@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { searchDocuments } from "../db/schema/search.ts";
 import { logger } from "./logger.ts";

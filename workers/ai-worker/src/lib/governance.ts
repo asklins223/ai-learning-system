@@ -48,28 +48,21 @@ export function normalizeWorkspaceAIPolicy(value: unknown): WorkspaceAIPolicy {
  * mock provider 豁免 — 不需要同意即可使用。
  * 其他 provider 需要已签署同意（aiConsentVersion 非空且 aiConsentAt 非空）。
  */
-export async function checkAIConsent(workspaceId: string, userId?: string): Promise<boolean> {
+export async function checkAIConsent(workspaceId: string, providerName: string): Promise<boolean> {
   const ws = await db.query.workspaces.findFirst({
     where: eq(schema.workspaces.id, workspaceId),
   });
   if (!ws) return false;
-  // Personal BYOK overrides the workspace/environment provider for this job.
-  if (await getWorkspaceAIProvider(workspaceId, userId) === "mock") return true;
+  if (providerName.toLowerCase() === "mock") return true;
   // 其他 provider 需要已签署同意
   return ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
 }
 
 /**
- * 获取当前任务的有效 AI provider 名称。
- * 优先使用发起人的个人配置，其次 workspace，最后回退到 AI_PROVIDER_CARD。
+ * 获取 workspace 级 AI provider 名称，缺省时回退到全局配置。
+ * 个人配置由 resolveProviderSelection 单独解析，避免重复查询。
  */
-export async function getWorkspaceAIProvider(workspaceId: string, userId?: string): Promise<string> {
-  if (userId) {
-    const personal = await db.query.userAIModelConfigs.findFirst({
-      where: eq(schema.userAIModelConfigs.userId, userId),
-    });
-    if (personal?.provider) return personal.provider.toLowerCase();
-  }
+export async function getWorkspaceAIProvider(workspaceId: string): Promise<string> {
   const ws = await db.query.workspaces.findFirst({
     where: eq(schema.workspaces.id, workspaceId),
   });
@@ -206,7 +199,7 @@ export async function enforcePrivacyGovernance(
   workspaceId: string,
   dataCategories: string[],
   data: Record<string, unknown>,
-  userId?: string,
+  providerName: string,
 ): Promise<{
   allowed: boolean;
   reason?: string;
@@ -214,7 +207,7 @@ export async function enforcePrivacyGovernance(
   piiDetectedTypes: string[];
 }> {
   const policy = await getWorkspaceAIPolicy(workspaceId);
-  const provider = await getWorkspaceAIProvider(workspaceId, userId);
+  const provider = providerName.toLowerCase();
 
   // 1. sendToExternal 门禁：非 mock provider + sendToExternal=false → 拒绝
   if (provider !== "mock" && !policy.sendToExternal) {

@@ -8,8 +8,7 @@ import {
 } from "../../db/schema/evidence.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { noteBlocks } from "../../db/schema/note.ts";
-import { ReviewStatus, ValidationOutcome } from "@ailearn/shared";
-import { logger } from "../../lib/logger.ts";
+import { ReviewStatus } from "@ailearn/shared";
 import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
 
 export type ReviewReason =
@@ -188,7 +187,11 @@ export async function listReviews(
   const cardHasHardEvidence = new Map<string, boolean>();
   if (keyPointIds.length > 0) {
     const evRows = await db.query.evidences.findMany({
-      where: inArray(evidences.keyPointId, keyPointIds),
+      where: and(
+        eq(evidences.workspaceId, workspaceId),
+        inArray(evidences.keyPointId, keyPointIds),
+      ),
+      orderBy: (evidence, { asc }) => [asc(evidence.createdAt), asc(evidence.id)],
     });
     // N-005: 查询用户级 override
     const evIds = evRows.map((r) => r.id);
@@ -330,6 +333,8 @@ export async function completeReview(id: string, workspaceId: string, userId: st
       .where(
         and(
           eq(reviewSchedules.id, id),
+          eq(reviewSchedules.workspaceId, workspaceId),
+          eq(reviewSchedules.userId, userId),
           eq(reviewSchedules.status, ReviewStatus.PENDING), // R-021: 并发安全条件
         ),
       )
@@ -391,6 +396,8 @@ export async function dismissReview(id: string, workspaceId: string, userId: str
       .where(
         and(
           eq(reviewSchedules.id, id),
+          eq(reviewSchedules.workspaceId, workspaceId),
+          eq(reviewSchedules.userId, userId),
           eq(reviewSchedules.status, ReviewStatus.PENDING), // R-021: 并发安全条件
         ),
       )

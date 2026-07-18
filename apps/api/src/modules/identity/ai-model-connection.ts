@@ -184,10 +184,25 @@ function connectionErrorForResponse(
 }
 
 function hasExpectedContent(protocol: DashScopeTextProtocol | "openai_compatible", body: unknown): boolean {
-  const payload = body as any;
+  const asRecord = (value: unknown): Record<string, unknown> | null =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  const firstChoiceContent = (value: unknown): unknown => {
+    if (!Array.isArray(value)) return undefined;
+    const firstChoice = asRecord(value[0]);
+    const message = asRecord(firstChoice?.message);
+    return message?.content;
+  };
+
+  const payload = asRecord(body);
+  if (!payload) return false;
   const content = protocol === "native_text"
-    ? payload?.output?.choices?.[0]?.message?.content ?? payload?.output?.text
-    : payload?.choices?.[0]?.message?.content;
+    ? (() => {
+        const output = asRecord(payload.output);
+        return firstChoiceContent(output?.choices) ?? output?.text;
+      })()
+    : firstChoiceContent(payload.choices);
   return typeof content === "string" && Boolean(content.trim());
 }
 

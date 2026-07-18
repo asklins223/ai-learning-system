@@ -9,6 +9,7 @@ import { Drawer } from "@/components/ui/Drawer";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { MarkdownPreview } from "@/components/MarkdownPreview";
 import { blocksToMarkdown, markdownToBlocks } from "@/lib/markdown-blocks";
+import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
 import { useFocusTrap } from "@/lib/use-focus-trap";
 import { useModalIsolation } from "@/lib/use-modal-isolation";
 import { relativeTime } from "@/lib/format";
@@ -140,16 +141,7 @@ export function NoteEditor({
   const conflictDialogRef = useRef<HTMLDivElement>(null);
   useModalIsolation(conflictDialogRef, !!conflictData);
   useFocusTrap(conflictDialogRef, !!conflictData);
-
-  // 冲突必须由用户明确选择，Escape 不再隐式丢弃本地内容。
-  useEffect(() => {
-    if (!conflictData) return;
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = originalOverflow;
-    };
-  }, [conflictData]);
+  useBodyScrollLock(!!conflictData);
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -865,10 +857,7 @@ export function NoteEditor({
         const saved = await flushLatestDraft();
         if (!saved) throw new Error("请先解决保存问题，再导出当前版本。");
       }
-      const url = api.exportNoteMarkdown(noteId);
-      const res = await fetch(url, { credentials: "same-origin" });
-      if (!res.ok) throw new Error("导出失败");
-      const blob = await res.blob();
+      const blob = await api.exportNoteMarkdown(noteId);
       const u = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = u;

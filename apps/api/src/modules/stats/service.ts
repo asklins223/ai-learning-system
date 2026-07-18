@@ -23,25 +23,26 @@ export interface StatsOverview {
  * 替代前端加载第一张卡的 validation/evidence 后只反映第一张卡的问题。
  */
 export async function getStatsOverview(workspaceId: string, userId?: string): Promise<StatsOverview> {
-  // 1. 笔记总数
-  const noteRows = await db
-    .select({ count: count() })
-    .from(notes)
-    .where(eq(notes.workspaceId, workspaceId));
+  // Fetch independent top-level aggregates concurrently. Active card IDs are
+  // needed below, so deriving the count from that same snapshot avoids a
+  // redundant count query and an internally inconsistent result during writes.
+  const [noteRows, allCardRows, activeCards] = await Promise.all([
+    db
+      .select({ count: count() })
+      .from(notes)
+      .where(eq(notes.workspaceId, workspaceId)),
+    db
+      .select({ count: count() })
+      .from(learningCards)
+      .where(eq(learningCards.workspaceId, workspaceId)),
+    db.query.learningCards.findMany({
+      where: and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, "active")),
+      columns: { id: true },
+    }),
+  ]);
   const noteCount = Number(noteRows[0]?.count ?? 0);
-
-  // 2. 学习卡总数 + 活跃卡数
-  const cardRows = await db
-    .select({ count: count() })
-    .from(learningCards)
-    .where(and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, "active")));
-  const activeCardCount = Number(cardRows[0]?.count ?? 0);
-
-  const allCardRows = await db
-    .select({ count: count() })
-    .from(learningCards)
-    .where(eq(learningCards.workspaceId, workspaceId));
   const cardCount = Number(allCardRows[0]?.count ?? 0);
+  const activeCardCount = activeCards.length;
 
   if (activeCardCount === 0) {
     return {
@@ -57,18 +58,16 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     };
   }
 
-  // 3. 查所有 active card 的 ID
-  const activeCards = await db.query.learningCards.findMany({
-    where: and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, "active")),
-    columns: { id: true },
-  });
   const activeCardIds = activeCards.map((c) => c.id);
 
   // 4. 批量查 keyPoints
   const kpRows = await db
     .select({ id: cardKeyPoints.id })
     .from(cardKeyPoints)
-    .where(inArray(cardKeyPoints.cardId, activeCardIds));
+    .where(and(
+      eq(cardKeyPoints.workspaceId, workspaceId),
+      inArray(cardKeyPoints.cardId, activeCardIds),
+    ));
   const kpIds = kpRows.map((r) => r.id);
 
   // 5. 批量查 evidence 统计
@@ -83,7 +82,10 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
         userOverride: evidences.userOverride,
       })
       .from(evidences)
-      .where(inArray(evidences.keyPointId, kpIds));
+      .where(and(
+        eq(evidences.workspaceId, workspaceId),
+        inArray(evidences.keyPointId, kpIds),
+      ));
     // N-005: 查询用户级 override
     const evIds = evRows.map((r) => r.id);
     const userOverrideMap = userId
@@ -98,7 +100,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
       if (ea === null) continue; // R-009: rejected 证据不计入统计
       evidenceCount++;
       if (ea === "aligned") hardEvidenceCount++;
-      const hasOverride = userId ? !!userOv : !!ev.userOverride;
+      const hasOverride = userId ? Boolean(userOv ?? ev.userOverride) : Boolean(ev.userOverride);
       if (!hasOverride && ea !== "aligned") pendingEvidenceCount++;
     }
   }
@@ -111,6 +113,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     .select({ outcome: validationEvents.outcome })
     .from(validationEvents)
     .where(and(
+      eq(validationEvents.workspaceId, workspaceId),
       inArray(validationEvents.cardId, activeCardIds),
       ...(userId ? [eq(validationEvents.userId, userId)] : []),
     ));

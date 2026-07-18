@@ -11,6 +11,10 @@ import {
 } from "@ailearn/shared/public-json-http";
 import type { AIProvider, EvaluateValidationInput, GenerateCardInput } from "../ai-provider.ts";
 import { EVAL_SYSTEM_PROMPT, SYSTEM_PROMPT } from "../prompts.ts";
+import {
+  readChatCompletionContent,
+  readProviderErrorMessage,
+} from "./json-response.ts";
 
 export class OpenAICompatibleProvider implements AIProvider {
   id = "openai_compatible";
@@ -67,12 +71,11 @@ export class OpenAICompatibleProvider implements AIProvider {
       { model: this.modelId, messages, temperature: 0.2 },
       signal,
     );
-    const payload = response.body as any;
     if (response.status < 200 || response.status >= 300) {
-      const message = String(payload?.error?.message ?? payload?.message ?? response.statusText).slice(0, 500);
+      const message = (readProviderErrorMessage(response.body) ?? response.statusText).slice(0, 500);
       throw new Error(`OpenAI-compatible endpoint ${response.status}: ${message}`);
     }
-    const content = payload?.choices?.[0]?.message?.content;
+    const content = readChatCompletionContent(response.body);
     if (typeof content !== "string" || !content.trim()) {
       throw new Error(`OpenAI-compatible endpoint returned empty output (${this.modelId})`);
     }

@@ -57,7 +57,7 @@ export async function createSource(
         type: input.type,
         title: input.title,
         origin: input.url ?? null,
-        status: isUrlWithoutContent ? SourceStatus.DRAFT : SourceStatus.DRAFT,
+        status: SourceStatus.DRAFT,
         metadata,
         createdBy: userId,
       })
@@ -167,7 +167,10 @@ export async function updateSource(
     updates.metadata = { ...source.metadata, ...input.metadata };
   }
 
-  await db.update(sources).set(updates).where(eq(sources.id, sourceId));
+  await db
+    .update(sources)
+    .set(updates)
+    .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)));
   return getSource(sourceId, workspaceId);
 }
 
@@ -181,7 +184,7 @@ export async function deleteSource(sourceId: string, workspaceId: string) {
   await db
     .update(sources)
     .set({ status: SourceStatus.ARCHIVED, updatedAt: new Date() })
-    .where(eq(sources.id, sourceId));
+    .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)));
 
   // 清理搜索索引（P1-3）
   await deleteSearchDocument(workspaceId, "source", sourceId);

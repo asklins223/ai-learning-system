@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useCallback, ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Icon } from "./icons";
+import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
+import { useFocusTrap } from "@/lib/use-focus-trap";
 import { useModalIsolation } from "@/lib/use-modal-isolation";
 
 /**
@@ -47,76 +49,28 @@ export function Drawer({
   closeOnBackdrop = true,
 }: DrawerProps) {
   const drawerRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   useModalIsolation(drawerRef, open);
+  useFocusTrap(drawerRef, open);
+  useBodyScrollLock(open);
 
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
 
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         onCloseRef.current();
-        return;
       }
-      // Focus trap
-      if (e.key === "Tab" && drawerRef.current) {
-        const focusable = Array.from(
-          drawerRef.current.querySelectorAll<HTMLElement>(
-            'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"]):not([aria-hidden="true"])',
-          ),
-        ).filter((element) => element.offsetParent !== null && !element.closest("[inert]"));
-        if (focusable.length === 0) {
-          e.preventDefault();
-          drawerRef.current.focus();
-          return;
-        }
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (!open) return;
-
-    previousFocusRef.current = document.activeElement as HTMLElement;
-    window.addEventListener("keydown", handleKeyDown);
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    // 初始焦点：优先关闭按钮，其次第一个可交互元素，最后聚焦 drawer 本身。
-    requestAnimationFrame(() => {
-      const closeBtn = drawerRef.current?.querySelector<HTMLElement>(
-        "[aria-label='关闭抽屉']",
-      );
-      const firstInteractive = drawerRef.current?.querySelector<HTMLElement>(
-        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"]):not([aria-hidden="true"])',
-      );
-      (closeBtn ?? firstInteractive ?? drawerRef.current)?.focus();
-    });
-
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      document.body.style.overflow = originalOverflow;
-      previousFocusRef.current?.focus();
     };
-  }, [open, handleKeyDown]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
 
   if (!open) return null;
-
-  const isRight = side === "right";
 
   return (
     <div

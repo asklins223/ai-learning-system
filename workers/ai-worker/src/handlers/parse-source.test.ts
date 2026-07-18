@@ -5,6 +5,7 @@ import {
   createPinnedLookup,
   fetchUrlContent,
   type AddressResolver,
+  type PinnedAddress,
   type PinnedRequester,
 } from "./parse-source.ts";
 
@@ -39,7 +40,7 @@ test("pins the validated IP and revalidates every redirect", async () => {
     return {
       status: 200,
       statusText: "OK",
-      contentType: "text/html; charset=utf-8",
+      contentType: "Text/HTML; charset=utf-8",
       body: Buffer.from("<h1>Pinned</h1><p>redirect ok</p>"),
     };
   };
@@ -55,6 +56,43 @@ test("pins the validated IP and revalidates every redirect", async () => {
     { hostname: "origin.invalid", address: "203.0.113.10" },
     { hostname: "redirect.invalid", address: "203.0.113.11" },
   ]);
+});
+
+test("parent cancellation also interrupts a pending DNS resolution", async () => {
+  const controller = new AbortController();
+  let requestCalled = false;
+  const pending = fetchUrlContent("https://origin.invalid/start", controller.signal, {
+    resolveAddress: async () => new Promise<PinnedAddress>(() => {}),
+    request: async () => {
+      requestCalled = true;
+      throw new Error("request must not start after cancellation");
+    },
+  });
+
+  controller.abort(new Error("job cancelled"));
+
+  await assert.rejects(pending, /job cancelled/);
+  assert.equal(requestCalled, false);
+});
+
+test("parent cancellation interrupts a requester that has not settled", async () => {
+  const controller = new AbortController();
+  let markRequestStarted!: () => void;
+  const requestStarted = new Promise<void>((resolve) => {
+    markRequestStarted = resolve;
+  });
+  const pending = fetchUrlContent("https://origin.invalid/start", controller.signal, {
+    resolveAddress: async () => ({ address: "203.0.113.10", family: 4 }),
+    request: async () => {
+      markRequestStarted();
+      return new Promise<never>(() => {});
+    },
+  });
+
+  await requestStarted;
+  controller.abort(new Error("job cancelled during request"));
+
+  await assert.rejects(pending, /job cancelled during request/);
 });
 
 test("the socket lookup callback always returns the validated address", async () => {

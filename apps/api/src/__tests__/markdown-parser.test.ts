@@ -70,12 +70,9 @@ describe("markdown-parser span correctness", () => {
 
   it("CRLF line endings produce correct spans", () => {
     const content = "# Title\r\n\r\nParagraph one.\r\n\r\n- list item";
-    // G-008: Parser normalizes CRLF to LF internally, so offsets refer to
-    // the normalized content. Verify slices against the normalized version.
-    const normalized = content.replace(/\r\n/g, "\n");
     const segments = parseContent(content, "markdown");
     for (const seg of segments) {
-      const sliced = normalized.slice(seg.charStart, seg.charEnd);
+      const sliced = content.slice(seg.charStart, seg.charEnd);
       assert.equal(
         sliced, seg.text,
         `CRLF span mismatch: expected "${seg.text}" but got "${sliced}"`,

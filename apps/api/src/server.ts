@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { db } from "./db/client.ts";
+import { closeDatabase, db } from "./db/client.ts";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import sensible from "@fastify/sensible";
@@ -19,6 +19,7 @@ import { exportRoutes } from "./modules/export/routes.ts";
 import { statsRoutes } from "./modules/stats/routes.ts";
 import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
+import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
 
 const trustProxyValue = process.env.TRUST_PROXY?.trim();
 const normalizedTrustProxyValue = trustProxyValue?.toLowerCase();
@@ -37,23 +38,15 @@ const app = Fastify({
   trustProxy,
 });
 
-// R-004: /health = liveness (进程存活 + DB 连接)，/ready = readiness (业务 schema 已就绪)
-app.get("/health", async (_req, reply) => {
-  try {
-    await db.execute(sql`SELECT 1`);
-    return {
-      status: "ok",
-      service: "api",
-      timestamp: new Date().toISOString(),
-    };
-  } catch {
-    return reply.code(503).send({
-      status: "unhealthy",
-      service: "api",
-      error: "database connection failed",
-      timestamp: new Date().toISOString(),
-    });
-  }
+// Liveness only proves the process/event loop can answer HTTP. Database and
+// schema checks belong exclusively to /ready so a transient dependency outage
+// does not make the orchestrator kill an otherwise healthy API process.
+app.get("/health", async () => {
+  return {
+    status: "ok",
+    service: "api",
+    timestamp: new Date().toISOString(),
+  };
 });
 
 app.get("/ready", async (_req, reply) => {
@@ -145,8 +138,15 @@ app.get("/ready", async (_req, reply) => {
 
 // G-002: 包装在 async IIFE 中，使 esbuild --format=cjs 能正确构建（CJS 不支持 top-level await）
 async function main() {
+  const allowedOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:3000")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  if (allowedOrigins.length === 0) {
+    throw new Error("CORS_ORIGIN must contain at least one origin");
+  }
   await app.register(cors, {
-    origin: (process.env.CORS_ORIGIN ?? "http://localhost:3000").split(","),
+    origin: allowedOrigins,
     credentials: true,
   });
 
@@ -180,6 +180,25 @@ async function main() {
     process.exit(1);
   }
 
+  let sessionCleanupTimer: NodeJS.Timeout | undefined;
+  const shutdown = createGracefulShutdown({
+    clearTimer: () => {
+      if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
+      sessionCleanupTimer = undefined;
+    },
+    closeServer: () => app.close(),
+    closeDatabase,
+  });
+  const handleSignal = (signal: NodeJS.Signals) => {
+    app.log.info({ signal }, "shutdown requested");
+    void shutdown.shutdown(signal).catch((error) => {
+      app.log.error({ err: error, signal }, "graceful shutdown failed");
+      process.exitCode = 1;
+    });
+  };
+  process.on("SIGTERM", handleSignal);
+  process.on("SIGINT", handleSignal);
+
   // §2.4: 清理过期 session — 启动时立即执行一次，之后每小时定时清理
   // 启动时先清理一次（进程崩溃重启后可能积累了大量过期 session）
   try {
@@ -192,16 +211,19 @@ async function main() {
   }
 
   // 每小时定时清理
-  setInterval(async () => {
-    try {
-      const deleted = await cleanupExpiredSessions();
-      if (deleted > 0) {
-        app.log.info({ deleted }, "expired sessions cleaned up");
+  if (!shutdown.isShuttingDown()) {
+    sessionCleanupTimer = setInterval(async () => {
+      try {
+        const deleted = await cleanupExpiredSessions();
+        if (deleted > 0) {
+          app.log.info({ deleted }, "expired sessions cleaned up");
+        }
+      } catch (err) {
+        app.log.error({ err }, "session cleanup failed");
       }
-    } catch (err) {
-      app.log.error({ err }, "session cleanup failed");
-    }
-  }, 60 * 60 * 1000); // 1 hour
+    }, 60 * 60 * 1000); // 1 hour
+    sessionCleanupTimer.unref();
+  }
 }
 
 main().catch((err) => {

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Icon } from "@/components/ui/icons";
 import { useTheme } from "@/components/ThemeProvider";
+import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
 import { useFocusTrap } from "@/lib/use-focus-trap";
 import { useModalIsolation } from "@/lib/use-modal-isolation";
 import {
@@ -33,6 +34,7 @@ export function TabletTopBar() {
   const drawerRef = useRef<HTMLElement>(null);
   useModalIsolation(drawerRef, drawerOpen);
   useFocusTrap(drawerRef, drawerOpen);
+  useBodyScrollLock(drawerOpen);
 
   /* 关闭抽屉：路由变化 */
   useEffect(() => {
@@ -61,16 +63,6 @@ export function TabletTopBar() {
     }
     document.addEventListener("keydown", handleEsc);
     return () => document.removeEventListener("keydown", handleEsc);
-  }, [drawerOpen]);
-
-  /* 打开时锁定 body 滚动 */
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const original = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = original;
-    };
   }, [drawerOpen]);
 
   /* 点击遮罩关闭 */

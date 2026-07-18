@@ -16,7 +16,6 @@ export const jobs = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     // G-001: 不可变 lease token — claim 时生成并写入 DB，完成/失败时以此作为原子条件。
-    // 比 timestamp 比较更可靠，不受 DB 精度或序列化差异影响。
     leaseToken: text("lease_token"),
   },
   (t) => ({

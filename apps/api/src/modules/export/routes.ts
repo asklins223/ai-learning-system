@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { exportWorkspace, restoreWorkspace, exportNoteMarkdown } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
+import { uuidParamSchema } from "../../lib/pagination.ts";
 
 export async function exportRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
@@ -52,6 +53,8 @@ export async function exportRoutes(app: FastifyInstance) {
 
   // GET /export/notes/:id — 导出单篇笔记为 Markdown
   app.get<{ Params: { id: string } }>("/export/notes/:id", async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
     const markdown = await exportNoteMarkdown(req.params.id, req.session.workspaceId);
     if (!markdown) return reply.code(404).send({ error: "not found" });
     reply.header("Content-Type", "text/markdown; charset=utf-8");

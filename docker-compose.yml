@@ -49,6 +49,9 @@ services:
   # Runs on every deployment path, including existing data volumes.  The
   # first pass creates/rotates the roles and transfers legacy object ownership
   # before migrations run; the post-migration pass below grants new objects.
+  #
+  # One-shot (restart: "no"): `make up` waits for it to exit and then removes
+  # the container via `make clean-init` so it doesn't linger in `docker ps -a`.
   role-bootstrap:
     image: postgres:16-alpine
     restart: "no"
@@ -79,8 +82,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -91,6 +94,8 @@ services:
     networks:
       - ailearn_net
 
+  # One-shot bucket bootstrap (profile: storage).  `make storage` waits for
+  # it to exit and removes the container immediately afterwards.
   minio-init:
     image: minio/mc:RELEASE.2024-11-21T17-21-54Z
     profiles: ["storage"]
@@ -114,6 +119,8 @@ services:
       - ailearn_net
 
   # Migrations are automatic, but account seeding is intentionally separate.
+  # One-shot (restart: "no"): runs on every `make up` to apply pending
+  # migrations, then is auto-removed by `make clean-init`.
   migrate:
     build: *api-build
     user: node
@@ -130,6 +137,8 @@ services:
     networks:
       - ailearn_net
 
+  # One-shot (restart: "no"): re-applies role grants on objects created by
+  # the migrator, then is auto-removed by `make clean-init`.
   role-grants:
     image: postgres:16-alpine
     restart: "no"
@@ -148,6 +157,7 @@ services:
 
   # Run explicitly with `make seed-owner`. seed.ts fails closed when either
   # OWNER_EMAIL or OWNER_PASSWORD is absent and never enables demo defaults.
+  # Uses `run --rm` so the container is removed immediately after seeding.
   seed-owner:
     profiles: ["seed"]
     build: *api-build

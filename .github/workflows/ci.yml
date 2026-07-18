@@ -39,6 +39,7 @@ jobs:
     name: TypeCheck & Lint
     runs-on: ubuntu-latest
     needs: release-inputs
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -73,17 +74,28 @@ jobs:
         working-directory: workers/ai-worker
         run: npm ci --no-audit --no-fund
 
+      - name: Verify API and Worker database schemas are synchronized
+        run: node .github/scripts/verify-schema-mirror.mjs
+
+      - name: TypeCheck shared contracts
+        working-directory: packages/shared
+        run: npm run typecheck
+
+      - name: TypeCheck database package
+        working-directory: packages/db
+        run: npm run typecheck
+
       - name: TypeCheck API
         working-directory: apps/api
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
       - name: TypeCheck Web
         working-directory: apps/web
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
       - name: TypeCheck Worker
         working-directory: workers/ai-worker
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
       - name: Lint Web
         working-directory: apps/web
@@ -105,10 +117,19 @@ jobs:
         working-directory: workers/ai-worker
         run: npm audit --omit=dev --audit-level=high
 
+      - name: Audit shared production deps
+        working-directory: packages/shared
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit database package production deps
+        working-directory: packages/db
+        run: npm audit --omit=dev --audit-level=high
+
   build:
     name: Build (API / Web / Worker)
     runs-on: ubuntu-latest
     needs: typecheck
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -194,6 +215,7 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     needs: typecheck
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -205,6 +227,7 @@ jobs:
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
+            packages/db/package-lock.json
             packages/shared/package-lock.json
 
       # API and Worker load the shared package from its workspace source path.
@@ -217,6 +240,10 @@ jobs:
       - name: Install Web
         working-directory: apps/web
         run: npm ci --no-audit --no-fund
+
+      - name: Run shared contract unit tests
+        working-directory: packages/shared
+        run: npm test
 
       # F-018: 基础单元测试 — 覆盖 markdown-blocks 往返、分页参数 clamp 等关键链路
       - name: Run Web unit tests

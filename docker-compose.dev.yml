@@ -19,7 +19,7 @@ services:
       POSTGRES_PASSWORD: ailearn_dev
       POSTGRES_DB: ailearn
     ports:
-      - "5432:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - dev_postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -40,8 +40,8 @@ services:
       MINIO_ROOT_USER: ailearn
       MINIO_ROOT_PASSWORD: ailearn_dev_secret
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - dev_minio_data:/data
     healthcheck:
@@ -52,6 +52,8 @@ services:
     networks:
       - ailearn_net
 
+  # One-shot bucket bootstrap (profile: storage).  `make storage-dev` waits
+  # for it to exit and removes the container immediately afterwards.
   minio-init:
     image: minio/mc:RELEASE.2024-11-21T17-21-54Z
     profiles: ["storage"]
@@ -68,6 +70,8 @@ services:
     networks:
       - ailearn_net
 
+  # One-shot (restart: "no"): runs on every `make dev` to apply pending
+  # migrations, then is auto-removed by `make clean-init-dev`.
   migrate:
     build:
       context: .
@@ -83,11 +87,15 @@ services:
     volumes:
       - ./apps/api/src:/app/src
       - ./packages/shared/src:/tmp/shared/src
+      # Keep package exports in sync with the hot-mounted shared sources.
+      # Dependency changes still require rebuilding the image.
+      - ./packages/shared/package.json:/tmp/shared/package.json:ro
     command: ["npm", "run", "db:migrate"]
     networks:
       - ailearn_net
 
   # Demo credentials are created only when `make seed-demo` is run.
+  # Uses `run --rm` so the container is removed immediately after seeding.
   seed-demo:
     profiles: ["seed"]
     build:
@@ -105,6 +113,7 @@ services:
     volumes:
       - ./apps/api/src:/app/src
       - ./packages/shared/src:/tmp/shared/src
+      - ./packages/shared/package.json:/tmp/shared/package.json:ro
     command: ["npm", "run", "db:seed"]
     networks:
       - ailearn_net
@@ -147,6 +156,7 @@ services:
     volumes:
       - ./apps/api/src:/app/src
       - ./packages/shared/src:/tmp/shared/src
+      - ./packages/shared/package.json:/tmp/shared/package.json:ro
     networks:
       - ailearn_net
 
@@ -174,7 +184,9 @@ services:
     volumes:
       - ./workers/ai-worker/src:/app/src
       - ./packages/shared/src:/tmp/shared/src
+      - ./packages/shared/package.json:/tmp/shared/package.json:ro
       - ./packages/db/src:/tmp/db/src
+      - ./packages/db/package.json:/tmp/db/package.json:ro
       - ./apps/api/src:/apps/api/src
     networks:
       - ailearn_net
@@ -199,6 +211,7 @@ services:
       - ./apps/web/components:/app/components
       - ./apps/web/lib:/app/lib
       - ./packages/shared/src:/tmp/shared/src
+      - ./packages/shared/package.json:/tmp/shared/package.json:ro
     networks:
       - ailearn_net
 

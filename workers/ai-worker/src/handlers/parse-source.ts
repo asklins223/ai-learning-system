@@ -168,6 +168,39 @@ export type FetchUrlDependencies = {
   request?: PinnedRequester;
 };
 
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("URL fetch aborted", { cause: signal.reason });
+}
+
+/** Race an otherwise non-cancellable operation (notably DNS lookup) with a signal. */
+async function awaitWithAbort<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw abortReason(signal);
+  const task = operation();
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(abortReason(signal));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+
+    task.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
 /**
  * Resolve once, reject the whole answer set if any address is non-public, and
  * return the exact address that the HTTP client must use. The request must not
@@ -362,17 +395,21 @@ export async function fetchUrlContent(
       throw new Error("URL credentials are not allowed");
     }
 
-    // Resolve and validate immediately before this hop, then force the socket
-    // to use that exact address. Every redirect repeats this process.
-    const pinned = await resolveAddress(parsed.hostname);
     const ac = new AbortController();
-    const timeout = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+    const timeout = setTimeout(
+      () => ac.abort(new Error(`URL fetch timed out after ${FETCH_TIMEOUT_MS}ms`)),
+      FETCH_TIMEOUT_MS,
+    );
     const abortFromParent = () => ac.abort(signal?.reason);
     if (signal?.aborted) abortFromParent();
     else signal?.addEventListener("abort", abortFromParent, { once: true });
 
     try {
-      const res = await request(parsed, pinned, ac.signal);
+      // Resolve and validate immediately before this hop, then force the
+      // socket to use that exact address. DNS is not natively cancellable, so
+      // race it with the same per-hop deadline used by the request.
+      const pinned = await awaitWithAbort(() => resolveAddress(parsed.hostname), ac.signal);
+      const res = await awaitWithAbort(() => request(parsed, pinned, ac.signal), ac.signal);
 
       if (res.status >= 300 && res.status < 400 && res.location) {
         if (redirectCount >= FETCH_MAX_REDIRECTS) {
@@ -396,7 +433,7 @@ export async function fetchUrlContent(
       const decoder = new TextDecoder("utf-8", { fatal: false });
       const rawText = decoder.decode(res.body);
 
-      if (res.contentType.includes("text/html")) {
+      if (res.contentType.toLowerCase().includes("text/html")) {
         return extractTextFromHtml(rawText);
       }
       return rawText;
@@ -465,9 +502,15 @@ export async function runParseSource(job: JobPayload) {
 
   try {
     const metadata = (processingSource.metadata ?? {}) as Record<string, unknown>;
-    let rawContent = (metadata.rawContent as string) ?? "";
-    const fetchUrlContentFlag = job.payload.fetchUrlContent as boolean | undefined;
-    const url = (metadata.url as string) ?? processingSource.origin ?? "";
+    if (metadata.rawContent != null && typeof metadata.rawContent !== "string") {
+      throw new Error("source metadata.rawContent must be a string");
+    }
+    if (metadata.url != null && typeof metadata.url !== "string") {
+      throw new Error("source metadata.url must be a string");
+    }
+    let rawContent = metadata.rawContent ?? "";
+    const fetchUrlContentFlag = job.payload.fetchUrlContent === true;
+    const url = metadata.url ?? processingSource.origin ?? "";
 
     // R-014: 如果标记了 fetchUrlContent，执行 HTTP 抓取
     if (fetchUrlContentFlag && url && !rawContent.trim()) {

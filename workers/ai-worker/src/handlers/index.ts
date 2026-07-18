@@ -1,8 +1,8 @@
-import { and, asc, count, eq, lte, sql, inArray, desc } from "drizzle-orm";
+import { and, asc, count, eq, sql, inArray, desc, or } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
-import { getProvider } from "../lib/ai-provider.ts";
+import { createProvider, resolveProviderSelection } from "../lib/ai-provider.ts";
 import { alignQuote } from "../lib/align.ts";
 // N-011: AI 治理 — 同意门禁 + 审计日志
 import { checkAIConsent, logAICall, enforcePrivacyGovernance } from "../lib/governance.ts";
@@ -103,12 +103,19 @@ export async function runGenerateCard(job: JobPayload) {
   if (!note) throw new Error(`note ${version.noteId} not found in workspace`);
 
   const blocks = await db.query.noteBlocks.findMany({
-    where: eq(schema.noteBlocks.versionId, noteVersionId),
+    where: and(
+      eq(schema.noteBlocks.versionId, noteVersionId),
+      eq(schema.noteBlocks.workspaceId, job.workspaceId),
+    ),
     orderBy: asc(schema.noteBlocks.ordinal),
   });
 
+  // Resolve once so consent, policy checks, and the eventual call all refer to
+  // the same provider/configuration snapshot.
+  const providerSelection = await resolveProviderSelection(job.workspaceId, auditUserId);
+
   // N-011: AI 同意门禁 — 未签署同意的工作区不能调用外部 AI provider
-  const consentOk = await checkAIConsent(job.workspaceId, auditUserId);
+  const consentOk = await checkAIConsent(job.workspaceId, providerSelection.providerName);
   if (!consentOk) {
     throw new Error("AI consent not signed for this workspace. Owner must sign AI consent before using external AI providers.");
   }
@@ -118,14 +125,13 @@ export async function runGenerateCard(job: JobPayload) {
     job.workspaceId,
     ["note_content"],
     { noteTitle: note.title, blocks: blocks.map((b) => ({ ordinal: b.ordinal, type: b.type, content: b.content })) },
-    auditUserId,
+    providerSelection.providerName,
   );
   if (!governanceResult.allowed) {
     throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
   }
 
-  // N-011: 使用 workspace 级 provider 配置
-  const provider = await getProvider(job.workspaceId, auditUserId);
+  const provider = createProvider(providerSelection.providerName, providerSelection.config);
 
   // N-011: 使用脱敏后的数据
   const sanitizedInput = governanceResult.sanitizedData as {
@@ -307,13 +313,13 @@ export async function runGenerateCard(job: JobPayload) {
       );
     }
 
-    for (const kp of kps) {
-      await tx.insert(schema.jobs).values({
+    if (kps.length > 0) {
+      await tx.insert(schema.jobs).values(kps.map((kp) => ({
         type: "align_evidence",
         workspaceId: version.workspaceId,
         payload: { keyPointId: kp.id, noteVersionId },
         status: "pending",
-      });
+      })));
     }
 
     const oldCardIds = oldActiveCards.map((card) => card.id);
@@ -322,8 +328,19 @@ export async function runGenerateCard(job: JobPayload) {
         .delete(schema.searchDocuments)
         .where(and(
           eq(schema.searchDocuments.workspaceId, version.workspaceId),
-          eq(schema.searchDocuments.objectType, "card"),
-          inArray(schema.searchDocuments.objectId, oldCardIds),
+          or(
+            and(
+              eq(schema.searchDocuments.objectType, "card"),
+              inArray(schema.searchDocuments.objectId, oldCardIds),
+            ),
+            and(
+              eq(schema.searchDocuments.objectType, "evidence"),
+              inArray(
+                sql<string>`${schema.searchDocuments.metadata}->>'cardId'`,
+                oldCardIds,
+              ),
+            ),
+          ),
         ));
     }
 
@@ -412,7 +429,10 @@ export async function runAlignEvidence(job: JobPayload) {
   if (!card) throw new Error(`card ${kp.cardId} not found in workspace`);
 
   const blocks = await db.query.noteBlocks.findMany({
-    where: eq(schema.noteBlocks.versionId, card.noteVersionId),
+    where: and(
+      eq(schema.noteBlocks.versionId, card.noteVersionId),
+      eq(schema.noteBlocks.workspaceId, job.workspaceId),
+    ),
     orderBy: asc(schema.noteBlocks.ordinal),
   });
 
@@ -420,43 +440,6 @@ export async function runAlignEvidence(job: JobPayload) {
     kp.quoteText,
     blocks.map((b) => ({ blockId: b.id, blockOrdinal: b.ordinal, text: b.content })),
   );
-
-  // N-006: 保存现有的人工 override，在重新对齐后恢复
-  const oldEvidences = await db.query.evidences.findMany({
-    where: and(
-      eq(schema.evidences.keyPointId, kp.id),
-      eq(schema.evidences.workspaceId, job.workspaceId),
-    ),
-  });
-  const oldOverrides = new Map<string, string>();
-  for (const ev of oldEvidences) {
-    if (ev.userOverride) {
-      // 用 blockId 或 quoteText 作为匹配键
-      const key = ev.blockId ?? ev.quoteText;
-      oldOverrides.set(key, ev.userOverride);
-    }
-    // N-006: 不在事务外删除搜索文档 — 事务可能回滚，删除操作应在事务成功后执行
-  }
-
-  // N-006: 保存用户级 evidence_overrides 记录，在重新对齐后恢复
-  // evidence_overrides 通过 FK ON DELETE CASCADE 随 evidence 删除而丢失，
-  // 需要在删除前查询并在插入新 evidence 后重新写入。
-  const oldEvidenceIds = oldEvidences.map((e) => e.id);
-  const oldUserOverrides = oldEvidenceIds.length
-    ? await db.query.evidenceOverrides.findMany({
-        where: inArray(schema.evidenceOverrides.evidenceId, oldEvidenceIds),
-      })
-    : [];
-  // 按 blockId ?? quoteText 分组用户级 override
-  const oldUserOverrideMap = new Map<string, Array<{ userId: string; override: string }>>();
-  for (const uo of oldUserOverrides) {
-    const parentEv = oldEvidences.find((e) => e.id === uo.evidenceId);
-    if (!parentEv) continue;
-    const key = parentEv.blockId ?? parentEv.quoteText;
-    const arr = oldUserOverrideMap.get(key) ?? [];
-    arr.push({ userId: uo.userId, override: uo.override });
-    oldUserOverrideMap.set(key, arr);
-  }
 
   // N-006: 在事务中原子删除旧 evidence 和插入新 evidence
   const newEvidenceData: Array<{
@@ -512,10 +495,60 @@ export async function runAlignEvidence(job: JobPayload) {
     }
   }
 
-  await db.transaction(async (tx) => {
+  const committed = await db.transaction(async (tx) => {
     await lockJobLease(tx, leaseContext(job));
-    // 删除旧 evidence
-    await tx.delete(schema.evidences).where(eq(schema.evidences.keyPointId, kp.id));
+    // Multiple jobs for the same key point can pass the fast idempotency read
+    // concurrently. Serialize their replace transactions before reading the
+    // old rows so they cannot both insert a complete evidence set.
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`evidence-align:${kp.id}`}, 0)
+      )
+    `);
+
+    const oldEvidences = await tx
+      .select()
+      .from(schema.evidences)
+      .where(and(
+        eq(schema.evidences.keyPointId, kp.id),
+        eq(schema.evidences.workspaceId, job.workspaceId),
+      ))
+      .for("update");
+
+    if (oldEvidences.length > 0 && !forceRealign) {
+      logger.info({ keyPointId }, "align_evidence skipped — concurrent result already exists");
+      return false;
+    }
+
+    // Read overrides after locking their parent evidence rows. This prevents a
+    // concurrent override write from being silently lost to ON DELETE CASCADE.
+    const oldEvidenceIds = oldEvidences.map((e) => e.id);
+    const oldUserOverrides = oldEvidenceIds.length > 0
+      ? await tx
+          .select()
+          .from(schema.evidenceOverrides)
+          .where(inArray(schema.evidenceOverrides.evidenceId, oldEvidenceIds))
+          .for("update")
+      : [];
+    const oldEvidenceById = new Map(oldEvidences.map((e) => [e.id, e]));
+    const oldOverrides = new Map<string, string>();
+    for (const ev of oldEvidences) {
+      if (ev.userOverride) oldOverrides.set(ev.blockId ?? ev.quoteText, ev.userOverride);
+    }
+    const oldUserOverrideMap = new Map<string, Array<{ userId: string; override: string }>>();
+    for (const userOverride of oldUserOverrides) {
+      const parentEvidence = oldEvidenceById.get(userOverride.evidenceId);
+      if (!parentEvidence) continue;
+      const key = parentEvidence.blockId ?? parentEvidence.quoteText;
+      const overrides = oldUserOverrideMap.get(key) ?? [];
+      overrides.push({ userId: userOverride.userId, override: userOverride.override });
+      oldUserOverrideMap.set(key, overrides);
+    }
+
+    await tx.delete(schema.evidences).where(and(
+      eq(schema.evidences.keyPointId, kp.id),
+      eq(schema.evidences.workspaceId, job.workspaceId),
+    ));
 
     // 插入新 evidence
     const inserted = [];
@@ -606,7 +639,10 @@ export async function runAlignEvidence(job: JobPayload) {
         });
     }
     throwIfJobAborted(job);
+    return true;
   });
+
+  if (!committed) return;
 
   logger.info(
     { keyPointId, alignment: bestAlignment, score: bestScore, method: bestMethod },
@@ -752,13 +788,20 @@ export async function runEvaluateValidation(job: JobPayload) {
   let referenceText = "";
   if (ev?.blockId) {
     const blk = await db.query.noteBlocks.findFirst({
-      where: eq(schema.noteBlocks.id, ev.blockId),
+      where: and(
+        eq(schema.noteBlocks.id, ev.blockId),
+        eq(schema.noteBlocks.workspaceId, job.workspaceId),
+      ),
     });
     if (blk) referenceText = blk.content;
   }
 
+  // Resolve once so consent, policy checks, and the eventual call all refer to
+  // the same provider/configuration snapshot.
+  const providerSelection = await resolveProviderSelection(job.workspaceId, userId);
+
   // N-011: AI 同意门禁 — 未签署同意的工作区不能调用外部 AI provider
-  const consentOk = await checkAIConsent(job.workspaceId, userId);
+  const consentOk = await checkAIConsent(job.workspaceId, providerSelection.providerName);
   if (!consentOk) {
     throw new Error("AI consent not signed for this workspace. Owner must sign AI consent before using external AI providers.");
   }
@@ -768,14 +811,13 @@ export async function runEvaluateValidation(job: JobPayload) {
     job.workspaceId,
     ["question", "user_answer", "claim", "quote"],
     { question, questionType, claim: kp.claim, quote: referenceText || kp.quoteText, userAnswer },
-    userId,
+    providerSelection.providerName,
   );
   if (!governanceResult.allowed) {
     throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
   }
 
-  // N-011: 使用 workspace 级 provider 配置
-  const provider = await getProvider(job.workspaceId, userId);
+  const provider = createProvider(providerSelection.providerName, providerSelection.config);
 
   // N-011: 审计日志
   const aiCallStart = Date.now();

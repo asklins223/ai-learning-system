@@ -13,6 +13,13 @@ import type {
   EvaluateValidationInput,
 } from "../ai-provider.ts";
 import { SYSTEM_PROMPT, EVAL_SYSTEM_PROMPT } from "../prompts.ts";
+import {
+  asJsonRecord,
+  readChatCompletionContent,
+  readProviderCode,
+  readProviderErrorMessage,
+  readString,
+} from "./json-response.ts";
 
 /**
  * DashScope (Alibaba Cloud 百炼 / 通义千问) provider.
@@ -136,9 +143,9 @@ export class DashScopeProvider implements AIProvider {
     );
     if (signal?.aborted) throw abortError(signal, "after DashScope response");
 
-    let r: any;
+    let payload: unknown;
     try {
-      r = await response.json();
+      payload = await response.json() as unknown;
     } catch (err) {
       throw new Error(
         `dashscope returned invalid JSON (${response.status} ${response.statusText})`,
@@ -146,24 +153,25 @@ export class DashScopeProvider implements AIProvider {
       );
     }
     if (!response.ok) {
-      const code = r?.code ?? response.status;
-      const message = r?.message ?? response.statusText;
+      const code = readProviderCode(payload) ?? response.status;
+      const message = readProviderErrorMessage(payload) ?? response.statusText;
       throw new Error(`dashscope ${code}: ${message}`);
     }
     if (signal?.aborted) throw abortError(signal, "after DashScope body read");
 
-    const output: any = endpoint.protocol === "native_text"
-      ? r?.output
-      : r?.choices?.[0]?.message;
+    const responseRecord = asJsonRecord(payload);
+    const output = endpoint.protocol === "native_text"
+      ? asJsonRecord(responseRecord?.output)
+      : responseRecord;
     if (!output) {
-      const code = r?.code ?? "unknown";
-      const message = r?.message ?? "no output";
+      const code = readProviderCode(payload) ?? "unknown";
+      const message = readProviderErrorMessage(payload) ?? "no output";
       throw new Error(`dashscope ${code}: ${message}`);
     }
     const text: string | undefined =
       endpoint.protocol === "native_text"
-        ? output.choices?.[0]?.message?.content ?? output.text
-        : output.content;
+        ? readChatCompletionContent(output) ?? readString(output, "text")
+        : readChatCompletionContent(output);
     if (typeof text !== "string" || text.length === 0) {
       throw new Error(`dashscope returned empty output (${this.modelId})`);
     }

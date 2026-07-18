@@ -1,9 +1,9 @@
-import { and, eq, asc, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, evidenceOverrides, understandingEvents } from "../../db/schema/evidence.ts";
 import { noteBlocks } from "../../db/schema/note.ts";
-import { getUserOverrideMap, effectiveAlignmentForUser, isHardEvidenceForUser } from "../../lib/evidence.ts";
+import { getUserOverrideMap } from "../../lib/evidence.ts";
 
 /**
  * Fetch every key point on a card plus its evidences, joined with the
@@ -77,43 +77,47 @@ export async function overrideEvidence(
   userId: string,
   override: "confirmed" | "downgraded" | "rejected",
 ) {
-  const ev = await db.query.evidences.findFirst({
-    where: and(eq(evidences.id, evidenceId), eq(evidences.workspaceId, workspaceId)),
-  });
-  if (!ev) return null;
-
-  // N-005: 使用 upsert 写入用户级 override 表
-  // 唯一键 (evidence_id, user_id) 确保每个用户对同一证据只有一条 override
-  await db
-    .insert(evidenceOverrides)
-    .values({
-      evidenceId,
-      userId,
-      workspaceId,
-      override,
-    })
-    .onConflictDoUpdate({
-      target: [evidenceOverrides.evidenceId, evidenceOverrides.userId],
-      set: { override, createdAt: new Date() },
+  return db.transaction(async (tx) => {
+    const ev = await tx.query.evidences.findFirst({
+      where: and(eq(evidences.id, evidenceId), eq(evidences.workspaceId, workspaceId)),
     });
+    if (!ev) return null;
 
-  // B3: 写入 understanding_events，影响理解状态聚合
-  // 查找关联的 cardId（通过 keyPoint → card）
-  const kp = await db.query.cardKeyPoints.findFirst({
-    where: eq(cardKeyPoints.id, ev.keyPointId),
-  });
-  if (kp) {
-    await db.insert(understandingEvents).values({
-      workspaceId,
-      userId,
-      subjectType: "card",
-      subjectId: kp.cardId,
-      eventType: "evidence_overridden",
-      payload: { evidenceId, override, keyPointId: ev.keyPointId },
+    // N-005: 使用 upsert 写入用户级 override 表
+    // 唯一键 (evidence_id, user_id) 确保每个用户对同一证据只有一条 override
+    await tx
+      .insert(evidenceOverrides)
+      .values({
+        evidenceId,
+        userId,
+        workspaceId,
+        override,
+      })
+      .onConflictDoUpdate({
+        target: [evidenceOverrides.evidenceId, evidenceOverrides.userId],
+        set: { override, createdAt: new Date() },
+      });
+
+    // Keep the derived understanding event atomic with the effective override.
+    const kp = await tx.query.cardKeyPoints.findFirst({
+      where: and(
+        eq(cardKeyPoints.id, ev.keyPointId),
+        eq(cardKeyPoints.workspaceId, workspaceId),
+      ),
     });
-  }
+    if (kp) {
+      await tx.insert(understandingEvents).values({
+        workspaceId,
+        userId,
+        subjectType: "card",
+        subjectId: kp.cardId,
+        eventType: "evidence_overridden",
+        payload: { evidenceId, override, keyPointId: ev.keyPointId },
+      });
+    }
 
-  return { ok: true };
+    return { ok: true };
+  });
 }
 
 /**

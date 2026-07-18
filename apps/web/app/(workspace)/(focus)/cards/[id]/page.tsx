@@ -40,6 +40,7 @@ import {
   sanitizeTodayReturnTarget,
   withTodayReturnTarget,
 } from "@/lib/today-return";
+import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
 
 type DetailLayoutMode = "wide" | "medium" | "compact";
 
@@ -119,6 +120,7 @@ export default function CardPage() {
     "idle" | "regenerating"
   >("idle");
   const [lifecycleMessage, setLifecycleMessage] = useState<string | null>(null);
+  useBodyScrollLock(layoutMode === "compact" && validationPanelOpen);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -155,8 +157,6 @@ export default function CardPage() {
 
     const previousFocus = document.activeElement as HTMLElement | null;
     const validationTrigger = validationTriggerRef.current;
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
 
     const focusableSelector =
       'button:not(:disabled), [href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])';
@@ -194,7 +194,6 @@ export default function CardPage() {
 
     return () => {
       window.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = originalOverflow;
       (validationTrigger ?? previousFocus)?.focus();
     };
   }, [layoutMode, validationPanelOpen]);

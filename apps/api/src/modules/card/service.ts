@@ -1,12 +1,11 @@
-import { and, asc, eq, desc, sql, inArray, count } from "drizzle-orm";
+import { and, asc, eq, desc, sql, inArray, count, or } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { notes, noteVersions } from "../../db/schema/note.ts";
 import { reviewSchedules, validationEvents, evidences } from "../../db/schema/evidence.ts";
 import { aiArtifacts } from "../../db/schema/ai.ts";
-import { jobs } from "../../db/schema/job.ts";
-import { ArtifactStatus, CardStatus, JobType, JobStatus, ReviewStatus } from "@ailearn/shared";
-import { deleteSearchDocument } from "../../lib/search-index.ts";
+import { searchDocuments } from "../../db/schema/search.ts";
+import { ArtifactStatus, CardStatus, JobType, ReviewStatus } from "@ailearn/shared";
 import { clampLimit } from "../../lib/pagination.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
@@ -270,15 +269,46 @@ export async function dismissCard(cardId: string, workspaceId: string) {
         and(
           eq(reviewSchedules.workspaceId, workspaceId),
           eq(reviewSchedules.status, ReviewStatus.PENDING),
-          sql`(${sql.identifier("subject_type")} = 'card' AND ${sql.identifier("subject_id")} = ${cardId}
-               OR ${sql.identifier("subject_type")} = 'validation' AND ${sql.identifier("subject_id")} IN
-                 (SELECT id FROM validation_events WHERE card_id = ${cardId}))`,
+          or(
+            and(
+              eq(reviewSchedules.subjectType, "card"),
+              eq(reviewSchedules.subjectId, cardId),
+            ),
+            and(
+              eq(reviewSchedules.subjectType, "validation"),
+              inArray(
+                reviewSchedules.subjectId,
+                tx
+                  .select({ id: validationEvents.id })
+                  .from(validationEvents)
+                  .where(and(
+                    eq(validationEvents.workspaceId, workspaceId),
+                    eq(validationEvents.cardId, cardId),
+                  )),
+              ),
+            ),
+          ),
         ),
       );
-  });
 
-  // P1-3: card archived 时清理搜索索引
-  await deleteSearchDocument(workspaceId, "card", cardId);
+    // Card and evidence projections form one searchable aggregate. Removing
+    // only the card row leaves evidence hits pointing at an archived card.
+    await tx
+      .delete(searchDocuments)
+      .where(and(
+        eq(searchDocuments.workspaceId, workspaceId),
+        or(
+          and(
+            eq(searchDocuments.objectType, "card"),
+            eq(searchDocuments.objectId, cardId),
+          ),
+          and(
+            eq(searchDocuments.objectType, "evidence"),
+            eq(sql<string>`${searchDocuments.metadata}->>'cardId'`, cardId),
+          ),
+        ),
+      ));
+  });
 
   return { ok: true };
 }

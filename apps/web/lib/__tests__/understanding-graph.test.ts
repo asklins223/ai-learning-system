@@ -3,14 +3,12 @@ import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
 import {
   STAR_MAP_NODE_RADIUS,
-  createStarMapLayout,
   createUniverseLayout,
   filterUnderstandingGraph,
   findGraphPath,
   getGraphNeighborhood,
   getSelectedGraphPath,
   graphEdgeKey,
-  layoutUnderstandingGraph,
   normalizeUnderstandingGraph,
   type GraphEdge,
   type GraphNode,
@@ -186,167 +184,6 @@ describe("understanding graph traversal", () => {
     const selected = getSelectedGraphPath(graph, "card-a");
     assert.equal(new Set(selected.nodeIds).size, selected.nodeIds.length);
     assert.ok(selected.nodeIds.length <= graph.nodes.length);
-  });
-});
-
-function rectanglesOverlap(
-  left: { x: number; y: number; width: number; height: number },
-  right: { x: number; y: number; width: number; height: number },
-) {
-  const epsilon = 0.0001;
-  return !(
-    left.x + left.width <= right.x + epsilon ||
-    right.x + right.width <= left.x + epsilon ||
-    left.y + left.height <= right.y + epsilon ||
-    right.y + right.height <= left.y + epsilon
-  );
-}
-
-describe("understanding graph layout", () => {
-  it("returns an empty 1600x960 canvas for an empty graph", () => {
-    assert.deepEqual(layoutUnderstandingGraph({ nodes: [], edges: [] }), {
-      width: 1600,
-      height: 960,
-      scale: 1,
-      nodes: [],
-      edges: [],
-      components: [],
-    });
-  });
-
-  it("lays out components and isolated nodes without overlap inside the canvas", () => {
-    const layout = layoutUnderstandingGraph(fixture());
-    assert.equal(layout.width, 1600);
-    assert.equal(layout.height, 960);
-    assert.equal(layout.components.length, 3);
-    assert.equal(layout.edges.length, fixture().edges.length);
-
-    for (const item of layout.nodes) {
-      assert.ok(item.x >= 0 && item.y >= 0, `${item.id} starts inside canvas`);
-      assert.ok(item.x + item.width <= layout.width + 0.001, `${item.id} fits horizontally`);
-      assert.ok(item.y + item.height <= layout.height + 0.001, `${item.id} fits vertically`);
-    }
-    for (let left = 0; left < layout.nodes.length; left += 1) {
-      for (let right = left + 1; right < layout.nodes.length; right += 1) {
-        assert.equal(
-          rectanglesOverlap(layout.nodes[left], layout.nodes[right]),
-          false,
-          `${layout.nodes[left].id} must not overlap ${layout.nodes[right].id}`,
-        );
-      }
-    }
-
-    const lanes = new Map(layout.nodes.map((item) => [item.type, item.laneIndex]));
-    assert.deepEqual(Object.fromEntries(lanes), { source: 0, note: 1, card: 2, key_point: 3 });
-    assert.ok(layout.edges.every((item) => item.path.startsWith("M ")));
-  });
-
-  it("is stable across input order and duplicate edges", () => {
-    const original = fixture();
-    const reversed: UnderstandingGraph = {
-      nodes: [...original.nodes].reverse(),
-      edges: [edge("zz-duplicate", "source-a", "note-a", "derived_from"), ...original.edges].reverse(),
-    };
-    const expected = layoutUnderstandingGraph(original);
-    const actual = layoutUnderstandingGraph(reversed);
-
-    assert.deepEqual(actual.nodes, expected.nodes);
-    assert.deepEqual(
-      actual.edges.map(({ id: _id, ...item }) => item),
-      expected.edges.map(({ id: _id, ...item }) => item),
-    );
-    assert.deepEqual(actual.components, expected.components);
-  });
-
-  it("scales a dense component to keep every node non-overlapping", () => {
-    const graph = fixture();
-    for (let index = 0; index < 40; index += 1) {
-      const id = `dense-${String(index).padStart(2, "0")}`;
-      graph.nodes.push(node(id, "key_point", `Dense claim ${index}`));
-      graph.edges.push(edge(`dense-edge-${index}`, "card-a", id, "contains"));
-    }
-    const layout = layoutUnderstandingGraph(graph);
-    assert.ok(layout.scale < 1);
-
-    const denseNodes = layout.nodes.filter((item) => item.type === "key_point" && item.componentId === "card-a");
-    for (let index = 1; index < denseNodes.length; index += 1) {
-      assert.ok(denseNodes[index - 1].y + denseNodes[index - 1].height <= denseNodes[index].y + 0.001);
-    }
-    assert.ok(layout.nodes.every((item) => item.y + item.height <= layout.height + 0.001));
-  });
-});
-
-function manyNoteCardComponents(count: number): UnderstandingGraph {
-  const nodes: GraphNode[] = [];
-  const edges: GraphEdge[] = [];
-  for (let index = 0; index < count; index += 1) {
-    const suffix = String(index).padStart(2, "0");
-    nodes.push(
-      node(`many-note-${suffix}`, "note", `Note ${suffix}`),
-      node(`many-card-${suffix}`, "card", `Card ${suffix}`, index % 2 ? "reviewed" : "seen"),
-    );
-    edges.push(edge(`many-edge-${suffix}`, `many-note-${suffix}`, `many-card-${suffix}`, "generated_from"));
-  }
-  return { nodes, edges };
-}
-
-function assertStarLayoutClear(graph: UnderstandingGraph) {
-  const layout = createStarMapLayout(graph);
-  const normalized = normalizeUnderstandingGraph(graph);
-  for (const current of normalized.nodes) {
-    const point = layout[current.id];
-    const radius = STAR_MAP_NODE_RADIUS[current.type];
-    assert.ok(point, `${current.id} has a center point`);
-    assert.ok(point.x - radius >= 0 && point.x + radius <= 1600, `${current.id} fits horizontally`);
-    assert.ok(point.y - radius >= 0 && point.y + radius <= 960, `${current.id} fits vertically`);
-  }
-  for (let left = 0; left < normalized.nodes.length; left += 1) {
-    for (let right = left + 1; right < normalized.nodes.length; right += 1) {
-      const leftNode = normalized.nodes[left];
-      const rightNode = normalized.nodes[right];
-      const minimum = STAR_MAP_NODE_RADIUS[leftNode.type] + STAR_MAP_NODE_RADIUS[rightNode.type];
-      const distance = Math.hypot(
-        layout[leftNode.id].x - layout[rightNode.id].x,
-        layout[leftNode.id].y - layout[rightNode.id].y,
-      );
-      assert.ok(distance >= minimum - 0.001, `${leftNode.id} must not overlap ${rightNode.id}`);
-    }
-  }
-  return layout;
-}
-
-describe("UnderstandingStarMap center-point layout", () => {
-  it("keeps 24 note-card components (48 fixed-radius nodes) readable in 1600x960", () => {
-    const graph = manyNoteCardComponents(24);
-    const layout = assertStarLayoutClear(graph);
-    assert.equal(Object.keys(layout).length, 48);
-  });
-
-  it("remains stable when API node and edge order changes", () => {
-    const graph = manyNoteCardComponents(24);
-    const reversed = { nodes: [...graph.nodes].reverse(), edges: [...graph.edges].reverse() };
-    assert.deepEqual(createStarMapLayout(reversed), createStarMapLayout(graph));
-  });
-
-  it("packs expanded source/note/card/claim components without circle overlap", () => {
-    const graph: UnderstandingGraph = { nodes: [], edges: [] };
-    for (let index = 0; index < 12; index += 1) {
-      const suffix = String(index).padStart(2, "0");
-      graph.nodes.push(
-        node(`expanded-source-${suffix}`, "source", `Source ${suffix}`),
-        node(`expanded-note-${suffix}`, "note", `Note ${suffix}`),
-        node(`expanded-card-${suffix}`, "card", `Card ${suffix}`, "seen"),
-        node(`expanded-claim-a-${suffix}`, "key_point", `Claim A ${suffix}`),
-        node(`expanded-claim-b-${suffix}`, "key_point", `Claim B ${suffix}`),
-      );
-      graph.edges.push(
-        edge(`expanded-source-note-${suffix}`, `expanded-source-${suffix}`, `expanded-note-${suffix}`, "derived_from"),
-        edge(`expanded-note-card-${suffix}`, `expanded-note-${suffix}`, `expanded-card-${suffix}`, "generated_from"),
-        edge(`expanded-card-claim-a-${suffix}`, `expanded-card-${suffix}`, `expanded-claim-a-${suffix}`, "contains"),
-        edge(`expanded-card-claim-b-${suffix}`, `expanded-card-${suffix}`, `expanded-claim-b-${suffix}`, "contains"),
-      );
-    }
-    assert.equal(Object.keys(assertStarLayoutClear(graph)).length, 60);
   });
 });
 

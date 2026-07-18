@@ -1,13 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { and, desc, eq, asc, inArray, sql } from "drizzle-orm";
-import { db } from "../../db/client.ts";
-import * as schema from "../../db/schema/index.ts";
+import { db, withSessionAdvisoryLock } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
 import { benchmarkLabels, benchmarkReports } from "../../db/schema/benchmark.ts";
-import { deleteSearchDocument, upsertSearchDocument } from "../../lib/search-index.ts";
+import { upsertSearchDocument } from "../../lib/search-index.ts";
 import { createGenerateCardJob } from "../job/service.ts";
+import { deleteNote } from "../note/service.ts";
 
 /**
  * 内置基准测试笔记（30 篇，覆盖技术、产品、学习、元数据干扰、
@@ -445,43 +445,46 @@ async function runPipelineForNote(
 
   try {
     // 1. 创建 note + note_version + note_blocks
-    const [note] = await db
-      .insert(notes)
-      .values({
-        workspaceId,
-        title: noteTitle,
-        titleSource: "benchmark",
-        createdBy: userId,
-      })
-      .returning();
-
-    const [version] = await db
-      .insert(noteVersions)
-      .values({
-        noteId: note.id,
-        workspaceId,
-        versionNo: 1,
-        contentJson: { blocks: blocksInput },
-        createdBy: userId,
-      })
-      .returning();
-
-    if (blocksInput.length > 0) {
-      await db.insert(noteBlocks).values(
-        blocksInput.map((b, idx) => ({
-          versionId: version.id,
+    const { note, version } = await db.transaction(async (tx) => {
+      const [createdNote] = await tx
+        .insert(notes)
+        .values({
           workspaceId,
-          ordinal: idx,
-          type: b.type,
-          content: b.content,
-        })),
-      );
-    }
+          title: noteTitle,
+          titleSource: "benchmark",
+          createdBy: userId,
+        })
+        .returning();
 
-    await db
-      .update(notes)
-      .set({ currentVersionId: version.id, updatedAt: new Date() })
-      .where(eq(notes.id, note.id));
+      const [createdVersion] = await tx
+        .insert(noteVersions)
+        .values({
+          noteId: createdNote.id,
+          workspaceId,
+          versionNo: 1,
+          contentJson: { blocks: blocksInput },
+          createdBy: userId,
+        })
+        .returning();
+
+      if (blocksInput.length > 0) {
+        await tx.insert(noteBlocks).values(
+          blocksInput.map((block, ordinal) => ({
+            versionId: createdVersion.id,
+            workspaceId,
+            ordinal,
+            type: block.type,
+            content: block.content,
+          })),
+        );
+      }
+
+      await tx
+        .update(notes)
+        .set({ currentVersionId: createdVersion.id, updatedAt: new Date() })
+        .where(and(eq(notes.id, createdNote.id), eq(notes.workspaceId, workspaceId)));
+      return { note: createdNote, version: createdVersion };
+    });
 
     await upsertSearchDocument({
       workspaceId,
@@ -750,8 +753,8 @@ async function persistBenchmarkLabels(
         benchmarkLabels.keyPointOrdinal,
       ],
       set: {
-        isCorrectlyAligned: sql.raw("excluded.is_correctly_aligned"),
-        expectedBlockOrdinal: sql.raw("excluded.expected_block_ordinal"),
+        isCorrectlyAligned: sql`excluded.is_correctly_aligned`,
+        expectedBlockOrdinal: sql`excluded.expected_block_ordinal`,
         updatedBy: userId,
         updatedAt: new Date(),
       },
@@ -790,7 +793,9 @@ export async function getLatestBenchmarkReport(
 }
 
 /**
- * P2-1: 清理上一次基准测试数据（按标题匹配），避免多次运行累积重复数据。
+ * 清理上一次基准测试数据（按标题匹配），避免多次运行累积重复数据。
+ * 复用笔记领域的级联删除路径，确保 jobs、验证/复习记录、AI artifacts
+ * 和搜索投影都与普通笔记删除保持同一套语义。
  */
 async function cleanupPreviousBenchmarkData(workspaceId: string): Promise<void> {
   const benchmarkTitles = BUILTIN_NOTES.map((n) => n.title);
@@ -805,57 +810,7 @@ async function cleanupPreviousBenchmarkData(workspaceId: string): Promise<void> 
   if (oldNotes.length === 0) return;
 
   for (const oldNote of oldNotes) {
-    // 查出关联的 versions 和 cards
-    const versions = await db.query.noteVersions.findMany({
-      where: eq(noteVersions.noteId, oldNote.id),
-    });
-    const versionIds = versions.map((v) => v.id);
-    if (versionIds.length === 0) {
-      await db.delete(notes).where(eq(notes.id, oldNote.id));
-      await deleteSearchDocument(workspaceId, "note", oldNote.id);
-      continue;
-    }
-
-    const cards = await db.query.learningCards.findMany({
-      where: inArray(learningCards.noteVersionId, versionIds),
-    });
-    const cardIds = cards.map((c) => c.id);
-    let evidenceIds: string[] = [];
-
-    if (cardIds.length > 0) {
-      // 查出 keyPoints
-      const kps = await db.query.cardKeyPoints.findMany({
-        where: inArray(cardKeyPoints.cardId, cardIds),
-      });
-      const kpIds = kps.map((k) => k.id);
-
-      // 删除 evidences
-      if (kpIds.length > 0) {
-        const evRows = await db.query.evidences.findMany({
-          where: inArray(evidences.keyPointId, kpIds),
-          columns: { id: true },
-        });
-        evidenceIds = evRows.map((ev) => ev.id);
-        await db.delete(evidences).where(inArray(evidences.keyPointId, kpIds));
-      }
-      // 删除 card_key_points
-      await db.delete(cardKeyPoints).where(inArray(cardKeyPoints.cardId, cardIds));
-      // 删除 learning_cards
-      await db.delete(learningCards).where(inArray(learningCards.id, cardIds));
-    }
-
-    // 删除 note_versions (cascade note_blocks)
-    await db.delete(noteVersions).where(eq(noteVersions.noteId, oldNote.id));
-    // 删除 note
-    await db.delete(notes).where(eq(notes.id, oldNote.id));
-
-    await deleteSearchDocument(workspaceId, "note", oldNote.id);
-    for (const cardId of cardIds) {
-      await deleteSearchDocument(workspaceId, "card", cardId);
-    }
-    for (const evidenceId of evidenceIds) {
-      await deleteSearchDocument(workspaceId, "evidence", evidenceId);
-    }
+    await deleteNote(oldNote.id, workspaceId);
   }
 }
 
@@ -873,7 +828,7 @@ const DATASET_VERSION = "2026-07-18-v2";
  * 运行完整基准测试（API 入口）。
  * 注意：此函数依赖 AI Worker 正在运行，会插入 generate_card job 并等待 worker 处理。
  */
-export async function runBenchmark(
+async function executeBenchmark(
   workspaceId: string,
   userId: string,
 ): Promise<BenchmarkReport> {
@@ -914,6 +869,20 @@ export async function runBenchmark(
     await persistBenchmarkReport(workspaceId, userId, report, tx);
   });
   return report;
+}
+
+export async function runBenchmark(
+  workspaceId: string,
+  userId: string,
+): Promise<BenchmarkReport> {
+  // A benchmark can hold the HTTP request for many minutes. Serialize runs for
+  // one workspace across API replicas without holding an equally long DB
+  // transaction; otherwise concurrent runs delete and supersede each other's
+  // notes/jobs while they are still being evaluated.
+  return withSessionAdvisoryLock(
+    `benchmark-run:${workspaceId}`,
+    () => executeBenchmark(workspaceId, userId),
+  );
 }
 
 /**

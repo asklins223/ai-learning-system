@@ -30,17 +30,17 @@ import {
 } from "./ai-model-connection.ts";
 
 export const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(4),
+  email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
+  password: z.string().min(4).max(200),
   // Controls whether the browser keeps the HttpOnly cookie after closing.
   // Bearer clients can ignore this field and continue using the response token.
   remember: z.boolean().optional().default(false),
 });
 
 const registerSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
-  inviteCode: z.string().min(1),
+  email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
+  password: z.string().min(8).max(200),
+  inviteCode: z.string().trim().min(1).max(200),
 });
 
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
@@ -121,14 +121,15 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   app.post("/auth/login", async (req, reply) => {
     // G-005: 使用 req.ip（trustProxy=true 时解析 X-Forwarded-For）而非 req.socket.remoteAddress
     const ip = req.ip;
-    const ipDecision = await limiter.consume(`ip:${ip}`);
+    const ipKey = `auth:login:ip:${ip}`;
+    const ipDecision = await limiter.consume(ipKey);
     if (!ipDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(ipDecision.resetAt));
       return reply.code(429).send({ error: "Too many login attempts. Please try again later." });
     }
     const body = parseBody(app, loginSchema, req.body);
     // R-011: 也按 email 限流，防止跨 IP 暴力破解单个账户
-    const emailKey = `email:${body.email.toLowerCase()}`;
+    const emailKey = `auth:login:email:${body.email}`;
     const emailDecision = await limiter.consume(emailKey);
     if (!emailDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(emailDecision.resetAt));
@@ -140,7 +141,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     }
     // G-005: 成功登录后重置该账户和 IP 的限流计数
     await limiter.reset(emailKey);
-    await limiter.reset(`ip:${ip}`);
+    await limiter.reset(ipKey);
     // Set an HttpOnly cookie for clients that opt into cookie auth while still
     // returning the Bearer token for existing API consumers.
     const csrfToken = setSessionCookies(reply, result.token, body.remember);
@@ -150,7 +151,8 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   app.post("/auth/register", async (req, reply) => {
     // G-005: 使用 req.ip 而非 req.socket.remoteAddress
     const ip = req.ip;
-    const ipDecision = await limiter.consume(`ip:${ip}`);
+    const ipKey = `auth:register:ip:${ip}`;
+    const ipDecision = await limiter.consume(ipKey);
     if (!ipDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(ipDecision.resetAt));
       return reply.code(429).send({ error: "Too many registration attempts. Please try again later." });
@@ -161,7 +163,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       throw app.httpErrors.badRequest("invalid invite or email exists");
     }
     // G-005: 成功注册后重置限流
-    await limiter.reset(`ip:${ip}`);
+    await limiter.reset(ipKey);
     const csrfToken = setSessionCookies(reply, result.token);
     return { ...result, csrfToken };
   });

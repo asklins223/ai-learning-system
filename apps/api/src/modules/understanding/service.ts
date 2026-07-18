@@ -79,27 +79,27 @@ export async function getUnderstandingStates(
 
   const eventMap = new Map<string, {
     latestEventType: string | null;
-    lastEventAt: string | null;
     misunderstandingCount: number;
     // G-009: 跟踪最新的验证事件类型（validated/misunderstood），忽略 reviewed 事件
     // 确保完成复习不会清除误解状态 — 只有新的验证事件才能关闭误解
     latestValidationEventType: string | null;
+    lastValidatedAt: string | null;
   }>();
 
   for (const row of eventRows) {
     const current = eventMap.get(row.cardId) ?? {
       latestEventType: null,
-      lastEventAt: null,
       misunderstandingCount: 0,
       latestValidationEventType: null,
+      lastValidatedAt: null,
     };
     if (!current.latestEventType) {
       current.latestEventType = row.eventType;
-      current.lastEventAt = row.createdAt.toISOString();
     }
     // G-009: 只记录最新的验证事件（validated 或 misunderstood），忽略 reviewed/seen
     if (!current.latestValidationEventType && (row.eventType === "validated" || row.eventType === "misunderstood")) {
       current.latestValidationEventType = row.eventType;
+      current.lastValidatedAt = row.createdAt.toISOString();
     }
     if (row.eventType === "misunderstood") {
       current.misunderstandingCount++;
@@ -175,6 +175,15 @@ export async function getUnderstandingStates(
 
   // 4. 批量查 review_schedules（B14: 替代 for 循环逐个查询）
   const reviewMap = new Map<string, { nextReviewAt: string | null; reviewStatus: string | null }>();
+  const rememberEarlierReview = (cardId: string, nextReviewAt: Date, status: string) => {
+    const current = reviewMap.get(cardId);
+    if (!current?.nextReviewAt || nextReviewAt.getTime() < new Date(current.nextReviewAt).getTime()) {
+      reviewMap.set(cardId, {
+        nextReviewAt: nextReviewAt.toISOString(),
+        reviewStatus: status,
+      });
+    }
+  };
   const reviewRows = await db
     .select({
       cardId: validationEvents.cardId,
@@ -200,12 +209,7 @@ export async function getUnderstandingStates(
     )
     .orderBy(asc(reviewSchedules.nextReviewAt));
   for (const row of reviewRows) {
-    if (!reviewMap.has(row.cardId)) {
-      reviewMap.set(row.cardId, {
-        nextReviewAt: row.nextReviewAt.toISOString(),
-        reviewStatus: row.status,
-      });
-    }
+    rememberEarlierReview(row.cardId, row.nextReviewAt, row.status);
   }
   // subjectType=card 的 review
   const cardReviewRows = await db
@@ -227,12 +231,7 @@ export async function getUnderstandingStates(
     )
     .orderBy(asc(reviewSchedules.nextReviewAt));
   for (const row of cardReviewRows) {
-    if (!reviewMap.has(row.subjectId)) {
-      reviewMap.set(row.subjectId, {
-        nextReviewAt: row.nextReviewAt.toISOString(),
-        reviewStatus: row.status,
-      });
-    }
+    rememberEarlierReview(row.subjectId, row.nextReviewAt, row.status);
   }
 
   // 5. 组装结果
@@ -288,7 +287,7 @@ export async function getUnderstandingStates(
       evidenceCoverage,
       hardEvidenceCount: evStats.hard,
       softEvidenceCount: evStats.soft,
-      lastValidatedAt: eventInfo?.lastEventAt ?? null,
+      lastValidatedAt: eventInfo?.lastValidatedAt ?? null,
       nextReviewAt: reviewInfo?.nextReviewAt ?? null,
       reviewStatus: reviewInfo?.reviewStatus ?? null,
       misunderstandingCount: eventInfo?.misunderstandingCount ?? 0,

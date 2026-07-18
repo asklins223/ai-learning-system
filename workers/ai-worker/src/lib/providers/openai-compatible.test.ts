@@ -49,6 +49,24 @@ describe("OpenAI-compatible personal provider", () => {
     );
   });
 
+  it("extracts bounded provider errors without trusting an arbitrary response shape", async () => {
+    const provider = new OpenAICompatibleProvider({
+      apiKey: "sk-test-secret",
+      baseUrl: "https://api.example.com/v1",
+      model: "example-model",
+      request: async () => ({
+        status: 401,
+        statusText: "Unauthorized",
+        body: { error: { message: "credential rejected" } },
+      }),
+    });
+
+    await assert.rejects(
+      provider.generateCard({ noteTitle: "Note", blocks: [] }),
+      /401: credential rejected/,
+    );
+  });
+
   it("keeps Docker Desktop synthetic DNS compatibility explicit", () => {
     const previous = process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS;
     try {

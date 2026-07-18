@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from "uuid";
 import { db } from "../../db/client.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { learningCards } from "../../db/schema/card.ts";

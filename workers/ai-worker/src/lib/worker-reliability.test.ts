@@ -16,6 +16,7 @@ import {
 } from "./governance.ts";
 import { DashScopeProvider } from "./providers/dashscope.ts";
 import { resolveWorkerDatabaseUrl } from "../db.ts";
+import { retryBackoffMs } from "./job-retry.ts";
 
 test("production workers fail closed when the dedicated database role is missing", () => {
   assert.throws(
@@ -26,6 +27,16 @@ test("production workers fail closed when the dedicated database role is missing
     resolveWorkerDatabaseUrl({ NODE_ENV: "production", DATABASE_URL_WORKER: "postgres://worker" }),
     "postgres://worker",
   );
+  assert.equal(
+    resolveWorkerDatabaseUrl({ NODE_ENV: "development", DATABASE_URL: "   " }),
+    "postgres://ailearn:ailearn_dev@postgres:5432/ailearn",
+  );
+});
+
+test("retry backoff starts at ten seconds and doubles per previous failure", () => {
+  assert.deepEqual([0, 1, 2].map(retryBackoffMs), [10_000, 20_000, 40_000]);
+  assert.throws(() => retryBackoffMs(-1), RangeError);
+  assert.throws(() => retryBackoffMs(0.5), RangeError);
 });
 
 test("timeout aborts the provider signal and fences late handler work", async () => {

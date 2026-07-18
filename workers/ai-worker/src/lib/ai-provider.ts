@@ -31,6 +31,11 @@ export interface AIProviderRuntimeConfig {
   model?: string | null;
 }
 
+export interface AIProviderSelection {
+  providerName: string;
+  config: AIProviderRuntimeConfig;
+}
+
 /**
  * N-011: 根据 provider 名称创建 AIProvider 实例。
  * @param providerName provider 标识（mock | dashscope | openai_compatible）
@@ -62,21 +67,29 @@ export function createProvider(
 }
 
 /**
- * 获取 AI provider。优先使用任务发起人的个人配置，再读取 workspace 配置。
+ * Resolve the provider configuration once per job. Governance and provider
+ * construction must use this same snapshot so a concurrent settings change
+ * cannot make the checked provider differ from the provider being called.
  */
-export async function getProvider(workspaceId?: string, userId?: string): Promise<AIProvider> {
+export async function resolveProviderSelection(
+  workspaceId?: string,
+  userId?: string,
+): Promise<AIProviderSelection> {
   if (userId) {
     const { getPersonalAIProviderRuntimeConfig } = await import("./governance.ts");
     const personal = await getPersonalAIProviderRuntimeConfig(userId);
-    if (personal) return createProvider(personal.provider, personal);
+    if (personal) {
+      return { providerName: personal.provider, config: personal };
+    }
   }
-  // N-011: 优先使用 workspace 级 provider 配置
+
   if (workspaceId) {
     const { getWorkspaceAIProvider } = await import("./governance.ts");
-    const providerName = await getWorkspaceAIProvider(workspaceId, userId);
-    return createProvider(providerName);
+    return { providerName: await getWorkspaceAIProvider(workspaceId), config: {} };
   }
-  // 回退到全局环境变量
-  const id = (process.env.AI_PROVIDER_CARD ?? "mock").toLowerCase();
-  return createProvider(id);
+
+  return {
+    providerName: (process.env.AI_PROVIDER_CARD ?? "mock").toLowerCase(),
+    config: {},
+  };
 }

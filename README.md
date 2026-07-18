@@ -170,16 +170,20 @@ make seed-owner
 | `make reset` | 删除生产数据库卷并重新启动 |
 | `make storage-dev` | 启动开发环境及 MinIO |
 | `make storage` | 启动生产环境及 MinIO |
+| `make clean-init` | 等待并清除生产环境成功退出的初始化容器 |
+| `make clean-init-dev` | 等待并清除开发环境成功退出的初始化容器 |
 
 `reset` 和 `reset-dev` 会删除对应的数据卷，请先确认数据已经备份。
+
+`up`、`dev`、`storage`、`storage-dev` 会在启动后自动等待并删除成功退出的一次性初始化容器（`migrate`、`role-bootstrap`、`role-grants`、`minio-init`），使其不会以 `Exited` 状态残留在 `docker ps -a` 中。初始化失败会让命令返回失败并保留容器，便于读取日志；`seed-*` 命令使用 `run --rm`，执行后容器自动删除。
 
 ## 测试
 
 各模块使用独立 lockfile。干净检出时先安装共享包，再运行服务测试：
 
 ```bash
-(cd packages/shared && npm ci)
-(cd packages/db && npm ci)
+(cd packages/shared && npm ci && npm test && npm run typecheck)
+(cd packages/db && npm ci && npm run typecheck)
 (cd apps/api && npm ci && npm test && npm run typecheck)
 (cd apps/web && npm ci && npm test && npm run typecheck)
 (cd workers/ai-worker && npm ci && npm test && npm run typecheck)

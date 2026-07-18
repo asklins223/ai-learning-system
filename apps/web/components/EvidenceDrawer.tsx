@@ -9,6 +9,8 @@ import {
 import { StatusChip } from "@/components/ui/StatusChip";
 import type { StatusTone } from "@/lib/status-map";
 import { Icon } from "@/components/ui/icons";
+import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
+import { useFocusTrap } from "@/lib/use-focus-trap";
 import { useModalIsolation } from "@/lib/use-modal-isolation";
 
 export function EvidenceDrawer({
@@ -32,8 +34,9 @@ export function EvidenceDrawer({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
   useModalIsolation(dialogRef, open);
+  useFocusTrap(dialogRef, open);
+  useBodyScrollLock(open);
 
   useEffect(() => {
     if (!open) return;
@@ -46,48 +49,15 @@ export function EvidenceDrawer({
 
   useEffect(() => {
     if (!open) return;
-
-    const originalOverflow = document.body.style.overflow;
-    previousFocusRef.current = document.activeElement as HTMLElement;
-    document.body.style.overflow = "hidden";
-
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
-        return;
-      }
-      if (event.key !== "Tab" || !dialogRef.current) return;
-
-      const focusable = Array.from(
-        dialogRef.current.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((element) => element.offsetParent !== null);
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
-    window.requestAnimationFrame(() => {
-      dialogRef.current
-        ?.querySelector<HTMLElement>("[data-evidence-close]")
-        ?.focus();
-    });
-
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = originalOverflow;
-      previousFocusRef.current?.focus();
-    };
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose, open]);
 
   if (!open) return null;
@@ -128,7 +98,6 @@ export function EvidenceDrawer({
             type="button"
             onClick={onClose}
             aria-label="关闭证据详情"
-            data-evidence-close
           >
             <Icon.Close aria-hidden="true" />
           </button>

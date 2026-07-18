@@ -11,9 +11,13 @@ function parseEncryptionKey(value: string | undefined): Buffer {
     throw new Error("AI_CREDENTIAL_ENCRYPTION_KEY is required to store or use personal AI credentials");
   }
 
-  const key = /^[0-9a-f]{64}$/i.test(raw)
-    ? Buffer.from(raw, "hex")
-    : Buffer.from(raw, "base64");
+  const isHex = /^[0-9a-f]{64}$/i.test(raw);
+  const isBase64 = /^[A-Za-z0-9+/_-]+={0,2}$/.test(raw);
+  if (!isHex && !isBase64) {
+    throw new Error("AI_CREDENTIAL_ENCRYPTION_KEY must be 32 bytes encoded as 64 hex characters or base64");
+  }
+
+  const key = Buffer.from(raw, isHex ? "hex" : "base64");
   if (key.length !== KEY_BYTES) {
     throw new Error("AI_CREDENTIAL_ENCRYPTION_KEY must be 32 bytes encoded as 64 hex characters or base64");
   }
@@ -79,8 +83,9 @@ export function decryptAiCredential(
 }
 
 export function aiCredentialHint(secret: string): string {
-  const suffix = secret.slice(-4);
-  return suffix ? `••••${suffix}` : "••••";
+  // Never reveal an entire short secret. Callers currently enforce a longer
+  // minimum, but keeping this helper safe makes that invariant local.
+  return secret.length > 4 ? `••••${secret.slice(-4)}` : "••••";
 }
 
 /** Fails fast without exposing key material; useful for readiness/configuration checks. */

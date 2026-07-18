@@ -6,7 +6,7 @@ export const sourceCreateSchema = z.object({
   title: z.string().min(1).max(500),
   content: z.string().optional(),
   url: z.string().url().optional(),
-  metadata: z.record(z.any()).optional(),
+  metadata: z.record(z.unknown()).optional(),
 }).refine(
   (data) => {
     // F-021: url 类型时 url 或 content 至少一项必须有值
@@ -23,7 +23,7 @@ export const sourceUpdateSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   // F-021: 状态只允许服务端状态机改变，客户端不能直接设置 status
   // status 字段从 schema 中移除
-  metadata: z.record(z.any()).optional(),
+  metadata: z.record(z.unknown()).optional(),
 });
 
 export const sourceListQuerySchema = paginationQuerySchema.extend({

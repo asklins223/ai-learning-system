@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@/components/ui/icons";
+import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
 import { useFocusTrap } from "@/lib/use-focus-trap";
 import { useModalIsolation } from "@/lib/use-modal-isolation";
 
@@ -37,12 +38,7 @@ export function ConfirmDialog({
       if (e.key === "Escape" && !loading) onCancel();
     };
     window.addEventListener("keydown", onKey);
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = originalOverflow;
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, [open, onCancel, loading]);
 
   const [mounted, setMounted] = useState(false);
@@ -52,6 +48,7 @@ export function ConfirmDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalIsolation(dialogRef, open && mounted);
   useFocusTrap(dialogRef, open && mounted);
+  useBodyScrollLock(open && mounted);
 
   if (!open || !mounted) return null;
 

@@ -41,6 +41,8 @@ export const evidences = pgTable(
 
 /**
  * N-005: 用户级证据覆盖表。
+ * 替代 evidences.userOverride 字段，每个用户对同一证据有独立的 override，
+ * 不再全工作区共享 last-write-wins。
  */
 export const evidenceOverrides = pgTable(
   "evidence_overrides",
@@ -60,6 +62,8 @@ export const evidenceOverrides = pgTable(
 
 /**
  * N-003: 服务端持久化验证题。
+ * 题目由服务端生成和存储，绑定 card/keyPoint/noteVersion，
+ * 客户端只提交 questionId + answer + idempotencyKey。
  */
 export const validationQuestions = pgTable(
   "validation_questions",
@@ -69,7 +73,7 @@ export const validationQuestions = pgTable(
     cardId: uuid("card_id").notNull().references(() => learningCards.id, { onDelete: "cascade" }),
     keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
     noteVersionId: uuid("note_version_id"),
-    questionType: text("question_type").notNull(),
+    questionType: text("question_type").notNull(), // explain | example | apply
     question: text("question").notNull(),
     createdBy: uuid("created_by").notNull().references(() => users.id),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -85,6 +89,7 @@ export const validationQuestions = pgTable(
 /**
  * 理解验证记录（对齐产品文档 §5.8）。
  * 每次用户提交验证答案后写入一条，关联到具体 keyPoint 和 AI 评估 artifact。
+ * N-003: 新增 questionId（绑定服务端持久化的题目）和 jobId（绑定异步结果身份）。
  */
 export const validationEvents = pgTable(
   "validation_events",
@@ -102,8 +107,8 @@ export const validationEvents = pgTable(
     confidence: integer("confidence").notNull(), // 0-100，存储时 ×100 避免浮点
     feedback: jsonb("feedback").$type<ValidationFeedback | null>(),
     // N-003: 绑定服务端持久化的题目和异步 job
-    questionId: uuid("question_id"),
-    jobId: uuid("job_id"),
+    questionId: uuid("question_id"), // FK 在迁移中定义
+    jobId: uuid("job_id"), // 绑定 evaluate_validation job
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

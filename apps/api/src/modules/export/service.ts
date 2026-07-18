@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { ValidationFeedback } from "@ailearn/shared";
 import { db } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
@@ -15,6 +15,7 @@ import { aiArtifacts } from "../../db/schema/ai.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { workspaces, workspaceMembers, users } from "../../db/schema/identity.ts";
 import { RECOVERED_PASSWORD_SENTINEL } from "../identity/service.ts";
+import { logger } from "../../lib/logger.ts";
 
 type RestoreDatabase = Pick<typeof db, "query" | "transaction">;
 
@@ -236,6 +237,10 @@ export async function restoreWorkspace(
   // 基本校验
   if (!data.workspace || !data.exportManifest) {
     return { success: false, message: "无效的导出文件：缺少 workspace 或 exportManifest 字段" };
+  }
+  const manifest = data.exportManifest as Record<string, unknown>;
+  if (manifest.version !== "2.0") {
+    return { success: false, message: "不支持的导出文件版本：仅支持 2.0" };
   }
 
   // 检查目标 workspace 是否已有业务数据。新工作区本身会包含 Owner 成员，
@@ -640,9 +645,10 @@ export async function restoreWorkspace(
       counts,
     };
   } catch (err) {
+    logger.error({ err, targetWorkspaceId }, "workspace restore failed");
     return {
       success: false,
-      message: `恢复失败：${err instanceof Error ? err.message : String(err)}`,
+      message: "恢复失败：导入数据无效或与目标工作区不兼容",
     };
   }
 }

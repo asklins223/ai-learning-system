@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { validationEvents, evidences, validationQuestions } from "../../db/schema/evidence.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
@@ -9,6 +9,30 @@ import {
   getUserOverrideMap,
 } from "../../lib/evidence.ts";
 import type { ValidationSubmitInput, CreateQuestionInput } from "./schema.ts";
+
+async function keyPointHasHardEvidence(
+  keyPointId: string,
+  workspaceId: string,
+  userId: string,
+): Promise<boolean> {
+  const keyPointEvidences = await db.query.evidences.findMany({
+    where: and(
+      eq(evidences.keyPointId, keyPointId),
+      eq(evidences.workspaceId, workspaceId),
+    ),
+  });
+  const userOverrideMap = await getUserOverrideMap(
+    userId,
+    keyPointEvidences.map((evidence) => evidence.id),
+  );
+  return keyPointEvidences.some(
+    (evidence) => effectiveAlignmentForUser(
+      evidence.alignment,
+      evidence.userOverride,
+      userOverrideMap.get(evidence.id) ?? null,
+    ) === "aligned",
+  );
+}
 
 /**
  * N-003: 服务端创建验证题，持久化到 validation_questions 表。
@@ -52,25 +76,7 @@ export async function createValidationQuestion(
   }
 
   // N-004: 服务端强制校验目标 keyPoint 的硬证据门槛
-  const keyPointEvidences = await db.query.evidences.findMany({
-    where: and(
-      eq(evidences.keyPointId, keyPointId),
-      eq(evidences.workspaceId, workspaceId),
-    ),
-  });
-  const userOverrideMap = await getUserOverrideMap(
-    userId,
-    keyPointEvidences.map((evidence) => evidence.id),
-  );
-  const hasHardEvidence = keyPointEvidences.some(
-    (evidence) =>
-      effectiveAlignmentForUser(
-        evidence.alignment,
-        evidence.userOverride,
-        userOverrideMap.get(evidence.id) ?? null,
-      ) === "aligned",
-  );
-  if (!hasHardEvidence) {
+  if (!await keyPointHasHardEvidence(keyPointId, workspaceId, userId)) {
     return { error: "no_hard_evidence" as const };
   }
 
@@ -125,7 +131,7 @@ export async function submitValidation(
     });
     if (!q) return { error: "invalid_question" as const };
     // 检查题目是否过期
-    if (q.expiresAt && q.expiresAt < new Date()) {
+    if (q.expiresAt && q.expiresAt <= new Date()) {
       return { error: "question_expired" as const };
     }
     keyPointId = q.keyPointId ?? undefined;
@@ -166,25 +172,7 @@ export async function submitValidation(
   }
 
   // N-004: 服务端强制校验目标 keyPoint 的硬证据门槛
-  const keyPointEvidences = await db.query.evidences.findMany({
-    where: and(
-      eq(evidences.keyPointId, keyPointId),
-      eq(evidences.workspaceId, workspaceId),
-    ),
-  });
-  const userOverrideMap = await getUserOverrideMap(
-    userId,
-    keyPointEvidences.map((evidence) => evidence.id),
-  );
-  const hasHardEvidence = keyPointEvidences.some(
-    (evidence) =>
-      effectiveAlignmentForUser(
-        evidence.alignment,
-        evidence.userOverride,
-        userOverrideMap.get(evidence.id) ?? null,
-      ) === "aligned",
-  );
-  if (!hasHardEvidence) {
+  if (!await keyPointHasHardEvidence(keyPointId, workspaceId, userId)) {
     return { error: "no_hard_evidence" as const };
   }
 

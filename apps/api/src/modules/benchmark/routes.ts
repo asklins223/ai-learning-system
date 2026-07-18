@@ -7,22 +7,66 @@ import {
   getSavedBenchmarkLabels,
   runBenchmark,
   saveLabelsAndCalculate,
+  BUILTIN_NOTES,
 } from "./service.ts";
 
 const labelEntrySchema = z.object({
-  ordinal: z.number().int(),
+  ordinal: z.number().int().min(0),
   isCorrectlyAligned: z.boolean(),
   expectedBlockOrdinal: z.number().int().min(0).nullable(),
 });
 
 const labelFileSchema = z.object({
-  noteFile: z.string(),
-  keyPoints: z.array(labelEntrySchema),
+  noteFile: z.string().min(1).max(200),
+  keyPoints: z.array(labelEntrySchema).max(100),
 });
 
 const saveLabelsSchema = z.object({
-  runId: z.string().min(1),
-  labels: z.array(labelFileSchema),
+  runId: z.string().min(1).max(100),
+  labels: z.array(labelFileSchema).min(1).max(BUILTIN_NOTES.length),
+}).superRefine((data, context) => {
+  const noteByFile = new Map(BUILTIN_NOTES.map((note) => [note.file, note]));
+  const seenFiles = new Set<string>();
+  data.labels.forEach((labelFile, fileIndex) => {
+    const note = noteByFile.get(labelFile.noteFile);
+    if (!note) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", fileIndex, "noteFile"],
+        message: "unknown benchmark note file",
+      });
+    }
+    if (seenFiles.has(labelFile.noteFile)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", fileIndex, "noteFile"],
+        message: "duplicate benchmark note file",
+      });
+    }
+    seenFiles.add(labelFile.noteFile);
+
+    const seenOrdinals = new Set<number>();
+    labelFile.keyPoints.forEach((label, labelIndex) => {
+      if (seenOrdinals.has(label.ordinal)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["labels", fileIndex, "keyPoints", labelIndex, "ordinal"],
+          message: "duplicate key-point ordinal",
+        });
+      }
+      seenOrdinals.add(label.ordinal);
+      if (
+        note && label.expectedBlockOrdinal !== null &&
+        label.expectedBlockOrdinal >= note.blocks.length
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["labels", fileIndex, "keyPoints", labelIndex, "expectedBlockOrdinal"],
+          message: "expected block ordinal is outside the benchmark note",
+        });
+      }
+    });
+  });
 });
 
 export async function benchmarkRoutes(app: FastifyInstance) {
@@ -83,8 +127,6 @@ export async function benchmarkRoutes(app: FastifyInstance) {
    * GET /benchmark/notes — 返回内置基准笔记列表（供前端展示）。
    */
   app.get("/benchmark/notes", async () => {
-    // 直接从 service 的 BUILTIN_NOTES 导出
-    const { BUILTIN_NOTES } = await import("./service.ts");
     return {
       items: BUILTIN_NOTES.map((n) => ({
         file: n.file,

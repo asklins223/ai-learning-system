@@ -9,14 +9,9 @@
     "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "rootDir": "src",
-    "baseUrl": "src",
-    "paths": {
-      "@ailearn/shared": ["."]
-    }
+    "rootDir": "src"
   },
   "include": ["src/**/*.ts"]
 }

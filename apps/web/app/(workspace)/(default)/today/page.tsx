@@ -332,6 +332,9 @@ export default function TodayPage() {
 
   useEffect(() => {
     void loadAll();
+    return () => {
+      loadRequestRef.current += 1;
+    };
   }, [loadAll]);
 
   useEffect(() => {

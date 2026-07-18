@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { and, eq, isNull, lt, or, gte, inArray, desc, count } from "drizzle-orm";
+import { and, eq, isNull, lt, or, gte, inArray, desc, count, sql } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { users, workspaceMembers, inviteCodes, workspaces, aiAuditLog } from "../../db/schema/identity.ts";
 import { sessions } from "../../db/schema/session.ts";
@@ -8,6 +8,13 @@ import { sessions } from "../../db/schema/session.ts";
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const RECOVERED_PASSWORD_SENTINEL = "$RESET_REQUIRED$";
 const BCRYPT_COST = 10;
+// Keep unknown-account logins on the same expensive bcrypt path as known
+// accounts so response timing does not become a reliable email oracle.
+const DUMMY_PASSWORD_HASH = "$2a$10$cgxNDTz4bljIsmxLn2w.7O6Cd/C3cZK3neQBb/2Xxx4xNJkIgMrse";
+
+export function canonicalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
 
 function legacyHashPassword(plain: string): string {
   return createHash("sha256").update(`ailearn:${plain}`).digest("hex");
@@ -23,7 +30,9 @@ function hashPassword(plain: string): Promise<string> {
 
 async function verifyPassword(plain: string, stored: string): Promise<boolean> {
   if (isLegacyHash(stored)) {
-    return legacyHashPassword(plain) === stored;
+    const candidate = Buffer.from(legacyHashPassword(plain));
+    const expected = Buffer.from(stored);
+    return candidate.length === expected.length && timingSafeEqual(candidate, expected);
   }
   return bcrypt.compare(plain, stored);
 }
@@ -61,8 +70,17 @@ export async function loginWithPassword(
   email: string,
   password: string,
 ): Promise<{ token: string; ctx: SessionContext; workspaces: WorkspaceInfo[] } | null> {
-  const user = await db.query.users.findFirst({ where: eq(users.email, email) });
-  if (!user) return null;
+  const normalizedEmail = canonicalizeEmail(email);
+  const exactUser = await db.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
+  // Existing installations may contain mixed-case addresses. Keep the indexed
+  // canonical lookup fast and only use the compatibility scan when necessary.
+  const user = exactUser ?? await db.query.users.findFirst({
+    where: sql`lower(${users.email}) = ${normalizedEmail}`,
+  });
+  if (!user) {
+    await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+    return null;
+  }
   if (!(await verifyPassword(password, user.passwordHash))) return null;
   if (isLegacyHash(user.passwordHash)) {
     const newHash = await hashPassword(password);
@@ -99,36 +117,57 @@ export async function registerWithInvite(
   password: string,
   inviteCode: string,
 ): Promise<{ token: string; ctx: SessionContext } | null> {
-  // F-012: Use transaction for atomic invite consumption
-  const result = await db.transaction(async (tx) => {
-    const now = new Date();
-    const consumed = await tx
-      .update(inviteCodes)
-      .set({ consumedAt: now })
-      .where(
-        and(
-          eq(inviteCodes.code, inviteCode),
-          isNull(inviteCodes.consumedBy),
-          or(isNull(inviteCodes.expiresAt), gte(inviteCodes.expiresAt, now)),
-        ),
-      )
-      .returning();
-    if (consumed.length === 0) return null;
-    const invite = consumed[0];
-    const existing = await tx.query.users.findFirst({ where: eq(users.email, email) });
-    if (existing) return null;
-    const [user] = await tx
-      .insert(users)
-      .values({ email, passwordHash: await hashPassword(password) })
-      .returning();
-    await tx.update(inviteCodes).set({ consumedBy: user.id }).where(eq(inviteCodes.code, inviteCode));
-    await tx.insert(workspaceMembers).values({
-      workspaceId: invite.workspaceId,
-      userId: user.id,
-      role: "member",
+  const normalizedEmail = canonicalizeEmail(email);
+  let result: { userId: string; workspaceId: string } | null;
+  try {
+    // Lock the invite row first, then mark both consumed fields together only
+    // after the user and membership writes have succeeded.
+    result = await db.transaction(async (tx) => {
+      const now = new Date();
+      const inviteRows = await tx
+        .select()
+        .from(inviteCodes)
+        .where(
+          and(
+            eq(inviteCodes.code, inviteCode),
+            isNull(inviteCodes.consumedBy),
+            or(isNull(inviteCodes.expiresAt), gte(inviteCodes.expiresAt, now)),
+          ),
+        )
+        .for("update");
+      const invite = inviteRows[0];
+      if (!invite) return null;
+
+      const exactUser = await tx.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
+      const existing = exactUser ?? await tx.query.users.findFirst({
+        where: sql`lower(${users.email}) = ${normalizedEmail}`,
+      });
+      if (existing) return null;
+
+      const [user] = await tx
+        .insert(users)
+        .values({ email: normalizedEmail, passwordHash: await hashPassword(password) })
+        .returning();
+      await tx.insert(workspaceMembers).values({
+        workspaceId: invite.workspaceId,
+        userId: user.id,
+        role: "member",
+      });
+      await tx
+        .update(inviteCodes)
+        .set({ consumedBy: user.id, consumedAt: now })
+        .where(and(eq(inviteCodes.code, inviteCode), isNull(inviteCodes.consumedBy)));
+      return { userId: user.id, workspaceId: invite.workspaceId };
     });
-    return { userId: user.id, workspaceId: invite.workspaceId };
-  });
+  } catch (error) {
+    // A concurrent registration through another invite may win the unique
+    // email race after our pre-check. Treat that as the same public conflict
+    // as an already-existing email and let the transaction roll back cleanly.
+    if (error && typeof error === "object" && "code" in error && error.code === "23505") {
+      return null;
+    }
+    throw error;
+  }
   if (!result) return null;
   return issueSession(result.userId, result.workspaceId);
 }

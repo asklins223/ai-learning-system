@@ -176,6 +176,18 @@ describe("session credential migration", () => {
     );
   });
 
+  it("canonicalizes login identities and bounds password input", () => {
+    const parsed = loginSchema.parse({
+      email: "  User.Name@Example.COM  ",
+      password: "secret",
+    });
+    assert.equal(parsed.email, "user.name@example.com");
+    assert.equal(loginSchema.safeParse({
+      email: "user@example.com",
+      password: "x".repeat(201),
+    }).success, false);
+  });
+
   it("keeps Bearer credentials first while accepting the HttpOnly cookie fallback", () => {
     assert.deepEqual(
       extractAuthCredential({

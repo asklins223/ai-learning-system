@@ -11,7 +11,7 @@ import {
 import { sql } from "drizzle-orm";
 import { evidenceAlignmentEnum, validationOutcomeEnum, reviewStatusEnum } from "./enums.ts";
 import { cardKeyPoints } from "./card.ts";
-import { noteBlocks, noteVersions } from "./note.ts";
+import { noteBlocks } from "./note.ts";
 import { learningCards } from "./card.ts";
 import { aiArtifacts } from "./ai.ts";
 import { users } from "./identity.ts";

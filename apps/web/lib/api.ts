@@ -135,10 +135,10 @@ export function getCsrfToken(): string | null {
   return getCookie(CSRF_COOKIE_KEY);
 }
 
-function addCsrfHeader(headers: Record<string, string>, method: string): void {
+function addCsrfHeader(headers: Headers, method: string): void {
   if (["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase())) return;
   const csrf = getCsrfToken();
-  if (csrf) headers[CSRF_HEADER_KEY] = csrf;
+  if (csrf) headers.set(CSRF_HEADER_KEY, csrf);
 }
 
 /** 仅处理当前会话代际发出的 401，避免迟到响应清掉新登录或新工作区。 */
@@ -161,12 +161,24 @@ export class ApiError extends Error {
 
 function parseApiError(status: number, statusText: string, text: string): ApiError {
   try {
-    const payload = JSON.parse(text) as { error?: unknown; code?: unknown };
-    if (typeof payload.error === "string" && payload.error.trim()) {
+    const payload = JSON.parse(text) as {
+      error?: unknown;
+      message?: unknown;
+      code?: unknown;
+    };
+    const error = typeof payload.error === "string" ? payload.error.trim() : "";
+    const message = typeof payload.message === "string" ? payload.message.trim() : "";
+    const code =
+      typeof payload.code === "string" && payload.code.trim()
+        ? payload.code.trim()
+        : message && /^[a-z][a-z0-9_]*$/.test(error)
+          ? error
+          : undefined;
+    if (message || error) {
       return new ApiError(
         status,
-        payload.error.trim(),
-        typeof payload.code === "string" ? payload.code : undefined,
+        message || error,
+        code,
       );
     }
   } catch {
@@ -175,17 +187,15 @@ function parseApiError(status: number, statusText: string, text: string): ApiErr
   return new ApiError(status, `API ${status}: ${text || statusText}`);
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function requestResponse(path: string, init: RequestInit = {}): Promise<Response> {
   const requestGeneration = getMeCacheGeneration;
-  const headers: Record<string, string> = {
-    ...(init.headers as Record<string, string> | undefined),
-  };
+  const headers = new Headers(init.headers);
   // 只有在有 body 时才设置 Content-Type，避免 Fastify 对空 body 报 FST_ERR_CTP_EMPTY_JSON_BODY
-  if (init.body && !headers["Content-Type"]) {
-    headers["Content-Type"] = "application/json";
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
   const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   addCsrfHeader(headers, init.method ?? "GET");
 
   const res = await fetch(`${API_URL}${path}`, {
@@ -198,29 +208,17 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const text = await res.text().catch(() => "");
     throw parseApiError(res.status, res.statusText, text);
   }
+  return res;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await requestResponse(path, init);
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
 async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
-  const requestGeneration = getMeCacheGeneration;
-  const headers: Record<string, string> = {
-    ...(init.headers as Record<string, string> | undefined),
-  };
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  addCsrfHeader(headers, init.method ?? "GET");
-
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    credentials: init.credentials ?? "same-origin",
-    headers,
-  });
-  if (!res.ok) {
-    if (res.status === 401) handleUnauthorized(requestGeneration);
-    const text = await res.text().catch(() => "");
-    throw parseApiError(res.status, res.statusText, text);
-  }
+  const res = await requestResponse(path, init);
   return res.blob();
 }
 
@@ -887,7 +885,7 @@ isAutosave?: boolean;
   deleteNote: (id: string) =>
     request<void>(`/notes/${id}`, { method: "DELETE" }),
   exportNoteMarkdown: (id: string) =>
-    `${API_URL}/export/notes/${id}`,
+    requestBlob(`/export/notes/${id}`),
   exportWorkspace: () => requestBlob("/export/workspace"),
 
   /* cards */

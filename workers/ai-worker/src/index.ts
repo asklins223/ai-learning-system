@@ -1,10 +1,11 @@
 import { and, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { logger } from "./lib/logger.ts";
 import * as schema from "./schema/index.ts";
-import { db } from "./db.ts";
+import { closeDatabase, db } from "./db.ts";
 import { runGenerateCard, runAlignEvidence, runEvaluateValidation } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
+import { retryBackoffMs } from "./lib/job-retry.ts";
 
 const HANDLERS = {
   generate_card: runGenerateCard,
@@ -237,8 +238,8 @@ async function tick() {
       const message = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
       const nextAttempts = job.attempts + 1;
       const isDead = nextAttempts >= MAX_ATTEMPTS;
-      // 退避：2^attempts * 10s（10s / 20s / 40s），dead 任务不再重试
-      const backoffMs = isDead ? 0 : Math.pow(2, nextAttempts) * 10_000;
+      // 退避：10s / 20s / 40s；dead 任务不再重试。
+      const backoffMs = isDead ? 0 : retryBackoffMs(job.attempts);
       // G-001: 失败时也使用原子条件 UPDATE，避免覆盖 reaper 的状态
       const failResult = await db
         .update(schema.jobs)
@@ -276,22 +277,26 @@ async function tick() {
 
 async function main() {
   logger.info("AI worker started, polling for jobs…");
-  while (true) {
-    try {
-      await tick();
-    } catch (err) {
-      logger.error({ err }, "tick failed");
+  try {
+    while (true) {
+      try {
+        await tick();
+      } catch (err) {
+        logger.error({ err }, "tick failed");
+      }
+      // F-010: 优雅关停 — 当前作业结束后退出。
+      if (shuttingDown) {
+        logger.info("shutdown complete, exiting");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }
-    // F-010: 优雅关停 — 当前无作业时退出
-    if (shuttingDown) {
-      logger.info("shutdown complete, exiting");
-      process.exit(0);
-    }
-    await new Promise((r) => setTimeout(r, POLL_MS));
+  } finally {
+    await closeDatabase();
   }
 }
 
 main().catch((err) => {
-  logger.error(err);
-  process.exit(1);
+  logger.error({ err }, "AI worker stopped unexpectedly");
+  process.exitCode = 1;
 });

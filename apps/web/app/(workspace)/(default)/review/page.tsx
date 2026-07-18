@@ -303,14 +303,18 @@ export default function ReviewPage() {
   const reviewHeadingRef = useRef<HTMLHeadingElement>(null);
   const emptyHeadingRef = useRef<HTMLHeadingElement>(null);
   const shouldFocusNextRef = useRef(false);
+  const loadRequestRef = useRef(0);
 
   const closeQueue = useCallback(() => setQueueOpen(false), []);
 
   const loadReviews = useCallback(async () => {
+    const requestId = ++loadRequestRef.current;
     setLoadError(null);
     setLoadMoreError(null);
+    setLoadingMore(false);
     try {
       const response = await api.listReviews({ status: "pending", limit: 50, offset: 0 });
+      if (requestId !== loadRequestRef.current) return;
       const { items, total } = response;
       setReviews(items);
       setReviewTotal(total);
@@ -328,6 +332,7 @@ export default function ReviewPage() {
         return items[0]?.review.id ?? null;
       });
     } catch (error) {
+      if (requestId !== loadRequestRef.current) return;
       setReviews(null);
       setReviewTotal(0);
       setReviewNextOffset(null);
@@ -336,7 +341,8 @@ export default function ReviewPage() {
   }, [requestedReviewId]);
 
   const loadMoreReviews = useCallback(async () => {
-    if (loadingMore || reviewNextOffset === null) return;
+    if (loadingMore || actionState !== null || reviewNextOffset === null) return;
+    const requestId = loadRequestRef.current;
     setLoadingMore(true);
     setLoadMoreError(null);
     try {
@@ -345,6 +351,7 @@ export default function ReviewPage() {
         limit: 50,
         offset: reviewNextOffset,
       });
+      if (requestId !== loadRequestRef.current) return;
       setReviews((existing) => {
         const base = existing ?? [];
         const seen = new Set(base.map((item) => item.review.id));
@@ -353,14 +360,18 @@ export default function ReviewPage() {
       setReviewTotal(response.total);
       setReviewNextOffset(response.nextOffset);
     } catch (error) {
+      if (requestId !== loadRequestRef.current) return;
       setLoadMoreError(error instanceof Error ? error.message : "更多复习加载失败");
     } finally {
-      setLoadingMore(false);
+      if (requestId === loadRequestRef.current) setLoadingMore(false);
     }
-  }, [loadingMore, reviewNextOffset]);
+  }, [actionState, loadingMore, reviewNextOffset]);
 
   useEffect(() => {
     void loadReviews();
+    return () => {
+      loadRequestRef.current += 1;
+    };
   }, [loadReviews]);
 
   useEffect(() => {
@@ -421,7 +432,7 @@ export default function ReviewPage() {
   const currentPosition = current
     ? filteredReviews.findIndex((item) => item.review.id === current.review.id) + 1
     : 0;
-  const isBusy = actionState !== null;
+  const isBusy = actionState !== null || loadingMore;
   const reasonPresentation = current
     ? statusMap.reviewReason(current.reviewReason)
     : null;

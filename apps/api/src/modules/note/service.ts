@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
@@ -453,26 +453,25 @@ export async function deleteNote(noteId: string, workspaceId: string) {
     // R-023: 删除关联的 jobs（包含 userAnswer 等敏感 payload）
     //    通过 JSONB payload 中的 cardId/noteVersionId/keyPointId 关联
     if (cardIds.length > 0) {
-      await tx.execute(sql`
-        DELETE FROM jobs WHERE workspace_id = ${workspaceId} AND (
-          payload->>'cardId' = ANY(${sql.raw(`ARRAY[${cardIds.map((id) => `'${id}'`).join(",")}]::text[]`)}) OR
-          payload->>'oldCardId' = ANY(${sql.raw(`ARRAY[${cardIds.map((id) => `'${id}'`).join(",")}]::text[]`)})
-        )
-      `);
+      await tx.delete(jobs).where(and(
+        eq(jobs.workspaceId, workspaceId),
+        or(
+          inArray(sql<string>`${jobs.payload}->>'cardId'`, cardIds),
+          inArray(sql<string>`${jobs.payload}->>'oldCardId'`, cardIds),
+        ),
+      ));
     }
     if (versionIds.length > 0) {
-      await tx.execute(sql`
-        DELETE FROM jobs WHERE workspace_id = ${workspaceId} AND (
-          payload->>'noteVersionId' = ANY(${sql.raw(`ARRAY[${versionIds.map((id) => `'${id}'`).join(",")}]::text[]`)})
-        )
-      `);
+      await tx.delete(jobs).where(and(
+        eq(jobs.workspaceId, workspaceId),
+        inArray(sql<string>`${jobs.payload}->>'noteVersionId'`, versionIds),
+      ));
     }
     if (kpIds.length > 0) {
-      await tx.execute(sql`
-        DELETE FROM jobs WHERE workspace_id = ${workspaceId} AND (
-          payload->>'keyPointId' = ANY(${sql.raw(`ARRAY[${kpIds.map((id) => `'${id}'`).join(",")}]::text[]`)})
-        )
-      `);
+      await tx.delete(jobs).where(and(
+        eq(jobs.workspaceId, workspaceId),
+        inArray(sql<string>`${jobs.payload}->>'keyPointId'`, kpIds),
+      ));
     }
 
     // 12. 删除 learning_cards（通过 noteVersionId 关联）
