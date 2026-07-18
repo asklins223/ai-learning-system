@@ -205,6 +205,14 @@ jobs:
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
+            packages/shared/package-lock.json
+
+      # API and Worker load the shared package from its workspace source path.
+      # Install its runtime dependencies explicitly in a clean checkout so
+      # imports such as zod resolve from packages/shared/node_modules.
+      - name: Install shared
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
 
       - name: Install Web
         working-directory: apps/web
@@ -277,7 +285,8 @@ jobs:
 
       - name: Install API
         working-directory: apps/api
-        run: npm ci --no-audit --no-fund
+        # NODE_ENV=production would otherwise omit tsx, which db:migrate uses.
+        run: npm ci --include=dev --no-audit --no-fund
 
       - name: Bootstrap least-privilege roles for the empty database
         run: |
