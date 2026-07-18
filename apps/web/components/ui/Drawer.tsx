@@ -7,7 +7,6 @@ import { useModalIsolation } from "@/lib/use-modal-isolation";
 /**
  * Drawer — 侧边滑出面板基础组件。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.9
  *
  * 支持：
  * - 从右侧或底部滑出

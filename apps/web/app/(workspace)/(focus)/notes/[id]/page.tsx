@@ -21,7 +21,6 @@ import { sanitizeTodayReturnTarget } from "@/lib/today-return";
  *
  * 模板：EditorTemplate
  * Shell：focus
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §13.4
  *
  * auth-gate 由 workspace layout 统一处理。
  * 页面本身只做数据加载和错误展示，编辑逻辑全部在 NoteEditor 组件中。

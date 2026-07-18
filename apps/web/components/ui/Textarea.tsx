@@ -5,7 +5,6 @@ import { forwardRef, type TextareaHTMLAttributes } from "react";
 /**
  * Textarea — 统一多行文本输入。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.4
  * - Textarea 可调整高度时不得破坏容器
  * - 错误不把整个输入区染成红色
  */

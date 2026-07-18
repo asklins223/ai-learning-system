@@ -12,7 +12,6 @@ import { api } from "@/lib/api";
  * - (focus)/layout.tsx   → <AppShell variant="focus">
  * - (internal)/layout.tsx → <AppShell variant="internal">
  *
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §7.1
  */
 export default function WorkspaceLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();

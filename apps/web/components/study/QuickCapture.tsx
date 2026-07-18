@@ -7,7 +7,6 @@ import { StatusChip } from "@/components/ui/StatusChip";
 /**
  * QuickCapture — 快速捕获文本/Markdown/代码/URL 并创建来源。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §10 / §13.2 / §13.10
  * - 类型识别是前端启发式，不能称"AI 识别"
  * - 创建来源使用 createSource API
  * - Enter 提交，Shift+Enter 换行（或 ⌘+Enter）

@@ -6,7 +6,6 @@ import { Icon } from "./icons";
 /**
  * Select — 统一下拉选择框。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.4
  * - 高度 40px，移动端至少 44px
  * - 背景 --color-surface-raised，边框 --color-border-strong
  * - Focus: 2px 实线 + 3px 低透明 ring

@@ -7,7 +7,6 @@ import { statusMap } from "@/lib/status-map";
 /**
  * AIJobIndicator — 后台 AI 任务状态指示器。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §10 / §12
  * - 只展示 pending/running 状态
  * - 不得根据 type 猜关联对象
  * - loading 有文字或读屏提示

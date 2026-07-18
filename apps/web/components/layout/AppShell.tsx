@@ -11,7 +11,6 @@ import { TabletTopBar } from "./TabletTopBar";
  * AppShell — 全局应用外壳。
  *
  * 显式 variant 替代 body:has 路由样式。
- * 参见：UI-REFACTOR-VISUAL-AUDIT-AND-REWORK-SPEC.md §7 / §9
  *
  * - default：首页、列表、搜索、设置等 → 桌面侧栏 + 页面工作区
  * - focus：学习卡详情、笔记编辑 → 减少导航噪音，全宽工作区

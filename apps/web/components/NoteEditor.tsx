@@ -71,7 +71,7 @@ function savingStatePresentation(state: SavingState, dirty: boolean): { label: s
 /**
  * 笔记编辑器。
  *
- * UI 对齐 UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §13.4：
+ * 编辑器交互约束：
  * - 三栏：大纲/版本 | 编辑纸面 | 生成学习卡
  * - TopBar：返回链接 + 标题 + 版本号 + 操作按钮
  * - 中央编辑纸面使用 shadow-paper；两侧 Control Surface

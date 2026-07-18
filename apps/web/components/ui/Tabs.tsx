@@ -5,7 +5,6 @@ import { useState, useRef, useCallback, ReactNode, useId } from "react";
 /**
  * Tabs — 选项卡基础组件。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.8 / §15.3
  *
  * 支持：
  * - tablist / tab / tabpanel 语义

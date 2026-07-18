@@ -7,7 +7,6 @@ import { ThemeToggle } from "@/components/ui/ThemeToggle";
  * TopBar — focus 模式顶部栏。
  *
  * 低高度、低噪音。包含返回入口、页面上下文和主题切换。
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §7.4
  */
 export function TopBar() {
   const router = useRouter();

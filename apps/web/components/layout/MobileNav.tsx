@@ -20,7 +20,6 @@ import {
  * - "探索"点击展开二级面板（学习卡/理解星图/搜索）。
  * - "我的"点击展开二级面板（笔记/来源资料/今日变化/设置）。
  *
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §7.5
  */
 
 type PanelType = "explore" | "mine" | null;

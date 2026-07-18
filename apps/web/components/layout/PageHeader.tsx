@@ -20,7 +20,6 @@ import { ReactNode } from "react";
  * - 操作区可下移一行。
  * - 主按钮必要时占满宽度。
  *
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §8.3 + §8.4
  */
 
 interface PageHeaderProps {

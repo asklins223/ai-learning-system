@@ -6,7 +6,6 @@ import type { Config } from "tailwindcss";
  * 所有颜色、阴影、圆角均映射 CSS 变量（来自 styles/tokens.css）。
  * tailwind.config.ts 不再维护独立色值，唯一事实来源为 tokens.css。
  *
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §5.1 / §17.5
  */
 const config: Config = {
   content: [

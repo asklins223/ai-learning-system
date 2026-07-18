@@ -6,7 +6,6 @@ import { Icon } from "./icons";
 /**
  * FormField — 表单字段容器，统一 label / helper / error 关联。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.3
  * - 结构顺序：Label → Input → Helper / Error
  * - label、helper、error 必须通过 id 关联
  * - Error 使用文字 + 图标，不只变红

@@ -30,7 +30,6 @@ function formatNoteDate(value: string) {
  * /notes — 笔记库页面
  *
  * 模板：LibraryTemplate
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §13.3
  *
  * 用户能在当前已加载笔记中按标题筛选、打开继续编辑、新建、导入
  * Markdown、重命名、删除和加载更早笔记。这是对象库，不是证据状态看板。

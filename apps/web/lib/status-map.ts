@@ -2,7 +2,6 @@
  * 集中状态映射 — 所有页面共享的 status → presentation 映射。
  *
  * 页面禁止重复写三元表达式决定颜色或同一状态的不同中文文案。
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §11.11
  */
 
 export type StatusTone =

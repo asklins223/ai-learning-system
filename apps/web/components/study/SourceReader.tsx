@@ -7,7 +7,6 @@ import { StatusChip } from "@/components/ui/StatusChip";
 /**
  * SourceReader — 来源原文阅读器组件。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §10 / §13.9
  * - 原文阅读区为主要视觉对象
  * - 解析片段和关联笔记为辅助区域
  * - 主纸面使用 Paper Surface

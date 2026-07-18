@@ -9,7 +9,6 @@ import { useModalIsolation } from "@/lib/use-modal-isolation";
 /**
  * Dialog — 通用模态对话框基础组件。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.9
  * - 带遮罩
  * - 打开后 focus trap
  * - Esc 始终执行安全的取消/关闭

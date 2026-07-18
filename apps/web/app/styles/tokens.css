@@ -8,7 +8,6 @@
  * - 页面文件不得新增静态十六进制颜色。
  * - 旧 token 别名已在 P6 移除，全部使用 --color-* 语义名。
  *
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §5
  */
 
 :root {

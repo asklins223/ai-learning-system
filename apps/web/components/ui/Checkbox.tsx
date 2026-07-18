@@ -5,7 +5,6 @@ import { forwardRef, type InputHTMLAttributes, useId } from "react";
 /**
  * Checkbox — 统一复选框，必须使用真实 input 与可点击 label。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.3 / §15.3
  * - Checkbox 必须使用真实 input 与可点击 label
  * - 触控目标至少 44 × 44px
  * - 通过 id 关联 label

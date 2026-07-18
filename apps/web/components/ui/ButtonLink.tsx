@@ -6,7 +6,6 @@ import { type ReactNode, forwardRef } from "react";
 /**
  * ButtonLink — 导航链接，视觉与 Button 一致，但使用真实 <a> / Next Link。
  *
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §9.1
  * - Link 导航使用真实 a / Next Link，不得用 button 模拟
  * - variant / size / icon 支持与 Button 对齐
  */

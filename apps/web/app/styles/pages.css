@@ -4672,7 +4672,6 @@ border-color: var(--color-border-strong);
 /* ── components/NoteEditor.tsx ── */
 /* ──────────────────────────────────────────────────────────────
  * /notes/[id] 笔记编辑页 — EditorTemplate + focus shell
- * 规范：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §13.4
  * ────────────────────────────────────────────────────────────── */
 
 /*

@@ -10,10 +10,12 @@ coverage/
 .turbo/
 *.tsbuildinfo
 
-# Temporary and output directories
-work/
-tmp/
-outputs/
+# Temporary, output, and private archive directories
+/work/
+/tmp/
+/outputs/
+/project-archive/
+/product-design-assets/
 scripts/*.py
 scripts/*.js
 
@@ -24,9 +26,6 @@ scripts/*.js
 # Local design/review artifacts and one-off migration helpers. These files may
 # contain personal data or machine-specific output and must not be published.
 .catpaw/
-outputs/
-work/
-tmp/
 fix_note*.py
 coin-flip-game.html
 study-card*.html

@@ -1,7 +1,6 @@
 /**
  * 共享导航配置 — 桌面侧栏和移动底部导航使用同一数据源。
  *
- * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §7.3 + §7.5
  * - DesktopSidebar 和 MobileNav 不得各自维护独立的导航数组。
  * - 当前路由状态通过统一映射得到。
  */
