@@ -725,6 +725,11 @@ jobs:
           backup="$RUNNER_TEMP/ailearn-production-smoke.sql"
           trap 'rm -f "$backup"' EXIT
 
+          # Freeze application writers before taking and comparing the dump.
+          # Otherwise a follow-up indexing job can legitimately change the
+          # source database after pg_dump's consistent snapshot was captured.
+          docker compose stop api worker
+
           docker compose exec -T postgres \
             pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
               --no-owner --no-privileges > "$backup"
