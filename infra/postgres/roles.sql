@@ -171,6 +171,24 @@ BEGIN
 END
 $$;
 
+-- A plain pg_dump/psql restore with --no-owner recreates application
+-- functions as the restore role.  Reconcile only the two audited queue
+-- entrypoints before applying their exact ACLs and validating SECURITY
+-- DEFINER/search_path below; extension-owned functions remain untouched.
+DO $$
+BEGIN
+  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_claim_jobs(integer, integer)
+      OWNER TO ailearn_migrator;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_reap_stale_jobs(integer, integer)
+      OWNER TO ailearn_migrator;
+  END IF;
+END
+$$;
+
 -- Reset grants before applying the explicit matrix.  This removes privileges
 -- left by the old shared `ailearn` connection without touching ownership.
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM ailearn_api, ailearn_worker;
