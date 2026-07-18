@@ -1,0 +1,41 @@
+node_modules/
+.next/
+dist/
+build/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+.turbo/
+*.tsbuildinfo
+
+# Temporary and output directories
+work/
+tmp/
+outputs/
+scripts/*.py
+scripts/*.js
+
+# Documentation artifacts (keep source, ignore generated)
+*.pdf
+*.docx
+
+# Local design/review artifacts and one-off migration helpers. These files may
+# contain personal data or machine-specific output and must not be published.
+.catpaw/
+outputs/
+work/
+tmp/
+fix_note*.py
+coin-flip-game.html
+study-card*.html
+ui_progress_append.md
+AI学习系统-v0.3-*
+ai-learning-system-v0.3-*
+AI学习系统-v0.4-当前问题审核报告-*
+/drizzle.config.ts
+
+# R-003: Override global .gitignore that ignores Dockerfiles.
+# Ensure Dockerfiles are tracked in this repo.
+!**/Dockerfile

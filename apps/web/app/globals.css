@@ -1,0 +1,36 @@
+/**
+ * CSS 分层结构
+ *
+ * 已提取到独立文件：
+ * - styles/tokens.css            — 唯一设计 token（颜色、阴影、圆角、间距、动效）
+ * - styles/motion.css             — @keyframes 动画定义 + reduced motion
+ * - styles/dark-mode.css          — 暗色模式覆盖（含去重）
+ * - styles/base.css               — 重置、排版、表单元素、滚动条
+ * - styles/components.css         — @layer components + 可复用 UI 组件
+ * - styles/workspace.css          — 笔记/编辑器/搜索工作区样式
+ * - styles/theme-transition.css   — 主题切换过渡动画
+ * - styles/layout.css             — 应用外壳、侧栏、顶部栏、移动导航、页头 (P6-9)
+ * - styles/pages.css              — 路由页面组件样式 (P6-9)
+ *
+ * 页面专属样式由对应 page.tsx 引入，避免每个路由都解析整站 CSS。
+ *
+ * globals.css 保留：Tailwind 指令、@import、body 基础主题
+ *
+ * 注意：@import 必须在 @tailwind 指令之前（CSS 规范要求 @import 在所有其他规则之前）。
+ * postcss-import 会先内联所有 @import 文件，然后 Tailwind 处理合并后的结果。
+ */
+@import "./styles/tokens.css";
+@import "./styles/motion.css";
+@import "./styles/dark-mode.css";
+@import "./styles/base.css";
+@import "./styles/components.css";
+@import "./styles/workspace.css";
+@import "./styles/theme-transition.css";
+@import "./styles/layout.css";
+@import "./styles/pages.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark mode rules extracted to styles/dark-mode.css */

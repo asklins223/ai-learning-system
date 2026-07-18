@@ -1,0 +1,261 @@
+name: ailearn
+
+# Production-like stack. All application containers use their `prod` image
+# target, run without source bind mounts and inherit the non-root image user.
+# Local hot-reload defaults live in the standalone docker-compose.dev.yml.
+
+x-api-build: &api-build
+  context: .
+  dockerfile: apps/api/Dockerfile
+  target: prod
+
+x-worker-build: &worker-build
+  context: .
+  dockerfile: workers/ai-worker/Dockerfile
+  target: prod
+
+x-role-bootstrap-environment: &role-bootstrap-environment
+  POSTGRES_HOST: postgres
+  POSTGRES_USER: ${POSTGRES_USER:-ailearn}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting the production stack}
+  POSTGRES_DB: ${POSTGRES_DB:-ailearn}
+  MIGRATOR_PASSWORD: ${MIGRATOR_PASSWORD:?Set MIGRATOR_PASSWORD in .env before starting the production stack}
+  API_PASSWORD: ${API_PASSWORD:?Set API_PASSWORD in .env before starting the production stack}
+  WORKER_PASSWORD: ${WORKER_PASSWORD:?Set WORKER_PASSWORD in .env before starting the production stack}
+
+x-role-bootstrap-volumes: &role-bootstrap-volumes
+  - ./infra/postgres/apply-roles.sh:/opt/ailearn/apply-roles.sh:ro
+  - ./infra/postgres/roles.sql:/opt/ailearn/roles.sql:ro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ailearn}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting the production stack}
+      POSTGRES_DB: ${POSTGRES_DB:-ailearn}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ailearn_net
+
+  # Runs on every deployment path, including existing data volumes.  The
+  # first pass creates/rotates the roles and transfers legacy object ownership
+  # before migrations run; the post-migration pass below grants new objects.
+  role-bootstrap:
+    image: postgres:16-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *role-bootstrap-environment
+    volumes: *role-bootstrap-volumes
+    entrypoint: ["/bin/sh", "/opt/ailearn/apply-roles.sh"]
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  # Optional object storage: `make storage`. The wrapper deliberately exits
+  # when credentials are empty instead of falling back to MinIO defaults.
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    profiles: ["storage"]
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        test -n "$${MINIO_ROOT_USER:-}" || { echo >&2 'MINIO_ROOT_USER is required'; exit 1; }
+        test -n "$${MINIO_ROOT_PASSWORD:-}" || { echo >&2 'MINIO_ROOT_PASSWORD is required'; exit 1; }
+        exec minio server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ailearn_net
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    profiles: ["storage"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      S3_BUCKET: ${S3_BUCKET:-ailearn-workspaces}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        test -n "$${MINIO_ROOT_USER:-}" || { echo >&2 'MINIO_ROOT_USER is required'; exit 1; }
+        test -n "$${MINIO_ROOT_PASSWORD:-}" || { echo >&2 'MINIO_ROOT_PASSWORD is required'; exit 1; }
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb -p "local/$${S3_BUCKET}" || true
+        mc anonymous set none "local/$${S3_BUCKET}"
+        echo 'minio init done'
+    networks:
+      - ailearn_net
+
+  # Migrations are automatic, but account seeding is intentionally separate.
+  migrate:
+    build: *api-build
+    user: node
+    restart: "no"
+    depends_on:
+      role-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL_MIGRATOR: ${DATABASE_URL_MIGRATOR:?Set DATABASE_URL_MIGRATOR in .env before starting the production stack}
+      NODE_ENV: production
+    command: ["npm", "run", "db:migrate"]
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  role-grants:
+    image: postgres:16-alpine
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *role-bootstrap-environment
+      REQUIRE_RLS_DISABLED: "true"
+    volumes: *role-bootstrap-volumes
+    entrypoint: ["/bin/sh", "/opt/ailearn/apply-roles.sh"]
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  # Run explicitly with `make seed-owner`. seed.ts fails closed when either
+  # OWNER_EMAIL or OWNER_PASSWORD is absent and never enables demo defaults.
+  seed-owner:
+    profiles: ["seed"]
+    build: *api-build
+    user: node
+    restart: "no"
+    depends_on:
+      role-grants:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL_API: ${DATABASE_URL_API:?Set DATABASE_URL_API in .env before starting the production stack}
+      NODE_ENV: production
+      OWNER_EMAIL: ${OWNER_EMAIL:-}
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      OWNER_WORKSPACE: ${OWNER_WORKSPACE:-Personal Workspace}
+    command: ["npm", "run", "db:seed"]
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  api:
+    build: *api-build
+    user: node
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      role-grants:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL_API: ${DATABASE_URL_API:?Set DATABASE_URL_API in .env before starting the production stack}
+      NODE_ENV: production
+      PORT: 4000
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}
+      AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-postgres}
+      AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
+      AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS: ${AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS:-300000}
+      AI_MODEL_TEST_RATE_LIMIT_MAX_ATTEMPTS: ${AI_MODEL_TEST_RATE_LIMIT_MAX_ATTEMPTS:-5}
+      AI_MODEL_TEST_TIMEOUT_MS: ${AI_MODEL_TEST_TIMEOUT_MS:-15000}
+      AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-false}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:-}
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  worker:
+    build: *worker-build
+    user: node
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      role-grants:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL_WORKER: ${DATABASE_URL_WORKER:?Set DATABASE_URL_WORKER in .env before starting the production stack}
+      NODE_ENV: production
+      AI_PROVIDER_CARD: ${AI_PROVIDER_CARD:-mock}
+      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:-}
+      AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-false}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
+      API_INTERNAL_URL: http://api:4000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: prod
+      args:
+        INTERNAL_API_URL: http://api:4000
+    user: node
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      INTERNAL_API_URL: http://api:4000
+    ports:
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+volumes:
+  postgres_data:
+  minio_data:
+
+networks:
+  ailearn_net:
+    driver: bridge

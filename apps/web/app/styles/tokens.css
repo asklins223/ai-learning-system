@@ -1,0 +1,247 @@
+/**
+ * 单一设计 Token — CSS 自定义属性。
+ *
+ * 本文件是全站唯一设计 token 事实来源。
+ * - 日间 token 在 :root 中定义。
+ * - Night 主题在 html[data-theme="night"] 中覆盖同名 token。
+ * - tailwind.config.ts 只映射 CSS 变量，不再维护独立色值。
+ * - 页面文件不得新增静态十六进制颜色。
+ * - 旧 token 别名已在 P6 移除，全部使用 --color-* 语义名。
+ *
+ * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §5
+ */
+
+:root {
+  /* ── 布局常量 ── */
+  --mobile-nav-height: 64px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --mobile-nav-inset: calc(var(--mobile-nav-height) + var(--safe-bottom));
+
+  /* ── 颜色：环境层（§5.1 对齐规范） ── */
+  --color-canvas: #EEE6DA;
+  --color-canvas-deep: #E4D4C1;
+
+  /* ── 颜色：壳层（更暖，不过度白） ── */
+  --color-shell: #F8F2E9;
+  --color-shell-glass: rgba(248, 242, 233, 0.92);
+
+  /* ── 颜色：控件表面 ── */
+  --color-surface: #F5EFE4;
+  --color-surface-raised: #FFFDF8;
+  --color-surface-soft: #F2EBDE;
+
+  /* ── 颜色：纸面（最亮，学习对象中心） ── */
+  --color-paper: #FFFDF8;
+  --color-paper-deep: #F2E3CA;
+  --color-paper-note: #FCE7A8;
+  --color-paper-muted: #FAF5EC;
+
+  /* ── 颜色：边框（更暖，不冷灰） ── */
+  --color-border: #DED2C1;
+  --color-border-strong: #CDBFAE;
+  --color-divider: #DED0C0;
+
+  /* ── 颜色：文本（§5.1 Ink 体系） ── */
+  --color-text: #27231F;
+  --color-text-secondary: #746D65;
+  --color-text-tertiary: #918A82;
+  --color-text-disabled: #A8A29A;
+
+  /* ── 颜色：主操作（§5.1 稳定深绿，不发灰） ── */
+  --color-action: #17865F;
+  --color-action-hover: #0F6E4D;
+  --color-on-action: #FFFFFF;
+
+  /* ── 颜色：成功 ── */
+  --color-success: #1C9868;
+  --color-success-text: #126B49;
+  --color-success-soft: #EDF6EF;
+
+  /* ── 颜色：证据（§5.1 Evidence Blue） ── */
+  --color-evidence: #1976C9;
+  --color-evidence-text: #165A98;
+  --color-evidence-soft: #E2EDF8;
+
+  /* ── 颜色：高亮/星标 ── */
+  --color-highlight: #FEB318;
+  --color-highlight-soft: #FFF4D7;
+
+  /* ── 颜色：警告/复习（§5.1 Review Orange） ── */
+  --color-warning: #E99A16;
+  --color-warning-text: #875314;
+  --color-warning-soft: #FFF0DC;
+
+  /* ── 颜色：危险/误区（§5.1 Misconception Red） ── */
+  --color-danger: #D85B4B;
+  --color-danger-text: #A33A2D;
+  --color-danger-soft: #FCF0E9;
+
+  /* ── 颜色：运行中 ── */
+  --color-running: #168C9A;
+  --color-running-text: #0D6D77;
+  --color-running-soft: #E8F6F7;
+
+  /* ── 颜色：焦点 ── */
+  --color-focus-ring: #0B70DE;
+
+  /* ── 颜色：遮罩 ── */
+  --color-scrim: rgba(36, 28, 20, 0.40);
+
+  /* ── 间距 ── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ── 圆角 ── */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-shell: 18px;
+  --radius-pill: 999px;
+
+  /* ── 阴影（§5.4 两档常驻 + 一档浮层） ── */
+  --shadow-control: 0 1px 2px rgba(79, 57, 33, .08);
+  --shadow-panel:
+    0 1px 2px rgba(79, 57, 33, .08),
+    0 6px 16px rgba(79, 57, 33, .08);
+  --shadow-paper:
+    0 1px 2px rgba(79, 57, 33, .08),
+    0 12px 28px rgba(79, 57, 33, .08);
+  --shadow-raised:
+    0 3px 8px rgba(79, 57, 33, .10),
+    0 18px 42px rgba(79, 57, 33, .12);
+  --shadow-floating: 0 18px 60px rgba(30, 24, 18, .24);
+  --shadow-shell: 0 24px 60px rgba(43, 30, 20, .12);
+
+  /* ── 纸面纹理 ── */
+  --paper-texture-opacity: 0.024;
+
+  /* ── 控件尺寸 ── */
+  --control-height-sm: 32px;
+  --control-height-md: 40px;
+  --control-height-touch: 44px;
+
+  /* ── 动效 ── */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --ease-standard: cubic-bezier(.2, .8, .2, 1);
+  /* 主题扩散层使用固定目标色，避免动画中途随 data-theme 突然换色。 */
+  --theme-reveal-day-inner: #FFFDF8;
+  --theme-reveal-day-middle: #F8F2E9;
+  --theme-reveal-day-outer: #EEE6DA;
+  --theme-reveal-night-inner: #1A1610;
+  --theme-reveal-night-middle: #251F18;
+  --theme-reveal-night-outer: #322A22;
+
+  /* ── 层级 ── */
+  --z-base: 0;
+  --z-sticky: 20;
+  --z-header: 30;
+  --z-drawer: 50;
+  --z-dialog: 60;
+  --z-toast: 70;
+
+  /* ── 字体（§5.2 三角色字体栈） ── */
+  --font-ui: "Inter", "PingFang SC", "Source Han Sans SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --font-editorial: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "PingFang SC", serif;
+  --font-note: "LXGW WenKai Screen", "LXGW WenKai", "STKaiti", "KaiTi", serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+}
+
+/* ================================================================ */
+/* Night 主题                                                       */
+/* ================================================================ */
+
+html[data-theme="night"] {
+  color-scheme: dark;
+
+  /* ── 环境层（暖棕黑，不冷蓝黑） ── */
+  --color-canvas: #1A1610;
+  --color-canvas-deep: #100E0B;
+
+  /* ── 壳层 ── */
+  --color-shell: #251F18;
+  --color-shell-glass: rgba(37, 31, 24, 0.92);
+
+  /* ── 控件表面 ── */
+  --color-surface: #2D261F;
+  --color-surface-raised: #383029;
+  --color-surface-soft: #332B22;
+
+  /* ── 纸面（暖灰纸张，不冷） ── */
+  --color-paper: #322A22;
+  --color-paper-deep: #3F342A;
+  --color-paper-note: #5A4726;
+  --color-paper-muted: #382F26;
+
+  /* ── 边框 ── */
+  --color-border: #4A3D31;
+  --color-border-strong: #5D4D3E;
+  --color-divider: #504236;
+
+  /* ── 文本 ── */
+  --color-text: #F5EBDD;
+  --color-text-secondary: #C9BBA9;
+  --color-text-tertiary: #B1A18E;
+  --color-text-disabled: #776B5D;
+
+  /* ── 主操作 ── */
+  --color-action: #45AD7B;
+  --color-action-hover: #56BE8B;
+  --color-on-action: #102018;
+
+  /* ── 成功 ── */
+  --color-success: #5AC991;
+  --color-success-text: #84DBAE;
+  --color-success-soft: #20382D;
+
+  /* ── 证据 ── */
+  --color-evidence: #6EAEF3;
+  --color-evidence-text: #8FC1F6;
+  --color-evidence-soft: #23364A;
+
+  /* ── 高亮 ── */
+  --color-highlight: #F3B842;
+  --color-highlight-soft: #493A20;
+
+  /* ── 警告 ── */
+  --color-warning: #E8A65A;
+  --color-warning-text: #F2BE7A;
+  --color-warning-soft: #473421;
+
+  /* ── 危险 ── */
+  --color-danger: #F07B68;
+  --color-danger-text: #F49A8B;
+  --color-danger-soft: #482A25;
+
+  /* ── 运行中 ── */
+  --color-running: #62C7D1;
+  --color-running-text: #8DDBE1;
+  --color-running-soft: #213B3D;
+
+  /* ── 焦点 ── */
+  --color-focus-ring: #8FC1F6;
+
+  /* ── 遮罩 ── */
+  --color-scrim: rgba(0, 0, 0, 0.62);
+
+  /* ── 阴影 ── */
+  --shadow-control: 0 1px 2px rgb(0 0 0 / 24%);
+  --shadow-panel: 0 1px 2px rgb(0 0 0 / 22%), 0 8px 20px rgb(0 0 0 / 20%);
+  --shadow-paper: 0 2px 5px rgb(0 0 0 / 28%), 0 16px 34px rgb(0 0 0 / 24%);
+  --shadow-floating: 0 20px 48px rgb(0 0 0 / 40%);
+  --shadow-shell: 0 24px 64px rgb(0 0 0 / 44%);
+
+  /* ── 纸面纹理 ── */
+  --paper-texture-opacity: 0.014;
+
+}

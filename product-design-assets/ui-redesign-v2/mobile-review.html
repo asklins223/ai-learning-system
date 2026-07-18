@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1536, initial-scale=1" />
+    <title>理解引擎 - 移动端复习效果图</title>
+    <link rel="stylesheet" href="./ui-redesign-v2.css" />
+  </head>
+  <body>
+    <main class="mock-frame">
+      <section class="content" style="height:100%; padding:48px 70px;">
+        <div class="phone-stage">
+          <aside class="stack">
+            <div>
+              <h1 class="page-title">移动端今日复习</h1>
+              <p class="page-subtitle">手机端不是桌面队列压缩版，而是一屏一条、固定主操作、可随时回看证据。</p>
+            </div>
+            <div class="panel">
+              <div class="panel-header"><div><h3 class="panel-title">今日范围</h3><p class="panel-subtitle">只保留移动端适合完成的任务</p></div></div>
+              <div class="panel-body stack-tight">
+                <div class="mini-metric"><span>待轻触</span><strong>3</strong></div>
+                <div class="mini-metric"><span>预计完成</span><strong>6 分钟</strong></div>
+                <div class="callout amber"><h4>先处理误解</h4><p>答不出时不是失败，直接进入回看原文证据。</p></div>
+              </div>
+            </div>
+          </aside>
+
+          <section class="phone">
+            <div class="phone-screen">
+              <header class="phone-top">
+                <div class="phone-status"><span>9:41</span><span>100%</span></div>
+                <h2 class="phone-title">今日复习</h2>
+                <div class="chip-row" style="margin-top:12px;">
+                  <span class="chip blue">全部 3</span>
+                  <span class="chip amber">待复习 2</span>
+                  <span class="chip red">误解 1</span>
+                </div>
+              </header>
+
+              <section class="phone-main">
+                <article class="paper" style="padding:18px;">
+                  <div class="chip-row"><span class="chip red">修正误解</span><span class="chip">第 1 / 3 条</span></div>
+                  <h3 style="margin:18px 0 8px; font-size:22px; line-height:1.25;">为什么要除以 √dk 进行缩放？</h3>
+                  <p class="row-copy" style="font-size:14px;">请不用公式说明：如果不缩放，点积和 Softmax 会出现什么训练问题？</p>
+                  <div class="textarea-box" style="min-height:130px; margin-top:16px;">我的回答...</div>
+                  <div class="callout blue" style="margin-top:14px;">
+                    <h4>出现原因</h4>
+                    <p>上次回答缺少“方差随维度增长”的解释。</p>
+                  </div>
+                </article>
+
+                <div class="bottom-action">
+                  <button class="button" style="width:100%;">提交回答</button>
+                  <button class="button-secondary" style="width:100%;">回看原文证据</button>
+                </div>
+              </section>
+
+              <nav class="phone-nav">
+                <span>学习流</span>
+                <span class="active">复习</span>
+                <span>新建</span>
+                <span>探索</span>
+                <span>我的</span>
+              </nav>
+            </div>
+          </section>
+
+          <aside class="stack">
+            <div class="panel">
+              <div class="panel-header"><div><h3 class="panel-title">证据底部抽屉</h3><p class="panel-subtitle">不离开复习上下文</p></div></div>
+              <div class="panel-body stack-tight">
+                <div class="callout blue">
+                  <h4>片段 7 · 公式推导</h4>
+                  <p>“除以 √dk 是为了抵消点积方差随维度增长而增大的影响。”</p>
+                </div>
+                <div class="callout green">
+                  <h4>硬证据</h4>
+                  <p>已对齐 · 可支撑理解修正。</p>
+                </div>
+                <button class="button-secondary">返回题卡</button>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-header"><div><h3 class="panel-title">完成反馈</h3><p class="panel-subtitle">轻，不制造压力</p></div></div>
+              <div class="panel-body stack-tight">
+                <div class="callout green"><h4>完成后</h4><p>展示下一次复习时间，并进入下一条。</p></div>
+                <div class="callout"><h4>无到期复习</h4><p>展示“今天没有到期复习”和最近薄弱点。</p></div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,59 @@
+/**
+ * Base styles — reset, typography, form elements, scrollbar
+ *
+ * 使用新设计 token 体系。
+ * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §5 / §17.1
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  /* §13.2: 不得使用 overflow-x:hidden 隐藏越界错误
+     修复布局问题必须从根源修复，不能用 overflow 裁剪 */
+}
+
+body {
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  background: var(--color-canvas);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* 键盘焦点 */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}

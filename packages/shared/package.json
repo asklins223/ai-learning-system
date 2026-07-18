@@ -1,0 +1,36 @@
+{
+  "name": "@ailearn/shared",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./ai-credentials": {
+      "types": "./src/ai-credentials.ts",
+      "import": "./src/ai-credentials.ts",
+      "default": "./src/ai-credentials.ts"
+    },
+    "./ai-endpoints": {
+      "types": "./src/ai-endpoints.ts",
+      "import": "./src/ai-endpoints.ts",
+      "default": "./src/ai-endpoints.ts"
+    },
+    "./public-json-http": {
+      "types": "./src/public-json-http.ts",
+      "import": "./src/public-json-http.ts",
+      "default": "./src/public-json-http.ts"
+    }
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

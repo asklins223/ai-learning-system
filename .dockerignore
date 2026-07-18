@@ -1,0 +1,20 @@
+# F-027: .dockerignore — 排除不必要的文件，减小构建上下文
+**/node_modules
+**/.next
+**/dist
+**/.git
+**/.gitignore
+**/.env
+**/.env.local
+**/.env.*.local
+**/*.md
+**/docs
+**/product-design-assets
+**/ui-redesign-v1
+**/ui-redesign-v2
+**/.catpaw
+**/infra/postgres/data
+**/infra/minio/data
+**/.DS_Store
+**/npm-debug.log*
+**/yarn-error.log*

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1536, initial-scale=1" />
+    <title>理解引擎 - 首页效果图</title>
+    <link rel="stylesheet" href="./ui-redesign-v2.css" />
+  </head>
+  <body>
+    <main class="mock-frame lively-bg">
+      <section class="app-shell">
+        <aside class="sidebar">
+          <div class="brand"><span class="brand-logo">理</span><h1 class="brand-title">理解引擎</h1></div>
+          <nav class="nav">
+            <div class="nav-item active"><span class="nav-icon i-home"></span>今日学习</div>
+            <div class="nav-item"><span class="nav-icon i-note"></span>笔记</div>
+            <div class="nav-item"><span class="nav-icon i-card"></span>学习卡</div>
+            <div class="nav-item"><span class="nav-icon i-review"></span>复习</div>
+            <div class="nav-item"><span class="nav-icon i-graph"></span>理解星图</div>
+            <div class="nav-item"><span class="nav-icon i-change"></span>今日变化</div>
+          </nav>
+          <div class="sidebar-bottom">
+            <div class="nav-item"><span class="nav-icon i-source"></span>来源资料</div>
+            <div class="nav-item"><span class="nav-icon i-search"></span>搜索</div>
+            <div class="user-row"><span class="avatar"></span><span class="user-meta"><strong>Owner</strong><span>个人工作区</span></span><span class="collapse-button">‹</span></div>
+          </div>
+        </aside>
+
+        <section class="workspace">
+          <header class="page-top fun">
+            <div>
+              <div class="top-kicker">学习流已就绪</div>
+              <h2 class="page-title">今日学习驾驶舱</h2>
+              <p class="page-subtitle">从资料到证据，再到验证和复习；首页只呈现今天真正要推进的学习对象。</p>
+            </div>
+            <div class="top-controls">
+              <div class="search-field">搜索笔记、学习卡或来源...</div>
+              <div class="task-pill"><span class="dot green"></span>AI任务</div>
+              <div class="mode-pill"><span class="inline-icon i-focus"></span>专注模式 <span class="toggle"></span></div>
+              <div class="day-pill"><span class="inline-icon i-sun"></span>日间</div>
+            </div>
+          </header>
+
+          <main class="content compact">
+            <div class="context-strip">
+              <div class="context-item"><span>今日主线</span><strong>缩放因子：证据确认后再验证</strong></div>
+              <div class="context-item"><span>当前输入</span><strong>Markdown、代码、URL + 正文</strong></div>
+              <div class="context-item"><span>风险提醒</span><strong>1 条误解，1 条候选证据待确认</strong></div>
+              <div class="context-item"><span>下一步</span><strong>先回答解释题，再写入事件</strong></div>
+            </div>
+
+            <div class="fun-grid">
+              <section class="stack">
+                <div class="hero-lab breath-surface">
+                  <div class="split-title">
+                    <div class="chip-row">
+                      <span class="chip blue">快速捕获</span>
+                      <span class="chip teal">可追溯</span>
+                    </div>
+                    <span class="sparkline"><span></span><span></span><span></span><span></span></span>
+                  </div>
+                  <h3>让新材料进入理解流，不再堆成资料。</h3>
+                  <p>粘贴原文、Markdown 或代码后先创建 Source 和快照；只有可引用片段进入证据线索，学习卡和验证才会继续推进。</p>
+                  <div class="signal-rail" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+                  <div class="learning-orbit" aria-hidden="true">
+                    <div class="orbit-core"><strong>√dk</strong><span>理解对象</span></div>
+                    <div class="orbit-chip source">Source<span>快照</span></div>
+                    <div class="orbit-chip segment">Segment<span>片段</span></div>
+                    <div class="orbit-chip evidence">Evidence<span>硬证据</span></div>
+                    <div class="orbit-chip review">Review<span>轻触</span></div>
+                  </div>
+                  <div class="capture-lane">
+                    <div class="input-box">粘贴原文、Markdown、代码，或保存 URL 并补充正文...</div>
+                    <button class="button">识别并创建</button>
+                  </div>
+                  <div class="route-ribbon">
+                    <div class="route-dot done"><strong>输入资料</strong><span>Source + snapshot</span></div>
+                    <div class="route-dot done"><strong>解析片段</strong><span>source_segment</span></div>
+                    <div class="route-dot active"><strong>学习卡</strong><span>当前焦点</span></div>
+                    <div class="route-dot warn"><strong>证据确认</strong><span>片段 12 待确认</span></div>
+                    <div class="route-dot risk"><strong>轻触复习</strong><span>误解优先</span></div>
+                  </div>
+                </div>
+
+                <div class="cockpit-grid">
+                  <div class="live-card breath-surface">
+                    <div class="live-card-header">
+                      <div><h3>正在推进</h3><p>不是任务列表，而是今天的理解对象</p></div>
+                      <span class="chip blue">learning_unit</span>
+                    </div>
+                    <div class="live-card-body">
+                      <article class="row-card active">
+                        <div>
+                          <h4 class="row-title">自注意力机制为什么要除以 √dk？</h4>
+                          <p class="row-copy">当前回答缺少“方差随维度增长”的解释，需要先回看片段 7，再确认片段 12。</p>
+                          <div class="meta-line"><span class="chip red">误解修正</span><span class="chip green">硬证据 3</span><span>review_attempt 待写入</span></div>
+                          <div class="object-flow"><span>片段 7</span><i></i><span>解释缺口</span><i></i><span>片段 12</span><i></i><span>复习记录</span></div>
+                        </div>
+                        <button class="button-secondary">继续</button>
+                      </article>
+                      <div class="learning-loop" style="margin-top: 12px;">
+                        <div class="learning-loop-step done"><strong>已读</strong><span>第 3.2 节</span></div>
+                        <div class="learning-loop-step active"><strong>解释</strong><span>不用公式</span></div>
+                        <div class="learning-loop-step"><strong>证据</strong><span>候选确认</span></div>
+                        <div class="learning-loop-step"><strong>验证</strong><span>短回答</span></div>
+                        <div class="learning-loop-step"><strong>复习</strong><span>3 天后</span></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="live-card">
+                    <div class="live-card-header">
+                      <div><h3>今日变化</h3><p>只显示真实事件</p></div>
+                      <span class="chip green">4 条</span>
+                    </div>
+                    <div class="live-card-body event-stack">
+                      <div class="event-row"><span class="event-mark">S</span><div><h4>新增来源</h4><p>Attention 摘录生成 7 个可引用片段。</p></div><span class="chip blue">Source</span></div>
+                      <div class="event-row"><span class="event-mark">E</span><div><h4>证据对齐</h4><p>片段 7 已成为学习卡硬证据。</p></div><span class="chip green">aligned</span></div>
+                      <div class="event-row"><span class="event-mark">M</span><div><h4>误解记录</h4><p>“固定归一化”被标记为待修正。</p></div><span class="chip red">待处理</span></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <aside class="stack">
+                <div class="live-card breath-surface">
+                  <div class="live-card-header">
+                    <div><h3>证据地图</h3><p>AI 结论必须回到原文</p></div>
+                    <span class="chip blue">当前对象</span>
+                  </div>
+                  <div class="live-card-body">
+                    <div class="evidence-map">
+                      <svg class="flow-lines" viewBox="0 0 290 262" preserveAspectRatio="none" aria-hidden="true">
+                        <defs>
+                          <marker id="wire-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="#8bbcff"></path>
+                          </marker>
+                        </defs>
+                        <path class="blue" d="M86 76 C120 84 148 106 162 124" />
+                        <path class="amber" d="M232 96 C222 112 214 124 208 140" />
+                        <path class="green" d="M100 214 C132 198 166 174 190 154" />
+                        <circle cx="86" cy="76" r="4" />
+                        <circle cx="162" cy="124" r="4" />
+                        <circle cx="232" cy="96" r="4" />
+                        <circle cx="100" cy="214" r="4" />
+                      </svg>
+                      <div class="map-node source" style="left: 22px; top: 50px;"><strong>片段 7</strong><span>公式推导</span></div>
+                      <div class="map-node focus" style="left: 142px; top: 108px;"><strong>√dk 缩放</strong><span>学习中</span></div>
+                      <div class="map-node card" style="left: 42px; top: 188px;"><strong>学习卡</strong><span>已生成</span></div>
+                      <div class="map-node risk" style="right: 20px; top: 72px;"><strong>片段 12</strong><span>候选证据</span></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="live-card">
+                  <div class="live-card-header"><div><h3>保持边界</h3><p>不展示未接通能力</p></div></div>
+                  <div class="live-card-body stack-tight">
+                    <div class="callout amber"><h4>仅 URL 不生成学习卡</h4><p>没有正文时只保存链接，等待用户补充文本。</p></div>
+                    <div class="callout blue"><h4>证据不足不升级状态</h4><p>软引用可以提示回看，不能单独支撑理解升级。</p></div>
+                    <button class="button">开始今日验证</button>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </main>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

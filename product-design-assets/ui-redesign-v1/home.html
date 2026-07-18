@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>理解引擎 - 主页设计稿</title>
+    <link rel="stylesheet" href="./ui-redesign-framework.css" />
+  </head>
+  <body>
+    <main class="screen">
+      <section class="frame" aria-label="主页">
+        <div class="topbar">
+          <div class="brand">
+            <span class="brand-mark">理</span>
+            <div>
+              <p class="brand-title">理解引擎</p>
+              <p class="brand-subtitle">今日学习驾驶舱</p>
+            </div>
+          </div>
+          <div class="top-actions">
+            <div class="segmented">
+              <span class="active">专注时刻</span>
+              <span>复盘</span>
+              <span>探索</span>
+            </div>
+            <button class="icon-button">⌕</button>
+            <span class="avatar">A</span>
+          </div>
+        </div>
+
+        <div class="app-grid">
+          <aside class="sidebar">
+            <p class="nav-label">工作区</p>
+            <div class="nav-item active"><strong><span class="dot amber"></span>主页</strong><span class="badge amber">3</span></div>
+            <div class="nav-item"><strong><span class="dot blue"></span>笔记</strong><span class="badge">18</span></div>
+            <div class="nav-item"><strong><span class="dot green"></span>学习卡</strong><span class="badge">48</span></div>
+            <div class="nav-item"><strong><span class="dot red"></span>复习</strong><span class="badge red">5</span></div>
+
+            <div class="nav-group">
+              <p class="nav-label">学习路径</p>
+              <div class="flow">
+                <div class="flow-step done">
+                  <span class="index">1</span>
+                  <div>
+                    <h4>收集材料</h4>
+                    <p>18 篇笔记已整理</p>
+                  </div>
+                </div>
+                <div class="flow-step current">
+                  <span class="index">2</span>
+                  <div>
+                    <h4>验证理解</h4>
+                    <p>5 张卡等待追问</p>
+                  </div>
+                </div>
+                <div class="flow-step">
+                  <span class="index">3</span>
+                  <div>
+                    <h4>复盘迁移</h4>
+                    <p>本周完成 64%</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </aside>
+
+          <section class="main">
+            <div class="toolbar">
+              <div>
+                <p class="eyebrow">7 月 7 日 周二</p>
+                <h1 class="page-title">今天先把最不稳的理解补牢。</h1>
+                <p class="page-copy">主页不再堆满入口，而是回答三个问题：今天要学什么，哪里不够稳，下一步该验证什么。</p>
+              </div>
+              <button class="button">新建笔记</button>
+            </div>
+
+            <div class="dashboard-grid">
+              <div class="dashboard-stack">
+                <section class="surface hero-panel">
+                  <div>
+                    <p class="eyebrow">快速捕获</p>
+                    <h2 style="margin: 0; font-size: 22px">把新材料放进理解流水线</h2>
+                    <p class="surface-subtitle" style="margin-top: 8px">粘贴原文、链接或一段疑问，系统会自动生成证据线索和候选学习卡。</p>
+                    <div class="capture-box">
+                      <div class="capture-row">
+                        <div class="input-field">粘贴原文或问题...</div>
+                        <button class="button-secondary">生成学习卡</button>
+                      </div>
+                      <div class="chip-row">
+                        <span class="chip amber">注意力机制</span>
+                        <span class="chip blue">React Server Components</span>
+                        <span class="chip green">经济学原理</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="paper-panel">
+                    <p class="eyebrow">今日分数</p>
+                    <div class="kpi-ring" style="margin: 10px auto">
+                      <div>
+                        <strong>72</strong>
+                        <span>理解指数</span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="surface">
+                  <div class="surface-header">
+                    <div>
+                      <h3 class="surface-title">继续理解</h3>
+                      <p class="surface-subtitle">按不稳定程度排序</p>
+                    </div>
+                    <span class="chip amber">优先 3 项</span>
+                  </div>
+                  <div class="surface-body mini-card-grid">
+                    <article class="mini-card">
+                      <div class="progress-line"><span class="dot red"></span><h4>注意力缩放为什么除以 √dk</h4></div>
+                      <p>证据不足，回答容易停留在公式记忆。</p>
+                    </article>
+                    <article class="mini-card">
+                      <div class="progress-line"><span class="dot amber"></span><h4>RSC 与客户端状态边界</h4></div>
+                      <p>需要用自己的项目例子解释一次。</p>
+                    </article>
+                    <article class="mini-card">
+                      <div class="progress-line"><span class="dot green"></span><h4>机会成本与边际选择</h4></div>
+                      <p>已通过迁移问题，明天复习。</p>
+                    </article>
+                    <article class="mini-card">
+                      <div class="progress-line"><span class="dot blue"></span><h4>向量数据库召回流程</h4></div>
+                      <p>新生成，等待第一次验证。</p>
+                    </article>
+                  </div>
+                </section>
+              </div>
+
+              <div class="dashboard-stack">
+                <section class="surface">
+                  <div class="surface-header">
+                    <div>
+                      <h3 class="surface-title">理解状态</h3>
+                      <p class="surface-subtitle">从看过到掌握的流转</p>
+                    </div>
+                  </div>
+                  <div class="surface-body">
+                    <div class="stat-row">
+                      <div class="stat"><span>已掌握</span><strong>21</strong></div>
+                      <div class="stat"><span>理解中</span><strong>17</strong></div>
+                      <div class="stat"><span>有风险</span><strong>10</strong></div>
+                    </div>
+                    <div class="divider"></div>
+                    <div class="bar"><span style="width: 72%"></span></div>
+                    <p style="margin: 10px 0 0; color: var(--muted); font-size: 12px">本周理解稳定度提升 8%，主要来自 6 次 AI 追问验证。</p>
+                  </div>
+                </section>
+
+                <section class="surface">
+                  <div class="surface-header">
+                    <div>
+                      <h3 class="surface-title">今日复习</h3>
+                      <p class="surface-subtitle">5 张卡，约 12 分钟</p>
+                    </div>
+                    <button class="button-secondary">开始</button>
+                  </div>
+                  <div class="surface-body list">
+                    <article class="list-item review-card">
+                      <span class="status-strip"></span>
+                      <div><h4>注意力缩放的必要性</h4><p>第 3.2 节 · 证据不足</p></div>
+                      <span class="chip red">补证据</span>
+                    </article>
+                    <article class="list-item review-card">
+                      <span class="status-strip" style="background: var(--green)"></span>
+                      <div><h4>Q、K、V 的职责区别</h4><p>第 3.2 节 · 明日复习</p></div>
+                      <span class="chip green">稳定</span>
+                    </article>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <aside class="right-rail">
+            <section class="surface">
+              <div class="surface-header">
+                <div>
+                  <h3 class="surface-title">AI 建议</h3>
+                  <p class="surface-subtitle">根据今天的验证记录</p>
+                </div>
+              </div>
+              <div class="surface-body list">
+                <div class="callout red">
+                  <h4>先处理证据不足</h4>
+                  <p>有 2 个结论缺少原文引用，不能升级为已掌握。</p>
+                </div>
+                <div class="callout blue">
+                  <h4>建议做一次迁移解释</h4>
+                  <p>把 Softmax 缩放解释给“刚学线性代数的人”。</p>
+                </div>
+                <div class="callout green">
+                  <h4>完成后复习计划会自动后移</h4>
+                  <p>通过验证的卡片进入 2 天后复习。</p>
+                </div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

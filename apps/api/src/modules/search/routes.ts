@@ -1,0 +1,41 @@
+import type { FastifyInstance } from "fastify";
+import { z } from "zod";
+import { requireSession, requireOwner } from "../identity/middleware.ts";
+import { detectSearchDrift, reindexWorkspaceSearch, search } from "./service.ts";
+import { parseQuery } from "../../lib/pagination.ts";
+
+const searchQuerySchema = z.object({
+  q: z.string().optional(),
+  type: z.enum(["note", "card", "source", "evidence"]).optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
+  offset: z.coerce.number().int().min(0).max(100_000).optional(),
+});
+
+export async function searchRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", requireSession);
+
+  // GET /search?q=...&type=...&limit=...&offset=...
+  // R-022: 统一 Zod 校验
+  app.get("/search", async (req) => {
+    const q = parseQuery(app, searchQuerySchema, req.query);
+    if (!q.q?.trim()) return { items: [], total: 0, nextOffset: null };
+    return search(req.session.workspaceId, q.q.trim(), {
+      type: q.type,
+      limit: q.limit,
+      offset: q.offset,
+    });
+  });
+
+  // GET /search/drift — F-025: 检测搜索索引与业务表的漂移
+  // 返回幽灵文档、缺失文档和过期标题，供前端展示和触发 reindex 补偿
+  app.get("/search/drift", { preHandler: [requireOwner] }, async (req) => {
+    return detectSearchDrift(req.session.workspaceId);
+  });
+
+  // POST /search/reindex — 重建当前 workspace 的 search_documents 派生表
+  // F-011: 重建索引是管理操作，仅 owner 可执行
+  // F-025: 作为补偿机制，修复漂移检测发现的不一致
+  app.post("/search/reindex", { preHandler: [requireOwner] }, async (req) => {
+    return reindexWorkspaceSearch(req.session.workspaceId);
+  });
+}

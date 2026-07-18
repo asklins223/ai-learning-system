@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": true,
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "@ailearn/shared": ["./node_modules/@ailearn/shared/src/index.ts"]
+    },
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts", "node_modules/@ailearn/shared/src/**/*.ts"]
+}

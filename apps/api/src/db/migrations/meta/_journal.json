@@ -1,0 +1,132 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1783249501693,
+      "tag": "0000_illegal_kid_colt",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1783249501700,
+      "tag": "0001_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783310676117,
+      "tag": "0002_nebulous_molecule_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783334107450,
+      "tag": "0003_shocking_black_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1783593601000,
+      "tag": "0004_note_title_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1783593602000,
+      "tag": "0005_remove_ai_tag_suggestions",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1783679400000,
+      "tag": "0006_v03_schema_changes",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1783762200000,
+      "tag": "0007_notes_source_fkey",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783765800000,
+      "tag": "0008_remove_tags_categories",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1783769400000,
+      "tag": "0009_benchmark_persistence",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1783853000000,
+      "tag": "0010_fix_user_id_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1783939400000,
+      "tag": "0011_n003_n005_n007_n011",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1784025800000,
+      "tag": "0012_jobs_lease_token",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1784112200000,
+      "tag": "0013_g003_enum_mapping_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1784198600000,
+      "tag": "0014_n007_workspace_fk_completion",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1784285000000,
+      "tag": "0015_v03_migration_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1784351000000,
+      "tag": "0016_auth_rate_limits",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784437400000,
+      "tag": "0017_user_ai_model_configs",
+      "breakpoints": true
+    }
+  ]
+}

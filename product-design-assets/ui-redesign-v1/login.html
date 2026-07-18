@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>理解引擎 - 登录页设计稿</title>
+    <link rel="stylesheet" href="./ui-redesign-framework.css" />
+  </head>
+  <body>
+    <main class="screen">
+      <section class="frame auth-frame" aria-label="登录页">
+        <div class="auth-left">
+          <div class="brand">
+            <span class="brand-mark">理</span>
+            <div>
+              <p class="brand-title">理解引擎</p>
+              <p class="brand-subtitle">AI Learning OS</p>
+            </div>
+          </div>
+
+          <h1 class="auth-title">把看过的内容，变成可验证的理解。</h1>
+          <p class="auth-copy">
+            不是另一个资料仓库。系统会记录原文证据、生成学习卡、追问你的解释，并把每次验证结果沉淀成理解状态。
+          </p>
+
+          <div class="chip-row" style="margin-top: 22px">
+            <span class="chip amber">证据驱动</span>
+            <span class="chip green">理解验证</span>
+            <span class="chip blue">间隔复习</span>
+          </div>
+
+          <div class="auth-preview">
+            <div class="paper-panel">
+              <p class="eyebrow">今日路径</p>
+              <div class="flow" style="margin-top: 14px">
+                <div class="flow-step done">
+                  <span class="index">1</span>
+                  <div>
+                    <h4>导入一段原文</h4>
+                    <p>保留引用、章节和上下文。</p>
+                  </div>
+                </div>
+                <div class="flow-step current">
+                  <span class="index">2</span>
+                  <div>
+                    <h4>生成学习卡</h4>
+                    <p>将要点拆成可验证的理解单元。</p>
+                  </div>
+                </div>
+                <div class="flow-step">
+                  <span class="index">3</span>
+                  <div>
+                    <h4>AI 追问验证</h4>
+                    <p>用解释、例子和迁移问题检查掌握程度。</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="paper-panel">
+              <p class="eyebrow">理解状态</p>
+              <div class="kpi-ring" style="margin: 16px auto 12px">
+                <div>
+                  <strong>72</strong>
+                  <span>持续提升</span>
+                </div>
+              </div>
+              <div class="bar" aria-label="理解进度">
+                <span style="width: 72%"></span>
+              </div>
+              <p style="margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55">
+                已验证 18 张学习卡，今天还有 3 张待复习。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <aside class="auth-right">
+          <form class="surface login-card">
+            <div class="surface-header" style="padding: 0 0 15px; border-bottom: 0">
+              <div>
+                <h2>登录学习工作区</h2>
+                <p class="surface-subtitle">继续今天的理解验证</p>
+              </div>
+              <span class="chip green">安全会话</span>
+            </div>
+
+            <label>
+              邮箱
+              <div class="input-field">owner@ailearn.local</div>
+            </label>
+            <label>
+              密码
+              <div class="input-field">••••••••••••</div>
+            </label>
+
+            <div class="hint-row">
+              <span>保持登录 7 天</span>
+              <span style="color: var(--blue); font-weight: 760">忘记密码</span>
+            </div>
+
+            <button class="button" type="button" style="width: 100%; margin-top: 22px">进入理解引擎</button>
+
+            <div class="divider"></div>
+
+            <div class="callout green">
+              <h4>下一步建议</h4>
+              <p>登录后直接进入今日学习驾驶舱，优先处理待复习和证据不足的学习卡。</p>
+            </div>
+          </form>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>

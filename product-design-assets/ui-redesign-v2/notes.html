@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1536, initial-scale=1" />
+    <title>理解引擎 - 笔记页效果图</title>
+    <link rel="stylesheet" href="./ui-redesign-v2.css" />
+  </head>
+  <body>
+    <main class="mock-frame lively-bg">
+      <section class="app-shell">
+        <aside class="sidebar">
+          <div class="brand"><span class="brand-logo">理</span><h1 class="brand-title">理解引擎</h1></div>
+          <nav class="nav">
+            <div class="nav-item"><span class="nav-icon i-home"></span>今日学习</div>
+            <div class="nav-item active"><span class="nav-icon i-note"></span>笔记</div>
+            <div class="nav-item"><span class="nav-icon i-card"></span>学习卡</div>
+            <div class="nav-item"><span class="nav-icon i-review"></span>复习</div>
+            <div class="nav-item"><span class="nav-icon i-graph"></span>理解星图</div>
+            <div class="nav-item"><span class="nav-icon i-change"></span>今日变化</div>
+          </nav>
+          <div class="sidebar-bottom">
+            <div class="nav-item"><span class="nav-icon i-source"></span>来源资料</div>
+            <div class="nav-item"><span class="nav-icon i-search"></span>搜索</div>
+            <div class="user-row"><span class="avatar"></span><span class="user-meta"><strong>Owner</strong><span>个人工作区</span></span><span class="collapse-button">‹</span></div>
+          </div>
+        </aside>
+
+        <section class="workspace">
+          <header class="page-top fun">
+            <div>
+              <div class="top-kicker">表达会变成可验证对象</div>
+              <h2 class="page-title">笔记</h2>
+              <p class="page-subtitle">笔记不是终点。每一段表达都可以变成片段、证据、学习卡或复习入口。</p>
+            </div>
+            <div class="top-controls">
+              <div class="search-field">搜索笔记、学习卡或来源...</div>
+              <button class="button">新建笔记</button>
+              <button class="button-secondary">导入 Markdown</button>
+            </div>
+          </header>
+
+          <main class="content compact">
+            <div class="notes-stage">
+              <aside class="stack">
+                <div class="note-filter">
+                  <div class="note-filter-row active"><span>全部笔记</span><strong>12</strong></div>
+                  <div class="note-filter-row"><span>已生成学习卡</span><strong>5</strong></div>
+                  <div class="note-filter-row"><span>证据待补</span><strong>2</strong></div>
+                  <div class="note-filter-row"><span>内容已更新</span><strong>4</strong></div>
+                </div>
+                <div class="live-card breath-surface">
+                  <div class="live-card-header"><div><h3>笔记流</h3><p>从表达进入理解系统</p></div></div>
+                  <div class="live-card-body">
+                    <div class="note-thread">
+                      <div class="thread-item green"><h4>写下解释</h4><p>用户自己的语言先进入 NoteVersion。</p></div>
+                      <div class="thread-item"><h4>绑定片段</h4><p>关键结论优先回到 source_segment。</p></div>
+                      <div class="thread-item amber"><h4>生成候选卡</h4><p>证据不足时只提示补证据。</p></div>
+                      <div class="thread-item red"><h4>未对齐提醒</h4><p>不能升级理解状态。</p></div>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+
+              <section class="stack">
+                <div class="live-card breath-surface">
+                  <div class="live-card-header">
+                    <div><h3>笔记墙</h3><p>按可行动状态排列，而不是普通文件夹</p></div>
+                    <div class="chip-row"><span class="chip blue">全部 12</span><span class="chip green">有学习卡 5</span><span class="chip red">证据不足 2</span></div>
+                  </div>
+                  <div class="live-card-body">
+                    <div class="object-flow" style="margin: 0 0 14px;"><span>笔记 v12</span><i></i><span>片段 7</span><i></i><span>学习卡</span><i></i><span>证据待确认</span></div>
+                    <div class="note-wall">
+                      <article class="note-tile active">
+                        <span class="chip blue">Transformer · v12</span>
+                        <h4>自注意力机制缩放因子笔记</h4>
+                        <p>缩放因子 √dk 用于控制点积注意力方差，使 Softmax 处于有效梯度区间。</p>
+                        <div class="meta-line"><span class="chip green">已生成学习卡</span><span class="chip red">未对齐 1</span></div>
+                        <div class="object-flow"><span>Source 3.2</span><i></i><span>片段 7</span><i></i><span>学习卡</span></div>
+                      </article>
+                      <article class="note-tile amber">
+                        <span class="chip amber">React · v4</span>
+                        <h4>RSC 与客户端 JS 体积</h4>
+                        <p>对比 RSC 与传统 CSR 打包体积、首屏加载和交互延迟。</p>
+                        <div class="meta-line"><span class="chip amber">内容已更新</span><span>6 个块</span></div>
+                      </article>
+                      <article class="note-tile teal">
+                        <span class="chip teal">AI 对齐 · v5</span>
+                        <h4>AI 证据对齐规则</h4>
+                        <p>定义硬证据、软引用与未对齐边界，明确证据驱动的理解升级路径。</p>
+                        <div class="meta-line"><span class="chip green">硬证据 4</span><span class="chip teal">软引用 2</span></div>
+                      </article>
+                      <article class="note-tile green">
+                        <span class="chip green">研究方法 · v2</span>
+                        <h4>来源快照与笔记版本</h4>
+                        <p>如何创建来源快照并在笔记版本间绑定证据，确保历史可追溯。</p>
+                        <div class="meta-line"><span class="chip blue">来源 1</span><span>6 个块</span></div>
+                      </article>
+                      <article class="note-tile red">
+                        <span class="chip red">算法 · v3</span>
+                        <h4>梯度稳定性与学习率</h4>
+                        <p>分析学习率、梯度裁剪与梯度范数下降的关系，仍需原文证据。</p>
+                        <div class="meta-line"><span class="chip red">证据不足</span><span>待补片段</span></div>
+                      </article>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <aside class="stack">
+                <div class="live-card breath-surface">
+                  <div class="live-card-header"><div><h3>下一步</h3><p>把笔记变成学习动作</p></div></div>
+                  <div class="live-card-body stack-tight">
+                    <div class="event-row"><span class="event-mark">1</span><div><h4>处理证据不足笔记</h4><p>补充片段后再生成学习卡。</p></div><span class="chip red">2</span></div>
+                    <div class="event-row"><span class="event-mark">2</span><div><h4>从最新笔记生成学习卡</h4><p>基于 NoteVersion v12。</p></div><span class="chip blue">候选</span></div>
+                    <div class="event-row"><span class="event-mark">3</span><div><h4>回到快速捕获</h4><p>随时记录灵感与问题。</p></div><span class="chip teal">入口</span></div>
+                  </div>
+                </div>
+                <div class="live-card">
+                  <div class="live-card-header"><div><h3>证据提醒</h3><p>保持边界</p></div></div>
+                  <div class="live-card-body">
+                    <div class="callout blue"><h4>证据不足的笔记不会升级理解状态</h4><p>它们可以生成待处理项，但不能伪装成已验证理解。</p></div>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </main>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

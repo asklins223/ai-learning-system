@@ -1,0 +1,213 @@
+name: ailearn-dev
+
+# Standalone local-development stack. It intentionally uses fixed local-only
+# credentials, dev image targets and source bind mounts for hot reload.
+# Do not layer this file on top of docker-compose.yml.
+
+x-dev-database: &dev-database
+  DATABASE_URL: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
+  DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
+  DATABASE_URL_API: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
+  DATABASE_URL_WORKER: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ailearn
+      POSTGRES_PASSWORD: ailearn_dev
+      POSTGRES_DB: ailearn
+    ports:
+      - "5432:5432"
+    volumes:
+      - dev_postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ailearn -d ailearn"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ailearn_net
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    profiles: ["storage"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ailearn
+      MINIO_ROOT_PASSWORD: ailearn_dev_secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - dev_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ailearn_net
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    profiles: ["storage"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ailearn ailearn_dev_secret;
+      mc mb -p local/ailearn-workspaces || true;
+      mc anonymous set none local/ailearn-workspaces;
+      echo 'minio init done';
+      "
+    networks:
+      - ailearn_net
+
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: dev
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *dev-database
+      NODE_ENV: development
+    volumes:
+      - ./apps/api/src:/app/src
+      - ./packages/shared/src:/tmp/shared/src
+    command: ["npm", "run", "db:migrate"]
+    networks:
+      - ailearn_net
+
+  # Demo credentials are created only when `make seed-demo` is run.
+  seed-demo:
+    profiles: ["seed"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: dev
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *dev-database
+      NODE_ENV: development
+      SEED_DEMO_DATA: "true"
+    volumes:
+      - ./apps/api/src:/app/src
+      - ./packages/shared/src:/tmp/shared/src
+    command: ["npm", "run", "db:seed"]
+    networks:
+      - ailearn_net
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *dev-database
+      NODE_ENV: development
+      PORT: 4000
+      CORS_ORIGIN: http://localhost:3000
+      TRUST_PROXY: loopback,linklocal,uniquelocal
+      AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-memory}
+      AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
+      AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS: ${AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS:-300000}
+      AI_MODEL_TEST_RATE_LIMIT_MAX_ATTEMPTS: ${AI_MODEL_TEST_RATE_LIMIT_MAX_ATTEMPTS:-5}
+      AI_MODEL_TEST_TIMEOUT_MS: ${AI_MODEL_TEST_TIMEOUT_MS:-15000}
+      # Docker Desktop proxies public DNS through 198.18.0.0/15. This remains
+      # explicit and development-only; production defaults to strict blocking.
+      AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
+      # Deterministic local-only key. Production must use a random secret.
+      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - ./apps/api/src:/app/src
+      - ./packages/shared/src:/tmp/shared/src
+    networks:
+      - ailearn_net
+
+  worker:
+    build:
+      context: .
+      dockerfile: workers/ai-worker/Dockerfile
+      target: dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *dev-database
+      NODE_ENV: development
+      AI_PROVIDER_CARD: ${AI_PROVIDER_CARD:-mock}
+      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
+      AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
+      API_INTERNAL_URL: http://api:4000
+    volumes:
+      - ./workers/ai-worker/src:/app/src
+      - ./packages/shared/src:/tmp/shared/src
+      - ./packages/db/src:/tmp/db/src
+      - ./apps/api/src:/apps/api/src
+    networks:
+      - ailearn_net
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: dev
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      INTERNAL_API_URL: http://api:4000
+    ports:
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
+    volumes:
+      - ./apps/web/public:/app/public:ro
+      - ./apps/web/app:/app/app
+      - ./apps/web/components:/app/components
+      - ./apps/web/lib:/app/lib
+      - ./packages/shared/src:/tmp/shared/src
+    networks:
+      - ailearn_net
+
+volumes:
+  # Compose scopes these development-only volumes under the `ailearn-dev`
+  # project, so production data from docker-compose.yml is never reused.
+  dev_postgres_data:
+  dev_minio_data:
+
+networks:
+  ailearn_net:
+    driver: bridge

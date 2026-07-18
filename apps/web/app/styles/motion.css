@@ -1,0 +1,110 @@
+/**
+ * 动效定义 — @keyframes 集中管理。
+ *
+ * 替换旧 animations.css；确认无引用后删除旧文件。
+ * 参见：UI-REFACTOR-AI-IMPLEMENTATION-SPEC.md §14 / §17.1
+ */
+
+/* ── 呼吸效果 ── */
+@keyframes breatheFrame {
+  0%, 100% {
+    opacity: 0.42;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.006);
+  }
+}
+
+@keyframes breatheGlow {
+  0%, 100% {
+    box-shadow: 0 14px 30px rgba(11, 112, 222, 0.08);
+  }
+  50% {
+    box-shadow: 0 22px 54px rgba(11, 112, 222, 0.18);
+  }
+}
+
+/* ── 流动线 ── */
+@keyframes wireFlow {
+  0% {
+    stroke-dashoffset: 0;
+    stroke-opacity: 0.62;
+  }
+  50% {
+    stroke-opacity: 0.95;
+  }
+  100% {
+    stroke-dashoffset: -42;
+    stroke-opacity: 0.62;
+  }
+}
+
+/* ── 脉冲点 ── */
+@keyframes pulseDot {
+  0%, 100% {
+    opacity: 0.72;
+    r: 4;
+  }
+  50% {
+    opacity: 1;
+    r: 5.5;
+  }
+}
+
+/* ── 呼吸条 ── */
+@keyframes breatheBar {
+  0%, 100% {
+    transform: scaleY(0.68);
+    opacity: 0.6;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+/* ── 证据扫描 ── */
+@keyframes evidenceSweep {
+  0% {
+    transform: translateX(-80%);
+    opacity: 0;
+  }
+  42%, 58% {
+    opacity: 0.75;
+  }
+  100% {
+    transform: translateX(80%);
+  }
+}
+
+/* ── 抽屉入场 ── */
+@keyframes fadeMaskIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── 下拉入场 ── */
+@keyframes dropdownEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ── Reduced Motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

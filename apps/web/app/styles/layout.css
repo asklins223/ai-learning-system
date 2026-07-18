@@ -1,0 +1,1605 @@
+/**
+ * Layout styles — app shell, sidebar, top bar, mobile nav, page header
+ *
+ * P6-9 迁移：从 styled-jsx global 提取。Night 主题通过 token 自动生效。
+ */
+
+/* ── Page-end sentinel (§13.6) ── */
+[data-ui="page-end"] {
+  height: 0;
+  width: 100%;
+  clear: both;
+  pointer-events: none;
+}
+
+/* 客户端鉴权确认发生在 AppShell 挂载之前。这一帧也必须占满视口，
+ * 否则硬刷新时会先出现一次与完成页不同的窄布局。 */
+.workspace-auth-loading {
+  box-sizing: border-box;
+  display: grid;
+  width: 100%;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 24px;
+  color: var(--color-text-tertiary);
+  background: var(--color-canvas);
+  background-image:
+    radial-gradient(circle at 18% 12%, rgba(255, 253, 248, 0.50), transparent 32%),
+    radial-gradient(circle at 82% 78%, rgba(242, 227, 202, 0.35), transparent 36%);
+}
+
+.workspace-auth-loading__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  font: 600 13px/1.2 var(--font-ui);
+  letter-spacing: 0.04em;
+}
+
+.workspace-auth-loading__status i {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-highlight);
+  box-shadow: 0 0 0 5px var(--color-highlight-soft);
+  animation: workspace-auth-loading-pulse 900ms var(--ease-standard) infinite alternate;
+}
+
+@keyframes workspace-auth-loading-pulse {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-auth-loading__status i { animation: none; }
+}
+
+/* ── Skip Link (§15.3) ── */
+.skip-link {
+  position: fixed;
+  top: -100px;
+  left: 16px;
+  z-index: 100;
+  padding: 8px 16px;
+  background: var(--color-action);
+  color: var(--color-on-action);
+  border-radius: var(--radius-md, 8px);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: top 180ms;
+}
+
+.skip-link:focus {
+  top: 8px;
+}
+
+/* ── AppShell.tsx ── */
+.app-canvas {
+  min-height: 100dvh;
+  padding: 0;
+  background: var(--color-canvas);
+  background-image:
+    radial-gradient(circle at 18% 12%, rgba(255, 253, 248, 0.50), transparent 32%),
+    radial-gradient(circle at 82% 78%, rgba(242, 227, 202, 0.35), transparent 36%),
+    linear-gradient(160deg, rgba(79, 57, 33, 0.04), transparent 40%, rgba(107, 72, 39, 0.06));
+}
+
+.app-shell-inner {
+  position: relative;
+  display: flex;
+  width: 100%;
+  max-width: none;
+  min-height: 100dvh;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--color-shell);
+  box-shadow: none;
+  /* §5.4: 不使用 backdrop-filter 玻璃化，保持实心暖纸面感 */
+}
+
+/* §9.4 Focus Shell: 纵向排列，TopBar 全宽 + Main 全宽
+ * 硬约束: TopBar 不得成为 Main 左侧的横向 flex item */
+.app-shell-inner--focus {
+flex-direction: column;
+overflow: visible;
+}
+
+/* <960px 同样保持贴边，不在断点切换时重建外框 */
+@media (max-width: 959px) {
+  .app-shell-inner {
+    backdrop-filter: none;
+  }
+
+  /* Focus 模式下同样贴边 */
+  .app-shell-inner--focus {
+    backdrop-filter: none;
+  }
+}
+
+/* §9.3: 640–959px 平板布局 — TabletTopBar 在 workspace 上方 */
+@media (min-width: 640px) and (max-width: 959px) {
+  .app-shell-inner:not(.app-shell-inner--focus) {
+    flex-direction: column;
+  }
+}
+
+.workspace {
+position: relative;
+z-index: 1;
+flex: 1;
+min-width: 0;
+min-height: 100dvh;
+padding-bottom: 34px;
+}
+
+/* TabletTopBar is a real 60px row above the workspace. Subtract it from the
+ * workspace rather than producing a permanent one-header-height overflow. */
+@media (min-width: 640px) and (max-width: 959px) {
+  .workspace:not(.workspace--focus) {
+    min-height: calc(100dvh - 60px);
+  }
+}
+
+/* Desktop Sidebar 是 AppShell 的真实 flex 子项，不再用 margin 伪造占位。 */
+.workspace:not(.workspace--focus) {
+  margin-left: 0;
+}
+
+/* <960px: 无侧栏，无左边距 */
+@media (max-width: 959px) {
+  .workspace {
+    margin-left: 0 !important;
+  }
+}
+
+/* focus 模式工作区无侧栏，全宽 */
+/* §9.4: 390px 下 workspace x=0, width=390px */
+/* §9.5: container-type 用于 Focus 容器 inline-size 查询 */
+.workspace--focus {
+  margin-left: 0 !important;
+  width: 100% !important;
+  min-width: 0;
+  flex: none !important;
+  position: relative;
+  left: 0 !important;
+  container-type: inline-size;
+  container-name: focus-workspace;
+}
+
+/* 移动端底部导航空间 */
+/* §9.7: 有 BottomNav 时正文底部留白 ≥ mobile-nav-inset + 16px
+   仅 default 变体渲染 MobileNav，internal 和 focus 不需要此留白 */
+@media (max-width: 639px) {
+  /* default 变体：有 MobileNav，需要完整底部留白 */
+  [data-variant="default"] .workspace:not(.workspace--focus) {
+    padding-bottom: calc(var(--mobile-nav-inset) + 16px);
+  }
+
+  /* internal 变体：无 MobileNav，仅需 safe-area 留白 */
+  [data-variant="internal"] .workspace:not(.workspace--focus) {
+    padding-bottom: calc(var(--safe-bottom) + 16px);
+  }
+
+  /* §9.7: 无 BottomNav 的 Focus：ActionDock 贴 safe-bottom
+     Focus 页面仍需 safe-area 底部留白 */
+  .workspace--focus {
+    padding-bottom: calc(var(--safe-bottom) + 16px);
+  }
+}
+
+/* ── MobileNav.tsx ── */
+.mobile-nav {
+position: fixed;
+bottom: 0;
+left: 0;
+right: 0;
+z-index: var(--z-header);
+display: none; /* 默认隐藏，<640px 显示 */
+align-items: center;
+justify-content: space-around;
+height: var(--mobile-nav-inset);
+padding-bottom: env(safe-area-inset-bottom, 0px);
+background: var(--color-surface);
+border-top: 1px solid var(--color-border);
+box-shadow: 0 -2px 8px rgb(70 48 30 / 5%);
+}
+
+@media (max-width: 639px) {
+.mobile-nav {
+  display: flex;
+}
+}
+
+.mobile-nav-item {
+display: flex;
+flex-direction: column;
+align-items: center;
+justify-content: center;
+gap: 2px;
+min-width: 48px;
+min-height: 44px;
+border: none;
+border-radius: var(--radius-sm);
+padding: 4px 8px;
+background: transparent;
+color: var(--color-text-tertiary);
+font-family: var(--font-ui);
+font-size: 11px;
+font-weight: 550;
+cursor: pointer;
+transition: color var(--motion-fast) var(--ease-standard);
+-webkit-tap-highlight-color: transparent;
+}
+
+.mobile-nav-item.active {
+color: var(--color-warning);
+font-weight: 650;
+}
+
+.mobile-nav-item:active {
+opacity: 0.7;
+}
+
+/* "新建"按钮特殊样式 */
+.mobile-nav-item--create {
+position: relative;
+min-width: 44px;
+min-height: 44px;
+}
+
+.mobile-nav-item--create .mobile-nav-icon {
+display: grid;
+place-items: center;
+width: 40px;
+height: 40px;
+border-radius: var(--radius-pill);
+background: var(--color-action);
+color: var(--color-on-action);
+}
+
+.mobile-nav-item--create .mobile-nav-label {
+color: var(--color-text-secondary);
+}
+
+.mobile-nav-item--create:active .mobile-nav-icon {
+transform: scale(0.94);
+transition: transform 100ms ease;
+}
+
+.mobile-nav-icon {
+display: inline-grid;
+place-items: center;
+width: 24px;
+height: 24px;
+}
+
+.mobile-nav-icon svg {
+width: 22px;
+height: 22px;
+}
+
+.mobile-nav-label {
+line-height: 1.2;
+}
+
+/* ── 二级面板 ── */
+.mobile-nav-panel {
+position: fixed;
+  bottom: var(--mobile-nav-inset);
+left: 12px;
+right: 12px;
+z-index: calc(var(--z-header) + 1);
+display: flex;
+flex-direction: column;
+gap: 2px;
+border: 1px solid var(--color-border);
+border-radius: var(--radius-md);
+background: var(--color-surface);
+box-shadow: var(--shadow-panel);
+padding: 6px;
+animation: mobilePanelEnter 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 状态清理由组件负责；CSS 再做一层断点防御，避免旋转或极端并发
+   渲染时手机二级导航短暂出现在更大视口。 */
+@media (min-width: 640px) {
+  .mobile-nav-panel {
+    display: none;
+  }
+}
+
+@keyframes mobilePanelEnter {
+from {
+  opacity: 0;
+  transform: translateY(8px) scale(0.97);
+}
+to {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+}
+
+.mobile-nav-panel-item {
+display: flex;
+align-items: center;
+gap: 12px;
+height: 44px;
+border-radius: var(--radius-sm);
+padding: 0 14px;
+color: var(--color-text);
+font-family: var(--font-ui);
+font-size: 14px;
+font-weight: 600;
+text-decoration: none;
+transition: background var(--motion-fast) var(--ease-standard);
+}
+
+.mobile-nav-panel-item:hover {
+background: var(--color-surface-soft);
+}
+
+.mobile-nav-panel-item.active {
+background: var(--color-surface-soft);
+color: var(--color-warning);
+}
+
+.mobile-nav-panel-icon {
+display: inline-grid;
+place-items: center;
+width: 22px;
+height: 22px;
+flex: 0 0 22px;
+}
+
+.mobile-nav-panel-icon svg {
+width: 20px;
+height: 20px;
+}
+
+/* ── PageHeader.tsx ── */
+.page-header {
+display: flex;
+align-items: flex-start;
+justify-content: space-between;
+gap: var(--space-6);
+padding: var(--space-8) var(--space-8) var(--space-6);
+}
+
+.page-header-text {
+display: flex;
+flex-direction: column;
+gap: var(--space-1);
+min-width: 0;
+}
+
+/* §12.1: 分组标题弱化为 11–12px 元信息 */
+.page-header-kicker {
+color: var(--color-text-tertiary);
+font-family: var(--font-ui);
+font-size: 12px;
+font-weight: 600;
+letter-spacing: 0.02em;
+}
+
+/* §5.2: H1 使用 Editorial serif 字体，28–34px，400–600 */
+.page-header-title {
+margin: 0;
+color: var(--color-text);
+font-family: var(--font-editorial);
+font-size: 30px;
+font-weight: 500;
+line-height: 1.25;
+letter-spacing: 0;
+}
+
+.page-header-subtitle {
+margin: 0;
+max-width: 72ch;
+color: var(--color-text-secondary);
+font-family: var(--font-ui);
+font-size: 14px;
+font-weight: 450;
+line-height: 1.5;
+}
+
+.page-header-actions {
+display: flex;
+align-items: center;
+gap: var(--space-3);
+flex-shrink: 0;
+}
+
+/* 移动端适配 */
+@media (max-width: 639px) {
+.page-header {
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-4) var(--space-4);
+}
+
+.page-header-title {
+  font-size: 26px;
+}
+
+.page-header-actions {
+  width: 100%;
+}
+
+.page-header-actions > :first-child:only-child {
+  flex: 1;
+}
+}
+
+/* ── Sidebar.tsx ── */
+/* §12.1: 导航不用冷蓝整行大圆角底块，选中态用暖纸签/短线/加重文字 */
+.sidebar {
+position: sticky;
+top: 0;
+z-index: 20;
+display: flex;
+flex-direction: column;
+align-self: flex-start;
+flex: 0 0 216px;
+width: 216px;
+height: 100dvh;
+max-height: 100dvh;
+min-height: 0;
+overflow: visible;
+border-right: 1px solid var(--color-border);
+border-radius: 0;
+padding: 18px 12px 14px;
+background:
+  linear-gradient(180deg, color-mix(in srgb, var(--color-paper-muted) 54%, var(--color-shell)), var(--color-shell));
+}
+
+/* §12.1: 品牌字标用 div/链接，不用 H1；推荐“理解引擎 + 橙色圆点” */
+.sidebar .brand {
+display: flex;
+align-items: center;
+gap: 9px;
+min-height: 40px;
+margin: 0 6px 22px;
+color: var(--color-text);
+text-decoration: none;
+}
+
+.sidebar .brand-logo {
+display: grid;
+place-items: center;
+width: 36px;
+height: 36px;
+border: 1px solid var(--color-border-strong);
+border-radius: 10px;
+background: var(--color-paper);
+color: var(--color-text);
+font-size: 17px;
+font-weight: 600;
+font-family: var(--font-editorial);
+box-shadow: var(--shadow-control);
+flex: 0 0 36px;
+}
+
+.sidebar .brand-copy {
+display: flex;
+flex: 1;
+min-width: 0;
+flex-direction: column;
+gap: 3px;
+}
+
+.sidebar .brand-title-row {
+display: flex;
+align-items: center;
+gap: 7px;
+min-width: 0;
+}
+
+.sidebar .brand-title {
+display: block;
+font-size: 17px;
+font-weight: 600;
+line-height: 1.1;
+letter-spacing: 0.01em;
+font-family: var(--font-editorial);
+color: var(--color-text);
+}
+
+.sidebar .brand-subtitle {
+display: block;
+overflow: hidden;
+color: var(--color-text-tertiary);
+font: 600 9px/1.2 var(--font-ui);
+letter-spacing: 0.08em;
+white-space: nowrap;
+}
+
+.sidebar .brand-dot {
+width: 6px;
+height: 6px;
+display: inline-block;
+flex: 0 0 6px;
+border-radius: 999px;
+background: var(--color-warning);
+box-shadow: 0 0 0 3px var(--color-warning-soft);
+align-self: center;
+margin: 0;
+}
+
+.sidebar .nav {
+display: grid;
+gap: 4px;
+min-height: 0;
+padding-bottom: 8px;
+}
+
+/* 导航分组 */
+.sidebar .nav-group {
+display: grid;
+gap: 2px;
+margin-top: 14px;
+padding-top: 0;
+border-top: 0;
+}
+
+/* §12.1: 分组标题弱化为 11–12px 元信息，不形成企业后台“模块目录” */
+.sidebar .nav-group-label {
+padding: 0 10px 5px;
+color: var(--color-text-tertiary);
+font-size: 11px;
+font-weight: 600;
+letter-spacing: 0.08em;
+font-family: var(--font-ui);
+user-select: none;
+}
+
+/* §12.1: 选中态采用暖纸签/3px 短线/文字加重，不用冷蓝整行大圆角底块 */
+.sidebar .nav-item {
+position: relative;
+display: flex;
+align-items: center;
+gap: 8px;
+height: 44px;
+border: 1px solid transparent;
+border-radius: 10px;
+padding: 0 8px;
+color: var(--color-text-secondary);
+font-size: 14px;
+font-weight: 500;
+font-family: var(--font-ui);
+text-decoration: none;
+transition:
+  color var(--motion-fast) var(--ease-standard),
+  background var(--motion-fast) var(--ease-standard),
+  border-color var(--motion-fast) var(--ease-standard);
+}
+
+.sidebar .nav-item::before {
+content: "";
+position: absolute;
+left: -1px;
+top: 50%;
+width: 3px;
+height: 20px;
+border-radius: var(--radius-pill);
+background: var(--color-warning);
+opacity: 0;
+transform: translateY(-50%) scaleY(0.5);
+transition: opacity var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard);
+}
+
+.sidebar .nav-item:hover {
+color: var(--color-text);
+background: color-mix(in srgb, var(--color-surface-soft) 82%, transparent);
+}
+
+.sidebar .nav-item.active {
+color: var(--color-text);
+font-weight: 650;
+border-color: color-mix(in srgb, var(--color-border) 76%, transparent);
+background: color-mix(in srgb, var(--color-surface-raised) 72%, var(--color-surface-soft));
+box-shadow: var(--shadow-control);
+}
+
+.sidebar .nav-item.active::before {
+opacity: 1;
+transform: translateY(-50%) scaleY(1);
+}
+
+.sidebar .nav-item.active .nav-icon {
+color: var(--color-text);
+border-color: var(--color-border);
+background: var(--color-paper);
+box-shadow: var(--shadow-control);
+}
+
+/* §12.5: 18–20px 线性图标，线宽约 1.75–2px */
+.sidebar .nav-icon {
+position: relative;
+display: inline-grid;
+place-items: center;
+width: 30px;
+height: 30px;
+border: 1px solid transparent;
+border-radius: 8px;
+color: var(--color-text-tertiary);
+flex: 0 0 30px;
+transition:
+  color var(--motion-fast) var(--ease-standard),
+  background var(--motion-fast) var(--ease-standard),
+  border-color var(--motion-fast) var(--ease-standard);
+}
+
+.sidebar .nav-icon svg {
+width: 18px;
+height: 18px;
+}
+
+.sidebar .sidebar-bottom {
+margin-top: auto;
+padding: 12px 0 0;
+}
+
+.sidebar .sidebar-bottom .nav-item {
+height: 38px;
+}
+
+/* ==================== User Area ==================== */
+.user-area {
+position: relative;
+margin-top: 0;
+}
+
+.user-row {
+display: flex;
+align-items: center;
+gap: 10px;
+width: 100%;
+height: 64px;
+border: 1px solid var(--color-border);
+border-radius: 12px;
+padding: 0 8px;
+background: color-mix(in srgb, var(--color-paper-muted) 72%, var(--color-surface-soft));
+box-shadow: var(--shadow-control);
+cursor: pointer;
+transition:
+  background var(--motion-fast) var(--ease-standard),
+  border-color var(--motion-fast) var(--ease-standard),
+  box-shadow var(--motion-fast) var(--ease-standard);
+text-align: left;
+}
+
+.user-row:hover {
+border-color: var(--color-border-strong);
+background: var(--color-paper);
+}
+
+.user-row.open {
+background: var(--color-paper);
+border-color: var(--color-border-strong);
+box-shadow: var(--shadow-panel);
+}
+
+/* 头像：真实 owner 插画，其他角色保留首字母回退。 */
+.user-avatar-wrap {
+position: relative;
+width: 42px;
+height: 42px;
+flex: 0 0 42px;
+overflow: hidden;
+border: 1px solid var(--color-border-strong);
+border-radius: 999px;
+background: var(--color-paper);
+box-shadow: var(--shadow-control);
+}
+
+.user-row .avatar {
+display: grid;
+place-items: center;
+width: 100%;
+height: 100%;
+border-radius: 999px;
+border: 0;
+background: color-mix(in srgb, var(--color-action) 82%, var(--color-text));
+color: var(--color-on-action);
+font-size: 13px;
+font-weight: 750;
+box-shadow: none;
+}
+
+.avatar-image,
+.dropdown-avatar-image {
+display: block;
+width: 100%;
+height: 100%;
+max-width: none;
+border-radius: inherit;
+object-fit: cover;
+object-position: 50% 42%;
+transform: scale(1.18);
+transform-origin: 50% 42%;
+}
+
+.user-row .user-meta {
+display: flex;
+flex-direction: column;
+gap: 1px;
+min-width: 0;
+flex: 1;
+}
+
+.user-row .user-meta strong {
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+color: var(--color-text);
+font-size: 13px;
+font-weight: 650;
+line-height: 1.3;
+}
+
+.user-row .user-meta span {
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+color: var(--color-text-tertiary);
+font-size: 11px;
+font-weight: 500;
+line-height: 1.3;
+}
+
+.user-row .chevron {
+display: grid;
+place-items: center;
+width: 20px;
+height: 20px;
+flex: 0 0 20px;
+color: var(--color-text-tertiary);
+transition: transform 0.2s ease, color 0.15s ease;
+}
+
+.user-row:hover .chevron {
+color: var(--color-text-secondary);
+}
+
+.user-row .chevron.open {
+transform: rotate(-90deg);
+}
+
+.user-row .chevron-icon {
+width: 16px;
+height: 16px;
+}
+
+/* ==================== Dropdown Panel ==================== */
+.user-dropdown {
+position: absolute;
+bottom: calc(100% + 10px);
+left: 0;
+width: 288px;
+z-index: 50;
+border: 1px solid var(--color-border);
+border-radius: 14px;
+background: var(--color-paper-muted);
+box-shadow: var(--shadow-floating);
+max-height: calc(100dvh - 32px);
+overflow-x: hidden;
+overflow-y: auto;
+animation: dropdownEnter 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dropdownEnter {
+from {
+  opacity: 0;
+  transform: translateY(6px) scale(0.98);
+}
+to {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+}
+
+/* Dropdown: User header */
+.dropdown-user-header {
+display: flex;
+align-items: center;
+gap: 12px;
+padding: 16px 16px 13px;
+background: color-mix(in srgb, var(--color-paper) 70%, var(--color-paper-muted));
+}
+
+.dropdown-avatar-wrap {
+position: relative;
+width: 52px;
+height: 52px;
+flex: 0 0 52px;
+overflow: hidden;
+border: 1px solid var(--color-border-strong);
+border-radius: 999px;
+background: var(--color-paper);
+box-shadow: var(--shadow-control);
+}
+
+.dropdown-avatar {
+display: grid;
+place-items: center;
+width: 100%;
+height: 100%;
+border-radius: 999px;
+border: 0;
+background: color-mix(in srgb, var(--color-action) 82%, var(--color-text));
+color: var(--color-on-action);
+font-size: 15px;
+font-weight: 750;
+box-shadow: none;
+}
+
+.dropdown-user-info {
+display: flex;
+flex-direction: column;
+gap: 3px;
+min-width: 0;
+flex: 1;
+}
+
+.dropdown-user-name {
+display: flex;
+align-items: center;
+gap: 8px;
+}
+
+.dropdown-user-kicker {
+color: var(--color-warning-text);
+font: 650 9px/1.2 var(--font-ui);
+letter-spacing: 0.12em;
+}
+
+.dropdown-user-name strong {
+color: var(--color-text);
+font-size: 14px;
+font-weight: 700;
+line-height: 1.3;
+}
+
+.dropdown-user-email {
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+color: var(--color-text-secondary);
+font-size: 12px;
+line-height: 1.3;
+}
+
+.dropdown-badge {
+flex: 0 0 auto;
+padding: 2px 7px;
+border: 1px solid var(--color-border);
+border-radius: 999px;
+background: var(--color-surface-soft);
+color: var(--color-text-secondary);
+font-size: 10px;
+font-weight: 600;
+letter-spacing: 0.02em;
+}
+
+.dropdown-workspace {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 12px;
+margin: 0 8px 5px;
+padding: 10px 11px;
+border: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
+border-radius: 9px;
+background: color-mix(in srgb, var(--color-surface) 72%, transparent);
+}
+
+.dropdown-workspace span {
+color: var(--color-text-tertiary);
+font: 550 11px/1.3 var(--font-ui);
+}
+
+.dropdown-workspace strong {
+min-width: 0;
+overflow: hidden;
+color: var(--color-text);
+font: 650 12px/1.3 var(--font-ui);
+text-overflow: ellipsis;
+white-space: nowrap;
+}
+
+/* Dropdown: Divider */
+.dropdown-divider {
+height: 1px;
+margin: 2px 10px;
+background: color-mix(in srgb, var(--color-border) 78%, transparent);
+}
+
+/* Dropdown: Menu items */
+.dropdown-menu-list {
+display: flex;
+flex-direction: column;
+gap: 2px;
+padding: 6px 8px;
+}
+
+.dropdown-menu-label {
+padding: 5px 8px 4px;
+color: var(--color-text-tertiary);
+font-size: 10px;
+font-weight: 600;
+letter-spacing: 0.06em;
+text-transform: uppercase;
+}
+
+.dropdown-menu-item {
+display: flex;
+align-items: center;
+gap: 10px;
+height: 38px;
+border: none;
+border-radius: 8px;
+padding: 0 8px;
+background: transparent;
+color: var(--color-text);
+font-size: 13px;
+font-weight: 560;
+cursor: pointer;
+transition: background 0.12s ease;
+text-align: left;
+width: 100%;
+}
+
+.dropdown-menu-item:hover {
+background: var(--color-surface-raised);
+}
+
+.dropdown-menu-item:active {
+background: var(--color-surface-soft);
+}
+
+.dropdown-menu-item:disabled {
+opacity: 0.4;
+cursor: not-allowed;
+}
+
+.dropdown-menu-item:disabled:hover {
+background: transparent;
+}
+
+.dropdown-menu-item:disabled .dropdown-menu-icon {
+color: var(--color-text-tertiary);
+}
+
+.dropdown-menu-icon {
+width: 17px;
+height: 17px;
+flex: 0 0 17px;
+color: var(--color-text-secondary);
+}
+
+.dropdown-menu-value {
+margin-left: auto;
+color: var(--color-text-tertiary);
+font: 500 10px/1 var(--font-ui);
+}
+
+.dropdown-menu-item:hover .dropdown-menu-icon {
+color: var(--color-text);
+}
+
+.dropdown-kbd {
+margin-left: auto;
+padding: 2px 6px;
+border: 1px solid var(--color-border);
+border-radius: 4px;
+background: var(--color-surface-soft);
+color: var(--color-text-secondary);
+font-size: 10px;
+font-weight: 600;
+font-family: ui-monospace, monospace;
+}
+
+/* Dropdown: Logout */
+.dropdown-menu-item.logout {
+color: var(--color-danger);
+}
+
+.dropdown-menu-item.logout .dropdown-menu-icon {
+color: var(--color-danger);
+}
+
+.dropdown-menu-item.logout:hover {
+background: rgba(225, 29, 72, 0.06);
+}
+
+.dropdown-menu-item.logout:hover .dropdown-menu-icon {
+color: var(--color-danger);
+}
+
+.dropdown-logout-error,
+.tablet-logout-error {
+margin: 2px 14px 8px;
+color: var(--color-danger);
+font-size: 11px;
+line-height: 1.45;
+}
+
+/* Dropdown: Footer */
+.dropdown-footer {
+display: flex;
+align-items: center;
+justify-content: center;
+padding: 9px 14px;
+background: color-mix(in srgb, var(--color-surface) 72%, transparent);
+border-top: 1px solid var(--color-border);
+}
+
+.sidebar .nav-item:focus-visible,
+.sidebar .brand:focus-visible,
+.sidebar .user-row:focus-visible,
+.sidebar .dropdown-menu-item:focus-visible {
+outline: 2px solid var(--color-focus-ring);
+outline-offset: 2px;
+}
+
+.dropdown-footer-version {
+color: var(--color-text-tertiary);
+font-size: 10px;
+font-weight: 500;
+letter-spacing: 0.02em;
+}
+
+/* ==================== 960–1279px: 72px 紧凑 Rail ==================== */
+@media (min-width: 960px) and (max-width: 1279px) {
+.sidebar {
+  flex-basis: 72px;
+  width: 72px;
+  padding: 18px 8px 14px;
+}
+
+.sidebar .brand {
+  justify-content: center;
+  margin: 0 0 22px;
+}
+
+.sidebar .brand-copy,
+.sidebar .brand-dot {
+  display: none;
+}
+
+.sidebar .nav-item {
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-inline: auto;
+  padding: 0;
+  font-size: 0;
+}
+
+.sidebar .nav-item.active {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sidebar .nav-item::before {
+  left: -4px;
+}
+
+.sidebar .nav-icon {
+  width: 34px;
+  height: 34px;
+  flex-basis: 34px;
+}
+
+.sidebar .nav-item::after,
+.sidebar .user-row::after {
+  content: attr(data-label);
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  z-index: 80;
+  width: max-content;
+  max-width: 220px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 72%, transparent);
+  border-radius: 7px;
+  background: var(--color-text);
+  color: var(--color-paper);
+  box-shadow: var(--shadow-panel);
+  font: 550 12px/1.2 var(--font-ui);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-4px, -50%);
+  transition: opacity var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard);
+}
+
+.sidebar .nav-item:hover::after,
+.sidebar .nav-item:focus-visible::after,
+.sidebar .user-row:hover::after,
+.sidebar .user-row:focus-visible::after {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+/* 紧凑模式下隐藏分组标签 */
+.sidebar .nav-group-label {
+  display: none;
+}
+
+.sidebar .nav-group {
+  position: relative;
+  margin-top: 12px;
+  padding-top: 11px;
+}
+
+.sidebar .nav-group::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 24px;
+  height: 1px;
+  background: var(--color-border);
+  transform: translateX(-50%);
+}
+
+.sidebar .sidebar-bottom {
+  padding: 12px 0 0;
+}
+
+.user-row {
+  position: relative;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-inline: auto;
+  padding: 0;
+  gap: 0;
+  border-radius: 11px;
+}
+
+.user-avatar-wrap {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+}
+
+.user-row .user-meta,
+.user-row .chevron {
+  display: none;
+}
+
+.user-dropdown {
+  left: calc(100% + 8px);
+  right: auto;
+  bottom: 0;
+  width: 288px;
+}
+}
+
+@media (max-height: 640px) and (min-width: 960px) {
+  .sidebar .brand {
+    margin-bottom: 12px;
+  }
+
+  .sidebar .nav {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  .sidebar .nav-group {
+    margin-top: 7px;
+  }
+}
+
+/* Night 仍保持暖纸层级，覆盖旧 dark-mode.css 中的冷色侧栏规则。 */
+html[data-theme="night"] .sidebar {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-paper-muted) 45%, var(--color-shell)), var(--color-shell));
+}
+
+html[data-theme="night"] .sidebar .user-row {
+  border-color: var(--color-border);
+  background: color-mix(in srgb, var(--color-surface-raised) 58%, var(--color-surface));
+}
+
+html[data-theme="night"] .sidebar .user-row:hover,
+html[data-theme="night"] .sidebar .user-row.open {
+  border-color: var(--color-border-strong);
+  background: var(--color-paper);
+}
+
+html[data-theme="night"] .sidebar .user-row .avatar,
+html[data-theme="night"] .sidebar .dropdown-avatar {
+  background: color-mix(in srgb, var(--color-action) 78%, var(--color-text));
+}
+
+html[data-theme="night"] .sidebar .user-dropdown {
+  background: var(--color-paper-muted);
+}
+
+/* ==================== <960px: 完全隐藏侧栏 ==================== */
+/* §9.1: <640px 无桌面侧栏，内容全宽；640–959px 同样无侧栏 */
+@media (max-width: 959px) {
+  .sidebar {
+    display: none !important;
+    visibility: hidden !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    left: -9999px !important;
+  }
+}
+
+/* ── TabletTopBar.tsx ── (§9.3: 640–959px 平板 TopBar + Overlay Drawer) */
+
+.tablet-topbar {
+  display: none; /* 默认隐藏，640–959px 显示 */
+  position: sticky;
+  top: 0;
+  z-index: var(--z-header);
+  width: 100%;
+  height: 60px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 0 16px;
+  background: color-mix(in srgb, var(--color-paper-muted) 82%, var(--color-shell));
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+/* §9.3: 仅 640–959px 显示 TabletTopBar */
+@media (min-width: 640px) and (max-width: 959px) {
+  .tablet-topbar {
+    display: flex;
+  }
+}
+
+.tablet-topbar-menu {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.tablet-topbar-menu:hover {
+  background: var(--color-surface-soft);
+  color: var(--color-text);
+}
+
+.tablet-topbar-menu:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.tablet-topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-decoration: none;
+  color: var(--color-text);
+}
+
+.tablet-topbar-logo {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-editorial);
+}
+
+.tablet-topbar-title {
+  font: 600 18px/1.2 var(--font-editorial);
+  letter-spacing: 0.01em;
+}
+
+.tablet-topbar-dot {
+  width: 6px;
+  height: 6px;
+  align-self: flex-start;
+  margin: 8px 0 0 -5px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  box-shadow: 0 0 0 3px var(--color-warning-soft);
+}
+
+/* §9.3: Overlay Drawer — 覆盖正文而不推动正文 */
+.tablet-drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-drawer);
+  background: var(--color-scrim);
+  animation: tabletDrawerScrimEnter 0.16s ease;
+}
+
+@keyframes tabletDrawerScrimEnter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.tablet-drawer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: calc(var(--z-drawer) + 1);
+  width: clamp(304px, 80vw, 336px);
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-paper-muted);
+  border-right: 1px solid var(--color-border);
+  box-shadow: var(--shadow-floating);
+  padding: 14px 12px 18px;
+  animation: tabletDrawerEnter 0.2s var(--ease-standard);
+}
+
+.tablet-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  min-height: 48px;
+  margin: 0 2px 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tablet-drawer-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.tablet-drawer-logo {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: var(--color-paper);
+  box-shadow: var(--shadow-control);
+  font: 600 17px/1 var(--font-editorial);
+}
+
+.tablet-drawer-brand > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tablet-drawer-brand strong {
+  font: 600 17px/1.15 var(--font-editorial);
+}
+
+.tablet-drawer-brand small {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font: 600 8px/1.2 var(--font-ui);
+  letter-spacing: 0.11em;
+  white-space: nowrap;
+}
+
+.tablet-drawer-close {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.tablet-drawer-close:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.tablet-drawer-close svg {
+  width: 19px;
+  height: 19px;
+}
+
+@keyframes tabletDrawerEnter {
+  from {
+    transform: translateX(-100%);
+    opacity: 0.5;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.tablet-drawer-nav {
+  display: grid;
+  gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  overscroll-behavior: contain;
+}
+
+.tablet-drawer-item {
+  display: flex;
+  align-items: center;
+gap: 10px;
+height: 44px;
+border: 1px solid transparent;
+border-radius: 10px;
+padding: 0 12px;
+color: var(--color-text-secondary);
+font-size: 14px;
+font-weight: 520;
+  text-decoration: none;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.tablet-drawer-item:hover {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+/* §12.1: tablet drawer 选中态不用蓝色，用暖纸签 */
+.tablet-drawer-item.active {
+  border-color: var(--color-border);
+  background: var(--color-surface-raised);
+  box-shadow: inset 3px 0 0 var(--color-warning), var(--shadow-control);
+  color: var(--color-text);
+  font-weight: 650;
+}
+
+.tablet-drawer-item.logout {
+  color: var(--color-danger);
+}
+
+.tablet-drawer-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+}
+
+.tablet-drawer-item.active .tablet-drawer-icon {
+  color: var(--color-text);
+  background: var(--color-paper);
+  box-shadow: var(--shadow-control);
+}
+
+.tablet-drawer-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.tablet-drawer-group-label {
+  padding: 12px 12px 4px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  user-select: none;
+}
+
+.tablet-drawer-divider {
+  height: 1px;
+  margin: 8px 0;
+  background: var(--color-border);
+}
+
+.tablet-drawer-item-value {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font: 500 10px/1 var(--font-ui);
+}
+
+.tablet-topbar-brand:focus-visible,
+.tablet-drawer-brand:focus-visible,
+.tablet-drawer-close:focus-visible,
+.tablet-drawer-item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ── TopBar.tsx ── (§9.4 Focus Shell FocusBar) */
+.topbar {
+position: sticky;
+top: 0;
+z-index: var(--z-header);
+display: flex;
+width: 100%;
+align-items: center;
+justify-content: space-between;
+height: 56px;
+padding: 0 20px;
+background: var(--color-surface);
+border-bottom: 1px solid var(--color-border);
+flex-shrink: 0;
+}
+
+.topbar-back {
+display: inline-flex;
+align-items: center;
+gap: 6px;
+padding: 6px 12px;
+border: none;
+border-radius: var(--radius-sm);
+background: transparent;
+color: var(--color-text-secondary);
+font-family: var(--font-ui);
+font-size: 14px;
+font-weight: 500;
+cursor: pointer;
+transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.topbar-back:hover {
+background: var(--color-surface-soft);
+color: var(--color-text);
+}
+
+.topbar-back:focus-visible {
+outline: 2px solid var(--color-focus-ring);
+outline-offset: 2px;
+}
+
+.topbar-actions {
+display: flex;
+align-items: center;
+gap: 12px;
+}
+
+.topbar-theme-toggle {
+position: relative;
+inset: auto;
+z-index: 1;
+flex: 0 0 auto;
+width: 40px;
+height: 40px;
+}
+
+/* Drawer 挂载在 workspace 内；打开时让抽屉覆盖所有 shell 导航层。 */
+.app-shell-inner:has(.drawer-backdrop) > .topbar,
+.app-shell-inner:has(.drawer-backdrop) > .sidebar,
+.app-shell-inner:has(.drawer-backdrop) > .tablet-topbar,
+.app-canvas:has(.drawer-backdrop) > .mobile-nav {
+z-index: 0;
+}
