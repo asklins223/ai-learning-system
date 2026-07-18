@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { requireAuditUserId } from "../handlers/index.ts";
 import {
   HandlerTimeoutError,
@@ -22,6 +24,229 @@ import {
   WorkerWorkspaceTransactionContextError,
 } from "../db.ts";
 import { retryBackoffMs } from "./job-retry.ts";
+import {
+  claimJobs,
+  createDrizzleQueueJobUpdater,
+  markJobFailed,
+  markJobSucceeded,
+  reapStaleJobs,
+  type ClaimedJob,
+  type QueueJobUpdate,
+  type QueueJobUpdater,
+  type QueueSqlExecutor,
+  type QueueTransactionRunner,
+} from "../queue.ts";
+import * as schema from "../schema/index.ts";
+
+const claimedJobFixture: ClaimedJob = {
+  id: "11111111-1111-1111-1111-111111111111",
+  type: "generate_card",
+  payload: { noteVersionId: "note-1" },
+  workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  attempts: 0,
+  leaseToken: "lease-token-1",
+};
+
+function queueExecutorWithRows(rows: Record<string, unknown>[]): QueueSqlExecutor {
+  return {
+    execute: async <T extends Record<string, unknown>>() => rows as T[],
+  };
+}
+
+test("queue claim maps database rows to trusted worker jobs", async () => {
+  const jobs = await claimJobs(queueExecutorWithRows([
+    {
+      id: "job-1",
+      type: "parse_source",
+      payload: { sourceId: "source-1" },
+      workspace_id: "workspace-1",
+      requested_by: "actor-1",
+      attempts: 2,
+      lease_token: "lease-1",
+    },
+    {
+      id: "job-2",
+      type: "generate_card",
+      payload: null,
+      workspace_id: "workspace-2",
+      requested_by: null,
+      attempts: null,
+      lease_token: "lease-2",
+    },
+  ]));
+
+  assert.deepEqual(jobs, [
+    {
+      id: "job-1",
+      type: "parse_source",
+      payload: { sourceId: "source-1" },
+      workspaceId: "workspace-1",
+      requestedBy: "actor-1",
+      attempts: 2,
+      leaseToken: "lease-1",
+    },
+    {
+      id: "job-2",
+      type: "generate_card",
+      payload: {},
+      workspaceId: "workspace-2",
+      requestedBy: null,
+      attempts: 0,
+      leaseToken: "lease-2",
+    },
+  ]);
+});
+
+test("queue reaper summarizes pending and dead results", async () => {
+  const result = await reapStaleJobs(queueExecutorWithRows([
+    { id: "job-pending", status: "pending" },
+    { id: "job-dead", status: "dead" },
+    { id: "job-other", status: "failed" },
+  ]));
+
+  assert.deepEqual(result, {
+    total: 3,
+    pending: 1,
+    dead: 1,
+    ids: ["job-pending", "job-dead", "job-other"],
+  });
+});
+
+test("successful queue updates are fenced by workspace, running state, and lease token", async () => {
+  let context: unknown;
+  let values: unknown;
+  let predicate: SQL | undefined;
+  let returnedRows = [{ id: claimedJobFixture.id }];
+  const transaction = {
+    update: (table: unknown) => {
+      assert.equal(table, schema.jobs);
+      return {
+        set: (nextValues: unknown) => {
+          values = nextValues;
+          return {
+            where: (nextPredicate: SQL) => {
+              predicate = nextPredicate;
+              return {
+                returning: () => Promise.resolve(returnedRows),
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  const runTransaction: QueueTransactionRunner = async (nextContext, operation) => {
+    context = nextContext;
+    return operation(transaction as never);
+  };
+  const updateJob = createDrizzleQueueJobUpdater(runTransaction);
+  const finishedAt = new Date("2026-07-18T12:00:00.000Z");
+
+  assert.equal(await markJobSucceeded(claimedJobFixture, updateJob, () => finishedAt), true);
+  assert.deepEqual(context, {
+    workspaceId: claimedJobFixture.workspaceId,
+    userId: claimedJobFixture.requestedBy,
+  });
+  assert.deepEqual(values, {
+    status: "succeeded",
+    finishedAt,
+    leaseToken: null,
+  });
+
+  assert.ok(predicate);
+  const query = new PgDialect().sqlToQuery(predicate);
+  assert.match(query.sql, /"jobs"\."id" = \$1/);
+  assert.match(query.sql, /"jobs"\."workspace_id" = \$2/);
+  assert.match(query.sql, /"jobs"\."status" = \$3/);
+  assert.match(query.sql, /"jobs"\."lease_token" = \$4/);
+  assert.deepEqual(query.params, [
+    claimedJobFixture.id,
+    claimedJobFixture.workspaceId,
+    "running",
+    claimedJobFixture.leaseToken,
+  ]);
+
+  // A reaped/re-claimed job changes the lease, so the fenced UPDATE returns no
+  // row and the adapter reports that the success transition was not applied.
+  returnedRows = [];
+  assert.equal(await markJobSucceeded(claimedJobFixture, updateJob, () => finishedAt), false);
+});
+
+test("failed jobs below the attempt limit return to pending with backoff", async () => {
+  const updates: QueueJobUpdate[] = [];
+  const updateJob: QueueJobUpdater = async (update) => {
+    updates.push(update);
+    return true;
+  };
+  const epochMs = Date.parse("2026-07-18T12:00:00.000Z");
+
+  const transition = await markJobFailed(
+    claimedJobFixture,
+    "provider unavailable",
+    updateJob,
+    () => new Date(epochMs),
+    () => epochMs,
+  );
+
+  assert.deepEqual(transition, {
+    updated: true,
+    status: "pending",
+    attempts: 1,
+    backoffMs: 10_000,
+  });
+  assert.deepEqual(updates, [{
+    context: {
+      workspaceId: claimedJobFixture.workspaceId,
+      userId: claimedJobFixture.requestedBy,
+    },
+    fence: {
+      id: claimedJobFixture.id,
+      workspaceId: claimedJobFixture.workspaceId,
+      status: "running",
+      leaseToken: claimedJobFixture.leaseToken,
+    },
+    values: {
+      status: "pending",
+      attempts: 1,
+      lastError: "provider unavailable",
+      startedAt: null,
+      leaseToken: null,
+      finishedAt: null,
+      scheduledAt: new Date(epochMs + 10_000),
+    },
+  }]);
+});
+
+test("failed jobs at the attempt limit become dead without retry delay", async () => {
+  let update: QueueJobUpdate | undefined;
+  const updateJob: QueueJobUpdater = async (nextUpdate) => {
+    update = nextUpdate;
+    return true;
+  };
+  const epochMs = Date.parse("2026-07-18T12:00:00.000Z");
+  const exhaustedJob = { ...claimedJobFixture, attempts: 2 };
+
+  const transition = await markJobFailed(
+    exhaustedJob,
+    "model deadline exceeded",
+    updateJob,
+    () => new Date(epochMs),
+    () => epochMs,
+  );
+
+  assert.deepEqual(transition, {
+    updated: true,
+    status: "dead",
+    attempts: 3,
+    backoffMs: 0,
+  });
+  assert.equal(update?.values.status, "dead");
+  assert.equal(update?.values.attempts, 3);
+  assert.deepEqual(update?.values.finishedAt, new Date(epochMs));
+  assert.deepEqual(update?.values.scheduledAt, new Date(epochMs));
+  assert.equal(update?.fence.leaseToken, exhaustedJob.leaseToken);
+});
 
 test("production workers fail closed when the dedicated database role is missing", () => {
   assert.throws(

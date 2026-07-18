@@ -10,6 +10,7 @@ import {
   RevisionConflictError,
 } from "./service.ts";
 import { requireSession } from "../identity/middleware.ts";
+import { withWorkspaceTransaction } from "../../db/client.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
 
@@ -19,16 +20,27 @@ export async function noteRoutes(app: FastifyInstance) {
   app.get("/notes", async (req) => {
     // R-022: 统一 Zod 校验，非法参数返回 400 而非 NaN 进入查询
     const q = parseQuery(app, paginationQuerySchema, req.query);
-    const result = await listNotes(req.session.workspaceId, {
-      cursor: q.cursor,
-      limit: q.limit,
-    });
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => listNotes(transaction, req.session.workspaceId, {
+        cursor: q.cursor,
+        limit: q.limit,
+      }),
+    );
     return result;
   });
 
   app.post("/notes", async (req) => {
     const body = parseBody(app, noteCreateSchema, req.body);
-    const result = await createNote(req.session.workspaceId, req.session.userId, body);
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => createNote(
+        transaction,
+        req.session.workspaceId,
+        req.session.userId,
+        body,
+      ),
+    );
     return {
       note: result?.note,
       version: result?.version,
@@ -40,7 +52,14 @@ export async function noteRoutes(app: FastifyInstance) {
     // R-022: UUID 路径参数校验
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const result = await getNoteWithVersion(req.params.id, req.session.workspaceId);
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => getNoteWithVersion(
+        transaction,
+        req.params.id,
+        req.session.workspaceId,
+      ),
+    );
     if (!result) return reply.code(404).send({ error: "not found" });
     return result;
   });
@@ -50,11 +69,15 @@ export async function noteRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
     const body = parseBody(app, noteUpdateSchema, req.body);
     try {
-      const result = await updateNote(
-        req.params.id,
-        req.session.workspaceId,
-        req.session.userId,
-        body,
+      const result = await withWorkspaceTransaction(
+        { workspaceId: req.session.workspaceId, userId: req.session.userId },
+        (transaction) => updateNote(
+          transaction,
+          req.params.id,
+          req.session.workspaceId,
+          req.session.userId,
+          body,
+        ),
       );
       if (!result) return reply.code(404).send({ error: "not found" });
       return result;
@@ -81,7 +104,10 @@ export async function noteRoutes(app: FastifyInstance) {
   app.delete<{ Params: { id: string } }>("/notes/:id", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const result = await deleteNote(req.params.id, req.session.workspaceId);
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => deleteNote(transaction, req.params.id, req.session.workspaceId),
+    );
     if (!result) return reply.code(404).send({ error: "not found" });
     return reply.code(204).send();
   });
@@ -90,7 +116,10 @@ export async function noteRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/notes/:id/versions", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const versions = await listNoteVersions(req.params.id, req.session.workspaceId);
+    const versions = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => listNoteVersions(transaction, req.params.id, req.session.workspaceId),
+    );
     if (!versions) return reply.code(404).send({ error: "not found" });
     return { items: versions };
   });

@@ -31,12 +31,12 @@ export type ApiTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 
 export interface WorkspaceTransactionContext {
   workspaceId: string;
-  userId: string | null;
+  userId: string;
 }
 
 export interface NormalizedWorkspaceTransactionContext {
   workspaceId: string;
-  userId: string | null;
+  userId: string;
 }
 
 export class WorkspaceTransactionContextError extends Error {
@@ -66,12 +66,12 @@ export function normalizeWorkspaceTransactionContext(
   if (typeof context.workspaceId !== "string") {
     throw new WorkspaceTransactionContextError("workspaceId must be a UUID");
   }
-  if (context.userId !== null && typeof context.userId !== "string") {
-    throw new WorkspaceTransactionContextError("userId must be a UUID or null");
+  if (typeof context.userId !== "string") {
+    throw new WorkspaceTransactionContextError("userId must be a UUID");
   }
   return {
     workspaceId: normalizeContextUuid(context.workspaceId, "workspaceId"),
-    userId: context.userId === null ? null : normalizeContextUuid(context.userId, "userId"),
+    userId: normalizeContextUuid(context.userId, "userId"),
   };
 }
 
@@ -97,8 +97,8 @@ const workspaceTransactionStorage = new AsyncLocalStorage<ActiveWorkspaceTransac
 
 /**
  * Set both custom settings transaction-locally and verify PostgreSQL returned
- * the exact normalized values. An empty app.user_id represents an intentionally
- * absent actor and is consumed through NULLIF by future policies.
+ * the exact normalized values. API business work always has an authenticated
+ * actor; actor-less system work belongs to controlled functions or the Worker.
  */
 export async function setApiTransactionContext(
   transaction: ApiTransaction,
@@ -116,12 +116,12 @@ export async function setApiTransactionContext(
   const rows = await transaction.execute<{ workspace_id: string; user_id: string }>(sql`
     SELECT
       pg_catalog.set_config('app.workspace_id', ${normalized.workspaceId}, true) AS workspace_id,
-      pg_catalog.set_config('app.user_id', ${normalized.userId ?? ""}, true) AS user_id
+      pg_catalog.set_config('app.user_id', ${normalized.userId}, true) AS user_id
   `);
   const applied = rows[0];
   if (
     applied?.workspace_id?.toLowerCase() !== normalized.workspaceId
-    || (applied?.user_id ?? "").toLowerCase() !== (normalized.userId ?? "")
+    || applied?.user_id?.toLowerCase() !== normalized.userId
   ) {
     throw new WorkspaceTransactionContextError("database rejected workspace transaction context");
   }

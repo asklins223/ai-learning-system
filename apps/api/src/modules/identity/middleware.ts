@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { eq, and } from "drizzle-orm";
 import { decodeToken } from "./service.ts";
-import { db } from "../../db/client.ts";
+import { withWorkspaceTransaction } from "../../db/client.ts";
 import { workspaceMembers, workspaces } from "../../db/schema/identity.ts";
 import { extractAuthCredential, hasValidCookieCsrf, type AuthCredential } from "./session-auth.ts";
 
@@ -36,12 +36,24 @@ export function getRequestCredential(req: FastifyRequest): AuthCredential | null
 
 export async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
   const { userId, workspaceId } = req.session;
-  const membership = await db.query.workspaceMembers.findFirst({
-    where: and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)),
-  });
-  const isOwnerViaMember = membership?.role === "owner";
-  const ws = await db.query.workspaces.findFirst({ where: eq(workspaces.id, workspaceId) });
-  const isOwnerViaWorkspace = ws?.ownerId === userId;
+  const { isOwnerViaMember, isOwnerViaWorkspace } = await withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (transaction) => {
+      const membership = await transaction.query.workspaceMembers.findFirst({
+        where: and(
+          eq(workspaceMembers.workspaceId, workspaceId),
+          eq(workspaceMembers.userId, userId),
+        ),
+      });
+      const ws = await transaction.query.workspaces.findFirst({
+        where: eq(workspaces.id, workspaceId),
+      });
+      return {
+        isOwnerViaMember: membership?.role === "owner",
+        isOwnerViaWorkspace: ws?.ownerId === userId,
+      };
+    },
+  );
   if (!isOwnerViaMember && !isOwnerViaWorkspace) {
     return reply.code(403).send({ error: "owner role required" });
   }

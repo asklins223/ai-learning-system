@@ -1,11 +1,12 @@
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import type { ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, validationEvents, reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
 import { aiArtifacts } from "../../db/schema/ai.ts";
 import { jobs } from "../../db/schema/job.ts";
-import { upsertSearchDocument, deleteSearchDocument } from "../../lib/search-index.ts";
+import { searchDocuments } from "../../db/schema/search.ts";
+import { logger } from "../../lib/logger.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import type { NoteCreateInput, NoteUpdateInput, NoteBlock } from "./schema.ts";
 
@@ -43,14 +44,95 @@ function deriveNoteTitle(blocks: NoteBlock[] | Array<{ type: NoteBlock["type"]; 
   return title.slice(0, 60) || "无标题笔记";
 }
 
+type NoteSearchDocument = {
+  workspaceId: string;
+  objectType: "note" | "card" | "evidence";
+  objectId: string;
+  title: string | null;
+  body: string | null;
+};
+
+/**
+ * Keep projection failures non-fatal without escaping the request transaction.
+ * Drizzle maps this nested transaction to a savepoint on the same connection.
+ */
+async function upsertSearchDocument(
+  executor: ApiTransaction,
+  document: NoteSearchDocument,
+): Promise<boolean> {
+  try {
+    await executor.transaction(async (savepoint) => {
+      await savepoint
+        .insert(searchDocuments)
+        .values({ ...document, metadata: {}, indexedAt: new Date() })
+        .onConflictDoUpdate({
+          target: [searchDocuments.workspaceId, searchDocuments.objectType, searchDocuments.objectId],
+          set: {
+            title: document.title,
+            body: document.body,
+            metadata: {},
+            indexedAt: new Date(),
+          },
+        });
+    });
+    return true;
+  } catch (err) {
+    logger.error(
+      { err, ...document },
+      "search index upsert failed — index may be stale, run reindex to compensate",
+    );
+    return false;
+  }
+}
+
+async function deleteSearchDocuments(
+  executor: ApiTransaction,
+  workspaceId: string,
+  documents: Array<Pick<NoteSearchDocument, "objectType" | "objectId">>,
+): Promise<void> {
+  if (documents.length === 0) return;
+
+  const objectIdsByType = new Map<NoteSearchDocument["objectType"], string[]>();
+  for (const document of documents) {
+    const objectIds = objectIdsByType.get(document.objectType) ?? [];
+    objectIds.push(document.objectId);
+    objectIdsByType.set(document.objectType, objectIds);
+  }
+  const documentConditions = Array.from(objectIdsByType, ([objectType, objectIds]) => and(
+    eq(searchDocuments.objectType, objectType),
+    inArray(searchDocuments.objectId, objectIds),
+  ));
+
+  try {
+    await executor.transaction(async (savepoint) => {
+      await savepoint
+        .delete(searchDocuments)
+        .where(and(
+          eq(searchDocuments.workspaceId, workspaceId),
+          or(...documentConditions),
+        ));
+    });
+  } catch (err) {
+    logger.error(
+      { err, workspaceId, documents },
+      "search index batch delete failed — index may have ghost documents, run reindex to compensate",
+    );
+  }
+}
+
 /* ----------------------------- service --------------------------------- */
 
-export async function createNote(workspaceId: string, userId: string, input: NoteCreateInput) {
+export async function createNote(
+  executor: ApiTransaction,
+  workspaceId: string,
+  userId: string,
+  input: NoteCreateInput,
+) {
   // 自动提取标题：取 blocks 里第一个 heading 或 paragraph 的 content
   const titleWasProvided = Boolean(input.title?.trim());
   const title = titleWasProvided ? input.title.trim().slice(0, 200) : deriveNoteTitle(input.blocks ?? []);
 
-  const note = await db.transaction(async (tx) => {
+  const note = await (async (tx: ApiTransaction) => {
     const [row] = await tx
       .insert(notes)
       .values({
@@ -90,13 +172,13 @@ export async function createNote(workspaceId: string, userId: string, input: Not
       .where(eq(notes.id, row.id));
 
     return row;
-  });
+  })(executor);
 
   // 同步搜索索引（note_version 创建时）
-  const result = await getNoteWithVersion(note.id, workspaceId);
+  const result = await getNoteWithVersion(executor, note.id, workspaceId);
   if (result) {
     const body = (result.blocks as NoteBlock[]).map((b) => b.content).join("\n");
-    await upsertSearchDocument({
+    await upsertSearchDocument(executor, {
       workspaceId,
       objectType: "note",
       objectId: note.id,
@@ -107,7 +189,11 @@ export async function createNote(workspaceId: string, userId: string, input: Not
   return result;
 }
 
-export async function listNotes(workspaceId: string, opts?: { cursor?: string; limit?: number }) {
+export async function listNotes(
+  executor: ApiTransaction,
+  workspaceId: string,
+  opts?: { cursor?: string; limit?: number },
+) {
   const limit = Math.max(1, Math.min(100, opts?.limit ?? 100));
   const conditions = [eq(notes.workspaceId, workspaceId)];
 
@@ -125,7 +211,7 @@ export async function listNotes(workspaceId: string, opts?: { cursor?: string; l
     }
   }
 
-  let rows = await db
+  const rows = await executor
     .select({
       id: notes.id,
       title: notes.title,
@@ -142,7 +228,7 @@ export async function listNotes(workspaceId: string, opts?: { cursor?: string; l
     .limit(limit);
 
   // R-019: 服务端返回实际总数，不再依赖前端已加载数量
-  const countRows = await db
+  const countRows = await executor
     .select({ count: sql<number>`count(*)::int` })
     .from(notes)
     .where(eq(notes.workspaceId, workspaceId));
@@ -167,8 +253,12 @@ export async function listNotes(workspaceId: string, opts?: { cursor?: string; l
   };
 }
 
-export async function getNoteWithVersion(noteId: string, workspaceId: string) {
-  const note = await db.query.notes.findFirst({
+export async function getNoteWithVersion(
+  executor: ApiTransaction,
+  noteId: string,
+  workspaceId: string,
+) {
+  const note = await executor.query.notes.findFirst({
     where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
   });
   if (!note) return null;
@@ -176,12 +266,12 @@ export async function getNoteWithVersion(noteId: string, workspaceId: string) {
   const versionId = note.currentVersionId;
   if (!versionId) return null;
 
-  const version = await db.query.noteVersions.findFirst({
+  const version = await executor.query.noteVersions.findFirst({
     where: eq(noteVersions.id, versionId),
   });
   if (!version) return null;
 
-  const blocks = await db.query.noteBlocks.findMany({
+  const blocks = await executor.query.noteBlocks.findMany({
     where: eq(noteBlocks.versionId, versionId),
     orderBy: (b, { asc: asc1 }) => [asc1(b.ordinal)],
   });
@@ -194,13 +284,14 @@ export async function getNoteWithVersion(noteId: string, workspaceId: string) {
 }
 
 export async function updateNote(
+  executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
   userId: string,
   input: NoteUpdateInput,
 ) {
-  // P1-4: 搜索索引同步移到事务外，与 createNote 保持一致
-  const result = await db.transaction(async (tx) => {
+  // P1-4: 业务写入和搜索投影共享 handler 事务；投影自身以 savepoint 隔离失败。
+  const result = await (async (tx: ApiTransaction) => {
     // R-008: 使用 FOR UPDATE 锁定 note 行，防止并发版本号冲突
     const noteRows = await tx
       .select()
@@ -288,16 +379,16 @@ export async function updateNote(
       orderBy: (b, { asc: a1 }) => [a1(b.ordinal)],
     });
     return { note: uNote, version: uVer, blocks: uBlocks as NoteBlock[] };
-  });
+  })(executor);
 
-  // R-017: 事务外同步搜索索引 — 即使只改标题也更新（标题投影不会持续过期）
+  // R-017: 即使只改标题也更新搜索投影（标题投影不会持续过期）。
   if (result) {
     const body = Array.isArray(input.blocks)
       ? (result.blocks as NoteBlock[]).map((b) => b.content).join("\n")
       : null;
     // 只改标题时，body 从已有版本获取
     const effectiveBody = body ?? (result.blocks as NoteBlock[]).map((b) => b.content).join("\n");
-    await upsertSearchDocument({
+    await upsertSearchDocument(executor, {
       workspaceId,
       objectType: "note",
       objectId: noteId,
@@ -309,15 +400,19 @@ export async function updateNote(
   return result;
 }
 
-export async function deleteNote(noteId: string, workspaceId: string) {
-  const note = await db.query.notes.findFirst({
+export async function deleteNote(
+  executor: ApiTransaction,
+  noteId: string,
+  workspaceId: string,
+) {
+  const note = await executor.query.notes.findFirst({
     where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
   });
   if (!note) return null;
 
   // P1-1: 级联清理所有关联数据，避免孤儿数据
-  // 收集需要清理搜索索引的 ID（事务内收集，事务外清理）
-  const cleanupIds = await db.transaction(async (tx) => {
+  // 收集需要清理搜索索引的 ID。
+  const cleanupIds = await (async (tx: ApiTransaction) => {
     // 1. 查出所有关联的 note_version IDs
     const versionRows = await tx
       .select({ id: noteVersions.id })
@@ -483,16 +578,14 @@ export async function deleteNote(noteId: string, workspaceId: string) {
     await tx.delete(notes).where(eq(notes.id, noteId));
 
     return { cardIds, evidenceIds };
-  });
+  })(executor);
 
-  // 事务外清理搜索索引
-  await deleteSearchDocument(workspaceId, "note", noteId);
-  for (const cardId of cleanupIds.cardIds) {
-    await deleteSearchDocument(workspaceId, "card", cardId);
-  }
-  for (const evidenceId of cleanupIds.evidenceIds) {
-    await deleteSearchDocument(workspaceId, "evidence", evidenceId);
-  }
+  // 同一 handler 事务内清理搜索索引；每次投影写使用 savepoint 保留补偿语义。
+  await deleteSearchDocuments(executor, workspaceId, [
+    { objectType: "note", objectId: noteId },
+    ...cleanupIds.cardIds.map((objectId) => ({ objectType: "card" as const, objectId })),
+    ...cleanupIds.evidenceIds.map((objectId) => ({ objectType: "evidence" as const, objectId })),
+  ]);
 
   return { ok: true };
 }
@@ -500,13 +593,17 @@ export async function deleteNote(noteId: string, workspaceId: string) {
 /**
  * §2.5: 笔记版本历史列表（不含 blocks 详情，按需加载）。
  */
-export async function listNoteVersions(noteId: string, workspaceId: string) {
-  const note = await db.query.notes.findFirst({
+export async function listNoteVersions(
+  executor: ApiTransaction,
+  noteId: string,
+  workspaceId: string,
+) {
+  const note = await executor.query.notes.findFirst({
     where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
   });
   if (!note) return null;
 
-  const versions = await db.query.noteVersions.findMany({
+  const versions = await executor.query.noteVersions.findMany({
     where: eq(noteVersions.noteId, noteId),
     orderBy: (v, { desc: d }) => [d(v.versionNo)],
     columns: {

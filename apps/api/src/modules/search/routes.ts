@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
+import { withWorkspaceTransaction } from "../../db/client.ts";
 import { detectSearchDrift, reindexWorkspaceSearch, search } from "./service.ts";
 import { parseQuery } from "../../lib/pagination.ts";
 
@@ -18,24 +19,36 @@ export async function searchRoutes(app: FastifyInstance) {
   // R-022: 统一 Zod 校验
   app.get("/search", async (req) => {
     const q = parseQuery(app, searchQuerySchema, req.query);
-    if (!q.q?.trim()) return { items: [], total: 0, nextOffset: null };
-    return search(req.session.workspaceId, q.q.trim(), {
-      type: q.type,
-      limit: q.limit,
-      offset: q.offset,
-    });
+    const normalizedQuery = q.q?.trim();
+    return withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      async (transaction) => {
+        if (!normalizedQuery) return { items: [], total: 0, nextOffset: null };
+        return search(transaction, req.session.workspaceId, normalizedQuery, {
+          type: q.type,
+          limit: q.limit,
+          offset: q.offset,
+        });
+      },
+    );
   });
 
   // GET /search/drift — F-025: 检测搜索索引与业务表的漂移
   // 返回幽灵文档、缺失文档和过期标题，供前端展示和触发 reindex 补偿
   app.get("/search/drift", { preHandler: [requireOwner] }, async (req) => {
-    return detectSearchDrift(req.session.workspaceId);
+    return withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => detectSearchDrift(transaction, req.session.workspaceId),
+    );
   });
 
   // POST /search/reindex — 重建当前 workspace 的 search_documents 派生表
   // F-011: 重建索引是管理操作，仅 owner 可执行
   // F-025: 作为补偿机制，修复漂移检测发现的不一致
   app.post("/search/reindex", { preHandler: [requireOwner] }, async (req) => {
-    return reindexWorkspaceSearch(req.session.workspaceId);
+    return withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => reindexWorkspaceSearch(transaction, req.session.workspaceId),
+    );
   });
 }

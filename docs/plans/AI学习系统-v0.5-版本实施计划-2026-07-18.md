@@ -1,7 +1,7 @@
 # AI 学习系统 v0.5 版本实施计划
 
-> 状态：Approved for development（M0 收口中；foundation/expand 已在本地开始，M1 Gate 未通过）<br>
-> 文档版本：0.4<br>
+> 状态：Approved for development（M0 收口中；SEC-01 policy expand/verify 已本地通过，RLS enforce 仍阻断，M1 Gate 未通过）<br>
+> 文档版本：0.5<br>
 > 计划日期：2026-07-18<br>
 > 最后更新：2026-07-18<br>
 > 目标版本：`v0.5.0`<br>
@@ -315,6 +315,8 @@ Provider 超时、Worker 重启或导入部分失败
 - [ ] 两个 workspace 的跨域 ID 猜测、关联写入和批量接口全部被拒绝；
 - [ ] Worker claim、续租、提交和回收通过 RLS/lease 双重约束；
 - [ ] 迁移、回滚/前向修复和故障恢复 runbook 完成。
+
+2026-07-18 实施进度：0019 已在 RLS 保持关闭的前提下定义 22 张表、58 条 policy；隔离 PostgreSQL 16.14 上的受限角色/RLS gate、Worker `max: 1` 连接池 1,000 次事务和双 Worker queue 5 项已通过。这只是 expand/verify preparation；真实 HTTP 双 workspace 矩阵、validation artifact 归属、job-specific 更新函数、完整 handler side effect、代表性升级和独立评审仍阻断 enforce，以上 DoD 不勾选。
 
 ### 6.2 SEC-02 / ALPHA-01：邀请、成员与 onboarding
 
@@ -778,8 +780,8 @@ D-02、D-03、D-06 当前由 `@asklins223` 以 repository owner 身份兼任产�
 - [x] 数据迁移和回滚/前向修复方案通过；
 - [ ] 测试 fixture、Alpha 环境和 Provider 预算准备完成（框架、fixture/环境契约与 10 美元上限已批准；CLI/harness、外部环境资源和真实凭据仍未准备）；
 - [x] 隐私 allowlist、保留期和访问权限通过 Owner development review；SEC-01 enforce/RC 的独立 security/data review 要求和证据入口已记录；
-- [ ] 当前工作区无会污染 release-check 的未跟踪发布输入（M0 工件提交后关闭）；
-- [ ] v0.4 本地 immutable-SHA 基线已复核；待保存 Node 22 CI 原始 artifact 并把证据纳入 clean Git 提交。
+- [x] foundation clean commit 上 `verify-release-inputs` 已确认当时 19 个迁移输入完整；当前新增第 20 个 migration 将在本次提交后重新执行 clean input gate；
+- [ ] 保存并核验 v0.4 基线对应的 Node 22 原始 artifact/report 与 digest（immutable-SHA 本地基线及既有成功 run 已复核）。
 
 ## 12. 文档变更记录
 
@@ -789,3 +791,4 @@ D-02、D-03、D-06 当前由 `@asklins223` 以 repository owner 身份兼任产�
 | 0.2 | 2026-07-18 | 固定 canonical 路径与不可变 SHA；收敛为 8 周 Private Alpha；补齐数据分类、可计算 SLO、备份、E2E/覆盖率和 Provider 门禁 |
 | 0.3 | 2026-07-18 | repository owner 批准开发启动；从 canonical SHA 建立 v0.5 分支；接受 ADR-0001～0008 并保存初步本地基线 |
 | 0.4 | 2026-07-18 | 明确 Owner development self-review 与独立发布复核边界；修正 immutable-SHA coverage；M0 保持收口中并记录已开始的 foundation/expand |
+| 0.5 | 2026-07-18 | 记录 SEC-01 policy expand/verify：22 表/58 policy、PG16.14 受限角色与双 Worker/池复用证据；明确 RLS 仍关闭及 enforce/M1 阻断项 |

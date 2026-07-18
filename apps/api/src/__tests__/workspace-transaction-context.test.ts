@@ -17,16 +17,16 @@ test("workspace transaction context validates and canonicalizes UUIDs without a 
       userId: USER_ID.toLowerCase(),
     },
   );
-  assert.deepEqual(
-    normalizeWorkspaceTransactionContext({ workspaceId: WORKSPACE_ID, userId: null }),
-    { workspaceId: WORKSPACE_ID.toLowerCase(), userId: null },
-  );
   assert.throws(
-    () => normalizeWorkspaceTransactionContext({ workspaceId: "not-a-uuid", userId: null }),
+    () => normalizeWorkspaceTransactionContext({ workspaceId: "not-a-uuid", userId: USER_ID }),
     WorkspaceTransactionContextError,
   );
   assert.throws(
     () => normalizeWorkspaceTransactionContext({ workspaceId: WORKSPACE_ID, userId: "" }),
+    WorkspaceTransactionContextError,
+  );
+  assert.throws(
+    () => normalizeWorkspaceTransactionContext({ workspaceId: WORKSPACE_ID, userId: null as never }),
     WorkspaceTransactionContextError,
   );
 });
@@ -44,7 +44,7 @@ test("nested workspace transaction context fails closed on tenant or actor chang
   assert.throws(
     () => assertWorkspaceTransactionContextCompatible(active, {
       workspaceId: active.workspaceId,
-      userId: null,
+      userId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
     }),
     /cannot change workspace or user context/,
   );

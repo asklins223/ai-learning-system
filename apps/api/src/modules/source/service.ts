@@ -1,7 +1,8 @@
 import { and, asc, desc, eq, ne, sql, count, inArray } from "drizzle-orm";
-import { db, withWorkspaceTransaction } from "../../db/client.ts";
+import type { ApiTransaction } from "../../db/client.ts";
 import { sources, sourceSegments, notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { jobs } from "../../db/schema/job.ts";
+import { searchDocuments } from "../../db/schema/search.ts";
 import {
   SourceStatus,
   JobStatus,
@@ -10,10 +11,73 @@ import {
 } from "@ailearn/shared";
 import { segmentsToBlocks, type ParsedSegment } from "../../lib/markdown-parser.ts";
 import type { SourceCreateInput, SourceUpdateInput } from "./schema.ts";
-import { deleteSearchDocument, upsertSearchDocument } from "../../lib/search-index.ts";
+import { logger } from "../../lib/logger.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 
+type SourceSearchDocument = {
+  workspaceId: string;
+  objectType: "source" | "note";
+  objectId: string;
+  title: string | null;
+  body: string | null;
+};
+
+/** Keep best-effort projection writes on the request connection via a savepoint. */
+async function upsertSearchDocument(
+  executor: ApiTransaction,
+  document: SourceSearchDocument,
+): Promise<boolean> {
+  try {
+    await executor.transaction(async (savepoint) => {
+      await savepoint
+        .insert(searchDocuments)
+        .values({ ...document, metadata: {}, indexedAt: new Date() })
+        .onConflictDoUpdate({
+          target: [searchDocuments.workspaceId, searchDocuments.objectType, searchDocuments.objectId],
+          set: {
+            title: document.title,
+            body: document.body,
+            metadata: {},
+            indexedAt: new Date(),
+          },
+        });
+    });
+    return true;
+  } catch (err) {
+    logger.error(
+      { err, ...document },
+      "search index upsert failed — index may be stale, run reindex to compensate",
+    );
+    return false;
+  }
+}
+
+async function deleteSearchDocument(
+  executor: ApiTransaction,
+  workspaceId: string,
+  objectType: SourceSearchDocument["objectType"],
+  objectId: string,
+): Promise<void> {
+  try {
+    await executor.transaction(async (savepoint) => {
+      await savepoint
+        .delete(searchDocuments)
+        .where(and(
+          eq(searchDocuments.workspaceId, workspaceId),
+          eq(searchDocuments.objectType, objectType),
+          eq(searchDocuments.objectId, objectId),
+        ));
+    });
+  } catch (err) {
+    logger.error(
+      { err, workspaceId, objectType, objectId },
+      "search index delete failed — index may have ghost document, run reindex to compensate",
+    );
+  }
+}
+
 export async function createSource(
+  executor: ApiTransaction,
   workspaceId: string,
   userId: string,
   input: SourceCreateInput,
@@ -24,7 +88,7 @@ export async function createSource(
   if (input.url) metadata.url = input.url;
 
   // R-016: source 创建和 job 入队在同一事务内，避免入队失败留下永不解析的 DRAFT
-  const source = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+  const source = await (async (tx: ApiTransaction) => {
     // 与 createJob 使用同一 workspace advisory lock，将配额计数和插入
     // 串行化；既保持 source/job 原子性，也避免并发突破配额。
     await tx.execute(sql`
@@ -75,12 +139,13 @@ export async function createSource(
     });
 
     return row;
-  });
+  })(executor);
 
-  return getSource(source.id, workspaceId);
+  return getSource(executor, source.id, workspaceId);
 }
 
 export async function listSources(
+  executor: ApiTransaction,
   workspaceId: string,
   opts?: { status?: string; cursor?: string; limit?: number },
 ) {
@@ -103,13 +168,13 @@ export async function listSources(
       conditions.push(sql`(${sources.createdAt}, ${sources.id}) < (${cursorTs}, ${cursorId})`);
     }
   }
-  const items = await db.query.sources.findMany({
+  const items = await executor.query.sources.findMany({
     where: and(...conditions),
     orderBy: [desc(sources.createdAt), desc(sources.id)],
     limit,
   });
   // R-019: 服务端返回实际总数
-  const countRows = await db
+  const countRows = await executor
     .select({ count: sql<number>`count(*)::int` })
     .from(sources)
     .where(where);
@@ -122,12 +187,16 @@ export async function listSources(
   return { items, nextCursor, total };
 }
 
-export async function listSourceStatuses(workspaceId: string, ids: string[]) {
+export async function listSourceStatuses(
+  executor: ApiTransaction,
+  workspaceId: string,
+  ids: string[],
+) {
   if (ids.length === 0) return [];
   // Polling must not retransmit metadata.rawContent (potentially hundreds of
   // kilobytes) every few seconds. Include archived rows so another tab's
   // archive action can make the polling client remove the stale entry.
-  return db
+  return executor
     .select({
       id: sources.id,
       status: sources.status,
@@ -137,13 +206,17 @@ export async function listSourceStatuses(workspaceId: string, ids: string[]) {
     .where(and(eq(sources.workspaceId, workspaceId), inArray(sources.id, ids)));
 }
 
-export async function getSource(sourceId: string, workspaceId: string) {
-  const source = await db.query.sources.findFirst({
+export async function getSource(
+  executor: ApiTransaction,
+  sourceId: string,
+  workspaceId: string,
+) {
+  const source = await executor.query.sources.findFirst({
     where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
   });
   if (!source) return null;
 
-  const segments = await db.query.sourceSegments.findMany({
+  const segments = await executor.query.sourceSegments.findMany({
     where: eq(sourceSegments.sourceId, sourceId),
     orderBy: [asc(sourceSegments.ordinal)],
   });
@@ -152,11 +225,12 @@ export async function getSource(sourceId: string, workspaceId: string) {
 }
 
 export async function updateSource(
+  executor: ApiTransaction,
   sourceId: string,
   workspaceId: string,
   input: SourceUpdateInput,
 ) {
-  const source = await db.query.sources.findFirst({
+  const source = await executor.query.sources.findFirst({
     where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
   });
   if (!source) return null;
@@ -168,27 +242,31 @@ export async function updateSource(
     updates.metadata = { ...source.metadata, ...input.metadata };
   }
 
-  await db
+  await executor
     .update(sources)
     .set(updates)
     .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)));
-  return getSource(sourceId, workspaceId);
+  return getSource(executor, sourceId, workspaceId);
 }
 
-export async function deleteSource(sourceId: string, workspaceId: string) {
-  const source = await db.query.sources.findFirst({
+export async function deleteSource(
+  executor: ApiTransaction,
+  sourceId: string,
+  workspaceId: string,
+) {
+  const source = await executor.query.sources.findFirst({
     where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
   });
   if (!source) return null;
 
   // 软删除：status → archived
-  await db
+  await executor
     .update(sources)
     .set({ status: SourceStatus.ARCHIVED, updatedAt: new Date() })
     .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)));
 
   // 清理搜索索引（P1-3）
-  await deleteSearchDocument(workspaceId, "source", sourceId);
+  await deleteSearchDocument(executor, workspaceId, "source", sourceId);
 
   return { ok: true };
 }
@@ -196,13 +274,17 @@ export async function deleteSource(sourceId: string, workspaceId: string) {
 /**
  * §2.7: 查询从此来源创建的笔记列表。
  */
-export async function listNotesBySource(sourceId: string, workspaceId: string) {
-  const source = await db.query.sources.findFirst({
+export async function listNotesBySource(
+  executor: ApiTransaction,
+  sourceId: string,
+  workspaceId: string,
+) {
+  const source = await executor.query.sources.findFirst({
     where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
   });
   if (!source) return null;
 
-  const noteRows = await db
+  const noteRows = await executor
     .select({
       id: notes.id,
       title: notes.title,
@@ -227,11 +309,12 @@ export async function listNotesBySource(sourceId: string, workspaceId: string) {
  * 4. block 的 source_ref 指向 source_segment
  */
 export async function createNoteFromSource(
+  executor: ApiTransaction,
   sourceId: string,
   workspaceId: string,
   userId: string,
 ) {
-  const source = await db.query.sources.findFirst({
+  const source = await executor.query.sources.findFirst({
     where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
   });
   if (!source) return null;
@@ -241,7 +324,7 @@ export async function createNoteFromSource(
     return { error: "source_not_ready" as const };
   }
 
-  const segments = await db.query.sourceSegments.findMany({
+  const segments = await executor.query.sourceSegments.findMany({
     where: eq(sourceSegments.sourceId, sourceId),
     orderBy: [asc(sourceSegments.ordinal)],
   });
@@ -261,7 +344,7 @@ export async function createNoteFromSource(
 
   const blocks = segmentsToBlocks(parsedSegments, source.type as "text" | "markdown" | "code" | "url");
 
-  const result = await db.transaction(async (tx) => {
+  const result = await (async (tx: ApiTransaction) => {
     // 创建 note，写入 sourceId
     const [note] = await tx
       .insert(notes)
@@ -305,11 +388,11 @@ export async function createNoteFromSource(
       .where(eq(notes.id, note.id));
 
     return { note, version };
-  });
+  })(executor);
 
   // B-NEW-1: 同步搜索索引（与 createNote / importMarkdown 保持一致）
   const bodyText = blocks.map((b) => b.content).join("\n");
-  await upsertSearchDocument({
+  await upsertSearchDocument(executor, {
     workspaceId,
     objectType: "note",
     objectId: result.note.id,

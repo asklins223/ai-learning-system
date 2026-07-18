@@ -1,5 +1,5 @@
 import { and, asc, eq, ne, sql, inArray, lt } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import type { ApiTransaction } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
 import { notes, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
@@ -24,6 +24,7 @@ export interface SearchResult {
  * 同一张 card 下的多条 evidence 只返回一条，但记录 matchCount。
  */
 export async function search(
+  executor: ApiTransaction,
   workspaceId: string,
   query: string,
   opts?: { type?: string; limit?: number; offset?: number },
@@ -49,7 +50,7 @@ export async function search(
   // The page and total are independent reads; run them concurrently to avoid
   // paying two database round trips serially on every keystroke.
   const [rows, countRows] = await Promise.all([
-    db.execute<{
+    executor.execute<{
       object_type: string;
       object_id: string;
       title: string | null;
@@ -92,7 +93,7 @@ export async function search(
       OFFSET ${offset}
     `),
     // N-012: total 统计去重后的实体数
-    db.execute<{ count: string }>(sql`
+    executor.execute<{ count: string }>(sql`
       SELECT count(*) as count FROM (
         SELECT DISTINCT ON (
           CASE
@@ -191,7 +192,10 @@ export interface SearchReindexResult {
  *
  * 只索引当前可用对象：笔记、未归档来源、active 学习卡，以及这些卡片下的 evidence。
  */
-export async function reindexWorkspaceSearch(workspaceId: string): Promise<SearchReindexResult & { errors: number }> {
+export async function reindexWorkspaceSearch(
+  executor: ApiTransaction,
+  workspaceId: string,
+): Promise<SearchReindexResult & { errors: number }> {
   let deletedCount = 0;
   let indexed = { note: 0, source: 0, card: 0, evidence: 0 };
   let errors = 0;
@@ -201,11 +205,11 @@ export async function reindexWorkspaceSearch(workspaceId: string): Promise<Searc
   // one query. The old implementation issued one blocks query per note, one
   // segments query per source, and one key-point/evidence query per card.
   const [noteRows, sourceRows, cardRows] = await Promise.all([
-    db.query.notes.findMany({ where: eq(notes.workspaceId, workspaceId) }),
-    db.query.sources.findMany({
+    executor.query.notes.findMany({ where: eq(notes.workspaceId, workspaceId) }),
+    executor.query.sources.findMany({
       where: and(eq(sources.workspaceId, workspaceId), ne(sources.status, SourceStatus.ARCHIVED)),
     }),
-    db.query.learningCards.findMany({
+    executor.query.learningCards.findMany({
       where: and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, CardStatus.ACTIVE)),
     }),
   ]);
@@ -217,19 +221,19 @@ export async function reindexWorkspaceSearch(workspaceId: string): Promise<Searc
   const cardIds = cardRows.map((card) => card.id);
   const [blockRows, segmentRows, keyPointRows] = await Promise.all([
     currentVersionIds.length > 0
-      ? db.query.noteBlocks.findMany({
+      ? executor.query.noteBlocks.findMany({
           where: inArray(noteBlocks.versionId, currentVersionIds),
           orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
         })
       : Promise.resolve([]),
     sourceIds.length > 0
-      ? db.query.sourceSegments.findMany({
+      ? executor.query.sourceSegments.findMany({
           where: inArray(sourceSegments.sourceId, sourceIds),
           orderBy: [asc(sourceSegments.sourceId), asc(sourceSegments.ordinal)],
         })
       : Promise.resolve([]),
     cardIds.length > 0
-      ? db.query.cardKeyPoints.findMany({
+      ? executor.query.cardKeyPoints.findMany({
           where: and(
             eq(cardKeyPoints.workspaceId, workspaceId),
             inArray(cardKeyPoints.cardId, cardIds),
@@ -241,7 +245,7 @@ export async function reindexWorkspaceSearch(workspaceId: string): Promise<Searc
 
   const keyPointIds = keyPointRows.map((keyPoint) => keyPoint.id);
   const evidenceRows = keyPointIds.length > 0
-    ? await db.query.evidences.findMany({
+    ? await executor.query.evidences.findMany({
         where: and(
           eq(evidences.workspaceId, workspaceId),
           inArray(evidences.keyPointId, keyPointIds),
@@ -343,7 +347,7 @@ export async function reindexWorkspaceSearch(workspaceId: string): Promise<Searc
 
   // R-017: 原子事务 — 删除 + 重建在同一事务内
   try {
-    await db.transaction(async (tx) => {
+    await executor.transaction(async (tx) => {
       // Do not delete a projection updated after this rebuild started. On a
       // conflict below, the same timestamp fence prevents stale snapshot data
       // from overwriting a newer request-path upsert.
@@ -477,20 +481,23 @@ export interface SearchDriftResult {
   hasDrift: boolean;
 }
 
-export async function detectSearchDrift(workspaceId: string): Promise<SearchDriftResult> {
+export async function detectSearchDrift(
+  executor: ApiTransaction,
+  workspaceId: string,
+): Promise<SearchDriftResult> {
   const ghosts: { objectType: string; objectId: string }[] = [];
   const missing: { objectType: string; objectId: string }[] = [];
   const staleTitles: { objectType: string; objectId: string; indexedTitle: string | null; actualTitle: string }[] = [];
 
   // 1. Notes: 对比业务表与索引
-  const noteRows = await db.query.notes.findMany({
+  const noteRows = await executor.query.notes.findMany({
     where: eq(notes.workspaceId, workspaceId),
     columns: { id: true, title: true, currentVersionId: true },
   });
   const noteIds = new Set(noteRows.filter((n) => n.currentVersionId).map((n) => n.id));
   const noteTitleMap = new Map(noteRows.filter((n) => n.currentVersionId).map((n) => [n.id, n.title]));
 
-  const indexedNotes = await db.query.searchDocuments.findMany({
+  const indexedNotes = await executor.query.searchDocuments.findMany({
     where: and(eq(searchDocuments.workspaceId, workspaceId), eq(searchDocuments.objectType, "note")),
     columns: { objectId: true, title: true, body: true },
   });
@@ -518,14 +525,14 @@ export async function detectSearchDrift(workspaceId: string): Promise<SearchDrif
   }
 
   // 2. Sources: 对比业务表与索引（排除已归档）
-  const sourceRows = await db.query.sources.findMany({
+  const sourceRows = await executor.query.sources.findMany({
     where: and(eq(sources.workspaceId, workspaceId), ne(sources.status, SourceStatus.ARCHIVED)),
     columns: { id: true, title: true },
   });
   const sourceIds = new Set(sourceRows.map((s) => s.id));
   const sourceTitleMap = new Map(sourceRows.map((s) => [s.id, s.title]));
 
-  const indexedSources = await db.query.searchDocuments.findMany({
+  const indexedSources = await executor.query.searchDocuments.findMany({
     where: and(eq(searchDocuments.workspaceId, workspaceId), eq(searchDocuments.objectType, "source")),
     columns: { objectId: true, title: true },
   });
@@ -553,7 +560,7 @@ export async function detectSearchDrift(workspaceId: string): Promise<SearchDrif
   }
 
   // 3. Cards: 对比业务表与索引（仅 active）
-  const cardRows = await db.query.learningCards.findMany({
+  const cardRows = await executor.query.learningCards.findMany({
     where: and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, CardStatus.ACTIVE)),
     columns: { id: true, schemaJson: true },
   });
@@ -562,7 +569,7 @@ export async function detectSearchDrift(workspaceId: string): Promise<SearchDrif
     cardRows.map((c) => [c.id, (c.schemaJson as { title?: string }).title ?? ""]),
   );
 
-  const indexedCards = await db.query.searchDocuments.findMany({
+  const indexedCards = await executor.query.searchDocuments.findMany({
     where: and(eq(searchDocuments.workspaceId, workspaceId), eq(searchDocuments.objectType, "card")),
     columns: { objectId: true, title: true },
   });
@@ -594,7 +601,7 @@ export async function detectSearchDrift(workspaceId: string): Promise<SearchDrif
   const activeCardIds = Array.from(cardIds);
   let evidenceIds = new Set<string>();
   if (activeCardIds.length > 0) {
-    const activeKpRows = await db.query.cardKeyPoints.findMany({
+    const activeKpRows = await executor.query.cardKeyPoints.findMany({
       where: and(
         eq(cardKeyPoints.workspaceId, workspaceId),
         inArray(cardKeyPoints.cardId, activeCardIds),
@@ -603,7 +610,7 @@ export async function detectSearchDrift(workspaceId: string): Promise<SearchDrif
     });
     const activeKpIds = activeKpRows.map((k) => k.id);
     if (activeKpIds.length > 0) {
-      const evidenceRows = await db.query.evidences.findMany({
+      const evidenceRows = await executor.query.evidences.findMany({
         where: and(
           eq(evidences.workspaceId, workspaceId),
           inArray(evidences.keyPointId, activeKpIds),
@@ -614,7 +621,7 @@ export async function detectSearchDrift(workspaceId: string): Promise<SearchDrif
     }
   }
 
-  const indexedEvidences = await db.query.searchDocuments.findMany({
+  const indexedEvidences = await executor.query.searchDocuments.findMany({
     where: and(eq(searchDocuments.workspaceId, workspaceId), eq(searchDocuments.objectType, "evidence")),
     columns: { objectId: true },
   });
@@ -653,7 +660,7 @@ export async function detectSearchDrift(workspaceId: string): Promise<SearchDrif
     note.currentVersionId ? [note.currentVersionId] : [],
   );
   const currentBlocks = currentVersionIds.length > 0
-    ? await db.query.noteBlocks.findMany({
+    ? await executor.query.noteBlocks.findMany({
         where: inArray(noteBlocks.versionId, currentVersionIds),
         orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
       })
