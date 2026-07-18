@@ -1,7 +1,7 @@
 # AI 学习系统 v0.5 版本实施计划
 
-> 状态：Approved for development（M0 收口中；SEC-01 policy expand/verify 已本地通过，RLS enforce 仍阻断，M1 Gate 未通过）<br>
-> 文档版本：0.5<br>
+> 状态：Approved for development（M0 收口中；8 个 Must 均未达到 DoD；保守估计约 80% 未完成；RLS enforce/M1 Gate 未通过）<br>
+> 文档版本：0.6<br>
 > 计划日期：2026-07-18<br>
 > 最后更新：2026-07-18<br>
 > 目标版本：`v0.5.0`<br>
@@ -61,12 +61,27 @@ v0.5 是第一次受控 Private Alpha，不等于产品路线中的完整 V1。�
 | --- | --- | --- |
 | 当前公开版本为 0.4.0 | `33efa06:README.md:5`；五个 `package.json:3` | 静态已复核 |
 | v0.4 核心能力清单 | `33efa06:README.md:7-17` | 静态已复核，运行态待 M0 复测 |
-| 迁移/构建/单测/Compose/备份 CI 已配置 | `33efa06:.github/workflows/ci.yml` | 配置已复核，最新 Actions 结果待 M0 保存 |
+| 迁移/构建/单测/Compose/备份 CI 已配置 | `33efa06:.github/workflows/ci.yml` | canonical `main@33efa06` 的 [CI #6](https://github.com/asklins223/ai-learning-system/actions/runs/29642136880) 已确认 6/6 job 成功；该运行未上传原始 artifact/digest |
 | 维护提交声称约 180 项测试通过 | commit `33efa06` message | 仅维护记录，M0 必须从 clean checkout 重跑 |
 | RLS 仍暂缓 | `33efa06:apps/api/src/db/migrations/0014_n007_workspace_fk_completion.sql:151-160`；`33efa06:infra/postgres/roles.sql:10-12` | 静态已复核 |
 | 30 篇样本与 90%/85%/85% 阈值存在 | `33efa06:apps/api/src/modules/benchmark/service.ts:12-20`；`33efa06:packages/shared/src/constants.ts:4-10` | 静态已复核，发布门禁尚未闭环 |
 | CI 无浏览器 E2E，生产 smoke 为单 Worker | `33efa06:.github/workflows/ci.yml` | 静态已复核 |
 | 可观测性以 Pino、health/readiness 为主 | `33efa06:apps/api/src/lib/logger.ts`；`33efa06:apps/api/src/server.ts:41-135` | 静态已复核 |
+
+### 0.4 当前实施完成度快照（2026-07-18）
+
+以下数字用于回答“还有多少未实现”，按计划门禁与工作包状态统计；它不是代码行百分比、Story Point 燃尽或剩余工期承诺。测试通过只证明相应子场景，不自动关闭上层 Gate。
+
+| 口径 | 已完成/已勾选 | 未完成 | 结论 |
+| --- | ---: | ---: | --- |
+| 8 个 Must 工作包 | 0 | 8 | 6 个部分实现，AIQ-01/OPS-01 共 2 个未开始 |
+| M0～M6 milestone Gate | 4/30 | 26/30 | 形式未完成率 86.7%；M0 仍收口，M1～M6 均未通过 |
+| 发布硬门禁 | 0/15 | 15/15 | 尚未达到 RC 证据标准 |
+| 以 checkbox 表达的 Must DoD | 0/22 | 22/22 | SEC-01、SEC-02/ALPHA-01、LOOP-01/02、OPS-01 均未关闭显式 DoD |
+
+综合已经完成的 M0 决策、release foundation、SEC-01 expand 和局部 PostgreSQL/Worker 验证，保守估计仍有约 80% 工作范围未完成（合理区间约 80%～85%）。详细 Must 分类与剩余边界以 `docs/plans/v0.5-implementation-register.md` 为准。
+
+分支增量 commit `1d2cada4f7318c52ffc9c64c40e2b4c640c0c17a` 的 [GitHub Actions run 29648766086](https://github.com/asklins223/ai-learning-system/actions/runs/29648766086) 已 6/6 job 成功，包含 backup restore、Worker smoke、fresh migration 和原始 Node/PostgreSQL artifact。这关闭的是当前分支 CI 回归，不代表 M0、SEC-01、M1 或 RC Gate 已完成。
 
 ## 1. 当前能力与主要缺口
 
@@ -82,7 +97,7 @@ v0.5 是第一次受控 Private Alpha，不等于产品路线中的完整 V1。�
 - API、Worker、migrator 最小权限数据库角色；
 - 迁移矩阵、生产 Compose smoke、Worker 单任务 smoke 和备份恢复门禁；
 - 30 篇 AI 基准样本与 90% / 85% / 85% 的质量阈值定义；
-- 发布后维护线记录约 180 项自动化测试通过，但公开 CI 最新实跑结果仍需在迭代启动时重新确认。
+- 发布后维护线记录约 180 项自动化测试通过；canonical `main@33efa06` 的 CI #6 已确认 6/6 job 成功，但未上传原始日志/报告 artifact 与 digest。
 
 ### 1.2 v0.5 必须处理的缺口
 
@@ -780,7 +795,7 @@ D-02、D-03、D-06 当前由 `@asklins223` 以 repository owner 身份兼任产�
 - [x] 数据迁移和回滚/前向修复方案通过；
 - [ ] 测试 fixture、Alpha 环境和 Provider 预算准备完成（框架、fixture/环境契约与 10 美元上限已批准；CLI/harness、外部环境资源和真实凭据仍未准备）；
 - [x] 隐私 allowlist、保留期和访问权限通过 Owner development review；SEC-01 enforce/RC 的独立 security/data review 要求和证据入口已记录；
-- [x] foundation clean commit 上 `verify-release-inputs` 已确认当时 19 个迁移输入完整；当前新增第 20 个 migration 将在本次提交后重新执行 clean input gate；
+- [x] `1d2cada` clean commit 上 `verify-release-inputs` 已确认 20 个 migration 输入完整，Actions 的 Clean Release Inputs job 通过；
 - [ ] 保存并核验 v0.4 基线对应的 Node 22 原始 artifact/report 与 digest（immutable-SHA 本地基线及既有成功 run 已复核）。
 
 ## 12. 文档变更记录
@@ -792,3 +807,4 @@ D-02、D-03、D-06 当前由 `@asklins223` 以 repository owner 身份兼任产�
 | 0.3 | 2026-07-18 | repository owner 批准开发启动；从 canonical SHA 建立 v0.5 分支；接受 ADR-0001～0008 并保存初步本地基线 |
 | 0.4 | 2026-07-18 | 明确 Owner development self-review 与独立发布复核边界；修正 immutable-SHA coverage；M0 保持收口中并记录已开始的 foundation/expand |
 | 0.5 | 2026-07-18 | 记录 SEC-01 policy expand/verify：22 表/58 policy、PG16.14 受限角色与双 Worker/池复用证据；明确 RLS 仍关闭及 enforce/M1 阻断项 |
+| 0.6 | 2026-07-18 | 增加总体完成度盘点：8 个 Must 0 完成/6 部分/2 未开始，30 项 milestone Gate 尚余 26 项；记录 `1d2cada` Actions 6/6 job 与 artifact 证据，保守估计约 80% 范围未完成 |
