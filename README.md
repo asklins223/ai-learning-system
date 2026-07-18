@@ -1,8 +1,29 @@
-# AI Learning System
+<div align="center">
 
-AI Learning System 是一个面向个人学习的 AI 原生知识系统。它把资料、笔记、学习卡、证据引用、理解验证和复习计划连接成一条可追溯的学习闭环。
+# 理解引擎
 
-当前版本：`v0.5.0`
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](https://github.com/asklins223/ai-learning-system)
+[![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6?logo=typescript)](https://www.typescriptlang.org/)
+[![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify)](https://fastify.dev/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+</div>
+
+理解引擎 是一个面向个人学习的 AI 原生知识系统。它把资料、笔记、学习卡、证据引用、理解验证和复习计划连接成一条可追溯的学习闭环。
+
+## 界面预览
+
+### 深色模式
+
+![深色模式界面](/docs/image/Snipaste_2026-07-18_20-04-12.png)
+
+### 浅色模式
+
+![浅色模式界面](/docs/image/Snipaste_2026-07-18_20-04-30.png)
 
 ## 核心能力
 
