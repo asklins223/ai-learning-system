@@ -35,6 +35,12 @@ jobs:
       - name: Verify clean checkout and required release files
         run: node .github/scripts/verify-release-inputs.mjs
 
+      # This is intentionally fail-closed on an exact release tag. Until the
+      # final evidence-aggregation job supplies RELEASE_MANIFEST_PATH, v0.5
+      # tags must not pass CI merely because the schema/verifier exists.
+      - name: Verify exact-tag release manifest contract
+        run: node .github/scripts/release-manifest-contract.mjs
+
   typecheck:
     name: TypeCheck & Lint
     runs-on: ubuntu-latest
@@ -347,7 +353,7 @@ jobs:
         env:
           NODE_ENV: test
           RATE_LIMIT_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
-        run: node --import tsx --test src/__tests__/identity-security.test.ts
+        run: node --import tsx --test src/integration-tests/rate-limit-postgres.integration.ts
 
       - name: Verify every journal migration was applied
         working-directory: apps/api

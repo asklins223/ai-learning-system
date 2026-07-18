@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, ne, sql, count, inArray } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { sources, sourceSegments, notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { jobs } from "../../db/schema/job.ts";
 import {
@@ -24,7 +24,7 @@ export async function createSource(
   if (input.url) metadata.url = input.url;
 
   // R-016: source 创建和 job 入队在同一事务内，避免入队失败留下永不解析的 DRAFT
-  const source = await db.transaction(async (tx) => {
+  const source = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     // 与 createJob 使用同一 workspace advisory lock，将配额计数和插入
     // 串行化；既保持 source/job 原子性，也避免并发突破配额。
     await tx.execute(sql`
@@ -67,9 +67,10 @@ export async function createSource(
     await tx.insert(jobs).values({
       type: JobType.PARSE_SOURCE,
       workspaceId,
+      requestedBy: userId,
       payload: isUrlWithoutContent
-        ? { sourceId: row.id, fetchUrlContent: true }
-        : { sourceId: row.id },
+        ? { sourceId: row.id, fetchUrlContent: true, userId }
+        : { sourceId: row.id, userId },
       status: JobStatus.PENDING,
     });
 

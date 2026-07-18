@@ -202,6 +202,7 @@ export async function regenerateCard(cardId: string, workspaceId: string, userId
   const newJob = await createJob({
     type: JobType.GENERATE_CARD,
     workspaceId,
+    requestedBy: userId,
     // Preserve the actor who requested regeneration for AI audit attribution;
     // the note author may be a different workspace member.
     payload: { noteVersionId: useVersionId, userId, oldCardId: cardId },

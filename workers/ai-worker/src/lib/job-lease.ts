@@ -1,14 +1,18 @@
 import { and, eq } from "drizzle-orm";
-import { db } from "../db.ts";
+import {
+  setWorkerTransactionContext,
+  withWorkerWorkspaceTransaction,
+  type WorkerTransaction,
+} from "../db.ts";
 import * as schema from "../schema/index.ts";
 
 export interface JobLeaseContext {
   id: string;
+  workspaceId: string;
+  requestedBy: string | null;
   leaseToken: string;
   signal?: AbortSignal;
 }
-
-type WorkerTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export class JobLeaseLostError extends Error {
   constructor(jobId: string, reason: "aborted" | "inactive") {
@@ -25,20 +29,35 @@ export function throwIfJobAborted(job: JobLeaseContext): void {
   }
 }
 
+/** Bind every handler transaction to the job's immutable workspace/actor. */
+export function withJobTransaction<T>(
+  job: JobLeaseContext,
+  operation: (transaction: WorkerTransaction) => Promise<T>,
+): Promise<T> {
+  return withWorkerWorkspaceTransaction(
+    { workspaceId: job.workspaceId, userId: job.requestedBy },
+    operation,
+  );
+}
+
 /**
  * Fail closed before any handler side effect. The second abort check closes
  * the window where cancellation fires while the lease lookup is in flight.
  */
 export async function assertJobLease(job: JobLeaseContext): Promise<void> {
   throwIfJobAborted(job);
-  const activeLease = await db.query.jobs.findFirst({
-    columns: { id: true },
-    where: and(
-      eq(schema.jobs.id, job.id),
-      eq(schema.jobs.status, "running"),
-      eq(schema.jobs.leaseToken, job.leaseToken),
-    ),
-  });
+  const activeLease = await withWorkerWorkspaceTransaction(
+    { workspaceId: job.workspaceId, userId: job.requestedBy },
+    (tx) => tx.query.jobs.findFirst({
+      columns: { id: true },
+      where: and(
+        eq(schema.jobs.id, job.id),
+        eq(schema.jobs.workspaceId, job.workspaceId),
+        eq(schema.jobs.status, "running"),
+        eq(schema.jobs.leaseToken, job.leaseToken),
+      ),
+    }),
+  );
   throwIfJobAborted(job);
   if (!activeLease) {
     throw new JobLeaseLostError(job.id, "inactive");
@@ -55,12 +74,17 @@ export async function lockJobLease(
   job: JobLeaseContext,
 ): Promise<void> {
   throwIfJobAborted(job);
+  await setWorkerTransactionContext(
+    tx,
+    { workspaceId: job.workspaceId, userId: job.requestedBy },
+  );
   const [activeLease] = await tx
     .select({ id: schema.jobs.id })
     .from(schema.jobs)
     .where(
       and(
         eq(schema.jobs.id, job.id),
+        eq(schema.jobs.workspaceId, job.workspaceId),
         eq(schema.jobs.status, "running"),
         eq(schema.jobs.leaseToken, job.leaseToken),
       ),
@@ -80,6 +104,7 @@ export async function lockJobLease(
     .where(
       and(
         eq(schema.jobs.id, job.id),
+        eq(schema.jobs.workspaceId, job.workspaceId),
         eq(schema.jobs.status, "running"),
         eq(schema.jobs.leaseToken, job.leaseToken),
       ),

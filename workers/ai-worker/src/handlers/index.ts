@@ -11,6 +11,7 @@ import {
   isJobLeaseActive,
   lockJobLease,
   throwIfJobAborted,
+  withJobTransaction,
   type JobLeaseContext,
 } from "../lib/job-lease.ts";
 import {
@@ -26,6 +27,8 @@ import {
 export interface JobPayload {
   id: string;
   workspaceId: string;
+  /** Trusted actor copied from jobs.requested_by by the claim function. */
+  requestedBy: string | null;
   payload: Record<string, unknown>;
   /** Immutable lease token assigned by the claim transaction. */
   leaseToken: string;
@@ -33,16 +36,34 @@ export interface JobPayload {
   signal?: AbortSignal;
 }
 
-export function requireAuditUserId(payload: Record<string, unknown>): string {
-  const userId = payload.userId;
+export function requireAuditUserId(
+  job: Pick<JobPayload, "requestedBy" | "payload">,
+): string {
+  const userId = job.requestedBy;
   if (typeof userId !== "string" || userId.trim().length === 0) {
-    throw new Error("missing userId in generate_card payload; refusing to fabricate AI audit attribution");
+    throw new Error("missing trusted requestedBy actor; refusing to fabricate AI audit attribution");
+  }
+  const legacyPayloadUserId = job.payload.userId;
+  if (
+    legacyPayloadUserId !== undefined
+    && (
+      typeof legacyPayloadUserId !== "string"
+      || legacyPayloadUserId.trim().toLowerCase() !== userId.toLowerCase()
+    )
+  ) {
+    throw new Error("payload userId does not match trusted requestedBy actor");
   }
   return userId;
 }
 
 function leaseContext(job: JobPayload): JobLeaseContext {
-  return { id: job.id, leaseToken: job.leaseToken, signal: job.signal };
+  return {
+    id: job.id,
+    workspaceId: job.workspaceId,
+    requestedBy: job.requestedBy,
+    leaseToken: job.leaseToken,
+    signal: job.signal,
+  };
 }
 
 export async function runGenerateCard(job: JobPayload) {
@@ -84,7 +105,7 @@ export async function runGenerateCard(job: JobPayload) {
   // Legacy jobs that already produced their card can remain idempotent without
   // inventing an operator. Any job that still needs an AI call must carry the
   // initiating user explicitly for audit attribution.
-  const auditUserId = requireAuditUserId(job.payload);
+  const auditUserId = requireAuditUserId(job);
 
   const version = await db.query.noteVersions.findFirst({
     where: and(
@@ -172,7 +193,7 @@ export async function runGenerateCard(job: JobPayload) {
   // Persist the card and its search projection in the same lease-fenced
   // transaction. A timed-out handler must not mutate search_documents after
   // the outer worker has released the lease for a retry.
-  await db.transaction(async (tx) => {
+  await withJobTransaction(job, async (tx) => {
     await lockJobLease(tx, leaseContext(job));
     // Serialize card completion with API enqueue/dedupe/quota checks for this
     // workspace. This closes the window where a completed job disappears from
@@ -317,6 +338,7 @@ export async function runGenerateCard(job: JobPayload) {
       await tx.insert(schema.jobs).values(kps.map((kp) => ({
         type: "align_evidence",
         workspaceId: version.workspaceId,
+        requestedBy: auditUserId,
         payload: { keyPointId: kp.id, noteVersionId },
         status: "pending",
       })));
@@ -495,7 +517,7 @@ export async function runAlignEvidence(job: JobPayload) {
     }
   }
 
-  const committed = await db.transaction(async (tx) => {
+  const committed = await withJobTransaction(job, async (tx) => {
     await lockJobLease(tx, leaseContext(job));
     // Multiple jobs for the same key point can pass the fast idempotency read
     // concurrently. Serialize their replace transactions before reading the
@@ -684,14 +706,13 @@ export async function runEvaluateValidation(job: JobPayload) {
   const questionType = job.payload.questionType as string | undefined;
   const question = job.payload.question as string | undefined;
   const userAnswer = job.payload.userAnswer as string | undefined;
-  const userId = job.payload.userId as string | undefined;
+  const userId = requireAuditUserId(job);
   // N-003: 从 payload 获取 questionId，用于绑定服务端持久化的题目
   const questionId = job.payload.questionId as string | undefined;
   if (!cardId) throw new Error("missing cardId in payload");
   if (!questionType) throw new Error("missing questionType in payload");
   if (!question) throw new Error("missing question in payload");
   if (!userAnswer) throw new Error("missing userAnswer in payload");
-  if (!userId) throw new Error("missing userId in payload");
   await assertJobLease(leaseContext(job));
   logger.info({ cardId, keyPointId }, "running evaluate_validation");
 
@@ -872,7 +893,7 @@ export async function runEvaluateValidation(job: JobPayload) {
   const intervalDays = intervalForOutcome(feedback.outcome);
   const nextReviewAt = new Date(Date.now() + intervalDays * 24 * 60 * 60 * 1000);
 
-  await db.transaction(async (tx) => {
+  await withJobTransaction(job, async (tx) => {
     await lockJobLease(tx, leaseContext(job));
     // Serialize the final side effects for this job. A lease may expire after
     // the model call and let a second worker execute the same job concurrently;

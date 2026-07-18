@@ -9,6 +9,7 @@ build/
 coverage/
 .turbo/
 *.tsbuildinfo
+/release/artifacts/
 
 # Temporary, output, and private archive directories
 /work/

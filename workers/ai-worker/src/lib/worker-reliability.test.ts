@@ -15,7 +15,12 @@ import {
   normalizeWorkspaceAIPolicy,
 } from "./governance.ts";
 import { DashScopeProvider } from "./providers/dashscope.ts";
-import { resolveWorkerDatabaseUrl } from "../db.ts";
+import {
+  assertWorkerWorkspaceTransactionContextCompatible,
+  normalizeWorkerWorkspaceTransactionContext,
+  resolveWorkerDatabaseUrl,
+  WorkerWorkspaceTransactionContextError,
+} from "../db.ts";
 import { retryBackoffMs } from "./job-retry.ts";
 
 test("production workers fail closed when the dedicated database role is missing", () => {
@@ -30,6 +35,34 @@ test("production workers fail closed when the dedicated database role is missing
   assert.equal(
     resolveWorkerDatabaseUrl({ NODE_ENV: "development", DATABASE_URL: "   " }),
     "postgres://ailearn:ailearn_dev@postgres:5432/ailearn",
+  );
+});
+
+test("worker transaction context validates UUIDs and forbids nested context changes", () => {
+  const active = normalizeWorkerWorkspaceTransactionContext({
+    workspaceId: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+    userId: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+  });
+  assert.deepEqual(active, {
+    workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    userId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  });
+  assert.doesNotThrow(() => {
+    assertWorkerWorkspaceTransactionContextCompatible(active, { ...active });
+  });
+  assert.throws(
+    () => assertWorkerWorkspaceTransactionContextCompatible(active, {
+      workspaceId: active.workspaceId,
+      userId: null,
+    }),
+    WorkerWorkspaceTransactionContextError,
+  );
+  assert.throws(
+    () => normalizeWorkerWorkspaceTransactionContext({
+      workspaceId: "not-a-uuid",
+      userId: null,
+    }),
+    WorkerWorkspaceTransactionContextError,
   );
 });
 
@@ -68,7 +101,13 @@ test("an aborted lease fails closed before a transaction can commit", () => {
   const controller = new AbortController();
   controller.abort(new Error("deadline"));
   assert.throws(
-    () => throwIfJobAborted({ id: "job-1", leaseToken: "lease-1", signal: controller.signal }),
+    () => throwIfJobAborted({
+      id: "job-1",
+      workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      requestedBy: null,
+      leaseToken: "lease-1",
+      signal: controller.signal,
+    }),
     (error: unknown) => error instanceof JobLeaseLostError,
   );
 });
@@ -155,12 +194,22 @@ test("auditLogging policy disables writes without changing attribution", async (
   assert.equal((writes[0] as { userId: string }).userId, "initiator-1");
 });
 
-test("generate_card audit attribution fails closed when legacy payload lacks userId", () => {
+test("job actor attribution trusts requestedBy and rejects payload overrides", () => {
   assert.throws(
-    () => requireAuditUserId({ noteVersionId: "version-1" }),
+    () => requireAuditUserId({ requestedBy: null, payload: { userId: "payload-actor" } }),
     /refusing to fabricate AI audit attribution/,
   );
-  assert.equal(requireAuditUserId({ userId: "initiator-1" }), "initiator-1");
+  assert.equal(
+    requireAuditUserId({ requestedBy: "initiator-1", payload: {} }),
+    "initiator-1",
+  );
+  assert.throws(
+    () => requireAuditUserId({
+      requestedBy: "trusted-actor",
+      payload: { userId: "payload-actor" },
+    }),
+    /does not match trusted requestedBy/,
+  );
 });
 
 test("workspace policy normalization preserves explicit false values", () => {

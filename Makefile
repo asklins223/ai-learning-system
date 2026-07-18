@@ -16,7 +16,7 @@ STORAGE_INIT_SERVICES := minio-init
 
 .PHONY: up dev storage storage-dev seed-owner seed-demo down down-prod down-dev logs reset reset-dev \
 	rebuild rebuild-dev config config-dev shell-api shell-web shell-worker \
-	clean-init clean-init-dev
+	clean-init clean-init-dev version-check verify release-check
 
 # Production-like stack: prod targets, non-root application users, no bind mounts.
 up:
@@ -107,6 +107,31 @@ config:
 
 config-dev:
 	$(COMPOSE_DEV) config --quiet
+
+# release/version.json is the only manually edited version source. To update
+# generated copies, run: node .github/scripts/version-contract.mjs --write
+version-check:
+	node .github/scripts/version-contract.mjs --check
+
+# Honest local/CI baseline using only gates that exist today. Coverage, browser
+# E2E, secret/container scans and AIQ remain separate unfinished RC gates.
+verify: version-check
+	node --test .github/scripts/version-contract.test.mjs .github/scripts/release-manifest-contract.test.mjs
+	node .github/scripts/verify-schema-mirror.mjs
+	cd packages/shared && npm run typecheck && npm test
+	cd packages/db && npm run typecheck
+	cd apps/api && npm run typecheck && npm test
+	cd apps/web && npm run typecheck && npm run lint && npm test
+	cd workers/ai-worker && npm run typecheck && npm test
+
+# Source inputs are checked first. The actual manifest is generated after the
+# tag and stays untracked because embedding HEAD in a tracked file would be
+# self-referential. On an exact release tag, the final command fails closed
+# unless RELEASE_MANIFEST_PATH names a complete CI/release JSON artifact.
+release-check:
+	node .github/scripts/verify-release-inputs.mjs
+	$(MAKE) --no-print-directory verify
+	node .github/scripts/release-manifest-contract.mjs
 
 shell-api:
 	$(COMPOSE_DEV) exec api sh

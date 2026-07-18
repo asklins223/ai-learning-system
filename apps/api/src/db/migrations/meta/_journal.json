@@ -127,6 +127,13 @@
       "when": 1784437400000,
       "tag": "0017_user_ai_model_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784523800000,
+      "tag": "0018_sec01_jobs_expand",
+      "breakpoints": true
     }
   ]
 }

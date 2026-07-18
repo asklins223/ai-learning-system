@@ -13,6 +13,7 @@ import {
   isJobLeaseActive,
   lockJobLease,
   throwIfJobAborted,
+  withJobTransaction,
 } from "../lib/job-lease.ts";
 import type { JobPayload } from "./index.ts";
 
@@ -477,7 +478,7 @@ export async function runParseSource(job: JobPayload) {
   // Every state transition is workspace-scoped and refuses to move an
   // archived row. RETURNING also refreshes the source snapshot after any lock
   // wait, so later parsing does not rely on the initial TOCTOU-prone read.
-  const [processingSource] = await db.transaction(async (tx) => {
+  const [processingSource] = await withJobTransaction(job, async (tx) => {
     await lockJobLease(tx, job);
     const rows = await tx
       .update(schema.sources)
@@ -521,7 +522,7 @@ export async function runParseSource(job: JobPayload) {
 
         // Merge fetched content while holding the source row lock. If archive
         // won the race, do not restore metadata or continue toward ready.
-        const metadataStored = await db.transaction(async (tx) => {
+        const metadataStored = await withJobTransaction(job, async (tx) => {
           await lockJobLease(tx, job);
           const [lockedSource] = await tx
             .select()
@@ -583,7 +584,7 @@ export async function runParseSource(job: JobPayload) {
       // Whichever operation wins against archive determines the final state:
       // worker first => archive subsequently deletes the projection; archive
       // first => this transaction observes archived and writes nothing.
-      const committed = await db.transaction(async (tx) => {
+      const committed = await withJobTransaction(job, async (tx) => {
         await lockJobLease(tx, job);
         const [lockedSource] = await tx
           .select()
@@ -661,7 +662,7 @@ export async function runParseSource(job: JobPayload) {
     // Recheck the terminal archived state under a row lock, then replace
     // segments, set ready, and write the projection atomically. This prevents
     // a parse job that started earlier from resurrecting an archived source.
-    const committed = await db.transaction(async (tx) => {
+    const committed = await withJobTransaction(job, async (tx) => {
       await lockJobLease(tx, job);
       const [lockedSource] = await tx
         .select()
@@ -759,7 +760,7 @@ export async function runParseSource(job: JobPayload) {
     // Failed and its optional fetch-error projection use the same source row
     // lock. If archive won the race, both writes are skipped and the archived
     // source remains absent from search.
-    const committed = await db.transaction(async (tx) => {
+    const committed = await withJobTransaction(job, async (tx) => {
       await lockJobLease(tx, job);
       const [lockedSource] = await tx
         .select()

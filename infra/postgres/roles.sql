@@ -272,6 +272,31 @@ $$;
 
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ailearn_worker;
 
+-- SEC-01 expand phase: the Worker may cross workspace boundaries only through
+-- these fixed queue functions.  The functions are created by migration 0018;
+-- the pre-migration bootstrap pass safely skips them, while the post-migration
+-- pass revokes ambient access and grants the exact signatures to Worker only.
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public
+  FROM PUBLIC, ailearn_api, ailearn_worker;
+
+DO $$
+BEGIN
+  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_claim_jobs(integer, integer)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_claim_jobs(integer, integer)
+      TO ailearn_worker;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_reap_stale_jobs(integer, integer)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_reap_stale_jobs(integer, integer)
+      TO ailearn_worker;
+  END IF;
+END
+$$;
+
 -- Drizzle readiness only needs to inspect the journal.  The worker does not
 -- need migration metadata and therefore receives no drizzle-schema grant.
 DO $$
@@ -293,6 +318,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE ailearn_migrator IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO ailearn_api;
 ALTER DEFAULT PRIVILEGES FOR ROLE ailearn_migrator IN SCHEMA public
   REVOKE ALL ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE ailearn_migrator IN SCHEMA public
+  REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 -- Worker privileges are deliberately not granted by default.  This script is
 -- re-applied after migrations, so a newly introduced table remains invisible
@@ -487,6 +514,69 @@ BEGIN
     OR has_schema_privilege('ailearn_worker', 'drizzle', 'USAGE')
   ) THEN
     RAISE EXCEPTION 'migration journal privilege matrix mismatch';
+  END IF;
+
+  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer)') IS NOT NULL AND (
+    NOT has_function_privilege(
+      'ailearn_worker', 'public.ailearn_claim_jobs(integer,integer)', 'EXECUTE'
+    )
+    OR has_function_privilege(
+      'ailearn_api', 'public.ailearn_claim_jobs(integer,integer)', 'EXECUTE'
+    )
+  ) THEN
+    RAISE EXCEPTION 'job claim function privilege matrix mismatch';
+  END IF;
+
+  IF to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)') IS NOT NULL AND (
+    NOT has_function_privilege(
+      'ailearn_worker', 'public.ailearn_reap_stale_jobs(integer,integer)', 'EXECUTE'
+    )
+    OR has_function_privilege(
+      'ailearn_api', 'public.ailearn_reap_stale_jobs(integer,integer)', 'EXECUTE'
+    )
+  ) THEN
+    RAISE EXCEPTION 'job reap function privilege matrix mismatch';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    WHERE p.oid IN (
+      to_regprocedure('public.ailearn_claim_jobs(integer,integer)'),
+      to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)')
+    )
+      AND (
+        NOT p.prosecdef
+        OR p.proowner <> 'ailearn_migrator'::regrole
+        OR p.proconfig IS DISTINCT FROM
+          ARRAY['search_path=pg_catalog, public']::text[]
+      )
+  ) THEN
+    RAISE EXCEPTION 'job queue function security contract mismatch';
+  END IF;
+
+  SELECT string_agg(p.oid::regprocedure::text, ', ')
+  INTO mismatch
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public'
+    AND has_function_privilege('ailearn_worker', p.oid, 'EXECUTE')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_claim_jobs(integer,integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)');
+  IF mismatch IS NOT NULL THEN
+    RAISE EXCEPTION 'Worker has unexpected function EXECUTE privileges: %', mismatch;
+  END IF;
+
+  SELECT string_agg(p.oid::regprocedure::text, ', ')
+  INTO mismatch
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public'
+    AND has_function_privilege('ailearn_api', p.oid, 'EXECUTE');
+  IF mismatch IS NOT NULL THEN
+    RAISE EXCEPTION 'API has unexpected function EXECUTE privileges: %', mismatch;
   END IF;
 END
 $$;

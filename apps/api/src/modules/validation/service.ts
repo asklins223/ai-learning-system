@@ -179,6 +179,7 @@ export async function submitValidation(
   const job = await createJob({
     type: JobType.EVALUATE_VALIDATION,
     workspaceId,
+    requestedBy: userId,
     payload: {
       cardId,
       keyPointId,

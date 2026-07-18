@@ -1,7 +1,7 @@
-import { and, eq, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { logger } from "./lib/logger.ts";
 import * as schema from "./schema/index.ts";
-import { closeDatabase, db } from "./db.ts";
+import { closeDatabase, db, withWorkerWorkspaceTransaction } from "./db.ts";
 import { runGenerateCard, runAlignEvidence, runEvaluateValidation } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
@@ -39,6 +39,7 @@ type ClaimedJob = {
   type: string;
   payload: Record<string, unknown>;
   workspaceId: string;
+  requestedBy: string | null;
   attempts: number;
   // G-001: 不可变 lease token — claim 时生成并写入 DB，完成/失败时以此作为原子条件
   leaseToken: string;
@@ -49,61 +50,20 @@ type ClaimedJob = {
  * R-007: 回收时递增 attempts，确保超时作业最终达到 MAX_ATTEMPTS 而非无限重试。
  */
 async function reapStaleJobs(): Promise<number> {
-  const timeout = new Date(Date.now() - LEASE_TIMEOUT_MS);
-  const now = new Date();
-
-  // Both updates repeat the full stale-lease predicate in the UPDATE itself.
-  // PostgreSQL re-checks this predicate after waiting on a concurrent row lock,
-  // so a completed job or a lease whose started_at was renewed is never
-  // overwritten by a stale SELECT result. Status makes the two updates and
-  // concurrent reapers mutually exclusive.
-  const toPending = await db
-    .update(schema.jobs)
-    .set({
-      status: "pending",
-      startedAt: null,
-      leaseToken: null,
-      attempts: sql`${schema.jobs.attempts} + 1`,
-      lastError: "lease expired (worker crash or timeout)",
-      scheduledAt: new Date(now.getTime() + 10_000),
-      finishedAt: null,
-    })
-    .where(
-      and(
-        eq(schema.jobs.status, "running"),
-        lt(schema.jobs.startedAt, timeout),
-        lt(schema.jobs.attempts, MAX_ATTEMPTS - 1),
-      ),
-    )
-    .returning({ id: schema.jobs.id });
-
-  const toDead = await db
-    .update(schema.jobs)
-    .set({
-      status: "dead",
-      startedAt: null,
-      leaseToken: null,
-      attempts: sql`${schema.jobs.attempts} + 1`,
-      lastError: "lease expired — max attempts reached",
-      finishedAt: now,
-    })
-    .where(
-      and(
-        eq(schema.jobs.status, "running"),
-        lt(schema.jobs.startedAt, timeout),
-        gte(schema.jobs.attempts, MAX_ATTEMPTS - 1),
-      ),
-    )
-    .returning({ id: schema.jobs.id });
-
-  const total = toPending.length + toDead.length;
+  const reaped = await db.execute<{ id: string; status: string }>(sql`
+    SELECT id, status
+    FROM public.ailearn_reap_stale_jobs(${LEASE_TIMEOUT_MS}, ${MAX_ATTEMPTS})
+  `);
+  const pending = reaped.filter((row) => row.status === "pending");
+  const dead = reaped.filter((row) => row.status === "dead");
+  const total = reaped.length;
   if (total > 0) {
     logger.warn(
       {
         count: total,
-        pending: toPending.length,
-        dead: toDead.length,
-        ids: [...toPending, ...toDead].map((row) => row.id),
+        pending: pending.length,
+        dead: dead.length,
+        ids: reaped.map((row) => row.id),
       },
       "reaped stale running jobs",
     );
@@ -120,43 +80,29 @@ async function reapStaleJobs(): Promise<number> {
  * 在同一事务内将状态置 running，保证锁内提交。
  */
 async function claimJobs(): Promise<ClaimedJob[]> {
-  // G-001: 生成不可变 lease token（UUID），在同一次 claim 事务中写入并返回。
-  // 后续的成功/失败更新以 (id, status='running', lease_token=token) 为条件。
-  // 如果 job 被 reaper 回收并重新 claim，lease_token 会不同，条件 UPDATE 影响 0 行。
-  const leaseToken = crypto.randomUUID();
-  const claimTime = new Date();
-  return db.transaction(async (tx) => {
-    const rows = await tx.execute<{
-      id: string;
-      type: string;
-      payload: unknown;
-      workspace_id: string;
-      attempts: number | null;
-    }>(sql`
-      SELECT id, type, payload, workspace_id, attempts
-      FROM jobs
-      WHERE status = 'pending'
-        AND attempts < ${MAX_ATTEMPTS}
-        AND scheduled_at <= now()
-      ORDER BY scheduled_at
-      LIMIT ${CONCURRENCY}
-      FOR UPDATE SKIP LOCKED
-    `);
-    if (rows.length === 0) return [];
-    const ids = rows.map((r) => r.id);
-    await tx
-      .update(schema.jobs)
-      .set({ status: "running", startedAt: claimTime, leaseToken })
-      .where(inArray(schema.jobs.id, ids));
-    return rows.map((r) => ({
-      id: r.id,
-      type: r.type,
-      payload: (r.payload ?? {}) as Record<string, unknown>,
-      workspaceId: r.workspace_id,
-      attempts: r.attempts ?? 0,
-      leaseToken,
-    }));
-  });
+  // Claim/reap are the only intentional cross-workspace queue operations. The
+  // fixed SECURITY DEFINER function owns locking and assigns a token per row.
+  const rows = await db.execute<{
+    id: string;
+    type: string;
+    payload: unknown;
+    workspace_id: string;
+    requested_by: string | null;
+    attempts: number | null;
+    lease_token: string;
+  }>(sql`
+    SELECT id, type, payload, workspace_id, requested_by, attempts, lease_token
+    FROM public.ailearn_claim_jobs(${CONCURRENCY}, ${MAX_ATTEMPTS})
+  `);
+  return rows.map((row) => ({
+    id: row.id,
+    type: row.type,
+    payload: (row.payload ?? {}) as Record<string, unknown>,
+    workspaceId: row.workspace_id,
+    requestedBy: row.requested_by,
+    attempts: row.attempts ?? 0,
+    leaseToken: row.lease_token,
+  }));
 }
 
 async function tick() {
@@ -171,24 +117,28 @@ async function tick() {
   for (const job of candidates) {
     const handler = HANDLERS[job.type as keyof typeof HANDLERS];
     if (!handler) {
-      const unknownResult = await db
-        .update(schema.jobs)
-        .set({
-          status: "failed",
-          lastError: `unknown job type ${job.type}`,
-          finishedAt: new Date(),
-          attempts: MAX_ATTEMPTS,
-          startedAt: null,
-          leaseToken: null,
-        })
-        .where(
-          and(
-            eq(schema.jobs.id, job.id),
-            eq(schema.jobs.status, "running"),
-            eq(schema.jobs.leaseToken, job.leaseToken),
-          ),
-        )
-        .returning({ id: schema.jobs.id });
+      const unknownResult = await withWorkerWorkspaceTransaction(
+        { workspaceId: job.workspaceId, userId: job.requestedBy },
+        (tx) => tx
+          .update(schema.jobs)
+          .set({
+            status: "failed",
+            lastError: `unknown job type ${job.type}`,
+            finishedAt: new Date(),
+            attempts: MAX_ATTEMPTS,
+            startedAt: null,
+            leaseToken: null,
+          })
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.workspaceId, job.workspaceId),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.leaseToken, job.leaseToken),
+            ),
+          )
+          .returning({ id: schema.jobs.id }),
+      );
       if (unknownResult.length === 0) {
         logger.warn({ jobId: job.id }, "unknown job lease was already reaped; status left unchanged");
       }
@@ -203,6 +153,7 @@ async function tick() {
             id: job.id,
             payload: job.payload,
             workspaceId: job.workspaceId,
+            requestedBy: job.requestedBy,
             leaseToken: job.leaseToken,
             signal,
           }),
@@ -215,17 +166,21 @@ async function tick() {
 
       // G-001: 原子条件 UPDATE — 只有 status=running 且 lease_token 与 claim 时相同才提交 succeeded。
       // 如果 job 被 reaper 回收并重新 claim，lease_token 会不同，UPDATE 影响 0 行。
-      const successResult = await db
-        .update(schema.jobs)
-        .set({ status: "succeeded", finishedAt: new Date(), leaseToken: null })
-        .where(
-          and(
-            eq(schema.jobs.id, job.id),
-            eq(schema.jobs.status, "running"),
-            eq(schema.jobs.leaseToken, job.leaseToken),
-          ),
-        )
-        .returning({ id: schema.jobs.id });
+      const successResult = await withWorkerWorkspaceTransaction(
+        { workspaceId: job.workspaceId, userId: job.requestedBy },
+        (tx) => tx
+          .update(schema.jobs)
+          .set({ status: "succeeded", finishedAt: new Date(), leaseToken: null })
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.workspaceId, job.workspaceId),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.leaseToken, job.leaseToken),
+            ),
+          )
+          .returning({ id: schema.jobs.id }),
+      );
       if (successResult.length === 0) {
         logger.warn(
           { jobId: job.id },
@@ -241,25 +196,29 @@ async function tick() {
       // 退避：10s / 20s / 40s；dead 任务不再重试。
       const backoffMs = isDead ? 0 : retryBackoffMs(job.attempts);
       // G-001: 失败时也使用原子条件 UPDATE，避免覆盖 reaper 的状态
-      const failResult = await db
-        .update(schema.jobs)
-        .set({
-          status: isDead ? "dead" : "pending",
-          attempts: nextAttempts,
-          lastError: message,
-          startedAt: null,
-          leaseToken: null,
-          finishedAt: isDead ? new Date() : null,
-          scheduledAt: new Date(Date.now() + backoffMs),
-        })
-        .where(
-          and(
-            eq(schema.jobs.id, job.id),
-            eq(schema.jobs.status, "running"),
-            eq(schema.jobs.leaseToken, job.leaseToken),
-          ),
-        )
-        .returning({ id: schema.jobs.id });
+      const failResult = await withWorkerWorkspaceTransaction(
+        { workspaceId: job.workspaceId, userId: job.requestedBy },
+        (tx) => tx
+          .update(schema.jobs)
+          .set({
+            status: isDead ? "dead" : "pending",
+            attempts: nextAttempts,
+            lastError: message,
+            startedAt: null,
+            leaseToken: null,
+            finishedAt: isDead ? new Date() : null,
+            scheduledAt: new Date(Date.now() + backoffMs),
+          })
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.workspaceId, job.workspaceId),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.leaseToken, job.leaseToken),
+            ),
+          )
+          .returning({ id: schema.jobs.id }),
+      );
       if (failResult.length === 0) {
         logger.warn(
           { jobId: job.id },

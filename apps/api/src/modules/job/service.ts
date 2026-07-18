@@ -1,4 +1,4 @@
-import { db } from "../../db/client.ts";
+import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { learningCards } from "../../db/schema/card.ts";
 import { noteVersions } from "../../db/schema/note.ts";
@@ -13,6 +13,7 @@ import {
 export interface CreateJobInput {
   type: JobType;
   workspaceId: string;
+  requestedBy: string;
   payload: Record<string, unknown>;
   dedupe?: {
     payloadField: "noteVersionId";
@@ -43,45 +44,51 @@ function assertJobQuota(pendingCount: number): void {
 export async function createJob(input: CreateJobInput) {
   // 同一 workspace 的“计数 + 插入”必须共享事务级 advisory lock，
   // 否则并发请求都可能在 49 条时通过检查并突破配额。
-  return db.transaction(async (tx) => {
-    await tx.execute(sql`
-      SELECT pg_advisory_xact_lock(
-        hashtextextended(${`job-quota:${input.workspaceId}`}, 0)
-      )
-    `);
-    if (input.dedupe) {
-      const existing = await tx.query.jobs.findFirst({
-        where: and(
-          eq(jobs.workspaceId, input.workspaceId),
-          eq(jobs.type, input.type),
-          inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
-          sql`${jobs.payload}->>${input.dedupe.payloadField} = ${input.dedupe.value}`,
-        ),
-      });
-      if (existing) return existing;
-    }
-    const pendingRows = await tx
-      .select({ count: count() })
-      .from(jobs)
-      .where(
-        and(
-          eq(jobs.workspaceId, input.workspaceId),
-          eq(jobs.status, JobStatus.PENDING),
-        ),
-      );
-    assertJobQuota(Number(pendingRows[0]?.count ?? 0));
+  return withWorkspaceTransaction(
+    { workspaceId: input.workspaceId, userId: input.requestedBy },
+    async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${`job-quota:${input.workspaceId}`}, 0)
+        )
+      `);
+      if (input.dedupe) {
+        const existing = await tx.query.jobs.findFirst({
+          where: and(
+            eq(jobs.workspaceId, input.workspaceId),
+            eq(jobs.type, input.type),
+            inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
+            sql`${jobs.payload}->>${input.dedupe.payloadField} = ${input.dedupe.value}`,
+          ),
+        });
+        if (existing) return existing;
+      }
+      const pendingRows = await tx
+        .select({ count: count() })
+        .from(jobs)
+        .where(
+          and(
+            eq(jobs.workspaceId, input.workspaceId),
+            eq(jobs.status, JobStatus.PENDING),
+          ),
+        );
+      assertJobQuota(Number(pendingRows[0]?.count ?? 0));
 
-    const [job] = await tx
-      .insert(jobs)
-      .values({
-        type: input.type,
-        workspaceId: input.workspaceId,
-        payload: input.payload,
-        status: JobStatus.PENDING,
-      })
-      .returning();
-    return job;
-  });
+      const [job] = await tx
+        .insert(jobs)
+        .values({
+          type: input.type,
+          workspaceId: input.workspaceId,
+          requestedBy: input.requestedBy,
+          // Keep the legacy payload copy during the expand phase, but make the
+          // trusted session actor authoritative if a caller supplied a mismatch.
+          payload: { ...input.payload, userId: input.requestedBy },
+          status: JobStatus.PENDING,
+        })
+        .returning();
+      return job;
+    },
+  );
 }
 
 export type GenerateCardEnqueueResult = {
@@ -104,93 +111,97 @@ export async function createGenerateCardJob(input: {
   noteId: string;
   noteVersionId: string;
 }): Promise<GenerateCardEnqueueResult> {
-  return db.transaction(async (tx) => {
-    await tx.execute(sql`
-      SELECT pg_advisory_xact_lock(
-        hashtextextended(${`job-quota:${input.workspaceId}`}, 0)
-      )
-    `);
+  return withWorkspaceTransaction(
+    { workspaceId: input.workspaceId, userId: input.userId },
+    async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${`job-quota:${input.workspaceId}`}, 0)
+        )
+      `);
 
-    const currentCard = await tx.query.learningCards.findFirst({
-      where: and(
-        eq(learningCards.workspaceId, input.workspaceId),
-        eq(learningCards.noteVersionId, input.noteVersionId),
-        eq(learningCards.status, CardStatus.ACTIVE),
-      ),
-      orderBy: [desc(learningCards.createdAt)],
-    });
-    const activeJob = await tx.query.jobs.findFirst({
-      where: and(
-        eq(jobs.workspaceId, input.workspaceId),
-        eq(jobs.type, JobType.GENERATE_CARD),
-        inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
-        sql`${jobs.payload}->>'noteVersionId' = ${input.noteVersionId}`,
-      ),
-      orderBy: [desc(jobs.scheduledAt)],
-    });
+      const currentCard = await tx.query.learningCards.findFirst({
+        where: and(
+          eq(learningCards.workspaceId, input.workspaceId),
+          eq(learningCards.noteVersionId, input.noteVersionId),
+          eq(learningCards.status, CardStatus.ACTIVE),
+        ),
+        orderBy: [desc(learningCards.createdAt)],
+      });
+      const activeJob = await tx.query.jobs.findFirst({
+        where: and(
+          eq(jobs.workspaceId, input.workspaceId),
+          eq(jobs.type, JobType.GENERATE_CARD),
+          inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
+          sql`${jobs.payload}->>'noteVersionId' = ${input.noteVersionId}`,
+        ),
+        orderBy: [desc(jobs.scheduledAt)],
+      });
 
-    const [previousCard] = await tx
-      .select({ id: learningCards.id, noteVersionId: learningCards.noteVersionId })
-      .from(learningCards)
-      .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
-      .where(and(
-        eq(learningCards.workspaceId, input.workspaceId),
-        eq(learningCards.status, CardStatus.ACTIVE),
-        eq(noteVersions.noteId, input.noteId),
-      ))
-      .orderBy(desc(learningCards.createdAt))
-      .limit(1);
+      const [previousCard] = await tx
+        .select({ id: learningCards.id, noteVersionId: learningCards.noteVersionId })
+        .from(learningCards)
+        .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
+        .where(and(
+          eq(learningCards.workspaceId, input.workspaceId),
+          eq(learningCards.status, CardStatus.ACTIVE),
+          eq(noteVersions.noteId, input.noteId),
+        ))
+        .orderBy(desc(learningCards.createdAt))
+        .limit(1);
 
-    if (activeJob) {
+      if (activeJob) {
+        return {
+          state: "generating",
+          cardId: currentCard?.id ?? previousCard?.id ?? null,
+          jobId: activeJob.id,
+          generatedVersionId: currentCard?.noteVersionId ?? previousCard?.noteVersionId ?? null,
+        };
+      }
+
+      if (currentCard) {
+        return {
+          state: "generated",
+          cardId: currentCard.id,
+          jobId: null,
+          generatedVersionId: currentCard.noteVersionId,
+        };
+      }
+
+      const pendingRows = await tx
+        .select({ count: count() })
+        .from(jobs)
+        .where(and(
+          eq(jobs.workspaceId, input.workspaceId),
+          eq(jobs.status, JobStatus.PENDING),
+        ));
+      assertJobQuota(Number(pendingRows[0]?.count ?? 0));
+
+      const [job] = await tx
+        .insert(jobs)
+        .values({
+          type: JobType.GENERATE_CARD,
+          workspaceId: input.workspaceId,
+          requestedBy: input.userId,
+          payload: {
+            noteVersionId: input.noteVersionId,
+            userId: input.userId,
+            ...(previousCard && previousCard.noteVersionId !== input.noteVersionId
+              ? { oldCardId: previousCard.id }
+              : {}),
+          },
+          status: JobStatus.PENDING,
+        })
+        .returning();
+
       return {
         state: "generating",
-        cardId: currentCard?.id ?? previousCard?.id ?? null,
-        jobId: activeJob.id,
-        generatedVersionId: currentCard?.noteVersionId ?? previousCard?.noteVersionId ?? null,
+        cardId: previousCard?.id ?? null,
+        jobId: job.id,
+        generatedVersionId: previousCard?.noteVersionId ?? null,
       };
-    }
-
-    if (currentCard) {
-      return {
-        state: "generated",
-        cardId: currentCard.id,
-        jobId: null,
-        generatedVersionId: currentCard.noteVersionId,
-      };
-    }
-
-    const pendingRows = await tx
-      .select({ count: count() })
-      .from(jobs)
-      .where(and(
-        eq(jobs.workspaceId, input.workspaceId),
-        eq(jobs.status, JobStatus.PENDING),
-      ));
-    assertJobQuota(Number(pendingRows[0]?.count ?? 0));
-
-    const [job] = await tx
-      .insert(jobs)
-      .values({
-        type: JobType.GENERATE_CARD,
-        workspaceId: input.workspaceId,
-        payload: {
-          noteVersionId: input.noteVersionId,
-          userId: input.userId,
-          ...(previousCard && previousCard.noteVersionId !== input.noteVersionId
-            ? { oldCardId: previousCard.id }
-            : {}),
-        },
-        status: JobStatus.PENDING,
-      })
-      .returning();
-
-    return {
-      state: "generating",
-      cardId: previousCard?.id ?? null,
-      jobId: job.id,
-      generatedVersionId: previousCard?.noteVersionId ?? null,
-    };
-  });
+    },
+  );
 }
 
 export async function listJobs(workspaceId: string) {

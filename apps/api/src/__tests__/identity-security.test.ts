@@ -130,31 +130,6 @@ describe("authentication rate limiter", () => {
     assert.equal(queries.length, 3);
   });
 
-  it("shares a PostgreSQL window atomically when an integration URL is provided", {
-    skip: !process.env.RATE_LIMIT_TEST_DATABASE_URL,
-  }, async () => {
-    const postgres = (await import("postgres")).default;
-    const { drizzle } = await import("drizzle-orm/postgres-js");
-    const client = postgres(process.env.RATE_LIMIT_TEST_DATABASE_URL!, { max: 8 });
-    const database = drizzle(client);
-    const store = new PostgresRateLimitStore(database as never);
-    const key = `test:rate-limit:${process.pid}:${Date.now()}`;
-
-    try {
-      await store.delete(key);
-      const entries = await Promise.all(
-        Array.from({ length: 8 }, () => store.increment(key, 60_000, Date.now())),
-      );
-      assert.deepEqual(
-        entries.map((entry) => entry.count).sort((a, b) => a - b),
-        [1, 2, 3, 4, 5, 6, 7, 8],
-      );
-      assert.equal(new Set(entries.map((entry) => entry.resetAt)).size, 1);
-    } finally {
-      await store.delete(key);
-      await client.end();
-    }
-  });
 });
 
 describe("session credential migration", () => {
