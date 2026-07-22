@@ -1,20 +1,25 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { ValidationFeedback } from "@ailearn/shared";
 import { db } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
+import { computeContentHash } from "../note/service.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import {
   evidences,
   validationEvents,
   reviewSchedules,
+  reviewAttempts,
   understandingEvents,
   evidenceOverrides,
   validationQuestions,
 } from "../../db/schema/evidence.ts";
 import { aiArtifacts } from "../../db/schema/ai.ts";
 import { jobs } from "../../db/schema/job.ts";
-import { workspaces, workspaceMembers, users } from "../../db/schema/identity.ts";
-import { RECOVERED_PASSWORD_SENTINEL } from "../identity/service.ts";
+import { workspaces, workspaceMembers, users, onboardingStates } from "../../db/schema/identity.ts";
+import {
+  generateDefaultWorkspaceName,
+  RECOVERED_PASSWORD_SENTINEL,
+} from "../identity/service.ts";
 import { logger } from "../../lib/logger.ts";
 
 type RestoreDatabase = Pick<typeof db, "query" | "transaction">;
@@ -49,9 +54,9 @@ export async function exportWorkspace(workspaceId: string) {
         })
       : [];
 
-    // notes
+    // CONC-03: 只导出未软删除的笔记
     const noteRows = await tx.query.notes.findMany({
-      where: eq(notes.workspaceId, workspaceId),
+      where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
       orderBy: (n, { desc }) => [desc(n.updatedAt)],
     });
 
@@ -123,6 +128,13 @@ export async function exportWorkspace(workspaceId: string) {
       orderBy: (r, { desc }) => [desc(r.createdAt)],
     });
 
+    // review attempts (LOOP-01/02) — must follow review_schedules in export
+    // ordering so restore can insert parent before child.
+    const reviewAttemptRows = await tx.query.reviewAttempts.findMany({
+      where: eq(reviewAttempts.workspaceId, workspaceId),
+      orderBy: (a, { desc }) => [desc(a.createdAt)],
+    });
+
     // understanding events
     const understandingEventRows = await tx.query.understandingEvents.findMany({
       where: eq(understandingEvents.workspaceId, workspaceId),
@@ -135,12 +147,21 @@ export async function exportWorkspace(workspaceId: string) {
       orderBy: (a, { desc }) => [desc(a.createdAt)],
     });
 
+    // onboarding states (SEC-02/ALPHA-01) — per-user onboarding progress.
+    // invite_codes are NOT exported: they contain token hashes which are
+    // security-sensitive credentials, not business data.
+    const onboardingStateRows = await tx.query.onboardingStates.findMany({
+      where: eq(onboardingStates.workspaceId, workspaceId),
+      orderBy: (o, { desc }) => [desc(o.updatedAt)],
+    });
+
     return {
       workspace: workspace
         ? {
             id: workspace.id,
             name: workspace.name,
             ownerId: workspace.ownerId,
+            workspaceType: workspace.workspaceType,
             // N-011: 导出 AI 隐私治理配置
             aiProvider: workspace.aiProvider,
             aiConsentVersion: workspace.aiConsentVersion,
@@ -155,6 +176,9 @@ export async function exportWorkspace(workspaceId: string) {
         id: u.id,
         email: u.email,
         role: u.role,
+        displayName: u.displayName,
+        avatarUrl: u.avatarUrl,
+        personalWorkspaceId: u.personalWorkspaceId,
         createdAt: u.createdAt,
         updatedAt: u.updatedAt,
       })),
@@ -171,8 +195,10 @@ export async function exportWorkspace(workspaceId: string) {
       validationQuestions: validationQuestionRows,
       validationEvents: validationEventRows,
       reviewSchedules: reviewScheduleRows,
+      reviewAttempts: reviewAttemptRows,
       understandingEvents: understandingEventRows,
       aiArtifacts: aiArtifactRows,
+      onboardingStates: onboardingStateRows,
       /**
        * 导出清单：明确哪些数据已包含、哪些未包含。
        * N-009: 新增 users 和 workspaceMembers，导出文件现在可用于恢复。
@@ -194,8 +220,10 @@ export async function exportWorkspace(workspaceId: string) {
           "validationQuestions",
           "validationEvents",
           "reviewSchedules",
+          "reviewAttempts",
           "understandingEvents",
           "aiArtifacts",
+          "onboardingStates",
         ],
         excluded: {
           searchDocuments: "可重建 — 调用 POST /search/reindex 即可从主表重建",
@@ -205,6 +233,7 @@ export async function exportWorkspace(workspaceId: string) {
           sessions: "安全敏感 — 用户会话令牌，不应导出",
           passwordHashes: "安全敏感 — 用户密码哈希不导出，恢复后需重置密码",
           aiAuditLog: "运行态 — AI 审计日志，不随 workspace 导出",
+          inviteCodes: "安全敏感 — 邀请 token hash 属凭据数据，不随导出",
         },
         version: "2.0",
         notes: [
@@ -246,7 +275,7 @@ export async function restoreWorkspace(
   // 检查目标 workspace 是否已有业务数据。新工作区本身会包含 Owner 成员，
   // 因而不能以 workspace_members 非空作为冲突依据。
   const [existingNotes, existingSources, existingCards, existingJobs, existingArtifacts] = await Promise.all([
-    database.query.notes.findMany({ where: eq(notes.workspaceId, targetWorkspaceId), limit: 1 }),
+    database.query.notes.findMany({ where: and(eq(notes.workspaceId, targetWorkspaceId), isNull(notes.deletedAt)), limit: 1 }),
     database.query.sources.findMany({ where: eq(sources.workspaceId, targetWorkspaceId), limit: 1 }),
     database.query.learningCards.findMany({ where: eq(learningCards.workspaceId, targetWorkspaceId), limit: 1 }),
     database.query.jobs.findMany({ where: eq(jobs.workspaceId, targetWorkspaceId), limit: 1 }),
@@ -280,8 +309,10 @@ export async function restoreWorkspace(
     counts.validationQuestions = Array.isArray(data.validationQuestions) ? data.validationQuestions.length : 0;
     counts.validationEvents = Array.isArray(data.validationEvents) ? data.validationEvents.length : 0;
     counts.reviewSchedules = Array.isArray(data.reviewSchedules) ? data.reviewSchedules.length : 0;
+    counts.reviewAttempts = Array.isArray(data.reviewAttempts) ? data.reviewAttempts.length : 0;
     counts.understandingEvents = Array.isArray(data.understandingEvents) ? data.understandingEvents.length : 0;
     counts.aiArtifacts = Array.isArray(data.aiArtifacts) ? data.aiArtifacts.length : 0;
+    counts.onboardingStates = Array.isArray(data.onboardingStates) ? data.onboardingStates.length : 0;
 
     // N-009: dry-run 引用完整性校验
     const refErrors: string[] = [];
@@ -289,6 +320,9 @@ export async function restoreWorkspace(
     const cardIds = new Set((Array.isArray(data.learningCards) ? data.learningCards : []).map((c: Record<string, unknown>) => c.id as string));
     const keyPointIds = new Set((Array.isArray(data.cardKeyPoints) ? data.cardKeyPoints : []).map((k: Record<string, unknown>) => k.id as string));
     const questionIds = new Set((Array.isArray(data.validationQuestions) ? data.validationQuestions : []).map((q: Record<string, unknown>) => q.id as string));
+    const scheduleIds = new Set((Array.isArray(data.reviewSchedules) ? data.reviewSchedules : []).map((r: Record<string, unknown>) => r.id as string));
+    const validationEventIds = new Set((Array.isArray(data.validationEvents) ? data.validationEvents : []).map((v: Record<string, unknown>) => v.id as string));
+    const noteVersionIds = new Set((Array.isArray(data.noteVersions) ? data.noteVersions : []).map((v: Record<string, unknown>) => v.id as string));
 
     // evidence_overrides 引用完整性
     if (Array.isArray(data.evidenceOverrides)) {
@@ -320,6 +354,28 @@ export async function restoreWorkspace(
         }
       }
     }
+    if (Array.isArray(data.reviewAttempts)) {
+      for (const a of data.reviewAttempts as Record<string, unknown>[]) {
+        if (!scheduleIds.has(a.reviewScheduleId as string)) {
+          refErrors.push(`review_attempt references missing schedule ${a.reviewScheduleId}`);
+        }
+        if (a.validationEventId && !validationEventIds.has(a.validationEventId as string)) {
+          refErrors.push(`review_attempt references missing validation_event ${a.validationEventId}`);
+        }
+        if (a.validationQuestionId && !questionIds.has(a.validationQuestionId as string)) {
+          refErrors.push(`review_attempt references missing question ${a.validationQuestionId}`);
+        }
+        if (a.keyPointId && !keyPointIds.has(a.keyPointId as string)) {
+          refErrors.push(`review_attempt references missing key_point ${a.keyPointId}`);
+        }
+        if (a.evidenceId && !evidenceIds.has(a.evidenceId as string)) {
+          refErrors.push(`review_attempt references missing evidence ${a.evidenceId}`);
+        }
+        if (a.noteVersionId && !noteVersionIds.has(a.noteVersionId as string)) {
+          refErrors.push(`review_attempt references missing note_version ${a.noteVersionId}`);
+        }
+      }
+    }
 
     if (refErrors.length > 0) {
       return { success: false, message: `dry-run 引用完整性校验失败：${refErrors.slice(0, 5).join("; ")}${refErrors.length > 5 ? ` ...共 ${refErrors.length} 个错误` : ""}`, dryRun: true, counts };
@@ -334,16 +390,87 @@ export async function restoreWorkspace(
       if (Array.isArray(data.users)) {
         for (const u of data.users) {
           const user = u as Record<string, unknown>;
-          await tx.insert(users).values({
-            id: user.id as string,
-            email: user.email as string,
-            // 临时密码哈希，用户需要重置
-            passwordHash: RECOVERED_PASSWORD_SENTINEL,
-            role: (user.role as string) ?? "owner",
-          }).onConflictDoNothing();
+          const [insertedUser] = await tx
+            .insert(users)
+            .values({
+              id: user.id as string,
+              email: user.email as string,
+              // 临时密码哈希，用户需要重置
+              passwordHash: RECOVERED_PASSWORD_SENTINEL,
+              role: (user.role as string) ?? "owner",
+              displayName: (user.displayName as string) ?? null,
+              avatarUrl: (user.avatarUrl as string) ?? null,
+            })
+            .onConflictDoNothing()
+            .returning({
+              id: users.id,
+              email: users.email,
+              displayName: users.displayName,
+            });
+
+          if (insertedUser) {
+            // The exported pointer belongs to the source installation and its
+            // personal workspace is not part of a single-workspace archive.
+            // Give every newly recovered account a valid local personal space
+            // instead of committing a user with personal_workspace_id = NULL.
+            const [personalWorkspace] = await tx
+              .insert(workspaces)
+              .values({
+                ownerId: insertedUser.id,
+                name: generateDefaultWorkspaceName(
+                  insertedUser.displayName,
+                  insertedUser.email,
+                ),
+                workspaceType: "personal",
+              })
+              .returning({ id: workspaces.id });
+
+            await tx
+              .update(users)
+              .set({ personalWorkspaceId: personalWorkspace.id })
+              .where(eq(users.id, insertedUser.id));
+
+            await tx.insert(workspaceMembers).values({
+              workspaceId: personalWorkspace.id,
+              userId: insertedUser.id,
+              role: "owner",
+            });
+
+            await tx.insert(onboardingStates).values({
+              workspaceId: personalWorkspace.id,
+              userId: insertedUser.id,
+              version: "v1",
+              steps: {},
+              status: "pending",
+            });
+          }
         }
         counts.users = data.users.length;
       }
+
+      // Restore workspace metadata without replacing the target workspace ID
+      // or owner. workspaceType is also target identity metadata: copying it
+      // could turn an owner's personal workspace into a collaborative one (or
+      // vice versa) while personalWorkspaceId still points at the target.
+      // Identity references are restored first so aiConsentBy remains valid.
+      const exportedWorkspace = data.workspace as Record<string, unknown>;
+      await tx
+        .update(workspaces)
+        .set({
+          name: (exportedWorkspace.name as string) || "恢复的工作区",
+          aiProvider: (exportedWorkspace.aiProvider as string) ?? "mock",
+          aiConsentVersion: (exportedWorkspace.aiConsentVersion as string) ?? null,
+          aiConsentAt: exportedWorkspace.aiConsentAt
+            ? new Date(exportedWorkspace.aiConsentAt as string)
+            : null,
+          aiConsentBy: (exportedWorkspace.aiConsentBy as string) ?? null,
+          aiDataPolicy: (exportedWorkspace.aiDataPolicy as {
+            sendToExternal: boolean;
+            piiDetection: boolean;
+            auditLogging: boolean;
+          }) ?? { sendToExternal: false, piiDetection: true, auditLogging: true },
+        })
+        .where(eq(workspaces.id, targetWorkspaceId));
 
       // 2. 恢复 workspace_members
       if (Array.isArray(data.workspaceMembers)) {
@@ -354,6 +481,7 @@ export async function restoreWorkspace(
             userId: member.userId as string,
             role: (member.role as string) ?? "member",
             joinedAt: member.joinedAt ? new Date(member.joinedAt as string) : new Date(),
+            leftAt: member.leftAt ? new Date(member.leftAt as string) : null,
           }).onConflictDoNothing();
         }
         counts.workspaceMembers = data.workspaceMembers.length;
@@ -417,12 +545,15 @@ export async function restoreWorkspace(
       if (Array.isArray(data.noteVersions)) {
         for (const v of data.noteVersions) {
           const ver = v as Record<string, unknown>;
+          const contentJson = ver.contentJson as unknown;
+          const contentHash = (ver.contentHash as string) ?? computeContentHash(contentJson);
           await tx.insert(noteVersions).values({
             id: ver.id as string,
             noteId: ver.noteId as string,
             workspaceId: targetWorkspaceId,
             versionNo: ver.versionNo as number,
-            contentJson: ver.contentJson as unknown,
+            contentJson,
+            contentHash,
             createdBy: ver.createdBy as string,
           }).onConflictDoNothing();
         }
@@ -620,6 +751,48 @@ export async function restoreWorkspace(
         counts.reviewSchedules = data.reviewSchedules.length;
       }
 
+      // 13b. 恢复 review_attempts (LOOP-01/02) — 必须在 review_schedules 之后，
+      //      因为 review_attempts.review_schedule_id 外键指向 review_schedules。
+      //      answer_text 属于业务数据，随导出文件一起恢复；隐私边界由导出文件
+      //      本身的访问控制保证（仅 Owner 可导出/恢复）。
+      if (Array.isArray(data.reviewAttempts)) {
+        for (const a of data.reviewAttempts) {
+          const att = a as Record<string, unknown>;
+          await tx.insert(reviewAttempts).values({
+            id: att.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: att.userId as string,
+            reviewScheduleId: att.reviewScheduleId as string,
+            subjectType: att.subjectType as string,
+            subjectId: att.subjectId as string,
+            validationEventId: (att.validationEventId as string) ?? null,
+            validationQuestionId: (att.validationQuestionId as string) ?? null,
+            keyPointId: (att.keyPointId as string) ?? null,
+            evidenceId: (att.evidenceId as string) ?? null,
+            noteVersionId: (att.noteVersionId as string) ?? null,
+            answerType: (att.answerType as string) ?? null,
+            answerText: (att.answerText as string) ?? null,
+            outcome: (att.outcome as string) ?? null,
+            confidence: (att.confidence as number) ?? null,
+            skipReason: (att.skipReason as string) ?? null,
+            scheduleBeforeIntervalDays: (att.scheduleBeforeIntervalDays as number) ?? null,
+            scheduleAfterIntervalDays: (att.scheduleAfterIntervalDays as number) ?? null,
+            scheduleReasonCode: (att.scheduleReasonCode as string) ?? null,
+            understandingEffect: (att.understandingEffect as string) ?? null,
+            nextReviewAt: att.nextReviewAt ? new Date(att.nextReviewAt as string) : null,
+            nextScheduleId: (att.nextScheduleId as string) ?? null,
+            idempotencyKey: att.idempotencyKey as string,
+            status: (att.status as string) ?? "started",
+            startedAt: att.startedAt ? new Date(att.startedAt as string) : new Date(),
+            completedAt: att.completedAt ? new Date(att.completedAt as string) : null,
+            abandonedAt: att.abandonedAt ? new Date(att.abandonedAt as string) : null,
+            createdAt: att.createdAt ? new Date(att.createdAt as string) : new Date(),
+            updatedAt: att.updatedAt ? new Date(att.updatedAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.reviewAttempts = data.reviewAttempts.length;
+      }
+
       // 14. 恢复 understanding_events
       if (Array.isArray(data.understandingEvents)) {
         for (const u of data.understandingEvents) {
@@ -635,6 +808,25 @@ export async function restoreWorkspace(
           }).onConflictDoNothing();
         }
         counts.understandingEvents = data.understandingEvents.length;
+      }
+
+      // 15. 恢复 onboarding_states (SEC-02/ALPHA-01) — 必须在 users 和
+      //     workspace_members 之后，因为外键指向它们。
+      if (Array.isArray(data.onboardingStates)) {
+        for (const o of data.onboardingStates) {
+          const os = o as Record<string, unknown>;
+          await tx.insert(onboardingStates).values({
+            id: os.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: os.userId as string,
+            version: (os.version as string) ?? "v1",
+            steps: (os.steps as Record<string, boolean>) ?? {},
+            status: (os.status as string) ?? "pending",
+            createdAt: os.createdAt ? new Date(os.createdAt as string) : new Date(),
+            updatedAt: os.updatedAt ? new Date(os.updatedAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.onboardingStates = data.onboardingStates.length;
       }
 
     });
@@ -657,8 +849,9 @@ export async function restoreWorkspace(
  * 导出单篇笔记为 Markdown。
  */
 export async function exportNoteMarkdown(noteId: string, workspaceId: string) {
+  // CONC-03: 不导出已软删除的笔记
   const note = await db.query.notes.findFirst({
-    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
+    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
   });
   if (!note) return null;
 

@@ -172,7 +172,7 @@ END
 $$;
 
 -- A plain pg_dump/psql restore with --no-owner recreates application
--- functions as the restore role.  Reconcile only the two audited queue
+-- functions as the restore role.  Reconcile the five audited queue
 -- entrypoints before applying their exact ACLs and validating SECURITY
 -- DEFINER/search_path below; extension-owned functions remain untouched.
 DO $$
@@ -184,6 +184,21 @@ BEGIN
 
   IF to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)') IS NOT NULL THEN
     ALTER FUNCTION public.ailearn_reap_stale_jobs(integer, integer)
+      OWNER TO ailearn_migrator;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_renew_job_lease(uuid,uuid,text)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_renew_job_lease(uuid, uuid, text)
+      OWNER TO ailearn_migrator;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_finish_job(uuid, uuid, text)
+      OWNER TO ailearn_migrator;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_fail_job(uuid, uuid, text, text, integer)
       OWNER TO ailearn_migrator;
   END IF;
 END
@@ -291,7 +306,8 @@ $$;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ailearn_worker;
 
 -- SEC-01 expand phase: the Worker may cross workspace boundaries only through
--- these fixed queue functions.  The functions are created by migration 0018;
+-- these fixed queue functions.  The functions are created by migrations 0018
+-- and 0022;
 -- the pre-migration bootstrap pass safely skips them, while the post-migration
 -- pass revokes ambient access and grants the exact signatures to Worker only.
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public
@@ -310,6 +326,27 @@ BEGIN
     REVOKE ALL ON FUNCTION public.ailearn_reap_stale_jobs(integer, integer)
       FROM PUBLIC, ailearn_api;
     GRANT EXECUTE ON FUNCTION public.ailearn_reap_stale_jobs(integer, integer)
+      TO ailearn_worker;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_renew_job_lease(uuid,uuid,text)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_renew_job_lease(uuid, uuid, text)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_renew_job_lease(uuid, uuid, text)
+      TO ailearn_worker;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_finish_job(uuid, uuid, text)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_finish_job(uuid, uuid, text)
+      TO ailearn_worker;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_fail_job(uuid, uuid, text, text, integer)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_fail_job(uuid, uuid, text, text, integer)
       TO ailearn_worker;
   END IF;
 END
@@ -556,12 +593,48 @@ BEGIN
     RAISE EXCEPTION 'job reap function privilege matrix mismatch';
   END IF;
 
+  IF to_regprocedure('public.ailearn_renew_job_lease(uuid,uuid,text)') IS NOT NULL AND (
+    NOT has_function_privilege(
+      'ailearn_worker', 'public.ailearn_renew_job_lease(uuid,uuid,text)', 'EXECUTE'
+    )
+    OR has_function_privilege(
+      'ailearn_api', 'public.ailearn_renew_job_lease(uuid,uuid,text)', 'EXECUTE'
+    )
+  ) THEN
+    RAISE EXCEPTION 'job lease renewal function privilege matrix mismatch';
+  END IF;
+
+  IF to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)') IS NOT NULL AND (
+    NOT has_function_privilege(
+      'ailearn_worker', 'public.ailearn_finish_job(uuid,uuid,text)', 'EXECUTE'
+    )
+    OR has_function_privilege(
+      'ailearn_api', 'public.ailearn_finish_job(uuid,uuid,text)', 'EXECUTE'
+    )
+  ) THEN
+    RAISE EXCEPTION 'job finish function privilege matrix mismatch';
+  END IF;
+
+  IF to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)') IS NOT NULL AND (
+    NOT has_function_privilege(
+      'ailearn_worker', 'public.ailearn_fail_job(uuid,uuid,text,text,integer)', 'EXECUTE'
+    )
+    OR has_function_privilege(
+      'ailearn_api', 'public.ailearn_fail_job(uuid,uuid,text,text,integer)', 'EXECUTE'
+    )
+  ) THEN
+    RAISE EXCEPTION 'job failure function privilege matrix mismatch';
+  END IF;
+
   IF EXISTS (
     SELECT 1
     FROM pg_proc p
     WHERE p.oid IN (
       to_regprocedure('public.ailearn_claim_jobs(integer,integer)'),
-      to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)')
+      to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)'),
+      to_regprocedure('public.ailearn_renew_job_lease(uuid,uuid,text)'),
+      to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)'),
+      to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)')
     )
       AND (
         NOT p.prosecdef
@@ -582,7 +655,13 @@ BEGIN
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_claim_jobs(integer,integer)')
     AND p.oid IS DISTINCT FROM
-      to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)');
+      to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_renew_job_lease(uuid,uuid,text)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)');
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'Worker has unexpected function EXECUTE privileges: %', mismatch;
   END IF;
@@ -601,9 +680,10 @@ $$;
 
 -- Explicitly document the current security posture.  Do not silently turn on
 -- RLS from a bootstrap script that has no policies or workspace context.  The
--- pre-migration pass allows an older unsafe state to reach migration 0015,
--- which removes the unreleased policies.  The post-migration pass sets
--- require_rls_disabled=true and fails closed if any public table remains
+-- pre-migration pass allows an older database to reach the forward migration
+-- endpoint; migration 0027 restores expansion mode after 0024 was journaled
+-- before runtime transaction scoping was complete.  The post-migration pass
+-- sets require_rls_disabled=true and fails closed if any public table remains
 -- protected.
 DO $$
 DECLARE

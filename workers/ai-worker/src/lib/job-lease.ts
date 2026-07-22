@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   setWorkerTransactionContext,
   withWorkerWorkspaceTransaction,
@@ -15,11 +15,13 @@ export interface JobLeaseContext {
 }
 
 export class JobLeaseLostError extends Error {
+  readonly reason: "aborted" | "inactive";
   constructor(jobId: string, reason: "aborted" | "inactive") {
     super(reason === "aborted"
       ? `job ${jobId} was aborted before committing side effects`
       : `job ${jobId} no longer owns its lease`);
     this.name = "JobLeaseLostError";
+    this.reason = reason;
   }
 }
 
@@ -95,21 +97,22 @@ export async function lockJobLease(
     throw new JobLeaseLostError(job.id, "inactive");
   }
 
-  // Refresh the lease while the transaction owns the row lock. This prevents a
-  // reaper from releasing a still-running handler in the small window between
-  // the fenced business commit and the outer job-status update.
-  await tx
-    .update(schema.jobs)
-    .set({ startedAt: new Date() })
-    .where(
-      and(
-        eq(schema.jobs.id, job.id),
-        eq(schema.jobs.workspaceId, job.workspaceId),
-        eq(schema.jobs.status, "running"),
-        eq(schema.jobs.leaseToken, job.leaseToken),
-      ),
-    );
+  // SEC-01: Refresh the lease via the SECURITY DEFINER function instead of a
+  // direct UPDATE.  This prevents a reaper from releasing a still-running
+  // handler in the small window between the fenced business commit and the
+  // outer job-status update, and ensures the Worker never needs blanket UPDATE
+  // on jobs after RLS enforce.
+  const renewRows = await tx.execute<{ ok: boolean }>(sql`
+    SELECT ailearn_renew_job_lease(
+      ${job.id},
+      ${job.workspaceId},
+      ${job.leaseToken}
+    ) AS ok
+  `);
   throwIfJobAborted(job);
+  if (renewRows.length === 0 || renewRows[0].ok !== true) {
+    throw new JobLeaseLostError(job.id, "inactive");
+  }
 }
 
 export async function isJobLeaseActive(job: JobLeaseContext): Promise<boolean> {

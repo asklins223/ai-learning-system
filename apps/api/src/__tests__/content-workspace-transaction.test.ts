@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const MODULE_CONTRACTS = [
-  { name: "note", handlers: 6, services: 6 },
+  { name: "note", handlers: 9, services: 9 },
   { name: "source", handlers: 8, services: 8 },
   { name: "search", handlers: 3, services: 3 },
 ] as const;

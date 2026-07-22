@@ -4,7 +4,7 @@ import { db } from "../../db/client.ts";
 import { noteVersions } from "../../db/schema/note.ts";
 import { learningCards } from "../../db/schema/card.ts";
 import { jobs } from "../../db/schema/job.ts";
-import { requireSession } from "../identity/middleware.ts";
+import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { getCardWithDetail, listCards, regenerateCard, acceptCard, dismissCard } from "./service.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
 
@@ -27,7 +27,8 @@ export async function cardRoutes(app: FastifyInstance) {
   });
 
   // POST /cards/:id/regenerate — 重新生成学习卡
-  app.post<{ Params: { id: string } }>("/cards/:id/regenerate", async (req, reply) => {
+  // RBAC: 仅 owner 可重新生成卡片
+  app.post<{ Params: { id: string } }>("/cards/:id/regenerate", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
     const result = await regenerateCard(req.params.id, req.session.workspaceId, req.session.userId);
@@ -36,7 +37,8 @@ export async function cardRoutes(app: FastifyInstance) {
   });
 
   // POST /cards/:id/accept — 接受学习卡
-  app.post<{ Params: { id: string } }>("/cards/:id/accept", async (req, reply) => {
+  // RBAC: 仅 owner 可接受/忽略卡片
+  app.post<{ Params: { id: string } }>("/cards/:id/accept", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
     const result = await acceptCard(req.params.id, req.session.workspaceId);
@@ -45,7 +47,8 @@ export async function cardRoutes(app: FastifyInstance) {
   });
 
   // POST /cards/:id/dismiss — 忽略学习卡
-  app.post<{ Params: { id: string } }>("/cards/:id/dismiss", async (req, reply) => {
+  // RBAC: 仅 owner 可接受/忽略卡片
+  app.post<{ Params: { id: string } }>("/cards/:id/dismiss", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
     const result = await dismissCard(req.params.id, req.session.workspaceId);
@@ -140,7 +143,8 @@ export async function cardJobRoutes(app: FastifyInstance) {
     return getGenerationState(req.session.workspaceId, req.params.id, version.noteId);
   });
 
-  app.post("/cards/generate", async (req, reply) => {
+  // RBAC: 仅 owner 可触发生成卡片（创建 AI 任务属于数据写入）
+  app.post("/cards/generate", { preHandler: [requireOwner] }, async (req, reply) => {
     const body = parseBody(app, generateCardRequestSchema, req.body);
     // 跨租户校验：noteVersion 必须属于当前 workspace
     const version = await db.query.noteVersions.findFirst({

@@ -4,7 +4,7 @@ import type { LearningCardOutput, EvaluateValidationOutput } from "@ailearn/shar
 export class MockProvider implements AIProvider {
   id = "mock";
   modelId = "mock-v1";
-  promptVersion = "v1-mock";
+  promptVersion = "v2-mock";
 
   async generateCard(input: GenerateCardInput, signal?: AbortSignal): Promise<LearningCardOutput> {
     // R-007: 检查是否已取消

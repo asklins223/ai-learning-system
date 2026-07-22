@@ -7,7 +7,7 @@ import { evidences } from "../../db/schema/evidence.ts";
 import { benchmarkLabels, benchmarkReports } from "../../db/schema/benchmark.ts";
 import { upsertSearchDocument } from "../../lib/search-index.ts";
 import { createGenerateCardJob } from "../job/service.ts";
-import { deleteNote } from "../note/service.ts";
+import { physicalDeleteNote, computeContentHash } from "../note/service.ts";
 
 /**
  * 内置基准测试笔记（30 篇，覆盖技术、产品、学习、元数据干扰、
@@ -463,6 +463,7 @@ async function runPipelineForNote(
           workspaceId,
           versionNo: 1,
           contentJson: { blocks: blocksInput },
+          contentHash: computeContentHash({ blocks: blocksInput }),
           createdBy: userId,
         })
         .returning();
@@ -813,7 +814,12 @@ async function cleanupPreviousBenchmarkData(
     });
 
     for (const oldNote of oldNotes) {
-      await deleteNote(transaction, oldNote.id, workspaceId);
+      // P1-1: 使用 physicalDeleteNote 彻底清理基准测试数据，
+      // 避免 deleteNote 软删除后数据残留导致重复运行冲突。
+      // CONC-07: force=true 跳过 deletedAt 检查，允许删除 active 笔记。
+      // benchmark 笔记通常是 active 状态（未被软删除），不加 force 会被
+      // physicalDeleteNote 的 CONC-07 守卫静默跳过，导致数据累积。
+      await physicalDeleteNote(transaction, oldNote.id, workspaceId, { force: true });
     }
   });
 }

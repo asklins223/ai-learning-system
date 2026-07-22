@@ -9,7 +9,7 @@
     "start": "node --import tsx src/index.ts",
     "build": "npm run typecheck && esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/handlers/parse-source.test.ts src/lib/worker-reliability.test.ts src/lib/providers/dashscope.test.ts src/lib/providers/openai-compatible.test.ts"
+    "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)"
   },
   "dependencies": {
     "@ailearn/shared": "file:../../packages/shared",
@@ -17,7 +17,8 @@
     "postgres": "^3.4.5",
     "drizzle-orm": "^0.45.2",
     "zod": "^3.23.8",
-    "pino": "^9.5.0"
+    "pino": "^9.5.0",
+    "prom-client": "^15.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",

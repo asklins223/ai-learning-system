@@ -1,4 +1,4 @@
-import { and, eq, inArray, count } from "drizzle-orm";
+import { and, eq, inArray, count, isNull } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, validationEvents, reviewSchedules } from "../../db/schema/evidence.ts";
@@ -30,7 +30,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     db
       .select({ count: count() })
       .from(notes)
-      .where(eq(notes.workspaceId, workspaceId)),
+      .where(and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt))),
     db
       .select({ count: count() })
       .from(learningCards)

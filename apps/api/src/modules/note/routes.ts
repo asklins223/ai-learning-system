@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import { noteCreateSchema, noteUpdateSchema } from "./schema.ts";
 import {
   createNote,
@@ -6,31 +7,43 @@ import {
   listNotes,
   updateNote,
   deleteNote,
+  physicalDeleteNote,
+  restoreDeletedNote,
   listNoteVersions,
+  restoreNoteVersion,
   RevisionConflictError,
+  NoteNotDeletedError,
 } from "./service.ts";
-import { requireSession } from "../identity/middleware.ts";
+import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
+import { deleteObject } from "../../lib/object-storage.ts";
+import { logger } from "../../lib/logger.ts";
 
 export async function noteRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
 
   app.get("/notes", async (req) => {
     // R-022: 统一 Zod 校验，非法参数返回 400 而非 NaN 进入查询
-    const q = parseQuery(app, paginationQuerySchema, req.query);
+    // 前端始终发送 trashed 作为 boolean（包括 false），因此需要接受
+    // "true"/"1" 和 "false"/"0" 两组合法值。
+    const q = parseQuery(app, paginationQuerySchema.extend({
+      trashed: z.enum(["true", "1", "false", "0"]).optional(),
+    }), req.query);
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => listNotes(transaction, req.session.workspaceId, {
         cursor: q.cursor,
         limit: q.limit,
+        trashed: q.trashed === "true" || q.trashed === "1",
       }),
     );
     return result;
   });
 
-  app.post("/notes", async (req) => {
+  // RBAC: 笔记增删改仅 owner 可执行，member 只读
+  app.post("/notes", { preHandler: [requireOwner] }, async (req) => {
     const body = parseBody(app, noteCreateSchema, req.body);
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
@@ -64,7 +77,7 @@ export async function noteRoutes(app: FastifyInstance) {
     return result;
   });
 
-  app.patch<{ Params: { id: string } }>("/notes/:id", async (req, reply) => {
+  app.patch<{ Params: { id: string } }>("/notes/:id", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
     const body = parseBody(app, noteUpdateSchema, req.body);
@@ -100,8 +113,9 @@ export async function noteRoutes(app: FastifyInstance) {
     }
   });
 
-  // DELETE /notes/:id — 删除笔记（级联删除 versions + blocks）
-  app.delete<{ Params: { id: string } }>("/notes/:id", async (req, reply) => {
+  // DELETE /notes/:id — 删除笔记（CONC-03: 软删除，设置 deleted_at）
+  // RBAC: 仅 owner 可删除
+  app.delete<{ Params: { id: string } }>("/notes/:id", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
     const result = await withWorkspaceTransaction(
@@ -110,6 +124,57 @@ export async function noteRoutes(app: FastifyInstance) {
     );
     if (!result) return reply.code(404).send({ error: "not found" });
     return reply.code(204).send();
+  });
+
+  // §3.11: DELETE /notes/:id/permanent — 物理删除已软删除的笔记并清理对象存储图片
+  // 管理员手动触发；定时任务 cleanup-soft-deleted-notes.ts 自动执行相同逻辑
+  // RBAC: 仅 owner 可物理删除
+  app.delete<{ Params: { id: string } }>("/notes/:id/permanent", { preHandler: [requireOwner] }, async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => physicalDeleteNote(transaction, req.params.id, req.session.workspaceId),
+    );
+    if (!result) return reply.code(404).send({ error: "not found" });
+
+    // 事务已提交，fire-and-forget 清理对象存储中的图片（§3.11）
+    if (result.imageObjectKeys?.length > 0) {
+      void Promise.allSettled(
+        result.imageObjectKeys.map((key) => deleteObject(key)),
+      ).then((results) => {
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed > 0) {
+          logger.warn(
+            { failed, total: result.imageObjectKeys.length, noteId: req.params.id },
+            "some image objects failed to delete after permanent note deletion",
+          );
+        }
+      });
+    }
+
+    return reply.code(204).send();
+  });
+
+  // CONC-03: POST /notes/:id/restore — 恢复软删除的笔记
+  // RBAC: 仅 owner 可恢复
+  app.post<{ Params: { id: string } }>("/notes/:id/restore", { preHandler: [requireOwner] }, async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    try {
+      const result = await withWorkspaceTransaction(
+        { workspaceId: req.session.workspaceId, userId: req.session.userId },
+        (transaction) => restoreDeletedNote(transaction, req.params.id, req.session.workspaceId),
+      );
+      if (!result) return reply.code(404).send({ error: "not found" });
+      return result;
+    } catch (err) {
+      // P2-3: 笔记未删除时返回 409 Conflict，而非 404
+      if (err instanceof NoteNotDeletedError) {
+        return reply.code(409).send({ error: "note_not_deleted", message: "该笔记未被删除，无需恢复" });
+      }
+      throw err;
+    }
   });
 
   // §2.5: GET /notes/:id/versions — 笔记版本历史列表（不含 blocks 详情）
@@ -123,5 +188,51 @@ export async function noteRoutes(app: FastifyInstance) {
     if (!versions) return reply.code(404).send({ error: "not found" });
     return { items: versions };
   });
+
+  // POST /notes/:id/versions/:versionId/restore — 恢复到指定版本
+  // CONC-05: 可选 baseVersionId 乐观检查，不匹配时返回 409
+  // RBAC: 仅 owner 可恢复版本
+  const restoreSchema = z.object({
+    baseVersionId: z.string().uuid().optional(),
+  }).default({});
+  app.post<{ Params: { id: string; versionId: string } }>(
+    "/notes/:id/versions/:versionId/restore",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      const params = uuidParamSchema.safeParse(req.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+      // versionId 也必须是合法 UUID，否则返回 400 而非进入 DB 查询
+      if (!z.string().uuid().safeParse(req.params.versionId).success) {
+        return reply.code(400).send({ error: "invalid versionId format" });
+      }
+      const body = parseBody(app, restoreSchema, req.body);
+
+      try {
+        const result = await withWorkspaceTransaction(
+          { workspaceId: req.session.workspaceId, userId: req.session.userId },
+          (transaction) => restoreNoteVersion(
+            transaction,
+            req.params.id,
+            req.params.versionId,
+            req.session.workspaceId,
+            req.session.userId,
+            body.baseVersionId,
+          ),
+        );
+
+        if (!result) return reply.code(404).send({ error: "not found" });
+        return result;
+      } catch (err) {
+        if (err instanceof RevisionConflictError) {
+          return reply.code(409).send({
+            error: "revision_conflict",
+            currentVersionId: err.currentVersionId,
+            message: "内容已被改动，请刷新后重试",
+          });
+        }
+        throw err;
+      }
+    },
+  );
 
 }

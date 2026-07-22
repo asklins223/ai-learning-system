@@ -156,14 +156,14 @@ describe("personal AI connection probe", () => {
     assert.match(requestSnapshot.body.messages[0].content ?? "", /single word: OK/);
   });
 
-  it("uses the DashScope request and response contract", async () => {
+  it("uses the DashScope compatible request and response contract", async () => {
     const requestSnapshot: { url: string; body: any } = { url: "", body: null };
     const requester: PublicJsonRequester = async (url, _headers, body) => {
       Object.assign(requestSnapshot, { url, body });
       return {
         status: 200,
         statusText: "OK",
-        body: { output: { choices: [{ message: { content: "OK" } }] } },
+        body: { choices: [{ message: { content: "OK" } }] },
       };
     };
     const result = await testAIModelRuntimeConnection({
@@ -176,10 +176,11 @@ describe("personal AI connection probe", () => {
     assert.equal(result.provider, "dashscope");
     assert.equal(
       requestSnapshot.url,
-      "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     );
-    assert.equal(requestSnapshot.body.input.messages.length, 1);
-    assert.equal(requestSnapshot.body.parameters.result_format, "message");
+    assert.equal(requestSnapshot.body.model, "qwen-plus");
+    assert.equal(requestSnapshot.body.messages.length, 1);
+    assert.equal("input" in requestSnapshot.body, false);
   });
 
   it("automatically uses DashScope's compatible contract for Qwen 3.5", async () => {

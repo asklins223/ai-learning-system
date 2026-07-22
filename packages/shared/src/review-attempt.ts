@@ -90,16 +90,6 @@ export const reviewAttemptSubmitSchema = z
         message: "answer is required for this answer type and outcome",
       });
     }
-    const canUpgrade =
-      value.outcome === ReviewAttemptOutcome.CORRECT ||
-      value.outcome === ReviewAttemptOutcome.PARTIAL;
-    if (canUpgrade && value.validationQuestionId === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["validationQuestionId"],
-        message: "validationQuestionId is required for an upgrading outcome",
-      });
-    }
   });
 
 export type ReviewAttemptSubmitInput = z.infer<typeof reviewAttemptSubmitSchema>;

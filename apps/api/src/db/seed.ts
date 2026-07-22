@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { eq } from "drizzle-orm";
 import { db } from "./client.ts";
 import { users, workspaces, workspaceMembers } from "./schema/identity.ts";
 
@@ -42,6 +43,9 @@ function resolveSeedConfig() {
   const workspaceName =
     process.env.OWNER_WORKSPACE?.trim() ||
     (demoSeed ? DEMO_WORKSPACE_NAME : "Personal Workspace");
+  // PROFILE-01: 支持 displayName 和 avatarUrl 环境变量
+  const displayName = process.env.OWNER_DISPLAY_NAME?.trim() || null;
+  const avatarUrl = process.env.OWNER_AVATAR_URL?.trim() || null;
 
   if (!ownerEmail.includes("@")) {
     throw new Error("OWNER_EMAIL must be a valid email address.");
@@ -50,13 +54,13 @@ function resolveSeedConfig() {
     throw new Error("OWNER_PASSWORD must contain at least 12 characters.");
   }
 
-  return { demoSeed, ownerEmail, ownerPassword, workspaceName };
+  return { demoSeed, ownerEmail, ownerPassword, workspaceName, displayName, avatarUrl };
 }
 
 async function main() {
   console.log("Seeding…");
 
-  const { demoSeed, ownerEmail, ownerPassword, workspaceName } = resolveSeedConfig();
+  const { demoSeed, ownerEmail, ownerPassword, workspaceName, displayName, avatarUrl } = resolveSeedConfig();
 
   const existing = await db.query.users.findFirst({
     where: (u, { eq }) => eq(u.email, ownerEmail),
@@ -73,12 +77,18 @@ async function main() {
       email: ownerEmail,
       passwordHash: hashPassword(ownerPassword),
       role: "owner",
+      ...(displayName ? { displayName } : {}),
+      ...(avatarUrl ? { avatarUrl } : {}),
     })
     .returning();
 
   const [ws] = await db
     .insert(workspaces)
-    .values({ ownerId: owner.id, name: workspaceName })
+    .values({
+      ownerId: owner.id,
+      name: workspaceName,
+      workspaceType: "personal",
+    })
     .returning();
 
   await db.insert(workspaceMembers).values({
@@ -86,6 +96,12 @@ async function main() {
     userId: owner.id,
     role: "owner",
   });
+
+  // PROFILE-01: 设置用户的 personal_workspace_id
+  await db
+    .update(users)
+    .set({ personalWorkspaceId: ws.id })
+    .where(eq(users.id, owner.id));
 
   console.log(`Seeded ${demoSeed ? "demo " : ""}owner: ${ownerEmail}`);
   console.log(`Workspace: ${workspaceName} (${ws.id})`);

@@ -1,4 +1,4 @@
-import { and, asc, eq, ne, sql, inArray, lt } from "drizzle-orm";
+import { and, asc, eq, ne, sql, inArray, lt, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
@@ -205,7 +205,8 @@ export async function reindexWorkspaceSearch(
   // one query. The old implementation issued one blocks query per note, one
   // segments query per source, and one key-point/evidence query per card.
   const [noteRows, sourceRows, cardRows] = await Promise.all([
-    executor.query.notes.findMany({ where: eq(notes.workspaceId, workspaceId) }),
+    // CONC-03: 软删除的笔记不应被重新索引到搜索文档中
+    executor.query.notes.findMany({ where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)) }),
     executor.query.sources.findMany({
       where: and(eq(sources.workspaceId, workspaceId), ne(sources.status, SourceStatus.ARCHIVED)),
     }),
@@ -490,8 +491,10 @@ export async function detectSearchDrift(
   const staleTitles: { objectType: string; objectId: string; indexedTitle: string | null; actualTitle: string }[] = [];
 
   // 1. Notes: 对比业务表与索引
+  // CONC-03: 软删除的笔记不应计入漂移检测的期望集，
+  // 否则 deleteNote 清理搜索文档后会产生假阳性漂移报告
   const noteRows = await executor.query.notes.findMany({
-    where: eq(notes.workspaceId, workspaceId),
+    where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
     columns: { id: true, title: true, currentVersionId: true },
   });
   const noteIds = new Set(noteRows.filter((n) => n.currentVersionId).map((n) => n.id));

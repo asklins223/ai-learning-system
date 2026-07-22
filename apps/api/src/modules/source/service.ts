@@ -1,6 +1,7 @@
-import { and, asc, desc, eq, ne, sql, count, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, ne, sql, count, inArray, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { sources, sourceSegments, notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
+import { computeContentHash } from "../note/service.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
 import {
@@ -173,6 +174,29 @@ export async function listSources(
     orderBy: [desc(sources.createdAt), desc(sources.id)],
     limit,
   });
+
+  // 批量查询每条来源的关联笔记数量，避免 N+1
+  const sourceIds = items.map((s) => s.id);
+  const noteCountRows = sourceIds.length > 0
+    ? await executor
+        .select({
+          sourceId: notes.sourceId,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(notes)
+        .where(and(
+          inArray(notes.sourceId, sourceIds),
+          eq(notes.workspaceId, workspaceId),
+          isNull(notes.deletedAt),
+        ))
+        .groupBy(notes.sourceId)
+    : [];
+  const noteCountMap = new Map(noteCountRows.map((r) => [r.sourceId!, r.count]));
+  const itemsWithCounts = items.map((s) => ({
+    ...s,
+    noteCount: noteCountMap.get(s.id) ?? 0,
+  }));
+
   // R-019: 服务端返回实际总数
   const countRows = await executor
     .select({ count: sql<number>`count(*)::int` })
@@ -184,7 +208,7 @@ export async function listSources(
   const nextCursor = items.length === limit && lastItem
     ? encodeCursor(lastItem.createdAt, lastItem.id)
     : null;
-  return { items, nextCursor, total };
+  return { items: itemsWithCounts, nextCursor, total };
 }
 
 export async function listSourceStatuses(
@@ -294,7 +318,7 @@ export async function listNotesBySource(
       currentVersionId: notes.currentVersionId,
     })
     .from(notes)
-    .where(and(eq(notes.sourceId, sourceId), eq(notes.workspaceId, workspaceId)))
+    .where(and(eq(notes.sourceId, sourceId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)))
     .orderBy(desc(notes.updatedAt))
     .limit(50);
 
@@ -304,15 +328,17 @@ export async function listNotesBySource(
 /**
  * 从 Source 创建笔记草稿。
  * 1. 读取 source_segments
- * 2. 创建 note（title 从 source.title 继承，写入 sourceId）
- * 3. 创建 note_version + note_blocks（每个 segment 映射为一个 block）
- * 4. block 的 source_ref 指向 source_segment
+ * 2. （可选）内容去重：若已有笔记当前版本的内容哈希一致，返回 duplicate_content
+ * 3. 创建 note（title 从 source.title 继承，写入 sourceId）
+ * 4. 创建 note_version + note_blocks（每个 segment 映射为一个 block）
+ * 5. block 的 source_ref 指向 source_segment
  */
 export async function createNoteFromSource(
   executor: ApiTransaction,
   sourceId: string,
   workspaceId: string,
   userId: string,
+  opts?: { force?: boolean },
 ) {
   const source = await executor.query.sources.findFirst({
     where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
@@ -343,6 +369,35 @@ export async function createNoteFromSource(
   }));
 
   const blocks = segmentsToBlocks(parsedSegments, source.type as "text" | "markdown" | "code" | "url");
+  const newContentHash = computeContentHash({ blocks: blocks.map((b) => ({ type: b.type, content: b.content })) });
+
+  // 内容去重：如果该来源已有笔记的当前版本内容哈希与新内容一致，
+  // 说明来源内容未变，重复创建会生成完全相同的笔记。
+  // force=true 时跳过此检查（用户明确确认要再创建一篇）。
+  if (!opts?.force) {
+    const existingNotes = await executor
+      .select({
+        noteId: notes.id,
+        noteTitle: notes.title,
+        versionHash: noteVersions.contentHash,
+      })
+      .from(notes)
+      .innerJoin(noteVersions, eq(notes.currentVersionId, noteVersions.id))
+      .where(and(
+        eq(notes.sourceId, sourceId),
+        eq(notes.workspaceId, workspaceId),
+        isNull(notes.deletedAt),
+      ));
+
+    const duplicate = existingNotes.find((n) => n.versionHash === newContentHash);
+    if (duplicate) {
+      return {
+        error: "duplicate_content" as const,
+        existingNoteId: duplicate.noteId,
+        existingNoteTitle: duplicate.noteTitle,
+      };
+    }
+  }
 
   const result = await (async (tx: ApiTransaction) => {
     // 创建 note，写入 sourceId
@@ -365,6 +420,7 @@ export async function createNoteFromSource(
         workspaceId,
         versionNo: 1,
         contentJson: { blocks: blocks.map((b) => ({ type: b.type, content: b.content })) },
+        contentHash: newContentHash,
         createdBy: userId,
       })
       .returning();

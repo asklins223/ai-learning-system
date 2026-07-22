@@ -14,29 +14,34 @@ import type {
 } from "../ai-provider.ts";
 import { SYSTEM_PROMPT, EVAL_SYSTEM_PROMPT } from "../prompts.ts";
 import {
-  asJsonRecord,
   readChatCompletionContent,
   readProviderCode,
   readProviderErrorMessage,
-  readString,
 } from "./json-response.ts";
+
+// Connection pooling: Node.js 20+ fetch uses undici internally with
+// keep-alive enabled by default, so TCP+TLS connections are reused
+// across requests automatically. The max_tokens, stream:false, and
+// response_format parameters are the primary latency and reliability
+// optimizations.
 
 /**
  * DashScope (Alibaba Cloud 百炼 / 通义千问) provider.
  *
  * - Reads DASHSCOPE_API_KEY from env (or `apiKey` config).
  * - Models: set DASHSCOPE_MODEL (default `qwen-plus`).
- * - Calls the generation REST endpoint directly so the worker AbortSignal is
- *   attached to the underlying HTTP request.
- * - DashScope does not expose JSON schema response_format here, so output is
- *   still validated through JSON extraction + Zod.
- * - Falls back to a permissive JSON parser that strips ``` fences and finds
- *   the first outermost JSON object.
+ * - All requests route through the OpenAI-compatible endpoint
+ *   (`/compatible-mode/v1/chat/completions`) which supports:
+ *     • `response_format: { type: "json_object" }` for guaranteed JSON output
+ *     • `stream: false` for simpler non-streaming responses
+ * - Output is validated through Zod after JSON extraction. A tolerant
+ *   parser strips ``` fences and finds the first balanced JSON object
+ *   as a defensive fallback.
  */
 export class DashScopeProvider implements AIProvider {
   id = "dashscope";
   modelId: string;
-  promptVersion = "v1-dashscope";
+  promptVersion = "v6-dashscope";
 
   private readonly apiKey: string;
   private readonly basePath: string;
@@ -68,10 +73,12 @@ export class DashScopeProvider implements AIProvider {
     // R-007: 检查是否已取消
     if (signal?.aborted) throw new Error("aborted before generateCard");
     const userPayload = buildUserPayload(input);
+    // temperature 0.3：比 0.2 略高，有助于模型进行抽象提炼而非直接截取原文。
+    // max_tokens 4096：配合 key_points 限制为 5 个，覆盖 95%+ 场景。
     const raw = await this.callOnce([
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userPayload },
-    ], 0.2, signal);
+    ], 0.3, signal, 4096);
     const parsed = safeParseJson(raw);
     const result = learningCardOutputSchema.safeParse(parsed);
     if (!result.success) {
@@ -92,7 +99,7 @@ export class DashScopeProvider implements AIProvider {
     const raw = await this.callOnce([
       { role: "system", content: EVAL_SYSTEM_PROMPT },
       { role: "user", content: userPayload },
-    ], 0.2, signal);
+    ], 0.2, signal, 2048);
     const parsed = safeParseJson(raw);
     const result = evaluateValidationOutputSchema.safeParse(parsed);
     if (!result.success) {
@@ -110,23 +117,20 @@ export class DashScopeProvider implements AIProvider {
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
     temperature = 0.2,
     signal?: AbortSignal,
+    maxTokens = 4096,
   ): Promise<string> {
     if (signal?.aborted) throw abortError(signal, "before DashScope request");
     const endpoint = resolveDashScopeTextEndpoint(this.basePath, this.modelId);
-    const body = endpoint.protocol === "native_text"
-      ? {
-          model: this.modelId,
-          input: { messages },
-          parameters: {
-            result_format: "message",
-            temperature,
-          },
-        }
-      : {
-          model: this.modelId,
-          messages,
-          temperature,
-        };
+    const body = {
+      model: this.modelId,
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+      stream: false,
+      // Force the model to emit valid JSON. Both SYSTEM_PROMPT and
+      // EVAL_SYSTEM_PROMPT mention "JSON" so this constraint is honoured.
+      response_format: { type: "json_object" as const },
+    };
     const response = await this.request(
       endpoint.url,
       {
@@ -159,19 +163,13 @@ export class DashScopeProvider implements AIProvider {
     }
     if (signal?.aborted) throw abortError(signal, "after DashScope body read");
 
-    const responseRecord = asJsonRecord(payload);
-    const output = endpoint.protocol === "native_text"
-      ? asJsonRecord(responseRecord?.output)
-      : responseRecord;
-    if (!output) {
+    const responseRecord = payload as Record<string, unknown>;
+    if (!responseRecord) {
       const code = readProviderCode(payload) ?? "unknown";
       const message = readProviderErrorMessage(payload) ?? "no output";
       throw new Error(`dashscope ${code}: ${message}`);
     }
-    const text: string | undefined =
-      endpoint.protocol === "native_text"
-        ? readChatCompletionContent(output) ?? readString(output, "text")
-        : readChatCompletionContent(output);
+    const text = readChatCompletionContent(responseRecord);
     if (typeof text !== "string" || text.length === 0) {
       throw new Error(`dashscope returned empty output (${this.modelId})`);
     }
@@ -197,8 +195,9 @@ function buildUserPayload(input: GenerateCardInput): string {
 }
 
 /**
- * Tolerant JSON extraction. The model may wrap output in ```json fences
- * or prefix prose. We strip fences and find the first balanced JSON object.
+ * Tolerant JSON extraction. Even with response_format: { type: "json_object" }
+ * some models may occasionally wrap output in ```json fences or prefix prose.
+ * We strip fences and find the first balanced JSON object as a fallback.
  */
 function safeParseJson(raw: string): unknown {
   const stripped = raw

@@ -24,6 +24,7 @@ const POLICY_TABLES = [
   "evidence_overrides",
   "validation_events",
   "review_schedules",
+  "review_attempts",
   "understanding_events",
   "jobs",
 ] as const;
@@ -32,6 +33,7 @@ const WORKSPACE_POLICY_TABLES = POLICY_TABLES.filter((table) => ![
   "evidence_overrides",
   "validation_events",
   "review_schedules",
+  "review_attempts",
   "understanding_events",
   "validation_questions",
   "ai_artifacts",
@@ -43,6 +45,7 @@ const USER_PRIVATE_POLICY_TABLES = [
   "evidence_overrides",
   "validation_events",
   "review_schedules",
+  "review_attempts",
   "understanding_events",
 ] as const;
 
@@ -255,6 +258,7 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       FROM pg_catalog.pg_policies
       WHERE schemaname = 'public'
         AND tablename = ANY(${migrator.array([...POLICY_TABLES])})
+        AND policyname LIKE 'sec01\_v1\_%'
       ORDER BY tablename, policyname
     `;
 
@@ -438,12 +442,15 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       FROM pg_catalog.pg_proc AS procedure
       WHERE procedure.oid IN (
         'public.ailearn_claim_jobs(integer,integer)'::regprocedure,
-        'public.ailearn_reap_stale_jobs(integer,integer)'::regprocedure
+        'public.ailearn_reap_stale_jobs(integer,integer)'::regprocedure,
+        'public.ailearn_renew_job_lease(uuid,uuid,text)'::regprocedure,
+        'public.ailearn_finish_job(uuid,uuid,text)'::regprocedure,
+        'public.ailearn_fail_job(uuid,uuid,text,text,integer)'::regprocedure
       )
     `;
     assert.deepEqual(queueFunctions, {
-      secure_count: 2,
-      worker_execute_count: 2,
+      secure_count: 5,
+      worker_execute_count: 5,
       api_execute_count: 0,
     });
 
@@ -490,10 +497,10 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       `;
       await transaction`
         INSERT INTO note_versions (
-          id, note_id, workspace_id, version_no, content_json, created_by
+          id, note_id, workspace_id, version_no, content_json, content_hash, created_by
         ) VALUES (
           ${noteVersionA}, ${noteA}, ${workspaceA}, 1,
-          ${transaction.json({ blocks: [] })}, ${userA}
+          ${transaction.json({ blocks: [] })}, 'rls-test-hash', ${userA}
         )
       `;
       await transaction`

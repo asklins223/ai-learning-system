@@ -9,6 +9,8 @@ import {
   getUserOverrideMap,
 } from "../../lib/evidence.ts";
 import type { ValidationSubmitInput, CreateQuestionInput } from "./schema.ts";
+// OPS-01: Funnel 指标（ADR-0006 §2）
+import { recordFunnelEvent } from "../../lib/metrics.ts";
 
 async function keyPointHasHardEvidence(
   keyPointId: string,
@@ -191,6 +193,9 @@ export async function submitValidation(
       ...(questionId ? { questionId } : {}),
     },
   });
+
+  // OPS-01: Funnel 指标 — 验证提交
+  recordFunnelEvent("validation_submitted");
 
   return { jobId: job.id };
 }

@@ -118,6 +118,9 @@ export const validationEvents = pgTable(
     jobUniqueIdx: uniqueIndex("validation_events_job_unique_idx")
       .on(t.jobId)
       .where(sql`${t.jobId} IS NOT NULL`),
+    // 并发安全兜底：防止相同输入组合的重复写入（advisory lock 的数据库层面兜底）
+    inputUniqueIdx: uniqueIndex("validation_events_input_unique_idx")
+      .on(t.workspaceId, t.cardId, sql`COALESCE(${t.keyPointId}, '00000000-0000-0000-0000-000000000000'::uuid)`, t.userId, t.question, t.userAnswer),
   }),
 );
 
@@ -139,11 +142,79 @@ export const reviewSchedules = pgTable(
     intervalDays: integer("interval_days").notNull().default(1),
     lastReviewAt: timestamp("last_review_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    // CONC-10: updatedAt 记录最近一次 status 变更时间。
+    // deleteNote 取消计划时设为 deletedAt，restoreDeletedNote 恢复时
+    // 用 updatedAt = deletedAt 精确匹配，避免误恢复之前手动取消的计划。
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     subjectIdx: index("review_schedules_subject_idx").on(t.subjectType, t.subjectId),
     nextIdx: index("review_schedules_next_idx").on(t.nextReviewAt, t.status),
     userStatusIdx: index("review_schedules_user_status_idx").on(t.userId, t.status, t.nextReviewAt),
+  }),
+);
+
+/**
+ * LOOP-01 / LOOP-02: Review attempt (ADR-0004).
+ *
+ * Every review completion produces one auditable row.  Version references are
+ * nullable because "later" and "unable" attempts may not carry a full
+ * question/evidence snapshot.  answer_text is nullable because recall and
+ * self_grade outcomes may omit free text.  The (workspace_id, user_id,
+ * idempotency_key) unique index is the idempotency boundary.
+ */
+export const reviewAttempts = pgTable(
+  "review_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    reviewScheduleId: uuid("review_schedule_id").notNull().references(() => reviewSchedules.id, { onDelete: "cascade" }),
+    subjectType: text("subject_type").notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    validationEventId: uuid("validation_event_id").references(() => validationEvents.id, { onDelete: "set null" }),
+    validationQuestionId: uuid("validation_question_id"),
+    keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
+    evidenceId: uuid("evidence_id").references(() => evidences.id, { onDelete: "set null" }),
+    noteVersionId: uuid("note_version_id"),
+    answerType: text("answer_type"),
+    answerText: text("answer_text"),
+    outcome: text("outcome"),
+    confidence: integer("confidence"),
+    skipReason: text("skip_reason"),
+    scheduleBeforeIntervalDays: integer("schedule_before_interval_days"),
+    scheduleAfterIntervalDays: integer("schedule_after_interval_days"),
+    scheduleReasonCode: text("schedule_reason_code"),
+    understandingEffect: text("understanding_effect"),
+    nextReviewAt: timestamp("next_review_at", { withTimezone: true }),
+    // V05-RISK-05: persist the next schedule ID created by submit, so
+    // historical attempts can trace their successor schedule across generations.
+    nextScheduleId: uuid("next_schedule_id"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    status: text("status").notNull().default("started"),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    // V05-RISK-04: record when a started attempt was abandoned (user cancel,
+    // auto-abandon on new start, or stale cleanup).
+    abandonedAt: timestamp("abandoned_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    workspaceUserCreatedIdx: index("review_attempts_workspace_user_created_idx").on(
+      t.workspaceId, t.userId, t.createdAt, t.id,
+    ),
+    scheduleIdx: index("review_attempts_schedule_idx").on(t.reviewScheduleId, t.createdAt),
+    subjectIdx: index("review_attempts_subject_idx").on(
+      t.workspaceId, t.subjectType, t.subjectId, t.createdAt,
+    ),
+    idempotencyUniqueIdx: uniqueIndex("review_attempts_idempotency_unique_idx").on(
+      t.workspaceId, t.userId, t.idempotencyKey,
+    ),
+    // V05-RISK-04: at most one 'started' attempt per (workspace, user, schedule).
+    activeStartedUniqueIdx: uniqueIndex("review_attempts_active_started_unique_idx").on(
+      t.workspaceId, t.userId, t.reviewScheduleId,
+    ).where(sql`${t.status} = 'started'`),
   }),
 );
 

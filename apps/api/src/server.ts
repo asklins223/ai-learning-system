@@ -3,6 +3,7 @@ import { closeDatabase, db } from "./db/client.ts";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import sensible from "@fastify/sensible";
+import multipart from "@fastify/multipart";
 import { logger } from "./lib/logger.ts";
 import { authRoutes } from "./modules/identity/routes.ts";
 import { noteRoutes } from "./modules/note/routes.ts";
@@ -18,8 +19,21 @@ import { searchRoutes } from "./modules/search/routes.ts";
 import { exportRoutes } from "./modules/export/routes.ts";
 import { statsRoutes } from "./modules/stats/routes.ts";
 import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
+import { uploadRoutes } from "./modules/upload/routes.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
+import { purgeSoftDeletedNotes } from "./modules/note/maintenance.ts";
 import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
+import {
+  getMetricsText,
+  getMetricsContentType,
+  httpRequestsTotal,
+  httpRequestDurationSeconds,
+  httpErrors5xxTotal,
+  readinessStatus,
+  setReleaseInfo,
+  statusToClass,
+  normalizeRouteTemplate,
+} from "./lib/metrics.ts";
 
 const trustProxyValue = process.env.TRUST_PROXY?.trim();
 const normalizedTrustProxyValue = trustProxyValue?.toLowerCase();
@@ -49,6 +63,37 @@ app.get("/health", async () => {
   };
 });
 
+// OPS-01: Prometheus 指标端点（ADR-0006 §1）
+// 不需要认证，但应在生产环境通过网络策略限制访问（仅 Prometheus scraper 可达）。
+app.get("/metrics", async (_req, reply) => {
+  reply.header("Content-Type", getMetricsContentType());
+  return getMetricsText();
+});
+
+// OPS-01: HTTP 请求指标收集 hook（ADR-0006 §1）
+// 在每个请求完成后记录 method、route template、status class 和延迟。
+// 路由参数被规范化为模板，避免高基数和参数泄漏。
+app.addHook("onResponse", async (request, reply) => {
+  // 排除 /metrics 和 /health 自身，避免自我放大
+  if (request.url === "/metrics" || request.url === "/health") return;
+  const method = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+    .includes(request.method)
+    ? request.method
+    : "OTHER";
+  const routeTemplate = request.routeOptions.url;
+  const route = typeof routeTemplate === "string" && routeTemplate.length > 0
+    ? normalizeRouteTemplate(routeTemplate)
+    : "unmatched";
+  const statusClass = statusToClass(reply.statusCode);
+  const durationSeconds = reply.elapsedTime / 1000;
+
+  httpRequestsTotal.inc({ method, route, status_class: statusClass });
+  httpRequestDurationSeconds.observe({ method, route }, durationSeconds);
+  if (statusClass === "5xx") {
+    httpErrors5xxTotal.inc({ method, route });
+  }
+});
+
 app.get("/ready", async (_req, reply) => {
   try {
     await db.execute(sql`SELECT 1`);
@@ -70,6 +115,7 @@ app.get("/ready", async (_req, reply) => {
       "validation_events",
       "validation_questions",
       "review_schedules",
+      "review_attempts",
       "understanding_events",
       "ai_artifacts",
       "ai_audit_log",
@@ -79,6 +125,7 @@ app.get("/ready", async (_req, reply) => {
       "benchmark_labels",
       "auth_rate_limits",
       "user_ai_model_configs",
+      "onboarding_states",
     ];
     const tableRows = await db.execute(sql`
       SELECT table_name
@@ -92,9 +139,10 @@ app.get("/ready", async (_req, reply) => {
 
     // Drizzle journal 的最新迁移时间戳。可通过环境变量在后续版本提升门槛，
     // 避免只存在早期核心表时 readiness 仍误报成功。
-    const minimumMigrationRaw = process.env.MIN_READY_MIGRATION_CREATED_AT ?? "1784437400000";
+    const minimumMigrationRaw = process.env.MIN_READY_MIGRATION_CREATED_AT ?? "1785387800000";
     const minimumMigration = Number(minimumMigrationRaw);
     if (!Number.isSafeInteger(minimumMigration) || minimumMigration <= 0) {
+      readinessStatus.set(0);
       return reply.code(503).send({
         status: "not_ready",
         service: "api",
@@ -111,6 +159,7 @@ app.get("/ready", async (_req, reply) => {
     );
 
     if (missingTables.length > 0 || appliedMigration < minimumMigration) {
+      readinessStatus.set(0);
       return reply.code(503).send({
         status: "not_ready",
         service: "api",
@@ -121,12 +170,14 @@ app.get("/ready", async (_req, reply) => {
         timestamp: new Date().toISOString(),
       });
     }
+    readinessStatus.set(1);
     return {
       status: "ready",
       service: "api",
       timestamp: new Date().toISOString(),
     };
   } catch {
+    readinessStatus.set(0);
     return reply.code(503).send({
       status: "not_ready",
       service: "api",
@@ -153,6 +204,24 @@ async function main() {
   // 提供 httpErrors（badRequest / unauthorized / notFound 等）和统一错误序列化。
   await app.register(sensible);
 
+  // 图片上传：multipart/form-data 解析插件
+  // 在流式读取阶段就拒绝超大文件，防止 OOM
+  await app.register(multipart, {
+    limits: {
+      fileSize: 10 * 1024 * 1024,  // 10MB — 全局上限；头像端点通过 req.file({ limits }) 单独覆写为 2MB
+      files: 1,                     // 每次请求只允许 1 个文件
+      fields: 3,                    // 非文件字段上限（noteId 等；CSRF token 通过 header 传递，不计入）
+      fieldSize: 1024,              // 单个字段值上限
+    },
+  });
+
+  // OPS-01: 设置 Release 信息（ADR-0006 §2）
+  // 在启动时将版本、commit 和迁移数暴露为 Prometheus label。
+  const releaseVersion = process.env.npm_package_version ?? "0.5.0";
+  const releaseCommit = process.env.GIT_COMMIT ?? "unknown";
+  const releaseMigrations = Number(process.env.MIGRATION_COUNT ?? "0");
+  setReleaseInfo(releaseVersion, releaseCommit, releaseMigrations);
+
   await app.register(authRoutes);
   await app.register(noteRoutes);
   await app.register(cardRoutes);
@@ -168,6 +237,7 @@ async function main() {
   await app.register(exportRoutes);
   await app.register(statsRoutes);
   await app.register(benchmarkRoutes);
+  await app.register(uploadRoutes);
 
   const PORT = Number(process.env.PORT ?? 4000);
   const HOST = "0.0.0.0";
@@ -181,10 +251,13 @@ async function main() {
   }
 
   let sessionCleanupTimer: NodeJS.Timeout | undefined;
+  let notePurgeTimer: NodeJS.Timeout | undefined;
   const shutdown = createGracefulShutdown({
     clearTimer: () => {
       if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
       sessionCleanupTimer = undefined;
+      if (notePurgeTimer) clearInterval(notePurgeTimer);
+      notePurgeTimer = undefined;
     },
     closeServer: () => app.close(),
     closeDatabase,
@@ -223,6 +296,31 @@ async function main() {
       }
     }, 60 * 60 * 1000); // 1 hour
     sessionCleanupTimer.unref();
+  }
+
+  // CONC-03: 定时物理清除超过保留期（30 天）的软删除笔记
+  // 启动时先执行一次，之后每 6 小时执行一次
+  try {
+    const purged = await purgeSoftDeletedNotes();
+    if (purged > 0) {
+      app.log.info({ purged }, "soft-deleted notes purged on startup");
+    }
+  } catch (err) {
+    app.log.error({ err }, "note purge on startup failed");
+  }
+
+  if (!shutdown.isShuttingDown()) {
+    notePurgeTimer = setInterval(async () => {
+      try {
+        const purged = await purgeSoftDeletedNotes();
+        if (purged > 0) {
+          app.log.info({ purged }, "soft-deleted notes purged");
+        }
+      } catch (err) {
+        app.log.error({ err }, "note purge failed");
+      }
+    }, 6 * 60 * 60 * 1000); // 6 hours
+    notePurgeTimer.unref();
   }
 }
 

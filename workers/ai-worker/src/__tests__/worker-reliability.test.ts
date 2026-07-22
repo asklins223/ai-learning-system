@@ -6,24 +6,24 @@ import { requireAuditUserId } from "../handlers/index.ts";
 import {
   HandlerTimeoutError,
   runWithAbortTimeout,
-} from "./handler-timeout.ts";
+} from "../lib/handler-timeout.ts";
 import {
   JobLeaseLostError,
   throwIfJobAborted,
-} from "./job-lease.ts";
+} from "../lib/job-lease.ts";
 import {
   DEFAULT_AI_DATA_POLICY,
   logAICall,
   normalizeWorkspaceAIPolicy,
-} from "./governance.ts";
-import { DashScopeProvider } from "./providers/dashscope.ts";
+} from "../lib/governance.ts";
+import { DashScopeProvider } from "../lib/providers/dashscope.ts";
 import {
   assertWorkerWorkspaceTransactionContextCompatible,
   normalizeWorkerWorkspaceTransactionContext,
   resolveWorkerDatabaseUrl,
   WorkerWorkspaceTransactionContextError,
 } from "../db.ts";
-import { retryBackoffMs } from "./job-retry.ts";
+import { retryBackoffMs } from "../lib/job-retry.ts";
 import {
   claimJobs,
   createDrizzleQueueJobUpdater,
@@ -193,7 +193,7 @@ test("failed jobs below the attempt limit return to pending with backoff", async
     updated: true,
     status: "pending",
     attempts: 1,
-    backoffMs: 10_000,
+    backoffMs: 2_000,
   });
   assert.deepEqual(updates, [{
     context: {
@@ -213,7 +213,7 @@ test("failed jobs below the attempt limit return to pending with backoff", async
       startedAt: null,
       leaseToken: null,
       finishedAt: null,
-      scheduledAt: new Date(epochMs + 10_000),
+      scheduledAt: new Date(epochMs + 2_000),
     },
   }]);
 });
@@ -291,8 +291,8 @@ test("worker transaction context validates UUIDs and forbids nested context chan
   );
 });
 
-test("retry backoff starts at ten seconds and doubles per previous failure", () => {
-  assert.deepEqual([0, 1, 2].map(retryBackoffMs), [10_000, 20_000, 40_000]);
+test("retry backoff starts at two seconds and doubles per previous failure", () => {
+  assert.deepEqual([0, 1, 2].map(retryBackoffMs), [2_000, 4_000, 8_000]);
   assert.throws(() => retryBackoffMs(-1), RangeError);
   assert.throws(() => retryBackoffMs(0.5), RangeError);
 });
@@ -354,24 +354,22 @@ test("DashScope forwards the worker AbortSignal to the HTTP request", async () =
   assert.equal(requestSignal, controller.signal);
 });
 
-test("DashScope direct HTTP path preserves the generation request contract", async () => {
+test("DashScope compatible HTTP path preserves the generation request contract", async () => {
   let requestedUrl = "";
   let requestBody: Record<string, unknown> | undefined;
   const request: typeof globalThis.fetch = async (input, init) => {
     requestedUrl = String(input);
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return new Response(JSON.stringify({
-      output: {
-        choices: [{
-          message: {
-            content: JSON.stringify({
-              title: "Card",
-              summary: "Summary",
-              key_points: [{ ordinal: 0, claim: "Claim", quote_text: "Quote" }],
-            }),
-          },
-        }],
-      },
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            title: "Card",
+            summary: "Summary",
+            key_points: [{ ordinal: 0, claim: "Claim", quote_text: "Quote" }],
+          }),
+        },
+      }],
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   };
   const provider = new DashScopeProvider({
@@ -382,9 +380,9 @@ test("DashScope direct HTTP path preserves the generation request contract", asy
 
   const output = await provider.generateCard({ noteTitle: "N", blocks: [] });
 
-  assert.equal(requestedUrl, "https://dashscope.invalid/api/v1/services/aigc/text-generation/generation");
+  assert.equal(requestedUrl, "https://dashscope.invalid/compatible-mode/v1/chat/completions");
   assert.equal(requestBody?.model, "qwen-plus");
-  assert.equal((requestBody?.parameters as { result_format?: string }).result_format, "message");
+  assert.deepEqual(requestBody?.response_format, { type: "json_object" });
   assert.equal(output.title, "Card");
 });
 

@@ -11,7 +11,10 @@ import {
   resolveDashScopeTextEndpoint,
   resolveOpenAIChatCompletionsUrl,
 } from "./ai-endpoints.ts";
-import { isNonPublicAIEndpointAddress } from "./public-json-http.ts";
+import {
+  isNonPublicAIEndpointAddress,
+  postJsonToPublicEndpoint,
+} from "./public-json-http.ts";
 import { evaluateValidationOutputSchema, learningCardOutputSchema } from "./schemas.ts";
 import { parseContent } from "./markdown-parser.ts";
 
@@ -60,9 +63,28 @@ describe("AI endpoint resolution", () => {
     );
   });
 
-  it("routes modern Qwen models through the compatible endpoint", () => {
+  it("routes all models through the compatible endpoint", () => {
+    // qwen-plus (legacy model) — still routes to compatible endpoint
+    assert.deepEqual(
+      resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/api/v1", "qwen-plus"),
+      {
+        protocol: "openai_compatible",
+        url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      },
+    );
+    // qwen3.6-plus (modern model)
     assert.deepEqual(
       resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/api/v1", " qwen3.6-plus "),
+      {
+        protocol: "openai_compatible",
+        url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      },
+    );
+  });
+
+  it("accepts an explicit compatible-mode base URL", () => {
+    assert.deepEqual(
+      resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
       {
         protocol: "openai_compatible",
         url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
@@ -94,6 +116,31 @@ describe("public endpoint address policy", () => {
     assert.equal(isNonPublicAIEndpointAddress("8.8.8.8"), false);
     assert.equal(isNonPublicAIEndpointAddress("2606:4700:4700::1111"), false);
   });
+
+  it("rejects a private literal endpoint before opening a socket", async () => {
+    await assert.rejects(
+      postJsonToPublicEndpoint("https://127.0.0.1/v1/chat/completions", {}, {}),
+      /non-public address/,
+    );
+  });
+
+  it("keeps Docker Desktop synthetic DNS compatibility explicit", () => {
+    const previous = process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS;
+    try {
+      delete process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS;
+      assert.equal(isNonPublicAIEndpointAddress("198.18.0.44"), true);
+      process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS = "true";
+      assert.equal(isNonPublicAIEndpointAddress("198.18.0.44"), false);
+      assert.equal(isNonPublicAIEndpointAddress("127.0.0.1"), true);
+      assert.equal(isNonPublicAIEndpointAddress("10.0.0.1"), true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS;
+      } else {
+        process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS = previous;
+      }
+    }
+  });
 });
 
 describe("shared AI output contracts", () => {
@@ -104,6 +151,27 @@ describe("shared AI output contracts", () => {
       confidence: 2,
       feedback: "Needs review",
     }).success, false);
+  });
+
+  it("accepts optional thinking field in evaluateValidationOutputSchema", () => {
+    const withThinking = evaluateValidationOutputSchema.safeParse({
+      outcome: "preliminary_understanding",
+      confidence: 0.85,
+      feedback: "回答准确覆盖了核心原理",
+      thinking: "claim 核心要点：1) 前提条件 2) 策略选择 3) 目的",
+      covered_points: ["策略选择"],
+      missing_points: [],
+      misunderstandings: [],
+      evidence_refs: [],
+    });
+    assert.equal(withThinking.success, true);
+
+    const withoutThinking = evaluateValidationOutputSchema.safeParse({
+      outcome: "preliminary_understanding",
+      confidence: 0.85,
+      feedback: "回答准确覆盖了核心原理",
+    });
+    assert.equal(withoutThinking.success, true);
   });
 });
 

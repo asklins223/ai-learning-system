@@ -1,11 +1,16 @@
-import { and, asc, count, eq, sql, inArray, desc, or } from "drizzle-orm";
+import { and, asc, count, eq, sql, inArray, or } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
-import { createProvider, resolveProviderSelection } from "../lib/ai-provider.ts";
+import { createProvider } from "../lib/ai-provider.ts";
 import { alignQuote } from "../lib/align.ts";
+import { sanitizeCardOutput } from "../lib/card-quality.ts";
 // N-011: AI 治理 — 同意门禁 + 审计日志
-import { checkAIConsent, logAICall, enforcePrivacyGovernance } from "../lib/governance.ts";
+import {
+  enforcePrivacyGovernanceWithPolicy,
+  logAICall,
+  resolveAIGovernanceContext,
+} from "../lib/governance.ts";
 import {
   assertJobLease,
   isJobLeaseActive,
@@ -14,6 +19,13 @@ import {
   withJobTransaction,
   type JobLeaseContext,
 } from "../lib/job-lease.ts";
+// OPS-01: Provider 指标（ADR-0006 §2）
+import {
+  providerCallsTotal,
+  providerCallDurationSeconds,
+  providerErrorsTotal,
+  categorizeError,
+} from "../lib/metrics.ts";
 import {
   ArtifactType,
   ArtifactStatus,
@@ -107,52 +119,97 @@ export async function runGenerateCard(job: JobPayload) {
   // initiating user explicitly for audit attribution.
   const auditUserId = requireAuditUserId(job);
 
-  const version = await db.query.noteVersions.findFirst({
-    where: and(
-      eq(schema.noteVersions.id, noteVersionId),
-      eq(schema.noteVersions.workspaceId, job.workspaceId),
-    ),
-  });
+  // 并行查询 note+version (JOIN)、noteBlocks 和 AI 治理上下文，减少串行 DB 往返
+  const [versionNoteRow, blocks, govCtx] = await Promise.all([
+    db.select({ version: schema.noteVersions, note: schema.notes })
+      .from(schema.noteVersions)
+      .innerJoin(schema.notes, eq(schema.notes.id, schema.noteVersions.noteId))
+      .where(and(
+        eq(schema.noteVersions.id, noteVersionId),
+        eq(schema.noteVersions.workspaceId, job.workspaceId),
+        eq(schema.notes.workspaceId, job.workspaceId),
+      ))
+      .limit(1),
+    db.query.noteBlocks.findMany({
+      where: and(
+        eq(schema.noteBlocks.versionId, noteVersionId),
+        eq(schema.noteBlocks.workspaceId, job.workspaceId),
+      ),
+      orderBy: asc(schema.noteBlocks.ordinal),
+    }),
+    resolveAIGovernanceContext(job.workspaceId, auditUserId),
+  ]);
+  const version = versionNoteRow[0]?.version;
+  const note = versionNoteRow[0]?.note;
   if (!version) throw new Error(`note version ${noteVersionId} not found in workspace`);
-
-  const note = await db.query.notes.findFirst({
-    where: and(
-      eq(schema.notes.id, version.noteId),
-      eq(schema.notes.workspaceId, job.workspaceId),
-    ),
-  });
-  if (!note) throw new Error(`note ${version.noteId} not found in workspace`);
-
-  const blocks = await db.query.noteBlocks.findMany({
-    where: and(
-      eq(schema.noteBlocks.versionId, noteVersionId),
-      eq(schema.noteBlocks.workspaceId, job.workspaceId),
-    ),
-    orderBy: asc(schema.noteBlocks.ordinal),
-  });
-
-  // Resolve once so consent, policy checks, and the eventual call all refer to
-  // the same provider/configuration snapshot.
-  const providerSelection = await resolveProviderSelection(job.workspaceId, auditUserId);
-
-  // N-011: AI 同意门禁 — 未签署同意的工作区不能调用外部 AI provider
-  const consentOk = await checkAIConsent(job.workspaceId, providerSelection.providerName);
-  if (!consentOk) {
+  if (!note) throw new Error(`note not found in workspace`);
+  if (!govCtx.consentOk) {
     throw new Error("AI consent not signed for this workspace. Owner must sign AI consent before using external AI providers.");
   }
 
-  // N-011: 隐私治理 — sendToExternal 门禁 + PII 检测/脱敏
-  const governanceResult = await enforcePrivacyGovernance(
+  // 过滤 image block 并提取 alt text，避免将图片 URL 发送给 AI provider。
+  // 有 alt text 的图片转为 paragraph 保留语义价值；无 alt text 的丢弃。
+  // 此步骤在 enforcePrivacyGovernanceWithPolicy 之前执行，使 PII 检测只需处理文本内容。
+  const textBlocks = blocks
+    .map((b) => {
+      if (b.type === "image") {
+        const altMatch = /^!\[([^\]]*)\]\([^)]+\)/.exec(b.content);
+        const alt = altMatch?.[1]?.trim();
+        return alt ? { ordinal: b.ordinal, type: "paragraph" as const, content: `（图片：${alt}）` } : null;
+      }
+      return { ordinal: b.ordinal, type: b.type, content: b.content };
+    })
+    .filter((b): b is NonNullable<typeof b> => b !== null);
+
+  // 内容长度控制：当笔记总内容过长时截断，避免超出模型上下文窗口或导致注意力分散。
+  // 策略：按信息密度优先保留 blocks，避免简单按 ordinal 顺序截断丢失尾部重要内容。
+  // - paragraph / quote / list 类型信息密度高于 heading，优先保留
+  // - 内容较长的 block 通常包含更多知识，优先保留
+  // - 仍保持原始 ordinal 顺序输出，确保模型理解文档结构
+  // 上限设为 12000 字符（约 4000-6000 tokens），适配 qwen-plus 等模型的上下文窗口。
+  const MAX_CONTENT_CHARS = 12_000;
+  let truncatedBlocks = textBlocks;
+  const totalContentLength = textBlocks.reduce((sum, b) => sum + b.content.length, 0);
+  if (totalContentLength > MAX_CONTENT_CHARS) {
+    // 为每个 block 计算信息密度分数
+    const scored = textBlocks.map((b) => {
+      let score = b.content.length;
+      // paragraph / quote / list 优先级高于 heading
+      if (b.type === "paragraph" || b.type === "quote") score *= 1.5;
+      else if (b.type === "list") score *= 1.3;
+      else if (b.type === "heading") score *= 0.5;
+      return { block: b, score };
+    });
+    // 按分数降序排列，选择能放入上限的高分 blocks
+    const sortedByScore = [...scored].sort((a, b) => b.score - a.score);
+    const selectedSet = new Set<typeof textBlocks[number]>();
+    let accumulated = 0;
+    for (const item of sortedByScore) {
+      if (accumulated + item.block.content.length > MAX_CONTENT_CHARS && selectedSet.size >= 3) break;
+      selectedSet.add(item.block);
+      accumulated += item.block.content.length;
+    }
+    // 恢复原始 ordinal 顺序
+    truncatedBlocks = textBlocks.filter((b) => selectedSet.has(b));
+    logger.info(
+      { totalBlocks: textBlocks.length, keptBlocks: truncatedBlocks.length, totalContentLength, maxChars: MAX_CONTENT_CHARS },
+      "note content truncated for card generation — kept high-density blocks by information score",
+    );
+  }
+
+  // 隐私治理 — 使用预解析的 policy，避免重复查 workspaces
+  const governanceResult = enforcePrivacyGovernanceWithPolicy(
+    govCtx.policy,
     job.workspaceId,
     ["note_content"],
-    { noteTitle: note.title, blocks: blocks.map((b) => ({ ordinal: b.ordinal, type: b.type, content: b.content })) },
-    providerSelection.providerName,
+    { noteTitle: note.title, blocks: truncatedBlocks },
+    govCtx.providerName,
   );
   if (!governanceResult.allowed) {
     throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
   }
 
-  const provider = createProvider(providerSelection.providerName, providerSelection.config);
+  const provider = createProvider(govCtx.providerName, govCtx.providerConfig);
 
   // N-011: 使用脱敏后的数据
   const sanitizedInput = governanceResult.sanitizedData as {
@@ -165,7 +222,14 @@ export async function runGenerateCard(job: JobPayload) {
   let output;
   try {
     output = await provider.generateCard(sanitizedInput, job.signal);
+    // OPS-01: Provider 成功指标
+    providerCallsTotal.labels("generate_card", "success").inc();
+    providerCallDurationSeconds.labels("generate_card").observe((Date.now() - aiCallStart) / 1000);
   } catch (err) {
+    // OPS-01: Provider 失败指标
+    providerCallsTotal.labels("generate_card", "failed").inc();
+    providerCallDurationSeconds.labels("generate_card").observe((Date.now() - aiCallStart) / 1000);
+    providerErrorsTotal.labels("generate_card", categorizeError(err)).inc();
     // N-011: 写入审计日志（失败）
     if (await isJobLeaseActive(leaseContext(job))) {
       await logAICall({
@@ -176,7 +240,7 @@ export async function runGenerateCard(job: JobPayload) {
         modelId: provider.modelId,
         operation: "generate_card",
         dataCategories: ["note_content"],
-        dataSizeBytes: JSON.stringify(blocks).length,
+        dataSizeBytes: JSON.stringify(truncatedBlocks).length,
         durationMs: Date.now() - aiCallStart,
         status: "failed",
         errorMessage: err instanceof Error ? err.message : String(err),
@@ -187,6 +251,19 @@ export async function runGenerateCard(job: JobPayload) {
 
   // R-007: 模型调用后检查是否已 abort，避免写入学果
   await assertJobLease(leaseContext(job));
+
+  // Post-generation quality sanitization: remove short claims (topic labels),
+  // filter vague evaluations, validate quote_text against source blocks,
+  // deduplicate semantically similar key points, truncate to 5, and renumber.
+  const originalCount = output.key_points.length;
+  const sourceBlockContents = sanitizedInput.blocks.map((b) => b.content);
+  output = sanitizeCardOutput(output, sourceBlockContents);
+  if (output.key_points.length < originalCount) {
+    logger.info(
+      { originalCount, sanitizedCount: output.key_points.length },
+      "card output sanitized — removed short/vague/duplicate key points or unmatched quotes",
+    );
+  }
 
   const cardBody = [output.summary, ...output.key_points.map((kp) => kp.claim)].join("\n");
 
@@ -408,7 +485,7 @@ export async function runGenerateCard(job: JobPayload) {
       modelId: provider.modelId,
       operation: "generate_card",
       dataCategories: ["note_content"],
-      dataSizeBytes: JSON.stringify(blocks).length,
+      dataSizeBytes: JSON.stringify(truncatedBlocks).length,
       durationMs: Date.now() - aiCallStart,
       status: "success",
     });
@@ -460,7 +537,9 @@ export async function runAlignEvidence(job: JobPayload) {
 
   const result = alignQuote(
     kp.quoteText,
-    blocks.map((b) => ({ blockId: b.id, blockOrdinal: b.ordinal, text: b.content })),
+    blocks
+      .filter((b) => b.type !== "image")
+      .map((b) => ({ blockId: b.id, blockOrdinal: b.ordinal, text: b.content })),
   );
 
   // N-006: 在事务中原子删除旧 evidence 和插入新 evidence
@@ -716,129 +795,101 @@ export async function runEvaluateValidation(job: JobPayload) {
   await assertJobLease(leaseContext(job));
   logger.info({ cardId, keyPointId }, "running evaluate_validation");
 
-  // The job id is the primary idempotency key. This avoids another provider
-  // call on ordinary redelivery/replay after the result transaction committed.
-  const existingJobValidation = await db.query.validationEvents.findFirst({
-    where: and(
-      eq(schema.validationEvents.workspaceId, job.workspaceId),
-      eq(schema.validationEvents.jobId, job.id),
-    ),
-  });
-  if (existingJobValidation) {
-    logger.info(
-      { jobId: job.id, validationEventId: existingJobValidation.id },
-      "evaluate_validation skipped — result already exists for this job",
-    );
-    return;
-  }
-
-  // R-007: 兼容旧记录（job_id 为空）的输入级幂等检查。
-  // 匹配条件：同 cardId + keyPointId + question + userAnswer + userId
+  // 幂等检查 — 合并为单次 OR 查询：by jobId 或 by input 组合
+  // 避免对 validationEvents 表的两次串行查询。
   const existingValidation = await db.query.validationEvents.findFirst({
     where: and(
       eq(schema.validationEvents.workspaceId, job.workspaceId),
-      eq(schema.validationEvents.cardId, cardId),
-      eq(schema.validationEvents.userId, userId),
-      eq(schema.validationEvents.question, question),
-      eq(schema.validationEvents.userAnswer, userAnswer),
-      ...(keyPointId ? [eq(schema.validationEvents.keyPointId, keyPointId)] : []),
+      or(
+        eq(schema.validationEvents.jobId, job.id),
+        and(
+          eq(schema.validationEvents.cardId, cardId),
+          eq(schema.validationEvents.userId, userId),
+          eq(schema.validationEvents.question, question),
+          eq(schema.validationEvents.userAnswer, userAnswer),
+          ...(keyPointId ? [eq(schema.validationEvents.keyPointId, keyPointId)] : []),
+        ),
+      ),
     ),
   });
   if (existingValidation) {
     logger.info(
-      { cardId, keyPointId, validationEventId: existingValidation.id },
-      "evaluate_validation skipped — validation event already exists for this input",
+      { jobId: job.id, validationEventId: existingValidation.id },
+      existingValidation.jobId === job.id
+        ? "evaluate_validation skipped — result already exists for this job"
+        : "evaluate_validation skipped — validation event already exists for this input",
     );
     return;
   }
 
-  const card = await db.query.learningCards.findFirst({
-    where: and(
-      eq(schema.learningCards.id, cardId),
-      eq(schema.learningCards.workspaceId, job.workspaceId),
-    ),
-  });
+  // 并行查询 card + keyPoint + AI 治理上下文，减少串行 DB 往返
+  const [card, kpRow, govCtx] = await Promise.all([
+    db.query.learningCards.findFirst({
+      where: and(
+        eq(schema.learningCards.id, cardId),
+        eq(schema.learningCards.workspaceId, job.workspaceId),
+      ),
+    }),
+    keyPointId
+      ? db.query.cardKeyPoints.findFirst({
+          where: and(
+            eq(schema.cardKeyPoints.id, keyPointId),
+            eq(schema.cardKeyPoints.cardId, cardId),
+            eq(schema.cardKeyPoints.workspaceId, job.workspaceId),
+          ),
+        })
+      : db.query.cardKeyPoints.findFirst({
+          where: and(
+            eq(schema.cardKeyPoints.cardId, cardId),
+            eq(schema.cardKeyPoints.workspaceId, job.workspaceId),
+          ),
+        }),
+    resolveAIGovernanceContext(job.workspaceId, userId),
+  ]);
   if (!card) throw new Error(`card ${cardId} not found in workspace`);
-
-  let kp = null as typeof schema.cardKeyPoints.$inferSelect | null;
-  if (keyPointId) {
-    kp = (await db.query.cardKeyPoints.findFirst({
-      where: and(
-        eq(schema.cardKeyPoints.id, keyPointId),
-        eq(schema.cardKeyPoints.cardId, cardId),
-        eq(schema.cardKeyPoints.workspaceId, job.workspaceId),
-      ),
-    })) ?? null;
-    if (!kp) throw new Error(`key point ${keyPointId} not found in card ${cardId}`);
-  } else {
-    kp = (await db.query.cardKeyPoints.findFirst({
-      where: and(
-        eq(schema.cardKeyPoints.cardId, cardId),
-        eq(schema.cardKeyPoints.workspaceId, job.workspaceId),
-      ),
-    })) ?? null;
-  }
-  if (!kp) throw new Error(`card ${cardId} has no key points to validate`);
+  const kp = kpRow ?? null;
+  if (!kp) throw new Error(keyPointId ? `key point ${keyPointId} not found in card ${cardId}` : `card ${cardId} has no key points to validate`);
 
   // 取 keyPoint 对应的 evidence block 内容，作为参考答案上下文
-  // N-004: 使用确定性排序选取最高分有效硬证据
-  const allEvs = await db.query.evidences.findMany({
-    where: and(
-      eq(schema.evidences.keyPointId, kp.id),
-      eq(schema.evidences.workspaceId, job.workspaceId),
-    ),
-    orderBy: [desc(schema.evidences.alignmentScore)],
-  });
-  // N-004: 确定性选取 — 优先 aligned（含 confirmed override），然后 soft，最后其他
-  const evidencePriority = (alignment: string, userOverride: string | null): number => {
-    let eff = alignment;
-    if (userOverride === "rejected") return 3;
-    if (userOverride === "downgraded") eff = "soft";
-    if (userOverride === "confirmed") eff = "aligned";
-    switch (eff) {
-      case "aligned": return 0;
-      case "soft": return 1;
-      default: return 2;
-    }
-  };
-  const ev = allEvs.sort((a, b) => {
-    const pdiff = evidencePriority(a.alignment, a.userOverride) - evidencePriority(b.alignment, b.userOverride);
-    if (pdiff !== 0) return pdiff;
-    return b.alignmentScore - a.alignmentScore;
-  })[0];
-  let referenceText = "";
-  if (ev?.blockId) {
-    const blk = await db.query.noteBlocks.findFirst({
-      where: and(
-        eq(schema.noteBlocks.id, ev.blockId),
-        eq(schema.noteBlocks.workspaceId, job.workspaceId),
-      ),
-    });
-    if (blk) referenceText = blk.content;
-  }
-
-  // Resolve once so consent, policy checks, and the eventual call all refer to
-  // the same provider/configuration snapshot.
-  const providerSelection = await resolveProviderSelection(job.workspaceId, userId);
-
-  // N-011: AI 同意门禁 — 未签署同意的工作区不能调用外部 AI provider
-  const consentOk = await checkAIConsent(job.workspaceId, providerSelection.providerName);
-  if (!consentOk) {
+  // N-004: 使用 SQL 排序选取最高分有效硬证据，避免全量加载后 JS 排序
+  // 优先级：aligned > soft > 其他，同级按 alignmentScore 降序
+  // 使用 LEFT JOIN note_blocks 一次性获取 block 内容，消除额外串行查询
+  const evidenceRows = await db.execute<{ id: string; block_id: string | null; alignment: string; alignment_score: number; user_override: string | null; block_content: string | null }>(sql`
+    SELECT e.id, e.block_id, e.alignment, e.alignment_score, e.user_override, nb.content AS block_content
+    FROM evidences e
+    LEFT JOIN note_blocks nb ON nb.id = e.block_id AND nb.workspace_id = e.workspace_id
+    WHERE e.key_point_id = ${kp.id}
+      AND e.workspace_id = ${job.workspaceId}
+    ORDER BY
+      CASE
+        WHEN e.user_override = 'rejected' THEN 3
+        WHEN e.user_override = 'downgraded' THEN 1
+        WHEN e.user_override = 'confirmed' OR e.alignment = 'aligned' THEN 0
+        WHEN e.alignment = 'soft' THEN 1
+        ELSE 2
+      END,
+      e.alignment_score DESC
+    LIMIT 1
+  `);
+  const ev = evidenceRows[0];
+  const referenceText = ev?.block_content ?? "";
+  if (!govCtx.consentOk) {
     throw new Error("AI consent not signed for this workspace. Owner must sign AI consent before using external AI providers.");
   }
 
-  // N-011: 隐私治理 — sendToExternal 门禁 + PII 检测/脱敏
-  const governanceResult = await enforcePrivacyGovernance(
+  // 隐私治理 — 使用预解析的 policy，避免重复查 workspaces
+  const governanceResult = enforcePrivacyGovernanceWithPolicy(
+    govCtx.policy,
     job.workspaceId,
     ["question", "user_answer", "claim", "quote"],
     { question, questionType, claim: kp.claim, quote: referenceText || kp.quoteText, userAnswer },
-    providerSelection.providerName,
+    govCtx.providerName,
   );
   if (!governanceResult.allowed) {
     throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
   }
 
-  const provider = createProvider(providerSelection.providerName, providerSelection.config);
+  const provider = createProvider(govCtx.providerName, govCtx.providerConfig);
 
   // N-011: 审计日志
   const aiCallStart = Date.now();
@@ -856,7 +907,14 @@ export async function runEvaluateValidation(job: JobPayload) {
   let output;
   try {
     output = await provider.evaluateValidation(sanitizedInput, job.signal);
+    // OPS-01: Provider 成功指标
+    providerCallsTotal.labels("evaluate_validation", "success").inc();
+    providerCallDurationSeconds.labels("evaluate_validation").observe((Date.now() - aiCallStart) / 1000);
   } catch (err) {
+    // OPS-01: Provider 失败指标
+    providerCallsTotal.labels("evaluate_validation", "failed").inc();
+    providerCallDurationSeconds.labels("evaluate_validation").observe((Date.now() - aiCallStart) / 1000);
+    providerErrorsTotal.labels("evaluate_validation", categorizeError(err)).inc();
     // N-011: 写入审计日志（失败）
     if (await isJobLeaseActive(leaseContext(job))) {
       await logAICall({
@@ -895,34 +953,51 @@ export async function runEvaluateValidation(job: JobPayload) {
 
   await withJobTransaction(job, async (tx) => {
     await lockJobLease(tx, leaseContext(job));
-    // Serialize the final side effects for this job. A lease may expire after
-    // the model call and let a second worker execute the same job concurrently;
-    // the advisory transaction lock makes the second transaction wait, then
-    // observe the first validation event and return without creating another
-    // artifact, understanding event, or review schedule. The DB unique index on
-    // validation_events.job_id remains the final invariant.
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${job.id}, 0))`);
+    // 输入维度 advisory lock：当 QUEUE_CONCURRENCY > 1 时，两个不同 jobId 但
+    // 相同输入（cardId + keyPointId + userId + question + userAnswer）的 job 可能
+    // 同时通过事务外的幂等读检查。输入维度锁让第二个事务等待，然后观察到第一个
+    // validation event 并返回，避免重复写入。validation_events.job_id 查询仍是最终不变量。
+    const validationLockKey = `${job.workspaceId}:${cardId}:${keyPointId ?? ""}:${userId}:${question}:${userAnswer}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${validationLockKey}, 0))`);
+    // 输入维度锁已确保此前相同输入的并发事务已提交。此处查重必须同时检查
+    // jobId（防重试重复）和输入组合（防不同 jobId 相同输入的并发重复），
+    // 否则第二个 job 无法观察到第一个 job 已写入的 validation event。
     const committedResult = await tx.query.validationEvents.findFirst({
       where: and(
         eq(schema.validationEvents.workspaceId, job.workspaceId),
-        eq(schema.validationEvents.jobId, job.id),
+        or(
+          eq(schema.validationEvents.jobId, job.id),
+          and(
+            eq(schema.validationEvents.cardId, cardId),
+            eq(schema.validationEvents.userId, userId),
+            eq(schema.validationEvents.question, question),
+            eq(schema.validationEvents.userAnswer, userAnswer),
+            ...(keyPointId ? [eq(schema.validationEvents.keyPointId, keyPointId)] : []),
+          ),
+        ),
       ),
     });
     if (committedResult) {
       logger.info(
         { jobId: job.id, validationEventId: committedResult.id },
-        "evaluate_validation side effects skipped — concurrent result already committed",
+        committedResult.jobId === job.id
+          ? "evaluate_validation side effects skipped — result already exists for this job"
+          : "evaluate_validation side effects skipped — concurrent result already committed for same input",
       );
       return;
     }
 
     // 1. ai_artifacts
+    // SEC-01: validation_feedback artifacts carry an exact actor binding in
+    // input_refs.userId so the RLS actor guard can enforce user-private access
+    // once ROW LEVEL SECURITY is activated.  Without this binding the Worker
+    // write would be rejected by sec01_v1_ai_artifacts_validation_actor_guard.
     const [artifact] = await tx
       .insert(schema.aiArtifacts)
       .values({
         workspaceId: job.workspaceId,
         type: ArtifactType.VALIDATION_FEEDBACK,
-        inputRefs: { cardId, keyPointId: kp!.id },
+        inputRefs: { cardId, keyPointId: kp!.id, userId },
         output,
         modelId: provider.modelId,
         promptVersion: provider.promptVersion,

@@ -118,7 +118,8 @@ describe("review attempt contract", () => {
     );
   });
 
-  it("requires an answer for successful/incorrect results and a question for upgrades", () => {
+  it("requires an answer for successful/incorrect results and allows recall without answer for unable", () => {
+    // For CORRECT/PARTIAL/INCORRECT, an answer is always required (outcome !== UNABLE).
     for (const outcome of [
       ReviewAttemptOutcome.CORRECT,
       ReviewAttemptOutcome.PARTIAL,
@@ -129,6 +130,7 @@ describe("review attempt contract", () => {
         false,
       );
     }
+    // For UNABLE with FREE_TEXT, an answer is still required (answerType === FREE_TEXT).
     assert.equal(
       reviewAttemptSubmitSchema.safeParse(validSubmit({
         answerType: ReviewAttemptAnswerType.FREE_TEXT,
@@ -137,13 +139,23 @@ describe("review attempt contract", () => {
       })).success,
       false,
     );
+    // For UNABLE with RECALL, an answer is not required.
+    assert.equal(
+      reviewAttemptSubmitSchema.safeParse(validSubmit({
+        answerType: ReviewAttemptAnswerType.RECALL,
+        outcome: ReviewAttemptOutcome.UNABLE,
+        answer: undefined,
+      })).success,
+      true,
+    );
+    // validationQuestionId is optional for all outcomes.
     for (const outcome of [ReviewAttemptOutcome.CORRECT, ReviewAttemptOutcome.PARTIAL]) {
       assert.equal(
         reviewAttemptSubmitSchema.safeParse(validSubmit({
           outcome,
           validationQuestionId: undefined,
         })).success,
-        false,
+        true,
       );
     }
   });

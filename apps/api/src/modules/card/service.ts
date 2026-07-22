@@ -1,4 +1,4 @@
-import { and, asc, eq, desc, sql, inArray, count, or } from "drizzle-orm";
+import { and, asc, eq, desc, sql, inArray, count, or, isNull } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { notes, noteVersions } from "../../db/schema/note.ts";
@@ -183,7 +183,7 @@ export async function regenerateCard(cardId: string, workspaceId: string, userId
   if (!version) return null;
 
   const note = await db.query.notes.findFirst({
-    where: and(eq(notes.id, version.noteId), eq(notes.workspaceId, workspaceId)),
+    where: and(eq(notes.id, version.noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
   });
   if (!note) return null;
 
@@ -265,7 +265,7 @@ export async function dismissCard(cardId: string, workspaceId: string) {
     // 关联的 pending review 标记 cancelled
     await tx
       .update(reviewSchedules)
-      .set({ status: ReviewStatus.CANCELLED })
+      .set({ status: ReviewStatus.CANCELLED, updatedAt: new Date() })
       .where(
         and(
           eq(reviewSchedules.workspaceId, workspaceId),

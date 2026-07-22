@@ -34,9 +34,26 @@ export function getRequestCredential(req: FastifyRequest): AuthCredential | null
   return extractAuthCredential(req.headers);
 }
 
+/**
+ * Pure ownership decision extracted from requireOwner for testability.
+ *
+ * A user is considered an owner if EITHER:
+ *   - their workspace_members.role equals "owner" (collaborative workspace), OR
+ *   - the workspace.ownerId matches their userId (personal workspace, ADR-0009).
+ *
+ * This mirrors the OR semantics in requireOwner and /auth/me role derivation.
+ */
+export function isWorkspaceOwner(ctx: {
+  membershipRole: string | null | undefined;
+  workspaceOwnerId: string | null | undefined;
+  userId: string;
+}): boolean {
+  return ctx.membershipRole === "owner" || ctx.workspaceOwnerId === ctx.userId;
+}
+
 export async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
   const { userId, workspaceId } = req.session;
-  const { isOwnerViaMember, isOwnerViaWorkspace } = await withWorkspaceTransaction(
+  const { membershipRole, workspaceOwnerId } = await withWorkspaceTransaction(
     { workspaceId, userId },
     async (transaction) => {
       const membership = await transaction.query.workspaceMembers.findFirst({
@@ -49,12 +66,12 @@ export async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
         where: eq(workspaces.id, workspaceId),
       });
       return {
-        isOwnerViaMember: membership?.role === "owner",
-        isOwnerViaWorkspace: ws?.ownerId === userId,
+        membershipRole: membership?.role,
+        workspaceOwnerId: ws?.ownerId,
       };
     },
   );
-  if (!isOwnerViaMember && !isOwnerViaWorkspace) {
+  if (!isWorkspaceOwner({ membershipRole, workspaceOwnerId, userId })) {
     return reply.code(403).send({ error: "owner role required" });
   }
 }

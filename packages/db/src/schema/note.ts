@@ -1,4 +1,5 @@
 import { pgTable, uuid, text, integer, timestamp, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users } from "./identity.ts";
 import { sourceStatusEnum } from "./enums.ts";
 
@@ -50,10 +51,14 @@ export const notes = pgTable(
     createdBy: uuid("created_by").notNull().references(() => users.id),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    // CONC-03: 软删除标记，NULL 表示未删除。30 天后由定时任务物理删除。
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (t) => ({
     workspaceIdx: index("notes_workspace_idx").on(t.workspaceId),
     sourceIdx: index("notes_source_idx").on(t.sourceId),
+    // 查询 deleted_at IS NULL 时使用部分索引
+    activeNotesIdx: index("notes_active_idx").on(t.workspaceId).where(sql`${t.deletedAt} IS NULL`),
   }),
 );
 
@@ -65,12 +70,16 @@ export const noteVersions = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     versionNo: integer("version_no").notNull(),
     contentJson: jsonb("content_json").$type<unknown>().notNull(),
+    contentHash: text("content_hash").notNull(),
     createdBy: uuid("created_by").notNull().references(() => users.id),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    // isAutosave 原地更新时刷新；未更新过则等于 createdAt
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     noteIdx: index("note_versions_note_idx").on(t.noteId, t.versionNo),
     uniqueNoteVersion: uniqueIndex("note_versions_unique_idx").on(t.noteId, t.versionNo),
+    contentHashIdx: index("note_versions_content_hash_idx").on(t.noteId, t.contentHash),
   }),
 );
 

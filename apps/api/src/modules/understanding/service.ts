@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, validationEvents, reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
@@ -366,6 +366,7 @@ export async function getUnderstandingGraph(
         where: and(
           eq(notes.workspaceId, workspaceId),
           inArray(notes.id, noteIds),
+          isNull(notes.deletedAt),
         ),
       })
     : [];

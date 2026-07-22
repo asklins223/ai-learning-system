@@ -49,13 +49,64 @@ export function normalizeWorkspaceAIPolicy(value: unknown): WorkspaceAIPolicy {
  * 其他 provider 需要已签署同意（aiConsentVersion 非空且 aiConsentAt 非空）。
  */
 export async function checkAIConsent(workspaceId: string, providerName: string): Promise<boolean> {
+  // mock provider 不需要 AI 同意，始终放行
+  if (providerName.toLowerCase() === "mock") return true;
   const ws = await db.query.workspaces.findFirst({
     where: eq(schema.workspaces.id, workspaceId),
   });
   if (!ws) return false;
-  if (providerName.toLowerCase() === "mock") return true;
   // 其他 provider 需要已签署同意
   return ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
+}
+
+/**
+ * 一次性解析 AI 调用所需的全部治理上下文：provider 选择 + consent + policy。
+ * 这消除了 checkAIConsent + enforcePrivacyGovernance + resolveProviderSelection
+ * 中对 workspaces 表的重复查询（原先最多查 3 次，现在只查 1 次）。
+ */
+export interface AIGovernanceContext {
+  providerName: string;
+  providerConfig: import("./ai-provider.ts").AIProviderRuntimeConfig;
+  consentOk: boolean;
+  policy: WorkspaceAIPolicy;
+}
+
+export async function resolveAIGovernanceContext(
+  workspaceId: string,
+  userId: string | null,
+): Promise<AIGovernanceContext> {
+  // 并行查询个人配置和 workspaces，消除一次串行 DB 往返。
+  const [personalConfig, ws] = await Promise.all([
+    userId ? getPersonalAIProviderRuntimeConfig(userId) : Promise.resolve(null),
+    db.query.workspaces.findFirst({
+      where: eq(schema.workspaces.id, workspaceId),
+    }),
+  ]);
+
+  let providerName: string;
+  let providerConfig: import("./ai-provider.ts").AIProviderRuntimeConfig = {};
+
+  if (personalConfig) {
+    providerName = personalConfig.provider;
+    providerConfig = personalConfig;
+  } else if (ws?.aiProvider) {
+    providerName = ws.aiProvider.toLowerCase();
+  } else {
+    providerName = (process.env.AI_PROVIDER_CARD ?? "mock").toLowerCase();
+  }
+
+  let policy: WorkspaceAIPolicy = { ...DEFAULT_AI_DATA_POLICY };
+  let consentOk = true;
+
+  if (ws) {
+    policy = normalizeWorkspaceAIPolicy(ws.aiDataPolicy);
+    // consent 检查（mock 豁免）
+    if (providerName.toLowerCase() !== "mock") {
+      consentOk = ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
+    }
+  }
+
+  return { providerName, providerConfig, consentOk, policy };
 }
 
 /**
@@ -207,6 +258,25 @@ export async function enforcePrivacyGovernance(
   piiDetectedTypes: string[];
 }> {
   const policy = await getWorkspaceAIPolicy(workspaceId);
+  return enforcePrivacyGovernanceWithPolicy(policy, workspaceId, dataCategories, data, providerName);
+}
+
+/**
+ * 使用预解析的 policy 执行隐私治理检查，避免重复查询 workspaces 表。
+ * 与 resolveAIGovernanceContext 配合使用。
+ */
+export function enforcePrivacyGovernanceWithPolicy(
+  policy: WorkspaceAIPolicy,
+  workspaceId: string,
+  dataCategories: string[],
+  data: Record<string, unknown>,
+  providerName: string,
+): {
+  allowed: boolean;
+  reason?: string;
+  sanitizedData: Record<string, unknown>;
+  piiDetectedTypes: string[];
+} {
   const provider = providerName.toLowerCase();
 
   // 1. sendToExternal 门禁：非 mock provider + sendToExternal=false → 拒绝

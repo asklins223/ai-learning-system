@@ -17,7 +17,10 @@ export const learningCardKeyPointSchema = z.object({
 export const learningCardOutputSchema = z.object({
   title: z.string().min(1).max(200),
   summary: z.string().min(1).max(1000),
-  key_points: z.array(learningCardKeyPointSchema).min(1).max(20),
+  // max(10) 为安全上限：prompt 要求最多 5 个 key_points，
+  // 允许 10 是为了在模型偶尔输出 6-7 个时不直接 fail schema 校验，
+  // 而是由 sanitizeCardOutput 截断到 5 个，避免浪费一次模型调用。
+  key_points: z.array(learningCardKeyPointSchema).min(1).max(10),
 });
 
 export type LearningCardOutput = z.infer<typeof learningCardOutputSchema>;
@@ -74,6 +77,7 @@ export const reviewStatusSchema = z.enum([
  * worker 调 evaluateValidation 后必须通过此 schema 校验才写入。
  */
 export const evaluateValidationOutputSchema = z.object({
+  thinking: z.string().max(2000).optional(),
   outcome: validationOutcomeSchema,
   confidence: z.number().min(0).max(1),
   feedback: z.string().min(1).max(2000),
