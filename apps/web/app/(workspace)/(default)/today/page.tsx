@@ -25,6 +25,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
+import { useIsOwner } from "@/lib/use-current-user";
 
 type ActivityType = "note" | "card" | "source" | "review" | "job";
 type ActivityGroup = "attention" | "running" | "recorded";
@@ -62,17 +63,17 @@ const GROUP_META: Record<
 > = {
   attention: {
     title: "需要关注",
-    eyebrow: "CHECK FIRST",
+    eyebrow: "优先处理",
     description: "处理未完成的资料和任务，避免理解链路停在半路。",
   },
   running: {
     title: "正在处理",
-    eyebrow: "IN PROGRESS",
+    eyebrow: "进行中",
     description: "这些项目仍在后台推进，状态会在刷新后更新。",
   },
   recorded: {
     title: "今日记录",
-    eyebrow: "RECORDED",
+    eyebrow: "已记录",
     description: "今天在当前工作区中可追溯的学习产出与处理记录。",
   },
 };
@@ -238,6 +239,7 @@ function ActivityIcon({ type }: { type: ActivityType }) {
 }
 
 export default function TodayPage() {
+  const { isOwner } = useIsOwner();
   const [notes, setNotes] = useState<NoteHeader[] | null>(null);
   const [cards, setCards] = useState<CardListItem[] | null>(null);
   const [reviews, setReviews] = useState<ReviewWithCard[] | null>(null);
@@ -396,6 +398,7 @@ export default function TodayPage() {
   }, [activeFilter, routeReady, searchQuery]);
 
   const openCapture = useCallback((shouldScroll = true) => {
+    if (!isOwner) return;
     shouldScrollToCaptureRef.current = shouldScroll;
     if (showCapture) {
       window.requestAnimationFrame(() => {
@@ -408,7 +411,7 @@ export default function TodayPage() {
       return;
     }
     setShowCapture(true);
-  }, [showCapture]);
+  }, [isOwner, showCapture]);
 
   useEffect(() => {
     const handleOpenCapture = () => openCapture(true);
@@ -433,7 +436,7 @@ export default function TodayPage() {
 
   const handleQuickCapture = useCallback(async () => {
     const text = captureText.trim();
-    if (!text || captureBusyRef.current) return;
+    if (!isOwner || !text || captureBusyRef.current) return;
     captureBusyRef.current = true;
     setCaptureBusy(true);
     setCaptureMessage(null);
@@ -466,7 +469,7 @@ export default function TodayPage() {
       setCaptureBusy(false);
       window.requestAnimationFrame(() => captureInputRef.current?.focus());
     }
-  }, [captureText]);
+  }, [captureText, isOwner]);
 
   const activities = useMemo<TodayActivity[]>(() => {
     const rows: TodayActivity[] = [];
@@ -757,26 +760,28 @@ export default function TodayPage() {
       <PageHeader
         className="workspace-page-header"
         title="今日变化"
-        kicker="DAILY LOG · 今日理解轨迹"
+        kicker="学习动态"
         subtitle="把当前工作区今天发生的学习动作，整理成一条可回看的真实轨迹。"
         actions={
           <div className="today-header-actions">
-            <button
-              className="today-header-capture"
-              type="button"
-              onClick={() => (showCapture ? setShowCapture(false) : openCapture(false))}
-              aria-expanded={showCapture}
-              aria-controls="quick-capture"
-            >
-              {showCapture ? <Icon.Close /> : <Icon.Plus />}
-              <span>{showCapture ? "收起录入台" : "快速收录"}</span>
-            </button>
+            {isOwner && (
+              <button
+                className="today-header-capture"
+                type="button"
+                onClick={() => (showCapture ? setShowCapture(false) : openCapture(false))}
+                aria-expanded={showCapture}
+                aria-controls="quick-capture"
+              >
+                {showCapture ? <Icon.Close /> : <Icon.Plus />}
+                <span>{showCapture ? "收起录入台" : "快速收录"}</span>
+              </button>
+            )}
             <ThemeToggle className="today-theme-toggle" />
           </div>
         }
       />
 
-      {showCapture && (
+      {showCapture && isOwner && (
         <section
           id="quick-capture"
           ref={captureSectionRef}
@@ -789,7 +794,7 @@ export default function TodayPage() {
                 <Icon.Inbox />
               </span>
               <div>
-                <span className="today-capture-eyebrow">QUICK CAPTURE</span>
+                <span className="today-capture-eyebrow">添加学习材料</span>
                 <h2 id="today-capture-title">快速收录一份资料</h2>
                 <p>粘贴文本、Markdown、代码或网址；系统会判断类型并加入今日轨迹。</p>
               </div>
@@ -900,11 +905,11 @@ export default function TodayPage() {
 
         <section className="today-overview" aria-labelledby="today-overview-title">
           <div className="today-overview-copy">
-            <span className="today-overview-eyebrow">CURRENT WORKSPACE · 当前工作区</span>
+            <span className="today-overview-eyebrow">当前工作区</span>
             <p className="today-overview-date">{dateTitle || "正在读取本地日期"}</p>
             <h2 id="today-overview-title">
               {loading ? (
-                <span className="today-overview-loading" aria-label="正在整理今日轨迹" />
+                <span className="today-overview-loading" role="img" aria-label="正在整理今日轨迹" />
               ) : allFailed ? (
                 "今日账本暂时未能打开"
               ) : activities.length > 0 ? (
@@ -924,6 +929,7 @@ export default function TodayPage() {
 
           <div
             className={`today-overview-score ${attentionDataUnavailable ? "is-unknown" : attentionContextCount > 0 ? "is-attention" : "is-clear"}`}
+            role="img"
             aria-label={
               loading
                 ? "正在加载"
@@ -944,7 +950,7 @@ export default function TodayPage() {
             </small>
           </div>
 
-          <div className="today-overview-metrics" aria-label="今日变化摘要">
+          <div className="today-overview-metrics" role="group" aria-label="今日变化摘要">
             <button
               type="button"
               className={activeFilter === "note" ? "is-active" : undefined}
@@ -990,7 +996,7 @@ export default function TodayPage() {
 
         <section id="today-ledger" className="today-ledger-toolbar" aria-labelledby="today-ledger-title">
           <div className="today-ledger-title-wrap">
-            <span>TODAY&apos;S LEDGER</span>
+            <span>今日学习记录</span>
             <h2 id="today-ledger-title">今日账本</h2>
             <small aria-live="polite">
               {loading
@@ -1055,7 +1061,7 @@ export default function TodayPage() {
         <div className={`today-ledger-layout ${dueReviews.length > 0 || runningContext.length > 0 ? "has-context" : ""}`}>
           <section className="today-ledger-paper" aria-label="今日活动轨迹">
             {loading ? (
-              <div className="today-ledger-loading" aria-label="正在加载今日活动">
+              <div className="today-ledger-loading" role="img" aria-label="正在加载今日活动">
                 {[0, 1, 2, 3].map((row) => (
                   <div key={row} className="today-ledger-skeleton-row">
                     <span />
@@ -1108,8 +1114,10 @@ export default function TodayPage() {
                   <button type="button" onClick={() => { setSearchQuery(""); setActiveFilter("all"); }}>
                     清除筛选
                   </button>
-                ) : (
+                ) : isOwner ? (
                   <button type="button" onClick={() => openCapture(true)}>快速收录</button>
+                ) : (
+                  <Link href="/notes">查看工作区笔记</Link>
                 )}
               </div>
             ) : (

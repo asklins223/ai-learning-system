@@ -17,13 +17,19 @@ export const API_URL =
 const TOKEN_KEY = "ailearn.token";
 const CSRF_COOKIE_KEY = "ailearn_csrf";
 const CSRF_HEADER_KEY = "x-csrf-token";
+export const IDENTITY_CHANGED_EVENT = "ailearn:identity-changed";
 
 export type CurrentUser = {
-  userId: string;
-  workspaceId: string;
-  email: string;
-  role: string;
-  workspaceName: string;
+userId: string;
+workspaceId: string;
+email: string;
+role: string;
+displayName: string | null;
+avatarUrl: string | null;
+workspaceName: string;
+workspaceType: string;
+isPersonal: boolean;
+personalWorkspaceId: string | null;
 };
 
 export type PersonalAIProvider = "mock" | "dashscope" | "openai_compatible";
@@ -79,6 +85,12 @@ function invalidateGetMeCache() {
   getMeInFlight = null;
 }
 
+function notifyIdentityChanged() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(IDENTITY_CHANGED_EVENT));
+  }
+}
+
 function clearSensitiveLocalState() {
   if (typeof window === "undefined") return;
   try {
@@ -131,6 +143,22 @@ function getCookie(name: string): string | null {
   }
 }
 
+/**
+ * 当 Next.js rewrite 代理未正确转发后端的 Set-Cookie 头时，浏览器可能
+ * 只收到 ailearn_session 而遗漏 ailearn_csrf。此函数从响应体中提取
+ * csrfToken 并主动设置 cookie，确保后续非 GET 请求能通过双重提交校验。
+ *
+ * 设置 Max-Age 与后端 session TTL 一致（7 天），确保用户勾选"保持登录"
+ * 后重启浏览器时 ailearn_csrf 不会先于 ailearn_session 过期，否则所有
+ * 写操作（POST/PUT/DELETE）会因缺少 CSRF token 被 403 阻断。
+ */
+const CSRF_COOKIE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 天，与 SESSION_TTL_MS 一致
+function setCsrfCookie(token: string): void {
+  if (typeof document === "undefined") return;
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${CSRF_COOKIE_KEY}=${encodeURIComponent(token)}; Path=/; Max-Age=${CSRF_COOKIE_MAX_AGE_SECONDS}; SameSite=Lax${secure}`;
+}
+
 export function getCsrfToken(): string | null {
   return getCookie(CSRF_COOKIE_KEY);
 }
@@ -153,10 +181,79 @@ function handleUnauthorized(requestGeneration: number) {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public code?: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public code?: string,
+    public data?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/**
+ * RBAC: 将 API 错误转换为用户友好的提示文案。
+ *
+ * 当成员尝试执行需要所有者权限的操作时，后端返回 403 + { error: "owner role required" }。
+ * 此函数将这类错误转为中文提示，其他错误返回 fallback。
+ */
+export function formatApiError(
+  err: unknown,
+  fallback: string,
+): string {
+  if (err instanceof ApiError) {
+    if (err.status === 403 && (err.code === "owner_role_required" || err.message.includes("owner role required"))) {
+      return "此操作需要所有者权限，你当前是成员角色，无法执行。";
+    }
+    return err.message || fallback;
+  }
+  return fallback;
+}
+
+interface UploadResult {
+  url: string;
+  objectKey: string;
+  size: number;
+  mimeType: string;
+}
+
+/**
+ * 使用 XMLHttpRequest 上传文件，支持 upload progress 事件。
+ * fetch() 不支持上传进度回调，因此对大文件（>1MB）走此路径。
+ */
+function uploadWithProgress(
+  url: string,
+  formData: FormData,
+  headers: Record<string, string>,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    for (const [key, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        onProgress(e.loaded, e.total);
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as UploadResult);
+        } catch {
+          reject(new ApiError(xhr.status, xhr.responseText || "解析响应失败"));
+        }
+      } else {
+        reject(new ApiError(xhr.status, xhr.responseText || "上传失败"));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, "网络错误，上传失败"));
+    xhr.send(formData);
+  });
 }
 
 function parseApiError(status: number, statusText: string, text: string): ApiError {
@@ -171,7 +268,7 @@ function parseApiError(status: number, statusText: string, text: string): ApiErr
     const code =
       typeof payload.code === "string" && payload.code.trim()
         ? payload.code.trim()
-        : message && /^[a-z][a-z0-9_]*$/.test(error)
+        : /^[a-z][a-z0-9_]*$/.test(error)
           ? error
           : undefined;
     if (message || error) {
@@ -179,6 +276,7 @@ function parseApiError(status: number, statusText: string, text: string): ApiErr
         status,
         message || error,
         code,
+        payload as Record<string, unknown>,
       );
     }
   } catch {
@@ -214,7 +312,23 @@ async function requestResponse(path: string, init: RequestInit = {}): Promise<Re
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await requestResponse(path, init);
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  const data = await res.json() as T;
+  // 登录/注册/切换工作区等端点在响应体中返回 csrfToken。当 Next.js
+  // rewrite 代理丢弃了后端的 Set-Cookie: ailearn_csrf 时，前端需要
+  // 从响应体兜底设置 cookie，否则后续 PUT/POST/DELETE 会因缺少
+  // x-csrf-token 头而被 403 拒绝。
+  if (
+    typeof window !== "undefined" &&
+    data &&
+    typeof data === "object" &&
+    "csrfToken" in data
+  ) {
+    const token = (data as { csrfToken?: unknown }).csrfToken;
+    if (typeof token === "string" && token) {
+      setCsrfCookie(token);
+    }
+  }
+  return data;
 }
 
 async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
@@ -273,7 +387,18 @@ export interface AuthResponse {
   token: string;
   ctx: { userId: string; workspaceId: string };
   // N-013: 登录时返回所有可访问的工作区
-  workspaces?: Array<{ workspaceId: string; workspaceName: string; role: string }>;
+  workspaces?: Array<{
+    workspaceId: string;
+    workspaceName: string;
+    role: string;
+    workspaceType: string;
+    isPersonal: boolean;
+  }>;
+  // 后端在登录/注册/切换工作区时返回的 CSRF token。正常情况下浏览器
+  // 会通过 Set-Cookie 自动存储 ailearn_csrf，但 Next.js rewrite 代理
+  // 转发多个 Set-Cookie 头时可能丢失非首个 cookie，因此前端需要从
+  // 响应体兜底设置 cookie。
+  csrfToken?: string;
 }
 
 export interface NoteHeader {
@@ -282,6 +407,7 @@ export interface NoteHeader {
   titleSource?: "auto" | "manual";
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string | null;
 }
 
 export type BlockType = "paragraph" | "heading" | "code" | "list" | "quote" | "image";
@@ -487,23 +613,87 @@ manual_pin: "green",
 };
 
 export interface ReviewWithCard {
-review: {
+  review: {
+    id: string;
+    workspaceId: string;
+    userId: string;
+    subjectType: string;
+    subjectId: string;
+    validationEventId: string | null;
+    status: ReviewStatus;
+    nextReviewAt: string;
+    intervalDays: number;
+    lastReviewAt: string | null;
+    createdAt: string;
+  };
+  card: { id: string; title: string };
+  keyPoint: { id: string; claim: string; quoteText: string } | null;
+  blockContent: string | null;
+  reviewReason: ReviewReason;
+}
+
+/* ------------------------------------------------------------------ */
+/* Review Attempts (LOOP-01/02, ADR-0004)                             */
+/* ------------------------------------------------------------------ */
+
+export type ReviewAttemptAnswerType = "recall" | "free_text" | "self_grade";
+export type ReviewAttemptOutcome = "correct" | "partial" | "incorrect" | "unable";
+
+export interface ReviewAttemptStartResult {
+  attemptId: string;
+  reviewScheduleId: string;
+  subjectType: string;
+  subjectId: string;
+  status: string;
+  startedAt: string;
+  idempotent: boolean;
+}
+
+export interface ReviewAttemptSubmitResult {
+  attemptId: string;
+  status: string;
+  outcome: string;
+  scheduleReasonCode: string;
+  understandingEffect: string;
+  beforeIntervalDays: number;
+  afterIntervalDays: number;
+  nextReviewAt: string;
+  nextScheduleId: string;
+  idempotent: boolean;
+}
+
+export interface ReviewAttemptLaterResult {
+  attemptId: string;
+  status: string;
+  scheduleReasonCode: string;
+  nextReviewAt: string;
+  intervalDays: number;
+  idempotent: boolean;
+}
+
+export interface ReviewAttemptHistoryItem {
 id: string;
-workspaceId: string;
-userId: string;
+reviewScheduleId: string;
 subjectType: string;
 subjectId: string;
-validationEventId: string | null;
-status: ReviewStatus;
-nextReviewAt: string;
-intervalDays: number;
-lastReviewAt: string | null;
-createdAt: string;
-};
-card: { id: string; title: string };
-keyPoint: { id: string; claim: string; quoteText: string } | null;
-blockContent: string | null;
-reviewReason: ReviewReason;
+answerType: string | null;
+outcome: string | null;
+confidence: number | null;
+skipReason: string | null;
+scheduleBeforeIntervalDays: number | null;
+scheduleAfterIntervalDays: number | null;
+scheduleReasonCode: string | null;
+understandingEffect: string | null;
+nextReviewAt: string | null;
+nextScheduleId: string | null;
+status: string;
+startedAt: string;
+completedAt: string | null;
+}
+
+export interface ReviewAttemptHistoryResult {
+  items: ReviewAttemptHistoryItem[];
+  nextCursor: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -525,6 +715,8 @@ export interface SourceRow {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** 该来源已创建的笔记数量（listSources 返回） */
+  noteCount?: number;
 }
 
 export interface SourceSegment {
@@ -535,7 +727,7 @@ export interface SourceSegment {
   text: string;
   charStart: number;
   charEnd: number;
-  segmentType: "paragraph" | "heading" | "code" | "quote" | "list";
+  segmentType: "paragraph" | "heading" | "code" | "quote" | "list" | "image";
 }
 
 export interface SourceDetail {
@@ -642,6 +834,7 @@ export interface NoteVersionSummary {
   versionNo: number;
   createdBy: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -848,7 +1041,7 @@ export const api = {
   },
 
 /* notes */
-listNotes: (params?: { cursor?: string; limit?: number }) => {
+listNotes: (params?: { cursor?: string; limit?: number; trashed?: boolean }) => {
 const qs = params
 ? "?" +
 new URLSearchParams(
@@ -884,6 +1077,9 @@ isAutosave?: boolean;
     }),
   deleteNote: (id: string) =>
     request<void>(`/notes/${id}`, { method: "DELETE" }),
+  // CONC-03: 恢复软删除的笔记
+  restoreNote: (id: string) =>
+    request<NoteDetail>(`/notes/${id}/restore`, { method: "POST" }),
   exportNoteMarkdown: (id: string) =>
     requestBlob(`/export/notes/${id}`),
   exportWorkspace: () => requestBlob("/export/workspace"),
@@ -963,9 +1159,9 @@ isAutosave?: boolean;
     }),
   deleteSource: (id: string) =>
     request<{ ok: boolean }>(`/sources/${id}`, { method: "DELETE" }),
-  createNoteFromSource: (id: string) =>
+  createNoteFromSource: (id: string, opts?: { force?: boolean }) =>
     request<{ note: { id: string; title: string }; version: { id: string; versionNo: number } }>(
-      `/sources/${id}/create-note`,
+      `/sources/${id}/create-note${opts?.force ? "?force=true" : ""}`,
       { method: "POST" },
     ),
 
@@ -1011,6 +1207,12 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
   /* note version history (§2.5) */
   listNoteVersions: (id: string) =>
     request<{ items: NoteVersionSummary[] }>(`/notes/${id}/versions`),
+
+  restoreNoteVersion: (noteId: string, versionId: string, baseVersionId?: string) =>
+    request<NoteDetail>(`/notes/${noteId}/versions/${versionId}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ baseVersionId }),
+    }),
 
   /* source related notes (§2.7) */
   listNotesBySource: (id: string) =>
@@ -1068,10 +1270,72 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
       : "";
     return request<{ items: ReviewWithCard[]; total: number; nextOffset: number | null }>(`/reviews${qs}`);
   },
-  completeReview: (id: string) =>
-    request<{ ok: boolean }>(`/reviews/${id}/complete`, { method: "POST" }),
-  dismissReview: (id: string) =>
-    request<{ ok: boolean }>(`/reviews/${id}/dismiss`, { method: "POST" }),
+
+  /* review attempts (LOOP-01/02, ADR-0004) */
+  startReviewAttempt: (params: {
+    reviewScheduleId: string;
+    idempotencyKey: string;
+  }) =>
+    request<ReviewAttemptStartResult>("/reviews/attempts/start", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  submitReviewAttempt: (params: {
+    attemptId: string;
+    reviewScheduleId: string;
+    validationQuestionId?: string;
+    answerType: ReviewAttemptAnswerType;
+    answer?: string;
+    outcome: ReviewAttemptOutcome;
+    confidence: number;
+    idempotencyKey: string;
+  }) =>
+    request<ReviewAttemptSubmitResult>("/reviews/attempts/submit", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  laterReviewAttempt: (params: {
+    reviewScheduleId: string;
+    reason: "later";
+    idempotencyKey: string;
+  }) =>
+    request<ReviewAttemptLaterResult>("/reviews/attempts/later", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  listReviewAttemptHistory: (params?: {
+    limit?: number;
+    cursor?: string;
+    reviewScheduleId?: string;
+  }) => {
+    const qs = params
+      ? "?" +
+        new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v !== undefined)
+            .map(([k, v]) => [k, String(v)]) as [string, string][],
+        ).toString()
+      : "";
+return request<ReviewAttemptHistoryResult>(`/reviews/attempts/history${qs}`);
+},
+
+/* review attempt active query (V05-RISK-04) */
+getActiveReviewAttempt: (reviewScheduleId: string) =>
+request<{ activeAttempt: {
+attemptId: string;
+reviewScheduleId: string;
+subjectType: string;
+subjectId: string;
+status: string;
+startedAt: string;
+idempotencyKey: string;
+} | null }>(`/reviews/attempts/active?reviewScheduleId=${reviewScheduleId}`),
+
+/* review attempt abandon (V05-RISK-04) */
+abandonReviewAttempt: (attemptId: string) =>
+request<{ attemptId: string; status: string; abandonedAt: string }>(`/reviews/attempts/${attemptId}/abandon`, {
+method: "POST",
+}),
 
   /* benchmark (§2.1) */
   runBenchmark: () =>
@@ -1091,9 +1355,15 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
   // R-026: 获取当前登录用户信息
   getMe: getMeCached,
 
-  // N-013: 列出用户可访问的所有工作区
-  listWorkspaces: () =>
-    request<{ workspaces: Array<{ workspaceId: string; workspaceName: string; role: string }> }>("/auth/workspaces"),
+// N-013: 列出用户可访问的所有工作区
+listWorkspaces: () =>
+request<{ workspaces: Array<{
+  workspaceId: string;
+  workspaceName: string;
+  role: string;
+  workspaceType: string;
+  isPersonal: boolean;
+}> }>("/auth/workspaces"),
 
   // N-013: 切换工作区
   switchWorkspace: async (workspaceId: string) => {
@@ -1108,4 +1378,217 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
       invalidateGetMeCache();
     }
   },
+
+  /* SEC-02 / ALPHA-01: 邀请管理 */
+createInvite: (params: { role?: "member" | "owner"; expiresInHours?: number }) =>
+request<{
+id: string;
+token: string;
+tokenHint: string;
+role: string;
+expiresAt: string | null;
+createdAt: string;
+}>("/invites", { method: "POST", body: JSON.stringify(params) }),
+
+  listInvites: (params?: { limit?: number; offset?: number }) => {
+    const qs = params
+      ? "?" +
+        new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v !== undefined)
+            .map(([k, v]) => [k, String(v)]) as [string, string][],
+        ).toString()
+      : "";
+    return request<{
+      items: Array<{
+        id: string;
+        tokenHint: string;
+        role: string;
+        status: string;
+        createdAt: string;
+        expiresAt: string | null;
+        consumedAt: string | null;
+        consumedByEmail: string | null;
+        revokedAt: string | null;
+      }>;
+      total: number;
+    }>(`/invites${qs}`);
+  },
+
+  revokeInvite: (inviteId: string) =>
+    request<{ ok: boolean }>(`/invites/${inviteId}`, { method: "DELETE" }),
+
+  /* SEC-02 / ALPHA-01: 成员管理 */
+  listMembers: () =>
+    request<{
+      items: Array<{
+        userId: string;
+        email: string;
+        role: string;
+        joinedAt: string;
+      }>;
+      total: number;
+    }>("/members"),
+
+  removeMember: (userId: string) =>
+    request<{ ok: boolean }>(`/members/${userId}`, { method: "DELETE" }),
+
+  /* SEC-02 / ALPHA-01: Onboarding 状态 */
+  getOnboardingState: () =>
+    request<{
+      id: string;
+      workspaceId: string;
+      userId: string;
+      version: string;
+      steps: Record<string, boolean>;
+      status: string;
+    }>("/onboarding/state"),
+
+  markOnboardingStep: (step: "evidence_review", evidenceId: string) =>
+    request<{ ok: boolean }>("/onboarding/steps", {
+      method: "POST",
+      body: JSON.stringify({ step, completed: true, evidenceId }),
+    }),
+
+/* SEC-02 / ALPHA-01: v0.5 邀请注册 */
+registerWithInviteToken: (params: {
+email: string;
+password: string;
+inviteToken: string;
+displayName?: string;
+avatarUrl?: string;
+}) =>
+request<AuthResponse>("/auth/register-v2", {
+method: "POST",
+body: JSON.stringify(params),
+}),
+
+/* ADR-0009: 无邀请码注册 — 只创建个人工作区 */
+registerPersonal: (params: {
+email: string;
+password: string;
+displayName?: string;
+avatarUrl?: string;
+}) =>
+request<AuthResponse>("/auth/register-personal", {
+method: "POST",
+body: JSON.stringify(params),
+}),
+
+/* PROFILE-01 / ADR-0009: 统一注册端点（有/无邀请码均可） */
+register: (params: {
+email: string;
+password: string;
+inviteToken?: string;
+displayName?: string;
+avatarUrl?: string;
+}) => {
+invalidateGetMeCache();
+return request<AuthResponse>("/auth/register-v2", {
+method: "POST",
+body: JSON.stringify(params),
+});
+},
+
+/* PROFILE-01: 更新用户档案（昵称/头像） */
+updateProfile: async (params: {
+displayName?: string | null;
+avatarUrl?: string | null;
+}) => {
+invalidateGetMeCache();
+const result = await request<{ ok: true; displayName: string | null; avatarUrl: string | null }>(
+"/auth/profile",
+{
+method: "PUT",
+body: JSON.stringify(params),
+},
+);
+invalidateGetMeCache();
+notifyIdentityChanged();
+return result;
+},
+
+/* PROFILE-01: 重命名个人工作区 */
+renameWorkspace: async (workspaceId: string, name: string) => {
+invalidateGetMeCache();
+const result = await request<{ ok: true; workspaceId: string; name: string }>(
+`/workspaces/${workspaceId}/name`,
+{
+method: "PATCH",
+body: JSON.stringify({ name }),
+},
+);
+invalidateGetMeCache();
+notifyIdentityChanged();
+return result;
+},
+
+/* ADR-0009: 已登录用户通过邀请码加入协作工作区 */
+joinWorkspace: (params: { inviteToken: string }) =>
+request<{ workspaceId: string; workspaceName: string; role: string }>(
+"/auth/join-workspace",
+{
+method: "POST",
+body: JSON.stringify(params),
+},
+),
+
+/* ADR-0009: 退出协作工作区，自动切换回个人工作区 */
+leaveWorkspace: (params: { workspaceId: string }) => {
+invalidateGetMeCache();
+return request<
+| (AuthResponse & { switchedToPersonalWorkspace: true })
+| { ok: true; switchedToPersonalWorkspace: false }
+>(
+"/auth/leave-workspace",
+{
+method: "POST",
+body: JSON.stringify(params),
+},
+);
+},
+
+/* 图片上传 — 笔记图片（支持可选进度回调，大文件时用 XMLHttpRequest 显示进度） */
+uploadImage: async (file: File, noteId: string, onProgress?: (loaded: number, total: number) => void) => {
+  const formData = new FormData();
+  // @fastify/multipart 的 req.file() 只收集文件 part 之前的字段，
+  // 因此 noteId 必须在 file 之前追加，否则后端读取不到 noteId。
+  formData.append("noteId", noteId);
+  formData.append("file", file);
+  const headers: Record<string, string> = {};
+  const csrf = getCsrfToken();
+  if (csrf) headers[CSRF_HEADER_KEY] = csrf;
+  const url = `${API_URL}/uploads/images`;
+
+  // 有进度回调时使用 XMLHttpRequest 以获取 upload progress 事件
+  if (onProgress) {
+    return uploadWithProgress(url, formData, headers, onProgress);
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    body: formData,
+    credentials: "include",
+    headers,
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+  return res.json() as Promise<{ url: string; objectKey: string; size: number; mimeType: string }>;
+},
+
+/* 图片上传 — 用户头像 */
+uploadAvatar: async (file: File) => {
+const formData = new FormData();
+formData.append("file", file);
+const headers: Record<string, string> = {};
+const csrf = getCsrfToken();
+if (csrf) headers[CSRF_HEADER_KEY] = csrf;
+const res = await fetch(`${API_URL}/uploads/avatars`, {
+  method: "POST",
+  body: formData,
+  credentials: "include",
+  headers,
+});
+if (!res.ok) throw new ApiError(res.status, await res.text());
+return res.json() as Promise<{ url: string; objectKey: string; size: number; mimeType: string }>;
+},
 };

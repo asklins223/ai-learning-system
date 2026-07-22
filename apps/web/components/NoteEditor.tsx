@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError, API_URL, getCsrfToken } from "@/lib/api";
+import { useIsOwner } from "@/lib/use-current-user";
+import { MemberNotice } from "@/components/settings/MemberNotice";
 import { Icon } from "@/components/ui/icons";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Drawer } from "@/components/ui/Drawer";
@@ -32,10 +34,17 @@ interface Props {
 }
 
 type EditorMode = "edit" | "preview" | "split";
+type ViewMode = "normal" | "wide" | "fullscreen";
 
-type SavingState = "idle" | "saving" | "saved" | "error" | "conflict";
+type SavingState = "idle" | "saving" | "saved" | "error" | "conflict" | "deleted";
 
 const LOCAL_DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Phase 2: 编辑会话超时——30 秒无编辑后封存当前会话版本。
+ * 下次自动保存将创建新版本，而非原地更新。
+ */
+const SESSION_TIMEOUT_MS = 30_000;
 
 function stripMarkdownTitle(content: string): string {
   const htmlHeading = /^<h\d>([\s\S]+)<\/h\d>$/.exec(content.trim());
@@ -65,6 +74,7 @@ function savingStatePresentation(state: SavingState, dirty: boolean): { label: s
   if (state === "saved") return { label: "已保存", tone: "success" };
   if (state === "error") return { label: "保存失败", tone: "danger" };
   if (state === "conflict") return { label: "内容冲突", tone: "warning" };
+  if (state === "deleted") return { label: "笔记已删除", tone: "danger" };
   if (dirty) return { label: "未保存", tone: "warning" };
   return { label: "已保存", tone: "success" };
 }
@@ -91,6 +101,10 @@ export function NoteEditor({
   returnHref = "/notes",
   returnLabel = "笔记库",
 }: Props) {
+  const { isOwner } = useIsOwner();
+  // Ref mirror so async callbacks (save, beforeunload, cleanup) always see the latest value
+  const isOwnerRef = useRef(isOwner);
+  isOwnerRef.current = isOwner;
   const router = useRouter();
   const initialMarkdown = useMemo(() => {
     if (initialBlocks.length === 0) return "";
@@ -121,17 +135,27 @@ export function NoteEditor({
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [compactDrawer, setCompactDrawer] = useState(false);
   const [splitUnavailable, setSplitUnavailable] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("normal");
+  const workbenchRef = useRef<HTMLDivElement>(null);
+  const exitingFullscreenRef = useRef(false);
   const [leaving, setLeaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [confirmRestore, setConfirmRestore] = useState<{ versionId: string; versionNo: number } | null>(null);
   const [hasRecoveredConflictDraft, setHasRecoveredConflictDraft] = useState(false);
   // R-008: 是否有被丢弃的草稿可恢复
   const [hasDiscardedDraft, setHasDiscardedDraft] = useState(false);
   // F-007: 冲突状态
   const [conflictData, setConflictData] = useState<{ serverTitle: string; serverSource: string; serverVersionNo: number } | null>(null);
+  // 图片上传状态
+  const [uploadingCount, setUploadingCount] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ loaded: number; total: number } | null>(null);
+  const imageFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 版本历史
   const [versions, setVersions] = useState<NoteVersionSummary[] | null>(null);
@@ -145,7 +169,11 @@ export function NoteEditor({
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Phase 2: 编辑会话状态
+  const sessionVersionIdRef = useRef<string | null>(null);
+  const sessionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
   const textareaSelectionRef = useRef({ start: 0, end: 0 });
   const moreActionsRef = useRef<HTMLDetailsElement | null>(null);
   const savedVersionIdRef = useRef(noteVersionId);
@@ -155,8 +183,16 @@ export function NoteEditor({
   const isDeletingRef = useRef(false);
   const recoveredConflictRef = useRef(false);
   const mountedRef = useRef(true);
+  // CONC-02: 笔记已被其他用户删除时，阻止后续保存和编辑
+  const noteDeletedRef = useRef(false);
   const generationRunRef = useRef(0);
   const initialBlockCountRef = useRef(initialBlocks.length);
+  // beforeunload keepalive 请求发出后，如果用户取消导航留在页面，
+  // savedVersionIdRef / lastSavedSourceRef 可能已过期（keepalive 响应丢失）。
+  // 下次 save() 检测到此标志时先拉取最新笔记状态，避免不必要的 409 冲突。
+  const beforeUnloadSaveFiredRef = useRef(false);
+  // P2-4: 跟踪 PATCH 请求是否正在进行，避免轮询与保存交错时误判冲突
+  const saveInFlightRef = useRef(false);
   const conflictDraftStorageKey = useMemo(
     () => `note-editor-conflict-draft:${draftScope}:${noteId}`,
     [draftScope, noteId],
@@ -200,7 +236,7 @@ export function NoteEditor({
     () => previewBlocks.filter((block) => block.type === "heading"),
     [previewBlocks],
   );
-  const outlineBlocks = useMemo(() => allOutlineBlocks.slice(0, 10), [allOutlineBlocks]);
+  const outlineBlocks = allOutlineBlocks;
 
   const savingPres = savingStatePresentation(saving, dirty);
 
@@ -210,8 +246,12 @@ export function NoteEditor({
     versionAtGeneration: number,
     runId: number,
   ) => {
-    for (let index = 0; index < 40; index += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+    // 轮询超时对齐 handler 超时（90s）+ 15s 余量 = 105s，消除"假超时"。
+    // 使用 deadline 驱动 + 指数退避，减少前期无效轮询。
+    const deadline = Date.now() + 105_000;
+    let pollDelay = 1000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollDelay));
       if (runId !== generationRunRef.current || !mountedRef.current) return;
       const job = await api.getJob(jobId);
       if (runId !== generationRunRef.current || !mountedRef.current) return;
@@ -227,6 +267,7 @@ export function NoteEditor({
         setGenMessage(`任务${jobPres.label}：${job.lastError ?? "未知错误"}`);
         return;
       }
+      pollDelay = Math.min(3000, Math.round(pollDelay * 1.5));
     }
     if (runId !== generationRunRef.current || !mountedRef.current) return;
     setGenState("idle");
@@ -312,6 +353,31 @@ export function NoteEditor({
     if (splitUnavailable && mode === "split") setMode("edit");
   }, [splitUnavailable, mode]);
 
+  // RBAC: 成员（非所有者）强制预览模式，不能编辑笔记
+  useEffect(() => {
+    if (!isOwner && mode !== "preview") setMode("preview");
+  }, [isOwner, mode]);
+
+  // Fullscreen API 同步：用户通过 Esc 退出浏览器全屏时，回退到宽屏模式
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement && !exitingFullscreenRef.current) {
+        setViewMode((prev) => (prev === "fullscreen" ? "wide" : prev));
+      }
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  // 组件卸载时退出浏览器全屏，避免离开页面后仍残留全屏状态
+  useEffect(() => {
+    return () => {
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => {});
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const closeOnOutside = (event: PointerEvent) => {
       const details = moreActionsRef.current;
@@ -350,17 +416,141 @@ export function NoteEditor({
     };
   }, [noteId, currentVersionNo]);
 
+  // Phase 2: 编辑会话管理
+  const clearSessionTimeout = useCallback(() => {
+    if (sessionTimeoutRef.current) {
+      clearTimeout(sessionTimeoutRef.current);
+      sessionTimeoutRef.current = null;
+    }
+  }, []);
+
+  const resetSessionTimeout = useCallback(() => {
+    clearSessionTimeout();
+    sessionTimeoutRef.current = setTimeout(() => {
+      if (!mountedRef.current) return;
+      // 30 秒无编辑：封存当前会话版本，下次自动保存创建新版本
+      sessionVersionIdRef.current = null;
+      sessionTimeoutRef.current = null;
+    }, SESSION_TIMEOUT_MS);
+  }, [clearSessionTimeout]);
+
+  const endSession = useCallback(() => {
+    sessionVersionIdRef.current = null;
+    clearSessionTimeout();
+  }, [clearSessionTimeout]);
+
+  // CONC-04: 轮询检测笔记是否被其他用户删除或修改（每 30 秒）
+  useEffect(() => {
+    let cancelled = false;
+    const POLL_INTERVAL = 30_000;
+
+    const checkNoteStatus = async () => {
+      if (cancelled || !mountedRef.current) return;
+      // 冲突/删除/保存中不轮询
+      if (conflictDataRef.current || noteDeletedRef.current) return;
+      // P2-4: 只在 PATCH 请求进行中时跳过轮询，而非在有 pending timer 时跳过
+      // 避免 continuous editing 时 timer.current 始终非空导致轮询永不执行
+      if (saveInFlightRef.current) return;
+
+      try {
+        const fresh = await api.getNote(noteId);
+        if (cancelled || !mountedRef.current) return;
+        if (conflictDataRef.current || noteDeletedRef.current) return;
+
+        // 版本未变化 — 无需处理
+        if (fresh.version.id === savedVersionIdRef.current) return;
+
+        const freshMarkdown = fresh.blocks.length > 0 ? blocksToMarkdown(fresh.blocks) : "";
+        const hasLocalChanges = latestDraftRef.current.source !== lastSavedSourceRef.current;
+
+        if (hasLocalChanges) {
+          // 有未保存的本地编辑 — 触发冲突对话框
+          persistDraftLocally(latestDraftRef.current.source);
+          conflictDataRef.current = {
+            serverTitle: fresh.note.title,
+            serverSource: freshMarkdown,
+            serverVersionNo: fresh.version.versionNo,
+          };
+          endSession();
+          if (mountedRef.current) {
+            setCurrentVersionId(fresh.version.id);
+            setCurrentVersionNo(fresh.version.versionNo);
+            savedVersionIdRef.current = fresh.version.id;
+            currentVersionNoRef.current = fresh.version.versionNo;
+            setConflictData(conflictDataRef.current);
+            setSaving("conflict");
+          }
+        } else {
+          // 无本地编辑 — 静默同步到服务端最新版本
+          savedVersionIdRef.current = fresh.version.id;
+          currentVersionNoRef.current = fresh.version.versionNo;
+          lastSavedSourceRef.current = freshMarkdown;
+          latestDraftRef.current = { source: freshMarkdown };
+          if (mountedRef.current) {
+            setCurrentVersionId(fresh.version.id);
+            setCurrentVersionNo(fresh.version.versionNo);
+            setSource(freshMarkdown);
+            setTitle(fresh.note.title);
+            setDirty(false);
+          }
+        }
+      } catch (err) {
+        if (cancelled || !mountedRef.current) return;
+        if (err instanceof ApiError && err.status === 404) {
+          // 笔记已被其他用户删除
+          persistDraftLocally(latestDraftRef.current.source);
+          endSession();
+          noteDeletedRef.current = true;
+          if (mountedRef.current) {
+            setSaving("deleted");
+          }
+        }
+        // 其他错误（网络等）静默忽略，下次轮询重试
+      }
+    };
+
+    const intervalId = setInterval(checkNoteStatus, POLL_INTERVAL);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [noteId, persistDraftLocally, endSession]);
+
   const syncDirty = useCallback(() => {
     setDirty(true);
   }, []);
 
-  const save = useCallback((isAutosave = true): Promise<boolean> => {
+  const save = useCallback((isAutosaveRequest = true): Promise<boolean> => {
+    if (!isOwnerRef.current) return Promise.resolve(false);
     if (timer.current) {
       clearTimeout(timer.current);
       timer.current = null;
     }
     const operation = saveChainRef.current.then(async () => {
-      if (conflictDataRef.current || isDeletingRef.current) return false;
+      if (conflictDataRef.current || isDeletingRef.current || noteDeletedRef.current) return false;
+
+      // beforeunload keepalive 请求可能已更新服务端版本，但响应丢失。
+      // 先拉取最新状态，确保 baseVersionId 正确，避免不必要的 409。
+      if (beforeUnloadSaveFiredRef.current) {
+        beforeUnloadSaveFiredRef.current = false;
+        // 标记保存进行中，避免 CONC-04 轮询在此窗口读取中间状态
+        saveInFlightRef.current = true;
+        try {
+          const fresh = await api.getNote(noteId);
+          savedVersionIdRef.current = fresh.version.id;
+          currentVersionNoRef.current = fresh.version.versionNo;
+          const freshMarkdown = fresh.blocks.length > 0 ? blocksToMarkdown(fresh.blocks) : "";
+          lastSavedSourceRef.current = freshMarkdown;
+          // 如果 keepalive 成功，服务端内容 === 当前草稿 → 下方的去重检查会跳过保存
+          // 如果 keepalive 失败，服务端内容 ≠ 当前草稿 → 正常保存流程
+        } catch {
+          // 拉取失败时继续使用旧 ref，让 409 处理器兜底
+        } finally {
+          // 如果后续 try 块执行，saveInFlightRef 会在那里重新设置；
+          // 如果 draftSource === lastSavedSourceRef 提前返回，需要在此清除。
+          saveInFlightRef.current = false;
+        }
+      }
 
       const draftSource = latestDraftRef.current.source;
       if (draftSource === lastSavedSourceRef.current) {
@@ -371,7 +561,7 @@ export function NoteEditor({
           setDirty(false);
           setHasRecoveredConflictDraft(false);
           recoveredConflictRef.current = false;
-          if (!isAutosave) setSaving("saved");
+          if (!isAutosaveRequest) setSaving("saved");
         }
         return true;
       }
@@ -384,17 +574,36 @@ export function NoteEditor({
 
       try {
         const blocks = markdownToBlocks(draftSource);
+        // Phase 2: 会话内自动保存 → 原地更新（isAutosave=true）
+        //          会话外自动保存 → 创建新版本（isAutosave=false），然后开始新会话
+        const actualIsAutosave = isAutosaveRequest && sessionVersionIdRef.current !== null;
+        saveInFlightRef.current = true;
         const updated = await api.updateNote(noteId, {
           blocks,
           baseVersionId: savedVersionIdRef.current ?? undefined,
-          isAutosave,
+          isAutosave: actualIsAutosave,
         });
+        saveInFlightRef.current = false;
         savedVersionIdRef.current = updated.version.id;
         currentVersionNoRef.current = updated.version.versionNo;
         lastSavedSourceRef.current = draftSource;
         const isLatestDraft = latestDraftRef.current.source === draftSource;
         if (isLatestDraft) {
           clearPersistedDraft(draftSource);
+        }
+
+        // Phase 2: 编辑会话状态管理
+        if (isAutosaveRequest) {
+          if (!actualIsAutosave || updated.version.id !== sessionVersionIdRef.current) {
+            // 创建了新版本或内容去重匹配：开始新会话
+            sessionVersionIdRef.current = updated.version.id;
+          }
+          // 会话内原地更新时会话继续；无论哪种情况都重置超时
+          // 仅在组件仍挂载时重置，避免卸载后的异步保存泄漏定时器
+          if (mountedRef.current) resetSessionTimeout();
+        } else {
+          // 显式保存：结束会话（版本被冻结为快照）
+          endSession();
         }
 
         if (mountedRef.current) {
@@ -413,6 +622,7 @@ export function NoteEditor({
         }
         return true;
       } catch (err) {
+        saveInFlightRef.current = false;
         if (err instanceof ApiError && err.status === 409) {
           try {
             const fresh = await api.getNote(noteId);
@@ -426,6 +636,7 @@ export function NoteEditor({
             };
             persistDraftLocally(draftSource);
             conflictDataRef.current = nextConflict;
+            endSession();
             if (mountedRef.current) {
               setCurrentVersionId(fresh.version.id);
               setConflictData(nextConflict);
@@ -433,6 +644,14 @@ export function NoteEditor({
             }
           } catch {
             if (mountedRef.current) setSaving("error");
+          }
+        } else if (err instanceof ApiError && err.status === 404) {
+          // CONC-02: 笔记已被其他用户删除，区分 404 与普通错误
+          persistDraftLocally(draftSource);
+          endSession();
+          noteDeletedRef.current = true;
+          if (mountedRef.current) {
+            setSaving("deleted");
           }
         } else if (mountedRef.current) {
           setSaving("error");
@@ -442,7 +661,7 @@ export function NoteEditor({
     });
     saveChainRef.current = operation;
     return operation;
-  }, [clearPersistedDraft, noteId, persistDraftLocally]);
+  }, [clearPersistedDraft, endSession, noteId, persistDraftLocally, resetSessionTimeout]);
 
   const flushLatestDraft = useCallback(async () => {
     // 保存期间仍可能产生新输入；只有当前源码与最后成功版本一致才算真正 flush 完成。
@@ -455,13 +674,17 @@ export function NoteEditor({
   }, [save]);
 
   function scheduleSave() {
-    if (conflictDataRef.current || isDeletingRef.current) return;
+    if (!isOwner) return;
+    if (conflictDataRef.current || isDeletingRef.current || noteDeletedRef.current) return;
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => void save(true), 800);
+    timer.current = setTimeout(() => void save(true), 2500);
+    // Phase 2: 每次编辑都重置会话超时
+    resetSessionTimeout();
   }
 
   function updateSource(next: string) {
-    if (leaving || deleting) return;
+    if (!isOwner) return;
+    if (leaving || deleting || noteDeletedRef.current) return;
     recoveredConflictRef.current = false;
     latestDraftRef.current = { ...latestDraftRef.current, source: next };
     setSource(next);
@@ -488,6 +711,7 @@ export function NoteEditor({
     setHasRecoveredConflictDraft(false);
     recoveredConflictRef.current = false;
     clearPersistedDraft(discardedSource);
+    endSession();
   }
 
   function discardRecoveredConflictDraft() {
@@ -499,6 +723,7 @@ export function NoteEditor({
     setHasRecoveredConflictDraft(false);
     recoveredConflictRef.current = false;
     clearPersistedDraft(recoveredSource);
+    endSession();
   }
 
   // R-008: 恢复被丢弃的本地草稿
@@ -520,16 +745,155 @@ export function NoteEditor({
     conflictDataRef.current = null;
     setConflictData(null);
     setSaving("idle");
+    endSession();
     await save(false);
+  }
+
+  /** 恢复到指定版本（实际执行恢复操作） */
+  async function handleRestoreVersion(versionId: string) {
+    if (noteDeletedRef.current) return;
+    setRestoring(true);
+    try {
+      // 等待飞行中的保存完成，避免 restore 与 save 交错时 baseVersionId 过期
+      // 导致不必要的 409 冲突对话框（后端 FOR UPDATE 锁保证数据安全，
+      // 但等待 saveChain 可消除此 UX 问题）。
+      await saveChainRef.current;
+      // CONC-05: 传入 baseVersionId 让服务端做乐观检查，避免无条件覆盖他人编辑
+      const result = await api.restoreNoteVersion(noteId, versionId, savedVersionIdRef.current ?? undefined);
+      // 更新编辑器状态
+      const restoredMarkdown = result.blocks.length > 0
+        ? blocksToMarkdown(result.blocks as Block[])
+        : "";
+      // 清除可能残留的自动保存定时器，防止恢复后用旧 baseVersionId 触发不必要的保存
+      if (timer.current) {
+        clearTimeout(timer.current);
+        timer.current = null;
+      }
+      setSource(restoredMarkdown);
+      latestDraftRef.current = { source: restoredMarkdown };
+      // blocksToMarkdown 往返可能不完美还原原始 markdown（空行/缩进微差），
+      // 但 lastSavedSourceRef 设为 restoredMarkdown 后：
+      // - 用户不编辑 → draftSource === lastSavedSourceRef → 不触发保存（正确）
+      // - 用户编辑 → 正常保存，baseVersionId 指向恢复后的版本（正确）
+      lastSavedSourceRef.current = restoredMarkdown;
+      savedVersionIdRef.current = result.version.id;
+      currentVersionNoRef.current = result.version.versionNo;
+      setTitle(result.note.title);
+      setCurrentVersionId(result.version.id);
+      setCurrentVersionNo(result.version.versionNo);
+      setDirty(false);
+      setSaving("idle");
+      // Phase 2: 版本恢复后结束会话——currentVersionId 已切换，旧会话失效
+      endSession();
+      // 版本列表由 useEffect 依赖 currentVersionNo 自动刷新，无需显式调用
+    } catch (err) {
+      // CONC-05: 恢复时检测到版本冲突，提示用户刷新
+      if (err instanceof ApiError && err.status === 409) {
+        setSaving("conflict");
+        endSession();
+        try {
+          const fresh = await api.getNote(noteId);
+          savedVersionIdRef.current = fresh.version.id;
+          currentVersionNoRef.current = fresh.version.versionNo;
+          const freshMarkdown = fresh.blocks.length > 0 ? blocksToMarkdown(fresh.blocks) : "";
+          conflictDataRef.current = {
+            serverTitle: fresh.note.title,
+            serverSource: freshMarkdown,
+            serverVersionNo: fresh.version.versionNo,
+          };
+          if (mountedRef.current) {
+            setCurrentVersionId(fresh.version.id);
+            setConflictData(conflictDataRef.current);
+            setSaving("conflict");
+          }
+        } catch {
+          if (mountedRef.current) setSaving("error");
+        }
+      } else if (err instanceof ApiError && err.status === 404) {
+        // CONC-02: 笔记已被其他用户删除
+        endSession();
+        noteDeletedRef.current = true;
+        if (mountedRef.current) {
+          setSaving("deleted");
+        }
+      } else {
+        setSaving("error");
+      }
+    } finally {
+      setRestoring(false);
+      setConfirmRestore(null);
+    }
+  }
+
+  function jumpToPreviewHeading(block: Block) {
+    const previewPane = previewRef.current;
+    if (!previewPane) return;
+    const headings = previewPane.querySelectorAll("h1, h2, h3, h4, h5, h6");
+    if (headings.length === 0) return;
+
+    // 优先按大纲中的标题序号匹配预览中对应位置的标题元素
+    const headingIndex = allOutlineBlocks.findIndex(
+      (b) => b.content === block.content && b.ordinal === block.ordinal,
+    );
+    let targetHeading: HTMLElement | null = null;
+    if (headingIndex >= 0 && headingIndex < headings.length) {
+      targetHeading = headings[headingIndex] as HTMLElement;
+    }
+
+    // 回退：按文本匹配（兼容行内加粗/斜体等格式差异）
+    if (!targetHeading) {
+      const headingText = stripMarkdownTitle(block.content);
+      if (headingText) {
+        for (const heading of Array.from(headings)) {
+          const text = heading.textContent ?? "";
+          if (text === headingText || text.includes(headingText) || headingText.includes(text)) {
+            targetHeading = heading as HTMLElement;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!targetHeading) return;
+
+    // 从标题元素向上查找真正可滚动的容器
+    // 桌面端 .ne-editor-preview 是 overflow:hidden，真正滚动的是内层 .md-preview
+    // 移动端 .ne-editor-preview 本身是 overflow:auto
+    let scrollable: HTMLElement | null = targetHeading.parentElement;
+    while (scrollable && scrollable !== previewPane) {
+      const style = getComputedStyle(scrollable);
+      if (
+        (style.overflowY === "auto" || style.overflowY === "scroll") &&
+        scrollable.scrollHeight > scrollable.clientHeight
+      ) {
+        break;
+      }
+      scrollable = scrollable.parentElement;
+    }
+    const container = scrollable ?? previewPane;
+    const containerRect = container.getBoundingClientRect();
+    const headingRect = targetHeading.getBoundingClientRect();
+    const offset = headingRect.top - containerRect.top + container.scrollTop;
+    container.scrollTo({
+      top: Math.max(0, offset - 16),
+      behavior: "smooth",
+    });
   }
 
   function jumpToBlock(block: Block) {
     const textarea = textareaRef.current;
-    if (!textarea) {
-      setMode("edit");
-      requestAnimationFrame(() => jumpToBlock(block));
+    // 预览模式或 textarea 不可用时：滚动预览面板到对应标题
+    if (mode === "preview" || !textarea) {
+      const previewPane = previewRef.current;
+      if (previewPane) {
+        jumpToPreviewHeading(block);
+        return;
+      }
+      // 预览面板尚未渲染，等待下一帧重试
+      requestAnimationFrame(() => requestAnimationFrame(() => jumpToBlock(block)));
       return;
     }
+    // 编辑/分屏模式：选中文本并滚动 textarea
     const raw = block.content.trim();
     const fallback = stripMarkdownTitle(raw);
     const rawIndex = raw ? source.indexOf(raw) : -1;
@@ -538,6 +902,14 @@ export function NoteEditor({
     const length = rawIndex >= 0 ? raw.length : fallback.length;
     textarea.focus();
     textarea.setSelectionRange(start, start + length);
+    // 滚动 textarea 使选中行进入视口
+    const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 27.3;
+    const lineNum = source.substring(0, start).split("\n").length;
+    textarea.scrollTop = Math.max(0, (lineNum - 1) * lineHeight - textarea.clientHeight / 3);
+    // 分屏模式下同步滚动预览面板
+    if (mode === "split") {
+      jumpToPreviewHeading(block);
+    }
   }
 
   function applyWrap(prefix: string, suffix = prefix, placeholder = "text") {
@@ -627,6 +999,74 @@ export function NoteEditor({
     });
   }
 
+  // 图片上传：插入占位符 → 上传 → 替换为实际 URL
+  async function uploadAndInsertImage(file: File) {
+    if (!file.type.startsWith("image/")) return;
+    const uploadId = crypto.randomUUID();
+    const placeholder = `![上传中…](uploading:${uploadId})`;
+    insertAtCursor(placeholder);
+    setUploadingCount((c) => c + 1);
+    setUploadError(null);
+    // 大文件（>1MB）显示上传进度条
+    const useProgress = file.size > 1024 * 1024;
+    if (useProgress) setUploadProgress({ loaded: 0, total: file.size });
+    try {
+      const result = await api.uploadImage(file, noteId, useProgress ? (loaded, total) => {
+        setUploadProgress({ loaded, total });
+      } : undefined);
+      const markdown = `![](${result.url})`;
+      // Use latestDraftRef to avoid stale closure, and call updateSource
+      // (not setSource) so the save chain tracks the change and triggers autosave.
+      const currentSource = latestDraftRef.current.source;
+      updateSource(currentSource.replace(placeholder, markdown));
+    } catch (err) {
+      const currentSource = latestDraftRef.current.source;
+      const cleaned = currentSource.replace(placeholder, "");
+      if (cleaned !== currentSource) updateSource(cleaned);
+      setUploadError(err instanceof ApiError ? "图片上传失败" : "图片上传失败，请重试");
+    } finally {
+      setUploadingCount((c) => c - 1);
+      setUploadProgress(null);
+    }
+  }
+
+  // 粘贴图片：检测剪贴板中的图片文件
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          void uploadAndInsertImage(file);
+        }
+      }
+    }
+  }
+
+  // 拖拽图片：检测拖入的图片文件
+  function handleDrop(e: React.DragEvent<HTMLTextAreaElement>) {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const imageFiles = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (imageFiles.length === 0) return;
+    e.preventDefault();
+    for (const file of imageFiles) {
+      void uploadAndInsertImage(file);
+    }
+  }
+
+  // 工具栏按钮触发文件选择
+  function handleImageFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files) return;
+    for (const file of Array.from(files)) {
+      void uploadAndInsertImage(file);
+    }
+    e.target.value = "";
+  }
+
   function changeMode(nextMode: EditorMode) {
     const textarea = textareaRef.current;
     if (textarea) {
@@ -647,6 +1087,31 @@ export function NoteEditor({
         Math.min(end, nextTextarea.value.length),
       );
     });
+  }
+
+  function changeViewMode(next: ViewMode) {
+    if (next === viewMode) return;
+    if (next === "fullscreen") {
+      const el = workbenchRef.current;
+      if (el?.requestFullscreen) {
+        void el.requestFullscreen().then(
+          () => setViewMode("fullscreen"),
+          () => setViewMode("wide"),
+        );
+      } else {
+        setViewMode("wide");
+      }
+    } else {
+      if (document.fullscreenElement) {
+        exitingFullscreenRef.current = true;
+        void document.exitFullscreen().then(() => {
+          exitingFullscreenRef.current = false;
+          setViewMode(next);
+        });
+      } else {
+        setViewMode(next);
+      }
+    }
   }
 
   function applyStarterTemplate(template: string) {
@@ -696,14 +1161,23 @@ export function NoteEditor({
   useEffect(() => {
     const onBeforeUnload = () => {
       if (
+        isOwnerRef.current &&
         !isDeletingRef.current &&
         !conflictDataRef.current &&
         !recoveredConflictRef.current &&
+        !noteDeletedRef.current &&
         latestDraftRef.current.source !== lastSavedSourceRef.current
       ) {
         const draft = latestDraftRef.current;
         // keepalive 受请求体大小和浏览器生命周期限制，本地副本是最后一道保护。
         persistDraftLocally(draft.source);
+        // 如果保存正在飞行中，跳过 keepalive 请求——飞行中的 save 已经在处理
+        // 内容，keepalive 携带的 baseVersionId 已过期，服务端会返回 409 并被
+        // 静默吞掉。本地草稿已持久化，下次进入页面时会恢复。
+        if (saveInFlightRef.current) return;
+        // 标记已发出 keepalive 请求——如果用户取消导航留在页面，
+        // 下次 save() 会先拉取最新笔记状态，避免使用过期的 baseVersionId。
+        beforeUnloadSaveFiredRef.current = true;
         const blocks = markdownToBlocks(draft.source);
         const csrfToken = getCsrfToken();
         try {
@@ -716,7 +1190,8 @@ export function NoteEditor({
             body: JSON.stringify({
               blocks: blocks.map((b) => ({ type: b.type, content: b.content })),
               baseVersionId: savedVersionIdRef.current ?? undefined,
-              isAutosave: true,
+              // Phase 2: 遵循会话状态——会话活跃时原地更新，会话结束后创建新版本
+              isAutosave: sessionVersionIdRef.current !== null,
             }),
             credentials: "same-origin",
             keepalive: true,
@@ -742,9 +1217,11 @@ export function NoteEditor({
         clearTimeout(timer.current);
         timer.current = null;
       }
+      clearSessionTimeout();
       if (
         !isDeletingRef.current &&
         !recoveredConflictRef.current &&
+        !noteDeletedRef.current &&
         latestDraftRef.current.source !== lastSavedSourceRef.current
       ) {
         persistDraftLocally(latestDraftRef.current.source);
@@ -754,7 +1231,7 @@ export function NoteEditor({
       generationRunRef.current += 1;
       mountedRef.current = false;
     };
-  }, [persistDraftLocally]);
+  }, [clearSessionTimeout, persistDraftLocally]);
 
   async function generateCard() {
     if (!latestDraftRef.current.source.trim()) {
@@ -818,10 +1295,14 @@ export function NoteEditor({
 
   const generatedIsCurrent = generatedVersionId === currentVersionId && !dirty;
   const hasWritableContent = source.trim().length > 0;
-  const generationBlocked = Boolean(conflictData) || deleting || leaving;
+  const generationBlocked = Boolean(conflictData) || deleting || leaving || saving === "deleted";
   const genButton = (() => {
     if (genState === "generating") {
       return { label: "生成中…", disabled: true, onClick: () => {} };
+    }
+    // RBAC: 成员不能生成学习卡（创建 AI 任务属于工作区数据写入）
+    if (!isOwner) {
+      return { label: "需要所有者权限", disabled: true, onClick: () => {} };
     }
     if (generatedIsCurrent) {
       return {
@@ -850,6 +1331,10 @@ export function NoteEditor({
   })();
 
   async function handleExport() {
+    if (noteDeletedRef.current) {
+      setExportError("笔记已被删除，无法导出。");
+      return;
+    }
     setExporting(true);
     setExportError(null);
     try {
@@ -949,26 +1434,41 @@ export function NoteEditor({
         </header>
         <div className="note-editor-panel-body">
           {outlineBlocks.length > 0 ? (
-            <ol className="note-editor-outline-list">
-              {outlineBlocks.map((block, index) => (
-                <li key={`${block.ordinal}-${block.content}`}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!fromDrawer) {
-                        jumpToBlock(block);
-                        return;
-                      }
-                      setInspectorOpen(false);
-                      setMode("edit");
-                      requestAnimationFrame(() => requestAnimationFrame(() => jumpToBlock(block)));
-                    }}
+            <ol className="ne-outline-list">
+              {outlineBlocks.map((block, index) => {
+                const levelMatch = /^<h(\d)>/.exec(block.content.trim());
+                const level = levelMatch ? Number(levelMatch[1]) : 1;
+                const title = stripMarkdownTitle(block.content) || "未命名标题";
+                return (
+                  <li
+                    key={`${block.ordinal}-${block.content}`}
+                    className="ne-outline-item"
+                    data-level={level}
                   >
-                    <span>{String(index + 1).padStart(2, "0")}</span>
-                    <strong>{stripMarkdownTitle(block.content) || "未命名标题"}</strong>
-                  </button>
-                </li>
-              ))}
+                    <button
+                      type="button"
+                      className="ne-outline-link"
+                      onClick={() => {
+                        if (!fromDrawer) {
+                          jumpToBlock(block);
+                          return;
+                        }
+                        setInspectorOpen(false);
+                        requestAnimationFrame(() => requestAnimationFrame(() => jumpToBlock(block)));
+                      }}
+                      title={title}
+                    >
+                      <span className="ne-outline-index" aria-hidden="true">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
+                      <span className="ne-outline-level" aria-hidden="true">
+                        H{level}
+                      </span>
+                      <strong className="ne-outline-text">{title}</strong>
+                    </button>
+                  </li>
+                );
+              })}
             </ol>
           ) : (
             <div className="note-editor-panel-empty">
@@ -980,17 +1480,13 @@ export function NoteEditor({
               </button>
             </div>
           )}
-          {allOutlineBlocks.length > outlineBlocks.length && (
-            <p className="note-editor-panel-remainder">
-              还有 {allOutlineBlocks.length - outlineBlocks.length} 个标题未在此处展开
-            </p>
-          )}
         </div>
       </section>
     );
   }
 
   function renderVersionsPanel() {
+    const visibleVersions = versions ?? [];
     return (
       <section className="note-editor-panel note-editor-versions-panel">
         <header className="note-editor-panel-header">
@@ -1021,44 +1517,81 @@ export function NoteEditor({
             </div>
           )}
           {versions === null && !versionsError && (
-            <div className="note-editor-version-skeleton" role="status">
-              正在读取保存记录…
+            <div className="ne-version-skeleton-list" role="status" aria-label="正在读取保存记录">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="ne-version-skeleton-item">
+                  <span className="ne-version-skeleton-node" />
+                  <div className="ne-version-skeleton-content">
+                    <span className="ne-version-skeleton-line ne-version-skeleton-line--short" />
+                    <span className="ne-version-skeleton-line ne-version-skeleton-line--long" />
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           {versions && versions.length === 0 && (
             <div className="note-editor-panel-empty note-editor-panel-empty--compact">
+              <Icon.Archive aria-hidden="true" />
               <strong>还没有保存记录</strong>
               <p>完成第一次保存后，版本会显示在这里。</p>
             </div>
           )}
-          {versions && versions.length > 0 && (
-            <ol className="note-editor-version-list">
-              {versions.slice(0, 8).map((version) => (
-                <li
-                  key={version.id}
-                  className={
-                    version.versionNo === currentVersionNo ? "is-current" : ""
-                  }
-                >
-                  <span className="note-editor-version-mark" aria-hidden="true" />
-                  <div>
-                    <strong>版本 {version.versionNo}</strong>
-                    <time
-                      dateTime={version.createdAt}
-                      title={new Date(version.createdAt).toLocaleString()}
-                    >
-                      {relativeTime(version.createdAt)}
-                    </time>
-                  </div>
-                  {version.versionNo === currentVersionNo && <small>当前</small>}
-                </li>
-              ))}
+          {visibleVersions.length > 0 && (
+            <ol className="ne-version-timeline">
+              {visibleVersions.map((version, index) => {
+                const isCurrent = version.versionNo === currentVersionNo;
+                const isModified = version.updatedAt !== version.createdAt;
+                const isLast = index === visibleVersions.length - 1;
+                return (
+                  <li
+                    key={version.id}
+                    className="ne-version-timeline-item"
+                    data-current={isCurrent || undefined}
+                    data-modified={isModified || undefined}
+                  >
+                    <div className="ne-version-timeline-rail" aria-hidden="true">
+                      <span className="ne-version-timeline-node" />
+                      {!isLast && <span className="ne-version-timeline-line" />}
+                    </div>
+                    <div className="ne-version-timeline-card">
+                      <div className="ne-version-timeline-head">
+                        <strong className="ne-version-timeline-no">
+                          v{version.versionNo}
+                        </strong>
+                        {isCurrent ? (
+                          <span className="ne-version-timeline-tag ne-version-timeline-tag--current">
+                            <Icon.Check className="ne-version-timeline-tag-icon" aria-hidden="true" />
+                            当前
+                          </span>
+                        ) : isModified ? (
+                          <span className="ne-version-timeline-tag ne-version-timeline-tag--auto">
+                            自动保存
+                          </span>
+                        ) : null}
+                      </div>
+                      <time
+                        className="ne-version-timeline-time"
+                        dateTime={version.updatedAt}
+                        title={`创建：${new Date(version.createdAt).toLocaleString()}\n修改：${new Date(version.updatedAt).toLocaleString()}`}
+                      >
+                        {relativeTime(version.updatedAt)}
+                      </time>
+                      {!isCurrent && isOwner && (
+                        <button
+                          type="button"
+                          className="ne-version-restore-btn"
+                          onClick={() => setConfirmRestore({ versionId: version.id, versionNo: version.versionNo })}
+                          disabled={restoring}
+                        >
+                          <Icon.Refresh className="ne-version-restore-icon" aria-hidden="true" />
+                          恢复此版本
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
             </ol>
-          )}
-          {versions && versions.length > 8 && (
-            <p className="note-editor-panel-remainder">
-              还有 {versions.length - 8} 个较早版本未在此处展开
-            </p>
           )}
         </div>
       </section>
@@ -1174,7 +1707,7 @@ export function NoteEditor({
   }
 
   return (
-    <div className="note-workbench" data-editor-mode={mode}>
+    <div ref={workbenchRef} className="note-workbench" data-editor-mode={mode} data-view-mode={viewMode}>
       <header className="ne-topbar" data-ui="focus-topbar">
         <div className="ne-topbar-left">
           <button
@@ -1267,6 +1800,7 @@ export function NoteEditor({
                 type="button"
                 className="is-danger"
                 role="menuitem"
+                hidden={!isOwner}
                 onClick={() => {
                   moreActionsRef.current?.removeAttribute("open");
                   setConfirmDelete(true);
@@ -1300,6 +1834,26 @@ export function NoteEditor({
           <p>保存没有完成，本地内容仍在当前页面中。</p>
           <button type="button" className="ne-notice-action" onClick={() => void flushLatestDraft()}>
             重试保存
+          </button>
+        </div>
+      )}
+
+      {/* CONC-02: 笔记已被其他用户删除 */}
+      {saving === "deleted" && (
+        <div className="ne-notice ne-notice--danger" role="alert">
+          <p>这篇笔记已被其他成员删除。你的本地内容已保留，可复制后另存为新笔记。</p>
+          <button type="button" className="ne-notice-action" onClick={() => {
+            if (
+              returnHref.startsWith("/search") ||
+              returnHref.startsWith("/sources") ||
+              returnHref.startsWith("/today")
+            ) {
+              router.replace(returnHref);
+            } else {
+              router.push(returnHref);
+            }
+          }}>
+            返回列表
           </button>
         </div>
       )}
@@ -1361,13 +1915,14 @@ export function NoteEditor({
                   把尚未成形的想法写清楚，再从保存版本生成可验证的学习对象。
                 </p>
               </div>
+              {!isOwner && <MemberNotice compact />}
               {titleSource === "auto" && (
                 <span className="ne-chip ne-chip--muted">自动命名</span>
               )}
             </div>
 
             <div className="ne-toolbar-controls">
-              <div className="ne-mode-switch" role="group" aria-label="编辑器显示模式">
+              <div className="ne-mode-switch" role="group" aria-label="编辑器显示模式" hidden={!isOwner}>
                 <button
                   type="button"
                   className={`ne-toolbar-chip ${mode === "edit" ? "ne-toolbar-chip--active" : ""}`}
@@ -1396,37 +1951,74 @@ export function NoteEditor({
                   分屏
                 </button>
               </div>
-              {mode !== "preview" && (
-                <div className="ne-format-tools" role="group" aria-label="Markdown 格式工具">
-                  <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("# ", /^#{1,6}\s+/)} aria-label="一级标题" title="一级标题">
-                    <Icon.H1 className="ne-toolbar-icon" aria-hidden="true" />
+              <div className="ne-toolbar-tail">
+                {mode !== "preview" && (
+                  <div className="ne-format-tools" role="group" aria-label="Markdown 格式工具">
+                    <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("# ", /^#{1,6}\s+/)} aria-label="一级标题" title="一级标题">
+                      <Icon.H1 className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("## ", /^#{1,6}\s+/)} aria-label="二级标题" title="二级标题">
+                      <Icon.H2 className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => applyWrap("**", "**", "加粗")} aria-label="加粗" title="加粗 · ⌘B">
+                      <Icon.Bold className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => applyWrap("*", "*", "斜体")} aria-label="斜体" title="斜体 · ⌘I">
+                      <Icon.Italic className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => applyWrap("`", "`", "代码")} aria-label="行内代码" title="行内代码">
+                      <Icon.Code className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("> ", /^>\s?/)} aria-label="引用" title="引用">
+                      <Icon.QuoteMark className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("- ", /^[-*+]\s+/)} aria-label="无序列表" title="无序列表">
+                      <Icon.List className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => applyWrap("[", "](https://)", "链接文字")} aria-label="链接" title="链接 · ⌘K">
+                      <Icon.LinkOut className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => insertAtCursor("\n---\n")} aria-label="分隔线" title="分隔线">
+                      <Icon.Divider className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="ne-format-button" onClick={() => imageFileInputRef.current?.click()} aria-label="插入图片" title="插入图片">
+                      <Icon.Image className="ne-toolbar-icon" aria-hidden="true" />
+                    </button>
+                  </div>
+                )}
+                <div className="ne-view-switch" role="group" aria-label="视图模式">
+                  <button
+                    type="button"
+                    className={`ne-toolbar-chip ${viewMode === "normal" ? "ne-toolbar-chip--active" : ""}`}
+                    onClick={() => changeViewMode("normal")}
+                    aria-pressed={viewMode === "normal"}
+                    title="正常布局"
+                  >
+                    <Icon.Columns className="ne-toolbar-icon" aria-hidden="true" />
+                    <span>正常</span>
                   </button>
-                  <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("## ", /^#{1,6}\s+/)} aria-label="二级标题" title="二级标题">
-                    <Icon.H2 className="ne-toolbar-icon" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className={`ne-toolbar-chip ${viewMode === "wide" ? "ne-toolbar-chip--active" : ""}`}
+                    onClick={() => changeViewMode("wide")}
+                    aria-pressed={viewMode === "wide"}
+                    title="宽屏 · 铺满浏览器"
+                  >
+                    <Icon.WideView className="ne-toolbar-icon" aria-hidden="true" />
+                    <span>宽屏</span>
                   </button>
-                  <button type="button" className="ne-format-button" onClick={() => applyWrap("**", "**", "加粗")} aria-label="加粗" title="加粗 · ⌘B">
-                    <Icon.Bold className="ne-toolbar-icon" aria-hidden="true" />
-                  </button>
-                  <button type="button" className="ne-format-button" onClick={() => applyWrap("*", "*", "斜体")} aria-label="斜体" title="斜体 · ⌘I">
-                    <Icon.Italic className="ne-toolbar-icon" aria-hidden="true" />
-                  </button>
-                  <button type="button" className="ne-format-button" onClick={() => applyWrap("`", "`", "代码")} aria-label="行内代码" title="行内代码">
-                    <Icon.Code className="ne-toolbar-icon" aria-hidden="true" />
-                  </button>
-                  <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("> ", /^>\s?/)} aria-label="引用" title="引用">
-                    <Icon.QuoteMark className="ne-toolbar-icon" aria-hidden="true" />
-                  </button>
-                  <button type="button" className="ne-format-button" onClick={() => applyLinePrefix("- ", /^[-*+]\s+/)} aria-label="无序列表" title="无序列表">
-                    <Icon.List className="ne-toolbar-icon" aria-hidden="true" />
-                  </button>
-                  <button type="button" className="ne-format-button" onClick={() => applyWrap("[", "](https://)", "链接文字")} aria-label="链接" title="链接 · ⌘K">
-                    <Icon.LinkOut className="ne-toolbar-icon" aria-hidden="true" />
-                  </button>
-                  <button type="button" className="ne-format-button" onClick={() => insertAtCursor("\n---\n")} aria-label="分隔线" title="分隔线">
-                    <Icon.Divider className="ne-toolbar-icon" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className={`ne-toolbar-chip ${viewMode === "fullscreen" ? "ne-toolbar-chip--active" : ""}`}
+                    onClick={() => changeViewMode("fullscreen")}
+                    aria-pressed={viewMode === "fullscreen"}
+                    title="全屏"
+                  >
+                    <Icon.Fullscreen className="ne-toolbar-icon" aria-hidden="true" />
+                    <span>全屏</span>
                   </button>
                 </div>
-              )}
+              </div>
             </div>
           </div>
 
@@ -1435,7 +2027,7 @@ export function NoteEditor({
               <div className="ne-editor-pane">
                 <header className="ne-pane-label">
                   <span>MARKDOWN SOURCE</span>
-                  <small>输入停顿 800ms 后同步</small>
+                  <small>输入停顿 2.5s 后同步</small>
                 </header>
                 {source.trim() === "" && (
                   <div className="ne-starter-row" aria-label="快速开始模板">
@@ -1447,13 +2039,15 @@ export function NoteEditor({
                     </div>
                   </div>
                 )}
-                <textarea
-                  ref={textareaRef}
-                  value={source}
-                  disabled={leaving || deleting}
-                  onChange={(e) => updateSource(e.target.value)}
-                  onKeyDown={onEditorKeyDown}
-                  onSelect={(e) => {
+<textarea
+ref={textareaRef}
+value={source}
+disabled={leaving || deleting || saving === "deleted"}
+onChange={(e) => updateSource(e.target.value)}
+onKeyDown={onEditorKeyDown}
+onPaste={handlePaste}
+onDrop={handleDrop}
+onSelect={(e) => {
                     textareaSelectionRef.current = {
                       start: e.currentTarget.selectionStart,
                       end: e.currentTarget.selectionEnd,
@@ -1464,10 +2058,40 @@ export function NoteEditor({
                   className="ne-editor-textarea"
                   aria-label="Markdown 笔记正文"
                 />
+                {uploadingCount > 0 && (
+                  <div className="ne-upload-status" role="status" aria-live="polite">
+                    <span>正在上传 {uploadingCount} 张图片…</span>
+                    {uploadProgress && uploadProgress.total > 0 && (
+                      <span className="ne-upload-progress-bar">
+                        <span
+                          className="ne-upload-progress-fill"
+                          style={{ width: `${Math.round((uploadProgress.loaded / uploadProgress.total) * 100)}%` }}
+                        />
+                        <span className="ne-upload-progress-text">
+                          {Math.round((uploadProgress.loaded / uploadProgress.total) * 100)}%
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                )}
+                {uploadError && (
+                  <div className="ne-upload-error" role="alert">
+                    {uploadError}
+                  </div>
+                )}
+                <input
+                  ref={imageFileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={handleImageFileSelect}
+                />
               </div>
             )}
             {(mode === "preview" || mode === "split") && (
               <div
+                ref={previewRef}
                 className="ne-editor-pane ne-editor-preview"
                 role="region"
                 aria-label="Markdown 阅读预览"
@@ -1606,7 +2230,7 @@ export function NoteEditor({
       <ConfirmDialog
         open={confirmDelete}
         title={`删除「${title || "无标题笔记"}」？`}
-        message="确定要删除这篇笔记吗？此操作不可撤销，关联的学习卡、证据和复习记录将一并清除。"
+        message="确定要将这篇笔记移入回收站吗？30 天内可在笔记列表恢复，届时关联的学习卡和复习计划将一并归档。超过 30 天后将永久删除。"
         confirmLabel="删除"
         variant="danger"
         loading={deleting}
@@ -1634,6 +2258,19 @@ export function NoteEditor({
             }
           } catch (err) {
             isDeletingRef.current = false;
+            if (err instanceof ApiError && err.status === 404) {
+              // CONC-06: 笔记已被其他用户删除，直接导航返回
+              if (
+                returnHref.startsWith("/search") ||
+                returnHref.startsWith("/sources") ||
+                returnHref.startsWith("/today")
+              ) {
+                router.replace(returnHref);
+              } else {
+                router.push(returnHref);
+              }
+              return;
+            }
             setDeleteError(
               `删除失败：${err instanceof Error ? err.message : "未知错误"}`,
             );
@@ -1646,6 +2283,20 @@ export function NoteEditor({
           }
         }}
         onCancel={() => setConfirmDelete(false)}
+      />
+
+      <ConfirmDialog
+        open={confirmRestore !== null}
+        title={confirmRestore ? `恢复到版本 ${confirmRestore.versionNo}？` : ""}
+        message="当前未保存的修改将丢失，编辑器会加载目标版本的内容。"
+        confirmLabel="恢复"
+        variant="default"
+        loading={restoring}
+        onConfirm={() => {
+          if (!confirmRestore) return;
+          void handleRestoreVersion(confirmRestore.versionId);
+        }}
+        onCancel={() => setConfirmRestore(null)}
       />
     </div>
   );

@@ -1,21 +1,25 @@
 "use client";
 
 import "@/app/styles/home.css";
+import "@/app/styles/onboarding-guide.css";
 import "@/app/styles/workspace-headers.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, CardListItem, JobRow, ReviewWithCard, StatsOverview } from "@/lib/api";
+import { useIsOwner } from "@/lib/use-current-user";
 import { relativeTime } from "@/lib/format";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Icon } from "@/components/ui/icons";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { OnboardingGuide } from "@/components/study/OnboardingGuide";
 import { statusMap } from "@/lib/status-map";
 
 type CaptureMessageType = "success" | "error";
 
 export default function HomePage() {
+  const { isOwner } = useIsOwner();
   const router = useRouter();
   const [todayLabel, setTodayLabel] = useState("今天");
   const [stats, setStats] = useState<StatsOverview | null>(null);
@@ -126,15 +130,30 @@ export default function HomePage() {
   }, [router]);
 
   const openCapture = useCallback(() => {
+    if (!isOwner) return;
     setCaptureExpanded(true);
     window.requestAnimationFrame(() => {
       document.getElementById("home-capture-input")?.focus();
     });
-  }, []);
+  }, [isOwner]);
+
+  useEffect(() => {
+    const openFromHash = () => {
+      if (window.location.hash === "#quick-capture") openCapture();
+    };
+    const openFromShell = () => openCapture();
+    openFromHash();
+    window.addEventListener("hashchange", openFromHash);
+    window.addEventListener("home:open-capture", openFromShell);
+    return () => {
+      window.removeEventListener("hashchange", openFromHash);
+      window.removeEventListener("home:open-capture", openFromShell);
+    };
+  }, [openCapture]);
 
   const handleCapture = useCallback(async () => {
     const text = captureText.trim();
-    if (!text) return;
+    if (!isOwner || !text) return;
 
     setCaptureBusy(true);
     setCaptureMsg(null);
@@ -152,7 +171,7 @@ export default function HomePage() {
         await api.createSource({ type, title, content: text });
       }
 
-      setCaptureMsg("来源已创建，正在解析…");
+      setCaptureMsg("材料已添加，正在解析…");
       setCaptureMsgType("success");
       setCaptureText("");
 
@@ -179,7 +198,7 @@ export default function HomePage() {
     } finally {
       setCaptureBusy(false);
     }
-  }, [captureText]);
+  }, [captureText, isOwner]);
 
   const pendingReviews = reviews ?? [];
   const pendingReviewCount = homeReviewTotal ?? pendingReviews.length;
@@ -256,9 +275,27 @@ export default function HomePage() {
   );
   const queueCount = pendingReviewCount + activeJobs.length;
   const errorList = [statsError, notesError, cardsError, reviewsError, jobsError].filter(Boolean);
+  const resolvedNoteCount = stats?.noteCount ?? noteTotal;
+  const resolvedCardCount = stats?.cardCount ?? homeCardTotal;
+  const isFirstUse =
+    resolvedNoteCount === 0 &&
+    resolvedCardCount === 0 &&
+    cards !== null &&
+    reviews !== null &&
+    jobs !== null &&
+    !notesError &&
+    !cardsError &&
+    !reviewsError &&
+    !jobsError &&
+    pendingReviewCount === 0 &&
+    jobs.length === 0;
 
   return (
-    <div className="learning-home" data-ui="learning-home">
+    <div
+      className="learning-home"
+      data-ui="learning-home"
+      data-home-state={isFirstUse ? "first-use" : "active"}
+    >
       <header
         className="learning-home-header workspace-page-header"
         data-ui="page-header"
@@ -266,13 +303,15 @@ export default function HomePage() {
         <div className="learning-home-heading">
           <p className="learning-home-eyebrow">
             <span className="learning-home-eyebrow-dot" aria-hidden="true" />
-            PERSONAL LEARNING DESK
+            {isFirstUse ? "第一次学习" : "个人理解工作台"}
             <span className="learning-home-eyebrow-separator" aria-hidden="true">·</span>
             <span className="learning-home-date">{todayLabel}</span>
           </p>
-          <h1>今日学习</h1>
+          <h1>{isFirstUse ? "建立你的第一条学习记录" : "今日学习"}</h1>
           <p className="learning-home-subtitle">
-            把今天最值得推进的理解，放在桌面中央。
+            {isFirstUse
+              ? "先放入一份材料，笔记、学习卡与复习会从这里自然接上。"
+              : "把今天最值得推进的理解，放在桌面中央。"}
           </p>
         </div>
 
@@ -292,9 +331,10 @@ export default function HomePage() {
       </header>
 
       <div className="learning-home-content">
+        {!isFirstUse && (
         <section className="learning-home-overview" aria-labelledby="learning-home-overview-title">
           <div className="learning-home-overview-intro">
-            <span className="learning-home-overview-kicker">TODAY</span>
+            <span className="learning-home-overview-kicker">今日概览</span>
             <h2 id="learning-home-overview-title">学习概览</h2>
             <p>今天的理解工作台</p>
           </div>
@@ -334,6 +374,7 @@ export default function HomePage() {
             </div>
           </dl>
         </section>
+        )}
 
         {errorList.length > 0 && (
           <div className="learning-home-alert" role="alert">
@@ -352,7 +393,32 @@ export default function HomePage() {
 
         <div className="learning-home-desk">
           <div className="learning-home-primary">
-            {focusLoading ? (
+            {isFirstUse && (
+              <section
+                className="learning-home-starter-intro"
+                aria-labelledby="learning-home-starter-title"
+              >
+                <span className="learning-home-starter-label">
+                  <Icon.Sparkle aria-hidden="true" />
+                  从这里开始
+                </span>
+                <h2 id="learning-home-starter-title">
+                  从一份真正想弄懂的材料开始
+                </h2>
+                <p>
+                  不用先整理格式。粘贴原文、Markdown、代码或网页链接，系统会先替你收好，再逐步整理成可验证的理解。
+                </p>
+                <div className="learning-home-starter-outcome">
+                  <span aria-hidden="true"><Icon.Card /></span>
+                  <div>
+                    <strong>添加后会发生什么？</strong>
+                    <p>材料进入解析队列，随后可在笔记中提炼重点并生成学习卡。</p>
+                  </div>
+                </div>
+              </section>
+            )}
+            <OnboardingGuide variant={isFirstUse ? "starter" : "default"} />
+            {!isFirstUse && (focusLoading ? (
               <section className="learning-home-focus learning-home-focus--loading" aria-busy="true" aria-label="正在加载今日下一步">
                 <div className="learning-home-focus-skeleton-label" />
                 <div className="learning-home-focus-skeleton-title" />
@@ -367,7 +433,7 @@ export default function HomePage() {
                     {todayFocus.kind === "review" ? <Icon.Review /> : <Icon.Sparkle />}
                     {todayFocus.eyebrow}
                   </span>
-                  <span className="learning-home-focus-index">01 / TODAY</span>
+                  <span className="learning-home-focus-index">今日重点</span>
                 </div>
 
                 <div className="learning-home-focus-body">
@@ -399,26 +465,39 @@ export default function HomePage() {
             ) : (
               <section className="learning-home-focus learning-home-focus--empty" data-ui="primary-object">
                 <div className="learning-home-focus-topline">
-                  <span className="learning-home-focus-tag"><Icon.Sparkle />开始今天的第一步</span>
-                  <span className="learning-home-focus-index">01 / TODAY</span>
+                  <span className="learning-home-focus-tag"><Icon.Sparkle />今天的学习桌面</span>
+                  <span className="learning-home-focus-index">今日重点</span>
                 </div>
                 <div className="learning-home-focus-empty-copy">
                   <span className="learning-home-focus-empty-icon" aria-hidden="true"><Icon.Plus /></span>
                   <div>
-                    <h2>先放入一份值得理解的材料</h2>
-                    <p>粘贴原文、Markdown、代码或链接，系统会把它整理成后续可验证的学习对象。</p>
+                    <h2>桌面上还没有学习对象</h2>
+                    <p>
+                      {isOwner
+                        ? "粘贴原文、Markdown、代码或链接，系统会把它整理成后续可验证的学习对象。"
+                        : "你当前以成员身份浏览，可以先从工作区已有资料和学习记录开始。"}
+                    </p>
                   </div>
                 </div>
-                <button className="learning-home-focus-cta" type="button" onClick={openCapture}>
-                  <span>添加第一份材料</span>
-                  <Icon.Arrow />
-                </button>
+                {isOwner ? (
+                  <button className="learning-home-focus-cta" type="button" onClick={openCapture}>
+                    <span>打开快速捕获</span>
+                    <Icon.Arrow />
+                  </button>
+                ) : (
+                  <Link className="learning-home-focus-cta" href="/sources">
+                    <span>浏览来源资料</span>
+                    <Icon.Arrow />
+                  </Link>
+                )}
               </section>
-            )}
+            ))}
           </div>
 
           <aside className="learning-home-tools" aria-label="今日学习工具">
+            {isOwner ? (
             <section
+              id="quick-capture"
               className="learning-home-capture"
               data-expanded={captureExpanded ? "true" : "false"}
               data-ui="quick-capture"
@@ -427,8 +506,8 @@ export default function HomePage() {
                 <div className="learning-home-tool-heading">
                   <span className="learning-home-tool-icon" aria-hidden="true"><Icon.Plus /></span>
                   <div>
-                    <p>QUICK CAPTURE</p>
-                    <h2>快速捕获</h2>
+                    <p>{isFirstUse ? "从这里开始" : "添加学习材料"}</p>
+                    <h2>{isFirstUse ? "添加第一份材料" : "快速捕获"}</h2>
                   </div>
                 </div>
                 <button
@@ -451,7 +530,9 @@ export default function HomePage() {
                 <textarea
                   id="home-capture-input"
                   className="learning-home-capture-input"
-                  placeholder="粘贴原文、Markdown、代码，或输入 URL…"
+                  placeholder={isFirstUse
+                    ? "粘贴一段真正想弄懂的内容，或输入网页链接…"
+                    : "粘贴原文、Markdown、代码，或输入 URL…"}
                   value={captureText}
                   onChange={(event) => {
                     setCaptureText(event.target.value);
@@ -476,7 +557,11 @@ export default function HomePage() {
                     aria-busy={captureBusy}
                   >
                     {captureBusy && <span className="learning-home-spinner" aria-hidden="true" />}
-                    <span>{captureBusy ? "创建中…" : "创建来源"}</span>
+                    <span>
+                      {captureBusy
+                        ? isFirstUse ? "正在添加…" : "创建中…"
+                        : isFirstUse ? "添加材料" : "创建来源"}
+                    </span>
                   </button>
                 </div>
                 {captureMsg && (
@@ -492,13 +577,25 @@ export default function HomePage() {
                 )}
               </div>
             </section>
+            ) : (
+              <div className="learning-home-readonly-notice">
+                <span className="learning-home-readonly-icon" aria-hidden="true">
+                  <Icon.Eye />
+                </span>
+                <div>
+                  <strong>成员模式</strong>
+                  <span>你可以查看、验证和复习，创建和编辑由工作区所有者操作。</span>
+                </div>
+              </div>
+            )}
 
+            {!isFirstUse && (
             <section className="learning-home-queue" data-ui="today-queue">
               <header className="learning-home-tool-header learning-home-queue-header">
                 <div className="learning-home-tool-heading">
                   <span className="learning-home-tool-icon" aria-hidden="true"><Icon.Review /></span>
                   <div>
-                    <p>TODAY&apos;S QUEUE</p>
+                    <p>今日待办</p>
                     <h2>今日队列</h2>
                   </div>
                 </div>
@@ -562,13 +659,15 @@ export default function HomePage() {
                 )}
               </div>
             </section>
+            )}
           </aside>
         </div>
 
+        {!isFirstUse && (
         <section className="learning-home-recent" aria-labelledby="learning-home-recent-title">
           <header className="learning-home-section-header">
             <div>
-              <p>RECENT STUDY CARDS</p>
+              <p>最近更新</p>
               <h2 id="learning-home-recent-title">最近学习卡</h2>
               <span>继续补充证据，或回到尚未说清楚的地方。</span>
             </div>
@@ -636,6 +735,7 @@ export default function HomePage() {
             )}
           </div>
         </section>
+        )}
       </div>
     </div>
   );

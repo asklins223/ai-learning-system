@@ -179,7 +179,7 @@ export default function LoginPage() {
           </header>
 
           <div className="login-brand-copy">
-            <p className="login-eyebrow">YOUR UNDERSTANDING WORKSPACE</p>
+            <p className="login-eyebrow">个人理解工作台</p>
             <h1 id="login-brand-title">
               把看过的内容，
               <span>变成能被验证的理解。</span>
@@ -234,7 +234,7 @@ export default function LoginPage() {
         <div className="login-form-panel">
           <div className="login-form-wrap">
             <div className="login-form-heading">
-              <span className="login-form-kicker">PERSONAL BETA</span>
+              <span className="login-form-kicker">欢迎回来</span>
               <h2>继续你的学习</h2>
               <p>登录后回到个人理解工作区</p>
             </div>
@@ -350,9 +350,17 @@ export default function LoginPage() {
 
             <footer className="login-form-footer">
               <span className="login-footer-line" aria-hidden="true" />
-              <span>理解引擎 v0.4 · 单工作区</span>
+              <span>理解引擎 v0.5 · 个人工作区优先</span>
               <span className="login-footer-line" aria-hidden="true" />
             </footer>
+
+            <div className="login-register-cta">
+              <span className="login-register-text">没有账号？</span>
+              <a href="/register" className="login-register-link">
+                立即注册
+                <ArrowGlyph />
+              </a>
+            </div>
           </div>
         </div>
       </section>

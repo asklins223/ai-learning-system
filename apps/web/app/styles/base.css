@@ -28,8 +28,19 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
+}
+
+/* iOS Safari 会在聚焦小于 16px 的表单控件时强制放大视口。手机端统一
+ * 使用可读字号，避免键盘弹出后页面跳动或横向错位。 */
+@media (max-width: 639px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
 }
 
 a {

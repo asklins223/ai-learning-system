@@ -479,7 +479,7 @@ export default function SearchPage() {
 
       <PageHeader
         className="workspace-page-header search-page-header"
-        kicker="SEARCH DESK · 全域检索"
+        kicker="全域检索"
         title="搜索"
         subtitle="在笔记、学习卡、来源与证据之间，快速找回已经形成的理解。"
         actions={headerActions}

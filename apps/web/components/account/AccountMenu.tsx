@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
@@ -12,11 +11,13 @@ import {
   type KeyboardEvent,
 } from "react";
 import { Icon } from "@/components/ui/icons";
-import { api } from "@/lib/api";
+import { api, IDENTITY_CHANGED_EVENT } from "@/lib/api";
 
 type AccountInfo = {
   email: string;
   role: string;
+  displayName: string | null;
+  avatarUrl: string | null;
   workspaceName: string;
 };
 
@@ -37,6 +38,7 @@ export function AccountMenu({
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ top: 64, left: 12 });
 
   const updateMenuPosition = useCallback(() => {
@@ -76,18 +78,22 @@ export function AccountMenu({
 
   useEffect(() => {
     let cancelled = false;
-    void api
+    const loadAccount = () => api
       .getMe()
       .then((result) => {
         if (cancelled) return;
         setAccount(result);
+        setAvatarFailed(false);
         setLoadFailed(false);
       })
       .catch(() => {
         if (!cancelled) setLoadFailed(true);
       });
+    void loadAccount();
+    window.addEventListener(IDENTITY_CHANGED_EVENT, loadAccount);
     return () => {
       cancelled = true;
+      window.removeEventListener(IDENTITY_CHANGED_EVENT, loadAccount);
     };
   }, []);
 
@@ -188,7 +194,7 @@ export function AccountMenu({
     items[nextIndex]?.focus();
   };
 
-  const displayName = account?.email.split("@")[0] ?? (loadFailed ? "账户" : "加载中");
+  const displayName = account?.displayName?.trim() || account?.email.split("@")[0] || (loadFailed ? "账户" : "加载中");
   const email = account?.email ?? (loadFailed ? "账户信息暂不可用" : "正在读取账户…");
   const workspace =
     account?.workspaceName ??
@@ -199,6 +205,11 @@ export function AccountMenu({
       : account?.role
         ? "Member"
         : "Personal Beta";
+  const hasAvatar = Boolean(account?.avatarUrl) && !avatarFailed;
+  const fallbackLetter = (account?.displayName?.trim() || account?.email?.trim() || "")
+    .charAt(0)
+    .toUpperCase();
+  const hasFallbackLetter = fallbackLetter.length > 0;
 
   return (
     <>
@@ -220,13 +231,24 @@ export function AccountMenu({
           aria-expanded={open}
           aria-controls="workspace-account-menu"
         >
-          <Image
-            src="/images/avatar-owner-custom.jpg"
-            alt=""
-            width={40}
-            height={40}
-            priority
-          />
+          {hasAvatar ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={account!.avatarUrl!}
+              alt=""
+              width={40}
+              height={40}
+              onError={() => setAvatarFailed(true)}
+            />
+          ) : (
+            <span className="account-menu-trigger-fallback" aria-hidden="true">
+              {hasFallbackLetter ? (
+                fallbackLetter
+              ) : (
+                <Icon.User className="account-menu-placeholder-icon" />
+              )}
+            </span>
+          )}
           <i aria-hidden="true" />
         </button>
       </div>
@@ -247,12 +269,24 @@ export function AccountMenu({
             }}
           >
             <div className="account-menu-user">
-              <Image
-                src="/images/avatar-owner-custom.jpg"
-                alt=""
-                width={54}
-                height={54}
-              />
+              {hasAvatar ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={account!.avatarUrl!}
+                  alt=""
+                  width={54}
+                  height={54}
+                  onError={() => setAvatarFailed(true)}
+                />
+              ) : (
+                <span className="account-menu-user-fallback" aria-hidden="true">
+                  {hasFallbackLetter ? (
+                    fallbackLetter
+                  ) : (
+                    <Icon.User className="account-menu-placeholder-icon" />
+                  )}
+                </span>
+              )}
               <div>
                 <span>个人中心</span>
                 <strong>{displayName}</strong>
@@ -305,7 +339,7 @@ export function AccountMenu({
 
             <footer>
               <span>理解引擎</span>
-              <small>Personal Beta · v0.4</small>
+              <small>Private Alpha · v0.5</small>
             </footer>
           </div>,
           document.body,

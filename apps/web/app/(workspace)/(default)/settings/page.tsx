@@ -1,7 +1,6 @@
 "use client";
 
 import "@/app/styles/settings.css";
-import Image from "next/image";
 import {
   useCallback,
   useEffect,
@@ -10,7 +9,7 @@ import {
   type ComponentType,
   type SVGProps,
 } from "react";
-import { api, type SearchDriftResult } from "@/lib/api";
+import { api, type SearchDriftResult, type CurrentUser } from "@/lib/api";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -20,8 +19,11 @@ import {
   useMarkdownFileSelection,
 } from "@/components/MarkdownFilePicker";
 import { AIModelSettings } from "@/components/settings/AIModelSettings";
+import { InviteMemberSettings } from "@/components/settings/InviteMemberSettings";
+import { WorkspaceManagement } from "@/components/settings/WorkspaceManagement";
+import { AvatarUploader } from "@/components/account/AvatarUploader";
 
-type SettingsSectionId = "account" | "model" | "export" | "import" | "search";
+type SettingsSectionId = "account" | "workspaces" | "invites" | "model" | "export" | "import" | "search";
 type SettingsIcon = ComponentType<SVGProps<SVGSVGElement>>;
 type ReindexResult = {
   deleted: number;
@@ -29,18 +31,24 @@ type ReindexResult = {
   errors: number;
 };
 
-const SETTINGS_SECTIONS: Array<{
+const ALL_SETTINGS_SECTIONS: Array<{
   id: SettingsSectionId;
   label: string;
   caption: string;
+  group: "账户与空间" | "AI 与学习" | "数据与维护";
   icon: SettingsIcon;
+  ownerOnly?: boolean;
 }> = [
-  { id: "account", label: "个人账户", caption: "身份与工作区", icon: Icon.User },
-  { id: "model", label: "模型与 API", caption: "个人 BYOK 配置", icon: Icon.Sparkle },
-  { id: "export", label: "数据导出", caption: "保存完整副本", icon: Icon.Download },
-  { id: "import", label: "内容导入", caption: "迁移 Markdown", icon: Icon.Inbox },
-  { id: "search", label: "搜索维护", caption: "检测与重建索引", icon: Icon.Search },
+  { id: "account", label: "个人账户", caption: "身份与个人档案", group: "账户与空间", icon: Icon.User },
+  { id: "workspaces", label: "工作区管理", caption: "加入或退出协作空间", group: "账户与空间", icon: Icon.Layers },
+  { id: "invites", label: "邀请与成员", caption: "管理协作权限", group: "账户与空间", icon: Icon.User, ownerOnly: true },
+  { id: "model", label: "模型与 API", caption: "个人模型服务", group: "AI 与学习", icon: Icon.Sparkle },
+  { id: "export", label: "数据导出", caption: "保存完整副本", group: "数据与维护", icon: Icon.Download },
+  { id: "import", label: "内容导入", caption: "迁移 Markdown", group: "数据与维护", icon: Icon.Inbox },
+  { id: "search", label: "搜索维护", caption: "检测与重建索引", group: "数据与维护", icon: Icon.Search },
 ];
+
+const SETTINGS_GROUPS = ["账户与空间", "AI 与学习", "数据与维护"] as const;
 
 function roleLabel(role: string) {
   switch (role.toLowerCase()) {
@@ -63,12 +71,10 @@ function createImportId() {
 }
 
 function SettingsPanelHeading({
-  eyebrow,
   title,
   description,
   icon: PanelIcon,
 }: {
-  eyebrow: string;
   title: string;
   description: string;
   icon: SettingsIcon;
@@ -79,7 +85,6 @@ function SettingsPanelHeading({
         <PanelIcon />
       </span>
       <div>
-        <span className="settings-panel-eyebrow">{eyebrow}</span>
         <h2>{title}</h2>
         <p>{description}</p>
       </div>
@@ -92,12 +97,67 @@ export default function SettingsPage() {
   const navRef = useRef<HTMLElement>(null);
 
   const [accountLoading, setAccountLoading] = useState(true);
-  const [accountData, setAccountData] = useState<{
-    email: string;
-    role: string;
-    workspaceName: string;
-  } | null>(null);
+  const [accountData, setAccountData] = useState<CurrentUser | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [avatarFailed, setAvatarFailed] = useState(false);
+
+  // PROFILE-01: 用户档案编辑
+  const [profileEditing, setProfileEditing] = useState(false);
+  const [profileDisplayName, setProfileDisplayName] = useState("");
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSuccess, setProfileSuccess] = useState<string | null>(null);
+
+  async function handleSaveProfile() {
+    if (profileSaving) return;
+    const nextDisplayName = profileDisplayName.trim();
+    if (nextDisplayName.length > 32) {
+      setProfileError("昵称最多 32 个字符");
+      return;
+    }
+    setProfileSaving(true);
+    setProfileError(null);
+    setProfileSuccess(null);
+    try {
+      await api.updateProfile({
+        displayName: nextDisplayName || null,
+      });
+      setProfileSuccess("档案已更新");
+      setProfileEditing(false);
+      await loadAccount();
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "档案更新失败");
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  async function handleAvatarUploaded(url: string) {
+    setProfileAvatarUrl(url);
+    setProfileSaving(true);
+    setProfileError(null);
+    setProfileSuccess(null);
+    try {
+      await api.updateProfile({ avatarUrl: url });
+      setProfileSuccess("头像已更新");
+      await loadAccount();
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "头像更新失败");
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  function handleCancelProfileEdit() {
+    setProfileEditing(false);
+    setProfileDisplayName(accountData?.displayName ?? "");
+    setProfileAvatarUrl(accountData?.avatarUrl ?? "");
+    setProfileError(null);
+    setProfileSuccess(null);
+  }
+
+  const isOwner = accountData?.role.toLowerCase() === "owner";
 
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -124,7 +184,11 @@ export default function SettingsPage() {
     setAccountLoading(true);
     setAccountError(null);
     try {
-      setAccountData(await api.getMe());
+      const data = await api.getMe();
+      setAccountData(data);
+      setAvatarFailed(false);
+      setProfileDisplayName(data.displayName ?? "");
+      setProfileAvatarUrl(data.avatarUrl ?? "");
     } catch (error) {
       setAccountError(error instanceof Error ? error.message : "账户信息暂时无法读取");
     } finally {
@@ -136,33 +200,32 @@ export default function SettingsPage() {
     void loadAccount();
   }, [loadAccount]);
 
+  // 根据角色计算可见的设置分区；accountData 加载完成后才确定 invites 是否可见
+  const visibleSections = ALL_SETTINGS_SECTIONS.filter(
+    (item) => !item.ownerOnly || isOwner,
+  );
+  const visibleSectionIds = visibleSections.map((item) => item.id).join(",");
+
   useEffect(() => {
-    const elements = SETTINGS_SECTIONS.map((item) => document.getElementById(item.id)).filter(
-      (element): element is HTMLElement => Boolean(element),
-    );
-    if (elements.length === 0) return;
+    const ids = visibleSectionIds.split(",").filter(Boolean);
+    const syncFromHash = () => {
+      const hash = window.location.hash.slice(1);
+      if (ids.includes(hash)) setActiveSection(hash as SettingsSectionId);
+    };
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+    return () => window.removeEventListener("hashchange", syncFromHash);
+  }, [visibleSectionIds]);
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort((a, b) => Math.abs(a.boundingClientRect.top) - Math.abs(b.boundingClientRect.top));
-        const next = visible[0]?.target.id;
-        if (next && SETTINGS_SECTIONS.some((item) => item.id === next)) {
-          setActiveSection(next as SettingsSectionId);
-        }
-      },
-      { rootMargin: "-18% 0px -68% 0px", threshold: [0, 0.08, 0.25] },
-    );
-
-    elements.forEach((element) => observer.observe(element));
-    return () => observer.disconnect();
-  }, []);
+  useEffect(() => {
+    const ids = visibleSectionIds.split(",").filter(Boolean);
+    if (!ids.includes(activeSection)) setActiveSection("account");
+  }, [activeSection, visibleSectionIds]);
 
   useEffect(() => {
     const nav = navRef.current;
     if (!nav || nav.scrollWidth <= nav.clientWidth) return;
-    const activeItem = nav.querySelector<HTMLElement>(`[href="#${activeSection}"]`);
+    const activeItem = nav.querySelector<HTMLElement>(`[data-section="${activeSection}"]`);
     if (!activeItem) return;
 
     const navRect = nav.getBoundingClientRect();
@@ -183,6 +246,12 @@ export default function SettingsPage() {
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
     });
   }, [activeSection]);
+
+  const selectSection = useCallback((section: SettingsSectionId) => {
+    setActiveSection(section);
+    const nextUrl = `${window.location.pathname}${window.location.search}#${section}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, []);
 
   const importLimitMessage = importFiles.validationError;
 
@@ -284,7 +353,6 @@ export default function SettingsPage() {
     }
   }, []);
 
-  const isOwner = accountData?.role.toLowerCase() === "owner";
   const isKnownNonOwner = Boolean(accountData && !isOwner);
   const ownerActionDisabled = accountLoading || !isOwner;
 
@@ -292,93 +360,160 @@ export default function SettingsPage() {
     <div className="settings-page">
       <PageHeader
         className="workspace-page-header"
-        title="个人设置"
-        kicker="PERSONAL DESK · 账户与数据"
-        subtitle="管理当前身份、工作区数据与搜索维护工具；每项操作都保留清晰边界。"
+        title="设置"
+        kicker="账户与数据"
+        subtitle="在一个地方管理个人资料、工作区、模型和数据工具。"
         actions={<ThemeToggle className="settings-theme-toggle" />}
       />
 
       <div className="settings-content">
+        <label className="settings-mobile-section-picker">
+          <span>当前设置分区</span>
+          <select
+            value={activeSection}
+            onChange={(event) => selectSection(event.target.value as SettingsSectionId)}
+          >
+            {SETTINGS_GROUPS.map((group) => (
+              <optgroup key={group} label={group}>
+                {visibleSections
+                  .filter((item) => item.group === group)
+                  .map((item) => (
+                    <option key={item.id} value={item.id}>{item.label}</option>
+                  ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
         <div className="settings-layout">
           <aside className="settings-rail" aria-label="设置目录">
-            <div className="settings-rail-title">
-              <span>SETTINGS INDEX</span>
-              <strong>设置目录</strong>
-            </div>
-            <nav ref={navRef} className="settings-nav">
-              {SETTINGS_SECTIONS.map((item, index) => {
+            <nav ref={navRef} className="settings-nav" role="tablist" aria-label="设置分区">
+              {visibleSections.map((item, index) => {
                 const NavIcon = item.icon;
                 return (
-                  <a
+                  <button
                     key={item.id}
-                    href={`#${item.id}`}
+                    id={`settings-tab-${item.id}`}
+                    type="button"
+                    role="tab"
+                    data-section={item.id}
                     className={`settings-nav-item${activeSection === item.id ? " is-active" : ""}`}
-                    aria-current={activeSection === item.id ? "location" : undefined}
-                    onClick={() => setActiveSection(item.id)}
+                    aria-controls={item.id}
+                    aria-selected={activeSection === item.id}
+                    tabIndex={activeSection === item.id ? 0 : -1}
+                    onClick={() => selectSection(item.id)}
+                    onKeyDown={(event) => {
+                      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+                      event.preventDefault();
+                      const delta = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+                      const targetIndex = event.key === "Home"
+                        ? 0
+                        : event.key === "End"
+                          ? visibleSections.length - 1
+                          : (index + delta + visibleSections.length) % visibleSections.length;
+                      const target = visibleSections[targetIndex];
+                      selectSection(target.id);
+                      window.requestAnimationFrame(() => {
+                        navRef.current
+                          ?.querySelector<HTMLElement>(`[data-section="${target.id}"]`)
+                          ?.focus();
+                      });
+                    }}
                   >
-                    <span className="settings-nav-index">0{index + 1}</span>
                     <span className="settings-nav-icon" aria-hidden="true"><NavIcon /></span>
                     <span className="settings-nav-copy">
                       <strong>{item.label}</strong>
                       <small>{item.caption}</small>
                     </span>
                     <Icon.Chevron aria-hidden="true" />
-                  </a>
+                  </button>
                 );
               })}
             </nav>
             <div className="settings-rail-note">
               <Icon.Lock aria-hidden="true" />
-              <p><strong>数据归你所有</strong><span>导出与索引维护不会修改笔记正文。</span></p>
+              <p><strong>数据边界清晰</strong><span>导出与维护操作不会修改笔记正文。</span></p>
             </div>
           </aside>
 
           <div className="settings-panels">
-            <section id="account" className="settings-panel">
+            <section
+              id="account"
+              className="settings-panel"
+              role="tabpanel"
+              aria-labelledby="settings-tab-account"
+              hidden={activeSection !== "account"}
+            >
               <SettingsPanelHeading
-                eyebrow="IDENTITY"
                 title="当前账户"
                 description="确认正在操作的身份与工作区，避免在错误空间中维护数据。"
                 icon={Icon.User}
               />
 
               <div className="settings-profile-card">
-                <div className="settings-profile-main">
-                  <span className="settings-avatar-wrap">
-                    {accountData && isOwner ? (
-                      <Image
-                        src="/images/avatar-owner-custom.jpg"
-                        alt="当前账户头像"
-                        width={80}
-                        height={80}
-                        priority
-                      />
-                    ) : (
-                      <span className="settings-avatar-fallback" aria-label="账户头像">
-                        {accountData?.email?.trim().charAt(0).toUpperCase() || "?"}
-                      </span>
-                    )}
-                    {accountData && !accountError && <i aria-hidden="true" />}
-                  </span>
-                  <div className="settings-profile-copy">
-                    <span className="settings-profile-label">SIGNED IN AS</span>
-                    {accountLoading ? (
-                      <span className="settings-account-skeleton" aria-label="正在读取账户信息" />
-                    ) : (
-                      <h3>{accountData?.email || "账户信息未加载"}</h3>
-                    )}
-                    <p>{accountData ? "当前登录账户" : "正在确认当前账户"}</p>
+                <div className="settings-profile-hero">
+                  <div className="settings-profile-hero-body">
+                    <span className="settings-avatar-wrap is-lg">
+                      {accountData?.avatarUrl && !avatarFailed ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={accountData.avatarUrl}
+                          alt="当前账户头像"
+                          width={84}
+                          height={84}
+                          onError={() => setAvatarFailed(true)}
+                        />
+                      ) : (
+                        <span className="settings-avatar-fallback" aria-label="账户头像">
+                          {(() => {
+                            const letter = (accountData?.displayName?.trim() || accountData?.email?.trim() || "").charAt(0).toUpperCase();
+                            return letter || <Icon.User className="settings-avatar-placeholder-icon" />;
+                          })()}
+                        </span>
+                      )}
+                      {accountData && !accountError && <i aria-hidden="true" />}
+                    </span>
+                    <div className="settings-profile-hero-copy">
+                      <span className="settings-profile-label">当前登录</span>
+                      {accountLoading ? (
+                        <span className="settings-account-skeleton" aria-label="正在读取账户信息" />
+                      ) : (
+                        <h3>{accountData?.displayName?.trim() || accountData?.email || "账户信息未加载"}</h3>
+                      )}
+                      <p>{accountData?.email || "正在确认当前账户"}</p>
+                      {accountData && !accountLoading && (
+                        <span className="settings-profile-role-tag">{roleLabel(accountData.role)}</span>
+                      )}
+                    </div>
+                    <div className="settings-profile-hero-actions">
+                      <button
+                        type="button"
+                        className="settings-icon-button"
+                        onClick={() => void loadAccount()}
+                        disabled={accountLoading}
+                        aria-label="刷新账户信息"
+                        title="刷新账户信息"
+                      >
+                        <Icon.Refresh className={accountLoading ? "settings-spin" : undefined} />
+                      </button>
+                      {!profileEditing && (
+                        <button
+                          type="button"
+                          className="settings-secondary-button"
+                          onClick={() => {
+                            setProfileDisplayName(accountData?.displayName ?? "");
+                            setProfileAvatarUrl(accountData?.avatarUrl ?? "");
+                            setProfileError(null);
+                            setProfileSuccess(null);
+                            setProfileEditing(true);
+                          }}
+                          disabled={accountLoading}
+                        >
+                          <Icon.Edit aria-hidden="true" />
+                          编辑档案
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    className="settings-icon-button"
-                    onClick={() => void loadAccount()}
-                    disabled={accountLoading}
-                    aria-label="刷新账户信息"
-                    title="刷新账户信息"
-                  >
-                    <Icon.Refresh className={accountLoading ? "settings-spin" : undefined} />
-                  </button>
                 </div>
 
                 {accountError && (
@@ -389,41 +524,153 @@ export default function SettingsPage() {
                   </div>
                 )}
 
-                <dl className="settings-account-facts">
-                  <div>
-                    <dt>账户角色</dt>
-                    <dd>{accountLoading ? "—" : accountData ? roleLabel(accountData.role) : "未知"}</dd>
-                    <small>决定当前工作区权限</small>
+                {/* PROFILE-01: 编辑时才展开详细表单，避免重复展示同一份账户信息。 */}
+                {(profileEditing || profileError || profileSuccess) && (
+                <div className="settings-profile-edit">
+                  {profileEditing && (
+                  <>
+                  <div className="settings-profile-edit-heading">
+                    <div className="settings-profile-edit-title">
+                      <span className="settings-profile-edit-icon" aria-hidden="true"><Icon.User /></span>
+                      <div>
+                        <strong>个人档案</strong>
+                        <small>管理昵称与头像</small>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <dt>当前工作区</dt>
-                    <dd>{accountLoading ? "—" : accountData?.workspaceName || "未知"}</dd>
-                    <small>本页操作仅作用于此空间</small>
+
+                  <div className="settings-profile-edit-form">
+                      <div className="settings-profile-edit-avatar">
+                        <AvatarUploader
+                          currentUrl={profileAvatarUrl || null}
+                          displayName={accountData?.displayName}
+                          email={accountData?.email}
+                          onUploaded={(url) => void handleAvatarUploaded(url)}
+                          onError={(msg) => setProfileError(msg)}
+                          disabled={profileSaving}
+                          size={72}
+                        />
+                      </div>
+                      <div className="settings-profile-edit-field">
+                        <label htmlFor="profile-display-name" className="settings-field-label-row">
+                          <span>昵称</span>
+                          <span className="settings-field-counter" aria-live="polite">
+                            {profileDisplayName.length}/32
+                          </span>
+                        </label>
+                        <input
+                          id="profile-display-name"
+                          type="text"
+                          value={profileDisplayName}
+                          onChange={(e) => setProfileDisplayName(e.target.value)}
+                          placeholder="展示在侧栏和工作区名称中"
+                          maxLength={32}
+                          disabled={profileSaving}
+                          autoComplete="nickname"
+                        />
+                      </div>
+                      <div className="settings-profile-edit-actions">
+                        <button
+                          type="button"
+                          className="settings-secondary-button"
+                          onClick={handleCancelProfileEdit}
+                          disabled={profileSaving}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-primary-button"
+                          onClick={() => void handleSaveProfile()}
+                          disabled={profileSaving}
+                          aria-busy={profileSaving}
+                        >
+                          {profileSaving ? <Icon.Refresh className="settings-spin" /> : <Icon.Check />}
+                          {profileSaving ? "保存中…" : "保存"}
+                        </button>
+                      </div>
                   </div>
-                  <div>
-                    <dt>会话状态</dt>
-                    <dd className={accountData ? "is-success" : undefined}>
-                      {accountLoading ? "确认中" : accountData ? "已连接" : "待重试"}
-                    </dd>
-                    <small>身份凭据由当前设备保存</small>
-                  </div>
-                </dl>
+                  </>
+                  )}
+
+                  {profileError && (
+                    <div className="settings-notice is-danger" role="alert">
+                      <Icon.Warn aria-hidden="true" />
+                      <span>{profileError}</span>
+                    </div>
+                  )}
+                  {profileSuccess && (
+                    <div className="settings-notice is-success" role="status">
+                      <Icon.Check aria-hidden="true" />
+                      <span>{profileSuccess}</span>
+                    </div>
+                  )}
+                </div>
+                )}
               </div>
             </section>
 
-            <section id="model" className="settings-panel">
+            {isOwner && (
+              <section
+                id="invites"
+                className="settings-panel"
+                role="tabpanel"
+                aria-labelledby="settings-tab-invites"
+                hidden={activeSection !== "invites"}
+              >
+                {activeSection === "invites" && <>
+                <SettingsPanelHeading
+                  title="邀请与成员管理"
+                  description="创建邀请链接、查看邀请状态、管理工作区成员。邀请链接只显示一次，请及时复制保存。"
+                  icon={Icon.User}
+                />
+                <InviteMemberSettings />
+                </>}
+              </section>
+            )}
+
+            <section
+              id="workspaces"
+              className="settings-panel"
+              role="tabpanel"
+              aria-labelledby="settings-tab-workspaces"
+              hidden={activeSection !== "workspaces"}
+            >
+              {activeSection === "workspaces" && <>
               <SettingsPanelHeading
-                eyebrow="PERSONAL AI · BYOK"
+                title="工作区管理"
+                description="管理你的个人工作区与协作工作区。可通过邀请码加入他人的协作空间，也可随时退出。"
+                icon={Icon.Layers}
+              />
+              <WorkspaceManagement currentUser={accountData} />
+              </>}
+            </section>
+
+            <section
+              id="model"
+              className="settings-panel"
+              role="tabpanel"
+              aria-labelledby="settings-tab-model"
+              hidden={activeSection !== "model"}
+            >
+              {activeSection === "model" && <>
+              <SettingsPanelHeading
                 title="模型与 API 配置"
                 description="为当前账户选择模型服务并安全保存自己的 API Key；完整密钥不会回显给浏览器。"
                 icon={Icon.Sparkle}
               />
               <AIModelSettings isOwner={isOwner} accountLoading={accountLoading} />
+              </>}
             </section>
 
-            <section id="export" className="settings-panel">
+            <section
+              id="export"
+              className="settings-panel"
+              role="tabpanel"
+              aria-labelledby="settings-tab-export"
+              hidden={activeSection !== "export"}
+            >
               <SettingsPanelHeading
-                eyebrow="PORTABILITY"
                 title="导出工作区副本"
                 description="把主要学习对象整理为 JSON 文件，便于备份、迁移或自行分析。"
                 icon={Icon.Download}
@@ -463,9 +710,14 @@ export default function SettingsPage() {
               )}
             </section>
 
-            <section id="import" className="settings-panel">
+            <section
+              id="import"
+              className="settings-panel"
+              role="tabpanel"
+              aria-labelledby="settings-tab-import"
+              hidden={activeSection !== "import"}
+            >
               <SettingsPanelHeading
-                eyebrow="MIGRATION"
                 title="导入 Markdown 文件"
                 description="选择或拖入 .md / .markdown 文件；每个文件创建一篇笔记，不再需要粘贴文本。"
                 icon={Icon.Inbox}
@@ -474,8 +726,8 @@ export default function SettingsPage() {
               <div className="settings-import-desk">
                 <div className="settings-import-toolbar">
                   <div>
-                    <span>FILE IMPORT DESK</span>
-                    <strong>Markdown 文件导入台</strong>
+                    <strong>待导入文件</strong>
+                    <span>可拖放或选择多个 Markdown 文件</span>
                   </div>
                   <div className="settings-import-stats" aria-live="polite">
                     <span><strong>{importFiles.summary.files}</strong> 个文件</span>
@@ -544,9 +796,14 @@ export default function SettingsPage() {
               </div>
             </section>
 
-            <section id="search" className="settings-panel">
+            <section
+              id="search"
+              className="settings-panel"
+              role="tabpanel"
+              aria-labelledby="settings-tab-search"
+              hidden={activeSection !== "search"}
+            >
               <SettingsPanelHeading
-                eyebrow="MAINTENANCE"
                 title="搜索索引维护"
                 description="检查搜索结果是否与真实学习对象一致，仅在出现缺失或旧内容时重建。"
                 icon={Icon.Search}
@@ -554,7 +811,6 @@ export default function SettingsPage() {
 
               <div className="settings-maintenance-grid">
                 <article className="settings-maintenance-card">
-                  <span className="settings-maintenance-number">01</span>
                   <span className="settings-maintenance-icon" aria-hidden="true"><Icon.Search /></span>
                   <h3>检测索引漂移</h3>
                   <p>对比搜索索引和业务数据，识别幽灵文档、缺失对象及过期内容。</p>
@@ -571,7 +827,6 @@ export default function SettingsPage() {
                 </article>
 
                 <article className="settings-maintenance-card is-caution">
-                  <span className="settings-maintenance-number">02</span>
                   <span className="settings-maintenance-icon" aria-hidden="true"><Icon.Refresh /></span>
                   <h3>重建搜索索引</h3>
                   <p>清理派生索引并从真实学习数据重新生成；不会删除笔记或学习卡。</p>

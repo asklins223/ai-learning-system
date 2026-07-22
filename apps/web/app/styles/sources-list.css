@@ -1431,6 +1431,18 @@
   margin-top: 18px;
 }
 
+/* 成员只读提示（空状态时替代创建按钮） */
+.sources-readonly-hint {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--color-evidence) 24%, var(--color-border));
+  border-radius: var(--radius-sm);
+  background: var(--color-evidence-soft);
+  color: var(--color-evidence-text);
+  font: 500 12px/1.55 var(--font-ui);
+  text-align: center;
+}
+
 .sources-pagination {
   display: flex;
   min-height: 62px;

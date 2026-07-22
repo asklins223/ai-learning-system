@@ -233,7 +233,7 @@ export default function CardsIndex() {
     <div className="cards-page">
       <PageHeader
         className="workspace-page-header"
-        kicker="CARD LIBRARY · 理解对象库"
+        kicker="理解卡片"
         title="学习卡"
         subtitle="集中查看每个理解对象的证据、验证与复习安排。"
         actions={headerActions}
@@ -345,7 +345,7 @@ export default function CardsIndex() {
               <span className="cards-state-icon" aria-hidden="true">
                 <Icon.Warn />
               </span>
-              <span className="cards-eyebrow">LIBRARY UNAVAILABLE</span>
+              <span className="cards-eyebrow">卡片库暂不可用</span>
               <h3>学习卡暂时无法打开</h3>
               <p>{error}</p>
               <div className="cards-state-actions">

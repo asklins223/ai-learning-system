@@ -1,6 +1,7 @@
 "use client";
 
 import "@/app/styles/review.css";
+import "@/app/styles/review-attempt-history.css";
 import "@/app/styles/workspace-headers.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -11,15 +12,103 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
-import { api, type ReviewWithCard } from "@/lib/api";
+import { ReviewAttemptHistory } from "@/components/study/ReviewAttemptHistory";
+import {
+  ApiError,
+  api,
+  type ReviewAttemptOutcome,
+  type ReviewAttemptSubmitResult,
+  type ReviewWithCard,
+} from "@/lib/api";
 import { relativeTime } from "@/lib/format";
+import { buildValidationPrompt } from "@/lib/validation-question";
+import {
+  formatRelativeTime,
+  formatScheduleChange,
+  getOutcomeMeta,
+  getReasonCodeLabel,
+  getUnderstandingEffectLabel,
+} from "@/lib/review-attempt-format";
 import { statusMap } from "@/lib/status-map";
+import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
+import { useFocusTrap } from "@/lib/use-focus-trap";
+import { useModalIsolation } from "@/lib/use-modal-isolation";
 
-type ReviewActionKind = "complete" | "dismiss";
+type ReviewActionKind = "submit" | "later";
+
+type AttemptPhase =
+  | "ready-to-submit"
+  | "preparing-question"
+  | "starting"
+  | "submitting"
+  | "ready-to-later"
+  | "latering";
+
+type ValidationQuestionUnavailableReason = "no_hard_evidence" | "no_key_point";
 
 interface ReviewActionState {
   id: string;
   kind: ReviewActionKind;
+  attemptId?: string;
+  validationQuestionId?: string;
+  validationQuestionUnavailable?: ValidationQuestionUnavailableReason;
+  startRequested?: boolean;
+  idempotencyKey: string;
+  phase: AttemptPhase;
+}
+
+interface ReviewSubmissionForm {
+  outcome: ReviewAttemptOutcome | null;
+  confidence: number;
+  answer: string;
+}
+
+const DEFAULT_SUBMISSION_FORM: ReviewSubmissionForm = {
+  outcome: null,
+  confidence: 50,
+  answer: "",
+};
+
+const OUTCOME_OPTIONS: { value: ReviewAttemptOutcome; label: string; hint: string }[] = [
+  { value: "correct", label: "掌握", hint: "能完整回忆关键点" },
+  { value: "partial", label: "部分掌握", hint: "回忆不完整或有偏差" },
+  { value: "incorrect", label: "未掌握", hint: "无法回忆或回忆错误" },
+  { value: "unable", label: "无法判断", hint: "问题不适用或无法回答" },
+];
+
+const REVIEW_ANSWER_MAX_LENGTH = 10_000;
+
+function buildValidationQuestion(item: ReviewWithCard) {
+  const source = item.keyPoint?.claim.trim() || item.card.title.trim();
+  const { prompt } = buildValidationPrompt(source, 0);
+  return prompt;
+}
+
+function isValidationQuestionUnavailable(
+  error: unknown,
+): error is ApiError & { code: ValidationQuestionUnavailableReason } {
+  return (
+    error instanceof ApiError &&
+    (error.code === "no_hard_evidence" || error.code === "no_key_point")
+  );
+}
+
+function getReviewActionError(error: unknown, fallback: string) {
+  if (error instanceof ApiError && error.message.trim()) return error.message;
+  return fallback;
+}
+
+function buildSubmissionFeedback(result: ReviewAttemptSubmitResult) {
+  const outcome = getOutcomeMeta(result.outcome)?.label ?? "本轮结果";
+  const reason = getReasonCodeLabel(result.scheduleReasonCode) ?? "复习计划已更新";
+  const scheduleChange = formatScheduleChange(
+    result.beforeIntervalDays,
+    result.afterIntervalDays,
+  );
+  const nextReview = formatRelativeTime(result.nextReviewAt) || "时间已更新";
+  const understandingEffect = getUnderstandingEffectLabel(result.understandingEffect);
+  const prefix = result.idempotent ? "已确认此前提交" : `已记录为「${outcome}」`;
+  return `${prefix}。${reason}；复习间隔：${scheduleChange}，下次复习${nextReview}。${understandingEffect ? `${understandingEffect}。` : ""}`;
 }
 
 const REVIEW_ID_PATTERN = /^[A-Za-z0-9_-]{1,160}$/;
@@ -102,7 +191,7 @@ function ReviewQueuePanel({
     <div className="review-queue-panel">
       <header className="review-queue-header">
         <div>
-          <span className="review-eyebrow">TODAY&apos;S QUEUE</span>
+          <span className="review-eyebrow">待复习</span>
           <h2 className="review-queue-title">到期复习</h2>
         </div>
         <span
@@ -214,7 +303,7 @@ function ReviewFactsPanel({
       aria-label="当前复习事实"
     >
       <header className="review-facts-header">
-        <span className="review-eyebrow">REVIEW FACTS</span>
+        <span className="review-eyebrow">复习依据</span>
         <h2>复习事实</h2>
       </header>
       <div className="review-facts-grid">
@@ -247,7 +336,7 @@ function ReviewFactsPanel({
         </div>
       </div>
       <div className="review-facts-guide">
-        <span className="review-eyebrow">REVIEW ROUTE</span>
+        <span className="review-eyebrow">本轮路径</span>
         <strong>建议复习顺序</strong>
         <ol>
           <li>
@@ -295,8 +384,9 @@ export default function ReviewPage() {
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [queueOpen, setQueueOpen] = useState(false);
-  const [isPhone, setIsPhone] = useState(false);
+  const [isCompactViewport, setIsCompactViewport] = useState(false);
   const [actionState, setActionState] = useState<ReviewActionState | null>(null);
+  const [submissionForm, setSubmissionForm] = useState<ReviewSubmissionForm>(DEFAULT_SUBMISSION_FORM);
   const [actionError, setActionError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -304,6 +394,10 @@ export default function ReviewPage() {
   const emptyHeadingRef = useRef<HTMLHeadingElement>(null);
   const shouldFocusNextRef = useRef(false);
   const loadRequestRef = useRef(0);
+  const submissionPanelRef = useRef<HTMLDivElement>(null);
+  const [revealedReviewIds, setRevealedReviewIds] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const closeQueue = useCallback(() => setQueueOpen(false), []);
 
@@ -375,8 +469,8 @@ export default function ReviewPage() {
   }, [loadReviews]);
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 639px)");
-    const update = () => setIsPhone(media.matches);
+    const media = window.matchMedia("(max-width: 759px)");
+    const update = () => setIsCompactViewport(media.matches);
     update();
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
@@ -407,7 +501,7 @@ export default function ReviewPage() {
 
   useEffect(() => {
     if (!feedback) return;
-    const timer = window.setTimeout(() => setFeedback(null), 4200);
+    const timer = window.setTimeout(() => setFeedback(null), 8000);
     return () => window.clearTimeout(timer);
   }, [feedback]);
 
@@ -436,6 +530,42 @@ export default function ReviewPage() {
   const reasonPresentation = current
     ? statusMap.reviewReason(current.reviewReason)
     : null;
+  const isSubmissionProcessing =
+    actionState?.kind === "submit" && actionState.phase !== "ready-to-submit";
+  const isSubmissionFormLocked =
+    isSubmissionProcessing ||
+    (actionState?.kind === "submit" && actionState.startRequested === true);
+  const submissionModalOpen = Boolean(
+    isCompactViewport &&
+    actionState?.kind === "submit" &&
+    actionState.id === current?.review.id,
+  );
+  const currentReferenceRevealed = current
+    ? revealedReviewIds.has(current.review.id)
+    : false;
+
+  useModalIsolation(submissionPanelRef, submissionModalOpen);
+  useFocusTrap(submissionPanelRef, submissionModalOpen);
+  useBodyScrollLock(submissionModalOpen);
+
+  useEffect(() => {
+    if (!submissionModalOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (
+        actionState?.kind === "submit" &&
+        (actionState.startRequested || actionState.attemptId)
+      ) {
+        setActionError("本次复习记录已开始，请重试提交完成记录，避免留下未完成项。");
+        return;
+      }
+      setActionState(null);
+      setActionError(null);
+      setSubmissionForm(DEFAULT_SUBMISSION_FORM);
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [actionState, submissionModalOpen]);
 
   const handleSearchChange = (value: string) => {
     setSearchQuery(value);
@@ -452,75 +582,278 @@ export default function ReviewPage() {
     setQueueOpen(false);
   };
 
-  async function handleReviewAction(kind: ReviewActionKind) {
-    if (!current || isBusy) return;
-
-    const target = current;
-    const sourceReviews = reviews ?? [];
+  function chooseNextReviewId(items: ReviewWithCard[], target: ReviewWithCard) {
+    const visibleItems = filterReviewItems(items, searchQuery);
     const originalIndex = Math.max(
       0,
-      filteredReviews.findIndex((item) => item.review.id === target.review.id),
+      visibleItems.findIndex((item) => item.review.id === target.review.id),
     );
-    const chooseNextId = (items: ReviewWithCard[]) => {
-      const visibleItems = filterReviewItems(items, searchQuery);
-      return visibleItems[Math.min(originalIndex, visibleItems.length - 1)]?.review.id ?? null;
-    };
+    return visibleItems[Math.min(originalIndex, visibleItems.length - 1)]?.review.id ?? null;
+  }
 
-    setActionState({ id: target.review.id, kind });
+  async function removeFromQueueAndBackfill(target: ReviewWithCard) {
+    const sourceReviews = reviews ?? [];
+    const remaining = sourceReviews.filter(
+      (item) => item.review.id !== target.review.id,
+    );
+    shouldFocusNextRef.current = true;
+    setReviews(remaining);
+    setReviewTotal((value) => Math.max(0, value - 1));
+    setSelectedReviewId(chooseNextReviewId(remaining, target));
+
+    const backfillOffset = Math.max(0, (reviewNextOffset ?? reviewTotal) - 1);
+    setReviewNextOffset(backfillOffset);
+    try {
+      const response = await api.listReviews({
+        status: "pending",
+        limit: 50,
+        offset: backfillOffset,
+      });
+      const seen = new Set(remaining.map((item) => item.review.id));
+      const merged = remaining.concat(
+        response.items.filter((item) => !seen.has(item.review.id)),
+      );
+      setReviews(merged);
+      setReviewTotal(response.total);
+      setReviewNextOffset(response.nextOffset);
+      setSelectedReviewId(chooseNextReviewId(merged, target));
+    } catch {
+      setActionError("操作已完成，但最新队列暂时未同步；稍后刷新页面即可。");
+    }
+  }
+
+  function handleStartSubmit() {
+    if (!current || isBusy) return;
+    const target = current;
+    const idempotencyKey = `ui-${target.review.id}-${crypto.randomUUID()}`;
     setActionError(null);
     setFeedback(null);
+    setSubmissionForm(DEFAULT_SUBMISSION_FORM);
+    setActionState({
+      id: target.review.id,
+      kind: "submit",
+      idempotencyKey,
+      phase: "ready-to-submit",
+      startRequested: false,
+    });
+  }
+
+  async function handleConfirmSubmit() {
+    if (!current || !actionState || actionState.kind !== "submit") return;
+    const target = current;
+    const form = submissionForm;
+    const idempotencyKey = actionState.idempotencyKey;
+
+    if (!form.outcome) {
+      setActionError("请先根据刚才的回想选择掌握程度。");
+      return;
+    }
+    const outcome = form.outcome;
+
+    // Schema requires answer for recall/free_text unless outcome is "unable".
+    const needsAnswer = outcome !== "unable";
+    if (needsAnswer && form.answer.trim().length === 0) {
+      setActionError("请输入你的回忆内容，或选择「无法判断」。");
+      return;
+    }
+    if (form.answer.includes("\0")) {
+      setActionError("回答中包含无法保存的控制字符，请删除后重试。");
+      return;
+    }
+
+    setActionError(null);
+
+    const needsValidationQuestion =
+      outcome === "correct" || outcome === "partial";
+    let validationQuestionId = actionState.validationQuestionId;
+    let validationQuestionUnavailable = actionState.validationQuestionUnavailable;
+
+    if (
+      needsValidationQuestion &&
+      !validationQuestionId &&
+      !validationQuestionUnavailable
+    ) {
+      setActionState((prev) =>
+        prev && prev.id === target.review.id
+          ? { ...prev, phase: "preparing-question" }
+          : prev,
+      );
+
+      try {
+        const questionResult = await api.createValidationQuestion(target.card.id, {
+          keyPointId: target.keyPoint?.id,
+          questionType: "explain",
+          question: buildValidationQuestion(target),
+        });
+        validationQuestionId = questionResult.questionId;
+        setActionState((prev) =>
+          prev && prev.id === target.review.id
+            ? { ...prev, validationQuestionId }
+            : prev,
+        );
+      } catch (error) {
+        if (!isValidationQuestionUnavailable(error)) {
+          setActionError(
+            `${getReviewActionError(error, "验证问题准备失败，请稍后重试。")} 答案已保留。`,
+          );
+          setActionState((prev) =>
+            prev && prev.id === target.review.id
+              ? { ...prev, phase: "ready-to-submit" }
+              : prev,
+          );
+          return;
+        }
+
+        validationQuestionUnavailable = error.code;
+        setActionState((prev) =>
+          prev && prev.id === target.review.id
+            ? { ...prev, validationQuestionUnavailable }
+            : prev,
+        );
+      }
+    }
+
+    let attemptId = actionState.attemptId;
+    if (!attemptId) {
+      setActionState((prev) =>
+        prev && prev.id === target.review.id
+          ? { ...prev, phase: "starting", startRequested: true }
+          : prev,
+      );
+
+      try {
+        const startResult = await api.startReviewAttempt({
+          reviewScheduleId: target.review.id,
+          idempotencyKey,
+        });
+        attemptId = startResult.attemptId;
+        setActionState((prev) =>
+          prev && prev.id === target.review.id
+            ? {
+                ...prev,
+                attemptId,
+                validationQuestionId,
+                validationQuestionUnavailable,
+              }
+            : prev,
+        );
+      } catch (error) {
+        setActionError(
+          `${getReviewActionError(error, "开始复习失败，请稍后重试。")} 本次答案和提交标识已保留，可安全重试。`,
+        );
+        setActionState((prev) =>
+          prev && prev.id === target.review.id
+            ? { ...prev, phase: "ready-to-submit", startRequested: true }
+            : prev,
+        );
+        return;
+      }
+    }
+
+    setActionState((prev) =>
+      prev && prev.id === target.review.id
+        ? {
+            ...prev,
+            attemptId,
+            validationQuestionId,
+            validationQuestionUnavailable,
+            phase: "submitting",
+            startRequested: true,
+          }
+        : prev,
+    );
 
     try {
-      if (kind === "complete") {
-        await api.completeReview(target.review.id);
-      } else {
-        await api.dismissReview(target.review.id);
-      }
+      const result = await api.submitReviewAttempt({
+        attemptId,
+        reviewScheduleId: target.review.id,
+        validationQuestionId: needsValidationQuestion
+          ? validationQuestionId
+          : undefined,
+        answerType: "recall",
+        answer: needsAnswer ? form.answer.trim() : undefined,
+        outcome,
+        confidence: form.confidence,
+        idempotencyKey,
+      });
 
-      const remaining = sourceReviews.filter(
-        (item) => item.review.id !== target.review.id,
-      );
-      shouldFocusNextRef.current = true;
-      setReviews(remaining);
-      setReviewTotal((value) => Math.max(0, value - 1));
-      setSelectedReviewId(chooseNextId(remaining));
-      setFeedback(
-        kind === "complete"
-          ? "已完成，复习队列已更新。"
-          : "已移到明天，复习队列已更新。",
-      );
-
-      // The completed/dismissed row was inside the already consumed prefix, so
-      // the server-side offset shifts left by exactly one. Use the API cursor,
-      // not hydrated item count, because stale associations can be filtered.
-      const backfillOffset = Math.max(0, (reviewNextOffset ?? reviewTotal) - 1);
-      setReviewNextOffset(backfillOffset);
-      try {
-        const response = await api.listReviews({
-          status: "pending",
-          limit: 50,
-          offset: backfillOffset,
-        });
-        const seen = new Set(remaining.map((item) => item.review.id));
-        const merged = remaining.concat(
-          response.items.filter((item) => !seen.has(item.review.id)),
-        );
-        setReviews(merged);
-        setReviewTotal(response.total);
-        setReviewNextOffset(response.nextOffset);
-        setSelectedReviewId(chooseNextId(merged));
-      } catch {
-        setActionError("操作已完成，但最新队列暂时未同步；稍后刷新页面即可。");
-      }
-    } catch {
-      setActionError(
-        kind === "complete"
-          ? "完成复习失败，请稍后重试。"
-          : "移到明天失败，请稍后重试。",
-      );
-    } finally {
+      setFeedback(buildSubmissionFeedback(result));
+      await removeFromQueueAndBackfill(target);
       setActionState(null);
+    } catch (error) {
+      setActionError(
+        `${getReviewActionError(error, "提交复习结果失败，请稍后重试。")} 本次答案已保留，再次提交不会重复记录。`,
+      );
+      setActionState((prev) =>
+        prev && prev.id === target.review.id
+          ? {
+              ...prev,
+              attemptId,
+              validationQuestionId,
+              validationQuestionUnavailable,
+              phase: "ready-to-submit",
+              startRequested: true,
+            }
+          : prev,
+      );
     }
+  }
+
+  async function handleLater() {
+    if (!current) return;
+    const target = current;
+    const retryState =
+      actionState?.kind === "later" &&
+      actionState.id === target.review.id &&
+      actionState.phase === "ready-to-later"
+        ? actionState
+        : null;
+    if (actionState && !retryState) return;
+
+    const idempotencyKey =
+      retryState?.idempotencyKey ??
+      `ui-later-${target.review.id}-${crypto.randomUUID()}`;
+    setActionError(null);
+    setFeedback(null);
+    setActionState({
+      id: target.review.id,
+      kind: "later",
+      idempotencyKey,
+      phase: "latering",
+    });
+
+    try {
+      await api.laterReviewAttempt({
+        reviewScheduleId: target.review.id,
+        reason: "later",
+        idempotencyKey,
+      });
+
+      setFeedback("已移到稍后复习，队列已更新。");
+      await removeFromQueueAndBackfill(target);
+      setActionState(null);
+    } catch {
+      setActionError("移到稍后的结果尚未确认；提交标识已保留，请安全重试。");
+      setActionState({
+        id: target.review.id,
+        kind: "later",
+        idempotencyKey,
+        phase: "ready-to-later",
+      });
+    }
+  }
+
+  function handleCancelAction() {
+    if (
+      actionState?.kind === "submit" &&
+      (actionState.startRequested || actionState.attemptId)
+    ) {
+      setActionError("本次复习记录已开始，请重试提交完成记录，避免留下未完成项。");
+      return;
+    }
+    setActionState(null);
+    setActionError(null);
+    setSubmissionForm(DEFAULT_SUBMISSION_FORM);
   }
 
   const headerActions = (
@@ -553,7 +886,7 @@ export default function ReviewPage() {
     <div className="review-page">
       <PageHeader
         className="workspace-page-header"
-        kicker="REVIEW DESK · 今日队列"
+        kicker="间隔复习"
         title="今日复习"
         subtitle="回看关键点，确认后进入下一轮。"
         actions={headerActions}
@@ -593,7 +926,7 @@ export default function ReviewPage() {
             <span className="review-state-icon" aria-hidden="true">
               <Icon.AlertCircle />
             </span>
-            <span className="review-eyebrow">QUEUE UNAVAILABLE</span>
+            <span className="review-eyebrow">队列暂不可用</span>
             <h2>复习队列暂时无法打开</h2>
             <p>{loadError}</p>
             <div className="review-state-actions">
@@ -621,7 +954,7 @@ export default function ReviewPage() {
             <span className="review-state-icon" aria-hidden="true">
               <Icon.Check />
             </span>
-            <span className="review-eyebrow">QUEUE CLEAR</span>
+            <span className="review-eyebrow">今日已完成</span>
             <h2 ref={emptyHeadingRef} tabIndex={-1}>现在没有到期复习</h2>
             <p>当前队列已经清空。完成新的学习卡验证后，系统会继续安排下一次复习。</p>
             <ol className="review-state-flow" aria-label="后续复习安排">
@@ -690,7 +1023,7 @@ export default function ReviewPage() {
                     </div>
 
                     <header className="review-card-heading">
-                      <span>当前学习卡</span>
+                      <span>本轮复习</span>
                       <h2 ref={reviewHeadingRef} tabIndex={-1}>{current.card.title}</h2>
                       <p className="review-card-reason">
                         <span aria-hidden="true" />
@@ -698,7 +1031,28 @@ export default function ReviewPage() {
                       </p>
                     </header>
 
-                    <div className="review-card-content">
+                    <details
+                      className="review-reference"
+                      onToggle={(event) => {
+                        if (!event.currentTarget.open) return;
+                        setRevealedReviewIds((previous) => {
+                          if (previous.has(current.review.id)) return previous;
+                          const next = new Set(previous);
+                          next.add(current.review.id);
+                          return next;
+                        });
+                      }}
+                    >
+                      <summary className="review-reference-trigger">
+                        <span className="review-reference-icon" aria-hidden="true"><Icon.Eye /></span>
+                        <span>
+                          <strong>需要提示时，再查看关键点与原文</strong>
+                          <small>先凭记忆完成回想，能更真实地判断理解程度。</small>
+                        </span>
+                        <Icon.Chevron className="review-reference-chevron" aria-hidden="true" />
+                      </summary>
+
+                      <div className="review-card-content">
                       <section className="review-key-point">
                         <div className="review-section-heading">
                           <span aria-hidden="true">01</span>
@@ -729,7 +1083,8 @@ export default function ReviewPage() {
                           <p className="review-card-block-text">{current.blockContent}</p>
                         </section>
                       )}
-                    </div>
+                      </div>
+                    </details>
 
                     <div className="review-facts-inline">
                       <ReviewFactsPanel item={current} compact />
@@ -755,43 +1110,221 @@ export default function ReviewPage() {
                         )}
                         className="review-open-card"
                       >
-                        打开学习卡
+                        查看完整学习卡
                         <Icon.Arrow aria-hidden="true" />
                       </Link>
-                      <div className="review-action-dock">
-                        <button
-                          type="button"
-                          className="review-action-primary"
-                          disabled={isBusy}
-                          aria-busy={
-                            actionState?.id === current.review.id &&
-                            actionState.kind === "complete"
-                          }
-                          onClick={() => void handleReviewAction("complete")}
-                        >
-                          <Icon.Check aria-hidden="true" />
-                          {actionState?.id === current.review.id &&
-                          actionState.kind === "complete"
-                            ? "正在完成…"
-                            : "完成本轮"}
-                        </button>
-                        <button
-                          type="button"
-                          className="review-action-secondary"
-                          disabled={isBusy}
-                          aria-busy={
-                            actionState?.id === current.review.id &&
-                            actionState.kind === "dismiss"
-                          }
-                          onClick={() => void handleReviewAction("dismiss")}
-                        >
-                          {actionState?.id === current.review.id &&
-                          actionState.kind === "dismiss"
-                            ? "正在移到明天…"
-                            : "明天再看"}
-                        </button>
+                      <div
+                        className={`review-action-dock ${
+                          actionState?.id === current.review.id &&
+                          actionState.kind === "submit"
+                            ? "review-action-dock--submission"
+                            : ""
+                        }`}
+                      >
+                        {actionState?.id === current.review.id &&
+                        actionState.kind === "submit" ? (
+                          <div
+                            ref={submissionPanelRef}
+                            className="review-submission-panel"
+                            aria-busy={isSubmissionProcessing}
+                            role={isCompactViewport ? "dialog" : "region"}
+                            aria-modal={isCompactViewport ? true : undefined}
+                            aria-labelledby="review-submission-title"
+                          >
+                            <header className="review-submission-header">
+                              <div>
+                                <span>回想与自评</span>
+                                <h3 id="review-submission-title">离开原文，你现在能说清楚多少？</h3>
+                                <p>先留下真实回想，再选择最接近的掌握状态。</p>
+                              </div>
+                              <span className="review-submission-state">
+                                {actionState.startRequested ? "已保留" : "尚未提交"}
+                              </span>
+                            </header>
+                            {currentReferenceRevealed && (
+                              <p className="review-reference-notice" role="status">
+                                <Icon.Eye aria-hidden="true" />
+                                你已查看本轮参考内容，请按查看后的真实感受选择结果。
+                              </p>
+                            )}
+                            {submissionForm.outcome !== "unable" && (
+                              <div className="review-submission-response">
+                                <div
+                                  id="review-submission-question"
+                                  className="review-submission-question"
+                                >
+                                  <small>请先独立回答</small>
+                                  <strong>{buildValidationQuestion(current)}</strong>
+                                </div>
+                                <label className="review-submission-answer">
+                                  <span>
+                                    {submissionForm.outcome === "incorrect"
+                                      ? "卡住或记错的地方"
+                                      : "我的回想"}
+                                  </span>
+                                  <textarea
+                                    value={submissionForm.answer}
+                                    onChange={(e) =>
+                                      setSubmissionForm((f) => ({ ...f, answer: e.target.value }))
+                                    }
+                                    placeholder={
+                                      submissionForm.outcome === "incorrect"
+                                        ? "写下卡住或记错的部分，方便下一轮针对性复习"
+                                        : "不看原文，用自己的话写下答案"
+                                    }
+                                    rows={4}
+                                    maxLength={REVIEW_ANSWER_MAX_LENGTH}
+                                    autoFocus
+                                    disabled={isSubmissionFormLocked}
+                                    aria-describedby="review-submission-question"
+                                  />
+                                </label>
+                              </div>
+                            )}
+                            <div
+                              className="review-submission-outcomes"
+                              role="group"
+                              aria-label="本轮掌握程度"
+                            >
+                              {OUTCOME_OPTIONS.map((opt, index) => (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  className={`review-outcome-chip ${submissionForm.outcome === opt.value ? "active" : ""}`}
+                                  aria-pressed={submissionForm.outcome === opt.value}
+                                  onClick={() =>
+                                    setSubmissionForm((f) => ({ ...f, outcome: opt.value }))
+                                  }
+                                  disabled={isSubmissionFormLocked}
+                                >
+                                  <span className="review-outcome-index" aria-hidden="true">
+                                    {index + 1}
+                                  </span>
+                                  <strong>{opt.label}</strong>
+                                  <small>{opt.hint}</small>
+                                </button>
+                              ))}
+                            </div>
+                            {actionState.validationQuestionUnavailable && (
+                              <p className="review-submission-notice" role="status">
+                                {actionState.validationQuestionUnavailable ===
+                                "no_hard_evidence"
+                                  ? "当前关键点缺少可验证的硬证据。本轮回答仍会记录，但不会据此提升理解状态或延长间隔。"
+                                  : "当前学习卡没有可验证的关键点。本轮回答仍会记录，但不会据此提升理解状态或延长间隔。"}
+                              </p>
+                            )}
+                            {submissionForm.outcome && (
+                            <label className="review-submission-confidence">
+                              <span className="review-submission-confidence-head">
+                                <span>这次判断有多确定？</span>
+                                <output>{submissionForm.confidence}%</output>
+                              </span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                step={10}
+                                value={submissionForm.confidence}
+                                onChange={(e) =>
+                                  setSubmissionForm((f) => ({
+                                    ...f,
+                                    confidence: Number(e.target.value),
+                                  }))
+                                }
+                                disabled={isSubmissionFormLocked}
+                              />
+                              <span className="review-submission-confidence-scale" aria-hidden="true">
+                                <span>仍有疑问</span>
+                                <span>非常确定</span>
+                              </span>
+                            </label>
+                            )}
+                            <div className="review-submission-actions">
+                              {actionState.startRequested || actionState.attemptId ? (
+                                <span className="review-submission-retry-note">
+                                  答案已保留，可安全重试
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="review-action-secondary"
+                                  onClick={handleCancelAction}
+                                  disabled={isSubmissionProcessing}
+                                >
+                                  取消
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="review-action-primary"
+                                onClick={() => void handleConfirmSubmit()}
+                                disabled={
+                                  isSubmissionProcessing ||
+                                  !submissionForm.outcome ||
+                                  (submissionForm.outcome !== "unable" && !submissionForm.answer.trim())
+                                }
+                                aria-busy={isSubmissionProcessing}
+                              >
+                                <Icon.Check aria-hidden="true" />
+                                {actionState.phase === "preparing-question"
+                                  ? "正在准备验证…"
+                                  : actionState.phase === "starting"
+                                    ? "正在开始…"
+                                    : actionState.phase === "submitting"
+                                      ? "正在提交…"
+                                      : actionState.startRequested
+                                        ? "重试提交"
+                                        : "提交结果"}
+                              </button>
+                            </div>
+                          </div>
+                        ) : actionState?.id === current.review.id ? (
+                          <button
+                            type="button"
+                            className="review-action-primary"
+                            disabled={actionState.phase !== "ready-to-later"}
+                            aria-busy={actionState.phase !== "ready-to-later"}
+                            onClick={() => void handleLater()}
+                          >
+                            <Icon.Check aria-hidden="true" />
+                            {actionState.phase === "starting"
+                              ? "正在开始…"
+                              : actionState.phase === "submitting"
+                                ? "正在提交…"
+                                : actionState.phase === "latering"
+                                  ? "正在移到稍后…"
+                                  : actionState.phase === "ready-to-later"
+                                    ? "重试移到稍后"
+                                    : "处理中…"}
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="review-action-primary"
+                              disabled={isBusy}
+                              onClick={handleStartSubmit}
+                            >
+                              <Icon.Check aria-hidden="true" />
+                              完成本轮
+                            </button>
+                            <button
+                              type="button"
+                              className="review-action-secondary"
+                              disabled={isBusy}
+                              onClick={() => void handleLater()}
+                            >
+                              稍后再看
+                            </button>
+                          </>
+                        )}
                       </div>
                     </footer>
+
+                    <ReviewAttemptHistory
+                      reviewScheduleId={current.review.id}
+                      cardTitle={current.card.title}
+                    />
                   </article>
                 </div>
               </section>
@@ -800,7 +1333,7 @@ export default function ReviewPage() {
                 <span className="review-filter-empty-icon" aria-hidden="true">
                   <Icon.Search />
                 </span>
-                <span className="review-eyebrow">NO MATCHES</span>
+                <span className="review-eyebrow">没有匹配结果</span>
                 <h2>没有匹配的复习</h2>
                 <p>保留队列不变，清空关键词即可继续。</p>
                 <button
@@ -825,7 +1358,7 @@ export default function ReviewPage() {
             open={queueOpen}
             onClose={closeQueue}
             title={`复习队列 · ${filteredReviews.length}/${reviewTotal}`}
-            side={isPhone ? "bottom" : "right"}
+            side={isCompactViewport ? "bottom" : "right"}
             width="min(380px, 88vw)"
             maxHeight="72dvh"
           >

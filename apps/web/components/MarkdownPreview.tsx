@@ -21,7 +21,7 @@ interface Props {
 }
 
 interface Token {
-  kind: "codeblock" | "h1" | "h2" | "h3" | "h4" | "p" | "quote" | "ul" | "ol" | "hr";
+  kind: "codeblock" | "h1" | "h2" | "h3" | "h4" | "p" | "quote" | "ul" | "ol" | "hr" | "image";
   raw?: string;
   lang?: string;
   items?: string[];
@@ -55,6 +55,17 @@ function inline(s: string): string {
       out = out.replace(/!!([^!]+)!!/g, '<span class="md-fluo">$1</span>');
       out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_, t: string, u: string) =>
         `<a href="${u}" target="_blank" rel="noopener" class="md-link">${t}</a>`,
+      );
+      // 行内图片 ![alt](url) — 仅允许站内路径或 HTTPS URL
+      out = out.replace(
+        /!\[([^\]]*)\]\(([^)]+)\)/g,
+        (_, alt: string, url: string) => {
+          if (!url.startsWith("/api/uploads/") && !url.startsWith("https://")) return _;
+          // 二次属性级转义：确保属性值内不会出现裸 " 或 <
+          const safeUrl = url.replace(/"/g, "&quot;").replace(/</g, "&lt;");
+          const safeAlt = alt.replace(/"/g, "&quot;").replace(/</g, "&lt;");
+          return `<img src="${safeUrl}" alt="${safeAlt}" class="md-image md-image--inline" loading="lazy" />`;
+        },
       );
       return out;
     })
@@ -110,6 +121,14 @@ function tokenize(src: string): Token[] {
       continue;
     }
 
+    // 独立图片行 ![alt](url)
+    const imageMatch = /^!\[([^\]]*)\]\(([^)]+)\)\s*$/.exec(line);
+    if (imageMatch) {
+      tokens.push({ kind: "image", raw: line });
+      i++;
+      continue;
+    }
+
     // 无序列表
     if (/^[-*+]\s+\S/.test(line)) {
       const items: string[] = [];
@@ -139,7 +158,7 @@ function tokenize(src: string): Token[] {
     }
     const buf: string[] = [line];
     i++;
-    while (i < lines.length && lines[i].trim() !== "" && !/^(#{1,4}\s|>\s?|[-*+]\s|\d+\.\s|```)/.test(lines[i])) {
+    while (i < lines.length && lines[i].trim() !== "" && !/^(#{1,4}\s|>\s?|[-*+]\s|\d+\.\s|```|!\[)/.test(lines[i])) {
       buf.push(lines[i]);
       i++;
     }
@@ -196,6 +215,13 @@ export function MarkdownPreview({ source, demoteHeadings = false }: Props) {
             );
           case "hr":
             return <hr key={idx} className="md-hr" />;
+          case "image": {
+            const m = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec((t.raw ?? "").trim());
+            if (m) {
+              return <img key={idx} src={m[2]} alt={m[1]} className="md-image" loading="lazy" />;
+            }
+            return <p key={idx} dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+          }
           case "codeblock":
             return (
               <pre key={idx} className="md-pre">
