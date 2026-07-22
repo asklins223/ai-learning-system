@@ -274,6 +274,13 @@
       "when": 1786251800000,
       "tag": "0038_sec01_rls_enforce_policy_fix",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1786338200000,
+      "tag": "0039_sec01_policy_catalog_repair",
+      "breakpoints": true
     }
   ]
 }

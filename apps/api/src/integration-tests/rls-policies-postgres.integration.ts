@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import postgres, { type Sql, type TransactionSql } from "postgres";
+
+const POLICY_CATALOG_REPAIR_STATEMENTS = readFileSync(
+  new URL("../db/migrations/0039_sec01_policy_catalog_repair.sql", import.meta.url),
+  "utf8",
+)
+  .split("--> statement-breakpoint")
+  .map((statement) => statement.trim())
+  .filter(Boolean);
 
 const POLICY_TABLES = [
   "workspaces",
@@ -185,6 +194,14 @@ async function assertRlsCheckDenied(operation: () => Promise<unknown>): Promise<
   });
 }
 
+async function rerunPolicyCatalogRepair(sql: Sql): Promise<void> {
+  await sql.begin(async (transaction) => {
+    for (const statement of POLICY_CATALOG_REPAIR_STATEMENTS) {
+      await transaction.unsafe(statement);
+    }
+  });
+}
+
 test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gate", async () => {
   const migrator = postgres(requireDatabaseUrl("RLS_TEST_MIGRATOR_DATABASE_URL"), { max: 1 });
   const api = postgres(requireDatabaseUrl("RLS_TEST_API_DATABASE_URL"), { max: 1 });
@@ -214,7 +231,9 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
   const eventBUserB = randomUUID();
   const jobA = randomUUID();
   const jobB = randomUUID();
+  const sentinelTable = `sec01_policy_scope_${randomUUID().replaceAll("-", "")}`;
   const tablesEnabledByTest: string[] = [];
+  let sentinelTableCreated = false;
   let primaryFailure: unknown;
 
   try {
@@ -237,6 +256,53 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       3,
       "migrator/API/Worker URLs must use three independent PostgreSQL backends",
     );
+
+    // Replaying the forward repair must not discover or rewrite policies
+    // outside its explicit 24-table manifest. These two sentinels catch both
+    // broad *_runtime_access drops and broad RESTRICTIVE -> PERMISSIVE rewrites.
+    await migrator.unsafe(`CREATE TABLE public.${sentinelTable} (id bigint PRIMARY KEY)`);
+    sentinelTableCreated = true;
+    await migrator.unsafe(
+      `CREATE POLICY external_runtime_access ON public.${sentinelTable} `
+      + "AS RESTRICTIVE FOR SELECT TO ailearn_api USING (true)",
+    );
+    await migrator.unsafe(
+      `CREATE POLICY external_restrictive_guard ON public.${sentinelTable} `
+      + "AS RESTRICTIVE FOR SELECT TO ailearn_api USING (true)",
+    );
+
+    await rerunPolicyCatalogRepair(migrator);
+
+    const sentinelPolicies = await migrator<{
+      policy_name: string;
+      permissive: string;
+      command: string;
+      roles: string[];
+    }[]>`
+      SELECT
+        policyname AS policy_name,
+        permissive,
+        cmd AS command,
+        roles
+      FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = ${sentinelTable}
+      ORDER BY policyname
+    `;
+    assert.deepEqual([...sentinelPolicies], [
+      {
+        policy_name: "external_restrictive_guard",
+        permissive: "RESTRICTIVE",
+        command: "SELECT",
+        roles: ["ailearn_api"],
+      },
+      {
+        policy_name: "external_runtime_access",
+        permissive: "RESTRICTIVE",
+        command: "SELECT",
+        roles: ["ailearn_api"],
+      },
+    ]);
 
     const policies = await migrator<{
       table_name: string;
@@ -907,6 +973,14 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       }
       try {
         await migrator.unsafe(`ALTER TABLE public.${tableName} DISABLE ROW LEVEL SECURITY`);
+      } catch (error) {
+        cleanupFailure ??= error;
+      }
+    }
+
+    if (sentinelTableCreated) {
+      try {
+        await migrator.unsafe(`DROP TABLE IF EXISTS public.${sentinelTable}`);
       } catch (error) {
         cleanupFailure ??= error;
       }
