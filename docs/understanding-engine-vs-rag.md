@@ -200,6 +200,6 @@ RAG 的"可追溯"思想 ∈ 理解引擎的信任机制 ⊂ 理解引擎的整�
 ## 附录 B：相关文档索引
 
 - [项目技术介绍](project-overview.md) — 完整架构和核心技术详解
-- [产品愿景](../ai-learning-system-product-plan.md) — 产品定位和核心理念
-- [ADR-0005 AI 质量门禁](adr/0005-ai-quality-gates.md) — 质量保障体系设计决策
-- [ADR-0006 遥测、隐私与 SLO](adr/0006-telemetry-privacy-and-slo.md) — 隐私治理设计决策
+- [项目 README](../README.md) — 产品定位和当前入口
+- [项目技术介绍](project-overview.md) — 当前架构、质量与隐私边界
+- [当前运维入口](operations.md) — 发布门禁、告警、备份与回滚入口

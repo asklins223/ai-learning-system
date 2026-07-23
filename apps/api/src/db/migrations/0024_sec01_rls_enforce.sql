@@ -15,7 +15,7 @@
 -- - Worker 对 public.jobs 的直接 UPDATE 权限被收回
 -- - Worker 仍通过 ailearn_renew_job_lease / ailearn_finish_job / ailearn_fail_job 操作 jobs
 --
--- 回滚：见 docs/runbooks/sec01-enforce.md §回滚
+-- 失败处理：停止发布并使用前向修复迁移恢复到已知安全状态，见 docs/operations.md。
 
 -- ─── 1. 启用 RLS（ENABLE + FORCE）─────────────────────────────────
 

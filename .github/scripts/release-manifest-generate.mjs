@@ -621,9 +621,8 @@ if (rcMode) {
       evidence: [],
     },
     // Approvals: filled progressively during gray release.
-    // See docs/runbooks/promotion-evidence.md for the 48h/7d/14d gate template.
-    // See docs/runbooks/sec01-independent-review-request.md for the security/data
-    // review request. Both approvals must be "approved" before the contract
+    // See docs/operations.md#promotion-and-approvals for the active approval
+    // requirements. Both approvals must be "approved" before the contract
     // verifier accepts the manifest as a release-ready RC.
     approvals: {
       owner: {
