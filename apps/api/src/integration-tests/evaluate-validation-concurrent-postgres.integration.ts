@@ -69,14 +69,14 @@ async function seedWorkspaceAndCard(
   `;
   await tx`
     INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-    VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify({ blocks: [] })}, ${`hash-${noteVersionId.slice(0, 8)}`}, ${userId})
+    VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [] })}, ${`hash-${noteVersionId.slice(0, 8)}`}, ${userId})
   `;
   await tx`
     UPDATE notes SET current_version_id = ${noteVersionId} WHERE id = ${noteId}
   `;
   await tx`
     INSERT INTO learning_cards (id, workspace_id, note_version_id, status, schema_json)
-    VALUES (${cardId}, ${workspaceId}, ${noteVersionId}, 'active', ${JSON.stringify({ title: "Concurrent Test Card", summary: "Test" })})
+    VALUES (${cardId}, ${workspaceId}, ${noteVersionId}, 'active', ${tx.json({ title: "Concurrent Test Card", summary: "Test" })})
   `;
   await tx`
     INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text)
@@ -112,7 +112,7 @@ async function createJob(
 ): Promise<void> {
   await tx`
     INSERT INTO jobs (id, type, workspace_id, payload, status)
-    VALUES (${jobId}, 'evaluate_validation', ${workspaceId}, ${JSON.stringify({})}, 'succeeded')
+    VALUES (${jobId}, 'evaluate_validation', ${workspaceId}, ${tx.json({})}, 'succeeded')
     ON CONFLICT (id) DO NOTHING
   `;
 }
@@ -275,9 +275,17 @@ test("真正并发：两个事务同时执行相同输入，最终只有一条�
       await cleanupWorkspace(tx, workspaceId, userId);
     });
   } finally {
-    await setupConn.end();
-    await connA.end();
-    await connB.end();
+    const closeResults = await Promise.allSettled([
+      setupConn.end({ timeout: 5 }),
+      connA.end({ timeout: 5 }),
+      connB.end({ timeout: 5 }),
+    ]);
+    const failures = closeResults
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "failed to close concurrent validation PostgreSQL clients");
+    }
   }
 });
 

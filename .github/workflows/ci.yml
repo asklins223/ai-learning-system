@@ -98,6 +98,12 @@ jobs:
       - name: Verify API and Worker database schemas are synchronized
         run: node .github/scripts/verify-schema-mirror.mjs
 
+      - name: Verify CI workflow and PostgreSQL lifecycle contracts
+        run: |
+          node --test \
+            .github/scripts/ci-workflow-contract.test.mjs \
+            .github/scripts/postgres-integration-lifecycle.test.mjs
+
       - name: TypeCheck shared contracts
         working-directory: packages/shared
         run: npm run typecheck
@@ -291,6 +297,10 @@ jobs:
       # imports such as zod resolve from packages/shared/node_modules.
       - name: Install shared
         working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+
+      - name: Install database package
+        working-directory: packages/db
         run: npm ci --no-audit --no-fund
 
       - name: Install ai-quality

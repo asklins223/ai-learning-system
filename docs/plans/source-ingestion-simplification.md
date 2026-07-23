@@ -146,13 +146,23 @@ export function detectSourceType(content: string, url?: string): "text" | "markd
 ```
 
 > **⚠️ 与已有 `detectCaptureType` 的关系**：`apps/web/app/(workspace)/(default)/today/page.tsx`
-> 第 167 行已有一个 `detectCaptureType` 函数，逻辑与 `detectSourceType` 高度相似但有差异
-> （如 `detectCaptureType` 额外检测 `^[a-zA-Z_$][\w$]*\s*[({]` 等代码特征）。
+> 第 167 行已有一个 `detectCaptureType` 函数，逻辑与 `detectSourceType` 高度相似但有差异。
 > Markdown 检测正则已与 `detectCaptureType` 对齐（`/^(#{1,6}\s|>|[-*+]\s|\d+\.\s)/m`），
 > 要求标记后有空格，避免 `-5 度` 等以 `-` 开头的纯文本被误判。
 > Phase C 简化前端后，`detectCaptureType` 和 `captureTitle`（第 183 行）将变为死代码，
 > 应一并清理。建议实施时确认 `detectSourceType` 覆盖了 `detectCaptureType` 的所有检测分支，
 > 或将 `detectSourceType` 提取到 `shared` 包中作为前后端共用的单一实现。
+>
+> **⚠️ 代码检测分支对比（实施前必须对齐）**：两个函数的代码检测逻辑存在以下差异，
+> Phase C step 5 提取到 `shared` 包前必须取并集统一：
+>
+> | 检测分支 | `detectCaptureType` | `detectSourceType` |
+> |---|---|---|
+> | `interface`/`type`/`enum` 关键字 | ✅ 有 | ❌ 缺 |
+> | `from`/`private`/`protected` 关键字 | ✅ 有 | ❌ 缺 |
+> | `^[a-zA-Z_$][\w$]*\s*[({]` 模式 | ✅ 有 | ❌ 缺 |
+> | `if __name__`/`#include`/`package` | ❌ 缺 | ✅ 有 |
+> | ` ``` ` 处理 | 作为 code 信号 | 作为 markdown 信号（设计意图不同） |
 
 > **⚠️ `detectSourceType` 与 `correctSourceType` 的两层检测关系**：方案中存在两个类型检测函数——
 > `detectSourceType`（`source/service.ts`，创建时调用）使用简单正则做粗粒度初步检测，
@@ -336,12 +346,17 @@ const committed = await withJobTransaction(job, async (tx) => {
   // ⚠️ 基于 lockedSource 重新计算 correctedType 和 finalTitle
   //    （lockedSource 可能与 processingSource 不同，例如另一个事务改过 metadata）
   const lockedTypeSource = (lockedSource.metadata ?? {}).typeSource as string | undefined;
-  const lockedCorrectedType = correctSourceType(rawContent, lockedSource.type, lockedTypeSource);
+  // ⚠️ 从事务内 lockedSource.metadata 重读 rawContent，与 typeSource/fetchedTitle 保持一致。
+  //    虽然实际风险较低（job lease + FOR UPDATE 防止并发），但 URL 抓取事务与 ready 提交
+  //    事务之间存在理论上的 TOCTOU 窗口——另一事务可能修改 metadata.rawContent。
+  //    始终从 lockedSource 重读确保事务内全部基于同一快照计算。
+  const lockedRawContent = ((lockedSource.metadata ?? {}).rawContent as string) ?? rawContent;
+  const lockedCorrectedType = correctSourceType(lockedRawContent, lockedSource.type, lockedTypeSource);
   // ⚠️ 始终基于 lockedCorrectedType 重新解析，不回退到事务外的 finalSegments。
   //    lockedSource.type 可能与 processingSource.type 不同（另一事务改过），
   //    此时事务外的 finalSegments 是用旧 type 计算的，回退到它会写入错误 segments。
   //    parseContent 开销可控（内容上限 500KB），牺牲少量性能消除一类隐 bug。
-  const lockedFinalSegments = parseContent(rawContent, lockedCorrectedType);
+  const lockedFinalSegments = parseContent(lockedRawContent, lockedCorrectedType);
   const lockedSourceBody = lockedFinalSegments.map((s) => s.text).join("\n");
 
   // 标题提取：传入已计算的 lockedBlocks（避免重复 parseContent）
@@ -353,7 +368,6 @@ const committed = await withJobTransaction(job, async (tx) => {
   const extractedTitle = extractSourceTitle(
     lockedBlocks,
     lockedCorrectedType,
-    rawContent,
     lockedSource.origin,
     lockedFetchedTitle,
   );
@@ -431,7 +445,6 @@ import {
  *
  * @param blocks 调用方已通过 parseContent + segmentsToBlocks 计算好的 blocks，避免重复解析
  * @param sourceType 来源类型
- * @param rawContent 原始内容文本（已剥离 HTML 标签的纯文本，不可用于提取 HTML title）
  * @param origin 来源地址（URL 来源的最终回退：hostname）
  * @param fetchedTitle fetchUrlContent 从原始 HTML 中提取的标题（URL 来源优先使用）
  * 返回 null 表示未提取到，调用方应保留原标题
@@ -439,11 +452,10 @@ import {
 export function extractSourceTitle(
   blocks: ParsedBlock[],
   sourceType: string,
-  rawContent?: string,
   origin?: string | null,
   fetchedTitle?: string | null,
 ): string | null {
-  // ⚠️ URL 来源：rawContent 已被 extractTextFromHtml 剥离了 HTML 标签，
+  // ⚠️ URL 来源：内容已被 extractTextFromHtml 剥离了 HTML 标签，
   //    不能从中提取 <title>。必须使用 fetchUrlContent 在剥离前提取的 fetchedTitle。
   if (sourceType === "url" && fetchedTitle) {
     return fetchedTitle;
@@ -500,8 +512,8 @@ function extractHtmlTitle(html: string): string | null {
 >
 > **`extractHtmlTitle` 单一定义**：该函数在 `parse-source.ts` 模块级别定义一次，
 > 仅由 `fetchUrlContent`（§3.4.3）调用——在 HTML 标签被剥离前从原始 HTML 中提取标题。
-> `extractSourceTitle` 不再调用 `extractHtmlTitle`，因为其接收的 `rawContent`
-> 已被 `extractTextFromHtml` 剥离了 HTML 标签。如果 `fetchUrlContent` 将来被提取到
+> `extractSourceTitle` 不调用 `extractHtmlTitle`——它不接收原始 HTML 文本，
+> URL 来源的标题通过 `fetchedTitle` 参数间接获取。如果 `fetchUrlContent` 将来被提取到
 > 独立模块，需将 `extractHtmlTitle` 一并迁移或抽到 `shared` 包中。
 >
 > **⚠️ URL 标题提取数据流（评审修正）**：原始方案中 `extractSourceTitle` 尝试从
@@ -512,9 +524,11 @@ function extractHtmlTitle(html: string): string | null {
 > → 存入 `metadata.fetchedTitle` → 事务内从 `lockedSource.metadata` 读取 →
 > 传入 `extractSourceTitle` 的 `fetchedTitle` 参数。
 >
-> **标题截断长度统一**：`extractTitleFromBlocks` 内部截取 60 字符（`.slice(0, 60)`），
-> `extractSourceTitle` 和 `extractHtmlTitle` 统一截取 100 字符。source 标题比笔记标题
-> 允许更长（schema 允许 500 字符），100 字符兼顾了 URL 来源的网页标题长度和 UI 列表显示。
+> **标题截断长度**：`extractTitleFromBlocks` 内部截取 60 字符（`.slice(0, 60)`），
+> `extractSourceTitle` 对 blocks 提取的标题再做 `.slice(0, 100)` 但实际是 no-op（已是 60 字符）。
+> `extractHtmlTitle` 截取 100 字符——这是 URL 来源标题的有效截断长度。
+> 因此非 URL 来源有效截断为 60 字符，URL 来源为 100 字符。source 标题比笔记标题
+> 允许更长（schema 允许 500 字符），兼顾了 URL 来源的网页标题长度和 UI 列表显示。
 >
 > **`extractTitleFromBlocks` 边界 case**：该函数在无内容时返回字符串 `"无标题笔记"`，
 > `extractSourceTitle` 通过 `title !== "无标题笔记"` 判断是否提取到。如果来源内容
@@ -822,6 +836,11 @@ export async function fetchUrlContent(
 }
 ```
 
+> **⚠️ `fetchUrlContentOnce` 实现说明**：上方的重试包装器中引用了 `fetchUrlContentOnce`，
+> 该函数即当前 `fetchUrlContent`（§3.4.3 改造前）的原有逻辑重命名——包括 DNS 解析、
+> 重定向跟随、Content-Length 预检、流式收集、TextDecoder 解码、HTML 提取等全部移入。
+> Phase A 部署时返回类型仍为 `string`；Phase B step 2 将返回类型改为 `FetchedContent`。
+
 #### 3.4.3 改进 HTML 解析与标题提取（P1）
 
 当前 `extractTextFromHtml()` 在剥离标签前没有提取 `<title>`。改为在 `fetchUrlContent` 返回前提取结构化信息：
@@ -932,6 +951,11 @@ function extractTextFromHtml(html: string): string {
     .trim();
 }
 ```
+
+> **⚠️ `<header>` 移除风险**：部分网站将文章标题 `<h1>` 放在 `<article><header><h1>标题</h1></header>` 结构中。
+> 移除 `<header>` 会丢失该 heading，影响 blocks 提取路径的标题回退。影响范围有限——URL 来源标题提取
+> 走 `fetchedTitle` 路径，仅在 `fetchedTitle` 提取失败（网页无 `<title>`）且 blocks fallback 时才受影响。
+> 如需更保守，可改为只移除 `<article>` 标签之外的页面级 `<header>`，或在移除前先提取 `<header>` 内的 `<h1>` 文本。
 
 > **⚠️ 已知局限：字符编码（charset）**：当前 `fetchUrlContent` 使用 `new TextDecoder("utf-8", { fatal: false })`
 > 硬编码 UTF-8 解码（`parse-source.ts` 第 434 行）。大量中文网站使用 GBK/GB2312 编码，
@@ -1346,6 +1370,12 @@ await tx
 | F5 | 🟢 优化 | `FetchedContent.url` 字段无调用方消费（YAGNI） | §3.4.3：移除 `url` 字段，返回语句同步更新 |
 | F6 | 🟢 优化 | `extractTextFromHtml` 的 `<article>` 非贪婪匹配只取第一个，博客列表页会丢失正文 | §3.4.3：改为 `matchAll` 取最长 `<article>` |
 | F7 | 🟢 优化 | `fetchUrlContent` 重试包装返回类型仍为 `Promise<string>` | §3.4.2：改为 `Promise<FetchedContent>` |
+| F8 | 🔴 关键 | 事务内 `correctSourceType` 和 `parseContent` 使用事务外局部变量 `rawContent`，存在 TOCTOU 窗口 | §3.3：新增 `lockedRawContent` 从 `lockedSource.metadata.rawContent` 重读，事务内全部基于 `lockedSource` 快照计算 |
+| F9 | 🟡 中 | `extractSourceTitle` 的 `rawContent` 参数声明后从未使用（F1 修正后的残留死参数） | §3.3.1：移除 `rawContent` 参数，同步更新 JSDoc、注释和调用方 |
+| F10 | 🟡 中 | `detectSourceType` 未覆盖 `detectCaptureType` 的 `interface`/`type`/`enum`/`from`/`private`/`protected` 关键字和 `^[a-zA-Z_$]` 模式 | §3.1：补充分支对比表，Phase C step 5 提取到 shared 前必须取并集 |
+| F11 | 🟡 低 | 标题截断长度描述称"统一 100 字符"，但 blocks 路径实际为 60 字符（`extractTitleFromBlocks` 内部已截取） | §3.3.1：修正描述为"URL 来源 100 字符，其余来源 60 字符" |
+| F12 | 🟢 优化 | `extractTextFromHtml` 移除 `<header>` 可能丢失 `<article>` 内的 `<h1>` 标题 | §3.4.3：补充风险说明和缓解建议 |
+| F13 | 🟢 优化 | §3.4.2 重试包装引用 `fetchUrlContentOnce` 但未说明其实现 | §3.4.2：补充说明即当前 `fetchUrlContent` 原逻辑重命名 |
 
 ### 10.2 额外验证结果
 
@@ -1356,6 +1386,8 @@ await tx
 | `parse_source` 默认超时 60s ≥ 最坏情况 41s | ✅ 确认（`handler-timeout-config.ts` 第 31 行 `parse_source: 60_000`） |
 | lease 超时 120s > handler 超时 + 安全余量 | ✅ 确认（`queue.ts` 第 13 行 `LEASE_TIMEOUT_MS = 120_000`） |
 | `extractTitleFromBlocks` 通过 worker re-export 可访问 | ✅ 确认（`workers/ai-worker/src/lib/markdown-parser.ts` 第 1 行 `export * from "@ailearn/shared/markdown-parser"`） |
+| 测试文件 `parse-source.test.ts` 和 `parse-source-extra.test.ts` 共约 30+ 个断言将 `fetchUrlContent` 返回值当字符串使用 | ✅ 确认（Phase B step 2 需同步更新为 `result.text`） |
+| 前端 `api.ts` 第 1152–1161 行 `createSource` 参数 type/title 均为必填 | ✅ 确认（Phase C step 2 需改为 optional） |
 
 ### 10.3 未采纳的建议（记录备查）
 
