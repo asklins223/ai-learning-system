@@ -129,7 +129,7 @@ version-check:
 # Browser E2E remains a separate service-backed gate; AIQ RC requires the
 # release provider credentials and is therefore executed by the RC workflow.
 verify: version-check
-	node --test .github/scripts/version-contract.test.mjs .github/scripts/release-manifest-contract.test.mjs .github/scripts/coverage-gate-lib.test.mjs
+	node --test .github/scripts/version-contract.test.mjs .github/scripts/release-manifest-contract.test.mjs .github/scripts/coverage-gate-lib.test.mjs .github/scripts/ci-workflow-contract.test.mjs
 	node .github/scripts/verify-schema-mirror.mjs
 	cd packages/shared && npm run typecheck && npm test
 	cd packages/db && npm run typecheck && npm test

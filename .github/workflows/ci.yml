@@ -50,6 +50,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Gitleaks scans the pushed commit range, which may include merge
+          # parents that are unavailable in the default depth-1 checkout.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
