@@ -932,7 +932,6 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-policy-fix.log"
 
       - name: "SEC-01 enforce: run verification script"
-        working-directory: apps/api
         env:
           SEC01_VERIFY_MIGRATOR_URL: postgres://ailearn_migrator:ci-migrator-only-password@127.0.0.1:5432/ailearn_ci
           SEC01_VERIFY_API_URL: postgres://ailearn_api:ci-api-only-password@127.0.0.1:5432/ailearn_ci

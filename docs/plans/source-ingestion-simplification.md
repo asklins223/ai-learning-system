@@ -498,6 +498,8 @@ function extractHtmlTitle(html: string): string | null {
     const contentMatch = ogTagMatch[0].match(/content=["']([^"']+)["']/i);
     if (contentMatch?.[1]?.trim()) return contentMatch[1].trim().slice(0, 100);
   }
+  // ⚠️ [^<]+ 不匹配含 < 字符的 title（如 <title>A < B</title>），会截断在 < 处。
+  //    极罕见但如需更健壮可改为 [\s\S]*? 非贪婪匹配。当前实现对绝大多数网页足够。
   const titleMatch = head.match(/<title[^>]*>([^<]+)<\/title>/i);
   if (titleMatch?.[1]?.trim()) {
     return titleMatch[1].trim().replace(/\s+/g, " ").slice(0, 100);
@@ -579,7 +581,8 @@ export function correctSourceType(
     /^(function|const|let|var|class|import|export|def |#include|package |public class)/m,
     /```[\s\S]*?```/,  // 代码块
     /^(if|for|while|switch|try|catch)\s*\(/m,
-    /;\s*$/m,  // 行尾分号
+    /;\s*$/m,  // 行尾分号 — ⚠️ 自然文本中分号结尾的句子也会命中（如"先做这个；然后那个。"），
+               //    但需 codeScore >= 2 且 codeScore > mdScore 才触发修正，单指标命中不足以误判
   ];
   const codeScore = codeIndicators.filter((re) => re.test(text)).length;
 
@@ -796,7 +799,7 @@ const FETCH_TIMEOUT_MS = 15_000;
 
 // 修改后
 const FETCH_TIMEOUT_MS = 20_000;  // 从 15s 延长到 20s
-const FETCH_RETRY_COUNT = 1;       // 增加 1 次重试（共 2 次尝试）
+const FETCH_RETRY_COUNT = Number(process.env.SOURCE_FETCH_RETRY_COUNT ?? 1);  // 增加 1 次重试（共 2 次尝试），可通过环境变量取消重试（设为 0）
 ```
 
 在 `fetchUrlContent` 中增加重试包装：
@@ -840,6 +843,16 @@ export async function fetchUrlContent(
 > 该函数即当前 `fetchUrlContent`（§3.4.3 改造前）的原有逻辑重命名——包括 DNS 解析、
 > 重定向跟随、Content-Length 预检、流式收集、TextDecoder 解码、HTML 提取等全部移入。
 > Phase A 部署时返回类型仍为 `string`；Phase B step 2 将返回类型改为 `FetchedContent`。
+>
+> **⚠️ Phase A 返回类型澄清**：上方重试包装代码中 `Promise<FetchedContent>` 是
+> **Phase B 完成后的最终签名**。Phase A 部署时，重试包装器和 `fetchUrlContentOnce`
+> 的返回类型均为 `Promise<string>`——即重试逻辑包裹的仍是返回 `string` 的原有逻辑。
+> 实施时 Phase A 的签名应为 `Promise<string>`，Phase B step 2 再统一改为 `Promise<FetchedContent>`。
+>
+> **⚠️ `FETCH_RETRY_COUNT` 环境变量**：与 `SOURCE_FETCH_ACCEPT_ENCODING` 一致，
+> 重试次数通过 `SOURCE_FETCH_RETRY_COUNT` 环境变量控制，支持运行时回滚。
+> 回滚：设 `SOURCE_FETCH_RETRY_COUNT=0` 即禁用重试，恢复原单次请求行为。
+> 默认值 `1`（共 2 次尝试）。R9 中提到的"取消重试"通过此变量实现。
 
 #### 3.4.3 改进 HTML 解析与标题提取（P1）
 
@@ -1236,6 +1249,14 @@ await tx
 > Phase B 内部**首先完成**——后续 steps 3–5 的事务回写代码和 HTML 解析改进都依赖
 > `FetchedContent` 的结构化返回值。
 
+> **⚠️ `typeSource` 功能窗口期**：Phase B 部署后、Phase C 部署前，旧前端仍始终传 `type`，
+> 导致所有新建 source 的 `metadata.typeSource = "manual"`，`correctSourceType` 对这些 source
+> 是 no-op（不修正类型）。**标题提取不受影响**——`extractSourceTitle` 不检查 `typeSource`，
+> 会正常提取并回写标题。类型修正功能在 Phase C 部署（前端不再传 `type`）后才对新建 source
+> 生效。存量 source 在 retry 时会被修正（`typeSource` 为 `undefined`，视为 `"auto"`）。
+> 这不是 bug 而是 graceful degradation：在两个 Phase 都部署前的中间状态下，只有标题提取
+> 这一增量功能生效，类型修正等待前端简化后才启动。
+
 **验收标准**：
 - URL 来源解析后 title 为网页标题而非 URL 截断
 - Markdown 来源解析后 title 为第一个 heading
@@ -1278,6 +1299,8 @@ await tx
 | R8 | deflate raw 误判导致解压失败 | `inflateSync` 遇到 `Z_DATA_ERROR` 时 fallback 到 `inflateRawSync`（同步 API，buffer-then-decompress 策略） |
 | R9 | **Worker job 超时与重试冲突** | 超时从 15s 延长到 20s + 1 次重试（含 1s 延迟），最坏情况约 41s。实施前必须确认 Worker 的 job 执行超时 ≥ 60s，否则重试可能无法完成。如 job 超时不足，需调低 `FETCH_TIMEOUT_MS` 或取消重试（`FETCH_RETRY_COUNT = 0`）。（已验证：`parse_source` 默认超时 60s，lease 超时 120s，41s 在安全范围内 ✅） |
 | R10 | **URL 来源 HTML 标题提取死代码** | 原方案 `extractSourceTitle` 对 URL 来源调用 `extractHtmlTitle(rawContent)`，但 `rawContent` 已被 `extractTextFromHtml` 剥离 HTML 标签，提取永远失败。修正：`fetchUrlContent` 在剥离前提取标题存入 `FetchedContent.title` → 调用方写入 `metadata.fetchedTitle` → 事务内传入 `extractSourceTitle` 的 `fetchedTitle` 参数 |
+| R11 | **Phase B–C 间 `typeSource` 功能窗口期** | Phase B 部署后 Phase C 部署前，旧前端始终传 `type`，所有新 source 的 `typeSource = "manual"`，`correctSourceType` 为 no-op。标题提取不受影响（不检查 `typeSource`）。类型修正在 Phase C 部署后才对新建 source 生效；存量 source 在 retry 时修正（`typeSource` 为 `undefined` 视为 `"auto"`）。详见 §6 Phase B 说明 |
+| R12 | **`correctSourceType` 分号正则误判** | `/;\s*$/m` 匹配任何以分号结尾的行，自然文本中的分号句也会命中。缓解：需 `codeScore >= 2 && codeScore > mdScore` 才触发 text→code 修正，单指标命中不足以误判 |
 
 ---
 
@@ -1376,6 +1399,9 @@ await tx
 | F11 | 🟡 低 | 标题截断长度描述称"统一 100 字符"，但 blocks 路径实际为 60 字符（`extractTitleFromBlocks` 内部已截取） | §3.3.1：修正描述为"URL 来源 100 字符，其余来源 60 字符" |
 | F12 | 🟢 优化 | `extractTextFromHtml` 移除 `<header>` 可能丢失 `<article>` 内的 `<h1>` 标题 | §3.4.3：补充风险说明和缓解建议 |
 | F13 | 🟢 优化 | §3.4.2 重试包装引用 `fetchUrlContentOnce` 但未说明其实现 | §3.4.2：补充说明即当前 `fetchUrlContent` 原逻辑重命名 |
+| F14 | 🟡 中 | §3.4.2 重试包装代码签名 `Promise<FetchedContent>` 是 Phase B 版本，Phase A 部署时返回类型仍为 `string`，但代码未标注可能误导实施者 | §3.4.2：新增 Phase A 返回类型澄清注释，明确 Phase A 签名为 `Promise<string>` |
+| F15 | 🟡 中 | `FETCH_RETRY_COUNT` 硬编码为常量，与 `SOURCE_FETCH_ACCEPT_ENCODING` 环境变量回滚策略不一致；R9 提到可设为 0 但未说明通过何种机制 | §3.4.2：改为 `process.env.SOURCE_FETCH_RETRY_COUNT ?? 1`，与 URL 修复的回滚策略一致 |
+| F16 | 🟡 中 | Phase B–C 间存在 `typeSource` 功能窗口期：旧前端传 `type` → 所有新 source 为 `manual` → 类型修正 no-op，文档未说明此中间状态 | §6 Phase B：新增功能窗口期说明，明确标题提取不受影响、类型修正在 Phase C 后生效 |
 
 ### 10.2 额外验证结果
 

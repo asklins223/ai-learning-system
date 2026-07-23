@@ -6,6 +6,10 @@ const workflow = readFileSync(
   new URL("../workflows/ci.yml", import.meta.url),
   "utf8",
 );
+const coverageGate = readFileSync(
+  new URL("./coverage-gate.mjs", import.meta.url),
+  "utf8",
+);
 
 function jobBlock(name) {
   const match = workflow.match(
@@ -37,5 +41,29 @@ describe("CI workflow contract", () => {
     assert.ok(installDatabase >= 0, "Unit Tests must install packages/db");
     assert.ok(installDatabase < skipTodoGate, "packages/db must be installed before skip/todo tests");
     assert.ok(installDatabase < coverageGate, "packages/db must be installed before coverage tests");
+  });
+
+  it("runs the SEC-01 verification script from the repository root", () => {
+    const freshMigrations = jobBlock("fresh-migrations");
+    const step = freshMigrations.match(
+      /- name: "SEC-01 enforce: run verification script"\n([\s\S]*?)(?=\n\s+- name:)/,
+    );
+
+    assert.ok(step, "Fresh Migrations must run SEC-01 enforce verification");
+    assert.doesNotMatch(
+      step[0],
+      /working-directory:/,
+      "the repository-root .github script must not run from apps/api",
+    );
+    assert.match(step[0], /node \.github\/scripts\/sec01-enforce-verify\.mjs/);
+  });
+
+  it("keeps coverage discovery self-contained on GitHub runners", () => {
+    assert.doesNotMatch(
+      coverageGate,
+      /execFileSync\(["']rg["']/,
+      "coverage collection must not assume ripgrep is installed on the runner",
+    );
+    assert.match(coverageGate, /readdirSync\(/);
   });
 });
