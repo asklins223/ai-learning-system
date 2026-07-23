@@ -21,6 +21,8 @@ import {
   type ValidationFeedback,
   type ValidationEvent,
 } from "@/lib/api";
+import { useIsOwner } from "@/lib/use-current-user";
+import { MemberNotice } from "@/components/settings/MemberNotice";
 import { EvidenceDrawer } from "@/components/EvidenceDrawer";
 import { ValidationPanel, ValidationQuestion } from "@/components/ValidationPanel";
 import { Drawer } from "@/components/ui/Drawer";
@@ -32,6 +34,7 @@ import { UnderstandingFacts } from "@/components/study/UnderstandingFacts";
 import { ReviewPlanCard } from "@/components/study/ReviewPlanCard";
 import { AccountMenu } from "@/components/account/AccountMenu";
 import { normalizeKeyPointClaim } from "@/lib/card-display";
+import { buildValidationPrompt } from "@/lib/validation-question";
 import {
   sanitizeSearchReturnTarget,
   withSearchReturnTarget,
@@ -59,6 +62,7 @@ const EMPTY_PAGER: PagerState = {
 };
 
 export default function CardPage() {
+  const { isOwner } = useIsOwner();
   const params = useParams<{ id: string }>();
   const cardId = params?.id;
   const router = useRouter();
@@ -259,6 +263,14 @@ export default function CardPage() {
       }
       setEvidence(result);
       setEvidenceError(null);
+      const reviewedEvidenceId = result
+        .flatMap((group) => group.evidences)
+        .find((item) => Boolean(item.id))?.id;
+      if (reviewedEvidenceId) {
+        // The server only accepts this acknowledgement with an evidence row
+        // belonging to the active workspace; failure must not block reading.
+        void api.markOnboardingStep("evidence_review", reviewedEvidenceId).catch(() => {});
+      }
     } catch (caught) {
       if (
         !mountedRef.current ||
@@ -513,13 +525,16 @@ export default function CardPage() {
         );
       })
       .slice(0, 3)
-      .map((keyPoint, index) => ({
-        type: (["explain", "example", "apply"] as const)[index % 3],
-        prompt: buildPrompt(keyPoint.claim, index),
-        refClaim: buildKnowledgeLabel(keyPoint.claim),
-        refQuote: keyPoint.quoteText,
-        keyPointId: keyPoint.id,
-      }));
+      .map((keyPoint, index) => {
+        const { type, prompt } = buildValidationPrompt(keyPoint.claim, index);
+        return {
+          type,
+          prompt,
+          refClaim: buildKnowledgeLabel(keyPoint.claim),
+          refQuote: keyPoint.quoteText,
+          keyPointId: keyPoint.id,
+        };
+      });
   }, [data, evidence]);
 
   const handleValidation = useCallback(
@@ -550,7 +565,8 @@ export default function CardPage() {
         });
         if (!isCurrentRequest()) throw new Error("页面已切换");
 
-        const deadline = Date.now() + 60_000;
+        // 轮询超时对齐 handler 超时（90s）+ 15s 余量 = 105s，消除"假超时"。
+        const deadline = Date.now() + 105_000;
         let delay = 1000;
         let completed = false;
         while (Date.now() < deadline) {
@@ -790,7 +806,7 @@ export default function CardPage() {
               <b>{evidenceCount}</b>
             </button>
           )}
-          {isCardActive && (
+          {isCardActive && isOwner && (
             <button
               type="button"
               className="card-detail-header-action card-detail-regenerate"
@@ -811,6 +827,7 @@ export default function CardPage() {
               </span>
             </button>
           )}
+          {isCardActive && !isOwner && <MemberNotice compact />}
           <ThemeToggle className="card-detail-theme-toggle" />
           <AccountMenu
             className="card-detail-account-menu"
@@ -1125,16 +1142,6 @@ function appendUniqueCards(
       return true;
     }),
   ];
-}
-
-function buildPrompt(claim: string, index: number): string {
-  const normalizedClaim = normalizeKeyPointClaim(claim);
-  if (/[？?]\s*$/.test(normalizedClaim)) return normalizedClaim;
-  const head = compactText(normalizedClaim, 64);
-  const shortHead = compactText(normalizedClaim, 34);
-  if (index === 0) return `请用自己的话解释：${head}`;
-  if (index === 1) return `给出一个能体现「${shortHead}」的实例。`;
-  return `「${shortHead}」具体解决了什么问题？如果没有它会怎样？`;
 }
 
 function buildKnowledgeLabel(claim: string): string {

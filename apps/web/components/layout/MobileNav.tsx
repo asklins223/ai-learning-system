@@ -9,12 +9,17 @@ import {
   mobileMineNavItems,
   isNavActive,
 } from "@/lib/navigation";
+import { WorkspaceSwitcher } from "@/components/layout/WorkspaceSwitcher";
+import { useCurrentUser } from "@/lib/use-current-user";
+import { useTheme } from "@/components/ThemeProvider";
+import { api } from "@/lib/api";
+import { Icon } from "@/components/ui/icons";
 
 /**
  * MobileNav — 移动端底部导航栏。
  *
  * 仅在 <640px 视口显示。5 个固定入口：
- *   学习流 / 复习 / 新建 / 探索 / 我的
+ *   学习 / 复习 / 新建 / 探索 / 我的
  *
  * - "新建"打开 QuickCapture（暂用路由跳转占位）。
  * - "探索"点击展开二级面板（学习卡/理解星图/搜索）。
@@ -28,10 +33,17 @@ export function MobileNav() {
   const pathname = usePathname();
   const router = useRouter();
   const [panel, setPanel] = useState<PanelType>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
   const exploreButtonRef = useRef<HTMLButtonElement>(null);
   const mineButtonRef = useRef<HTMLButtonElement>(null);
+  const { currentUser, reload: reloadCurrentUser } = useCurrentUser();
+  const { theme, toggleTheme, mounted } = useTheme();
+  const canCreateContent = Boolean(
+    currentUser && (currentUser.role === "owner" || currentUser.isPersonal),
+  );
 
   /* 关闭面板：点击外部或路由变化 */
   useEffect(() => {
@@ -72,7 +84,9 @@ export function MobileNav() {
   useEffect(() => {
     if (!panel) return;
     const frame = window.requestAnimationFrame(() => {
-      panelRef.current?.querySelector<HTMLElement>('a[href]')?.focus();
+      panelRef.current
+        ?.querySelector<HTMLElement>('button:not([disabled]), a[href]')
+        ?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
   }, [panel]);
@@ -91,12 +105,18 @@ export function MobileNav() {
   }, [panel]);
 
   const handleQuickCapture = useCallback(() => {
+    if (!canCreateContent) return;
+    setPanel(null);
+    if (pathname === "/") {
+      window.dispatchEvent(new CustomEvent("home:open-capture"));
+      return;
+    }
     if (pathname === "/today") {
       window.dispatchEvent(new CustomEvent("today:open-capture"));
       return;
     }
-    router.push("/today#quick-capture");
-  }, [pathname, router]);
+    router.push("/#quick-capture");
+  }, [canCreateContent, pathname, router]);
 
   const handleItemClick = useCallback((item: typeof mobileBottomNavItems[number]) => {
     if (item.href === "#quick-capture") {
@@ -138,6 +158,24 @@ export function MobileNav() {
   }
 
   const panelItems = panel === "explore" ? exploreNavItems : panel === "mine" ? mobileMineNavItems : [];
+  const mobileDisplayName = currentUser?.displayName?.trim()
+    || currentUser?.email.split("@")[0]
+    || "个人账户";
+
+  const handleLogout = useCallback(async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    setLogoutError(null);
+    try {
+      await api.logout();
+      setPanel(null);
+      router.replace("/login");
+    } catch {
+      setLogoutError("退出失败，请重试。");
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [loggingOut, router]);
 
   return (
     <>
@@ -150,6 +188,23 @@ export function MobileNav() {
           data-ui="mobile-nav-panel"
           aria-label={panel === "explore" ? "探索导航" : "个人导航"}
         >
+          {panel === "mine" && (
+            <div className="mobile-nav-account" aria-label="当前账户与工作区">
+              <div className="mobile-nav-account-summary">
+                <span className="mobile-nav-account-avatar" aria-hidden="true">
+                  {mobileDisplayName.charAt(0).toUpperCase()}
+                </span>
+                <span>
+                  <strong>{mobileDisplayName}</strong>
+                  <small>{currentUser?.email ?? "正在读取账户…"}</small>
+                </span>
+              </div>
+              <WorkspaceSwitcher
+                currentUser={currentUser}
+                onSwitched={reloadCurrentUser}
+              />
+            </div>
+          )}
           {panelItems.map((item) => (
             <Link
               key={item.href}
@@ -161,6 +216,29 @@ export function MobileNav() {
               {item.label}
             </Link>
           ))}
+          {panel === "mine" && (
+            <div className="mobile-nav-account-actions">
+              <button
+                type="button"
+                onClick={(event) => toggleTheme({ x: event.clientX, y: event.clientY })}
+                disabled={!mounted}
+              >
+                <Icon.Appearance aria-hidden="true" />
+                <span>切换到{theme === "day" ? "夜间" : "日间"}</span>
+              </button>
+              <button
+                type="button"
+                className="is-danger"
+                onClick={() => void handleLogout()}
+                disabled={loggingOut}
+                aria-busy={loggingOut}
+              >
+                <Icon.Logout aria-hidden="true" />
+                <span>{loggingOut ? "退出中…" : "退出登录"}</span>
+              </button>
+              {logoutError && <p role="alert">{logoutError}</p>}
+            </div>
+          )}
         </nav>
       )}
 
@@ -185,7 +263,9 @@ export function MobileNav() {
                 key="quick-capture"
                 className="mobile-nav-item mobile-nav-item--create"
                 onClick={handleQuickCapture}
-                aria-label="新建"
+                aria-label={canCreateContent ? "新建" : "新建（仅工作区所有者可用）"}
+                title={canCreateContent ? undefined : "仅工作区所有者可添加内容"}
+                disabled={!canCreateContent}
                 type="button"
               >
                 <span className="mobile-nav-icon"><item.icon /></span>

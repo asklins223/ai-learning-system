@@ -1,6 +1,6 @@
 {
   "name": "@ailearn/shared",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -30,6 +30,11 @@
       "types": "./src/markdown-parser.ts",
       "import": "./src/markdown-parser.ts",
       "default": "./src/markdown-parser.ts"
+    },
+    "./prompts": {
+      "types": "./src/prompts.ts",
+      "import": "./src/prompts.ts",
+      "default": "./src/prompts.ts"
     }
   },
   "dependencies": {
@@ -37,7 +42,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/*.test.ts"
+    "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",

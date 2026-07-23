@@ -1,11 +1,33 @@
-import { and, eq, gte, inArray, lt, sql } from "drizzle-orm";
+// P2-1: Node.js 20+ fetch 内部已使用 undici 连接池并默认开启 keep-alive。
+// 全局 fetch 会自动复用 TCP+TLS 连接，无需显式配置 Agent。
+// 如需进一步调优连接池参数，可安装 undici npm 包并使用 setGlobalDispatcher。
+
 import { logger } from "./lib/logger.ts";
-import * as schema from "./schema/index.ts";
-import { closeDatabase, db } from "./db.ts";
+import { closeDatabase } from "./db.ts";
 import { runGenerateCard, runAlignEvidence, runEvaluateValidation } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
-import { retryBackoffMs } from "./lib/job-retry.ts";
+import { resolveHandlerTimeout, RESOLVED_TIMEOUT_INFO } from "./lib/handler-timeout-config.ts";
+import { isNonRetryableError } from "./lib/non-retryable-errors.ts";
+import {
+  claimJobs,
+  markJobDead,
+  markJobFailed,
+  markJobSucceeded,
+  markUnknownJobFailed,
+  reapStaleJobs,
+  QUEUE_CONCURRENCY,
+  type ClaimedJob,
+} from "./queue.ts";
+// OPS-01: Prometheus 指标（ADR-0006 §1-3）
+import {
+  jobTerminalTotal,
+  jobRetriesTotal,
+  jobLeaseLostTotal,
+  jobNonRetryableDeadTotal,
+  jobDurationSeconds,
+  startMetricsServer,
+} from "./lib/metrics.ts";
 
 const HANDLERS = {
   generate_card: runGenerateCard,
@@ -14,15 +36,13 @@ const HANDLERS = {
   parse_source: runParseSource,
 } as const;
 
-const POLL_MS = 1500;
-const MAX_ATTEMPTS = 3;
-const CONCURRENCY = 1; // F-010: 每次只认领 1 条作业，串行处理避免扩大故障面
-const LEASE_TIMEOUT_MS = 120_000; // F-010: 租约超时 2 分钟
-const MODEL_TIMEOUT_MS = 90_000; // F-010: 模型调用超时 90 秒
+const POLL_MS = 500;
+// F-010: 模型调用超时现在按 job 类型分别配置，见 handler-timeout-config.ts
+// 全局默认仍可通过 WORKER_MODEL_TIMEOUT_MS 环境变量覆盖。
 
 // F-010: 优雅关停标志
 let shuttingDown = false;
-function setupGracefulShutdown() {
+export function setupGracefulShutdown() {
   const handler = () => {
     if (!shuttingDown) {
       shuttingDown = true;
@@ -34,249 +54,188 @@ function setupGracefulShutdown() {
 }
 setupGracefulShutdown();
 
-type ClaimedJob = {
-  id: string;
-  type: string;
-  payload: Record<string, unknown>;
-  workspaceId: string;
-  attempts: number;
-  // G-001: 不可变 lease token — claim 时生成并写入 DB，完成/失败时以此作为原子条件
-  leaseToken: string;
-};
+// 处理单个 job 的完整生命周期（claim 后的执行 + 状态转换 + 指标记录）。
+// 从 tick() 提取为独立函数以支持 fire-and-forget 并行处理。
+export async function processJob(job: ClaimedJob): Promise<void> {
+  const handler = HANDLERS[job.type as keyof typeof HANDLERS];
+  if (!handler) {
+    const unknownUpdated = await markUnknownJobFailed(job);
+    if (!unknownUpdated) {
+      logger.warn({ jobId: job.id }, "unknown job lease was already reaped; status left unchanged");
+    }
+    return;
+  }
 
-/**
- * F-010: 回收器 — 将 startedAt 超过 LEASE_TIMEOUT_MS 仍为 running 的作业重置为 pending。
- * R-007: 回收时递增 attempts，确保超时作业最终达到 MAX_ATTEMPTS 而非无限重试。
- */
-async function reapStaleJobs(): Promise<number> {
-  const timeout = new Date(Date.now() - LEASE_TIMEOUT_MS);
-  const now = new Date();
-
-  // Both updates repeat the full stale-lease predicate in the UPDATE itself.
-  // PostgreSQL re-checks this predicate after waiting on a concurrent row lock,
-  // so a completed job or a lease whose started_at was renewed is never
-  // overwritten by a stale SELECT result. Status makes the two updates and
-  // concurrent reapers mutually exclusive.
-  const toPending = await db
-    .update(schema.jobs)
-    .set({
-      status: "pending",
-      startedAt: null,
-      leaseToken: null,
-      attempts: sql`${schema.jobs.attempts} + 1`,
-      lastError: "lease expired (worker crash or timeout)",
-      scheduledAt: new Date(now.getTime() + 10_000),
-      finishedAt: null,
-    })
-    .where(
-      and(
-        eq(schema.jobs.status, "running"),
-        lt(schema.jobs.startedAt, timeout),
-        lt(schema.jobs.attempts, MAX_ATTEMPTS - 1),
+  // OPS-01: 记录 job 运行时长（ADR-0006 §2）
+  const jobStart = Date.now();
+  try {
+    // F-010: 为 handler 添加超时保护（按 job 类型解析超时阈值）
+    // R-007: 超时会中止 provider；leaseToken 继续保护迟到 handler 的业务提交。
+    const handlerTimeoutMs = resolveHandlerTimeout(job.type);
+    await runWithAbortTimeout(
+      (signal) => handler({
+          id: job.id,
+          payload: job.payload,
+          workspaceId: job.workspaceId,
+          requestedBy: job.requestedBy,
+          leaseToken: job.leaseToken,
+          signal,
+        }),
+      handlerTimeoutMs,
+      (lateError) => logger.warn(
+        { jobId: job.id, err: lateError },
+        "timed-out handler settled after its lease was released",
       ),
-    )
-    .returning({ id: schema.jobs.id });
+    );
 
-  const toDead = await db
-    .update(schema.jobs)
-    .set({
-      status: "dead",
-      startedAt: null,
-      leaseToken: null,
-      attempts: sql`${schema.jobs.attempts} + 1`,
-      lastError: "lease expired — max attempts reached",
-      finishedAt: now,
-    })
-    .where(
-      and(
-        eq(schema.jobs.status, "running"),
-        lt(schema.jobs.startedAt, timeout),
-        gte(schema.jobs.attempts, MAX_ATTEMPTS - 1),
-      ),
-    )
-    .returning({ id: schema.jobs.id });
+    // G-001: 原子条件 UPDATE — 只有 status=running 且 lease_token 与 claim 时相同才提交 succeeded。
+    // 如果 job 被 reaper 回收并重新 claim，lease_token 会不同，UPDATE 影响 0 行。
+    const successUpdated = await markJobSucceeded(job);
+    jobDurationSeconds.labels(job.type).observe((Date.now() - jobStart) / 1000);
+    if (!successUpdated) {
+      // OPS-01: lease 丢失 — job 被 reaper 回收并重新 claim
+      jobLeaseLostTotal.labels(job.type).inc();
+      logger.warn(
+        { jobId: job.id },
+        "job was reaped or re-claimed during execution — skipping result commit to avoid duplicate side effects",
+      );
+      return;
+    }
+    // OPS-01: 记录终态
+    jobTerminalTotal.labels(job.type, "succeeded").inc();
+    logger.info({ jobId: job.id, type: job.type }, "job ok");
+  } catch (err) {
+    const message = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
+    jobDurationSeconds.labels(job.type).observe((Date.now() - jobStart) / 1000);
 
-  const total = toPending.length + toDead.length;
-  if (total > 0) {
+    // 非重试错误（欠费/鉴权/配置）直接标记 dead，不浪费重试次数。
+    if (isNonRetryableError(err) || isNonRetryableError(message)) {
+      const failure = await markJobDead(job, message);
+      if (!failure.updated) {
+        jobLeaseLostTotal.labels(job.type).inc();
+        logger.warn(
+          { jobId: job.id },
+          "job was reaped during execution — skipping non-retryable dead update to avoid double-counting",
+        );
+        return;
+      }
+      jobNonRetryableDeadTotal.labels(job.type).inc();
+      jobTerminalTotal.labels(job.type, "dead").inc();
+      logger.error(
+        {
+          jobId: job.id,
+          error: message,
+          reason: "non-retryable",
+        },
+        "job marked dead — non-retryable error (billing/auth/config)",
+      );
+      return;
+    }
+
+    // G-001: 失败时也使用原子条件 UPDATE，避免覆盖 reaper 的状态
+    const failure = await markJobFailed(job, message);
+    if (!failure.updated) {
+      // OPS-01: lease 丢失 — job 被 reaper 回收
+      jobLeaseLostTotal.labels(job.type).inc();
+      logger.warn(
+        { jobId: job.id },
+        "job was reaped during execution — skipping failure update to avoid double-counting",
+      );
+      return;
+    }
+    // OPS-01: 记录重试或终态
+    if (failure.status === "pending") {
+      jobRetriesTotal.labels(job.type).inc();
+    } else {
+      // dead — 终态
+      jobTerminalTotal.labels(job.type, "dead").inc();
+    }
+    logger.error(
+      {
+        jobId: job.id,
+        error: message,
+        attempts: failure.attempts,
+        backoffMs: failure.backoffMs,
+      },
+      "job failed",
+    );
+  }
+}
+
+// 追踪在途 job 的 Promise，用于优雅关停时等待全部完成。
+// semaphore 模型：tick() 不再 await 所有 job 完成后才认领下一批，
+// 而是每个 slot 空闲后立即在下次 tick 补充，避免慢 job 堵塞快 job 的 slot。
+const inflight = new Set<Promise<void>>();
+
+export async function tick(): Promise<void> {
+  // F-010: 先回收悬挂作业
+  const reaped = await reapStaleJobs();
+  if (reaped.total > 0) {
     logger.warn(
       {
-        count: total,
-        pending: toPending.length,
-        dead: toDead.length,
-        ids: [...toPending, ...toDead].map((row) => row.id),
+        count: reaped.total,
+        pending: reaped.pending,
+        dead: reaped.dead,
+        ids: reaped.ids,
       },
       "reaped stale running jobs",
     );
   }
-  return total;
-}
-
-/**
- * 原子抢占待执行 job：
- * - 用 FOR UPDATE SKIP LOCKED 避免多 worker 抢同一批任务
- * - 同时过滤 attempts < MAX_ATTEMPTS，避免死循环拉取已耗尽重试的 pending job
- * - scheduledAt <= now() 实现退避：重试任务不会被立即拉走
- * F-010: 改为只认领 CONCURRENCY 条作业
- * 在同一事务内将状态置 running，保证锁内提交。
- */
-async function claimJobs(): Promise<ClaimedJob[]> {
-  // G-001: 生成不可变 lease token（UUID），在同一次 claim 事务中写入并返回。
-  // 后续的成功/失败更新以 (id, status='running', lease_token=token) 为条件。
-  // 如果 job 被 reaper 回收并重新 claim，lease_token 会不同，条件 UPDATE 影响 0 行。
-  const leaseToken = crypto.randomUUID();
-  const claimTime = new Date();
-  return db.transaction(async (tx) => {
-    const rows = await tx.execute<{
-      id: string;
-      type: string;
-      payload: unknown;
-      workspace_id: string;
-      attempts: number | null;
-    }>(sql`
-      SELECT id, type, payload, workspace_id, attempts
-      FROM jobs
-      WHERE status = 'pending'
-        AND attempts < ${MAX_ATTEMPTS}
-        AND scheduled_at <= now()
-      ORDER BY scheduled_at
-      LIMIT ${CONCURRENCY}
-      FOR UPDATE SKIP LOCKED
-    `);
-    if (rows.length === 0) return [];
-    const ids = rows.map((r) => r.id);
-    await tx
-      .update(schema.jobs)
-      .set({ status: "running", startedAt: claimTime, leaseToken })
-      .where(inArray(schema.jobs.id, ids));
-    return rows.map((r) => ({
-      id: r.id,
-      type: r.type,
-      payload: (r.payload ?? {}) as Record<string, unknown>,
-      workspaceId: r.workspace_id,
-      attempts: r.attempts ?? 0,
-      leaseToken,
-    }));
-  });
-}
-
-async function tick() {
-  // F-010: 先回收悬挂作业
-  await reapStaleJobs();
 
   // F-010: 优雅关停时不认领新作业
   if (shuttingDown) return;
 
-  const candidates = await claimJobs();
+  // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
+  // 各 handler 事务中的 advisory lock 保证并发安全：
+  //   generate_card    — workspace 级锁，同 workspace 串行化
+  //   align_evidence   — key point 级锁，不同 key point 可并行
+  //   evaluate_validation — 输入维度锁（cardId+keyPointId+userId+question+userAnswer），
+  //                         防止相同输入的不同 job 并发写入重复 validation_events
+  // AI 模型调用是网络 IO，并行处理可让多个 job 的模型调用同时进行。
+  const available = QUEUE_CONCURRENCY - inflight.size;
+  if (available <= 0) return;
+
+  const candidates = await claimJobs(undefined, available);
 
   for (const job of candidates) {
-    const handler = HANDLERS[job.type as keyof typeof HANDLERS];
-    if (!handler) {
-      const unknownResult = await db
-        .update(schema.jobs)
-        .set({
-          status: "failed",
-          lastError: `unknown job type ${job.type}`,
-          finishedAt: new Date(),
-          attempts: MAX_ATTEMPTS,
-          startedAt: null,
-          leaseToken: null,
-        })
-        .where(
-          and(
-            eq(schema.jobs.id, job.id),
-            eq(schema.jobs.status, "running"),
-            eq(schema.jobs.leaseToken, job.leaseToken),
-          ),
-        )
-        .returning({ id: schema.jobs.id });
-      if (unknownResult.length === 0) {
-        logger.warn({ jobId: job.id }, "unknown job lease was already reaped; status left unchanged");
-      }
-      continue;
-    }
-
-    try {
-      // F-010: 为 handler 添加超时保护
-      // R-007: 超时会中止 provider；leaseToken 继续保护迟到 handler 的业务提交。
-      await runWithAbortTimeout(
-        (signal) => handler({
-            id: job.id,
-            payload: job.payload,
-            workspaceId: job.workspaceId,
-            leaseToken: job.leaseToken,
-            signal,
-          }),
-        MODEL_TIMEOUT_MS,
-        (lateError) => logger.warn(
-          { jobId: job.id, err: lateError },
-          "timed-out handler settled after its lease was released",
-        ),
-      );
-
-      // G-001: 原子条件 UPDATE — 只有 status=running 且 lease_token 与 claim 时相同才提交 succeeded。
-      // 如果 job 被 reaper 回收并重新 claim，lease_token 会不同，UPDATE 影响 0 行。
-      const successResult = await db
-        .update(schema.jobs)
-        .set({ status: "succeeded", finishedAt: new Date(), leaseToken: null })
-        .where(
-          and(
-            eq(schema.jobs.id, job.id),
-            eq(schema.jobs.status, "running"),
-            eq(schema.jobs.leaseToken, job.leaseToken),
-          ),
-        )
-        .returning({ id: schema.jobs.id });
-      if (successResult.length === 0) {
-        logger.warn(
-          { jobId: job.id },
-          "job was reaped or re-claimed during execution — skipping result commit to avoid duplicate side effects",
-        );
-        continue;
-      }
-      logger.info({ jobId: job.id, type: job.type }, "job ok");
-    } catch (err) {
-      const message = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
-      const nextAttempts = job.attempts + 1;
-      const isDead = nextAttempts >= MAX_ATTEMPTS;
-      // 退避：10s / 20s / 40s；dead 任务不再重试。
-      const backoffMs = isDead ? 0 : retryBackoffMs(job.attempts);
-      // G-001: 失败时也使用原子条件 UPDATE，避免覆盖 reaper 的状态
-      const failResult = await db
-        .update(schema.jobs)
-        .set({
-          status: isDead ? "dead" : "pending",
-          attempts: nextAttempts,
-          lastError: message,
-          startedAt: null,
-          leaseToken: null,
-          finishedAt: isDead ? new Date() : null,
-          scheduledAt: new Date(Date.now() + backoffMs),
-        })
-        .where(
-          and(
-            eq(schema.jobs.id, job.id),
-            eq(schema.jobs.status, "running"),
-            eq(schema.jobs.leaseToken, job.leaseToken),
-          ),
-        )
-        .returning({ id: schema.jobs.id });
-      if (failResult.length === 0) {
-        logger.warn(
-          { jobId: job.id },
-          "job was reaped during execution — skipping failure update to avoid double-counting",
-        );
-        continue;
-      }
+    const promise = processJob(job).catch((err) => {
+      // processJob 内部已有完整的 try/catch，此 catch 仅防止意外 rejection。
       logger.error(
-        { jobId: job.id, error: message, attempts: nextAttempts, backoffMs },
-        "job failed",
+        { jobId: job.id, err },
+        "job processing rejected unexpectedly",
       );
-    }
+    });
+    inflight.add(promise);
+    promise.finally(() => inflight.delete(promise));
   }
 }
 
-async function main() {
-  logger.info("AI worker started, polling for jobs…");
+export async function main() {
+  // OPS-01: 启动 Prometheus metrics HTTP 服务器（ADR-0006 §1）
+  const metricsPort = Number(process.env.WORKER_METRICS_PORT ?? 9100);
+  const metricsServer = startMetricsServer(metricsPort);
+  logger.info({ port: metricsPort }, "worker metrics server started");
+
+  logger.info(
+    {
+      leaseTimeoutMs: RESOLVED_TIMEOUT_INFO.leaseTimeoutMs,
+      maxAllowedTimeoutMs: RESOLVED_TIMEOUT_INFO.maxAllowedTimeoutMs,
+      defaultTimeouts: RESOLVED_TIMEOUT_INFO.defaultTimeouts,
+      envOverrides: {
+        global: process.env.WORKER_MODEL_TIMEOUT_MS,
+        generate_card: process.env.WORKER_TIMEOUT_GENERATE_CARD_MS,
+        evaluate_validation: process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS,
+        align_evidence: process.env.WORKER_TIMEOUT_ALIGN_EVIDENCE_MS,
+        parse_source: process.env.WORKER_TIMEOUT_PARSE_SOURCE_MS,
+      },
+    },
+    "handler timeout configuration resolved",
+  );
+
+  logger.info(
+    { concurrency: QUEUE_CONCURRENCY, pollMs: POLL_MS },
+    "AI worker started, polling for jobs…",
+  );
   try {
     while (true) {
       try {
@@ -284,19 +243,34 @@ async function main() {
       } catch (err) {
         logger.error({ err }, "tick failed");
       }
-      // F-010: 优雅关停 — 当前作业结束后退出。
+      // F-010: 优雅关停 — 不再认领新作业，等待在途 job 完成后退出。
       if (shuttingDown) {
+        if (inflight.size > 0) {
+          logger.info(
+            { inflight: inflight.size },
+            "shutdown signal received, waiting for in-flight jobs to finish…",
+          );
+          await Promise.allSettled([...inflight]);
+        }
         logger.info("shutdown complete, exiting");
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }
   } finally {
+    metricsServer.close();
     await closeDatabase();
   }
 }
 
-main().catch((err) => {
-  logger.error({ err }, "AI worker stopped unexpectedly");
-  process.exitCode = 1;
-});
+// Tests can explicitly import the lifecycle functions without starting the
+// polling loop. Requiring NODE_ENV=test prevents an accidental production env
+// variable from silently disabling the worker.
+const autostartDisabledForTest = process.env.NODE_ENV === "test"
+  && process.env.WORKER_DISABLE_AUTOSTART === "1";
+if (!autostartDisabledForTest) {
+  main().catch((err) => {
+    logger.error({ err }, "AI worker stopped unexpectedly");
+    process.exitCode = 1;
+  });
+}

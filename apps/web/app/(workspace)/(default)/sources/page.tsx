@@ -16,7 +16,9 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
-import { api, type SourceRow, type SourceType } from "@/lib/api";
+import { api, ApiError, formatApiError, type SourceRow, type SourceType } from "@/lib/api";
+import { useIsOwner } from "@/lib/use-current-user";
+import { MemberNotice } from "@/components/settings/MemberNotice";
 import { fullTime, relativeTime } from "@/lib/format";
 import {
   buildSourceLibraryReturnTarget,
@@ -73,6 +75,7 @@ function SourceTypeIcon({ type }: { type: SourceType }) {
 }
 
 export default function SourcesPage() {
+  const { isOwner } = useIsOwner();
   const router = useRouter();
   const searchParams = useSearchParams();
   const sourceQueryString = searchParams.toString();
@@ -114,6 +117,8 @@ export default function SourcesPage() {
     message: string;
   } | null>(null);
   const [statusMessage, setStatusMessage] = useState("");
+  const [createNoteTarget, setCreateNoteTarget] = useState<SourceRow | null>(null);
+  const [duplicateNoteInfo, setDuplicateNoteInfo] = useState<{ sourceId: string; noteId: string; noteTitle: string } | null>(null);
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollDelayRef = useRef(2000);
@@ -322,9 +327,7 @@ export default function SourcesPage() {
       await loadSources({ fullReload: false });
       window.requestAnimationFrame(() => createTriggerRef.current?.focus());
     } catch (error) {
-      setCreateError(
-        error instanceof Error ? error.message : "创建来源失败，请重试。",
-      );
+      setCreateError(formatApiError(error, "创建来源失败，请重试。"));
     } finally {
       createRequestRef.current = false;
       setCreating(false);
@@ -363,8 +366,7 @@ export default function SourcesPage() {
       setArchiveTarget(null);
       setRowError({
         sourceId: target.id,
-        message:
-          error instanceof Error ? error.message : "归档失败，请稍后重试。",
+        message: formatApiError(error, "归档失败，请稍后重试。"),
       });
     } finally {
       rowActionRef.current = false;
@@ -372,14 +374,14 @@ export default function SourcesPage() {
     }
   }
 
-  async function handleCreateNote(source: SourceRow) {
+  async function doCreateNote(source: SourceRow, force = false) {
     if (rowActionRef.current) return;
 
     rowActionRef.current = true;
     setCreatingNoteId(source.id);
     setRowError(null);
     try {
-      const result = await api.createNoteFromSource(source.id);
+      const result = await api.createNoteFromSource(source.id, { force });
       router.push(
         withSourceLibraryReturnTarget(
           `/notes/${result.note.id}`,
@@ -387,17 +389,36 @@ export default function SourcesPage() {
         ) ?? `/notes/${result.note.id}`,
       );
     } catch (error) {
+      // 后端返回 duplicate_content 时，提供导航到已有笔记的选项
+      if (error instanceof ApiError && error.status === 409 && error.code === "duplicate_content") {
+        const existingNoteId = error.data?.existingNoteId as string | undefined;
+        const existingNoteTitle = error.data?.existingNoteTitle as string | undefined;
+        if (existingNoteId) {
+          setDuplicateNoteInfo({
+            sourceId: source.id,
+            noteId: existingNoteId,
+            noteTitle: existingNoteTitle || "无标题笔记",
+          });
+          return;
+        }
+      }
       setRowError({
         sourceId: source.id,
-        message:
-          error instanceof Error
-            ? error.message
-            : "暂时无法从这条来源创建笔记。",
+        message: formatApiError(error, "暂时无法从这条来源创建笔记。"),
       });
     } finally {
       rowActionRef.current = false;
       setCreatingNoteId(null);
     }
+  }
+
+  async function handleCreateNote(source: SourceRow) {
+    // 如果已有笔记，先弹确认框
+    if ((source.noteCount ?? 0) > 0) {
+      setCreateNoteTarget(source);
+      return;
+    }
+    await doCreateNote(source, false);
   }
 
   const loadedCounts = useMemo<Record<FilterStatus, number>>(
@@ -455,11 +476,12 @@ export default function SourcesPage() {
     <div className="sources-page">
       <PageHeader
         className="workspace-page-header"
-        kicker="SOURCE LIBRARY · 原始资料库"
+        kicker="来源资料"
         title="来源资料"
         subtitle="把文章、代码与网页收进资料库，等待解析后继续整理为笔记和证据。"
         actions={
           <div className="sources-header-actions">
+            {!isOwner && <MemberNotice compact />}
             <button
               ref={createTriggerRef}
               className="sources-action-primary"
@@ -470,6 +492,7 @@ export default function SourcesPage() {
               type="button"
               aria-expanded={showCreate}
               aria-controls="source-capture-panel"
+              hidden={!isOwner}
             >
               <Icon.Plus aria-hidden="true" />
               <span>{showCreate ? "收起录入台" : "新建来源"}</span>
@@ -479,7 +502,7 @@ export default function SourcesPage() {
         }
       />
 
-      {showCreate && (
+      {showCreate && isOwner && (
         <div className="sources-create-wrap">
           <section
             id="source-capture-panel"
@@ -491,7 +514,7 @@ export default function SourcesPage() {
                 <Icon.Inbox />
               </span>
               <div>
-                <span className="sources-eyebrow">SOURCE CAPTURE</span>
+                <span className="sources-eyebrow">添加资料</span>
                 <h2 id="source-capture-title">收录一份新资料</h2>
                 <p>选择资料类型并放入原始内容，系统会在后台自动拆解和解析。</p>
               </div>
@@ -842,14 +865,20 @@ export default function SourcesPage() {
               </p>
               <div className="sources-state-actions">
                 {sources.length === 0 ? (
-                  <button
-                    className="sources-action-primary"
-                    onClick={() => setShowCreate(true)}
-                    type="button"
-                  >
-                    <Icon.Plus aria-hidden="true" />
-                    收录第一份资料
-                  </button>
+                  isOwner ? (
+                    <button
+                      className="sources-action-primary"
+                      onClick={() => setShowCreate(true)}
+                      type="button"
+                    >
+                      <Icon.Plus aria-hidden="true" />
+                      收录第一份资料
+                    </button>
+                  ) : (
+                    <p className="sources-readonly-hint">
+                      你是此工作区的成员，可以查看和验证资料，但不能创建或修改来源。
+                    </p>
+                  )
                 ) : (
                   <button
                     className="sources-action-secondary"
@@ -966,7 +995,7 @@ export default function SourcesPage() {
                           {relativeTime(source.createdAt)}
                         </time>
 
-                        <div className="sources-card-actions">
+                        <div className="sources-card-actions" hidden={!isOwner}>
                           {source.status === "ready" && (
                             <button
                               className="sources-row-create"
@@ -977,11 +1006,19 @@ export default function SourcesPage() {
                               aria-label={
                                 creatingNoteId === source.id
                                   ? `正在为${source.title || "未命名来源"}创建笔记`
-                                  : `为${source.title || "未命名来源"}创建笔记`
+                                  : (source.noteCount ?? 0) > 0
+                                    ? `再为${source.title || "未命名来源"}创建一篇笔记（已有 ${(source.noteCount ?? 0)} 篇）`
+                                    : `为${source.title || "未命名来源"}创建笔记`
                               }
                             >
                               <Icon.Sparkle aria-hidden="true" />
-                              <span>{creatingNoteId === source.id ? "创建中…" : "创建笔记"}</span>
+                              <span>
+                                {creatingNoteId === source.id
+                                  ? "创建中…"
+                                  : (source.noteCount ?? 0) > 0
+                                    ? `再创建一篇（${source.noteCount}）`
+                                    : "创建笔记"}
+                              </span>
                             </button>
                           )}
                           <button
@@ -1063,6 +1100,53 @@ export default function SourcesPage() {
         onConfirm={() => void confirmArchive()}
         onCancel={() => {
           if (!archivingId) setArchiveTarget(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={createNoteTarget !== null}
+        title="再创建一篇笔记？"
+        message={`这份来源已经创建过 ${createNoteTarget?.noteCount ?? 0} 篇笔记。确定要基于相同内容再创建一篇新笔记吗？`}
+        confirmLabel="确认创建"
+        loading={creatingNoteId === createNoteTarget?.id}
+        onConfirm={() => {
+          if (createNoteTarget) {
+            const target = createNoteTarget;
+            setCreateNoteTarget(null);
+            void doCreateNote(target, false);
+          }
+        }}
+        onCancel={() => {
+          if (!creatingNoteId) setCreateNoteTarget(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={duplicateNoteInfo !== null}
+        title="已存在内容相同的笔记"
+        message={`检测到该来源已创建过一篇内容完全相同的笔记：“${duplicateNoteInfo?.noteTitle}”。你可以打开已有笔记，或仍然创建一篇新的。`}
+        confirmLabel="仍要创建"
+        cancelLabel="打开已有笔记"
+        loading={creatingNoteId === duplicateNoteInfo?.sourceId}
+        onConfirm={() => {
+          if (duplicateNoteInfo) {
+            const { sourceId } = duplicateNoteInfo;
+            const source = sources.find((s) => s.id === sourceId);
+            setDuplicateNoteInfo(null);
+            if (source) void doCreateNote(source, true);
+          }
+        }}
+        onCancel={() => {
+          if (!creatingNoteId && duplicateNoteInfo) {
+            const noteId = duplicateNoteInfo.noteId;
+            setDuplicateNoteInfo(null);
+            router.push(
+              withSourceLibraryReturnTarget(
+                `/notes/${noteId}`,
+                sourceLibraryReturnTarget,
+              ) ?? `/notes/${noteId}`,
+            );
+          }
         }}
       />
     </div>

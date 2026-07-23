@@ -20,6 +20,8 @@ import {
   type SourceStatus,
   type SourceType,
 } from "@/lib/api";
+import { useIsOwner } from "@/lib/use-current-user";
+import { MemberNotice } from "@/components/settings/MemberNotice";
 import { AccountMenu } from "@/components/account/AccountMenu";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -65,6 +67,7 @@ const SEGMENT_TYPE_LABELS: Record<SourceSegment["segmentType"], string> = {
   code: "代码",
   quote: "引用",
   list: "列表",
+  image: "图片",
 };
 
 const POLL_INTERVALS = [2000, 5000, 10000] as const;
@@ -181,6 +184,7 @@ function OriginLink({ origin, compact = false }: { origin: string; compact?: boo
 }
 
 export default function SourceDetailPage() {
+  const { isOwner } = useIsOwner();
   const params = useParams<{ id: string }>();
   const sourceId = params?.id;
   const router = useRouter();
@@ -225,6 +229,8 @@ export default function SourceDetailPage() {
   const [relatedNotesError, setRelatedNotesError] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const [createConfirmOpen, setCreateConfirmOpen] = useState(false);
+  const [duplicateNote, setDuplicateNote] = useState<{ id: string; title: string } | null>(null);
 
   const loadSource = useCallback(
     async (showLoading = false) => {
@@ -353,13 +359,13 @@ export default function SourceDetailPage() {
     return () => window.clearTimeout(timer);
   }, [refreshAnnouncement]);
 
-  async function handleCreateNote() {
+  async function doCreateNote(force = false) {
     if (!data || converting) return;
     setConverting(true);
     setActionError(null);
 
     try {
-      const result = await api.createNoteFromSource(data.source.id);
+      const result = await api.createNoteFromSource(data.source.id, { force });
       const noteDestination = `/notes/${result.note.id}`;
       const target = searchReturnTarget
         ? (withSearchReturnTarget(
@@ -384,11 +390,35 @@ export default function SourceDetailPage() {
         router.push(target);
       }
     } catch (error) {
-      if (mountedRef.current) {
-        setActionError(getReadableError(error, "创建笔记失败，请稍后重试。"));
-        setConverting(false);
+      if (!mountedRef.current) return;
+      // 后端返回 duplicate_content 时，提示用户已有相同内容的笔记
+      if (error instanceof ApiError && error.status === 409 && error.code === "duplicate_content") {
+        const existingNoteId = error.data?.existingNoteId as string | undefined;
+        const existingNoteTitle = error.data?.existingNoteTitle as string | undefined;
+        if (existingNoteId) {
+          setDuplicateNote({ id: existingNoteId, title: existingNoteTitle || "无标题笔记" });
+          setConverting(false);
+          return;
+        }
       }
+      setActionError(getReadableError(error, "创建笔记失败，请稍后重试。"));
+      setConverting(false);
     }
+  }
+
+  async function handleCreateNote() {
+    if (!data || converting) return;
+    // 如果已有关联笔记，先弹确认框
+    if (relatedNotes.length > 0) {
+      setCreateConfirmOpen(true);
+      return;
+    }
+    await doCreateNote(false);
+  }
+
+  async function handleConfirmCreate() {
+    setCreateConfirmOpen(false);
+    await doCreateNote(false);
   }
 
   async function handleArchive() {
@@ -541,7 +571,7 @@ export default function SourceDetailPage() {
     0,
     (rawContent?.length ?? 0) - visibleRawCharacterCount,
   );
-  const canCreateNote = source.status === "ready" && hasSegments;
+  const canCreateNote = isOwner && source.status === "ready" && hasSegments;
   const originUrl = isOpenableOrigin(source.origin) ? source.origin : null;
   const characterCount =
     rawContent?.length ?? segments.reduce((total, segment) => total + segment.text.length, 0);
@@ -745,7 +775,7 @@ export default function SourceDetailPage() {
                   打开原始网页
                 </a>
               )}
-              {source.status !== "archived" && (
+              {source.status !== "archived" && isOwner && (
                 <button
                   type="button"
                   className="source-detail-archive-button"
@@ -760,6 +790,7 @@ export default function SourceDetailPage() {
         </section>
       ) : (
         <div className="source-detail-body">
+          {!isOwner && <MemberNotice />}
           <section className="source-detail-hero" aria-labelledby="source-detail-title">
             <div className="source-detail-hero-kicker">
               <span className="source-detail-hero-type" data-type={source.type}>
@@ -1040,6 +1071,50 @@ export default function SourceDetailPage() {
         onConfirm={() => void handleArchive()}
         onCancel={() => {
           if (!archiving) setArchiveOpen(false);
+        }}
+      />
+
+      <ConfirmDialog
+        open={createConfirmOpen}
+        title={`再创建一篇笔记？`}
+        message={`这份来源已经创建过 ${relatedNotes.length} 篇笔记。确定要基于相同内容再创建一篇新笔记吗？`}
+        confirmLabel="确认创建"
+        loading={converting}
+        onConfirm={() => void handleConfirmCreate()}
+        onCancel={() => {
+          if (!converting) setCreateConfirmOpen(false);
+        }}
+      />
+
+      <ConfirmDialog
+        open={duplicateNote !== null}
+        title="已存在内容相同的笔记"
+        message={`检测到该来源已创建过一篇内容完全相同的笔记：“${duplicateNote?.title}”。你可以打开已有笔记，或仍然创建一篇新的。`}
+        confirmLabel="仍要创建"
+        cancelLabel="打开已有笔记"
+        loading={converting}
+        onConfirm={() => {
+          setDuplicateNote(null);
+          void doCreateNote(true);
+        }}
+        onCancel={() => {
+          if (!converting && duplicateNote) {
+            const noteId = duplicateNote.id;
+            setDuplicateNote(null);
+            const noteDestination = `/notes/${noteId}`;
+            const target = searchReturnTarget
+              ? (withSearchReturnTarget(noteDestination, searchReturnTarget) ?? noteDestination)
+              : todayReturnTarget
+                ? (withTodayReturnTarget(noteDestination, todayReturnTarget) ?? noteDestination)
+                : sourceDetailReturnTarget
+                  ? (withSourceDetailReturnTarget(noteDestination, sourceDetailReturnTarget) ?? noteDestination)
+                  : noteDestination;
+            if (searchReturnTarget || todayReturnTarget || sourceDetailReturnTarget) {
+              router.replace(target);
+            } else {
+              router.push(target);
+            }
+          }
         }}
       />
     </div>

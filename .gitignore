@@ -1,4 +1,5 @@
 node_modules/
+.github/scripts/node_modules
 .next/
 dist/
 build/
@@ -9,11 +10,14 @@ build/
 coverage/
 .turbo/
 *.tsbuildinfo
+/release/artifacts/
 
 # Temporary, output, and private archive directories
 /work/
 /tmp/
 /outputs/
+/tests/e2e/playwright-report/
+/tests/e2e/test-results/
 /project-archive/
 /product-design-assets/
 scripts/*.py

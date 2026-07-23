@@ -1,4 +1,4 @@
-import { and, asc, eq, desc, sql, inArray, count, or } from "drizzle-orm";
+import { and, asc, eq, desc, sql, inArray, count, or, isNull } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { notes, noteVersions } from "../../db/schema/note.ts";
@@ -36,15 +36,26 @@ export async function listCards(workspaceId: string, opts?: { cursor?: string; l
   if (opts?.cursor) {
     const decoded = decodeCursor(opts.cursor);
     if (decoded) {
-      const cursorTs = new Date(decoded.timestamp);
+      const cursorTs = decoded.timestamp;
       const cursorId = decoded.id;
-      conditions.push(sql`(${learningCards.createdAt}, ${learningCards.id}) < (${cursorTs}, ${cursorId})`);
+      conditions.push(
+        sql`(${learningCards.createdAt}, ${learningCards.id}) < (${cursorTs}::timestamptz, ${cursorId}::uuid)`,
+      );
     }
   }
-  const cards = await db.query.learningCards.findMany({
+  const cardRows = await db.query.learningCards.findMany({
     where: and(...conditions),
     orderBy: [desc(learningCards.createdAt), desc(learningCards.id)],
-    limit,
+    limit: limit + 1,
+    extras: {
+      cursorTimestamp: sql<string>`to_char(${learningCards.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_timestamp"),
+    },
+  });
+  const hasMore = cardRows.length > limit;
+  const cardsWithCursor = cardRows.slice(0, limit);
+  const cards = cardsWithCursor.map(({ cursorTimestamp, ...card }) => {
+    if (!cursorTimestamp) throw new Error("card cursor timestamp is missing");
+    return card;
   });
 
   // R-019: 服务端返回实际总数
@@ -139,9 +150,9 @@ export async function listCards(workspaceId: string, opts?: { cursor?: string; l
   }
 
   // R-019: 使用最后一条记录的 (createdAt, id) 作为下一页 cursor
-  const lastCard = cards[cards.length - 1];
-  const nextCursor = cards.length === limit && lastCard
-    ? encodeCursor(lastCard.createdAt, lastCard.id)
+  const lastCard = cardsWithCursor[cardsWithCursor.length - 1];
+  const nextCursor = hasMore && lastCard
+    ? encodeCursor(lastCard.cursorTimestamp, lastCard.id)
     : null;
 
   return {
@@ -183,7 +194,7 @@ export async function regenerateCard(cardId: string, workspaceId: string, userId
   if (!version) return null;
 
   const note = await db.query.notes.findFirst({
-    where: and(eq(notes.id, version.noteId), eq(notes.workspaceId, workspaceId)),
+    where: and(eq(notes.id, version.noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
   });
   if (!note) return null;
 
@@ -202,6 +213,7 @@ export async function regenerateCard(cardId: string, workspaceId: string, userId
   const newJob = await createJob({
     type: JobType.GENERATE_CARD,
     workspaceId,
+    requestedBy: userId,
     // Preserve the actor who requested regeneration for AI audit attribution;
     // the note author may be a different workspace member.
     payload: { noteVersionId: useVersionId, userId, oldCardId: cardId },
@@ -264,7 +276,7 @@ export async function dismissCard(cardId: string, workspaceId: string) {
     // 关联的 pending review 标记 cancelled
     await tx
       .update(reviewSchedules)
-      .set({ status: ReviewStatus.CANCELLED })
+      .set({ status: ReviewStatus.CANCELLED, updatedAt: new Date() })
       .where(
         and(
           eq(reviewSchedules.workspaceId, workspaceId),

@@ -11,13 +11,13 @@
 
 export interface ParsedSegment {
   text: string;
-  segmentType: "paragraph" | "heading" | "code" | "quote" | "list";
+  segmentType: "paragraph" | "heading" | "code" | "quote" | "list" | "image";
   charStart: number;
   charEnd: number;
 }
 
 export interface ParsedBlock {
-  type: "paragraph" | "heading" | "code" | "list" | "quote";
+  type: "paragraph" | "heading" | "code" | "list" | "quote" | "image";
   content: string;
 }
 
@@ -208,6 +208,17 @@ function parseMarkdown(content: string): ParsedSegment[] {
       flush();
       currentText = line + "\n";
       currentType = "heading";
+      charStart = currentOffset;
+      currentOffset += line.length + 1;
+      flush();
+      continue;
+    }
+
+    // 图片行（独立行，![alt](url) 格式）
+    if (/^!\[[^\]]*\]\([^)]+\)\s*$/.test(line)) {
+      flush();
+      currentText = line + "\n";
+      currentType = "image";
       charStart = currentOffset;
       currentOffset += line.length + 1;
       flush();

@@ -27,6 +27,10 @@ export const learningCards = pgTable(
     supersededByCardId: uuid("superseded_by_card_id"), // regenerate 时指向新卡
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    // CONC-10-edge: 专用标记列，仅在 deleteNote 归档卡片时设为 deletedAt，
+    // restoreDeletedNote 恢复时用此列精确匹配并清除。不受其他操作（如
+    // card/service archiveCard）覆盖 updatedAt 的影响。
+    archivedByNoteDeletionAt: timestamp("archived_by_note_deletion_at", { withTimezone: true }),
   },
   (t) => ({
     noteIdx: index("learning_cards_note_idx").on(t.noteVersionId),

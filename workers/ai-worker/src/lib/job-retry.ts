@@ -1,4 +1,4 @@
-const RETRY_BACKOFF_BASE_MS = 10_000;
+const RETRY_BACKOFF_BASE_MS = 2_000;
 
 /**
  * Exponential retry delay based on failures that happened before this attempt.

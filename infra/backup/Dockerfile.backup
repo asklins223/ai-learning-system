@@ -1,0 +1,59 @@
+# OPS-01: Backup runner container (ADR-0007)
+#
+# Contains: age (encryption), mc (MinIO client), pg_dump (PostgreSQL client),
+#           cron (scheduler), curl/jq (health checks)
+#
+# This container runs the Alpha backup infrastructure:
+#   1. setup-backup-infrastructure.sh — generate age keys + create S3 bucket
+#   2. alpha-backup-cron.sh — scheduled backup/rotate/freshness-check
+#   3. rc-restore-verify.sh — RC restore verification
+#
+# Usage in docker-compose.alpha.yml:
+#   docker compose -f docker-compose.alpha.yml run --rm backup-runner init
+#   docker compose -f docker-compose.alpha.yml run --rm backup-runner backup
+#   docker compose -f docker-compose.alpha.yml run --rm backup-runner restore-verify
+
+FROM alpine:3.20
+
+# Install: PostgreSQL client (pg_dump/pg_restore), age (encryption),
+# MinIO client (mc), cron, curl, jq, bash, coreutils
+RUN apk add --no-cache \
+    postgresql16-client \
+    age \
+    curl \
+    jq \
+    bash \
+    python3 \
+    coreutils \
+    ca-certificates \
+    && \
+    # Install MinIO client (mc)
+    arch="$(uname -m)" && \
+    case "$arch" in \
+      x86_64) mc_arch="amd64" ;; \
+      aarch64) mc_arch="arm64" ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://dl.min.io/client/mc/release/linux-${mc_arch}/mc" \
+      -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc && \
+    # Verify tools
+    pg_dump --version && \
+    age --version && \
+    mc --version
+
+# Copy backup scripts
+COPY infra/backup/backup.sh /opt/ailearn/backup.sh
+COPY infra/backup/restore.sh /opt/ailearn/restore.sh
+COPY infra/backup/rotate.sh /opt/ailearn/rotate.sh
+COPY infra/backup/freshness-check.sh /opt/ailearn/freshness-check.sh
+COPY infra/backup/manifest.schema.json /opt/ailearn/manifest.schema.json
+COPY infra/backup/setup-backup-infrastructure.sh /opt/ailearn/setup-backup-infrastructure.sh
+COPY infra/backup/alpha-backup-cron.sh /opt/ailearn/alpha-backup-cron.sh
+COPY infra/backup/rc-restore-verify.sh /opt/ailearn/rc-restore-verify.sh
+RUN chmod +x /opt/ailearn/*.sh
+
+WORKDIR /opt/ailearn
+
+# Default entrypoint: show available commands
+CMD ["bash", "-c", "echo 'Usage: init | backup | restore-verify | freshness-check | cron'; exit 0"]

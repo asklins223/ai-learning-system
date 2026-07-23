@@ -26,7 +26,7 @@ export const primaryNavItems: NavItem[] = [
     icon: Icon.Compass,
     label: "今日学习",
     href: "/",
-    mobileLabel: "学习流",
+    mobileLabel: "学习",
     showInMobile: true,
     mobileGroup: "primary",
   },
@@ -73,7 +73,7 @@ export const mineNavItems: NavItem[] = [
   },
   {
     icon: Icon.Timeline,
-    label: "今日变化",
+    label: "学习动态",
     href: "/today",
   },
 ];
@@ -95,9 +95,22 @@ export const allSidebarNavItems: NavItem[] = [
   ...mineNavItems,
 ];
 
+/** 为平板顶栏等紧凑壳层提供稳定的当前页面名称。 */
+export function getCurrentPageLabel(pathname: string | null): string {
+  if (!pathname) return "理解引擎";
+  const item = allSidebarNavItems.find((candidate) => isNavActive(candidate.href, pathname));
+  if (item) return item.label;
+  if (pathname.startsWith("/settings")) return "设置";
+  if (pathname.startsWith("/benchmark")) return "理解评测";
+  if (pathname.startsWith("/cards/")) return "学习卡详情";
+  if (pathname.startsWith("/notes/")) return "笔记编辑";
+  if (pathname.startsWith("/sources/")) return "来源阅读";
+  return "理解引擎";
+}
+
 /** 移动底部导航的 5 个固定入口 */
 export const mobileBottomNavItems: NavItem[] = [
-  primaryNavItems[0], // 学习流 → /
+  primaryNavItems[0], // 学习 → /
   primaryNavItems[1], // 复习 → /review
   {
     icon: Icon.Plus,

@@ -3,7 +3,6 @@ import { decryptAiCredential } from "@ailearn/shared/ai-credentials";
 import {
   resolveDashScopeTextEndpoint,
   resolveOpenAIChatCompletionsUrl,
-  type DashScopeTextProtocol,
 } from "@ailearn/shared/ai-endpoints";
 import {
   postJsonToPublicEndpoint,
@@ -183,7 +182,7 @@ function connectionErrorForResponse(
   );
 }
 
-function hasExpectedContent(protocol: DashScopeTextProtocol | "openai_compatible", body: unknown): boolean {
+function hasExpectedContent(body: unknown): boolean {
   const asRecord = (value: unknown): Record<string, unknown> | null =>
     value !== null && typeof value === "object" && !Array.isArray(value)
       ? value as Record<string, unknown>
@@ -197,12 +196,7 @@ function hasExpectedContent(protocol: DashScopeTextProtocol | "openai_compatible
 
   const payload = asRecord(body);
   if (!payload) return false;
-  const content = protocol === "native_text"
-    ? (() => {
-        const output = asRecord(payload.output);
-        return firstChoiceContent(output?.choices) ?? output?.text;
-      })()
-    : firstChoiceContent(payload.choices);
+  const content = firstChoiceContent(payload.choices);
   return typeof content === "string" && Boolean(content.trim());
 }
 
@@ -226,20 +220,13 @@ export async function testAIModelRuntimeConnection(
   const dashScopeEndpoint = runtime.provider === "dashscope"
     ? resolveDashScopeTextEndpoint(runtime.baseUrl, runtime.model)
     : null;
-  const protocol = dashScopeEndpoint?.protocol ?? "openai_compatible";
   const endpoint = dashScopeEndpoint?.url ?? resolveOpenAIChatCompletionsUrl(runtime.baseUrl);
   const headers = {
     Accept: "application/json",
     Authorization: `Bearer ${runtime.apiKey}`,
   };
   const messages = [{ role: "user", content: FIXED_TEST_PROMPT }];
-  const body = protocol === "native_text"
-    ? {
-        model: runtime.model,
-        input: { messages },
-        parameters: { result_format: "message", temperature: 0 },
-      }
-    : { model: runtime.model, messages, temperature: 0 };
+  const body = { model: runtime.model, messages, temperature: 0 };
 
   try {
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
@@ -253,7 +240,7 @@ export async function testAIModelRuntimeConnection(
     if (response.status < 200 || response.status >= 300) {
       throw connectionErrorForResponse(response, runtime, durationMs);
     }
-    if (!hasExpectedContent(protocol, response.body)) {
+    if (!hasExpectedContent(response.body)) {
       throw new AIModelConnectionError(
         "接口已响应，但返回格式与所选 Provider 不兼容",
         "incompatible_response",

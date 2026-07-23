@@ -18,7 +18,7 @@ import {
 
 export class OpenAICompatibleProvider implements AIProvider {
   id = "openai_compatible";
-  promptVersion = "v1-openai-compatible";
+  promptVersion = "v6-openai-compatible";
   readonly modelId: string;
   private readonly endpoint: string;
   private readonly apiKey: string;
@@ -37,10 +37,12 @@ export class OpenAICompatibleProvider implements AIProvider {
   }
 
   async generateCard(input: GenerateCardInput, signal?: AbortSignal): Promise<LearningCardOutput> {
+    // temperature 0.3：比 0.2 略高，有助于模型进行抽象提炼而非直接截取原文。
+    // max_tokens 4096：配合 key_points 限制为 5 个，覆盖 95%+ 场景。
     const raw = await this.call([
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: JSON.stringify({ note_title: input.noteTitle, blocks: input.blocks }) },
-    ], signal);
+    ], signal, 4096, 0.3);
     const result = learningCardOutputSchema.safeParse(parseModelJson(raw));
     if (!result.success) {
       throw new Error(`OpenAI-compatible output failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
@@ -52,7 +54,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     const raw = await this.call([
       { role: "system", content: EVAL_SYSTEM_PROMPT },
       { role: "user", content: JSON.stringify(input) },
-    ], signal);
+    ], signal, 2048);
     const result = evaluateValidationOutputSchema.safeParse(parseModelJson(raw));
     if (!result.success) {
       throw new Error(`OpenAI-compatible evaluation failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
@@ -63,12 +65,14 @@ export class OpenAICompatibleProvider implements AIProvider {
   private async call(
     messages: Array<{ role: "system" | "user"; content: string }>,
     signal?: AbortSignal,
+    maxTokens = 4096,
+    temperature = 0.3,
   ): Promise<string> {
     if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("AI request aborted");
     const response = await this.request(
       this.endpoint,
       { Accept: "application/json", Authorization: `Bearer ${this.apiKey}` },
-      { model: this.modelId, messages, temperature: 0.2 },
+      { model: this.modelId, messages, temperature, max_tokens: maxTokens, stream: false },
       signal,
     );
     if (response.status < 200 || response.status >= 300) {

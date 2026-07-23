@@ -812,6 +812,42 @@
   display: none;
 }
 
+/* 成员只读提示（替代快速捕获面板） */
+.learning-home-readonly-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--color-evidence) 24%, var(--color-border));
+  border-radius: var(--radius-sm);
+  background: var(--color-evidence-soft);
+  color: var(--color-evidence-text);
+  font: 500 12px/1.55 var(--font-ui);
+}
+
+.learning-home-readonly-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
+.learning-home-readonly-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.learning-home-readonly-notice strong {
+  display: block;
+  font: 630 12.5px/1.4 var(--font-ui);
+  color: var(--color-evidence-text);
+}
+
+.learning-home-readonly-notice span {
+  font: 450 11.5px/1.55 var(--font-ui);
+  color: var(--color-text-secondary);
+}
+
 .learning-home-queue-header {
   padding: 11px 14px;
   border-bottom: 1px solid var(--color-divider);
@@ -1795,5 +1831,367 @@ html[data-theme="night"] .learning-home-focus-cta:hover {
   .learning-home-focus-skeleton-title,
   .learning-home-focus-skeleton-button {
     animation-duration: 1.5s;
+  }
+}
+
+/* First-use desk ---------------------------------------------------------
+ * A genuinely empty workspace is not a smaller version of the dashboard.
+ * It is one coherent starting surface: context, first capture, real route.
+ */
+
+.learning-home[data-home-state="first-use"] {
+  background:
+    radial-gradient(circle at 72% 2%, color-mix(in srgb, var(--color-success-soft) 52%, transparent), transparent 30%),
+    linear-gradient(180deg, color-mix(in srgb, var(--color-paper-muted) 46%, transparent), transparent 520px);
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-content {
+  width: 100%;
+  max-width: 1308px;
+  margin-inline: auto;
+  padding-top: 32px;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-desk {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.86fr) minmax(440px, 1.14fr);
+  grid-template-areas:
+    "intro capture"
+    "guide capture";
+  gap: 0;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 22px;
+  background: var(--color-paper);
+  box-shadow: var(--shadow-paper);
+}
+
+.learning-home[data-home-state="first-use"] :is(.learning-home-primary, .learning-home-tools) {
+  display: contents;
+}
+
+.learning-home-starter-intro {
+  grid-area: intro;
+  min-width: 0;
+  padding: 42px 38px 34px;
+  border-right: 1px solid var(--color-divider);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--color-success-soft) 46%, var(--color-paper)) 0%, var(--color-paper) 66%);
+}
+
+.learning-home-starter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-action);
+  font: 700 11px/1.4 var(--font-ui);
+  letter-spacing: 0.06em;
+}
+
+.learning-home-starter-label svg {
+  width: 18px;
+  height: 18px;
+}
+
+.learning-home-starter-intro h2 {
+  max-width: 500px;
+  margin: 17px 0 0;
+  color: var(--color-text);
+  font: 500 clamp(31px, 3vw, 44px)/1.18 var(--font-editorial);
+  letter-spacing: -0.038em;
+  text-wrap: balance;
+}
+
+.learning-home-starter-intro > p {
+  max-width: 520px;
+  margin: 17px 0 0;
+  color: var(--color-text-secondary);
+  font: 400 14px/1.75 var(--font-ui);
+}
+
+.learning-home-starter-outcome {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  max-width: 520px;
+  margin-top: 30px;
+  padding-top: 22px;
+  border-top: 1px solid var(--color-divider);
+}
+
+.learning-home-starter-outcome > span {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--color-success-soft);
+  color: var(--color-success-text);
+}
+
+.learning-home-starter-outcome svg {
+  width: 19px;
+  height: 19px;
+}
+
+.learning-home-starter-outcome strong {
+  display: block;
+  color: var(--color-text);
+  font: 650 12px/1.45 var(--font-ui);
+}
+
+.learning-home-starter-outcome p {
+  margin: 3px 0 0;
+  color: var(--color-text-tertiary);
+  font: 400 11px/1.55 var(--font-ui);
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture {
+  grid-area: capture;
+  min-width: 0;
+  /* Percentage height plus vertical margins creates a cyclic grid size on scroll. */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  margin: 30px;
+  padding: 27px;
+  border-color: var(--color-border-strong);
+  border-radius: 17px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-paper-muted) 72%, var(--color-paper)), var(--color-paper));
+  box-shadow: none;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-tool-header {
+  align-items: flex-start;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-tool-heading {
+  gap: 13px;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-tool-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--color-success-soft);
+  color: var(--color-success-text);
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-tool-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-tool-heading p {
+  color: var(--color-action);
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-tool-heading h2 {
+  margin-top: 3px;
+  font-size: 24px;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture-form {
+  flex: 1;
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture-input {
+  min-height: 210px;
+  max-height: 360px;
+  flex: 1;
+  padding: 17px 18px;
+  border-color: var(--color-border-strong);
+  border-radius: 13px;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture-footer {
+  align-items: center;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture-hint {
+  max-width: 245px;
+  line-height: 1.55;
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture-submit {
+  min-width: 132px;
+  height: 48px;
+  border-color: transparent;
+  border-radius: 11px;
+  background: var(--color-action);
+  color: var(--color-on-action);
+  font-size: 13px;
+  box-shadow: 0 7px 16px color-mix(in srgb, var(--color-action) 18%, transparent);
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture-submit:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--color-action-hover);
+}
+
+.learning-home[data-home-state="first-use"] .learning-home-capture-submit:disabled {
+  background: color-mix(in srgb, var(--color-action) 55%, var(--color-paper));
+  color: color-mix(in srgb, var(--color-on-action) 82%, transparent);
+  box-shadow: none;
+  opacity: 1;
+}
+
+html[data-theme="night"] .learning-home[data-home-state="first-use"] .learning-home-starter-intro {
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--color-success-soft) 38%, var(--color-paper)) 0%, var(--color-paper) 68%);
+}
+
+html[data-theme="night"] .learning-home[data-home-state="first-use"] .learning-home-capture {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-paper-muted) 80%, var(--color-paper)), var(--color-paper));
+}
+
+@media (max-width: 959px) {
+  .learning-home[data-home-state="first-use"] .learning-home-content {
+    max-width: 760px;
+    padding-top: 24px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-desk {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "intro"
+      "capture"
+      "guide";
+  }
+
+  .learning-home-starter-intro {
+    padding: 38px 34px 31px;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-divider);
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture {
+    min-height: 0;
+    margin: 0;
+    padding: 29px 34px 32px;
+    border: 0;
+    border-bottom: 1px solid var(--color-divider);
+    border-radius: 0;
+    background: var(--color-paper);
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-form {
+    display: flex;
+    grid-template-columns: none;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-input {
+    min-height: 170px;
+  }
+}
+
+@media (max-width: 639px) {
+  .learning-home[data-home-state="first-use"] .learning-home-header {
+    padding-bottom: 19px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-heading h1 {
+    max-width: 245px;
+    font-size: 29px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-subtitle {
+    max-width: 255px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-content {
+    gap: 14px;
+    padding: 16px 14px 30px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-desk {
+    border-radius: 17px;
+  }
+
+  .learning-home-starter-intro {
+    padding: 28px 22px 25px;
+  }
+
+  .learning-home-starter-label {
+    font-size: 10px;
+  }
+
+  .learning-home-starter-intro h2 {
+    margin-top: 13px;
+    font-size: 30px;
+    line-height: 1.22;
+  }
+
+  .learning-home-starter-intro > p {
+    margin-top: 13px;
+    font-size: 12.5px;
+    line-height: 1.68;
+  }
+
+  .learning-home-starter-outcome {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 10px;
+    margin-top: 22px;
+    padding-top: 18px;
+  }
+
+  .learning-home-starter-outcome > span {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture {
+    padding: 24px 22px 26px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-tool-icon {
+    width: 38px;
+    height: 38px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-tool-heading h2 {
+    font-size: 21px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-trigger,
+  .learning-home[data-home-state="first-use"] .learning-home-capture-collapse {
+    display: none;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-form {
+    display: flex;
+    margin-top: 18px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-input {
+    grid-row: auto;
+    min-height: 154px;
+    padding: 14px;
+    font-size: 13px;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-hint {
+    max-width: none;
+  }
+
+  .learning-home[data-home-state="first-use"] .learning-home-capture-submit {
+    width: 100%;
+    min-width: 0;
+    height: 48px;
   }
 }

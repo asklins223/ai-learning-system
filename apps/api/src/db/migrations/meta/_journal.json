@@ -127,6 +127,160 @@
       "when": 1784437400000,
       "tag": "0017_user_ai_model_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784523800000,
+      "tag": "0018_sec01_jobs_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1784610200000,
+      "tag": "0019_sec01_rls_policies_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1784696600000,
+      "tag": "0020_loop01_review_attempts_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1784783000000,
+      "tag": "0021_sec02_invites_onboarding_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1784869400000,
+      "tag": "0022_sec01_job_functions_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1784955800000,
+      "tag": "0023_sec01_validation_feedback_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1785042200000,
+      "tag": "0024_sec01_rls_enforce",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1785128600000,
+      "tag": "0025_adr0009_personal_workspace",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1785215000000,
+      "tag": "0026_profile_user_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1785301400000,
+      "tag": "0027_sec01_rls_expansion_failsafe",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1785387800000,
+      "tag": "0028_adr0009_personal_workspace_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1785474200000,
+      "tag": "0029_note_version_content_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1785560600000,
+      "tag": "0030_job_queue_priority",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1785647000000,
+      "tag": "0031_job_retry_backoff_adjust",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1785733400000,
+      "tag": "0032_note_soft_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1785819800000,
+      "tag": "0033_note_version_updated_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1785906200000,
+      "tag": "0034_validation_events_input_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785992600000,
+      "tag": "0035_review_schedules_updated_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1786079000000,
+      "tag": "0036_learning_cards_archived_by_note_deletion_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1786165400000,
+      "tag": "0037_review_attempt_active_unique_and_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1786251800000,
+      "tag": "0038_sec01_rls_enforce_policy_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1786338200000,
+      "tag": "0039_sec01_policy_catalog_repair",
+      "breakpoints": true
     }
   ]
 }

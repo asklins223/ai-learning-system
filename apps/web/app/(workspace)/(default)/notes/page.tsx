@@ -13,7 +13,9 @@ import {
   MarkdownFilePicker,
   useMarkdownFileSelection,
 } from "@/components/MarkdownFilePicker";
-import { api, NoteHeader } from "@/lib/api";
+import { api, NoteHeader, formatApiError } from "@/lib/api";
+import { useIsOwner } from "@/lib/use-current-user";
+import { MemberNotice } from "@/components/settings/MemberNotice";
 import { relativeTime } from "@/lib/format";
 
 function formatNoteDate(value: string) {
@@ -35,6 +37,7 @@ function formatNoteDate(value: string) {
  * Markdown、重命名、删除和加载更早笔记。这是对象库，不是证据状态看板。
  */
 export default function NotesIndex() {
+  const { isOwner } = useIsOwner();
   const router = useRouter();
   const [items, setItems] = useState<NoteHeader[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -46,6 +49,8 @@ export default function NotesIndex() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "recent">("all");
+  // P1-2: 回收站视图切换
+  const [viewMode, setViewMode] = useState<"all" | "trash">("all");
 
   // 重命名
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -80,6 +85,10 @@ export default function NotesIndex() {
   const importTriggerRef = useRef<HTMLButtonElement>(null);
   const menuInitialFocusRef = useRef<"first" | "last">("first");
 
+  // 恢复
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+
   // 首屏加载
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -88,7 +97,7 @@ export default function NotesIndex() {
     setItems(null);
     setLoadError(null);
     api
-      .listNotes()
+      .listNotes({ trashed: viewMode === "trash" })
       .then((r) => {
         if (!active) return;
         setItems(r.items);
@@ -104,7 +113,7 @@ export default function NotesIndex() {
     return () => {
       active = false;
     };
-  }, [loadNonce]);
+  }, [loadNonce, viewMode]);
 
   async function loadMore() {
     if (
@@ -117,7 +126,7 @@ export default function NotesIndex() {
     setLoadingMore(true);
     setLoadMoreError(null);
     try {
-      const r = await api.listNotes({ cursor: nextCursor, limit: 50 });
+      const r = await api.listNotes({ cursor: nextCursor, limit: 50, trashed: viewMode === "trash" });
       setItems((previous) => {
         const current = previous ?? [];
         const knownIds = new Set(current.map((note) => note.id));
@@ -139,9 +148,7 @@ export default function NotesIndex() {
       const { note } = await api.createNote("");
       router.push(`/notes/${note.id}`);
     } catch (error) {
-      setCreateError(
-        error instanceof Error ? error.message : "暂时无法创建笔记，请重试。",
-      );
+      setCreateError(formatApiError(error, "暂时无法创建笔记，请重试。"));
       setCreating(false);
     }
   }
@@ -191,7 +198,7 @@ export default function NotesIndex() {
       }
       // 导入已经完成后，列表刷新失败不应被误报为“导入失败”。
       try {
-        const refreshed = await api.listNotes();
+        const refreshed = await api.listNotes({ trashed: viewMode === "trash" });
         setItems(refreshed.items);
         setNextCursor(refreshed.nextCursor);
         setNoteTotal(refreshed.total);
@@ -223,7 +230,7 @@ export default function NotesIndex() {
     if (refreshingAfterImport || loadingMore) return;
     setRefreshingAfterImport(true);
     try {
-      const refreshed = await api.listNotes();
+      const refreshed = await api.listNotes({ trashed: viewMode === "trash" });
       setItems(refreshed.items);
       setNextCursor(refreshed.nextCursor);
       setNoteTotal(refreshed.total);
@@ -278,10 +285,25 @@ export default function NotesIndex() {
       setNoteTotal((current) => Math.max(0, current - 1));
       setConfirmDeleteId(null);
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : "删除失败");
+      setDeleteError(formatApiError(err, "删除失败"));
       setConfirmDeleteId(null);
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  // P1-2: 恢复软删除的笔记
+  async function handleRestore(noteId: string) {
+    setRestoringId(noteId);
+    setRestoreError(null);
+    try {
+      await api.restoreNote(noteId);
+      setItems((current) => current?.filter((item) => item.id !== noteId) ?? current);
+      setNoteTotal((current) => Math.max(0, current - 1));
+    } catch (err) {
+      setRestoreError(formatApiError(err, "恢复失败"));
+    } finally {
+      setRestoringId(null);
     }
   }
 
@@ -431,17 +453,19 @@ export default function NotesIndex() {
     <div className="notes-page">
       <PageHeader
         className="workspace-page-header"
-        kicker="NOTE LIBRARY · 思考草稿库"
+        kicker="笔记与整理"
         title="笔记"
         subtitle="集中整理你的表达，让每一份草稿都能继续生长为可验证的理解。"
         actions={
           <div className="notes-header-actions">
+            {!isOwner && <MemberNotice compact />}
             <button
               type="button"
               className="notes-action-primary"
               onClick={createNew}
               disabled={creating}
               aria-busy={creating}
+              hidden={!isOwner}
             >
               <Icon.Plus aria-hidden="true" />
               <span>{creating ? "创建中…" : "新建笔记"}</span>
@@ -469,6 +493,7 @@ export default function NotesIndex() {
               }
               aria-expanded={importOpen}
               aria-controls="notes-import-panel"
+              hidden={!isOwner}
             >
               <Icon.Inbox aria-hidden="true" />
               <span>{importOpen ? "收起导入" : "导入文件"}</span>
@@ -478,7 +503,7 @@ export default function NotesIndex() {
         }
       />
 
-      {importOpen && (
+      {importOpen && isOwner && (
         <div className="notes-import-wrap">
           <section
             id="notes-import-panel"
@@ -490,7 +515,7 @@ export default function NotesIndex() {
                 <Icon.Inbox />
               </span>
               <div>
-                <span className="notes-eyebrow">MARKDOWN IMPORT</span>
+                <span className="notes-eyebrow">导入 Markdown</span>
                 <h2 id="notes-import-title" className="notes-import-title">
                   导入 Markdown 文件
                 </h2>
@@ -617,7 +642,7 @@ export default function NotesIndex() {
       )}
 
       <div className="notes-content">
-        {(createError || deleteError) && (
+        {(createError || deleteError || restoreError) && (
           <div className="notes-page-notices">
             {createError && (
               <div
@@ -644,6 +669,21 @@ export default function NotesIndex() {
                   type="button"
                   className="notes-action-text"
                   onClick={() => setDeleteError(null)}
+                >
+                  关闭
+                </button>
+              </div>
+            )}
+            {restoreError && (
+              <div
+                className="notes-notice notes-notice--danger"
+                role="alert"
+              >
+                <p>{restoreError}</p>
+                <button
+                  type="button"
+                  className="notes-action-text"
+                  onClick={() => setRestoreError(null)}
                 >
                   关闭
                 </button>
@@ -686,6 +726,34 @@ export default function NotesIndex() {
             <div
               className="notes-filter-group"
               role="group"
+              aria-label="筛选笔记"
+            >
+              <button
+                type="button"
+                className={`notes-filter-btn ${
+                  viewMode === "all" ? "active" : ""
+                }`}
+                onClick={() => { setViewMode("all"); setFilter("all"); }}
+                aria-pressed={viewMode === "all"}
+              >
+                <span>全部笔记</span>
+              </button>
+              <button
+                type="button"
+                className={`notes-filter-btn ${
+                  viewMode === "trash" ? "active" : ""
+                }`}
+                onClick={() => { setViewMode("trash"); setFilter("all"); }}
+                aria-pressed={viewMode === "trash"}
+              >
+                <span>回收站</span>
+              </button>
+            </div>
+
+            {viewMode === "all" && (
+            <div
+              className="notes-filter-group"
+              role="group"
               aria-label="按更新时间筛选笔记"
             >
               <button
@@ -711,6 +779,7 @@ export default function NotesIndex() {
                 <strong>{recentCount}</strong>
               </button>
             </div>
+            )}
 
           </div>
         </div>
@@ -723,7 +792,11 @@ export default function NotesIndex() {
           <header className="notes-library-header">
             <div className="notes-library-heading">
               <h2 id="notes-library-title">
-                {hasLocalSelection ? "筛选结果" : "全部笔记"}
+                {viewMode === "trash"
+                  ? "回收站"
+                  : hasLocalSelection
+                    ? "筛选结果"
+                    : "全部笔记"}
               </h2>
             </div>
             <div className="notes-library-meta">
@@ -742,7 +815,7 @@ export default function NotesIndex() {
               <span className="notes-state-icon notes-state-icon--danger">
                 <Icon.AlertCircle aria-hidden="true" />
               </span>
-              <span className="notes-eyebrow">LIBRARY UNAVAILABLE</span>
+              <span className="notes-eyebrow">笔记库暂不可用</span>
               <h3 className="notes-error-title">笔记加载失败</h3>
               <p className="notes-error-desc">{loadError}</p>
               <button
@@ -825,7 +898,7 @@ export default function NotesIndex() {
                     查看全部笔记
                   </button>
                 )}
-                {!hasQuery && !hasFilter && (
+                {!hasQuery && !hasFilter && isOwner && (
                   <button
                     type="button"
                     className="notes-action-primary"
@@ -1005,6 +1078,7 @@ export default function NotesIndex() {
                           <div
                             className="notes-card-menu"
                             ref={menuOpenId === note.id ? menuRef : undefined}
+                            hidden={!isOwner}
                           >
                             <button
                               ref={
@@ -1058,6 +1132,7 @@ export default function NotesIndex() {
                                   type="button"
                                   className="notes-card-dropdown-item"
                                   onClick={() => startRename(note)}
+                                  disabled={viewMode === "trash"}
                                   role="menuitem"
                                 >
                                   <Icon.Pencil
@@ -1066,19 +1141,35 @@ export default function NotesIndex() {
                                   />
                                   重命名
                                 </button>
-                                <button
-                                  type="button"
-                                  className="notes-card-dropdown-item notes-card-dropdown-item--danger"
-                                  onClick={() => handleDelete(note.id)}
-                                  disabled={deletingId === note.id}
-                                  role="menuitem"
-                                >
-                                  <Icon.Trash
-                                    className="notes-dropdown-icon"
-                                    aria-hidden="true"
-                                  />
-                                  删除
-                                </button>
+                                {viewMode === "trash" ? (
+                                  <button
+                                    type="button"
+                                    className="notes-card-dropdown-item"
+                                    onClick={() => void handleRestore(note.id)}
+                                    disabled={restoringId === note.id}
+                                    role="menuitem"
+                                  >
+                                    <Icon.Refresh
+                                      className="notes-dropdown-icon"
+                                      aria-hidden="true"
+                                    />
+                                    {restoringId === note.id ? "恢复中…" : "恢复"}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="notes-card-dropdown-item notes-card-dropdown-item--danger"
+                                    onClick={() => handleDelete(note.id)}
+                                    disabled={deletingId === note.id}
+                                    role="menuitem"
+                                  >
+                                    <Icon.Trash
+                                      className="notes-dropdown-icon"
+                                      aria-hidden="true"
+                                    />
+                                    删除
+                                  </button>
+                                )}
                               </div>
                             )}
                           </div>
@@ -1131,7 +1222,7 @@ export default function NotesIndex() {
       <ConfirmDialog
         open={confirmDeleteId !== null}
         title={`删除「${confirmDeleteNoteTitle}」？`}
-        message="确定要删除这篇笔记吗？此操作不可撤销，关联的学习卡、证据和复习记录将一并清除。"
+        message="确定要将这篇笔记移入回收站吗？30 天内可在回收站恢复，届时关联的学习卡和复习计划将一并归档。超过 30 天后将永久删除。"
         confirmLabel="删除"
         variant="danger"
         loading={deletingId !== null}

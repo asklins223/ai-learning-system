@@ -13,7 +13,10 @@ import {
   exploreNavItems,
   mineNavItems,
   isNavActive,
+  getCurrentPageLabel,
 } from "@/lib/navigation";
+import { WorkspaceSwitcher } from "@/components/layout/WorkspaceSwitcher";
+import { useCurrentUser } from "@/lib/use-current-user";
 
 /**
  * TabletTopBar — 640–959px 平板 Default Shell 顶部栏。
@@ -32,6 +35,8 @@ export function TabletTopBar() {
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
+  const { currentUser, reload: reloadCurrentUser } = useCurrentUser();
+  const pageLabel = getCurrentPageLabel(pathname);
   useModalIsolation(drawerRef, drawerOpen);
   useFocusTrap(drawerRef, drawerOpen);
   useBodyScrollLock(drawerOpen);
@@ -89,6 +94,16 @@ export function TabletTopBar() {
   return (
     <>
       <div className="tablet-topbar" data-ui="tablet-topbar">
+        <Link href="/" className="tablet-topbar-brand" aria-label="理解引擎首页">
+          <span className="tablet-topbar-logo">理</span>
+          <span className="tablet-topbar-title">理解引擎</span>
+          <span className="tablet-topbar-dot" aria-hidden="true" />
+        </Link>
+        <span className="tablet-topbar-divider" aria-hidden="true" />
+        <span className="tablet-topbar-page">{pageLabel}</span>
+        <span className="tablet-topbar-workspace">
+          {currentUser?.workspaceName ?? "当前工作区"}
+        </span>
         <button
           type="button"
           ref={menuButtonRef}
@@ -109,11 +124,6 @@ export function TabletTopBar() {
           </svg>
         </button>
 
-        <Link href="/" className="tablet-topbar-brand" aria-label="理解引擎首页">
-          <span className="tablet-topbar-logo">理</span>
-          <span className="tablet-topbar-title">理解引擎</span>
-          <span className="tablet-topbar-dot" aria-hidden="true" />
-        </Link>
       </div>
 
       {/* Overlay Drawer — §9.3 */}
@@ -134,7 +144,7 @@ export function TabletTopBar() {
                 <span className="tablet-drawer-logo">理</span>
                 <span>
                   <strong>理解引擎</strong>
-                  <small>PERSONAL STUDY DESK</small>
+                  <small>个人理解工作台</small>
                 </span>
               </Link>
               <button
@@ -146,6 +156,13 @@ export function TabletTopBar() {
                 <Icon.Close />
               </button>
             </header>
+
+            <div className="tablet-drawer-workspace">
+              <WorkspaceSwitcher
+                currentUser={currentUser}
+                onSwitched={reloadCurrentUser}
+              />
+            </div>
 
             <nav className="tablet-drawer-nav" aria-label="主导航">
               {primaryNavItems.map((item) => (

@@ -1,10 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { eq, and, inArray, sql } from "drizzle-orm";
+import { eq, and, inArray, sql, isNull } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { db } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
-import { requireSession } from "../identity/middleware.ts";
+import { computeContentHash } from "../note/service.ts";
+import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { markdownToBlocks, extractTitleFromBlocks } from "../../lib/markdown-parser.ts";
 import { upsertSearchDocument } from "../../lib/search-index.ts";
@@ -112,6 +113,7 @@ async function importItems(
             workspaceId,
             versionNo: 1,
             contentJson,
+            contentHash: computeContentHash(contentJson),
             createdBy: userId,
           })
           .returning();
@@ -184,7 +186,8 @@ export async function importRoutes(app: FastifyInstance) {
   // POST /import/markdown — 批量导入 Markdown 笔记
   // F-033: 支持幂等键（importId），中途失败时重试不会创建重复笔记
   // G-006: 使用 advisory lock + itemKey 实现并发安全的幂等导入
-  app.post("/import/markdown", { bodyLimit: 2 * 1024 * 1024 }, async (req) => {
+  // RBAC: 仅 owner 可导入笔记（数据写入操作，member 只读）
+  app.post("/import/markdown", { preHandler: [requireOwner], bodyLimit: 2 * 1024 * 1024 }, async (req) => {
     const body = parseBody(app, importMarkdownSchema, req.body);
     const { workspaceId, userId } = req.session;
     const requestedItems: ItemWithIndex[] = body.items.map((item, originalIndex) => ({
@@ -263,9 +266,11 @@ export async function importRoutes(app: FastifyInstance) {
       const existingNoteIds = Array.from(
         new Set(requestedExistingEntries.map(([, value]) => value.noteId)),
       );
+      // CONC-03: 幂等检查时排除已软删除的笔记，
+      // 避免笔记被删除后用相同 importId 重新导入时误判为已存在
       const existingNotes = existingNoteIds.length > 0
         ? await tx.query.notes.findMany({
-            where: inArray(notes.id, existingNoteIds),
+            where: and(inArray(notes.id, existingNoteIds), isNull(notes.deletedAt)),
           })
         : [];
       const noteMap = new Map(existingNotes.map((n) => [n.id, n]));

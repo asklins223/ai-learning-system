@@ -22,7 +22,7 @@ const TYPE_LABEL: Record<ValidationQuestion["type"], string> = {
   apply: "应用",
 };
 
-const ANSWER_LIMIT = 500;
+const ANSWER_LIMIT = 1000;
 
 export function ValidationPanel({
   questions,
@@ -181,8 +181,8 @@ export function ValidationPanel({
           <p id="ref-validation-question-title" className="ref-validation-question-text">
             {q.prompt}
           </p>
-          <span className="ref-validation-knowledge-tag" title={q.refClaim}>
-            知识点：{q.refClaim}
+          <span className="ref-validation-knowledge-tag">
+            请用自己的话回答，不要照抄原文
           </span>
         </section>
 

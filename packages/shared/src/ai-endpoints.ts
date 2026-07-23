@@ -23,14 +23,20 @@ export interface DashScopeTextEndpoint {
 /**
  * Resolve the correct DashScope text contract.
  *
- * Qwen 3.5/3.6 cannot use DashScope's legacy text-generation endpoint. When a
- * user keeps the familiar `/api/v1` root for these model families, route the
- * request through the official OpenAI-compatible endpoint on the same origin.
- * A caller can also opt into that contract explicitly with a
- * `/compatible-mode/v1` base URL.
+ * All DashScope models — including qwen-plus, qwen-max, and qwen3.x — are now
+ * routed through the OpenAI-compatible endpoint.  This gives us:
+ *   1. `response_format: { type: "json_object" }` support for guaranteed JSON
+ *   2. `stream: false` for simpler non-streaming responses
+ *   3. A single code path instead of branching on protocol
+ *
+ * The legacy native text-generation endpoint is no longer used.  A caller can
+ * still pass any DashScope base URL (`/api/v1` or `/compatible-mode/v1`) and
+ * the function normalises it to the compatible chat-completions URL.
  */
-export function resolveDashScopeTextEndpoint(baseUrl: string, model: string): DashScopeTextEndpoint {
+export function resolveDashScopeTextEndpoint(baseUrl: string, _model?: string): DashScopeTextEndpoint {
   const normalized = baseUrl.replace(/\/+$/, "");
+
+  // Already pointing at compatible-mode — just append the chat path.
   if (/\/compatible-mode\/v1(?:\/chat\/completions)?$/i.test(normalized)) {
     return {
       protocol: "openai_compatible",
@@ -38,8 +44,8 @@ export function resolveDashScopeTextEndpoint(baseUrl: string, model: string): Da
     };
   }
 
-  const requiresModernContract = /^qwen3\.(?:5|6)(?:[-.]|$)/i.test(model.trim());
-  if (requiresModernContract && /\/api\/v1$/i.test(normalized)) {
+  // Rewrite the legacy `/api/v1` root to the compatible-mode root.
+  if (/\/api\/v1$/i.test(normalized)) {
     const compatibleRoot = normalized.replace(/\/api\/v1$/i, "/compatible-mode/v1");
     return {
       protocol: "openai_compatible",
@@ -47,8 +53,9 @@ export function resolveDashScopeTextEndpoint(baseUrl: string, model: string): Da
     };
   }
 
+  // Fallback: assume the caller already supplied a compatible root.
   return {
-    protocol: "native_text",
-    url: resolveDashScopeGenerationUrl(normalized),
+    protocol: "openai_compatible",
+    url: resolveOpenAIChatCompletionsUrl(normalized),
   };
 }

@@ -7,6 +7,11 @@ export const users = pgTable(
     email: text("email").notNull(),
     passwordHash: text("password_hash").notNull(),
     role: text("role").notNull().default("owner"),
+    // ADR-0009: 用户的个人工作区 ID（注册时自动创建，不可删除）
+    personalWorkspaceId: uuid("personal_workspace_id"),
+    // PROFILE-01: 用户展示名与头像（选填，注册时可收集，个人中心可编辑）
+    displayName: text("display_name"),
+    avatarUrl: text("avatar_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -33,6 +38,8 @@ export const workspaces = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     ownerId: uuid("owner_id").notNull().references(() => users.id),
     name: text("name").notNull(),
+    // ADR-0009: workspace 类型区分个人/协作
+    workspaceType: text("workspace_type").notNull().default("personal"), // personal | collaborative
     // N-011: AI 隐私治理字段
     aiProvider: text("ai_provider").notNull().default("mock"), // mock | dashscope | qwen
     aiConsentVersion: text("ai_consent_version"), // 同意版本号
@@ -57,6 +64,8 @@ export const workspaceMembers = pgTable(
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     role: text("role").notNull().default("member"),
     joinedAt: timestamp("joined_at", { withTimezone: true }).defaultNow().notNull(),
+    // ADR-0009: 软退出标记，NULL 表示活跃成员
+    leftAt: timestamp("left_at", { withTimezone: true }),
   },
   (t) => ({
     pk: uniqueIndex("workspace_members_pk").on(t.workspaceId, t.userId),
@@ -64,14 +73,46 @@ export const workspaceMembers = pgTable(
 );
 
 export const inviteCodes = pgTable("invite_codes", {
-  code: text("code").primaryKey(),
+  id: uuid("id").primaryKey().defaultRandom(),
+  code: text("code"),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   createdBy: uuid("created_by").notNull().references(() => users.id),
   expiresAt: timestamp("expires_at", { withTimezone: true }),
   consumedBy: uuid("consumed_by").references(() => users.id),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  // SEC-02 / ADR-0002: secure token storage
+  tokenHash: text("token_hash"),
+  tokenHint: text("token_hint"),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  revokedBy: uuid("revoked_by").references(() => users.id),
+  role: text("role").notNull().default("member"),
+  // ADR-0009: 区分邀请码消费场景
+  consumeContext: text("consume_context").notNull().default("registration"), // registration | workspace_join
 });
+
+/**
+ * Server-side onboarding state per (workspace, user, version).
+ * Steps are business-fact driven: ai_consent, provider_config, first_content,
+ * first_note, first_card, evidence_review, first_validation.
+ */
+export const onboardingStates = pgTable(
+  "onboarding_states",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    version: text("version").notNull().default("v1"),
+    steps: jsonb("steps").$type<Record<string, boolean>>().notNull().default({}),
+    status: text("status").notNull().default("pending"), // pending | in_progress | completed
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    uniqueState: uniqueIndex("onboarding_states_unique_idx").on(t.workspaceId, t.userId, t.version),
+    workspaceUserIdx: index("onboarding_states_workspace_user_idx").on(t.workspaceId, t.userId),
+  }),
+);
 
 /**
  * Shared authentication rate-limit buckets.

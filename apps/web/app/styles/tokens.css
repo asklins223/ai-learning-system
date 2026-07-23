@@ -42,13 +42,15 @@
 
   /* ── 颜色：文本（§5.1 Ink 体系） ── */
   --color-text: #27231F;
-  --color-text-secondary: #746D65;
-  --color-text-tertiary: #918A82;
+  --color-text-secondary: #5F594F;
+  --color-text-tertiary: #746D65;
   --color-text-disabled: #A8A29A;
 
   /* ── 颜色：主操作（§5.1 稳定深绿，不发灰） ── */
-  --color-action: #17865F;
-  --color-action-hover: #0F6E4D;
+  --color-action: #126B4F;
+  --color-action-hover: #0D543E;
+  --color-action-text: #0F6148;
+  --color-action-soft: #E6F2EC;
   --color-on-action: #FFFFFF;
 
   /* ── 颜色：成功 ── */
@@ -83,6 +85,15 @@
   /* ── 颜色：焦点 ── */
   --color-focus-ring: #0B70DE;
 
+  /* ── 颜色：辅助/别名（统一引用，避免页面级散播） ── */
+  --color-accent: var(--color-evidence);
+  --color-accent-soft: var(--color-evidence-soft);
+  --color-accent-text: var(--color-evidence-text);
+  --color-info: var(--color-evidence);
+  --color-info-soft: var(--color-evidence-soft);
+  --color-muted: color-mix(in srgb, var(--color-text) 45%, transparent);
+  --color-hover: var(--color-surface-soft);
+
   /* ── 颜色：遮罩 ── */
   --color-scrim: rgba(36, 28, 20, 0.40);
 
@@ -108,8 +119,8 @@
   /* ── 阴影（§5.4 两档常驻 + 一档浮层） ── */
   --shadow-control: 0 1px 2px rgba(79, 57, 33, .08);
   --shadow-panel:
-    0 1px 2px rgba(79, 57, 33, .08),
-    0 6px 16px rgba(79, 57, 33, .08);
+    0 1px 2px rgba(79, 57, 33, .07),
+    0 7px 20px rgba(79, 57, 33, .07);
   --shadow-paper:
     0 1px 2px rgba(79, 57, 33, .08),
     0 12px 28px rgba(79, 57, 33, .08);
@@ -189,13 +200,15 @@ html[data-theme="night"] {
 
   /* ── 文本 ── */
   --color-text: #F5EBDD;
-  --color-text-secondary: #C9BBA9;
-  --color-text-tertiary: #B1A18E;
+  --color-text-secondary: #D0C2B1;
+  --color-text-tertiary: #B5A795;
   --color-text-disabled: #776B5D;
 
   /* ── 主操作 ── */
-  --color-action: #45AD7B;
-  --color-action-hover: #56BE8B;
+  --color-action: #58BC8C;
+  --color-action-hover: #6BC99C;
+  --color-action-text: #89DDB5;
+  --color-action-soft: #203A2E;
   --color-on-action: #102018;
 
   /* ── 成功 ── */

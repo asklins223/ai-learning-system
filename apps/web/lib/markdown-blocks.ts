@@ -95,6 +95,17 @@ export function markdownToBlocks(md: string): Block[] {
       continue;
     }
 
+    // 图片行（独立行，![alt](url) 格式）
+    const imageMatch = /^!\[([^\]]*)\]\([^)]+\)\s*$/.exec(syntaxLine);
+    if (imageMatch) {
+      ordinal = flushBuilder(buf, ordinal, blocks);
+      buf = newBuilder("image");
+      buf.lines.push(syntaxLine);
+      ordinal = flushBuilder(buf, ordinal, blocks);
+      buf = null;
+      continue;
+    }
+
     // 列表（无序 / 有序）
     // F-008: 保留原始 marker 和缩进，不再统一为 ·
     if (/^(\s*)[-*+]\s+\S/.test(raw) || /^(\s*)\d+\.\s+\S/.test(raw)) {

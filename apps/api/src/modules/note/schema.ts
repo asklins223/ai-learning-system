@@ -47,4 +47,8 @@ export const noteUpdateSchema = z.object({
 );
 
 export type NoteCreateInput = z.output<typeof noteCreateSchema>;
-export type NoteUpdateInput = z.input<typeof noteUpdateSchema>;
+/**
+ * 使用 z.output 而非 z.input，使 isAutosave 类型为 boolean（含默认值 false）。
+ * 路由层 parseBody 已应用 schema.parse()，service 收到的始终是完整 output。
+ */
+export type NoteUpdateInput = z.output<typeof noteUpdateSchema>;

@@ -1,13 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { and, desc, eq, asc, inArray, sql } from "drizzle-orm";
-import { db, withSessionAdvisoryLock } from "../../db/client.ts";
+import { db, withSessionAdvisoryLock, withWorkspaceTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
 import { benchmarkLabels, benchmarkReports } from "../../db/schema/benchmark.ts";
 import { upsertSearchDocument } from "../../lib/search-index.ts";
 import { createGenerateCardJob } from "../job/service.ts";
-import { deleteNote } from "../note/service.ts";
+import { physicalDeleteNote, computeContentHash } from "../note/service.ts";
 
 /**
  * 内置基准测试笔记（30 篇，覆盖技术、产品、学习、元数据干扰、
@@ -463,6 +463,7 @@ async function runPipelineForNote(
           workspaceId,
           versionNo: 1,
           contentJson: { blocks: blocksInput },
+          contentHash: computeContentHash({ blocks: blocksInput }),
           createdBy: userId,
         })
         .returning();
@@ -797,21 +798,30 @@ export async function getLatestBenchmarkReport(
  * 复用笔记领域的级联删除路径，确保 jobs、验证/复习记录、AI artifacts
  * 和搜索投影都与普通笔记删除保持同一套语义。
  */
-async function cleanupPreviousBenchmarkData(workspaceId: string): Promise<void> {
-  const benchmarkTitles = BUILTIN_NOTES.map((n) => n.title);
-  // 查找所有同名笔记
-  const oldNotes = await db.query.notes.findMany({
-    where: and(
-      eq(notes.workspaceId, workspaceId),
-      inArray(notes.title, benchmarkTitles),
-      eq(notes.titleSource, "benchmark"),
-    ),
-  });
-  if (oldNotes.length === 0) return;
+async function cleanupPreviousBenchmarkData(
+  workspaceId: string,
+  userId: string,
+): Promise<void> {
+  await withWorkspaceTransaction({ workspaceId, userId }, async (transaction) => {
+    const benchmarkTitles = BUILTIN_NOTES.map((n) => n.title);
+    // 查找所有同名笔记
+    const oldNotes = await transaction.query.notes.findMany({
+      where: and(
+        eq(notes.workspaceId, workspaceId),
+        inArray(notes.title, benchmarkTitles),
+        eq(notes.titleSource, "benchmark"),
+      ),
+    });
 
-  for (const oldNote of oldNotes) {
-    await deleteNote(oldNote.id, workspaceId);
-  }
+    for (const oldNote of oldNotes) {
+      // P1-1: 使用 physicalDeleteNote 彻底清理基准测试数据，
+      // 避免 deleteNote 软删除后数据残留导致重复运行冲突。
+      // CONC-07: force=true 跳过 deletedAt 检查，允许删除 active 笔记。
+      // benchmark 笔记通常是 active 状态（未被软删除），不加 force 会被
+      // physicalDeleteNote 的 CONC-07 守卫静默跳过，导致数据累积。
+      await physicalDeleteNote(transaction, oldNote.id, workspaceId, { force: true });
+    }
+  });
 }
 
 /**
@@ -835,7 +845,7 @@ async function executeBenchmark(
   // R-010: 生成唯一 runId，绑定本次运行的所有结果
   const runId = generateRunId();
   // P2-1: 运行前先清理上一次的基准测试数据
-  await cleanupPreviousBenchmarkData(workspaceId);
+  await cleanupPreviousBenchmarkData(workspaceId, userId);
 
   const results: NoteResult[] = [];
 

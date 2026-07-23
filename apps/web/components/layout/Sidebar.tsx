@@ -2,19 +2,19 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { usePathname } from "next/navigation";
 import { Icon } from "@/components/ui/icons";
 import { useTheme } from "@/components/ThemeProvider";
-import { api } from "@/lib/api";
+import { api, IDENTITY_CHANGED_EVENT } from "@/lib/api";
 import { primaryNavItems, exploreNavItems, mineNavItems, isNavActive } from "@/lib/navigation";
+import { WorkspaceSwitcher } from "@/components/layout/WorkspaceSwitcher";
 
 /**
  * 侧栏导航分组。
- * - 主导航：学习流 + 复习
+ * - 主导航：学习 + 复习
  * - 探索：学习卡 + 理解星图
- * - 我的：笔记 + 来源资料 + 今日变化
+ * - 我的：笔记 + 来源资料 + 学习动态
  * 共享配置来自 navigation.ts，不在此重复维护。
  */
 const navMainItems = primaryNavItems;
@@ -35,11 +35,29 @@ export function Sidebar() {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const userTriggerRef = useRef<HTMLButtonElement>(null);
   // R-026: 从后端获取真实用户信息，不再硬编码 owner 邮箱和角色
-  const [userInfo, setUserInfo] = useState<{ email: string; role: string; workspaceName: string } | null>(null);
+  const [userInfo, setUserInfo] = useState<{
+    userId: string;
+    workspaceId: string;
+    email: string;
+    role: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+    workspaceName: string;
+    workspaceType: string;
+    isPersonal: boolean;
+    personalWorkspaceId: string | null;
+  } | null>(null);
+
+  const reloadUserInfo = useCallback(() => {
+    api.getMe().then((info) => {
+      setUserInfo(info);
+      setUserLoadFailed(false);
+    }).catch(() => setUserLoadFailed(true));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    api.getMe().then((info) => {
+    const load = () => api.getMe().then((info) => {
       if (!cancelled) {
         setUserInfo(info);
         setUserLoadFailed(false);
@@ -47,7 +65,12 @@ export function Sidebar() {
     }).catch(() => {
       if (!cancelled) setUserLoadFailed(true);
     });
-    return () => { cancelled = true; };
+    void load();
+    window.addEventListener(IDENTITY_CHANGED_EVENT, load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(IDENTITY_CHANGED_EVENT, load);
+    };
   }, []);
 
   /* click outside → close */
@@ -111,12 +134,17 @@ export function Sidebar() {
     }
   }, [loggingOut, router]);
 
-  /* R-026: 从后端获取真实用户信息 */
+  /* R-026 / PROFILE-01: 从后端获取真实用户信息，优先使用 displayName */
   const userEmail = userInfo?.email ?? (userLoadFailed ? "账户信息暂不可用" : "正在读取账户…");
   const workspaceName = userInfo?.workspaceName ?? (userLoadFailed ? "工作区信息暂不可用" : "正在读取工作区…");
-  const displayName = userInfo?.email.split("@")[0] ?? (userLoadFailed ? "账户" : "加载中");
-  const avatarChar = userInfo ? displayName.charAt(0).toUpperCase() : "理";
-  const roleLabel = userInfo ? (userInfo.role === "owner" ? "Owner" : "Member") : null;
+  const displayName = userInfo?.displayName?.trim()
+    || userInfo?.email.split("@")[0]
+    || (userLoadFailed ? "账户" : "加载中");
+  const avatarChar = displayName.charAt(0).toUpperCase();
+  const roleLabel = userInfo ? (userInfo.role === "owner" ? "所有者" : "成员") : null;
+  const canCreateContent = Boolean(
+    userInfo && (userInfo.role === "owner" || userInfo.isPersonal),
+  );
 
   return (
     <aside className="sidebar" data-ui="desktop-sidebar">
@@ -127,12 +155,12 @@ export function Sidebar() {
             <span className="brand-title">理解引擎</span>
             <span className="brand-dot" aria-hidden="true" />
           </span>
-          <span className="brand-subtitle">PERSONAL DESK</span>
+          <span className="brand-subtitle">个人理解工作台</span>
         </span>
       </Link>
 
       <nav className="nav" aria-label="主导航">
-        {/* 主导航：学习流 + 复习 */}
+        {/* 主导航：学习 + 复习 */}
         {navMainItems.map((item) => (
           <Link
             key={item.href}
@@ -146,6 +174,35 @@ export function Sidebar() {
             {item.label}
           </Link>
         ))}
+
+        {canCreateContent ? (
+          <Link
+            href="/#quick-capture"
+            className="sidebar-capture"
+            aria-label="快速收录一份学习材料"
+            data-label="快速收录"
+          >
+            <span className="sidebar-capture-icon" aria-hidden="true"><Icon.Plus /></span>
+            <span className="sidebar-capture-copy">
+              <strong>快速收录</strong>
+              <small>文本、代码或链接</small>
+            </span>
+            <Icon.Arrow className="sidebar-capture-arrow" aria-hidden="true" />
+          </Link>
+        ) : (
+          <span
+            className="sidebar-capture is-disabled"
+            aria-label="快速收录仅对工作区所有者开放"
+            aria-disabled="true"
+            data-label="仅所有者可收录"
+          >
+            <span className="sidebar-capture-icon" aria-hidden="true"><Icon.Lock /></span>
+            <span className="sidebar-capture-copy">
+              <strong>快速收录</strong>
+              <small>{userInfo ? "仅所有者可添加" : "正在确认权限"}</small>
+            </span>
+          </span>
+        )}
 
         {/* 探索分组 */}
         <div className="nav-group">
@@ -200,13 +257,12 @@ export function Sidebar() {
               {/* User header */}
               <div className="dropdown-user-header">
                 <div className="dropdown-avatar-wrap">
-                  {userInfo?.role === "owner" ? (
-                    <Image
+                  {userInfo?.avatarUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
                       className="dropdown-avatar-image"
-                      src="/images/avatar-owner-custom.jpg"
+                      src={userInfo.avatarUrl}
                       alt=""
-                      width={96}
-                      height={96}
                     />
                   ) : (
                     <span className="dropdown-avatar">{avatarChar}</span>
@@ -222,10 +278,8 @@ export function Sidebar() {
                 </div>
               </div>
 
-              <div className="dropdown-workspace">
-                <span>当前工作区</span>
-                <strong>{workspaceName}</strong>
-              </div>
+              {/* ADR-0009: 工作区切换器 */}
+              <WorkspaceSwitcher currentUser={userInfo} onSwitched={reloadUserInfo} />
 
               <div className="dropdown-menu-list">
                 <div className="dropdown-menu-label">偏好与账户</div>
@@ -279,7 +333,7 @@ export function Sidebar() {
 
               {/* Footer */}
               <div className="dropdown-footer">
-                <span className="dropdown-footer-version">理解引擎 v0.4</span>
+                <span className="dropdown-footer-version">理解引擎 v0.5</span>
               </div>
             </div>
           )}
@@ -298,13 +352,12 @@ export function Sidebar() {
             data-label={`个人中心 · ${displayName}`}
           >
             <div className="user-avatar-wrap">
-              {userInfo?.role === "owner" ? (
-                <Image
+              {userInfo?.avatarUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
                   className="avatar-image"
-                  src="/images/avatar-owner-custom.jpg"
+                  src={userInfo.avatarUrl}
                   alt=""
-                  width={80}
-                  height={80}
                 />
               ) : (
                 <span className="avatar">{avatarChar}</span>

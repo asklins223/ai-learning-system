@@ -36,8 +36,10 @@ export async function exportRoutes(app: FastifyInstance) {
     validationQuestions: z.array(z.record(z.unknown())).optional(),
     validationEvents: z.array(z.record(z.unknown())).optional(),
     reviewSchedules: z.array(z.record(z.unknown())).optional(),
+    reviewAttempts: z.array(z.record(z.unknown())).optional(),
     understandingEvents: z.array(z.record(z.unknown())).optional(),
     aiArtifacts: z.array(z.record(z.unknown())).optional(),
+    onboardingStates: z.array(z.record(z.unknown())).optional(),
     dryRun: z.boolean().optional().default(false),
   });
 

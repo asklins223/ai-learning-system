@@ -3,7 +3,6 @@ import { db } from "../../db/client.ts";
 import {
   reviewSchedules,
   validationEvents,
-  understandingEvents,
   evidences,
 } from "../../db/schema/evidence.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
@@ -224,7 +223,14 @@ export async function listReviews(
       where: inArray(noteBlocks.id, blockIds),
     });
     for (const blk of blockRows) {
-      blockMap.set(blk.id, blk.content);
+      if (blk.type === "image") {
+        // image block 的 content 是 ![alt](url) 格式，复习展示时提取 alt text，
+        // 有 alt text 则显示 alt text，无则显示 [图片] 占位符，不暴露原始 URL
+        const altMatch = /^!\[([^\]]*)\]\(/.exec(blk.content);
+        blockMap.set(blk.id, altMatch?.[1]?.trim() || "[图片]");
+      } else {
+        blockMap.set(blk.id, blk.content);
+      }
     }
   }
 
@@ -299,125 +305,4 @@ export async function listReviews(
     total,
     nextOffset: consumed < total ? consumed : null,
   };
-}
-
-/** 完成复习：标记 completed，写 understanding_event(reviewed)，调度下一次（延长间隔）。
- *  R-021: 并发安全 — UPDATE 带 status=pending 条件，使用 RETURNING 确认更新成功后再创建下一次计划。
- *  幂等：若该 review 已非 pending，UPDATE 不会影响任何行，直接返回不重复处理。 */
-export async function completeReview(id: string, workspaceId: string, userId: string) {
-  // R-021: 先查询 review 信息（用于计算下一次间隔）
-  const r = await db.query.reviewSchedules.findFirst({
-    where: and(
-      eq(reviewSchedules.id, id), 
-      eq(reviewSchedules.workspaceId, workspaceId),
-      eq(reviewSchedules.userId, userId)
-    ),
-  });
-  if (!r) return null;
-  if (r.status !== ReviewStatus.PENDING) return { ok: true, skipped: true };
-
-  // 下一次间隔：当前间隔 × 2，封顶 30 天（离散档位演进）。
-  // intervalDays=0（misunderstanding 立即回看）完成后转 3 天，进入正常档位。
-  const base = r.intervalDays > 0 ? r.intervalDays * 2 : 3;
-  const nextInterval = Math.min(30, Math.max(1, base));
-  const nextReviewAt = new Date(Date.now() + nextInterval * 24 * 60 * 60 * 1000);
-
-  // R-021: 原子 UPDATE + 条件检查 — 只在 status=pending 时更新，使用 RETURNING 确认成功
-  const updatedRows = await db.transaction(async (tx) => {
-    const updated = await tx
-      .update(reviewSchedules)
-      .set({
-        status: ReviewStatus.COMPLETED,
-        lastReviewAt: new Date(),
-      })
-      .where(
-        and(
-          eq(reviewSchedules.id, id),
-          eq(reviewSchedules.workspaceId, workspaceId),
-          eq(reviewSchedules.userId, userId),
-          eq(reviewSchedules.status, ReviewStatus.PENDING), // R-021: 并发安全条件
-        ),
-      )
-      .returning({ id: reviewSchedules.id });
-
-    // 如果没有更新到行，说明已被另一个请求处理
-    if (updated.length === 0) return null;
-
-    // 写下一次复习（同 subject）
-    await tx.insert(reviewSchedules).values({
-      workspaceId,
-      userId,
-      subjectType: r.subjectType,
-      subjectId: r.subjectId,
-      validationEventId: r.validationEventId,
-      status: ReviewStatus.PENDING,
-      nextReviewAt,
-      intervalDays: nextInterval,
-    });
-
-    // 写 understanding_event
-    await tx.insert(understandingEvents).values({
-      workspaceId,
-      userId,
-      subjectType: r.subjectType,
-      subjectId: r.subjectId,
-      eventType: "reviewed",
-      payload: { reviewId: id, intervalDays: nextInterval },
-    });
-
-    return updated;
-  });
-
-  // R-021: 如果事务返回 null，说明并发请求已处理
-  if (!updatedRows) return { ok: true, skipped: true };
-
-  return { ok: true };
-}
-
-/** F-019: Skip review - mark dismissed and reschedule for next day instead of permanent dismiss.
- *  R-021: 并发安全 — UPDATE 带 status=pending 条件，使用 RETURNING 确认更新成功后再创建下一次计划。 */
-export async function dismissReview(id: string, workspaceId: string, userId: string) {
-  const r = await db.query.reviewSchedules.findFirst({
-    where: and(
-      eq(reviewSchedules.id, id), 
-      eq(reviewSchedules.workspaceId, workspaceId),
-      eq(reviewSchedules.userId, userId)
-    ),
-  });
-  if (!r) return null;
-  if (r.status !== ReviewStatus.PENDING) return { ok: true, skipped: true };
-  const nextReviewAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-  // R-021: 原子 UPDATE + 条件检查
-  const updatedRows = await db.transaction(async (tx) => {
-    const updated = await tx
-      .update(reviewSchedules)
-      .set({ status: ReviewStatus.DISMISSED, lastReviewAt: new Date() })
-      .where(
-        and(
-          eq(reviewSchedules.id, id),
-          eq(reviewSchedules.workspaceId, workspaceId),
-          eq(reviewSchedules.userId, userId),
-          eq(reviewSchedules.status, ReviewStatus.PENDING), // R-021: 并发安全条件
-        ),
-      )
-      .returning({ id: reviewSchedules.id });
-
-    if (updated.length === 0) return null;
-
-    await tx.insert(reviewSchedules).values({
-      workspaceId,
-      userId,
-      subjectType: r.subjectType,
-      subjectId: r.subjectId,
-      validationEventId: r.validationEventId,
-      status: ReviewStatus.PENDING,
-      nextReviewAt,
-      intervalDays: r.intervalDays,
-    });
-    return updated;
-  });
-
-  if (!updatedRows) return { ok: true, skipped: true };
-  return { ok: true };
 }

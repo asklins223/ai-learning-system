@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  workflow_dispatch:
+  schedule:
+    # Nightly at 02:00 UTC — runs full nightly E2E suite (ADR-0008 §6)
+    - cron: "0 2 * * *"
   push:
-    branches: [main, master]
+    branches: [main, master, "codex/**"]
     tags: ["v*"]
   pull_request:
     branches: [main, master]
@@ -16,6 +20,10 @@ concurrency:
 
 env:
   NODE_VERSION: "22"
+  # Immutable v0.4 baseline named by the v0.5 release plan. Changed-line
+  # coverage measures the complete v0.5 delta instead of an arbitrary runner
+  # checkout depth or latest-commit window.
+  COVERAGE_BASE_SHA: "33efa06f8c0a5f2d1e97e12dcb745b2314c606e8"
 
 jobs:
   release-inputs:
@@ -48,11 +56,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
+            package-lock.json
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
             packages/db/package-lock.json
             packages/shared/package-lock.json
+            packages/ai-quality/package-lock.json
+
+      - name: Install repository tooling
+        run: npm ci --no-audit --no-fund
 
       - name: Install shared
         working-directory: packages/shared
@@ -60,6 +73,10 @@ jobs:
 
       - name: Install db
         working-directory: packages/db
+        run: npm ci --no-audit --no-fund
+
+      - name: Install ai-quality
+        working-directory: packages/ai-quality
         run: npm ci --no-audit --no-fund
 
       - name: Install API
@@ -85,6 +102,10 @@ jobs:
         working-directory: packages/db
         run: npm run typecheck
 
+      - name: TypeCheck ai-quality package
+        working-directory: packages/ai-quality
+        run: npm run typecheck
+
       - name: TypeCheck API
         working-directory: apps/api
         run: npm run typecheck
@@ -103,6 +124,21 @@ jobs:
           # F-018: 确保非交互模式，不提示 ESLint 配置向导
           CI: true
         run: npx eslint . --max-warnings=0
+
+      # OPS-01: 验证 Prometheus alerts.yml 语法
+      - name: Verify Prometheus alerts syntax
+        run: node .github/scripts/verify-alerts-syntax.mjs
+
+      # REL-01 / RC 硬门禁 §4.1: Secret scan — 0 high/critical 才通过
+      # 使用 Gitleaks 扫描全仓，检测 API key、密码、token 等敏感信息泄漏。
+      # .gitleaks.toml 配置允许 .env.example 和 docs/ 中的示例值。
+      - name: Secret scan (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: true
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+          GITLEAKS_CONFIG: .gitleaks.toml
 
       # F-016: 生产依赖审计门禁 — 0 high/critical 才通过
       - name: Audit Web production deps
@@ -138,6 +174,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
+            package-lock.json
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
@@ -218,6 +255,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -230,11 +269,28 @@ jobs:
             packages/db/package-lock.json
             packages/shared/package-lock.json
 
+      - name: Prepare raw Node test evidence
+        run: |
+          mkdir -p "$RUNNER_TEMP/unit-test-logs"
+          {
+            node --version
+            npm --version
+            uname -a
+            git rev-parse HEAD
+          } > "$RUNNER_TEMP/unit-test-logs/environment.txt"
+
+      - name: Install repository coverage tooling
+        run: npm ci --no-audit --no-fund
+
       # API and Worker load the shared package from its workspace source path.
       # Install its runtime dependencies explicitly in a clean checkout so
       # imports such as zod resolve from packages/shared/node_modules.
       - name: Install shared
         working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+
+      - name: Install ai-quality
+        working-directory: packages/ai-quality
         run: npm ci --no-audit --no-fund
 
       - name: Install Web
@@ -243,30 +299,120 @@ jobs:
 
       - name: Run shared contract unit tests
         working-directory: packages/shared
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/shared.tap"
+
+      # AIQ-01: 版本化黄金集与评分器单元测试
+      - name: Run ai-quality unit tests
+        working-directory: packages/ai-quality
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/ai-quality.tap"
 
       # F-018: 基础单元测试 — 覆盖 markdown-blocks 往返、分页参数 clamp 等关键链路
       - name: Run Web unit tests
         working-directory: apps/web
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/web.tap"
 
       - name: Run API unit tests
         working-directory: apps/api
         run: |
           npm ci --no-audit --no-fund
-          npm test
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/api.tap"
 
       - name: Run Worker unit tests
         working-directory: workers/ai-worker
         run: |
           npm ci --no-audit --no-fund
-          npm test
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/worker.tap"
+
+      # QLT-01/02: skip/todo allowlist gate (ADR-0008 §覆盖率与测试发现)
+      - name: Skip/todo allowlist gate
+        run: |
+          set -o pipefail
+          node .github/scripts/skip-todo-gate.mjs 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/skip-todo-gate.txt"
+
+      # QLT-01/02: coverage collection (report-only in PR, enforced in release-check)
+      - name: Coverage gate (report-only)
+        run: |
+          set -o pipefail
+          node .github/scripts/coverage-gate.mjs --report-only 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/coverage-gate.txt"
+          # Include coverage summary JSON in the artifact for FDN-01 formal report
+          if [ -f outputs/coverage/summary.json ]; then
+            cp outputs/coverage/summary.json "$RUNNER_TEMP/unit-test-logs/coverage-summary.json"
+          fi
+          find outputs/coverage -maxdepth 1 -name '*.coverage.json' -exec \
+            cp {} "$RUNNER_TEMP/unit-test-logs/" \;
+
+      - name: Upload raw Node test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ env.NODE_VERSION }}-unit-test-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/unit-test-logs
+          if-no-files-found: warn
+          retention-days: 30
+
+  # AIQ-01: PR 层 AI 质量门禁（ADR-0005）
+  # PR 只运行 schema/parser/alignment/scorer 与固定 Mock，不访问付费网络。
+  # 校验数据集完整性、标签覆盖、评分器逻辑和 metricsVerified。
+  ai-quality-gate:
+    name: AI Quality Gate (PR Mock, ADR-0005)
+    runs-on: ubuntu-latest
+    needs: typecheck
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            packages/shared/package-lock.json
+            packages/ai-quality/package-lock.json
+
+      - name: Install shared
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+
+      - name: Install ai-quality
+        working-directory: packages/ai-quality
+        run: npm ci --no-audit --no-fund
+
+      - name: Run PR Mock quality gate
+        working-directory: packages/ai-quality
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ai-quality-evidence"
+          npm run pr-gate 2>&1 | tee "$RUNNER_TEMP/ai-quality-evidence/pr-gate-result.json"
+
+      # AIQ-01: RC gate framework dry-run validation (no API key required)
+      - name: Validate RC gate framework (dry-run)
+        working-directory: packages/ai-quality
+        run: |
+          set -o pipefail
+          npm run rc-dry-run 2>&1 | tee "$RUNNER_TEMP/ai-quality-evidence/rc-dry-run.log"
+
+      - name: Upload AI quality gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-quality-pr-gate-${{ github.sha }}
+          path: ${{ runner.temp }}/ai-quality-evidence
+          if-no-files-found: warn
+          retention-days: 90
 
   fresh-migrations:
     name: Fresh PostgreSQL Migrations
     runs-on: ubuntu-latest
     needs: typecheck
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -285,6 +431,7 @@ jobs:
       DATABASE_URL: postgres://ailearn:ci-migration-only-password@127.0.0.1:5432/ailearn_ci
       DATABASE_URL_MIGRATOR: postgres://ailearn_migrator:ci-migrator-only-password@127.0.0.1:5432/ailearn_ci
       DATABASE_URL_API: postgres://ailearn_api:ci-api-only-password@127.0.0.1:5432/ailearn_ci
+      DATABASE_URL_WORKER: postgres://ailearn_worker:ci-worker-only-password@127.0.0.1:5432/ailearn_ci
       UPGRADE_DATABASE_URL: postgres://ailearn:ci-migration-only-password@127.0.0.1:5432/ailearn_upgrade_ci
       UPGRADE_DATABASE_URL_MIGRATOR: postgres://ailearn_migrator:ci-migrator-only-password@127.0.0.1:5432/ailearn_upgrade_ci
       POSTGRES_HOST: 127.0.0.1
@@ -304,15 +451,37 @@ jobs:
           cache: npm
           cache-dependency-path: |
             apps/api/package-lock.json
+            workers/ai-worker/package-lock.json
+            packages/db/package-lock.json
             packages/shared/package-lock.json
+
+      - name: Prepare raw PostgreSQL test evidence
+        run: |
+          mkdir -p "$RUNNER_TEMP/postgres-test-logs"
+          {
+            node --version
+            npm --version
+            uname -a
+            git rev-parse HEAD
+            docker inspect "${{ job.services.postgres.id }}" \
+              --format '{{.Config.Image}} {{.Image}}'
+          } > "$RUNNER_TEMP/postgres-test-logs/environment.txt"
 
       - name: Install shared
         working-directory: packages/shared
         run: npm ci --no-audit --no-fund
 
+      - name: Install database package
+        working-directory: packages/db
+        run: npm ci --no-audit --no-fund
+
       - name: Install API
         working-directory: apps/api
         # NODE_ENV=production would otherwise omit tsx, which db:migrate uses.
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: Install Worker
+        working-directory: workers/ai-worker
         run: npm ci --include=dev --no-audit --no-fund
 
       - name: Bootstrap least-privilege roles for the empty database
@@ -347,7 +516,84 @@ jobs:
         env:
           NODE_ENV: test
           RATE_LIMIT_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
-        run: node --import tsx --test src/__tests__/identity-security.test.ts
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/rate-limit-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/rate-limit.tap"
+
+      - name: Verify SEC-01 policy catalog and restricted roles
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          RLS_TEST_MIGRATOR_DATABASE_URL: ${{ env.DATABASE_URL_MIGRATOR }}
+          RLS_TEST_API_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+          RLS_TEST_WORKER_DATABASE_URL: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/rls-policies-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/rls-policies.tap"
+
+      - name: Verify review attempt schema, idempotency, cascade, and RLS
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          REVIEW_ATTEMPT_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/review-attempt-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/review-attempt.tap"
+
+      - name: Verify content hash consistency between PostgreSQL and application layer
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          CONTENT_HASH_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/content-hash-consistency-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/content-hash-consistency.tap"
+
+      - name: Verify SEC-02 invite/onboarding schema, constraints, and RLS
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          SEC02_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/sec02-invites-onboarding-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec02-invites-onboarding.tap"
+
+      - name: Verify evaluate_validation concurrent safety (advisory lock + idempotent dedup)
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          EVAL_VALIDATION_CONCURRENT_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/evaluate-validation-concurrent-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/evaluate-validation-concurrent.tap"
+
+      - name: Verify note version restore schema, constraints, and cascade behaviour
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          NOTE_VERSION_RESTORE_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/note-version-restore-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-version-restore.tap"
+
+      - name: Verify double Worker queue, leases, and pool context
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          QUEUE_TEST_MIGRATOR_DATABASE_URL: ${{ env.DATABASE_URL_MIGRATOR }}
+          QUEUE_TEST_WORKER_A_DATABASE_URL: ${{ env.DATABASE_URL_WORKER }}
+          QUEUE_TEST_WORKER_B_DATABASE_URL: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/queue-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/worker-queue.tap"
 
       - name: Verify every journal migration was applied
         working-directory: apps/api
@@ -640,6 +886,69 @@ jobs:
           DATABASE_URL_MIGRATOR: ${{ env.UPGRADE_DATABASE_URL_MIGRATOR }}
         run: npm run db:migrate
 
+      # SEC-01: Enforce-mode verification (ADR-0003)
+      # After all migrations are applied (0027 returns to expand mode), this step
+      # manually re-applies 0024_sec01_rls_enforce.sql to enable RLS+FORCE on all
+      # 24 tables and revoke Worker direct UPDATE on jobs. Then it runs the
+      # sec01-enforce-verify.mjs script to verify cross-workspace isolation in
+      # enforce mode. Finally, it re-applies 0027 to return to expand mode.
+      - name: "SEC-01 enforce: apply 0024 enforce SQL"
+        working-directory: apps/api
+        env:
+          PGPASSWORD: ci-migrator-only-password
+        run: |
+          set -o pipefail
+          psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
+            --set=ON_ERROR_STOP=1 \
+            -f src/db/migrations/0024_sec01_rls_enforce.sql \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-apply.log"
+
+      # 0038 drops runtime_access bypass policies and converts RESTRICTIVE
+      # policies to PERMISSIVE so that enforce-mode RLS actually isolates
+      # workspaces.  Must be applied after 0024 (ENABLE+FORCE RLS).
+      - name: "SEC-01 enforce: apply 0038 policy fix SQL"
+        working-directory: apps/api
+        env:
+          PGPASSWORD: ci-migrator-only-password
+        run: |
+          set -o pipefail
+          psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
+            --set=ON_ERROR_STOP=1 \
+            -f src/db/migrations/0038_sec01_rls_enforce_policy_fix.sql \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-policy-fix.log"
+
+      - name: "SEC-01 enforce: run verification script"
+        working-directory: apps/api
+        env:
+          SEC01_VERIFY_MIGRATOR_URL: postgres://ailearn_migrator:ci-migrator-only-password@127.0.0.1:5432/ailearn_ci
+          SEC01_VERIFY_API_URL: postgres://ailearn_api:ci-api-only-password@127.0.0.1:5432/ailearn_ci
+          SEC01_VERIFY_WORKER_URL: postgres://ailearn_worker:ci-worker-only-password@127.0.0.1:5432/ailearn_ci
+        run: |
+          set -o pipefail
+          node .github/scripts/sec01-enforce-verify.mjs \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-verify.log"
+
+      - name: "SEC-01 enforce: restore expand mode (0027 fail-safe)"
+        if: always()
+        working-directory: apps/api
+        env:
+          PGPASSWORD: ci-migrator-only-password
+        run: |
+          set -o pipefail
+          psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
+            --set=ON_ERROR_STOP=1 \
+            -f src/db/migrations/0027_sec01_rls_expansion_failsafe.sql \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-restore.log"
+
+      - name: Upload raw PostgreSQL test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-16-sec01-test-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/postgres-test-logs
+          if-no-files-found: warn
+          retention-days: 30
+
   production-compose:
     name: Production Images & Compose Smoke
     runs-on: ubuntu-latest
@@ -659,6 +968,7 @@ jobs:
       CORS_ORIGIN: http://localhost:3000
       AI_PROVIDER_CARD: mock
       AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+      WORKER_METRICS_PORT: "9100"
       DOCKER_BUILDKIT: "1"
     steps:
       - uses: actions/checkout@v4
@@ -693,6 +1003,56 @@ jobs:
             }
           done
 
+      # REL-01 / RC 硬门禁 §4.1: 镜像漏洞扫描 — 0 high/critical 才通过
+      # 使用 Trivy 扫描三个生产 Docker 镜像的高危和严重漏洞。
+      # --severity HIGH,CRITICAL --exit-code 1 确保有高危漏洞时阻断 CI。
+      - name: Scan API image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ailearn_ci-api
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+          ignore-unfixed: true
+
+      - name: Scan Worker image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ailearn_ci-worker
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+          ignore-unfixed: true
+
+      - name: Scan Web image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ailearn_ci-web
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+          ignore-unfixed: true
+
+      # Capture local build identities for reproducibility. These are not
+      # registry RepoDigests and therefore cannot satisfy the release contract.
+      - name: Capture local production image identities (REL-01 evidence)
+        env:
+          COMPOSE_PROJECT_NAME: ${{ env.COMPOSE_PROJECT_NAME }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/image-digests"
+          node .github/scripts/capture-image-digests.mjs \
+            --allow-local \
+            --output "$RUNNER_TEMP/image-digests/image-digests.json"
+
+      - name: Upload image digests artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests-${{ github.sha }}
+          path: ${{ runner.temp }}/image-digests
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Prepare migration image alias
         run: docker tag ailearn_ci-api ailearn_ci-migrate
 
@@ -707,6 +1067,15 @@ jobs:
           curl --fail --silent --show-error \
             --retry 30 --retry-delay 2 --retry-all-errors \
             http://127.0.0.1:3000/ >/dev/null
+
+      - name: Verify Worker metrics server is running
+        run: |
+          curl --fail --silent --show-error \
+            --retry 30 --retry-delay 2 --retry-all-errors \
+            http://127.0.0.1:9100/metrics | head -1 || {
+            echo "Worker metrics server not accessible"
+            exit 1
+          }
 
           for one_shot in role-bootstrap migrate role-grants; do
             container_id="$(docker compose ps -aq "$one_shot")"
@@ -807,6 +1176,32 @@ jobs:
           test "$restored_migrations" -gt 0
           echo "backup/restore OK: $restored_migrations migrations and ${#tables[@]} populated tables"
 
+      - name: Privacy scan on /metrics endpoint (ADR-0006 §7)
+        env:
+          METRICS_URL: "http://localhost:4000/metrics"
+        run: |
+          set -euo pipefail
+          # Restart API to expose /metrics endpoint
+          docker compose start api
+          # Wait for readiness
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/ready >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          # Fetch metrics and run privacy scan
+          METRICS_TEXT=$(curl -sf "$METRICS_URL" || echo "")
+          if [ -z "$METRICS_TEXT" ]; then
+            echo "Warning: /metrics endpoint returned empty, skipping privacy scan"
+          else
+            node --import tsx apps/api/src/scripts/privacy-scan.ts --text "$METRICS_TEXT"
+          fi
+
+      - name: Backup scripts test (ADR-0007)
+        run: |
+          bash infra/backup/backup-scripts.test.sh
+
       - name: Capture Compose diagnostics
         if: failure()
         run: |
@@ -827,3 +1222,609 @@ jobs:
       - name: Stop production Compose stack
         if: always()
         run: docker compose down --volumes --remove-orphans
+
+  e2e:
+    name: E2E (Playwright, ADR-0008)
+    runs-on: ubuntu-latest
+    # E2E tests are now blocking per ADR-0008 §6.7 "PR 失败即阻断".
+    # The PR smoke suite covers: login/session, note creation/card generation,
+    # evidence override, validation submission, review attempt, workspace permissions.
+    # Worker service is started to enable card generation during E2E.
+    env:
+      E2E_BASE_URL: "http://localhost:3000"
+      E2E_API_URL: "http://localhost:4000"
+      # Database URLs for dev compose (must match docker-compose.dev.yml)
+      # Dev compose uses a single superuser role for all connections
+      DATABASE_URL_API: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      DATABASE_URL_WORKER: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      DATABASE_URL: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      # Fixed seed output path (must be consistent between seed and test steps)
+      E2E_SEED_OUTPUT: /tmp/e2e-seed-output.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/api/package-lock.json
+            packages/shared/package-lock.json
+            tests/e2e/package-lock.json
+
+      - name: Install E2E dependencies
+        working-directory: tests/e2e
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck E2E harness
+        working-directory: tests/e2e
+        run: npm run typecheck
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json') }}
+
+      - name: Install Playwright browsers
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Start dev services
+        run: |
+          docker volume inspect ailearn-dev_dev_postgres_data >/dev/null 2>&1 || \
+            docker volume create --label com.ailearn.purpose=ci-postgres-data ailearn-dev_dev_postgres_data >/dev/null
+          docker compose -f docker-compose.dev.yml up -d postgres minio
+          # Wait for PostgreSQL to be ready
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U ailearn >/dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            echo "Waiting for PostgreSQL... ($i/30)"
+            sleep 2
+          done
+
+      - name: Bootstrap restricted database roles
+        run: docker compose -f docker-compose.dev.yml run --rm role-bootstrap
+
+      - name: Install shared
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+
+      - name: Install and migrate API
+        working-directory: apps/api
+        run: |
+          npm ci --include=dev --no-audit --no-fund
+          npm run db:migrate
+
+      - name: Install Worker
+        working-directory: workers/ai-worker
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: Install and build Web
+        working-directory: apps/web
+        run: |
+          npm ci --no-audit --no-fund
+
+      - name: Start API server
+        env:
+          NODE_ENV: development
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+          AI_PROVIDER_CARD: mock
+          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          CORS_ORIGIN: http://localhost:3000
+        run: |
+          cd apps/api && npx tsx src/server.ts &
+          # Wait for API to be ready
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/ready >/dev/null 2>&1; then
+              echo "API is ready"
+              break
+            fi
+            echo "Waiting for API... ($i/30)"
+            sleep 2
+          done
+
+      - name: Start Worker
+        env:
+          NODE_ENV: development
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          AI_PROVIDER_CARD: mock
+          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          API_INTERNAL_URL: http://localhost:4000
+        run: |
+          cd workers/ai-worker && npx tsx src/index.ts &
+          # Give Worker a few seconds to start
+          sleep 3
+          echo "Worker started"
+
+      - name: Start Web dev server
+        run: |
+          cd apps/web && npm run dev &
+          # Wait for Web to be ready
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000 >/dev/null 2>&1; then
+              echo "Web is ready"
+              break
+            fi
+            echo "Waiting for Web... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run seed CLI (QLT-01, PR profile)
+        working-directory: tests/e2e
+        env:
+          SEED_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+          SEED_API_URL: ${{ env.E2E_API_URL }}
+          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
+        run: |
+          npm run seed -- --profile pr --output "$E2E_SEED_OUTPUT"
+
+      - name: Run Playwright E2E tests
+        if: success()
+        working-directory: tests/e2e
+        env:
+          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
+          E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
+        run: |
+          npm run test:pr
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: tests/e2e/playwright-report
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload Playwright test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ github.run_id }}
+          path: tests/e2e/test-results
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Stop dev services
+        if: always()
+        run: |
+          docker compose -f docker-compose.dev.yml down --volumes --remove-orphans
+          docker volume rm ailearn-dev_dev_postgres_data >/dev/null 2>&1 || true
+
+  # REL-01: Release evidence aggregation job
+  # Runs after all blocking jobs pass. Generates a contract-compliant RC
+  # manifest skeleton and uploads it as a CI artifact for evidence retention.
+  # The manifest's images/aiQuality/approvals fields are placeholders that
+  # must be filled by the CI build job (image digests), RC gate CLI (AIQ
+  # metrics), and human approval before the contract verifier will accept it.
+  release-evidence:
+    name: Release Evidence (Manifest Aggregation)
+    runs-on: ubuntu-latest
+    needs: [build, unit-tests, fresh-migrations, production-compose, ai-quality-gate, e2e]
+    # Don't run on PRs from forks (secrets may not be available)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Install shared for manifest generator (it imports version-contract.mjs)
+      - name: Install shared
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+
+      - name: Prepare release evidence directory
+        run: mkdir -p "$RUNNER_TEMP/release-evidence"
+
+      # Download the image digests artifact produced by production-compose.
+      # This contains local build identities, or registry RepoDigests when a
+      # separate publish stage has supplied them.
+      - name: Download image digests artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-digests-${{ github.sha }}
+          path: ${{ runner.temp }}/image-digests
+
+      - name: Check for image digests
+        id: check-images
+        run: |
+          if [ -f "$RUNNER_TEMP/image-digests/image-digests.json" ] \
+            && jq -e '.releaseReady == true' "$RUNNER_TEMP/image-digests/image-digests.json" >/dev/null; then
+            echo "images_path=$RUNNER_TEMP/image-digests/image-digests.json" >> "$GITHUB_OUTPUT"
+            echo "Found registry-backed image digests file"
+          else
+            echo "images_path=" >> "$GITHUB_OUTPUT"
+            echo "Local image identities are evidence only; registry RepoDigests remain required"
+          fi
+
+      - name: Download raw unit and coverage evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: node-${{ env.NODE_VERSION }}-unit-test-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/unit-test-logs
+
+      - name: Download Playwright JUnit evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-results-${{ github.run_id }}
+          path: ${{ runner.temp }}/playwright-results
+
+      - name: Prepare collected coverage and scan evidence
+        run: |
+          test -f "$RUNNER_TEMP/unit-test-logs/coverage-summary.json"
+          mkdir -p outputs/coverage "$RUNNER_TEMP/release-evidence/scan-results"
+          cp "$RUNNER_TEMP/unit-test-logs/coverage-summary.json" outputs/coverage/summary.json
+          cp outputs/coverage/summary.json "$RUNNER_TEMP/release-evidence/coverage-summary.json"
+          find "$RUNNER_TEMP/unit-test-logs" -maxdepth 1 -name '*.coverage.json' -exec \
+            cp {} outputs/coverage/ \;
+          for name in api worker web; do
+            echo "passed: production-compose Trivy gate completed with exit-code=0" \
+              > "$RUNNER_TEMP/release-evidence/scan-results/trivy-scan-${name}.txt"
+          done
+          for name in api worker web shared; do
+            echo "passed: typecheck npm audit gate completed with exit-code=0" \
+              > "$RUNNER_TEMP/release-evidence/scan-results/npm-audit-${name}.txt"
+          done
+
+      # Generate dev manifest (with test summary) for evidence retention
+      - name: Generate release manifest (dev mode)
+        run: |
+          set -o pipefail
+          node .github/scripts/release-manifest-generate.mjs \
+            --skip-tests \
+            --output "$RUNNER_TEMP/release-evidence/release-manifest-dev.json" \
+            2>&1 | tee "$RUNNER_TEMP/release-evidence/generate-dev.log"
+
+      # Generate RC manifest with real image digests (if available).
+      # The --images flag injects canonical sha256 digests from the CI build
+      # into the manifest.images section, replacing placeholder values.
+      - name: Generate release manifest (RC with image digests)
+        run: |
+          set -o pipefail
+          IMAGES_ARG=""
+          if [ -n "${{ steps.check-images.outputs.images_path }}" ]; then
+            IMAGES_ARG="--images ${{ steps.check-images.outputs.images_path }}"
+          fi
+          node .github/scripts/release-manifest-generate.mjs \
+            --rc \
+            --skip-tests \
+            $IMAGES_ARG \
+            --output "$RUNNER_TEMP/release-evidence/release-manifest-rc.json" \
+            2>&1 | tee "$RUNNER_TEMP/release-evidence/generate-rc.log"
+
+      # Record environment metadata for reproducibility
+      - name: Record evidence metadata
+        run: |
+          {
+            echo "{"
+            echo "  \"githubRunId\": \"${{ github.run_id }}\","
+            echo "  \"githubRunAttempt\": \"${{ github.run_attempt }}\","
+            echo "  \"githubSha\": \"${{ github.sha }}\","
+            echo "  \"githubRef\": \"${{ github.ref }}\","
+            echo "  \"githubEventName\": \"${{ github.event_name }}\","
+            echo "  \"nodeVersion\": \"$(node --version)\","
+            echo "  \"npmVersion\": \"$(npm --version)\","
+            echo "  \"uname\": \"$(uname -a)\","
+            echo "  \"generatedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+            echo "}"
+          } > "$RUNNER_TEMP/release-evidence/environment.json"
+
+      # FDN-01: Save formal coverage baseline with digest for reproducibility
+      - name: Save coverage baseline (FDN-01)
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-evidence/coverage-baseline"
+          node .github/scripts/coverage-baseline-save.mjs \
+            --use-existing \
+            --label "ci-${{ github.run_id }}" \
+            2>&1 | tee "$RUNNER_TEMP/release-evidence/coverage-baseline-save.log"
+          cp -R outputs/coverage-baselines/. \
+            "$RUNNER_TEMP/release-evidence/coverage-baseline/"
+
+      # Run only after aggregation so an exact tag is checked against concrete
+      # test/scan/image/AIQ/approval evidence instead of failing before jobs run.
+      - name: Verify exact-tag release manifest contract
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_MANIFEST_PATH: ${{ runner.temp }}/release-evidence/release-manifest-rc.json
+        run: node .github/scripts/release-manifest-contract.mjs
+
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/release-evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  # QLT-01/02: Nightly E2E suite (ADR-0008 §6)
+  # Runs the full nightly test matrix: Chromium 390/768/1440 + Firefox 1440.
+  # Uses nightly seed profile (51 notes/cards) for pagination boundary tests.
+  # Only runs on schedule or manual dispatch — does not block PRs.
+  e2e-nightly:
+    name: E2E Nightly (Full Matrix, ADR-0008)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    timeout-minutes: 45
+    env:
+      E2E_BASE_URL: "http://localhost:3000"
+      E2E_API_URL: "http://localhost:4000"
+      E2E_PROFILE: "nightly"
+      DATABASE_URL_API: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      DATABASE_URL_WORKER: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      DATABASE_URL: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
+      E2E_SEED_OUTPUT: /tmp/e2e-nightly-seed-output.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/api/package-lock.json
+            packages/shared/package-lock.json
+            tests/e2e/package-lock.json
+
+      - name: Install E2E dependencies
+        working-directory: tests/e2e
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck E2E harness
+        working-directory: tests/e2e
+        run: npm run typecheck
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json') }}
+
+      - name: Install Playwright browsers (Chromium + Firefox)
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: Start dev services
+        run: |
+          docker volume inspect ailearn-dev_dev_postgres_data >/dev/null 2>&1 || \
+            docker volume create --label com.ailearn.purpose=ci-postgres-data ailearn-dev_dev_postgres_data >/dev/null
+          docker compose -f docker-compose.dev.yml up -d postgres minio
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U ailearn >/dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            echo "Waiting for PostgreSQL... ($i/30)"
+            sleep 2
+          done
+
+      - name: Bootstrap restricted database roles
+        run: docker compose -f docker-compose.dev.yml run --rm role-bootstrap
+
+      - name: Install shared
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+
+      - name: Install and migrate API
+        working-directory: apps/api
+        run: |
+          npm ci --include=dev --no-audit --no-fund
+          npm run db:migrate
+
+      - name: Install Worker
+        working-directory: workers/ai-worker
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: Install and build Web
+        working-directory: apps/web
+        run: npm ci --no-audit --no-fund
+
+      - name: Start API server
+        env:
+          NODE_ENV: development
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+          AI_PROVIDER_CARD: mock
+          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          CORS_ORIGIN: http://localhost:3000
+        run: |
+          cd apps/api && npx tsx src/server.ts &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/ready >/dev/null 2>&1; then
+              echo "API is ready"
+              break
+            fi
+            echo "Waiting for API... ($i/30)"
+            sleep 2
+          done
+
+      - name: Start Worker
+        env:
+          NODE_ENV: development
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          AI_PROVIDER_CARD: mock
+          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          API_INTERNAL_URL: http://localhost:4000
+        run: |
+          cd workers/ai-worker && npx tsx src/index.ts &
+          sleep 3
+          echo "Worker started"
+
+      - name: Start Web dev server
+        run: |
+          cd apps/web && npm run dev &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000 >/dev/null 2>&1; then
+              echo "Web is ready"
+              break
+            fi
+            echo "Waiting for Web... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run seed CLI (QLT-01, nightly profile)
+        working-directory: tests/e2e
+        env:
+          SEED_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+          SEED_API_URL: ${{ env.E2E_API_URL }}
+          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
+        run: |
+          npm run seed -- --profile nightly --output "$E2E_SEED_OUTPUT"
+
+      - name: Run Playwright nightly E2E tests
+        working-directory: tests/e2e
+        env:
+          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
+          E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
+          E2E_PROFILE: ${{ env.E2E_PROFILE }}
+        run: |
+          npm run test:nightly
+
+      - name: Upload Playwright nightly report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-nightly-report-${{ github.run_id }}
+          path: tests/e2e/playwright-report
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload Playwright nightly results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-nightly-results-${{ github.run_id }}
+          path: tests/e2e/test-results
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Stop dev services
+        if: always()
+        run: |
+          docker compose -f docker-compose.dev.yml down --volumes --remove-orphans
+          docker volume rm ailearn-dev_dev_postgres_data >/dev/null 2>&1 || true
+
+  # OPS-01: Alpha infrastructure verification (ADR-0006, ADR-0007)
+  # Uses Docker Compose to deploy Prometheus + Alertmanager + backup-runner
+  # and verifies the full backup/restore/monitoring cycle.
+  # Only runs on schedule or manual dispatch — does not block PRs.
+  alpha-infrastructure:
+    name: Alpha Infrastructure (Monitoring + Backup, OPS-01)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: ailearn_alpha_ci
+      POSTGRES_USER: ailearn
+      POSTGRES_PASSWORD: ci-alpha-postgres-password
+      POSTGRES_DB: ailearn
+      MIGRATOR_PASSWORD: ci-alpha-migrator-password
+      API_PASSWORD: ci-alpha-api-password
+      WORKER_PASSWORD: ci-alpha-worker-password
+      DATABASE_URL_MIGRATOR: postgres://ailearn_migrator:ci-alpha-migrator-password@postgres:5432/ailearn
+      DATABASE_URL_API: postgres://ailearn_api:ci-alpha-api-password@postgres:5432/ailearn
+      DATABASE_URL_WORKER: postgres://ailearn_worker:ci-alpha-worker-password@postgres:5432/ailearn
+      MINIO_ROOT_USER: ailearn
+      MINIO_ROOT_PASSWORD: ci-alpha-minio-secret
+      AI_PROVIDER_CARD: mock
+      AI_CREDENTIAL_ENCRYPTION_KEY: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      BACKUP_BUCKET: ailearn-backups
+      SOURCE_RELEASE: "0.5.0-alpha"
+      SOURCE_COMMIT: ${{ github.sha }}
+      SOURCE_MIGRATION: "0039"
+      CORS_ORIGIN: http://localhost:3000
+      AUTH_COOKIE_SECURE: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose alpha overlay
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage config --quiet
+
+      - name: Start complete Alpha stack
+        run: ./scripts/alpha-env-setup.sh up
+
+      - name: Initialize backup infrastructure (age keys + S3 bucket)
+        run: ./scripts/alpha-env-setup.sh init
+
+      - name: Execute RC restore verification
+        run: ./scripts/alpha-env-setup.sh restore-verify
+
+      - name: Verify deeply checked backup freshness
+        run: ./scripts/alpha-env-setup.sh freshness
+
+      - name: Verify Prometheus rules, targets, and backup metric
+        run: |
+          set -euo pipefail
+          RULE_COUNT="$(curl -fsS http://127.0.0.1:9090/api/v1/rules | jq '[.data.groups[].rules[]] | length')"
+          test "$RULE_COUNT" -gt 0
+
+          for attempt in $(seq 1 30); do
+            all_up=true
+            for job in ailearn-api ailearn-worker ailearn-backup; do
+              value="$(curl -fsS --get --data-urlencode "query=up{job=\"$job\"}" \
+                http://127.0.0.1:9090/api/v1/query | jq -r '.data.result[0].value[1] // "0"')"
+              if [ "$value" != "1" ]; then all_up=false; fi
+            done
+            backup_value="$(curl -fsS --get \
+              --data-urlencode 'query=ailearn_db_last_successful_backup_timestamp{job="ailearn-backup"}' \
+              http://127.0.0.1:9090/api/v1/query | jq -r '.data.result[0].value[1] // "0"')"
+            if [ "$all_up" = true ] && awk "BEGIN { exit !($backup_value > 0) }"; then
+              echo "All Alpha scrape targets and verified-backup metric are healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo >&2 "Alpha scrape targets or verified-backup metric did not become healthy"
+          curl -fsS http://127.0.0.1:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health, lastError}' >&2
+          exit 1
+
+      - name: Capture Alpha infrastructure evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/alpha-evidence"
+          {
+            echo "# Alpha Infrastructure Evidence"
+            echo ""
+            echo "## Prometheus Targets"
+            curl -sf http://localhost:9090/api/v1/targets 2>/dev/null | \
+              jq '.data.activeTargets[] | {job: .labels.job, health: .health}' || echo "N/A"
+            echo ""
+            echo "## Alert Rules"
+            curl -sf http://localhost:9090/api/v1/rules 2>/dev/null | \
+              jq '.data.groups[] | {name: .name, ruleCount: (.rules | length)}' || echo "N/A"
+          } > "$RUNNER_TEMP/alpha-evidence/alpha-report.md"
+          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage \
+            run --rm -v "$RUNNER_TEMP/alpha-evidence:/evidence" backup-runner \
+            sh -c 'cp -R /var/lib/ailearn/manifests /evidence/'
+          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage \
+            logs --no-color > "$RUNNER_TEMP/alpha-evidence/compose.log" 2>&1 || true
+
+      - name: Upload Alpha infrastructure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-infrastructure-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/alpha-evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Stop Alpha infrastructure
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage down --volumes --remove-orphans

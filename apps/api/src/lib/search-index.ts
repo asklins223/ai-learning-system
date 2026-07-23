@@ -4,6 +4,12 @@ import { searchDocuments } from "../db/schema/search.ts";
 import { logger } from "./logger.ts";
 
 /**
+ * 数据库接口类型——仅选取 upsert/delete 所需的方法。
+ * 测试时可注入 mock 实现以验证真实函数逻辑。
+ */
+type SearchDatabase = Pick<typeof db, "insert" | "delete">;
+
+/**
  * 搜索索引同步统一入口。
  * 各模块只调用此函数，不内联写 upsert SQL。
  *
@@ -14,18 +20,21 @@ import { logger } from "./logger.ts";
  * 搜索索引是派生投影，业务事务成功后索引写入失败不应回滚业务操作。
  * 调用方可通过 GET /search/drift 检测漂移，并通过 POST /search/reindex 补偿。
  */
-export async function upsertSearchDocument(params: {
-  workspaceId: string;
-  objectType: "note" | "card" | "source" | "evidence";
-  objectId: string;
-  title: string | null;
-  body: string | null;
-  metadata?: Record<string, unknown>;
-}): Promise<boolean> {
+export async function upsertSearchDocument(
+  params: {
+    workspaceId: string;
+    objectType: "note" | "card" | "source" | "evidence";
+    objectId: string;
+    title: string | null;
+    body: string | null;
+    metadata?: Record<string, unknown>;
+  },
+  database: SearchDatabase = db,
+): Promise<boolean> {
   const { workspaceId, objectType, objectId, title, body, metadata } = params;
 
   try {
-    await db
+    await database
       .insert(searchDocuments)
       .values({
         workspaceId,
@@ -70,9 +79,10 @@ export async function deleteSearchDocument(
   workspaceId: string,
   objectType: string,
   objectId: string,
+  database: SearchDatabase = db,
 ): Promise<void> {
   try {
-    await db
+    await database
       .delete(searchDocuments)
       .where(
         and(
