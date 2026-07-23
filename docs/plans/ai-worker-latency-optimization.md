@@ -4,7 +4,7 @@
 > **状态**：Draft/Proposed
 > **优先级**：P0-P2（紧急到中期）
 > **关联文件**：`workers/ai-worker/src/index.ts`、`workers/ai-worker/src/queue.ts`、`workers/ai-worker/src/handlers/index.ts`、`workers/ai-worker/src/lib/handler-timeout-config.ts`、`workers/ai-worker/src/lib/providers/dashscope.ts`、`workers/ai-worker/src/lib/providers/openai-compatible.ts`、`workers/ai-worker/src/lib/prompts.ts`、`workers/ai-worker/src/lib/job-retry.ts`、`apps/web/components/NoteEditor.tsx`、`apps/web/app/(workspace)/(focus)/cards/[id]/page.tsx`、`docker-compose.yml`
-> **前置文档**：[AI Worker 超时与计费错误修复报告](../runbooks/ai-worker-timeout-and-billing-fix.md)
+> **前置记录**：AI Worker 超时与计费错误修复报告已转入本地 `project-archive`
 
 ---
 

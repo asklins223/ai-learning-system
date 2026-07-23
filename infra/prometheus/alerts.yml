@@ -33,7 +33,7 @@ groups:
         annotations:
           summary: "AI Learn API 服务不可用"
           description: "API readiness 状态为 0，服务可能已停止或崩溃。"
-          runbook: "docs/runbooks/slo-alerts.md#api-down"
+          runbook: "docs/operations.md#alerts"
 
       - alert: AILearnWorkerDown
         expr: |
@@ -46,7 +46,7 @@ groups:
         annotations:
           summary: "AI Learn Worker 服务不可用"
           description: "Prometheus 无法抓取 Worker 指标端点。"
-          runbook: "docs/runbooks/slo-alerts.md#worker-down"
+          runbook: "docs/operations.md#alerts"
 
       # HTTP 5xx 错误率过高（超过 0.5%）
       - alert: AILearnHighHTTP5xxRate
@@ -63,7 +63,7 @@ groups:
         annotations:
           summary: "HTTP 5xx 错误率过高"
           description: "5xx 错误率达到 {{ $value | humanizePercentage }}，超过 SLO 目标 0.5%。"
-          runbook: "docs/runbooks/slo-alerts.md#high-5xx-rate"
+          runbook: "docs/operations.md#alerts"
 
       # HTTP p95 延迟超过 1 秒
       - alert: AILearnHighHTTPLatency
@@ -76,7 +76,7 @@ groups:
         annotations:
           summary: "HTTP p95 延迟超过阈值"
           description: "p95 延迟达到 {{ $value }}s，超过 SLO 目标 1s。"
-          runbook: "docs/runbooks/slo-alerts.md#high-latency"
+          runbook: "docs/operations.md#alerts"
 
   # ─── Job 队列健康 ─────────────────────────────────────────────────────────
   - name: ailearn_job_health
@@ -92,7 +92,7 @@ groups:
         annotations:
           summary: "Job 队列堆积"
           description: "Pending 队列深度达到 {{ $value }}，可能 Worker 处理速度不足。"
-          runbook: "docs/runbooks/slo-alerts.md#job-backlog"
+          runbook: "docs/operations.md#alerts"
 
       # 最老 pending job 超过 5 分钟
       - alert: AILearnStalePendingJob
@@ -104,7 +104,7 @@ groups:
         annotations:
           summary: "存在超时 pending job"
           description: "最老的 pending job 已等待 {{ $value | humanizeDuration }}，超过阈值 5 分钟。"
-          runbook: "docs/runbooks/slo-alerts.md#stale-job"
+          runbook: "docs/operations.md#alerts"
 
       # Job 死信率超过 1%
       - alert: AILearnHighJobDeadRate
@@ -121,7 +121,7 @@ groups:
         annotations:
           summary: "Job 死信率过高"
           description: "死信率达到 {{ $value | humanizePercentage }}，超过 SLO 目标 1%。"
-          runbook: "docs/runbooks/slo-alerts.md#high-dead-rate"
+          runbook: "docs/operations.md#alerts"
 
       # Job lease 丢失
       - alert: AILearnJobLeaseLost
@@ -133,7 +133,7 @@ groups:
         annotations:
           summary: "检测到 job lease 丢失"
           description: "过去 5 分钟内发生 {{ $value }} 次 lease 丢失事件。"
-          runbook: "docs/runbooks/slo-alerts.md#lease-lost"
+          runbook: "docs/operations.md#alerts"
 
   # ─── Provider 调用健康 ─────────────────────────────────────────────────────
   - name: ailearn_provider_health
@@ -154,7 +154,7 @@ groups:
         annotations:
           summary: "AI Provider 错误率过高"
           description: "Provider 错误率达到 {{ $value | humanizePercentage }}，超过阈值 5%。"
-          runbook: "docs/runbooks/slo-alerts.md#provider-errors"
+          runbook: "docs/operations.md#alerts"
 
       # Provider 调用超时（p95 超过 30 秒）
       - alert: AILearnProviderHighLatency
@@ -167,7 +167,7 @@ groups:
         annotations:
           summary: "Provider 调用延迟过高"
           description: "Provider 调用 p95 延迟达到 {{ $value }}s，超过阈值 30s。"
-          runbook: "docs/runbooks/slo-alerts.md#provider-latency"
+          runbook: "docs/operations.md#alerts"
 
       # Provider schema failure（结构化错误）
       - alert: AILearnProviderSchemaFailure
@@ -179,7 +179,7 @@ groups:
         annotations:
           summary: "Provider 返回结构化错误"
           description: "检测到 schema_failure 错误，可能模型输出格式不兼容。"
-          runbook: "docs/runbooks/slo-alerts.md#schema-failure"
+          runbook: "docs/operations.md#alerts"
 
       # Provider 配额不足
       - alert: AILearnProviderQuotaExceeded
@@ -191,7 +191,7 @@ groups:
         annotations:
           summary: "Provider 配额不足"
           description: "检测到 quota_exceeded 错误，需检查 API key 配额。"
-          runbook: "docs/runbooks/slo-alerts.md#quota-exceeded"
+          runbook: "docs/operations.md#alerts"
 
   # ─── 数据库健康 ───────────────────────────────────────────────────────────
   - name: ailearn_database_health
@@ -207,7 +207,7 @@ groups:
         annotations:
           summary: "数据库事务失败率过高"
           description: "事务失败速率达到 {{ $value }}/s。"
-          runbook: "docs/runbooks/slo-alerts.md#transaction-failure"
+          runbook: "docs/operations.md#alerts"
 
       # RLS 拒绝率激增（可能表明 policy 配置问题或异常访问模式）
       - alert: AILearnHighRLSDenialRate
@@ -219,7 +219,7 @@ groups:
         annotations:
           summary: "RLS 拒绝率激增"
           description: "RLS policy 拒绝速率达到 {{ $value }}/s，需检查是否有异常访问模式。"
-          runbook: "docs/runbooks/slo-alerts.md#rls-denial"
+          runbook: "docs/operations.md#alerts"
 
       # 备份过期（超过 24 小时无成功备份）
       - alert: AILearnBackupStale
@@ -235,7 +235,7 @@ groups:
         annotations:
           summary: "数据库备份过期"
           description: "距离上次成功备份已超过 {{ $value | humanizeDuration }}，超过 SLO 目标 24 小时。"
-          runbook: "docs/runbooks/slo-alerts.md#backup-stale"
+          runbook: "docs/operations.md#alerts"
 
   # ─── Alpha 漏斗监控 ─────────────────────────────────────────────────────────
   - name: ailearn_funnel_monitoring
@@ -256,7 +256,7 @@ groups:
         annotations:
           summary: "邀请消费率过低"
           description: "邀请发出后消费率低于 10%。"
-          runbook: "docs/runbooks/slo-alerts.md#low-invite-rate"
+          runbook: "docs/operations.md#alerts"
 
       # 学习卡生成失败率过高
       - alert: AILearnLowCardGenerationSuccessRate
@@ -273,7 +273,7 @@ groups:
         annotations:
           summary: "学习卡生成失败率过高"
           description: "卡片生成失败率超过 20%。"
-          runbook: "docs/runbooks/slo-alerts.md#card-gen-failure"
+          runbook: "docs/operations.md#alerts"
 
   # ─── Release 信息 ───────────────────────────────────────────────────────────
   - name: ailearn_release_info
@@ -302,4 +302,4 @@ groups:
         annotations:
           summary: "检测到版本回滚"
           description: "Release 已回滚，需立即调查原因。"
-          runbook: "docs/runbooks/rollback-v0.5.md"
+          runbook: "docs/operations.md#rollback"

@@ -59,4 +59,4 @@ npm --prefix tests/e2e test
 
 ## Fixture 契约
 
-遵循 `docs/testing/v0.5-fixture-contract.md`：每个 test worker 使用独立 `runId`，fixture 包含两个 workspace、Owner/member、到期 review schedule 等。
+每个 test worker 使用独立 `runId`；fixture 包含两个 workspace、Owner/member、到期 review schedule 等。当前可执行契约以本目录的 fixture 与 seed 代码为准。
