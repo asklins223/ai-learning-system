@@ -36,15 +36,26 @@ export async function listCards(workspaceId: string, opts?: { cursor?: string; l
   if (opts?.cursor) {
     const decoded = decodeCursor(opts.cursor);
     if (decoded) {
-      const cursorTs = new Date(decoded.timestamp);
+      const cursorTs = decoded.timestamp;
       const cursorId = decoded.id;
-      conditions.push(sql`(${learningCards.createdAt}, ${learningCards.id}) < (${cursorTs}, ${cursorId})`);
+      conditions.push(
+        sql`(${learningCards.createdAt}, ${learningCards.id}) < (${cursorTs}::timestamptz, ${cursorId}::uuid)`,
+      );
     }
   }
-  const cards = await db.query.learningCards.findMany({
+  const cardRows = await db.query.learningCards.findMany({
     where: and(...conditions),
     orderBy: [desc(learningCards.createdAt), desc(learningCards.id)],
-    limit,
+    limit: limit + 1,
+    extras: {
+      cursorTimestamp: sql<string>`to_char(${learningCards.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_timestamp"),
+    },
+  });
+  const hasMore = cardRows.length > limit;
+  const cardsWithCursor = cardRows.slice(0, limit);
+  const cards = cardsWithCursor.map(({ cursorTimestamp, ...card }) => {
+    if (!cursorTimestamp) throw new Error("card cursor timestamp is missing");
+    return card;
   });
 
   // R-019: 服务端返回实际总数
@@ -139,9 +150,9 @@ export async function listCards(workspaceId: string, opts?: { cursor?: string; l
   }
 
   // R-019: 使用最后一条记录的 (createdAt, id) 作为下一页 cursor
-  const lastCard = cards[cards.length - 1];
-  const nextCursor = cards.length === limit && lastCard
-    ? encodeCursor(lastCard.createdAt, lastCard.id)
+  const lastCard = cardsWithCursor[cardsWithCursor.length - 1];
+  const nextCursor = hasMore && lastCard
+    ? encodeCursor(lastCard.cursorTimestamp, lastCard.id)
     : null;
 
   return {

@@ -1098,7 +1098,7 @@
   border: 2px solid var(--color-paper);
   border-radius: var(--radius-pill);
   padding-inline: 3px;
-  background: var(--color-running);
+  background: var(--color-running-text);
   color: var(--color-on-action);
   font-family: var(--font-ui);
   font-size: 8.5px;

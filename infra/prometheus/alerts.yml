@@ -1,0 +1,305 @@
+# OPS-01: Prometheus 告警规则（ADR-0006 §2, v0.5 §6.6）
+#
+# SLO 定义：
+#   - HTTP 可用性：99.5% (允许 0.5% 错误率)
+#   - HTTP p95 延迟：1 秒
+#   - Job 完成率：99% (1% 死信可接受)
+#   - 最老 pending job：5 分钟
+#   - Provider 错误率：< 5%
+#   - 备份新鲜度：24 小时内
+#
+# 告警级别：
+#   - warning：需要关注但非紧急
+#   - critical：需要立即响应
+#
+# 所有规则使用 `ailearn_` 前缀，避免与其他服务冲突。
+
+groups:
+  # ─── HTTP 服务健康 ───────────────────────────────────────────────────────
+  - name: ailearn_http_health
+    interval: 30s
+    rules:
+      # API 不可用（/readiness 返回 0）
+      - alert: AILearnAPIDown
+        expr: |
+          (up{job="ailearn-api"} == 0)
+          or absent(up{job="ailearn-api"})
+          or (ailearn_readiness_status{job="ailearn-api"} == 0)
+          or absent(ailearn_readiness_status{job="ailearn-api"})
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "AI Learn API 服务不可用"
+          description: "API readiness 状态为 0，服务可能已停止或崩溃。"
+          runbook: "docs/runbooks/slo-alerts.md#api-down"
+
+      - alert: AILearnWorkerDown
+        expr: |
+          (up{job="ailearn-worker"} == 0)
+          or absent(up{job="ailearn-worker"})
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "AI Learn Worker 服务不可用"
+          description: "Prometheus 无法抓取 Worker 指标端点。"
+          runbook: "docs/runbooks/slo-alerts.md#worker-down"
+
+      # HTTP 5xx 错误率过高（超过 0.5%）
+      - alert: AILearnHighHTTP5xxRate
+        expr: |
+          (
+            rate(ailearn_http_errors_5xx_total[5m])
+            /
+            rate(ailearn_http_requests_total[5m])
+          ) > 0.005
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "HTTP 5xx 错误率过高"
+          description: "5xx 错误率达到 {{ $value | humanizePercentage }}，超过 SLO 目标 0.5%。"
+          runbook: "docs/runbooks/slo-alerts.md#high-5xx-rate"
+
+      # HTTP p95 延迟超过 1 秒
+      - alert: AILearnHighHTTPLatency
+        expr: |
+          histogram_quantile(0.95, rate(ailearn_http_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "HTTP p95 延迟超过阈值"
+          description: "p95 延迟达到 {{ $value }}s，超过 SLO 目标 1s。"
+          runbook: "docs/runbooks/slo-alerts.md#high-latency"
+
+  # ─── Job 队列健康 ─────────────────────────────────────────────────────────
+  - name: ailearn_job_health
+    interval: 30s
+    rules:
+      # Pending 队列堆积超过 100
+      - alert: AILearnJobQueueBacklog
+        expr: ailearn_job_queue_depth{status="pending"} > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Job 队列堆积"
+          description: "Pending 队列深度达到 {{ $value }}，可能 Worker 处理速度不足。"
+          runbook: "docs/runbooks/slo-alerts.md#job-backlog"
+
+      # 最老 pending job 超过 5 分钟
+      - alert: AILearnStalePendingJob
+        expr: ailearn_job_oldest_pending_age_seconds > 300
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "存在超时 pending job"
+          description: "最老的 pending job 已等待 {{ $value | humanizeDuration }}，超过阈值 5 分钟。"
+          runbook: "docs/runbooks/slo-alerts.md#stale-job"
+
+      # Job 死信率超过 1%
+      - alert: AILearnHighJobDeadRate
+        expr: |
+          (
+            rate(ailearn_job_terminal_total{status="dead"}[10m])
+            /
+            rate(ailearn_job_terminal_total[10m])
+          ) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Job 死信率过高"
+          description: "死信率达到 {{ $value | humanizePercentage }}，超过 SLO 目标 1%。"
+          runbook: "docs/runbooks/slo-alerts.md#high-dead-rate"
+
+      # Job lease 丢失
+      - alert: AILearnJobLeaseLost
+        expr: rate(ailearn_job_lease_lost_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "检测到 job lease 丢失"
+          description: "过去 5 分钟内发生 {{ $value }} 次 lease 丢失事件。"
+          runbook: "docs/runbooks/slo-alerts.md#lease-lost"
+
+  # ─── Provider 调用健康 ─────────────────────────────────────────────────────
+  - name: ailearn_provider_health
+    interval: 30s
+    rules:
+      # Provider 错误率超过 5%
+      - alert: AILearnHighProviderErrorRate
+        expr: |
+          (
+            rate(ailearn_provider_errors_total[5m])
+            /
+            rate(ailearn_provider_calls_total[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "AI Provider 错误率过高"
+          description: "Provider 错误率达到 {{ $value | humanizePercentage }}，超过阈值 5%。"
+          runbook: "docs/runbooks/slo-alerts.md#provider-errors"
+
+      # Provider 调用超时（p95 超过 30 秒）
+      - alert: AILearnProviderHighLatency
+        expr: |
+          histogram_quantile(0.95, rate(ailearn_provider_call_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Provider 调用延迟过高"
+          description: "Provider 调用 p95 延迟达到 {{ $value }}s，超过阈值 30s。"
+          runbook: "docs/runbooks/slo-alerts.md#provider-latency"
+
+      # Provider schema failure（结构化错误）
+      - alert: AILearnProviderSchemaFailure
+        expr: rate(ailearn_provider_errors_total{error_category="schema_failure"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Provider 返回结构化错误"
+          description: "检测到 schema_failure 错误，可能模型输出格式不兼容。"
+          runbook: "docs/runbooks/slo-alerts.md#schema-failure"
+
+      # Provider 配额不足
+      - alert: AILearnProviderQuotaExceeded
+        expr: rate(ailearn_provider_errors_total{error_category="quota_exceeded"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Provider 配额不足"
+          description: "检测到 quota_exceeded 错误，需检查 API key 配额。"
+          runbook: "docs/runbooks/slo-alerts.md#quota-exceeded"
+
+  # ─── 数据库健康 ───────────────────────────────────────────────────────────
+  - name: ailearn_database_health
+    interval: 30s
+    rules:
+      # 数据库事务失败率过高
+      - alert: AILearnHighTransactionFailureRate
+        expr: rate(ailearn_db_transaction_failures_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "数据库事务失败率过高"
+          description: "事务失败速率达到 {{ $value }}/s。"
+          runbook: "docs/runbooks/slo-alerts.md#transaction-failure"
+
+      # RLS 拒绝率激增（可能表明 policy 配置问题或异常访问模式）
+      - alert: AILearnHighRLSDenialRate
+        expr: rate(ailearn_db_rls_denied_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "RLS 拒绝率激增"
+          description: "RLS policy 拒绝速率达到 {{ $value }}/s，需检查是否有异常访问模式。"
+          runbook: "docs/runbooks/slo-alerts.md#rls-denial"
+
+      # 备份过期（超过 24 小时无成功备份）
+      - alert: AILearnBackupStale
+        expr: |
+          (up{job="ailearn-backup"} == 0)
+          or absent(up{job="ailearn-backup"})
+          or absent(ailearn_db_last_successful_backup_timestamp{job="ailearn-backup"})
+          or ((time() - ailearn_db_last_successful_backup_timestamp{job="ailearn-backup"}) > 86400)
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "数据库备份过期"
+          description: "距离上次成功备份已超过 {{ $value | humanizeDuration }}，超过 SLO 目标 24 小时。"
+          runbook: "docs/runbooks/slo-alerts.md#backup-stale"
+
+  # ─── Alpha 漏斗监控 ─────────────────────────────────────────────────────────
+  - name: ailearn_funnel_monitoring
+    interval: 60s
+    rules:
+      # 邀请发出后 1 小时内无人消费（可能邀请流程有问题）
+      - alert: AILearnLowInviteConsumptionRate
+        expr: |
+          (
+            rate(ailearn_funnel_events_total{event="invite_consumed"}[1h])
+            /
+            rate(ailearn_funnel_events_total{event="invite_created"}[1h])
+          ) < 0.1
+        for: 2h
+        labels:
+          severity: warning
+          team: product
+        annotations:
+          summary: "邀请消费率过低"
+          description: "邀请发出后消费率低于 10%。"
+          runbook: "docs/runbooks/slo-alerts.md#low-invite-rate"
+
+      # 学习卡生成失败率过高
+      - alert: AILearnLowCardGenerationSuccessRate
+        expr: |
+          (
+            rate(ailearn_funnel_events_total{event="card_generation_failed"}[10m])
+            /
+            rate(ailearn_funnel_events_total{event="card_generation_terminal"}[10m])
+          ) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "学习卡生成失败率过高"
+          description: "卡片生成失败率超过 20%。"
+          runbook: "docs/runbooks/slo-alerts.md#card-gen-failure"
+
+  # ─── Release 信息 ───────────────────────────────────────────────────────────
+  - name: ailearn_release_info
+    interval: 60s
+    rules:
+      # 检测到新的部署
+      - alert: AILearnReleaseDeployed
+        expr: |
+          increase(ailearn_funnel_events_total{event="release_deployed"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "检测到新版本部署"
+          description: "新的 release 已部署。"
+
+      # 检测到回滚
+      - alert: AILearnReleaseRolledBack
+        expr: |
+          increase(ailearn_funnel_events_total{event="release_rolled_back"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "检测到版本回滚"
+          description: "Release 已回滚，需立即调查原因。"
+          runbook: "docs/runbooks/rollback-v0.5.md"

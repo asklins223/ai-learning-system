@@ -323,9 +323,10 @@ describe("note/service listNotes", () => {
     assert.equal(result.items.length, 2);
     assert.equal(result.total, 2);
     assert.equal(result.nextCursor, null);
+    assert.equal(result.items[0]?.currentVersionId, "v1");
   });
 
-  it("结果数等于 limit 时生成 nextCursor", async () => {
+  it("结果数等于 limit 时不猜测存在下一页", async () => {
     const now = new Date();
     const notes = Array.from({ length: 3 }, (_, i) => ({
       id: `note-${i + 1}`,
@@ -333,6 +334,31 @@ describe("note/service listNotes", () => {
       titleSource: "manual" as const,
       createdAt: now,
       updatedAt: now,
+      cursorTimestamp: now.toISOString(),
+      currentVersionId: `v${i + 1}`,
+      workspaceId: WS_ID,
+      createdBy: USER_ID,
+    }));
+    const mock = createMockExecutor({
+      selectResult: [notes, [{ count: 10 }]],
+    });
+
+    const result = await listNotes(mock, WS_ID, { limit: 3 });
+
+    assert.equal(result.items.length, 3);
+    assert.equal(result.total, 10);
+    assert.equal(result.nextCursor, null);
+  });
+
+  it("结果数超过 limit 时生成 nextCursor", async () => {
+    const now = new Date();
+    const notes = Array.from({ length: 4 }, (_, i) => ({
+      id: `note-${i + 1}`,
+      title: `笔记${i + 1}`,
+      titleSource: "manual" as const,
+      createdAt: now,
+      updatedAt: now,
+      cursorTimestamp: now.toISOString(),
       currentVersionId: `v${i + 1}`,
       workspaceId: WS_ID,
       createdBy: USER_ID,

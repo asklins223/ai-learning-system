@@ -1,0 +1,33 @@
+# Gitleaks configuration for AI Learning System
+# REL-01 / RC 硬门禁 §4.1: Secret scan
+#
+# This config extends the default rules and adds allowlist patterns for
+# development examples, documentation, and test fixtures that contain
+# non-sensitive placeholder values.
+
+title = "AI Learning System - Gitleaks Config"
+
+[extend]
+# Extend the default Gitleaks rules
+useDefault = true
+
+[allowlist]
+description = "Known literal development placeholders; no source path is exempt from scanning"
+
+# Allow known development placeholder values
+regexes = [
+  # Development credentials (ailearn_dev, dev_jwt_secret, etc.)
+  "ailearn_dev(?:_secret)?",
+  "dev_jwt_secret_change_me",
+  "ci-(?:[a-z0-9]+-)*(?:password|secret)",
+  "ailearn-e2e-pass-[a-z0-9-]+",
+  # Deterministic UUID used by the privacy scanner's lease-token canary test.
+  "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  # Test/example API keys (not real)
+  "sk-(?:test|example|xxx|your)[A-Za-z0-9_-]*",
+  # Encryption key placeholder (hex zeros for CI)
+  "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  # JWT secret placeholder
+  "your-.*-secret-here",
+  "change-?me",
+]

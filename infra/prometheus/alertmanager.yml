@@ -1,0 +1,42 @@
+# OPS-01: Alertmanager configuration (ADR-0006 §4)
+#
+# In the Alpha environment, alerts are routed to:
+#   - Default receiver: log to file (no external integration needed for Alpha)
+#   - Critical alerts: would be routed to Slack/PagerDuty in production
+#
+# For Alpha testing, we use a "webhook" receiver that logs alerts to stdout
+# so they can be viewed in `docker compose logs alertmanager`.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "service"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "log-receiver"
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: "log-receiver"
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: "log-receiver"
+    webhook_configs:
+      - url: "http://alpha-ops-sidecar:8080/alerts"
+        send_resolved: true
+    # In production, this would be:
+    # slack_configs:
+    #   - api_url: "https://hooks.slack.com/services/..."
+    #     channel: "#ailearn-alerts"
+
+inhibit_rules:
+  # Suppress warning if critical is firing for the same alert
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "service"]

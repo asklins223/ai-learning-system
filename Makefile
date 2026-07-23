@@ -113,16 +113,35 @@ config-dev:
 version-check:
 	node .github/scripts/version-contract.mjs --check
 
-# Honest local/CI baseline using only gates that exist today. Coverage, browser
-# E2E, secret/container scans and AIQ remain separate unfinished RC gates.
+# Honest local/CI baseline using only gates that exist today. Coverage gate is
+# report-only in verify (does not block PRs); release-check enforces thresholds.
+# Secret scan (Gitleaks) and container scan (Trivy) are integrated in CI.
+# Browser E2E remains a separate service-backed gate; AIQ RC requires the
+# release provider credentials and is therefore executed by the RC workflow.
 verify: version-check
-	node --test .github/scripts/version-contract.test.mjs .github/scripts/release-manifest-contract.test.mjs
+	node --test .github/scripts/version-contract.test.mjs .github/scripts/release-manifest-contract.test.mjs .github/scripts/coverage-gate-lib.test.mjs
 	node .github/scripts/verify-schema-mirror.mjs
 	cd packages/shared && npm run typecheck && npm test
-	cd packages/db && npm run typecheck
+	cd packages/db && npm run typecheck && npm test
+	cd packages/ai-quality && npm run typecheck && npm test && npm run pr-gate
 	cd apps/api && npm run typecheck && npm test
 	cd apps/web && npm run typecheck && npm run lint && npm test
 	cd workers/ai-worker && npm run typecheck && npm test
+	cd tests/e2e && npm run typecheck
+	node .github/scripts/skip-todo-gate.mjs
+	node .github/scripts/coverage-gate.mjs --report-only
+
+# Coverage gate with threshold enforcement (blocks release-check, not PRs).
+coverage-gate:
+	node .github/scripts/coverage-gate.mjs
+
+# Skip/todo allowlist gate (blocks verify and release-check).
+skip-todo-gate:
+	node .github/scripts/skip-todo-gate.mjs
+
+# Generate release manifest (collects test summaries, coverage, digests).
+release-manifest:
+	node .github/scripts/release-manifest-generate.mjs
 
 # Source inputs are checked first. The actual manifest is generated after the
 # tag and stays untracked because embedding HEAD in a tracked file would be
@@ -131,6 +150,8 @@ verify: version-check
 release-check:
 	node .github/scripts/verify-release-inputs.mjs
 	$(MAKE) --no-print-directory verify
+	node .github/scripts/coverage-gate.mjs
+	node .github/scripts/release-manifest-generate.mjs
 	node .github/scripts/release-manifest-contract.mjs
 
 shell-api:

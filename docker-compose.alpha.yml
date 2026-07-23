@@ -1,0 +1,147 @@
+name: ailearn-alpha
+
+# Alpha environment overlay — adds monitoring and backup infrastructure
+# on top of the production stack (docker-compose.yml).
+#
+# Usage (from repo root):
+#   docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage up -d
+#   docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage run --rm backup-runner init
+#   docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage run --rm backup-runner backup
+#
+# Or use the helper script:
+#   ./scripts/alpha-env-setup.sh up
+#   ./scripts/alpha-env-setup.sh init
+#   ./scripts/alpha-env-setup.sh backup
+#   ./scripts/alpha-env-setup.sh restore-verify
+
+services:
+  postgres:
+    networks:
+      ailearn_net:
+        aliases:
+          - restore-postgres
+
+  # ─── Monitoring Stack (ADR-0006) ───────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    restart: unless-stopped
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    ports:
+      - "${PROMETHEUS_BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    volumes:
+      - ./infra/prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "${ALERTMANAGER_BIND_ADDRESS:-127.0.0.1}:${ALERTMANAGER_PORT:-9093}:9093"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  alpha-ops-sidecar:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    environment:
+      MANIFEST_DIR: /var/lib/ailearn/manifests
+      PORT: "8080"
+    volumes:
+      - ./infra/prometheus/alpha-ops-sidecar.py:/opt/ailearn/alpha-ops-sidecar.py:ro
+      - backup_manifests:/var/lib/ailearn/manifests:ro
+    command: ["python3", "/opt/ailearn/alpha-ops-sidecar.py"]
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  # ─── Backup Runner (ADR-0007) ──────────────────────────────────────
+  # One-shot container that runs backup/restore/verify scripts.
+  # Depends on postgres (always available) — MinIO connection is
+  # established at runtime if the storage profile is active.
+
+  backup-runner:
+    build:
+      context: .
+      dockerfile: infra/backup/Dockerfile.backup
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # PostgreSQL connection for backup/restore
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: ${POSTGRES_USER:-ailearn}
+      PG_DB: ${POSTGRES_DB:-ailearn}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # MinIO/S3 connection for encrypted backup upload
+      # Uses dev defaults — production must override via .env
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${BACKUP_BUCKET:-ailearn-backups}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-ailearn}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-ailearn_dev_secret}
+      # Release metadata
+      SOURCE_RELEASE: ${SOURCE_RELEASE:-0.5.0-alpha}
+      SOURCE_COMMIT: ${SOURCE_COMMIT:-unknown}
+      SOURCE_MIGRATION: ${SOURCE_MIGRATION:-0039}
+      MIGRATOR_PASSWORD: ${MIGRATOR_PASSWORD:?Set MIGRATOR_PASSWORD in .env}
+      API_PASSWORD: ${API_PASSWORD:?Set API_PASSWORD in .env}
+      WORKER_PASSWORD: ${WORKER_PASSWORD:?Set WORKER_PASSWORD in .env}
+      # age key directory (mounted volume for key persistence)
+      KEY_DIR: /etc/ailearn
+      # Manifest directory (mounted volume for manifest persistence)
+      MANIFEST_DIR: /var/lib/ailearn/manifests
+    volumes:
+      - backup_keys:/etc/ailearn
+      - backup_manifests:/var/lib/ailearn/manifests
+      - ./infra/backup:/scripts:ro
+      - ./infra/postgres/roles.sql:/opt/ailearn/roles.sql:ro
+    command: ["bash", "-c", "echo 'Usage: init | backup | restore-verify | freshness-check'; exit 0"]
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+volumes:
+  prometheus_data:
+  alertmanager_data:
+  backup_keys:
+  backup_manifests:

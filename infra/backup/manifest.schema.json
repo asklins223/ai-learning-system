@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Backup Manifest",
+  "description": "ADR-0007 §4: 每份备份记录的元数据清单",
+  "type": "object",
+  "required": [
+    "backupId",
+    "sourceRelease",
+    "sourceCommit",
+    "sourceMigration",
+    "startedAt",
+    "completedAt",
+    "sizeBytes",
+    "sha256",
+    "objectKey",
+    "verificationStatus",
+    "format"
+  ],
+  "properties": {
+    "backupId": {
+      "type": "string",
+      "description": "唯一备份 ID（时间戳 + 短 UUID）",
+      "pattern": "^\\d{8}T\\d{6}-[a-f0-9]{8}$"
+    },
+    "sourceRelease": {
+      "type": "string",
+      "description": "源系统版本号（如 0.5.0-alpha.1）"
+    },
+    "sourceCommit": {
+      "type": "string",
+      "description": "源系统 Git commit SHA"
+    },
+    "sourceMigration": {
+      "type": "string",
+      "description": "源数据库最新迁移编号（如 0021）"
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "备份开始时间（ISO 8601 UTC）"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "备份完成时间（ISO 8601 UTC）"
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "description": "加密前 dump 文件大小（字节）",
+      "minimum": 0
+    },
+    "encryptedSizeBytes": {
+      "type": "integer",
+      "description": "加密后文件大小（字节）",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "description": "加密前 dump 文件的 SHA-256 校验和",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "encryptedSha256": {
+      "type": "string",
+      "description": "加密后文件的 SHA-256 校验和",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "objectKey": {
+      "type": "string",
+      "description": "S3-compatible 存储中的对象 key"
+    },
+    "verificationStatus": {
+      "type": "string",
+      "enum": ["pending", "verified", "failed"],
+      "description": "备份验证状态"
+    },
+    "verifiedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "验证完成时间"
+    },
+    "format": {
+      "type": "string",
+      "enum": ["custom", "plain"],
+      "description": "pg_dump 输出格式（custom = -Fc，plain = -Fp）"
+    },
+    "retentionClass": {
+      "type": "string",
+      "enum": ["daily", "weekly"],
+      "description": "保留类别（daily 保留 14 周期，weekly 保留 4 周）"
+    }
+  },
+  "additionalProperties": false
+}

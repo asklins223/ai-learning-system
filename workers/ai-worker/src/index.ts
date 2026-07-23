@@ -42,7 +42,7 @@ const POLL_MS = 500;
 
 // F-010: 优雅关停标志
 let shuttingDown = false;
-function setupGracefulShutdown() {
+export function setupGracefulShutdown() {
   const handler = () => {
     if (!shuttingDown) {
       shuttingDown = true;
@@ -56,7 +56,7 @@ setupGracefulShutdown();
 
 // 处理单个 job 的完整生命周期（claim 后的执行 + 状态转换 + 指标记录）。
 // 从 tick() 提取为独立函数以支持 fire-and-forget 并行处理。
-async function processJob(job: ClaimedJob): Promise<void> {
+export async function processJob(job: ClaimedJob): Promise<void> {
   const handler = HANDLERS[job.type as keyof typeof HANDLERS];
   if (!handler) {
     const unknownUpdated = await markUnknownJobFailed(job);
@@ -167,7 +167,7 @@ async function processJob(job: ClaimedJob): Promise<void> {
 // 而是每个 slot 空闲后立即在下次 tick 补充，避免慢 job 堵塞快 job 的 slot。
 const inflight = new Set<Promise<void>>();
 
-async function tick(): Promise<void> {
+export async function tick(): Promise<void> {
   // F-010: 先回收悬挂作业
   const reaped = await reapStaleJobs();
   if (reaped.total > 0) {
@@ -210,7 +210,7 @@ async function tick(): Promise<void> {
   }
 }
 
-async function main() {
+export async function main() {
   // OPS-01: 启动 Prometheus metrics HTTP 服务器（ADR-0006 §1）
   const metricsPort = Number(process.env.WORKER_METRICS_PORT ?? 9100);
   const metricsServer = startMetricsServer(metricsPort);
@@ -263,7 +263,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  logger.error({ err }, "AI worker stopped unexpectedly");
-  process.exitCode = 1;
-});
+// Tests can explicitly import the lifecycle functions without starting the
+// polling loop. Requiring NODE_ENV=test prevents an accidental production env
+// variable from silently disabling the worker.
+const autostartDisabledForTest = process.env.NODE_ENV === "test"
+  && process.env.WORKER_DISABLE_AUTOSTART === "1";
+if (!autostartDisabledForTest) {
+  main().catch((err) => {
+    logger.error({ err }, "AI worker stopped unexpectedly");
+    process.exitCode = 1;
+  });
+}

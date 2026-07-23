@@ -20,6 +20,10 @@ concurrency:
 
 env:
   NODE_VERSION: "22"
+  # Immutable v0.4 baseline named by the v0.5 release plan. Changed-line
+  # coverage measures the complete v0.5 delta instead of an arbitrary runner
+  # checkout depth or latest-commit window.
+  COVERAGE_BASE_SHA: "33efa06f8c0a5f2d1e97e12dcb745b2314c606e8"
 
 jobs:
   release-inputs:
@@ -39,12 +43,6 @@ jobs:
       - name: Verify clean checkout and required release files
         run: node .github/scripts/verify-release-inputs.mjs
 
-      # This is intentionally fail-closed on an exact release tag. Until the
-      # final evidence-aggregation job supplies RELEASE_MANIFEST_PATH, v0.5
-      # tags must not pass CI merely because the schema/verifier exists.
-      - name: Verify exact-tag release manifest contract
-        run: node .github/scripts/release-manifest-contract.mjs
-
   typecheck:
     name: TypeCheck & Lint
     runs-on: ubuntu-latest
@@ -58,12 +56,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
+            package-lock.json
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
             packages/db/package-lock.json
             packages/shared/package-lock.json
             packages/ai-quality/package-lock.json
+
+      - name: Install repository tooling
+        run: npm ci --no-audit --no-fund
 
       - name: Install shared
         working-directory: packages/shared
@@ -172,6 +174,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
+            package-lock.json
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
@@ -252,6 +255,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -273,6 +278,9 @@ jobs:
             uname -a
             git rev-parse HEAD
           } > "$RUNNER_TEMP/unit-test-logs/environment.txt"
+
+      - name: Install repository coverage tooling
+        run: npm ci --no-audit --no-fund
 
       # API and Worker load the shared package from its workspace source path.
       # Install its runtime dependencies explicitly in a clean checkout so
@@ -326,16 +334,20 @@ jobs:
       # QLT-01/02: skip/todo allowlist gate (ADR-0008 §覆盖率与测试发现)
       - name: Skip/todo allowlist gate
         run: |
+          set -o pipefail
           node .github/scripts/skip-todo-gate.mjs 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/skip-todo-gate.txt"
 
       # QLT-01/02: coverage collection (report-only in PR, enforced in release-check)
       - name: Coverage gate (report-only)
         run: |
+          set -o pipefail
           node .github/scripts/coverage-gate.mjs --report-only 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/coverage-gate.txt"
           # Include coverage summary JSON in the artifact for FDN-01 formal report
           if [ -f outputs/coverage/summary.json ]; then
             cp outputs/coverage/summary.json "$RUNNER_TEMP/unit-test-logs/coverage-summary.json"
           fi
+          find outputs/coverage -maxdepth 1 -name '*.coverage.json' -exec \
+            cp {} "$RUNNER_TEMP/unit-test-logs/" \;
 
       - name: Upload raw Node test evidence
         if: always()
@@ -376,6 +388,7 @@ jobs:
       - name: Run PR Mock quality gate
         working-directory: packages/ai-quality
         run: |
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/ai-quality-evidence"
           npm run pr-gate 2>&1 | tee "$RUNNER_TEMP/ai-quality-evidence/pr-gate-result.json"
 
@@ -383,6 +396,7 @@ jobs:
       - name: Validate RC gate framework (dry-run)
         working-directory: packages/ai-quality
         run: |
+          set -o pipefail
           npm run rc-dry-run 2>&1 | tee "$RUNNER_TEMP/ai-quality-evidence/rc-dry-run.log"
 
       - name: Upload AI quality gate evidence
@@ -883,6 +897,7 @@ jobs:
         env:
           PGPASSWORD: ci-migrator-only-password
         run: |
+          set -o pipefail
           psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
             --set=ON_ERROR_STOP=1 \
             -f src/db/migrations/0024_sec01_rls_enforce.sql \
@@ -896,6 +911,7 @@ jobs:
         env:
           PGPASSWORD: ci-migrator-only-password
         run: |
+          set -o pipefail
           psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
             --set=ON_ERROR_STOP=1 \
             -f src/db/migrations/0038_sec01_rls_enforce_policy_fix.sql \
@@ -908,6 +924,7 @@ jobs:
           SEC01_VERIFY_API_URL: postgres://ailearn_api:ci-api-only-password@127.0.0.1:5432/ailearn_ci
           SEC01_VERIFY_WORKER_URL: postgres://ailearn_worker:ci-worker-only-password@127.0.0.1:5432/ailearn_ci
         run: |
+          set -o pipefail
           node .github/scripts/sec01-enforce-verify.mjs \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-verify.log"
 
@@ -917,11 +934,11 @@ jobs:
         env:
           PGPASSWORD: ci-migrator-only-password
         run: |
+          set -o pipefail
           psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
             --set=ON_ERROR_STOP=1 \
             -f src/db/migrations/0027_sec01_rls_expansion_failsafe.sql \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-restore.log" || \
-          echo "Warning: failed to restore expand mode (may require manual intervention)"
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-restore.log"
 
       - name: Upload raw PostgreSQL test evidence
         if: always()
@@ -1016,18 +1033,16 @@ jobs:
           format: table
           ignore-unfixed: true
 
-      # REL-01: Capture real Docker image digests for the release manifest.
-      # The capture script extracts canonical sha256 digests from the three
-      # production images built above and writes them to a JSON file.
-      # The release-evidence job downloads this artifact and injects the real
-      # digests into the RC manifest, replacing placeholder values.
-      - name: Capture production image digests (REL-01)
+      # Capture local build identities for reproducibility. These are not
+      # registry RepoDigests and therefore cannot satisfy the release contract.
+      - name: Capture local production image identities (REL-01 evidence)
         env:
           COMPOSE_PROJECT_NAME: ${{ env.COMPOSE_PROJECT_NAME }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           mkdir -p "$RUNNER_TEMP/image-digests"
           node .github/scripts/capture-image-digests.mjs \
+            --allow-local \
             --output "$RUNNER_TEMP/image-digests/image-digests.json"
 
       - name: Upload image digests artifact
@@ -1241,7 +1256,11 @@ jobs:
 
       - name: Install E2E dependencies
         working-directory: tests/e2e
-        run: npm install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck E2E harness
+        working-directory: tests/e2e
+        run: npm run typecheck
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -1267,6 +1286,9 @@ jobs:
             echo "Waiting for PostgreSQL... ($i/30)"
             sleep 2
           done
+
+      - name: Bootstrap restricted database roles
+        run: docker compose -f docker-compose.dev.yml run --rm role-bootstrap
 
       - name: Install shared
         working-directory: packages/shared
@@ -1385,7 +1407,7 @@ jobs:
   release-evidence:
     name: Release Evidence (Manifest Aggregation)
     runs-on: ubuntu-latest
-    needs: [build, unit-tests, fresh-migrations, production-compose, ai-quality-gate]
+    needs: [build, unit-tests, fresh-migrations, production-compose, ai-quality-gate, e2e]
     # Don't run on PRs from forks (secrets may not be available)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 10
@@ -1407,29 +1429,59 @@ jobs:
         run: mkdir -p "$RUNNER_TEMP/release-evidence"
 
       # Download the image digests artifact produced by production-compose.
-      # This contains the real sha256 digests of the API/Web/Worker Docker
-      # images, which are injected into the RC manifest's images field.
+      # This contains local build identities, or registry RepoDigests when a
+      # separate publish stage has supplied them.
       - name: Download image digests artifact
         uses: actions/download-artifact@v4
         with:
           name: image-digests-${{ github.sha }}
           path: ${{ runner.temp }}/image-digests
-        continue-on-error: true
 
       - name: Check for image digests
         id: check-images
         run: |
-          if [ -f "$RUNNER_TEMP/image-digests/image-digests.json" ]; then
+          if [ -f "$RUNNER_TEMP/image-digests/image-digests.json" ] \
+            && jq -e '.releaseReady == true' "$RUNNER_TEMP/image-digests/image-digests.json" >/dev/null; then
             echo "images_path=$RUNNER_TEMP/image-digests/image-digests.json" >> "$GITHUB_OUTPUT"
-            echo "Found image digests file"
+            echo "Found registry-backed image digests file"
           else
             echo "images_path=" >> "$GITHUB_OUTPUT"
-            echo "Warning: image digests artifact not found, using placeholders"
+            echo "Local image identities are evidence only; registry RepoDigests remain required"
           fi
+
+      - name: Download raw unit and coverage evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: node-${{ env.NODE_VERSION }}-unit-test-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/unit-test-logs
+
+      - name: Download Playwright JUnit evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-results-${{ github.run_id }}
+          path: ${{ runner.temp }}/playwright-results
+
+      - name: Prepare collected coverage and scan evidence
+        run: |
+          test -f "$RUNNER_TEMP/unit-test-logs/coverage-summary.json"
+          mkdir -p outputs/coverage "$RUNNER_TEMP/release-evidence/scan-results"
+          cp "$RUNNER_TEMP/unit-test-logs/coverage-summary.json" outputs/coverage/summary.json
+          cp outputs/coverage/summary.json "$RUNNER_TEMP/release-evidence/coverage-summary.json"
+          find "$RUNNER_TEMP/unit-test-logs" -maxdepth 1 -name '*.coverage.json' -exec \
+            cp {} outputs/coverage/ \;
+          for name in api worker web; do
+            echo "passed: production-compose Trivy gate completed with exit-code=0" \
+              > "$RUNNER_TEMP/release-evidence/scan-results/trivy-scan-${name}.txt"
+          done
+          for name in api worker web shared; do
+            echo "passed: typecheck npm audit gate completed with exit-code=0" \
+              > "$RUNNER_TEMP/release-evidence/scan-results/npm-audit-${name}.txt"
+          done
 
       # Generate dev manifest (with test summary) for evidence retention
       - name: Generate release manifest (dev mode)
         run: |
+          set -o pipefail
           node .github/scripts/release-manifest-generate.mjs \
             --skip-tests \
             --output "$RUNNER_TEMP/release-evidence/release-manifest-dev.json" \
@@ -1440,6 +1492,7 @@ jobs:
       # into the manifest.images section, replacing placeholder values.
       - name: Generate release manifest (RC with image digests)
         run: |
+          set -o pipefail
           IMAGES_ARG=""
           if [ -n "${{ steps.check-images.outputs.images_path }}" ]; then
             IMAGES_ARG="--images ${{ steps.check-images.outputs.images_path }}"
@@ -1450,32 +1503,6 @@ jobs:
             $IMAGES_ARG \
             --output "$RUNNER_TEMP/release-evidence/release-manifest-rc.json" \
             2>&1 | tee "$RUNNER_TEMP/release-evidence/generate-rc.log"
-
-      # Copy coverage summary if it exists (from unit-tests job artifact)
-      - name: Generate coverage summary
-        run: |
-          node .github/scripts/coverage-gate.mjs --report-only \
-            2>&1 | tee "$RUNNER_TEMP/release-evidence/coverage-gate.log" || true
-          if [ -f outputs/coverage/summary.json ]; then
-            cp outputs/coverage/summary.json "$RUNNER_TEMP/release-evidence/coverage-summary.json"
-          fi
-
-      # REL-01: Record container/dependency scan status for manifest automation.
-      # Since release-evidence depends on production-compose (Trivy scans) and
-      # typecheck (npm audit), if those jobs passed, the scans passed.
-      - name: Record scan gate status for release manifest
-        run: |
-          mkdir -p "$RUNNER_TEMP/release-evidence/scan-results"
-          # Container scans (Trivy) — passed because production-compose job succeeded
-          for name in api worker web; do
-            echo "passed: no HIGH/CRITICAL vulnerabilities (Trivy exit-code=0)" \
-              > "$RUNNER_TEMP/release-evidence/scan-results/trivy-scan-${name}.txt"
-          done
-          # Dependency scans (npm audit) — passed because typecheck job succeeded
-          for name in api worker web shared; do
-            echo "passed: no high/critical vulnerabilities (npm audit exit-code=0)" \
-              > "$RUNNER_TEMP/release-evidence/scan-results/npm-audit-${name}.txt"
-          done
 
       # Record environment metadata for reproducibility
       - name: Record evidence metadata
@@ -1498,9 +1525,20 @@ jobs:
       - name: Save coverage baseline (FDN-01)
         run: |
           mkdir -p "$RUNNER_TEMP/release-evidence/coverage-baseline"
-          node .github/scripts/coverage-baseline-save.mjs --label "ci-${{ github.run_id }}" \
-            2>&1 | tee "$RUNNER_TEMP/release-evidence/coverage-baseline-save.log" || \
-          echo "Warning: coverage baseline save skipped (coverage gate may not have run)"
+          node .github/scripts/coverage-baseline-save.mjs \
+            --use-existing \
+            --label "ci-${{ github.run_id }}" \
+            2>&1 | tee "$RUNNER_TEMP/release-evidence/coverage-baseline-save.log"
+          cp -R outputs/coverage-baselines/. \
+            "$RUNNER_TEMP/release-evidence/coverage-baseline/"
+
+      # Run only after aggregation so an exact tag is checked against concrete
+      # test/scan/image/AIQ/approval evidence instead of failing before jobs run.
+      - name: Verify exact-tag release manifest contract
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_MANIFEST_PATH: ${{ runner.temp }}/release-evidence/release-manifest-rc.json
+        run: node .github/scripts/release-manifest-contract.mjs
 
       - name: Upload release evidence
         if: always()
@@ -1544,7 +1582,11 @@ jobs:
 
       - name: Install E2E dependencies
         working-directory: tests/e2e
-        run: npm install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck E2E harness
+        working-directory: tests/e2e
+        run: npm run typecheck
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -1569,6 +1611,9 @@ jobs:
             echo "Waiting for PostgreSQL... ($i/30)"
             sleep 2
           done
+
+      - name: Bootstrap restricted database roles
+        run: docker compose -f docker-compose.dev.yml run --rm role-bootstrap
 
       - name: Install shared
         working-directory: packages/shared
@@ -1682,7 +1727,7 @@ jobs:
     name: Alpha Infrastructure (Monitoring + Backup, OPS-01)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       COMPOSE_PROJECT_NAME: ailearn_alpha_ci
       POSTGRES_USER: ailearn
@@ -1691,6 +1736,9 @@ jobs:
       MIGRATOR_PASSWORD: ci-alpha-migrator-password
       API_PASSWORD: ci-alpha-api-password
       WORKER_PASSWORD: ci-alpha-worker-password
+      DATABASE_URL_MIGRATOR: postgres://ailearn_migrator:ci-alpha-migrator-password@postgres:5432/ailearn
+      DATABASE_URL_API: postgres://ailearn_api:ci-alpha-api-password@postgres:5432/ailearn
+      DATABASE_URL_WORKER: postgres://ailearn_worker:ci-alpha-worker-password@postgres:5432/ailearn
       MINIO_ROOT_USER: ailearn
       MINIO_ROOT_PASSWORD: ci-alpha-minio-secret
       AI_PROVIDER_CARD: mock
@@ -1698,7 +1746,9 @@ jobs:
       BACKUP_BUCKET: ailearn-backups
       SOURCE_RELEASE: "0.5.0-alpha"
       SOURCE_COMMIT: ${{ github.sha }}
-      SOURCE_MIGRATION: "0037"
+      SOURCE_MIGRATION: "0039"
+      CORS_ORIGIN: http://localhost:3000
+      AUTH_COOKIE_SECURE: "false"
     steps:
       - uses: actions/checkout@v4
 
@@ -1706,98 +1756,43 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage config --quiet
 
-      - name: Start Alpha infrastructure (PostgreSQL + MinIO + monitoring)
-        run: |
-          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage up -d \
-            postgres minio prometheus alertmanager backup-bucket-init
-          for i in $(seq 1 30); do
-            if docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage exec -T \
-              postgres pg_isready -U ailearn >/dev/null 2>&1; then
-              echo "PostgreSQL is ready"
-              break
-            fi
-            echo "Waiting for PostgreSQL... ($i/30)"
-            sleep 2
-          done
-
-      - name: Bootstrap roles and migrate
-        run: |
-          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage up -d \
-            role-bootstrap migrate role-grants
-          for i in $(seq 1 60); do
-            cid="$(docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage ps -q migrate)"
-            if [ -n "$cid" ] && [ "$(docker inspect "$cid" --format '{{.State.Status}}')" = "exited" ]; then
-              echo "Migrations complete"
-              break
-            fi
-            echo "Waiting for migrations... ($i/60)"
-            sleep 3
-          done
-
-      - name: Verify Prometheus is healthy and scraping targets
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9090/-/healthy >/dev/null 2>&1; then
-              echo "Prometheus is healthy"
-              break
-            fi
-            echo "Waiting for Prometheus... ($i/30)"
-            sleep 2
-          done
-          RULE_COUNT=$(curl -sf http://localhost:9090/api/v1/rules | jq '.data.groups[].rules | length' | awk '{sum+=$1} END {print sum}')
-          echo "Prometheus rules loaded: $RULE_COUNT"
-          test "$RULE_COUNT" -gt 0 || { echo >&2 "No alert rules loaded"; exit 1; }
-          curl -sf http://localhost:9093/-/healthy || { echo >&2 "Alertmanager not healthy"; exit 1; }
-          echo "Alertmanager is healthy"
+      - name: Start complete Alpha stack
+        run: ./scripts/alpha-env-setup.sh up
 
       - name: Initialize backup infrastructure (age keys + S3 bucket)
-        run: |
-          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage run --rm backup-runner \
-            /scripts/setup-backup-infrastructure.sh \
-              --s3-endpoint http://minio:9000 \
-              --s3-bucket ailearn-backups \
-              --s3-access-key ailearn \
-              --s3-secret-key ci-alpha-minio-secret \
-              --key-dir /etc/ailearn
-
-      - name: Execute encrypted backup
-        run: |
-          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage run --rm backup-runner \
-            /scripts/backup.sh \
-              --pg-host postgres \
-              --pg-user ailearn \
-              --pg-db ailearn \
-              --release 0.5.0-alpha \
-              --commit "${{ github.sha }}" \
-              --migration 0037 \
-              --age-key /etc/ailearn/backup-age.pub \
-              --s3-endpoint http://minio:9000 \
-              --s3-bucket ailearn-backups \
-              --s3-access-key ailearn \
-              --s3-secret-key ci-alpha-minio-secret \
-              --manifest-dir /var/lib/ailearn/manifests
-
-      - name: Verify backup freshness
-        run: |
-          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage run --rm backup-runner \
-            /scripts/freshness-check.sh \
-              --manifest-dir /var/lib/ailearn/manifests \
-              --max-age-hours 1
+        run: ./scripts/alpha-env-setup.sh init
 
       - name: Execute RC restore verification
+        run: ./scripts/alpha-env-setup.sh restore-verify
+
+      - name: Verify deeply checked backup freshness
+        run: ./scripts/alpha-env-setup.sh freshness
+
+      - name: Verify Prometheus rules, targets, and backup metric
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage run --rm backup-runner \
-            /scripts/rc-restore-verify.sh \
-              --pg-host postgres \
-              --pg-user ailearn \
-              --pg-db ailearn \
-              --restore-db ailearn_restore_ci \
-              --s3-endpoint http://minio:9000 \
-              --s3-bucket ailearn-backups \
-              --s3-access-key ailearn \
-              --s3-secret-key ci-alpha-minio-secret \
-              --age-key /etc/ailearn/backup-age.key \
-              --manifest-dir /var/lib/ailearn/manifests
+          set -euo pipefail
+          RULE_COUNT="$(curl -fsS http://127.0.0.1:9090/api/v1/rules | jq '[.data.groups[].rules[]] | length')"
+          test "$RULE_COUNT" -gt 0
+
+          for attempt in $(seq 1 30); do
+            all_up=true
+            for job in ailearn-api ailearn-worker ailearn-backup; do
+              value="$(curl -fsS --get --data-urlencode "query=up{job=\"$job\"}" \
+                http://127.0.0.1:9090/api/v1/query | jq -r '.data.result[0].value[1] // "0"')"
+              if [ "$value" != "1" ]; then all_up=false; fi
+            done
+            backup_value="$(curl -fsS --get \
+              --data-urlencode 'query=ailearn_db_last_successful_backup_timestamp{job="ailearn-backup"}' \
+              http://127.0.0.1:9090/api/v1/query | jq -r '.data.result[0].value[1] // "0"')"
+            if [ "$all_up" = true ] && awk "BEGIN { exit !($backup_value > 0) }"; then
+              echo "All Alpha scrape targets and verified-backup metric are healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo >&2 "Alpha scrape targets or verified-backup metric did not become healthy"
+          curl -fsS http://127.0.0.1:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health, lastError}' >&2
+          exit 1
 
       - name: Capture Alpha infrastructure evidence
         if: always()
@@ -1814,6 +1809,11 @@ jobs:
             curl -sf http://localhost:9090/api/v1/rules 2>/dev/null | \
               jq '.data.groups[] | {name: .name, ruleCount: (.rules | length)}' || echo "N/A"
           } > "$RUNNER_TEMP/alpha-evidence/alpha-report.md"
+          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage \
+            run --rm -v "$RUNNER_TEMP/alpha-evidence:/evidence" backup-runner \
+            sh -c 'cp -R /var/lib/ailearn/manifests /evidence/'
+          docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage \
+            logs --no-color > "$RUNNER_TEMP/alpha-evidence/compose.log" 2>&1 || true
 
       - name: Upload Alpha infrastructure evidence
         if: always()

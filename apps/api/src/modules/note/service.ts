@@ -374,11 +374,12 @@ export async function listNotes(
   if (opts?.cursor) {
     const decoded = decodeCursor(opts.cursor);
     if (decoded) {
-      const cursorTs = new Date(decoded.timestamp);
+      const cursorTs = decoded.timestamp;
       const cursorId = decoded.id;
-      // (updatedAt, id) < (cursorTs, cursorId) 的等价条件
+      // Keep the timestamp as an ISO string and cast it explicitly. Passing a
+      // JavaScript Date through a raw tuple serializes it as a locale string.
       conditions.push(
-        sql`(${notes.updatedAt}, ${notes.id}) < (${cursorTs}, ${cursorId})`,
+        sql`(${notes.updatedAt}, ${notes.id}) < (${cursorTs}::timestamptz, ${cursorId}::uuid)`,
       );
     }
   }
@@ -394,11 +395,15 @@ export async function listNotes(
       currentVersionId: notes.currentVersionId,
       workspaceId: notes.workspaceId,
       createdBy: notes.createdBy,
+      cursorTimestamp: sql<string>`to_char(${notes.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
     })
     .from(notes)
     .where(and(...conditions))
     .orderBy(desc(notes.updatedAt), desc(notes.id))
-    .limit(limit);
+    .limit(limit + 1);
+
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
 
   // R-019: 服务端返回实际总数，不再依赖前端已加载数量
   // CONC-03: count 也需随 trashed 切换条件，否则回收站 total 不正确
@@ -409,16 +414,17 @@ export async function listNotes(
   const total = countRows[0]?.count ?? 0;
 
   // R-019: 使用最后一条记录的 (updatedAt, id) 作为下一页 cursor
-  const lastRow = rows[rows.length - 1];
-  const nextCursor = rows.length === limit && lastRow
-    ? encodeCursor(lastRow.updatedAt, lastRow.id)
+  const lastRow = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && lastRow
+    ? encodeCursor(lastRow.cursorTimestamp, lastRow.id)
     : null;
 
   return {
-    items: rows.map((r) => ({
+    items: pageRows.map((r) => ({
       id: r.id,
       title: r.title,
       titleSource: r.titleSource,
+      currentVersionId: r.currentVersionId,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     })),

@@ -1,0 +1,80 @@
+# OPS-01: Prometheus scrape configuration (ADR-0006)
+#
+# Scrape targets for the Alpha environment:
+#   - API server /metrics endpoint (port 4000)
+#   - Worker metrics server (port 9100)
+#   - Prometheus self-monitoring
+#   - Alertmanager (port 9093)
+#
+# Alert rules are loaded from alerts.yml.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: "ailearn-alpha"
+    environment: "alpha"
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "alertmanager:9093"
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # API server metrics (ADR-0006 §3)
+  # Exposes: ailearn_http_requests_total, ailearn_http_errors_5xx_total,
+  #          ailearn_http_request_duration_seconds, ailearn_readiness_status,
+  #          ailearn_funnel_events_total, etc.
+  - job_name: "ailearn-api"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["api:4000"]
+        labels:
+          service: "api"
+    # Relabel to add consistent labels
+    relabel_configs:
+      - source_labels: ["__address__"]
+        target_label: "instance"
+        replacement: "api"
+
+  # Worker metrics server (ADR-0006 §3, OPS-01)
+  # Exposes: ailearn_job_queue_depth, ailearn_job_terminal_total,
+  #          ailearn_provider_calls_total, ailearn_provider_errors_total, etc.
+  - job_name: "ailearn-worker"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["worker:9100"]
+        labels:
+          service: "worker"
+    relabel_configs:
+      - source_labels: ["__address__"]
+        target_label: "instance"
+        replacement: "worker"
+
+  # Backup verification status is derived from persistent manifests.  The
+  # metric is absent until a deep RC restore verification marks one verified.
+  - job_name: "ailearn-backup"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["alpha-ops-sidecar:8080"]
+        labels:
+          service: "backup"
+
+  # PostgreSQL exporter (optional, if enabled)
+  # - job_name: "postgres"
+  #   static_configs:
+  #     - targets: ["postgres-exporter:9187"]
+
+  # Alertmanager self-monitoring
+  - job_name: "alertmanager"
+    static_configs:
+      - targets: ["alertmanager:9093"]

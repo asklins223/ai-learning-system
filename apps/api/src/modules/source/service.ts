@@ -164,15 +164,26 @@ export async function listSources(
   if (opts?.cursor) {
     const decoded = decodeCursor(opts.cursor);
     if (decoded) {
-      const cursorTs = new Date(decoded.timestamp);
+      const cursorTs = decoded.timestamp;
       const cursorId = decoded.id;
-      conditions.push(sql`(${sources.createdAt}, ${sources.id}) < (${cursorTs}, ${cursorId})`);
+      conditions.push(
+        sql`(${sources.createdAt}, ${sources.id}) < (${cursorTs}::timestamptz, ${cursorId}::uuid)`,
+      );
     }
   }
-  const items = await executor.query.sources.findMany({
+  const sourceRows = await executor.query.sources.findMany({
     where: and(...conditions),
     orderBy: [desc(sources.createdAt), desc(sources.id)],
-    limit,
+    limit: limit + 1,
+    extras: {
+      cursorTimestamp: sql<string>`to_char(${sources.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_timestamp"),
+    },
+  });
+  const hasMore = sourceRows.length > limit;
+  const itemsWithCursor = sourceRows.slice(0, limit);
+  const items = itemsWithCursor.map(({ cursorTimestamp, ...source }) => {
+    if (!cursorTimestamp) throw new Error("source cursor timestamp is missing");
+    return source;
   });
 
   // 批量查询每条来源的关联笔记数量，避免 N+1
@@ -204,9 +215,9 @@ export async function listSources(
     .where(where);
   const total = countRows[0]?.count ?? 0;
   // R-019: 使用最后一条记录的 (createdAt, id) 作为下一页 cursor
-  const lastItem = items[items.length - 1];
-  const nextCursor = items.length === limit && lastItem
-    ? encodeCursor(lastItem.createdAt, lastItem.id)
+  const lastItem = itemsWithCursor[itemsWithCursor.length - 1];
+  const nextCursor = hasMore && lastItem
+    ? encodeCursor(lastItem.cursorTimestamp, lastItem.id)
     : null;
   return { items: itemsWithCounts, nextCursor, total };
 }
