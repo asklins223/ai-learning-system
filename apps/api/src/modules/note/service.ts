@@ -483,7 +483,7 @@ export async function updateNote(
     const note = noteRows[0];
     if (!note) return null;
 
-    // R-008: 乐观并发控制 — blocks 更新时 baseVersionId 必须匹配（schema 层已强制必填）
+    // R-008: 乐观并发控制 — 标题或正文更新时 baseVersionId 必须匹配。
     if (
       input.baseVersionId &&
       input.baseVersionId !== note.currentVersionId
@@ -496,12 +496,75 @@ export async function updateNote(
       : null;
     const effectiveTitleSource = requestedManualTitle !== null ? "manual" : note.titleSource;
     const effectiveTitle = requestedManualTitle ?? note.title;
+    const manualTitleChanged =
+      requestedManualTitle !== null &&
+      (requestedManualTitle !== note.title || note.titleSource !== "manual");
 
-    if (requestedManualTitle !== null && (requestedManualTitle !== note.title || note.titleSource !== "manual")) {
+    if (manualTitleChanged) {
       await tx
         .update(notes)
         .set({ title: requestedManualTitle, titleSource: "manual", updatedAt: new Date() })
         .where(eq(notes.id, noteId));
+    }
+
+    // 标题单独修改时，精确克隆当前正文为一个新版本。currentVersionId 同时
+    // 是客户端 OCC 令牌；如果只改 notes.title，多标签页会持有同一令牌并
+    // 静默覆盖。仅对带 baseVersionId 的新协议请求推进版本，保留 service
+    // 对旧内部调用的兼容性（HTTP schema 已强制 mutation 必须携带 base）。
+    if (
+      !Array.isArray(input.blocks) &&
+      manualTitleChanged &&
+      note.currentVersionId &&
+      input.baseVersionId
+    ) {
+      const currentVersion = await tx.query.noteVersions.findFirst({
+        where: eq(noteVersions.id, note.currentVersionId),
+      });
+      if (currentVersion) {
+        const currentBlocks = await tx.query.noteBlocks.findMany({
+          where: eq(noteBlocks.versionId, note.currentVersionId),
+          orderBy: (b, { asc: asc1 }) => [asc1(b.ordinal)],
+        });
+        const latest = await tx.query.noteVersions.findFirst({
+          where: eq(noteVersions.noteId, noteId),
+          orderBy: (v, { desc: desc1 }) => [desc1(v.versionNo)],
+        });
+        const nextVersionNo = (latest?.versionNo ?? 0) + 1;
+        const [newVersion] = await tx
+          .insert(noteVersions)
+          .values({
+            noteId,
+            workspaceId,
+            versionNo: nextVersionNo,
+            contentJson: currentVersion.contentJson,
+            contentHash: currentVersion.contentHash,
+            createdBy: userId,
+          })
+          .returning();
+
+        if (currentBlocks.length) {
+          await tx.insert(noteBlocks).values(
+            currentBlocks.map((block) => ({
+              versionId: newVersion.id,
+              workspaceId,
+              ordinal: block.ordinal,
+              type: block.type,
+              content: block.content,
+              sourceRef: block.sourceRef ?? null,
+            })),
+          );
+        }
+
+        await tx
+          .update(notes)
+          .set({
+            currentVersionId: newVersion.id,
+            title: requestedManualTitle,
+            titleSource: "manual",
+            updatedAt: new Date(),
+          })
+          .where(eq(notes.id, noteId));
+      }
     }
 
     if (Array.isArray(input.blocks)) {
@@ -522,8 +585,10 @@ export async function updateNote(
       });
       // 二次验证：哈希匹配后确认 contentJson 实际内容一致
       // （contentJson 为 NOT NULL 列，防御性检查 undefined 仅供 mock 兼容）
+      // 手动标题修改也必须推进 currentVersionId：它既是版本指针，也是
+      // 编辑器的 OCC 令牌。否则同内容的标题更新会绕过去重分支静默互相覆盖。
       const existingVersion =
-        hashMatch && hashMatch.contentJson &&
+        !manualTitleChanged && hashMatch && hashMatch.contentJson &&
         computeContentHash(hashMatch.contentJson) === contentHash
           ? hashMatch
           : null;
@@ -544,7 +609,7 @@ export async function updateNote(
             })
             .where(eq(notes.id, noteId));
         }
-      } else if (input.isAutosave && note.currentVersionId) {
+      } else if (input.isAutosave && note.currentVersionId && !manualTitleChanged) {
         // 2. 自动保存模式：尝试原地更新当前版本
         const canInPlace = await canUpdateVersionInPlace(tx, note.currentVersionId);
         if (canInPlace) {

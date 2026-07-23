@@ -616,9 +616,17 @@ async function deriveOnboardingSnapshot(
     )
     .limit(1);
 
+  const personalProvider = providerConfig?.provider && providerConfig.provider !== "mock"
+    ? providerConfig.provider
+    : null;
+  const effectiveProvider = String(
+    personalProvider ?? workspace?.aiProvider ?? process.env.AI_PROVIDER_CARD ?? "mock",
+  ).toLowerCase();
+  const usesExternalProvider = effectiveProvider !== "mock";
+
   const steps: Record<string, boolean> = {
-    ai_consent: Boolean(workspace?.aiConsentAt && workspace.aiConsentVersion),
-    provider_config: Boolean(providerConfig),
+    ai_consent: !usesExternalProvider || Boolean(workspace?.aiConsentAt && workspace.aiConsentVersion),
+    provider_config: Boolean(effectiveProvider),
     first_content: firstContent.length > 0,
     first_note: firstNote.length > 0,
     first_card: firstCard.length > 0,

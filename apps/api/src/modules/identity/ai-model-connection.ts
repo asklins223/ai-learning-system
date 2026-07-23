@@ -90,7 +90,7 @@ export async function resolvePersonalAIConnectionRuntime(
 ): Promise<AIModelConnectionRuntime> {
   if (input.provider === "mock") {
     throw new AIModelConnectionError(
-      "本地 Mock 不需要测试外部连接",
+      "系统默认配置无需测试外部连接",
       "invalid_configuration",
       400,
     );

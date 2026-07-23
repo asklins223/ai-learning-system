@@ -25,17 +25,17 @@ interface StepDef {
 const ONBOARDING_STEPS: StepDef[] = [
   {
     id: "ai_consent",
-    label: "确认 AI 使用政策",
-    description: "先确认工作区的数据边界与 AI 使用方式。",
+    label: "确认 AI 使用边界",
+    description: "仅在使用外部模型时，需要确认工作区的数据边界。",
     href: "/settings#model",
-    ctaLabel: "查看 AI 设置",
+    ctaLabel: "查看模型设置",
   },
   {
     id: "provider_config",
-    label: "连接 AI 模型",
-    description: "选择可用模型并完成一次连接检查。",
+    label: "模型已就绪",
+    description: "系统默认配置可以直接使用，也可以按需连接个人模型。",
     href: "/settings#model",
-    ctaLabel: "连接模型",
+    ctaLabel: "查看模型设置",
   },
   {
     id: "first_content",
@@ -184,12 +184,12 @@ export function OnboardingGuide({ variant = "default" }: OnboardingGuideProps) {
           </span>
           <div>
             <h2 id="onboarding-guide-title">
-              {variant === "starter" ? "从材料到掌握" : "学习路径"}
+              {variant === "starter" ? "上手进度" : "学习路径"}
             </h2>
             <p>
               {variant === "starter"
-                ? "完成的每一步都来自真实学习记录"
-                : "进度来自你的真实学习记录"}
+                ? "系统默认模型已就绪，添加材料即可开始"
+                : "根据真实学习记录自动推进"}
             </p>
           </div>
         </div>
@@ -197,7 +197,7 @@ export function OnboardingGuide({ variant = "default" }: OnboardingGuideProps) {
         <div className="onboarding-guide-header-actions">
           <span className="onboarding-guide-count" aria-hidden="true">
             <strong>{completedCount}</strong>
-            <span>/ {totalCount}</span>
+            <span>/ {totalCount} 已完成</span>
           </span>
           <button
             type="button"
@@ -230,10 +230,11 @@ export function OnboardingGuide({ variant = "default" }: OnboardingGuideProps) {
 
       <div className="onboarding-guide-current">
         <span className="onboarding-guide-current-index" aria-hidden="true">
-          {String(nextStepIndex + 1).padStart(2, "0")}
+          <small>下一步</small>
+          <strong>{String(nextStepIndex + 1).padStart(2, "0")}</strong>
         </span>
         <div className="onboarding-guide-current-copy">
-          <p>{variant === "starter" ? "路径建议" : "现在继续"}</p>
+          <p>{variant === "starter" ? "完成第一个学习动作" : "建议继续"}</p>
           <h3>{nextStep.label}</h3>
           <span>{nextStep.description}</span>
         </div>

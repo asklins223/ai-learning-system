@@ -438,6 +438,17 @@ describe("note/service updateNote", () => {
   });
 
   it("只更新标题（不更新 blocks）", async () => {
+    const nextVersionId = "00000000-0000-0000-0000-000000000007";
+    const currentVersion = {
+      id: VERSION_ID,
+      noteId: NOTE_ID,
+      versionNo: 1,
+      contentJson: {
+        blocks: [{ type: "paragraph", content: "内容" }],
+        importId: "import-1",
+      },
+      contentHash: "original-content-hash",
+    };
     const mock = createMockExecutor({
       selectResult: [[{
         id: NOTE_ID,
@@ -446,9 +457,19 @@ describe("note/service updateNote", () => {
         titleSource: "auto",
         workspaceId: WS_ID,
       }]],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, title: "新标题", titleSource: "manual", workspaceId: WS_ID },
-      noteVersionsFindFirst: { id: VERSION_ID, versionNo: 1 },
-      noteBlocksFindMany: [{ type: "paragraph", content: "内容", ordinal: 0 }],
+      notesFindFirst: { id: NOTE_ID, currentVersionId: nextVersionId, title: "新标题", titleSource: "manual", workspaceId: WS_ID },
+      noteVersionsFindFirstQueue: [
+        currentVersion,
+        currentVersion,
+        { ...currentVersion, id: nextVersionId, versionNo: 2 },
+      ],
+      noteBlocksFindMany: [{
+        type: "paragraph",
+        content: "内容",
+        ordinal: 0,
+        sourceRef: { sourceId: "source-1", segmentId: "segment-1" },
+      }],
+      insertReturning: [[{ id: nextVersionId, noteId: NOTE_ID, versionNo: 2 }]],
     });
 
     const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
@@ -459,6 +480,23 @@ describe("note/service updateNote", () => {
 
     assert.ok(result);
     assert.equal(result!.note.title, "新标题");
+    assert.equal(result!.version.id, nextVersionId);
+    const versionInsert = mock._insertCalls.find(
+      (call: { data: unknown }) =>
+        !Array.isArray(call.data) &&
+        typeof call.data === "object" &&
+        call.data !== null &&
+        "contentHash" in call.data,
+    );
+    assert.deepEqual(versionInsert?.data.contentJson, currentVersion.contentJson);
+    assert.equal(versionInsert?.data.contentHash, currentVersion.contentHash);
+    const blockInsert = mock._insertCalls.find(
+      (call: { data: unknown }) => Array.isArray(call.data),
+    );
+    assert.deepEqual(
+      blockInsert?.data[0].sourceRef,
+      { sourceId: "source-1", segmentId: "segment-1" },
+    );
   });
 
   it("更新 blocks 时创建新版本", async () => {
@@ -884,6 +922,51 @@ describe("note/service updateNote content-hash dedup", () => {
     assert.ok(result);
     assert.equal(result!.version.id, "current-v1");
     assert.equal(result!.note.title, "same");
+  });
+
+  it("手动标题变化即使正文相同也创建新版本令牌", async () => {
+    const currentVersion = {
+      id: VERSION_ID,
+      noteId: NOTE_ID,
+      versionNo: 1,
+      contentHash: "same-content",
+      contentJson: { blocks: [{ type: "paragraph", content: "same" }] },
+    };
+    const nextVersionId = "00000000-0000-0000-0000-000000000006";
+    const mock = createMockExecutor({
+      selectResult: [[{
+        id: NOTE_ID,
+        currentVersionId: VERSION_ID,
+        title: "旧标题",
+        titleSource: "manual",
+        workspaceId: WS_ID,
+      }]],
+      notesFindFirst: {
+        id: NOTE_ID,
+        currentVersionId: nextVersionId,
+        workspaceId: WS_ID,
+        title: "新标题",
+        titleSource: "manual",
+      },
+      noteVersionsFindFirstQueue: [
+        currentVersion,
+        currentVersion,
+        { ...currentVersion, id: nextVersionId, versionNo: 2 },
+      ],
+      insertReturning: [[{ id: nextVersionId, noteId: NOTE_ID, versionNo: 2 }]],
+      noteBlocksFindMany: [{ type: "paragraph", content: "same", ordinal: 0 }],
+    });
+
+    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
+      title: "新标题",
+      blocks: [{ type: "paragraph", content: "same" }],
+      baseVersionId: VERSION_ID,
+      isAutosave: true,
+    });
+
+    assert.ok(result);
+    assert.equal(result!.version.id, nextVersionId);
+    assert.equal(result!.version.versionNo, 2);
   });
 
   it("isAutosave + 无卡片引用时原地更新当前版本", async () => {

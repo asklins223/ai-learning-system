@@ -31,7 +31,7 @@ const DEFAULT_POLICY: AIPrivacySettings["aiDataPolicy"] = {
 function providerLabel(provider: PersonalAIProvider | null): string {
   if (provider === "dashscope") return "阿里云百炼 / DashScope";
   if (provider === "openai_compatible") return "OpenAI-compatible 接口";
-  return "本地 Mock（不调用外部接口）";
+  return "系统默认配置";
 }
 
 function hasSameEndpointOrigin(previousBaseUrl: string | null, nextBaseUrl: string): boolean {
@@ -61,6 +61,7 @@ export function AIModelSettings({ isOwner, accountLoading }: {
   const [testing, setTesting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showDefaultConfirm, setShowDefaultConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [connectionResult, setConnectionResult] = useState<PersonalAIConnectionTestResult | null>(null);
@@ -106,6 +107,10 @@ export function AIModelSettings({ isOwner, accountLoading }: {
     config.provider !== "mock" &&
     hasSameEndpointOrigin(config.baseUrl, baseUrl),
   );
+  const hasPersonalConfig = Boolean(
+    config?.configured && config.provider && config.provider !== "mock",
+  );
+  const modelAvailable = Boolean(config);
   const busy = loading || saving || testing || deleting;
 
   function clearConnectionResult() {
@@ -134,8 +139,16 @@ export function AIModelSettings({ isOwner, accountLoading }: {
     setApiKey("");
   }
 
-  async function save(event: FormEvent<HTMLFormElement>) {
+  function requestSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!external && hasPersonalConfig) {
+      setShowDefaultConfirm(true);
+      return;
+    }
+    void save();
+  }
+
+  async function save() {
     setSaving(true);
     setError(null);
     setSuccess(null);
@@ -170,14 +183,17 @@ export function AIModelSettings({ isOwner, accountLoading }: {
       setPolicy(updatedPrivacy.aiDataPolicy);
       setConsent(Boolean(updatedPrivacy.aiConsentAt && updatedPrivacy.aiConsentVersion));
       setSuccess(
-        external && (!updatedPrivacy.aiDataPolicy.sendToExternal || !updatedPrivacy.aiConsentAt)
+        !external
+          ? "已切换为系统默认配置，下一次 AI 任务将使用系统提供的模型。"
+          : !updatedPrivacy.aiDataPolicy.sendToExternal || !updatedPrivacy.aiConsentAt
           ? "个人模型已保存；当前工作区尚未允许外发，任务会继续被隐私门禁拦截。"
-          : "模型配置已保存，下一次由你发起的 AI 任务将使用此配置。",
+          : "个人模型配置已保存，下一次由你发起的 AI 任务将使用此配置。",
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "模型配置保存失败");
     } finally {
       setSaving(false);
+      setShowDefaultConfirm(false);
     }
   }
 
@@ -187,7 +203,7 @@ export function AIModelSettings({ isOwner, accountLoading }: {
     setError(null);
     setSuccess(null);
     try {
-      if (!external) throw new Error("本地 Mock 不需要测试外部连接");
+      if (!external) throw new Error("系统默认配置无需测试外部连接");
       if (!baseUrl.trim()) throw new Error("请填写 API Base URL");
       if (!model.trim()) throw new Error("请填写模型名称");
       if (!apiKey.trim() && !hasReusableKey) {
@@ -216,7 +232,7 @@ export function AIModelSettings({ isOwner, accountLoading }: {
       await api.deletePersonalAIModelConfig();
       setShowDeleteConfirm(false);
       await load();
-      setSuccess("个人模型配置已删除；后续任务将回退到工作区或系统默认 Provider。");
+      setSuccess("个人模型配置已删除，现已恢复为系统默认配置。");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "删除模型配置失败");
     } finally {
@@ -226,15 +242,15 @@ export function AIModelSettings({ isOwner, accountLoading }: {
 
   return (
     <>
-      <form className="settings-ai-card" onSubmit={(event) => void save(event)}>
+      <form className="settings-ai-card" onSubmit={requestSave}>
         <div className="settings-ai-status">
-          <span className={`settings-ai-status-dot ${config?.configured ? "is-configured" : ""}`} />
+          <span className={`settings-ai-status-dot ${modelAvailable ? "is-configured" : ""}`} />
           <div>
-            <strong>{config?.configured ? "已启用个人模型配置" : "当前使用系统回退配置"}</strong>
+            <strong>{hasPersonalConfig ? "已启用个人模型配置" : "当前使用系统默认配置"}</strong>
             <small>
-              {config?.configured
-                ? `${providerLabel(config.provider)}${config.apiKeyHint ? ` · Key ${config.apiKeyHint}` : ""}`
-                : `回退 Provider：${config?.fallbackProvider ?? "mock"}`}
+              {hasPersonalConfig
+                ? `${providerLabel(config?.provider ?? null)}${config?.apiKeyHint ? ` · Key ${config.apiKeyHint}` : ""}`
+                : "由系统统一管理，无需填写接口或密钥"}
             </small>
           </div>
           <button type="button" className="settings-icon-button" onClick={() => void load()} disabled={busy} aria-label="刷新模型配置">
@@ -244,13 +260,17 @@ export function AIModelSettings({ isOwner, accountLoading }: {
 
         <div className="settings-ai-grid">
           <label className="settings-field">
-            <span>Provider 类型</span>
+            <span>模型来源</span>
             <select value={provider} onChange={(event) => changeProvider(event.target.value as PersonalAIProvider)} disabled={busy}>
-              <option value="mock">本地 Mock</option>
+              <option value="mock">系统默认</option>
               <option value="dashscope">阿里云百炼 / DashScope</option>
               <option value="openai_compatible">OpenAI-compatible</option>
             </select>
-            <small>配置只属于当前账户，不影响其他成员。</small>
+            <small>
+              {external
+                ? "个人配置只属于当前账户，不影响其他成员。"
+                : "使用系统统一维护的模型，可直接开始生成学习卡。"}
+            </small>
           </label>
 
           {external && (
@@ -343,22 +363,35 @@ export function AIModelSettings({ isOwner, accountLoading }: {
               {testing ? "正在测试连接" : "测试连接"}
             </button>
           )}
-          {config?.configured && (
+          {hasPersonalConfig && (
             <button className="settings-secondary-button is-danger" type="button" onClick={() => setShowDeleteConfirm(true)} disabled={busy}>
               <Icon.Trash />删除个人配置
             </button>
           )}
           <button className="settings-primary-button" type="submit" disabled={busy}>
             {saving ? <Icon.Refresh className="settings-spin" /> : <Icon.Check />}
-            {saving ? "正在加密保存" : "保存模型配置"}
+            {saving
+              ? external ? "正在加密保存" : "正在切换"
+              : external ? "保存个人模型配置" : "使用系统默认配置"}
           </button>
         </div>
       </form>
 
       <ConfirmDialog
+        open={showDefaultConfirm}
+        title="改用系统默认配置？"
+        message="当前个人模型、接口地址和加密保存的 API Key 将被删除，后续 AI 任务会使用系统默认配置。"
+        confirmLabel="确认切换"
+        cancelLabel="保留个人配置"
+        loading={saving}
+        onCancel={() => setShowDefaultConfirm(false)}
+        onConfirm={() => void save()}
+      />
+
+      <ConfirmDialog
         open={showDeleteConfirm}
         title="删除个人模型配置？"
-        message="加密保存的 API Key、接口地址和模型选择都会删除。后续 AI 任务将回退到工作区或系统默认 Provider。"
+        message="加密保存的 API Key、接口地址和模型选择都会删除，后续 AI 任务将使用系统默认配置。"
         confirmLabel="确认删除"
         cancelLabel="保留配置"
         loading={deleting}

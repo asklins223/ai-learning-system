@@ -105,7 +105,9 @@ export async function getPersonalAIModelConfig(userId: string): Promise<Personal
     where: eq(userAIModelConfigs.userId, userId),
   });
   return {
-    configured: Boolean(row),
+    // Legacy `mock` rows represented a local override. The UI now treats
+    // system-default as the absence of a personal override.
+    configured: Boolean(row && row.provider !== "mock"),
     provider: (row?.provider as PersonalAIProvider | undefined) ?? null,
     baseUrl: row?.baseUrl ?? null,
     model: row?.model ?? null,
@@ -120,6 +122,11 @@ export async function savePersonalAIModelConfig(
   userId: string,
   input: PersonalAIModelConfigInput,
 ): Promise<PersonalAIModelConfigView> {
+  if (input.provider === "mock") {
+    await db.delete(userAIModelConfigs).where(eq(userAIModelConfigs.userId, userId));
+    return getPersonalAIModelConfig(userId);
+  }
+
   const now = new Date();
   const existing = await db.query.userAIModelConfigs.findFirst({
     where: eq(userAIModelConfigs.userId, userId),
@@ -130,35 +137,33 @@ export async function savePersonalAIModelConfig(
   let apiKeyEncrypted: string | null = null;
   let apiKeyHintValue: string | null = null;
 
-  if (input.provider !== "mock") {
-    baseUrl = normalizePersonalAIBaseUrl(input.provider, input.baseUrl);
-    model = normalizePersonalAIModel(input.model);
-    const apiKey = input.apiKey?.trim();
-    if (apiKey) {
-      if (apiKey.length < 8 || apiKey.length > 4096) {
-        throw new AIModelConfigError("apiKey must be between 8 and 4096 characters");
-      }
-      try {
-        apiKeyEncrypted = encryptAiCredential(apiKey, userId);
-      } catch (error) {
-        throw new AIModelConfigError(
-          error instanceof Error ? error.message : "AI credential encryption is unavailable",
-          503,
-        );
-      }
-      apiKeyHintValue = aiCredentialHint(apiKey);
-    } else {
-      // A saved key may only be reused for the same provider and HTTPS origin.
-      // Otherwise a URL edit could silently forward the credential elsewhere.
-      const canReuse = existing?.provider === input.provider &&
-        hasSamePersonalAIEndpointOrigin(existing.baseUrl, baseUrl);
-      apiKeyEncrypted = canReuse ? existing.apiKeyEncrypted : null;
-      apiKeyHintValue = canReuse ? existing.apiKeyHint : null;
-      if (!apiKeyEncrypted || !apiKeyHintValue) {
-        throw new AIModelConfigError(
-          "apiKey is required when configuring an external provider or changing the endpoint origin",
-        );
-      }
+  baseUrl = normalizePersonalAIBaseUrl(input.provider, input.baseUrl);
+  model = normalizePersonalAIModel(input.model);
+  const apiKey = input.apiKey?.trim();
+  if (apiKey) {
+    if (apiKey.length < 8 || apiKey.length > 4096) {
+      throw new AIModelConfigError("apiKey must be between 8 and 4096 characters");
+    }
+    try {
+      apiKeyEncrypted = encryptAiCredential(apiKey, userId);
+    } catch (error) {
+      throw new AIModelConfigError(
+        error instanceof Error ? error.message : "AI credential encryption is unavailable",
+        503,
+      );
+    }
+    apiKeyHintValue = aiCredentialHint(apiKey);
+  } else {
+    // A saved key may only be reused for the same provider and HTTPS origin.
+    // Otherwise a URL edit could silently forward the credential elsewhere.
+    const canReuse = existing?.provider === input.provider &&
+      hasSamePersonalAIEndpointOrigin(existing.baseUrl, baseUrl);
+    apiKeyEncrypted = canReuse ? existing.apiKeyEncrypted : null;
+    apiKeyHintValue = canReuse ? existing.apiKeyHint : null;
+    if (!apiKeyEncrypted || !apiKeyHintValue) {
+      throw new AIModelConfigError(
+        "apiKey is required when configuring an external provider or changing the endpoint origin",
+      );
     }
   }
 

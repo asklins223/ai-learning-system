@@ -189,14 +189,12 @@ describe("governance getPersonalAIProviderRuntimeConfig (DB mock)", () => {
     assert.equal(result, null);
   });
 
-  it("用户配置为 mock 时返回 mock 配置", async () => {
+  it("旧 mock 记录按系统默认处理，不再形成个人覆盖", async () => {
     setupDbMock({
       userAIModelConfig: { provider: "mock", baseUrl: null, model: null, apiKeyEncrypted: null },
     });
     const result = await getPersonalAIProviderRuntimeConfig(USER_ID);
-    assert.ok(result);
-    assert.equal(result!.provider, "mock");
-    assert.equal(result!.apiKey, null);
+    assert.equal(result, null);
   });
 
   it("用户配置不完整时抛错", async () => {

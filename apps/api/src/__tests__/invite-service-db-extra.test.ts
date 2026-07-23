@@ -571,10 +571,10 @@ describe("invite-service removeMember (DB mock)", () => {
 // ─── getOnboardingState ──────────────────────────────────────────────────
 
 describe("invite-service getOnboardingState (DB mock)", () => {
-  it("返回存在的 onboarding 状态（派生步骤全 false 时 status=pending）", async () => {
+  it("系统默认模型可用时自动完成模型准备步骤", async () => {
     // deriveOnboardingSnapshot calls:
-    //   tx.query.workspaces.findFirst → undefined (ai_consent=false)
-    //   tx.query.userAIModelConfigs.findFirst → undefined (provider_config=false)
+    //   tx.query.workspaces.findFirst → undefined (falls back to system mock)
+    //   tx.query.userAIModelConfigs.findFirst → undefined (no personal override)
     //   tx.select().from(sources).where().limit(1) → [] (first_content=false)
     //   tx.select().from(notes).where().limit(1) → [] (first_note=false)
     //   tx.select().from(learningCards).innerJoin().where().limit(1) → [] (first_card=false)
@@ -599,10 +599,10 @@ describe("invite-service getOnboardingState (DB mock)", () => {
     assert.ok(result);
     assert.equal(result!.id, "ob-1");
     assert.equal(result!.version, "v1");
-    assert.equal(result!.status, "pending");
+    assert.equal(result!.status, "in_progress");
     assert.deepEqual(result!.steps, {
-      ai_consent: false,
-      provider_config: false,
+      ai_consent: true,
+      provider_config: true,
       first_content: false,
       first_note: false,
       first_card: false,
@@ -760,7 +760,7 @@ describe("invite-service ensureOnboardingState (DB mock)", () => {
 
     const result = await ensureOnboardingState(WS_ID, USER_ID);
     assert.equal(result.id, "ob-1");
-    assert.equal(result.status, "pending");
+    assert.equal(result.status, "in_progress");
   });
 
   it("不存在时创建新状态", async () => {
@@ -786,7 +786,7 @@ describe("invite-service ensureOnboardingState (DB mock)", () => {
 
     const result = await ensureOnboardingState(WS_ID, USER_ID);
     assert.equal(result.id, "ob-new");
-    assert.equal(result.status, "pending");
+    assert.equal(result.status, "in_progress");
   });
 
   it("创建后仍查不到时抛错", async () => {

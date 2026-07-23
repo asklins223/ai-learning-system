@@ -1,112 +1,122 @@
-COMPOSE_PROD := docker compose -p ailearn
-COMPOSE_DEV := docker compose -p ailearn-dev -f docker-compose.dev.yml
+COMPOSE := docker compose -p ailearn-dev -f docker-compose.dev.yml
+DEV_DB_VOLUME := ailearn-dev_dev_postgres_data
+.DEFAULT_GOAL := up
 
 # One-shot init containers (restart: "no") that exit after their task.
-# They are waited on and then removed after every `up`/`dev`/`storage` so
-# they don't linger as exited containers in `docker ps -a`.
+# Stale containers are removed at the START of each `up`/`storage` run
+# so that `docker compose up` always recreates them with the latest image.
+# After they exit they are LEFT IN PLACE (as exited containers) so that
+# Docker Desktop's "Start" button (`docker compose start`) can restart the
+# entire stack — including re-running migrations — without error.
 #
-# migrate / role-bootstrap / role-grants run on every startup to apply
-# pending schema migrations and re-apply role grants.  They are idempotent
-# no-ops when nothing changed, but must run every time — they are NOT
+# migrate / role-bootstrap run on every startup to apply pending schema
+# migrations and re-apply role grants.  They are idempotent no-ops when
+# nothing changed, but must run every time — they are NOT
 # first-time-only.  minio-init and seed-* are genuinely one-time and are
 # already gated behind profiles.
-PROD_INIT_SERVICES := role-bootstrap migrate role-grants
-DEV_INIT_SERVICES := migrate
+INIT_SERVICES := role-bootstrap migrate
 STORAGE_INIT_SERVICES := minio-init
 
-.PHONY: up dev storage storage-dev seed-owner seed-demo down down-prod down-dev logs reset reset-dev \
-	rebuild rebuild-dev config config-dev shell-api shell-web shell-worker \
-	clean-init clean-init-dev version-check verify release-check
+# Include the storage profile in every dev `up` so that avatar/note image
+# uploads work out of the box without a separate `make storage` step.
+DEV_PROFILES := --profile storage
 
-# Production-like stack: prod targets, non-root application users, no bind mounts.
-up:
-	$(COMPOSE_PROD) up -d --build
-	$(MAKE) --no-print-directory clean-init
+.PHONY: up dev storage storage-dev seed-demo down down-dev logs reset reset-dev reset-db \
+	rebuild rebuild-dev config config-dev clean-init clean-init-dev \
+	ensure-db-volume \
+	shell-api shell-web shell-worker version-check verify release-check \
+	coverage-gate skip-todo-gate release-manifest \
+	alpha-up alpha-down alpha-backup alpha-restore-verify alpha-status alpha-metrics
 
-# Standalone local stack with dev targets, fixed local credentials and hot reload.
-dev:
-	$(COMPOSE_DEV) up -d --build
-	$(MAKE) --no-print-directory clean-init-dev
+# Local development stack: dev image targets, source bind mounts and hot
+# reload.  This is the default `make up` target — there is no separate
+# production stack for local use anymore.  CI still builds production images
+# from docker-compose.yml directly (see .github/workflows/ci.yml), but that
+# file is no longer wired to any local Makefile target.
+ensure-db-volume:
+	@set -e; if ! docker volume inspect "$(DEV_DB_VOLUME)" >/dev/null 2>&1; then \
+		docker volume create \
+			--label com.ailearn.protected=true \
+			--label com.ailearn.purpose=postgres-data \
+			"$(DEV_DB_VOLUME)" >/dev/null; \
+		echo "Created protected database volume $(DEV_DB_VOLUME)"; \
+	fi
 
-storage:
-	$(COMPOSE_PROD) --profile storage up -d --build
-	$(MAKE) --no-print-directory clean-init
-	@set -e; for svc in $(STORAGE_INIT_SERVICES); do \
-		cid="$$( $(COMPOSE_PROD) ps -aq $$svc )"; \
-		if [ -n "$$cid" ]; then $(COMPOSE_PROD) wait $$svc >/dev/null; fi; \
+up: ensure-db-volume
+	-$(COMPOSE) rm -f $(INIT_SERVICES) $(STORAGE_INIT_SERVICES) 2>/dev/null
+	$(COMPOSE) $(DEV_PROFILES) up -d --build
+	@set -e; for svc in $(INIT_SERVICES) $(STORAGE_INIT_SERVICES); do \
+		cid="$$( $(COMPOSE) ps -aq $$svc )"; \
+		if [ -z "$$cid" ]; then echo "Missing required init service: $$svc" >&2; exit 1; fi; \
+		$(COMPOSE) wait $$svc >/dev/null; \
 	done
-	@$(COMPOSE_PROD) rm -f $(STORAGE_INIT_SERVICES) 2>/dev/null || true
 
-storage-dev:
-	$(COMPOSE_DEV) --profile storage up -d --build
-	$(MAKE) --no-print-directory clean-init-dev
-	@set -e; for svc in $(STORAGE_INIT_SERVICES); do \
-		cid="$$( $(COMPOSE_DEV) ps -aq $$svc )"; \
-		if [ -n "$$cid" ]; then $(COMPOSE_DEV) wait $$svc >/dev/null; fi; \
+# Backward-compatible alias.
+dev: up
+
+storage: ensure-db-volume
+	-$(COMPOSE) rm -f $(INIT_SERVICES) $(STORAGE_INIT_SERVICES) 2>/dev/null
+	$(COMPOSE) --profile storage up -d --build
+	@set -e; for svc in $(INIT_SERVICES) $(STORAGE_INIT_SERVICES); do \
+		cid="$$( $(COMPOSE) ps -aq $$svc )"; \
+		if [ -z "$$cid" ]; then echo "Missing required init service: $$svc" >&2; exit 1; fi; \
+		$(COMPOSE) wait $$svc >/dev/null; \
 	done
-	@$(COMPOSE_DEV) rm -f $(STORAGE_INIT_SERVICES) 2>/dev/null || true
 
-# Wait for the production init containers to exit, then remove them so they
-# don't linger in `docker ps -a`.  `docker compose wait` blocks until the
-# one-shot container stops; if it already exited (or was never created) the
-# command returns immediately. A non-zero init exit is deliberately propagated
-# and the failed container is preserved so its logs remain available.
+storage-dev: storage
+
+# Manually remove stale one-shot init containers.  This is NOT called
+# automatically by `up` — init containers are left in place after they
+# exit so that Docker Desktop's "Start" button can restart the stack.
+# Stale containers are instead removed at the beginning of the next
+# `up`/`storage` run.
 clean-init:
-	@set -e; for svc in $(PROD_INIT_SERVICES); do \
-		cid="$$( $(COMPOSE_PROD) ps -aq $$svc )"; \
-		if [ -n "$$cid" ]; then $(COMPOSE_PROD) wait $$svc >/dev/null; fi; \
-	done
-	@$(COMPOSE_PROD) rm -f $(PROD_INIT_SERVICES) 2>/dev/null || true
+	@$(COMPOSE) rm -f $(INIT_SERVICES) 2>/dev/null || true
 
-# Same as clean-init but for the dev stack (only `migrate` is one-shot here).
-clean-init-dev:
-	@set -e; for svc in $(DEV_INIT_SERVICES); do \
-		cid="$$( $(COMPOSE_DEV) ps -aq $$svc )"; \
-		if [ -n "$$cid" ]; then $(COMPOSE_DEV) wait $$svc >/dev/null; fi; \
-	done
-	@$(COMPOSE_DEV) rm -f $(DEV_INIT_SERVICES) 2>/dev/null || true
-
-# Production seed fails when OWNER_EMAIL or OWNER_PASSWORD is absent.
-# Uses --rm so the container is removed immediately after seeding.
-seed-owner:
-	$(COMPOSE_PROD) --profile seed run --rm seed-owner
+clean-init-dev: clean-init
 
 # Explicitly creates owner@ailearn.local / ailearn_owner in development only.
 # Uses --rm so the container is removed immediately after seeding.
-seed-demo:
-	$(COMPOSE_DEV) --profile seed run --rm seed-demo
+seed-demo: ensure-db-volume
+	$(COMPOSE) --profile seed run --rm seed-demo
 
-# Backward-compatible alias: `make down` stops only the production project.
-down: down-prod
+down:
+	$(COMPOSE) down --remove-orphans
 
-down-prod:
-	$(COMPOSE_PROD) down --remove-orphans
-
-down-dev:
-	$(COMPOSE_DEV) down --remove-orphans
+down-dev: down
 
 logs:
-	$(COMPOSE_DEV) logs -f
+	$(COMPOSE) logs -f
 
-reset:
-	$(COMPOSE_PROD) down -v --remove-orphans
-	$(MAKE) up
+reset reset-dev:
+	@echo "Refusing to delete the development database from the legacy '$@' target."; \
+		echo "Use: make reset-db CONFIRM_RESET_DB=DELETE_DEV_DB"; \
+		exit 2
 
-reset-dev:
-	$(COMPOSE_DEV) down -v --remove-orphans
-	$(MAKE) dev
+reset-db:
+	@if [ "$(CONFIRM_RESET_DB)" != "DELETE_DEV_DB" ]; then \
+		echo "Database reset cancelled; no data was changed."; \
+		echo "To permanently delete $(DEV_DB_VOLUME), run:"; \
+		echo "  make reset-db CONFIRM_RESET_DB=DELETE_DEV_DB"; \
+		exit 2; \
+	fi
+	$(COMPOSE) down --remove-orphans
+	@if docker volume inspect "$(DEV_DB_VOLUME)" >/dev/null 2>&1; then \
+		docker volume rm "$(DEV_DB_VOLUME)"; \
+	else \
+		echo "Database volume $(DEV_DB_VOLUME) is already absent."; \
+	fi
+	$(MAKE) --no-print-directory up
 
 rebuild:
-	$(COMPOSE_PROD) build --no-cache
+	$(COMPOSE) build --no-cache
 
-rebuild-dev:
-	$(COMPOSE_DEV) build --no-cache
+rebuild-dev: rebuild
 
 config:
-	$(COMPOSE_PROD) config --quiet
+	$(COMPOSE) config --quiet
 
-config-dev:
-	$(COMPOSE_DEV) config --quiet
+config-dev: config
 
 # release/version.json is the only manually edited version source. To update
 # generated copies, run: node .github/scripts/version-contract.mjs --write
@@ -155,10 +165,34 @@ release-check:
 	node .github/scripts/release-manifest-contract.mjs
 
 shell-api:
-	$(COMPOSE_DEV) exec api sh
+	$(COMPOSE) exec api sh
 
 shell-web:
-	$(COMPOSE_DEV) exec web sh
+	$(COMPOSE) exec web sh
 
 shell-worker:
-	$(COMPOSE_DEV) exec worker sh
+	$(COMPOSE) exec worker sh
+
+# ─── Alpha environment (OPS-01) ──────────────────────────────────────
+# Docker-based Alpha environment with Prometheus, Alertmanager, and
+# backup infrastructure. Requires .env with POSTGRES_PASSWORD,
+# MIGRATOR_PASSWORD, API_PASSWORD, WORKER_PASSWORD, MINIO_ROOT_PASSWORD.
+ALPHA_SCRIPT := ./scripts/alpha-env-setup.sh
+
+alpha-up:
+	$(ALPHA_SCRIPT) up
+
+alpha-down:
+	$(ALPHA_SCRIPT) down
+
+alpha-backup:
+	$(ALPHA_SCRIPT) backup
+
+alpha-restore-verify:
+	$(ALPHA_SCRIPT) restore-verify
+
+alpha-status:
+	$(ALPHA_SCRIPT) status
+
+alpha-metrics:
+	$(ALPHA_SCRIPT) metrics

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, CardListItem, JobRow, ReviewWithCard, StatsOverview } from "@/lib/api";
-import { useIsOwner } from "@/lib/use-current-user";
+import { useCurrentUser } from "@/lib/use-current-user";
 import { relativeTime } from "@/lib/format";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Icon } from "@/components/ui/icons";
@@ -15,11 +15,16 @@ import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { OnboardingGuide } from "@/components/study/OnboardingGuide";
 import { statusMap } from "@/lib/status-map";
+import { resolveHomeOnboardingVisibility } from "@/lib/home-onboarding";
 
 type CaptureMessageType = "success" | "error";
 
 export default function HomePage() {
-  const { isOwner } = useIsOwner();
+  const { currentUser, loading: accountLoading } = useCurrentUser();
+  const isOwner = Boolean(
+    currentUser && (currentUser.role === "owner" || currentUser.isPersonal),
+  );
+  const isPersonalWorkspace = Boolean(currentUser?.isPersonal);
   const router = useRouter();
   const [todayLabel, setTodayLabel] = useState("今天");
   const [stats, setStats] = useState<StatsOverview | null>(null);
@@ -277,7 +282,7 @@ export default function HomePage() {
   const errorList = [statsError, notesError, cardsError, reviewsError, jobsError].filter(Boolean);
   const resolvedNoteCount = stats?.noteCount ?? noteTotal;
   const resolvedCardCount = stats?.cardCount ?? homeCardTotal;
-  const isFirstUse =
+  const isEmptyWorkspace =
     resolvedNoteCount === 0 &&
     resolvedCardCount === 0 &&
     cards !== null &&
@@ -289,6 +294,11 @@ export default function HomePage() {
     !jobsError &&
     pendingReviewCount === 0 &&
     jobs.length === 0;
+  const { isFirstUse, showOnboarding } = resolveHomeOnboardingVisibility({
+    accountLoading,
+    isPersonalWorkspace,
+    isEmptyWorkspace,
+  });
 
   return (
     <div
@@ -417,7 +427,9 @@ export default function HomePage() {
                 </div>
               </section>
             )}
-            <OnboardingGuide variant={isFirstUse ? "starter" : "default"} />
+            {showOnboarding && (
+              <OnboardingGuide variant={isFirstUse ? "starter" : "default"} />
+            )}
             {!isFirstUse && (focusLoading ? (
               <section className="learning-home-focus learning-home-focus--loading" aria-busy="true" aria-label="正在加载今日下一步">
                 <div className="learning-home-focus-skeleton-label" />

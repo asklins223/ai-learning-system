@@ -89,4 +89,30 @@ describe("API client", () => {
     assert.match(capturedUrl, /\/export\/notes\/note-1$/);
     assert.equal(await blob.text(), "# Note");
   });
+
+  it("keeps onboarding evidence acknowledgement alive across navigation", async () => {
+    let capturedInit: RequestInit | undefined;
+    mockFetch((_url, init) => {
+      capturedInit = init;
+      return Response.json({ ok: true });
+    });
+
+    await api.markOnboardingStep("evidence_review", "evidence-1");
+
+    assert.equal(capturedInit?.method, "POST");
+    assert.equal(capturedInit?.keepalive, true);
+  });
+
+  it("keeps session revocation alive while redirecting to login", async () => {
+    let capturedInit: RequestInit | undefined;
+    mockFetch((_url, init) => {
+      capturedInit = init;
+      return new Response(null, { status: 204 });
+    });
+
+    await api.logout();
+
+    assert.equal(capturedInit?.method, "POST");
+    assert.equal(capturedInit?.keepalive, true);
+  });
 });

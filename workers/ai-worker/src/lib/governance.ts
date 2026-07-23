@@ -139,8 +139,10 @@ export async function getPersonalAIProviderRuntimeConfig(
     where: eq(schema.userAIModelConfigs.userId, userId),
   });
   if (!row) return null;
+  // `mock` was historically stored as a personal row. It now means “use the
+  // workspace/system default”, so legacy rows must not override that default.
   if (row.provider === "mock") {
-    return { provider: "mock", baseUrl: null, model: null, apiKey: null };
+    return null;
   }
   if (!row.baseUrl || !row.model || !row.apiKeyEncrypted) {
     throw new Error("personal AI model configuration is incomplete");

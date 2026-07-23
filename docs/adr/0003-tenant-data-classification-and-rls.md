@@ -1,9 +1,10 @@
 # ADR-0003：数据分类、事务租户上下文与 RLS
 
-- Status: Accepted
+- Status: Accepted（2026-07-19 补充设计理念修正，见 §Design Concept Amendment）
 - Owner: Security / Database Owner
 - Approver: repository owner `@asklins223`（development self-review；RLS enforce 前必须独立 security/data review）
 - Date: 2026-07-18
+- Amended: 2026-07-19
 
 ## Context
 
@@ -44,6 +45,29 @@ v0.4 已分 migrator、API、Worker 角色并补齐多数复合外键，但应�
 ## Rollback / Forward-fix
 
 应用必须兼容 policy 已存在但暂未 enforce。若某批启用造成拒绝，先关闭该批 feature flag/流量，再由 migrator 暂停具体 policy 并以前向迁移修复；不得回滚已写业务数据。
+
+## Design Concept Amendment（2026-07-19）
+
+### 当前模型与理念修正的关系
+
+ADR-0002 的理念修正将"个人工作区优先"确立为产品首要概念。本 ADR 的 RLS 设计与此完全兼容，且不冲突：
+
+1. **RLS 是 workspace 级隔离机制**：无论一个 workspace 属于单人还是多人，RLS 保证跨 workspace 数据不会泄漏。当前已落地的 24 表 RLS policy 和 `withWorkspaceTransaction` 上下文设置不需要修改。
+2. **当前共享 workspace 是协作模式**：同一个 workspace 内多成员共享 workspace-owned 数据是明确的产品行为（协作），不是安全缺陷。RLS 的 user-private 策略继续保护成员间的个人数据（验证记录、复习计划等）。
+3. **v0.6 多工作区模型不改变 RLS 架构**：未来用户可属于多个 workspace，但每次查询仍在单一 workspace 事务上下文中执行。`withWorkspaceTransaction` 的 `workspaceId` 参数会随当前选定 workspace 变化，RLS policy 本身不需要修改。
+
+### 开发环境安全缺陷（需修复）
+
+当前开发环境存在一个与理念修正无关但需要记录的安全缺陷：
+
+- `docker-compose.dev.yml` 中所有服务均使用 `postgres://ailearn:ailearn_dev@...` 连接，而 `ailearn` 角色是 `rolsuper=t, rolbypassrls=t` 的数据库超级用户。
+- 这意味着即使代码遗漏了 `WHERE workspace_id = ...` 条件，RLS 也不会拦截——超级用户绕过所有 policy。
+- **生产环境必须使用 `ailearn_api` / `ailearn_worker` 角色**（`NOBYPASSRLS`），否则 RLS 形同虚设。
+- 部分业务模块（`validation/service.ts`、`evidence/service.ts`、`review/service.ts` 等）存在直接使用全局 `db.query` 而非 `withWorkspaceTransaction` 的查询路径；这些在开发环境正常工作（超级用户绕过 RLS），但在生产环境用受限角色时会返回 0 行（RLS fail-closed）。
+
+### 后续路线影响
+
+原 ADR-0009 的多工作区 v0.6 主线提案已撤回并转入本地归档。现有 RLS policy 与已经实现的工作区能力继续按 v0.5 baseline candidate 验收；后续新增租户模型要求必须由新的 Accepted ADR 明确授权。
 
 ## Evidence
 

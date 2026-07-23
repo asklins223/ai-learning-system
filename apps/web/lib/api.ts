@@ -311,7 +311,13 @@ async function requestResponse(path: string, init: RequestInit = {}): Promise<Re
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await requestResponse(path, init);
-  if (res.status === 204) return undefined as T;
+  if (res.status === 204) {
+    // fetch() resolves when response headers arrive. Drain the empty response
+    // before a caller redirects (notably logout), otherwise Chromium can mark
+    // the still-closing request as ERR_ABORTED during navigation.
+    await res.text();
+    return undefined as T;
+  }
   const data = await res.json() as T;
   // 登录/注册/切换工作区等端点在响应体中返回 csrfToken。当 Next.js
   // rewrite 代理丢弃了后端的 Set-Cookie: ailearn_csrf 时，前端需要
@@ -405,6 +411,7 @@ export interface NoteHeader {
   id: string;
   title: string;
   titleSource?: "auto" | "manual";
+  currentVersionId: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string | null;
@@ -541,7 +548,8 @@ export interface JobRow {
 }
 
 export interface CardGenerationStatus {
-  state: "idle" | "generating" | "generated";
+  /** `checking` is a frontend-only recovery state used while card status is unavailable. */
+  state: "idle" | "checking" | "generating" | "generated";
   cardId: string | null;
   jobId: string | null;
   generatedVersionId: string | null;
@@ -1035,7 +1043,7 @@ export const api = {
   /** 登出成功必须由服务端确认撤销 session 并清除 HttpOnly Cookie。 */
   logout: async () => {
     invalidateGetMeCache();
-    await request<void>("/auth/logout", { method: "POST" });
+    await request<void>("/auth/logout", { method: "POST", keepalive: true });
     clearSensitiveLocalState();
     setToken(null);
   },
@@ -1447,6 +1455,10 @@ createdAt: string;
   markOnboardingStep: (step: "evidence_review", evidenceId: string) =>
     request<{ ok: boolean }>("/onboarding/steps", {
       method: "POST",
+      // Evidence acknowledgement is deliberately fire-and-forget in the card
+      // reader. Keep it alive across an immediate route change so navigation
+      // does not cancel a valid write or surface a requestfailed event.
+      keepalive: true,
       body: JSON.stringify({ step, completed: true, evidenceId }),
     }),
 
