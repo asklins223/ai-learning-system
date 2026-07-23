@@ -28,6 +28,7 @@
 @import "./styles/theme-transition.css";
 @import "./styles/layout.css";
 @import "./styles/pages.css";
+@import "./styles/accessibility.css";
 
 @tailwind base;
 @tailwind components;

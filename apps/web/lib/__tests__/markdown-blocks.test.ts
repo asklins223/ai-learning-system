@@ -6,7 +6,11 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { markdownToBlocks, blocksToMarkdown } from "../markdown-blocks";
+import {
+  blocksToMarkdown,
+  markdownHeadingSelections,
+  markdownToBlocks,
+} from "../markdown-blocks";
 
 function roundTrip(md: string): string {
   return blocksToMarkdown(markdownToBlocks(md));
@@ -20,6 +24,22 @@ describe("markdown-blocks round-trip", () => {
     assert.equal(blocks[0].type, "heading");
     assert.equal(blocks[1].type, "heading");
     assert.equal(blocks[2].type, "heading");
+  });
+
+  it("preserves level-five and level-six headings for the article outline", () => {
+    const input = "##### Detail\n\n###### Footnote";
+    const blocks = markdownToBlocks(input);
+    assert.deepEqual(blocks.map((block) => block.content), ["<h5>Detail</h5>", "<h6>Footnote</h6>"]);
+    assert.equal(blocksToMarkdown(blocks), input);
+  });
+
+  it("locates duplicate headings without counting code-fence examples", () => {
+    const input = "# 重复标题\n\n```md\n# 围栏中的示例\n```\n\n## 重复标题";
+    const selections = markdownHeadingSelections(input);
+    assert.deepEqual(
+      selections.map(({ start, length }) => input.slice(start, start + length)),
+      ["重复标题", "重复标题"],
+    );
   });
 
   it("preserves ordered list markers (1. 2. 3.)", () => {

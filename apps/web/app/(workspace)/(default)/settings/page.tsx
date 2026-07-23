@@ -42,7 +42,7 @@ const ALL_SETTINGS_SECTIONS: Array<{
   { id: "account", label: "个人账户", caption: "身份与个人档案", group: "账户与空间", icon: Icon.User },
   { id: "workspaces", label: "工作区管理", caption: "加入或退出协作空间", group: "账户与空间", icon: Icon.Layers },
   { id: "invites", label: "邀请与成员", caption: "管理协作权限", group: "账户与空间", icon: Icon.User, ownerOnly: true },
-  { id: "model", label: "模型与 API", caption: "个人模型服务", group: "AI 与学习", icon: Icon.Sparkle },
+  { id: "model", label: "模型与 API", caption: "系统默认与个人模型", group: "AI 与学习", icon: Icon.Sparkle },
   { id: "export", label: "数据导出", caption: "保存完整副本", group: "数据与维护", icon: Icon.Download },
   { id: "import", label: "内容导入", caption: "迁移 Markdown", group: "数据与维护", icon: Icon.Inbox },
   { id: "search", label: "搜索维护", caption: "检测与重建索引", group: "数据与维护", icon: Icon.Search },
@@ -656,7 +656,7 @@ export default function SettingsPage() {
               {activeSection === "model" && <>
               <SettingsPanelHeading
                 title="模型与 API 配置"
-                description="为当前账户选择模型服务并安全保存自己的 API Key；完整密钥不会回显给浏览器。"
+                description="直接使用系统默认配置，或为当前账户连接个人模型服务；完整密钥不会回显给浏览器。"
                 icon={Icon.Sparkle}
               />
               <AIModelSettings isOwner={isOwner} accountLoading={accountLoading} />

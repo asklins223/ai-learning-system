@@ -1,0 +1,14 @@
+/**
+ * Cross-page WCAG fixes that must remain independent from page layout work.
+ * Keep these overrides semantic so day and night themes both retain contrast.
+ */
+
+@media (max-width: 639px) {
+  .app-canvas:not([data-page="graph"]) .mobile-nav-item {
+    color: var(--color-text-secondary);
+  }
+
+  .app-canvas:not([data-page="graph"]) .mobile-nav-item.active {
+    color: var(--color-warning-text);
+  }
+}

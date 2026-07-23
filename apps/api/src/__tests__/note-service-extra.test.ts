@@ -12,6 +12,7 @@ import {
   deriveNoteTitle,
   RevisionConflictError,
 } from "../modules/note/service.ts";
+import { noteUpdateSchema } from "../modules/note/schema.ts";
 
 // ─── cleanTitleCandidate ─────────────────────────────────────────────────
 
@@ -153,4 +154,24 @@ test("RevisionConflictError 是 Error 的实例", () => {
   const err = new RevisionConflictError("v1");
   assert.ok(err instanceof Error);
   assert.ok(err instanceof RevisionConflictError);
+});
+
+test("noteUpdateSchema 要求标题修改携带 baseVersionId", () => {
+  const result = noteUpdateSchema.safeParse({ title: "新标题" });
+  assert.equal(result.success, false);
+});
+
+test("noteUpdateSchema 要求正文修改携带 baseVersionId", () => {
+  const result = noteUpdateSchema.safeParse({
+    blocks: [{ type: "paragraph", content: "正文" }],
+  });
+  assert.equal(result.success, false);
+});
+
+test("noteUpdateSchema 接受携带 baseVersionId 的标题修改", () => {
+  const result = noteUpdateSchema.safeParse({
+    title: "新标题",
+    baseVersionId: "00000000-0000-0000-0000-000000000001",
+  });
+  assert.equal(result.success, true);
 });

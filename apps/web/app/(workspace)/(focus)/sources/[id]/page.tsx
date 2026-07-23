@@ -184,7 +184,7 @@ function OriginLink({ origin, compact = false }: { origin: string; compact?: boo
 }
 
 export default function SourceDetailPage() {
-  const { isOwner } = useIsOwner();
+  const { isOwner, loading: ownerLoading } = useIsOwner();
   const params = useParams<{ id: string }>();
   const sourceId = params?.id;
   const router = useRouter();
@@ -790,7 +790,7 @@ export default function SourceDetailPage() {
         </section>
       ) : (
         <div className="source-detail-body">
-          {!isOwner && <MemberNotice />}
+          {!ownerLoading && !isOwner && <MemberNotice />}
           <section className="source-detail-hero" aria-labelledby="source-detail-title">
             <div className="source-detail-hero-kicker">
               <span className="source-detail-hero-type" data-type={source.type}>

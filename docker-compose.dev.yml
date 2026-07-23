@@ -70,6 +70,30 @@ services:
     networks:
       - ailearn_net
 
+  # One-shot (restart: "no"): creates the restricted database roles that
+  # migrations 0022+ reference (GRANT EXECUTE TO ailearn_worker, etc.).
+  # Dev uses fixed passwords; production must set them via .env.
+  role-bootstrap:
+    image: postgres:16-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ailearn
+      POSTGRES_PASSWORD: ailearn_dev
+      POSTGRES_DB: ailearn
+      MIGRATOR_PASSWORD: ailearn_dev
+      API_PASSWORD: ailearn_dev
+      WORKER_PASSWORD: ailearn_dev
+    volumes:
+      - ./infra/postgres/apply-roles.sh:/opt/ailearn/apply-roles.sh:ro
+      - ./infra/postgres/roles.sql:/opt/ailearn/roles.sql:ro
+    entrypoint: ["/bin/sh", "/opt/ailearn/apply-roles.sh"]
+    networks:
+      - ailearn_net
+
   # One-shot (restart: "no"): runs on every `make dev` to apply pending
   # migrations, then is auto-removed by `make clean-init-dev`.
   migrate:
@@ -81,6 +105,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      role-bootstrap:
+        condition: service_completed_successfully
     environment:
       <<: *dev-database
       NODE_ENV: development
@@ -146,6 +172,16 @@ services:
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
       # Deterministic local-only key. Production must use a random secret.
       AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
+      # macOS Docker: inotify events are unreliable across the bind mount.
+      # Force polling so tsx watch actually picks up source changes.
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "1000"
+      # Image upload: MinIO/S3 storage endpoint and credentials.
+      # Must match the dev minio service's MINIO_ROOT_USER/PASSWORD below.
+      STORAGE_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-ailearn-workspaces}
+      MINIO_ROOT_USER: ailearn
+      MINIO_ROOT_PASSWORD: ailearn_dev_secret
     ports:
       - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-4000}:4000"
     healthcheck:
@@ -181,6 +217,15 @@ services:
       DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
       DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
       API_INTERNAL_URL: http://api:4000
+      # Handler timeouts (ms) — per job type, clamped below lease timeout (120s)
+      WORKER_MODEL_TIMEOUT_MS: ${WORKER_MODEL_TIMEOUT_MS:-}
+      WORKER_TIMEOUT_GENERATE_CARD_MS: ${WORKER_TIMEOUT_GENERATE_CARD_MS:-}
+      WORKER_TIMEOUT_EVALUATE_VALIDATION_MS: ${WORKER_TIMEOUT_EVALUATE_VALIDATION_MS:-}
+      WORKER_TIMEOUT_ALIGN_EVIDENCE_MS: ${WORKER_TIMEOUT_ALIGN_EVIDENCE_MS:-}
+      WORKER_TIMEOUT_PARSE_SOURCE_MS: ${WORKER_TIMEOUT_PARSE_SOURCE_MS:-}
+      # macOS Docker: same polling fix as the api service.
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "1000"
     volumes:
       - ./workers/ai-worker/src:/app/src
       - ./packages/shared/src:/tmp/shared/src
@@ -216,9 +261,12 @@ services:
       - ailearn_net
 
 volumes:
-  # Compose scopes these development-only volumes under the `ailearn-dev`
-  # project, so production data from docker-compose.yml is never reused.
+  # Keep PostgreSQL outside the Compose lifecycle so even `down -v` cannot
+  # remove it accidentally. `make up` creates it; only the confirmed
+  # `make reset-db CONFIRM_RESET_DB=DELETE_DEV_DB` path deletes it.
   dev_postgres_data:
+    name: ailearn-dev_dev_postgres_data
+    external: true
   dev_minio_data:
 
 networks:

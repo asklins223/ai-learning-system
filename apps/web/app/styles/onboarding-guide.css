@@ -1,7 +1,4 @@
-/*
- * Learning Ledger
- * A compact, progress-first learning path integrated with the home desk.
- */
+/* Compact learning path integrated with the home desk. */
 
 .learning-home-primary:has(> .onboarding-guide) {
   flex-direction: column;
@@ -20,25 +17,14 @@
   width: 100%;
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 15px;
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--color-highlight-soft) 48%, var(--color-paper)) 0 6px,
-      transparent 6px
-    ),
-    color-mix(in srgb, var(--color-paper) 96%, var(--color-surface-soft));
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--color-paper) 94%, var(--color-surface-soft));
   box-shadow: var(--shadow-control);
 }
 
 .onboarding-guide::after {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 26px;
-  width: 1px;
-  background: color-mix(in srgb, var(--color-divider) 72%, transparent);
-  pointer-events: none;
+  display: none;
 }
 
 .onboarding-guide-header {
@@ -48,7 +34,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 15px 18px 12px 34px;
+  padding: 16px 18px 12px;
 }
 
 .onboarding-guide-title-group,
@@ -74,8 +60,8 @@
   display: grid;
   place-items: center;
   border-radius: 10px;
-  background: var(--color-highlight-soft);
-  color: var(--color-warning-text);
+  background: var(--color-evidence-soft);
+  color: var(--color-evidence-text);
 }
 
 .onboarding-guide-symbol svg {
@@ -98,23 +84,28 @@
 
 .onboarding-guide-header-actions {
   flex: 0 0 auto;
-  gap: 12px;
+  gap: 8px;
 }
 
 .onboarding-guide-count {
-  gap: 3px;
+  min-height: 34px;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  padding: 0 10px;
+  background: var(--color-surface-soft);
   color: var(--color-text-tertiary);
   font: 550 11px/1 var(--font-mono);
 }
 
 .onboarding-guide-count strong {
   color: var(--color-text);
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 650;
 }
 
 .onboarding-guide-expand {
-  min-height: 44px;
+  min-height: 38px;
   justify-content: center;
   gap: 6px;
   border: 0;
@@ -152,11 +143,11 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: 0 18px 13px 34px;
+  padding: 0 18px 14px;
 }
 
 .onboarding-guide-progress {
-  height: 4px;
+  height: 5px;
   overflow: hidden;
   border-radius: 99px;
   background: var(--color-surface-soft);
@@ -180,30 +171,37 @@
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
   gap: 14px;
-  margin-left: 7px;
-  padding: 15px 18px 17px 27px;
-  border-top: 1px solid var(--color-divider);
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--color-action) 7%, transparent),
-      transparent 62%
-    );
+  margin: 0 12px 12px;
+  padding: 14px 15px;
+  border: 1px solid var(--color-divider);
+  border-radius: 12px;
+  background: var(--color-paper);
 }
 
 .onboarding-guide-current-index {
-  width: 48px;
+  width: 52px;
   height: 48px;
-  display: grid;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--color-action) 35%, var(--color-border));
-  border-radius: 50%;
-  background: var(--color-paper);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 1px solid color-mix(in srgb, var(--color-action) 18%, var(--color-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-evidence-soft) 62%, var(--color-paper));
   color: var(--color-action);
-  font: 650 12px/1 var(--font-mono);
-  box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-action) 6%, transparent);
+  box-shadow: none;
+}
+
+.onboarding-guide-current-index small {
+  color: var(--color-text-tertiary);
+  font: 600 8px/1 var(--font-ui);
+}
+
+.onboarding-guide-current-index strong {
+  font: 700 12px/1 var(--font-mono);
 }
 
 .onboarding-guide-current-copy {
@@ -212,7 +210,7 @@
 
 .onboarding-guide-current-copy p {
   margin: 0 0 2px;
-  color: var(--color-action);
+  color: var(--color-text-tertiary);
   font: 650 10px/1.35 var(--font-ui);
 }
 
@@ -231,18 +229,19 @@
 }
 
 .onboarding-guide-cta {
-  min-width: 128px;
-  min-height: 46px;
+  min-width: 116px;
+  min-height: 42px;
   justify-content: center;
   gap: 9px;
+  border: 1px solid color-mix(in srgb, var(--color-action) 34%, var(--color-border));
   border-radius: 10px;
   padding: 0 16px;
-  background: var(--color-action);
-  color: var(--color-on-action);
+  background: color-mix(in srgb, var(--color-evidence-soft) 42%, var(--color-paper));
+  color: var(--color-action);
   font: 650 13px/1 var(--font-ui);
   text-decoration: none;
   white-space: nowrap;
-  box-shadow: 0 6px 14px color-mix(in srgb, var(--color-action) 18%, transparent);
+  box-shadow: none;
   transition:
     background var(--motion-fast) var(--ease-standard),
     box-shadow var(--motion-fast) var(--ease-standard),
@@ -250,8 +249,9 @@
 }
 
 .onboarding-guide-cta:hover {
-  background: var(--color-action-hover);
-  box-shadow: 0 8px 18px color-mix(in srgb, var(--color-action) 22%, transparent);
+  border-color: color-mix(in srgb, var(--color-action) 58%, var(--color-border));
+  background: var(--color-evidence-soft);
+  box-shadow: none;
   transform: translateY(-1px);
 }
 
@@ -275,10 +275,9 @@
 .onboarding-guide-route-wrap {
   position: relative;
   z-index: 1;
-  margin-left: 7px;
   border-top: 1px dashed var(--color-divider);
-  padding: 17px 18px 18px 27px;
-  background: color-mix(in srgb, var(--color-surface-soft) 44%, transparent);
+  padding: 14px 18px 18px;
+  background: transparent;
 }
 
 .onboarding-guide-route-wrap[hidden] {
@@ -287,8 +286,8 @@
 
 .onboarding-guide-route {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 0;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -298,18 +297,16 @@
   position: relative;
   min-width: 0;
   align-items: flex-start;
-  gap: 8px;
-  padding-right: 9px;
+  gap: 9px;
+  min-height: 50px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-soft);
 }
 
 .onboarding-guide-route li:not(:last-child)::after {
-  content: "";
-  position: absolute;
-  top: 13px;
-  left: 28px;
-  right: 0;
-  height: 1px;
-  background: var(--color-border-strong);
+  display: none;
 }
 
 .onboarding-guide-route li.is-done::after {
@@ -319,8 +316,8 @@
 .onboarding-guide-route-node {
   position: relative;
   z-index: 1;
-  width: 27px;
-  height: 27px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
@@ -337,7 +334,7 @@
 }
 
 .onboarding-guide-route li.is-done {
-  opacity: 0.58;
+  opacity: 0.66;
 }
 
 .onboarding-guide-route li.is-done .onboarding-guide-route-node {
@@ -388,7 +385,7 @@
 .onboarding-guide--error {
   min-height: 76px;
   align-items: center;
-  padding: 15px 18px 15px 34px;
+  padding: 15px 18px;
 }
 
 .onboarding-guide--loading {
@@ -474,17 +471,12 @@
 }
 
 html[data-theme="night"] .onboarding-guide {
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--color-highlight-soft) 58%, var(--color-paper)) 0 6px,
-      transparent 6px
-    ),
-    color-mix(in srgb, var(--color-paper) 94%, var(--color-canvas-deep));
+  background: color-mix(in srgb, var(--color-paper) 94%, var(--color-canvas-deep));
 }
 
 html[data-theme="night"] .onboarding-guide-cta {
-  background: color-mix(in srgb, var(--color-action) 84%, var(--color-canvas-deep));
+  background: color-mix(in srgb, var(--color-evidence-soft) 42%, var(--color-paper));
+  color: var(--color-action);
 }
 
 @media (max-width: 640px) {
@@ -492,14 +484,10 @@ html[data-theme="night"] .onboarding-guide-cta {
     border-radius: 14px;
   }
 
-  .onboarding-guide::after {
-    left: 20px;
-  }
-
   .onboarding-guide-header {
     align-items: flex-start;
     gap: 10px;
-    padding: 13px 10px 11px 26px;
+    padding: 14px 13px 11px;
   }
 
   .onboarding-guide-symbol {
@@ -534,19 +522,19 @@ html[data-theme="night"] .onboarding-guide-cta {
 
   .onboarding-guide-progress-row {
     gap: 9px;
-    padding: 0 13px 12px 26px;
+    padding: 0 13px 12px;
   }
 
   .onboarding-guide-current {
-    grid-template-columns: 42px minmax(0, 1fr);
+    grid-template-columns: 48px minmax(0, 1fr);
     gap: 11px;
-    margin-left: 5px;
-    padding: 14px 13px 14px 21px;
+    margin: 0 9px 9px;
+    padding: 12px;
   }
 
   .onboarding-guide-current-index {
-    width: 42px;
-    height: 42px;
+    width: 48px;
+    height: 46px;
   }
 
   .onboarding-guide-current-copy h3 {
@@ -565,33 +553,27 @@ html[data-theme="night"] .onboarding-guide-cta {
   }
 
   .onboarding-guide-route-wrap {
-    margin-left: 5px;
-    padding: 15px 13px 17px 21px;
+    padding: 13px 13px 15px;
   }
 
   .onboarding-guide-route {
-    grid-template-columns: 1fr;
-    gap: 0;
+    grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
+    gap: 7px;
   }
 
   .onboarding-guide-route li {
-    min-height: 52px;
-    gap: 11px;
-    padding: 0 0 13px;
+    min-height: 48px;
+    gap: 9px;
+    padding: 9px;
   }
 
   .onboarding-guide-route li:last-child {
-    min-height: 27px;
-    padding-bottom: 0;
+    min-height: 48px;
+    padding-bottom: 9px;
   }
 
   .onboarding-guide-route li:not(:last-child)::after {
-    top: 27px;
-    bottom: 0;
-    left: 13px;
-    right: auto;
-    width: 1px;
-    height: auto;
+    display: none;
   }
 
   .onboarding-guide-route strong {
@@ -601,7 +583,7 @@ html[data-theme="night"] .onboarding-guide-cta {
   .onboarding-guide--loading,
   .onboarding-guide--error {
     min-height: 72px;
-    padding: 13px 12px 13px 26px;
+    padding: 13px 12px;
   }
 
   .onboarding-guide--loading {
@@ -647,7 +629,7 @@ html[data-theme="night"] .onboarding-guide-cta {
   }
 }
 
-/* First-use variant: part of the welcome desk, not another nested card. */
+/* First-use variant: a quiet progress footer, while capture remains primary. */
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] {
   grid-area: guide;
@@ -657,7 +639,7 @@ html[data-theme="night"] .onboarding-guide-cta {
   border-top: 1px solid var(--color-divider);
   border-right: 1px solid var(--color-divider);
   border-radius: 0;
-  background: color-mix(in srgb, var(--color-paper-muted) 56%, var(--color-paper));
+  background: color-mix(in srgb, var(--color-paper-muted) 48%, var(--color-paper));
   box-shadow: none;
 }
 
@@ -670,8 +652,8 @@ html[data-theme="night"] .onboarding-guide-cta {
 }
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-symbol {
-  background: var(--color-success-soft);
-  color: var(--color-success-text);
+  background: var(--color-evidence-soft);
+  color: var(--color-evidence-text);
 }
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-progress-row {
@@ -679,16 +661,16 @@ html[data-theme="night"] .onboarding-guide-cta {
 }
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-current {
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
   gap: 12px;
-  margin: 0;
-  padding: 15px 24px 19px;
-  background: color-mix(in srgb, var(--color-success-soft) 42%, transparent);
+  margin: 0 16px 16px;
+  padding: 13px 14px;
+  background: var(--color-paper);
 }
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-current-index {
-  width: 42px;
-  height: 42px;
+  width: 52px;
+  height: 48px;
 }
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-current-copy h3 {
@@ -704,20 +686,20 @@ html[data-theme="night"] .onboarding-guide-cta {
   width: 100%;
   min-height: 44px;
   margin-top: 2px;
-  border: 1px solid color-mix(in srgb, var(--color-action) 38%, var(--color-border));
-  background: var(--color-paper);
+  border: 1px solid color-mix(in srgb, var(--color-action) 30%, var(--color-border));
+  background: color-mix(in srgb, var(--color-evidence-soft) 38%, var(--color-paper));
   color: var(--color-action);
   box-shadow: none;
 }
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-cta:hover {
-  background: var(--color-success-soft);
+  background: var(--color-evidence-soft);
   box-shadow: none;
 }
 
 .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-route-wrap {
   margin: 0;
-  padding: 17px 24px 19px;
+  padding: 15px 18px 18px;
 }
 
 html[data-theme="night"] .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] {
@@ -725,7 +707,7 @@ html[data-theme="night"] .learning-home[data-home-state="first-use"] .onboarding
 }
 
 html[data-theme="night"] .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-cta {
-  background: var(--color-paper);
+  background: color-mix(in srgb, var(--color-evidence-soft) 38%, var(--color-paper));
   color: var(--color-action);
 }
 
@@ -745,14 +727,15 @@ html[data-theme="night"] .learning-home[data-home-state="first-use"] .onboarding
   }
 
   .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-current {
-    grid-template-columns: 40px minmax(0, 1fr);
+    grid-template-columns: 48px minmax(0, 1fr);
     gap: 11px;
-    padding: 14px 16px 17px;
+    margin: 0 10px 10px;
+    padding: 12px;
   }
 
   .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-current-index {
-    width: 40px;
-    height: 40px;
+    width: 48px;
+    height: 46px;
   }
 
   .learning-home[data-home-state="first-use"] .onboarding-guide[data-variant="starter"] .onboarding-guide-route-wrap {

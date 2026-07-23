@@ -1,9 +1,9 @@
 # AI 学习系统 v0.5 版本实施计划
 
-> 状态：Approved for development（M0 收口中；8 个 Must 均未达到 DoD；保守估计约 80% 未完成；RLS enforce/M1 Gate 未通过）<br>
-> 文档版本：0.6<br>
+> 状态：Approved for development（M0 收口中；9 个 Must 均未达到 DoD；保守估计约 80% 未完成；RLS enforce/M1 Gate 未通过；2026-07-19 理念修正：个人工作区优先，见 §0.5）<br>
+> 文档版本：0.9<br>
 > 计划日期：2026-07-18<br>
-> 最后更新：2026-07-18<br>
+> 最后更新：2026-07-20<br>
 > 目标版本：`v0.5.0`<br>
 > 产品阶段：Private Alpha<br>
 > Canonical repository：`https://github.com/asklins223/ai-learning-system.git`<br>
@@ -12,7 +12,7 @@
 > 规划审计快照：`33efa06f8c0a5f2d1e97e12dcb745b2314c606e8`（审计于 2026-07-18）<br>
 > 文档 Owner：repository owner `@asklins223`<br>
 > Approver：repository owner `@asklins223`（development self-review；SEC-01 enforce 与 RC 前必须补独立 security/data review）<br>
-> 批准日期/证据：2026-07-18，Codex 任务指令“开始实施这一版本计划”；ADR-0001～0008<br>
+> 批准日期/证据：2026-07-18，Codex 任务指令“开始实施这一版本计划”；ADR-0001～0009<br>
 > 容量假设：2 条并行实施流（安全/后端与产品/质量）<br>
 > 建议周期：8 周开发与验收，随后 2 周小范围观察；若只有 1 名实施者，按 10～12 周并移除全部 Should<br>
 > 一句话目标：让 5～15 名受邀用户能够安全、独立、可度量地完成“输入 → 学习卡 → 证据 → 验证 → 复习”闭环。
@@ -28,6 +28,24 @@
 发现入口为 `docs/plans/README.md`。活动计划不得在仓库根目录或 `project-archive/` 保留第二份可编辑副本；版本冻结后由后继计划替代，并在索引中标记 `Superseded` 或 `Archived`，不复制内容制造双源。
 
 早期产品愿景、V0 Personal Beta、v0.4 实施计划和审核报告已经在 public main 的 `5a1c9cf` 中移除。它们只作为本地历史输入；本文已重新陈述 v0.5 仍然采用的目标和原则，因此 canonical 计划不依赖这些已删除文件或未跟踪的 `project-archive/`。
+
+### 0.5 设计理念修正（2026-07-19）
+
+Repository owner 于 2026-07-19 决定调整多租户设计理念，本节记录决策背景与 v0.5/v0.6 边界。
+
+**背景**：v0.5 原始设计将 Private Alpha 定位为“邀请加入共享工作区”——所有被邀请用户直接加入邀请者的 workspace，共享同一空间内的全部学习数据。在实际使用中发现：用户期望“我的学习数据是我的”，默认进入他人空间不符合直觉；共享 workspace 要求 RLS 同时做 workspace 级别隔离 + user-private 级别隔离，代码复杂度高；“邀请”语义模糊。
+
+**理念修正**：确立**个人工作区优先（Personal Workspace First）**为产品首要概念。每个用户默认拥有自己的个人工作区，学习数据归属于创建者所在的个人工作区，用户之间的数据默认互不干涉、互不打扰。邀请功能保留，但其语义明确为“邀请到你所在的工作区进行协作”，作为可选的协作模式。
+
+**v0.5 实施范围**：
+1. **不改变当前代码实现**（共享 workspace 模型已落地且测试通过）。
+2. **文档和 UI 措辞调整**：将“邀请注册”定位从“加入共享空间”修正为“邀请协作”，强调个人工作区是默认形态。
+3. **保留当前共享 workspace 能力**：作为“协作模式”继续可用，Owner 可邀请成员加入同一 workspace 共同维护学习空间。
+4. **不阻断 v0.5 发布**：当前共享模型在 RLS enforce 后可保证跨 workspace 隔离；同 workspace 内的共享是明确的协作行为，不是数据泄漏。
+
+**后续路线**：原 ADR-0009 的“以多工作区作为 v0.6 主线”提案已撤回并转入本地归档；后续版本边界以 ADR-0010 和唯一活动的 v0.6 实施计划为准。当前已落地的个人/协作工作区能力作为 v0.5 baseline candidate 验收，不以已撤回提案作为发布依据。
+
+**关联文档**：ADR-0002 §Design Concept Amendment、ADR-0003 §Design Concept Amendment、ADR-0010。
 
 文档生命周期为：
 
@@ -74,7 +92,7 @@ v0.5 是第一次受控 Private Alpha，不等于产品路线中的完整 V1。�
 
 | 口径 | 已完成/已勾选 | 未完成 | 结论 |
 | --- | ---: | ---: | --- |
-| 8 个 Must 工作包 | 0 | 8 | 6 个部分实现，AIQ-01/OPS-01 共 2 个未开始 |
+| 8 个 Must 工作包 | 0 | 8 | 8 个均部分实现，OPS-01 metrics/隐私扫描/备份脚本已落地，Alpha 环境集成待完成 |
 | M0～M6 milestone Gate | 4/30 | 26/30 | 形式未完成率 86.7%；M0 仍收口，M1～M6 均未通过 |
 | 发布硬门禁 | 0/15 | 15/15 | 尚未达到 RC 证据标准 |
 | 以 checkbox 表达的 Must DoD | 0/22 | 22/22 | SEC-01、SEC-02/ALPHA-01、LOOP-01/02、OPS-01 均未关闭显式 DoD |
@@ -273,6 +291,7 @@ Provider 超时、Worker 重启或导入部分失败
 | LOOP-01 / LOOP-02 | 可追溯验证与 Review Attempt | 服务端题目为默认路径；复习记录回答、结果、原因和调度变化 |
 | QLT-01 / QLT-02 | 关键 E2E 与故障测试 | 核心闭环三视口；双 Worker 与真实 PostgreSQL 覆盖竞争、租约和恢复 |
 | AIQ-01 | 版本化黄金集 | 固定样本、标签、评分器和可复现 RC Provider 门禁 |
+| PROFILE-01 | 用户档案与工作区命名 | 昵称/头像字段、注册收集、个人中心修改、个人工作区改名、Owner 账号数据库化 |
 | OPS-01 | 最小运维与备份 | SLO 必需指标/告警、定时加密备份和恢复演练可运行 |
 | REL-01 | 可追溯发布 | 统一验证入口、digest、灰度和回滚清单 |
 
@@ -546,7 +565,109 @@ Nightly/RC 扩展覆盖：
 
 CI 必须执行上述门禁，避免新增测试文件未被发现或 flake 被自动重试掩盖。
 
-### 6.8 REL-01：发布与供应链
+### 6.8 PROFILE-01：用户档案、工作区命名与管理员账号数据库化
+
+#### 背景
+
+当前系统存在三个身份与工作区体验缺口：
+
+1. **无用户昵称**：`users` 表只有 `email`，前端用 `email.split("@")[0]` 拼凑显示名，无法自定义；
+2. **无头像字段**：前端硬编码判断 `role === "owner"` 显示固定头像图片 `/images/avatar-owner-custom.jpg`，非 owner 显示首字母占位；
+3. **工作区名称不可改**：注册时默认命名 `${email.split("@")[0]}的工作区`，用户无法在设置中修改；
+4. **Owner 账号硬编码残留**：`seed.ts` 虽支持环境变量注入，但前端 Sidebar 仍硬编码 owner 头像路径和角色判断逻辑，未从数据库读取用户档案。
+
+#### 功能边界
+
+**A. 用户档案（昵称 + 头像）**
+
+- `users` 表新增 `display_name`（昵称）和 `avatar_url`（头像 URL）字段；
+- 注册时昵称和头像均为**选填**：
+  - 昵称不填时，系统从 email 前缀自动生成默认昵称（如 `user@example.com` → `user`）；
+  - 头像不填时，默认为 `null`，前端用**昵称首字母**渲染占位头像（如昵称 `小明` → 显示 `小`）；
+  - 头像填了 URL 时优先使用 URL 图片；
+- 昵称长度 1～32 字符，不允许纯空白；头像 URL 长度 ≤ 500，必须为 `https://` 或相对路径；
+- 个人中心（设置页）支持修改昵称和头像；
+- 头像上传方式：v0.5 支持 URL 输入或从预设头像库选择，不做文件上传（文件上传列为 v0.6）；
+- `GET /auth/me` 返回 `displayName` 和 `avatarUrl`；
+- Sidebar 完全从 `/auth/me` 返回值渲染昵称和头像，移除 `role === "owner"` 硬编码头像判断。
+
+**B. 工作区命名与改名**
+
+- 注册时默认工作区名称：`{昵称}的工作区`，昵称超过 12 字符时截断为前 10 字符 + `…`；
+- 设置页工作区管理区支持修改**个人工作区**名称；
+- **协作工作区名称不可改**：即使是所有者也不能在个人中心修改协作工作区名称（协作工作区改名属于 v0.6 管理面板范畴）；
+- 工作区名称长度 1～50 字符；
+- 改名后前端立即更新当前显示，不需要重新签发 session（工作区名称不在 session 中）。
+
+**C. 管理员账号数据库化**
+
+- 移除前端 Sidebar 中 `role === "owner"` 的硬编码头像路径判断；
+- 所有用户头像和昵称均从数据库 `users.display_name` / `users.avatar_url` 读取；
+- `seed.ts` 补充 `display_name` 和 `avatar_url` 字段注入，支持 `OWNER_DISPLAY_NAME` 和 `OWNER_AVATAR_URL` 环境变量；
+- 既有 owner 账号通过迁移脚本回填 `display_name`（从 email 前缀推导）和 `personal_workspace_id`（ADR-0009 迁移已覆盖）；
+- `/auth/me` 返回 `displayName` 和 `avatarUrl`，前端不再有任何硬编码 owner 逻辑。
+
+**D. 注册表单设计**
+
+- 注册表单字段顺序：**邮箱 → 密码 → 昵称（选填）→ 头像（选填）→ 邀请码（选填，置末尾）**；
+- 邀请码从必填改为**选填**，旁边标注说明其用途；
+- 邀请码旁设置一个信息图标（`ⓘ`），用户点击或鼠标悬停时显示 Tooltip：
+  > 邀请码用于加入他人的工作区进行协作学习。如果不填，将只创建你的个人工作区。你可以随时在设置中通过邀请码加入协作空间。
+- 注册页面不再区分「个人注册」和「邀请码注册」两个 Tab，统一为一个表单，邀请码作为最末选填项；
+- 从 URL `?token=xxx` 自动填充邀请码的逻辑保留，但不再切换模式。
+
+**E. 工作区类型判定指标**
+
+工作区在用户视角下的「个人/协作」属性**不是全局字段**，而是**按用户视角计算**的：
+
+- **判定指标**：`isPersonal = (workspaces.ownerId === currentUserId)`——即该工作区是否由当前用户创建；
+- **个人工作区**：当前用户是创建者（`ownerId === userId`）→ 对该用户显示为「个人工作区」；
+- **协作工作区**：当前用户不是创建者（`ownerId !== userId`），即使该用户在 `workspace_members` 中的 role 为 `owner` → 对该用户显示为「协作工作区」；
+- **同一工作区对不同用户显示不同**：用户 A 创建的工作区，对 A 显示「个人工作区」，对被邀请加入的 B 显示「协作工作区」；
+- **后端实现**：`/auth/me` 和 `/auth/workspaces` 返回的 `isPersonal` 字段计算方式从 `user.personalWorkspaceId === workspaceId` 改为 `workspace.ownerId === userId`；
+- **前端实现**：Sidebar、WorkspaceSwitcher、WorkspaceManagement 全部基于 `isPersonal` 字段渲染标签，不再使用 `workspaceType` 全局字段；
+- **`workspaceType` 字段保留但不再用于显示判定**：它仅用于后端业务逻辑（如是否允许创建邀请码等），前端显示完全基于 `isPersonal`；
+- **个人工作区可被邀请加入**：移除「个人工作区不能通过邀请码加入」的限制——任何工作区的所有者都可以创建邀请码邀请他人加入；
+  - 对创建者而言始终是「个人工作区」；
+  - 对被邀请者而言始终是「协作工作区」；
+  - 这保证了创建者的个人空间语义不变，同时允许灵活的协作场景。
+
+#### 数据迁移
+
+1. `users` 表新增 `display_name TEXT` 和 `avatar_url TEXT`，均可空；
+2. 回填 `display_name`：`COALESCE(split_part(email, '@', 1), email)`；
+3. `avatar_url` 回填为 `NULL`（前端用首字母占位）；
+4. 迁移脚本在 `0025_adr0009_personal_workspace.sql` 之后编号。
+
+#### API 面
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `PUT` | `/auth/profile` | 修改当前用户昵称和头像 URL |
+| `GET` | `/auth/me` | 返回增加 `displayName`、`avatarUrl` |
+| `PATCH` | `/workspaces/:id/name` | 修改个人工作区名称（仅限 `isPersonal` 的工作区） |
+
+注册端点（`/auth/register-personal`、`/auth/register-with-invite`）请求体增加 `displayName` 字段（选填，不填时系统从 email 前缀生成）和 `avatarUrl` 字段（选填）。两个注册端点合并为统一端点，邀请码作为选填字段。
+
+#### DoD
+
+- [ ] `users` 表包含 `display_name` 和 `avatar_url` 字段，迁移脚本可前向兼容执行；
+- [ ] 注册页面昵称和头像为选填，不填时系统自动生成默认昵称和首字母占位头像；
+- [ ] 注册后个人工作区默认命名为 `{昵称}的工作区`；
+- [ ] 注册表单中邀请码为选填项并置于末尾，旁有信息图标 Tooltip 说明用途；
+- [ ] 注册页面不再区分「个人注册」和「邀请码注册」两个 Tab；
+- [ ] 个人中心支持修改昵称和头像 URL，保存后 Sidebar 立即更新；
+- [ ] 设置页工作区管理区支持修改个人工作区名称；
+- [ ] 协作工作区名称不可修改（API 返回 403）；
+- [ ] `isPersonal` 字段基于 `workspaces.ownerId === userId` 计算，同一工作区对不同用户显示不同标签；
+- [ ] 前端 Sidebar/WorkspaceSwitcher/WorkspaceManagement 全部基于 `isPersonal` 渲染标签，不再使用 `workspaceType`；
+- [ ] 个人工作区可被邀请加入，对创建者显示「个人工作区」，对被邀请者显示「协作工作区」；
+- [ ] 前端 Sidebar 不存在 `role === "owner"` 硬编码头像路径，全部从 `/auth/me` 渲染；
+- [ ] `seed.ts` 支持 `OWNER_DISPLAY_NAME` 和 `OWNER_AVATAR_URL` 环境变量；
+- [ ] 既有 owner 账号迁移后 `display_name` 非空；
+- [ ] 昵称长度、头像 URL 格式有服务端校验。
+
+### 6.9 REL-01：发布与供应链
 
 - 建立单一版本源并校验五个 package、lockfile、README、tag 一致；
 - 提供本地与 CI 共用的一个 `verify` / `release-check` 入口；
@@ -717,7 +838,9 @@ CI 必须执行上述门禁，避免新增测试文件未被发现或 flake 被�
 - Review Attempt：开始、提交、稍后、历史；
 - Feedback（Should）：提交、我的反馈、Owner 分流；
 - Internal ops：只暴露聚合健康信息，不暴露学习正文；
-- Import Run（Should）：创建、进度、失败项、重试。
+- Import Run（Should）：创建、进度、失败项、重试；
+- 用户档案：读取当前用户信息（含昵称、头像 URL）、修改昵称和头像 URL；
+- 工作区命名：修改个人工作区名称（协作工作区改名列为 v0.6）。
 
 v0.5 不新增 member 个人批量导出：完整 workspace export 仍为 Owner-only；member 只使用其已有权限范围内的单笔记导出。Review Attempt 必须进入 Owner workspace export、备份、恢复和删除校验；个人批量导出若要加入，按 Should 单独评审共享内容与个人学习记录边界。
 
@@ -737,10 +860,11 @@ v0.5 不新增 member 个人批量导出：完整 workspace export 仍为 Owner-
 
 - 本版只增加完成 Alpha 旅程所需页面和状态，不做整体视觉重构；
 - 所有异步步骤展示当前状态、可恢复动作和关联错误；
-- “理解”“完成”“掌握”等文案必须来自真实事件，不用装饰性进度伪造；
+- "理解""完成""掌握"等文案必须来自真实事件，不用装饰性进度伪造；
 - Owner 操作与学习者操作明确分区；
 - 移动端优先保障 onboarding、验证和复习；若进入 Should，再覆盖结构化反馈；
-- 键盘、焦点、减少动画、空态、错误态和长文本是验收项。
+- 键盘、焦点、减少动画、空态、错误态和长文本是验收项；
+- 用户档案（昵称、头像）和工作区名称在设置页提供入口，无需视觉重构；头像默认使用首字母占位，v0.5 不做文件上传。
 
 ## 9. 风险与控制
 
@@ -780,6 +904,7 @@ v0.5 不新增 member 个人批量导出：完整 workspace export 仍为 Owner-
 | D-07 | 备份与恢复 | 12h 加密备份、独立故障域、14 个周期备份 + 4 个周备份 | Platform Owner / repository owner | M0 | Accepted / `ADR-0007` |
 | D-08 | E2E 框架与矩阵 | Chromium PR/三视口 RC，Firefox 关键旅程，无障碍 AA | Quality Owner / repository owner | M0 | Accepted / `ADR-0008` |
 | D-09 | 导入适配（Should） | Readwise CSV/JSON 优先，Anki CSV/TSV 次之 | Product Owner / repository owner | M5 裁剪 | Deferred / 无 ADR |
+| D-10 | 用户档案与工作区命名 | 昵称必填、头像 URL 可选；个人工作区可改名，协作不可改 | Product Owner / repository owner | M0 | Pending / 需补充 ADR |
 
 D-02、D-03、D-06 当前由 `@asklins223` 以 repository owner 身份兼任产品、安全、数据与平台角色完成 development self-review；这不是独立发布审批。独立 security/data reviewer 是 SEC-01 enforce 与 RC 的阻断输入。
 
@@ -808,3 +933,6 @@ D-02、D-03、D-06 当前由 `@asklins223` 以 repository owner 身份兼任产�
 | 0.4 | 2026-07-18 | 明确 Owner development self-review 与独立发布复核边界；修正 immutable-SHA coverage；M0 保持收口中并记录已开始的 foundation/expand |
 | 0.5 | 2026-07-18 | 记录 SEC-01 policy expand/verify：22 表/58 policy、PG16.14 受限角色与双 Worker/池复用证据；明确 RLS 仍关闭及 enforce/M1 阻断项 |
 | 0.6 | 2026-07-18 | 增加总体完成度盘点：8 个 Must 0 完成/6 部分/2 未开始，30 项 milestone Gate 尚余 26 项；记录 `1d2cada` Actions 6/6 job 与 artifact 证据，保守估计约 80% 范围未完成 |
+| 0.7 | 2026-07-20 | QLT-01/02 扩展 seed CLI 支持 nightly（51 条）和 rc（100 条卡 + 1000 条搜索文档）profile；实现 handler 故障矩阵单元测试（17 用例，覆盖 Provider 延迟返回、事务崩溃、幂等、死信收敛等），CI 自动集成 |
+| 0.8 | 2026-07-20 | 新增 PROFILE-01 工作包：用户档案（昵称/头像）、工作区命名（个人可改）、Owner 账号数据库化；更新 §5.1 Must 表格、§8.1 API 面、§8.3 UI 原则、§10.2 决策表 |
+| 0.9 | 2026-07-20 | PROFILE-01 细化：昵称/头像改为选填（不填时系统自动生成默认昵称和首字母占位头像）；邀请码改为选填并移至注册表单末尾，旁加信息图标 Tooltip；新增 §6.8 E 工作区类型判定指标——`isPersonal` 基于 `workspaces.ownerId === userId` 计算，同一工作区对不同用户显示不同标签；移除「个人工作区不能通过邀请码加入」限制；ADR-0009 同步更新 §3.2 注册流程、§3.3 加入限制、新增 §3.6 工作区类型判定指标 |

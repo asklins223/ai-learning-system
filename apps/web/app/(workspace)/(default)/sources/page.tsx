@@ -75,7 +75,7 @@ function SourceTypeIcon({ type }: { type: SourceType }) {
 }
 
 export default function SourcesPage() {
-  const { isOwner } = useIsOwner();
+  const { isOwner, loading: ownerLoading } = useIsOwner();
   const router = useRouter();
   const searchParams = useSearchParams();
   const sourceQueryString = searchParams.toString();
@@ -481,7 +481,7 @@ export default function SourcesPage() {
         subtitle="把文章、代码与网页收进资料库，等待解析后继续整理为笔记和证据。"
         actions={
           <div className="sources-header-actions">
-            {!isOwner && <MemberNotice compact />}
+            {!ownerLoading && !isOwner && <MemberNotice variant="badge" />}
             <button
               ref={createTriggerRef}
               className="sources-action-primary"

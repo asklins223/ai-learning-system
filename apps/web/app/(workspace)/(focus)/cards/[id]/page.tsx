@@ -62,7 +62,7 @@ const EMPTY_PAGER: PagerState = {
 };
 
 export default function CardPage() {
-  const { isOwner } = useIsOwner();
+  const { isOwner, loading: ownerLoading } = useIsOwner();
   const params = useParams<{ id: string }>();
   const cardId = params?.id;
   const router = useRouter();
@@ -255,6 +255,15 @@ export default function CardPage() {
     const requestCardId = cardId;
     try {
       const result = await api.getCardEvidence(cardId);
+      const reviewedEvidenceId = result
+        .flatMap((group) => group.evidences)
+        .find((item) => Boolean(item.id))?.id;
+      if (reviewedEvidenceId) {
+        // The server only accepts this acknowledgement with an evidence row
+        // belonging to the active workspace. Await the best-effort write so a
+        // route change cannot cancel it after evidence is already rendered.
+        await api.markOnboardingStep("evidence_review", reviewedEvidenceId).catch(() => {});
+      }
       if (
         !mountedRef.current ||
         activeCardIdRef.current !== requestCardId
@@ -263,14 +272,6 @@ export default function CardPage() {
       }
       setEvidence(result);
       setEvidenceError(null);
-      const reviewedEvidenceId = result
-        .flatMap((group) => group.evidences)
-        .find((item) => Boolean(item.id))?.id;
-      if (reviewedEvidenceId) {
-        // The server only accepts this acknowledgement with an evidence row
-        // belonging to the active workspace; failure must not block reading.
-        void api.markOnboardingStep("evidence_review", reviewedEvidenceId).catch(() => {});
-      }
     } catch (caught) {
       if (
         !mountedRef.current ||
@@ -827,7 +828,7 @@ export default function CardPage() {
               </span>
             </button>
           )}
-          {isCardActive && !isOwner && <MemberNotice compact />}
+          {isCardActive && !ownerLoading && !isOwner && <MemberNotice variant="badge" />}
           <ThemeToggle className="card-detail-theme-toggle" />
           <AccountMenu
             className="card-detail-account-menu"

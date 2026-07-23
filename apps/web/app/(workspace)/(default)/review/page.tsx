@@ -395,11 +395,17 @@ export default function ReviewPage() {
   const shouldFocusNextRef = useRef(false);
   const loadRequestRef = useRef(0);
   const submissionPanelRef = useRef<HTMLDivElement>(null);
+  const completeReviewButtonRef = useRef<HTMLButtonElement>(null);
   const [revealedReviewIds, setRevealedReviewIds] = useState<Set<string>>(
     () => new Set(),
   );
 
   const closeQueue = useCallback(() => setQueueOpen(false), []);
+  const restoreReviewActionFocus = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      (completeReviewButtonRef.current ?? reviewHeadingRef.current)?.focus();
+    });
+  }, []);
 
   const loadReviews = useCallback(async () => {
     const requestId = ++loadRequestRef.current;
@@ -562,10 +568,11 @@ export default function ReviewPage() {
       setActionState(null);
       setActionError(null);
       setSubmissionForm(DEFAULT_SUBMISSION_FORM);
+      restoreReviewActionFocus();
     };
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [actionState, submissionModalOpen]);
+  }, [actionState, restoreReviewActionFocus, submissionModalOpen]);
 
   const handleSearchChange = (value: string) => {
     setSearchQuery(value);
@@ -854,6 +861,7 @@ export default function ReviewPage() {
     setActionState(null);
     setActionError(null);
     setSubmissionForm(DEFAULT_SUBMISSION_FORM);
+    restoreReviewActionFocus();
   }
 
   const headerActions = (
@@ -1300,6 +1308,7 @@ export default function ReviewPage() {
                         ) : (
                           <>
                             <button
+                              ref={completeReviewButtonRef}
                               type="button"
                               className="review-action-primary"
                               disabled={isBusy}

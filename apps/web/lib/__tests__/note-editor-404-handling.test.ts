@@ -94,6 +94,55 @@ describe("NoteEditor 404 handling (CONC-02, CONC-06)", () => {
     );
   });
 
+  it("CONC-04: 应丢弃保存期间已经过期的轮询响应", () => {
+    const pollStart = SOURCE.indexOf("const checkNoteStatus");
+    const pollEnd = SOURCE.indexOf("const intervalId", pollStart);
+    const pollSection = SOURCE.slice(pollStart, pollEnd);
+
+    assert.ok(
+      pollSection.includes("const pollBaseline"),
+      "轮询发起前应记录已保存状态快照",
+    );
+    assert.ok(
+      pollSection.includes("savedVersionIdRef.current !== pollBaseline.versionId"),
+      "轮询返回后应检查版本基线是否已推进",
+    );
+    assert.ok(
+      pollSection.includes("lastSavedSourceRef.current !== pollBaseline.source"),
+      "会话内自动保存复用版本 ID 时仍应检查正文基线",
+    );
+    assert.ok(
+      pollSection.includes("saveInFlightRef.current"),
+      "保存正在进行时不应应用轮询响应",
+    );
+  });
+
+  it("标题-only 保存不应重建正文块并丢失来源引用", () => {
+    const saveStart = SOURCE.indexOf("const save = useCallback");
+    const saveEnd = SOURCE.indexOf("const flushLatestDraft", saveStart);
+    const saveSection = SOURCE.slice(saveStart, saveEnd);
+    const unloadStart = SOURCE.indexOf("const onBeforeUnload");
+    const unloadEnd = SOURCE.indexOf("window.addEventListener", unloadStart);
+    const unloadSection = SOURCE.slice(unloadStart, unloadEnd);
+
+    assert.ok(
+      saveSection.includes("const sourceChanged"),
+      "保存前应独立判断正文是否改变",
+    );
+    assert.ok(
+      saveSection.includes("...(blocks ? { blocks } : {})"),
+      "标题-only 保存不应发送 blocks",
+    );
+    assert.ok(
+      unloadSection.includes("const sourceChanged"),
+      "beforeunload 保存也应独立判断正文是否改变",
+    );
+    assert.ok(
+      unloadSection.includes("...(blocks"),
+      "beforeunload 的标题-only 请求不应发送 blocks",
+    );
+  });
+
   it("CONC-05: restoreNoteVersion 应传递 baseVersionId", () => {
     const restoreSection = SOURCE.slice(
       SOURCE.indexOf("handleRestoreVersion"),

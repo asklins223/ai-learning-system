@@ -99,7 +99,7 @@ export async function noteRoutes(app: FastifyInstance) {
         return reply.code(409).send({
           error: "revision_conflict",
           currentVersionId: err.currentVersionId,
-          message: "内容已被改动，请刷新后重试",
+          message: "笔记已被改动，请刷新后重试",
         });
       }
       // R-008: 捕获唯一约束冲突（并发版本号碰撞），返回 409 而非 500

@@ -1,9 +1,10 @@
 # ADR-0002：Private Alpha 邀请、成员与 onboarding
 
-- Status: Accepted
+- Status: Accepted（2026-07-19 补充设计理念修正，见 §Design Concept Amendment）
 - Owner: Product / Identity Owner
 - Approver: repository owner `@asklins223`（development self-review；独立 security/data review 待 SEC-01 enforce/RC）
 - Date: 2026-07-18
+- Amended: 2026-07-19
 
 ## Context
 
@@ -11,7 +12,7 @@ v0.4 已有邀请码注册、workspace membership、session 和 owner 检查，�
 
 ## Decision
 
-1. Private Alpha 上限为 15 人、最多 3 个活跃 workspace；只有 `owner` 和 `member` 两个有效角色。
+1. Private Alpha 上限为 15 人、最多 3 个活跃 workspace；只有 `owner` 和 `member` 两个有效角色。邀请者创建邀请时可选择授予 `member` 或 `owner` 角色，默认为 `member`。
 2. 邀请通过复制链接或邀请码交付，本版不接邮件。明文 token 只在创建响应中展示一次；数据库保存 SHA-256 token hash、不可逆短提示、创建者、过期时间、撤销时间、消费人和消费时间。
 3. 消费邀请使用行锁和唯一约束，在创建用户、membership、onboarding state 与标记消费的同一事务中完成；过期、撤销、已消费和并发失败使用稳定错误码。
 4. Owner 可以分页查看邀请状态、撤销未消费邀请、查看成员、移除 member 并撤销该成员在 workspace 中的全部 session。最后一个 Owner 不可被移除。
@@ -36,7 +37,44 @@ v0.4 已有邀请码注册、workspace membership、session 和 owner 检查，�
 
 旧注册 API 在一个明确兼容窗口内只读取迁移后的 token；出现问题时关闭邀请创建/消费 feature flag，不恢复明文 token。数据问题以前向修复处理。
 
+## Design Concept Amendment（2026-07-19）
+
+### 背景
+
+v0.5 原始设计将 Private Alpha 定位为"邀请加入共享工作区"——所有被邀请用户直接加入邀请者的 workspace，共享同一空间内的全部学习数据。在实际使用和评审中发现：
+
+1. **默认共享增加了认知负担**：用户期望"我的学习数据是我的"，而非默认进入他人空间。
+2. **设计复杂度上升**：共享 workspace 需要 RLS 做 workspace 级别隔离 + user-private 级别隔离两层策略，代码中大量查询需要同时携带 `workspace_id` 和 `user_id` 上下文。
+3. **产品语义模糊**："邀请"到底意味着"加入我的团队"还是"获得系统访问权"不够清晰。
+
+### 理念修正
+
+**个人工作区优先（Personal Workspace First）**
+
+- 每个用户默认拥有自己的个人工作区；学习数据（笔记、来源、学习卡、证据等）归属于创建者所在的个人工作区。
+- 用户之间的数据默认互不干涉、互不打扰。
+- 这是产品的**首要概念**，也是大多数单人学习场景的默认预期。
+
+**邀请协作作为可选模式（Invite-to-Collaborate as Optional）**
+
+- 邀请功能保留，但其语义明确为"邀请到你所在的工作区进行协作"，而非默认行为。
+- 被邀请者可以选择接受邀请加入协作空间，也可以选择保持自己的个人工作区独立运行。
+- 协作空间内，成员可查看 workspace 级数据（笔记、来源、学习卡等），但增删改操作仅 owner 可执行（`requireOwner` 守卫）；个人数据（验证记录、复习计划、理解事件等）仍按用户隔离，成员可完整使用验证/复习功能。
+
+### v0.5 实施范围
+
+v0.5 **不改变当前代码实现**（共享 workspace 模型已落地且测试通过），但进行以下概念调整：
+
+1. **文档和 UI 措辞**：将"邀请注册"的定位从"加入共享空间"修正为"邀请协作"，强调个人工作区是默认形态。
+2. **保留当前共享 workspace 能力**：作为"协作模式"继续可用，Owner 可邀请成员加入同一 workspace 共同维护学习空间。
+3. **不阻断 v0.5 发布**：当前共享模型在 RLS enforce 后可保证跨 workspace 隔离；同 workspace 内的共享是明确的协作行为，不是数据泄漏。
+
+### 后续路线
+
+原 ADR-0009 的“以多工作区作为 v0.6 主线”提案已撤回并转入本地归档。个人工作区、协作工作区和切换能力在 v0.5 中只按已落地 baseline candidate 验收；后续版本的产品主线与新增要求以 ADR-0010 和唯一活动的 v0.6 实施计划为准。
+
 ## Evidence
 
 - v0.4 `invite_codes`、`workspace_members` 和 `sessions` schema。
 - v0.4 `registerWithInvite` 已使用事务与 `FOR UPDATE`，可作为并发消费基础。
+- 2026-07-19 概念评审：repository owner 确认个人工作区优先理念，当前共享模型保留为协作模式。

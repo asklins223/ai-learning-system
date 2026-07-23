@@ -95,7 +95,7 @@ make seed-demo
 
 登录后进入“个人中心 → 模型 API”，可以选择：
 
-- `本地 Mock`：不访问外部模型，不需要 API Key。
+- `系统默认`：使用系统统一维护的模型，不需要个人 API Key。
 - `阿里云百炼 / DashScope`：填写官方 HTTPS Base URL、模型 ID 和 API Key。
 - `OpenAI-compatible`：填写兼容 `chat/completions` 协议的 HTTPS 接口、模型 ID 和 API Key。
 
@@ -118,7 +118,7 @@ https://dashscope.aliyuncs.com/compatible-mode/v1
 
 ## 生产部署
 
-生产 Compose 与开发 Compose 完全独立，不共享容器项目名或数据卷。
+`docker-compose.yml` 是生产配置，仅供 CI 构建和扫描生产镜像使用，不再绑定任何本地 Makefile 目标。本机开发统一使用 `docker-compose.dev.yml`（`make up`），自带源码挂载和热重载。
 
 ### 1. 准备配置
 
@@ -159,12 +159,13 @@ AUTH_COOKIE_SECURE=false
 
 真实 HTTPS 部署必须保持 `AUTH_COOKIE_SECURE=true`。
 
-### 2. 校验并启动
+### 2. 构建与发布
+
+生产镜像由 CI 流水线（`.github/workflows/ci.yml`）从 `docker-compose.yml` 构建，并通过 Trivy 漏洞扫描门禁。本地如需手动验证生产镜像，可直接使用 docker compose：
 
 ```bash
-make config
-make up
-make seed-owner
+docker compose -f docker-compose.yml config --quiet
+docker compose -f docker-compose.yml build api worker web
 ```
 
 生产环境使用三个独立数据库角色：
@@ -179,24 +180,23 @@ make seed-owner
 
 | 命令 | 说明 |
 | --- | --- |
-| `make dev` | 启动开发环境 |
+| `make up` | 启动开发环境（源码挂载、热重载） |
+| `make dev` | 同 `make up`（别名） |
 | `make seed-demo` | 创建本地演示账号 |
-| `make logs` | 查看开发环境日志 |
-| `make down-dev` | 停止开发环境并保留数据 |
-| `make reset-dev` | 删除开发数据库卷并重新启动 |
-| `make config` | 校验生产配置 |
-| `make up` | 构建并启动生产环境 |
-| `make seed-owner` | 创建生产 Owner 账号 |
-| `make down-prod` | 停止生产环境并保留数据 |
-| `make reset` | 删除生产数据库卷并重新启动 |
-| `make storage-dev` | 启动开发环境及 MinIO |
-| `make storage` | 启动生产环境及 MinIO |
-| `make clean-init` | 等待并清除生产环境成功退出的初始化容器 |
-| `make clean-init-dev` | 等待并清除开发环境成功退出的初始化容器 |
+| `make logs` | 查看日志 |
+| `make down` | 停止并保留数据 |
+| `make reset-db CONFIRM_RESET_DB=DELETE_DEV_DB` | 明确确认后删除开发数据库卷并重新启动 |
+| `make rebuild` | 无缓存重新构建开发镜像 |
+| `make config` | 校验开发配置 |
+| `make storage` | 启动开发环境及 MinIO |
+| `make clean-init` | 清除已退出的初始化容器 |
+| `make shell-api` | 进入 API 容器 shell |
+| `make shell-web` | 进入 Web 容器 shell |
+| `make shell-worker` | 进入 Worker 容器 shell |
 
-`reset` 和 `reset-dev` 会删除对应的数据卷，请先确认数据已经备份。
+开发数据库使用固定 external 卷 `ailearn-dev_dev_postgres_data`。`make up` 会在首次启动时自动创建该卷；`make down`、删除容器以及 `docker compose down -v` 都不会删除它。旧的 `make reset` / `make reset-dev` 已停用并会拒绝执行；确实需要清空数据库时，先完成备份，再使用表格中的带确认值命令。显式执行 `docker volume rm`、带命名卷清理能力的 `docker volume prune`，或在 Docker Desktop 中直接删除该卷，仍会永久删除数据。
 
-`up`、`dev`、`storage`、`storage-dev` 会在启动后自动等待并删除成功退出的一次性初始化容器（`migrate`、`role-bootstrap`、`role-grants`、`minio-init`），使其不会以 `Exited` 状态残留在 `docker ps -a` 中。初始化失败会让命令返回失败并保留容器，便于读取日志；`seed-*` 命令使用 `run --rm`，执行后容器自动删除。
+`up`、`dev`、`storage`、`storage-dev` 会在启动前清除上一轮的一次性初始化容器，并在启动后等待本轮 `role-bootstrap`、`migrate`（以及存储模式下的 `minio-init`）执行完毕。本轮容器会以 `Exited` 状态保留，便于 Docker Desktop 的整组 Start 重新执行初始化；下次启动时再清除。`seed-*` 命令使用 `run --rm`，执行后容器自动删除。
 
 ## 测试
 
@@ -236,8 +236,8 @@ GitHub Actions 还会执行：
 │   ├── postgres/             # PostgreSQL 初始化、角色和授权脚本
 │   └── minio/                # 可选对象存储说明
 ├── .github/workflows/        # CI 流水线
-├── docker-compose.yml        # 生产环境
-├── docker-compose.dev.yml    # 本机开发环境
+├── docker-compose.yml        # CI 生产镜像构建配置
+├── docker-compose.dev.yml    # 本机开发环境（默认）
 ├── .env.example              # 生产配置模板
 └── Makefile                  # 常用运行命令
 ```
@@ -246,7 +246,7 @@ GitHub Actions 还会执行：
 
 ### 无法登录
 
-开发环境先执行 `make seed-demo`。生产环境需要在 `.env` 中填写 Owner 凭据，然后执行 `make seed-owner`。
+开发环境先执行 `make seed-demo` 创建演示账号。生产环境的 Owner 账号由 CI 发布流程处理。
 
 ### 模型测试返回 400
 

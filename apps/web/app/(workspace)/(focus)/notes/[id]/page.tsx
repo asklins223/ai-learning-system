@@ -71,14 +71,15 @@ export default function NotePage() {
         try {
           generation = await api.getCardGenerationStatus(result.version.id);
         } catch {
-          // Generation hydration is auxiliary. A transient status failure must
-          // not block the user from opening and editing the note itself.
+          // Keep the note readable while the editor rechecks this auxiliary
+          // state. Owners stay write-locked until we can prove that no card job
+          // is active; otherwise a refresh could mutate a version mid-run.
           generation = {
-            state: "idle",
+            state: "checking",
             cardId: null,
             jobId: null,
             generatedVersionId: null,
-            message: "学习卡状态暂时未同步，可继续编辑并稍后重试。",
+            message: "正在重新确认学习卡任务状态…",
           };
         }
         return { result, currentUser, generation };
@@ -159,9 +160,6 @@ export default function NotePage() {
             <div className="mt-4">
               <Skeleton lines={8} />
             </div>
-          </div>
-          <div className="note-detail-loading-right">
-            <Skeleton lines={3} />
           </div>
         </div>
       </div>

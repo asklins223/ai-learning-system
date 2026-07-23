@@ -15,6 +15,45 @@ interface Builder {
   lines: string[];
 }
 
+export interface MarkdownHeadingSelection {
+  start: number;
+  length: number;
+}
+
+/**
+ * Returns source ranges for Markdown heading titles in document order.
+ * The fence rule intentionally mirrors markdownToBlocks so `# example` lines
+ * inside code blocks cannot shift outline navigation to the wrong heading.
+ */
+export function markdownHeadingSelections(md: string): MarkdownHeadingSelection[] {
+  const lines = md.split("\n");
+  const selections: MarkdownHeadingSelection[] = [];
+  let offset = 0;
+  let inCode = false;
+
+  for (const raw of lines) {
+    const syntaxLine = raw.trimEnd();
+    if (/^```\s*([a-zA-Z0-9_-]*)\s*$/.test(syntaxLine)) {
+      inCode = !inCode;
+    } else if (!inCode) {
+      const heading = /^(#{1,6})[\t ]+(.+?)[\t ]*$/.exec(syntaxLine);
+      if (heading) {
+        const title = heading[2];
+        const titleOffset = raw.indexOf(title, heading[1].length);
+        selections.push({
+          start: offset + Math.max(0, titleOffset),
+          length: title.length,
+        });
+      }
+    }
+    // split("\n") removes one character; any CR remains in `raw`, preserving
+    // exact offsets for both LF and CRLF source.
+    offset += raw.length + 1;
+  }
+
+  return selections;
+}
+
 function flushBuilder(buf: Builder | null, ordinalStart: number, blocks: Block[]): number {
   if (!buf || buf.lines.length === 0) return ordinalStart;
   // F-008: 非 code 类型也用 \n join，保留列表/引用的原始行结构
@@ -74,7 +113,7 @@ export function markdownToBlocks(md: string): Block[] {
     }
 
     // 标题
-    const heading = /^(#{1,4})\s+(.+)$/.exec(syntaxLine);
+    const heading = /^(#{1,6})\s+(.+)$/.exec(syntaxLine);
     if (heading) {
       ordinal = flushBuilder(buf, ordinal, blocks);
       const level = heading[1].length;
@@ -153,7 +192,7 @@ export function blocksToMarkdown(blocks: Block[]): string {
       switch (b.type) {
         case "heading": {
           const m = /^<h(\d)>([\s\S]+)<\/h\1>$/.exec(b.content.trim());
-          if (m) return `${"#".repeat(Math.min(4, Math.max(1, Number(m[1]))))} ${m[2]}`;
+          if (m) return `${"#".repeat(Math.min(6, Math.max(1, Number(m[1]))))} ${m[2]}`;
           // G-008: 如果 content 已经是 Markdown 标题格式（# 开头），保留原样
           if (/^#{1,6}\s+/.test(b.content.trim())) return b.content.trim();
           return `## ${b.content}`;

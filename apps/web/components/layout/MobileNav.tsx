@@ -39,7 +39,12 @@ export function MobileNav() {
   const navRef = useRef<HTMLElement>(null);
   const exploreButtonRef = useRef<HTMLButtonElement>(null);
   const mineButtonRef = useRef<HTMLButtonElement>(null);
-  const { currentUser, reload: reloadCurrentUser } = useCurrentUser();
+  const {
+    currentUser,
+    loading: currentUserLoading,
+    error: currentUserError,
+    reload: reloadCurrentUser,
+  } = useCurrentUser();
   const { theme, toggleTheme, mounted } = useTheme();
   const canCreateContent = Boolean(
     currentUser && (currentUser.role === "owner" || currentUser.isPersonal),
@@ -160,7 +165,15 @@ export function MobileNav() {
   const panelItems = panel === "explore" ? exploreNavItems : panel === "mine" ? mobileMineNavItems : [];
   const mobileDisplayName = currentUser?.displayName?.trim()
     || currentUser?.email.split("@")[0]
-    || "个人账户";
+    || (currentUserError ? "账户信息不可用" : "个人账户");
+  const mobileAccountMeta = currentUserError
+    ? "账户读取失败，请重试"
+    : currentUser?.email ?? (currentUserLoading ? "正在读取账户…" : "尚未读取到账户");
+  const createDisabledReason = currentUserLoading
+    ? "正在确认新建权限"
+    : currentUserError
+      ? "账户信息读取失败，暂不能新建"
+      : "仅工作区所有者可添加内容";
 
   const handleLogout = useCallback(async () => {
     if (loggingOut) return;
@@ -196,13 +209,24 @@ export function MobileNav() {
                 </span>
                 <span>
                   <strong>{mobileDisplayName}</strong>
-                  <small>{currentUser?.email ?? "正在读取账户…"}</small>
+                  <small>{mobileAccountMeta}</small>
                 </span>
               </div>
-              <WorkspaceSwitcher
-                currentUser={currentUser}
-                onSwitched={reloadCurrentUser}
-              />
+              {currentUserError ? (
+                <button
+                  type="button"
+                  className="mobile-nav-account-retry"
+                  onClick={reloadCurrentUser}
+                >
+                  <Icon.Refresh aria-hidden="true" />
+                  重新读取账户
+                </button>
+              ) : (
+                <WorkspaceSwitcher
+                  currentUser={currentUser}
+                  onSwitched={reloadCurrentUser}
+                />
+              )}
             </div>
           )}
           {panelItems.map((item) => (
@@ -263,8 +287,8 @@ export function MobileNav() {
                 key="quick-capture"
                 className="mobile-nav-item mobile-nav-item--create"
                 onClick={handleQuickCapture}
-                aria-label={canCreateContent ? "新建" : "新建（仅工作区所有者可用）"}
-                title={canCreateContent ? undefined : "仅工作区所有者可添加内容"}
+                aria-label={canCreateContent ? "新建" : `新建（${createDisabledReason}）`}
+                title={canCreateContent ? undefined : createDisabledReason}
                 disabled={!canCreateContent}
                 type="button"
               >

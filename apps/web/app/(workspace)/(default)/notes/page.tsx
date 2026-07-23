@@ -37,7 +37,7 @@ function formatNoteDate(value: string) {
  * Markdown、重命名、删除和加载更早笔记。这是对象库，不是证据状态看板。
  */
 export default function NotesIndex() {
-  const { isOwner } = useIsOwner();
+  const { isOwner, loading: ownerLoading } = useIsOwner();
   const router = useRouter();
   const [items, setItems] = useState<NoteHeader[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -376,7 +376,8 @@ export default function NotesIndex() {
   async function submitRename(noteId: string) {
     const nextTitle = renameValue.trim();
     if (!nextTitle) return;
-    const currentTitle = items?.find((note) => note.id === noteId)?.title?.trim();
+    const currentNote = items?.find((note) => note.id === noteId);
+    const currentTitle = currentNote?.title?.trim();
     if (currentTitle === nextTitle) {
       setRenamingId(null);
       setRenameValue("");
@@ -387,7 +388,13 @@ export default function NotesIndex() {
     setRenameSaving(true);
     setRenameError(null);
     try {
-      const updated = await api.updateNote(noteId, { title: nextTitle });
+      if (!currentNote?.currentVersionId) {
+        throw new Error("笔记版本尚未就绪，请刷新后重试");
+      }
+      const updated = await api.updateNote(noteId, {
+        title: nextTitle,
+        baseVersionId: currentNote.currentVersionId,
+      });
       setItems((current) =>
         current
           ?.map((item) =>
@@ -458,7 +465,7 @@ export default function NotesIndex() {
         subtitle="集中整理你的表达，让每一份草稿都能继续生长为可验证的理解。"
         actions={
           <div className="notes-header-actions">
-            {!isOwner && <MemberNotice compact />}
+            {!ownerLoading && !isOwner && <MemberNotice variant="badge" />}
             <button
               type="button"
               className="notes-action-primary"

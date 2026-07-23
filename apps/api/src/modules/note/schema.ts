@@ -33,7 +33,7 @@ export const noteUpdateSchema = z.object({
   /**
    * 乐观并发控制：客户端传当前持有的 versionId。
    * 若与 note.currentVersionId 不一致，说明内容已被另一端改动，拒绝写入（409）。
-   * R-008: 当 blocks 存在时 baseVersionId 为必填，防止静默覆盖。
+   * R-008: 当 title 或 blocks 存在时 baseVersionId 为必填，防止静默覆盖。
    */
   baseVersionId: z.string().uuid().optional(),
   /**
@@ -42,8 +42,8 @@ export const noteUpdateSchema = z.object({
    */
   isAutosave: z.boolean().optional().default(false),
 }).refine(
-  (data) => !data.blocks || data.baseVersionId,
-  { message: "baseVersionId is required when updating blocks", path: ["baseVersionId"] },
+  (data) => (data.title === undefined && data.blocks === undefined) || data.baseVersionId,
+  { message: "baseVersionId is required when updating a note", path: ["baseVersionId"] },
 );
 
 export type NoteCreateInput = z.output<typeof noteCreateSchema>;
