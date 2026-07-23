@@ -68,14 +68,14 @@ async function seedWorkspaceAndSchedule(
   `;
   await tx`
     INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-    VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify({ blocks: [] })}, ${`hash-${noteVersionId.slice(0, 8)}`}, ${userId})
+    VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [] })}, ${`hash-${noteVersionId.slice(0, 8)}`}, ${userId})
   `;
   await tx`
     UPDATE notes SET current_version_id = ${noteVersionId} WHERE id = ${noteId}
   `;
   await tx`
     INSERT INTO learning_cards (id, workspace_id, note_version_id, status, schema_json)
-    VALUES (${cardId}, ${workspaceId}, ${noteVersionId}, 'active', ${JSON.stringify({ title: "Test Card", summary: "Test" })})
+    VALUES (${cardId}, ${workspaceId}, ${noteVersionId}, 'active', ${tx.json({ title: "Test Card", summary: "Test" })})
   `;
   await tx`
     INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days)
@@ -162,41 +162,33 @@ test("review_attempts table structure matches schema definition", async () => {
 });
 
 test("idempotency unique index enforces (workspace_id, user_id, idempotency_key)", async () => {
-  // Transaction 1: verify duplicate key is rejected.
-  const setup = await sql.begin(async (tx) => {
-    const seed = await seedWorkspaceAndSchedule(tx);
+  // A unique violation aborts and rolls back the entire transaction, including
+  // its fixtures. Assert the exact PostgreSQL error instead of swallowing it.
+  await assert.rejects(
+    () => sql.begin(async (tx) => {
+      const seed = await seedWorkspaceAndSchedule(tx);
 
-    await tx`
-      INSERT INTO review_attempts (workspace_id, user_id, review_schedule_id, subject_type, subject_id, idempotency_key, status)
-      VALUES (${seed.workspaceId}, ${seed.userId}, ${seed.scheduleId}, 'card', ${seed.scheduleId}, 'test-key-001', 'started')
-    `;
-
-    // Duplicate idempotency key should fail.
-    let duplicateFailed = false;
-    try {
       await tx`
         INSERT INTO review_attempts (workspace_id, user_id, review_schedule_id, subject_type, subject_id, idempotency_key, status)
         VALUES (${seed.workspaceId}, ${seed.userId}, ${seed.scheduleId}, 'card', ${seed.scheduleId}, 'test-key-001', 'started')
       `;
-    } catch (err) {
-      duplicateFailed = true;
-      assert.match(
-        String(err),
-        /unique constraint|unique/i,
-        "duplicate idempotency key should fail with unique constraint error",
+
+      await tx`
+        INSERT INTO review_attempts (workspace_id, user_id, review_schedule_id, subject_type, subject_id, idempotency_key, status)
+        VALUES (${seed.workspaceId}, ${seed.userId}, ${seed.scheduleId}, 'card', ${seed.scheduleId}, 'test-key-001', 'started')
+      `;
+    }),
+    (error: unknown) => {
+      assert.equal(
+        (error as { code?: string }).code,
+        "23505",
+        "duplicate idempotency key should fail with PostgreSQL unique_violation",
       );
-    }
-    assert.ok(duplicateFailed, "duplicate idempotency key should be rejected");
+      return true;
+    },
+  );
 
-    return seed;
-  }).catch(() => {
-    // Transaction may have been aborted by the duplicate insert error;
-    // the assertion was already checked above.
-    return null;
-  });
-
-  // Transaction 2: verify a different key succeeds (using fresh seed to avoid
-  // interference from the aborted transaction above).
+  // A different key succeeds in a fresh transaction.
   await sql.begin(async (tx) => {
     const seed = await seedWorkspaceAndSchedule(tx);
 
@@ -211,13 +203,6 @@ test("idempotency unique index enforces (workspace_id, user_id, idempotency_key)
 
     await cleanupWorkspace(tx, seed.workspaceId, seed.userId);
   });
-
-  // Cleanup from transaction 1 (if it didn't abort before returning seed).
-  if (setup) {
-    await sql.begin(async (tx) => {
-      await cleanupWorkspace(tx, setup.workspaceId, setup.userId);
-    }).catch(() => {});
-  }
 });
 
 test("FK cascade: deleting review_schedules cascades to review_attempts", async () => {
@@ -322,16 +307,9 @@ test("history query excludes answer_text (privacy boundary)", async () => {
     `;
 
     assert.equal(rows.length, 1);
-    // Verify answer_text is not in the selected columns.
-    const selectedColumns = [
-      "id", "review_schedule_id", "subject_type", "subject_id",
-      "answer_type", "outcome", "confidence", "skip_reason",
-      "schedule_before_interval_days", "schedule_after_interval_days",
-      "schedule_reason_code", "understanding_effect", "next_review_at",
-      "status", "started_at", "completed_at",
-    ];
+    // Verify the actual projected row does not expose answer_text.
     assert.ok(
-      !selectedColumns.includes("answer_text"),
+      !Object.hasOwn(rows[0], "answer_text"),
       "answer_text must not be in the history query column list",
     );
 

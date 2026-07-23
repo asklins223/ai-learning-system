@@ -28,6 +28,10 @@ if (!databaseUrl) {
 
 const sql = postgres(databaseUrl, { max: 2 });
 
+test.after(async () => {
+  await sql.end({ timeout: 5 });
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 async function seedWorkspaceAndNote(
@@ -89,7 +93,7 @@ test("content hash: PostgreSQL md5(content_json::text) matches computeContentHas
       // Insert note_version with a placeholder hash
       await tx`
         INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify(contentJson)}, 'placeholder', ${userId})
+        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${tx.json(contentJson)}, 'placeholder', ${userId})
       `;
 
       // Compute hash the way the migration does
@@ -127,7 +131,7 @@ test("content hash: consistency for Unicode (CJK) content", async () => {
     try {
       await tx`
         INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify(contentJson)}, 'placeholder', ${userId})
+        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${tx.json(contentJson)}, 'placeholder', ${userId})
       `;
 
       const [pgRow] = await tx<{ hash: string }[]>`
@@ -162,7 +166,7 @@ test("content hash: consistency for image blocks", async () => {
     try {
       await tx`
         INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify(contentJson)}, 'placeholder', ${userId})
+        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${tx.json(contentJson)}, 'placeholder', ${userId})
       `;
 
       const [pgRow] = await tx<{ hash: string }[]>`
@@ -194,7 +198,7 @@ test("content hash: consistency for empty blocks", async () => {
     try {
       await tx`
         INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify(contentJson)}, 'placeholder', ${userId})
+        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${tx.json(contentJson)}, 'placeholder', ${userId})
       `;
 
       const [pgRow] = await tx<{ hash: string }[]>`
@@ -234,7 +238,7 @@ test("content hash: consistency for emoji (BMP-external) content", async () => {
     try {
       await tx`
         INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify(contentJson)}, 'placeholder', ${userId})
+        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${tx.json(contentJson)}, 'placeholder', ${userId})
       `;
 
       const [pgRow] = await tx<{ hash: string }[]>`
@@ -272,7 +276,7 @@ test("content hash: deduplication works end-to-end with real PostgreSQL", async 
     try {
       await tx`
         INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify(contentJson)}, ${expectedHash}, ${userId})
+        VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${tx.json(contentJson)}, ${expectedHash}, ${userId})
       `;
 
       // Simulate the dedup lookup: find a version by content_hash
