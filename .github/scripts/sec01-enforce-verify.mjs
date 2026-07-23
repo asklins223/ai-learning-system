@@ -23,6 +23,7 @@
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 
 const MIGRATOR_URL = process.env.SEC01_VERIFY_MIGRATOR_URL;
 const API_URL = process.env.SEC01_VERIFY_API_URL;
@@ -33,8 +34,12 @@ if (!MIGRATOR_URL || !API_URL || !WORKER_URL) {
   process.exit(1);
 }
 
-// Dynamic import of postgres
-const { default: postgres } = await import("postgres");
+// Repository tooling intentionally has no PostgreSQL runtime dependency.
+// Resolve the driver from the already-installed API package instead.
+const requireFromApi = createRequire(
+  new URL("../../apps/api/package.json", import.meta.url),
+);
+const postgres = requireFromApi("postgres");
 
 const EXPECTED_RLS_TABLES = [
   "workspaces",

@@ -19,7 +19,14 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { resolve, join, relative } from "node:path";
 import {
   aggregateCoverage,
@@ -152,16 +159,25 @@ function readCoverageSummary(summaryPath, repoRoot) {
 }
 
 function discoverFiles(cwd, directories) {
-  let fileList = "";
-  try {
-    fileList = execFileSync("rg", ["--files", ...directories], {
-      cwd,
-      encoding: "utf8",
-    }).trim();
-  } catch (err) {
-    if (err.status !== 1) throw err;
+  const files = [];
+
+  function visit(relativeDirectory) {
+    const entries = readdirSync(resolve(cwd, relativeDirectory), {
+      withFileTypes: true,
+    });
+    for (const entry of entries) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      const relativePath = join(relativeDirectory, entry.name);
+      if (entry.isDirectory()) {
+        visit(relativePath);
+      } else if (entry.isFile()) {
+        files.push(relativePath.replaceAll("\\", "/"));
+      }
+    }
   }
-  return fileList ? fileList.split("\n").sort() : [];
+
+  for (const directory of directories) visit(directory);
+  return files.sort();
 }
 
 function discoverTestFiles(cwd, testDir) {
