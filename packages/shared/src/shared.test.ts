@@ -15,7 +15,12 @@ import {
   isNonPublicAIEndpointAddress,
   postJsonToPublicEndpoint,
 } from "./public-json-http.ts";
-import { evaluateValidationOutputSchema, learningCardOutputSchema } from "./schemas.ts";
+import {
+  evaluateValidationOutputSchema,
+  generateValidationQuestionOutputSchema,
+  imageInsightOutputSchema,
+  learningCardOutputSchema,
+} from "./schemas.ts";
 import { parseContent } from "./markdown-parser.ts";
 
 const HEX_KEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -172,6 +177,63 @@ describe("shared AI output contracts", () => {
       feedback: "回答准确覆盖了核心原理",
     });
     assert.equal(withoutThinking.success, true);
+  });
+
+  it("keeps decorative and hard image evidence mutually exclusive", () => {
+    const base = {
+      contentType: "decorative" as const,
+      decorative: true,
+      caption: "装饰插图",
+      ocr: [],
+      facts: [],
+      promptInjectionDetected: false,
+      safetyFlags: [],
+      unresolvedReason: null,
+    };
+    assert.equal(imageInsightOutputSchema.safeParse(base).success, true);
+    assert.equal(imageInsightOutputSchema.safeParse({
+      ...base,
+      ocr: [{
+        text: "不应发布",
+        region: { x: 0, y: 0, width: 100, height: 100 },
+        confidence: 0.99,
+      }],
+    }).success, false);
+  });
+
+  it("enforces unique rubric keys and at least one required item", () => {
+    const valid = {
+      questionType: "explain" as const,
+      question: "请解释这个概念。",
+      rubricItems: [
+        {
+          key: "definition",
+          criterion: "说明定义",
+          expectedConcept: "核心定义",
+          weight: 2 as const,
+          required: true,
+          evidenceRefId: "ev_1",
+        },
+        {
+          key: "reason",
+          criterion: "说明原因",
+          expectedConcept: "核心原因",
+          weight: 1 as const,
+          required: false,
+          evidenceRefId: "ev_1",
+        },
+      ],
+    };
+
+    assert.equal(generateValidationQuestionOutputSchema.safeParse(valid).success, true);
+    assert.equal(generateValidationQuestionOutputSchema.safeParse({
+      ...valid,
+      rubricItems: valid.rubricItems.map((item) => ({ ...item, key: "duplicate" })),
+    }).success, false);
+    assert.equal(generateValidationQuestionOutputSchema.safeParse({
+      ...valid,
+      rubricItems: valid.rubricItems.map((item) => ({ ...item, required: false })),
+    }).success, false);
   });
 });
 

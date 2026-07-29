@@ -53,6 +53,8 @@ export const notes = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     // CONC-03: 软删除标记，NULL 表示未删除。30 天后由定时任务物理删除。
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    cardGenerationEpoch: integer("card_generation_epoch").notNull().default(0),
+    latestGenerationRunId: uuid("latest_generation_run_id"),
   },
   (t) => ({
     workspaceIdx: index("notes_workspace_idx").on(t.workspaceId),
@@ -75,11 +77,48 @@ export const noteVersions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     // isAutosave 原地更新时刷新；未更新过则等于 createdAt
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    sealedAt: timestamp("sealed_at", { withTimezone: true }),
+    sealedReason: text("sealed_reason"),
   },
   (t) => ({
     noteIdx: index("note_versions_note_idx").on(t.noteId, t.versionNo),
     uniqueNoteVersion: uniqueIndex("note_versions_unique_idx").on(t.noteId, t.versionNo),
     contentHashIdx: index("note_versions_content_hash_idx").on(t.noteId, t.contentHash),
+  }),
+);
+
+/**
+ * Immutable identity for an uploaded note image. Markdown remains a rendering
+ * compatibility layer; generation and evidence use this typed asset instead.
+ */
+export const noteImageAssets = pgTable(
+  "note_image_assets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    uploadedForNoteId: uuid("uploaded_for_note_id").references(() => notes.id, { onDelete: "set null" }),
+    objectKey: text("object_key").notNull(),
+    sha256: text("sha256").notNull(),
+    mimeType: text("mime_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    status: text("status").notNull().default("ready"),
+    normalizedObjectKey: text("normalized_object_key"),
+    thumbnailObjectKey: text("thumbnail_object_key"),
+    createdBy: uuid("created_by").notNull().references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => ({
+    workspaceIdUnique: uniqueIndex("note_image_assets_workspace_id_unique_idx")
+      .on(t.workspaceId, t.id),
+    workspaceObjectKeyUnique: uniqueIndex("note_image_assets_workspace_object_key_unique_idx")
+      .on(t.workspaceId, t.objectKey),
+    workspaceHashIdx: index("note_image_assets_workspace_hash_idx")
+      .on(t.workspaceId, t.sha256),
+    noteIdx: index("note_image_assets_note_idx")
+      .on(t.workspaceId, t.uploadedForNoteId, t.createdAt),
   }),
 );
 
@@ -92,10 +131,12 @@ export const noteBlocks = pgTable(
     ordinal: integer("ordinal").notNull(),
     type: text("type").notNull(), // paragraph | heading | code | list | quote | image
     content: text("content").notNull(),
+    imageAssetId: uuid("image_asset_id").references(() => noteImageAssets.id, { onDelete: "restrict" }),
     sourceRef: jsonb("source_ref").$type<{ sourceId?: string; segmentId?: string } | null>().default(null),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     versionIdx: index("note_blocks_version_idx").on(t.versionId, t.ordinal),
+    imageAssetIdx: index("note_blocks_image_asset_idx").on(t.workspaceId, t.imageAssetId),
   }),
 );

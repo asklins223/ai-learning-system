@@ -35,9 +35,15 @@
       "types": "./src/prompts.ts",
       "import": "./src/prompts.ts",
       "default": "./src/prompts.ts"
+    },
+    "./constants": {
+      "types": "./src/constants.ts",
+      "import": "./src/constants.ts",
+      "default": "./src/constants.ts"
     }
   },
   "dependencies": {
+    "ts-fsrs": "4.6.0",
     "zod": "^3.23.8"
   },
   "scripts": {

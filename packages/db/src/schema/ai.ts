@@ -23,6 +23,8 @@ export const aiArtifacts = pgTable(
     /** 模型返回的 token 用量（prompt + completion），用于成本统计 */
     costTokens: integer("cost_tokens"),
     status: artifactStatusEnum("status").notNull().default("ready"),
+    // ── v0.6 扩展 (计划 §6.6) ──
+    parentArtifactId: uuid("parent_artifact_id"), // draft → repair → final lineage
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

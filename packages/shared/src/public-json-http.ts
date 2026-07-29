@@ -3,6 +3,7 @@ import { request as httpsRequest, type RequestOptions } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const CONNECT_TIMEOUT_MS = 10_000;
 
 type PinnedAddress = { address: string; family: 4 | 6 };
 
@@ -96,6 +97,19 @@ async function resolvePublicAddress(hostname: string): Promise<PinnedAddress> {
   return { address: selected.address, family: selected.family };
 }
 
+/**
+ * Validate a custom/personal AI endpoint URL without sending a request:
+ * HTTPS-only, no inline credentials, and the hostname must resolve to a
+ * public address. Used by transports (e.g. the DashScope fetch client) that
+ * do not route through postJsonToPublicEndpoint's pinned request path.
+ */
+export async function assertPublicHttpsAIEndpoint(url: string): Promise<void> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new Error("personal AI endpoints must use HTTPS");
+  if (parsed.username || parsed.password) throw new Error("AI endpoint URL credentials are not allowed");
+  await resolvePublicAddress(parsed.hostname);
+}
+
 function pinnedLookup(pinned: PinnedAddress): LookupFunction {
   return (_hostname, _options, callback) => callback(null, pinned.address, pinned.family);
 }
@@ -171,7 +185,27 @@ export const postJsonToPublicEndpoint: PublicJsonRequester = async (
         });
       });
     });
-    request.once("error", reject);
+    // A hung TCP/TLS connect (blocked container egress, required proxy, or a
+    // fake-IP VPN resolver handing out 198.18.x.x) would otherwise silently
+    // burn the caller's entire provider budget and read as a model timeout.
+    // Fail fast with a pointed, distinguishable error instead.
+    const connectTimer = setTimeout(() => {
+      request.destroy(new Error(
+        `AI endpoint TCP/TLS connection could not be established within ${CONNECT_TIMEOUT_MS}ms — check container network egress/proxy, or a fake-IP VPN DNS resolver (198.18.x.x)`,
+      ));
+    }, CONNECT_TIMEOUT_MS);
+    request.on("socket", (socket) => {
+      if (!socket.connecting) {
+        clearTimeout(connectTimer);
+        return;
+      }
+      socket.once("secureConnect", () => clearTimeout(connectTimer));
+    });
+    request.once("response", () => clearTimeout(connectTimer));
+    request.once("error", (error) => {
+      clearTimeout(connectTimer);
+      reject(error);
+    });
     request.end(encodedBody);
   });
 };

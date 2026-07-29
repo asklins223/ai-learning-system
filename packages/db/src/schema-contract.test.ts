@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { getTableColumns, getTableName, is } from "drizzle-orm";
-import { PgTable } from "drizzle-orm/pg-core";
+import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
+import { ArtifactType } from "@ailearn/shared";
 import * as schema from "./index.ts";
 
 const expectedTables = [
@@ -10,18 +11,29 @@ const expectedTables = [
   "auth_rate_limits",
   "benchmark_labels",
   "benchmark_reports",
+  "card_generation_candidate_evidence",
+  "card_generation_candidates",
+  "card_generation_events",
+  "card_generation_runs",
+  "card_generation_units",
   "card_key_points",
   "evidence_overrides",
   "evidences",
   "invite_codes",
   "jobs",
+  "learning_card_sets",
   "learning_cards",
   "note_blocks",
+  "note_evidence_spans",
+  "note_image_assets",
+  "note_image_evidence_units",
+  "note_image_insights",
   "note_versions",
   "notes",
   "onboarding_states",
   "review_attempts",
   "review_schedules",
+  "scheduling_shadow_decisions",
   "search_documents",
   "sessions",
   "source_segments",
@@ -29,8 +41,15 @@ const expectedTables = [
   "understanding_events",
   "user_ai_model_configs",
   "users",
+  "validation_action_commands",
+  "validation_assistance_exposures",
   "validation_events",
+  "validation_point_assessments",
+  "validation_quality_signals",
+  "validation_question_rubric_items",
   "validation_questions",
+  "validation_submission_jobs",
+  "validation_submissions",
   "workspace_members",
   "workspaces",
 ];
@@ -52,6 +71,7 @@ describe("database schema package contract", () => {
       [schema.learningCards, "createdAt"],
       [schema.evidences, "createdAt"],
       [schema.reviewAttempts, "createdAt"],
+      [schema.cardGenerationRuns, "createdAt"],
       [schema.jobs, "scheduledAt"],
     ] as const) {
       const columns = getTableColumns(table) as Record<string, unknown>;
@@ -59,6 +79,45 @@ describe("database schema package contract", () => {
       assert.ok(columns.workspaceId, `${getTableName(table)} must have workspaceId`);
       assert.ok(columns[lifecycleColumn], `${getTableName(table)} must have ${lifecycleColumn}`);
     }
+  });
+
+  it("keeps generation runs separate from leased execution jobs", () => {
+    const runColumns = getTableColumns(schema.cardGenerationRuns) as Record<string, unknown>;
+    const jobColumns = getTableColumns(schema.jobs) as Record<string, unknown>;
+
+    for (const column of [
+      "generationEpoch",
+      "blockManifest",
+      "assetManifest",
+      "status",
+      "stage",
+      "stateVersion",
+      "nextEventSequence",
+    ]) {
+      assert.ok(runColumns[column], `card_generation_runs must have ${column}`);
+    }
+    assert.ok(jobColumns.generationRunId, "jobs must link to a generation run");
+    assert.ok(jobColumns.resourceClass, "jobs must declare a resource class");
+    assert.ok(jobColumns.priority, "jobs must declare a priority");
+  });
+
+  it("models the M5 terminal result and card-set member constraints", () => {
+    const cardConfig = getTableConfig(schema.learningCards);
+    const runConfig = getTableConfig(schema.cardGenerationRuns);
+    const cardIndexNames = new Set(
+      cardConfig.indexes.map((index) => index.config.name),
+    );
+    const cardCheckNames = new Set(cardConfig.checks.map((check) => check.name));
+    const runCheckNames = new Set(runConfig.checks.map((check) => check.name));
+
+    assert.ok(
+      cardIndexNames.has("learning_cards_generation_set_identity_unique_idx"),
+    );
+    assert.ok(cardIndexNames.has("learning_cards_set_scope_key_unique_idx"));
+    assert.ok(cardCheckNames.has("learning_cards_card_set_shape_check"));
+    assert.ok(
+      runCheckNames.has("card_generation_runs_m5_terminal_result_check"),
+    );
   });
 
   it("exports PostgreSQL enum columns with non-empty values", () => {
@@ -76,5 +135,11 @@ describe("database schema package contract", () => {
       assert.ok(pgEnum.enumValues.length > 0);
       assert.equal(new Set(pgEnum.enumValues).size, pgEnum.enumValues.length);
     }
+
+    assert.deepEqual(
+      [...schema.artifactTypeEnum.enumValues].sort(),
+      Object.values(ArtifactType).sort(),
+      "artifact_type schema must stay aligned with the shared ArtifactType contract",
+    );
   });
 });
