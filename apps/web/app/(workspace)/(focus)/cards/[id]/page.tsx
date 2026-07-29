@@ -6,26 +6,25 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
 import {
   api,
   CardDetailResponse,
+  CardSetDetailResponse,
   CardListItem,
   CardEvidenceGroup,
   EvidenceOverride,
   effectiveAlignment,
   isHardEvidence,
-  type ValidationFeedback,
   type ValidationEvent,
 } from "@/lib/api";
 import { useIsOwner } from "@/lib/use-current-user";
 import { MemberNotice } from "@/components/settings/MemberNotice";
 import { EvidenceDrawer } from "@/components/EvidenceDrawer";
-import { ValidationPanel, ValidationQuestion } from "@/components/ValidationPanel";
 import { Drawer } from "@/components/ui/Drawer";
+import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { StudyPaper } from "@/components/study/StudyPaper";
@@ -33,8 +32,6 @@ import { EvidenceRail } from "@/components/study/EvidenceRail";
 import { UnderstandingFacts } from "@/components/study/UnderstandingFacts";
 import { ReviewPlanCard } from "@/components/study/ReviewPlanCard";
 import { AccountMenu } from "@/components/account/AccountMenu";
-import { normalizeKeyPointClaim } from "@/lib/card-display";
-import { buildValidationPrompt } from "@/lib/validation-question";
 import {
   sanitizeSearchReturnTarget,
   withSearchReturnTarget,
@@ -43,7 +40,12 @@ import {
   sanitizeTodayReturnTarget,
   withTodayReturnTarget,
 } from "@/lib/today-return";
-import { useBodyScrollLock } from "@/lib/use-body-scroll-lock";
+import { isQuestionFirstUIEnabled } from "@/lib/feature-flags";
+import { statusMap } from "@/lib/status-map";
+import {
+  formatSafeImageUnitReference,
+  readPartialCardCoverageWarning,
+} from "@/lib/card-coverage-warning";
 
 type DetailLayoutMode = "wide" | "medium" | "compact";
 
@@ -95,8 +97,6 @@ export default function CardPage() {
   const deskRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const activeCardIdRef = useRef(cardId);
-  const validationSheetRef = useRef<HTMLDivElement>(null);
-  const validationTriggerRef = useRef<HTMLButtonElement>(null);
   activeCardIdRef.current = cardId;
 
   const [data, setData] = useState<CardDetailResponse | null>(null);
@@ -110,21 +110,19 @@ export default function CardPage() {
     [],
   );
   const [validationError, setValidationError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<ValidationFeedback | null>(null);
-  const [validating, setValidating] = useState(false);
   const [nextReviewAt, setNextReviewAt] = useState<string | null>(null);
   const [cardListItem, setCardListItem] = useState<CardListItem | null>(null);
+  const [cardSetDetail, setCardSetDetail] =
+    useState<CardSetDetailResponse | null>(null);
   const [pager, setPager] = useState<PagerState>(EMPTY_PAGER);
   const [openKeyPointId, setOpenKeyPointId] = useState<string | null>(null);
   const [evidencePanelOpen, setEvidencePanelOpen] = useState(false);
-  const [validationPanelOpen, setValidationPanelOpen] = useState(false);
   const [layoutMode, setLayoutMode] =
-    useState<DetailLayoutMode>("medium");
+    useState<DetailLayoutMode>("compact");
   const [lifecycleAction, setLifecycleAction] = useState<
     "idle" | "regenerating"
   >("idle");
   const [lifecycleMessage, setLifecycleMessage] = useState<string | null>(null);
-  useBodyScrollLock(layoutMode === "compact" && validationPanelOpen);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -139,7 +137,7 @@ export default function CardPage() {
 
     const setModeFromWidth = (width: number) => {
       setLayoutMode(
-        width >= 1240 ? "wide" : width >= 960 ? "medium" : "compact",
+        width >= 1240 ? "wide" : width >= 1080 ? "medium" : "compact",
       );
     };
 
@@ -152,55 +150,8 @@ export default function CardPage() {
   }, []);
 
   useEffect(() => {
-    if (layoutMode === "wide") setEvidencePanelOpen(false);
-    if (layoutMode !== "compact") setValidationPanelOpen(false);
+    if (layoutMode !== "compact") setEvidencePanelOpen(false);
   }, [layoutMode]);
-
-  useEffect(() => {
-    if (layoutMode !== "compact" || !validationPanelOpen) return;
-
-    const previousFocus = document.activeElement as HTMLElement | null;
-    const validationTrigger = validationTriggerRef.current;
-
-    const focusableSelector =
-      'button:not(:disabled), [href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])';
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setValidationPanelOpen(false);
-        return;
-      }
-      if (event.key !== "Tab" || !validationSheetRef.current) return;
-
-      const focusable = Array.from(
-        validationSheetRef.current.querySelectorAll<HTMLElement>(
-          focusableSelector,
-        ),
-      ).filter((element) => element.offsetParent !== null);
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    window.requestAnimationFrame(() => {
-      validationSheetRef.current
-        ?.querySelector<HTMLElement>(".validation-mobile-close")
-        ?.focus();
-    });
-
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      (validationTrigger ?? previousFocus)?.focus();
-    };
-  }, [layoutMode, validationPanelOpen]);
 
   useEffect(() => {
     if (!cardId) return;
@@ -212,17 +163,39 @@ export default function CardPage() {
     setEvidenceActionError(null);
     setValidationHistory([]);
     setValidationError(null);
-    setFeedback(null);
-    setValidating(false);
     setNextReviewAt(null);
     setCardListItem(null);
+    setCardSetDetail(null);
     setPager(EMPTY_PAGER);
     setOpenKeyPointId(null);
     setEvidencePanelOpen(false);
-    setValidationPanelOpen(false);
     setLifecycleAction("idle");
     setLifecycleMessage(null);
   }, [cardId]);
+
+  useEffect(() => {
+    const parentSetId =
+      data?.card.id === cardId ? data.card.cardSetId : null;
+    if (!parentSetId) {
+      setCardSetDetail(null);
+      return;
+    }
+
+    let cancelled = false;
+    void api.getCardSet(parentSetId)
+      .then((result) => {
+        if (!cancelled) setCardSetDetail(result);
+      })
+      .catch(() => {
+        // Membership still comes from the card row; sibling navigation is an
+        // enhancement and must not block the card itself.
+        if (!cancelled) setCardSetDetail(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cardId, data?.card.cardSetId, data?.card.id]);
 
   const fetchCardDetail = useCallback(async () => {
     if (!cardId) return;
@@ -237,16 +210,14 @@ export default function CardPage() {
       }
       setData(result);
       setCardError(null);
-    } catch (caught) {
+    } catch {
       if (
         !mountedRef.current ||
         activeCardIdRef.current !== requestCardId
       ) {
         return;
       }
-      setCardError(
-        caught instanceof Error ? caught.message : "学习卡暂时无法读取。",
-      );
+      setCardError("暂时无法读取这张学习卡，请稍后重试。");
     }
   }, [cardId]);
 
@@ -272,16 +243,14 @@ export default function CardPage() {
       }
       setEvidence(result);
       setEvidenceError(null);
-    } catch (caught) {
+    } catch {
       if (
         !mountedRef.current ||
         activeCardIdRef.current !== requestCardId
       ) {
         return;
       }
-      setEvidenceError(
-        caught instanceof Error ? caught.message : "证据暂时无法读取。",
-      );
+      setEvidenceError("证据暂时无法读取，请稍后重试。");
     }
   }, [cardId]);
 
@@ -298,45 +267,14 @@ export default function CardPage() {
       }
       setValidationHistory(result.items);
       setValidationError(null);
-    } catch (caught) {
+    } catch {
       if (
         !mountedRef.current ||
         activeCardIdRef.current !== requestCardId
       ) {
         return;
       }
-      setValidationError(
-        caught instanceof Error ? caught.message : "验证记录暂时无法读取。",
-      );
-    }
-  }, [cardId]);
-
-  const refreshReviewSchedule = useCallback(async () => {
-    if (!cardId) return;
-    const requestCardId = cardId;
-    try {
-      let items: CardListItem[] = [];
-      let cursor: string | undefined;
-
-      for (let page = 0; page < 10; page += 1) {
-        const result = await api.listCards({ cursor, limit: 100 });
-        if (
-          !mountedRef.current ||
-          activeCardIdRef.current !== requestCardId
-        ) {
-          return;
-        }
-        items = appendUniqueCards(items, result.items);
-        const current = items.find((item) => item.id === cardId);
-        if (current || !result.nextCursor) {
-          setCardListItem(current ?? null);
-          setNextReviewAt(current?.nextReviewAt ?? null);
-          return;
-        }
-        cursor = result.nextCursor ?? undefined;
-      }
-    } catch {
-      // 复习计划失败不阻断阅读或验证。
+      setValidationError("验证记录暂时无法读取，请稍后重试。");
     }
   }, [cardId]);
 
@@ -456,9 +394,7 @@ export default function CardPage() {
           return;
         }
         if (job.status === "failed" || job.status === "dead") {
-          setLifecycleMessage(
-            `重新生成失败：${job.lastError ?? "未知错误"}`,
-          );
+          setLifecycleMessage("学习卡暂时没有重新生成成功，请稍后重试。");
           setLifecycleAction("idle");
           return;
         }
@@ -467,16 +403,14 @@ export default function CardPage() {
 
       setLifecycleMessage("等待超时，可稍后返回列表查看生成结果。");
       setLifecycleAction("idle");
-    } catch (caught) {
+    } catch {
       if (
         !mountedRef.current ||
         activeCardIdRef.current !== requestCardId
       ) {
         return;
       }
-      setLifecycleMessage(
-        `操作失败：${caught instanceof Error ? caught.message : "未知错误"}`,
-      );
+      setLifecycleMessage("重新生成暂时没有开始，请稍后重试。");
       setLifecycleAction("idle");
     }
   }, [backHref, backLabel, cardId, router]);
@@ -495,126 +429,17 @@ export default function CardPage() {
           return;
         }
         await fetchEvidence();
-      } catch (caught) {
+      } catch {
         if (
           !mountedRef.current ||
           activeCardIdRef.current !== requestCardId
         ) {
           return;
         }
-        const message =
-          caught instanceof Error ? caught.message : "证据状态更新失败。";
-        setEvidenceActionError(message);
+        setEvidenceActionError("证据状态暂时没有更新成功，请稍后重试。");
       }
     },
     [cardId, fetchEvidence],
-  );
-
-  const validationQuestions = useMemo<ValidationQuestion[]>(() => {
-    if (!data || !evidence) return [];
-
-    return data.keyPoints
-      .filter((keyPoint) => {
-        const group = evidence.find(
-          (item) => item.keyPoint.id === keyPoint.id,
-        );
-        return group?.evidences.some((item) =>
-          isHardEvidence(
-            item.alignment,
-            item.effectiveOverride ?? item.userOverride,
-          ),
-        );
-      })
-      .slice(0, 3)
-      .map((keyPoint, index) => {
-        const { type, prompt } = buildValidationPrompt(keyPoint.claim, index);
-        return {
-          type,
-          prompt,
-          refClaim: buildKnowledgeLabel(keyPoint.claim),
-          refQuote: keyPoint.quoteText,
-          keyPointId: keyPoint.id,
-        };
-      });
-  }, [data, evidence]);
-
-  const handleValidation = useCallback(
-    async (
-      answer: string,
-      question: ValidationQuestion,
-    ): Promise<ValidationFeedback> => {
-      if (!cardId || !question.keyPointId) {
-        throw new Error("缺少学习卡或关键要点。");
-      }
-
-      const requestCardId = cardId;
-      const isCurrentRequest = () =>
-        mountedRef.current &&
-        activeCardIdRef.current === requestCardId;
-      setValidating(true);
-      try {
-        const { questionId } = await api.createValidationQuestion(cardId, {
-          keyPointId: question.keyPointId,
-          questionType: question.type,
-          question: question.prompt,
-        });
-        if (!isCurrentRequest()) throw new Error("页面已切换");
-
-        const { jobId } = await api.submitValidation(cardId, {
-          questionId,
-          userAnswer: answer,
-        });
-        if (!isCurrentRequest()) throw new Error("页面已切换");
-
-        // 轮询超时对齐 handler 超时（90s）+ 15s 余量 = 105s，消除"假超时"。
-        const deadline = Date.now() + 105_000;
-        let delay = 1000;
-        let completed = false;
-        while (Date.now() < deadline) {
-          await new Promise((resolve) => window.setTimeout(resolve, delay));
-          if (!isCurrentRequest()) throw new Error("页面已切换");
-          const job = await api.getJob(jobId);
-          if (job.status === "succeeded") {
-            completed = true;
-            break;
-          }
-          if (job.status === "failed" || job.status === "dead") {
-            throw new Error(job.lastError || "验证任务执行失败");
-          }
-          delay = Math.min(3000, delay * 1.5);
-        }
-
-        if (!completed) throw new Error("验证判定超时，请稍后重试");
-
-        const result = await api.getValidationByJobId(jobId);
-        if (!isCurrentRequest()) throw new Error("页面已切换");
-        if (!result?.feedback) throw new Error("验证结果尚未准备完成");
-
-        setValidationHistory((current) => [
-          result,
-          ...current.filter((item) => item.id !== result.id),
-        ]);
-        setFeedback(result.feedback);
-        void refreshReviewSchedule();
-
-        try {
-          const fresh = await api.listValidations(cardId);
-          if (isCurrentRequest()) {
-            setValidationHistory([
-              result,
-              ...fresh.items.filter((item) => item.id !== result.id),
-            ]);
-          }
-        } catch {
-          // 新结果已写入界面，历史刷新失败不回滚成功状态。
-        }
-
-        return result.feedback;
-      } finally {
-        if (isCurrentRequest()) setValidating(false);
-      }
-    },
-    [cardId, refreshReviewSchedule],
   );
 
   const currentData = data?.card.id === cardId ? data : null;
@@ -631,7 +456,11 @@ export default function CardPage() {
           backLabel={backLabel}
           replace={shouldReplaceBackNavigation}
         />
-        <section className="card-detail-state" aria-labelledby="card-error-title">
+        <section
+          className="card-detail-state"
+          role="alert"
+          aria-labelledby="card-error-title"
+        >
           <span className="card-detail-state-icon is-error">
             <Icon.Warn aria-hidden="true" />
           </span>
@@ -664,6 +493,7 @@ export default function CardPage() {
         />
         <section
           className="card-detail-loading"
+          role="status"
           aria-live="polite"
           aria-busy="true"
         >
@@ -698,11 +528,31 @@ export default function CardPage() {
     cardListItem?.validationCount ?? 0,
     validationHistory.length,
   );
-  const latestFeedback = feedback ?? validationHistory[0]?.feedback ?? null;
+  const latestFeedback = validationHistory[0]?.feedback ?? null;
   const isCardActive = card.status === "active";
   const evidenceLoading = evidence === null && !evidenceError;
+  const eligibleKeyPointCount = evidenceGroups.filter((group) =>
+    group.evidences.some((item) =>
+      isHardEvidence(
+        item.alignment,
+        item.effectiveOverride ?? item.userOverride,
+      ),
+    ),
+  ).length;
   const canValidate =
-    isCardActive && !evidenceLoading && validationQuestions.length > 0;
+    isCardActive && !evidenceLoading && eligibleKeyPointCount > 0;
+  const questionFirstEnabled = isQuestionFirstUIEnabled();
+  const canStartValidation = questionFirstEnabled && canValidate;
+  const partialCoverageWarning = readPartialCardCoverageWarning(
+    card.schemaJson,
+  );
+  const cardPresentation = partialCoverageWarning
+    ? { label: "部分结果", tone: "warning" as const }
+    : statusMap.cardStatus(card.status);
+  const cardTitle = card.schemaJson.title?.trim() || "未命名学习卡";
+  const cardSummary =
+    card.schemaJson.summary?.trim() || "这张学习卡还没有核心理解摘要。";
+  const createdAtLabel = formatCardDate(card.createdAt);
   const activeGroup = openKeyPointId
     ? evidenceGroups.find(
         (group) => group.keyPoint.id === openKeyPointId,
@@ -711,12 +561,31 @@ export default function CardPage() {
   const activeKeyPoint = keyPoints.find(
     (keyPoint) => keyPoint.id === openKeyPointId,
   );
-  const initialValidation = validationHistory[0];
+  const setCards = cardSetDetail
+    ? [...cardSetDetail.cards].sort(compareCardSetMembers)
+    : [];
+  const setCardIndex = setCards.findIndex(
+    (item) => item.card.id === card.id,
+  );
+  const previousSetCard =
+    setCardIndex > 0 ? setCards[setCardIndex - 1] : null;
+  const nextSetCard =
+    setCardIndex >= 0 ? setCards[setCardIndex + 1] ?? null : null;
 
   const openEvidenceDetail = (keyPointId: string) => {
     setEvidencePanelOpen(false);
-    setValidationPanelOpen(false);
     setOpenKeyPointId(keyPointId);
+  };
+
+  const revealEvidenceWorkspace = () => {
+    if (layoutMode === "compact") {
+      setEvidencePanelOpen(true);
+      return;
+    }
+
+    document
+      .querySelector<HTMLElement>('[data-ui="evidence-rail"]')
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   return (
@@ -735,15 +604,9 @@ export default function CardPage() {
             <Icon.Chevron aria-hidden="true" />
             <span>{backLabel}</span>
           </Link>
-          <span
-            className={`card-detail-status card-detail-status--${card.status}`}
-          >
-            {card.status === "active"
-              ? "使用中"
-              : card.status === "superseded"
-                ? "历史版本"
-                : "已归档"}
-          </span>
+          <StatusChip tone={cardPresentation.tone} size="sm" dot>
+            {cardPresentation.label}
+          </StatusChip>
         </div>
 
         <nav className="card-detail-pager" aria-label="学习卡导航">
@@ -796,17 +659,6 @@ export default function CardPage() {
         </nav>
 
         <div className="card-detail-header-actions">
-          {layoutMode !== "wide" && (
-            <button
-              type="button"
-              className="card-detail-header-action card-detail-evidence-trigger"
-              onClick={() => setEvidencePanelOpen(true)}
-            >
-              <Icon.Link aria-hidden="true" />
-              <span>证据</span>
-              <b>{evidenceCount}</b>
-            </button>
-          )}
           {isCardActive && isOwner && (
             <button
               type="button"
@@ -837,192 +689,233 @@ export default function CardPage() {
         </div>
       </header>
 
-      <div className="card-detail-alerts" aria-live="polite">
-        {evidenceError && layoutMode !== "wide" && (
-          <div className="card-detail-alert is-danger">
-            <Icon.Warn aria-hidden="true" />
-            <span>证据加载失败，学习卡正文仍可阅读。</span>
-            <button type="button" onClick={() => void fetchEvidence()}>
-              重试
-            </button>
-          </div>
+      <div className="card-detail-main">
+        {card.cardSetId && (
+          <nav
+            className="card-detail-set-navigation"
+            aria-label="卡组内学习卡导航"
+          >
+            <Link
+              href={`/card-sets/${card.cardSetId}`}
+              className="card-detail-set-link"
+            >
+              <Icon.Card aria-hidden="true" />
+              <span>
+                {cardSetDetail?.cardSet.title?.trim() || "查看所属卡组"}
+              </span>
+            </Link>
+            {setCardIndex >= 0 && (
+              <>
+                <span className="card-detail-set-position">
+                  {card.scope === "overview" ? "总览卡" : "章节卡"} ·{" "}
+                  {setCardIndex + 1} / {setCards.length}
+                </span>
+                <span className="card-detail-set-siblings">
+                  {previousSetCard ? (
+                    <Link
+                      href={`/cards/${previousSetCard.card.id}`}
+                      aria-label="卡组内上一张学习卡"
+                    >
+                      <Icon.Chevron aria-hidden="true" />
+                      上一张
+                    </Link>
+                  ) : (
+                    <span aria-hidden="true">上一张</span>
+                  )}
+                  {nextSetCard ? (
+                    <Link
+                      href={`/cards/${nextSetCard.card.id}`}
+                      aria-label="卡组内下一张学习卡"
+                    >
+                      下一张
+                      <Icon.Chevron aria-hidden="true" />
+                    </Link>
+                  ) : (
+                    <span aria-hidden="true">下一张</span>
+                  )}
+                </span>
+              </>
+            )}
+          </nav>
         )}
-        {lifecycleMessage && (
-          <div className="card-detail-alert is-info">
-            <Icon.Refresh aria-hidden="true" />
-            <span>{lifecycleMessage}</span>
+        <div className="card-detail-alerts" aria-live="polite">
+          {partialCoverageWarning && (
+            <div
+              className="card-detail-alert card-detail-partial-alert is-warning"
+              role="status"
+            >
+              <Icon.Warn aria-hidden="true" />
+              <div className="card-detail-partial-alert-copy">
+                <strong>部分结果</strong>
+                <p>
+                  生成时排除了 {partialCoverageWarning.excludedImageCount}{" "}
+                  张图片。这张卡不会替换完整学习卡，也不能用于验证或复习。
+                </p>
+                {partialCoverageWarning.excludedImages.length > 0 && (
+                  <ul aria-label="已排除的图片素材">
+                    {partialCoverageWarning.excludedImages
+                      .slice(0, 5)
+                      .map((image, index) => (
+                        <li key={image.imageAssetId}>
+                          缺失图片 {index + 1}
+                          <span>
+                            素材{" "}
+                            <code>
+                              {formatSafeImageUnitReference(image.imageAssetId)}
+                            </code>
+                          </span>
+                        </li>
+                      ))}
+                    {partialCoverageWarning.excludedImages.length > 5 && (
+                      <li>
+                        另有{" "}
+                        {partialCoverageWarning.excludedImages.length - 5}{" "}
+                        张图片未展开
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+          {evidenceError && layoutMode === "compact" && (
+            <div className="card-detail-alert is-danger">
+              <Icon.Warn aria-hidden="true" />
+              <span>证据暂时没有载入，学习卡正文仍可阅读。</span>
+              <button type="button" onClick={() => void fetchEvidence()}>
+                重试
+              </button>
+            </div>
+          )}
+          {validationError && validationHistory.length === 0 && (
+            <div className="card-detail-alert is-warning">
+              <Icon.Warn aria-hidden="true" />
+              <span>验证记录暂时没有载入，不影响继续阅读。</span>
+              <button type="button" onClick={() => void fetchValidations()}>
+                重试
+              </button>
+            </div>
+          )}
+          {lifecycleMessage && (
+            <div className="card-detail-alert is-info">
+              <Icon.Refresh aria-hidden="true" />
+              <span>{lifecycleMessage}</span>
+            </div>
+          )}
+        </div>
+
+        <section
+          className="card-detail-overview"
+          aria-labelledby="card-detail-title"
+        >
+          <div className="card-detail-overview-grid">
+            <div className="card-detail-overview-copy">
+              <div className="card-detail-overview-meta">
+                <span className="card-detail-overview-mobile-status">
+                  <StatusChip tone={cardPresentation.tone} size="sm" dot>
+                    {cardPresentation.label}
+                  </StatusChip>
+                </span>
+                <time dateTime={card.createdAt}>创建于 {createdAtLabel}</time>
+              </div>
+              <span className="card-detail-overview-kicker">
+                <i aria-hidden="true" />
+                个人理解工作台
+              </span>
+              <h1 id="card-detail-title">{cardTitle}</h1>
+              <div className="card-detail-core-understanding">
+                <span className="card-detail-core-icon" aria-hidden="true">
+                  <Icon.Sparkle />
+                </span>
+                <div>
+                  <span>核心理解</span>
+                  <p>{cardSummary}</p>
+                </div>
+              </div>
+            </div>
+
+            {layoutMode !== "compact" && (
+              <CardNextStep
+                cardId={cardId}
+                enabled={questionFirstEnabled}
+                active={isCardActive}
+                canValidate={canValidate}
+                evidenceLoading={evidenceLoading}
+                eligibleKeyPointCount={eligibleKeyPointCount}
+                onOpenEvidence={revealEvidenceWorkspace}
+              />
+            )}
           </div>
-        )}
+
+          <UnderstandingFacts
+            evidenceCount={alignedCount}
+            validationCount={validationCount}
+            latestFeedback={latestFeedback}
+            nextReviewAt={nextReviewAt}
+          />
+        </section>
+
+        <section
+          className="card-detail-content-grid"
+          aria-label="学习卡正文与学习依据"
+        >
+          <StudyPaper
+            data={currentData}
+            groups={evidenceGroups}
+            latestFeedback={latestFeedback}
+            onOpenEvidence={openEvidenceDetail}
+          />
+
+          {layoutMode !== "compact" && (
+            <aside className="card-detail-side-rail" aria-label="证据与复习计划">
+              <EvidenceRail
+                groups={evidenceGroups}
+                selectedKeyPointId={openKeyPointId}
+                loading={evidenceLoading}
+                error={evidenceError}
+                onSelect={openEvidenceDetail}
+                onRetry={() => void fetchEvidence()}
+              />
+              <ReviewPlanCard
+                alignedCount={alignedCount}
+                validationCount={validationCount}
+                nextReviewAt={nextReviewAt}
+              />
+            </aside>
+          )}
+        </section>
       </div>
 
-      <section
-        className="study-desk-grid"
-        aria-label="学习卡阅读与验证工作台"
-      >
-        {layoutMode === "wide" && (
-          <aside className="study-left-column" aria-label="证据与复习计划">
-            <EvidenceRail
-              groups={evidenceGroups}
-              selectedKeyPointId={openKeyPointId}
-              loading={evidenceLoading}
-              error={evidenceError}
-              onSelect={openEvidenceDetail}
-              onRetry={() => void fetchEvidence()}
-            />
-            <ReviewPlanCard
-              alignedCount={alignedCount}
-              validationCount={validationCount}
-              nextReviewAt={nextReviewAt}
-            />
-          </aside>
-        )}
-
-        <StudyPaper
-          data={currentData}
-          groups={evidenceGroups}
-          latestFeedback={latestFeedback}
-          onOpenEvidence={openEvidenceDetail}
-        />
-
-        <aside
-          className={`validation-side ${
-            validationPanelOpen ? "is-mobile-open" : ""
-          }`}
-          role={layoutMode === "compact" ? "dialog" : undefined}
-          aria-modal={layoutMode === "compact" ? true : undefined}
-          aria-label={
-            layoutMode === "compact" ? "验证理解" : undefined
-          }
-          aria-hidden={
-            layoutMode === "compact" && !validationPanelOpen
-              ? true
-              : undefined
-          }
-        >
-          {layoutMode === "compact" && (
-            <button
-              type="button"
-              className="validation-sheet-backdrop"
-              onClick={() => setValidationPanelOpen(false)}
-              aria-label="关闭验证面板"
-              tabIndex={-1}
-            />
-          )}
-          <div ref={validationSheetRef} className="validation-side-shell">
-            <button
-              type="button"
-              className="validation-mobile-close"
-              onClick={() => setValidationPanelOpen(false)}
-              aria-label="关闭验证面板"
-            >
-              <Icon.Close aria-hidden="true" />
-            </button>
-
-            {validationError && validationHistory.length === 0 && (
-              <div className="validation-history-error" role="status">
-                <span>验证记录暂时无法读取，但仍可以提交新的回答。</span>
-                <button type="button" onClick={() => void fetchValidations()}>
-                  重试
-                </button>
-              </div>
-            )}
-
-            {canValidate ? (
-              <ValidationPanel
-                questions={validationQuestions}
-                evidenceQuote={validationQuestions[0]?.refQuote ?? ""}
-                onSubmit={handleValidation}
-                busy={validating}
-                feedback={latestFeedback}
-                initialAnswer={initialValidation?.userAnswer ?? ""}
-                initialKeyPointId={initialValidation?.keyPointId ?? null}
-                nextReviewAt={nextReviewAt}
-                onOpenEvidence={openEvidenceDetail}
-              />
-            ) : (
-              <section className="ref-validation-panel ref-validation-empty">
-                <header className="ref-validation-header">
-                  <div className="ref-validation-heading">
-                    <span className="ref-validation-bulb" aria-hidden="true">
-                      ✦
-                    </span>
-                    <h2 className="ref-validation-title">验证理解</h2>
-                  </div>
-                </header>
-                <div className="ref-validation-empty-body">
-                  <span className="ref-validation-empty-icon">
-                    {evidenceLoading ? (
-                      <Icon.Refresh aria-hidden="true" />
-                    ) : (
-                      <Icon.Warn aria-hidden="true" />
-                    )}
-                  </span>
-                  <h3>
-                    {!isCardActive
-                      ? "历史卡片仅供阅读"
-                      : evidenceLoading
-                        ? "正在检查证据"
-                        : "需要硬证据才能验证"}
-                  </h3>
-                  <p>
-                    {!isCardActive
-                      ? "此学习卡不是当前版本，因此不再接受新的理解验证。"
-                      : evidenceLoading
-                        ? "证据加载完成后，符合条件的关键要点会自动生成验证题。"
-                        : "先打开证据线索，确认至少一条引用能够支持当前关键要点。"}
-                  </p>
-                  {layoutMode !== "wide" && (
-                    <button
-                      type="button"
-                      onClick={() => setEvidencePanelOpen(true)}
-                    >
-                      查看证据线索
-                    </button>
-                  )}
-                </div>
-              </section>
-            )}
-          </div>
-        </aside>
-      </section>
-
-      <UnderstandingFacts
-        evidenceCount={alignedCount}
-        validationCount={validationCount}
-        latestFeedback={latestFeedback}
-        nextReviewAt={nextReviewAt}
-      />
-
       {layoutMode === "compact" &&
-        !validationPanelOpen &&
         !evidencePanelOpen &&
         !openKeyPointId && (
-        <nav
-          className="card-detail-action-dock"
-          aria-label="学习卡详情操作"
-        >
-          <button
-            type="button"
-            onClick={() => setEvidencePanelOpen(true)}
+          <nav
+            className={`card-detail-action-dock ${canStartValidation ? "" : "is-single"}`}
+            aria-label="学习卡详情操作"
           >
-            <Icon.Link aria-hidden="true" />
-            <span>证据线索</span>
-            <b>{evidenceCount}</b>
-          </button>
-          <button
-            ref={validationTriggerRef}
-            type="button"
-            className="is-primary"
-            onClick={() => setValidationPanelOpen(true)}
-          >
-            <Icon.Check aria-hidden="true" />
-            <span>{canValidate ? "验证理解" : "查看验证状态"}</span>
-          </button>
-        </nav>
+            <button
+              type="button"
+              onClick={() => setEvidencePanelOpen(true)}
+            >
+              <Icon.Link aria-hidden="true" />
+              <span>{canStartValidation ? "证据线索" : "证据与复习"}</span>
+              <b>{evidenceCount}</b>
+            </button>
+            {canStartValidation && (
+              <button
+                type="button"
+                className="is-primary"
+                onClick={() => router.push(`/cards/${cardId}/validate`)}
+              >
+                <Icon.Target aria-hidden="true" />
+                <span>开始验证</span>
+              </button>
+            )}
+          </nav>
         )}
 
       <Drawer
-        open={evidencePanelOpen && layoutMode !== "wide"}
+        open={evidencePanelOpen && layoutMode === "compact"}
         onClose={() => setEvidencePanelOpen(false)}
         title="证据与复习"
         side="right"
@@ -1056,6 +949,101 @@ export default function CardPage() {
         />
       )}
     </div>
+  );
+}
+
+function CardNextStep({
+  cardId,
+  enabled,
+  active,
+  canValidate,
+  evidenceLoading,
+  eligibleKeyPointCount,
+  onOpenEvidence,
+}: {
+  cardId: string;
+  enabled: boolean;
+  active: boolean;
+  canValidate: boolean;
+  evidenceLoading: boolean;
+  eligibleKeyPointCount: number;
+  onOpenEvidence: () => void;
+}) {
+  const state = !active
+    ? "readonly"
+    : !enabled
+      ? "paused"
+      : evidenceLoading
+        ? "checking"
+        : canValidate
+          ? "ready"
+          : "needs-evidence";
+  const title = !active
+    ? "历史卡片仅供阅读"
+    : !enabled
+      ? "独立验证暂未开启"
+      : evidenceLoading
+        ? "正在检查验证条件"
+        : canValidate
+          ? "用一次独立回答检验理解"
+          : "先补齐可验证的学习依据";
+  const detail = !active
+    ? "这张卡已有更新版本，仍可回看内容与证据记录。"
+    : !enabled
+      ? "你仍可阅读理解要点、核对证据并查看复习安排。"
+      : evidenceLoading
+        ? "证据载入完成后，会自动确认哪些要点可以进入独立验证。"
+        : canValidate
+          ? `${eligibleKeyPointCount} 个要点已具备验证依据。作答时不会提前展示结论或原文。`
+          : "至少确认一条能够支持理解要点的硬证据，才能开始独立验证。";
+  const statusLabel = !active
+    ? "只读状态"
+    : !enabled
+      ? "功能已暂停"
+      : evidenceLoading
+        ? "检查中"
+        : canValidate
+          ? "可以开始"
+          : "等待硬证据";
+
+  return (
+    <aside className="card-detail-next-step" data-state={state} aria-labelledby="card-next-step-title">
+      <header className="card-detail-next-step-header">
+        <span className="card-detail-next-step-icon" aria-hidden="true">
+          <Icon.Target />
+        </span>
+        <div>
+          <span>下一步</span>
+          <h2 id="card-next-step-title">理解验证</h2>
+        </div>
+        <span className="card-detail-next-step-status">
+          <i aria-hidden="true" />
+          {statusLabel}
+        </span>
+      </header>
+
+      <div className="card-detail-next-step-body">
+        <h3>{title}</h3>
+        <p>{detail}</p>
+
+        {enabled && active && canValidate ? (
+          <Link href={`/cards/${cardId}/validate`} className="card-detail-next-step-primary">
+            开始验证
+            <Icon.Arrow aria-hidden="true" />
+          </Link>
+        ) : active && !evidenceLoading ? (
+          <button type="button" className="card-detail-next-step-secondary" onClick={onOpenEvidence}>
+            <Icon.Link aria-hidden="true" />
+            查看学习依据
+          </button>
+        ) : null}
+      </div>
+
+      <p className="card-detail-next-step-privacy">
+        <Icon.Lock aria-hidden="true" />
+        验证在独立页面进行，阅读内容不会被带入作答区。
+      </p>
+    </aside>
   );
 }
 
@@ -1130,6 +1118,25 @@ function withReviewReturnTarget(
   }
 }
 
+function compareCardSetMembers(
+  left: CardDetailResponse,
+  right: CardDetailResponse,
+): number {
+  const leftScope = left.card.scope === "overview" ? 0 : 1;
+  const rightScope = right.card.scope === "overview" ? 0 : 1;
+  if (leftScope !== rightScope) return leftScope - rightScope;
+
+  const leftOrdinal =
+    typeof left.card.ordinal === "number"
+      ? left.card.ordinal
+      : Number.MAX_SAFE_INTEGER;
+  const rightOrdinal =
+    typeof right.card.ordinal === "number"
+      ? right.card.ordinal
+      : Number.MAX_SAFE_INTEGER;
+  return leftOrdinal - rightOrdinal || left.card.id.localeCompare(right.card.id);
+}
+
 function appendUniqueCards(
   current: CardListItem[],
   incoming: CardListItem[],
@@ -1145,15 +1152,12 @@ function appendUniqueCards(
   ];
 }
 
-function buildKnowledgeLabel(claim: string): string {
-  return compactText(
-    normalizeKeyPointClaim(claim).replace(/[。？?！!]$/, ""),
-    18,
-  );
-}
-
-function compactText(text: string | null | undefined, limit: number): string {
-  const value = (text ?? "").replace(/\s+/g, " ").trim();
-  if (value.length <= limit) return value;
-  return `${value.slice(0, limit - 3).trim()}...`;
+function formatCardDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "日期未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(date);
 }

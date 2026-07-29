@@ -12,6 +12,7 @@ import { Icon } from "@/components/ui/icons";
 import { api, type CardListItem } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
 import { statusMap } from "@/lib/status-map";
+import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
 
 type Filter = "all" | "active" | "superseded" | "archived";
 
@@ -60,6 +61,9 @@ function formatReviewSchedule(value: string | null | undefined) {
 }
 
 function nextActionLabel(card: CardListItem) {
+  if (readPartialCardCoverageWarning(card.schemaJson)) {
+    return "查看部分结果";
+  }
   if (card.status === "superseded") return "查看历史版本";
   if (card.status === "archived") return "查看归档卡片";
   if (card.reviewStatus === "pending") return "查看复习安排";
@@ -468,7 +472,12 @@ export default function CardsIndex() {
         ) : (
           <div className="cards-grid">
             {filtered.map((card, index) => {
-              const statusPresentation = statusMap.cardStatus(card.status);
+              const partialCoverageWarning = readPartialCardCoverageWarning(
+                card.schemaJson,
+              );
+              const statusPresentation = partialCoverageWarning
+                ? { label: "部分结果", tone: "warning" as const }
+                : statusMap.cardStatus(card.status);
               const evidenceHard = card.evidenceHardCount ?? 0;
               const evidenceSoft = card.evidenceSoftCount ?? 0;
               const evidenceTotal = card.evidenceTotalCount ?? 0;
@@ -498,7 +507,7 @@ export default function CardsIndex() {
                 <Link
                   key={card.id}
                   href={`/cards/${card.id}`}
-                  className={`cards-card cards-card--${card.status} ${hasReview ? "cards-card--scheduled" : ""} ${reviewSchedule?.isDue ? "cards-card--due" : ""}`}
+                  className={`cards-card cards-card--${card.status} ${partialCoverageWarning ? "cards-card--partial" : ""} ${hasReview ? "cards-card--scheduled" : ""} ${reviewSchedule?.isDue ? "cards-card--due" : ""}`}
                   data-ui="study-card"
                   aria-labelledby={`${cardTitleId} ${cardDescriptionId}`}
                 >
@@ -543,6 +552,16 @@ export default function CardsIndex() {
                       {cardSummary(card)}
                     </p>
                   </div>
+
+                  {partialCoverageWarning && (
+                    <p className="cards-card-partial-warning">
+                      <Icon.Warn aria-hidden="true" />
+                      <span>
+                        已排除 {partialCoverageWarning.excludedImageCount}{" "}
+                        张图片；不会替换完整学习卡，不能用于验证或复习。
+                      </span>
+                    </p>
+                  )}
 
                   <dl className="cards-card-facts">
                     <div>

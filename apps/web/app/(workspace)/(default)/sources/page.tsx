@@ -95,13 +95,13 @@ export default function SourcesPage() {
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
 
   const [showCreate, setShowCreate] = useState(false);
-  const [createType, setCreateType] = useState<SourceType>("text");
-  const [createTitle, setCreateTitle] = useState("");
-  const [createContent, setCreateContent] = useState("");
-  const [createUrl, setCreateUrl] = useState("");
-  const [createAttempted, setCreateAttempted] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [captureText, setCaptureText] = useState("");
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const [captureMessage, setCaptureMessage] = useState<{
+    tone: "success" | "error";
+    text: string;
+    sourceId?: string;
+  } | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<FilterStatus>(
     () => sourceRouteState?.status ?? "all",
@@ -123,11 +123,11 @@ export default function SourcesPage() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollDelayRef = useRef(2000);
   const listRequestRef = useRef(0);
-  const createRequestRef = useRef(false);
   const loadMoreRequestRef = useRef(false);
   const rowActionRef = useRef(false);
+  const captureBusyRef = useRef(false);
   const createTriggerRef = useRef<HTMLButtonElement>(null);
-  const createTitleRef = useRef<HTMLInputElement>(null);
+  const captureInputRef = useRef<HTMLTextAreaElement>(null);
   const libraryHeadingRef = useRef<HTMLHeadingElement>(null);
   const sourceLinkRefs = useRef(new Map<string, HTMLAnchorElement>());
 
@@ -243,7 +243,9 @@ export default function SourcesPage() {
 
   useEffect(() => {
     if (!showCreate) return;
-    window.requestAnimationFrame(() => createTitleRef.current?.focus());
+    window.requestAnimationFrame(() => {
+      captureInputRef.current?.focus({ preventScroll: true });
+    });
   }, [showCreate]);
 
   useEffect(() => {
@@ -290,47 +292,58 @@ export default function SourcesPage() {
   }
 
   function closeCreatePanel() {
-    if (createRequestRef.current) return;
+    if (captureBusyRef.current) return;
     setShowCreate(false);
-    setCreateAttempted(false);
-    setCreateError(null);
+    setCaptureMessage(null);
     window.requestAnimationFrame(() => createTriggerRef.current?.focus());
   }
 
-  async function handleCreate() {
-    const title = createTitle.trim();
-    const content = createContent.trim();
-    const url = createUrl.trim();
-    setCreateAttempted(true);
+  async function handleCapture() {
+    const text = captureText.trim();
+    if (!text || captureBusyRef.current) return;
 
-    const invalid =
-      !title ||
-      (createType === "url" ? !isValidHttpUrl(url) : !content);
-    if (invalid || createRequestRef.current) return;
-
-    createRequestRef.current = true;
-    setCreating(true);
-    setCreateError(null);
-    try {
-      await api.createSource({
-        type: createType,
-        title,
-        content: createType === "url" ? undefined : content,
-        url: createType === "url" ? url : undefined,
+    // 保留 isOwner 拦截：成员角色不应能创建来源
+    if (!isOwner) {
+      setCaptureMessage({
+        tone: "error",
+        text: "此操作需要所有者权限，你当前是成员角色，无法执行。",
       });
-      setCreateTitle("");
-      setCreateContent("");
-      setCreateUrl("");
-      setCreateAttempted(false);
-      setShowCreate(false);
-      setStatusMessage(`“${title}”已加入资料解析队列。`);
+      return;
+    }
+
+    // 保留 URL 格式校验：防止 ftp:// 等无效 URL 发到后端
+    const isUrl = /^https?:\/\//.test(text);
+    if (isUrl && !isValidHttpUrl(text)) {
+      setCaptureMessage({
+        tone: "error",
+        text: "请输入以 http:// 或 https:// 开头的有效链接。",
+      });
+      return;
+    }
+
+    captureBusyRef.current = true;
+    setCaptureBusy(true);
+    setCaptureMessage(null);
+    try {
+      const result = isUrl
+        ? await api.createSource({ url: text })
+        : await api.createSource({ content: text });
+      setCaptureText("");
+      setCaptureMessage({
+        tone: "success",
+        text: "资料已加入解析队列，后台会继续处理。",
+        sourceId: result.source.id,
+      });
       await loadSources({ fullReload: false });
-      window.requestAnimationFrame(() => createTriggerRef.current?.focus());
+      window.requestAnimationFrame(() => captureInputRef.current?.focus());
     } catch (error) {
-      setCreateError(formatApiError(error, "创建来源失败，请重试。"));
+      setCaptureMessage({
+        tone: "error",
+        text: formatApiError(error, "收录没有完成，输入内容已为你保留，请稍后重试。"),
+      });
     } finally {
-      createRequestRef.current = false;
-      setCreating(false);
+      captureBusyRef.current = false;
+      setCaptureBusy(false);
     }
   }
 
@@ -454,23 +467,6 @@ export default function SourcesPage() {
         ? `已加载 ${sources.length} / 共 ${sourceTotal}`
         : `共 ${sourceTotal} 条资料`;
 
-  const titleError =
-    createAttempted && !createTitle.trim() ? "请填写资料标题。" : "";
-  const urlError =
-    createType === "url" &&
-    (createAttempted || createUrl.trim().length > 0) &&
-    !isValidHttpUrl(createUrl.trim())
-      ? "请输入以 http:// 或 https:// 开头的有效链接。"
-      : "";
-  const contentError =
-    createType !== "url" && createAttempted && !createContent.trim()
-      ? "请粘贴需要解析的资料内容。"
-      : "";
-  const canCreate =
-    createTitle.trim().length > 0 &&
-    (createType === "url"
-      ? isValidHttpUrl(createUrl.trim())
-      : createContent.trim().length > 0);
 
   return (
     <div className="sources-page">
@@ -503,188 +499,95 @@ export default function SourcesPage() {
       />
 
       {showCreate && isOwner && (
-        <div className="sources-create-wrap">
-          <section
-            id="source-capture-panel"
-            className="sources-capture-paper"
-            aria-labelledby="source-capture-title"
-          >
-            <header className="sources-capture-header">
+        <section
+          id="source-capture-panel"
+          className="sources-capture-wrap"
+          aria-labelledby="source-capture-title"
+        >
+          <div className="sources-capture-paper">
+            <div className="sources-capture-heading">
               <span className="sources-capture-icon" aria-hidden="true">
                 <Icon.Inbox />
               </span>
               <div>
-                <span className="sources-eyebrow">添加资料</span>
+                <span className="sources-capture-eyebrow">添加资料</span>
                 <h2 id="source-capture-title">收录一份新资料</h2>
-                <p>选择资料类型并放入原始内容，系统会在后台自动拆解和解析。</p>
+                <p>粘贴原文、Markdown、代码或网页链接，系统会自动识别类型并提取标题。</p>
+              </div>
+            </div>
+
+            <label className="sources-sr-only" htmlFor="source-capture-input">
+              待收录的资料内容
+            </label>
+            <textarea
+              id="source-capture-input"
+              ref={captureInputRef}
+              className="sources-capture-input"
+              placeholder="从这里开始粘贴，Enter 正常换行…"
+              value={captureText}
+              onChange={(event) => {
+                setCaptureText(event.target.value);
+                if (captureMessage) setCaptureMessage(null);
+              }}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  void handleCapture();
+                }
+              }}
+              rows={4}
+              disabled={captureBusy}
+            />
+
+            <div className="sources-capture-footer">
+              <div className="sources-capture-detection" aria-live="polite">
+                <Icon.Sparkle />
+                <span>
+                  {captureText.trim()
+                    ? /^https?:\/\//.test(captureText.trim())
+                      ? "识别为网页链接资料"
+                      : "系统会自动识别资料类型"
+                    : "输入后自动识别资料类型"}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>⌘ / Ctrl + Enter 提交</span>
               </div>
               <button
-                className="sources-capture-close"
-                onClick={closeCreatePanel}
+                className="sources-action-primary sources-capture-submit"
+                onClick={() => void handleCapture()}
+                disabled={captureBusy || !captureText.trim()}
                 type="button"
-                aria-label="关闭新建来源"
-                disabled={creating}
+                aria-busy={captureBusy}
               >
-                <Icon.Close aria-hidden="true" />
+                {captureBusy ? <Icon.Refresh className="sources-spin" /> : <Icon.Plus />}
+                {captureBusy ? "正在收录" : "加入解析队列"}
               </button>
-            </header>
+            </div>
 
-            <form
-              className="sources-capture-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void handleCreate();
-              }}
-              noValidate
-            >
-              <div className="sources-capture-layout">
-                <fieldset className="sources-type-picker" disabled={creating}>
-                  <legend>资料类型</legend>
-                  <div className="sources-type-grid">
-                    {(Object.keys(SOURCE_TYPE_META) as SourceType[]).map(
-                      (type) => {
-                        const meta = SOURCE_TYPE_META[type];
-                        return (
-                          <button
-                            key={type}
-                            className={`sources-type-option ${createType === type ? "is-active" : ""}`}
-                            onClick={() => {
-                              setCreateType(type);
-                              setCreateAttempted(false);
-                              setCreateError(null);
-                            }}
-                            type="button"
-                            aria-pressed={createType === type}
-                          >
-                            <span className="sources-type-option-icon">
-                              <SourceTypeIcon type={type} />
-                            </span>
-                            <span>
-                              <strong>{meta.label}</strong>
-                              <small>{meta.hint}</small>
-                            </span>
-                          </button>
-                        );
-                      },
-                    )}
-                  </div>
-                </fieldset>
-
-                <div className="sources-capture-fields">
-                  <label className="sources-field" htmlFor="source-title">
-                    <span>资料标题</span>
-                    <input
-                      ref={createTitleRef}
-                      id="source-title"
-                      className="sources-input"
-                      value={createTitle}
-                      onChange={(event) => setCreateTitle(event.target.value)}
-                      placeholder="例如：Attention Is All You Need"
-                      maxLength={500}
-                      required
-                      disabled={creating}
-                      aria-invalid={Boolean(titleError)}
-                      aria-describedby={titleError ? "source-title-error" : undefined}
-                    />
-                    {titleError && (
-                      <small id="source-title-error" className="sources-field-error">
-                        {titleError}
-                      </small>
-                    )}
-                  </label>
-
-                  {createType === "url" ? (
-                    <label className="sources-field" htmlFor="source-url">
-                      <span>网页链接</span>
-                      <input
-                        id="source-url"
-                        className="sources-input"
-                        type="url"
-                        inputMode="url"
-                        autoComplete="url"
-                        value={createUrl}
-                        onChange={(event) => setCreateUrl(event.target.value)}
-                        placeholder="https://example.com/article"
-                        required
-                        disabled={creating}
-                        aria-invalid={Boolean(urlError)}
-                        aria-describedby={urlError ? "source-url-error" : "source-url-help"}
-                      />
-                      {urlError ? (
-                        <small id="source-url-error" className="sources-field-error">
-                          {urlError}
-                        </small>
-                      ) : (
-                        <small id="source-url-help" className="sources-field-help">
-                          仅支持可访问的 HTTP 或 HTTPS 网页。
-                        </small>
-                      )}
-                    </label>
-                  ) : (
-                    <label className="sources-field" htmlFor="source-content">
-                      <span>{SOURCE_TYPE_META[createType].label}内容</span>
-                      <textarea
-                        id="source-content"
-                        className="sources-textarea"
-                        value={createContent}
-                        onChange={(event) => setCreateContent(event.target.value)}
-                        placeholder={
-                          createType === "code"
-                            ? "粘贴需要理解的代码片段…"
-                            : createType === "markdown"
-                              ? "粘贴 Markdown 内容…"
-                              : "粘贴文章、摘录或其他正文…"
-                        }
-                        rows={8}
-                        required
-                        disabled={creating}
-                        aria-invalid={Boolean(contentError)}
-                        aria-describedby={contentError ? "source-content-error" : undefined}
-                      />
-                      {contentError && (
-                        <small id="source-content-error" className="sources-field-error">
-                          {contentError}
-                        </small>
-                      )}
-                    </label>
-                  )}
-                </div>
+            {captureMessage && (
+              <div
+                className={`sources-capture-message is-${captureMessage.tone}`}
+                role={captureMessage.tone === "error" ? "alert" : "status"}
+                aria-live="polite"
+              >
+                {captureMessage.tone === "success" ? <Icon.Check /> : <Icon.Warn />}
+                <span>{captureMessage.text}</span>
+                {captureMessage.sourceId && (
+                  <Link
+                    href={
+                      withSourceLibraryReturnTarget(
+                        `/sources/${captureMessage.sourceId}`,
+                        sourceLibraryReturnTarget,
+                      ) ?? `/sources/${captureMessage.sourceId}`
+                    }
+                  >
+                    打开来源
+                  </Link>
+                )}
               </div>
-
-              {createError && (
-                <div className="sources-create-error" role="alert">
-                  <Icon.Warn aria-hidden="true" />
-                  <span>{createError}</span>
-                </div>
-              )}
-
-              <footer className="sources-capture-footer">
-                <p>
-                  保存后会进入解析队列；关闭面板不会清空尚未提交的内容。
-                </p>
-                <div className="sources-capture-actions">
-                  <button
-                    className="sources-action-secondary"
-                    onClick={closeCreatePanel}
-                    type="button"
-                    disabled={creating}
-                  >
-                    取消
-                  </button>
-                  <button
-                    className="sources-action-primary"
-                    type="submit"
-                    disabled={creating || !canCreate}
-                    aria-busy={creating}
-                  >
-                    <Icon.Sparkle aria-hidden="true" />
-                    {creating ? "正在收录…" : "加入解析队列"}
-                  </button>
-                </div>
-              </footer>
-            </form>
-          </section>
-        </div>
+            )}
+          </div>
+        </section>
       )}
 
       <div className="sources-content" aria-busy={loading}>

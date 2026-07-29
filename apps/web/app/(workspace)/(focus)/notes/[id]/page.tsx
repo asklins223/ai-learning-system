@@ -1,6 +1,7 @@
 "use client";
 
 import "@/app/styles/note-editor.css";
+import "@/app/styles/milkdown-editor.css";
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";

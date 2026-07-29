@@ -523,6 +523,11 @@
   opacity: 0.5;
 }
 
+.cards-card--partial .cards-card-accent {
+  background: var(--color-warning);
+  opacity: 1;
+}
+
 .cards-card--superseded::before,
 .cards-card--archived::before {
   opacity: 0.35;
@@ -647,6 +652,34 @@
   color: var(--color-text-secondary);
   font-style: italic;
   opacity: 0.8;
+}
+
+.cards-card-partial-warning {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 10px 0 0;
+  border: 1px solid color-mix(
+    in srgb,
+    var(--color-warning) 30%,
+    var(--color-border)
+  );
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-text);
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.cards-card-partial-warning svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin-top: 1px;
 }
 
 .cards-card-facts {

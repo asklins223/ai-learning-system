@@ -2568,3 +2568,174 @@
     margin: 0;
   }
 }
+
+/* ================================================================
+ * v0.6 Review Queue — neutral safety queue (计划 §9.4)
+ * Only shows task number, due reason, interval — no card/claim/quote.
+ * ================================================================ */
+
+.review-v06-queue {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.review-v06-queue-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 24px 0 16px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 16px;
+}
+
+.review-v06-queue-header h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.review-v06-queue-count {
+  margin-left: auto;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-v06-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-v06-item-wrap {
+  margin: 0;
+  padding: 0;
+}
+
+.review-v06-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  text-decoration: none;
+  color: var(--color-text);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  min-height: 56px;
+}
+
+.review-v06-item:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.review-v06-item:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.review-v06-item-index {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  min-width: 2rem;
+}
+
+.review-v06-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.review-v06-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.review-v06-item-interval {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-v06-item-due {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+.review-v06-item-due time {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.review-v06-item-due small {
+  font-size: 0.75rem;
+}
+
+.review-v06-item-arrow {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.review-v06-item:hover .review-v06-item-arrow {
+  transform: translateX(4px);
+  color: var(--color-accent);
+}
+
+.review-v06-pagination {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+}
+
+.review-v06-load-more {
+  padding: 10px 24px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.review-v06-load-more:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.review-v06-load-more:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .review-v06-queue {
+    padding: 0 12px;
+  }
+
+  .review-v06-item {
+    padding: 12px 16px;
+    gap: 12px;
+  }
+
+  .review-v06-item-index {
+    min-width: 1.5rem;
+  }
+}

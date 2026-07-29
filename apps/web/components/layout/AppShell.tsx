@@ -75,10 +75,17 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
   const isBenchmarkPage = variant === "internal" && pathname === "/benchmark";
   const isCardDetailPage =
     variant === "focus" && /^\/cards\/[^/]+$/.test(pathname);
+  const isCardSetDetailPage =
+    variant === "focus" && /^\/card-sets\/[^/]+$/.test(pathname);
   const isNoteEditorPage =
     variant === "focus" && /^\/notes\/[^/]+$/.test(pathname);
   const isSourceDetailPage =
     variant === "focus" && /^\/sources\/[^/]+$/.test(pathname);
+  const isSessionPage =
+    variant === "focus" && (
+      /^\/cards\/[^/]+\/validate$/.test(pathname)
+      || /^\/review\/[^/]+$/.test(pathname)
+    );
 
   useEffect(() => {
     if (
@@ -161,10 +168,14 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
                 ? "benchmark"
               : isCardDetailPage
                 ? "card-detail"
+              : isCardSetDetailPage
+                ? "card-set-detail"
               : isNoteEditorPage
                 ? "note-editor"
               : isSourceDetailPage
                 ? "source-detail"
+              : isSessionPage
+                ? "validation-session"
               : undefined
       }
     >
@@ -177,10 +188,10 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
         /* §9.4 Focus Shell: 纵向两行 — FocusBar 全宽 + Main 全宽
          * 不得将 TopBar 和 Main 放入同一个横向 flex 容器 */
         <div className="app-shell-inner app-shell-inner--focus">
-          {!isCardDetailPage && !isNoteEditorPage && !isSourceDetailPage && <TopBar />}
+          {!isCardDetailPage && !isNoteEditorPage && !isSourceDetailPage && !isSessionPage && <TopBar />}
           <main
             id="main-content"
-            className="workspace workspace--focus"
+            className={`workspace workspace--focus${isSessionPage ? " workspace--session" : ""}`}
             tabIndex={-1}
             data-page-root
           >

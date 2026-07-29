@@ -876,6 +876,13 @@
     font-size: 0.9em;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
+  .md-math {
+    margin: 12px 0;
+    padding: 8px 0;
+    text-align: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
   .md-bold { font-weight: 700; }
   .md-italic { font-style: italic; }
   .md-link {

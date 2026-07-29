@@ -21,23 +21,9 @@ export function StudyPaper({
   latestFeedback: ValidationFeedback | null;
   onOpenEvidence?: (keyPointId: string) => void;
 }) {
-  const { card, keyPoints } = data;
-  const title = card.schemaJson.title?.trim() || "未命名学习卡";
-  const summary =
-    card.schemaJson.summary?.trim() || "这张学习卡还没有核心理解摘要。";
+  const { keyPoints } = data;
   const misunderstandings = latestFeedback?.misunderstandings ?? [];
   const missingPoints = latestFeedback?.missingPoints ?? [];
-  const createdAt = new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(new Date(card.createdAt));
-  const statusLabel =
-    card.status === "active"
-      ? "使用中"
-      : card.status === "superseded"
-        ? "已被新版本替代"
-        : "已归档";
 
   return (
     <div className="study-card-stack" data-ui="study-paper">
@@ -46,42 +32,24 @@ export function StudyPaper({
         <span className="study-card-tab-mark">✦</span>
       </div>
 
-      <article className="study-card-page">
+      <article className="study-card-page" aria-labelledby="study-paper-title">
         <span className="binder-ring" aria-hidden="true">
           <i />
           <i />
         </span>
-
         <header className="study-card-paper-header">
-          <div className="study-card-meta">
-            <span className={`study-card-status study-card-status--${card.status}`}>
-              {statusLabel}
-            </span>
-            <span aria-hidden="true">·</span>
-            <time dateTime={card.createdAt}>{createdAt}</time>
+          <div>
+            <span className="paper-section-kicker">UNDERSTANDING NOTES</span>
+            <h2 id="study-paper-title">理解要点</h2>
+            <p>把核心理解拆成可以回看、核对和验证的小单元。</p>
           </div>
-          <h1 className="study-card-paper-title">{title}</h1>
+          <span className="study-card-paper-count">
+            <strong>{String(keyPoints.length).padStart(2, "0")}</strong>
+            个要点
+          </span>
         </header>
 
-        <section className="paper-section paper-core-section">
-          <div className="paper-section-heading">
-            <span className="paper-star" aria-hidden="true">
-              ★
-            </span>
-            <h2>核心理解</h2>
-          </div>
-          <p className="paper-core-copy">{summary}</p>
-        </section>
-
-        <section className="paper-key-points" aria-labelledby="paper-key-points-title">
-          <div className="paper-key-points-heading">
-            <div>
-              <span className="paper-section-kicker">UNDERSTANDING NOTES</span>
-              <h2 id="paper-key-points-title">理解要点</h2>
-            </div>
-            <span>{keyPoints.length} 个要点</span>
-          </div>
-
+        <section className="paper-key-points" aria-labelledby="study-paper-title">
           {keyPoints.length === 0 ? (
             <div className="paper-key-point-empty">
               暂无关键要点，重新生成学习卡后再查看。
@@ -119,12 +87,17 @@ export function StudyPaper({
                       {String(index + 1).padStart(2, "0")}
                     </div>
                     <div className="paper-key-point-content">
-                      <h3>关键要点 {index + 1}</h3>
-                      <p>{displayClaim}</p>
+                      <h3>{displayClaim}</h3>
                       {sourceCopy && (
-                        <blockquote>
-                          {compactText(sourceCopy, 100)}
-                        </blockquote>
+                        <div className="paper-key-point-source">
+                          <span>
+                            <Icon.Quote aria-hidden="true" />
+                            原文依据
+                          </span>
+                          <blockquote>
+                            {compactText(sourceCopy, 140)}
+                          </blockquote>
+                        </div>
                       )}
                     </div>
                     <button
@@ -190,7 +163,6 @@ function InsightNote({
 }) {
   return (
     <div className={`insight-note ${tone}`}>
-      {tone === "amber" && <span className="note-pin" aria-hidden="true" />}
       <h3>{title}</h3>
       <ul>
         {items.slice(0, 4).map((item, index) => (

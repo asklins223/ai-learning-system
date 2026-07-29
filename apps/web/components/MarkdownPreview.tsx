@@ -1,5 +1,5 @@
 /**
- * 极简 Markdown 渲染器（仅用于预览，不依赖第三方库）。
+ * 极简 Markdown 渲染器（仅用于预览）。
  *
  * 支持：
  * - `#` 至 `######` 六级标题
@@ -12,9 +12,11 @@
  * - `---` 分隔线
  * - `[text](url)` HTTPS/HTTP 外链与安全的站内相对链接
  * - `![alt](url)` HTTPS 或 `/api/uploads/` 站内图片
+ * - `$...$` 行内数学公式 / `$$...$$` 块级数学公式（KaTeX 渲染）
  * - 行内自动转义 HTML
  */
-import React, { Fragment } from "react";
+import React, { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import katex from "katex";
 
 interface Props {
   source: string;
@@ -22,8 +24,18 @@ interface Props {
   demoteHeadings?: boolean;
 }
 
+interface GalleryImage {
+  src: string;
+  alt: string;
+}
+
+interface LightboxState {
+  images: GalleryImage[];
+  index: number;
+}
+
 interface Token {
-  kind: "codeblock" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "quote" | "ul" | "ol" | "hr" | "image" | "table";
+  kind: "codeblock" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "quote" | "ul" | "ol" | "hr" | "image" | "table" | "math";
   raw?: string;
   lang?: string;
   items?: string[];
@@ -170,7 +182,33 @@ function renderInlineMarkup(escaped: string): string {
   return output + applyInlineStyles(escaped.slice(cursor));
 }
 
-/** 行内强调 / code / link / image */
+/**
+ * 用 KaTeX 渲染数学公式，失败时回退为纯文本。
+ * formula 已经过 escapeHtml 处理，需要先 decode 还原 LaTeX 反斜杠等字符。
+ */
+function renderMath(escapedFormula: string, displayMode: boolean): string {
+  const formula = decodeEscapedHtml(escapedFormula);
+  try {
+    return katex.renderToString(formula, { throwOnError: false, displayMode });
+  } catch {
+    return escapedFormula;
+  }
+}
+
+/** 行内数学公式 $...$ 分割，交由 KaTeX 渲染，其余走 renderInlineMarkup */
+function renderInlineMath(s: string): string {
+  return s
+    .split(/(\$[^$\n]+\$)/g)
+    .map((part) => {
+      if (part.startsWith("$") && part.endsWith("$") && part.length > 2) {
+        return renderMath(part.slice(1, -1), false);
+      }
+      return renderInlineMarkup(part);
+    })
+    .join("");
+}
+
+/** 行内强调 / code / link / image / inline math */
 function inline(s: string): string {
   const escaped = escapeHtml(s);
   return escaped
@@ -179,7 +217,7 @@ function inline(s: string): string {
       if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
         return `<code class="md-code">${part.slice(1, -1)}</code>`;
       }
-      return renderInlineMarkup(part);
+      return renderInlineMath(part);
     })
     .join("");
 }
@@ -254,6 +292,14 @@ function tokenize(src: string): Token[] {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
+
+    // 块级数学公式 $$...$$（单行）
+    const blockMath = /^\$\$(.+)\$\$$/.exec(line);
+    if (blockMath) {
+      tokens.push({ kind: "math", raw: blockMath[1] });
+      i++;
+      continue;
+    }
 
     // 代码围栏
     const fence = /^```\s*([a-zA-Z0-9_-]*)\s*$/.exec(line);
@@ -345,7 +391,7 @@ function tokenize(src: string): Token[] {
     while (
       i < lines.length &&
       lines[i].trim() !== "" &&
-      !/^(#{1,6}\s|>\s?|[-*+]\s|\d+\.\s|```|!\[)/.test(lines[i]) &&
+      !/^(#{1,6}\s|>\s?|[-*+]\s|\d+\.\s|```|!\[|\$\$)/.test(lines[i]) &&
       !parseTableAt(lines, i)
     ) {
       buf.push(lines[i]);
@@ -358,8 +404,87 @@ function tokenize(src: string): Token[] {
 
 export function MarkdownPreview({ source, demoteHeadings = false }: Props) {
   const tokens = tokenize(source);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const lastFocusedRef = useRef<HTMLElement | null>(null);
+  const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+
+  const closeLightbox = useCallback(() => setLightbox(null), []);
+
+  const goNext = useCallback(() => {
+    setLightbox((current) => {
+      if (!current) return current;
+      const len = current.images.length;
+      if (len <= 1) return current;
+      return { ...current, index: (current.index + 1) % len };
+    });
+  }, []);
+
+  const goPrev = useCallback(() => {
+    setLightbox((current) => {
+      if (!current) return current;
+      const len = current.images.length;
+      if (len <= 1) return current;
+      return { ...current, index: (current.index - 1 + len) % len };
+    });
+  }, []);
+
+  // 仅在 lightbox 打开/关闭时重新挂载监听器，避免每次切换图片都重订阅
+  const lightboxOpen = lightbox !== null;
+  useEffect(() => {
+    if (!lightbox) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeLightbox();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        goNext();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        goPrev();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    // 打开时将焦点移到关闭按钮，关闭后恢复到原元素
+    closeBtnRef.current?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+      lastFocusedRef.current?.focus();
+      lastFocusedRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightboxOpen, closeLightbox, goNext, goPrev]);
+
+  const handlePreviewClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName !== "IMG" || !target.classList.contains("md-image")) return;
+      const container = containerRef.current;
+      if (!container) return;
+      lastFocusedRef.current = target as HTMLImageElement;
+      const allImgs = Array.from(
+        container.querySelectorAll<HTMLImageElement>("img.md-image"),
+      ).map((img) => ({
+        src: img.currentSrc || img.src,
+        alt: img.alt || "",
+      }));
+      if (allImgs.length === 0) return;
+      const clickedSrc = (target as HTMLImageElement).currentSrc || (target as HTMLImageElement).src;
+      const clickedIndex = allImgs.findIndex((img) => img.src === clickedSrc);
+      setLightbox({
+        images: allImgs,
+        index: clickedIndex >= 0 ? clickedIndex : 0,
+      });
+    },
+    [],
+  );
+
   return (
-    <div className="md-preview">
+    <div className="md-preview" ref={containerRef} onClick={handlePreviewClick}>
       {tokens.map((t, idx) => {
         switch (t.kind) {
           case "h1":
@@ -466,6 +591,8 @@ export function MarkdownPreview({ source, demoteHeadings = false }: Props) {
                 </table>
               </div>
             );
+          case "math":
+            return <div key={idx} className="md-math" dangerouslySetInnerHTML={{ __html: renderMath(escapeHtml(t.raw ?? ""), true) }} />;
           case "codeblock":
             return (
               <pre key={idx} className="md-pre">
@@ -480,6 +607,77 @@ export function MarkdownPreview({ source, demoteHeadings = false }: Props) {
       {tokens.length === 0 && (
         <p className="text-sm text-faint">（暂无内容，开始写点什么吧）</p>
       )}
+
+      {lightbox && (() => {
+        const current = lightbox.images[lightbox.index];
+        if (!current) return null;
+        const hasMultiple = lightbox.images.length > 1;
+        return (
+          <div
+            className="md-lightbox"
+            role="dialog"
+            aria-modal="true"
+            aria-label="图片预览"
+            onClick={closeLightbox}
+          >
+            <button
+              ref={closeBtnRef}
+              type="button"
+              className="md-lightbox-close"
+              aria-label="关闭图片预览"
+              onClick={closeLightbox}
+            >
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+            {hasMultiple && (
+              <>
+                <button
+                  type="button"
+                  className="md-lightbox-nav md-lightbox-nav--prev"
+                  aria-label="上一张图片"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    goPrev();
+                  }}
+                >
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M15 6l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="md-lightbox-nav md-lightbox-nav--next"
+                  aria-label="下一张图片"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    goNext();
+                  }}
+                >
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </>
+            )}
+            <img
+              src={current.src}
+              alt={current.alt}
+              className="md-lightbox-img"
+              onClick={(e) => e.stopPropagation()}
+            />
+            {current.alt && (
+              <p className="md-lightbox-caption">{current.alt}</p>
+            )}
+            {hasMultiple && (
+              <p className="md-lightbox-counter">
+                {lightbox.index + 1} / {lightbox.images.length}
+              </p>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -2455,7 +2455,7 @@ color: var(--color-text-tertiary);
 }
 
 [data-theme="night"] .card-detail-desk {
-color-scheme: light;
+color-scheme: dark;
 }
 
 [data-theme="night"] .card-detail-desk .evidence-rail {

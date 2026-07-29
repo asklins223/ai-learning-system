@@ -6,7 +6,7 @@ import "@/app/styles/workspace-headers.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, CardListItem, JobRow, ReviewWithCard, StatsOverview } from "@/lib/api";
+import { api, CardListItem, JobRow, SanitizedReviewItem, StatsOverview } from "@/lib/api";
 import { useCurrentUser } from "@/lib/use-current-user";
 import { relativeTime } from "@/lib/format";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -34,7 +34,7 @@ export default function HomePage() {
   const [cards, setCards] = useState<CardListItem[] | null>(null);
   const [homeCardTotal, setHomeCardTotal] = useState<number | null>(null);
   const [cardsError, setCardsError] = useState<string | null>(null);
-  const [reviews, setReviews] = useState<ReviewWithCard[] | null>(null);
+  const [reviews, setReviews] = useState<SanitizedReviewItem[] | null>(null);
   const [homeReviewTotal, setHomeReviewTotal] = useState<number | null>(null);
   const [reviewsError, setReviewsError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<JobRow[] | null>(null);
@@ -47,6 +47,7 @@ export default function HomePage() {
   const [captureExpanded, setCaptureExpanded] = useState(false);
   const [homeRefreshing, setHomeRefreshing] = useState(false);
   const homeRequestRef = useRef(0);
+  const captureBusyRef = useRef(false);
 
   useEffect(() => {
     const formatter = new Intl.DateTimeFormat("zh-CN", {
@@ -65,7 +66,7 @@ export default function HomePage() {
         api.getStatsOverview(),
         api.listNotes({ limit: 1 }),
         api.listCards(),
-        api.listReviews({ status: "pending" }),
+        api.listSanitizedReviews({ status: "pending" }),
         api.listJobs(),
       ] as const);
 
@@ -158,22 +159,18 @@ export default function HomePage() {
 
   const handleCapture = useCallback(async () => {
     const text = captureText.trim();
-    if (!isOwner || !text) return;
+    if (!isOwner || !text || captureBusyRef.current) return;
 
+    captureBusyRef.current = true;
     setCaptureBusy(true);
     setCaptureMsg(null);
 
     try {
       const isUrl = /^https?:\/\//.test(text);
-      const isCode = /^(function|const|let|var|class|import|export|def |if __name__|#include|package |public class)/.test(text);
-      const hasMarkdown = /^[#>*\-]/m.test(text);
-
       if (isUrl) {
-        await api.createSource({ type: "url", title: text.slice(0, 60), url: text });
+        await api.createSource({ url: text });
       } else {
-        const type = isCode ? "code" : hasMarkdown ? "markdown" : "text";
-        const title = text.split("\n")[0].slice(0, 60) || "快速捕获";
-        await api.createSource({ type, title, content: text });
+        await api.createSource({ content: text });
       }
 
       setCaptureMsg("材料已添加，正在解析…");
@@ -194,13 +191,14 @@ export default function HomePage() {
           }
         },
       );
-    } catch (caught: unknown) {
-      setCaptureMsg(`创建失败：${caught instanceof Error ? caught.message : "未知错误"}`);
+    } catch {
+      setCaptureMsg("材料暂时没有添加成功，输入内容已保留，请检查网络后重试。");
       setCaptureMsgType("error");
       window.requestAnimationFrame(() => {
         document.getElementById("home-capture-input")?.focus();
       });
     } finally {
+      captureBusyRef.current = false;
       setCaptureBusy(false);
     }
   }, [captureText, isOwner]);
@@ -243,7 +241,7 @@ export default function HomePage() {
     ? {
         kind: "review" as const,
         eyebrow: "今日下一步 · 到期复习",
-        title: pendingReviews[0]?.card.title ?? "完成一轮复习",
+        title: "完成一轮独立复习",
         summary: `今天有 ${pendingReviewCount} 条复习已经到期，先从最早的一条开始。`,
         meta: [
           { label: "到期复习", value: `${pendingReviewCount} 条` },
@@ -633,16 +631,16 @@ export default function HomePage() {
                       const reason = statusMap.reviewReason(review.reviewReason);
                       return (
                         <Link
-                          key={review.review.id}
-                          href={`/review?review=${encodeURIComponent(review.review.id)}`}
+                          key={review.reviewId}
+                          href={`/review/${encodeURIComponent(review.reviewId)}`}
                           className="learning-home-queue-item"
                           data-kind="review"
-                          aria-label={`复习：${review.card.title}`}
+                          aria-label={`开始复习：${reason.label}`}
                         >
                           <span className="learning-home-queue-item-icon" aria-hidden="true"><Icon.Review /></span>
                           <span className="learning-home-queue-item-copy">
-                            <strong>{review.card.title}</strong>
-                            <small>{reason.label}</small>
+                            <strong>独立回忆一项理解</strong>
+                            <small>{reason.label} · 间隔 {review.intervalDays} 天</small>
                           </span>
                           <Icon.ChevronRight className="learning-home-queue-chevron" />
                         </Link>

@@ -164,41 +164,6 @@ function activityClock(iso: string): string {
   });
 }
 
-function detectCaptureType(value: string): SourceType {
-  const text = value.trim();
-  if (/^https?:\/\/\S+$/i.test(text)) return "url";
-  if (
-    /^```/.test(text) ||
-    /^(?:const|let|var|function|class|interface|type|enum|import|export|def|from|public|private|protected)\b/m.test(
-      text,
-    ) ||
-    /^[a-zA-Z_$][\w$]*\s*[({]/m.test(text)
-  ) {
-    return "code";
-  }
-  if (/^(#{1,6}\s|>|[-*+]\s|\d+\.\s)/m.test(text)) return "markdown";
-  return "text";
-}
-
-function captureTitle(value: string, type: SourceType): string {
-  const text = value.trim();
-  if (type === "url") {
-    try {
-      const url = new URL(text);
-      const path = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
-      return `${url.hostname}${path}`.slice(0, 80) || url.hostname;
-    } catch {
-      return text.slice(0, 80);
-    }
-  }
-
-  return (
-    text
-      .split("\n")[0]
-      .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+\.\s+)/, "")
-      .slice(0, 80) || "快速收录"
-  );
-}
 
 async function listAllReviews(): Promise<ReviewWithCard[]> {
   const items: ReviewWithCard[] = [];
@@ -432,8 +397,6 @@ export default function TodayPage() {
     return () => window.cancelAnimationFrame(frame);
   }, [showCapture]);
 
-  const captureType = useMemo(() => detectCaptureType(captureText), [captureText]);
-
   const handleQuickCapture = useCallback(async () => {
     const text = captureText.trim();
     if (!isOwner || !text || captureBusyRef.current) return;
@@ -441,13 +404,10 @@ export default function TodayPage() {
     setCaptureBusy(true);
     setCaptureMessage(null);
     try {
-      const type = detectCaptureType(text);
-      const title = captureTitle(text, type);
+      const isUrl = /^https?:\/\//.test(text);
       const result = await api.createSource({
-        type,
-        title,
-        content: type === "url" ? undefined : text,
-        url: type === "url" ? text : undefined,
+        content: isUrl ? undefined : text,
+        url: isUrl ? text : undefined,
       });
       setSources((current) => [
         result.source,
@@ -826,7 +786,9 @@ export default function TodayPage() {
                 <Icon.Sparkle />
                 <span>
                   {captureText.trim()
-                    ? `识别为 ${sourceTypeLabel(captureType)}资料`
+                    ? /^https?:\/\//.test(captureText.trim())
+                      ? "识别为网页链接资料"
+                      : "系统会自动识别资料类型"
                     : "输入后自动识别资料类型"}
                 </span>
                 <span aria-hidden="true">·</span>
@@ -1215,10 +1177,12 @@ export default function TodayPage() {
               </div>
               <p className="today-context-intro">这不是今日事件，而是此刻最值得处理的学习上下文。</p>
               <ol className="today-context-list">
-                {dueReviews.slice(0, 3).map((item) => (
+                {dueReviews.slice(0, 3).map((item, index) => (
                   <li key={item.review.id}>
-                    <span>{item.card.title}</span>
-                    <small>{item.keyPoint?.claim ?? "待完成本轮复习"}</small>
+                    <span>复习任务 {String(index + 1).padStart(2, "0")}</span>
+                    <small>
+                      {statusMap.reviewReason(item.reviewReason).label} · 当前间隔 {item.review.intervalDays} 天
+                    </small>
                   </li>
                 ))}
               </ol>

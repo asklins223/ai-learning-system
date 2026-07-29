@@ -24,6 +24,7 @@ const PROVIDER_DEFAULTS: Record<Exclude<PersonalAIProvider, "mock">, { baseUrl: 
 
 const DEFAULT_POLICY: AIPrivacySettings["aiDataPolicy"] = {
   sendToExternal: false,
+  sendImageContent: false,
   piiDetection: true,
   auditLogging: true,
 };
@@ -319,6 +320,10 @@ export function AIModelSettings({ isOwner, accountLoading }: {
             <label>
               <input type="checkbox" checked={policy.sendToExternal} onChange={(event) => setPolicy((value) => ({ ...value, sendToExternal: event.target.checked }))} />
               <span><strong>允许发送到外部模型</strong><small>关闭时，即使个人 Key 已配置，Worker 也不会发送学习内容。</small></span>
+            </label>
+            <label>
+              <input type="checkbox" checked={policy.sendImageContent} onChange={(event) => setPolicy((value) => ({ ...value, sendImageContent: event.target.checked }))} />
+              <span><strong>允许发送图片内容</strong><small>单独授权 OCR 与视觉理解；关闭时正文仍可外发，但图片任务会明确等待授权。</small></span>
             </label>
             <label>
               <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={Boolean(privacy?.aiConsentAt) || !isOwner} />

@@ -68,7 +68,7 @@ export function EvidenceRail({
             <p>
               {loading
                 ? "正在读取…"
-                : `${hardEvidence} 条硬证据 · ${totalEvidence} 条有效引用${
+                : `${hardEvidence} 条硬证据 · ${totalEvidence} 条证据记录${
                     rejectedEvidence > 0
                       ? ` · ${rejectedEvidence} 条已排除`
                       : ""
@@ -120,8 +120,7 @@ export function EvidenceRail({
                   item.effectiveOverride ?? item.userOverride,
                 ) !== null,
             );
-            const firstEvidence =
-              availableEvidence[0] ?? group.evidences[0];
+            const firstEvidence = availableEvidence[0];
             const hardCount = availableEvidence.filter((item) =>
               isHardEvidence(
                 item.alignment,
@@ -131,14 +130,19 @@ export function EvidenceRail({
             const evidenceCount = availableEvidence.length;
             const rejectedCount =
               group.evidences.length - availableEvidence.length;
+            const hasEvidenceRecords = group.evidences.length > 0;
             const sourceOrdinal = group.keyPoint.segmentRef?.blockOrdinal;
-            const description =
-              firstEvidence?.blockContent ||
-              firstEvidence?.quoteText ||
-              normalizeKeyPointClaim(group.keyPoint.claim);
             const displayClaim = normalizeKeyPointClaim(
               group.keyPoint.claim,
             );
+            const description =
+              firstEvidence?.blockContent ||
+              firstEvidence?.quoteText ||
+              (firstEvidence
+                ? displayClaim
+                : rejectedCount > 0
+                  ? "相关证据已被排除，可打开记录重新判断。"
+                  : "这个要点暂时还没有可用证据。");
             const isSelected = selectedKeyPointId === group.keyPoint.id;
 
             return (
@@ -150,6 +154,7 @@ export function EvidenceRail({
                   onClick={() => onSelect(group.keyPoint.id)}
                   className="evidence-card-button"
                   type="button"
+                  disabled={!hasEvidenceRecords}
                   aria-pressed={isSelected}
                 >
                   <div className="evidence-card-heading">
@@ -169,7 +174,9 @@ export function EvidenceRail({
 
                   <div className="evidence-card-meta">
                     <span className="evidence-source-ref">
-                      {sourceOrdinal !== undefined
+                      {!hasEvidenceRecords
+                        ? "暂无原文引用"
+                        : sourceOrdinal !== undefined
                         ? `原文第 ${sourceOrdinal + 1} 段`
                         : "原文片段"}
                     </span>

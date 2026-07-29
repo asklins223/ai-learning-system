@@ -70,8 +70,12 @@ export function UnderstandingFacts({
   ];
 
   return (
-    <section className="understanding-path" data-ui="understanding-path">
-      <h2 className="understanding-title">理解状态</h2>
+    <section
+      className="understanding-path"
+      data-ui="understanding-path"
+      aria-labelledby="understanding-title"
+    >
+      <h2 id="understanding-title" className="understanding-title">理解状态</h2>
       <div className="understanding-facts-grid">
         {facts.map((fact) => (
           <div key={fact.label} className={`understanding-fact-card is-${fact.tone}`}>

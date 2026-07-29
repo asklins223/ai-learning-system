@@ -250,6 +250,7 @@ html[data-theme="night"] {
   --shadow-control: 0 1px 2px rgb(0 0 0 / 24%);
   --shadow-panel: 0 1px 2px rgb(0 0 0 / 22%), 0 8px 20px rgb(0 0 0 / 20%);
   --shadow-paper: 0 2px 5px rgb(0 0 0 / 28%), 0 16px 34px rgb(0 0 0 / 24%);
+  --shadow-raised: 0 4px 10px rgb(0 0 0 / 30%), 0 20px 44px rgb(0 0 0 / 34%);
   --shadow-floating: 0 20px 48px rgb(0 0 0 / 40%);
   --shadow-shell: 0 24px 64px rgb(0 0 0 / 44%);
 

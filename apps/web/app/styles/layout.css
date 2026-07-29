@@ -169,6 +169,13 @@ padding-bottom: 34px;
   container-name: focus-workspace;
 }
 
+/* Question-first validation/review owns its single session header and its
+ * complete 100dvh canvas, so the generic Focus workspace must add no inset. */
+.workspace--session {
+  min-height: 100dvh;
+  padding-bottom: 0 !important;
+}
+
 /* 移动端底部导航空间 */
 /* §9.7: 有 BottomNav 时正文底部留白 ≥ mobile-nav-inset + 16px
    仅 default 变体渲染 MobileNav，internal 和 focus 不需要此留白 */

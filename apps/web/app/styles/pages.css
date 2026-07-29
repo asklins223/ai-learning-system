@@ -5164,22 +5164,6 @@ border-right: 1px solid var(--color-divider);
 .ne-editor-pane:last-child {
 border-right: none;
 }
-.ne-editor-textarea {
-width: 100%;
-min-height: max(560px, calc(100dvh - 250px));
-border: 0;
-outline: 0;
-resize: vertical;
-padding: var(--space-6);
-background: transparent;
-color: var(--color-text);
-font-family: var(--font-mono);
-font-size: 15px;
-line-height: 1.78;
-}
-.ne-editor-textarea::placeholder {
-color: var(--color-text-tertiary);
-}
 .ne-editor-preview {
 padding: var(--space-6);
 background: var(--color-paper);
@@ -5389,9 +5373,6 @@ border-top: 1px solid var(--color-divider);
 }
 .ne-editor-h1 {
   font-size: 22px;
-}
-.ne-editor-textarea {
-  min-height: 60dvh;
 }
 .ne-editor-pane {
   min-height: 42dvh;

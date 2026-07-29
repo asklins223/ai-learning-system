@@ -9,7 +9,7 @@ import { Icon } from "@/components/ui/icons";
  * - 必须显示：来源学习卡、复习安排、已验证次数
  * - MUST NOT: 使用假数据或猜测安排
  *
- * 这是学习卡详情页左栏的复习计划摘要，不是 /review 页面的 ReviewCard。
+ * 这是学习卡详情页辅助栏的复习计划摘要，不是 /review 页面的 ReviewCard。
  * /review 的 ReviewCard 是独立页面组件，在 review/page.tsx 中实现。
  */
 export function ReviewPlanCard({
@@ -22,9 +22,12 @@ export function ReviewPlanCard({
   nextReviewAt: string | null;
 }) {
   const schedule = formatReviewSchedule(nextReviewAt);
-  const nextLabel = schedule?.relative ?? (alignedCount > 0 ? "验证后安排" : "待补证据");
-  const hasSchedule = !!schedule;
-
+  const nextLabel = schedule?.relative ?? "尚未安排";
+  const scheduleHint =
+    schedule?.date ??
+    (alignedCount > 0
+      ? "当前没有具体复习日期"
+      : "补齐硬证据后再安排");
   return (
     <section className="review-plan-card" data-ui="review-card">
       <div className="review-plan-heading">
@@ -44,13 +47,7 @@ export function ReviewPlanCard({
             <strong>{validationCount} 次</strong>
           </div>
         </div>
-        {hasSchedule && schedule?.date && (
-          <p className="review-date-line">{schedule.date}</p>
-        )}
-        {!hasSchedule && (
-          <p className="review-date-line">尚未生成复习时间</p>
-        )}
-        <p className="review-current-card">基于当前验证状态自动安排</p>
+        <p className="review-date-line">{scheduleHint}</p>
       </div>
     </section>
   );
