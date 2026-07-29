@@ -15,7 +15,9 @@ import {
  */
 
 async function openNoteEditor(page: Page): Promise<ReturnType<Page["locator"]>> {
-  const editor = page.locator("textarea.ne-editor-textarea");
+  // v0.6: Milkdown editor replaces textarea.ne-editor-textarea.
+  // The ProseMirror contenteditable is the actual typing surface.
+  const editor = page.locator(".milkdown-editor .ProseMirror");
   if (!(await editor.isVisible().catch(() => false))) {
     await page.getByRole("button", { name: /^(编辑|写作)$/ }).click();
   }
@@ -55,7 +57,8 @@ function uniqueMarker(testInfo: TestInfo, purpose: string): string {
 }
 
 async function saveCurrentNote(page: Page): Promise<void> {
-  const editor = page.locator("textarea.ne-editor-textarea");
+  // v0.6: Milkdown editor — use page-level keyboard shortcut.
+  const editor = page.locator(".milkdown-editor .ProseMirror");
   const noteId = new URL(page.url()).pathname.split("/").at(-1);
   expect(noteId, "the note editor URL must contain a note id").toBeTruthy();
 
@@ -68,7 +71,9 @@ async function saveCurrentNote(page: Page): Promise<void> {
     && response.url().includes(`/api/notes/${noteId}`),
   );
   const versionsResponsePromise = waitForNoteVersions(page, noteId);
-  await editor.press("Control+s");
+  // Focus the editor first so the shortcut reaches the editor instance.
+  await editor.click();
+  await page.keyboard.press("Control+s");
   const response = await responsePromise;
   expect(response.ok(), `explicit note save returned ${response.status()}`).toBeTruthy();
   const versionsResponse = await versionsResponsePromise;
@@ -279,13 +284,17 @@ test.describe("PR smoke: Login/logout & session restore @pr", () => {
 test.describe("PR smoke: New note + save + generate card @pr", () => {
   test("owner can create a new editable note", async ({ authedPage }) => {
     const editor = await createEmptyNote(authedPage);
-    await expect(editor).toBeEditable();
+    // v0.6: Milkdown renders a contenteditable ProseMirror element.
+    await expect(editor).toBeVisible();
+    await expect(editor).toHaveAttribute("contenteditable", "true");
   });
 
   test("explicit save persists note content", async ({ authedPage }, testInfo) => {
     const marker = uniqueMarker(testInfo, "save");
     const editor = await createEmptyNote(authedPage);
-    await editor.fill(`${marker}\n\n包含多个段落以验证版本保存。`);
+    // v0.6: Milkdown contenteditable — click to focus then type.
+    await editor.click();
+    await authedPage.keyboard.type(`${marker}\n\n包含多个段落以验证版本保存。`);
     await saveCurrentNote(authedPage);
     const noteUrl = new URL(authedPage.url()).pathname;
 
@@ -298,14 +307,17 @@ test.describe("PR smoke: New note + save + generate card @pr", () => {
     const reopenedEditor = await openNoteEditor(authedPage);
     const reopenedVersions = await reopenedVersionsPromise;
     expect(reopenedVersions.ok(), "reopened version history must load").toBeTruthy();
-    await expect(reopenedEditor).toHaveValue(new RegExp(marker));
+    // v0.6: Milkdown doesn't expose .value — check text content instead.
+    await expect(reopenedEditor).toContainText(marker, { timeout: 15_000 });
   });
 
   test("saved note can generate a learning card", async ({ authedPage }, testInfo) => {
     testInfo.setTimeout(120_000);
     const marker = uniqueMarker(testInfo, "generate");
     const editor = await createEmptyNote(authedPage);
-    await editor.fill(
+    // v0.6: Milkdown contenteditable — click to focus then type.
+    await editor.click();
+    await authedPage.keyboard.type(
       `${marker}\n\n刻意练习需要明确目标、及时反馈和适度挑战。`,
     );
     await saveCurrentNote(authedPage);
@@ -320,7 +332,8 @@ test.describe("PR smoke: New note + save + generate card @pr", () => {
     const generationStage = authedPage.locator(".ne-generation-dialog");
     await expect(generationStage).toBeVisible();
     await expect(generationStage).toContainText(/正在锁定当前笔记版本|生成任务已进入队列|正在提炼关键理解/);
-    await expect(editor).toBeDisabled();
+    // v0.6: Milkdown editor is disabled via contenteditable=false during generation.
+    await expect(editor).toHaveAttribute("contenteditable", "false", { timeout: 10_000 });
     const response = await responsePromise;
     expect(response.ok()).toBeTruthy();
     await expect(generationStage).toBeHidden({ timeout: 90_000 });

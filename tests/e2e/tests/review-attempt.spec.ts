@@ -4,7 +4,16 @@ import type { Page } from "@playwright/test";
 /**
  * E2E: Review Attempt journey (LOOP-01/02, ADR-0004, ADR-0008 §6).
  *
- * Covers the PR-smoke path:
+ * v0.6 MIGRATION NOTICE: The review flow has fundamentally changed in v0.6.
+ * The old flow (single "完成本轮" button → inline submission panel) has been
+ * replaced by a list-based flow:
+ *   /review shows a queue of tasks → click "开始" → navigates to
+ *   /review/[scheduleId] focus page → question-first answering → submit.
+ *
+ * The selectors and test flow below need to be rewritten to match the v0.6 UI.
+ * Until then, these tests will fail against the v0.6 review page.
+ *
+ * Original v0.5 flow:
  * 1. Login → navigate to review queue.
  * 2. Start an attempt ("完成本轮").
  * 3. Submit with outcome + answer + confidence.

@@ -77,9 +77,8 @@ test.describe("Core learning journey @pr", () => {
     // Should navigate to the note editor page
     await expect(page).toHaveURL(/\/notes\/[\w-]+/);
 
-    // The editor may restore its last display mode. Select the explicit
-    // writing mode before asserting the actual editable surface.
-    const editor = page.locator("textarea.ne-editor-textarea");
+    // v0.6: Milkdown editor replaces textarea.ne-editor-textarea.
+    const editor = page.locator(".milkdown-editor .ProseMirror");
     if (!(await editor.isVisible().catch(() => false))) {
       await page.getByRole("button", { name: /^(编辑|写作)$/ }).click();
     }
