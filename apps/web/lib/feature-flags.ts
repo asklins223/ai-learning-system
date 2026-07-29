@@ -28,9 +28,13 @@ export function isRubricEvaluationEnabled(): boolean {
   return isExplicitlyEnabled(process.env.NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED);
 }
 
-/** CARD_GENERATION_V2_ENABLED — enables the resumable generation-run UX. */
+/**
+ * CARD_GENERATION_V2_ENABLED — enables the resumable generation-run UX.
+ *
+ * P1 audit fix: Changed from fail-open to fail-closed to align with M0's
+ * frozen principle. Production must explicitly set
+ * NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED=true at build time.
+ */
 export function isCardGenerationV2Enabled(): boolean {
-  const value = process.env.NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED;
-  if (value === undefined || value === "") return true;
-  return isExplicitlyEnabled(value);
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED);
 }

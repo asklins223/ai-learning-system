@@ -1319,6 +1319,11 @@ jobs:
 
       - name: Install and build Web
         working-directory: apps/web
+        env:
+          NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: "true"
+          NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: "true"
+          NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: "true"
+          NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: "true"
         run: |
           npm ci --no-audit --no-fund
 
@@ -1330,6 +1335,9 @@ jobs:
           AI_PROVIDER_CARD: mock
           AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
           CORS_ORIGIN: http://localhost:3000
+          CARD_GENERATION_V2_ENABLED: "true"
+          AI_QUESTION_V1_ENABLED: "true"
+          RUBRIC_EVALUATION_V1_ENABLED: "true"
         run: |
           cd apps/api && npx tsx src/server.ts &
           # Wait for API to be ready
@@ -1350,6 +1358,7 @@ jobs:
           AI_PROVIDER_CARD: mock
           AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
           API_INTERNAL_URL: http://localhost:4000
+          CARD_GENERATION_V2_ENABLED: "true"
         run: |
           cd workers/ai-worker && npx tsx src/index.ts &
           # Give Worker a few seconds to start

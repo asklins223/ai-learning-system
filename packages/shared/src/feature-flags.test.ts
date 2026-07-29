@@ -135,9 +135,9 @@ test("CARD_REPAIR_V1_ENABLED: false when set to 'false'", () => {
   });
 });
 
-test("CARD_GENERATION_V2_ENABLED: defaults on with an explicit false rollback", () => {
+test("CARD_GENERATION_V2_ENABLED: defaults off (fail-closed) with explicit true opt-in", () => {
   withEnv({ CARD_GENERATION_V2_ENABLED: undefined }, () => {
-    assert.equal(isCardGenerationV2Enabled(), true);
+    assert.equal(isCardGenerationV2Enabled(), false);
   });
   withEnv({ CARD_GENERATION_V2_ENABLED: "1" }, () => {
     assert.equal(isCardGenerationV2Enabled(), false);
@@ -166,7 +166,7 @@ test("FSRS_SHADOW_ENABLED: true when set to 'true'", () => {
 
 // ─── Fail-closed invariant (计划 §12.2) ──────────────────────────────────
 
-test("Default rollout: generation v2 is on while experimental v0.6 flags remain off", () => {
+test("Default rollout: all v0.6 flags default off (fail-closed)", () => {
   withEnv(
     {
       AI_QUESTION_V1_ENABLED: undefined,
@@ -181,7 +181,7 @@ test("Default rollout: generation v2 is on while experimental v0.6 flags remain 
       assert.equal(isRubricEvaluationEnabled(), false);
       assert.equal(isSchedulerPolicyV2(), false);
       assert.equal(isCardRepairEnabled(), false);
-      assert.equal(isCardGenerationV2Enabled(), true);
+      assert.equal(isCardGenerationV2Enabled(), false);
       assert.equal(isFSRSShadowEnabled(), false);
     },
   );

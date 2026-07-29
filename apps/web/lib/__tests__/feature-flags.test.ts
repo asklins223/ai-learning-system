@@ -93,9 +93,9 @@ describe("Client-side feature flags", () => {
   });
 
   describe("isCardGenerationV2Enabled", () => {
-    it("defaults to enabled after the M6 rollout", () => {
+    it("defaults to disabled (fail-closed) when unset", () => {
       withEnv({ NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: undefined }, () => {
-        assert.equal(isCardGenerationV2Enabled(), true);
+        assert.equal(isCardGenerationV2Enabled(), false);
       });
     });
 

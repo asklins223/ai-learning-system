@@ -83,14 +83,15 @@ export function isCardRepairEnabled(): boolean {
 
 /**
  * CARD_GENERATION_V2_ENABLED — routes new requests through the resumable
- * generation-run workflow. M6 makes v2 the default for new requests. Setting
- * the flag to the exact string "false" is the documented rollback switch;
- * invalid non-empty values remain disabled instead of being guessed.
+ * generation-run workflow.
+ *
+ * P1 audit fix (2026-07-26): Changed from fail-open to fail-closed to align
+ * with M0's frozen principle that all flags default to false. Production
+ * must explicitly set CARD_GENERATION_V2_ENABLED=true. Development .env.example
+ * and docker-compose.dev.yml already set it to true.
  */
 export function isCardGenerationV2Enabled(): boolean {
-  const value = process.env.CARD_GENERATION_V2_ENABLED;
-  if (value === undefined || value === "") return true;
-  return value === "true";
+  return process.env.CARD_GENERATION_V2_ENABLED === "true";
 }
 
 /**
