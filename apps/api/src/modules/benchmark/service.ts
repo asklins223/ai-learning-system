@@ -6,7 +6,7 @@ import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
 import { benchmarkLabels, benchmarkReports } from "../../db/schema/benchmark.ts";
 import { upsertSearchDocument } from "../../lib/search-index.ts";
-import { createGenerateCardJob } from "../job/service.ts";
+import { createCardGenerationRun } from "../card-generation/service.ts";
 import { physicalDeleteNote, computeContentHash } from "../note/service.ts";
 
 /**
@@ -502,12 +502,13 @@ async function runPipelineForNote(
     //    这里不走 job 队列，而是直接调用 worker handler 逻辑
     //    但 worker handler 在 ai-worker 包内，API 侧无法直接 import。
     //    所以我们走标准的 job 插入 + 轮询等待方式。
-    await createGenerateCardJob({
-      workspaceId,
-      userId,
-      noteId: note.id,
-      noteVersionId: version.id,
-    });
+    await createCardGenerationRun(
+      { workspaceId, userId },
+      {
+        noteVersionId: version.id,
+        idempotencyKey: `benchmark:${version.id}`,
+      },
+    );
 
     // 3. 轮询等待 card 生成完成（worker 异步处理）
     const card = await waitForCard(version.id, workspaceId, 60_000);

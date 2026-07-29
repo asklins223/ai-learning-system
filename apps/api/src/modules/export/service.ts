@@ -16,6 +16,17 @@ import {
 import { aiArtifacts } from "../../db/schema/ai.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { workspaces, workspaceMembers, users, onboardingStates } from "../../db/schema/identity.ts";
+// v0.6: 可信掌握闭环新表 (计划 §6.9: 导出/导入覆盖)
+import {
+  validationQuestionRubricItems,
+  validationSubmissions,
+  validationSubmissionJobs,
+  validationActionCommands,
+  validationAssistanceExposures,
+  validationPointAssessments,
+  schedulingShadowDecisions,
+  validationQualitySignals,
+} from "../../db/schema/validation-v2.ts";
 import {
   generateDefaultWorkspaceName,
   RECOVERED_PASSWORD_SENTINEL,
@@ -147,6 +158,55 @@ export async function exportWorkspace(workspaceId: string) {
       orderBy: (a, { desc }) => [desc(a.createdAt)],
     });
 
+    // v0.6: 可信掌握闭环新表导出 (计划 §6.9)
+    // validation_question_rubric_items
+    const rubricItemRows = await tx.query.validationQuestionRubricItems.findMany({
+      where: eq(validationQuestionRubricItems.workspaceId, workspaceId),
+      orderBy: (r, { asc: a }) => [a(r.questionId), a(r.ordinal)],
+    });
+
+    // validation_submissions — user-private, RLS-enforced
+    const submissionRows = await tx.query.validationSubmissions.findMany({
+      where: eq(validationSubmissions.workspaceId, workspaceId),
+      orderBy: (s, { desc }) => [desc(s.createdAt)],
+    });
+
+    // validation_submission_jobs
+    const submissionJobRows = await tx.query.validationSubmissionJobs.findMany({
+      where: inArray(validationSubmissionJobs.submissionId, submissionRows.map((s) => s.id)),
+      orderBy: (j, { asc: a }) => [a(j.submissionId), a(j.phase), a(j.phaseOrdinal)],
+    });
+
+    // validation_action_commands — user-private, RLS-enforced
+    const actionCommandRows = await tx.query.validationActionCommands.findMany({
+      where: eq(validationActionCommands.workspaceId, workspaceId),
+      orderBy: (c, { desc }) => [desc(c.createdAt)],
+    });
+
+    // validation_assistance_exposures — user-private, RLS-enforced
+    const assistanceExposureRows = await tx.query.validationAssistanceExposures.findMany({
+      where: eq(validationAssistanceExposures.workspaceId, workspaceId),
+      orderBy: (e, { desc }) => [desc(e.lastExposedAt)],
+    });
+
+    // validation_point_assessments — user-private, RLS-enforced
+    const pointAssessmentRows = await tx.query.validationPointAssessments.findMany({
+      where: eq(validationPointAssessments.workspaceId, workspaceId),
+      orderBy: (p, { asc: a }) => [a(p.submissionId)],
+    });
+
+    // scheduling_shadow_decisions — user-private, RLS-enforced
+    const shadowDecisionRows = await tx.query.schedulingShadowDecisions.findMany({
+      where: eq(schedulingShadowDecisions.workspaceId, workspaceId),
+      orderBy: (s, { desc }) => [desc(s.createdAt)],
+    });
+
+    // validation_quality_signals — user-private, RLS-enforced
+    const qualitySignalRows = await tx.query.validationQualitySignals.findMany({
+      where: eq(validationQualitySignals.workspaceId, workspaceId),
+      orderBy: (q, { desc }) => [desc(q.createdAt)],
+    });
+
     // onboarding states (SEC-02/ALPHA-01) — per-user onboarding progress.
     // invite_codes are NOT exported: they contain token hashes which are
     // security-sensitive credentials, not business data.
@@ -199,9 +259,19 @@ export async function exportWorkspace(workspaceId: string) {
       understandingEvents: understandingEventRows,
       aiArtifacts: aiArtifactRows,
       onboardingStates: onboardingStateRows,
+      // v0.6: 可信掌握闭环新表 (计划 §6.9)
+      validationQuestionRubricItems: rubricItemRows,
+      validationSubmissions: submissionRows,
+      validationSubmissionJobs: submissionJobRows,
+      validationActionCommands: actionCommandRows,
+      validationAssistanceExposures: assistanceExposureRows,
+      validationPointAssessments: pointAssessmentRows,
+      schedulingShadowDecisions: shadowDecisionRows,
+      validationQualitySignals: qualitySignalRows,
       /**
        * 导出清单：明确哪些数据已包含、哪些未包含。
        * N-009: 新增 users 和 workspaceMembers，导出文件现在可用于恢复。
+       * v0.6: 新增可信掌握闭环 8 张表，覆盖 §6.9 导出/导入要求。
        */
       exportManifest: {
         included: [
@@ -224,6 +294,15 @@ export async function exportWorkspace(workspaceId: string) {
           "understandingEvents",
           "aiArtifacts",
           "onboardingStates",
+          // v0.6: 可信掌握闭环新表
+          "validationQuestionRubricItems",
+          "validationSubmissions",
+          "validationSubmissionJobs",
+          "validationActionCommands",
+          "validationAssistanceExposures",
+          "validationPointAssessments",
+          "schedulingShadowDecisions",
+          "validationQualitySignals",
         ],
         excluded: {
           searchDocuments: "可重建 — 调用 POST /search/reindex 即可从主表重建",
@@ -313,6 +392,15 @@ export async function restoreWorkspace(
     counts.understandingEvents = Array.isArray(data.understandingEvents) ? data.understandingEvents.length : 0;
     counts.aiArtifacts = Array.isArray(data.aiArtifacts) ? data.aiArtifacts.length : 0;
     counts.onboardingStates = Array.isArray(data.onboardingStates) ? data.onboardingStates.length : 0;
+    // v0.6: 可信掌握闭环新表 dry-run 计数
+    counts.validationQuestionRubricItems = Array.isArray(data.validationQuestionRubricItems) ? data.validationQuestionRubricItems.length : 0;
+    counts.validationSubmissions = Array.isArray(data.validationSubmissions) ? data.validationSubmissions.length : 0;
+    counts.validationSubmissionJobs = Array.isArray(data.validationSubmissionJobs) ? data.validationSubmissionJobs.length : 0;
+    counts.validationActionCommands = Array.isArray(data.validationActionCommands) ? data.validationActionCommands.length : 0;
+    counts.validationAssistanceExposures = Array.isArray(data.validationAssistanceExposures) ? data.validationAssistanceExposures.length : 0;
+    counts.validationPointAssessments = Array.isArray(data.validationPointAssessments) ? data.validationPointAssessments.length : 0;
+    counts.schedulingShadowDecisions = Array.isArray(data.schedulingShadowDecisions) ? data.schedulingShadowDecisions.length : 0;
+    counts.validationQualitySignals = Array.isArray(data.validationQualitySignals) ? data.validationQualitySignals.length : 0;
 
     // N-009: dry-run 引用完整性校验
     const refErrors: string[] = [];
@@ -379,6 +467,66 @@ export async function restoreWorkspace(
 
     if (refErrors.length > 0) {
       return { success: false, message: `dry-run 引用完整性校验失败：${refErrors.slice(0, 5).join("; ")}${refErrors.length > 5 ? ` ...共 ${refErrors.length} 个错误` : ""}`, dryRun: true, counts };
+    }
+
+    // v0.6: 可信掌握闭环新表 dry-run 引用完整性校验 (计划 §6.9)
+    const submissionIds = new Set((Array.isArray(data.validationSubmissions) ? data.validationSubmissions : []).map((s: Record<string, unknown>) => s.id as string));
+    const rubricItemIds = new Set((Array.isArray(data.validationQuestionRubricItems) ? data.validationQuestionRubricItems : []).map((r: Record<string, unknown>) => r.id as string));
+
+    if (Array.isArray(data.validationQuestionRubricItems)) {
+      for (const r of data.validationQuestionRubricItems as Record<string, unknown>[]) {
+        if (!questionIds.has(r.questionId as string)) {
+          refErrors.push(`validation_question_rubric_item references missing question ${r.questionId}`);
+        }
+        if (r.evidenceId && !evidenceIds.has(r.evidenceId as string)) {
+          refErrors.push(`validation_question_rubric_item references missing evidence ${r.evidenceId}`);
+        }
+      }
+    }
+
+    if (Array.isArray(data.validationSubmissions)) {
+      for (const s of data.validationSubmissions as Record<string, unknown>[]) {
+        if (!cardIds.has(s.cardId as string)) {
+          refErrors.push(`validation_submission references missing card ${s.cardId}`);
+        }
+        if (s.questionId && !questionIds.has(s.questionId as string)) {
+          refErrors.push(`validation_submission references missing question ${s.questionId}`);
+        }
+        if (s.keyPointId && !keyPointIds.has(s.keyPointId as string)) {
+          refErrors.push(`validation_submission references missing key_point ${s.keyPointId}`);
+        }
+      }
+    }
+
+    if (Array.isArray(data.validationSubmissionJobs)) {
+      for (const j of data.validationSubmissionJobs as Record<string, unknown>[]) {
+        if (!submissionIds.has(j.submissionId as string)) {
+          refErrors.push(`validation_submission_job references missing submission ${j.submissionId}`);
+        }
+      }
+    }
+
+    if (Array.isArray(data.validationPointAssessments)) {
+      for (const p of data.validationPointAssessments as Record<string, unknown>[]) {
+        if (!submissionIds.has(p.submissionId as string)) {
+          refErrors.push(`validation_point_assessment references missing submission ${p.submissionId}`);
+        }
+        if (!rubricItemIds.has(p.rubricItemId as string)) {
+          refErrors.push(`validation_point_assessment references missing rubric_item ${p.rubricItemId}`);
+        }
+      }
+    }
+
+    if (Array.isArray(data.validationQualitySignals)) {
+      for (const q of data.validationQualitySignals as Record<string, unknown>[]) {
+        if (!validationEventIds.has(q.validationEventId as string)) {
+          refErrors.push(`validation_quality_signal references missing validation_event ${q.validationEventId}`);
+        }
+      }
+    }
+
+    if (refErrors.length > 0) {
+      return { success: false, message: `dry-run v0.6 引用完整性校验失败：${refErrors.slice(0, 5).join("; ")}${refErrors.length > 5 ? ` ...共 ${refErrors.length} 个错误` : ""}`, dryRun: true, counts };
     }
 
     return { success: true, message: "dry-run 验证通过，可以恢复", dryRun: true, counts };
@@ -466,9 +614,10 @@ export async function restoreWorkspace(
           aiConsentBy: (exportedWorkspace.aiConsentBy as string) ?? null,
           aiDataPolicy: (exportedWorkspace.aiDataPolicy as {
             sendToExternal: boolean;
+            sendImageContent: boolean;
             piiDetection: boolean;
             auditLogging: boolean;
-          }) ?? { sendToExternal: false, piiDetection: true, auditLogging: true },
+          }) ?? { sendToExternal: false, sendImageContent: false, piiDetection: true, auditLogging: true },
         })
         .where(eq(workspaces.id, targetWorkspaceId));
 
@@ -612,6 +761,8 @@ export async function restoreWorkspace(
             inputHash: (art.inputHash as string) ?? null,
             costTokens: (art.costTokens as number) ?? null,
             status: (art.status as string) ?? "ready",
+            // v0.6 扩展字段 (计划 §6.6): parent_artifact_id 用于 draft → repair → final lineage
+            parentArtifactId: (art.parentArtifactId as string) ?? null,
           }).onConflictDoNothing();
         }
         counts.aiArtifacts = data.aiArtifacts.length;
@@ -702,6 +853,18 @@ export async function restoreWorkspace(
             createdBy: vq.createdBy as string,
             createdAt: vq.createdAt ? new Date(vq.createdAt as string) : new Date(),
             expiresAt: vq.expiresAt ? new Date(vq.expiresAt as string) : null,
+            // v0.6 扩展字段 (计划 §6.2)
+            userId: (vq.userId as string) ?? null,
+            artifactId: (vq.artifactId as string) ?? null,
+            generationJobId: (vq.generationJobId as string) ?? null,
+            generatorKind: (vq.generatorKind as string) ?? "ai",
+            status: (vq.status as string) ?? "active",
+            rubricVersion: (vq.rubricVersion as string) ?? null,
+            sourceFingerprint: (vq.sourceFingerprint as string) ?? null,
+            supersededAt: vq.supersededAt ? new Date(vq.supersededAt as string) : null,
+            staleReason: (vq.staleReason as string) ?? null,
+            lastUsedAt: vq.lastUsedAt ? new Date(vq.lastUsedAt as string) : null,
+            useCount: (vq.useCount as number) ?? 0,
           }).onConflictDoNothing();
         }
         counts.validationQuestions = data.validationQuestions.length;
@@ -727,6 +890,13 @@ export async function restoreWorkspace(
             questionId: (ve.questionId as string) ?? null,
             // jobs 属于运行态且不在导出清单中，不能恢复悬空 job FK。
             jobId: null,
+            // v0.6 扩展字段 (计划 §6.6)
+            submissionId: (ve.submissionId as string) ?? null,
+            noteVersionId: (ve.noteVersionId as string) ?? null,
+            rubricVersion: (ve.rubricVersion as string) ?? null,
+            reducerVersion: (ve.reducerVersion as string) ?? null,
+            sourceFingerprint: (ve.sourceFingerprint as string) ?? null,
+            sourceStatus: (ve.sourceStatus as string) ?? null,
           }).onConflictDoNothing();
         }
         counts.validationEvents = data.validationEvents.length;
@@ -746,6 +916,12 @@ export async function restoreWorkspace(
             status: (rev.status as string) ?? "pending",
             nextReviewAt: new Date(rev.nextReviewAt as string),
             intervalDays: (rev.intervalDays as number) ?? 1,
+            // v0.6 扩展字段 (计划 §6.6)
+            keyPointId: (rev.keyPointId as string) ?? null,
+            generation: (rev.generation as number) ?? 1,
+            policyVersion: (rev.policyVersion as string) ?? null,
+            reasonCode: (rev.reasonCode as string) ?? null,
+            supersedesScheduleId: (rev.supersedesScheduleId as string) ?? null,
           }).onConflictDoNothing();
         }
         counts.reviewSchedules = data.reviewSchedules.length;
@@ -788,6 +964,13 @@ export async function restoreWorkspace(
             abandonedAt: att.abandonedAt ? new Date(att.abandonedAt as string) : null,
             createdAt: att.createdAt ? new Date(att.createdAt as string) : new Date(),
             updatedAt: att.updatedAt ? new Date(att.updatedAt as string) : new Date(),
+            // v0.6 扩展字段 (计划 §6.6)
+            evaluationArtifactId: (att.evaluationArtifactId as string) ?? null,
+            evaluationStatus: (att.evaluationStatus as string) ?? null,
+            assistanceLevel: (att.assistanceLevel as string) ?? null,
+            evidenceRevealedAt: att.evidenceRevealedAt ? new Date(att.evidenceRevealedAt as string) : null,
+            policyVersion: (att.policyVersion as string) ?? null,
+            sourceFingerprint: (att.sourceFingerprint as string) ?? null,
           }).onConflictDoNothing();
         }
         counts.reviewAttempts = data.reviewAttempts.length;
@@ -808,6 +991,202 @@ export async function restoreWorkspace(
           }).onConflictDoNothing();
         }
         counts.understandingEvents = data.understandingEvents.length;
+      }
+
+      // ═══ v0.6: 可信掌握闭环新表恢复 (计划 §6.9) ═══
+      // 依赖顺序：rubric_items → submissions → submission_jobs, action_commands,
+      //           assistance_exposures → point_assessments, shadow_decisions,
+      //           quality_signals
+
+      // v0.6-15. 恢复 validation_question_rubric_items (依赖 validation_questions)
+      if (Array.isArray(data.validationQuestionRubricItems)) {
+        for (const r of data.validationQuestionRubricItems) {
+          const ri = r as Record<string, unknown>;
+          await tx.insert(validationQuestionRubricItems).values({
+            id: ri.id as string,
+            workspaceId: targetWorkspaceId,
+            questionId: ri.questionId as string,
+            ordinal: ri.ordinal as number,
+            criterion: ri.criterion as string,
+            expectedConcept: ri.expectedConcept as string,
+            weight: (ri.weight as number) ?? 1,
+            required: (ri.required as boolean) ?? true,
+            evidenceId: (ri.evidenceId as string) ?? null,
+            evidenceSnapshot: (ri.evidenceSnapshot as Record<string, unknown>) ?? null,
+            createdAt: ri.createdAt ? new Date(ri.createdAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.validationQuestionRubricItems = data.validationQuestionRubricItems.length;
+      }
+
+      // v0.6-16. 恢复 validation_submissions (依赖 users, learning_cards, card_key_points)
+      // user_answer 属于敏感业务数据，随导出文件恢复；隐私边界由导出文件
+      // 本身的访问控制保证（仅 Owner 可导出/恢复）。
+      if (Array.isArray(data.validationSubmissions)) {
+        for (const s of data.validationSubmissions) {
+          const sub = s as Record<string, unknown>;
+          await tx.insert(validationSubmissions).values({
+            id: sub.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: sub.userId as string,
+            cardId: sub.cardId as string,
+            keyPointId: (sub.keyPointId as string) ?? null,
+            questionId: (sub.questionId as string) ?? null,
+            context: sub.context as string,
+            reviewAttemptId: (sub.reviewAttemptId as string) ?? null,
+            inputScheduleId: (sub.inputScheduleId as string) ?? null,
+            userAnswer: (sub.userAnswer as string) ?? null,
+            selfConfidence: (sub.selfConfidence as number) ?? null,
+            draftRevision: (sub.draftRevision as number) ?? 0,
+            answerHash: (sub.answerHash as string) ?? null,
+            answerLockedAt: sub.answerLockedAt ? new Date(sub.answerLockedAt as string) : null,
+            assistanceSnapshotExposedAt: sub.assistanceSnapshotExposedAt ? new Date(sub.assistanceSnapshotExposedAt as string) : null,
+            assistanceLevel: (sub.assistanceLevel as string) ?? "none",
+            evidenceRevealedAt: sub.evidenceRevealedAt ? new Date(sub.evidenceRevealedAt as string) : null,
+            sourceFingerprint: (sub.sourceFingerprint as string) ?? null,
+            status: (sub.status as string) ?? "question_preparing",
+            currentGenerationJobId: (sub.currentGenerationJobId as string) ?? null,
+            currentEvaluationJobId: (sub.currentEvaluationJobId as string) ?? null,
+            validationEventId: (sub.validationEventId as string) ?? null,
+            failureStage: (sub.failureStage as string) ?? null,
+            failureCode: (sub.failureCode as string) ?? null,
+            terminalReason: (sub.terminalReason as string) ?? null,
+            startIdempotencyKey: sub.startIdempotencyKey as string,
+            createdAt: sub.createdAt ? new Date(sub.createdAt as string) : new Date(),
+            updatedAt: sub.updatedAt ? new Date(sub.updatedAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.validationSubmissions = data.validationSubmissions.length;
+      }
+
+      // v0.6-17. 恢复 validation_submission_jobs (依赖 validation_submissions)
+      if (Array.isArray(data.validationSubmissionJobs)) {
+        for (const j of data.validationSubmissionJobs) {
+          const sj = j as Record<string, unknown>;
+          await tx.insert(validationSubmissionJobs).values({
+            id: sj.id as string,
+            submissionId: sj.submissionId as string,
+            phase: sj.phase as string,
+            phaseOrdinal: (sj.phaseOrdinal as number) ?? 1,
+            jobId: sj.jobId as string,
+            retryOfJobId: (sj.retryOfJobId as string) ?? null,
+            createdAt: sj.createdAt ? new Date(sj.createdAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.validationSubmissionJobs = data.validationSubmissionJobs.length;
+      }
+
+      // v0.6-18. 恢复 validation_action_commands (依赖 users; submission_id 可空)
+      if (Array.isArray(data.validationActionCommands)) {
+        for (const c of data.validationActionCommands) {
+          const ac = c as Record<string, unknown>;
+          await tx.insert(validationActionCommands).values({
+            id: ac.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: ac.userId as string,
+            submissionId: (ac.submissionId as string) ?? null,
+            action: ac.action as string,
+            idempotencyKey: ac.idempotencyKey as string,
+            requestHash: ac.requestHash as string,
+            responseStatus: (ac.responseStatus as string) ?? "pending",
+            responseSnapshot: (ac.responseSnapshot as Record<string, unknown>) ?? null,
+            createdAt: ac.createdAt ? new Date(ac.createdAt as string) : new Date(),
+            updatedAt: ac.updatedAt ? new Date(ac.updatedAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.validationActionCommands = data.validationActionCommands.length;
+      }
+
+      // v0.6-19. 恢复 validation_assistance_exposures (依赖 users, card_key_points)
+      if (Array.isArray(data.validationAssistanceExposures)) {
+        for (const e of data.validationAssistanceExposures) {
+          const ae = e as Record<string, unknown>;
+          await tx.insert(validationAssistanceExposures).values({
+            id: ae.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: ae.userId as string,
+            keyPointId: ae.keyPointId as string,
+            exposureFingerprint: ae.exposureFingerprint as string,
+            lastExposureKind: ae.lastExposureKind as string,
+            firstExposedAt: ae.firstExposedAt ? new Date(ae.firstExposedAt as string) : new Date(),
+            lastExposedAt: ae.lastExposedAt ? new Date(ae.lastExposedAt as string) : new Date(),
+            unassistedEligibleAfter: ae.unassistedEligibleAfter ? new Date(ae.unassistedEligibleAfter as string) : new Date(),
+            lastOriginSubmissionId: (ae.lastOriginSubmissionId as string) ?? null,
+            inputScheduleId: (ae.inputScheduleId as string) ?? null,
+            createdAt: ae.createdAt ? new Date(ae.createdAt as string) : new Date(),
+            updatedAt: ae.updatedAt ? new Date(ae.updatedAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.validationAssistanceExposures = data.validationAssistanceExposures.length;
+      }
+
+      // v0.6-20. 恢复 validation_point_assessments (依赖 validation_submissions, validation_question_rubric_items)
+      if (Array.isArray(data.validationPointAssessments)) {
+        for (const p of data.validationPointAssessments) {
+          const pa = p as Record<string, unknown>;
+          await tx.insert(validationPointAssessments).values({
+            id: pa.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: pa.userId as string,
+            submissionId: pa.submissionId as string,
+            rubricItemId: pa.rubricItemId as string,
+            verdict: pa.verdict as string,
+            assessmentSource: pa.assessmentSource as string,
+            confidence: (pa.confidence as number) ?? null,
+            rationale: (pa.rationale as string) ?? null,
+            answerExcerpt: (pa.answerExcerpt as string) ?? null,
+            evidenceSnapshot: (pa.evidenceSnapshot as Record<string, unknown>) ?? null,
+            createdAt: pa.createdAt ? new Date(pa.createdAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.validationPointAssessments = data.validationPointAssessments.length;
+      }
+
+      // v0.6-21. 恢复 scheduling_shadow_decisions (依赖 users, card_key_points)
+      if (Array.isArray(data.schedulingShadowDecisions)) {
+        for (const s of data.schedulingShadowDecisions) {
+          const sd = s as Record<string, unknown>;
+          await tx.insert(schedulingShadowDecisions).values({
+            id: sd.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: sd.userId as string,
+            keyPointId: (sd.keyPointId as string) ?? null,
+            sourceType: sd.sourceType as string,
+            sourceId: sd.sourceId as string,
+            algorithm: sd.algorithm as string,
+            algorithmVersion: sd.algorithmVersion as string,
+            parametersVersion: sd.parametersVersion as string,
+            inputSnapshot: (sd.inputSnapshot as Record<string, unknown>) ?? null,
+            predictedDueAt: sd.predictedDueAt ? new Date(sd.predictedDueAt as string) : new Date(),
+            stability: (sd.stability as unknown) ?? null,
+            difficulty: (sd.difficulty as unknown) ?? null,
+            retrievability: (sd.retrievability as unknown) ?? null,
+            createdAt: sd.createdAt ? new Date(sd.createdAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.schedulingShadowDecisions = data.schedulingShadowDecisions.length;
+      }
+
+      // v0.6-22. 恢复 validation_quality_signals (依赖 users, validation_events)
+      if (Array.isArray(data.validationQualitySignals)) {
+        for (const q of data.validationQualitySignals) {
+          const qs = q as Record<string, unknown>;
+          await tx.insert(validationQualitySignals).values({
+            id: qs.id as string,
+            workspaceId: targetWorkspaceId,
+            userId: qs.userId as string,
+            validationEventId: qs.validationEventId as string,
+            submissionId: (qs.submissionId as string) ?? null,
+            reason: qs.reason as string,
+            comment: (qs.comment as string) ?? null,
+            sourceFingerprint: (qs.sourceFingerprint as string) ?? null,
+            rubricVersion: (qs.rubricVersion as string) ?? null,
+            reducerVersion: (qs.reducerVersion as string) ?? null,
+            policyVersion: (qs.policyVersion as string) ?? null,
+            createdAt: qs.createdAt ? new Date(qs.createdAt as string) : new Date(),
+          }).onConflictDoNothing();
+        }
+        counts.validationQualitySignals = data.validationQualitySignals.length;
       }
 
       // 15. 恢复 onboarding_states (SEC-02/ALPHA-01) — 必须在 users 和

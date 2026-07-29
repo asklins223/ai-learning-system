@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { noteVersions } from "../../db/schema/note.ts";
@@ -7,6 +8,7 @@ import { jobs } from "../../db/schema/job.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { getCardWithDetail, listCards, regenerateCard, acceptCard, dismissCard } from "./service.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
+import { activeLearningCardConsumerPredicate } from "./consumer-eligibility.ts";
 
 export async function cardRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
@@ -58,9 +60,12 @@ export async function cardRoutes(app: FastifyInstance) {
 }
 
 import { generateCardRequestSchema } from "./schema.ts";
-import { createGenerateCardJob } from "../job/service.ts";
-import { CardStatus, JobStatus, JobType } from "@ailearn/shared";
+import { JobStatus, JobType } from "@ailearn/shared";
 import { parseBody } from "../../lib/validate.ts";
+import {
+  createCardGenerationRun,
+  getLegacyGenerationCompatibility,
+} from "../card-generation/service.ts";
 
 export async function cardJobRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
@@ -70,7 +75,7 @@ export async function cardJobRoutes(app: FastifyInstance) {
       where: and(
         eq(learningCards.workspaceId, workspaceId),
         eq(learningCards.noteVersionId, noteVersionId),
-        eq(learningCards.status, CardStatus.ACTIVE),
+        activeLearningCardConsumerPredicate(),
       ),
       orderBy: [desc(learningCards.createdAt)],
     });
@@ -89,7 +94,7 @@ export async function cardJobRoutes(app: FastifyInstance) {
       .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
       .where(and(
         eq(learningCards.workspaceId, workspaceId),
-        eq(learningCards.status, CardStatus.ACTIVE),
+        activeLearningCardConsumerPredicate(),
         eq(noteVersions.noteId, noteId),
       ))
       .orderBy(desc(learningCards.createdAt))
@@ -153,11 +158,16 @@ export async function cardJobRoutes(app: FastifyInstance) {
     if (!version) {
       return reply.code(404).send({ error: "note version not found" });
     }
-    return createGenerateCardJob({
-      workspaceId: req.session.workspaceId,
-      userId: req.session.userId,
-      noteId: version.noteId,
-      noteVersionId: body.noteVersionId,
-    });
+    const run = await createCardGenerationRun(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      {
+        noteVersionId: body.noteVersionId,
+        idempotencyKey: `legacy-generate:${randomUUID()}`,
+      },
+    );
+    return getLegacyGenerationCompatibility(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      run.runId,
+    );
   });
 }

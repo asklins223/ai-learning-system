@@ -1,11 +1,16 @@
 import { and, asc, eq, ne, sql, inArray, lt, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
+import {
+  learningCards,
+  learningCardSets,
+  cardKeyPoints,
+} from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
 import { notes, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
 import { CardStatus, SourceStatus } from "@ailearn/shared";
 import { logger } from "../../lib/logger.ts";
+import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
 
 export interface SearchResult {
   objectType: string;
@@ -16,7 +21,70 @@ export interface SearchResult {
   href: string;
   /** 当 evidence 被按 card 聚合时，表示该 card 下有多少条 evidence 命中 */
   matchCount?: number;
+  cardSetId?: string | null;
+  scope?: "overview" | "section" | null;
+  ordinal?: number | null;
 }
+
+const consumableSearchDocumentPredicate = sql<boolean>`(
+  search_document.object_type NOT IN ('card', 'card_set', 'evidence')
+  OR (
+    search_document.object_type = 'card_set'
+    AND EXISTS (
+      SELECT 1
+      FROM learning_card_sets AS parent_set
+      WHERE parent_set.id = search_document.object_id
+        AND parent_set.workspace_id = search_document.workspace_id
+        AND parent_set.status = 'active'
+    )
+  )
+  OR (
+    search_document.object_type = 'card'
+    AND EXISTS (
+      SELECT 1
+      FROM learning_cards AS consumer_card
+      WHERE consumer_card.id = search_document.object_id
+        AND consumer_card.workspace_id = search_document.workspace_id
+        AND consumer_card.status = 'active'
+        AND (
+          consumer_card.card_set_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM learning_card_sets AS parent_set
+            WHERE parent_set.id = consumer_card.card_set_id
+              AND parent_set.workspace_id = consumer_card.workspace_id
+              AND parent_set.status = 'active'
+          )
+        )
+    )
+  )
+  OR (
+    search_document.object_type = 'evidence'
+    AND EXISTS (
+      SELECT 1
+      FROM evidences AS consumer_evidence
+      JOIN card_key_points AS consumer_key_point
+        ON consumer_key_point.id = consumer_evidence.key_point_id
+       AND consumer_key_point.workspace_id = consumer_evidence.workspace_id
+      JOIN learning_cards AS consumer_card
+        ON consumer_card.id = consumer_key_point.card_id
+       AND consumer_card.workspace_id = consumer_key_point.workspace_id
+      WHERE consumer_evidence.id = search_document.object_id
+        AND consumer_evidence.workspace_id = search_document.workspace_id
+        AND consumer_card.status = 'active'
+        AND (
+          consumer_card.card_set_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM learning_card_sets AS parent_set
+            WHERE parent_set.id = consumer_card.card_set_id
+              AND parent_set.workspace_id = consumer_card.workspace_id
+              AND parent_set.status = 'active'
+          )
+        )
+    )
+  )
+)`;
 
 /**
  * 全文搜索（pg_trgm + ILIKE，中文友好）。
@@ -62,13 +130,14 @@ export async function search(
       WITH matching AS (
         SELECT object_type, object_id, title, body, indexed_at, metadata,
           ${dedupKey} as dedup_key
-        FROM search_documents
+        FROM search_documents AS search_document
         WHERE workspace_id = ${workspaceId}
           AND (
             body ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
             OR title ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
           )
           AND (${type}::text IS NULL OR object_type = ${type})
+          AND ${consumableSearchDocumentPredicate}
       ),
       evidence_counts AS (
         SELECT metadata->>'cardId' as card_id, count(*) as match_count
@@ -103,13 +172,14 @@ export async function search(
           END
         )
           1
-        FROM search_documents
+        FROM search_documents AS search_document
         WHERE workspace_id = ${workspaceId}
           AND (
             body ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
             OR title ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
           )
           AND (${type}::text IS NULL OR object_type = ${type})
+          AND ${consumableSearchDocumentPredicate}
       ) as distinct_entities
     `),
   ]);
@@ -133,6 +203,17 @@ export async function search(
       (match) => `«${match}»`,
     );
 
+    const metadata = row.metadata as Record<string, unknown> | null;
+    const cardSetId = typeof metadata?.cardSetId === "string"
+      ? metadata.cardSetId
+      : null;
+    const scope = metadata?.scope === "overview" || metadata?.scope === "section"
+      ? metadata.scope
+      : null;
+    const ordinal = typeof metadata?.ordinal === "number"
+      ? metadata.ordinal
+      : null;
+
     // 生成 href
     let href = "";
     switch (row.object_type) {
@@ -140,15 +221,25 @@ export async function search(
         href = `/notes/${row.object_id}`;
         break;
       case "card":
-        href = `/cards/${row.object_id}`;
+        href = cardSetId
+          ? `/card-sets/${cardSetId}?cardId=${row.object_id}`
+          : `/cards/${row.object_id}`;
+        break;
+      case "card_set":
+        href = `/card-sets/${row.object_id}`;
         break;
       case "source":
         href = `/sources/${row.object_id}`;
         break;
       case "evidence": {
-        const meta = row.metadata as Record<string, unknown> | null;
-        const cardId = (meta?.cardId as string) ?? null;
-        href = cardId ? `/cards/${cardId}` : "";
+        const cardId = typeof metadata?.cardId === "string"
+          ? metadata.cardId
+          : null;
+        href = cardSetId
+          ? `/card-sets/${cardSetId}${cardId ? `?cardId=${cardId}` : ""}`
+          : cardId
+            ? `/cards/${cardId}`
+            : "";
         break;
       }
       default:
@@ -163,6 +254,9 @@ export async function search(
       indexedAt: row.indexed_at instanceof Date ? row.indexed_at.toISOString() : row.indexed_at,
       href,
       matchCount: Number(row.match_count) || 1,
+      cardSetId,
+      scope,
+      ordinal,
     };
   });
 
@@ -179,6 +273,7 @@ export interface SearchReindexResult {
   indexed: {
     note: number;
     source: number;
+    cardSet: number;
     card: number;
     evidence: number;
   };
@@ -197,21 +292,30 @@ export async function reindexWorkspaceSearch(
   workspaceId: string,
 ): Promise<SearchReindexResult & { errors: number }> {
   let deletedCount = 0;
-  let indexed = { note: 0, source: 0, card: 0, evidence: 0 };
+  let indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 };
   let errors = 0;
   const projectionStartedAt = new Date();
 
   // Collect top-level entities in parallel, then hydrate each child table in
   // one query. The old implementation issued one blocks query per note, one
   // segments query per source, and one key-point/evidence query per card.
-  const [noteRows, sourceRows, cardRows] = await Promise.all([
+  const [noteRows, sourceRows, cardSetRows, cardRows] = await Promise.all([
     // CONC-03: 软删除的笔记不应被重新索引到搜索文档中
     executor.query.notes.findMany({ where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)) }),
     executor.query.sources.findMany({
       where: and(eq(sources.workspaceId, workspaceId), ne(sources.status, SourceStatus.ARCHIVED)),
     }),
+    executor.query.learningCardSets.findMany({
+      where: and(
+        eq(learningCardSets.workspaceId, workspaceId),
+        eq(learningCardSets.status, "active"),
+      ),
+    }),
     executor.query.learningCards.findMany({
-      where: and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, CardStatus.ACTIVE)),
+      where: and(
+        eq(learningCards.workspaceId, workspaceId),
+        activeLearningCardConsumerPredicate(),
+      ),
     }),
   ]);
 
@@ -301,6 +405,7 @@ export async function reindexWorkspaceSearch(
       type: source.type,
     };
   });
+  const cardsById = new Map(cardRows.map((card) => [card.id, card]));
 
   const documents: Array<typeof searchDocuments.$inferInsert> = [
     ...noteData.map((note) => ({
@@ -321,6 +426,19 @@ export async function reindexWorkspaceSearch(
       metadata: { type: source.type },
       indexedAt: projectionStartedAt,
     })),
+    ...cardSetRows.map((cardSet) => ({
+      workspaceId,
+      objectType: "card_set",
+      objectId: cardSet.id,
+      title: cardSet.title,
+      body: cardSet.summary,
+      metadata: {
+        cardSetId: cardSet.id,
+        noteId: cardSet.noteId,
+        noteVersionId: cardSet.noteVersionId,
+      },
+      indexedAt: projectionStartedAt,
+    })),
     ...cardRows.map((card) => {
       const keyPoints = keyPointsByCard.get(card.id) ?? [];
       return {
@@ -329,20 +447,35 @@ export async function reindexWorkspaceSearch(
         objectId: card.id,
         title: card.schemaJson.title,
         body: [card.schemaJson.summary, ...keyPoints.map((keyPoint) => keyPoint.claim)].join("\n"),
-        metadata: { noteVersionId: card.noteVersionId },
+        metadata: {
+          noteVersionId: card.noteVersionId,
+          cardSetId: card.cardSetId,
+          scope: card.scope,
+          ordinal: card.ordinal,
+        },
         indexedAt: projectionStartedAt,
       };
     }),
     ...keyPointRows.flatMap((keyPoint) =>
-      (evidencesByKeyPoint.get(keyPoint.id) ?? []).map((evidence) => ({
-        workspaceId,
-        objectType: "evidence",
-        objectId: evidence.id,
-        title: keyPoint.claim,
-        body: evidence.quoteText,
-        metadata: { keyPointId: keyPoint.id, cardId: keyPoint.cardId, alignment: evidence.alignment },
-        indexedAt: projectionStartedAt,
-      })),
+      (evidencesByKeyPoint.get(keyPoint.id) ?? []).map((evidence) => {
+        const card = cardsById.get(keyPoint.cardId);
+        return {
+          workspaceId,
+          objectType: "evidence",
+          objectId: evidence.id,
+          title: keyPoint.claim,
+          body: evidence.quoteText,
+          metadata: {
+            keyPointId: keyPoint.id,
+            cardId: keyPoint.cardId,
+            cardSetId: card?.cardSetId ?? null,
+            scope: card?.scope ?? null,
+            ordinal: card?.ordinal ?? null,
+            alignment: evidence.alignment,
+          },
+          indexedAt: projectionStartedAt,
+        };
+      }),
     ),
   ];
 
@@ -408,20 +541,57 @@ export async function reindexWorkspaceSearch(
               )
             )
             OR (
+              search_document.object_type = 'card_set'
+              AND NOT EXISTS (
+                SELECT 1 FROM learning_card_sets AS domain_card_set
+                WHERE domain_card_set.id = search_document.object_id
+                  AND domain_card_set.workspace_id = ${workspaceId}
+                  AND domain_card_set.status = 'active'
+              )
+            )
+            OR (
               search_document.object_type = 'card'
               AND NOT EXISTS (
                 SELECT 1 FROM learning_cards AS domain_card
                 WHERE domain_card.id = search_document.object_id
                   AND domain_card.workspace_id = ${workspaceId}
                   AND domain_card.status = ${CardStatus.ACTIVE}
+                  AND (
+                    domain_card.card_set_id IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM learning_card_sets AS parent_set
+                      WHERE parent_set.id = domain_card.card_set_id
+                        AND parent_set.workspace_id = domain_card.workspace_id
+                        AND parent_set.status = 'active'
+                    )
+                  )
               )
             )
             OR (
               search_document.object_type = 'evidence'
               AND NOT EXISTS (
-                SELECT 1 FROM evidences AS domain_evidence
+                SELECT 1
+                FROM evidences AS domain_evidence
+                JOIN card_key_points AS domain_key_point
+                  ON domain_key_point.id = domain_evidence.key_point_id
+                 AND domain_key_point.workspace_id = domain_evidence.workspace_id
+                JOIN learning_cards AS domain_card
+                  ON domain_card.id = domain_key_point.card_id
+                 AND domain_card.workspace_id = domain_key_point.workspace_id
                 WHERE domain_evidence.id = search_document.object_id
                   AND domain_evidence.workspace_id = ${workspaceId}
+                  AND domain_card.status = ${CardStatus.ACTIVE}
+                  AND (
+                    domain_card.card_set_id IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM learning_card_sets AS parent_set
+                      WHERE parent_set.id = domain_card.card_set_id
+                        AND parent_set.workspace_id = domain_card.workspace_id
+                        AND parent_set.status = 'active'
+                    )
+                  )
               )
             )
           )
@@ -430,6 +600,7 @@ export async function reindexWorkspaceSearch(
     indexed = {
       note: noteData.length,
       source: sourceData.length,
+      cardSet: cardSetRows.length,
       card: cardRows.length,
       evidence: evidenceRows.length,
     };
@@ -437,7 +608,7 @@ export async function reindexWorkspaceSearch(
     // A rolled-back rebuild changed neither the old index nor the reported
     // counters. The old code leaked pre-rollback counts as if work succeeded.
     deletedCount = 0;
-    indexed = { note: 0, source: 0, card: 0, evidence: 0 };
+    indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 };
     logger.error({ err, workspaceId }, "reindex transaction failed — old index preserved");
     errors = 1;
   }
@@ -460,6 +631,7 @@ export interface SearchDriftResult {
   expected: {
     note: number;
     source: number;
+    cardSet: number;
     card: number;
     evidence: number;
   };
@@ -467,6 +639,7 @@ export interface SearchDriftResult {
   actual: {
     note: number;
     source: number;
+    cardSet: number;
     card: number;
     evidence: number;
   };
@@ -562,9 +735,55 @@ export async function detectSearchDrift(
     }
   }
 
-  // 3. Cards: 对比业务表与索引（仅 active）
+  // 3. Card sets: only the active publish boundary is searchable.
+  const cardSetRows = await executor.query.learningCardSets.findMany({
+    where: and(
+      eq(learningCardSets.workspaceId, workspaceId),
+      eq(learningCardSets.status, "active"),
+    ),
+    columns: { id: true, title: true },
+  });
+  const cardSetIds = new Set(cardSetRows.map((cardSet) => cardSet.id));
+  const cardSetTitleMap = new Map(
+    cardSetRows.map((cardSet) => [cardSet.id, cardSet.title]),
+  );
+  const indexedCardSets = await executor.query.searchDocuments.findMany({
+    where: and(
+      eq(searchDocuments.workspaceId, workspaceId),
+      eq(searchDocuments.objectType, "card_set"),
+    ),
+    columns: { objectId: true, title: true },
+  });
+  const indexedCardSetIds = new Set(
+    indexedCardSets.map((document) => document.objectId),
+  );
+  for (const document of indexedCardSets) {
+    if (!cardSetIds.has(document.objectId)) {
+      ghosts.push({ objectType: "card_set", objectId: document.objectId });
+    } else {
+      const actualTitle = cardSetTitleMap.get(document.objectId);
+      if (actualTitle !== undefined && actualTitle !== document.title) {
+        staleTitles.push({
+          objectType: "card_set",
+          objectId: document.objectId,
+          indexedTitle: document.title,
+          actualTitle,
+        });
+      }
+    }
+  }
+  for (const id of cardSetIds) {
+    if (!indexedCardSetIds.has(id)) {
+      missing.push({ objectType: "card_set", objectId: id });
+    }
+  }
+
+  // 4. Cards: active rows are consumable only under an active parent set.
   const cardRows = await executor.query.learningCards.findMany({
-    where: and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, CardStatus.ACTIVE)),
+    where: and(
+      eq(learningCards.workspaceId, workspaceId),
+      activeLearningCardConsumerPredicate(),
+    ),
     columns: { id: true, schemaJson: true },
   });
   const cardIds = new Set(cardRows.map((c) => c.id));
@@ -599,7 +818,7 @@ export async function detectSearchDrift(
     }
   }
 
-  // 4. Evidence: R-017 — 只对比 active card 下的 evidence（与 reindex 逻辑一致）
+  // 5. Evidence: R-017 — 只对比可消费 card 下的 evidence（与 reindex 逻辑一致）
   //    先查出 active card 的 keyPoint IDs，再查这些 keyPoint 下的 evidence
   const activeCardIds = Array.from(cardIds);
   let evidenceIds = new Set<string>();
@@ -644,12 +863,14 @@ export async function detectSearchDrift(
   const expected = {
     note: noteIds.size,
     source: sourceIds.size,
+    cardSet: cardSetIds.size,
     card: cardIds.size,
     evidence: evidenceIds.size,
   };
   const actual = {
     note: indexedNotes.length,
     source: indexedSources.length,
+    cardSet: indexedCardSets.length,
     card: indexedCards.length,
     evidence: indexedEvidences.length,
   };

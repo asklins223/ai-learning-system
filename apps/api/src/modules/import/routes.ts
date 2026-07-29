@@ -4,7 +4,7 @@ import { eq, and, inArray, sql, isNull } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { db } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
-import { computeContentHash } from "../note/service.ts";
+import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { markdownToBlocks, extractTitleFromBlocks } from "../../lib/markdown-parser.ts";
@@ -119,13 +119,21 @@ async function importItems(
           .returning();
 
         if (blocks.length) {
+          const blocksWithAssets = await ensureImageAssetsForBlocks(
+            itemTx as Parameters<typeof ensureImageAssetsForBlocks>[0],
+            workspaceId,
+            blocks,
+            userId,
+            note.id,
+          );
           await itemTx.insert(noteBlocks).values(
-            blocks.map((b, idx) => ({
+            blocksWithAssets.map((b, idx) => ({
               versionId: version.id,
               workspaceId,
               ordinal: idx,
               type: b.type,
               content: b.content,
+              imageAssetId: b.imageAssetId,
             })),
           );
         }

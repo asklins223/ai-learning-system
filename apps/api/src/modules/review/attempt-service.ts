@@ -12,6 +12,7 @@
  */
 
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import {
   reviewAttempts,
@@ -22,6 +23,7 @@ import {
   evidenceOverrides,
   understandingEvents,
 } from "../../db/schema/evidence.ts";
+import { validationActionCommands } from "../../db/schema/index.ts";
 import { ReviewStatus } from "@ailearn/shared";
 import {
   REVIEW_ATTEMPT_LATER_REASON,
@@ -35,6 +37,7 @@ import {
   type EvidenceOverride,
 } from "../../lib/evidence.ts";
 import { calculateReviewSchedule } from "./scheduling-policy.ts";
+import { reviewScheduleTargetsConsumableCardPredicate } from "./consumer-eligibility.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 // OPS-01: Funnel 指标（ADR-0006 §2）
 import { recordFunnelEvent } from "../../lib/metrics.ts";
@@ -50,7 +53,8 @@ export type ReviewAttemptErrorCode =
   | "question_not_found"
   | "question_expired"
   | "card_not_found"
-  | "key_point_not_found";
+  | "key_point_not_found"
+  | "idempotency_key_reused";
 
 export class ReviewAttemptError extends Error {
   readonly code: ReviewAttemptErrorCode;
@@ -69,6 +73,7 @@ export class ReviewAttemptError extends Error {
       : code === "schedule_not_pending"
           || code === "attempt_not_started"
           || code === "attempt_already_completed"
+          || code === "idempotency_key_reused"
         ? 409
         : 410;
   }
@@ -315,6 +320,7 @@ export async function startReviewAttempt(
             eq(reviewSchedules.id, input.reviewScheduleId),
             eq(reviewSchedules.workspaceId, workspaceId),
             eq(reviewSchedules.userId, userId),
+            reviewScheduleTargetsConsumableCardPredicate(),
           ),
         )
         .for("update");
@@ -438,6 +444,7 @@ export async function submitReviewAttempt(
             eq(reviewSchedules.id, attempt.reviewScheduleId),
             eq(reviewSchedules.workspaceId, workspaceId),
             eq(reviewSchedules.userId, userId),
+            reviewScheduleTargetsConsumableCardPredicate(),
           ),
         )
         .for("update");
@@ -478,7 +485,7 @@ export async function submitReviewAttempt(
 
       // 3. Resolve the card and key point for evidence checking.
       let cardId: string | null = null;
-      let keyPointId: string | null = null;
+      let keyPointId: string | null = schedule.keyPointId ?? null;
 
       if (schedule.subjectType === "card") {
         cardId = schedule.subjectId;
@@ -563,6 +570,7 @@ export async function submitReviewAttempt(
           subjectType: schedule.subjectType,
           subjectId: schedule.subjectId,
           validationEventId: schedule.validationEventId,
+          keyPointId,
           status: ReviewStatus.PENDING,
           nextReviewAt: decision.nextReviewAt,
           intervalDays: decision.afterIntervalDays,
@@ -646,35 +654,119 @@ export async function submitReviewAttempt(
 // ─── Later ───────────────────────────────────────────────────────────────
 
 /**
+ * v0.6 Action command idempotency helpers for the "later" action (计划 §6.4.1).
+ *
+ * The "later" action is migrated from the v0.5 review-attempt-level idempotency
+ * (reviewAttempts.idempotencyKey) to the v0.6 unified action command ledger
+ * (validation_action_commands). This ensures consistent idempotency semantics
+ * across all v0.6 validation and review mutations.
+ *
+ * The existing reviewAttempts.idempotencyKey unique index is kept as a
+ * secondary safety net for backward compatibility.
+ */
+
+function computeLaterRequestHash(input: ReviewAttemptLaterInput): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      action: "later",
+      reviewScheduleId: input.reviewScheduleId,
+      reason: input.reason,
+    }))
+    .digest("hex");
+}
+
+async function checkLaterActionCommand(
+  tx: ApiTransaction,
+  workspaceId: string,
+  userId: string,
+  idempotencyKey: string,
+  requestHash: string,
+): Promise<{ exists: boolean; responseSnapshot?: Record<string, unknown> }> {
+  const existing = await tx.query.validationActionCommands.findFirst({
+    where: and(
+      eq(validationActionCommands.workspaceId, workspaceId),
+      eq(validationActionCommands.userId, userId),
+      eq(validationActionCommands.action, "later"),
+      eq(validationActionCommands.idempotencyKey, idempotencyKey),
+    ),
+  });
+
+  if (existing) {
+    // 计划 §6.4.1: 命中但 request hash 不同 → 409 idempotency_key_reused
+    if (existing.requestHash !== requestHash) {
+      throw new ReviewAttemptError("idempotency_key_reused");
+    }
+    return { exists: true, responseSnapshot: existing.responseSnapshot ?? undefined };
+  }
+
+  await tx.insert(validationActionCommands).values({
+    workspaceId,
+    userId,
+    action: "later",
+    idempotencyKey,
+    requestHash,
+    responseStatus: "pending",
+  });
+
+  return { exists: false };
+}
+
+async function completeLaterActionCommand(
+  tx: ApiTransaction,
+  workspaceId: string,
+  userId: string,
+  idempotencyKey: string,
+  responseSnapshot: Record<string, unknown>,
+): Promise<void> {
+  await tx
+    .update(validationActionCommands)
+    .set({
+      responseStatus: "success",
+      responseSnapshot,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(validationActionCommands.workspaceId, workspaceId),
+        eq(validationActionCommands.userId, userId),
+        eq(validationActionCommands.action, "later"),
+        eq(validationActionCommands.idempotencyKey, idempotencyKey),
+      ),
+    );
+}
+
+/**
  * Defer a review with a "later" skip reason. Creates an attempt, applies the
  * short deferral, and keeps the interval unchanged. Does not emit an
  * understanding event.
+ *
+ * v0.6: Uses validation_action_commands for idempotency (计划 §6.4.1),
+ * consistent with the validation session service pattern. The existing
+ * reviewAttempts.idempotencyKey unique index remains as a secondary safety net.
  */
 export async function laterReviewAttempt(
   workspaceId: string,
   userId: string,
   input: ReviewAttemptLaterInput,
 ): Promise<ReviewAttemptLaterResult> {
+  const requestHash = computeLaterRequestHash(input);
+
   const result = await withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
-      // 1. Replay before schedule validation so a completed/changed schedule
-      // does not make an already committed request fail on retry.
-      const existing = await findAttemptByIdempotencyKey(
+      // 1. Check action command ledger for idempotent replay (计划 §6.4.1).
+      const actionCmd = await checkLaterActionCommand(
         tx,
         workspaceId,
         userId,
         input.idempotencyKey,
+        requestHash,
       );
-      if (existing) {
-        assertIdempotentAttemptMatches(existing, input.reviewScheduleId, "later");
+      if (actionCmd.exists && actionCmd.responseSnapshot) {
+        // Idempotent replay — return the stored response.
         return {
           __idempotent: true,
-          attemptId: existing.id,
-          status: existing.status,
-          scheduleReasonCode: existing.scheduleReasonCode ?? "later_short_deferral",
-          nextReviewAt: existing.nextReviewAt ?? new Date(),
-          intervalDays: existing.scheduleAfterIntervalDays ?? 1,
+          ...(actionCmd.responseSnapshot as unknown as Omit<ReviewAttemptLaterResult, "idempotent">),
           idempotent: true,
         };
       }
@@ -688,6 +780,7 @@ export async function laterReviewAttempt(
             eq(reviewSchedules.id, input.reviewScheduleId),
             eq(reviewSchedules.workspaceId, workspaceId),
             eq(reviewSchedules.userId, userId),
+            reviewScheduleTargetsConsumableCardPredicate(),
           ),
         )
         .for("update");
@@ -707,7 +800,8 @@ export async function laterReviewAttempt(
 
       const now = new Date();
 
-      // 4. Create the attempt.
+      // 4. Create the attempt (reviewAttempts.idempotencyKey remains as
+      //    secondary safety net for backward compatibility).
       const [attempt] = await tx
         .insert(reviewAttempts)
         .values({
@@ -731,6 +825,8 @@ export async function laterReviewAttempt(
         .returning();
 
       if (!attempt) {
+        // Secondary safety net triggered — the reviewAttempts unique index
+        // prevented a duplicate. Fetch the existing attempt for replay.
         const racedAttempt = await findAttemptByIdempotencyKey(
           tx,
           workspaceId,
@@ -741,8 +837,7 @@ export async function laterReviewAttempt(
           throw new Error("review attempt idempotency conflict did not expose an existing row");
         }
         assertIdempotentAttemptMatches(racedAttempt, input.reviewScheduleId, "later");
-        return {
-          __idempotent: true,
+        const replayResult = {
           attemptId: racedAttempt.id,
           status: racedAttempt.status,
           scheduleReasonCode: racedAttempt.scheduleReasonCode ?? "later_short_deferral",
@@ -750,6 +845,15 @@ export async function laterReviewAttempt(
           intervalDays: racedAttempt.scheduleAfterIntervalDays ?? schedule.intervalDays,
           idempotent: true,
         };
+        // Complete the action command with the replayed response.
+        await completeLaterActionCommand(
+          tx,
+          workspaceId,
+          userId,
+          input.idempotencyKey,
+          replayResult as unknown as Record<string, unknown>,
+        );
+        return { __idempotent: true, ...replayResult };
       }
 
       // 5. Update the schedule's next review time (keep interval, keep pending).
@@ -772,15 +876,25 @@ export async function laterReviewAttempt(
         throw new ReviewAttemptError("schedule_not_pending");
       }
 
-      return {
-        __idempotent: false,
+      const result = {
         attemptId: attempt.id,
-        status: "skipped",
+        status: "skipped" as const,
         scheduleReasonCode: decision.reasonCode,
         nextReviewAt: decision.nextReviewAt,
         intervalDays: decision.afterIntervalDays,
         idempotent: false,
       };
+
+      // 6. Complete the action command with the response snapshot.
+      await completeLaterActionCommand(
+        tx,
+        workspaceId,
+        userId,
+        input.idempotencyKey,
+        result as unknown as Record<string, unknown>,
+      );
+
+      return { __idempotent: false, ...result };
     },
   );
 

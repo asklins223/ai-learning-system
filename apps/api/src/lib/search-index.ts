@@ -23,7 +23,7 @@ type SearchDatabase = Pick<typeof db, "insert" | "delete">;
 export async function upsertSearchDocument(
   params: {
     workspaceId: string;
-    objectType: "note" | "card" | "source" | "evidence";
+    objectType: "note" | "card_set" | "card" | "source" | "evidence";
     objectId: string;
     title: string | null;
     body: string | null;

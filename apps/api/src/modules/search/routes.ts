@@ -7,7 +7,7 @@ import { parseQuery } from "../../lib/pagination.ts";
 
 const searchQuerySchema = z.object({
   q: z.string().optional(),
-  type: z.enum(["note", "card", "source", "evidence"]).optional(),
+  type: z.enum(["note", "card_set", "card", "source", "evidence"]).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
   offset: z.coerce.number().int().min(0).max(100_000).optional(),
 });

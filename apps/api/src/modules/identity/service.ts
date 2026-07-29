@@ -851,7 +851,12 @@ export async function getAIPrivacySettings(workspaceId: string) {
     aiConsentVersion: ws.aiConsentVersion,
     aiConsentAt: ws.aiConsentAt,
     aiConsentBy: ws.aiConsentBy,
-    aiDataPolicy: ws.aiDataPolicy,
+    aiDataPolicy: {
+      sendToExternal: ws.aiDataPolicy.sendToExternal,
+      sendImageContent: ws.aiDataPolicy.sendImageContent ?? false,
+      piiDetection: ws.aiDataPolicy.piiDetection,
+      auditLogging: ws.aiDataPolicy.auditLogging,
+    },
   };
 }
 
@@ -880,6 +885,7 @@ export async function updateAIDataPolicy(
   workspaceId: string,
   policy: {
     sendToExternal: boolean;
+    sendImageContent: boolean;
     piiDetection: boolean;
     auditLogging: boolean;
   },

@@ -1,9 +1,42 @@
 import { and, eq, inArray } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import { db, type ApiTransaction } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, evidenceOverrides, understandingEvents } from "../../db/schema/evidence.ts";
 import { noteBlocks } from "../../db/schema/note.ts";
 import { getUserOverrideMap } from "../../lib/evidence.ts";
+import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
+
+async function resolveConsumableEvidenceTarget(
+  transaction: ApiTransaction,
+  evidenceId: string,
+  workspaceId: string,
+) {
+  const evidence = await transaction.query.evidences.findFirst({
+    where: and(
+      eq(evidences.id, evidenceId),
+      eq(evidences.workspaceId, workspaceId),
+    ),
+  });
+  if (!evidence) return null;
+
+  const keyPoint = await transaction.query.cardKeyPoints.findFirst({
+    where: and(
+      eq(cardKeyPoints.id, evidence.keyPointId),
+      eq(cardKeyPoints.workspaceId, workspaceId),
+    ),
+  });
+  if (!keyPoint) return null;
+
+  const card = await transaction.query.learningCards.findFirst({
+    where: and(
+      eq(learningCards.id, keyPoint.cardId),
+      eq(learningCards.workspaceId, workspaceId),
+      activeLearningCardConsumerPredicate(),
+    ),
+    columns: { id: true },
+  });
+  return card ? { evidence, keyPoint } : null;
+}
 
 /**
  * Fetch every key point on a card plus its evidences, joined with the
@@ -78,10 +111,12 @@ export async function overrideEvidence(
   override: "confirmed" | "downgraded" | "rejected",
 ) {
   return db.transaction(async (tx) => {
-    const ev = await tx.query.evidences.findFirst({
-      where: and(eq(evidences.id, evidenceId), eq(evidences.workspaceId, workspaceId)),
-    });
-    if (!ev) return null;
+    const target = await resolveConsumableEvidenceTarget(
+      tx,
+      evidenceId,
+      workspaceId,
+    );
+    if (!target) return null;
 
     // N-005: 使用 upsert 写入用户级 override 表
     // 唯一键 (evidence_id, user_id) 确保每个用户对同一证据只有一条 override
@@ -99,22 +134,14 @@ export async function overrideEvidence(
       });
 
     // Keep the derived understanding event atomic with the effective override.
-    const kp = await tx.query.cardKeyPoints.findFirst({
-      where: and(
-        eq(cardKeyPoints.id, ev.keyPointId),
-        eq(cardKeyPoints.workspaceId, workspaceId),
-      ),
+    await tx.insert(understandingEvents).values({
+      workspaceId,
+      userId,
+      subjectType: "card",
+      subjectId: target.keyPoint.cardId,
+      eventType: "evidence_overridden",
+      payload: { evidenceId, override, keyPointId: target.evidence.keyPointId },
     });
-    if (kp) {
-      await tx.insert(understandingEvents).values({
-        workspaceId,
-        userId,
-        subjectType: "card",
-        subjectId: kp.cardId,
-        eventType: "evidence_overridden",
-        payload: { evidenceId, override, keyPointId: ev.keyPointId },
-      });
-    }
 
     return { ok: true };
   });
@@ -128,19 +155,23 @@ export async function removeEvidenceOverride(
   workspaceId: string,
   userId: string,
 ) {
-  const ev = await db.query.evidences.findFirst({
-    where: and(eq(evidences.id, evidenceId), eq(evidences.workspaceId, workspaceId)),
-  });
-  if (!ev) return null;
-
-  await db
-    .delete(evidenceOverrides)
-    .where(
-      and(
-        eq(evidenceOverrides.evidenceId, evidenceId),
-        eq(evidenceOverrides.userId, userId),
-      ),
+  return db.transaction(async (tx) => {
+    const target = await resolveConsumableEvidenceTarget(
+      tx,
+      evidenceId,
+      workspaceId,
     );
+    if (!target) return null;
 
-  return { ok: true };
+    await tx
+      .delete(evidenceOverrides)
+      .where(
+        and(
+          eq(evidenceOverrides.evidenceId, evidenceId),
+          eq(evidenceOverrides.userId, userId),
+        ),
+      );
+
+    return { ok: true };
+  });
 }

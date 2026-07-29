@@ -9,6 +9,7 @@ import {
   getUserOverrideMap,
 } from "../../lib/evidence.ts";
 import type { ValidationSubmitInput, CreateQuestionInput } from "./schema.ts";
+import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
 // OPS-01: Funnel 指标（ADR-0006 §2）
 import { recordFunnelEvent } from "../../lib/metrics.ts";
 
@@ -48,7 +49,11 @@ export async function createValidationQuestion(
 ) {
   // 校验 card 归属
   const card = await db.query.learningCards.findFirst({
-    where: and(eq(learningCards.id, cardId), eq(learningCards.workspaceId, workspaceId)),
+    where: and(
+      eq(learningCards.id, cardId),
+      eq(learningCards.workspaceId, workspaceId),
+      activeLearningCardConsumerPredicate(),
+    ),
   });
   if (!card) return null;
 
@@ -113,7 +118,11 @@ export async function submitValidation(
 ) {
   // 跨租户校验 card
   const card = await db.query.learningCards.findFirst({
-    where: and(eq(learningCards.id, cardId), eq(learningCards.workspaceId, workspaceId)),
+    where: and(
+      eq(learningCards.id, cardId),
+      eq(learningCards.workspaceId, workspaceId),
+      activeLearningCardConsumerPredicate(),
+    ),
   });
   if (!card) return null;
 

@@ -2,19 +2,17 @@ import { z } from "zod";
 import { paginationQuerySchema } from "../../lib/pagination.ts";
 
 export const sourceCreateSchema = z.object({
-  type: z.enum(["text", "markdown", "code", "url"]),
-  title: z.string().min(1).max(500),
+  type: z.enum(["text", "markdown", "code", "url"]).optional(),
+  title: z.string().max(500).optional(),
   content: z.string().optional(),
   url: z.string().url().optional(),
   metadata: z.record(z.unknown()).optional(),
 }).refine(
   (data) => {
-    // F-021: url 类型时 url 或 content 至少一项必须有值
-    if (data.type === "url") {
-      return Boolean(data.url?.trim() || data.content?.trim());
-    }
-    // 非 url 类型时 content 必须有值
-    return Boolean(data.content?.trim());
+    // IR2: 采用严格校验——非 url 类型要求 content 必填，防止
+    // { type: "text", url: "..." } 无 content 组合产生空 source
+    if (data.type && data.type !== "url") return Boolean(data.content?.trim());
+    return Boolean(data.url?.trim() || data.content?.trim());
   },
   { message: "url or content is required" },
 );

@@ -6,22 +6,24 @@
  * - GET  /uploads/*        — 图片下载（租户/用户隔离校验）
  */
 import type { FastifyInstance } from "fastify";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
-import { db } from "../../db/client.ts";
-import { notes } from "../../db/schema/note.ts";
+import { withWorkspaceTransaction } from "../../db/client.ts";
+import { noteImageAssets, notes } from "../../db/schema/note.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { hasValidCookieCsrf } from "../identity/session-auth.ts";
 import {
   uploadObject,
   getObject,
   headObject,
+  deleteObject,
   isStorageConfigured,
 } from "../../lib/object-storage.ts";
 import {
   validateImageMagicBytes,
   ALLOWED_IMAGE_TYPES,
   extFromMimeType,
+  readImageDimensions,
 } from "../../lib/file-validation.ts";
 import { getRequestCredential } from "../identity/middleware.ts";
 import { logger } from "../../lib/logger.ts";
@@ -101,9 +103,20 @@ export async function uploadRoutes(
 
     // Validate noteId belongs to current workspace (提前校验，避免无效请求浪费内存读取文件)
     // CONC-03: 不允许向已软删除的笔记上传图片，避免产生孤儿图片对象
-    const note = await db.query.notes.findFirst({
-      where: and(eq(notes.id, noteId), eq(notes.workspaceId, req.session.workspaceId), isNull(notes.deletedAt)),
-    });
+    const transactionContext = {
+      workspaceId: req.session.workspaceId,
+      userId: req.session.userId,
+    };
+    const note = await withWorkspaceTransaction(
+      transactionContext,
+      (tx) => tx.query.notes.findFirst({
+        where: and(
+          eq(notes.id, noteId),
+          eq(notes.workspaceId, req.session.workspaceId),
+          isNull(notes.deletedAt),
+        ),
+      }),
+    );
     if (!note) {
       return reply.code(404).send({ error: "note not found in current workspace" });
     }
@@ -125,6 +138,15 @@ export async function uploadRoutes(
       return reply.code(413).send({ error: "file too large (max 10MB)" });
     }
 
+    const dimensions = readImageDimensions(buffer, file.mimetype);
+    if (!dimensions) {
+      return reply.code(415).send({ error: "image dimensions could not be decoded" });
+    }
+    // Decode-bomb guard: reject before any downstream normalizer opens pixels.
+    if (dimensions.width * dimensions.height > 40_000_000) {
+      return reply.code(413).send({ error: "image pixel count exceeds 40 megapixels" });
+    }
+
     // Generate objectKey: {workspaceId}/notes/{noteId}/{uuid}.{ext}
     const ext = extFromMimeType(file.mimetype);
     const objectKey = `${req.session.workspaceId}/notes/${noteId}/${randomUUID()}.${ext}`;
@@ -136,12 +158,54 @@ export async function uploadRoutes(
       return reply.code(503).send({ error: "failed to upload image" });
     }
 
+    let asset: typeof noteImageAssets.$inferSelect;
+    try {
+      asset = await withWorkspaceTransaction(transactionContext, async (tx) => {
+        const liveNote = await tx.query.notes.findFirst({
+          columns: { id: true },
+          where: and(
+            eq(notes.id, note.id),
+            eq(notes.workspaceId, req.session.workspaceId),
+            isNull(notes.deletedAt),
+          ),
+        });
+        if (!liveNote) throw new Error("note was deleted before image asset registration");
+        const [registered] = await tx
+          .insert(noteImageAssets)
+          .values({
+            workspaceId: req.session.workspaceId,
+            uploadedForNoteId: liveNote.id,
+            objectKey,
+            sha256: createHash("sha256").update(buffer).digest("hex"),
+            mimeType: file.mimetype,
+            byteSize: buffer.length,
+            width: dimensions.width,
+            height: dimensions.height,
+            status: "ready",
+            createdBy: req.session.userId,
+          })
+          .returning();
+        if (!registered) throw new Error("image asset insert returned no row");
+        return registered;
+      });
+    } catch (err) {
+      await deleteObject(objectKey).catch((cleanupError) => {
+        logger.error({ err: cleanupError, objectKey }, "failed to clean up image after asset persistence failure");
+      });
+      logger.error({ err, objectKey }, "failed to persist uploaded image asset");
+      return reply.code(503).send({ error: "failed to register uploaded image" });
+    }
+
     const url = `/api/uploads/${objectKey}`;
     return reply.code(201).send({
+      assetId: asset.id,
       url,
       objectKey,
       size: buffer.length,
       mimeType: file.mimetype,
+      sha256: asset.sha256,
+      width: dimensions.width,
+      height: dimensions.height,
     });
   });
 
@@ -218,9 +282,10 @@ export async function uploadRoutes(
         return reply.code(403).send({ error: "forbidden" });
       }
     } else {
-      // Note image path: {workspaceId}/notes/{noteId}/{uuid}.{ext}
+      // Note/source image path: {workspaceId}/notes/{noteId}/{uuid}.{ext}
+      //   or: {workspaceId}/sources/{sourceId}/{uuid}.{ext}
       const parts = path.split("/");
-      if (parts.length < 4 || parts[1] !== "notes") {
+      if (parts.length < 4 || (parts[1] !== "notes" && parts[1] !== "sources")) {
         return reply.code(404).send({ error: "not found" });
       }
       const pathWorkspaceId = parts[0];

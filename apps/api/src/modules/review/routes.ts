@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
-import { listReviews } from "./service.ts";
+import { withWorkspaceTransaction } from "../../db/client.ts";
+import { listReviews, listSanitizedReviews, getSanitizedReviewMeta } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { parseQuery } from "../../lib/pagination.ts";
 import {
@@ -48,17 +49,60 @@ export async function reviewRoutes(app: FastifyInstance) {
   // GET /reviews?status=dismissed|completed|... — 返回该状态全部（不过滤到期）
   // GET /reviews?includeAll=true — 返回该 workspace 全部复习
   // R-022: 统一 Zod 校验
-  app.get<{ Querystring: { status?: string; includeAll?: string } }>(
+  // v0.6: GET /reviews?sanitized=true — 返回安全版本（不含 card title/claim/quote/blockContent）
+  app.get<{ Querystring: { status?: string; includeAll?: string; sanitized?: string } }>(
     "/reviews",
-    async (req) => {
+    async (req, reply) => {
       const q = parseQuery(app, reviewQuerySchema, req.query);
       const includeAll = q.includeAll === "true";
-      return listReviews(req.session.workspaceId, {
-        status: q.status,
-        includeAll,
-        limit: q.limit,
-        offset: q.offset,
-      }, req.session.userId);
+      const sanitized = req.query.sanitized === "true";
+      if (sanitized) {
+        // v0.6 安全列表（计划 §9.4/§10.4）
+        // Cache-Control: private, no-store — 不进入 Service Worker/共享缓存
+        reply.header("Cache-Control", "private, no-store");
+        return withWorkspaceTransaction(
+          { workspaceId: req.session.workspaceId, userId: req.session.userId },
+          (tx) => listSanitizedReviews(req.session.workspaceId, {
+            status: q.status,
+            includeAll,
+            limit: q.limit,
+            offset: q.offset,
+          }, req.session.userId, tx),
+        );
+      }
+      return withWorkspaceTransaction(
+        { workspaceId: req.session.workspaceId, userId: req.session.userId },
+        (tx) => listReviews(req.session.workspaceId, {
+          status: q.status,
+          includeAll,
+          limit: q.limit,
+          offset: q.offset,
+        }, req.session.userId, tx),
+      );
+    },
+  );
+
+  // v0.6: GET /reviews/:scheduleId/sanitized — 返回单个 schedule 的安全元数据（计划 §9.4/§10.4）
+  // 只包含 cardId、keyPointId、nextReviewAt、intervalDays、status、reviewReason
+  // 不包含 card title、claim、quoteText、blockContent
+  app.get<{ Params: { scheduleId: string } }>(
+    "/reviews/:scheduleId/sanitized",
+    async (req, reply) => {
+      const result = await withWorkspaceTransaction(
+        { workspaceId: req.session.workspaceId, userId: req.session.userId },
+        (tx) => getSanitizedReviewMeta(
+          req.session.workspaceId,
+          req.params.scheduleId,
+          req.session.userId,
+          tx,
+        ),
+      );
+      if (!result) {
+        return reply.code(404).send({ error: "not_found", message: "复习任务不存在" });
+      }
+      // Cache-Control: private, no-store — 不进入 Service Worker/共享缓存（计划 §8.2）
+      reply.header("Cache-Control", "private, no-store");
+      return reply.send(result);
     },
   );
 

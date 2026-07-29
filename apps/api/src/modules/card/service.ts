@@ -1,15 +1,19 @@
 import { and, asc, eq, desc, sql, inArray, count, or, isNull } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { db } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { notes, noteVersions } from "../../db/schema/note.ts";
 import { reviewSchedules, validationEvents, evidences } from "../../db/schema/evidence.ts";
 import { aiArtifacts } from "../../db/schema/ai.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
-import { ArtifactStatus, CardStatus, JobType, ReviewStatus } from "@ailearn/shared";
+import { ArtifactStatus, CardStatus, ReviewStatus } from "@ailearn/shared";
 import { clampLimit } from "../../lib/pagination.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
-import { createJob } from "../job/service.ts";
+import {
+  createCardGenerationRun,
+  getLegacyGenerationCompatibility,
+} from "../card-generation/service.ts";
 
 export async function getCardWithDetail(cardId: string, workspaceId: string) {
   const card = await db.query.learningCards.findFirst({
@@ -181,7 +185,17 @@ export async function listCards(workspaceId: string, opts?: { cursor?: string; l
  * 5. 创建新 generate_card job
  * 6. 返回 jobId
  */
-export async function regenerateCard(cardId: string, workspaceId: string, userId: string) {
+type RegenerationDependencies = {
+  createRun?: typeof createCardGenerationRun;
+  getCompatibility?: typeof getLegacyGenerationCompatibility;
+};
+
+export async function regenerateCard(
+  cardId: string,
+  workspaceId: string,
+  userId: string,
+  dependencies: RegenerationDependencies = {},
+) {
   const card = await db.query.learningCards.findFirst({
     where: and(eq(learningCards.id, cardId), eq(learningCards.workspaceId, workspaceId)),
   });
@@ -209,18 +223,22 @@ export async function regenerateCard(cardId: string, workspaceId: string, userId
   // 旧卡的 superseded、review 取消和搜索索引清理将在 Worker 成功创建新卡后，
   // 在同一事务中原子执行。这确保了即使 Worker 失败/超时/dead，
   // 旧卡仍可读、可搜、可复习。
-  // N-001: 使用 createJob 确保配额检查
-  const newJob = await createJob({
-    type: JobType.GENERATE_CARD,
-    workspaceId,
-    requestedBy: userId,
-    // Preserve the actor who requested regeneration for AI audit attribution;
-    // the note author may be a different workspace member.
-    payload: { noteVersionId: useVersionId, userId, oldCardId: cardId },
-    dedupe: { payloadField: "noteVersionId", value: useVersionId },
-  });
+  const createRun = dependencies.createRun ?? createCardGenerationRun;
+  const getCompatibility = dependencies.getCompatibility ?? getLegacyGenerationCompatibility;
+  const run = await createRun(
+    { workspaceId, userId },
+    {
+      noteVersionId: useVersionId,
+      idempotencyKey: `legacy-regenerate:${randomUUID()}`,
+      oldCardId: cardId,
+    },
+  );
+  const compatibility = await getCompatibility(
+    { workspaceId, userId },
+    run.runId,
+  );
 
-  return { jobId: newJob.id, sameVersion };
+  return { jobId: compatibility?.jobId ?? null, runId: run.runId, sameVersion };
 }
 
 /**

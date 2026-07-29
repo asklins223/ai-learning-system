@@ -10,6 +10,7 @@
     "build": "esbuild src/server.ts --bundle --platform=node --format=cjs --outfile=dist/server.cjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)",
+    "test:v06:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/v06-migration-fresh-upgrade-repeat.integration.ts src/integration-tests/v06-rls-matrix-postgres.integration.ts src/integration-tests/v06-validation-session-postgres.integration.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts"

@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { type ApiTransaction } from "../../db/client.ts";
-import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
+import { notes, noteVersions, noteBlocks, noteImageAssets } from "../../db/schema/note.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, validationEvents, reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
 import { aiArtifacts } from "../../db/schema/ai.ts";
@@ -11,6 +11,11 @@ import { logger } from "../../lib/logger.ts";
 import { CardStatus, ReviewStatus } from "@ailearn/shared";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
+import {
+  validateImageMagicBytes,
+  readImageDimensions,
+} from "../../lib/file-validation.ts";
+import { getObject, isStorageConfigured } from "../../lib/object-storage.ts";
 import type { NoteCreateInput, NoteUpdateInput, NoteBlock } from "./schema.ts";
 
 /**
@@ -89,6 +94,123 @@ function stripUploadingPlaceholders<T extends { type: string; content: string }>
   );
 }
 
+export async function resolveImageAssetIds<T extends { type: string; content: string }>(
+  tx: ApiTransaction,
+  workspaceId: string,
+  blocks: T[],
+): Promise<Array<T & { imageAssetId: string | null }>> {
+  const objectKeys = [...new Set(blocks
+    .filter((block) => block.type === "image")
+    .map((block) => extractObjectKeyFromMarkdownImage(block.content))
+    .filter((key): key is string => key !== null))];
+  const assets = objectKeys.length > 0
+    ? await tx.query.noteImageAssets.findMany({
+        where: and(
+          eq(noteImageAssets.workspaceId, workspaceId),
+          inArray(noteImageAssets.objectKey, objectKeys),
+          eq(noteImageAssets.status, "ready"),
+          isNull(noteImageAssets.deletedAt),
+        ),
+      })
+    : [];
+  const assetByObjectKey = new Map(assets.map((asset) => [asset.objectKey, asset.id]));
+  return blocks.map((block) => {
+    const objectKey = block.type === "image"
+      ? extractObjectKeyFromMarkdownImage(block.content)
+      : null;
+    return { ...block, imageAssetId: objectKey ? assetByObjectKey.get(objectKey) ?? null : null };
+  });
+}
+
+/**
+ * Ensure every image block with a /api/uploads/ object key has a registered
+ * note_image_assets record. Images imported from sources (URL ingestion,
+ * markdown import) are already in MinIO but lack the immutable asset row that
+ * card generation v2 requires. This function downloads those images, computes
+ * their SHA-256, validates magic bytes, reads dimensions, and inserts the
+ * missing asset rows, then delegates to resolveImageAssetIds to link the
+ * blocks to their asset IDs.
+ *
+ * Blocks whose images are external URLs (not /api/uploads/) or already have
+ * asset records are left untouched.
+ */
+export async function ensureImageAssetsForBlocks<T extends { type: string; content: string }>(
+  tx: ApiTransaction,
+  workspaceId: string,
+  blocks: T[],
+  userId: string,
+  noteId?: string | null,
+): Promise<Array<T & { imageAssetId: string | null }>> {
+  const objectKeys = [...new Set(blocks
+    .filter((block) => block.type === "image")
+    .map((block) => extractObjectKeyFromMarkdownImage(block.content))
+    .filter((key): key is string => key !== null))];
+
+  if (objectKeys.length === 0) {
+    return resolveImageAssetIds(tx, workspaceId, blocks);
+  }
+
+  // Check which object keys already have registered assets.
+  const existing = await tx.query.noteImageAssets.findMany({
+    where: and(
+      eq(noteImageAssets.workspaceId, workspaceId),
+      inArray(noteImageAssets.objectKey, objectKeys),
+      eq(noteImageAssets.status, "ready"),
+      isNull(noteImageAssets.deletedAt),
+    ),
+  });
+  const existingKeys = new Set(existing.map((asset) => asset.objectKey));
+  const missingKeys = objectKeys.filter((key) => !existingKeys.has(key));
+
+  if (missingKeys.length === 0) {
+    return resolveImageAssetIds(tx, workspaceId, blocks);
+  }
+
+  if (!isStorageConfigured()) {
+    logger.warn(
+      { missingCount: missingKeys.length, workspaceId },
+      "object storage not configured; skipping image asset registration for source-imported images",
+    );
+    return resolveImageAssetIds(tx, workspaceId, blocks);
+  }
+
+  for (const objectKey of missingKeys) {
+    try {
+      const { body, contentType } = await getObject(objectKey);
+      if (!validateImageMagicBytes(body, contentType)) {
+        logger.warn({ objectKey, contentType }, "source-imported image failed magic bytes validation");
+        continue;
+      }
+      const dimensions = readImageDimensions(body, contentType);
+      if (!dimensions) {
+        logger.warn({ objectKey, contentType }, "source-imported image dimensions could not be read");
+        continue;
+      }
+      const sha256 = createHash("sha256").update(body).digest("hex");
+      await tx
+        .insert(noteImageAssets)
+        .values({
+          workspaceId,
+          uploadedForNoteId: noteId ?? null,
+          objectKey,
+          sha256,
+          mimeType: contentType,
+          byteSize: body.length,
+          width: dimensions.width,
+          height: dimensions.height,
+          status: "ready",
+          createdBy: userId,
+        })
+        .onConflictDoNothing();
+      logger.info({ objectKey, workspaceId }, "registered source-imported image as note_image_asset");
+    } catch (err) {
+      logger.warn({ objectKey, err }, "failed to register source-imported image asset");
+    }
+  }
+
+  return resolveImageAssetIds(tx, workspaceId, blocks);
+}
+
 /**
  * 乐观并发冲突：客户端提交的 baseVersionId 与服务端 currentVersionId 不一致。
  * 路由层捕获后返回 409，提示客户端重新拉取最新版本再编辑。
@@ -154,11 +276,12 @@ async function canUpdateVersionInPlace(
 ): Promise<boolean> {
   // 锁定 note_versions 行，防止并发卡片插入
   const versionRows = await tx
-    .select({ id: noteVersions.id })
+    .select({ id: noteVersions.id, sealedAt: noteVersions.sealedAt })
     .from(noteVersions)
     .where(eq(noteVersions.id, versionId))
     .for("update");
   if (versionRows.length === 0) return false;
+  if (versionRows[0]?.sealedAt) return false;
 
   const card = await tx.query.learningCards.findFirst({
     where: and(
@@ -189,13 +312,15 @@ async function updateVersionInPlace(
   await tx.delete(noteBlocks).where(eq(noteBlocks.versionId, versionId));
   // 插入新 blocks
   if (blocks.length) {
+    const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, blocks);
     await tx.insert(noteBlocks).values(
-      blocks.map((b, idx) => ({
+      blocksWithAssets.map((b, idx) => ({
         versionId,
         workspaceId,
         ordinal: idx,
         type: b.type,
         content: b.content,
+        imageAssetId: b.imageAssetId,
       })),
     );
   }
@@ -320,13 +445,15 @@ export async function createNote(
       .returning();
 
     if (sanitizedBlocks.length) {
+      const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
       await tx.insert(noteBlocks).values(
-        sanitizedBlocks.map((b, idx) => ({
+        blocksWithAssets.map((b, idx) => ({
           versionId: version.id,
           workspaceId,
           ordinal: idx,
           type: b.type,
           content: b.content,
+          imageAssetId: b.imageAssetId,
         })),
       );
     }
@@ -550,6 +677,7 @@ export async function updateNote(
               ordinal: block.ordinal,
               type: block.type,
               content: block.content,
+              imageAssetId: block.imageAssetId,
               sourceRef: block.sourceRef ?? null,
             })),
           );
@@ -642,13 +770,15 @@ export async function updateNote(
             .returning();
 
           if (sanitizedBlocks.length) {
+            const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
             await tx.insert(noteBlocks).values(
-              sanitizedBlocks.map((b, idx) => ({
+              blocksWithAssets.map((b, idx) => ({
                 versionId: newVersion.id,
                 workspaceId,
                 ordinal: idx,
                 type: b.type,
                 content: b.content,
+                imageAssetId: b.imageAssetId,
               })),
             );
           }
@@ -683,13 +813,15 @@ export async function updateNote(
           .returning();
 
         if (sanitizedBlocks.length) {
+          const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
           await tx.insert(noteBlocks).values(
-            sanitizedBlocks.map((b, idx) => ({
+            blocksWithAssets.map((b, idx) => ({
               versionId: newVersion.id,
               workspaceId,
               ordinal: idx,
               type: b.type,
               content: b.content,
+              imageAssetId: b.imageAssetId,
             })),
           );
         }
@@ -1177,7 +1309,9 @@ export async function physicalDeleteNote(
       await tx.delete(learningCards).where(inArray(learningCards.noteVersionId, versionIds));
     }
 
-    // 收集 image objectKeys 用于事务提交后清理对象存储
+    // 收集图片资产与旧版 Markdown object key。Typed asset 可能被同一
+    // workspace 的其他笔记版本复用，必须在级联删除后重新检查引用，
+    // 只有真正 orphan 的资产才允许删除对象。
     const allBlocks = versionIds.length > 0
       ? await tx.query.noteBlocks.findMany({
           where: and(
@@ -1186,10 +1320,25 @@ export async function physicalDeleteNote(
           ),
         })
       : [];
-    const imageObjectKeys = allBlocks
+    const legacyImageObjectKeys = allBlocks
       .filter((b) => b.type === "image")
       .map((b) => extractObjectKeyFromMarkdownImage(b.content))
       .filter((key): key is string => key !== null);
+    const blockAssetIds = [...new Set(allBlocks.flatMap((block) =>
+      block.imageAssetId ? [block.imageAssetId] : []))];
+    const assetConditions = [eq(noteImageAssets.uploadedForNoteId, noteId)];
+    if (blockAssetIds.length > 0) {
+      assetConditions.push(inArray(noteImageAssets.id, blockAssetIds));
+    }
+    if (legacyImageObjectKeys.length > 0) {
+      assetConditions.push(inArray(noteImageAssets.objectKey, legacyImageObjectKeys));
+    }
+    const candidateAssets = await tx.query.noteImageAssets.findMany({
+      where: and(
+        eq(noteImageAssets.workspaceId, workspaceId),
+        or(...assetConditions),
+      ),
+    });
 
     // 14. 物理删除 note（级联删除 note_versions + note_blocks）
     // 防御性条件：仅删除仍处于软删除状态的笔记，防止在级联清理过程中
@@ -1197,12 +1346,51 @@ export async function physicalDeleteNote(
     // force=true 时不加此条件，允许删除未软删除的笔记。
     // 如果 deleted_at 已被清除（笔记被恢复），DELETE 影响行数为 0，
     // 说明不应继续物理删除，中止并返回 null 让调用方感知。
-    await tx.delete(notes)
+    const [deletedNote] = await tx.delete(notes)
       .where(
         options?.force
           ? eq(notes.id, noteId)
           : and(eq(notes.id, noteId), isNotNull(notes.deletedAt)),
-      );
+      )
+      .returning({ id: notes.id });
+    if (!deletedNote) {
+      throw new Error("note permanent deletion lost its locked row");
+    }
+
+    const candidateAssetIds = candidateAssets.map((asset) => asset.id);
+    const remainingAssetRefs = candidateAssetIds.length > 0
+      ? await tx
+          .select({ imageAssetId: noteBlocks.imageAssetId })
+          .from(noteBlocks)
+          .where(and(
+            eq(noteBlocks.workspaceId, workspaceId),
+            inArray(noteBlocks.imageAssetId, candidateAssetIds),
+          ))
+      : [];
+    const retainedAssetIds = new Set(remainingAssetRefs.flatMap((row) =>
+      row.imageAssetId ? [row.imageAssetId] : []));
+    const orphanAssets = candidateAssets.filter((asset) => !retainedAssetIds.has(asset.id));
+    if (orphanAssets.length > 0) {
+      const deletedAt = new Date();
+      await tx
+        .update(noteImageAssets)
+        .set({ status: "deleted", deletedAt })
+        .where(and(
+          eq(noteImageAssets.workspaceId, workspaceId),
+          inArray(noteImageAssets.id, orphanAssets.map((asset) => asset.id)),
+          isNull(noteImageAssets.deletedAt),
+        ));
+    }
+    const knownAssetObjectKeys = new Set(candidateAssets.map((asset) => asset.objectKey));
+    const unmanagedLegacyKeys = legacyImageObjectKeys.filter((key) => !knownAssetObjectKeys.has(key));
+    const imageObjectKeys = [...new Set([
+      ...unmanagedLegacyKeys,
+      ...orphanAssets.flatMap((asset) => [
+        asset.objectKey,
+        ...(asset.normalizedObjectKey ? [asset.normalizedObjectKey] : []),
+        ...(asset.thumbnailObjectKey ? [asset.thumbnailObjectKey] : []),
+      ]),
+    ])];
 
     return { cardIds, evidenceIds, imageObjectKeys };
   })(executor);

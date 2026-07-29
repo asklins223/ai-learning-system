@@ -1,14 +1,17 @@
+import { randomUUID } from "node:crypto";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { jobs } from "../../db/schema/job.ts";
-import { learningCards } from "../../db/schema/card.ts";
-import { noteVersions } from "../../db/schema/note.ts";
-import { and, desc, eq, count, inArray, sql } from "drizzle-orm";
+import { and, eq, count, inArray, sql } from "drizzle-orm";
 import {
-  CardStatus,
+  JobResourceClass,
   JobType,
   JobStatus,
   MAX_PENDING_JOBS_PER_WORKSPACE,
 } from "@ailearn/shared";
+import {
+  createCardGenerationRun,
+  getLegacyGenerationCompatibility,
+} from "../card-generation/service.ts";
 
 export interface CreateJobInput {
   type: JobType;
@@ -16,9 +19,25 @@ export interface CreateJobInput {
   requestedBy: string;
   payload: Record<string, unknown>;
   dedupe?: {
-    payloadField: "noteVersionId";
+    payloadField: "noteVersionId" | "submissionId";
     value: string;
   };
+}
+
+function jobScheduling(type: JobType): { priority: number; resourceClass: string } {
+  switch (type) {
+    case JobType.EVALUATE_VALIDATION:
+    case JobType.GENERATE_VALIDATION_QUESTION:
+      return { priority: 100, resourceClass: JobResourceClass.INTERACTIVE_AI };
+    case JobType.PARSE_SOURCE:
+      return { priority: 70, resourceClass: JobResourceClass.CARD_FOREGROUND };
+    case JobType.GENERATE_CARD:
+      return { priority: 50, resourceClass: JobResourceClass.CARD_FOREGROUND };
+    case JobType.ALIGN_EVIDENCE:
+      return { priority: 10, resourceClass: JobResourceClass.MAINTENANCE };
+    default:
+      return { priority: 40, resourceClass: JobResourceClass.MAINTENANCE };
+  }
 }
 
 /** N-001: 对已经在同一锁域内计算出的 pending 数量执行配额断言。 */
@@ -73,6 +92,7 @@ export async function createJob(input: CreateJobInput) {
           ),
         );
       assertJobQuota(Number(pendingRows[0]?.count ?? 0));
+      const scheduling = jobScheduling(input.type);
 
       const [job] = await tx
         .insert(jobs)
@@ -84,6 +104,8 @@ export async function createJob(input: CreateJobInput) {
           // trusted session actor authoritative if a caller supplied a mismatch.
           payload: { ...input.payload, userId: input.requestedBy },
           status: JobStatus.PENDING,
+          priority: scheduling.priority,
+          resourceClass: scheduling.resourceClass,
         })
         .returning();
       return job;
@@ -111,97 +133,17 @@ export async function createGenerateCardJob(input: {
   noteId: string;
   noteVersionId: string;
 }): Promise<GenerateCardEnqueueResult> {
-  return withWorkspaceTransaction(
-    { workspaceId: input.workspaceId, userId: input.userId },
-    async (tx) => {
-      await tx.execute(sql`
-        SELECT pg_advisory_xact_lock(
-          hashtextextended(${`job-quota:${input.workspaceId}`}, 0)
-        )
-      `);
-
-      const currentCard = await tx.query.learningCards.findFirst({
-        where: and(
-          eq(learningCards.workspaceId, input.workspaceId),
-          eq(learningCards.noteVersionId, input.noteVersionId),
-          eq(learningCards.status, CardStatus.ACTIVE),
-        ),
-        orderBy: [desc(learningCards.createdAt)],
-      });
-      const activeJob = await tx.query.jobs.findFirst({
-        where: and(
-          eq(jobs.workspaceId, input.workspaceId),
-          eq(jobs.type, JobType.GENERATE_CARD),
-          inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
-          sql`${jobs.payload}->>'noteVersionId' = ${input.noteVersionId}`,
-        ),
-        orderBy: [desc(jobs.scheduledAt)],
-      });
-
-      const [previousCard] = await tx
-        .select({ id: learningCards.id, noteVersionId: learningCards.noteVersionId })
-        .from(learningCards)
-        .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
-        .where(and(
-          eq(learningCards.workspaceId, input.workspaceId),
-          eq(learningCards.status, CardStatus.ACTIVE),
-          eq(noteVersions.noteId, input.noteId),
-        ))
-        .orderBy(desc(learningCards.createdAt))
-        .limit(1);
-
-      if (activeJob) {
-        return {
-          state: "generating",
-          cardId: currentCard?.id ?? previousCard?.id ?? null,
-          jobId: activeJob.id,
-          generatedVersionId: currentCard?.noteVersionId ?? previousCard?.noteVersionId ?? null,
-        };
-      }
-
-      if (currentCard) {
-        return {
-          state: "generated",
-          cardId: currentCard.id,
-          jobId: null,
-          generatedVersionId: currentCard.noteVersionId,
-        };
-      }
-
-      const pendingRows = await tx
-        .select({ count: count() })
-        .from(jobs)
-        .where(and(
-          eq(jobs.workspaceId, input.workspaceId),
-          eq(jobs.status, JobStatus.PENDING),
-        ));
-      assertJobQuota(Number(pendingRows[0]?.count ?? 0));
-
-      const [job] = await tx
-        .insert(jobs)
-        .values({
-          type: JobType.GENERATE_CARD,
-          workspaceId: input.workspaceId,
-          requestedBy: input.userId,
-          payload: {
-            noteVersionId: input.noteVersionId,
-            userId: input.userId,
-            ...(previousCard && previousCard.noteVersionId !== input.noteVersionId
-              ? { oldCardId: previousCard.id }
-              : {}),
-          },
-          status: JobStatus.PENDING,
-        })
-        .returning();
-
-      return {
-        state: "generating",
-        cardId: previousCard?.id ?? null,
-        jobId: job.id,
-        generatedVersionId: previousCard?.noteVersionId ?? null,
-      };
+  const context = { workspaceId: input.workspaceId, userId: input.userId };
+  const run = await createCardGenerationRun(
+    context,
+    {
+      noteVersionId: input.noteVersionId,
+      idempotencyKey: `legacy-service:${randomUUID()}`,
     },
   );
+  const compatibility = await getLegacyGenerationCompatibility(context, run.runId);
+  if (!compatibility) throw new Error("generation run disappeared after creation");
+  return compatibility;
 }
 
 export async function listJobs(workspaceId: string) {

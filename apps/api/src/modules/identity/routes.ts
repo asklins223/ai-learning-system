@@ -536,6 +536,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   // PUT /workspace/ai-data-policy — Owner 更新 AI 数据策略
   const aiDataPolicySchema = z.object({
     sendToExternal: z.boolean(),
+    sendImageContent: z.boolean(),
     piiDetection: z.boolean(),
     auditLogging: z.boolean(),
   });

@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, ne, sql, count, inArray, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { sources, sourceSegments, notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
-import { computeContentHash } from "../note/service.ts";
+import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
 import {
@@ -83,10 +83,18 @@ export async function createSource(
   userId: string,
   input: SourceCreateInput,
 ) {
+  // 如果未传 type，前端检测为初步值；Worker 会再次检测并修正
+  const detectedType = input.type ?? detectSourceType(input.content ?? "", input.url);
+  // 如果未传 title，使用临时占位标题；Worker 解析后会更新
+  const title = input.title?.trim() || input.url?.slice(0, 60) || input.content?.split("\n")[0]?.slice(0, 60) || "未命名来源";
+
   const metadata: Record<string, unknown> = { ...input.metadata };
-  const isUrlWithoutContent = input.type === "url" && !input.content?.trim();
+  // 关键：原代码用 input.type（必填）判断，改成 optional 后必须用 detectedType。
+  const isUrlWithoutContent = detectedType === "url" && !input.content?.trim();
   if (input.content) metadata.rawContent = input.content;
   if (input.url) metadata.url = input.url;
+  // 标记 type 来源，供 Worker 判断是否可修正
+  metadata.typeSource = input.type ? "manual" : "auto";
 
   // R-016: source 创建和 job 入队在同一事务内，避免入队失败留下永不解析的 DRAFT
   const source = await (async (tx: ApiTransaction) => {
@@ -119,8 +127,8 @@ export async function createSource(
       .insert(sources)
       .values({
         workspaceId,
-        type: input.type,
-        title: input.title,
+        type: detectedType,
+        title,
         origin: input.url ?? null,
         status: SourceStatus.DRAFT,
         metadata,
@@ -137,6 +145,8 @@ export async function createSource(
         ? { sourceId: row.id, fetchUrlContent: true, userId }
         : { sourceId: row.id, userId },
       status: JobStatus.PENDING,
+      priority: 70,
+      resourceClass: "card_foreground",
     });
 
     return row;
@@ -307,6 +317,46 @@ export async function deleteSource(
 }
 
 /**
+ * 根据内容特征初步检测来源类型（快速粗粒度判断）。
+ * Worker 端 correctSourceType 会做更细粒度的修正。
+ * 已与 detectCaptureType（today/page.tsx）取并集统一。
+ */
+export function detectSourceType(content: string, url?: string): "text" | "markdown" | "code" | "url" {
+  // URL 检测：有 url 参数且无 content，或 content 本身就是 URL
+  if (url && /^https?:\/\//.test(url) && !content.trim()) return "url";
+  const text = content.trim();
+  if (/^https?:\/\/\S+$/i.test(text)) return "url";
+
+  // 代码检测：合并 detectCaptureType 和原 detectSourceType 的所有关键字（并集）
+  // 注意：from 已移除——在英文文本中过于常见（"from the beginning" 等），
+  // 且 ES module 导入中 from 总是与 import/export 同时出现，两者已在关键字列表中。
+  // public/private/protected 已移除——作为独立关键字在英文文本中过于常见
+  //（"public transport"、"private matter"、"protected species"），
+  // 会导致 detectSourceType 误判为 code，且 correctSourceType 的 code→text 回退
+  //（codeScore === 0 条件）被这些关键字在 codeIndicators 中的匹配所阻断。
+  // 改用 "public class" 两词模式替代独立 public 关键字。
+  // type 已移除——与 from/public/private/protected 同类问题，是常见英文单词
+  //（"type of music"、"type your name"、"type a letter"），作为独立关键字
+  // 会导致英文文本被误判为 code。TypeScript 的 type 定义通常伴随 const/import
+  // 等其他关键字出现，移除 type 不影响多行代码文件的检测。
+  if (
+    /^(?:function|const|let|var|class|interface|enum|import|export|def|#include|package|public class|if __name__)\b/m.test(text) ||
+    /^[a-zA-Z_$][\w$]*\s*[({]/m.test(text) // 函数调用或定义模式
+  ) {
+    return "code";
+  }
+
+  // ``` 含代码块按 markdown 处理（保留代码块结构，而非 code 整段）
+  if (/```/.test(text)) return "markdown";
+
+  // Markdown 检测：标题、列表、引用等语法
+  // 正则与 today/page.tsx 的 detectCaptureType 对齐，要求标记后有空格，
+  // 避免 "-5 度" 等以 - 开头的纯文本被误判为 markdown。
+  if (/^(#{1,6}\s|>|[-*+]\s|\d+\.\s)/m.test(text) || /\[.+?\]\(.+?\)/.test(text)) return "markdown";
+  return "text";
+}
+
+/**
  * §2.7: 查询从此来源创建的笔记列表。
  */
 export async function listNotesBySource(
@@ -437,13 +487,15 @@ export async function createNoteFromSource(
       .returning();
 
     // 创建 note_blocks，每个 block 的 source_ref 指向 source_segment
+    const blocksWithAssets = await ensureImageAssetsForBlocks(tx, workspaceId, blocks, userId, note.id);
     await tx.insert(noteBlocks).values(
-      blocks.map((b, idx) => ({
+      blocksWithAssets.map((b, idx) => ({
         versionId: version.id,
         workspaceId,
         ordinal: idx,
         type: b.type,
         content: b.content,
+        imageAssetId: b.imageAssetId,
         sourceRef: { sourceId: source.id, segmentId: segments[idx]?.id },
       })),
     );

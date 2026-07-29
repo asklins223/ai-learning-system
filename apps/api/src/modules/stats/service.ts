@@ -5,6 +5,7 @@ import { evidences, validationEvents, reviewSchedules } from "../../db/schema/ev
 import { notes } from "../../db/schema/note.ts";
 import { ReviewStatus } from "@ailearn/shared";
 import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
+import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
 
 export interface StatsOverview {
   noteCount: number;
@@ -36,7 +37,10 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
       .from(learningCards)
       .where(eq(learningCards.workspaceId, workspaceId)),
     db.query.learningCards.findMany({
-      where: and(eq(learningCards.workspaceId, workspaceId), eq(learningCards.status, "active")),
+      where: and(
+        eq(learningCards.workspaceId, workspaceId),
+        activeLearningCardConsumerPredicate(),
+      ),
       columns: { id: true },
     }),
   ]);

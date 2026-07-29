@@ -10,6 +10,7 @@ import {
   type UnderstandingGraph,
   UNDERSTANDING_GRAPH_CARD_LIMIT,
 } from "./graph.ts";
+import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
 
 export interface UnderstandingState {
   subjectType: "card";
@@ -43,7 +44,7 @@ export async function getUnderstandingStates(
   const cards = await db.query.learningCards.findMany({
     where: and(
       eq(learningCards.workspaceId, workspaceId),
-      eq(learningCards.status, "active"),
+      activeLearningCardConsumerPredicate(),
     ),
     orderBy: [desc(learningCards.createdAt)],
     limit: UNDERSTANDING_GRAPH_CARD_LIMIT,
@@ -323,7 +324,7 @@ export async function getUnderstandingGraph(
       .from(learningCards)
       .where(and(
         eq(learningCards.workspaceId, workspaceId),
-        eq(learningCards.status, "active"),
+        activeLearningCardConsumerPredicate(),
       )),
   ]);
 
@@ -344,7 +345,7 @@ export async function getUnderstandingGraph(
   const cardRows = await db.query.learningCards.findMany({
     where: and(
       eq(learningCards.workspaceId, workspaceId),
-      eq(learningCards.status, "active"),
+      activeLearningCardConsumerPredicate(),
       inArray(learningCards.id, cardIds),
     ),
   });

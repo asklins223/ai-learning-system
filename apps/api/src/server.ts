@@ -8,9 +8,11 @@ import { logger } from "./lib/logger.ts";
 import { authRoutes } from "./modules/identity/routes.ts";
 import { noteRoutes } from "./modules/note/routes.ts";
 import { cardRoutes, cardJobRoutes } from "./modules/card/routes.ts";
+import { cardSetRoutes } from "./modules/card-set/routes.ts";
 import { jobRoutes } from "./modules/job/routes.ts";
 import { evidenceRoutes } from "./modules/evidence/routes.ts";
 import { validationRoutes } from "./modules/validation/routes.ts";
+import { validationSessionRoutes } from "./modules/validation/session-routes.ts";
 import { reviewRoutes } from "./modules/review/routes.ts";
 import { sourceRoutes } from "./modules/source/routes.ts";
 import { importRoutes } from "./modules/import/routes.ts";
@@ -20,6 +22,7 @@ import { exportRoutes } from "./modules/export/routes.ts";
 import { statsRoutes } from "./modules/stats/routes.ts";
 import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
+import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
 import { purgeSoftDeletedNotes } from "./modules/note/maintenance.ts";
 import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
@@ -108,6 +111,9 @@ app.get("/ready", async (_req, reply) => {
       "notes",
       "note_versions",
       "note_blocks",
+      "note_image_assets",
+      "note_image_insights",
+      "note_image_evidence_units",
       "learning_cards",
       "card_key_points",
       "evidences",
@@ -120,12 +126,26 @@ app.get("/ready", async (_req, reply) => {
       "ai_artifacts",
       "ai_audit_log",
       "jobs",
+      "card_generation_runs",
+      "card_generation_events",
+      "note_evidence_spans",
+      "card_generation_units",
+      "card_generation_candidates",
+      "card_generation_candidate_evidence",
       "search_documents",
       "benchmark_reports",
       "benchmark_labels",
       "auth_rate_limits",
       "user_ai_model_configs",
       "onboarding_states",
+      "validation_question_rubric_items",
+      "validation_submissions",
+      "validation_submission_jobs",
+      "validation_action_commands",
+      "validation_assistance_exposures",
+      "validation_point_assessments",
+      "scheduling_shadow_decisions",
+      "validation_quality_signals",
     ];
     const tableRows = await db.execute(sql`
       SELECT table_name
@@ -139,7 +159,7 @@ app.get("/ready", async (_req, reply) => {
 
     // Drizzle journal 的最新迁移时间戳。可通过环境变量在后续版本提升门槛，
     // 避免只存在早期核心表时 readiness 仍误报成功。
-    const minimumMigrationRaw = process.env.MIN_READY_MIGRATION_CREATED_AT ?? "1785387800000";
+    const minimumMigrationRaw = process.env.MIN_READY_MIGRATION_CREATED_AT ?? "1786683800000";
     const minimumMigration = Number(minimumMigrationRaw);
     if (!Number.isSafeInteger(minimumMigration) || minimumMigration <= 0) {
       readinessStatus.set(0);
@@ -226,9 +246,12 @@ async function main() {
   await app.register(noteRoutes);
   await app.register(cardRoutes);
   await app.register(cardJobRoutes);
+  await app.register(cardSetRoutes);
+  await app.register(cardGenerationRoutes);
   await app.register(jobRoutes);
   await app.register(evidenceRoutes);
   await app.register(validationRoutes);
+  await app.register(validationSessionRoutes);
   await app.register(reviewRoutes);
   await app.register(sourceRoutes);
   await app.register(importRoutes);
