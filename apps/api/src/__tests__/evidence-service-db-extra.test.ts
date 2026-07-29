@@ -154,14 +154,21 @@ describe("evidence service hydration", () => {
 type OverrideTransactionFixture = {
   evidence?: any;
   keyPoint?: any;
+  card?: any | null;
 };
 
 function installOverrideTransaction(fixture: OverrideTransactionFixture) {
   const inserts: Array<{ table: unknown; value: unknown; conflict?: unknown }> = [];
+  const deletes: unknown[] = [];
   mutableDb.transaction = async (run: (tx: any) => Promise<unknown>) => run({
     query: {
       evidences: { findFirst: async () => fixture.evidence },
       cardKeyPoints: { findFirst: async () => fixture.keyPoint },
+      learningCards: {
+        findFirst: async () => fixture.card === null
+          ? undefined
+          : fixture.card ?? (fixture.keyPoint ? { id: fixture.keyPoint.cardId } : undefined),
+      },
     },
     insert: (table: unknown) => ({
       values: (value: unknown) => {
@@ -174,13 +181,18 @@ function installOverrideTransaction(fixture: OverrideTransactionFixture) {
         };
       },
     }),
+    delete: (table: unknown) => ({
+      where: async () => {
+        deletes.push(table);
+      },
+    }),
   });
-  return inserts;
+  return { inserts, deletes };
 }
 
 describe("evidence override mutations", () => {
   it("returns null without writing when the evidence is outside the workspace", async () => {
-    const inserts = installOverrideTransaction({});
+    const { inserts } = installOverrideTransaction({});
     assert.equal(
       await overrideEvidence(EVIDENCE_ID, WORKSPACE_ID, USER_ID, "confirmed"),
       null,
@@ -189,7 +201,7 @@ describe("evidence override mutations", () => {
   });
 
   it("upserts a user override and emits the derived understanding event atomically", async () => {
-    const inserts = installOverrideTransaction({
+    const { inserts } = installOverrideTransaction({
       evidence: { id: EVIDENCE_ID, keyPointId: "kp-1" },
       keyPoint: { id: "kp-1", cardId: CARD_ID },
     });
@@ -218,31 +230,41 @@ describe("evidence override mutations", () => {
     });
   });
 
-  it("still stores the override when its key point no longer exists", async () => {
-    const inserts = installOverrideTransaction({
+  it("rejects an override when its key point no longer exists", async () => {
+    const { inserts } = installOverrideTransaction({
       evidence: { id: EVIDENCE_ID, keyPointId: "kp-deleted" },
     });
-    assert.deepEqual(
+    assert.equal(
       await overrideEvidence(EVIDENCE_ID, WORKSPACE_ID, USER_ID, "downgraded"),
-      { ok: true },
+      null,
     );
-    assert.equal(inserts.length, 1);
-    assert.equal(inserts[0]?.table, evidenceOverrides);
+    assert.equal(inserts.length, 0);
+  });
+
+  it("rejects an override when the target card is not consumer-active", async () => {
+    const { inserts } = installOverrideTransaction({
+      evidence: { id: EVIDENCE_ID, keyPointId: "kp-1" },
+      keyPoint: { id: "kp-1", cardId: CARD_ID },
+      card: null,
+    });
+    assert.equal(
+      await overrideEvidence(EVIDENCE_ID, WORKSPACE_ID, USER_ID, "confirmed"),
+      null,
+    );
+    assert.equal(inserts.length, 0);
   });
 
   it("removes only the current user's override and handles missing evidence", async () => {
-    let deleteCalls = 0;
-    mutableDb.query.evidences.findFirst = async () => undefined;
-    mutableDb.delete = () => {
-      deleteCalls++;
-      return { where: async () => undefined };
-    };
+    let fixture = installOverrideTransaction({});
     assert.equal(await removeEvidenceOverride(EVIDENCE_ID, WORKSPACE_ID, USER_ID), null);
-    assert.equal(deleteCalls, 0);
+    assert.equal(fixture.deletes.length, 0);
 
-    mutableDb.query.evidences.findFirst = async () => ({ id: EVIDENCE_ID });
+    fixture = installOverrideTransaction({
+      evidence: { id: EVIDENCE_ID, keyPointId: "kp-1" },
+      keyPoint: { id: "kp-1", cardId: CARD_ID },
+    });
     assert.deepEqual(await removeEvidenceOverride(EVIDENCE_ID, WORKSPACE_ID, USER_ID), { ok: true });
-    assert.equal(deleteCalls, 1);
+    assert.deepEqual(fixture.deletes, [evidenceOverrides]);
   });
 });
 
@@ -353,14 +375,19 @@ describe("evidence routes", () => {
     const remove = routeApp.handlers.get("DELETE /evidences/:id/override")!;
     const session = { workspaceId: WORKSPACE_ID, userId: USER_ID };
 
-    installOverrideTransaction({ evidence: { id: EVIDENCE_ID, keyPointId: "kp-gone" } });
+    installOverrideTransaction({
+      evidence: { id: EVIDENCE_ID, keyPointId: "kp-1" },
+      keyPoint: { id: "kp-1", cardId: CARD_ID },
+    });
     assert.deepEqual(
       await post({ params: { id: EVIDENCE_ID }, body: { override: "confirmed" }, session }, createReply()),
       { ok: true },
     );
 
-    mutableDb.query.evidences.findFirst = async () => ({ id: EVIDENCE_ID });
-    mutableDb.delete = () => ({ where: async () => undefined });
+    installOverrideTransaction({
+      evidence: { id: EVIDENCE_ID, keyPointId: "kp-1" },
+      keyPoint: { id: "kp-1", cardId: CARD_ID },
+    });
     assert.deepEqual(
       await remove({ params: { id: EVIDENCE_ID }, session }, createReply()),
       { ok: true },

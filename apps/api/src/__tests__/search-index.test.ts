@@ -168,7 +168,7 @@ test("upsertSearchDocument 失败时返回 false 而非抛异常（F-025）", as
 
 test("upsertSearchDocument 对所有 objectType 类型都能正常工作", async () => {
   const { db } = createSuccessMockDb();
-  for (const objectType of ["note", "card", "source", "evidence"] as const) {
+  for (const objectType of ["note", "card_set", "card", "source", "evidence"] as const) {
     const result = await upsertSearchDocument(
       {
         workspaceId: "ws-1",
@@ -217,7 +217,7 @@ test("deleteSearchDocument 失败时不抛异常（F-025）", async () => {
 
 test("deleteSearchDocument 对不同 objectType 都能正常工作", async () => {
   const { db } = createSuccessMockDb();
-  for (const objectType of ["note", "card", "source", "evidence"]) {
+  for (const objectType of ["note", "card_set", "card", "source", "evidence"]) {
     await deleteSearchDocument("ws-1", objectType, `obj-${objectType}`, db);
   }
   assert.ok(true);

@@ -176,13 +176,34 @@ function installRegenerationReads(config: {
   mutableDb.query.notes.findFirst = async () => config.note;
 }
 
-function installCreateJobTransaction(job: any, existing = false): void {
-  mutableDb.transaction = async (run: (tx: any) => Promise<any>) => run({
-    execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
-    query: { jobs: { findFirst: async () => existing ? job : undefined } },
-    select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
-    insert: () => ({ values: () => ({ returning: async () => [job] }) }),
-  });
+function generationDependencies(jobId: string, runId: string) {
+  return {
+    createRun: async (
+      context: { workspaceId: string; userId: string },
+      input: { noteVersionId: string; idempotencyKey: string; oldCardId?: string },
+    ) => {
+      assert.deepEqual(context, { workspaceId: WORKSPACE_ID, userId: USER_ID });
+      assert.equal(input.oldCardId, "card-1");
+      assert.match(input.idempotencyKey, /^legacy-regenerate:/);
+      return {
+        runId,
+        status: "queued",
+        sourceSnapshot: {
+          noteVersionId: input.noteVersionId,
+          versionNo: 1,
+          contentHash: "hash",
+        },
+        canContinueEditing: true as const,
+      };
+    },
+    getCompatibility: async () => ({
+      state: "generating" as const,
+      cardId: "card-1",
+      jobId,
+      generatedVersionId: null,
+      runId,
+    }),
+  };
 }
 
 describe("card regeneration", () => {
@@ -206,10 +227,14 @@ describe("card regeneration", () => {
       version: { id: "version-1", noteId: "note-1" },
       note: { id: "note-1", currentVersionId: null },
     });
-    installCreateJobTransaction({ id: "job-existing" }, true);
-
-    assert.deepEqual(await regenerateCard("card-1", WORKSPACE_ID, USER_ID), {
+    assert.deepEqual(await regenerateCard(
+      "card-1",
+      WORKSPACE_ID,
+      USER_ID,
+      generationDependencies("job-existing", "run-existing"),
+    ), {
       jobId: "job-existing",
+      runId: "run-existing",
       sameVersion: true,
     });
   });
@@ -220,10 +245,14 @@ describe("card regeneration", () => {
       version: { id: "version-1", noteId: "note-1" },
       note: { id: "note-1", currentVersionId: "version-2" },
     });
-    installCreateJobTransaction({ id: "job-new" });
-
-    assert.deepEqual(await regenerateCard("card-1", WORKSPACE_ID, USER_ID), {
+    assert.deepEqual(await regenerateCard(
+      "card-1",
+      WORKSPACE_ID,
+      USER_ID,
+      generationDependencies("job-new", "run-new"),
+    ), {
       jobId: "job-new",
+      runId: "run-new",
       sameVersion: false,
     });
   });

@@ -66,6 +66,7 @@ describe("source creation and reads", () => {
     assert.deepEqual(inserted[0]!.value.metadata, {
       language: "en",
       url: "https://example.test/docs",
+      typeSource: "manual",
     });
     assert.equal(inserted[1]!.table, jobs);
     assert.deepEqual(inserted[1]!.value.payload, {

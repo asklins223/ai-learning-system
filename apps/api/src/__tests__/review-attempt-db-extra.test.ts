@@ -151,6 +151,10 @@ function createMockTx(config: MockTxConfig): any {
         findFirst: async () => undefined,
         findMany: async () => [],
       },
+      validationActionCommands: {
+        findFirst: async () => undefined,
+        findMany: async () => [],
+      },
     },
   };
 }

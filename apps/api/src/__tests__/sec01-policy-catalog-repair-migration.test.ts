@@ -109,11 +109,19 @@ test("0039 repairs only the explicit public SEC-01/SEC-02 policy catalog", () =>
 });
 
 test("Drizzle journal applies the expansion-only catalog repair after 0038", () => {
-  assert.deepEqual(journal.entries.at(-1), {
-    idx: 39,
+  // 0039 is still present and after 0038; 0043 remains the v0.6 tail before
+  // the separately scoped generation-engine v2 migration.
+  const entry0039 = journal.entries.find((e) => e.tag === "0039_sec01_policy_catalog_repair");
+  assert.ok(entry0039, "0039 must exist in journal");
+  assert.equal(entry0039.idx, 39);
+  const entry0043 = journal.entries.find((entry) => entry.tag === "0043_v06_rls_context_alignment");
+  assert.ok(entry0043);
+  assert.deepEqual(entry0043, {
+    idx: 43,
     version: "7",
-    when: 1786338200000,
-    tag: "0039_sec01_policy_catalog_repair",
+    when: 1786683800000,
+    tag: "0043_v06_rls_context_alignment",
     breakpoints: true,
   });
+  assert.equal(journal.entries[entry0043.idx + 1]?.tag, "0044_card_generation_run_bridge");
 });

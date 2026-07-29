@@ -103,6 +103,7 @@ test("所有错误码均可达且 statusCode 在合理范围", () => {
     question_expired: 410,
     card_not_found: 404,
     key_point_not_found: 404,
+    idempotency_key_reused: 409,
   };
   for (const [code, expectedStatus] of Object.entries(codeToStatus)) {
     const err = new ReviewAttemptError(code as ReviewAttemptErrorCode);
