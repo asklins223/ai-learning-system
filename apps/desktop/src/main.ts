@@ -11,6 +11,9 @@
  * The backend (Docker / API / Postgres / Worker) is managed externally.
  */
 
+// Critical: ensure we run as Electron, not plain Node.
+// This runs via esbuild banner before require("electron") — see esbuild.mjs.
+
 import { app, BrowserWindow, ipcMain, shell, dialog } from "electron";
 import * as path from "node:path";
 import { logger } from "./logger";

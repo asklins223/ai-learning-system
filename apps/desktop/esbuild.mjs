@@ -8,6 +8,15 @@ import * as path from "node:path";
 
 const root = path.resolve(import.meta.dirname);
 
+/**
+ * Banner: must delete ELECTRON_RUN_AS_NODE before any require("electron")
+ * call runs.  When this env var is set, Electron runs as plain Node.js
+ * and require("electron") returns a path string instead of the API.
+ */
+const banner = {
+  js: `delete process.env.ELECTRON_RUN_AS_NODE;`,
+};
+
 /** @type {import('esbuild').BuildOptions} */
 const baseOptions = {
   bundle: true,
@@ -16,6 +25,7 @@ const baseOptions = {
   target: "node20",
   sourcemap: true,
   external: ["electron", "electron-log"],
+  banner,
 };
 
 // Build main process.
