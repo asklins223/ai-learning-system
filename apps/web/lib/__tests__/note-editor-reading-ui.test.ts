@@ -4,15 +4,15 @@ import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
 const editorSource = readFileSync(
-  resolve(import.meta.dirname, "../../components/NoteEditor.tsx"),
+  resolve((import.meta.dirname ?? __dirname), "../../components/NoteEditor.tsx"),
   "utf8",
 );
 const editorStyles = readFileSync(
-  resolve(import.meta.dirname, "../../app/styles/note-editor.css"),
+  resolve((import.meta.dirname ?? __dirname), "../../app/styles/note-editor.css"),
   "utf8",
 );
 const notePageSource = readFileSync(
-  resolve(import.meta.dirname, "../../app/(workspace)/(focus)/notes/[id]/page.tsx"),
+  resolve((import.meta.dirname ?? __dirname), "../../app/(workspace)/(focus)/notes/[id]/page.tsx"),
   "utf8",
 );
 
@@ -40,18 +40,30 @@ describe("NoteEditor reading and generation UI contract", () => {
     assert.match(editorStyles, /\.ne-outline-link\[aria-current="location"\]/);
   });
 
-  it("blocks editing with an accessible modal while card generation is active", () => {
+  it("only blocks the save-and-accept handshake, then exposes resumable run progress", () => {
     assert.ok(editorSource.includes("useModalIsolation(generationOverlayRef, generationOverlayActive)"));
     assert.ok(editorSource.includes("useFocusTrap(generationOverlayRef, generationOverlayActive)"));
+    assert.ok(editorSource.includes('genState === "generating" && generationPhase === "saving"'));
+    assert.ok(editorSource.includes("generationOverlayActive = isOwner && generationLocked"));
     assert.ok(editorSource.includes('className="ne-generation-dialog"'));
     assert.ok(editorSource.includes('aria-modal="true"'));
-    assert.ok(editorSource.includes('genState === "generating"'));
-    assert.ok(editorSource.includes('genState === "checking"'));
-    assert.ok(editorSource.includes('genState === "status-error"'));
+    assert.ok(editorSource.includes("api.createCardGenerationRun"));
+    assert.ok(editorSource.includes("api.getCardGenerationRun"));
+    assert.ok(editorSource.includes("api.getLatestCardGenerationRun"));
+    assert.ok(editorSource.includes("api.cancelCardGenerationRun"));
+    assert.ok(editorSource.includes("accepted.canContinueEditing"));
+    assert.ok(editorSource.includes("endSession();"));
+    assert.ok(editorSource.includes('className="note-editor-generation-progress"'));
+    assert.ok(editorSource.includes('className="note-editor-generation-cancel"'));
+    assert.ok(editorSource.includes("generationRun.progress.completed"));
+    assert.ok(editorSource.includes("generationRun.coverage.sourceUnitsCompleted"));
     assert.ok(editorSource.includes("uploadingCountRef.current > 0"));
     assert.ok(editorSource.includes("generationLockedRef.current"));
     assert.ok(notePageSource.includes('state: "checking"'));
+    assert.ok(!editorSource.includes("生成完成前已暂停编辑"));
     assert.ok(!editorSource.includes('aria-busy="true"'));
     assert.match(editorStyles, /\.ne-generation-overlay\s*\{/);
+    assert.match(editorStyles, /\.note-editor-generation-progress\s*\{/);
+    assert.match(editorStyles, /\.note-editor-generation-cancel\s*\{/);
   });
 });

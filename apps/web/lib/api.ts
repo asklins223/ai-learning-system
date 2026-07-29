@@ -60,6 +60,7 @@ export interface AIPrivacySettings {
   aiConsentBy: string | null;
   aiDataPolicy: {
     sendToExternal: boolean;
+    sendImageContent: boolean;
     piiDetection: boolean;
     auditLogging: boolean;
   };
@@ -96,7 +97,10 @@ function clearSensitiveLocalState() {
   try {
     for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
       const key = window.localStorage.key(index);
-      if (key?.startsWith("note-editor-conflict-draft:")) {
+      if (
+        key?.startsWith("note-editor-conflict-draft:") ||
+        key?.startsWith("note-editor-card-generation-run:")
+      ) {
         window.localStorage.removeItem(key);
       }
     }
@@ -212,46 +216,76 @@ export function formatApiError(
 }
 
 interface UploadResult {
+  assetId: string;
   url: string;
   objectKey: string;
   size: number;
   mimeType: string;
+  sha256: string;
+  width: number;
+  height: number;
+}
+
+export interface UploadImageOptions {
+  onProgress?: (loaded: number, total: number) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 /**
- * 使用 XMLHttpRequest 上传文件，支持 upload progress 事件。
- * fetch() 不支持上传进度回调，因此对大文件（>1MB）走此路径。
+ * 使用 XMLHttpRequest 上传文件，支持逐文件进度、超时和取消。
  */
 function uploadWithProgress(
   url: string,
   formData: FormData,
   headers: Record<string, string>,
-  onProgress: (loaded: number, total: number) => void,
+  options: UploadImageOptions,
 ): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      options.signal?.removeEventListener("abort", abortUpload);
+      callback();
+    };
+    const abortUpload = () => xhr.abort();
     xhr.open("POST", url);
     xhr.withCredentials = true;
+    xhr.timeout = options.timeoutMs ?? 60_000;
     for (const [key, value] of Object.entries(headers)) {
       xhr.setRequestHeader(key, value);
     }
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        onProgress(e.loaded, e.total);
+      if (e.lengthComputable && options.onProgress) {
+        options.onProgress(e.loaded, e.total);
       }
     };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
-          resolve(JSON.parse(xhr.responseText) as UploadResult);
+          const result = JSON.parse(xhr.responseText) as UploadResult;
+          finish(() => resolve(result));
         } catch {
-          reject(new ApiError(xhr.status, xhr.responseText || "解析响应失败"));
+          finish(() => reject(new ApiError(xhr.status, xhr.responseText || "解析响应失败")));
         }
       } else {
-        reject(new ApiError(xhr.status, xhr.responseText || "上传失败"));
+        finish(() => reject(parseApiError(
+          xhr.status,
+          xhr.statusText,
+          xhr.responseText,
+        )));
       }
     };
-    xhr.onerror = () => reject(new ApiError(0, "网络错误，上传失败"));
+    xhr.onerror = () => finish(() => reject(new ApiError(0, "网络错误，上传失败", "upload_network_error")));
+    xhr.ontimeout = () => finish(() => reject(new ApiError(0, "图片上传超时", "upload_timeout")));
+    xhr.onabort = () => finish(() => reject(new ApiError(0, "图片上传已取消", "upload_cancelled")));
+    if (options.signal?.aborted) {
+      finish(() => reject(new ApiError(0, "图片上传已取消", "upload_cancelled")));
+      return;
+    }
+    options.signal?.addEventListener("abort", abortUpload, { once: true });
     xhr.send(formData);
   });
 }
@@ -440,6 +474,29 @@ export interface NoteDetail {
 }
 
 export type CardStatus = "active" | "superseded" | "archived";
+export type CardScope = "overview" | "section";
+export type CardSetStatus =
+  | "draft"
+  | "active"
+  | "partial_ready"
+  | "superseded"
+  | "archived";
+
+export interface LearningCardSchema {
+  title: string;
+  summary: string;
+  coverageWarning?: {
+    code: "partial_generation";
+    excludedImageCount: number;
+    excludedUnitIds: string[];
+    excludedImages: Array<{
+      sourceUnitId: string;
+      imageAssetId: string;
+      imageBlockId: string;
+      reason: string;
+    }>;
+  };
+}
 
 export interface CardKeyPoint {
   id: string;
@@ -450,29 +507,30 @@ export interface CardKeyPoint {
   segmentRef: { blockId?: string; blockOrdinal?: number } | null;
 }
 
-/** /cards/:id 返回 { card, keyPoints }（后端 getCardWithDetail 结构）。 */
-export interface CardDetailResponse {
-  card: {
-    id: string;
-    noteVersionId: string;
-    workspaceId: string;
-    status: CardStatus;
-    schemaJson: { title: string; summary: string };
-    artifactId: string | null;
-    createdAt: string;
-  };
-  keyPoints: CardKeyPoint[];
-}
-
-/** /cards 列表行（listCards 返回含聚合统计）。 */
-export interface CardListItem {
+export interface LearningCardRecord {
   id: string;
   noteVersionId: string;
   workspaceId: string;
   status: CardStatus;
-  schemaJson: { title: string; summary: string };
+  schemaJson: LearningCardSchema;
   artifactId: string | null;
   createdAt: string;
+  /** M5 card-set metadata. Optional while older card responses are still supported. */
+  cardSetId?: string | null;
+  generationRunId?: string | null;
+  scope?: CardScope | null;
+  scopeKey?: string | null;
+  ordinal?: number | null;
+}
+
+/** /cards/:id 返回 { card, keyPoints }（后端 getCardWithDetail 结构）。 */
+export interface CardDetailResponse {
+  card: LearningCardRecord;
+  keyPoints: CardKeyPoint[];
+}
+
+/** /cards 列表行（listCards 返回含聚合统计）。 */
+export interface CardListItem extends LearningCardRecord {
   // B6: 聚合统计字段
   evidenceHardCount?: number;
   evidenceSoftCount?: number;
@@ -480,6 +538,68 @@ export interface CardListItem {
   validationCount?: number;
   reviewStatus?: string | null;
   nextReviewAt?: string | null;
+}
+
+export interface CardSetRecord {
+  id: string;
+  workspaceId: string;
+  noteId: string;
+  noteVersionId: string;
+  generationRunId: string;
+  status: CardSetStatus;
+  title: string;
+  summary: string;
+  coverageReport: Record<string, unknown> | null;
+  createdAt: string;
+  activatedAt: string | null;
+  supersededAt: string | null;
+}
+
+export interface CardSetListItem extends CardSetRecord {
+  cardCount: number;
+  sectionCardCount: number;
+  overviewCardId: string | null;
+}
+
+export interface CardSetDetailResponse {
+  cardSet: CardSetRecord;
+  cards: CardDetailResponse[];
+  nextCursor: string | null;
+}
+
+export interface CardSetCardsPageResponse {
+  cardSetId: string;
+  items: CardDetailResponse[];
+  /** Opaque server cursor; clients must only pass it back unchanged. */
+  nextCursor: string | null;
+}
+
+export interface CardSetListResponse {
+  items: CardSetListItem[];
+  nextCursor: string | null;
+  total: number;
+}
+
+export interface CardSetAcceptResponse {
+  cardSetId: string;
+  acceptedArtifactCount: number;
+  /** Forward-compatible alias accepted by the UI if the API evolves. */
+  acceptedArtifacts?: number;
+}
+
+export interface CardSetRegenerateRequest {
+  mode?: string;
+  exclusions?: Record<string, unknown> | string[];
+}
+
+export interface CardSetRegenerateResponse {
+  runId: string;
+  rootRunId?: string;
+  status?: string;
+  mode?: string;
+  /** Compatibility with the initial M5 service response. */
+  jobId?: string | null;
+  sameVersion?: boolean;
 }
 
 export type EvidenceAlignment = "aligned" | "soft" | "unaligned" | "stale_alignment";
@@ -556,6 +676,85 @@ export interface CardGenerationStatus {
   message?: string;
 }
 
+/**
+ * Generation Run v2 is the user-facing task contract. Generic JobRow remains
+ * available for legacy card generation and validation flows, but new note
+ * generation code should only interpret this domain-specific view.
+ */
+export type CardGenerationRunStatus =
+  | "queued"
+  | "planning"
+  | "awaiting_assets"
+  | "mapping"
+  | "reducing"
+  | "rendering"
+  | "validating"
+  | "publishing"
+  | "needs_attention"
+  | "partial_ready"
+  | "succeeded"
+  | "cancelled"
+  | "superseded"
+  | "failed"
+  | "terminal_failed";
+
+export interface CardGenerationSourceSnapshot {
+  noteVersionId: string;
+  versionNo: number;
+  contentHash: string;
+}
+
+export interface CardGenerationRunAccepted {
+  runId: string;
+  status: CardGenerationRunStatus;
+  sourceSnapshot: CardGenerationSourceSnapshot;
+  canContinueEditing: boolean;
+}
+
+export interface CardGenerationRunView {
+  runId: string;
+  noteId: string;
+  noteVersionId: string;
+  status: CardGenerationRunStatus;
+  stage: string;
+  stateVersion: number;
+  sequence: number;
+  sourceSnapshot: CardGenerationSourceSnapshot;
+  progress: {
+    completed: number;
+    total: number;
+    unit: string;
+  };
+  coverage: {
+    sourceUnitsCompleted: number;
+    sourceUnitsTotal: number;
+    imagesCompleted: number;
+    imagesTotal: number;
+    sourceCoverageBps: number | null;
+    imageCoverageBps: number | null;
+  };
+  warnings: Array<{
+    code: string;
+    details?: Record<string, unknown>;
+  }>;
+  actions: {
+    retryable: boolean;
+    cancellable: boolean;
+    canContinueWithExclusions: boolean;
+  };
+  result: {
+    cardId: string | null;
+    cardSetId: string | null;
+  } | null;
+  error: {
+    code: string;
+    retryable: boolean;
+  } | null;
+  createdAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+}
+
 /* ------------------------------------------------------------------ */
 /* 验证 / 复习（V0.1b）                                                */
 /* ------------------------------------------------------------------ */
@@ -574,6 +773,125 @@ export interface ValidationFeedback {
   misunderstandings: string[];
   evidenceRefs: string[];
   feedback: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* v0.6 可信掌握闭环 — Validation Session API (计划 §8.2)              */
+/* ------------------------------------------------------------------ */
+
+/** 净化后的题目 DTO（不含 rubric/expectedConcept/evidence） */
+export interface SanitizedQuestion {
+  questionId: string;
+  questionType: "explain" | "example" | "apply";
+  question: string;
+  keyPointOrdinal?: number;
+}
+
+/** POST /cards/:cardId/validation-sessions/start 响应 */
+export interface StartSessionResult {
+  status:
+    | "ready"
+    | "question_preparing"
+    | "answer_saved"
+    | "evaluation_pending"
+    | "question_retryable"
+    | "evaluation_retryable"
+    | "blocked";
+  submissionId?: string;
+  question?: SanitizedQuestion;
+  jobId?: string;
+  reason?: string;
+  unassistedEligibleAt?: string;
+}
+
+/** GET /validation-sessions/:submissionId 响应 */
+export interface GetSessionResult {
+  submissionId: string;
+  status: string;
+  context: string;
+  keyPointId: string | null;
+  question?: SanitizedQuestion;
+  draftRevision: number;
+  draftAnswer?: string;
+  selfConfidence?: number | null;
+  assistanceLevel: string;
+  sourceAvailable: boolean;
+  resultAvailable: boolean;
+  jobId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** PATCH /validation-sessions/:submissionId/draft 响应 */
+export interface DraftResult {
+  revision: number;
+  answerHash: string;
+}
+
+/** POST /validation-sessions/:submissionId/submit 响应 */
+export interface SubmitResult {
+  status: "evaluation_pending";
+  jobId: string;
+}
+
+/** POST /validation-sessions/:submissionId/unable 响应 */
+export interface UnableResult {
+  status: "completed";
+  resultAvailable: true;
+}
+
+/** POST /validation-sessions/:submissionId/retry-* 响应 */
+export interface RetryResult {
+  status: "question_preparing" | "evaluation_pending";
+  jobId: string;
+}
+
+/** POST /validation-sessions/:submissionId/abandon 响应 */
+export interface AbandonResult {
+  status: "abandoned";
+}
+
+/** POST /validation-events/:eventId/quality-signal 响应 (计划 §8.4 Should) */
+export interface QualitySignalResult {
+  signalId: string;
+  status: "saved";
+}
+
+/** Quality signal reason (计划 §8.4) */
+export type QualitySignalReason =
+  | "question_bad"
+  | "too_strict"
+  | "too_lenient"
+  | "rubric_bad"
+  | "evidence_bad";
+
+
+/** POST /validation-sessions/:submissionId/reveal-source 响应 */
+export interface RevealSourceResult {
+  assistanceLevel: string;
+  sourceAvailable: boolean;
+}
+
+/** reveal-result 中的 rubric item 评估结果 */
+export interface RevealResultRubricItem {
+  criterion: string;
+  verdict: "covered" | "partial" | "missing" | "contradicted" | "not_assessable";
+  rationale?: string;
+}
+
+/** reveal-result 中的证据引用 */
+export interface RevealResultEvidenceRef {
+  quoteText: string;
+  alignment: string;
+}
+
+/** POST /validation-sessions/:submissionId/reveal-result 响应 */
+export interface RevealResultData {
+  outcome: ValidationOutcome;
+  feedback: string | ValidationFeedback | null;
+  rubricItems: RevealResultRubricItem[];
+  userAnswer: string;
+  evidenceRefs: RevealResultEvidenceRef[];
 }
 
 export interface ValidationEvent {
@@ -637,6 +955,34 @@ export interface ReviewWithCard {
   card: { id: string; title: string };
   keyPoint: { id: string; claim: string; quoteText: string } | null;
   blockContent: string | null;
+  reviewReason: ReviewReason;
+}
+
+/**
+ * v0.6 Sanitized review item (计划 §9.4/§10.4)
+ * Only contains neutral fields — NO card title, claim, quoteText, blockContent.
+ */
+export interface SanitizedReviewItem {
+  reviewId: string;
+  cardId: string;
+  keyPointId: string | null;
+  status: string;
+  nextReviewAt: string;
+  intervalDays: number;
+  reviewReason: ReviewReason;
+}
+
+/**
+ * v0.6 Sanitized single review metadata (计划 §9.4/§10.4)
+ * Minimal data for Review Focus route — NO card title, claim, quote, blockContent.
+ */
+export interface SanitizedReviewMeta {
+  scheduleId: string;
+  cardId: string;
+  keyPointId: string | null;
+  status: string;
+  nextReviewAt: string;
+  intervalDays: number;
   reviewReason: ReviewReason;
 }
 
@@ -1105,6 +1451,90 @@ isAutosave?: boolean;
     return request<{ items: CardListItem[]; nextCursor: string | null; total: number }>(`/cards${qs}`);
   },
   getCard: (id: string) => request<CardDetailResponse>(`/cards/${id}`),
+  listCardSets: (params?: {
+    status?: CardSetStatus;
+    noteId?: string;
+    cursor?: string;
+    limit?: number;
+  }) => {
+    const qs = params
+      ? "?" +
+        new URLSearchParams(
+          Object.entries(params)
+            .filter(([, value]) => value != null)
+            .map(([key, value]) => [key, String(value)]) as [string, string][],
+        ).toString()
+      : "";
+    return request<CardSetListResponse>(`/card-sets${qs}`);
+  },
+  getCardSet: (id: string) =>
+    request<CardSetDetailResponse>(`/card-sets/${id}`),
+  listCardSetCards: (
+    id: string,
+    params?: { cursor?: string; limit?: number },
+  ) => {
+    const qs = params
+      ? "?" +
+        new URLSearchParams(
+          Object.entries(params)
+            .filter(([, value]) => value != null)
+            .map(([key, value]) => [key, String(value)]) as [string, string][],
+        ).toString()
+      : "";
+    return request<CardSetCardsPageResponse>(
+      `/card-sets/${id}/cards${qs}`,
+    );
+  },
+  acceptCardSet: (id: string) =>
+    request<CardSetAcceptResponse>(`/card-sets/${id}/accept`, {
+      method: "POST",
+    }),
+  dismissCardSet: (id: string) =>
+    request<{ cardSetId: string; status: CardSetStatus }>(
+      `/card-sets/${id}/dismiss`,
+      { method: "POST" },
+    ),
+  regenerateCardSet: (
+    id: string,
+    body: CardSetRegenerateRequest = {},
+  ) =>
+    request<CardSetRegenerateResponse>(`/card-sets/${id}/regenerate`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  createCardGenerationRun: (body: { noteVersionId: string; idempotencyKey: string }) =>
+    request<CardGenerationRunAccepted>("/card-generation-runs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getCardGenerationRun: (id: string, signal?: AbortSignal) =>
+    request<CardGenerationRunView>(`/card-generation-runs/${id}`, { signal }),
+  cancelCardGenerationRun: (id: string) =>
+    request<CardGenerationRunView>(`/card-generation-runs/${id}/cancel`, {
+      method: "POST",
+    }),
+  retryCardGenerationRun: (id: string) =>
+    request<CardGenerationRunView>(`/card-generation-runs/${id}/retry`, {
+      method: "POST",
+    }),
+  continueCardGenerationRunWithExclusions: (
+    id: string,
+    body: { excludedUnitIds: string[]; idempotencyKey: string },
+  ) =>
+    request<CardGenerationRunAccepted>(
+      `/card-generation-runs/${id}/continue-with-exclusions`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
+  getLatestCardGenerationRun: (noteVersionId: string, signal?: AbortSignal) =>
+    request<{ run: CardGenerationRunView | null }>(
+      `/note-versions/${noteVersionId}/card-generation-latest`,
+      { signal },
+    ),
+
+  /* Legacy generation compatibility. */
   generateCard: (noteVersionId: string) =>
     request<CardGenerationStatus>("/cards/generate", {
       method: "POST",
@@ -1150,8 +1580,8 @@ isAutosave?: boolean;
       body: JSON.stringify({ ids }),
     }),
   createSource: (body: {
-    type: SourceType;
-    title: string;
+    type?: SourceType;
+    title?: string;
     content?: string;
     url?: string;
   }) =>
@@ -1266,6 +1696,107 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
   getValidationByJobId: (jobId: string) =>
     request<ValidationEvent>(`/validations/by-job/${jobId}`),
 
+  /* v0.6 可信掌握闭环 — Validation Session API (计划 §8.2) */
+  startValidationSession: (
+    cardId: string,
+    body: {
+      keyPointId?: string;
+      idempotencyKey: string;
+      context?: "initial_validation" | "review";
+      reviewScheduleId?: string;
+    },
+  ) =>
+    request<StartSessionResult>(
+      `/cards/${cardId}/validation-sessions/start`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  getValidationSession: (submissionId: string) =>
+    request<GetSessionResult>(`/validation-sessions/${submissionId}`),
+  draftValidationAnswer: (
+    submissionId: string,
+    body: {
+      answer: string;
+      selfConfidence?: number;
+      baseRevision: number;
+      idempotencyKey: string;
+    },
+  ) =>
+    request<DraftResult>(`/validation-sessions/${submissionId}/draft`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  revealValidationSource: (
+    submissionId: string,
+    body: { idempotencyKey: string },
+  ) =>
+    request<RevealSourceResult>(
+      `/validation-sessions/${submissionId}/reveal-source`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  revealValidationResult: (
+    submissionId: string,
+    body: { idempotencyKey: string },
+  ) =>
+    request<RevealResultData>(
+      `/validation-sessions/${submissionId}/reveal-result`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  submitValidationAnswer: (
+    submissionId: string,
+    body: {
+      answer: string;
+      selfConfidence?: number;
+      baseRevision: number;
+      idempotencyKey: string;
+    },
+  ) =>
+    request<SubmitResult>(`/validation-sessions/${submissionId}/submit`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  unableValidationAnswer: (
+    submissionId: string,
+    body: { baseRevision: number; idempotencyKey: string },
+  ) =>
+    request<UnableResult>(`/validation-sessions/${submissionId}/unable`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  retryValidationQuestion: (
+    submissionId: string,
+    body: { idempotencyKey: string },
+  ) =>
+    request<RetryResult>(
+      `/validation-sessions/${submissionId}/retry-question`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  retryValidationEvaluation: (
+    submissionId: string,
+    body: { idempotencyKey: string },
+  ) =>
+    request<RetryResult>(
+      `/validation-sessions/${submissionId}/retry-evaluation`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  abandonValidationSession: (
+    submissionId: string,
+    body: { idempotencyKey: string },
+  ) =>
+    request<AbandonResult>(
+      `/validation-sessions/${submissionId}/abandon`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /* v0.6 quality signal (计划 §8.4 Should) */
+  submitQualitySignal: (
+    eventId: string,
+    body: { reason: QualitySignalReason; comment?: string },
+  ) =>
+    request<QualitySignalResult>(
+      `/validation-events/${eventId}/quality-signal`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
   /* reviews (V0.1b) */
   listReviews: (params?: { status?: ReviewStatus; includeAll?: boolean; limit?: number; offset?: number }) => {
     const qs = params
@@ -1278,6 +1809,21 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
       : "";
     return request<{ items: ReviewWithCard[]; total: number; nextOffset: number | null }>(`/reviews${qs}`);
   },
+
+  /* v0.6 reviews — sanitized (计划 §9.4/§10.4) */
+  // 安全列表：不含 card title/claim/quote/blockContent
+  listSanitizedReviews: (params?: { status?: ReviewStatus; limit?: number; offset?: number }) => {
+    const baseParams: Record<string, string> = { sanitized: "true" };
+    if (params?.status) baseParams.status = params.status;
+    if (params?.limit !== undefined) baseParams.limit = String(params.limit);
+    if (params?.offset !== undefined) baseParams.offset = String(params.offset);
+    const qs = "?" + new URLSearchParams(baseParams).toString();
+    return request<{ items: SanitizedReviewItem[]; total: number; nextOffset: number | null }>(`/reviews${qs}`);
+  },
+
+  // v0.6 安全单个 review 元数据：不含 card title/claim/quote/blockContent
+  getReviewFocusMeta: (scheduleId: string) =>
+    request<SanitizedReviewMeta>(`/reviews/${scheduleId}/sanitized`),
 
   /* review attempts (LOOP-01/02, ADR-0004) */
   startReviewAttempt: (params: {
@@ -1561,7 +2107,7 @@ body: JSON.stringify(params),
 },
 
 /* 图片上传 — 笔记图片（支持可选进度回调，大文件时用 XMLHttpRequest 显示进度） */
-uploadImage: async (file: File, noteId: string, onProgress?: (loaded: number, total: number) => void) => {
+uploadImage: async (file: File, noteId: string, options: UploadImageOptions = {}) => {
   const formData = new FormData();
   // @fastify/multipart 的 req.file() 只收集文件 part 之前的字段，
   // 因此 noteId 必须在 file 之前追加，否则后端读取不到 noteId。
@@ -1572,19 +2118,7 @@ uploadImage: async (file: File, noteId: string, onProgress?: (loaded: number, to
   if (csrf) headers[CSRF_HEADER_KEY] = csrf;
   const url = `${API_URL}/uploads/images`;
 
-  // 有进度回调时使用 XMLHttpRequest 以获取 upload progress 事件
-  if (onProgress) {
-    return uploadWithProgress(url, formData, headers, onProgress);
-  }
-
-  const res = await fetch(url, {
-    method: "POST",
-    body: formData,
-    credentials: "include",
-    headers,
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
-  return res.json() as Promise<{ url: string; objectKey: string; size: number; mimeType: string }>;
+  return uploadWithProgress(url, formData, headers, options);
 },
 
 /* 图片上传 — 用户头像 */

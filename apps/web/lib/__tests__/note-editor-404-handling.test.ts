@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const EDITOR_PATH = resolve(
-  import.meta.dirname,
+  (import.meta.dirname ?? __dirname),
   "../../components/NoteEditor.tsx",
 );
 
