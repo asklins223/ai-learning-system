@@ -47,9 +47,10 @@ export const workspaces = pgTable(
     aiConsentBy: uuid("ai_consent_by").references(() => users.id), // 同意操作者
     aiDataPolicy: jsonb("ai_data_policy").$type<{
       sendToExternal: boolean;
+      sendImageContent: boolean;
       piiDetection: boolean;
       auditLogging: boolean;
-    }>().notNull().default({ sendToExternal: false, piiDetection: true, auditLogging: true }),
+    }>().notNull().default({ sendToExternal: false, sendImageContent: false, piiDetection: true, auditLogging: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

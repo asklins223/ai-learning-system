@@ -281,6 +281,76 @@
       "when": 1786338200000,
       "tag": "0039_sec01_policy_catalog_repair",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1786424600000,
+      "tag": "0040_v06_trusted_mastery_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1786511000000,
+      "tag": "0041_v06_quality_signals",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1786597400000,
+      "tag": "0042_v06_artifact_types_and_integrity",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1786683800000,
+      "tag": "0043_v06_rls_context_alignment",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1786770200000,
+      "tag": "0044_card_generation_run_bridge",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1786856600000,
+      "tag": "0045_card_generation_text_pipeline",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1786943000000,
+      "tag": "0046_card_generation_image_pipeline",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1787029400000,
+      "tag": "0047_card_generation_partial_terminal",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1787115800000,
+      "tag": "0048_learning_card_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1787202200000,
+      "tag": "0049_card_generation_m5_integrity",
+      "breakpoints": true
     }
   ]
 }
