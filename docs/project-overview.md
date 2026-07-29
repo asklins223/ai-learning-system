@@ -1,6 +1,6 @@
 # 理解引擎 — 项目技术介绍
 
-> 版本：v0.5.0　|　状态：Private Alpha　|　最后更新：2026-07-21
+> 版本：v0.5.0　|　状态：Private Alpha（Card Generation v2 发布候选）　|　最后更新：2026-07-26
 
 ## 1. 项目定位
 
@@ -33,12 +33,12 @@
 ┌──────────────────────────┐   ┌───────────────────────────────┐
 │   PostgreSQL 16          │◄──│   AI Worker (独立进程)          │
 │  ─────────────────       │   │  ──────────────────────────    │
-│  28+ 业务表 + RLS policy │   │  generate_card                 │
-│  pg_trgm 全文搜索        │   │  align_evidence                │
-│  SECURITY DEFINER 队列   │   │  evaluate_validation           │
-│  函数                    │   │  parse_source                  │
+│  业务表 + RLS policy     │   │  generation run DAG           │
+│  pg_trgm 全文搜索        │   │  text/image map · reduce      │
+│  SECURITY DEFINER 队列   │   │  deck plan · render · publish │
+│  函数                    │   │  validation · source parsing  │
 └──────────────────────────┘   │  ──────────────────────────    │
-           ▲                   │  lease token · 幂等 · 重试     │
+           ▲                   │  checkpoint · lease · 幂等     │
            │                   │  隐私治理 · 审计日志            │
            │                   └───────────┬───────────────────┘
            │                               │
@@ -187,34 +187,35 @@ function pgJsonbSerialize(value: unknown): string {
 
 ### 4.3 AI 学习卡生成与证据对齐
 
-这是系统最核心的 AI 能力：从笔记内容生成结构化学习卡（title + summary + 最多 5 个 key_points），每个 key point 包含**抽象 claim**（用自己的话概括的知识断言）和**原文 quote_text**（支撑 claim 的近似逐字片段），然后自动将 quote 对齐到笔记的具体 block。
+这是系统最核心的 AI 能力。Card Generation v2 把不可变笔记版本封存为一个可恢复
+generation run，对全文和 required images 建立 manifest，并按 source unit 执行有界
+Map/Reduce。最终产物是自适应 Card Set：一张 overview card 加零到多张 section
+cards；每个 active key point 必须引用服务端校验的 exact text span 或合格 image
+region。
+
+v2 不再对整篇笔记做静默字符截断，也不再把所有资料强压为固定容量的单张卡。
+产品仍有显式输入配额（当前最多 500,000 文本字符、2,000 blocks、30 images），
+超出时 API 明确拒绝并要求拆分，而不是悄悄丢弃尾部内容。
 
 #### 4.3.1 完整生成流程
 
 ```
-笔记保存 → API 创建 generate_card job (status=pending)
-                    │
-                    │ Worker claim
-                    ▼
-         ┌─────────────────────────────┐
-         │ 1. 幂等检查                   │  已有 active card → 跳过
-         │ 2. 并行查询 note+version,     │  减少 DB 往返
-         │    blocks, AI 治理上下文      │
-         │ 3. 图片 block 脱敏             │  alt text → 文字描述
-         │ 4. 内容长度截断（12000 字符）   │  信息密度优先保留
-         │ 5. 隐私治理门禁               │  同意+PII检测+sendToExternal
-         │ 6. 调用 AI Provider           │  SYSTEM_PROMPT v7
-         │ 7. Zod schema 校验            │  learningCardOutputSchema
-         │ 8. 质量清洗                   │  sanitizeCardOutput()
-         │ 9. 事务写入                   │  pg_advisory_xact_lock
-         │    → supersede 旧卡           │  + card + key_points
-         │    → insert artifact          │  + align_evidence jobs
-         │    → insert card + kps        │  + search index
-         │    → create align jobs        │
-         │    → search index upsert      │
-         │ 10. 写审计日志                 │  ai_audit_log
-         └─────────────────────────────┘
+保存笔记版本
+  → POST /card-generation-runs
+  → 封存 note version、block/image manifest、治理与 Provider 快照
+  → planner：产生全文 source units 与 exact evidence spans
+  → 有界并行：text map（最多 3）/ image analysis（最多 2）
+  → section reduce：合并、去重并校验候选
+  → deck plan：候选 exactly-once 分配到 overview + section cards
+  → card render：只渲染 deck plan allowlist 中的 candidate IDs
+  → global verify：全文/图片 coverage、typed evidence、epoch fence
+  → publish：单事务写入 Card Set、cards、key points、evidence、搜索投影
+  → succeeded / needs_attention / partial_ready / cancelled / superseded
 ```
+
+API 返回 `202` 后用户可以继续编辑；页面通过 generation run 和事件恢复真实进度。
+每个成功 unit 是独立 checkpoint，单个失败不会重跑已成功 sibling，publish retry
+也不会重新调用 Provider。
 
 #### 4.3.2 Prompt 工程（v7 版本）
 

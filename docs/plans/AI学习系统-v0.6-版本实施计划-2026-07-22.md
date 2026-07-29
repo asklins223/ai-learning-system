@@ -1,13 +1,18 @@
 # AI 学习系统 v0.6 版本实施计划：可信掌握闭环
 
-> 状态：Draft（方向 A 已由 repository owner 选择；详细范围待批准）<br>
-> 文档版本：0.1<br>
+> 状态：Approved（M0-M6 为代码候选；2026-07-26 修复后全量单元回归与数据库、AIQ、Worker、Web、会话恢复审查已完成；M7 未开始；正式版本仍为 0.5.0，v0.6 尚未发布）<br>
+> 文档版本：3.5<br>
 > 计划日期：2026-07-22<br>
+> 批准日期：2026-07-24<br>
 > 目标版本：`v0.6.0`<br>
 > 产品阶段：Private Alpha 深化<br>
 > 基线版本：`v0.5.0`<br>
-> Base SHA：TBD，等待 v0.5 clean accepted SHA 与当前工作树能力归属完成<br>
+> Base SHA：`40fdf1c`（merge: complete v0.5 workspace implementation）<br>
+> v0.6 分支：`v0.6-implementation`<br>
+> v0.5 迁移末端：`0039_sec01_policy_catalog_repair.sql`<br>
+> v0.6 迁移末端：`0043_v06_rls_context_alignment.sql`<br>
 > 关联决策：ADR-0004、ADR-0005、ADR-0010<br>
+> 最新审查证据：[v0.6 实施审查与修复记录（2026-07-26）](../evidence/v0.6/implementation-review-and-fixes-2026-07-26.md)<br>
 > 文档 Owner：repository owner `@asklins223`<br>
 > 容量假设：2 条并行实施流时 7～9 周；单实施流 10～12 周；随后至少 14 日受控观察<br>
 > 一句话目标：让系统能够基于当前硬证据提出不泄露答案的问题，在用户独立作答后逐项判断理解，并以可解释、可回放的结果安排下一次复习。
@@ -995,6 +1000,8 @@ eligibility-check
 
 ## 11. 里程碑与 Gate
 
+> 本节 checkbox 表示正式 Gate 是否关闭，不等同于“代码已经存在”。截至 2026-07-26，M0-M6 为代码候选并已完成登记的定向验证；在 clean SHA、完整 RC、真实 Provider 与 Alpha 证据绑定前，不把这些 checkbox 批量改为已发布完成。增量证据见本计划顶部链接的审查记录。
+
 ### M0：基线与决策冻结
 
 工作项：
@@ -1225,18 +1232,47 @@ v0.6 观察期结束后只选择一个产品主方向。RLS、迁移、质量、
 
 详细方案获批后，实施前必须：
 
-- [ ] 将本计划状态改为 Approved 并记录批准证据；
-- [ ] 创建 `docs/plans/v0.6-implementation-register.md`；
-- [ ] 创建 `docs/evidence/v0.6/README.md` 与 milestone gate；
-- [ ] 记录 Base SHA、目标分支和 migration end；
-- [ ] 冻结数据集/标签/scorer/prompt/reducer/policy 版本；
-- [ ] 指定 Product、Learning Loop、AI Quality、Security/Data、Web UX 和 Release Owner；
+- [x] 将本计划状态改为 Approved 并记录批准证据；
+- [x] 创建 `docs/plans/v0.6-implementation-register.md`；
+- [x] 创建 `docs/evidence/v0.6/README.md` 与 milestone gate；
+- [x] 记录 Base SHA、目标分支和 migration end；
+- [x] 冻结数据集/标签/scorer/prompt/reducer/policy 版本；
+- [x] 指定 Product、Learning Loop、AI Quality、Security/Data、Web UX 和 Release Owner；
 - [ ] 确认真实 Provider 凭据、revision 取证与 RC 成本预算；
 - [ ] 从 M1 expand migration 开始，不直接在生产式数据库试错；
-- [ ] 所有工作按 Gate 交付证据，不以“代码存在”替代 DoD。
+- [x] M0-M6 阶段性 Gate 证据已绑定（`docs/evidence/v0.6/m{0..6}-gate.md`）；2026-07-25 的 2634 个测试为历史全量检查点，2026-07-26 修复后已完成登记的定向验证；完整 RC/真实 Provider/Alpha 证据仍由 M7 阻断
 
 ## 18. 文档变更记录
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
 | 0.1 | 2026-07-22 | Repository owner 选择方向 A；建立 v0.6 可信掌握闭环、v0.7 方向性预期、question/rubric/evaluation/card repair/discrete-v2/FSRS shadow 的正式 Draft |
+| 0.2 | 2026-07-24 | 计划状态从 Draft 进入 Approved；冻结 Base SHA=`40fdf1c`、分支=`v0.6-implementation`、迁移末端=`0039`；创建实施登记册与证据索引 |
+| 0.3 | 2026-07-25 | M1-M3 实施七轮审查修复完成；修复 evaluate-rubric 事务内 question 重读、noteVersionId 缺失、startValidationSession 非终态 submission 检查、artifact inputRefs 一致性、review schedule generation 递增共 5 项 |
+| 0.4 | 2026-07-25 | M1-M3 实施第八轮审查修复完成；修复 submitAnswer/unableToAnswer 缺少 source fingerprint 校验、question 未用 FOR UPDATE 锁、inputSchedule 未用 FOR UPDATE 锁、generate-validation-question noteVersionId 使用 pre-tx 快照共 4 项 |
+| 0.5 | 2026-07-25 | M1-M3 实施第十轮审查修复完成；修复 initial_validation 缺少 pending schedule 冲突检查、understanding event 在调度前置检查前写入、review 分支缺少 review attempt 锁定、review 分支缺少 input schedule PENDING 状态校验、exposure 查询缺少 workspaceId 过滤共 5 项 |
+| 0.6 | 2026-07-25 | M1-M3 实施第十一轮审查修复完成；修复 revealResult exposure 查询缺少 workspaceId 过滤、review 上下文中 review attempt 未标记为 completed、artifactTypeSchema 缺少 v0.6 新增类型共 3 项 |
+| 0.7 | 2026-07-25 | M1-M3 实施第十二轮审查修复完成；修复 revealResult/getValidationSession 不允许 STALE 揭示结果、startValidationSession 绑定已有题目未校验 source fingerprint、调度前置检查失败时未设置 validationEventId、已有题目查找要求 expiresAt 非空共 4 项 |
+| 0.8 | 2026-07-25 | M1-M3 实施第十三轮审查修复完成；修复 submitAnswer/unableToAnswer 不重新读取 exposure 聚合行（跨 submission exposure 检测）、submitAnswer 不写 assistanceSnapshotExposedAt、getValidationSession 对 STALE 返回 draftAnswer、unableToAnswer hasValidServerQuestion 缺少 fingerprint 校验、fingerprint 校验使用前置条件而非 fail closed 共 6 项 |
+| 0.9 | 2026-07-25 | M5 审查修复完成；修复 card repair 状态未持久化（jobs 表新增 repair_state/repair_attempt_count + CAS none→claimed→completed）、CARD_REPAIR_V1_ENABLED flag 未门禁所有 repair 行为、draft/final artifact lineage 未接线（parent_artifact_id）、repair 调用未单独记录 logAICall 共 4 项；确认 Review later 动作已有 idempotency 和 FOR UPDATE 锁定 |
+| 1.0 | 2026-07-25 | M1-M3+M5+M6 第十五轮审查修复完成；修复 artifact type 使用错误：evaluate-rubric.ts AI 评估 artifact 使用 VALIDATION_FEEDBACK 而非 RUBRIC_EVALUATION、generate-validation-question.ts 题目 artifact 使用 QUESTION 而非 VALIDATION_QUESTION/DETERMINISTIC_QUESTION、session-service.ts unable 路径 artifact 使用 VALIDATION_FEEDBACK 而非 RUBRIC_EVALUATION 共 3 项 |
+| 1.1 | 2026-07-25 | M1-M3+M5+M6 第十六轮审查修复完成；修复 evaluate-rubric hasHardEvidence 使用 pre-tx 快照（§8.6 违规）、fsrs-shadow 头部及函数注释 Rating 枚举值错误、evaluate-rubric shouldMutateSchedule 缩进不一致、fsrs-shadow computeFSRSShadowDecision 未文档化 currentIntervalDays 限制、fsrs-shadow retrievability 访问方式错误、fsrs-shadow 未使用 State import 共 6 项 |
+| 1.3 | 2026-07-25 | M1-M3+M5+M6 第十八轮审查修复完成；修复 submitAnswer 中 question.status !== ACTIVE 未标记 submission 为 STALE（§7.5 违规）共 1 项；确认 rubric-reducer、fingerprint、scheduling-policy-v2、question-safety、deterministic-question、generate-validation-question、evaluate-rubric、session-service（10 个端点）、card-quality、handlers/index.ts（card repair）、fsrs-shadow 全部审查项无需修复 |
+| 1.2 | 2026-07-25 | M1-M3+M5+M6 第十七轮审查修复完成；修复 revealSource/revealResult exposure upsert 竞争条件（§6.4.2 违规，find-then-update/insert 改为 onConflictDoUpdate 原子 upsert）、revealResult exposure update 未设置 lastOriginSubmissionId 共 2 项 |
+| 1.4 | 2026-07-25 | M1-M3+M5+M6 第十九轮审查修复完成；修复 evaluate-rubric.ts understanding event 在 hasHardEvidence 检查前写入（§4.1 违规：0 次无当前用户有效硬证据的理解升级），将 txRubricItems 查询移到 understanding event 之前，hasHardEvidence 为 false 时降级 eventType 为 "seen" 共 1 项 |
+| 1.5 | 2026-07-25 | M1-M3+M5+M6 第二十轮审查修复完成；修复 unableToAnswer hasHardEvidence 使用事务开始时加载的 rubric items 快照而非重新读取（§8.6 违规）、unableToAnswer question.status !== ACTIVE 的 failureCode 不一致、unableToAnswer understanding event payload 缺少 hasHardEvidence 共 3 项 |
+| 1.6 | 2026-07-25 | M1-M3+M5+M6 第二十一轮审查完成（事务包装器与 Job Lineage 终审 — 0 项修复）；确认 withWorkspaceTransaction 底层回滚正确、Advisory Lock 语义正确、retryQuestion/retryEvaluation Job Lineage 追踪完整、evaluate-rubric.ts 与 unableToAnswer 调度前置检查和 FSRS shadow 对齐；更新 M5/M6 里程碑状态为进行中 |
+| 1.7 | 2026-07-25 | M4 启动 — Question-first UX 前端实现；新增 ValidationFocus 组件（~550 行）、validation-focus.css、卡片验证 Focus 路由 /cards/[id]/validate、Review Focus 路由 /review/[scheduleId]、v0.6 API 客户端（10 个方法 + 12 个类型）、卡片详情页 CTA 更新；Linter 无 ERROR |
+| 1.8 | 2026-07-25 | M4 继续 — Review Context、Queue 收敛与 Feature Flag；完成 review context session start（§8.3: startValidationSession 扩展 context=review + reviewScheduleId、schedule FOR UPDATE 锁定、review attempt 创建/resume、effective start 检查）、review queue 收敛（§9.4: /review 页面替换为中性安全队列，不显示卡片标题/claim/quote）、feature flag 门禁（§12.2: NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED 条件渲染、feature-flags.ts 工具模块）；Linter 无 ERROR |
+| 1.9 | 2026-07-25 | M4 继续 — 服务端 Feature Flag 门禁与统一调度；新增 packages/shared/src/feature-flags.ts（5 个服务端 flag 集中化）、packages/shared/src/scheduling-unified.ts（discrete-v1/v2 统一分发器）；generate-validation-question.ts 门禁 AI_QUESTION_V1_ENABLED（false→deterministic fallback）、evaluate-rubric.ts 门禁 RUBRIC_EVALUATION_V1_ENABLED（false→fail closed evaluation_retryable）、handlers/index.ts 使用 isCardRepairEnabled()；session-service.ts 和 evaluate-rubric.ts 调度切换到 calculateSchedule()、policy_version 动态适配；新增 62 个单元测试（shared 35 + web 27）含 SanitizedQuestion DTO 泄漏检测 |
+| 2.0 | 2026-07-25 | M4 继续 — Review 安全端点与泄漏检测；新增 SanitizedReviewItem/SanitizedReviewMeta 接口、listSanitizedReviews/getSanitizedReviewMeta 服务函数、GET /reviews?sanitized=true 和 GET /reviews/:scheduleId/sanitized 端点（Cache-Control: private, no-store）；Review Focus 页面改用 getReviewFocusMeta 替代 listReviews()、Review 队列页面改用 listSanitizedReviews；修复 v0.6 key_point schedule 不出现在复习队列（EXISTS 查询新增 key_point 分支 + 数据解析逻辑）；新增 12 个泄漏检测测试；Linter 无 ERROR |
+| 2.1 | 2026-07-25 | M4 继续 — 安全契约测试；新增 fingerprint-invariant.test.ts（26 个测试：exposure fingerprint 跨版本不变性、冷却门禁不变性、source vs exposure 对比）、v06-cache-control-contract.test.ts（9 个测试：全 10 条 session 路由 Cache-Control: private, no-store 覆盖验证、review sanitized 路由验证）、v06-session-contract.test.ts（20 个测试：action command 幂等回放、draft revision CAS 冲突 409、unable 响应最小化、submit 响应最小化、reveal-source 响应、blocked 状态响应、abandon 幂等）；覆盖 §10.4 中可在无运行服务器条件下验证的安全不变量；Linter 无 ERROR |
+| 2.2 | 2026-07-25 | M4/M5/M6 继续 — 数据治理补全；完成 §6.9 导出/导入（exportWorkspace/restoreWorkspace 新增 8 张 v0.6 新表查询/恢复 + 现有表 v0.6 字段扩展：validation_questions 11 字段、validation_events 6 字段、review_schedules 5 字段、review_attempts 6 字段、ai_artifacts parentArtifactId + dry-run 引用完整性校验）、§6.6 input_hash 真实写入（generate-validation-question.ts + evaluate-rubric.ts artifact 插入新增 SHA-256 inputHash）、§10.5 Provider maxAttempts=1 确认（postJsonToPublicEndpoint/callOnce 均原生 HTTP 无重试）、§4.1 遥测隐私扫描（新增 v06-telemetry-privacy-scan.test.ts 4 个测试：Worker/API logger 不泄漏题面/答案/quote/expectedConcept、metrics 标签不含敏感字段、logAICall 参数不含答案/题面）；Linter 无新增 ERROR |
+| 2.3 | 2026-07-25 | M4/M5/M6 继续 — Provider Usage Tracking + FSRS Compare Report + Source Inspection Tests；完成 §6.6 cost_tokens 真实写入、§10.6 FSRS shadow 离线对比报告、§9.5/§10.4 CSS/组件源码级无障碍契约测试；Linter 无新增 ERROR |
+| 2.4 | 2026-07-25 | M0-M6 Gate 证据绑定完成；修复 fsrs-compare-report.test.ts 1 个失败测试（v0.6 FSRS 新卡片限制导致 meanIntervalDiff 比较逻辑修正）、review-attempt-db-extra.test.ts mock 缺少 validationActionCommands（Review later 迁移后 mock 补全）、v06-dom-leakage.test.ts 过度禁止 post-reveal 合法字段引用（quoteText/claim/rubricItems 在结果揭示阶段合法使用）；创建 m1-gate.md ~ m6-gate.md Gate 证据文件；更新证据索引 README；2513 测试全绿（Shared 352 + API 1361 + Web 263 + Worker 537） |
+| 3.0 | 2026-07-25 | 代码可实施剩余任务推进完成 — M1/M2/M3/M4/M5/§10.7；新增 RLS 矩阵集成测试（`v06-rls-matrix-postgres.integration.ts`：8 张表 RLS enabled + 8 条 policy + 同 workspace 不同 user 隔离 + 跨 workspace 隔离 + 无 user_id 返回零行，需 PostgreSQL 运行）、Migration fresh/upgrade/repeat/restore 集成测试（`v06-migration-fresh-upgrade-repeat.integration.ts`：新表/索引/约束/列扩展/幂等性/legacy 标记/备份恢复/类型验证，需 PostgreSQL 运行）、AI Quality 黄金集 fixture（`packages/ai-quality/src/v06/`：Question/Rubric Gold 60 样本 + Evaluation Gold 120 样本 + Card Repair Gold 30 样本 + 三套评分器 + 25 个单元测试全绿）、导出/导入验证测试（`v06-export-import-coverage.test.ts`：19 个测试全绿 — 8 张新表导出/恢复 + manifest + 依赖顺序 + 隐私扫描 + CASCADE + 现有表扩展）、Playwright E2E 框架（安装 @playwright/test + @axe-core/playwright + Chromium，3 个 spec 文件：card-validation/review-flow/accessibility，含泄漏检测/键盘/触控/200%zoom/reduced-motion/axe WCAG 2.2 AA）；更新实施登记册与证据索引；新增 44 个测试全绿（ai-quality v06 gold 25 + api export-import 19） |
+| 3.1 | 2026-07-25 | 代码质量提升 — TypeScript 类型检查全绿 + 锁序契约测试 + E2E 种子数据；修复全部三个包共 31 个 TypeScript 类型检查错误（apps/web 16 + apps/api 14 + packages/shared 1：未使用变量/导入/类型转换/缺少键）；新增 `v06-lock-ordering-contract.test.ts`（25 个测试全绿 — §8.7 固定锁序/§6.4.2 原子 upsert/§7.4 exposure 重新读取/§8.6 fingerprint fail-closed/§6.4.1 action command 幂等先于状态校验/§4.1 不接受客户端 outcome 的源码级验证）；新增 `seed-e2e-v06.ts` 种子数据脚本（用户+工作区+笔记+卡片+key points+evidence+review schedule+validation question，固定 UUID 供 E2E 导航）；2634 测试全绿（Shared 352 + AI Quality 77 + API 1405 + Web 263 + Worker 537）；tsc --noEmit 全部 0 错误 |
+| 3.2 | 2026-07-25 | 第二十二轮审查修复 — TypeScript noUnusedLocals 合规性修复；发现并修复 apps/api 中 9 个 TS6133 错误（v06-lock-ordering-contract.test.ts 2 个 + v06-rls-matrix-postgres.integration.ts 3 个 + v06-export-import-coverage.test.ts 4 个，均为文档性 `_` 前缀变量被 noUnusedLocals 标记）；修复方法：移除 `_` 前缀 + 添加 `void` 引用语句；2634 测试全绿，tsc --noEmit 全部 0 错误 |
+| 3.3 | 2026-07-25 | 第二十三轮审查修复 — Repair costTokens + 时间戳一致性 + monorepo 同步；发现并修复 3 个问题：(1) handlers/index.ts card repair logAICall 缺少 costTokens（§10.5 违规，成功和失败两处均添加 costTokens）、(2) repair logAICall dataSizeBytes 使用修复后输出而非原始 draft（在 repairCard 调用前捕获 repairInputSize）、(3) evaluate-rubric.ts hasValidServerQuestion 使用 new Date() 而非事务内统一时间戳（引入 schedulingNow 变量）；附带修复 monorepo 依赖同步（workers/ai-worker/node_modules/@ailearn/shared 过期导入）；2634 测试全绿，tsc --noEmit 全部 0 错误 |
+| 3.4 | 2026-07-26 | 实施审查与附加修复 — 新增 0042/0043 并修复 artifact enum、RLS runtime GUC、持久化错误净化和 ready 检查；统一 effective hard evidence；AIQ scorer 2.0.0 改用独立 prediction 与真实 QWK；Provider/Handler 分层超时；修复 Milkdown 生命周期竞态和终态 Job 会话恢复；PostgreSQL 集成 38/38、Web 49/49、API 恢复 3/3、Worker 41/41、AIQ 32/32 定向验证及相关 typecheck/build/lint 通过。M7 仍未开始，正式版本保持 0.5.0 |
+| 3.5 | 2026-07-26 | 审查收口 — 终态恢复改为当前 Job 指针 CAS 并保持 RLS transaction/锁序；补齐 ValidationFocus 安全重试文案、Review mock、RLS migration 断言和调度 fail-closed 测试；新增串行 PostgreSQL 集成脚本。修复后全量单元测试 2717/2717，6 个 package typecheck、Web lint、API/Worker build 通过；浏览器恢复路径无 DOM 敏感字段且 console 0 错误。本地 Worker 退出 137，因此真实 Provider 最终链路仍由 M7 阻断 |
