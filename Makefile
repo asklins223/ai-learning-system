@@ -26,7 +26,9 @@ DEV_PROFILES := --profile storage
 	ensure-db-volume \
 	shell-api shell-web shell-worker version-check verify release-check \
 	coverage-gate skip-todo-gate release-manifest \
-	alpha-up alpha-down alpha-backup alpha-restore-verify alpha-status alpha-metrics
+	alpha-up alpha-down alpha-backup alpha-restore-verify alpha-status alpha-metrics \
+	desktop-install desktop-dev desktop-build desktop-dist desktop-dist-arm64 \
+	desktop-up desktop-down desktop-logs
 
 # Local development stack: dev image targets, source bind mounts and hot
 # reload.  This is the default `make up` target — there is no separate
@@ -48,7 +50,7 @@ up: ensure-db-volume
 	@set -e; for svc in $(INIT_SERVICES) $(STORAGE_INIT_SERVICES); do \
 		cid="$$( $(COMPOSE) ps -aq $$svc )"; \
 		if [ -z "$$cid" ]; then echo "Missing required init service: $$svc" >&2; exit 1; fi; \
-		$(COMPOSE) wait $$svc >/dev/null; \
+		docker wait $$cid >/dev/null; \
 	done
 
 # Backward-compatible alias.
@@ -60,7 +62,7 @@ storage: ensure-db-volume
 	@set -e; for svc in $(INIT_SERVICES) $(STORAGE_INIT_SERVICES); do \
 		cid="$$( $(COMPOSE) ps -aq $$svc )"; \
 		if [ -z "$$cid" ]; then echo "Missing required init service: $$svc" >&2; exit 1; fi; \
-		$(COMPOSE) wait $$svc >/dev/null; \
+		docker wait $$cid >/dev/null; \
 	done
 
 storage-dev: storage
@@ -196,3 +198,46 @@ alpha-status:
 
 alpha-metrics:
 	$(ALPHA_SCRIPT) metrics
+
+# ─── Desktop (macOS) ────────────────────────────────────────────────
+# The desktop app is an Electron shell that manages the Docker stack
+# and loads http://localhost:3000 in a native window.
+
+DESKTOP_DIR := apps/desktop
+DESKTOP_COMPOSE := docker-compose.desktop.yml
+DESKTOP_PROJECT := ailearn-desktop
+
+.PHONY: desktop-install desktop-dev desktop-build desktop-dist \
+	desktop-dist-arm64 desktop-up desktop-down desktop-logs
+
+# Install desktop Electron dependencies.
+desktop-install:
+	cd $(DESKTOP_DIR) && npm install
+
+# Run the desktop app in development mode (requires Docker stack running).
+desktop-dev:
+	cd $(DESKTOP_DIR) && npm run dev
+
+# Build the Electron main/preload bundles.
+desktop-build:
+	cd $(DESKTOP_DIR) && npm run build
+
+# Package the desktop app as a .dmg (both arm64 and x64).
+desktop-dist:
+	cd $(DESKTOP_DIR) && npm run dist
+
+# Package for Apple Silicon only (smaller, faster build).
+desktop-dist-arm64:
+	cd $(DESKTOP_DIR) && npm run dist:arm64
+
+# Manually start the desktop Docker stack (without the Electron app).
+desktop-up:
+	docker compose -f $(DESKTOP_COMPOSE) -p $(DESKTOP_PROJECT) up -d --build
+
+# Stop the desktop Docker stack.
+desktop-down:
+	docker compose -f $(DESKTOP_COMPOSE) -p $(DESKTOP_PROJECT) down
+
+# Tail desktop stack logs.
+desktop-logs:
+	docker compose -f $(DESKTOP_COMPOSE) -p $(DESKTOP_PROJECT) logs -f

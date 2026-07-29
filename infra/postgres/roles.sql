@@ -232,8 +232,12 @@ BEGIN
     'notes',
     'note_versions',
     'note_blocks',
+    'note_image_assets',
+    'note_image_insights',
+    'note_image_evidence_units',
     'sources',
     'source_segments',
+    'learning_card_sets',
     'learning_cards',
     'card_key_points',
     'evidences',
@@ -241,6 +245,12 @@ BEGIN
     'validation_events',
     'review_schedules',
     'jobs',
+    'card_generation_runs',
+    'card_generation_events',
+    'note_evidence_spans',
+    'card_generation_units',
+    'card_generation_candidates',
+    'card_generation_candidate_evidence',
     'search_documents',
     'ai_artifacts',
     'user_ai_model_configs'
@@ -255,10 +265,14 @@ BEGIN
   -- SELECT grants above are intentionally retained because RETURNING and
   -- conflict updates require read access to affected columns.
   FOREACH table_name IN ARRAY ARRAY[
+    'learning_card_sets',
     'learning_cards',
     'review_schedules',
     'jobs',
-    'search_documents'
+    'search_documents',
+    'card_generation_units',
+    'card_generation_candidates',
+    'note_image_insights'
   ]
   LOOP
     IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
@@ -269,10 +283,18 @@ BEGIN
     END IF;
   END LOOP;
 
+  IF to_regclass('public.card_generation_runs') IS NOT NULL THEN
+    GRANT UPDATE ON TABLE public.card_generation_runs TO ailearn_worker;
+  END IF;
+
   FOREACH table_name IN ARRAY ARRAY[
     'ai_artifacts',
     'card_key_points',
     'evidence_overrides',
+    'card_generation_events',
+    'note_evidence_spans',
+    'note_image_evidence_units',
+    'card_generation_candidate_evidence',
     'validation_events'
   ]
   LOOP
@@ -507,8 +529,12 @@ BEGIN
       ('notes', true, false, false, false),
       ('note_versions', true, false, false, false),
       ('note_blocks', true, false, false, false),
+      ('note_image_assets', true, false, false, false),
+      ('note_image_insights', true, true, true, false),
+      ('note_image_evidence_units', true, true, false, false),
       ('sources', true, false, true, false),
       ('source_segments', true, true, false, true),
+      ('learning_card_sets', true, true, true, false),
       ('learning_cards', true, true, true, false),
       ('card_key_points', true, true, false, false),
       ('evidences', true, true, false, true),
@@ -516,6 +542,12 @@ BEGIN
       ('validation_events', true, true, false, false),
       ('review_schedules', true, true, true, false),
       ('jobs', true, true, true, false),
+      ('card_generation_runs', true, false, true, false),
+      ('card_generation_events', true, true, false, false),
+      ('note_evidence_spans', true, true, false, false),
+      ('card_generation_units', true, true, true, false),
+      ('card_generation_candidates', true, true, true, false),
+      ('card_generation_candidate_evidence', true, true, false, false),
       ('search_documents', true, true, true, true),
       ('ai_artifacts', true, true, false, false),
       ('user_ai_model_configs', true, false, false, false),

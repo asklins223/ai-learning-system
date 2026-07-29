@@ -125,7 +125,16 @@ run_one_shot() {
   local service="$1"
   "${COMPOSE[@]}" rm -f "$service" >/dev/null 2>&1 || true
   "${COMPOSE[@]}" up -d "$service"
-  "${COMPOSE[@]}" wait "$service" >/dev/null
+  # Docker Compose v5 changed `compose wait` to reject already-exited
+  # one-shot containers ("no containers for project").  Fall back to the
+  # stable `docker wait <container-id>` which handles exited containers.
+  local cid
+  cid="$("${COMPOSE[@]}" ps -aq "$service" | head -n1)"
+  if [[ -z "$cid" ]]; then
+    err "Missing required init service: $service"
+    return 1
+  fi
+  docker wait "$cid" >/dev/null
 }
 
 # ─── 启动 Alpha 环境 ──────────────────────────────────────────────────

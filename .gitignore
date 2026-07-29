@@ -18,6 +18,8 @@ coverage/
 /outputs/
 /tests/e2e/playwright-report/
 /tests/e2e/test-results/
+/apps/web/playwright-report/
+/apps/web/test-results/
 /project-archive/
 /product-design-assets/
 scripts/*.py
