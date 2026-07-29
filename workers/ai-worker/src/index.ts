@@ -2,13 +2,44 @@
 // 全局 fetch 会自动复用 TCP+TLS 连接，无需显式配置 Agent。
 // 如需进一步调优连接池参数，可安装 undici npm 包并使用 setGlobalDispatcher。
 
+import { and, eq, inArray } from "drizzle-orm";
 import { logger } from "./lib/logger.ts";
-import { closeDatabase } from "./db.ts";
-import { runGenerateCard, runAlignEvidence, runEvaluateValidation } from "./handlers/index.ts";
+import { closeDatabase, db } from "./db.ts";
+import * as schema from "./schema/index.ts";
+import { runGenerateCard, runAlignEvidence, runEvaluateValidation, type JobPayload } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
+import { runGenerateValidationQuestion } from "./handlers/generate-validation-question.ts";
+import { runEvaluateRubric } from "./handlers/evaluate-rubric.ts";
+import {
+  projectTextPipelineJobFailure,
+  runAnalyzeCardImage,
+  runMapCardGeneration,
+  runPlanCardSet,
+  runPlanCardGeneration,
+  runPublishCardGeneration,
+  runReduceCardGeneration,
+  runRenderCardGeneration,
+} from "./handlers/card-generation-text.ts";
+
+/**
+ * Dispatch evaluate_validation jobs based on payload format:
+ * - v0.6: payload contains `submissionId` → use runEvaluateRubric (rubric-based evaluation)
+ * - v0.5: legacy payload with cardId/question/userAnswer → use runEvaluateValidation
+ *
+ * This ensures backward compatibility while routing new v0.6 sessions to the
+ * trusted mastery closed-loop handler.
+ */
+function dispatchEvaluateValidation(job: JobPayload) {
+  if (job.payload.submissionId) {
+    return runEvaluateRubric(job);
+  }
+  return runEvaluateValidation(job);
+}
 import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
 import { resolveHandlerTimeout, RESOLVED_TIMEOUT_INFO } from "./lib/handler-timeout-config.ts";
 import { isNonRetryableError } from "./lib/non-retryable-errors.ts";
+import { safeErrorMessage, sanitizeOperationalError } from "@ailearn/shared";
+import { markCardGenerationRunNeedsAttention } from "./lib/card-generation-run.ts";
 import {
   claimJobs,
   markJobDead,
@@ -31,9 +62,17 @@ import {
 
 const HANDLERS = {
   generate_card: runGenerateCard,
+  plan_card_generation: runPlanCardGeneration,
+  analyze_card_image: runAnalyzeCardImage,
+  map_card_generation: runMapCardGeneration,
+  reduce_card_generation: runReduceCardGeneration,
+  plan_card_set: runPlanCardSet,
+  render_card_generation: runRenderCardGeneration,
+  publish_card_generation: runPublishCardGeneration,
   align_evidence: runAlignEvidence,
-  evaluate_validation: runEvaluateValidation,
+  evaluate_validation: dispatchEvaluateValidation,
   parse_source: runParseSource,
+  generate_validation_question: runGenerateValidationQuestion,
 } as const;
 
 const POLL_MS = 500;
@@ -53,6 +92,99 @@ export function setupGracefulShutdown() {
   process.on("SIGINT", handler);
 }
 setupGracefulShutdown();
+
+const TEXT_GENERATION_JOB_TYPES = new Set([
+  "plan_card_generation",
+  "analyze_card_image",
+  "map_card_generation",
+  "reduce_card_generation",
+  "plan_card_set",
+  "render_card_generation",
+  "publish_card_generation",
+]);
+
+async function projectGenerationFailure(
+  job: ClaimedJob,
+  error: unknown,
+  terminal: boolean,
+  retryable: boolean,
+): Promise<void> {
+  if (!job.payload.generationRunId) return;
+  try {
+    if (job.type === "generate_card") {
+      if (!terminal) return;
+      await markCardGenerationRunNeedsAttention({
+        workspaceId: job.workspaceId,
+        requestedBy: job.requestedBy,
+        payload: job.payload,
+        error,
+        retryable,
+      });
+    } else if (TEXT_GENERATION_JOB_TYPES.has(job.type)) {
+      await projectTextPipelineJobFailure({
+        job,
+        error,
+        terminal,
+        retryable,
+      });
+    }
+  } catch (projectionError) {
+    // The job terminal transition is already committed. Keep the projection
+    // failure privacy-safe so reconciliation can repair the run later without
+    // leaking provider/database text into logs.
+    logger.error(
+      {
+        jobId: job.id,
+        error: sanitizeOperationalError(projectionError),
+      },
+      "failed to project generation job state to generation run",
+    );
+  }
+}
+
+/**
+ * 关键补漏:SQL reaper 只翻转 jobs 行。worker 崩溃/断电后被 reaper 判死的
+ * generation job,如果不在这里投影回 run/unit,对应检查点会永远停在
+ * "running",整个 run 卡死且 /retry 也捞不到它。lease 已失效,但失败
+ * 投影本身不依赖 lease(走 workspace 事务 + run 行锁),可以安全补账。
+ */
+async function projectReapedGenerationJobs(reapedIds: string[]): Promise<void> {
+  if (reapedIds.length === 0) return;
+  let deadRows: Array<typeof schema.jobs.$inferSelect> = [];
+  try {
+    deadRows = await db.query.jobs.findMany({
+      where: and(
+        inArray(schema.jobs.id, reapedIds),
+        eq(schema.jobs.status, "dead"),
+      ),
+    });
+  } catch (error) {
+    logger.error(
+      { error: sanitizeOperationalError(error) },
+      "failed to load reaped jobs for generation projection",
+    );
+    return;
+  }
+  for (const row of deadRows) {
+    if (!row.generationRunId) continue;
+    await projectGenerationFailure(
+      {
+        id: row.id,
+        type: row.type,
+        payload: (row.payload ?? {}) as Record<string, unknown>,
+        workspaceId: row.workspaceId,
+        requestedBy: row.requestedBy,
+        attempts: row.attempts ?? 0,
+        // The lease died with the reaped worker; failure projection never
+        // touches the lease fence (workspace transaction + row locks only).
+        leaseToken: "",
+      },
+      new Error("job lease expired and was reaped (worker crash or stall)"),
+      true,
+      true,
+    );
+  }
+}
 
 // 处理单个 job 的完整生命周期（claim 后的执行 + 状态转换 + 指标记录）。
 // 从 tick() 提取为独立函数以支持 fire-and-forget 并行处理。
@@ -105,7 +237,8 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     jobTerminalTotal.labels(job.type, "succeeded").inc();
     logger.info({ jobId: job.id, type: job.type }, "job ok");
   } catch (err) {
-    const message = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
+    const message = safeErrorMessage(err);
+    const safeError = sanitizeOperationalError(err);
     jobDurationSeconds.labels(job.type).observe((Date.now() - jobStart) / 1000);
 
     // 非重试错误（欠费/鉴权/配置）直接标记 dead，不浪费重试次数。
@@ -119,12 +252,13 @@ export async function processJob(job: ClaimedJob): Promise<void> {
         );
         return;
       }
+      await projectGenerationFailure(job, err, true, false);
       jobNonRetryableDeadTotal.labels(job.type).inc();
       jobTerminalTotal.labels(job.type, "dead").inc();
       logger.error(
         {
           jobId: job.id,
-          error: message,
+          error: safeError,
           reason: "non-retryable",
         },
         "job marked dead — non-retryable error (billing/auth/config)",
@@ -145,15 +279,17 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     }
     // OPS-01: 记录重试或终态
     if (failure.status === "pending") {
+      await projectGenerationFailure(job, err, false, true);
       jobRetriesTotal.labels(job.type).inc();
     } else {
       // dead — 终态
+      await projectGenerationFailure(job, err, true, true);
       jobTerminalTotal.labels(job.type, "dead").inc();
     }
     logger.error(
       {
         jobId: job.id,
-        error: message,
+        error: safeError,
         attempts: failure.attempts,
         backoffMs: failure.backoffMs,
       },
@@ -180,6 +316,9 @@ export async function tick(): Promise<void> {
       },
       "reaped stale running jobs",
     );
+    // Reaped-to-dead generation jobs must settle their run checkpoints, or
+    // the run wedges in a permanently "running" unit (see helper docstring).
+    await projectReapedGenerationJobs(reaped.ids);
   }
 
   // F-010: 优雅关停时不认领新作业
@@ -224,6 +363,11 @@ export async function main() {
       envOverrides: {
         global: process.env.WORKER_MODEL_TIMEOUT_MS,
         generate_card: process.env.WORKER_TIMEOUT_GENERATE_CARD_MS,
+        plan_card_generation: process.env.WORKER_TIMEOUT_PLAN_CARD_GENERATION_MS,
+        analyze_card_image: process.env.WORKER_TIMEOUT_ANALYZE_CARD_IMAGE_MS,
+        map_card_generation: process.env.WORKER_TIMEOUT_MAP_CARD_GENERATION_MS,
+        reduce_card_generation: process.env.WORKER_TIMEOUT_REDUCE_CARD_GENERATION_MS,
+        publish_card_generation: process.env.WORKER_TIMEOUT_PUBLISH_CARD_GENERATION_MS,
         evaluate_validation: process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS,
         align_evidence: process.env.WORKER_TIMEOUT_ALIGN_EVIDENCE_MS,
         parse_source: process.env.WORKER_TIMEOUT_PARSE_SOURCE_MS,

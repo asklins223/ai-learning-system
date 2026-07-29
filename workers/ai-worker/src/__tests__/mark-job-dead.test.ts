@@ -49,7 +49,7 @@ test("markJobDead forces dead state on first attempt (attempts=0)", async () => 
   const update = updates[0];
   assert.equal(update.values.status, "failed"); // triggers max_attempts=1 in SQL function
   assert.equal(update.values.attempts, MAX_ATTEMPTS);
-  assert.equal(update.values.lastError, "overdue-payment");
+  assert.equal(update.values.lastError, "operational_error:billing:Error");
   assert.equal(update.values.leaseToken, null);
   assert.equal(update.values.startedAt, null);
   assert.deepEqual(update.values.finishedAt, now);

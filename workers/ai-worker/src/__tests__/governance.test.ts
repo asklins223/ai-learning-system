@@ -51,9 +51,16 @@ test("normalizeWorkspaceAIPolicy: 全部字段覆盖时返回覆盖值", () => {
     sendToExternal: true,
     piiDetection: false,
     auditLogging: false,
+    sendImageContent: true,
   };
   const result = normalizeWorkspaceAIPolicy(input);
   assert.deepEqual(result, input);
+});
+
+test("normalizeWorkspaceAIPolicy: sendImageContent 缺省时回退默认值 false", () => {
+  const result = normalizeWorkspaceAIPolicy({ sendToExternal: true });
+  assert.equal(result.sendImageContent, DEFAULT_AI_DATA_POLICY.sendImageContent);
+  assert.equal(DEFAULT_AI_DATA_POLICY.sendImageContent, false);
 });
 
 test("normalizeWorkspaceAIPolicy: 非 boolean 字段回退默认值", () => {

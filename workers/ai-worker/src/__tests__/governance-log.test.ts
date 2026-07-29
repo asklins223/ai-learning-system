@@ -98,7 +98,7 @@ test("logAICall: 可选字段使用默认值", async () => {
 
 // ─── logAICall: 自定义字段正确传递 ────────────────────────────────────────
 
-test("logAICall: 所有字段正确传递到 write", async () => {
+test("logAICall: 所有字段正确传递且错误信息安全化", async () => {
   let writtenRow: any = null;
   await logAICall(
     {
@@ -139,7 +139,7 @@ test("logAICall: 所有字段正确传递到 write", async () => {
   assert.equal(writtenRow.costTokens, 500);
   assert.equal(writtenRow.durationMs, 2000);
   assert.equal(writtenRow.status, "failed");
-  assert.equal(writtenRow.errorMessage, "provider timeout");
+  assert.equal(writtenRow.errorMessage, "operational_error:timeout:Error");
 });
 
 // ─── logAICall: write 抛异常时不传播，返回 false ─────────────────────────

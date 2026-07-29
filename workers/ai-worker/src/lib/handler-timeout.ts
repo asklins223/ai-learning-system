@@ -38,3 +38,58 @@ export async function runWithAbortTimeout<T>(
     }
   }
 }
+
+/**
+ * Give one nested operation a smaller budget than its parent handler.
+ *
+ * The child receives its own AbortSignal. A child timeout never aborts the
+ * parent signal, leaving the handler enough time to persist a deterministic
+ * fallback or a retryable state. Parent cancellation still propagates down.
+ */
+export async function runWithAbortBudget<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+  onLateError?: (error: unknown) => void,
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  let settledByDeadline = false;
+  let rejectDeadline: ((reason: unknown) => void) | undefined;
+
+  const task = Promise.resolve().then(() => operation(controller.signal));
+  const deadline = new Promise<never>((_, reject) => {
+    rejectDeadline = reject;
+    timer = setTimeout(() => {
+      settledByDeadline = true;
+      const error = new HandlerTimeoutError(timeoutMs);
+      reject(error);
+      controller.abort(error);
+    }, timeoutMs);
+  });
+
+  const onParentAbort = () => {
+    settledByDeadline = true;
+    const reason = parentSignal?.reason instanceof Error
+      ? parentSignal.reason
+      : new DOMException("parent operation aborted", "AbortError");
+    rejectDeadline?.(reason);
+    controller.abort(reason);
+  };
+
+  if (parentSignal?.aborted) {
+    onParentAbort();
+  } else {
+    parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+  }
+
+  try {
+    return await Promise.race([task, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", onParentAbort);
+    if (settledByDeadline) {
+      void task.catch((error) => onLateError?.(error));
+    }
+  }
+}

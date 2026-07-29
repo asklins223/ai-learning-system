@@ -30,14 +30,32 @@ collectDefaultMetrics({ register: registry });
 
 export const JOB_TYPES = [
   "generate_card",
+  "plan_card_generation",
+  "analyze_card_image",
+  "map_card_generation",
+  "reduce_card_generation",
+  "plan_card_set",
+  "render_card_generation",
+  "publish_card_generation",
   "align_evidence",
   "evaluate_validation",
   "parse_source",
+  "generate_validation_question",
 ] as const;
 
 export const JOB_STATUSES = ["pending", "running", "succeeded", "failed", "dead"] as const;
 
-export const PROVIDER_OPERATIONS = ["generate_card", "align_evidence", "evaluate_validation"] as const;
+export const PROVIDER_OPERATIONS = [
+  "generate_card",
+  "generate_card_repair",
+  "card_map",
+  "image_understanding",
+  "image_card_map",
+  "align_evidence",
+  "evaluate_validation",
+  "evaluate_rubric",
+  "generate_validation_question",
+] as const;
 
 export const ERROR_CATEGORIES = [
   "timeout",

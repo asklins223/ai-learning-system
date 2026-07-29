@@ -10,4 +10,11 @@
  *       key_points 上限从 8 降至 5，提高单点质量
  */
 
-export { SYSTEM_PROMPT, EVAL_SYSTEM_PROMPT } from "@ailearn/shared/prompts";
+export {
+  CARD_MAP_SYSTEM_PROMPT,
+  IMAGE_UNDERSTANDING_SYSTEM_PROMPT,
+  SYSTEM_PROMPT,
+  EVAL_SYSTEM_PROMPT,
+  QUESTION_GENERATION_PROMPT,
+  RUBRIC_EVALUATION_PROMPT,
+} from "@ailearn/shared/prompts";

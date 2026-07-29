@@ -136,7 +136,7 @@ test("并行处理：一个 job 失败不会阻止其他 job 成功提交", asyn
 
   // 验证失败的 job 使用了正确的 lease token
   assert.equal(failedUpdates[0].fence.leaseToken, "lease-2");
-  assert.equal(failedUpdates[0].values.lastError, "simulated provider error");
+  assert.equal(failedUpdates[0].values.lastError, "operational_error:provider:Error");
 });
 
 test("并行处理：lease 丢失的 job 不影响其他 job 的状态转换", async () => {

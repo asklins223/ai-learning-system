@@ -43,6 +43,21 @@ const validEvalOutput = {
   evidence_refs: ["原文引用"],
 };
 
+const validImageOutput = {
+  contentType: "document",
+  decorative: false,
+  caption: "一张包含标题的文档截图",
+  ocr: [{
+    text: "缓存一致性",
+    region: { x: 100, y: 200, width: 3_000, height: 800 },
+    confidence: 0.98,
+  }],
+  facts: [],
+  promptInjectionDetected: false,
+  safetyFlags: [],
+  unresolvedReason: null,
+};
+
 // ─── generateCard 成功路径 ───────────────────────────────────────────────
 
 test("OpenAICompatibleProvider.generateCard: 正常 JSON 输出成功", async () => {
@@ -116,6 +131,49 @@ test("OpenAICompatibleProvider.generateCard: markdown 包裹的 JSON 成功解�
     blocks: [{ ordinal: 0, type: "paragraph", content: "内容" }],
   });
   assert.equal(result.title, "测试卡片");
+});
+
+test("OpenAICompatibleProvider.analyzeImage: 使用独立视觉模型和 data URL 多模态消息", async () => {
+  let requestedBody: unknown;
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "sk-test-secret",
+    baseUrl: "https://api.example.com/v1",
+    model: "text-model",
+    visionModel: "vision-model",
+    request: async (_url, _headers, body) => {
+      requestedBody = body;
+      return {
+        status: 200,
+        statusText: "OK",
+        body: {
+          choices: [{ message: { content: JSON.stringify(validImageOutput) } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        },
+      };
+    },
+  });
+
+  const result = await provider.analyzeImage({
+    body: Buffer.from([0, 1, 2]),
+    mimeType: "image/png",
+    width: 640,
+    height: 480,
+    sha256: "a".repeat(64),
+    userDescription: "一致性示意图",
+  });
+
+  assert.equal(provider.visionModelId, "vision-model");
+  assert.equal(result.ocr[0]?.text, "缓存一致性");
+  const body = requestedBody as Record<string, any>;
+  assert.equal(body.model, "vision-model");
+  assert.equal(body.temperature, 0);
+  assert.equal(body.max_tokens, 4096);
+  const content = body.messages[1].content as Array<Record<string, any>>;
+  assert.equal(content[0]?.type, "text");
+  assert.match(content[0]?.text, /normalized_0_10000/);
+  assert.equal(content[1]?.type, "image_url");
+  assert.equal(content[1]?.image_url?.url, "data:image/png;base64,AAEC");
+  assert.equal(provider.getLastUsage()?.totalTokens, 15);
 });
 
 test("OpenAICompatibleProvider.generateCard: 无 markdown 标记的 ``` 包裹成功解析", async () => {
@@ -500,4 +558,32 @@ test("OpenAICompatibleProvider: id 和 promptVersion 正确", () => {
   assert.equal(provider.id, "openai_compatible");
   assert.equal(provider.promptVersion, "v6-openai-compatible");
   assert.equal(provider.modelId, "gpt-4");
+});
+
+test("OpenAICompatibleProvider: failed request clears usage from the previous call", async () => {
+  let callCount = 0;
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          status: 200,
+          statusText: "OK",
+          body: {
+            choices: [{ message: { content: JSON.stringify(validCardOutput) } }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          },
+        };
+      }
+      throw new Error("network unavailable");
+    },
+  });
+
+  await provider.generateCard({ noteTitle: "测试", blocks: [] });
+  assert.equal(provider.getLastUsage()?.totalTokens, 15);
+  await assert.rejects(provider.generateCard({ noteTitle: "测试", blocks: [] }), /network unavailable/);
+  assert.equal(provider.getLastUsage(), null);
 });

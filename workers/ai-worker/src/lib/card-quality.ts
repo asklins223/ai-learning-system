@@ -11,11 +11,51 @@
  * 7. claim 与 quote_text 完全无关（引用虽是原文逐字片段但与 claim 毫不相干）
  * 8. claim 只是 quote_text 的复述/压缩版，措辞高度重合——不是抽象提炼
  *
+ * v0.6 新增：assessCardOutput 返回结构化质量报告（issue reason codes），
+ * 用于驱动条件式修复（CARD-02，计划 §7.7）。
+ *
  * 本模块提供轻量级的后处理函数，在 handler 持久化之前对输出进行清洗。
  * 所有函数都是纯函数，不依赖外部状态。
  */
 
 import type { LearningCardOutput } from "@ailearn/shared";
+import { CardRepairReasonCode } from "@ailearn/shared";
+
+// ─── v0.6: assessCardOutput (计划 §7.7) ───────────────────────────────────
+
+/** 评估器版本 */
+export const CARD_ASSESSOR_VERSION = "card-assessor-v1";
+
+/** 质量问题 severity */
+export type CardIssueSeverity = "hard" | "soft";
+
+/** 单条质量问题 */
+export interface CardIssue {
+  code: string;
+  severity: CardIssueSeverity;
+  keyPointOrdinal?: number;
+}
+
+/**
+ * 质量评估结果（计划 §7.7）。
+ *
+ * assessCardOutput 返回此结构，包含清洗后的输出和结构化 issue reason codes。
+ * 用于驱动条件式修复：hard trigger 触发修复，soft trigger 可裁剪。
+ */
+export interface CardAssessmentResult {
+  /** 清洗后的输出 */
+  sanitized: LearningCardOutput;
+  /** 检测到的质量问题，每项带 reason code 和 severity */
+  issues: CardIssue[];
+  /** 是否使用了渐进放宽 fallback */
+  usedFallback: boolean;
+  /** 是否存在 hard failure（无法安全解析或零有效 key point） */
+  hardFailure: boolean;
+  /** 评估器版本 */
+  assessorVersion: string;
+}
+
+// ─── Shared helpers (internal) ────────────────────────────────────────────
 
 /**
  * 归一化文本：去除空白、转小写。
@@ -59,241 +99,149 @@ function containment(queryNgrams: Set<string>, targetNgrams: Set<string>): numbe
   return found / queryNgrams.size;
 }
 
-/**
- * 最小 claim 长度（归一化后）。低于此值的 claim 视为话题标签，不是知识断言。
- * 从 8 提升到 12：8 个归一化字符约 4 个汉字，仍可能是话题标签。
- * 12 个归一化字符约 6 个汉字，更可靠地过滤短标签。
- */
+// ─── Constants ─────────────────────────────────────────────────────────────
+
 const MIN_CLAIM_LENGTH = 12;
-
-/**
- * claim 去重阈值。两个 claim 的 Jaccard 相似度超过此值时，保留第一个。
- */
 const CLAIM_DEDUP_THRESHOLD = 0.6;
-
-/**
- * quote_text 最小长度（归一化后）。低于此值的引用太短，无法支撑 claim。
- */
 const MIN_QUOTE_LENGTH = 10;
-
-/**
- * quote_text 与原文的最低 containment 阈值。
- * 低于此值说明 quote_text 很可能是模型伪造或大幅改写的。
- *
- * 0.5：模型（尤其 qwen-plus）在提取原文时经常有轻微改写（标点、连接词、语序微调），
- * 要求 60% trigram 精确匹配过于严格，导致大量本应保留的 key points 被过滤，
- * fallback 频繁触发，输出质量反而下降。0.5 容忍轻微改写同时仍能拦截
- * 跨 block 拼接和大面积编造。
- */
 const QUOTE_CONTAINMENT_THRESHOLD = 0.5;
-
-/**
- * claim 与 quote_text 的最高相似度阈值。
- * 超过此值说明 claim 只是 quote_text 的复述/压缩版，不是抽象提炼。
- *
- * 0.8：使用 bigram containment（包容率）。理想情况下 claim 应该用不同措辞
- * 来表述知识点（像老师用自己的话讲解），但模型在提炼时不可避免地会
- * 复用一些领域术语（如"一致性"、"缓存"、"索引"等专有名词）。
- * 0.8 允许一定比例的术语复用（最多 20% 的 claim bigram 来自 quote），
- * 但能有效拦截 claim 几乎逐字复制 quote_text 的情况（containment > 0.8）。
- */
 const CLAIM_QUOTE_SIMILARITY_THRESHOLD = 0.8;
-
-/**
- * claim 与 quote_text 的最低相似度阈值。
- * 低于此值说明 claim 和 quote_text 在用词上完全不同，引用很可能选错了。
- *
- * 与 claimQuoteRelevant 的 bigram 重叠检查互补：
- * - claimQuoteRelevant 检查是否有至少 1 个 bigram 重叠（非常宽松）
- * - 此阈值在 fallback 场景中使用，确保最低限度的相关性
- */
-
-/**
- * key_points 最大保留数量。与 prompt 中的"最多输出 5 个"一致。
- */
 const MAX_KEY_POINTS = 5;
 
-/**
- * 模糊评价型 claim 的检测模式。这些模式通常不可验证。
- * 覆盖常见模糊表达：「很重要」「很关键」「有重要影响」「是重要组成部分」
- * 「扮演重要角色」「提供了基础」「具有重要作用」等。
- */
+/** 覆盖率阈值：清洗后有效 key_points / 原始 key_points 低于此值触发 coverage_too_low */
+const COVERAGE_TOO_LOW_THRESHOLD = 0.5;
+
+// ─── Detection helpers ─────────────────────────────────────────────────────
+
 const VAGUE_CLAIM_PATTERNS = [
-  // 「X 很重要 / 很关键 / 很核心 / 很基础 / 很常见」
   /很重要[。]?$/,
   /很关键[。]?$/,
   /很核心[。]?$/,
   /很基础[。]?$/,
   /很常见[。]?$/,
-  // 「X 是基础 / 是关键 / 是核心」
   /是基础[。]?$/,
   /是关键[。]?$/,
   /是核心[。]?$/,
   /很重要的概念[。]?$/,
-  // 「X 有重要影响 / 有显著影响 / 有很大影响」
   /有重要影响[。]?$/,
   /有显著影响[。]?$/,
   /有很大影响[。]?$/,
-  // 「X 是 ... 的重要组成部分 / 关键组成部分」
   /重要组成部分[。]?$/,
   /关键组成部分[。]?$/,
-  // 「X 广泛应用于 Y」（缺乏具体原理说明）
   /广泛应用于[^，。]+[。]?$/,
-  // 「X 是一种重要的 Y」（泛化描述，无可验证论断）
   /是一种重要[^，。]*[。]?$/,
-  // 「X 对 Y 至关重要 / 不可或缺」
   /至关重要[。]?$/,
   /不可或缺[。]?$/,
-  // v6 新增：更多常见模糊表达
-  // 「X 扮演重要角色 / 扮演关键角色」
   /扮演重要角色[。]?$/,
   /扮演关键角色[。]?$/,
-  // 「X 提供了基础 / 提供了支撑 / 提供了保障」
   /提供了基础[。]?$/,
   /提供了支撑[。]?$/,
   /提供了保障[。]?$/,
-  // 「X 具有重要意义 / 具有重要价值 / 具有重要作用」
   /具有重要意义的?$/,
   /具有重要价值的?$/,
   /具有重要作用[。]?$/,
-  // 「X 是常见的方法 / 是常见的做法」（泛化，无具体原理）
   /是常见的方法[。]?$/,
   /是常见的做法[。]?$/,
-  // 「X 是核心概念 / 是核心机制」（仅贴标签，无原理说明）
   /是核心概念[。]?$/,
   /是核心机制[。]?$/,
-  // 「X 起着重要作用 / 起着关键作用」
   /起着重要作用[。]?$/,
   /起着关键作用[。]?$/,
-  // 「X 是不可或缺的」
   /是不可或缺的?[。]?$/,
-  // 「X 对 Y 有深远影响 / 有深刻影响」
   /有深远影响[。]?$/,
   /有深刻影响[。]?$/,
 ];
 
-/**
- * 检测 claim 是否是模糊评价而非可验证的断言。
- */
 function isVagueClaim(claim: string): boolean {
-  // 检查模糊评价模式
   for (const pattern of VAGUE_CLAIM_PATTERNS) {
     if (pattern.test(claim)) return true;
   }
   return false;
 }
 
-/**
- * 检测 claim 与 quote_text 是否有最低限度的相关性。
- *
- * 使用 bigram（2-gram）重叠检查：如果 claim 和 quote_text 没有任何
- * bigram 重叠，说明它们在用词上完全不同，引用很可能选错了。
- *
- * 阈值为 0 个重叠 bigram（即至少要有 1 个重叠），非常宽松。
- * 这只拦截完全无关的 claim-quote 对，不会误伤合法的抽象 claim。
- */
 function claimQuoteRelevant(claim: string, quoteText: string): boolean {
   const claimBigrams = ngramSet(claim, 2);
   const quoteBigrams = ngramSet(quoteText, 2);
   if (claimBigrams.size === 0 || quoteBigrams.size === 0) return true;
-
   for (const bg of claimBigrams) {
     if (quoteBigrams.has(bg)) return true;
   }
   return false;
 }
 
-/**
- * 检测 claim 是否过于相似于 quote_text——即 claim 只是原文的复述/压缩版，
- * 而非抽象提炼。
- *
- * 使用 bigram containment（包容率）：测量 claim 的 bigram 中有多大比例
- * 出现在 quote_text 中。如果大部分 claim 的 bigram 都能在 quote_text 中找到，
- * 说明 claim 大量复用了原文措辞，没有真正用自己的语言重新表述知识点。
- *
- * 之所以用 containment 而非 Jaccard：当 quote_text 比 claim 长很多时
- * （常见场景），Jaccard 会被 quote_text 的额外 bigram 稀释，导致即使是
- * claim 完全包含在 quote_text 中的情况也无法检测。Containment 只关注
- * claim 的 bigram 有多少来自 quote_text，不受 quote_text 长度影响。
- *
- * 例外处理：当 quote_text 很短（< 30 归一化字符）时跳过此检查，因为短引用
- * 本身的 bigram 数量有限，容易产生高 containment 值，但这种情况不代表 claim
- * 是复述。
- */
 function claimQuoteTooSimilar(claim: string, quoteText: string): boolean {
   const normQuote = normalize(quoteText);
-  // 短引用不做相似度检查（bigram 集合太小，容易误判）
   if (normQuote.length < 30) return false;
-
   const claimBigrams = ngramSet(claim, 2);
   const quoteBigrams = ngramSet(quoteText, 2);
   if (claimBigrams.size === 0 || quoteBigrams.size === 0) return false;
-
   const claimInQuoteRatio = containment(claimBigrams, quoteBigrams);
   return claimInQuoteRatio >= CLAIM_QUOTE_SIMILARITY_THRESHOLD;
 }
 
-/**
- * 检测 quote_text 是否在原文 blocks 中存在（允许模糊匹配）。
- *
- * 使用 containment ratio（包容率）而非精确匹配：
- * - 精确匹配：quote 归一化后是某个 block 归一化后的子串
- * - 模糊匹配：quote 的 trigram 有 >= QUOTE_CONTAINMENT_THRESHOLD 比例出现在某个 block 中
- *
- * @param quoteText - 模型输出的引用文本
- * @param sourceBlocks - 原文 blocks 的内容数组
- * @returns 是否找到匹配的原文
- */
-function quoteExistsInSource(
-  quoteText: string,
-  sourceBlocks: string[],
-): boolean {
+function quoteExistsInSource(quoteText: string, sourceBlocks: string[]): boolean {
   const normQuote = normalize(quoteText);
   if (normQuote.length === 0) return false;
-
-  // 快速路径：精确子串匹配
   for (const block of sourceBlocks) {
     const normBlock = normalize(block);
     if (normBlock.includes(normQuote)) return true;
   }
-
-  // 模糊路径：基于 trigram containment
   const quoteTrigrams = ngramSet(quoteText, 3);
   if (quoteTrigrams.size === 0) return false;
-
   for (const block of sourceBlocks) {
     const blockTrigrams = ngramSet(block, 3);
     const ratio = containment(quoteTrigrams, blockTrigrams);
     if (ratio >= QUOTE_CONTAINMENT_THRESHOLD) return true;
   }
-
   return false;
 }
 
+// ─── assessCardOutput (计划 §7.7) ──────────────────────────────────────────
+
 /**
- * 对 AI 输出的学习卡进行后处理清洗。
+ * 对 AI 输出的学习卡进行质量评估和清洗，返回结构化质量报告。
  *
- * 步骤：
- * 1. 过滤 claim 过短的 key point（只是话题标签）
- * 2. 过滤 claim 是模糊评价的 key point（如"X 很重要"）
- * 3. 过滤 quote_text 过短的 key point
- * 4. 如果传入了 sourceBlocks，验证 quote_text 是否在原文中存在，丢弃伪造引用
- * 5. 检测 claim 与 quote_text 的相关性，丢弃引用与论断完全无关的 key point
- * 6. 检测 claim 是否过于相似于 quote_text（只是原文复述而非抽象提炼），丢弃复述型 claim
- * 7. 去除语义重复的 key point（claim 之间 Jaccard 相似度过高）
- * 8. 截断到 MAX_KEY_POINTS 个（保留前 N 个，模型应已按重要性排序）
- * 9. 重新编号 ordinal（确保连续从 0 开始）
+ * 这是 v0.6 版本的 sanitizeCardOutput（计划 §7.7），
+ * 在执行清洗的同时收集 issue reason codes，用于驱动条件式修复。
  *
- * 如果清洗后 key_points 为空，尝试从原始输出中挑选「最不差」的 1-2 个保留
- * （优先保留 claim 长度达标的），避免完全空卡。如果实在没有可用的，返回原始输出。
+ * 触发规则（计划 §7.7）：
+ * - hard trigger：伪造/无原文引用(quote_not_in_source)、零有效 key point
+ *   (insufficient_valid_key_points)、schema_invalid_bounded、必须使用渐进放宽 fallback
+ * - terminal schema failure：无法安全解析(schema_unparseable)、字段/大小无界 →
+ *   直接失败，不进入 repair
+ * - soft trigger：大量重复(duplicate_key_point)、有效 key point 被移除超过冻结阈值
+ *   (coverage_too_low)
  *
  * @param output - AI 模型输出的学习卡
  * @param sourceBlocks - 可选，原文 blocks 的内容数组。传入时会验证 quote_text 是否在原文中存在。
+ * @returns 结构化质量评估结果
  */
-export function sanitizeCardOutput(
+export function assessCardOutput(
   output: LearningCardOutput,
   sourceBlocks?: string[],
-): LearningCardOutput {
+): CardAssessmentResult {
+  const issues: CardIssue[] = [];
+  const originalCount = output.key_points.length;
+
+  // 检测 schema_unparseable：输出无 key_points 或 title/summary 为空
+  if (!output.key_points || output.key_points.length === 0 ||
+      !output.title || !output.summary) {
+    return {
+      sanitized: output,
+      issues: [{ code: CardRepairReasonCode.SCHEMA_UNPARSEABLE, severity: "hard" }],
+      usedFallback: false,
+      hardFailure: true,
+      assessorVersion: CARD_ASSESSOR_VERSION,
+    };
+  }
+
+  // 检测 schema_invalid_bounded：key_points 超过 10 个
+  if (output.key_points.length > 10) {
+    issues.push({
+      code: CardRepairReasonCode.SCHEMA_INVALID_BOUNDED,
+      severity: "hard",
+    });
+  }
+
   const seen = new Set<string>();
   const deduped: LearningCardOutput["key_points"] = [];
 
@@ -301,27 +249,62 @@ export function sanitizeCardOutput(
     const normClaim = normalize(kp.claim);
     const normQuote = normalize(kp.quote_text);
 
-    // 跳过过短的 claim（通常是话题标签）
-    if (normClaim.length < MIN_CLAIM_LENGTH) continue;
-
-    // 跳过模糊评价型 claim
-    if (isVagueClaim(kp.claim)) continue;
-
-    // 跳过过短的 quote_text（太短的引用无法支撑 claim）
-    if (normQuote.length < MIN_QUOTE_LENGTH) continue;
-
-    // 如果有原文 blocks，验证 quote_text 是否在原文中存在
-    if (sourceBlocks && sourceBlocks.length > 0) {
-      if (!quoteExistsInSource(kp.quote_text, sourceBlocks)) continue;
+    if (normClaim.length < MIN_CLAIM_LENGTH) {
+      issues.push({
+        code: CardRepairReasonCode.CLAIM_TOO_SHORT,
+        severity: "soft",
+        keyPointOrdinal: kp.ordinal,
+      });
+      continue;
     }
 
-    // 检查 claim 与 quote_text 的相关性
-    if (!claimQuoteRelevant(kp.claim, kp.quote_text)) continue;
+    if (isVagueClaim(kp.claim)) {
+      issues.push({
+        code: CardRepairReasonCode.CLAIM_VAGUE,
+        severity: "soft",
+        keyPointOrdinal: kp.ordinal,
+      });
+      continue;
+    }
 
-    // v6: 检测 claim 是否过于相似于 quote_text（只是原文复述而非抽象提炼）
-    if (claimQuoteTooSimilar(kp.claim, kp.quote_text)) continue;
+    if (normQuote.length < MIN_QUOTE_LENGTH) {
+      issues.push({
+        code: CardRepairReasonCode.QUOTE_NOT_IN_SOURCE,
+        severity: "soft",
+        keyPointOrdinal: kp.ordinal,
+      });
+      continue;
+    }
 
-    // 检查与已保留 claim 的相似度
+    if (sourceBlocks && sourceBlocks.length > 0) {
+      if (!quoteExistsInSource(kp.quote_text, sourceBlocks)) {
+        issues.push({
+          code: CardRepairReasonCode.QUOTE_NOT_IN_SOURCE,
+          severity: "hard",
+          keyPointOrdinal: kp.ordinal,
+        });
+        continue;
+      }
+    }
+
+    if (!claimQuoteRelevant(kp.claim, kp.quote_text)) {
+      issues.push({
+        code: CardRepairReasonCode.CLAIM_QUOTE_UNRELATED,
+        severity: "hard",
+        keyPointOrdinal: kp.ordinal,
+      });
+      continue;
+    }
+
+    if (claimQuoteTooSimilar(kp.claim, kp.quote_text)) {
+      issues.push({
+        code: CardRepairReasonCode.CLAIM_QUOTE_TOO_SIMILAR,
+        severity: "soft",
+        keyPointOrdinal: kp.ordinal,
+      });
+      continue;
+    }
+
     const claimBigrams = ngramSet(kp.claim, 2);
     let isDuplicate = false;
     for (const seenNgram of seen) {
@@ -331,41 +314,90 @@ export function sanitizeCardOutput(
       }
     }
 
-    if (isDuplicate) continue;
+    if (isDuplicate) {
+      issues.push({
+        code: CardRepairReasonCode.DUPLICATE_KEY_POINT,
+        severity: "soft",
+        keyPointOrdinal: kp.ordinal,
+      });
+      continue;
+    }
 
     seen.add(kp.claim);
     deduped.push(kp);
-
-    // 达到最大数量后停止
     if (deduped.length >= MAX_KEY_POINTS) break;
   }
 
-  // 如果清洗后为空，尝试渐进放宽过滤条件，避免完全空卡或返回低质量原始输出。
-  // 逐级放宽：先放宽 quote 校验 → 再放宽 claim 长度 → 最后放宽相关性检查。
-  // 每一级都在之前保留的结果上继续补充，目标保留 1-3 个 key points。
+  // 检测覆盖率是否过低
+  const validCount = deduped.length;
+  if (originalCount > 0 && validCount / originalCount < COVERAGE_TOO_LOW_THRESHOLD) {
+    issues.push({
+      code: CardRepairReasonCode.COVERAGE_TOO_LOW,
+      severity: "soft",
+    });
+  }
+
+  // 检测零有效 key point
   if (deduped.length === 0) {
+    issues.push({
+      code: CardRepairReasonCode.INSUFFICIENT_VALID_KEY_POINTS,
+      severity: "hard",
+    });
+
     const fallbackKps = progressiveFallback(output, sourceBlocks);
     const renumberedFallback = fallbackKps.map((kp, idx) => ({
       ...kp,
       ordinal: idx,
     }));
+
     return {
-      ...output,
-      key_points: renumberedFallback,
+      sanitized: {
+        ...output,
+        key_points: renumberedFallback,
+      },
+      issues,
+      usedFallback: true,
+      hardFailure: false,
+      assessorVersion: CARD_ASSESSOR_VERSION,
     };
   }
 
-  // 重新编号 ordinal
   const renumbered = deduped.map((kp, idx) => ({
     ...kp,
     ordinal: idx,
   }));
 
   return {
-    ...output,
-    key_points: renumbered,
+    sanitized: {
+      ...output,
+      key_points: renumbered,
+    },
+    issues,
+    usedFallback: false,
+    hardFailure: false,
+    assessorVersion: CARD_ASSESSOR_VERSION,
   };
 }
+
+// ─── sanitizeCardOutput (backward-compatible wrapper) ──────────────────────
+
+/**
+ * 对 AI 输出的学习卡进行后处理清洗。
+ *
+ * 这是 sanitizeCardOutput 的向后兼容包装，调用 assessCardOutput 并只返回 sanitized。
+ * v0.6 新代码应直接使用 assessCardOutput 获取结构化质量报告。
+ *
+ * @param output - AI 模型输出的学习卡
+ * @param sourceBlocks - 可选，原文 blocks 的内容数组。传入时会验证 quote_text 是否在原文中存在。
+ */
+export function sanitizeCardOutput(
+  output: LearningCardOutput,
+  sourceBlocks?: string[],
+): LearningCardOutput {
+  return assessCardOutput(output, sourceBlocks).sanitized;
+}
+
+// ─── progressiveFallback (internal) ───────────────────────────────────────
 
 /**
  * 渐进放宽的 fallback 策略。
@@ -401,15 +433,13 @@ function progressiveFallback(
     return true;
   }
 
-  // 级别 1：放宽 quote 校验（阈值 0.3），保留 claim 长度达标、quote 不太离谱、
-  // 且 claim 不是 quote 的复述（claimQuoteTooSimilar 不触发）的 key points
+  // 级别 1：放宽 quote 校验（阈值 0.3）
   if (sourceBlocks && sourceBlocks.length > 0) {
     for (const kp of candidates) {
       if (normalize(kp.claim).length < MIN_CLAIM_LENGTH) continue;
       if (normalize(kp.quote_text).length < MIN_QUOTE_LENGTH) continue;
       if (!claimQuoteRelevant(kp.claim, kp.quote_text)) continue;
       if (claimQuoteTooSimilar(kp.claim, kp.quote_text)) continue;
-      // 用更宽松的 containment 检查
       const quoteTrigrams = ngramSet(kp.quote_text, 3);
       if (quoteTrigrams.size === 0) continue;
       let bestRatio = 0;
@@ -422,14 +452,12 @@ function progressiveFallback(
   }
   if (kept.length >= 1) return kept;
 
-  // 级别 2：放宽 quote 校验（阈值 0.3）+ 放宽相似度检查（允许 claim 复述 quote）
-  // 当所有 claim 都是原文复述时，这是必要的退路
+  // 级别 2：放宽 quote 校验（阈值 0.3）+ 放宽相似度检查
   if (sourceBlocks && sourceBlocks.length > 0) {
     for (const kp of candidates) {
       if (normalize(kp.claim).length < MIN_CLAIM_LENGTH) continue;
       if (normalize(kp.quote_text).length < MIN_QUOTE_LENGTH) continue;
       if (!claimQuoteRelevant(kp.claim, kp.quote_text)) continue;
-      // 不再检查 claimQuoteTooSimilar — 允许复述型 claim 作为退路
       const quoteTrigrams = ngramSet(kp.quote_text, 3);
       if (quoteTrigrams.size === 0) continue;
       let bestRatio = 0;

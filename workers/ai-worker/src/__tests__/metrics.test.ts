@@ -33,12 +33,20 @@ import {
 
 // ─── allowlist 完整性 ──────────────────────────────────────────────────
 
-test("JOB_TYPES 包含全部 4 种 job 类型", () => {
-  assert.equal(JOB_TYPES.length, 4);
+test("JOB_TYPES 包含全部 Worker handler 类型", () => {
+  assert.equal(JOB_TYPES.length, 12);
   assert.ok(JOB_TYPES.includes("generate_card"));
+  assert.ok(JOB_TYPES.includes("plan_card_generation"));
+  assert.ok(JOB_TYPES.includes("analyze_card_image"));
+  assert.ok(JOB_TYPES.includes("map_card_generation"));
+  assert.ok(JOB_TYPES.includes("reduce_card_generation"));
+  assert.ok(JOB_TYPES.includes("plan_card_set"));
+  assert.ok(JOB_TYPES.includes("render_card_generation"));
+  assert.ok(JOB_TYPES.includes("publish_card_generation"));
   assert.ok(JOB_TYPES.includes("align_evidence"));
   assert.ok(JOB_TYPES.includes("evaluate_validation"));
   assert.ok(JOB_TYPES.includes("parse_source"));
+  assert.ok(JOB_TYPES.includes("generate_validation_question"));
 });
 
 test("JOB_TYPES 元素唯一", () => {
@@ -55,11 +63,17 @@ test("JOB_STATUSES 包含全部 5 种状态", () => {
   assert.ok(JOB_STATUSES.includes("dead"));
 });
 
-test("PROVIDER_OPERATIONS 包含 3 种操作（不含 parse_source）", () => {
-  assert.equal(PROVIDER_OPERATIONS.length, 3);
+test("PROVIDER_OPERATIONS 包含全部外部模型调用操作（不含 parse_source）", () => {
+  assert.equal(PROVIDER_OPERATIONS.length, 9);
   assert.ok(PROVIDER_OPERATIONS.includes("generate_card"));
+  assert.ok(PROVIDER_OPERATIONS.includes("generate_card_repair"));
+  assert.ok(PROVIDER_OPERATIONS.includes("card_map"));
+  assert.ok(PROVIDER_OPERATIONS.includes("image_understanding"));
+  assert.ok(PROVIDER_OPERATIONS.includes("image_card_map"));
   assert.ok(PROVIDER_OPERATIONS.includes("align_evidence"));
   assert.ok(PROVIDER_OPERATIONS.includes("evaluate_validation"));
+  assert.ok(PROVIDER_OPERATIONS.includes("evaluate_rubric"));
+  assert.ok(PROVIDER_OPERATIONS.includes("generate_validation_question"));
   assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("parse_source"));
 });
 

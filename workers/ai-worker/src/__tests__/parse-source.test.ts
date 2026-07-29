@@ -101,7 +101,7 @@ test("fetchUrlContent: 200 纯文本成功返回", async () => {
   }]);
 
   const result = await fetchUrlContent("https://example.com/test.txt", undefined, deps);
-  assert.equal(result, "Hello, World!");
+  assert.equal(result.text, "Hello, World!");
 });
 
 test("fetchUrlContent: 200 markdown 成功返回", async () => {
@@ -113,7 +113,7 @@ test("fetchUrlContent: 200 markdown 成功返回", async () => {
   }]);
 
   const result = await fetchUrlContent("https://example.com/test.md", undefined, deps);
-  assert.equal(result, "# Title\n\nContent here.");
+  assert.equal(result.text, "# Title\n\nContent here.");
 });
 
 test("fetchUrlContent: 200 HTML 内容被提取为纯文本", async () => {
@@ -125,9 +125,9 @@ test("fetchUrlContent: 200 HTML 内容被提取为纯文本", async () => {
   }]);
 
   const result = await fetchUrlContent("https://example.com/page.html", undefined, deps);
-  assert.ok(result.includes("Title"));
-  assert.ok(result.includes("Content"));
-  assert.ok(!result.includes("<html>"));
+  assert.ok(result.text.includes("Title"));
+  assert.ok(result.text.includes("Content"));
+  assert.ok(!result.text.includes("<html>"));
 });
 
 test("fetchUrlContent: 301 重定向后跟随", async () => {
@@ -148,7 +148,7 @@ test("fetchUrlContent: 301 重定向后跟随", async () => {
   ]);
 
   const result = await fetchUrlContent("https://example.com/old.txt", undefined, deps);
-  assert.equal(result, "Redirected content");
+  assert.equal(result.text, "Redirected content");
 });
 
 test("fetchUrlContent: 302 重定向后跟随", async () => {
@@ -169,7 +169,7 @@ test("fetchUrlContent: 302 重定向后跟随", async () => {
   ]);
 
   const result = await fetchUrlContent("https://example.com/old.txt", undefined, deps);
-  assert.equal(result, "Found content");
+  assert.equal(result.text, "Found content");
 });
 
 test("fetchUrlContent: 404 抛出 HTTP 错误", async () => {
@@ -300,5 +300,5 @@ test("fetchUrlContent: 多次重定向后成功", async () => {
   ]);
 
   const result = await fetchUrlContent("https://example.com/start", undefined, deps);
-  assert.equal(result, "Final content");
+  assert.equal(result.text, "Final content");
 });

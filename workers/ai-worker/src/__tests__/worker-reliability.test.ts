@@ -209,13 +209,33 @@ test("failed jobs below the attempt limit return to pending with backoff", async
     values: {
       status: "pending",
       attempts: 1,
-      lastError: "provider unavailable",
+      lastError: "operational_error:provider:Error",
       startedAt: null,
       leaseToken: null,
       finishedAt: null,
       scheduledAt: new Date(epochMs + 2_000),
     },
   }]);
+});
+
+test("queue persistence redacts SQL parameters and answer content", async () => {
+  let update: QueueJobUpdate | undefined;
+  const updateJob: QueueJobUpdater = async (nextUpdate) => {
+    update = nextUpdate;
+    return true;
+  };
+  const secret = "用户答案：不应进入 last_error";
+
+  await markJobFailed(
+    claimedJobFixture,
+    `DrizzleQueryError: Failed query: INSERT params: ${secret}`,
+    updateJob,
+  );
+
+  assert.equal(update?.values.lastError, "operational_error:database:Error");
+  assert.ok(!update?.values.lastError?.includes(secret));
+  assert.ok(!update?.values.lastError?.includes("INSERT"));
+  assert.ok(!update?.values.lastError?.includes("params"));
 });
 
 test("failed jobs at the attempt limit become dead without retry delay", async () => {
@@ -438,7 +458,7 @@ test("job actor attribution trusts requestedBy and rejects payload overrides", (
 test("workspace policy normalization preserves explicit false values", () => {
   assert.deepEqual(
     normalizeWorkspaceAIPolicy({ sendToExternal: true, piiDetection: false, auditLogging: false }),
-    { sendToExternal: true, piiDetection: false, auditLogging: false },
+    { sendToExternal: true, sendImageContent: false, piiDetection: false, auditLogging: false },
   );
   assert.deepEqual(normalizeWorkspaceAIPolicy({ auditLogging: false }), {
     ...DEFAULT_AI_DATA_POLICY,

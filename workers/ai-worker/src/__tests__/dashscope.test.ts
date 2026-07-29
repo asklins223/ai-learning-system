@@ -47,6 +47,24 @@ function validationOutput() {
   };
 }
 
+function imageOutput() {
+  return {
+    contentType: "chart",
+    decorative: false,
+    caption: "趋势图",
+    ocr: [],
+    facts: [{
+      text: "指标随时间上升",
+      region: { x: 500, y: 500, width: 8_000, height: 8_000 },
+      confidence: 0.95,
+      kind: "chart",
+    }],
+    promptInjectionDetected: false,
+    safetyFlags: [],
+    unresolvedReason: null,
+  };
+}
+
 // ─── Protocol selection tests ─────────────────────────────────────────
 
 describe("DashScope provider protocol selection", () => {
@@ -140,6 +158,42 @@ describe("DashScope provider protocol selection", () => {
     await provider.generateCard({ noteTitle: "Note", blocks: [] });
     assert.equal(requestedBody.stream, false);
     assert.equal(requestedBody.max_tokens, 4096);
+  });
+
+  it("routes image analysis through the configured vision model with a data URL", async () => {
+    const { request, capturedUrl, capturedBody } = mockFetch({
+      choices: [{ message: { content: JSON.stringify(imageOutput()) } }],
+      usage: { input_tokens: 12, output_tokens: 6, total_tokens: 18 },
+    });
+    const provider = new DashScopeProvider({
+      apiKey: "test-key",
+      model: "qwen-plus",
+      visionModel: "qwen3-vl-plus",
+      request,
+    });
+
+    const result = await provider.analyzeImage({
+      body: Buffer.from([3, 4, 5]),
+      mimeType: "image/jpeg",
+      width: 800,
+      height: 600,
+      sha256: "b".repeat(64),
+      userDescription: "趋势图",
+    });
+
+    assert.equal(result.facts[0]?.kind, "chart");
+    assert.equal(provider.visionModelId, "qwen3-vl-plus");
+    assert.equal(
+      capturedUrl.value,
+      "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    );
+    const body = capturedBody.value as Record<string, any>;
+    assert.equal(body.model, "qwen3-vl-plus");
+    assert.equal(body.temperature, 0);
+    const content = body.messages[1].content as Array<Record<string, any>>;
+    assert.match(content[0]?.text, /normalized_0_10000/);
+    assert.equal(content[1]?.image_url?.url, "data:image/jpeg;base64,AwQF");
+    assert.equal(provider.getLastUsage()?.totalTokens, 18);
   });
 });
 
@@ -534,5 +588,34 @@ describe("DashScope abort signal handling", () => {
     await assert.rejects(
       provider.generateCard({ noteTitle: "Note", blocks: [] }, controller.signal),
     );
+  });
+});
+
+describe("DashScope usage accounting", () => {
+  it("clears usage from the previous call when the next request fails", async () => {
+    let callCount = 0;
+    const request = (async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(cardOutput()) } }],
+          usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error("network unavailable");
+    }) as typeof fetch;
+    const provider = new DashScopeProvider({
+      apiKey: "test-key",
+      model: "qwen-plus",
+      request,
+    });
+
+    await provider.generateCard({ noteTitle: "Note", blocks: [] });
+    assert.equal(provider.getLastUsage()?.totalTokens, 12);
+    await assert.rejects(provider.generateCard({ noteTitle: "Note", blocks: [] }), /network unavailable/);
+    assert.equal(provider.getLastUsage(), null);
   });
 });

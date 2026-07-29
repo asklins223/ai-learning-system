@@ -6,6 +6,7 @@ import {
   type WorkerWorkspaceTransactionContext,
 } from "./db.ts";
 import { retryBackoffMs } from "./lib/job-retry.ts";
+import { safeErrorMessage } from "@ailearn/shared";
 import * as schema from "./schema/index.ts";
 
 export const MAX_ATTEMPTS = 3;
@@ -275,7 +276,7 @@ export async function markJobFailed(
   const updated = await updateJob(createClaimedJobUpdate(job, {
     status,
     attempts: nextAttempts,
-    lastError: message,
+    lastError: safeErrorMessage(message),
     startedAt: null,
     leaseToken: null,
     finishedAt: isDead ? now() : null,
@@ -302,7 +303,7 @@ export async function markJobDead(
 ): Promise<FailedJobTransition> {
   const updated = await updateJob(createClaimedJobUpdate(job, {
     status: "failed",
-    lastError: message,
+    lastError: safeErrorMessage(message),
     finishedAt: now(),
     attempts: MAX_ATTEMPTS,
     startedAt: null,

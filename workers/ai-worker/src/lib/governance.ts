@@ -11,18 +11,21 @@
 
 import { eq } from "drizzle-orm";
 import { decryptAiCredential } from "@ailearn/shared/ai-credentials";
+import { safeErrorMessage } from "@ailearn/shared";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { logger } from "./logger.ts";
 
 export interface WorkspaceAIPolicy {
   sendToExternal: boolean;
+  sendImageContent?: boolean;
   piiDetection: boolean;
   auditLogging: boolean;
 }
 
 export const DEFAULT_AI_DATA_POLICY: WorkspaceAIPolicy = {
   sendToExternal: false,
+  sendImageContent: false,
   piiDetection: true,
   auditLogging: true,
 };
@@ -34,6 +37,9 @@ export function normalizeWorkspaceAIPolicy(value: unknown): WorkspaceAIPolicy {
     sendToExternal: typeof policy.sendToExternal === "boolean"
       ? policy.sendToExternal
       : DEFAULT_AI_DATA_POLICY.sendToExternal,
+    sendImageContent: typeof policy.sendImageContent === "boolean"
+      ? policy.sendImageContent
+      : DEFAULT_AI_DATA_POLICY.sendImageContent,
     piiDetection: typeof policy.piiDetection === "boolean"
       ? policy.piiDetection
       : DEFAULT_AI_DATA_POLICY.piiDetection,
@@ -158,11 +164,7 @@ export async function getPersonalAIProviderRuntimeConfig(
 /**
  * N-011: 获取工作区 AI 数据策略。
  */
-export async function getWorkspaceAIPolicy(workspaceId: string): Promise<{
-  sendToExternal: boolean;
-  piiDetection: boolean;
-  auditLogging: boolean;
-}> {
+export async function getWorkspaceAIPolicy(workspaceId: string): Promise<WorkspaceAIPolicy> {
   const ws = await db.query.workspaces.findFirst({
     where: eq(schema.workspaces.id, workspaceId),
   });
@@ -291,6 +293,15 @@ export function enforcePrivacyGovernanceWithPolicy(
     };
   }
 
+  if (provider !== "mock" && dataCategories.includes("image_content") && !policy.sendImageContent) {
+    return {
+      allowed: false,
+      reason: "Workspace policy has not authorized sending image content to external AI providers (sendImageContent=false).",
+      sanitizedData: data,
+      piiDetectedTypes: [],
+    };
+  }
+
   // 2. PII 检测和脱敏
   let sanitizedData = data;
   let piiDetectedTypes: string[] = [];
@@ -356,7 +367,7 @@ export async function logAICall(
       costTokens: params.costTokens ?? null,
       durationMs: params.durationMs ?? null,
       status: params.status ?? "success",
-      errorMessage: params.errorMessage ?? null,
+      errorMessage: params.errorMessage ? safeErrorMessage(params.errorMessage) : null,
     };
     const write = dependencies.write ?? (async (row) => {
       await db.insert(schema.aiAuditLog).values(row);

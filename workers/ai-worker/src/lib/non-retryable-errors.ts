@@ -41,6 +41,7 @@ const NON_RETRYABLE_PATTERNS: readonly string[] = [
   "is required for",
   "not configured",
   "consent not signed",
+  "provider snapshot mismatch",
 ];
 
 /**

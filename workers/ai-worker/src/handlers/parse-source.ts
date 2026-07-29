@@ -3,11 +3,23 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
+import {
+  gunzipSync,
+  inflateSync,
+  inflateRawSync,
+  brotliDecompressSync,
+} from "node:zlib";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { SourceStatus } from "@ailearn/shared";
-import { parseContent } from "../lib/markdown-parser.ts";
+import { isStorageConfigured, uploadSourceImage } from "../lib/object-storage.ts";
+import {
+  parseContent,
+  segmentsToBlocks,
+  extractTitleFromBlocks,
+  type ParsedBlock,
+} from "../lib/markdown-parser.ts";
 import {
   assertJobLease,
   isJobLeaseActive,
@@ -18,10 +30,30 @@ import {
 import type { JobPayload } from "./index.ts";
 
 // R-014: URL 抓取限制
-const FETCH_TIMEOUT_MS = 15_000;
-const FETCH_MAX_BYTES = 500_000; // 500KB
+const FETCH_TIMEOUT_MS = 20_000; // 从 15s 延长到 20s
+// 原始 HTTP 响应体（解压后）的大小上限。微信公众号等内容密集型页面的原始 HTML
+// （含大量内联样式、脚本）解压后常达 3–5MB；extractTextFromHtml 会剥离标签和噪声，
+// 清洗后文本远小于此值。设为 5MB 以容纳大型网页同时仍提供安全上限。
+const FETCH_MAX_BYTES = 5_000_000; // 5MB
 const FETCH_MAX_REDIRECTS = 5;
 const FETCH_ALLOWED_PROTOCOLS = ["http:", "https:"];
+
+// User-Agent：使用真实浏览器 UA 避免被反爬风控拦截（如 Bilibili 返回验证码页面）。
+// 通过环境变量 SOURCE_FETCH_USER_AGENT 可覆盖，支持特定场景定制。
+const FETCH_USER_AGENT =
+  process.env.SOURCE_FETCH_USER_AGENT ??
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+// Phase A: 通过环境变量控制 Accept-Encoding，支持运行时回滚
+// 默认 "gzip, deflate, br, identity"；回滚设为 "identity" 即恢复原行为
+const FETCH_ACCEPT_ENCODING =
+  process.env.SOURCE_FETCH_ACCEPT_ENCODING ?? "gzip, deflate, br, identity";
+
+// Phase A: 重试次数通过环境变量控制，支持运行时回滚
+// NaN 防护：Number("abc") 返回 NaN，循环 `attempt <= NaN` 恒 false 会导致 lastError 为 null，
+// 最终 throw null 而非 Error 对象。必须用 isFinite 校验后回退默认值。
+const _parsedRetry = Number(process.env.SOURCE_FETCH_RETRY_COUNT ?? 1);
+const FETCH_RETRY_COUNT = Number.isFinite(_parsedRetry) && _parsedRetry >= 0 ? _parsedRetry : 1;
 
 /**
  * An archived source is terminal for parse jobs. Every database write also
@@ -71,10 +103,18 @@ function parseIpv6Hextets(ip: string): number[] | null {
 }
 
 /**
+ * Docker Desktop / 代理工具（Clash fake-ip 等）可能在 198.18.0.0/15 范围合成
+ * DNS 答案。此环境变量为 true 时放行该范围，与 public-json-http.ts 行为一致。
+ */
+function allowsDockerDesktopSyntheticDns(): boolean {
+  return process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS?.trim().toLowerCase() === "true";
+}
+
+/**
  * G-007: SSRF 防护 — IP 级别非公网地址检测。
  * 检查 IPv4 和 IPv6 地址是否属于私有、保留、环回、链路本地等范围。
  */
-function isPrivateIpAddress(ip: string): boolean {
+export function isPrivateIpAddress(ip: string): boolean {
   const normalizedIp = ip.toLowerCase().replace(/^\[|\]$/g, "");
 
   // IPv4-mapped IPv6 (::ffff:x.x.x.x)
@@ -97,7 +137,7 @@ function isPrivateIpAddress(ip: string): boolean {
     if (a === 192 && b === 0 && c === 0) return true;   // IETF protocol assignments
     if (a === 192 && b === 0 && c === 2) return true;   // TEST-NET-1
     if (a === 192 && b === 88 && c === 99) return true; // deprecated 6to4 relay anycast
-    if (a === 198 && (b === 18 || b === 19)) return true; // benchmark network
+    if (a === 198 && (b === 18 || b === 19) && !allowsDockerDesktopSyntheticDns()) return true; // benchmark network (RFC 2544) / Docker Desktop synthetic DNS
     if (a === 198 && b === 51 && c === 100) return true;  // TEST-NET-2
     if (a === 203 && b === 0 && c === 113) return true;   // TEST-NET-3
     if (a >= 224) return true;                           // multicast / reserved
@@ -224,20 +264,43 @@ async function resolvePublicAddress(hostname: string): Promise<PinnedAddress> {
     return { address: cleanHostname, family: literalFamily };
   }
 
-  // G-007: DNS 解析 hostname，检查所有 A/AAAA 记录。
-  // Any private answer rejects the hostname; selecting only the public subset
-  // would still let an attacker influence which destination is reached.
+  // G-007: DNS 解析 hostname，检查 A/AAAA 记录。
+  // 策略：过滤掉私有/内网地址，只从公网地址中选择。
+  // 安全性：createPinnedLookup 固定连接 IP，被跳过的私有地址永远不会被连接。
+  // 如果全部地址都是私有/内网，仍然拒绝（SSRF 防护不变）。
+  // 修复 U5：CDN 域名 DNS 可能返回混合公网/内网地址（如负载均衡器内部地址），
+  // 旧策略"任何一个私有就拒绝整个 hostname"会误杀合法 CDN 域名。
   try {
     const addresses = await dnsLookup(cleanHostname, { all: true, verbatim: true });
     if (addresses.length === 0) {
       throw new Error(`blocked: hostname has no address (${hostname})`);
     }
-    for (const addr of addresses) {
-      if (isPrivateIpAddress(addr.address)) {
-        throw new Error(`blocked: private/internal host (${hostname})`);
-      }
+
+    const publicAddresses = addresses.filter(
+      (addr) => !isPrivateIpAddress(addr.address),
+    );
+
+    if (publicAddresses.length === 0) {
+      // 所有地址都是私有/内网——仍然拒绝（SSRF 防护不变）
+      const blockedIps = addresses.map((a) => a.address).join(", ");
+      throw new Error(
+        `blocked: private/internal host (${hostname}) — all resolved addresses are private: ${blockedIps}`,
+      );
     }
-    const selected = addresses[0];
+
+    // 部分地址被跳过时记录日志，便于诊断 CDN 误杀问题
+    if (publicAddresses.length < addresses.length) {
+      const skipped = addresses
+        .filter((a) => isPrivateIpAddress(a.address))
+        .map((a) => a.address)
+        .join(", ");
+      logger.warn(
+        { hostname, skippedPrivateIps: skipped, publicCount: publicAddresses.length, totalCount: addresses.length },
+        "SSRF check skipped private DNS addresses, using public ones",
+      );
+    }
+
+    const selected = publicAddresses[0];
     if (selected.family !== 4 && selected.family !== 6) {
       throw new Error(`blocked: unsupported address family (${selected.family})`);
     }
@@ -260,6 +323,37 @@ export function createPinnedLookup(pinned: PinnedAddress): LookupFunction {
 }
 
 /**
+ * 解压 buffer，支持 gzip / deflate / br。
+ * deflate 先尝试标准 zlib wrapper（inflateSync），Z_DATA_ERROR 时 fallback 到 raw deflate（inflateRawSync）。
+ * 部分老服务器返回 `x-gzip`（等价于 `gzip`），在 contentEncoding 赋值时归一化为 `gzip`。
+ */
+export function decompressBuffer(compressed: Buffer, encoding: string): Buffer {
+  if (encoding === "gzip" || encoding === "x-gzip") {
+    return gunzipSync(compressed);
+  }
+  if (encoding === "br") {
+    return brotliDecompressSync(compressed);
+  }
+  if (encoding === "deflate") {
+    try {
+      return inflateSync(compressed);
+    } catch (err) {
+      // 很多服务器把 raw deflate（无 zlib header）误标为 deflate。
+      // inflateSync 期望 zlib wrapper，遇到 raw deflate 会抛 Z_DATA_ERROR，
+      // 此时 fallback 到 inflateRawSync。
+      // 注意：Node.js zlib 错误的 code 在 err.code（如 "Z_DATA_ERROR"），
+      // err.message 是人类可读描述（如 "incorrect header check"），不含 Z_DATA_ERROR。
+      const errCode = (err as NodeJS.ErrnoException).code;
+      if (err instanceof Error && (errCode === "Z_DATA_ERROR" || /Z_DATA_ERROR/.test(err.message))) {
+        return inflateRawSync(compressed);
+      }
+      throw err;
+    }
+  }
+  throw new Error(`unsupported content encoding: ${encoding}`);
+}
+
+/**
  * Issue one GET request to a previously validated address. The URL hostname is
  * retained for the Host header and HTTPS SNI/certificate validation, while the
  * custom lookup callback always returns the pinned IP. This closes the DNS
@@ -276,11 +370,19 @@ async function requestPinnedUrl(
     lookup: createPinnedLookup(pinned),
     signal,
     headers: {
-      "User-Agent": "AILearnBot/0.3 (+https://github.com/ailearn)",
+      // 使用真实浏览器 UA 避免被反爬风控拦截（如 Bilibili 验证码页面）。
+      // 通过 SOURCE_FETCH_USER_AGENT 环境变量可覆盖。
+      "User-Agent": FETCH_USER_AGENT,
       Accept: "text/html,text/plain,application/json,*/*",
-      // Avoid accepting a compressed response whose expanded body can bypass
-      // the byte limit. Servers that ignore this header are rejected below.
-      "Accept-Encoding": "identity",
+      // 中文优先，覆盖大多数用户场景
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      // 浏览器 Sec-Fetch 指示符，部分反爬系统检查这些头
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      // Phase A: 支持压缩响应，通过环境变量控制可回滚
+      "Accept-Encoding": FETCH_ACCEPT_ENCODING,
     },
   };
   if (parsed.protocol === "https:" && !isIP(parsed.hostname)) {
@@ -304,40 +406,84 @@ async function requestPinnedUrl(
         return;
       }
 
-      const rawLength = getHeader(response, "content-length");
-      const contentLength = rawLength === undefined ? 0 : Number(rawLength);
-      if (Number.isFinite(contentLength) && contentLength > FETCH_MAX_BYTES) {
-        response.destroy();
-        reject(new Error(`content too large: ${contentLength} bytes (max ${FETCH_MAX_BYTES})`));
-        return;
-      }
+      // 归一化：部分老服务器返回 `x-gzip`（等价于 `gzip`），统一为 `gzip` 简化后续分支判断
+      const rawEncoding = (getHeader(response, "content-encoding") ?? "identity").toLowerCase();
+      const contentEncoding = rawEncoding === "x-gzip" ? "gzip" : rawEncoding;
 
-      const contentEncoding = (getHeader(response, "content-encoding") ?? "identity").toLowerCase();
-      if (contentEncoding !== "identity") {
+      if (contentEncoding === "identity") {
+        // identity：Content-Length 预检 + 流上限制（双重防护）
+        const rawLength = getHeader(response, "content-length");
+        const contentLength = rawLength === undefined ? 0 : Number(rawLength);
+        if (Number.isFinite(contentLength) && contentLength > FETCH_MAX_BYTES) {
+          response.destroy();
+          reject(new Error(`content too large: ${contentLength} bytes (max ${FETCH_MAX_BYTES})`));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        let totalBytes = 0;
+        response.on("data", (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          totalBytes += buffer.length;
+          if (totalBytes > FETCH_MAX_BYTES) {
+            response.destroy(new Error(`content exceeded max size (${FETCH_MAX_BYTES} bytes)`));
+            return;
+          }
+          chunks.push(buffer);
+        });
+        response.once("end", () => {
+          resolve({
+            status,
+            statusText,
+            contentType: getHeader(response, "content-type") ?? "",
+            body: Buffer.concat(chunks),
+          });
+        });
+      } else if (contentEncoding === "gzip" || contentEncoding === "deflate" || contentEncoding === "br") {
+        // gzip / deflate / br：先收集完整压缩 buffer，再解压
+        // 压缩后大小预检：允许压缩后 2x FETCH_MAX_BYTES（压缩比通常 < 10x）
+        const chunks: Buffer[] = [];
+        let totalBytes = 0;
+        response.on("data", (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          totalBytes += buffer.length;
+          if (totalBytes > FETCH_MAX_BYTES * 2) {
+            response.destroy(new Error(`compressed content too large (${totalBytes} bytes)`));
+            return;
+          }
+          chunks.push(buffer);
+        });
+        response.once("end", () => {
+          const compressed = Buffer.concat(chunks);
+          try {
+            const decompressed = decompressBuffer(compressed, contentEncoding);
+            // 解压后大小检查（防解压炸弹）
+            if (decompressed.length > FETCH_MAX_BYTES) {
+              reject(new Error(`decompressed content too large: ${decompressed.length} bytes (max ${FETCH_MAX_BYTES})`));
+              return;
+            }
+            // 可观测性：记录压缩编码和响应大小，便于量化压缩编码分布和解压比
+            logger.info(
+              { url: parsed.href, contentEncoding, compressedBytes: compressed.length, decompressedBytes: decompressed.length },
+              "URL response decompressed",
+            );
+            resolve({
+              status,
+              statusText,
+              contentType: getHeader(response, "content-type") ?? "",
+              body: decompressed,
+            });
+          } catch (err) {
+            reject(new Error(`decompression failed (${contentEncoding}): ${err instanceof Error ? err.message : String(err)}`));
+          }
+        });
+        // 压缩分支不重复注册 response.once("error") ——
+        // 上方的 response.once("error", reject) 已对所有响应生效
+      } else {
         response.destroy();
         reject(new Error(`unsupported content encoding: ${contentEncoding}`));
         return;
       }
-
-      const chunks: Buffer[] = [];
-      let totalBytes = 0;
-      response.on("data", (chunk: Buffer | string) => {
-        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        totalBytes += buffer.length;
-        if (totalBytes > FETCH_MAX_BYTES) {
-          response.destroy(new Error(`content exceeded max size (${FETCH_MAX_BYTES} bytes)`));
-          return;
-        }
-        chunks.push(buffer);
-      });
-      response.once("end", () => {
-        resolve({
-          status,
-          statusText,
-          contentType: getHeader(response, "content-type") ?? "",
-          body: Buffer.concat(chunks),
-        });
-      });
     };
 
     const request = parsed.protocol === "https:"
@@ -349,39 +495,386 @@ async function requestPinnedUrl(
 }
 
 /**
- * R-014: 从 HTML 中提取纯文本（简易版）。
- * 去除 script/style 标签及其内容，去除其他 HTML 标签，保留文本和换行。
+ * 移除所有带指定 class 模式的 HTML 元素（含内容），支持嵌套同类标签。
+ * 用简单的深度计数器找到匹配的闭合标签。
  */
-function extractTextFromHtml(html: string): string {
-  return html
-    // 移除 script 和 style 标签及其内容
+function removeElementsByClass(html: string, tagName: string, classPattern: string): string {
+  const openRe = new RegExp(`<${tagName}[^>]*class="[^"]*\\b${classPattern}\\b[^"]*"[^>]*>`, "gi");
+  let result = html;
+  let match: RegExpExecArray | null;
+  openRe.lastIndex = 0;
+  while ((match = openRe.exec(result)) !== null) {
+    const startIdx = match.index;
+    let depth = 1;
+    let idx = startIdx + match[0].length;
+    const tagRe = new RegExp(`</?${tagName}\\b[^>]*>`, "gi");
+    tagRe.lastIndex = idx;
+    let tagMatch: RegExpExecArray | null;
+    while (depth > 0 && (tagMatch = tagRe.exec(result)) !== null) {
+      depth += tagMatch[0].startsWith("</") ? -1 : 1;
+      idx = tagRe.lastIndex;
+    }
+    if (depth === 0) {
+      result = result.slice(0, startIdx) + " " + result.slice(idx);
+      openRe.lastIndex = startIdx;
+    } else {
+      break;
+    }
+  }
+  return result;
+}
+
+/**
+ * 常见正文容器 class 模式（按优先级排列）。
+ * 用于无 <article>/<main> 标签时，通过 class 定位正文区域。
+ */
+const CONTENT_CLASS_PATTERNS = [
+  "opus-module-content",   // Bilibili opus
+  "rich_media_content",    // 微信公众号正文容器
+  "article-content",       // 通用
+  "post-content",          // WordPress 等
+  "entry-content",         // WordPress
+  "rich-text",             // 富文本编辑器
+  "content-body",          // 通用
+  "markdown-body",         // GitHub 等
+  "post-body",             // 博客
+  "article-body",          // 新闻站
+  "ql-editor",             // Quill 编辑器
+  "read-content",          // Readability
+];
+
+/**
+ * 常见噪声元素 class 模式，提取前移除以减少干扰。
+ */
+const NOISE_CLASS_PATTERNS = [
+  "opus-toc",              // Bilibili 目录
+  "table-of-contents",     // 通用目录
+  "toc",
+  "share",                 // 分享栏
+  "comment",               // 评论区
+  "sidebar",               // 侧边栏
+  "breadcrumb",            // 面包屑
+  "pagination",            // 分页
+  "related-post",          // 相关推荐
+  "recommend",             // 推荐栏
+  "opus-pic-view__caption", // Bilibili 图片默认说明文字（"图片"）
+  // 微信公众号噪声元素
+  // 注意：removeElementsByClass 用 \b 做单词边界匹配，_ 是 \w 字符，
+  // 所以 \b 在 _ 前后不会匹配。必须用完整 class 名，不能用前缀。
+  "mp_profile_iframe_wrp",            // 作者名片
+  "rich_media_area_extra",            // 底部推荐区
+  "rich_media_info",                  // 底部信息栏
+  "rich_media_tool__wrp",             // 底部工具栏容器（点赞、分享等）
+  "rich_media_tool_area",             // 底部工具栏区域
+  "qr_code_pc_outer",                 // 二维码外层容器
+  "weui-dialog",                      // 弹窗/对话框（\b 匹配 weui-dialog weui-dialog_link）
+  "weui-mask",                        // 遮罩层
+  "wx_network_msg_wrp",               // 网络消息提示
+  "comment_primary_emotion_panel_wrp",// 评论表情面板
+  "wx-edui-video_source_link",        // 视频号来源链接
+  "jump_author_avatar",               // 作者头像跳转
+  "jump_wx_qrcode_desc",              // 二维码描述
+  "bottom_bar_wrp",                   // 底部操作栏
+  "outer_dialog",                     // 外部对话框
+  "sns_opr_gap",                      // 社交操作间距
+  "media_tool_meta",                  // 媒体工具元信息
+];
+
+/**
+ * 代码块 UI 噪声 class 模式。
+ * 这些元素是代码高亮组件的 UI 控件（工具栏、行号、复制按钮、提示通知等），
+ * 不属于正文内容，提取前移除以减少噪声。
+ * 对 div 和 span 两种标签都尝试移除。
+ */
+const CODE_NOISE_CLASS_PATTERNS = [
+  // Bilibili 代码块 UI（div + span 混合标签）
+  // code-block-header 是工具栏外层 div，移除后内部的 label/lang/actions 一起消失。
+  // 以下 label/lang/line-number 作为安全网：当 HTML 结构变化或 header 未匹配时
+  // 仍能逐个清除噪声 span。
+  "code-block-header",       // div: 工具栏（代码块标签、语言标签、自动换行、复制代码）
+  "code-block-gutter",       // div: 行号容器（移除后行号 span 一起消失）
+  "code-block-line-numbers", // div: Bilibili 行号容器（复数形式，\b 无法匹配单数 pattern）
+  "code-block-toast",        // div: "复制成功" 提示
+  "code-block-label",        // span: "代码块" 文字标签
+  "code-block-lang",         // span: 语言标签（如 PlainText）
+  "code-block-line-number",  // span: 行号
+  // 通用代码高亮库 UI（仅移除 UI 控件，不移除包含代码的外层容器）
+  // 注意：不加 "toolbar"——太宽泛，\btoolbar\b 会匹配 page-toolbar、action-toolbar
+  // 等非代码元素，造成误杀。如需 highlight.js toolbar 支持应使用更具体的模式。
+  "copy-button",            // div/span: 通用复制按钮
+];
+
+/**
+ * 解码数学公式图片的 alt 文本。
+ * Bilibili 等平台将 LaTeX 公式 URL-encode 后存入 alt 属性，
+ * 例如 alt="x%E2%80%99_i" 实际表示 x'_i。
+ */
+function decodeFormulaAlt(alt: string): string {
+  try {
+    return decodeURIComponent(alt);
+  } catch {
+    return alt;
+  }
+}
+
+/**
+ * 将 <img> 的 src 和 alt 转为 markdown 图片语法，解析相对 URL。
+ * 跳过 data: URI 和空 src。
+ * 解码 HTML 实体（如 &amp; → &），微信公众号图片 URL 常含 &amp;。
+ */
+function imgReplacement(src: string, alt: string, baseUrl?: string): string {
+  const trimmedSrc = decodeHtmlEntities(src.trim());
+  if (!trimmedSrc || trimmedSrc.startsWith("data:")) return "";
+  let resolved = trimmedSrc;
+  if (baseUrl) {
+    try {
+      resolved = new URL(trimmedSrc, baseUrl).href;
+    } catch {
+      return "";
+    }
+  }
+  const cleanAlt = alt.trim() || "图片";
+  return `\n![${cleanAlt}](${resolved})\n`;
+}
+
+/**
+ * R-014: 从 HTML 中提取纯文本。
+ * 改进：
+ * - 支持 <article>/<main> 标签和常见正文 class 容器
+ * - 移除常见噪声元素（目录、分享栏、评论区等）
+ * - 保留 <img> alt 文本（数学公式等以图片形式展示）
+ * - 更激进的空白行压缩
+ */
+function extractTextFromHtml(html: string, baseUrl?: string): string {
+  // Step 1: 预清理 — 移除 script/style/noscript
+  let cleaned = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
-    // 块级标签转换为换行
+    // 移除语义化噪声标签
+    .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+    .replace(/<header[\s\S]*?<\/header>/gi, "")
+    .replace(/<aside[\s\S]*?<\/aside>/gi, "");
+
+  // Step 2: 移除噪声元素（按 class 模式）
+  for (const noise of NOISE_CLASS_PATTERNS) {
+    cleaned = removeElementsByClass(cleaned, "div", noise);
+  }
+
+  // Step 2b: 移除代码块 UI 元素（工具栏、行号、复制按钮、提示通知等）
+  // 这些元素同时包含 div 和 span 标签，需要分别处理
+  for (const noise of CODE_NOISE_CLASS_PATTERNS) {
+    cleaned = removeElementsByClass(cleaned, "div", noise);
+    cleaned = removeElementsByClass(cleaned, "span", noise);
+  }
+
+  // Step 3: 处理 <img> 标签
+  // 数学公式图片（class 含 formula）→ 解码 alt 文本（URL-encoded），用 $...$ 包裹为行内公式
+  // 内容图片（有 src 或 data-src）→ 转为 markdown ![alt](url) 以便后续下载上传
+  cleaned = cleaned
+    // 数学公式图片：解码 alt 文本（Bilibili 的 alt 是 URL-encoded LaTeX），用 $...$ 包裹
+    .replace(/<img[^>]*class="[^"]*formula[^"]*"[^>]*alt="([^"]*)"[^>]*>/gi, (_, alt) => `$${decodeFormulaAlt(alt)}$`)
+    .replace(/<img[^>]*alt="([^"]*)"[^>]*class="[^"]*formula[^"]*"[^>]*>/gi, (_, alt) => `$${decodeFormulaAlt(alt)}$`)
+    .replace(/<img[^>]*class="[^"]*formula[^"]*"[^>]*alt='([^']*)'[^>]*>/gi, (_, alt) => `$${decodeFormulaAlt(alt)}$`)
+    // 内容图片：转为 markdown 图片语法
+    // data-src 优先于 src：部分平台（微信公众号）用 data-src 懒加载真实图片 URL，
+    // src 可能为占位图或缺失。先匹配 data-src 再匹配 src，确保使用真实 URL。
+    .replace(/<img[^>]*data-src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>/gi, (_, src, alt) => imgReplacement(src, alt, baseUrl))
+    .replace(/<img[^>]*alt="([^"]*)"[^>]*data-src="([^"]*)"[^>]*>/gi, (_, alt, src) => imgReplacement(src, alt, baseUrl))
+    .replace(/<img[^>]*data-src="([^"]*)"[^>]*>/gi, (_, src) => imgReplacement(src, "图片", baseUrl))
+    // src 图片（data-src 已在上一步处理，不含 data-src 的图片走此分支）
+    .replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>/gi, (_, src, alt) => imgReplacement(src, alt, baseUrl))
+    .replace(/<img[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*>/gi, (_, alt, src) => imgReplacement(src, alt, baseUrl))
+    .replace(/<img[^>]*src="([^"]*)"[^>]*>/gi, (_, src) => imgReplacement(src, "图片", baseUrl))
+    // 移除剩余无 src/data-src 的 img 标签
+    .replace(/<img[^>]*>/gi, "");
+
+  // Step 4: 尝试提取正文区域
+  let contentHtml: string;
+
+  // 4a: <article> 标签（取最长匹配）
+  const articleMatches = [...cleaned.matchAll(/<article[\s\S]*?<\/article>/gi)];
+  const articleContent = articleMatches.length > 0
+    ? articleMatches.reduce((a, b) => a[0].length > b[0].length ? a : b)[0]
+    : null;
+
+  // 4b: <main> 标签
+  const mainMatch = cleaned.match(/<main[\s\S]*?<\/main>/i);
+
+  // 4c: 按 class 模式提取正文容器
+  // 使用深度计数找到匹配的闭合标签，正确处理嵌套 div
+  let classContent: string | null = null;
+  for (const cls of CONTENT_CLASS_PATTERNS) {
+    const openRe = new RegExp(
+      `<(div|section|article)[^>]*class="[^"]*\\b${cls}\\b[^"]*"[^>]*>`,
+      "gi",
+    );
+    const openTags = [...cleaned.matchAll(openRe)];
+    if (openTags.length > 0) {
+      const parts: string[] = [];
+      for (const tag of openTags) {
+        const tagName = tag[1];
+        const contentStart = tag.index + tag[0].length;
+        // 深度计数找到匹配的闭合标签
+        let depth = 1;
+        let idx = contentStart;
+        const tagRe = new RegExp(`</?${tagName}\\b[^>]*>`, "gi");
+        tagRe.lastIndex = idx;
+        let tagMatch: RegExpExecArray | null;
+        while (depth > 0 && (tagMatch = tagRe.exec(cleaned)) !== null) {
+          depth += tagMatch[0].startsWith("</") ? -1 : 1;
+          idx = tagRe.lastIndex;
+        }
+        if (depth === 0) {
+          parts.push(cleaned.slice(contentStart, idx - tagMatch![0].length));
+        }
+      }
+      if (parts.length > 0) {
+        const joined = parts.join("\n\n");
+        const previewText = joined.replace(/<[^>]+>/g, "").trim();
+        if (previewText.length >= 200) {
+          classContent = joined;
+          break;
+        }
+      }
+    }
+  }
+
+  contentHtml = articleContent || mainMatch?.[0] || classContent || cleaned;
+
+  // fallback：如果提取后的纯文本过短（< 200 字符），回退到全文
+  if (contentHtml !== cleaned) {
+    const previewText = contentHtml.replace(/<[^>]+>/g, "").trim();
+    if (previewText.length < 200) {
+      contentHtml = cleaned;
+    }
+  }
+
+  // 代码块用占位符替换，在空白清理后还原，以保留代码缩进。
+  // 否则 .replace(/^[ \t]+/gm, "") 会剥离代码块内的行首缩进。
+  const codeBlocks: string[] = [];
+
+  return contentHtml
+    // Step 5: 代码块 <pre>...</pre> → 占位符（在标签剥离前提取，保留代码内容）
+    // 微信公众号代码块结构：<section style="background:..."><pre>●●●<code>tokens</code></pre></section>
+    // 语法高亮把每个 token 放在嵌套 <span> 中，token 间无空格，需要手动插入。
+    .replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_, content) => {
+      let code = content
+        // 移除彩色圆点（macOS 窗口控制装饰）
+        .replace(/●/g, "")
+        // <br> 转换行（在标签剥离前处理，保留代码换行）
+        .replace(/<br\s*\/?>/gi, "\n")
+        // 微信语法高亮：<span style="color:..."><span leaf="">token</span></span>
+        // 相邻 token 间无空格，在双闭合 </span></span> 处插入空格
+        .replace(/<\/span><\/span>/gi, " ")
+        // 剥离所有剩余 HTML 标签（语法高亮 span、code 标签等）
+        .replace(/<[^>]+>/g, "");
+      // 解码 HTML 实体（&nbsp; → 空格等）
+      code = decodeHtmlEntities(code);
+      // 清理 token 间空格：移除标点前的空格，折叠多余空格
+      // 注意：用 [ \t] 而非 \s，避免吞掉换行符导致代码行合并
+      code = code
+        .replace(/[ \t]+([,.;:()\[\]{}])/g, "$1")
+        .replace(/([.\[{(])[ \t]+/g, "$1")
+        .replace(/([^ \n]) {2,}/g, "$1 ")
+        .replace(/[ \t]+$/gm, "")
+        .replace(/\n{3,}/g, "\n\n");
+      if (!code.trim()) return "";
+      codeBlocks.push(code.trim());
+      return `\n\u0000CODEBLOCK${codeBlocks.length - 1}\u0000\n`;
+    })
+    // Step 5b: 行内 <code> → backtick 包裹（在 <pre> 占位后处理，避免重复匹配）
+    .replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_, code) => {
+      const decoded = decodeHtmlEntities(code.replace(/<[^>]+>/g, "")).trim();
+      return decoded ? `\`${decoded}\`` : "";
+    })
+    // Step 6: 块级标签转换为换行
     .replace(/<\/?(p|div|br|h[1-6]|li|ul|ol|blockquote|pre|tr|table)[^>]*>/gi, "\n")
-    // 移除所有其他 HTML 标签
+    // Step 7: 移除所有其他 HTML 标签
     .replace(/<[^>]+>/g, "")
-    // 解码常见 HTML 实体
+    // Step 8: 解码常见 HTML 实体
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, " ")
-    // 压缩空白
+    // Step 9: 去除每行首尾空白（减少缩进噪声）
+    .replace(/^[ \t]+/gm, "")
+    .replace(/[ \t]+$/gm, "")
+    // Step 10: 压缩空白：移除纯空白行，折叠连续空行
+    .replace(/\n[ \t]*\n/g, "\n\n")
     .replace(/\n{3,}/g, "\n\n")
+    // Step 11: 还原代码块占位符为 markdown 代码块
+    .replace(/\u0000CODEBLOCK(\d+)\u0000/g, (_, i) => `\n\`\`\`\n${codeBlocks[Number(i)]}\n\`\`\`\n`)
+    // Step 12: 将独占一行的 $...$ 升级为块级公式 $$...$$
+    .replace(/^\$([^$\n]+)\$$/gm, (_, formula) => `$$${formula}$$`)
     .trim();
 }
 
 /**
- * R-014: 受控 HTTP 抓取 — 含 SSRF 防护、超时、大小限制和重定向控制。
+ * 解码常见 HTML 实体。与 extractTextFromHtml 中的实体解码保持一致。
  */
-export async function fetchUrlContent(
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+/**
+ * 从 HTML 中提取标题。优先 og:title，其次 <title>。
+ * 定义在 parse-source.ts 模块级别，仅由 fetchUrlContentOnce 调用
+ * （在 extractTextFromHtml 剥离标签前从原始 HTML 提取标题）。
+ */
+function extractHtmlTitle(html: string): string | null {
+  // 性能优化：og:title 和 <title> 都在 <head> 中，先截取 <head> 部分可减少
+  // 正则在 500KB HTML 上的扫描范围。如 <head> 不存在则回退到全文匹配。
+  const headMatch = html.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
+  const head = headMatch?.[1] ?? html;
+
+  // og:title：先匹配整个 <meta> 标签，再从中提取 content 属性，
+  // 避免假设 property/name 在 content 之前（部分 HTML 中属性顺序可能反转）。
+  const ogTagMatch = head.match(/<meta\s+[^>]*?(?:property|name)=["']og:title["'][^>]*?>/i);
+  if (ogTagMatch?.[0]) {
+    // 使用反向引用 (\1) 匹配与开头相同类型的引号，
+    // 使标题中可以包含另一种引号（如 content="John's Blog" 不被截断）。
+    const contentMatch = ogTagMatch[0].match(/content=(["'])([\s\S]*?)\1/i);
+    if (contentMatch?.[2]?.trim()) {
+      // 解码 HTML 实体并归一化空白（与 <title> 路径一致）
+      return decodeHtmlEntities(contentMatch[2].trim()).replace(/\s+/g, " ").slice(0, 100);
+    }
+  }
+  // 使用 [\s\S]*? 非贪婪匹配，支持标题中含 < 字符（如 <title>A < B</title>）。
+  const titleMatch = head.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (titleMatch?.[1]?.trim()) {
+    // 解码 HTML 实体（如 &amp; → &），与 extractTextFromHtml 的实体解码一致
+    return decodeHtmlEntities(titleMatch[1].trim()).replace(/\s+/g, " ").slice(0, 100);
+  }
+  return null;
+}
+
+/**
+ * fetchUrlContent 的返回类型，包含提取的文本和可选的 HTML 标题。
+ */
+export interface FetchedContent {
+  text: string;
+  title: string | null;
+}
+
+/**
+ * R-014: 受控 HTTP 抓取 — 含 SSRF 防护、超时、大小限制和重定向控制。
+ * 原有逻辑重命名为 fetchUrlContentOnce，由 fetchUrlContent 重试包装器调用。
+ */
+export async function fetchUrlContentOnce(
   url: string,
   signal?: AbortSignal,
   dependencies: FetchUrlDependencies = {},
-): Promise<string> {
+): Promise<FetchedContent> {
   const resolveAddress = dependencies.resolveAddress ?? resolvePublicAddress;
   const request = dependencies.request ?? requestPinnedUrl;
   let currentUrl = url;
@@ -434,15 +927,354 @@ export async function fetchUrlContent(
       const decoder = new TextDecoder("utf-8", { fatal: false });
       const rawText = decoder.decode(res.body);
 
+      // extractHtmlTitle 必须在 extractTextFromHtml 之前调用——
+      // 后者会剥离所有 HTML 标签，剥离后无法再提取 <title>。
       if (res.contentType.toLowerCase().includes("text/html")) {
-        return extractTextFromHtml(rawText);
+        const title = extractHtmlTitle(rawText);
+        const text = extractTextFromHtml(rawText, currentUrl);
+        return { text, title };
       }
-      return rawText;
+      return { text: rawText, title: null };
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abortFromParent);
     }
   }
+}
+
+/**
+ * R-014: 受控 HTTP 抓取（含重试包装）。
+ * 仅对瞬时错误（超时、连接重置、DNS 失败）重试，不重试 HTTP 4xx。
+ */
+export async function fetchUrlContent(
+  url: string,
+  signal?: AbortSignal,
+  dependencies: FetchUrlDependencies = {},
+): Promise<FetchedContent> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= FETCH_RETRY_COUNT; attempt++) {
+    try {
+      return await fetchUrlContentOnce(url, signal, dependencies);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // 仅对瞬时错误重试（超时、连接重置、DNS 失败），不重试 HTTP 4xx
+      // ECONNRESET 等网络错误在 Node 中是 err.code 属性，不是 message 字符串。
+      const errCode = (err as NodeJS.ErrnoException).code;
+      const isTransient =
+        lastError.message.includes("timed out")
+        || errCode === "ECONNRESET"
+        || errCode === "ECONNREFUSED"
+        || errCode === "EAI_AGAIN"  // DNS 临时失败
+        || lastError.message.includes("DNS resolution failed")
+        || lastError.message.includes("socket hang up");
+      if (!isTransient || attempt === FETCH_RETRY_COUNT) break;
+      // 重试触发时记录日志
+      logger.warn(
+        { url, attempt: attempt + 1, errCode: errCode ?? "unknown", errMessage: lastError.message },
+        "URL fetch retry triggered",
+      );
+      // 短暂等待后重试（绑定 signal，job 被 abort 时立即中断延迟）
+      // 双向清理：timer 正常触发后移除 abort listener，避免 listener 泄漏
+      // 预检 signal 是否已 abort——AbortSignal 只触发一次 abort 事件，
+      // 若进入延迟前 signal 已 abort，addEventListener 不会回调，导致无谓等待。
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) { resolve(); return; }
+        const onAbort = () => { clearTimeout(timer); resolve(); };
+        const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, 1000 * (attempt + 1));
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * 从解析后的内容中提取标题。
+ * - URL 来源：优先使用 fetchUrlContent 已提取的 HTML 标题（fetchedTitle），回退到 blocks 提取
+ * - 其余来源：直接复用 extractTitleFromBlocks
+ *
+ * @param blocks 调用方已通过 parseContent + segmentsToBlocks 计算好的 blocks，避免重复解析
+ * @param sourceType 来源类型
+ * @param origin 来源地址（URL 来源的最终回退：hostname）
+ * @param fetchedTitle fetchUrlContent 从原始 HTML 中提取的标题（URL 来源优先使用）
+ * 返回 null 表示未提取到，调用方应保留原标题
+ */
+export function extractSourceTitle(
+  blocks: ParsedBlock[],
+  sourceType: string,
+  origin?: string | null,
+  fetchedTitle?: string | null,
+): string | null {
+  // URL 来源：内容已被 extractTextFromHtml 剥离了 HTML 标签，
+  // 不能从中提取 <title>。必须使用 fetchUrlContent 在剥离前提取的 fetchedTitle。
+  if (sourceType === "url" && fetchedTitle) {
+    return fetchedTitle;
+  }
+
+  // 通用：复用已有 extractTitleFromBlocks（直接用传入的 blocks，不再重复 parseContent）
+  // 不依赖 extractTitleFromBlocks 返回的 "无标题笔记" 字符串做判断，
+  // 改为先检查 blocks 是否真正有内容。
+  if (blocks.length > 0 && blocks.some((b) => b.content.trim())) {
+    const title = extractTitleFromBlocks(blocks);
+    if (title) return title.slice(0, 100);
+  }
+
+  // URL 来源的最终回退：hostname
+  if (sourceType === "url" && origin) {
+    try {
+      return new URL(origin).hostname;
+    } catch { /* ignore */ }
+  }
+
+  return null;
+}
+
+/**
+ * 根据实际内容特征修正来源类型。
+ * 仅在原始类型与内容特征明显不符时修正。
+ *
+ * @param typeSource "manual" 表示用户手动选择了类型（不可覆盖），
+ *                  "auto" 或 undefined 表示自动检测（可修正）。
+ *                  该值由 createSource service 写入 metadata.typeSource。
+ */
+export function correctSourceType(
+  content: string,
+  originalType: string,
+  typeSource?: string,
+): "text" | "markdown" | "code" | "url" {
+  // 用户手动选择的类型优先级最高，不修正
+  if (typeSource === "manual") {
+    return originalType as "text" | "markdown" | "code" | "url";
+  }
+
+  // URL 类型不可修正：URL 抓取到的 HTML 纯文本可能命中代码或 Markdown 特征，
+  // 但将其修正为 code/markdown 会导致 parseContent 用错误的分段策略处理。
+  if (originalType === "url") {
+    return "url";
+  }
+
+  const text = content.trim();
+  if (!text) return originalType as "text" | "markdown" | "code" | "url";
+
+  // 代码特征（含与 detectSourceType 对齐的关键字集）
+  // from 已移除——英文文本 "from the beginning" 等会误判，且 ES module 导入中
+  // from 总是与 import/export 同时出现，两者已在关键字列表中。
+  // public/private/protected 已移除——作为独立关键字在英文文本中过于常见
+  //（"public transport"、"private matter"），会导致 codeScore=1，
+  // 阻断 code→text 回退（需 codeScore===0），使 detectSourceType 的误判无法修正。
+  // type 已移除——与 from/public/private/protected 同类问题，是常见英文单词
+  //（"type of music"、"type your name"），作为独立关键字会导致 codeScore=1，
+  // 阻断 code→text 回退。TypeScript 的 type 定义通常伴随 const/import 等出现，
+  // 移除 type 不影响多行代码文件的 codeScore >= 2 判定。
+  // 保留 interface/enum：这些关键字在英文文本中极少出现在行首，
+  // 且是 TypeScript 类型定义的强信号。
+  // 第一条 codeIndicator 与 detectSourceType 的关键字集完全对齐（IR1）：
+  // - 使用 \b 词边界替代尾随空格，使 def\tfoo / package\tmain 等 tab 分隔的代码也能匹配，
+  //   同时防止 classical / define / packages 等英文单词误匹配
+  // - 包含 if __name__（Python 入口模式），避免 detectSourceType 检测为 code
+  //   但 correctSourceType 的 codeScore=0 导致 code→text 误降级
+  const codeIndicators = [
+    /^(function|const|let|var|class|import|export|def|#include|package|public class|if __name__)\b/m,
+    /^(interface|enum)\b/m,
+    /```[\s\S]*?```/,  // 代码块
+    /^(if|for|while|switch|try|catch)\s*\(/m,
+    /;\s*$/m,  // 行尾半角分号 — 仅匹配半角分号 ;（U+003B），不匹配全角分号
+  ];
+  const codeScore = codeIndicators.filter((re) => re.test(text)).length;
+
+  // Markdown 特征
+  const mdIndicators = [
+    /^#{1,6}\s/m,       // 标题
+    /^[-*+]\s/m,        // 无序列表
+    /^\d+\.\s/m,        // 有序列表
+    /^>\s/m,            // 引用
+    /\[.+?\]\(.+?\)/,   // 链接
+    /!\[.*?\]\(.+?\)/,  // 图片
+    /```/,              // 代码块标记
+    /^\|.*\|/m,         // 表格
+  ];
+  const mdScore = mdIndicators.filter((re) => re.test(text)).length;
+
+  // 仅对自动检测的 text 类型做修正
+  if (originalType === "text") {
+    if (codeScore >= 2 && codeScore > mdScore) return "code";
+    if (mdScore >= 2) return "markdown";
+  }
+  // 含 ``` 的 markdown mdScore 至少 1（命中 /```/），
+  // 改为只看 codeScore 是否远超 mdScore
+  if (originalType === "markdown" && codeScore >= 3 && codeScore > mdScore + 1) return "code";
+  if (originalType === "code") {
+    // ER1: 误判回退 — detectSourceType 的 /^[a-zA-Z_$]/ 正则可能误判英文文本为 code
+    if (codeScore === 0 && mdScore === 0) return "text";
+    if (mdScore >= 2 && mdScore > codeScore) return "markdown";
+  }
+
+  return originalType as "text" | "markdown" | "code" | "url";
+}
+
+/**
+ * R-014: 图片下载限制
+ */
+const IMAGE_FETCH_TIMEOUT_MS = 15_000;
+const IMAGE_MAX_BYTES = 5_000_000; // 5MB
+const IMAGE_ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/**
+ * 下载单张图片并上传到 MinIO，返回可访问的 objectKey。
+ * 复用 resolvePublicAddress 进行 SSRF 防护。
+ */
+async function downloadAndUploadImage(
+  imageUrl: string,
+  workspaceId: string,
+  sourceId: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const parsed = new URL(imageUrl);
+  if (!FETCH_ALLOWED_PROTOCOLS.includes(parsed.protocol)) return null;
+
+  const pinned = await resolvePublicAddress(parsed.hostname);
+  const options: RequestOptions = {
+    method: "GET",
+    family: pinned.family,
+    lookup: createPinnedLookup(pinned),
+    signal,
+    headers: {
+      "User-Agent": FETCH_USER_AGENT,
+      Accept: "image/*,*/*",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  };
+  if (parsed.protocol === "https:" && !isIP(parsed.hostname)) {
+    (options as RequestOptions & { servername: string }).servername = parsed.hostname;
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      req.destroy(new Error(`image fetch timed out after ${IMAGE_FETCH_TIMEOUT_MS}ms`));
+    }, IMAGE_FETCH_TIMEOUT_MS);
+
+    const req = parsed.protocol === "https:"
+      ? httpsRequest(parsed, options, (response) => {
+        response.once("error", () => { clearTimeout(timeout); resolve(null); });
+        const contentType = (getHeader(response, "content-type") ?? "").split(";")[0].trim().toLowerCase();
+        if (!IMAGE_ALLOWED_TYPES.has(contentType)) {
+          response.destroy();
+          clearTimeout(timeout);
+          resolve(null);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let total = 0;
+        response.on("data", (chunk: Buffer | string) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          total += buf.length;
+          if (total > IMAGE_MAX_BYTES) {
+            response.destroy();
+            clearTimeout(timeout);
+            resolve(null);
+            return;
+          }
+          chunks.push(buf);
+        });
+        response.once("end", async () => {
+          clearTimeout(timeout);
+          try {
+            const body = Buffer.concat(chunks);
+            if (body.length < 100) { resolve(null); return; }
+            const objectKey = await uploadSourceImage(workspaceId, sourceId, body, contentType);
+            resolve(objectKey);
+          } catch {
+            resolve(null);
+          }
+        });
+      })
+      : httpRequest(parsed, options, (response) => {
+        response.once("error", () => { clearTimeout(timeout); resolve(null); });
+        const contentType = (getHeader(response, "content-type") ?? "").split(";")[0].trim().toLowerCase();
+        if (!IMAGE_ALLOWED_TYPES.has(contentType)) {
+          response.destroy();
+          clearTimeout(timeout);
+          resolve(null);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let total = 0;
+        response.on("data", (chunk: Buffer | string) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          total += buf.length;
+          if (total > IMAGE_MAX_BYTES) {
+            response.destroy();
+            clearTimeout(timeout);
+            resolve(null);
+            return;
+          }
+          chunks.push(buf);
+        });
+        response.once("end", async () => {
+          clearTimeout(timeout);
+          try {
+            const body = Buffer.concat(chunks);
+            if (body.length < 100) { resolve(null); return; }
+            const objectKey = await uploadSourceImage(workspaceId, sourceId, body, contentType);
+            resolve(objectKey);
+          } catch {
+            resolve(null);
+          }
+        });
+      });
+    req.once("error", () => { clearTimeout(timeout); resolve(null); });
+    req.end();
+  });
+}
+
+/**
+ * 扫描文本中的 markdown 图片引用，下载图片并上传到 MinIO，替换 URL。
+ * 仅处理外部 URL（非 /api/uploads/ 路径），跳过已上传的图片。
+ * 如果存储未配置或下载失败，保留原始 URL 不变。
+ */
+export async function fetchAndUploadSourceImages(
+  text: string,
+  workspaceId: string,
+  sourceId: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (!isStorageConfigured()) return text;
+
+  // 匹配 ![alt](url) 中 url 不以 /api/uploads/ 开头的图片
+  const imagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  const matches = [...text.matchAll(imagePattern)];
+  const externalImages = matches.filter(
+    (m) => !m[2].startsWith("/api/uploads/") && !m[2].startsWith("data:"),
+  );
+  if (externalImages.length === 0) return text;
+
+  // 去重：同一 URL 只下载一次
+  const urlToKey = new Map<string, string | null>();
+  for (const match of externalImages) {
+    const url = match[2];
+    if (urlToKey.has(url)) continue;
+    if (signal?.aborted) break;
+    try {
+      logger.info({ sourceId, imageUrl: url }, "downloading source image");
+      const objectKey = await downloadAndUploadImage(url, workspaceId, sourceId, signal);
+      urlToKey.set(url, objectKey);
+      if (objectKey) {
+        logger.info({ sourceId, imageUrl: url, objectKey }, "source image uploaded");
+      }
+    } catch (err) {
+      logger.warn({ sourceId, imageUrl: url, err }, "source image download failed");
+      urlToKey.set(url, null);
+    }
+  }
+
+  // 替换文本中的 URL
+  let result = text;
+  for (const [url, objectKey] of urlToKey) {
+    if (objectKey) {
+      result = result.replaceAll(`](${url})`, `](/api/uploads/${objectKey})`);
+    }
+  }
+  return result;
 }
 
 /**
@@ -517,8 +1349,13 @@ export async function runParseSource(job: JobPayload) {
     if (fetchUrlContentFlag && url && !rawContent.trim()) {
       logger.info({ sourceId, url }, "fetching URL content");
       try {
-        const fetchedContent = await fetchUrlContent(url, job.signal);
-        rawContent = fetchedContent;
+        const fetched = await fetchUrlContent(url, job.signal);
+        rawContent = fetched.text;
+
+        // 下载页面内嵌图片并上传到 MinIO，替换文本中的图片 URL
+        rawContent = await fetchAndUploadSourceImages(
+          rawContent, job.workspaceId, sourceId, job.signal,
+        );
 
         // Merge fetched content while holding the source row lock. If archive
         // won the race, do not restore metadata or continue toward ready.
@@ -541,7 +1378,9 @@ export async function runParseSource(job: JobPayload) {
             .set({
               metadata: {
                 ...((lockedSource.metadata ?? {}) as Record<string, unknown>),
-                rawContent: fetchedContent,
+                rawContent: rawContent,
+                // 必须写入 fetchedTitle，否则事务内 extractSourceTitle 无法获取 URL 来源的网页标题
+                fetchedTitle: fetched.title,
                 fetchedAt: new Date().toISOString(),
               },
               updatedAt: new Date(),
@@ -563,7 +1402,7 @@ export async function runParseSource(job: JobPayload) {
           return;
         }
 
-        logger.info({ sourceId, contentLength: fetchedContent.length }, "URL content fetched");
+        logger.info({ sourceId, contentLength: fetched.text.length }, "URL content fetched");
       } catch (fetchErr) {
         logger.error({ sourceId, url, err: fetchErr }, "URL fetch failed");
         const fetchError = fetchErr instanceof Error ? fetchErr.message : "unknown";
@@ -652,16 +1491,13 @@ export async function runParseSource(job: JobPayload) {
       return;
     }
 
-    // 解析内容
-    const segments = parseContent(
-      rawContent,
-      processingSource.type as "text" | "markdown" | "code" | "url",
-    );
+    // ─── 以下计算全部在事务内基于 lockedSource 进行，不在事务外预计算 ───
+    // 原代码在事务外用 processingSource 预计算 segments 和 sourceBody，
+    // 然后直接用于事务内写入。但事务外预计算存在 TOCTOU 窗口（processingSource 与 lockedSource
+    // 可能不同），且预计算结果在事务内完全未被引用——事务内全部基于 lockedSource 重算。
+    // 因此删除事务外的 segments/sourceBody 预计算，避免对 500KB 内容的无意义双倍解析。
 
-    const sourceBody = segments.map((s) => s.text).join("\n");
-    // Recheck the terminal archived state under a row lock, then replace
-    // segments, set ready, and write the projection atomically. This prevents
-    // a parse job that started earlier from resurrecting an archived source.
+    // ─── ready 提交事务（改造原有第 665–742 行的事务）───
     const committed = await withJobTransaction(job, async (tx) => {
       await lockJobLease(tx, job);
       const [lockedSource] = await tx
@@ -676,6 +1512,52 @@ export async function runParseSource(job: JobPayload) {
         .for("update");
       if (!lockedSource || !canAdvanceSourceParse(lockedSource.status)) return false;
 
+      // 基于 lockedSource 重新计算 correctedType 和 finalTitle
+      //（lockedSource 可能与 processingSource 不同，例如另一个事务改过 metadata）
+      const lockedTypeSource = (lockedSource.metadata ?? {}).typeSource as string | undefined;
+      // 从事务内 lockedSource.metadata 重读 rawContent，与 typeSource/fetchedTitle 保持一致。
+      const lockedRawContent = ((lockedSource.metadata ?? {}).rawContent as string) ?? rawContent;
+      const lockedCorrectedType = correctSourceType(lockedRawContent, lockedSource.type, lockedTypeSource);
+      // 始终基于 lockedCorrectedType 重新解析，不回退到事务外的 finalSegments。
+      const lockedFinalSegments = parseContent(
+        lockedRawContent,
+        lockedCorrectedType as "text" | "markdown" | "code" | "url",
+      );
+      const lockedSourceBody = lockedFinalSegments.map((s) => s.text).join("\n");
+
+      // 标题提取：传入已计算的 lockedBlocks（避免重复 parseContent）
+      const lockedBlocks = segmentsToBlocks(
+        lockedFinalSegments,
+        lockedCorrectedType as "text" | "markdown" | "code" | "url",
+      );
+      const lockedFetchedTitle = (lockedSource.metadata ?? {}).fetchedTitle as string | null | undefined;
+      const extractedTitle = extractSourceTitle(
+        lockedBlocks,
+        lockedCorrectedType,
+        lockedSource.origin,
+        lockedFetchedTitle,
+      );
+      const finalTitle = extractedTitle || lockedSource.title;
+
+      // 可观测性：记录标题来源和是否提取成功
+      logger.info(
+        {
+          sourceId,
+          titleSource: lockedFetchedTitle ? "html_title" : extractedTitle ? "blocks" : "fallback",
+          titleLength: finalTitle.length,
+        },
+        "source title extracted",
+      );
+
+      // 可观测性：记录类型修正
+      if (lockedCorrectedType !== lockedSource.type) {
+        logger.info(
+          { sourceId, originalType: lockedSource.type, correctedType: lockedCorrectedType, typeSource: lockedTypeSource },
+          "source type corrected",
+        );
+      }
+
+      // 写入 segments（用 lockedFinalSegments）
       await tx
         .delete(schema.sourceSegments)
         .where(
@@ -685,9 +1567,9 @@ export async function runParseSource(job: JobPayload) {
           ),
         );
 
-      if (segments.length > 0) {
+      if (lockedFinalSegments.length > 0) {
         await tx.insert(schema.sourceSegments).values(
-          segments.map((seg, idx) => ({
+          lockedFinalSegments.map((seg, idx) => ({
             sourceId,
             workspaceId: job.workspaceId,
             ordinal: idx,
@@ -699,9 +1581,15 @@ export async function runParseSource(job: JobPayload) {
         );
       }
 
+      // 更新 source：status + 修正后的 type + 提取的 title
       const [updated] = await tx
         .update(schema.sources)
-        .set({ status: SourceStatus.READY, updatedAt: new Date() })
+        .set({
+          status: SourceStatus.READY,
+          type: lockedCorrectedType,
+          title: finalTitle,
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(schema.sources.id, sourceId),
@@ -712,6 +1600,7 @@ export async function runParseSource(job: JobPayload) {
         .returning({ id: schema.sources.id });
       if (!updated) return false;
 
+      // 搜索索引也用 finalTitle 和 lockedCorrectedType
       const indexedAt = new Date();
       await tx
         .insert(schema.searchDocuments)
@@ -719,9 +1608,9 @@ export async function runParseSource(job: JobPayload) {
           workspaceId: job.workspaceId,
           objectType: "source",
           objectId: sourceId,
-          title: lockedSource.title,
-          body: sourceBody,
-          metadata: { type: lockedSource.type },
+          title: finalTitle,
+          body: lockedSourceBody,
+          metadata: { type: lockedCorrectedType },
           indexedAt,
         })
         .onConflictDoUpdate({
@@ -731,9 +1620,9 @@ export async function runParseSource(job: JobPayload) {
             schema.searchDocuments.objectId,
           ],
           set: {
-            title: lockedSource.title,
-            body: sourceBody,
-            metadata: { type: lockedSource.type },
+            title: finalTitle,
+            body: lockedSourceBody,
+            metadata: { type: lockedCorrectedType },
             indexedAt,
           },
         });
@@ -747,7 +1636,7 @@ export async function runParseSource(job: JobPayload) {
     }
 
     logger.info(
-      { sourceId, segmentCount: segments.length },
+      { sourceId },
       "source parsed successfully",
     );
   } catch (err) {
