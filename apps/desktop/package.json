@@ -1,0 +1,30 @@
+{
+  "name": "@ailearn/desktop",
+  "version": "0.5.0",
+  "private": true,
+  "description": "AI Learn — macOS desktop launcher (frontend lifecycle only)",
+  "author": "AI Learn Team",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc --noEmit && node esbuild.mjs",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "prebuild:web": "cd ../../apps/web && npm install && NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED=true NEXT_PUBLIC_AI_QUESTION_V1_ENABLED=true NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED=true NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED=true npm run build",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run prebuild:web && npm run build && electron-builder",
+    "dist:arm64": "npm run prebuild:web && npm run build && electron-builder --arm64",
+    "dist:universal": "npm run prebuild:web && npm run build && electron-builder --universal"
+  },
+  "dependencies": {
+    "electron-log": "^5.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "electron": "^33.4.1",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

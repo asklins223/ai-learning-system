@@ -1,0 +1,88 @@
+# electron-builder configuration for macOS desktop packaging.
+# Produces a .dmg (disk image) and .app bundle.
+#
+# The app bundles the pre-built Next.js frontend. The backend (Docker/API/
+# Postgres/Worker) is managed externally by the user.
+
+appId: com.ailearn.desktop
+productName: AI Learn
+copyright: Copyright © 2026 AI Learn Team
+
+directories:
+  output: release
+  buildResources: build
+
+# macOS-specific configuration.
+mac:
+  category: public.app-category.education
+  # icon: build/icon.icns  # Uncomment after placing an .icns file in build/
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: false
+
+# DMG (disk image) configuration.
+dmg:
+  title: "AI Learn"
+  contents:
+    - x: 140
+      y: 200
+    - x: 400
+      y: 200
+      type: link
+      path: /Applications
+
+# Bundle the pre-built Next.js web app into resources/web/.
+# This includes the source, .next/ build output, and node_modules.
+extraResources:
+  - from: ../../apps/web/package.json
+    to: web/package.json
+  - from: ../../apps/web/package-lock.json
+    to: web/package-lock.json
+  - from: ../../apps/web/next.config.mjs
+    to: web/next.config.mjs
+  - from: ../../apps/web/tsconfig.json
+    to: web/tsconfig.json
+  - from: ../../apps/web/tailwind.config.ts
+    to: web/tailwind.config.ts
+  - from: ../../apps/web/postcss.config.js
+    to: web/postcss.config.js
+  - from: ../../apps/web/app
+    to: web/app
+    filter: ["**/*"]
+  - from: ../../apps/web/components
+    to: web/components
+    filter: ["**/*"]
+  - from: ../../apps/web/lib
+    to: web/lib
+    filter: ["**/*"]
+  - from: ../../apps/web/public
+    to: web/public
+    filter: ["**/*"]
+  - from: ../../apps/web/.next
+    to: web/.next
+    filter: ["**/*", "!**/*.map", "!**/*.tsbuildinfo"]
+  - from: ../../apps/web/node_modules
+    to: web/node_modules
+    filter:
+      - "**/*"
+      - "!**/node_modules/**"   # skip nested deps already hoisted
+      - "!**/.bin/**"            # we resolve next CLI by path
+  - from: ../../packages/shared
+    to: web/../../packages/shared
+    filter: ["**/*"]
+  # Also include @ailearn/shared symlink target
+  - from: ../../packages/shared/src
+    to: web/node_modules/@ailearn/shared/src
+    filter: ["**/*"]
+  - from: ../../packages/shared/package.json
+    to: web/node_modules/@ailearn/shared/package.json
+
+# Files to include in the app bundle (Electron side).
+files:
+  - dist/**/*
+  - node_modules/**/*
+  - package.json

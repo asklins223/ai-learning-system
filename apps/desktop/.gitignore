@@ -1,0 +1,7 @@
+node_modules/
+dist/
+release/
+*.dmg
+*.app
+build/icon.icns
+build/icon.png
