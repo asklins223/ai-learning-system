@@ -1279,7 +1279,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json', 'apps/web/package-lock.json') }}
 
       - name: Install Playwright browsers
         working-directory: tests/e2e
@@ -1378,7 +1378,7 @@ jobs:
         run: |
           npm run seed -- --profile pr --output "$E2E_SEED_OUTPUT"
 
-      - name: Run Playwright E2E tests
+      - name: Run Playwright E2E tests (v0.5 PR smoke)
         if: success()
         working-directory: tests/e2e
         env:
@@ -1386,6 +1386,40 @@ jobs:
           E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
         run: |
           npm run test:pr
+
+      # ── v0.6 E2E (计划 §13.3, M4 Gate) ─────────────────────────────────
+      # Seeds v0.6 test data (fixed card UUID for deterministic navigation)
+      # and runs the v0.6 E2E suite: review flow, card validation, axe-core.
+      # Uses continue-on-error until the suite is proven stable on CI.
+      - name: Run v0.6 E2E seed
+        if: success()
+        env:
+          SEED_E2E: "true"
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          E2E_TEST_USER_EMAIL: e2e-test@ailearn.local
+          E2E_TEST_USER_PASSWORD: e2e_test_password_2026
+        run: node --import tsx apps/api/src/scripts/seed-e2e-v06.ts
+
+      - name: Install v0.6 Playwright browsers
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run v0.6 E2E tests
+        if: success()
+        working-directory: apps/web
+        continue-on-error: true
+        env:
+          E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
+        run: npx playwright test
+
+      - name: Upload v0.6 Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-v06-${{ github.run_id }}
+          path: apps/web/playwright-report
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Upload Playwright report
         if: always()
@@ -1473,6 +1507,13 @@ jobs:
         with:
           name: playwright-results-${{ github.run_id }}
           path: ${{ runner.temp }}/playwright-results
+
+      - name: Download v0.6 Playwright report
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report-v06-${{ github.run_id }}
+          path: ${{ runner.temp }}/playwright-report-v06
+        continue-on-error: true
 
       - name: Prepare collected coverage and scan evidence
         run: |

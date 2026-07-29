@@ -8,7 +8,9 @@
     "start": "next start -p 3000",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test $(find lib -name '*.test.ts' | sort)"
+    "test": "node --import tsx --test $(find lib -name '*.test.ts' | sort)",
+    "test:e2e": "playwright test",
+    "test:e2e:ci": "playwright test --reporter=list --reporter=html"
   },
   "dependencies": {
     "@ailearn/shared": "file:../../packages/shared",
