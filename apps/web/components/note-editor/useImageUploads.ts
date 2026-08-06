@@ -80,6 +80,9 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
   const imageUploadItemsRef = useRef(new Map<string, ImageUploadTask>());
   const imageUploadQueueRef = useRef<string[]>([]);
   const activeImageUploadsRef = useRef(0);
+  // runImageUpload 与 pumpImageUploads 相互递归调度上传队列，
+  // 通过 ref 持有 pump 的最新实现，避免 useCallback 依赖环。
+  const pumpImageUploadsRef = useRef<() => void>(() => {});
 
   /** 同步上传状态到 React state（触发 UI 更新） */
   const syncImageUploadState = useCallback(() => {
@@ -194,7 +197,7 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
       if (task.status === "succeeded" || task.status === "cancelled") {
         scheduleImageUploadRemoval(task);
       }
-      pumpImageUploads();
+      pumpImageUploadsRef.current();
     }
   }, [noteId, editorRef, latestDraftRef, updateSource, syncImageUploadState, mountedRef, scheduleImageUploadRemoval, imageUploadErrorMessage]);
 
@@ -218,6 +221,7 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
       void runImageUpload(task, controller);
     }
   }, [mountedRef, syncImageUploadState, runImageUpload]);
+  pumpImageUploadsRef.current = pumpImageUploads;
 
   /** 将文件加入上传队列 */
   const queueImageUpload = useCallback((file: File) => {
@@ -302,14 +306,17 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
   // 与 NoteEditor 中的 mountedRef 清理同步：mountedRef 在卸载时置 false，
   // 此 effect 在同一轮 cleanup 中取消所有未完成的上传任务。
   useEffect(() => {
+    // imageUploadItemsRef 从不被整体重新赋值（仅 set/delete/clear），
+    // 在 effect setup 时快照等价于清理时刻读取。
+    const uploads = imageUploadItemsRef.current;
     return () => {
       imageUploadQueueRef.current = [];
-      for (const upload of imageUploadItemsRef.current.values()) {
+      for (const upload of uploads.values()) {
         upload.status = "cancelled";
         upload.controller?.abort();
         if (upload.cleanupTimer) clearTimeout(upload.cleanupTimer);
       }
-      imageUploadItemsRef.current.clear();
+      uploads.clear();
       activeImageUploadsRef.current = 0;
     };
   }, []);

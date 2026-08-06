@@ -372,9 +372,9 @@ export function useNoteSave(ctx: NoteSaveContext): NoteSaveControls {
     editorRef, latestDraftRef, latestTitleRef, lastSavedSourceRef, lastSavedTitleRef,
     lastSavedTitleSourceRef, titleDirtyRef, titleEditRevisionRef, savedVersionIdRef,
     currentVersionNoRef, sessionVersionIdRef, saveChainRef, mountedRef, isOwnerRef,
-    restoringRef, isDeletingRef, noteDeletedRef, conflictDataRef, generationLockedRef,
+    restoringRef, isDeletingRef, noteDeletedRef, conflictDataRef,
     recoveredConflictRef, beforeUnloadSaveFiredRef, saveInFlightRef, timer,
-    savedStateTimerRef, sessionTimeoutRef, setSaving, setTitle, setIsAutoTitle,
+    savedStateTimerRef, setSaving, setTitle, setIsAutoTitle,
     setCurrentVersionId, setCurrentVersionNo, setDirty, setHasRecoveredConflictDraft,
     setConflictData,
   ]);
@@ -538,8 +538,9 @@ export function useNoteSave(ctx: NoteSaveContext): NoteSaveControls {
   }, [
     noteId, persistDraftLocally, endSession,
     mountedRef, conflictDataRef, noteDeletedRef, isDeletingRef, restoringRef,
-    generationLockedRef, saveInFlightRef, savedVersionIdRef, lastSavedSourceRef,
-    lastSavedTitleRef, titleEditRevisionRef, titleDirtyRef, latestDraftRef,
+    generationLockedRef, saveInFlightRef, savedVersionIdRef, currentVersionNoRef,
+    lastSavedSourceRef, lastSavedTitleRef, lastSavedTitleSourceRef,
+    titleEditRevisionRef, titleDirtyRef, latestDraftRef,
     latestTitleRef, editorRef,
     setCurrentVersionId, setCurrentVersionNo, setConflictData, setSaving,
     setSource, setTitle, setIsAutoTitle, setDirty,
@@ -633,6 +634,25 @@ export function useNoteSave(ctx: NoteSaveContext): NoteSaveControls {
   const saveRef = useRef(save);
   saveRef.current = save;
 
+  // 卸载清理需在清理时刻读取最新的 ref 状态（删除中/生成中的笔记不得触发
+  // flush-save）。与 saveRef 一致，用 ref 持有 flush 函数，清理时调用
+  // 即可读取调用时刻的最新值，而非 effect setup 时的快照。
+  const flushIfNeededOnUnmountRef = useRef<() => void>(() => {});
+  flushIfNeededOnUnmountRef.current = () => {
+    if (
+      !isDeletingRef.current &&
+      !recoveredConflictRef.current &&
+      !noteDeletedRef.current &&
+      (
+        latestDraftRef.current.source !== lastSavedSourceRef.current ||
+        titleDirtyRef.current
+      )
+    ) {
+      persistDraftLocally(latestDraftRef.current.source);
+      if (!generationLockedRef.current) void saveRef.current(true);
+    }
+  };
+
   useEffect(() => {
     // React Strict Mode 会在开发环境执行一次 setup → cleanup → setup。
     // 每次 setup 都必须恢复存活标记，否则后续保存虽成功却不会同步界面状态。
@@ -643,28 +663,14 @@ export function useNoteSave(ctx: NoteSaveContext): NoteSaveControls {
         timer.current = null;
       }
       clearSessionTimeout();
-      if (
-        !isDeletingRef.current &&
-        !recoveredConflictRef.current &&
-        !noteDeletedRef.current &&
-        (
-          latestDraftRef.current.source !== lastSavedSourceRef.current ||
-          titleDirtyRef.current
-        )
-      ) {
-        persistDraftLocally(latestDraftRef.current.source);
-        if (!generationLockedRef.current) void saveRef.current(true);
-      }
+      flushIfNeededOnUnmountRef.current();
       if (savedStateTimerRef.current) clearTimeout(savedStateTimerRef.current);
       mountedRef.current = false;
       // 图片上传的卸载清理由 useImageUploads hook 内部 useEffect 处理，
       // 此处无需手动取消上传队列。
     };
   }, [
-    clearSessionTimeout, persistDraftLocally,
-    mountedRef, timer, isDeletingRef, recoveredConflictRef, noteDeletedRef,
-    latestDraftRef, lastSavedSourceRef, titleDirtyRef, generationLockedRef,
-    savedStateTimerRef,
+    clearSessionTimeout, mountedRef, timer, savedStateTimerRef,
   ]);
 
   return {
