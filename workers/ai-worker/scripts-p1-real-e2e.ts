@@ -35,11 +35,14 @@ const admin = postgres(adminUrl, { max: 4 });
 
 const USER_ID = "10000000-0000-4000-8000-000000000031";
 const WORKSPACE_ID = "20000000-0000-4000-8000-000000000031";
-const NOTE_ID = "30000000-0000-4000-8000-000000000031";
-const VERSION_ID = "40000000-0000-4000-8000-000000000031";
-const RUN_ID = "50000000-0000-4000-8000-000000000031";
-
-const CONTENT = [
+// 样本参数化(P0-6 分层基线数据采集):SAMPLE_ID / SAMPLE_TITLE / SAMPLE_DENSITY / SAMPLE_CONTENT
+const SAMPLE_ID = process.env.SAMPLE_ID ?? "031";
+const NOTE_ID = `30000000-0000-4000-8000-000000000${SAMPLE_ID}`;
+const VERSION_ID = `40000000-0000-4000-8000-000000000${SAMPLE_ID}`;
+const RUN_ID = `50000000-0000-4000-8000-000000000${SAMPLE_ID}`;
+const SAMPLE_DENSITY = process.env.SAMPLE_DENSITY ?? "standard";
+const SAMPLE_TITLE = process.env.SAMPLE_TITLE ?? "CAP 定理与分布式共识";
+const SAMPLE_CONTENT = process.env.SAMPLE_CONTENT ?? [
   "分布式系统的一致性、可用性和分区容错性无法同时满足，这是 CAP 定理的核心结论。",
   "两阶段提交协议通过准备阶段和提交阶段保证分布式事务的原子性，但存在协调者单点故障问题。",
   "Raft 算法通过领导者选举、日志复制和安全性保证达成共识，日志条目只能由领导者追加。",
@@ -67,11 +70,11 @@ async function seed(): Promise<void> {
       (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (
         ${VERSION_ID}, ${NOTE_ID}, ${WORKSPACE_ID}, 1,
-        ${tx.json({ blocks: [{ type: "paragraph", content: CONTENT }] })},
+        ${tx.json({ blocks: [{ type: "paragraph", content: SAMPLE_CONTENT }] })},
         'p1-real-source-hash', ${USER_ID}
       ) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (version_id, workspace_id, ordinal, type, content)
-      VALUES (${VERSION_ID}, ${WORKSPACE_ID}, 0, 'paragraph', ${CONTENT})
+      VALUES (${VERSION_ID}, ${WORKSPACE_ID}, 0, 'paragraph', ${SAMPLE_CONTENT})
       ON CONFLICT DO NOTHING`;
     await tx`INSERT INTO card_generation_runs (
         id, workspace_id, note_id, note_version_id, requested_by,
@@ -81,8 +84,8 @@ async function seed(): Promise<void> {
         next_event_sequence, retryable, required_units, budget_snapshot
       ) VALUES (
         ${RUN_ID}, ${WORKSPACE_ID}, ${NOTE_ID}, ${VERSION_ID}, ${USER_ID},
-        'p1-real-e2e', 'p1-real-fp', 1,
-        'CAP 定理与分布式共识', 'p1-real-source-hash', 'block-hash', 'asset-hash',
+        ${`p1-real-e2e-${SAMPLE_ID}`}, ${`p1-real-fp-${SAMPLE_ID}`}, 1,
+        ${SAMPLE_TITLE}, 'p1-real-source-hash', 'block-hash', 'asset-hash',
         '[]'::jsonb, '[]'::jsonb, 'queued', 'queued', 1, 1, true, 1,
         ${tx.json({
           roles: {},
@@ -100,15 +103,16 @@ async function seed(): Promise<void> {
       VALUES (${RUN_ID}, ${WORKSPACE_ID}, 1, 'snapshot', 'queued', 1, 1, 'blocks', 'source_snapshot_sealed')
       ON CONFLICT DO NOTHING`;
     // prepare unit + job(仿 API service.ts 创建,worker 走真实 PREPARE 流程)
-    const PREPARE_UNIT_ID = "60000000-0000-4000-8000-000000000031";
+    const PREPARE_UNIT_ID = `60000000-0000-4000-8000-000000000${SAMPLE_ID}`;
+    await tx`DELETE FROM card_generation_units WHERE id = ${PREPARE_UNIT_ID}`;
     await tx`INSERT INTO card_generation_units
       (id, workspace_id, run_id, kind, level, ordinal, unit_key, required,
        input_manifest, input_hash, status, cursor_json, budget_json, usage_json)
       VALUES (
         ${PREPARE_UNIT_ID}, ${WORKSPACE_ID}, ${RUN_ID}, 'prepare', 0, 0,
         ${`prepare:${RUN_ID}`}, true,
-        ${tx.json({ density: "standard" })},
-        'p1-real-fp',
+                ${tx.json({ density: SAMPLE_DENSITY })},
+        ${`p1-real-fp-${SAMPLE_ID}`},
         'pending', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb
       ) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO jobs
@@ -116,7 +120,7 @@ async function seed(): Promise<void> {
        priority, resource_class, idempotency_key)
       VALUES (
         'execute_card_agent_turn', ${WORKSPACE_ID}, ${USER_ID},
-        ${tx.json({ noteVersionId: VERSION_ID, generationRunId: RUN_ID, agentUnitId: PREPARE_UNIT_ID, turnNo: 0, inputHash: "p1-real-fp", userId: USER_ID })},
+        ${tx.json({ noteVersionId: VERSION_ID, generationRunId: RUN_ID, agentUnitId: PREPARE_UNIT_ID, turnNo: 0, inputHash: `p1-real-fp-${SAMPLE_ID}`, userId: USER_ID })},
         'pending', ${RUN_ID}, ${PREPARE_UNIT_ID}, 'snapshot', 80, 'card_foreground',
         ${`generation-run:${RUN_ID}:prepare:0`}
       ) ON CONFLICT DO NOTHING`;
