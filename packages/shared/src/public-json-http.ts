@@ -98,14 +98,14 @@ async function resolvePublicAddress(hostname: string): Promise<PinnedAddress> {
 }
 
 /**
- * Validate a custom/personal AI endpoint URL without sending a request:
+ * Validate a custom AI endpoint URL without sending a request:
  * HTTPS-only, no inline credentials, and the hostname must resolve to a
  * public address. Used by transports (e.g. the DashScope fetch client) that
  * do not route through postJsonToPublicEndpoint's pinned request path.
  */
 export async function assertPublicHttpsAIEndpoint(url: string): Promise<void> {
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:") throw new Error("personal AI endpoints must use HTTPS");
+  if (parsed.protocol !== "https:") throw new Error("AI endpoints must use HTTPS");
   if (parsed.username || parsed.password) throw new Error("AI endpoint URL credentials are not allowed");
   await resolvePublicAddress(parsed.hostname);
 }
@@ -135,7 +135,7 @@ export const postJsonToPublicEndpoint: PublicJsonRequester = async (
   signal,
 ) => {
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:") throw new Error("personal AI endpoints must use HTTPS");
+  if (parsed.protocol !== "https:") throw new Error("AI endpoints must use HTTPS");
   if (parsed.username || parsed.password) throw new Error("AI endpoint URL credentials are not allowed");
   const pinned = await resolvePublicAddress(parsed.hostname);
   const encodedBody = Buffer.from(JSON.stringify(body));

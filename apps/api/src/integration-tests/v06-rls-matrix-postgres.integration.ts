@@ -209,8 +209,7 @@ async function seedLearningCardSet(
       title_snapshot,
       source_content_hash,
       block_manifest_hash,
-      asset_manifest_hash,
-      pipeline_version
+      asset_manifest_hash
     )
     VALUES (
       ${runId},
@@ -223,8 +222,7 @@ async function seedLearningCardSet(
       'RLS card set',
       'source-hash',
       'block-hash',
-      'asset-hash',
-      'card-generation-v2-m5'
+      'asset-hash'
     )
   `;
   await tx`

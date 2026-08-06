@@ -2,16 +2,13 @@
  * governance.ts DB 依赖函数补充测试
  *
  * 通过 mock db 对象的 transaction/query 属性，
- * 测试 checkAIConsent / getWorkspaceAIProvider / getPersonalAIProviderRuntimeConfig /
- * getWorkspaceAIPolicy / enforcePrivacyGovernance / logAICall 的核心业务逻辑分支。
+ * 测试 checkAIConsent / getWorkspaceAIPolicy / enforcePrivacyGovernance / logAICall 的核心业务逻辑分支。
  */
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import {
   checkAIConsent,
-  getWorkspaceAIProvider,
-  getPersonalAIProviderRuntimeConfig,
   getWorkspaceAIPolicy,
   enforcePrivacyGovernance,
   logAICall,
@@ -19,6 +16,7 @@ import {
   type AICallAuditParams,
 } from "../lib/governance.ts";
 import { db } from "../db.ts";
+import { setPlatformConfig, resetPlatformConfigCache } from "@ailearn/shared";
 
 const WS_ID = "00000000-0000-0000-0000-000000000001";
 const USER_ID = "00000000-0000-0000-0000-000000000002";
@@ -26,16 +24,13 @@ const USER_ID = "00000000-0000-0000-0000-000000000002";
 let originalTransaction: typeof db.transaction;
 let originalInsert: typeof db.insert;
 let originalWorkspacesFindFirst: any;
-let originalUserAIModelConfigsFindFirst: any;
 
 before(() => {
+  setPlatformConfig(null);
   originalTransaction = db.transaction;
   originalInsert = db.insert;
   if (db.query?.workspaces?.findFirst) {
     originalWorkspacesFindFirst = db.query.workspaces.findFirst;
-  }
-  if (db.query?.userAIModelConfigs?.findFirst) {
-    originalUserAIModelConfigsFindFirst = db.query.userAIModelConfigs.findFirst;
   }
 });
 
@@ -45,21 +40,15 @@ after(() => {
   if (originalWorkspacesFindFirst && db.query?.workspaces) {
     db.query.workspaces.findFirst = originalWorkspacesFindFirst;
   }
-  if (originalUserAIModelConfigsFindFirst && db.query?.userAIModelConfigs) {
-    db.query.userAIModelConfigs.findFirst = originalUserAIModelConfigsFindFirst;
-  }
+  resetPlatformConfigCache();
 });
 
 function setupDbMock(opts: {
   workspace?: any;
-  userAIModelConfig?: any;
   insertShouldThrow?: boolean;
 }) {
   if (db.query?.workspaces) {
     (db.query.workspaces.findFirst as any) = async () => opts.workspace ?? undefined;
-  }
-  if (db.query?.userAIModelConfigs) {
-    (db.query.userAIModelConfigs.findFirst as any) = async () => opts.userAIModelConfig ?? undefined;
   }
 
   let insertCallCount = 0;
@@ -140,93 +129,6 @@ describe("governance checkAIConsent (DB mock)", () => {
     });
     const result = await checkAIConsent(WS_ID, "openai_compatible");
     assert.equal(result, false);
-  });
-});
-
-// ─── getWorkspaceAIProvider ─────────────────────────────────────────────
-
-describe("governance getWorkspaceAIProvider (DB mock)", () => {
-  it("工作区有 aiProvider 时返回小写", async () => {
-    setupDbMock({
-      workspace: { id: WS_ID, aiProvider: "DashScope" },
-    });
-    const result = await getWorkspaceAIProvider(WS_ID);
-    assert.equal(result, "dashscope");
-  });
-
-  it("工作区无 aiProvider 时回退到环境变量", async () => {
-    const oldEnv = process.env.AI_PROVIDER_CARD;
-    process.env.AI_PROVIDER_CARD = "openai_compatible";
-    try {
-      setupDbMock({ workspace: { id: WS_ID, aiProvider: null } });
-      const result = await getWorkspaceAIProvider(WS_ID);
-      assert.equal(result, "openai_compatible");
-    } finally {
-      if (oldEnv === undefined) delete process.env.AI_PROVIDER_CARD;
-      else process.env.AI_PROVIDER_CARD = oldEnv;
-    }
-  });
-
-  it("工作区不存在时回退到 mock", async () => {
-    const oldEnv = process.env.AI_PROVIDER_CARD;
-    delete process.env.AI_PROVIDER_CARD;
-    try {
-      setupDbMock({ workspace: undefined });
-      const result = await getWorkspaceAIProvider(WS_ID);
-      assert.equal(result, "mock");
-    } finally {
-      if (oldEnv !== undefined) process.env.AI_PROVIDER_CARD = oldEnv;
-    }
-  });
-});
-
-// ─── getPersonalAIProviderRuntimeConfig ─────────────────────────────────
-
-describe("governance getPersonalAIProviderRuntimeConfig (DB mock)", () => {
-  it("用户无个人配置时返回 null", async () => {
-    setupDbMock({ userAIModelConfig: undefined });
-    const result = await getPersonalAIProviderRuntimeConfig(USER_ID);
-    assert.equal(result, null);
-  });
-
-  it("旧 mock 记录按系统默认处理，不再形成个人覆盖", async () => {
-    setupDbMock({
-      userAIModelConfig: { provider: "mock", baseUrl: null, model: null, apiKeyEncrypted: null },
-    });
-    const result = await getPersonalAIProviderRuntimeConfig(USER_ID);
-    assert.equal(result, null);
-  });
-
-  it("用户配置不完整时抛错", async () => {
-    setupDbMock({
-      userAIModelConfig: {
-        provider: "dashscope",
-        baseUrl: null,
-        model: "qwen-turbo",
-        apiKeyEncrypted: "encrypted-key",
-      },
-    });
-    await assert.rejects(
-      () => getPersonalAIProviderRuntimeConfig(USER_ID),
-      /incomplete/,
-    );
-  });
-
-  it("用户配置为 openai_compatible 时抛错（因为需要 decryptAiCredential）", async () => {
-    setupDbMock({
-      userAIModelConfig: {
-        provider: "openai_compatible",
-        baseUrl: "https://api.openai.com",
-        model: "gpt-4",
-        apiKeyEncrypted: "encrypted-key-data",
-      },
-    });
-    // decryptAiCredential requires a specific format that we can't easily mock
-    // This test just verifies the flow reaches the decryption point
-    await assert.rejects(
-      () => getPersonalAIProviderRuntimeConfig(USER_ID),
-      /unsupported AI credential ciphertext format|could not be decrypted/,
-    );
   });
 });
 
@@ -340,7 +242,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "generate_card",
+      operation: "execute_card_agent_turn",
     };
     const result = await logAICall(params);
     assert.equal(result, true);
@@ -355,7 +257,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "generate_card",
+      operation: "execute_card_agent_turn",
     };
     const result = await logAICall(params);
     assert.equal(result, false);
@@ -368,7 +270,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "mock",
       modelId: "mock-model",
-      operation: "generate_card",
+      operation: "execute_card_agent_turn",
     };
     let written = false;
     const result = await logAICall(params, {
@@ -389,7 +291,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "generate_card",
+      operation: "execute_card_agent_turn",
     };
     const result = await logAICall(params);
     assert.equal(result, false);
@@ -401,7 +303,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "generate_card",
+      operation: "execute_card_agent_turn",
     };
     const result = await logAICall(params, {
       getPolicy: async () => ({ sendToExternal: true, piiDetection: true, auditLogging: true }),

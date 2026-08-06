@@ -137,9 +137,12 @@ test("v0.6 导出：restoreWorkspace 恢复所有 v0.6 新表数据", () => {
 
 test("v0.6 导出：restoreWorkspace 对每个 v0.6 新表执行 insert", () => {
   const source = readExportService();
+  // restoreTable(tx, table, ...) 可能跨行，移除全部空白后匹配。
+  const flattened = source.replace(/\s+/g, "");
 
   // Check that restore has insert calls for v0.6 tables
-  // Look for patterns like "tx.insert(validationQuestionRubricItems)"
+  // PERF-40 后 restore 统一走 restoreTable(tx, table, data[table], ...)，
+  // 兼容旧的 tx.insert(table) 直插模式。
   const insertPatterns = [
     "validationQuestionRubricItems",
     "validationSubmissions",
@@ -152,9 +155,11 @@ test("v0.6 导出：restoreWorkspace 对每个 v0.6 新表执行 insert", () => 
   ];
 
   for (const table of insertPatterns) {
-    // The insert should appear in the restore section
+    const directInsert = flattened.includes(`tx.insert(${table})`)
+      || flattened.includes(`.insert(${table})`);
+    const restoreTableCall = flattened.includes(`restoreTable(tx,${table},`);
     assert.ok(
-      source.includes(`tx.insert(${table})`) || source.includes(`.insert(${table})`),
+      directInsert || restoreTableCall,
       `Restore should insert into ${table}`,
     );
   }
@@ -387,4 +392,33 @@ test("v0.6 导出：现有表 v0.6 扩展字段在导出中包含", () => {
     source.includes("aiArtifacts") || source.includes("ai_artifacts"),
     "Export should include ai_artifacts with v0.6 fields",
   );
+});
+
+// ─── v0.6 单一配置源重构（计划 §7.2）────────────────────────────────────
+
+test("v0.6 单一配置源：导出载荷不再携带 aiProvider", () => {
+  const source = readExportService();
+
+  // 导出的 workspace 对象不应包含 aiProvider 字段
+  // 检查 workspace 导出块中不出现 aiProvider 赋值
+  const workspaceExportBlock = source.match(
+    /workspace:\s*workspace\s*\?[\s\S]*?\{[\s\S]*?\}/,
+  );
+  if (workspaceExportBlock) {
+    assert.ok(
+      !workspaceExportBlock[0].includes("aiProvider"),
+      "Export workspace block should not contain aiProvider field (removed in 0065 migration)",
+    );
+  }
+
+  // 恢复时不应写入 aiProvider
+  const restoreBlock = source.match(
+    /exportedWorkspace[\s\S]*?\.update\(workspaces\)[\s\S]*?\.set\([\s\S]*?\)/,
+  );
+  if (restoreBlock) {
+    assert.ok(
+      !restoreBlock[0].includes("aiProvider"),
+      "Restore workspace block should not write aiProvider (removed in 0065 migration)",
+    );
+  }
 });

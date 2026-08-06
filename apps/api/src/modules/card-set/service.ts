@@ -9,9 +9,8 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import { ArtifactStatus, ReviewStatus } from "@ailearn/shared";
+import { ReviewStatus } from "@ailearn/shared";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { aiArtifacts } from "../../db/schema/ai.ts";
 import {
   cardKeyPoints,
   learningCards,
@@ -31,7 +30,7 @@ import {
 } from "../../lib/pagination.ts";
 import {
   createCardGenerationRun,
-  getLegacyGenerationCompatibility,
+  getGenerationRunStatus,
 } from "../card-generation/service.ts";
 
 export class CardSetServiceError extends Error {
@@ -263,53 +262,6 @@ export async function listCardSets(
   });
 }
 
-export async function acceptCardSet(
-  cardSetId: string,
-  workspaceId: string,
-  userId: string,
-) {
-  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
-    const [cardSet] = await tx
-      .select()
-      .from(learningCardSets)
-      .where(and(
-        eq(learningCardSets.id, cardSetId),
-        eq(learningCardSets.workspaceId, workspaceId),
-      ))
-      .for("update");
-    if (!cardSet) return null;
-    if (cardSet.status !== "active") {
-      throw new CardSetServiceError(
-        "card_set_not_acceptable",
-        409,
-        "只有当前完整卡组可以被接受",
-      );
-    }
-    const cards = await tx
-      .select({ artifactId: learningCards.artifactId })
-      .from(learningCards)
-      .where(and(
-        eq(learningCards.workspaceId, workspaceId),
-        eq(learningCards.cardSetId, cardSet.id),
-      ));
-    const artifactIds = cards.flatMap((card) =>
-      card.artifactId ? [card.artifactId] : []);
-    if (artifactIds.length > 0) {
-      await tx
-        .update(aiArtifacts)
-        .set({ status: ArtifactStatus.ACCEPTED })
-        .where(and(
-          eq(aiArtifacts.workspaceId, workspaceId),
-          inArray(aiArtifacts.id, artifactIds),
-        ));
-    }
-    return {
-      cardSetId: cardSet.id,
-      acceptedArtifactCount: artifactIds.length,
-    };
-  });
-}
-
 export async function dismissCardSet(
   cardSetId: string,
   workspaceId: string,
@@ -362,81 +314,90 @@ export async function dismissCardSet(
         ));
       const keyPointIds = keyPoints.map((keyPoint) => keyPoint.id);
       const validationEventIds = events.map((event) => event.id);
-      await tx
-        .update(learningCards)
-        .set({ status: "archived", updatedAt: now })
-        .where(and(
-          eq(learningCards.workspaceId, workspaceId),
-          inArray(learningCards.id, cardIds),
-        ));
-      await tx
-        .update(reviewSchedules)
-        .set({ status: ReviewStatus.SUPERSEDED, updatedAt: now })
-        .where(and(
-          eq(reviewSchedules.workspaceId, workspaceId),
-          eq(reviewSchedules.status, ReviewStatus.PENDING),
-          eq(reviewSchedules.subjectType, "card"),
-          inArray(reviewSchedules.subjectId, cardIds),
-        ));
-      if (keyPointIds.length > 0) {
-        await tx
+      // PERF-44 修复：以下多个 UPDATE/DELETE 互相独立（操作不同表/不同条件），
+      // 可以并行执行，避免串行等待。
+      const updatePromises: Promise<unknown>[] = [
+        tx
+          .update(learningCards)
+          .set({ status: "archived", updatedAt: now })
+          .where(and(
+            eq(learningCards.workspaceId, workspaceId),
+            inArray(learningCards.id, cardIds),
+          )),
+        tx
           .update(reviewSchedules)
           .set({ status: ReviewStatus.SUPERSEDED, updatedAt: now })
           .where(and(
             eq(reviewSchedules.workspaceId, workspaceId),
             eq(reviewSchedules.status, ReviewStatus.PENDING),
-            inArray(reviewSchedules.keyPointId, keyPointIds),
-          ));
-      }
-      if (validationEventIds.length > 0) {
-        await tx
-          .update(reviewSchedules)
-          .set({ status: ReviewStatus.SUPERSEDED, updatedAt: now })
+            eq(reviewSchedules.subjectType, "card"),
+            inArray(reviewSchedules.subjectId, cardIds),
+          )),
+        tx
+          .update(validationQuestions)
+          .set({ status: "superseded", supersededAt: now })
           .where(and(
-            eq(reviewSchedules.workspaceId, workspaceId),
-            eq(reviewSchedules.status, ReviewStatus.PENDING),
+            eq(validationQuestions.workspaceId, workspaceId),
+            inArray(validationQuestions.cardId, cardIds),
+            eq(validationQuestions.status, "active"),
+          )),
+        tx
+          .delete(searchDocuments)
+          .where(and(
+            eq(searchDocuments.workspaceId, workspaceId),
             or(
-              inArray(
-                reviewSchedules.validationEventId,
-                validationEventIds,
+              and(
+                eq(searchDocuments.objectType, "card_set"),
+                eq(searchDocuments.objectId, cardSet.id),
               ),
               and(
-                eq(reviewSchedules.subjectType, "validation"),
-                inArray(reviewSchedules.subjectId, validationEventIds),
+                eq(searchDocuments.objectType, "card"),
+                inArray(searchDocuments.objectId, cardIds),
+              ),
+              and(
+                eq(searchDocuments.objectType, "evidence"),
+                inArray(
+                  sql<string>`${searchDocuments.metadata}->>'cardId'`,
+                  cardIds,
+                ),
               ),
             ),
-          ));
+          )),
+      ];
+      if (keyPointIds.length > 0) {
+        updatePromises.push(
+          tx
+            .update(reviewSchedules)
+            .set({ status: ReviewStatus.SUPERSEDED, updatedAt: now })
+            .where(and(
+              eq(reviewSchedules.workspaceId, workspaceId),
+              eq(reviewSchedules.status, ReviewStatus.PENDING),
+              inArray(reviewSchedules.keyPointId, keyPointIds),
+            )),
+        );
       }
-      await tx
-        .update(validationQuestions)
-        .set({ status: "superseded", supersededAt: now })
-        .where(and(
-          eq(validationQuestions.workspaceId, workspaceId),
-          inArray(validationQuestions.cardId, cardIds),
-          eq(validationQuestions.status, "active"),
-        ));
-      await tx
-        .delete(searchDocuments)
-        .where(and(
-          eq(searchDocuments.workspaceId, workspaceId),
-          or(
-            and(
-              eq(searchDocuments.objectType, "card_set"),
-              eq(searchDocuments.objectId, cardSet.id),
-            ),
-            and(
-              eq(searchDocuments.objectType, "card"),
-              inArray(searchDocuments.objectId, cardIds),
-            ),
-            and(
-              eq(searchDocuments.objectType, "evidence"),
-              inArray(
-                sql<string>`${searchDocuments.metadata}->>'cardId'`,
-                cardIds,
+      if (validationEventIds.length > 0) {
+        updatePromises.push(
+          tx
+            .update(reviewSchedules)
+            .set({ status: ReviewStatus.SUPERSEDED, updatedAt: now })
+            .where(and(
+              eq(reviewSchedules.workspaceId, workspaceId),
+              eq(reviewSchedules.status, ReviewStatus.PENDING),
+              or(
+                inArray(
+                  reviewSchedules.validationEventId,
+                  validationEventIds,
+                ),
+                and(
+                  eq(reviewSchedules.subjectType, "validation"),
+                  inArray(reviewSchedules.subjectId, validationEventIds),
+                ),
               ),
-            ),
-          ),
-        ));
+            )),
+        );
+      }
+      await Promise.all(updatePromises);
     } else {
       await tx
         .delete(searchDocuments)
@@ -452,7 +413,7 @@ export async function dismissCardSet(
 
 type RegenerateCardSetDependencies = {
   createRun?: typeof createCardGenerationRun;
-  getCompatibility?: typeof getLegacyGenerationCompatibility;
+  getCompatibility?: typeof getGenerationRunStatus;
 };
 
 export async function regenerateCardSet(
@@ -480,7 +441,7 @@ export async function regenerateCardSet(
     const noteVersionId = note.currentVersionId ?? cardSet.noteVersionId;
     const createRun = dependencies.createRun ?? createCardGenerationRun;
     const getCompatibility =
-      dependencies.getCompatibility ?? getLegacyGenerationCompatibility;
+      dependencies.getCompatibility ?? getGenerationRunStatus;
     // 幂等键从 (cardSetId, noteVersionId) 派生：HTTP 重试/双击不再各自创建
     // 一个 run（第二个 run 立即 supersede 第一个，浪费整次生成）。用户在新
     // 版本或新 epoch 下再次触发时键会变化，仍可正常发起新的重新生成。

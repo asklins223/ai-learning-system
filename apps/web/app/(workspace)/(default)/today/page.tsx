@@ -120,7 +120,7 @@ function sourceTypeLabel(type: SourceType): string {
 
 function jobLabel(type: string): string {
   switch (type) {
-    case "generate_card":
+    case "execute_card_agent_turn":
       return "生成学习卡";
     case "evaluate_validation":
       return "评估验证";

@@ -48,6 +48,13 @@ export class WorkspaceTransactionContextError extends Error {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * 无具体 actor 的工作区级操作使用固定的系统身份（nil UUID）。
+ * 满足 RLS 上下文的 UUID 校验；生产路由总是传入已认证的 session user，
+ * 该常量只服务于测试/内部调用方按工作区聚合、不带用户过滤的路径。
+ */
+export const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
+
 function normalizeContextUuid(value: string, field: "workspaceId" | "userId"): string {
   const normalized = value.trim().toLowerCase();
   if (!UUID_PATTERN.test(normalized)) {
@@ -132,6 +139,25 @@ export async function setApiTransactionContext(
  * Run one application unit of work with transaction-local tenant context.
  * Same-context nesting reuses the active transaction; context changes fail
  * before any query can execute.
+ *
+ * ─── QUAL-58/SEC-26 修复完成 ───────────────────────────────────────────
+ * `withWorkspaceTransaction` 现已在所有需要 workspace 隔离的 API 模块中使用
+ * （note、card、evidence、job、export、validation、stats、understanding、
+ * review、benchmark 等）。
+ *
+ * 已完成的统一工作：
+ *   1. benchmark/service.ts 的 3 处 db.transaction 已转为 withWorkspaceTransaction
+ *   2. stats/service.ts 的裸 db 查询已包裹在 withWorkspaceTransaction 内
+ *   3. understanding/service.ts 的裸 db 查询已包裹在 withWorkspaceTransaction 内
+ *   4. validation/service.ts 的裸 db 查询已包裹在 withWorkspaceTransaction 内
+ *   5. review/service.ts 的 tx ?? db 回退模式已改为 withWorkspaceTransaction 包裹
+ *
+ * 保留直接使用 `db` 的场景（有意为之）：
+ *   - identity/service.ts：注册/登录等操作在 workspace 建前执行
+ *   - 系统级函数（maintenance、seed 等）
+ *
+ * 最终目标：启用 RLS FORCE 模式后，所有运行时查询自动受 RLS 保护
+ * ──────────────────────────────────────────────────────────────────────
  */
 export async function withWorkspaceTransaction<T>(
   context: WorkspaceTransactionContext,

@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { db, withWorkspaceTransaction } from "../../db/client.ts";
+import { withWorkspaceTransaction } from "../../db/client.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { and, eq, count, inArray, sql } from "drizzle-orm";
 import {
@@ -8,10 +7,6 @@ import {
   JobStatus,
   MAX_PENDING_JOBS_PER_WORKSPACE,
 } from "@ailearn/shared";
-import {
-  createCardGenerationRun,
-  getLegacyGenerationCompatibility,
-} from "../card-generation/service.ts";
 
 export interface CreateJobInput {
   type: JobType;
@@ -31,8 +26,6 @@ function jobScheduling(type: JobType): { priority: number; resourceClass: string
       return { priority: 100, resourceClass: JobResourceClass.INTERACTIVE_AI };
     case JobType.PARSE_SOURCE:
       return { priority: 70, resourceClass: JobResourceClass.CARD_FOREGROUND };
-    case JobType.GENERATE_CARD:
-      return { priority: 50, resourceClass: JobResourceClass.CARD_FOREGROUND };
     case JobType.ALIGN_EVIDENCE:
       return { priority: 10, resourceClass: JobResourceClass.MAINTENANCE };
     default:
@@ -113,73 +106,57 @@ export async function createJob(input: CreateJobInput) {
   );
 }
 
-export type GenerateCardEnqueueResult = {
-  state: "generating" | "generated";
-  cardId: string | null;
-  jobId: string | null;
-  generatedVersionId: string | null;
-};
-
 /**
- * Atomically hydrate/dedupe/enqueue generation for one note version.
- *
- * The public status read and the worker can commit between two ordinary
- * queries. Repeating the active-card and active-job checks under the same
- * workspace advisory lock used by the worker closes that window.
+ * BUG-73 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）。
  */
-export async function createGenerateCardJob(input: {
-  workspaceId: string;
-  userId: string;
-  noteId: string;
-  noteVersionId: string;
-}): Promise<GenerateCardEnqueueResult> {
-  const context = { workspaceId: input.workspaceId, userId: input.userId };
-  const run = await createCardGenerationRun(
-    context,
-    {
-      noteVersionId: input.noteVersionId,
-      idempotencyKey: `legacy-service:${randomUUID()}`,
+export async function listJobs(workspaceId: string, userId: string) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
+      const rows = await tx.query.jobs.findMany({
+        where: eq(jobs.workspaceId, workspaceId),
+        orderBy: (j, { desc }) => [desc(j.scheduledAt)],
+        limit: 50,
+      });
+      // R-006: 脱敏 — 不返回 payload 中的敏感字段（question/userAnswer/userId）和完整 lastError
+      return rows.map((j) => ({
+        id: j.id,
+        type: j.type,
+        status: j.status,
+        attempts: j.attempts,
+        scheduledAt: j.scheduledAt,
+        startedAt: j.startedAt,
+        finishedAt: j.finishedAt,
+        lastError: j.lastError ? "error occurred" : null,
+      }));
     },
   );
-  const compatibility = await getLegacyGenerationCompatibility(context, run.runId);
-  if (!compatibility) throw new Error("generation run disappeared after creation");
-  return compatibility;
 }
 
-export async function listJobs(workspaceId: string) {
-  const rows = await db.query.jobs.findMany({
-    where: eq(jobs.workspaceId, workspaceId),
-    orderBy: (j, { desc }) => [desc(j.scheduledAt)],
-    limit: 50,
-  });
-  // R-006: 脱敏 — 不返回 payload 中的敏感字段（question/userAnswer/userId）和完整 lastError
-  return rows.map((j) => ({
-    id: j.id,
-    type: j.type,
-    status: j.status,
-    attempts: j.attempts,
-    scheduledAt: j.scheduledAt,
-    startedAt: j.startedAt,
-    finishedAt: j.finishedAt,
-    lastError: j.lastError ? "error occurred" : null,
-  }));
-}
-
-// 防御纵深：service 层也按 workspaceId 过滤，route 已做一层但避免被绕过。
-export async function getJob(id: string, workspaceId: string) {
-  const job = await db.query.jobs.findFirst({
-    where: and(eq(jobs.id, id), eq(jobs.workspaceId, workspaceId)),
-  });
-  if (!job) return null;
-  // R-006: 脱敏 — 不返回 payload 和完整 lastError
-  return {
-    id: job.id,
-    type: job.type,
-    status: job.status,
-    attempts: job.attempts,
-    scheduledAt: job.scheduledAt,
-    startedAt: job.startedAt,
-    finishedAt: job.finishedAt,
-    lastError: job.lastError ? "error occurred" : null,
-  };
+/**
+ * 防御纵深：service 层也按 workspaceId 过滤，route 已做一层但避免被绕过。
+ *
+ * BUG-73 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）。
+ */
+export async function getJob(id: string, workspaceId: string, userId: string) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
+      const job = await tx.query.jobs.findFirst({
+        where: and(eq(jobs.id, id), eq(jobs.workspaceId, workspaceId)),
+      });
+      if (!job) return null;
+      // R-006: 脱敏 — 不返回 payload 和完整 lastError
+      return {
+        id: job.id,
+        type: job.type,
+        status: job.status,
+        attempts: job.attempts,
+        scheduledAt: job.scheduledAt,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        lastError: job.lastError ? "error occurred" : null,
+      };
+    },
+  );
 }

@@ -39,7 +39,7 @@ export function jobStatusMeta(status: string): { tone: "verified" | "running" | 
 /** 任务类型 → 中文文案。 */
 export function jobTypeLabel(type: string): string {
   switch (type) {
-    case "generate_card":
+    case "execute_card_agent_turn":
       return "生成学习卡";
     case "align_evidence":
       return "对齐证据";

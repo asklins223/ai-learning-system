@@ -8,6 +8,12 @@ import { getSanitizedReviewMeta, listReviews } from "../modules/review/service.t
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const USER_ID = "00000000-0000-4000-8000-000000000002";
 const mutableDb = db as any;
+// QUAL-58/SEC-26 后服务无 tx 时走 withWorkspaceTransaction（真实 db.transaction），
+// 单元测试直接传入 fake tx 跳过 RLS 上下文设置。
+const FAKE_TX = {
+  query: mutableDb.query,
+  select: (...args: unknown[]) => mutableDb.select(...args),
+} as any;
 const original = {
   select: mutableDb.select,
   reviewSchedulesFindMany: mutableDb.query.reviewSchedules.findMany,
@@ -91,19 +97,19 @@ describe("review listing filters and empty boundaries", () => {
   it("supports include-all, terminal status, and pending filters without hydrating empty pages", async () => {
     installReviewDb({ total: 0 });
 
-    assert.deepEqual(await listReviews(WORKSPACE_ID, { includeAll: true }), {
+    assert.deepEqual(await listReviews(WORKSPACE_ID, { includeAll: true }, undefined, FAKE_TX), {
       items: [], total: 0, nextOffset: null,
     });
-    assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.COMPLETED }, USER_ID), {
+    assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.COMPLETED }, USER_ID, FAKE_TX), {
       items: [], total: 0, nextOffset: null,
     });
-    assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.DISMISSED }), {
+    assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.DISMISSED }, undefined, FAKE_TX), {
       items: [], total: 0, nextOffset: null,
     });
-    assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.PENDING }, USER_ID), {
+    assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.PENDING }, USER_ID, FAKE_TX), {
       items: [], total: 0, nextOffset: null,
     });
-    assert.deepEqual(await listReviews(WORKSPACE_ID, {}, undefined), {
+    assert.deepEqual(await listReviews(WORKSPACE_ID, {}, undefined, FAKE_TX), {
       items: [], total: 0, nextOffset: null,
     });
   });
@@ -115,7 +121,7 @@ describe("review listing filters and empty boundaries", () => {
       validations: [],
     });
 
-    assert.deepEqual(await listReviews(WORKSPACE_ID, { includeAll: true }), {
+    assert.deepEqual(await listReviews(WORKSPACE_ID, { includeAll: true }, undefined, FAKE_TX), {
       items: [], total: 1, nextOffset: null,
     });
   });
@@ -169,6 +175,7 @@ describe("review hydration and reason derivation", () => {
       WORKSPACE_ID,
       { limit: 1000, offset: 2 },
       USER_ID,
+      FAKE_TX,
     );
 
     assert.equal(result.total, 10);
@@ -200,7 +207,7 @@ describe("review hydration and reason derivation", () => {
       ],
     });
 
-    const result = await listReviews(WORKSPACE_ID, { includeAll: true });
+    const result = await listReviews(WORKSPACE_ID, { includeAll: true }, undefined, FAKE_TX);
 
     assert.equal(result.items[0]!.keyPoint?.id, "kp-first");
     assert.equal(result.items[0]!.reviewReason, "evidence_gap");
@@ -215,7 +222,7 @@ describe("review hydration and reason derivation", () => {
       keyPoints: [],
     });
 
-    const result = await listReviews(WORKSPACE_ID, { includeAll: true }, USER_ID);
+    const result = await listReviews(WORKSPACE_ID, { includeAll: true }, USER_ID, FAKE_TX);
 
     assert.equal(result.items[0]!.keyPoint, null);
     assert.equal(result.items[0]!.blockContent, null);
@@ -253,6 +260,7 @@ describe("legacy review Focus metadata", () => {
       WORKSPACE_ID,
       "schedule-validation",
       USER_ID,
+      FAKE_TX,
     );
 
     assert.equal(result?.cardId, "card-1");
@@ -287,6 +295,7 @@ describe("legacy review Focus metadata", () => {
       WORKSPACE_ID,
       "schedule-card",
       USER_ID,
+      FAKE_TX,
     );
 
     assert.equal(result?.cardId, "card-legacy");
@@ -314,6 +323,7 @@ describe("legacy review Focus metadata", () => {
       WORKSPACE_ID,
       "schedule-inactive-set",
       USER_ID,
+      FAKE_TX,
     );
 
     assert.equal(result, null);

@@ -3,7 +3,7 @@
  *
  * 流程：
  * 1. 从 submission 读取锁定的答案、question 和 rubric items
- * 2. 调用 provider.evaluateRubric 获取逐项评估
+ * 2. 调用 evaluateRubricViaChat(provider, input) → chatCompletion + zod 校验
  * 3. 校验输出（一一对应、无未知 ID、answerExcerpt 是真实子串）
  * 4. 运行 reduceRubric 确定性 reducer 计算 outcome
  * 5. 事务内：写 assessments、validation event、understanding event 和 schedule
@@ -19,10 +19,12 @@ import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { createProvider } from "../lib/ai-provider.ts";
+import { evaluateRubricViaChat } from "../lib/business-ai-ops.ts";
 import {
   enforcePrivacyGovernanceWithPolicy,
   logAICall,
   resolveAIGovernanceContext,
+  resolveProviderForTask,
 } from "../lib/governance.ts";
 import {
   assertJobLease,
@@ -178,6 +180,9 @@ const userId = requireAuditUserId(job);
     throw new Error("AI consent not signed for this workspace");
   }
 
+  // R3: Route text_generation tasks to a potentially different (cheaper) provider
+  const textRes = resolveProviderForTask(govCtx, "evaluate_rubric");
+
   const governanceResult = enforcePrivacyGovernanceWithPolicy(
     govCtx.policy,
     job.workspaceId,
@@ -187,21 +192,22 @@ const userId = requireAuditUserId(job);
       questionType: question.questionType,
       userAnswer: submission.userAnswer,
     },
-    govCtx.providerName,
+    textRes.providerName,
   );
   if (!governanceResult.allowed) {
     throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
   }
 
-  const provider = createProvider(govCtx.providerName, govCtx.providerConfig);
+  const provider = createProvider(textRes.providerName, textRes.providerConfig);
   const aiCallStart = Date.now();
 
   let evalOutput: EvaluateRubricOutput | null = null;
   let aiError: Error | null = null;
+  let rubricUsage: { totalTokens?: number | null } | null = null;
 
   try {
-    const rawOutput = await runWithAbortBudget(
-      (signal) => provider.evaluateRubric(providerInput, signal),
+    const result = await runWithAbortBudget(
+      (signal) => evaluateRubricViaChat(provider, providerInput, signal),
       job.signal,
       resolveProviderCallTimeout("evaluate_validation"),
       (lateError) => logger.warn(
@@ -209,7 +215,8 @@ const userId = requireAuditUserId(job);
         "rubric provider settled after its call budget expired",
       ),
     );
-    const parsed = evaluateRubricOutputSchema.safeParse(rawOutput);
+    rubricUsage = result.usage;
+    const parsed = evaluateRubricOutputSchema.safeParse(result.output);
     if (!parsed.success) {
       throw new Error(`evaluateRubric output schema validation failed: ${parsed.error.message}`);
     }
@@ -308,7 +315,7 @@ const userId = requireAuditUserId(job);
         operation: "evaluate_rubric",
       dataCategories: ["question", "user_answer"],
       dataSizeBytes: JSON.stringify(providerInput).length,
-      costTokens: provider.getLastUsage()?.totalTokens ?? null,
+      costTokens: rubricUsage?.totalTokens ?? null,
       durationMs: Date.now() - aiCallStart,
       status: "failed",
       errorMessage: aiError?.message ?? "contract violation",
@@ -578,7 +585,7 @@ const userId = requireAuditUserId(job);
         promptVersion: provider.promptVersion,
         status: ArtifactStatus.READY,
         inputHash, // 计划 §6.6: 输入指纹，用于幂等去重
-        costTokens: provider.getLastUsage()?.totalTokens ?? null, // 计划 §6.6, §10.5: Provider usage tokens
+        costTokens: rubricUsage?.totalTokens ?? null, // R5: usage from return value
       })
       .returning();
 
@@ -987,7 +994,7 @@ const userId = requireAuditUserId(job);
       operation: "evaluate_rubric",
       dataCategories: ["question", "user_answer"],
       dataSizeBytes: JSON.stringify(providerInput).length,
-      costTokens: provider.getLastUsage()?.totalTokens ?? null,
+      costTokens: rubricUsage?.totalTokens ?? null,
       durationMs: Date.now() - aiCallStart,
       status: "success",
     });

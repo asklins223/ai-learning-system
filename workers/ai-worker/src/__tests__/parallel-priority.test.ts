@@ -35,7 +35,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 function makeJob(overrides: Partial<ClaimedJob> = {}): ClaimedJob {
   return {
     id: `job-${Math.random().toString(36).slice(2, 10)}`,
-    type: "generate_card",
+    type: "execute_card_agent_turn",
     payload: {},
     workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
     requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -70,7 +70,7 @@ function createFencingUpdater(): {
 
 test("并行处理：3 个 job 并行执行时各自使用独立 lease token 进行 fencing", async () => {
   const jobs: ClaimedJob[] = [
-    makeJob({ id: "job-a", type: "generate_card", leaseToken: "lease-a" }),
+    makeJob({ id: "job-a", type: "execute_card_agent_turn", leaseToken: "lease-a" }),
     makeJob({ id: "job-b", type: "align_evidence", leaseToken: "lease-b" }),
     makeJob({ id: "job-c", type: "evaluate_validation", leaseToken: "lease-c" }),
   ];
@@ -104,8 +104,8 @@ test("并行处理：3 个 job 并行执行时各自使用独立 lease token 进
 
 test("并行处理：一个 job 失败不会阻止其他 job 成功提交", async () => {
   const jobs: ClaimedJob[] = [
-    makeJob({ id: "job-success-1", type: "generate_card", leaseToken: "lease-1" }),
-    makeJob({ id: "job-fail", type: "generate_card", leaseToken: "lease-2", attempts: 0 }),
+    makeJob({ id: "job-success-1", type: "execute_card_agent_turn", leaseToken: "lease-1" }),
+    makeJob({ id: "job-fail", type: "execute_card_agent_turn", leaseToken: "lease-2", attempts: 0 }),
     makeJob({ id: "job-success-2", type: "align_evidence", leaseToken: "lease-3" }),
   ];
 
@@ -141,8 +141,8 @@ test("并行处理：一个 job 失败不会阻止其他 job 成功提交", asyn
 
 test("并行处理：lease 丢失的 job 不影响其他 job 的状态转换", async () => {
   const jobs: ClaimedJob[] = [
-    makeJob({ id: "job-reaped", type: "generate_card", leaseToken: "lease-reaped" }),
-    makeJob({ id: "job-normal", type: "generate_card", leaseToken: "lease-normal" }),
+    makeJob({ id: "job-reaped", type: "execute_card_agent_turn", leaseToken: "lease-reaped" }),
+    makeJob({ id: "job-normal", type: "execute_card_agent_turn", leaseToken: "lease-normal" }),
   ];
 
   const { updater, updates, revokedLeases } = createFencingUpdater();
@@ -181,7 +181,7 @@ test("并行处理：lease 丢失的 job 不影响其他 job 的状态转换", a
 
 test("并行处理：未知 job 类型在并行环境中正确标记为 dead", async () => {
   const jobs: ClaimedJob[] = [
-    makeJob({ id: "job-known", type: "generate_card", leaseToken: "lease-known" }),
+    makeJob({ id: "job-known", type: "execute_card_agent_turn", leaseToken: "lease-known" }),
     makeJob({ id: "job-unknown", type: "nonexistent_type", leaseToken: "lease-unknown" }),
   ];
 
@@ -189,7 +189,7 @@ test("并行处理：未知 job 类型在并行环境中正确标记为 dead", a
 
   // 模拟 processJob 中对未知类型的处理
   const processJobLike = async (job: ClaimedJob) => {
-    const knownTypes = new Set(["generate_card", "align_evidence", "evaluate_validation", "parse_source"]);
+    const knownTypes = new Set(["execute_card_agent_turn", "align_evidence", "evaluate_validation", "parse_source"]);
     if (!knownTypes.has(job.type)) {
       await markUnknownJobFailed(job, updater);
       return;
@@ -268,7 +268,8 @@ test("队列优先级：migration 0030 的 ORDER BY 包含正确的优先级映�
   // 验证优先级 CASE 表达式存在且值正确
   assert.ok(sql.includes("WHEN 'evaluate_validation' THEN 10"), "evaluate_validation 优先级应为 10");
   assert.ok(sql.includes("WHEN 'parse_source' THEN 8"), "parse_source 优先级应为 8");
-  assert.ok(sql.includes("WHEN 'generate_card' THEN 5"), "generate_card 优先级应为 5");
+  // 历史迁移 0030 中仍包含 generate_card 的优先级映射（已废弃但迁移文件不可修改）
+  assert.ok(sql.includes("WHEN 'generate_card' THEN 5"), "generate_card 优先级应为 5（历史迁移保留）");
   assert.ok(sql.includes("WHEN 'align_evidence' THEN 1"), "align_evidence 优先级应为 1");
   assert.ok(sql.includes("ELSE 5"), "未知类型默认优先级应为 5");
 
@@ -288,14 +289,15 @@ test("队列优先级：migration 0030 的 ORDER BY 包含正确的优先级映�
   assert.ok(sql.includes("SKIP LOCKED"), "应保留 SKIP LOCKED 以支持多 Worker 并发 claim");
 });
 
-test("队列优先级：evaluate_validation (10) > parse_source (8) > generate_card (5) > align_evidence (1)", () => {
+test("队列优先级：evaluate_validation (10) > parse_source (8) > execute_card_agent_turn (5) > align_evidence (1)", () => {
   // 验证优先级数值的正确性：
   // evaluate_validation 是用户实时等待的场景，优先级最高
   // align_evidence 是后台任务，优先级最低
+  // execute_card_agent_turn 使用默认优先级 5（ELSE 分支）
   const priorities: Record<string, number> = {
     evaluate_validation: 10,
     parse_source: 8,
-    generate_card: 5,
+    execute_card_agent_turn: 5,
     align_evidence: 1,
   };
 
@@ -305,8 +307,8 @@ test("队列优先级：evaluate_validation (10) > parse_source (8) > generate_c
     "evaluate_validation 应优先于 align_evidence",
   );
   assert.ok(
-    priorities.evaluate_validation > priorities.generate_card,
-    "evaluate_validation 应优先于 generate_card",
+    priorities.evaluate_validation > priorities.execute_card_agent_turn,
+    "evaluate_validation 应优先于 execute_card_agent_turn",
   );
   assert.ok(
     priorities.parse_source > priorities.align_evidence,

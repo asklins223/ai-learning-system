@@ -375,7 +375,7 @@ describe("export/service restoreWorkspace 实际恢复", () => {
       reviewSchedules: [{ id: "rs1", userId: "u1", subjectType: "card", subjectId: "c1", status: "pending", nextReviewAt: "2026-01-01T00:00:00.000Z", intervalDays: 1 }],
       reviewAttempts: [{ id: "ra1", userId: "u1", reviewScheduleId: "rs1", subjectType: "card", subjectId: "c1", idempotencyKey: "key1", status: "completed", startedAt: "2026-01-01T00:00:00.000Z" }],
       understandingEvents: [{ id: "ue1", userId: "u1", subjectType: "card", subjectId: "c1", eventType: "reviewed", payload: {} }],
-      aiArtifacts: [{ id: "a1", type: "generate_card", inputRefs: {}, output: {}, modelId: "m1", promptVersion: "v1" }],
+      aiArtifacts: [{ id: "a1", type: "learning_card", inputRefs: {}, output: {}, modelId: "m1", promptVersion: "v1" }],
       onboardingStates: [{ id: "os1", userId: "u1", version: "v1", steps: {}, status: "pending" }],
     };
 

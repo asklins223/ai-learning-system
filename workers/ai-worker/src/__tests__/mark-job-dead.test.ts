@@ -14,7 +14,7 @@ import {
 
 const baseJob: ClaimedJob = {
   id: "22222222-2222-2222-2222-222222222222",
-  type: "generate_card",
+  type: "execute_card_agent_turn",
   payload: { noteVersionId: "nv-1" },
   workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",

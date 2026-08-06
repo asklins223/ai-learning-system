@@ -3,7 +3,6 @@
  * REL-01: RC manifest aiQuality 字段填充脚本
  *
  * 用法：
- *   DASHSCOPE_API_KEY=sk-xxx \
  *   DASHSCOPE_MODEL=qwen-plus \
  *   node .github/scripts/rc-manifest-fill.mjs \
  *     --input /path/to/release-manifest-rc.json \
@@ -11,10 +10,13 @@
  *
  * 该脚本：
  * 1. 读取 RC manifest（由 release-manifest-generate.mjs --rc 生成）
- * 2. 运行 rc-gate CLI（调用真实 Provider）
- * 3. 将 rc-gate 输出填充到 manifest.aiQuality 字段
+ * 2. 运行 supervisor-rc-gate CLI（登录 ailearn API 并驱动真实 provider 跑 golden set）
+ * 3. 将 supervisor-rc-gate 输出填充到 manifest.aiQuality 字段
  * 4. 输出填充后的 manifest 到指定路径
- */
+ *
+ * 注意：实际 AI provider 由 ailearn API/worker 按 config/ai-platforms.json 解析；
+ * 本脚本不直接使用 DASHSCOPE_API_KEY。DASHSCOPE_MODEL / DASHSCOPE_BASE_URL 仅
+ * 作为 supervisor-rc-gate 的模型/端点覆盖（默认 qwen-plus / dashscope）。
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -64,13 +66,16 @@ Options:
   --evidence-output Path for the raw RC gate evidence JSON
 
 Environment variables:
-  DASHSCOPE_API_KEY    Required: DashScope API key for RC gate
-  DASHSCOPE_MODEL       Optional: Model ID (default: qwen-plus)
+  DASHSCOPE_MODEL       Optional: Model ID override (default: qwen-plus)
+  DASHSCOPE_BASE_URL    Optional: Endpoint override (default: dashscope)
   AIQ_RC_MAX_BUDGET_USD Optional: Max budget in USD (default: 10)
   AIQ_RC_PREVIOUS_METRICS_JSON Optional: Previous RC metrics JSON
 
+Note: the RC gate logs into the ailearn API and drives the real provider
+resolved by config/ai-platforms.json. It does NOT use DASHSCOPE_API_KEY.
+
 Example:
-  DASHSCOPE_API_KEY=sk-xxx DASHSCOPE_MODEL=qwen-plus \\
+  DASHSCOPE_MODEL=qwen-plus \\
   node .github/scripts/rc-manifest-fill.mjs \\
     --input outputs/release-manifest-rc.json \\
     --output outputs/release-manifest-rc-filled.json
@@ -107,8 +112,8 @@ async function main() {
     process.exit(1);
   }
 
-  // 4. 运行 rc-gate
-  console.error(`Running rc-gate on: ${inputPath}`);
+  // 4. 运行 supervisor-rc-gate
+  console.error(`Running supervisor-rc-gate on: ${inputPath}`);
   console.error(`Budget: $${process.env.AIQ_RC_MAX_BUDGET_USD ?? 10}, Model: ${process.env.DASHSCOPE_MODEL ?? "qwen-plus"}`);
 
   let rcGateExitCode = 0;
@@ -118,7 +123,7 @@ async function main() {
       [
         "--import",
         "tsx",
-        resolve(repoRoot, "packages/ai-quality/src/cli/rc-gate.ts"),
+        resolve(repoRoot, "packages/ai-quality/src/cli/supervisor-rc-gate.ts"),
         "--output",
         evidencePath,
       ],
@@ -132,10 +137,10 @@ async function main() {
   } catch (error) {
     rcGateExitCode = Number.isInteger(error?.status) ? error.status : 1;
     if (!existsSync(evidencePath)) {
-      console.error(`Failed to run rc-gate: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`Failed to run supervisor-rc-gate: ${error instanceof Error ? error.message : String(error)}`);
       process.exit(1);
     }
-    console.error(`rc-gate exited ${rcGateExitCode}; preserving its failed evidence in the manifest`);
+    console.error(`supervisor-rc-gate exited ${rcGateExitCode}; preserving its failed evidence in the manifest`);
   }
 
   const artifact = JSON.parse(readFileSync(evidencePath, "utf8"));
@@ -187,7 +192,7 @@ async function main() {
     runResults,
     metrics: mapMetrics(rcGateOutput.averageMetrics),
     costUsd: rcGateOutput.budgetUsedUsd,
-    evidence: [`ci://run/${runId}/ai-quality/rc-gate`],
+    evidence: [`ci://run/${runId}/ai-quality/supervisor-rc-gate`],
   };
 
   // 6. 写入输出 manifest
@@ -201,13 +206,13 @@ async function main() {
     process.exit(1);
   }
 
-  // 7. 根据 rc-gate 结果设置退出码
+  // 7. 根据 supervisor-rc-gate 结果设置退出码
   if (rcGateExitCode !== 0 || !rcGateOutput.passed) {
-    console.error(`RC gate failed: metrics do not meet thresholds`);
+    console.error(`Supervisor RC gate failed: metrics do not meet thresholds`);
     process.exit(1);
   }
 
-  console.error(`RC gate passed`);
+  console.error(`Supervisor RC gate passed`);
   process.exit(0);
 }
 

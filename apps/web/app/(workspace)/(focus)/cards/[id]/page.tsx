@@ -21,8 +21,9 @@ import {
   type ValidationEvent,
 } from "@/lib/api";
 import { useIsOwner } from "@/lib/use-current-user";
+import { compareCardSetMembers } from "@/lib/card-set-members";
 import { MemberNotice } from "@/components/settings/MemberNotice";
-import { EvidenceDrawer } from "@/components/EvidenceDrawer";
+import { EvidenceDialog } from "@/components/EvidenceDialog";
 import { Drawer } from "@/components/ui/Drawer";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
@@ -939,7 +940,7 @@ export default function CardPage() {
       </Drawer>
 
       {activeGroup && activeKeyPoint && (
-        <EvidenceDrawer
+        <EvidenceDialog
           open={!!openKeyPointId}
           onClose={() => setOpenKeyPointId(null)}
           claim={activeKeyPoint.claim}
@@ -1116,25 +1117,6 @@ function withReviewReturnTarget(
   } catch {
     return null;
   }
-}
-
-function compareCardSetMembers(
-  left: CardDetailResponse,
-  right: CardDetailResponse,
-): number {
-  const leftScope = left.card.scope === "overview" ? 0 : 1;
-  const rightScope = right.card.scope === "overview" ? 0 : 1;
-  if (leftScope !== rightScope) return leftScope - rightScope;
-
-  const leftOrdinal =
-    typeof left.card.ordinal === "number"
-      ? left.card.ordinal
-      : Number.MAX_SAFE_INTEGER;
-  const rightOrdinal =
-    typeof right.card.ordinal === "number"
-      ? right.card.ordinal
-      : Number.MAX_SAFE_INTEGER;
-  return leftOrdinal - rightOrdinal || left.card.id.localeCompare(right.card.id);
 }
 
 function appendUniqueCards(

@@ -4,7 +4,23 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isNonRetryableError } from "../lib/non-retryable-errors.ts";
+import { isNonRetryableError, AgentOutputError } from "../lib/non-retryable-errors.ts";
+
+test("detects AgentOutputError (output_truncated) as non-retryable", () => {
+  const error = new AgentOutputError(
+    "output_truncated",
+    'agent output truncated at finish_reason="length" (toolCalls=1, malformed=1)',
+  );
+  assert.equal(isNonRetryableError(error), true);
+});
+
+test("detects AgentOutputError (arguments_malformed) as non-retryable", () => {
+  const error = new AgentOutputError(
+    "arguments_malformed",
+    'tool call "record_extraction_decisions" has malformed arguments JSON',
+  );
+  assert.equal(isNonRetryableError(error), true);
+});
 
 test("detects overdue-payment billing error from DashScope 400", () => {
   const error = new Error(

@@ -209,11 +209,10 @@ describe("SEC-02 DoD: ADR-0009 软退出机制", () => {
 // ─── 4. Owner 与 member 两条 onboarding 分支 ──────────────────────────────
 
 describe("SEC-02 DoD: Onboarding 分支与状态转换", () => {
-  it("ONBOARDING_STEPS 包含 7 个步骤", () => {
-    assert.equal(ONBOARDING_STEPS.length, 7);
+  it("ONBOARDING_STEPS 包含 6 个步骤", () => {
+    assert.equal(ONBOARDING_STEPS.length, 6);
     assert.deepEqual([...ONBOARDING_STEPS], [
       "ai_consent",
-      "provider_config",
       "first_content",
       "first_note",
       "first_card",

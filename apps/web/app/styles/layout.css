@@ -4,6 +4,44 @@
  * P6-9 迁移：从 styled-jsx global 提取。Night 主题通过 token 自动生效。
  */
 
+/* Electron exposes these variables only when Window Controls Overlay is
+ * enabled. Browser builds resolve the fallbacks, so the same CSS keeps its
+ * existing geometry outside the desktop shell. */
+:root {
+  --window-titlebar-height: env(titlebar-area-height, 0px);
+  --window-titlebar-safe-left: env(titlebar-area-x, 0px);
+  --window-titlebar-safe-width: env(titlebar-area-width, 100vw);
+  --window-titlebar-safe-right: max(
+    0px,
+    calc(
+      100vw
+      - var(--window-titlebar-safe-left)
+      - var(--window-titlebar-safe-width)
+    )
+  );
+
+  /* Sticky workspace header — shared offset so in-page sticky elements and
+   * scroll-anchor targets clear the header on every breakpoint.
+   * --workspace-sticky-top:    the `top` value the header sticks at.
+   * --workspace-sticky-height: the header's min-height at that breakpoint. */
+  --workspace-sticky-top: 0px;
+  --workspace-sticky-height: 136px;
+}
+
+@media (min-width: 640px) and (max-width: 959px) {
+  :root {
+    --workspace-sticky-top: 60px;    /* below the TabletTopBar */
+    --workspace-sticky-height: 130px;
+  }
+}
+
+@media (max-width: 639px) {
+  :root {
+    --workspace-sticky-top: 0px;
+    --workspace-sticky-height: 160px;
+  }
+}
+
 /* ── Page-end sentinel (§13.6) ── */
 [data-ui="page-end"] {
   height: 0;
@@ -59,7 +97,7 @@
 .skip-link {
   position: fixed;
   top: -100px;
-  left: 16px;
+  left: max(16px, calc(var(--window-titlebar-safe-left) + 8px));
   z-index: 100;
   padding: 8px 16px;
   background: var(--color-action);
@@ -69,6 +107,8 @@
   font-weight: 600;
   text-decoration: none;
   transition: top 180ms;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .skip-link:focus {
@@ -1611,7 +1651,7 @@ letter-spacing: 0.02em;
 }
 }
 
-@media (max-height: 640px) and (min-width: 960px) {
+@media (max-height: 700px) and (min-width: 960px) {
   .sidebar .brand {
     margin-bottom: 12px;
   }
@@ -2078,6 +2118,121 @@ z-index: 1;
 flex: 0 0 auto;
 width: 40px;
 height: 40px;
+}
+
+/* ── Desktop window chrome ───────────────────────────────────────
+ * The packaged macOS window hides the native title text but keeps the native
+ * traffic lights. Existing 56–68px page headers double as the drag surface;
+ * interactive descendants remain clickable, and left/right padding follows
+ * the Window Controls Overlay safe rectangle. These rules deliberately do not
+ * depend on a viewport breakpoint: Electron page zoom can move the renderer
+ * into the tablet/mobile layout while the native traffic lights stay visible. */
+.sidebar {
+  padding-top: max(18px, calc(var(--window-titlebar-height) + 4px));
+}
+
+.sidebar::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: var(--window-titlebar-safe-left);
+  height: var(--window-titlebar-height);
+  content: "";
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+:is(
+  .learning-home-header,
+  .workspace-page-header,
+  .tablet-topbar,
+  .topbar,
+  .card-detail-header,
+  .card-set-header,
+  .source-detail-header,
+  .note-workbench .ne-topbar,
+  .note-detail-state-topbar,
+  .note-detail-loading-topbar,
+  .validation-focus-header,
+  .universe-top-hud,
+  .workspace-route-loading
+) {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+:is(
+  .learning-home-header,
+  .workspace-page-header,
+  .tablet-topbar,
+  .topbar,
+  .card-detail-header,
+  .card-set-header,
+  .source-detail-header,
+  .note-workbench .ne-topbar,
+  .note-detail-state-topbar,
+  .note-detail-loading-topbar,
+  .validation-focus-header,
+  .universe-top-hud,
+  .workspace-route-loading
+) :is(a, button, input, textarea, select, summary, [role="button"], [contenteditable="true"]) {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.tablet-topbar {
+  padding-left: max(16px, var(--window-titlebar-safe-left));
+  padding-right: max(16px, var(--window-titlebar-safe-right));
+}
+
+.topbar {
+  padding-left: max(20px, var(--window-titlebar-safe-left));
+  padding-right: max(20px, var(--window-titlebar-safe-right));
+}
+
+.app-canvas[data-page="card-detail"] .card-detail-header,
+.app-canvas[data-page="card-set-detail"] .card-set-header,
+.app-canvas[data-page="source-detail"] .source-detail-header {
+  padding-left: max(clamp(18px, 2.2vw, 34px), var(--window-titlebar-safe-left));
+  padding-right: max(clamp(18px, 2.2vw, 34px), var(--window-titlebar-safe-right));
+}
+
+.app-canvas[data-page="note-editor"] .note-workbench .ne-topbar {
+  padding-left: max(var(--note-editor-gutter), var(--window-titlebar-safe-left));
+  padding-right: max(var(--note-editor-gutter), var(--window-titlebar-safe-right));
+}
+
+.app-canvas[data-page="note-editor"] :is(
+  .note-detail-state-topbar,
+  .note-detail-loading-topbar
+) {
+  padding-left: max(32px, var(--window-titlebar-safe-left));
+  padding-right: max(32px, var(--window-titlebar-safe-right));
+}
+
+.app-canvas[data-page="validation-session"] .validation-focus-header-inner {
+  padding-left: max(clamp(18px, 2.2vw, 34px), var(--window-titlebar-safe-left));
+  padding-right: max(clamp(18px, 2.2vw, 34px), var(--window-titlebar-safe-right));
+}
+
+.login-page,
+.workspace-auth-loading {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.login-stage,
+.login-page :is(a, button, input, textarea, select, summary, [role="button"], [contenteditable="true"]) {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+@media (max-width: 639px) {
+  .app-canvas[data-page="home"] .learning-home-header,
+  .app-canvas[data-page] .workspace-page-header {
+    padding-left: max(18px, var(--window-titlebar-safe-left));
+    padding-right: max(18px, var(--window-titlebar-safe-right));
+  }
 }
 
 /* Drawer 挂载在 workspace 内；打开时让抽屉覆盖所有 shell 导航层。 */

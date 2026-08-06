@@ -411,7 +411,8 @@ export async function submitReviewAttempt(
   userId: string,
   input: ReviewAttemptSubmitInput,
 ): Promise<ReviewAttemptSubmitResult> {
-  const result = await withWorkspaceTransaction(
+  // BUG-05 修复：使用独立变量追踪幂等状态，不再将内部标记放入返回对象
+  const { result, isIdempotent } = await withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
       // 1. Serialize every submission for this attempt.
@@ -463,17 +464,19 @@ export async function submitReviewAttempt(
           orderBy: (s, { asc }) => [asc(s.nextReviewAt)],
         });
         return {
-          __idempotent: true, // 标记幂等返回
-          attemptId: attempt.id,
-          status: attempt.status,
-          outcome: attempt.outcome ?? input.outcome,
-          scheduleReasonCode: attempt.scheduleReasonCode ?? "",
-          understandingEffect: attempt.understandingEffect ?? "unchanged",
-          beforeIntervalDays: attempt.scheduleBeforeIntervalDays ?? 0,
-          afterIntervalDays: attempt.scheduleAfterIntervalDays ?? 0,
-          nextReviewAt: attempt.nextReviewAt ?? nextSchedule?.nextReviewAt ?? new Date(),
-          nextScheduleId: nextSchedule?.id ?? "",
-          idempotent: true,
+          result: {
+            attemptId: attempt.id,
+            status: attempt.status,
+            outcome: attempt.outcome ?? input.outcome,
+            scheduleReasonCode: attempt.scheduleReasonCode ?? "",
+            understandingEffect: attempt.understandingEffect ?? "unchanged",
+            beforeIntervalDays: attempt.scheduleBeforeIntervalDays ?? 0,
+            afterIntervalDays: attempt.scheduleAfterIntervalDays ?? 0,
+            nextReviewAt: attempt.nextReviewAt ?? nextSchedule?.nextReviewAt ?? new Date(),
+            nextScheduleId: nextSchedule?.id ?? "",
+            idempotent: true,
+          },
+          isIdempotent: true, // 幂等返回
         };
       }
       if (attempt.status !== "started") {
@@ -627,28 +630,29 @@ export async function submitReviewAttempt(
       }
 
       return {
-        __idempotent: false, // 标记非幂等返回
-        attemptId: attempt.id,
-        status: "completed",
-        outcome: input.outcome,
-        scheduleReasonCode: decision.reasonCode,
-        understandingEffect: decision.understandingEffect,
-        beforeIntervalDays: decision.beforeIntervalDays,
-        afterIntervalDays: decision.afterIntervalDays,
-        nextReviewAt: decision.nextReviewAt,
-        nextScheduleId: nextSchedule.id,
-        idempotent: false,
+        result: {
+          attemptId: attempt.id,
+          status: "completed",
+          outcome: input.outcome,
+          scheduleReasonCode: decision.reasonCode,
+          understandingEffect: decision.understandingEffect,
+          beforeIntervalDays: decision.beforeIntervalDays,
+          afterIntervalDays: decision.afterIntervalDays,
+          nextReviewAt: decision.nextReviewAt,
+          nextScheduleId: nextSchedule.id,
+          idempotent: false,
+        },
+        isIdempotent: false, // 非幂等返回
       };
     },
   );
 
   // OPS-01: Funnel 指标 — 复习尝试终态（非幂等提交）
-  if (!result.__idempotent) {
+  // BUG-05 修复：使用独立变量判断幂等状态，不再从返回对象中读取内部标记
+  if (!isIdempotent) {
     recordFunnelEvent("review_attempt_terminal");
   }
-  // 移除内部标记，返回标准接口
-  const { __idempotent, ...rest } = result as any;
-  return rest;
+  return result;
 }
 
 // ─── Later ───────────────────────────────────────────────────────────────
@@ -751,7 +755,8 @@ export async function laterReviewAttempt(
 ): Promise<ReviewAttemptLaterResult> {
   const requestHash = computeLaterRequestHash(input);
 
-  const result = await withWorkspaceTransaction(
+  // BUG-05 修复：使用独立变量追踪幂等状态
+  const { result, isIdempotent } = await withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
       // 1. Check action command ledger for idempotent replay (计划 §6.4.1).
@@ -763,11 +768,13 @@ export async function laterReviewAttempt(
         requestHash,
       );
       if (actionCmd.exists && actionCmd.responseSnapshot) {
-        // Idempotent replay — return the stored response.
+        // 幂等重放 — 返回缓存的响应
         return {
-          __idempotent: true,
-          ...(actionCmd.responseSnapshot as unknown as Omit<ReviewAttemptLaterResult, "idempotent">),
-          idempotent: true,
+          result: {
+            ...(actionCmd.responseSnapshot as unknown as Omit<ReviewAttemptLaterResult, "idempotent">),
+            idempotent: true,
+          },
+          isIdempotent: true,
         };
       }
 
@@ -853,7 +860,10 @@ export async function laterReviewAttempt(
           input.idempotencyKey,
           replayResult as unknown as Record<string, unknown>,
         );
-        return { __idempotent: true, ...replayResult };
+        return {
+          result: replayResult,
+          isIdempotent: true,
+        };
       }
 
       // 5. Update the schedule's next review time (keep interval, keep pending).
@@ -894,16 +904,26 @@ export async function laterReviewAttempt(
         result as unknown as Record<string, unknown>,
       );
 
-      return { __idempotent: false, ...result };
+      return {
+        result: {
+          attemptId: attempt.id,
+          status: "skipped",
+          scheduleReasonCode: decision.reasonCode,
+          nextReviewAt: decision.nextReviewAt,
+          intervalDays: decision.afterIntervalDays,
+          idempotent: false,
+        },
+        isIdempotent: false,
+      };
     },
   );
 
   // OPS-01: Funnel 指标 — 复习尝试终态（跳过）
-  if (!result.__idempotent) {
+  // BUG-05 修复：使用独立变量判断幂等状态
+  if (!isIdempotent) {
     recordFunnelEvent("review_attempt_terminal");
   }
-  const { __idempotent, ...rest } = result as any;
-  return rest;
+  return result;
 }
 
 // ─── History ─────────────────────────────────────────────────────────────

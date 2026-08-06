@@ -406,13 +406,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/ai-quality-evidence"
           npm run pr-gate 2>&1 | tee "$RUNNER_TEMP/ai-quality-evidence/pr-gate-result.json"
 
-      # AIQ-01: RC gate framework dry-run validation (no API key required)
-      - name: Validate RC gate framework (dry-run)
-        working-directory: packages/ai-quality
-        run: |
-          set -o pipefail
-          npm run rc-dry-run 2>&1 | tee "$RUNNER_TEMP/ai-quality-evidence/rc-dry-run.log"
-
       - name: Upload AI quality gate evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -980,7 +973,6 @@ jobs:
       DATABASE_URL_WORKER: postgres://ailearn_worker:ci-compose-worker-password@postgres:5432/ailearn
       CORS_ORIGIN: http://localhost:3000
       AI_PROVIDER_CARD: mock
-      AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
       WORKER_METRICS_PORT: "9100"
       DOCKER_BUILDKIT: "1"
     steps:
@@ -1068,6 +1060,11 @@ jobs:
 
       - name: Prepare migration image alias
         run: docker tag ailearn_ci-api ailearn_ci-migrate
+
+      - name: Use mock AI platform config for CI
+        run: |
+          mkdir -p config
+          cp .github/ci/ai-platforms.mock.json config/ai-platforms.json
 
       - name: Start production Compose stack without rebuilding
         run: docker compose up -d --no-build
@@ -1254,6 +1251,8 @@ jobs:
       DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
       # Fixed seed output path (must be consistent between seed and test steps)
       E2E_SEED_OUTPUT: /tmp/e2e-seed-output.json
+      # 卡组轮播 UI：dev server 编译期读取，否则 card-set-carousel.spec.ts 全部自动跳过
+      NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -1320,7 +1319,6 @@ jobs:
       - name: Install and build Web
         working-directory: apps/web
         env:
-          NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: "true"
           NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: "true"
           NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: "true"
           NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: "true"
@@ -1333,9 +1331,8 @@ jobs:
           DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
           DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
           AI_PROVIDER_CARD: mock
-          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
           CORS_ORIGIN: http://localhost:3000
-          CARD_GENERATION_V2_ENABLED: "true"
           AI_QUESTION_V1_ENABLED: "true"
           RUBRIC_EVALUATION_V1_ENABLED: "true"
         run: |
@@ -1356,9 +1353,8 @@ jobs:
           DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
           DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
           AI_PROVIDER_CARD: mock
-          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
           API_INTERNAL_URL: http://localhost:4000
-          CARD_GENERATION_V2_ENABLED: "true"
         run: |
           cd workers/ai-worker && npx tsx src/index.ts &
           # Give Worker a few seconds to start
@@ -1702,7 +1698,7 @@ jobs:
           DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
           DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
           AI_PROVIDER_CARD: mock
-          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
           CORS_ORIGIN: http://localhost:3000
         run: |
           cd apps/api && npx tsx src/server.ts &
@@ -1721,7 +1717,7 @@ jobs:
           DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
           DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
           AI_PROVIDER_CARD: mock
-          AI_CREDENTIAL_ENCRYPTION_KEY: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
           API_INTERNAL_URL: http://localhost:4000
         run: |
           cd workers/ai-worker && npx tsx src/index.ts &
@@ -1805,7 +1801,6 @@ jobs:
       MINIO_ROOT_USER: ailearn
       MINIO_ROOT_PASSWORD: ci-alpha-minio-secret
       AI_PROVIDER_CARD: mock
-      AI_CREDENTIAL_ENCRYPTION_KEY: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
       BACKUP_BUCKET: ailearn-backups
       SOURCE_RELEASE: "0.5.0-alpha"
       SOURCE_COMMIT: ${{ github.sha }}
@@ -1818,6 +1813,11 @@ jobs:
       - name: Validate Docker Compose alpha overlay
         run: |
           docker compose -f docker-compose.yml -f docker-compose.alpha.yml --profile storage config --quiet
+
+      - name: Use mock AI platform config for CI
+        run: |
+          mkdir -p config
+          cp .github/ci/ai-platforms.mock.json config/ai-platforms.json
 
       - name: Start complete Alpha stack
         run: ./scripts/alpha-env-setup.sh up

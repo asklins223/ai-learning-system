@@ -42,25 +42,6 @@ export {
 // RC 真实证据对齐（与 ai-worker alignQuote 同构）
 export { realAlignEvidence } from "./real-align.ts";
 
-// RC Runner
-export {
-  runRCGate,
-  averageMetrics,
-  checkRegression,
-  isInfrastructureError,
-  DEFAULT_RC_CONFIG,
-  ProviderError,
-} from "./rc-runner.ts";
-export type {
-  ProviderClient,
-  ProviderCallResult,
-  AlignEvidenceFn,
-  RCRunnerConfig,
-  RCRoundResult,
-  RCGateResult,
-  ProviderErrorType,
-} from "./rc-runner.ts";
-
 // 类型定义
 export type {
   DatasetBlock,

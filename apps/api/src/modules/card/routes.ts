@@ -1,14 +1,20 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { noteVersions } from "../../db/schema/note.ts";
 import { learningCards } from "../../db/schema/card.ts";
-import { jobs } from "../../db/schema/job.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
-import { getCardWithDetail, listCards, regenerateCard, acceptCard, dismissCard } from "./service.ts";
+import { getCardWithDetail, listCards, regenerateCard, dismissCard } from "./service.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
 import { activeLearningCardConsumerPredicate } from "./consumer-eligibility.ts";
+// QUAL-59 修复：将 import 语句从文件中间移到顶部，符合 ES 模块规范
+import { generateCardRequestSchema } from "./schema.ts";
+import { parseBody } from "../../lib/validate.ts";
+import {
+  createCardGenerationRun,
+  getGenerationRunStatus,
+} from "../card-generation/service.ts";
 
 export async function cardRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
@@ -23,7 +29,7 @@ export async function cardRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/cards/:id", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const data = await getCardWithDetail(req.params.id, req.session.workspaceId);
+    const data = await getCardWithDetail(req.params.id, req.session.workspaceId, req.session.userId);
     if (!data) return reply.code(404).send({ error: "not found" });
     return data;
   });
@@ -38,34 +44,16 @@ export async function cardRoutes(app: FastifyInstance) {
     return result;
   });
 
-  // POST /cards/:id/accept — 接受学习卡
-  // RBAC: 仅 owner 可接受/忽略卡片
-  app.post<{ Params: { id: string } }>("/cards/:id/accept", { preHandler: [requireOwner] }, async (req, reply) => {
-    const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const result = await acceptCard(req.params.id, req.session.workspaceId);
-    if (!result) return reply.code(404).send({ error: "not found" });
-    return result;
-  });
-
   // POST /cards/:id/dismiss — 忽略学习卡
-  // RBAC: 仅 owner 可接受/忽略卡片
+  // RBAC: 仅 owner 可忽略卡片
   app.post<{ Params: { id: string } }>("/cards/:id/dismiss", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const result = await dismissCard(req.params.id, req.session.workspaceId);
+    const result = await dismissCard(req.params.id, req.session.workspaceId, req.session.userId);
     if (!result) return reply.code(404).send({ error: "not found" });
     return result;
   });
 }
-
-import { generateCardRequestSchema } from "./schema.ts";
-import { JobStatus, JobType } from "@ailearn/shared";
-import { parseBody } from "../../lib/validate.ts";
-import {
-  createCardGenerationRun,
-  getLegacyGenerationCompatibility,
-} from "../card-generation/service.ts";
 
 export async function cardJobRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
@@ -79,15 +67,6 @@ export async function cardJobRoutes(app: FastifyInstance) {
       ),
       orderBy: [desc(learningCards.createdAt)],
     });
-    const activeJob = await db.query.jobs.findFirst({
-      where: and(
-        eq(jobs.workspaceId, workspaceId),
-        eq(jobs.type, JobType.GENERATE_CARD),
-        inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
-        sql`${jobs.payload}->>'noteVersionId' = ${noteVersionId}`,
-      ),
-      orderBy: [desc(jobs.scheduledAt)],
-    });
     const [previousCard] = await db
       .select({ id: learningCards.id, noteVersionId: learningCards.noteVersionId })
       .from(learningCards)
@@ -99,15 +78,6 @@ export async function cardJobRoutes(app: FastifyInstance) {
       ))
       .orderBy(desc(learningCards.createdAt))
       .limit(1);
-
-    if (activeJob) {
-      return {
-        state: "generating" as const,
-        cardId: existingCard?.id ?? previousCard?.id ?? null,
-        jobId: activeJob.id,
-        generatedVersionId: existingCard?.noteVersionId ?? previousCard?.noteVersionId ?? null,
-      };
-    }
 
     if (existingCard) {
       return {
@@ -162,10 +132,10 @@ export async function cardJobRoutes(app: FastifyInstance) {
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       {
         noteVersionId: body.noteVersionId,
-        idempotencyKey: `legacy-generate:${randomUUID()}`,
+        idempotencyKey: `card-generate:${randomUUID()}`,
       },
     );
-    return getLegacyGenerationCompatibility(
+    return getGenerationRunStatus(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       run.runId,
     );

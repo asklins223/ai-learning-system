@@ -11,6 +11,7 @@ type RestoreDatabase = NonNullable<Parameters<typeof restoreWorkspace>[3]>;
 type Operation = {
   kind: "insert" | "update";
   table: unknown;
+  /** batchInsert 传入数组；单元素批次在 createRecordingDatabase 中解包为行。 */
   values: Record<string, unknown>;
 };
 
@@ -18,8 +19,17 @@ function createRecordingDatabase(operations: Operation[]): RestoreDatabase {
   const tx = {
     insert(table: unknown) {
       return {
-        values(values: Record<string, unknown>) {
-          operations.push({ kind: "insert" as const, table, values });
+        values(values: Record<string, unknown> | Record<string, unknown>[]) {
+          // PERF-40 后 restoreTable 走 batchInsert，values 为数组；单元素批次
+          // 解包为单行，保持断言按行字段访问的既有语义。
+          const recorded = Array.isArray(values) && values.length === 1
+            ? values[0]
+            : values;
+          operations.push({
+            kind: "insert" as const,
+            table,
+            values: recorded as Record<string, unknown>,
+          });
           const returning = () => Promise.resolve([values]);
           const onConflict = () => ({
             returning,

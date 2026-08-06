@@ -4,7 +4,201 @@
  * - 服务端用 INTERNAL_API_URL，浏览器用 NEXT_PUBLIC_API_URL（默认都指向 http://localhost:4000）。
  * - 所有 fetch 收口到 request()，统一注入 Authorization、JSON header，并处理 401。
  * - 页面禁止直接用 fetch 调 API，统一走 api.*。
+ *
+ * ─── ARCH-04 拆分进度 ──────────────────────────────────────────────────
+ * 本文件包含核心基础设施（request、token 管理、CSRF）和 API 对象定义。
+ *
+ * 已完成的拆分：
+ *   - `lib/api-types.ts` — 所有共享类型定义和类型工具函数（ARCH-04）
+ *   - `lib/status-map.ts` — 卡片生成状态映射
+ *   - `lib/card-display.ts` — 卡片显示逻辑
+ *   - `lib/card-coverage-warning.ts` — 覆盖率警告
+ *   - `lib/feature-flags.ts` — 功能开关
+ *   - `lib/format.ts` — 格式化工具
+ *   - `lib/navigation.ts` — 导航工具
+ *   - `lib/use-current-user.ts` — 当前用户 Hook
+ *   - `lib/home-onboarding.ts` — 首页引导
+ *   - `lib/markdown-blocks.ts` — Markdown 块处理
+ *   - `lib/markdown-import-files.ts` — Markdown 导入
+ *   - `lib/milkdown-lifecycle.ts` — Milkdown 生命周期
+ *   - `lib/note-title-save.ts` — 笔记标题保存
+ *   - `lib/review-attempt-format.ts` — 复习格式化
+ *   - `lib/search-return.ts` — 搜索结果处理
+ *   - `lib/source-return.ts` — 来源结果处理
+ *   - `lib/today-return.ts` — 今日页面处理
+ *   - `lib/understanding-graph.ts` — 理解星图
+ *   - `lib/validation-action-keys.ts` — 验证操作键
+ *   - `lib/validation-question.ts` — 验证问题
+ *
+ * 所有类型从 `api-types.ts` 导入并重新导出，保持向后兼容。
+ * ──────────────────────────────────────────────────────────────────────
  */
+
+// ARCH-04 修复：从 api-types.ts 导入并重新导出所有共享类型，保持向后兼容
+export {
+  type CurrentUser,
+  type AIPrivacySettings,
+  type UploadImageOptions,
+  type AuthResponse,
+  type NoteHeader,
+  type BlockType,
+  type Block,
+  type NoteVersion,
+  type NoteDetail,
+  type CardStatus,
+  type CardScope,
+  type CardSetStatus,
+  type LearningCardSchema,
+  type CardKeyPoint,
+  type LearningCardRecord,
+  type CardDetailResponse,
+  type CardListItem,
+  type CardSetRecord,
+  type CardSetListItem,
+  type CardSetDetailResponse,
+  type CardSetCardsPageResponse,
+  type CardSetListResponse,
+  type CardSetRegenerateRequest,
+  type CardSetRegenerateResponse,
+  type EvidenceAlignment,
+  type EvidenceOverride,
+  type EvidenceRow,
+  type CardEvidenceGroup,
+  type JobType,
+  type JobStatus,
+  type JobRow,
+  type CardGenerationStatus,
+  type CardGenerationRunStatus,
+  type CardGenerationSourceSnapshot,
+  type CardGenerationRunAccepted,
+  type CardGenerationRunView,
+  type CardGenerationRunMetrics,
+  type AgentEventPage,
+  type AgentEventView,
+  type ValidationOutcome,
+  type ValidationFeedback,
+  type SanitizedQuestion,
+  type StartSessionResult,
+  type GetSessionResult,
+  type DraftResult,
+  type SubmitResult,
+  type UnableResult,
+  type RetryResult,
+  type AbandonResult,
+  type QualitySignalResult,
+  type QualitySignalReason,
+  type RevealSourceResult,
+  type RevealResultRubricItem,
+  type RevealResultEvidenceRef,
+  type RevealResultData,
+  type ValidationEvent,
+  type ReviewStatus,
+  type ReviewReason,
+  type ReviewWithCard,
+  type SanitizedReviewItem,
+  type SanitizedReviewMeta,
+  type ReviewAttemptAnswerType,
+  type ReviewAttemptOutcome,
+  type ReviewAttemptStartResult,
+  type ReviewAttemptSubmitResult,
+  type ReviewAttemptLaterResult,
+  type ReviewAttemptHistoryItem,
+  type ReviewAttemptHistoryResult,
+  type SourceStatus,
+  type SourceStatusSnapshot,
+  type SourceType,
+  type SourceRow,
+  type SourceSegment,
+  type SourceDetail,
+  type UnderstandingState,
+  type UnderstandingGraphNodeType,
+  type UnderstandingGraphEdgeType,
+  type UnderstandingGraphNode,
+  type UnderstandingGraphEdge,
+  type UnderstandingGraphResponse,
+  type SearchResult,
+  type SearchDriftResult,
+  type StatsOverview,
+  type NoteVersionSummary,
+  type BenchmarkKeyPoint,
+  type BenchmarkNoteResult,
+  type BenchmarkReport,
+  type BenchmarkLabel,
+  type MarkdownImportApiItem,
+  type MarkdownImportApiResult,
+  effectiveAlignment,
+  isHardEvidence,
+  REVIEW_REASON_LABELS,
+  REVIEW_REASON_COLORS,
+  splitMarkdownImportBatches,
+} from "./api-types";
+
+import type {
+  CurrentUser,
+  AIPrivacySettings,
+  AuthResponse,
+  NoteHeader,
+  Block,
+  NoteDetail,
+  CardSetStatus,
+  CardSetRegenerateRequest,
+  CardListItem,
+  CardSetListResponse,
+  CardSetDetailResponse,
+  CardSetCardsPageResponse,
+  CardSetRegenerateResponse,
+  CardDetailResponse,
+  CardGenerationRunAccepted,
+  CardGenerationRunView,
+  CardGenerationStatus,
+  AgentEventPage,
+  CardEvidenceGroup,
+  EvidenceOverride,
+  JobRow,
+  MarkdownImportApiItem,
+  MarkdownImportApiResult,
+  ReviewStatus,
+  ReviewAttemptAnswerType,
+  ReviewAttemptOutcome,
+  ReviewAttemptHistoryResult,
+  SanitizedReviewItem,
+  SanitizedReviewMeta,
+  SourceStatus,
+  SourceType,
+  SourceDetail,
+  UnderstandingState,
+  UnderstandingGraphResponse,
+  SearchResult,
+  SearchDriftResult,
+  StatsOverview,
+  NoteVersionSummary,
+  BenchmarkReport,
+  BenchmarkLabel,
+  StartSessionResult,
+  DraftResult,
+  SubmitResult,
+  UnableResult,
+  RetryResult,
+  AbandonResult,
+  QualitySignalReason,
+  QualitySignalResult,
+  RevealSourceResult,
+  RevealResultData,
+  ValidationEvent,
+  UploadImageOptions,
+  SourceRow,
+  SourceStatusSnapshot,
+  GetSessionResult,
+  ReviewWithCard,
+  ReviewAttemptStartResult,
+  ReviewAttemptSubmitResult,
+  ReviewAttemptLaterResult,
+} from "./api-types";
+
+import {
+  splitMarkdownImportBatches,
+  MARKDOWN_IMPORT_ROUTE_BYTES,
+} from "./api-types";
 
 // R-012: 浏览器端默认使用同源 /api（由 next.config.mjs rewrite 代理到 API 服务器），
 // 不再依赖 NEXT_PUBLIC_API_URL 指向 localhost，避免远程访问时请求访问者本机。
@@ -19,54 +213,14 @@ const CSRF_COOKIE_KEY = "ailearn_csrf";
 const CSRF_HEADER_KEY = "x-csrf-token";
 export const IDENTITY_CHANGED_EVENT = "ailearn:identity-changed";
 
-export type CurrentUser = {
-userId: string;
-workspaceId: string;
-email: string;
-role: string;
-displayName: string | null;
-avatarUrl: string | null;
-workspaceName: string;
-workspaceType: string;
-isPersonal: boolean;
-personalWorkspaceId: string | null;
-};
-
-export type PersonalAIProvider = "mock" | "dashscope" | "openai_compatible";
-
-export interface PersonalAIModelConfig {
-  configured: boolean;
-  provider: PersonalAIProvider | null;
-  baseUrl: string | null;
-  model: string | null;
-  apiKeyHint: string | null;
-  updatedAt: string | null;
-  encryptionReady: boolean;
-  fallbackProvider: string;
-}
-
-export interface PersonalAIConnectionTestResult {
-  ok: true;
-  provider: Exclude<PersonalAIProvider, "mock">;
-  model: string;
-  latencyMs: number;
-  checkedAt: string;
-}
-
-export interface AIPrivacySettings {
-  aiProvider: string;
-  aiConsentVersion: string | null;
-  aiConsentAt: string | null;
-  aiConsentBy: string | null;
-  aiDataPolicy: {
-    sendToExternal: boolean;
-    sendImageContent: boolean;
-    piiDetection: boolean;
-    auditLogging: boolean;
-  };
-}
+// ARCH-04: CurrentUser, AIPrivacySettings 等类型已迁移到 api-types.ts
 
 const GET_ME_CACHE_TTL_MS = 20_000;
+
+// QUAL-06 fix: SSR safety — guard module-level cache so it only activates
+// in browser context. On the server (Next.js SSR), each request gets its
+// own module instance so cross-user cache leakage is not possible.
+const isBrowser = typeof window !== "undefined";
 
 let getMeCache:
   | { token: string | null; value: CurrentUser; expiresAt: number }
@@ -77,10 +231,11 @@ let getMeInFlight:
 let getMeCacheGeneration = 0;
 
 /**
- * 账户信息会被侧栏、页头账户菜单和设置页同时读取。缓存失效使用代际编号，
- * 确保 token / 工作区切换前发出的迟到响应不能回填到新会话。
+ * QUAL-06 fix: SSR-safe cache invalidation. Only mutates module state
+ * in browser context; in SSR, this is a no-op since cache is always null.
  */
 function invalidateGetMeCache() {
+  if (!isBrowser) return;
   getMeCacheGeneration += 1;
   getMeCache = null;
   getMeInFlight = null;
@@ -173,6 +328,18 @@ function addCsrfHeader(headers: Headers, method: string): void {
   if (csrf) headers.set(CSRF_HEADER_KEY, csrf);
 }
 
+/**
+ * QUAL-22 修复：提取共享的 CSRF header 构建函数。
+ * 用于 uploadImage 和 uploadAvatar 等上传场景，统一 CSRF header 注入逻辑。
+ * 替代原先在三处独立实现的 csrf = getCsrfToken(); if (csrf) headers[...] = csrf 模式。
+ */
+function buildCsrfHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const csrf = getCsrfToken();
+  if (csrf) headers[CSRF_HEADER_KEY] = csrf;
+  return headers;
+}
+
 /** 仅处理当前会话代际发出的 401，避免迟到响应清掉新登录或新工作区。 */
 function handleUnauthorized(requestGeneration: number) {
   if (typeof window === "undefined") return;
@@ -226,11 +393,7 @@ interface UploadResult {
   height: number;
 }
 
-export interface UploadImageOptions {
-  onProgress?: (loaded: number, total: number) => void;
-  signal?: AbortSignal;
-  timeoutMs?: number;
-}
+// ARCH-04: UploadImageOptions 已迁移到 api-types.ts
 
 /**
  * 使用 XMLHttpRequest 上传文件，支持逐文件进度、超时和取消。
@@ -419,881 +582,6 @@ async function getMeCached(): Promise<CurrentUser> {
   return promise;
 }
 
-/* ------------------------------------------------------------------ */
-/* 共享类型                                                             */
-/* ------------------------------------------------------------------ */
-
-export interface AuthResponse {
-  token: string;
-  ctx: { userId: string; workspaceId: string };
-  // N-013: 登录时返回所有可访问的工作区
-  workspaces?: Array<{
-    workspaceId: string;
-    workspaceName: string;
-    role: string;
-    workspaceType: string;
-    isPersonal: boolean;
-  }>;
-  // 后端在登录/注册/切换工作区时返回的 CSRF token。正常情况下浏览器
-  // 会通过 Set-Cookie 自动存储 ailearn_csrf，但 Next.js rewrite 代理
-  // 转发多个 Set-Cookie 头时可能丢失非首个 cookie，因此前端需要从
-  // 响应体兜底设置 cookie。
-  csrfToken?: string;
-}
-
-export interface NoteHeader {
-  id: string;
-  title: string;
-  titleSource?: "auto" | "manual";
-  currentVersionId: string | null;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt?: string | null;
-}
-
-export type BlockType = "paragraph" | "heading" | "code" | "list" | "quote" | "image";
-
-export interface Block {
-  ordinal: number;
-  type: BlockType;
-  content: string;
-}
-
-export interface NoteVersion {
-  id: string;
-  noteId: string;
-  versionNo: number;
-  contentJson: { blocks: Block[] };
-  createdAt: string;
-}
-
-export interface NoteDetail {
-  note: NoteHeader;
-  version: NoteVersion;
-  blocks: Block[];
-}
-
-export type CardStatus = "active" | "superseded" | "archived";
-export type CardScope = "overview" | "section";
-export type CardSetStatus =
-  | "draft"
-  | "active"
-  | "partial_ready"
-  | "superseded"
-  | "archived";
-
-export interface LearningCardSchema {
-  title: string;
-  summary: string;
-  coverageWarning?: {
-    code: "partial_generation";
-    excludedImageCount: number;
-    excludedUnitIds: string[];
-    excludedImages: Array<{
-      sourceUnitId: string;
-      imageAssetId: string;
-      imageBlockId: string;
-      reason: string;
-    }>;
-  };
-}
-
-export interface CardKeyPoint {
-  id: string;
-  cardId: string;
-  ordinal: number;
-  claim: string;
-  quoteText: string;
-  segmentRef: { blockId?: string; blockOrdinal?: number } | null;
-}
-
-export interface LearningCardRecord {
-  id: string;
-  noteVersionId: string;
-  workspaceId: string;
-  status: CardStatus;
-  schemaJson: LearningCardSchema;
-  artifactId: string | null;
-  createdAt: string;
-  /** M5 card-set metadata. Optional while older card responses are still supported. */
-  cardSetId?: string | null;
-  generationRunId?: string | null;
-  scope?: CardScope | null;
-  scopeKey?: string | null;
-  ordinal?: number | null;
-}
-
-/** /cards/:id 返回 { card, keyPoints }（后端 getCardWithDetail 结构）。 */
-export interface CardDetailResponse {
-  card: LearningCardRecord;
-  keyPoints: CardKeyPoint[];
-}
-
-/** /cards 列表行（listCards 返回含聚合统计）。 */
-export interface CardListItem extends LearningCardRecord {
-  // B6: 聚合统计字段
-  evidenceHardCount?: number;
-  evidenceSoftCount?: number;
-  evidenceTotalCount?: number;
-  validationCount?: number;
-  reviewStatus?: string | null;
-  nextReviewAt?: string | null;
-}
-
-export interface CardSetRecord {
-  id: string;
-  workspaceId: string;
-  noteId: string;
-  noteVersionId: string;
-  generationRunId: string;
-  status: CardSetStatus;
-  title: string;
-  summary: string;
-  coverageReport: Record<string, unknown> | null;
-  createdAt: string;
-  activatedAt: string | null;
-  supersededAt: string | null;
-}
-
-export interface CardSetListItem extends CardSetRecord {
-  cardCount: number;
-  sectionCardCount: number;
-  overviewCardId: string | null;
-}
-
-export interface CardSetDetailResponse {
-  cardSet: CardSetRecord;
-  cards: CardDetailResponse[];
-  nextCursor: string | null;
-}
-
-export interface CardSetCardsPageResponse {
-  cardSetId: string;
-  items: CardDetailResponse[];
-  /** Opaque server cursor; clients must only pass it back unchanged. */
-  nextCursor: string | null;
-}
-
-export interface CardSetListResponse {
-  items: CardSetListItem[];
-  nextCursor: string | null;
-  total: number;
-}
-
-export interface CardSetAcceptResponse {
-  cardSetId: string;
-  acceptedArtifactCount: number;
-  /** Forward-compatible alias accepted by the UI if the API evolves. */
-  acceptedArtifacts?: number;
-}
-
-export interface CardSetRegenerateRequest {
-  mode?: string;
-  exclusions?: Record<string, unknown> | string[];
-}
-
-export interface CardSetRegenerateResponse {
-  runId: string;
-  rootRunId?: string;
-  status?: string;
-  mode?: string;
-  /** Compatibility with the initial M5 service response. */
-  jobId?: string | null;
-  sameVersion?: boolean;
-}
-
-export type EvidenceAlignment = "aligned" | "soft" | "unaligned" | "stale_alignment";
-export type EvidenceOverride = "confirmed" | "downgraded" | "rejected";
-
-export interface EvidenceRow {
-  id: string;
-  keyPointId: string;
-  blockId: string | null;
-  blockOrdinal: number | null;
-  quoteText: string;
-  alignment: EvidenceAlignment;
-  alignmentScore: number;
-  alignmentMethod: string;
-  userOverride: EvidenceOverride | null;
-  /** 当前登录用户的有效覆盖；新接口优先返回此字段。 */
-  effectiveOverride?: EvidenceOverride | null;
-  blockContent: string | null;
-  blockType: string | null;
-}
-
-/**
- * R-009: 计算证据的有效对齐状态（前端镜像后端 effectiveAlignment 逻辑）。
- *
- * - userOverride="rejected" → 返回 null，表示该证据应被排除
- * - userOverride="downgraded" → 返回 "soft"
- * - userOverride="confirmed" → 返回 "aligned"
- * - 无 override → 返回原始 alignment
- */
-export function effectiveAlignment(
-  alignment: EvidenceAlignment,
-  userOverride: EvidenceOverride | null,
-): EvidenceAlignment | null {
-  if (userOverride === "rejected") return null;
-  if (userOverride === "downgraded") return "soft";
-  if (userOverride === "confirmed") return "aligned";
-  return alignment;
-}
-
-/** R-009: 判断证据是否为"硬证据"（effective alignment === "aligned"） */
-export function isHardEvidence(
-  alignment: EvidenceAlignment,
-  userOverride: EvidenceOverride | null,
-): boolean {
-  return effectiveAlignment(alignment, userOverride) === "aligned";
-}
-
-/** /cards/:cardId/evidence 返回数组：{ keyPoint, evidences[] }（后端 getCardEvidence 结构）。 */
-export interface CardEvidenceGroup {
-  keyPoint: CardKeyPoint;
-  evidences: EvidenceRow[];
-}
-
-export type JobType = "generate_card" | "align_evidence" | "evaluate_validation" | "parse_source";
-export type JobStatus = "pending" | "running" | "succeeded" | "failed" | "dead";
-
-export interface JobRow {
-  id: string;
-  type: JobType | string;
-  status: JobStatus | string;
-  attempts?: number;
-  scheduledAt: string;
-  startedAt?: string | null;
-  finishedAt?: string | null;
-  lastError: string | null;
-}
-
-export interface CardGenerationStatus {
-  /** `checking` is a frontend-only recovery state used while card status is unavailable. */
-  state: "idle" | "checking" | "generating" | "generated";
-  cardId: string | null;
-  jobId: string | null;
-  generatedVersionId: string | null;
-  message?: string;
-}
-
-/**
- * Generation Run v2 is the user-facing task contract. Generic JobRow remains
- * available for legacy card generation and validation flows, but new note
- * generation code should only interpret this domain-specific view.
- */
-export type CardGenerationRunStatus =
-  | "queued"
-  | "planning"
-  | "awaiting_assets"
-  | "mapping"
-  | "reducing"
-  | "rendering"
-  | "validating"
-  | "publishing"
-  | "needs_attention"
-  | "partial_ready"
-  | "succeeded"
-  | "cancelled"
-  | "superseded"
-  | "failed"
-  | "terminal_failed";
-
-export interface CardGenerationSourceSnapshot {
-  noteVersionId: string;
-  versionNo: number;
-  contentHash: string;
-}
-
-export interface CardGenerationRunAccepted {
-  runId: string;
-  status: CardGenerationRunStatus;
-  sourceSnapshot: CardGenerationSourceSnapshot;
-  canContinueEditing: boolean;
-}
-
-export interface CardGenerationRunView {
-  runId: string;
-  noteId: string;
-  noteVersionId: string;
-  status: CardGenerationRunStatus;
-  stage: string;
-  stateVersion: number;
-  sequence: number;
-  sourceSnapshot: CardGenerationSourceSnapshot;
-  progress: {
-    completed: number;
-    total: number;
-    unit: string;
-  };
-  coverage: {
-    sourceUnitsCompleted: number;
-    sourceUnitsTotal: number;
-    imagesCompleted: number;
-    imagesTotal: number;
-    sourceCoverageBps: number | null;
-    imageCoverageBps: number | null;
-  };
-  warnings: Array<{
-    code: string;
-    details?: Record<string, unknown>;
-  }>;
-  actions: {
-    retryable: boolean;
-    cancellable: boolean;
-    canContinueWithExclusions: boolean;
-  };
-  result: {
-    cardId: string | null;
-    cardSetId: string | null;
-  } | null;
-  error: {
-    code: string;
-    retryable: boolean;
-  } | null;
-  createdAt: string;
-  startedAt?: string | null;
-  finishedAt?: string | null;
-}
-
-/* ------------------------------------------------------------------ */
-/* 验证 / 复习（V0.1b）                                                */
-/* ------------------------------------------------------------------ */
-
-export type ValidationOutcome =
-  | "preliminary_understanding"
-  | "unclear_expression"
-  | "misunderstanding"
-  | "unknown";
-
-export interface ValidationFeedback {
-  outcome: ValidationOutcome;
-  confidence: number; // 0-1
-  coveredPoints: string[];
-  missingPoints: string[];
-  misunderstandings: string[];
-  evidenceRefs: string[];
-  feedback: string;
-}
-
-/* ------------------------------------------------------------------ */
-/* v0.6 可信掌握闭环 — Validation Session API (计划 §8.2)              */
-/* ------------------------------------------------------------------ */
-
-/** 净化后的题目 DTO（不含 rubric/expectedConcept/evidence） */
-export interface SanitizedQuestion {
-  questionId: string;
-  questionType: "explain" | "example" | "apply";
-  question: string;
-  keyPointOrdinal?: number;
-}
-
-/** POST /cards/:cardId/validation-sessions/start 响应 */
-export interface StartSessionResult {
-  status:
-    | "ready"
-    | "question_preparing"
-    | "answer_saved"
-    | "evaluation_pending"
-    | "question_retryable"
-    | "evaluation_retryable"
-    | "blocked";
-  submissionId?: string;
-  question?: SanitizedQuestion;
-  jobId?: string;
-  reason?: string;
-  unassistedEligibleAt?: string;
-}
-
-/** GET /validation-sessions/:submissionId 响应 */
-export interface GetSessionResult {
-  submissionId: string;
-  status: string;
-  context: string;
-  keyPointId: string | null;
-  question?: SanitizedQuestion;
-  draftRevision: number;
-  draftAnswer?: string;
-  selfConfidence?: number | null;
-  assistanceLevel: string;
-  sourceAvailable: boolean;
-  resultAvailable: boolean;
-  jobId?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** PATCH /validation-sessions/:submissionId/draft 响应 */
-export interface DraftResult {
-  revision: number;
-  answerHash: string;
-}
-
-/** POST /validation-sessions/:submissionId/submit 响应 */
-export interface SubmitResult {
-  status: "evaluation_pending";
-  jobId: string;
-}
-
-/** POST /validation-sessions/:submissionId/unable 响应 */
-export interface UnableResult {
-  status: "completed";
-  resultAvailable: true;
-}
-
-/** POST /validation-sessions/:submissionId/retry-* 响应 */
-export interface RetryResult {
-  status: "question_preparing" | "evaluation_pending";
-  jobId: string;
-}
-
-/** POST /validation-sessions/:submissionId/abandon 响应 */
-export interface AbandonResult {
-  status: "abandoned";
-}
-
-/** POST /validation-events/:eventId/quality-signal 响应 (计划 §8.4 Should) */
-export interface QualitySignalResult {
-  signalId: string;
-  status: "saved";
-}
-
-/** Quality signal reason (计划 §8.4) */
-export type QualitySignalReason =
-  | "question_bad"
-  | "too_strict"
-  | "too_lenient"
-  | "rubric_bad"
-  | "evidence_bad";
-
-
-/** POST /validation-sessions/:submissionId/reveal-source 响应 */
-export interface RevealSourceResult {
-  assistanceLevel: string;
-  sourceAvailable: boolean;
-}
-
-/** reveal-result 中的 rubric item 评估结果 */
-export interface RevealResultRubricItem {
-  criterion: string;
-  verdict: "covered" | "partial" | "missing" | "contradicted" | "not_assessable";
-  rationale?: string;
-}
-
-/** reveal-result 中的证据引用 */
-export interface RevealResultEvidenceRef {
-  quoteText: string;
-  alignment: string;
-}
-
-/** POST /validation-sessions/:submissionId/reveal-result 响应 */
-export interface RevealResultData {
-  outcome: ValidationOutcome;
-  feedback: string | ValidationFeedback | null;
-  rubricItems: RevealResultRubricItem[];
-  userAnswer: string;
-  evidenceRefs: RevealResultEvidenceRef[];
-}
-
-export interface ValidationEvent {
-  id: string;
-  workspaceId: string;
-  userId: string;
-  cardId: string;
-  keyPointId: string | null;
-  artifactId: string | null;
-  question: string;
-  questionType: "explain" | "example" | "apply";
-  userAnswer: string;
-  outcome: ValidationOutcome;
-  confidence: number; // 后端存 0-100
-  feedback: ValidationFeedback | null;
-  createdAt: string;
-}
-
-export type ReviewStatus =
-  | "pending"
-  | "accepted"
-  | "dismissed"
-  | "completed"
-  | "superseded"
-  | "cancelled";
-
-export type ReviewReason =
-| "misunderstanding"
-| "evidence_gap"
-| "due_review"
-| "manual_pin";
-
-export const REVIEW_REASON_LABELS: Record<ReviewReason, string> = {
-misunderstanding: "误解修正",
-evidence_gap: "证据不足",
-due_review: "到期复习",
-manual_pin: "手动置顶",
-};
-
-export const REVIEW_REASON_COLORS: Record<ReviewReason, string> = {
-misunderstanding: "red",
-evidence_gap: "amber",
-due_review: "blue",
-manual_pin: "green",
-};
-
-export interface ReviewWithCard {
-  review: {
-    id: string;
-    workspaceId: string;
-    userId: string;
-    subjectType: string;
-    subjectId: string;
-    validationEventId: string | null;
-    status: ReviewStatus;
-    nextReviewAt: string;
-    intervalDays: number;
-    lastReviewAt: string | null;
-    createdAt: string;
-  };
-  card: { id: string; title: string };
-  keyPoint: { id: string; claim: string; quoteText: string } | null;
-  blockContent: string | null;
-  reviewReason: ReviewReason;
-}
-
-/**
- * v0.6 Sanitized review item (计划 §9.4/§10.4)
- * Only contains neutral fields — NO card title, claim, quoteText, blockContent.
- */
-export interface SanitizedReviewItem {
-  reviewId: string;
-  cardId: string;
-  keyPointId: string | null;
-  status: string;
-  nextReviewAt: string;
-  intervalDays: number;
-  reviewReason: ReviewReason;
-}
-
-/**
- * v0.6 Sanitized single review metadata (计划 §9.4/§10.4)
- * Minimal data for Review Focus route — NO card title, claim, quote, blockContent.
- */
-export interface SanitizedReviewMeta {
-  scheduleId: string;
-  cardId: string;
-  keyPointId: string | null;
-  status: string;
-  nextReviewAt: string;
-  intervalDays: number;
-  reviewReason: ReviewReason;
-}
-
-/* ------------------------------------------------------------------ */
-/* Review Attempts (LOOP-01/02, ADR-0004)                             */
-/* ------------------------------------------------------------------ */
-
-export type ReviewAttemptAnswerType = "recall" | "free_text" | "self_grade";
-export type ReviewAttemptOutcome = "correct" | "partial" | "incorrect" | "unable";
-
-export interface ReviewAttemptStartResult {
-  attemptId: string;
-  reviewScheduleId: string;
-  subjectType: string;
-  subjectId: string;
-  status: string;
-  startedAt: string;
-  idempotent: boolean;
-}
-
-export interface ReviewAttemptSubmitResult {
-  attemptId: string;
-  status: string;
-  outcome: string;
-  scheduleReasonCode: string;
-  understandingEffect: string;
-  beforeIntervalDays: number;
-  afterIntervalDays: number;
-  nextReviewAt: string;
-  nextScheduleId: string;
-  idempotent: boolean;
-}
-
-export interface ReviewAttemptLaterResult {
-  attemptId: string;
-  status: string;
-  scheduleReasonCode: string;
-  nextReviewAt: string;
-  intervalDays: number;
-  idempotent: boolean;
-}
-
-export interface ReviewAttemptHistoryItem {
-id: string;
-reviewScheduleId: string;
-subjectType: string;
-subjectId: string;
-answerType: string | null;
-outcome: string | null;
-confidence: number | null;
-skipReason: string | null;
-scheduleBeforeIntervalDays: number | null;
-scheduleAfterIntervalDays: number | null;
-scheduleReasonCode: string | null;
-understandingEffect: string | null;
-nextReviewAt: string | null;
-nextScheduleId: string | null;
-status: string;
-startedAt: string;
-completedAt: string | null;
-}
-
-export interface ReviewAttemptHistoryResult {
-  items: ReviewAttemptHistoryItem[];
-  nextCursor: string | null;
-}
-
-/* ------------------------------------------------------------------ */
-/* Sources (V0.3)                                                     */
-/* ------------------------------------------------------------------ */
-
-export type SourceStatus = "draft" | "processing" | "ready" | "failed" | "archived";
-export type SourceStatusSnapshot = Pick<SourceRow, "id" | "status" | "updatedAt">;
-export type SourceType = "text" | "markdown" | "code" | "url";
-
-export interface SourceRow {
-  id: string;
-  workspaceId: string;
-  type: SourceType;
-  title: string;
-  origin: string | null;
-  status: SourceStatus;
-  metadata: Record<string, unknown>;
-  createdBy: string;
-  createdAt: string;
-  updatedAt: string;
-  /** 该来源已创建的笔记数量（listSources 返回） */
-  noteCount?: number;
-}
-
-export interface SourceSegment {
-  id: string;
-  sourceId: string;
-  workspaceId: string;
-  ordinal: number;
-  text: string;
-  charStart: number;
-  charEnd: number;
-  segmentType: "paragraph" | "heading" | "code" | "quote" | "list" | "image";
-}
-
-export interface SourceDetail {
-  source: SourceRow;
-  segments: SourceSegment[];
-}
-
-export interface UnderstandingState {
-  subjectType: "card";
-  subjectId: string;
-  title: string;
-  state: string;
-  evidenceCoverage: number;
-  hardEvidenceCount: number;
-  softEvidenceCount: number;
-  lastValidatedAt: string | null;
-  nextReviewAt: string | null;
-  reviewStatus: string | null;
-  misunderstandingCount: number;
-}
-
-export type UnderstandingGraphNodeType = "source" | "note" | "card" | "key_point";
-export type UnderstandingGraphEdgeType = "derived_from" | "generated_from" | "contains";
-
-export interface UnderstandingGraphNode {
-  id: string;
-  entityId: string;
-  type: UnderstandingGraphNodeType;
-  label: string;
-  description: string | null;
-  state: string | null;
-  href: string;
-  parentId: string | null;
-  evidenceCoverage: number | null;
-  hardEvidenceCount: number;
-  softEvidenceCount: number;
-  misunderstandingCount: number;
-  lastValidatedAt: string | null;
-  nextReviewAt: string | null;
-  metadata: Record<string, unknown>;
-}
-
-export interface UnderstandingGraphEdge {
-  id: string;
-  from: string;
-  to: string;
-  type: UnderstandingGraphEdgeType;
-  strength: number;
-}
-
-export interface UnderstandingGraphResponse {
-  nodes: UnderstandingGraphNode[];
-  edges: UnderstandingGraphEdge[];
-  meta: {
-    generatedAt: string;
-    totalCards: number;
-    nodeCount: number;
-    edgeCount: number;
-    sourceCount: number;
-    noteCount: number;
-    cardCount: number;
-    keyPointCount: number;
-    truncated: boolean;
-    stateCounts: Record<string, number>;
-  };
-}
-
-export interface SearchResult {
-objectType: string;
-objectId: string;
-title: string | null;
-snippet: string;
-indexedAt: string;
-href: string;
-matchCount?: number;
-}
-
-// F-025: 搜索索引漂移检测结果
-export interface SearchDriftResult {
-expected: { note: number; source: number; card: number; evidence: number };
-actual: { note: number; source: number; card: number; evidence: number };
-ghosts: { objectType: string; objectId: string }[];
-missing: { objectType: string; objectId: string }[];
-staleTitles: { objectType: string; objectId: string; indexedTitle: string; actualTitle: string }[];
-staleBodies: { objectType: string; objectId: string }[];
-hasDrift: boolean;
-}
-
-export interface StatsOverview {
-  noteCount: number;
-  cardCount: number;
-  activeCardCount: number;
-  misunderstandingCount: number;
-  unclearCount: number;
-  evidenceCount: number;
-  pendingEvidenceCount: number;
-  pendingReviewCount: number;
-  hardEvidenceCount: number;
-}
-
-export interface NoteVersionSummary {
-  id: string;
-  noteId: string;
-  versionNo: number;
-  createdBy: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/* ------------------------------------------------------------------ */
-/* Benchmark (§2.1)                                                    */
-/* ------------------------------------------------------------------ */
-
-export interface BenchmarkKeyPoint {
-  ordinal: number;
-  claim: string;
-  quoteText: string;
-  alignment: string;
-  alignmentScore: number;
-  alignmentMethod: string;
-  blockOrdinal: number | null;
-}
-
-export interface BenchmarkNoteResult {
-  noteFile: string;
-  noteTitle: string;
-  noteId: string;
-  noteVersionId: string;
-  cardId: string;
-  cardTitle: string;
-  cardSummary: string;
-  keyPoints: BenchmarkKeyPoint[];
-  blockCount: number;
-  error: string | null;
-}
-
-export interface BenchmarkReport {
-// R-010: 每次运行有唯一 runId，绑定结果到特定运行
-runId: string;
-// R-010: 数据集版本，确保结果可追溯
-datasetVersion: string;
-timestamp: string;
-  totalNotes: number;
-  totalKeyPoints: number;
-metrics: {
-hardCitationPrecision: number | null;
-keyPointHardCoverage: number | null;
-validationExpectedPointsHardCoverage: number | null;
-// F-013: 标记指标是否经人工标注验证
-metricsVerified: boolean;
-};
-  results: BenchmarkNoteResult[];
-  hasLabels: boolean;
-}
-
-export interface BenchmarkLabel {
-  noteFile: string;
-  keyPoints: Array<{
-    ordinal: number;
-    isCorrectlyAligned: boolean;
-    expectedBlockOrdinal: number | null;
-  }>;
-}
-
-export interface MarkdownImportApiItem {
-  title?: string;
-  content: string;
-}
-
-export interface MarkdownImportApiResult {
-  imported: number;
-  notes: Array<{ note: { id: string; title: string }; version: { id: string; versionNo: number } }>;
-  idempotent?: boolean;
-  errors?: Array<{ index: number; title: string; error: string }>;
-}
-
-const MARKDOWN_IMPORT_BATCH_BYTES = 1_750_000;
-const MARKDOWN_IMPORT_ROUTE_BYTES = 2 * 1024 * 1024;
-
-function markdownImportPayloadBytes(items: MarkdownImportApiItem[], importId: string) {
-  return new TextEncoder().encode(JSON.stringify({ items, importId })).byteLength;
-}
-
-/**
- * Fastify 为导入路由保留 2 MiB body limit；这里按 UTF-8 字节拆批，避免多文件导入
- * 因 JSON 总体积超过传输限制。每个文件仍是一篇独立笔记。
- */
-export function splitMarkdownImportBatches(
-  items: MarkdownImportApiItem[],
-  importId: string,
-  maxBytes = MARKDOWN_IMPORT_BATCH_BYTES,
-) {
-  const batches: MarkdownImportApiItem[][] = [];
-  let current: MarkdownImportApiItem[] = [];
-  const sizeProbeId = `${importId.slice(0, 90)}:100`;
-
-  for (const item of items) {
-    const candidate = [...current, item];
-    if (
-      current.length > 0 &&
-      (current.length >= 100 || markdownImportPayloadBytes(candidate, sizeProbeId) > maxBytes)
-    ) {
-      batches.push(current);
-      current = [item];
-    } else {
-      current = candidate;
-    }
-  }
-  if (current.length > 0) batches.push(current);
-  return batches;
-}
-
 function createMarkdownImportId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `markdown-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1351,28 +639,6 @@ export const api = {
       body: JSON.stringify({ email, password, remember }),
     }),
 
-  getPersonalAIModelConfig: () =>
-    request<PersonalAIModelConfig>("/auth/ai-model-config"),
-  savePersonalAIModelConfig: (body: {
-    provider: PersonalAIProvider;
-    baseUrl?: string | null;
-    model?: string | null;
-    apiKey?: string;
-  }) => request<PersonalAIModelConfig>("/auth/ai-model-config", {
-    method: "PUT",
-    body: JSON.stringify(body),
-  }),
-  testPersonalAIModelConnection: (body: {
-    provider: PersonalAIProvider;
-    baseUrl?: string | null;
-    model?: string | null;
-    apiKey?: string;
-  }) => request<PersonalAIConnectionTestResult>("/auth/ai-model-config/test", {
-    method: "POST",
-    body: JSON.stringify(body),
-  }),
-  deletePersonalAIModelConfig: () =>
-    request<void>("/auth/ai-model-config", { method: "DELETE" }),
   getAIPrivacySettings: () =>
     request<AIPrivacySettings>("/workspace/ai-settings"),
   updateAIConsent: (consentVersion: string) =>
@@ -1485,10 +751,6 @@ isAutosave?: boolean;
       `/card-sets/${id}/cards${qs}`,
     );
   },
-  acceptCardSet: (id: string) =>
-    request<CardSetAcceptResponse>(`/card-sets/${id}/accept`, {
-      method: "POST",
-    }),
   dismissCardSet: (id: string) =>
     request<{ cardSetId: string; status: CardSetStatus }>(
       `/card-sets/${id}/dismiss`,
@@ -1502,13 +764,37 @@ isAutosave?: boolean;
       method: "POST",
       body: JSON.stringify(body),
     }),
-  createCardGenerationRun: (body: { noteVersionId: string; idempotencyKey: string }) =>
+  createCardGenerationRun: (body: { noteVersionId: string; idempotencyKey: string; density?: "overview" | "standard" | "complete"; force?: boolean; feedbackSummary?: string }) =>
     request<CardGenerationRunAccepted>("/card-generation-runs", {
       method: "POST",
       body: JSON.stringify(body),
     }),
   getCardGenerationRun: (id: string, signal?: AbortSignal) =>
     request<CardGenerationRunView>(`/card-generation-runs/${id}`, { signal }),
+  /**
+   * Phase B（设计 §5.2）：增量拉取 Agent 活动流。
+   *
+   * - `since`：`(createdAt, id)` 复合游标（服务端 nextCursor 返回），
+   *   语义为"返回严格晚于此游标的事件"；不传从最早开始。
+   * - `limit`：页大小 1–200，默认 200。
+   * - `includeUsage`：是否返回 token/计费 usage（默认 false）。
+   */
+  getCardGenerationAgentEvents: (id: string, opts: {
+    since?: string;
+    limit?: number;
+    includeUsage?: boolean;
+    signal?: AbortSignal;
+  } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.since) params.set("since", opts.since);
+    if (opts.limit != null) params.set("limit", String(opts.limit));
+    if (opts.includeUsage) params.set("includeUsage", "1");
+    const qs = params.toString();
+    return request<AgentEventPage>(
+      `/card-generation-runs/${id}/agent-events${qs ? `?${qs}` : ""}`,
+      { signal: opts.signal },
+    );
+  },
   cancelCardGenerationRun: (id: string) =>
     request<CardGenerationRunView>(`/card-generation-runs/${id}/cancel`, {
       method: "POST",
@@ -1517,17 +803,6 @@ isAutosave?: boolean;
     request<CardGenerationRunView>(`/card-generation-runs/${id}/retry`, {
       method: "POST",
     }),
-  continueCardGenerationRunWithExclusions: (
-    id: string,
-    body: { excludedUnitIds: string[]; idempotencyKey: string },
-  ) =>
-    request<CardGenerationRunAccepted>(
-      `/card-generation-runs/${id}/continue-with-exclusions`,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-    ),
   getLatestCardGenerationRun: (noteVersionId: string, signal?: AbortSignal) =>
     request<{ run: CardGenerationRunView | null }>(
       `/note-versions/${noteVersionId}/card-generation-latest`,
@@ -1535,11 +810,6 @@ isAutosave?: boolean;
     ),
 
   /* Legacy generation compatibility. */
-  generateCard: (noteVersionId: string) =>
-    request<CardGenerationStatus>("/cards/generate", {
-      method: "POST",
-      body: JSON.stringify({ noteVersionId }),
-    }),
   getCardGenerationStatus: (noteVersionId: string) =>
     request<CardGenerationStatus>(`/note-versions/${noteVersionId}/card-status`),
   getCardEvidence: (cardId: string) =>
@@ -1550,8 +820,6 @@ isAutosave?: boolean;
     request<{ jobId: string; sameVersion: boolean }>(`/cards/${cardId}/regenerate`, {
       method: "POST",
     }),
-  acceptCard: (cardId: string) =>
-    request<{ ok: boolean }>(`/cards/${cardId}/accept`, { method: "POST" }),
   dismissCard: (cardId: string) =>
     request<{ ok: boolean }>(`/cards/${cardId}/dismiss`, { method: "POST" }),
 
@@ -2113,9 +1381,8 @@ uploadImage: async (file: File, noteId: string, options: UploadImageOptions = {}
   // 因此 noteId 必须在 file 之前追加，否则后端读取不到 noteId。
   formData.append("noteId", noteId);
   formData.append("file", file);
-  const headers: Record<string, string> = {};
-  const csrf = getCsrfToken();
-  if (csrf) headers[CSRF_HEADER_KEY] = csrf;
+  // QUAL-22 修复：使用共享的 buildCsrfHeaders 函数，统一 CSRF header 注入逻辑
+  const headers = buildCsrfHeaders();
   const url = `${API_URL}/uploads/images`;
 
   return uploadWithProgress(url, formData, headers, options);
@@ -2125,16 +1392,23 @@ uploadImage: async (file: File, noteId: string, options: UploadImageOptions = {}
 uploadAvatar: async (file: File) => {
 const formData = new FormData();
 formData.append("file", file);
-const headers: Record<string, string> = {};
-const csrf = getCsrfToken();
-if (csrf) headers[CSRF_HEADER_KEY] = csrf;
+// BUG-15 修复：使用 requestResponse 包装器，统一 401 处理和错误解析
+// QUAL-22 修复：使用共享的 buildCsrfHeaders 函数，统一 CSRF header 注入逻辑
+const headers = buildCsrfHeaders();
+const token = getToken();
+if (token) headers["Authorization"] = `Bearer ${token}`;
 const res = await fetch(`${API_URL}/uploads/avatars`, {
   method: "POST",
   body: formData,
   credentials: "include",
   headers,
 });
-if (!res.ok) throw new ApiError(res.status, await res.text());
+if (!res.ok) {
+  // BUG-15 修复：401 时触发标准登录跳转
+  if (res.status === 401) handleUnauthorized(getMeCacheGeneration);
+  const text = await res.text().catch(() => "");
+  throw parseApiError(res.status, res.statusText, text);
+}
 return res.json() as Promise<{ url: string; objectKey: string; size: number; mimeType: string }>;
 },
 };

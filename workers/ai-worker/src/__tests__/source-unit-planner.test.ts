@@ -72,9 +72,9 @@ test("images are enumerated separately instead of being treated as alt text", ()
   assert.equal(plan.spans.map((span) => span.exactText).join(""), "A complete text fact remains present.");
 });
 
-// ─── 回归：map chunk 不得超过 cardMapInputSchema 的 200 单元上限 ─────────
+// ─── 回归：map chunk 留出结构化输出余量，不顶满 200 单元 schema 上限 ─────
 
-test("chunks never exceed the 200-unit map input schema cap", () => {
+test("chunks cap short evidence batches at 50 units", () => {
   const blocks = Array.from({ length: 300 }, (_, i) => ({
     id: `p-${i}`,
     ordinal: i,
@@ -85,8 +85,8 @@ test("chunks never exceed the 200-unit map input schema cap", () => {
   assert.ok(plan.chunks.length >= 2, "300 个短块必须拆成多个 chunk");
   for (const chunk of plan.chunks) {
     assert.ok(
-      chunk.unitKeys.length <= 200,
-      `chunk ${chunk.ordinal} has ${chunk.unitKeys.length} units (> 200)`,
+      chunk.unitKeys.length <= 50,
+      `chunk ${chunk.ordinal} has ${chunk.unitKeys.length} units (> 50)`,
     );
   }
   // 全覆盖不丢失
@@ -128,4 +128,75 @@ test("editor <hN> headings are parsed with real level and stripped tags", () => 
     `sectionPath leaks raw tags: ${JSON.stringify(span!.sectionPath)}`,
   );
   assert.ok(span!.sectionPath.includes("编辑器标题"));
+});
+
+// ─── 回归：────Title──── 样式装饰性章节标记被正确识别 ──────────────────
+
+test("decorative section markers (────Title────) are detected as level-1 headings", () => {
+  const plan = planSourceUnits("version-section-marker", [
+    { id: "p0", ordinal: 0, type: "paragraph", content: "这是引言部分。" },
+    { id: "p1", ordinal: 1, type: "paragraph", content: "────什么是 Graph Engineering？────" },
+    { id: "p2", ordinal: 2, type: "paragraph", content: "graph engineering 是在干嘛呢？" },
+    { id: "p3", ordinal: 3, type: "paragraph", content: "────Graph Engineering 的工作原理是什么？────" },
+    { id: "p4", ordinal: 4, type: "paragraph", content: "一张 graph 拆开就三样东西。" },
+  ]);
+  const introSpan = plan.spans.find((s) => s.blockId === "p0");
+  const section1Span = plan.spans.find((s) => s.blockId === "p2");
+  const section2Span = plan.spans.find((s) => s.blockId === "p4");
+  assert.ok(introSpan, "intro span should exist");
+  assert.ok(section1Span, "section 1 span should exist");
+  assert.ok(section2Span, "section 2 span should exist");
+  assert.deepEqual(introSpan!.sectionPath, [], "intro should have empty sectionPath");
+  assert.deepEqual(
+    section1Span!.sectionPath,
+    ["什么是 Graph Engineering？"],
+    "section 1 should use the marker title",
+  );
+  assert.deepEqual(
+    section2Span!.sectionPath,
+    ["Graph Engineering 的工作原理是什么？"],
+    "section 2 should use the marker title",
+  );
+  // The section marker block itself should also be in the new section
+  const markerSpan = plan.spans.find((s) => s.blockId === "p1");
+  assert.deepEqual(
+    markerSpan!.sectionPath,
+    ["什么是 Graph Engineering？"],
+    "marker block should be in its own section",
+  );
+});
+
+// ─── 回归：图片块继承周围文本的 sectionPath ──────────────────────────
+
+test("image blocks inherit sectionPath from surrounding text", () => {
+  const plan = planSourceUnits("version-image-section", [
+    { id: "p0", ordinal: 0, type: "paragraph", content: "引言文字。" },
+    { id: "img1", ordinal: 1, type: "image", content: "![图片](url1.png)" },
+    { id: "p1", ordinal: 2, type: "paragraph", content: "────什么是 Graph Engineering？────" },
+    { id: "p2", ordinal: 3, type: "paragraph", content: "graph 的定义。" },
+    { id: "img2", ordinal: 4, type: "image", content: "![图片](url2.png)" },
+    { id: "img3", ordinal: 5, type: "image", content: "![图](url3.png)" },
+    { id: "p3", ordinal: 6, type: "paragraph", content: "────Graph Engineering 怎么上手实操？────" },
+    { id: "p4", ordinal: 7, type: "paragraph", content: "动手之前先泼一盆冷水。" },
+    { id: "img4", ordinal: 8, type: "image", content: "![示意图](url4.png)" },
+  ]);
+  const imgSectionPaths = new Map(plan.imageSectionPaths.map((entry) => [entry.blockId, entry.sectionPath]));
+  assert.deepEqual(imgSectionPaths.get("img1"), [], "image before any heading should have empty sectionPath");
+  assert.deepEqual(
+    imgSectionPaths.get("img2"),
+    ["什么是 Graph Engineering？"],
+    "image after first section marker should inherit that section",
+  );
+  assert.deepEqual(
+    imgSectionPaths.get("img3"),
+    ["什么是 Graph Engineering？"],
+    "second image in same section should inherit same sectionPath",
+  );
+  assert.deepEqual(
+    imgSectionPaths.get("img4"),
+    ["Graph Engineering 怎么上手实操？"],
+    "image after second section marker should inherit new section",
+  );
+  // imageBlockIds should still be populated
+  assert.deepEqual(plan.imageBlockIds, ["img1", "img2", "img3", "img4"]);
 });

@@ -1,25 +1,19 @@
-// P2-1: Node.js 20+ fetch 内部已使用 undici 连接池并默认开启 keep-alive。
-// 全局 fetch 会自动复用 TCP+TLS 连接，无需显式配置 Agent。
-// 如需进一步调优连接池参数，可安装 undici npm 包并使用 setGlobalDispatcher。
+// A3（计划 §2.3）：显式配置 undici 连接池参数。
+// Node.js 20+ 内置 undici 默认池，但参数不可调。
+// 通过 setGlobalDispatcher 显式配置，使生产环境可通过环境变量调参。
+import { initHttpPool } from "./lib/http-pool.ts";
+initHttpPool();
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { logger } from "./lib/logger.ts";
-import { closeDatabase, db } from "./db.ts";
+import { closeDatabase, db, withWorkerWorkspaceTransaction } from "./db.ts";
 import * as schema from "./schema/index.ts";
-import { runGenerateCard, runAlignEvidence, runEvaluateValidation, type JobPayload } from "./handlers/index.ts";
+import { runAlignEvidence, runEvaluateValidation, type JobPayload } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runGenerateValidationQuestion } from "./handlers/generate-validation-question.ts";
 import { runEvaluateRubric } from "./handlers/evaluate-rubric.ts";
-import {
-  projectTextPipelineJobFailure,
-  runAnalyzeCardImage,
-  runMapCardGeneration,
-  runPlanCardSet,
-  runPlanCardGeneration,
-  runPublishCardGeneration,
-  runReduceCardGeneration,
-  runRenderCardGeneration,
-} from "./handlers/card-generation-text.ts";
+import { runCardSupervisorAgent } from "./handlers/card-supervisor-agent.ts";
+import { reconcileSupervisorAgentRuns } from "./agent/reconciler.ts";
 
 /**
  * Dispatch evaluate_validation jobs based on payload format:
@@ -38,8 +32,7 @@ function dispatchEvaluateValidation(job: JobPayload) {
 import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
 import { resolveHandlerTimeout, RESOLVED_TIMEOUT_INFO } from "./lib/handler-timeout-config.ts";
 import { isNonRetryableError } from "./lib/non-retryable-errors.ts";
-import { safeErrorMessage, sanitizeOperationalError } from "@ailearn/shared";
-import { markCardGenerationRunNeedsAttention } from "./lib/card-generation-run.ts";
+import { safeErrorMessage, sanitizeOperationalError, NON_TERMINAL_UNIT_STATUSES } from "@ailearn/shared";
 import {
   claimJobs,
   markJobDead,
@@ -57,18 +50,15 @@ import {
   jobLeaseLostTotal,
   jobNonRetryableDeadTotal,
   jobDurationSeconds,
+  jobOldestPendingAgeSeconds,
+  jobQueueDepth,
+  JOB_STATUSES,
   startMetricsServer,
 } from "./lib/metrics.ts";
 
 const HANDLERS = {
-  generate_card: runGenerateCard,
-  plan_card_generation: runPlanCardGeneration,
-  analyze_card_image: runAnalyzeCardImage,
-  map_card_generation: runMapCardGeneration,
-  reduce_card_generation: runReduceCardGeneration,
-  plan_card_set: runPlanCardSet,
-  render_card_generation: runRenderCardGeneration,
-  publish_card_generation: runPublishCardGeneration,
+  // Supervisor Agent v1：唯一 Agent job type（计划 §5.2）
+  execute_card_agent_turn: runCardSupervisorAgent,
   align_evidence: runAlignEvidence,
   evaluate_validation: dispatchEvaluateValidation,
   parse_source: runParseSource,
@@ -76,6 +66,10 @@ const HANDLERS = {
 } as const;
 
 const POLL_MS = 500;
+const POLL_MAX_MS = 5_000; // QUAL-08: max backoff when queue is idle
+const QUEUE_METRICS_REFRESH_MS = 5_000;
+let lastQueueMetricsRefreshAt = 0;
+let currentPollMs = POLL_MS; // adaptive: grows when idle, resets on activity
 // F-010: 模型调用超时现在按 job 类型分别配置，见 handler-timeout-config.ts
 // 全局默认仍可通过 WORKER_MODEL_TIMEOUT_MS 环境变量覆盖。
 
@@ -93,14 +87,14 @@ export function setupGracefulShutdown() {
 }
 setupGracefulShutdown();
 
-const TEXT_GENERATION_JOB_TYPES = new Set([
-  "plan_card_generation",
-  "analyze_card_image",
-  "map_card_generation",
-  "reduce_card_generation",
-  "plan_card_set",
-  "render_card_generation",
-  "publish_card_generation",
+// Agent job 的 payload 结构与文本管线 job 不同（使用 agentUnitId 而非
+// generationUnitId，且没有 noteVersionId），需要独立的失败投影路径。
+const AGENT_TERMINAL_RUN_STATUSES = new Set([
+  "needs_attention",
+  "partial_ready",
+  "succeeded",
+  "cancelled",
+  "superseded",
 ]);
 
 async function projectGenerationFailure(
@@ -108,26 +102,18 @@ async function projectGenerationFailure(
   error: unknown,
   terminal: boolean,
   retryable: boolean,
-): Promise<void> {
-  if (!job.payload.generationRunId) return;
+): Promise<boolean> {
+  if (!job.payload.generationRunId) return false;
   try {
-    if (job.type === "generate_card") {
-      if (!terminal) return;
-      await markCardGenerationRunNeedsAttention({
-        workspaceId: job.workspaceId,
-        requestedBy: job.requestedBy,
-        payload: job.payload,
-        error,
-        retryable,
-      });
-    } else if (TEXT_GENERATION_JOB_TYPES.has(job.type)) {
-      await projectTextPipelineJobFailure({
+    if (job.type === "execute_card_agent_turn") {
+      return await projectAgentJobFailure({
         job,
         error,
         terminal,
         retryable,
       });
     }
+    return false;
   } catch (projectionError) {
     // The job terminal transition is already committed. Keep the projection
     // failure privacy-safe so reconciliation can repair the run later without
@@ -139,7 +125,114 @@ async function projectGenerationFailure(
       },
       "failed to project generation job state to generation run",
     );
+    return false;
   }
+}
+
+/**
+ * Agent job (execute_card_agent_turn) 的失败投影。
+ *
+ * Agent job 的 payload 使用 agentUnitId（而非 generationUnitId）且没有
+ * noteVersionId，需要独立的失败投影路径。
+ *
+ * 非终态失败时，agent handler 的 catch 块已将 unit 标记为 retryable_failed，
+ * 此处无需重复操作，直接返回 false。
+ *
+ * 终态失败时，将 unit 标记为 terminal_failed，原子取消同一 run 下所有
+ * 非终态 unit，并将 run 标记为 needs_attention。
+ */
+async function projectAgentJobFailure(input: {
+  job: ClaimedJob;
+  error: unknown;
+  terminal: boolean;
+  retryable: boolean;
+}): Promise<boolean> {
+  const agentUnitId = input.job.payload.agentUnitId;
+  const runId = input.job.payload.generationRunId;
+  if (typeof agentUnitId !== "string" || typeof runId !== "string") return false;
+
+  // 非终态：agent handler 已标记 unit 为 retryable_failed，无需额外投影
+  if (!input.terminal) return false;
+
+  const sanitized = sanitizeOperationalError(input.error);
+  const errorCode = `agent_${sanitized.category}`;
+
+  return withWorkerWorkspaceTransaction(
+    { workspaceId: input.job.workspaceId, userId: input.job.requestedBy },
+    async (tx) => {
+      const [run] = await tx
+        .select({
+          id: schema.cardGenerationRuns.id,
+          workspaceId: schema.cardGenerationRuns.workspaceId,
+          status: schema.cardGenerationRuns.status,
+          stateVersion: schema.cardGenerationRuns.stateVersion,
+          nextEventSequence: schema.cardGenerationRuns.nextEventSequence,
+        })
+        .from(schema.cardGenerationRuns)
+        .where(and(
+          eq(schema.cardGenerationRuns.id, runId),
+          eq(schema.cardGenerationRuns.workspaceId, input.job.workspaceId),
+        ))
+        .for("update");
+      if (!run || AGENT_TERMINAL_RUN_STATUSES.has(run.status)) return false;
+
+      const now = new Date();
+
+      // 标记当前 unit 为 terminal_failed
+      await tx
+        .update(schema.cardGenerationUnits)
+        .set({
+          status: "terminal_failed",
+          errorCode,
+          finishedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(schema.cardGenerationUnits.id, agentUnitId),
+          eq(schema.cardGenerationUnits.workspaceId, input.job.workspaceId),
+        ));
+
+      // 原子取消同一 run 下所有非终态 unit（保留 waiting_child parent 链）。
+      // 检查点保留修复：waiting_child 的 parent 正在等它的子任务完成，是重试恢复的
+      // 关键链路。若把 parent 也取消，用户 `/retry` 重排队失败的子任务后，
+      // resumeParentSupervisorIfNeeded 因 parent 已终态而无法恢复，run 会永久卡死。
+      // 因此只取消 pending/running/retryable_failed 等兄弟 unit，保留 waiting_child。
+      await tx
+        .update(schema.cardGenerationUnits)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(schema.cardGenerationUnits.runId, runId),
+          eq(schema.cardGenerationUnits.workspaceId, input.job.workspaceId),
+          inArray(schema.cardGenerationUnits.status, NON_TERMINAL_UNIT_STATUSES),
+          ne(schema.cardGenerationUnits.id, agentUnitId),
+          ne(schema.cardGenerationUnits.status, "waiting_child"),
+        ));
+
+      // 标记 run 为 needs_attention
+      await tx
+        .update(schema.cardGenerationRuns)
+        .set({
+          status: "needs_attention",
+          stateVersion: sql`${schema.cardGenerationRuns.stateVersion} + 1`,
+          nextEventSequence: sql`${schema.cardGenerationRuns.nextEventSequence} + 1`,
+          errorCode,
+          retryable: input.retryable,
+          updatedAt: now,
+          finishedAt: now,
+        })
+        .where(and(
+          eq(schema.cardGenerationRuns.id, run.id),
+          eq(schema.cardGenerationRuns.workspaceId, run.workspaceId),
+          eq(schema.cardGenerationRuns.stateVersion, run.stateVersion),
+        ));
+
+      return true;
+    },
+  );
 }
 
 /**
@@ -148,8 +241,8 @@ async function projectGenerationFailure(
  * "running",整个 run 卡死且 /retry 也捞不到它。lease 已失效,但失败
  * 投影本身不依赖 lease(走 workspace 事务 + run 行锁),可以安全补账。
  */
-async function projectReapedGenerationJobs(reapedIds: string[]): Promise<void> {
-  if (reapedIds.length === 0) return;
+async function projectReapedGenerationJobs(reapedIds: string[]): Promise<number> {
+  if (reapedIds.length === 0) return 0;
   let deadRows: Array<typeof schema.jobs.$inferSelect> = [];
   try {
     deadRows = await db.query.jobs.findMany({
@@ -163,27 +256,130 @@ async function projectReapedGenerationJobs(reapedIds: string[]): Promise<void> {
       { error: sanitizeOperationalError(error) },
       "failed to load reaped jobs for generation projection",
     );
-    return;
+    return 0;
   }
-  for (const row of deadRows) {
-    if (!row.generationRunId) continue;
-    await projectGenerationFailure(
-      {
-        id: row.id,
-        type: row.type,
-        payload: (row.payload ?? {}) as Record<string, unknown>,
-        workspaceId: row.workspaceId,
-        requestedBy: row.requestedBy,
-        attempts: row.attempts ?? 0,
-        // The lease died with the reaped worker; failure projection never
-        // touches the lease fence (workspace transaction + row locks only).
-        leaseToken: "",
-      },
-      new Error("job lease expired and was reaped (worker crash or stall)"),
-      true,
-      true,
+  let projected = 0;
+  // PERF-46/62 修复：将串行处理改为分批并行处理。
+  // 每个 dead job 的 failure projection 涉及独立的事务（workspace 事务 + 行锁），
+  // 不同 workspace/run 之间无依赖关系，可以安全并行。
+  // 使用每批 10 个的并发度，避免同时开启过多事务。
+  const BATCH_SIZE = 10;
+  for (let i = 0; i < deadRows.length; i += BATCH_SIZE) {
+    const batch = deadRows.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(async (row) => {
+        if (!row.generationRunId) return false;
+        const updated = await projectGenerationFailure(
+          {
+            id: row.id,
+            type: row.type,
+            payload: (row.payload ?? {}) as Record<string, unknown>,
+            workspaceId: row.workspaceId,
+            requestedBy: row.requestedBy,
+            attempts: row.attempts ?? 0,
+            // lease 已失效，但失败投影不依赖 lease（workspace 事务 + 行锁）
+            leaseToken: "",
+          },
+          row.lastError
+            ?? new Error("job lease expired and was reaped (worker crash or stall)"),
+          true,
+          true,
+        );
+        return updated;
+      }),
+    );
+    projected += results.filter(Boolean).length;
+  }
+  return projected;
+}
+
+/**
+ * Recover the narrow crash window where a queue job reached `dead` but its
+ * generation checkpoint projection failed (for example because the process
+ * restarted between the two transactions). Without this startup sweep the
+ * unit can remain `running` forever even though no active queue job exists.
+ *
+ * Select only the latest job for each generation unit. Older dead attempts
+ * must never overwrite a newer pending/running/succeeded retry.
+ */
+export async function reconcileTerminalGenerationJobs(): Promise<number> {
+  const batchSize = 500;
+  const maxBatches = 10;
+  let projectedTotal = 0;
+  let skippedBatches = 0;
+  for (let batch = 0; batch < maxBatches; batch += 1) {
+    const rows = await db.execute<{ id: string }>(sql`
+      WITH latest_generation_jobs AS (
+        SELECT DISTINCT ON (generation_unit_id)
+          id,
+          generation_run_id,
+          generation_unit_id,
+          status
+        FROM public.jobs
+        WHERE generation_run_id IS NOT NULL
+          AND generation_unit_id IS NOT NULL
+          AND scheduled_at >= clock_timestamp() - interval '30 days'
+        ORDER BY
+          generation_unit_id,
+          COALESCE(finished_at, started_at, scheduled_at) DESC,
+          id DESC
+      )
+      SELECT latest.id
+      FROM latest_generation_jobs AS latest
+      JOIN public.card_generation_units AS generation_unit
+        ON generation_unit.id = latest.generation_unit_id
+      JOIN public.card_generation_runs AS generation_run
+        ON generation_run.id = latest.generation_run_id
+      WHERE latest.status = 'dead'
+        AND generation_unit.status NOT IN (
+          'succeeded',
+          'terminal_failed',
+          'cancelled',
+          'superseded'
+        )
+        AND generation_run.status NOT IN (
+          'needs_attention',
+          'partial_ready',
+          'succeeded',
+          'cancelled',
+          'superseded'
+        )
+      ORDER BY latest.id
+      LIMIT ${batchSize}
+    `) as unknown as Array<{ id: string }>;
+    if (rows.length === 0) break;
+
+    // ARCH-08 fix: Wrap batch projection in try/catch and continue the loop
+    // even when a batch yields 0 projections. Previously, a batch returning
+    // 0 projected jobs would break the loop, leaving subsequent batches of
+    // dead jobs unprocessed until the next restart. Now we only break when
+    // there are no more rows to process (rows.length < batchSize means we've
+    // consumed all dead jobs).
+    let projected = 0;
+    try {
+      projected = await projectReapedGenerationJobs(rows.map((row) => row.id));
+      projectedTotal += projected;
+    } catch (error) {
+      // Log and continue — individual job projections inside
+      // projectReapedGenerationJobs already have their own try/catch, but
+      // a catastrophic failure (e.g., DB disconnect) should not prevent
+      // the next batch from being attempted.
+      logger.error(
+        { batch, error: sanitizeOperationalError(error) },
+        "reconcileTerminalGenerationJobs: batch projection failed, continuing to next batch",
+      );
+      skippedBatches += 1;
+    }
+
+    if (rows.length < batchSize) break;
+  }
+  if (skippedBatches > 0) {
+    logger.warn(
+      { skippedBatches, projectedTotal },
+      "reconcileTerminalGenerationJobs: some batches were skipped due to errors; remaining dead jobs will be retried on next startup",
     );
   }
+  return projectedTotal;
 }
 
 // 处理单个 job 的完整生命周期（claim 后的执行 + 状态转换 + 指标记录）。
@@ -239,10 +435,30 @@ export async function processJob(job: ClaimedJob): Promise<void> {
   } catch (err) {
     const message = safeErrorMessage(err);
     const safeError = sanitizeOperationalError(err);
+    // ARCH-04 设计权衡说明：
+    // 开发环境在 detail 字段中记录原始 error message（可能含 SQL 参数等敏感信息），
+    // 生产环境仅使用 sanitizeOperationalError 脱敏后的安全版本。
+    // 这是有意的隐私设计——生产环境绝不在日志中暴露可能包含用户数据的原始错误。
+    // 代价是生产环境调试时需要通过 safeError 中的分类信息推断根因。
+    // detail 字段绕过 pino 的 err/error 序列化器（会剥离 message），使根因可见。
+    if (process.env.NODE_ENV === "development") {
+      logger.warn(
+        {
+          jobId: job.id,
+          type: job.type,
+          detail: err instanceof Error ? err.message : String(err),
+          ...(err instanceof Error && err.cause
+            ? { cause: err.cause instanceof Error ? err.cause.message : String(err.cause) }
+            : {}),
+        },
+        "job error detail (development)",
+      );
+    }
+    const autoRetry = !(isNonRetryableError(err) || isNonRetryableError(message));
     jobDurationSeconds.labels(job.type).observe((Date.now() - jobStart) / 1000);
 
     // 非重试错误（欠费/鉴权/配置）直接标记 dead，不浪费重试次数。
-    if (isNonRetryableError(err) || isNonRetryableError(message)) {
+    if (!autoRetry) {
       const failure = await markJobDead(job, message);
       if (!failure.updated) {
         jobLeaseLostTotal.labels(job.type).inc();
@@ -252,7 +468,12 @@ export async function processJob(job: ClaimedJob): Promise<void> {
         );
         return;
       }
-      await projectGenerationFailure(job, err, true, false);
+      await projectGenerationFailure(
+        job,
+        err,
+        true,
+        false,
+      );
       jobNonRetryableDeadTotal.labels(job.type).inc();
       jobTerminalTotal.labels(job.type, "dead").inc();
       logger.error(
@@ -260,6 +481,9 @@ export async function processJob(job: ClaimedJob): Promise<void> {
           jobId: job.id,
           error: safeError,
           reason: "non-retryable",
+          ...(process.env.NODE_ENV === "development"
+            ? { detail: err instanceof Error ? err.message : String(err) }
+            : {}),
         },
         "job marked dead — non-retryable error (billing/auth/config)",
       );
@@ -279,11 +503,21 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     }
     // OPS-01: 记录重试或终态
     if (failure.status === "pending") {
-      await projectGenerationFailure(job, err, false, true);
+      await projectGenerationFailure(
+        job,
+        err,
+        false,
+        true,
+      );
       jobRetriesTotal.labels(job.type).inc();
     } else {
       // dead — 终态
-      await projectGenerationFailure(job, err, true, true);
+      await projectGenerationFailure(
+        job,
+        err,
+        true,
+        true,
+      );
       jobTerminalTotal.labels(job.type, "dead").inc();
     }
     logger.error(
@@ -292,6 +526,9 @@ export async function processJob(job: ClaimedJob): Promise<void> {
         error: safeError,
         attempts: failure.attempts,
         backoffMs: failure.backoffMs,
+        ...(process.env.NODE_ENV === "development"
+          ? { detail: err instanceof Error ? err.message : String(err) }
+          : {}),
       },
       "job failed",
     );
@@ -301,11 +538,93 @@ export async function processJob(job: ClaimedJob): Promise<void> {
 // 追踪在途 job 的 Promise，用于优雅关停时等待全部完成。
 // semaphore 模型：tick() 不再 await 所有 job 完成后才认领下一批，
 // 而是每个 slot 空闲后立即在下次 tick 补充，避免慢 job 堵塞快 job 的 slot。
+//
+// ARCH-03 修复：内存背压控制
+// 在固定并发数（QUEUE_CONCURRENCY）的基础上，增加内存使用监控。
+// 当进程堆内存超过阈值时，暂停认领新 job，防止多个重型 job 同时运行导致 OOM。
+// 内存阈值默认为 1.5GB（可通过环境变量 WORKER_MEMORY_LIMIT_MB 配置）。
+const WORKER_MEMORY_LIMIT_MB = Number(process.env.WORKER_MEMORY_LIMIT_MB ?? 1536);
+// 记录上次跳过认领的时间，避免日志刷屏
+let lastMemorySkipLogAt = 0;
+
+/**
+ * 检查当前进程内存使用是否在安全范围内。
+ * 如果堆内存使用超过阈值，返回 false 并记录警告日志。
+ */
+function isMemoryAvailable(): boolean {
+  const memUsage = process.memoryUsage();
+  const heapUsedMB = memUsage.heapUsed / (1024 * 1024);
+  if (heapUsedMB > WORKER_MEMORY_LIMIT_MB) {
+    // 每 30 秒最多记录一次警告，避免日志刷屏
+    const now = Date.now();
+    if (now - lastMemorySkipLogAt > 30_000) {
+      lastMemorySkipLogAt = now;
+      logger.warn(
+        {
+          heapUsedMB: Math.round(heapUsedMB),
+          limitMB: WORKER_MEMORY_LIMIT_MB,
+          rssMB: Math.round(memUsage.rss / (1024 * 1024)),
+          inflight: inflight.size,
+        },
+        "内存使用超过阈值，暂停认领新 job（ARCH-03 背压控制）",
+      );
+    }
+    return false;
+  }
+  return true;
+}
+
 const inflight = new Set<Promise<void>>();
 
+async function refreshQueueMetrics(nowMs = Date.now()): Promise<void> {
+  if (nowMs - lastQueueMetricsRefreshAt < QUEUE_METRICS_REFRESH_MS) return;
+  lastQueueMetricsRefreshAt = nowMs;
+  try {
+    const [depthRows, ageRows] = await Promise.all([
+      db.execute<{ status: string; total: number }>(sql`
+        SELECT status::text AS status, count(*)::integer AS total
+        FROM public.jobs
+        GROUP BY status
+      `) as unknown as Promise<Array<{ status: string; total: number }>>,
+      db.execute<{ oldest_pending_age_seconds: number }>(sql`
+        SELECT COALESCE(
+          EXTRACT(EPOCH FROM (clock_timestamp() - min(scheduled_at))),
+          0
+        )::double precision AS oldest_pending_age_seconds
+        FROM public.jobs
+        WHERE status = 'pending'
+      `) as unknown as Promise<Array<{ oldest_pending_age_seconds: number }>>,
+    ]);
+    for (const status of JOB_STATUSES) {
+      jobQueueDepth.labels(status).set(0);
+    }
+    for (const row of depthRows) {
+      if ((JOB_STATUSES as readonly string[]).includes(row.status)) {
+        jobQueueDepth.labels(row.status).set(Number(row.total));
+      }
+    }
+    jobOldestPendingAgeSeconds.set(
+      Math.max(0, Number(ageRows[0]?.oldest_pending_age_seconds ?? 0)),
+    );
+  } catch (error) {
+    logger.warn(
+      { error: sanitizeOperationalError(error) },
+      "failed to refresh queue metrics",
+    );
+  }
+}
+
 export async function tick(): Promise<void> {
-  // F-010: 先回收悬挂作业
-  const reaped = await reapStaleJobs();
+  // ARCH-07: Check shutdown first — skip reapStaleJobs and metrics refresh
+  // during graceful shutdown to avoid unnecessary database queries.
+  if (shuttingDown) return;
+
+  // PERF-05 修复：refreshQueueMetrics 和 reapStaleJobs 可以并行执行
+  // 因为两者互不依赖，避免空闲队列的 tick 延迟叠加
+  const [, reaped] = await Promise.all([
+    refreshQueueMetrics(),
+    reapStaleJobs(),
+  ]);
   if (reaped.total > 0) {
     logger.warn(
       {
@@ -324,9 +643,13 @@ export async function tick(): Promise<void> {
   // F-010: 优雅关停时不认领新作业
   if (shuttingDown) return;
 
+  // ARCH-03 修复：内存背压检查
+  // 当进程堆内存超过阈值时，暂停认领新 job，等待现有 job 完成释放内存
+  if (!isMemoryAvailable()) return;
+
   // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
   // 各 handler 事务中的 advisory lock 保证并发安全：
-  //   generate_card    — workspace 级锁，同 workspace 串行化
+  //   execute_card_agent_turn — workspace 级锁，同 workspace 串行化
   //   align_evidence   — key point 级锁，不同 key point 可并行
   //   evaluate_validation — 输入维度锁（cardId+keyPointId+userId+question+userAnswer），
   //                         防止相同输入的不同 job 并发写入重复 validation_events
@@ -336,16 +659,27 @@ export async function tick(): Promise<void> {
 
   const candidates = await claimJobs(undefined, available);
 
+  // QUAL-08: Adaptive polling — reset to fast poll when jobs are found,
+  // exponentially back off when queue is idle.
+  if (candidates.length > 0) {
+    currentPollMs = POLL_MS;
+  } else {
+    currentPollMs = Math.min(POLL_MAX_MS, currentPollMs * 2);
+  }
+
   for (const job of candidates) {
+    // BUG-10 修复：确保 finally 总是执行，即使 catch 中抛出异常
     const promise = processJob(job).catch((err) => {
       // processJob 内部已有完整的 try/catch，此 catch 仅防止意外 rejection。
       logger.error(
         { jobId: job.id, err },
         "job processing rejected unexpectedly",
       );
+      return undefined; // 确保返回一个 resolved promise，finally 会执行
     });
     inflight.add(promise);
-    promise.finally(() => inflight.delete(promise));
+    // BUG-10 修复：使用 .then().catch().finally() 链确保 inflight.delete 总是执行
+    promise.then(() => inflight.delete(promise)).catch(() => inflight.delete(promise));
   }
 }
 
@@ -362,12 +696,6 @@ export async function main() {
       defaultTimeouts: RESOLVED_TIMEOUT_INFO.defaultTimeouts,
       envOverrides: {
         global: process.env.WORKER_MODEL_TIMEOUT_MS,
-        generate_card: process.env.WORKER_TIMEOUT_GENERATE_CARD_MS,
-        plan_card_generation: process.env.WORKER_TIMEOUT_PLAN_CARD_GENERATION_MS,
-        analyze_card_image: process.env.WORKER_TIMEOUT_ANALYZE_CARD_IMAGE_MS,
-        map_card_generation: process.env.WORKER_TIMEOUT_MAP_CARD_GENERATION_MS,
-        reduce_card_generation: process.env.WORKER_TIMEOUT_REDUCE_CARD_GENERATION_MS,
-        publish_card_generation: process.env.WORKER_TIMEOUT_PUBLISH_CARD_GENERATION_MS,
         evaluate_validation: process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS,
         align_evidence: process.env.WORKER_TIMEOUT_ALIGN_EVIDENCE_MS,
         parse_source: process.env.WORKER_TIMEOUT_PARSE_SOURCE_MS,
@@ -380,6 +708,48 @@ export async function main() {
     { concurrency: QUEUE_CONCURRENCY, pollMs: POLL_MS },
     "AI worker started, polling for jobs…",
   );
+  try {
+    const reconciled = await reconcileTerminalGenerationJobs();
+    if (reconciled > 0) {
+      logger.warn(
+        { projectedJobs: reconciled },
+        "reconciled terminal generation jobs left without a durable checkpoint projection",
+      );
+    }
+  } catch (error) {
+    logger.error(
+      { error: sanitizeOperationalError(error) },
+      "startup generation projection reconciliation failed",
+    );
+  }
+  // P0-06b: 启动时执行 Supervisor Agent reconciler
+  try {
+    const supResult = await reconcileSupervisorAgentRuns();
+    if (supResult.cancelledUnits > 0 || supResult.resumedParents > 0) {
+      logger.warn(
+        supResult,
+        "startup supervisor agent reconciliation: cleaned up dangling units and resumed stuck parents",
+      );
+    }
+  } catch (error) {
+    logger.error(
+      { error: sanitizeOperationalError(error) },
+      "startup supervisor agent reconciliation failed",
+    );
+  }
+  // P0-06b: 定时执行 Supervisor Agent reconciler（每 60 秒）
+  const RECONCILER_INTERVAL_MS = 60_000;
+  const reconcilerTimer = setInterval(async () => {
+    try {
+      await reconcileSupervisorAgentRuns();
+    } catch (error) {
+      logger.error(
+        { error: sanitizeOperationalError(error) },
+        "periodic supervisor agent reconciliation failed",
+      );
+    }
+  }, RECONCILER_INTERVAL_MS);
+  reconcilerTimer.unref(); // 不阻止进程退出
   try {
     while (true) {
       try {
@@ -394,14 +764,36 @@ export async function main() {
             { inflight: inflight.size },
             "shutdown signal received, waiting for in-flight jobs to finish…",
           );
-          await Promise.allSettled([...inflight]);
+          // 修复：优雅关停 drain 必须有界。某个 handler（如底层 provider 调用不响应
+          // abort）可能永远不结束，worker 会一直等，最后被 SIGKILL 强杀，在途 job
+          // 遗留在 running 状态且 lease 未释放，整个 run 永久卡住（reaper 只在 tick 里跑）。
+          // 到点后强制退出，遗留 job 由下一个 worker 启动时的 reapStaleJobs 回收。
+          const drainTimeoutMs = Math.max(
+            1_000,
+            Number(process.env.WORKER_DRAIN_TIMEOUT_MS ?? 45_000),
+          );
+          const drainDeadline = new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, drainTimeoutMs);
+            t.unref();
+          });
+          await Promise.race([
+            Promise.allSettled([...inflight]),
+            drainDeadline,
+          ]);
+          if (inflight.size > 0) {
+            logger.warn(
+              { inflight: inflight.size, drainTimeoutMs },
+              "drain timeout reached, exiting anyway (orphaned running jobs will be reaped by the next worker startup)",
+            );
+          }
         }
         logger.info("shutdown complete, exiting");
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      await new Promise((resolve) => setTimeout(resolve, currentPollMs));
     }
   } finally {
+    clearInterval(reconcilerTimer);
     metricsServer.close();
     await closeDatabase();
   }

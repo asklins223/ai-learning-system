@@ -1,5 +1,5 @@
 import { and, eq, lte, sql, inArray } from "drizzle-orm";
-import { db, type ApiTransaction } from "../../db/client.ts";
+import { withWorkspaceTransaction, SYSTEM_USER_ID, type ApiTransaction } from "../../db/client.ts";
 import {
   reviewSchedules,
   validationEvents,
@@ -108,7 +108,14 @@ export async function listReviews(
   userId?: string,
   tx?: ApiTransaction,
 ): Promise<{ items: ReviewWithCard[]; total: number; nextOffset: number | null }> {
-  const queryDb = tx ?? db;
+  // QUAL-58/SEC-26 修复：未提供 tx 时使用 withWorkspaceTransaction 确保 RLS 上下文
+  if (!tx) {
+    return withWorkspaceTransaction(
+      { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+      (newTx) => listReviews(workspaceId, filter, userId, newTx),
+    );
+  }
+  const queryDb = tx;
   let where;
   const userFilter = userId ? eq(reviewSchedules.userId, userId) : undefined;
   if (filter.includeAll) {
@@ -398,7 +405,14 @@ export async function listSanitizedReviews(
   userId?: string,
   tx?: ApiTransaction,
 ): Promise<{ items: SanitizedReviewItem[]; total: number; nextOffset: number | null }> {
-  const queryDb = tx ?? db;
+  // QUAL-58/SEC-26 修复：未提供 tx 时使用 withWorkspaceTransaction 确保 RLS 上下文
+  if (!tx) {
+    return withWorkspaceTransaction(
+      { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+      (newTx) => listSanitizedReviews(workspaceId, filter, userId, newTx),
+    );
+  }
+  const queryDb = tx;
   const result = await listReviews(workspaceId, filter, userId, tx);
   const keyPointIds = result.items
     .map((item) => item.keyPoint?.id)
@@ -456,7 +470,14 @@ export async function getSanitizedReviewMeta(
   userId?: string,
   tx?: ApiTransaction,
 ): Promise<SanitizedReviewMeta | null> {
-  const queryDb = tx ?? db;
+  // QUAL-58/SEC-26 修复：未提供 tx 时使用 withWorkspaceTransaction 确保 RLS 上下文
+  if (!tx) {
+    return withWorkspaceTransaction(
+      { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+      (newTx) => getSanitizedReviewMeta(workspaceId, scheduleId, userId, newTx),
+    );
+  }
+  const queryDb = tx;
   const schedule = await queryDb.query.reviewSchedules.findFirst({
     where: and(
       eq(reviewSchedules.workspaceId, workspaceId),

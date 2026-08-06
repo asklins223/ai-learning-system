@@ -22,6 +22,8 @@ coverage/
 /apps/web/test-results/
 /project-archive/
 /product-design-assets/
+/e2e-artifacts/
+/.reasonix/
 scripts/*.py
 scripts/*.js
 

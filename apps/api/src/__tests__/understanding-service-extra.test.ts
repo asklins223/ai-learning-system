@@ -11,6 +11,12 @@ import {
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const USER_ID = "00000000-0000-4000-8000-000000000002";
 const mutableDb = db as any;
+// QUAL-58/SEC-26 后服务无 tx 时走 withWorkspaceTransaction（真实 db.transaction），
+// 单元测试直接传入 fake tx 跳过 RLS 上下文设置。
+const FAKE_TX = {
+  query: mutableDb.query,
+  select: (...args: unknown[]) => mutableDb.select(...args),
+} as any;
 const original = {
   select: mutableDb.select,
   learningCardsFindMany: mutableDb.query.learningCards.findMany,
@@ -50,7 +56,8 @@ function installStateDb(fixture: StateDbFixture): void {
       if (table === understandingEvents) {
         return {
           innerJoin: () => ({
-            where: () => ({ orderBy: async () => fixture.events ?? [] }),
+            // PERF-23：服务端用 SQL GROUP BY 聚合 understanding_events
+            where: () => ({ groupBy: async () => fixture.events ?? [] }),
           }),
         };
       }
@@ -59,10 +66,24 @@ function installStateDb(fixture: StateDbFixture): void {
       }
       if (table === reviewSchedules) {
         return {
-          innerJoin: () => ({
-            where: () => ({ orderBy: async () => fixture.validationReviews ?? [] }),
+          // PERF-23 后：validation + card 两类 schedule 合并为一次 leftJoin 查询，
+          // 结果行的 cardId = COALESCE(validation.card_id, schedule.subject_id)。
+          leftJoin: () => ({
+            where: () => ({
+              orderBy: async () => [
+                ...(fixture.validationReviews ?? []).map((r) => ({
+                  cardId: r.cardId,
+                  nextReviewAt: r.nextReviewAt,
+                  status: r.status,
+                })),
+                ...(fixture.cardReviews ?? []).map((r) => ({
+                  cardId: r.subjectId,
+                  nextReviewAt: r.nextReviewAt,
+                  status: r.status,
+                })),
+              ],
+            }),
           }),
-          where: () => ({ orderBy: async () => fixture.cardReviews ?? [] }),
         };
       }
       throw new Error("unexpected table in state fixture");
@@ -87,7 +108,7 @@ describe("understanding state aggregation", () => {
       throw new Error("should not query aggregates");
     };
 
-    assert.deepEqual(await getUnderstandingStates(WORKSPACE_ID), []);
+    assert.deepEqual(await getUnderstandingStates(WORKSPACE_ID, undefined, undefined, FAKE_TX), []);
     assert.equal(selects, 0);
   });
 
@@ -103,15 +124,51 @@ describe("understanding state aggregation", () => {
     ];
     installStateDb({
       cards,
+      // PERF-23 后服务端用 SQL GROUP BY 聚合，fixture 提供聚合行：
+      // { cardId, latestEventType, latestValidationEventType, lastValidatedAt, misunderstandingCount }
       events: [
-        { cardId: "card-misunderstood", eventType: "reviewed", createdAt: new Date("2026-07-21T00:00:00Z") },
-        { cardId: "card-misunderstood", eventType: "misunderstood", createdAt: new Date("2026-07-20T00:00:00Z") },
-        { cardId: "card-misunderstood", eventType: "misunderstood", createdAt: new Date("2026-07-19T00:00:00Z") },
-        { cardId: "card-due", eventType: "seen", createdAt: new Date("2026-07-20T00:00:00Z") },
-        { cardId: "card-validated", eventType: "validated", createdAt: new Date("2026-07-20T00:00:00Z") },
-        { cardId: "card-reviewed", eventType: "reviewed", createdAt: new Date("2026-07-20T00:00:00Z") },
-        { cardId: "card-seen", eventType: "seen", createdAt: new Date("2026-07-20T00:00:00Z") },
-        { cardId: "card-unknown", eventType: "custom", createdAt: new Date("2026-07-20T00:00:00Z") },
+        {
+          cardId: "card-misunderstood",
+          latestEventType: "reviewed",
+          latestValidationEventType: "misunderstood",
+          lastValidatedAt: new Date("2026-07-20T00:00:00Z"),
+          misunderstandingCount: 2,
+        },
+        {
+          cardId: "card-due",
+          latestEventType: "seen",
+          latestValidationEventType: null,
+          lastValidatedAt: null,
+          misunderstandingCount: 0,
+        },
+        {
+          cardId: "card-validated",
+          latestEventType: "validated",
+          latestValidationEventType: "validated",
+          lastValidatedAt: new Date("2026-07-20T00:00:00Z"),
+          misunderstandingCount: 0,
+        },
+        {
+          cardId: "card-reviewed",
+          latestEventType: "reviewed",
+          latestValidationEventType: null,
+          lastValidatedAt: null,
+          misunderstandingCount: 0,
+        },
+        {
+          cardId: "card-seen",
+          latestEventType: "seen",
+          latestValidationEventType: null,
+          lastValidatedAt: null,
+          misunderstandingCount: 0,
+        },
+        {
+          cardId: "card-unknown",
+          latestEventType: "custom",
+          latestValidationEventType: null,
+          lastValidatedAt: null,
+          misunderstandingCount: 0,
+        },
       ],
       keyPoints: [
         { id: "kp-misunderstood", cardId: "card-misunderstood" },
@@ -140,7 +197,7 @@ describe("understanding state aggregation", () => {
       ],
     });
 
-    const results = await getUnderstandingStates(WORKSPACE_ID, undefined, USER_ID);
+    const results = await getUnderstandingStates(WORKSPACE_ID, undefined, USER_ID, FAKE_TX);
     const byId = new Map(results.map((result) => [result.subjectId, result]));
 
     assert.equal(byId.get("card-misunderstood")?.state, "misunderstood");
@@ -160,7 +217,13 @@ describe("understanding state aggregation", () => {
   it("uses legacy evidence overrides without a user and filters by derived state", async () => {
     installStateDb({
       cards: [stateCard("card-soft", "Soft")],
-      events: [{ cardId: "card-soft", eventType: "seen", createdAt: new Date("2026-07-20T00:00:00Z") }],
+      events: [{
+        cardId: "card-soft",
+        latestEventType: "seen",
+        latestValidationEventType: null,
+        lastValidatedAt: null,
+        misunderstandingCount: 0,
+      }],
       keyPoints: [{ id: "kp-soft", cardId: "card-soft" }],
       evidenceRows: [
         { id: "ev-soft", keyPointId: "kp-soft", alignment: "aligned", userOverride: "downgraded" },
@@ -168,8 +231,8 @@ describe("understanding state aggregation", () => {
       ],
     });
 
-    assert.deepEqual(await getUnderstandingStates(WORKSPACE_ID, { state: "misunderstood" }), []);
-    const seen = await getUnderstandingStates(WORKSPACE_ID, { state: "seen" });
+    assert.deepEqual(await getUnderstandingStates(WORKSPACE_ID, { state: "misunderstood" }, undefined, FAKE_TX), []);
+    const seen = await getUnderstandingStates(WORKSPACE_ID, { state: "seen" }, undefined, FAKE_TX);
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.softEvidenceCount, 1);
     assert.equal(seen[0]!.hardEvidenceCount, 0);
@@ -211,7 +274,8 @@ function installGraphDb(fixture: GraphDbFixture): void {
       if (table === understandingEvents) {
         return {
           innerJoin: () => ({
-            where: () => ({ orderBy: async () => fixture.events ?? [] }),
+            // PERF-23：服务端用 SQL GROUP BY 聚合 understanding_events
+            where: () => ({ groupBy: async () => fixture.events ?? [] }),
           }),
         };
       }
@@ -221,12 +285,10 @@ function installGraphDb(fixture: GraphDbFixture): void {
       }
       if (table === reviewSchedules) {
         reviewSelect += 1;
-        if (reviewSelect === 1) {
-          return {
-            innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
-          };
-        }
-        return { where: () => ({ orderBy: async () => [] }) };
+        return {
+          // PERF-23 后为合并的 leftJoin 查询；graph fixture 不提供复习数据。
+          leftJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
+        };
       }
       if (table === learningCards) {
         return { where: async () => [{ count: fixture.totalCards ?? fixture.stateCards.length }] };
@@ -243,7 +305,7 @@ describe("understanding graph data projection", () => {
   it("returns stable metadata when there are no visible cards", async () => {
     installGraphDb({ stateCards: [], totalCards: 3 });
 
-    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID);
+    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID, FAKE_TX);
 
     assert.deepEqual(graph.nodes, []);
     assert.equal(graph.meta.totalCards, 3);
@@ -325,7 +387,7 @@ describe("understanding graph data projection", () => {
       totalCards: 1,
     });
 
-    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID);
+    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID, FAKE_TX);
 
     assert.deepEqual(graph.nodes.map((node) => node.type), ["source", "note", "card", "key_point"]);
     assert.equal(graph.meta.totalCards, 1);
@@ -357,7 +419,7 @@ describe("understanding graph data projection", () => {
       totalCards: 1,
     });
 
-    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID);
+    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID, FAKE_TX);
 
     assert.equal(graph.meta.cardCount, 1);
     assert.equal(graph.meta.noteCount, 0);
@@ -380,7 +442,7 @@ describe("understanding graph data projection", () => {
       totalCards: 0,
     });
 
-    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID);
+    const graph = await getUnderstandingGraph(WORKSPACE_ID, USER_ID, FAKE_TX);
 
     assert.equal(graph.meta.cardCount, 0);
     assert.equal(graph.nodes.length, 0);

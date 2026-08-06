@@ -34,15 +34,8 @@ import {
 // ─── allowlist 完整性 ──────────────────────────────────────────────────
 
 test("JOB_TYPES 包含全部 Worker handler 类型", () => {
-  assert.equal(JOB_TYPES.length, 12);
-  assert.ok(JOB_TYPES.includes("generate_card"));
-  assert.ok(JOB_TYPES.includes("plan_card_generation"));
-  assert.ok(JOB_TYPES.includes("analyze_card_image"));
-  assert.ok(JOB_TYPES.includes("map_card_generation"));
-  assert.ok(JOB_TYPES.includes("reduce_card_generation"));
-  assert.ok(JOB_TYPES.includes("plan_card_set"));
-  assert.ok(JOB_TYPES.includes("render_card_generation"));
-  assert.ok(JOB_TYPES.includes("publish_card_generation"));
+  assert.equal(JOB_TYPES.length, 5);
+  assert.ok(JOB_TYPES.includes("execute_card_agent_turn"));
   assert.ok(JOB_TYPES.includes("align_evidence"));
   assert.ok(JOB_TYPES.includes("evaluate_validation"));
   assert.ok(JOB_TYPES.includes("parse_source"));
@@ -64,17 +57,15 @@ test("JOB_STATUSES 包含全部 5 种状态", () => {
 });
 
 test("PROVIDER_OPERATIONS 包含全部外部模型调用操作（不含 parse_source）", () => {
-  assert.equal(PROVIDER_OPERATIONS.length, 9);
-  assert.ok(PROVIDER_OPERATIONS.includes("generate_card"));
-  assert.ok(PROVIDER_OPERATIONS.includes("generate_card_repair"));
-  assert.ok(PROVIDER_OPERATIONS.includes("card_map"));
-  assert.ok(PROVIDER_OPERATIONS.includes("image_understanding"));
-  assert.ok(PROVIDER_OPERATIONS.includes("image_card_map"));
+  assert.equal(PROVIDER_OPERATIONS.length, 4);
   assert.ok(PROVIDER_OPERATIONS.includes("align_evidence"));
   assert.ok(PROVIDER_OPERATIONS.includes("evaluate_validation"));
   assert.ok(PROVIDER_OPERATIONS.includes("evaluate_rubric"));
   assert.ok(PROVIDER_OPERATIONS.includes("generate_validation_question"));
   assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("parse_source"));
+  assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("card_map"));
+  assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("image_understanding"));
+  assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("execute_card_agent_turn"));
 });
 
 test("ERROR_CATEGORIES 包含全部 10 种错误分类", () => {
@@ -121,24 +112,22 @@ test("categorizeError: schema_failure 关键词匹配", () => {
   assert.equal(categorizeError(new Error("invalid JSON")), "schema_failure");
 });
 
-test("categorizeError: provider_5xx 关键词匹配", () => {
-  assert.equal(categorizeError(new Error("500 internal server error")), "provider_5xx");
-  assert.equal(categorizeError(new Error("502 bad gateway")), "provider_5xx");
-  assert.equal(categorizeError(new Error("503 service unavailable")), "provider_5xx");
-  // Note: "504 gateway timeout" matches "timeout" first due to keyword priority
-  assert.equal(categorizeError(new Error("HTTP 504 error")), "provider_5xx");
+test("categorizeError: provider_5xx 结构化状态码匹配", () => {
+  assert.equal(categorizeError(Object.assign(new Error("internal server error"), { status: 500 })), "provider_5xx");
+  assert.equal(categorizeError(Object.assign(new Error("bad gateway"), { status: 502 })), "provider_5xx");
+  assert.equal(categorizeError(Object.assign(new Error("service unavailable"), { status: 503 })), "provider_5xx");
+  assert.equal(categorizeError(Object.assign(new Error("gateway timeout"), { status: 504 })), "provider_5xx");
 });
 
-test("categorizeError: auth_error 关键词匹配", () => {
-  assert.equal(categorizeError(new Error("401 unauthorized")), "auth_error");
-  assert.equal(categorizeError(new Error("403 forbidden")), "auth_error");
-  assert.equal(categorizeError(new Error("authentication failed")), "auth_error");
+test("categorizeError: auth_error 结构化状态码匹配", () => {
+  assert.equal(categorizeError(Object.assign(new Error("unauthorized"), { status: 401 })), "auth_error");
+  assert.equal(categorizeError(Object.assign(new Error("forbidden"), { status: 403 })), "auth_error");
 });
 
-test("categorizeError: quota_exceeded 关键词匹配", () => {
+test("categorizeError: quota_exceeded 关键词与结构化匹配", () => {
   assert.equal(categorizeError(new Error("quota exceeded")), "quota_exceeded");
   assert.equal(categorizeError(new Error("rate limit hit")), "quota_exceeded");
-  assert.equal(categorizeError(new Error("429 too many requests")), "quota_exceeded");
+  assert.equal(categorizeError(Object.assign(new Error("too many requests"), { status: 429 })), "quota_exceeded");
 });
 
 test("categorizeError: network_error 关键词匹配", () => {
@@ -157,9 +146,9 @@ test("categorizeError: validation_error 关键词匹配", () => {
   assert.equal(categorizeError(new Error("invalid input")), "validation_error");
 });
 
-test("categorizeError: provider_4xx 关键词匹配", () => {
-  assert.equal(categorizeError(new Error("400 bad request")), "provider_4xx");
-  assert.equal(categorizeError(new Error("422 unprocessable entity")), "provider_4xx");
+test("categorizeError: provider_4xx 结构化状态码匹配", () => {
+  assert.equal(categorizeError(Object.assign(new Error("bad request"), { status: 400 })), "provider_4xx");
+  assert.equal(categorizeError(Object.assign(new Error("unprocessable entity"), { status: 422 })), "provider_4xx");
 });
 
 test("categorizeError: 无法分类的错误返回 unknown", () => {
@@ -188,46 +177,46 @@ test("jobOldestPendingAgeSeconds 正确设置值", () => {
 });
 
 test("jobTerminalTotal 按 type/status 正确递增", () => {
-  jobTerminalTotal.labels("generate_card", "succeeded").inc();
-  jobTerminalTotal.labels("generate_card", "succeeded").inc();
+  jobTerminalTotal.labels("execute_card_agent_turn", "succeeded").inc();
+  jobTerminalTotal.labels("execute_card_agent_turn", "succeeded").inc();
   jobTerminalTotal.labels("align_evidence", "dead").inc();
   assert.ok(true);
 });
 
 test("jobRetriesTotal 按 type 正确递增", () => {
-  jobRetriesTotal.labels("generate_card").inc();
+  jobRetriesTotal.labels("execute_card_agent_turn").inc();
   jobRetriesTotal.labels("evaluate_validation").inc();
   assert.ok(true);
 });
 
 test("jobLeaseLostTotal 按 type 正确递增", () => {
-  jobLeaseLostTotal.labels("generate_card").inc();
+  jobLeaseLostTotal.labels("execute_card_agent_turn").inc();
   assert.ok(true);
 });
 
 test("jobDurationSeconds 正确观察值", () => {
-  jobDurationSeconds.labels("generate_card").observe(0.5);
-  jobDurationSeconds.labels("generate_card").observe(5.2);
+  jobDurationSeconds.labels("execute_card_agent_turn").observe(0.5);
+  jobDurationSeconds.labels("execute_card_agent_turn").observe(5.2);
   jobDurationSeconds.labels("parse_source").observe(15.0);
   assert.ok(true);
 });
 
 test("providerCallsTotal 按 operation/status 正确递增", () => {
-  providerCallsTotal.labels("generate_card", "success").inc();
-  providerCallsTotal.labels("generate_card", "failed").inc();
+  providerCallsTotal.labels("execute_card_agent_turn", "success").inc();
+  providerCallsTotal.labels("execute_card_agent_turn", "failed").inc();
   providerCallsTotal.labels("evaluate_validation", "success").inc();
   assert.ok(true);
 });
 
 test("providerCallDurationSeconds 正确观察值", () => {
-  providerCallDurationSeconds.labels("generate_card").observe(1.2);
+  providerCallDurationSeconds.labels("execute_card_agent_turn").observe(1.2);
   providerCallDurationSeconds.labels("evaluate_validation").observe(3.5);
   assert.ok(true);
 });
 
 test("providerErrorsTotal 按 operation/error_category 正确递增", () => {
-  providerErrorsTotal.labels("generate_card", "timeout").inc();
-  providerErrorsTotal.labels("generate_card", "schema_failure").inc();
+  providerErrorsTotal.labels("execute_card_agent_turn", "timeout").inc();
+  providerErrorsTotal.labels("execute_card_agent_turn", "schema_failure").inc();
   providerErrorsTotal.labels("evaluate_validation", "auth_error").inc();
   assert.ok(true);
 });

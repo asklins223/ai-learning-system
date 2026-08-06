@@ -74,7 +74,7 @@ export async function benchmarkRoutes(app: FastifyInstance) {
 
   /**
    * POST /benchmark/run — 运行 Evidence 对齐基准测试。
-   * 会创建 30 篇版本化内置笔记，触发 generate_card + align_evidence 全链路。
+   * 会创建 30 篇版本化内置笔记，触发 execute_card_agent_turn + align_evidence 全链路。
    * 需要 AI Worker 正在运行。
    */
   app.post("/benchmark/run", { preHandler: [requireOwner] }, async (req) => {

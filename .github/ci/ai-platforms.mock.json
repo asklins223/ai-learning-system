@@ -1,0 +1,11 @@
+{
+  "platforms": {
+    "mock": { "type": "mock" }
+  },
+  "capabilities": {
+    "agent_turn": { "platform": "mock", "model": "mock-v1" },
+    "text_generation": { "platform": "mock", "model": "mock-v1" },
+    "vision": { "platform": "mock", "model": "mock-v1" },
+    "embedding": { "platform": "mock", "model": "mock-v1" }
+  }
+}

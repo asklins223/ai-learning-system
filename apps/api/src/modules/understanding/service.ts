@@ -1,5 +1,5 @@
-import { and, asc, count, desc, eq, inArray, isNull } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import { and, asc, count, desc, eq, inArray, isNull, sql, or } from "drizzle-orm";
+import { withWorkspaceTransaction, SYSTEM_USER_ID, type ApiTransaction } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, validationEvents, reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
 import { notes, noteVersions, sources } from "../../db/schema/note.ts";
@@ -34,14 +34,20 @@ export interface UnderstandingState {
  * 2. 对每张 card，join understanding_events → validation_events 找到最新事件
  * 3. 映射为理解状态
  * 4. 关联 card/note 信息（标题、证据覆盖率、上次验证时间、下次复习时间）
+ *
+ * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
 export async function getUnderstandingStates(
   workspaceId: string,
   opts?: { state?: string },
   userId?: string,
+  tx?: ApiTransaction,
 ): Promise<UnderstandingState[]> {
+  // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
+  // 提供 tx（测试/内部调用）时直接运行，跳过事务上下文设置。
+  const run = async (tx: ApiTransaction): Promise<UnderstandingState[]> => {
   // 1. 查所有 active cards
-  const cards = await db.query.learningCards.findMany({
+  const cards = await tx.query.learningCards.findMany({
     where: and(
       eq(learningCards.workspaceId, workspaceId),
       activeLearningCardConsumerPredicate(),
@@ -54,69 +60,66 @@ export async function getUnderstandingStates(
 
   const cardIds = cards.map((c) => c.id);
 
-  // 2. 批量查 understanding_events（通过 join validation_events 找到 card_id）
-  // 聚合每个 card 的最新事件
-  const eventRows = await db
-    .select({
-      cardId: validationEvents.cardId,
-      eventType: understandingEvents.eventType,
-      createdAt: understandingEvents.createdAt,
-    })
-    .from(understandingEvents)
-    .innerJoin(
-      validationEvents,
-      and(
-        eq(understandingEvents.subjectId, validationEvents.id),
-        eq(understandingEvents.subjectType, "validation"),
+  // PERF-23 修复：使用 SQL GROUP BY 聚合替代应用层聚合。
+  // 原代码加载所有 understanding_events 到内存后在 JS 中遍历聚合，
+  // 现改为在数据库层面使用 PostgreSQL 的 array_agg + FILTER 子句直接计算：
+  //   - latest_event_type: 按时间倒序的第一条事件类型
+  //   - latest_validation_event_type: 按 validated/misunderstood 过滤后的最新事件类型
+  //   - last_validated_at: validated/misunderstood 事件的最新时间戳
+  //   - misunderstanding_count: misunderstood 事件计数
+  // 这将每张卡 50 行事件数据降为 1 行聚合结果，大幅减少内存使用和数据传输量。
+  const [eventAggRows, allKps] = await Promise.all([
+    tx
+      .select({
+        cardId: validationEvents.cardId,
+        latestEventType: sql<string | null>`(array_agg(${understandingEvents.eventType} ORDER BY ${understandingEvents.createdAt} DESC))[1]`,
+        latestValidationEventType: sql<string | null>`(array_agg(${understandingEvents.eventType} ORDER BY ${understandingEvents.createdAt} DESC) FILTER (WHERE ${understandingEvents.eventType} IN ('validated', 'misunderstood')))[1]`,
+        lastValidatedAt: sql<Date | null>`MAX(${understandingEvents.createdAt}) FILTER (WHERE ${understandingEvents.eventType} IN ('validated', 'misunderstood'))`,
+        misunderstandingCount: sql<number>`COUNT(*) FILTER (WHERE ${understandingEvents.eventType} = 'misunderstood')`,
+      })
+      .from(understandingEvents)
+      .innerJoin(
+        validationEvents,
+        and(
+          eq(understandingEvents.subjectId, validationEvents.id),
+          eq(understandingEvents.subjectType, "validation"),
+        ),
+      )
+      .where(and(
+        eq(understandingEvents.workspaceId, workspaceId),
+        inArray(validationEvents.cardId, cardIds),
+        // R-006: 按 userId 过滤，普通成员只能看到自己的理解事件
+        ...(userId ? [eq(validationEvents.userId, userId)] : []),
+      ))
+      .groupBy(validationEvents.cardId),
+    // 3. 批量查 keyPoints（B14: 替代 for 循环逐个查询）
+    tx.query.cardKeyPoints.findMany({
+      where: and(
+        eq(cardKeyPoints.workspaceId, workspaceId),
+        inArray(cardKeyPoints.cardId, cardIds),
       ),
-    )
-    .where(and(
-      eq(understandingEvents.workspaceId, workspaceId),
-      inArray(validationEvents.cardId, cardIds),
-      // R-006: 按 userId 过滤，普通成员只能看到自己的理解事件
-      ...(userId ? [eq(validationEvents.userId, userId)] : []),
-    ))
-    .orderBy(desc(understandingEvents.createdAt));
+    }),
+  ]);
+  const allKeyPointIds = new Set<string>();
+  const cardKeyPointMap = new Map<string, string[]>();
 
+  // PERF-23 修复：直接使用 SQL 聚合结果构建 eventMap，无需 JS 遍历
   const eventMap = new Map<string, {
     latestEventType: string | null;
     misunderstandingCount: number;
-    // G-009: 跟踪最新的验证事件类型（validated/misunderstood），忽略 reviewed 事件
-    // 确保完成复习不会清除误解状态 — 只有新的验证事件才能关闭误解
     latestValidationEventType: string | null;
     lastValidatedAt: string | null;
   }>();
 
-  for (const row of eventRows) {
-    const current = eventMap.get(row.cardId) ?? {
-      latestEventType: null,
-      misunderstandingCount: 0,
-      latestValidationEventType: null,
-      lastValidatedAt: null,
-    };
-    if (!current.latestEventType) {
-      current.latestEventType = row.eventType;
-    }
-    // G-009: 只记录最新的验证事件（validated 或 misunderstood），忽略 reviewed/seen
-    if (!current.latestValidationEventType && (row.eventType === "validated" || row.eventType === "misunderstood")) {
-      current.latestValidationEventType = row.eventType;
-      current.lastValidatedAt = row.createdAt.toISOString();
-    }
-    if (row.eventType === "misunderstood") {
-      current.misunderstandingCount++;
-    }
-    eventMap.set(row.cardId, current);
+  for (const row of eventAggRows) {
+    eventMap.set(row.cardId, {
+      latestEventType: row.latestEventType,
+      misunderstandingCount: Number(row.misunderstandingCount),
+      latestValidationEventType: row.latestValidationEventType,
+      lastValidatedAt: row.lastValidatedAt?.toISOString() ?? null,
+    });
   }
 
-  // 3. 批量查 keyPoints（B14: 替代 for 循环逐个查询）
-  const allKps = await db.query.cardKeyPoints.findMany({
-    where: and(
-      eq(cardKeyPoints.workspaceId, workspaceId),
-      inArray(cardKeyPoints.cardId, cardIds),
-    ),
-  });
-  const allKeyPointIds = new Set<string>();
-  const cardKeyPointMap = new Map<string, string[]>();
   for (const kp of allKps) {
     const arr = cardKeyPointMap.get(kp.cardId) ?? [];
     arr.push(kp.id);
@@ -126,7 +129,7 @@ export async function getUnderstandingStates(
 
   const evidenceStats = new Map<string, { hard: number; soft: number; total: number; keyPointsWithHard: Set<string> }>();
   if (allKeyPointIds.size > 0) {
-    const evRows = await db
+    const evRows = await tx
       .select({
         id: evidences.id,
         keyPointId: evidences.keyPointId,
@@ -139,7 +142,7 @@ export async function getUnderstandingStates(
     // N-005: 查询用户级 override
     const evIds = evRows.map((r) => r.id);
     const userOverrideMap = userId
-      ? await getUserOverrideMap(userId, evIds)
+      ? await getUserOverrideMap(userId, evIds, tx)
       : new Map<string, "confirmed" | "downgraded" | "rejected">();
 
     // 按 card 聚合（通过 keyPoint → card 映射）
@@ -174,7 +177,9 @@ export async function getUnderstandingStates(
     }
   }
 
-  // 4. 批量查 review_schedules（B14: 替代 for 循环逐个查询）
+  // PERF-23 修复：合并两个串行的 review_schedules 查询为单个查询。
+  // 原代码分别查询 subjectType='validation'（join validation_events）
+  // 和 subjectType='card'（直接按 subjectId 查询），现合并为单次 OR 条件查询。
   const reviewMap = new Map<string, { nextReviewAt: string | null; reviewStatus: string | null }>();
   const rememberEarlierReview = (cardId: string, nextReviewAt: Date, status: string) => {
     const current = reviewMap.get(cardId);
@@ -185,14 +190,15 @@ export async function getUnderstandingStates(
       });
     }
   };
-  const reviewRows = await db
+  // 合并查询：validation 类型（通过 join 获取 cardId）+ card 类型（直接 subjectId 即 cardId）
+  const allReviewRows = await tx
     .select({
-      cardId: validationEvents.cardId,
+      cardId: sql<string>`COALESCE(${validationEvents.cardId}, ${reviewSchedules.subjectId})`,
       nextReviewAt: reviewSchedules.nextReviewAt,
       status: reviewSchedules.status,
     })
     .from(reviewSchedules)
-    .innerJoin(
+    .leftJoin(
       validationEvents,
       and(
         eq(reviewSchedules.subjectId, validationEvents.id),
@@ -203,40 +209,30 @@ export async function getUnderstandingStates(
       and(
         eq(reviewSchedules.workspaceId, workspaceId),
         eq(reviewSchedules.status, "pending"),
-        inArray(validationEvents.cardId, cardIds),
+        or(
+          // validation 类型：通过 join 的 card_id 匹配
+          inArray(validationEvents.cardId, cardIds),
+          // card 类型：subject_id 直接是 cardId
+          and(
+            eq(reviewSchedules.subjectType, "card"),
+            inArray(reviewSchedules.subjectId, cardIds),
+          ),
+        ),
         // R-006: 按 userId 过滤复习计划
         ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
       ),
     )
     .orderBy(asc(reviewSchedules.nextReviewAt));
-  for (const row of reviewRows) {
+  for (const row of allReviewRows) {
     rememberEarlierReview(row.cardId, row.nextReviewAt, row.status);
-  }
-  // subjectType=card 的 review
-  const cardReviewRows = await db
-    .select({
-      subjectId: reviewSchedules.subjectId,
-      nextReviewAt: reviewSchedules.nextReviewAt,
-      status: reviewSchedules.status,
-    })
-    .from(reviewSchedules)
-    .where(
-      and(
-        eq(reviewSchedules.workspaceId, workspaceId),
-        eq(reviewSchedules.subjectType, "card"),
-        eq(reviewSchedules.status, "pending"),
-        inArray(reviewSchedules.subjectId, cardIds),
-        // R-006: 按 userId 过滤复习计划
-        ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
-      ),
-    )
-    .orderBy(asc(reviewSchedules.nextReviewAt));
-  for (const row of cardReviewRows) {
-    rememberEarlierReview(row.subjectId, row.nextReviewAt, row.status);
   }
 
   // 5. 组装结果
-  const results: UnderstandingState[] = cards.map((card) => {
+  // QUAL-26 修复：当指定了 state 过滤时，在组装阶段直接跳过不匹配的卡片，
+  // 避免为不匹配的卡片构建完整的结果对象（虽然仍需计算状态，但跳过了不必要的字段组装）。
+  const stateFilter = opts?.state;
+  const results: UnderstandingState[] = [];
+  for (const card of cards) {
     const eventInfo = eventMap.get(card.id);
     const evStats = evidenceStats.get(card.id) ?? { hard: 0, soft: 0, total: 0, keyPointsWithHard: new Set<string>() };
     const reviewInfo = reviewMap.get(card.id);
@@ -273,6 +269,9 @@ export async function getUnderstandingStates(
       }
     }
 
+    // QUAL-26 优化：如果指定了 state 过滤且不匹配，跳过此卡片
+    if (stateFilter && state !== stateFilter) continue;
+
     // N-004: 证据覆盖率改为 keyPoint 级别 — 有硬证据的 keyPoint 数 / 总 keyPoint 数
     const totalKps = cardKeyPointMap.get(card.id)?.length ?? 0;
     const kpsWithHard = evStats.keyPointsWithHard?.size ?? 0;
@@ -280,7 +279,7 @@ export async function getUnderstandingStates(
       ? Math.round((kpsWithHard / totalKps) * 100) / 100
       : 0;
 
-    return {
+    results.push({
       subjectType: "card" as const,
       subjectId: card.id,
       title: card.schemaJson?.title ?? "（未命名学习卡）",
@@ -292,15 +291,15 @@ export async function getUnderstandingStates(
       nextReviewAt: reviewInfo?.nextReviewAt ?? null,
       reviewStatus: reviewInfo?.reviewStatus ?? null,
       misunderstandingCount: eventInfo?.misunderstandingCount ?? 0,
-    };
-  });
-
-  // 按状态筛选
-  if (opts?.state) {
-    return results.filter((r) => r.state === opts.state);
+    });
   }
 
   return results;
+  };
+  return tx ? run(tx) : withWorkspaceTransaction(
+    { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+    run,
+  );
 }
 
 /**
@@ -312,14 +311,20 @@ export async function getUnderstandingStates(
  * card -> keyPoint (card_key_points.card_id)
  *
  * active card 最多投影 200 张；totalCards/truncated 会说明是否截断。
+ *
+ * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
 export async function getUnderstandingGraph(
   workspaceId: string,
   userId: string,
+  tx?: ApiTransaction,
 ): Promise<UnderstandingGraph> {
+  // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
+  // 提供 tx（测试/内部调用）时直接运行，跳过事务上下文设置。
+  const run = async (tx: ApiTransaction): Promise<UnderstandingGraph> => {
   const [states, totalRows] = await Promise.all([
-    getUnderstandingStates(workspaceId, undefined, userId),
-    db
+    getUnderstandingStates(workspaceId, undefined, userId, tx),
+    tx
       .select({ count: count() })
       .from(learningCards)
       .where(and(
@@ -342,28 +347,72 @@ export async function getUnderstandingGraph(
   }
 
   const cardIds = states.map((state) => state.subjectId);
-  const cardRows = await db.query.learningCards.findMany({
-    where: and(
-      eq(learningCards.workspaceId, workspaceId),
-      activeLearningCardConsumerPredicate(),
-      inArray(learningCards.id, cardIds),
-    ),
-  });
+  // PERF-22 修复：cardRows、keyPointRows、validationRows 均只依赖 cardIds（来自 states），
+  // 三者之间无依赖关系，可以并行查询。原代码串行执行 3 次 DB 往返。
+  const [cardRows, keyPointRows, validationRows] = await Promise.all([
+    tx.query.learningCards.findMany({
+      where: and(
+        eq(learningCards.workspaceId, workspaceId),
+        activeLearningCardConsumerPredicate(),
+        inArray(learningCards.id, cardIds),
+      ),
+    }),
+    tx.query.cardKeyPoints.findMany({
+      where: and(
+        eq(cardKeyPoints.workspaceId, workspaceId),
+        inArray(cardKeyPoints.cardId, cardIds),
+      ),
+      orderBy: [asc(cardKeyPoints.ordinal)],
+    }),
+    tx
+      .select({
+        cardId: validationEvents.cardId,
+        keyPointId: validationEvents.keyPointId,
+        outcome: validationEvents.outcome,
+        createdAt: validationEvents.createdAt,
+      })
+      .from(validationEvents)
+      .where(and(
+        eq(validationEvents.workspaceId, workspaceId),
+        eq(validationEvents.userId, userId),
+        inArray(validationEvents.cardId, cardIds),
+      ))
+      .orderBy(desc(validationEvents.createdAt)),
+  ]);
   const cardById = new Map(cardRows.map((card) => [card.id, card]));
 
   const noteVersionIds = Array.from(new Set(cardRows.map((card) => card.noteVersionId)));
-  const noteVersionRows = noteVersionIds.length > 0
-    ? await db.query.noteVersions.findMany({
-        where: and(
-          eq(noteVersions.workspaceId, workspaceId),
-          inArray(noteVersions.id, noteVersionIds),
-        ),
-      })
-    : [];
+  // PERF-22 优化：noteVersionRows 和 evidenceRows 无依赖关系，可以并行。
+  // evidenceRows 依赖 keyPointIds（来自 keyPointRows），noteVersionRows 依赖 cardRows。
+  const keyPointIds = keyPointRows.map((keyPoint) => keyPoint.id);
+  const [noteVersionRows, evidenceRows] = await Promise.all([
+    noteVersionIds.length > 0
+      ? tx.query.noteVersions.findMany({
+          where: and(
+            eq(noteVersions.workspaceId, workspaceId),
+            inArray(noteVersions.id, noteVersionIds),
+          ),
+        })
+      : Promise.resolve([] as typeof noteVersions.$inferSelect[]),
+    keyPointIds.length > 0
+      ? tx
+          .select({
+            id: evidences.id,
+            keyPointId: evidences.keyPointId,
+            alignment: evidences.alignment,
+            legacyOverride: evidences.userOverride,
+          })
+          .from(evidences)
+          .where(and(
+            eq(evidences.workspaceId, workspaceId),
+            inArray(evidences.keyPointId, keyPointIds),
+          ))
+      : Promise.resolve([] as Array<{ id: string; keyPointId: string; alignment: string; legacyOverride: string | null }>),
+  ]);
 
   const noteIds = Array.from(new Set(noteVersionRows.map((version) => version.noteId)));
   const noteRows = noteIds.length > 0
-    ? await db.query.notes.findMany({
+    ? await tx.query.notes.findMany({
         where: and(
           eq(notes.workspaceId, workspaceId),
           inArray(notes.id, noteIds),
@@ -376,7 +425,7 @@ export async function getUnderstandingGraph(
     noteRows.flatMap((note) => note.sourceId ? [note.sourceId] : []),
   ));
   const sourceRows = sourceIds.length > 0
-    ? await db.query.sources.findMany({
+    ? await tx.query.sources.findMany({
         where: and(
           eq(sources.workspaceId, workspaceId),
           inArray(sources.id, sourceIds),
@@ -384,61 +433,24 @@ export async function getUnderstandingGraph(
       })
     : [];
 
-  const keyPointRows = await db.query.cardKeyPoints.findMany({
-    where: and(
-      eq(cardKeyPoints.workspaceId, workspaceId),
-      inArray(cardKeyPoints.cardId, cardIds),
-    ),
-    orderBy: [asc(cardKeyPoints.ordinal)],
-  });
-  const keyPointIds = keyPointRows.map((keyPoint) => keyPoint.id);
+  const overrideMap = await getUserOverrideMap(userId, evidenceRows.map((row) => row.id), tx);
 
   const evidenceStats = new Map<string, { hard: number; soft: number }>();
-  if (keyPointIds.length > 0) {
-    const evidenceRows = await db
-      .select({
-        id: evidences.id,
-        keyPointId: evidences.keyPointId,
-        alignment: evidences.alignment,
-        legacyOverride: evidences.userOverride,
-      })
-      .from(evidences)
-      .where(and(
-        eq(evidences.workspaceId, workspaceId),
-        inArray(evidences.keyPointId, keyPointIds),
-      ));
-    const overrideMap = await getUserOverrideMap(userId, evidenceRows.map((row) => row.id));
-
-    for (const row of evidenceRows) {
-      const effective = effectiveAlignmentForUser(
-        row.alignment,
-        row.legacyOverride,
-        overrideMap.get(row.id) ?? null,
-      );
-      if (effective === null) continue;
-      const current = evidenceStats.get(row.keyPointId) ?? { hard: 0, soft: 0 };
-      if (effective === "aligned") current.hard++;
-      if (effective === "soft") current.soft++;
-      evidenceStats.set(row.keyPointId, current);
-    }
+  for (const row of evidenceRows) {
+    const effective = effectiveAlignmentForUser(
+      row.alignment,
+      row.legacyOverride,
+      overrideMap.get(row.id) ?? null,
+    );
+    if (effective === null) continue;
+    const current = evidenceStats.get(row.keyPointId) ?? { hard: 0, soft: 0 };
+    if (effective === "aligned") current.hard++;
+    if (effective === "soft") current.soft++;
+    evidenceStats.set(row.keyPointId, current);
   }
 
   const validationStats = new Map<string, { misunderstandingCount: number; lastValidatedAt: string | null }>();
   const cardLastValidatedAt = new Map<string, string>();
-  const validationRows = await db
-    .select({
-      cardId: validationEvents.cardId,
-      keyPointId: validationEvents.keyPointId,
-      outcome: validationEvents.outcome,
-      createdAt: validationEvents.createdAt,
-    })
-    .from(validationEvents)
-    .where(and(
-      eq(validationEvents.workspaceId, workspaceId),
-      eq(validationEvents.userId, userId),
-      inArray(validationEvents.cardId, cardIds),
-    ))
-    .orderBy(desc(validationEvents.createdAt));
 
   for (const row of validationRows) {
     // 这里必须来自真实 validation_events，而不是任意 understanding event。
@@ -518,4 +530,9 @@ export async function getUnderstandingGraph(
     }),
     keyPoints: graphKeyPoints.filter((keyPoint) => stateByCardId.has(keyPoint.cardId)),
   });
+  };
+  return tx ? run(tx) : withWorkspaceTransaction(
+    { workspaceId, userId },
+    run,
+  );
 }

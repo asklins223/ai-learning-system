@@ -11,10 +11,15 @@ const expectedTables = [
   "auth_rate_limits",
   "benchmark_labels",
   "benchmark_reports",
+  "card_generation_agent_events",
   "card_generation_candidate_evidence",
   "card_generation_candidates",
+  "card_generation_drafts",
   "card_generation_events",
+  "card_generation_quality_reports",
   "card_generation_runs",
+  "card_generation_source_bundle_members",
+  "card_generation_source_bundles",
   "card_generation_units",
   "card_key_points",
   "evidence_overrides",
@@ -24,6 +29,7 @@ const expectedTables = [
   "learning_card_sets",
   "learning_cards",
   "note_blocks",
+  "note_evidence_embeddings",
   "note_evidence_spans",
   "note_image_assets",
   "note_image_evidence_units",
@@ -39,7 +45,6 @@ const expectedTables = [
   "source_segments",
   "sources",
   "understanding_events",
-  "user_ai_model_configs",
   "users",
   "validation_action_commands",
   "validation_assistance_exposures",
@@ -101,7 +106,7 @@ describe("database schema package contract", () => {
     assert.ok(jobColumns.priority, "jobs must declare a priority");
   });
 
-  it("models the M5 terminal result and card-set member constraints", () => {
+  it("models the result contract and card-set member constraints", () => {
     const cardConfig = getTableConfig(schema.learningCards);
     const runConfig = getTableConfig(schema.cardGenerationRuns);
     const cardIndexNames = new Set(
@@ -116,7 +121,7 @@ describe("database schema package contract", () => {
     assert.ok(cardIndexNames.has("learning_cards_set_scope_key_unique_idx"));
     assert.ok(cardCheckNames.has("learning_cards_card_set_shape_check"));
     assert.ok(
-      runCheckNames.has("card_generation_runs_m5_terminal_result_check"),
+      runCheckNames.has("card_generation_runs_result_contract_check"),
     );
   });
 

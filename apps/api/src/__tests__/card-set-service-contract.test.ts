@@ -1,15 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, beforeEach, describe, it } from "node:test";
-import { ArtifactStatus } from "@ailearn/shared";
 import { db } from "../db/client.ts";
-import { aiArtifacts } from "../db/schema/ai.ts";
 import {
-  learningCards,
   learningCardSets,
 } from "../db/schema/card.ts";
 import {
-  acceptCardSet,
   CardSetServiceError,
   getCardSetWithDetail,
   listCardSetCards,
@@ -198,74 +194,7 @@ describe("Card Set list, detail, and cursor pagination", () => {
   });
 });
 
-function installAcceptTransaction(input: {
-  status: string;
-  artifactIds?: Array<string | null>;
-}): Array<{ table: unknown; values: unknown }> {
-  const updates: Array<{ table: unknown; values: unknown }> = [];
-  mutableDb.transaction = async (callback: (tx: any) => Promise<unknown>) =>
-    callback({
-      execute: async () => [{
-        workspace_id: WORKSPACE_ID,
-        user_id: USER_ID,
-      }],
-      select: () => ({
-        from: (table: unknown) => {
-          if (table === learningCardSets) {
-            return {
-              where: () => ({
-                for: async () => [{ id: SET_ID, status: input.status }],
-              }),
-            };
-          }
-          if (table === learningCards) {
-            return {
-              where: async () => (input.artifactIds ?? []).map((artifactId) => ({
-                artifactId,
-              })),
-            };
-          }
-          throw new Error("unexpected acceptCardSet table");
-        },
-      }),
-      update: (table: unknown) => ({
-        set: (values: unknown) => ({
-          where: async () => {
-            updates.push({ table, values });
-          },
-        }),
-      }),
-    });
-  return updates;
-}
-
 describe("Card Set actions and result contracts", () => {
-  it("rejects partial_ready acceptance and accepts every artifact of an active set", async () => {
-    installAcceptTransaction({ status: "partial_ready" });
-    await assert.rejects(
-      acceptCardSet(SET_ID, WORKSPACE_ID, USER_ID),
-      (error: unknown) =>
-        error instanceof CardSetServiceError
-        && error.code === "card_set_not_acceptable"
-        && error.statusCode === 409,
-    );
-
-    const updates = installAcceptTransaction({
-      status: "active",
-      artifactIds: ["artifact-1", null, "artifact-2"],
-    });
-    const result = await acceptCardSet(SET_ID, WORKSPACE_ID, USER_ID);
-
-    assert.deepEqual(result, {
-      cardSetId: SET_ID,
-      acceptedArtifactCount: 2,
-    });
-    assert.deepEqual(updates, [{
-      table: aiArtifacts,
-      values: { status: ArtifactStatus.ACCEPTED },
-    }]);
-  });
-
   it("regenerate returns runId, compatibility jobId, and sameVersion", async () => {
     mutableDb.query.learningCardSets.findFirst = async () => ({
       id: SET_ID,
@@ -321,7 +250,6 @@ describe("Card Set actions and result contracts", () => {
       '"/card-sets"',
       '"/card-sets/:id"',
       '"/card-sets/:id/cards"',
-      '"/card-sets/:id/accept"',
       '"/card-sets/:id/dismiss"',
       '"/card-sets/:id/regenerate"',
     ]) {
@@ -331,7 +259,7 @@ describe("Card Set actions and result contracts", () => {
       routesSource,
       /"\/card-sets\/:id\/cards"[\s\S]*?listCardSetCards/,
     );
-    for (const action of ["accept", "dismiss", "regenerate"]) {
+    for (const action of ["dismiss", "regenerate"]) {
       const routeStart = routesSource.indexOf(`"/card-sets/:id/${action}"`);
       assert.ok(routeStart >= 0);
       assert.ok(

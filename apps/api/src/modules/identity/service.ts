@@ -15,6 +15,7 @@ import {
   hashInvitationToken as hashInvitationTokenLocal,
   isValidInvitationToken as isValidInvitationTokenLocal,
 } from "./invitation-token.ts";
+import { resolveSystemProviderForCapability } from "@ailearn/shared";
 import { deleteObject } from "../../lib/object-storage.ts";
 import { logger } from "../../lib/logger.ts";
 
@@ -29,6 +30,22 @@ export function canonicalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+/**
+ * SEC-04 说明：legacy 密码哈希使用 SHA-256 + 静态前缀，无盐值。
+ *
+ * 这是 v0.5 遗留的密码存储方案，存在以下风险：
+ * - 无盐值导致相同密码产生相同哈希，易受彩虹表攻击
+ * - SHA-256 计算速度快，不利于抵抗暴力破解
+ *
+ * 缓解措施（已实施）：
+ * - 新注册用户使用 bcrypt（带盐值+cost factor）存储密码
+ * - 用户登录时自动检测 legacy 哈希并升级为 bcrypt
+ *   （见 loginWithPassword 第 103-106 行）
+ * - 未知邮箱也执行 bcrypt 比较以消除计时侧信道
+ *
+ * 残余风险：尚未再次登录的 legacy 用户仍使用无盐哈希。
+ * 建议：在完成全量用户迁移后移除此函数。
+ */
 function legacyHashPassword(plain: string): string {
   return createHash("sha256").update(`ailearn:${plain}`).digest("hex");
 }
@@ -87,10 +104,12 @@ export async function loginWithPassword(
   password: string,
 ): Promise<{ token: string; ctx: SessionContext; workspaces: WorkspaceInfo[] } | null> {
   const normalizedEmail = canonicalizeEmail(email);
-  const exactUser = await db.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
-  // Existing installations may contain mixed-case addresses. Keep the indexed
-  // canonical lookup fast and only use the compatibility scan when necessary.
-  const user = exactUser ?? await db.query.users.findFirst({
+  // BUG-07 修复：合并两次串行 DB 查询为单次 lower(email) 查询。
+  // canonicalizeEmail 已将邮箱转为小写，使用 lower(email) = normalizedEmail
+  // 可以在单次查询中同时匹配精确和大小写不一致的历史数据，
+  // 避免正常流程中的第二次 DB 往返。PostgreSQL 在 email 列上的
+  // lower(email) 表达式索引可以高效执行此查询。
+  const user = await db.query.users.findFirst({
     where: sql`lower(${users.email}) = ${normalizedEmail}`,
   });
   if (!user) {
@@ -130,8 +149,15 @@ export async function loginWithPassword(
     };
   });
 
-  // ADR-0009: 默认进入个人工作区（personalWorkspaceId），否则第一个
-  const defaultWorkspaceId = user.personalWorkspaceId ?? memberships[0].workspaceId;
+  // BUG-67 修复：验证 personalWorkspaceId 是否仍在活跃成员列表中。
+  // 如果用户被移出或主动退出了个人工作区（leftAt 非空），
+  // personalWorkspaceId 仍指向已退出的工作区，签发的 session 将无效。
+  // 改为优先从活跃成员列表中查找 personalWorkspaceId，找不到则回退到第一个。
+  const activeWorkspaceIds = new Set(memberships.map((m) => m.workspaceId));
+  const defaultWorkspaceId =
+    (user.personalWorkspaceId && activeWorkspaceIds.has(user.personalWorkspaceId))
+      ? user.personalWorkspaceId
+      : memberships[0].workspaceId;
   const session = await issueSession(user.id, defaultWorkspaceId);
   return { ...session, workspaces: workspacesList };
 }
@@ -847,7 +873,6 @@ export async function getAIPrivacySettings(workspaceId: string) {
   });
   if (!ws) return null;
   return {
-    aiProvider: ws.aiProvider,
     aiConsentVersion: ws.aiConsentVersion,
     aiConsentAt: ws.aiConsentAt,
     aiConsentBy: ws.aiConsentBy,
@@ -1026,14 +1051,22 @@ export async function logAICall(params: LogAICallParams): Promise<void> {
 /**
  * N-011: 检查工作区是否已签署 AI 同意。
  * 未签署同意时，AI 调用应被阻止。
+ *
+ * v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
+ * 不再读 workspace.aiProvider（列已删除）。任一 capability 解析为非 mock
+ * 即要求已签署同意，与 worker anyExternalNonMock 组合判定一致。
  */
 export async function checkAIConsent(workspaceId: string): Promise<boolean> {
   const ws = await db.query.workspaces.findFirst({
     where: eq(workspaces.id, workspaceId),
   });
   if (!ws) return false;
-  // mock provider 不需要同意
-  if (ws.aiProvider === "mock") return true;
-  // 其他 provider 需要已签署同意
+  // 任一 capability 解析为非 mock 即要求已签署同意
+  const anyExternalNonMock =
+    resolveSystemProviderForCapability("agent_turn") !== "mock" ||
+    resolveSystemProviderForCapability("vision") !== "mock" ||
+    resolveSystemProviderForCapability("text_generation") !== "mock" ||
+    resolveSystemProviderForCapability("embedding") !== "mock";
+  if (!anyExternalNonMock) return true;
   return ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
 }

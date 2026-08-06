@@ -29,14 +29,7 @@ collectDefaultMetrics({ register: registry });
 // ─── allowlist ───────────────────────────────────────────────────────────
 
 export const JOB_TYPES = [
-  "generate_card",
-  "plan_card_generation",
-  "analyze_card_image",
-  "map_card_generation",
-  "reduce_card_generation",
-  "plan_card_set",
-  "render_card_generation",
-  "publish_card_generation",
+  "execute_card_agent_turn",
   "align_evidence",
   "evaluate_validation",
   "parse_source",
@@ -46,11 +39,6 @@ export const JOB_TYPES = [
 export const JOB_STATUSES = ["pending", "running", "succeeded", "failed", "dead"] as const;
 
 export const PROVIDER_OPERATIONS = [
-  "generate_card",
-  "generate_card_repair",
-  "card_map",
-  "image_understanding",
-  "image_card_map",
   "align_evidence",
   "evaluate_validation",
   "evaluate_rubric",
@@ -160,19 +148,35 @@ export const providerErrorsTotal = new Counter({
 /**
  * 将自由文本错误归类到 allowlist 分类。
  * 与 API 侧 categorizeError 保持同步。
+ *
+ * QUAL-21 修复：与 isNonRetryableError（QUAL-24）保持一致的分类策略——
+ * 优先检查结构化 ProviderRequestError 的 HTTP 状态码，避免文本子串匹配的误判。
+ * 例如 "timeout after 5000ms" 不再被误分类为 provider_5xx（匹配 "500"）。
+ * 只有当错误不是结构化 ProviderRequestError 时，才回退到文本模式匹配。
  */
 export function categorizeError(error: unknown): (typeof ERROR_CATEGORIES)[number] {
   if (error === null || error === undefined) return "unknown";
+
+  // QUAL-21: 优先检查结构化错误类型，与 isNonRetryableError 保持一致
+  if (typeof error === "object" && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number") {
+      if (status >= 500) return "provider_5xx";
+      if (status === 401 || status === 403) return "auth_error";
+      if (status === 429) return "quota_exceeded";
+      if (status >= 400 && status < 500) return "provider_4xx";
+    }
+  }
+
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   if (message.includes("timeout") || message.includes("timed out") || message.includes("abort")) return "timeout";
   if (message.includes("schema") || message.includes("parse") || message.includes("invalid json")) return "schema_failure";
-  if (message.includes("500") || message.includes("502") || message.includes("503") || message.includes("504")) return "provider_5xx";
-  if (message.includes("401") || message.includes("403") || message.includes("auth")) return "auth_error";
-  if (message.includes("quota") || message.includes("rate limit") || message.includes("429")) return "quota_exceeded";
+  // QUAL-21: 文本匹配仅作为结构化检查的回退，优先级降低
+  if (message.includes("quota") || message.includes("rate limit")) return "quota_exceeded";
   if (message.includes("network") || message.includes("econnrefused") || message.includes("enotfound")) return "network_error";
   if (message.includes("rls") || message.includes("policy")) return "rls_denied";
   if (message.includes("validation") || message.includes("invalid")) return "validation_error";
-  if (message.includes("400") || message.includes("422")) return "provider_4xx";
+  if (message.includes("auth")) return "auth_error";
   return "unknown";
 }
 

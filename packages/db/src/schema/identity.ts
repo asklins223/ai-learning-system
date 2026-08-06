@@ -20,18 +20,6 @@ export const users = pgTable(
   }),
 );
 
-/** Personal BYOK model settings. Provider secrets are AES-GCM ciphertext only. */
-export const userAIModelConfigs = pgTable("user_ai_model_configs", {
-  userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
-  provider: text("provider").notNull(), // mock | dashscope | openai_compatible
-  baseUrl: text("base_url"),
-  model: text("model"),
-  apiKeyEncrypted: text("api_key_encrypted"),
-  apiKeyHint: text("api_key_hint"),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
-
 export const workspaces = pgTable(
   "workspaces",
   {
@@ -40,8 +28,7 @@ export const workspaces = pgTable(
     name: text("name").notNull(),
     // ADR-0009: workspace 类型区分个人/协作
     workspaceType: text("workspace_type").notNull().default("personal"), // personal | collaborative
-    // N-011: AI 隐私治理字段
-    aiProvider: text("ai_provider").notNull().default("mock"), // mock | dashscope | qwen
+    // N-011: AI 隐私治理字段（ai_provider 列已在 0065 迁移中移除，平台解析完全收敛到 config/ai-platforms.json）
     aiConsentVersion: text("ai_consent_version"), // 同意版本号
     aiConsentAt: timestamp("ai_consent_at", { withTimezone: true }), // 同意时间
     aiConsentBy: uuid("ai_consent_by").references(() => users.id), // 同意操作者
@@ -94,7 +81,7 @@ export const inviteCodes = pgTable("invite_codes", {
 
 /**
  * Server-side onboarding state per (workspace, user, version).
- * Steps are business-fact driven: ai_consent, provider_config, first_content,
+ * Steps are business-fact driven: ai_consent, first_content,
  * first_note, first_card, evidence_review, first_validation.
  */
 export const onboardingStates = pgTable(
@@ -149,7 +136,7 @@ export const aiAuditLog = pgTable(
     jobId: uuid("job_id"),
     provider: text("provider").notNull(),
     modelId: text("model_id").notNull(),
-    operation: text("operation").notNull(), // generate_card | evaluate_validation | parse_source | align_evidence
+    operation: text("operation").notNull(), // execute_card_agent_turn | evaluate_validation | parse_source | align_evidence | generate_validation_question
     dataCategories: text("data_categories").array().notNull().default([]), // note_content | user_answer | question | claim | quote
     dataSizeBytes: integer("data_size_bytes"),
     costTokens: integer("cost_tokens"),

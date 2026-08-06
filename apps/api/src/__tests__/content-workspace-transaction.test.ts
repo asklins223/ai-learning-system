@@ -5,7 +5,8 @@ import test from "node:test";
 const MODULE_CONTRACTS = [
   { name: "note", handlers: 9, services: 9 },
   { name: "source", handlers: 8, services: 8 },
-  { name: "search", handlers: 3, services: 3 },
+  // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务
+  { name: "search", handlers: 4, services: 4 },
 ] as const;
 
 function readModuleFile(moduleName: string, fileName: "routes.ts" | "service.ts"): string {

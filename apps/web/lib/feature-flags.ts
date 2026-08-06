@@ -29,12 +29,22 @@ export function isRubricEvaluationEnabled(): boolean {
 }
 
 /**
- * CARD_GENERATION_V2_ENABLED — enables the resumable generation-run UX.
+ * CARD_SET_DECK_UI_ENABLED — controls the /cards card-set carousel UI.
  *
- * P1 audit fix: Changed from fail-open to fail-closed to align with M0's
- * frozen principle. Production must explicitly set
- * NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED=true at build time.
+ * 卡组轮播 UI 的代码级回退开关（docs/plans/card-set-carousel-ui.md §7.1）。
+ * fail-closed：flag 关闭时 /cards 回退现有平铺网格；不是用户可见的视图开关。
  */
-export function isCardGenerationV2Enabled(): boolean {
-  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED);
+export function isCardSetDeckUIEnabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED);
+}
+
+/**
+ * AGENT_ACTIVITY_STREAM_ENABLED — controls the card generation Agent
+ * activity-stream console (docs/plans/learning-card-generation-agent-stream-ui.md §8, Phase B/C).
+ *
+ * 可选增强（hardening §2.6），fail-closed：flag 关闭时 UI 行为与 Phase A
+ * 落地后的现状一致（旧进度展示路径），不渲染活动流/汇总卡。
+ */
+export function isAgentActivityStreamEnabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED);
 }

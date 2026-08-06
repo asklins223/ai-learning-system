@@ -445,11 +445,11 @@ describe("permission-guard: note/card/source/import 写操作使用 requireOwner
   it("card/routes.ts 写操作挂载 requireOwner", () => {
     const content = readRouteFile("card/routes.ts");
     const preHandlerWithOwner = content.match(/preHandler:\s*\[requireOwner\]/g);
-    // POST /cards/:id/regenerate, POST /cards/:id/accept, POST /cards/:id/dismiss,
-    // POST /cards/generate = 4
+    // POST /cards/:id/regenerate, POST /cards/:id/dismiss,
+    // POST /cards/generate = 3（accept 死功能已移除）
     assert.ok(
-      preHandlerWithOwner !== null && preHandlerWithOwner.length >= 4,
-      `card/routes.ts 应至少有 4 个路由使用 requireOwner，实际找到 ${preHandlerWithOwner?.length ?? 0}`,
+      preHandlerWithOwner !== null && preHandlerWithOwner.length >= 3,
+      `card/routes.ts 应至少有 3 个路由使用 requireOwner，实际找到 ${preHandlerWithOwner?.length ?? 0}`,
     );
   });
 

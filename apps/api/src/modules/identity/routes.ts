@@ -3,7 +3,7 @@ import { z } from "zod";
 import { eq, and } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { users, workspaceMembers, workspaces } from "../../db/schema/identity.ts";
-import { loginWithPassword, registerWithInvite, registerWithoutInvite, switchWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, logAICall, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace } from "./service.ts";
+import { loginWithPassword, registerWithInvite, registerWithoutInvite, switchWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession, requireOwner, getRequestCredential } from "./middleware.ts";
 import { clampLimit, clampOffset, parseQuery } from "../../lib/pagination.ts";
@@ -27,17 +27,6 @@ import {
   RateLimiter,
   type RateLimitStore,
 } from "./rate-limit.ts";
-import {
-  AIModelConfigError,
-  PERSONAL_AI_PROVIDERS,
-  deletePersonalAIModelConfig,
-  getPersonalAIModelConfig,
-  savePersonalAIModelConfig,
-} from "./ai-model-config.ts";
-import {
-  AIModelConnectionError,
-  testPersonalAIModelConnection,
-} from "./ai-model-connection.ts";
 
 export const loginSchema = z.object({
   email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
@@ -81,9 +70,6 @@ const registerPersonalSchema = z.object({
 
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_RATE_LIMIT_MAX = 5; // max attempts per window
-const DEFAULT_AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
-const DEFAULT_AI_MODEL_TEST_RATE_LIMIT_MAX = 5;
-
 function positiveIntegerEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
@@ -107,8 +93,6 @@ export interface AuthRoutesOptions {
   rateLimitStore?: RateLimitStore;
   rateLimitWindowMs?: number;
   rateLimitMaxAttempts?: number;
-  aiModelTestRateLimitWindowMs?: number;
-  aiModelTestRateLimitMaxAttempts?: number;
 }
 
 function setSessionCookies(
@@ -141,16 +125,6 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     maxAttempts: options.rateLimitMaxAttempts ?? positiveIntegerEnv(
       "AUTH_RATE_LIMIT_MAX_ATTEMPTS",
       DEFAULT_RATE_LIMIT_MAX,
-    ),
-  });
-  const aiModelTestLimiter = new RateLimiter(options.rateLimitStore ?? defaultRateLimitStore, {
-    windowMs: options.aiModelTestRateLimitWindowMs ?? positiveIntegerEnv(
-      "AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS",
-      DEFAULT_AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS,
-    ),
-    maxAttempts: options.aiModelTestRateLimitMaxAttempts ?? positiveIntegerEnv(
-      "AI_MODEL_TEST_RATE_LIMIT_MAX_ATTEMPTS",
-      DEFAULT_AI_MODEL_TEST_RATE_LIMIT_MAX,
     ),
   });
 
@@ -352,99 +326,6 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       return result;
     },
   );
-
-  const personalAIModelConfigSchema = z.object({
-    provider: z.enum(PERSONAL_AI_PROVIDERS),
-    baseUrl: z.string().trim().max(500).nullable().optional(),
-    model: z.string().trim().max(200).nullable().optional(),
-    // Omit/blank keeps the existing encrypted key only for the same provider/origin.
-    // The key itself is never returned.
-    apiKey: z.string().trim().max(4096).optional(),
-  });
-
-  app.get("/auth/ai-model-config", { preHandler: [requireSession] }, async (req) => {
-    return getPersonalAIModelConfig(req.session.userId);
-  });
-
-  app.put("/auth/ai-model-config", { preHandler: [requireSession] }, async (req, reply) => {
-    const body = parseBody(app, personalAIModelConfigSchema, req.body);
-    try {
-      return await savePersonalAIModelConfig(req.session.userId, body);
-    } catch (error) {
-      if (error instanceof AIModelConfigError) {
-        return reply.code(error.statusCode).send({ error: error.message });
-      }
-      throw error;
-    }
-  });
-
-  app.post("/auth/ai-model-config/test", { preHandler: [requireSession] }, async (req, reply) => {
-    const body = parseBody(app, personalAIModelConfigSchema, req.body);
-    const decision = await aiModelTestLimiter.consume(`ai-model-test:user:${req.session.userId}`);
-    if (!decision.allowed) {
-      reply.header("Retry-After", retryAfterSeconds(decision.resetAt));
-      return reply.code(429).send({
-        error: "连接测试过于频繁，请稍后再试",
-        code: "test_rate_limited",
-      });
-    }
-
-    try {
-      const result = await testPersonalAIModelConnection(req.session.userId, body);
-      const privacy = await getAIPrivacySettings(req.session.workspaceId).catch(() => null);
-      if (privacy?.aiDataPolicy.auditLogging) {
-        void logAICall({
-          workspaceId: req.session.workspaceId,
-          actorUserId: req.session.userId,
-          provider: result.provider,
-          modelId: result.model,
-          operation: "test_connection",
-          dataCategories: ["fixed_connection_probe"],
-          dataSizeBytes: 0,
-          durationMs: result.latencyMs,
-          status: "success",
-        }).catch((error) => {
-          app.log.warn({ err: error, userId: req.session.userId }, "failed to audit AI connection test");
-        });
-      }
-      return result;
-    } catch (error) {
-      if (error instanceof AIModelConnectionError) {
-        if (error.provider && error.model && error.durationMs !== undefined) {
-          const privacy = await getAIPrivacySettings(req.session.workspaceId).catch(() => null);
-          if (privacy?.aiDataPolicy.auditLogging) {
-            void logAICall({
-              workspaceId: req.session.workspaceId,
-              actorUserId: req.session.userId,
-              provider: error.provider,
-              modelId: error.model,
-              operation: "test_connection",
-              dataCategories: ["fixed_connection_probe"],
-              dataSizeBytes: 0,
-              durationMs: error.durationMs,
-              status: "failed",
-              errorMessage: error.message,
-            }).catch((auditError) => {
-              app.log.warn({ err: auditError, userId: req.session.userId }, "failed to audit AI connection test");
-            });
-          }
-        }
-        return reply.code(error.statusCode).send({ error: error.message, code: error.code });
-      }
-      if (error instanceof AIModelConfigError) {
-        return reply.code(error.statusCode).send({
-          error: error.message,
-          code: "invalid_configuration",
-        });
-      }
-      throw error;
-    }
-  });
-
-  app.delete("/auth/ai-model-config", { preHandler: [requireSession] }, async (req, reply) => {
-    await deletePersonalAIModelConfig(req.session.userId);
-    return reply.code(204).send();
-  });
 
   // ─── ADR-0009: 无邀请码注册端点 ────────────────────────────────
   app.post("/auth/register-personal", async (req, reply) => {

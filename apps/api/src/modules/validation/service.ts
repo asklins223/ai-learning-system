@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import { withWorkspaceTransaction, SYSTEM_USER_ID, type ApiTransaction } from "../../db/client.ts";
 import { validationEvents, evidences, validationQuestions } from "../../db/schema/evidence.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { createJob } from "../job/service.ts";
@@ -13,12 +13,18 @@ import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibilit
 // OPS-01: Funnel 指标（ADR-0006 §2）
 import { recordFunnelEvent } from "../../lib/metrics.ts";
 
+/**
+ * 检查 keyPoint 是否有硬证据。
+ *
+ * QUAL-58/SEC-26 修复：接受可选的事务参数，在 withWorkspaceTransaction 上下文内复用。
+ */
 async function keyPointHasHardEvidence(
   keyPointId: string,
   workspaceId: string,
   userId: string,
+  tx: ApiTransaction,
 ): Promise<boolean> {
-  const keyPointEvidences = await db.query.evidences.findMany({
+  const keyPointEvidences = await tx.query.evidences.findMany({
     where: and(
       eq(evidences.keyPointId, keyPointId),
       eq(evidences.workspaceId, workspaceId),
@@ -27,6 +33,7 @@ async function keyPointHasHardEvidence(
   const userOverrideMap = await getUserOverrideMap(
     userId,
     keyPointEvidences.map((evidence) => evidence.id),
+    tx,
   );
   return keyPointEvidences.some(
     (evidence) => effectiveAlignmentForUser(
@@ -40,6 +47,8 @@ async function keyPointHasHardEvidence(
 /**
  * N-003: 服务端创建验证题，持久化到 validation_questions 表。
  * 绑定 card/keyPoint/noteVersion，返回 questionId 供客户端使用。
+ *
+ * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
 export async function createValidationQuestion(
   cardId: string,
@@ -47,8 +56,11 @@ export async function createValidationQuestion(
   userId: string,
   input: CreateQuestionInput,
 ) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
   // 校验 card 归属
-  const card = await db.query.learningCards.findFirst({
+  const card = await tx.query.learningCards.findFirst({
     where: and(
       eq(learningCards.id, cardId),
       eq(learningCards.workspaceId, workspaceId),
@@ -60,7 +72,7 @@ export async function createValidationQuestion(
   // 校验/确定 keyPoint
   let keyPointId = input.keyPointId;
   if (!keyPointId) {
-    const first = await db.query.cardKeyPoints.findFirst({
+    const first = await tx.query.cardKeyPoints.findFirst({
       where: and(
         eq(cardKeyPoints.cardId, cardId),
         eq(cardKeyPoints.workspaceId, workspaceId),
@@ -68,7 +80,7 @@ export async function createValidationQuestion(
     });
     keyPointId = first?.id ?? undefined;
   } else {
-    const kp = await db.query.cardKeyPoints.findFirst({
+    const kp = await tx.query.cardKeyPoints.findFirst({
       where: and(
         eq(cardKeyPoints.id, keyPointId),
         eq(cardKeyPoints.cardId, cardId),
@@ -83,12 +95,12 @@ export async function createValidationQuestion(
   }
 
   // N-004: 服务端强制校验目标 keyPoint 的硬证据门槛
-  if (!await keyPointHasHardEvidence(keyPointId, workspaceId, userId)) {
+  if (!await keyPointHasHardEvidence(keyPointId, workspaceId, userId, tx)) {
     return { error: "no_hard_evidence" as const };
   }
 
   // 持久化题目
-  const [question] = await db
+  const [question] = await tx
     .insert(validationQuestions)
     .values({
       workspaceId,
@@ -104,11 +116,15 @@ export async function createValidationQuestion(
     .returning();
 
   return { questionId: question.id };
+    },
+  );
 }
 
 /**
  * 提交一次理解验证：跨租户校验 card 存在，入队 evaluate_validation job。
  * N-003: 支持 questionId 模式（从服务端持久化的题目获取 question/questionType）。
+ *
+ * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
 export async function submitValidation(
   cardId: string,
@@ -116,8 +132,11 @@ export async function submitValidation(
   userId: string,
   input: ValidationSubmitInput,
 ) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
   // 跨租户校验 card
-  const card = await db.query.learningCards.findFirst({
+  const card = await tx.query.learningCards.findFirst({
     where: and(
       eq(learningCards.id, cardId),
       eq(learningCards.workspaceId, workspaceId),
@@ -133,7 +152,7 @@ export async function submitValidation(
 
   if (input.questionId) {
     // N-003: 从服务端持久化的题目获取信息
-    const q = await db.query.validationQuestions.findFirst({
+    const q = await tx.query.validationQuestions.findFirst({
       where: and(
         eq(validationQuestions.id, input.questionId),
         eq(validationQuestions.workspaceId, workspaceId),
@@ -158,7 +177,7 @@ export async function submitValidation(
 
   // 若未指定 keyPoint，取该 card 第一个 keyPoint
   if (!keyPointId) {
-    const first = await db.query.cardKeyPoints.findFirst({
+    const first = await tx.query.cardKeyPoints.findFirst({
       where: and(
         eq(cardKeyPoints.cardId, cardId),
         eq(cardKeyPoints.workspaceId, workspaceId),
@@ -167,7 +186,7 @@ export async function submitValidation(
     keyPointId = first?.id ?? undefined;
   } else {
     // 校验 keyPoint 归属该 card
-    const kp = await db.query.cardKeyPoints.findFirst({
+    const kp = await tx.query.cardKeyPoints.findFirst({
       where: and(
         eq(cardKeyPoints.id, keyPointId),
         eq(cardKeyPoints.cardId, cardId),
@@ -183,7 +202,7 @@ export async function submitValidation(
   }
 
   // N-004: 服务端强制校验目标 keyPoint 的硬证据门槛
-  if (!await keyPointHasHardEvidence(keyPointId, workspaceId, userId)) {
+  if (!await keyPointHasHardEvidence(keyPointId, workspaceId, userId, tx)) {
     return { error: "no_hard_evidence" as const };
   }
 
@@ -207,14 +226,21 @@ export async function submitValidation(
   recordFunnelEvent("validation_submitted");
 
   return { jobId: job.id };
+    },
+  );
 }
 
 /** 列某张学习卡的验证历史
  * F-011: 按 userId 隔离，普通成员只能看到自己的验证记录
+ *
+ * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
 export async function listValidations(cardId: string, workspaceId: string, userId?: string) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+    async (tx) => {
   // 先校验 card 归属
-  const card = await db.query.learningCards.findFirst({
+  const card = await tx.query.learningCards.findFirst({
     where: and(eq(learningCards.id, cardId), eq(learningCards.workspaceId, workspaceId)),
   });
   if (!card) return null;
@@ -226,15 +252,23 @@ export async function listValidations(cardId: string, workspaceId: string, userI
   if (userId) {
     conditions.push(eq(validationEvents.userId, userId));
   }
-  return db.query.validationEvents.findMany({
+  return tx.query.validationEvents.findMany({
     where: and(...conditions),
     orderBy: (v, { desc: d }) => [d(v.createdAt)],
     limit: 20,
   });
+    },
+  );
 }
 
-/** 取单条验证结果（含 feedback） */
+/** 取单条验证结果（含 feedback）
+ *
+ * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
+ */
 export async function getValidation(id: string, workspaceId: string, userId?: string) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+    async (tx) => {
   const conditions = [
     eq(validationEvents.id, id),
     eq(validationEvents.workspaceId, workspaceId),
@@ -245,17 +279,24 @@ export async function getValidation(id: string, workspaceId: string, userId?: st
     conditions.push(eq(validationEvents.userId, userId));
   }
 
-  return db.query.validationEvents.findFirst({
+  return tx.query.validationEvents.findFirst({
     where: and(...conditions),
   });
+    },
+  );
 }
 
 /**
  * N-003: 按 jobId 查询验证结果。
  * 客户端提交验证后获得 jobId，可通过此接口直接取回结果，
  * 不再需要通过 key point、题目、答案和时间窗猜测匹配。
+ *
+ * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
 export async function getValidationByJobId(jobId: string, workspaceId: string, userId?: string) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+    async (tx) => {
   const conditions = [
     eq(validationEvents.jobId, jobId),
     eq(validationEvents.workspaceId, workspaceId),
@@ -265,7 +306,9 @@ export async function getValidationByJobId(jobId: string, workspaceId: string, u
     conditions.push(eq(validationEvents.userId, userId));
   }
 
-  return db.query.validationEvents.findFirst({
+  return tx.query.validationEvents.findFirst({
     where: and(...conditions),
   });
+    },
+  );
 }

@@ -13,7 +13,52 @@ import {
   readProviderCode,
   readProviderErrorMessage,
   readChatCompletionContent,
+  parseAgentTurnToolCalls,
 } from "../lib/providers/json-response.ts";
+
+// ─── parseAgentTurnToolCalls（截断修复契约）──────────────────────────────
+
+test("parseAgentTurnToolCalls: 完整 arguments JSON 正常解析", () => {
+  const result = parseAgentTurnToolCalls({
+    choices: [{
+      message: {
+        content: null,
+        tool_calls: [{
+          id: "call-1",
+          function: { name: "record_extraction_decisions", arguments: '{"candidates":[{"localId":"c1"}]}' },
+        }],
+      },
+      finish_reason: "tool_calls",
+    }],
+  }, true);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].argumentsMalformed, false);
+  assert.deepEqual(result.toolCalls[0].arguments, { candidates: [{ localId: "c1" }] });
+  assert.equal(result.finishReason, "tool_calls");
+});
+
+test("parseAgentTurnToolCalls: 截断的不完整 arguments 标记 malformed 而非静默空对象", () => {
+  const result = parseAgentTurnToolCalls({
+    choices: [{
+      message: {
+        content: null,
+        tool_calls: [{
+          id: "call-1",
+          function: { name: "record_extraction_decisions", arguments: '{"candidates":[{"localId":"c1"},{"localId":"c2"},{"localId":' },
+        }],
+      },
+      finish_reason: "length",
+    }],
+  }, true);
+  assert.equal(result.finishReason, "length");
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].argumentsMalformed, true);
+  assert.deepEqual(result.toolCalls[0].arguments, {});
+  assert.equal(
+    result.toolCalls[0].rawArguments,
+    '{"candidates":[{"localId":"c1"},{"localId":"c2"},{"localId":',
+  );
+});
 
 // ─── asJsonRecord ────────────────────────────────────────────────────────
 
@@ -86,6 +131,25 @@ test("readProviderCode: 字符串 code 正确返回", () => {
 
 test("readProviderCode: 数字 code 正确返回", () => {
   assert.equal(readProviderCode({ code: 401 }), 401);
+});
+
+test("readProviderCode: OpenAI 嵌套 error.code 正确返回", () => {
+  assert.equal(
+    readProviderCode({ error: { code: "invalid_api_key", message: "do not persist" } }),
+    "invalid_api_key",
+  );
+});
+
+test("readProviderCode: 顶层合法 code 优先于嵌套值", () => {
+  assert.equal(
+    readProviderCode({ code: "top", error: { code: "nested" } }),
+    "top",
+  );
+});
+
+test("readProviderCode: 嵌套对象或数组不会作为 code 返回", () => {
+  assert.equal(readProviderCode({ error: { code: { secret: true } } }), undefined);
+  assert.equal(readProviderCode({ error: { code: ["invalid_api_key"] } }), undefined);
 });
 
 test("readProviderCode: 无 code 返回 undefined", () => {

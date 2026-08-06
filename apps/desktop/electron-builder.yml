@@ -1,8 +1,8 @@
 # electron-builder configuration for macOS desktop packaging.
 # Produces a .dmg (disk image) and .app bundle.
 #
-# The app bundles the pre-built Next.js frontend. The backend (Docker/API/
-# Postgres/Worker) is managed externally by the user.
+# The app bundles the Next.js standalone output (traced node_modules).
+# The backend (Docker/API/Postgres/Worker) is managed externally by the user.
 
 appId: com.ailearn.desktop
 productName: AI Learn
@@ -11,6 +11,16 @@ copyright: Copyright © 2026 AI Learn Team
 directories:
   output: release
   buildResources: build
+
+# Only keep English and Simplified Chinese locales — removes ~55 unused
+# .lproj directories (~60MB) from the Electron Framework bundle.
+electronLanguages:
+  - en
+  - zh_CN
+
+# afterPack hook strips locale .lproj dirs from Electron Framework
+# (electronLanguages only handles app-level symlinks, not Framework).
+afterPack: ./after-pack.cjs
 
 # macOS-specific configuration.
 mac:
@@ -35,42 +45,28 @@ dmg:
       type: link
       path: /Applications
 
-# Bundle the pre-built Next.js web app into resources/web/.
-# node_modules already contains @ailearn/shared as a symlink (from npm install),
-# so we don't need to copy shared/ separately.
+# Bundle the Next.js standalone output into resources/web/.
+# Standalone mode traces all imports during `next build` and includes
+# only the needed node_modules files — typically 50-80MB vs 350MB+.
+# The prebuild:web script copies .next/static/ and public/ into the
+# standalone directory so it is fully self-contained.
 extraResources:
-  - from: ../../apps/web/package.json
-    to: web/package.json
-  - from: ../../apps/web/next.config.mjs
-    to: web/next.config.mjs
-  - from: ../../apps/web/tsconfig.json
-    to: web/tsconfig.json
-  - from: ../../apps/web/tailwind.config.ts
-    to: web/tailwind.config.ts
-  - from: ../../apps/web/postcss.config.js
-    to: web/postcss.config.js
-  - from: ../../apps/web/app
-    to: web/app
-    filter: ["**/*"]
-  - from: ../../apps/web/components
-    to: web/components
-    filter: ["**/*"]
-  - from: ../../apps/web/lib
-    to: web/lib
-    filter: ["**/*"]
-  - from: ../../apps/web/public
-    to: web/public
-    filter: ["**/*"]
-  - from: ../../apps/web/.next
-    to: web/.next
-    filter: ["**/*", "!**/*.map", "!**/*.tsbuildinfo"]
-  - from: ../../apps/web/node_modules
-    to: web/node_modules
+  - from: ../../apps/web/.next/standalone
+    to: web/.next/standalone
     filter:
       - "**/*"
-      - "!**/.bin/**"
-      - "!**/.cache/**"
-      - "!**/**/*.md"
+      - "!**/*.md"
+      - "!**/*.map"
+      - "!**/*.tsbuildinfo"
+      - "!**/test/**"
+      - "!**/tests/**"
+      - "!**/__tests__/**"
+      # sharp-libvips (17MB) — not needed: app does not use next/image
+      - "!**/sharp-libvips*/**"
+      - "!**/sharp-wasm32/**"
+      # typescript (8.7MB) — traced via @milkdown/components→vue, but the
+      # app uses @milkdown/react, not the Vue components
+      - "!**/node_modules/typescript/**"
 
 # Files to include in the app bundle (Electron side).
 files:

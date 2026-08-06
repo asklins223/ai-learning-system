@@ -53,40 +53,6 @@ async function main() {
   assert(login?.token, "login response did not include a token");
   const token = login.token;
 
-  const emptyModelConfig = await request("/auth/ai-model-config", { token });
-  assert(emptyModelConfig?.configured === false, "new owner unexpectedly has a personal model config");
-  assert(emptyModelConfig?.encryptionReady === true, "personal credential encryption is not ready");
-
-  const externalModelConfig = await request("/auth/ai-model-config", {
-    token,
-    method: "PUT",
-    body: {
-      provider: "openai_compatible",
-      baseUrl: "https://api.example.com/v1",
-      model: "ci-compatible-model",
-      apiKey: "sk-ci-personal-secret",
-    },
-  });
-  assert(externalModelConfig?.provider === "openai_compatible", "external personal provider was not saved");
-  assert(externalModelConfig?.apiKeyHint === "••••cret", "external personal key hint was not returned");
-  assert(!("apiKey" in externalModelConfig), "personal model config exposed an API key");
-  assert(!("apiKeyEncrypted" in externalModelConfig), "personal model config exposed encrypted key material");
-
-  const externalModelConfigRead = await request("/auth/ai-model-config", { token });
-  assert(externalModelConfigRead?.apiKeyHint === "••••cret", "saved personal key hint was not readable");
-  assert(!("apiKey" in externalModelConfigRead), "personal model GET exposed an API key");
-
-  const personalModelConfig = await request("/auth/ai-model-config", {
-    token,
-    method: "PUT",
-    body: { provider: "mock" },
-  });
-  assert(personalModelConfig?.configured === true, "personal model config was not saved");
-  assert(personalModelConfig?.provider === "mock", "personal mock provider was not selected");
-  assert(personalModelConfig?.apiKeyHint === null, "switching to mock did not clear the key hint");
-  assert(!("apiKey" in personalModelConfig), "personal model config exposed an API key");
-  assert(!("apiKeyEncrypted" in personalModelConfig), "personal model config exposed encrypted key material");
-
   const created = await request("/notes", {
     token,
     method: "POST",
@@ -108,35 +74,33 @@ async function main() {
     method: "POST",
     body: { noteVersionId },
   });
-  assert(firstGeneration?.state === "generating", "first generation request was not queued");
-  assert(firstGeneration?.jobId, "first generation request did not return a job id");
-  const jobId = firstGeneration.jobId;
+  assert(firstGeneration?.runId, "generation request did not return a run id");
+  const runId = firstGeneration.runId;
 
-  // A repeated request must reuse the active job or return the card that the
-  // first request already completed. It must never create a second job.
+  // A repeated request must reuse the active run or return the card that the
+  // first request already completed. It must never create a second run.
   const repeatedGeneration = await request("/cards/generate", {
     token,
     method: "POST",
     body: { noteVersionId },
   });
   assert(
-    repeatedGeneration?.jobId === null || repeatedGeneration?.jobId === jobId,
-    `repeated generation created a different job: ${repeatedGeneration?.jobId}`,
+    !repeatedGeneration?.runId || repeatedGeneration.runId === runId,
+    `repeated generation created a different run: ${repeatedGeneration?.runId}`,
   );
 
-  const job = await poll(
-    `generate_card job ${jobId}`,
+  const run = await poll(
+    `card generation run ${runId}`,
     async () => {
-      const current = await request(`/jobs/${jobId}`, { token });
-      if (current?.status === "failed" || current?.status === "dead") {
-        throw new Error(`generate_card job reached ${current.status}`);
+      const current = await request(`/card-generation-runs/${runId}`, { token });
+      if (current?.status === "failed" || current?.status === "terminal_failed" || current?.status === "cancelled") {
+        throw new Error(`card generation run reached ${current.status}`);
       }
       return current;
     },
     (current) => current?.status === "succeeded",
   );
-  assert(job.attempts === 0, `generate_card job unexpectedly retried ${job.attempts} time(s)`);
-  assert(job.startedAt && job.finishedAt, "completed job is missing execution timestamps");
+  assert(run.runId === runId, "polling returned an unexpected run id");
 
   const generationState = await poll(
     `card state for note version ${noteVersionId}`,
@@ -153,19 +117,17 @@ async function main() {
   assert(Array.isArray(card?.keyPoints) && card.keyPoints.length > 0, "mock provider produced no key points");
 
   const jobs = await request("/jobs", { token });
-  const generateJobs = jobs?.items?.filter((item) => item.type === "generate_card") ?? [];
-  assert(generateJobs.length === 1, `expected one generate_card job, found ${generateJobs.length}`);
-  assert(generateJobs[0].id === jobId, "job list returned an unexpected generate_card job");
+  const agentJobs = jobs?.items?.filter((item) => item.type === "execute_card_agent_turn") ?? [];
+  assert(agentJobs.length >= 1, `expected at least one execute_card_agent_turn job, found ${agentJobs.length}`);
 
   const audit = await request("/workspace/ai-audit-log?limit=100&offset=0", { token });
-  const auditEntries = audit?.items?.filter((item) => item.jobId === jobId) ?? [];
-  assert(auditEntries.length === 1, `expected one AI audit entry, found ${auditEntries.length}`);
+  const auditEntries = audit?.items?.filter((item) => item.operation === "execute_card_agent_turn") ?? [];
+  assert(auditEntries.length >= 1, `expected at least one AI audit entry, found ${auditEntries.length}`);
   assert(auditEntries[0].provider === "mock", "worker smoke did not use the mock provider");
-  assert(auditEntries[0].operation === "generate_card", "AI audit entry has the wrong operation");
   assert(auditEntries[0].status === "success", "AI audit entry did not record success");
 
   console.log(
-    `worker smoke OK: job=${jobId} card=${generationState.cardId} keyPoints=${card.keyPoints.length}`,
+    `worker smoke OK: run=${runId} card=${generationState.cardId} keyPoints=${card.keyPoints.length}`,
   );
 }
 

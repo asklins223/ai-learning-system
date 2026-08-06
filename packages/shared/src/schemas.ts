@@ -25,7 +25,7 @@ export const learningCardOutputSchema = z.object({
 
 export type LearningCardOutput = z.infer<typeof learningCardOutputSchema>;
 
-// ─── Learning-card generation v2 provider contracts ─────────────────────
+// ─── Learning-card generation provider contracts ─────────────────────────
 
 export const cardMapEvidenceUnitSchema = z.object({
   refId: z.string().min(1).max(160),
@@ -117,8 +117,9 @@ export const cardMapCandidateSchema = z.object({
   claim: z.string().min(1).max(500),
   evidenceRefIds: z.array(z.string().min(1).max(160)).min(1).max(12),
   topic: z.string().min(1).max(200),
-  cognitiveType: z.enum(["concept", "comparison", "causal", "procedure", "boundary"]),
+  cognitiveType: z.enum(["concept", "comparison", "causal", "procedure", "boundary", "code", "formula"]),
   importance: z.enum(["core", "supporting", "detail"]),
+  difficulty: z.enum(["basic", "intermediate", "advanced"]),
   relationHints: z.array(z.object({
     type: z.enum(["supports", "contrasts", "depends_on"]),
     localTargetId: z.string().min(1).max(100),

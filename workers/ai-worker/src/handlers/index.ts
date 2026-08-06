@@ -1,17 +1,17 @@
-import { and, asc, count, eq, sql, inArray, or } from "drizzle-orm";
+import { and, asc, eq, sql, inArray, or } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { createProvider } from "../lib/ai-provider.ts";
+import { evaluateValidationViaChat } from "../lib/business-ai-ops.ts";
 import { alignQuote } from "../lib/align.ts";
-import { assessCardOutput } from "../lib/card-quality.ts";
-import type { CardAssessmentResult } from "../lib/card-quality.ts";
 // N-011: AI 治理 — 同意门禁 + 审计日志
 import {
   enforcePrivacyGovernanceWithPolicy,
   logAICall,
   resolveAIGovernanceContext,
+  resolveProviderForTask,
 } from "../lib/governance.ts";
 import {
   assertJobLease,
@@ -21,13 +21,6 @@ import {
   withJobTransaction,
   type JobLeaseContext,
 } from "../lib/job-lease.ts";
-import {
-  beginCardGenerationPublish,
-  completeCardGenerationRun,
-  completeExistingCardGenerationRun,
-  generationRunIdFromPayload,
-  startCardGenerationRun,
-} from "../lib/card-generation-run.ts";
 // OPS-01: Provider 指标（ADR-0006 §2）
 import {
   providerCallsTotal,
@@ -38,12 +31,8 @@ import {
 import {
   ArtifactType,
   ArtifactStatus,
-  CardStatus,
-  CardRepairState,
   ValidationOutcome,
   ReviewStatus,
-  MAX_PENDING_JOBS_PER_WORKSPACE,
-  isCardRepairEnabled,
   type ValidationFeedback,
 } from "@ailearn/shared";
 
@@ -87,719 +76,6 @@ function leaseContext(job: JobPayload): JobLeaseContext {
     leaseToken: job.leaseToken,
     signal: job.signal,
   };
-}
-
-export async function runGenerateCard(job: JobPayload) {
-  const noteVersionId = job.payload.noteVersionId as string | undefined;
-  if (!noteVersionId) throw new Error("missing noteVersionId in payload");
-  const lease = leaseContext(job);
-  await assertJobLease(lease);
-  const generationRunId = generationRunIdFromPayload(job.payload);
-  const generationRunStart = generationRunId
-    ? await startCardGenerationRun(lease, { runId: generationRunId, noteVersionId })
-    : null;
-  if (generationRunStart?.state === "skip") {
-    logger.info(
-      { noteVersionId, generationRunId, reason: generationRunStart.reason },
-      "generate_card skipped by generation run start fence",
-    );
-    return;
-  }
-  const activeGenerationRun = generationRunStart?.state === "active"
-    ? generationRunStart.run
-    : null;
-  const oldCardId = job.payload.oldCardId as string | undefined;
-  logger.info({ noteVersionId, oldCardId, generationRunId }, "running generate_card");
-
-  // R-007: 幂等检查 — 如果该 noteVersionId 已有 active card，说明前一次执行已成功
-  // N-010: 如果是 regeneration (oldCardId 存在)，则不跳过 — 旧卡将在事务中原子切换
-  const existingCard = await db.query.learningCards.findFirst({
-    where: and(
-      eq(schema.learningCards.noteVersionId, noteVersionId),
-      eq(schema.learningCards.workspaceId, job.workspaceId),
-      eq(schema.learningCards.status, CardStatus.ACTIVE),
-    ),
-  });
-  if (existingCard && !oldCardId) {
-    if (generationRunId) {
-      await completeExistingCardGenerationRun(lease, {
-        runId: generationRunId,
-        noteVersionId,
-        cardId: existingCard.id,
-      });
-    }
-    logger.info({ noteVersionId, cardId: existingCard.id }, "generate_card skipped — active card already exists");
-    return;
-  }
-  if (existingCard && oldCardId) {
-    const oldCard = await db.query.learningCards.findFirst({
-      where: and(
-        eq(schema.learningCards.id, oldCardId),
-        eq(schema.learningCards.workspaceId, job.workspaceId),
-      ),
-    });
-    if (oldCard?.supersededByCardId === existingCard.id) {
-      if (generationRunId) {
-        await completeExistingCardGenerationRun(lease, {
-          runId: generationRunId,
-          noteVersionId,
-          cardId: existingCard.id,
-        });
-      }
-      logger.info(
-        { noteVersionId, cardId: existingCard.id, oldCardId },
-        "generate_card regeneration skipped — this replacement already committed",
-      );
-      return;
-    }
-  }
-
-  // Legacy jobs that already produced their card can remain idempotent without
-  // inventing an operator. Any job that still needs an AI call must carry the
-  // initiating user explicitly for audit attribution.
-  const auditUserId = requireAuditUserId(job);
-
-  // 并行查询 note+version (JOIN)、noteBlocks 和 AI 治理上下文，减少串行 DB 往返
-  const [versionNoteRow, blocks, govCtx] = await Promise.all([
-    db.select({ version: schema.noteVersions, note: schema.notes })
-      .from(schema.noteVersions)
-      .innerJoin(schema.notes, eq(schema.notes.id, schema.noteVersions.noteId))
-      .where(and(
-        eq(schema.noteVersions.id, noteVersionId),
-        eq(schema.noteVersions.workspaceId, job.workspaceId),
-        eq(schema.notes.workspaceId, job.workspaceId),
-      ))
-      .limit(1),
-    db.query.noteBlocks.findMany({
-      where: and(
-        eq(schema.noteBlocks.versionId, noteVersionId),
-        eq(schema.noteBlocks.workspaceId, job.workspaceId),
-      ),
-      orderBy: asc(schema.noteBlocks.ordinal),
-    }),
-    resolveAIGovernanceContext(job.workspaceId, auditUserId),
-  ]);
-  const version = versionNoteRow[0]?.version;
-  const note = versionNoteRow[0]?.note;
-  if (!version) throw new Error(`note version ${noteVersionId} not found in workspace`);
-  if (!note) throw new Error(`note not found in workspace`);
-  if (!govCtx.consentOk) {
-    throw new Error("AI consent not signed for this workspace. Owner must sign AI consent before using external AI providers.");
-  }
-
-  // 过滤 image block 并提取 alt text，避免将图片 URL 发送给 AI provider。
-  // 有 alt text 的图片转为 paragraph 保留语义价值；无 alt text 的丢弃。
-  // 此步骤在 enforcePrivacyGovernanceWithPolicy 之前执行，使 PII 检测只需处理文本内容。
-  const textBlocks = blocks
-    .map((b) => {
-      if (b.type === "image") {
-        const altMatch = /^!\[([^\]]*)\]\([^)]+\)/.exec(b.content);
-        const alt = altMatch?.[1]?.trim();
-        return alt ? { ordinal: b.ordinal, type: "paragraph" as const, content: `（图片：${alt}）` } : null;
-      }
-      return { ordinal: b.ordinal, type: b.type, content: b.content };
-    })
-    .filter((b): b is NonNullable<typeof b> => b !== null);
-
-  // 隐私治理 — 使用预解析的 policy，避免重复查 workspaces
-  const governanceResult = enforcePrivacyGovernanceWithPolicy(
-    govCtx.policy,
-    job.workspaceId,
-    ["note_content"],
-    {
-      noteTitle: activeGenerationRun?.titleSnapshot ?? note.title,
-      blocks: textBlocks,
-    },
-    govCtx.providerName,
-  );
-  if (!governanceResult.allowed) {
-    throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
-  }
-
-  const provider = createProvider(govCtx.providerName, govCtx.providerConfig);
-
-  // N-011: 使用脱敏后的数据
-  const sanitizedInput = governanceResult.sanitizedData as {
-    noteTitle: string;
-    blocks: Array<{ ordinal: number; type: string; content: string }>;
-  };
-
-  const aiCallStart = Date.now();
-  // 计划 §6.6: 开始真实写入 input_hash 与 cost_tokens — capture before AI call
-  const cardInputHash = createHash("sha256").update(JSON.stringify(sanitizedInput), "utf8").digest("hex");
-  let cardCostTokens: number | null = null;
-
-  let output;
-  try {
-    output = await provider.generateCard(sanitizedInput, job.signal);
-    // OPS-01: Provider 成功指标
-    providerCallsTotal.labels("generate_card", "success").inc();
-    providerCallDurationSeconds.labels("generate_card").observe((Date.now() - aiCallStart) / 1000);
-    // 计划 §6.6: capture cost tokens from original generateCard call before potential repair
-    cardCostTokens = provider.getLastUsage()?.totalTokens ?? null;
-  } catch (err) {
-    // OPS-01: Provider 失败指标
-    providerCallsTotal.labels("generate_card", "failed").inc();
-    providerCallDurationSeconds.labels("generate_card").observe((Date.now() - aiCallStart) / 1000);
-    providerErrorsTotal.labels("generate_card", categorizeError(err)).inc();
-    // N-011: 写入审计日志（失败）
-    if (await isJobLeaseActive(leaseContext(job))) {
-      await logAICall({
-        workspaceId: job.workspaceId,
-        userId: auditUserId,
-        jobId: job.id,
-        provider: provider.id,
-        modelId: provider.modelId,
-        operation: "generate_card",
-        dataCategories: ["note_content"],
-        dataSizeBytes: JSON.stringify(textBlocks).length,
-        costTokens: provider.getLastUsage()?.totalTokens ?? null, // 计划 §6.6: cost tracking
-        durationMs: Date.now() - aiCallStart,
-        status: "failed",
-        errorMessage: err instanceof Error ? err.message : String(err),
-      });
-    }
-    throw err;
-  }
-
-  // R-007: 模型调用后检查是否已 abort，避免写入学果
-  await assertJobLease(leaseContext(job));
-
-  // v0.6 CARD-02: Post-generation quality assessment with conditional repair.
-  // assessCardOutput returns structured issue reason codes; hard triggers
-  // (quote_not_in_source, claim_quote_unrelated, insufficient_valid_key_points,
-  // schema_invalid_bounded) drive a single conditional repair call (计划 §7.7).
-  // Terminal schema failure (schema_unparseable) fails the job without repair.
-  const originalCount = output.key_points.length;
-  const sourceBlockContents = sanitizedInput.blocks.map((b) => b.content);
-  let assessment: CardAssessmentResult = assessCardOutput(output, sourceBlockContents);
-
-  // Check for terminal schema failure — do not enter repair
-  if (assessment.hardFailure) {
-    throw new Error(
-      `card generation failed: terminal schema failure (${assessment.issues.map((i) => i.code).join(", ")})`,
-    );
-  }
-
-  // v0.6 CARD-02: Conditional repair — at most one, same Provider/model
-  // Trigger rules (计划 §7.7):
-  // - hard trigger: quote_not_in_source, claim_quote_unrelated, insufficient_valid_key_points, schema_invalid_bounded, usedFallback
-  // - soft trigger (only if CARD_REPAIR_V1_ENABLED): duplicate_key_point, coverage_too_low
-  //
-  // 计划 §12.2: CARD_REPAIR_V1_ENABLED gates ALL repair behavior.
-  // When false, fall back to single sanitizeCardOutput (no repair call).
-  const hardTriggers = assessment.issues.filter((i) => i.severity === "hard");
-  const repairEnabled = isCardRepairEnabled();
-
-  // Save draft artifact for lineage if repair occurs (计划 §7.7:
-  // "Draft artifact 在发生修复时保存为 dismissed，final artifact 指向 parent")
-  let draftArtifactId: string | null = null;
-  let repairInputHash: string | null = null;
-
-  if (repairEnabled && (hardTriggers.length > 0 || assessment.usedFallback)) {
-    logger.info(
-      {
-        originalCount,
-        sanitizedCount: assessment.sanitized.key_points.length,
-        hardTriggerCount: hardTriggers.length,
-        usedFallback: assessment.usedFallback,
-        issueCodes: assessment.issues.map((i) => i.code),
-      },
-      "card quality issues detected — attempting conditional repair (CARD-02)",
-    );
-
-    // 计划 §7.7: Persist repair state CAS none → claimed before calling Provider.
-    // This ensures crash/lease-lost prevents a second repair call.
-    // Job retry after crash will see repair_state=claimed and fail closed.
-    // CAS 必须 lease-fenced：附带 lease_token + status='running' 条件，防止
-    // lease 已被收割的旧 worker 赢得 claim 并发起唯一一次 repair 调用
-    // （计划 §7.7 "lease-fenced CAS"）。同时在调用 Provider 之前就把
-    // repair_attempt_count 置 1——失败/超时的付费调用也必须留下持久痕迹
-    // （计划 §7.7 "调用前持久化 request attempt"）。
-    const [claimedJob] = await db
-      .update(schema.jobs)
-      .set({
-        repairState: CardRepairState.CLAIMED,
-        repairAttemptCount: 1,
-      })
-      .where(
-        and(
-          eq(schema.jobs.id, job.id),
-          eq(schema.jobs.workspaceId, job.workspaceId),
-          eq(schema.jobs.repairState, CardRepairState.NONE),
-          eq(schema.jobs.status, "running"),
-          eq(schema.jobs.leaseToken, job.leaseToken),
-        ),
-      )
-      .returning();
-    if (!claimedJob) {
-      // repair_state was not 'none' — either already claimed or completed —
-      // or this worker's lease is no longer current.
-      // Fail closed: do not attempt repair again (计划 §7.7:
-      // "崩溃或 lease 丢失后不得再次发起 repair，只能保守失败")
-      throw new Error(
-        "card repair already attempted or lease no longer current — refusing to repair",
-      );
-    }
-
-    // Save draft artifact as dismissed for lineage (计划 §7.7:
-    // "Draft artifact 在发生修复时保存为 dismissed，final artifact 指向 parent")
-    const [draftArtifact] = await db
-      .insert(schema.aiArtifacts)
-      .values({
-        workspaceId: version.workspaceId,
-        type: "learning_card",
-        inputRefs: { noteVersionId },
-        output: assessment.sanitized,
-        modelId: provider.modelId,
-        promptVersion: provider.promptVersion,
-        status: ArtifactStatus.DISMISSED,
-        inputHash: cardInputHash, // 计划 §6.6: input_hash for draft artifact
-        costTokens: cardCostTokens, // 计划 §6.6: cost_tokens from original generateCard call
-      })
-      .returning();
-    draftArtifactId = draftArtifact.id;
-
-    // Repair uses the same Provider/model and governance context.
-    // Provider/SDK transport layer maxAttempts=1, no implicit auto-retry.
-    const repairStart = Date.now();
-    // Capture repair input size before output is reassigned to repaired output.
-    // This ensures dataSizeBytes reflects the actual data sent to the Provider.
-    const repairInputStr = JSON.stringify({ draft: output, sourceBlocks: sourceBlockContents, issues: assessment.issues });
-    const repairInputSize = repairInputStr.length;
-    repairInputHash = createHash("sha256").update(repairInputStr, "utf8").digest("hex");
-    try {
-      const repairedOutput = await provider.repairCard(
-        {
-          draft: output,
-          sourceBlocks: sourceBlockContents,
-          issues: assessment.issues,
-        },
-        job.signal,
-      );
-
-      // R-007: Check lease after repair call
-      await assertJobLease(leaseContext(job));
-
-      // Re-run the same assessor on the repaired output (计划 §7.7)
-      const reAssessment = assessCardOutput(repairedOutput, sourceBlockContents);
-
-      // If repair itself has hard failure, fail the job — do not activate card
-      if (reAssessment.hardFailure) {
-        throw new Error(
-          `card repair failed: terminal schema failure after repair (${reAssessment.issues.map((i) => i.code).join(", ")})`,
-        );
-      }
-
-      // If repair still has hard triggers, it's a hard failure — don't activate
-      const remainingHardTriggers = reAssessment.issues.filter((i) => i.severity === "hard");
-      if (remainingHardTriggers.length > 0) {
-        throw new Error(
-          `card repair did not resolve all hard triggers: ${remainingHardTriggers.map((i) => i.code).join(", ")}`,
-        );
-      }
-
-      // Repair succeeded — persist repair_state=completed（attempt count 已在
-      // claim 时写入）。同样 lease-fenced 且以 claimed 为前置状态。
-      await db
-        .update(schema.jobs)
-        .set({
-          repairState: CardRepairState.COMPLETED,
-        })
-        .where(and(
-          eq(schema.jobs.id, job.id),
-          eq(schema.jobs.workspaceId, job.workspaceId),
-          eq(schema.jobs.repairState, CardRepairState.CLAIMED),
-          eq(schema.jobs.leaseToken, job.leaseToken),
-        ));
-
-      // Repair succeeded — use the repaired output
-      logger.info(
-        {
-          originalIssues: assessment.issues.length,
-          repairedIssues: reAssessment.issues.length,
-          repairDurationMs: Date.now() - repairStart,
-        },
-        "card repair succeeded — using repaired output",
-      );
-
-      output = reAssessment.sanitized;
-      assessment = reAssessment;
-
-      // OPS-01: Provider success metrics for repair
-      providerCallsTotal.labels("generate_card_repair", "success").inc();
-      providerCallDurationSeconds.labels("generate_card_repair").observe((Date.now() - repairStart) / 1000);
-
-      // N-011: Log repair call separately for cost/usage traceability (计划 §10.5)
-      // Includes costTokens for Provider usage tracking (计划 §6.6, §10.5)
-      if (await isJobLeaseActive(leaseContext(job))) {
-        await logAICall({
-          workspaceId: job.workspaceId,
-          userId: auditUserId,
-          jobId: job.id,
-          provider: provider.id,
-          modelId: provider.modelId,
-          operation: "generate_card_repair",
-          dataCategories: ["note_content"],
-          dataSizeBytes: repairInputSize,
-          costTokens: provider.getLastUsage()?.totalTokens ?? null,
-          durationMs: Date.now() - repairStart,
-          status: "success",
-        });
-      }
-    } catch (repairErr) {
-      // OPS-01: Provider failure metrics for repair
-      providerCallsTotal.labels("generate_card_repair", "failed").inc();
-      providerCallDurationSeconds.labels("generate_card_repair").observe((Date.now() - repairStart) / 1000);
-      providerErrorsTotal.labels("generate_card_repair", categorizeError(repairErr)).inc();
-
-      // N-011: Log repair failure
-      // Includes costTokens for Provider usage tracking (计划 §6.6, §10.5)
-      if (await isJobLeaseActive(leaseContext(job))) {
-        await logAICall({
-          workspaceId: job.workspaceId,
-          userId: auditUserId,
-          jobId: job.id,
-          provider: provider.id,
-          modelId: provider.modelId,
-          operation: "generate_card_repair",
-          dataCategories: ["note_content"],
-          dataSizeBytes: repairInputSize,
-          costTokens: provider.getLastUsage()?.totalTokens ?? null,
-          durationMs: Date.now() - repairStart,
-          status: "failed",
-          errorMessage: repairErr instanceof Error ? repairErr.message : String(repairErr),
-        });
-      }
-
-      // Repair failed — if the original assessment had hard triggers,
-      // we cannot safely activate the card. Fail the job.
-      if (hardTriggers.length > 0) {
-        throw new Error(
-          `card generation failed after repair: ${repairErr instanceof Error ? repairErr.message : String(repairErr)}`,
-        );
-      }
-
-      // If repair failed but only soft triggers existed, use the original
-      // sanitized output (soft triggers don't block card activation)
-      logger.warn(
-        { repairError: repairErr instanceof Error ? repairErr.message : String(repairErr) },
-        "card repair failed but only soft triggers — using original sanitized output",
-      );
-    }
-  } else if (assessment.issues.length > 0) {
-    // 注意：flag 关闭时 hard trigger 也会走到这里——分别记录 hard/soft 数量，
-    // 避免灰度观察期把"被 flag 挡下的 hard 缺陷 draft"误读成只有 soft 问题。
-    logger.info(
-      {
-        originalCount,
-        sanitizedCount: assessment.sanitized.key_points.length,
-        hardIssueCount: hardTriggers.length,
-        softIssueCount: assessment.issues.filter((i) => i.severity === "soft").length,
-        issueCodes: assessment.issues.map((i) => i.code),
-        repairEnabled,
-      },
-      repairEnabled
-        ? "card output sanitized — soft issues only, no repair needed"
-        : "card output sanitized — repair disabled by flag (hard triggers, if any, were not repaired)",
-    );
-  }
-
-  output = assessment.sanitized;
-
-  const cardBody = [output.summary, ...output.key_points.map((kp) => kp.claim)].join("\n");
-
-  // Persist the card and its search projection in the same lease-fenced
-  // transaction. A timed-out handler must not mutate search_documents after
-  // the outer worker has released the lease for a retry.
-  const publication = await withJobTransaction(job, async (tx) => {
-    await lockJobLease(tx, lease);
-    // Serialize card completion with API enqueue/dedupe/quota checks for this
-    // workspace. This closes the window where a completed job disappears from
-    // the active-job query immediately before its card becomes observable.
-    await tx.execute(sql`
-      SELECT pg_advisory_xact_lock(
-        hashtextextended(${`job-quota:${job.workspaceId}`}, 0)
-      )
-    `);
-
-    const runPublishing = activeGenerationRun
-      ? await beginCardGenerationPublish(tx, {
-          runId: activeGenerationRun.id,
-          workspaceId: job.workspaceId,
-          noteVersionId,
-        })
-      : null;
-    if (runPublishing?.state === "skip") {
-      return { published: false as const, reason: runPublishing.reason };
-    }
-
-    // A note may have an active card from an older version. Supersede every
-    // active card for the note, not only cards on the target version; otherwise
-    // “generate newer card” leaves the old card/reviews/search projection live.
-    const oldActiveCardRows = await tx
-      .select({ card: schema.learningCards })
-      .from(schema.learningCards)
-      .innerJoin(
-        schema.noteVersions,
-        eq(schema.noteVersions.id, schema.learningCards.noteVersionId),
-      )
-      .where(and(
-        eq(schema.learningCards.workspaceId, job.workspaceId),
-        eq(schema.learningCards.status, CardStatus.ACTIVE),
-        eq(schema.noteVersions.noteId, version.noteId),
-      ));
-    const oldActiveCards = oldActiveCardRows.map((row) => row.card);
-    if (oldCardId && !oldActiveCards.some((card) => card.id === oldCardId)) {
-      const explicitOldCard = await tx.query.learningCards.findFirst({
-        where: and(
-          eq(schema.learningCards.id, oldCardId),
-          eq(schema.learningCards.workspaceId, job.workspaceId),
-          eq(schema.learningCards.status, CardStatus.ACTIVE),
-        ),
-      });
-      if (explicitOldCard) {
-        const explicitOldVersion = await tx.query.noteVersions.findFirst({
-          where: and(
-            eq(schema.noteVersions.id, explicitOldCard.noteVersionId),
-            eq(schema.noteVersions.workspaceId, job.workspaceId),
-          ),
-        });
-        if (!explicitOldVersion || explicitOldVersion.noteId !== version.noteId) {
-          throw new Error(`old card ${oldCardId} does not belong to the target note`);
-        }
-        oldActiveCards.push(explicitOldCard);
-      }
-    }
-    if (oldActiveCards.length > 0) {
-      await tx
-        .update(schema.learningCards)
-        .set({ status: CardStatus.SUPERSEDED, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.learningCards.workspaceId, job.workspaceId),
-            inArray(schema.learningCards.id, oldActiveCards.map((card) => card.id)),
-            eq(schema.learningCards.status, CardStatus.ACTIVE),
-          ),
-        );
-
-      // N-010: 在事务中原子取消旧卡的 pending review
-      for (const oldCard of oldActiveCards) {
-        await tx
-          .update(schema.reviewSchedules)
-          .set({ status: ReviewStatus.SUPERSEDED })
-          .where(
-            and(
-              eq(schema.reviewSchedules.workspaceId, job.workspaceId),
-              eq(schema.reviewSchedules.status, ReviewStatus.PENDING),
-              sql`(${sql.identifier("subject_type")} = 'card' AND ${sql.identifier("subject_id")} = ${oldCard.id}
-                   OR ${sql.identifier("subject_type")} = 'validation' AND ${sql.identifier("subject_id")} IN
-                     (SELECT id FROM validation_events WHERE card_id = ${oldCard.id}))`,
-            ),
-          );
-      }
-    }
-
-  // B8: artifact status 设为 ready（而非 accepted），等待用户手动 accept
-  // 计划 §7.7: 若发生修复，final artifact 指向 parent (draftArtifactId)
-  // 计划 §6.6: 开始真实写入 input_hash 与 cost_tokens
-  const finalInputHash = draftArtifactId ? repairInputHash : cardInputHash;
-  const finalCostTokens = draftArtifactId ? (provider.getLastUsage()?.totalTokens ?? null) : cardCostTokens;
-  const [artifact] = await tx
-      .insert(schema.aiArtifacts)
-      .values({
-        workspaceId: version.workspaceId,
-        type: "learning_card",
-        inputRefs: { noteVersionId },
-        output,
-        modelId: provider.modelId,
-        promptVersion: provider.promptVersion,
-        status: ArtifactStatus.READY,
-        parentArtifactId: draftArtifactId,
-        inputHash: finalInputHash, // 计划 §6.6
-        costTokens: finalCostTokens, // 计划 §6.6
-      })
-      .returning();
-
-    const [card] = await tx
-      .insert(schema.learningCards)
-      .values({
-        noteVersionId: version.id,
-        workspaceId: version.workspaceId,
-        status: "active",
-        schemaJson: { title: output.title, summary: output.summary },
-        artifactId: artifact.id,
-      })
-      .returning();
-
-    // B2/B9: 所有被替换的 active card（包括跨版本显式 oldCardId）都回填
-    // replacement，并在事务提交后清理对应搜索投影。
-    for (const oldCard of oldActiveCards) {
-      await tx
-        .update(schema.learningCards)
-        .set({ supersededByCardId: card.id, updatedAt: new Date() })
-        .where(and(
-          eq(schema.learningCards.id, oldCard.id),
-          eq(schema.learningCards.workspaceId, job.workspaceId),
-        ));
-    }
-
-    const kps = await tx
-      .insert(schema.cardKeyPoints)
-      .values(
-        output.key_points.map((kp) => ({
-          cardId: card.id,
-          workspaceId: version.workspaceId,
-          ordinal: kp.ordinal,
-          claim: kp.claim,
-          quoteText: kp.quote_text,
-        })),
-      )
-      .returning();
-
-    const [pendingRow] = await tx
-      .select({ count: count() })
-      .from(schema.jobs)
-      .where(and(
-        eq(schema.jobs.workspaceId, version.workspaceId),
-        eq(schema.jobs.status, "pending"),
-      ));
-    const pendingCount = Number(pendingRow?.count ?? 0);
-    if (pendingCount + kps.length > MAX_PENDING_JOBS_PER_WORKSPACE) {
-      throw new Error(
-        `workspace pending-job quota would be exceeded: ${pendingCount} + ${kps.length} > ${MAX_PENDING_JOBS_PER_WORKSPACE}`,
-      );
-    }
-
-    if (kps.length > 0) {
-      await tx.insert(schema.jobs).values(kps.map((kp) => ({
-        type: "align_evidence",
-        workspaceId: version.workspaceId,
-        requestedBy: auditUserId,
-        payload: { keyPointId: kp.id, noteVersionId },
-        status: "pending",
-        priority: 10,
-        resourceClass: "maintenance",
-      })));
-    }
-
-    const oldCardIds = oldActiveCards.map((card) => card.id);
-    if (oldCardIds.length > 0) {
-      await tx
-        .delete(schema.searchDocuments)
-        .where(and(
-          eq(schema.searchDocuments.workspaceId, version.workspaceId),
-          or(
-            and(
-              eq(schema.searchDocuments.objectType, "card"),
-              inArray(schema.searchDocuments.objectId, oldCardIds),
-            ),
-            and(
-              eq(schema.searchDocuments.objectType, "evidence"),
-              inArray(
-                sql<string>`${schema.searchDocuments.metadata}->>'cardId'`,
-                oldCardIds,
-              ),
-            ),
-          ),
-        ));
-    }
-
-    // 回滚一致性：legacy 发布替换了 v2 卡组的成员卡后，卡组本身也必须同事务
-    // 置为 superseded 并清理其 card_set 搜索投影。否则回滚后重新生成会留下
-    // 一个"active 但成员全部 superseded"的卡组（产品面 split-brain，runbook
-    // §5.5 的 overview 计数检查也测不出来）。
-    const staleActiveSets = await tx
-      .select({ id: schema.learningCardSets.id })
-      .from(schema.learningCardSets)
-      .where(and(
-        eq(schema.learningCardSets.workspaceId, version.workspaceId),
-        eq(schema.learningCardSets.noteId, version.noteId),
-        eq(schema.learningCardSets.status, "active"),
-      ))
-      .for("update");
-    if (staleActiveSets.length > 0) {
-      const staleSetIds = staleActiveSets.map((set) => set.id);
-      await tx
-        .update(schema.learningCardSets)
-        .set({ status: "superseded", supersededAt: new Date() })
-        .where(and(
-          eq(schema.learningCardSets.workspaceId, version.workspaceId),
-          inArray(schema.learningCardSets.id, staleSetIds),
-          eq(schema.learningCardSets.status, "active"),
-        ));
-      await tx
-        .delete(schema.searchDocuments)
-        .where(and(
-          eq(schema.searchDocuments.workspaceId, version.workspaceId),
-          eq(schema.searchDocuments.objectType, "card_set"),
-          inArray(schema.searchDocuments.objectId, staleSetIds),
-        ));
-    }
-
-    const indexedAt = new Date();
-    await tx
-      .insert(schema.searchDocuments)
-      .values({
-        workspaceId: version.workspaceId,
-        objectType: "card",
-        objectId: card.id,
-        title: output.title,
-        body: cardBody,
-        metadata: { noteVersionId: version.id },
-        indexedAt,
-      })
-      .onConflictDoUpdate({
-        target: [
-          schema.searchDocuments.workspaceId,
-          schema.searchDocuments.objectType,
-          schema.searchDocuments.objectId,
-        ],
-        set: {
-          title: output.title,
-          body: cardBody,
-          metadata: { noteVersionId: version.id },
-          indexedAt,
-        },
-      });
-
-    throwIfJobAborted(job);
-    if (runPublishing?.state === "active") {
-      await completeCardGenerationRun(tx, {
-        run: runPublishing.run,
-        cardId: card.id,
-      });
-    }
-    throwIfJobAborted(job);
-    logger.info({ cardId: card.id, keyPoints: kps.length }, "card persisted");
-
-    return { published: true as const };
-  });
-
-  if (!publication.published) {
-    logger.info(
-      { noteVersionId, generationRunId, reason: publication.reason },
-      "generate_card result was not published by generation run fence",
-    );
-  }
-
-  // N-011: only record a successful call after the card transaction commits.
-  // This avoids claiming success when persistence was rolled back.
-  if (await isJobLeaseActive(leaseContext(job))) {
-    await logAICall({
-      workspaceId: job.workspaceId,
-      userId: auditUserId,
-      jobId: job.id,
-      provider: provider.id,
-      modelId: provider.modelId,
-      operation: "generate_card",
-      dataCategories: ["note_content"],
-      dataSizeBytes: JSON.stringify(textBlocks).length,
-      costTokens: cardCostTokens, // 计划 §6.6: cost tracking for generate_card
-      durationMs: Date.now() - aiCallStart,
-      status: "success",
-    });
-  }
 }
 
 export async function runAlignEvidence(job: JobPayload) {
@@ -1083,7 +359,7 @@ function intervalForOutcome(outcome: ValidationOutcome): number {
 /**
  * 理解验证判定 handler（V0.1b 核心）。
  * 1. 读 keyPoint + 关联 evidence block（作为参考答案上下文）
- * 2. 调 provider.evaluateValidation → zod 校验输出
+ * 2. 调 evaluateValidationViaChat(provider, input) → chatCompletion + zod 校验
  * 3. 写 ai_artifacts(type=validation_feedback)
  * 4. 写 validation_events（outcome/confidence/feedback）
  * 5. 写 understanding_events（validated / misunderstood）
@@ -1187,19 +463,22 @@ export async function runEvaluateValidation(job: JobPayload) {
     throw new Error("AI consent not signed for this workspace. Owner must sign AI consent before using external AI providers.");
   }
 
+  // R3: Route text_generation tasks to a potentially different (cheaper) provider
+  const textRes = resolveProviderForTask(govCtx, "evaluate_validation");
+
   // 隐私治理 — 使用预解析的 policy，避免重复查 workspaces
   const governanceResult = enforcePrivacyGovernanceWithPolicy(
     govCtx.policy,
     job.workspaceId,
     ["question", "user_answer", "claim", "quote"],
     { question, questionType, claim: kp.claim, quote: referenceText || kp.quoteText, userAnswer },
-    govCtx.providerName,
+    textRes.providerName,
   );
   if (!governanceResult.allowed) {
     throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
   }
 
-  const provider = createProvider(govCtx.providerName, govCtx.providerConfig);
+  const provider = createProvider(textRes.providerName, textRes.providerConfig);
 
   // N-011: 审计日志
   const aiCallStart = Date.now();
@@ -1215,8 +494,11 @@ export async function runEvaluateValidation(job: JobPayload) {
   };
 
   let output;
+  let evalUsage: { totalTokens?: number | null } | null = null;
   try {
-    output = await provider.evaluateValidation(sanitizedInput, job.signal);
+    const result = await evaluateValidationViaChat(provider, sanitizedInput, job.signal);
+    output = result.output;
+    evalUsage = result.usage;
     // OPS-01: Provider 成功指标
     providerCallsTotal.labels("evaluate_validation", "success").inc();
     providerCallDurationSeconds.labels("evaluate_validation").observe((Date.now() - aiCallStart) / 1000);
@@ -1236,7 +518,7 @@ export async function runEvaluateValidation(job: JobPayload) {
         operation: "evaluate_validation",
         dataCategories: ["question", "user_answer", "claim", "quote"],
         dataSizeBytes: inputDataSize,
-        costTokens: provider.getLastUsage()?.totalTokens ?? null, // 计划 §6.6: cost tracking
+        costTokens: evalUsage?.totalTokens ?? null, // R5: usage from return value
         durationMs: Date.now() - aiCallStart,
         status: "failed",
         errorMessage: err instanceof Error ? err.message : String(err),
@@ -1314,7 +596,7 @@ export async function runEvaluateValidation(job: JobPayload) {
         promptVersion: provider.promptVersion,
         status: ArtifactStatus.READY,
         inputHash: createHash("sha256").update(JSON.stringify(sanitizedInput), "utf8").digest("hex"), // 计划 §6.6
-        costTokens: provider.getLastUsage()?.totalTokens ?? null, // 计划 §6.6
+        costTokens: evalUsage?.totalTokens ?? null, // R5: usage from return value
       })
       .returning();
 
@@ -1404,7 +686,7 @@ export async function runEvaluateValidation(job: JobPayload) {
       operation: "evaluate_validation",
       dataCategories: ["question", "user_answer", "claim", "quote"],
       dataSizeBytes: inputDataSize,
-      costTokens: provider.getLastUsage()?.totalTokens ?? null, // 计划 §6.6: cost tracking
+      costTokens: evalUsage?.totalTokens ?? null, // R5: usage from return value
       durationMs: Date.now() - aiCallStart,
       status: "success",
     });

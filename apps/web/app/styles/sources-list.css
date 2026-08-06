@@ -2864,7 +2864,7 @@
   padding-inline: var(--sources-content-gutter);
   padding-top: 15px;
   padding-bottom: 2px;
-  scroll-margin-top: 18px;
+  scroll-margin-top: calc(var(--workspace-sticky-top, 0px) + var(--workspace-sticky-height, 136px) + 18px);
 }
 
 .sources-capture-wrap .sources-capture-paper {

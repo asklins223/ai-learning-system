@@ -5,63 +5,63 @@ import {
   count,
   desc,
   eq,
+  gt,
   inArray,
-  notInArray,
+  isNull,
+  like,
+  or,
   sql,
 } from "drizzle-orm";
 import {
-  CardGenerationRunStatus,
   CardGenerationStage,
-  CardGenerationUnitKind,
-  CARD_GENERATION_IMAGE_WINDOW,
-  CARD_GENERATION_MAP_WINDOW,
-  CARD_GENERATION_MAX_BLOCKS,
-  CARD_GENERATION_MAX_IMAGES,
-  CARD_GENERATION_MAX_SOURCE_CHARS,
   JobResourceClass,
   JobStatus,
   JobType,
   MAX_PENDING_JOBS_PER_WORKSPACE,
-  isCardGenerationV2Enabled,
+  SUPERVISOR_AGENT_ENGINE_MODE,
+  SUPERVISOR_SHELL_VERSION,
+  AgentUnitKind,
+  SupervisorRunStatus,
+  SupervisorShellStage,
+  isFeedbackCollectionEnabled,
+  isRunErrorRetryable,
+  resolveSystemProviderForCapability,
+  resolveSystemPlatform,
 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
-import {
+import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
+import { learningCards } from "../../db/schema/card.ts";
+import { cardGenerationAgentEvents,
+  cardGenerationCandidates,
+  cardGenerationDrafts,
   cardGenerationEvents,
+  cardGenerationQualityReports,
   cardGenerationRuns,
+  cardGenerationSourceBundles,
   cardGenerationUnits,
   type CardGenerationAssetManifestEntry,
   type CardGenerationBlockManifestEntry,
-  type CardGenerationExclusionPolicy,
 } from "../../db/schema/card-generation.ts";
-import { learningCards } from "../../db/schema/card.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { noteBlocks, noteImageAssets, notes, noteVersions } from "../../db/schema/note.ts";
+
 import type {
-  ContinueWithExclusionsInput,
   CreateCardGenerationRunInput,
 } from "./schema.ts";
 
-const LEGACY_PIPELINE_VERSION = "card-generation-v2-m1";
-const TEXT_PIPELINE_VERSION = "card-generation-v2-m5";
-const LEGACY_PROMPT_BUNDLE_VERSION = "legacy-card-v1";
-const TEXT_PROMPT_BUNDLE_VERSION = "map-candidate-v1+deck-plan-v1";
-const IMAGE_PROMPT_BUNDLE_VERSION =
-  "map-candidate-v1+image-understanding-v1+deck-plan-v1";
 const TERMINAL_STATUSES = [
-  CardGenerationRunStatus.PARTIAL_READY,
-  CardGenerationRunStatus.SUCCEEDED,
-  CardGenerationRunStatus.CANCELLED,
-  CardGenerationRunStatus.SUPERSEDED,
+  SupervisorRunStatus.PARTIAL_READY,
+  SupervisorRunStatus.SUCCEEDED,
+  SupervisorRunStatus.NEEDS_ATTENTION,
+  SupervisorRunStatus.CANCELLED,
+  SupervisorRunStatus.SUPERSEDED,
 ] as const;
 const CANCELLABLE_STATUSES = new Set<string>([
-  CardGenerationRunStatus.QUEUED,
-  CardGenerationRunStatus.PLANNING,
-  CardGenerationRunStatus.AWAITING_ASSETS,
-  CardGenerationRunStatus.MAPPING,
-  CardGenerationRunStatus.REDUCING,
-  CardGenerationRunStatus.RENDERING,
-  CardGenerationRunStatus.VALIDATING,
-  CardGenerationRunStatus.PUBLISHING,
+  SupervisorRunStatus.QUEUED,
+  SupervisorRunStatus.PREPARING,
+  SupervisorRunStatus.RUNNING,
+  SupervisorRunStatus.VALIDATING,
+  SupervisorRunStatus.PUBLISHING,
 ]);
 
 type GenerationRunRow = typeof cardGenerationRuns.$inferSelect;
@@ -86,12 +86,15 @@ export type CardGenerationRunView = {
   stage: string;
   stateVersion: number;
   sequence: number;
+  engineMode: string;
+  shellVersion: string | null;
   sourceSnapshot: {
     noteVersionId: string;
     versionNo: number;
     contentHash: string;
   };
   progress: { completed: number; total: number; unit: string };
+  shellStage: string | null;
   coverage: {
     sourceUnitsCompleted: number;
     sourceUnitsTotal: number;
@@ -100,24 +103,107 @@ export type CardGenerationRunView = {
     sourceCoverageBps: number | null;
     imageCoverageBps: number | null;
   };
+  coverageReport: Record<string, unknown> | null;
+  providerCapabilityFingerprint: string | null;
   warnings: Array<{ code: string; details?: Record<string, unknown> }>;
   actions: {
     retryable: boolean;
+    restartable: boolean;
     cancellable: boolean;
-    canContinueWithExclusions: boolean;
   };
   result: { cardId: string | null; cardSetId: string | null } | null;
   error: { code: string; retryable: boolean } | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /**
+   * E2 阶段一（计划 §2.9）：生成质量报告。
+   * 当 isFeedbackCollectionEnabled() 为 true 时填充，null 表示未启用采集。
+   * 包含从 run 状态、覆盖率、事件中聚合的质量信号。
+   */
+  qualityReport: GenerationQualityReport | null;
+  /**
+   * Phase C（设计 §5.4）：真实计数聚合。
+   * 从 units/candidates/drafts/quality_reports/source_bundles 同事务聚合，
+   * 供前端四阶段轨道与汇总卡展示。向后兼容的纯新增字段。
+   */
+  metrics: CardGenerationRunMetrics;
+};
+
+/**
+ * 生成 run 的真实计数聚合（设计 §5.4）。
+ * 每个字段对应真实存储（非百分比、非合成值）。
+ */
+export type CardGenerationRunMetrics = {
+  bundles: {
+    planned: number;
+    assigned: number;
+    decided: number;
+    required: number;
+  };
+  childTasks: {
+    pending: number;
+    running: number;
+    completed: number;
+    failed: number;
+  };
+  candidates: {
+    extracted: number;
+    canonical: number;
+    eligible: number;
+    rejected: number;
+  };
+  draft: {
+    version: number;
+    producedByRole: string | null;
+  };
+  critic: {
+    status: string | null;
+    hardIssues: number;
+    softIssues: number;
+  };
+  /**
+   * verify 逐项 check 无表列，只持久化在 agent 事件的 tool_result safePayload
+   * （eventKey 前缀 `verify:`）。此处从最近一次 verify 事件聚合；
+   * 尚未执行校验时为 null。
+   */
+  verify: { passedChecks: number; totalChecks: number } | null;
+  semanticIndex: {
+    mode: string | null;
+    status: string | null;
+  };
+  usageTokens: number | null;
+};
+
+/**
+ * E2 阶段一（计划 §2.9）：生成质量报告类型。
+ * 只采集不干预——不改变生成行为，只聚合和展示质量信号。
+ */
+export type GenerationQualityReport = {
+  signals: Array<{
+    issueType: string;
+    description: string;
+    severity: "info" | "warning" | "critical";
+    detectedAt: string;
+  }>;
+  summary: {
+    totalSignals: number;
+    criticalCount: number;
+    warningCount: number;
+    infoCount: number;
+  };
 };
 
 export type CardGenerationRunAccepted = {
   runId: string;
   status: string;
-  sourceSnapshot: { noteVersionId: string; versionNo: number; contentHash: string };
-  canContinueEditing: true;
+  sourceSnapshot: { noteVersionId: string; versionNo: number; contentHash: string } | null;
+  canContinueEditing: boolean;
+  /**
+   * B1（计划 §2.4）：表示此 run 是复用的已有 succeeded run，而非新创建。
+   * 前端据此显示"内容未变，已复用上次结果"提示并提供"强制重新生成"入口。
+   */
+  reused?: boolean;
 };
 
 function sha256(value: string): string {
@@ -170,18 +256,40 @@ export function buildGenerationFingerprint(input: {
   sourceContentHash: string;
   blockManifestHash: string;
   assetManifestHash: string;
-  pipelineVersion?: string;
 }): string {
-  const { pipelineVersion = LEGACY_PIPELINE_VERSION, ...snapshot } = input;
   return hashJson({
     contract: "card-generation-fingerprint-v2",
-    pipelineVersion,
-    ...snapshot,
+    ...input,
   });
 }
 
 function iso(value: Date | null): string | null {
   return value ? value.toISOString() : null;
+}
+
+/**
+ * 将 run status/stage 映射到用户可见四阶段（计划 §12）。
+ *
+ * 四阶段：preparing | generating | checking | publishing
+ */
+function mapToShellStage(runStatus: string, runStage: string): string {
+  switch (runStatus) {
+    case SupervisorRunStatus.QUEUED:
+    case SupervisorRunStatus.PREPARING:
+      return SupervisorShellStage.PREPARING;
+    case SupervisorRunStatus.RUNNING:
+      return SupervisorShellStage.GENERATING;
+    case SupervisorRunStatus.VALIDATING:
+      return SupervisorShellStage.CHECKING;
+    case SupervisorRunStatus.PUBLISHING:
+      return SupervisorShellStage.PUBLISHING;
+    default:
+      break;
+  }
+  if (runStage === "publish" || runStage === "complete") {
+    return SupervisorShellStage.PUBLISHING;
+  }
+  return SupervisorShellStage.GENERATING;
 }
 
 async function toRunView(
@@ -200,9 +308,7 @@ async function toRunView(
   }
 
   const warnings: CardGenerationRunView["warnings"] = [];
-  const executionMode = run.providerSnapshot.executionMode;
-  const textPipeline = executionMode === "text_v2" || executionMode === "multimodal_v2";
-  const failedCheckpoints = run.status === CardGenerationRunStatus.NEEDS_ATTENTION
+  const failedCheckpoints = run.status === SupervisorRunStatus.NEEDS_ATTENTION
     ? await tx.query.cardGenerationUnits.findMany({
         where: and(
           eq(cardGenerationUnits.workspaceId, run.workspaceId),
@@ -212,27 +318,22 @@ async function toRunView(
         orderBy: [asc(cardGenerationUnits.ordinal)],
       })
     : [];
-  const failedUnitDetails = failedCheckpoints.map((unit) => ({
-    unitId: unit.id,
-    kind: unit.kind,
-    ordinal: unit.ordinal,
-    status: unit.status,
-    errorCode: unit.errorCode,
-    ...(unit.kind === CardGenerationUnitKind.IMAGE
-      ? {
-          imageAssetId: unit.inputManifest.imageAssetId ?? null,
-          imageBlockId: unit.inputManifest.imageBlockId ?? null,
-        }
-      : {}),
-  }));
-  const excludableImageUnits = failedCheckpoints.filter(
-    (unit) =>
-      unit.kind === CardGenerationUnitKind.IMAGE
-      && unit.status === "terminal_failed"
-      && typeof unit.inputManifest.imageAssetId === "string"
-      && typeof unit.inputManifest.imageBlockId === "string",
-  );
-  const latestNoteFence = run.status === CardGenerationRunStatus.NEEDS_ATTENTION
+  if (failedCheckpoints.length > 0) {
+    warnings.push({
+      code: "generation_units_failed",
+      details: {
+        units: failedCheckpoints.map((unit) => ({
+          unitId: unit.id,
+          kind: unit.kind,
+          ordinal: unit.ordinal,
+          status: unit.status,
+          errorCode: unit.errorCode,
+        })),
+      },
+    });
+  }
+
+  const latestNoteFence = run.status === SupervisorRunStatus.NEEDS_ATTENTION
     ? await tx.query.notes.findFirst({
         columns: {
           cardGenerationEpoch: true,
@@ -244,49 +345,60 @@ async function toRunView(
         ),
       })
     : null;
-  if (!textPipeline && (run.sourceCoverageBps === null || run.imageCoverageBps === null)) {
-    warnings.push({ code: "coverage_unmeasured", details: { bridge: "legacy_generator" } });
-  }
-  if (!textPipeline && run.requiredImages > 0) {
-    warnings.push({
-      code: "image_pipeline_not_active",
-      details: { requiredImages: run.requiredImages },
-    });
-  }
-  if (failedUnitDetails.length > 0) {
-    warnings.push({
-      code: "generation_units_failed",
-      details: { units: failedUnitDetails },
-    });
-  }
-  if (run.exclusionPolicy?.mode === "explicit_image_exclusions_v1") {
-    warnings.push({
-      code: "partial_coverage",
-      details: {
-        sourceRunId: run.exclusionPolicy.sourceRunId,
-        excludedImageCount: run.exclusionPolicy.excludedUnits.length,
-        excludedUnitIds: run.exclusionPolicy.excludedUnits.map((unit) => unit.sourceUnitId),
-        excludedImages: run.exclusionPolicy.excludedUnits.map((unit) => ({
-          imageAssetId: unit.imageAssetId,
-          imageBlockId: unit.imageBlockId,
-          reason: unit.errorCode ?? "image_analysis_failed",
-        })),
-        imagesCompleted: run.completedImages,
-        imagesTotal: run.requiredImages,
-        imageCoverageBps: run.imageCoverageBps,
-        policyAdjustedImageCoverageBps:
-          Number(run.coverageReport.policyAdjustedImageCoverageBps ?? 0),
-      },
-    });
-  }
 
   const terminal = TERMINAL_STATUSES.includes(run.status as (typeof TERMINAL_STATUSES)[number]);
+  const latestRun =
+    latestNoteFence?.cardGenerationEpoch === run.generationEpoch
+    && latestNoteFence.latestGenerationRunId === run.id;
+  const retryCompatible = true;
+
+  const shellStage = mapToShellStage(run.status, run.stage);
+
+  const retryable =
+    run.status === SupervisorRunStatus.NEEDS_ATTENTION
+    && run.retryable
+    && latestRun
+    && retryCompatible
+    // 错误码级兜底：即使 DB 中 retryable 为 true，预算耗尽/确定性门禁等
+    // 明确不可恢复的错误也不展示"重试"（与 worker 写入侧使用同一判定）。
+    && isRunErrorRetryable(run.errorCode);
   const progressComplete =
-    run.status === CardGenerationRunStatus.SUCCEEDED
-    || run.status === CardGenerationRunStatus.PARTIAL_READY;
+    run.status === SupervisorRunStatus.SUCCEEDED
+    || run.status === SupervisorRunStatus.PARTIAL_READY;
   const result = run.resultCardId || run.resultCardSetId
     ? { cardId: run.resultCardId, cardSetId: run.resultCardSetId }
     : null;
+
+  // 真实进度/覆盖率的唯一来源是 supervisor 持久化的六层 coverageReport
+  //（prepare/deck-draft/specialist-persist/publish 各阶段都会刷新）。
+  // 旧的 completedUnits/requiredUnits/sourceCoverageBps 计数器已不再被写入，
+  // 不再作为进度数据源。
+  const coverageReport = (run.coverageReport ?? {}) as Record<string, unknown>;
+
+  // E2 阶段一：当 feature flag 开启时，聚合生成质量报告
+  const qualityReport = isFeedbackCollectionEnabled()
+    ? buildQualityReport(run, coverageReport, failedCheckpoints)
+    : null;
+  const fraction = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const explicitDecisionCoverage = fraction(coverageReport.explicitDecisionCoverage);
+  const bundleAssignmentCoverage = fraction(coverageReport.bundleAssignmentCoverage);
+  const bundleDecisions = Array.isArray(coverageReport.bundleDecisions)
+    ? (coverageReport.bundleDecisions as Array<{ decisionStatus?: string }>)
+    : [];
+  const decidedBundles = bundleDecisions.filter(
+    (d) => d?.decisionStatus === "candidate_emitted"
+      || d?.decisionStatus === "no_learnable_fact",
+  ).length;
+  // Supervisor 把图片折叠进 source bundle（由 vision specialist 处理），
+  // 不在 run 行单独记录图片完成数。图片覆盖率用 bundle 分配覆盖率作为代理：
+  // 它是 coverageReport 里同时覆盖文本与图片 bundle 的真实指标。
+  const hasImages = run.requiredImages > 0;
+  const imageCoverageBps = hasImages
+    ? bundleAssignmentCoverage != null
+      ? Math.round(bundleAssignmentCoverage * 10000)
+      : null
+    : 10_000;
 
   return {
     runId: run.id,
@@ -296,40 +408,50 @@ async function toRunView(
     stage: run.stage,
     stateVersion: run.stateVersion,
     sequence: Math.max(0, run.nextEventSequence - 1),
+    engineMode: SUPERVISOR_AGENT_ENGINE_MODE,
+    shellVersion: SUPERVISOR_SHELL_VERSION,
     sourceSnapshot: {
       noteVersionId: run.noteVersionId,
       versionNo: version.versionNo,
       contentHash: run.sourceContentHash,
     },
     progress: {
-      completed: textPipeline ? run.completedUnits : progressComplete ? 1 : 0,
-      total: textPipeline ? run.requiredUnits : 1,
-      unit: textPipeline ? "source_units" : "legacy_job",
+      completed: explicitDecisionCoverage != null
+        ? Math.round(explicitDecisionCoverage * 100)
+        : progressComplete ? 100 : 0,
+      total: 100,
+      unit: "percent",
     },
+    shellStage,
     coverage: {
-      sourceUnitsCompleted: run.completedUnits,
-      sourceUnitsTotal: run.requiredUnits,
-      imagesCompleted: run.completedImages,
+      sourceUnitsCompleted: decidedBundles,
+      sourceUnitsTotal: bundleDecisions.length,
+      imagesCompleted: hasImages && bundleAssignmentCoverage != null
+        ? Math.round(bundleAssignmentCoverage * run.requiredImages)
+        : 0,
       imagesTotal: run.requiredImages,
-      sourceCoverageBps: run.sourceCoverageBps,
-      imageCoverageBps: run.imageCoverageBps,
+      sourceCoverageBps: explicitDecisionCoverage != null
+        ? Math.round(explicitDecisionCoverage * 10000)
+        : null,
+      imageCoverageBps,
     },
+    coverageReport: (run.coverageReport as Record<string, unknown> | null) ?? null,
+    providerCapabilityFingerprint: run.providerCapabilityFingerprint ?? null,
     warnings,
     actions: {
-      retryable: run.status === CardGenerationRunStatus.NEEDS_ATTENTION && run.retryable,
+      retryable,
+      restartable:
+        run.status === SupervisorRunStatus.NEEDS_ATTENTION
+        && latestRun,
       cancellable: CANCELLABLE_STATUSES.has(run.status),
-      canContinueWithExclusions:
-        run.status === CardGenerationRunStatus.NEEDS_ATTENTION
-        && executionMode === "multimodal_v2"
-        && excludableImageUnits.length > 0
-        && latestNoteFence?.cardGenerationEpoch === run.generationEpoch
-        && latestNoteFence.latestGenerationRunId === run.id,
     },
     result,
-    error: run.errorCode ? { code: run.errorCode, retryable: run.retryable } : null,
+    error: run.errorCode ? { code: run.errorCode, retryable } : null,
     createdAt: run.createdAt.toISOString(),
     startedAt: iso(run.startedAt),
     finishedAt: terminal || run.finishedAt ? iso(run.finishedAt) : null,
+    qualityReport,
+    metrics: await buildRunMetrics(tx, run),
   };
 }
 
@@ -346,6 +468,161 @@ async function getRunRowForWorkspace(
   }) ?? null;
 }
 
+/**
+ * Phase C（设计 §5.4）：聚合 run 的真实计数。
+ *
+ * 字段与真实存储的映射（勿按组名猜列）：
+ * - `bundles`：`card_generation_source_bundles`；planned=assignmentStatus 'pending'、
+ *   assigned=非 pending、decided=decisionStatus 非 'pending'、required=required。
+ * - `childTasks`：`card_generation_units.status` 全量枚举中
+ *   completed≈succeeded、failed≈retryable_failed|terminal_failed、
+ *   running≈running|agent_running|waiting_child|verifying。
+ * - `candidates`：`candidateKind` ∈ {extracted, canonical}；
+ *   eligible≈validationStatus 'accepted'、rejected≈'excluded'（coverage-ledger 的
+ *   candidateSurvivalCoverage 是比例非计数，无法直接映射成条数）。
+ * - `draft`：`card_generation_drafts` 最大 draftVersion + 产出 unit 的 kind。
+ * - `critic`：最新 `card_generation_quality_reports`（按 createdAt desc）。
+ * - `verify`：`verify:*` tool_result 事件的 safePayload.checks。
+ * - `semanticIndex.mode`：`runs.embeddingProfileVersion`（SupervisorProgress 的
+ *   semanticIndexMode 的持久化代理）；status 暂无列，留 null。
+ * - `usageTokens`：`runs.usageSummary.{inputTokens, outputTokens}` 之和。
+ */
+async function buildRunMetrics(
+  tx: ApiTransaction,
+  run: GenerationRunRow,
+): Promise<CardGenerationRunMetrics> {
+  const { workspaceId, id: runId } = run;
+
+  const [bundles] = await tx
+    .select({
+      planned: count(sql`case when ${cardGenerationSourceBundles.assignmentStatus} = 'pending' then 1 end`),
+      assigned: count(sql`case when ${cardGenerationSourceBundles.assignmentStatus} <> 'pending' then 1 end`),
+      decided: count(sql`case when ${cardGenerationSourceBundles.decisionStatus} <> 'pending' then 1 end`),
+      required: count(sql`case when ${cardGenerationSourceBundles.required} then 1 end`),
+    })
+    .from(cardGenerationSourceBundles)
+    .where(and(
+      eq(cardGenerationSourceBundles.workspaceId, workspaceId),
+      eq(cardGenerationSourceBundles.runId, runId),
+    ));
+
+  const [childTasks] = await tx
+    .select({
+      pending: count(sql`case when ${cardGenerationUnits.status} = 'pending' then 1 end`),
+      running: count(sql`case when ${cardGenerationUnits.status} in ('running', 'agent_running', 'waiting_child', 'verifying') then 1 end`),
+      completed: count(sql`case when ${cardGenerationUnits.status} = 'succeeded' then 1 end`),
+      failed: count(sql`case when ${cardGenerationUnits.status} in ('retryable_failed', 'terminal_failed') then 1 end`),
+    })
+    .from(cardGenerationUnits)
+    .where(and(
+      eq(cardGenerationUnits.workspaceId, workspaceId),
+      eq(cardGenerationUnits.runId, runId),
+    ));
+
+  const [candidates] = await tx
+    .select({
+      extracted: count(sql`case when ${cardGenerationCandidates.candidateKind} = 'extracted' then 1 end`),
+      canonical: count(sql`case when ${cardGenerationCandidates.candidateKind} = 'canonical' then 1 end`),
+      eligible: count(sql`case when ${cardGenerationCandidates.validationStatus} = 'accepted' then 1 end`),
+      rejected: count(sql`case when ${cardGenerationCandidates.validationStatus} = 'excluded' then 1 end`),
+    })
+    .from(cardGenerationCandidates)
+    .where(and(
+      eq(cardGenerationCandidates.workspaceId, workspaceId),
+      eq(cardGenerationCandidates.runId, runId),
+    ));
+
+  const latestDraft = await tx.query.cardGenerationDrafts.findFirst({
+    columns: { draftVersion: true, producedByUnitId: true },
+    where: and(
+      eq(cardGenerationDrafts.workspaceId, workspaceId),
+      eq(cardGenerationDrafts.runId, runId),
+    ),
+    orderBy: [desc(cardGenerationDrafts.draftVersion)],
+  });
+  let producedByRole: string | null = null;
+  if (latestDraft) {
+    const producer = await tx.query.cardGenerationUnits.findFirst({
+      columns: { kind: true },
+      where: eq(cardGenerationUnits.id, latestDraft.producedByUnitId),
+    });
+    producedByRole = producer?.kind ?? null;
+  }
+
+  const latestReport = await tx.query.cardGenerationQualityReports.findFirst({
+    columns: { criticStatus: true, hardIssues: true, softIssues: true },
+    where: and(
+      eq(cardGenerationQualityReports.workspaceId, workspaceId),
+      eq(cardGenerationQualityReports.runId, runId),
+    ),
+    orderBy: [desc(cardGenerationQualityReports.createdAt)],
+  });
+
+  // verify 计数只存在于 `verify:*` tool_result 事件的 safePayload.checks。
+  const verifyEvent = await tx.query.cardGenerationAgentEvents.findFirst({
+    columns: { safePayload: true },
+    where: and(
+      eq(cardGenerationAgentEvents.workspaceId, workspaceId),
+      eq(cardGenerationAgentEvents.runId, runId),
+      eq(cardGenerationAgentEvents.eventType, "tool_result"),
+      like(cardGenerationAgentEvents.eventKey, "verify:%"),
+    ),
+    orderBy: [desc(cardGenerationAgentEvents.createdAt)],
+  });
+  let verify: CardGenerationRunMetrics["verify"] = null;
+  if (verifyEvent) {
+    const checks = Array.isArray(verifyEvent.safePayload.checks)
+      ? verifyEvent.safePayload.checks as Array<{ passed?: unknown }>
+      : [];
+    if (checks.length > 0) {
+      verify = {
+        passedChecks: checks.filter((c) => c.passed === true).length,
+        totalChecks: checks.length,
+      };
+    }
+  }
+
+  const usage = (run.usageSummary ?? {}) as Record<string, unknown>;
+  const usageTokens = (typeof usage.inputTokens === "number" ? usage.inputTokens : 0)
+    + (typeof usage.outputTokens === "number" ? usage.outputTokens : 0);
+
+  return {
+    bundles: {
+      planned: bundles?.planned ?? 0,
+      assigned: bundles?.assigned ?? 0,
+      decided: bundles?.decided ?? 0,
+      required: bundles?.required ?? 0,
+    },
+    childTasks: {
+      pending: childTasks?.pending ?? 0,
+      running: childTasks?.running ?? 0,
+      completed: childTasks?.completed ?? 0,
+      failed: childTasks?.failed ?? 0,
+    },
+    candidates: {
+      extracted: candidates?.extracted ?? 0,
+      canonical: candidates?.canonical ?? 0,
+      eligible: candidates?.eligible ?? 0,
+      rejected: candidates?.rejected ?? 0,
+    },
+    draft: {
+      version: latestDraft?.draftVersion ?? 0,
+      producedByRole,
+    },
+    critic: {
+      status: latestReport?.criticStatus ?? null,
+      hardIssues: Array.isArray(latestReport?.hardIssues) ? latestReport.hardIssues.length : 0,
+      softIssues: Array.isArray(latestReport?.softIssues) ? latestReport.softIssues.length : 0,
+    },
+    verify,
+    semanticIndex: {
+      mode: run.embeddingProfileVersion ?? null,
+      status: null,
+    },
+    usageTokens: usageTokens > 0 ? usageTokens : null,
+  };
+}
+
 function assertPendingQuota(pendingCount: number): void {
   if (pendingCount >= MAX_PENDING_JOBS_PER_WORKSPACE) {
     throw new CardGenerationServiceError(
@@ -356,140 +633,77 @@ function assertPendingQuota(pendingCount: number): void {
   }
 }
 
-function legacyJobValues(input: {
-  workspaceId: string;
-  userId: string;
-  noteVersionId: string;
-  runId: string;
-  idempotencyKey: string;
-  oldCardId?: string;
-}) {
-  return {
-    type: JobType.GENERATE_CARD,
-    workspaceId: input.workspaceId,
-    requestedBy: input.userId,
-    payload: {
-      noteVersionId: input.noteVersionId,
-      generationRunId: input.runId,
-      userId: input.userId,
-      ...(input.oldCardId ? { oldCardId: input.oldCardId } : {}),
-    },
-    status: JobStatus.PENDING,
-    generationRunId: input.runId,
-    stage: CardGenerationStage.LEGACY_GENERATE,
-    priority: 50,
-    resourceClass: JobResourceClass.CARD_FOREGROUND,
-    idempotencyKey: input.idempotencyKey,
-  } as const;
-}
+/**
+ * E2 阶段一（计划 §2.9）：构建生成质量报告。
+ *
+ * 从 run 状态、覆盖率、失败检查点中聚合质量信号。
+ * 只采集不干预——不改变生成行为，只用于展示和诊断。
+ */
+function buildQualityReport(
+  run: GenerationRunRow,
+  coverageReport: Record<string, unknown>,
+  failedCheckpoints: Array<{ id: string; kind: string; ordinal: number | null; status: string; errorCode: string | null }>,
+): GenerationQualityReport {
+  const signals: GenerationQualityReport["signals"] = [];
+  const nowISO = new Date().toISOString();
 
-function plannerJobValues(input: {
-  workspaceId: string;
-  userId: string;
-  noteVersionId: string;
-  runId: string;
-  unitId: string;
-}) {
-  return {
-    type: JobType.PLAN_CARD_GENERATION,
-    workspaceId: input.workspaceId,
-    requestedBy: input.userId,
-    payload: {
-      noteVersionId: input.noteVersionId,
-      generationRunId: input.runId,
-      generationUnitId: input.unitId,
-      userId: input.userId,
-    },
-    status: JobStatus.PENDING,
-    generationRunId: input.runId,
-    generationUnitId: input.unitId,
-    stage: CardGenerationStage.PLANNER,
-    priority: 80,
-    resourceClass: JobResourceClass.CARD_FOREGROUND,
-    idempotencyKey: `generation-run:${input.runId}:planner:0`,
-  } as const;
-}
-
-function generationUnitJobValues(input: {
-  workspaceId: string;
-  userId: string;
-  noteVersionId: string;
-  runId: string;
-  unit: typeof cardGenerationUnits.$inferSelect;
-}) {
-  const descriptor = input.unit.kind === CardGenerationUnitKind.PLANNER
-    ? {
-        type: JobType.PLAN_CARD_GENERATION,
-        stage: CardGenerationStage.PLANNER,
-        priority: 80,
-        resourceClass: JobResourceClass.CARD_FOREGROUND,
-      }
-    : input.unit.kind === CardGenerationUnitKind.TEXT_MAP
-      ? {
-          type: JobType.MAP_CARD_GENERATION,
-          stage: CardGenerationStage.TEXT_MAP,
-          priority: 40,
-          resourceClass: JobResourceClass.CARD_MAP,
-        }
-      : input.unit.kind === CardGenerationUnitKind.IMAGE
-        ? {
-            type: JobType.ANALYZE_CARD_IMAGE,
-            stage: CardGenerationStage.IMAGE_ANALYSIS,
-            priority: 45,
-            resourceClass: JobResourceClass.VISION,
-          }
-      : input.unit.kind === CardGenerationUnitKind.SECTION_REDUCE
-        ? {
-            type: JobType.REDUCE_CARD_GENERATION,
-            stage: CardGenerationStage.SECTION_REDUCE,
-            priority: 70,
-            resourceClass: JobResourceClass.CARD_FOREGROUND,
-          }
-        : input.unit.kind === CardGenerationUnitKind.DECK_PLAN
-          ? {
-              type: JobType.PLAN_CARD_SET,
-              stage: CardGenerationStage.DECK_PLAN,
-              priority: 75,
-              resourceClass: JobResourceClass.CARD_FOREGROUND,
-            }
-          : input.unit.kind === CardGenerationUnitKind.CARD_RENDER
-            ? {
-                type: JobType.RENDER_CARD_GENERATION,
-                stage: CardGenerationStage.CARD_RENDER,
-                priority: 65,
-                resourceClass: JobResourceClass.CARD_FOREGROUND,
-              }
-        : input.unit.kind === CardGenerationUnitKind.PUBLISH
-          ? {
-              type: JobType.PUBLISH_CARD_GENERATION,
-              stage: CardGenerationStage.PUBLISH,
-              priority: 80,
-              resourceClass: JobResourceClass.CARD_FOREGROUND,
-            }
-          : null;
-  if (!descriptor) {
-    throw new CardGenerationServiceError(
-      "generation_unit_not_retryable",
-      409,
-      "当前失败步骤不能通过此接口重试",
-    );
+  // 信号 1：run 处于 NEEDS_ATTENTION 状态
+  if (run.status === SupervisorRunStatus.NEEDS_ATTENTION) {
+    signals.push({
+      issueType: "needs_attention",
+      description: `生成任务需要处理${run.errorCode ? `（错误：${run.errorCode}）` : ""}`,
+      severity: "critical",
+      detectedAt: nowISO,
+    });
   }
+
+  // 信号 2：覆盖率低于阈值（六层账本）
+  const explicitDecisionCoverage = typeof coverageReport.explicitDecisionCoverage === "number"
+    && Number.isFinite(coverageReport.explicitDecisionCoverage)
+    ? coverageReport.explicitDecisionCoverage as number
+    : null;
+  if (explicitDecisionCoverage !== null && explicitDecisionCoverage < 0.6) {
+    signals.push({
+      issueType: "low_coverage",
+      description: `显式决策覆盖率 ${(explicitDecisionCoverage * 100).toFixed(1)}%，低于阈值 60%`,
+      severity: "warning",
+      detectedAt: nowISO,
+    });
+  }
+
+  // 信号 3：失败的检查点
+  if (failedCheckpoints.length > 0) {
+    signals.push({
+      issueType: "generation_units_failed",
+      description: `${failedCheckpoints.length} 个生成检查点失败`,
+      severity: "warning",
+      detectedAt: nowISO,
+    });
+  }
+
+  // 信号 4：run 被 superseded（被更新请求取代）
+  if (run.status === SupervisorRunStatus.SUPERSEDED) {
+    signals.push({
+      issueType: "superseded",
+      description: "此任务已被更新的生成请求取代",
+      severity: "info",
+      detectedAt: nowISO,
+    });
+  }
+
+  const criticalCount = signals.filter((s) => s.severity === "critical").length;
+  const warningCount = signals.filter((s) => s.severity === "warning").length;
+  const infoCount = signals.filter((s) => s.severity === "info").length;
+
   return {
-    ...descriptor,
-    workspaceId: input.workspaceId,
-    requestedBy: input.userId,
-    payload: {
-      noteVersionId: input.noteVersionId,
-      generationRunId: input.runId,
-      generationUnitId: input.unit.id,
-      userId: input.userId,
+    signals,
+    summary: {
+      totalSignals: signals.length,
+      criticalCount,
+      warningCount,
+      infoCount,
     },
-    status: JobStatus.PENDING,
-    generationRunId: input.runId,
-    generationUnitId: input.unit.id,
-    idempotencyKey:
-      `generation-run:${input.runId}:unit:${input.unit.id}:attempt:${input.unit.attempts + 1}`,
-  } as const;
+  };
 }
 
 export async function createCardGenerationRun(
@@ -497,8 +711,6 @@ export async function createCardGenerationRun(
   input: CreateCardGenerationRunInput & { oldCardId?: string },
 ): Promise<CardGenerationRunAccepted> {
   return withWorkspaceTransaction(context, async (tx) => {
-    // Keep the queue advisory lock outermost: the worker publish path already
-    // holds this lock before it locks run/note rows.
     await tx.execute(sql`
       SELECT pg_advisory_xact_lock(
         hashtextextended(${`job-quota:${context.workspaceId}`}, 0)
@@ -519,13 +731,22 @@ export async function createCardGenerationRun(
           "幂等键已被另一请求使用",
         );
       }
-      const replayView = await toRunView(tx, replay);
-      return {
-        runId: replay.id,
-        status: replay.status,
-        sourceSnapshot: replayView.sourceSnapshot,
-        canContinueEditing: true,
-      };
+      try {
+        const replayView = await toRunView(tx, replay);
+        return {
+          runId: replay.id,
+          status: replay.status,
+          sourceSnapshot: replayView.sourceSnapshot,
+          canContinueEditing: true,
+        };
+      } catch {
+        return {
+          runId: replay.id,
+          status: replay.status,
+          sourceSnapshot: null,
+          canContinueEditing: false,
+        };
+      }
     }
 
     const candidateVersion = await tx.query.noteVersions.findFirst({
@@ -539,7 +760,6 @@ export async function createCardGenerationRun(
       throw new CardGenerationServiceError("note_version_not_found", 404, "笔记版本不存在");
     }
 
-    // Fixed row-lock order for all snapshot writers: note, then version.
     const [note] = await tx
       .select()
       .from(notes)
@@ -602,19 +822,37 @@ export async function createCardGenerationRun(
     const textSourceChars = blocks
       .filter((block) => block.type !== "image")
       .reduce((total, block) => total + block.content.length, 0);
-    const executionMode = isCardGenerationV2Enabled()
-      ? manifests.assetManifest.length > 0 ? "multimodal_v2" : "text_v2"
-      : "legacy_bridge";
-    const pipelineVersion = executionMode === "text_v2" || executionMode === "multimodal_v2"
-      ? TEXT_PIPELINE_VERSION
-      : LEGACY_PIPELINE_VERSION;
-    // 显式的 input_limit_exceeded 同样适用于 legacy_bridge：M6 已移除 legacy
-    // handler 的 12k 静默截断，若回滚路径不做预检，一篇 500k 字符的笔记会变成
-    // 单次无上限的 provider 请求（G3 只禁止"静默"降级，不禁止显式失败）。
+
+    const executionMode = "supervisor_agent_v1";
+
+    // P0-01 阶段A-4 + P1-12：为 supervisor_agent_v1 解析并冻结 provider 快照。
+    // v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
+    // 不再查 personal BYOK 或 workspace.aiProvider。
+    const resolvedProviderName = resolveSystemProviderForCapability("agent_turn");
+
+    // B1-B3 迁移遗漏修复：快照额外冻结系统 agent_turn 平台的配置平台 ID
+    //（config/ai-platforms.json 的 platform id，如 "morbuke"；无配置文件时为 provider type）。
+    // 用于 worker 侧平台漂移检测：config 平台在 run 创建后变化时能发现，
+    // 而不只是 provider type/model（type 可能不变、仅平台实例切换）。
+    const systemAgentTurnPlatform = resolveSystemPlatform("agent_turn");
+    const systemAgentTurnPlatformId = systemAgentTurnPlatform?.platformId ?? null;
+
     if (
-      blocks.length > CARD_GENERATION_MAX_BLOCKS
-      || textSourceChars > CARD_GENERATION_MAX_SOURCE_CHARS
-      || manifests.assetManifest.length > CARD_GENERATION_MAX_IMAGES
+      resolvedProviderName === "mock"
+      && process.env.NODE_ENV === "production"
+      && process.env.ALLOW_MOCK_IN_PRODUCTION !== "true"
+    ) {
+      throw new CardGenerationServiceError(
+        "mock_provider_blocked_in_production",
+        422,
+        "当前工作区的 AI 模型配置为 Mock，无法在生产环境中生成学习卡。请在设置中配置真实的 AI 模型。",
+      );
+    }
+
+    if (
+      blocks.length > 2000
+      || textSourceChars > 500_000
+      || manifests.assetManifest.length > 30
     ) {
       throw new CardGenerationServiceError(
         "input_limit_exceeded",
@@ -630,26 +868,54 @@ export async function createCardGenerationRun(
       sourceContentHash: version.contentHash,
       blockManifestHash: manifests.blockManifestHash,
       assetManifestHash: manifests.assetManifestHash,
-      pipelineVersion,
     });
 
-    const active = await tx.query.cardGenerationRuns.findFirst({
+    // Check for active (non-terminal) run with same fingerprint
+    const activeNonTerminal = await tx.query.cardGenerationRuns.findFirst({
       where: and(
         eq(cardGenerationRuns.workspaceId, context.workspaceId),
         eq(cardGenerationRuns.noteVersionId, version.id),
         eq(cardGenerationRuns.generationFingerprint, generationFingerprint),
-        notInArray(cardGenerationRuns.status, [...TERMINAL_STATUSES]),
       ),
-      orderBy: [desc(cardGenerationRuns.createdAt)],
     });
-    if (active) {
-      const activeView = await toRunView(tx, active);
+    if (activeNonTerminal && !TERMINAL_STATUSES.includes(activeNonTerminal.status as (typeof TERMINAL_STATUSES)[number])) {
+      const activeView = await toRunView(tx, activeNonTerminal);
       return {
-        runId: active.id,
-        status: active.status,
+        runId: activeNonTerminal.id,
+        status: activeNonTerminal.status,
         sourceSnapshot: activeView.sourceSnapshot,
         canContinueEditing: true,
       };
+    }
+
+    // B1（计划 §2.4）：同内容跳过与结果复用。
+    // 在活跃 run 复用之后、配额检查之前，查询同 fingerprint 的 succeeded run。
+    // 仅命中同 noteVersionId（内容一旦变化 fingerprint 自然不同）；不跨 workspace。
+    // force=true 时跳过此检查。
+    if (!input.force) {
+      const succeededRun = await tx.query.cardGenerationRuns.findFirst({
+        where: and(
+          eq(cardGenerationRuns.workspaceId, context.workspaceId),
+          eq(cardGenerationRuns.noteVersionId, version.id),
+          eq(cardGenerationRuns.generationFingerprint, generationFingerprint),
+          eq(cardGenerationRuns.status, SupervisorRunStatus.SUCCEEDED),
+        ),
+        orderBy: [desc(cardGenerationRuns.createdAt)],
+      });
+      if (succeededRun) {
+        try {
+          const reuseView = await toRunView(tx, succeededRun);
+          return {
+            runId: succeededRun.id,
+            status: succeededRun.status,
+            sourceSnapshot: reuseView.sourceSnapshot,
+            canContinueEditing: true,
+            reused: true,
+          };
+        } catch {
+          // 如果 toRunView 失败（如源快照已不存在），继续创建新 run
+        }
+      }
     }
 
     const pendingRows = await tx
@@ -665,7 +931,7 @@ export async function createCardGenerationRun(
     if (!version.sealedAt) {
       await tx
         .update(noteVersions)
-        .set({ sealedAt: now, sealedReason: "card_generation_v2" })
+        .set({ sealedAt: now, sealedReason: "card_generation" })
         .where(and(
           eq(noteVersions.id, version.id),
           eq(noteVersions.workspaceId, context.workspaceId),
@@ -691,36 +957,27 @@ export async function createCardGenerationRun(
         assetManifestHash: manifests.assetManifestHash,
         blockManifest: manifests.blockManifest,
         assetManifest: manifests.assetManifest,
-        pipelineVersion,
-        promptBundleVersion: executionMode === "multimodal_v2"
-          ? IMAGE_PROMPT_BUNDLE_VERSION
-          : executionMode === "text_v2" ? TEXT_PROMPT_BUNDLE_VERSION
-          : LEGACY_PROMPT_BUNDLE_VERSION,
         providerSnapshot: {
           executionMode,
-          ...(executionMode !== "legacy_bridge" ? {
-            capabilityPolicy: "conservative-32k-v1",
-            mapPromptVersion: TEXT_PROMPT_BUNDLE_VERSION,
-          } : {}),
+          ...(resolvedProviderName ? { providerName: resolvedProviderName } : {}),
+          ...(systemAgentTurnPlatformId ? { platformId: systemAgentTurnPlatformId } : {}),
+          capabilityPolicy: "conservative-32k-v1",
           ...(input.oldCardId ? { oldCardId: input.oldCardId } : {}),
+          ...(input.feedbackSummary ? { feedbackSummary: input.feedbackSummary } : {}),
         },
         governancePolicyVersion: "workspace-policy-snapshot-v1",
-        status: CardGenerationRunStatus.QUEUED,
+        status: SupervisorRunStatus.QUEUED,
         stage: CardGenerationStage.QUEUED,
         stateVersion: 1,
         nextEventSequence: 2,
         retryable: true,
-        requiredUnits: executionMode !== "legacy_bridge" ? 0 : manifests.blockManifest.length,
+        requiredUnits: 0,
         completedUnits: 0,
         requiredImages: imageAssetIds.length,
         completedImages: 0,
-        sourceCoverageBps: executionMode !== "legacy_bridge" ? 0 : null,
-        imageCoverageBps: executionMode !== "legacy_bridge"
-          ? imageAssetIds.length === 0 ? 10_000 : 0
-          : null,
-        coverageReport: executionMode !== "legacy_bridge"
-          ? { measurement: "planned", plannerVersion: null }
-          : { measurement: "unmeasured", bridge: "legacy_generator" },
+        sourceCoverageBps: 0,
+        imageCoverageBps: imageAssetIds.length === 0 ? 10_000 : 0,
+        coverageReport: { measurement: "planned", plannerVersion: null },
       })
       .returning();
 
@@ -738,7 +995,7 @@ export async function createCardGenerationRun(
       workspaceId: context.workspaceId,
       sequence: 1,
       stage: CardGenerationStage.SNAPSHOT,
-      state: CardGenerationRunStatus.QUEUED,
+      state: SupervisorRunStatus.QUEUED,
       completed: manifests.blockManifest.length,
       total: manifests.blockManifest.length,
       unit: "blocks",
@@ -751,53 +1008,54 @@ export async function createCardGenerationRun(
       createdAt: now,
     });
 
-    let job: typeof jobs.$inferSelect;
-    if (executionMode !== "legacy_bridge") {
-      const [plannerUnit] = await tx
-        .insert(cardGenerationUnits)
-        .values({
-          workspaceId: context.workspaceId,
-          runId: run.id,
-          kind: CardGenerationUnitKind.PLANNER,
-          level: 0,
-          ordinal: 0,
-          unitKey: `planner:${run.generationFingerprint}`,
-          pipelineVersion,
-          required: true,
-          inputManifest: {},
+    // Supervisor Agent v1 路径（计划 §5.1, §5.2）：
+    // 创建 prepare unit 和 execute_card_agent_turn job
+    const [prepareUnit] = await tx
+      .insert(cardGenerationUnits)
+      .values({
+        workspaceId: context.workspaceId,
+        runId: run.id,
+        kind: AgentUnitKind.PREPARE,
+        level: 0,
+        ordinal: 0,
+        unitKey: `prepare:${run.generationFingerprint}`,
+        required: true,
+        inputManifest: {
+          density: input.density,
+        },
+        inputHash: run.generationFingerprint,
+        tokenEstimate: 0,
+        status: "pending",
+        scheduledAt: now,
+      })
+      .returning();
+    await tx
+      .insert(jobs)
+      .values({
+        type: JobType.EXECUTE_CARD_AGENT_TURN,
+        workspaceId: context.workspaceId,
+        requestedBy: context.userId,
+        payload: {
+          noteVersionId: version.id,
+          generationRunId: run.id,
+          agentUnitId: prepareUnit.id,
+          turnNo: 0,
           inputHash: run.generationFingerprint,
-          tokenEstimate: 0,
-          status: "pending",
-          scheduledAt: now,
-        })
-        .returning();
-      [job] = await tx
-        .insert(jobs)
-        .values(plannerJobValues({
-          workspaceId: context.workspaceId,
           userId: context.userId,
-          noteVersionId: version.id,
-          runId: run.id,
-          unitId: plannerUnit.id,
-        }))
-        .returning();
-    } else {
-      [job] = await tx
-        .insert(jobs)
-        .values(legacyJobValues({
-          workspaceId: context.workspaceId,
-          userId: context.userId,
-          noteVersionId: version.id,
-          runId: run.id,
-          idempotencyKey: `generation-run:${run.id}:legacy:1`,
-          oldCardId: input.oldCardId,
-        }))
-        .returning();
-    }
+        },
+        status: JobStatus.PENDING,
+        generationRunId: run.id,
+        generationUnitId: prepareUnit.id,
+        stage: CardGenerationStage.SNAPSHOT,
+        priority: 80,
+        resourceClass: JobResourceClass.CARD_FOREGROUND,
+        idempotencyKey: `generation-run:${run.id}:prepare:0`,
+      })
+      .returning();
 
     await tx
       .update(cardGenerationRuns)
-      .set({ legacyJobId: job.id, updatedAt: now })
+      .set({ updatedAt: now })
       .where(and(
         eq(cardGenerationRuns.id, run.id),
         eq(cardGenerationRuns.workspaceId, context.workspaceId),
@@ -810,446 +1068,6 @@ export async function createCardGenerationRun(
         noteVersionId: version.id,
         versionNo: version.versionNo,
         contentHash: version.contentHash,
-      },
-      canContinueEditing: true,
-    };
-  });
-}
-
-/**
- * Derive a new run from a strict failure after the owner explicitly excludes
- * one or more failed images. The sealed snapshot remains unchanged; the
- * exclusion policy is a separate, immutable input to the derived fingerprint.
- */
-export async function continueCardGenerationRunWithExclusions(
-  context: { workspaceId: string; userId: string },
-  sourceRunId: string,
-  input: ContinueWithExclusionsInput,
-): Promise<CardGenerationRunAccepted | null> {
-  return withWorkspaceTransaction(context, async (tx) => {
-    await tx
-      .select({ id: jobs.id })
-      .from(jobs)
-      .where(and(
-        eq(jobs.workspaceId, context.workspaceId),
-        eq(jobs.generationRunId, sourceRunId),
-        inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
-      ))
-      .orderBy(asc(jobs.id))
-      .for("update");
-    await tx.execute(sql`
-      SELECT pg_advisory_xact_lock(
-        hashtextextended(${`job-quota:${context.workspaceId}`}, 0)
-      )
-    `);
-
-    const normalizedUnitIds = [...input.excludedUnitIds].sort();
-    const replay = await tx.query.cardGenerationRuns.findFirst({
-      where: and(
-        eq(cardGenerationRuns.workspaceId, context.workspaceId),
-        eq(cardGenerationRuns.requestIdempotencyKey, input.idempotencyKey),
-      ),
-    });
-    if (replay) {
-      const policy = replay.exclusionPolicy;
-      const replayUnitIds = [...(
-        policy?.requestedUnitIds
-        ?? policy?.excludedUnits.map((unit) => unit.sourceUnitId)
-        ?? []
-      )].sort();
-      if (
-        replay.requestedBy !== context.userId
-        || policy?.mode !== "explicit_image_exclusions_v1"
-        || policy.sourceRunId !== sourceRunId
-        || normalizedUnitIds.length !== replayUnitIds.length
-        || normalizedUnitIds.some((unitId, index) => unitId !== replayUnitIds[index])
-      ) {
-        throw new CardGenerationServiceError(
-          "idempotency_key_reused",
-          409,
-          "幂等键已被另一请求使用",
-        );
-      }
-      const replayView = await toRunView(tx, replay);
-      return {
-        runId: replay.id,
-        status: replay.status,
-        sourceSnapshot: replayView.sourceSnapshot,
-        canContinueEditing: true,
-      };
-    }
-
-    const [sourceRun] = await tx
-      .select()
-      .from(cardGenerationRuns)
-      .where(and(
-        eq(cardGenerationRuns.id, sourceRunId),
-        eq(cardGenerationRuns.workspaceId, context.workspaceId),
-      ))
-      .for("update");
-    if (!sourceRun) return null;
-    if (
-      sourceRun.status !== CardGenerationRunStatus.NEEDS_ATTENTION
-      || sourceRun.providerSnapshot.executionMode !== "multimodal_v2"
-    ) {
-      throw new CardGenerationServiceError(
-        "run_exclusions_not_available",
-        409,
-        "当前任务没有可显式排除的失败图片",
-      );
-    }
-
-    const [note] = await tx
-      .select({
-        id: notes.id,
-        generationEpoch: notes.cardGenerationEpoch,
-        latestGenerationRunId: notes.latestGenerationRunId,
-      })
-      .from(notes)
-      .where(and(
-        eq(notes.id, sourceRun.noteId),
-        eq(notes.workspaceId, context.workspaceId),
-        sql`${notes.deletedAt} IS NULL`,
-      ))
-      .for("update");
-    if (
-      !note
-      || note.generationEpoch !== sourceRun.generationEpoch
-      || note.latestGenerationRunId !== sourceRun.id
-    ) {
-      throw new CardGenerationServiceError(
-        "stale_generation_epoch",
-        409,
-        "该任务已被更新请求取代",
-      );
-    }
-
-    const failedImageUnits = await tx
-      .select()
-      .from(cardGenerationUnits)
-      .where(and(
-        eq(cardGenerationUnits.workspaceId, context.workspaceId),
-        eq(cardGenerationUnits.runId, sourceRun.id),
-        inArray(cardGenerationUnits.id, normalizedUnitIds),
-      ))
-      .orderBy(asc(cardGenerationUnits.ordinal), asc(cardGenerationUnits.id))
-      .for("update");
-    if (
-      failedImageUnits.length !== normalizedUnitIds.length
-      || failedImageUnits.some((unit) =>
-        unit.kind !== CardGenerationUnitKind.IMAGE
-        || unit.status !== "terminal_failed"
-        || !unit.required
-        || !unit.inputManifest.imageAssetId
-        || !unit.inputManifest.imageBlockId)
-    ) {
-      throw new CardGenerationServiceError(
-        "invalid_exclusion_units",
-        422,
-        "只能排除当前任务中已确定失败的必需图片",
-      );
-    }
-    const inheritedExclusions = sourceRun.exclusionPolicy?.mode === "explicit_image_exclusions_v1"
-      ? sourceRun.exclusionPolicy.excludedUnits
-      : [];
-    const exclusionsByAssetId = new Map(
-      inheritedExclusions.map((unit) => [unit.imageAssetId, unit]),
-    );
-    for (const unit of failedImageUnits) {
-      exclusionsByAssetId.set(unit.inputManifest.imageAssetId!, {
-        sourceUnitId: unit.id,
-        kind: "image",
-        inputHash: unit.inputHash,
-        imageAssetId: unit.inputManifest.imageAssetId!,
-        imageBlockId: unit.inputManifest.imageBlockId!,
-        errorCode: unit.errorCode,
-      });
-    }
-    const cumulativeExclusions = [...exclusionsByAssetId.values()].sort((a, b) =>
-      a.imageAssetId.localeCompare(b.imageAssetId)
-      || a.imageBlockId.localeCompare(b.imageBlockId));
-    if (
-      sourceRun.requiredUnits === 0
-      && cumulativeExclusions.length >= sourceRun.requiredImages
-    ) {
-      throw new CardGenerationServiceError(
-        "no_remaining_generation_input",
-        422,
-        "排除这些图片后没有可用于生成学习卡的内容",
-      );
-    }
-
-    const now = new Date();
-    const exclusionPolicy: CardGenerationExclusionPolicy = {
-      mode: "explicit_image_exclusions_v1",
-      sourceRunId: sourceRun.id,
-      requestedBy: context.userId,
-      requestedAt: now.toISOString(),
-      requestedUnitIds: normalizedUnitIds,
-      excludedUnits: cumulativeExclusions,
-    };
-    const rootGenerationFingerprint =
-      typeof sourceRun.providerSnapshot.rootGenerationFingerprint === "string"
-        ? sourceRun.providerSnapshot.rootGenerationFingerprint
-        : sourceRun.generationFingerprint;
-    const generationFingerprint = hashJson({
-      contract: "card-generation-partial-derivation-v1",
-      rootGenerationFingerprint,
-      excludedImageInputs: exclusionPolicy.excludedUnits
-        .map((unit) => ({
-          inputHash: unit.inputHash,
-          imageAssetId: unit.imageAssetId,
-          imageBlockId: unit.imageBlockId,
-        }))
-        .sort((a, b) =>
-          a.imageAssetId.localeCompare(b.imageAssetId)
-          || a.imageBlockId.localeCompare(b.imageBlockId)),
-    });
-
-    const pendingRows = await tx
-      .select({ count: count() })
-      .from(jobs)
-      .where(and(
-        eq(jobs.workspaceId, context.workspaceId),
-        eq(jobs.status, JobStatus.PENDING),
-        sql`${jobs.generationRunId} IS DISTINCT FROM ${sourceRun.id}`,
-      ));
-    assertPendingQuota(Number(pendingRows[0]?.count ?? 0));
-
-    const generationEpoch = note.generationEpoch + 1;
-    const [derivedRun] = await tx
-      .insert(cardGenerationRuns)
-      .values({
-        workspaceId: context.workspaceId,
-        noteId: sourceRun.noteId,
-        noteVersionId: sourceRun.noteVersionId,
-        requestedBy: context.userId,
-        requestIdempotencyKey: input.idempotencyKey,
-        generationFingerprint,
-        generationEpoch,
-        supersedesRunId: sourceRun.id,
-        titleSnapshot: sourceRun.titleSnapshot,
-        sourceContentHash: sourceRun.sourceContentHash,
-        blockManifestHash: sourceRun.blockManifestHash,
-        assetManifestHash: sourceRun.assetManifestHash,
-        blockManifest: sourceRun.blockManifest,
-        assetManifest: sourceRun.assetManifest,
-        pipelineVersion: sourceRun.pipelineVersion,
-        promptBundleVersion: sourceRun.promptBundleVersion,
-        providerSnapshot: {
-          ...sourceRun.providerSnapshot,
-          partialPolicy: exclusionPolicy.mode,
-          sourceRunId: sourceRun.id,
-          rootGenerationFingerprint,
-        },
-        governancePolicyVersion: sourceRun.governancePolicyVersion,
-        status: CardGenerationRunStatus.QUEUED,
-        stage: CardGenerationStage.QUEUED,
-        stateVersion: 1,
-        nextEventSequence: 2,
-        retryable: true,
-        requiredUnits: 0,
-        completedUnits: 0,
-        failedUnits: 0,
-        requiredImages: sourceRun.requiredImages,
-        completedImages: 0,
-        sourceCoverageBps: 0,
-        imageCoverageBps: sourceRun.requiredImages === 0 ? 10_000 : 0,
-        coverageReport: {
-          measurement: "planned",
-          plannerVersion: null,
-          resultCompleteness: "partial",
-          originalRequiredImages: sourceRun.requiredImages,
-          policyAdjustedImageCoverageBps:
-            sourceRun.requiredImages === exclusionPolicy.excludedUnits.length
-              ? 10_000
-              : 0,
-          excludedImages: exclusionPolicy.excludedUnits.map((unit) => ({
-            sourceUnitId: unit.sourceUnitId,
-            imageAssetId: unit.imageAssetId,
-            imageBlockId: unit.imageBlockId,
-            reason: unit.errorCode ?? "image_analysis_failed",
-          })),
-        },
-        exclusionPolicy,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
-    if (!derivedRun) {
-      throw new CardGenerationServiceError(
-        "generation_derivation_failed",
-        500,
-        "无法创建派生生成任务",
-      );
-    }
-
-    const [plannerUnit] = await tx
-      .insert(cardGenerationUnits)
-      .values({
-        workspaceId: context.workspaceId,
-        runId: derivedRun.id,
-        kind: CardGenerationUnitKind.PLANNER,
-        level: 0,
-        ordinal: 0,
-        unitKey: `planner:${derivedRun.generationFingerprint}`,
-        pipelineVersion: derivedRun.pipelineVersion,
-        required: true,
-        inputManifest: {},
-        inputHash: derivedRun.generationFingerprint,
-        tokenEstimate: 0,
-        status: "pending",
-        scheduledAt: now,
-      })
-      .returning();
-    if (!plannerUnit) {
-      throw new CardGenerationServiceError(
-        "generation_checkpoint_missing",
-        500,
-        "无法创建派生生成检查点",
-      );
-    }
-    const [plannerJob] = await tx
-      .insert(jobs)
-      .values(plannerJobValues({
-        workspaceId: context.workspaceId,
-        userId: context.userId,
-        noteVersionId: sourceRun.noteVersionId,
-        runId: derivedRun.id,
-        unitId: plannerUnit.id,
-      }))
-      .returning();
-    if (!plannerJob) {
-      throw new CardGenerationServiceError(
-        "generation_job_missing",
-        500,
-        "无法创建派生生成任务",
-      );
-    }
-
-    await tx
-      .update(cardGenerationRuns)
-      .set({
-        legacyJobId: plannerJob.id,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(cardGenerationRuns.id, derivedRun.id),
-        eq(cardGenerationRuns.workspaceId, context.workspaceId),
-      ));
-    await tx
-      .update(cardGenerationRuns)
-      .set({
-        status: CardGenerationRunStatus.SUPERSEDED,
-        stage: CardGenerationStage.COMPLETE,
-        stateVersion: sourceRun.stateVersion + 1,
-        nextEventSequence: sourceRun.nextEventSequence + 1,
-        errorCode: "continued_with_exclusions",
-        retryable: false,
-        updatedAt: now,
-        finishedAt: now,
-      })
-      .where(and(
-        eq(cardGenerationRuns.id, sourceRun.id),
-        eq(cardGenerationRuns.workspaceId, context.workspaceId),
-        eq(cardGenerationRuns.stateVersion, sourceRun.stateVersion),
-      ));
-    await tx
-      .update(jobs)
-      .set({
-        status: JobStatus.DEAD,
-        lastError: "generation_superseded_by_partial_run",
-        leaseToken: null,
-        finishedAt: now,
-      })
-      .where(and(
-        eq(jobs.workspaceId, context.workspaceId),
-        eq(jobs.generationRunId, sourceRun.id),
-        inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
-      ));
-    await tx
-      .update(cardGenerationUnits)
-      .set({ status: "superseded", finishedAt: now, updatedAt: now })
-      .where(and(
-        eq(cardGenerationUnits.workspaceId, context.workspaceId),
-        eq(cardGenerationUnits.runId, sourceRun.id),
-        notInArray(cardGenerationUnits.status, [
-          "succeeded",
-          "terminal_failed",
-          "cancelled",
-          "superseded",
-        ]),
-      ));
-    await tx
-      .update(notes)
-      .set({
-        cardGenerationEpoch: generationEpoch,
-        latestGenerationRunId: derivedRun.id,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(notes.id, sourceRun.noteId),
-        eq(notes.workspaceId, context.workspaceId),
-      ));
-
-    await tx.insert(cardGenerationEvents).values([
-      {
-        runId: sourceRun.id,
-        workspaceId: context.workspaceId,
-        sequence: sourceRun.nextEventSequence,
-        stage: CardGenerationStage.COMPLETE,
-        state: CardGenerationRunStatus.SUPERSEDED,
-        completed: sourceRun.completedImages,
-        total: sourceRun.requiredImages,
-        unit: "images",
-        messageCode: "generation_continued_with_exclusions",
-        safeDetails: {
-          derivedRunId: derivedRun.id,
-          newlyExcludedImageCount: failedImageUnits.length,
-          excludedImageCount: exclusionPolicy.excludedUnits.length,
-        },
-        createdAt: now,
-      },
-      {
-        runId: derivedRun.id,
-        workspaceId: context.workspaceId,
-        sequence: 1,
-        stage: CardGenerationStage.SNAPSHOT,
-        state: CardGenerationRunStatus.QUEUED,
-        completed: 0,
-        total: 1,
-        unit: "run",
-        messageCode: "partial_generation_derived",
-        safeDetails: {
-          sourceRunId: sourceRun.id,
-          newlyExcludedImageCount: failedImageUnits.length,
-          excludedImageCount: exclusionPolicy.excludedUnits.length,
-        },
-        createdAt: now,
-      },
-    ]);
-
-    const version = await tx.query.noteVersions.findFirst({
-      columns: { versionNo: true },
-      where: and(
-        eq(noteVersions.id, sourceRun.noteVersionId),
-        eq(noteVersions.workspaceId, context.workspaceId),
-      ),
-    });
-    if (!version) {
-      throw new CardGenerationServiceError(
-        "source_snapshot_missing",
-        409,
-        "生成快照已不存在",
-      );
-    }
-    return {
-      runId: derivedRun.id,
-      status: derivedRun.status,
-      sourceSnapshot: {
-        noteVersionId: sourceRun.noteVersionId,
-        versionNo: version.versionNo,
-        contentHash: sourceRun.sourceContentHash,
       },
       canContinueEditing: true,
     };
@@ -1326,13 +1144,91 @@ export async function listCardGenerationEvents(
   });
 }
 
+/**
+ * 列出 Supervisor Agent v1 的 Agent 事件（计划 §9.3，设计 §5.2）。
+ *
+ * 分页契约（向后兼容）：
+ * - 不传 `since`/`limit` 时返回最旧 200 条（与旧行为一致），并补充
+ *   `nextCursor`/`hasMore` 两个新字段。
+ * - `since` 为 `(createdAt, id)` 复合游标（base64 编码的 `ISO时间:id`），
+ *   语义为"返回严格晚于此游标的事件"。
+ * - 返回新增 `eventKey`（事件唯一键，前端去重/恢复锚点；旧字段
+ *   `messageCode` 保留兼容）、`unitId/parentUnitId/childUnitId`（子代理树）、
+ *   `attemptNo/toolVersion/errorCode`，以及可选 `usage`（`includeUsage=1`）。
+ */
+export async function listCardGenerationAgentEvents(
+  context: { workspaceId: string; userId: string },
+  runId: string,
+  opts: { since?: string; limit?: number; includeUsage?: boolean } = {},
+) {
+  return withWorkspaceTransaction(context, async (tx) => {
+    const run = await getRunRowForWorkspace(tx, runId, context.workspaceId);
+    if (!run) return null;
+    const limit = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 200)));
+
+    const cursor = opts.since ? decodeCursor(opts.since) : null;
+    const afterFilter = cursor
+      ? or(
+          gt(cardGenerationAgentEvents.createdAt, new Date(cursor.timestamp)),
+          and(
+            eq(cardGenerationAgentEvents.createdAt, new Date(cursor.timestamp)),
+            gt(cardGenerationAgentEvents.id, cursor.id),
+          ),
+        )
+      : undefined;
+
+    // 多取一条判断是否还有后续页。
+    const rows = await tx.query.cardGenerationAgentEvents.findMany({
+      where: and(
+        eq(cardGenerationAgentEvents.workspaceId, context.workspaceId),
+        eq(cardGenerationAgentEvents.runId, runId),
+        afterFilter,
+      ),
+      orderBy: [
+        asc(cardGenerationAgentEvents.createdAt),
+        asc(cardGenerationAgentEvents.id),
+      ],
+      limit: limit + 1,
+    });
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page.at(-1);
+    return {
+      events: page.map((event) => {
+        const base = {
+          id: event.id,
+          eventKey: event.eventKey,
+          eventType: event.eventType,
+          agentRole: event.agentRole,
+          turnNo: event.turnNo,
+          attemptNo: event.attemptNo,
+          toolName: event.toolName,
+          toolVersion: event.toolVersion,
+          unitId: event.unitId,
+          parentUnitId: event.parentUnitId,
+          childUnitId: event.childUnitId,
+          errorCode: event.errorCode,
+          // 兼容旧字段名：现状响应用 messageCode 承载 eventKey。
+          messageCode: event.eventKey,
+          safePayload: event.safePayload,
+          createdAt: event.createdAt.toISOString(),
+        };
+        if (opts.includeUsage) {
+          return { ...base, usage: event.usage };
+        }
+        return base;
+      }),
+      nextCursor: last ? encodeCursor(last.createdAt, last.id) : null,
+      hasMore,
+    };
+  });
+}
+
 export async function cancelCardGenerationRun(
   context: { workspaceId: string; userId: string },
   runId: string,
 ): Promise<CardGenerationRunView | null> {
   return withWorkspaceTransaction(context, async (tx) => {
-    // Worker order is job lease -> workspace advisory lock -> run. Match it
-    // here so cancellation cannot deadlock a worker entering its publish fence.
     await tx
       .select({ id: jobs.id })
       .from(jobs)
@@ -1363,7 +1259,7 @@ export async function cancelCardGenerationRun(
     const [updated] = await tx
       .update(cardGenerationRuns)
       .set({
-        status: CardGenerationRunStatus.CANCELLED,
+        status: SupervisorRunStatus.CANCELLED,
         stage: CardGenerationStage.COMPLETE,
         stateVersion: run.stateVersion + 1,
         nextEventSequence: run.nextEventSequence + 1,
@@ -1385,7 +1281,7 @@ export async function cancelCardGenerationRun(
       workspaceId: context.workspaceId,
       sequence: run.nextEventSequence,
       stage: CardGenerationStage.COMPLETE,
-      state: CardGenerationRunStatus.CANCELLED,
+      state: SupervisorRunStatus.CANCELLED,
       completed: 0,
       total: 1,
       unit: "run",
@@ -1394,7 +1290,6 @@ export async function cancelCardGenerationRun(
       createdAt: now,
     });
 
-    // Revoking the lease makes every late worker side effect fail its fence.
     await tx
       .update(jobs)
       .set({
@@ -1415,7 +1310,7 @@ export async function cancelCardGenerationRun(
       .where(and(
         eq(cardGenerationUnits.workspaceId, context.workspaceId),
         eq(cardGenerationUnits.runId, run.id),
-        notInArray(cardGenerationUnits.status, ["succeeded", "cancelled", "superseded"]),
+        sql`${cardGenerationUnits.status} NOT IN ('succeeded', 'cancelled', 'superseded')`,
       ));
 
     return toRunView(tx, updated);
@@ -1441,7 +1336,12 @@ export async function retryCardGenerationRun(
       ))
       .for("update");
     if (!run) return null;
-    if (run.status !== CardGenerationRunStatus.NEEDS_ATTENTION || !run.retryable) {
+    if (run.status !== SupervisorRunStatus.NEEDS_ATTENTION || !run.retryable) {
+      throw new CardGenerationServiceError("run_not_retryable", 409, "当前任务不可重试");
+    }
+    // 错误码级兜底：预算耗尽/确定性门禁等明确不可恢复的错误直接拒绝重试，
+    // 避免用户点击后再次进入"重试 → 再次失败"的无效循环。
+    if (!isRunErrorRetryable(run.errorCode)) {
       throw new CardGenerationServiceError("run_not_retryable", 409, "当前任务不可重试");
     }
 
@@ -1461,163 +1361,136 @@ export async function retryCardGenerationRun(
       .select({ count: count() })
       .from(jobs)
       .where(and(eq(jobs.workspaceId, context.workspaceId), eq(jobs.status, JobStatus.PENDING)));
-    assertPendingQuota(Number(pendingRows[0]?.count ?? 0));
+    const pendingCount = Number(pendingRows[0]?.count ?? 0);
+    assertPendingQuota(pendingCount);
 
-    if (
-      run.providerSnapshot.executionMode === "text_v2"
-      || run.providerSnapshot.executionMode === "multimodal_v2"
-    ) {
-      const failedCheckpoints = await tx
-        .select()
-        .from(cardGenerationUnits)
-        .where(and(
+    // Supervisor Agent v1 checkpoint 恢复协议。
+    // BUG-104（同 evidence-persist.ts）：drizzle 的 sql 模板把 Date 参数原样
+    // 交给 postgres.js，postgres.js 使用 Date.toString() 序列化，产生
+    // "Thu Aug 06 2026 ..." 格式而非 ISO 8601，导致 PostgreSQL 无法解析。
+    // 必须使用 toISOString() 显式序列化。
+    const staleRunningThreshold = new Date(Date.now() - 120_000).toISOString();
+    // 检查点丢失回退时，若恢复的 supervisor 已 completed，需清空其 cursor 重新决策。
+    let resetCursorForFallback = false;
+    let failedAgentUnits = await tx
+      .select()
+      .from(cardGenerationUnits)
+      .where(and(
+        eq(cardGenerationUnits.workspaceId, context.workspaceId),
+        eq(cardGenerationUnits.runId, run.id),
+        inArray(cardGenerationUnits.status, [
+          "terminal_failed",
+          "retryable_failed",
+          "pending",
+          "running",
+        ]),
+        sql`(
+          ${cardGenerationUnits.status} NOT IN ('pending', 'running')
+          OR ${cardGenerationUnits.scheduledAt} IS NULL
+          OR ${cardGenerationUnits.scheduledAt} < ${staleRunningThreshold}
+        )`,
+      ))
+      .orderBy(
+        sql`CASE ${cardGenerationUnits.status}
+          WHEN 'terminal_failed' THEN 0
+          WHEN 'retryable_failed' THEN 1
+          WHEN 'running' THEN 2
+          ELSE 3
+        END`,
+        asc(cardGenerationUnits.ordinal),
+      )
+      .for("update");
+
+    if (failedAgentUnits.length === 0) {
+      // 检查点丢失回退（legacy 数据 / 极端状态）：没有任何 failed/stale checkpoint 存活。
+      // 典型场景是历史 run——早期 reconciler 会把 needs_attention run 下的非终态 unit
+      // 一律取消，导致 run 是 needs_attention 但 unit 全是 cancelled，重试无检查点。
+      // 此时恢复顶层 supervisor unit（kind=agent_run 且无 parent）作为检查点，
+      // 让 run 从已完成的 PREPARE 状态重新进入 agent 阶段。
+      // 新代码不会再产生这种状态（reconciler 保留 needs_attention 检查点、失败 unit
+      // 显式标记 terminal_failed），此回退只用于兜底历史数据。
+      const supervisorUnit = await tx.query.cardGenerationUnits.findFirst({
+        where: and(
           eq(cardGenerationUnits.workspaceId, context.workspaceId),
           eq(cardGenerationUnits.runId, run.id),
-          inArray(cardGenerationUnits.status, [
-            "terminal_failed",
-            "retryable_failed",
-            "pending",
-          ]),
-          sql`(${cardGenerationUnits.status} <> 'pending' OR ${cardGenerationUnits.scheduledAt} IS NULL)`,
-        ))
-        .orderBy(
-          sql`CASE ${cardGenerationUnits.status}
-            WHEN 'terminal_failed' THEN 0
-            WHEN 'retryable_failed' THEN 1
-            ELSE 2
-          END`,
-          asc(cardGenerationUnits.ordinal),
-        )
-        .for("update");
-      if (failedCheckpoints.length === 0) {
+          eq(cardGenerationUnits.kind, AgentUnitKind.AGENT_RUN),
+          isNull(cardGenerationUnits.parentUnitId),
+        ),
+        orderBy: [asc(cardGenerationUnits.ordinal)],
+      });
+      if (!supervisorUnit) {
         throw new CardGenerationServiceError(
           "generation_checkpoint_missing",
           409,
           "没有可恢复的生成检查点",
         );
       }
-      const now = new Date();
-      // 方案 §4.4：一次重试恢复全部失败检查点。窗口约束仍然生效——超出
-      // 窗口的单元只重置为可调度状态（scheduledAt=NULL），由 worker 完成
-      // 单元后的窗口推进接续投放，不会瞬间占满队列配额。
-      const recoveredSourceUnits = failedCheckpoints.reduce((total, checkpoint) =>
-        checkpoint.kind === CardGenerationUnitKind.TEXT_MAP && checkpoint.status !== "pending"
-          ? total + (checkpoint.inputManifest.spanIds?.length ?? 0)
-          : total, 0);
-      await tx
-        .update(cardGenerationUnits)
-        .set({
-          status: "pending",
-          scheduledAt: null,
-          finishedAt: null,
-          errorCode: null,
-          updatedAt: now,
-        })
-        .where(and(
-          eq(cardGenerationUnits.workspaceId, context.workspaceId),
-          inArray(cardGenerationUnits.id, failedCheckpoints.map((checkpoint) => checkpoint.id)),
-        ));
-      const ofKind = (kind: string) =>
-        failedCheckpoints.filter((checkpoint) => checkpoint.kind === kind);
-      const toSchedule = [
-        ...ofKind(CardGenerationUnitKind.PLANNER),
-        ...ofKind(CardGenerationUnitKind.IMAGE).slice(0, CARD_GENERATION_IMAGE_WINDOW),
-        ...ofKind(CardGenerationUnitKind.TEXT_MAP).slice(0, CARD_GENERATION_MAP_WINDOW),
-        ...ofKind(CardGenerationUnitKind.SECTION_REDUCE),
-        ...ofKind(CardGenerationUnitKind.DECK_PLAN),
-        ...ofKind(CardGenerationUnitKind.CARD_RENDER),
-        ...ofKind(CardGenerationUnitKind.PUBLISH),
-      ];
-      const primary = toSchedule[0] ?? failedCheckpoints[0]!;
-      const target = primary.kind === CardGenerationUnitKind.PLANNER
-        ? { status: CardGenerationRunStatus.QUEUED, stage: CardGenerationStage.PLANNER }
-        : primary.kind === CardGenerationUnitKind.IMAGE
-          ? { status: CardGenerationRunStatus.AWAITING_ASSETS, stage: CardGenerationStage.IMAGE_ANALYSIS }
-        : primary.kind === CardGenerationUnitKind.TEXT_MAP
-          ? { status: CardGenerationRunStatus.MAPPING, stage: CardGenerationStage.TEXT_MAP }
-          : primary.kind === CardGenerationUnitKind.SECTION_REDUCE
-            ? { status: CardGenerationRunStatus.REDUCING, stage: CardGenerationStage.SECTION_REDUCE }
-            : primary.kind === CardGenerationUnitKind.DECK_PLAN
-              ? { status: CardGenerationRunStatus.REDUCING, stage: CardGenerationStage.DECK_PLAN }
-              : primary.kind === CardGenerationUnitKind.CARD_RENDER
-                ? { status: CardGenerationRunStatus.RENDERING, stage: CardGenerationStage.CARD_RENDER }
-            : { status: CardGenerationRunStatus.VALIDATING, stage: CardGenerationStage.GLOBAL_VERIFY };
-      const [updated] = await tx
-        .update(cardGenerationRuns)
-        .set({
-          status: target.status,
-          stage: target.stage,
-          stateVersion: run.stateVersion + 1,
-          nextEventSequence: run.nextEventSequence + 1,
-          errorCode: null,
-          retryable: true,
-          failedUnits: Math.max(0, run.failedUnits - recoveredSourceUnits),
-          updatedAt: now,
-          finishedAt: null,
-        })
-        .where(and(
-          eq(cardGenerationRuns.id, run.id),
-          eq(cardGenerationRuns.workspaceId, context.workspaceId),
-          eq(cardGenerationRuns.stateVersion, run.stateVersion),
-        ))
-        .returning();
-      await tx.insert(cardGenerationEvents).values({
-        runId: run.id,
-        workspaceId: context.workspaceId,
-        sequence: run.nextEventSequence,
-        stage: target.stage,
-        state: target.status,
-        completed: run.completedUnits,
-        total: run.requiredUnits,
-        unit: primary.kind === CardGenerationUnitKind.IMAGE ? "images" : "source_units",
-        messageCode: "generation_checkpoint_retry_queued",
-        safeDetails: {
-          retriedUnitCount: failedCheckpoints.length,
-          scheduledUnitCount: toSchedule.length,
-          unitKinds: [...new Set(failedCheckpoints.map((checkpoint) => checkpoint.kind))],
-        },
-        createdAt: now,
-      });
-      let firstRetryJobId: string | null = null;
-      for (const checkpoint of toSchedule) {
-        const [job] = await tx
-          .insert(jobs)
-          .values(generationUnitJobValues({
-            workspaceId: context.workspaceId,
-            userId: context.userId,
-            noteVersionId: run.noteVersionId,
-            runId: run.id,
-            unit: checkpoint,
-          }))
-          .returning();
-        firstRetryJobId ??= job.id;
-        await tx
-          .update(cardGenerationUnits)
-          .set({ scheduledAt: now, updatedAt: now })
-          .where(and(
-            eq(cardGenerationUnits.id, checkpoint.id),
-            eq(cardGenerationUnits.workspaceId, context.workspaceId),
-          ));
-      }
-      if (firstRetryJobId) {
-        await tx
-          .update(cardGenerationRuns)
-          .set({ legacyJobId: firstRetryJobId })
-          .where(and(
-            eq(cardGenerationRuns.id, run.id),
-            eq(cardGenerationRuns.workspaceId, context.workspaceId),
-          ));
-      }
-      return toRunView(tx, updated);
+      failedAgentUnits = [supervisorUnit];
+      // 若该 supervisor 已 succeeded（agent 阶段已走完，run 在 VERIFY/PUBLISH 才失败），
+      // 其 session cursor 处于 completed 状态，直接重跑会立刻再次 needs_attention。
+      // 清空 cursor 让它从 agent 阶段重新决策（候选/账本从 DB 重建，幂等安全）。
+      resetCursorForFallback = supervisorUnit.status === "succeeded";
     }
 
     const now = new Date();
     const nextStateVersion = run.stateVersion + 1;
+
+    await tx
+      .update(cardGenerationUnits)
+      .set({
+        status: "pending",
+        scheduledAt: null,
+        finishedAt: null,
+        errorCode: null,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(cardGenerationUnits.workspaceId, context.workspaceId),
+        inArray(cardGenerationUnits.id, failedAgentUnits.map((u) => u.id)),
+      ));
+
+    if (resetCursorForFallback) {
+      // 回退恢复的 supervisor 已 completed：清空 session cursor（置空对象，
+      // fromDbRow 会重建为初始状态），让其在重跑时从 agent 阶段重新决策。
+      await tx
+        .update(cardGenerationUnits)
+        .set({ cursorJson: {}, updatedAt: now })
+        .where(and(
+          eq(cardGenerationUnits.workspaceId, context.workspaceId),
+          eq(cardGenerationUnits.id, failedAgentUnits[0]!.id),
+        ));
+    }
+
+    const primaryUnit = failedAgentUnits[0]!;
+    await tx
+      .insert(jobs)
+      .values({
+        type: JobType.EXECUTE_CARD_AGENT_TURN,
+        workspaceId: context.workspaceId,
+        requestedBy: context.userId,
+        payload: {
+          noteVersionId: run.noteVersionId,
+          generationRunId: run.id,
+          agentUnitId: primaryUnit.id,
+          turnNo: 0,
+          inputHash: run.generationFingerprint,
+          userId: context.userId,
+        },
+        status: JobStatus.PENDING,
+        generationRunId: run.id,
+        generationUnitId: primaryUnit.id,
+        stage: CardGenerationStage.SNAPSHOT,
+        priority: 80,
+        resourceClass: JobResourceClass.CARD_FOREGROUND,
+        idempotencyKey: `generation-run:${run.id}:retry:${nextStateVersion}`,
+      })
+      .returning();
+
     const [updated] = await tx
       .update(cardGenerationRuns)
       .set({
-        status: CardGenerationRunStatus.QUEUED,
-        stage: CardGenerationStage.QUEUED,
+        status: SupervisorRunStatus.RUNNING,
+        stage: CardGenerationStage.SNAPSHOT,
         stateVersion: nextStateVersion,
         nextEventSequence: run.nextEventSequence + 1,
         errorCode: null,
@@ -1632,43 +1505,46 @@ export async function retryCardGenerationRun(
       ))
       .returning();
 
+    await tx
+      .update(cardGenerationUnits)
+      .set({ scheduledAt: now, updatedAt: now })
+      .where(and(
+        eq(cardGenerationUnits.id, primaryUnit.id),
+        eq(cardGenerationUnits.workspaceId, context.workspaceId),
+      ));
+
     await tx.insert(cardGenerationEvents).values({
       runId: run.id,
       workspaceId: context.workspaceId,
       sequence: run.nextEventSequence,
-      stage: CardGenerationStage.QUEUED,
-      state: CardGenerationRunStatus.QUEUED,
+      stage: CardGenerationStage.SNAPSHOT,
+      state: SupervisorRunStatus.RUNNING,
       completed: 0,
       total: 1,
-      unit: "legacy_job",
-      messageCode: "generation_retry_queued",
-      safeDetails: { stateVersion: nextStateVersion },
+      unit: "agent_unit",
+      messageCode: "supervisor_checkpoint_retry_queued",
+      safeDetails: {
+        retriedUnitCount: failedAgentUnits.length,
+        primaryUnitId: primaryUnit.id,
+        primaryUnitKind: primaryUnit.kind,
+        engineMode: "supervisor_agent_v1",
+      },
       createdAt: now,
     });
 
-    const [job] = await tx
-      .insert(jobs)
-      .values(legacyJobValues({
-        workspaceId: context.workspaceId,
-        userId: context.userId,
-        noteVersionId: run.noteVersionId,
-        runId: run.id,
-        idempotencyKey: `generation-run:${run.id}:retry:${nextStateVersion}`,
-        oldCardId: typeof run.providerSnapshot.oldCardId === "string"
-          ? run.providerSnapshot.oldCardId
-          : undefined,
-      }))
-      .returning();
     await tx
       .update(cardGenerationRuns)
-      .set({ legacyJobId: job.id })
-      .where(and(eq(cardGenerationRuns.id, run.id), eq(cardGenerationRuns.workspaceId, context.workspaceId)));
+      .set({ updatedAt: now })
+      .where(and(
+        eq(cardGenerationRuns.id, run.id),
+        eq(cardGenerationRuns.workspaceId, context.workspaceId),
+      ));
 
     return toRunView(tx, updated);
   });
 }
 
-export async function getLegacyGenerationCompatibility(
+export async function getGenerationRunStatus(
   context: { workspaceId: string; userId: string },
   runId: string,
 ) {
@@ -1692,10 +1568,19 @@ export async function getLegacyGenerationCompatibility(
       fallbackCardId = card?.id ?? null;
       generatedVersionId = card?.noteVersionId ?? null;
     }
+    const [latestJob] = await tx
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(and(
+        eq(jobs.workspaceId, context.workspaceId),
+        eq(jobs.generationRunId, run.id),
+      ))
+      .orderBy(desc(jobs.scheduledAt))
+      .limit(1);
     return {
-      state: run.status === CardGenerationRunStatus.SUCCEEDED ? "generated" as const : "generating" as const,
+      state: run.status === SupervisorRunStatus.SUCCEEDED ? "generated" as const : "generating" as const,
       cardId: fallbackCardId,
-      jobId: run.legacyJobId,
+      jobId: latestJob?.id ?? null,
       generatedVersionId,
       runId: run.id,
     };

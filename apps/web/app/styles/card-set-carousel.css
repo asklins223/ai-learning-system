@@ -1,0 +1,1198 @@
+/**
+ * 卡组轮播 UI（docs/plans/card-set-carousel-ui.md）。
+ *
+ * 红线（§1.3）：
+ * - 布局常量全部为组件级 CSS 变量，tokens.css 零改动；
+ * - 动效只用 120/180/240ms 三档 + --ease-standard；不新增动效 token；
+ * - 禁用动画 box-shadow/filter（抬升阴影用预烘焙 ::after + opacity 交叉淡化）；
+ * - 舞台裁切用 overflow-x: clip（不产生滚动容器）；
+ * - 轮播/展开元素 content-visibility 显式 visible（cards-card 的 auto 会按视口
+ *   cull 被 transform 移出的封面，切换动画中途闪空）；
+ * - 入场 stagger 用 @keyframes + animation-delay，不用 transition-delay
+ *   （React 19 并发渲染下 transition 两段式提交的起始态可能被跳过）；
+ * - prefers-reduced-motion 专属块显式清零 stagger delay。
+ */
+
+/* ── 布局常量（组件级，§3.1） ── */
+.deck-carousel {
+  --deck-cover-width: 300px;
+  --deck-cover-height: 420px;
+  --deck-stage-height: 470px;
+  --deck-sticky-top: 88px;
+  --deck-transition: transform var(--motion-slow) var(--ease-standard),
+    opacity var(--motion-slow) var(--ease-standard);
+  position: relative;
+}
+
+/* 精修纸面配方：粗点阵（结构层）+ 细颗粒（材质层），随 --color-text 主题自适应；
+   封面、成员卡共用同一配方，避免视觉漂移 */
+.deck-page {
+  --deck-paper-grid:
+    radial-gradient(color-mix(in srgb, var(--color-text) 5%, transparent) 0.45px, transparent 0.5px),
+    radial-gradient(color-mix(in srgb, var(--color-text) 3%, transparent) 0.6px, transparent 0.75px);
+  --deck-paper-grid-size: 17px 17px, 9px 9px, auto;
+}
+
+/* ═══ 轮播 ═══ */
+
+.deck-carousel-caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 12px;
+  min-height: 22px;
+  padding: 4px 0 2px;
+}
+
+.deck-carousel-caption span {
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.deck-carousel-focus-title {
+  max-width: 340px;
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 裁切盒：clip 不产生滚动容器（base.css 禁止 overflow-x: hidden 隐藏越界） */
+.deck-stage-clip {
+  position: relative;
+  overflow-x: clip;
+}
+
+.deck-stage {
+  --deck-dx: 0px;
+  position: relative;
+  height: var(--deck-stage-height);
+  touch-action: pan-y;
+  content-visibility: visible;
+}
+
+/* ── 封面（按钮外壳透明，纸面子元素承载视觉） ── */
+.deck-cover {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--deck-cover-width);
+  height: var(--deck-cover-height);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  content-visibility: visible;
+  transition: var(--deck-transition);
+}
+
+.deck-cover--hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 空卡组封面（§6.5 防御边界）：降饱和占位，点击导航详情页承接 lifecycle */
+.deck-cover--empty .deck-cover-paper {
+  background: var(--deck-paper-grid),
+    color-mix(in srgb, var(--color-paper-muted) 45%, var(--color-paper));
+  background-size: var(--deck-paper-grid-size);
+}
+
+/* 拖拽跟手：零过渡；拖拽/回弹期间保留 will-change（240ms + 300ms 冗余，§5.2） */
+.deck-carousel.is-dragging .deck-cover {
+  transition: none;
+}
+
+.deck-carousel.is-dragging .deck-cover,
+.deck-carousel.is-settling .deck-cover {
+  will-change: transform, opacity;
+}
+
+/* ── 封面纸面（face） ── */
+.deck-cover-face {
+  position: absolute;
+  inset: 0;
+}
+
+.deck-cover-peeks {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.deck-cover-peek {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: calc(100% - var(--peek-w));
+  height: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: var(--color-paper-deep);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-paper) 42%, transparent);
+  transform: translate(-50%, var(--peek-y)) rotateZ(var(--peek-r));
+  transition: transform var(--motion-base) var(--ease-standard);
+}
+
+.deck-cover:hover .deck-cover-peek {
+  transform: translate(-50%, calc(var(--peek-y) + 4px)) rotateZ(var(--peek-r));
+}
+
+.deck-cover-paper {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--deck-paper-grid), var(--color-paper);
+  background-size: var(--deck-paper-grid-size);
+  box-shadow:
+    0 5px 0 -1px var(--color-paper-deep),
+    0 6px 0 -1px var(--color-border),
+    var(--shadow-paper);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+/* 花牌水印（已移除）：SVG 黑桃在该尺寸下渲染不佳，改为不加水印，
+   纸面双层纹理 + 焦点/侧翼阴影层级已足够表达「纸牌」身份。 */
+
+/* 抬升阴影：预烘焙 ::after + opacity 交叉淡化（不动画 box-shadow） */
+.deck-cover-paper::after {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.deck-cover:hover .deck-cover-paper {
+  transform: translateY(-4px);
+}
+
+.deck-cover:hover .deck-cover-paper::after {
+  opacity: 1;
+}
+
+.deck-cover:focus-visible {
+  outline: none;
+}
+
+.deck-cover:focus-visible .deck-cover-paper {
+  border-color: var(--color-focus-ring);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--color-focus-ring) 28%, transparent),
+    0 5px 0 -1px var(--color-paper-deep),
+    0 6px 0 -1px var(--color-border),
+    var(--shadow-control);
+}
+
+/* 状态变体（§3.1）：superseded/archived 降饱和但可浏览 */
+.deck-cover-face--superseded .deck-cover-paper,
+.deck-cover-face--archived .deck-cover-paper {
+  background: var(--deck-paper-grid),
+    color-mix(in srgb, var(--color-paper-muted) 38%, var(--color-paper));
+  background-size: var(--deck-paper-grid-size);
+}
+
+.deck-cover-face--superseded .deck-cover-paper h3,
+.deck-cover-face--archived .deck-cover-paper h3 {
+  color: color-mix(in srgb, var(--color-text) 78%, var(--color-text-secondary));
+}
+
+.deck-cover-accent {
+  position: absolute;
+  top: 18px;
+  left: 0;
+  z-index: 2;
+  width: 3px;
+  height: 42px;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  background: var(--color-success);
+}
+
+.deck-cover-face--superseded .deck-cover-accent {
+  background: var(--color-warning);
+  opacity: 0.62;
+}
+
+.deck-cover-face--archived .deck-cover-accent {
+  background: var(--color-text-secondary);
+  opacity: 0.5;
+}
+
+.deck-cover-face--draft .deck-cover-accent,
+.deck-cover-face--partial_ready .deck-cover-accent {
+  background: var(--color-warning);
+}
+
+/* 侧翼封面：淡化纸张代替整体透明（元素透明度会让文字对比度必挂 WCAG 1.4.3），
+   后退层级由 z/scale/弧线 + 纸张降饱和共同表达；阴影更平，衬托焦点封面被「拿起」 */
+.deck-cover--wing .deck-cover-paper {
+  background: var(--deck-paper-grid),
+    color-mix(in srgb, var(--color-paper-muted) 60%, var(--color-paper));
+  background-size: var(--deck-paper-grid-size);
+  box-shadow:
+    0 3px 0 -1px var(--color-paper-deep),
+    0 4px 0 -1px var(--color-border),
+    var(--shadow-control);
+}
+
+.deck-cover--wing .deck-cover-paper h3 {
+  color: color-mix(in srgb, var(--color-text) 84%, var(--color-text-secondary));
+}
+
+/* 降饱和封面（superseded/archived/侧翼/空卡组）上弱对比元素提亮到达标：
+   muted 徽章文字用 secondary，张数徽章加深 warning-text */
+.deck-cover-face--superseded .status-chip[data-tone="muted"],
+.deck-cover-face--archived .status-chip[data-tone="muted"],
+.deck-cover--wing .status-chip[data-tone="muted"],
+.deck-cover--empty .status-chip[data-tone="muted"] {
+  color: var(--color-text-secondary);
+}
+
+.deck-cover-face--superseded .deck-cover-count,
+.deck-cover-face--archived .deck-cover-count,
+.deck-cover--wing .deck-cover-count,
+.deck-cover--empty .deck-cover-count {
+  color: color-mix(in srgb, var(--color-warning-text) 80%, var(--color-text));
+}
+
+.deck-cover-topline {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 16px 0;
+}
+
+.deck-cover-time {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+}
+
+.deck-cover-body {
+  position: relative;
+  z-index: 1;
+  padding: 16px 16px 0;
+}
+
+.deck-cover-body h3 {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-editorial);
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.deck-cover-body p {
+  margin: 10px 0 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.deck-cover-count {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 22%, var(--color-border));
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-warning-soft) 82%, var(--color-paper));
+  color: var(--color-warning-text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ── 控件：箭头 / 指示器 / 加载更多 ── */
+.deck-carousel-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 6px;
+}
+
+.deck-carousel-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height-touch);
+  height: var(--control-height-touch);
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+
+.deck-carousel-arrow:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-soft);
+  color: var(--color-text);
+}
+
+.deck-carousel-arrow:disabled {
+  color: var(--color-text-disabled);
+  cursor: default;
+}
+
+.deck-carousel-arrow svg {
+  width: 18px;
+  height: 18px;
+}
+
+.deck-carousel-arrow[data-ui="carousel-prev"] svg {
+  transform: rotate(180deg);
+}
+
+.deck-carousel-indicators {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 指示器：24px 命中区（WCAG 2.5.8 最小目标尺寸），9px 视觉圆点由 ::before 承载 */
+.deck-carousel-indicators button {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.deck-carousel-indicators button::before {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+  background: var(--color-surface);
+  content: "";
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+
+.deck-carousel-indicators button:hover {
+  transform: scale(1.15);
+}
+
+.deck-carousel-indicators button.is-current::before {
+  border-color: var(--color-warning);
+  background: var(--color-warning);
+}
+
+.deck-carousel-indicators-text {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.deck-carousel-loadmore-wrap {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.deck-carousel-loadmore {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 16px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-paper) 78%, transparent);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.deck-carousel-loadmore:hover:not(:disabled) {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning-text);
+}
+
+.deck-carousel-loadmore:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+/* ═══ 桌面展开「摊牌」（§4.1） ═══ */
+
+.deck-expanded {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+  content-visibility: visible;
+  animation: deck-expanded-enter var(--motion-slow) var(--ease-standard) backwards;
+}
+
+@keyframes deck-expanded-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 收起退场（§5.1 获得慢、放弃快）：成员 120ms 同时退场 → 封面回位 180ms */
+.deck-expanded--leaving .deck-member-tile {
+  animation: deck-member-leave var(--motion-fast) var(--ease-standard) forwards;
+}
+
+.deck-expanded--leaving .deck-expanded-cover {
+  transition: opacity var(--motion-base) var(--ease-standard);
+  opacity: 0;
+}
+
+@keyframes deck-member-leave {
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+.deck-expanded-cover {
+  position: sticky;
+  top: var(--deck-sticky-top);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.deck-expanded-cover-face {
+  position: relative;
+  width: 270px;
+  height: 378px;
+}
+
+.deck-cover-face--compact .deck-cover-body {
+  padding-top: 13px;
+}
+
+.deck-cover-face--compact .deck-cover-body h3 {
+  font-size: 17px;
+}
+
+/* 左栏数据条：张数 / 章节 / 总览，发丝分隔的三格统计 */
+.deck-expanded-cover-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 270px;
+  padding: 11px 0;
+  border-top: 1px solid var(--color-divider);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.deck-expanded-cover-stats > div {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 3px;
+  border-right: 1px solid var(--color-divider);
+}
+
+.deck-expanded-cover-stats > div:last-child {
+  border-right: 0;
+}
+
+.deck-expanded-cover-stats b {
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.deck-expanded-cover-stats span {
+  color: var(--color-text-tertiary);
+  font-size: 10.5px;
+}
+
+.deck-expanded-cover-actions {
+  display: flex;
+  width: 270px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.deck-expanded-collapse,
+.deck-expanded-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-paper) 78%, transparent);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.deck-expanded-collapse:hover,
+.deck-expanded-open:hover {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning-text);
+}
+
+.deck-expanded-collapse svg {
+  width: 16px;
+  height: 16px;
+  transform: rotate(180deg);
+}
+
+.deck-expanded-open svg {
+  width: 16px;
+  height: 16px;
+}
+
+.deck-expanded-members {
+  min-width: 0;
+}
+
+.deck-expanded-heading {
+  margin-bottom: 16px;
+}
+
+.deck-expanded-heading h2 {
+  margin: 0;
+  color: var(--color-text);
+  font-family: var(--font-editorial);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.deck-expanded-heading-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 7px;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.deck-expanded-heading-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--color-border-strong);
+}
+
+.deck-expanded-members-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+/* ── 成员卡瓦片（紧凑变体，§6.2） ── */
+.deck-member-tile {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 250px;
+  flex-direction: column;
+  padding: 15px 18px 13px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 15px;
+  background: var(--deck-paper-grid), var(--color-paper);
+  background-size: var(--deck-paper-grid-size);
+  color: inherit;
+  text-decoration: none;
+  box-shadow:
+    0 5px 0 -1px var(--color-paper-deep),
+    0 6px 0 -1px var(--color-border),
+    var(--shadow-control);
+  content-visibility: visible;
+  animation: deck-member-enter var(--motion-slow) var(--ease-standard) backwards;
+  animation-delay: var(--enter-delay, 0ms);
+  transition:
+    border-color var(--motion-base) var(--ease-standard),
+    transform var(--motion-base) var(--ease-standard);
+}
+
+@keyframes deck-member-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px) rotateZ(var(--enter-rotate, 0deg)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.deck-member-tile--overview {
+  grid-column: 1 / -1;
+}
+
+.deck-member-tile:hover {
+  border-color: color-mix(in srgb, var(--color-warning) 34%, var(--color-border-strong));
+  transform: translateY(-2px);
+}
+
+.deck-member-tile-accent {
+  position: absolute;
+  top: 18px;
+  left: 0;
+  width: 3px;
+  height: 42px;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  background: var(--color-success);
+}
+
+.deck-member-tile--overview .deck-member-tile-accent {
+  top: 0;
+  left: 18px;
+  width: 42px;
+  height: 3px;
+  border-radius: 0 0 var(--radius-pill) var(--radius-pill);
+}
+
+.deck-member-tile--superseded .deck-member-tile-accent {
+  background: var(--color-warning);
+  opacity: 0.62;
+}
+
+.deck-member-tile--archived .deck-member-tile-accent {
+  background: var(--color-text-secondary);
+  opacity: 0.5;
+}
+
+.deck-member-tile--superseded,
+.deck-member-tile--archived {
+  background: var(--deck-paper-grid),
+    color-mix(in srgb, var(--color-paper-muted) 38%, var(--color-paper));
+  background-size: var(--deck-paper-grid-size);
+}
+
+.deck-member-tile--superseded .deck-member-tile-title,
+.deck-member-tile--archived .deck-member-tile-title {
+  color: color-mix(in srgb, var(--color-text) 78%, var(--color-text-secondary));
+}
+
+.deck-member-tile-topline {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.deck-member-tile-ordinal {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-evidence-text);
+  font-family: var(--font-editorial);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+
+/* 章节引导线：序号前的一小段同色发丝 */
+.deck-member-tile-ordinal::before {
+  width: 14px;
+  height: 1px;
+  margin-right: 8px;
+  background: color-mix(in srgb, currentColor 45%, transparent);
+  content: "";
+}
+
+.deck-member-tile--overview .deck-member-tile-ordinal {
+  color: var(--color-warning-text);
+}
+
+.deck-member-tile-title {
+  margin-top: 7px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-editorial);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.deck-member-tile-summary {
+  margin-top: 6px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.deck-member-tile-partial {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--color-warning-text);
+  font-size: 11px;
+}
+
+.deck-member-tile-partial svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.deck-member-tile-footer {
+  margin-top: auto;
+  padding-top: 11px;
+  border-top: 1px solid var(--color-divider);
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+/* ── 展开骨架（骨架即纸堆，§4.3） ── */
+.deck-expanded-skeletons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.deck-member-skeleton {
+  display: flex;
+  min-height: 250px;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 15px;
+  background: var(--color-surface);
+  /* 骨架呼吸复用全站 cards-skeleton-breathe（§4.3），不另造副本 */
+  animation: cards-skeleton-breathe 1.5s ease-in-out infinite;
+}
+
+.deck-member-skeleton--overview {
+  grid-column: 1 / -1;
+}
+
+.deck-skeleton-topline {
+  width: 40%;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+
+.deck-skeleton-title {
+  width: 70%;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+
+.deck-skeleton-copy {
+  width: 90%;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+
+.deck-skeleton-copy--short {
+  width: 55%;
+}
+
+.deck-expanded-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 15px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+}
+
+.deck-expanded-error > svg {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--color-warning-text);
+}
+
+.deck-expanded-error strong {
+  display: block;
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.deck-expanded-error p {
+  margin: 4px 0 10px;
+  font-size: 12.5px;
+}
+
+.deck-expanded-error button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.deck-expanded-error button svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ═══ 移动端展开 Drawer（§4.3） ═══ */
+
+.deck-member-skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.deck-member-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  animation: cards-skeleton-breathe 1.5s ease-in-out infinite;
+}
+
+.deck-skeleton-ordinal {
+  width: 30px;
+  height: 22px;
+  flex: none;
+  border-radius: 6px;
+  background: var(--color-border);
+}
+
+.deck-skeleton-row-copy {
+  height: 14px;
+  flex: 1;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+
+.deck-member-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.deck-member-list > li + li {
+  margin-top: 8px;
+}
+
+.deck-member-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  min-height: 72px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--color-highlight) 30%, var(--color-border));
+  border-radius: 12px;
+  background: var(--color-highlight-soft);
+  color: inherit;
+  text-decoration: none;
+}
+
+.deck-member-overview-kicker {
+  display: inline-flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-warning-text);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.deck-member-overview-kicker svg {
+  width: 13px;
+  height: 13px;
+}
+
+.deck-member-overview strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deck-member-overview small {
+  color: var(--color-text-tertiary);
+  font-size: 11.5px;
+}
+
+.deck-member-overview > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--color-warning-text);
+}
+
+.deck-member-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-raised);
+  color: inherit;
+  text-decoration: none;
+}
+
+.deck-member-row-ordinal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--color-surface-soft);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.deck-member-row-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.deck-member-row-copy strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 13.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deck-member-row-copy small {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.deck-member-row > svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--color-text-disabled);
+}
+
+.deck-member-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  color: var(--color-text-secondary);
+}
+
+.deck-member-error > svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--color-warning-text);
+}
+
+.deck-member-error strong {
+  display: block;
+  color: var(--color-text);
+  font-size: 13.5px;
+}
+
+.deck-member-error p {
+  margin: 4px 0 10px;
+  font-size: 12px;
+}
+
+.deck-member-error button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.deck-member-error button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.deck-member-drawer-open {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 42px;
+  border-radius: 10px;
+  background: var(--color-action);
+  color: var(--color-on-action);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.deck-member-drawer-open svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ═══ 响应式 ═══ */
+
+@media (max-width: 959px) {
+  .deck-expanded {
+    grid-template-columns: 270px minmax(0, 1fr);
+    gap: 20px;
+  }
+
+  .deck-expanded-members-grid,
+  .deck-expanded-skeletons {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 639px) {
+  .deck-carousel {
+    --deck-cover-width: min(84vw, 300px);
+    --deck-cover-height: calc(var(--deck-cover-width) * 88 / 63);
+    --deck-stage-height: calc(var(--deck-cover-height) + 52px);
+  }
+
+  /* 移动端只显示 ±1 侧翼（§4.3）：箭头隐藏、指示器保留可点 */
+  .deck-carousel-arrow {
+    display: none;
+  }
+
+  .deck-carousel-focus-title {
+    display: none;
+  }
+}
+
+/* ═══ Reduced Motion（G-1 硬性验收项） ═══
+ * motion.css 全局降级只把 duration 打到 0.01ms，不清 delay——
+ * 不补这条，成员 stagger 会退化成「无动画但阶梯式延迟出现」的隐形 bug。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .deck-carousel .deck-cover,
+  .deck-carousel .deck-cover-paper,
+  .deck-carousel .deck-cover-peek,
+  .deck-carousel .deck-carousel-arrow,
+  .deck-carousel .deck-carousel-indicators button {
+    transition-delay: 0ms !important;
+    animation-delay: 0ms !important;
+  }
+
+  .deck-expanded,
+  .deck-member-tile,
+  .deck-expanded--leaving .deck-member-tile {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+  }
+
+  .deck-member-tile,
+  .deck-expanded--leaving .deck-member-tile {
+    animation: none;
+  }
+}

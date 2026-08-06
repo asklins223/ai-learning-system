@@ -4,7 +4,7 @@
  * 流程：
  * 1. 读取 keyPoint、evidence、note version 数据
  * 2. 组装 GenerateValidationQuestionInput（opaque evidence refs）
- * 3. 调用 provider.generateValidationQuestion
+ * 3. 调用 generateValidationQuestionViaChat(provider, input) → chatCompletion + zod 校验
  * 4. 用 schema 校验输出
  * 5. 运行 assessQuestionOutput 安全门禁
  * 6. 安全门禁失败 → 切到 deterministic fallback
@@ -18,10 +18,12 @@ import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { createProvider } from "../lib/ai-provider.ts";
+import { generateValidationQuestionViaChat } from "../lib/business-ai-ops.ts";
 import {
   enforcePrivacyGovernanceWithPolicy,
   logAICall,
   resolveAIGovernanceContext,
+  resolveProviderForTask,
 } from "../lib/governance.ts";
 import {
   assertJobLease,
@@ -207,12 +209,15 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
 
   // ── 4. Call AI provider (gated by AI_QUESTION_V1_ENABLED, 计划 §12.2) ──
 
-  const provider = createProvider(govCtx.providerName, govCtx.providerConfig);
+  // R3: Route text_generation tasks to a potentially different (cheaper) provider
+  const textRes = resolveProviderForTask(govCtx, "generate_question");
+  const provider = createProvider(textRes.providerName, textRes.providerConfig);
   const aiCallStart = Date.now();
 
   let aiOutput: GenerateValidationQuestionOutput | null = null;
   let aiError: Error | null = null;
   let usedFallback = false;
+  let questionUsage: { totalTokens?: number | null } | null = null;
 
   // Feature flag: when AI_QUESTION_V1_ENABLED=false, skip AI provider call
   // and use deterministic fallback only (计划 §12.2: "可以回到...确定性题目")
@@ -225,15 +230,15 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
       job.workspaceId,
       ["claim", "quote"],
       { claim: kp.claim, quote },
-      govCtx.providerName,
+      textRes.providerName,
     );
     if (!governanceResult.allowed) {
       throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
     }
 
     try {
-      const rawOutput = await runWithAbortBudget(
-        (signal) => provider.generateValidationQuestion(providerInput, signal),
+      const result = await runWithAbortBudget(
+        (signal) => generateValidationQuestionViaChat(provider, providerInput, signal),
         job.signal,
         resolveProviderCallTimeout("generate_validation_question"),
         (lateError) => logger.warn(
@@ -241,8 +246,9 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
           "question provider settled after its call budget expired",
         ),
       );
+      questionUsage = result.usage;
       // Validate with schema
-      const parsed = generateValidationQuestionOutputSchema.safeParse(rawOutput);
+      const parsed = generateValidationQuestionOutputSchema.safeParse(result.output);
       if (!parsed.success) {
         throw new Error(`AI question output schema validation failed: ${parsed.error.message}`);
       }
@@ -484,7 +490,7 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
         promptVersion: usedFallback ? "deterministic-v1" : provider.promptVersion,
         status: ArtifactStatus.READY,
         inputHash, // 计划 §6.6: 输入指纹，用于幂等去重
-        costTokens: usedFallback ? null : (provider.getLastUsage()?.totalTokens ?? null), // 计划 §6.6, §10.5: Provider usage tokens
+        costTokens: usedFallback ? null : (questionUsage?.totalTokens ?? null), // R5: usage from return value
       })
       .returning();
 
@@ -584,7 +590,7 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
       operation: "generate_validation_question",
       dataCategories: ["claim", "quote"],
       dataSizeBytes: JSON.stringify(providerInput).length,
-      costTokens: usedFallback ? null : (provider.getLastUsage()?.totalTokens ?? null),
+      costTokens: usedFallback ? null : (questionUsage?.totalTokens ?? null),
       durationMs: Date.now() - aiCallStart,
       status: "success",
     });

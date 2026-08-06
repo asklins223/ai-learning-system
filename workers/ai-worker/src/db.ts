@@ -18,7 +18,7 @@ export function resolveWorkerDatabaseUrl(env: NodeJS.ProcessEnv = process.env): 
 const connectionString = resolveWorkerDatabaseUrl();
 
 // Pool size must accommodate QUEUE_CONCURRENCY (3) parallel jobs, each of which
-// may issue up to 4 concurrent queries via Promise.all (e.g. generate_card's
+// may issue up to 4 concurrent queries via Promise.all (e.g. agent turn's
 // version+blocks+governance fan-out).  Peak demand = 3 × 4 = 12 concurrent
 // connections.  10 was slightly too small at peak — 2 queries would queue
 // inside the pool.  15 provides headroom for peak demand plus connection

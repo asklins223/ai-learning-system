@@ -421,7 +421,7 @@ interface LabelFile {
 }
 
 /**
- * 运行单篇笔记的全链路：创建 note → generate_card → align_evidence。
+ * 运行单篇笔记的全链路：创建 note → execute_card_agent_turn → align_evidence。
  */
 async function runPipelineForNote(
   workspaceId: string,
@@ -444,8 +444,11 @@ async function runPipelineForNote(
   };
 
   try {
-    // 1. 创建 note + note_version + note_blocks
-    const { note, version } = await db.transaction(async (tx) => {
+    // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 替代 db.transaction
+    // 确保 RLS 上下文（app.workspace_id/app.user_id）在事务内可用
+    const { note, version } = await withWorkspaceTransaction(
+      { workspaceId, userId },
+      async (tx) => {
       const [createdNote] = await tx
         .insert(notes)
         .values({
@@ -485,7 +488,8 @@ async function runPipelineForNote(
         .set({ currentVersionId: createdVersion.id, updatedAt: new Date() })
         .where(and(eq(notes.id, createdNote.id), eq(notes.workspaceId, workspaceId)));
       return { note: createdNote, version: createdVersion };
-    });
+    },
+    );
 
     await upsertSearchDocument({
       workspaceId,
@@ -498,7 +502,7 @@ async function runPipelineForNote(
     result.noteId = note.id;
     result.noteVersionId = version.id;
 
-    // 2. 直接创建 generate_card job 并同步等待 worker 处理
+    // 2. 直接创建 generation run 并同步等待 worker 处理
     //    这里不走 job 队列，而是直接调用 worker handler 逻辑
     //    但 worker handler 在 ai-worker 包内，API 侧无法直接 import。
     //    所以我们走标准的 job 插入 + 轮询等待方式。
@@ -527,7 +531,7 @@ async function runPipelineForNote(
       orderBy: asc(cardKeyPoints.ordinal),
     });
 
-    // 5. 等待 align_evidence 完成（worker 在 generate_card 完成后会自动排队 align_evidence）
+    // 5. 等待 align_evidence 完成（worker 在 generation 完成后会自动排队 align_evidence）
     //    轮询等待所有 key point 的 evidence 出现
     const evidenceReady = await waitForAlignEvidence(kps.map((k) => k.id), workspaceId, 60_000);
     if (!evidenceReady) throw new Error("evidence alignment timeout (60s)");
@@ -837,7 +841,7 @@ const DATASET_VERSION = "2026-07-18-v2";
 
 /**
  * 运行完整基准测试（API 入口）。
- * 注意：此函数依赖 AI Worker 正在运行，会插入 generate_card job 并等待 worker 处理。
+ * 注意：此函数依赖 AI Worker 正在运行，会插入 generation run 并等待 worker 处理。
  */
 async function executeBenchmark(
   workspaceId: string,
@@ -850,6 +854,15 @@ async function executeBenchmark(
 
   const results: NoteResult[] = [];
 
+  // PERF-28/29 注释：此处串行处理是设计选择，而非遗漏。
+  // 每篇笔记的 runPipelineForNote 涉及：
+  //   1. 创建笔记和 noteVersion
+  //   2. 触发卡片生成（涉及 AI provider 调用）
+  //   3. 卡片生成可能使用 advisory lock 串行化同 workspace 的操作
+  // 并行化会导致多个 AI 调用同时进行，可能触发 provider 限流，
+  // 且 advisory lock 会导致部分操作被阻塞反而降低效率。
+  // 如果需要并行化，应使用有限并发（如 p-limit(2)）并确保不会
+  // 触发 workspace 级锁冲突。
   for (const note of BUILTIN_NOTES) {
     const result = await runPipelineForNote(
       workspaceId,
@@ -875,10 +888,14 @@ async function executeBenchmark(
     hasLabels: false,
   };
 
-  await db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`benchmark:${workspaceId}`}))`);
-    await persistBenchmarkReport(workspaceId, userId, report, tx);
-  });
+  // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 替代 db.transaction
+  await withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`benchmark:${workspaceId}`}))`);
+      await persistBenchmarkReport(workspaceId, userId, report, tx);
+    },
+  );
   return report;
 }
 
@@ -905,9 +922,12 @@ export async function saveLabelsAndCalculate(
   runId: string,
   labels: LabelFile[],
 ): Promise<BenchmarkReport | null> {
-  return db.transaction(async (tx) => {
-    // 与新运行的最终报告写入共用工作区级事务锁，使校验与两次写入保持原子性。
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`benchmark:${workspaceId}`}))`);
+  // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 替代 db.transaction
+  return withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
+      // 与新运行的最终报告写入共用工作区级事务锁，使校验与两次写入保持原子性。
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`benchmark:${workspaceId}`}))`);
 
     // 使用报告中冻结的运行结果计算，避免重扫数据库时混入另一轮产物。
     const latestReport = await getLatestBenchmarkReport(workspaceId, tx);
@@ -930,5 +950,6 @@ export async function saveLabelsAndCalculate(
     await persistBenchmarkLabels(workspaceId, userId, labels, tx);
     await persistBenchmarkReport(workspaceId, userId, report, tx);
     return report;
-  });
+    },
+  );
 }

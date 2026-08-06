@@ -51,6 +51,55 @@ const STATIC_WORKSPACE_ROUTES = [
 
 let workspacePrefetchState: "idle" | "scheduled" | "complete" = "idle";
 
+// ─── QUAL-43/40/68 修复：用路由匹配表替代 15+ 布尔变量 ────────────────────
+// 原代码使用 15+ 个布尔变量（isHomePage, isReviewPage, ...）做页面类型检测，
+// 新增页面时容易遗漏，且嵌套三元表达式难以维护。
+// 改为路由模式匹配表：每个路由模式包含 variant 约束、正则匹配和 page 标识。
+
+interface RoutePattern {
+  /** 限制的 variant（undefined 表示任意） */
+  variant?: AppShellVariant;
+  /** 路径正则匹配 */
+  test: (pathname: string) => boolean;
+  /** data-page 属性值 */
+  page: string;
+  /** 是否拥有自己的 Focus 头部（仅 focus variant） */
+  ownsFocusHeader?: boolean;
+}
+
+const ROUTE_PATTERNS: RoutePattern[] = [
+  // ── default variant 路由 ──
+  { variant: "default", test: (p) => p === "/", page: "home" },
+  { variant: "default", test: (p) => p === "/review", page: "review" },
+  { variant: "default", test: (p) => p === "/cards", page: "cards" },
+  { variant: "default", test: (p) => p === "/graph", page: "graph" },
+  { variant: "default", test: (p) => p === "/notes", page: "notes" },
+  { variant: "default", test: (p) => p === "/search", page: "search" },
+  { variant: "default", test: (p) => p === "/sources", page: "sources" },
+  { variant: "default", test: (p) => p === "/today", page: "today" },
+  { variant: "default", test: (p) => p === "/settings", page: "settings" },
+  // ── internal variant 路由 ──
+  { variant: "internal", test: (p) => p === "/benchmark", page: "benchmark" },
+  // ── focus variant 路由 ──
+  { variant: "focus", test: (p) => /^\/cards\/[^/]+$/.test(p), page: "card-detail", ownsFocusHeader: true },
+  { variant: "focus", test: (p) => /^\/card-sets\/[^/]+$/.test(p), page: "card-set-detail", ownsFocusHeader: true },
+  { variant: "focus", test: (p) => /^\/notes\/[^/]+$/.test(p), page: "note-editor", ownsFocusHeader: true },
+  { variant: "focus", test: (p) => /^\/sources\/[^/]+$/.test(p), page: "source-detail", ownsFocusHeader: true },
+  {
+    variant: "focus",
+    test: (p) => /^\/cards\/[^/]+\/validate$/.test(p) || /^\/review\/[^/]+$/.test(p),
+    page: "validation-session",
+    ownsFocusHeader: true,
+  },
+];
+
+/** 根据当前 pathname 和 variant 匹配路由模式 */
+function matchRoute(pathname: string, variant: AppShellVariant): RoutePattern | null {
+  return ROUTE_PATTERNS.find(
+    (r) => (!r.variant || r.variant === variant) && r.test(pathname),
+  ) ?? null;
+}
+
 interface AppShellProps {
   children: ReactNode;
   variant?: AppShellVariant;
@@ -63,29 +112,12 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
   const showMobileNav = variant === "default";
   const showTabletTopBar = variant === "default" || variant === "internal";
   const isFocus = variant === "focus";
-  const isHomePage = variant === "default" && pathname === "/";
-  const isReviewPage = variant === "default" && pathname === "/review";
-  const isCardsPage = variant === "default" && pathname === "/cards";
-  const isGraphPage = variant === "default" && pathname === "/graph";
-  const isNotesPage = variant === "default" && pathname === "/notes";
-  const isSearchPage = variant === "default" && pathname === "/search";
-  const isSourcesPage = variant === "default" && pathname === "/sources";
-  const isTodayPage = variant === "default" && pathname === "/today";
-  const isSettingsPage = variant === "default" && pathname === "/settings";
-  const isBenchmarkPage = variant === "internal" && pathname === "/benchmark";
-  const isCardDetailPage =
-    variant === "focus" && /^\/cards\/[^/]+$/.test(pathname);
-  const isCardSetDetailPage =
-    variant === "focus" && /^\/card-sets\/[^/]+$/.test(pathname);
-  const isNoteEditorPage =
-    variant === "focus" && /^\/notes\/[^/]+$/.test(pathname);
-  const isSourceDetailPage =
-    variant === "focus" && /^\/sources\/[^/]+$/.test(pathname);
-  const isSessionPage =
-    variant === "focus" && (
-      /^\/cards\/[^/]+\/validate$/.test(pathname)
-      || /^\/review\/[^/]+$/.test(pathname)
-    );
+
+  // QUAL-43/40/68 修复：使用路由匹配表替代 15+ 布尔变量
+  const matchedRoute = matchRoute(pathname, variant);
+  const pageName = matchedRoute?.page;
+  const hasOwnedFocusHeader = matchedRoute?.ownsFocusHeader === true;
+  const isSessionPage = pageName === "validation-session";
 
   useEffect(() => {
     if (
@@ -101,8 +133,18 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
 
     const prefetchWorkspaceRoutes = () => {
       workspacePrefetchState = "complete";
-      for (const href of STATIC_WORKSPACE_ROUTES) {
-        router.prefetch(href);
+      // PERF-67 修复：分批预热路由，避免 10 个并发 prefetch 争抢带宽。
+      // 每批 3 个路由，间隔 200ms，总耗时约 800ms 完成 10 个路由的预热。
+      const BATCH_SIZE = 3;
+      const BATCH_INTERVAL_MS = 200;
+      for (let i = 0; i < STATIC_WORKSPACE_ROUTES.length; i += BATCH_SIZE) {
+        const batch = STATIC_WORKSPACE_ROUTES.slice(i, i + BATCH_SIZE);
+        const batchIndex = Math.floor(i / BATCH_SIZE);
+        setTimeout(() => {
+          for (const href of batch) {
+            router.prefetch(href);
+          }
+        }, batchIndex * BATCH_INTERVAL_MS);
       }
     };
 
@@ -145,39 +187,7 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
       className="app-canvas"
       data-ui="app-shell"
       data-variant={variant}
-      data-page={
-        isHomePage
-          ? "home"
-          : isReviewPage
-            ? "review"
-            : isCardsPage
-              ? "cards"
-              : isGraphPage
-                ? "graph"
-              : isNotesPage
-                ? "notes"
-              : isSearchPage
-                ? "search"
-              : isSourcesPage
-                ? "sources"
-              : isTodayPage
-                ? "today"
-              : isSettingsPage
-                ? "settings"
-              : isBenchmarkPage
-                ? "benchmark"
-              : isCardDetailPage
-                ? "card-detail"
-              : isCardSetDetailPage
-                ? "card-set-detail"
-              : isNoteEditorPage
-                ? "note-editor"
-              : isSourceDetailPage
-                ? "source-detail"
-              : isSessionPage
-                ? "validation-session"
-              : undefined
-      }
+      data-page={pageName}
     >
       {/* §15.3: Skip link — 键盘用户跳到主内容 */}
       <a href="#main-content" className="skip-link">
@@ -188,7 +198,7 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
         /* §9.4 Focus Shell: 纵向两行 — FocusBar 全宽 + Main 全宽
          * 不得将 TopBar 和 Main 放入同一个横向 flex 容器 */
         <div className="app-shell-inner app-shell-inner--focus">
-          {!isCardDetailPage && !isNoteEditorPage && !isSourceDetailPage && !isSessionPage && <TopBar />}
+          {!hasOwnedFocusHeader && <TopBar />}
           <main
             id="main-content"
             className={`workspace workspace--focus${isSessionPage ? " workspace--session" : ""}`}

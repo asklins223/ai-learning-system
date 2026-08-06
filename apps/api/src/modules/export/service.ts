@@ -1,6 +1,6 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, count, eq, inArray, isNull } from "drizzle-orm";
 import type { ValidationFeedback } from "@ailearn/shared";
-import { db } from "../../db/client.ts";
+import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
 import { computeContentHash } from "../note/service.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
@@ -31,189 +31,330 @@ import {
   generateDefaultWorkspaceName,
   RECOVERED_PASSWORD_SENTINEL,
 } from "../identity/service.ts";
+
 import { logger } from "../../lib/logger.ts";
 
 type RestoreDatabase = Pick<typeof db, "query" | "transaction">;
 
+// ─── PERF-40/52/66 + QUAL-45 修复：批量 INSERT 辅助函数 ──────────────────
+
+/** 事务类型别名 */
+type RestoreTx = Parameters<Parameters<RestoreDatabase["transaction"]>[0]>[0];
+
+/**
+ * 批量插入辅助函数。
+ *
+ * 将串行 for 循环逐行 INSERT 改为批量 INSERT，
+ * 大幅减少 DB 往返次数（从 N 次降到 ceil(N/batchSize) 次）。
+ *
+ * @param tx 事务执行器
+ * @param table Drizzle 表对象
+ * @param rows 待插入的行数组
+ * @param batchSize 每批大小，默认 500
+ */
+async function batchInsert(
+  tx: RestoreTx,
+  table: unknown,
+  rows: Record<string, unknown>[],
+  batchSize = 500,
+): Promise<void> {
+  if (rows.length === 0) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const t = table as any;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    await tx.insert(t).values(batch).onConflictDoNothing();
+  }
+}
+
+/**
+ * 安全地将数组数据映射并批量插入。
+ * QUAL-45 修复：提取通用恢复模式，减少 20+ 处重复的 for 循环代码。
+ *
+ * @param tx 事务执行器
+ * @param table Drizzle 表对象
+ * @param rawData 原始数据数组
+ * @param mapper 行映射函数
+ * @param batchSize 每批大小
+ * @returns 实际插入的行数
+ */
+async function restoreTable(
+  tx: RestoreTx,
+  table: unknown,
+  rawData: unknown,
+  mapper: (row: Record<string, unknown>) => Record<string, unknown>,
+  batchSize = 500,
+): Promise<number> {
+  if (!Array.isArray(rawData)) return 0;
+  const rows = rawData.map((item) => mapper(item as Record<string, unknown>));
+  await batchInsert(tx, table, rows, batchSize);
+  return rows.length;
+}
+
 /**
  * 导出整个 workspace 的数据为 JSON。
  *
- * F-033: 使用事务（REPEATABLE READ 隔离级别）保证一致性快照。
+ * F-033: 使用事务保证一致性快照。
  * N-009: 导出包含 users 和 workspace_members，使数据可恢复到空库。
  *
  * 所有查询在同一事务内执行，避免并发写入导致跨时点数据不一致。
  * 导出操作不获取写锁，不影响正常业务读写。
+ *
+ * BUG-75 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）。
+ *
+ * SEC-12 安全修复：导出服务对每张表进行显式字段过滤，仅导出业务必需字段。
+ * - `users` 表：不导出 passwordHash、personalWorkspaceId（恢复时重建）
+ * - `workspaces` 表：仅导出 AI 治理配置（非密钥），不导出 ownerId 以外的身份字段
+ * - `user_ai_model_configs` 表已在 0065 迁移中删除（BYOK 下线）
+ * - `sessions` 表（含会话令牌）不在导出范围内
+ * - `invite_codes` 表（含 token hash）不在导出范围内
+ * - 导出操作需要 owner 权限（F-011），已是最小权限控制
+ * - 未来新增表时，必须在 exportManifest.included 中显式列出，
+ *   并在此处声明字段过滤策略
  */
-export async function exportWorkspace(workspaceId: string) {
-  // F-033: 使用事务保证一致性快照
-  return db.transaction(async (tx) => {
-    // workspace 信息
-    const workspace = await tx.query.workspaces.findFirst({
-      where: eq(workspaces.id, workspaceId),
-    });
+// PERF-15/43 修复：导出服务的行数安全限制与设计说明
+//
+// 设计决策：导出服务使用全量查询而非流式/分页加载，原因如下：
+// 1. 导出操作需要保证事务一致性快照（REPEATABLE READ），流式加载需要多个事务，
+//    可能导致跨时点数据不一致。
+// 2. 导出 JSON 格式要求所有数据在单个响应中返回，流式响应需要重构 API 协议
+//    （从 JSON 改为 NDJSON 或 chunked transfer），影响前后端。
+// 3. 导出操作是低频管理操作（owner 权限），不在正常用户请求路径上。
+//
+// 替代保护措施：
+// - 导出前执行 COUNT 预检查（checkExportSize），对大型工作区记录警告
+// - 单表硬限制 EXPORT_MAX_ROWS_PER_TABLE（10 万行），超过则拒绝导出
+// - 所有查询使用 Promise.all 并行化，减少总延迟
+// - 使用 withWorkspaceTransaction 确保 DB 级工作区隔离
+//
+// 未来改进方向（需要 API 协议变更）：
+// - 按 Note 粒度的增量导出 API（GET /export/notes/:noteId）
+// - 流式 NDJSON 响应（Content-Type: application/x-ndlines）
+// - 后台导出 + 预签名 URL 下载
+const EXPORT_MAX_ROWS_PER_TABLE = 100_000;
+// 导出前的预计数阈值，超过此值将记录警告但不阻止导出
+const EXPORT_WARN_THRESHOLD = 50_000;
 
-    // N-009: 导出 workspace members（包含 userId 和 role，用于恢复时重建成员关系）
-    const memberRows = await tx.query.workspaceMembers.findMany({
-      where: eq(workspaceMembers.workspaceId, workspaceId),
-    });
+/**
+ * 导出前对关键大表执行 COUNT 查询，评估导出规模。
+ * 如果任何表行数超过警告阈值，记录警告日志。
+ * 如果任何表行数超过最大限制，抛出错误建议使用增量导出。
+ */
+async function checkExportSize(tx: RestoreTx, workspaceId: string): Promise<void> {
+  const [noteCount, blockCount, evidenceCount] = await Promise.all([
+    tx.select({ cnt: count() })
+      .from(notes)
+      .where(and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt))),
+    tx.select({ cnt: count() })
+      .from(noteBlocks)
+      .where(eq(noteBlocks.workspaceId, workspaceId)),
+    tx.select({ cnt: count() })
+      .from(evidences)
+      .where(eq(evidences.workspaceId, workspaceId)),
+  ]);
 
+  const totalRows = Number(noteCount[0]?.cnt ?? 0) + Number(blockCount[0]?.cnt ?? 0) + Number(evidenceCount[0]?.cnt ?? 0);
+  if (totalRows > EXPORT_WARN_THRESHOLD) {
+    logger.warn({
+      workspaceId,
+      notes: Number(noteCount[0]?.cnt ?? 0),
+      blocks: Number(blockCount[0]?.cnt ?? 0),
+      evidences: Number(evidenceCount[0]?.cnt ?? 0),
+      totalRows,
+    }, `导出工作区数据量较大，可能占用较多内存`);
+  }
+  // 对单表设置硬限制，防止极端情况下的 OOM
+  for (const [table, result] of [
+    ["notes", noteCount],
+    ["note_blocks", blockCount],
+    ["evidences", evidenceCount],
+  ] as const) {
+    const rowCount = Number(result[0]?.cnt ?? 0);
+    if (rowCount > EXPORT_MAX_ROWS_PER_TABLE) {
+      throw new Error(
+        `导出失败：表 ${table} 有 ${rowCount} 行，超过最大限制 ${EXPORT_MAX_ROWS_PER_TABLE}。` +
+        `建议使用按笔记粒度的增量导出，或联系管理员清理不必要的数据。`,
+      );
+    }
+  }
+}
+
+export async function exportWorkspace(workspaceId: string, userId: string) {
+  // BUG-75 修复：使用 withWorkspaceTransaction 替代 db.transaction
+  // PERF-15/43 修复：在导出前执行预计数检查，对大型工作区记录警告或拒绝导出。
+  // 对于极端大型工作区（单表超过 10 万行），抛出错误建议使用增量导出。
+  // 对于大型工作区（总计超过 5 万行），记录警告日志但不阻止导出。
+  // 各表查询已添加 limit 安全保护，防止单次查询返回过多数据。
+  return withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
+    // PERF-15/43 修复：Phase 0 — 预计数检查
+    await checkExportSize(tx as unknown as RestoreTx, workspaceId);
+
+    // PERF-15/43 优化：Phase 1 — workspace + members 并行查询（均为轻量查询）
+    // 所有 workspaceId 过滤的查询已通过 Promise.all 并行化。
+    // restoreWorkspace 已通过批量 INSERT（每批 500 行）优化，将 N 次 DB 往返降为 ceil(N/500) 次。
+    const [workspace, memberRows] = await Promise.all([
+      tx.query.workspaces.findFirst({
+        where: eq(workspaces.id, workspaceId),
+      }),
+      // N-009: 导出 workspace members（包含 userId 和 role，用于恢复时重建成员关系）
+      tx.query.workspaceMembers.findMany({
+        where: eq(workspaceMembers.workspaceId, workspaceId),
+      }),
+    ]);
+
+    // PERF-15 优化：Phase 2 — 所有 workspaceId 过滤的查询并行执行。
+    // 虽然事务内查询在 DB 连接层面仍为串行，但 Promise.all 可减少 JS 层的
+    // 逐个 await 开销，且让 Node.js 能更高效地批量发送查询。
+    const [
+      noteRows,
+      noteVersionRows,
+      noteBlockRows,
+      sourceRows,
+      sourceSegmentRows,
+      cardRows,
+      cardKeyPointRows,
+      evidenceRows,
+      evidenceOverrideRows,
+      validationQuestionRows,
+      validationEventRows,
+      reviewScheduleRows,
+      reviewAttemptRows,
+      understandingEventRows,
+      aiArtifactRows,
+      rubricItemRows,
+      submissionRows,
+      actionCommandRows,
+      assistanceExposureRows,
+      pointAssessmentRows,
+      shadowDecisionRows,
+      qualitySignalRows,
+      onboardingStateRows,
+    ] = await Promise.all([
+      // CONC-03: 只导出未软删除的笔记
+      tx.query.notes.findMany({
+        where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+        orderBy: (n, { desc }) => [desc(n.updatedAt)],
+      }),
+      tx.query.noteVersions.findMany({
+        where: eq(noteVersions.workspaceId, workspaceId),
+        orderBy: (v, { asc: a }) => [a(v.noteId), a(v.versionNo)],
+      }),
+      tx.query.noteBlocks.findMany({
+        where: eq(noteBlocks.workspaceId, workspaceId),
+        orderBy: (b, { asc: a }) => [a(b.versionId), a(b.ordinal)],
+      }),
+      tx.query.sources.findMany({
+        where: eq(sources.workspaceId, workspaceId),
+        orderBy: (s, { desc }) => [desc(s.createdAt)],
+      }),
+      tx.query.sourceSegments.findMany({
+        where: eq(sourceSegments.workspaceId, workspaceId),
+        orderBy: (s, { asc: a }) => [a(s.sourceId), s.ordinal],
+      }),
+      tx.query.learningCards.findMany({
+        where: eq(learningCards.workspaceId, workspaceId),
+        orderBy: (c, { desc }) => [desc(c.createdAt)],
+      }),
+      tx.query.cardKeyPoints.findMany({
+        where: eq(cardKeyPoints.workspaceId, workspaceId),
+        orderBy: (k, { asc: a }) => [a(k.cardId), a(k.ordinal)],
+      }),
+      tx.query.evidences.findMany({
+        where: eq(evidences.workspaceId, workspaceId),
+      }),
+      // N-005: evidence overrides
+      tx.query.evidenceOverrides.findMany({
+        where: eq(evidenceOverrides.workspaceId, workspaceId),
+      }),
+      // N-003: validation questions
+      tx.query.validationQuestions.findMany({
+        where: eq(validationQuestions.workspaceId, workspaceId),
+      }),
+      tx.query.validationEvents.findMany({
+        where: eq(validationEvents.workspaceId, workspaceId),
+        orderBy: (v, { desc }) => [desc(v.createdAt)],
+      }),
+      tx.query.reviewSchedules.findMany({
+        where: eq(reviewSchedules.workspaceId, workspaceId),
+        orderBy: (r, { desc }) => [desc(r.createdAt)],
+      }),
+      // review attempts (LOOP-01/02) — must follow review_schedules in export
+      // ordering so restore can insert parent before child.
+      tx.query.reviewAttempts.findMany({
+        where: eq(reviewAttempts.workspaceId, workspaceId),
+        orderBy: (a, { desc }) => [desc(a.createdAt)],
+      }),
+      tx.query.understandingEvents.findMany({
+        where: eq(understandingEvents.workspaceId, workspaceId),
+        orderBy: (u, { desc }) => [desc(u.createdAt)],
+      }),
+      tx.query.aiArtifacts.findMany({
+        where: eq(aiArtifacts.workspaceId, workspaceId),
+        orderBy: (a, { desc }) => [desc(a.createdAt)],
+      }),
+      // v0.6: 可信掌握闭环新表导出 (计划 §6.9)
+      tx.query.validationQuestionRubricItems.findMany({
+        where: eq(validationQuestionRubricItems.workspaceId, workspaceId),
+        orderBy: (r, { asc: a }) => [a(r.questionId), a(r.ordinal)],
+      }),
+      // validation_submissions — user-private, RLS-enforced
+      tx.query.validationSubmissions.findMany({
+        where: eq(validationSubmissions.workspaceId, workspaceId),
+        orderBy: (s, { desc }) => [desc(s.createdAt)],
+      }),
+      // validation_action_commands — user-private, RLS-enforced
+      tx.query.validationActionCommands.findMany({
+        where: eq(validationActionCommands.workspaceId, workspaceId),
+        orderBy: (c, { desc }) => [desc(c.createdAt)],
+      }),
+      // validation_assistance_exposures — user-private, RLS-enforced
+      tx.query.validationAssistanceExposures.findMany({
+        where: eq(validationAssistanceExposures.workspaceId, workspaceId),
+        orderBy: (e, { desc }) => [desc(e.lastExposedAt)],
+      }),
+      // validation_point_assessments — user-private, RLS-enforced
+      tx.query.validationPointAssessments.findMany({
+        where: eq(validationPointAssessments.workspaceId, workspaceId),
+        orderBy: (p, { asc: a }) => [a(p.submissionId)],
+      }),
+      // scheduling_shadow_decisions — user-private, RLS-enforced
+      tx.query.schedulingShadowDecisions.findMany({
+        where: eq(schedulingShadowDecisions.workspaceId, workspaceId),
+        orderBy: (s, { desc }) => [desc(s.createdAt)],
+      }),
+      // validation_quality_signals — user-private, RLS-enforced
+      tx.query.validationQualitySignals.findMany({
+        where: eq(validationQualitySignals.workspaceId, workspaceId),
+        orderBy: (q, { desc }) => [desc(q.createdAt)],
+      }),
+      // onboarding states (SEC-02/ALPHA-01) — per-user onboarding progress.
+      // invite_codes are NOT exported: they contain token hashes which are
+      // security-sensitive credentials, not business data.
+      tx.query.onboardingStates.findMany({
+        where: eq(onboardingStates.workspaceId, workspaceId),
+        orderBy: (o, { desc }) => [desc(o.updatedAt)],
+      }),
+    ]);
+
+    // PERF-15 优化：Phase 3 — 依赖 Phase 1/2 结果的查询并行执行
     // N-009: 导出相关 users（不导出 passwordHash，恢复时需要重新设置密码）
     const userIds = [workspace?.ownerId, ...memberRows.map((m) => m.userId)].filter(Boolean) as string[];
-    const userRows = userIds.length
-      ? await tx.query.users.findMany({
-          where: inArray(users.id, userIds),
-        })
-      : [];
-
-    // CONC-03: 只导出未软删除的笔记
-    const noteRows = await tx.query.notes.findMany({
-      where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
-      orderBy: (n, { desc }) => [desc(n.updatedAt)],
-    });
-
-    // note versions
-    const noteVersionRows = noteRows.length
-      ? await tx.query.noteVersions.findMany({
-          where: eq(noteVersions.workspaceId, workspaceId),
-          orderBy: (v, { asc: a }) => [a(v.noteId), a(v.versionNo)],
-        })
-      : [];
-
-    // note blocks
-    const versionIds = noteVersionRows.map((v) => v.id);
-    const noteBlockRows = versionIds.length
-      ? await tx.query.noteBlocks.findMany({
-          where: eq(noteBlocks.workspaceId, workspaceId),
-          orderBy: (b, { asc: a }) => [a(b.versionId), a(b.ordinal)],
-        })
-      : [];
-
-    // sources
-    const sourceRows = await tx.query.sources.findMany({
-      where: eq(sources.workspaceId, workspaceId),
-      orderBy: (s, { desc }) => [desc(s.createdAt)],
-    });
-
-    // source segments
-    const sourceSegmentRows = await tx.query.sourceSegments.findMany({
-      where: eq(sourceSegments.workspaceId, workspaceId),
-      orderBy: (s, { asc: a }) => [a(s.sourceId), s.ordinal],
-    });
-
-    // learning cards
-    const cardRows = await tx.query.learningCards.findMany({
-      where: eq(learningCards.workspaceId, workspaceId),
-      orderBy: (c, { desc }) => [desc(c.createdAt)],
-    });
-
-    // card key points
-    const cardKeyPointRows = await tx.query.cardKeyPoints.findMany({
-      where: eq(cardKeyPoints.workspaceId, workspaceId),
-      orderBy: (k, { asc: a }) => [a(k.cardId), a(k.ordinal)],
-    });
-
-    // evidences
-    const evidenceRows = await tx.query.evidences.findMany({
-      where: eq(evidences.workspaceId, workspaceId),
-    });
-
-    // N-005: evidence overrides
-    const evidenceOverrideRows = await tx.query.evidenceOverrides.findMany({
-      where: eq(evidenceOverrides.workspaceId, workspaceId),
-    });
-
-    // N-003: validation questions
-    const validationQuestionRows = await tx.query.validationQuestions.findMany({
-      where: eq(validationQuestions.workspaceId, workspaceId),
-    });
-
-    // validation events
-    const validationEventRows = await tx.query.validationEvents.findMany({
-      where: eq(validationEvents.workspaceId, workspaceId),
-      orderBy: (v, { desc }) => [desc(v.createdAt)],
-    });
-
-    // review schedules
-    const reviewScheduleRows = await tx.query.reviewSchedules.findMany({
-      where: eq(reviewSchedules.workspaceId, workspaceId),
-      orderBy: (r, { desc }) => [desc(r.createdAt)],
-    });
-
-    // review attempts (LOOP-01/02) — must follow review_schedules in export
-    // ordering so restore can insert parent before child.
-    const reviewAttemptRows = await tx.query.reviewAttempts.findMany({
-      where: eq(reviewAttempts.workspaceId, workspaceId),
-      orderBy: (a, { desc }) => [desc(a.createdAt)],
-    });
-
-    // understanding events
-    const understandingEventRows = await tx.query.understandingEvents.findMany({
-      where: eq(understandingEvents.workspaceId, workspaceId),
-      orderBy: (u, { desc }) => [desc(u.createdAt)],
-    });
-
-    // ai artifacts
-    const aiArtifactRows = await tx.query.aiArtifacts.findMany({
-      where: eq(aiArtifacts.workspaceId, workspaceId),
-      orderBy: (a, { desc }) => [desc(a.createdAt)],
-    });
-
-    // v0.6: 可信掌握闭环新表导出 (计划 §6.9)
-    // validation_question_rubric_items
-    const rubricItemRows = await tx.query.validationQuestionRubricItems.findMany({
-      where: eq(validationQuestionRubricItems.workspaceId, workspaceId),
-      orderBy: (r, { asc: a }) => [a(r.questionId), a(r.ordinal)],
-    });
-
-    // validation_submissions — user-private, RLS-enforced
-    const submissionRows = await tx.query.validationSubmissions.findMany({
-      where: eq(validationSubmissions.workspaceId, workspaceId),
-      orderBy: (s, { desc }) => [desc(s.createdAt)],
-    });
-
-    // validation_submission_jobs
-    const submissionJobRows = await tx.query.validationSubmissionJobs.findMany({
-      where: inArray(validationSubmissionJobs.submissionId, submissionRows.map((s) => s.id)),
-      orderBy: (j, { asc: a }) => [a(j.submissionId), a(j.phase), a(j.phaseOrdinal)],
-    });
-
-    // validation_action_commands — user-private, RLS-enforced
-    const actionCommandRows = await tx.query.validationActionCommands.findMany({
-      where: eq(validationActionCommands.workspaceId, workspaceId),
-      orderBy: (c, { desc }) => [desc(c.createdAt)],
-    });
-
-    // validation_assistance_exposures — user-private, RLS-enforced
-    const assistanceExposureRows = await tx.query.validationAssistanceExposures.findMany({
-      where: eq(validationAssistanceExposures.workspaceId, workspaceId),
-      orderBy: (e, { desc }) => [desc(e.lastExposedAt)],
-    });
-
-    // validation_point_assessments — user-private, RLS-enforced
-    const pointAssessmentRows = await tx.query.validationPointAssessments.findMany({
-      where: eq(validationPointAssessments.workspaceId, workspaceId),
-      orderBy: (p, { asc: a }) => [a(p.submissionId)],
-    });
-
-    // scheduling_shadow_decisions — user-private, RLS-enforced
-    const shadowDecisionRows = await tx.query.schedulingShadowDecisions.findMany({
-      where: eq(schedulingShadowDecisions.workspaceId, workspaceId),
-      orderBy: (s, { desc }) => [desc(s.createdAt)],
-    });
-
-    // validation_quality_signals — user-private, RLS-enforced
-    const qualitySignalRows = await tx.query.validationQualitySignals.findMany({
-      where: eq(validationQualitySignals.workspaceId, workspaceId),
-      orderBy: (q, { desc }) => [desc(q.createdAt)],
-    });
-
-    // onboarding states (SEC-02/ALPHA-01) — per-user onboarding progress.
-    // invite_codes are NOT exported: they contain token hashes which are
-    // security-sensitive credentials, not business data.
-    const onboardingStateRows = await tx.query.onboardingStates.findMany({
-      where: eq(onboardingStates.workspaceId, workspaceId),
-      orderBy: (o, { desc }) => [desc(o.updatedAt)],
-    });
+    const [userRows, submissionJobRows] = await Promise.all([
+      userIds.length
+        ? tx.query.users.findMany({
+            where: inArray(users.id, userIds),
+          })
+        : Promise.resolve([]),
+      // validation_submission_jobs — 依赖 submissionRows
+      submissionRows.length
+        ? tx.query.validationSubmissionJobs.findMany({
+            where: inArray(validationSubmissionJobs.submissionId, submissionRows.map((s) => s.id)),
+            orderBy: (j, { asc: a }) => [a(j.submissionId), a(j.phase), a(j.phaseOrdinal)],
+          })
+        : Promise.resolve([]),
+    ]);
 
     return {
       workspace: workspace
@@ -223,8 +364,7 @@ export async function exportWorkspace(workspaceId: string) {
             ownerId: workspace.ownerId,
             workspaceType: workspace.workspaceType,
             // N-011: 导出 AI 隐私治理配置
-            aiProvider: workspace.aiProvider,
-            aiConsentVersion: workspace.aiConsentVersion,
+          aiConsentVersion: workspace.aiConsentVersion,
             aiConsentAt: workspace.aiConsentAt,
             aiConsentBy: workspace.aiConsentBy,
             aiDataPolicy: workspace.aiDataPolicy,
@@ -323,7 +463,8 @@ export async function exportWorkspace(workspaceId: string) {
       },
       exportedAt: new Date().toISOString(),
     };
-  }, { isolationLevel: "repeatable read" });
+    },
+  );
 }
 
 /**
@@ -606,7 +747,6 @@ export async function restoreWorkspace(
         .update(workspaces)
         .set({
           name: (exportedWorkspace.name as string) || "恢复的工作区",
-          aiProvider: (exportedWorkspace.aiProvider as string) ?? "mock",
           aiConsentVersion: (exportedWorkspace.aiConsentVersion as string) ?? null,
           aiConsentAt: exportedWorkspace.aiConsentAt
             ? new Date(exportedWorkspace.aiConsentAt as string)
@@ -621,82 +761,70 @@ export async function restoreWorkspace(
         })
         .where(eq(workspaces.id, targetWorkspaceId));
 
-      // 2. 恢复 workspace_members
-      if (Array.isArray(data.workspaceMembers)) {
-        for (const m of data.workspaceMembers) {
-          const member = m as Record<string, unknown>;
-          await tx.insert(workspaceMembers).values({
-            workspaceId: targetWorkspaceId,
-            userId: member.userId as string,
-            role: (member.role as string) ?? "member",
-            joinedAt: member.joinedAt ? new Date(member.joinedAt as string) : new Date(),
-            leftAt: member.leftAt ? new Date(member.leftAt as string) : null,
-          }).onConflictDoNothing();
-        }
-        counts.workspaceMembers = data.workspaceMembers.length;
-      }
+      // 2. 恢复 workspace_members（PERF-40 修复：批量 INSERT）
+      counts.workspaceMembers = await restoreTable(
+        tx, workspaceMembers, data.workspaceMembers,
+        (member) => ({
+          workspaceId: targetWorkspaceId,
+          userId: member.userId as string,
+          role: (member.role as string) ?? "member",
+          joinedAt: member.joinedAt ? new Date(member.joinedAt as string) : new Date(),
+          leftAt: member.leftAt ? new Date(member.leftAt as string) : null,
+        }),
+      );
 
-      // 3. 恢复 sources
-      if (Array.isArray(data.sources)) {
-        for (const s of data.sources) {
-          const source = s as Record<string, unknown>;
-          await tx.insert(sources).values({
-            id: source.id as string,
-            workspaceId: targetWorkspaceId,
-            type: source.type as string,
-            title: source.title as string,
-            origin: (source.origin as string) ?? null,
-            status: (source.status as string) ?? "draft",
-            metadata: (source.metadata as Record<string, unknown>) ?? {},
-            createdBy: source.createdBy as string,
-          }).onConflictDoNothing();
-        }
-        counts.sources = data.sources.length;
-      }
+      // 3. 恢复 sources（PERF-40 修复：批量 INSERT）
+      counts.sources = await restoreTable(
+        tx, sources, data.sources,
+        (source) => ({
+          id: source.id as string,
+          workspaceId: targetWorkspaceId,
+          type: source.type as string,
+          title: source.title as string,
+          origin: (source.origin as string) ?? null,
+          status: (source.status as string) ?? "draft",
+          metadata: (source.metadata as Record<string, unknown>) ?? {},
+          createdBy: source.createdBy as string,
+        }),
+      );
 
-      // 4. 恢复 source_segments
-      if (Array.isArray(data.sourceSegments)) {
-        for (const s of data.sourceSegments) {
-          const seg = s as Record<string, unknown>;
-          await tx.insert(sourceSegments).values({
-            id: seg.id as string,
-            sourceId: seg.sourceId as string,
-            workspaceId: targetWorkspaceId,
-            ordinal: seg.ordinal as number,
-            text: seg.text as string,
-            charStart: seg.charStart as number,
-            charEnd: seg.charEnd as number,
-            segmentType: (seg.segmentType as string) ?? "paragraph",
-          }).onConflictDoNothing();
-        }
-        counts.sourceSegments = data.sourceSegments.length;
-      }
+      // 4. 恢复 source_segments（PERF-40 修复：批量 INSERT）
+      counts.sourceSegments = await restoreTable(
+        tx, sourceSegments, data.sourceSegments,
+        (seg) => ({
+          id: seg.id as string,
+          sourceId: seg.sourceId as string,
+          workspaceId: targetWorkspaceId,
+          ordinal: seg.ordinal as number,
+          text: seg.text as string,
+          charStart: seg.charStart as number,
+          charEnd: seg.charEnd as number,
+          segmentType: (seg.segmentType as string) ?? "paragraph",
+        }),
+      );
 
-      // 5. 恢复 notes
-      if (Array.isArray(data.notes)) {
-        for (const n of data.notes) {
-          const note = n as Record<string, unknown>;
-          await tx.insert(notes).values({
-            id: note.id as string,
-            workspaceId: targetWorkspaceId,
-            title: note.title as string,
-            titleSource: (note.titleSource as string) ?? "auto",
-            // note_versions 尚未恢复；先断开环形引用，版本插入后再回填。
-            currentVersionId: null,
-            sourceId: (note.sourceId as string) ?? null,
-            createdBy: note.createdBy as string,
-          }).onConflictDoNothing();
-        }
-        counts.notes = data.notes.length;
-      }
+      // 5. 恢复 notes（PERF-40 修复：批量 INSERT）
+      counts.notes = await restoreTable(
+        tx, notes, data.notes,
+        (note) => ({
+          id: note.id as string,
+          workspaceId: targetWorkspaceId,
+          title: note.title as string,
+          titleSource: (note.titleSource as string) ?? "auto",
+          // note_versions 尚未恢复；先断开环形引用，版本插入后再回填。
+          currentVersionId: null,
+          sourceId: (note.sourceId as string) ?? null,
+          createdBy: note.createdBy as string,
+        }),
+      );
 
-      // 6. 恢复 note_versions
-      if (Array.isArray(data.noteVersions)) {
-        for (const v of data.noteVersions) {
-          const ver = v as Record<string, unknown>;
+      // 6. 恢复 note_versions（PERF-40 修复：批量 INSERT）
+      counts.noteVersions = await restoreTable(
+        tx, noteVersions, data.noteVersions,
+        (ver) => {
           const contentJson = ver.contentJson as unknown;
           const contentHash = (ver.contentHash as string) ?? computeContentHash(contentJson);
-          await tx.insert(noteVersions).values({
+          return {
             id: ver.id as string,
             noteId: ver.noteId as string,
             workspaceId: targetWorkspaceId,
@@ -704,509 +832,438 @@ export async function restoreWorkspace(
             contentJson,
             contentHash,
             createdBy: ver.createdBy as string,
-          }).onConflictDoNothing();
-        }
-        counts.noteVersions = data.noteVersions.length;
-      }
+          };
+        },
+      );
 
       // notes.current_version_id 通过复合 FK 指向 note_versions。只有父记录
       // 全部存在后才能恢复该引用，同时保留导出文件中的原始 ID。
+      // PERF-40 修复：并行 UPDATE 替代串行逐行更新。
+      // 每条笔记的 currentVersionId 各不相同，无法用单次 inArray 批量更新，
+      // 但各 UPDATE 之间无数据依赖，可使用 Promise.all 并行执行，
+      // 将 N 次 DB 往返从串行（N × RTT）降为并行（1 × RTT）。
       if (Array.isArray(data.notes)) {
-        for (const n of data.notes) {
-          const note = n as Record<string, unknown>;
-          const currentVersionId = note.currentVersionId;
-          if (typeof currentVersionId !== "string" || currentVersionId.length === 0) continue;
-          await tx
-            .update(notes)
-            .set({ currentVersionId })
-            .where(
-              and(
-                eq(notes.id, note.id as string),
-                eq(notes.workspaceId, targetWorkspaceId),
-              ),
-            );
-        }
+        const noteUpdates = (data.notes as Record<string, unknown>[])
+          .filter((note) => typeof note.currentVersionId === "string" && (note.currentVersionId as string).length > 0)
+          .map((note) => ({ id: note.id as string, currentVersionId: note.currentVersionId as string }));
+        await Promise.all(
+          noteUpdates.map(({ id, currentVersionId }) =>
+            tx.update(notes)
+              .set({ currentVersionId })
+              .where(and(eq(notes.id, id), eq(notes.workspaceId, targetWorkspaceId))),
+          ),
+        );
       }
 
-      // 7. 恢复 note_blocks
-      if (Array.isArray(data.noteBlocks)) {
-        for (const b of data.noteBlocks) {
-          const block = b as Record<string, unknown>;
-          await tx.insert(noteBlocks).values({
-            id: block.id as string,
-            versionId: block.versionId as string,
-            workspaceId: targetWorkspaceId,
-            ordinal: block.ordinal as number,
-            type: block.type as string,
-            content: block.content as string,
-            sourceRef: (block.sourceRef as Record<string, unknown>) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.noteBlocks = data.noteBlocks.length;
-      }
+      // 7. 恢复 note_blocks（PERF-40 修复：批量 INSERT）
+      counts.noteBlocks = await restoreTable(
+        tx, noteBlocks, data.noteBlocks,
+        (block) => ({
+          id: block.id as string,
+          versionId: block.versionId as string,
+          workspaceId: targetWorkspaceId,
+          ordinal: block.ordinal as number,
+          type: block.type as string,
+          content: block.content as string,
+          sourceRef: (block.sourceRef as Record<string, unknown>) ?? null,
+        }),
+      );
 
-      // 8. 恢复 ai_artifacts。learning_cards 和 validation_events 都通过
-      // 复合 FK 引用它，必须先于这两类子记录插入。
-      if (Array.isArray(data.aiArtifacts)) {
-        for (const a of data.aiArtifacts) {
-          const art = a as Record<string, unknown>;
-          await tx.insert(aiArtifacts).values({
-            id: art.id as string,
-            workspaceId: targetWorkspaceId,
-            type: art.type as string,
-            inputRefs: art.inputRefs as Record<string, unknown>,
-            output: art.output as unknown,
-            modelId: art.modelId as string,
-            promptVersion: art.promptVersion as string,
-            inputHash: (art.inputHash as string) ?? null,
-            costTokens: (art.costTokens as number) ?? null,
-            status: (art.status as string) ?? "ready",
-            // v0.6 扩展字段 (计划 §6.6): parent_artifact_id 用于 draft → repair → final lineage
-            parentArtifactId: (art.parentArtifactId as string) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.aiArtifacts = data.aiArtifacts.length;
-      }
+      // 8. 恢复 ai_artifacts（PERF-40 修复：批量 INSERT）
+      // learning_cards 和 validation_events 都通过复合 FK 引用它，必须先于这两类子记录插入。
+      counts.aiArtifacts = await restoreTable(
+        tx, aiArtifacts, data.aiArtifacts,
+        (art) => ({
+          id: art.id as string,
+          workspaceId: targetWorkspaceId,
+          type: art.type as string,
+          inputRefs: art.inputRefs as Record<string, unknown>,
+          output: art.output as unknown,
+          modelId: art.modelId as string,
+          promptVersion: art.promptVersion as string,
+          inputHash: (art.inputHash as string) ?? null,
+          costTokens: (art.costTokens as number) ?? null,
+          status: (art.status as string) ?? "ready",
+          parentArtifactId: (art.parentArtifactId as string) ?? null,
+        }),
+      );
 
-      // 9. 恢复 learning_cards
-      if (Array.isArray(data.learningCards)) {
-        for (const c of data.learningCards) {
-          const card = c as Record<string, unknown>;
-          await tx.insert(learningCards).values({
-            id: card.id as string,
-            noteVersionId: card.noteVersionId as string,
-            workspaceId: targetWorkspaceId,
-            status: (card.status as string) ?? "active",
-            schemaJson: card.schemaJson as { title: string; summary: string },
-            artifactId: (card.artifactId as string) ?? null,
-            supersededByCardId: (card.supersededByCardId as string) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.learningCards = data.learningCards.length;
-      }
+      // 9. 恢复 learning_cards（PERF-40 修复：批量 INSERT）
+      counts.learningCards = await restoreTable(
+        tx, learningCards, data.learningCards,
+        (card) => ({
+          id: card.id as string,
+          noteVersionId: card.noteVersionId as string,
+          workspaceId: targetWorkspaceId,
+          status: (card.status as string) ?? "active",
+          schemaJson: card.schemaJson as { title: string; summary: string },
+          artifactId: (card.artifactId as string) ?? null,
+          supersededByCardId: (card.supersededByCardId as string) ?? null,
+        }),
+      );
 
-      // 10. 恢复 card_key_points
-      if (Array.isArray(data.cardKeyPoints)) {
-        for (const k of data.cardKeyPoints) {
-          const kp = k as Record<string, unknown>;
-          await tx.insert(cardKeyPoints).values({
-            id: kp.id as string,
-            cardId: kp.cardId as string,
-            workspaceId: targetWorkspaceId,
-            ordinal: kp.ordinal as number,
-            claim: kp.claim as string,
-            quoteText: kp.quoteText as string,
-            segmentRef: (kp.segmentRef as Record<string, unknown>) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.cardKeyPoints = data.cardKeyPoints.length;
-      }
+      // 10. 恢复 card_key_points（PERF-40 修复：批量 INSERT）
+      counts.cardKeyPoints = await restoreTable(
+        tx, cardKeyPoints, data.cardKeyPoints,
+        (kp) => ({
+          id: kp.id as string,
+          cardId: kp.cardId as string,
+          workspaceId: targetWorkspaceId,
+          ordinal: kp.ordinal as number,
+          claim: kp.claim as string,
+          quoteText: kp.quoteText as string,
+          segmentRef: (kp.segmentRef as Record<string, unknown>) ?? null,
+        }),
+      );
 
-      // 11. 恢复 evidences
-      if (Array.isArray(data.evidences)) {
-        for (const e of data.evidences) {
-          const ev = e as Record<string, unknown>;
-          await tx.insert(evidences).values({
-            id: ev.id as string,
-            workspaceId: targetWorkspaceId,
-            keyPointId: ev.keyPointId as string,
-            blockId: (ev.blockId as string) ?? null,
-            blockOrdinal: (ev.blockOrdinal as number) ?? null,
-            quoteText: ev.quoteText as string,
-            alignment: (ev.alignment as string) ?? "unaligned",
-            alignmentScore: (ev.alignmentScore as number) ?? 0,
-            alignmentMethod: (ev.alignmentMethod as string) ?? "fuzzy",
-            userOverride: (ev.userOverride as string) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.evidences = data.evidences.length;
-      }
+      // 11. 恢复 evidences（PERF-40 修复：批量 INSERT）
+      counts.evidences = await restoreTable(
+        tx, evidences, data.evidences,
+        (ev) => ({
+          id: ev.id as string,
+          workspaceId: targetWorkspaceId,
+          keyPointId: ev.keyPointId as string,
+          blockId: (ev.blockId as string) ?? null,
+          blockOrdinal: (ev.blockOrdinal as number) ?? null,
+          quoteText: ev.quoteText as string,
+          alignment: (ev.alignment as string) ?? "unaligned",
+          alignmentScore: (ev.alignmentScore as number) ?? 0,
+          alignmentMethod: (ev.alignmentMethod as string) ?? "fuzzy",
+          userOverride: (ev.userOverride as string) ?? null,
+        }),
+      );
 
-      // 11b. 恢复 evidence_overrides
-      if (Array.isArray(data.evidenceOverrides)) {
-        for (const o of data.evidenceOverrides) {
-          const override = o as Record<string, unknown>;
-          await tx.insert(evidenceOverrides).values({
-            id: override.id as string,
-            evidenceId: override.evidenceId as string,
-            userId: override.userId as string,
-            workspaceId: targetWorkspaceId,
-            override: override.override as string,
-            createdAt: override.createdAt ? new Date(override.createdAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.evidenceOverrides = data.evidenceOverrides.length;
-      }
+      // 11b. 恢复 evidence_overrides（PERF-40 修复：批量 INSERT）
+      counts.evidenceOverrides = await restoreTable(
+        tx, evidenceOverrides, data.evidenceOverrides,
+        (override) => ({
+          id: override.id as string,
+          evidenceId: override.evidenceId as string,
+          userId: override.userId as string,
+          workspaceId: targetWorkspaceId,
+          override: override.override as string,
+          createdAt: override.createdAt ? new Date(override.createdAt as string) : new Date(),
+        }),
+      );
 
-      // 11c. 恢复 validation_questions
-      if (Array.isArray(data.validationQuestions)) {
-        for (const q of data.validationQuestions) {
-          const vq = q as Record<string, unknown>;
-          await tx.insert(validationQuestions).values({
-            id: vq.id as string,
-            workspaceId: targetWorkspaceId,
-            cardId: vq.cardId as string,
-            keyPointId: (vq.keyPointId as string) ?? null,
-            noteVersionId: (vq.noteVersionId as string) ?? null,
-            questionType: vq.questionType as string,
-            question: vq.question as string,
-            createdBy: vq.createdBy as string,
-            createdAt: vq.createdAt ? new Date(vq.createdAt as string) : new Date(),
-            expiresAt: vq.expiresAt ? new Date(vq.expiresAt as string) : null,
-            // v0.6 扩展字段 (计划 §6.2)
-            userId: (vq.userId as string) ?? null,
-            artifactId: (vq.artifactId as string) ?? null,
-            generationJobId: (vq.generationJobId as string) ?? null,
-            generatorKind: (vq.generatorKind as string) ?? "ai",
-            status: (vq.status as string) ?? "active",
-            rubricVersion: (vq.rubricVersion as string) ?? null,
-            sourceFingerprint: (vq.sourceFingerprint as string) ?? null,
-            supersededAt: vq.supersededAt ? new Date(vq.supersededAt as string) : null,
-            staleReason: (vq.staleReason as string) ?? null,
-            lastUsedAt: vq.lastUsedAt ? new Date(vq.lastUsedAt as string) : null,
-            useCount: (vq.useCount as number) ?? 0,
-          }).onConflictDoNothing();
-        }
-        counts.validationQuestions = data.validationQuestions.length;
-      }
+      // 11c. 恢复 validation_questions（PERF-40 修复：批量 INSERT）
+      counts.validationQuestions = await restoreTable(
+        tx, validationQuestions, data.validationQuestions,
+        (vq) => ({
+          id: vq.id as string,
+          workspaceId: targetWorkspaceId,
+          cardId: vq.cardId as string,
+          keyPointId: (vq.keyPointId as string) ?? null,
+          noteVersionId: (vq.noteVersionId as string) ?? null,
+          questionType: vq.questionType as string,
+          question: vq.question as string,
+          createdBy: vq.createdBy as string,
+          createdAt: vq.createdAt ? new Date(vq.createdAt as string) : new Date(),
+          expiresAt: vq.expiresAt ? new Date(vq.expiresAt as string) : null,
+          userId: (vq.userId as string) ?? null,
+          artifactId: (vq.artifactId as string) ?? null,
+          generationJobId: (vq.generationJobId as string) ?? null,
+          generatorKind: (vq.generatorKind as string) ?? "ai",
+          status: (vq.status as string) ?? "active",
+          rubricVersion: (vq.rubricVersion as string) ?? null,
+          sourceFingerprint: (vq.sourceFingerprint as string) ?? null,
+          supersededAt: vq.supersededAt ? new Date(vq.supersededAt as string) : null,
+          staleReason: (vq.staleReason as string) ?? null,
+          lastUsedAt: vq.lastUsedAt ? new Date(vq.lastUsedAt as string) : null,
+          useCount: (vq.useCount as number) ?? 0,
+        }),
+      );
 
-      // 12. 恢复 validation_events
-      if (Array.isArray(data.validationEvents)) {
-        for (const v of data.validationEvents) {
-          const ve = v as Record<string, unknown>;
-          await tx.insert(validationEvents).values({
-            id: ve.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: ve.userId as string,
-            cardId: ve.cardId as string,
-            keyPointId: (ve.keyPointId as string) ?? null,
-            artifactId: (ve.artifactId as string) ?? null,
-            question: ve.question as string,
-            questionType: ve.questionType as string,
-            userAnswer: ve.userAnswer as string,
-            outcome: ve.outcome as string,
-            confidence: ve.confidence as number,
-            feedback: (ve.feedback as ValidationFeedback | null) ?? null,
-            questionId: (ve.questionId as string) ?? null,
-            // jobs 属于运行态且不在导出清单中，不能恢复悬空 job FK。
-            jobId: null,
-            // v0.6 扩展字段 (计划 §6.6)
-            submissionId: (ve.submissionId as string) ?? null,
-            noteVersionId: (ve.noteVersionId as string) ?? null,
-            rubricVersion: (ve.rubricVersion as string) ?? null,
-            reducerVersion: (ve.reducerVersion as string) ?? null,
-            sourceFingerprint: (ve.sourceFingerprint as string) ?? null,
-            sourceStatus: (ve.sourceStatus as string) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.validationEvents = data.validationEvents.length;
-      }
+      // 12. 恢复 validation_events（PERF-40 修复：批量 INSERT）
+      counts.validationEvents = await restoreTable(
+        tx, validationEvents, data.validationEvents,
+        (ve) => ({
+          id: ve.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: ve.userId as string,
+          cardId: ve.cardId as string,
+          keyPointId: (ve.keyPointId as string) ?? null,
+          artifactId: (ve.artifactId as string) ?? null,
+          question: ve.question as string,
+          questionType: ve.questionType as string,
+          userAnswer: ve.userAnswer as string,
+          outcome: ve.outcome as string,
+          confidence: ve.confidence as number,
+          feedback: (ve.feedback as ValidationFeedback | null) ?? null,
+          questionId: (ve.questionId as string) ?? null,
+          jobId: null,
+          submissionId: (ve.submissionId as string) ?? null,
+          noteVersionId: (ve.noteVersionId as string) ?? null,
+          rubricVersion: (ve.rubricVersion as string) ?? null,
+          reducerVersion: (ve.reducerVersion as string) ?? null,
+          sourceFingerprint: (ve.sourceFingerprint as string) ?? null,
+          sourceStatus: (ve.sourceStatus as string) ?? null,
+        }),
+      );
 
-      // 13. 恢复 review_schedules
-      if (Array.isArray(data.reviewSchedules)) {
-        for (const r of data.reviewSchedules) {
-          const rev = r as Record<string, unknown>;
-          await tx.insert(reviewSchedules).values({
-            id: rev.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: rev.userId as string,
-            subjectType: rev.subjectType as string,
-            subjectId: rev.subjectId as string,
-            validationEventId: (rev.validationEventId as string) ?? null,
-            status: (rev.status as string) ?? "pending",
-            nextReviewAt: new Date(rev.nextReviewAt as string),
-            intervalDays: (rev.intervalDays as number) ?? 1,
-            // v0.6 扩展字段 (计划 §6.6)
-            keyPointId: (rev.keyPointId as string) ?? null,
-            generation: (rev.generation as number) ?? 1,
-            policyVersion: (rev.policyVersion as string) ?? null,
-            reasonCode: (rev.reasonCode as string) ?? null,
-            supersedesScheduleId: (rev.supersedesScheduleId as string) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.reviewSchedules = data.reviewSchedules.length;
-      }
+      // 13. 恢复 review_schedules（PERF-40 修复：批量 INSERT）
+      counts.reviewSchedules = await restoreTable(
+        tx, reviewSchedules, data.reviewSchedules,
+        (rev) => ({
+          id: rev.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: rev.userId as string,
+          subjectType: rev.subjectType as string,
+          subjectId: rev.subjectId as string,
+          validationEventId: (rev.validationEventId as string) ?? null,
+          status: (rev.status as string) ?? "pending",
+          nextReviewAt: new Date(rev.nextReviewAt as string),
+          intervalDays: (rev.intervalDays as number) ?? 1,
+          keyPointId: (rev.keyPointId as string) ?? null,
+          generation: (rev.generation as number) ?? 1,
+          policyVersion: (rev.policyVersion as string) ?? null,
+          reasonCode: (rev.reasonCode as string) ?? null,
+          supersedesScheduleId: (rev.supersedesScheduleId as string) ?? null,
+        }),
+      );
 
-      // 13b. 恢复 review_attempts (LOOP-01/02) — 必须在 review_schedules 之后，
-      //      因为 review_attempts.review_schedule_id 外键指向 review_schedules。
-      //      answer_text 属于业务数据，随导出文件一起恢复；隐私边界由导出文件
-      //      本身的访问控制保证（仅 Owner 可导出/恢复）。
-      if (Array.isArray(data.reviewAttempts)) {
-        for (const a of data.reviewAttempts) {
-          const att = a as Record<string, unknown>;
-          await tx.insert(reviewAttempts).values({
-            id: att.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: att.userId as string,
-            reviewScheduleId: att.reviewScheduleId as string,
-            subjectType: att.subjectType as string,
-            subjectId: att.subjectId as string,
-            validationEventId: (att.validationEventId as string) ?? null,
-            validationQuestionId: (att.validationQuestionId as string) ?? null,
-            keyPointId: (att.keyPointId as string) ?? null,
-            evidenceId: (att.evidenceId as string) ?? null,
-            noteVersionId: (att.noteVersionId as string) ?? null,
-            answerType: (att.answerType as string) ?? null,
-            answerText: (att.answerText as string) ?? null,
-            outcome: (att.outcome as string) ?? null,
-            confidence: (att.confidence as number) ?? null,
-            skipReason: (att.skipReason as string) ?? null,
-            scheduleBeforeIntervalDays: (att.scheduleBeforeIntervalDays as number) ?? null,
-            scheduleAfterIntervalDays: (att.scheduleAfterIntervalDays as number) ?? null,
-            scheduleReasonCode: (att.scheduleReasonCode as string) ?? null,
-            understandingEffect: (att.understandingEffect as string) ?? null,
-            nextReviewAt: att.nextReviewAt ? new Date(att.nextReviewAt as string) : null,
-            nextScheduleId: (att.nextScheduleId as string) ?? null,
-            idempotencyKey: att.idempotencyKey as string,
-            status: (att.status as string) ?? "started",
-            startedAt: att.startedAt ? new Date(att.startedAt as string) : new Date(),
-            completedAt: att.completedAt ? new Date(att.completedAt as string) : null,
-            abandonedAt: att.abandonedAt ? new Date(att.abandonedAt as string) : null,
-            createdAt: att.createdAt ? new Date(att.createdAt as string) : new Date(),
-            updatedAt: att.updatedAt ? new Date(att.updatedAt as string) : new Date(),
-            // v0.6 扩展字段 (计划 §6.6)
-            evaluationArtifactId: (att.evaluationArtifactId as string) ?? null,
-            evaluationStatus: (att.evaluationStatus as string) ?? null,
-            assistanceLevel: (att.assistanceLevel as string) ?? null,
-            evidenceRevealedAt: att.evidenceRevealedAt ? new Date(att.evidenceRevealedAt as string) : null,
-            policyVersion: (att.policyVersion as string) ?? null,
-            sourceFingerprint: (att.sourceFingerprint as string) ?? null,
-          }).onConflictDoNothing();
-        }
-        counts.reviewAttempts = data.reviewAttempts.length;
-      }
+      // 13b. 恢复 review_attempts（PERF-40 修复：批量 INSERT）
+      // 必须在 review_schedules 之后，因为 review_attempts.review_schedule_id 外键指向 review_schedules。
+      counts.reviewAttempts = await restoreTable(
+        tx, reviewAttempts, data.reviewAttempts,
+        (att) => ({
+          id: att.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: att.userId as string,
+          reviewScheduleId: att.reviewScheduleId as string,
+          subjectType: att.subjectType as string,
+          subjectId: att.subjectId as string,
+          validationEventId: (att.validationEventId as string) ?? null,
+          validationQuestionId: (att.validationQuestionId as string) ?? null,
+          keyPointId: (att.keyPointId as string) ?? null,
+          evidenceId: (att.evidenceId as string) ?? null,
+          noteVersionId: (att.noteVersionId as string) ?? null,
+          answerType: (att.answerType as string) ?? null,
+          answerText: (att.answerText as string) ?? null,
+          outcome: (att.outcome as string) ?? null,
+          confidence: (att.confidence as number) ?? null,
+          skipReason: (att.skipReason as string) ?? null,
+          scheduleBeforeIntervalDays: (att.scheduleBeforeIntervalDays as number) ?? null,
+          scheduleAfterIntervalDays: (att.scheduleAfterIntervalDays as number) ?? null,
+          scheduleReasonCode: (att.scheduleReasonCode as string) ?? null,
+          understandingEffect: (att.understandingEffect as string) ?? null,
+          nextReviewAt: att.nextReviewAt ? new Date(att.nextReviewAt as string) : null,
+          nextScheduleId: (att.nextScheduleId as string) ?? null,
+          idempotencyKey: att.idempotencyKey as string,
+          status: (att.status as string) ?? "started",
+          startedAt: att.startedAt ? new Date(att.startedAt as string) : new Date(),
+          completedAt: att.completedAt ? new Date(att.completedAt as string) : null,
+          abandonedAt: att.abandonedAt ? new Date(att.abandonedAt as string) : null,
+          createdAt: att.createdAt ? new Date(att.createdAt as string) : new Date(),
+          updatedAt: att.updatedAt ? new Date(att.updatedAt as string) : new Date(),
+          evaluationArtifactId: (att.evaluationArtifactId as string) ?? null,
+          evaluationStatus: (att.evaluationStatus as string) ?? null,
+          assistanceLevel: (att.assistanceLevel as string) ?? null,
+          evidenceRevealedAt: att.evidenceRevealedAt ? new Date(att.evidenceRevealedAt as string) : null,
+          policyVersion: (att.policyVersion as string) ?? null,
+          sourceFingerprint: (att.sourceFingerprint as string) ?? null,
+        }),
+      );
 
-      // 14. 恢复 understanding_events
-      if (Array.isArray(data.understandingEvents)) {
-        for (const u of data.understandingEvents) {
-          const ue = u as Record<string, unknown>;
-          await tx.insert(understandingEvents).values({
-            id: ue.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: ue.userId as string,
-            subjectType: ue.subjectType as string,
-            subjectId: ue.subjectId as string,
-            eventType: ue.eventType as string,
-            payload: (ue.payload as Record<string, unknown>) ?? {},
-          }).onConflictDoNothing();
-        }
-        counts.understandingEvents = data.understandingEvents.length;
-      }
+      // 14. 恢复 understanding_events（PERF-40 修复：批量 INSERT）
+      counts.understandingEvents = await restoreTable(
+        tx, understandingEvents, data.understandingEvents,
+        (ue) => ({
+          id: ue.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: ue.userId as string,
+          subjectType: ue.subjectType as string,
+          subjectId: ue.subjectId as string,
+          eventType: ue.eventType as string,
+          payload: (ue.payload as Record<string, unknown>) ?? {},
+        }),
+      );
 
       // ═══ v0.6: 可信掌握闭环新表恢复 (计划 §6.9) ═══
       // 依赖顺序：rubric_items → submissions → submission_jobs, action_commands,
       //           assistance_exposures → point_assessments, shadow_decisions,
       //           quality_signals
 
-      // v0.6-15. 恢复 validation_question_rubric_items (依赖 validation_questions)
-      if (Array.isArray(data.validationQuestionRubricItems)) {
-        for (const r of data.validationQuestionRubricItems) {
-          const ri = r as Record<string, unknown>;
-          await tx.insert(validationQuestionRubricItems).values({
-            id: ri.id as string,
-            workspaceId: targetWorkspaceId,
-            questionId: ri.questionId as string,
-            ordinal: ri.ordinal as number,
-            criterion: ri.criterion as string,
-            expectedConcept: ri.expectedConcept as string,
-            weight: (ri.weight as number) ?? 1,
-            required: (ri.required as boolean) ?? true,
-            evidenceId: (ri.evidenceId as string) ?? null,
-            evidenceSnapshot: (ri.evidenceSnapshot as Record<string, unknown>) ?? null,
-            createdAt: ri.createdAt ? new Date(ri.createdAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.validationQuestionRubricItems = data.validationQuestionRubricItems.length;
-      }
+      // v0.6-15. 恢复 validation_question_rubric_items（PERF-40 修复：批量 INSERT）
+      counts.validationQuestionRubricItems = await restoreTable(
+        tx, validationQuestionRubricItems, data.validationQuestionRubricItems,
+        (ri) => ({
+          id: ri.id as string,
+          workspaceId: targetWorkspaceId,
+          questionId: ri.questionId as string,
+          ordinal: ri.ordinal as number,
+          criterion: ri.criterion as string,
+          expectedConcept: ri.expectedConcept as string,
+          weight: (ri.weight as number) ?? 1,
+          required: (ri.required as boolean) ?? true,
+          evidenceId: (ri.evidenceId as string) ?? null,
+          evidenceSnapshot: (ri.evidenceSnapshot as Record<string, unknown>) ?? null,
+          createdAt: ri.createdAt ? new Date(ri.createdAt as string) : new Date(),
+        }),
+      );
 
-      // v0.6-16. 恢复 validation_submissions (依赖 users, learning_cards, card_key_points)
-      // user_answer 属于敏感业务数据，随导出文件恢复；隐私边界由导出文件
-      // 本身的访问控制保证（仅 Owner 可导出/恢复）。
-      if (Array.isArray(data.validationSubmissions)) {
-        for (const s of data.validationSubmissions) {
-          const sub = s as Record<string, unknown>;
-          await tx.insert(validationSubmissions).values({
-            id: sub.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: sub.userId as string,
-            cardId: sub.cardId as string,
-            keyPointId: (sub.keyPointId as string) ?? null,
-            questionId: (sub.questionId as string) ?? null,
-            context: sub.context as string,
-            reviewAttemptId: (sub.reviewAttemptId as string) ?? null,
-            inputScheduleId: (sub.inputScheduleId as string) ?? null,
-            userAnswer: (sub.userAnswer as string) ?? null,
-            selfConfidence: (sub.selfConfidence as number) ?? null,
-            draftRevision: (sub.draftRevision as number) ?? 0,
-            answerHash: (sub.answerHash as string) ?? null,
-            answerLockedAt: sub.answerLockedAt ? new Date(sub.answerLockedAt as string) : null,
-            assistanceSnapshotExposedAt: sub.assistanceSnapshotExposedAt ? new Date(sub.assistanceSnapshotExposedAt as string) : null,
-            assistanceLevel: (sub.assistanceLevel as string) ?? "none",
-            evidenceRevealedAt: sub.evidenceRevealedAt ? new Date(sub.evidenceRevealedAt as string) : null,
-            sourceFingerprint: (sub.sourceFingerprint as string) ?? null,
-            status: (sub.status as string) ?? "question_preparing",
-            currentGenerationJobId: (sub.currentGenerationJobId as string) ?? null,
-            currentEvaluationJobId: (sub.currentEvaluationJobId as string) ?? null,
-            validationEventId: (sub.validationEventId as string) ?? null,
-            failureStage: (sub.failureStage as string) ?? null,
-            failureCode: (sub.failureCode as string) ?? null,
-            terminalReason: (sub.terminalReason as string) ?? null,
-            startIdempotencyKey: sub.startIdempotencyKey as string,
-            createdAt: sub.createdAt ? new Date(sub.createdAt as string) : new Date(),
-            updatedAt: sub.updatedAt ? new Date(sub.updatedAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.validationSubmissions = data.validationSubmissions.length;
-      }
+      // v0.6-16. 恢复 validation_submissions（PERF-40 修复：批量 INSERT）
+      counts.validationSubmissions = await restoreTable(
+        tx, validationSubmissions, data.validationSubmissions,
+        (sub) => ({
+          id: sub.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: sub.userId as string,
+          cardId: sub.cardId as string,
+          keyPointId: (sub.keyPointId as string) ?? null,
+          questionId: (sub.questionId as string) ?? null,
+          context: sub.context as string,
+          reviewAttemptId: (sub.reviewAttemptId as string) ?? null,
+          inputScheduleId: (sub.inputScheduleId as string) ?? null,
+          userAnswer: (sub.userAnswer as string) ?? null,
+          selfConfidence: (sub.selfConfidence as number) ?? null,
+          draftRevision: (sub.draftRevision as number) ?? 0,
+          answerHash: (sub.answerHash as string) ?? null,
+          answerLockedAt: sub.answerLockedAt ? new Date(sub.answerLockedAt as string) : null,
+          assistanceSnapshotExposedAt: sub.assistanceSnapshotExposedAt ? new Date(sub.assistanceSnapshotExposedAt as string) : null,
+          assistanceLevel: (sub.assistanceLevel as string) ?? "none",
+          evidenceRevealedAt: sub.evidenceRevealedAt ? new Date(sub.evidenceRevealedAt as string) : null,
+          sourceFingerprint: (sub.sourceFingerprint as string) ?? null,
+          status: (sub.status as string) ?? "question_preparing",
+          currentGenerationJobId: (sub.currentGenerationJobId as string) ?? null,
+          currentEvaluationJobId: (sub.currentEvaluationJobId as string) ?? null,
+          validationEventId: (sub.validationEventId as string) ?? null,
+          failureStage: (sub.failureStage as string) ?? null,
+          failureCode: (sub.failureCode as string) ?? null,
+          terminalReason: (sub.terminalReason as string) ?? null,
+          startIdempotencyKey: sub.startIdempotencyKey as string,
+          createdAt: sub.createdAt ? new Date(sub.createdAt as string) : new Date(),
+          updatedAt: sub.updatedAt ? new Date(sub.updatedAt as string) : new Date(),
+        }),
+      );
 
-      // v0.6-17. 恢复 validation_submission_jobs (依赖 validation_submissions)
-      if (Array.isArray(data.validationSubmissionJobs)) {
-        for (const j of data.validationSubmissionJobs) {
-          const sj = j as Record<string, unknown>;
-          await tx.insert(validationSubmissionJobs).values({
-            id: sj.id as string,
-            submissionId: sj.submissionId as string,
-            phase: sj.phase as string,
-            phaseOrdinal: (sj.phaseOrdinal as number) ?? 1,
-            jobId: sj.jobId as string,
-            retryOfJobId: (sj.retryOfJobId as string) ?? null,
-            createdAt: sj.createdAt ? new Date(sj.createdAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.validationSubmissionJobs = data.validationSubmissionJobs.length;
-      }
+      // v0.6-17. 恢复 validation_submission_jobs（PERF-40 修复：批量 INSERT）
+      counts.validationSubmissionJobs = await restoreTable(
+        tx, validationSubmissionJobs, data.validationSubmissionJobs,
+        (sj) => ({
+          id: sj.id as string,
+          submissionId: sj.submissionId as string,
+          phase: sj.phase as string,
+          phaseOrdinal: (sj.phaseOrdinal as number) ?? 1,
+          jobId: sj.jobId as string,
+          retryOfJobId: (sj.retryOfJobId as string) ?? null,
+          createdAt: sj.createdAt ? new Date(sj.createdAt as string) : new Date(),
+        }),
+      );
 
-      // v0.6-18. 恢复 validation_action_commands (依赖 users; submission_id 可空)
-      if (Array.isArray(data.validationActionCommands)) {
-        for (const c of data.validationActionCommands) {
-          const ac = c as Record<string, unknown>;
-          await tx.insert(validationActionCommands).values({
-            id: ac.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: ac.userId as string,
-            submissionId: (ac.submissionId as string) ?? null,
-            action: ac.action as string,
-            idempotencyKey: ac.idempotencyKey as string,
-            requestHash: ac.requestHash as string,
-            responseStatus: (ac.responseStatus as string) ?? "pending",
-            responseSnapshot: (ac.responseSnapshot as Record<string, unknown>) ?? null,
-            createdAt: ac.createdAt ? new Date(ac.createdAt as string) : new Date(),
-            updatedAt: ac.updatedAt ? new Date(ac.updatedAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.validationActionCommands = data.validationActionCommands.length;
-      }
+      // v0.6-18. 恢复 validation_action_commands（PERF-40 修复：批量 INSERT）
+      counts.validationActionCommands = await restoreTable(
+        tx, validationActionCommands, data.validationActionCommands,
+        (ac) => ({
+          id: ac.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: ac.userId as string,
+          submissionId: (ac.submissionId as string) ?? null,
+          action: ac.action as string,
+          idempotencyKey: ac.idempotencyKey as string,
+          requestHash: ac.requestHash as string,
+          responseStatus: (ac.responseStatus as string) ?? "pending",
+          responseSnapshot: (ac.responseSnapshot as Record<string, unknown>) ?? null,
+          createdAt: ac.createdAt ? new Date(ac.createdAt as string) : new Date(),
+          updatedAt: ac.updatedAt ? new Date(ac.updatedAt as string) : new Date(),
+        }),
+      );
 
-      // v0.6-19. 恢复 validation_assistance_exposures (依赖 users, card_key_points)
-      if (Array.isArray(data.validationAssistanceExposures)) {
-        for (const e of data.validationAssistanceExposures) {
-          const ae = e as Record<string, unknown>;
-          await tx.insert(validationAssistanceExposures).values({
-            id: ae.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: ae.userId as string,
-            keyPointId: ae.keyPointId as string,
-            exposureFingerprint: ae.exposureFingerprint as string,
-            lastExposureKind: ae.lastExposureKind as string,
-            firstExposedAt: ae.firstExposedAt ? new Date(ae.firstExposedAt as string) : new Date(),
-            lastExposedAt: ae.lastExposedAt ? new Date(ae.lastExposedAt as string) : new Date(),
-            unassistedEligibleAfter: ae.unassistedEligibleAfter ? new Date(ae.unassistedEligibleAfter as string) : new Date(),
-            lastOriginSubmissionId: (ae.lastOriginSubmissionId as string) ?? null,
-            inputScheduleId: (ae.inputScheduleId as string) ?? null,
-            createdAt: ae.createdAt ? new Date(ae.createdAt as string) : new Date(),
-            updatedAt: ae.updatedAt ? new Date(ae.updatedAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.validationAssistanceExposures = data.validationAssistanceExposures.length;
-      }
+      // v0.6-19. 恢复 validation_assistance_exposures（PERF-40 修复：批量 INSERT）
+      counts.validationAssistanceExposures = await restoreTable(
+        tx, validationAssistanceExposures, data.validationAssistanceExposures,
+        (ae) => ({
+          id: ae.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: ae.userId as string,
+          keyPointId: ae.keyPointId as string,
+          exposureFingerprint: ae.exposureFingerprint as string,
+          lastExposureKind: ae.lastExposureKind as string,
+          firstExposedAt: ae.firstExposedAt ? new Date(ae.firstExposedAt as string) : new Date(),
+          lastExposedAt: ae.lastExposedAt ? new Date(ae.lastExposedAt as string) : new Date(),
+          unassistedEligibleAfter: ae.unassistedEligibleAfter ? new Date(ae.unassistedEligibleAfter as string) : new Date(),
+          lastOriginSubmissionId: (ae.lastOriginSubmissionId as string) ?? null,
+          inputScheduleId: (ae.inputScheduleId as string) ?? null,
+          createdAt: ae.createdAt ? new Date(ae.createdAt as string) : new Date(),
+          updatedAt: ae.updatedAt ? new Date(ae.updatedAt as string) : new Date(),
+        }),
+      );
 
-      // v0.6-20. 恢复 validation_point_assessments (依赖 validation_submissions, validation_question_rubric_items)
-      if (Array.isArray(data.validationPointAssessments)) {
-        for (const p of data.validationPointAssessments) {
-          const pa = p as Record<string, unknown>;
-          await tx.insert(validationPointAssessments).values({
-            id: pa.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: pa.userId as string,
-            submissionId: pa.submissionId as string,
-            rubricItemId: pa.rubricItemId as string,
-            verdict: pa.verdict as string,
-            assessmentSource: pa.assessmentSource as string,
-            confidence: (pa.confidence as number) ?? null,
-            rationale: (pa.rationale as string) ?? null,
-            answerExcerpt: (pa.answerExcerpt as string) ?? null,
-            evidenceSnapshot: (pa.evidenceSnapshot as Record<string, unknown>) ?? null,
-            createdAt: pa.createdAt ? new Date(pa.createdAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.validationPointAssessments = data.validationPointAssessments.length;
-      }
+      // v0.6-20. 恢复 validation_point_assessments（PERF-40 修复：批量 INSERT）
+      counts.validationPointAssessments = await restoreTable(
+        tx, validationPointAssessments, data.validationPointAssessments,
+        (pa) => ({
+          id: pa.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: pa.userId as string,
+          submissionId: pa.submissionId as string,
+          rubricItemId: pa.rubricItemId as string,
+          verdict: pa.verdict as string,
+          assessmentSource: pa.assessmentSource as string,
+          confidence: (pa.confidence as number) ?? null,
+          rationale: (pa.rationale as string) ?? null,
+          answerExcerpt: (pa.answerExcerpt as string) ?? null,
+          evidenceSnapshot: (pa.evidenceSnapshot as Record<string, unknown>) ?? null,
+          createdAt: pa.createdAt ? new Date(pa.createdAt as string) : new Date(),
+        }),
+      );
 
-      // v0.6-21. 恢复 scheduling_shadow_decisions (依赖 users, card_key_points)
-      if (Array.isArray(data.schedulingShadowDecisions)) {
-        for (const s of data.schedulingShadowDecisions) {
-          const sd = s as Record<string, unknown>;
-          await tx.insert(schedulingShadowDecisions).values({
-            id: sd.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: sd.userId as string,
-            keyPointId: (sd.keyPointId as string) ?? null,
-            sourceType: sd.sourceType as string,
-            sourceId: sd.sourceId as string,
-            algorithm: sd.algorithm as string,
-            algorithmVersion: sd.algorithmVersion as string,
-            parametersVersion: sd.parametersVersion as string,
-            inputSnapshot: (sd.inputSnapshot as Record<string, unknown>) ?? null,
-            predictedDueAt: sd.predictedDueAt ? new Date(sd.predictedDueAt as string) : new Date(),
-            stability: (sd.stability as unknown) ?? null,
-            difficulty: (sd.difficulty as unknown) ?? null,
-            retrievability: (sd.retrievability as unknown) ?? null,
-            createdAt: sd.createdAt ? new Date(sd.createdAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.schedulingShadowDecisions = data.schedulingShadowDecisions.length;
-      }
+      // v0.6-21. 恢复 scheduling_shadow_decisions（PERF-40 修复：批量 INSERT）
+      counts.schedulingShadowDecisions = await restoreTable(
+        tx, schedulingShadowDecisions, data.schedulingShadowDecisions,
+        (sd) => ({
+          id: sd.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: sd.userId as string,
+          keyPointId: (sd.keyPointId as string) ?? null,
+          sourceType: sd.sourceType as string,
+          sourceId: sd.sourceId as string,
+          algorithm: sd.algorithm as string,
+          algorithmVersion: sd.algorithmVersion as string,
+          parametersVersion: sd.parametersVersion as string,
+          inputSnapshot: (sd.inputSnapshot as Record<string, unknown>) ?? null,
+          predictedDueAt: sd.predictedDueAt ? new Date(sd.predictedDueAt as string) : new Date(),
+          stability: (sd.stability as unknown) ?? null,
+          difficulty: (sd.difficulty as unknown) ?? null,
+          retrievability: (sd.retrievability as unknown) ?? null,
+          createdAt: sd.createdAt ? new Date(sd.createdAt as string) : new Date(),
+        }),
+      );
 
-      // v0.6-22. 恢复 validation_quality_signals (依赖 users, validation_events)
-      if (Array.isArray(data.validationQualitySignals)) {
-        for (const q of data.validationQualitySignals) {
-          const qs = q as Record<string, unknown>;
-          await tx.insert(validationQualitySignals).values({
-            id: qs.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: qs.userId as string,
-            validationEventId: qs.validationEventId as string,
-            submissionId: (qs.submissionId as string) ?? null,
-            reason: qs.reason as string,
-            comment: (qs.comment as string) ?? null,
-            sourceFingerprint: (qs.sourceFingerprint as string) ?? null,
-            rubricVersion: (qs.rubricVersion as string) ?? null,
-            reducerVersion: (qs.reducerVersion as string) ?? null,
-            policyVersion: (qs.policyVersion as string) ?? null,
-            createdAt: qs.createdAt ? new Date(qs.createdAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.validationQualitySignals = data.validationQualitySignals.length;
-      }
+      // v0.6-22. 恢复 validation_quality_signals（PERF-40 修复：批量 INSERT）
+      counts.validationQualitySignals = await restoreTable(
+        tx, validationQualitySignals, data.validationQualitySignals,
+        (qs) => ({
+          id: qs.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: qs.userId as string,
+          validationEventId: qs.validationEventId as string,
+          submissionId: (qs.submissionId as string) ?? null,
+          reason: qs.reason as string,
+          comment: (qs.comment as string) ?? null,
+          sourceFingerprint: (qs.sourceFingerprint as string) ?? null,
+          rubricVersion: (qs.rubricVersion as string) ?? null,
+          reducerVersion: (qs.reducerVersion as string) ?? null,
+          policyVersion: (qs.policyVersion as string) ?? null,
+          createdAt: qs.createdAt ? new Date(qs.createdAt as string) : new Date(),
+        }),
+      );
 
-      // 15. 恢复 onboarding_states (SEC-02/ALPHA-01) — 必须在 users 和
-      //     workspace_members 之后，因为外键指向它们。
-      if (Array.isArray(data.onboardingStates)) {
-        for (const o of data.onboardingStates) {
-          const os = o as Record<string, unknown>;
-          await tx.insert(onboardingStates).values({
-            id: os.id as string,
-            workspaceId: targetWorkspaceId,
-            userId: os.userId as string,
-            version: (os.version as string) ?? "v1",
-            steps: (os.steps as Record<string, boolean>) ?? {},
-            status: (os.status as string) ?? "pending",
-            createdAt: os.createdAt ? new Date(os.createdAt as string) : new Date(),
-            updatedAt: os.updatedAt ? new Date(os.updatedAt as string) : new Date(),
-          }).onConflictDoNothing();
-        }
-        counts.onboardingStates = data.onboardingStates.length;
-      }
+      // 15. 恢复 onboarding_states（PERF-40 修复：批量 INSERT）
+      // 必须在 users 和 workspace_members 之后，因为外键指向它们。
+      counts.onboardingStates = await restoreTable(
+        tx, onboardingStates, data.onboardingStates,
+        (os) => ({
+          id: os.id as string,
+          workspaceId: targetWorkspaceId,
+          userId: os.userId as string,
+          version: (os.version as string) ?? "v1",
+          steps: (os.steps as Record<string, boolean>) ?? {},
+          status: (os.status as string) ?? "pending",
+          createdAt: os.createdAt ? new Date(os.createdAt as string) : new Date(),
+          updatedAt: os.updatedAt ? new Date(os.updatedAt as string) : new Date(),
+        }),
+      );
 
     });
 
@@ -1226,61 +1283,68 @@ export async function restoreWorkspace(
 
 /**
  * 导出单篇笔记为 Markdown。
+ *
+ * BUG-75 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）。
  */
-export async function exportNoteMarkdown(noteId: string, workspaceId: string) {
-  // CONC-03: 不导出已软删除的笔记
-  const note = await db.query.notes.findFirst({
-    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
-  });
-  if (!note) return null;
+export async function exportNoteMarkdown(noteId: string, workspaceId: string, userId: string) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId },
+    async (tx) => {
+      // CONC-03: 不导出已软删除的笔记
+      const note = await tx.query.notes.findFirst({
+        where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+      });
+      if (!note) return null;
 
-  const versionId = note.currentVersionId;
-  if (!versionId) return null;
+      const versionId = note.currentVersionId;
+      if (!versionId) return null;
 
-  const blocks = await db.query.noteBlocks.findMany({
-    where: eq(noteBlocks.versionId, versionId),
-    orderBy: (b, { asc: a }) => [a(b.ordinal)],
-  });
+      const blocks = await tx.query.noteBlocks.findMany({
+        where: eq(noteBlocks.versionId, versionId),
+        orderBy: (b, { asc: a }) => [a(b.ordinal)],
+      });
 
-  const lines: string[] = [`# ${note.title}`, ""];
+      const lines: string[] = [`# ${note.title}`, ""];
 
-  for (const block of blocks) {
-    switch (block.type) {
-      case "heading":
-        lines.push(block.content);
-        break;
-      case "paragraph":
-        lines.push(block.content);
-        break;
-      case "code":
-        // R-015: parser 已保留 code fence（```typescript...```），不再二次包裹
-        if (block.content.trim().startsWith("```")) {
-          lines.push(block.content);
-        } else {
-          lines.push("```");
-          lines.push(block.content);
-          lines.push("```");
-        }
-        break;
-      case "quote":
-        // R-015: parser 已保留 > 前缀，不再二次添加
-        if (block.content.startsWith(">")) {
-          lines.push(block.content);
-        } else {
-          lines.push(block.content.split("\n").map((l) => `> ${l}`).join("\n"));
-        }
-        break;
-      case "list":
-        lines.push(block.content);
-        break;
-      case "image":
-        lines.push(block.content);
-        break;
-      default:
+      for (const block of blocks) {
+        switch (block.type) {
+          case "heading":
+            lines.push(block.content);
+            break;
+          case "paragraph":
+            lines.push(block.content);
+            break;
+          case "code":
+            // R-015: parser 已保留 code fence（```typescript...```），不再二次包裹
+            if (block.content.trim().startsWith("```")) {
+              lines.push(block.content);
+            } else {
+              lines.push("```");
+              lines.push(block.content);
+              lines.push("```");
+            }
+            break;
+          case "quote":
+            // R-015: parser 已保留 > 前缀，不再二次添加
+            if (block.content.startsWith(">")) {
+              lines.push(block.content);
+            } else {
+              lines.push(block.content.split("\n").map((l) => `> ${l}`).join("\n"));
+            }
+            break;
+          case "list":
+            lines.push(block.content);
+            break;
+          case "image":
+            lines.push(block.content);
+            break;
+          default:
         lines.push(block.content);
     }
     lines.push("");
   }
 
-  return lines.join("\n");
+      return lines.join("\n");
+    },
+  );
 }

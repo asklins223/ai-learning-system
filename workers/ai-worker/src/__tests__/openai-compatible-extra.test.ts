@@ -2,15 +2,21 @@
  * openai-compatible.ts 扩展测试
  *
  * 通过 mock requester 测试 OpenAICompatibleProvider 的所有方法：
- * - generateCard 成功/失败
- * - evaluateValidation 成功/失败
+ * - evaluateValidation 成功/失败（R5: via evaluateValidationViaChat helper）
  * - call 方法的错误分支（aborted signal, error status, empty output）
  * - parseModelJson 的各种 JSON 格式解析
+ * - analyzeImage 多模态消息
+ *
+ * R5: Business methods removed from provider; tests now use
+ * evaluateValidationViaChat helper from business-ai-ops.ts.
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { OpenAICompatibleProvider } from "../lib/providers/openai-compatible.ts";
+import { ProviderRequestError } from "../lib/generation-failure-policy.ts";
+import { AgentOutputError } from "../lib/non-retryable-errors.ts";
+import { evaluateValidationViaChat, analyzeImageViaChat } from "../lib/business-ai-ops.ts";
 import type { PublicJsonRequester, PublicJsonResponse } from "@ailearn/shared/public-json-http";
 
 function mockRequester(response: PublicJsonResponse): PublicJsonRequester {
@@ -20,18 +26,6 @@ function mockRequester(response: PublicJsonResponse): PublicJsonRequester {
 function failingRequester(error: Error): PublicJsonRequester {
   return async () => { throw error; };
 }
-
-const validCardOutput = {
-  title: "测试卡片",
-  summary: "测试摘要",
-  key_points: [
-    {
-      ordinal: 0,
-      claim: "测试要点",
-      quote_text: "原文引用",
-    },
-  ],
-};
 
 const validEvalOutput = {
   outcome: "preliminary_understanding",
@@ -58,13 +52,23 @@ const validImageOutput = {
   unresolvedReason: null,
 };
 
-// ─── generateCard 成功路径 ───────────────────────────────────────────────
+function evalInput() {
+  return {
+    question: "什么是X？",
+    questionType: "free_text",
+    claim: "X是Y",
+    quote: "X是Y的原文",
+    userAnswer: "X是Y",
+  };
+}
 
-test("OpenAICompatibleProvider.generateCard: 正常 JSON 输出成功", async () => {
+// ─── evaluateValidation 成功路径 ─────────────────────────────────────────
+
+test("OpenAICompatibleProvider.evaluateValidation: 正常 JSON 输出成功", async () => {
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
-    body: { choices: [{ message: { content: JSON.stringify(validCardOutput) } }] },
+    body: { choices: [{ message: { content: JSON.stringify(validEvalOutput) } }] },
   };
   const provider = new OpenAICompatibleProvider({
     apiKey: "test-key",
@@ -72,15 +76,12 @@ test("OpenAICompatibleProvider.generateCard: 正常 JSON 输出成功", async ()
     model: "gpt-4",
     request: mockRequester(response),
   });
-  const result = await provider.generateCard({
-    noteTitle: "测试笔记",
-    blocks: [{ ordinal: 0, type: "paragraph", content: "内容" }],
-  });
-  assert.equal(result.title, "测试卡片");
-  assert.equal(result.key_points.length, 1);
+  const result = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(result.output.outcome, "preliminary_understanding");
+  assert.equal(result.output.confidence, 0.85);
 });
 
-test("OpenAICompatibleProvider.generateCard: 保持 endpoint、鉴权和模型请求契约", async () => {
+test("OpenAICompatibleProvider.evaluateValidation: 保持 endpoint、鉴权和模型请求契约", async () => {
   let requestedUrl = "";
   let requestedHeaders: Record<string, string> = {};
   let requestedBody: unknown;
@@ -95,45 +96,23 @@ test("OpenAICompatibleProvider.generateCard: 保持 endpoint、鉴权和模型�
       return {
         status: 200,
         statusText: "OK",
-        body: { choices: [{ message: { content: JSON.stringify(validCardOutput) } }] },
+        body: { choices: [{ message: { content: JSON.stringify(validEvalOutput) } }] },
       };
     },
   });
 
-  await provider.generateCard({ noteTitle: "Note", blocks: [] });
+  await evaluateValidationViaChat(provider, evalInput());
 
   assert.equal(requestedUrl, "https://api.example.com/v1/chat/completions");
   assert.equal(requestedHeaders.Authorization, "Bearer sk-test-secret");
   assert.equal(typeof requestedBody, "object");
   const body = requestedBody as Record<string, unknown>;
   assert.equal(body.model, "example-model");
-  assert.equal(body.temperature, 0.3);
-  assert.equal(body.max_tokens, 4096);
   assert.equal(body.stream, false);
   assert.ok(Array.isArray(body.messages));
 });
 
-test("OpenAICompatibleProvider.generateCard: markdown 包裹的 JSON 成功解析", async () => {
-  const markdownJson = "```json\n" + JSON.stringify(validCardOutput) + "\n```";
-  const response: PublicJsonResponse = {
-    status: 200,
-    statusText: "OK",
-    body: { choices: [{ message: { content: markdownJson } }] },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  const result = await provider.generateCard({
-    noteTitle: "测试笔记",
-    blocks: [{ ordinal: 0, type: "paragraph", content: "内容" }],
-  });
-  assert.equal(result.title, "测试卡片");
-});
-
-test("OpenAICompatibleProvider.analyzeImage: 使用独立视觉模型和 data URL 多模态消息", async () => {
+test("analyzeImageViaChat: 使用独立视觉模型和 data URL 多模态消息", async () => {
   let requestedBody: unknown;
   const provider = new OpenAICompatibleProvider({
     apiKey: "sk-test-secret",
@@ -153,7 +132,7 @@ test("OpenAICompatibleProvider.analyzeImage: 使用独立视觉模型和 data UR
     },
   });
 
-  const result = await provider.analyzeImage({
+  const result = await analyzeImageViaChat(provider, {
     body: Buffer.from([0, 1, 2]),
     mimeType: "image/png",
     width: 640,
@@ -173,11 +152,27 @@ test("OpenAICompatibleProvider.analyzeImage: 使用独立视觉模型和 data UR
   assert.match(content[0]?.text, /normalized_0_10000/);
   assert.equal(content[1]?.type, "image_url");
   assert.equal(content[1]?.image_url?.url, "data:image/png;base64,AAEC");
-  assert.equal(provider.getLastUsage()?.totalTokens, 15);
 });
 
-test("OpenAICompatibleProvider.generateCard: 无 markdown 标记的 ``` 包裹成功解析", async () => {
-  const wrappedJson = "```\n" + JSON.stringify(validCardOutput) + "\n```";
+test("OpenAICompatibleProvider.evaluateValidation: markdown 包裹的 JSON 成功解析", async () => {
+  const markdownJson = "```json\n" + JSON.stringify(validEvalOutput) + "\n```";
+  const response: PublicJsonResponse = {
+    status: 200,
+    statusText: "OK",
+    body: { choices: [{ message: { content: markdownJson } }] },
+  };
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: mockRequester(response),
+  });
+  const result = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(result.output.outcome, "preliminary_understanding");
+});
+
+test("OpenAICompatibleProvider.evaluateValidation: 无 markdown 标记的 ``` 包裹成功解析", async () => {
+  const wrappedJson = "```\n" + JSON.stringify(validEvalOutput) + "\n```";
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
@@ -189,15 +184,12 @@ test("OpenAICompatibleProvider.generateCard: 无 markdown 标记的 ``` 包裹�
     model: "gpt-4",
     request: mockRequester(response),
   });
-  const result = await provider.generateCard({
-    noteTitle: "测试",
-    blocks: [],
-  });
-  assert.equal(result.title, "测试卡片");
+  const result = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(result.output.outcome, "preliminary_understanding");
 });
 
-test("OpenAICompatibleProvider.generateCard: JSON 前后有多余文本但含有效 JSON 对象", async () => {
-  const mixedContent = "Here is the result:\n" + JSON.stringify(validCardOutput) + "\nDone.";
+test("OpenAICompatibleProvider.evaluateValidation: JSON 前后有多余文本但含有效 JSON 对象", async () => {
+  const mixedContent = "Here is the result:\n" + JSON.stringify(validEvalOutput) + "\nDone.";
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
@@ -209,16 +201,13 @@ test("OpenAICompatibleProvider.generateCard: JSON 前后有多余文本但含有
     model: "gpt-4",
     request: mockRequester(response),
   });
-  const result = await provider.generateCard({
-    noteTitle: "测试",
-    blocks: [],
-  });
-  assert.equal(result.title, "测试卡片");
+  const result = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(result.output.outcome, "preliminary_understanding");
 });
 
-// ─── generateCard 失败路径 ───────────────────────────────────────────────
+// ─── evaluateValidation 失败路径 ─────────────────────────────────────────
 
-test("OpenAICompatibleProvider.generateCard: 无效 JSON 输出抛错", async () => {
+test("OpenAICompatibleProvider.evaluateValidation: 无效 JSON 输出抛错", async () => {
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
@@ -231,147 +220,7 @@ test("OpenAICompatibleProvider.generateCard: 无效 JSON 输出抛错", async ()
     request: mockRequester(response),
   });
   await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
-    /no JSON object/,
-  );
-});
-
-test("OpenAICompatibleProvider.generateCard: schema 校验失败抛错", async () => {
-  const invalidOutput = { title: "缺少字段" };
-  const response: PublicJsonResponse = {
-    status: 200,
-    statusText: "OK",
-    body: { choices: [{ message: { content: JSON.stringify(invalidOutput) } }] },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
-    /schema check/,
-  );
-});
-
-test("OpenAICompatibleProvider.generateCard: 空输出抛错", async () => {
-  const response: PublicJsonResponse = {
-    status: 200,
-    statusText: "OK",
-    body: { choices: [{ message: { content: "" } }] },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
-    /empty output/,
-  );
-});
-
-test("OpenAICompatibleProvider.generateCard: 空白输出抛错", async () => {
-  const response: PublicJsonResponse = {
-    status: 200,
-    statusText: "OK",
-    body: { choices: [{ message: { content: "   " } }] },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
-    /empty output/,
-  );
-});
-
-test("OpenAICompatibleProvider.generateCard: HTTP 错误状态抛错", async () => {
-  const response: PublicJsonResponse = {
-    status: 500,
-    statusText: "Internal Server Error",
-    body: { error: "server error" },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
-    /500/,
-  );
-});
-
-test("OpenAICompatibleProvider.generateCard: 401 错误状态抛错", async () => {
-  const response: PublicJsonResponse = {
-    status: 401,
-    statusText: "Unauthorized",
-    body: { error: { message: "invalid api key" } },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
-    /401: invalid api key/,
-  );
-});
-
-// ─── evaluateValidation 成功/失败 ─────────────────────────────────────────
-
-test("OpenAICompatibleProvider.evaluateValidation: 正常 JSON 输出成功", async () => {
-  const response: PublicJsonResponse = {
-    status: 200,
-    statusText: "OK",
-    body: { choices: [{ message: { content: JSON.stringify(validEvalOutput) } }] },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  const result = await provider.evaluateValidation({
-    question: "什么是X？",
-    questionType: "free_text",
-    claim: "X是Y",
-    quote: "X是Y的原文",
-    userAnswer: "X是Y",
-  });
-  assert.equal(result.outcome, "preliminary_understanding");
-  assert.equal(result.confidence, 0.85);
-});
-
-test("OpenAICompatibleProvider.evaluateValidation: 无效 JSON 抛错", async () => {
-  const response: PublicJsonResponse = {
-    status: 200,
-    statusText: "OK",
-    body: { choices: [{ message: { content: "not json" } }] },
-  };
-  const provider = new OpenAICompatibleProvider({
-    apiKey: "test-key",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4",
-    request: mockRequester(response),
-  });
-  await assert.rejects(
-    provider.evaluateValidation({
-      question: "什么是X？",
-      questionType: "free_text",
-      claim: "X是Y",
-      quote: "原文",
-      userAnswer: "X是Y",
-    }),
+    evaluateValidationViaChat(provider, evalInput()),
     /no JSON object/,
   );
 });
@@ -390,14 +239,65 @@ test("OpenAICompatibleProvider.evaluateValidation: schema 校验失败抛错", a
     request: mockRequester(response),
   });
   await assert.rejects(
-    provider.evaluateValidation({
-      question: "什么是X？",
-      questionType: "free_text",
-      claim: "X是Y",
-      quote: "原文",
-      userAnswer: "X是Y",
-    }),
+    evaluateValidationViaChat(provider, evalInput()),
     /schema check/,
+  );
+});
+
+test("OpenAICompatibleProvider.evaluateValidation: 空输出抛错", async () => {
+  const response: PublicJsonResponse = {
+    status: 200,
+    statusText: "OK",
+    body: { choices: [{ message: { content: "" } }] },
+  };
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: mockRequester(response),
+  });
+  await assert.rejects(
+    evaluateValidationViaChat(provider, evalInput()),
+    /empty output/,
+  );
+});
+
+test("OpenAICompatibleProvider.evaluateValidation: HTTP 错误状态抛错", async () => {
+  const response: PublicJsonResponse = {
+    status: 500,
+    statusText: "Internal Server Error",
+    body: { error: "server error" },
+  };
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: mockRequester(response),
+  });
+  await assert.rejects(
+    evaluateValidationViaChat(provider, evalInput()),
+    /500/,
+  );
+});
+
+test("OpenAICompatibleProvider.evaluateValidation: 401 错误状态抛错", async () => {
+  const response: PublicJsonResponse = {
+    status: 401,
+    statusText: "Unauthorized",
+    body: { error: { code: "invalid_api_key", message: "invalid api key" } },
+  };
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: mockRequester(response),
+  });
+  await assert.rejects(
+    evaluateValidationViaChat(provider, evalInput()),
+    (error: unknown) =>
+      error instanceof ProviderRequestError
+      && error.status === 401
+      && error.providerCode === "invalid_api_key",
   );
 });
 
@@ -418,7 +318,7 @@ test("OpenAICompatibleProvider: aborted signal 抛错", async () => {
   const controller = new AbortController();
   controller.abort(new Error("user cancelled"));
   await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }, controller.signal),
+    evaluateValidationViaChat(provider, evalInput(), controller.signal),
     /user cancelled/,
   );
 });
@@ -438,7 +338,7 @@ test("OpenAICompatibleProvider: aborted signal 无 reason 抛默认错误", asyn
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }, controller.signal),
+    evaluateValidationViaChat(provider, evalInput(), controller.signal),
     /aborted/,
   );
 });
@@ -451,15 +351,15 @@ test("OpenAICompatibleProvider: 网络错误抛错", async () => {
     request: failingRequester(new Error("ECONNREFUSED")),
   });
   await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
+    evaluateValidationViaChat(provider, evalInput()),
     /ECONNREFUSED/,
   );
 });
 
-// ─── parseModelJson 边界情况（通过 generateCard 间接测试）─────────────────
+// ─── parseModelJson 边界情况（通过 evaluateValidation 间接测试）──────────
 
 test("OpenAICompatibleProvider: 嵌套 JSON 对象正确解析", async () => {
-  const nestedJson = '{"title":"卡","summary":"摘要","key_points":[{"ordinal":0,"claim":"要点","quote_text":"引用"}]}';
+  const nestedJson = '{"outcome":"preliminary_understanding","confidence":0.85,"feedback":"ok","covered_points":[],"missing_points":[],"misunderstandings":[],"evidence_refs":[]}';
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
@@ -471,13 +371,12 @@ test("OpenAICompatibleProvider: 嵌套 JSON 对象正确解析", async () => {
     model: "gpt-4",
     request: mockRequester(response),
   });
-  const result = await provider.generateCard({ noteTitle: "测试", blocks: [] });
-  assert.equal(result.title, "卡");
-  assert.equal(result.key_points[0].claim, "要点");
+  const result = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(result.output.outcome, "preliminary_understanding");
 });
 
 test("OpenAICompatibleProvider: JSON 含字符串中的花括号正确解析", async () => {
-  const jsonWithStringBraces = '{"title":"含{花括号}的标题","summary":"摘要","key_points":[{"ordinal":0,"claim":"要点","quote_text":"引用"}]}';
+  const jsonWithStringBraces = '{"outcome":"preliminary_understanding","confidence":0.85,"feedback":"含{花括号}的反馈","covered_points":[],"missing_points":[],"misunderstandings":[],"evidence_refs":[]}';
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
@@ -489,12 +388,12 @@ test("OpenAICompatibleProvider: JSON 含字符串中的花括号正确解析", a
     model: "gpt-4",
     request: mockRequester(response),
   });
-  const result = await provider.generateCard({ noteTitle: "测试", blocks: [] });
-  assert.equal(result.title, "含{花括号}的标题");
+  const result = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(result.output.feedback, "含{花括号}的反馈");
 });
 
 test("OpenAICompatibleProvider: JSON 含转义引号正确解析", async () => {
-  const jsonWithEscapedQuotes = '{"title":"含\\"引号\\"的标题","summary":"摘要","key_points":[{"ordinal":0,"claim":"要点","quote_text":"引用"}]}';
+  const jsonWithEscapedQuotes = '{"outcome":"preliminary_understanding","confidence":0.85,"feedback":"含\\"引号\\"的反馈","covered_points":[],"missing_points":[],"misunderstandings":[],"evidence_refs":[]}';
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
@@ -506,8 +405,8 @@ test("OpenAICompatibleProvider: JSON 含转义引号正确解析", async () => {
     model: "gpt-4",
     request: mockRequester(response),
   });
-  const result = await provider.generateCard({ noteTitle: "测试", blocks: [] });
-  assert.equal(result.title, '含"引号"的标题');
+  const result = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(result.output.feedback, '含"引号"的反馈');
 });
 
 test("OpenAICompatibleProvider: 无 { 的输出抛 'no JSON object'", async () => {
@@ -523,13 +422,13 @@ test("OpenAICompatibleProvider: 无 { 的输出抛 'no JSON object'", async () =
     request: mockRequester(response),
   });
   await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
+    evaluateValidationViaChat(provider, evalInput()),
     /no JSON object/,
   );
 });
 
 test("OpenAICompatibleProvider: 不完整的 JSON 抛 'malformed JSON'", async () => {
-  const incompleteJson = 'Here is the result: {"title":"不完整"';
+  const incompleteJson = 'Here is the result: {"outcome":"不完整"';
   const response: PublicJsonResponse = {
     status: 200,
     statusText: "OK",
@@ -542,7 +441,7 @@ test("OpenAICompatibleProvider: 不完整的 JSON 抛 'malformed JSON'", async (
     request: mockRequester(response),
   });
   await assert.rejects(
-    provider.generateCard({ noteTitle: "测试", blocks: [] }),
+    evaluateValidationViaChat(provider, evalInput()),
     /malformed JSON/,
   );
 });
@@ -560,7 +459,7 @@ test("OpenAICompatibleProvider: id 和 promptVersion 正确", () => {
   assert.equal(provider.modelId, "gpt-4");
 });
 
-test("OpenAICompatibleProvider: failed request clears usage from the previous call", async () => {
+test("OpenAICompatibleProvider: usage returned per call, not retained across calls", async () => {
   let callCount = 0;
   const provider = new OpenAICompatibleProvider({
     apiKey: "test-key",
@@ -573,7 +472,7 @@ test("OpenAICompatibleProvider: failed request clears usage from the previous ca
           status: 200,
           statusText: "OK",
           body: {
-            choices: [{ message: { content: JSON.stringify(validCardOutput) } }],
+            choices: [{ message: { content: JSON.stringify(validEvalOutput) } }],
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
           },
         };
@@ -582,8 +481,120 @@ test("OpenAICompatibleProvider: failed request clears usage from the previous ca
     },
   });
 
-  await provider.generateCard({ noteTitle: "测试", blocks: [] });
-  assert.equal(provider.getLastUsage()?.totalTokens, 15);
-  await assert.rejects(provider.generateCard({ noteTitle: "测试", blocks: [] }), /network unavailable/);
-  assert.equal(provider.getLastUsage(), null);
+  const ok = await evaluateValidationViaChat(provider, evalInput());
+  assert.equal(ok.usage.totalTokens, 15);
+  await assert.rejects(evaluateValidationViaChat(provider, evalInput()), /network unavailable/);
+});
+
+// ─── executeAgentTurn 截断/参数损坏检测（截断空转修复）────────────────────
+
+const agentTurnRequest = {
+  role: "text_extractor",
+  systemPrompt: "test system prompt",
+  messages: [{ role: "user" as const, content: "分析这段内容" }],
+  tools: [{
+    name: "record_extraction_decisions",
+    description: "记录提取决策",
+    parameters: { type: "object", properties: {} },
+  }],
+};
+
+test("OpenAICompatibleProvider.executeAgentTurn: finish_reason=length 抛 output_truncated", async () => {
+  const response: PublicJsonResponse = {
+    status: 200,
+    statusText: "OK",
+    body: {
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "call-1",
+            function: {
+              name: "record_extraction_decisions",
+              // 模拟输出被截断：arguments 是不完整 JSON
+              arguments: '{"candidates":[{"localId":"c1"},{"localId":',
+            },
+          }],
+        },
+        finish_reason: "length",
+      }],
+    },
+  };
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: mockRequester(response),
+  });
+  await assert.rejects(
+    provider.executeAgentTurn(agentTurnRequest as never),
+    (err: unknown) =>
+      err instanceof AgentOutputError && err.code === "output_truncated",
+  );
+});
+
+test("OpenAICompatibleProvider.executeAgentTurn: malformed arguments 抛 arguments_malformed", async () => {
+  const response: PublicJsonResponse = {
+    status: 200,
+    statusText: "OK",
+    body: {
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "call-1",
+            function: {
+              name: "record_extraction_decisions",
+              arguments: "{invalid json",
+            },
+          }],
+        },
+        finish_reason: "stop",
+      }],
+    },
+  };
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: mockRequester(response),
+  });
+  await assert.rejects(
+    provider.executeAgentTurn(agentTurnRequest as never),
+    (err: unknown) =>
+      err instanceof AgentOutputError && err.code === "arguments_malformed",
+  );
+});
+
+test("OpenAICompatibleProvider.executeAgentTurn: 完整 tool call 正常返回", async () => {
+  const response: PublicJsonResponse = {
+    status: 200,
+    statusText: "OK",
+    body: {
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "call-1",
+            function: {
+              name: "record_extraction_decisions",
+              arguments: '{"bundleIds":["b1"],"candidates":[{"localId":"c1"}]}',
+            },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    },
+  };
+  const provider = new OpenAICompatibleProvider({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4",
+    request: mockRequester(response),
+  });
+  const result = await provider.executeAgentTurn(agentTurnRequest as never);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].name, "record_extraction_decisions");
+  assert.deepEqual(result.toolCalls[0].arguments, { bundleIds: ["b1"], candidates: [{ localId: "c1" }] });
+  assert.equal(result.finishReason, "tool_calls");
 });

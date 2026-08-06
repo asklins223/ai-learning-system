@@ -53,9 +53,8 @@ interface MockTxConfig {
   usersFindFirstQueue?: any[];
   onboardingStatesFindFirst?: any;
   onboardingStatesFindFirstQueue?: any[];
-  workspacesFindFirst?: any;
-  userAIModelConfigsFindFirst?: any;
-  evidencesFindFirst?: any;
+workspacesFindFirst?: any;
+evidencesFindFirst?: any;
 }
 
 function createMockTx(config: MockTxConfig): any {
@@ -116,14 +115,10 @@ function createMockTx(config: MockTxConfig): any {
         findMany: async () => [],
       },
       workspaces: {
-        findFirst: async () => config.workspacesFindFirst ?? undefined,
-        findMany: async () => [],
-      },
-      userAIModelConfigs: {
-        findFirst: async () => config.userAIModelConfigsFindFirst ?? undefined,
-        findMany: async () => [],
-      },
-      evidences: {
+findFirst: async () => config.workspacesFindFirst ?? undefined,
+findMany: async () => [],
+},
+evidences: {
         findFirst: async () => config.evidencesFindFirst ?? undefined,
         findMany: async () => [],
       },
@@ -572,10 +567,9 @@ describe("invite-service removeMember (DB mock)", () => {
 
 describe("invite-service getOnboardingState (DB mock)", () => {
   it("系统默认模型可用时自动完成模型准备步骤", async () => {
-    // deriveOnboardingSnapshot calls:
-    //   tx.query.workspaces.findFirst → undefined (falls back to system mock)
-    //   tx.query.userAIModelConfigs.findFirst → undefined (no personal override)
-    //   tx.select().from(sources).where().limit(1) → [] (first_content=false)
+// deriveOnboardingSnapshot calls:
+//   tx.query.workspaces.findFirst → undefined (falls back to system mock)
+//   tx.select().from(sources).where().limit(1) → [] (first_content=false)
     //   tx.select().from(notes).where().limit(1) → [] (first_note=false)
     //   tx.select().from(learningCards).innerJoin().where().limit(1) → [] (first_card=false)
     //   tx.select().from(validationEvents).where().limit(1) → [] (first_validation=false)
@@ -602,7 +596,6 @@ describe("invite-service getOnboardingState (DB mock)", () => {
     assert.equal(result!.status, "in_progress");
     assert.deepEqual(result!.steps, {
       ai_consent: true,
-      provider_config: true,
       first_content: false,
       first_note: false,
       first_card: false,
@@ -716,9 +709,8 @@ describe("invite-service markOnboardingStep (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
-      workspacesFindFirst: { aiConsentAt: new Date(), aiConsentVersion: "v1" },
-      userAIModelConfigsFindFirst: { id: "config-1" },
-      selectResult: [
+workspacesFindFirst: { aiConsentAt: new Date(), aiConsentVersion: "v1" },
+selectResult: [
         [{  // onboarding state select
           id: "ob-1", workspaceId: WS_ID, userId: USER_ID,
           version: "v1", steps: {}, status: "pending",
@@ -740,8 +732,8 @@ describe("invite-service markOnboardingStep (DB mock)", () => {
 
 describe("invite-service ensureOnboardingState (DB mock)", () => {
   it("已存在时直接返回", async () => {
-    // getOnboardingState calls deriveOnboardingSnapshot which needs:
-    //   workspaces.findFirst, userAIModelConfigs.findFirst, 4 select queries
+// getOnboardingState calls deriveOnboardingSnapshot which needs:
+//   workspaces.findFirst, 4 select queries
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,

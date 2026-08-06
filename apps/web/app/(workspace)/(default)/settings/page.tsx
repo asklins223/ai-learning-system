@@ -18,7 +18,7 @@ import {
   MarkdownFilePicker,
   useMarkdownFileSelection,
 } from "@/components/MarkdownFilePicker";
-import { AIModelSettings } from "@/components/settings/AIModelSettings";
+import { AIPrivacySettings } from "@/components/settings/AIPrivacySettings";
 import { InviteMemberSettings } from "@/components/settings/InviteMemberSettings";
 import { WorkspaceManagement } from "@/components/settings/WorkspaceManagement";
 import { AvatarUploader } from "@/components/account/AvatarUploader";
@@ -655,11 +655,11 @@ export default function SettingsPage() {
             >
               {activeSection === "model" && <>
               <SettingsPanelHeading
-                title="模型与 API 配置"
-                description="直接使用系统默认配置，或为当前账户连接个人模型服务；完整密钥不会回显给浏览器。"
+                title="AI 模型与隐私治理"
+                description="系统统一配置 AI 平台，此处管理工作区的外发边界、数据策略和 AI 使用同意。"
                 icon={Icon.Sparkle}
               />
-              <AIModelSettings isOwner={isOwner} accountLoading={accountLoading} />
+              <AIPrivacySettings isOwner={isOwner} accountLoading={accountLoading} />
               </>}
             </section>
 

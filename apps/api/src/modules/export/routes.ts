@@ -11,7 +11,7 @@ export async function exportRoutes(app: FastifyInstance) {
   // GET /export/workspace — 导出整个 workspace 数据为 JSON
   // F-011: 导出是高危操作，仅 owner 可执行
   app.get("/export/workspace", { preHandler: [requireOwner] }, async (req, reply) => {
-    const data = await exportWorkspace(req.session.workspaceId);
+    const data = await exportWorkspace(req.session.workspaceId, req.session.userId);
     reply.header("Content-Type", "application/json");
     reply.header("Content-Disposition", `attachment; filename="workspace-export-${new Date().toISOString().slice(0, 10)}.json"`);
     return data;
@@ -57,7 +57,7 @@ export async function exportRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/export/notes/:id", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const markdown = await exportNoteMarkdown(req.params.id, req.session.workspaceId);
+    const markdown = await exportNoteMarkdown(req.params.id, req.session.workspaceId, req.session.userId);
     if (!markdown) return reply.code(404).send({ error: "not found" });
     reply.header("Content-Type", "text/markdown; charset=utf-8");
     reply.header("Content-Disposition", `attachment; filename="note-${req.params.id}.md"`);

@@ -29,8 +29,8 @@ test("createProvider: dashscope 无配置但在有环境变量时返回 provider
   try {
     const provider = createProvider("dashscope");
     assert.ok(provider);
-    assert.equal(typeof provider.generateCard, "function");
-    assert.equal(typeof provider.evaluateValidation, "function");
+    assert.equal(typeof provider.chatCompletion, "function");
+    assert.equal(typeof provider.executeAgentTurn, "function");
   } finally {
     if (oldKey === undefined) delete process.env.DASHSCOPE_API_KEY;
     else process.env.DASHSCOPE_API_KEY = oldKey;
@@ -59,25 +59,100 @@ test("createProvider: dashscope 带配置正确传递", () => {
   assert.ok(provider);
 });
 
+// Clear OPENAI_COMPAT_* env vars so tests are deterministic regardless of
+// the host environment.
+const compatEnvKeys = [
+  "OPENAI_COMPAT_API_KEY",
+  "OPENAI_COMPAT_BASE_URL",
+  "OPENAI_COMPAT_MODEL",
+  "OPENAI_COMPAT_VISION_MODEL",
+] as const;
+
 test("createProvider: openai_compatible 缺少 apiKey 抛错", () => {
-  assert.throws(
-    () => createProvider("openai_compatible", { baseUrl: "https://api.example.com", model: "gpt-4" }),
-    /apiKey/,
-  );
+  const saved = compatEnvKeys.map((k) => process.env[k]);
+  compatEnvKeys.forEach((k) => delete process.env[k]);
+  try {
+    assert.throws(
+      () => createProvider("openai_compatible", { baseUrl: "https://api.example.com", model: "gpt-4" }),
+      /apiKey/,
+    );
+  } finally {
+    compatEnvKeys.forEach((k, i) => {
+      if (saved[i] !== undefined) (process.env as Record<string, string>)[k] = saved[i]!;
+    });
+  }
 });
 
 test("createProvider: openai_compatible 缺少 baseUrl 抛错", () => {
-  assert.throws(
-    () => createProvider("openai_compatible", { apiKey: "key", model: "gpt-4" }),
-    /baseUrl/,
-  );
+  const saved = compatEnvKeys.map((k) => process.env[k]);
+  compatEnvKeys.forEach((k) => delete process.env[k]);
+  try {
+    assert.throws(
+      () => createProvider("openai_compatible", { apiKey: "key", model: "gpt-4" }),
+      /baseUrl/,
+    );
+  } finally {
+    compatEnvKeys.forEach((k, i) => {
+      if (saved[i] !== undefined) (process.env as Record<string, string>)[k] = saved[i]!;
+    });
+  }
 });
 
 test("createProvider: openai_compatible 缺少 model 抛错", () => {
-  assert.throws(
-    () => createProvider("openai_compatible", { apiKey: "key", baseUrl: "https://api.example.com" }),
-    /model/,
-  );
+  const saved = compatEnvKeys.map((k) => process.env[k]);
+  compatEnvKeys.forEach((k) => delete process.env[k]);
+  try {
+    assert.throws(
+      () => createProvider("openai_compatible", { apiKey: "key", baseUrl: "https://api.example.com" }),
+      /model/,
+    );
+  } finally {
+    compatEnvKeys.forEach((k, i) => {
+      if (saved[i] !== undefined) (process.env as Record<string, string>)[k] = saved[i]!;
+    });
+  }
+});
+
+test("createProvider: openai_compatible 从环境变量回退创建实例", () => {
+  const saved = compatEnvKeys.map((k) => process.env[k]);
+  process.env.OPENAI_COMPAT_API_KEY = "env-key";
+  process.env.OPENAI_COMPAT_BASE_URL = "https://api.example.com/v1";
+  process.env.OPENAI_COMPAT_MODEL = "gpt-4";
+  delete process.env.OPENAI_COMPAT_VISION_MODEL;
+  try {
+    const provider = createProvider("openai_compatible");
+    assert.ok(provider);
+    assert.equal(provider.id, "openai_compatible");
+    assert.equal(provider.modelId, "gpt-4");
+    assert.equal(provider.visionModelId, "gpt-4");
+  } finally {
+    compatEnvKeys.forEach((k, i) => {
+      if (saved[i] !== undefined) (process.env as Record<string, string>)[k] = saved[i]!;
+      else delete process.env[k];
+    });
+  }
+});
+
+test("createProvider: openai_compatible 配置优先于环境变量", () => {
+  const saved = compatEnvKeys.map((k) => process.env[k]);
+  process.env.OPENAI_COMPAT_API_KEY = "env-key";
+  process.env.OPENAI_COMPAT_BASE_URL = "https://env.example.com/v1";
+  process.env.OPENAI_COMPAT_MODEL = "env-model";
+  try {
+    const provider = createProvider("openai_compatible", {
+      apiKey: "config-key",
+      baseUrl: "https://config.example.com/v1",
+      model: "config-model",
+      visionModel: "config-vision",
+    });
+    assert.equal(provider.modelId, "config-model");
+    assert.equal(provider.visionModelId, "config-vision");
+  } finally {
+    compatEnvKeys.forEach((k, i) => {
+      if (saved[i] !== undefined) (process.env as Record<string, string>)[k] = saved[i]!;
+      else delete process.env[k];
+    });
+  }
 });
 
 test("createProvider: openai_compatible 完整配置返回 provider 实例", () => {
@@ -87,8 +162,8 @@ test("createProvider: openai_compatible 完整配置返回 provider 实例", () 
     model: "gpt-4",
   });
   assert.ok(provider);
-  assert.equal(typeof provider.generateCard, "function");
-  assert.equal(typeof provider.evaluateValidation, "function");
+  assert.equal(typeof provider.chatCompletion, "function");
+  assert.equal(typeof provider.executeAgentTurn, "function");
 });
 
 test("createProvider: 未知 provider 抛错", () => {

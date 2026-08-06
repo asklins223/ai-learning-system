@@ -138,7 +138,6 @@ DATABASE_URL_MIGRATOR=postgres://ailearn_migrator:密码@postgres:5432/ailearn
 DATABASE_URL_API=postgres://ailearn_api:密码@postgres:5432/ailearn
 DATABASE_URL_WORKER=postgres://ailearn_worker:密码@postgres:5432/ailearn
 
-AI_CREDENTIAL_ENCRYPTION_KEY=32字节随机密钥
 OWNER_EMAIL=你的管理员邮箱
 OWNER_PASSWORD=至少12位的管理员密码
 ```

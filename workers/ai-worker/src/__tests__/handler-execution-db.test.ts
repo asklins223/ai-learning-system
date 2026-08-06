@@ -6,7 +6,6 @@ import { db } from "../db.ts";
 import {
   runAlignEvidence,
   runEvaluateValidation,
-  runGenerateCard,
   type JobPayload,
 } from "../handlers/index.ts";
 import { runParseSource } from "../handlers/parse-source.ts";
@@ -41,9 +40,8 @@ const original = {
   execute: db.execute,
   learningCardsFindFirst: db.query.learningCards.findFirst,
   noteBlocksFindMany: db.query.noteBlocks.findMany,
-  workspacesFindFirst: db.query.workspaces.findFirst,
-  userAIModelConfigsFindFirst: db.query.userAIModelConfigs.findFirst,
-  cardKeyPointsFindFirst: db.query.cardKeyPoints.findFirst,
+workspacesFindFirst: db.query.workspaces.findFirst,
+cardKeyPointsFindFirst: db.query.cardKeyPoints.findFirst,
   evidencesFindFirst: db.query.evidences.findFirst,
   validationEventsFindFirst: db.query.validationEvents.findFirst,
   sourcesFindFirst: db.query.sources.findFirst,
@@ -52,7 +50,6 @@ const original = {
 let scenario: ScenarioName = "generate";
 let sourceFixture: SourceFixture;
 let writes: WriteRecord[] = [];
-let generatedKeyPointCount = 0;
 let workerMain: typeof import("../index.ts").main;
 let processClaimedJob: typeof import("../index.ts").processJob;
 const previousAutostart = process.env.WORKER_DISABLE_AUTOSTART;
@@ -131,7 +128,6 @@ function insertedRows(table: unknown, values: any): unknown[] {
       id: `generated-key-point-${index + 1}`,
       ...value,
     }));
-    generatedKeyPointCount = rows.length;
     return rows;
   }
   if (table === schema.evidences) {
@@ -219,17 +215,15 @@ function installDatabaseHarness(): void {
       user_override: null,
       block_content: "重力使物体相互吸引",
     }];
-  }) as unknown as typeof db.execute;
+}) as unknown as typeof db.execute;
 
-  db.query.userAIModelConfigs.findFirst = (async () => undefined) as typeof db.query.userAIModelConfigs.findFirst;
-  db.query.workspaces.findFirst = (async () => ({
-    id: WORKSPACE_ID,
-    aiProvider: "mock",
-    aiDataPolicy: {
-      sendToExternal: false,
-      piiDetection: true,
-      auditLogging: false,
-    },
+db.query.workspaces.findFirst = (async () => ({
+id: WORKSPACE_ID,
+aiDataPolicy: {
+sendToExternal: false,
+piiDetection: true,
+auditLogging: false,
+},
     aiConsentVersion: null,
     aiConsentAt: null,
   })) as typeof db.query.workspaces.findFirst;
@@ -289,7 +283,6 @@ before(async () => {
 
 beforeEach(() => {
   writes = [];
-  generatedKeyPointCount = 0;
   sourceFixture = {
     id: "source-1",
     workspaceId: WORKSPACE_ID,
@@ -310,9 +303,8 @@ after(() => {
   db.execute = original.execute;
   db.query.learningCards.findFirst = original.learningCardsFindFirst;
   db.query.noteBlocks.findMany = original.noteBlocksFindMany;
-  db.query.workspaces.findFirst = original.workspacesFindFirst;
-  db.query.userAIModelConfigs.findFirst = original.userAIModelConfigsFindFirst;
-  db.query.cardKeyPoints.findFirst = original.cardKeyPointsFindFirst;
+db.query.workspaces.findFirst = original.workspacesFindFirst;
+db.query.cardKeyPoints.findFirst = original.cardKeyPointsFindFirst;
   db.query.evidences.findFirst = original.evidencesFindFirst;
   db.query.validationEvents.findFirst = original.validationEventsFindFirst;
   db.query.sources.findFirst = original.sourcesFindFirst;
@@ -323,20 +315,6 @@ after(() => {
 });
 
 describe("worker handlers execute their real database workflows", () => {
-  it("generates a card, supersedes its predecessor, and enqueues evidence alignment", async () => {
-    scenario = "generate";
-    await runGenerateCard(baseJob({
-      noteVersionId: "note-version-1",
-      oldCardId: "old-card",
-    }));
-
-    assert.ok(generatedKeyPointCount > 0);
-    assert.ok(writes.some((write) => write.operation === "insert" && write.table === schema.aiArtifacts));
-    assert.ok(writes.some((write) => write.operation === "insert" && write.table === schema.learningCards));
-    assert.ok(writes.some((write) => write.operation === "insert" && write.table === schema.jobs));
-    assert.ok(writes.some((write) => write.operation === "delete" && write.table === schema.searchDocuments));
-  });
-
   it("force-realigns evidence while restoring legacy and per-user overrides", async () => {
     scenario = "align";
     await runAlignEvidence(baseJob({ keyPointId: "key-point-1", force: true }));

@@ -57,6 +57,11 @@ type RateLimitDatabase = Pick<typeof db, "execute">;
  * The insert/update is one statement and is serialized by the primary-key
  * conflict row lock.  `clock_timestamp()` is evaluated by PostgreSQL so
  * separate API replicas do not depend on identical application clocks.
+ *
+ * SEC-02 安全说明：SQL 语句通过 drizzle 的 `sql` 模板标签构造，
+ * 所有用户输入（`key`、`windowMs`）作为参数化值传递，不会直接拼接到 SQL 字符串中。
+ * 表名 `authRateLimits` 是 drizzle schema 对象（编译时常量），非用户输入。
+ * 因此不存在 SQL 注入风险。
  */
 export class PostgresRateLimitStore implements RateLimitStore {
   constructor(private readonly database: RateLimitDatabase = db) {}

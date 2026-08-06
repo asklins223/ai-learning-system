@@ -1,54 +1,155 @@
 import {
-  evaluateValidationOutputSchema,
-  learningCardOutputSchema,
-  generateValidationQuestionOutputSchema,
-  evaluateRubricOutputSchema,
-  cardMapOutputSchema,
-  imageInsightOutputSchema,
-  type EvaluateValidationOutput,
-  type LearningCardOutput,
-  type GenerateValidationQuestionOutput,
-  type EvaluateRubricOutput,
-  type GenerateValidationQuestionInput,
-  type EvaluateRubricInput,
-  type CardMapInput,
-  type CardMapOutput,
-  type ImageInsightOutput,
+  type AgentTurnRequest,
+  type AgentTurnResult,
+  type ProviderCapability,
 } from "@ailearn/shared";
-import { resolveOpenAIChatCompletionsUrl } from "@ailearn/shared/ai-endpoints";
+import { resolveOpenAIChatCompletionsUrl, resolveOpenAIEmbeddingsUrl } from "@ailearn/shared/ai-endpoints";
 import {
   postJsonToPublicEndpoint,
   type PublicJsonRequester,
 } from "@ailearn/shared/public-json-http";
-import type { AIProvider, AnalyzeImageInput, EvaluateValidationInput, GenerateCardInput, RepairCardInput, ProviderUsage } from "../ai-provider.ts";
-import {
-  CARD_MAP_SYSTEM_PROMPT,
-  IMAGE_UNDERSTANDING_SYSTEM_PROMPT,
-  EVAL_SYSTEM_PROMPT,
-  SYSTEM_PROMPT,
-  QUESTION_GENERATION_PROMPT,
-  RUBRIC_EVALUATION_PROMPT,
-} from "../prompts.ts";
+import { shouldUsePromptCache } from "@ailearn/shared";
+import type { AIProvider, ProviderUsage } from "../ai-provider.ts";
 import {
   readChatCompletionContent,
-  readProviderErrorMessage,
+  readProviderCode,
   readUsage,
+  parseAgentTurnToolCalls,
+  buildAgentTurnMessages,
 } from "./json-response.ts";
+import type {
+  ChatMessage,
+  ChatOptions,
+  ChatResult,
+  CapabilityImpl,
+  ProviderRuntimeConfig,
+  PlatformOptions,
+} from "@ailearn/shared";
+import { registerFactory } from "../provider-factory.ts";
+import { ProviderRequestError } from "../generation-failure-policy.ts";
+import { AgentOutputError } from "../non-retryable-errors.ts";
+import { DEFAULT_CONTEXT_WINDOW_TOKENS } from "../provider-constants.ts";
+
+// ARCH-05: contextWindowTokens 可通过 OPENAI_COMPAT_CONTEXT_WINDOW_TOKENS 环境变量覆盖。
+
+/** R1: Preset options for provider-specific configuration (e.g., DashScope). */
+export interface ProviderPresetOptions {
+  /** URL rewrite function (e.g., DashScope /api/v1 → /compatible-mode/v1). */
+  resolveEndpoint?: (baseUrl: string) => string;
+  /** Extra request params merged into the request body (e.g., enable_thinking: false). */
+  extraRequestParams?: Record<string, unknown>;
+  /** Extra request headers (e.g., X-DashScope-WorkSpace). */
+  extraHeaders?: Record<string, string>;
+  /** max_tokens control: "always" always sets it; "env-gated" respects OPENAI_COMPAT_DISABLE_MAX_TOKENS. */
+  maxTokensStrategy?: "always" | "env-gated";
+  /** Override the provider id (e.g., "dashscope"). */
+  providerId?: string;
+  /** Override the prompt version (e.g., "v6-dashscope"). */
+  promptVersionOverride?: string;
+}
+
+/**
+ * R1: Adapt a raw `typeof fetch` function to the `PublicJsonRequester` interface.
+ *
+ * @deprecated TEST-ONLY. This adapter performs raw `fetch` with NO SSRF
+ * validation (no IP pinning, no HTTPS-only check, no DNS resolution guard,
+ * no connect timeout). It exists solely so DashScopeProvider test files that
+ * inject a `typeof fetch` mock can reuse OpenAICompatibleProvider's logic.
+ * It MUST NOT be reachable from production code: createDashScopeProvider and
+ * the createProvider fallback never set `options.request`, so production
+ * always uses postJsonToPublicEndpoint. If you add a PlatformOptions field
+ * that can flow into `options.request`, you will reopen the SSRF bypass that
+ * R1 was specifically designed to close — gate it behind an explicit allowlist.
+ *
+ * @see docs/plans/provider-registry-refactor.md §1.5 (SSRF unification)
+ */
+function adaptFetchToPublicJsonRequester(fetchFn: typeof globalThis.fetch): PublicJsonRequester {
+  // Defense-in-depth: this function bypasses postJsonToPublicEndpoint's SSRF
+  // protections (IP pinning, HTTPS-only, connect timeout). Block production use
+  // so a future code change cannot accidentally route real traffic through it.
+  if (process.env.NODE_ENV === "production" && process.env.ALLOW_TEST_FETCH_IN_PRODUCTION !== "true") {
+    throw new Error(
+      "adaptFetchToPublicJsonRequester must not be used in production — it bypasses SSRF protections. "
+      + "Set ALLOW_TEST_FETCH_IN_PRODUCTION=true to override (e.g. for E2E tests).",
+    );
+  }
+  return async (url, headers, body, signal) => {
+    const response = await fetchFn(url, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    let parsedBody: unknown = null;
+    try {
+      const text = await response.text();
+      parsedBody = text ? JSON.parse(text) : null;
+    } catch (err) {
+      throw new Error(
+        `returned invalid JSON (${response.status} ${response.statusText})`,
+        { cause: err },
+      );
+    }
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      body: parsedBody,
+    };
+  };
+}
+
+/** R1: Unified abort error helper. */
+function abortError(signal: AbortSignal, phase: string): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  return new Error(`AI request aborted ${phase}`);
+}
 
 export class OpenAICompatibleProvider implements AIProvider {
-  id = "openai_compatible";
-  promptVersion = "v6-openai-compatible";
+  readonly id: string;
+  readonly promptVersion: string;
   readonly modelId: string;
   readonly visionModelId: string;
+  readonly embeddingModelId: string;
   private readonly endpoint: string;
+  private readonly embeddingEndpoint: string;
   private readonly apiKey: string;
   private readonly request: PublicJsonRequester;
+  private readonly extraRequestParams: Record<string, unknown> | undefined;
+  private readonly extraHeaders: Record<string, string> | undefined;
+  private readonly maxTokensStrategy: "always" | "env-gated";
+  /** Platform config options (from config file, overrides env vars). */
+  private readonly platformOptions: PlatformOptions | undefined;
 
-  // v0.6: Track usage from the last API call (计划 §6.6, §10.5)
-  private lastUsage: ProviderUsage | null = null;
-
-  getLastUsage(): ProviderUsage | null {
-    return this.lastUsage;
+  /**
+   * R2: TextGenerationCapability — generic chat completion.
+   *
+   * This is the capability-based API that will eventually replace the
+   * business-specific methods (evaluateValidation, generateValidationQuestion,
+   * evaluateRubric) in R5. The provider only does the API call; prompt
+   * selection and schema validation are the caller's responsibility.
+   */
+  async chatCompletion(
+    messages: ChatMessage[],
+    options: ChatOptions,
+    signal?: AbortSignal,
+  ): Promise<ChatResult> {
+    const { content, usage } = await this.call(
+      messages as Array<{
+        role: "system" | "user";
+        content: string | Array<
+          | { type: "text"; text: string }
+          | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } }
+        >;
+      }>,
+      signal,
+      options.maxTokens ?? 4096,
+      options.temperature ?? 0.2,
+      options.model ?? this.modelId,
+    );
+    return {
+      content,
+      usage: usage ?? { totalTokens: null, promptTokens: null, completionTokens: null, requestId: null },
+    };
   }
 
   constructor(options: {
@@ -56,156 +157,74 @@ export class OpenAICompatibleProvider implements AIProvider {
     baseUrl: string;
     model: string;
     visionModel?: string;
+    embeddingModel?: string;
     request?: PublicJsonRequester;
+    // ── R1: Preset configuration for DashScope compatibility ──
+    resolveEndpoint?: (baseUrl: string) => string;
+    resolveEmbeddingEndpoint?: (baseUrl: string) => string;
+    extraRequestParams?: Record<string, unknown>;
+    extraHeaders?: Record<string, string>;
+    maxTokensStrategy?: "always" | "env-gated";
+    providerId?: string;
+    promptVersionOverride?: string;
+    /** Platform config options (from config/ai-platforms.json). */
+    platformOptions?: PlatformOptions;
   }) {
     this.apiKey = options.apiKey;
     this.modelId = options.model;
     this.visionModelId = options.visionModel ?? options.model;
-    this.endpoint = resolveOpenAIChatCompletionsUrl(options.baseUrl);
+    this.embeddingModelId = options.embeddingModel
+      ?? process.env.OPENAI_COMPAT_EMBEDDING_MODEL
+      ?? "";
+    // R1: Use resolveEndpoint if provided (e.g., DashScope URL rewriting)
+    const resolveFn = options.resolveEndpoint ?? resolveOpenAIChatCompletionsUrl;
+    this.endpoint = resolveFn(options.baseUrl);
+    // R1: Use resolveEmbeddingEndpoint if provided (e.g., DashScope /api/v1 → /compatible-mode/v1/embeddings)
+    const resolveEmbeddingFn = options.resolveEmbeddingEndpoint ?? resolveOpenAIEmbeddingsUrl;
+    this.embeddingEndpoint = resolveEmbeddingFn(options.baseUrl);
     this.request = options.request ?? postJsonToPublicEndpoint;
+    this.extraRequestParams = options.extraRequestParams;
+    this.extraHeaders = options.extraHeaders;
+    this.maxTokensStrategy = options.maxTokensStrategy ?? "env-gated";
+    this.platformOptions = options.platformOptions;
+    this.id = options.providerId ?? "openai_compatible";
+    this.promptVersion = options.promptVersionOverride ?? "v6-openai-compatible";
   }
 
-  async generateCard(input: GenerateCardInput, signal?: AbortSignal): Promise<LearningCardOutput> {
-    // temperature 0.3：比 0.2 略高，有助于模型进行抽象提炼而非直接截取原文。
-    // max_tokens 4096：配合 key_points 限制为 5 个，覆盖 95%+ 场景。
-    const raw = await this.call([
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: JSON.stringify({ note_title: input.noteTitle, blocks: input.blocks }) },
-    ], signal, 4096, 0.3);
-    const result = learningCardOutputSchema.safeParse(parseModelJson(raw));
-    if (!result.success) {
-      throw new Error(`OpenAI-compatible output failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
+  /**
+   * Call the OpenAI-compatible embeddings endpoint.
+   *
+   * Returns null when no embedding model is configured or the request fails,
+   * matching DashScopeProvider's embed() contract. Upstream callers fall back
+   * to lexical/sequential search automatically.
+   */
+  async embed(text: string, signal?: AbortSignal): Promise<number[] | null> {
+    if (!this.embeddingModelId) return null;
+    try {
+      const response = await this.request(
+        this.embeddingEndpoint,
+        { Accept: "application/json", Authorization: `Bearer ${this.apiKey}`, ...this.extraHeaders },
+        {
+          model: this.embeddingModelId,
+          input: [text.slice(0, 1500)],
+          encoding_format: "float",
+        },
+        signal,
+      );
+      if (response.status < 200 || response.status >= 300) {
+        return null;
+      }
+      const body = response.body as Record<string, unknown>;
+      const data = (body?.data as Array<Record<string, unknown>>) ?? [];
+      const embedding = data[0]?.embedding;
+      if (!Array.isArray(embedding)) return null;
+      return embedding as number[];
+    } catch {
+      return null;
     }
-    return result.data;
   }
 
-  async extractCardCandidates(
-    input: CardMapInput,
-    signal?: AbortSignal,
-  ): Promise<CardMapOutput> {
-    const raw = await this.call([
-      { role: "system", content: CARD_MAP_SYSTEM_PROMPT },
-      { role: "user", content: JSON.stringify(input) },
-    ], signal, 4096, 0.2);
-    const result = cardMapOutputSchema.safeParse(parseModelJson(raw));
-    if (!result.success) {
-      throw new Error(`OpenAI-compatible card map failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
-    }
-    return result.data;
-  }
-
-  async analyzeImage(input: AnalyzeImageInput, signal?: AbortSignal): Promise<ImageInsightOutput> {
-    const description = input.userDescription?.trim();
-    const raw = await this.call([
-      { role: "system", content: IMAGE_UNDERSTANDING_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              task: "extract_image_insight",
-              coordinateSystem: "normalized_0_10000",
-              width: input.width,
-              height: input.height,
-              ...(description ? { userDescription: description } : {}),
-            }),
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:${input.mimeType};base64,${input.body.toString("base64")}`,
-              detail: "high",
-            },
-          },
-        ],
-      },
-    ], signal, 4096, 0, this.visionModelId);
-    const result = imageInsightOutputSchema.safeParse(parseModelJson(raw));
-    if (!result.success) {
-      throw new Error(`OpenAI-compatible image insight failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
-    }
-    return result.data;
-  }
-
-  async evaluateValidation(input: EvaluateValidationInput, signal?: AbortSignal): Promise<EvaluateValidationOutput> {
-    const raw = await this.call([
-      { role: "system", content: EVAL_SYSTEM_PROMPT },
-      { role: "user", content: JSON.stringify(input) },
-    ], signal, 2048);
-    const result = evaluateValidationOutputSchema.safeParse(parseModelJson(raw));
-    if (!result.success) {
-      throw new Error(`OpenAI-compatible evaluation failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
-    }
-    return result.data;
-  }
-
-  // v0.6: AI question + rubric generation (计划 §7.1)
-  async generateValidationQuestion(
-    input: GenerateValidationQuestionInput,
-    signal?: AbortSignal,
-  ): Promise<GenerateValidationQuestionOutput> {
-    const userPayload = JSON.stringify({
-      claim: input.claim,
-      quote: input.quote,
-      evidenceRefs: input.evidenceRefs,
-      ...(input.preferredType ? { preferredType: input.preferredType } : {}),
-    });
-    const raw = await this.call([
-      { role: "system", content: QUESTION_GENERATION_PROMPT },
-      { role: "user", content: userPayload },
-    ], signal, 2048, 0.3);
-    const result = generateValidationQuestionOutputSchema.safeParse(parseModelJson(raw));
-    if (!result.success) {
-      throw new Error(`OpenAI-compatible question generation failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
-    }
-    return result.data;
-  }
-
-  // v0.6: rubric-based point evaluation (计划 §7.2)
-  async evaluateRubric(
-    input: EvaluateRubricInput,
-    signal?: AbortSignal,
-  ): Promise<EvaluateRubricOutput> {
-    const raw = await this.call([
-      { role: "system", content: RUBRIC_EVALUATION_PROMPT },
-      { role: "user", content: JSON.stringify(input) },
-    ], signal, 2048, 0.2);
-    const result = evaluateRubricOutputSchema.safeParse(parseModelJson(raw));
-    if (!result.success) {
-      throw new Error(`OpenAI-compatible rubric evaluation failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
-    }
-    return result.data;
-  }
-
-  // v0.6: conditional card repair (计划 §7.7)
-  // Provider/SDK 传输层 maxAttempts=1，不发生隐式自动重发
-  async repairCard(
-    input: RepairCardInput,
-    signal?: AbortSignal,
-  ): Promise<LearningCardOutput> {
-    const repairPrompt = `你之前生成的学习卡存在质量问题，请修复后重新输出。
-
-## 质量问题
-${input.issues.map((i) => `- ${i.severity === "hard" ? "严重" : "次要"}：${i.code}${i.keyPointOrdinal !== undefined ? `（要点 ${i.keyPointOrdinal + 1}）` : ""}`).join("\n")}
-
-## 之前输出
-${JSON.stringify(input.draft)}
-
-## 原文 blocks
-${JSON.stringify(input.sourceBlocks)}
-
-请根据上述质量问题修复学习卡，确保 quote_text 是原文的逐字片段，claim 是基于原文的抽象知识断言。`;
-    const raw = await this.call([
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: repairPrompt },
-    ], signal, 4096, 0.3);
-    const result = learningCardOutputSchema.safeParse(parseModelJson(raw));
-    if (!result.success) {
-      throw new Error(`OpenAI-compatible repairCard failed schema check: ${result.error.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`);
-    }
-    return result.data;
-  }
+  // ─── Supervisor Agent v1: executeAgentTurn + getCapabilities (计划 §8.1, §8.2) ──
 
   private async call(
     messages: Array<{
@@ -217,45 +236,266 @@ ${JSON.stringify(input.sourceBlocks)}
     }>,
     signal?: AbortSignal,
     maxTokens = 4096,
-    temperature = 0.3,
+    temperature = 0.2,
     model = this.modelId,
-  ): Promise<string> {
-    // Usage belongs to one request only. A failed follow-up request must not
-    // inherit token accounting from the previous successful call.
-    this.lastUsage = null;
-    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("AI request aborted");
+  ): Promise<{ content: string; usage: ProviderUsage | null }> {
+    if (signal?.aborted) throw abortError(signal, "before request");
+    // R1: maxTokensStrategy controls max_tokens ("always" for DashScope, "env-gated" for OpenAI-compatible)
+    // Platform config options can override env vars.
+    const disableMaxTokens = this.platformOptions?.disableMaxTokens
+      ?? process.env.OPENAI_COMPAT_DISABLE_MAX_TOKENS === "true";
+    const shouldSetMaxTokens = this.maxTokensStrategy === "always" || !disableMaxTokens;
+    const body: Record<string, unknown> = {
+      model,
+      messages,
+      temperature,
+      stream: false,
+      // Force the model to emit valid JSON, matching DashScope's behaviour.
+      response_format: { type: "json_object" as const },
+      // Platform config options control thinking mode:
+      //   disableThinking: explicitly disable (enable_thinking: false)
+      //   enableThinking:  explicitly enable  (enable_thinking: true)
+      //   neither:          use model/API default (no field)
+      ...((this.platformOptions?.disableThinking ?? process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+        ? { enable_thinking: false }
+        : this.platformOptions?.enableThinking
+          ? { enable_thinking: true }
+          : {}),
+      // R1: DashScope preset overrides (e.g., enable_thinking: false)
+      ...this.extraRequestParams,
+    };
+    if (shouldSetMaxTokens) {
+      body.max_tokens = maxTokens;
+    }
+    // R1: Merge extra headers (e.g., X-DashScope-WorkSpace)
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+      ...this.extraHeaders,
+    };
     const response = await this.request(
       this.endpoint,
-      { Accept: "application/json", Authorization: `Bearer ${this.apiKey}` },
-      {
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        stream: false,
-        // Opt-in switch for qwen3/qwen3.5-class hybrid models served through
-        // an OpenAI-compatible gateway (e.g. DashScope compatible-mode, vLLM):
-        // their default thinking phase blows bounded non-streaming budgets.
-        // Kept opt-in because strict OpenAI endpoints reject unknown fields.
-        ...(process.env.OPENAI_COMPAT_DISABLE_THINKING === "true"
-          ? { enable_thinking: false }
-          : {}),
-      },
+      headers,
+      body,
       signal,
     );
+    // R1: Post-response abort check (matching DashScope's behavior)
+    if (signal?.aborted) throw abortError(signal, "after response");
     if (response.status < 200 || response.status >= 300) {
-      const message = (readProviderErrorMessage(response.body) ?? response.statusText).slice(0, 500);
-      throw new Error(`OpenAI-compatible endpoint ${response.status}: ${message}`);
+      throw new ProviderRequestError({
+        provider: this.id,
+        status: response.status,
+        providerCode: readProviderCode(response.body),
+      });
     }
+    // R1: Post-body-read abort check
+    if (signal?.aborted) throw abortError(signal, "after body read");
     const content = readChatCompletionContent(response.body);
     if (typeof content !== "string" || !content.trim()) {
-      throw new Error(`OpenAI-compatible endpoint returned empty output (${model})`);
+      throw new Error(`${this.id} returned empty output (${model})`);
     }
 
     // v0.6: Extract usage from API response (计划 §6.6, §10.5)
-    this.lastUsage = readUsage(response.body);
+    const usage = readUsage(response.body);
 
-    return content;
+    return { content, usage };
+  }
+
+  // ─── Supervisor Agent v1: executeAgentTurn + getCapabilities (计划 §8.1, §8.2) ──
+
+  /**
+   * 通用 Agent turn 执行（计划 §8.1）。
+   *
+   * OpenAI-compatible endpoint 支持 native tool calls。
+   * 当 tool schema 非空时，使用 native tools 模式；
+   * 当 tool schema 为空时，回退到 JSON mode（structured_action_v1）。
+   *
+   * 一次 attempt 最多一次 provider 请求（计划 §5.2, §5.3）。
+   * usage/requestId 随响应返回，不依赖可变的 getLastUsage()。
+   */
+  async executeAgentTurn(
+    request: AgentTurnRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentTurnResult> {
+    if (signal?.aborted) throw abortError(signal, "before executeAgentTurn");
+
+    // PERF-09: 使用共享的 messages 构建函数
+    const messages = buildAgentTurnMessages(request.systemPrompt, request.messages);
+
+    const hasTools = request.tools.length > 0;
+    const tools = hasTools
+      ? request.tools.map((t) => ({
+          type: "function" as const,
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+          },
+        }))
+      : undefined;
+
+    const requestBody: Record<string, unknown> = {
+      model: request.model ?? this.modelId,
+      messages,
+      temperature: request.temperature,
+      stream: false,
+      // Platform config options control thinking mode:
+      //   disableThinking: explicitly disable (enable_thinking: false)
+      //   enableThinking:  explicitly enable  (enable_thinking: true)
+      //   neither:          use model/API default (no field)
+      ...((this.platformOptions?.disableThinking ?? process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+        ? { enable_thinking: false }
+        : this.platformOptions?.enableThinking
+          ? { enable_thinking: true }
+          : {}),
+      // R1: DashScope preset overrides (e.g., enable_thinking: false)
+      ...this.extraRequestParams,
+    };
+
+    // R1: maxTokensStrategy controls max_tokens
+    const disableMaxTokens = this.platformOptions?.disableMaxTokens
+      ?? process.env.OPENAI_COMPAT_DISABLE_MAX_TOKENS === "true";
+    const shouldSetMaxTokens = this.maxTokensStrategy === "always" || !disableMaxTokens;
+    if (shouldSetMaxTokens) {
+      requestBody.max_tokens = request.maxTokens;
+    }
+
+    if (hasTools) {
+      requestBody.tools = tools;
+      requestBody.tool_choice = "auto";
+    } else {
+      requestBody.response_format = { type: "json_object" as const };
+    }
+
+    // B2（计划 §2.5）：prompt cache 控制。
+    // 当 feature flag 开启且 provider 在白名单中时，添加缓存标记。
+    // DashScope 支持 enable_cache 参数；其他 OpenAI-compatible 端点
+    // 可能在 messages 上使用 cache_control 标记。此处统一用 enable_cache
+    // （DashScope 扩展），不支持的端点会静默忽略。
+    if (shouldUsePromptCache(this.id)) {
+      requestBody.enable_cache = true;
+    }
+
+    // R1: Merge extra headers
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+      ...this.extraHeaders,
+    };
+    // Merge platform options extra headers
+    if (this.platformOptions?.extraHeaders) {
+      Object.assign(headers, this.platformOptions.extraHeaders);
+    }
+    console.error("[REPRO-LOG] REQUEST", JSON.stringify({
+      model: requestBody.model,
+      toolNames: (requestBody.tools as Array<{function:{name:string}}> | undefined)?.map(t => t.function.name),
+      toolChoice: requestBody.tool_choice,
+      maxTokens: requestBody.max_tokens,
+      msgCount: (requestBody.messages as Array<{role:string}>).length,
+      userMsgLen: (requestBody.messages as Array<{content:string}>).map(m => (m.content ?? "").length),
+      systemLen: ((requestBody.messages as Array<{role:string,content:string}>).find(m=>m.role==="system")?.content ?? "").length,
+      userContentPrefix: ((requestBody.messages as Array<{content:string}>).find(m=>m.content)?.content ?? "").slice(0, 600),
+    }));
+    const response = await this.request(
+      this.endpoint,
+      headers,
+      requestBody,
+      signal,
+    );
+
+    if (signal?.aborted) throw abortError(signal, "after agent turn response");
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new ProviderRequestError({
+        provider: this.id,
+        status: response.status,
+        providerCode: readProviderCode(response.body),
+      });
+    }
+
+    const body = response.body as Record<string, unknown>;
+    console.error("[REPRO-LOG] RESPONSE", JSON.stringify({
+      status: response.status,
+      finish: (body.choices as Array<{finish_reason:string}> | undefined)?.[0]?.finish_reason,
+      toolCalls: (body.choices as Array<{message:{tool_calls?: Array<{function:{name:string}}>}}> | undefined)?.[0]?.message?.tool_calls?.map(tc => tc.function.name),
+      contentPreview: ((body.choices as Array<{message:{content?:string}}> | undefined)?.[0]?.message?.content ?? "").slice(0, 400),
+    }));
+    const usage = readUsage(response.body);
+
+    // R1: Post-body-read abort check
+    if (signal?.aborted) throw abortError(signal, "after agent turn body read");
+
+    // QUAL-19 / BUG-09: Use shared tool calls parser. The JSON mode fallback
+    // is only attempted when no native tool_calls are present, preventing
+    // duplicate tool call execution when a provider returns both
+    // `message.tool_calls` and a JSON `content` body.
+    const { content, toolCalls, finishReason, requestId } =
+      parseAgentTurnToolCalls(body, hasTools, ["id", "request_id"]);
+
+    // 输出截断 / 参数损坏检测（截断空转修复）：
+    // - finish_reason="length"：输出达到 token 上限被截断，arguments 可能不完整。
+    //   截断是确定性的——相同输出预算下重试必然再次截断——必须归类为
+    //   AgentOutputError（isNonRetryableError 命中），队列标记 dead，不再无限空转。
+    // - 存在 argumentsMalformed 工具调用：输出损坏（不完整 JSON），同样确定性失败。
+    // 修复前：截断被静默降级为空对象 arguments，工具"看似成功"执行，
+    // 提取结果为空 → 协议失败 → unit retryable_failed → 队列重投 → 再次截断 → 空转。
+    if (finishReason === "length") {
+      throw new AgentOutputError(
+        "output_truncated",
+        `agent output truncated at finish_reason="length" ` +
+          `(toolCalls=${toolCalls.length}, malformed=${toolCalls.filter((tc) => tc.argumentsMalformed).length})`,
+      );
+    }
+    const malformed = toolCalls.find((tc) => tc.argumentsMalformed);
+    if (malformed) {
+      throw new AgentOutputError(
+        "arguments_malformed",
+        `tool call "${malformed.name}" has malformed arguments JSON (id=${malformed.id ?? "unknown"})`,
+      );
+    }
+
+    return {
+      content,
+      toolCalls,
+      finishReason,
+      usage,
+      providerRequestId: requestId,
+    };
+  }
+
+  /**
+   * 返回 OpenAI-compatible Provider 能力快照（计划 §8.2）。
+   *
+   * ARCH-05: contextWindowTokens is configurable via the config file
+   * options.contextWindowTokens (PlatformOptions), with a fallback to the
+   * legacy OPENAI_COMPAT_CONTEXT_WINDOW_TOKENS / DASHSCOPE_CONTEXT_WINDOW_TOKENS
+   * env vars for models with non-default context limits.
+   */
+  getCapabilities(): ProviderCapability {
+    // 迁移遗漏修复：config/ai-platforms.json 的 options.contextWindowTokens 优先于 env。
+    const contextWindowTokens = this.platformOptions?.contextWindowTokens
+      ?? (Number(process.env.OPENAI_COMPAT_CONTEXT_WINDOW_TOKENS)
+        || Number(process.env.DASHSCOPE_CONTEXT_WINDOW_TOKENS)
+        || DEFAULT_CONTEXT_WINDOW_TOKENS);
+    // 输出预算：允许平台配置覆盖。默认 16384——这是对 openai_compatible 模型实际输出能力的
+    // 校准值（实测 deepseek-v4-flash-0731 在 max_tokens=32768 时输出过 15442 token 后自停；
+    // 而 provider 在「不传 max_tokens」时的默认上限仅为 8192，会截断大输出）。
+    // 使 ContextPacker.getMaxOutputTokens() = min(maxOutputTokens, reserved) = 16384，
+    // 避免 request.maxTokens=4096 或 8192 与真实输出上限不符、导致 agent turn 被截断。
+    const maxOutputTokens = this.platformOptions?.maxOutputTokens ?? 16384;
+    const reservedOutputTokens = maxOutputTokens;
+    return {
+      providerId: this.id,
+      modelId: this.modelId,
+      visionModelId: this.visionModelId,
+      toolMode: "native_tools",
+      contextWindowTokens,
+      reservedOutputTokens,
+      maxInputTokens: contextWindowTokens - reservedOutputTokens,
+      maxOutputTokens,
+      // R3: fingerprint includes visionModelId to capture vision-only config drift.
+fingerprint: `${this.id}:${this.modelId}:${this.visionModelId}:native_tools`,
+    };
   }
 }
 
@@ -263,30 +503,63 @@ export function resolveChatCompletionsUrl(baseUrl: string): string {
   return resolveOpenAIChatCompletionsUrl(baseUrl);
 }
 
-function parseModelJson(raw: string): unknown {
-  const stripped = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  try {
-    return JSON.parse(stripped);
-  } catch {
-    const start = stripped.indexOf("{");
-    if (start < 0) throw new Error("model returned no JSON object");
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let index = start; index < stripped.length; index += 1) {
-      const character = stripped[index];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (character === "\\") escaped = true;
-        else if (character === '"') inString = false;
-        continue;
-      }
-      if (character === '"') inString = true;
-      else if (character === "{") depth += 1;
-      else if (character === "}" && --depth === 0) {
-        return JSON.parse(stripped.slice(start, index + 1));
-      }
-    }
-    throw new Error("model returned malformed JSON");
-  }
+export { adaptFetchToPublicJsonRequester };
+
+// ─── R2: Factory registrations ──────────────────────────────────────────
+// Register OpenAI-compatible provider for each capability it supports.
+// The factory creates a provider instance from runtime config, returning null
+// when required config (apiKey, baseUrl, model) is missing.
+
+function resolveOpenAICompatConfig(config: ProviderRuntimeConfig): {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  visionModel?: string;
+  platformOptions?: PlatformOptions;
+} | null {
+  const apiKey = config.apiKey ?? process.env.OPENAI_COMPAT_API_KEY;
+  const baseUrl = config.baseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
+  const model = config.model ?? process.env.OPENAI_COMPAT_MODEL;
+  if (!apiKey || !baseUrl || !model) return null;
+  return {
+    apiKey,
+    baseUrl,
+    model,
+    ...(config.visionModel ? { visionModel: config.visionModel } : {}),
+    ...(config.options ? { platformOptions: config.options } : {}),
+  };
 }
+
+registerFactory("openai_compatible", "text_generation", (config) => {
+  const resolved = resolveOpenAICompatConfig(config);
+  if (!resolved) return null;
+  return new OpenAICompatibleProvider(resolved) as unknown as CapabilityImpl;
+});
+
+registerFactory("openai_compatible", "vision", (config) => {
+  const resolved = resolveOpenAICompatConfig(config);
+  if (!resolved) return null;
+  return new OpenAICompatibleProvider(resolved) as unknown as CapabilityImpl;
+});
+
+registerFactory("openai_compatible", "agent_turn", (config) => {
+  const resolved = resolveOpenAICompatConfig(config);
+  if (!resolved) return null;
+  return new OpenAICompatibleProvider(resolved) as unknown as CapabilityImpl;
+});
+
+registerFactory("openai_compatible", "embedding", (config) => {
+  const apiKey = config.apiKey ?? process.env.OPENAI_COMPAT_API_KEY;
+  const baseUrl = config.baseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
+  const model = config.model ?? process.env.OPENAI_COMPAT_MODEL;
+  if (!apiKey || !baseUrl || !model) return null;
+  // 迁移遗漏修复：配置文件 embedding 能力的 model 即 embedding 模型，
+  // 无 OPENAI_COMPAT_EMBEDDING_MODEL 覆盖时直接复用，避免 embed() 因 env 缺失返回 null。
+  const embeddingModel = process.env.OPENAI_COMPAT_EMBEDDING_MODEL ?? model;
+  return new OpenAICompatibleProvider({
+    apiKey,
+    baseUrl,
+    model,
+    embeddingModel,
+  }) as unknown as CapabilityImpl;
+});

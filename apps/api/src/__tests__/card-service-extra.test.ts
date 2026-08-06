@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, describe, it } from "node:test";
+import { after, beforeEach, describe, it } from "node:test";
 import { ArtifactStatus, CardStatus, ReviewStatus } from "@ailearn/shared";
 import { db } from "../db/client.ts";
 import { aiArtifacts } from "../db/schema/ai.ts";
@@ -8,7 +8,6 @@ import { evidences, reviewSchedules, validationEvents } from "../db/schema/evide
 import { searchDocuments } from "../db/schema/search.ts";
 import { encodeCursor } from "../lib/pagination.ts";
 import {
-  acceptCard,
   dismissCard,
   getCardWithDetail,
   listCards,
@@ -18,6 +17,29 @@ import {
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const USER_ID = "00000000-0000-4000-8000-000000000002";
 const mutableDb = db as any;
+
+// BUG-72 测试适配：withWorkspaceTransaction 内部调用 db.transaction 并执行
+// setApiTransactionContext（需要 tx.execute），因此 mock 的 tx 必须提供 execute 方法
+// 以及 query/select 委托到 db.query/db.select，使现有 mock 继续生效。
+function passthroughTransaction(): any {
+  return async (run: (tx: any) => Promise<any>) => run({
+    execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
+    query: mutableDb.query,
+    select: mutableDb.select,
+    transaction: async (fn: (tx: any) => Promise<any>) => fn({
+      execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
+      query: mutableDb.query,
+      select: mutableDb.select,
+      insert: mutableDb.insert,
+      update: mutableDb.update,
+      delete: mutableDb.delete,
+    }),
+    insert: mutableDb.insert,
+    update: mutableDb.update,
+    delete: mutableDb.delete,
+  });
+}
+
 const original = {
   select: mutableDb.select,
   transaction: mutableDb.transaction,
@@ -41,16 +63,20 @@ after(() => {
 });
 
 describe("card detail and listing", () => {
+  beforeEach(() => {
+    mutableDb.transaction = passthroughTransaction();
+  });
+
   it("returns a card with ordered key points or null when missing", async () => {
     mutableDb.query.learningCards.findFirst = async () => ({ id: "card-1", schemaJson: { title: "Card" } });
     mutableDb.query.cardKeyPoints.findMany = async () => [{ id: "kp-1", ordinal: 0 }];
-    assert.deepEqual(await getCardWithDetail("card-1", WORKSPACE_ID), {
+    assert.deepEqual(await getCardWithDetail("card-1", WORKSPACE_ID, USER_ID), {
       card: { id: "card-1", schemaJson: { title: "Card" } },
       keyPoints: [{ id: "kp-1", ordinal: 0 }],
     });
 
     mutableDb.query.learningCards.findFirst = async () => undefined;
-    assert.equal(await getCardWithDetail("missing", WORKSPACE_ID), null);
+    assert.equal(await getCardWithDetail("missing", WORKSPACE_ID, USER_ID), null);
   });
 
   it("paginates cards and aggregates user-scoped evidence, validation, and review state", async () => {
@@ -147,7 +173,7 @@ describe("card detail and listing", () => {
       },
     });
 
-    const result = await listCards(WORKSPACE_ID, { cursor: "invalid" });
+    const result = await listCards(WORKSPACE_ID, { cursor: "invalid" }, USER_ID);
 
     assert.equal(result.items[0]!.evidenceSoftCount, 1);
     assert.equal(result.items[0]!.evidenceTotalCount, 1);
@@ -159,10 +185,10 @@ describe("card detail and listing", () => {
   it("returns an empty page after the count and rejects lossy cursor rows", async () => {
     mutableDb.query.learningCards.findMany = async () => [];
     mutableDb.select = () => ({ from: () => ({ where: async () => [{ count: 0 }] }) });
-    assert.deepEqual(await listCards(WORKSPACE_ID), { items: [], nextCursor: null, total: 0 });
+    assert.deepEqual(await listCards(WORKSPACE_ID, undefined, USER_ID), { items: [], nextCursor: null, total: 0 });
 
     mutableDb.query.learningCards.findMany = async () => [{ id: "card-broken" }];
-    await assert.rejects(listCards(WORKSPACE_ID, { limit: 1 }), /card cursor timestamp is missing/);
+    await assert.rejects(listCards(WORKSPACE_ID, { limit: 1 }, USER_ID), /card cursor timestamp is missing/);
   });
 });
 
@@ -184,7 +210,7 @@ function generationDependencies(jobId: string, runId: string) {
     ) => {
       assert.deepEqual(context, { workspaceId: WORKSPACE_ID, userId: USER_ID });
       assert.equal(input.oldCardId, "card-1");
-      assert.match(input.idempotencyKey, /^legacy-regenerate:/);
+      assert.match(input.idempotencyKey, /^card-regenerate:/);
       return {
         runId,
         status: "queued",
@@ -260,45 +286,26 @@ describe("card regeneration", () => {
 
 function writeTransaction(captured: Array<{ table: unknown; value: any }>): any {
   return async (run: (tx: any) => Promise<void>) => run({
+    // BUG-72 测试适配：withWorkspaceTransaction 需要 tx.execute 用于 setApiTransactionContext
+    execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
+    query: mutableDb.query,
+    select: mutableDb.select,
     update: (table: unknown) => ({
       set: (value: any) => {
         captured.push({ table, value });
         return { where: async () => undefined };
       },
     }),
-    select: () => ({ from: () => ({ where: () => [] }) }),
     delete: (table: unknown) => ({
       where: async () => { captured.push({ table, value: "deleted" }); },
     }),
   });
 }
 
-describe("card acceptance and dismissal", () => {
+describe("card dismissal", () => {
   it("returns null for missing cards", async () => {
     mutableDb.query.learningCards.findFirst = async () => undefined;
-    assert.equal(await acceptCard("missing", WORKSPACE_ID), null);
-    assert.equal(await dismissCard("missing", WORKSPACE_ID), null);
-  });
-
-  it("accepts the artifact and touches the card", async () => {
-    const writes: Array<{ table: unknown; value: any }> = [];
-    mutableDb.query.learningCards.findFirst = async () => ({ id: "card-1", artifactId: "artifact-1" });
-    mutableDb.transaction = writeTransaction(writes);
-
-    assert.deepEqual(await acceptCard("card-1", WORKSPACE_ID), { ok: true });
-    assert.deepEqual(writes.map((write) => [write.table, write.value.status]), [
-      [aiArtifacts, ArtifactStatus.ACCEPTED],
-      [learningCards, undefined],
-    ]);
-  });
-
-  it("accepts a card without an artifact", async () => {
-    const writes: Array<{ table: unknown; value: any }> = [];
-    mutableDb.query.learningCards.findFirst = async () => ({ id: "card-1", artifactId: null });
-    mutableDb.transaction = writeTransaction(writes);
-
-    assert.deepEqual(await acceptCard("card-1", WORKSPACE_ID), { ok: true });
-    assert.deepEqual(writes.map((write) => write.table), [learningCards]);
+    assert.equal(await dismissCard("missing", WORKSPACE_ID, USER_ID), null);
   });
 
   it("dismisses artifact/card/reviews and removes card/evidence projections", async () => {
@@ -306,7 +313,7 @@ describe("card acceptance and dismissal", () => {
     mutableDb.query.learningCards.findFirst = async () => ({ id: "card-1", artifactId: "artifact-1" });
     mutableDb.transaction = writeTransaction(writes);
 
-    assert.deepEqual(await dismissCard("card-1", WORKSPACE_ID), { ok: true });
+    assert.deepEqual(await dismissCard("card-1", WORKSPACE_ID, USER_ID), { ok: true });
     assert.deepEqual(writes.map((write) => write.table), [
       aiArtifacts,
       learningCards,

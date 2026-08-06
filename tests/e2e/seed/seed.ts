@@ -589,7 +589,6 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           'v1',
           ${JSON.stringify({
             ai_consent: true,
-            provider_config: true,
             first_content: true,
             first_note: true,
             first_card: true,
@@ -607,7 +606,6 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           'v1',
           ${JSON.stringify({
             ai_consent: true,
-            provider_config: true,
             first_content: true,
             first_note: true,
           })}::jsonb,

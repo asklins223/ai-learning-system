@@ -303,3 +303,214 @@ groups:
           summary: "检测到版本回滚"
           description: "Release 已回滚，需立即调查原因。"
           runbook: "docs/operations.md#rollback"
+
+  # ─── Supervisor Agent v1 健康 ──────────────────────────────────────────────
+  #
+  # 对应计划 §W7, §17.3, §19.3 的监控要求。
+  # 所有指标使用 `ailearn_supervisor_` 前缀。
+  # 告警级别：
+  #   - warning：需要关注但非紧急
+  #   - critical：需要立即响应（hard invariant 违规 = 立即回滚）
+  - name: ailearn_supervisor_agent_v1
+    interval: 30s
+    rules:
+      # Supervisor Agent run 失败率超过 2%
+      - alert: AILearnSupervisorHighRunFailureRate
+        expr: |
+          (
+            rate(ailearn_supervisor_run_failures_total[10m])
+            /
+            rate(ailearn_supervisor_run_terminal_total[10m])
+          ) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Supervisor Agent run 失败率过高"
+          description: "失败率达到 {{ $value | humanizePercentage }}，超过阈值 2%。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # 非 cancel run 成功率低于 98%（计划 §17.3）
+      - alert: AILearnSupervisorLowSuccessRate
+        expr: |
+          (
+            rate(ailearn_supervisor_run_failures_total[15m])
+            /
+            rate(ailearn_supervisor_run_terminal_total[15m])
+          ) > 0.02
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Supervisor Agent 非 cancel 成功率低于 98%"
+          description: "非 cancel run 失败率超过 2%。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # Critic 拒绝率过高（可能表明生成质量下降）
+      - alert: AILearnSupervisorHighCriticRejectionRate
+        expr: |
+          (
+            rate(ailearn_supervisor_critic_rejections_total[15m])
+            /
+            rate(ailearn_supervisor_critic_evaluations_total[15m])
+          ) > 0.30
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Supervisor Critic 拒绝率过高"
+          description: "Critic 拒绝率达到 {{ $value | humanizePercentage }}，超过停止扩量阈值 30%。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # Repair 触发率超过 30%（计划 §17.3 停止扩量阈值）
+      - alert: AILearnSupervisorHighRepairRate
+        expr: |
+          (
+            rate(ailearn_supervisor_repair_triggered_total[15m])
+            /
+            rate(ailearn_supervisor_run_terminal_total[15m])
+          ) > 0.30
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Supervisor Repair 触发率超过停止扩量阈值"
+          description: "Repair 触发率达到 {{ $value | humanizePercentage }}，超过 30% 停止扩量阈值。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # Hard invariant 违规 = 立即回滚（计划 §19.3）
+      - alert: AILearnSupervisorHardInvariantViolation
+        expr: rate(ailearn_supervisor_hard_invariant_violations_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Supervisor Agent hard invariant 违规"
+          description: "检测到 hard invariant 违规，需立即回滚。违规类型包括：evidence/tenant/hash/epoch/idempotency/partial/privacy 违规、unsupported/contradicted claim 发布、child 越权 delegate、Agent direct canonical write、Supervisor 未经 Critic 发布。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md#立即回滚"
+
+      # Evidence integrity 违规
+      - alert: AILearnSupervisorEvidenceIntegrityViolation
+        expr: rate(ailearn_supervisor_evidence_integrity_violations_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Supervisor evidence integrity 违规"
+          description: "检测到 evidence allowlist/quote-hash/typed-evidence 违规。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # 不支持的 claim 被发布（立即回滚条件）
+      - alert: AILearnSupervisorUnsupportedClaimPublished
+        expr: rate(ailearn_supervisor_unsupported_claims_published_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Supervisor 发布了不支持的 claim"
+          description: "unsupported/contradicted claim 被发布，需立即回滚。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md#立即回滚"
+
+      # 预算超限
+      - alert: AILearnSupervisorBudgetExceeded
+        expr: rate(ailearn_supervisor_budget_exceeded_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Supervisor Agent 预算超限"
+          description: "检测到 turn/token/tool-call/cost 预算超限事件。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # Coverage 不完整（< 100%）
+      - alert: AILearnSupervisorLowCoverage
+        expr: ailearn_supervisor_coverage_ratio < 1.0
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Supervisor Agent coverage 不完整"
+          description: "coverage ratio 低于 100%，当前值 {{ $value | humanizePercentage }}。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # Shadow 模式异常（计划 §G4）
+      - alert: AILearnSupervisorShadowQualityRegression
+        expr: |
+          (
+            rate(ailearn_supervisor_shadow_quality_failures_total[30m])
+            /
+            rate(ailearn_supervisor_shadow_runs_total[30m])
+          ) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Supervisor Shadow 质量回退"
+          description: "Shadow 模式质量失败率超过 5%。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+      # Canary 阶段错误率激增（计划 §G5）
+      - alert: AILearnSupervisorCanaryErrorSpike
+        expr: |
+          (
+            rate(ailearn_supervisor_canary_errors_total[10m])
+            /
+            rate(ailearn_supervisor_canary_runs_total[10m])
+          ) > 0.02
+        for: 10m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Supervisor Canary 错误率激增"
+          description: "Canary 阶段错误率超过 2%，需考虑回滚。"
+          runbook: "docs/runbooks/card-generation-supervisor-v1-rollout-rollback.md"
+
+  # ─── 搜索索引一致性监控 ─────────────────────────────────────────────────────
+  #
+  # ARCH-01: Search projection (search_documents) uses savepoint isolation,
+  # meaning projection write failures don't block the main transaction. This
+  # can cause silent drift between business data and search index. These
+  # alerts detect when drift exceeds acceptable thresholds so administrators
+  # can trigger reindex before users notice missing search results.
+  - name: ailearn_search_consistency
+    interval: 60s
+    rules:
+      # Search index drift detected (ghosts + missing > 0)
+      - alert: AILearnSearchIndexDrift
+        expr: ailearn_search_drift_total > 0
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "搜索索引检测到漂移"
+          description: "检测到 {{ $value }} 个漂移文档（幽灵或缺失），需检查是否需要触发 reindex。"
+          runbook: "docs/operations.md#search-drift"
+
+      # Search index drift ratio exceeds 5% of total documents
+      - alert: AILearnHighSearchDriftRatio
+        expr: |
+          (
+            ailearn_search_drift_total
+            /
+            ailearn_search_documents_total
+          ) > 0.05
+        for: 15m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "搜索索引漂移比例过高"
+          description: "漂移比例超过 5%，用户可能搜不到最新内容，需立即触发 reindex。"
+          runbook: "docs/operations.md#search-drift"

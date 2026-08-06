@@ -28,7 +28,6 @@
 #   DATABASE_URL_API      — API 角色连接串（必须设置，密码需 URL 编码）
 #   DATABASE_URL_WORKER   — Worker 角色连接串（必须设置，密码需 URL 编码）
 #   BACKUP_BUCKET       — 备份 bucket 名称（默认 ailearn-backups）
-#   AI_CREDENTIAL_ENCRYPTION_KEY — AI 凭证加密密钥（32 字节 hex）
 
 set -euo pipefail
 
@@ -73,7 +72,6 @@ check_env() {
   [[ -z "${DATABASE_URL_MIGRATOR:-}" ]] && missing+=("DATABASE_URL_MIGRATOR")
   [[ -z "${DATABASE_URL_API:-}" ]] && missing+=("DATABASE_URL_API")
   [[ -z "${DATABASE_URL_WORKER:-}" ]] && missing+=("DATABASE_URL_WORKER")
-  [[ -z "${AI_CREDENTIAL_ENCRYPTION_KEY:-}" ]] && missing+=("AI_CREDENTIAL_ENCRYPTION_KEY")
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     err "缺少必需的环境变量: ${missing[*]}"
@@ -87,7 +85,6 @@ check_env() {
     err "  export DATABASE_URL_MIGRATOR=postgres://ailearn_migrator:...@postgres:5432/ailearn"
     err "  export DATABASE_URL_API=postgres://ailearn_api:...@postgres:5432/ailearn"
     err "  export DATABASE_URL_WORKER=postgres://ailearn_worker:...@postgres:5432/ailearn"
-    err "  export AI_CREDENTIAL_ENCRYPTION_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
     exit 1
   fi
 }
@@ -105,7 +102,6 @@ prepare_compose_control_env() {
   export DATABASE_URL_MIGRATOR="${DATABASE_URL_MIGRATOR:-postgres://control:control@postgres:5432/control}"
   export DATABASE_URL_API="${DATABASE_URL_API:-postgres://control:control@postgres:5432/control}"
   export DATABASE_URL_WORKER="${DATABASE_URL_WORKER:-postgres://control:control@postgres:5432/control}"
-  export AI_CREDENTIAL_ENCRYPTION_KEY="${AI_CREDENTIAL_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}"
 }
 
 wait_http() {

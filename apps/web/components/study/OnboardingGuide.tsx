@@ -7,7 +7,6 @@ import { Icon } from "@/components/ui/icons";
 
 type OnboardingStepId =
   | "ai_consent"
-  | "provider_config"
   | "first_content"
   | "first_note"
   | "first_card"
@@ -27,13 +26,6 @@ const ONBOARDING_STEPS: StepDef[] = [
     id: "ai_consent",
     label: "确认 AI 使用边界",
     description: "仅在使用外部模型时，需要确认工作区的数据边界。",
-    href: "/settings#model",
-    ctaLabel: "查看模型设置",
-  },
-  {
-    id: "provider_config",
-    label: "模型已就绪",
-    description: "系统默认配置可以直接使用，也可以按需连接个人模型。",
     href: "/settings#model",
     ctaLabel: "查看模型设置",
   },

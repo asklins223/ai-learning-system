@@ -74,19 +74,13 @@ export type ArtifactType = (typeof ArtifactType)[keyof typeof ArtifactType];
 
 // Job types
 export const JobType = {
-  GENERATE_CARD: "generate_card",
-  PLAN_CARD_GENERATION: "plan_card_generation",
-  ANALYZE_CARD_IMAGE: "analyze_card_image",
-  MAP_CARD_GENERATION: "map_card_generation",
-  REDUCE_CARD_GENERATION: "reduce_card_generation",
-  PLAN_CARD_SET: "plan_card_set",
-  RENDER_CARD_GENERATION: "render_card_generation",
-  PUBLISH_CARD_GENERATION: "publish_card_generation",
   ALIGN_EVIDENCE: "align_evidence",
   EVALUATE_VALIDATION: "evaluate_validation",
   SCHEDULE_REVIEW: "schedule_review",
   PARSE_SOURCE: "parse_source",
   GENERATE_VALIDATION_QUESTION: "generate_validation_question",
+  // Supervisor Agent v1：唯一 Agent job type（计划 §5.2）
+  EXECUTE_CARD_AGENT_TURN: "execute_card_agent_turn",
 } as const;
 export type JobType = (typeof JobType)[keyof typeof JobType];
 
@@ -246,58 +240,16 @@ export const QualitySignalReason = {
 export type QualitySignalReason =
   (typeof QualitySignalReason)[keyof typeof QualitySignalReason];
 
-// ─── Learning-card generation engine v2 ───────────────────────────────────
-
-/** Business-level generation run state (not the execution job state). */
-export const CardGenerationRunStatus = {
-  QUEUED: "queued",
-  PLANNING: "planning",
-  AWAITING_ASSETS: "awaiting_assets",
-  MAPPING: "mapping",
-  REDUCING: "reducing",
-  RENDERING: "rendering",
-  VALIDATING: "validating",
-  PUBLISHING: "publishing",
-  NEEDS_ATTENTION: "needs_attention",
-  PARTIAL_READY: "partial_ready",
-  SUCCEEDED: "succeeded",
-  CANCELLED: "cancelled",
-  SUPERSEDED: "superseded",
-} as const;
-export type CardGenerationRunStatus =
-  (typeof CardGenerationRunStatus)[keyof typeof CardGenerationRunStatus];
+// ─── Learning-card generation engine ──────────────────────────────────────
 
 /** Stable, user-visible stages used by progress events and recovery APIs. */
 export const CardGenerationStage = {
   QUEUED: "queued",
   SNAPSHOT: "snapshot",
-  PLANNER: "planner",
-  IMAGE_ANALYSIS: "image_analysis",
-  TEXT_MAP: "text_map",
-  SECTION_REDUCE: "section_reduce",
-  DECK_PLAN: "deck_plan",
-  CARD_RENDER: "card_render",
-  GLOBAL_VERIFY: "global_verify",
-  PUBLISH: "publish",
-  LEGACY_GENERATE: "legacy_generate",
   COMPLETE: "complete",
 } as const;
 export type CardGenerationStage =
   (typeof CardGenerationStage)[keyof typeof CardGenerationStage];
-
-/** Checkpoint kinds persisted independently from queue jobs. */
-export const CardGenerationUnitKind = {
-  PLANNER: "planner",
-  IMAGE: "image",
-  TEXT_MAP: "text_map",
-  SECTION_REDUCE: "section_reduce",
-  DECK_PLAN: "deck_plan",
-  CARD_RENDER: "card_render",
-  VERIFY: "verify",
-  PUBLISH: "publish",
-} as const;
-export type CardGenerationUnitKind =
-  (typeof CardGenerationUnitKind)[keyof typeof CardGenerationUnitKind];
 
 export const JobResourceClass = {
   INTERACTIVE_AI: "interactive_ai",

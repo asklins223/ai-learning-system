@@ -86,15 +86,22 @@ describe("v0.6 Cache-Control contract (计划 §10.4)", () => {
     });
 
     it("every route handler sets NO_STORE header (count match)", () => {
-      // Every route should have a reply.headers(NO_STORE) call.
-      // We subtract 1 for the constant definition line itself.
-      const expectedApplications = routeDefinitionCount;
+      // 部分路由通过 createSubmissionRoute 工厂统一应用 NO_STORE，
+      // 工厂内的单处 reply.headers(NO_STORE) 覆盖全部工厂路由。
+      // 剩余直接 handler 各自显式设置。因此要求：
+      //   直接路由数 ≤ 显式 NO_STORE 应用数（排除常量定义行）
+      const factoryCovered = countOccurrences(sessionRoutesSource, "createSubmissionRoute(");
+      const directRoutes = routeDefinitionCount - factoryCovered;
       const actualApplications = noStoreCount - 1; // subtract constant definition
 
       assert.ok(
-        actualApplications >= expectedApplications,
-        `Expected at least ${expectedApplications} NO_STORE applications (one per route), found ${actualApplications}. ` +
-          `Route count: ${routeDefinitionCount}, NO_STORE references: ${noStoreCount}`,
+        factoryCovered > 0,
+        "session-routes.ts 应使用 createSubmissionRoute 工厂统一应用 NO_STORE",
+      );
+      assert.ok(
+        actualApplications >= directRoutes,
+        `Expected at least ${directRoutes} direct NO_STORE applications, found ${actualApplications}. ` +
+          `Route count: ${routeDefinitionCount}, factory-covered: ${factoryCovered}, NO_STORE references: ${noStoreCount}`,
       );
     });
 

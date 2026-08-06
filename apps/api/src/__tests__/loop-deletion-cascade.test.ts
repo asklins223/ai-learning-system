@@ -121,9 +121,13 @@ describe("LOOP-01/02 DoD: 导出/恢复覆盖 review_attempts", () => {
 
   it("exportWorkspace 查询 reviewAttempts 时按 workspaceId 过滤", () => {
     const content = readFile(join(MODULES_DIR, "export", "service.ts"));
+    // reviewAttemptRows 是 Promise.all 解构变量，过滤条件在稍后的查询里。
+    // 直接检查 reviewAttempts 查询段是否按 workspaceId 过滤。
+    const queryAnchor = content.indexOf("query.reviewAttempts.findMany");
+    assert.ok(queryAnchor >= 0, "导出服务应查询 reviewAttempts");
     const reviewAttemptSection = content.substring(
-      content.indexOf("reviewAttemptRows"),
-      content.indexOf("reviewAttemptRows") + 200,
+      queryAnchor,
+      queryAnchor + 300,
     );
     assert.ok(
       reviewAttemptSection.includes("workspaceId"),

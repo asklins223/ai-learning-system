@@ -10,8 +10,9 @@ import assert from "node:assert/strict";
 import {
   isQuestionFirstUIEnabled,
   isAIQuestionEnabled,
-  isCardGenerationV2Enabled,
   isRubricEvaluationEnabled,
+  isCardSetDeckUIEnabled,
+  isAgentActivityStreamEnabled,
 } from "../feature-flags.ts";
 
 function withEnv<T>(env: Record<string, string | undefined>, fn: () => T): T {
@@ -92,22 +93,54 @@ describe("Client-side feature flags", () => {
     });
   });
 
-  describe("isCardGenerationV2Enabled", () => {
-    it("defaults to disabled (fail-closed) when unset", () => {
-      withEnv({ NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: undefined }, () => {
-        assert.equal(isCardGenerationV2Enabled(), false);
+  describe("isCardSetDeckUIEnabled", () => {
+    it("defaults to false when NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED is unset", () => {
+      withEnv({ NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: undefined }, () => {
+        assert.equal(isCardSetDeckUIEnabled(), false);
       });
     });
 
-    it("supports the explicit false rollback switch", () => {
-      withEnv({ NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: "false" }, () => {
-        assert.equal(isCardGenerationV2Enabled(), false);
+    it("returns false when set to 'false'", () => {
+      withEnv({ NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: "false" }, () => {
+        assert.equal(isCardSetDeckUIEnabled(), false);
       });
     });
 
-    it("rejects invalid non-empty values", () => {
-      withEnv({ NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: "1" }, () => {
-        assert.equal(isCardGenerationV2Enabled(), false);
+    it("returns true when set to 'true'", () => {
+      withEnv({ NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: "true" }, () => {
+        assert.equal(isCardSetDeckUIEnabled(), true);
+      });
+    });
+
+    it("does not enable the feature for an invalid value", () => {
+      withEnv({ NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: "1" }, () => {
+        assert.equal(isCardSetDeckUIEnabled(), false);
+      });
+    });
+  });
+
+  describe("isAgentActivityStreamEnabled", () => {
+    it("defaults to false when NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED is unset", () => {
+      withEnv({ NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: undefined }, () => {
+        assert.equal(isAgentActivityStreamEnabled(), false);
+      });
+    });
+
+    it("returns false when set to 'false'", () => {
+      withEnv({ NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: "false" }, () => {
+        assert.equal(isAgentActivityStreamEnabled(), false);
+      });
+    });
+
+    it("returns true when set to 'true'", () => {
+      withEnv({ NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: "true" }, () => {
+        assert.equal(isAgentActivityStreamEnabled(), true);
+      });
+    });
+
+    it("does not enable the feature for an invalid value", () => {
+      withEnv({ NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: "1" }, () => {
+        assert.equal(isAgentActivityStreamEnabled(), false);
       });
     });
   });
@@ -119,11 +152,15 @@ describe("Client-side feature flags", () => {
           NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: undefined,
           NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: undefined,
           NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: undefined,
+          NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: undefined,
+          NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: undefined,
         },
         () => {
           assert.equal(isQuestionFirstUIEnabled(), false);
           assert.equal(isAIQuestionEnabled(), false);
           assert.equal(isRubricEvaluationEnabled(), false);
+          assert.equal(isCardSetDeckUIEnabled(), false);
+          assert.equal(isAgentActivityStreamEnabled(), false);
         },
       );
     });
@@ -134,11 +171,15 @@ describe("Client-side feature flags", () => {
           NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: "true",
           NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: "true",
           NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: "true",
+          NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: "true",
+          NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: "true",
         },
         () => {
           assert.equal(isQuestionFirstUIEnabled(), true);
           assert.equal(isAIQuestionEnabled(), true);
           assert.equal(isRubricEvaluationEnabled(), true);
+          assert.equal(isCardSetDeckUIEnabled(), true);
+          assert.equal(isAgentActivityStreamEnabled(), true);
         },
       );
     });

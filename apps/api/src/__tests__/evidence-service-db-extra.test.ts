@@ -27,6 +27,20 @@ const original = {
   overridesFindMany: mutableDb.query.evidenceOverrides.findMany,
 };
 
+// BUG-71 测试适配：withWorkspaceTransaction 内部调用 db.transaction 并执行
+// setApiTransactionContext（需要 tx.execute），因此 mock 的 tx 必须提供 execute 方法
+// 以及 query 委托到 db.query，使现有 mock 继续生效。
+function passthroughTransaction(): any {
+  return async (run: (tx: any) => Promise<any>) => run({
+    execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
+    query: mutableDb.query,
+    select: mutableDb.select,
+    insert: mutableDb.insert,
+    update: mutableDb.update,
+    delete: mutableDb.delete,
+  });
+}
+
 function restoreDatabase(): void {
   mutableDb.transaction = original.transaction;
   mutableDb.delete = original.delete;
@@ -39,7 +53,11 @@ function restoreDatabase(): void {
   mutableDb.query.evidenceOverrides.findMany = original.overridesFindMany;
 }
 
-beforeEach(restoreDatabase);
+beforeEach(() => {
+  restoreDatabase();
+  // BUG-71 测试适配：默认使用 passthroughTransaction 支持 withWorkspaceTransaction
+  mutableDb.transaction = passthroughTransaction();
+});
 after(restoreDatabase);
 
 describe("evidence service hydration", () => {
@@ -128,7 +146,7 @@ describe("evidence service hydration", () => {
     ]);
   });
 
-  it("uses the legacy override when no user is supplied and tolerates missing blocks", async () => {
+  it("uses the legacy override when user has no overrides and tolerates missing blocks", async () => {
     mutableDb.query.learningCards.findFirst = async () => ({ id: CARD_ID });
     mutableDb.query.cardKeyPoints.findMany = async () => [{ id: "kp-1", ordinal: 0 }];
     mutableDb.query.evidences.findMany = async () => [{
@@ -138,11 +156,10 @@ describe("evidence service hydration", () => {
       userOverride: "confirmed",
     }];
     mutableDb.query.noteBlocks.findMany = async () => [];
-    mutableDb.query.evidenceOverrides.findMany = async () => {
-      throw new Error("user-scoped query must not run");
-    };
+    // BUG-71 修复后 userId 必传，返回空数组模拟无用户级 override
+    mutableDb.query.evidenceOverrides.findMany = async () => [];
 
-    const result = await getCardEvidence(CARD_ID, WORKSPACE_ID);
+    const result = await getCardEvidence(CARD_ID, WORKSPACE_ID, USER_ID);
     assert.deepEqual(result?.[0]?.evidences.map((ev: any) => ({
       effectiveOverride: ev.effectiveOverride,
       blockContent: ev.blockContent,
@@ -161,6 +178,8 @@ function installOverrideTransaction(fixture: OverrideTransactionFixture) {
   const inserts: Array<{ table: unknown; value: unknown; conflict?: unknown }> = [];
   const deletes: unknown[] = [];
   mutableDb.transaction = async (run: (tx: any) => Promise<unknown>) => run({
+    // BUG-71 测试适配：withWorkspaceTransaction 需要 tx.execute
+    execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
     query: {
       evidences: { findFirst: async () => fixture.evidence },
       cardKeyPoints: { findFirst: async () => fixture.keyPoint },
@@ -169,6 +188,12 @@ function installOverrideTransaction(fixture: OverrideTransactionFixture) {
           ? undefined
           : fixture.card ?? (fixture.keyPoint ? { id: fixture.keyPoint.cardId } : undefined),
       },
+      // BUG-71 测试适配：passthrough 查询委托
+      learningCardsFindMany: async () => [],
+      cardKeyPointsFindMany: async () => [],
+      evidencesFindMany: async () => [],
+      noteBlocksFindMany: async () => [],
+      evidenceOverrides: { findMany: async () => [] },
     },
     insert: (table: unknown) => ({
       values: (value: unknown) => {
@@ -352,6 +377,7 @@ describe("evidence routes", () => {
     );
 
     mutableDb.transaction = async (run: (tx: any) => Promise<unknown>) => run({
+      execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
       query: { evidences: { findFirst: async () => undefined } },
     });
     reply = createReply();

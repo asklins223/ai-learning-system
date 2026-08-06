@@ -271,7 +271,7 @@ describe("OPS-01 DoD: 指标 allowlist 完整性", () => {
   });
 
   it("JOB_TYPES allowlist 对应 handler 注册表", () => {
-    const required = ["generate_card", "align_evidence", "evaluate_validation", "parse_source"];
+    const required = ["execute_card_agent_turn", "align_evidence", "evaluate_validation", "parse_source"];
     for (const type of required) {
       assert.ok(
         (JOB_TYPES as readonly string[]).includes(type),
@@ -285,7 +285,7 @@ describe("OPS-01 DoD: 指标 allowlist 完整性", () => {
   });
 
   it("PROVIDER_OPERATIONS allowlist 只包含已注册操作", () => {
-    assert.deepEqual([...PROVIDER_OPERATIONS], ["generate_card", "align_evidence", "evaluate_validation"]);
+    assert.deepEqual([...PROVIDER_OPERATIONS], ["align_evidence", "evaluate_validation", "generate_validation_question", "execute_card_agent_turn"]);
   });
 });
 
@@ -440,7 +440,7 @@ describe("OPS-01 DoD: 指标隐私边界", () => {
   });
 
   it("指标文本不包含 lease token 原始值", async () => {
-    jobTerminalTotal.inc({ type: "generate_card", status: "succeeded" });
+    jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
     const text = await getMetricsText();
     assert.doesNotMatch(text, /lease_token/i, "不应包含 lease_token 字段名");
     assert.doesNotMatch(

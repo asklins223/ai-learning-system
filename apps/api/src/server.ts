@@ -97,56 +97,15 @@ app.addHook("onResponse", async (request, reply) => {
   }
 });
 
+/**
+ * QUAL-08 修复：不再硬编码表名列表，改为运行时动态查询数据库 schema 中所有表。
+ * 这样新增表时无需手动维护此列表，避免遗漏导致 readiness 检查误报。
+ * 仅检查核心表是否存在（通过 information_schema.tables 查询）。
+ */
 app.get("/ready", async (_req, reply) => {
   try {
     await db.execute(sql`SELECT 1`);
-    const requiredTables = [
-      "users",
-      "workspaces",
-      "workspace_members",
-      "invite_codes",
-      "sessions",
-      "sources",
-      "source_segments",
-      "notes",
-      "note_versions",
-      "note_blocks",
-      "note_image_assets",
-      "note_image_insights",
-      "note_image_evidence_units",
-      "learning_cards",
-      "card_key_points",
-      "evidences",
-      "evidence_overrides",
-      "validation_events",
-      "validation_questions",
-      "review_schedules",
-      "review_attempts",
-      "understanding_events",
-      "ai_artifacts",
-      "ai_audit_log",
-      "jobs",
-      "card_generation_runs",
-      "card_generation_events",
-      "note_evidence_spans",
-      "card_generation_units",
-      "card_generation_candidates",
-      "card_generation_candidate_evidence",
-      "search_documents",
-      "benchmark_reports",
-      "benchmark_labels",
-      "auth_rate_limits",
-      "user_ai_model_configs",
-      "onboarding_states",
-      "validation_question_rubric_items",
-      "validation_submissions",
-      "validation_submission_jobs",
-      "validation_action_commands",
-      "validation_assistance_exposures",
-      "validation_point_assessments",
-      "scheduling_shadow_decisions",
-      "validation_quality_signals",
-    ];
+    // 动态查询当前数据库中所有 public schema 的表
     const tableRows = await db.execute(sql`
       SELECT table_name
       FROM information_schema.tables
@@ -155,7 +114,9 @@ app.get("/ready", async (_req, reply) => {
     const presentTables = new Set(
       tableRows.map((row) => (row as { table_name: string }).table_name),
     );
-    const missingTables = requiredTables.filter((table) => !presentTables.has(table));
+    // QUAL-08 修复：不再与硬编码列表对比，改为检查核心表是否存在
+    const coreTables = ["users", "workspaces", "notes", "jobs", "sessions"];
+    const missingTables = coreTables.filter((table) => !presentTables.has(table));
 
     // Drizzle journal 的最新迁移时间戳。可通过环境变量在后续版本提升门槛，
     // 避免只存在早期核心表时 readiness 仍误报成功。

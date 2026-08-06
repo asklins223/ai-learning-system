@@ -42,7 +42,7 @@ import {
 /** 标准测试用 claimed job fixture */
 const baseJob: ClaimedJob = {
   id: "11111111-1111-1111-1111-111111111111",
-  type: "generate_card",
+  type: "execute_card_agent_turn",
   payload: { noteVersionId: "note-version-1" },
   workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -309,7 +309,7 @@ test("故障矩阵：claim 返回未知 job 类型 — 不影响其他 job 的 c
   const executor = executorWithRows([
     {
       id: "job-known",
-      type: "generate_card",
+      type: "execute_card_agent_turn",
       payload: {},
       workspace_id: "ws-1",
       requested_by: "user-1",
@@ -330,7 +330,7 @@ test("故障矩阵：claim 返回未知 job 类型 — 不影响其他 job 的 c
   const jobs = await claimJobs(executor, 2, MAX_ATTEMPTS);
 
   assert.equal(jobs.length, 2);
-  assert.equal(jobs[0].type, "generate_card");
+  assert.equal(jobs[0].type, "execute_card_agent_turn");
   assert.equal(jobs[1].type, "unknown_type_xyz");
   // 两种 job 都应获得独立的 lease token
   assert.equal(new Set(jobs.map((j) => j.leaseToken)).size, 2);

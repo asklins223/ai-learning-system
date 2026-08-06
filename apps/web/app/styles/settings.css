@@ -83,7 +83,7 @@
 
 .settings-rail {
   position: sticky;
-  top: 24px;
+  top: calc(var(--workspace-sticky-top, 0px) + var(--workspace-sticky-height, 136px) + 24px);
 }
 
 .settings-rail-title {

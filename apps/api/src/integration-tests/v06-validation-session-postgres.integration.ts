@@ -609,7 +609,7 @@ test("v0.6: jobs repair_state CHECK constraint enforces 0..1", async () => {
           lease_token, repair_state, repair_attempt_count
         )
         VALUES (
-          ${jobId}, ${ctx.workspaceId}, 'generate_card', ${tx.json({})},
+          ${jobId}, ${ctx.workspaceId}, 'execute_card_agent_turn', ${tx.json({})},
           'pending', ${ctx.userId}, ${`lease-${randomUUID().slice(0, 8)}`},
           'none', 2
         )
@@ -630,7 +630,7 @@ test("v0.6: jobs repair_state CHECK constraint enforces 0..1", async () => {
         lease_token, repair_state, repair_attempt_count
       )
       VALUES (
-        ${jobId}, ${ctx.workspaceId}, 'generate_card', ${tx.json({})},
+        ${jobId}, ${ctx.workspaceId}, 'execute_card_agent_turn', ${tx.json({})},
         'pending', ${ctx.userId}, ${`lease-${randomUUID().slice(0, 8)}`},
         'completed', 1
       )

@@ -268,7 +268,7 @@ async function main() {
       await tx`INSERT INTO users (id, email, password_hash) VALUES (${testUserId}, ${`verify-job-${runId}@test.invalid`}, 'not-used')`;
       await tx`INSERT INTO workspaces (id, owner_id, name) VALUES (${testWorkspaceId}, ${testUserId}, 'verify-jobs')`;
       await tx`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${testWorkspaceId}, ${testUserId}, 'owner')`;
-      await tx`INSERT INTO jobs (id, type, workspace_id, requested_by, payload, status) VALUES (${testJobId}, 'generate_card', ${testWorkspaceId}, ${testUserId}, ${tx.json({})}::jsonb, 'pending')`;
+      await tx`INSERT INTO jobs (id, type, workspace_id, requested_by, payload, status) VALUES (${testJobId}, 'execute_card_agent_turn', ${testWorkspaceId}, ${testUserId}, ${tx.json({})}::jsonb, 'pending')`;
     });
 
     try {

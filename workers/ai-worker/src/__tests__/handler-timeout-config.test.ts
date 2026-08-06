@@ -12,17 +12,12 @@ import {
 
 const ENV_KEYS = [
   "WORKER_MODEL_TIMEOUT_MS",
-  "WORKER_TIMEOUT_GENERATE_CARD_MS",
-  "WORKER_TIMEOUT_ANALYZE_CARD_IMAGE_MS",
-  "WORKER_TIMEOUT_PLAN_CARD_SET_MS",
-  "WORKER_TIMEOUT_RENDER_CARD_GENERATION_MS",
   "WORKER_TIMEOUT_EVALUATE_VALIDATION_MS",
   "WORKER_TIMEOUT_ALIGN_EVIDENCE_MS",
   "WORKER_TIMEOUT_PARSE_SOURCE_MS",
   "WORKER_TIMEOUT_GENERATE_VALIDATION_QUESTION_MS",
   "WORKER_PROVIDER_TIMEOUT_MS",
   "WORKER_PROVIDER_TIMEOUT_GENERATE_VALIDATION_QUESTION_MS",
-  "WORKER_PROVIDER_TIMEOUT_ANALYZE_CARD_IMAGE_MS",
 ];
 
 const savedEnv: Record<string, string | undefined> = {};
@@ -42,23 +37,11 @@ afterEach(() => {
 });
 
 test("resolveHandlerTimeout returns built-in defaults per job type", () => {
-  assert.equal(resolveHandlerTimeout("generate_card"), 90_000);
-  assert.equal(resolveHandlerTimeout("analyze_card_image"), 110_000);
-  assert.equal(resolveHandlerTimeout("plan_card_set"), 60_000);
-  assert.equal(resolveHandlerTimeout("render_card_generation"), 60_000);
   assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
   assert.equal(resolveHandlerTimeout("generate_validation_question"), 90_000);
   assert.equal(resolveHandlerTimeout("align_evidence"), 30_000);
   assert.equal(resolveHandlerTimeout("parse_source"), 60_000);
-});
-
-test("image analysis keeps a bounded provider budget and persistence margin", () => {
-  assert.equal(resolveProviderCallTimeout("analyze_card_image"), 75_000);
-  assert.equal(
-    resolveHandlerTimeout("analyze_card_image")
-      - resolveProviderCallTimeout("analyze_card_image"),
-    35_000,
-  );
+  assert.equal(resolveHandlerTimeout("execute_card_agent_turn"), 110_000);
 });
 
 test("resolveHandlerTimeout falls back to global default for unknown job types", () => {
@@ -66,8 +49,8 @@ test("resolveHandlerTimeout falls back to global default for unknown job types",
 });
 
 test("resolveHandlerTimeout respects per-type env override", () => {
-  process.env.WORKER_TIMEOUT_GENERATE_CARD_MS = "120000";
-  assert.equal(resolveHandlerTimeout("generate_card"), 110_000); // clamped to lease - 10s
+  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "120000";
+  assert.equal(resolveHandlerTimeout("evaluate_validation"), 110_000); // clamped to lease - 10s
 });
 
 test("resolveHandlerTimeout respects global env override for unknown types", () => {
@@ -77,27 +60,27 @@ test("resolveHandlerTimeout respects global env override for unknown types", () 
 
 test("resolveHandlerTimeout per-type env overrides global env", () => {
   process.env.WORKER_MODEL_TIMEOUT_MS = "30000";
-  process.env.WORKER_TIMEOUT_GENERATE_CARD_MS = "60000";
-  assert.equal(resolveHandlerTimeout("generate_card"), 60_000);
-  assert.equal(resolveHandlerTimeout("evaluate_validation"), 30_000); // uses global
+  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "60000";
+  assert.equal(resolveHandlerTimeout("evaluate_validation"), 60_000);
+  assert.equal(resolveHandlerTimeout("align_evidence"), 30_000); // uses built-in default
 });
 
 test("resolveHandlerTimeout clamps to lease safety margin", () => {
-  process.env.WORKER_TIMEOUT_GENERATE_CARD_MS = "999999";
-  const resolved = resolveHandlerTimeout("generate_card");
+  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "999999";
+  const resolved = resolveHandlerTimeout("evaluate_validation");
   assert.equal(resolved, RESOLVED_TIMEOUT_INFO.maxAllowedTimeoutMs);
   assert.ok(resolved < RESOLVED_TIMEOUT_INFO.leaseTimeoutMs, "timeout must be < lease timeout");
 });
 
 test("resolveHandlerTimeout ignores invalid env values", () => {
-  process.env.WORKER_TIMEOUT_GENERATE_CARD_MS = "not-a-number";
-  assert.equal(resolveHandlerTimeout("generate_card"), 90_000);
+  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "not-a-number";
+  assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
 
-  process.env.WORKER_TIMEOUT_GENERATE_CARD_MS = "-5";
-  assert.equal(resolveHandlerTimeout("generate_card"), 90_000);
+  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "-5";
+  assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
 
-  process.env.WORKER_TIMEOUT_GENERATE_CARD_MS = "0";
-  assert.equal(resolveHandlerTimeout("generate_card"), 90_000);
+  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "0";
+  assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
 });
 
 test("lease safety margin is 10 seconds below lease timeout", () => {

@@ -1795,17 +1795,20 @@
 }
 
 .note-editor-generation-panel[data-generation-state="attention"],
-.note-editor-generation-panel[data-generation-state="partial"] {
+.note-editor-generation-panel[data-generation-state="partial"],
+.note-editor-generation-panel[data-generation-state="status-error"] {
   border-color: color-mix(in srgb, var(--color-warning) 48%, var(--color-border));
 }
 
 .note-editor-generation-panel[data-generation-state="attention"] .note-editor-panel-header,
-.note-editor-generation-panel[data-generation-state="partial"] .note-editor-panel-header {
+.note-editor-generation-panel[data-generation-state="partial"] .note-editor-panel-header,
+.note-editor-generation-panel[data-generation-state="status-error"] .note-editor-panel-header {
   background: color-mix(in srgb, var(--color-warning-soft) 64%, var(--color-surface-soft));
 }
 
 .note-editor-generation-panel[data-generation-state="attention"] .note-editor-panel-kicker,
-.note-editor-generation-panel[data-generation-state="partial"] .note-editor-panel-kicker {
+.note-editor-generation-panel[data-generation-state="partial"] .note-editor-panel-kicker,
+.note-editor-generation-panel[data-generation-state="status-error"] .note-editor-panel-kicker {
   color: var(--color-warning-text);
 }
 
@@ -3019,6 +3022,11 @@
   list-style: none;
 }
 
+/* C1: 四阶段步骤条 */
+.ne-generation-steps--four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .ne-generation-steps li {
   position: relative;
   display: flex;
@@ -3181,6 +3189,52 @@
   line-height: 1.4;
 }
 
+/* C1: 覆盖率展示 */
+.ne-generation-coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.ne-generation-coverage-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.ne-generation-coverage-label {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  font-weight: 600;
+}
+
+.ne-generation-coverage-value {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+.ne-generation-coverage-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.ne-generation-coverage-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--color-success, #22c55e);
+  transition: width 0.4s var(--ease-standard, ease);
+}
+
+.ne-generation-coverage-fill--image {
+  background: var(--color-evidence, #6366f1);
+}
+
 .ne-generation-dismiss {
   display: inline-flex;
   align-items: center;
@@ -3201,6 +3255,56 @@
 .ne-generation-dismiss:hover {
   border-color: var(--color-accent, #6366f1);
   background: var(--color-surface-raised, var(--color-paper));
+}
+
+/* B1（计划 §2.4）：内容未变复用提示与强制重新生成入口 */
+.ne-generation-reused {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 12px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-raised, var(--color-paper));
+}
+
+.ne-generation-reused-text {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ne-generation-reused-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ne-generation-force-regenerate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-accent, #6366f1);
+  border-radius: 9px;
+  background: var(--color-accent, #6366f1);
+  color: #fff;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 540;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.ne-generation-force-regenerate:hover {
+  opacity: 0.88;
 }
 
 .ne-generation-retry,
@@ -3696,7 +3800,7 @@
  * viewport and only the writing/preview panes scroll. Very short windows keep
  * natural page flow so the fixed controls never crowd out the document.
  */
-@media (min-width: 1100px) and (min-height: 620px) {
+@media (min-width: 960px) and (min-height: 620px) {
   .app-canvas[data-page="note-editor"],
   .app-canvas[data-page="note-editor"] .app-shell-inner--focus,
   .app-canvas[data-page="note-editor"] .workspace--focus {
@@ -3776,7 +3880,7 @@
     overflow: hidden;
   }
 
-  .note-workbench .ne-editor-pane {
+  .app-canvas[data-page="note-editor"] .note-workbench .ne-editor-pane {
     display: flex;
     height: 100%;
     min-height: 0;
@@ -3786,6 +3890,7 @@
 
   .note-workbench .ne-editor-pane .milkdown-editor {
     flex: 1 1 0;
+    min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -3820,8 +3925,8 @@
     overflow: visible;
   }
 
-  .note-workbench[data-editor-mode="preview"] .ne-editor-pane,
-  .note-workbench[data-editor-mode="preview"] .ne-editor-preview {
+  .app-canvas[data-page="note-editor"] .note-workbench[data-editor-mode="preview"] .ne-editor-pane,
+  .app-canvas[data-page="note-editor"] .note-workbench[data-editor-mode="preview"] .ne-editor-preview {
     height: auto;
     min-height: 0;
     overflow: visible;
@@ -4897,4 +5002,999 @@ background: var(--color-border-strong);
   .md-lightbox-nav--next {
     right: 8px;
   }
+}
+
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Agent 生成进度弹窗 · 暖纸编辑主题（设计稿移植）
+   参考 /Users/asklins/Downloads/agent-generation-progress-warm-editorial-v3.html
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── 暖纸主题色板 ────────────────────────────────────────────────────── */
+
+:root {
+  --gen-paper: #fbf8f1;
+  --gen-paper-deep: #f5efe4;
+  --gen-card: #fffdf8;
+  --gen-card-soft: #f8f4eb;
+  --gen-text: #292722;
+  --gen-muted: #716d65;
+  --gen-faint: #9c968c;
+  --gen-line: #ded3c1;
+  --gen-line-strong: #cdbfa9;
+  --gen-blue: #0b609b;
+  --gen-blue-strong: #074d7e;
+  --gen-blue-soft: #e4f0f5;
+  --gen-cyan: #69b6bd;
+  --gen-cyan-soft: #edf7f6;
+  --gen-green: #168e68;
+  --gen-green-soft: #eaf6ef;
+  --gen-purple: #5c2caf;
+  --gen-purple-soft: #f2eaf8;
+  --gen-warning: #aa6a18;
+  --gen-warning-soft: #fff3dc;
+  --gen-danger: #ad3f31;
+  --gen-danger-soft: #fff0ec;
+  --gen-shadow: 0 26px 80px rgba(72, 65, 54, .20), 0 3px 10px rgba(72, 65, 54, .08);
+  --gen-card-shadow: 0 7px 18px rgba(93, 80, 60, .08), 0 1px 3px rgba(93, 80, 60, .05);
+  --gen-radius: 30px;
+  --gen-radius-lg: 20px;
+  --gen-radius-md: 16px;
+  --gen-radius-sm: 12px;
+}
+
+/* ── 弹窗容器（活动流视图使用，覆盖在编辑区上） ────────────────────── */
+
+.gen-progress {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-dialog) + 1);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--color-scrim);
+  backdrop-filter: blur(5px);
+}
+
+.gen-progress-dialog {
+  position: relative;
+  width: min(1120px, calc(100vw - 36px));
+  height: min(880px, calc(100vh - 36px));
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--gen-line-strong);
+  border-radius: var(--gen-radius);
+  background:
+    radial-gradient(circle at 50% -10%, rgba(255, 255, 255, .84), transparent 35%),
+    var(--gen-paper);
+  box-shadow: var(--gen-shadow), inset 0 0 0 1px rgba(255, 255, 255, .82);
+}
+
+.gen-progress-dialog::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: calc(var(--gen-radius) - 8px);
+  border: 1px solid rgba(255, 255, 255, .55);
+  pointer-events: none;
+}
+
+/* ── 头部 ─────────────────────────────────────────────────────────────── */
+
+.gen-progress-header {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 26px 30px 14px;
+  text-align: left;
+}
+
+.gen-progress-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  color: var(--gen-blue);
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+}
+
+.gen-progress-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--gen-cyan);
+  box-shadow: 0 0 0 5px rgba(105, 182, 189, .15);
+  animation: gen-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes gen-pulse {
+  0%, 100% { transform: scale(.86); opacity: .60; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+.gen-progress-title {
+  margin: 0;
+  font-family: "Iowan Old Style", "Songti SC", "STSong", "Noto Serif SC", Georgia, serif;
+  font-size: clamp(26px, 3.2vw, 40px);
+  font-weight: 560;
+  line-height: 1.18;
+  letter-spacing: -.04em;
+  color: var(--gen-text);
+}
+
+.gen-progress-subtitle {
+  margin: 8px 0 0;
+  color: var(--gen-muted);
+  font-size: 14px;
+  line-height: 1.7;
+  max-width: 640px;
+}
+
+.gen-progress-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.gen-progress-status-chip {
+  min-height: 32px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #bad5dc;
+  border-radius: 999px;
+  color: var(--gen-blue-strong);
+  background: rgba(228, 240, 245, .72);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.gen-progress-close {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--gen-line);
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  color: var(--gen-muted);
+  background: rgba(255, 253, 248, .82);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: .18s ease;
+}
+
+.gen-progress-close:hover {
+  border-color: var(--gen-line-strong);
+  background: #fffdf8;
+  color: var(--gen-text);
+  transform: translateY(-1px);
+}
+
+/* ── 进度概览 ─────────────────────────────────────────────────────────── */
+
+.gen-progress-overview {
+  padding: 0 30px 14px;
+}
+
+.gen-progress-overview-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 20px;
+  margin-bottom: 14px;
+  padding: 12px 16px;
+  border: 1px solid var(--gen-line);
+  border-radius: 18px;
+  background: rgba(255, 253, 248, .72);
+}
+
+.gen-progress-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gen-progress-copy-title {
+  color: var(--gen-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.gen-progress-percent {
+  color: var(--gen-blue);
+  font-size: 18px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-progress-meta {
+  color: var(--gen-muted);
+  font-size: 12px;
+}
+
+.gen-progress-track {
+  height: 5px;
+  margin-top: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8dfd2;
+}
+
+.gen-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4aa0a8 0%, var(--gen-blue) 100%);
+  box-shadow: 0 0 14px rgba(45, 133, 157, .18);
+  transition: width .4s ease;
+}
+
+.gen-progress-timing {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 20px;
+  text-align: right;
+  color: var(--gen-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.gen-progress-timing strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--gen-text);
+  font-size: 14px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 四阶段 stepper ───────────────────────────────────────────────────── */
+
+.gen-progress-stepper {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-progress-step {
+  position: relative;
+  min-width: 0;
+  min-height: 84px;
+  padding: 12px 14px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-content: start;
+  gap: 10px;
+  border: 1px solid var(--gen-line);
+  border-radius: var(--gen-radius-md);
+  background: rgba(248, 244, 235, .62);
+}
+
+.gen-progress-step[data-state="done"] {
+  border-color: #94bea5;
+  background: rgba(234, 246, 239, .42);
+}
+
+.gen-progress-step[data-state="active"] {
+  border-color: #63aeb4;
+  background: rgba(237, 247, 246, .68);
+  box-shadow: inset 0 0 0 1px rgba(105, 182, 189, .10);
+}
+
+.gen-progress-step-index {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--gen-line-strong);
+  background: var(--gen-card);
+  color: var(--gen-muted);
+  font-size: 13px;
+  font-weight: 820;
+}
+
+.gen-progress-step[data-state="done"] .gen-progress-step-index {
+  border-color: #7fb493;
+  color: var(--gen-green);
+  background: rgba(255, 253, 248, .9);
+}
+
+.gen-progress-step[data-state="active"] .gen-progress-step-index {
+  border-color: #5daab0;
+  color: #257c84;
+  background: rgba(255, 253, 248, .92);
+}
+
+.gen-progress-step-name {
+  min-width: 0;
+  margin-top: 2px;
+  color: var(--gen-text);
+  font-size: 13px;
+  font-weight: 820;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gen-progress-step[data-state="done"] .gen-progress-step-name,
+.gen-progress-step[data-state="upcoming"] .gen-progress-step-name {
+  color: var(--gen-muted);
+}
+
+.gen-progress-step-desc {
+  margin-top: 5px;
+  color: var(--gen-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.gen-progress-step-count {
+  margin-top: 3px;
+  color: var(--gen-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 主内容双栏 ───────────────────────────────────────────────────────── */
+
+.gen-progress-content {
+  min-height: 0;
+  padding: 12px 30px 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, .72fr);
+  gap: 16px;
+  overflow: hidden;
+}
+
+.gen-progress-activity,
+.gen-progress-side {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--gen-line);
+  border-radius: var(--gen-radius-lg);
+  background: rgba(255, 253, 248, .66);
+  overflow: hidden;
+}
+
+.gen-progress-panel-header {
+  min-height: 54px;
+  padding: 11px 16px 10px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--gen-line);
+  background: rgba(250, 247, 239, .88);
+}
+
+.gen-progress-panel-title {
+  margin: 0;
+  color: var(--gen-blue);
+  font-size: 14px;
+  font-weight: 850;
+  letter-spacing: .02em;
+}
+
+.gen-progress-panel-hint {
+  margin: 3px 0 0;
+  color: var(--gen-muted);
+  font-size: 11px;
+}
+
+/* 执行记录时间线 */
+.gen-progress-activity .gen-timeline-wrap {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 14px 14px 16px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: #d5c8b4 transparent;
+}
+
+.gen-timeline {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-timeline-group {
+  display: grid;
+  gap: 7px;
+}
+
+.gen-timeline-group-label {
+  margin: 0 4px 4px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--gen-blue);
+  font-size: 12px;
+  font-weight: 840;
+}
+
+.gen-timeline-group-label::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(90deg, rgba(11, 96, 155, .25), rgba(11, 96, 155, .08));
+}
+
+.gen-timeline-event {
+  position: relative;
+  min-height: 60px;
+  margin-left: 14px;
+  padding: 10px 14px 10px 12px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--gen-line);
+  border-radius: var(--gen-radius-md);
+  background: rgba(255, 253, 248, .90);
+  box-shadow: var(--gen-card-shadow);
+  transition: .16s ease;
+}
+
+.gen-timeline-event:hover {
+  border-color: #c8bca8;
+  transform: translateY(-1px);
+}
+
+.gen-timeline-event::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: -14px;
+  bottom: -14px;
+  width: 1px;
+  background: rgba(11, 96, 155, .16);
+}
+
+.gen-timeline-group .gen-timeline-event:first-of-type::before {
+  top: 50%;
+}
+
+.gen-timeline-group .gen-timeline-event:last-of-type::before {
+  bottom: 50%;
+}
+
+.gen-timeline-event-icon {
+  position: relative;
+  z-index: 1;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+}
+
+/* 圆形状态徽标：实色圆 + 白色图形（不只靠色，§6.4）。 */
+.gen-status-badge {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #c9c2b4;
+  box-shadow: 0 1px 2px rgba(80, 60, 30, .14), inset 0 0 0 1px rgba(0, 0, 0, .06);
+}
+
+.gen-status-badge svg {
+  display: block;
+}
+
+.gen-status-badge.is-success { background: #3aa97b; }
+.gen-status-badge.is-failed { background: #d8604f; }
+.gen-status-badge.is-warning { background: #d99a3f; }
+.gen-status-badge.is-running { background: #2f8f9b; }
+.gen-status-badge.is-running svg { animation: gen-status-spin 1.1s linear infinite; }
+.gen-status-badge.is-muted {
+  background: #ece5d8;
+  color: #b3aa99;
+}
+
+.gen-status-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #b3aa99;
+}
+
+@keyframes gen-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gen-status-badge.is-running svg { animation: none; }
+}
+
+.gen-timeline-event-main {
+  min-width: 0;
+}
+
+.gen-timeline-event-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.gen-timeline-agent-tag {
+  flex: 0 0 auto;
+  max-width: 140px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--gen-purple);
+  background: var(--gen-purple-soft);
+  font-size: 11px;
+  font-weight: 840;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gen-timeline-event-text {
+  min-width: 0;
+  color: var(--gen-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gen-timeline-event-detail {
+  margin-top: 3px;
+  color: var(--gen-muted);
+  font-size: 11px;
+}
+
+.gen-timeline-event-time {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: center;
+  color: var(--gen-faint);
+  font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 事件折叠态摘要 */
+.gen-timeline-summary {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  border: 1px solid var(--gen-line);
+  border-radius: var(--gen-radius-md);
+  padding: 0;
+  background: rgba(255, 253, 248, .90);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gen-timeline-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 4px;
+  color: var(--gen-text);
+  font-size: 13px;
+}
+
+.gen-timeline-summary-action {
+  padding: 0 12px 9px;
+  color: var(--gen-blue);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.gen-timeline-empty {
+  border: 1px dashed var(--gen-line-strong);
+  border-radius: var(--gen-radius-md);
+  padding: 22px 14px;
+  color: var(--gen-faint);
+  font-size: 13px;
+  text-align: center;
+}
+
+.gen-timeline-error,
+.gen-timeline-limit {
+  margin: 0 4px 8px;
+  color: var(--gen-danger);
+  font-size: 11.5px;
+}
+
+.gen-timeline-collapse {
+  justify-self: start;
+  border: 0;
+  padding: 2px 4px;
+  background: transparent;
+  color: var(--gen-blue);
+  font-size: 11px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+/* ── 运行概览侧栏 ─────────────────────────────────────────────────────── */
+
+.gen-progress-side-content {
+  padding: 14px;
+  overflow-y: auto;
+}
+
+.gen-current-card {
+  padding: 14px;
+  border-radius: var(--gen-radius-md);
+  border: 1px solid #8fc0c1;
+  background: linear-gradient(145deg, rgba(237, 247, 246, .90), rgba(255, 253, 248, .92));
+}
+
+.gen-current-label {
+  color: #257c84;
+  font-size: 10px;
+  font-weight: 860;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.gen-current-title {
+  margin: 7px 0 5px;
+  color: var(--gen-text);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.gen-current-copy {
+  margin: 0;
+  color: var(--gen-muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.gen-mini-progress {
+  margin-top: 11px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: rgba(37, 124, 132, .13);
+}
+
+.gen-mini-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--gen-cyan), #257c84);
+  transition: width .4s ease;
+}
+
+.gen-stats {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.gen-stat {
+  padding: 10px 8px;
+  border: 1px solid var(--gen-line);
+  border-radius: var(--gen-radius-sm);
+  background: rgba(255, 253, 248, .72);
+}
+
+.gen-stat-label {
+  color: var(--gen-muted);
+  font-size: 10px;
+}
+
+.gen-stat-value {
+  margin-top: 4px;
+  color: var(--gen-text);
+  font-size: 15px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-section-title {
+  margin: 14px 0 8px;
+  color: var(--gen-blue);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .06em;
+}
+
+.gen-summary-list {
+  display: grid;
+  gap: 8px;
+}
+
+.gen-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  color: var(--gen-muted);
+  font-size: 11px;
+}
+
+.gen-summary-row strong {
+  color: var(--gen-text);
+  font-size: 11px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-alert {
+  border-radius: 10px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--gen-warning-soft) 80%, transparent);
+  border: 1px solid #ecd6ae;
+  color: var(--gen-warning);
+  font-size: 11px;
+}
+
+.gen-tech-toggle {
+  width: 100%;
+  margin-top: 13px;
+  padding: 10px 0 0;
+  border: 0;
+  border-top: 1px solid var(--gen-line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--gen-blue);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 820;
+  cursor: pointer;
+}
+
+.gen-tech-details {
+  display: none;
+  margin-top: 9px;
+  padding: 10px 11px;
+  border: 1px solid #e2d8c7;
+  border-radius: var(--gen-radius-sm);
+  background: #f6f1e8;
+  color: var(--gen-muted);
+  font: 11px/1.75 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-word;
+}
+
+.gen-tech-details.is-open {
+  display: block;
+}
+
+/* ── 底部 ─────────────────────────────────────────────────────────────── */
+
+.gen-progress-footer {
+  position: relative;
+  padding: 12px 26px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--gen-line);
+  background: rgba(251, 248, 241, .94);
+}
+
+.gen-progress-footer-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+  color: var(--gen-muted);
+  font-size: 11px;
+}
+
+.gen-progress-footer-note svg {
+  flex: 0 0 auto;
+  color: var(--gen-green);
+}
+
+.gen-progress-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gen-progress-cancel {
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: var(--gen-radius-sm);
+  border: 1px solid var(--gen-line-strong);
+  background: rgba(255, 253, 248, .86);
+  color: var(--gen-muted);
+  font-size: 12px;
+  font-weight: 820;
+  cursor: pointer;
+  transition: .17s ease;
+}
+
+.gen-progress-cancel:hover {
+  border-color: var(--gen-danger);
+  background: var(--gen-danger-soft);
+  color: var(--gen-danger);
+  transform: translateY(-1px);
+}
+
+.gen-progress-dismiss {
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: var(--gen-radius-sm);
+  border: 1px solid #75adb8;
+  background: var(--gen-blue-soft);
+  color: var(--gen-blue-strong);
+  font-size: 12px;
+  font-weight: 820;
+  cursor: pointer;
+  transition: .17s ease;
+}
+
+.gen-progress-dismiss:hover {
+  background: #d8ebf1;
+  transform: translateY(-1px);
+}
+
+/* ── 响应式 ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .gen-progress-dialog {
+    width: min(760px, calc(100vw - 24px));
+    height: min(940px, calc(100vh - 24px));
+  }
+
+  .gen-progress-header {
+    padding: 22px 24px 12px;
+  }
+
+  .gen-progress-overview {
+    padding: 0 24px 12px;
+  }
+
+  .gen-progress-content {
+    grid-template-columns: 1fr;
+    overflow: auto;
+    padding: 10px 24px 12px;
+  }
+
+  .gen-progress-activity {
+    min-height: 420px;
+  }
+
+  .gen-progress-side {
+    overflow: visible;
+  }
+
+  .gen-progress-stepper {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gen-progress-overview-top {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .gen-progress-timing {
+    justify-content: start;
+    text-align: left;
+  }
+}
+
+@media (max-width: 620px) {
+  .gen-progress {
+    padding: 6px;
+  }
+
+  .gen-progress-dialog {
+    width: calc(100vw - 8px);
+    height: calc(100vh - 8px);
+    border-radius: 22px;
+  }
+
+  .gen-progress-dialog::after {
+    display: none;
+  }
+
+  .gen-progress-header {
+    padding: 20px 16px 12px;
+    flex-direction: column;
+  }
+
+  .gen-progress-header-actions {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+  }
+
+  .gen-progress-title {
+    font-size: 26px;
+  }
+
+  .gen-progress-overview {
+    padding: 0 14px 12px;
+  }
+
+  .gen-progress-content {
+    padding: 8px 14px 12px;
+  }
+
+  .gen-progress-stepper {
+    grid-template-columns: 1fr;
+  }
+
+  .gen-progress-step:not([data-state="active"]) {
+    display: none;
+  }
+
+  .gen-progress-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .gen-progress-footer-note {
+    display: none;
+  }
+
+  .gen-progress-footer-actions {
+    width: 100%;
+  }
+
+  .gen-progress-footer-actions button {
+    flex: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gen-progress-pulse {
+    animation: none;
+  }
+}
+
+/* 时间线组内事件列表 + 子代理缩进 */
+.gen-timeline-group-events {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-timeline-event.is-child {
+  margin-left: 26px;
+}
+
+.gen-timeline-event.is-child::after {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 50%;
+  width: 16px;
+  height: 1px;
+  background: rgba(11, 96, 155, .22);
 }

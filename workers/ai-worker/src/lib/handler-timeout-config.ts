@@ -3,8 +3,6 @@
  *
  * Timeouts are configurable via environment variables:
  *   WORKER_MODEL_TIMEOUT_MS              — global default (fallback)
- *   WORKER_TIMEOUT_GENERATE_CARD_MS      — generate_card override
- *   WORKER_TIMEOUT_ANALYZE_CARD_IMAGE_MS — analyze_card_image override
  *   WORKER_TIMEOUT_EVALUATE_VALIDATION_MS — evaluate_validation override
  *   WORKER_TIMEOUT_ALIGN_EVIDENCE_MS     — align_evidence override
  *   WORKER_TIMEOUT_PARSE_SOURCE_MS       — parse_source override
@@ -24,18 +22,6 @@ const MAX_ALLOWED_TIMEOUT_MS = LEASE_TIMEOUT_MS - LEASE_SAFETY_MARGIN_MS;
 
 /** Default per-type timeouts (milliseconds). */
 const DEFAULT_TIMEOUTS: Record<string, number> = {
-  // AI generation — complex structured output, needs the most time.
-  generate_card: 90_000,
-  // Deterministic planner/reduce/publish leave ample time for DB checkpoints.
-  plan_card_generation: 60_000,
-  reduce_card_generation: 60_000,
-  plan_card_set: 60_000,
-  render_card_generation: 60_000,
-  publish_card_generation: 60_000,
-  // One bounded Provider call plus validation/persistence.
-  map_card_generation: 90_000,
-  // One vision call, optional bounded map call, and durable cache persistence.
-  analyze_card_image: 110_000,
   // AI evaluation — simpler output but still a model round-trip.
   evaluate_validation: 90_000,
   // v0.6 question generation needs post-call time for safe fallback.
@@ -44,13 +30,18 @@ const DEFAULT_TIMEOUTS: Record<string, number> = {
   align_evidence: 30_000,
   // URL fetch + text segmentation, no AI call.
   parse_source: 60_000,
+  // BUG-58/QUAL-49/70 修复：补充 v0.6 Supervisor Agent job 类型的超时配置。
+  // Supervisor Agent turn 涉及多轮 LLM 调用 + DB 上下文加载 + 工具执行，
+  // 需要比普通单次 LLM 调用更长的超时时间。
+  // 110_000 = LEASE_TIMEOUT_MS(120s) - 10s safety margin，是 clamp 后的最大值。
+  execute_card_agent_turn: 110_000,
 };
 
 const GLOBAL_DEFAULT_MS = 90_000;
 const PROVIDER_SAFETY_MARGIN_MS = 15_000;
 // 75s (was 60s): long structured JSON outputs on commercial Qwen-class models
 // regularly need 40-70s even without thinking mode. Still bounded by
-// handlerTimeout - 15s, so map (90s) and image (110s) callers keep their
+// handlerTimeout - 15s, so the agent turn (120s) keeps its
 // persistence margin inside the 120s lease. Override per deployment via
 // WORKER_PROVIDER_TIMEOUT_MS / WORKER_PROVIDER_TIMEOUT_<TYPE>_MS.
 const DEFAULT_PROVIDER_TIMEOUT_MS = 75_000;
@@ -74,7 +65,7 @@ function providerEnvKeyForType(jobType: string): string {
  * Resolve the handler timeout for a given job type.
  *
  * Priority:
- *   1. Per-type env var (e.g. WORKER_TIMEOUT_GENERATE_CARD_MS)
+ *   1. Per-type env var (e.g. WORKER_TIMEOUT_EXECUTE_CARD_AGENT_TURN_MS)
  *   2. Global env var (WORKER_MODEL_TIMEOUT_MS)
  *   3. Per-type built-in default
  *   4. Global built-in default (90 000 ms)

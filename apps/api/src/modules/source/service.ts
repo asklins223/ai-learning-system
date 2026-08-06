@@ -23,7 +23,13 @@ type SourceSearchDocument = {
   body: string | null;
 };
 
-/** Keep best-effort projection writes on the request connection via a savepoint. */
+/** Keep best-effort projection writes on the request connection via a savepoint.
+ *
+ * QUAL-61 备注：此函数与 note/service.ts 中的 upsertSearchDocument 逻辑重复。
+ * 理想情况下应提取到共享的 search-index.ts 模块中，但当前两个模块的
+ * SearchDocument 类型定义不同（source 有自己的 SourceSearchDocument 类型），
+ * 提取共享函数需要先统一类型定义，属于架构级改进，暂缓处理。
+ */
 async function upsertSearchDocument(
   executor: ApiTransaction,
   document: SourceSearchDocument,
@@ -510,7 +516,8 @@ export async function createNoteFromSource(
   })(executor);
 
   // B-NEW-1: 同步搜索索引（与 createNote / importMarkdown 保持一致）
-  const bodyText = blocks.map((b) => b.content).join("\n");
+  // BUG-69 修复：过滤 image 类型 block，与 note service 保持一致，避免 drift 检测误报
+  const bodyText = blocks.filter((b) => b.type !== "image").map((b) => b.content).join("\n");
   await upsertSearchDocument(executor, {
     workspaceId,
     objectType: "note",

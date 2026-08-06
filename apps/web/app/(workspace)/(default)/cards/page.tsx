@@ -12,6 +12,8 @@ import { Icon } from "@/components/ui/icons";
 import { api, type CardListItem } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
 import { statusMap } from "@/lib/status-map";
+import { isCardSetDeckUIEnabled } from "@/lib/feature-flags";
+import { CardSetDeckPage } from "@/components/study/CardSetDeckPage";
 import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
 
 type Filter = "all" | "active" | "superseded" | "archived";
@@ -74,6 +76,13 @@ function nextActionLabel(card: CardListItem) {
 }
 
 export default function CardsIndex() {
+  if (isCardSetDeckUIEnabled()) {
+    return <CardSetDeckPage />;
+  }
+  return <CardsGridPage />;
+}
+
+function CardsGridPage() {
   const [items, setItems] = useState<CardListItem[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [cardTotal, setCardTotal] = useState(0);

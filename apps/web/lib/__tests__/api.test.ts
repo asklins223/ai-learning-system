@@ -272,59 +272,12 @@ describe("API client", () => {
     });
   });
 
-  it("uses the strict/partial generation resolution routes and request body", async () => {
-    const requests: Array<{ url: string; init: RequestInit }> = [];
-    mockFetch((url, init) => {
-      requests.push({ url, init });
-      if (url.endsWith("/retry")) {
-        return Response.json({
-          runId: "run-1",
-          status: "queued",
-        });
-      }
-      return Response.json({
-        runId: "run-2",
-        status: "queued",
-        sourceSnapshot: {
-          noteVersionId: "version-1",
-          versionNo: 3,
-          contentHash: "hash",
-        },
-        canContinueEditing: true,
-      }, { status: 202 });
-    });
-
-    await api.retryCardGenerationRun("run-1");
-    await api.continueCardGenerationRunWithExclusions("run-1", {
-      excludedUnitIds: ["unit-1", "unit-2"],
-      idempotencyKey: "card-generation-exclusions-request-1",
-    });
-
-    assert.match(requests[0]?.url ?? "", /\/card-generation-runs\/run-1\/retry$/);
-    assert.equal(requests[0]?.init.method, "POST");
-    assert.match(
-      requests[1]?.url ?? "",
-      /\/card-generation-runs\/run-1\/continue-with-exclusions$/,
-    );
-    assert.equal(requests[1]?.init.method, "POST");
-    assert.deepEqual(JSON.parse(String(requests[1]?.init.body)), {
-      excludedUnitIds: ["unit-1", "unit-2"],
-      idempotencyKey: "card-generation-exclusions-request-1",
-    });
-  });
-
   it("uses the card-set collection, detail, and lifecycle routes", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     mockFetch((url, init) => {
       requests.push({ url, init });
       if (url.includes("/regenerate")) {
         return Response.json({ runId: "run-2", status: "queued" });
-      }
-      if (url.includes("/accept")) {
-        return Response.json({
-          cardSetId: "set-1",
-          acceptedArtifactCount: 3,
-        });
       }
       if (url.includes("/dismiss")) {
         return Response.json({ cardSetId: "set-1", status: "archived" });
@@ -357,7 +310,6 @@ describe("API client", () => {
       cursor: "opaque+/=",
       limit: 20,
     });
-    await api.acceptCardSet("set-1");
     await api.dismissCardSet("set-1");
     await api.regenerateCardSet("set-1", {
       mode: "strict",
@@ -374,13 +326,11 @@ describe("API client", () => {
       /\/card-sets\/set-1\/cards\?cursor=opaque%2B%2F%3D&limit=20$/,
     );
     assert.equal(cardPage.nextCursor, "next-opaque-cursor");
-    assert.match(requests[3]?.url ?? "", /\/card-sets\/set-1\/accept$/);
+    assert.match(requests[3]?.url ?? "", /\/card-sets\/set-1\/dismiss$/);
     assert.equal(requests[3]?.init.method, "POST");
-    assert.match(requests[4]?.url ?? "", /\/card-sets\/set-1\/dismiss$/);
+    assert.match(requests[4]?.url ?? "", /\/card-sets\/set-1\/regenerate$/);
     assert.equal(requests[4]?.init.method, "POST");
-    assert.match(requests[5]?.url ?? "", /\/card-sets\/set-1\/regenerate$/);
-    assert.equal(requests[5]?.init.method, "POST");
-    assert.deepEqual(JSON.parse(String(requests[5]?.init.body)), {
+    assert.deepEqual(JSON.parse(String(requests[4]?.init.body)), {
       mode: "strict",
       exclusions: { unitIds: ["unit-1"] },
     });

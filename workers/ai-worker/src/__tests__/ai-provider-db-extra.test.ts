@@ -1,49 +1,41 @@
 /**
  * ai-provider.ts DB 依赖函数补充测试
  *
- * 通过 mock db 对象的 transaction/query 属性，
- * 测试 resolveProviderSelection 的核心业务逻辑分支。
+ * v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
+ * 不再有 personal BYOK 或 workspace.aiProvider 分支。
  */
 
 import assert from "node:assert/strict";
-import { describe, it, before, after } from "node:test";
-import { resolveProviderSelection } from "../lib/ai-provider.ts";
-import { encryptAiCredential } from "@ailearn/shared/ai-credentials";
+import { describe, it, before, after, afterEach } from "node:test";
+import { resolveProviderSelection, createProvider } from "../lib/ai-provider.ts";
+import {
+  setPlatformConfig,
+  resetPlatformConfigCache,
+  resolveSystemPlatform,
+  resolveSystemProviderForCapability,
+} from "@ailearn/shared";
 import { db } from "../db.ts";
 
 const WS_ID = "00000000-0000-0000-0000-000000000001";
 const USER_ID = "00000000-0000-0000-0000-000000000002";
-const TEST_ENC_KEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 let originalTransaction: typeof db.transaction;
-let originalUserAIModelConfigsFindFirst: any;
 let originalWorkspacesFindFirst: any;
-let originalEncKey: string | undefined;
 
 before(() => {
+  setPlatformConfig(null);
   originalTransaction = db.transaction;
-  if (db.query?.userAIModelConfigs?.findFirst) {
-    originalUserAIModelConfigsFindFirst = db.query.userAIModelConfigs.findFirst;
-  }
   if (db.query?.workspaces?.findFirst) {
     originalWorkspacesFindFirst = db.query.workspaces.findFirst;
   }
-  originalEncKey = process.env.AI_CREDENTIAL_ENCRYPTION_KEY;
 });
 
 after(() => {
   db.transaction = originalTransaction;
-  if (originalUserAIModelConfigsFindFirst && db.query?.userAIModelConfigs) {
-    db.query.userAIModelConfigs.findFirst = originalUserAIModelConfigsFindFirst;
-  }
   if (originalWorkspacesFindFirst && db.query?.workspaces) {
     db.query.workspaces.findFirst = originalWorkspacesFindFirst;
   }
-  if (originalEncKey === undefined) {
-    delete process.env.AI_CREDENTIAL_ENCRYPTION_KEY;
-  } else {
-    process.env.AI_CREDENTIAL_ENCRYPTION_KEY = originalEncKey;
-  }
+  resetPlatformConfigCache();
 });
 
 // Mock execute for setWorkerTransactionContext
@@ -77,10 +69,6 @@ function createMockTx(): any {
       }),
     }),
     query: {
-      userAIModelConfigs: {
-        findFirst: async () => undefined,
-        findMany: async () => [],
-      },
       workspaces: {
         findFirst: async () => undefined,
         findMany: async () => [],
@@ -89,50 +77,21 @@ function createMockTx(): any {
   };
 }
 
-function setupDbMock(hasPersonalConfig: boolean = false, hasWorkspaceProvider: boolean = false) {
+function setupDbMock() {
   const mockTx = createMockTx();
   db.transaction = (async (fn: any) => fn(mockTx)) as typeof db.transaction;
-
-  if (hasPersonalConfig) {
-    process.env.AI_CREDENTIAL_ENCRYPTION_KEY = TEST_ENC_KEY;
-    const encryptedKey = encryptAiCredential("test-api-key-value", USER_ID, TEST_ENC_KEY);
-    (db.query!.userAIModelConfigs!.findFirst as any) = async () => ({
-      provider: "openai_compatible",
-      baseUrl: "https://api.openai.com",
-      model: "gpt-4",
-      apiKeyEncrypted: encryptedKey,
-    });
-  }
-
-  if (hasWorkspaceProvider) {
-    (db.query!.workspaces!.findFirst as any) = async () => ({
-      aiProvider: "dashscope",
-    });
+  if (db.query?.workspaces) {
+    (db.query.workspaces.findFirst as any) = async () => undefined;
   }
 }
 
 describe("ai-provider resolveProviderSelection (DB mock)", () => {
-  it("有 userId 优先使用个人配置", async () => {
-    setupDbMock(true, false);
-    const result = await resolveProviderSelection(WS_ID, USER_ID);
-    assert.equal(result.providerName, "openai_compatible");
-    assert.ok(result.config);
-    assert.equal((result.config as any).provider, "openai_compatible");
-  });
-
-  it("无 userId 有 workspaceId 时使用 workspace 配置", async () => {
-    setupDbMock(false, true);
-    const result = await resolveProviderSelection(WS_ID, undefined);
-    assert.equal(result.providerName, "dashscope");
-    assert.deepEqual(result.config, {});
-  });
-
-  it("无 userId 且无 workspaceId 时使用环境变量", async () => {
-    setupDbMock(false, false);
+  it("无配置文件时回退到环境变量", async () => {
+    setupDbMock();
     const oldEnv = process.env.AI_PROVIDER_CARD;
     process.env.AI_PROVIDER_CARD = "mock";
     try {
-      const result = await resolveProviderSelection(undefined, undefined);
+      const result = await resolveProviderSelection(WS_ID, USER_ID);
       assert.equal(result.providerName, "mock");
     } finally {
       if (oldEnv === undefined) delete process.env.AI_PROVIDER_CARD;
@@ -140,15 +99,143 @@ describe("ai-provider resolveProviderSelection (DB mock)", () => {
     }
   });
 
-  it("无 userId 且无 workspaceId 且无环境变量时默认为 mock", async () => {
+  it("无环境变量时默认为 mock", async () => {
     const oldEnv = process.env.AI_PROVIDER_CARD;
     delete process.env.AI_PROVIDER_CARD;
     try {
-      setupDbMock(false, false);
+      setupDbMock();
       const result = await resolveProviderSelection(undefined, undefined);
       assert.equal(result.providerName, "mock");
     } finally {
       if (oldEnv !== undefined) process.env.AI_PROVIDER_CARD = oldEnv;
     }
+  });
+
+  it("有配置文件时使用平台配置", async () => {
+    setupDbMock();
+    setPlatformConfig({
+      platforms: {
+        myopenai: {
+          type: "openai_compatible",
+          apiKey: "sk-fixture",
+          baseUrl: "https://fixture.example.com/v1",
+        },
+      },
+      capabilities: {
+        agent_turn: { platform: "myopenai", model: "glm-5.2" },
+      },
+    });
+    try {
+      const result = await resolveProviderSelection(WS_ID, USER_ID);
+      assert.equal(result.providerName, "openai_compatible");
+      const cfg = result.config as any;
+      assert.equal(cfg.apiKey, "sk-fixture");
+      assert.equal(cfg.baseUrl, "https://fixture.example.com/v1");
+      assert.equal(cfg.model, "glm-5.2");
+    } finally {
+      setPlatformConfig(null);
+    }
+  });
+});
+
+describe("§2.3 缺 key 判定", () => {
+  afterEach(() => {
+    setPlatformConfig(null);
+    resetPlatformConfigCache();
+  });
+
+  it("非 mock 平台 apiKey 含未解析的 ${VAR} 时 resolveSystemPlatform 返回 null", () => {
+    setPlatformConfig({
+      platforms: {
+        bigmodel: {
+          type: "openai_compatible",
+          apiKey: "${BIGMODEL_API_KEY}",
+          baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+        },
+      },
+      capabilities: {
+        agent_turn: { platform: "bigmodel", model: "glm-4.1V" },
+      },
+    });
+    const result = resolveSystemPlatform("agent_turn");
+    assert.equal(result, null, "unresolved ${VAR} apiKey should yield null (→ mock fallback)");
+  });
+
+  it("非 mock 平台 apiKey 为空时 resolveSystemPlatform 返回 null", () => {
+    setPlatformConfig({
+      platforms: {
+        nokey: {
+          type: "openai_compatible",
+          apiKey: "",
+          baseUrl: "https://example.com/v1",
+        },
+      },
+      capabilities: {
+        agent_turn: { platform: "nokey", model: "test-model" },
+      },
+    });
+    const result = resolveSystemPlatform("agent_turn");
+    assert.equal(result, null, "empty apiKey should yield null (→ mock fallback)");
+  });
+
+  it("非 mock 平台 apiKey 缺失时 resolveSystemPlatform 返回 null", () => {
+    setPlatformConfig({
+      platforms: {
+        missingkey: {
+          type: "dashscope",
+          baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        },
+      },
+      capabilities: {
+        agent_turn: { platform: "missingkey", model: "qwen-plus" },
+      },
+    });
+    const result = resolveSystemPlatform("agent_turn");
+    assert.equal(result, null, "missing apiKey should yield null (→ mock fallback)");
+  });
+
+  it("缺 key 时 resolveSystemProviderForCapability 返回 mock（豁免 consent）", () => {
+    setPlatformConfig({
+      platforms: {
+        bigmodel: {
+          type: "openai_compatible",
+          apiKey: "${UNSET_VAR}",
+          baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+        },
+      },
+      capabilities: {
+        agent_turn: { platform: "bigmodel", model: "glm-4.1V" },
+      },
+    });
+    const providerType = resolveSystemProviderForCapability("agent_turn");
+    assert.equal(providerType, "mock", "unresolved apiKey should resolve to mock for consent exemption");
+  });
+
+  it("mock 平台无需 apiKey 检查", () => {
+    setPlatformConfig({
+      platforms: {
+        mymock: { type: "mock" },
+      },
+      capabilities: {
+        agent_turn: { platform: "mymock", model: "mock-v1" },
+      },
+    });
+    const result = resolveSystemPlatform("agent_turn");
+    assert.ok(result, "mock platform should resolve even without apiKey");
+    assert.equal(result!.type, "mock");
+  });
+
+  it("createProvider 对含 ${VAR} 的 apiKey fail-fast 报错", () => {
+    assert.throws(
+      () => createProvider("openai_compatible", { apiKey: "${MISSING_KEY}", baseUrl: "https://example.com", model: "test" }),
+      /unresolved env var reference/i,
+      "createProvider should fail-fast on literal ${VAR} apiKey",
+    );
+  });
+
+  it("createProvider 对正常 apiKey 不报错", () => {
+    // mock provider always works
+    const provider = createProvider("mock", {});
+    assert.ok(provider, "mock provider should be created without issues");
   });
 });

@@ -386,6 +386,14 @@ export function generateDeterministicQuestion(
         required: true,
         evidenceRefId: evidenceRef.refId,
       },
+      {
+        key: "det_2",
+        criterion: "回答提及了该知识点的适用条件或边界情况",
+        expectedConcept: "适用条件或边界",
+        weight: 2,
+        required: false,
+        evidenceRefId: evidenceRef.refId,
+      },
     ],
   });
 

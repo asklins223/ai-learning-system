@@ -17,6 +17,7 @@ import {
   normalizeWorkspaceAIPolicy,
 } from "../lib/governance.ts";
 import { DashScopeProvider } from "../lib/providers/dashscope.ts";
+import { evaluateValidationViaChat } from "../lib/business-ai-ops.ts";
 import {
   assertWorkerWorkspaceTransactionContextCompatible,
   normalizeWorkerWorkspaceTransactionContext,
@@ -40,7 +41,7 @@ import * as schema from "../schema/index.ts";
 
 const claimedJobFixture: ClaimedJob = {
   id: "11111111-1111-1111-1111-111111111111",
-  type: "generate_card",
+  type: "execute_card_agent_turn",
   payload: { noteVersionId: "note-1" },
   workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -67,7 +68,7 @@ test("queue claim maps database rows to trusted worker jobs", async () => {
     },
     {
       id: "job-2",
-      type: "generate_card",
+      type: "execute_card_agent_turn",
       payload: null,
       workspace_id: "workspace-2",
       requested_by: null,
@@ -88,7 +89,7 @@ test("queue claim maps database rows to trusted worker jobs", async () => {
     },
     {
       id: "job-2",
-      type: "generate_card",
+      type: "execute_card_agent_turn",
       payload: {},
       workspaceId: "workspace-2",
       requestedBy: null,
@@ -368,7 +369,11 @@ test("DashScope forwards the worker AbortSignal to the HTTP request", async () =
   };
   const provider = new DashScopeProvider({ apiKey: "test-key", request });
   const controller = new AbortController();
-  const pending = provider.generateCard({ noteTitle: "N", blocks: [] }, controller.signal);
+  const pending = evaluateValidationViaChat(
+    provider,
+    { question: "Q", questionType: "t", claim: "C", quote: "R", userAnswer: "A" },
+    controller.signal,
+  );
   controller.abort(new Error("cancelled"));
   await assert.rejects(pending, /cancelled/);
   assert.equal(requestSignal, controller.signal);
@@ -384,9 +389,13 @@ test("DashScope compatible HTTP path preserves the generation request contract",
       choices: [{
         message: {
           content: JSON.stringify({
-            title: "Card",
-            summary: "Summary",
-            key_points: [{ ordinal: 0, claim: "Claim", quote_text: "Quote" }],
+            outcome: "preliminary_understanding",
+            confidence: 0.85,
+            feedback: "Good",
+            covered_points: [],
+            missing_points: [],
+            misunderstandings: [],
+            evidence_refs: [],
           }),
         },
       }],
@@ -398,12 +407,13 @@ test("DashScope compatible HTTP path preserves the generation request contract",
     request,
   });
 
-  const output = await provider.generateCard({ noteTitle: "N", blocks: [] });
+  await evaluateValidationViaChat(provider, {
+    question: "Q", questionType: "t", claim: "C", quote: "R", userAnswer: "A",
+  });
 
   assert.equal(requestedUrl, "https://dashscope.invalid/compatible-mode/v1/chat/completions");
   assert.equal(requestBody?.model, "qwen-plus");
   assert.deepEqual(requestBody?.response_format, { type: "json_object" });
-  assert.equal(output.title, "Card");
 });
 
 test("auditLogging policy disables writes without changing attribution", async () => {
@@ -414,7 +424,7 @@ test("auditLogging policy disables writes without changing attribution", async (
     jobId: "job-1",
     provider: "mock",
     modelId: "mock-v1",
-    operation: "generate_card",
+      operation: "execute_card_agent_turn",
   };
 
   const disabled = await logAICall(params, {

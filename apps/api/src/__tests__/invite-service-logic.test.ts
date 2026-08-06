@@ -252,11 +252,10 @@ describe("invite-service: ConsumeInviteError 错误码完整性", () => {
 // ─── ONBOARDING_STEPS 完成检测逻辑 ──────────────────────────────────────
 
 describe("invite-service: ONBOARDING_STEPS 完成检测逻辑", () => {
-  it("包含 7 个步骤且顺序正确", () => {
-    assert.equal(ONBOARDING_STEPS.length, 7);
+  it("包含 6 个步骤且顺序正确", () => {
+    assert.equal(ONBOARDING_STEPS.length, 6);
     assert.deepEqual([...ONBOARDING_STEPS], [
       "ai_consent",
-      "provider_config",
       "first_content",
       "first_note",
       "first_card",
@@ -312,10 +311,9 @@ describe("invite-service: ONBOARDING_STEPS 完成检测逻辑", () => {
   });
 
   it("状态计算：部分完成 → in_progress", () => {
-    const steps: Record<string, boolean> = {
-      ai_consent: true,
-      provider_config: true,
-    };
+const steps: Record<string, boolean> = {
+ai_consent: true,
+};
     const allComplete = ONBOARDING_STEPS.every((s) => steps[s]);
     const completed = true;
     const status = allComplete ? "completed" : completed ? "in_progress" : "pending";

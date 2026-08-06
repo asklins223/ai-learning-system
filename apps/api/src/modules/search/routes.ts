@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { detectSearchDrift, reindexWorkspaceSearch, search } from "./service.ts";
+import { detectSearchDrift, reindexWorkspaceSearch, search, autoFixSearchDrift } from "./service.ts";
 import { parseQuery } from "../../lib/pagination.ts";
 
 const searchQuerySchema = z.object({
@@ -49,6 +49,15 @@ export async function searchRoutes(app: FastifyInstance) {
     return withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => reindexWorkspaceSearch(transaction, req.session.workspaceId),
+    );
+  });
+
+  // POST /search/auto-fix — ARCH-01 修复：自动检测并修复搜索索引漂移
+  // 检测漂移量，超过阈值时自动触发 reindex。可由定时任务或手动调用。
+  app.post("/search/auto-fix", { preHandler: [requireOwner] }, async (req) => {
+    return withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => autoFixSearchDrift(transaction, req.session.workspaceId),
     );
   });
 }

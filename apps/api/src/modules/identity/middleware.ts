@@ -56,15 +56,18 @@ export async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
   const { membershipRole, workspaceOwnerId } = await withWorkspaceTransaction(
     { workspaceId, userId },
     async (transaction) => {
-      const membership = await transaction.query.workspaceMembers.findFirst({
-        where: and(
-          eq(workspaceMembers.workspaceId, workspaceId),
-          eq(workspaceMembers.userId, userId),
-        ),
-      });
-      const ws = await transaction.query.workspaces.findFirst({
-        where: eq(workspaces.id, workspaceId),
-      });
+      // PERF-08 fix: These two queries are independent — run them in parallel.
+      const [membership, ws] = await Promise.all([
+        transaction.query.workspaceMembers.findFirst({
+          where: and(
+            eq(workspaceMembers.workspaceId, workspaceId),
+            eq(workspaceMembers.userId, userId),
+          ),
+        }),
+        transaction.query.workspaces.findFirst({
+          where: eq(workspaces.id, workspaceId),
+        }),
+      ]);
       return {
         membershipRole: membership?.role,
         workspaceOwnerId: ws?.ownerId,

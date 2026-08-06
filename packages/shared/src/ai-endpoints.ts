@@ -6,6 +6,14 @@ export function resolveOpenAIChatCompletionsUrl(baseUrl: string): string {
     : `${normalized}/chat/completions`;
 }
 
+/** Resolve the OpenAI-compatible embeddings endpoint from a base URL. */
+export function resolveOpenAIEmbeddingsUrl(baseUrl: string): string {
+  const normalized = baseUrl.replace(/\/+$/, "");
+  return /\/embeddings$/i.test(normalized)
+    ? normalized
+    : `${normalized}/embeddings`;
+}
+
 export function resolveDashScopeGenerationUrl(baseUrl: string): string {
   const normalized = baseUrl.replace(/\/+$/, "");
   return /\/services\/aigc\/text-generation\/generation$/i.test(normalized)

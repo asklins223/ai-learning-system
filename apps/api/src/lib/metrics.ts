@@ -56,13 +56,10 @@ export const HTTP_STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
 
 /**
  * Job type allowlist — 对应 HANDLERS 注册表。
+ * BUG-74/QUAL-60/QUAL-72 修复：从 JobType 枚举派生，避免硬编码与 schema 不同步。
  */
-export const JOB_TYPES = [
-  "generate_card",
-  "align_evidence",
-  "evaluate_validation",
-  "parse_source",
-] as const;
+import { JobType as _JobType } from "@ailearn/shared";
+export const JOB_TYPES = Object.values(_JobType) as readonly string[];
 
 /**
  * Job status allowlist。
@@ -71,8 +68,14 @@ export const JOB_STATUSES = ["pending", "running", "succeeded", "failed", "dead"
 
 /**
  * Provider operation allowlist。
+ * BUG-74 修复：补充 v0.6 新增的 provider 操作类型。
  */
-export const PROVIDER_OPERATIONS = ["generate_card", "align_evidence", "evaluate_validation"] as const;
+export const PROVIDER_OPERATIONS = [
+  "align_evidence",
+  "evaluate_validation",
+  "generate_validation_question",
+  "execute_card_agent_turn",
+] as const;
 
 /**
  * 错误分类 allowlist — 自由文本错误必须先归类。
@@ -315,19 +318,22 @@ export function normalizeRouteTemplate(path: string): string {
 /**
  * 将自由文本错误归类到 allowlist 分类。
  * 避免在指标 label 中使用原始错误消息。
+ * BUG-24 修复：使用结构化状态码匹配而非数字子串匹配，避免误分类。
  */
 export function categorizeError(error: unknown): (typeof ERROR_CATEGORIES)[number] {
   if (error === null || error === undefined) return "unknown";
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  // 优先匹配语义关键词，避免数字子串误匹配
   if (message.includes("timeout") || message.includes("timed out")) return "timeout";
   if (message.includes("schema") || message.includes("parse") || message.includes("invalid json")) return "schema_failure";
-  if (message.includes("500") || message.includes("502") || message.includes("503") || message.includes("504")) return "provider_5xx";
-  if (message.includes("401") || message.includes("403") || message.includes("auth")) return "auth_error";
+  if (message.includes("validation") || message.includes("invalid")) return "validation_error";
+  // 使用正则精确匹配 HTTP 状态码（前后非数字边界），而非子串匹配
+  if (/(?:^|\D)(5\d{2})(?:\D|$)/.test(message)) return "provider_5xx";
+  if (/(?:^|\D)(401|403)(?:\D|$)/.test(message) || message.includes("unauthorized") || message.includes("forbidden")) return "auth_error";
   if (message.includes("quota") || message.includes("rate limit") || message.includes("429")) return "quota_exceeded";
   if (message.includes("network") || message.includes("econnrefused") || message.includes("enotfound")) return "network_error";
   if (message.includes("rls") || message.includes("policy")) return "rls_denied";
-  if (message.includes("validation") || message.includes("invalid")) return "validation_error";
-  if (message.includes("400") || message.includes("422")) return "provider_4xx";
+  if (/(?:^|\D)(4\d{2})(?:\D|$)/.test(message)) return "provider_4xx";
   return "unknown";
 }
 

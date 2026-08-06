@@ -12,7 +12,7 @@ x-dev-database: &dev-database
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ailearn
@@ -74,7 +74,7 @@ services:
   # migrations 0022+ reference (GRANT EXECUTE TO ailearn_worker, etc.).
   # Dev uses fixed passwords; production must set them via .env.
   role-bootstrap:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: "no"
     depends_on:
       postgres:
@@ -164,19 +164,20 @@ services:
       AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-memory}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
-      AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS: ${AI_MODEL_TEST_RATE_LIMIT_WINDOW_MS:-300000}
-      AI_MODEL_TEST_RATE_LIMIT_MAX_ATTEMPTS: ${AI_MODEL_TEST_RATE_LIMIT_MAX_ATTEMPTS:-5}
-      AI_MODEL_TEST_TIMEOUT_MS: ${AI_MODEL_TEST_TIMEOUT_MS:-15000}
       # The standalone dev stack deliberately exercises the v0.6 scheduling
       # and shadow paths. Production remains fail-closed unless explicitly set.
       SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v2}
       FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-true}
-      CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-true}
+      # AI platform config — all provider/capability config in one JSON file.
+      AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
+      TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
       # Docker Desktop proxies public DNS through 198.18.0.0/15. This remains
       # explicit and development-only; production defaults to strict blocking.
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
-      # Deterministic local-only key. Production must use a random secret.
-      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
       # macOS Docker: inotify events are unreliable across the bind mount.
       # Force polling so tsx watch actually picks up source changes.
       CHOKIDAR_USEPOLLING: "true"
@@ -198,6 +199,7 @@ services:
       - ./apps/api/src:/app/src
       - ./packages/shared/src:/tmp/shared/src
       - ./packages/shared/package.json:/tmp/shared/package.json:ro
+      - ./config:/app/config:ro
     networks:
       - ailearn_net
 
@@ -215,14 +217,14 @@ services:
     environment:
       <<: *dev-database
       NODE_ENV: development
-      AI_PROVIDER_CARD: ${AI_PROVIDER_CARD:-mock}
-      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
-      AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
+      # AI platform config — all provider/capability config in one JSON file.
+      AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
-      DASHSCOPE_ENABLE_THINKING: ${DASHSCOPE_ENABLE_THINKING:-false}
-      OPENAI_COMPAT_DISABLE_THINKING: ${OPENAI_COMPAT_DISABLE_THINKING:-false}
-      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
+      TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
       API_INTERNAL_URL: http://api:4000
       # Explicit development opt-ins for v0.6 worker write paths.
       AI_QUESTION_V1_ENABLED: ${AI_QUESTION_V1_ENABLED:-true}
@@ -230,7 +232,6 @@ services:
       CARD_REPAIR_V1_ENABLED: ${CARD_REPAIR_V1_ENABLED:-true}
       SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v2}
       FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-true}
-      CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-true}
       # Source image upload: MinIO/S3 storage for embedded images
       STORAGE_ENDPOINT: http://minio:9000
       S3_BUCKET: ${S3_BUCKET:-ailearn-workspaces}
@@ -239,15 +240,9 @@ services:
       # Handler timeouts (ms) — per job type, clamped below lease timeout (120s)
       WORKER_MODEL_TIMEOUT_MS: ${WORKER_MODEL_TIMEOUT_MS:-}
       WORKER_PROVIDER_TIMEOUT_MS: ${WORKER_PROVIDER_TIMEOUT_MS:-75000}
-      WORKER_TIMEOUT_GENERATE_CARD_MS: ${WORKER_TIMEOUT_GENERATE_CARD_MS:-}
       WORKER_TIMEOUT_EVALUATE_VALIDATION_MS: ${WORKER_TIMEOUT_EVALUATE_VALIDATION_MS:-}
       WORKER_TIMEOUT_ALIGN_EVIDENCE_MS: ${WORKER_TIMEOUT_ALIGN_EVIDENCE_MS:-}
       WORKER_TIMEOUT_PARSE_SOURCE_MS: ${WORKER_TIMEOUT_PARSE_SOURCE_MS:-}
-      # v2 学习卡流水线各阶段的 handler/provider 超时调优入口(缺省用内置值)
-      WORKER_TIMEOUT_MAP_CARD_GENERATION_MS: ${WORKER_TIMEOUT_MAP_CARD_GENERATION_MS:-}
-      WORKER_TIMEOUT_ANALYZE_CARD_IMAGE_MS: ${WORKER_TIMEOUT_ANALYZE_CARD_IMAGE_MS:-}
-      WORKER_PROVIDER_TIMEOUT_MAP_CARD_GENERATION_MS: ${WORKER_PROVIDER_TIMEOUT_MAP_CARD_GENERATION_MS:-}
-      WORKER_PROVIDER_TIMEOUT_ANALYZE_CARD_IMAGE_MS: ${WORKER_PROVIDER_TIMEOUT_ANALYZE_CARD_IMAGE_MS:-}
       # macOS Docker: same polling fix as the api service.
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "1000"
@@ -258,6 +253,7 @@ services:
       - ./packages/db/src:/tmp/db/src
       - ./packages/db/package.json:/tmp/db/package.json:ro
       - ./apps/api/src:/apps/api/src
+      - ./config:/app/config:ro
     networks:
       - ailearn_net
 
@@ -278,7 +274,9 @@ services:
       NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: ${NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED:-true}
       NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: ${NEXT_PUBLIC_AI_QUESTION_V1_ENABLED:-true}
       NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: ${NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED:-true}
-      NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: ${NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED:-true}
+      NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: ${NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED:-true}
+      # Agent 活动流控制台（可选增强，fail-closed：默认关）
+      NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: ${NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED:-false}
     ports:
       - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
     volumes:

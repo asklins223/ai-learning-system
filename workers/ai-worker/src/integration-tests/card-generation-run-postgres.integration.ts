@@ -5,8 +5,8 @@ import { closeDatabase } from "../db.ts";
 import { processJob } from "../index.ts";
 import { claimJobs } from "../queue.ts";
 
-const adminUrl = process.env.CARD_GENERATION_V2_TEST_ADMIN_URL;
-if (!adminUrl) throw new Error("CARD_GENERATION_V2_TEST_ADMIN_URL is required");
+const adminUrl = process.env.CARD_GENERATION_TEST_ADMIN_URL;
+if (!adminUrl) throw new Error("CARD_GENERATION_TEST_ADMIN_URL is required");
 
 const admin = postgres(adminUrl, { max: 1 });
 const USER_ID = "10000000-0000-4000-8000-000000000011";
@@ -20,13 +20,13 @@ test.after(async () => {
   await admin.end({ timeout: 5 });
 });
 
-test("worker fences and atomically publishes a run-backed legacy generation", async () => {
+test("worker fences and atomically publishes a run-backed generation", async () => {
   await admin.begin(async (tx) => {
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, 'card-v2-worker@example.invalid', 'unused')`;
     await tx`INSERT INTO workspaces
-      (id, owner_id, name, ai_provider, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'Card v2 worker test', 'mock', 'v1', now(), ${USER_ID})`;
+      (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'Card v2 worker test', 'v1', now(), ${USER_ID})`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner')`;
     await tx`INSERT INTO notes
@@ -48,7 +48,7 @@ test("worker fences and atomically publishes a run-backed legacy generation", as
         'Distributed consensus requires nodes to agree on one durable ordering before committed results become visible.'
       )`;
     await tx`UPDATE note_versions
-      SET sealed_at = now(), sealed_reason = 'card_generation_v2'
+      SET sealed_at = now(), sealed_reason = 'card_generation'
       WHERE id = ${VERSION_ID}`;
     await tx`INSERT INTO card_generation_runs (
         id, workspace_id, note_id, note_version_id, requested_by,
@@ -72,9 +72,9 @@ test("worker fences and atomically publishes a run-backed legacy generation", as
       (type, workspace_id, requested_by, payload, status, generation_run_id, stage,
        priority, resource_class, idempotency_key)
       VALUES (
-        'generate_card', ${WORKSPACE_ID}, ${USER_ID},
+        'execute_card_agent_turn', ${WORKSPACE_ID}, ${USER_ID},
         ${tx.json({ noteVersionId: VERSION_ID, generationRunId: RUN_ID, userId: USER_ID })},
-        'pending', ${RUN_ID}, 'legacy_generate', 50, 'card_foreground',
+        'pending', ${RUN_ID}, 'supervisor_agent', 50, 'card_foreground',
         'worker-generation-run-job'
       )`;
   });
@@ -110,7 +110,7 @@ test("worker fences and atomically publishes a run-backed legacy generation", as
   assert.equal(run?.active_card_count, 1);
 
   const [job] = await admin<{ status: string; lease_token: string | null }[]>`
-    SELECT status, lease_token FROM jobs WHERE generation_run_id = ${RUN_ID} AND type = 'generate_card'
+    SELECT status, lease_token FROM jobs WHERE generation_run_id = ${RUN_ID} AND type = 'execute_card_agent_turn'
   `;
   assert.equal(job?.status, "succeeded");
   assert.equal(job?.lease_token, null);

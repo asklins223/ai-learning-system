@@ -5,7 +5,6 @@ import {
   workspaceMembers,
   users,
   workspaces,
-  userAIModelConfigs,
 } from "../../db/schema/identity.ts";
 import { sessions } from "../../db/schema/session.ts";
 import { onboardingStates } from "../../db/schema/identity.ts";
@@ -19,6 +18,7 @@ import {
   isValidInvitationToken,
 } from "./invitation-token.ts";
 import { canonicalizeEmail, hashPassword, issueSession, type SessionContext } from "./service.ts";
+import { resolveSystemProviderForCapability } from "@ailearn/shared";
 // OPS-01: Funnel 指标（ADR-0006 §2）
 import { recordFunnelEvent } from "../../lib/metrics.ts";
 
@@ -535,7 +535,6 @@ export async function removeMember(
 
 export const ONBOARDING_STEPS = [
   "ai_consent",
-  "provider_config",
   "first_content",
   "first_note",
   "first_card",
@@ -578,9 +577,6 @@ async function deriveOnboardingSnapshot(
   const workspace = await tx.query.workspaces.findFirst({
     where: eq(workspaces.id, workspaceId),
   });
-  const providerConfig = await tx.query.userAIModelConfigs.findFirst({
-    where: eq(userAIModelConfigs.userId, userId),
-  });
   const firstContent = await tx
     .select({ id: sources.id })
     .from(sources)
@@ -616,17 +612,13 @@ async function deriveOnboardingSnapshot(
     )
     .limit(1);
 
-  const personalProvider = providerConfig?.provider && providerConfig.provider !== "mock"
-    ? providerConfig.provider
-    : null;
-  const effectiveProvider = String(
-    personalProvider ?? workspace?.aiProvider ?? process.env.AI_PROVIDER_CARD ?? "mock",
-  ).toLowerCase();
+  // v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
+  // 不再读 workspace.aiProvider 或 personal BYOK。
+  const effectiveProvider = resolveSystemProviderForCapability("agent_turn");
   const usesExternalProvider = effectiveProvider !== "mock";
 
   const steps: Record<string, boolean> = {
     ai_consent: !usesExternalProvider || Boolean(workspace?.aiConsentAt && workspace.aiConsentVersion),
-    provider_config: Boolean(effectiveProvider),
     first_content: firstContent.length > 0,
     first_note: firstNote.length > 0,
     first_card: firstCard.length > 0,

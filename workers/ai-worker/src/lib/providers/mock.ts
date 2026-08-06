@@ -1,44 +1,182 @@
 import type {
   AIProvider,
-  GenerateCardInput,
-  EvaluateValidationInput,
-  RepairCardInput,
   ProviderUsage,
-  AnalyzeImageInput,
+  EvaluateValidationInput,
 } from "../ai-provider.ts";
+import { DEFAULT_CONTEXT_WINDOW_TOKENS } from "../provider-constants.ts";
 import type {
-  LearningCardOutput,
-  EvaluateValidationOutput,
-  GenerateValidationQuestionOutput,
-  EvaluateRubricOutput,
+  AgentTurnRequest,
+  AgentTurnResult,
+  ProviderCapability,
+  ChatMessage,
+  ChatOptions,
+  ChatResult,
+  CapabilityImpl,
   GenerateValidationQuestionInput,
   EvaluateRubricInput,
-  CardMapInput,
-  CardMapOutput,
+  PlatformOptions,
+} from "@ailearn/shared";
+import type {
   ImageInsightOutput,
 } from "@ailearn/shared";
+import {
+  EVAL_SYSTEM_PROMPT,
+  QUESTION_GENERATION_PROMPT,
+  RUBRIC_EVALUATION_PROMPT,
+  IMAGE_UNDERSTANDING_SYSTEM_PROMPT,
+} from "../prompts.ts";
+import { generateDeterministicQuestion } from "@ailearn/shared";
+import { registerFactory } from "../provider-factory.ts";
+
+// ─── R5: Mock business logic (moved from removed provider methods) ──────
+
+/** Compute word-level overlap ratio between quote and userAnswer. */
+function computeOverlap(quote: string, userAnswer: string): number {
+  const quoteWords = new Set(quote.toLowerCase().split(/\s+/).filter((w) => w.length > 0));
+  if (quoteWords.size === 0) return 0;
+  const answerWords = userAnswer.toLowerCase().split(/\s+/).filter((w) => w.length > 0);
+  let hits = 0;
+  for (const w of answerWords) {
+    if (quoteWords.has(w)) hits++;
+  }
+  return hits / quoteWords.size;
+}
+
+/** R5: Mock evaluateValidation logic (moved from removed provider method). */
+function mockEvaluateValidation(input: EvaluateValidationInput) {
+  const overlap = computeOverlap(input.quote, input.userAnswer);
+  const claimTrunc = input.claim.slice(0, 40);
+  const quoteTrunc = input.quote.slice(0, 60);
+
+  if (overlap > 0.6) {
+    return {
+      outcome: "preliminary_understanding",
+      confidence: 0.9,
+      feedback: "回答与原文一致，理解到位。",
+      covered_points: [claimTrunc],
+      missing_points: [],
+      misunderstandings: [],
+      evidence_refs: [],
+    };
+  } else if (overlap > 0.3) {
+    return {
+      outcome: "unclear_expression",
+      confidence: 0.6,
+      feedback: "部分要点命中，但表述不够完整。",
+      covered_points: [],
+      missing_points: [claimTrunc],
+      misunderstandings: [],
+      evidence_refs: [],
+    };
+  } else if (overlap > 0.05) {
+    return {
+      outcome: "unclear_expression",
+      confidence: 0.4,
+      feedback: "与原文相关性较弱，需要进一步澄清。",
+      covered_points: [],
+      missing_points: [claimTrunc],
+      misunderstandings: [],
+      evidence_refs: [],
+    };
+  } else {
+    return {
+      outcome: "misunderstanding",
+      confidence: 0.7,
+      feedback: "未命中原文要点，回答与预期不符。",
+      covered_points: [],
+      missing_points: [],
+      misunderstandings: [claimTrunc],
+      evidence_refs: quoteTrunc ? [quoteTrunc] : [],
+    };
+  }
+}
+
+/** R5: Mock evaluateRubric logic (moved from removed provider method). */
+
+/**
+ * Compute character-level overlap ratio between criterion and userAnswer.
+ * Uses character bigrams to handle CJK text that lacks whitespace word boundaries.
+ */
+function computeCharOverlap(criterion: string, userAnswer: string): number {
+  const c = criterion.toLowerCase();
+  const a = userAnswer.toLowerCase();
+  if (c.length < 2) return a.includes(c) ? 1 : 0;
+  const bigrams = new Set<string>();
+  for (let i = 0; i < c.length - 1; i++) {
+    bigrams.add(c.slice(i, i + 2));
+  }
+  if (bigrams.size === 0) return 0;
+  let hits = 0;
+  for (let i = 0; i < a.length - 1; i++) {
+    if (bigrams.has(a.slice(i, i + 2))) hits++;
+  }
+  return Math.min(1, hits / bigrams.size);
+}
+
+function mockEvaluateRubric(input: EvaluateRubricInput) {
+  // Use character length for CJK text that lacks whitespace word boundaries.
+  const isShortAnswer = input.userAnswer.trim().length <= 1;
+
+  const itemResults = input.rubricItems.map((item) => {
+    const overlap = computeCharOverlap(item.criterion, input.userAnswer);
+
+    let verdict: "covered" | "partial" | "missing" | "contradicted" | "not_assessable";
+    let confidence: number;
+
+    if (isShortAnswer) {
+      verdict = "not_assessable";
+      confidence = 0.3;
+    } else if (overlap > 0.3) {
+      verdict = "covered";
+      confidence = 0.85;
+    } else if (overlap > 0.1) {
+      verdict = "partial";
+      confidence = 0.5;
+    } else {
+      verdict = "missing";
+      confidence = 0.7;
+    }
+
+    return {
+      rubricItemId: item.rubricItemId,
+      verdict,
+      confidence,
+      rationale: `Mock assessment based on overlap (${(overlap * 100).toFixed(0)}%).`,
+      answerExcerpt: input.userAnswer.slice(0, 100),
+    };
+  });
+
+  return {
+    itemResults,
+    feedback: "Mock rubric evaluation completed.",
+  };
+}
+
+// ARCH-05: contextWindowTokens 可通过 MOCK_CONTEXT_WINDOW_TOKENS 环境变量覆盖。
 
 export class MockProvider implements AIProvider {
   id = "mock";
   modelId = "mock-v1";
   visionModelId = "mock-vision-v1";
   promptVersion = "v2-mock";
+  /** 配置文件 options（含 contextWindowTokens），从 config/ai-platforms.json 传入。 */
+  private readonly platformOptions: PlatformOptions | undefined;
 
-  // v0.6: Track usage from the last call (计划 §6.6, §10.5)
-  private lastUsage: ProviderUsage | null = null;
-
-  getLastUsage(): ProviderUsage | null {
-    return this.lastUsage;
+  constructor(options?: { platformOptions?: PlatformOptions }) {
+    this.platformOptions = options?.platformOptions;
   }
 
   /**
    * Estimate token count for mock responses.
    * Mock doesn't call a real API, so we estimate based on input/output size.
-   * Rough estimate: ~1 token per 4 chars for mixed CJK + ASCII.
+   *
+   * BUG-10: Previous estimate used `length / 4` uniformly, which severely
+   * underestimates CJK text (where ~1 token ≈ 1.5 chars). We now detect
+   * CJK characters and apply a more accurate ratio for them.
    */
   private estimateUsage(inputText: string, outputText: string): ProviderUsage {
-    const promptTokens = Math.ceil(inputText.length / 4);
-    const completionTokens = Math.ceil(outputText.length / 4);
+    const promptTokens = estimateTokenCount(inputText);
+    const completionTokens = estimateTokenCount(outputText);
     return {
       totalTokens: promptTokens + completionTokens,
       promptTokens,
@@ -47,349 +185,294 @@ export class MockProvider implements AIProvider {
     };
   }
 
-  /** M5 成本观测：统一记录 mock 调用 usage 并原样返回输出 */
-  private recordUsage<T>(input: unknown, output: T): T {
-    this.lastUsage = this.estimateUsage(JSON.stringify(input), JSON.stringify(output));
-    return output;
-  }
+  // ─── Supervisor Agent v1: executeAgentTurn + getCapabilities (计划 §8.1, §8.2) ──
 
-  async generateCard(input: GenerateCardInput, signal?: AbortSignal): Promise<LearningCardOutput> {
-    // R-007: 检查是否已取消
-    if (signal?.aborted) throw new Error("aborted before generateCard");
-    const candidates = input.blocks
-      .filter((b) => b.type !== "code" && b.type !== "image" && b.content.trim().length > 10)
-      .slice(0, 5);
+  /**
+   * Mock Agent turn executor.
+   *
+   * 根据 role 和 messages 生成合理的 tool calls，使 Supervisor Agent loop
+   * 能在开发和测试环境中完整运行。
+   *
+   * 策略：
+   * - generation_supervisor: 返回 request_verification（最短路径）
+   * - text_extractor/code_extractor/vision_specialist: 返回 complete_agent_task
+   * - deck_composer: 返回 submit_deck_proposal + complete_agent_task
+   * - grounding_critic: 返回 submit_quality_report + complete_agent_task
+   * - repairer: 返回 submit_draft_patch + complete_agent_task
+   */
+  async executeAgentTurn(
+    request: AgentTurnRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentTurnResult> {
+    if (signal?.aborted) throw new Error("aborted before executeAgentTurn");
 
-    const keyPoints = candidates.map((block, idx) => {
-      const firstSentence = block.content
-        .replace(/\n+/g, " ")
-        .split(/[。.!?！？]/)[0]
-        .trim()
-        .slice(0, 240);
-      return {
-        ordinal: idx,
-        claim: `要点 ${idx + 1}：${firstSentence.slice(0, 80)}`,
-        quote_text: firstSentence || block.content.slice(0, 240),
-      };
-    });
+    const role = request.role;
+    const toolCalls: Array<{
+      id: string;
+      name: string;
+      arguments: Record<string, unknown>;
+    }> = [];
 
-    const output: LearningCardOutput = keyPoints.length === 0
-      ? {
-          title: input.noteTitle,
-          summary: "（Mock provider：未找到足够文本，无法生成要点）",
-          key_points: [
-            {
-              ordinal: 0,
-              claim: "请在笔记中加入更多正文后再生成学习卡",
-              quote_text: "请在笔记中加入更多正文后再生成学习卡",
+    // 根据 role 生成不同的 tool calls
+    switch (role) {
+      case "generation_supervisor":
+        // Mock Supervisor: 直接请求 verification（最短路径）
+        toolCalls.push({
+          id: `call_mock_${Date.now()}`,
+          name: "request_verification",
+          arguments: { draftHash: "mock_draft_hash" },
+        });
+        break;
+
+      case "text_extractor":
+      case "code_extractor":
+      case "vision_specialist":
+        // Mock Extractor: 完成 task
+        toolCalls.push({
+          id: `call_mock_${Date.now()}`,
+          name: "complete_agent_task",
+          arguments: { outputHash: `mock_output_${role}` },
+        });
+        break;
+
+      case "deck_composer":
+        // Mock Composer: 提交 proposal + 完成
+        toolCalls.push({
+          id: `call_mock_${Date.now()}`,
+          name: "submit_deck_proposal",
+          arguments: {
+            proposal: {
+              deckTitle: "Mock Deck",
+              deckSummary: "Mock generated deck",
+              cards: [],
             },
-          ],
-        }
-      : {
-          title: input.noteTitle,
-          summary: `自动摘要：本文共 ${input.blocks.length} 个块，提取 ${keyPoints.length} 个要点。`,
-          key_points: keyPoints,
-        };
-    // M5 成本观测：mock provider 也记录 usage，保证 cost_tokens 在开发/E2E 环境非空
-    this.lastUsage = this.estimateUsage(JSON.stringify(input), JSON.stringify(output));
-    return output;
-  }
+          },
+        });
+        toolCalls.push({
+          id: `call_mock_${Date.now() + 1}`,
+          name: "complete_agent_task",
+          arguments: { outputHash: "mock_composer_output" },
+        });
+        break;
 
-  async extractCardCandidates(
-    input: CardMapInput,
-    signal?: AbortSignal,
-  ): Promise<CardMapOutput> {
-    if (signal?.aborted) throw new Error("aborted before extractCardCandidates");
-    const candidates: CardMapOutput["candidates"] = [];
-    const noCandidateUnitIds: CardMapOutput["noCandidateUnitIds"] = [];
+      case "grounding_critic":
+        // Mock Critic: 提交通过的 Quality Report + 完成
+        toolCalls.push({
+          id: `call_mock_${Date.now()}`,
+          name: "submit_quality_report",
+          arguments: {
+            report: {
+              draftHash: "mock_draft_hash",
+              candidatePoolHash: "mock_pool_hash",
+              sourceLedgerHash: "mock_ledger_hash",
+              hardIssues: [],
+              softIssues: [],
+              perClaimVerdicts: [],
+              metrics: {},
+              criticStatus: "passed",
+              deterministicStatus: "passed",
+            },
+          },
+        });
+        toolCalls.push({
+          id: `call_mock_${Date.now() + 1}`,
+          name: "complete_agent_task",
+          arguments: { outputHash: "mock_critic_output" },
+        });
+        break;
 
-    for (const unit of input.evidenceUnits) {
-      if (unit.contextOnly) continue;
-      const normalized = unit.text.replace(/\s+/g, " ").trim();
-      if (normalized.length < 12) {
-        noCandidateUnitIds.push({ unitId: unit.refId, reason: "metadata" });
-        continue;
-      }
-      const snippet = normalized.split(/[。.!?！？]/)[0]?.trim() || normalized;
-      const localId = `c${candidates.length + 1}`;
-      candidates.push({
-        localId,
-        claim: `该资料单元揭示的核心结论是：${snippet.slice(0, 180)}`,
-        evidenceRefIds: [unit.refId],
-        topic: unit.sectionPath.at(-1) ?? input.noteTitle,
-        cognitiveType: "concept",
-        importance: candidates.length < 3 ? "core" : "supporting",
-      });
+      case "repairer":
+        // Mock Repairer: 提交空 patch + 完成
+        toolCalls.push({
+          id: `call_mock_${Date.now()}`,
+          name: "submit_draft_patch",
+          arguments: {
+            baseDraftHash: "mock_draft_hash",
+            patches: [],
+          },
+        });
+        toolCalls.push({
+          id: `call_mock_${Date.now() + 1}`,
+          name: "complete_agent_task",
+          arguments: { outputHash: "mock_repair_output" },
+        });
+        break;
     }
 
-    const output: CardMapOutput = {
-      sectionSummary: `共处理 ${input.evidenceUnits.filter((unit) => !unit.contextOnly).length} 个主证据单元。`,
-      candidates,
-      noCandidateUnitIds,
-    };
-    this.lastUsage = this.estimateUsage(JSON.stringify(input), JSON.stringify(output));
-    return output;
-  }
-
-  async analyzeImage(
-    input: AnalyzeImageInput,
-    signal?: AbortSignal,
-  ): Promise<ImageInsightOutput> {
-    if (signal?.aborted) throw new Error("aborted before analyzeImage");
-    const output: ImageInsightOutput = {
-      contentType: "decorative",
-      decorative: true,
-      caption: input.userDescription?.trim().slice(0, 1_000)
-        || "Mock provider 已检查图片；未生成视觉事实。",
-      ocr: [],
-      facts: [],
-      promptInjectionDetected: false,
-      safetyFlags: ["mock_no_visual_inference"],
-      unresolvedReason: null,
-    };
-    this.lastUsage = this.estimateUsage(
-      JSON.stringify({ mimeType: input.mimeType, width: input.width, height: input.height }),
-      JSON.stringify(output),
-    );
-    return output;
-  }
-
-  async evaluateValidation(input: EvaluateValidationInput, signal?: AbortSignal): Promise<EvaluateValidationOutput> {
-    // R-007: 检查是否已取消
-    if (signal?.aborted) throw new Error("aborted before evaluateValidation");
-    const overlap = simpleOverlap(input.userAnswer, input.quote);
-    if (overlap > 0.6) {
-      return this.recordUsage(input, {
-        outcome: "preliminary_understanding",
-        confidence: 0.9,
-        feedback: "回答与原文一致，覆盖核心要点",
-        covered_points: [input.claim.slice(0, 40)],
-        missing_points: [],
-        misunderstandings: [],
-        evidence_refs: [input.quote.slice(0, 60)],
-      });
-    }
-    if (overlap > 0.3) {
-      return this.recordUsage(input, {
-        outcome: "unclear_expression",
-        confidence: 0.6,
-        feedback: "部分要点命中，表达可更清晰",
-        covered_points: [],
-        missing_points: [input.claim.slice(0, 40)],
-        misunderstandings: [],
-        evidence_refs: [],
-      });
-    }
-    if (overlap > 0.05) {
-      return this.recordUsage(input, {
-        outcome: "unclear_expression",
-        confidence: 0.4,
-        feedback: "与原文相关性较弱，建议回看证据",
-        covered_points: [],
-        missing_points: [input.claim.slice(0, 40)],
-        misunderstandings: [],
-        evidence_refs: [],
-      });
-    }
-    return this.recordUsage(input, {
-      outcome: "misunderstanding",
-      confidence: 0.7,
-      feedback: "未命中原文要点，存在误解",
-      covered_points: [],
-      missing_points: [input.claim.slice(0, 40)],
-      misunderstandings: [input.claim.slice(0, 40)],
-      evidence_refs: [input.quote.slice(0, 60)],
-    });
-  }
-
-  // v0.6: Mock question + rubric generation (计划 §7.1)
-  async generateValidationQuestion(
-    input: GenerateValidationQuestionInput,
-    signal?: AbortSignal,
-  ): Promise<GenerateValidationQuestionOutput> {
-    if (signal?.aborted) throw new Error("aborted before generateValidationQuestion");
-
-    // Mock: generate a safe question that doesn't leak the claim
-    // Use the claim to build a contextual question without revealing the conclusion
-    const claimSnippet = input.claim.slice(0, 30);
-    const evidenceRef = input.evidenceRefs[0];
-    if (!evidenceRef) {
-      throw new Error("MockProvider: at least one evidence ref is required");
-    }
-
-    const questionType = input.preferredType ?? "explain";
-
-    const questionTexts: Record<string, string> = {
-      explain: `关于「${claimSnippet}…」这一知识点，\n请用自己的话解释其核心含义和背后的原理。`,
-      example: `请举一个具体的例子来说明「${claimSnippet}…」这一知识点的原理。\n并解释你的例子如何体现其核心原理。`,
-      apply: `在实际场景中，「${claimSnippet}…」的适用条件是什么？\n如果忽视它可能出现什么问题？`,
-    };
-
-    this.lastUsage = this.estimateUsage(
-      JSON.stringify(input),
-      JSON.stringify(questionTexts[questionType]),
-    );
+    const outputText = JSON.stringify({ role, toolCallCount: toolCalls.length });
+    const usage = this.estimateUsage(JSON.stringify(request), outputText);
 
     return {
-      questionType,
-      question: questionTexts[questionType],
-      rubricItems: [
-        {
-          key: "rp_1",
-          criterion: "回答识别出该知识点的核心概念",
-          expectedConcept: input.claim.slice(0, 80),
-          weight: 3,
-          required: true,
-          evidenceRefId: evidenceRef.refId,
-        },
-        {
-          key: "rp_2",
-          criterion: "回答用自己的话解释了原理或因果关系",
-          expectedConcept: "用自己的语言解释了知识点的原理",
-          weight: 2,
-          required: true,
-          evidenceRefId: evidenceRef.refId,
-        },
-        {
-          key: "rp_3",
-          criterion: "回答体现了对适用场景或条件的理解",
-          expectedConcept: "理解知识点的适用条件和边界",
-          weight: 1,
-          required: false,
-          evidenceRefId: evidenceRef.refId,
-        },
-      ],
+      content: null,
+      toolCalls,
+      finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      usage,
+      providerRequestId: `mock_req_${Date.now()}`,
     };
   }
 
-  // v0.6: Mock rubric-based evaluation (计划 §7.2)
-  async evaluateRubric(
-    input: EvaluateRubricInput,
-    signal?: AbortSignal,
-  ): Promise<EvaluateRubricOutput> {
-    if (signal?.aborted) throw new Error("aborted before evaluateRubric");
-
-    const answer = input.userAnswer.trim();
-    const tooShort = answer.length < 5;
-
-    // Compute per-item overlap using character bigrams against each criterion
-    const itemResults = input.rubricItems.map((item) => {
-      let verdict: "covered" | "partial" | "missing" | "contradicted" | "not_assessable";
-      let confidence: number;
-
-      if (tooShort) {
-        verdict = "not_assessable";
-        confidence = 0.3;
-      } else {
-        const overlap = charBigramOverlap(answer, item.criterion);
-        if (overlap > 0.4) {
-          verdict = "covered";
-          confidence = 0.8;
-        } else if (overlap > 0.2) {
-          verdict = item.required ? "partial" : "covered";
-          confidence = 0.6;
-        } else {
-          verdict = "missing";
-          confidence = 0.4;
-        }
-      }
-
-      return {
-        rubricItemId: item.rubricItemId,
-        verdict,
-        confidence,
-        rationale: `Mock 评估：回答与评分标准「${item.criterion.slice(0, 30)}」的匹配度分析`,
-      };
-    });
-
-    // Overall feedback based on result distribution
-    const coveredCount = itemResults.filter((r) => r.verdict === "covered").length;
-    const totalCount = itemResults.length;
-    const feedback =
-      coveredCount === totalCount
-        ? "回答较好地覆盖了核心要点"
-        : coveredCount > 0
-          ? "回答部分命中，表达可更清晰"
-          : tooShort
-            ? "回答过短，无法有效评估"
-            : "回答与知识点相关性较弱，建议回看证据";
-
-    this.lastUsage = this.estimateUsage(
-      JSON.stringify(input),
-      JSON.stringify({ itemResults, feedback }),
-    );
-
-    return { itemResults, feedback };
+  /**
+   * 返回 Mock Provider 能力快照（计划 §8.2）。
+   * capability fingerprint 固化到 run，同一 run 不得在执行中切 provider/model/tool schema。
+   *
+   * ARCH-05: contextWindowTokens is configurable via
+   * MOCK_CONTEXT_WINDOW_TOKENS env var.
+   */
+  getCapabilities(): ProviderCapability {
+    // 迁移遗漏修复：config/ai-platforms.json 的 options.contextWindowTokens 优先于 env。
+    const contextWindowTokens = this.platformOptions?.contextWindowTokens
+      ?? (Number(process.env.MOCK_CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS);
+    const reservedOutputTokens = 4096;
+    return {
+      providerId: this.id,
+      modelId: this.modelId,
+      visionModelId: this.visionModelId,
+      toolMode: "native_tools",
+      contextWindowTokens,
+      reservedOutputTokens,
+      maxInputTokens: contextWindowTokens - reservedOutputTokens,
+      maxOutputTokens: 4096,
+      // R3: fingerprint includes visionModelId to capture vision-only config drift.
+fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
+    };
   }
 
-  // v0.6: Mock card repair (计划 §7.7)
-  async repairCard(
-    input: RepairCardInput,
+  /**
+   * R5: TextGenerationCapability — mock chat completion.
+   *
+   * Detects the system prompt and returns an appropriate mock response:
+   * - EVAL_SYSTEM_PROMPT: overlap-based evaluateValidation mock
+   * - QUESTION_GENERATION_PROMPT: deterministic question generation
+   * - RUBRIC_EVALUATION_PROMPT: overlap-based evaluateRubric mock
+   * - Otherwise: generic mock response
+   *
+   * This simulates what a real API would return for each prompt type,
+   * allowing business helpers (evaluateValidationViaChat, etc.) to work
+   * with the MockProvider.
+   */
+  async chatCompletion(
+    messages: ChatMessage[],
+    _options: ChatOptions,
     signal?: AbortSignal,
-  ): Promise<LearningCardOutput> {
-    if (signal?.aborted) throw new Error("aborted before repairCard");
+  ): Promise<ChatResult> {
+    if (signal?.aborted) throw new Error("aborted before chatCompletion");
 
-    // Mock: re-extract key points from source blocks, fixing the issues
-    // by ensuring quote_text comes directly from the source
-    const candidates = input.sourceBlocks
-      .filter((b) => b.trim().length > 10)
-      .slice(0, 5);
+    const systemContent = messages.find((m) => m.role === "system");
+    const systemPrompt = typeof systemContent?.content === "string"
+      ? systemContent.content
+      : "";
+    const userMessage = messages.find((m) => m.role === "user");
+    const userContent = typeof userMessage?.content === "string"
+      ? userMessage.content
+      : "";
 
-    const keyPoints = candidates.map((block, idx) => {
-      const firstSentence = block
-        .replace(/\n+/g, " ")
-        .split(/[。.!?！？]/)[0]
-        .trim()
-        .slice(0, 240);
-      return {
-        ordinal: idx,
-        claim: `要点 ${idx + 1}：${firstSentence.slice(0, 80)}`,
-        quote_text: firstSentence || block.slice(0, 240),
+    let content: string;
+
+    // Use startsWith instead of === so the mock still recognizes the prompt
+    // type even if a caller appends extra context after the base prompt.
+    if (systemPrompt.startsWith(EVAL_SYSTEM_PROMPT)) {
+      content = JSON.stringify(mockEvaluateValidation(JSON.parse(userContent)));
+    } else if (systemPrompt.startsWith(QUESTION_GENERATION_PROMPT)) {
+      const input = JSON.parse(userContent) as GenerateValidationQuestionInput;
+      // Try indices 0-2 to find one matching preferredType
+      if (input.preferredType) {
+        let output = generateDeterministicQuestion(input, 0);
+        for (let i = 1; i <= 2; i++) {
+          if (output.questionType === input.preferredType) break;
+          output = generateDeterministicQuestion(input, i);
+        }
+        content = JSON.stringify(output);
+      } else {
+        content = JSON.stringify(generateDeterministicQuestion(input, 0));
+      }
+    } else if (systemPrompt.startsWith(RUBRIC_EVALUATION_PROMPT)) {
+      content = JSON.stringify(mockEvaluateRubric(JSON.parse(userContent)));
+    } else if (systemPrompt.startsWith(IMAGE_UNDERSTANDING_SYSTEM_PROMPT)) {
+      // R5: analyzeImageViaChat builds a multimodal user message (text + image_url).
+      // Mock returns a decorative insight; the text part carries the image metadata.
+      const textPart = Array.isArray(userMessage?.content)
+        ? userMessage!.content.find((p) => p.type === "text")?.text ?? ""
+        : "";
+      const meta = JSON.parse(textPart || "{}") as { userDescription?: string };
+      const output: ImageInsightOutput = {
+        contentType: "decorative",
+        decorative: true,
+        caption: meta.userDescription?.trim().slice(0, 1_000)
+          || "Mock provider 已检查图片；未生成视觉事实。",
+        ocr: [],
+        facts: [],
+        promptInjectionDetected: false,
+        safetyFlags: ["mock_no_visual_inference"],
+        unresolvedReason: null,
       };
-    });
-
-    if (keyPoints.length === 0) {
-      // If no valid source blocks, return the draft as-is
-      return this.recordUsage(input, input.draft);
+      content = JSON.stringify(output);
+    } else {
+      content = JSON.stringify({ status: "mock", message: "Mock chat completion response" });
     }
 
-    return this.recordUsage(input, {
-      title: input.draft.title,
-      summary: input.draft.summary,
-      key_points: keyPoints,
-    });
+    const usage = this.estimateUsage(userContent, content);
+    return { content, usage };
   }
 
-}
+  /**
+   * R2: EmbeddingCapability — mock embed.
+   *
+   * Returns null to trigger upstream fallback to lexical/sequential search,
+   * matching the contract of other providers' embed() method.
+   */
+  async embed(_text: string, _signal?: AbortSignal): Promise<number[] | null> {
+    return null;
+  }
 
-function simpleOverlap(a: string, b: string): number {
-  const as = new Set(a.toLowerCase().split(/[\s,.，。；;!?！？]+/).filter(Boolean));
-  const bs = b.toLowerCase().split(/[\s,.，。；;!?！？]+/).filter(Boolean);
-  if (bs.length === 0) return 0;
-  let hits = 0;
-  for (const w of bs) if (as.has(w)) hits++;
-  return hits / bs.length;
 }
 
 /**
- * Character bigram overlap for Chinese text.
- * Chinese text has no spaces, so word-level overlap fails.
- * Bigram (2-char) overlap is a simple but effective approximation.
+ * BUG-10: Estimate token count for text, accounting for CJK characters.
+ *
+ * CJK text uses approximately 1 token per 1.5 characters (or fewer),
+ * while ASCII text uses approximately 1 token per 4 characters.
+ * This function counts CJK and non-CJK characters separately and
+ * applies the appropriate ratio to each group.
  */
-function charBigramOverlap(a: string, b: string): number {
-  const aBigrams = new Set<string>();
-  const aClean = a.replace(/\s+/g, "");
-  for (let i = 0; i < aClean.length - 1; i++) {
-    aBigrams.add(aClean.slice(i, i + 2));
+function estimateTokenCount(text: string): number {
+  let cjkChars = 0;
+  let otherChars = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (
+      (code >= 0x4e00 && code <= 0x9fff) ||   // CJK Unified Ideographs
+      (code >= 0x3400 && code <= 0x4dbf) ||   // CJK Extension A
+      (code >= 0x3040 && code <= 0x30ff) ||   // Hiragana + Katakana
+      (code >= 0xac00 && code <= 0xd7af)      // Hangul Syllables
+    ) {
+      cjkChars++;
+    } else {
+      otherChars++;
+    }
   }
-  if (aBigrams.size === 0) return 0;
-
-  const bClean = b.replace(/\s+/g, "");
-  let hits = 0;
-  let total = 0;
-  for (let i = 0; i < bClean.length - 1; i++) {
-    total++;
-    if (aBigrams.has(bClean.slice(i, i + 2))) hits++;
-  }
-  return total === 0 ? 0 : hits / total;
+  // CJK: ~1.5 chars/token; ASCII: ~4 chars/token
+  return Math.ceil(cjkChars / 1.5 + otherChars / 4);
 }
+
+// ─── R2: Factory registrations for Mock ─────────────────────────────────
+// Mock provider supports all capabilities for development and testing.
+
+registerFactory("mock", "text_generation", (config) => {
+  return new MockProvider({ platformOptions: config.options }) as unknown as CapabilityImpl;
+});
+
+registerFactory("mock", "vision", (config) => {
+  return new MockProvider({ platformOptions: config.options }) as unknown as CapabilityImpl;
+});
+
+registerFactory("mock", "agent_turn", (config) => {
+  return new MockProvider({ platformOptions: config.options }) as unknown as CapabilityImpl;
+});
+
+registerFactory("mock", "embedding", (config) => {
+  return new MockProvider({ platformOptions: config.options }) as unknown as CapabilityImpl;
+});
+
+registerFactory("mock", "rerank", (config) => {
+  return new MockProvider({ platformOptions: config.options }) as unknown as CapabilityImpl;
+});

@@ -9,7 +9,7 @@
  * - 旧的 effectiveAlignment 保留向后兼容（使用 evidences.userOverride 字段）。
  */
 
-import { db } from "../db/client.ts";
+import { db, type ApiTransaction } from "../db/client.ts";
 import { evidenceOverrides } from "../db/schema/evidence.ts";
 import { eq, inArray, and } from "drizzle-orm";
 
@@ -77,17 +77,71 @@ export function isHardEvidenceForUser(
 /**
  * N-005: 批量查询用户级证据 override。
  * 返回 evidenceId → override 的映射。
+ *
+ * BUG-71 修复：支持可选的 executor 参数，允许在 withWorkspaceTransaction
+ * 上下文内复用同一事务连接，确保 DB 级工作区上下文一致。
  */
 export async function getUserOverrideMap(
   userId: string,
   evidenceIds: string[],
+  executor?: Pick<ApiTransaction, "query">,
 ): Promise<Map<string, EvidenceOverride>> {
   if (evidenceIds.length === 0) return new Map();
-  const rows = await db.query.evidenceOverrides.findMany({
+  // BUG-71: 优先使用传入的 executor（事务连接），否则回退到 db（向后兼容）
+  const queryTarget = executor ?? db;
+  const rows = await queryTarget.query.evidenceOverrides.findMany({
     where: and(
       eq(evidenceOverrides.userId, userId),
       inArray(evidenceOverrides.evidenceId, evidenceIds),
     ),
   });
   return new Map(rows.map((r) => [r.evidenceId, r.override as EvidenceOverride]));
+}
+
+/**
+ * 证据聚合统计结果。
+ */
+export interface EvidenceStats {
+  hard: number;
+  soft: number;
+  total: number;
+  pendingCount: number;
+}
+
+/**
+ * QUAL-46 修复：提取共享的证据对齐聚合函数。
+ *
+ * stats/service.ts 和 understanding/service.ts 都包含几乎相同的逻辑：
+ * 查询 evidences → 查询 userOverrideMap → 遍历计算 effectiveAlignment → 聚合 hard/soft 计数。
+ * 此函数将这段逻辑提取为共享实现，消除重复代码。
+ *
+ * @param evRows 证据行数组（包含 id, alignment, userOverride 字段）
+ * @param userOverrideMap 用户级 override 映射（从 getUserOverrideMap 获取）
+ * @param userId 可选的用户 ID，决定是否使用用户级 override
+ * @returns 聚合统计结果（hard、soft、total、pendingCount）
+ */
+export function aggregateEvidenceStats(
+  evRows: Array<{ id: string; alignment: string; userOverride: string | null }>,
+  userOverrideMap: Map<string, EvidenceOverride>,
+  userId?: string,
+): EvidenceStats {
+  let hard = 0;
+  let soft = 0;
+  let total = 0;
+  let pendingCount = 0;
+
+  for (const ev of evRows) {
+    const userOv = userOverrideMap.get(ev.id) ?? null;
+    const ea = userId
+      ? effectiveAlignmentForUser(ev.alignment, ev.userOverride, userOv)
+      : effectiveAlignment(ev.alignment, ev.userOverride);
+    if (ea === null) continue; // rejected 证据不计入统计
+    total++;
+    if (ea === "aligned") hard++;
+    else if (ea === "soft") soft++;
+    const hasOverride = userId ? Boolean(userOv ?? ev.userOverride) : Boolean(ev.userOverride);
+    if (!hasOverride && ea !== "aligned") pendingCount++;
+  }
+
+  return { hard, soft, total, pendingCount };
 }

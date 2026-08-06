@@ -380,11 +380,10 @@ describe("SEC-02 DoD: 邀请 token 安全存储", () => {
 // ─── 5. onboarding 状态管理 ─────────────────────────────────────────────────
 
 describe("SEC-02 DoD: onboarding 状态管理", () => {
-  it("ONBOARDING_STEPS 包含 7 个步骤且顺序正确", () => {
-    assert.equal(ONBOARDING_STEPS.length, 7);
+  it("ONBOARDING_STEPS 包含 6 个步骤且顺序正确", () => {
+    assert.equal(ONBOARDING_STEPS.length, 6);
     assert.deepEqual([...ONBOARDING_STEPS], [
       "ai_consent",
-      "provider_config",
       "first_content",
       "first_note",
       "first_card",

@@ -71,22 +71,22 @@ test("Job 队列深度 gauge 正确设置值", async () => {
 });
 
 test("Job 终态计数器按 type/status 正确递增", async () => {
-  jobTerminalTotal.inc({ type: "generate_card", status: "succeeded" });
-  jobTerminalTotal.inc({ type: "generate_card", status: "succeeded" });
+  jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
+  jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
   jobTerminalTotal.inc({ type: "parse_source", status: "dead" });
 
   const text = await getMetricsText();
-  assert.match(text, /ailearn_job_terminal_total\{type="generate_card",status="succeeded"\} 2/);
+  assert.match(text, /ailearn_job_terminal_total\{type="execute_card_agent_turn",status="succeeded"\} 2/);
   assert.match(text, /ailearn_job_terminal_total\{type="parse_source",status="dead"\} 1/);
 });
 
 test("Provider 调用计数器按 operation/status 正确递增", async () => {
-  providerCallsTotal.inc({ operation: "generate_card", status: "success" });
-  providerCallsTotal.inc({ operation: "generate_card", status: "error" });
+  providerCallsTotal.inc({ operation: "execute_card_agent_turn", status: "success" });
+  providerCallsTotal.inc({ operation: "execute_card_agent_turn", status: "error" });
 
   const text = await getMetricsText();
-  assert.match(text, /ailearn_provider_calls_total\{operation="generate_card",status="success"\} 1/);
-  assert.match(text, /ailearn_provider_calls_total\{operation="generate_card",status="error"\} 1/);
+  assert.match(text, /ailearn_provider_calls_total\{operation="execute_card_agent_turn",status="success"\} 1/);
+  assert.match(text, /ailearn_provider_calls_total\{operation="execute_card_agent_turn",status="error"\} 1/);
 });
 
 test("Funnel 事件通过 recordFunnelEvent 正确记录", async () => {
@@ -236,7 +236,7 @@ test("指标文本不包含原始 URL query 参数", async () => {
 
 test("指标文本不包含 lease token 原始值", async () => {
   // 验证 job 指标不暴露 lease token
-  jobTerminalTotal.inc({ type: "generate_card", status: "succeeded" });
+  jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
 
   const text = await getMetricsText();
   // 不应包含 "lease_token" 或类似敏感字段

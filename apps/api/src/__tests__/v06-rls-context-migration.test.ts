@@ -73,16 +73,15 @@ test("0043 remains registered immediately before the generation-run bridge", () 
     server,
     /MIN_READY_MIGRATION_CREATED_AT \?\? "1786683800000"/,
   );
-  for (const table of [
-    "validation_question_rubric_items",
-    "validation_submissions",
-    "validation_submission_jobs",
-    "validation_action_commands",
-    "validation_assistance_exposures",
-    "validation_point_assessments",
-    "scheduling_shadow_decisions",
-    "validation_quality_signals",
-  ]) {
-    assert.ok(server.includes(`"${table}"`), `/ready must require ${table}`);
-  }
+  // QUAL-08 后 /ready 不再硬编码表名：改为动态查询 information_schema.tables
+  // （覆盖所有已迁移表）+ 迁移时间戳门槛（0043，即引入 v0.6 新表的迁移）。
+  // 因此断言：
+  // 1. /ready 动态查询 information_schema
+  // 2. 迁移门槛时间戳等于 0043 迁移的 when（上面已断言）
+  assert.match(server, /information_schema\.tables/);
+  assert.ok(server.includes("coreTables"), "/ready 应检查核心表存在");
+  assert.ok(
+    server.includes("MIN_READY_MIGRATION_CREATED_AT"),
+    "/ready 应使用迁移时间戳门槛覆盖 v0.6 新表",
+  );
 });

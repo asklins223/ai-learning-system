@@ -8,7 +8,7 @@ export const jobs = pgTable(
   "jobs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    type: text("type").notNull(), // generate_card | align_evidence | evaluate_validation | parse_source
+    type: text("type").notNull(), // execute_card_agent_turn | align_evidence | evaluate_validation | parse_source | generate_validation_question
     workspaceId: uuid("workspace_id").notNull(),
     // SEC-01: trusted actor attribution. Legacy rows may remain null until a
     // membership-validated backfill or explicit quarantine decision is made.
@@ -44,8 +44,5 @@ export const jobs = pgTable(
     idempotencyUniqueIdx: uniqueIndex("jobs_workspace_idempotency_unique_idx")
       .on(t.workspaceId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
-    generateCardActiveUniqueIdx: uniqueIndex("jobs_generate_card_active_unique_idx")
-      .on(t.workspaceId, sql`(${t.payload}->>'noteVersionId')`)
-      .where(sql`${t.type} = 'generate_card' AND ${t.status} IN ('pending', 'running') AND ${t.payload}->>'noteVersionId' IS NOT NULL`),
   }),
 );

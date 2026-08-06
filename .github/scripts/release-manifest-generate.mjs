@@ -595,7 +595,7 @@ if (rcMode) {
             "Container scanning not configured",
           ),
     },
-    // AIQ: placeholder — actual metrics filled by rc-gate CLI run
+    // AIQ: placeholder — actual metrics filled by supervisor-rc-gate CLI run
     aiQuality: {
       status: "not_run",
       datasetVersion: null,
@@ -666,7 +666,7 @@ if (rcMode) {
   }
   if (rcManifest.aiQuality.status !== "passed") {
     console.log("[release-manifest] 注意: aiQuality 为占位符，");
-    console.log("[release-manifest]       需由 rc-gate CLI 运行真实 Provider 后填充。");
+    console.log("[release-manifest]       需由 supervisor-rc-gate CLI 运行真实 Provider 后填充。");
   }
   process.exit(0);
 }

@@ -1,10 +1,17 @@
 import { createHash } from "node:crypto";
-import { CARD_MAP_SYSTEM_PROMPT } from "@ailearn/shared/prompts";
 import {
   CARD_GENERATION_MAX_BLOCKS,
   CARD_GENERATION_MAX_IMAGES,
   CARD_GENERATION_MAX_SOURCE_CHARS,
 } from "@ailearn/shared";
+
+/**
+ * Conservative token estimate for the system prompt overhead in the map
+ * input budget. The old CARD_MAP_SYSTEM_PROMPT was removed with the
+ * Pipeline V2 engine; this constant preserves the budget arithmetic
+ * without depending on a deleted prompt.
+ */
+const MAP_PROMPT_TOKEN_ESTIMATE = 2000;
 
 export const SOURCE_PLANNER_VERSION = "source-unit-planner-v1";
 export const MAX_GENERATION_SOURCE_CHARS = CARD_GENERATION_MAX_SOURCE_CHARS;
@@ -41,11 +48,17 @@ export type PlannedMapChunk = {
   sectionKeys: string[];
 };
 
+export type ImageSectionPath = {
+  blockId: string;
+  sectionPath: string[];
+};
+
 export type SourcePlan = {
   plannerVersion: string;
   spans: PlannedSourceSpan[];
   chunks: PlannedMapChunk[];
   imageBlockIds: string[];
+  imageSectionPaths: ImageSectionPath[];
   totalSourceChars: number;
   totalTokenEstimate: number;
   mapInputBudgetTokens: number;
@@ -94,7 +107,7 @@ export function resolveProviderCapability(
     maxSourceUnitTokens: 1_500,
   };
   const capability = { ...defaults, ...override };
-  const promptTokens = estimateTokens(CARD_MAP_SYSTEM_PROMPT);
+  const promptTokens = MAP_PROMPT_TOKEN_ESTIMATE;
   const available = capability.contextWindowTokens
     - promptTokens
     - capability.reservedOutputTokens
@@ -133,6 +146,22 @@ function sourceKind(type: string): SourceUnitKind {
   if (type === "code") return "code";
   if (type === "list") return "list";
   return "text";
+}
+
+/**
+ * Detect decorative section markers like ────Title──── or ----Title----.
+ * Returns the extracted title, or null if the content is not a section marker.
+ * These patterns are common in Chinese long-form articles where sections
+ * are delimited by decorative line characters instead of markdown headings.
+ */
+function detectSectionMarker(content: string): string | null {
+  const match = /^\s*([\u2500\u2501\u2550\-=_*~]{2,})\s*(.+?)\s*([\u2500\u2501\u2550\-=_*~]{2,})\s*$/.exec(content);
+  if (!match) return null;
+  const title = match[2].trim();
+  if (title.length === 0 || title.length > 200) return null;
+  // Reject if the "title" is itself just decorative characters
+  if (/^[\u2500\u2501\u2550\-=_*~\s]+$/.test(title)) return null;
+  return title;
 }
 
 function headingInfo(content: string): { level: number; title: string } {
@@ -313,7 +342,7 @@ export function planSourceUnits(
   }
 
   const capability = resolveProviderCapability(capabilityOverride);
-  const promptTokens = estimateTokens(CARD_MAP_SYSTEM_PROMPT);
+  const promptTokens = MAP_PROMPT_TOKEN_ESTIMATE;
   const mapInputBudgetTokens = capability.contextWindowTokens
     - promptTokens
     - capability.reservedOutputTokens
@@ -321,9 +350,25 @@ export function planSourceUnits(
     - capability.safetyMarginTokens;
   const sectionPath: string[] = [];
   const spans: PlannedSourceSpan[] = [];
+  const imageSectionPaths: ImageSectionPath[] = [];
 
   for (const block of blocks) {
-    if (block.type === "image") continue;
+    if (block.type === "image") {
+      // Record the current sectionPath so image evidence can be attributed
+      // to the same section as the surrounding text, instead of a hardcoded
+      // "图片" pseudo-section that produces dozens of duplicate cards.
+      imageSectionPaths.push({ blockId: block.id, sectionPath: [...sectionPath] });
+      continue;
+    }
+    // Detect decorative section markers like ────Title──── in paragraph blocks.
+    // These are common in Chinese long-form articles and act as level-1 headings.
+    if (block.type === "paragraph") {
+      const marker = detectSectionMarker(block.content);
+      if (marker) {
+        sectionPath.splice(1);
+        sectionPath[0] = marker;
+      }
+    }
     if (block.type === "heading") {
       const heading = headingInfo(block.content);
       sectionPath.splice(heading.level - 1);
@@ -380,10 +425,12 @@ export function planSourceUnits(
     pending = [];
     pendingTokens = 0;
   };
-  // cardMapInputSchema 限制每个 map chunk 最多 200 个 evidence units；
-  // 只按 token 预算切块时，大量短块（大纲/闪卡式笔记）会塞进单个 chunk，
-  // loadMapMaterial 的 schema parse 在任何 provider 调用前必然失败且不可恢复。
-  const MAX_CHUNK_UNITS = 200;
+  // The provider contract allows 200 evidence units, but asking the model to
+  // echo a coverage decision for that many short units produces very large
+  // JSON and materially increases truncation/schema failures. Keep each
+  // request below the schema ceiling while preserving the same exact source
+  // coverage across chunks.
+  const MAX_CHUNK_UNITS = 50;
   for (const span of spans) {
     if (
       pending.length > 0
@@ -402,6 +449,7 @@ export function planSourceUnits(
     spans,
     chunks,
     imageBlockIds,
+    imageSectionPaths,
     totalSourceChars,
     totalTokenEstimate: spans.reduce((total, span) => total + span.tokenEstimate, 0),
     mapInputBudgetTokens,

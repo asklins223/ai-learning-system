@@ -15,10 +15,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)",
-    "pr-gate": "node --import tsx src/cli/pr-gate.ts",
-    "rc-gate": "node --import tsx src/cli/rc-gate.ts",
-    "rc-smoke": "node --import tsx src/cli/rc-smoke.ts",
-    "rc-dry-run": "node --import tsx src/cli/rc-dry-run.ts"
+    "pr-gate": "node --import tsx src/cli/pr-gate.ts"
   },
   "dependencies": {
     "@ailearn/shared": "file:../shared",

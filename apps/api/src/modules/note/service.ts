@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, isNotNull, or, sql, type Column } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "../../db/schema/note.ts";
@@ -8,6 +8,43 @@ import { aiArtifacts } from "../../db/schema/ai.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
 import { logger } from "../../lib/logger.ts";
+
+/**
+ * PERF-10: Chunked delete helper for large IN arrays.
+ *
+ * PostgreSQL's IN clause degrades when parameter count exceeds ~1000.
+ * This helper splits large ID arrays into batches and deletes them
+ * sequentially within the same transaction.
+ */
+async function chunkedInArrayDelete(
+  tx: ApiTransaction,
+  table: Parameters<typeof tx.delete>[0],
+  column: Column,
+  ids: string[],
+  chunkSize = 500,
+): Promise<void> {
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    await tx.delete(table).where(inArray(column, chunk));
+  }
+}
+
+/**
+ * PERF-10: Chunked select helper for large IN arrays.
+ * Returns combined results from multiple batched queries.
+ */
+async function chunkedInArraySelect<T>(
+  queryFn: (chunk: string[]) => Promise<T[]>,
+  ids: string[],
+  chunkSize = 500,
+): Promise<T[]> {
+  const results: T[] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    results.push(...await queryFn(chunk));
+  }
+  return results;
+}
 import { CardStatus, ReviewStatus } from "@ailearn/shared";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
@@ -53,11 +90,40 @@ function pgJsonbSerialize(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return "null";
-    return Number.isInteger(value) ? String(value) : String(value);
+    // BUG-01 fix: PostgreSQL jsonb::text never uses exponential notation.
+    // JavaScript's String() uses exponential notation for |value| >= 1e21
+    // or |value| < 1e-6, which would cause md5(content_json::text) to
+    // differ from computeContentHash. Convert exponential to fixed-point.
+    // BUG-04 修复：toFixed(20) 对极大/极小数字仍会丢失精度。
+    // 对于指数格式，使用 BigInt 精确转换（当数字为整数时），
+    // 否则使用 toPrecision 并去除尾部零。非指数格式直接使用 String()。
+    const str = String(value);
+    if (/[eE]/.test(str)) {
+      // 对于指数表示的数字，尝试使用更高精度转换
+      // PostgreSQL jsonb::text 使用 shortest round-trip representation
+      // 对于非整数的指数表示，使用 toPrecision(21) 然后去除尾部零
+      if (Number.isInteger(value)) {
+        // 整数使用 BigInt 精确表示
+        try {
+          return BigInt(value).toString();
+        } catch {
+          // 超出 BigInt 安全范围时回退到 toFixed
+          const fixed = value.toFixed(20).replace(/0+$/, "").replace(/\.$/, "");
+          return fixed || "0";
+        }
+      }
+      const fixed = value.toPrecision(21).replace(/0+$/, "").replace(/\.$/, "");
+      return fixed || "0";
+    }
+    return str;
   }
   if (typeof value === "boolean") return value ? "true" : "false";
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
+    // BUG-12: Each element is recursively serialized, so NaN/Infinity
+    // inside arrays becomes "null" — matching PostgreSQL's jsonb behaviour
+    // where NaN is never stored (it is silently converted to null on
+    // input). This ensures md5(content_json::text) stays consistent.
     return "[" + value.map(pgJsonbSerialize).join(", ") + "]";
   }
   if (typeof value === "object") {
@@ -126,7 +192,7 @@ export async function resolveImageAssetIds<T extends { type: string; content: st
  * Ensure every image block with a /api/uploads/ object key has a registered
  * note_image_assets record. Images imported from sources (URL ingestion,
  * markdown import) are already in MinIO but lack the immutable asset row that
- * card generation v2 requires. This function downloads those images, computes
+ * card generation requires. This function downloads those images, computes
  * their SHA-256, validates magic bytes, reads dimensions, and inserts the
  * missing asset rows, then delegates to resolveImageAssetIds to link the
  * blocks to their asset IDs.
@@ -174,9 +240,24 @@ export async function ensureImageAssetsForBlocks<T extends { type: string; conte
     return resolveImageAssetIds(tx, workspaceId, blocks);
   }
 
+  // BUG-01 fix: 逐个处理图片资产，避免多张图片 Buffer 同时驻留内存导致 OOM。
+  // 每次迭代：加载 → 校验 → 计算 → 插入 → 释放，确保同一时刻最多一张图片在内存中。
+  // 添加 20MB 大小限制，防止异常大图片拖垮进程。
+  const MAX_IMAGE_BUFFER_BYTES = 20 * 1024 * 1024; // 20MB
   for (const objectKey of missingKeys) {
+    let body: Buffer | null = null;
     try {
-      const { body, contentType } = await getObject(objectKey);
+      const result = await getObject(objectKey);
+      body = result.body;
+      // 防御：跳过异常大图片，避免单张图片耗尽内存
+      if (body.length > MAX_IMAGE_BUFFER_BYTES) {
+        logger.warn(
+          { objectKey, byteSize: body.length, maxAllowed: MAX_IMAGE_BUFFER_BYTES },
+          "source-imported image exceeds size limit, skipping asset registration",
+        );
+        continue;
+      }
+      const contentType = result.contentType;
       if (!validateImageMagicBytes(body, contentType)) {
         logger.warn({ objectKey, contentType }, "source-imported image failed magic bytes validation");
         continue;
@@ -187,6 +268,9 @@ export async function ensureImageAssetsForBlocks<T extends { type: string; conte
         continue;
       }
       const sha256 = createHash("sha256").update(body).digest("hex");
+      const byteSize = body.length;
+      // 在 DB 插入前释放 Buffer 引用，让 V8 可尽早回收
+      body = null;
       await tx
         .insert(noteImageAssets)
         .values({
@@ -195,7 +279,7 @@ export async function ensureImageAssetsForBlocks<T extends { type: string; conte
           objectKey,
           sha256,
           mimeType: contentType,
-          byteSize: body.length,
+          byteSize,
           width: dimensions.width,
           height: dimensions.height,
           status: "ready",
@@ -340,8 +424,16 @@ type NoteSearchDocument = {
 };
 
 /**
- * Keep projection failures non-fatal without escaping the request transaction.
- * Drizzle maps this nested transaction to a savepoint on the same connection.
+ * 搜索投影写入（savepoint 隔离）。
+ *
+ * ARCH-01 设计权衡说明：
+ * 搜索投影写入失败时不中断主事务（savepoint 回滚仅影响投影部分），
+ * 这意味着搜索索引可能短暂与业务数据不一致。
+ * 补偿机制：
+ * 1. 投影失败时记录 error 日志，提示运维运行 reindex
+ * 2. /search/drift 端点可检测不一致（ghosts / missing / staleTitles / staleBodies）
+ * 3. /search/reindex 端点可全量重建工作区搜索索引
+ * 此设计避免了搜索索引故障阻塞核心业务写入，代价是需要运维定期检查 drift。
  */
 async function upsertSearchDocument(
   executor: ApiTransaction,
@@ -409,6 +501,63 @@ async function deleteSearchDocuments(
 
 /* ----------------------------- service --------------------------------- */
 
+/**
+ * QUAL-03 修复：提取命名函数替代 IIFE 模式。
+ * 原 (async (tx: ApiTransaction) => { ... })(executor) 模式误导读者
+ * 以为创建了新事务上下文，实际 executor 即外部事务执行器。
+ */
+async function createNoteTx(
+  tx: ApiTransaction,
+  workspaceId: string,
+  userId: string,
+  title: string,
+  titleWasProvided: boolean,
+  sanitizedBlocks: ReturnType<typeof stripUploadingPlaceholders>,
+): Promise<typeof notes.$inferSelect> {
+  const [row] = await tx
+    .insert(notes)
+    .values({
+      workspaceId,
+      title,
+      titleSource: titleWasProvided ? "manual" : "auto",
+      createdBy: userId,
+    })
+    .returning();
+
+  const [version] = await tx
+    .insert(noteVersions)
+    .values({
+      noteId: row.id,
+      workspaceId,
+      versionNo: 1,
+      contentJson: { blocks: sanitizedBlocks },
+      contentHash: computeContentHash({ blocks: sanitizedBlocks }),
+      createdBy: userId,
+    })
+    .returning();
+
+  if (sanitizedBlocks.length) {
+    const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
+    await tx.insert(noteBlocks).values(
+      blocksWithAssets.map((b, idx) => ({
+        versionId: version.id,
+        workspaceId,
+        ordinal: idx,
+        type: b.type,
+        content: b.content,
+        imageAssetId: b.imageAssetId,
+      })),
+    );
+  }
+
+  await tx
+    .update(notes)
+    .set({ currentVersionId: version.id, updatedAt: new Date() })
+    .where(eq(notes.id, row.id));
+
+  return row;
+}
+
 export async function createNote(
   executor: ApiTransaction,
   workspaceId: string,
@@ -421,50 +570,8 @@ export async function createNote(
   const titleWasProvided = Boolean(input.title?.trim());
   const title = titleWasProvided ? input.title.trim().slice(0, 200) : deriveNoteTitle(sanitizedBlocks);
 
-  const note = await (async (tx: ApiTransaction) => {
-    const [row] = await tx
-      .insert(notes)
-      .values({
-        workspaceId,
-        title,
-        titleSource: titleWasProvided ? "manual" : "auto",
-        createdBy: userId,
-      })
-      .returning();
-
-    const [version] = await tx
-      .insert(noteVersions)
-      .values({
-        noteId: row.id,
-        workspaceId,
-        versionNo: 1,
-        contentJson: { blocks: sanitizedBlocks },
-        contentHash: computeContentHash({ blocks: sanitizedBlocks }),
-        createdBy: userId,
-      })
-      .returning();
-
-    if (sanitizedBlocks.length) {
-      const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
-      await tx.insert(noteBlocks).values(
-        blocksWithAssets.map((b, idx) => ({
-          versionId: version.id,
-          workspaceId,
-          ordinal: idx,
-          type: b.type,
-          content: b.content,
-          imageAssetId: b.imageAssetId,
-        })),
-      );
-    }
-
-    await tx
-      .update(notes)
-      .set({ currentVersionId: version.id, updatedAt: new Date() })
-      .where(eq(notes.id, row.id));
-
-    return row;
-  })(executor);
+  // QUAL-03 修复：移除 IIFE 模式，executor 即事务执行器，无需额外包装
+  const note = await createNoteTx(executor, workspaceId, userId, title, titleWasProvided, sanitizedBlocks);
 
   // 同步搜索索引（note_version 创建时）
   const result = await getNoteWithVersion(executor, note.id, workspaceId);
@@ -511,33 +618,42 @@ export async function listNotes(
     }
   }
 
-  const rows = await executor
-    .select({
-      id: notes.id,
-      title: notes.title,
-      titleSource: notes.titleSource,
-      createdAt: notes.createdAt,
-      updatedAt: notes.updatedAt,
-      deletedAt: notes.deletedAt,
-      currentVersionId: notes.currentVersionId,
-      workspaceId: notes.workspaceId,
-      createdBy: notes.createdBy,
-      cursorTimestamp: sql<string>`to_char(${notes.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
-    })
-    .from(notes)
-    .where(and(...conditions))
-    .orderBy(desc(notes.updatedAt), desc(notes.id))
-    .limit(limit + 1);
+  // PERF-07 fix: Run page query and count query in parallel since they are independent.
+  // The total reflects the global count (ignoring cursor), which is semantically
+  // correct for cursor pagination. In high-concurrency write scenarios the total
+  // may differ slightly from the actual page contents, but this is an inherent
+  // trade-off of cursor pagination and acceptable for note lists.
+  const countConditions = and(
+    eq(notes.workspaceId, workspaceId),
+    opts?.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt),
+  );
+
+  const [rows, countRows] = await Promise.all([
+    executor
+      .select({
+        id: notes.id,
+        title: notes.title,
+        titleSource: notes.titleSource,
+        createdAt: notes.createdAt,
+        updatedAt: notes.updatedAt,
+        deletedAt: notes.deletedAt,
+        currentVersionId: notes.currentVersionId,
+        workspaceId: notes.workspaceId,
+        createdBy: notes.createdBy,
+        cursorTimestamp: sql<string>`to_char(${notes.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
+      .from(notes)
+      .where(and(...conditions))
+      .orderBy(desc(notes.updatedAt), desc(notes.id))
+      .limit(limit + 1),
+    executor
+      .select({ count: sql<number>`count(*)::int` })
+      .from(notes)
+      .where(countConditions),
+  ]);
 
   const hasMore = rows.length > limit;
   const pageRows = rows.slice(0, limit);
-
-  // R-019: 服务端返回实际总数，不再依赖前端已加载数量
-  // CONC-03: count 也需随 trashed 切换条件，否则回收站 total 不正确
-  const countRows = await executor
-    .select({ count: sql<number>`count(*)::int` })
-    .from(notes)
-    .where(and(eq(notes.workspaceId, workspaceId), opts?.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt)));
   const total = countRows[0]?.count ?? 0;
 
   // R-019: 使用最后一条记录的 (updatedAt, id) 作为下一页 cursor
@@ -599,7 +715,8 @@ export async function updateNote(
   input: NoteUpdateInput,
 ) {
   // P1-4: 业务写入和搜索投影共享 handler 事务；投影自身以 savepoint 隔离失败。
-  const result = await (async (tx: ApiTransaction) => {
+  // QUAL-03 修复：移除 IIFE 模式，executor 即事务执行器，无需额外包装
+  const tx = executor;
     // R-008: 使用 FOR UPDATE 锁定 note 行，防止并发版本号冲突
     // CONC-03: 只锁定未软删除的笔记
     const noteRows = await tx
@@ -851,8 +968,7 @@ export async function updateNote(
       where: eq(noteBlocks.versionId, uNote.currentVersionId),
       orderBy: (b, { asc: a1 }) => [a1(b.ordinal)],
     });
-    return { note: uNote, version: uVer, blocks: uBlocks as NoteBlock[] };
-  })(executor);
+    const result = { note: uNote, version: uVer, blocks: uBlocks as NoteBlock[] };
 
   // R-017: 即使只改标题也更新搜索投影（标题投影不会持续过期）。
   if (result) {
@@ -981,7 +1097,8 @@ export async function restoreDeletedNote(
   noteId: string,
   workspaceId: string,
 ) {
-  const result = await (async (tx: ApiTransaction) => {
+  // QUAL-03 修复：移除 IIFE 模式，executor 即事务执行器，无需额外包装
+  const tx = executor;
     // FOR UPDATE 锁定 note 行（包括已软删除的）
     const noteRows = await tx
       .select()
@@ -1046,6 +1163,16 @@ export async function restoreDeletedNote(
         // CONC-10: 用 updatedAt = note.deletedAt 精确匹配被 deleteNote
         // 取消的计划（deleteNote 取消时将 updatedAt 设为 deletedAt），
         // 避免误恢复用户在笔记删除前就已手动取消的计划。
+        //
+        // SEC-01 说明：此处使用 updatedAt 时间戳匹配恢复范围，存在极端竞态窗口。
+        // 卡片恢复已通过专用标记列 archivedByNoteDeletionAt 精确匹配（见上方），
+        // 但复习计划仍依赖 updatedAt 精确匹配 deletedAt。
+        // 风险：如果 deleteNote 和 restoreDeletedNote 之间的时间精度不一致
+        //（PostgreSQL timestamptz 微秒精度 vs JS Date 毫秒精度），可能导致匹配失败。
+        // 缓解措施：deleteNote 在同一事务内设置 deletedAt 和 updatedAt，
+        // 使用相同的 Date 对象，确保时间戳一致。实际竞态概率极低。
+        // 建议改进：未来为 reviewSchedules 添加专用标记列（如 cancelledByNoteDeletionAt），
+        // 彻底消除时间戳匹配的竞态风险。
         await tx
           .update(reviewSchedules)
           .set({ status: ReviewStatus.PENDING, updatedAt: new Date() })
@@ -1073,13 +1200,12 @@ export async function restoreDeletedNote(
       orderBy: (b, { asc }) => [asc(b.ordinal)],
     });
 
-    return {
+    const result = {
       note: { ...note, deletedAt: null },
       version,
       blocks: blocks as NoteBlock[],
       restoredCards,
     };
-  })(executor);
 
   // 恢复后重建搜索索引
   if (result?.version) {
@@ -1097,11 +1223,22 @@ export async function restoreDeletedNote(
   }
 
   // 重建被恢复卡片的搜索索引（deleteNote 清理了卡片搜索文档）
+  // BUG-02 fix: Batch query keyPoints for all restored cards instead of N+1 queries.
   if (result?.restoredCards?.length) {
+    const cardIds = result.restoredCards.map((c) => c.id);
+    // Batch query all keyPoints for restored cards in one query
+    const allKeyPoints = await executor.query.cardKeyPoints.findMany({
+      where: inArray(cardKeyPoints.cardId, cardIds),
+    });
+    // Group keyPoints by cardId
+    const keyPointsByCard = new Map<string, typeof allKeyPoints>();
+    for (const kp of allKeyPoints) {
+      const list = keyPointsByCard.get(kp.cardId) ?? [];
+      list.push(kp);
+      keyPointsByCard.set(kp.cardId, list);
+    }
     for (const card of result.restoredCards) {
-      const keyPoints = await executor.query.cardKeyPoints.findMany({
-        where: eq(cardKeyPoints.cardId, card.id),
-      });
+      const keyPoints = keyPointsByCard.get(card.id) ?? [];
       const cardBody = [
         card.schemaJson.summary,
         ...keyPoints.map((kp) => kp.claim),
@@ -1131,6 +1268,38 @@ export async function restoreDeletedNote(
  *   用于 benchmark 清理等需要强制删除 active 笔记的场景。正常定时任务和
  *   管理员手动触发不传此参数，保持 CONC-07 的安全检查。
  */
+
+/**
+ * QUAL-03 修复：提取命名函数替代 IIFE 模式。
+ * 级联删除卡片关联的 AI artifacts（包括卡片 artifact 和验证 artifact）。
+ * 使用分块查询和分块删除避免大数组 IN 子句性能退化。
+ *
+ * @param tx 事务执行器
+ * @param cardIds 待删除卡片关联的 card IDs
+ * @param validationArtifactIds 验证事件关联的 artifact IDs
+ */
+async function deleteCardArtifactsCascade(
+  tx: ApiTransaction,
+  cardIds: string[],
+  validationArtifactIds: string[],
+): Promise<void> {
+  // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
+  const cardRowsForArtifacts = await chunkedInArraySelect<{ artifactId: string | null }>(
+    (chunk) => tx.select({ artifactId: learningCards.artifactId })
+      .from(learningCards)
+      .where(inArray(learningCards.id, chunk)),
+    cardIds,
+  );
+  const cardArtifactIds = cardRowsForArtifacts
+    .map((c) => c.artifactId)
+    .filter((id): id is string => id !== null);
+  const allArtifactIds = [...cardArtifactIds, ...validationArtifactIds];
+  if (allArtifactIds.length > 0) {
+    // PERF-10 补漏: 使用分块删除避免大数组 IN 子句性能退化
+    await chunkedInArrayDelete(tx, aiArtifacts, aiArtifacts.id, allArtifactIds);
+  }
+}
+
 export async function physicalDeleteNote(
   executor: ApiTransaction,
   noteId: string,
@@ -1151,7 +1320,11 @@ export async function physicalDeleteNote(
   // （用于 benchmark 清理等需要强制删除的场景）。
   if (!options?.force && !noteRows[0].deletedAt) return null;
 
-  const cleanupIds = await (async (tx: ApiTransaction) => {
+  // QUAL-10 fix: Replaced IIFE pattern with a named function for clarity.
+  // The previous `(async (tx) => { ... })(executor)` pattern was misleading
+  // because it implied a new transaction context, but `executor` was already
+  // the active transaction. Named function makes the intent explicit.
+  const collectAndDeleteCascade = async (tx: ApiTransaction) => {
     // 1. 查出所有关联的 note_version IDs
     const versionRows = await tx
       .select({ id: noteVersions.id })
@@ -1159,154 +1332,165 @@ export async function physicalDeleteNote(
       .where(eq(noteVersions.noteId, noteId));
     const versionIds = versionRows.map((v) => v.id);
 
+    // QUAL-11 fix: Parallelize independent ID collection queries.
+    // Steps 2-5 were previously serial, but 3 (kpIds) depends on 2 (cardIds),
+    // and 5 (veIds) also depends on 2 (cardIds). However, 2 itself can run
+    // concurrently with nothing else (it depends on 1). Steps 3 and 5 can
+    // run in parallel once cardIds is known, and step 4 depends on 3.
     // 2. 查出所有关联的 card IDs
+    // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
     let cardIds: string[] = [];
     if (versionIds.length > 0) {
-      const cardRows = await tx
-        .select({ id: learningCards.id })
-        .from(learningCards)
-        .where(inArray(learningCards.noteVersionId, versionIds));
+      const cardRows = await chunkedInArraySelect<{ id: string }>(
+        (chunk) => tx.select({ id: learningCards.id })
+          .from(learningCards)
+          .where(inArray(learningCards.noteVersionId, chunk)),
+        versionIds,
+      );
       cardIds = cardRows.map((c) => c.id);
     }
 
-    // 3. 查出所有关联的 keyPoint IDs
-    let kpIds: string[] = [];
-    if (cardIds.length > 0) {
-      const kpRows = await tx
-        .select({ id: cardKeyPoints.id })
-        .from(cardKeyPoints)
-        .where(inArray(cardKeyPoints.cardId, cardIds));
-      kpIds = kpRows.map((k) => k.id);
-    }
+    // 3 & 5: kpIds depends on cardIds, veIds also depends on cardIds — run in parallel.
+    // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
+    const [kpRowsResult, veRowsResult] = await Promise.all([
+      cardIds.length > 0
+        ? chunkedInArraySelect<{ id: string }>(
+            (chunk) => tx.select({ id: cardKeyPoints.id }).from(cardKeyPoints).where(inArray(cardKeyPoints.cardId, chunk)),
+            cardIds,
+          )
+        : Promise.resolve([] as { id: string }[]),
+      cardIds.length > 0
+        ? chunkedInArraySelect<{ id: string }>(
+            (chunk) => tx.select({ id: validationEvents.id }).from(validationEvents).where(inArray(validationEvents.cardId, chunk)),
+            cardIds,
+          )
+        : Promise.resolve([] as { id: string }[]),
+    ]);
+    const kpIds = kpRowsResult.map((k) => k.id);
+    const veIds = veRowsResult.map((v) => v.id);
 
     // 4. 查出所有关联的 evidence IDs（用于搜索索引清理）
+    // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
     let evidenceIds: string[] = [];
     if (kpIds.length > 0) {
-      const evRows = await tx
-        .select({ id: evidences.id })
-        .from(evidences)
-        .where(inArray(evidences.keyPointId, kpIds));
+      const evRows = await chunkedInArraySelect<{ id: string }>(
+        (chunk) => tx.select({ id: evidences.id })
+          .from(evidences)
+          .where(inArray(evidences.keyPointId, chunk)),
+        kpIds,
+      );
       evidenceIds = evRows.map((e) => e.id);
     }
 
-    // 5. 查出所有关联的 validation_event IDs
-    let veIds: string[] = [];
-    if (cardIds.length > 0) {
-      const veRows = await tx
-        .select({ id: validationEvents.id })
-        .from(validationEvents)
-        .where(inArray(validationEvents.cardId, cardIds));
-      veIds = veRows.map((v) => v.id);
-    }
+    // QUAL-11 优化：合并同表删除操作并并行执行，减少数据库往返次数。
+    // 步骤 6-8、10 互不依赖，使用 Promise.all 并行执行；
+    // 步骤 7、8 的 veIds 和 cardIds 条件合并为单次 OR 查询。
 
-    // 6. 删除 evidences（通过 keyPointId 关联）
-    if (kpIds.length > 0) {
-      await tx.delete(evidences).where(inArray(evidences.keyPointId, kpIds));
-    }
-
-    // 7. 删除 understanding_events
+    // 7+8: 构建合并的 understanding_events 和 review_schedules 删除条件
+    const understandingConditions: ReturnType<typeof and>[] = [];
     if (veIds.length > 0) {
-      await tx
-        .delete(understandingEvents)
-        .where(
-          and(
-            eq(understandingEvents.subjectType, "validation"),
-            inArray(understandingEvents.subjectId, veIds),
-          ),
-        );
+      understandingConditions.push(and(
+        eq(understandingEvents.subjectType, "validation"),
+        inArray(understandingEvents.subjectId, veIds),
+      ) as ReturnType<typeof and>);
     }
     if (cardIds.length > 0) {
-      await tx
-        .delete(understandingEvents)
-        .where(
-          and(
-            eq(understandingEvents.subjectType, "card"),
-            inArray(understandingEvents.subjectId, cardIds),
-          ),
-        );
+      understandingConditions.push(and(
+        eq(understandingEvents.subjectType, "card"),
+        inArray(understandingEvents.subjectId, cardIds),
+      ) as ReturnType<typeof and>);
     }
-
-    // 8. 删除 review_schedules
+    const reviewConditions: ReturnType<typeof and>[] = [];
     if (veIds.length > 0) {
-      await tx
-        .delete(reviewSchedules)
-        .where(
-          and(
-            eq(reviewSchedules.subjectType, "validation"),
-            inArray(reviewSchedules.subjectId, veIds),
-          ),
-        );
+      reviewConditions.push(and(
+        eq(reviewSchedules.subjectType, "validation"),
+        inArray(reviewSchedules.subjectId, veIds),
+      ) as ReturnType<typeof and>);
     }
     if (cardIds.length > 0) {
-      await tx
-        .delete(reviewSchedules)
-        .where(
-          and(
-            eq(reviewSchedules.subjectType, "card"),
-            inArray(reviewSchedules.subjectId, cardIds),
-          ),
-        );
+      reviewConditions.push(and(
+        eq(reviewSchedules.subjectType, "card"),
+        inArray(reviewSchedules.subjectId, cardIds),
+      ) as ReturnType<typeof and>);
     }
 
-    // 9. 删除 validation_events
+    // 6+7+8+10: 并行执行不依赖彼此结果的删除操作
+    await Promise.all([
+      // 6. 删除 evidences（通过 keyPointId 关联）
+      // PERF-10: 使用分块删除避免大数组 IN 子句性能退化
+      kpIds.length > 0
+        ? chunkedInArrayDelete(tx, evidences, evidences.keyPointId, kpIds)
+        : Promise.resolve(),
+      // 7. 删除 understanding_events（合并 veIds 和 cardIds 条件为单次查询）
+      understandingConditions.length > 0
+        ? tx.delete(understandingEvents).where(or(...understandingConditions))
+        : Promise.resolve(),
+      // 8. 删除 review_schedules（合并 veIds 和 cardIds 条件为单次查询）
+      reviewConditions.length > 0
+        ? tx.delete(reviewSchedules).where(or(...reviewConditions))
+        : Promise.resolve(),
+      // 10. 删除 card_key_points
+      // PERF-10: 使用分块删除避免大数组 IN 子句性能退化
+      cardIds.length > 0
+        ? chunkedInArrayDelete(tx, cardKeyPoints, cardKeyPoints.cardId, cardIds)
+        : Promise.resolve(),
+    ]);
+
+    // 9. 删除 validation_events（需先收集 artifactIds 供步骤 11 使用）
     let validationArtifactIds: string[] = [];
     if (cardIds.length > 0) {
-      const veArtifactRows = await tx
-        .select({ artifactId: validationEvents.artifactId })
-        .from(validationEvents)
-        .where(inArray(validationEvents.cardId, cardIds));
+      // PERF-10: 使用分块查询/删除避免大数组 IN 子句性能退化
+      const veArtifactRows = await chunkedInArraySelect<{ artifactId: string | null }>(
+        (chunk) => tx.select({ artifactId: validationEvents.artifactId })
+          .from(validationEvents)
+          .where(inArray(validationEvents.cardId, chunk)),
+        cardIds,
+      );
       validationArtifactIds = veArtifactRows
         .map((v) => v.artifactId)
         .filter((id): id is string => id !== null);
-      await tx.delete(validationEvents).where(inArray(validationEvents.cardId, cardIds));
+      await chunkedInArrayDelete(tx, validationEvents, validationEvents.cardId, cardIds);
     }
 
-    // 10. 删除 card_key_points
+    // 11+12: 并行执行 ai_artifacts 删除（依赖步骤 9 结果）和 jobs 删除（独立）
+    // 12. 合并三组 jobs 删除条件为单次 OR 查询，减少数据库往返
+    const jobPayloadConditions: ReturnType<typeof or>[] = [];
     if (cardIds.length > 0) {
-      await tx.delete(cardKeyPoints).where(inArray(cardKeyPoints.cardId, cardIds));
-    }
-
-    // 11. 删除 ai_artifacts
-    if (cardIds.length > 0) {
-      const cardRowsForArtifacts = await tx
-        .select({ artifactId: learningCards.artifactId })
-        .from(learningCards)
-        .where(inArray(learningCards.id, cardIds));
-      const cardArtifactIds = cardRowsForArtifacts
-        .map((c) => c.artifactId)
-        .filter((id): id is string => id !== null);
-      const allArtifactIds = [...cardArtifactIds, ...validationArtifactIds];
-      if (allArtifactIds.length > 0) {
-        await tx.delete(aiArtifacts).where(inArray(aiArtifacts.id, allArtifactIds));
-      }
-    }
-
-    // 12. 删除关联的 jobs
-    if (cardIds.length > 0) {
-      await tx.delete(jobs).where(and(
-        eq(jobs.workspaceId, workspaceId),
-        or(
-          inArray(sql<string>`${jobs.payload}->>'cardId'`, cardIds),
-          inArray(sql<string>`${jobs.payload}->>'oldCardId'`, cardIds),
-        ),
-      ));
+      jobPayloadConditions.push(or(
+        inArray(sql<string>`${jobs.payload}->>'cardId'`, cardIds),
+        inArray(sql<string>`${jobs.payload}->>'oldCardId'`, cardIds),
+      ) as ReturnType<typeof or>);
     }
     if (versionIds.length > 0) {
-      await tx.delete(jobs).where(and(
-        eq(jobs.workspaceId, workspaceId),
-        inArray(sql<string>`${jobs.payload}->>'noteVersionId'`, versionIds),
-      ));
+      jobPayloadConditions.push(
+        inArray(sql<string>`${jobs.payload}->>'noteVersionId'`, versionIds) as ReturnType<typeof or>,
+      );
     }
     if (kpIds.length > 0) {
-      await tx.delete(jobs).where(and(
-        eq(jobs.workspaceId, workspaceId),
-        inArray(sql<string>`${jobs.payload}->>'keyPointId'`, kpIds),
-      ));
+      jobPayloadConditions.push(
+        inArray(sql<string>`${jobs.payload}->>'keyPointId'`, kpIds) as ReturnType<typeof or>,
+      );
     }
 
+    await Promise.all([
+      // 11. 删除 ai_artifacts（依赖步骤 9 收集的 validationArtifactIds）
+      // QUAL-03 修复：提取命名函数替代 IIFE 模式，提高可读性
+      cardIds.length > 0
+        ? deleteCardArtifactsCascade(tx, cardIds, validationArtifactIds)
+        : Promise.resolve(),
+      // 12. 删除关联的 jobs（合并三组条件为单次查询）
+      jobPayloadConditions.length > 0
+        ? tx.delete(jobs).where(and(
+            eq(jobs.workspaceId, workspaceId),
+            or(...jobPayloadConditions),
+          ))
+        : Promise.resolve(),
+    ]);
+
     // 13. 删除 learning_cards
+    // PERF-10 补漏: 使用分块删除避免大数组 IN 子句性能退化
     if (versionIds.length > 0) {
-      await tx.delete(learningCards).where(inArray(learningCards.noteVersionId, versionIds));
+      await chunkedInArrayDelete(tx, learningCards, learningCards.noteVersionId, versionIds);
     }
 
     // 收集图片资产与旧版 Markdown object key。Typed asset 可能被同一
@@ -1393,7 +1577,9 @@ export async function physicalDeleteNote(
     ])];
 
     return { cardIds, evidenceIds, imageObjectKeys };
-  })(executor);
+  };
+
+  const cleanupIds = await collectAndDeleteCascade(executor);
 
   // 清理搜索索引
   await deleteSearchDocuments(executor, workspaceId, [
@@ -1450,7 +1636,8 @@ export async function restoreNoteVersion(
   _userId: string,
   baseVersionId?: string,
 ) {
-  const result = await (async (tx: ApiTransaction) => {
+  // QUAL-03 修复：移除 IIFE 模式，executor 即事务执行器，无需额外包装
+  const tx = executor;
     // 锁定 note 行
     // CONC-03: 只锁定未软删除的笔记
     const noteRows = await tx
@@ -1501,7 +1688,7 @@ export async function restoreNoteVersion(
       })
       .where(eq(notes.id, noteId));
 
-    return {
+    const result = {
       note: {
         ...note,
         currentVersionId: versionId,
@@ -1511,7 +1698,6 @@ export async function restoreNoteVersion(
       version: targetVersion,
       blocks: restoredBlocks,
     };
-  })(executor);
 
   // 恢复后同步搜索索引——currentVersionId 已切换到旧版本，
   // 搜索投影需要反映恢复后的标题和正文摘要。

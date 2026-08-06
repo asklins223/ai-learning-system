@@ -21,6 +21,7 @@ const noteEditorSource = readFileSync(
   "utf8",
 );
 const apiSource = readFileSync(resolve(WEB_ROOT, "lib/api.ts"), "utf8");
+const apiTypesSource = readFileSync(resolve(WEB_ROOT, "lib/api-types.ts"), "utf8");
 const shellSource = readFileSync(
   resolve(WEB_ROOT, "components/layout/AppShell.tsx"),
   "utf8",
@@ -58,20 +59,21 @@ describe("learning card set UI contract", () => {
   });
 
   it("exposes card-set API types and lifecycle methods", () => {
-    assert.ok(apiSource.includes("export interface CardSetDetailResponse"));
-    assert.ok(apiSource.includes("cards: CardDetailResponse[]"));
+    // ARCH-04：共享类型定义迁移至 api-types.ts，api.ts 仅重新导出保持向后兼容
+    assert.ok(apiTypesSource.includes("export interface CardSetDetailResponse"));
+    assert.ok(apiTypesSource.includes("cards: CardDetailResponse[]"));
     assert.match(
-      apiSource,
+      apiTypesSource,
       /export interface CardSetDetailResponse \{[\s\S]*nextCursor: string \| null;/,
     );
-    assert.ok(apiSource.includes("export interface CardSetCardsPageResponse"));
-    assert.ok(apiSource.includes("items: CardDetailResponse[]"));
+    assert.ok(apiTypesSource.includes("export interface CardSetCardsPageResponse"));
+    assert.ok(apiTypesSource.includes("items: CardDetailResponse[]"));
+    assert.ok(apiSource.includes("type CardSetDetailResponse"));
+    assert.ok(apiSource.includes("type CardSetCardsPageResponse"));
     assert.ok(apiSource.includes("listCardSetCards:"));
     assert.ok(apiSource.includes("/card-sets/${id}/cards${qs}"));
-    assert.ok(apiSource.includes("acceptedArtifactCount: number"));
     assert.ok(apiSource.includes("listCardSets:"));
     assert.ok(apiSource.includes("getCardSet:"));
-    assert.ok(apiSource.includes("acceptCardSet:"));
     assert.ok(apiSource.includes("dismissCardSet:"));
     assert.ok(apiSource.includes("regenerateCardSet:"));
   });
@@ -81,13 +83,26 @@ describe("learning card set UI contract", () => {
     assert.ok(cardSetSource.includes('title="章节卡"'));
     assert.ok(cardSetSource.includes("cardSet.status === \"partial_ready\""));
     assert.ok(cardSetSource.includes("readPartialCardSetCoverageWarning"));
-    assert.ok(cardSetSource.includes("api.acceptCardSet"));
+    // 「接受整组」为死功能（卡片生成不产生 card-level artifact，acceptCardSet
+    // 恒返回 acceptedArtifactCount=0 且 ACCEPTED 无下游消费），已移除；契约固化不再调用。
+    assert.ok(!cardSetSource.includes("api.acceptCardSet"));
     assert.ok(cardSetSource.includes("api.dismissCardSet"));
     assert.ok(cardSetSource.includes("api.regenerateCardSet"));
     assert.ok(cardSetSource.includes("<StudyPaper"));
     assert.ok(cardSetSource.includes("<EvidenceRail"));
     assert.ok(cardSetSource.includes('aria-label="卡组操作"'));
-    assert.ok(shellSource.includes('? "card-set-detail"'));
+    assert.ok(shellSource.includes('page: "card-set-detail"'));
+  });
+
+  it("uses the card-set header as the only focus header", () => {
+    const ownedHeaderStart = shellSource.indexOf("const hasOwnedFocusHeader");
+    const ownedHeaderEnd = shellSource.indexOf(";", ownedHeaderStart);
+    const ownedHeaderSource = shellSource.slice(ownedHeaderStart, ownedHeaderEnd);
+
+    assert.ok(ownedHeaderStart >= 0, "AppShell must declare owned focus headers");
+    assert.ok(ownedHeaderSource.includes("ownsFocusHeader"));
+    assert.ok(shellSource.includes("!hasOwnedFocusHeader && <TopBar />"));
+    assert.ok(cardSetSource.includes('className="card-set-header"'));
   });
 
   it("incrementally loads long card sets without replacing the current page", () => {

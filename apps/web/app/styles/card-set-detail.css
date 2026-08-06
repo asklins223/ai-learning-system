@@ -572,6 +572,7 @@
   grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
   gap: clamp(16px, 2vw, 26px);
   align-items: start;
+  margin: 50px 0px;
 }
 
 .card-set-reader-grid > *,

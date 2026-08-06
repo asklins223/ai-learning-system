@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { eq, and, inArray, sql, isNull } from "drizzle-orm";
 import { createHash } from "node:crypto";
-import { db } from "../../db/client.ts";
+import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
@@ -38,7 +38,7 @@ interface ItemWithIndex {
   itemKey: string;
 }
 
-type ImportTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type ImportTransaction = ApiTransaction;
 
 interface ImportedItem {
   itemKey: string;
@@ -152,7 +152,8 @@ async function importItems(
         version: { id: result.version.id, versionNo: result.version.versionNo },
       });
 
-      const bodyText = blocks.map((b) => b.content).join("\n");
+      // BUG-69 修复：过滤 image 类型 block，与 note service 保持一致，避免 drift 检测误报
+      const bodyText = blocks.filter((b) => b.type !== "image").map((b) => b.content).join("\n");
       searchDocuments.push({
         workspaceId,
         objectType: "note",
@@ -183,8 +184,21 @@ async function importItems(
 
 async function updateImportedNoteSearchIndexes(documents: PendingSearchDocument[]) {
   // 搜索索引是可重建投影：必须等业务事务提交后再更新，失败仅记录日志。
-  for (const document of documents) {
-    await upsertSearchDocument(document);
+  // BUG-47/PERF-20/PERF-39 修复：原代码使用串行 for 循环逐个更新搜索索引，
+  // 对于 100 篇笔记的批量导入会产生 100 次串行 DB 往返。
+  // 改为 Promise.all 并行化所有 upsert 操作，并对每个操作添加独立的
+  // try-catch 错误隔离——单篇搜索索引更新失败不影响其他笔记的索引更新。
+  const results = await Promise.allSettled(
+    documents.map((doc) => upsertSearchDocument(doc)),
+  );
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i]!;
+    if (result.status === "rejected") {
+      logger.error(
+        { err: result.reason, objectId: documents[i]!.objectId, title: documents[i]!.title },
+        "import: 搜索索引更新失败（单篇隔离，不影响其他笔记）",
+      );
+    }
   }
 }
 
@@ -195,7 +209,8 @@ export async function importRoutes(app: FastifyInstance) {
   // F-033: 支持幂等键（importId），中途失败时重试不会创建重复笔记
   // G-006: 使用 advisory lock + itemKey 实现并发安全的幂等导入
   // RBAC: 仅 owner 可导入笔记（数据写入操作，member 只读）
-  app.post("/import/markdown", { preHandler: [requireOwner], bodyLimit: 2 * 1024 * 1024 }, async (req) => {
+  // BUG-25 修复：bodyLimit 与 schema 最大容量对齐（100 items × 500KB ≈ 50MB）
+  app.post("/import/markdown", { preHandler: [requireOwner], bodyLimit: 50 * 1024 * 1024 }, async (req) => {
     const body = parseBody(app, importMarkdownSchema, req.body);
     const { workspaceId, userId } = req.session;
     const requestedItems: ItemWithIndex[] = body.items.map((item, originalIndex) => ({
@@ -205,18 +220,22 @@ export async function importRoutes(app: FastifyInstance) {
     }));
 
     // G-006: 无 importId 时不做幂等检查，直接导入
+    // BUG-70 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）
     if (!body.importId) {
-      const outcome = await db.transaction(async (tx) => {
-        const imported = await importItems(tx, requestedItems, workspaceId, userId, null);
-        return {
-          response: {
-            imported: imported.records.length,
-            notes: imported.records.map(({ note, version }) => ({ note, version })),
-            ...(imported.errors && imported.errors.length > 0 ? { errors: imported.errors } : {}),
-          },
-          searchDocuments: imported.searchDocuments,
-        };
-      });
+      const outcome = await withWorkspaceTransaction(
+        { workspaceId, userId },
+        async (tx) => {
+          const imported = await importItems(tx, requestedItems, workspaceId, userId, null);
+          return {
+            response: {
+              imported: imported.records.length,
+              notes: imported.records.map(({ note, version }) => ({ note, version })),
+              ...(imported.errors && imported.errors.length > 0 ? { errors: imported.errors } : {}),
+            },
+            searchDocuments: imported.searchDocuments,
+          };
+        },
+      );
 
       await updateImportedNoteSearchIndexes(outcome.searchDocuments);
       return outcome.response;
@@ -225,9 +244,12 @@ export async function importRoutes(app: FastifyInstance) {
 
     // 同一事务持有 transaction-scoped advisory lock，保证检查与新增使用同一连接，
     // 并在提交/回滚时由 PostgreSQL 自动释放，避免连接池中的 session lock 泄漏。
+    // BUG-70 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）
     const lockKey = `${workspaceId}:${importId}`;
-    const outcome = await db.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
+    const outcome = await withWorkspaceTransaction(
+      { workspaceId, userId },
+      async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
 
       // G-006: 查询已存在的版本，确定哪些 items 已经导入
       const existingVersions = await tx
@@ -352,7 +374,8 @@ export async function importRoutes(app: FastifyInstance) {
         },
         searchDocuments,
       };
-    });
+      },
+    );
 
     await updateImportedNoteSearchIndexes(outcome.searchDocuments);
     return outcome.response;

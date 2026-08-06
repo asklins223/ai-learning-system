@@ -183,6 +183,7 @@ function MilkdownInner({
   disabledRef.current = disabled;
   const onImagePasteRef = useRef(onImagePaste);
   onImagePasteRef.current = onImagePaste;
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   useEditor((root) =>
     Editor.make()
@@ -215,8 +216,19 @@ function MilkdownInner({
       .use(createPlaceholderPlugin())
   );
 
+  // ProseMirror 的 ensureEditable() 仅在 view 创建和 view.update() 时调用。
+  // 当 disabled 从 true 变为 false 时（例如 ownerLoading 完成后），
+  // disabledRef.current 已更新但 .ProseMirror DOM 的 contenteditable 属性
+  // 不会自动同步，导致编辑器保持只读、无法输入。此处手动同步属性。
+  useEffect(() => {
+    const dom = wrapperRef.current?.querySelector<HTMLElement>(".ProseMirror");
+    if (dom) {
+      dom.contentEditable = disabled ? "false" : "true";
+    }
+  }, [disabled]);
+
   return (
-    <div className="milkdown-editor">
+    <div className="milkdown-editor" ref={wrapperRef}>
       <Milkdown />
     </div>
   );

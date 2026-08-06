@@ -57,10 +57,16 @@ export function WorkspaceRouteLoading({
 
       <style>{`
         .workspace-route-loading {
+          --workspace-route-loading-gutter: clamp(28px, 4vw, 64px);
+
           box-sizing: border-box;
           width: 100%;
           min-height: 100dvh;
-          padding: clamp(28px, 4vw, 64px);
+          padding:
+            var(--workspace-route-loading-gutter)
+            max(var(--workspace-route-loading-gutter), var(--window-titlebar-safe-right))
+            var(--workspace-route-loading-gutter)
+            max(var(--workspace-route-loading-gutter), var(--window-titlebar-safe-left));
           color: var(--color-text-secondary);
         }
         .workspace:has(> .workspace-route-loading) {
@@ -136,7 +142,11 @@ export function WorkspaceRouteLoading({
         }
         @media (max-width: 639px) {
           .workspace-route-loading {
-            padding: 26px 20px calc(var(--safe-bottom) + 28px);
+            padding:
+              26px
+              max(20px, var(--window-titlebar-safe-right))
+              calc(var(--safe-bottom) + 28px)
+              max(20px, var(--window-titlebar-safe-left));
           }
           .workspace-route-loading--default {
             min-height: calc(100dvh - var(--mobile-nav-inset));

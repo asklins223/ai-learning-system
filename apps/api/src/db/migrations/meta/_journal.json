@@ -351,6 +351,118 @@
       "when": 1787202200000,
       "tag": "0049_card_generation_m5_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1787288600000,
+      "tag": "0050_user_ai_vision_model",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1787375000000,
+      "tag": "0051_card_generation_restartable_failures",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1787461400000,
+      "tag": "0052_supervisor_agent_v1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1787547800000,
+      "tag": "0053_search_trigram_gin_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1787634200000,
+      "tag": "0054_card_generation_units_status_check",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1787720600000,
+      "tag": "0055_card_generation_candidates_pending_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1787807000000,
+      "tag": "0056_bundle_candidate_count_persist",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1787893400000,
+      "tag": "0057_candidate_bundle_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1787979800000,
+      "tag": "0058_candidate_difficulty_learning_objective",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1788066200000,
+      "tag": "0059_candidate_cognitive_type_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1788152600000,
+      "tag": "0060_user_ai_model_type_multi_platform",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1788239000000,
+      "tag": "0061_card_generation_schema_drift",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1788325400000,
+      "tag": "0062_retire_legacy_bridge_pipeline_v2_constraints",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1788411800000,
+      "tag": "0063_drop_provider_check_constraint",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1788498200000,
+      "tag": "0064_ailearn_fail_job_return_record",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1788584600000,
+      "tag": "0065_drop_byok_workspace_ai_provider",
+      "breakpoints": true
     }
   ]
 }

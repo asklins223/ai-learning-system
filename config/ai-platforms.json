@@ -1,0 +1,74 @@
+{
+  "platforms": {
+    "morbuke": {
+      "type": "openai_compatible",
+      "apiKey": "${OPENAI_COMPAT_API_KEY}",
+      "baseUrl": "https://cn.morbuke.com/v1",
+      "options": {
+        "disableThinking": true,
+        "disableMaxTokens": true
+      }
+    },
+    "qwen": {
+      "type": "dashscope",
+      "apiKey": "${DASHSCOPE_API_KEY}",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "options": {
+        "enableThinking": false
+      }
+    },
+    "bigmodel": {
+      "type": "openai_compatible",
+      "apiKey": "${BIGMODEL_API_KEY}",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "options": {
+        "enableThinking": true,
+        "disableMaxTokens": true
+      }
+    },
+    "siliconflow": {
+      "type": "siliconflow",
+      "apiKey": "${SILICONFLOW_API_KEY}",
+      "baseUrl": "https://api.siliconflow.cn/v1"
+    },
+    "siliconflow-chat": {
+      "type": "openai_compatible",
+      "apiKey": "${SILICONFLOW_API_KEY}",
+      "baseUrl": "https://api.siliconflow.cn/v1",
+      "options": {
+        "disableThinking": true,
+        "disableMaxTokens": true
+      }
+    },
+    "tokenrhythm": {
+      "type": "openai_compatible",
+      "apiKey": "${TOKENRHYTHM_API_KEY}",
+      "baseUrl": "https://tokenrhythm.studio/v1",
+      "options": {
+        "disableThinking": true,
+        "maxOutputTokens": 16384
+      }
+    },
+    "mock": {
+      "type": "mock"
+    }
+  },
+  "capabilities": {
+    "agent_turn": {
+      "platform": "tokenrhythm",
+      "model": "deepseek-v4-flash-0731"
+    },
+    "text_generation": {
+      "platform": "siliconflow-chat",
+      "model": "THUDM/GLM-4-9B-0414"
+    },
+    "vision": {
+      "platform": "bigmodel",
+      "model": "GLM-4.1V-Thinking-Flash"
+    },
+    "embedding": {
+      "platform": "siliconflow",
+      "model": "BAAI/bge-m3"
+    }
+  }
+}

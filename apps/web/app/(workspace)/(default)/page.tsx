@@ -753,7 +753,7 @@ export default function HomePage() {
 
 function jobLabel(type: string): string {
   switch (type) {
-    case "generate_card": return "生成学习卡";
+    case "execute_card_agent_turn": return "生成学习卡";
     case "evaluate_validation": return "评估验证";
     case "align_evidence": return "证据对齐";
     case "parse_source": return "解析来源";

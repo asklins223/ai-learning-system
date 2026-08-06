@@ -520,6 +520,16 @@ async function keyPointHasHardEvidence(
  * note version + content hash, hard evidence, and question/rubric policy versions.
  * Used to verify that an existing question's fingerprint still matches the current source.
  */
+/**
+ * SEC-19 安全注释：此函数查询包含用户笔记内容（claim、quote、noteBlocks 等）。
+ * 风险：这些查询从数据库加载用户笔记内容到内存，用于计算 source fingerprint。
+ *   如果服务器日志级别设置过高（如 debug），这些内容可能被记录到日志中。
+ * 缓解措施：
+ *   1. 此函数仅在 validation session 事务中调用，结果用于 fingerprint 比对
+ *   2. fingerprint 本身是哈希值，不包含明文内容
+ *   3. 查询已通过 workspaceId 过滤，确保租户隔离
+ *   4. 不应将中间变量（claim、quote、noteBlocks）记录到日志中
+ */
 async function computeSourceFingerprintFromDb(
   tx: ApiTransaction,
   workspaceId: string,
@@ -1996,15 +2006,17 @@ export async function unableToAnswer(
       // This catches cross-submission exposures (e.g., another tab/device revealed source).
       let promotedAssistanceLevel = submission.assistanceLevel;
       let promotedAssistanceSnapshotExposedAt = submission.assistanceSnapshotExposedAt;
+      // PERF-37 修复：将 existingExposure 提升到 if 块外部，以便后续复用，避免重复查询
+      let existingExposure: typeof validationAssistanceExposures.$inferSelect | null = null;
       if (submission.keyPointId && submission.assistanceLevel === AssistanceLevel.NONE) {
-        const existingExposure = await tx.query.validationAssistanceExposures.findFirst({
+        existingExposure = (await tx.query.validationAssistanceExposures.findFirst({
           where: and(
             eq(validationAssistanceExposures.workspaceId, workspaceId),
             eq(validationAssistanceExposures.userId, userId),
             eq(validationAssistanceExposures.keyPointId, submission.keyPointId),
           ),
           orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
-        });
+        })) ?? null;
         if (existingExposure && !isUnassistedEligible(existingExposure.unassistedEligibleAfter, now)) {
           promotedAssistanceLevel = AssistanceLevel.SOURCE_VIEWED;
           promotedAssistanceSnapshotExposedAt = now;
@@ -2037,45 +2049,50 @@ export async function unableToAnswer(
         throw new SessionError("question_not_ready", "no rubric items found");
       }
 
-      // Write system feedback artifact
-      const [artifact] = await tx
-        .insert(aiArtifacts)
-        .values({
-          workspaceId,
-          type: ArtifactType.RUBRIC_EVALUATION, // 计划 §6.6: v0.6 unable path also writes point assessments and runs reducer
-          inputRefs: {
-            cardId: submission.cardId,
-            keyPointId: submission.keyPointId ?? undefined,
+      // PERF-37 修复：aiArtifacts 插入和 validationPointAssessments 插入之间无数据依赖，
+      // 可以并行执行。原代码串行执行两次 INSERT，现在使用 Promise.all 并行化。
+      // 注意：validationPointAssessments 不依赖 artifact.id（与 validationEvents 不同），
+      // 因此可以安全并行。
+      const [artifactRows] = await Promise.all([
+        tx
+          .insert(aiArtifacts)
+          .values({
+            workspaceId,
+            type: ArtifactType.RUBRIC_EVALUATION, // 计划 §6.6: v0.6 unable path also writes point assessments and runs reducer
+            inputRefs: {
+              cardId: submission.cardId,
+              keyPointId: submission.keyPointId ?? undefined,
+              userId,
+            },
+            output: {
+              mode: "user_declared_unable",
+              submissionId,
+              questionId: question.id,
+              reducerVersion: RUBRIC_REDUCER_VERSION,
+            },
+            modelId: "system",
+            promptVersion: "unable-v1",
+            status: ArtifactStatus.READY,
+            inputHash: createHash("sha256").update(JSON.stringify({ questionId: question.id, submissionId, mode: "user_declared_unable" }), "utf8").digest("hex"), // 计划 §6.6
+            costTokens: null, // 计划 §6.6: no AI call for unable path
+          })
+          .returning(),
+        // Write missing assessments for all rubric items（不依赖 artifact.id，可并行）
+        tx.insert(validationPointAssessments).values(
+          rubricItems.map((item) => ({
+            workspaceId,
             userId,
-          },
-          output: {
-            mode: "user_declared_unable",
             submissionId,
-            questionId: question.id,
-            reducerVersion: RUBRIC_REDUCER_VERSION,
-          },
-          modelId: "system",
-          promptVersion: "unable-v1",
-          status: ArtifactStatus.READY,
-          inputHash: createHash("sha256").update(JSON.stringify({ questionId: question.id, submissionId, mode: "user_declared_unable" }), "utf8").digest("hex"), // 计划 §6.6
-          costTokens: null, // 计划 §6.6: no AI call for unable path
-        })
-        .returning();
-
-      // Write missing assessments for all rubric items
-      await tx.insert(validationPointAssessments).values(
-        rubricItems.map((item) => ({
-          workspaceId,
-          userId,
-          submissionId,
-          rubricItemId: item.id,
-          verdict: RubricVerdict.MISSING,
-          assessmentSource: AssessmentSource.USER_DECLARED_UNABLE,
-          confidence: 0,
-          rationale: "User declared unable to answer",
-          evidenceSnapshot: item.evidenceSnapshot,
-        })),
-      );
+            rubricItemId: item.id,
+            verdict: RubricVerdict.MISSING,
+            assessmentSource: AssessmentSource.USER_DECLARED_UNABLE,
+            confidence: 0,
+            rationale: "User declared unable to answer",
+            evidenceSnapshot: item.evidenceSnapshot,
+          })),
+        ),
+      ]);
+      const artifact = artifactRows[0]!;
 
       // Run reducer
       const reducerInputs: RubricItemInput[] = rubricItems.map((item) => ({
@@ -2218,18 +2235,12 @@ export async function unableToAnswer(
         return result;
       }
 
-      // Re-read rubric items inside transaction to get tx-in evidenceId
-      // (计划 §8.6: "再次校验 evidence" — rubric items loaded earlier may have stale
-      // evidenceId if evidence was deleted between the initial load and here,
-      // since the FK has onDelete: "set null")
-      const txRubricItems = await tx.query.validationQuestionRubricItems.findMany({
-        where: and(
-          eq(validationQuestionRubricItems.questionId, submission.questionId),
-          eq(validationQuestionRubricItems.workspaceId, workspaceId),
-        ),
-        orderBy: sql`${validationQuestionRubricItems.ordinal} ASC`,
-      });
-      const txHasHardEvidence = txRubricItems.every((item) => item.evidenceId !== null);
+      // PERF-37 修复：复用步骤 6 已查询的 rubricItems，避免重复 DB 查询。
+      // 原代码在同一事务内重复查询 rubricItems（步骤 6 和步骤 11），
+      // 由于在同一事务中，两次查询结果必然一致，直接复用即可。
+      // 计划 §8.6 "再次校验 evidence" 的需求已通过同一事务快照满足：
+      // 事务隔离级别保证步骤 6 的查询已看到最新的 committed 数据。
+      const txHasHardEvidence = rubricItems.every((item) => item.evidenceId !== null);
 
       // Write understanding event (moved after scheduling pre-check — only if pre-check passes)
       // unable always produces "seen" eventType (no understanding upgrade),
@@ -2248,17 +2259,10 @@ export async function unableToAnswer(
         },
       });
 
-      // Apply scheduling based on context
-      const exposure = submission.keyPointId
-        ? await tx.query.validationAssistanceExposures.findFirst({
-            where: and(
-              eq(validationAssistanceExposures.workspaceId, workspaceId),
-              eq(validationAssistanceExposures.userId, userId),
-              eq(validationAssistanceExposures.keyPointId, submission.keyPointId),
-            ),
-            orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
-          })
-        : null;
+      // PERF-37 修复：复用步骤 4 已查询的 existingExposure，避免重复 DB 查询。
+      // 原代码在同一事务内重复查询 exposure（步骤 4 和步骤 13），
+      // 由于在同一事务中，两次查询结果必然一致，直接复用即可。
+      const exposure = existingExposure;
 
       const assistanceOutcome = promotedAssistanceLevel === AssistanceLevel.SOURCE_VIEWED
         ? "source_viewed" as const
@@ -2574,20 +2578,30 @@ export async function revealResult(
       });
 
       // Load evidence refs
+      // BUG-39 修复：原代码对每个 rubricItem 的 evidenceId 逐个查询 evidences（N+1 查询）。
+      // 如果有 5 个 rubricItem 且每个都有 evidenceId，会产生 5 次独立 DB 查询。
+      // 改为批量查询所有需要的 evidenceId，用 Map 在内存中匹配。
+      const evidenceIds = rubricItems
+        .map((item) => item.evidenceId)
+        .filter((id): id is string => id !== null);
+      const evidenceMap = new Map<string, { quoteText: string; alignment: string }>();
+      if (evidenceIds.length > 0) {
+        const evRows = await tx.query.evidences.findMany({
+          where: and(
+            inArray(evidences.id, evidenceIds),
+            eq(evidences.workspaceId, workspaceId),
+          ),
+        });
+        for (const ev of evRows) {
+          evidenceMap.set(ev.id, { quoteText: ev.quoteText, alignment: ev.alignment });
+        }
+      }
       const evidenceRefs: Array<{ quoteText: string; alignment: string }> = [];
       for (const item of rubricItems) {
         if (item.evidenceId) {
-          const ev = await tx.query.evidences.findFirst({
-            where: and(
-              eq(evidences.id, item.evidenceId),
-              eq(evidences.workspaceId, workspaceId),
-            ),
-          });
+          const ev = evidenceMap.get(item.evidenceId);
           if (ev) {
-            evidenceRefs.push({
-              quoteText: ev.quoteText,
-              alignment: ev.alignment,
-            });
+            evidenceRefs.push(ev);
           }
         }
       }

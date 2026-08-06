@@ -8,6 +8,9 @@
 .app-canvas .workspace-page-header {
   --workspace-header-gutter: 32px;
 
+  position: sticky;
+  top: var(--workspace-sticky-top, 0px);
+  z-index: var(--z-sticky);
   display: flex;
   width: 100%;
   max-width: none;
@@ -18,6 +21,9 @@
   margin: 0;
   padding: 26px var(--workspace-header-gutter) 20px;
   border-bottom: 1px solid color-mix(in srgb, var(--color-border) 58%, transparent);
+  background: color-mix(in srgb, var(--color-shell) 92%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
 
 .workspace-page-header > :is(.page-header-text, .learning-home-heading) {

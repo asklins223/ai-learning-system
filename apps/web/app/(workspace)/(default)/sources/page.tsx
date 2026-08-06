@@ -919,7 +919,7 @@ export default function SourcesPage() {
                                 {creatingNoteId === source.id
                                   ? "创建中…"
                                   : (source.noteCount ?? 0) > 0
-                                    ? `再创建一篇（${source.noteCount}）`
+                                    ? `再创建一篇（${source.noteCount ?? 0}）`
                                     : "创建笔记"}
                               </span>
                             </button>

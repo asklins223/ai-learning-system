@@ -6,10 +6,18 @@
   max-width: none;
   min-height: 100%;
   margin: 0 auto;
-  overflow: hidden;
+  overflow-x: clip;
   background:
     radial-gradient(circle at 78% 3%, color-mix(in srgb, var(--color-highlight-soft) 42%, transparent), transparent 27%),
     linear-gradient(180deg, color-mix(in srgb, var(--color-paper-muted) 38%, transparent), transparent 360px);
+}
+
+/* The page content already owns its closing breathing room. Keep the generic
+ * shell padding only on phones, where it reserves the fixed BottomNav. */
+@media (min-width: 640px) {
+  .app-canvas[data-page="home"] .workspace {
+    padding-bottom: 0;
+  }
 }
 
 /* 首页在桌面端使用完整工作区，不保留展示稿式的外圈留白。 */

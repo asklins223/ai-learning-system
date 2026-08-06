@@ -8,8 +8,9 @@
 import type { FastifyInstance } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
-import { withWorkspaceTransaction } from "../../db/client.ts";
+import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { noteImageAssets, notes } from "../../db/schema/note.ts";
+import { users } from "../../db/schema/identity.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { hasValidCookieCsrf } from "../identity/session-auth.ts";
 import {
@@ -126,6 +127,14 @@ export async function uploadRoutes(
       return reply.code(415).send({ error: "unsupported file type" });
     }
 
+    // QUAL-48 安全注释：file.toBuffer() 将整个文件读入内存。
+    // 防护措施：
+    //   1. req.file({ limits: { fileSize: MAX_IMAGE_SIZE } }) 已在上游设置
+    //      10MB 限制，Fastify 会在流式读取时自动截断并拒绝超大文件
+    //   2. toBuffer() 后的双重校验（buffer.length > MAX_IMAGE_SIZE）作为
+    //      第二道防线，防止 limits 配置被绕过
+    //   3. magic bytes 校验在 toBuffer 后进行，因为需要检查前几字节
+    //   4. 图片尺寸校验防止 decode-bomb（40 megapixel 限制）
     const buffer = await file.toBuffer();
 
     // Validate magic bytes
@@ -235,6 +244,14 @@ export async function uploadRoutes(
       return reply.code(415).send({ error: "unsupported file type" });
     }
 
+    // QUAL-48 安全注释：file.toBuffer() 将整个文件读入内存。
+    // 防护措施：
+    //   1. req.file({ limits: { fileSize: MAX_AVATAR_SIZE } }) 已在上游设置
+    //      2MB 限制，Fastify 会在流式读取时自动截断并拒绝超大文件
+    //   2. toBuffer() 后的双重校验（buffer.length > MAX_AVATAR_SIZE）作为
+    //      第二道防线，防止 limits 配置被绕过
+    //   3. magic bytes 校验在 toBuffer 后进行，因为需要检查前几字节
+    //   4. 图片尺寸校验防止 decode-bomb（40 megapixel 限制）
     const buffer = await file.toBuffer();
 
     // Validate magic bytes
@@ -245,6 +262,15 @@ export async function uploadRoutes(
     // Double-check file size
     if (buffer.length > MAX_AVATAR_SIZE) {
       return reply.code(413).send({ error: "file too large (max 2MB)" });
+    }
+
+    // BUG-26 修复：头像上传也需 decode-bomb 防护，与笔记图片上传保持一致
+    const avatarDimensions = readImageDimensions(buffer, file.mimetype);
+    if (!avatarDimensions) {
+      return reply.code(415).send({ error: "image dimensions could not be decoded" });
+    }
+    if (avatarDimensions.width * avatarDimensions.height > 40_000_000) {
+      return reply.code(413).send({ error: "image pixel count exceeds 40 megapixels" });
     }
 
     // Generate objectKey: avatars/{userId}/{uuid}.{ext}
@@ -258,7 +284,32 @@ export async function uploadRoutes(
       return reply.code(503).send({ error: "failed to upload avatar" });
     }
 
+    // BUG-21/SEC-31 修复：持久化 avatarUrl 到 users 表，并清理旧头像存储
+    // 查询旧头像 objectKey
+    const [userRow] = await db
+      .select({ avatarUrl: users.avatarUrl })
+      .from(users)
+      .where(eq(users.id, req.session.userId))
+      .limit(1);
+    const oldAvatarUrl = userRow?.avatarUrl;
+
+    // 更新 users.avatarUrl
     const url = `/api/uploads/${objectKey}`;
+    await db
+      .update(users)
+      .set({ avatarUrl: url, updatedAt: new Date() })
+      .where(eq(users.id, req.session.userId));
+
+    // 异步清理旧头像存储对象（不阻塞响应）
+    if (oldAvatarUrl) {
+      const oldObjectKey = oldAvatarUrl.replace(/^\/api\/uploads\//, "");
+      if (oldObjectKey && oldObjectKey.startsWith("avatars/")) {
+        deleteObject(oldObjectKey).catch((err) => {
+          logger.warn({ err, oldObjectKey }, "failed to delete old avatar from storage");
+        });
+      }
+    }
+
     return reply.code(201).send({
       url,
       objectKey,
@@ -271,6 +322,11 @@ export async function uploadRoutes(
   app.get("/uploads/*", async (req, reply) => {
     const path = (req.params as { "*": string })["*"];
     if (!path) return reply.code(404).send({ error: "not found" });
+
+    // SEC-21 修复：拒绝包含路径遍历字符的请求，防止跨 workspace 文件访问
+    if (path.includes("..") || path.includes("\\")) {
+      return reply.code(404).send({ error: "not found" });
+    }
 
     // Validate path format and enforce tenant isolation
     if (path.startsWith("avatars/")) {

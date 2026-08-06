@@ -4,17 +4,17 @@ import { requireOwner, requireSession } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { parseQuery, uuidParamSchema } from "../../lib/pagination.ts";
 import {
-  continueWithExclusionsSchema,
   createCardGenerationRunSchema,
   generationEventsQuerySchema,
+  agentEventsQuerySchema,
 } from "./schema.ts";
 import {
   cancelCardGenerationRun,
   CardGenerationServiceError,
-  continueCardGenerationRunWithExclusions,
   createCardGenerationRun,
   getCardGenerationRun,
   getLatestCardGenerationRun,
+  listCardGenerationAgentEvents,
   listCardGenerationEvents,
   retryCardGenerationRun,
 } from "./service.ts";
@@ -59,14 +59,38 @@ export async function cardGenerationRoutes(app: FastifyInstance) {
     }
   });
 
+  // QUAL-44 修复：GET 路由添加 try-catch 错误处理，与 POST 路由保持一致
   app.get<{ Params: { id: string } }>("/card-generation-runs/:id/events", async (req, reply) => {
     reply.headers(NO_STORE);
     if (!uuidParamSchema.safeParse(req.params).success) {
       return reply.code(400).send({ error: "invalid_id" });
     }
-    const query = parseQuery(app, generationEventsQuerySchema, req.query);
-    const events = await listCardGenerationEvents(context(req), req.params.id, query.after);
-    return events ?? reply.code(404).send({ error: "generation_run_not_found" });
+    try {
+      const query = parseQuery(app, generationEventsQuerySchema, req.query);
+      const events = await listCardGenerationEvents(context(req), req.params.id, query.after);
+      return events ?? reply.code(404).send({ error: "generation_run_not_found" });
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // QUAL-44 修复：GET 路由添加 try-catch 错误处理
+  app.get<{ Params: { id: string } }>("/card-generation-runs/:id/agent-events", async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse(req.params).success) {
+      return reply.code(400).send({ error: "invalid_id" });
+    }
+    try {
+      const query = parseQuery(app, agentEventsQuerySchema, req.query);
+      const events = await listCardGenerationAgentEvents(
+        context(req),
+        req.params.id,
+        { since: query.since, limit: query.limit, includeUsage: query.includeUsage },
+      );
+      return events ?? reply.code(404).send({ error: "generation_run_not_found" });
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
   });
 
   app.post<{ Params: { id: string } }>(
@@ -97,30 +121,6 @@ export async function cardGenerationRoutes(app: FastifyInstance) {
       try {
         const run = await retryCardGenerationRun(context(req), req.params.id);
         return run ?? reply.code(404).send({ error: "generation_run_not_found" });
-      } catch (error) {
-        return sendServiceError(reply, error);
-      }
-    },
-  );
-
-  app.post<{ Params: { id: string } }>(
-    "/card-generation-runs/:id/continue-with-exclusions",
-    { preHandler: [requireOwner] },
-    async (req, reply) => {
-      reply.headers(NO_STORE);
-      if (!uuidParamSchema.safeParse(req.params).success) {
-        return reply.code(400).send({ error: "invalid_id" });
-      }
-      const body = parseBody(app, continueWithExclusionsSchema, req.body);
-      try {
-        const run = await continueCardGenerationRunWithExclusions(
-          context(req),
-          req.params.id,
-          body,
-        );
-        return run
-          ? reply.code(202).send(run)
-          : reply.code(404).send({ error: "generation_run_not_found" });
       } catch (error) {
         return sendServiceError(reply, error);
       }

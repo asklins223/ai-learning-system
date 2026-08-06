@@ -215,10 +215,11 @@ describe("search projection rebuild", () => {
             },
           }),
         }),
-        execute: async () => {
-          reconciled += 1;
-        },
       }),
+      // PERF-08：事务提交后的 ghost 清理通过外层 executor.execute 执行
+      execute: async () => {
+        reconciled += 1;
+      },
     } as any;
 
     const result = await reindexWorkspaceSearch(executor, WORKSPACE_ID);
@@ -273,8 +274,9 @@ describe("search projection rebuild", () => {
       transaction: async (run: (tx: any) => Promise<void>) => run({
         delete: () => ({ where: () => ({ returning: async () => [] }) }),
         insert: () => { inserts += 1; return {}; },
-        execute: async () => undefined,
       }),
+      // PERF-08：事务提交后的 ghost 清理通过外层 executor.execute 执行
+      execute: async () => undefined,
     } as any;
 
     const result = await reindexWorkspaceSearch(executor, WORKSPACE_ID);

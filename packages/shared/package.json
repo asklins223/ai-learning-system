@@ -11,11 +11,6 @@
       "import": "./src/index.ts",
       "default": "./src/index.ts"
     },
-    "./ai-credentials": {
-      "types": "./src/ai-credentials.ts",
-      "import": "./src/ai-credentials.ts",
-      "default": "./src/ai-credentials.ts"
-    },
     "./ai-endpoints": {
       "types": "./src/ai-endpoints.ts",
       "import": "./src/ai-endpoints.ts",

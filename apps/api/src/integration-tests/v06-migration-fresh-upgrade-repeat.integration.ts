@@ -471,19 +471,16 @@ test("M6 migration: legacy nulls survive while M5 result and member identity fai
         {
           id: runAId,
           epoch: 1,
-          pipelineVersion: "card-generation-v2-m5",
           status: "queued",
         },
         {
           id: runBId,
           epoch: 2,
-          pipelineVersion: "card-generation-v2-m5",
           status: "queued",
         },
         {
           id: legacyRunId,
           epoch: 3,
-          pipelineVersion: "card-generation-v2-m4",
           status: "succeeded",
         },
       ]) {
@@ -500,7 +497,6 @@ test("M6 migration: legacy nulls survive while M5 result and member identity fai
             source_content_hash,
             block_manifest_hash,
             asset_manifest_hash,
-            pipeline_version,
             status
           )
           VALUES (
@@ -515,7 +511,6 @@ test("M6 migration: legacy nulls survive while M5 result and member identity fai
             'source-hash',
             'block-hash',
             'asset-hash',
-            ${run.pipelineVersion},
             ${run.status}
           )
         `;
@@ -956,5 +951,26 @@ test("v0.6 migration: v0.6 column extensions on existing tables have correct typ
   assert.ok(
     repairCountCol?.column_default?.includes("0"),
     "jobs.repair_attempt_count should default to 0",
+  );
+});
+
+test("v0.6 migration: BYOK table and workspace ai_provider column are dropped (0065)", async () => {
+  // §7.2 新增断言：验证 user_ai_model_configs 表已删除
+  const byokTableExists = await tableExists("user_ai_model_configs");
+  assert.equal(
+    byokTableExists,
+    false,
+    "user_ai_model_configs table should not exist after migration 0065",
+  );
+
+  // §7.2 新增断言：验证 workspaces.ai_provider 列已删除
+  const [aiProviderCol] = await sql`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'workspaces' AND column_name = 'ai_provider'
+  `;
+  assert.equal(
+    aiProviderCol,
+    undefined,
+    "workspaces.ai_provider column should not exist after migration 0065",
   );
 });

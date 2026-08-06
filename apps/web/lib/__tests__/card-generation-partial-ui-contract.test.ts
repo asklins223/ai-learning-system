@@ -15,36 +15,61 @@ const apiSource = readFileSync(
   resolve((import.meta.dirname ?? __dirname), "../api.ts"),
   "utf8",
 );
+// ARCH-04 拆分：共享类型已从 api.ts 迁移到 api-types.ts（api.ts 仅做 re-export）。
+// 状态枚举断言需读取 api-types.ts。
+const apiTypesSource = readFileSync(
+  resolve((import.meta.dirname ?? __dirname), "../api-types.ts"),
+  "utf8",
+);
+
+// PERF-04 拆分：生成逻辑已提取到 note-editor/ 目录下的多个模块。
+// 测试需要检查所有拆分后的文件。
+const noteEditorDir = resolve((import.meta.dirname ?? __dirname), "../../components/note-editor");
+function readSubFile(name: string): string {
+  return readFileSync(resolve(noteEditorDir, name), "utf8");
+}
+const useGenerationActionsSource = readSubFile("useGenerationActions.ts");
+const generationFailureDialogSource = readSubFile("GenerationFailureDialog.tsx");
+const generationPanelSource = readSubFile("GenerationPanel.tsx");
+const confirmDialogsSource = readSubFile("ConfirmDialogs.tsx");
+const noteEditorUtilsSource = readSubFile("note-editor-utils.ts");
+const noteEditorTypesSource = readSubFile("note-editor-types.ts");
+
+// 合并所有源码
+const allSources = [
+  editorSource,
+  useGenerationActionsSource,
+  generationFailureDialogSource,
+  generationPanelSource,
+  confirmDialogsSource,
+  noteEditorUtilsSource,
+  noteEditorTypesSource,
+].join("\n");
 
 describe("strict/partial card generation UI contract", () => {
-  it("supports retrying a strict failure and explicitly confirming image exclusions", () => {
-    assert.ok(apiSource.includes('| "partial_ready"'));
+  it("supports retrying a strict failure", () => {
+    assert.ok(apiTypesSource.includes('| "partial_ready"'));
     assert.ok(apiSource.includes("retryCardGenerationRun"));
     assert.ok(apiSource.includes("/card-generation-runs/${id}/retry"));
-    assert.ok(apiSource.includes("continueCardGenerationRunWithExclusions"));
-    assert.ok(apiSource.includes("/card-generation-runs/${id}/continue-with-exclusions"));
-    assert.ok(editorSource.includes("getFailedGenerationImages"));
-    assert.ok(editorSource.includes("api.retryCardGenerationRun"));
-    assert.ok(editorSource.includes("api.continueCardGenerationRunWithExclusions"));
-    assert.ok(editorSource.includes("重试失败检查点"));
-    assert.ok(editorSource.includes("确认排除并继续"));
-    assert.ok(editorSource.includes("未得到你的明确确认前，失败图片不会被自动排除"));
+    assert.ok(allSources.includes("getFailedGenerationUnits"));
+    assert.ok(allSources.includes("api.retryCardGenerationRun"));
+    assert.ok(allSources.includes("重试失败检查点"));
   });
 
   it("switches to the derived run and treats partial_ready as terminal", () => {
-    const activeStatuses = editorSource.slice(
-      editorSource.indexOf("const ACTIVE_GENERATION_RUN_STATUSES"),
-      editorSource.indexOf("]);", editorSource.indexOf("const ACTIVE_GENERATION_RUN_STATUSES")),
+    const activeStatuses = noteEditorTypesSource.slice(
+      noteEditorTypesSource.indexOf("const ACTIVE_GENERATION_RUN_STATUSES"),
+      noteEditorTypesSource.indexOf("]);", noteEditorTypesSource.indexOf("const ACTIVE_GENERATION_RUN_STATUSES")),
     );
-    assert.ok(editorSource.includes('if (run.status === "partial_ready")'));
-    assert.ok(editorSource.includes('setGenState("partial-ready")'));
+    assert.ok(allSources.includes('if (run.status === "partial_ready")'));
+    assert.ok(allSources.includes('setGenState("partial-ready")'));
     assert.ok(!activeStatuses.includes('"partial_ready"'));
-    assert.ok(editorSource.includes("setGenerationRunId(accepted.runId)"));
-    assert.ok(editorSource.includes("pollGenerationRun(accepted.runId, pollToken)"));
-    assert.ok(editorSource.includes("部分结果不会替换已有完整学习卡"));
-    assert.ok(editorSource.includes("图片（实际覆盖）"));
-    assert.ok(editorSource.includes("查看部分结果"));
-    assert.ok(editorSource.includes("不会进入验证或复习流程"));
+    assert.ok(allSources.includes("setGenerationRunId(accepted.runId)"));
+    assert.ok(allSources.includes("pollGenerationRun(accepted.runId, pollToken)"));
+    assert.ok(allSources.includes("部分结果不会替换已有完整学习卡"));
+    assert.ok(allSources.includes("图片（实际覆盖）"));
+    assert.ok(allSources.includes("查看部分结果"));
+    assert.ok(allSources.includes("不会进入验证或复习流程"));
     assert.match(editorStyles, /data-generation-state="partial"/);
     assert.match(editorStyles, /\.note-editor-generation-actions\s*\{/);
     assert.match(editorStyles, /\.note-editor-generation-partial\s*\{/);

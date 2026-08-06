@@ -150,7 +150,7 @@
 }
 
 .today-capture-wrap {
-  scroll-margin-top: 18px;
+  scroll-margin-top: calc(var(--workspace-sticky-top, 0px) + var(--workspace-sticky-height, 136px) + 18px);
   padding-top: 15px;
 }
 
@@ -678,7 +678,7 @@
 /* Ledger toolbar */
 
 .today-ledger-toolbar {
-  scroll-margin-top: 18px;
+  scroll-margin-top: calc(var(--workspace-sticky-top, 0px) + var(--workspace-sticky-height, 136px) + 18px);
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr) minmax(220px, 276px);
   align-items: center;
@@ -1365,7 +1365,7 @@
 
 .today-context-panel {
   position: sticky;
-  top: 22px;
+  top: calc(var(--workspace-sticky-top, 0px) + var(--workspace-sticky-height, 136px) + 22px);
   border-radius: 17px;
   padding: 18px;
   overflow: hidden;

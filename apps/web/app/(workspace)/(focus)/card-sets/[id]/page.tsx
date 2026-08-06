@@ -19,17 +19,19 @@ import {
   type CardSetStatus,
 } from "@/lib/api";
 import { useIsOwner } from "@/lib/use-current-user";
+import { compareCardSetMembers } from "@/lib/card-set-members";
 import { readPartialCardCoverageWarning, readPartialCardSetCoverageWarning } from "@/lib/card-coverage-warning";
 import { StatusChip, type StatusTone } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Icon } from "@/components/ui/icons";
 import { AccountMenu } from "@/components/account/AccountMenu";
 import { MemberNotice } from "@/components/settings/MemberNotice";
 import { StudyPaper } from "@/components/study/StudyPaper";
 import { EvidenceRail } from "@/components/study/EvidenceRail";
-import { EvidenceDrawer } from "@/components/EvidenceDrawer";
+import { EvidenceDialog } from "@/components/EvidenceDialog";
 
-type LifecycleAction = "accept" | "dismiss" | "regenerate" | null;
+type LifecycleAction = "dismiss" | "regenerate" | null;
 
 const CARD_SET_STATUS: Record<
   CardSetStatus,
@@ -60,6 +62,7 @@ export default function CardSetPage() {
   const [action, setAction] = useState<LifecycleAction>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmDismissOpen, setConfirmDismissOpen] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
 
@@ -194,27 +197,12 @@ export default function CardSetPage() {
     nextAction: Exclude<LifecycleAction, null>,
   ) => {
     if (!cardSetId || action) return;
-    if (
-      nextAction === "dismiss"
-      && !window.confirm("归档后，这组学习卡将退出当前学习流程。确认归档吗？")
-    ) {
-      return;
-    }
 
     setAction(nextAction);
     setActionMessage(null);
     setActionError(null);
     try {
-      if (nextAction === "accept") {
-        const result = await api.acceptCardSet(cardSetId);
-        const accepted =
-          result.acceptedArtifacts ?? result.acceptedArtifactCount;
-        setActionMessage(
-          accepted == null
-            ? "已接受整组学习卡，可以开始后续学习。"
-            : `已接受整组学习卡，共发布 ${accepted} 个学习产物。`,
-        );
-      } else if (nextAction === "dismiss") {
+      if (nextAction === "dismiss") {
         await api.dismissCardSet(cardSetId);
         setDetail((current) => current
           ? {
@@ -226,6 +214,7 @@ export default function CardSetPage() {
               })),
             }
           : current);
+        setConfirmDismissOpen(false);
         setActionMessage("这组学习卡已归档。");
       } else {
         const result = await api.regenerateCardSet(cardSetId);
@@ -237,11 +226,9 @@ export default function CardSetPage() {
       }
     } catch {
       setActionError(
-        nextAction === "accept"
-          ? "暂时无法接受这组学习卡，请稍后再试。"
-          : nextAction === "dismiss"
-            ? "暂时无法归档这组学习卡，请稍后再试。"
-            : "暂时无法创建重新生成任务，请稍后再试。",
+        nextAction === "dismiss"
+          ? "暂时无法归档这组学习卡，请稍后再试。"
+          : "暂时无法创建重新生成任务，请稍后再试。",
       );
     } finally {
       setAction(null);
@@ -293,7 +280,6 @@ export default function CardSetPage() {
     .find((warning) => warning !== null)
     ?? null;
   const isPartial = cardSet.status === "partial_ready" || Boolean(setWarning);
-  const canAccept = isOwner && cardSet.status === "active";
   const canChange =
     isOwner
     && cardSet.status !== "archived"
@@ -351,17 +337,6 @@ export default function CardSetPage() {
           </div>
 
           <div className="card-set-actions" aria-label="卡组操作">
-            {canAccept && (
-              <button
-                type="button"
-                className="is-primary"
-                disabled={Boolean(action)}
-                onClick={() => void runAction("accept")}
-              >
-                <Icon.Check aria-hidden="true" />
-                {action === "accept" ? "正在接受…" : "接受整组"}
-              </button>
-            )}
             {canChange && (
               <button
                 type="button"
@@ -377,7 +352,7 @@ export default function CardSetPage() {
                 type="button"
                 className="is-danger"
                 disabled={Boolean(action)}
-                onClick={() => void runAction("dismiss")}
+                onClick={() => setConfirmDismissOpen(true)}
               >
                 <Icon.Archive aria-hidden="true" />
                 {action === "dismiss" ? "正在归档…" : "归档"}
@@ -535,13 +510,27 @@ export default function CardSetPage() {
       </div>
 
       {activeEvidenceGroup && activeKeyPoint && (
-        <EvidenceDrawer
+        <EvidenceDialog
           open={Boolean(openKeyPointId)}
           onClose={() => setOpenKeyPointId(null)}
           claim={activeKeyPoint.claim}
           chips={activeEvidenceGroup.evidences}
         />
       )}
+
+      <ConfirmDialog
+        open={confirmDismissOpen}
+        title="归档这组学习卡？"
+        message="归档后，这组学习卡将退出当前学习流程，关联的卡片与复习安排也会一并归档。"
+        confirmLabel="确认归档"
+        cancelLabel="取消"
+        variant="archive"
+        loading={action === "dismiss"}
+        onCancel={() => {
+          if (action !== "dismiss") setConfirmDismissOpen(false);
+        }}
+        onConfirm={() => void runAction("dismiss")}
+      />
     </main>
   );
 }
@@ -637,24 +626,6 @@ function appendUniqueCardSetMembers(
       return true;
     }),
   ];
-}
-
-function compareCardSetMembers(
-  left: CardDetailResponse,
-  right: CardDetailResponse,
-): number {
-  const leftScope = left.card.scope === "overview" ? 0 : 1;
-  const rightScope = right.card.scope === "overview" ? 0 : 1;
-  if (leftScope !== rightScope) return leftScope - rightScope;
-  const leftOrdinal =
-    typeof left.card.ordinal === "number"
-      ? left.card.ordinal
-      : Number.MAX_SAFE_INTEGER;
-  const rightOrdinal =
-    typeof right.card.ordinal === "number"
-      ? right.card.ordinal
-      : Number.MAX_SAFE_INTEGER;
-  return leftOrdinal - rightOrdinal || left.card.id.localeCompare(right.card.id);
 }
 
 function formatDate(value: string): string {

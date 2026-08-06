@@ -10,7 +10,6 @@ import {
   getSchedulerPolicyVersion,
   isSchedulerPolicyV2,
   isCardRepairEnabled,
-  isCardGenerationV2Enabled,
 } from "./feature-flags.ts";
 import { isFSRSShadowEnabled } from "./fsrs-shadow.ts";
 
@@ -135,21 +134,6 @@ test("CARD_REPAIR_V1_ENABLED: false when set to 'false'", () => {
   });
 });
 
-test("CARD_GENERATION_V2_ENABLED: defaults off (fail-closed) with explicit true opt-in", () => {
-  withEnv({ CARD_GENERATION_V2_ENABLED: undefined }, () => {
-    assert.equal(isCardGenerationV2Enabled(), false);
-  });
-  withEnv({ CARD_GENERATION_V2_ENABLED: "1" }, () => {
-    assert.equal(isCardGenerationV2Enabled(), false);
-  });
-  withEnv({ CARD_GENERATION_V2_ENABLED: "false" }, () => {
-    assert.equal(isCardGenerationV2Enabled(), false);
-  });
-  withEnv({ CARD_GENERATION_V2_ENABLED: "true" }, () => {
-    assert.equal(isCardGenerationV2Enabled(), true);
-  });
-});
-
 // ─── FSRS_SHADOW_ENABLED (re-exported from fsrs-shadow.ts) ───────────────
 
 test("FSRS_SHADOW_ENABLED: defaults to false when unset", () => {
@@ -173,7 +157,6 @@ test("Default rollout: all v0.6 flags default off (fail-closed)", () => {
       RUBRIC_EVALUATION_V1_ENABLED: undefined,
       SCHEDULER_POLICY_VERSION: undefined,
       CARD_REPAIR_V1_ENABLED: undefined,
-      CARD_GENERATION_V2_ENABLED: undefined,
       FSRS_SHADOW_ENABLED: undefined,
     },
     () => {
@@ -181,7 +164,6 @@ test("Default rollout: all v0.6 flags default off (fail-closed)", () => {
       assert.equal(isRubricEvaluationEnabled(), false);
       assert.equal(isSchedulerPolicyV2(), false);
       assert.equal(isCardRepairEnabled(), false);
-      assert.equal(isCardGenerationV2Enabled(), false);
       assert.equal(isFSRSShadowEnabled(), false);
     },
   );

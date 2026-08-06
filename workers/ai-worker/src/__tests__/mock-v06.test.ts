@@ -3,6 +3,10 @@
  *
  * Tests generateValidationQuestion and evaluateRubric methods
  * added in v0.6 (计划 §7.1, §7.2).
+ *
+ * R5: Business methods removed from provider; tests now use
+ * generateValidationQuestionViaChat and evaluateRubricViaChat
+ * helpers from business-ai-ops.ts.
  */
 
 import assert from "node:assert/strict";
@@ -11,6 +15,10 @@ import { MockProvider } from "../lib/providers/mock.ts";
 import { generateValidationQuestionOutputSchema, evaluateRubricOutputSchema } from "@ailearn/shared";
 import { assessQuestionOutput } from "@ailearn/shared";
 import type { GenerateValidationQuestionInput, EvaluateRubricInput } from "@ailearn/shared";
+import {
+  generateValidationQuestionViaChat,
+  evaluateRubricViaChat,
+} from "../lib/business-ai-ops.ts";
 
 const provider = new MockProvider();
 
@@ -29,50 +37,50 @@ const validInput: GenerateValidationQuestionInput = {
 // ─── generateValidationQuestion ───────────────────────────────────────────
 
 test("MockProvider.generateValidationQuestion: returns valid output", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  const parsed = generateValidationQuestionOutputSchema.safeParse(result);
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  const parsed = generateValidationQuestionOutputSchema.safeParse(result.output);
   assert.ok(parsed.success, "output should pass schema validation");
 });
 
 test("MockProvider.generateValidationQuestion: has questionType", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  assert.ok(["explain", "example", "apply"].includes(result.questionType));
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  assert.ok(["explain", "example", "apply"].includes(result.output.questionType));
 });
 
 test("MockProvider.generateValidationQuestion: has question text", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  assert.ok(result.question.length > 0);
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  assert.ok(result.output.question.length > 0);
 });
 
 test("MockProvider.generateValidationQuestion: has 2-5 rubric items", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  assert.ok(result.rubricItems.length >= 2, "should have at least 2 rubric items");
-  assert.ok(result.rubricItems.length <= 5, "should have at most 5 rubric items");
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  assert.ok(result.output.rubricItems.length >= 2, "should have at least 2 rubric items");
+  assert.ok(result.output.rubricItems.length <= 5, "should have at most 5 rubric items");
 });
 
 test("MockProvider.generateValidationQuestion: at least one required item", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  const hasRequired = result.rubricItems.some((item) => item.required);
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  const hasRequired = result.output.rubricItems.some((item: { required: boolean }) => item.required);
   assert.ok(hasRequired, "should have at least one required rubric item");
 });
 
 test("MockProvider.generateValidationQuestion: all evidenceRefIds from allowlist", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  for (const item of result.rubricItems) {
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  for (const item of result.output.rubricItems) {
     assert.equal(item.evidenceRefId, "ev_1");
   }
 });
 
 test("MockProvider.generateValidationQuestion: keys are unique", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  const keys = result.rubricItems.map((item) => item.key);
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  const keys = result.output.rubricItems.map((item: { key: string }) => item.key);
   const uniqueKeys = new Set(keys);
   assert.equal(keys.length, uniqueKeys.size, "all keys should be unique");
 });
 
 test("MockProvider.generateValidationQuestion: weights are 1-3", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
-  for (const item of result.rubricItems) {
+  const result = await generateValidationQuestionViaChat(provider, validInput);
+  for (const item of result.output.rubricItems) {
     assert.ok(item.weight >= 1 && item.weight <= 3, `weight should be 1-3, got ${item.weight}`);
   }
 });
@@ -82,8 +90,8 @@ test("MockProvider.generateValidationQuestion: respects preferredType", async ()
     ...validInput,
     preferredType: "example",
   };
-  const result = await provider.generateValidationQuestion(input);
-  assert.equal(result.questionType, "example");
+  const result = await generateValidationQuestionViaChat(provider, input);
+  assert.equal(result.output.questionType, "example");
 });
 
 test("MockProvider.generateValidationQuestion: throws on no evidence refs", async () => {
@@ -92,7 +100,7 @@ test("MockProvider.generateValidationQuestion: throws on no evidence refs", asyn
     evidenceRefs: [],
   };
   await assert.rejects(
-    () => provider.generateValidationQuestion(input),
+    () => generateValidationQuestionViaChat(provider, input),
     /at least one evidence ref/,
   );
 });
@@ -101,15 +109,15 @@ test("MockProvider.generateValidationQuestion: abort signal throws", async () =>
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    () => provider.generateValidationQuestion(validInput, controller.signal),
+    () => generateValidationQuestionViaChat(provider, validInput, controller.signal),
     /aborted/,
   );
 });
 
 test("MockProvider.generateValidationQuestion: output passes safety gate", async () => {
-  const result = await provider.generateValidationQuestion(validInput);
+  const result = await generateValidationQuestionViaChat(provider, validInput);
   const safetyResult = assessQuestionOutput({
-    output: result,
+    output: result.output,
     claim: validInput.claim,
     quote: validInput.quote,
     allowedEvidenceRefIds: ["ev_1"],
@@ -141,45 +149,45 @@ const validRubricInput: EvaluateRubricInput = {
 };
 
 test("MockProvider.evaluateRubric: returns valid output", async () => {
-  const result = await provider.evaluateRubric(validRubricInput);
-  const parsed = evaluateRubricOutputSchema.safeParse(result);
+  const result = await evaluateRubricViaChat(provider, validRubricInput);
+  const parsed = evaluateRubricOutputSchema.safeParse(result.output);
   assert.ok(parsed.success, "output should pass schema validation");
 });
 
 test("MockProvider.evaluateRubric: itemResults match input items", async () => {
-  const result = await provider.evaluateRubric(validRubricInput);
-  assert.equal(result.itemResults.length, validRubricInput.rubricItems.length);
-  const inputIds = new Set(validRubricInput.rubricItems.map((item) => item.rubricItemId));
-  for (const itemResult of result.itemResults) {
+  const result = await evaluateRubricViaChat(provider, validRubricInput);
+  assert.equal(result.output.itemResults.length, validRubricInput.rubricItems.length);
+  const inputIds = new Set(validRubricInput.rubricItems.map((item: { rubricItemId: string }) => item.rubricItemId));
+  for (const itemResult of result.output.itemResults) {
     assert.ok(inputIds.has(itemResult.rubricItemId), `rubricItemId ${itemResult.rubricItemId} should be in input`);
   }
 });
 
 test("MockProvider.evaluateRubric: verdicts are valid", async () => {
-  const result = await provider.evaluateRubric(validRubricInput);
+  const result = await evaluateRubricViaChat(provider, validRubricInput);
   const validVerdicts = ["covered", "partial", "missing", "contradicted", "not_assessable"];
-  for (const item of result.itemResults) {
+  for (const item of result.output.itemResults) {
     assert.ok(validVerdicts.includes(item.verdict), `verdict should be valid, got ${item.verdict}`);
   }
 });
 
 test("MockProvider.evaluateRubric: confidence is 0-1", async () => {
-  const result = await provider.evaluateRubric(validRubricInput);
-  for (const item of result.itemResults) {
+  const result = await evaluateRubricViaChat(provider, validRubricInput);
+  for (const item of result.output.itemResults) {
     assert.ok(item.confidence >= 0 && item.confidence <= 1);
   }
 });
 
 test("MockProvider.evaluateRubric: has feedback", async () => {
-  const result = await provider.evaluateRubric(validRubricInput);
-  assert.ok(result.feedback.length > 0);
+  const result = await evaluateRubricViaChat(provider, validRubricInput);
+  assert.ok(result.output.feedback.length > 0);
 });
 
 test("MockProvider.evaluateRubric: abort signal throws", async () => {
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    () => provider.evaluateRubric(validRubricInput, controller.signal),
+    () => evaluateRubricViaChat(provider, validRubricInput, controller.signal),
     /aborted/,
   );
 });
@@ -189,8 +197,8 @@ test("MockProvider.evaluateRubric: high overlap answer gets covered verdicts", a
     ...validRubricInput,
     userAnswer: "缓存策略选择原则是当缓存值来源复杂时淘汰缓存而非更新，这样可以避免缓存与数据库之间的值不一致",
   };
-  const result = await provider.evaluateRubric(input);
-  const hasCovered = result.itemResults.some((item) => item.verdict === "covered");
+  const result = await evaluateRubricViaChat(provider, input);
+  const hasCovered = result.output.itemResults.some((item: { verdict: string }) => item.verdict === "covered");
   assert.ok(hasCovered, "high overlap answer should get at least one covered verdict");
 });
 
@@ -199,7 +207,7 @@ test("MockProvider.evaluateRubric: empty answer gets not_assessable", async () =
     ...validRubricInput,
     userAnswer: "不",
   };
-  const result = await provider.evaluateRubric(input);
-  const hasNotAssessable = result.itemResults.some((item) => item.verdict === "not_assessable");
+  const result = await evaluateRubricViaChat(provider, input);
+  const hasNotAssessable = result.output.itemResults.some((item: { verdict: string }) => item.verdict === "not_assessable");
   assert.ok(hasNotAssessable, "very short answer should get not_assessable");
 });

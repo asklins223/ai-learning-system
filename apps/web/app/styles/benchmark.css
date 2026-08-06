@@ -64,7 +64,7 @@
 
   .bench-note-section,
   .bench-keypoint {
-    scroll-margin-top: 78px;
+    scroll-margin-top: calc(var(--workspace-sticky-top, 60px) + var(--workspace-sticky-height, 130px) + 18px);
   }
 }
 
@@ -485,7 +485,7 @@
 
 .bench-sidebar {
   position: sticky;
-  top: 18px;
+  top: calc(var(--workspace-sticky-top, 0px) + var(--workspace-sticky-height, 136px) + 18px);
   display: flex;
   min-width: 0;
   align-self: start;
@@ -1814,7 +1814,7 @@
 
   .bench-mobile-sample-nav {
     position: sticky;
-    top: 0;
+    top: calc(var(--workspace-sticky-top, 0px) + var(--workspace-sticky-height, 160px));
     z-index: 6;
     display: block;
     margin-inline: -4px;
@@ -1876,7 +1876,7 @@
 
   .bench-note-section,
   .bench-keypoint {
-    scroll-margin-top: 78px;
+    scroll-margin-top: calc(var(--workspace-sticky-top, 60px) + var(--workspace-sticky-height, 130px) + 18px);
   }
 
   .bench-launch-card,

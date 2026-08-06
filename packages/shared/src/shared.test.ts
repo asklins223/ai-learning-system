@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  aiCredentialHint,
-  decryptAiCredential,
-  encryptAiCredential,
-  validateAiCredentialEncryptionKey,
-} from "./ai-credentials.ts";
-import {
   resolveDashScopeGenerationUrl,
   resolveDashScopeTextEndpoint,
   resolveOpenAIChatCompletionsUrl,
@@ -22,35 +16,6 @@ import {
   learningCardOutputSchema,
 } from "./schemas.ts";
 import { parseContent } from "./markdown-parser.ts";
-
-const HEX_KEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const BASE64_KEY = Buffer.from(HEX_KEY, "hex").toString("base64");
-
-describe("AI credential helpers", () => {
-  it("round-trips credentials and binds ciphertext to a user", () => {
-    const encrypted = encryptAiCredential("sk-private-value", "user-a", HEX_KEY);
-
-    assert.equal(decryptAiCredential(encrypted, "user-a", HEX_KEY), "sk-private-value");
-    assert.doesNotMatch(encrypted, /private-value/);
-    assert.throws(() => decryptAiCredential(encrypted, "user-b", HEX_KEY), /could not be decrypted/);
-  });
-
-  it("accepts exact hex/base64 keys and rejects permissive base64 garbage", () => {
-    assert.doesNotThrow(() => validateAiCredentialEncryptionKey(HEX_KEY));
-    assert.doesNotThrow(() => validateAiCredentialEncryptionKey(BASE64_KEY));
-    assert.throws(
-      () => validateAiCredentialEncryptionKey(`${BASE64_KEY.slice(0, -1)}!`),
-      /must be 32 bytes/,
-    );
-  });
-
-  it("does not expose a complete short secret in a hint", () => {
-    assert.equal(aiCredentialHint("sk-private-value"), "••••alue");
-    assert.equal(aiCredentialHint("abcd"), "••••");
-    assert.equal(aiCredentialHint("abc"), "••••");
-    assert.equal(aiCredentialHint(""), "••••");
-  });
-});
 
 describe("AI endpoint resolution", () => {
   it("adds terminal provider paths only once", () => {

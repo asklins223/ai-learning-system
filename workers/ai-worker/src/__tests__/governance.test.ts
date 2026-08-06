@@ -6,8 +6,8 @@
  * - detectAndSanitizePII
  * - sanitizePIIInObject
  *
- * 注意：checkAIConsent / getWorkspaceAIProvider / getWorkspaceAIPolicy /
- * enforcePrivacyGovernance / logAICall 依赖数据库，此处不测试。
+* 注意：checkAIConsent / getWorkspaceAIPolicy /
+* enforcePrivacyGovernance / logAICall 依赖数据库，此处不测试。
  */
 
 import assert from "node:assert/strict";
@@ -101,12 +101,20 @@ test("detectAndSanitizePII: 检测身份证号", () => {
   assert.ok(result.sanitizedText.includes("1***4"));
 });
 
-test("detectAndSanitizePII: 检测银行卡号（16-19位）", () => {
-  const text = "卡号 6225880212345678 用于支付";
+test("detectAndSanitizePII: 检测银行卡号（16-19位，Luhn 校验）", () => {
+  // QUAL-13: 银行卡号需要通过 Luhn 校验。6225880212345673 是 Luhn 有效号码。
+  const text = "卡号 6225880212345673 用于支付";
   const result = detectAndSanitizePII(text);
   assert.equal(result.hasPII, true);
   assert.ok(result.detectedTypes.includes("bank_card"));
-  assert.ok(result.sanitizedText.includes("6***8"));
+  assert.ok(result.sanitizedText.includes("6***3"));
+});
+
+test("detectAndSanitizePII: 非 Luhn 长数字不误判为银行卡号", () => {
+  // QUAL-13: 16-19位数字但不通过 Luhn 校验的（如时间戳、订单号）不应被脱敏
+  const text = "订单号 6225880212345678 时间戳 1700000000000000";
+  const result = detectAndSanitizePII(text);
+  assert.ok(!result.detectedTypes.includes("bank_card"));
 });
 
 test("detectAndSanitizePII: 同时检测多种 PII 类型", () => {
