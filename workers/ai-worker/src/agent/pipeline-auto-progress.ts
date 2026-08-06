@@ -191,14 +191,27 @@ export async function autoProgressAfterChildUnit(input: {
       );
     }
 
-    // parent Supervisor 直接终态（管道进入 VERIFY，无需恢复）
-    await db
+    // parent Supervisor 直接终态（管道进入 VERIFY，无需恢复）。
+    // 复核 should-fix:update 加 status='waiting_child' CAS 条件——防止 check-then-act
+    // 窗口内 resume 已把 parent 置 running 时被误终结;rowCount=0 则视为未推进,
+    // 交由 resume 恢复 parent。
+    const parentUpdate = await db
       .update(schema.cardGenerationUnits)
       .set({ status: "succeeded", finishedAt: new Date(), updatedAt: new Date() })
       .where(and(
         eq(schema.cardGenerationUnits.id, parentUnitId),
         eq(schema.cardGenerationUnits.workspaceId, workspaceId),
-      ));
+        eq(schema.cardGenerationUnits.status, "waiting_child"),
+      ))
+      .returning({ id: schema.cardGenerationUnits.id });
+
+    if (parentUpdate.length === 0) {
+      logger.warn(
+        { runId, parentUnitId },
+        "P1-2: parent 已被并发恢复(running)，不再终结；交由 resume 流程",
+      );
+      return false;
+    }
 
     return true;
   }

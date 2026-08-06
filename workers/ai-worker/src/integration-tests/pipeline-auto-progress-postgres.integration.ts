@@ -283,6 +283,26 @@ test("P1-6c: 并发调用 autoProgressAfterChildUnit（P1-2 场景）不创建�
   assert.equal(verifyJobs[0]?.count, 1, "并发下不得创建重复 verify job");
 });
 
+test("P1-2: parent 不在 waiting_child 时自动推进返回 false(不误终结 supervisor)", async () => {
+  const runId = "50000000-0000-4000-8000-000000000027";
+  const parentId = "60000000-0000-4000-8000-000000000027";
+  const childId = "70000000-0000-4000-8000-000000000027";
+  await seedRun({
+    runId, noteId: "30000000-0000-4000-8000-000000000027", versionId: "40000000-0000-4000-8000-000000000027", epoch: 1,
+    draftContentHash: "p1-2b-draft-hash", parentUnitId: parentId, childUnitId: childId,
+    report: { criticStatus: "passed", deterministicStatus: "passed" },
+  });
+  // 把 parent 改为 running(模拟 resume 已恢复)——自动推进应跳过终结
+  await admin`UPDATE card_generation_units SET status = 'running' WHERE id = ${parentId}`;
+
+  const progressed = await autoProgressAfterChildUnit({ job: makeJob(runId), runId, childUnitId: childId });
+  assert.equal(progressed, false, "parent 非 waiting_child 时不应自动推进(避免误终结)");
+
+  const [parent] = await admin<{ status: string }[]>`
+    SELECT status FROM card_generation_units WHERE id = ${parentId}`;
+  assert.equal(parent?.status, "running", "parent 不应被误置为 succeeded");
+});
+
 // ─── P1-4: Child Tasks Completed → 事件驱动恢复 parent（CAS）─────────────
 
 test("P1-4: child 全部终态 + parent waiting_child → resume 创建 resume job（CAS）", async () => {
