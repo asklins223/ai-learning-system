@@ -53,6 +53,8 @@ import {
   type CriticCandidateEntry,
 } from "./durable-pagination.ts";
 import { executeToolCall, type ToolExecutionContext, type ToolCallRequest } from "./tools/executor.ts";
+import { scheduleCriticForDraft } from "./tools/quality.ts";
+import { autoProgressAfterChildUnit } from "./pipeline-auto-progress.ts";
 import type { EvidenceEmbeddingProvider } from "./tools/evidence.ts";
 import type { RerankProvider } from "./reranker.ts";
 import { createEmbeddingProvider } from "../lib/ai-provider.ts";
@@ -965,6 +967,8 @@ export async function processToolResults(turnCtx: TurnExecutionContext): Promise
   const childTaskIds: string[] = [];
   let verificationRequested = false;
   let verificationSucceeded = false;
+  // P1-1：本 turn 是否由系统自动创建了 Critic(需强制 wait_for_children)
+  let autoCreatedCritic = false;
 
   for (const toolCall of outcome.toolCalls) {
     const toolRequest: ToolCallRequest = {
@@ -978,6 +982,31 @@ export async function processToolResults(turnCtx: TurnExecutionContext): Promise
     if (toolCall.name === "delegate_specialist" && toolResult.success) {
       const result = toolResult.result as { childTaskId?: string } | null;
       if (result?.childTaskId) childTaskIds.push(result.childTaskId);
+    }
+    // P1-1：Draft Created → 系统自动创建 Critic Unit。
+    // 不再依赖模型在下一 turn 调用 request_grounding_review。
+    // scheduleCriticForDraft 幂等：模型后续/auto-fallback 重复请求会命中已存在 unit。
+    if (toolCall.name === "submit_deck_draft" && toolResult.success) {
+      const result = toolResult.result as { draftId?: string; contentHash?: string } | null;
+      if (result?.draftId && result?.contentHash) {
+        const scheduled = await scheduleCriticForDraft({
+          workspaceId: job.workspaceId,
+          runId: payload.generationRunId,
+          agentUnitId: payload.agentUnitId,
+          requestedBy: job.requestedBy ?? "system",
+          draftId: result.draftId,
+          draftHash: result.contentHash,
+          budgetTracker,
+        });
+        if (scheduled && !scheduled.alreadyCompleted) {
+          childTaskIds.push(scheduled.criticTaskId);
+          autoCreatedCritic = true;
+          logger.info(
+            { runId: payload.generationRunId, draftId: result.draftId, criticTaskId: scheduled.criticTaskId },
+            "P1-1: submit_deck_draft 成功后系统自动创建 Critic",
+          );
+        }
+      }
     }
     if (toolCall.name === "request_grounding_review" && toolResult.success) {
       const result = toolResult.result as { criticTaskId?: string; alreadyCompleted?: boolean } | null;
@@ -1009,6 +1038,14 @@ export async function processToolResults(turnCtx: TurnExecutionContext): Promise
       "Supervisor 试图等待子任务但无子任务被创建（工具执行可能失败），继续循环",
     );
     outcome.nextAction = "continue";
+  }
+
+  // P1-1：submit_deck_draft 成功且系统自动创建了 Critic → 强制等待子任务。
+  // supervisor-loop 的 hasAsyncChild 只识别 delegate/request_grounding_review/
+  // request_repair，submit_deck_draft 不在其中，因此这里显式覆盖为 wait_for_children，
+  // 使本 turn 结束时 unit 置 waiting_child，Critic 完成后由 resume 恢复。
+  if (autoCreatedCritic && childTaskIds.length > 0 && outcome.nextAction !== "wait_for_children") {
+    outcome.nextAction = "wait_for_children";
   }
 
   logger.info(
@@ -1140,7 +1177,17 @@ export async function scheduleNextTurn(
             eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
           ));
         });
-        await resumeParentSupervisorIfNeeded(job.workspaceId, payload.agentUnitId, job.requestedBy ?? null);
+        // P1-2/P1-3：子 Agent 完成后系统自动推进（Critic passed → VERIFY；
+        // 新 draft 未评审 → 自动重新 Critic）。返回 true 表示已由系统推进，
+        // 无需走 resume 恢复 parent。
+        const autoProgressed = await autoProgressAfterChildUnit({
+          job,
+          runId: payload.generationRunId,
+          childUnitId: payload.agentUnitId,
+        });
+        if (!autoProgressed) {
+          await resumeParentSupervisorIfNeeded(job.workspaceId, payload.agentUnitId, job.requestedBy ?? null);
+        }
         void reconcileStuckSupervisors(job.workspaceId).catch(() => {});
         return { kind: "complete" };
       }
