@@ -394,8 +394,11 @@ export function shouldContinueLoop(
     return false;
   }
 
-  // BUG-93 修复：在创建新 turn job 之前预检 maxTurns，
-  // 避免创建注定在 reserveTurn 阶段失败的 turn。
+  // BUG-93 修复：在创建新 turn job 之前预检（兼容性保留）。
+  // 预算口径（2026-08-04 设计变更，见 plan §9-1）：角色级 maxTurns 已不作
+  // 执行检查，isRoleTurnsExhausted 恒为 false；防死循环由 run 级
+  // maxProviderCalls / runDeadline / token 上限兜底。此处仅保留调用以维持
+  // 未来若重新引入角色级限制时的检查位点。
   if (budgetTracker.isRoleTurnsExhausted("generation_supervisor")) {
     ctx.state = "needs_attention";
     return false;

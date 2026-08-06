@@ -133,6 +133,7 @@ version-check:
 verify: version-check
 	node --test .github/scripts/version-contract.test.mjs .github/scripts/release-manifest-contract.test.mjs .github/scripts/coverage-gate-lib.test.mjs .github/scripts/ci-workflow-contract.test.mjs .github/scripts/postgres-integration-lifecycle.test.mjs
 	node .github/scripts/verify-schema-mirror.mjs
+	node .github/scripts/verify-budget-contract.mjs
 	cd packages/shared && npm run typecheck && npm test
 	cd packages/db && npm run typecheck && npm test
 	cd packages/ai-quality && npm run typecheck && npm test && npm run pr-gate

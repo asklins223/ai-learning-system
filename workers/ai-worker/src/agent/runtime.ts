@@ -24,6 +24,7 @@ import type {
 } from "@ailearn/shared";
 import type { CapabilityBundle } from "../lib/capability-bundle.ts";
 import { logger } from "../lib/logger.ts";
+import { recordProviderTurnMetrics } from "../lib/metrics.ts";
 import type { AgentSession } from "./session.ts";
 import type { BudgetTracker } from "./budget.ts";
 import { enforceRequestTokenBudget, InputOverContextError } from "./request-packer.ts";
@@ -184,9 +185,22 @@ export class AgentRuntime {
     });
 
   // R5: bundle is the sole path — provider field has been removed.
+  const startedAt = Date.now();
   const result = await this.config.bundle.agentTurn.executeAgentTurn(request, signal);
-    logger.debug({ runId: ctx.runId, turnNo: ctx.turnNo, finishReason: result.finishReason, toolCallCount: result.toolCalls.length }, "Agent turn 完成（bundle）");
-      return result;
+  // P0-4：Agent 角色 provider 调用统一埋点（duration/token/finish_reason/truncated）。
+  // model 优先取 request.model（调用方可覆盖），缺省取 capability 快照的 modelId。
+  recordProviderTurnMetrics({
+    role: ctx.role,
+    model: request.model ?? this.config.bundle.capability.modelId,
+    durationMs: Date.now() - startedAt,
+    finishReason: result.finishReason,
+    promptTokens: result.usage?.promptTokens,
+    completionTokens: result.usage?.completionTokens,
+    cacheHitTokens: result.usage?.cacheHitTokens,
+    cacheMissTokens: result.usage?.cacheMissTokens,
+  });
+  logger.debug({ runId: ctx.runId, turnNo: ctx.turnNo, finishReason: result.finishReason, toolCallCount: result.toolCalls.length }, "Agent turn 完成（bundle）");
+  return result;
   }
 
 }

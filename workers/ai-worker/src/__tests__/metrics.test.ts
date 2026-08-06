@@ -23,6 +23,13 @@ import {
   providerCallsTotal,
   providerCallDurationSeconds,
   providerErrorsTotal,
+  providerInputTokensTotal,
+  providerOutputTokensTotal,
+  providerCacheHitTokensTotal,
+  providerCacheMissTokensTotal,
+  providerFinishReasonTotal,
+  providerResponseTruncatedTotal,
+  recordProviderTurnMetrics,
   categorizeError,
   startMetricsServer,
   JOB_TYPES,
@@ -57,7 +64,8 @@ test("JOB_STATUSES 包含全部 5 种状态", () => {
 });
 
 test("PROVIDER_OPERATIONS 包含全部外部模型调用操作（不含 parse_source）", () => {
-  assert.equal(PROVIDER_OPERATIONS.length, 4);
+  // P0-4：4 个非角色 key + 7 个 Agent 角色（Supervisor v1 全部角色）
+  assert.equal(PROVIDER_OPERATIONS.length, 11);
   assert.ok(PROVIDER_OPERATIONS.includes("align_evidence"));
   assert.ok(PROVIDER_OPERATIONS.includes("evaluate_validation"));
   assert.ok(PROVIDER_OPERATIONS.includes("evaluate_rubric"));
@@ -66,6 +74,21 @@ test("PROVIDER_OPERATIONS 包含全部外部模型调用操作（不含 parse_so
   assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("card_map"));
   assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("image_understanding"));
   assert.ok(!(PROVIDER_OPERATIONS as readonly string[]).includes("execute_card_agent_turn"));
+});
+
+test("PROVIDER_OPERATIONS 包含全部 Agent 角色（P0-4 allowlist 全角色）", () => {
+  const roles = [
+    "generation_supervisor",
+    "text_extractor",
+    "code_extractor",
+    "vision_specialist",
+    "deck_composer",
+    "grounding_critic",
+    "repairer",
+  ];
+  for (const role of roles) {
+    assert.ok(PROVIDER_OPERATIONS.includes(role as never), `missing role: ${role}`);
+  }
 });
 
 test("ERROR_CATEGORIES 包含全部 10 种错误分类", () => {
@@ -218,6 +241,45 @@ test("providerErrorsTotal 按 operation/error_category 正确递增", () => {
   providerErrorsTotal.labels("execute_card_agent_turn", "timeout").inc();
   providerErrorsTotal.labels("execute_card_agent_turn", "schema_failure").inc();
   providerErrorsTotal.labels("evaluate_validation", "auth_error").inc();
+  assert.ok(true);
+});
+
+test("recordProviderTurnMetrics 记录 token/finish_reason/truncated（P0-4）", () => {
+  // 正常结束：不触发 truncated
+  recordProviderTurnMetrics({
+    role: "generation_supervisor",
+    model: "model-x",
+    durationMs: 1200,
+    finishReason: "tool_calls",
+    promptTokens: 100,
+    completionTokens: 50,
+    cacheHitTokens: 30,
+    cacheMissTokens: 70,
+  });
+  providerFinishReasonTotal.labels("generation_supervisor", "tool_calls").inc();
+
+  // 截断结束：finishReason=length → provider_response_truncated 递增
+  recordProviderTurnMetrics({
+    role: "text_extractor",
+    model: "model-x",
+    durationMs: 800,
+    finishReason: "length",
+    promptTokens: 200,
+    completionTokens: 0,
+    cacheHitTokens: null,
+    cacheMissTokens: null,
+  });
+  providerResponseTruncatedTotal.labels("text_extractor").inc();
+  assert.ok(true);
+});
+
+test("provider 级指标 label 含 role/model（P0-4 可观测性）", () => {
+  providerInputTokensTotal.labels("vision_specialist", "vision-model").inc(10);
+  providerOutputTokensTotal.labels("vision_specialist", "vision-model").inc(20);
+  providerCacheHitTokensTotal.labels("deck_composer", "model-x").inc(5);
+  providerCacheMissTokensTotal.labels("deck_composer", "model-x").inc(15);
+  providerFinishReasonTotal.labels("grounding_critic", "stop").inc();
+  providerResponseTruncatedTotal.labels("repairer").inc();
   assert.ok(true);
 });
 

@@ -38,11 +38,30 @@ export const JOB_TYPES = [
 
 export const JOB_STATUSES = ["pending", "running", "succeeded", "failed", "dead"] as const;
 
+/**
+ * Provider 调用操作 allowlist。
+ *
+ * P0-4（实施计划 §5.0 P0-4 / §4.1）：
+ * 现状仅含 4 个非角色 key（align_evidence / evaluate_validation /
+ * evaluate_rubric / generate_validation_question）。Agent 类角色
+ * （Supervisor v1 的全部角色）的 provider 调用统一经
+ * AgentRuntime.executeTurn 执行，此处补充全部角色名，使
+ * duration / token / finish_reason 指标按角色可观测。
+ */
 export const PROVIDER_OPERATIONS = [
+  // 非 Agent 业务操作（既有）
   "align_evidence",
   "evaluate_validation",
   "evaluate_rubric",
   "generate_validation_question",
+  // Agent 角色（Supervisor Agent v1，与 card-agent-contracts.ts AgentRole 对齐）
+  "generation_supervisor",
+  "text_extractor",
+  "code_extractor",
+  "vision_specialist",
+  "deck_composer",
+  "grounding_critic",
+  "repairer",
 ] as const;
 
 export const ERROR_CATEGORIES = [
@@ -143,7 +162,89 @@ export const providerErrorsTotal = new Counter({
   registers: [registry],
 });
 
+// ─── Provider 级指标（P0-4，实施计划 §4.1） ────────────────────────────
+// 由 AgentRuntime.executeTurn 统一埋点（全部 Agent 角色 provider 调用入口），
+// 按 role / model / finish_reason 可观测。
+
+/** Provider 输入 token 计数器 */
+export const providerInputTokensTotal = new Counter({
+  name: "ailearn_provider_input_tokens_total",
+  help: "Total provider input tokens by role and model",
+  labelNames: ["role", "model"] as const,
+  registers: [registry],
+});
+
+/** Provider 输出 token 计数器 */
+export const providerOutputTokensTotal = new Counter({
+  name: "ailearn_provider_output_tokens_total",
+  help: "Total provider output tokens by role and model",
+  labelNames: ["role", "model"] as const,
+  registers: [registry],
+});
+
+/** Provider prompt cache 命中 token 计数器（B2） */
+export const providerCacheHitTokensTotal = new Counter({
+  name: "ailearn_provider_cache_hit_tokens_total",
+  help: "Total prompt cache hit tokens by role and model",
+  labelNames: ["role", "model"] as const,
+  registers: [registry],
+});
+
+/** Provider prompt cache 未命中 token 计数器（B2） */
+export const providerCacheMissTokensTotal = new Counter({
+  name: "ailearn_provider_cache_miss_tokens_total",
+  help: "Total prompt cache miss tokens by role and model",
+  labelNames: ["role", "model"] as const,
+  registers: [registry],
+});
+
+/** Provider finish reason 计数器（stop/tool_calls/length/content_filter/error） */
+export const providerFinishReasonTotal = new Counter({
+  name: "ailearn_provider_finish_reason_total",
+  help: "Total provider calls by role and finish reason",
+  labelNames: ["role", "finish_reason"] as const,
+  registers: [registry],
+});
+
+/** Provider 输出截断计数器（finishReason === "length"，质量信号） */
+export const providerResponseTruncatedTotal = new Counter({
+  name: "ailearn_provider_response_truncated_total",
+  help: "Total provider responses truncated due to max tokens by role",
+  labelNames: ["role"] as const,
+  registers: [registry],
+});
+
 // ─── 辅助函数 ───────────────────────────────────────────────────────────
+
+/**
+ * 记录一次 Agent 角色 provider 调用（P0-4 统一埋点）。
+ *
+ * 由 AgentRuntime.executeTurn 在 provider 调用成功后调用；
+ * role 取 AgentTurnRequest.role，model 取 request.model（缺省 provider
+ * 默认模型时由调用方传入）。truncated 由 finishReason === "length" 判定。
+ */
+export function recordProviderTurnMetrics(input: {
+  role: string;
+  model: string;
+  durationMs: number;
+  finishReason: string;
+  promptTokens: number | null | undefined;
+  completionTokens: number | null | undefined;
+  cacheHitTokens: number | null | undefined;
+  cacheMissTokens: number | null | undefined;
+}): void {
+  const { role, model } = input;
+  providerCallsTotal.labels(role, "success").inc();
+  providerCallDurationSeconds.labels(role).observe(input.durationMs / 1000);
+  providerFinishReasonTotal.labels(role, input.finishReason).inc();
+  if (input.finishReason === "length") {
+    providerResponseTruncatedTotal.labels(role).inc();
+  }
+  if (input.promptTokens != null) providerInputTokensTotal.labels(role, model).inc(input.promptTokens);
+  if (input.completionTokens != null) providerOutputTokensTotal.labels(role, model).inc(input.completionTokens);
+  if (input.cacheHitTokens != null) providerCacheHitTokensTotal.labels(role, model).inc(input.cacheHitTokens);
+  if (input.cacheMissTokens != null) providerCacheMissTokensTotal.labels(role, model).inc(input.cacheMissTokens);
+}
 
 /**
  * 将自由文本错误归类到 allowlist 分类。

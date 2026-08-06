@@ -535,6 +535,8 @@ export async function loadAgentRunPhaseContext(
         providerCallsUsed: budgetTracker.getUsage().providerCalls,
         providerCallsMax: budgetTracker.getBudget().maxProviderCalls,
         turnsUsed: session.getState().turnNo,
+        // 预算口径（2026-08-04）：角色级 maxTurns 仅常量保留、不作执行检查，
+        // 此字段仅作为信息展示给模型参考，不是硬限制（见 plan §9-1）。
         turnsMax: budgetTracker.getBudget().roles[role as AgentRole]?.maxTurns ?? 16,
         deadline: budgetTracker.getBudget().runDeadline,
       },

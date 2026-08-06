@@ -1302,30 +1302,3 @@ export const FORBIDDEN_OPERATIONS = [
   "dynamic_tool_creation",
 ] as const;
 export type ForbiddenOperation = (typeof FORBIDDEN_OPERATIONS)[number];
-
-// ─── 30. Generation Fingerprint（计划 §9.1） ────────────────────────────
-
-/**
- * generation fingerprint 覆盖所有版本、provider/model、governance、
- * sealed manifests、density 和 generation nonce。
- */
-export const generationFingerprintInputSchema = z.object({
-  engineMode: z.string(),
-  shellVersion: z.string(),
-  supervisorPolicyVersion: z.string(),
-  toolSchemaVersion: z.string(),
-  plannerVersion: z.string(),
-  verifierVersion: z.string(),
-  retrievalPolicyVersion: z.string(),
-  embeddingProfileVersion: z.string(),
-  resultContractVersion: z.string(),
-  providerId: z.string(),
-  modelId: z.string(),
-  governancePolicyVersion: z.string(),
-  blockManifestHash: z.string(),
-  assetManifestHash: z.string(),
-  titleSnapshot: z.string(),
-  density: z.string(),
-  generationNonce: z.string(),
-}).strict();
-export type GenerationFingerprintInput = z.infer<typeof generationFingerprintInputSchema>;
