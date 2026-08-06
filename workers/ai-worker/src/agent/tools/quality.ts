@@ -792,6 +792,19 @@ async function handleRequestVerification(
     };
   }
 
+  // security_review MEDIUM:模型伪造 draftHash 时 draft 为 undefined，
+  // 下方 draft.id 会抛 TypeError 并把 JS 错误原文返回给模型(内部信息泄漏)。
+  // 与 handleRequestGroundingReview 一致返回 draft not found。
+  if (!draft) {
+    return {
+      toolCallId: call.id,
+      toolName: call.name,
+      success: false,
+      result: null,
+      error: `draft not found: hash=${args.draftHash}`,
+    };
+  }
+
   // 检查 Critic 是否通过
   const [qualityReport] = await db
     .select({

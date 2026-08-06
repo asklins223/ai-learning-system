@@ -1162,8 +1162,11 @@ export async function scheduleNextTurn(
       if (role === "generation_supervisor") {
         logger.info({ runId: payload.generationRunId }, "Supervisor 完成，进入 VERIFY");
         const verifyUnitId = await createVerifyUnit(job, payload, runContext);
-        await createNextTurnJob(job, payload.generationRunId, verifyUnitId, payload.turnNo + 1);
-        return { kind: "continue", nextTurnNo: payload.turnNo + 1 };
+        // security_review MEDIUM:verify unit 是独立新 unit,其第一个 turn 固定为 1,
+        // 与 P1-2 自动路径(pipeline-auto-progress)统一。原 payload.turnNo+1 在并发时
+        // 会与自动路径产生两个不同 turnNo 的 verify job(同一 verify unit 双 job 竞态)。
+        await createNextTurnJob(job, payload.generationRunId, verifyUnitId, 1);
+        return { kind: "continue", nextTurnNo: 1 };
       } else {
         logger.info(
           { runId: payload.generationRunId, role, unitId: payload.agentUnitId },
