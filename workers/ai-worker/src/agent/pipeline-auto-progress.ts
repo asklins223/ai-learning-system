@@ -66,6 +66,26 @@ export async function autoProgressAfterChildUnit(input: {
   }
   const parentUnitId = child.parentUnitId;
 
+  // P1-2 should-fix(评审):仅当 parent 仍处于 waiting_child(等待子任务)时自动推进。
+  // 任意子 agent(含 extractor/repairer)完成都会进入本函数;若 parent 已不在等待态
+  // (如已 running 或 supervisor 正处理其他子任务),跳过自动推进,避免误判提前
+  // 终结 supervisor。加审计日志观察非预期路径。
+  const [parentRow] = await db
+    .select({ status: schema.cardGenerationUnits.status })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.id, parentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, workspaceId),
+    ))
+    .limit(1);
+  if (!parentRow || parentRow.status !== "waiting_child") {
+    logger.warn(
+      { runId, childUnitId, parentUnitId, parentStatus: parentRow?.status ?? "missing" },
+      "autoProgressAfterChildUnit: parent 不在 waiting_child，跳过系统自动推进，走 resume",
+    );
+    return false;
+  }
+
   // 查最新 draft（按 draftVersion 降序）
   const [latestDraft] = await db
     .select({
@@ -147,8 +167,22 @@ export async function autoProgressAfterChildUnit(input: {
       .returning();
 
     if (!unit) {
-      // 并发下已存在 verify unit（幂等命中）→ 直接按已推进处理
-      logger.info({ runId }, "P1-2: verify unit 已存在（并发幂等），跳过创建");
+      // 并发下已存在 verify unit(幂等命中)。
+      // P1-2 should-fix(评审):幂等命中分支也必须补建 job——若创建方在 insert 后、
+      // 插 job 前崩溃,verify unit 会悬挂无 job(死锁)。createNextTurnJob 本身幂等。
+      logger.info({ runId }, "P1-2: verify unit 已存在(并发幂等)，补建/确认 job");
+      const [existingVerify] = await db
+        .select({ id: schema.cardGenerationUnits.id })
+        .from(schema.cardGenerationUnits)
+        .where(and(
+          eq(schema.cardGenerationUnits.runId, runId),
+          eq(schema.cardGenerationUnits.workspaceId, workspaceId),
+          eq(schema.cardGenerationUnits.unitKey, `verify:${runId}`),
+        ))
+        .limit(1);
+      if (existingVerify) {
+        await createNextTurnJob(job, runId, existingVerify.id, 1);
+      }
     } else {
       await createNextTurnJob(job, runId, unit.id, 1);
       logger.info(

@@ -65,6 +65,9 @@ export async function createVerifyUnit(
   _runContext: Extract<RunContext, { kind: "active" }>,
 ): Promise<string> {
   const now = new Date();
+  // P1-2 should-fix(评审):加 onConflictDoNothing 幂等。P1-2 的 autoProgressAfterChildUnit
+  // 与旧路径(scheduleNextTurn complete)可能并发创建同 key(verify:{runId})的 unit,
+  // 无 onConflict 会撞唯一键(card_generation_units_run_unit_key_unique_idx)抛错。
   const [unit] = await db
     .insert(schema.cardGenerationUnits)
     .values({
@@ -81,13 +84,29 @@ export async function createVerifyUnit(
       status: "pending",
       scheduledAt: now,
     })
+    .onConflictDoNothing()
     .returning();
 
-  if (!unit) {
-    throw new Error("无法创建 verify unit");
+  if (unit) {
+    return unit.id;
   }
 
-  return unit.id;
+  // 幂等命中：并发下已存在 verify unit，返回既有 id（调用方 createNextTurnJob 幂等）。
+  const [existing] = await db
+    .select({ id: schema.cardGenerationUnits.id })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+      eq(schema.cardGenerationUnits.unitKey, `verify:${payload.generationRunId}`),
+    ))
+    .limit(1);
+
+  if (existing) {
+    return existing.id;
+  }
+
+  throw new Error("无法创建 verify unit");
 }
 
 /** 创建 Supervisor agent_run unit */

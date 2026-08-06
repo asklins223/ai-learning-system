@@ -1045,6 +1045,10 @@ export async function processToolResults(turnCtx: TurnExecutionContext): Promise
   // request_repair，submit_deck_draft 不在其中，因此这里显式覆盖为 wait_for_children，
   // 使本 turn 结束时 unit 置 waiting_child，Critic 完成后由 resume 恢复。
   if (autoCreatedCritic && childTaskIds.length > 0 && outcome.nextAction !== "wait_for_children") {
+    logger.warn(
+      { runId: payload.generationRunId, turnNo: payload.turnNo, prevNextAction: outcome.nextAction },
+      "P1-1: submit_deck_draft 自动创建 Critic，覆盖 nextAction 为 wait_for_children",
+    );
     outcome.nextAction = "wait_for_children";
   }
 
