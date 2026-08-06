@@ -263,6 +263,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: typecheck
     timeout-minutes: 15
+    env:
+      # Worker and API tests import db.ts at module load time, which creates
+      # a postgres connection pool.  The pool is lazy (no connection is made
+      # until a query runs), but the default URL uses the Docker Compose
+      # hostname "postgres" which does not resolve on CI runners and can cause
+      # DNS lookups to hang until the job timeout.  Setting these to a dummy
+      # URL ensures the pool is created without hanging; all db methods are
+      # mocked in unit tests so no real connection is ever attempted.
+      DATABASE_URL_WORKER: postgres://ci:ci@127.0.0.1:1/ci
+      DATABASE_URL_API: postgres://ci:ci@127.0.0.1:1/ci
     steps:
       - uses: actions/checkout@v4
         with:
