@@ -11,6 +11,9 @@
 import { and, eq, inArray } from "drizzle-orm";
 import {
   SupervisorRunStatus,
+  GenerationExecutionMode,
+  isFastPathEnabled,
+  isRunInFastBucket,
 } from "@ailearn/shared";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
@@ -26,6 +29,7 @@ import { executePrepare } from "./prepare.ts";
 import { persistEvidenceAndBundles, persistEvidenceEmbeddings } from "./evidence-persist.ts";
 import { appendAgentEvent } from "./specialist-persist.ts";
 import {
+  createFastExtractUnit,
   createSupervisorUnit,
   createNextTurnJob,
 } from "./unit-helpers.ts";
@@ -375,8 +379,28 @@ export async function executePreparePhase(
   // 创建 Supervisor agent_run unit 和对应的 job
   // R31 修复：传递实际请求的 density，不再在 createSupervisorUnit 中硬编码 "standard"。
   const prepareDensity = ((runDetail as Record<string, unknown>).density ?? "standard") as "overview" | "standard" | "complete";
-  const supervisorUnitId = await createSupervisorUnit(job, payload, runContext, prepareDensity);
-  await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
+
+  // P2 接线:Router 判定 fast 且灰度开启 → 创建 FAST_EXTRACT unit(不再走 Full Supervisor)。
+  // 默认关闭(fail-closed,§12.2);开启后按 FAST_PATH_ROLLOUT_PERCENT 分桶。
+  if (
+    routeDecision.mode === GenerationExecutionMode.FAST_TWO_STAGE_V1
+    && isFastPathEnabled()
+    && isRunInFastBucket(payload.generationRunId)
+  ) {
+    const fastUnitId = await createFastExtractUnit(job, payload, prepareDensity);
+    await createNextTurnJob(job, payload.generationRunId, fastUnitId, 1);
+    logger.info(
+      { runId: payload.generationRunId, mode: routeDecision.mode, unitId: fastUnitId },
+      "P2 接线: Router 分发到 FAST_EXTRACT(Fast 两阶段)",
+    );
+  } else {
+    const supervisorUnitId = await createSupervisorUnit(job, payload, runContext, prepareDensity);
+    await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
+    logger.info(
+      { runId: payload.generationRunId, mode: routeDecision.mode, unitId: supervisorUnitId },
+      "P2 接线: 继续 Full Supervisor(灰度关闭或 Router 非 Fast)",
+    );
+  }
 
   // 记录 Agent event
   await appendAgentEvent({

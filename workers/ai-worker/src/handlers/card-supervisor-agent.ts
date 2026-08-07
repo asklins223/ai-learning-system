@@ -71,6 +71,7 @@ import { handleTurnResult } from "../agent/unit-helpers.ts";
 import { executeVerifyPhase } from "../agent/verify-phase.ts";
 import { executePublishPhase } from "../agent/publish-phase.ts";
 // QUAL-02/PERF-04 拆分：PREPARE 阶段提取到独立模块
+import { executeFastExtractPhase, executeFastComposePhase } from "../agent/fast-path.ts";
 import { executePreparePhase } from "../agent/prepare-phase.ts";
 // QUAL-02/PERF-04 拆分（第八轮）：run context 加载、payload 解析
 import { extractAgentJobPayload, loadAndValidateRunContext } from "../agent/run-context.ts";
@@ -216,6 +217,13 @@ async function executeAgentPhase(
 
     case AgentUnitKind.DETERMINISTIC_VERIFY:
       return await executeVerifyPhase(job, payload, runContext, lease);
+
+    // P2 Fast 路径接线(审计缺口:Fast 组件此前零生产调用点;灰度开启才分发)
+    case AgentUnitKind.FAST_EXTRACT:
+      return await executeFastExtractPhase(job, payload, runContext, lease);
+
+    case AgentUnitKind.FAST_COMPOSE:
+      return await executeFastComposePhase(job, payload, runContext, lease);
 
     case AgentUnitKind.PUBLISH:
       return await executePublishPhase(job, payload, runContext, lease);

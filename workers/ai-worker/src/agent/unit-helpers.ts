@@ -115,8 +115,7 @@ export async function createSupervisorUnit(
   payload: AgentJobPayload,
   _runContext: Extract<RunContext, { kind: "active" }>,
   density: "overview" | "standard" | "complete" = "standard",
-): Promise<string> {
-  const now = new Date();
+): Promise<string> {  const now = new Date();
 
   // 冲突修复（retry/恢复重跑 prepare）：supervisor unit 的唯一身份是
   // (run_id, kind=agent_run, level=0, ordinal=1)。run 被 retry 或恢复检查点
@@ -213,6 +212,104 @@ export async function createPublishUnit(
     throw new Error("无法创建 publish unit");
   }
 
+  return unit.id;
+}
+
+/**
+ * P2 Fast 路径:P2-1 Router 判定 fast 时创建 FAST_EXTRACT unit。
+ * 身份:(run, kind=fast_extract, level=0, ordinal=10),幂等复用(与 createSupervisorUnit 同模式)。
+ */
+export async function createFastExtractUnit(
+  job: JobPayload,
+  payload: AgentJobPayload,
+  density: "overview" | "standard" | "complete" = "standard",
+): Promise<string> {
+  const now = new Date();
+  const unitKey = `fast_extract:${payload.generationRunId}`;
+  const [existing] = await db
+    .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.unitKey, unitKey),
+    ))
+    .limit(1);
+  if (existing) {
+    if (existing.status !== "pending" && existing.status !== "running") {
+      await db
+        .update(schema.cardGenerationUnits)
+        .set({ status: "pending", scheduledAt: now, updatedAt: now })
+        .where(eq(schema.cardGenerationUnits.id, existing.id));
+    }
+    return existing.id;
+  }
+  const [unit] = await db
+    .insert(schema.cardGenerationUnits)
+    .values({
+      workspaceId: job.workspaceId,
+      runId: payload.generationRunId,
+      parentUnitId: null,
+      kind: AgentUnitKind.FAST_EXTRACT,
+      level: 0,
+      ordinal: 10,
+      unitKey,
+      required: true,
+      inputManifest: { density },
+      inputHash: createHash("sha256").update(`fast_extract:${payload.generationRunId}`).digest("hex"),
+      tokenEstimate: 0,
+      status: "pending",
+      scheduledAt: now,
+    })
+    .returning();
+  if (!unit) throw new Error("无法创建 fast_extract unit");
+  return unit.id;
+}
+
+/** P2 Fast 路径:FAST_EXTRACT 完成后创建 FAST_COMPOSE unit(身份 (run, fast_compose, 0, 20)) */
+export async function createFastComposeUnit(
+  job: JobPayload,
+  payload: AgentJobPayload,
+): Promise<string> {
+  const now = new Date();
+  const unitKey = `fast_compose:${payload.generationRunId}`;
+  const [existing] = await db
+    .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.unitKey, unitKey),
+    ))
+    .limit(1);
+  if (existing) {
+    if (existing.status !== "pending" && existing.status !== "running") {
+      await db
+        .update(schema.cardGenerationUnits)
+        .set({ status: "pending", scheduledAt: now, updatedAt: now })
+        .where(eq(schema.cardGenerationUnits.id, existing.id));
+    }
+    return existing.id;
+  }
+  const [unit] = await db
+    .insert(schema.cardGenerationUnits)
+    .values({
+      workspaceId: job.workspaceId,
+      runId: payload.generationRunId,
+      parentUnitId: null,
+      kind: AgentUnitKind.FAST_COMPOSE,
+      level: 0,
+      ordinal: 20,
+      unitKey,
+      required: true,
+      inputManifest: {},
+      inputHash: createHash("sha256").update(`fast_compose:${payload.generationRunId}`).digest("hex"),
+      tokenEstimate: 0,
+      status: "pending",
+      scheduledAt: now,
+    })
+    .returning();
+  if (!unit) throw new Error("无法创建 fast_compose unit");
   return unit.id;
 }
 
