@@ -261,6 +261,19 @@ async function advancePlannedPipeline(
   }
 
   // 全部终态 → Gap Detection(§3.2):从正式候选统计各 bundle 决策
+  // review 修复:先取当前 replanVersion,replan 有上限(≤2 轮),超限 escalate 防无限循环
+  const [latestSpecialist] = await db
+    .select({ inputManifest: schema.cardGenerationUnits.inputManifest })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+    ))
+    .orderBy(desc(schema.cardGenerationUnits.createdAt))
+    .limit(1);
+  const prevManifest = (latestSpecialist?.inputManifest as Record<string, unknown>) ?? {};
+  const currentReplanVersion = Number(prevManifest.replanVersion ?? 1);
   const candidateRows = await db
     .select({ bundleId: schema.cardGenerationCandidates.bundleId, id: schema.cardGenerationCandidates.id })
     .from(schema.cardGenerationCandidates)
@@ -311,22 +324,18 @@ async function advancePlannedPipeline(
   if (affected.size > 0) {
     // Bounded Replan:仅为受影响 bundle 重跑(新 specialist units,replanVersion 递增)
     logger.warn(
-      { runId: payload.generationRunId, affected: [...affected], gaps: gaps.map((g) => g.code) },
+      { runId: payload.generationRunId, affected: [...affected], gaps: gaps.map((g) => g.code), replanVersion: currentReplanVersion },
       "PLAN: Gap 可 Replan(仅重跑受影响 bundle)",
     );
-    // replanVersion 从最新 specialist unit manifest 递增(plan unit 自身无 manifest)
-    const [latestSpecialist] = await db
-      .select({ inputManifest: schema.cardGenerationUnits.inputManifest })
-      .from(schema.cardGenerationUnits)
-      .where(and(
-        eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
-        eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
-        eq(schema.cardGenerationUnits.runId, payload.generationRunId),
-      ))
-      .orderBy(desc(schema.cardGenerationUnits.createdAt))
-      .limit(1);
-    const prevManifest = (latestSpecialist?.inputManifest as Record<string, unknown>) ?? {};
-    const replanVersion = Number(prevManifest.replanVersion ?? 1) + 1;
+    // review 修复:replan 上限(≤2 轮,累计 3 版),超限 escalate 防无限循环烧 provider
+    if (currentReplanVersion >= 3) {
+      logger.warn(
+        { runId: payload.generationRunId, replanVersion: currentReplanVersion, affected: [...affected] },
+        "PLAN: replan 达到上限,升级 Full Supervisor",
+      );
+      return await escalatePlanned(job, payload, runContext);
+    }
+    const replanVersion = currentReplanVersion + 1;
     const created: string[] = [];
     for (const [i, bundleId] of [...affected].sort().entries()) {
       const task = plan.bundleTasks.find((t) => t.bundleId === bundleId);
@@ -367,7 +376,7 @@ async function launchPlannedCompose(job: JobPayload, payload: AgentJobPayload): 
   return { kind: "complete" };
 }
 
-/** 升级 Full Supervisor(失败 Artifact 不发布) */
+/** 升级 Full Supervisor(失败 Artifact 不发布;plan unit 置 superseded 防 resume 双轨) */
 async function escalatePlanned(
   job: JobPayload,
   payload: AgentJobPayload,
@@ -375,6 +384,14 @@ async function escalatePlanned(
 ): Promise<AgentTurnExecutionResult> {
   const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
   await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-  await markPlanUnitFinished(job, payload, "succeeded");
+  // review should-fix:终结 plan unit(superseded),避免 specialist children 完成后
+  // resume 重入 plan 与 supervisor Full 双轨并发
+  await db
+    .update(schema.cardGenerationUnits)
+    .set({ status: "superseded", finishedAt: new Date(), updatedAt: new Date() })
+    .where(and(
+      eq(schema.cardGenerationUnits.id, payload.agentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+    ));
   return { kind: "complete" };
 }

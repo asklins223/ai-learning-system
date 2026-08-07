@@ -155,7 +155,9 @@ export async function executePlannedSpecialistPhase(
       { workspaceId: job.workspaceId, userId: job.requestedBy ?? null },
       async (tx) => {
         for (const [i, c] of out.candidates!.entries()) {
-          const localId = String(c.localId ?? `c${i + 1}`);
+          // review blocking 修复:localId 用 ${bundleId}:${localId} 复合键,
+          // 避免多 bundle 各自输出 c1/c2 在 compose 解析时跨 bundle 冲突
+          const localId = `${bundleId}:${String(c.localId ?? `c${i + 1}`)}`;
           const claim = String(c.claim ?? "");
           const sectionKey = String(c.sectionKey ?? "");
           await tx.insert(schema.cardGenerationCandidates).values({
@@ -247,13 +249,14 @@ export async function executePlannedComposePhase(
   }
 
   const [run] = await db
-    .select({ titleSnapshot: schema.cardGenerationRuns.titleSnapshot })
+    .select({ titleSnapshot: schema.cardGenerationRuns.titleSnapshot, budgetSnapshot: schema.cardGenerationRuns.budgetSnapshot })
     .from(schema.cardGenerationRuns)
     .where(and(
       eq(schema.cardGenerationRuns.id, payload.generationRunId),
       eq(schema.cardGenerationRuns.workspaceId, job.workspaceId),
     ))
     .limit(1);
+  const runBudget = (run?.budgetSnapshot as Record<string, unknown> | null) ?? {};
   // density 存于 prepare/plan unit 的 inputManifest(runs 表无 density 列)
   const [densityRow] = await db
     .select({ inputManifest: schema.cardGenerationUnits.inputManifest })
@@ -275,7 +278,7 @@ export async function executePlannedComposePhase(
     const res = await provider.chatCompletion(
       [
         { role: "system", content: PLANNED_COMPOSE_PROMPT },
-        { role: "user", content: `## 候选列表\n${candidatesText}\n\n卡片预算参考: ${density}` },
+        { role: "user", content: `## 候选列表\n${candidatesText}\n\n卡片预算参考: ${density}\n\n候选 id 已含 bundle 前缀(如 a:c1);引用时须原样使用完整 id。` },
       ],
       { temperature: 0.2, maxTokens: 16_384 },
     );
@@ -376,14 +379,14 @@ export async function executePlannedComposePhase(
       draftId: draft.id,
       draftHash: draft.contentHash,
       budgetTracker: new BudgetTracker({
-        maxProviderCalls: 60,
-        maxInputTokens: 2_000_000,
-        maxOutputTokens: 500_000,
-        roles: {},
-        maxEmbeddingTokens: 0,
-        maxParallelTasks: 0,
-        runDeadline: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-        costCap: 0,
+        maxProviderCalls: Number(runBudget.maxProviderCalls ?? 60),
+        maxInputTokens: Number(runBudget.maxInputTokens ?? 2_000_000),
+        maxOutputTokens: Number(runBudget.maxOutputTokens ?? 500_000),
+        roles: (runBudget.roles as Record<string, unknown>) ?? {},
+        maxEmbeddingTokens: Number(runBudget.maxEmbeddingTokens ?? 0),
+        maxParallelTasks: Number(runBudget.maxParallelTasks ?? 0),
+        runDeadline: String(runBudget.runDeadline ?? new Date(Date.now() + 30 * 60 * 1000).toISOString()),
+        costCap: Number(runBudget.costCap ?? 0),
       }),
     });
     await markFinished(job, payload, "succeeded");
@@ -405,6 +408,27 @@ async function escalateToFull(
 ): Promise<AgentTurnExecutionResult> {
   const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
   await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
+  // review should-fix:specialist 失败升级时,如 parent 是 plan unit 也一并终结,
+  // 避免 plan 经 resume 重入与 supervisor Full 双轨并发
+  if (payload.agentUnitId) {
+    const [parent] = await db
+      .select({ parentUnitId: schema.cardGenerationUnits.parentUnitId })
+      .from(schema.cardGenerationUnits)
+      .where(and(
+        eq(schema.cardGenerationUnits.id, payload.agentUnitId),
+        eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      ))
+      .limit(1);
+    if (parent?.parentUnitId) {
+      await db
+        .update(schema.cardGenerationUnits)
+        .set({ status: "superseded", finishedAt: new Date(), updatedAt: new Date() })
+        .where(and(
+          eq(schema.cardGenerationUnits.id, parent.parentUnitId),
+          eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+        ));
+    }
+  }
   await markFinished(job, payload, "succeeded");
   return { kind: "complete" };
 }

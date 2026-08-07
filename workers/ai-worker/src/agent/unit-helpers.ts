@@ -409,7 +409,7 @@ export async function createPlannedSpecialistUnit(
       parentUnitId: planUnitId,
       kind: AgentUnitKind.PLANNED_SPECIALIST,
       level: 0,
-      ordinal: 30 + input.waveNo * 10 + input.bundleOrdinal,
+      ordinal: 30 + input.waveNo * 100 + input.bundleOrdinal,
       unitKey,
       required: true,
       inputManifest: {
