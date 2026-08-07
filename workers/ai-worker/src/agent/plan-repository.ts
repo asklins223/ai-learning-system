@@ -44,6 +44,8 @@ export async function insertPlanRecord(
   // ON CONFLICT DO NOTHING 不使事务 aborted(PG 23505 会 abort 事务,
   // 无法在事务内重试),冲突时返回空行 → 重新尝试(最多 3 次)。
   // 与 P1-6 CAS 语义一致(乐观并发 + 唯一约束兑底)。
+  // 注意:重试依赖 READ COMMITTED 隔离级别(默认),每次语句取新快照、
+  // 能看到并发事务已提交的行;若未来改隔离级别需重新评估重试有效性。
   const contentHash = computePlanContentHash(plan);
   for (let attempt = 0; attempt < 3; attempt++) {
     const rows = await tx.execute<{ id: string; version: number }>(sql`

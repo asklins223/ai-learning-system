@@ -1,7 +1,7 @@
 -- 0071: 补齐 0068/0069/0070 遗漏的 least-privilege GRANT(review should-fix)
 -- 对照 0044:399-407 模式:按角色存在性授权,保证 roles.sql 未重放前角色也可用。
 -- ailearn_api:读写 card_generation_plans / provisional_candidates(API 层编排/查询);
--- ailearn_worker:写 plan/候选(生成流程),读取无需 SELECT(经 RLS workspace 隔离)。
+-- ailearn_worker:写 plan/候选(生成流程)并读取 plan(loadLatestPlan),经 RLS workspace 隔离。
 
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ailearn_api') THEN
