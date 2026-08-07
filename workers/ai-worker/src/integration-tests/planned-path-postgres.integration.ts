@@ -27,11 +27,11 @@ const admin = postgres(adminUrl, { max: 4 });
 
 const USER_ID = "10000000-0000-4000-8000-000000000023";
 const WORKSPACE_ID = "20000000-0000-4000-8000-000000000023";
-const RUN_ID = "50000000-0000-4000-8000-000000000091";
-const PLAN_UNIT_ID = "60000000-0000-4000-8000-000000000091";
+const RUN_ID = "50000000-0000-4000-8000-000000000098";
+const PLAN_UNIT_ID = "60000000-0000-4000-8000-000000000098";
 
 const job: JobPayload = {
-  id: "70000000-0000-4000-8000-000000000091",
+  id: "70000000-0000-4000-8000-000000000098",
   type: "execute_card_agent_turn",
   workspaceId: WORKSPACE_ID,
   requestedBy: USER_ID,
@@ -55,6 +55,8 @@ async function seed(): Promise<void> {
   await admin.begin(async (tx) => {
     await tx`DELETE FROM card_generation_units WHERE run_id = ${RUN_ID}`;
     await tx`DELETE FROM card_generation_runs WHERE id = ${RUN_ID}`;
+    // 清理同 idempotency key 的历史残留(不同 run id 的旧版 seed 数据)
+    await tx`DELETE FROM card_generation_runs WHERE request_idempotency_key = 'p3-planned-it'`;
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, 'p3-planned@example.invalid', 'unused')
       ON CONFLICT (id) DO NOTHING`;
@@ -64,11 +66,11 @@ async function seed(): Promise<void> {
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO notes
       (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES ('30000000-0000-4000-8000-000000000091', ${WORKSPACE_ID}, 't', ${USER_ID}, 1)
+      VALUES ('30000000-0000-4000-8000-000000000098', ${WORKSPACE_ID}, 't', ${USER_ID}, 1)
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions
       (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES ('40000000-0000-4000-8000-000000000091', '30000000-0000-4000-8000-000000000091',
+      VALUES ('40000000-0000-4000-8000-000000000098', '30000000-0000-4000-8000-000000000098',
         ${WORKSPACE_ID}, 1, '{"blocks":[]}'::jsonb, 'h', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO card_generation_runs (
@@ -78,8 +80,8 @@ async function seed(): Promise<void> {
         block_manifest, asset_manifest, status, stage, state_version,
         next_event_sequence, retryable, required_units, budget_snapshot
       ) VALUES (
-        ${RUN_ID}, ${WORKSPACE_ID}, '30000000-0000-4000-8000-000000000091',
-        '40000000-0000-4000-8000-000000000091', ${USER_ID},
+        ${RUN_ID}, ${WORKSPACE_ID}, '30000000-0000-4000-8000-000000000098',
+        '40000000-0000-4000-8000-000000000098', ${USER_ID},
         'p3-planned-it', 'p3-planned-fp', 1, 't', 'h', 'b', 'a',
         '[]'::jsonb, '[]'::jsonb, 'queued', 'queued', 1, 1, true, 1,
         ${admin.json({ roles: {}, maxProviderCalls: 10, maxInputTokens: 1000, maxOutputTokens: 1000, maxEmbeddingTokens: 0, maxParallelTasks: 0, runDeadline: "2030-01-01T00:00:00.000Z", costCap: 0 })}
