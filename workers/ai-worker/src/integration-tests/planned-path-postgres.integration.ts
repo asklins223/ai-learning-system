@@ -35,7 +35,9 @@ const job: JobPayload = {
   type: "execute_card_agent_turn",
   workspaceId: WORKSPACE_ID,
   requestedBy: USER_ID,
-} as JobPayload;
+  payload: {},
+  leaseToken: "it-lease",
+} as unknown as JobPayload;
 
 const payload: AgentJobPayload = {
   generationRunId: RUN_ID,
