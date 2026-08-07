@@ -133,20 +133,23 @@ test("worker fences and atomically publishes a run-backed generation", async () 
   await processJob(claimed[0]!);
 
   // 多轮 worker 循环语义:supervisor 流程会产生多个 turn job,
-  // 循环 claim+process 直到 run 到达终态(或超时上限)
-  let guard = 0;
-  while (guard++ < 30) {
+  // 循环 claim+process 直到 run 到达终态(或 30s 总耗时上限)
+  const loopDeadline = Date.now() + 30_000;
+  while (Date.now() < loopDeadline) {
     const [runState] = await admin<{ status: string }[]>`
       SELECT status FROM card_generation_runs WHERE id = ${RUN_ID}
     `;
     if (runState && ["succeeded", "failed", "needs_attention", "cancelled"].includes(runState.status)) break;
     const next = await claimJobs(undefined, 5);
     if (next.length === 0) {
-      if (guard > 10) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
       continue;
     }
-    for (const job of next) await processJob(job);
+    // review should-fix:只处理本 run 的 job(claim 是全局跨 workspace 的)
+    for (const job of next) {
+      if (job.payload.generationRunId !== RUN_ID) continue;
+      await processJob(job);
+    }
   }
 
   const [run] = await admin<{
