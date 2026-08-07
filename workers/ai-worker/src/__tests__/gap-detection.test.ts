@@ -178,3 +178,30 @@ test("affectedBundleIds covers per-bundle and global gaps", () => {
   assert.ok(affected.has("b1"));
   assert.ok(affected.has("b2"), "全局 gap 影响全部 bundle");
 });
+
+test("no_candidate 明确决策不触发 bundle_no_decision(遗留项①语义)", () => {
+  const p = plan([{ id: "b1", specialist: "text_extractor", focus: "机器学习" }]);
+  const gaps = detectGaps(ctx({
+    plan: p,
+    outcomes: {
+      b1: { hasDecision: true, decisionKind: "no_candidate", candidateCount: 0, protocolErrors: [], evidenceRefIds: [] },
+    },
+  }));
+  assert.equal(gaps.length, 0, "明确 no_candidate 决策 = 已覆盖,不 replan");
+});
+
+test("no_candidate 与 candidate 混合:未覆盖 bundle 仍触发", () => {
+  const p = plan([
+    { id: "b1", specialist: "text_extractor", focus: "A" },
+    { id: "b2", specialist: "text_extractor", focus: "B" },
+  ]);
+  const gaps = detectGaps(ctx({
+    plan: p,
+    outcomes: {
+      b1: { hasDecision: true, decisionKind: "no_candidate", candidateCount: 0, protocolErrors: [], evidenceRefIds: [] },
+      b2: { hasDecision: false, protocolErrors: [], evidenceRefIds: [], candidateCount: 0 },
+    },
+  }));
+  assert.ok(gaps.some((g) => g.code === "bundle_no_decision" && g.bundleId === "b2"), "b2 无决策仍触发");
+  assert.ok(!gaps.some((g) => g.bundleId === "b1"), "b1 no_candidate 不触发");
+});

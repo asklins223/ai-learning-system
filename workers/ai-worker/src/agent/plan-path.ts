@@ -275,31 +275,43 @@ async function advancePlannedPipeline(
   const prevManifest = (latestSpecialist?.inputManifest as Record<string, unknown>) ?? {};
   const currentReplanVersion = Number(prevManifest.replanVersion ?? 1);
   const candidateRows = await db
-    .select({ bundleId: schema.cardGenerationCandidates.bundleId, id: schema.cardGenerationCandidates.id })
+    .select({
+      bundleId: schema.cardGenerationCandidates.bundleId,
+      validationStatus: schema.cardGenerationCandidates.validationStatus,
+      candidateKind: schema.cardGenerationCandidates.candidateKind,
+    })
     .from(schema.cardGenerationCandidates)
     .where(and(
       eq(schema.cardGenerationCandidates.workspaceId, job.workspaceId),
       eq(schema.cardGenerationCandidates.runId, payload.generationRunId),
     ));
   const countByBundle = new Map<string, number>();
+  const noCandidateByBundle = new Map<string, number>();
   for (const r of candidateRows) {
     const bundleId = r.bundleId ?? "unknown";
-    countByBundle.set(bundleId, (countByBundle.get(bundleId) ?? 0) + 1);
+    if (r.validationStatus === "rejected" && r.candidateKind === "no_candidate") {
+      noCandidateByBundle.set(bundleId, (noCandidateByBundle.get(bundleId) ?? 0) + 1);
+    } else if (r.validationStatus === "accepted") {
+      countByBundle.set(bundleId, (countByBundle.get(bundleId) ?? 0) + 1);
+    }
   }
 
   const outcomes: Record<string, SpecialistOutcome> = {};
   let decidedBundles = 0;
   for (const task of plan.bundleTasks) {
     const candidateCount = countByBundle.get(task.bundleId) ?? 0;
+    const noCandidateCount = noCandidateByBundle.get(task.bundleId) ?? 0;
+    // 遗留项①:明确 no_candidate 决策视为 hasDecision(不触发 bundle_no_decision replan)
+    const hasDecision = candidateCount > 0 || noCandidateCount > 0;
     outcomes[task.bundleId] = {
-      hasDecision: candidateCount > 0,
-      decisionKind: candidateCount > 0 ? "candidate" : undefined,
+      hasDecision,
+      decisionKind: candidateCount > 0 ? "candidate" : noCandidateCount > 0 ? "no_candidate" : undefined,
       candidateCount,
       protocolErrors: [],
       evidenceRefIds: [],
       finishReason: "complete",
     };
-    if (candidateCount > 0) decidedBundles += 1;
+    if (hasDecision) decidedBundles += 1;
   }
   const survivingCoverage = plan.bundleTasks.length > 0 ? decidedBundles / plan.bundleTasks.length : 1;
 

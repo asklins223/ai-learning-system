@@ -180,12 +180,38 @@ export async function executePlannedSpecialistPhase(
             originAgentEventKey: `planned_specialist:${payload.agentUnitId}:rv${replanVersion}`,
           }).onConflictDoNothing();
         }
+        // 遗留项①:no_candidate 决策持久化——模型明确"该 bundle 无候选/证据不足"时
+        // 写入 rejected 占位候选(candidateKind=no_candidate),gap-detection 视为
+        // hasDecision=true/decisionKind=no_candidate,不再对该 bundle 反复 replan
+        for (const [i, d] of (out.noCandidateDecisions ?? []).entries()) {
+          const reason = String(d.reason ?? "no_candidate");
+          if (reason !== "no_candidate" && reason !== "insufficient_evidence") continue;
+          await tx.insert(schema.cardGenerationCandidates).values({
+            workspaceId: job.workspaceId,
+            runId: payload.generationRunId,
+            unitId: payload.agentUnitId,
+            localOrdinal: 10_000 + i,
+            localId: `${bundleId}:no-candidate-${i}`,
+            claim: "",
+            normalizedClaimHash: createHash("sha256").update(`no-candidate:${bundleId}:${i}`, "utf8").digest("hex"),
+            topic: String(d.detail ?? ""),
+            sectionKey: "",
+            cognitiveType: "concept",
+            importance: "low",
+            difficulty: "low",
+            validationStatus: "rejected",
+            candidateKind: "no_candidate",
+            bundleId,
+            primarySection: "",
+            originAgentEventKey: `planned_specialist:${payload.agentUnitId}:rv${replanVersion}`,
+          }).onConflictDoNothing();
+        }
       },
     );
 
     logger.info(
-      { runId: payload.generationRunId, bundleId, candidateCount: out.candidates.length, replanVersion },
-      "PLANNED_SPECIALIST: 候选已写入",
+      { runId: payload.generationRunId, bundleId, candidateCount: out.candidates.length, noCandidateCount: (out.noCandidateDecisions ?? []).length, replanVersion },
+      "PLANNED_SPECIALIST: 候选/no_candidate 已写入",
     );
     await markFinished(job, payload, "succeeded");
     return { kind: "complete" };
@@ -242,6 +268,8 @@ export async function executePlannedComposePhase(
     .where(and(
       eq(schema.cardGenerationCandidates.workspaceId, job.workspaceId),
       eq(schema.cardGenerationCandidates.runId, payload.generationRunId),
+      // 遗留项①:no_candidate 占位(rejected)不参与组合
+      eq(schema.cardGenerationCandidates.validationStatus, "accepted"),
     ));
   if (candidates.length === 0) {
     logger.warn({ runId: payload.generationRunId }, "PLANNED_COMPOSE: 无候选,升级 Full");
