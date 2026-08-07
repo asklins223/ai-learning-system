@@ -891,9 +891,10 @@ export async function persistRepairPatches(
   const draftVersion = (repairVersionResult?.value ?? 0) + 1;
 
   // 插入新 Draft
-  // security MEDIUM(0072):producedByEventKey=repair:${agentUnitId} 在同一 repair unit
-  // 重跑时复用;0072 唯一约束兜底后冲突即静默跳过(该 draft 已存在,版本语义一致)
-  await db.insert(schema.cardGenerationDrafts).values({
+  // security MEDIUM(0072)+ review should-fix:producedByEventKey=repair:${agentUnitId}
+  // 同一 repair unit 重跑时复用;onConflictDoNothing 限定 0072 唯一键 target,
+  // 避免吞掉 (workspace,run,draft_version) 并发冲突(后者应抛错→回滚→重试自愈)
+  const [repairDraft] = await db.insert(schema.cardGenerationDrafts).values({
     workspaceId,
     runId,
     draftVersion,
@@ -909,7 +910,9 @@ export async function persistRepairPatches(
     cardBudget: baseDraft.cardBudget,
     baseLedgerHash: baseDraft.baseLedgerHash,
     summarySupportCandidateIds: baseDraft.summarySupportCandidateIds,
-  }).onConflictDoNothing();
+  }).onConflictDoNothing({
+    target: [schema.cardGenerationDrafts.workspaceId, schema.cardGenerationDrafts.runId, schema.cardGenerationDrafts.producedByEventKey],
+  }).returning();
 
   // 失效旧 Quality Report（新 draftHash 使旧 report 失效）
   // R40 修复：与 deck-draft.ts 的 handleApplyDraftPatch (R36 修复) 保持一致。
@@ -927,8 +930,10 @@ export async function persistRepairPatches(
   ));
 
   logger.info(
-    { runId, agentUnitId, patchCount: patches.length, newDraftVersion: draftVersion, newDraftHash: patchedHash },
-    "Repair patches 已持久化，新 Draft 已创建",
+    { runId, agentUnitId, patchCount: patches.length, newDraftVersion: draftVersion, newDraftHash: patchedHash, draftReused: !repairDraft },
+    repairDraft
+      ? "Repair patches 已持久化，新 Draft 已创建"
+      : "Repair patches 已持久化,Draft 已存在(0072 幂等命中,跳过重建)",
   );
 }
 

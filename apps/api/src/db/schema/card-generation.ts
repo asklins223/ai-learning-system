@@ -596,6 +596,9 @@ export const cardGenerationDrafts = pgTable(
       .on(t.workspaceId, t.id),
     runVersionUnique: uniqueIndex("card_generation_drafts_run_version_unique_idx")
       .on(t.workspaceId, t.runId, t.draftVersion),
+    // 0072(migration)唯一约束镜像:Fast/Planned/Repair draft 幂等 DB 兜底
+    producedByEventKeyUnique: uniqueIndex("card_generation_drafts_produced_by_event_key_unique_idx")
+      .on(t.workspaceId, t.runId, t.producedByEventKey),
     runHashIdx: index("card_generation_drafts_run_hash_idx")
       .on(t.workspaceId, t.runId, t.contentHash),
   }),
