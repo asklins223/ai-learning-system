@@ -93,11 +93,12 @@ export async function executePreparePhase(
   // P2-1：Complexity Router（先统计不切换）。
   // 依据内容特征确定性判定执行模式，仅落库（execution_mode / routing_reason），
   // 不改变实际执行路径——现状仍走 Full Supervisor。
+  // review should-fix:formula 检测排除 code 块(代码中 $VAR/$1 会误判 has_formula)。
   const routeDecision = computeComplexityRoute({
     density: ((runDetail as Record<string, unknown>).density as string) ?? "standard",
     blockCount: blocks.length,
     imageCount: blocks.filter((b) => b.type === "image").length,
-    formulaCount: blocks.filter((b) => /\$\$[\s\S]+?\$\$|\$[^$\n]+\$/.test(b.content)).length,
+    formulaCount: blocks.filter((b) => b.type !== "code" && /\$\$[\s\S]+?\$\$|\$[^$\n]+\$/.test(b.content)).length,
     codeCount: blocks.filter((b) => b.type === "code").length,
     totalChars: blocks.reduce((sum, b) => sum + b.content.length, 0),
   });
