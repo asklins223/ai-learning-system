@@ -191,7 +191,7 @@ export async function executePlannedSpecialistPhase(
             runId: payload.generationRunId,
             unitId: payload.agentUnitId,
             localOrdinal: 10_000 + i,
-            localId: `${bundleId}:no-candidate-${i}`,
+            localId: `${bundleId}:__no_candidate__${i}`,
             claim: "",
             normalizedClaimHash: createHash("sha256").update(`no-candidate:${bundleId}:${i}`, "utf8").digest("hex"),
             topic: String(d.detail ?? ""),
