@@ -30,6 +30,7 @@ import type { JobPayload } from "../handlers/index.ts";
 import { executePrepare } from "./prepare.ts";
 import { persistEvidenceAndBundles, persistEvidenceEmbeddings } from "./evidence-persist.ts";
 import { appendAgentEvent } from "./specialist-persist.ts";
+import { checkIncrementalReuse } from "./incremental-reuse.ts";
 import {
   createFastExtractUnit,
   createPlanUnit,
@@ -350,9 +351,26 @@ export async function executePreparePhase(
     // 更新 run 状态为 running，写入 budget/engine 信息
     // R3 fix: Also store vision fingerprint in providerSnapshot for drift detection.
     const existingSnapshot = (runDetail.providerSnapshot as Record<string, unknown> | null) ?? {};
+    // P5-4 接入:Note Version Diff(增量复用数据源;真实版本迭代场景生效,
+    // 无上一版本 → hasPrevious=false 走全量路径)
+    let incremental: Record<string, unknown> | null = null;
+    try {
+      const inc = await checkIncrementalReuse(job.workspaceId, payload.generationRunId);
+      if (inc.hasPrevious) {
+        incremental = inc as unknown as Record<string, unknown>;
+        logger.info(
+          { runId: payload.generationRunId, changedSpans: inc.changedSpanCount, reuseRatio: inc.reuseRatio },
+          "P5: Note 版本增量检查(上一版本存在,可复用未变化 span)",
+        );
+      }
+    } catch (err) {
+      // 增量检查失败不阻塞生成(降级全量)
+      logger.warn({ err }, "P5: 增量检查失败,降级全量");
+    }
     const updatedSnapshot = {
       ...existingSnapshot,
       ...(visionFingerprint ? { visionFingerprint } : {}),
+      ...(incremental ? { incremental } : {}),
     };
     await tx.update(schema.cardGenerationRuns).set({
       status: SupervisorRunStatus.RUNNING,
