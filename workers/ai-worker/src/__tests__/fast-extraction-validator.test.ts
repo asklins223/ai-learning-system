@@ -203,14 +203,14 @@ test("输出截断 → output_truncated(retryable)", () => {
 });
 
 test("清洗后 artifact 不含未知键/__proto__(security 回归)", () => {
-  // JSON.parse 构造 __proto__ 自有键(对象字面量会触发原型 setter,不算自有键)
-  const withProto = JSON.parse(JSON.stringify({
-    ...validArtifact(),
-    extraKey: "x",
-    __proto__: { polluted: true },
-  }));
+  // 直接解析 JSON 字符串字面量以产生 __proto__ 自有键(JSON.parse 用
+  // CreateDataProperty 语义;对象字面量会触发原型 setter 而非自有键,
+  // JSON.stringify 只序列化自有可枚举键,序列化前已丢失)。
+  const base = JSON.stringify(validArtifact());
+  const withProto = JSON.parse(base.replace(/\}$/, ',"__proto__":{"polluted":true}}'));
+  assert.equal(Object.prototype.hasOwnProperty.call(withProto, "__proto__"), true, "__proto__ 应为自有键");
   const result = validateFastExtractionArtifact(withProto, ctx());
-  assert.equal(result.passed, false, "未知键应被 .strict() 拒绝");
+  assert.equal(result.passed, false, "__proto__ 未知键应被 .strict() 拒绝");
   assert.ok(result.issues.some((i) => i.code === "schema_invalid"));
   assert.equal(result.artifact, undefined, "失败不返回 artifact");
 
