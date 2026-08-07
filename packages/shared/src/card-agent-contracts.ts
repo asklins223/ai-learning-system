@@ -93,13 +93,15 @@ export const SPECIALIST_ROLES: AgentRole[] = [
 // ─── 3. Agent Unit Kind（计划 §9.2，泛化 card_generation_units） ───────────
 
 /**
- * Agent 路径只使用粗粒度 kind：
+ * Full Supervisor Agent v1 路径使用粗粒度 kind：
  * - prepare: 确定性封存、atomic evidence、bundle、outline、预算
  * - agent_run: Supervisor 和所有 child specialist（通过 agentRole 区分）
  * - deterministic_verify: 确定性完整性门禁
  * - publish: 单事务 canonical publish
  *
- * Agent 路径只使用以上四种粗粒度 kind。
+ * Phase 2/3(实施计划 §4.1, migration 0067)新增 Fast/Planned 路径 kind:
+ * fast_extract/fast_compose/route/supervisor_plan/grounding_critic_light/
+ * grounding_critic_claim/compose/repair(与 DB CHECK 对齐)。
  */
 export const AgentUnitKind = {
   PREPARE: "prepare",
