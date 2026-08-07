@@ -805,8 +805,8 @@ export type NoCandidateReason =
  * 输入不设 token 上限,仅受全局预算约束(历史教训:数值上限导致输出截断)。
  */
 export const fastExtractionCandidateSchema = z.object({
-  /** 本次 artifact 内唯一 ID(用于 relationHints 引用与中间校验) */
-  localId: z.string().min(1).max(160),
+  /** 本次 artifact 内唯一 ID(用于 relationHints 引用与中间校验,≤64 与 localTargetId 一致) */
+  localId: z.string().min(1).max(64),
   claim: z.string().min(1).max(500),
   topic: z.string().min(1).max(200),
   /** 全局章节标注(非 Bundle 分工) */
