@@ -37,6 +37,36 @@ test("forbid increase budget", () => {
   assert.ok(v.some((x) => x.code === "forbid_increase_budget"));
 });
 
+test("review should-fix: 黑名单绕过变体全部命中", () => {
+  // 变体 1:上限提到 500(原正则 提高.{0,6}(上限|预算) 之外的口径)
+  const v1 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "上限提到 500 次调用" }],
+  });
+  assert.ok(v1.some((x) => x.code === "forbid_increase_budget"), "上限提到 500");
+
+  // 变体 2:extend the cap
+  const v2 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "extend the cap to 500" }],
+  });
+  assert.ok(v2.some((x) => x.code === "forbid_increase_budget"), "extend the cap");
+
+  // 变体 3:全部重跑(顺序不同)
+  const v3 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "全部 specialist 重跑一遍" }],
+  });
+  assert.ok(v3.some((x) => x.code === "forbid_rerun_all"), "全部 specialist 重跑");
+
+  // 变体 4:从头再来
+  const v4 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "问题太多,从头再来一次" }],
+  });
+  assert.ok(v4.some((x) => x.code === "forbid_reset_run"), "从头再来");
+});
+
 test("forbid clear validated artifact", () => {
   const v = validateReplanProposal({
     ...base,

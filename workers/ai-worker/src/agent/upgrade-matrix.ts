@@ -29,8 +29,8 @@ export interface UpgradeEvaluationInput {
   contextThreshold: number;
   /** 复杂 Hard Issue 存在(critical/high 且 deterministic=false) */
   hasComplexHardIssue: boolean;
-  /** 当前路径(仅 fast/adaptive_planned 可升级到 full) */
-  currentMode: "fast_two_stage_v1" | "adaptive_planned_v1";
+  /** 当前路径(含 full:full 自身不升级,运行时防御) */
+  currentMode: "fast_two_stage_v1" | "adaptive_planned_v1" | "full_supervisor_v1";
 }
 
 export interface UpgradeDecision {
@@ -41,6 +41,11 @@ export interface UpgradeDecision {
 
 /** 升级条件判定(纯函数;任一命中即升级) */
 export function decideUpgrade(input: UpgradeEvaluationInput): UpgradeDecision {
+  // P3-6: 仅 fast/planned 可升级到 full;full 自身不升级(类型层面已排除,运行时防御)
+  if (input.currentMode === "full_supervisor_v1") {
+    return { escalate: false, reason: [] };
+  }
+
   const reason: string[] = [];
 
   if (input.escalateGapsRemain) reason.push("replan_后仍有_escalate_级_gap");

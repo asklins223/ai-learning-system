@@ -21,44 +21,58 @@ export interface PlanRepositoryInput {
   producedByEventKey: string;
 }
 
-/** 规范化 planJson 的 contentHash(与 B1 共享 Hash 规则:规范化 JSON + sha256) */
+/** 规范化 planJson 的 contentHash(与 B1 共享 Hash 规则:sha256(JSON.stringify()),见 service.ts hashJson) */
 export function computePlanContentHash(plan: GenerationPlan): string {
-  const canonical = JSON.stringify(plan, Object.keys(plan).sort());
-  return createHash("sha256").update(canonical).digest("hex");
+  return createHash("sha256").update(JSON.stringify(plan), "utf8").digest("hex");
 }
 
 export async function insertPlanRecord(
   input: PlanRepositoryInput,
 ): Promise<{ id: string; version: number; contentHash: string }> {
-  // 下一 version = 当前最大 version + 1(并发下由唯一约束兜底,冲突即重试失败)
-  const latest = await db
-    .select({ version: cardGenerationPlans.version })
-    .from(cardGenerationPlans)
-    .where(eq(cardGenerationPlans.runId, input.runId))
-    .orderBy(desc(cardGenerationPlans.version))
-    .limit(1);
-
-  const version = (latest[0]?.version ?? 0) + 1;
+  // 并发下 version 取 max+1 可能撞唯一约束:冲突时重试(最多 3 次),
+  // 与 P1-6 CAS 语义一致(乐观并发 + 唯一约束兑底)。
   const contentHash = computePlanContentHash(input.plan);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const latest = await db
+      .select({ version: cardGenerationPlans.version })
+      .from(cardGenerationPlans)
+      .where(eq(cardGenerationPlans.runId, input.runId))
+      .orderBy(desc(cardGenerationPlans.version))
+      .limit(1);
 
-  const [row] = await db
-    .insert(cardGenerationPlans)
-    .values({
-      workspaceId: input.workspaceId,
-      runId: input.runId,
-      version,
-      schemaVersion: input.plan.schemaVersion,
-      planJson: input.plan as unknown as Record<string, unknown>,
-      contentHash,
-      producedByUnitId: input.producedByUnitId,
-      producedByEventKey: input.producedByEventKey,
-    })
-    .returning({ id: cardGenerationPlans.id, version: cardGenerationPlans.version });
+    const version = (latest[0]?.version ?? 0) + 1;
 
-  if (!row) {
-    throw new Error("无法插入 plan 记录");
+    try {
+      const [row] = await db
+        .insert(cardGenerationPlans)
+        .values({
+          workspaceId: input.workspaceId,
+          runId: input.runId,
+          version,
+          schemaVersion: input.plan.schemaVersion,
+          planJson: input.plan as unknown as Record<string, unknown>,
+          contentHash,
+          producedByUnitId: input.producedByUnitId,
+          producedByEventKey: input.producedByEventKey,
+        })
+        .returning({ id: cardGenerationPlans.id, version: cardGenerationPlans.version });
+
+      if (row) {
+        return { id: row.id, version: row.version, contentHash };
+      }
+    } catch (err) {
+      // 唯一约束冲突(card_generation_plans_run_version_unique_idx) → 重试
+      // drizzle postgres-js 会把 PG 错误包装成 DrizzleQueryError(cause 为 PostgresError),
+      // 兼容 err.code 与 err.cause.code 两种形态。
+      const code =
+        typeof err === "object" && err !== null
+          ? ((err as { code?: string }).code ?? (err as { cause?: { code?: string } }).cause?.code)
+          : undefined;
+      if (code === "23505" && attempt < 2) continue;
+      throw err;
+    }
   }
-  return { id: row.id, version: row.version, contentHash };
+  throw new Error("无法插入 plan 记录(并发冲突重试耗尽)");
 }
 
 /** 读取指定 run 最新版 plan(不存在返回 null) */

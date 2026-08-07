@@ -51,6 +51,8 @@ export interface GapDetectionContext {
   coverageThreshold?: number;
   /** 单 bundle candidate 数量爆炸阈值 */
   candidateExplosionThreshold?: number;
+  /** 同 section candidate 重复判定阈值(默认 3) */
+  duplicateSectionThreshold?: number;
 }
 
 /** §3.2 清单的确定性判定,纯函数、无副作用 */
@@ -160,8 +162,9 @@ export function detectGaps(ctx: GapDetectionContext): GapSignal[] {
 
     // 8) 同 Section 大量重复 Candidate(§3.2)
     const bySection = outcome.candidatesBySection ?? {};
+    const duplicateThreshold = ctx.duplicateSectionThreshold ?? 3;
     for (const [section, count] of Object.entries(bySection)) {
-      if (count > 3) {
+      if (count > duplicateThreshold) {
         gaps.push({
           code: "section_duplicate_candidates",
           severity: "replannable",

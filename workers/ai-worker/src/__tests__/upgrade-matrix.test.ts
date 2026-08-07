@@ -19,6 +19,12 @@ test("no escalation when everything healthy", () => {
   assert.deepEqual(d.reason, []);
 });
 
+test("full_supervisor_v1 never escalates (runtime guard)", () => {
+  const d = decideUpgrade({ ...base, currentMode: "full_supervisor_v1", escalateGapsRemain: true, survivingCoverage: 0.1 });
+  assert.equal(d.escalate, false);
+  assert.deepEqual(d.reason, []);
+});
+
 test("escalate on replan-remaining escalate gaps", () => {
   const d = decideUpgrade({ ...base, escalateGapsRemain: true });
   assert.equal(d.escalate, true);

@@ -16,6 +16,8 @@ export interface ComposeCardRef {
   candidateIds: string[];
   /** candidateId → 卡片实际使用的 claim 文本(与权威 claim 比对,防模型改写) */
   claimsByCandidate: Record<string, string>;
+  /** 卡片引用的 Evidence ID(需 ⊆ allowlist) */
+  evidenceRefIds: string[];
 }
 
 export interface ComposeConsistencyInput {
@@ -79,8 +81,18 @@ export function validateComposeConsistency(input: ComposeConsistencyInput): Comp
         });
       }
     }
+    // 引用必须命中已分配 Evidence(卡片直接引用的 evidenceRefIds ⊆ allowlist)
+    for (const ref of card.evidenceRefIds) {
+      if (!input.evidenceAllowlist.has(ref)) {
+        issues.push({
+          code: "card_refs_unassigned_evidence",
+          cardId: card.cardId,
+          candidateId: ref,
+          message: `卡片 ${card.cardId} 引用未分配 Evidence ${ref}`,
+        });
+      }
+    }
   }
 
-  // 引用必须命中已分配 Evidence(若卡片同时给出 evidenceRefIds,扩展自 ComposeCardRef)
   return issues;
 }
