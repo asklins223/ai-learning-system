@@ -25,8 +25,8 @@ if (!adminUrl) throw new Error("CARD_GENERATION_TEST_ADMIN_URL is required");
 
 const admin = postgres(adminUrl, { max: 4 });
 
-const USER_ID = "10000000-0000-4000-8000-000000000023";
-const WORKSPACE_ID = "20000000-0000-4000-8000-000000000023";
+const USER_ID = "10000000-0000-4000-8000-000000000025";
+const WORKSPACE_ID = "20000000-0000-4000-8000-000000000025";
 const RUN_ID = "50000000-0000-4000-8000-000000000098";
 const PLAN_UNIT_ID = "60000000-0000-4000-8000-000000000098";
 
@@ -57,6 +57,9 @@ async function seed(): Promise<void> {
     await tx`DELETE FROM card_generation_runs WHERE id = ${RUN_ID}`;
     // 清理同 idempotency key 的历史残留(不同 run id 的旧版 seed 数据)
     await tx`DELETE FROM card_generation_runs WHERE request_idempotency_key = 'p3-planned-it'`;
+    // 清理同 note id 的旧 workspace 残留(seed 改 WS 后 ON CONFLICT 会跳过)
+    await tx`DELETE FROM note_versions WHERE note_id = '30000000-0000-4000-8000-000000000098'`;
+    await tx`DELETE FROM notes WHERE id = '30000000-0000-4000-8000-000000000098'`;
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, 'p3-planned@example.invalid', 'unused')
       ON CONFLICT (id) DO NOTHING`;
