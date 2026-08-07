@@ -41,6 +41,8 @@ export interface CandidateCacheKeyInput {
   workspaceId: string;
   /** 源证据(span)内容 hash——版本变化失效 */
   evidenceContentHash: string;
+  /** security MEDIUM:模型版本(缺则升级模型后 stale 重放) */
+  modelVersion: string;
   promptVersion: string;
 }
 
@@ -48,6 +50,7 @@ export function computeCandidateCacheKey(input: CandidateCacheKeyInput): string 
   return createHash("sha256").update(JSON.stringify({
     workspaceId: input.workspaceId,
     evidenceContentHash: input.evidenceContentHash,
+    modelVersion: input.modelVersion,
     promptVersion: input.promptVersion,
     unitKind: "candidate",
   })).digest("hex");
@@ -71,8 +74,17 @@ export function computeCriticCacheKey(input: CriticCacheKeyInput): string {
   })).digest("hex");
 }
 
-/** claim 文本规范化(去首尾空白、折叠空白)后哈希——同 Claim 同 hash */
+/**
+ * claim 文本规范化后哈希(同 Claim 同 hash)。
+ * security MEDIUM:输入长度设上限(>MAX_CLAIM_HASH_LENGTH 拒绝)——
+ * 防无界输入放大;规范化策略保守(trim+折叠空白),避免不同 claim 误命中。
+ */
+export const MAX_CLAIM_HASH_LENGTH = 4096;
+
 export function claimHash(claim: string): string {
+  if (claim.length > MAX_CLAIM_HASH_LENGTH) {
+    throw new Error(`claim 过长(${claim.length} > ${MAX_CLAIM_HASH_LENGTH}),拒绝哈希`);
+  }
   const normalized = claim.trim().replace(/\s+/g, " ");
   return createHash("sha256").update(normalized, "utf8").digest("hex");
 }

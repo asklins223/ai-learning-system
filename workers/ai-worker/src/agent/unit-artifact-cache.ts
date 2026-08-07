@@ -55,8 +55,12 @@ export function computeArtifactCacheKey(input: ArtifactCacheKeyInput): string {
     .digest("hex");
 }
 
-/** 最小版内存缓存(单 worker 进程内) */
-export function createMemoryArtifactCache(): ArtifactCache {
+/**
+ * 最小版内存缓存(单 worker 进程内)。
+ * security MEDIUM(Phase 5):可选 maxSize,超过时 FIFO 驱逐最旧条目
+ * (Map 保持插入序),防无界跨 run 驻留;默认不设限兼容既有调用。
+ */
+export function createMemoryArtifactCache(maxSize?: number): ArtifactCache {
   const store = new Map<string, ArtifactCacheEntry>();
   let hits = 0;
   let writes = 0;
@@ -72,6 +76,11 @@ export function createMemoryArtifactCache(): ArtifactCache {
     },
     put(entry) {
       store.set(entry.cacheKey, entry);
+      if (maxSize !== undefined && store.size > maxSize) {
+        // FIFO:驱逐最早插入的 key(Map 迭代序 = 插入序)
+        const oldest = store.keys().next().value;
+        if (oldest !== undefined) store.delete(oldest);
+      }
       writes += 1;
       logger.info({ cacheKey: entry.cacheKey.slice(0, 12), unitKind: entry.unitKind }, "P2-7: artifact 缓存写入");
     },
