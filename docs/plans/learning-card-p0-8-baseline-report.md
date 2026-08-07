@@ -53,3 +53,27 @@
 2. P0-7 三假设实验:延迟回归模型、调用价值消融、延迟瀑布分解
 3. SLO 冻结:需 P50/P90/P95 样本充足
 4. Phase 2(Fast 路径)是否上线:由 P0-7 拍板
+
+## 6. 全量审计接线(2026-08-07,补审计缺口)
+
+对计划 P0~P5 全部任务 + 拓展交付物做逐项完成度审计后,补齐以下接线/修复:
+
+| 批次 | 内容 | 提交 | 验证 |
+|---|---|---|---|
+| 审计第 1 批 | S1 fast-extract-prompt 补单测;S2 worker 未接线 kind fail-closed 标注;N1~N4 文档/行号/deprecated 修正 | 3e8c9b2 | 848/848 |
+| P4 接线 | P4-1 StableContextCache 接入 context-builder(工具 schema 稳定段);P4-3 tool_result 批量写入;P4-5 executionSummary 回灌;P4-6 worker LISTEN/NOTIFY 快速唤醒;P4-7 stage metrics 落库 | 7e93205 | 848/848 |
+| P2 Fast 接线 | prepare 灰度分发(FAST_PATH_ENABLED/ROLLOUT 默认关闭)+ fast-path.ts(Fast 链:提取→校验→provisional→组合→迁移→Draft→自动 Critic;升级路径兜底) | 62f9fef | 848/848 + 真实 E2E 036 |
+| P3 骨架 | plan-path.ts(Plan 生成→校验→不可变落库;失败升级 Full)+ PLANNED_PATH 灰度 + handler 分发 | 6dfbf54 | 848/848 |
+
+### Fast 链真实 E2E(样本 036,FAST_PATH=100%)
+
+- Router 分发到 FAST_EXTRACT ✓ → 提取执行 ✓ → 校验 3 次 retryable(schema_invalid,mock provider 场景)
+  → 重试耗尽**升级 Full Supervisor**(P2-6,失败 Artifact 不发布)✓ → run succeeded 58.1s ✓
+- 升级路径全链路可用:分发/执行/重试/升级/兜底全部真实运行验证
+- 真实 provider 的 Fast 成功路径需生产 providerSnapshot 配置后验证(代码已就绪)
+
+### 剩余(报告第 5 节更新)
+
+- P3 Specialist DAG 调度(P3-4)与 Bounded Replan(P3-3)执行接线:组件已交付,作为独立里程碑
+- P5 增量复用接入(需要真实版本迭代数据驱动)
+- P0-7 三假设正式实验与 SLO 冻结(需 ≥20 分层样本)
