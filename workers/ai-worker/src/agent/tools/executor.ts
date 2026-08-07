@@ -354,7 +354,9 @@ export async function executeToolCalls(
 
   // P4-4: 批量写入 tool_request 事件(单条 INSERT 多行,独立幂等键),
   // 执行时跳过逐条写入(skipRequestEvent),写入量从 N 次降为 1 次。
-  if (calls.length > 1) {
+  // 注意:仅当批量已写时才 skip(单条调用走 executeToolCall 自写,保证事件不丢失)。
+  const batched = calls.length > 1;
+  if (batched) {
     const rows = buildToolRequestEventRows(calls, ctx);
     if (rows.length > 0) {
       await persistToolRequestEventsBatch(db, rows);
@@ -363,13 +365,13 @@ export async function executeToolCalls(
 
   if (allReadOnly && calls.length > 1) {
     // 并行执行只读工具调用
-    return Promise.all(calls.map((call) => executeToolCall(call, ctx, { skipRequestEvent: true })));
+    return Promise.all(calls.map((call) => executeToolCall(call, ctx, batched ? { skipRequestEvent: true } : undefined)));
   }
 
   // 串行执行（有副作用或只有一个调用）
   const results: ToolCallResult[] = [];
   for (const call of calls) {
-    const result = await executeToolCall(call, ctx, { skipRequestEvent: true });
+    const result = await executeToolCall(call, ctx, batched ? { skipRequestEvent: true } : undefined);
     results.push(result);
   }
   return results;
@@ -409,12 +411,19 @@ export function buildToolRequestEventRows(
   }> = [];
 
   for (const call of calls) {
-    // 预检与 executeToolCall 一致:权限 + schema
+    // 预检与 executeToolCall 一致:权限 + schema(校验后参数含 .default() 填充)
     if (!toolRegistry.isToolAllowed(role, call.name)) continue;
     const zodSchema = getToolZodSchema(call.name);
-    if (zodSchema && !zodSchema.safeParse(call.arguments).success) continue;
+    let effectiveArgs = call.arguments;
+    if (zodSchema) {
+      const parsed = zodSchema.safeParse(call.arguments);
+      if (!parsed.success) continue;
+      // review bug:批量路径必须用与 executeToolCall 相同的校验后参数(default 填充)
+      // 计算 hash/幂等键,否则批量 tool_request 与 tool_result 事件链断裂。
+      effectiveArgs = parsed.data as Record<string, unknown>;
+    }
 
-    const argsHash = computeArgsHash(call.arguments);
+    const argsHash = computeArgsHash(effectiveArgs);
     const idempotencyKey = computeToolIdempotencyKey({
       runId,
       agentUnitId,
@@ -433,7 +442,7 @@ export function buildToolRequestEventRows(
       turnNo,
       toolName: call.name,
       inputHash: argsHash,
-      safePayload: { args: sanitizeArgs(call.arguments) },
+      safePayload: { args: sanitizeArgs(effectiveArgs) },
     });
   }
   return rows;
