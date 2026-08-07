@@ -367,8 +367,21 @@ export async function executeToolCalls(
   }
 
   if (allReadOnly && calls.length > 1) {
-    // 并行执行只读工具调用
-    const results = await Promise.all(calls.map((call) => executeToolCall(call, ctx, batched ? { skipRequestEvent: true, skipResultEvent: true } : undefined)));
+    // 并行执行只读工具调用(review should-fix:逐条捕获异常,
+    // 任一失败不阻断其余;result 事件流与单条语义一致)
+    const results = await Promise.all(calls.map(async (call) => {
+      try {
+        return await executeToolCall(call, ctx, batched ? { skipRequestEvent: true, skipResultEvent: true } : undefined);
+      } catch (err) {
+        return {
+          toolCallId: call.id,
+          toolName: call.name,
+          success: false,
+          result: null,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }));
     // P4-3:批量写 tool_result 事件(单条 INSERT 多行,独立幂等键)
     if (batched) {
       const rows = calls.flatMap((call, i) => buildToolResultEventRow(call, results[i], ctx));
@@ -382,8 +395,18 @@ export async function executeToolCalls(
   // 串行执行（有副作用或只有一个调用）
   const results: ToolCallResult[] = [];
   for (const call of calls) {
-    const result = await executeToolCall(call, ctx, batched ? { skipRequestEvent: true, skipResultEvent: true } : undefined);
-    results.push(result);
+    try {
+      const result = await executeToolCall(call, ctx, batched ? { skipRequestEvent: true, skipResultEvent: true } : undefined);
+      results.push(result);
+    } catch (err) {
+      results.push({
+        toolCallId: call.id,
+        toolName: call.name,
+        success: false,
+        result: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   // P4-3:批量写 tool_result 事件
   if (batched) {

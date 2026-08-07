@@ -182,7 +182,7 @@ export async function executeFastExtractPhase(
     );
     const supervisorUnitId = await createSupervisorUnit(job, payload, _runContext, inputs.density);
     await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-    await markUnitFinished(payload, "succeeded");
+    await markUnitFinished(job, payload, "succeeded");
     return { kind: "complete" };
   }
   if (result.action.kind !== "proceed") {
@@ -209,7 +209,7 @@ export async function executeFastExtractPhase(
   // 自动创建 FAST_COMPOSE unit + job(状态机自动推进)
   const composeUnitId = await createFastComposeUnit(job, payload);
   await createNextTurnJob(job, payload.generationRunId, composeUnitId, 1);
-  await markUnitFinished(payload, "succeeded");
+  await markUnitFinished(job, payload, "succeeded");
   return { kind: "complete" };
 }
 
@@ -250,13 +250,15 @@ export async function executeFastComposePhase(
       .where(and(
         eq(schema.provisionalCandidates.workspaceId, job.workspaceId),
         eq(schema.provisionalCandidates.runId, payload.generationRunId),
+        // review should-fix:仅待确认/待修订候选进入 compose(已 confirm/reject 的不重复入)
+        inArray(schema.provisionalCandidates.decision, [null, "revise", "supplement"] as never),
       )),
   );
   if (provisional.length === 0) {
     logger.warn({ runId: payload.generationRunId }, "FAST_COMPOSE: 无 provisional 候选,升级 Full");
     const supervisorUnitId = await createSupervisorUnit(job, payload, _runContext, inputs.density);
     await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-    await markUnitFinished(payload, "succeeded");
+    await markUnitFinished(job, payload, "succeeded");
     return { kind: "complete" };
   }
 
@@ -288,20 +290,38 @@ export async function executeFastComposePhase(
     );
     const supervisorUnitId = await createSupervisorUnit(job, payload, _runContext, inputs.density);
     await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-    await markUnitFinished(payload, "succeeded");
+    await markUnitFinished(job, payload, "succeeded");
     return { kind: "complete" };
   }
   const compose = schemaResult.data;
   const usedLocalIds = new Set(compose.cards.flatMap((c) => c.candidateIds));
 
-  // provisional confirm → 迁移为正式候选(被引用的;失败/未引用不迁移)
-  const localToCandidateId = new Map<string, string>();
-  await withWorkerWorkspaceTransaction(
-    { workspaceId: job.workspaceId, userId: job.requestedBy },
+  // review should-fix:引用完整性——所有被引用 localId 必须存在于 provisional
+  // (防孤儿引用:draft 引用不存在的候选 id)
+  const knownLocalIds = new Set(provisional.map((p) => p.localId));
+  const missingRefs = [...usedLocalIds].filter((id) => !knownLocalIds.has(id));
+  if (missingRefs.length > 0) {
+    logger.warn(
+      { runId: payload.generationRunId, missingRefs },
+      "FAST_COMPOSE: 引用不存在的候选 localId,升级 Full",
+    );
+    const supervisorUnitId = await createSupervisorUnit(job, payload, _runContext, inputs.density);
+    await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
+    await markUnitFinished(job, payload, "succeeded");
+    return { kind: "complete" };
+  }
+
+  // review should-fix(Blocking):候选迁移 + confirm + draft 创建合并为**单事务**,
+  // 且迁移冲突时回查正式候选 id(不再 fallback provisional id),draft 按
+  // producedByEventKey 幂等(重跑不重复创建)。
+  const composed = await withWorkerWorkspaceTransaction(
+    { workspaceId: job.workspaceId, userId: job.requestedBy ?? null },
     async (tx) => {
+      // 1) 候选迁移(被引用;onConflict 冲突 → 按 (run_id, local_id) 回查正式 id)
+      const localToCandidateId = new Map<string, string>();
       for (const c of provisional) {
         if (!usedLocalIds.has(c.localId)) continue;
-        const [row] = await tx
+        const [inserted] = await tx
           .insert(schema.cardGenerationCandidates)
           .values({
             workspaceId: job.workspaceId,
@@ -323,9 +343,24 @@ export async function executeFastComposePhase(
           })
           .onConflictDoNothing()
           .returning({ id: schema.cardGenerationCandidates.id });
-        localToCandidateId.set(c.localId, row?.id ?? c.id);
+        let candidateId = inserted?.id;
+        if (!candidateId) {
+          // 冲突:回查既有正式候选(重跑场景)
+          const [existing] = await tx
+            .select({ id: schema.cardGenerationCandidates.id })
+            .from(schema.cardGenerationCandidates)
+            .where(and(
+              eq(schema.cardGenerationCandidates.workspaceId, job.workspaceId),
+              eq(schema.cardGenerationCandidates.runId, payload.generationRunId),
+              eq(schema.cardGenerationCandidates.localId, c.localId),
+            ))
+            .limit(1);
+          candidateId = existing?.id ?? c.id;
+        }
+        localToCandidateId.set(c.localId, candidateId);
       }
-      // 更新 provisional 决策状态(confirm)
+
+      // 2) provisional confirm
       await tx
         .update(schema.provisionalCandidates)
         .set({ decision: "confirm", decisionByUnitId: payload.agentUnitId, decisionAt: new Date() })
@@ -334,66 +369,89 @@ export async function executeFastComposePhase(
           eq(schema.provisionalCandidates.runId, payload.generationRunId),
           inArray(schema.provisionalCandidates.localId, [...usedLocalIds]),
         ));
+
+      // 3) Draft 幂等:同 producedByEventKey 已存在则复用(重跑/恢复)
+      const [existingDraft] = await tx
+        .select({
+          id: schema.cardGenerationDrafts.id,
+          contentHash: schema.cardGenerationDrafts.contentHash,
+          draftVersion: schema.cardGenerationDrafts.draftVersion,
+        })
+        .from(schema.cardGenerationDrafts)
+        .where(and(
+          eq(schema.cardGenerationDrafts.workspaceId, job.workspaceId),
+          eq(schema.cardGenerationDrafts.runId, payload.generationRunId),
+          eq(schema.cardGenerationDrafts.producedByEventKey, `fast_compose:${payload.agentUnitId}`),
+        ))
+        .limit(1);
+      if (existingDraft) {
+        return {
+          localToCandidateId,
+          draftId: existingDraft.id,
+          draftVersion: existingDraft.draftVersion,
+          contentHash: existingDraft.contentHash,
+          reused: true,
+        };
+      }
+
+      const normalizedCards = compose.cards.map((card, index) => ({
+        title: card.title,
+        summary: card.summary,
+        candidateIds: card.candidateIds.map((localId) => localToCandidateId.get(localId) ?? localId),
+        primarySupportCandidateId: card.candidateIds[0] ? localToCandidateId.get(card.candidateIds[0]) ?? null : null,
+        draftCardId: `fast-${payload.agentUnitId}-${index}`,
+        ordinal: card.ordinal ?? index,
+        primarySection: card.sectionKey ?? "",
+        groupKey: undefined,
+        canonicalCandidateIds: card.candidateIds.map((localId) => localToCandidateId.get(localId) ?? localId),
+        learningObjective: card.learningObjective,
+      }));
+      const cardBudget = inputs.density === "overview" ? 8 : inputs.density === "standard" ? 15 : 50;
+      const [versionResult] = await tx
+        .select({ value: max(schema.cardGenerationDrafts.draftVersion) })
+        .from(schema.cardGenerationDrafts)
+        .where(and(
+          eq(schema.cardGenerationDrafts.workspaceId, job.workspaceId),
+          eq(schema.cardGenerationDrafts.runId, payload.generationRunId),
+        ));
+      const draftVersion = (versionResult?.value ?? 0) + 1;
+      const contentJson = {
+        deckTitle: inputs.title,
+        deckSummary: `${inputs.density} 快速生成`,
+        density: inputs.density,
+        cardBudget,
+        cards: normalizedCards as Array<Record<string, unknown>>,
+        summarySupportCandidateIds: [],
+      };
+      const contentHash = createHash("sha256").update(JSON.stringify(contentJson), "utf8").digest("hex");
+      const [draft] = await tx
+        .insert(schema.cardGenerationDrafts)
+        .values({
+          workspaceId: job.workspaceId,
+          runId: payload.generationRunId,
+          draftVersion,
+          parentDraftId: null,
+          producedByUnitId: payload.agentUnitId,
+          producedByEventKey: `fast_compose:${payload.agentUnitId}`,
+          schemaVersion: "deck-draft-v1",
+          contentJson: contentJson as never,
+          contentHash,
+          deckTitle: inputs.title,
+          deckSummary: contentJson.deckSummary,
+          density: inputs.density,
+          cardBudget,
+          baseLedgerHash: "",
+          summarySupportCandidateIds: [],
+        })
+        .returning();
+      if (!draft) throw new Error("FAST_COMPOSE: 无法创建 draft");
+      return { localToCandidateId, draftId: draft.id, draftVersion, contentHash, reused: false };
     },
   );
 
-  // 持久化 Draft(与 submit_deck_draft 同契约)
-  const normalizedCards = compose.cards.map((card, index) => ({
-    title: card.title,
-    summary: card.summary,
-    candidateIds: card.candidateIds.map((localId) => localToCandidateId.get(localId) ?? localId),
-    primarySupportCandidateId: card.candidateIds[0] ? localToCandidateId.get(card.candidateIds[0]) ?? null : null,
-    draftCardId: `fast-${payload.agentUnitId}-${index}`,
-    ordinal: card.ordinal ?? index,
-    primarySection: card.sectionKey ?? "",
-    groupKey: undefined,
-    canonicalCandidateIds: card.candidateIds.map((localId) => localToCandidateId.get(localId) ?? localId),
-    learningObjective: card.learningObjective,
-  }));
-  const cardCount = normalizedCards.length;
-  const cardBudget = inputs.density === "overview" ? 8 : inputs.density === "standard" ? 15 : 50;
-  const [versionResult] = await db
-    .select({ value: max(schema.cardGenerationDrafts.draftVersion) })
-    .from(schema.cardGenerationDrafts)
-    .where(and(
-      eq(schema.cardGenerationDrafts.workspaceId, job.workspaceId),
-      eq(schema.cardGenerationDrafts.runId, payload.generationRunId),
-    ));
-  const draftVersion = (versionResult?.value ?? 0) + 1;
-  const contentJson = {
-    deckTitle: inputs.title,
-    deckSummary: `${inputs.density} 快速生成`,
-    density: inputs.density,
-    cardBudget,
-    cards: normalizedCards as Array<Record<string, unknown>>,
-    summarySupportCandidateIds: [],
-  };
-  const contentHash = createHash("sha256").update(JSON.stringify(contentJson), "utf8").digest("hex");
-  const [draft] = await db
-    .insert(schema.cardGenerationDrafts)
-    .values({
-      workspaceId: job.workspaceId,
-      runId: payload.generationRunId,
-      draftVersion,
-      parentDraftId: null,
-      producedByUnitId: payload.agentUnitId,
-      producedByEventKey: `fast_compose:${payload.agentUnitId}`,
-      schemaVersion: "deck-draft-v1",
-      contentJson: contentJson as never,
-      contentHash,
-      deckTitle: inputs.title,
-      deckSummary: contentJson.deckSummary,
-      density: inputs.density,
-      cardBudget,
-      baseLedgerHash: "",
-      summarySupportCandidateIds: [],
-    })
-    .returning();
-  if (!draft) throw new Error("FAST_COMPOSE: 无法创建 draft");
-
   logger.info(
-    { runId: payload.generationRunId, draftId: draft.id, draftVersion, cardCount, contentHash },
-    "FAST_COMPOSE: Draft 已创建(自动进入 Critic 门禁)",
+    { runId: payload.generationRunId, draftId: composed.draftId, draftVersion: composed.draftVersion, contentHash: composed.contentHash, reused: composed.reused },
+    "FAST_COMPOSE: Draft 已创建/复用(自动进入 Critic 门禁)",
   );
 
   // P1-1 复用:自动创建 Critic(同一质量门禁,计划 §7 契约一致)
@@ -402,8 +460,8 @@ export async function executeFastComposePhase(
     runId: payload.generationRunId,
     agentUnitId: payload.agentUnitId,
     requestedBy: job.requestedBy ?? "",
-    draftId: draft.id,
-    draftHash: contentHash,
+    draftId: composed.draftId,
+    draftHash: composed.contentHash,
     budgetTracker: new BudgetTracker({
       maxProviderCalls: 60,
       maxInputTokens: 2_000_000,
@@ -416,14 +474,21 @@ export async function executeFastComposePhase(
     }),
   });
 
-  await markUnitFinished(payload, "succeeded");
+  await markUnitFinished(job, payload, "succeeded");
   return { kind: "complete" };
 }
 
-/** 标记当前 unit 终态(succeeded) */
-async function markUnitFinished(payload: AgentJobPayload, status: "succeeded" | "failed"): Promise<void> {
+/** 标记当前 unit 终态(succeeded),带 workspace 过滤(review nit;lease 由 handler 层保障) */
+async function markUnitFinished(
+  job: JobPayload,
+  payload: AgentJobPayload,
+  status: "succeeded" | "failed",
+): Promise<void> {
   await db
     .update(schema.cardGenerationUnits)
     .set({ status, finishedAt: new Date(), updatedAt: new Date() })
-    .where(eq(schema.cardGenerationUnits.id, payload.agentUnitId));
+    .where(and(
+      eq(schema.cardGenerationUnits.id, payload.agentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+    ));
 }

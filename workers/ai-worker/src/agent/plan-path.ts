@@ -136,6 +136,11 @@ export async function executePlanGenerationPhase(
     return { kind: "complete" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // review should-fix:可重试 provider 瞬时错误(429/408/5xx)re-throw 交外层重试机制,
+    // 不升级 Full(校验失败升级保留)
+    if (/429|408|50[0-9]|timeout|timed out/i.test(message)) {
+      throw err;
+    }
     logger.error({ runId: payload.generationRunId, err: message }, "PLAN_GENERATION 失败,升级 Full Supervisor");
     const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
     await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
