@@ -5,7 +5,7 @@ import type { ToolExecutionContext } from "../agent/tools/executor.ts";
 import { BudgetTracker } from "../agent/budget.ts";
 import { CoverageLedger } from "../agent/coverage-ledger.ts";
 import { CandidateLedger } from "../agent/candidate-ledger.ts";
-import { computeArgsHash } from "../agent/tool-registry.ts";
+import { computeArgsHash, toolRegistry } from "../agent/tool-registry.ts";
 
 function ctx(): ToolExecutionContext {
   return {
@@ -46,9 +46,13 @@ test("review bug: 非法参数被批量预检跳过(与 executeToolCall 一致)"
 });
 
 test("review bug: 权限拒绝的工具被跳过", () => {
-  // generation_supervisor 不允许 submit_deck_draft(那是 deck_composer 的工具)
+  // 用未注册工具名(权限分支:isToolAllowed=false → 跳过)
+  // 注:submit_deck_draft 实际 generation_supervisor 允许(tool-registry supervisorToolDefinitions),
+  // 其参数校验失败属 schema 分支而非权限分支,故此处用不存在的工具名。
+  const toolName = "nonexistent_tool";
+  assert.equal(toolRegistry.isToolAllowed("generation_supervisor", toolName), false, "前置:工具不在允许列表");
   const rows = buildToolRequestEventRows(
-    [{ id: "c1", name: "submit_deck_draft", arguments: {} }],
+    [{ id: "c1", name: toolName, arguments: {} }],
     ctx(),
   );
   assert.equal(rows.length, 0, "权限拒绝不生成事件行");
