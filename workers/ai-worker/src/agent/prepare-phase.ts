@@ -37,6 +37,7 @@ import type {
 import { createProvider, createEmbeddingProvider, type AIProvider } from "../lib/ai-provider.ts";
 import { resolveAIGovernanceContext, resolveProviderConfigForName, type AIGovernanceContext } from "../lib/governance.ts";
 import { buildCapabilityBundle, type CapabilityBundle } from "../lib/capability-bundle.ts";
+import { computeComplexityRoute } from "./complexity-router.ts";
 
 /**
  * PREPARE 阶段执行（计划 §5.1, §W3）。
@@ -88,6 +89,22 @@ export async function executePreparePhase(
         .from(schema.noteImageEvidenceUnits)
         .where(inArray(schema.noteImageEvidenceUnits.imageAssetId, imageAssetIds))
     : [];
+
+  // P2-1：Complexity Router（先统计不切换）。
+  // 依据内容特征确定性判定执行模式，仅落库（execution_mode / routing_reason），
+  // 不改变实际执行路径——现状仍走 Full Supervisor。
+  const routeDecision = computeComplexityRoute({
+    density: ((runDetail as Record<string, unknown>).density as string) ?? "standard",
+    blockCount: blocks.length,
+    imageCount: blocks.filter((b) => b.type === "image").length,
+    formulaCount: blocks.filter((b) => /\$\$[\s\S]+?\$\$|\$[^$\n]+\$/.test(b.content)).length,
+    codeCount: blocks.filter((b) => b.type === "code").length,
+    totalChars: blocks.reduce((sum, b) => sum + b.content.length, 0),
+  });
+  logger.info(
+    { runId: payload.generationRunId, mode: routeDecision.mode, routingReason: routeDecision.routingReason },
+    "P2-1: Complexity Router 判定完成（只统计不切换）",
+  );
 
   // 构建 provider capability
   // 修复 D4/D6（第5轮）：原代码硬编码 contextWindowTokens=128000 等值，
@@ -332,6 +349,9 @@ export async function executePreparePhase(
     await tx.update(schema.cardGenerationRuns).set({
       status: SupervisorRunStatus.RUNNING,
       engineMode: prepareResult.engineInfo.engineMode,
+      // P2-1：Router 落库（只统计不切换）——判定结果写入 execution_mode/routing_reason
+      executionMode: routeDecision.mode,
+      routingReason: routeDecision.routingReason,
       shellVersion: prepareResult.engineInfo.shellVersion,
       supervisorPolicyVersion: prepareResult.engineInfo.supervisorPolicyVersion,
       toolSchemaVersion: prepareResult.engineInfo.toolSchemaVersion,

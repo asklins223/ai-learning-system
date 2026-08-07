@@ -463,6 +463,13 @@
       "when": 1788584600000,
       "tag": "0065_drop_byok_workspace_ai_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1788671000000,
+      "tag": "0066_card_generation_runs_execution_mode",
+      "breakpoints": true
     }
   ]
 }

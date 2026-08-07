@@ -470,6 +470,27 @@ export const GenerationDensity = {
 export type GenerationDensity =
   (typeof GenerationDensity)[keyof typeof GenerationDensity];
 
+// ─── 11b. Generation Execution Mode（实施计划 §2.1/§4.8, P2-1） ──────────
+
+/**
+ * 生成执行模式(三层路径)。
+ *
+ * P2-1(Complexity Router,先统计不切换):Router 依据内容特征确定性判定,
+ * 只落库不切换——现状 run 仍走 Full Supervisor 路径。
+ * 兼容说明:旧值 `supervisor_agent_v1`(provider_snapshot.executionMode,
+ * service.ts 写入)语义等价 full_supervisor_v1;migration 回填时保持历史值。
+ */
+export const GenerationExecutionMode = {
+  FAST_TWO_STAGE_V1: "fast_two_stage_v1",
+  ADAPTIVE_PLANNED_V1: "adaptive_planned_v1",
+  FULL_SUPERVISOR_V1: "full_supervisor_v1",
+} as const;
+export type GenerationExecutionMode =
+  (typeof GenerationExecutionMode)[keyof typeof GenerationExecutionMode];
+
+/** 旧 executionMode 值 → 计划三值语义映射(兼容只读) */
+export const LEGACY_EXECUTION_MODE_SUPERVISOR_V1 = "supervisor_agent_v1";
+
 // ─── 12. Provider Capability（计划 §8.2） ────────────────────────────────
 
 /** Provider 工具支持模式 */

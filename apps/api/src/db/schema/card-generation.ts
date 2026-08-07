@@ -61,6 +61,10 @@ export const cardGenerationRuns = pgTable(
       .default(sql`'[]'::jsonb`),
     // ── Supervisor Agent v1 字段（计划 §9.1） ──
     engineMode: text("engine_mode").notNull().default("supervisor_agent_v1"),
+    // P2-1（Complexity Router,先统计不切换）:执行模式与路由原因落库。
+    // 存量 run 为 NULL(语义=未路由);migration 0066 已从 provider_snapshot.executionMode 回填。
+    executionMode: text("execution_mode"),
+    routingReason: jsonb("routing_reason").$type<string[]>().default(sql`'[]'::jsonb`),
     shellVersion: text("shell_version"),
     supervisorPolicyVersion: text("supervisor_policy_version"),
     toolSchemaVersion: text("tool_schema_version"),
