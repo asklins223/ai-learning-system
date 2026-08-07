@@ -484,6 +484,13 @@
       "when": 1788843800000,
       "tag": "0068_provisional_candidates",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1788930200000,
+      "tag": "0069_card_generation_plans",
+      "breakpoints": true
     }
   ]
 }

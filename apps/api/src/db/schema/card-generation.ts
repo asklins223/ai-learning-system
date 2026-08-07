@@ -700,3 +700,27 @@ export const provisionalCandidates = pgTable(
       .on(t.runId, t.localId),
   }),
 );
+
+// ─── card_generation_plans(实施计划 §3.2/§4.1, P3-1) ────────────────────
+
+/** Adaptive Planned 的 Initial Plan 不可变记录(只插入) */
+export const cardGenerationPlans = pgTable(
+  "card_generation_plans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    runId: uuid("run_id").notNull().references(() => cardGenerationRuns.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    schemaVersion: text("schema_version").notNull(),
+    planJson: jsonb("plan_json").$type<Record<string, unknown>>().notNull(),
+    contentHash: text("content_hash").notNull(),
+    producedByUnitId: uuid("produced_by_unit_id").notNull(),
+    producedByEventKey: text("produced_by_event_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    runIdx: index("card_generation_plans_run_idx").on(t.runId),
+    runVersionUnique: uniqueIndex("card_generation_plans_run_version_unique_idx")
+      .on(t.runId, t.version),
+  }),
+);

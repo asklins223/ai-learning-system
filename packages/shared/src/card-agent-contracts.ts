@@ -926,6 +926,37 @@ export function executionModeUserLabel(mode: string | null | undefined): string 
   return EXECUTION_MODE_USER_LABELS.full_supervisor_v1;
 }
 
+// ─── 11g. GenerationPlan(实施计划 §3.2/§4.1, P3-1) ───────────────────────
+
+/**
+ * Adaptive Planned 的 Initial Plan 输出。
+ *
+ * Plan 是**不可变记录**(§4.1,只插入不更新)、**初始而非最终真相**
+ * (Gap Detection 发现缺口后经 Bounded Replan 产生新 version)。
+ * bundleTasks 为 Specialist DAG 调度的输入(并行 text/code/vision,
+ * relatedBundleIds 声明依赖)。
+ */
+export const generationPlanBundleTaskSchema = z.object({
+  bundleId: z.string().min(1).max(200),
+  specialist: z.enum(["text_extractor", "code_extractor", "vision_specialist"]),
+  extractionFocus: z.string().min(1).max(500),
+  relatedBundleIds: z.array(z.string().min(1).max(200)).max(20),
+  expectedDecisionKinds: z.array(z.enum(["candidate", "no_candidate"])).max(10),
+}).strict();
+export type GenerationPlanBundleTask = z.infer<typeof generationPlanBundleTaskSchema>;
+
+export const generationPlanSchema = z.object({
+  schemaVersion: z.string().min(1).max(40),
+  documentIntent: z.string().min(1).max(500),
+  learningFocus: z.array(z.string().min(1).max(200)).max(20),
+  bundleTasks: z.array(generationPlanBundleTaskSchema).min(1).max(50),
+  compositionStrategy: z.object({
+    density: z.enum(["overview", "standard", "complete"]),
+    cardBudget: z.number().int().min(1).max(100),
+  }).strict(),
+}).strict();
+export type GenerationPlan = z.infer<typeof generationPlanSchema>;
+
 /** 语义支撑状态 */
 export const SemanticSupportStatus = {
   SUPPORTED: "supported",
