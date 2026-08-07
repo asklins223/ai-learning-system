@@ -1,8 +1,8 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { generationPlanSchema } from "@ailearn/shared";
-import { db } from "../db.ts";
 import { cardGenerationPlans } from "../schema/index.ts";
+import type { WorkerTransaction } from "../db.ts";
 import type { GenerationPlan } from "@ailearn/shared";
 
 /**
@@ -28,65 +28,56 @@ export function computePlanContentHash(plan: GenerationPlan): string {
 }
 
 export async function insertPlanRecord(
+  tx: WorkerTransaction,
   input: PlanRepositoryInput,
 ): Promise<{ id: string; version: number; contentHash: string }> {
   // security_review MEDIUM:写入前必须经有界 Schema 校验(防超大/异常 planJson 落库)
-  const plan = generationPlanSchema.parse(input.plan);
+  let plan: GenerationPlan;
+  try {
+    plan = generationPlanSchema.parse(input.plan);
+  } catch (err) {
+    // review nit:不抛裸 ZodError,带上下文包装
+    throw new Error(`plan 校验失败(runId=${input.runId}): ${(err as Error).message}`);
+  }
 
-  // 并发下 version 取 max+1 可能撞唯一约束:冲突时重试(最多 3 次),
+  // 并发安全:单条 INSERT...SELECT 原子语句(MAX(version)+1 在语句内计算),
+  // ON CONFLICT DO NOTHING 不使事务 aborted(PG 23505 会 abort 事务,
+  // 无法在事务内重试),冲突时返回空行 → 重新尝试(最多 3 次)。
   // 与 P1-6 CAS 语义一致(乐观并发 + 唯一约束兑底)。
   const contentHash = computePlanContentHash(plan);
   for (let attempt = 0; attempt < 3; attempt++) {
-    const latest = await db
-      .select({ version: cardGenerationPlans.version })
-      .from(cardGenerationPlans)
-      .where(eq(cardGenerationPlans.runId, input.runId))
-      .orderBy(desc(cardGenerationPlans.version))
-      .limit(1);
-
-    const version = (latest[0]?.version ?? 0) + 1;
-
-    try {
-      const [row] = await db
-        .insert(cardGenerationPlans)
-        .values({
-          workspaceId: input.workspaceId,
-          runId: input.runId,
-          version,
-          schemaVersion: plan.schemaVersion,
-          planJson: plan as unknown as Record<string, unknown>,
-          contentHash,
-          producedByUnitId: input.producedByUnitId,
-          producedByEventKey: input.producedByEventKey,
-        })
-        .returning({ id: cardGenerationPlans.id, version: cardGenerationPlans.version });
-
-      if (row) {
-        return { id: row.id, version: row.version, contentHash };
-      }
-    } catch (err) {
-      // 唯一约束冲突(card_generation_plans_run_version_unique_idx) → 重试
-      // drizzle postgres-js 会把 PG 错误包装成 DrizzleQueryError(cause 为 PostgresError),
-      // 兼容 err.code 与 err.cause.code 两种形态。
-      const code =
-        typeof err === "object" && err !== null
-          ? ((err as { code?: string }).code ?? (err as { cause?: { code?: string } }).cause?.code)
-          : undefined;
-      if (code === "23505" && attempt < 2) continue;
-      throw err;
+    const rows = await tx.execute<{ id: string; version: number }>(sql`
+      INSERT INTO card_generation_plans
+        (workspace_id, run_id, version, schema_version, plan_json, content_hash,
+         produced_by_unit_id, produced_by_event_key)
+      SELECT ${input.workspaceId}, ${input.runId}, COALESCE(MAX(version), 0) + 1,
+             ${plan.schemaVersion}, ${JSON.stringify(plan)}, ${contentHash},
+             ${input.producedByUnitId}, ${input.producedByEventKey}
+      FROM card_generation_plans
+      WHERE run_id = ${input.runId}
+      ON CONFLICT (run_id, version) DO NOTHING
+      RETURNING id, version
+    `);
+    const row = rows[0];
+    if (row) {
+      return { id: row.id, version: Number(row.version), contentHash };
     }
+    // 冲突(并发另一事务已插入同 version)→ 重试,读新快照
   }
   throw new Error("无法插入 plan 记录(并发冲突重试耗尽)");
 }
 
 /** 读取指定 run 最新版 plan(不存在返回 null) */
-export async function loadLatestPlan(runId: string): Promise<{
+export async function loadLatestPlan(
+  tx: WorkerTransaction,
+  runId: string,
+): Promise<{
   id: string;
   version: number;
   plan: GenerationPlan;
   contentHash: string;
 } | null> {
-  const row = await db
+  const row = await tx
     .select()
     .from(cardGenerationPlans)
     .where(eq(cardGenerationPlans.runId, runId))

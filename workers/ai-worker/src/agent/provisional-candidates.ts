@@ -10,7 +10,7 @@
  */
 
 import { and, eq, inArray } from "drizzle-orm";
-import { db } from "../db.ts";
+import type { WorkerTransaction } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { logger } from "../lib/logger.ts";
 import type { FastExtractionArtifact, FastExtractionCandidate } from "@ailearn/shared";
@@ -41,7 +41,10 @@ export interface ProvisionalCandidateRow {
 }
 
 /** 写入通过校验的 Fast 候选(失败 Artifact 不写入) */
-export async function writeProvisionalCandidates(input: WriteProvisionalInput): Promise<number> {
+export async function writeProvisionalCandidates(
+  tx: WorkerTransaction,
+  input: WriteProvisionalInput,
+): Promise<number> {
   const { workspaceId, runId, producedByUnitId, artifact, sourceProviderCallId } = input;
   const rows = artifact.candidates.map((c: FastExtractionCandidate) => ({
     workspaceId,
@@ -63,7 +66,7 @@ export async function writeProvisionalCandidates(input: WriteProvisionalInput): 
 
   // 幂等约束已由 UNIQUE(run_id, local_id) 保障(§4.1 Tool 幂等无回归),
   // onConflictDoNothing 防重复插入,重跑/重启恢复安全。
-  const inserted = await db
+  const inserted = await tx
     .insert(schema.provisionalCandidates)
     .values(rows as never[])
     .onConflictDoNothing()
@@ -74,8 +77,11 @@ export async function writeProvisionalCandidates(input: WriteProvisionalInput): 
 }
 
 /** 读取 run 的全部 provisional 候选(含已决策行,供 Full 审计/继续处理) */
-export async function listProvisionalCandidates(runId: string): Promise<ProvisionalCandidateRow[]> {
-  const rows = await db
+export async function listProvisionalCandidates(
+  tx: WorkerTransaction,
+  runId: string,
+): Promise<ProvisionalCandidateRow[]> {
+  const rows = await tx
     .select()
     .from(schema.provisionalCandidates)
     .where(and(
@@ -99,12 +105,15 @@ export async function listProvisionalCandidates(runId: string): Promise<Provisio
 }
 
 /** 应用 Full Supervisor 决策(confirm/revise/reject/supplement) */
-export async function applyProvisionalDecision(input: {
-  workspaceId: string;
-  runId: string;
-  decisionByUnitId: string;
-  decisions: Array<{ candidateId: string; decision: ProvisionalDecision; revisedClaim?: string }>;
-}): Promise<number> {
+export async function applyProvisionalDecision(
+  tx: WorkerTransaction,
+  input: {
+    workspaceId: string;
+    runId: string;
+    decisionByUnitId: string;
+    decisions: Array<{ candidateId: string; decision: ProvisionalDecision; revisedClaim?: string }>;
+  },
+): Promise<number> {
   const { workspaceId, runId, decisionByUnitId, decisions } = input;
   let applied = 0;
   const VALID_DECISIONS: readonly ProvisionalDecision[] = ["confirm", "revise", "reject", "supplement"];
@@ -120,7 +129,7 @@ export async function applyProvisionalDecision(input: {
       decisionAt: new Date(),
       ...(d.revisedClaim != null ? { revisedClaim: d.revisedClaim } : {}),
     };
-    const [row] = await db
+    const [row] = await tx
       .update(schema.provisionalCandidates)
       .set(set as never)
       .where(and(
@@ -136,8 +145,11 @@ export async function applyProvisionalDecision(input: {
 }
 
 /** 待确认候选数(供升级流程/测试) */
-export async function countPendingProvisionalCandidates(runId: string): Promise<number> {
-  const rows = await db
+export async function countPendingProvisionalCandidates(
+  tx: WorkerTransaction,
+  runId: string,
+): Promise<number> {
+  const rows = await tx
     .select({ id: schema.provisionalCandidates.id })
     .from(schema.provisionalCandidates)
     .where(and(

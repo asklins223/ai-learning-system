@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import postgres from "postgres";
-import { closeDatabase } from "../db.ts";
+import { closeDatabase, withWorkerWorkspaceTransaction } from "../db.ts";
 import { insertPlanRecord, loadLatestPlan, computePlanContentHash } from "../agent/plan-repository.ts";
 import type { GenerationPlan } from "@ailearn/shared";
 
@@ -88,14 +88,17 @@ test("P3-1: 只插入语义——同 run 多次 insert 产生递增 version,不�
   await seedRun();
   const unitId = "60000000-0000-4000-8000-000000000090";
 
-  const r1 = await insertPlanRecord({ workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("意图 v1"), producedByUnitId: unitId, producedByEventKey: "plan.initial" });
-  const r2 = await insertPlanRecord({ workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("意图 v2"), producedByUnitId: unitId, producedByEventKey: "plan.replan" });
+  const r1 = await withWorkerWorkspaceTransaction({ workspaceId: WORKSPACE_ID, userId: USER_ID }, (tx) =>
+    insertPlanRecord(tx, { workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("意图 v1"), producedByUnitId: unitId, producedByEventKey: "plan.initial" }));
+  const r2 = await withWorkerWorkspaceTransaction({ workspaceId: WORKSPACE_ID, userId: USER_ID }, (tx) =>
+    insertPlanRecord(tx, { workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("意图 v2"), producedByUnitId: unitId, producedByEventKey: "plan.replan" }));
 
   assert.equal(r1.version, 1);
   assert.equal(r2.version, 2);
   assert.notEqual(r1.contentHash, r2.contentHash, "内容不同 hash 不同");
 
-  const latest = await loadLatestPlan(RUN_ID);
+  const latest = await withWorkerWorkspaceTransaction({ workspaceId: WORKSPACE_ID, userId: USER_ID }, (tx) =>
+    loadLatestPlan(tx, RUN_ID));
   assert.equal(latest?.version, 2);
   assert.equal(latest?.plan.documentIntent, "意图 v2");
 
@@ -119,10 +122,14 @@ test("P3-1: 并发插入不产生重复 version(唯一约束 + 重试)", async (
   await seedRun();
   const unitId = "60000000-0000-4000-8000-000000000091";
 
+  // 3 个独立事务并行(各自 set_config workspace_id + 独立连接),触发唯一约束冲突→重试
   const results = await Promise.all([
-    insertPlanRecord({ workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("并发 A"), producedByUnitId: unitId, producedByEventKey: "plan.a" }),
-    insertPlanRecord({ workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("并发 B"), producedByUnitId: unitId, producedByEventKey: "plan.b" }),
-    insertPlanRecord({ workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("并发 C"), producedByUnitId: unitId, producedByEventKey: "plan.c" }),
+    withWorkerWorkspaceTransaction({ workspaceId: WORKSPACE_ID, userId: USER_ID }, (tx) =>
+      insertPlanRecord(tx, { workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("并发 A"), producedByUnitId: unitId, producedByEventKey: "plan.a" })),
+    withWorkerWorkspaceTransaction({ workspaceId: WORKSPACE_ID, userId: USER_ID }, (tx) =>
+      insertPlanRecord(tx, { workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("并发 B"), producedByUnitId: unitId, producedByEventKey: "plan.b" })),
+    withWorkerWorkspaceTransaction({ workspaceId: WORKSPACE_ID, userId: USER_ID }, (tx) =>
+      insertPlanRecord(tx, { workspaceId: WORKSPACE_ID, runId: RUN_ID, plan: plan("并发 C"), producedByUnitId: unitId, producedByEventKey: "plan.c" })),
   ]);
 
   const versions = results.map((r) => r.version).sort();

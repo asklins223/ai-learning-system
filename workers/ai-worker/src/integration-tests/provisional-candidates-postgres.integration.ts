@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import postgres from "postgres";
-import { closeDatabase } from "../db.ts";
+import { closeDatabase, withWorkerWorkspaceTransaction } from "../db.ts";
 import {
   writeProvisionalCandidates,
   listProvisionalCandidates,
@@ -78,28 +78,31 @@ function artifact(): FastExtractionArtifact {
 test("P2-6: 写入 → pending 读取 → 决策应用(confirm/revise/reject),producedBy 保留", async () => {
   await seedRun();
 
-  const written = await writeProvisionalCandidates({
-    workspaceId: WS_ID,
-    runId: RUN_ID,
-    producedByUnitId: UNIT_ID,
-    artifact: artifact(),
-    sourceProviderCallId: "provider-call-1",
-  });
+  const written = await withWorkerWorkspaceTransaction({ workspaceId: WS_ID, userId: USER_ID }, (tx) =>
+    writeProvisionalCandidates(tx, {
+      workspaceId: WS_ID,
+      runId: RUN_ID,
+      producedByUnitId: UNIT_ID,
+      artifact: artifact(),
+      sourceProviderCallId: "provider-call-1",
+    }));
   assert.equal(written, 2, "写入 2 个候选");
 
   // should-fix(review)幂等:重复写入(重跑/重启恢复)不重复插入(UNIQUE(run_id, local_id))
-  await writeProvisionalCandidates({
-    workspaceId: WS_ID,
-    runId: RUN_ID,
-    producedByUnitId: UNIT_ID,
-    artifact: artifact(),
-    sourceProviderCallId: "provider-call-1-dup",
-  });
+  await withWorkerWorkspaceTransaction({ workspaceId: WS_ID, userId: USER_ID }, (tx) =>
+    writeProvisionalCandidates(tx, {
+      workspaceId: WS_ID,
+      runId: RUN_ID,
+      producedByUnitId: UNIT_ID,
+      artifact: artifact(),
+      sourceProviderCallId: "provider-call-1-dup",
+    }));
   const [dupCount] = await admin<{ count: number }[]>`
     SELECT count(*)::int AS count FROM provisional_candidates WHERE run_id = ${RUN_ID}`;
   assert.equal(dupCount?.count, 2, "重复写入不得产生重复候选");
 
-  const pending = await listProvisionalCandidates(RUN_ID);
+  const pending = await withWorkerWorkspaceTransaction({ workspaceId: WS_ID, userId: USER_ID }, (tx) =>
+    listProvisionalCandidates(tx, RUN_ID));
   assert.equal(pending.length, 2);
   const c1 = pending.find((p) => p.localId === "c1")!;
   assert.equal(c1.claim, "命题一");
@@ -114,18 +117,20 @@ test("P2-6: 写入 → pending 读取 → 决策应用(confirm/revise/reject),pr
   assert.deepEqual(row?.relation_hints, [{ type: "supports", localTargetId: "c1" }]);
 
   // 决策应用:confirm c1、revise c2
-  const applied = await applyProvisionalDecision({
-    workspaceId: WS_ID,
-    runId: RUN_ID,
-    decisionByUnitId: UNIT_ID,
-    decisions: [
-      { candidateId: c1.id, decision: "confirm" },
-      { candidateId: pending.find((p) => p.localId === "c2")!.id, decision: "revise", revisedClaim: "修订后命题二" },
-    ],
-  });
+  const applied = await withWorkerWorkspaceTransaction({ workspaceId: WS_ID, userId: USER_ID }, (tx) =>
+    applyProvisionalDecision(tx, {
+      workspaceId: WS_ID,
+      runId: RUN_ID,
+      decisionByUnitId: UNIT_ID,
+      decisions: [
+        { candidateId: c1.id, decision: "confirm" },
+        { candidateId: pending.find((p) => p.localId === "c2")!.id, decision: "revise", revisedClaim: "修订后命题二" },
+      ],
+    }));
   assert.equal(applied, 2);
 
-  const after = await listProvisionalCandidates(RUN_ID);
+  const after = await withWorkerWorkspaceTransaction({ workspaceId: WS_ID, userId: USER_ID }, (tx) =>
+    listProvisionalCandidates(tx, RUN_ID));
   const a1 = after.find((p) => p.localId === "c1")!;
   const a2 = after.find((p) => p.localId === "c2")!;
   assert.equal(a1.decision, "confirm");
@@ -133,13 +138,15 @@ test("P2-6: 写入 → pending 读取 → 决策应用(confirm/revise/reject),pr
   assert.equal(a2.revisedClaim, "修订后命题二");
 
   // reject 后 pending 计数(decision=confirm 不再 pending;reject 也终态)
-  await applyProvisionalDecision({
-    workspaceId: WS_ID,
-    runId: RUN_ID,
-    decisionByUnitId: UNIT_ID,
-    decisions: [{ candidateId: a1.id, decision: "reject" }],
-  });
+  await withWorkerWorkspaceTransaction({ workspaceId: WS_ID, userId: USER_ID }, (tx) =>
+    applyProvisionalDecision(tx, {
+      workspaceId: WS_ID,
+      runId: RUN_ID,
+      decisionByUnitId: UNIT_ID,
+      decisions: [{ candidateId: a1.id, decision: "reject" }],
+    }));
   // countPending 只算 null/revise/supplement → confirm/reject 后为 0(revise 的 c2 仍算 pending)
-  const pendingCount = await countPendingProvisionalCandidates(RUN_ID);
+  const pendingCount = await withWorkerWorkspaceTransaction({ workspaceId: WS_ID, userId: USER_ID }, (tx) =>
+    countPendingProvisionalCandidates(tx, RUN_ID));
   assert.equal(pendingCount, 1, "仅 revise 的 c2 仍算 pending");
 });

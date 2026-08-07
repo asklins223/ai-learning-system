@@ -4,6 +4,8 @@ import {
   validateReplanProposal,
   classifyArtifactReuse,
   inputHashWithReplanVersion,
+  MAX_REPLAN_ADJUSTMENTS,
+  MAX_REPLAN_ADJUSTMENT_DETAIL_LENGTH,
   type ReplanProposal,
 } from "../agent/bounded-replan.ts";
 
@@ -24,7 +26,7 @@ test("empty adjustments rejected", () => {
 test("too many adjustments rejected (security LOW 加固)", () => {
   const v = validateReplanProposal({
     version: 2,
-    adjustments: Array.from({ length: 21 }, (_, i) => ({ type: "adjust_unfinished_bundle" as const, bundleId: `b${i}`, detail: "x" })),
+    adjustments: Array.from({ length: MAX_REPLAN_ADJUSTMENTS + 1 }, (_, i) => ({ type: "adjust_unfinished_bundle" as const, bundleId: `b${i}`, detail: "x" })),
   });
   assert.ok(v.some((x) => x.code === "too_many_adjustments"));
 });
@@ -32,7 +34,7 @@ test("too many adjustments rejected (security LOW 加固)", () => {
 test("adjustment detail over length limit rejected (security LOW 加固)", () => {
   const v = validateReplanProposal({
     version: 2,
-    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "x".repeat(501) }],
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "x".repeat(MAX_REPLAN_ADJUSTMENT_DETAIL_LENGTH + 1) }],
   });
   assert.ok(v.some((x) => x.code === "adjustment_detail_too_long"));
 });
