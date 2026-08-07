@@ -11,6 +11,7 @@
 | 031 | standard | CAP 定理(5 句) | 42 | 57,644 | 2,791 | 8 | 30 |
 | 032 | overview | 机器学习基础(10 句) | 44 | 56,304 | 3,315 | 8 | 29 |
 | 033 | complete | Python 列表推导(10 句,含代码) | 58 | 83,870 | 6,201 | 11 | 33 |
+| 034 | standard | 数据库事务与索引(10 句) | 44 | — | — | — | — |
 
 存储:本地 postgres `card_generation_runs`(usage_summary)+ `/tmp/p1-e2e-*.log`(运行日志)。
 脱敏:内容为人工构造,无真实用户数据。
@@ -33,7 +34,14 @@
 - E2E 生成:当前 P50 ≈ 44s / P90 未知(3 样本);待 20+ 样本后冻结
 - 可观察延迟(区分模式):Notify 正常 P95 ≤ 1s;Polling Fallback P95 ≤ 3s(设计值,未变)
 
-## 4. Phase 1 效果佐证(基线 vs 优化后)
+## 4. P2-1 Complexity Router 落库(先统计不切换)
+
+- migration 0066:runs 加 `execution_mode`/`routing_reason` 列,存量 230 run 回填 `supervisor_agent_v1`
+- PREPARE 计算 Router 判定(无图片/公式/代码 + density 非 complete → fast 候选;无数值硬阈值)
+- 样本 034 真实验证:`fast_two_stage_v1` + `["no_images","no_formula","no_code","density_not_complete"]` 落库,run 44.1s succeeded(执行路径未变)
+- 覆盖比例统计:`SELECT execution_mode, count(*) FROM card_generation_runs GROUP BY execution_mode`(新 run 计入;存量回填值不参与统计)
+
+## 5. Phase 1 效果佐证(基线 vs 优化后)
 
 - 系统自动推进(P1-1/P1-2/P1-5):Draft→Critic 不再依赖模型下一 turn 请求;request_verification 已 deprecated 标记
 - 无重复 Critic/VERIFY unit(3 个 run 均为 critic×1 + verify×1)
