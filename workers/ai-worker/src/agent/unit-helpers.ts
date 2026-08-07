@@ -115,7 +115,8 @@ export async function createSupervisorUnit(
   payload: AgentJobPayload,
   _runContext: Extract<RunContext, { kind: "active" }>,
   density: "overview" | "standard" | "complete" = "standard",
-): Promise<string> {  const now = new Date();
+): Promise<string> {
+  const now = new Date();
 
   // 冲突修复（retry/恢复重跑 prepare）：supervisor unit 的唯一身份是
   // (run_id, kind=agent_run, level=0, ordinal=1)。run 被 retry 或恢复检查点
@@ -270,7 +271,8 @@ export async function createFastExtractUnit(
   job: JobPayload,
   payload: AgentJobPayload,
   density: "overview" | "standard" | "complete" = "standard",
-): Promise<string> {  const now = new Date();
+): Promise<string> {
+  const now = new Date();
   const unitKey = `fast_extract:${payload.generationRunId}`;
   const [existing] = await db
     .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })
