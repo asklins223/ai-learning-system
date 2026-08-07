@@ -39,9 +39,9 @@ export interface ReplanProposal {
 // ─── Replan 边界校验 ─────────────────────────────────────────────────────
 
 const FORBIDDEN_PATTERNS: Array<{ pattern: RegExp; code: string; message: string }> = [
-  { pattern: /重置\s*run|reset\s*run|重新开始整个|restart|从头再来|重开|重来/i, code: "forbid_reset_run", message: "Replan 不得重置 Run" },
-  { pattern: /增加预算|提高.{0,6}(上限|预算)|加大.{0,6}(上限|预算)|extend.{0,6}(cap|budget)|raise.{0,6}(cap|budget)|bump.{0,6}(cap|budget)|maxProviderCalls|(上限|预算).{0,4}(提到|调到|调高|调大|提高到|增加|加大)/i, code: "forbid_increase_budget", message: "Replan 不得自动增预算" },
-  { pattern: /清除.{0,6}(artifact|已验证)|清空.{0,6}(artifact|已验证)|删除.{0,8}(artifact|已验证)|wipe|delete.{0,6}validated/i, code: "forbid_clear_artifact", message: "Replan 不得清除已验证 Artifact" },
+  { pattern: /重置\s*run|reset\s*run|重新开始整个|restart|从头再来|重新开始一次|整体重来/i, code: "forbid_reset_run", message: "Replan 不得重置 Run" },
+  { pattern: /增加预算|提高.{0,6}(上限|预算)|加大.{0,6}(上限|预算)|extend.{0,6}(cap|budget)|raise.{0,6}(cap|budget)|bump.{0,6}(cap|budget)|(上限|预算).{0,4}(提到|调到|调高|调大|提高到|增加|加大)|maxProviderCalls.{0,8}(增加|提高|加大|raise|extend|bump|increase)/i, code: "forbid_increase_budget", message: "Replan 不得自动增预算" },
+  { pattern: /清除.{0,6}(artifact|已验证)|清空.{0,6}(artifact|已验证)|删除.{0,8}(artifact|已验证)|wipe.{0,6}(artifact|everything|validated|cache)|delete.{0,6}validated/i, code: "forbid_clear_artifact", message: "Replan 不得清除已验证 Artifact" },
   { pattern: /(全部|所有|所有.{0,6}都|每个).{0,12}重跑|重跑(所有|全部)|rerun all|re-run all|重跑所有 specialist/i, code: "forbid_rerun_all", message: "Replan 不得无条件重跑全部 Specialist" },
 ];
 

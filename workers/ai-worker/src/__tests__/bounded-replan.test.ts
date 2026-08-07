@@ -67,6 +67,36 @@ test("review should-fix: 黑名单绕过变体全部命中", () => {
   assert.ok(v4.some((x) => x.code === "forbid_reset_run"), "从头再来");
 });
 
+test("review 复核:合法措辞不误伤(负向)", () => {
+  // 含"上限"但无提高动词 → 不命中增预算
+  const v1 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "adjust_extraction_focus", bundleId: "b1", detail: "调整 focus 到机器学习上限相关概念" }],
+  });
+  assert.deepEqual(v1, [], "提及'上限'但非增预算不应命中");
+
+  // 无重置语义 → 不命中
+  const v2 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "重新评估 b1 的候选决策" }],
+  });
+  assert.deepEqual(v2, [], "'重新评估'非重置 Run 不应命中");
+
+  // 英语 wipe 无 artifact/everything 上下文 → 不命中
+  const v3 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "wipe out the confusion in b1" }],
+  });
+  assert.deepEqual(v3, [], "wipe 无 artifact 上下文不应命中");
+
+  // maxProviderCalls 无增动词(否定式)→ 不命中
+  const v4 = validateReplanProposal({
+    ...base,
+    adjustments: [{ type: "add_bundle_context", bundleId: "b1", detail: "保持 maxProviderCalls 不变,补充上下文" }],
+  });
+  assert.deepEqual(v4, [], "maxProviderCalls 否定式不应命中");
+});
+
 test("forbid clear validated artifact", () => {
   const v = validateReplanProposal({
     ...base,
