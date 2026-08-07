@@ -355,7 +355,11 @@ export async function executeFastComposePhase(
               eq(schema.cardGenerationCandidates.localId, c.localId),
             ))
             .limit(1);
-          candidateId = existing?.id ?? c.id;
+          // security_review LOW:回查失败不再 fallback provisional id(防孤儿引用)
+          if (!existing) {
+            throw new Error(`FAST_COMPOSE: 候选迁移冲突且回查失败(localId=${c.localId})`);
+          }
+          candidateId = existing.id;
         }
         localToCandidateId.set(c.localId, candidateId);
       }
@@ -443,8 +447,33 @@ export async function executeFastComposePhase(
           baseLedgerHash: "",
           summarySupportCandidateIds: [],
         })
+        // security_review MEDIUM:DB 唯一约束(0072)兜底并发竞态;冲突时回查复用
+        .onConflictDoNothing()
         .returning();
-      if (!draft) throw new Error("FAST_COMPOSE: 无法创建 draft");
+      if (!draft) {
+        // 并发冲突(双事务穿过 check-then-act):回查既有 draft 复用
+        const [conflictDraft] = await tx
+          .select({
+            id: schema.cardGenerationDrafts.id,
+            contentHash: schema.cardGenerationDrafts.contentHash,
+            draftVersion: schema.cardGenerationDrafts.draftVersion,
+          })
+          .from(schema.cardGenerationDrafts)
+          .where(and(
+            eq(schema.cardGenerationDrafts.workspaceId, job.workspaceId),
+            eq(schema.cardGenerationDrafts.runId, payload.generationRunId),
+            eq(schema.cardGenerationDrafts.producedByEventKey, `fast_compose:${payload.agentUnitId}`),
+          ))
+          .limit(1);
+        if (!conflictDraft) throw new Error("FAST_COMPOSE: 无法创建 draft(冲突回查亦失败)");
+        return {
+          localToCandidateId,
+          draftId: conflictDraft.id,
+          draftVersion: conflictDraft.draftVersion,
+          contentHash: conflictDraft.contentHash,
+          reused: true,
+        };
+      }
       return { localToCandidateId, draftId: draft.id, draftVersion, contentHash, reused: false };
     },
   );

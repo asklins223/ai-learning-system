@@ -700,10 +700,18 @@ export async function main() {
       const pgListen = postgres(resolveWorkerDatabaseUrl(), { max: 1 });
       // 先赋值:listen 失败也要在 catch/finally 关闭,防连接泄漏阻塞进程退出
       notifyConnection = pgListen;
-      await pgListen.listen(NOTIFY_CHANNEL, () => {
+      // 建立超时 3s:连接挂起(如网络/权限)不能阻塞 worker 启动(shutdown 依赖进入主循环)
+      const listenPromise = pgListen.listen(NOTIFY_CHANNEL, () => {
         currentPollMs = POLL_MS;
         logger.debug({ channel: NOTIFY_CHANNEL }, "P4-6: job notify 唤醒,轮询加速");
       });
+      await Promise.race([
+        listenPromise,
+        new Promise((_, reject) => {
+          const t = setTimeout(() => reject(new Error("LISTEN 建立超时(3s)")), 3_000);
+          t.unref();
+        }),
+      ]);
       logger.info({ channel: NOTIFY_CHANNEL }, "P4-6: worker LISTEN 已建立(notify 快速唤醒)");
     }
   } catch (err) {

@@ -48,7 +48,7 @@ export async function executePlanGenerationPhase(
     .limit(1);
   if (existingPlan) {
     logger.info({ runId: payload.generationRunId, planId: existingPlan.id }, "PLAN_GENERATION: 已有 plan(幂等复用)");
-    await markPlanUnitFinished(payload, "succeeded");
+    await markPlanUnitFinished(job, payload, "succeeded");
     return { kind: "complete" };
   }
 
@@ -65,7 +65,7 @@ export async function executePlanGenerationPhase(
     ))
     .limit(1);
   if (!run) {
-    await markPlanUnitFinished(payload, "failed");
+    await markPlanUnitFinished(job, payload, "failed");
     return { kind: "failed", error: "run 不存在" };
   }
 
@@ -79,7 +79,7 @@ export async function executePlanGenerationPhase(
     visionModel: (config.visionModel as string) ?? null,
   } as never);
   if (!provider) {
-    await markPlanUnitFinished(payload, "failed");
+    await markPlanUnitFinished(job, payload, "failed");
     return { kind: "failed", error: "provider 解析失败" };
   }
 
@@ -111,7 +111,7 @@ export async function executePlanGenerationPhase(
       );
       const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
       await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-      await markPlanUnitFinished(payload, "succeeded");
+      await markPlanUnitFinished(job, payload, "succeeded");
       return { kind: "complete" };
     }
 
@@ -132,7 +132,7 @@ export async function executePlanGenerationPhase(
     );
 
     // 后续:Specialist DAG 调度(P3-4)作为独立里程碑;当前完成 plan 生成即结束本 unit
-    await markPlanUnitFinished(payload, "succeeded");
+    await markPlanUnitFinished(job, payload, "succeeded");
     return { kind: "complete" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -144,14 +144,21 @@ export async function executePlanGenerationPhase(
     logger.error({ runId: payload.generationRunId, err: message }, "PLAN_GENERATION 失败,升级 Full Supervisor");
     const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
     await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-    await markPlanUnitFinished(payload, "succeeded");
+    await markPlanUnitFinished(job, payload, "succeeded");
     return { kind: "complete" };
   }
 }
 
-async function markPlanUnitFinished(payload: AgentJobPayload, status: "succeeded" | "failed"): Promise<void> {
+async function markPlanUnitFinished(
+  job: JobPayload,
+  payload: AgentJobPayload,
+  status: "succeeded" | "failed",
+): Promise<void> {
   await db
     .update(schema.cardGenerationUnits)
     .set({ status, finishedAt: new Date(), updatedAt: new Date() })
-    .where(eq(schema.cardGenerationUnits.id, payload.agentUnitId));
+    .where(and(
+      eq(schema.cardGenerationUnits.id, payload.agentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+    ));
 }
