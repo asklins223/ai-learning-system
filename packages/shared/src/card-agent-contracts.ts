@@ -820,10 +820,10 @@ export const fastExtractionCandidateSchema = z.object({
   difficulty: z.enum(
     Object.values(CandidateDifficulty) as [string, ...string[]],
   ),
-  evidenceRefIds: z.array(z.string().min(1)).min(1).max(50),
+  evidenceRefIds: z.array(z.string().min(1).max(64)).min(1).max(50),
   relationHints: z.array(z.object({
     type: z.enum(["supports", "contrasts", "depends_on"]),
-    localTargetId: z.string().min(1),
+    localTargetId: z.string().min(1).max(64),
   }).strict()).max(20).optional(),
 }).strict();
 export type FastExtractionCandidate = z.infer<typeof fastExtractionCandidateSchema>;
