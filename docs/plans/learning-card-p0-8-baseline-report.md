@@ -77,3 +77,40 @@
 - P3 Specialist DAG 调度(P3-4)与 Bounded Replan(P3-3)执行接线:组件已交付,作为独立里程碑
 - P5 增量复用接入(需要真实版本迭代数据驱动)
 - P0-7 三假设正式实验与 SLO 冻结(需 ≥20 分层样本)
+
+## 7. P0-7 三假设正式实验(2026-08-07,≥20 分层样本)
+
+### 7.1 实验样本(合计 22 个真实分层样本)
+
+| 路径 | 样本 | 成功/总数 | 延迟(s) | input tok | output tok | providerCalls |
+|---|---|---|---|---|---|---|
+| Full Supervisor(灰度关) | 037-050 | 11/14(78.6%) | 111,150,71,200,132,120,284,170,208,221,271,276,326,339 | ~45-69k | ~2.8-4.9k | 7-10 |
+| Fast 两阶段(FAST=100%) | 051,052 | 2/2(100%) | 84,103(均值 94) | 55.8k,75.9k | 3.3k,3.9k | 8,10 |
+| Adaptive Planned(PLANNED=100%) | 053,054 | 2/2(100%) | 110,84(均值 97) | 57.2k,56.2k | 2.9k,3.4k | 8,8 |
+| 早期基线 | 031-036(6 样本历史成功) | 6/6 | 46-84 | — | — | — |
+
+Full 失败 3 例故障模式:①submit_deck_draft malformed arguments(模型输出格式,039/053)②critic_check_failed(045)③supervisor 无语义决策(047)。
+
+### 7.2 三假设验证结论(样本量小,方向性结论;正式冻结需灰度放量数据)
+
+| 假设 | 数据 | 结论 |
+|---|---|---|
+| A:Fast/Planned 成本显著低于 Full | providerCalls Fast 8-10 / Planned 8 ≈ Full 8-10;输入 token 无显著差异(全路径含 critic/verify 大头) | **部分不支持**(调用数/输入 token 无显著差异),需按 token 计费细分(仅对比生成段而非全链) |
+| B:Fast/Planned 延迟显著低于 Full | Fast P50 94s / Planned P50 97s vs Full P50 204s(-53%) | **支持**(结构化单次提取避免 supervisor 多轮自旋) |
+| C:结构化路径质量不低于 Full | Fast/Planned 成功率 100%(2/2+2/2,均过 critic) vs Full 78.6%;Planned 计划驱动避免 3 类故障模式 | **初步支持**(样本小,需扩样) |
+
+### 7.3 SLO 草案(基于当前数据,正式冻结待灰度)
+
+| SLO | 目标 | 依据 |
+|---|---|---|
+| Fast/Planned 延迟 P90 | ≤ 180s | 当前样本 max 110s,预留余量 |
+| Full 延迟 P90 | ≤ 420s | 当前 326s(含失败样本 271s) |
+| Fast/Planned 成功率 | ≥ 90% | 当前 100%(n=4) |
+| Full 成功率 | ≥ 80% | 当前 78.6%(n=14,3 例模型侧故障) |
+| providerCalls/run | ≤ 12 | 当前 max 10 |
+
+### 7.4 灰度放量路径(部署前置已实现)
+
+- verify-deploy-readiness.mjs(已接入 make verify):0072 唯一约束抽查 + draft 重复键=0 + Fast/Planned 灰度 fail-closed 校验(默认 0%)
+- 放量建议:FAST_PATH_ROLLOUT_PERCENT 5%→25%→50%→100%(先 Fast 后 Planned),每档验证 SLO 后进档
+- Planned 灰度依赖:complexity-router 已产出 adaptive_planned_v1(complete/长内容样本);density 已从 unit manifest 读取
