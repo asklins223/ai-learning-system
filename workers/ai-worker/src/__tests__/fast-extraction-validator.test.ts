@@ -156,6 +156,46 @@ test("公式候选无公式 Evidence → formula_evidence_type_mismatch(escalate
   assert.equal(issue!.severity, "escalate");
 });
 
+test("noCandidateDecisions 引用非 Required Bundle → no_candidate_bundle_not_required", () => {
+  const artifact = validArtifact();
+  artifact.noCandidateDecisions = [{ bundleId: "bundle-ghost", reason: "decorative" }];
+  const result = validateFastExtractionArtifact(artifact, ctx());
+  assert.equal(result.passed, false);
+  assert.ok(result.issues.some((i) => i.code === "no_candidate_bundle_not_required" && i.severity === "retryable"));
+});
+
+test("relationHints 悬空引用 → dangling_relation_target(retryable)", () => {
+  const artifact = validArtifact();
+  artifact.candidates[0] = {
+    ...artifact.candidates[0]!,
+    relationHints: [{ type: "supports", localTargetId: "ghost-id" }],
+  };
+  const result = validateFastExtractionArtifact(artifact, ctx());
+  assert.equal(result.passed, false);
+  assert.ok(result.issues.some((i) => i.code === "dangling_relation_target" && i.severity === "retryable"));
+});
+
+test("relationHints 自引用 → self_referencing_relation(retryable)", () => {
+  const artifact = validArtifact();
+  artifact.candidates[0] = {
+    ...artifact.candidates[0]!,
+    relationHints: [{ type: "supports", localTargetId: "c1" }],
+  };
+  const result = validateFastExtractionArtifact(artifact, ctx());
+  assert.equal(result.passed, false);
+  assert.ok(result.issues.some((i) => i.code === "self_referencing_relation" && i.severity === "retryable"));
+});
+
+test("relationHints 合法引用 → 通过", () => {
+  const artifact = validArtifact();
+  artifact.candidates[0] = {
+    ...artifact.candidates[0]!,
+    relationHints: [{ type: "supports", localTargetId: "c2" }],
+  };
+  const result = validateFastExtractionArtifact(artifact, ctx());
+  assert.equal(result.passed, true);
+});
+
 test("输出截断 → output_truncated(retryable)", () => {
   const result = validateFastExtractionArtifact(validArtifact(), ctx({ finishReason: "length" }));
   assert.equal(result.passed, false);

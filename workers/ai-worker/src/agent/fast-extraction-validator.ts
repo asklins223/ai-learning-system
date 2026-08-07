@@ -95,6 +95,31 @@ export function validateFastExtractionArtifact(
         });
       }
     }
+    // 2c. relationHints.localTargetId 悬空引用检查(review should-fix)
+    // 后续按 relationHints 合并时会拿到不存在的 localId,提前拒绝。
+    // (存在性检查在全部 localId 收集后统一执行,见步骤 2e)
+    for (const hint of c.relationHints ?? []) {
+      if (hint.localTargetId === c.localId) {
+        issues.push({
+          code: "self_referencing_relation",
+          severity: "retryable",
+          details: `localId=${c.localId} localTargetId=${hint.localTargetId}`,
+        });
+      }
+    }
+  }
+
+  // 2d. noCandidateDecisions.bundleId ∈ requiredBundleIds(review should-fix)
+  // 模型幻觉的多余决策不应被静默接受。
+  const requiredSet = new Set(ctx.requiredBundleIds);
+  for (const d of a.noCandidateDecisions) {
+    if (!requiredSet.has(d.bundleId)) {
+      issues.push({
+        code: "no_candidate_bundle_not_required",
+        severity: "retryable",
+        details: `bundle=${d.bundleId} 不在 Required Bundle 列表`,
+      });
+    }
   }
 
   // 3. 每个 Required Bundle 有明确决策
@@ -115,6 +140,20 @@ export function validateFastExtractionArtifact(
         severity: "retryable",
         details: `bundle=${required}`,
       });
+    }
+  }
+
+  // 2e. relationHints.localTargetId 存在性检查(review should-fix):
+  // 所有 localId 已收集完毕,悬空引用在此统一拒绝。
+  for (const c of a.candidates) {
+    for (const hint of c.relationHints ?? []) {
+      if (!localIds.has(hint.localTargetId)) {
+        issues.push({
+          code: "dangling_relation_target",
+          severity: "retryable",
+          details: `localId=${c.localId} localTargetId=${hint.localTargetId} 不存在`,
+        });
+      }
     }
   }
 

@@ -106,6 +106,17 @@ export const AgentUnitKind = {
   AGENT_RUN: "agent_run",
   DETERMINISTIC_VERIFY: "deterministic_verify",
   PUBLISH: "publish",
+  // Phase 2 Fast 路径(§3.1, migration 0067)
+  FAST_EXTRACT: "fast_extract",
+  FAST_COMPOSE: "fast_compose",
+  // Phase 3 Adaptive Planned 路径(§3.2)
+  ROUTE: "route",
+  SUPERVISOR_PLAN: "supervisor_plan",
+  // 风险分级 Critic(§3.3)
+  GROUNDING_CRITIC_LIGHT: "grounding_critic_light",
+  GROUNDING_CRITIC_CLAIM: "grounding_critic_claim",
+  COMPOSE: "compose",
+  REPAIR: "repair",
 } as const;
 export type AgentUnitKind = (typeof AgentUnitKind)[keyof typeof AgentUnitKind];
 
