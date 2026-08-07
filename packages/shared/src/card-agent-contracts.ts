@@ -780,6 +780,58 @@ export const NoCandidateReason = {
 export type NoCandidateReason =
   (typeof NoCandidateReason)[keyof typeof NoCandidateReason];
 
+// ─── 11c. FastExtractionArtifact(实施计划 §3.1, P2-2) ───────────────────
+
+/**
+ * FAST_EXTRACT 输出(Schema 校验 + 中间确定性校验的输入契约)。
+ *
+ * Fast 是**全局提取范式**:sectionKey/topic 为全局标注(非 Planned 的 Bundle 分工),
+ * 后续按 Evidence 所属 Bundle 重新归属(§4.2 传递规则)。
+ * 不负责最终分组、标题/摘要、Merge/Split、排序(控制 Output Token)。
+ *
+ * 输入不设 token 上限,仅受全局预算约束(历史教训:数值上限导致输出截断)。
+ */
+export const fastExtractionCandidateSchema = z.object({
+  /** 本次 artifact 内唯一 ID(用于 relationHints 引用与中间校验) */
+  localId: z.string().min(1).max(160),
+  claim: z.string().min(1).max(500),
+  topic: z.string().min(1).max(200),
+  /** 全局章节标注(非 Bundle 分工) */
+  sectionKey: z.string().min(1).max(200),
+  cognitiveType: z.enum(
+    Object.values(CognitiveType) as [string, ...string[]],
+  ),
+  importance: z.enum(
+    Object.values(CandidateImportance) as [string, ...string[]],
+  ),
+  difficulty: z.enum(
+    Object.values(CandidateDifficulty) as [string, ...string[]],
+  ),
+  evidenceRefIds: z.array(z.string().min(1)).min(1).max(50),
+  relationHints: z.array(z.object({
+    type: z.enum(["supports", "contrasts", "depends_on"]),
+    localTargetId: z.string().min(1),
+  }).strict()).max(20).optional(),
+}).strict();
+export type FastExtractionCandidate = z.infer<typeof fastExtractionCandidateSchema>;
+
+/** no-candidate 决策(Fast 全局范式:覆盖无候选的 Required Bundle) */
+export const fastExtractionNoCandidateSchema = z.object({
+  bundleId: z.string().min(1).max(200),
+  reason: z.enum(
+    Object.values(NoCandidateReason) as [string, ...string[]],
+  ),
+}).strict();
+export type FastExtractionNoCandidate = z.infer<typeof fastExtractionNoCandidateSchema>;
+
+export const fastExtractionArtifactSchema = z.object({
+  documentIntent: z.string().min(1).max(500),
+  learningFocus: z.array(z.string().min(1).max(200)).max(20),
+  candidates: z.array(fastExtractionCandidateSchema).max(100),
+  noCandidateDecisions: z.array(fastExtractionNoCandidateSchema).max(50),
+}).strict();
+export type FastExtractionArtifact = z.infer<typeof fastExtractionArtifactSchema>;
+
 /** 语义支撑状态 */
 export const SemanticSupportStatus = {
   SUPPORTED: "supported",
