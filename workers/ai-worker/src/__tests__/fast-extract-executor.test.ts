@@ -66,6 +66,11 @@ test("JSON 提取:markdown 围栏 + 前后说明中提取首个 JSON 对象", ()
   assert.equal(extractJsonObject('{"broken": '), null);
 });
 
+test("JSON 提取:超长输入快速失败(长度上限)", () => {
+  const long = "x".repeat(100_001);
+  assert.equal(extractJsonObject(long), null, "超长输入应快速失败");
+});
+
 test("首次尝试校验通过 → proceed(不重试)", async () => {
   const deps = makeDeps([{ content: JSON.stringify(validArtifact()), finishReason: "stop" }]);
   const result = await runFastExtract(deps, {

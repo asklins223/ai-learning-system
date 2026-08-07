@@ -107,7 +107,13 @@ export async function applyProvisionalDecision(input: {
 }): Promise<number> {
   const { workspaceId, runId, decisionByUnitId, decisions } = input;
   let applied = 0;
+  const VALID_DECISIONS: readonly ProvisionalDecision[] = ["confirm", "revise", "reject", "supplement"];
   for (const d of decisions) {
+    // security LOW 建议:运行时枚举强校验(decision 列无 DB CHECK,防任意字符串写入)
+    if (!VALID_DECISIONS.includes(d.decision)) {
+      logger.warn({ runId, decision: d.decision }, "P2-6: 非法 provisional 决策,跳过");
+      continue;
+    }
     const set = {
       decision: d.decision,
       decisionByUnitId,

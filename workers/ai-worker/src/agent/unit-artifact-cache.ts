@@ -15,6 +15,9 @@ import { createHash } from "node:crypto";
 import { logger } from "../lib/logger.ts";
 
 export interface ArtifactCacheKeyInput {
+  /** security LOW 建议:纳入 workspace 维度,防低熵 inputHash 时跨 run 重放 */
+  workspaceId: string;
+  runId: string;
   inputHash: string;
   modelVersion: string;
   promptVersion: string;
@@ -42,6 +45,8 @@ export interface ArtifactCache {
 export function computeArtifactCacheKey(input: ArtifactCacheKeyInput): string {
   return createHash("sha256")
     .update(JSON.stringify({
+      workspaceId: input.workspaceId,
+      runId: input.runId,
       inputHash: input.inputHash,
       modelVersion: input.modelVersion,
       promptVersion: input.promptVersion,

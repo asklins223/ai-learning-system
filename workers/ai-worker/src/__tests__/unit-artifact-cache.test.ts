@@ -14,6 +14,8 @@ import {
 } from "../agent/unit-artifact-cache.ts";
 
 const BASE = {
+  workspaceId: "ws-1",
+  runId: "run-1",
   inputHash: "input-hash-1",
   modelVersion: "model-v1",
   promptVersion: "prompt-v1",
@@ -26,6 +28,8 @@ test("cacheKey 内容寻址:同输入同 key,任一分量变化 → 不同 key",
   assert.equal(k1, k2, "同输入应稳定同 key");
   assert.equal(k1.length, 64, "SHA-256 hex");
 
+  assert.notEqual(computeArtifactCacheKey({ ...BASE, workspaceId: "ws-2" }), k1, "workspace 维度纳入");
+  assert.notEqual(computeArtifactCacheKey({ ...BASE, runId: "run-2" }), k1, "run 维度纳入");
   assert.notEqual(computeArtifactCacheKey({ ...BASE, inputHash: "x" }), k1);
   assert.notEqual(computeArtifactCacheKey({ ...BASE, modelVersion: "model-v2" }), k1);
   assert.notEqual(computeArtifactCacheKey({ ...BASE, promptVersion: "prompt-v2" }), k1);

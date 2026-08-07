@@ -42,11 +42,16 @@ export interface FastExtractRunResult {
 
 const MAX_ATTEMPTS = 3; // 1 初试 + 2 重试
 
+/** security LOW 建议:provider 输出解析长度硬上限(防 JSON.parse 最坏 O(n) 内存放大) */
+const MAX_PARSE_LENGTH = 100_000;
+
 /**
  * 容错提取 JSON 对象:模型输出可能带 markdown 围栏/前后说明,提取首个 {...} 块。
  * 提取失败返回 null(归 retryable schema_invalid)。
+ * 长度超过 MAX_PARSE_LENGTH 直接失败(快速失败,防超长输入)。
  */
 export function extractJsonObject(raw: string): unknown | null {
+  if (raw.length > MAX_PARSE_LENGTH) return null;
   // 去 markdown 围栏
   const withoutFence = raw.replace(/```(?:json)?/g, "");
   const start = withoutFence.indexOf("{");
@@ -85,10 +90,12 @@ export async function runFastExtract(
     const issueCodes = validation.issues.map((i) => i.code);
     attemptLog.push({ attempt, issues: issueCodes });
 
-    if (validation.passed && parsed != null) {
+    // security LOW 建议:proceed 返回 zod .strict() 清洗后的 artifact(不含未知键/
+    // __proto__,避免下游 spread/merge 的原型污染面)
+    if (validation.passed && parsed != null && validation.artifact != null) {
       logger.info({ attempt, retries: attempt - 1 }, "FAST_EXTRACT 校验通过");
       return {
-        action: { kind: "proceed", artifact: parsed, attemptCount: attempt },
+        action: { kind: "proceed", artifact: validation.artifact, attemptCount: attempt },
         attemptLog,
       };
     }

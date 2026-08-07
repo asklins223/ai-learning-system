@@ -48,6 +48,8 @@ export interface FastExtractionIssue {
 export interface FastExtractionValidationResult {
   passed: boolean;
   issues: FastExtractionIssue[];
+  /** 通过时返回 zod .strict() 清洗后的 artifact(不含未知键,security LOW 建议) */
+  artifact?: FastExtractionArtifact;
 }
 
 /**
@@ -196,5 +198,5 @@ export function validateFastExtractionArtifact(
     });
   }
 
-  return { passed: issues.length === 0, issues };
+  return { passed: issues.length === 0, issues, artifact: issues.length === 0 ? a : undefined };
 }
