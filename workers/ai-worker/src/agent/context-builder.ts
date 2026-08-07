@@ -23,6 +23,8 @@ import { isVisionUnderstandingEnabled } from "@ailearn/shared";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { ContextPacker, type ContextSection, type InfoTier } from "./context-packer.ts";
 import { estimateTokens, InputOverContextError } from "./request-packer.ts";
+import type { AgentExecutionSummary } from "./event-summary.ts";
+import { formatAgentExecutionSummary } from "./event-summary.ts";
 
 /** 运行 manifest 摘要 */
 export interface RunManifestSummary {
@@ -113,6 +115,8 @@ export interface ContextBuilderInput {
   candidates: CandidateLedgerEntry[];
   taskResults: AgentTaskResultEntry[];
   events: EventSummaryEntry[];
+  /** P4-5: Agent Execution Summary(模型上下文不再默认加载全部原始 Event;诊断按需读取) */
+  executionSummary?: AgentExecutionSummary | null;
   draft: DraftSummary | null;
   qualityReport: QualityReportSummary | null;
   /** 未完成的 hard issues */
@@ -205,10 +209,18 @@ export class ContextBuilder {
     }
 
     // tier_3: 上下文记忆 — 较旧的 events（排除已在 tier_2 中的近期 tool_result）
-    // PERF: 随 run 推进 olderEvents 线性增长，token 成本近似 O(T²)。
-    // 保留最近 60 条，更早的只保留一行计数摘要。
+    // P4-5: 提供 executionSummary 时默认用它替代较旧原始事件(不逐条注入),
+    // 诊断时按需读取原始 Event。无 summary 时回退既有行为。
     const MAX_OLDER_EVENTS = 60;
-    if (olderEvents.length > MAX_OLDER_EVENTS) {
+    const summaryText = input.executionSummary ? formatAgentExecutionSummary(input.executionSummary) : null;
+    if (summaryText) {
+      sections.push(this.makeSection("execution_summary", "tier_3_contextual", summaryText));
+      if (olderEvents.length > 0) {
+        const kept = olderEvents.slice(-10);
+        sections.push(this.makeSection("event_history_tail", "tier_3_contextual",
+          `(保留最近 ${kept.length} 条原始事件;更早的见执行摘要)` + "\n" + this.formatEventSummary(kept)));
+      }
+    } else if (olderEvents.length > MAX_OLDER_EVENTS) {
       const kept = olderEvents.slice(-MAX_OLDER_EVENTS);
       const droppedCount = olderEvents.length - MAX_OLDER_EVENTS;
       const summary = `…(省略 ${droppedCount} 条更早事件)…\n`;

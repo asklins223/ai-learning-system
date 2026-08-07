@@ -16,6 +16,7 @@ import { toolRegistry, computeToolIdempotencyKey, computeArgsHash, getToolZodSch
 import { db } from "../../db.ts";
 import * as schema from "../../schema/index.ts";
 import { logger } from "../../lib/logger.ts";
+import { persistToolRequestEventsBatch } from "../tool-events-batch.ts";
 import type { BudgetTracker } from "../budget.ts";
 import type { CoverageLedger } from "../coverage-ledger.ts";
 import type { CandidateLedger } from "../candidate-ledger.ts";
@@ -105,6 +106,7 @@ export interface ToolCallResult {
 export async function executeToolCall(
   call: ToolCallRequest,
   ctx: ToolExecutionContext,
+  opts?: { skipRequestEvent?: boolean },
 ): Promise<ToolCallResult> {
   const { role, runId, agentUnitId, turnNo } = ctx;
 
@@ -248,19 +250,21 @@ export async function executeToolCall(
     };
   }
 
-  // 7. 记录 tool request 事件
-  await db.insert(schema.cardGenerationAgentEvents).values({
-    workspaceId: ctx.workspaceId,
-    runId,
-    unitId: agentUnitId,
-    eventKey: `tool_request:${idempotencyKey}`,
-    eventType: "tool_request",
-    agentRole: role,
-    turnNo,
-    toolName: call.name,
-    inputHash: argsHash,
-    safePayload: { args: sanitizeArgs(call.arguments) },
-  }).onConflictDoNothing();
+  // 7. 记录 tool request 事件(P4-4:批量路径已由 executeToolCalls 统一写入,此处跳过避免重复)
+  if (!opts?.skipRequestEvent) {
+    await db.insert(schema.cardGenerationAgentEvents).values({
+      workspaceId: ctx.workspaceId,
+      runId,
+      unitId: agentUnitId,
+      eventKey: `tool_request:${idempotencyKey}`,
+      eventType: "tool_request",
+      agentRole: role,
+      turnNo,
+      toolName: call.name,
+      inputHash: argsHash,
+      safePayload: { args: sanitizeArgs(call.arguments) },
+    }).onConflictDoNothing();
+  }
 
   // 8. 分发到对应工具模块
   let result: ToolCallResult;
@@ -348,18 +352,91 @@ export async function executeToolCalls(
     (call) => toolRegistry.getToolDefinition(ctx.role, call.name)?.hasSideEffect === false,
   );
 
+  // P4-4: 批量写入 tool_request 事件(单条 INSERT 多行,独立幂等键),
+  // 执行时跳过逐条写入(skipRequestEvent),写入量从 N 次降为 1 次。
+  if (calls.length > 1) {
+    const rows = buildToolRequestEventRows(calls, ctx);
+    if (rows.length > 0) {
+      await persistToolRequestEventsBatch(db, rows);
+    }
+  }
+
   if (allReadOnly && calls.length > 1) {
     // 并行执行只读工具调用
-    return Promise.all(calls.map((call) => executeToolCall(call, ctx)));
+    return Promise.all(calls.map((call) => executeToolCall(call, ctx, { skipRequestEvent: true })));
   }
 
   // 串行执行（有副作用或只有一个调用）
   const results: ToolCallResult[] = [];
   for (const call of calls) {
-    const result = await executeToolCall(call, ctx);
+    const result = await executeToolCall(call, ctx, { skipRequestEvent: true });
     results.push(result);
   }
   return results;
+}
+
+/**
+ * 构造 tool_request 事件行(批量写入用,与 executeToolCall 内部语义一致:
+ * 仅含通过权限 + schema 校验的调用;幂等键独立)。
+ */
+export function buildToolRequestEventRows(
+  calls: ToolCallRequest[],
+  ctx: ToolExecutionContext,
+): Array<{
+  workspaceId: string;
+  runId: string;
+  unitId: string | null;
+  eventKey: string;
+  eventType: "tool_request";
+  agentRole: string;
+  turnNo: number;
+  toolName: string;
+  inputHash: string | null;
+  safePayload: Record<string, unknown>;
+}> {
+  const { role, runId, agentUnitId, turnNo } = ctx;
+  const rows: Array<{
+    workspaceId: string;
+    runId: string;
+    unitId: string | null;
+    eventKey: string;
+    eventType: "tool_request";
+    agentRole: string;
+    turnNo: number;
+    toolName: string;
+    inputHash: string | null;
+    safePayload: Record<string, unknown>;
+  }> = [];
+
+  for (const call of calls) {
+    // 预检与 executeToolCall 一致:权限 + schema
+    if (!toolRegistry.isToolAllowed(role, call.name)) continue;
+    const zodSchema = getToolZodSchema(call.name);
+    if (zodSchema && !zodSchema.safeParse(call.arguments).success) continue;
+
+    const argsHash = computeArgsHash(call.arguments);
+    const idempotencyKey = computeToolIdempotencyKey({
+      runId,
+      agentUnitId,
+      turnNo,
+      toolCallId: call.id,
+      toolName: call.name,
+      argsHash,
+    });
+    rows.push({
+      workspaceId: ctx.workspaceId,
+      runId,
+      unitId: agentUnitId,
+      eventKey: `tool_request:${idempotencyKey}`,
+      eventType: "tool_request",
+      agentRole: role,
+      turnNo,
+      toolName: call.name,
+      inputHash: argsHash,
+      safePayload: { args: sanitizeArgs(call.arguments) },
+    });
+  }
+  return rows;
 }
 
 // ─── 工具分类辅助 ──────────────────────────────────────────────────────────

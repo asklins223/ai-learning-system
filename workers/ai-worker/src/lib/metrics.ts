@@ -137,6 +137,24 @@ export const jobDurationSeconds = new Histogram({
 
 // ─── Provider 指标 ──────────────────────────────────────────────────────
 
+/** P4-7: Stage 转换延迟直方图(§5.4:Stage Transition Latency 记录) */
+export const stageTransitionLatencySeconds = new Histogram({
+  name: "ailearn_stage_transition_latency_seconds",
+  help: "Stage transition latency in seconds by from/to stage",
+  labelNames: ["fromStage", "toStage"] as const,
+  buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+  registers: [registry],
+});
+
+/** P4-7: Time to First Tool Call 直方图(每 turn 内首工具调用耗时) */
+export const timeToFirstToolCallSeconds = new Histogram({
+  name: "ailearn_time_to_first_tool_call_seconds",
+  help: "Time to first tool call within an agent turn",
+  labelNames: ["role"] as const,
+  buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+  registers: [registry],
+});
+
 /** Provider 调用计数器 */
 export const providerCallsTotal = new Counter({
   name: "ailearn_provider_calls_total",
