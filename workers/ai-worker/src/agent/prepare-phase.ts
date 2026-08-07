@@ -102,8 +102,18 @@ export async function executePreparePhase(
   // 依据内容特征确定性判定执行模式，仅落库（execution_mode / routing_reason），
   // 不改变实际执行路径——现状仍走 Full Supervisor。
   // review should-fix:formula 检测排除 code 块(代码中 $VAR/$1 会误判 has_formula)。
+  // density 从当前 prepare unit 的 inputManifest 读取(runs 表无 density 列)。
+  const [prepareUnitRow] = await db
+    .select({ inputManifest: schema.cardGenerationUnits.inputManifest })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.id, payload.agentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+    ))
+    .limit(1);
+  const requestDensity = ((prepareUnitRow?.inputManifest as Record<string, unknown> | null)?.density as "overview" | "standard" | "complete" | undefined) ?? "standard";
   const routeDecision = computeComplexityRoute({
-    density: ((runDetail as Record<string, unknown>).density as string) ?? "standard",
+    density: requestDensity,
     blockCount: blocks.length,
     imageCount: blocks.filter((b) => b.type === "image").length,
     formulaCount: blocks.filter((b) => b.type !== "code" && /\$\$[\s\S]+?\$\$|\$[^$\n]+\$/.test(b.content)).length,
@@ -399,7 +409,7 @@ export async function executePreparePhase(
 
   // 创建 Supervisor agent_run unit 和对应的 job
   // R31 修复：传递实际请求的 density，不再在 createSupervisorUnit 中硬编码 "standard"。
-  const prepareDensity = ((runDetail as Record<string, unknown>).density ?? "standard") as "overview" | "standard" | "complete";
+  const prepareDensity = requestDensity;
 
   // P2 接线:Router 判定 fast 且灰度开启 → 创建 FAST_EXTRACT unit(不再走 Full Supervisor)。
   // 默认关闭(fail-closed,§12.2);开启后按 FAST_PATH_ROLLOUT_PERCENT 分桶。
