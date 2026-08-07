@@ -891,6 +891,8 @@ export async function persistRepairPatches(
   const draftVersion = (repairVersionResult?.value ?? 0) + 1;
 
   // 插入新 Draft
+  // security MEDIUM(0072):producedByEventKey=repair:${agentUnitId} 在同一 repair unit
+  // 重跑时复用;0072 唯一约束兜底后冲突即静默跳过(该 draft 已存在,版本语义一致)
   await db.insert(schema.cardGenerationDrafts).values({
     workspaceId,
     runId,
@@ -907,7 +909,7 @@ export async function persistRepairPatches(
     cardBudget: baseDraft.cardBudget,
     baseLedgerHash: baseDraft.baseLedgerHash,
     summarySupportCandidateIds: baseDraft.summarySupportCandidateIds,
-  });
+  }).onConflictDoNothing();
 
   // 失效旧 Quality Report（新 draftHash 使旧 report 失效）
   // R40 修复：与 deck-draft.ts 的 handleApplyDraftPatch (R36 修复) 保持一致。
