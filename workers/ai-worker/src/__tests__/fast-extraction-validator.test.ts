@@ -202,8 +202,25 @@ test("输出截断 → output_truncated(retryable)", () => {
   assert.ok(result.issues.some((i) => i.code === "output_truncated" && i.severity === "retryable"));
 });
 
-test("schema 拒绝空 claim / 超长 claim / 非法枚举", () => {
-  // 空 claim
+test("清洗后 artifact 不含未知键/__proto__(security 回归)", () => {
+  const withProto: unknown = {
+    ...validArtifact(),
+    "__proto__": { polluted: true },
+    extraKey: "x",
+  };
+  const result = validateFastExtractionArtifact(withProto, ctx());
+  assert.equal(result.passed, false, "未知键应被 .strict() 拒绝");
+  assert.ok(result.issues.some((i) => i.code === "schema_invalid"));
+  assert.equal(result.artifact, undefined, "失败不返回 artifact");
+
+  // 通过时 artifact 为全新对象,不含未知键
+  const ok = validateFastExtractionArtifact(validArtifact(), ctx());
+  assert.equal(ok.passed, true);
+  assert.deepEqual(Object.keys(ok.artifact ?? {}).sort(),
+    ["candidates", "documentIntent", "learningFocus", "noCandidateDecisions"]);
+});
+
+test("schema 拒绝空 claim / 超长 claim / 非法枚举", () => {  // 空 claim
   assert.equal(fastExtractionArtifactSchema.safeParse({
     ...validArtifact(),
     candidates: [{ ...validArtifact().candidates[0]!, claim: "" }],
