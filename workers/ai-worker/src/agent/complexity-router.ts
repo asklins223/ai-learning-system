@@ -74,10 +74,17 @@ export function computeComplexityRoute(input: RouterInput): RouterDecision {
     && input.codeCount === 0
     && input.density !== "complete";
 
-  // P2-1 只统计不切换：判定结果落库,但执行仍走 Full Supervisor。
-  // adaptive_planned_v1 由 Phase 3 引入,当前不产出。
+  // P3 接线(审计缺口):complexity-router 此前从不产出 adaptive_planned_v1。
+  // 需规划(planned)条件:density=complete(内容密集需分段)或内容较长(≥12 block,
+  // 多 bundle 分段规划收益大);其余非简单内容走 Full Supervisor。
+  const needsPlanning = input.density === "complete" || input.blockCount >= 12;
+
   return {
-    mode: isSimple ? GenerationExecutionMode.FAST_TWO_STAGE_V1 : GenerationExecutionMode.FULL_SUPERVISOR_V1,
+    mode: isSimple
+      ? GenerationExecutionMode.FAST_TWO_STAGE_V1
+      : needsPlanning
+        ? GenerationExecutionMode.ADAPTIVE_PLANNED_V1
+        : GenerationExecutionMode.FULL_SUPERVISOR_V1,
     routingReason: reasons,
   };
 }

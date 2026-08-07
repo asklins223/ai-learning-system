@@ -10,7 +10,20 @@
  */
 
 import postgres from "postgres";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import "./src/lib/ai-provider.ts";
+
+// ─── 加载 .env(provider API keys 等) ────────────────────────────────────
+try {
+  const envText = readFileSync(resolve(process.cwd(), ".env"), "utf8");
+  for (const line of envText.split("\n")) {
+    const m = line.match(/^([A-Z_]+)=(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+  }
+} catch {
+  // 无 .env 时继续(测试环境无真实 provider)
+}
 
 const adminUrl = process.env.CARD_GENERATION_TEST_ADMIN_URL ?? process.env.DATABASE_URL;
 if (!adminUrl) throw new Error("DATABASE_URL required");
@@ -161,9 +174,16 @@ async function seedSample(s: Sample): Promise<{ runId: string; versionId: string
   const runId = `50000000-0000-4000-8000-${suffix}`;
   const noteId = `30000000-0000-4000-8000-${suffix}`;
   const versionId = `40000000-0000-4000-8000-${suffix}`;
+  const prepareUnitId = `60000000-0000-4000-8000-${suffix}`;
   await admin.begin(async (tx) => {
     await tx`DELETE FROM jobs WHERE generation_run_id = ${runId}`;
+    await tx`DELETE FROM card_generation_units WHERE run_id = ${runId}`;
+    await tx`DELETE FROM card_generation_drafts WHERE run_id = ${runId}`;
+    await tx`DELETE FROM card_generation_candidates WHERE run_id = ${runId}`;
     await tx`DELETE FROM card_generation_runs WHERE id = ${runId}`;
+    await tx`DELETE FROM note_blocks WHERE version_id = ${versionId}`;
+    await tx`DELETE FROM note_versions WHERE id = ${versionId}`;
+    await tx`DELETE FROM notes WHERE id = ${noteId}`;
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, 'p07-batch@example.invalid', 'unused') ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspaces
@@ -207,14 +227,25 @@ async function seedSample(s: Sample): Promise<{ runId: string; versionId: string
           costCap: 0,
         })}
       ) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO card_generation_units
+      (id, workspace_id, run_id, kind, level, ordinal, unit_key, required,
+       input_manifest, input_hash, status, cursor_json, budget_json, usage_json)
+      VALUES (
+        ${prepareUnitId}, ${WORKSPACE_ID}, ${runId}, 'prepare', 0, 0,
+        ${`prepare:${runId}`}, true,
+        ${tx.json({ density: s.density })},
+        ${`p07-fp-${s.id}`},
+        'pending', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb
+      ) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO jobs (
         id, type, workspace_id, requested_by, payload, status,
-        generation_run_id, generation_unit_id, stage, priority,
-        attempts, max_attempts, available_after, created_at, updated_at
+        generation_run_id, generation_unit_id, stage,
+        priority, resource_class, idempotency_key
       ) VALUES (
         gen_random_uuid(), 'execute_card_agent_turn', ${WORKSPACE_ID}, ${USER_ID},
-        ${tx.json({ generationRunId: runId, agentUnitId: null, turnNo: 1 })},
-        'pending', ${runId}, null, 'queued', 0, 0, 3, now(), now(), now()
+        ${tx.json({ noteVersionId: versionId, generationRunId: runId, agentUnitId: prepareUnitId, turnNo: 0, inputHash: `p07-fp-${s.id}`, userId: USER_ID })},
+        'pending', ${runId}, ${prepareUnitId}, 'snapshot', 80, 'card_foreground',
+        ${`generation-run:${runId}:prepare:0`}
       ) ON CONFLICT DO NOTHING`;
   });
   return { runId, versionId };

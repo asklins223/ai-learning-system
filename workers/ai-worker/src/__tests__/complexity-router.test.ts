@@ -54,18 +54,23 @@ test("含代码块 → full_supervisor_v1", () => {
   assert.ok(decision.routingReason.includes("has_code"));
 });
 
-test("density=complete → full_supervisor_v1", () => {
+test("density=complete → adaptive_planned_v1(P3 接线:内容密集需分段规划)", () => {
   const decision = computeComplexityRoute(input({ density: "complete" }));
-  assert.equal(decision.mode, GenerationExecutionMode.FULL_SUPERVISOR_V1);
+  assert.equal(decision.mode, GenerationExecutionMode.ADAPTIVE_PLANNED_V1);
   assert.ok(decision.routingReason.includes("density_complete"));
 });
 
+test("长文本(blockCount≥12)非简单特征 → adaptive_planned_v1(需多 bundle 分段规划)", () => {
+  const decision = computeComplexityRoute(input({ codeCount: 1, blockCount: 14 }));
+  assert.equal(decision.mode, GenerationExecutionMode.ADAPTIVE_PLANNED_V1);
+});
+
 test("不做 token 量/数量级硬阈值(长文本仍按特征判定)", () => {
-  // 长文本但特征简单 → 仍 fast 候选（无数值上限）
-  const longText = computeComplexityRoute(input({ totalChars: 200_000, blockCount: 500 }));
+  // 长文本但特征简单且密度非 complete → 仍 fast 候选(无数值上限)
+  const longText = computeComplexityRoute(input({ totalChars: 200_000, blockCount: 500, density: "overview" }));
   assert.equal(longText.mode, GenerationExecutionMode.FAST_TWO_STAGE_V1);
-  // 短文本但含代码 → full（特征优先于体量）
-  const shortWithCode = computeComplexityRoute(input({ totalChars: 50, codeCount: 1 }));
+  // 短文本但含代码 → full(特征优先于体量)
+  const shortWithCode = computeComplexityRoute(input({ totalChars: 50, codeCount: 1, blockCount: 3 }));
   assert.equal(shortWithCode.mode, GenerationExecutionMode.FULL_SUPERVISOR_V1);
 });
 
