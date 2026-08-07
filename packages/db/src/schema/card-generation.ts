@@ -317,6 +317,13 @@ export type CardGenerationUnitInputManifest = {
   agentRole?: AgentRole;
   taskSpec?: Record<string, unknown>;
   depth?: number;
+  // ── Phase 3 Planned 路径字段(§3.2,P3-4) ──
+  planVersion?: number;
+  bundleId?: string;
+  specialist?: "text_extractor" | "code_extractor" | "vision_specialist";
+  extractionFocus?: string;
+  relatedBundleIds?: string[];
+  replanVersion?: number;
 };
 
 /** Durable, independently retryable checkpoint; queue jobs are only leases. */

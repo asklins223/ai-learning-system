@@ -1,5 +1,5 @@
-import { and, eq } from "drizzle-orm";
-import { generationPlanSchema } from "@ailearn/shared";
+import { and, desc, eq } from "drizzle-orm";
+import { generationPlanSchema, type GenerationPlan } from "@ailearn/shared";
 import { db, withWorkerWorkspaceTransaction } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { logger } from "../lib/logger.ts";
@@ -8,7 +8,9 @@ import type { AgentJobPayload, RunContext } from "./types.ts";
 import { assertJobLease, type JobLeaseContext } from "../lib/job-lease.ts";
 import { createProvider } from "../lib/ai-provider.ts";
 import { insertPlanRecord } from "./plan-repository.ts";
-import { createNextTurnJob, createSupervisorUnit } from "./unit-helpers.ts";
+import { createNextTurnJob, createPlannedComposeUnit, createPlannedSpecialistUnit, createSupervisorUnit } from "./unit-helpers.ts";
+import { buildScheduleState, scheduleWaves } from "./specialist-dag.ts";
+import { detectGaps, hasEscalateGaps, affectedBundleIds, type SpecialistOutcome } from "./gap-detection.ts";
 import type { AgentTurnExecutionResult } from "./types.ts";
 
 /**
@@ -47,9 +49,8 @@ export async function executePlanGenerationPhase(
     ))
     .limit(1);
   if (existingPlan) {
-    logger.info({ runId: payload.generationRunId, planId: existingPlan.id }, "PLAN_GENERATION: 已有 plan(幂等复用)");
-    await markPlanUnitFinished(job, payload, "succeeded");
-    return { kind: "complete" };
+    // P3-4 接线:已有 plan(plan unit 恢复重入)→ 检查 specialist children 完成度
+    return await advancePlannedPipeline(job, payload, runContext);
   }
 
   const [run] = await db
@@ -131,9 +132,9 @@ export async function executePlanGenerationPhase(
       "PLAN_GENERATION: Initial Plan 已落库(不可变)",
     );
 
-    // 后续:Specialist DAG 调度(P3-4)作为独立里程碑;当前完成 plan 生成即结束本 unit
-    await markPlanUnitFinished(job, payload, "succeeded");
-    return { kind: "complete" };
+    // P3-4 接线:Initial Plan 落库后创建 Specialist DAG units(按 wave 并行),
+    // plan unit 置 waiting_child 等待全部 specialist 完成(由 resume 机制重入)
+    return await launchSpecialistDag(job, payload, runContext, plan, record.version);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // review should-fix:可重试 provider 瞬时错误(429/408/5xx)re-throw 交外层重试机制,
@@ -161,4 +162,219 @@ async function markPlanUnitFinished(
       eq(schema.cardGenerationUnits.id, payload.agentUnitId),
       eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
     ));
+}
+
+// ─── P3-4:Specialist DAG 调度 ──────────────────────────────────────────
+
+const DONE_OR_STUCK = new Set(["succeeded", "terminal_failed", "cancelled", "superseded", "retryable_failed"]);
+
+/** 创建全部 specialist units(按 wave),plan unit 置 waiting_child 等待 */
+async function launchSpecialistDag(
+  job: JobPayload,
+  payload: AgentJobPayload,
+  _runContext: Extract<RunContext, { kind: "active" }>,
+  plan: GenerationPlan,
+  planVersion: number,
+): Promise<AgentTurnExecutionResult> {
+  const replanVersion = 1;
+  const states = buildScheduleState(plan, new Set());
+  const waves = scheduleWaves(states);
+  const created: string[] = [];
+
+  for (const [waveNo, wave] of waves.entries()) {
+    for (const [i, bundleId] of wave.entries()) {
+      const task = plan.bundleTasks.find((t) => t.bundleId === bundleId);
+      if (!task) continue;
+      const unitId = await createPlannedSpecialistUnit(job, payload, payload.agentUnitId, {
+        planVersion,
+        bundleId: task.bundleId,
+        specialist: task.specialist,
+        extractionFocus: task.extractionFocus,
+        relatedBundleIds: task.relatedBundleIds ?? [],
+        waveNo,
+        bundleOrdinal: i,
+        replanVersion,
+      });
+      created.push(unitId);
+    }
+  }
+
+  if (created.length === 0) {
+    logger.warn({ runId: payload.generationRunId }, "PLAN: 无 specialist 任务,直接进入 compose");
+    return await launchPlannedCompose(job, payload);
+  }
+
+  for (const unitId of created) {
+    await createNextTurnJob(job, payload.generationRunId, unitId, 1);
+  }
+  // plan unit 置 waiting_child(由 resume 机制在全部 children 终态后重入)
+  await db
+    .update(schema.cardGenerationUnits)
+    .set({ status: "waiting_child", updatedAt: new Date() })
+    .where(and(
+      eq(schema.cardGenerationUnits.id, payload.agentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+    ));
+  logger.info(
+    { runId: payload.generationRunId, planVersion, specialistUnits: created.length, waves: waves.length },
+    "PLAN: Specialist DAG 已创建,等待子任务完成",
+  );
+  return { kind: "wait_for_children", childTaskIds: created };
+}
+
+/** plan unit 恢复重入:children 全终态后做 Gap Detection → Replan / Compose / 升级 */
+async function advancePlannedPipeline(
+  job: JobPayload,
+  payload: AgentJobPayload,
+  runContext: Extract<RunContext, { kind: "active" }>,
+): Promise<AgentTurnExecutionResult> {
+  const [planRow] = await db
+    .select({ planJson: schema.cardGenerationPlans.planJson, version: schema.cardGenerationPlans.version })
+    .from(schema.cardGenerationPlans)
+    .where(and(
+      eq(schema.cardGenerationPlans.runId, payload.generationRunId),
+      eq(schema.cardGenerationPlans.workspaceId, job.workspaceId),
+    ))
+    .orderBy(desc(schema.cardGenerationPlans.version))
+    .limit(1);
+  if (!planRow) {
+    logger.warn({ runId: payload.generationRunId }, "PLAN: 无 plan 记录,升级 Full");
+    return await escalatePlanned(job, payload, runContext);
+  }
+  const plan = planRow.planJson as unknown as GenerationPlan;
+
+  const children = await db
+    .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+    ));
+  const stillRunning = children.filter((c) => !DONE_OR_STUCK.has(c.status));
+  if (stillRunning.length > 0) {
+    logger.info(
+      { runId: payload.generationRunId, stillRunning: stillRunning.length },
+      "PLAN: 仍有 specialist 子任务运行中,继续等待",
+    );
+    return { kind: "wait_for_children", childTaskIds: stillRunning.map((c) => c.id) };
+  }
+
+  // 全部终态 → Gap Detection(§3.2):从正式候选统计各 bundle 决策
+  const candidateRows = await db
+    .select({ bundleId: schema.cardGenerationCandidates.bundleId, id: schema.cardGenerationCandidates.id })
+    .from(schema.cardGenerationCandidates)
+    .where(and(
+      eq(schema.cardGenerationCandidates.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationCandidates.runId, payload.generationRunId),
+    ));
+  const countByBundle = new Map<string, number>();
+  for (const r of candidateRows) {
+    const bundleId = r.bundleId ?? "unknown";
+    countByBundle.set(bundleId, (countByBundle.get(bundleId) ?? 0) + 1);
+  }
+
+  const outcomes: Record<string, SpecialistOutcome> = {};
+  let decidedBundles = 0;
+  for (const task of plan.bundleTasks) {
+    const candidateCount = countByBundle.get(task.bundleId) ?? 0;
+    outcomes[task.bundleId] = {
+      hasDecision: candidateCount > 0,
+      decisionKind: candidateCount > 0 ? "candidate" : undefined,
+      candidateCount,
+      protocolErrors: [],
+      evidenceRefIds: [],
+      finishReason: "complete",
+    };
+    if (candidateCount > 0) decidedBundles += 1;
+  }
+  const survivingCoverage = plan.bundleTasks.length > 0 ? decidedBundles / plan.bundleTasks.length : 1;
+
+  const gaps = detectGaps({
+    plan,
+    outcomes,
+    evidenceAllowlist: new Set(),
+    coverageLedgerComplete: true,
+    survivingCoverage,
+    coverageThreshold: 0.5,
+  });
+
+  if (hasEscalateGaps(gaps)) {
+    logger.warn(
+      { runId: payload.generationRunId, gaps: gaps.filter((g) => g.severity === "escalate").map((g) => g.code) },
+      "PLAN: Gap 需升级(escalate),升级 Full Supervisor",
+    );
+    return await escalatePlanned(job, payload, runContext);
+  }
+
+  const affected = affectedBundleIds(gaps, plan);
+  if (affected.size > 0) {
+    // Bounded Replan:仅为受影响 bundle 重跑(新 specialist units,replanVersion 递增)
+    logger.warn(
+      { runId: payload.generationRunId, affected: [...affected], gaps: gaps.map((g) => g.code) },
+      "PLAN: Gap 可 Replan(仅重跑受影响 bundle)",
+    );
+    // replanVersion 从最新 specialist unit manifest 递增(plan unit 自身无 manifest)
+    const [latestSpecialist] = await db
+      .select({ inputManifest: schema.cardGenerationUnits.inputManifest })
+      .from(schema.cardGenerationUnits)
+      .where(and(
+        eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
+        eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+        eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+      ))
+      .orderBy(desc(schema.cardGenerationUnits.createdAt))
+      .limit(1);
+    const prevManifest = (latestSpecialist?.inputManifest as Record<string, unknown>) ?? {};
+    const replanVersion = Number(prevManifest.replanVersion ?? 1) + 1;
+    const created: string[] = [];
+    for (const [i, bundleId] of [...affected].sort().entries()) {
+      const task = plan.bundleTasks.find((t) => t.bundleId === bundleId);
+      if (!task) continue;
+      const unitId = await createPlannedSpecialistUnit(job, payload, payload.agentUnitId, {
+        planVersion: planRow.version,
+        bundleId: task.bundleId,
+        specialist: task.specialist,
+        extractionFocus: task.extractionFocus,
+        relatedBundleIds: task.relatedBundleIds ?? [],
+        waveNo: 0,
+        bundleOrdinal: i,
+        replanVersion,
+      });
+      created.push(unitId);
+    }
+    for (const unitId of created) await createNextTurnJob(job, payload.generationRunId, unitId, 1);
+    await db
+      .update(schema.cardGenerationUnits)
+      .set({ status: "waiting_child", updatedAt: new Date() })
+      .where(and(
+        eq(schema.cardGenerationUnits.id, payload.agentUnitId),
+        eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      ));
+    return { kind: "wait_for_children", childTaskIds: created };
+  }
+
+  // 无 gap → 自动 Compose
+  logger.info({ runId: payload.generationRunId, bundleCount: plan.bundleTasks.length }, "PLAN: 无 Gap,自动进入 Compose");
+  return await launchPlannedCompose(job, payload);
+}
+
+/** 创建 PLANNED_COMPOSE unit 并完成 plan unit */
+async function launchPlannedCompose(job: JobPayload, payload: AgentJobPayload): Promise<AgentTurnExecutionResult> {
+  const composeUnitId = await createPlannedComposeUnit(job, payload);
+  await createNextTurnJob(job, payload.generationRunId, composeUnitId, 1);
+  await markPlanUnitFinished(job, payload, "succeeded");
+  return { kind: "complete" };
+}
+
+/** 升级 Full Supervisor(失败 Artifact 不发布) */
+async function escalatePlanned(
+  job: JobPayload,
+  payload: AgentJobPayload,
+  runContext: Extract<RunContext, { kind: "active" }>,
+): Promise<AgentTurnExecutionResult> {
+  const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
+  await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
+  await markPlanUnitFinished(job, payload, "succeeded");
+  return { kind: "complete" };
 }

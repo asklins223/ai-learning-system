@@ -119,6 +119,9 @@ export const AgentUnitKind = {
   GROUNDING_CRITIC_CLAIM: "grounding_critic_claim",
   COMPOSE: "compose",
   REPAIR: "repair",
+  // Phase 3 Planned 路径 Specialist DAG(§3.2/§5.3, migration 0073)
+  PLANNED_SPECIALIST: "planned_specialist",
+  PLANNED_COMPOSE: "planned_compose",
 } as const;
 export type AgentUnitKind = (typeof AgentUnitKind)[keyof typeof AgentUnitKind];
 

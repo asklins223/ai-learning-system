@@ -361,6 +361,122 @@ export async function createFastComposeUnit(
   return unit.id;
 }
 
+/**
+ * P3 Planned 路径:创建单个 Specialist DAG unit(§3.2, P3-4)。
+ * 身份:(run, planned_specialist, 0, ordinal=30+wave*10+bundleIdx),幂等;
+ * parentUnitId=plan unit(等待机制由 P1-4 的 child-complete 推进驱动)。
+ */
+export async function createPlannedSpecialistUnit(
+  job: JobPayload,
+  payload: AgentJobPayload,
+  planUnitId: string,
+  input: {
+    planVersion: number;
+    bundleId: string;
+    specialist: "text_extractor" | "code_extractor" | "vision_specialist";
+    extractionFocus: string;
+    relatedBundleIds: string[];
+    waveNo: number;
+    bundleOrdinal: number;
+    replanVersion: number;
+  },
+): Promise<string> {
+  const now = new Date();
+  const unitKey = `planned_specialist:${payload.generationRunId}:${input.bundleId}:rv${input.replanVersion}`;
+  const [existing] = await db
+    .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.unitKey, unitKey),
+    ))
+    .limit(1);
+  if (existing) {
+    if (existing.status !== "pending" && existing.status !== "running") {
+      await db
+        .update(schema.cardGenerationUnits)
+        .set({ status: "pending", scheduledAt: now, updatedAt: now })
+        .where(eq(schema.cardGenerationUnits.id, existing.id));
+    }
+    return existing.id;
+  }
+  const [unit] = await db
+    .insert(schema.cardGenerationUnits)
+    .values({
+      workspaceId: job.workspaceId,
+      runId: payload.generationRunId,
+      parentUnitId: planUnitId,
+      kind: AgentUnitKind.PLANNED_SPECIALIST,
+      level: 0,
+      ordinal: 30 + input.waveNo * 10 + input.bundleOrdinal,
+      unitKey,
+      required: true,
+      inputManifest: {
+        planVersion: input.planVersion,
+        bundleId: input.bundleId,
+        specialist: input.specialist,
+        extractionFocus: input.extractionFocus,
+        relatedBundleIds: input.relatedBundleIds,
+        replanVersion: input.replanVersion,
+      },
+      inputHash: createHash("sha256").update(unitKey, "utf8").digest("hex"),
+      tokenEstimate: 0,
+      status: "pending",
+      scheduledAt: now,
+    })
+    .returning();
+  if (!unit) throw new Error("无法创建 planned_specialist unit");
+  return unit.id;
+}
+
+/** P3 Planned 路径:全部 specialist 完成后创建 compose unit(身份 (run, planned_compose, 0, 200)) */
+export async function createPlannedComposeUnit(
+  job: JobPayload,
+  payload: AgentJobPayload,
+): Promise<string> {
+  const now = new Date();
+  const unitKey = `planned_compose:${payload.generationRunId}`;
+  const [existing] = await db
+    .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.unitKey, unitKey),
+    ))
+    .limit(1);
+  if (existing) {
+    if (existing.status !== "pending" && existing.status !== "running") {
+      await db
+        .update(schema.cardGenerationUnits)
+        .set({ status: "pending", scheduledAt: now, updatedAt: now })
+        .where(eq(schema.cardGenerationUnits.id, existing.id));
+    }
+    return existing.id;
+  }
+  const [unit] = await db
+    .insert(schema.cardGenerationUnits)
+    .values({
+      workspaceId: job.workspaceId,
+      runId: payload.generationRunId,
+      parentUnitId: null,
+      kind: AgentUnitKind.PLANNED_COMPOSE,
+      level: 0,
+      ordinal: 200,
+      unitKey,
+      required: true,
+      inputManifest: {},
+      inputHash: createHash("sha256").update(`planned_compose:${payload.generationRunId}`).digest("hex"),
+      tokenEstimate: 0,
+      status: "pending",
+      scheduledAt: now,
+    })
+    .returning();
+  if (!unit) throw new Error("无法创建 planned_compose unit");
+  return unit.id;
+}
+
 /** 创建下一个 Agent turn 的 job */
 export async function createNextTurnJob(
   job: JobPayload,

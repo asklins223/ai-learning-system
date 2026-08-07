@@ -72,6 +72,7 @@ import { executeVerifyPhase } from "../agent/verify-phase.ts";
 import { executePublishPhase } from "../agent/publish-phase.ts";
 // QUAL-02/PERF-04 拆分：PREPARE 阶段提取到独立模块
 import { executeFastExtractPhase, executeFastComposePhase } from "../agent/fast-path.ts";
+import { executePlannedSpecialistPhase, executePlannedComposePhase } from "../agent/planned-path.ts";
 import { executePlanGenerationPhase } from "../agent/plan-path.ts";
 import { executePreparePhase } from "../agent/prepare-phase.ts";
 // QUAL-02/PERF-04 拆分（第八轮）：run context 加载、payload 解析
@@ -229,6 +230,13 @@ async function executeAgentPhase(
     // P3 Planned 路径接线(审计缺口:Planned 组件此前零生产调用点;plan 生成+落库)
     case AgentUnitKind.SUPERVISOR_PLAN:
       return await executePlanGenerationPhase(job, payload, runContext, lease);
+
+    // P3 Specialist DAG 执行(§3.2 P3-4)
+    case AgentUnitKind.PLANNED_SPECIALIST:
+      return await executePlannedSpecialistPhase(job, payload, runContext, lease);
+
+    case AgentUnitKind.PLANNED_COMPOSE:
+      return await executePlannedComposePhase(job, payload, runContext, lease);
 
     case AgentUnitKind.PUBLISH:
       return await executePublishPhase(job, payload, runContext, lease);

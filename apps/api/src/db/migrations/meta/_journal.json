@@ -512,6 +512,13 @@
       "when": 1789189400000,
       "tag": "0072_drafts_produced_by_event_key_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1789275800000,
+      "tag": "0073_card_generation_units_planned_kind_check",
+      "breakpoints": true
     }
   ]
 }
