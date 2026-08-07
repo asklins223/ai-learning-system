@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { composeArtifactSchema } from "@ailearn/shared";
 import { db, withWorkerWorkspaceTransaction } from "../db.ts";
@@ -424,6 +424,8 @@ async function escalateToFull(
         .where(and(
           eq(schema.cardGenerationUnits.id, parent.parentUnitId),
           eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+          // security LOW 收口:仅 running/waiting_child 可被终结,防误置已推进状态
+          inArray(schema.cardGenerationUnits.status, ["running", "waiting_child"]),
         ));
     }
   }
