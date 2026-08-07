@@ -696,5 +696,7 @@ export const provisionalCandidates = pgTable(
   },
   (t) => ({
     runIdx: index("provisional_candidates_run_idx").on(t.runId),
+    runLocalUnique: uniqueIndex("provisional_candidates_run_local_unique_idx")
+      .on(t.runId, t.localId),
   }),
 );

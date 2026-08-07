@@ -81,10 +81,9 @@ export async function runFastExtract(
       finishReason: providerOut.finishReason,
     });
 
-    attemptLog.push({
-      attempt,
-      issues: validation.issues.map((i) => `${i.code}:${i.severity}`),
-    });
+    // nit(review):attemptLog 与 escalate 返回统一记录 issue code(不含 severity)
+    const issueCodes = validation.issues.map((i) => i.code);
+    attemptLog.push({ attempt, issues: issueCodes });
 
     if (validation.passed && parsed != null) {
       logger.info({ attempt, retries: attempt - 1 }, "FAST_EXTRACT 校验通过");
@@ -97,19 +96,19 @@ export async function runFastExtract(
     // 升级判定:任何 escalate(复杂语义)立即升级,不再重试
     const hasEscalate = validation.issues.some((i) => i.severity === "escalate");
     if (hasEscalate) {
-      logger.warn({ attempt, issues: validation.issues.map((i) => i.code) }, "FAST_EXTRACT 复杂语义错误,升级 Full");
+      logger.warn({ attempt, issues: issueCodes }, "FAST_EXTRACT 复杂语义错误,升级 Full");
       return {
         action: {
           kind: "escalate_to_full",
           attemptCount: attempt,
-          issues: validation.issues.map((i) => i.code),
+          issues: issueCodes,
         },
         attemptLog,
       };
     }
 
     logger.warn(
-      { attempt, retriesRemaining: MAX_ATTEMPTS - attempt, issues: validation.issues.map((i) => i.code) },
+      { attempt, retriesRemaining: MAX_ATTEMPTS - attempt, issues: issueCodes },
       "FAST_EXTRACT 校验未通过(可重试)",
     );
   }

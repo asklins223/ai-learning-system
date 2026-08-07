@@ -137,6 +137,18 @@ test("模型标注只升不降(低→标注高=高;高→标注低=仍高)", () 
   assert.equal(down.level, ClaimRiskLevel.HIGH, "确定性 high 不因模型标 low 而降级");
 });
 
+test("Repair 候选 → 直接升级 Full(§4.3,至少 Claim-Level)", () => {
+  const r = computeClaimRisk({
+    candidate: candidate(),
+    referencedBlockTypes: ["paragraph", "paragraph"],
+    referencedFormulaMarkers: [],
+    isRepairCandidate: true,
+  });
+  assert.equal(r.level, ClaimRiskLevel.HIGH);
+  assert.ok(r.signals.includes("repair_escalate"));
+  assert.equal(riskToReviewLevel(r.level), ReviewLevel.CLAIM);
+});
+
 test("medium → Claim-Level 映射", () => {
   const r = computeClaimRisk({
     candidate: candidate({ claim: "y".repeat(220) }),

@@ -40,6 +40,8 @@ export interface ClaimRiskInput {
   referencedFormulaMarkers: boolean[];
   /** 重复候选判定(与既有候选 claim 相似) */
   isDuplicateClaim?: boolean;
+  /** Fast 路径 Repair 候选 → 直接升级 Full(§4.3, review should-fix) */
+  isRepairCandidate?: boolean;
 }
 
 export interface ClaimRiskResult {
@@ -98,6 +100,13 @@ export function computeClaimRisk(input: ClaimRiskInput): ClaimRiskResult {
   if (hasImage) {
     level = maxLevel(level, ClaimRiskLevel.HIGH);
     signals.push("image_evidence");
+  }
+
+  // should-fix(review):Repair 规则落地——Fast 路径 Repair 候选直接升级 Full(§4.3),
+  // 不走 Claim 级审查。与 Image/Formula/Code 硬规则一致至少 Claim-Level。
+  if (input.isRepairCandidate) {
+    level = maxLevel(level, ClaimRiskLevel.HIGH);
+    signals.push("repair_escalate");
   }
 
   // 重复候选

@@ -15,7 +15,7 @@ import postgres from "postgres";
 import { closeDatabase } from "../db.ts";
 import {
   writeProvisionalCandidates,
-  listPendingProvisionalCandidates,
+  listProvisionalCandidates,
   applyProvisionalDecision,
   countPendingProvisionalCandidates,
 } from "../agent/provisional-candidates.ts";
@@ -87,7 +87,19 @@ test("P2-6: 写入 → pending 读取 → 决策应用(confirm/revise/reject),pr
   });
   assert.equal(written, 2, "写入 2 个候选");
 
-  const pending = await listPendingProvisionalCandidates(RUN_ID);
+  // should-fix(review)幂等:重复写入(重跑/重启恢复)不重复插入(UNIQUE(run_id, local_id))
+  await writeProvisionalCandidates({
+    workspaceId: WS_ID,
+    runId: RUN_ID,
+    producedByUnitId: UNIT_ID,
+    artifact: artifact(),
+    sourceProviderCallId: "provider-call-1-dup",
+  });
+  const [dupCount] = await admin<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM provisional_candidates WHERE run_id = ${RUN_ID}`;
+  assert.equal(dupCount?.count, 2, "重复写入不得产生重复候选");
+
+  const pending = await listProvisionalCandidates(RUN_ID);
   assert.equal(pending.length, 2);
   const c1 = pending.find((p) => p.localId === "c1")!;
   assert.equal(c1.claim, "命题一");
@@ -113,7 +125,7 @@ test("P2-6: 写入 → pending 读取 → 决策应用(confirm/revise/reject),pr
   });
   assert.equal(applied, 2);
 
-  const after = await listPendingProvisionalCandidates(RUN_ID);
+  const after = await listProvisionalCandidates(RUN_ID);
   const a1 = after.find((p) => p.localId === "c1")!;
   const a2 = after.find((p) => p.localId === "c2")!;
   assert.equal(a1.decision, "confirm");

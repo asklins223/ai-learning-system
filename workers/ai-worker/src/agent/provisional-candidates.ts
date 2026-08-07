@@ -61,17 +61,20 @@ export async function writeProvisionalCandidates(input: WriteProvisionalInput): 
 
   if (rows.length === 0) return 0;
 
+  // should-fix(review):升级流程幂等。表已加 UNIQUE(run_id, local_id)(migration 0068),
+  // 重跑/重启恢复时 onConflictDoNothing 防重复插入(§4.1 Tool 幂等无回归)。
   const inserted = await db
     .insert(schema.provisionalCandidates)
     .values(rows as never[])
+    .onConflictDoNothing()
     .returning({ id: schema.provisionalCandidates.id });
 
   logger.info({ runId, count: inserted.length }, "P2-6: provisional candidates 已写入");
   return inserted.length;
 }
 
-/** 读取 run 的 provisional 候选(仅待确认) */
-export async function listPendingProvisionalCandidates(runId: string): Promise<ProvisionalCandidateRow[]> {
+/** 读取 run 的全部 provisional 候选(含已决策行,供 Full 审计/继续处理) */
+export async function listProvisionalCandidates(runId: string): Promise<ProvisionalCandidateRow[]> {
   const rows = await db
     .select()
     .from(schema.provisionalCandidates)

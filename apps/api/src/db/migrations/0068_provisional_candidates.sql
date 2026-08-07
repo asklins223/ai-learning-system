@@ -28,3 +28,8 @@ CREATE TABLE IF NOT EXISTS provisional_candidates (
 
 CREATE INDEX IF NOT EXISTS provisional_candidates_run_idx
   ON provisional_candidates (run_id);
+
+-- review should-fix:升级流程幂等——同 run 内 localId 唯一(§4.1 Tool 幂等无回归)
+ALTER TABLE provisional_candidates
+  ADD CONSTRAINT provisional_candidates_run_local_unique_idx
+  UNIQUE (run_id, local_id);
