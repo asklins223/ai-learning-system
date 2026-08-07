@@ -61,6 +61,8 @@ export interface CriticCacheKeyInput {
   /** claim 文本规范化后的 sha256 */
   claimHash: string;
   criticMode: "light" | "claim" | "full";
+  /** security LOW 观察:模型版本(升级模型后 critic verdict 不 stale 重放) */
+  modelVersion: string;
   promptVersion: string;
 }
 
@@ -69,6 +71,7 @@ export function computeCriticCacheKey(input: CriticCacheKeyInput): string {
     workspaceId: input.workspaceId,
     claimHash: input.claimHash,
     criticMode: input.criticMode,
+    modelVersion: input.modelVersion,
     promptVersion: input.promptVersion,
     unitKind: "critic_verdict",
   })).digest("hex");

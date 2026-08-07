@@ -30,15 +30,15 @@ test("P5-1/2/3: key 不含 runId——跨 run 相同内容/相同 claim 命中(�
   const candB = computeCandidateCacheKey({ workspaceId: "w1", evidenceContentHash: "e1", modelVersion: "m1", promptVersion: "p1" });
   assert.equal(candA, candB, "跨 run 相同源证据 → 同一 key");
 
-  const criticA = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash("同一条 claim"), criticMode: "light", promptVersion: "p1" });
-  const criticB = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash("同一条 claim"), criticMode: "light", promptVersion: "p1" });
+  const criticA = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash("同一条 claim"), criticMode: "light", modelVersion: "m1", promptVersion: "p1" });
+  const criticB = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash("同一条 claim"), criticMode: "light", modelVersion: "m1", promptVersion: "p1" });
   assert.equal(criticA, criticB, "跨 run 同 claim → 同一 key(旧 verdict 复用)");
 
   // 跨 workspace 仍隔离
-  assert.notEqual(criticA, computeCriticCacheKey({ workspaceId: "w2", claimHash: claimHash("同一条 claim"), criticMode: "light", promptVersion: "p1" }));
+  assert.notEqual(criticA, computeCriticCacheKey({ workspaceId: "w2", claimHash: claimHash("同一条 claim"), criticMode: "light", modelVersion: "m1", promptVersion: "p1" }));
 
   // 配置维度语义:promptVersion 变化 → key 变化(升级提示词正确失效)
-  assert.notEqual(criticA, computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash("同一条 claim"), criticMode: "light", promptVersion: "p2" }));
+  assert.notEqual(criticA, computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash("同一条 claim"), criticMode: "light", modelVersion: "m1", promptVersion: "p2" }));
   assert.notEqual(bundleKeyA, computeBundleCacheKey({ workspaceId: "w1", bundleId: "b1", bundleContentHash: "h1", modelVersion: "m2", promptVersion: "p1" }), "modelVersion 升级失效");
 });
 
@@ -64,12 +64,12 @@ test("P5-2: candidate 同源同内容命中,源变化失效", () => {
 test("P5-3: critic verdict 按 claim 哈希命中,同 Claim 不重复审查", () => {
   const cache = createMemoryArtifactCache();
   const claim = "监督学习需要带标签的数据";
-  const k = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash(claim), criticMode: "light", promptVersion: "p1" });
+  const k = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash(claim), criticMode: "light", modelVersion: "m1", promptVersion: "p1" });
   putCriticVerdict(cache, k, { verdict: "supported", severity: "ok" }, "m1", "p1");
   assert.deepEqual(getCriticVerdict(cache, k), { verdict: "supported", severity: "ok" });
 
   // 不同 mode 不串(key 含 criticMode)
-  const kFull = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash(claim), criticMode: "full", promptVersion: "p1" });
+  const kFull = computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash(claim), criticMode: "full", modelVersion: "m1", promptVersion: "p1" });
   assert.notEqual(k, kFull);
   assert.equal(getCriticVerdict(cache, kFull), undefined);
 });

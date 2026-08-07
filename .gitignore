@@ -46,3 +46,4 @@ AI学习系统-v0.4-当前问题审核报告-*
 # R-003: Override global .gitignore that ignores Dockerfiles.
 # Ensure Dockerfiles are tracked in this repo.
 !**/Dockerfile
+reasonix.toml
