@@ -133,8 +133,10 @@ test("worker fences and atomically publishes a run-backed generation", async () 
   await processJob(claimed[0]!);
 
   // 多轮 worker 循环语义:supervisor 流程会产生多个 turn job,
-  // 循环 claim+process 直到 run 到达终态(或 30s 总耗时上限)
-  const loopDeadline = Date.now() + 30_000;
+  // 循环 claim+process 直到 run 到达终态。
+  // review should-fix:deadline 须 > 单次 processJob 的 handler 超时(110s),
+  // 真实 provider 延迟下避免误超时;可经 env 覆盖
+  const loopDeadline = Date.now() + Number(process.env.CARD_GEN_RUN_TEST_LOOP_MS ?? 120_000);
   while (Date.now() < loopDeadline) {
     const [runState] = await admin<{ status: string }[]>`
       SELECT status FROM card_generation_runs WHERE id = ${RUN_ID}
@@ -188,8 +190,10 @@ test("worker fences and atomically publishes a run-backed generation", async () 
     assert.equal(run.active_card_count, 1);
   }
 
+  // review should-fix:定向断言首个 seed 的 turn-0 job(多轮会新增 agent-turn:* 行,
+  // 升级路径的中间 turn job 可能 failed 而 run 仍合法到达终态)
   const [job] = await admin<{ status: string; lease_token: string | null }[]>`
-    SELECT status, lease_token FROM jobs WHERE generation_run_id = ${RUN_ID} AND type = 'execute_card_agent_turn'
+    SELECT status, lease_token FROM jobs WHERE idempotency_key = 'worker-generation-run-job'
   `;
   assert.equal(job?.status, "succeeded");
   assert.equal(job?.lease_token, null);
