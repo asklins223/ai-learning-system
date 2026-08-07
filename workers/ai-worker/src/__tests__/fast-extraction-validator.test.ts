@@ -203,11 +203,12 @@ test("输出截断 → output_truncated(retryable)", () => {
 });
 
 test("清洗后 artifact 不含未知键/__proto__(security 回归)", () => {
-  const withProto: unknown = {
+  // JSON.parse 构造 __proto__ 自有键(对象字面量会触发原型 setter,不算自有键)
+  const withProto = JSON.parse(JSON.stringify({
     ...validArtifact(),
-    "__proto__": { polluted: true },
     extraKey: "x",
-  };
+    __proto__: { polluted: true },
+  }));
   const result = validateFastExtractionArtifact(withProto, ctx());
   assert.equal(result.passed, false, "未知键应被 .strict() 拒绝");
   assert.ok(result.issues.some((i) => i.code === "schema_invalid"));
