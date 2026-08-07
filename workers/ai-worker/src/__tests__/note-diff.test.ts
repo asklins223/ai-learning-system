@@ -71,3 +71,14 @@ test("blockContentHash stable for same content", () => {
   assert.equal(blockContentHash(block("b1", "x")), blockContentHash(block("b1", "x")));
   assert.notEqual(blockContentHash(block("b1", "x")), blockContentHash(block("b1", "y")));
 });
+
+test("review should-fix: block 重排(内容不变)不产生变化且 nextContentHash 稳定", () => {
+  const prev = [block("b1", "x", 0), block("b2", "y", 1)];
+  const next = [block("b2", "y", 1), block("b1", "x", 0)]; // 顺序交换,内容不变
+  const d = diffNoteVersions(prev, next);
+  assert.equal(d.hasChanges, false, "内容不变的重排不产生 changed span");
+  assert.deepEqual(d.changedSpans, []);
+  // hash 与顺序无关:重排后 hash 与原始顺序版本一致
+  const original = diffNoteVersions([block("b1", "x", 0), block("b2", "y", 1)], [block("b1", "x", 0), block("b2", "y", 1)]);
+  assert.equal(d.nextContentHash, original.nextContentHash, "重排不改变 nextContentHash(失效键稳定)");
+});

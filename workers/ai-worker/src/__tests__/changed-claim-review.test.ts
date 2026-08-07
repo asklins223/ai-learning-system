@@ -16,7 +16,7 @@ function reviewInput(diff: ReturnType<typeof diffNoteVersions>, claimsBySpan: Ma
     claimsBySpan,
     criticCache,
     criticCacheKeyFor: (claim, mode) =>
-      computeCriticCacheKey({ workspaceId: "w1", runId: "r1", claimHash: claimHash(claim), criticMode: mode, promptVersion: "p1" }),
+      computeCriticCacheKey({ workspaceId: "w1", claimHash: claimHash(claim), criticMode: mode, promptVersion: "p1" }),
     criticMode: "light",
   };
 }

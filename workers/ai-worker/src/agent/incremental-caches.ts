@@ -12,12 +12,13 @@ import type { ArtifactCache } from "./unit-artifact-cache.ts";
  * - P5-2: Candidate 级缓存(key 含源证据 hash,同源同内容命中);
  * - P5-3: Critic verdict 缓存(key 含 claimHash + criticMode,同 Claim 重复审查命中)。
  *
+ * **review should-fix**:key **不含 runId**——跨 run 的相同内容/相同 claim
+ * 必须命中(跨版本复用);保留 workspaceId 防跨空间重放。
  * 全部为内存缓存(单 worker 进程内),DB 持久化留待跨进程阶段。
  */
 
 export interface BundleCacheKeyInput {
   workspaceId: string;
-  runId: string;
   bundleId: string;
   /** bundle 覆盖 span 的内容 hash(来自 P5-4 diff/快照)——变化即失效 */
   bundleContentHash: string;
@@ -28,7 +29,6 @@ export interface BundleCacheKeyInput {
 export function computeBundleCacheKey(input: BundleCacheKeyInput): string {
   return createHash("sha256").update(JSON.stringify({
     workspaceId: input.workspaceId,
-    runId: input.runId,
     bundleId: input.bundleId,
     bundleContentHash: input.bundleContentHash,
     modelVersion: input.modelVersion,
@@ -39,7 +39,6 @@ export function computeBundleCacheKey(input: BundleCacheKeyInput): string {
 
 export interface CandidateCacheKeyInput {
   workspaceId: string;
-  runId: string;
   /** 源证据(span)内容 hash——版本变化失效 */
   evidenceContentHash: string;
   promptVersion: string;
@@ -48,7 +47,6 @@ export interface CandidateCacheKeyInput {
 export function computeCandidateCacheKey(input: CandidateCacheKeyInput): string {
   return createHash("sha256").update(JSON.stringify({
     workspaceId: input.workspaceId,
-    runId: input.runId,
     evidenceContentHash: input.evidenceContentHash,
     promptVersion: input.promptVersion,
     unitKind: "candidate",
@@ -57,7 +55,6 @@ export function computeCandidateCacheKey(input: CandidateCacheKeyInput): string 
 
 export interface CriticCacheKeyInput {
   workspaceId: string;
-  runId: string;
   /** claim 文本规范化后的 sha256 */
   claimHash: string;
   criticMode: "light" | "claim" | "full";
@@ -67,7 +64,6 @@ export interface CriticCacheKeyInput {
 export function computeCriticCacheKey(input: CriticCacheKeyInput): string {
   return createHash("sha256").update(JSON.stringify({
     workspaceId: input.workspaceId,
-    runId: input.runId,
     claimHash: input.claimHash,
     criticMode: input.criticMode,
     promptVersion: input.promptVersion,

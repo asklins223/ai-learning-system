@@ -75,8 +75,14 @@ export function diffNoteVersions(prevBlocks: NoteBlockLike[], nextBlocks: NoteBl
     }
   }
 
+  // review should-fix:hash 与数组顺序无关(按 id 排序聚合)——block 重排(内容不变)
+  // 不产生 changedSpans,hash 也必须保持不变,避免"失效键已变却无变化 span"的空洞。
   const nextContentHash = createHash("sha256")
-    .update(JSON.stringify(nextBlocks.map((b) => ({ id: b.id, hash: blockContentHash(b) }))), "utf8")
+    .update(JSON.stringify(
+      nextBlocks
+        .map((b) => ({ id: b.id, hash: blockContentHash(b) }))
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+    ), "utf8")
     .digest("hex");
 
   return { changedSpans, unchangedSpans, nextContentHash, hasChanges: changedSpans.length > 0 };

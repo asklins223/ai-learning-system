@@ -29,7 +29,7 @@ export interface IndexUpdatePlan {
   remove: string[];
 }
 
-/** span 内容 → 索引内容 hash(失效键与 P5-1 bundleContentHash 同源:内容寻址) */
+/** span 内容 → 索引内容 hash(失效语义与 P5-1 bundleContentHash 对齐:内容寻址) */
 export function indexedTextHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
