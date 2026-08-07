@@ -14,6 +14,8 @@ import {
   GenerationExecutionMode,
   isFastPathEnabled,
   isRunInFastBucket,
+  isPlannedPathEnabled,
+  isRunInPlannedBucket,
 } from "@ailearn/shared";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
@@ -30,6 +32,7 @@ import { persistEvidenceAndBundles, persistEvidenceEmbeddings } from "./evidence
 import { appendAgentEvent } from "./specialist-persist.ts";
 import {
   createFastExtractUnit,
+  createPlanUnit,
   createSupervisorUnit,
   createNextTurnJob,
 } from "./unit-helpers.ts";
@@ -392,6 +395,18 @@ export async function executePreparePhase(
     logger.info(
       { runId: payload.generationRunId, mode: routeDecision.mode, unitId: fastUnitId },
       "P2 接线: Router 分发到 FAST_EXTRACT(Fast 两阶段)",
+    );
+  } else if (
+    routeDecision.mode === GenerationExecutionMode.ADAPTIVE_PLANNED_V1
+    && isPlannedPathEnabled()
+    && isRunInPlannedBucket(payload.generationRunId)
+  ) {
+    // P3 接线:Initial Plan 生成(plan 落库);Specialist DAG 调度为后续里程碑
+    const planUnitId = await createPlanUnit(job, payload);
+    await createNextTurnJob(job, payload.generationRunId, planUnitId, 1);
+    logger.info(
+      { runId: payload.generationRunId, mode: routeDecision.mode, unitId: planUnitId },
+      "P3 接线: Router 分发到 PLAN_GENERATION(Initial Plan)",
     );
   } else {
     const supervisorUnitId = await createSupervisorUnit(job, payload, runContext, prepareDensity);

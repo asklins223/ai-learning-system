@@ -215,6 +215,53 @@ export async function createPublishUnit(
   return unit.id;
 }
 
+/** P3 Planned 路径:创建 Initial Plan unit(身份 (run, supervisor_plan, 0, 10),幂等) */
+export async function createPlanUnit(
+  job: JobPayload,
+  payload: AgentJobPayload,
+): Promise<string> {
+  const now = new Date();
+  const unitKey = `plan:${payload.generationRunId}`;
+  const [existing] = await db
+    .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })
+    .from(schema.cardGenerationUnits)
+    .where(and(
+      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+      eq(schema.cardGenerationUnits.unitKey, unitKey),
+    ))
+    .limit(1);
+  if (existing) {
+    if (existing.status !== "pending" && existing.status !== "running") {
+      await db
+        .update(schema.cardGenerationUnits)
+        .set({ status: "pending", scheduledAt: now, updatedAt: now })
+        .where(eq(schema.cardGenerationUnits.id, existing.id));
+    }
+    return existing.id;
+  }
+  const [unit] = await db
+    .insert(schema.cardGenerationUnits)
+    .values({
+      workspaceId: job.workspaceId,
+      runId: payload.generationRunId,
+      parentUnitId: null,
+      kind: AgentUnitKind.SUPERVISOR_PLAN,
+      level: 0,
+      ordinal: 10,
+      unitKey,
+      required: true,
+      inputManifest: {},
+      inputHash: createHash("sha256").update(`plan:${payload.generationRunId}`).digest("hex"),
+      tokenEstimate: 0,
+      status: "pending",
+      scheduledAt: now,
+    })
+    .returning();
+  if (!unit) throw new Error("无法创建 plan unit");
+  return unit.id;
+}
+
 /**
  * P2 Fast 路径:P2-1 Router 判定 fast 时创建 FAST_EXTRACT unit。
  * 身份:(run, kind=fast_extract, level=0, ordinal=10),幂等复用(与 createSupervisorUnit 同模式)。
@@ -223,8 +270,7 @@ export async function createFastExtractUnit(
   job: JobPayload,
   payload: AgentJobPayload,
   density: "overview" | "standard" | "complete" = "standard",
-): Promise<string> {
-  const now = new Date();
+): Promise<string> {  const now = new Date();
   const unitKey = `fast_extract:${payload.generationRunId}`;
   const [existing] = await db
     .select({ id: schema.cardGenerationUnits.id, status: schema.cardGenerationUnits.status })

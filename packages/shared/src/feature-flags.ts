@@ -311,3 +311,32 @@ export function isRunInFastBucket(runId: string): boolean {
   }
   return h % 100 < percent;
 }
+
+// ─── P3 Planned 路径灰度机制(全量审计接线;与 Fast 同模式,默认关闭) ────────
+
+/**
+ * PLANNED_PATH_ENABLED — Planned 路径灰度总开关(默认 false,只统计不切换)。
+ * 关闭时 fail-closed:Router 恒 full_supervisor_v1(§12.2 原则)。
+ */
+export function isPlannedPathEnabled(): boolean {
+  return process.env.PLANNED_PATH_ENABLED === "true";
+}
+
+/** Planned 放量百分比(0-100,默认 0)。非法值收敛到 0(fail-closed)。 */
+export function getPlannedPathRolloutPercent(): number {
+  const raw = Number.parseInt(process.env.PLANNED_PATH_ROLLOUT_PERCENT ?? "", 10);
+  return Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 0;
+}
+
+/** 按 runId 稳定哈希分桶(与 Fast 同语义:同一 runId 每次判定一致) */
+export function isRunInPlannedBucket(runId: string): boolean {
+  if (!isPlannedPathEnabled()) return false;
+  const percent = getPlannedPathRolloutPercent();
+  if (percent <= 0) return false;
+  if (percent >= 100) return true;
+  let h = 0;
+  for (let i = 0; i < runId.length; i++) {
+    h = (h * 31 + runId.charCodeAt(i)) >>> 0;
+  }
+  return h % 100 < percent;
+}
