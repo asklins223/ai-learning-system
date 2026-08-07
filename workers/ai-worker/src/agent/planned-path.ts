@@ -406,10 +406,8 @@ async function escalateToFull(
   payload: AgentJobPayload,
   runContext: Extract<RunContext, { kind: "active" }>,
 ): Promise<AgentTurnExecutionResult> {
-  const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
-  await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-  // review should-fix:specialist 失败升级时,如 parent 是 plan unit 也一并终结,
-  // 避免 plan 经 resume 重入与 supervisor Full 双轨并发
+  // security MEDIUM 修复:先终结 parent plan unit(superseded)再建 supervisor,
+  // 消除 sibling 完成触发 plan resume CAS 与 supervisor Full 双轨的竞态窗口
   if (payload.agentUnitId) {
     const [parent] = await db
       .select({ parentUnitId: schema.cardGenerationUnits.parentUnitId })
@@ -429,6 +427,8 @@ async function escalateToFull(
         ));
     }
   }
+  const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
+  await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
   await markFinished(job, payload, "succeeded");
   return { kind: "complete" };
 }

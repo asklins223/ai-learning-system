@@ -12,7 +12,7 @@
  * 任一项失败 → 退出码 1(发布门禁)。
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
@@ -21,14 +21,15 @@ if (!DATABASE_URL) {
 }
 
 function psql(query) {
-  const sql = query.replace(/"/g, '\\"');
-  // 部署环境:本机 psql;本地开发:docker compose exec(自适应)
+  // security LOW 修复:execFile 参数数组(不用 shell 拼接,防 DATABASE_URL/SQL 元字符展开)
   try {
-    return execSync(`psql "${DATABASE_URL}" -t -A -c "${sql}"`, { stdio: ["ignore", "pipe", "pipe"] })
+    return execFileSync("psql", [DATABASE_URL, "-t", "-A", "-c", query], { stdio: ["ignore", "pipe", "pipe"] })
       .toString().trim();
   } catch {
-    return execSync(`docker compose -f docker-compose.dev.yml exec -T postgres psql -U ailearn -d ailearn -t -A -c "${sql}"`, { stdio: ["ignore", "pipe", "pipe"] })
-      .toString().trim();
+    return execFileSync(
+      "docker", ["compose", "-f", "docker-compose.dev.yml", "exec", "-T", "postgres", "psql", "-U", "ailearn", "-d", "ailearn", "-t", "-A", "-c", query],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    ).toString().trim();
   }
 }
 

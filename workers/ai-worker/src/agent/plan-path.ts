@@ -382,10 +382,8 @@ async function escalatePlanned(
   payload: AgentJobPayload,
   runContext: Extract<RunContext, { kind: "active" }>,
 ): Promise<AgentTurnExecutionResult> {
-  const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
-  await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
-  // review should-fix:终结 plan unit(superseded),避免 specialist children 完成后
-  // resume 重入 plan 与 supervisor Full 双轨并发
+  // security MEDIUM 修复:先原子终结 plan unit(superseded)再创建 supervisor,
+  // 消除 sibling 完成触发 resume CAS 与 supervisor Full 双轨的竞态窗口
   await db
     .update(schema.cardGenerationUnits)
     .set({ status: "superseded", finishedAt: new Date(), updatedAt: new Date() })
@@ -393,5 +391,7 @@ async function escalatePlanned(
       eq(schema.cardGenerationUnits.id, payload.agentUnitId),
       eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
     ));
+  const supervisorUnitId = await createSupervisorUnit(job, payload, runContext);
+  await createNextTurnJob(job, payload.generationRunId, supervisorUnitId, 1);
   return { kind: "complete" };
 }
