@@ -1,21 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { diffNoteVersions, type NoteBlockLike } from "../agent/note-diff.ts";
-import { checkIncrementalReuse, type IncrementalReuseInfo } from "../agent/incremental-reuse.ts";
 
 function block(id: string, content: string, ordinal = 0): NoteBlockLike {
   return { id, ordinal, type: "paragraph", content };
 }
 
-test("checkIncrementalReuse: 无上一版本 → hasPrevious=false(全量路径)", async () => {
-  // DB 查询在无数据时返回空 → 走全量(不抛)
-  const result: IncrementalReuseInfo = await checkIncrementalReuse("w-missing", "r-missing").catch((err) => {
-    // 测试环境无 DB 时也视为降级路径(生产有 DB)
-    assert.ok(err, "无 DB 时抛错由调用方降级全量");
-    return { hasPrevious: false, prevVersionNo: null, changedSpanCount: 0, unchangedSpanCount: 0, reuseRatio: 0, hasChanges: false };
-  });
-  assert.equal(result.hasPrevious, false);
-});
+// 注:checkIncrementalReuse 的 DB 分支(hasPrevious/reuseRatio)由
+// incremental-reuse-postgres.integration.ts(真实 postgres)覆盖;
+// 单测仅覆盖纯 diff 语义(不建立 DB 连接,避免测试进程连接泄漏)。
 
 test("diff 语义:内容不变 → 无可复用变化(全量可复用)", () => {
   const d = diffNoteVersions([block("b1", "x")], [block("b1", "x")]);
