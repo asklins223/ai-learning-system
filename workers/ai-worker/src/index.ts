@@ -6,7 +6,9 @@ initHttpPool();
 
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { logger } from "./lib/logger.ts";
-import { closeDatabase, db, withWorkerWorkspaceTransaction } from "./db.ts";
+import postgres from "postgres";
+import { closeDatabase, db, resolveWorkerDatabaseUrl, withWorkerWorkspaceTransaction } from "./db.ts";
+import { NOTIFY_CHANNEL } from "./lib/job-notify.ts";
 import * as schema from "./schema/index.ts";
 import { runAlignEvidence, runEvaluateValidation, type JobPayload } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
@@ -689,6 +691,29 @@ export async function main() {
   const metricsServer = startMetricsServer(metricsPort);
   logger.info({ port: metricsPort }, "worker metrics server started");
 
+  // P4-6 接线: LISTEN/NOTIFY 快速唤醒(轮询分级兜底保留,计划 §5.4)。
+  // Notify 到达 → 重置轮询间隔为快速档(≤POLL_MS 即再次 poll),
+  // 缩短空闲背退 2s→500ms 级唤醒延迟。失败仅警告,回退纯轮询。
+  let notifyConnection: ReturnType<typeof postgres> | undefined;
+  try {
+    if (process.env.WORKER_DISABLE_NOTIFY !== "1") {
+      const pgListen = postgres(resolveWorkerDatabaseUrl(), { max: 1 });
+      // 先赋值:listen 失败也要在 catch/finally 关闭,防连接泄漏阻塞进程退出
+      notifyConnection = pgListen;
+      await pgListen.listen(NOTIFY_CHANNEL, () => {
+        currentPollMs = POLL_MS;
+        logger.debug({ channel: NOTIFY_CHANNEL }, "P4-6: job notify 唤醒,轮询加速");
+      });
+      logger.info({ channel: NOTIFY_CHANNEL }, "P4-6: worker LISTEN 已建立(notify 快速唤醒)");
+    }
+  } catch (err) {
+    if (notifyConnection) {
+      await notifyConnection.end({ timeout: 2 }).catch(() => undefined);
+      notifyConnection = undefined;
+    }
+    logger.warn({ err }, "P4-6: LISTEN 建立失败,回退纯轮询兜底");
+  }
+
   logger.info(
     {
       leaseTimeoutMs: RESOLVED_TIMEOUT_INFO.leaseTimeoutMs,
@@ -794,6 +819,9 @@ export async function main() {
     }
   } finally {
     clearInterval(reconcilerTimer);
+    if (notifyConnection) {
+      await notifyConnection.end({ timeout: 2 }).catch(() => undefined);
+    }
     metricsServer.close();
     await closeDatabase();
   }

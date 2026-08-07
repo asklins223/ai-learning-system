@@ -26,6 +26,12 @@ import { estimateTokens, InputOverContextError } from "./request-packer.ts";
 import type { AgentExecutionSummary } from "./event-summary.ts";
 import { formatAgentExecutionSummary } from "./event-summary.ts";
 
+/** P4-1:稳定上下文缓存最小接口(与 StableContextCache 兼容) */
+export interface StableContextCacheLike {
+  get(key: string): string | null;
+  set(key: string, value: string): void;
+}
+
 /** 运行 manifest 摘要 */
 export interface RunManifestSummary {
   /** 笔记标题 */
@@ -141,6 +147,7 @@ export interface ContextBuilderInput {
 export class ContextBuilder {
   private readonly toolRegistry: ToolRegistry;
   private readonly packer: ContextPacker;
+  private readonly stableCache?: StableContextCacheLike;
 
   constructor(
     toolRegistry: ToolRegistry,
@@ -149,6 +156,7 @@ export class ContextBuilder {
       reservedOutputTokens?: number;
       maxOutputTokens?: number;
     },
+    stableCache?: StableContextCacheLike,
   ) {
     this.toolRegistry = toolRegistry;
     this.packer = new ContextPacker({
@@ -156,13 +164,27 @@ export class ContextBuilder {
       reservedOutputTokens: options?.reservedOutputTokens ?? 4_096,
       maxOutputTokens: options?.maxOutputTokens,
     });
+    this.stableCache = stableCache;
   }
 
   /**
    * 获取指定角色的工具 schema（R27 修复：公开方法替代私有字段访问）。
+   * P4-1 接线：稳定段缓存命中时直接复用序列化结果,不每 turn 重建。
    */
   getToolSchemas(role: AgentRole): AgentTurnRequest["tools"] {
-    return this.toolRegistry.getToolSchemasForRole(role);
+    return this.getToolSchemasCached(role);
+  }
+
+  /** P4-1:带稳定段缓存的工具 schema 读取(缓存键含 role;值与原计算逐字节一致) */
+  private getToolSchemasCached(role: AgentRole): AgentTurnRequest["tools"] {
+    const key = `toolSchemas:${role}`;
+    const cached = this.stableCache?.get(key);
+    if (cached !== undefined && cached !== null) {
+      return JSON.parse(cached) as AgentTurnRequest["tools"];
+    }
+    const schemas = this.toolRegistry.getToolSchemasForRole(role);
+    this.stableCache?.set(key, JSON.stringify(schemas));
+    return schemas;
   }
 
   // ─── Supervisor ────────────────────────────────────────────────────────
@@ -302,7 +324,7 @@ export class ContextBuilder {
     sections.push(this.makeSection("bundle_data", "tier_4_bulk", bundleJsonStr, true));
 
     // 统一打包
-    const toolSchemas = this.toolRegistry.getToolSchemasForRole(role);
+    const toolSchemas = this.getToolSchemasCached(role);
     const systemPromptTokens = estimateTokens(systemPrompt);
     const toolSchemaTokens = Math.max(1_024, Math.ceil(JSON.stringify(toolSchemas).length / 4));
     const overheadTokens = systemPromptTokens + toolSchemaTokens;
@@ -463,7 +485,7 @@ export class ContextBuilder {
     sections: ContextSection[],
     options?: { temperature?: number },
   ): AgentTurnRequest {
-    const toolSchemas = this.toolRegistry.getToolSchemasForRole(role);
+    const toolSchemas = this.getToolSchemasCached(role);
     const systemPromptTokens = estimateTokens(systemPrompt);
     const toolSchemaTokens = Math.max(1_024, Math.ceil(JSON.stringify(toolSchemas).length / 4));
     const overheadTokens = systemPromptTokens + toolSchemaTokens;

@@ -61,7 +61,7 @@ export function parseNotifyPayload(raw: string): JobNotifyPayload | null {
   }
 }
 
-const NOTIFY_CHANNEL = "ailearn_job_events";
+export const NOTIFY_CHANNEL = "ailearn_job_events";
 
 /**
  * 在事务内发送 job 通知(与状态变更同一事务,保证不丢失)。

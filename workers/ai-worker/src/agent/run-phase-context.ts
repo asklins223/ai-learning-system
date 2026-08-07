@@ -32,7 +32,9 @@ import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { AgentSession } from "./session.ts";
 import { BudgetTracker, type BudgetUsage } from "./budget.ts";
-import { ContextBuilder, type ContextBuilderInput } from "./context-builder.ts";
+import { ContextBuilder, type ContextBuilderInput, type StableContextCacheLike } from "./context-builder.ts";
+import { buildAgentExecutionSummary } from "./event-summary.ts";
+import { StableContextCache } from "./stable-context-cache.ts";
 import {
   CoverageLedger,
   initLedgerFromBundlePlan,
@@ -69,6 +71,22 @@ export interface AgentRunPhaseContext {
    *  Exposed so downstream code (e.g. embedding provider creation) can reuse
    *  the pre-resolved configuration instead of doing a separate DB query. */
   govCtx: AIGovernanceContext | null;
+}
+
+/**
+ * P4-1:runId 前缀隔离的稳定上下文缓存适配器(单例;按 runId 自动分区,
+ * LRU 有界由 StableContextCache 保障,防跨 run 混用)。
+ */
+const p4StableCacheSingleton = new StableContextCache(512);
+function p4StableContextCacheFor(runId: string): StableContextCacheLike {
+  return {
+    get(key) {
+      return p4StableCacheSingleton.get(`${runId}:${key}`)?.value ?? null;
+    },
+    set(key, value) {
+      p4StableCacheSingleton.set(`${runId}:${key}`, value, `hash-${value.length}`, Date.now());
+    },
+  };
 }
 
 /**
@@ -392,11 +410,13 @@ export async function loadAgentRunPhaseContext(
   };
 
   // 使用 provider 实际 capability 构建 context builder（而非从 providerSnapshot 读取不存在的字段）
+  // P4-1 接线:注入稳定上下文缓存(runId 前缀隔离;工具 schema 稳定段跨 turn 复用,
+  // 不再每 turn 重建;key 维度含 runId+role,与 stableContextCacheKey 语义一致)
   const contextBuilder = new ContextBuilder(toolRegistry, {
     contextWindowTokens: providerCapability.contextWindowTokens,
     reservedOutputTokens: providerCapability.reservedOutputTokens,
     maxOutputTokens: providerCapability.maxOutputTokens,
-  });
+  }, p4StableContextCacheFor(payload.generationRunId));
 
   const { AgentRuntime } = await import("./runtime.ts");
 
@@ -526,6 +546,15 @@ export async function loadAgentRunPhaseContext(
     : 0;
 
   const coverageSnapshot = coverageLedger.getSnapshot();
+  // P4-5:Agent 事件摘要条目(events 原始列表与 executionSummary 共用)
+  const eventSummaryEntries = agentEvents.map((e) => ({
+    eventType: e.eventType,
+    agentRole: e.agentRole,
+    turnNo: e.turnNo,
+    toolName: e.toolName,
+    safeDetails: (e.safePayload as Record<string, unknown>) ?? {},
+    createdAt: e.createdAt?.toISOString() ?? "",
+  }));
   const contextInput = {
     role: role as AgentRole,
     manifest: {
@@ -565,14 +594,10 @@ export async function loadAgentRunPhaseContext(
       validationStatus: c.validationStatus,
     })),
     taskResults: taskResultsFromDb,
-    events: agentEvents.map((e) => ({
-      eventType: e.eventType,
-      agentRole: e.agentRole,
-      turnNo: e.turnNo,
-      toolName: e.toolName,
-      safeDetails: (e.safePayload as Record<string, unknown>) ?? {},
-      createdAt: e.createdAt?.toISOString() ?? "",
-    })),
+    // P4-5 接线:同一批 events 同时生成原始列表与聚合摘要,
+    // 模型上下文默认加载摘要,诊断时按需读原始(审计缺口修复)
+    events: eventSummaryEntries,
+    executionSummary: buildAgentExecutionSummary(eventSummaryEntries),
     draft: latestDraft
       ? {
           draftVersion: latestDraft.draftVersion,

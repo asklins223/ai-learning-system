@@ -16,7 +16,7 @@ import { toolRegistry, computeToolIdempotencyKey, computeArgsHash, getToolZodSch
 import { db } from "../../db.ts";
 import * as schema from "../../schema/index.ts";
 import { logger } from "../../lib/logger.ts";
-import { persistToolRequestEventsBatch } from "../tool-events-batch.ts";
+import { persistToolRequestEventsBatch, persistToolResultEventsBatch } from "../tool-events-batch.ts";
 import type { BudgetTracker } from "../budget.ts";
 import type { CoverageLedger } from "../coverage-ledger.ts";
 import type { CandidateLedger } from "../candidate-ledger.ts";
@@ -106,7 +106,7 @@ export interface ToolCallResult {
 export async function executeToolCall(
   call: ToolCallRequest,
   ctx: ToolExecutionContext,
-  opts?: { skipRequestEvent?: boolean },
+  opts?: { skipRequestEvent?: boolean; skipResultEvent?: boolean },
 ): Promise<ToolCallResult> {
   const { role, runId, agentUnitId, turnNo } = ctx;
 
@@ -314,25 +314,28 @@ export async function executeToolCall(
   // BUG-57/86 修复：outputHash 应基于 sanitized 数据计算，
   // 与 safePayload 中存储的数据保持一致，确保审计事件的哈希
   // 可用于验证 safePayload 的完整性。
+  // P4-3 接线：批量路径由 executeToolCalls 统一写入，此处跳过避免重复。
   const sanitizedResult = result.success ? sanitizeArgs(result.result) : null;
-  await db.insert(schema.cardGenerationAgentEvents).values({
-    workspaceId: ctx.workspaceId,
-    runId,
-    unitId: agentUnitId,
-    eventKey: `tool_result:${idempotencyKey}`,
-    eventType: "tool_result",
-    agentRole: role,
-    turnNo,
-    toolName: call.name,
-    inputHash: argsHash,
-    outputHash: result.success ? computeArgsHash(sanitizedResult) : null,
-    safePayload: {
-      success: result.success,
-      result: sanitizedResult,
-      error: result.error ?? null,
-    },
-    errorCode: result.success ? null : (result.error ?? "tool_error"),
-  }).onConflictDoNothing();
+  if (!opts?.skipResultEvent) {
+    await db.insert(schema.cardGenerationAgentEvents).values({
+      workspaceId: ctx.workspaceId,
+      runId,
+      unitId: agentUnitId,
+      eventKey: `tool_result:${idempotencyKey}`,
+      eventType: "tool_result",
+      agentRole: role,
+      turnNo,
+      toolName: call.name,
+      inputHash: argsHash,
+      outputHash: result.success ? computeArgsHash(sanitizedResult) : null,
+      safePayload: {
+        success: result.success,
+        result: sanitizedResult,
+        error: result.error ?? null,
+      },
+      errorCode: result.success ? null : (result.error ?? "tool_error"),
+    }).onConflictDoNothing();
+  }
 
   // PERF-10 优化：将已执行的 key 加入内存缓存
   markExecuted(idempotencyKey);
@@ -365,14 +368,29 @@ export async function executeToolCalls(
 
   if (allReadOnly && calls.length > 1) {
     // 并行执行只读工具调用
-    return Promise.all(calls.map((call) => executeToolCall(call, ctx, batched ? { skipRequestEvent: true } : undefined)));
+    const results = await Promise.all(calls.map((call) => executeToolCall(call, ctx, batched ? { skipRequestEvent: true, skipResultEvent: true } : undefined)));
+    // P4-3:批量写 tool_result 事件(单条 INSERT 多行,独立幂等键)
+    if (batched) {
+      const rows = calls.flatMap((call, i) => buildToolResultEventRow(call, results[i], ctx));
+      if (rows.length > 0) {
+        await persistToolResultEventsBatch(db, rows);
+      }
+    }
+    return results;
   }
 
   // 串行执行（有副作用或只有一个调用）
   const results: ToolCallResult[] = [];
   for (const call of calls) {
-    const result = await executeToolCall(call, ctx, batched ? { skipRequestEvent: true } : undefined);
+    const result = await executeToolCall(call, ctx, batched ? { skipRequestEvent: true, skipResultEvent: true } : undefined);
     results.push(result);
+  }
+  // P4-3:批量写 tool_result 事件
+  if (batched) {
+    const rows = calls.flatMap((call, i) => buildToolResultEventRow(call, results[i], ctx));
+    if (rows.length > 0) {
+      await persistToolResultEventsBatch(db, rows);
+    }
   }
   return results;
 }
@@ -446,6 +464,70 @@ export function buildToolRequestEventRows(
     });
   }
   return rows;
+}
+
+/**
+ * P4-3:构造 tool_result 事件行(批量写入用)。
+ * 预检与 buildToolRequestEventRows 一致(权限 + schema 校验,校验后参数算 hash
+ * 与幂等键,保证 request/result 事件链一致);通过预检的调用才生成行
+ * (失败结果同样生成,errorCode 非空)。未通过预检返回 null(调用方过滤)。
+ */
+export function buildToolResultEventRow(
+  call: ToolCallRequest,
+  result: ToolCallResult,
+  ctx: ToolExecutionContext,
+): Array<{
+  workspaceId: string;
+  runId: string;
+  unitId: string | null;
+  eventKey: string;
+  eventType: "tool_result";
+  agentRole: string;
+  turnNo: number;
+  toolName: string;
+  inputHash: string | null;
+  outputHash: string | null;
+  safePayload: Record<string, unknown>;
+  errorCode: string | null;
+}> {
+  const { role, runId, agentUnitId, turnNo } = ctx;
+  if (!toolRegistry.isToolAllowed(role, call.name)) return [];
+  const zodSchema = getToolZodSchema(call.name);
+  let effectiveArgs = call.arguments;
+  if (zodSchema) {
+    const parsed = zodSchema.safeParse(call.arguments);
+    if (!parsed.success) return [];
+    effectiveArgs = parsed.data as Record<string, unknown>;
+  }
+
+  const argsHash = computeArgsHash(effectiveArgs);
+  const idempotencyKey = computeToolIdempotencyKey({
+    runId,
+    agentUnitId,
+    turnNo,
+    toolCallId: call.id,
+    toolName: call.name,
+    argsHash,
+  });
+  const sanitizedResult = result.success ? sanitizeArgs(result.result) : null;
+  return [{
+    workspaceId: ctx.workspaceId,
+    runId,
+    unitId: agentUnitId,
+    eventKey: `tool_result:${idempotencyKey}`,
+    eventType: "tool_result",
+    agentRole: role,
+    turnNo,
+    toolName: call.name,
+    inputHash: argsHash,
+    outputHash: result.success ? computeArgsHash(sanitizedResult) : null,
+    safePayload: {
+      success: result.success,
+      result: sanitizedResult,
+      error: result.error ?? null,
+    },
+    errorCode: result.success ? null : (result.error ?? "tool_error"),
+  }];
 }
 
 // ─── 工具分类辅助 ──────────────────────────────────────────────────────────

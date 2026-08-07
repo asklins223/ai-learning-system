@@ -26,6 +26,7 @@ import { AgentUnitKind } from "@ailearn/shared";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { logger } from "../lib/logger.ts";
+import { stageTransitionLatencySeconds } from "../lib/metrics.ts";
 import { scheduleCriticForDraft } from "./tools/quality.ts";
 import { createNextTurnJob } from "./unit-helpers.ts";
 import { BudgetTracker } from "./budget.ts";
@@ -71,7 +72,11 @@ export async function autoProgressAfterChildUnit(input: {
   // (如已 running 或 supervisor 正处理其他子任务),跳过自动推进,避免误判提前
   // 终结 supervisor。加审计日志观察非预期路径。
   const [parentRow] = await db
-    .select({ status: schema.cardGenerationUnits.status })
+    .select({
+      status: schema.cardGenerationUnits.status,
+      kind: schema.cardGenerationUnits.kind,
+      scheduledAt: schema.cardGenerationUnits.scheduledAt,
+    })
     .from(schema.cardGenerationUnits)
     .where(and(
       eq(schema.cardGenerationUnits.id, parentUnitId),
@@ -211,6 +216,15 @@ export async function autoProgressAfterChildUnit(input: {
         "P1-2: parent 已被并发恢复(running)，不再终结；交由 resume 流程",
       );
       return false;
+    }
+
+    // P4-7 接线:Stage 转换延迟记录(unit 级:创建→终态,from=parent kind → to=verify)
+    if (parentRow.scheduledAt) {
+      const secs = (Date.now() - parentRow.scheduledAt.getTime()) / 1000;
+      stageTransitionLatencySeconds.observe(
+        { fromStage: parentRow.kind ?? "supervisor", toStage: "verify" },
+        secs,
+      );
     }
 
     return true;
