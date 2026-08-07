@@ -221,12 +221,14 @@ async function executeAgentPhase(
       return await executePublishPhase(job, payload, runContext, lease);
 
     default:
-      // 旧 v2 unit kind 不应进入此路径
+      // 已声明但 worker 执行器尚未接线的 Phase 2/3/4 kind(fast_extract/fast_compose/
+      // route/supervisor_plan/grounding_critic_light/grounding_critic_claim/compose/repair
+      // 等)不应进入此路径;fail-closed 而非静默跳过(审计 S2)。
       logger.warn(
         { jobId: job.id, unitKind, runId: payload.generationRunId },
-        "Agent handler 收到非 Agent unit kind，跳过",
+        "Agent handler 收到未接线的 unit kind，fail-closed 跳过（Phase 2/3 组件已交付待接线）",
       );
-      return { kind: "needs_attention", reason: `非 Agent unit kind: ${unitKind}` };
+      return { kind: "needs_attention", reason: `未接线的 unit kind: ${unitKind}（组件已交付，待接线）` };
   }
 }
 

@@ -31,8 +31,11 @@
 | A3 | 模型未调用工具 + Report passed + deterministic passed | 同上 | `request_verification` | `complete` | 纯调度 |
 | A4 | 模型未调用工具 + 管道无法纯调度推进 | 同上 | 无 | `needs_attention` | protocol_error,不注入 |
 | A5 | 模型未调用工具 + deterministic failed | 同上 | 无 | `needs_attention` | 不注入 validate(防 BUG-94 循环) |
-| B1 | 模型调用 `request_verification`(错误 draftHash,BUG-94)+ 有 Draft 无 Report | `supervisor_model_verification_redirect` | `request_grounding_review`(draftHash 替换为 DB 权威值) | `wait_for_children` | 替换而非放行 |
+| B1 | 模型调用 `request_verification`(任意 hash,含错误 draftHash,BUG-94)+ 有 Draft 无 Report | `supervisor_model_verification_redirect` | `request_grounding_review`(draftHash 替换为 DB 权威值) | `wait_for_children` | 替换而非放行 |
 | B2 | 模型调用 `request_verification` + 管道就绪 | 同上 | `request_verification`(draftHash 替换为 DB 权威值) | `complete` | 替换为正确 hash |
+
+> 注:B1/B2 对**任何** `request_verification` 调用都触发重定向(代码注释"无论前置条件是否满足"),
+> 不只限于错误 hash——管道可推进时统一收口为 DB 权威 hash,防 BUG-94 的"用错误 hash 推进"与"正确但陈旧 hash"两路问题。
 | C1 | 只读自旋 ≥3 + 有 Draft 无 Report | `supervisor_read_only_spin_detected` | `request_grounding_review` | `wait_for_children` | 纯调度 |
 | C2 | 只读自旋 ≥3 + 无 Draft 有候选 | 同上 | `submit_deck_draft`(候选 claim 机械组装) | `continue` | 不生成新语义,后续仍走 Critic 门禁 |
 | C3 | 只读自旋 ≥3 + 无 Draft 无候选 | 同上 | 无 | `needs_attention` | protocol_error |
@@ -45,7 +48,8 @@
 - `maybeInjectSupervisorAutoFallback`(副作用:Agent Event 写入):同上
 - 自旋计数函数 `countConsecutiveReadOnlySupervisorTurns`:`run-phase-executor.ts`
   (由 `card-supervisor-agent.ts` re-export)
-- 调用点:`run-phase-executor.ts:341(executeSupervisorTurn)`→ `:355(maybeInject...)`
+- 调用点:`run-phase-executor.ts` 的 `executeSupervisorTurn` → 内部 `maybeInjectSupervisorAutoFallback`
+  (以函数名为准,行号随重构漂移)`
 
 ## 4. 测试覆盖
 
@@ -55,4 +59,4 @@
 - 关键断言:B1/B2 中注入工具的 `draftHash` 必须是 DB 权威值(非模型传入的错误 hash)。
 
 既有测试:`supervisor-spin-detection.test.ts`(自旋计数 5 例)、
-`supervisor-agent-behavior.test.ts`(44 例,含 §17.4 必测行为)。
+`supervisor-agent-behavior.test.ts`(39 例,含 §17.4 必测行为)。

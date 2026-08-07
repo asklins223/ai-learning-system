@@ -1,7 +1,9 @@
 /**
  * Supervisor Agent 统一入口（计划 §16.1）
  *
- * 此文件是计划 §16.1 要求的 `agent/supervisor.ts` 文件。
+ * @deprecated 兼容层：无生产引用，由 `roles/supervisor-loop.ts` 与
+ * `roles/supervisor-policy.ts` 替代。保留仅为满足计划 §16.1 文件清单。
+ *
  * Supervisor 逻辑拆分为 supervisor-loop（turn 执行 + 状态机）和
  * supervisor-policy（system prompt），通过此文件统一导出。
  */
