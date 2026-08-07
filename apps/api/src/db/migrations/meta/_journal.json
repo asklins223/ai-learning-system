@@ -477,6 +477,13 @@
       "when": 1788757400000,
       "tag": "0067_card_generation_units_kind_check",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1788843800000,
+      "tag": "0068_provisional_candidates",
+      "breakpoints": true
     }
   ]
 }

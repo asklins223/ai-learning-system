@@ -845,6 +845,87 @@ export const fastExtractionArtifactSchema = z.object({
 }).strict();
 export type FastExtractionArtifact = z.infer<typeof fastExtractionArtifactSchema>;
 
+// ─── 11d. ComposeArtifact(实施计划 §3.1, P2-4) ───────────────────────────
+
+/**
+ * FAST_COMPOSE 输出。
+ *
+ * 只负责组装卡片(title/summary/学习目标/序),不负责提取/校验/排序决策;
+ * candidateIds 引用 FastExtractionArtifact 的 localId(P2-2)。
+ * 按需读取 Evidence 原则(§3.1):Compose 只收到候选引用的证据子集,不注入全文。
+ */
+export const fastComposeCardSchema = z.object({
+  localId: z.string().min(1).max(64),
+  title: z.string().min(1).max(200),
+  summary: z.string().min(1).max(500),
+  candidateIds: z.array(z.string().min(1).max(64)).min(1).max(20),
+  ordinal: z.number().int().min(0),
+  learningObjective: z.string().min(1).max(300),
+  isOverview: z.boolean().default(false),
+  sectionKey: z.string().min(1).max(200).optional(),
+}).strict();
+export type FastComposeCard = z.infer<typeof fastComposeCardSchema>;
+
+export const composeArtifactSchema = z.object({
+  cards: z.array(fastComposeCardSchema).min(1).max(50),
+}).strict();
+export type ComposeArtifact = z.infer<typeof composeArtifactSchema>;
+
+// ─── 11e. Lightweight Critic 契约(实施计划 §3.3, P2-5) ───────────────────
+
+/**
+ * 轻量/逐 Claim Critic 的输入输出契约。
+ * 输入只含被审查 claim 及其引用证据子集(不注入全文);
+ * 输出 verdict(supported/partial/unsupported) + 硬问题/软问题(简化版)。
+ */
+export const lightCriticInputSchema = z.object({
+  claim: z.string().min(1).max(500),
+  /** 引用证据文本子集(按需读取,非全文) */
+  evidence: z.array(z.object({
+    refId: z.string().min(1).max(64),
+    text: z.string().min(1).max(2000),
+  }).strict()).min(1).max(50),
+  candidateId: z.string().min(1).max(64),
+  riskLevel: z.enum(["low", "medium", "high"]),
+}).strict();
+export type LightCriticInput = z.infer<typeof lightCriticInputSchema>;
+
+export const lightCriticOutputSchema = z.object({
+  verdict: z.enum(["supported", "partial", "unsupported"]),
+  supportingEvidenceRefIds: z.array(z.string().min(1).max(64)).max(50),
+  hardIssues: z.array(z.object({
+    reasonCode: z.enum([
+      "claim_not_in_evidence", "evidence_contradicts", "hallucinated_detail",
+      "boundary_violation", "instruction_followed",
+    ]),
+    detail: z.string().min(1).max(300),
+  }).strict()).max(20),
+  softIssues: z.array(z.object({
+    reasonCode: z.enum([
+      "vague_wording", "overlong_claim", "missing_context", "wording_diverges",
+    ]),
+    detail: z.string().min(1).max(300),
+  }).strict()).max(20),
+}).strict();
+export type LightCriticOutput = z.infer<typeof lightCriticOutputSchema>;
+
+// ─── 11f. executionMode 用户文案(实施计划 §4.8, P2-10) ───────────────────
+
+/** executionMode → 用户可见文案(§4.8) */
+export const EXECUTION_MODE_USER_LABELS: Record<GenerationExecutionMode, string> = {
+  fast_two_stage_v1: "快速生成",
+  adaptive_planned_v1: "多角色协作",
+  full_supervisor_v1: "深度分析",
+};
+
+/** 旧值兼容(supervisor_agent_v1 语义 = full_supervisor_v1) */
+export function executionModeUserLabel(mode: string | null | undefined): string {
+  if (mode === GenerationExecutionMode.FAST_TWO_STAGE_V1) return EXECUTION_MODE_USER_LABELS.fast_two_stage_v1;
+  if (mode === GenerationExecutionMode.ADAPTIVE_PLANNED_V1) return EXECUTION_MODE_USER_LABELS.adaptive_planned_v1;
+  // full_supervisor_v1 与旧 supervisor_agent_v1 均显示"深度分析"
+  return EXECUTION_MODE_USER_LABELS.full_supervisor_v1;
+}
+
 /** 语义支撑状态 */
 export const SemanticSupportStatus = {
   SUPPORTED: "supported",

@@ -667,3 +667,34 @@ export const noteEvidenceEmbeddings = pgTable(
       .on(t.workspaceId, t.noteVersionId, t.sourceHash),
   }),
 );
+
+// ─── provisional_candidates(实施计划 §3.3/§4.1, P2-6) ───────────────────
+
+/** Fast → Full 升级的临时候选(通过校验的 FastExtractionArtifact) */
+export const provisionalCandidates = pgTable(
+  "provisional_candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    runId: uuid("run_id").notNull().references(() => cardGenerationRuns.id, { onDelete: "cascade" }),
+    producedByUnitId: uuid("produced_by_unit_id").notNull(),
+    localId: text("local_id").notNull(),
+    claim: text("claim").notNull(),
+    topic: text("topic").notNull(),
+    sectionKey: text("section_key").notNull(),
+    cognitiveType: text("cognitive_type").notNull(),
+    importance: text("importance").notNull(),
+    difficulty: text("difficulty").notNull(),
+    evidenceRefIds: jsonb("evidence_ref_ids").$type<string[]>().default(sql`'[]'::jsonb`),
+    relationHints: jsonb("relation_hints").$type<Array<{ type: string; localTargetId: string }>>().default(sql`'[]'::jsonb`),
+    sourceProviderCallId: text("source_provider_call_id"),
+    producedAt: timestamp("produced_at", { withTimezone: true }).defaultNow().notNull(),
+    decision: text("decision"),
+    revisedClaim: text("revised_claim"),
+    decisionByUnitId: uuid("decision_by_unit_id"),
+    decisionAt: timestamp("decision_at", { withTimezone: true }),
+  },
+  (t) => ({
+    runIdx: index("provisional_candidates_run_idx").on(t.runId),
+  }),
+);

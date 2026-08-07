@@ -277,3 +277,37 @@ export function getVisionImageMaxBase64Bytes(): number {
   const raw = Number(process.env.VISION_IMAGE_MAX_BASE64_BYTES);
   return Number.isSafeInteger(raw) && raw > 0 ? raw : 1_048_576;
 }
+
+// ─── P2-9: Fast 路径灰度机制(实施计划 §5.2 P2-9) ────────────────────────
+
+/**
+ * FAST_PATH_ENABLED — Fast 路径灰度总开关(默认 false,只统计不切换)。
+ *
+ * 关闭时 fail-closed:Router 恒 full_supervisor_v1(现状路径,§12.2 原则)。
+ * 精确值 "true" 启用;启用后按 FAST_PATH_ROLLOUT_PERCENT 分桶放量。
+ */
+export function isFastPathEnabled(): boolean {
+  return process.env.FAST_PATH_ENABLED === "true";
+}
+
+/** 灰度放量百分比(0-100,默认 0)。非法值收敛到 0(fail-closed)。 */
+export function getFastPathRolloutPercent(): number {
+  const raw = Number.parseInt(process.env.FAST_PATH_ROLLOUT_PERCENT ?? "", 10);
+  return Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 0;
+}
+
+/**
+ * 按 runId 稳定哈希分桶:hash % 100 < percent → Fast 桶。
+ * 同一 runId 每次判定一致(重试不换桶)。
+ */
+export function isRunInFastBucket(runId: string): boolean {
+  if (!isFastPathEnabled()) return false;
+  const percent = getFastPathRolloutPercent();
+  if (percent <= 0) return false;
+  if (percent >= 100) return true;
+  let h = 0;
+  for (let i = 0; i < runId.length; i++) {
+    h = (h * 31 + runId.charCodeAt(i)) >>> 0;
+  }
+  return h % 100 < percent;
+}
