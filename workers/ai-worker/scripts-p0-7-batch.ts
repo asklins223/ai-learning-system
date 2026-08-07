@@ -157,9 +157,10 @@ const SAMPLES: Sample[] = [
 ];
 
 async function seedSample(s: Sample): Promise<{ runId: string; versionId: string }> {
-  const runId = `50000000-0000-4000-8000-0000000000${s.id}`;
-  const noteId = `30000000-0000-4000-8000-0000000000${s.id}`;
-  const versionId = `40000000-0000-4000-8000-0000000000${s.id}`;
+  const suffix = s.id.padStart(12, "0");
+  const runId = `50000000-0000-4000-8000-${suffix}`;
+  const noteId = `30000000-0000-4000-8000-${suffix}`;
+  const versionId = `40000000-0000-4000-8000-${suffix}`;
   await admin.begin(async (tx) => {
     await tx`DELETE FROM jobs WHERE generation_run_id = ${runId}`;
     await tx`DELETE FROM card_generation_runs WHERE id = ${runId}`;
