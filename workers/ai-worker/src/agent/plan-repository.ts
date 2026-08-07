@@ -1,5 +1,6 @@
 import { desc, eq } from "drizzle-orm";
 import { createHash } from "node:crypto";
+import { generationPlanSchema } from "@ailearn/shared";
 import { db } from "../db.ts";
 import { cardGenerationPlans } from "../schema/index.ts";
 import type { GenerationPlan } from "@ailearn/shared";
@@ -29,9 +30,12 @@ export function computePlanContentHash(plan: GenerationPlan): string {
 export async function insertPlanRecord(
   input: PlanRepositoryInput,
 ): Promise<{ id: string; version: number; contentHash: string }> {
+  // security_review MEDIUM:写入前必须经有界 Schema 校验(防超大/异常 planJson 落库)
+  const plan = generationPlanSchema.parse(input.plan);
+
   // 并发下 version 取 max+1 可能撞唯一约束:冲突时重试(最多 3 次),
   // 与 P1-6 CAS 语义一致(乐观并发 + 唯一约束兑底)。
-  const contentHash = computePlanContentHash(input.plan);
+  const contentHash = computePlanContentHash(plan);
   for (let attempt = 0; attempt < 3; attempt++) {
     const latest = await db
       .select({ version: cardGenerationPlans.version })
@@ -49,8 +53,8 @@ export async function insertPlanRecord(
           workspaceId: input.workspaceId,
           runId: input.runId,
           version,
-          schemaVersion: input.plan.schemaVersion,
-          planJson: input.plan as unknown as Record<string, unknown>,
+          schemaVersion: plan.schemaVersion,
+          planJson: plan as unknown as Record<string, unknown>,
           contentHash,
           producedByUnitId: input.producedByUnitId,
           producedByEventKey: input.producedByEventKey,

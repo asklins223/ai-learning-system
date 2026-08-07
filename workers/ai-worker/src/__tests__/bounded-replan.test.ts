@@ -21,6 +21,22 @@ test("empty adjustments rejected", () => {
   assert.ok(v.some((x) => x.code === "empty_adjustments"));
 });
 
+test("too many adjustments rejected (security LOW 加固)", () => {
+  const v = validateReplanProposal({
+    version: 2,
+    adjustments: Array.from({ length: 21 }, (_, i) => ({ type: "adjust_unfinished_bundle" as const, bundleId: `b${i}`, detail: "x" })),
+  });
+  assert.ok(v.some((x) => x.code === "too_many_adjustments"));
+});
+
+test("adjustment detail over length limit rejected (security LOW 加固)", () => {
+  const v = validateReplanProposal({
+    version: 2,
+    adjustments: [{ type: "adjust_unfinished_bundle", bundleId: "b1", detail: "x".repeat(501) }],
+  });
+  assert.ok(v.some((x) => x.code === "adjustment_detail_too_long"));
+});
+
 test("forbid reset run", () => {
   const v = validateReplanProposal({
     ...base,

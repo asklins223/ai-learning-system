@@ -36,6 +36,11 @@ export interface ReplanProposal {
   version: number;
 }
 
+/** 单次 Replan 提案的调整条数上限(security_review LOW:防未来 LLM 输入放大) */
+export const MAX_REPLAN_ADJUSTMENTS = 20;
+/** 单条 detail 长度上限 */
+export const MAX_REPLAN_ADJUSTMENT_DETAIL_LENGTH = 500;
+
 // ─── Replan 边界校验 ─────────────────────────────────────────────────────
 
 const FORBIDDEN_PATTERNS: Array<{ pattern: RegExp; code: string; message: string }> = [
@@ -63,6 +68,9 @@ export function validateReplanProposal(proposal: ReplanProposal): ReplanViolatio
   if (proposal.adjustments.length === 0) {
     violations.push({ code: "empty_adjustments", message: "Replan 提案为空(无事可做却要求 Replan)" });
   }
+  if (proposal.adjustments.length > MAX_REPLAN_ADJUSTMENTS) {
+    violations.push({ code: "too_many_adjustments", message: `Replan 调整项超过上限 ${MAX_REPLAN_ADJUSTMENTS}` });
+  }
   const allowed: ReplanAdjustmentType[] = [
     "adjust_unfinished_bundle",
     "bounded_refetch",
@@ -73,6 +81,9 @@ export function validateReplanProposal(proposal: ReplanProposal): ReplanViolatio
   for (const a of proposal.adjustments) {
     if (!allowed.includes(a.type)) {
       violations.push({ code: "invalid_adjustment_type", message: `不允许的调整类型 ${a.type}` });
+    }
+    if (a.detail.length > MAX_REPLAN_ADJUSTMENT_DETAIL_LENGTH) {
+      violations.push({ code: "adjustment_detail_too_long", message: `调整 detail 超过上限 ${MAX_REPLAN_ADJUSTMENT_DETAIL_LENGTH}` });
     }
   }
   return violations;
