@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { friendlyVoiceError } from "./VoiceInputPanel";
+import { friendlyVoiceError } from "@/components/learning-companion/VoiceInputPanel";
 
 /** ApiError 形状（真实链路：错误码在 err.code，name 恒为 ApiError）。 */
 function apiError(code: string): unknown {

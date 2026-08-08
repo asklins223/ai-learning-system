@@ -82,7 +82,7 @@ export function friendlyTextError(err: unknown): string {
   const code =
     (err as { code?: string } | null)?.code
     ?? (err instanceof Error ? err.name : undefined);
-  if (code !== undefined && code in TEXT_ERROR_FRIENDLY) {
+  if (code !== undefined && Object.hasOwn(TEXT_ERROR_FRIENDLY, code)) {
     return TEXT_ERROR_FRIENDLY[code];
   }
   return "提交失败，请重试。";

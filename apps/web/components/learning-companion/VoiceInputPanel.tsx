@@ -72,7 +72,7 @@ export function friendlyVoiceError(err: unknown): string {
   const code =
     (err as { code?: string } | null)?.code
     ?? (err instanceof Error ? err.name : undefined);
-  if (code !== undefined && code in VOICE_ERROR_FRIENDLY) {
+  if (code !== undefined && Object.hasOwn(VOICE_ERROR_FRIENDLY, code)) {
     return VOICE_ERROR_FRIENDLY[code];
   }
   return "操作失败，请重试或改用文字回答。";

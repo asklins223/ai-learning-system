@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { friendlyTextError } from "./TextOrMixedInput";
+import { friendlyTextError } from "@/components/learning-companion/TextOrMixedInput";
 
 function apiError(code: string): unknown {
   return Object.assign(new Error("internal detail"), { code, name: "ApiError" });
@@ -17,4 +17,6 @@ test("friendlyTextError：未知错误 → 通用文案（不透出内部细节�
   assert.equal(friendlyTextError(apiError("DB_CONN_ERR")), "提交失败，请重试。");
   assert.equal(friendlyTextError(new Error("sensitive detail")), "提交失败，请重试。");
   assert.equal(friendlyTextError("x"), "提交失败，请重试。");
+  // 空串错误码（无意义值）→ 通用文案
+  assert.equal(friendlyTextError(apiError("")), "提交失败，请重试。");
 });
