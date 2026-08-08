@@ -43,12 +43,12 @@ export function computeAnswerContentHash(text: string): string {
   return `sha256:${hash.digest("hex")}`;
 }
 
-/** probe 确定性 hash（should-fix #3：与 session-service 救火 3b 派生完全一致） */
+/** probe 确定性 hash（security_review MEDIUM 修复：纯 hex 与 session-service sha256Hex 完全一致） */
 export function frozenProbeHashForKey(keyPointId: string, contentExposureKey: string): string {
   const hash = createHash("sha256");
   const update = hash.update.bind(hash);
   update(`probe:${keyPointId}:0:${contentExposureKey}`);
-  return `sha256:${hash.digest("hex")}`;
+  return hash.digest("hex");
 }
 
 // ─── 输入/输出类型 ───────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   AnswerSubmissionError,
   computeAnswerContentHash,
+  frozenProbeHashForKey,
   submitEpisodeAnswer,
   type AnswerSubmissionRepository,
 } from "./answer-submission.js";
@@ -113,4 +114,12 @@ test("computeAnswerContentHash：确定性（同输入同 hash，不同输入不
   const c = computeAnswerContentHash("答案B");
   assert.equal(a, b);
   assert.notEqual(a, c);
+});
+
+test("frozenProbeHashForKey：纯 hex（与 session-service sha256Hex 派生一致，security_review MEDIUM）", () => {
+  const h = frozenProbeHashForKey("kp-1", "cex:kp1");
+  assert.match(h, /^[0-9a-f]{64}$/, "纯 64 位 hex，无 sha256: 前缀");
+  assert.equal(h.includes(":"), false, "不含前缀分隔符");
+  // 确定性
+  assert.equal(frozenProbeHashForKey("kp-1", "cex:kp1"), h);
 });
