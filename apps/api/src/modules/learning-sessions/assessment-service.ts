@@ -29,10 +29,7 @@ import {
 
 /** 确定性 hex hash（report_hash 计算） */
 function sha256Hex(data: string): string {
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(data, "utf8");
-  return hash.digest("hex");
+  return createHash("sha256").update(data, "utf8").digest("hex");
 }
 
 // ─── 错误 ────────────────────────────────────────────────────────────────
@@ -80,6 +77,7 @@ export interface AssessmentRepository {
   } | null>;
   findEpisodeRubricTargets(workspaceId: string, userId: string, episodeId: string): Promise<{
     episodeId: string;
+    sessionId: string;
     status: string;
     rubricTargets: unknown[];
     episodeEpoch: number;
@@ -145,6 +143,11 @@ export async function assessEpisode(
   }
   if (episode.status !== "answered_locked") {
     throw new AssessmentServiceError("EPISODE_NOT_ASSESSABLE", `Episode 状态 ${episode.status} 不可评测`, 409);
+  }
+  if (episode.sessionId !== input.sessionId) {
+    // review should-fix：episode 必须属于当前 session（对照 answer-submission 的 SESSION_MISMATCH）——
+    // 防止同 workspace 用户跨 session 引用 episode 写入错配报告行
+    throw new AssessmentServiceError("SESSION_MISMATCH", "Episode 不属于该 Session", 409);
   }
 
   const answerText = extractAnswerText(artifact.payload, artifact.modality);
@@ -234,7 +237,8 @@ export function createPgAssessmentRepository(transaction: AssessmentTx): Assessm
     async findEpisodeRubricTargets(workspaceId, userId, episodeId) {
       const rows = (await transaction.execute(
         sql`
-          SELECT id, status, rubric_targets AS "rubricTargets", episode_epoch AS "episodeEpoch"
+          SELECT id, session_id AS "sessionId", status, rubric_targets AS "rubricTargets",
+                 episode_epoch AS "episodeEpoch"
           FROM learning_episodes
           WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND id = ${episodeId}
           LIMIT 1
@@ -244,6 +248,7 @@ export function createPgAssessmentRepository(transaction: AssessmentTx): Assessm
       if (!row) return null;
       return {
         episodeId: String(row.id),
+        sessionId: String(row.sessionId),
         status: String(row.status),
         rubricTargets: Array.isArray(row.rubricTargets) ? row.rubricTargets : [],
         episodeEpoch: Number(row.episodeEpoch ?? 0),
