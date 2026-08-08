@@ -15,7 +15,7 @@
  * - 0 掌握/schedule 写入（COMMIT 是后续步骤）。
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
@@ -26,6 +26,14 @@ import {
   runRubricSessionReducer,
   type RubricSessionItemInput,
 } from "./trust-service.ts";
+
+/** 确定性 hex hash（report_hash 计算） */
+function sha256Hex(data: string): string {
+  const hash = createHash("sha256");
+  const update = hash.update.bind(hash);
+  update(data, "utf8");
+  return hash.digest("hex");
+}
 
 // ─── 错误 ────────────────────────────────────────────────────────────────
 
@@ -52,6 +60,7 @@ export interface AssessEpisodeInput {
 
 export interface AssessmentResult {
   episodeId: string;
+  sessionId: string;
   artifactId: string;
   verdicts: RubricSessionItemInput[];
   reducerVerdict: string;
@@ -75,7 +84,13 @@ export interface AssessmentRepository {
     rubricTargets: unknown[];
     episodeEpoch: number;
   } | null>;
-  writeAssessment(workspaceId: string, userId: string, episodeId: string, assessment: AssessmentResult): Promise<void>;
+  writeAssessment(
+    workspaceId: string,
+    userId: string,
+    sessionId: string,
+    episodeId: string,
+    assessment: AssessmentResult,
+  ): Promise<void>;
 }
 
 // ─── 纯函数：deterministic rubric 判定 ───────────────────────────────────
@@ -136,6 +151,14 @@ export async function assessEpisode(
   if (answerText === "") {
     throw new AssessmentServiceError("EMPTY_ANSWER", "锁定 artifact 无回答文本（fail closed）");
   }
+  if (!episode.rubricTargets || episode.rubricTargets.length === 0) {
+    // review should-fix：空 rubric 直接 4xx——reducer 对空集抛 ReducerError 会变 500
+    throw new AssessmentServiceError(
+      "RUBRIC_TARGETS_EMPTY",
+      "Episode 无 rubric targets（无法评测，fail closed）",
+      422,
+    );
+  }
 
   const verdicts = deterministicRubricVerdict(answerText, episode.rubricTargets ?? []);
   const reducer = runRubricSessionReducer(verdicts);
@@ -151,6 +174,7 @@ export async function assessEpisode(
 
   const result: AssessmentResult = {
     episodeId: input.episodeId,
+    sessionId: input.sessionId,
     artifactId: input.artifactId,
     verdicts,
     reducerVerdict: reducer.result, // RubricSessionResult（pass/partial/fail/not_assessable）
@@ -158,7 +182,13 @@ export async function assessEpisode(
     decisionHash: decision.decisionHash,
     disposition: reducer.result, // reducer 结果作为 disposition（COMMIT 前占位语义）
   };
-  await repo.writeAssessment(input.workspaceId, input.userId, input.episodeId, result);
+  await repo.writeAssessment(
+    input.workspaceId,
+    input.userId,
+    input.sessionId,
+    input.episodeId,
+    result,
+  );
   return result;
 }
 
@@ -219,19 +249,31 @@ export function createPgAssessmentRepository(transaction: AssessmentTx): Assessm
         episodeEpoch: Number(row.episodeEpoch ?? 0),
       };
     },
-    async writeAssessment(workspaceId, userId, episodeId, assessment) {
-      // 评测结果写 learning_assessment_reports（评估报告，非掌握/schedule 真值）
+    async writeAssessment(workspaceId, userId, sessionId, episodeId, assessment) {
+      // 评测结果写 learning_assessment_reports（评估报告，非掌握/schedule 真值）。
+      // review 修复：INSERT 严格对齐 0074 列；session_id 用真 session（非 episodeId，
+      // FK 指向 learning_sessions）；report_hash 撞唯一索引 → ON CONFLICT 幂等重放。
+      const rubricAssessments = assessment.verdicts.map((v) => ({
+        rubricItemId: v.rubricItemId,
+        verdict: v.verdict,
+        weight: v.weight,
+        required: v.required,
+      }));
+      const reportHash = sha256Hex(
+        `${episodeId}:${assessment.artifactId}:${assessment.decisionHash}`,
+      );
       await transaction.execute(
         sql`
           INSERT INTO learning_assessment_reports (
-            id, workspace_id, user_id, episode_id, artifact_id,
-            reducer_verdict, trust_class, decision_hash, disposition, verdicts
+            session_id, episode_id, workspace_id, user_id,
+            critic_version, reducer_version, assessment_source,
+            rubric_assessments, report_hash
           ) VALUES (
-            ${randomUUID()}, ${workspaceId}, ${userId}, ${episodeId},
-            ${assessment.artifactId}, ${assessment.reducerVerdict},
-            ${assessment.trustClass}, ${assessment.decisionHash},
-            ${assessment.disposition}, ${JSON.stringify(assessment.verdicts)}
+            ${sessionId}, ${episodeId}, ${workspaceId}, ${userId},
+            'deterministic-v1', 'rubric-session-reducer-v2', 'deterministic',
+            ${JSON.stringify(rubricAssessments)}, ${reportHash}
           )
+          ON CONFLICT (workspace_id, episode_id, report_hash) DO NOTHING
         `,
       );
     },

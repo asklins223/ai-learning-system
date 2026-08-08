@@ -38,7 +38,7 @@ function makeRepo(overrides: Partial<AssessmentRepository> = {}) {
         episodeEpoch: 1,
       };
     },
-    async writeAssessment(_ws, _u, _ep, assessment) {
+    async writeAssessment(_ws, _u, _s, _ep, assessment) {
       writes.push(assessment);
     },
     ...overrides,
@@ -57,6 +57,27 @@ test("assessEpisode：锁定 artifact + answered_locked episode → 评测 + 写
   assert.equal(result.disposition, "pass");
   assert.match(result.decisionHash, /^[0-9a-f]{64}$/, "decisionHash 为确定性纯 hex");
   assert.equal(writes.length, 1);
+});
+
+test("assessEpisode：同输入重放 → decisionHash 一致（确定性，review nit）", async () => {
+  const { repo } = makeRepo();
+  const a = await assessEpisode(baseInput(), repo);
+  const b = await assessEpisode(baseInput(), repo);
+  assert.equal(a.decisionHash, b.decisionHash, "同输入两次评测 decisionHash 必须相等");
+  assert.equal(a.reducerVerdict, b.reducerVerdict);
+});
+
+test("assessEpisode：空 rubric targets → 422（非 500，review should-fix）", async () => {
+  const { repo } = makeRepo({
+    findEpisodeRubricTargets: async () => ({
+      episodeId: EPISODE, status: "answered_locked", rubricTargets: [], episodeEpoch: 1,
+    }),
+  });
+  await assert.rejects(
+    () => assessEpisode(baseInput(), repo),
+    (err: unknown) =>
+      err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "RUBRIC_TARGETS_EMPTY",
+  );
 });
 
 test("assessEpisode：artifact 未锁定 → fail closed", async () => {
