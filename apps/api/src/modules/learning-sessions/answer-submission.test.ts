@@ -19,7 +19,7 @@ function makeRepo(overrides: Partial<AnswerSubmissionRepository> = {}) {
   const locks: string[] = [];
   const repo: AnswerSubmissionRepository = {
     async findEpisode() {
-      return { id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "active", probeId: PROBE };
+      return { id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "active", probeId: PROBE, contentExposureKey: "cex:kp1" };
     },
     async ensureProbe() {
       return { probeId: PROBE };
@@ -87,7 +87,7 @@ test("submitEpisodeAnswer：Episode 不存在 → 404", async () => {
 
 test("submitEpisodeAnswer：Episode 非 active → 不可作答", async () => {
   const { repo } = makeRepo({
-    findEpisode: async () => ({ id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "answered_locked", probeId: PROBE }),
+    findEpisode: async () => ({ id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "answered_locked", probeId: PROBE, contentExposureKey: "cex:kp1" }),
   });
   await assert.rejects(
     () => submitEpisodeAnswer(baseInput(), repo),
@@ -98,7 +98,7 @@ test("submitEpisodeAnswer：Episode 非 active → 不可作答", async () => {
 
 test("submitEpisodeAnswer：Episode 属于其他 Session → 409", async () => {
   const { repo } = makeRepo({
-    findEpisode: async () => ({ id: EPISODE, sessionId: "other-session", keyPointId: KEY_POINT, status: "active", probeId: PROBE }),
+    findEpisode: async () => ({ id: EPISODE, sessionId: "other-session", keyPointId: KEY_POINT, status: "active", probeId: PROBE, contentExposureKey: "cex:kp1" }),
   });
   await assert.rejects(
     () => submitEpisodeAnswer(baseInput(), repo),

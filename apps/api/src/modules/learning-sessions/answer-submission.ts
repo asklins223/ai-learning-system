@@ -43,11 +43,11 @@ export function computeAnswerContentHash(text: string): string {
   return `sha256:${hash.digest("hex")}`;
 }
 
-/** probe 确定性 hash（与 session-service 救火 3b 派生对齐） */
-export function frozenProbeHashForKey(episodeId: string, keyPointId: string, _status: string): string {
+/** probe 确定性 hash（should-fix #3：与 session-service 救火 3b 派生完全一致） */
+export function frozenProbeHashForKey(keyPointId: string, contentExposureKey: string): string {
   const hash = createHash("sha256");
   const update = hash.update.bind(hash);
-  update(`probe:${episodeId}:${keyPointId}`);
+  update(`probe:${keyPointId}:0:${contentExposureKey}`);
   return `sha256:${hash.digest("hex")}`;
 }
 
@@ -94,6 +94,7 @@ export interface AnswerSubmissionRepository {
     keyPointId: string;
     status: string;
     probeId: string | null;
+    contentExposureKey: string;
   } | null>;
   /**
    * 确保当前 episode 存在可用的 probe 行（learning_session_probes 的
@@ -169,7 +170,7 @@ export async function submitEpisodeAnswer(
     sessionId: input.sessionId,
     episodeId: input.episodeId,
     keyPointId,
-    probeHash: frozenProbeHashForKey(input.episodeId, keyPointId, episode.status),
+    probeHash: frozenProbeHashForKey(keyPointId, episode.contentExposureKey),
   });
 
   await repo.createArtifact({
@@ -227,7 +228,7 @@ export function createPgAnswerSubmissionRepository(
       const rows = (await transaction.execute(
         sql`
           SELECT id, session_id AS "sessionId", key_point_id AS "keyPointId",
-                 status, NULL::uuid AS "probeId"
+                 status, content_exposure_key AS "contentExposureKey", NULL::uuid AS "probeId"
           FROM learning_episodes
           WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND id = ${episodeId}
           LIMIT 1
@@ -240,13 +241,16 @@ export function createPgAnswerSubmissionRepository(
         sessionId: String(row.sessionId),
         keyPointId: String(row.keyPointId),
         status: String(row.status),
+        contentExposureKey: String(row.contentExposureKey ?? ""),
         probeId: row.probeId != null ? String(row.probeId) : null,
       };
     },
     // review blocking 修复：先建 probe 行（FK 前提），返回真实 probe id
     async ensureProbe(input) {
+      // should-fix #1（review）：ON CONFLICT 用 (episode_id, sequence) 唯一索引，
+      // 冲突时复用现有行（RETURNING 取真实 id），不撞 episodeSequenceUnique 23505。
       const probeId = randomUUID();
-      await transaction.execute(
+      const rows = (await transaction.execute(
         sql`
           INSERT INTO learning_session_probes (
             id, session_id, episode_id, workspace_id, user_id, sequence,
@@ -258,10 +262,12 @@ export function createPgAnswerSubmissionRepository(
             ${input.userId}, 0, '', '', '', '', '', '',
             'mastery_eligible', ${input.probeHash}, 'draft'
           )
-          ON CONFLICT (id) DO NOTHING
+          ON CONFLICT (episode_id, sequence) DO UPDATE SET updated_at = now()
+          RETURNING id
         `,
-      );
-      return { probeId };
+      )) as Array<Record<string, unknown>>;
+      const row = rows[0];
+      return { probeId: row && typeof row.id === "string" ? row.id : probeId };
     },
     async createArtifact(input) {
       await transaction.execute(
@@ -288,16 +294,25 @@ export function createPgAnswerSubmissionRepository(
       );
       return { id: input.id };
     },
-    // should-fix #1：锁 episode 带 status='active' 条件（防并发双提交双 artifact）
+    // should-fix #2（review）：条件 UPDATE 检查影响行数——并发双提交下第二个
+    // 请求 UPDATE 0 行 → 抛 EPISODE_NOT_ANSWERABLE（fail closed，不静默成功）。
     async lockEpisode(episodeId, _now, workspaceId, userId) {
-      await transaction.execute(
+      const rows = (await transaction.execute(
         sql`
           UPDATE learning_episodes
           SET status = 'answered_locked', updated_at = now()
           WHERE id = ${episodeId} AND workspace_id = ${workspaceId}
             AND user_id = ${userId} AND status = 'active'
+          RETURNING id
         `,
-      );
+      )) as Array<Record<string, unknown>>;
+      if (rows.length === 0) {
+        throw new AnswerSubmissionError(
+          "EPISODE_NOT_ANSWERABLE",
+          "Episode 已被并发提交锁定或状态不可作答（fail closed）",
+          409,
+        );
+      }
     },
   };
 }
