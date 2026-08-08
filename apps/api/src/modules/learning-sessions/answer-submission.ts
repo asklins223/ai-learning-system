@@ -173,6 +173,9 @@ export async function submitEpisodeAnswer(
     probeHash: frozenProbeHashForKey(keyPointId, episode.contentExposureKey),
   });
 
+  // 先锁后写（review nit：并发双提交第二方在 lockEpisode 处 409 而非 createArtifact 500）
+  await repo.lockEpisode(input.episodeId, nowIso, input.workspaceId, input.userId);
+
   await repo.createArtifact({
     id: artifactId,
     workspaceId: input.workspaceId,
@@ -191,7 +194,6 @@ export async function submitEpisodeAnswer(
     status: "locked",
     revision: 0,
   });
-  await repo.lockEpisode(input.episodeId, nowIso, input.workspaceId, input.userId);
 
   return {
     artifact: {
