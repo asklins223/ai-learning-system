@@ -7,6 +7,7 @@ import { TopBar } from "./TopBar";
 import { MobileNav } from "./MobileNav";
 import { TabletTopBar } from "./TabletTopBar";
 import { CompanionShell } from "@/components/learning-companion/CompanionShell";
+import { isCompanionShellEnabled } from "@/lib/feature-flags";
 
 /**
  * AppShell — 全局应用外壳。
@@ -231,8 +232,9 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
       {/* 移动端底部导航：仅 default */}
       {showMobileNav && <MobileNav />}
 
-      {/* 伴星壳（安静锚点 + 角色头像 + 侧板；quiet 未召唤时仅静态锚点，§5.4.2） */}
-      <CompanionShell />
+      {/* 伴星壳（安静锚点 + 角色头像 + 侧板；救火 1：flag 关闭时不渲染——审计确认
+          面板仍为空壳/演示态，真实闭环完成前不冒充 v1 交付） */}
+      {isCompanionShellEnabled() && <CompanionShell />}
     </div>
   );
 }

@@ -48,3 +48,17 @@ export function isCardSetDeckUIEnabled(): boolean {
 export function isAgentActivityStreamEnabled(): boolean {
   return isExplicitlyEnabled(process.env.NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED);
 }
+
+/**
+ * 救火 1（审计）：伴星壳（CompanionShell）默认关闭。
+ *
+ * 审计确认伴星面板仍是空壳/演示态（panelContent undefined、朗读/问一问
+ * 仅 console 桩、语音端点未接生产路径）——在完成真实闭环前不得展示，
+ * 避免把演示 UI 冒充 v1 交付（§12.2 fail closed：flag 关闭时不渲染）。
+ *
+ * 生产接入真实面板内容/端点后，由部署方显式设
+ * `NEXT_PUBLIC_COMPANION_SHELL_ENABLED=true` 开启。
+ */
+export function isCompanionShellEnabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_COMPANION_SHELL_ENABLED);
+}

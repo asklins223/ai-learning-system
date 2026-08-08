@@ -117,7 +117,17 @@ app.get("/ready", async (_req, reply) => {
       tableRows.map((row) => (row as { table_name: string }).table_name),
     );
     // QUAL-08 修复：不再与硬编码列表对比，改为检查核心表是否存在
-    const coreTables = ["users", "workspaces", "notes", "jobs", "sessions"];
+    // 救火 2（审计）：learning_sessions 是学习伴侣核心表——缺失时服务必须 not_ready
+    const coreTables = [
+      "users",
+      "workspaces",
+      "notes",
+      "jobs",
+      "sessions",
+      "learning_sessions",
+      "learning_episodes",
+      "learning_response_artifacts",
+    ];
     const missingTables = coreTables.filter((table) => !presentTables.has(table));
 
     // Drizzle journal 的最新迁移时间戳。可通过环境变量在后续版本提升门槛，
