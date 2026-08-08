@@ -31,6 +31,11 @@ import {
   cancelSession,
   getSessionPublicView,
 } from "./session-service.ts";
+import {
+  AnswerSubmissionError,
+  createPgAnswerSubmissionRepository,
+  submitEpisodeAnswer,
+} from "./answer-submission.ts";
 
 // ─── 请求体 schema（zod，路由层校验）──────────────────────────────────────
 
@@ -246,6 +251,54 @@ export async function learningSessionRoutes(app: FastifyInstance) {
         );
       } catch (err) {
         if (err instanceof SessionServiceError) {
+          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // 救火 3a（审计 #2）：回答上传端点——写 learning_response_artifacts + 锁定 Episode。
+  // POST /learning-sessions/:id/episodes/:episodeId/answer
+  // body: { modality: "text_or_mixed" | "voice", text: string }
+  const submitAnswerParamsSchema = z.object({
+    id: z.string().uuid(),
+    episodeId: z.string().uuid(),
+  });
+  const submitAnswerBodySchema = z.object({
+    modality: z.enum(["text_or_mixed", "voice"]),
+    text: z.string().min(1).max(20_000),
+  });
+  app.post<{ Params: { id: string; episodeId: string } }>(
+    "/learning-sessions/:id/episodes/:episodeId/answer",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const parsed = submitAnswerParamsSchema.safeParse(req.params);
+      if (!parsed.success) {
+        throw app.httpErrors.badRequest("session/episode id 非法");
+      }
+      const body = parseBody(app, submitAnswerBodySchema, req.body);
+      try {
+        return await withWorkspaceTransaction(
+          { workspaceId: req.session.workspaceId, userId: req.session.userId },
+          async (tx) => {
+            const repo = createPgAnswerSubmissionRepository(tx);
+            // keyPointId/probeId 由服务端从 episode 读取（客户端不传，防越权指定）。
+            return submitEpisodeAnswer(
+              {
+                workspaceId: req.session.workspaceId,
+                userId: req.session.userId,
+                sessionId: parsed.data.id,
+                episodeId: parsed.data.episodeId,
+                modality: body.modality,
+                text: body.text,
+              },
+              repo,
+            );
+          },
+        );
+      } catch (err) {
+        if (err instanceof AnswerSubmissionError) {
           return reply.code(err.statusCode).send({ error: err.code, message: err.message });
         }
         throw err;

@@ -1227,9 +1227,24 @@ export async function createSession(
   }
 
   const formalPlanKind = resolveFormalPlanKind(candidate.schedulingDecision.authorizedAction);
+  // 救火 3b：从候选派生 rubric targets + probe hashes（不再空壳）。
+  // probe/rubric 基于 sourceFingerprint + contentExposureKey 的确定性派生
+  //（EpisodeCandidate 不含逐证据 hash——scene 合同接入后替换为真实 evidence）。
+  const rubricTargets: unknown[] = [
+    {
+      itemId: "rubric-0",
+      evidenceHash: sha256Hex(`evidence:${candidate.sourceFingerprint}`),
+      facet: "explain",
+      verdict: "pending",
+      policyVersion: "rubric-v1",
+    },
+  ];
+  const frozenProbeHashes = [
+    sha256Hex(`probe:${candidate.keyPointId}:0:${candidate.contentExposureKey}`),
+  ];
   const formalPlan: EpisodeFormalPlan = {
     kind: formalPlanKind,
-    requiredProbeIds: [],
+    requiredProbeIds: frozenProbeHashes.slice(0, 1), // 首个 probe 为当前回答目标
   };
   const userPreferencesHash = sha256Hex(stableStringify(preferences ?? {}));
   const assistanceSnapshotHash = sha256Hex(stableStringify(assistance ?? null));
@@ -1250,7 +1265,7 @@ export async function createSession(
     budgetEnvelopeHash: budget.envelope.envelopeHash,
     userPreferencesHash,
     assistanceSnapshotHash,
-    frozenProbeHashes: [],
+    frozenProbeHashes,
   });
 
   const session = await repo.createSession({
@@ -1274,7 +1289,7 @@ export async function createSession(
     schedulingDecision: candidate.schedulingDecision,
     episodeTargetFingerprint: candidate.sourceFingerprint,
     contentExposureKey: candidate.contentExposureKey,
-    rubricTargets: [],
+    rubricTargets,
     allowedModalities: ["voice", "text_or_mixed"],
     maxTurns: 8,
     assistancePolicyVersion: policyVersions.assistancePolicyVersion,
@@ -1446,7 +1461,10 @@ export async function continueSession(
     budgetEnvelopeHash: budget.envelope.envelopeHash,
     userPreferencesHash: sha256Hex(stableStringify(preferences ?? {})),
     assistanceSnapshotHash: sha256Hex(stableStringify(assistance ?? null)),
-    frozenProbeHashes: [],
+    // 救火 3b：与 createSession 同语义（确定性派生，非空壳）
+    frozenProbeHashes: [
+      sha256Hex(`probe:${candidate.keyPointId}:0:${candidate.contentExposureKey}`),
+    ],
   });
   const nextEpisode = await repo.createEpisode({
     sessionId: session.id,
@@ -1461,7 +1479,16 @@ export async function continueSession(
     schedulingDecision: candidate.schedulingDecision,
     episodeTargetFingerprint: candidate.sourceFingerprint,
     contentExposureKey: candidate.contentExposureKey,
-    rubricTargets: [],
+    // 救火 3b：与 createSession 同语义（确定性派生，非空壳）
+    rubricTargets: [
+      {
+        itemId: "rubric-0",
+        evidenceHash: sha256Hex(`evidence:${candidate.sourceFingerprint}`),
+        facet: "explain",
+        verdict: "pending",
+        policyVersion: "rubric-v1",
+      },
+    ],
     allowedModalities: ["voice", "text_or_mixed"],
     maxTurns: 8,
     assistancePolicyVersion: policyVersions.assistancePolicyVersion,

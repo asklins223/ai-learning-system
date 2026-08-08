@@ -85,7 +85,7 @@ export function QuietAnchor({
       data-ui="lc-quiet-anchor"
       className={
         className ??
-        "fixed right-3 bottom-3 z-10 flex items-center justify-center"
+        "fixed right-3 bottom-3 z-40 flex items-center justify-center"
       }
     >
       <button

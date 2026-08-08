@@ -209,7 +209,7 @@ test("isToolAllowed：manifest 之外/未知工具默认拒绝", () => {
   assert.equal(learningToolGateway.isToolAllowed(LearningAgentRole.SCENE_AUTHOR, "http://evil.example/steal"), false);
 });
 
-test("允许工具：epoch 匹配 + 幂等键齐全时走到 not_implemented（非越权、非 epoch 拦截）", async () => {
+test("允许工具：epoch 匹配 + 幂等键齐全时走到 executor（救火 4：默认未注入 → executor_error）", async () => {
   const gateway = new LearningToolGateway(undefined, matchingEpochProvider());
   for (const actor of Object.keys(ALLOWED_BY_ROLE) as LearningAgentRole[]) {
     for (const toolId of ALLOWED_BY_ROLE[actor]) {
@@ -217,7 +217,7 @@ test("允许工具：epoch 匹配 + 幂等键齐全时走到 not_implemented（�
         makeRequest({ actor, toolId, idempotencyKey: "idem-ok" }),
       );
       assert.equal(result.ok, false);
-      if (!result.ok) assert.equal(result.error.code, "not_implemented", `${actor} 调 ${toolId}`);
+      if (!result.ok) assert.equal(result.error.code, "executor_error", `${actor} 调 ${toolId}`);
     }
   }
 });
@@ -232,7 +232,20 @@ test("允许工具：read_purified_contract_summary 可无幂等键（纯读净�
     }),
   );
   assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.error.code, "not_implemented");
+  if (!result.ok) assert.equal(result.error.code, "executor_error");
+});
+
+test("救火 4：注入 executor 后合法工具返回真实结果", async () => {
+  const gateway = new LearningToolGateway(undefined, matchingEpochProvider(), {
+    async execute(request) {
+      return { ok: true, payload: { toolId: request.toolId, handled: true } };
+    },
+  });
+  const result = await gateway.executeTool(
+    makeRequest({ toolId: "read_purified_contract_summary", idempotencyKey: null }),
+  );
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.payload.toolId, "read_purified_contract_summary");
 });
 
 test("缺少幂等键：合法工具 + epoch 匹配仍被拒（missing_idempotency_key）", async () => {

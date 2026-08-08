@@ -104,10 +104,36 @@ export type LearningToolExecutionResult =
           | "tool_unknown"
           | "missing_idempotency_key"
           | "epoch_mismatch"
-          | "not_implemented";
+          | "not_implemented"
+          | "executor_error";
         message: string;
       };
     };
+
+/**
+ * 救火 4（审计 #4）：工具副作用 executor 注入端口。
+ *
+ * 骨架阶段所有合法工具返回 not_implemented；真实实现经此端口分派：
+ * - 读工具（read_*）返回净化数据（不含 hidden rubric/solution/evidence）；
+ * - 写工具（submit_ / lock_ / dispatch_ 前缀）由宿主注入副作用实现（staging 写入、
+ *   tool-result 事件同事务记录）；未注入 → fail closed executor_error。
+ */
+export interface LearningToolExecutor {
+  execute(request: LearningToolExecutionRequest): Promise<LearningToolExecutionResult>;
+}
+
+/** 默认 executor：未注入 → fail closed（保持 0 canonical write） */
+const DEFAULT_TOOL_EXECUTOR: LearningToolExecutor = {
+  async execute(request) {
+    return {
+      ok: false,
+      error: {
+        code: "executor_error",
+        message: `工具 ${request.toolId} 的 executor 未注入（救火 4：宿主应用在 worker 初始化时接入真实实现）`,
+      },
+    };
+  },
+};
 
 /**
  * Learning Tool Gateway。
@@ -120,6 +146,7 @@ export type LearningToolExecutionResult =
 export class LearningToolGateway {
   private readonly allowlists: Record<LearningAgentRole, Set<LearningToolId>>;
   private readonly epochProvider: LearningEpochProvider;
+  private readonly toolExecutor: LearningToolExecutor;
 
   constructor(
     llmRoleSpecs: readonly LearningRoleSpec[] = [
@@ -131,6 +158,7 @@ export class LearningToolGateway {
       createGroundedAnswerCriticRole(),
     ],
     epochProvider: LearningEpochProvider = DEFAULT_EPOCH_PROVIDER,
+    toolExecutor: LearningToolExecutor = DEFAULT_TOOL_EXECUTOR,
   ) {
     const allowlists: Record<LearningAgentRole, Set<LearningToolId>> = {
       session_supervisor: new Set<LearningToolId>(),
@@ -152,6 +180,7 @@ export class LearningToolGateway {
     }
     this.allowlists = allowlists;
     this.epochProvider = epochProvider;
+    this.toolExecutor = toolExecutor;
   }
 
   /** 检查某 actor 是否允许某工具（默认拒绝） */
@@ -208,15 +237,10 @@ export class LearningToolGateway {
         error: { code: "missing_idempotency_key", message: `工具 ${request.toolId} 缺少幂等键` },
       });
     }
-    // 4. 骨架：真实工具副作用实现于 W2 后续任务（03-4 executor）。
-    //    此处拒绝执行以保持 0 canonical write（epoch 校验与 DTO 序列化为完整实现）。
-    return Promise.resolve({
-      ok: false,
-      error: {
-        code: "not_implemented",
-        message: `工具 ${request.toolId} 执行实现于 W2 后续任务（03-4）`,
-      },
-    });
+    // 4. 救火 4：真实工具副作用经注入 executor 分派（读工具返回净化数据、
+    //    写工具由宿主接入 staging 落库）；未注入 → fail closed executor_error，
+    //    保持 0 canonical write（epoch 校验与 DTO 序列化为完整实现）。
+    return this.toolExecutor.execute(request);
   }
 
   /**
