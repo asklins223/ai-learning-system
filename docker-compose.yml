@@ -212,6 +212,9 @@ services:
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      # 语音：SiliconFlow ASR（外部 API）+ edge-tts TTS（Docker 容器）
+      EDGE_TTS_BASE_URL: ${EDGE_TTS_BASE_URL:-http://edge-tts:8080}
+      EDGE_TTS_AUTH_TOKEN: ${EDGE_TTS_AUTH_TOKEN:?Set EDGE_TTS_AUTH_TOKEN in .env（edge-tts 与 api 必须一致）}
       # Image upload: MinIO/S3 storage endpoint
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
       S3_BUCKET: ${S3_BUCKET:-ailearn-workspaces}
@@ -302,6 +305,27 @@ services:
       INTERNAL_API_URL: http://api:4000
     ports:
       - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ailearn_net
+
+  # edge-tts：TTS 服务（Docker 容器内运行，不依赖宿主 CLI）。
+  # 暴露 OpenAI 协议 POST /v1/audio/speech（text → mp3），供 api 容器调用。
+  edge-tts:
+    build:
+      context: .
+      dockerfile: docker/edge-tts/Dockerfile
+    user: nobody
+    restart: unless-stopped
+    environment:
+      EDGE_TTS_AUTH_TOKEN: ${EDGE_TTS_AUTH_TOKEN:?Set EDGE_TTS_AUTH_TOKEN in .env（edge-tts 与 api 必须一致）}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     security_opt:
       - no-new-privileges:true
     networks:

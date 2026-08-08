@@ -175,6 +175,9 @@ services:
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      # 语音：SiliconFlow ASR（外部 API）+ edge-tts TTS（Docker 容器）
+      EDGE_TTS_BASE_URL: ${EDGE_TTS_BASE_URL:-http://edge-tts:8080}
+      EDGE_TTS_AUTH_TOKEN: ${EDGE_TTS_AUTH_TOKEN:?Set EDGE_TTS_AUTH_TOKEN in .env（edge-tts 与 api 必须一致）}
       # Docker Desktop proxies public DNS through 198.18.0.0/15. This remains
       # explicit and development-only; production defaults to strict blocking.
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
@@ -286,6 +289,26 @@ services:
       - ./apps/web/lib:/app/lib
       - ./packages/shared/src:/tmp/shared/src
       - ./packages/shared/package.json:/tmp/shared/package.json:ro
+    networks:
+      - ailearn_net
+
+  # edge-tts：TTS 服务（Docker 容器内运行；开发环境同网络）
+  edge-tts:
+    build:
+      context: .
+      dockerfile: docker/edge-tts/Dockerfile
+    user: nobody
+    restart: unless-stopped
+    environment:
+      EDGE_TTS_AUTH_TOKEN: ${EDGE_TTS_AUTH_TOKEN:?Set EDGE_TTS_AUTH_TOKEN in .env（edge-tts 与 api 必须一致）}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
     networks:
       - ailearn_net
 
