@@ -101,6 +101,21 @@ test("edgeTtsSynthesize：调用容器 /v1/audio/speech（OpenAI 协议）并返
   assert.ok(captured?.body?.includes('"voice":"zh-CN-XiaoxiaoNeural"'), "body 含 voice");
 });
 
+test("edgeTtsSynthesize：baseUrl 尾斜杠 strip + authToken 鉴权头", async () => {
+  let captured: { url: string; headers?: Record<string, string> } | undefined;
+  const fetchImpl = mockFetch(async (url, init) => {
+    captured = { url, headers: init.headers as Record<string, string> };
+    return bytesResponse(MP3_BYTES);
+  });
+  await edgeTtsSynthesize("你好", "zh-CN-XiaoxiaoNeural", {
+    baseUrl: "http://edge-tts:8080/", // 尾斜杠应被 strip
+    authToken: "secret-token",
+    fetchImpl,
+  });
+  assert.equal(captured?.url, "http://edge-tts:8080/v1/audio/speech", "尾斜杠已 strip，无 //v1 双斜杠");
+  assert.equal(captured?.headers?.["X-Edge-TTS-Token"], "secret-token", "authToken 鉴权头发送");
+});
+
 test("edgeTtsSynthesize：空文本 → fail closed", async () => {
   await assert.rejects(
     () => edgeTtsSynthesize("", "zh-CN-XiaoxiaoNeural", { fetchImpl: mockFetch(async () => bytesResponse(MP3_BYTES)) }),

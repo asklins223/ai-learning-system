@@ -19,6 +19,8 @@ export interface EdgeTtsProviderOptions {
   voice?: string;
   /** 语速（edge-tts rate，如 +0% / -10%） */
   rate?: string;
+  /** 容器鉴权共享 token（优先于 env EDGE_TTS_AUTH_TOKEN） */
+  authToken?: string;
   timeoutMs?: number;
   /** 测试注入 fetch */
   fetchImpl?: typeof fetch;
@@ -62,11 +64,13 @@ export async function edgeTtsSynthesize(
   if (typeof text !== "string" || text.trim() === "") {
     throw new EdgeTtsError("INVALID_ARGUMENT", "TTS 文本为空（fail closed）");
   }
-  const baseUrl = options.baseUrl ?? process.env.EDGE_TTS_BASE_URL ?? DEFAULT_BASE_URL;
+  const baseUrl = (options.baseUrl ?? process.env.EDGE_TTS_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
   const effectiveVoice = voice || (options.voice ?? DEFAULT_VOICE);
   const rate = options.rate ?? "+0%";
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  // 容器鉴权 token：优先 options.authToken（测试注入/显式配置），兜底 env
+  const authToken = options.authToken ?? process.env.EDGE_TTS_AUTH_TOKEN;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -74,8 +78,7 @@ export async function edgeTtsSynthesize(
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     // 容器鉴权（security_review MEDIUM）：共享 token 防内网任意调用
-    const token = process.env.EDGE_TTS_AUTH_TOKEN;
-    if (token) headers["X-Edge-TTS-Token"] = token;
+    if (authToken) headers["X-Edge-TTS-Token"] = authToken;
     response = await fetchImpl(`${baseUrl}/v1/audio/speech`, {
       method: "POST",
       headers,
