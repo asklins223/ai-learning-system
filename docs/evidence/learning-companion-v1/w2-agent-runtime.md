@@ -39,5 +39,5 @@
 ## 5. 判定层证据
 
 - 决策记录 `03-2`~`03-6`、`04-3`、`06-3` 头部状态均为 **Frozen（已冻结）**；阶段 03 退出 Gate 5 项全部勾选（越权写 0、无限 loop 不可达、生命周期完整、Global Shell 解耦、staging 0 canonical write）。
-- 本阶段判定层测试全绿：`orchestrator.test.ts`、`policies.test.ts`、`tools/gateway.test.ts`、roles 下各 `*.test.ts` 均为判定层测试；四包最终基线全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 750，见 `README.md`）。
+- 本阶段判定层测试全绿：`orchestrator.test.ts`、`policies.test.ts`、`tools/gateway.test.ts`、roles 下各 `*.test.ts` 均为判定层测试；四包最终基线全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 755，见 `README.md`）。
 - 各阶段 security_review 结论均为修复后 pass（详见 `release-manifest.json`）。
