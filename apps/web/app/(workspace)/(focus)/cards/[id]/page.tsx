@@ -33,6 +33,7 @@ import { EvidenceRail } from "@/components/study/EvidenceRail";
 import { UnderstandingFacts } from "@/components/study/UnderstandingFacts";
 import { ReviewPlanCard } from "@/components/study/ReviewPlanCard";
 import { AccountMenu } from "@/components/account/AccountMenu";
+import { LearningCardActions } from "@/components/learning-companion/LearningCardActions";
 import {
   sanitizeSearchReturnTarget,
   withSearchReturnTarget,
@@ -844,6 +845,43 @@ export default function CardPage() {
                 evidenceLoading={evidenceLoading}
                 eligibleKeyPointCount={eligibleKeyPointCount}
                 onOpenEvidence={revealEvidenceWorkspace}
+              />
+            )}
+
+            {/* 伴星学习卡主行动（§8）：唯一主行动「开始/继续一小段航程」+ 内容工具。
+                朗读/查看证据/问一问按实际暴露记录 exposure（assistance cooldown 生效）。 */}
+            {(activeKeyPoint ?? keyPoints[0]) && (
+              <LearningCardActions
+                cardId={cardId}
+                keyPointId={(activeKeyPoint ?? keyPoints[0]).id}
+                title={cardTitle}
+                summary={cardSummary}
+                keyPoints={keyPoints.map((kp) => ({ id: kp.id, claim: kp.claim }))}
+                dueLabel={nextReviewAt ? `下次复习 ${nextReviewAt}` : undefined}
+                published
+                contact={{ opened: true }}
+                journeyHint="语音 / 排序 / 修复 / 情境由本轮 Supervisor 决定"
+                onStartJourney={() => {
+                  const target = activeKeyPoint ?? keyPoints[0];
+                  if (target) {
+                    router.push(`/cards/${cardId}/validate?keyPoint=${encodeURIComponent(target.id)}`);
+                  }
+                }}
+                onReadAloud={() => {
+                  // 朗读摘要/论点：实际播放时由宿主记录 exposure（§8）。
+                  console.info("[companion] read aloud", cardId);
+                }}
+                onViewEvidence={() => {
+                  const target = activeKeyPoint ?? keyPoints[0];
+                  if (target) {
+                    setOpenKeyPointId(target.id);
+                    setEvidencePanelOpen(true);
+                  }
+                }}
+                onAskTutor={() => {
+                  // 当前 target 有界 Tutor detour：实际问答时记录 exposure（practice-only）。
+                  console.info("[companion] ask tutor", cardId);
+                }}
               />
             )}
           </div>

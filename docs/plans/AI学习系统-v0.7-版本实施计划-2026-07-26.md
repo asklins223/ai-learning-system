@@ -1,6 +1,6 @@
 # AI 学习系统 v0.7 版本实施计划：游戏化掌握旅程
 
-> 状态：Draft（可开发计划：批准后即可启动实施，允许与 v0.6 M7 收尾受控并行）<br>
+> 状态：Superseded（2026-08-07 由 [AI 学习伴侣驱动的多模态理解宇宙](learning-companion-multimodal-understanding-universe.md) 替代：阶段 00 Owner 决策批准采用 AI 学习伴侣驱动的多模态理解宇宙，本 v0.7 游戏化掌握旅程不再并行实施）<br>
 > 文档版本：0.4<br>
 > 计划日期：2026-07-26<br>
 > 目标版本：`v0.7.0`<br>
@@ -940,6 +940,6 @@ canonical 事务（v0.6 既有，不改）
 | 2026-07-26 | Draft 0.2 修订 | 补充星图交互升级（MAP-01）与概念聚合切片（CONC-01）为 Must；新增 Concept Gold v1 门禁与 ADR-0012；容量假设上调 |
 | 2026-07-26 | Draft 0.3 审查修订 | 状态机全覆盖（补 unclear_expression/unknown、partial 中断语义、needs_repair 覆盖首错）；XP 幂等语义补全（streak 里程碑终身一次、叠发规则）；今日关卡确定性排序；概念抽取治理上下文归属；M0/M1 Gate 与灰度批次一致性修复；backfill 成就静默入账 |
 | 2026-07-27 | Draft 0.4 基线校正 | 迁移序列自 `0044+` 校正为 `0050+`：2026-07-26 外部审计确认 Card Generation v2 已占用 `0044–0049`；编号以 M0 冻结为准 |
-| — | Approved | 待 owner 批准后填写，同步更新 `docs/plans/README.md` |
+| 2026-08-07 | Superseded | 本文被 [AI 学习伴侣驱动的多模态理解宇宙](learning-companion-multimodal-understanding-universe.md) 替代（阶段 00 Owner 决策 2026-08-07 批准 §21 13 条），不再进入 Approved，不再并行实施；计划索引同步见 `project-archive/plans/README.md` |
 
 

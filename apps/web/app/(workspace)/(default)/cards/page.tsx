@@ -3,6 +3,7 @@
 import "@/app/styles/cards-list.css";
 import "@/app/styles/workspace-headers.css";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Drawer } from "@/components/ui/Drawer";
@@ -12,6 +13,7 @@ import { Icon } from "@/components/ui/icons";
 import { api, type CardListItem } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
 import { statusMap } from "@/lib/status-map";
+import { StaticCardFallback } from "@/components/learning-companion/StaticCardFallback";
 import { isCardSetDeckUIEnabled } from "@/lib/feature-flags";
 import { CardSetDeckPage } from "@/components/study/CardSetDeckPage";
 import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
@@ -83,6 +85,7 @@ export default function CardsIndex() {
 }
 
 function CardsGridPage() {
+  const router = useRouter();
   const [items, setItems] = useState<CardListItem[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [cardTotal, setCardTotal] = useState(0);
@@ -695,6 +698,27 @@ function CardsGridPage() {
           ))}
         </div>
       </Drawer>
+
+      {/* 伴星静态卡 fallback（§10.6）：星图不是唯一入口——列表/卡片可直接开始航程 */}
+      {items !== null && items.length > 0 && (
+        <StaticCardFallback
+          title="直接开始一小段航程"
+          description="搜索、卡片、此刻和复习均可直接开始（星图只是入口之一）。"
+          entries={items.slice(0, 8).map((item) => ({
+            id: item.id,
+            keyPointId: item.id,
+            title: cardTitle(item),
+            summary: item.schemaJson?.summary?.trim() ?? "",
+            source: "card" as const,
+            onStart: () => {
+              router.push(`/cards/${item.id}/validate`);
+            },
+            meta: {
+              dueLabel: item.nextReviewAt ? `下次复习 ${item.nextReviewAt}` : undefined,
+            },
+          }))}
+        />
+      )}
     </div>
   );
 }

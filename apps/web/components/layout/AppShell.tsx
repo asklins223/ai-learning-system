@@ -6,6 +6,7 @@ import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { MobileNav } from "./MobileNav";
 import { TabletTopBar } from "./TabletTopBar";
+import { CompanionShell } from "@/components/learning-companion/CompanionShell";
 
 /**
  * AppShell — 全局应用外壳。
@@ -229,6 +230,9 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
 
       {/* 移动端底部导航：仅 default */}
       {showMobileNav && <MobileNav />}
+
+      {/* 伴星壳（安静锚点 + 角色头像 + 侧板；quiet 未召唤时仅静态锚点，§5.4.2） */}
+      <CompanionShell />
     </div>
   );
 }

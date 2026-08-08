@@ -4,6 +4,14 @@
 -- 整体回滚,靠 job 重试自愈。补 (workspace_id, run_id, produced_by_event_key) 唯一约束,
 -- 使 draft 幂等有 DB 级兜底(onConflictDoNothing + 回查复用)。
 
-ALTER TABLE public.card_generation_drafts
-  ADD CONSTRAINT card_generation_drafts_produced_by_event_key_unique_idx
-  UNIQUE (workspace_id, run_id, produced_by_event_key);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'card_generation_drafts_produced_by_event_key_unique_idx'
+  ) THEN
+    ALTER TABLE public.card_generation_drafts
+      ADD CONSTRAINT card_generation_drafts_produced_by_event_key_unique_idx
+      UNIQUE (workspace_id, run_id, produced_by_event_key);
+  END IF;
+END $$;

@@ -23,6 +23,8 @@ import { statsRoutes } from "./modules/stats/routes.ts";
 import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
 import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
+import { companionShellRoutes } from "./modules/companion-shell/index.ts";
+import { learningSessionRoutes } from "./modules/learning-sessions/session-routes.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
 import { purgeSoftDeletedNotes } from "./modules/note/maintenance.ts";
 import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
@@ -222,6 +224,8 @@ async function main() {
   await app.register(statsRoutes);
   await app.register(benchmarkRoutes);
   await app.register(uploadRoutes);
+  await app.register(companionShellRoutes);
+  await app.register(learningSessionRoutes);
 
   const PORT = Number(process.env.PORT ?? 4000);
   const HOST = "0.0.0.0";

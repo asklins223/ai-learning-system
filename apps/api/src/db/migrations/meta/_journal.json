@@ -519,6 +519,48 @@
       "when": 1789275800000,
       "tag": "0073_card_generation_units_planned_kind_check",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1789362200000,
+      "tag": "0074_learning_sessions_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1789448600000,
+      "tag": "0075_learning_sessions_rls_matrix",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1789535000000,
+      "tag": "0076_companion_audit_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1789621400000,
+      "tag": "0077_learning_unit_exposure",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1789707800000,
+      "tag": "0078_learning_outbox_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1789794200000,
+      "tag": "0079_learning_sessions_keypoint_fk",
+      "breakpoints": true
     }
   ]
 }

@@ -22,8 +22,9 @@ import { AIPrivacySettings } from "@/components/settings/AIPrivacySettings";
 import { InviteMemberSettings } from "@/components/settings/InviteMemberSettings";
 import { WorkspaceManagement } from "@/components/settings/WorkspaceManagement";
 import { AvatarUploader } from "@/components/account/AvatarUploader";
+import { CompanionSettings } from "@/components/learning-companion/CompanionSettings";
 
-type SettingsSectionId = "account" | "workspaces" | "invites" | "model" | "export" | "import" | "search";
+type SettingsSectionId = "account" | "workspaces" | "invites" | "model" | "export" | "import" | "search" | "companion";
 type SettingsIcon = ComponentType<SVGProps<SVGSVGElement>>;
 type ReindexResult = {
   deleted: number;
@@ -46,6 +47,7 @@ const ALL_SETTINGS_SECTIONS: Array<{
   { id: "export", label: "数据导出", caption: "保存完整副本", group: "数据与维护", icon: Icon.Download },
   { id: "import", label: "内容导入", caption: "迁移 Markdown", group: "数据与维护", icon: Icon.Inbox },
   { id: "search", label: "搜索维护", caption: "检测与重建索引", group: "数据与维护", icon: Icon.Search },
+  { id: "companion", label: "伴星", caption: "存在感与首次引导", group: "AI 与学习", icon: Icon.Sparkle },
 ];
 
 const SETTINGS_GROUPS = ["账户与空间", "AI 与学习", "数据与维护"] as const;
@@ -906,6 +908,26 @@ export default function SettingsPage() {
                   )}
                 </div>
               )}
+            </section>
+
+            {/* 伴星设置区（§5.4/§5.5/§7.1）：首次引导 + 存在感档位说明 */}
+            <section
+              className="settings-section"
+              aria-labelledby="settings-tab-companion"
+              hidden={activeSection !== "companion"}
+            >
+              <SettingsPanelHeading
+                title="伴星"
+                description="学习伴侣的存在感、首次引导与相处方式。"
+                icon={Icon.Sparkle}
+              />
+              <CompanionSettings
+                onboardingConsumed={false}
+                onStartOnboarding={() => console.info("[companion] onboarding start")}
+                onSkipOnboarding={() => console.info("[companion] onboarding skip")}
+                onAdjustMode={() => setActiveSection("companion")}
+                onReplayOnboarding={() => console.info("[companion] onboarding replay")}
+              />
             </section>
           </div>
         </div>

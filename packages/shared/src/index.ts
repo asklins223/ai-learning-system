@@ -20,3 +20,18 @@ export * from "./provider-capabilities.ts";
 export * from "./provider-registry.ts";
 export * from "./task-router.ts";
 export * from "./platform-config.ts";
+export * from "./companion-shell-contracts.ts";
+export * from "./auth-surface-manifest.ts";
+export * from "./published-learning-asset-contract.ts";
+export * from "./learning-session-contracts.ts";
+export * from "./voice-artifact-contracts.ts";
+export * from "./learning-trust-contracts.ts";
+export * from "./content-hash.ts";
+export * from "./scene-contracts.ts";
+export {
+  type A11yEquivalenceKind as SilentProofA11yEquivalenceKind,
+  type StructuredProofEligibilityReport,
+  type SilentProofProfile,
+  type ProfileFamily,
+} from "./silent-proof-profile-contracts.ts";
+export * from "./capability-bundle.ts";
