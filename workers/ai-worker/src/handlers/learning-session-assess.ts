@@ -54,6 +54,8 @@ export async function runLearningSessionAssess(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ artifactId, workspaceId: ctx.workspaceId }),
+    // should-fix #1（review）：接 abort signal——超时后 job 重试不重复触发上游评测副作用
+    signal: ctx.signal,
   });
   if (!res.ok) {
     throw new Error(`learning_session_assess 上游失败 HTTP ${res.status}`);

@@ -34,6 +34,8 @@ export const JOB_TYPES = [
   "evaluate_validation",
   "parse_source",
   "generate_validation_question",
+  // 救火 4b：Learning Session 评测（review should-fix #2——指标 allowlist 补新类型）
+  "learning_session_assess",
 ] as const;
 
 export const JOB_STATUSES = ["pending", "running", "succeeded", "failed", "dead"] as const;

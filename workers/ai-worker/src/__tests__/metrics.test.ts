@@ -41,8 +41,9 @@ import {
 // ─── allowlist 完整性 ──────────────────────────────────────────────────
 
 test("JOB_TYPES 包含全部 Worker handler 类型", () => {
-  assert.equal(JOB_TYPES.length, 5);
+  assert.equal(JOB_TYPES.length, 6);
   assert.ok(JOB_TYPES.includes("execute_card_agent_turn"));
+  assert.ok(JOB_TYPES.includes("learning_session_assess"));
   assert.ok(JOB_TYPES.includes("align_evidence"));
   assert.ok(JOB_TYPES.includes("evaluate_validation"));
   assert.ok(JOB_TYPES.includes("parse_source"));
