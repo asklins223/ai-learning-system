@@ -175,7 +175,8 @@ export interface SwitchModalityResult {
 
 // ─── 收口 fetch 实现（复用 lib/api.ts 的鉴权/CSRF/错误体系）────────────────
 
-const VOICE_BASE_PATH = "/learning-sessions/voice";
+// 救火 6：与真实 API 路由对齐（voice-routes.ts：POST /voice/tts、/voice/transcribe）
+const VOICE_BASE_PATH = "/voice";
 
 type VoiceActionBody =
   | TranscribeBody

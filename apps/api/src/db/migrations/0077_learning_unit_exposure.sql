@@ -125,15 +125,17 @@ ALTER TABLE public.learning_exposure_dependency_ledger ENABLE ROW LEVEL SECURITY
 ALTER TABLE public.learning_exposure_dependency_ledger FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS learning_exposure_dependency_ledger_workspace_user_isolation
   ON public.learning_exposure_dependency_ledger;
-CREATE POLICY learning_exposure_dependency_ledger_workspace_user_isolation
+DROP POLICY IF EXISTS learning_exposure_dependency_ledger_workspace_isolation
+  ON public.learning_exposure_dependency_ledger;
+-- 救火 2（审计迁移阻塞修复）：ledger 表无 user_id 列（workspace 级共享边），
+-- policy 改为 workspace_id 单条件（§13.3 workspace-scoped 语义）。
+CREATE POLICY learning_exposure_dependency_ledger_workspace_isolation
   ON public.learning_exposure_dependency_ledger FOR ALL
   USING (
     workspace_id = NULLIF(current_setting('app.workspace_id', true), '')::uuid
-    AND user_id = NULLIF(current_setting('app.user_id', true), '')::uuid
   )
   WITH CHECK (
     workspace_id = NULLIF(current_setting('app.workspace_id', true), '')::uuid
-    AND user_id = NULLIF(current_setting('app.user_id', true), '')::uuid
   );
 
 --> statement-breakpoint

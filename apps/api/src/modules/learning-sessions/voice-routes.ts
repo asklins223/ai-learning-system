@@ -20,6 +20,7 @@ import { parseBody } from "../../lib/validate.ts";
 import { requireSession } from "../identity/middleware.ts";
 import { assertSafeTtsInput, DEFAULT_VOICE_PROFILE } from "./voice-service.ts";
 import { edgeTtsSynthesize, EdgeTtsError } from "./voice-providers/edge-tts.ts";
+import { siliconFlowTranscribe, SiliconFlowAsrError } from "./voice-providers/siliconflow-asr.ts";
 
 const ttsBodySchema = z.object({
   /** 净化题面纯文本（服务端再校验一次 SSML/URL/脚本） */
@@ -51,11 +52,41 @@ export async function voiceRoutes(app: FastifyInstance) {
     }
   });
 
-  // POST /voice/transcribe：ASR（后续接线点——multipart 上传管线 + SiliconFlow）。
-  app.post("/voice/transcribe", { preHandler: [requireSession] }, async (_req, reply) => {
-    return reply.code(501).send({
-      error: "not_implemented_yet",
-      message: "ASR 上传端点接线中：需要 transient 音频存储 + SiliconFlow 调用（救火 6 后续）",
-    });
+  // POST /voice/transcribe：ASR（救火 6b——multipart 音频上传 → SiliconFlow 识别）。
+  // 请求：multipart/form-data，字段 file=<音频>（mp3/wav/m4a；SenseVoice 支持）。
+  // 响应：{ text, asrProvider, asrModel }（逐字 transcript；ASR 失败 → 4xx/5xx fail closed）。
+  app.post("/voice/transcribe", { preHandler: [requireSession] }, async (req, reply) => {
+    const part = await req.file();
+    if (part === undefined) {
+      return reply.code(400).send({ error: "MISSING_AUDIO_FILE", message: "缺少 file 字段（音频）" });
+    }
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of part.file) {
+      chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    }
+    const audio = Buffer.concat(chunks);
+    if (audio.length === 0) {
+      return reply.code(400).send({ error: "EMPTY_AUDIO", message: "音频内容为空（fail closed）" });
+    }
+    // 音频大小上限 25MB（SenseVoice 常见输入）
+    if (audio.length > 25 * 1024 * 1024) {
+      return reply.code(413).send({ error: "AUDIO_TOO_LARGE", message: "音频超过 25MB 上限" });
+    }
+    const filename = part.filename || "audio-upload.mp3";
+    try {
+      const result = await siliconFlowTranscribe(new Uint8Array(audio), filename, {
+        apiKey: process.env.SILICONFLOW_API_KEY,
+      });
+      return reply.send({
+        text: result.text,
+        asrProvider: "siliconflow",
+        asrModel: process.env.VOICE_ASR_MODEL ?? "FunAudioLLM/SenseVoiceSmall",
+      });
+    } catch (err) {
+      if (err instanceof SiliconFlowAsrError) {
+        return reply.code(502).send({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
   });
 }
