@@ -13,6 +13,7 @@ import * as schema from "./schema/index.ts";
 import { runAlignEvidence, runEvaluateValidation, type JobPayload } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runGenerateValidationQuestion } from "./handlers/generate-validation-question.ts";
+import { runLearningSessionAssess } from "./handlers/learning-session-assess.ts";
 import { runEvaluateRubric } from "./handlers/evaluate-rubric.ts";
 import { runCardSupervisorAgent } from "./handlers/card-supervisor-agent.ts";
 import { reconcileSupervisorAgentRuns } from "./agent/reconciler.ts";
@@ -65,6 +66,8 @@ const HANDLERS = {
   evaluate_validation: dispatchEvaluateValidation,
   parse_source: runParseSource,
   generate_validation_question: runGenerateValidationQuestion,
+  // 救火 4b：Learning Session 评测（接线点——经 API 编排独立评测）
+  learning_session_assess: runLearningSessionAssess,
 } as const;
 
 const POLL_MS = 500;
