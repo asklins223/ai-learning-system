@@ -60,14 +60,20 @@ const VOICE_ERROR_FRIENDLY: Readonly<Record<string, string>> = {
   FROZEN_PROBE_MISMATCH: "题目已失效或状态已变化，请刷新后重试。",
   ARTIFACT_LOCKED: "该回答已锁定，无法重复操作。",
   STALE_REVISION: "页面已过期，请刷新后重试。",
-  ASR_LOW_CONFIDENCE: "语音识别置信度不足，请重录或改用文字回答。",
   VOICE_CONFIRM_MISMATCH: "确认文本与转写不一致，请重录或改用文字回答。",
-  NOT_ALLOWED: "麦克风权限被拒绝，已切换到文字输入。",
 };
 
+/**
+ * 错误消息归一化（security_review MEDIUM 修复）：不透出宿主回调错误原文
+ * （服务端错误可能含内部细节）。匹配错误码 `err.code`（ApiError 语义），
+ * 兼容 `err.name` 兜底；命中白名单 → 友好文案，未知一律通用。
+ */
 export function friendlyVoiceError(err: unknown): string {
-  if (err instanceof Error && err.name in VOICE_ERROR_FRIENDLY) {
-    return VOICE_ERROR_FRIENDLY[err.name];
+  const code =
+    (err as { code?: string } | null)?.code
+    ?? (err instanceof Error ? err.name : undefined);
+  if (code !== undefined && code in VOICE_ERROR_FRIENDLY) {
+    return VOICE_ERROR_FRIENDLY[code];
   }
   return "操作失败，请重试或改用文字回答。";
 }
@@ -219,9 +225,8 @@ export function VoiceInputPanel({
         setTranscript(outcome.draft.confirmedTranscript);
         setPhase("awaiting_confirmation");
       } else {
-        setError(
-          `未能可靠识别这段语音（${outcome.reason || "关键术语低置信"}）。可重新录音，或改用文字回答。`,
-        );
+        // 不透出服务端构造的 outcome.reason（可能含置信度数值/segment 内部细节）。
+        setError("未能可靠识别这段语音。可重新录音，或改用文字回答。");
         setPhase("idle");
       }
     })();

@@ -79,8 +79,11 @@ const TEXT_ERROR_FRIENDLY: Readonly<Record<string, string>> = {
 };
 
 export function friendlyTextError(err: unknown): string {
-  if (err instanceof Error && err.name in TEXT_ERROR_FRIENDLY) {
-    return TEXT_ERROR_FRIENDLY[err.name];
+  const code =
+    (err as { code?: string } | null)?.code
+    ?? (err instanceof Error ? err.name : undefined);
+  if (code !== undefined && code in TEXT_ERROR_FRIENDLY) {
+    return TEXT_ERROR_FRIENDLY[code];
   }
   return "提交失败，请重试。";
 }
