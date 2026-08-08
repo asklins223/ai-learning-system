@@ -56,7 +56,8 @@ def _list_voices_cached():
     now = time.time()
     if _models_cache["data"] is not None and now - _models_cache["ts"] < _MODELS_CACHE_TTL_S:
         return _models_cache["data"]
-    voices = edge_tts.list_voices()
+    # edge-tts 6.x 的 list_voices() 是 async（review should-fix 修复）
+    voices = asyncio.run(edge_tts.list_voices())
     data = voices if isinstance(voices, list) else []
     _models_cache["ts"] = now
     _models_cache["data"] = data

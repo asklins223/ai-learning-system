@@ -10,8 +10,6 @@ import {
 import {
   createAsrProvider,
   createTtsProvider,
-  resolveVoiceProviderEnv,
-  type TtsAudioSink,
 } from "./index.js";
 
 // ─── mock fetch 工具 ─────────────────────────────────────────────────────
@@ -159,30 +157,50 @@ test("openAiCompatible：缺 baseUrl → fail closed", async () => {
 
 // ─── 工厂（适配为 voice-service 接口） ───────────────────────────────────
 
-test("createAsrProvider：siliconflow 默认 → 解析 audio 并产出 AsrTranscriptionResult", async () => {
-  const asr = createAsrProvider(
-    { asrProvider: "siliconflow", asrApiKey: "sk" },
-    async () => ({ buffer: MP3_BYTES, filename: "rec.mp3" }),
+test("createTtsProvider：edge_tts 默认 → 真调用，voice 用 env.ttsVoice 而非 voiceProfile", async () => {
+  let captured: { url: string; body?: string } | undefined;
+  const fetchImpl = mockFetch(async (url, init) => {
+    captured = { url, body: typeof init.body === "string" ? init.body : undefined };
+    return bytesResponse(MP3_BYTES);
+  });
+  const sinkCalls: Array<{ audio: Uint8Array; contentType: string }> = [];
+  const tts = createTtsProvider(
+    { ttsProvider: "edge_tts", edgeTtsBaseUrl: "http://edge-tts:8080", ttsVoice: "zh-CN-YunxiNeural", fetchImpl },
+    async (audio, contentType, _request) => {
+      sinkCalls.push({ audio, contentType });
+      return { audioRef: "ref-1", audioHash: "hash-1", expiresAt: "2026-08-09T00:00:00Z" };
+    },
   );
-  // 内部 siliconFlowTranscribe 用 globalThis.fetch——不可用于单测；改用注入验证工厂选择逻辑。
-  const env = resolveVoiceProviderEnv({ VOICE_ASR_PROVIDER: "siliconflow", SILICONFLOW_API_KEY: "sk" } as NodeJS.ProcessEnv);
-  assert.equal(env.asrProvider, "siliconflow");
-  assert.equal(env.asrApiKey, "sk");
-  void asr;
+  const result = await tts.synthesize({
+    text: "你好",
+    voiceProfile: "companion-default-v1", // 内部 profile id，不应直传为 voice
+    language: "zh-CN",
+    requestId: "req-1",
+  });
+  assert.equal(result.audioRef, "ref-1");
+  assert.equal(captured?.url, "http://edge-tts:8080/v1/audio/speech");
+  assert.ok(captured?.body?.includes('"voice":"zh-CN-YunxiNeural"'), "voice 取 env.ttsVoice 而非 voiceProfile");
+  assert.equal(captured?.body?.includes("companion-default-v1"), false, "voiceProfile 不得直传");
+  assert.equal(sinkCalls.length, 1);
 });
 
-test("createTtsProvider：edge_tts 默认 + sink 落盘 → TtsSynthesisResult", async () => {
-  const tts: ReturnType<typeof createTtsProvider> = createTtsProvider(
-    { ttsProvider: "edge_tts", edgeTtsBaseUrl: "http://edge-tts:8080" },
-    (async (_audio: Uint8Array, _contentType: string, _request: { text: string; voiceProfile: string; language: string; requestId: string }) => ({
-      audioRef: "ref-1",
-      audioHash: "hash-1",
-      expiresAt: "2026-08-09T00:00:00Z",
-    })) as TtsAudioSink,
+test("createAsrProvider：siliconflow 默认 → 真调用解析 audio 并产出结果", async () => {
+  const fetchImpl = mockFetch(async (url, init) => {
+    assert.equal(url, "https://api.siliconflow.cn/v1/audio/transcriptions");
+    assert.match((init.headers as Record<string, string>)["Authorization"] ?? "", /^Bearer sk-/);
+    return jsonResponse({ text: "测试语音。" });
+  });
+  const asr = createAsrProvider(
+    { asrProvider: "siliconflow", asrApiKey: "sk-test", fetchImpl },
+    async () => ({ buffer: MP3_BYTES, filename: "rec.mp3" }),
   );
-  // 内部 edgeTtsSynthesize 用 globalThis.fetch——单测不真实网络；验证工厂 env 解析。
-  const env = resolveVoiceProviderEnv({ VOICE_TTS_PROVIDER: "edge_tts", EDGE_TTS_BASE_URL: "http://edge-tts:8080" } as NodeJS.ProcessEnv);
-  assert.equal(env.ttsProvider, "edge_tts");
-  assert.equal(env.edgeTtsBaseUrl, "http://edge-tts:8080");
-  void tts;
+  const result = await asr.transcribe({
+    audioRef: "ref-1",
+    audioHash: "hash-1",
+    language: "zh-CN",
+    requestId: "req-1",
+  });
+  assert.equal(result.transcript, "测试语音。");
+  assert.equal(result.asrProvider, "siliconflow");
+  assert.equal(result.asrModel, "FunAudioLLM/SenseVoiceSmall");
 });

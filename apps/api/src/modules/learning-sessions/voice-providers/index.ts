@@ -46,6 +46,8 @@ export interface VoiceProviderEnv {
   ttsVoice?: string;
   ttsApiKey?: string;
   edgeTtsBaseUrl?: string;
+  /** 测试注入 fetch（缺省 globalThis.fetch） */
+  fetchImpl?: typeof fetch;
 }
 
 /** 从环境变量读取 provider 配置（测试可注入 env 覆盖） */
@@ -89,6 +91,7 @@ export function createAsrProvider(
           baseUrl: env.asrBaseUrl,
           apiKey: env.asrApiKey,
           model: env.asrModel ?? "FunAudioLLM/SenseVoiceSmall",
+          fetchImpl: env.fetchImpl,
         });
         return {
           transcript: result.text,
@@ -104,6 +107,7 @@ export function createAsrProvider(
         apiKey: env.asrApiKey,
         model: env.asrModel,
         baseUrl: env.asrBaseUrl,
+        fetchImpl: env.fetchImpl,
       });
       return {
         transcript: result.text,
@@ -135,20 +139,25 @@ export function createTtsProvider(
       }
       let audio: Uint8Array;
       let contentType = "audio/mpeg";
+      // voiceProfile 是内部 profile id（companion-default-v1，仅上层 allowlist 校验），
+      // 不能直传为 TTS voice id（review 阻塞 bug 修复）：provider voice 由
+      // env.ttsVoice 或默认 zh-CN-XiaoxiaoNeural 决定。
+      const ttsVoice = env.ttsVoice || "zh-CN-XiaoxiaoNeural";
       if (env.ttsProvider === "openai_compatible") {
         const result = await openAiCompatibleTts(request.text, {
           baseUrl: env.ttsBaseUrl,
           apiKey: env.ttsApiKey,
           model: env.ttsModel ?? "edge-tts",
-          voice: request.voiceProfile || env.ttsVoice || "zh-CN-XiaoxiaoNeural",
+          voice: ttsVoice,
+          fetchImpl: env.fetchImpl,
         });
         audio = result.audio;
         contentType = result.contentType;
       } else {
         // 默认 edge_tts（Docker 容器）
-        const result = await edgeTtsSynthesize(request.text, request.voiceProfile, {
+        const result = await edgeTtsSynthesize(request.text, ttsVoice, {
           baseUrl: env.edgeTtsBaseUrl,
-          voice: env.ttsVoice,
+          fetchImpl: env.fetchImpl,
         });
         audio = result.audio;
         contentType = result.contentType;
