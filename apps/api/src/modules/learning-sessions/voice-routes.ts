@@ -56,21 +56,44 @@ export async function voiceRoutes(app: FastifyInstance) {
   // 请求：multipart/form-data，字段 file=<音频>（mp3/wav/m4a；SenseVoice 支持）。
   // 响应：{ text, asrProvider, asrModel }（逐字 transcript；ASR 失败 → 4xx/5xx fail closed）。
   app.post("/voice/transcribe", { preHandler: [requireSession] }, async (req, reply) => {
-    const part = await req.file();
+    let part;
+    try {
+      part = await req.file();
+    } catch (err) {
+      // review should-fix：server.ts 全局 multipart fileSize=10MB——超限在
+      // req.file()/流读抛 FST_REQ_FILE_TOO_LARGE；转 413 而非 500。
+      const code = err instanceof Error ? (err as { code?: string }).code : undefined;
+      if (code === "FST_REQ_FILE_TOO_LARGE") {
+        return reply.code(413).send({ error: "AUDIO_TOO_LARGE", message: "音频超过 10MB 上限" });
+      }
+      throw err;
+    }
     if (part === undefined) {
       return reply.code(400).send({ error: "MISSING_AUDIO_FILE", message: "缺少 file 字段（音频）" });
     }
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of part.file) {
-      chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    // review nit：mimetype 校验（拒绝非音频，防伪装上传）
+    const mimetype = part.mimetype ?? "";
+    if (mimetype !== "" && !/^(audio|application\/octet-stream)/.test(mimetype)) {
+      return reply.code(415).send({ error: "UNSUPPORTED_MEDIA_TYPE", message: `不支持的内容类型 ${mimetype}` });
     }
-    const audio = Buffer.concat(chunks);
+    // review should-fix（防御性）：流读阶段超限同样抛 FST_REQ_FILE_TOO_LARGE——
+    // 整块读取纳入同一 try/catch 转 413（非 500）。
+    let audio: Buffer;
+    try {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of part.file) {
+        chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      }
+      audio = Buffer.concat(chunks);
+    } catch (err) {
+      const code = err instanceof Error ? (err as { code?: string }).code : undefined;
+      if (code === "FST_REQ_FILE_TOO_LARGE") {
+        return reply.code(413).send({ error: "AUDIO_TOO_LARGE", message: "音频超过 10MB 上限" });
+      }
+      throw err;
+    }
     if (audio.length === 0) {
       return reply.code(400).send({ error: "EMPTY_AUDIO", message: "音频内容为空（fail closed）" });
-    }
-    // 音频大小上限 25MB（SenseVoice 常见输入）
-    if (audio.length > 25 * 1024 * 1024) {
-      return reply.code(413).send({ error: "AUDIO_TOO_LARGE", message: "音频超过 25MB 上限" });
     }
     const filename = part.filename || "audio-upload.mp3";
     try {

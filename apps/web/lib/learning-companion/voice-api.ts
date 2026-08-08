@@ -6,11 +6,11 @@
  * 收口模块；组件层一律经注入回调间接使用本模块（见各组件注释），
  * 本模块自身也只被 learning-companion 组件与宿主页面调用。
  *
- * 端点路径假设（服务端路由由后续任务接管）：
- *   POST /api/learning-sessions/voice/transcribe
- *   POST /api/learning-sessions/voice/confirm
- *   POST /api/learning-sessions/voice/reRecord
- *   POST /api/learning-sessions/voice/switchModality
+ * 端点路径（救火 6：与真实 API 路由对齐 voice-routes.ts）：
+ *   POST /voice/transcribe
+ *   POST /voice/confirm
+ *   POST /voice/reRecord
+ *   POST /voice/switchModality
  *
  * 请求义务（服务端 validateRequestObligations，§13.2）：
  *   每次写请求必须携带 base revision、public scene hash、user action nonce
@@ -19,8 +19,9 @@
  *   并镜像服务端做 fail-fast 校验。
  *
  * 数据治理（§13.2）：
- *   - audioRef/audioHash 由上游 transient 上传管线提供（raw audio 短 TTL、
- *     加密、不进长期备份）；本模块不直接上传音频 blob；
+ *   - confirm/reRecord/switchModality 走 audioRef/audioHash（上游 transient 上传
+ *     管线：raw audio 短 TTL、加密、不进长期备份）；救火 6b 起 transcribe 直接
+ *     上传音频 blob（FormData → /voice/transcribe，10MB 上限）；
  *   - 内容 hash 以服务端计算为准（fail closed）；本模块的
  *     `computeTextContentHashPreview` / `computeVoiceTranscriptHashPreview`
  *     仅供 UI 展示"确定性哈希绑定"语义，不作校验依据。
@@ -120,17 +121,6 @@ export type TranscriptionOutcome =
   | { kind: "ok"; draft: VoiceDraftPayload; artifactId: string }
   | { kind: "not_assessable"; reason: string };
 
-export interface TranscribeBody {
-  /** 已有 voice draft artifact 时携带；无则服务端新建 */
-  artifactId?: string;
-  /** transient raw audio 引用（上游上传管线产出，短 TTL） */
-  audioRef: string;
-  /** 短期 audio hash（sha256:<64hex>） */
-  audioHash: string;
-  /** BCP-47 语言标签，如 en-US / zh-CN */
-  language: string;
-}
-
 export interface ConfirmTranscriptBody {
   artifactId: string;
   /** 用户确认的逐字 transcript（必须与 ASR draft 逐字一致；不一致 → VOICE_CONFIRM_MISMATCH） */
@@ -179,13 +169,14 @@ export interface SwitchModalityResult {
 const VOICE_BASE_PATH = "/voice";
 
 type VoiceActionBody =
-  | TranscribeBody
   | ConfirmTranscriptBody
   | ReRecordBody
   | SwitchModalityBody;
 
 interface VoiceRequestOptions {
   json?: VoiceActionBody;
+  /** 救火 6b：multipart FormData（transcribe 上传音频；优先级高于 json） */
+  form?: FormData;
 }
 
 async function voiceRequest<T>(
@@ -197,7 +188,16 @@ async function voiceRequest<T>(
   if (problems.length > 0) {
     throw new ApiError(400, `请求义务不完整：${problems.join("；")}`, "INVALID_OBLIGATIONS");
   }
-  const headers = new Headers({ "Content-Type": "application/json" });
+  const headers = new Headers();
+  // 救火 6b：FormData 上传时浏览器自动设 multipart boundary——不手动 Content-Type；
+  // JSON 路径设 application/json。oauth obligations 并入 JSON body。
+  let body: BodyInit;
+  if (options.form) {
+    body = options.form;
+  } else {
+    headers.set("Content-Type", "application/json");
+    body = JSON.stringify({ ...options.json, ...obligations });
+  }
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const csrf = getCsrfToken();
@@ -206,7 +206,7 @@ async function voiceRequest<T>(
     method: "POST",
     headers,
     credentials: "same-origin",
-    body: JSON.stringify({ ...options.json, ...obligations }),
+    body,
   });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
@@ -227,12 +227,18 @@ async function voiceRequest<T>(
 // ─── 语义收口（transcribe / confirm / reRecord / switchModality）───────────
 
 export const voiceApi = {
-  /** ASR 转写：audioRef/audioHash 由上游 transient 管线提供（§13.2） */
+  /**
+   * ASR 转写（救火 6b 契约对齐）：multipart FormData 直接上传音频 blob，
+   * 服务端 /voice/transcribe 收 file 字段（10MB 上限）→ SiliconFlow 识别。
+   */
   transcribe(
     obligations: VoiceObligations,
-    body: TranscribeBody,
+    body: { audio: Blob; filename?: string; language?: string },
   ): Promise<TranscriptionOutcome> {
-    return voiceRequest<TranscriptionOutcome>("transcribe", obligations, { json: body });
+    const form = new FormData();
+    form.append("file", body.audio, body.filename ?? "audio-upload.mp3");
+    if (body.language) form.append("language", body.language);
+    return voiceRequest<TranscriptionOutcome>("transcribe", obligations, { form });
   },
 
   /** 确认逐字 transcript → locked（voice canonical answer，§6.5） */

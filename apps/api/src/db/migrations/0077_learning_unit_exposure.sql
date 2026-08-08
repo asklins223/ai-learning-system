@@ -101,7 +101,7 @@ CREATE INDEX IF NOT EXISTS learning_exposure_dependency_source_idx
 --> statement-breakpoint
 
 -- ════════════════════════════════════════════════════════════════════════
--- RLS：workspace_id + user_id 双条件（0075 风格，§13.3）
+-- RLS：workspace_id 单条件（救火 2：ledger 表无 user_id 列，workspace 级共享边；§13.3）
 -- ════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE public.learning_unit_exposure ENABLE ROW LEVEL SECURITY;

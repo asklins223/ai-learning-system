@@ -32,7 +32,7 @@ test("救火 2：learning 核心表在真实 Postgres 存在（迁移已应用�
       REQUIRED_TABLES,
     );
     const missing = rows
-      .map((r: { regclass: string | null }) => r.regclass)
+      .map((r) => (r as { regclass?: string | null }).regclass ?? null)
       .filter((r: string | null) => r === null);
     assert.deepEqual(missing, [], `迁移未应用：缺表 ${REQUIRED_TABLES.filter((_, i) => rows[i]?.regclass === null).join(", ")}`);
   } finally {
@@ -40,7 +40,7 @@ test("救火 2：learning 核心表在真实 Postgres 存在（迁移已应用�
   }
 });
 
-test("救火 3：learning_response_artifacts 可写（RLS 双过滤 + 列对齐）", async (t) => {
+test("救火 3：learning_assessment_reports 列对齐（INSERT 列全覆盖）", async (t) => {
   if (!CONN) {
     t.skip("DATABASE_URL_API 未配置——跳过 DB 集成测试");
     return;
@@ -52,7 +52,9 @@ test("救火 3：learning_response_artifacts 可写（RLS 双过滤 + 列对齐�
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema='public' AND table_name='learning_assessment_reports'`,
     );
-    const cols = new Set(rows.map((r: { column_name: string }) => r.column_name));
+    const cols = new Set(
+      rows.map((r) => (r as { column_name?: string }).column_name ?? ""),
+    );
     for (const required of ["session_id", "episode_id", "workspace_id", "user_id", "critic_version", "rubric_assessments", "report_hash"]) {
       assert.ok(cols.has(required), `learning_assessment_reports 缺列 ${required}`);
     }
