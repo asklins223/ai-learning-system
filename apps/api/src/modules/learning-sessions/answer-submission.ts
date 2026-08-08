@@ -43,6 +43,14 @@ export function computeAnswerContentHash(text: string): string {
   return `sha256:${hash.digest("hex")}`;
 }
 
+/** probe 确定性 hash（与 session-service 救火 3b 派生对齐） */
+export function frozenProbeHashForKey(episodeId: string, keyPointId: string, _status: string): string {
+  const hash = createHash("sha256");
+  const update = hash.update.bind(hash);
+  update(`probe:${episodeId}:${keyPointId}`);
+  return `sha256:${hash.digest("hex")}`;
+}
+
 // ─── 输入/输出类型 ───────────────────────────────────────────────────────
 
 export type AnswerModality = "text_or_mixed" | "voice";
@@ -87,6 +95,20 @@ export interface AnswerSubmissionRepository {
     status: string;
     probeId: string | null;
   } | null>;
+  /**
+   * 确保当前 episode 存在可用的 probe 行（learning_session_probes 的
+   * FrozenProbeRef 记录；不存在则创建，返回真实 probe id）。
+   * review blocking 修复：learning_response_artifacts.probe_id 是
+   * uuid notNull + FK——必须先有 probe 行才能写 artifact。
+   */
+  ensureProbe(input: {
+    workspaceId: string;
+    userId: string;
+    sessionId: string;
+    episodeId: string;
+    keyPointId: string;
+    probeHash: string;
+  }): Promise<{ probeId: string }>;
   createArtifact(input: {
     id: string;
     workspaceId: string;
@@ -139,9 +161,16 @@ export async function submitEpisodeAnswer(
   const contentHash = computeAnswerContentHash(text);
   const artifactId = randomUUID();
   const nowIso = now.toISOString();
-  // keyPointId/probeId 优先取 episode（服务端权威），客户端传值仅作兜底
+  // keyPointId 优先取 episode（服务端权威）；probeId 经 ensureProbe 创建真实行
   const keyPointId = episode.keyPointId;
-  const probeId = episode.probeId ?? input.probeId ?? "";
+  const { probeId } = await repo.ensureProbe({
+    workspaceId: input.workspaceId,
+    userId: input.userId,
+    sessionId: input.sessionId,
+    episodeId: input.episodeId,
+    keyPointId,
+    probeHash: frozenProbeHashForKey(input.episodeId, keyPointId, episode.status),
+  });
 
   await repo.createArtifact({
     id: artifactId,
@@ -214,6 +243,26 @@ export function createPgAnswerSubmissionRepository(
         probeId: row.probeId != null ? String(row.probeId) : null,
       };
     },
+    // review blocking 修复：先建 probe 行（FK 前提），返回真实 probe id
+    async ensureProbe(input) {
+      const probeId = randomUUID();
+      await transaction.execute(
+        sql`
+          INSERT INTO learning_session_probes (
+            id, session_id, episode_id, workspace_id, user_id, sequence,
+            public_scene_contract_id, public_payload_hash, private_solution_id,
+            private_solution_hash, scene_safety_report_id, scene_safety_report_hash,
+            template_trust_ceiling, disclosure_profile_hash, status
+          ) VALUES (
+            ${probeId}, ${input.sessionId}, ${input.episodeId}, ${input.workspaceId},
+            ${input.userId}, 0, '', '', '', '', '', '',
+            'mastery_eligible', ${input.probeHash}, 'draft'
+          )
+          ON CONFLICT (id) DO NOTHING
+        `,
+      );
+      return { probeId };
+    },
     async createArtifact(input) {
       await transaction.execute(
         sql`
@@ -239,12 +288,14 @@ export function createPgAnswerSubmissionRepository(
       );
       return { id: input.id };
     },
+    // should-fix #1：锁 episode 带 status='active' 条件（防并发双提交双 artifact）
     async lockEpisode(episodeId, _now, workspaceId, userId) {
       await transaction.execute(
         sql`
           UPDATE learning_episodes
           SET status = 'answered_locked', updated_at = now()
-          WHERE id = ${episodeId} AND workspace_id = ${workspaceId} AND user_id = ${userId}
+          WHERE id = ${episodeId} AND workspace_id = ${workspaceId}
+            AND user_id = ${userId} AND status = 'active'
         `,
       );
     },

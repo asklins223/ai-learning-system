@@ -21,6 +21,9 @@ function makeRepo(overrides: Partial<AnswerSubmissionRepository> = {}) {
     async findEpisode() {
       return { id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "active", probeId: PROBE };
     },
+    async ensureProbe() {
+      return { probeId: PROBE };
+    },
     async createArtifact(input) {
       artifacts.push({ id: input.id, contentHash: input.contentHash, modality: input.modality });
       return { id: input.id };
@@ -46,12 +49,13 @@ function baseInput() {
   };
 }
 
-test("submitEpisodeAnswer：text_or_mixed 提交 → artifact locked + episode 锁定", async () => {
+test("submitEpisodeAnswer：text_or_mixed 提交 → artifact locked + episode 锁定 + probe 建立", async () => {
   const { repo, artifacts, locks } = makeRepo();
   const result = await submitEpisodeAnswer(baseInput(), repo);
   assert.equal(result.artifact.status, "locked");
   assert.equal(result.episodeStatus, "answered_locked");
   assert.equal(result.artifact.modality, "text_or_mixed");
+  assert.equal(result.artifact.probeId, PROBE, "probeId 来自 ensureProbe（非空，FK 前提）");
   assert.ok(result.artifact.contentHash.startsWith("sha256:"), "contentHash 带 sha256 前缀");
   assert.equal(artifacts.length, 1);
   assert.deepEqual(locks, [EPISODE]);

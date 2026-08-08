@@ -1443,7 +1443,10 @@ export async function continueSession(
   }
   const formalPlan: EpisodeFormalPlan = {
     kind: resolveFormalPlanKind(candidate.schedulingDecision.authorizedAction),
-    requiredProbeIds: [],
+    // 救火 3b（should-fix #2）：与 createSession 同语义——首个 probe 为当前回答目标
+    requiredProbeIds: [
+      sha256Hex(`probe:${candidate.keyPointId}:0:${candidate.contentExposureKey}`),
+    ],
   };
   const nextEpoch = episodes.reduce((max, e) => Math.max(max, e.episodeEpoch), 0) + 1;
   const planHash = computePlanHash({
