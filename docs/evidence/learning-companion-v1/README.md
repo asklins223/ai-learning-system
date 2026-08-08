@@ -21,7 +21,7 @@
 | apps/api | 2942 | 全绿 |
 | packages/shared | 374 | 全绿 |
 | packages/db | 5 | 全绿 |
-| apps/web | 750 | 全绿 |
+| apps/web | 755 | 全绿 |
 
 各阶段（02-10，01 为合同冻结）`security_review` 结论：**修复后 pass**（详见 `release-manifest.json`）。
 

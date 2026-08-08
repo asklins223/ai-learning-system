@@ -56,5 +56,5 @@
 
 ## 10. 判定层证据
 
-- 本阶段实现/测试随各模块落地（`apps/api/src/db/migrations/`、`apps/api/src/modules/companion-shell/` 等），四包测试全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 750）。
+- 本阶段实现/测试随各模块落地（`apps/api/src/db/migrations/`、`apps/api/src/modules/companion-shell/` 等），四包测试全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 755）。
 - 各决策记录（02-1~02-10）状态均为 Frozen（已冻结）。

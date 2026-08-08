@@ -12,7 +12,7 @@
 
 1. **证据原则**（与 `docs/evidence/learning-companion-v1/README.md` 一致）：代码存在不能替代真实 Gate——证据引用已冻结（Frozen）或已确认（Confirmed）的决策记录（`01-1`~`10-8`）与对应判定层测试；Mock 通过不能替代真实 Gate——真实 Provider 样本类 Gate 以对应决策记录与 `release-manifest.json` 标注为准，不虚构样本数据；计划文字不能替代真实 Gate——不引用待办、Should 项或未执行条目。
 2. **证据组织说明**：阶段 02 的 `02-1`（数据 schema 与迁移）、`02-3`（onboarding 状态机与跨设备同步）与阶段 03 的 `03-1`（Agent Runtime 复用与隔离）无独立决策记录文件，其冻结内容作为任务条目内嵌于阶段汇总文件 `02-w1-data-rls-privacy-events.md`（行 18/51）与 `03-w2-session-supervisor-runtime.md`（行 18），本核验按实际存在引用，不视为 GAP。
-3. **判定层事实**：四包测试全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 750），各阶段（02-10，阶段 01 为合同冻结）`security_review` 结论均为「修复后 pass」——测试计数与 security_review 明细见 `docs/evidence/learning-companion-v1/README.md` 与 `release-manifest.json`。
+3. **判定层事实**：四包测试全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 755），各阶段（02-10，阶段 01 为合同冻结）`security_review` 结论均为「修复后 pass」——测试计数与 security_review 明细见 `docs/evidence/learning-companion-v1/README.md` 与 `release-manifest.json`。
 4. **结论**：§20 全部 36 项核验通过（36/36，全部 `verified`），无 GAP 项；任何一项不满足则推迟发布，本核验未触发降阈。
 
 ---

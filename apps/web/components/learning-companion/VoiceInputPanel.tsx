@@ -158,7 +158,8 @@ export function VoiceInputPanel({
   const [micIssue, setMicIssue] = useState<MicIssue>(null);
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
-  const [replaying, setReplaying] = useState(false);  const [confirming, setConfirming] = useState(false);
+  const [replaying, setReplaying] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [draft, setDraft] = useState<VoiceDraftPayload | null>(null);
   const [artifactId, setArtifactId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState("");

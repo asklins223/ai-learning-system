@@ -36,6 +36,6 @@
 
 ## 4. 判定层证据
 
-- 兼容矩阵各组合、redaction 级联、uniqueness 键重建、竞态判定均为纯函数 + 单测双断言（干净样本放行 / 违规样本必拒），随各阶段四包测试全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 750）。
+- 兼容矩阵各组合、redaction 级联、uniqueness 键重建、竞态判定均为纯函数 + 单测双断言（干净样本放行 / 违规样本必拒），随各阶段四包测试全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 755）。
 - legacy reader matrix 演练于 2026-08-08 执行，PASS（`rollback-drill.test.ts` 49 例全绿），详细记录见 `rollback-drill.md`。
 - 决策记录 02-7、06-2、06-4、10-5、10-8 状态均为 Frozen（已冻结）。

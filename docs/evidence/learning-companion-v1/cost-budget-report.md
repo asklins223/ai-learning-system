@@ -58,5 +58,5 @@
 ## 6. 判定层证据
 
 - 成本 Gate 全部为纯函数判定：阈值/上限为 W0 冻结常量（只改常量、不改变判定逻辑），同一输入恒得同一输出；真实成本样本（真实 Provider token usage、真实 ASR 秒数等）由 09-6 真实环境 RC 与 10-7 最终 soak 的采集管线注入后复核，「待 RC 执行环境采集后回填」状态在 `release-manifest.json` 如实标注，不虚构样本数据。
-- 验证记录：`npm run typecheck --prefix apps/api` 通过；metrics-schema / privacy-review / real-env-rc（42 例）/ final-soak（22 例）单测全绿（随四包全量：apps/api 2942、packages/shared 374、packages/db 5、apps/web 750）。
+- 验证记录：`npm run typecheck --prefix apps/api` 通过；metrics-schema / privacy-review / real-env-rc（42 例）/ final-soak（22 例）单测全绿（随四包全量：apps/api 2942、packages/shared 374、packages/db 5、apps/web 755）。
 - 决策记录 01-5、02-4、03-6、08-4、09-6、10-7 状态均为 Frozen（已冻结）。
