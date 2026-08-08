@@ -54,7 +54,8 @@ export async function runLearningSessionAssess(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ artifactId, workspaceId: ctx.workspaceId }),
-    // should-fix #1（review）：接 abort signal——超时后 job 重试不重复触发上游评测副作用
+    // review nit：超时中止 in-flight 请求——避免迟到 handler 在 lease 释放后继续执行
+    //（防重复提交副作用由 processJob 的 leaseToken 条件 UPDATE 兜底）
     signal: ctx.signal,
   });
   if (!res.ok) {
