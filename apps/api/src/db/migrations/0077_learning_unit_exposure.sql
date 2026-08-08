@@ -15,9 +15,10 @@
 --    使 source → affected content exposure key 之间建立 dependency 边，同一条边
 --    幂等（source+affected+sharedEvidenceRef 唯一），传播按确定性顺序执行。
 --
--- RLS（0075/0076 风格）：两表均属 workspace-scoped learning 过程表，使用
--- workspace_id + user_id 双条件 policy；任一 context 缺失（NULLIF(...) IS NULL）
--- 即 fail closed。
+-- RLS（0075/0076 风格）：learning_unit_exposure 属 workspace-scoped 用户过程表，
+-- 使用 workspace_id + user_id 双条件 policy；learning_exposure_dependency_ledger 为
+-- workspace 级共享边（无 user_id 列，救火 2 修复），使用 workspace_id 单条件。
+-- 任一 context 缺失（NULLIF(...) IS NULL）即 fail closed。
 -- GRANT：ailearn_api 两表读写；ailearn_worker 仅学习过程表最小权限
 -- （SELECT/INSERT/UPDATE，无 DELETE，删除语义由 redaction/status 表达）。
 --

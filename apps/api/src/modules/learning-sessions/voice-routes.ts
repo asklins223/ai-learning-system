@@ -64,17 +64,28 @@ export async function voiceRoutes(app: FastifyInstance) {
       // req.file()/流读抛 FST_REQ_FILE_TOO_LARGE；转 413 而非 500。
       const code = err instanceof Error ? (err as { code?: string }).code : undefined;
       if (code === "FST_REQ_FILE_TOO_LARGE") {
-        return reply.code(413).send({ error: "AUDIO_TOO_LARGE", message: "音频超过 10MB 上限" });
+        return reply.code(413).send({ error: "AUDIO_TOO_LARGE", code: "AUDIO_TOO_LARGE", message: "音频超过 10MB 上限" });
       }
       throw err;
     }
     if (part === undefined) {
-      return reply.code(400).send({ error: "MISSING_AUDIO_FILE", message: "缺少 file 字段（音频）" });
+      return reply.code(400).send({ error: "MISSING_AUDIO_FILE", code: "MISSING_AUDIO_FILE", message: "缺少 file 字段（音频）" });
+    }
+    // review nit：真正消费 language（multipart fields——req.body 在未开
+    // attachFieldsToBody 时恒空；part.fields 含非 file 字段；缺省 zh-CN）
+    let language = "zh-CN";
+    try {
+      const fields = part.fields as Record<string, unknown> | undefined;
+      if (fields && typeof fields.language === "string") {
+        language = fields.language;
+      }
+    } catch {
+      // 字段解析异常——用缺省 language
     }
     // review nit：mimetype 校验（拒绝非音频，防伪装上传）
     const mimetype = part.mimetype ?? "";
     if (mimetype !== "" && !/^(audio|application\/octet-stream)/.test(mimetype)) {
-      return reply.code(415).send({ error: "UNSUPPORTED_MEDIA_TYPE", message: `不支持的内容类型 ${mimetype}` });
+      return reply.code(415).send({ error: "UNSUPPORTED_MEDIA_TYPE", code: "UNSUPPORTED_MEDIA_TYPE", message: `不支持的内容类型 ${mimetype}` });
     }
     // review should-fix（防御性）：流读阶段超限同样抛 FST_REQ_FILE_TOO_LARGE——
     // 整块读取纳入同一 try/catch 转 413（非 500）。
@@ -88,14 +99,16 @@ export async function voiceRoutes(app: FastifyInstance) {
     } catch (err) {
       const code = err instanceof Error ? (err as { code?: string }).code : undefined;
       if (code === "FST_REQ_FILE_TOO_LARGE") {
-        return reply.code(413).send({ error: "AUDIO_TOO_LARGE", message: "音频超过 10MB 上限" });
+        return reply.code(413).send({ error: "AUDIO_TOO_LARGE", code: "AUDIO_TOO_LARGE", message: "音频超过 10MB 上限" });
       }
       throw err;
     }
     if (audio.length === 0) {
-      return reply.code(400).send({ error: "EMPTY_AUDIO", message: "音频内容为空（fail closed）" });
+      return reply.code(400).send({ error: "EMPTY_AUDIO", code: "EMPTY_AUDIO", message: "音频内容为空（fail closed）" });
     }
     const filename = part.filename || "audio-upload.mp3";
+    // language 为日志元数据（SenseVoice 自动检测语言，无需传给 provider）
+    void language;
     try {
       const result = await siliconFlowTranscribe(new Uint8Array(audio), filename, {
         apiKey: process.env.SILICONFLOW_API_KEY,
