@@ -80,6 +80,10 @@ export function ValidationVoiceEntry({
 
   return (
     <div className="validation-voice-entry" data-ui="validation-voice-entry">
+      <p className="validation-voice-entry__pending-note" role="note">
+        ⚠ 伴星输入面板（语音/文字/结构式证明）当前为<b>接线演示</b>：提交不会写入学习记录，
+        请使用下方原验证区的「提交答案」完成正式验证（§6.5 服务端接入后此提示移除）。
+      </p>
       <ModalSwitcher
         current={modality}
         structuredProofEligible={structuredProofEligible}

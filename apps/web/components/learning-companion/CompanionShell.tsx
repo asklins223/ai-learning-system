@@ -25,7 +25,7 @@ import {
 import { QuietAnchor } from "./QuietAnchor";
 import { CompanionSidePanel } from "./CompanionSidePanel";
 import { CompanionAvatar } from "./CompanionAvatar";
-import type { CompanionVisualStateV1 } from "@/lib/learning-companion/companion-visual-state";
+import type { CompanionVisualStateV1, CompanionSystemEvent } from "@/lib/learning-companion/companion-visual-state";
 
 export interface CompanionShellProps {
   /** 存在感/控制状态快照；缺省为默认（quiet）。 */
@@ -33,7 +33,7 @@ export interface CompanionShellProps {
   /** 当前角色视觉状态（由上层按真实系统事件权威映射驱动）。 */
   visualState?: CompanionVisualStateV1;
   /** 触发该视觉状态的真实系统事件（防御性：动画只表达已发生状态）。 */
-  systemEvent?: string;
+  systemEvent?: CompanionSystemEvent;
   /** prefers-reduced-motion: reduce 或 animation_off。 */
   prefersReducedMotion?: boolean;
   /** 面板内容（如当前上下文/建议原因/动作；经父组件注入）。 */
@@ -44,10 +44,13 @@ export interface CompanionShellProps {
   anchorClassName?: string;
 }
 
+/** 默认系统事件（dormant 状态不依赖事件触发）。 */
+const DEFAULT_COMPANION_SYSTEM_EVENT: CompanionSystemEvent = { kind: "session_idle" };
+
 export function CompanionShell({
   controlSnapshot = DEFAULT_COMPANION_CONTROL_SNAPSHOT,
   visualState = "dormant",
-  systemEvent,
+  systemEvent = DEFAULT_COMPANION_SYSTEM_EVENT,
   prefersReducedMotion = false,
   panelContent,
   panelTitle = "伴星",
@@ -74,7 +77,7 @@ export function CompanionShell({
       />
       <CompanionAvatar
         state={visualState}
-        systemEvent={systemEvent as never}
+        systemEvent={systemEvent}
         prefersReducedMotion={prefersReducedMotion}
         quiet={!controlSnapshot.temporaryHidden && !controlSnapshot.globalOff}
         hidden={false}

@@ -96,6 +96,8 @@ function SettingsPanelHeading({
 
 export default function SettingsPage() {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("account");
+  // 伴星设置区状态（§7.1）：引导完成/跳过状态（桩态，宿主接 02-3 CAS 后持久化）。
+  const [onboardingConsumed, setOnboardingConsumed] = useState(false);
   const navRef = useRef<HTMLElement>(null);
 
   const [accountLoading, setAccountLoading] = useState(true);
@@ -922,11 +924,25 @@ export default function SettingsPage() {
                 icon={Icon.Sparkle}
               />
               <CompanionSettings
-                onboardingConsumed={false}
-                onStartOnboarding={() => console.info("[companion] onboarding start")}
-                onSkipOnboarding={() => console.info("[companion] onboarding skip")}
-                onAdjustMode={() => setActiveSection("companion")}
-                onReplayOnboarding={() => console.info("[companion] onboarding replay")}
+                onboardingConsumed={onboardingConsumed}
+                onStartOnboarding={() => {
+                  // 桩态：宿主接入 02-3 CAS start 后移除提示。
+                  console.info("[companion] onboarding start (integration pending)");
+                  setOnboardingConsumed(false);
+                }}
+                onSkipOnboarding={() => {
+                  // 桩态：宿主接入 02-3 CAS skip 后移除提示。
+                  console.info("[companion] onboarding skip (integration pending)");
+                  setOnboardingConsumed(true);
+                }}
+                onAdjustMode={() => {
+                  // 桩态：进入相处方式设置（存在感说明已在本分区可展开）。
+                  console.info("[companion] adjust mode (integration pending)");
+                }}
+                onReplayOnboarding={() => {
+                  console.info("[companion] onboarding replay (integration pending)");
+                  setOnboardingConsumed(false);
+                }}
               />
             </section>
           </div>

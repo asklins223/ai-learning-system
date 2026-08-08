@@ -36,7 +36,8 @@ export default function CardValidatePage() {
         voiceUnavailable={false}
         onSubmitText={async (text) => {
           // 文字提交：宿主在此接入 question-first 提交（v0.6 语义兼容）。
-          console.info("[companion] text_or_mixed submit", { cardId, keyPointId, text });
+          // 注意：不把用户输入原文写入 console（个人内容，§13.3 零采集）。
+          console.info("[companion] text_or_mixed submit", { cardId, keyPointId, textLength: text.length });
         }}
       />
       <ValidationFocus
