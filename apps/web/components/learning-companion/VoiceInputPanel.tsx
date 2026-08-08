@@ -52,6 +52,26 @@ export type VoiceInputPhase =
   | "awaiting_confirmation"
   | "confirmed";
 
+/**
+ * 错误消息归一化（security_review MEDIUM 修复）：不透出宿主回调 `err.message`
+ * 原文（服务端错误可能含内部细节）。只按白名单错误码映射友好文案，未知一律通用。
+ */
+const VOICE_ERROR_FRIENDLY: Readonly<Record<string, string>> = {
+  FROZEN_PROBE_MISMATCH: "题目已失效或状态已变化，请刷新后重试。",
+  ARTIFACT_LOCKED: "该回答已锁定，无法重复操作。",
+  STALE_REVISION: "页面已过期，请刷新后重试。",
+  ASR_LOW_CONFIDENCE: "语音识别置信度不足，请重录或改用文字回答。",
+  VOICE_CONFIRM_MISMATCH: "确认文本与转写不一致，请重录或改用文字回答。",
+  NOT_ALLOWED: "麦克风权限被拒绝，已切换到文字输入。",
+};
+
+export function friendlyVoiceError(err: unknown): string {
+  if (err instanceof Error && err.name in VOICE_ERROR_FRIENDLY) {
+    return VOICE_ERROR_FRIENDLY[err.name];
+  }
+  return "操作失败，请重试或改用文字回答。";
+}
+
 type MicIssue = "denied" | "unsupported" | "device" | null;
 
 export interface VoiceInputPanelProps {
@@ -132,8 +152,7 @@ export function VoiceInputPanel({
   const [micIssue, setMicIssue] = useState<MicIssue>(null);
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
-  const [replaying, setReplaying] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [replaying, setReplaying] = useState(false);  const [confirming, setConfirming] = useState(false);
   const [draft, setDraft] = useState<VoiceDraftPayload | null>(null);
   const [artifactId, setArtifactId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState("");
@@ -188,11 +207,7 @@ export function VoiceInputPanel({
         if (!aliveRef.current) return;
         // 用户已取消 / 已开始新一轮录音：迟到结果忽略，不覆盖后续状态
         if (token !== transcribeTokenRef.current) return;
-        setError(
-          err instanceof Error
-            ? err.message
-            : "语音转写失败，请重试或改用文字回答。",
-        );
+        setError(friendlyVoiceError(err));
         setPhase("idle");
         return;
       }
@@ -346,7 +361,7 @@ export function VoiceInputPanel({
       if (aliveRef.current) setPhase("confirmed");
     } catch (err) {
       if (aliveRef.current) {
-        setError(err instanceof Error ? err.message : "确认失败，请重试。");
+        setError(friendlyVoiceError(err));
       }
     } finally {
       if (aliveRef.current) setConfirming(false);
@@ -372,7 +387,7 @@ export function VoiceInputPanel({
       setPhase("idle");
     } catch (err) {
       if (aliveRef.current) {
-        setError(err instanceof Error ? err.message : "重录失败，请重试。");
+        setError(friendlyVoiceError(err));
       }
     }
   }, [artifactId, confirming, onReRecord]);

@@ -67,6 +67,24 @@ export interface TextOrMixedInputProps {
 
 const DEFAULT_MAX_LENGTH = 10_000;
 
+/**
+ * 错误消息归一化（security_review MEDIUM 修复）：不透出宿主回调 `err.message`
+ * 原文（服务端错误可能含内部细节）。白名单错误码 → 友好文案，未知一律通用。
+ */
+const TEXT_ERROR_FRIENDLY: Readonly<Record<string, string>> = {
+  FROZEN_PROBE_MISMATCH: "题目已失效或状态已变化，请刷新后重试。",
+  ARTIFACT_LOCKED: "该回答已锁定，无法重复操作。",
+  STALE_REVISION: "页面已过期，请刷新后重试。",
+  INVALID_ARGUMENT: "提交内容不合法，请检查后重试。",
+};
+
+export function friendlyTextError(err: unknown): string {
+  if (err instanceof Error && err.name in TEXT_ERROR_FRIENDLY) {
+    return TEXT_ERROR_FRIENDLY[err.name];
+  }
+  return "提交失败，请重试。";
+}
+
 export function TextOrMixedInput({
   initialText,
   originalTranscript,
@@ -130,7 +148,7 @@ export function TextOrMixedInput({
       setSubmitted(true);
       onSubmitted?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "提交失败，请重试。");
+      setError(friendlyTextError(err));
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
