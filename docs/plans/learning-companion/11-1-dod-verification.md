@@ -154,12 +154,12 @@
 - **证据**：`apps/api/src/modules/companion-shell/capability-deployment.ts`（+test，依赖闭包与原子关闭）、`canary-stage.ts`（+test）、`rollback-drill.ts`（+test，soft drain/hard kill/legacy matrix 演练）；`packages/shared/src/capability-bundle.ts`、`companion-shell-contracts.ts`；`docs/plans/learning-companion/10-1-capability-deployment.md`、`03-5-global-shell-decoupling.md`、`03-6-budget-epoch-kill.md`、`02-7-multimodal-legacy-adapter.md`（legacy reader rollback matrix）
 
 ### 35. 多模态 Gold、真实 LLM/ASR、PostgreSQL、对象存储和浏览器 RC 两轮达标
-- [x] 已核验
-- **证据**：`docs/plans/learning-companion/09-1-gold-rounds.md`（Gold 两轮）、`09-6-real-env-rc.md`（真实环境 RC）、`09-2-release-qualification.md`、`09-3-critic-tutor-quality.md`（Critic/Tutor 质量）、`09-4-capacity-performance.md`（容量性能）；`apps/api/src/modules/learning-sessions/gold-rounds.ts`（+test）、`real-env-rc.ts`（+test）、`release-qualification.ts`（+test）、`qualification-report.ts`（+test）、`capacity-perf.ts`（+test）、`critic-tutor-quality.ts`（+test）；真实 Provider 运行样本状态以 `09-1`/`09-6` 与 `release-manifest.json` 标注为准（如实披露，不虚构）
+- [ ] 判定层已交付；真实运行待 RC 环境采集后回填（不构成达标声明）
+- **证据**：`docs/plans/learning-companion/09-1-gold-rounds.md`（Gold 两轮）、`09-6-real-env-rc.md`（真实环境 RC）、`09-2-release-qualification.md`、`09-3-critic-tutor-quality.md`（Critic/Tutor 质量）、`09-4-capacity-performance.md`（容量性能）；`apps/api/src/modules/learning-sessions/gold-rounds.ts`（+test）、`real-env-rc.ts`（+test）、`release-qualification.ts`（+test）、`qualification-report.ts`（+test）、`capacity-perf.ts`（+test）、`critic-tutor-quality.ts`（+test）；真实 Provider 运行样本状态以 `09-1`/`09-6` 与 `release-manifest.json` 标注为准（审计 2026-08-08：撤"已验证"结论）
 
 ### 36. replay/shadow、internal allowlist、5%、25% 各阶段均达到冻结的 `RolloutStageGateV1`；rollback drill 通过并完成最终 soak 后，Must capability bundle 成为正式公测默认；Should flags 不属于本项 DoD
-- [x] 已核验
-- **证据**：`docs/plans/learning-companion/10-2-shadow-mode.md`、`10-3-internal-allowlist.md`、`10-4-canary-5pct.md`、`10-5-rollback-drill.md`、`10-6-canary-25pct.md`、`10-7-final-soak.md`、`10-8-public-beta-default.md`；`apps/api/src/modules/companion-shell/shadow-mode.ts`（+test）、`internal-allowlist.ts`（+test）、`canary-stage.ts`（+test，`RolloutStageGateV1` 判定）、`rollback-drill.ts`（+test）、`final-soak.ts`（+test）、`public-beta-default.ts`（+test，Must bundle 公测默认）；Should flags 不在本项核验范围
+- [ ] 判定层已交付；真实运行（shadow 对比/canary 档位/soak 成本曲线）待 RC 环境采集后回填（不构成达标声明）
+- **证据**：`docs/plans/learning-companion/10-2-shadow-mode.md`、`10-3-internal-allowlist.md`、`10-4-canary-5pct.md`、`10-5-rollback-drill.md`、`10-6-canary-25pct.md`、`10-7-final-soak.md`、`10-8-public-beta-default.md`；`apps/api/src/modules/companion-shell/shadow-mode.ts`（+test）、`internal-allowlist.ts`（+test）、`canary-stage.ts`（+test，`RolloutStageGateV1` 判定）、`rollback-drill.ts`（+test）、`final-soak.ts`（+test）、`public-beta-default.ts`（+test，Must bundle 公测默认）；真实运行样本状态以 `release-manifest.json` 标注为准（审计 2026-08-08：撤"已验证"结论）；Should flags 不在本项核验范围
 
 ---
 

@@ -2,6 +2,11 @@
   "releasedAt": "2026-08-08",
   "branch": "v1.0",
   "planRef": "docs/plans/learning-companion-multimodal-understanding-universe.md",
+  "deliveryStatus": {
+    "code": "implementation_complete_rc_pending",
+    "label": "实现/判定层已交付；真实运行验收待 RC 环境采集后回填",
+    "detail": "审计（2026-08-08）确认：大量纯函数/契约/判定层已交付但核心学习闭环未全量进入生产路径。DoD 35/36 与部分证据项依赖真实 Provider/ASR/浏览器/canary/soak 运行，当前为判定层实现 + 真实样本待回填，不构成 release qualification 达标声明。前端伴星演示已用 Feature Flag 默认隐藏（NEXT_PUBLIC_COMPANION_SHELL_ENABLED=false）。"
+  },
   "stages": {
     "00": { "completed": true, "gate": "docs/plans/learning-companion/00-decision-and-scope.md" },
     "01": { "completed": true, "gate": "docs/plans/learning-companion/01-w0-contracts-and-baseline.md" },
@@ -60,8 +65,8 @@
     { "id": 32, "verified": true, "summary": "三视口/200% zoom/键盘/读屏/Switch/reduced-motion/麦克风拒绝路径通过" },
     { "id": 33, "verified": true, "summary": "RLS、迁移、导出、分级删除与残留扫描、幂等、stale、cancel、crash、BudgetEnvelope、fault Gate 全部通过" },
     { "id": 34, "verified": true, "summary": "capability 依赖图冻结，root off 单 revision 原子关闭反向依赖闭包，0 非法组合，soft drain/hard kill/legacy reader matrix 演练通过" },
-    { "id": 35, "verified": true, "summary": "多模态 Gold、真实 LLM/ASR、PostgreSQL、对象存储、浏览器 RC 两轮达标" },
-    { "id": 36, "verified": true, "summary": "shadow/internal/5%/25% 均达 RolloutStageGateV1，rollback drill 通过并完成最终 soak 后 Must bundle 成为公测默认" }
+    { "id": 35, "verified": "pending_rc", "summary": "多模态 Gold、真实 LLM/ASR、PostgreSQL、对象存储、浏览器 RC 两轮达标（判定层已交付；真实运行样本待 RC 环境采集后回填，w8 证据 54 行清单）" },
+    { "id": 36, "verified": "pending_rc", "summary": "shadow/internal/5%/25% 均达 RolloutStageGateV1，rollback drill 通过并完成最终 soak 后 Must bundle 成为公测默认（判定层已交付；真实运行样本待回填，w9 证据 77 行）" }
   ],
   "evidenceFiles": [
     "README.md",

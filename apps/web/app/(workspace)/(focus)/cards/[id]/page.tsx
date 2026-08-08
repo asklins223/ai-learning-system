@@ -867,9 +867,28 @@ export default function CardPage() {
                     router.push(`/cards/${cardId}/validate?keyPoint=${encodeURIComponent(target.id)}`);
                   }
                 }}
-                onReadAloud={() => {
-                  // 朗读摘要/论点：实际播放时由宿主记录 exposure（§8）。
-                  console.info("[companion] read aloud", cardId);
+                onReadAloud={async () => {
+                  // 救火 6：真实 TTS 朗读（edge-tts 容器 → mp3）——不再 console 桩。
+                  // 朗读摘要/论点：实际播放后由宿主记录 exposure（§8）。
+                  try {
+                    const res = await fetch("/api/voice/tts", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ text: cardSummary, voice: "zh-CN-XiaoxiaoNeural" }),
+                    });
+                    if (!res.ok) {
+                      console.warn("[companion] tts failed", res.status);
+                      return;
+                    }
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const audio = new Audio(url);
+                    await audio.play();
+                    URL.revokeObjectURL(url);
+                    console.info("[companion] read aloud played", { cardId, length: cardSummary.length });
+                  } catch (err) {
+                    console.warn("[companion] tts error", err);
+                  }
                 }}
                 onViewEvidence={() => {
                   const target = activeKeyPoint ?? keyPoints[0];
