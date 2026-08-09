@@ -71,13 +71,17 @@ export async function voiceRoutes(app: FastifyInstance) {
     if (part === undefined) {
       return reply.code(400).send({ error: "MISSING_AUDIO_FILE", code: "MISSING_AUDIO_FILE", message: "缺少 file 字段（音频）" });
     }
-    // review nit：真正消费 language（multipart fields——req.body 在未开
-    // attachFieldsToBody 时恒空；part.fields 含非 file 字段；缺省 zh-CN）
+    // review nit：真正消费 language（multipart part.fields 是 { type:'field', value } 对象——
+    // 取 .value 判 string；缺省 zh-CN）
     let language = "zh-CN";
     try {
       const fields = part.fields as Record<string, unknown> | undefined;
-      if (fields && typeof fields.language === "string") {
-        language = fields.language;
+      const field = fields?.language;
+      const value = field && typeof field === "object"
+        ? (field as { value?: unknown }).value
+        : field;
+      if (typeof value === "string") {
+        language = value;
       }
     } catch {
       // 字段解析异常——用缺省 language
