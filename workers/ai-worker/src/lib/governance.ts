@@ -17,6 +17,23 @@ import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { logger } from "./logger.ts";
 
+/**
+ * Stable, privacy-safe governance error used by the job projection layer.
+ *
+ * The queue sanitiser persists `code` but deliberately removes free-form
+ * messages. Keeping the consent reason as a machine-readable code lets the
+ * web app offer the correct recovery action without exposing provider or
+ * user content in `jobs.last_error`.
+ */
+export class AIConsentRequiredError extends Error {
+  readonly code = "ai_consent_required";
+
+  constructor() {
+    super("AI consent not signed for this workspace");
+    this.name = "AIConsentRequiredError";
+  }
+}
+
 export interface WorkspaceAIPolicy {
   sendToExternal: boolean;
   sendImageContent?: boolean;
@@ -231,6 +248,16 @@ export async function resolveAIGovernanceContext(
     };
   } else {
     providerName = (process.env.AI_PROVIDER_CARD ?? "mock").toLowerCase();
+    // §2.3 mock 静默回退告警：系统平台未配置（apiKey 缺失/含未解析 ${VAR}）。
+    // 若不告警，生产链路会照常运行但产出固定假文本，用户与日志无法区分。
+    logger.warn(
+      {
+        workspaceId,
+        capability: "agent_turn",
+        fallback: providerName,
+      },
+      "agent_turn 平台未配置，回退到默认 provider（mock 输出为固定假文本）",
+    );
   }
 
   // vision — 独立系统级视觉平台（未配置时回退到主 provider）

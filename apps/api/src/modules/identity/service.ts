@@ -26,6 +26,15 @@ const BCRYPT_COST = 10;
 // accounts so response timing does not become a reliable email oracle.
 const DUMMY_PASSWORD_HASH = "$2a$10$cgxNDTz4bljIsmxLn2w.7O6Cd/C3cZK3neQBb/2Xxx4xNJkIgMrse";
 
+function systemUsesExternalAI(): boolean {
+  return (
+    resolveSystemProviderForCapability("agent_turn") !== "mock" ||
+    resolveSystemProviderForCapability("vision") !== "mock" ||
+    resolveSystemProviderForCapability("text_generation") !== "mock" ||
+    resolveSystemProviderForCapability("embedding") !== "mock"
+  );
+}
+
 export function canonicalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
@@ -79,6 +88,9 @@ function hashToken(token: string): string {
 export interface SessionContext {
   userId: string;
   workspaceId: string;
+  /** 2026-08-11（性能专项）：decodeToken 合并 JOIN 时顺带取回的成员角色，
+   * 供 /auth/me 等端点复用（避免重复查 workspace_members）。 */
+  membershipRole?: string | null;
 }
 
 export async function issueSession(userId: string, workspaceId: string): Promise<{ token: string; ctx: SessionContext }> {
@@ -177,113 +189,6 @@ function generateDefaultDisplayName(displayName: string | null | undefined, emai
   return (displayName?.trim() || email.split("@")[0] || "用户").slice(0, 32);
 }
 
-export async function registerWithInvite(
-  email: string,
-  password: string,
-  inviteCode: string,
-  options?: { displayName?: string; avatarUrl?: string },
-): Promise<{ token: string; ctx: SessionContext } | null> {
-  const normalizedEmail = canonicalizeEmail(email);
-  let result: { userId: string; workspaceId: string } | null;
-  try {
-    result = await db.transaction(async (tx) => {
-      const now = new Date();
-      const inviteRows = await tx
-        .select()
-        .from(inviteCodes)
-        .where(
-          and(
-            eq(inviteCodes.code, inviteCode),
-            isNull(inviteCodes.consumedBy),
-            or(isNull(inviteCodes.expiresAt), gte(inviteCodes.expiresAt, now)),
-          ),
-        )
-        .for("update");
-      const invite = inviteRows[0];
-      if (!invite) return null;
-
-      const exactUser = await tx.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
-      const existing = exactUser ?? await tx.query.users.findFirst({
-        where: sql`lower(${users.email}) = ${normalizedEmail}`,
-      });
-      if (existing) return null;
-
-      const [user] = await tx
-        .insert(users)
-        .values({
-          email: normalizedEmail,
-          passwordHash: await hashPassword(password),
-          displayName: generateDefaultDisplayName(options?.displayName, normalizedEmail),
-          ...(options?.avatarUrl?.trim() ? { avatarUrl: options.avatarUrl.trim() } : {}),
-        })
-        .returning();
-
-      // ADR-0009 / PROFILE-01: 创建个人工作区，名称优先使用昵称
-      const [personalWs] = await tx
-        .insert(workspaces)
-        .values({
-          ownerId: user.id,
-          name: generateDefaultWorkspaceName(options?.displayName, user.email),
-          workspaceType: "personal",
-        })
-        .returning({ id: workspaces.id });
-
-      // 设置用户的 personal_workspace_id
-      await tx
-        .update(users)
-        .set({ personalWorkspaceId: personalWs.id })
-        .where(eq(users.id, user.id));
-
-      // 个人工作区 membership（owner）
-      await tx.insert(workspaceMembers).values({
-        workspaceId: personalWs.id,
-        userId: user.id,
-        role: "owner",
-      });
-
-      // 邀请码对应的协作工作区 membership（使用邀请码指定的角色）
-      await tx.insert(workspaceMembers).values({
-        workspaceId: invite.workspaceId,
-        userId: user.id,
-        role: invite.role ?? "member",
-      });
-
-      // Both memberships are immediately visible after registration, so both
-      // workspaces need an onboarding state in the same transaction.
-      await tx.insert(onboardingStates).values([
-        {
-          workspaceId: personalWs.id,
-          userId: user.id,
-          version: "v1",
-          steps: {},
-          status: "pending",
-        },
-        {
-          workspaceId: invite.workspaceId,
-          userId: user.id,
-          version: "v1",
-          steps: {},
-          status: "pending",
-        },
-      ]);
-
-      await tx
-        .update(inviteCodes)
-        .set({ consumedBy: user.id, consumedAt: now, consumeContext: "registration" })
-        .where(and(eq(inviteCodes.code, inviteCode), isNull(inviteCodes.consumedBy)));
-
-      // ADR-0009: 默认进入个人工作区
-      return { userId: user.id, workspaceId: personalWs.id };
-    });
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "23505") {
-      return null;
-    }
-    throw error;
-  }
-  if (!result) return null;
-  return issueSession(result.userId, result.workspaceId);
-}
 
 /**
  * ADR-0009: 无邀请码注册 — 只创建个人工作区，不加入任何协作空间。
@@ -356,28 +261,47 @@ export async function registerWithoutInvite(
 
 export async function decodeToken(token: string): Promise<SessionContext | null> {
   // R-011: 查询时使用 token 哈希
-  const session = await db.query.sessions.findFirst({ where: eq(sessions.token, hashToken(token)) });
+  // 2026-08-11（性能专项）：合并 JOIN——sessions 查询 + workspaceMembers
+  // 活跃校验原为 2 次串行 DB 往返（挂在 18 处 preHandler）。LEFT JOIN 条件
+  // 含 isNull(left_at)，join 不上即为非活跃成员，单条查询完成两语义。
+  // token 为 PRIMARY KEY（sessions 表），走索引。
+  const tokenHash = hashToken(token);
+  const row = await db
+    .select({
+      userId: sessions.userId,
+      workspaceId: sessions.workspaceId,
+      expiresAt: sessions.expiresAt,
+      // join 命中与否的判据：workspaceMembers 行存在时 leftAt 有值（活跃=null）。
+      memberLeftAt: workspaceMembers.leftAt,
+      // 顺带取成员角色（/auth/me 复用，避免重复查询）
+      membershipRole: workspaceMembers.role,
+    })
+    .from(sessions)
+    .leftJoin(
+      workspaceMembers,
+      and(
+        eq(workspaceMembers.workspaceId, sessions.workspaceId),
+        eq(workspaceMembers.userId, sessions.userId),
+      ),
+    )
+    .where(eq(sessions.token, tokenHash))
+    .limit(1);
+  const session = row[0];
   if (!session) return null;
   if (session.expiresAt < new Date()) {
     // Remove expired credentials on first use as well as during the periodic
     // cleanup job. This bounds the lifetime of a stolen, already-expired token.
-    await db.delete(sessions).where(eq(sessions.token, hashToken(token)));
+    await db.delete(sessions).where(eq(sessions.token, tokenHash));
     return null;
   }
-  // ADR-0009: 检查用户是否仍是 workspace 的活跃成员（left_at IS NULL），被移除或退出后立即吊销 session
-  const membership = await db.query.workspaceMembers.findFirst({
-    where: and(
-      eq(workspaceMembers.workspaceId, session.workspaceId),
-      eq(workspaceMembers.userId, session.userId),
-      isNull(workspaceMembers.leftAt),
-    ),
-  });
-  if (!membership) {
-    // 用户已被移出或已退出 workspace，主动删除旧 session
-    await db.delete(sessions).where(eq(sessions.token, hashToken(token)));
+  // ADR-0009: LEFT JOIN 未命中（无 membership 行）或 left_at 非空（已退出）——
+  // 用户被移出/退出后立即吊销 session。判据用 membershipRole（NOT NULL）区分
+  // "join 未命中"与"活跃成员（left_at IS NULL）"——两者 memberLeftAt 都是 NULL。
+  if (session.membershipRole === null || session.memberLeftAt !== null) {
+    await db.delete(sessions).where(eq(sessions.token, tokenHash));
     return null;
   }
-  return { userId: session.userId, workspaceId: session.workspaceId };
+  return { userId: session.userId, workspaceId: session.workspaceId, membershipRole: session.membershipRole ?? null };
 }
 
 /** Revoke a session by its raw bearer/cookie token. */
@@ -435,6 +359,7 @@ export async function cleanupExpiredSessions(): Promise<number> {
 export async function switchWorkspace(
   userId: string,
   workspaceId: string,
+  previousToken: string | null,
 ): Promise<{ token: string; ctx: SessionContext } | null> {
   const membership = await db.query.workspaceMembers.findFirst({
     where: and(
@@ -444,7 +369,24 @@ export async function switchWorkspace(
     ),
   });
   if (!membership) return null;
-  return issueSession(userId, workspaceId);
+  // 2026-08-11（安全修复）：同一事务内"撤销旧 token + 签发新 token"——
+  // 此前 routes 先签发后撤销，revoke 失败时被窃取的旧 token 继续有效。
+  return db.transaction(async (tx) => {
+    if (previousToken) {
+      await tx.delete(sessions).where(eq(sessions.token, hashToken(previousToken)));
+    }
+    const now = new Date();
+    const token = generateToken();
+    const ctx: SessionContext = { userId, workspaceId, membershipRole: membership.role ?? null };
+    await tx.insert(sessions).values({
+      token: hashToken(token),
+      userId,
+      workspaceId,
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
+    });
+    return { token, ctx };
+  });
 }
 
 /**
@@ -873,6 +815,7 @@ export async function getAIPrivacySettings(workspaceId: string) {
   });
   if (!ws) return null;
   return {
+    requiresAIConsent: systemUsesExternalAI(),
     aiConsentVersion: ws.aiConsentVersion,
     aiConsentAt: ws.aiConsentAt,
     aiConsentBy: ws.aiConsentBy,
@@ -1062,11 +1005,34 @@ export async function checkAIConsent(workspaceId: string): Promise<boolean> {
   });
   if (!ws) return false;
   // 任一 capability 解析为非 mock 即要求已签署同意
-  const anyExternalNonMock =
-    resolveSystemProviderForCapability("agent_turn") !== "mock" ||
-    resolveSystemProviderForCapability("vision") !== "mock" ||
-    resolveSystemProviderForCapability("text_generation") !== "mock" ||
-    resolveSystemProviderForCapability("embedding") !== "mock";
+  const anyExternalNonMock = systemUsesExternalAI();
   if (!anyExternalNonMock) return true;
   return ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
+}
+
+/**
+ * 2026-08-11（安全加固）：修改密码——验证旧密码后更新 bcrypt 哈希，
+ * 并在同一事务内撤销该用户**全部** session（改密后强制全端重新登录）。
+ * 返回 false 表示旧密码错误（不区分其他原因，避免枚举）。
+ */
+export async function changePassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+): Promise<boolean> {
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+  if (!user || !(await verifyPassword(currentPassword, user.passwordHash))) return false;
+  const newHash = await hashPassword(newPassword);
+  await db.transaction(async (tx) => {
+    await tx.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, userId));
+    await tx.delete(sessions).where(eq(sessions.userId, userId));
+  });
+  return true;
+}
+
+/**
+ * 2026-08-11（安全加固）：撤销用户全部会话（"退出所有设备"）。
+ */
+export async function revokeAllSessionsForUser(userId: string): Promise<void> {
+  await db.delete(sessions).where(eq(sessions.userId, userId));
 }

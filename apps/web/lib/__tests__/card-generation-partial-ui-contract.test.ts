@@ -1,3 +1,7 @@
+
+// ⚠️ 静态源码契约快照（非行为测试）：断言的是源码文本特征，重构改名/换实现方式
+// 会误报，行为回归由 e2e/人工验证覆盖。2026-08-11 测试质量审计标注。
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -47,6 +51,13 @@ const allSources = [
 ].join("\n");
 
 describe("strict/partial card generation UI contract", () => {
+  it("routes structured AI consent failures to the real settings section", () => {
+    assert.ok(generationFailureDialogSource.includes('generationRun.error?.code === "ai_consent_required"'));
+    assert.ok(generationFailureDialogSource.includes('warning.details?.reason === "ai_consent_required"'));
+    assert.ok(generationFailureDialogSource.includes('href="/settings#model"'));
+    assert.ok(generationFailureDialogSource.includes("{requiresAIConsent && ("));
+  });
+
   it("supports retrying a strict failure", () => {
     assert.ok(apiTypesSource.includes('| "partial_ready"'));
     assert.ok(apiSource.includes("retryCardGenerationRun"));

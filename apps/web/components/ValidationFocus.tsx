@@ -31,6 +31,7 @@ import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { SessionProgressStage } from "@/components/validation/SessionProgressStage";
 import { isQuestionFirstUIEnabled } from "@/lib/feature-flags";
+import { VoiceTeachBackScene } from "@/components/learning-companion/scenes/VoiceTeachBackScene";
 import {
   clearActionKey,
   getOrCreateActionKey,
@@ -80,6 +81,7 @@ interface FocusState {
   sourceAvailable?: boolean;
   unassistedEligibleAt?: string;
   blockedReason?: string;
+  recoveryReason?: "ai_consent_required";
 }
 
 type ActionName =
@@ -169,6 +171,7 @@ export function ValidationFocus({
   onExit,
   exitHref,
   exitLabel = "返回学习卡",
+  voiceEntry,
 }: {
   cardId: string;
   keyPointId?: string;
@@ -177,6 +180,21 @@ export function ValidationFocus({
   onExit?: () => void;
   exitHref: string;
   exitLabel?: string;
+  /**
+   * 复习页 voice 可选模态（14 方案 §3.3，Owner 决策 1：text 默认、voice 可选）。
+   * 缺省 undefined = 纯 text（现状行为完全不变）。
+   * voice 确认的逐字 transcript 复用本组件既有 submitValidationAnswer 链提交
+   * （§3.6：多样性只在前端作答层，真相写入路径不变）。
+   */
+  voiceEntry?: {
+    enabled: boolean;
+    /** 语音能力整体不可用（ASR policy 不满足等）→ 只提示、无录音入口。 */
+    unavailable?: boolean;
+    /** BCP-47 语言标签，如 zh-CN。 */
+    language?: string;
+    /** ASR 转写注入（宿主接真实 /voice/transcribe 端点）。 */
+    onTranscribe?: (audio: Blob, meta: { language?: string }) => Promise<string>;
+  };
 }) {
   const [state, setState] = useState<FocusState>({
     phase: "eligibility-check",
@@ -286,6 +304,7 @@ export function ValidationFocus({
             jobId: session.jobId ?? prev.jobId,
             blockedReason:
               session.status === "question_blocked" ? "unsafe_fallback" : undefined,
+            recoveryReason: undefined,
             error: undefined,
           }));
 
@@ -323,8 +342,12 @@ export function ValidationFocus({
               jobId: session.jobId ?? prev.jobId,
               blockedReason:
                 session.status === "question_blocked" ? "unsafe_fallback" : undefined,
+              recoveryReason:
+                job.failureReason === "ai_consent_required" ? "ai_consent_required" : undefined,
               error:
-                newPhase === "question_retryable"
+                job.failureReason === "ai_consent_required"
+                  ? "当前工作区尚未签署 AI 使用协议。签署后可回来重新出题或评估，已保存的答案不会丢失。"
+                  : newPhase === "question_retryable"
                   ? "题目暂时没有准备好，请重试。"
                   : newPhase === "evaluation_retryable"
                     ? "评估暂时中断，请重试。"
@@ -338,7 +361,12 @@ export function ValidationFocus({
             setState((prev) => ({
               ...prev,
               phase: kind === "question" ? "question_retryable" : "evaluation_retryable",
-              error: `${kind === "question" ? "题目" : "评估"}暂时没有准备好，请重试。`,
+              recoveryReason:
+                job.failureReason === "ai_consent_required" ? "ai_consent_required" : undefined,
+              error:
+                job.failureReason === "ai_consent_required"
+                  ? "当前工作区尚未签署 AI 使用协议。签署后可回来重试，学习进度不会丢失。"
+                  : `${kind === "question" ? "题目" : "评估"}暂时没有准备好，请重试。`,
             }));
           }
           return;
@@ -389,6 +417,7 @@ export function ValidationFocus({
       jobId: session.jobId ?? undefined,
       blockedReason:
         session.status === "question_blocked" ? "unsafe_fallback" : undefined,
+      recoveryReason: undefined,
       error:
         restoredPhase === "error"
           ? "会话状态暂时无法恢复"
@@ -477,6 +506,15 @@ export function ValidationFocus({
               ? errorData.unassistedEligibleAt
               : undefined,
           error: undefined,
+        }));
+        return;
+      }
+      if (errorCode === "ai_consent_required") {
+        setState((prev) => ({
+          ...prev,
+          phase: "question_retryable",
+          recoveryReason: "ai_consent_required",
+          error: "当前工作区尚未签署 AI 使用协议。签署后可回来开始验证。",
         }));
         return;
       }
@@ -659,9 +697,11 @@ export function ValidationFocus({
 
   // ─── Submit answer ────────────────────────────────────────────────────
 
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(async (overrideAnswer?: string) => {
     const sid = state.submissionId;
-    if (!sid || !state.draftAnswer.trim()) return;
+    // voice 模态传入确认后的逐字 transcript；text 模态沿用 answerRef（与草稿同源）。
+    const answer = (overrideAnswer ?? answerRef.current).trim();
+    if (!sid || !answer) return;
     if (draftConflictRef.current) {
       setState((prev) => ({ ...prev, error: "请先处理另一页面产生的草稿冲突，再提交回答。" }));
       return;
@@ -685,12 +725,12 @@ export function ValidationFocus({
         actionSlot,
         `ui-submit-${sid}`,
       );
-      // 用 answerRef（与 flushDraft 持久化的内容同源）而不是闭包里的
-      // state.draftAnswer：点击提交到禁用重渲染之间的最后一次键入会先被
-      // flushDraft 存为草稿，闭包值则是旧的——两者不一致时评估的答案会比
-      // 已保存草稿旧。
+      // 用 answer（voice=确认 transcript / text=answerRef，与 flushDraft 持久化的
+      // 内容同源）而不是闭包里的 state.draftAnswer：点击提交到禁用重渲染之间
+      // 的最后一次键入会先被 flushDraft 存为草稿，闭包值则是旧的——两者不一致
+      // 时评估的答案会比已保存草稿旧。
       const result = await api.submitValidationAnswer(sid, {
-        answer: answerRef.current.trim(),
+        answer,
         selfConfidence: state.selfConfidence ?? undefined,
         baseRevision: revisionRef.current,
         idempotencyKey,
@@ -725,7 +765,7 @@ export function ValidationFocus({
     } finally {
       releaseActionLock("submit");
     }
-  }, [acquireActionLock, flushDraft, pollJobStatus, releaseActionLock, restoreSession, state.submissionId, state.draftAnswer, state.selfConfidence]);
+  }, [acquireActionLock, flushDraft, pollJobStatus, releaseActionLock, restoreSession, state.submissionId, state.selfConfidence]);
 
   // ─── Unable to answer ─────────────────────────────────────────────────
 
@@ -901,7 +941,7 @@ export function ValidationFocus({
     const sid = state.submissionId;
     if (!sid) return;
     if (!acquireActionLock("retry-question")) return;
-    setState((prev) => ({ ...prev, error: undefined }));
+    setState((prev) => ({ ...prev, error: undefined, recoveryReason: undefined }));
 
     const actionSlot = `retry-question:${sid}`;
     const idempotencyKey = getOrCreateActionKey(
@@ -920,6 +960,7 @@ export function ValidationFocus({
         phase: "question_preparing",
         jobId: result.jobId,
         error: undefined,
+        recoveryReason: undefined,
       }));
       pollJobStatus(result.jobId, "question", sid);
     } catch (err) {
@@ -943,7 +984,7 @@ export function ValidationFocus({
     const sid = state.submissionId;
     if (!sid) return;
     if (!acquireActionLock("retry-evaluation")) return;
-    setState((prev) => ({ ...prev, error: undefined }));
+    setState((prev) => ({ ...prev, error: undefined, recoveryReason: undefined }));
 
     const actionSlot = `retry-evaluation:${sid}`;
     const idempotencyKey = getOrCreateActionKey(
@@ -962,6 +1003,7 @@ export function ValidationFocus({
         phase: "evaluation_pending",
         jobId: result.jobId,
         error: undefined,
+        recoveryReason: undefined,
       }));
       pollJobStatus(result.jobId, "evaluation", sid);
     } catch (err) {
@@ -1115,13 +1157,15 @@ export function ValidationFocus({
 
           {state.phase === "question_retryable" && (
             <RetryView
-              title="题目暂时没有准备好"
+              title={state.recoveryReason === "ai_consent_required" ? "需要先确认 AI 使用协议" : "题目暂时没有准备好"}
               detail={state.error ?? "你的学习进度没有受到影响，可以立即重试，或稍后再回来。"}
               onRetry={handleRetryQuestion}
               onExit={handleSafeExit}
               exitHref={exitHref}
               exitLabel={exitLabel}
               busy={pendingAction !== null}
+              recoveryHref={state.recoveryReason === "ai_consent_required" ? "/settings#model" : undefined}
+              recoveryLabel="阅读并签署 AI 使用协议"
             />
           )}
 
@@ -1141,7 +1185,7 @@ export function ValidationFocus({
 
           {state.phase === "evaluation_retryable" && (
             <RetryView
-              title="评估暂时中断"
+              title={state.recoveryReason === "ai_consent_required" ? "需要先确认 AI 使用协议" : "评估暂时中断"}
               detail={state.error ?? "你的最终答案已经保存，不会丢失。可以重新发起评估。"}
               onRetry={handleRetryEvaluation}
               onExit={handleSafeExit}
@@ -1149,6 +1193,8 @@ export function ValidationFocus({
               exitLabel={exitLabel}
               retryLabel="重试评估"
               busy={pendingAction !== null}
+              recoveryHref={state.recoveryReason === "ai_consent_required" ? "/settings#model" : undefined}
+              recoveryLabel="阅读并签署 AI 使用协议"
             />
           )}
 
@@ -1214,6 +1260,16 @@ export function ValidationFocus({
               sourceAvailable={state.sourceAvailable === true}
               draftSaveStatus={draftSaveStatus}
               pendingAction={pendingAction}
+              voiceEntry={
+                voiceEntry?.enabled
+                  ? {
+                      unavailable: voiceEntry.unavailable === true,
+                      language: voiceEntry.language,
+                      onTranscribe: voiceEntry.onTranscribe,
+                    }
+                  : undefined
+              }
+              onVoiceSubmit={(transcript) => void handleSubmit(transcript)}
               onAnswerChange={(answer, confidence) => {
                 setState((prev) => ({
                   ...prev,
@@ -1364,6 +1420,8 @@ function RetryView({
   exitLabel,
   retryLabel = "重试出题",
   busy = false,
+  recoveryHref,
+  recoveryLabel,
 }: {
   title: string;
   detail: string;
@@ -1373,6 +1431,8 @@ function RetryView({
   exitLabel: string;
   retryLabel?: string;
   busy?: boolean;
+  recoveryHref?: string;
+  recoveryLabel?: string;
 }) {
   const titleRef = useRef<HTMLHeadingElement>(null);
 
@@ -1381,18 +1441,32 @@ function RetryView({
   }, []);
 
   return (
-    <div className="validation-focus-state" role="alert" aria-live="assertive">
+    <div
+      className="validation-focus-state"
+      data-recovery={recoveryHref ? "consent" : undefined}
+      role="alert"
+      aria-live="assertive"
+    >
       <span className="validation-focus-state-symbol validation-focus-state-symbol--retry" aria-hidden="true">
-        <Icon.Refresh />
+        {recoveryHref ? <Icon.Lock /> : <Icon.Refresh />}
       </span>
-      <span className="validation-focus-state-eyebrow">稍等一下</span>
+      <span className="validation-focus-state-eyebrow">
+        {recoveryHref ? "完成一次设置" : "稍等一下"}
+      </span>
       <h1 ref={titleRef} className="validation-focus-state-title" tabIndex={-1}>{title}</h1>
       <p className="validation-focus-state-detail">{detail}</p>
       <div className="validation-focus-state-actions">
-        <button type="button" className="validation-focus-btn validation-focus-btn--primary" onClick={onRetry} disabled={busy}>
-          <Icon.Refresh aria-hidden="true" />
-          {busy ? "正在重试…" : retryLabel}
-        </button>
+        {recoveryHref ? (
+          <a href={recoveryHref} className="validation-focus-btn validation-focus-btn--primary">
+            <Icon.Lock aria-hidden="true" />
+            {recoveryLabel ?? "前往设置"}
+          </a>
+        ) : (
+          <button type="button" className="validation-focus-btn validation-focus-btn--primary" onClick={onRetry} disabled={busy}>
+            <Icon.Refresh aria-hidden="true" />
+            {busy ? "正在重试…" : retryLabel}
+          </button>
+        )}
         <a
           href={exitHref}
           className="validation-focus-btn validation-focus-btn--ghost"
@@ -1440,7 +1514,7 @@ function BlockedView({
             : "当前无法开始验证，请稍后重试。";
 
   return (
-    <div className="validation-focus-blocked">
+    <div className="validation-focus-blocked" data-reason={reason ?? "unavailable"}>
       <span className="validation-focus-blocked-icon" aria-hidden="true">
         {reason === "unsafe_fallback" ? <Icon.Warn /> : <Icon.Lock />}
       </span>
@@ -1499,6 +1573,8 @@ function AnsweringView({
   sourceAvailable,
   draftSaveStatus,
   pendingAction,
+  voiceEntry,
+  onVoiceSubmit,
   onAnswerChange,
   onSubmit,
   onUnable,
@@ -1516,6 +1592,14 @@ function AnsweringView({
   sourceAvailable: boolean;
   draftSaveStatus: DraftSaveStatus;
   pendingAction: ActionName | null;
+  /** 复习页 voice 可选模态（text 默认；缺省 = 纯 text，行为不变）。 */
+  voiceEntry?: {
+    unavailable?: boolean;
+    language?: string;
+    onTranscribe?: (audio: Blob, meta: { language?: string }) => Promise<string>;
+  };
+  /** voice 确认后的逐字 transcript → 宿主提交（走既有 submitValidationAnswer 链）。 */
+  onVoiceSubmit: (transcript: string) => void;
   onAnswerChange: (answer: string, confidence: 1 | 2 | 3 | null) => void;
   onSubmit: () => void;
   onUnable: () => void;
@@ -1680,6 +1764,20 @@ function AnsweringView({
           </span>
         </div>
       </div>
+
+      {/* 复习页 voice 可选模态（14 方案 §3.3，Owner 决策 1：text 默认、voice 可选）：
+          放在文字作答区之后，缺省不出现——text 路径行为不变。 */}
+      {voiceEntry ? (
+        <div className="validation-focus-voice-entry" data-ui="review-voice-entry">
+          <VoiceTeachBackScene
+            voiceUnavailable={voiceEntry.unavailable === true}
+            language={voiceEntry.language}
+            onTranscribe={voiceEntry.onTranscribe}
+            onSubmit={(transcript) => onVoiceSubmit(transcript)}
+            ariaLabel="语音回答（可选）"
+          />
+        </div>
+      ) : null}
 
       <div className="validation-focus-confidence">
         <div className="validation-focus-confidence-heading">

@@ -7,7 +7,7 @@ import { extractAuthCredential, hasValidCookieCsrf, type AuthCredential } from "
 
 declare module "fastify" {
   interface FastifyRequest {
-    session: { userId: string; workspaceId: string };
+    session: { userId: string; workspaceId: string; membershipRole?: string | null };
   }
 }
 
@@ -53,24 +53,30 @@ export function isWorkspaceOwner(ctx: {
 
 export async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
   const { userId, workspaceId } = req.session;
+  // 2026-08-11（性能专项）：2 个并行查询合并为单条 LEFT JOIN（membership + workspace），
+  // 事务内往返 3 次→2 次（BEGIN+set_config+查询+COMMIT）。JOIN 不命中 membership 时
+  // membershipRole 为 null，等价于原"无成员记录 → 非 owner"。
   const { membershipRole, workspaceOwnerId } = await withWorkspaceTransaction(
     { workspaceId, userId },
     async (transaction) => {
-      // PERF-08 fix: These two queries are independent — run them in parallel.
-      const [membership, ws] = await Promise.all([
-        transaction.query.workspaceMembers.findFirst({
-          where: and(
-            eq(workspaceMembers.workspaceId, workspaceId),
+      const row = await transaction
+        .select({
+          membershipRole: workspaceMembers.role,
+          workspaceOwnerId: workspaces.ownerId,
+        })
+        .from(workspaces)
+        .leftJoin(
+          workspaceMembers,
+          and(
+            eq(workspaceMembers.workspaceId, workspaces.id),
             eq(workspaceMembers.userId, userId),
           ),
-        }),
-        transaction.query.workspaces.findFirst({
-          where: eq(workspaces.id, workspaceId),
-        }),
-      ]);
+        )
+        .where(eq(workspaces.id, workspaceId))
+        .limit(1);
       return {
-        membershipRole: membership?.role,
-        workspaceOwnerId: ws?.ownerId,
+        membershipRole: row[0]?.membershipRole ?? null,
+        workspaceOwnerId: row[0]?.workspaceOwnerId ?? null,
       };
     },
   );

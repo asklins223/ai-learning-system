@@ -199,7 +199,7 @@ export function assertRelationGovernanceEnabled(flags: RelationGovernanceFlags):
   if (!isRelationGovernanceEnabled(flags)) {
     throw new RelationGovernanceError(
       "Relationship Governance 为 Should bundle，flag 未开启时动作不可见不可执行",
-      "RELATION_GOVERNANCE_FLAG_DISABLED",
+      "relation_governance_flag_disabled",
     );
   }
 }
@@ -232,7 +232,7 @@ export function proposeRelationCandidate(
   if (input.from.nodeType === input.to.nodeType && input.from.entityId === input.to.entityId) {
     throw new RelationGovernanceError(
       "关系 candidate 端点不能为同一节点",
-      "RELATION_SELF_ENDPOINT",
+      "relation_self_endpoint",
     );
   }
   const candidate: RelationCandidate = {
@@ -277,7 +277,7 @@ export function assertCandidateNotInFormalTarget(
   if (record.candidate.formalTargetEligible !== false) {
     throw new RelationGovernanceError(
       "candidate 不允许进入 formal target（虚线，未经验证路径不得 published）",
-      "CANDIDATE_IN_FORMAL_TARGET",
+      "candidate_in_formal_target",
     );
   }
   return { ok: true, reasonCode: "candidate_is_dashed_not_formal" };
@@ -368,13 +368,13 @@ export function applySupportCheck(
   if (verdict.candidateId !== record.candidate.candidateId) {
     throw new RelationGovernanceError(
       "support check 与 candidate 不匹配",
-      "SUPPORT_CHECK_CANDIDATE_MISMATCH",
+      "support_check_candidate_mismatch",
     );
   }
   if (record.status === "rejected" || record.status === "withdrawn") {
     throw new RelationGovernanceError(
       "rejected/withdrawn candidate 不可重新走支持检查",
-      "SUPPORT_CHECK_ON_TERMINAL_STATE",
+      "support_check_on_terminal_state",
     );
   }
   if (!verdict.supported) {
@@ -484,19 +484,19 @@ export function publishRelation(input: PublishRelationInput): PublishedRelationO
   if (record.supportVerdict?.supported !== true) {
     throw new RelationGovernanceError(
       "candidate 未通过独立 support check，不能 published",
-      "PUBLISH_REQUIRES_SUPPORT_CHECK",
+      "publish_requires_support_check",
     );
   }
   if (input.authorization.decision !== "confirm") {
     throw new RelationGovernanceError(
       "candidate 未经 authorized confirm，不能 published",
-      "PUBLISH_REQUIRES_AUTHORIZED_CONFIRM",
+      "publish_requires_authorized_confirm",
     );
   }
   if (record.status !== "support_passed" && record.status !== "stale_under_review") {
     throw new RelationGovernanceError(
       `candidate 状态 ${record.status} 不允许 publish`,
-      "PUBLISH_INVALID_STATUS",
+      "publish_invalid_status",
     );
   }
 
@@ -572,7 +572,7 @@ export function applyAuthorizationDecision(
   if (!verdict.authorized) {
     throw new RelationGovernanceError(
       `授权拒绝：${verdict.reasonCode}`,
-      "AUTHORIZATION_DENIED",
+      "authorization_denied",
     );
   }
   const authorization = buildAuthorization(
@@ -622,7 +622,7 @@ export function checkRelationStaleness(
   if (input.record.status !== "published" || published === null) {
     throw new RelationGovernanceError(
       "只有 published 关系可做 stale 检测",
-      "STALE_CHECK_NOT_PUBLISHED",
+      "stale_check_not_published",
     );
   }
   const expected = new Map(published.upstreamRefs.map((ref) => [ref.entityId, ref.fingerprint]));
@@ -659,7 +659,7 @@ export function reviewAndRepublish(input: {
   if (input.record.status !== "stale_under_review") {
     throw new RelationGovernanceError(
       `重审只允许 stale_under_review：当前 ${input.record.status}`,
-      "REVIEW_REQUIRES_STALE_UNDER_REVIEW",
+      "review_requires_stale_under_review",
     );
   }
   const supportApplied = applySupportCheck(input.record, input.supportVerdict);

@@ -436,7 +436,10 @@ export function isDeviceLocalPreferenceKey(key: PreferenceKey): boolean {
 
 /** 是否为合法学习偏好键（onboarding 产品状态键一律不在白名单） */
 export function isLearningPreferenceKey(key: string): key is PreferenceKey {
-  return key in PREFERENCE_SCHEMA;
+  // Object.hasOwn：普通对象字面量继承 Object.prototype，
+  // `key in` 会把 "toString"/"constructor" 判为合法键，
+  // 随后 validatePreferenceValue 执行 PREFERENCE_SCHEMA[key].validate 抛 TypeError → 500。
+  return Object.hasOwn(PREFERENCE_SCHEMA, key);
 }
 
 /** 校验偏好值是否合法（键合法 + 值通过该键 schema） */
@@ -589,7 +592,11 @@ export function acceptSuggestedPreference(
   state: PreferencesState,
   key: PreferenceKey,
 ): PreferencesState {
-  if (!(key in state.suggested)) return state;
+  // Object.hasOwn：state.suggested 是普通对象字面量，`key in` 会把
+  // "toString"/"constructor" 等原型链键误判为已建议，随后
+  // validatePreferenceValue 对非法键执行 PREFERENCE_SCHEMA[key].validate
+  //（undefined.validate）抛 TypeError。hasOwn 只认自有键。
+  if (!Object.hasOwn(state.suggested, key)) return state;
   const value = state.suggested[key];
   if (!validatePreferenceValue(key, value)) return state;
   const suggested = { ...state.suggested };
@@ -605,7 +612,8 @@ export function rejectSuggestedPreference(
   state: PreferencesState,
   key: PreferenceKey,
 ): PreferencesState {
-  if (!(key in state.suggested)) return state;
+  // 与 acceptSuggestedPreference 一致：只认自有键，原型链键不当作已建议。
+  if (!Object.hasOwn(state.suggested, key)) return state;
   const suggested = { ...state.suggested };
   delete suggested[key];
   return { explicit: state.explicit, suggested };

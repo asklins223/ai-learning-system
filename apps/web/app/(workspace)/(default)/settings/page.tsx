@@ -20,11 +20,19 @@ import {
 } from "@/components/MarkdownFilePicker";
 import { AIPrivacySettings } from "@/components/settings/AIPrivacySettings";
 import { InviteMemberSettings } from "@/components/settings/InviteMemberSettings";
+import {
+  DEFAULT_PET_TTS,
+  PET_TTS_RATES,
+  PET_TTS_SEGMENT_GAPS,
+  PET_TTS_VOICES,
+  readPetTtsSettings,
+  writePetTtsSettings,
+  type PetTtsSettingsV1,
+} from "@/features/companion-pet/tts-settings";
 import { WorkspaceManagement } from "@/components/settings/WorkspaceManagement";
 import { AvatarUploader } from "@/components/account/AvatarUploader";
-import { CompanionSettings } from "@/components/learning-companion/CompanionSettings";
 
-type SettingsSectionId = "account" | "workspaces" | "invites" | "model" | "export" | "import" | "search" | "companion";
+type SettingsSectionId = "account" | "workspaces" | "invites" | "model" | "pet" | "export" | "import" | "search";
 type SettingsIcon = ComponentType<SVGProps<SVGSVGElement>>;
 type ReindexResult = {
   deleted: number;
@@ -43,11 +51,11 @@ const ALL_SETTINGS_SECTIONS: Array<{
   { id: "account", label: "个人账户", caption: "身份与个人档案", group: "账户与空间", icon: Icon.User },
   { id: "workspaces", label: "工作区管理", caption: "加入或退出协作空间", group: "账户与空间", icon: Icon.Layers },
   { id: "invites", label: "邀请与成员", caption: "管理协作权限", group: "账户与空间", icon: Icon.User, ownerOnly: true },
-  { id: "model", label: "模型与 API", caption: "系统默认与个人模型", group: "AI 与学习", icon: Icon.Sparkle },
+  { id: "model", label: "AI 使用与数据", caption: "授权与数据边界", group: "AI 与学习", icon: Icon.Sparkle },
+  { id: "pet", label: "桌宠伴星", caption: "桌面 AI 学习伙伴", group: "AI 与学习", icon: Icon.Sparkle },
   { id: "export", label: "数据导出", caption: "保存完整副本", group: "数据与维护", icon: Icon.Download },
   { id: "import", label: "内容导入", caption: "迁移 Markdown", group: "数据与维护", icon: Icon.Inbox },
   { id: "search", label: "搜索维护", caption: "检测与重建索引", group: "数据与维护", icon: Icon.Search },
-  { id: "companion", label: "伴星", caption: "存在感与首次引导", group: "AI 与学习", icon: Icon.Sparkle },
 ];
 
 const SETTINGS_GROUPS = ["账户与空间", "AI 与学习", "数据与维护"] as const;
@@ -94,10 +102,256 @@ function SettingsPanelHeading({
   );
 }
 
+interface DesktopPetApiShim {
+  getPetModeEnabled?: () => Promise<{ ok?: boolean; enabled?: boolean }>;
+  setPetModeEnabled?: (enabled: boolean) => Promise<{ ok?: boolean; enabled?: boolean }>;
+}
+
+/**
+ * 2026-08-12：设置页桌宠开关（Owner 需求——个人中心可开关，新用户默认开）。
+ * Electron 桌面应用：读/写 device-local petModeEnabled（main window IPC）；
+ * 浏览器环境：desktopAPI 不存在 → 显示降级提示（不冒充桌面能力）。
+ */
+function PetModeSetting() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const desktopApi = typeof window !== "undefined"
+    ? (window as unknown as { desktopAPI?: DesktopPetApiShim }).desktopAPI
+    : undefined;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!desktopApi?.getPetModeEnabled) {
+      setEnabled(null);
+      return;
+    }
+    void desktopApi.getPetModeEnabled()
+      .then((result) => {
+        if (!cancelled && typeof result?.enabled === "boolean") setEnabled(result.enabled);
+      })
+      .catch(() => {
+        if (!cancelled) setEnabled(null);
+      });
+    return () => { cancelled = true; };
+  }, [desktopApi]);
+
+  const toggle = (): void => {
+    if (!desktopApi?.setPetModeEnabled || enabled === null || busy) return;
+    setBusy(true);
+    setError(null);
+    void desktopApi.setPetModeEnabled(!enabled)
+      .then((result) => {
+        if (typeof result?.enabled === "boolean") setEnabled(result.enabled);
+      })
+      .catch(() => setError("切换失败，请重试。"))
+      .finally(() => setBusy(false));
+  };
+
+  if (enabled === null) {
+    return (
+      <p className="settings-section-note">
+        桌宠模式仅在桌面应用（Electron）中可用——浏览器内不可用。
+        请通过桌面应用打开本页面进行设置。
+      </p>
+    );
+  }
+
+  return (
+    <div className="settings-ai-control-row" role="group" aria-label="桌宠开关">
+      <span className="settings-ai-control-icon" aria-hidden="true"><Icon.Sparkle /></span>
+      <span className="settings-ai-control-copy">
+        <strong>桌面桌宠</strong>
+        <small>
+          在桌面上显示 AI 学习伴星角色（点击对话、长按菜单、可拖动、支持语音）。
+          新用户默认开启；关闭后角色从桌面消失，学习数据不受影响。
+          {error ? <span className="settings-section-error">{error}</span> : null}
+        </small>
+      </span>
+      <label className="settings-switch">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={() => toggle()}
+          disabled={busy}
+          aria-label="桌宠开关"
+        />
+        <i aria-hidden="true" />
+      </label>
+    </div>
+  );
+}
+
+// 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；Owner 决策 4）。
+// 偏好落在 account 级 user_learning_preferences（workspace_id IS NULL），
+// 跨设备同步；"any" = 未设置（跟随安排，Supervisor 默认编排）。
+function AnswerModePreferenceSetting() {
+  const [preference, setPreference] = useState<"voice" | "silent" | "text" | "any">("any");
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getAnswerModePreference()
+      .then((result) => {
+        if (cancelled) return;
+        setPreference(result.preference);
+        setLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoaded(true);
+        setError("暂时无法读取偏好，请稍后重试。");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const options: Array<{ value: "voice" | "silent" | "text" | "any"; label: string; hint: string }> = [
+    { value: "any", label: "跟随安排", hint: "由伴星按当前要点自动选择（默认）" },
+    { value: "voice", label: "语音优先", hint: "能语音时优先语音回答" },
+    { value: "silent", label: "静音结构优先", hint: "优先排序/修复等不发声的结构作答" },
+    { value: "text", label: "文字优先", hint: "始终先用文字回答" },
+  ];
+
+  const choose = (value: "voice" | "silent" | "text" | "any"): void => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void api.setAnswerModePreference(value)
+      .then((result) => setPreference(result.preference))
+      .catch(() => setError("保存失败，请重试。"))
+      .finally(() => setBusy(false));
+  };
+
+  if (!loaded) {
+    return <p className="settings-section-note">正在读取作答偏好…</p>;
+  }
+
+  return (
+    <div className="settings-ai-control-row" role="group" aria-label="默认作答方式">
+      <span className="settings-ai-control-icon" aria-hidden="true"><Icon.Edit /></span>
+      <span className="settings-ai-control-copy">
+        <strong>默认作答方式</strong>
+        <small>
+          练习与复习时优先使用的作答方式（语音 / 静音结构 / 文字）。
+          此偏好跨设备一致；不影响「换一种方式」临时切换。
+          {error ? <span className="settings-section-error">{error}</span> : null}
+        </small>
+        <span className="settings-radio-group" role="radiogroup" aria-label="默认作答方式">
+          {options.map((option) => (
+            <label key={option.value} className="settings-radio-option">
+              <input
+                type="radio"
+                name="answer-mode-preference"
+                value={option.value}
+                checked={preference === option.value}
+                onChange={() => choose(option.value)}
+                disabled={busy}
+              />
+              <span>
+                <strong>{option.label}</strong>
+                <small>{option.hint}</small>
+              </span>
+            </label>
+          ))}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+// 2026-08-12：伴星语音偏好（设置 → 伴星 → 伴星语音）。
+// 音色/语速/段落停顿，设备级（localStorage 跨窗口共享：settings 写入、
+// 桌宠窗口读取并作用于 TTS 请求与段间播放）。
+function TtsVoiceSettings() {
+  const [settings, setSettings] = useState<PetTtsSettingsV1>(DEFAULT_PET_TTS);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    setSettings(readPetTtsSettings());
+    setLoaded(true);
+  }, []);
+
+  const update = (patch: Partial<PetTtsSettingsV1>): void => {
+    setSettings((current) => {
+      const next = { ...current, ...patch };
+      writePetTtsSettings(next);
+      return next;
+    });
+  };
+
+  if (!loaded) {
+    return <p className="settings-section-note">正在读取伴星语音设置…</p>;
+  }
+
+  return (
+    <div className="settings-ai-control-row" role="group" aria-label="伴星语音">
+      <span className="settings-ai-control-icon" aria-hidden="true"><Icon.Play /></span>
+      <span className="settings-ai-control-copy">
+        <strong>伴星语音</strong>
+        <small>
+          语音播报的音色、语速与段落停顿。此偏好保存在本机，即时生效。
+        </small>
+
+        <span className="settings-tts-field">
+          <label htmlFor="pet-tts-voice">音色</label>
+          <select
+            id="pet-tts-voice"
+            className="settings-tts-select"
+            value={settings.voice}
+            onChange={(event) => update({ voice: event.target.value })}
+          >
+            {PET_TTS_VOICES.map((voice) => (
+              <option key={voice.value} value={voice.value}>
+                {voice.label} · {voice.hint}
+              </option>
+            ))}
+          </select>
+        </span>
+
+        <span className="settings-radio-group" role="radiogroup" aria-label="语速">
+          {PET_TTS_RATES.map((rate) => (
+            <label key={rate.value} className="settings-radio-option">
+              <input
+                type="radio"
+                name="pet-tts-rate"
+                value={rate.value}
+                checked={settings.rate === rate.value}
+                onChange={() => update({ rate: rate.value })}
+              />
+              <span>
+                <strong>{rate.label}</strong>
+                <small>{rate.hint}</small>
+              </span>
+            </label>
+          ))}
+        </span>
+
+        <span className="settings-radio-group" role="radiogroup" aria-label="段落间隔">
+          {PET_TTS_SEGMENT_GAPS.map((gap) => (
+            <label key={gap.value} className="settings-radio-option">
+              <input
+                type="radio"
+                name="pet-tts-gap"
+                value={gap.value}
+                checked={settings.segmentGapMs === gap.value}
+                onChange={() => update({ segmentGapMs: gap.value })}
+              />
+              <span>
+                <strong>{gap.label}</strong>
+                <small>{gap.hint}</small>
+              </span>
+            </label>
+          ))}
+        </span>
+      </span>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("account");
-  // 伴星设置区状态（§7.1）：引导完成/跳过状态（桩态，宿主接 02-3 CAS 后持久化）。
-  const [onboardingConsumed, setOnboardingConsumed] = useState(false);
   const navRef = useRef<HTMLElement>(null);
 
   const [accountLoading, setAccountLoading] = useState(true);
@@ -219,6 +473,26 @@ export default function SettingsPage() {
     syncFromHash();
     window.addEventListener("hashchange", syncFromHash);
     return () => window.removeEventListener("hashchange", syncFromHash);
+  }, [visibleSectionIds]);
+
+  // 伴星菜单“伴星设置”等入口通过 /settings?section=<id> 直达具体选项卡
+  //（桌面主进程 focusMainWindow 与浏览器 fallback 均生成该 query）。
+  // 仅首次挂载消费一次，避免与 hash 机制（selectSection 写入）互相覆盖。
+  useEffect(() => {
+    const ids = visibleSectionIds.split(",").filter(Boolean);
+    const params = new URLSearchParams(window.location.search);
+    const section = params.get("section");
+    if (section && ids.includes(section)) {
+      setActiveSection(section as SettingsSectionId);
+      params.delete("section");
+      const query = params.toString();
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `${window.location.pathname}${query ? `?${query}` : ""}#${section}`,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时消费一次
   }, [visibleSectionIds]);
 
   useEffect(() => {
@@ -366,7 +640,7 @@ export default function SettingsPage() {
         className="workspace-page-header"
         title="设置"
         kicker="账户与数据"
-        subtitle="在一个地方管理个人资料、工作区、模型和数据工具。"
+        subtitle="在一个地方管理个人资料、工作区、AI 使用授权和数据工具。"
         actions={<ThemeToggle className="settings-theme-toggle" />}
       />
 
@@ -659,11 +933,30 @@ export default function SettingsPage() {
             >
               {activeSection === "model" && <>
               <SettingsPanelHeading
-                title="AI 模型与隐私治理"
-                description="系统统一配置 AI 平台，此处管理工作区的外发边界、数据策略和 AI 使用同意。"
+                title="AI 使用与数据"
+                description="管理工作区的 AI 使用授权、内容外发范围与数据保护策略。"
                 icon={Icon.Sparkle}
               />
               <AIPrivacySettings isOwner={isOwner} accountLoading={accountLoading} />
+              </>}
+            </section>
+
+            <section
+              id="pet"
+              className="settings-panel"
+              role="tabpanel"
+              aria-labelledby="settings-tab-pet"
+              hidden={activeSection !== "pet"}
+            >
+              {activeSection === "pet" && <>
+              <SettingsPanelHeading
+                title="桌宠伴星"
+                description="桌面 AI 学习伴星（角色 + 气泡 + 语音对话）。新用户默认开启，可在桌面角色菜单随时退出。"
+                icon={Icon.Sparkle}
+              />
+              <PetModeSetting />
+              <AnswerModePreferenceSetting />
+              <TtsVoiceSettings />
               </>}
             </section>
 
@@ -910,40 +1203,6 @@ export default function SettingsPage() {
                   )}
                 </div>
               )}
-            </section>
-
-            {/* 伴星设置区（§5.4/§5.5/§7.1）：首次引导 + 存在感档位说明 */}
-            <section
-              className="settings-section"
-              aria-labelledby="settings-tab-companion"
-              hidden={activeSection !== "companion"}
-            >
-              <SettingsPanelHeading
-                title="伴星"
-                description="学习伴侣的存在感、首次引导与相处方式。"
-                icon={Icon.Sparkle}
-              />
-              <CompanionSettings
-                onboardingConsumed={onboardingConsumed}
-                onStartOnboarding={() => {
-                  // 桩态：宿主接入 02-3 CAS start 后移除提示。
-                  console.info("[companion] onboarding start (integration pending)");
-                  setOnboardingConsumed(false);
-                }}
-                onSkipOnboarding={() => {
-                  // 桩态：宿主接入 02-3 CAS skip 后移除提示。
-                  console.info("[companion] onboarding skip (integration pending)");
-                  setOnboardingConsumed(true);
-                }}
-                onAdjustMode={() => {
-                  // 桩态：进入相处方式设置（存在感说明已在本分区可展开）。
-                  console.info("[companion] adjust mode (integration pending)");
-                }}
-                onReplayOnboarding={() => {
-                  console.info("[companion] onboarding replay (integration pending)");
-                  setOnboardingConsumed(false);
-                }}
-              />
             </section>
           </div>
         </div>

@@ -23,7 +23,7 @@ import {
   isRunErrorRetryable,
 } from "@ailearn/shared";
 import { logger } from "../lib/logger.ts";
-import { db } from "../db.ts";
+import { db, withWorkerWorkspaceTransaction } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import {
   lockJobLease,
@@ -493,73 +493,89 @@ export async function createNextTurnJob(
     .digest("hex");
   const idempotencyKey = `agent-turn:${runId}:${unitId}:${turnNo}`;
 
-  // 冲突修复（retry/恢复重跑）：jobs_workspace_idempotency_unique_idx 是全状态
-  // 唯一（含 succeeded），而 retry 重跑 prepare/恢复检查点会为同一 (run, unit, turn)
-  // 再次创建 job。直接 insert 会撞唯一键（此前表现为 "Agent turn 执行失败" +
-  // duplicate key，run 被标 agent_database 并陷入新的失败循环）。
-  // 语义：同 key job 已存在——非终态（pending/running）跳过（已有调度）；
-  // 终态（succeeded/failed/dead）重置为 pending 复用（重跑语义）。
-  const [existingJob] = await db
-    .select({ id: schema.jobs.id, status: schema.jobs.status })
-    .from(schema.jobs)
-    .where(and(
-      eq(schema.jobs.workspaceId, job.workspaceId),
-      eq(schema.jobs.idempotencyKey, idempotencyKey),
-    ))
-    .limit(1);
+  // jobs RLS 重开（0098/0100）下，本函数的 jobs SELECT/UPDATE/INSERT 与
+  // card_generation_units 更新全部在 workspace 事务内执行（app.workspace_id /
+  // app.user_id 满足 0019/0039 tenant+actor guard；requestedBy 为 null 时
+  // 0098 已将 insert_actor_guard 与 update guard 对齐为 IS NOT DISTINCT FROM，
+  // requested_by IS NULL 的兼容行可正常 INSERT/UPDATE）。
+  await withWorkerWorkspaceTransaction(
+    { workspaceId: job.workspaceId, userId: job.requestedBy },
+    async (tx) => {
+      // 冲突修复（retry/恢复重跑）：jobs_workspace_idempotency_unique_idx 是全状态
+      // 唯一（含 succeeded），而 retry 重跑 prepare/恢复检查点会为同一 (run, unit, turn)
+      // 再次创建 job。直接 insert 会撞唯一键（此前表现为 "Agent turn 执行失败" +
+      // duplicate key，run 被标 agent_database 并陷入新的失败循环）。
+      // 语义：同 key job 已存在——非终态（pending/running）跳过（已有调度）；
+      // 终态（succeeded/failed/dead）重置为 pending 复用（重跑语义）。
+      const [existingJob] = await tx
+        .select({ id: schema.jobs.id, status: schema.jobs.status })
+        .from(schema.jobs)
+        .where(and(
+          eq(schema.jobs.workspaceId, job.workspaceId),
+          eq(schema.jobs.idempotencyKey, idempotencyKey),
+        ))
+        .limit(1);
 
-  if (existingJob) {
-    if (existingJob.status === JobStatus.PENDING || existingJob.status === JobStatus.RUNNING) {
-      return;
-    }
-    await db
-      .update(schema.jobs)
-      .set({
-        status: JobStatus.PENDING,
-        attempts: 0,
-        lastError: null,
-        scheduledAt: now,
-        startedAt: null,
-        finishedAt: null,
-        leaseToken: null,
-        repairState: "none",
-        repairAttemptCount: 0,
-      })
-      .where(eq(schema.jobs.id, existingJob.id));
-    return;
-  }
+      if (existingJob) {
+        if (existingJob.status === JobStatus.PENDING || existingJob.status === JobStatus.RUNNING) {
+          return;
+        }
+        // 2026-08-11：终态 job 只重置 failed/dead——succeeded 是真正完成的
+        // turn，重置重跑会再次调用 provider（模型计费重复；工具副作用虽有
+        // eventKey 幂等，但开销与计费无法幂等）。
+        if (existingJob.status === JobStatus.SUCCEEDED) {
+          return;
+        }
+        await tx
+          .update(schema.jobs)
+          .set({
+            status: JobStatus.PENDING,
+            attempts: 0,
+            lastError: null,
+            scheduledAt: now,
+            startedAt: null,
+            finishedAt: null,
+            leaseToken: null,
+            repairState: "none",
+            repairAttemptCount: 0,
+          })
+          .where(eq(schema.jobs.id, existingJob.id));
+        return;
+      }
 
-  await db
-    .insert(schema.jobs)
-    .values({
-      type: JobType.EXECUTE_CARD_AGENT_TURN,
-      workspaceId: job.workspaceId,
-      requestedBy: job.requestedBy,
-      payload: {
-        generationRunId: runId,
-        agentUnitId: unitId,
-        turnNo,
-        inputHash: turnInputHash,
-        userId: job.requestedBy,
-      },
-      status: JobStatus.PENDING,
-      generationRunId: runId,
-      generationUnitId: unitId,
-      stage: "complete",
-      priority: 80,
-      resourceClass: "card_foreground",
-      idempotencyKey,
-    })
-    .returning();
+      await tx
+        .insert(schema.jobs)
+        .values({
+          type: JobType.EXECUTE_CARD_AGENT_TURN,
+          workspaceId: job.workspaceId,
+          requestedBy: job.requestedBy,
+          payload: {
+            generationRunId: runId,
+            agentUnitId: unitId,
+            turnNo,
+            inputHash: turnInputHash,
+            userId: job.requestedBy,
+          },
+          status: JobStatus.PENDING,
+          generationRunId: runId,
+          generationUnitId: unitId,
+          stage: "complete",
+          priority: 80,
+          resourceClass: "card_foreground",
+          idempotencyKey,
+        })
+        .returning();
 
-  // 更新 unit 的 scheduledAt
-  await db
-    .update(schema.cardGenerationUnits)
-    .set({ scheduledAt: now, updatedAt: now })
-    .where(and(
-      eq(schema.cardGenerationUnits.id, unitId),
-      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
-    ));
+      // 更新 unit 的 scheduledAt
+      await tx
+        .update(schema.cardGenerationUnits)
+        .set({ scheduledAt: now, updatedAt: now })
+        .where(and(
+          eq(schema.cardGenerationUnits.id, unitId),
+          eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+        ));
+    },
+  );
 }
 
 /** 处理 turn 结果，决定是否创建下一 turn 或标记终态 */

@@ -192,7 +192,32 @@ export const structuredProofEligibilityReportSchema = z.object({
   goldPassed: goldPassedProofSchema,
   /** 综合判定：五项全部通过才 eligible，否则 ineligible（fail closed） */
   eligibility: z.enum([EligibilityStatus.ELIGIBLE, EligibilityStatus.INELIGIBLE]),
-}).strict();
+}).strict().superRefine((report, ctx) => {
+  // 联动校验（2026-08-11）：eligibility 必须与五项判定一致——
+  // 注释承诺 "五项全部通过才 eligible"，schema 此前未强制，可构造
+  // eligibility=eligible 但 coverage 未覆盖的矛盾报告。
+  const allPassed =
+    (report.coverageProof.requiredFacetsCovered && report.coverageProof.disclosureBoundaryRespected)
+    && (!report.recallNonDisclosure.publicTokensDiscloseAnswer
+        && report.recallNonDisclosure.recallCoveredByStructuralEvidenceOnly)
+    && report.discrimination.sufficient
+    && report.a11yEquivalence.semanticRequirementUnchanged
+    && report.goldPassed.independentGoldPassed;
+  if (report.eligibility === EligibilityStatus.ELIGIBLE && !allPassed) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["eligibility"],
+      message: "eligibility=eligible 但五项判定未全部通过（fail-closed 契约）",
+    });
+  }
+  if (report.eligibility === EligibilityStatus.INELIGIBLE && allPassed) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["eligibility"],
+      message: "eligibility=ineligible 但五项判定全部通过（矛盾）",
+    });
+  }
+});
 export type StructuredProofEligibilityReport = z.infer<
   typeof structuredProofEligibilityReportSchema
 >;

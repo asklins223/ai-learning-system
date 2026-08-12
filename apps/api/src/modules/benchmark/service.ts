@@ -537,19 +537,39 @@ async function runPipelineForNote(
     if (!evidenceReady) throw new Error("evidence alignment timeout (60s)");
 
     // 6. 收集每个 key point 的 alignment 结果
+    // 2026-08-11：批量查询一次拉全部 evidence，按 keyPointId 分组取"最优"
+    //（此前每 kp 单独一次 findFirst，N 次往返）。
+    const kpIds = kps.map((k) => k.id);
+    const allEvidence = kpIds.length > 0
+      ? await db.query.evidences.findMany({
+          where: and(
+            inArray(evidences.keyPointId, kpIds),
+            eq(evidences.workspaceId, workspaceId),
+          ),
+        })
+      : [];
+    const bestByKeyPoint = new Map<string, typeof allEvidence[number]>();
+    for (const ev of allEvidence) {
+      const current = bestByKeyPoint.get(ev.keyPointId);
+      if (!current) {
+        bestByKeyPoint.set(ev.keyPointId, ev);
+        continue;
+      }
+      // 与查询 orderBy 相同的确定性选取：aligned 优先，score 降序，ID 升序
+      const rank = (alignment: string | null) =>
+        alignment === "aligned" ? 0 : alignment === "soft" ? 1 : alignment === "unaligned" ? 2 : 3;
+      const better =
+        rank(ev.alignment) < rank(current.alignment) ||
+        (rank(ev.alignment) === rank(current.alignment) &&
+          (ev.alignmentScore ?? 0) > (current.alignmentScore ?? 0)) ||
+        (rank(ev.alignment) === rank(current.alignment) &&
+          (ev.alignmentScore ?? 0) === (current.alignmentScore ?? 0) &&
+          ev.id < current.id);
+      if (better) bestByKeyPoint.set(ev.keyPointId, ev);
+    }
+
     for (const kp of kps) {
-      // N-008: 确定性选取 — aligned 优先, score 降序, ID 升序
-      const ev = await db.query.evidences.findFirst({
-        where: and(
-          eq(evidences.keyPointId, kp.id),
-          eq(evidences.workspaceId, workspaceId),
-        ),
-        orderBy: [
-          sql`CASE ${evidences.alignment} WHEN 'aligned' THEN 0 WHEN 'soft' THEN 1 WHEN 'unaligned' THEN 2 ELSE 3 END`,
-          desc(evidences.alignmentScore),
-          asc(evidences.id),
-        ],
-      });
+      const ev = bestByKeyPoint.get(kp.id) ?? null;
 
       result.keyPoints.push({
         ordinal: kp.ordinal,

@@ -20,7 +20,7 @@ function makeRepo(overrides: Partial<AnswerSubmissionRepository> = {}) {
   const locks: string[] = [];
   const repo: AnswerSubmissionRepository = {
     async findEpisode() {
-      return { id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "active", probeId: PROBE, contentExposureKey: "cex:kp1" };
+      return { id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "active", processingPhase: "awaiting_response", probeId: PROBE, contentExposureKey: "cex:kp1" };
     },
     async ensureProbe() {
       return { probeId: PROBE };
@@ -54,12 +54,30 @@ test("submitEpisodeAnswer：text_or_mixed 提交 → artifact locked + episode �
   const { repo, artifacts, locks } = makeRepo();
   const result = await submitEpisodeAnswer(baseInput(), repo);
   assert.equal(result.artifact.status, "locked");
-  assert.equal(result.episodeStatus, "answered_locked");
+  assert.equal(result.episodeStatus, "active");
+  assert.equal(result.processingPhase, "assessment_pending");
   assert.equal(result.artifact.modality, "text_or_mixed");
   assert.equal(result.artifact.probeId, PROBE, "probeId 来自 ensureProbe（非空，FK 前提）");
   assert.ok(result.artifact.contentHash.startsWith("sha256:"), "contentHash 带 sha256 前缀");
   assert.equal(artifacts.length, 1);
   assert.deepEqual(locks, [EPISODE]);
+});
+
+test("submitEpisodeAnswer：artifact 与 assessment outbox 使用同一组作用域 ID", async () => {
+  const enqueued: Array<Record<string, string>> = [];
+  const { repo } = makeRepo({
+    async enqueueAssessment(input) {
+      enqueued.push(input);
+    },
+  });
+  const result = await submitEpisodeAnswer(baseInput(), repo);
+  assert.deepEqual(enqueued, [{
+    workspaceId: WS,
+    userId: USER,
+    sessionId: SESSION,
+    episodeId: EPISODE,
+    artifactId: result.artifact.artifactId,
+  }]);
 });
 
 test("submitEpisodeAnswer：voice transcript 提交 → payload 为 confirmedTranscript", async () => {
@@ -72,7 +90,7 @@ test("submitEpisodeAnswer：空回答 → fail closed", async () => {
   const { repo, artifacts } = makeRepo();
   await assert.rejects(
     () => submitEpisodeAnswer({ ...baseInput(), text: "   " }, repo),
-    (err: unknown) => err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "EMPTY_ANSWER",
+    (err: unknown) => err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "empty_answer",
   );
   assert.equal(artifacts.length, 0);
 });
@@ -82,29 +100,29 @@ test("submitEpisodeAnswer：Episode 不存在 → 404", async () => {
   await assert.rejects(
     () => submitEpisodeAnswer(baseInput(), repo),
     (err: unknown) =>
-      err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "EPISODE_NOT_FOUND",
+      err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "episode_not_found",
   );
 });
 
 test("submitEpisodeAnswer：Episode 非 active → 不可作答", async () => {
   const { repo } = makeRepo({
-    findEpisode: async () => ({ id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "answered_locked", probeId: PROBE, contentExposureKey: "cex:kp1" }),
+    findEpisode: async () => ({ id: EPISODE, sessionId: SESSION, keyPointId: KEY_POINT, status: "active", processingPhase: "assessment_pending", probeId: PROBE, contentExposureKey: "cex:kp1" }),
   });
   await assert.rejects(
     () => submitEpisodeAnswer(baseInput(), repo),
     (err: unknown) =>
-      err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "EPISODE_NOT_ANSWERABLE",
+      err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "episode_not_answerable",
   );
 });
 
 test("submitEpisodeAnswer：Episode 属于其他 Session → 409", async () => {
   const { repo } = makeRepo({
-    findEpisode: async () => ({ id: EPISODE, sessionId: "other-session", keyPointId: KEY_POINT, status: "active", probeId: PROBE, contentExposureKey: "cex:kp1" }),
+    findEpisode: async () => ({ id: EPISODE, sessionId: "other-session", keyPointId: KEY_POINT, status: "active", processingPhase: "awaiting_response", probeId: PROBE, contentExposureKey: "cex:kp1" }),
   });
   await assert.rejects(
     () => submitEpisodeAnswer(baseInput(), repo),
     (err: unknown) =>
-      err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "SESSION_MISMATCH",
+      err instanceof AnswerSubmissionError && (err as AnswerSubmissionError).code === "session_mismatch",
   );
 });
 

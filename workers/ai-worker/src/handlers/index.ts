@@ -8,6 +8,7 @@ import { evaluateValidationViaChat } from "../lib/business-ai-ops.ts";
 import { alignQuote } from "../lib/align.ts";
 // N-011: AI 治理 — 同意门禁 + 审计日志
 import {
+  AIConsentRequiredError,
   enforcePrivacyGovernanceWithPolicy,
   logAICall,
   resolveAIGovernanceContext,
@@ -460,7 +461,7 @@ export async function runEvaluateValidation(job: JobPayload) {
   const ev = evidenceRows[0];
   const referenceText = ev?.block_content ?? "";
   if (!govCtx.consentOk) {
-    throw new Error("AI consent not signed for this workspace. Owner must sign AI consent before using external AI providers.");
+    throw new AIConsentRequiredError();
   }
 
   // R3: Route text_generation tasks to a potentially different (cheaper) provider

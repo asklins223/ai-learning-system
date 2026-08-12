@@ -10,7 +10,9 @@ import {
   GetObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
+  NoSuchKey,
 } from "@aws-sdk/client-s3";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { logger } from "./logger.ts";
 
 function getRequiredEnv(name: string): string {
@@ -29,8 +31,32 @@ function getRequiredEnv(name: string): string {
 // 虽然 S3Client 构造是同步的，但如果 getRequiredEnv 抛出异常后 client
 // 仍为 null，后续重试可能因为状态不一致而失败。
 // 改为使用 Promise 缓存模式，确保只构造一次。
+//
+// 2026-08-12（存储面审计）：
+// - 独立凭证支持：MINIO_ACCESS_KEY/MINIO_SECRET_KEY 优先（最小权限原则，
+//   建议用仅限目标 bucket 的 access key），回退 MINIO_ROOT_USER/PASSWORD。
+// - 请求超时：S3Client 默认无 requestTimeout，MinIO 半挂时请求无限挂起
+//   （50MB 内存 buffer 无法释放）。加 NodeHttpHandler 连接 10s/请求超时
+//   （STORAGE_REQUEST_TIMEOUT_MS 可配，默认 120s）。
 let client: S3Client | null = null;
 let clientInitError: Error | null = null;
+
+function storageCredentials(): { accessKeyId: string; secretAccessKey: string } {
+  // 2026-08-12 review：`||` 而非 `??`——MINIO_ACCESS_KEY="" 空串时回退 root，
+  // 与 isStorageConfigured 的 truthy 语义一致（空串按未配置处理）。
+  const accessKeyId = process.env.MINIO_ACCESS_KEY?.trim()
+    || getRequiredEnv("MINIO_ROOT_USER");
+  const secretAccessKey = process.env.MINIO_SECRET_KEY?.trim()
+    || getRequiredEnv("MINIO_ROOT_PASSWORD");
+  return { accessKeyId, secretAccessKey };
+}
+
+function storageRequestTimeoutMs(): number {
+  const raw = process.env.STORAGE_REQUEST_TIMEOUT_MS?.trim();
+  if (!raw) return 120_000;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 1_000 ? value : 120_000;
+}
 
 function getClient(): S3Client {
   // 如果已有客户端实例，直接返回
@@ -42,13 +68,16 @@ function getClient(): S3Client {
   try {
     const endpoint = process.env.STORAGE_ENDPOINT ?? "http://minio:9000";
     const region = process.env.S3_REGION ?? "us-east-1";
-    const accessKeyId = getRequiredEnv("MINIO_ROOT_USER");
-    const secretAccessKey = getRequiredEnv("MINIO_ROOT_PASSWORD");
+    const { accessKeyId, secretAccessKey } = storageCredentials();
     client = new S3Client({
       endpoint,
       region,
       credentials: { accessKeyId, secretAccessKey },
       forcePathStyle: true,
+      requestHandler: new NodeHttpHandler({
+        connectionTimeout: 10_000,
+        requestTimeout: storageRequestTimeoutMs(),
+      }),
     });
     logger.info({ endpoint, region }, "S3 client initialized");
     return client;
@@ -67,7 +96,11 @@ function getBucket(): string {
  * Used by the readiness check to determine if upload endpoints should be available.
  */
 export function isStorageConfigured(): boolean {
-  return Boolean(process.env.MINIO_ROOT_USER && process.env.MINIO_ROOT_PASSWORD);
+  // 2026-08-12：独立凭证与 root 凭证任一齐全即视为已配置
+  return Boolean(
+    (process.env.MINIO_ACCESS_KEY && process.env.MINIO_SECRET_KEY)
+    || (process.env.MINIO_ROOT_USER && process.env.MINIO_ROOT_PASSWORD),
+  );
 }
 
 export interface UploadResult {
@@ -151,6 +184,11 @@ export async function getObject(objectKey: string): Promise<DownloadResult> {
 export async function headObject(
   objectKey: string,
 ): Promise<{ etag: string | undefined; contentType: string | undefined; contentLength: number | undefined } | null> {
+  // 2026-08-12（存储面审计）：与 getObject 同款路径遍历防御（纵深——所有
+  // 调用方当前已在路由层校验，新增调用方不易踩坑）。
+  if (objectKey.includes("..")) {
+    throw new Error(`invalid object key: path traversal detected in "${objectKey}"`);
+  }
   const command = new HeadObjectCommand({
     Bucket: getBucket(),
     Key: objectKey,
@@ -162,8 +200,15 @@ export async function headObject(
       contentType: result.ContentType,
       contentLength: result.ContentLength,
     };
-  } catch {
-    return null;
+  } catch (err) {
+    // 2026-08-12（存储面审计）：只把“对象不存在”折叠为 null；
+    // S3 服务端故障/网络错误向上抛，路由层可区分 404 与 503（此前
+    // 一律吞成 null，MinIO 故障不可观测）。403 保持折叠（防存在性 oracle）。
+    const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    if (status === 403 || status === 404 || err instanceof NoSuchKey) {
+      return null;
+    }
+    throw err;
   }
 }
 

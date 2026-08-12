@@ -98,7 +98,7 @@ export async function search(
   workspaceId: string,
   query: string,
   opts?: { type?: string; limit?: number; offset?: number },
-): Promise<{ items: SearchResult[]; total: number; nextOffset: number | null }> {
+): Promise<{ items: SearchResult[]; total: number; nextCursor: number | null }> {
   const limit = Math.min(opts?.limit ?? 20, 50);
   const offset = Math.max(opts?.offset ?? 0, 0);
   const type = opts?.type ?? null;
@@ -272,7 +272,7 @@ export async function search(
   return {
     items,
     total,
-    nextOffset: consumed < total ? consumed : null,
+    nextCursor: consumed < total ? consumed : null,
   };
 }
 

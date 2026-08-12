@@ -201,6 +201,53 @@ BEGIN
     ALTER FUNCTION public.ailearn_fail_job(uuid, uuid, text, text, integer)
       OWNER TO ailearn_migrator;
   END IF;
+
+  -- 0098/0100：新增的 SECURITY DEFINER 函数同样由迁移（dev 用 ailearn 角色）
+  -- 创建，必须把 owner 收敛到 ailearn_migrator（BYPASSRLS 语义依赖）。
+  IF to_regprocedure('public.ailearn_mark_dead_jobs_under_terminal_runs()') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_mark_dead_jobs_under_terminal_runs()
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_find_reaped_generation_jobs(uuid[])') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_find_reaped_generation_jobs(uuid[])
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_latest_dead_generation_job_ids(integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_latest_dead_generation_job_ids(integer)
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_queue_job_depth()') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_queue_job_depth()
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_queue_oldest_pending_age()') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_queue_oldest_pending_age()
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_enqueue_agent_turn_job(uuid,uuid,uuid,uuid,integer,text,integer,text,text,text)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_enqueue_agent_turn_job(uuid, uuid, uuid, uuid, integer, text, integer, text, text, text)
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_find_active_turn_job(uuid,uuid,uuid)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_find_active_turn_job(uuid, uuid, uuid)
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_purge_companion_audit_ttl(integer,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_purge_companion_audit_ttl(integer, integer)
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_purge_invitation_ledger_ttl(integer,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_purge_invitation_ledger_ttl(integer, integer)
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_purge_processed_outbox_ttl(integer,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_purge_processed_outbox_ttl(integer, integer)
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_purge_tutor_nonces_ttl(integer,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_purge_tutor_nonces_ttl(integer, integer)
+      OWNER TO ailearn_migrator;
+  END IF;
 END
 $$;
 
@@ -251,9 +298,40 @@ BEGIN
     'card_generation_units',
     'card_generation_candidates',
     'card_generation_candidate_evidence',
+    'card_generation_agent_events',
+    'card_generation_source_bundles',
+    'card_generation_source_bundle_members',
+    'card_generation_drafts',
+    'card_generation_quality_reports',
+    'note_evidence_embeddings',
+    'card_generation_plans',
+    'provisional_candidates',
     'search_documents',
     'ai_artifacts',
-    'user_ai_model_configs'
+    'user_ai_model_configs',
+    'review_attempts',
+    'validation_questions',
+    'validation_question_rubric_items',
+    'validation_submissions',
+    'validation_assistance_exposures',
+    'learning_sessions',
+    'learning_episodes',
+    'learning_session_probes',
+    'learning_response_artifacts',
+    'learning_assessment_reports',
+    'learning_session_processing_outbox',
+    'learning_unit_exposure',
+    'learning_exposure_dependency_ledger',
+    'learning_outbox_events',
+    'learning_tutor_detours',
+    'learning_tutor_permissions',
+    'learning_tutor_action_nonces',
+    'companion_conversations',
+    'companion_messages',
+    'companion_turn_runs',
+    'companion_stream_events',
+    'companion_action_proposals',
+    'companion_action_runs'
   ]
   LOOP
     IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
@@ -272,7 +350,12 @@ BEGIN
     'search_documents',
     'card_generation_units',
     'card_generation_candidates',
-    'note_image_insights'
+    'note_image_insights',
+    'card_generation_agent_events',
+    'card_generation_source_bundles',
+    'card_generation_source_bundle_members',
+    'card_generation_quality_reports',
+    'note_evidence_embeddings'
   ]
   LOOP
     IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
@@ -286,6 +369,83 @@ BEGIN
   IF to_regclass('public.card_generation_runs') IS NOT NULL THEN
     GRANT UPDATE ON TABLE public.card_generation_runs TO ailearn_worker;
   END IF;
+
+  IF to_regclass('public.review_attempts') IS NOT NULL THEN
+    GRANT UPDATE ON TABLE public.review_attempts TO ailearn_worker;
+  END IF;
+
+  IF to_regclass('public.validation_questions') IS NOT NULL THEN
+    GRANT INSERT ON TABLE public.validation_questions TO ailearn_worker;
+  END IF;
+
+  IF to_regclass('public.validation_question_rubric_items') IS NOT NULL THEN
+    GRANT INSERT ON TABLE public.validation_question_rubric_items TO ailearn_worker;
+  END IF;
+
+  IF to_regclass('public.validation_submissions') IS NOT NULL THEN
+    GRANT UPDATE ON TABLE public.validation_submissions TO ailearn_worker;
+  END IF;
+
+  IF to_regclass('public.validation_point_assessments') IS NOT NULL THEN
+    GRANT INSERT ON TABLE public.validation_point_assessments TO ailearn_worker;
+  END IF;
+
+  IF to_regclass('public.scheduling_shadow_decisions') IS NOT NULL THEN
+    GRANT INSERT ON TABLE public.scheduling_shadow_decisions TO ailearn_worker;
+  END IF;
+
+  IF to_regclass('public.learning_assessment_reports') IS NOT NULL THEN
+    GRANT INSERT ON TABLE public.learning_assessment_reports TO ailearn_worker;
+  END IF;
+
+  -- 0077/0078 授予 worker 的最小写权限镜像（roles.sql 是唯一授权源；
+  -- 不镜像的话 post-migration 重跑会 REVOKE 迁移授予的权限并被矩阵"判对"）。
+  IF to_regclass('public.learning_unit_exposure') IS NOT NULL THEN
+    GRANT INSERT, UPDATE ON TABLE public.learning_unit_exposure TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.learning_exposure_dependency_ledger') IS NOT NULL THEN
+    GRANT INSERT, UPDATE ON TABLE public.learning_exposure_dependency_ledger TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.learning_outbox_events') IS NOT NULL THEN
+    -- 0078 语义：worker 只读 + 标记消费（UPDATE processed_at），无 INSERT。
+    GRANT UPDATE ON TABLE public.learning_outbox_events TO ailearn_worker;
+  END IF;
+
+  -- P2/P5 companion runtime：worker 读取对话/run/action 状态，写入对话
+  -- 结果和事件，并只更新 API 已创建的 run/proposal/sequence 投影；不授予
+  -- worker 创建 action proposal/run 或删除会话数据的权限。
+  IF to_regclass('public.companion_conversations') IS NOT NULL THEN
+    GRANT UPDATE ON TABLE public.companion_conversations TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.companion_messages') IS NOT NULL THEN
+    GRANT INSERT ON TABLE public.companion_messages TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.companion_turn_runs') IS NOT NULL THEN
+    GRANT UPDATE ON TABLE public.companion_turn_runs TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.companion_stream_events') IS NOT NULL THEN
+    GRANT INSERT, UPDATE ON TABLE public.companion_stream_events TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.companion_action_proposals') IS NOT NULL THEN
+    GRANT UPDATE ON TABLE public.companion_action_proposals TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.companion_action_runs') IS NOT NULL THEN
+    GRANT UPDATE ON TABLE public.companion_action_runs TO ailearn_worker;
+  END IF;
+
+  FOREACH table_name IN ARRAY ARRAY[
+    'learning_episodes',
+    'learning_response_artifacts',
+    'learning_session_processing_outbox'
+  ]
+  LOOP
+    IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT UPDATE ON TABLE public.%I TO ailearn_worker',
+        table_name
+      );
+    END IF;
+  END LOOP;
 
   FOREACH table_name IN ARRAY ARRAY[
     'ai_artifacts',
@@ -302,6 +462,22 @@ BEGIN
       EXECUTE format('GRANT INSERT ON TABLE public.%I TO ailearn_worker', table_name);
     END IF;
   END LOOP;
+
+  IF to_regclass('public.card_generation_candidate_evidence') IS NOT NULL THEN
+    -- 0100：candidate-ledger 删除证据路径（与矩阵 can_delete=true 对齐，
+    -- 否则 roles.sql 重跑矩阵校验 RAISE）。
+    GRANT DELETE ON TABLE public.card_generation_candidate_evidence TO ailearn_worker;
+  END IF;
+
+  -- 0071 已授予 worker 的 plans/provisional 写权限（生成流程在 workspace 事务内
+  -- INSERT plan / provisional candidates）；roles.sql 此前未收录这两张表，
+  -- 重跑会 REVOKE 并致 worker 生成路径权限失败——此处补齐。
+  IF to_regclass('public.card_generation_plans') IS NOT NULL THEN
+    GRANT INSERT ON TABLE public.card_generation_plans TO ailearn_worker;
+  END IF;
+  IF to_regclass('public.provisional_candidates') IS NOT NULL THEN
+    GRANT INSERT, UPDATE ON TABLE public.provisional_candidates TO ailearn_worker;
+  END IF;
 
   IF to_regclass('public.evidences') IS NOT NULL THEN
     GRANT INSERT, DELETE ON TABLE public.evidences TO ailearn_worker;
@@ -370,6 +546,77 @@ BEGIN
       FROM PUBLIC, ailearn_api;
     GRANT EXECUTE ON FUNCTION public.ailearn_fail_job(uuid, uuid, text, text, integer)
       TO ailearn_worker;
+  END IF;
+
+  -- 0098：jobs RLS 重开后的跨 workspace 维护函数（migrator owner BYPASSRLS）。
+  IF to_regprocedure('public.ailearn_mark_dead_jobs_under_terminal_runs()') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_mark_dead_jobs_under_terminal_runs()
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_mark_dead_jobs_under_terminal_runs()
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_find_reaped_generation_jobs(uuid[])') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_find_reaped_generation_jobs(uuid[])
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_find_reaped_generation_jobs(uuid[])
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_latest_dead_generation_job_ids(integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_latest_dead_generation_job_ids(integer)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_latest_dead_generation_job_ids(integer)
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_queue_job_depth()') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_queue_job_depth()
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_queue_job_depth()
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_queue_oldest_pending_age()') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_queue_oldest_pending_age()
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_queue_oldest_pending_age()
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_enqueue_agent_turn_job(uuid,uuid,uuid,uuid,integer,text,integer,text,text,text)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_enqueue_agent_turn_job(uuid,uuid,uuid,uuid,integer,text,integer,text,text,text)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_enqueue_agent_turn_job(uuid,uuid,uuid,uuid,integer,text,integer,text,text,text)
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_find_active_turn_job(uuid,uuid,uuid)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_find_active_turn_job(uuid,uuid,uuid)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_find_active_turn_job(uuid,uuid,uuid)
+      TO ailearn_worker;
+  END IF;
+
+  -- 0098：TTL 清理函数经 SECURITY DEFINER（migrator owner BYPASSRLS）执行，
+  -- 由 API 进程（server.ts 每 6 小时定时）调用——API 需要 EXECUTE。
+  IF to_regprocedure('public.ailearn_purge_companion_audit_ttl(integer,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_purge_companion_audit_ttl(integer, integer)
+      FROM PUBLIC, ailearn_worker;
+    GRANT EXECUTE ON FUNCTION public.ailearn_purge_companion_audit_ttl(integer, integer)
+      TO ailearn_api;
+  END IF;
+  IF to_regprocedure('public.ailearn_purge_invitation_ledger_ttl(integer,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_purge_invitation_ledger_ttl(integer, integer)
+      FROM PUBLIC, ailearn_worker;
+    GRANT EXECUTE ON FUNCTION public.ailearn_purge_invitation_ledger_ttl(integer, integer)
+      TO ailearn_api;
+  END IF;
+  IF to_regprocedure('public.ailearn_purge_processed_outbox_ttl(integer,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_purge_processed_outbox_ttl(integer, integer)
+      FROM PUBLIC, ailearn_worker;
+    GRANT EXECUTE ON FUNCTION public.ailearn_purge_processed_outbox_ttl(integer, integer)
+      TO ailearn_api;
+  END IF;
+  IF to_regprocedure('public.ailearn_purge_tutor_nonces_ttl(integer,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_purge_tutor_nonces_ttl(integer, integer)
+      FROM PUBLIC, ailearn_worker;
+    GRANT EXECUTE ON FUNCTION public.ailearn_purge_tutor_nonces_ttl(integer, integer)
+      TO ailearn_api;
   END IF;
 END
 $$;
@@ -547,10 +794,43 @@ BEGIN
       ('note_evidence_spans', true, true, false, false),
       ('card_generation_units', true, true, true, false),
       ('card_generation_candidates', true, true, true, false),
-      ('card_generation_candidate_evidence', true, true, false, false),
+      ('card_generation_candidate_evidence', true, true, false, true),
+      ('card_generation_plans', true, true, false, false),
+      ('provisional_candidates', true, true, true, false),
+      ('card_generation_agent_events', true, true, true, false),
+      ('card_generation_source_bundles', true, true, true, false),
+      ('card_generation_source_bundle_members', true, true, true, false),
+      ('card_generation_drafts', true, false, false, false),
+      ('card_generation_quality_reports', true, true, true, false),
+      ('note_evidence_embeddings', true, true, true, false),
       ('search_documents', true, true, true, true),
       ('ai_artifacts', true, true, false, false),
       ('user_ai_model_configs', true, false, false, false),
+      ('review_attempts', true, false, true, false),
+      ('validation_questions', true, true, false, false),
+      ('validation_question_rubric_items', true, true, false, false),
+      ('validation_submissions', true, false, true, false),
+      ('validation_assistance_exposures', true, false, false, false),
+      ('validation_point_assessments', false, true, false, false),
+      ('scheduling_shadow_decisions', false, true, false, false),
+      ('learning_sessions', true, false, false, false),
+      ('learning_episodes', true, false, true, false),
+      ('learning_session_probes', true, false, false, false),
+      ('learning_response_artifacts', true, false, true, false),
+      ('learning_assessment_reports', true, true, false, false),
+      ('learning_session_processing_outbox', true, false, true, false),
+      ('learning_unit_exposure', true, true, true, false),
+      ('learning_exposure_dependency_ledger', true, true, true, false),
+      ('learning_outbox_events', true, false, true, false),
+      ('learning_tutor_detours', true, false, false, false),
+      ('learning_tutor_permissions', true, false, false, false),
+      ('learning_tutor_action_nonces', true, false, false, false),
+      ('companion_conversations', true, false, true, false),
+      ('companion_messages', true, true, false, false),
+      ('companion_turn_runs', true, false, true, false),
+      ('companion_stream_events', true, true, true, false),
+      ('companion_action_proposals', true, false, true, false),
+      ('companion_action_runs', true, false, true, false),
       ('understanding_events', false, true, false, false),
       ('ai_audit_log', false, true, false, false)
   ), actual AS (
@@ -666,7 +946,18 @@ BEGIN
       to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)'),
       to_regprocedure('public.ailearn_renew_job_lease(uuid,uuid,text)'),
       to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)'),
-      to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)')
+      to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)'),
+      to_regprocedure('public.ailearn_mark_dead_jobs_under_terminal_runs()'),
+      to_regprocedure('public.ailearn_find_reaped_generation_jobs(uuid[])'),
+      to_regprocedure('public.ailearn_latest_dead_generation_job_ids(integer)'),
+      to_regprocedure('public.ailearn_queue_job_depth()'),
+      to_regprocedure('public.ailearn_queue_oldest_pending_age()'),
+      to_regprocedure('public.ailearn_enqueue_agent_turn_job(uuid,uuid,uuid,uuid,integer,text,integer,text,text,text)'),
+      to_regprocedure('public.ailearn_find_active_turn_job(uuid,uuid,uuid)'),
+      to_regprocedure('public.ailearn_purge_companion_audit_ttl(integer,integer)'),
+      to_regprocedure('public.ailearn_purge_invitation_ledger_ttl(integer,integer)'),
+      to_regprocedure('public.ailearn_purge_processed_outbox_ttl(integer,integer)'),
+      to_regprocedure('public.ailearn_purge_tutor_nonces_ttl(integer,integer)')
     )
       AND (
         NOT p.prosecdef
@@ -693,7 +984,21 @@ BEGIN
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)')
     AND p.oid IS DISTINCT FROM
-      to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)');
+      to_regprocedure('public.ailearn_fail_job(uuid,uuid,text,text,integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_mark_dead_jobs_under_terminal_runs()')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_find_reaped_generation_jobs(uuid[])')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_latest_dead_generation_job_ids(integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_queue_job_depth()')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_queue_oldest_pending_age()')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_enqueue_agent_turn_job(uuid,uuid,uuid,uuid,integer,text,integer,text,text,text)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_find_active_turn_job(uuid,uuid,uuid)');
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'Worker has unexpected function EXECUTE privileges: %', mismatch;
   END IF;
@@ -703,7 +1008,15 @@ BEGIN
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname = 'public'
-    AND has_function_privilege('ailearn_api', p.oid, 'EXECUTE');
+    AND has_function_privilege('ailearn_api', p.oid, 'EXECUTE')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_purge_companion_audit_ttl(integer,integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_purge_invitation_ledger_ttl(integer,integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_purge_processed_outbox_ttl(integer,integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_purge_tutor_nonces_ttl(integer,integer)');
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'API has unexpected function EXECUTE privileges: %', mismatch;
   END IF;
@@ -715,24 +1028,32 @@ $$;
 -- pre-migration pass allows an older database to reach the forward migration
 -- endpoint; migration 0027 restores expansion mode after 0024 was journaled
 -- before runtime transaction scoping was complete.  The post-migration pass
--- sets require_rls_disabled=true and fails closed if any public table remains
--- protected.
+-- fails closed when protection is incomplete.
+-- 2026-08-11（第十轮修复）：原检查统计"启用了 RLS 的表数"，0111 为六张
+-- card_generation 表启用 RLS 后 enabled_count>0 必然 RAISE，导致生产
+-- role-grants 服务（REQUIRE_RLS_DISABLED=true）部署挂起。语义改为 fail-closed
+-- 的真正意图：**有 RLS 的表必须都有 policy**（未完成保护的 RLS 表 = 裸隔离）
+-- ——预迁移（全表无 RLS）与 0111 后（六表 RLS+双 policy）都通过。
 DO $$
 DECLARE
-  enabled_count integer;
+  unprotected_count integer;
 BEGIN
-  SELECT count(*) INTO enabled_count
+  SELECT count(*) INTO unprotected_count
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = 'public'
     AND c.relkind IN ('r', 'p')
-    AND c.relrowsecurity;
+    AND c.relrowsecurity
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_policies p
+      WHERE p.schemaname = 'public' AND p.tablename = c.relname
+    );
   IF coalesce(current_setting('ailearn.require_rls_disabled', true), 'false')::boolean
-    AND enabled_count > 0
+    AND unprotected_count > 0
   THEN
     RAISE EXCEPTION
-      'RLS is enabled on % public tables; migration/policies must be completed before applications start',
-      enabled_count;
+      '% public table(s) have RLS enabled without any policy; migration/policies must be completed before applications start',
+      unprotected_count;
   END IF;
 END
 $$;

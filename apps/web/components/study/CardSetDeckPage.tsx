@@ -99,7 +99,10 @@ export function CardSetDeckPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
-  const [cardsCache, setCardsCache] = useState<Record<string, CardDetailResponse[]>>({});
+  // 2026-08-11：缓存带时间戳（TTL 60s）——此前只增不改、无失效策略，
+  // 其他标签页/设备修改卡组成员后重复展开永远展示陈旧数据直到整页刷新。
+  const CARDS_CACHE_TTL_MS = 60_000;
+  const [cardsCache, setCardsCache] = useState<Record<string, { fetchedAt: number; items: CardDetailResponse[] }>>({});
   const [cardsLoading, setCardsLoading] = useState(false);
   const [cardsError, setCardsError] = useState<string | null>(null);
   const [collapseCount, setCollapseCount] = useState(0);
@@ -194,16 +197,19 @@ export function CardSetDeckPage() {
     }
   }, [nextCursor, sets]);
 
-  /* ── 展开成员（Map 缓存，重复展开/收起不重请求，§6.2） ── */
+  /* ── 展开成员（TTL 缓存：60s 内复用，过期后台静默刷新，§6.2） ── */
   const loadSetCards = useCallback(async (setId: string) => {
-    if (cardsCache[setId]) return;
+    const cached = cardsCache[setId];
+    const isStale = Boolean(cached && Date.now() - cached.fetchedAt >= CARDS_CACHE_TTL_MS);
+    if (cached && !isStale) return;
     const requestId = ++cardsRequestRef.current;
-    setCardsLoading(true);
+    // 无缓存才显示 loading；过期缓存展开时先展示旧数据、后台静默刷新
+    if (!cached) setCardsLoading(true);
     setCardsError(null);
     try {
       const result = await api.listCardSetCards(setId, { limit: 60 });
       if (requestId !== cardsRequestRef.current) return;
-      setCardsCache((previous) => ({ ...previous, [setId]: result.items }));
+      setCardsCache((previous) => ({ ...previous, [setId]: { fetchedAt: Date.now(), items: result.items } }));
     } catch {
       if (requestId !== cardsRequestRef.current) return;
       setCardsError("卡组成员暂时无法读取，请重试。");
@@ -343,7 +349,7 @@ export function CardSetDeckPage() {
   const expandedSet =
     (state.expandedId && sets?.find((item) => item.id === state.expandedId))
     ?? null;
-  const expandedCards = state.expandedId ? cardsCache[state.expandedId] ?? null : null;
+  const expandedCards = state.expandedId ? cardsCache[state.expandedId]?.items ?? null : null;
   const hasLocalFilter = state.query.trim().length > 0 || state.filter !== "all";
   const activeFilterLabel =
     FILTERS.find((item) => item.key === state.filter)?.label ?? "全部";

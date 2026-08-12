@@ -1,36 +1,38 @@
 /**
  * 文字闭环：评测服务（审计救火顺序 3 后半——回答 → 评测 → disposition）。
  *
- * 消费 answer 端点产出的锁定 artifact，经确定性 rubric 判定（比较用户答案与
- * 净化题面/证据结构，非 LLM 自由裁量——LLM 评测经 worker learning_session_assess
- * 接线）→ 签发 EpisodeTrustDecision → runRubricSessionReducer → disposition。
+ * 消费 answer 端点产出的锁定 artifact。独立 Critic 尚未接入前，本服务只产生
+ * diagnostic/not_assessable 报告，绝不把答案升级为正式理解或掌握事实。
  *
  * 端点：
  * - POST /learning-sessions/:id/episodes/:episodeId/assess
  *   body: { artifactId }（可选 rubricItemId 指定，缺省评测全部 rubric targets）
  *
  * 安全：
- * - 仅接受已锁定 artifact（status=locked）与已锁定 episode（answered_locked）；
+ * - 仅接受已锁定 artifact（status=locked）与 processing_phase=assessment_pending；
  * - 同 artifact 重放 hash 一致（issueEpisodeTrustDecision 确定性）；
  * - 0 掌握/schedule 写入（COMMIT 是后续步骤）。
  */
 
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
+import {
+  computeAssessmentReportHash,
+  computeAssessmentInputHash,
+  computeFailClosedAssessmentDecisionHash,
+} from "@ailearn/shared";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession } from "../identity/middleware.ts";
+import {
+  isLearningSessionCanonicalCommitEnabled,
+  isLearningSessionV2InternalEnabled,
+} from "../../config/learning-companion-flags.ts";
 import {
   issueEpisodeTrustDecision,
   runRubricSessionReducer,
   type RubricSessionItemInput,
 } from "./trust-service.ts";
-
-/** 确定性 hex hash（report_hash 计算） */
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
-}
 
 // ─── 错误 ────────────────────────────────────────────────────────────────
 
@@ -79,6 +81,7 @@ export interface AssessmentRepository {
     episodeId: string;
     sessionId: string;
     status: string;
+    processingPhase: string;
     rubricTargets: unknown[];
     episodeEpoch: number;
   } | null>;
@@ -89,14 +92,26 @@ export interface AssessmentRepository {
     episodeId: string,
     assessment: AssessmentResult,
   ): Promise<void>;
+  /** Idempotent replay after a worker/API race has already completed it. */
+  findExistingAssessment?: (
+    workspaceId: string,
+    userId: string,
+    episodeId: string,
+    artifactId: string,
+  ) => Promise<AssessmentResult | null>;
+  /** Advance the processing axis without changing Episode lifecycle status. */
+  markAssessmentComplete?: (
+    workspaceId: string,
+    userId: string,
+    episodeId: string,
+  ) => Promise<void>;
 }
 
 // ─── 纯函数：deterministic rubric 判定 ───────────────────────────────────
 
 /**
- * 确定性 rubric 判定（非 LLM）：比较用户答案文本与 rubric target 的
- * evidenceHash——答案内容 hash 覆盖对应 evidence 视为 covered，否则 missing。
- * （完整语义评测经 worker learning_session_assess 接入 LLM 路径。）
+ * 独立 Critic 缺席时 fail closed。不能用“答案非空”证明任何 rubric criterion；
+ * 所有 item 都标记 not_assessable。
  */
 export function deterministicRubricVerdict(
   answerText: string,
@@ -106,13 +121,11 @@ export function deterministicRubricVerdict(
   return (rubricTargets as Array<{ itemId?: string; evidenceHash?: string; facet?: string }>).map(
     (target, index) => {
       const itemId = target.itemId ?? `rubric-${index}`;
-      void target.evidenceHash; // evidenceHash 绑定由上层评测路径使用；deterministic 语义见注释
-      // 答案非空即视为对当前 item 有表达（deterministic 语义：结构证据覆盖判定
-      // 由 evidenceHash 绑定；内容实质评测交给 LLM 路径）。
-      const hasSubstantiveAnswer = normalizedAnswer.length > 0;
+      void normalizedAnswer;
+      void target.evidenceHash;
       return {
         rubricItemId: itemId,
-        verdict: hasSubstantiveAnswer ? "covered" : "missing",
+        verdict: "not_assessable",
         weight: 1,
         required: true,
       };
@@ -128,36 +141,52 @@ export async function assessEpisode(
 ): Promise<AssessmentResult> {
   const artifact = await repo.findLockedArtifact(input.workspaceId, input.userId, input.artifactId);
   if (artifact === null) {
-    throw new AssessmentServiceError("ARTIFACT_NOT_FOUND", "锁定 artifact 不存在", 404);
+    throw new AssessmentServiceError("artifact_not_found", "锁定 artifact 不存在", 404);
   }
   if (artifact.episodeId !== input.episodeId) {
-    throw new AssessmentServiceError("EPISODE_MISMATCH", "artifact 不属于该 Episode", 409);
+    throw new AssessmentServiceError("episode_mismatch", "artifact 不属于该 Episode", 409);
   }
   if (artifact.status !== "locked") {
-    throw new AssessmentServiceError("ARTIFACT_NOT_LOCKED", "仅锁定 artifact 可评测", 409);
+    throw new AssessmentServiceError("artifact_not_locked", "仅锁定 artifact 可评测", 409);
   }
 
   const episode = await repo.findEpisodeRubricTargets(input.workspaceId, input.userId, input.episodeId);
   if (episode === null) {
-    throw new AssessmentServiceError("EPISODE_NOT_FOUND", "Episode 不存在", 404);
-  }
-  if (episode.status !== "answered_locked") {
-    throw new AssessmentServiceError("EPISODE_NOT_ASSESSABLE", `Episode 状态 ${episode.status} 不可评测`, 409);
+    throw new AssessmentServiceError("episode_not_found", "Episode 不存在", 404);
   }
   if (episode.sessionId !== input.sessionId) {
-    // review should-fix：episode 必须属于当前 session（对照 answer-submission 的 SESSION_MISMATCH）——
-    // 防止同 workspace 用户跨 session 引用 episode 写入错配报告行
-    throw new AssessmentServiceError("SESSION_MISMATCH", "Episode 不属于该 Session", 409);
+    // Episode 必须属于当前 session，重放路径也不能绕过这个边界。
+    throw new AssessmentServiceError("session_mismatch", "Episode 不属于该 Session", 409);
   }
-
+  if (episode.processingPhase === "assessment_complete") {
+    const existing = await repo.findExistingAssessment?.(
+      input.workspaceId,
+      input.userId,
+      input.episodeId,
+      input.artifactId,
+    );
+    if (existing) return existing;
+    throw new AssessmentServiceError(
+      "assessment_result_not_found",
+      "Episode 已完成评估但报告不可重放",
+      409,
+    );
+  }
+  if (episode.status !== "active" || episode.processingPhase !== "assessment_pending") {
+    throw new AssessmentServiceError(
+      "episode_not_assessable",
+      `Episode 当前阶段 ${episode.processingPhase} 不可评测`,
+      409,
+    );
+  }
   const answerText = extractAnswerText(artifact.payload, artifact.modality);
   if (answerText === "") {
-    throw new AssessmentServiceError("EMPTY_ANSWER", "锁定 artifact 无回答文本（fail closed）");
+    throw new AssessmentServiceError("empty_answer", "锁定 artifact 无回答文本（fail closed）");
   }
   if (!episode.rubricTargets || episode.rubricTargets.length === 0) {
     // review should-fix：空 rubric 直接 4xx——reducer 对空集抛 ReducerError 会变 500
     throw new AssessmentServiceError(
-      "RUBRIC_TARGETS_EMPTY",
+      "rubric_targets_empty",
       "Episode 无 rubric targets（无法评测，fail closed）",
       422,
     );
@@ -165,15 +194,26 @@ export async function assessEpisode(
 
   const verdicts = deterministicRubricVerdict(answerText, episode.rubricTargets ?? []);
   const reducer = runRubricSessionReducer(verdicts);
+  const reasonCodes = ["assessment_critic_unavailable", `reducer:${reducer.result}`];
+  if (!isLearningSessionCanonicalCommitEnabled()) reasonCodes.push("canonical_commit_disabled");
   const decision = issueEpisodeTrustDecision({
     episodeId: input.episodeId,
-    effectiveClass: "mastery_eligible",
+    effectiveClass: "not_assessable",
     sourceArtifactIds: [input.artifactId],
-    frozenProbeSetHash: "",
-    requiredRubricCoverageHash: "",
-    assistanceSnapshotHash: "",
-    reasonCodes: [`reducer:${reducer.result}`],
+    frozenProbeSetHash: computeAssessmentInputHash("assessment-critic-unavailable"),
+    requiredRubricCoverageHash: computeAssessmentInputHash("assessment-coverage-unavailable"),
+    assistanceSnapshotHash: computeAssessmentInputHash("assessment-assistance-unavailable"),
+    reasonCodes,
   });
+  const sharedDecisionHash = computeFailClosedAssessmentDecisionHash({
+    episodeId: input.episodeId,
+    artifactId: input.artifactId,
+    reducerResult: reducer.result,
+    canonicalCommitEnabled: isLearningSessionCanonicalCommitEnabled(),
+  });
+  if (decision.decisionHash !== sharedDecisionHash) {
+    throw new AssessmentServiceError("assessment_hash_mismatch", "评估决策 hash 不一致", 500);
+  }
 
   const result: AssessmentResult = {
     episodeId: input.episodeId,
@@ -183,7 +223,7 @@ export async function assessEpisode(
     reducerVerdict: reducer.result, // RubricSessionResult（pass/partial/fail/not_assessable）
     trustClass: decision.effectiveClass,
     decisionHash: decision.decisionHash,
-    disposition: reducer.result, // reducer 结果作为 disposition（COMMIT 前占位语义）
+    disposition: "not_assessable",
   };
   await repo.writeAssessment(
     input.workspaceId,
@@ -192,6 +232,7 @@ export async function assessEpisode(
     input.episodeId,
     result,
   );
+  await repo.markAssessmentComplete?.(input.workspaceId, input.userId, input.episodeId);
   return result;
 }
 
@@ -237,7 +278,8 @@ export function createPgAssessmentRepository(transaction: AssessmentTx): Assessm
     async findEpisodeRubricTargets(workspaceId, userId, episodeId) {
       const rows = (await transaction.execute(
         sql`
-          SELECT id, session_id AS "sessionId", status, rubric_targets AS "rubricTargets",
+          SELECT id, session_id AS "sessionId", status,
+                 processing_phase AS "processingPhase", rubric_targets AS "rubricTargets",
                  episode_epoch AS "episodeEpoch"
           FROM learning_episodes
           WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND id = ${episodeId}
@@ -250,6 +292,7 @@ export function createPgAssessmentRepository(transaction: AssessmentTx): Assessm
         episodeId: String(row.id),
         sessionId: String(row.sessionId),
         status: String(row.status),
+        processingPhase: String(row.processingPhase ?? "awaiting_response"),
         rubricTargets: Array.isArray(row.rubricTargets) ? row.rubricTargets : [],
         episodeEpoch: Number(row.episodeEpoch ?? 0),
       };
@@ -264,21 +307,77 @@ export function createPgAssessmentRepository(transaction: AssessmentTx): Assessm
         weight: v.weight,
         required: v.required,
       }));
-      const reportHash = sha256Hex(
-        `${episodeId}:${assessment.artifactId}:${assessment.decisionHash}`,
+      const reportHash = computeAssessmentReportHash(
+        episodeId,
+        assessment.artifactId,
+        assessment.decisionHash,
       );
       await transaction.execute(
         sql`
           INSERT INTO learning_assessment_reports (
             session_id, episode_id, workspace_id, user_id,
             critic_version, reducer_version, assessment_source,
-            rubric_assessments, report_hash
+            rubric_assessments, report_hash, decision_hash
           ) VALUES (
             ${sessionId}, ${episodeId}, ${workspaceId}, ${userId},
-            'deterministic-v1', 'rubric-session-reducer-v2', 'deterministic',
-            ${JSON.stringify(rubricAssessments)}, ${reportHash}
+            'diagnostic-fail-closed-v1', 'rubric-session-reducer-v2', 'deterministic',
+            ${JSON.stringify(rubricAssessments)}, ${reportHash}, ${assessment.decisionHash}
           )
           ON CONFLICT (workspace_id, episode_id, report_hash) DO NOTHING
+        `,
+      );
+    },
+    async findExistingAssessment(workspaceId, userId, episodeId, artifactId) {
+      const rows = (await transaction.execute(
+        sql`
+          SELECT session_id AS "sessionId", rubric_assessments AS "rubricAssessments",
+                 decision_hash AS "decisionHash"
+          FROM learning_assessment_reports
+          WHERE workspace_id = ${workspaceId} AND user_id = ${userId}
+            AND episode_id = ${episodeId}
+            AND rubric_assessments IS NOT NULL
+            AND report_hash = ${computeAssessmentReportHash(
+              episodeId,
+              artifactId,
+              computeFailClosedAssessmentDecisionHash({
+                episodeId,
+                artifactId,
+                reducerResult: "not_assessable",
+                canonicalCommitEnabled: isLearningSessionCanonicalCommitEnabled(),
+              }),
+            )}
+          LIMIT 1
+        `,
+      )) as Array<Record<string, unknown>>;
+      const row = rows[0];
+      if (!row || typeof row.decisionHash !== "string") return null;
+      const raw = Array.isArray(row.rubricAssessments) ? row.rubricAssessments : [];
+      return {
+        episodeId,
+        sessionId: String(row.sessionId),
+        artifactId,
+        verdicts: raw.map((item) => ({
+          rubricItemId: String((item as Record<string, unknown>).rubricItemId),
+          verdict: "not_assessable" as const,
+          weight: Number((item as Record<string, unknown>).weight ?? 1),
+          required: Boolean((item as Record<string, unknown>).required ?? true),
+        })),
+        reducerVerdict: "not_assessable",
+        trustClass: "not_assessable",
+        decisionHash: row.decisionHash,
+        disposition: "not_assessable",
+      };
+    },
+    async markAssessmentComplete(workspaceId, userId, episodeId) {
+      await transaction.execute(
+        sql`
+          UPDATE learning_episodes
+          SET processing_phase = 'assessment_complete', updated_at = now()
+          WHERE id = ${episodeId}
+            AND workspace_id = ${workspaceId}
+            AND user_id = ${userId}
+            AND status = 'active'
+            AND processing_phase = 'assessment_pending'
         `,
       );
     },
@@ -295,6 +394,12 @@ export async function assessmentRoutes(app: FastifyInstance) {
     "/learning-sessions/:id/episodes/:episodeId/assess",
     { preHandler: [requireSession] },
     async (req, reply) => {
+      if (!isLearningSessionV2InternalEnabled()) {
+        return reply.code(404).send({
+          error: "learning_session_v2_disabled",
+          message: "学习伴星重构路径当前仅供内部验证",
+        });
+      }
       const parsed = assessParamsSchema.safeParse(req.params);
       if (!parsed.success) {
         throw app.httpErrors.badRequest("session/episode id 非法");

@@ -39,7 +39,7 @@
 - 共享知识真值继续使用 workspace-owned 策略；
 - account-scoped Companion 表（onboarding、account state）只按认证 user_id 授权，禁止 workspace actor 和其他用户读取；不使用 workspace RLS，跨设备同步；
 - workspace-scoped Companion/学习表（邀请 ledger、resume、session/episode/probe/artifact/assessment、prefs/projection）使用 workspace_id + user_id 双条件 RLS；
-- device-local hide 不写持久表；runtime-fence 仅保留 user/device session/surface epoch/TTL（ephemeral）；
+- device-local hide 不写持久表；runtime-fence 仅保留 user/device session/surface epoch/TTL（短 TTL server-side ephemeral table）；
 - `PageCompanionContextV1`、页面 manifest 和 action token 做 schema、版本、签名/来源、workspace、permission snapshot、contextVersion 与 allowlist 校验；页面切换后 stale action fail closed；
 - workspace/角色切换原子清空全局任务上下文；跨 workspace entity refs、onboarding resumeRef 和邀请 key 不得复用；
 - 数据归属矩阵（§12.1）逐表落库：published Card/Key Point/Evidence/血缘 → workspace-owned；onboarding/global_off/存在感/suppression → account-scoped；邀请 ledger/resume → user-private-in-workspace；Companion audit → user-private + 短 TTL；`temporary_hidden`/auth-surface hide → device-local non-identifying；正式 outcome → 现有 canonical 域。

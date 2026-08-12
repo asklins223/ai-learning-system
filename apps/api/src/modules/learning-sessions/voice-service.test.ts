@@ -185,6 +185,23 @@ class InMemoryVoiceArtifactRepository implements VoiceArtifactRepository {
     return this.probes.get(probeId) ?? null;
   }
 
+  episodeSummaries = new Map<string, { episodeTargetFingerprint: string; contentExposureKey: string }>();
+
+  addEpisodeSummary(
+    episodeId: string,
+    summary: { episodeTargetFingerprint: string; contentExposureKey: string },
+  ): void {
+    this.episodeSummaries.set(episodeId, summary);
+  }
+
+  async findEpisodeSummary(
+    _workspaceId: string,
+    _userId: string,
+    episodeId: string,
+  ): Promise<{ episodeTargetFingerprint: string; contentExposureKey: string } | null> {
+    return this.episodeSummaries.get(episodeId) ?? null;
+  }
+
   async createArtifact(record: VoiceArtifactRecord): Promise<VoiceArtifactRecord> {
     const copy = { ...record };
     this.artifacts.set(copy.id, copy);
@@ -799,6 +816,10 @@ describe("switchModality（text_or_mixed revision）", () => {
   it("无麦克风用户从零开始切换 text_or_mixed（无来源 artifact）→ 直接可用", async () => {
     const repository = new InMemoryVoiceArtifactRepository();
     repository.addProbe(makeFrozenProbe());
+    repository.addEpisodeSummary("ep-1", {
+      episodeTargetFingerprint: "fp-ep-1",
+      contentExposureKey: "exposure-ep-1",
+    });
     const created = await switchModality(makeContext(repository), {
       probeId: "probe-1",
       episodeId: "ep-1",
@@ -813,6 +834,10 @@ describe("switchModality（text_or_mixed revision）", () => {
     assert.equal(created.status, "locked");
     assert.equal(created.revision, 0);
     assert.equal(created.supersedesArtifactId, null);
+    // 无来源路径必须携带服务端 episode 事实（不是空串）：
+    // commit stale 判定与 FrozenProbe 匹配依赖这两个字段。
+    assert.equal(created.episodeTargetFingerprint, "fp-ep-1");
+    assert.equal(created.contentExposureKey, "exposure-ep-1");
     const payload = created.payload as TextOrMixedPayload;
     assert.ok(!("supersedesArtifactId" in payload));
   });

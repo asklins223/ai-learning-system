@@ -401,6 +401,7 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
       // learning_cards_workspace_note_version_active_unique_idx
       // 要求每个 (workspace_id, note_version_id) 只能有一张 active 卡。
       const cardIds: string[] = [];
+      const keyPointIds: string[] = [];
       const noteIds: string[] = [];
       for (let i = 0; i < config.noteCount; i++) {
         const quoteText = `Supporting quote for card ${i + 1}`;
@@ -441,6 +442,75 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           WHERE id = ${note.id}
         `;
 
+        // The Companion PREPARE path consumes the same canonical card graph as
+        // production: active card set → active card → generation run epoch →
+        // evidence. Keep the seed fixture on that path instead of creating a
+        // legacy standalone card that can render but cannot start a Session.
+        const generationRunId = randomUUID();
+        const cardSetId = randomUUID();
+        await tx`
+          INSERT INTO card_generation_runs (
+            id,
+            workspace_id,
+            note_id,
+            note_version_id,
+            requested_by,
+            request_idempotency_key,
+            generation_fingerprint,
+            generation_epoch,
+            title_snapshot,
+            source_content_hash,
+            block_manifest_hash,
+            asset_manifest_hash,
+            status,
+            stage,
+            started_at,
+            updated_at
+          )
+          VALUES (
+            ${generationRunId},
+            ${workspace.id},
+            ${note.id},
+            ${noteVersion.id},
+            ${owner.id},
+            ${`e2e-${runId}-${i}`},
+            ${`e2e-fingerprint-${runId}-${i}`},
+            1,
+            ${`Seed Note ${i + 1}`},
+            md5(${contentJson}::text),
+            md5(${blockContent}),
+            md5(''),
+            'queued',
+            'queued',
+            NOW(),
+            NOW()
+          )
+        `;
+        await tx`
+          INSERT INTO learning_card_sets (
+            id,
+            workspace_id,
+            note_id,
+            note_version_id,
+            generation_run_id,
+            status,
+            title,
+            summary,
+            activated_at
+          )
+          VALUES (
+            ${cardSetId},
+            ${workspace.id},
+            ${note.id},
+            ${noteVersion.id},
+            ${generationRunId},
+            'active',
+            ${`Seed Card Set ${i + 1}`},
+            ${`Seed card set for Companion E2E ${i + 1}.`},
+            NOW()
+          )
+        `;
+
         const [noteBlock] = await tx`
           INSERT INTO note_blocks (id, version_id, workspace_id, ordinal, type, content)
           VALUES (
@@ -456,11 +526,19 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
 
         // 创建学习卡
         const [card] = await tx`
-          INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json)
+          INSERT INTO learning_cards (
+            id, note_version_id, workspace_id, card_set_id, generation_run_id,
+            scope, scope_key, ordinal, status, schema_json
+          )
           VALUES (
             ${randomUUID()},
             ${noteVersion.id},
             ${workspace.id},
+            ${cardSetId},
+            ${generationRunId},
+            'section',
+            ${`section-${i}`},
+            1,
             'active',
             ${JSON.stringify({
               title: `Seed Card ${i + 1}`,
@@ -470,6 +548,17 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           RETURNING id
         `;
         cardIds.push(card.id);
+
+        await tx`
+          UPDATE card_generation_runs
+          SET status = 'succeeded',
+              stage = 'complete',
+              result_card_set_id = ${cardSetId},
+              result_card_id = ${card.id},
+              finished_at = NOW(),
+              updated_at = NOW()
+          WHERE id = ${generationRunId}
+        `;
 
         // 为每张卡创建一个 key point
         const [keyPoint] = await tx`
@@ -483,6 +572,7 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           )
           RETURNING id
         `;
+        keyPointIds.push(keyPoint.id);
 
         await tx`
           INSERT INTO evidences (
@@ -566,13 +656,17 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
       const scheduleCount = cardIds.length;
       for (let i = 0; i < scheduleCount; i++) {
         await tx`
-          INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days)
+          INSERT INTO review_schedules (
+            id, workspace_id, user_id, subject_type, subject_id, key_point_id,
+            status, next_review_at, interval_days
+          )
           VALUES (
             ${randomUUID()},
             ${workspace.id},
             ${owner.id},
             'card',
             ${cardIds[i]},
+            ${keyPointIds[i]},
             'pending',
             NOW(),
             1

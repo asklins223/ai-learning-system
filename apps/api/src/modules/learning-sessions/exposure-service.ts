@@ -158,28 +158,28 @@ export function computeContentExposureKey(input: {
   const revision = input.publishedContentRevision;
   const claimHash = input.normalizedClaimHash;
   if (typeof workspaceId !== "string" || workspaceId.trim() === "") {
-    throw new ExposureGuardError("workspaceId 不能为空", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("workspaceId 不能为空", "invalid_argument");
   }
   if (typeof userId !== "string" || userId.trim() === "") {
-    throw new ExposureGuardError("userId 不能为空", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("userId 不能为空", "invalid_argument");
   }
   if (typeof keyPointId !== "string" || keyPointId.trim() === "") {
-    throw new ExposureGuardError("keyPointId 不能为空", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("keyPointId 不能为空", "invalid_argument");
   }
   if (
     (typeof revision !== "number" && typeof revision !== "string")
     || String(revision).trim() === ""
   ) {
-    throw new ExposureGuardError("publishedContentRevision 非法", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("publishedContentRevision 非法", "invalid_argument");
   }
   if (typeof claimHash !== "string" || claimHash.trim() === "") {
-    throw new ExposureGuardError("normalizedClaimHash 不能为空", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("normalizedClaimHash 不能为空", "invalid_argument");
   }
   if (!Array.isArray(input.sortedEvidenceContentHashes)) {
-    throw new ExposureGuardError("sortedEvidenceContentHashes 必须是数组", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("sortedEvidenceContentHashes 必须是数组", "invalid_argument");
   }
   if (input.sortedEvidenceContentHashes.some((hash) => typeof hash !== "string" || hash.trim() === "")) {
-    throw new ExposureGuardError("evidence content hash 非法", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("evidence content hash 非法", "invalid_argument");
   }
   // 内部排序保证幂等（即使调用方传入乱序）。
   const sortedEvidence = [...input.sortedEvidenceContentHashes].sort();
@@ -214,7 +214,7 @@ function validateUserActionNonce(nonce: string): void {
   if (typeof nonce !== "string" || nonce.length < 8 || nonce.length > 128) {
     throw new ExposureGuardError(
       "userActionNonce 必须为 8-128 字符的字符串",
-      "INVALID_NONCE",
+      "invalid_nonce",
     );
   }
 }
@@ -421,6 +421,12 @@ export interface ExposureRepository {
     affectedContentExposureKey: string,
     sharedEvidenceRef: string,
   ): Promise<void>;
+  /** 2026-08-11：批量记录依赖边（单条多行 INSERT，替代循环逐条） */
+  recordDependencies(
+    workspaceId: string,
+    sourceContentExposureKey: string,
+    edges: ReadonlyArray<{ affectedContentExposureKey: string; sharedEvidenceRef: string }>,
+  ): Promise<void>;
   /** 确定性传播：某 source 影响的所有 affected keys（按 key 排序） */
   listAffectedKeys(workspaceId: string, sourceContentExposureKey: string): Promise<string[]>;
 }
@@ -449,7 +455,7 @@ export async function learningUnitGuard<T>(
 ): Promise<T> {
   validateUserActionNonce(context.userActionNonce);
   if (context.contentExposureKey.trim() === "") {
-    throw new ExposureGuardError("contentExposureKey 不能为空", "INVALID_ARGUMENT");
+    throw new ExposureGuardError("contentExposureKey 不能为空", "invalid_argument");
   }
   const now = context.now ?? new Date();
 
@@ -461,7 +467,7 @@ export async function learningUnitGuard<T>(
   if (state.revision !== context.baseRevision) {
     throw new ExposureGuardError(
       `revision CAS 失败：base=${context.baseRevision}，当前=${state.revision}`,
-      "STALE_REVISION",
+      "stale_revision",
     );
   }
 
@@ -539,14 +545,8 @@ export async function propagateExposureDependency(
     : a.sharedEvidenceRef > b.sharedEvidenceRef ? 1
     : 0,
   );
-  for (const edge of sorted) {
-    await repository.recordDependency(
-      workspaceId,
-      sourceContentExposureKey,
-      edge.affectedContentExposureKey,
-      edge.sharedEvidenceRef,
-    );
-  }
+  // 2026-08-11：批量多行 INSERT（此前循环逐条，一次一条往返）
+  await repository.recordDependencies(workspaceId, sourceContentExposureKey, sorted);
 }
 
 // ─── PostgreSQL 默认 repository（在 workspace transaction 内使用）────────
@@ -633,7 +633,7 @@ export function createPgExposureRepository(transaction: ApiTransaction): Exposur
       if (rows[0] === undefined) {
         throw new ExposureGuardError(
           `revision CAS 写回失败：expected=${expectedRevision}`,
-          "STALE_REVISION",
+          "stale_revision",
         );
       }
       return rowToState(rows[0]);
@@ -647,6 +647,18 @@ export function createPgExposureRepository(transaction: ApiTransaction): Exposur
           affectedContentExposureKey: affectedKey,
           sharedEvidenceRef,
         })
+        .onConflictDoNothing();
+    },
+    async recordDependencies(workspaceId, sourceKey, edges) {
+      if (edges.length === 0) return;
+      await transaction
+        .insert(ledgerTable)
+        .values(edges.map((edge) => ({
+          workspaceId,
+          sourceContentExposureKey: sourceKey,
+          affectedContentExposureKey: edge.affectedContentExposureKey,
+          sharedEvidenceRef: edge.sharedEvidenceRef,
+        })))
         .onConflictDoNothing();
     },
     async listAffectedKeys(workspaceId, sourceKey) {
@@ -701,9 +713,9 @@ function sha256Hex(data: string): string {
 }
 
 export type ExposureGuardErrorCode =
-  | "INVALID_ARGUMENT"
-  | "INVALID_NONCE"
-  | "STALE_REVISION";
+  | "invalid_argument"
+  | "invalid_nonce"
+  | "stale_revision";
 
 /** exposure guard 的 fail-closed 错误（风格同 LegacyAdapterError） */
 export class ExposureGuardError extends Error {

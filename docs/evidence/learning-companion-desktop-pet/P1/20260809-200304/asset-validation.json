@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "assetDir": "apps/web/public/images/companion/pet/sprite-v1",
+  "poses": 8,
+  "checks": {
+    "allFilesPresent": true,
+    "rgba700x860": true,
+    "maskBytes2048": true,
+    "manifestHashesMatch": true,
+    "hiddenRgbCleared": true,
+    "licenseGate": "blocked"
+  },
+  "errors": [],
+  "note": "Physical asset structure is valid as a draft. License remains fail-closed pending Owner confirmation."
+}

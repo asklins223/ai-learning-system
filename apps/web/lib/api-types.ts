@@ -34,6 +34,8 @@ export type CurrentUser = {
 };
 
 export interface AIPrivacySettings {
+  /** 当前系统是否配置了需要工作区明确同意的外部 AI。 */
+  requiresAIConsent: boolean;
   aiConsentVersion: string | null;
   aiConsentAt: string | null;
   aiConsentBy: string | null;
@@ -296,6 +298,8 @@ export interface JobRow {
   startedAt?: string | null;
   finishedAt?: string | null;
   lastError: string | null;
+  /** Privacy-safe reason code used to offer a recovery action. */
+  failureReason?: "ai_consent_required" | "external_ai_disabled" | "unknown" | null;
 }
 
 // ─── 卡片生成类型 ────────────────────────────────────────────────────
@@ -476,7 +480,8 @@ export interface AgentEventView {
 
 /** Phase B（设计 §5.2）：agent 事件分页响应。 */
 export interface AgentEventPage {
-  events: AgentEventView[];
+  // 2026-08-11：契约统一 events → items
+  items: AgentEventView[];
   /** 下一页游标；hasMore=false 时为 null */
   nextCursor: string | null;
   hasMore: boolean;

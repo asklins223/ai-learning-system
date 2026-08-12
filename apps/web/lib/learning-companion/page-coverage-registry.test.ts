@@ -148,6 +148,7 @@ describe("CompanionPageCoverageRegistryV1 数据完整性（§5.4.6）", () => {
   it("findEntryForPath 命中与未命中", () => {
     assert.equal(findEntryForPath(COMPANION_PAGE_COVERAGE_REGISTRY, "/graph")?.pageKind, "star-map");
     assert.equal(findEntryForPath(COMPANION_PAGE_COVERAGE_REGISTRY, "/sources/abc")?.pageKind, "source-detail");
+    assert.equal(findEntryForPath(COMPANION_PAGE_COVERAGE_REGISTRY, "/settings#model")?.pageKind, "settings-privacy");
     assert.equal(findEntryForPath(COMPANION_PAGE_COVERAGE_REGISTRY, "/no-such-route"), undefined);
   });
 });

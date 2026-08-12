@@ -465,8 +465,8 @@ describe("dual budget uniqueness", () => {
       reasonId: "recoverable_error_explanation",
       cooldownEpoch: 0,
     });
-    assert.ok(cb.startsWith("cb\u0000"));
-    assert.ok(rb.startsWith("rb\u0000"));
+    assert.ok(cb.startsWith("cb\u001f"));
+    assert.ok(rb.startsWith("rb\u001f"));
   });
 
   it("同一 contextBudgetKey 不重复（本 cooldown epoch 二次签发拒绝）", async () => {

@@ -339,6 +339,19 @@ describe("Agent 建议边界（suggested preference）", () => {
     assert.equal("tts_rate" in rejected.explicit, false);
   });
 
+  it("原型链键不当作已建议（hasOwn 防御，不抛 TypeError）", () => {
+    // 模拟调用方传入非法键（运行时 string，绕过 TS 联合类型）
+    const state = applyAgentSuggestedPreference(EMPTY_PREFERENCES_STATE, "tts_rate", 1.5).state;
+    const protoKey = "toString" as never;
+    const accepted = acceptSuggestedPreference(state, protoKey);
+    assert.deepEqual(accepted, state, "accept 对原型链键应原样返回");
+    const rejected = rejectSuggestedPreference(state, protoKey);
+    assert.deepEqual(rejected, state, "reject 对原型链键应原样返回");
+    assert.equal(state.explicit.tts_rate, undefined, "tts_rate 仍在 suggested，未误提升");
+    // `in` 检查含原型链（对任何对象恒 true），必须用 hasOwn 验证未写入自有键
+    assert.equal(Object.hasOwn(state.suggested, "toString"), false);
+  });
+
   it("Agent 静默改变 explicit → 一律阻止，explicit 原样保留", () => {
     const set = setExplicitPreference(EMPTY_PREFERENCES_STATE, "presence", "quiet");
     assert.equal(set.ok, true);

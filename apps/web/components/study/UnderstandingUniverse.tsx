@@ -930,6 +930,10 @@ export const UnderstandingUniverse = forwardRef<
   const targetViewportRef = useRef<Viewport | null>(null);
   const targetViewportResponseRef = useRef(VIEWPORT_RESPONSE_MS);
   const sizeRef = useRef<CanvasSize>({ width: 0, height: 0, dpr: 1 });
+  // 2026-08-11：canvas 的 viewport 位置缓存——getCanvasPoint 不再每 pointermove
+  // 读 getBoundingClientRect()（forced layout）。resize/scroll（capture, passive）
+  // 时刷新，pointermove 热路径只读此 ref。
+  const canvasRectRef = useRef<DOMRect | null>(null);
   const dragRef = useRef<PointerDrag | null>(null);
   const activePointersRef = useRef<Map<number, UniversePoint>>(new Map());
   const pinchRef = useRef<PinchGesture | null>(null);
@@ -1245,9 +1249,8 @@ export const UnderstandingUniverse = forwardRef<
   );
 
   const getCanvasPoint = useCallback((clientX: number, clientY: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
+    const rect = canvasRectRef.current;
+    if (!rect) return null;
     return { x: clientX - rect.left, y: clientY - rect.top };
   }, []);
 
@@ -2128,6 +2131,8 @@ export const UnderstandingUniverse = forwardRef<
       const dpr = Math.min(DPR_LIMIT, Math.max(1, window.devicePixelRatio || 1));
       const previous = sizeRef.current;
       sizeRef.current = { width, height, dpr };
+      // 缓存 viewport 位置（canvas 与 root 同为 inset:0，用 root rect 即可）
+      canvasRectRef.current = rect;
       canvas.width = Math.ceil(width * dpr);
       canvas.height = Math.ceil(height * dpr);
       dustRef.current = makeDust(clamp(Math.round((width * height) / 3600), 130, 360));
@@ -2156,10 +2161,19 @@ export const UnderstandingUniverse = forwardRef<
       invalidateScene();
     };
 
+    const refreshCanvasRect = () => {
+      canvasRectRef.current = root.getBoundingClientRect();
+    };
+    // 页面/容器滚动会改变 canvas 的 viewport 位置；capture+passive 监听刷新缓存
+    const onScroll = () => refreshCanvasRect();
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
     const observer = new ResizeObserver(resize);
     observer.observe(root);
     resize();
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      document.removeEventListener("scroll", onScroll, { capture: true } as EventListenerOptions);
+    };
   }, [getPosition, invalidateScene, positionedNodes]);
 
   useEffect(() => {

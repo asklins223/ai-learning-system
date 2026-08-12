@@ -13,7 +13,7 @@
  */
 
 import { and, eq, inArray } from "drizzle-orm";
-import { db } from "../../db.ts";
+import { db, withWorkerWorkspaceTransaction } from "../../db.ts";
 import * as schema from "../../schema/index.ts";
 import {
   AgentUnitKind,
@@ -226,7 +226,13 @@ async function handleDelegateSpecialist(
   let childUnitId: string;
 
   try {
-    childUnitId = await db.transaction(async (tx) => {
+    // 计划 §5.3：parent state、child unit、outbox/job 和 assignment 在同一
+    // 事务提交。jobs RLS 重开（0098）后必须带 workspace context
+    //（app.workspace_id/app.user_id 满足 tenant+actor guard），
+    // 裸 db.transaction 会被 RLS 拦截。
+    childUnitId = await withWorkerWorkspaceTransaction(
+      { workspaceId: ctx.workspaceId, userId: ctx.requestedBy },
+      async (tx) => {
       // 1. 幂等创建 child unit（unitKey 唯一约束保证）
       const [unit] = await tx
         .insert(schema.cardGenerationUnits)
@@ -313,7 +319,8 @@ async function handleDelegateSpecialist(
       ));
 
       return unitId;
-    });
+      },
+    );
 
     logger.info(
       {
@@ -329,6 +336,13 @@ async function handleDelegateSpecialist(
       { runId: ctx.runId, error: err instanceof Error ? err.message : String(err) },
       "delegate_specialist: 事务化创建子 Agent 任务失败",
     );
+    // 子任务未创建成功：不会有终态子任务触发 BUG-12 的 release，
+    // 必须在此释放预留的并发槽，否则 run 级 currentParallelTasks 单调递增。
+    try {
+      ctx.budgetTracker.releaseParallelTask(delegationRequest.role);
+    } catch {
+      // 容忍重复释放
+    }
     return {
       toolCallId: call.id,
       toolName: call.name,

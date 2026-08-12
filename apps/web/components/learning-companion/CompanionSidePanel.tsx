@@ -43,17 +43,21 @@ export function CompanionSidePanel({
   children,
 }: CompanionSidePanelProps) {
   const triggerRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
   const [liveMessage, setLiveMessage] = useState("");
 
-  // 打开时记录触发位置；关闭后焦点回原触发位置（验收：焦点恢复正确）
+  // 打开时记录触发位置；关闭后焦点回原触发位置（验收：焦点恢复正确）。
+  // 从未打开过（初始 mount open=false）时不播报"已关闭"也不做焦点恢复。
   useEffect(() => {
     if (open) {
+      wasOpenRef.current = true;
       const active = document.activeElement;
       triggerRef.current =
         restoreFocusRef?.current ??
         (active instanceof HTMLElement ? active : null);
       setLiveMessage(`${title}已打开`);
     } else {
+      if (!wasOpenRef.current) return;
       const trigger = triggerRef.current;
       if (trigger !== null && document.contains(trigger)) {
         trigger.focus({ preventScroll: true });

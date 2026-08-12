@@ -24,6 +24,7 @@ import type {
 } from "@ailearn/shared";
 import type { CapabilityBundle } from "../lib/capability-bundle.ts";
 import { logger } from "../lib/logger.ts";
+import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { recordProviderTurnMetrics } from "../lib/metrics.ts";
 import type { AgentSession } from "./session.ts";
 import type { BudgetTracker } from "./budget.ts";
@@ -130,6 +131,13 @@ export interface AgentRuntimeConfig {
    * 默认 2_048，与 ContextPacker 一致。
    */
   safetyMarginTokens?: number;
+  /**
+   * 单 turn 超时预算（毫秒）。
+   * 2026-08-12（模型调用面审计）：此前多轮循环无 per-attempt 超时，
+   * 一轮挂起（如模型 thinking 不返回）会耗尽整个 handler 预算，
+   * 后续 turn 全部没有时间。默认 90s，留给 handler 剩余时间做 DB 收尾。
+   */
+  turnTimeoutMs?: number;
 }
 
 /** Agent turn 执行上下文 */
@@ -186,7 +194,18 @@ export class AgentRuntime {
 
   // R5: bundle is the sole path — provider field has been removed.
   const startedAt = Date.now();
-  const result = await this.config.bundle.agentTurn.executeAgentTurn(request, signal);
+  // 2026-08-12（模型调用面审计）：单 turn 独立预算——挂起的 provider 请求
+  // 在 turnTimeoutMs 后被 abort，不再吞掉整个 handler 预算（多轮 supervisor
+  // 场景：一轮卡死，后续 turn 仍有机会）。父 signal 取消仍然向下传播。
+  const result = await runWithAbortBudget(
+    (turnSignal) => this.config.bundle.agentTurn.executeAgentTurn(request, turnSignal),
+    signal,
+    this.config.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
+    (lateError) => logger.warn(
+      { runId: ctx.runId, agentUnitId: ctx.agentUnitId, turnNo: ctx.turnNo, err: lateError },
+      "agent turn exceeded its budget after handler settled",
+    ),
+  );
   // P0-4：Agent 角色 provider 调用统一埋点（duration/token/finish_reason/truncated）。
   // model 优先取 request.model（调用方可覆盖），缺省取 capability 快照的 modelId。
   recordProviderTurnMetrics({
@@ -206,6 +225,12 @@ export class AgentRuntime {
 }
 
 /**
+ * 单 turn 超时预算默认值（毫秒）：90s。
+ * 2026-08-12（模型调用面审计）。
+ */
+export const DEFAULT_TURN_TIMEOUT_MS = 90_000;
+
+/**
  * 解析 structured_action_v1 格式的模型输出。
  *
  * 当 provider 只支持 JSON mode 时，模型输出一个 JSON 对象，
@@ -216,7 +241,10 @@ export function parseStructuredAction(rawOutput: string): AgentTurnResult {
   // 不是有效 JSON 时（如包含 markdown 包裹或截断的 JSON），直接解析会抛出
   // 未处理的异常，导致整个 Agent turn 崩溃。此处添加 try-catch，
   // 解析失败时返回空 toolCalls 和 stop finishReason，让上层逻辑正常处理。
-  let parsed: Record<string, unknown>;
+  // 与 learning-agent/runtime.ts 的 parseStructuredAction 实现保持一致：
+  // JSON.parse 成功但结果为 null/数字/字符串/数组时，直接访问属性同样会抛
+  // TypeError，必须统一按解析失败 fail-soft。
+  let parsed: unknown;
   try {
     parsed = JSON.parse(rawOutput);
   } catch {
@@ -229,17 +257,32 @@ export function parseStructuredAction(rawOutput: string): AgentTurnResult {
     };
   }
 
-  // 验证基本结构
-  const content = typeof parsed.content === "string" ? parsed.content : null;
-  const toolCalls = Array.isArray(parsed.toolCalls)
-    ? parsed.toolCalls.map((call: Record<string, unknown>) => ({
-        id: String(call.id ?? ""),
-        name: String(call.name ?? ""),
-        arguments: (call.arguments ?? {}) as Record<string, unknown>,
-      }))
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      content: rawOutput,
+      toolCalls: [],
+      finishReason: "stop",
+      usage: null,
+      providerRequestId: null,
+    };
+  }
+  const record = parsed as Record<string, unknown>;
+
+  // 验证基本结构（toolCalls 元素必须为对象，null/字符串/数字元素跳过——
+  // 恶意或格式错误的模型输出可能含 [null] 元素，直接访问 call.id 会崩）
+  const content = typeof record.content === "string" ? record.content : null;
+  const toolCalls = Array.isArray(record.toolCalls)
+    ? record.toolCalls
+        .filter((call): call is Record<string, unknown> =>
+          call !== null && typeof call === "object" && !Array.isArray(call))
+        .map((call) => ({
+          id: String(call.id ?? ""),
+          name: String(call.name ?? ""),
+          arguments: (call.arguments ?? {}) as Record<string, unknown>,
+        }))
     : [];
-  const finishReason = typeof parsed.finishReason === "string"
-    ? parsed.finishReason
+  const finishReason = typeof record.finishReason === "string"
+    ? record.finishReason
     : toolCalls.length > 0
       ? "tool_calls"
       : "stop";

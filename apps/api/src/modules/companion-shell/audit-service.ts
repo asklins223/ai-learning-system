@@ -20,7 +20,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, lt, isNull } from "drizzle-orm";
+import { and, eq, lt, isNull, sql } from "drizzle-orm";
 import {
   integer,
   jsonb,
@@ -871,23 +871,33 @@ export async function sweepCompanionInvitationLedgerTtl(
           lt(companionInvitationLedger.updatedAt, cutoff),
           isNull(companionInvitationLedger.tombstonedAt),
         ));
+      // 2026-08-11：单条 UPDATE + VALUES 派生表批量 tombstone（此前逐行
+      // UPDATE，过期行上千时 N 次往返）。
+      const tuples = stale.map((row) => ({
+        id: row.id,
+        sk: contentFreeLedgerKey(row.stablePageContextKey),
+        ck: contentFreeLedgerKey(row.contextBudgetKey),
+        rk: contentFreeLedgerKey(row.reasonBudgetKey),
+      }));
       let tombstoned = 0;
-      for (const row of stale) {
-        const updated = await tx
-          .update(companionInvitationLedger)
-          .set({
-            stablePageContextKey: contentFreeLedgerKey(row.stablePageContextKey),
-            contextBudgetKey: contentFreeLedgerKey(row.contextBudgetKey),
-            reasonBudgetKey: contentFreeLedgerKey(row.reasonBudgetKey),
-            boundedReason: null,
-            suggestionLease: null,
-            oneTimePermit: null,
-            tombstonedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(companionInvitationLedger.id, row.id))
-          .returning({ id: companionInvitationLedger.id });
-        tombstoned += updated.length;
+      if (tuples.length > 0) {
+        const updated = await tx.execute(sql`
+          UPDATE companion_invitation_ledger AS l
+          SET stable_page_context_key = v.sk,
+              context_budget_key = v.ck,
+              reason_budget_key = v.rk,
+              bounded_reason = NULL,
+              suggestion_lease = NULL,
+              one_time_permit = NULL,
+              tombstoned_at = now(),
+              updated_at = now()
+          FROM (VALUES ${sql.join(
+            tuples.map((t) => sql`(${t.id}, ${t.sk}, ${t.ck}, ${t.rk})`),
+            sql`, `,
+          )}) AS v(id, sk, ck, rk)
+          WHERE l.id = v.id
+        `);
+        tombstoned = Number((updated as unknown as { rowCount?: number }).rowCount ?? 0);
       }
       return { mode, removed: 0, tombstoned };
     },

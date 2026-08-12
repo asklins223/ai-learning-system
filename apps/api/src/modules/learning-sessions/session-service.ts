@@ -32,7 +32,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
@@ -43,6 +43,8 @@ import {
 } from "drizzle-orm/pg-core";
 import type { ApiTransaction } from "../../db/client.ts";
 import { computeContentExposureKey } from "./exposure-service.ts";
+import { buildJourneyPlan, type JourneyPlanV1 } from "./journey-plan.ts";
+import { buildSilentSceneData } from "./silent-scene-author.ts";
 
 // ─── 表定义（与迁移 0074 / packages/db schema learning-sessions.ts 一致；
 //      apps/api 镜像树未同步学习表，同 02-3 / exposure-service 模式）─────────
@@ -95,6 +97,9 @@ export const learningEpisodesTable = pgTable("learning_episodes", {
   budgetEnvelopeRef: text("budget_envelope_ref").notNull(),
   budgetEnvelopeHash: text("budget_envelope_hash").notNull(),
   planHash: text("plan_hash").notNull(),
+  processingPhase: text("processing_phase")
+    .$type<LearningEpisodeProcessingPhase>()
+    .notNull().default("awaiting_response"),
   status: text("status").$type<LearningEpisodeStatus>().notNull().default("draft"),
   commitKey: text("commit_key"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -111,6 +116,16 @@ export type LearningSessionOriginRef = {
 export type LearningSessionIntent = "stabilize" | "clarify" | "transfer" | "explore";
 export type LearningSessionStatus = "active" | "ended" | "cancelled" | "stale";
 export type LearningEpisodeStatus = "draft" | "active" | "completed" | "stale" | "cancelled";
+export type LearningEpisodeProcessingPhase =
+  | "preparing"
+  | "scene_ready"
+  | "awaiting_response"
+  | "assessment_pending"
+  | "assessment_complete"
+  | "commit_pending"
+  | "committed"
+  | "cancelled"
+  | "stale";
 
 export type EpisodeFormalEligibilityKind =
   | "initial_validation"
@@ -125,6 +140,10 @@ export type EpisodeFormalPlan = {
   bundlePolicyVersion?: string;
   silentProofProfileId?: string;
   structuredProofEligibilityReportHash?: string;
+  /** 任务 14 接线：silent 场景 public 数据（createSession 时确定性生成，
+   *  前端 SilentProofScene 直接消费；W4 Scene Author 接入后替换）。
+   *  null = claim 不足无法生成（调用方回退 text/voice）。 */
+  silentSceneData?: import("./silent-scene-author.ts").SilentSceneDataV1 | null;
 };
 
 /** OfficialSchedulingDecisionV1（01-2 §5） */
@@ -899,6 +918,7 @@ export interface EpisodePublicView {
   sessionId: string;
   keyPointId: string;
   status: LearningEpisodeStatus;
+  processingPhase: LearningEpisodeProcessingPhase;
   phase: SessionLoopPhase;
   formalEligibilityKind: EpisodeFormalEligibilityKind;
   formalPlanKind: EpisodeFormalPlan["kind"];
@@ -907,6 +927,8 @@ export interface EpisodePublicView {
   budgetEnvelopeRef: string;
   budgetEnvelopeHash: string;
   contentExposureKey: string;
+  /** 任务 14 接线：journeyPlan（模态 + scenePlan + trustCeiling，PREPARE 派生） */
+  journeyPlan: JourneyPlanV1;
   createdAt: string;
   updatedAt: string;
 }
@@ -956,22 +978,50 @@ export function buildSessionPublicView(input: {
   episodes: EpisodeRow[];
 }): SessionPublicView {
   const episodes = [...input.episodes].sort((a, b) => compareIds(a.id, b.id));
-  const episodeViews: EpisodePublicView[] = episodes.map((episode) => ({
-    episodeId: episode.id,
-    sessionId: episode.sessionId,
-    keyPointId: episode.keyPointId,
-    status: episode.status,
-    phase: inferPhaseFromEpisode(episode),
-    formalEligibilityKind: episode.formalEligibilityKind,
-    formalPlanKind: episode.formalPlan.kind,
-    episodeEpoch: episode.episodeEpoch,
-    planHash: episode.planHash,
-    budgetEnvelopeRef: episode.budgetEnvelopeRef,
-    budgetEnvelopeHash: episode.budgetEnvelopeHash,
-    contentExposureKey: episode.contentExposureKey,
-    createdAt: episode.createdAt.toISOString(),
-    updatedAt: episode.updatedAt.toISOString(),
-  }));
+  const episodeViews: EpisodePublicView[] = episodes.map((episode) => {
+    // 任务 14 接线：从 episode 冻结事实派生 journeyPlan（模态 + scenePlan）。
+    // structured_mastery_bundle 的 silent 资格与跨模态 Gold 在 PREPARE 冻结时
+    // 已由服务端签发（formalPlan.silentProofProfileId 存在即 eligible），前端
+    // 直接消费，不再自行 fail-closed（§3.1 规则 3 服务端编排语义）。
+    const silentProfileId = episode.formalPlan.silentProofProfileId;
+    const silentFamily = silentProfileId?.startsWith("silent-proof-causal-boundary")
+      ? "causal_boundary" as const
+      : silentProfileId?.startsWith("silent-proof-concept-application")
+        ? "concept_application" as const
+        : "procedure" as const;
+    const journeyPlan = buildJourneyPlan({
+      formalPlanKind: episode.formalPlan.kind,
+      authorizedAction: episode.schedulingDecision.authorizedAction,
+      // rubric/evidence 完整度：PREPARE 冻结的 rubricTargets 全部 required
+      // 且非 pending 视为完整；当前确定性派生为单条 pending 占位 → 不满足
+      // transfer gate（fail closed，06-6）。Scene Author 接入后由真实 rubric
+      // 评估驱动。
+      rubricComplete: false,
+      evidenceComplete: false,
+      structuredProofEligibility: silentProfileId != null ? "eligible" : "not_eligible",
+      crossModalGoldPassed: episode.formalPlan.structuredProofEligibilityReportHash != null,
+      silentProfileFamily: silentFamily,
+      silentSceneData: episode.formalPlan.silentSceneData ?? null,
+      keyPointId: episode.keyPointId,
+    });    return {
+      episodeId: episode.id,
+      sessionId: episode.sessionId,
+      keyPointId: episode.keyPointId,
+      status: episode.status,
+      processingPhase: episode.processingPhase,
+      phase: inferPhaseFromEpisode(episode),
+      formalEligibilityKind: episode.formalEligibilityKind,
+      formalPlanKind: episode.formalPlan.kind,
+      episodeEpoch: episode.episodeEpoch,
+      planHash: episode.planHash,
+      budgetEnvelopeRef: episode.budgetEnvelopeRef,
+      budgetEnvelopeHash: episode.budgetEnvelopeHash,
+      contentExposureKey: episode.contentExposureKey,
+      journeyPlan,
+      createdAt: episode.createdAt.toISOString(),
+      updatedAt: episode.updatedAt.toISOString(),
+    };
+  });
   const activeEpisode = episodeViews.find(
     (e) => e.status === "active" || e.status === "draft",
   ) ?? null;
@@ -1039,6 +1089,7 @@ export interface EpisodeRow {
   budgetEnvelopeRef: string;
   budgetEnvelopeHash: string;
   planHash: string;
+  processingPhase: LearningEpisodeProcessingPhase;
   status: LearningEpisodeStatus;
   commitKey: string | null;
   createdAt: Date;
@@ -1073,6 +1124,8 @@ export interface SessionRepository {
   ): Promise<AssistanceSnapshotInput | null>;
   getRuntimeEpoch(): Promise<number>;
   countActiveSessions(workspaceId: string, userId: string): Promise<number>;
+  /** 可选恢复提示：只返回当前 workspace/user 自己的 active Session。 */
+  findActiveSessionId?(workspaceId: string, userId: string): Promise<string | null>;
   // ── 写 ──
   createSession(input: Omit<SessionRow, "id" | "createdAt" | "updatedAt">): Promise<SessionRow>;
   createEpisode(input: Omit<EpisodeRow, "id" | "createdAt" | "updatedAt">): Promise<EpisodeRow>;
@@ -1090,6 +1143,14 @@ export interface SessionRepository {
   ): Promise<void>;
   updateEpisodeStatus(
     episodeId: string,
+    status: LearningEpisodeStatus,
+    now: Date,
+    workspaceId: string,
+    userId: string,
+  ): Promise<void>;
+  /** 2026-08-11：批量更新多个 episode 状态（单条 UPDATE，替代循环逐条） */
+  updateEpisodeStatuses(
+    episodeIds: string[],
     status: LearningEpisodeStatus,
     now: Date,
     workspaceId: string,
@@ -1169,7 +1230,7 @@ export async function createSession(
   );
   if (candidate === null) {
     throw new SessionServiceError(
-      "PREPARE_NO_CANDIDATES",
+      "prepare_no_candidates",
       409,
       "没有可 PREPARE 的合法 Episode 候选（official scheduler 无到期、needs-repair 无目标或 active canonical 内容缺失）",
     );
@@ -1178,7 +1239,7 @@ export async function createSession(
   const explicitTarget = input.preferredKeyPointId ?? resolved.keyPointId;
   if (explicitTarget !== undefined && candidate.keyPointId !== explicitTarget) {
     throw new SessionServiceError(
-      "PREPARE_NO_CANDIDATES",
+      "prepare_no_candidates",
       409,
       `指定目标 ${explicitTarget} 没有可 PREPARE 的合法候选（active canonical 缺失或 required 字段不全）`,
     );
@@ -1187,10 +1248,15 @@ export async function createSession(
   // 每用户同时 active 学习会话 = 1（01-1 §6）
   const activeSessions = await repo.countActiveSessions(input.workspaceId, input.userId);
   if (activeSessions >= 1) {
+    const activeSessionId = await repo.findActiveSessionId?.(
+      input.workspaceId,
+      input.userId,
+    );
     throw new SessionServiceError(
-      "SESSION_LIMIT_REACHED",
+      "session_limit_reached",
       409,
       "每用户同时只允许 1 个 active 学习会话；继续请使用 /continue 确认下一站",
+      activeSessionId ? { activeSessionId } : undefined,
     );
   }
 
@@ -1220,13 +1286,20 @@ export async function createSession(
   });
   if (!budget.sufficient) {
     throw new SessionServiceError(
-      "BUDGET_INSUFFICIENT",
+      "budget_insufficient",
       409,
       `预算不足：本 Episode 预留需要 ${budget.requiredTotal} 单位，可用 ${availableBudgetUnits} 单位；在用户作答前阻断`,
     );
   }
 
   const formalPlanKind = resolveFormalPlanKind(candidate.schedulingDecision.authorizedAction);
+  // 任务 14 接线：structured_mastery_bundle 冻结时签发 silent 资格
+  // （05-1 registry 三 family ACTIVE + Gold 均已就绪）。正式路径中
+  // silentProofProfileId 由 registry 按 keyPoint 资格选择；此处用确定性
+  // 默认（procedure family）保证 silent 路线真实可达（§7 决策 2：
+  // eligibility + Gold 硬门槛由服务端冻结时验证）。场景 public 数据由
+  // 确定性生成器从 canonical claim 派生（ordering + repair），前端
+  // SilentProofScene 直接消费（W4 Scene Author 接入后替换）。
   // 救火 3b：从候选派生 rubric targets + probe hashes（不再空壳）。
   // probe/rubric 基于 sourceFingerprint + contentExposureKey 的确定性派生
   //（EpisodeCandidate 不含逐证据 hash——scene 合同接入后替换为真实 evidence）。
@@ -1242,9 +1315,31 @@ export async function createSession(
   const frozenProbeHashes = [
     sha256Hex(`probe:${candidate.keyPointId}:0:${candidate.contentExposureKey}`),
   ];
+  const canonicalForScene = activeCanonical.find(
+    (item) => item.keyPointId === candidate.keyPointId,
+  );
+  const silentSceneData = formalPlanKind === "structured_mastery_bundle" && canonicalForScene
+    ? buildSilentSceneData(
+        candidate.keyPointId,
+        canonicalForScene.claim,
+        candidate.sourceFingerprint,
+      )
+    : undefined;
   const formalPlan: EpisodeFormalPlan = {
     kind: formalPlanKind,
     requiredProbeIds: frozenProbeHashes.slice(0, 1), // 首个 probe 为当前回答目标
+    // silent 资格与场景数据同生命周期：canonical 缺失或 claim <2 片段
+    //（buildSilentSceneData 返回 null）→ 三者都不签发，避免「有资格无场景」
+    // 的半签发状态（buildJourneyPlan 同样 fail-closed）。
+    ...(formalPlanKind === "structured_mastery_bundle" && silentSceneData != null
+      ? {
+          silentProofProfileId: "silent-proof-procedure-v1",
+          structuredProofEligibilityReportHash: sha256Hex(
+            `silent-eligibility:${candidate.keyPointId}:${candidate.sourceFingerprint}`,
+          ),
+          silentSceneData,
+        }
+      : {}),
   };
   const userPreferencesHash = sha256Hex(stableStringify(preferences ?? {}));
   const assistanceSnapshotHash = sha256Hex(stableStringify(assistance ?? null));
@@ -1310,6 +1405,7 @@ export async function createSession(
     budgetEnvelopeHash: budget.envelope.envelopeHash,
     planHash,
     status: "active",
+    processingPhase: "awaiting_response",
     commitKey: null,
   });
 
@@ -1365,7 +1461,7 @@ export async function continueSession(
   if (pending !== undefined) {
     // checkpoint 前置：本 Episode 必须先有真实结果（终态）才能继续下一站。
     throw new SessionServiceError(
-      "EPISODE_NOT_TERMINAL",
+      "episode_not_terminal",
       409,
       "checkpoint 要求本 Episode 先落终态（completed/stale/cancelled），才能确认下一站",
     );
@@ -1402,7 +1498,7 @@ export async function continueSession(
   const candidate = selectEpisodeCandidate(candidates, input.preferredKeyPointId);
   if (candidate === null) {
     throw new SessionServiceError(
-      "PREPARE_NO_CANDIDATES",
+      "prepare_no_candidates",
       409,
       "没有可 PREPARE 的下一 Episode 候选（已用完/无合法目标）",
     );
@@ -1410,7 +1506,7 @@ export async function continueSession(
   // 换路线时显式指定目标必须命中，禁止静默 PREPARE 其它候选。
   if (input.preferredKeyPointId !== undefined && candidate.keyPointId !== input.preferredKeyPointId) {
     throw new SessionServiceError(
-      "PREPARE_NO_CANDIDATES",
+      "prepare_no_candidates",
       409,
       `指定目标 ${input.preferredKeyPointId} 没有可 PREPARE 的合法候选`,
     );
@@ -1436,7 +1532,7 @@ export async function continueSession(
   });
   if (!budget.sufficient) {
     throw new SessionServiceError(
-      "BUDGET_INSUFFICIENT",
+      "budget_insufficient",
       409,
       `预算不足：下一 Episode 预留需要 ${budget.requiredTotal} 单位，可用 ${availableBudgetUnits} 单位；在用户作答前阻断`,
     );
@@ -1512,6 +1608,7 @@ export async function continueSession(
     budgetEnvelopeHash: budget.envelope.envelopeHash,
     planHash,
     status: "active",
+    processingPhase: "awaiting_response",
     commitKey: null,
   });
   const allEpisodes = [...episodes, nextEpisode];
@@ -1559,7 +1656,7 @@ export async function sessionLoop(
   const episode = await repo.findEpisode(input.workspaceId, input.userId, input.episodeId);
   if (episode === null || episode.sessionId !== session.id) {
     throw new SessionServiceError(
-      "EPISODE_NOT_FOUND",
+      "episode_not_found",
       404,
       "Episode 不存在或不属于该 Session",
     );
@@ -1571,7 +1668,7 @@ export async function sessionLoop(
   );
   if (!result.allowed) {
     throw new SessionServiceError(
-      "INVALID_LOOP_ACTION",
+      "invalid_loop_action",
       409,
       result.reason ?? "非法 loop action",
     );
@@ -1605,7 +1702,7 @@ export async function sessionLoop(
   }
   const updated = await repo.findSession(input.workspaceId, input.userId, session.id);
   if (updated === null) {
-    throw new SessionServiceError("SESSION_NOT_FOUND", 404, "Session 不存在");
+    throw new SessionServiceError("session_not_found", 404, "Session 不存在");
   }
   return {
     state: result.state,
@@ -1628,18 +1725,21 @@ export async function endSession(
   const now = input.now ?? new Date();
   const session = await requireActiveSession(input.workspaceId, input.userId, input.sessionId, repo);
   await repo.updateSessionStatus(session.id, "ended", now, input.workspaceId, input.userId);
-  for (const episode of await repo.listEpisodes(input.workspaceId, input.userId, session.id)) {
-    if (episode.status === "active" || episode.status === "draft") {
-      await repo.updateEpisodeStatus(episode.id, "cancelled", now, input.workspaceId, input.userId);
-    }
-  }
+  // 2026-08-11：复用一次 listEpisodes（此前调用 2 次）+ 批量取消
+  const episodes = await repo.listEpisodes(input.workspaceId, input.userId, session.id);
+  const cancellable = episodes
+    .filter((episode) => episode.status === "active" || episode.status === "draft")
+    .map((episode) => episode.id);
+  await repo.updateEpisodeStatuses(cancellable, "cancelled", now, input.workspaceId, input.userId);
   const updated = await repo.findSession(input.workspaceId, input.userId, session.id);
   if (updated === null) {
-    throw new SessionServiceError("SESSION_NOT_FOUND", 404, "Session 不存在");
+    throw new SessionServiceError("session_not_found", 404, "Session 不存在");
   }
+  // 返回最新状态（episodes 已取消）
+  const finalEpisodes = await repo.listEpisodes(input.workspaceId, input.userId, session.id);
   return buildSessionPublicView({
     session: updated,
-    episodes: await repo.listEpisodes(input.workspaceId, input.userId, session.id),
+    episodes: finalEpisodes,
   });
 }
 
@@ -1651,22 +1751,27 @@ export async function cancelSession(
   const now = input.now ?? new Date();
   const session = await requireActiveSession(input.workspaceId, input.userId, input.sessionId, repo);
   const episodes = await repo.listEpisodes(input.workspaceId, input.userId, session.id);
-  for (const episode of episodes) {
-    // 已 commit（completed）/已终态（stale）保留；未开始（draft）与进行中（active）
-    // 一律 cancelled（零副作用：只改状态，不写掌握/schedule）。
-    if (episode.status === "completed" || episode.status === "stale" || episode.status === "cancelled") {
-      continue;
-    }
-    await repo.updateEpisodeStatus(episode.id, "cancelled", now, input.workspaceId, input.userId);
-  }
+  // 2026-08-11：批量取消（此前循环逐条 UPDATE）
+  const cancellable = episodes
+    .filter((episode) => {
+      // 已 commit（completed）/已终态（stale/cancelled）保留；未开始（draft）
+      // 与进行中（active）一律 cancelled（零副作用：只改状态，不写掌握/schedule）。
+      return episode.status !== "completed"
+        && episode.status !== "stale"
+        && episode.status !== "cancelled";
+    })
+    .map((episode) => episode.id);
+  await repo.updateEpisodeStatuses(cancellable, "cancelled", now, input.workspaceId, input.userId);
   await repo.updateSessionStatus(session.id, "cancelled", now, input.workspaceId, input.userId);
   const updated = await repo.findSession(input.workspaceId, input.userId, session.id);
   if (updated === null) {
-    throw new SessionServiceError("SESSION_NOT_FOUND", 404, "Session 不存在");
+    throw new SessionServiceError("session_not_found", 404, "Session 不存在");
   }
+  // 返回最新状态（episodes 已取消）
+  const finalEpisodes = await repo.listEpisodes(input.workspaceId, input.userId, session.id);
   return buildSessionPublicView({
     session: updated,
-    episodes: await repo.listEpisodes(input.workspaceId, input.userId, session.id),
+    episodes: finalEpisodes,
   });
 }
 
@@ -1677,7 +1782,7 @@ export async function getSessionPublicView(
 ): Promise<SessionPublicView> {
   const session = await repo.findSession(input.workspaceId, input.userId, input.sessionId);
   if (session === null) {
-    throw new SessionServiceError("SESSION_NOT_FOUND", 404, "Session 不存在");
+    throw new SessionServiceError("session_not_found", 404, "Session 不存在");
   }
   return buildSessionPublicView({
     session,
@@ -1693,11 +1798,11 @@ async function requireActiveSession(
 ): Promise<SessionRow> {
   const session = await repo.findSession(workspaceId, userId, sessionId);
   if (session === null) {
-    throw new SessionServiceError("SESSION_NOT_FOUND", 404, "Session 不存在");
+    throw new SessionServiceError("session_not_found", 404, "Session 不存在");
   }
   if (session.status !== "active") {
     throw new SessionServiceError(
-      "SESSION_NOT_ACTIVE",
+      "session_not_active",
       409,
       `Session 当前状态 ${session.status}，无法执行该生命周期动作`,
     );
@@ -1736,7 +1841,9 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
             eq(reviewSchedules.workspaceId, workspaceId),
             eq(reviewSchedules.userId, userId),
             eq(reviewSchedules.status, "pending"),
-            sql`${reviewSchedules.nextReviewAt} <= ${now}`,
+            // postgres.js does not encode JavaScript Date values reliably for
+            // this Drizzle predicate; keep the boundary explicit and UTC.
+            sql`${reviewSchedules.nextReviewAt} <= ${now.toISOString()}`,
             sql`${reviewSchedules.keyPointId} IS NOT NULL`,
           ),
         );
@@ -1778,14 +1885,17 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
         .where(
           and(
             eq(cardKeyPoints.workspaceId, workspaceId),
+            eq(learningCards.workspaceId, workspaceId),
+            eq(learningCardSets.workspaceId, workspaceId),
+            eq(evidences.workspaceId, workspaceId),
             eq(learningCardSets.status, "active"),
             eq(learningCards.status, "active"),
-            ...(ids !== undefined ? [sql`${cardKeyPoints.id} = ANY(${ids}::uuid[])`] : []),
+            ...(ids !== undefined ? [inArray(cardKeyPoints.id, ids)] : []),
           ),
         );
       // cardRevision 权威来源：generation_run 的 generation_epoch（02-6）。
       const runIds = [...new Set(rows.map((r) => r.generationRunId))];
-      const runEpochs = await fetchGenerationEpochs(transaction, runIds);
+      const runEpochs = await fetchGenerationEpochs(transaction, workspaceId, runIds);
       const grouped = new Map<string, {
         keyPointId: string;
         cardId: string;
@@ -1896,19 +2006,48 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
         );
       return rows[0]?.count ?? 0;
     },
+    async findActiveSessionId(workspaceId, userId) {
+      const rows = await transaction
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(
+          and(
+            eq(sessions.workspaceId, workspaceId),
+            eq(sessions.userId, userId),
+            eq(sessions.status, "active"),
+          ),
+        )
+        .orderBy(desc(sessions.updatedAt), desc(sessions.createdAt))
+        .limit(1);
+      return rows[0]?.id ?? null;
+    },
     async createSession(values) {
-      const [row] = await transaction
-        .insert(sessions)
-        .values({
-          workspaceId: values.workspaceId,
-          userId: values.userId,
-          origin: values.origin,
-          originRef: values.originRef,
-          intent: values.intent,
-          status: values.status,
-        })
-        .returning();
-      return rowToSession(row);
+      try {
+        const [row] = await transaction
+          .insert(sessions)
+          .values({
+            workspaceId: values.workspaceId,
+            userId: values.userId,
+            origin: values.origin,
+            originRef: values.originRef,
+            intent: values.intent,
+            status: values.status,
+          })
+          .returning();
+        return rowToSession(row);
+      } catch (error) {
+        // 数据库级兜底：并发 PREPARE 命中部分唯一索引
+        // learning_sessions_user_active_unique_idx(workspace_id, user_id) WHERE status='active'，
+        // 把 23505 转成与预检查一致的 409 session_limit_reached，而非 500。
+        if (error && typeof error === "object" && "code" in error && error.code === "23505") {
+          throw new SessionServiceError(
+            "session_limit_reached",
+            409,
+            "每用户同时只允许 1 个 active 学习会话（并发 PREPARE 被数据库唯一索引拦截）；继续请使用 /continue 确认下一站",
+          );
+        }
+        throw error;
+      }
     },
     async createEpisode(values) {
       const [row] = await transaction
@@ -1946,6 +2085,7 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
           budgetEnvelopeRef: values.budgetEnvelopeRef,
           budgetEnvelopeHash: values.budgetEnvelopeHash,
           planHash: values.planHash,
+          processingPhase: values.processingPhase,
           status: values.status,
           commitKey: values.commitKey,
         })
@@ -2007,12 +2147,47 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
         );
     },
     async updateEpisodeStatus(episodeId, status, now, workspaceId, userId) {
+      const processingPhase = status === "completed"
+        ? "committed"
+        : status === "cancelled"
+          ? "cancelled"
+          : status === "stale"
+            ? "stale"
+            : undefined;
       await transaction
         .update(episodes)
-        .set({ status, updatedAt: now })
+        .set({
+          status,
+          ...(processingPhase ? { processingPhase } : {}),
+          updatedAt: now,
+        })
         .where(
           and(
             eq(episodes.id, episodeId),
+            eq(episodes.workspaceId, workspaceId),
+            eq(episodes.userId, userId),
+          ),
+        );
+    },
+    async updateEpisodeStatuses(episodeIds, status, now, workspaceId, userId) {
+      if (episodeIds.length === 0) return;
+      const processingPhase = status === "completed"
+        ? "committed"
+        : status === "cancelled"
+          ? "cancelled"
+          : status === "stale"
+            ? "stale"
+            : undefined;
+      await transaction
+        .update(episodes)
+        .set({
+          status,
+          ...(processingPhase ? { processingPhase } : {}),
+          updatedAt: now,
+        })
+        .where(
+          and(
+            inArray(episodes.id, episodeIds),
             eq(episodes.workspaceId, workspaceId),
             eq(episodes.userId, userId),
           ),
@@ -2064,13 +2239,16 @@ async function loadCanonical(
     .where(
       and(
         eq(cardKeyPoints.workspaceId, workspaceId),
+        eq(learningCards.workspaceId, workspaceId),
+        eq(learningCardSets.workspaceId, workspaceId),
+        eq(evidences.workspaceId, workspaceId),
         eq(learningCardSets.status, "active"),
         eq(learningCards.status, "active"),
-        sql`${cardKeyPoints.id} = ANY(${keyPointIds}::uuid[])`,
+        inArray(cardKeyPoints.id, [...keyPointIds]),
       ),
     );
   const runIds = [...new Set(rows.map((r) => r.generationRunId))];
-  const runEpochs = await fetchGenerationEpochs(transaction, runIds);
+  const runEpochs = await fetchGenerationEpochs(transaction, workspaceId, runIds);
   const grouped = new Map<string, {
     keyPointId: string;
     cardId: string;
@@ -2112,6 +2290,7 @@ async function loadCanonical(
 
 async function fetchGenerationEpochs(
   transaction: ApiTransaction,
+  workspaceId: string,
   runIds: readonly string[],
 ): Promise<Map<string, number>> {
   const map = new Map<string, number>();
@@ -2119,7 +2298,10 @@ async function fetchGenerationEpochs(
   const rows = await transaction
     .select({ id: cardGenerationRunsTable.id, generationEpoch: cardGenerationRunsTable.generationEpoch })
     .from(cardGenerationRunsTable)
-    .where(sql`${cardGenerationRunsTable.id} = ANY(${runIds}::uuid[])`);
+    .where(and(
+      eq(cardGenerationRunsTable.workspaceId, workspaceId),
+      inArray(cardGenerationRunsTable.id, [...runIds]),
+    ));
   for (const row of rows) map.set(row.id, row.generationEpoch);
   return map;
 }
@@ -2193,6 +2375,7 @@ function rowToEpisode(row: {
   budgetEnvelopeRef: string;
   budgetEnvelopeHash: string;
   planHash: string;
+  processingPhase: LearningEpisodeProcessingPhase;
   status: LearningEpisodeStatus;
   commitKey: string | null;
   createdAt: Date;
@@ -2204,24 +2387,31 @@ function rowToEpisode(row: {
 // ─── 错误类型 ─────────────────────────────────────────────────────────────
 
 export type SessionServiceErrorCode =
-  | "PREPARE_NO_CANDIDATES"
-  | "SESSION_LIMIT_REACHED"
-  | "BUDGET_INSUFFICIENT"
-  | "SESSION_NOT_FOUND"
-  | "SESSION_NOT_ACTIVE"
-  | "EPISODE_NOT_FOUND"
-  | "EPISODE_NOT_TERMINAL"
-  | "INVALID_LOOP_ACTION";
+  | "prepare_no_candidates"
+  | "session_limit_reached"
+  | "budget_insufficient"
+  | "session_not_found"
+  | "session_not_active"
+  | "episode_not_found"
+  | "episode_not_terminal"
+  | "invalid_loop_action";
 
 /** Session 服务错误（路由层按 statusCode 映射 HTTP） */
 export class SessionServiceError extends Error {
   readonly code: SessionServiceErrorCode;
   readonly statusCode: number;
+  readonly recoveryData?: Readonly<Record<string, string>>;
 
-  constructor(code: SessionServiceErrorCode, statusCode: number, message: string) {
+  constructor(
+    code: SessionServiceErrorCode,
+    statusCode: number,
+    message: string,
+    recoveryData?: Readonly<Record<string, string>>,
+  ) {
     super(message);
     this.name = "SessionServiceError";
     this.code = code;
     this.statusCode = statusCode;
+    this.recoveryData = recoveryData;
   }
 }

@@ -13,6 +13,13 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
+import {
+  authenticatedBeforeEach,
+} from "./helpers.ts";
+
+// 2026-08-12（e2e 质量审计 P1-1）：受保护页面统一真实登录
+authenticatedBeforeEach();
+
 
 const FLAG = process.env.NEXT_PUBLIC_COMPANION_SHELL_ENABLED === "true";
 

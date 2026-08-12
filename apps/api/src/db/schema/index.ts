@@ -10,3 +10,8 @@ export * from "./search.ts";
 export * from "./benchmark.ts";
 export * from "./validation-v2.ts";
 export * from "./card-generation.ts";
+export * from "./learning-sessions.ts";
+export * from "./companion.ts";
+export * from "./companion-conversations.ts";
+export * from "./learning-exposure.ts";
+export * from "./outbox.ts";

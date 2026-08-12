@@ -27,6 +27,10 @@ const reviewQuerySchema = z.object({
   includeAll: z.enum(["true", "false"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   offset: z.coerce.number().int().min(0).max(100_000).optional(),
+  // 2026-08-11（性能专项）：nextReviewAt 窗口过滤（today 页按天拉取，
+  // 避免全量复习串行瀑布）。
+  dueFromMs: z.coerce.number().int().min(0).optional(),
+  dueToMs: z.coerce.number().int().min(0).optional(),
 });
 
 const reviewAttemptHistoryQuerySchema = reviewAttemptHistoryPaginationSchema.extend({
@@ -77,6 +81,8 @@ export async function reviewRoutes(app: FastifyInstance) {
           includeAll,
           limit: q.limit,
           offset: q.offset,
+          dueFromMs: q.dueFromMs,
+          dueToMs: q.dueToMs,
         }, req.session.userId, tx),
       );
     },
@@ -176,10 +182,11 @@ export async function reviewRoutes(app: FastifyInstance) {
    */
   app.get<{ Querystring: { reviewScheduleId?: string } }>(
     "/reviews/attempts/active",
-    async (req) => {
+    async (req, reply) => {
       const scheduleId = req.query.reviewScheduleId;
       if (!scheduleId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(scheduleId)) {
-        return { activeAttempt: null };
+        // 2026-08-11：契约统一——非法 UUID 一律 400（此前静默返回 200 {activeAttempt:null}）
+        return reply.code(400).send({ error: "invalid_id_format", message: "无效的 reviewScheduleId" });
       }
       const activeAttempt = await getActiveReviewAttempt(
         req.session.workspaceId,

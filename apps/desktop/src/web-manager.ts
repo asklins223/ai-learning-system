@@ -18,9 +18,11 @@
  *
  * Identity verification:
  *   A random token is generated on each start. The utility-process worker
- *   exposes a `/__desktop_health` endpoint that returns the token. The
- *   health check verifies the token before considering the server ready,
- *   ensuring we connected to our own service and not a stale process.
+ *   exposes a `/__desktop_health` endpoint that requires the token via
+ *   `Authorization: Bearer` and returns only `service`/`port` (SEC-14 后
+ *   不再回显 token)。The health check sends the token header and verifies
+ *   `service` before considering the server ready, ensuring we connected
+ *   to our own service and not a stale process.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -231,6 +233,7 @@ async function startWebServerDev(
     INTERNAL_API_URL: "http://127.0.0.1:4000",
     NODE_ENV: "development",
     PORT: String(port),
+    NEXT_PUBLIC_COMPANION_PET_ENABLED: "true",
     NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: "true",
     NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: "true",
     NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: "true",
@@ -442,12 +445,19 @@ async function waitForWebHealthy(
     }
 
     try {
-      const res = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
+      // 2026-08-11 修复：SEC-22/29 与 SEC-14 互斥——worker 端 /__desktop_health
+      // 要求 Bearer token（否则 403），且响应不再返回 token（父进程此前校验
+      // body.token !== token 永远失败）。修复：请求带头 + 身份只比对 service。
+      const res = await fetch(healthUrl, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        signal: AbortSignal.timeout(3000),
+      });
       if (res.ok) {
         if (token) {
           // Verify identity to ensure we're talking to our own service.
-          const body = (await res.json()) as { service?: string; token?: string };
-          if (body.service !== "ailearn-desktop" || body.token !== token) {
+          // SEC-14 之后响应只含 service/port，不再返回 token。
+          const body = (await res.json()) as { service?: string };
+          if (body.service !== "ailearn-desktop") {
             logger.warn("[web] Health endpoint responded but identity mismatch — not our service.");
             // Keep polling — our server might still be starting.
           } else {

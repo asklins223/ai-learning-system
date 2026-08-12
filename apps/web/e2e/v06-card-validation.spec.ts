@@ -14,6 +14,15 @@
  */
 
 import { test, expect, type Response } from "@playwright/test";
+import {
+  skipIfNoServer,
+  authenticatedBeforeEach,
+  TEST_CARD_ID,
+} from "./helpers.ts";
+
+// 2026-08-12（e2e 质量审计 P1-1）：受保护页面统一真实登录
+authenticatedBeforeEach();
+
 
 // ─── Sensitive fields that must NEVER appear in pre-reveal responses ─────
 
@@ -108,9 +117,9 @@ test.describe("v0.6 Card Validation Flow (计划 §13.3)", () => {
   test("card detail page has '开始验证' CTA", async ({ page }) => {
     // This test requires a running server with seeded data
     // Skip if no server is available
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001");
+    await page.goto(`/cards/${TEST_CARD_ID}`);
 
     // Verify CTA exists
     const cta = page.locator("text=开始验证").first();
@@ -118,7 +127,7 @@ test.describe("v0.6 Card Validation Flow (计划 §13.3)", () => {
   });
 
   test("Focus page shows question without sensitive fields", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
     // Intercept all network responses
     const leakedFields: string[] = [];
@@ -134,7 +143,7 @@ test.describe("v0.6 Card Validation Flow (计划 §13.3)", () => {
       }
     });
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
 
     // Wait for page to load
     await page.waitForLoadState("networkidle");
@@ -144,22 +153,24 @@ test.describe("v0.6 Card Validation Flow (计划 §13.3)", () => {
   });
 
   test("Focus page has 100dvh layout (计划 §9.5)", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
 
     // Check that the page uses 100dvh
+    // 2026-08-11：运行时只能拿到计算后的 px 高度，无法直接断言 dvh 单位——
+    // 此前 expect(bodyHeight).toBeTruthy() 恒真（空转）。改为：body 实际渲染
+    // 出非零高度（页面未渲染即失败）；dvh 用法由源级测试验证。
     const bodyHeight = await page.evaluate(() => {
       return window.getComputedStyle(document.body).height;
     });
-    // The body height should reference dvh units (100dvh) for mobile-safe layout
-    expect(bodyHeight).toBeTruthy();
+    expect(parseFloat(bodyHeight) || 0).toBeGreaterThan(0);
   });
 
   test("user can type answer and submit with Cmd/Ctrl+Enter", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
 
     // Wait for textarea
     const textarea = page.locator("textarea").first();
@@ -168,15 +179,25 @@ test.describe("v0.6 Card Validation Flow (计划 §13.3)", () => {
     // Type answer
     await textarea.fill("This is my test answer about the concept.");
 
+    // 2026-08-12（P0-1 修复）：此前提交后只 sleep 零断言——任何实现都通过
+    // （假绿）。捕获提交请求并断言服务端真实处理（2xx/4xx 均可判定请求
+    // 发出并被处理；5xx 才失败）。
+    const submitResponse = page.waitForResponse(
+      (r) => r.url().includes(`/api/cards/${TEST_CARD_ID}/validate`) && r.request().method() === "POST",
+      { timeout: 15_000 },
+    );
+
     // Submit with Cmd+Enter (Mac) or Ctrl+Enter (Windows/Linux)
     await page.keyboard.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
 
-    // Wait for submission to be processed
-    await page.waitForTimeout(2000);
+    const resp = await submitResponse;
+    const status = resp.status();
+    expect(status).toBeGreaterThanOrEqual(200);
+    expect(status).toBeLessThan(500);
   });
 
   test("Cache-Control: private, no-store on session routes", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
     const cacheIssues: string[] = [];
     page.on("response", (response: Response) => {
@@ -187,7 +208,7 @@ test.describe("v0.6 Card Validation Flow (计划 §13.3)", () => {
       cacheIssues.push(...checkCacheControlHeaders(url, headers));
     });
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     expect(cacheIssues).toEqual([]);
@@ -198,7 +219,7 @@ test.describe("v0.6 Card Validation Flow (计划 §13.3)", () => {
 
 test.describe("v0.6 Pre-submit Leakage Detection (计划 §10.4)", () => {
   test("no sensitive fields in network responses before reveal", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
     const allLeaks: string[] = [];
 
@@ -215,7 +236,7 @@ test.describe("v0.6 Pre-submit Leakage Detection (计划 §10.4)", () => {
       }
     });
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     // Wait a bit for any lazy loading
@@ -225,9 +246,9 @@ test.describe("v0.6 Pre-submit Leakage Detection (计划 §10.4)", () => {
   });
 
   test("no sensitive fields in DOM before reveal", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     // Check page content for sensitive fields
@@ -240,7 +261,7 @@ test.describe("v0.6 Pre-submit Leakage Detection (计划 §10.4)", () => {
   });
 
   test("no sensitive fields in __NEXT_DATA__ RSC payload", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
     const nextDataLeaks: string[] = [];
 
@@ -256,7 +277,7 @@ test.describe("v0.6 Pre-submit Leakage Detection (计划 §10.4)", () => {
       }
     });
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     expect(nextDataLeaks).toEqual([]);
@@ -268,10 +289,10 @@ test.describe("v0.6 Pre-submit Leakage Detection (计划 §10.4)", () => {
 test.describe("v0.6 Viewport Tests (计划 §9.5)", () => {
   for (const [name, viewport] of Object.entries(VIEWPORTS)) {
     test(`Focus page renders correctly at ${name} (${viewport.width}x${viewport.height})`, async ({ page }) => {
-      test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+          skipIfNoServer();
 
       await page.setViewportSize(viewport);
-      await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+      await page.goto(`/cards/${TEST_CARD_ID}/validate`);
 
       // Check no horizontal overflow
       const hasOverflow = await page.evaluate(() => {

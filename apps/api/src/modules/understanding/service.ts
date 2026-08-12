@@ -43,6 +43,14 @@ export async function getUnderstandingStates(
   userId?: string,
   tx?: ApiTransaction,
 ): Promise<UnderstandingState[]> {
+  // 2026-08-11（性能专项）：非事务调用（HTTP 路由）走短 TTL 缓存。
+  const cache = !tx ? understandingStatesCache : null;
+  if (cache) sweepUnderstandingCache();
+  const cacheK = cacheKey(workspaceId, userId ?? SYSTEM_USER_ID, opts?.state ?? "");
+  const cachedHit = cache?.get(cacheK);
+  if (cachedHit && Date.now() - cachedHit.at < UNDERSTANDING_CACHE_TTL_MS) {
+    return cachedHit.data;
+  }
   // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
   // 提供 tx（测试/内部调用）时直接运行，跳过事务上下文设置。
   const run = async (tx: ApiTransaction): Promise<UnderstandingState[]> => {
@@ -296,10 +304,16 @@ export async function getUnderstandingStates(
 
   return results;
   };
-  return tx ? run(tx) : withWorkspaceTransaction(
+  if (tx) return run(tx);
+  const results = await withWorkspaceTransaction(
     { workspaceId, userId: userId ?? SYSTEM_USER_ID },
     run,
   );
+  // 2026-08-11（性能专项）：非事务路径计算完成后写入缓存
+  if (cache) {
+    cache.set(cacheK, { at: Date.now(), data: results });
+  }
+  return results;
 }
 
 /**
@@ -314,11 +328,40 @@ export async function getUnderstandingStates(
  *
  * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
+
+// 2026-08-11（性能专项）：/understanding/states 与 /graph 每请求重建 6-8 条聚合
+// SQL（前端导航即触发）。加进程内短 TTL 缓存（30s）：统计/星图视图对实时性
+// 不敏感，缓存显著降低 DB 负载；写操作后至多 30s 延迟展示，可接受。
+// tx 参数传入（事务内一致性）或 opts 变化时不走缓存。
+const UNDERSTANDING_CACHE_TTL_MS = 30_000;
+const understandingStatesCache = new Map<string, { at: number; data: UnderstandingState[] }>();
+const understandingGraphCache = new Map<string, { at: number; data: UnderstandingGraph }>();
+const cacheKey = (workspaceId: string, userId: string, extra = ""): string => `${workspaceId}:${userId}:${extra}`;
+
+// 2026-08-11（review 修复）：命中检查时顺带清理过期条目，避免 Map 随
+// (workspace,user,state) 组合缓慢无界增长。
+function sweepUnderstandingCache(): void {
+  const now = Date.now();
+  for (const [key, entry] of understandingStatesCache) {
+    if (now - entry.at >= UNDERSTANDING_CACHE_TTL_MS) understandingStatesCache.delete(key);
+  }
+  for (const [key, entry] of understandingGraphCache) {
+    if (now - entry.at >= UNDERSTANDING_CACHE_TTL_MS) understandingGraphCache.delete(key);
+  }
+}
 export async function getUnderstandingGraph(
   workspaceId: string,
   userId: string,
   tx?: ApiTransaction,
 ): Promise<UnderstandingGraph> {
+  // 2026-08-11（性能专项）：非事务调用（HTTP 路由）走短 TTL 缓存。
+  const cache = !tx ? understandingGraphCache : null;
+  if (cache) sweepUnderstandingCache();
+  const cacheK = cacheKey(workspaceId, userId);
+  const cachedHit = cache?.get(cacheK);
+  if (cachedHit && Date.now() - cachedHit.at < UNDERSTANDING_CACHE_TTL_MS) {
+    return cachedHit.data;
+  }
   // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
   // 提供 tx（测试/内部调用）时直接运行，跳过事务上下文设置。
   const run = async (tx: ApiTransaction): Promise<UnderstandingGraph> => {
@@ -531,8 +574,14 @@ export async function getUnderstandingGraph(
     keyPoints: graphKeyPoints.filter((keyPoint) => stateByCardId.has(keyPoint.cardId)),
   });
   };
-  return tx ? run(tx) : withWorkspaceTransaction(
+  if (tx) return run(tx);
+  const graphResult = await withWorkspaceTransaction(
     { workspaceId, userId },
     run,
   );
+  // 2026-08-11（性能专项）：非事务路径计算完成后写入缓存
+  if (cache) {
+    cache.set(cacheK, { at: Date.now(), data: graphResult });
+  }
+  return graphResult;
 }

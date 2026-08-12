@@ -24,7 +24,7 @@ import {
   LearningToolId,
   type LearningRoleSpec,
 } from "../types.ts";
-import { computeVoiceContentHash } from "@ailearn/shared";
+import { computeVoiceContentHash, LearningAssessmentSource } from "@ailearn/shared";
 
 // ─── 枚举与常量 ─────────────────────────────────────────────────────────
 
@@ -37,12 +37,11 @@ export const ASSESSMENT_VERDICTS = [
 ] as const;
 export type AssessmentVerdict = (typeof ASSESSMENT_VERDICTS)[number];
 
-export const ASSESSMENT_SOURCES = [
-  "deterministic",
-  "critic",
-  "user_declared_unable",
-] as const;
-export type AssessmentSource = (typeof ASSESSMENT_SOURCES)[number];
+// 2026-08-12（契约收口）：值域单一来源迁移到 @ailearn/shared
+// （LearningAssessmentSource，与 SQL 0074 CHECK 对齐）；保留本地导出名
+// 兼容既有消费者。
+export const ASSESSMENT_SOURCES: readonly LearningAssessmentSource[] = Object.values(LearningAssessmentSource);
+export type AssessmentSource = LearningAssessmentSource;
 
 export const ARTIFACT_MODALITIES = [
   "voice",

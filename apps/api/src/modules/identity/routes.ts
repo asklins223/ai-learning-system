@@ -1,9 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
-import { users, workspaceMembers, workspaces } from "../../db/schema/identity.ts";
-import { loginWithPassword, registerWithInvite, registerWithoutInvite, switchWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace } from "./service.ts";
+import { users, workspaces } from "../../db/schema/identity.ts";
+import { loginWithPassword, registerWithoutInvite, switchWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession, requireOwner, getRequestCredential } from "./middleware.ts";
 import { clampLimit, clampOffset, parseQuery } from "../../lib/pagination.ts";
@@ -51,14 +51,6 @@ export const avatarUrlSchema = z
       return false;
     }
   }, "avatarUrl must be an HTTPS URL or a site-uploaded avatar path");
-
-const registerSchema = z.object({
-  email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
-  password: z.string().min(8).max(200),
-  inviteCode: z.string().trim().min(1).max(200),
-  displayName: displayNameSchema.optional(),
-  avatarUrl: avatarUrlSchema.optional(),
-});
 
 // ADR-0009: 无邀请码注册 — 只创建个人工作区
 const registerPersonalSchema = z.object({
@@ -135,7 +127,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     const ipDecision = await limiter.consume(ipKey);
     if (!ipDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(ipDecision.resetAt));
-      return reply.code(429).send({ error: "Too many login attempts. Please try again later." });
+      return reply.code(429).send({ error: "rate_limited", message: "登录尝试过于频繁，请稍后重试" });
     }
     const body = parseBody(app, loginSchema, req.body);
     // R-011: 也按 email 限流，防止跨 IP 暴力破解单个账户
@@ -143,15 +135,16 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     const emailDecision = await limiter.consume(emailKey);
     if (!emailDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(emailDecision.resetAt));
-      return reply.code(429).send({ error: "Too many login attempts for this account. Please try again later." });
+      return reply.code(429).send({ error: "rate_limited", message: "该账号登录尝试过于频繁，请稍后重试" });
     }
     const result = await loginWithPassword(body.email, body.password);
     if (!result) {
       throw app.httpErrors.unauthorized("invalid credentials");
     }
-    // G-005: 成功登录后重置该账户和 IP 的限流计数
+    // G-005: 成功登录后重置该账户限流计数（2026-08-11 收紧：不再重置 IP
+    // 计数——否则攻击者用任一有效凭据登录一次即清空自身 IP 失败计数，
+    // 支持跨账户分布式暴力破解）。
     await limiter.reset(emailKey);
-    await limiter.reset(ipKey);
     // Set an HttpOnly cookie for clients that opt into cookie auth while still
     // returning the Bearer token for existing API consumers.
     const csrfToken = setSessionCookies(reply, result.token, body.remember);
@@ -159,44 +152,23 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   });
 
   /**
-   * POST /auth/register
-   * @deprecated Use POST /auth/register-v2 with secure invite token.
-   * Legacy endpoint uses plaintext invite code lookup. Will be removed
-   * after migration window closes.
+   * POST /auth/register（已禁用）
+   * 明文 invite code 查找已在 2026-08-11 安全审查后关闭（明文邀请码仍是有效
+   * 凭据且无 hash 校验）；一律 410 Gone，请迁移到 /auth/register-v2。
    */
-  app.post("/auth/register", async (req, reply) => {
+  app.post("/auth/register", async (_req, reply) => {
     reply.header("Deprecation", "true");
     reply.header("Sunset", "Sat, 31 Jan 2027 00:00:00 GMT");
     reply.header("Link", '</auth/register-v2>; rel="successor-version"');
-    // G-005: 使用 req.ip 而非 req.socket.remoteAddress
-    const ip = req.ip;
-    const ipKey = `auth:register:ip:${ip}`;
-    const ipDecision = await limiter.consume(ipKey);
-    if (!ipDecision.allowed) {
-      reply.header("Retry-After", retryAfterSeconds(ipDecision.resetAt));
-      return reply.code(429).send({ error: "Too many registration attempts. Please try again later." });
-    }
-    const body = parseBody(app, registerSchema, req.body);
-    const result = await registerWithInvite(body.email, body.password, body.inviteCode, {
-      displayName: body.displayName,
-      avatarUrl: body.avatarUrl,
-    });
-    if (!result) {
-      throw app.httpErrors.badRequest("invalid invite or email exists");
-    }
-    // G-005: 成功注册后重置限流
-    await limiter.reset(ipKey);
-    const csrfToken = setSessionCookies(reply, result.token);
-    return { ...result, csrfToken };
+    return reply.code(410).send({ error: "register endpoint deprecated and disabled; use /auth/register-v2" });
   });
 
   app.post("/auth/logout", async (req, reply) => {
     // Logout 不要求 CSRF 校验：
     // 1) Logout 是低风险操作——攻击者最多让用户退出登录，不会造成数据泄露或篡改。
-    // 2) 前端 setCsrfCookie 兜底设置的 ailearn_csrf 是 session cookie（无 Max-Age），
-    //    当用户勾选"保持登录"后重启浏览器，ailearn_session 仍在但 ailearn_csrf 已消失，
-    //    导致退出登录被 403 阻断。其他写操作不受影响因为它们在活跃会话期间使用。
-    // 3) 即便移除 CSRF 校验，SameSite=Lax 已经阻止跨站表单 POST 退出登录。
+    // 2) SameSite=Lax 已阻止跨站表单 POST 退出登录。
+    //（2026-08-11：原注释声称前端 setCsrfCookie 兜底无 Max-Age——已修复，
+    //  前端兜底 cookie 带 7 天 Max-Age 与 session 一致；注释一并更新。）
     const credential = getRequestCredential(req);
     if (credential) await revokeSession(credential.token);
     clearSessionCookies(reply);
@@ -250,7 +222,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       return { ok: true, switchedToPersonalWorkspace: false };
     }
 
-    const switchResult = await switchWorkspace(req.session.userId, result.personalWorkspaceId);
+    const switchResult = await switchWorkspace(req.session.userId, result.personalWorkspaceId, null);
     if (!switchResult) {
       // 理论上不会发生，但保护性处理
       clearSessionCookies(reply);
@@ -261,17 +233,40 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   });
 
   // R-026: 返回当前登录用户的真实信息，Sidebar 不再硬编码 owner 邮箱和角色
-  app.get("/auth/me", { preHandler: [requireSession] }, async (req) => {
-    const { userId, workspaceId } = req.session;
+  // 2026-08-11（性能专项）：补 response schema（fast-json-stringify 预编译序列化）
+  app.get<{ Reply: unknown }>("/auth/me", {
+    preHandler: [requireSession],
+    schema: {
+      response: {
+        200: {
+          type: "object",
+          required: ["userId", "workspaceId", "email", "role", "displayName", "avatarUrl", "workspaceName", "workspaceType", "isPersonal", "personalWorkspaceId"],
+          properties: {
+            userId: { type: "string" },
+            workspaceId: { type: "string" },
+            email: { type: "string" },
+            role: { type: "string" },
+            displayName: { type: ["string", "null"] },
+            avatarUrl: { type: ["string", "null"] },
+            workspaceName: { type: "string" },
+            workspaceType: { type: "string" },
+            isPersonal: { type: "boolean" },
+            personalWorkspaceId: { type: ["string", "null"] },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+  }, async (req) => {
+    const { userId, workspaceId, membershipRole } = req.session;
     const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
     if (!user) throw req.server.httpErrors.notFound("user not found");
-    const membership = await db.query.workspaceMembers.findFirst({
-      where: and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)),
-    });
+    // 2026-08-11（性能专项）：membership 已由 decodeToken 合并 JOIN 取回，
+    // 不再重复查 workspace_members（原 /auth/me 共 5 次 DB 查询 → 3 次）。
     const workspace = await db.query.workspaces.findFirst({ where: eq(workspaces.id, workspaceId) });
-    const role = membership?.role === "owner" || workspace?.ownerId === userId
+    const role = membershipRole === "owner" || workspace?.ownerId === userId
       ? "owner"
-      : membership?.role ?? "member";
+      : membershipRole ?? "member";
     return {
       userId,
       workspaceId,
@@ -334,7 +329,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     const ipDecision = await limiter.consume(ipKey);
     if (!ipDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(ipDecision.resetAt));
-      return reply.code(429).send({ error: "Too many registration attempts. Please try again later." });
+      return reply.code(429).send({ error: "rate_limited", message: "注册尝试过于频繁，请稍后重试" });
     }
     const body = parseBody(app, registerPersonalSchema, req.body);
     const result = await registerWithoutInvite(body.email, body.password, {
@@ -362,12 +357,9 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   app.post("/auth/switch-workspace", { preHandler: [requireSession] }, async (req, reply) => {
     const body = parseBody(app, switchWorkspaceSchema, req.body);
     const previousCredential = getRequestCredential(req);
-    const result = await switchWorkspace(req.session.userId, body.workspaceId);
+    const result = await switchWorkspace(req.session.userId, body.workspaceId, previousCredential?.token ?? null);
     if (!result) {
       return reply.code(403).send({ error: "not a member of this workspace" });
-    }
-    if (previousCredential && previousCredential.token !== result.token) {
-      await revokeSession(previousCredential.token);
     }
     const csrfToken = setSessionCookies(reply, result.token);
     return { ...result, csrfToken };
@@ -396,6 +388,29 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   );
 
   // ─── N-011: AI 隐私治理路由 ────────────────────────────────────
+
+  // 2026-08-11（安全加固）：修改密码——验证旧密码 + 更新 bcrypt + 撤销全部
+  // 会话（全端注销，泄露凭据可自轮换）。
+  const changePasswordSchema = z.object({
+    currentPassword: z.string().min(1).max(200),
+    newPassword: z.string().min(8).max(200),
+  });
+  app.post("/auth/change-password", { preHandler: [requireSession] }, async (req, reply) => {
+    const body = parseBody(app, changePasswordSchema, req.body);
+    const changed = await changePassword(req.session.userId, body.currentPassword, body.newPassword);
+    if (!changed) {
+      return reply.code(403).send({ error: "invalid_password", message: "当前密码不正确" });
+    }
+    clearSessionCookies(reply);
+    return reply.code(204).send();
+  });
+
+  // 2026-08-11（安全加固）：退出所有设备——撤销当前用户全部会话。
+  app.delete("/auth/sessions", { preHandler: [requireSession] }, async (req, reply) => {
+    await revokeAllSessionsForUser(req.session.userId);
+    clearSessionCookies(reply);
+    return reply.code(204).send();
+  });
 
   // GET /workspace/ai-settings — 获取当前工作区 AI 隐私配置
   app.get("/workspace/ai-settings", { preHandler: [requireSession] }, async (req) => {
@@ -594,7 +609,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     const ipDecision = await limiter.consume(ipKey);
     if (!ipDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(ipDecision.resetAt));
-      return reply.code(429).send({ error: "Too many registration attempts. Please try again later." });
+      return reply.code(429).send({ error: "rate_limited", message: "注册尝试过于频繁，请稍后重试" });
     }
     const body = parseBody(app, registerV2Schema, req.body);
 
@@ -613,7 +628,8 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
           email_exists: 409,
           concurrent_consumption: 409,
         };
-        await limiter.reset(ipKey); // don't penalize exploration
+        // 2026-08-11（安全修复）：失败分支不再 reset(ipKey)——此前无效 token
+        // 请求即可清空注册 IP 计数，配合无邮箱验证可无限批量注册假账户。
         return reply.code(statusMap[result.code] ?? 400).send({ error: result.code });
       }
       await limiter.reset(ipKey);

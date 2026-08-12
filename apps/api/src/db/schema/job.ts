@@ -44,5 +44,14 @@ export const jobs = pgTable(
     idempotencyUniqueIdx: uniqueIndex("jobs_workspace_idempotency_unique_idx")
       .on(t.workspaceId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("jobs_id_workspace_unique").on(t.id, t.workspaceId),
+    generationUnitIdx: index("jobs_generation_unit_idx").on(t.generationRunId, t.generationUnitId, t.status),
+    // 2026-08-12（generate 对齐）：表达式+部分唯一索引——同 noteVersion 的
+    // generate_card 不得并发重复(worker 幂等兜底)。drizzle 表达式索引用 sql 模板。
+    generateCardActiveUnique: uniqueIndex("jobs_generate_card_active_unique_idx")
+      .on(t.workspaceId, sql`(${t.payload} ->> 'noteVersionId')`)
+      .where(
+        sql`${t.type} = 'generate_card' AND ${t.status} IN ('pending', 'running') AND (${t.payload} ->> 'noteVersionId') IS NOT NULL`,
+      ),}),
 );

@@ -86,7 +86,7 @@ function inspectGate(value, path, issues) {
   }
 }
 
-function inspectDigest(value, path, issues) {
+function inspectDigest(value, path, issues, allowPlaceholder = false) {
   const match = typeof value === "string" ? DIGEST_PATTERN.exec(value) : null;
   if (!match) {
     issues.push(`${path} must be a canonical sha256 digest`);
@@ -96,7 +96,10 @@ function inspectDigest(value, path, issues) {
   const isRepeatedPlaceholder = [1, 2, 4, 8, 16].some(
     (width) => digest.slice(0, width).repeat(64 / width) === digest,
   );
-  if (isRepeatedPlaceholder) {
+  // 2026-08-11：无 registry 凭据的环境（本地/无 push 的 CI tag 流程）可显式声明
+  // allowUnpublishedImages——占位 digest 放行（格式仍校验），正式 release 流程
+  //（带 registry push 与人工审批）保持严格。
+  if (isRepeatedPlaceholder && !allowPlaceholder) {
     issues.push(`${path} must not be a placeholder digest`);
   }
 }
@@ -252,7 +255,7 @@ export function validateReleaseManifest(manifest, context) {
       if (typeof image.repository !== "string" || !image.repository.trim()) {
         issues.push(`manifest.images.${imageName}.repository must be non-empty`);
       }
-      inspectDigest(image.digest, `manifest.images.${imageName}.digest`, issues);
+      inspectDigest(image.digest, `manifest.images.${imageName}.digest`, issues, context.allowUnpublishedImages);
       if (typeof image.digest === "string") digests.push(image.digest);
       if (
         image.platform !== undefined &&
@@ -292,7 +295,7 @@ export function validateReleaseManifest(manifest, context) {
         }
         inspectIsoDate(image.provenance.builtAt, `${provenancePath}.builtAt`, issues);
         inspectIsoDate(image.provenance.observedAt, `${provenancePath}.observedAt`, issues);
-        inspectDigest(image.provenance.observedDigest, `${provenancePath}.observedDigest`, issues);
+        inspectDigest(image.provenance.observedDigest, `${provenancePath}.observedDigest`, issues, context.allowUnpublishedImages);
         if (image.provenance.observedDigest !== image.digest) {
           issues.push(`${provenancePath}.observedDigest must equal the released image digest`);
         }
@@ -530,6 +533,7 @@ export function resolveManifestArtifactPath(root, configuredPath) {
 export function verifyReleaseManifestForCurrentCheckout({
   root = REPOSITORY_ROOT,
   env = process.env,
+  allowUnpublishedImages = false,
 } = {}) {
   const issues = [];
   const exactTagNames = git(root, ["tag", "--points-at", "HEAD"])
@@ -607,6 +611,7 @@ export function verifyReleaseManifestForCurrentCheckout({
       latestMigration: entries.at(-1)?.tag ?? null,
       migrationCount: entries.length,
     },
+    allowUnpublishedImages,
   };
   issues.push(...validateReleaseManifest(manifest, context));
   return { required: true, tag: requirement.tag, manifestPath: absolutePath, issues };
@@ -614,7 +619,8 @@ export function verifyReleaseManifestForCurrentCheckout({
 
 function main() {
   try {
-    const result = verifyReleaseManifestForCurrentCheckout();
+    const allowUnpublishedImages = process.argv.includes("--allow-unpublished-images");
+    const result = verifyReleaseManifestForCurrentCheckout({ allowUnpublishedImages });
     if (result.issues.length > 0) {
       for (const issue of result.issues) console.error(`release manifest verification failed: ${issue}`);
       process.exitCode = 1;

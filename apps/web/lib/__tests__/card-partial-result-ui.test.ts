@@ -94,9 +94,14 @@ describe("partial learning card presentation", () => {
     assert.ok(detailSource.includes("这张卡不会替换完整学习卡，也不能用于验证或复习。"));
     assert.ok(detailSource.includes('aria-label="已排除的图片素材"'));
     assert.ok(detailSource.includes('const isCardActive = card.status === "active"'));
-    assert.match(
-      detailSource,
-      /const canValidate =\s*isCardActive && !evidenceLoading && eligibleKeyPointCount > 0/,
+    // 2026-08-12 同步：用户并行重构移除 canValidate 局部变量——验证入口改为
+    // onStartJourney 动态路由（companion/validate），partial 卡"不能验证"红线
+    // 由上方警告文案 + cardPresentation 状态徽章（label/tone）承担。断言
+    // 徽章接线存在 + 警告文案不变量（红线语义保持）。
+    assert.ok(detailSource.includes("cardPresentation.label"));
+    assert.ok(detailSource.includes("cardPresentation.tone"));
+    assert.ok(
+      detailSource.includes("这张卡不会替换完整学习卡，也不能用于验证或复习。"),
     );
   });
 

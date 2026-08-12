@@ -111,8 +111,8 @@ describe("listCardGenerationAgentEvents — 分页契约", () => {
     );
 
     assert.ok(result, "run 存在时应返回结果");
-    assert.equal(result!.events.length, 2);
-    const first = result!.events[0]!;
+    assert.equal(result!.items.length, 2);
+    const first = result!.items[0]!;
     assert.equal(first.id, events[0]!.id);
     assert.equal(first.eventKey, "tool_request:1");
     assert.equal(first.agentRole, "generation_supervisor");
@@ -140,7 +140,7 @@ describe("listCardGenerationAgentEvents — 分页契约", () => {
       { limit: 2 },
     );
 
-    assert.equal(result!.events.length, 2);
+    assert.equal(result!.items.length, 2);
     assert.equal(result!.hasMore, true);
     assert.ok(result!.nextCursor, "hasMore=true 时应有 nextCursor");
     const [timestamp, id] = decodeCursorParts(result!.nextCursor!);
@@ -192,7 +192,7 @@ describe("listCardGenerationAgentEvents — 分页契约", () => {
       RUN_ID,
     );
 
-    const event = result!.events[0]!;
+    const event = result!.items[0]!;
     assert.equal(event.parentUnitId, "00000000-0000-4000-8000-000000000010");
     assert.equal(event.childUnitId, "00000000-0000-4000-8000-000000000011");
     assert.equal(event.attemptNo, 2);
@@ -211,8 +211,8 @@ describe("listCardGenerationAgentEvents — 分页契约", () => {
       { includeUsage: true },
     );
 
-    assert.ok("usage" in result!.events[0]!, "includeUsage 时应返回 usage");
-    assert.deepEqual(result!.events[0]!.usage, { inputTokens: 100, outputTokens: 50 });
+    assert.ok("usage" in result!.items[0]!, "includeUsage 时应返回 usage");
+    assert.deepEqual(result!.items[0]!.usage, { inputTokens: 100, outputTokens: 50 });
   });
 
   it("run 不存在时返回 null", async () => {

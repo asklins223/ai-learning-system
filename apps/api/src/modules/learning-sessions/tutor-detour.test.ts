@@ -4,12 +4,12 @@
  * 覆盖（验收，07-w6 任务 07-7）：
  * - trusted → practice 原子切换：trusted challenge（让我试试）中提问 → 先记录
  *   assistance/exposure 再开放 Tutor 权限，然后才创建有界 detour（顺序断言）；
- *   together/free_explore 不切换直接创建；缺切换参数 → MISSING_SWITCH_PARAMS；
+ *   together/free_explore 不切换直接创建；缺切换参数 → missing_switch_params；
  * - 原子性：切换或 detour 保存任一步抛错 → 整体失败（transaction 不产生 detour）；
  * - 有界 detour 创建/结束：绑定 sessionId+episodeId+targetId+questionId；固定结束
  *   动作只有 return_to_origin / end_session；ended 终态不可再次动作；
  *   非法结束动作 / detour 不存在 → 拒绝；
- * - 问题标记是 Should 动作：shouldFlag 未开 → SAVE_MARKER_FLAG_OFF；开 → 保存；
+ * - 问题标记是 Should 动作：shouldFlag 未开 → save_marker_flag_off；开 → 保存；
  * - 不建第二套无限 message API：TutorDetourRecord 无 messages 数组；
  * - Session 外提问：只有明确选定 published Key Point 才创建 scoped exploration
  *   Session，否则请用户选择材料。
@@ -30,6 +30,7 @@ import type {
 } from "../companion-shell/presence-control.ts";
 import {
   TutorDetourError,
+  advanceTutorDetourTurn,
   buildTutorDetourRecord,
   createScopedTutorDetour,
   endScopedTutorDetour,
@@ -216,6 +217,33 @@ describe("transitionTutorDetourStatus", () => {
   });
 });
 
+describe("advanceTutorDetourTurn", () => {
+  it("最多两次说明，只递增计数且不产生 messages", () => {
+    const first = advanceTutorDetourTurn(recordFixture());
+    assert.equal(first.allowed, true);
+    assert.equal(first.record.turnCount, 1);
+    assert.equal(first.record.maxTurns, 2);
+    assert.ok(!("messages" in first.record));
+
+    const second = advanceTutorDetourTurn(first.record);
+    assert.equal(second.allowed, true);
+    assert.equal(second.record.turnCount, 2);
+
+    const third = advanceTutorDetourTurn(second.record);
+    assert.equal(third.allowed, false);
+    assert.ok(third.reason?.includes("最多支持两次"));
+  });
+
+  it("已结束 detour 不再接受回合", () => {
+    const ended = transitionTutorDetourStatus(recordFixture(), {
+      endReason: "return_to_origin",
+    }).record;
+    const result = advanceTutorDetourTurn(ended);
+    assert.equal(result.allowed, false);
+    assert.ok(result.reason?.includes("已结束"));
+  });
+});
+
 // ─── 3. 创建有界 detour：trusted → practice 原子切换 ─────────────────────
 
 describe("createScopedTutorDetour", () => {
@@ -267,12 +295,12 @@ describe("createScopedTutorDetour", () => {
     assert.ok(repo.records.has("detour-1"));
   });
 
-  it("trusted challenge 缺切换参数 → MISSING_SWITCH_PARAMS，detour 不创建", async () => {
+  it("trusted challenge 缺切换参数 → missing_switch_params，detour 不创建", async () => {
     const { deps, repo } = makeDeps({ foreground: "let_me_try" });
     await assert.rejects(
       () => createScopedTutorDetour(deps, detourInput()),
       (err: unknown) =>
-        err instanceof TutorDetourError && err.code === "MISSING_SWITCH_PARAMS",
+        err instanceof TutorDetourError && err.code === "missing_switch_params",
     );
     assert.equal(repo.records.has("detour-1"), false);
   });
@@ -326,15 +354,15 @@ describe("endScopedTutorDetour", () => {
     }
   });
 
-  it("detour 不存在 → DETOUR_NOT_FOUND", async () => {
+  it("detour 不存在 → detour_not_found", async () => {
     const { deps } = makeDeps();
     await assert.rejects(
       () => endScopedTutorDetour(deps, { scope: SCOPE, detourId: "nope", endReason: "end_session" }),
-      (err: unknown) => err instanceof TutorDetourError && err.code === "DETOUR_NOT_FOUND",
+      (err: unknown) => err instanceof TutorDetourError && err.code === "detour_not_found",
     );
   });
 
-  it("非法结束动作 → INVALID_END_REASON", async () => {
+  it("非法结束动作 → invalid_end_reason", async () => {
     const repo = new FakeDetourRepo();
     await repo.saveDetour(SCOPE, recordFixture());
     const { deps } = makeDeps({ detourRepo: repo });
@@ -345,13 +373,13 @@ describe("endScopedTutorDetour", () => {
           detourId: "detour-1",
           endReason: "save_question_marker" as never,
         }),
-      (err: unknown) => err instanceof TutorDetourError && err.code === "INVALID_END_REASON",
+      (err: unknown) => err instanceof TutorDetourError && err.code === "invalid_end_reason",
     );
   });
 
-  it("问题标记 Should flag 未开 → SAVE_MARKER_FLAG_OFF；开 → 保存", async () => {
+  it("问题标记 Should flag 未开 → save_marker_flag_off；开 → 保存", async () => {
     for (const [shouldFlag, expectedCode] of [
-      [false, "SAVE_MARKER_FLAG_OFF"],
+      [false, "save_marker_flag_off"],
       [true, null],
     ] as const) {
       const repo = new FakeDetourRepo();
@@ -378,7 +406,7 @@ describe("endScopedTutorDetour", () => {
     }
   });
 
-  it("已 ended 的 detour 不可再次结束 → INVALID_END_TRANSITION", async () => {
+  it("已 ended 的 detour 不可再次结束 → invalid_end_transition", async () => {
     const repo = new FakeDetourRepo();
     await repo.saveDetour(
       SCOPE,
@@ -388,7 +416,7 @@ describe("endScopedTutorDetour", () => {
     await assert.rejects(
       () =>
         endScopedTutorDetour(deps, { scope: SCOPE, detourId: "detour-1", endReason: "end_session" }),
-      (err: unknown) => err instanceof TutorDetourError && err.code === "INVALID_END_TRANSITION",
+      (err: unknown) => err instanceof TutorDetourError && err.code === "invalid_end_transition",
     );
   });
 });

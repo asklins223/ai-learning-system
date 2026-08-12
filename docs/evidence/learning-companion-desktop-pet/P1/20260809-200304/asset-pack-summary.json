@@ -1,0 +1,28 @@
+{
+  "result": "draft_blocked_license_and_owner_gate",
+  "source": "docs/image/learning-companion-character-action-reference.png",
+  "sourceSha256": "159f23153339db24815fcd9f8ed700907f55652ac15e859957c05e9b85dba2e5",
+  "outputDir": "apps/web/public/images/companion/pet/sprite-v1",
+  "poseMapping": {
+    "idle": "dormant.png",
+    "invite": "invite_once.png",
+    "navigate": "navigate.png",
+    "analyze": "present_evidence.png",
+    "listen": "listen.png",
+    "think": "uncertain_or_retry.png",
+    "encourage": "committed_change.png",
+    "celebrate": "co_manipulate.png"
+  },
+  "deterministicChecks": {
+    "canvas": "700x860",
+    "footAnchor": "(350,824)",
+    "hitMaskBytes": 2048,
+    "transparentOutsideAlpha": true,
+    "hiddenRgbCleared": true
+  },
+  "blockedGates": [
+    "Owner source ownership and modification/commercial/redistribution permission not confirmed",
+    "Owner approver and approval timestamp not supplied",
+    "P0 gate_passed evidence is still missing"
+  ]
+}

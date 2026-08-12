@@ -15,3 +15,4 @@ export * from "./exposure-service.ts";
 export * from "./canonical-events.ts";
 export * from "./session-service.ts";
 export * from "./session-routes.ts";
+export * from "./journey-plan.ts";

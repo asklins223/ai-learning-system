@@ -27,6 +27,17 @@ let closePromise: Promise<void> | null = null;
 
 export const db = drizzle(queryClient, { schema });
 
+// 2026-08-11（可观测性）：包装 transaction——失败时累加 dbTransactionFailuresTotal
+//（此前指标定义后从未 set，空转）。
+const originalTransaction = db.transaction.bind(db);
+db.transaction = ((...args: Parameters<typeof originalTransaction>) =>
+  originalTransaction(...args).catch((error: unknown) => {
+    import("../lib/metrics.ts").then(({ dbTransactionFailuresTotal }) => {
+      dbTransactionFailuresTotal.inc();
+    }).catch(() => {});
+    throw error;
+  })) as typeof originalTransaction;
+
 export type ApiTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export interface WorkspaceTransactionContext {
@@ -162,6 +173,7 @@ export async function setApiTransactionContext(
 export async function withWorkspaceTransaction<T>(
   context: WorkspaceTransactionContext,
   operation: (transaction: ApiTransaction) => Promise<T>,
+  options?: { isolationLevel?: "repeatable read" | "read committed" | "serializable" },
 ): Promise<T> {
   const normalized = normalizeWorkspaceTransactionContext(context);
   const active = workspaceTransactionStorage.getStore();
@@ -170,10 +182,19 @@ export async function withWorkspaceTransaction<T>(
       throw new WorkspaceTransactionContextError("workspace transaction is no longer active");
     }
     assertWorkspaceTransactionContextCompatible(active.context, normalized);
+    if (options?.isolationLevel) {
+      throw new WorkspaceTransactionContextError(
+        "cannot change isolation level inside an already-open workspace transaction",
+      );
+    }
     return operation(active.transaction);
   }
 
   return db.transaction(async (transaction) => {
+    // SET TRANSACTION 必须是事务内第一条语句：必须在 set_config 查询之前执行。
+    if (options?.isolationLevel) {
+      await transaction.execute(sql`SET TRANSACTION ISOLATION LEVEL ${sql.raw(options.isolationLevel.toUpperCase())}`);
+    }
     await setApiTransactionContext(transaction, normalized);
     const scopedTransaction = { context: normalized, transaction, open: true };
     try {

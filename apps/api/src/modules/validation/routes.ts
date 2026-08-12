@@ -30,7 +30,7 @@ export async function validationRoutes(app: FastifyInstance) {
       req.session.userId,
       body,
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     if ("error" in result) {
       if (result.error === "no_hard_evidence") {
         return reply.code(422).send({ error: result.error, message: "该关键要点暂无有效硬证据，无法验证" });
@@ -52,7 +52,7 @@ export async function validationRoutes(app: FastifyInstance) {
       req.session.userId,
       body,
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     if ("error" in result) {
       // N-004: 无硬证据的 keyPoint 返回 422
       if (result.error === "no_hard_evidence") {
@@ -77,7 +77,7 @@ export async function validationRoutes(app: FastifyInstance) {
     const params = cardIdParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid cardId format" });
     const items = await listValidations(req.params.cardId, req.session.workspaceId, req.session.userId);
-    if (!items) return reply.code(404).send({ error: "not found" });
+    if (!items) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return { items };
   });
 
@@ -85,9 +85,9 @@ export async function validationRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/validations/:id", async (req, reply) => {
     // R-022: UUID 路径参数校验
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const item = await getValidation(req.params.id, req.session.workspaceId, req.session.userId);
-    if (!item) return reply.code(404).send({ error: "not found" });
+    if (!item) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return item;
   });
 
@@ -101,7 +101,7 @@ export async function validationRoutes(app: FastifyInstance) {
     const params = jobIdSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid jobId format" });
     const item = await getValidationByJobId(req.params.jobId, req.session.workspaceId, req.session.userId);
-    if (!item) return reply.code(404).send({ error: "not found" });
+    if (!item) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return item;
   });
 }

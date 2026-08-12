@@ -95,6 +95,8 @@ export async function executePlanGenerationPhase(
         { role: "user", content: `## 笔记标题\n${run.titleSnapshot ?? ""}\n\n## 内容摘要\n${blockSummary.slice(0, 6000)}` },
       ],
       { temperature: 0.3, maxTokens: 8_192 },
+      // 2026-08-12（模型调用面审计）：透传 handler AbortSignal，超时真正中止底层请求
+      lease.signal,
     );
 
     const raw = res.content.replace(/```(?:json)?/g, "").trim();

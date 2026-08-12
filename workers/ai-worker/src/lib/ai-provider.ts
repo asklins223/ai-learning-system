@@ -81,6 +81,18 @@ export interface AIProvider {
     signal?: AbortSignal,
   ): Promise<ChatResult>;
 
+  /**
+   * §8.2 真实流式 chat completion：逐 token/增量调用 onDelta（不可为空串），
+   * 返回累积全文。可选实现——调用方（companion-dialogue worker）优先使用，
+   * 缺失时回退 chatCompletion + 分批写库（模拟流式节奏）。
+   */
+  chatCompletionStream?(
+    messages: ChatMessage[],
+    options: ChatOptions,
+    signal: AbortSignal | undefined,
+    onDelta: (deltaText: string) => void,
+  ): Promise<{ content: string }>;
+
   // ── Supervisor Agent v1（计划 §8.1） ──
   executeAgentTurn?(request: AgentTurnRequest, signal?: AbortSignal): Promise<AgentTurnResult>;
   getCapabilities?(): ProviderCapability;
@@ -130,8 +142,10 @@ export function createProvider(
   // 说明 config/ai-platforms.json 引用了未设置的 env var。立即报错而非等到请求期 401。
   // （resolveSystemPlatform 已对同一场景返回 null → mock 回退，此处是防御性二次检查。）
   if (id !== "mock" && config.apiKey && config.apiKey.includes("${")) {
+    // 不回显 apiKey 内容（即使其形式为未解析的 ${VAR} 占位符，也可能
+    // 泄露配置细节到错误/日志）。
     throw new Error(
-      `Provider "${providerName}" received an unresolved env var reference in apiKey: "${config.apiKey}". `
+      `Provider "${providerName}" received an unresolved env var reference in apiKey (e.g. \${VAR}). `
       + "Set the referenced environment variable or remove the reference in config/ai-platforms.json.",
     );
   }

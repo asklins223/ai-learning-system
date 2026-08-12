@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 1,
+  "characterId": "learning-companion-owner-reference-v1",
+  "sourceReference": {
+    "path": "docs/image/learning-companion-character-action-reference.png",
+    "sha256": "159f23153339db24815fcd9f8ed700907f55652ac15e859957c05e9b85dba2e5"
+  },
+  "canvas": {
+    "width": 700,
+    "height": 860
+  },
+  "poseOrder": [
+    "idle",
+    "invite",
+    "navigate",
+    "analyze",
+    "listen",
+    "think",
+    "encourage",
+    "celebrate"
+  ],
+  "poses": {
+    "idle": {
+      "image": "idle.png",
+      "imageSha256": "c51a525af8acd27ca8045a17402bc6eef30abe4c2a3367586940a70b14e34150",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 87,
+        "y": 94,
+        "width": 466,
+        "height": 730
+      },
+      "hitMask": "hit-masks/idle.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "50ad9c847c5d9ad8de2120152eff73dcf2ef40b4bfc7102bcf8b4974a9615a74",
+      "semanticPose": "idle"
+    },
+    "invite": {
+      "image": "invite.png",
+      "imageSha256": "cb984dcbe50c3a29ef79ce088eb24fbbd40377aa64a3e58fdcfa96933c07e3f8",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 140,
+        "y": 92,
+        "width": 496,
+        "height": 732
+      },
+      "hitMask": "hit-masks/invite.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "88aa1fbdcc40cb72f4328fecd08322d69bac135a557508ac6bbb517e2cbc8951",
+      "semanticPose": "invite"
+    },
+    "navigate": {
+      "image": "navigate.png",
+      "imageSha256": "c3002411ebd70f46bf07d700a1eca2f4b1f9cbf3ac9dc6c2c766c15480d2886e",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 166,
+        "y": 94,
+        "width": 490,
+        "height": 730
+      },
+      "hitMask": "hit-masks/navigate.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "6c11c2edf9e081fec846900d005cc078502cda3a7c7dd5013b12a41340efcf8f",
+      "semanticPose": "navigate"
+    },
+    "analyze": {
+      "image": "analyze.png",
+      "imageSha256": "eb0f706a2fe74ce4d02c5edabd97b9c62e16cc541f506e8654fedc47934cde76",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 143,
+        "y": 94,
+        "width": 542,
+        "height": 730
+      },
+      "hitMask": "hit-masks/analyze.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "c4e949b67fd7f392c99bc4625f22b97bd588771cfb049b75b27af053072cd29d",
+      "semanticPose": "analyze"
+    },
+    "listen": {
+      "image": "listen.png",
+      "imageSha256": "40d1d1929481a9da70ddecc2aac641dd058430c18a89db360502181690aad590",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 90,
+        "y": 92,
+        "width": 468,
+        "height": 732
+      },
+      "hitMask": "hit-masks/listen.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "be85d36a850ef4c057ec7b9f3ba5078dd54b855df43021f52d3b6aedece9956c",
+      "semanticPose": "listen"
+    },
+    "think": {
+      "image": "think.png",
+      "imageSha256": "ea7f8d7d80a0d5319d88efb5845bb420f9096e0c7c1e4e7b31d9a18ffb0c9eba",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 124,
+        "y": 90,
+        "width": 430,
+        "height": 734
+      },
+      "hitMask": "hit-masks/think.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "5a0b3786fb6b085fae477e8d99cadbfcce77179ffe07b3bc356d31f3752b6b9d",
+      "semanticPose": "think"
+    },
+    "encourage": {
+      "image": "encourage.png",
+      "imageSha256": "2be421cd2a4c770f2de1cdaab29b463995c4ad05639187ebbd5be9e5ba2bfa5a",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 150,
+        "y": 92,
+        "width": 462,
+        "height": 732
+      },
+      "hitMask": "hit-masks/encourage.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "ce0770e74e7df1596bfc145dc948fd910e9e2ecf8c6cf0806b23327d77af906f",
+      "semanticPose": "encourage"
+    },
+    "celebrate": {
+      "image": "celebrate.png",
+      "imageSha256": "c3988b8a4f179fe975e3486156db9ba8510553ffead925c930ede22eeba29565",
+      "naturalSize": {
+        "width": 700,
+        "height": 860
+      },
+      "footAnchor": {
+        "x": 350,
+        "y": 824
+      },
+      "opaqueBounds": {
+        "x": 112,
+        "y": 92,
+        "width": 526,
+        "height": 732
+      },
+      "hitMask": "hit-masks/celebrate.bin",
+      "hitMaskSize": {
+        "width": 128,
+        "height": 128
+      },
+      "hitMaskSha256": "7070f605191047571a56dc9fa5423a523a1d1e45279729962b49b2fd4b30182c",
+      "semanticPose": "celebrate"
+    }
+  }
+}

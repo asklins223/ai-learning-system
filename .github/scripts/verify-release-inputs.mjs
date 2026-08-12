@@ -60,7 +60,7 @@ const requiredManifestFields = [
 ];
 
 const ciWorkflow = readFileSync(".github/workflows/ci.yml", "utf8");
-if (!ciWorkflow.includes("run: node .github/scripts/release-manifest-contract.mjs")) {
+if (!/\bnode\s+\.github\/scripts\/release-manifest-contract\.mjs\b/.test(ciWorkflow)) {
   fail("CI must invoke the exact-tag release manifest verifier");
 }
 

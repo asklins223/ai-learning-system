@@ -561,6 +561,258 @@
       "when": 1789794200000,
       "tag": "0079_learning_sessions_keypoint_fk",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1789880600000,
+      "tag": "0080_learning_episode_processing_phase",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1789967000000,
+      "tag": "0081_learning_session_processing_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1789967060000,
+      "tag": "0082_learning_assessment_decision_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1789967120000,
+      "tag": "0083_learning_tutor_detours",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1789967180000,
+      "tag": "0084_learning_session_practice_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1789967240000,
+      "tag": "0085_learning_worker_grants_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1789967300000,
+      "tag": "0086_learning_worker_artifact_lock_grant",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1789967360000,
+      "tag": "0087_learning_worker_validation_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1789967420000,
+      "tag": "0088_companion_conversation_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1789967480000,
+      "tag": "0089_companion_turn_runs_last_event_seq",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1789967540000,
+      "tag": "0090_companion_turn_runs_prompt_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1789967600000,
+      "tag": "0091_companion_worker_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1786421336493,
+      "tag": "0092_companion_action_bridge",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1786422212816,
+      "tag": "0093_companion_action_ref",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1786422588588,
+      "tag": "0094_companion_worker_grants_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1786422928289,
+      "tag": "0095_companion_action_run_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1786423200000,
+      "tag": "0096_companion_action_idempotency_body",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1786423800000,
+      "tag": "0097_learning_sessions_active_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1786423900000,
+      "tag": "0098_learning_security_consistency_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1786424000000,
+      "tag": "0099_learning_user_fk_alignment",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1786424100000,
+      "tag": "0100_worker_generation_rls_exempt",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1786424200000,
+      "tag": "0101_validation_worker_rls_index_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1786424300000,
+      "tag": "0102_companion_worker_runtime_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1786424400000,
+      "tag": "0103_companion_runtime_fences",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1786424500000,
+      "tag": "0104_companion_ttl_stream_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1786424600000,
+      "tag": "0105_worker_reap_exponential_backoff",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1786424700000,
+      "tag": "0106_companion_action_runs_conversation_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1786424800000,
+      "tag": "0107_companion_turn_runs_account_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1786424900000,
+      "tag": "0108_companion_action_rls_nullif",
+      "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1786425000000,
+      "tag": "0109_commit_outbox_claim",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1786425001000,
+      "tag": "0110_companion_messages_workspace_user_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1786425002000,
+      "tag": "0111_card_generation_rls_complete",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1786425003000,
+      "tag": "0112_card_generation_rls_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1786425004000,
+      "tag": "0113_fail_job_backoff_jitter",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1786425005000,
+      "tag": "0114_query_path_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1786425006000,
+      "tag": "0115_job_insert_notify",
+      "breakpoints": true
     }
   ]
 }

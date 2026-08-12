@@ -41,13 +41,17 @@ import {
 // ─── allowlist 完整性 ──────────────────────────────────────────────────
 
 test("JOB_TYPES 包含全部 Worker handler 类型", () => {
-  assert.equal(JOB_TYPES.length, 6);
+  assert.equal(JOB_TYPES.length, 9);
   assert.ok(JOB_TYPES.includes("execute_card_agent_turn"));
   assert.ok(JOB_TYPES.includes("learning_session_assess"));
   assert.ok(JOB_TYPES.includes("align_evidence"));
   assert.ok(JOB_TYPES.includes("evaluate_validation"));
   assert.ok(JOB_TYPES.includes("parse_source"));
   assert.ok(JOB_TYPES.includes("generate_validation_question"));
+  // 2026-08-11：与 index.ts HANDLERS 对齐补全
+  assert.ok(JOB_TYPES.includes("companion_dialogue"));
+  assert.ok(JOB_TYPES.includes("companion_action"));
+  assert.ok(JOB_TYPES.includes("schedule_review"));
 });
 
 test("JOB_TYPES 元素唯一", () => {

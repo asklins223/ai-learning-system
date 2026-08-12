@@ -36,6 +36,11 @@ export const JOB_TYPES = [
   "generate_validation_question",
   // 救火 4b：Learning Session 评测（review should-fix #2——指标 allowlist 补新类型）
   "learning_session_assess",
+  // 2026-08-11：与 index.ts HANDLERS 对齐——companion 对话/动作 job 此前不在
+  // allowlist，其终态/重试/lease-lost 指标被 Prometheus 丢弃，告警聚合漏报。
+  "companion_dialogue",
+  "companion_action",
+  "schedule_review",
 ] as const;
 
 export const JOB_STATUSES = ["pending", "running", "succeeded", "failed", "dead"] as const;
@@ -322,6 +327,12 @@ export function startMetricsServer(port = Number(process.env.WORKER_METRICS_PORT
     }
     res.writeHead(404);
     res.end("Not Found\n");
+  });
+
+  // 2026-08-11：监听 'error'——端口占用/地址不可用时异步 error 事件若无监听
+  // 会让进程崩溃且无日志（此前 listen 后无人处理 error）。
+  server.on("error", (err) => {
+    console.error(`[metrics] metrics server error on port ${port}: ${err.message}`);
   });
 
   server.listen(port, "0.0.0.0");

@@ -13,7 +13,7 @@
  * - account state（global off/presence/suppression/动画/语音/通知边界）带 revision
  *   乐观锁；global off 时 epoch 单调递增作为 SSE/WS epoch 撤销信号（广播基础设施
  *   在任务 02-9/后续阶段补）。
- * - device runtime-fence：短 TTL 内存 fence，ephemeral 不落库。
+ * - device runtime-fence：短 TTL、content-free 的共享 server-side fence；不写账号偏好。
  *
  * 注意：companion 表在迁移 0075 下 FORCE RLS，policy 只按 app.user_id 授权
  * （fail closed），因此所有表读写必须经 withWorkspaceTransaction 设置 RLS 上下文；
@@ -21,7 +21,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, gt, lte, sql } from "drizzle-orm";
 import {
   boolean,
   integer,
@@ -35,6 +35,7 @@ import {
   withWorkspaceTransaction,
   type ApiTransaction,
 } from "../../db/client.ts";
+import { COMPANION_ACCOUNT_NOTIFY_CHANNEL } from "../companion-conversation/companion-notify.ts";
 import {
   CompanionOnboardingErrorCode,
   type CompanionAccountPatch,
@@ -106,13 +107,36 @@ export const userCompanionAccountState = pgTable(
   },
 );
 
+export const companionRuntimeFences = pgTable(
+  "companion_runtime_fences",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull(),
+    deviceSessionId: text("device_session_id").notNull(),
+    surfaceEpoch: integer("surface_epoch").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+);
+
 // ─── 常量与类型 ─────────────────────────────────────────────────────────
 
 /** resume token 恢复预算：签发后 7 天内可被动续接；过期只能被动恢复入口/重播。 */
 const RESUME_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** onboarding 初始 step（版本内首个页面）。 */
 const INITIAL_ONBOARDING_STEP_ID = "intro";
-/** 每用户内存 fence 上限，防止 deviceSessionId 枚举撑爆内存。 */
+
+/** 服务端约束客户端提交的 runId/stepId：只接受受限字符集与长度，非法值回退默认
+ *  （防超长字符串写入 activeRun jsonb、防任意 stepId 污染前端状态机）。 */
+function sanitizeOnboardingRefs(input: { runId?: string; stepId?: string }): {
+  runId?: string;
+  stepId?: string;
+} {
+  const runId = input.runId && /^[A-Za-z0-9_-]{1,128}$/.test(input.runId) ? input.runId : undefined;
+  const stepId = input.stepId && /^[A-Za-z0-9_-]{1,64}$/.test(input.stepId) ? input.stepId : undefined;
+  return { runId, stepId };
+}
+/** 每用户共享 fence 上限，防止 deviceSessionId 枚举撑爆短 TTL 存储。 */
 const RUNTIME_FENCE_MAX_PER_USER = 64;
 
 /** account revision 冲突（客户端 base revision 与服务端不一致）。 */
@@ -371,10 +395,11 @@ export async function transitionOnboarding(
             );
           }
           // not_offered → offered：CAS 签发一次性 display permit + first_run run。
+          const refs = sanitizeOnboardingRefs(input);
           const activeRun = buildActiveRun({
             entryMode: "first_run",
-            runId: input.runId ?? randomToken(),
-            stepId: input.stepId ?? INITIAL_ONBOARDING_STEP_ID,
+            runId: refs.runId ?? randomToken(),
+            stepId: refs.stepId ?? INITIAL_ONBOARDING_STEP_ID,
             workspaceId: input.workspaceId,
             now,
           });
@@ -567,10 +592,11 @@ export async function transitionOnboarding(
           }
           // 用户主动重播：创建 entryMode=manual_replay 独立 run，绝不改变 consumed。
           // 旧的 in_progress run 被新 run 取代（用户显式重开）。
+          const refs = sanitizeOnboardingRefs(input);
           const activeRun = buildActiveRun({
             entryMode: "manual_replay",
-            runId: input.runId ?? randomToken(),
-            stepId: input.stepId ?? INITIAL_ONBOARDING_STEP_ID,
+            runId: refs.runId ?? randomToken(),
+            stepId: refs.stepId ?? INITIAL_ONBOARDING_STEP_ID,
             workspaceId: input.workspaceId,
             now,
           });
@@ -607,8 +633,8 @@ function mergeAnimationVoiceOff(
 /**
  * 更新账号级 Companion 状态（global off / presence / suppression / 隐私控制）。
  * - revision 乐观锁：UPDATE ... WHERE revision = base，rowCount=0 → 409。
- * - global off（globalEnabled false）时 epoch 单调递增并记录广播钩子，
- *   SSE/WebSocket 广播基础设施在任务 02-9/后续阶段实现。
+ * - global off（globalEnabled false）时 epoch 单调递增，并在同一 DB 事务内
+ *   写入 PostgreSQL NOTIFY；账号 SSE 在各 API 进程内 fan-out 到 active devices。
  */
 export async function updateCompanionAccountState(
   userId: string,
@@ -638,6 +664,7 @@ export async function updateCompanionAccountState(
         .values({
           userId,
           revision: 1,
+          epoch: patch.globalEnabled === false ? 1 : 0,
           globalEnabled: patch.globalEnabled ?? true,
           presence: patch.presence ?? null,
           suggestionPause: patch.suggestionPause ?? null,
@@ -647,6 +674,9 @@ export async function updateCompanionAccountState(
           updatedAt: now,
         })
         .returning();
+      if (!created.globalEnabled) {
+        await notifyGlobalOffBroadcast(tx, userId, created.epoch);
+      }
       return serializeAccount(created);
     }
 
@@ -691,16 +721,14 @@ export async function updateCompanionAccountState(
       );
     }
 
-    if (globalOffApplied) {
-      notifyGlobalOffBroadcast(userId, updated.epoch);
-    }
+    if (globalOffApplied) await notifyGlobalOffBroadcast(tx, userId, updated.epoch);
     return serializeAccount(updated);
   });
 }
 
 /**
  * 查询钩子：当前 account epoch。供设备侧校验 surfaceEpoch 是否过期
- * （SSE/WS 撤销与迟到结果丢弃，任务 02-9/后续阶段）。
+ * （账号 SSE 撤销与迟到结果丢弃）。
  */
 export async function getAccountEpoch(userId: string, workspaceId: string): Promise<number> {
   return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
@@ -709,12 +737,21 @@ export async function getAccountEpoch(userId: string, workspaceId: string): Prom
   });
 }
 
-function notifyGlobalOffBroadcast(userId: string, epoch: number): void {
-  // 本阶段：epoch 递增已落库（上面 UPDATE），广播依赖 SSE/WebSocket 基础设施。
-  // TODO(02-9)：向该用户全部 active device session 推送 epoch 撤销 fence；
-  // 设备侧 surfaceEpoch < epoch 时丢弃迟到 Companion 结果。
-  void userId;
-  void epoch;
+async function notifyGlobalOffBroadcast(
+  tx: ApiTransaction,
+  userId: string,
+  epoch: number,
+): Promise<void> {
+  // pg_notify is part of the same transaction as the epoch update. PostgreSQL
+  // delivers it only after commit, so a device can never receive a revocation
+  // for an update that later rolls back; other API replicas receive it through
+  // the process-level LISTEN fan-out.
+  await tx.execute(sql`
+    select pg_notify(
+      ${COMPANION_ACCOUNT_NOTIFY_CHANNEL},
+      ${JSON.stringify({ userId, epoch })}
+    )
+  `);
 }
 
 // ─── 聚合视图：GET /me/companion ─────────────────────────────────────────
@@ -739,7 +776,7 @@ export async function getCompanionOverview(
   });
 }
 
-// ─── Device runtime-fence（ephemeral，不落库）────────────────────────────
+// ─── Device runtime-fence（短 TTL、跨实例共享）────────────────────────────
 
 interface RuntimeFenceRecord {
   deviceSessionId: string;
@@ -749,22 +786,17 @@ interface RuntimeFenceRecord {
 }
 
 /**
- * ephemeral 存储：内存 Map + TTL，不落库（§12.5 device runtime-fence）。
- * 只保留 user + device session + surface epoch + TTL，不存 page/entity/content。
- * 单实例部署足够；多实例需共享存储（Redis/表），见 TODO(02-9)。
+ * 共享存储：Postgres 短 TTL 表，不保存 page/entity/content。
+ * 按 user 的事务 advisory lock 保证多 API 实例下的 64 条上限和单调 epoch
+ * 更新仍然成立；过期行在每次读写时清理。
  */
-const runtimeFenceStore = new Map<string, RuntimeFenceRecord>();
-const RUNTIME_FENCE_KEY_SEP = "\u0000";
-
-function runtimeFenceKey(userId: string, deviceSessionId: string): string {
-  return `${userId}${RUNTIME_FENCE_KEY_SEP}${deviceSessionId}`;
-}
-
-function sweepExpiredRuntimeFences(): void {
-  const now = Date.now();
-  for (const [key, record] of runtimeFenceStore) {
-    if (new Date(record.expiresAt).getTime() < now) runtimeFenceStore.delete(key);
-  }
+function serializeRuntimeFence(row: typeof companionRuntimeFences.$inferSelect): RuntimeFenceRecord {
+  return {
+    deviceSessionId: row.deviceSessionId,
+    surfaceEpoch: row.surfaceEpoch,
+    createdAt: row.createdAt.toISOString(),
+    expiresAt: row.expiresAt.toISOString(),
+  };
 }
 
 /**
@@ -774,55 +806,229 @@ function sweepExpiredRuntimeFences(): void {
  */
 export async function createRuntimeFence(
   userId: string,
+  workspaceId: string,
   req: RuntimeFenceRequest,
 ): Promise<RuntimeFenceResponse> {
-  sweepExpiredRuntimeFences();
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    // Serialize all writes for one user across API instances. This makes the
+    // per-user cap and oldest-row eviction deterministic without a process
+    // local cache or a Redis dependency.
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`companion-runtime-fence:${userId}`}, 0)
+      )
+    `);
 
-  // 每用户 fence 数量上限：超过时淘汰最早过期的一条。
-  const userFences = listActiveRuntimeFences(userId);
-  if (userFences.length >= RUNTIME_FENCE_MAX_PER_USER) {
-    const oldest = userFences.reduce((a, b) => (a.expiresAt < b.expiresAt ? a : b));
-    runtimeFenceStore.delete(runtimeFenceKey(userId, oldest.deviceSessionId));
-  }
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + req.ttlSeconds * 1000);
+    await tx.delete(companionRuntimeFences).where(and(
+      eq(companionRuntimeFences.userId, userId),
+      lte(companionRuntimeFences.expiresAt, now),
+    ));
 
-  const now = Date.now();
-  const record: RuntimeFenceRecord = {
-    deviceSessionId: req.deviceSessionId,
-    surfaceEpoch: req.surfaceEpoch,
-    createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + req.ttlSeconds * 1000).toISOString(),
-  };
-  runtimeFenceStore.set(runtimeFenceKey(userId, req.deviceSessionId), record);
-  return {
-    deviceSessionId: record.deviceSessionId,
-    surfaceEpoch: record.surfaceEpoch,
-    ttlSeconds: req.ttlSeconds,
-    createdAt: record.createdAt,
-    expiresAt: record.expiresAt,
-  };
+    const existing = await tx
+      .select()
+      .from(companionRuntimeFences)
+      .where(and(
+        eq(companionRuntimeFences.userId, userId),
+        eq(companionRuntimeFences.deviceSessionId, req.deviceSessionId),
+      ))
+      .limit(1);
+
+    if (!existing[0]) {
+      const active = await tx
+        .select({ id: companionRuntimeFences.id })
+        .from(companionRuntimeFences)
+        .where(and(
+          eq(companionRuntimeFences.userId, userId),
+          gt(companionRuntimeFences.expiresAt, now),
+        ))
+        .orderBy(asc(companionRuntimeFences.expiresAt), asc(companionRuntimeFences.id));
+      if (active.length >= RUNTIME_FENCE_MAX_PER_USER && active[0]) {
+        await tx.delete(companionRuntimeFences).where(eq(companionRuntimeFences.id, active[0].id));
+      }
+    }
+
+    const row = existing[0]
+      ? (await tx
+          .update(companionRuntimeFences)
+          .set({
+            // A retried/late request must never move a device backwards.
+            surfaceEpoch: Math.max(existing[0].surfaceEpoch, req.surfaceEpoch),
+            createdAt: now,
+            expiresAt,
+          })
+          .where(eq(companionRuntimeFences.id, existing[0].id))
+          .returning())[0]
+      : (await tx
+          .insert(companionRuntimeFences)
+          .values({
+            userId,
+            deviceSessionId: req.deviceSessionId,
+            surfaceEpoch: req.surfaceEpoch,
+            createdAt: now,
+            expiresAt,
+          })
+          .returning())[0];
+
+    if (!row) throw new Error("runtime fence write returned no row");
+    const serialized = serializeRuntimeFence(row);
+    return {
+      deviceSessionId: serialized.deviceSessionId,
+      surfaceEpoch: serialized.surfaceEpoch,
+      ttlSeconds: req.ttlSeconds,
+      createdAt: serialized.createdAt,
+      expiresAt: serialized.expiresAt,
+    };
+  });
 }
 
 /** 查询钩子：该 device session 是否在有效 fence 内（过期即删除并返回 null）。 */
-export function getActiveRuntimeFence(userId: string, deviceSessionId: string): RuntimeFenceRecord | null {
-  sweepExpiredRuntimeFences();
-  const record = runtimeFenceStore.get(runtimeFenceKey(userId, deviceSessionId));
-  if (!record) return null;
-  if (new Date(record.expiresAt).getTime() < Date.now()) {
-    runtimeFenceStore.delete(runtimeFenceKey(userId, deviceSessionId));
-    return null;
-  }
-  return record;
+export async function getActiveRuntimeFence(
+  userId: string,
+  workspaceId: string,
+  deviceSessionId: string,
+): Promise<RuntimeFenceRecord | null> {
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const now = new Date();
+    await tx.delete(companionRuntimeFences).where(and(
+      eq(companionRuntimeFences.userId, userId),
+      lte(companionRuntimeFences.expiresAt, now),
+    ));
+    const row = (await tx
+      .select()
+      .from(companionRuntimeFences)
+      .where(and(
+        eq(companionRuntimeFences.userId, userId),
+        eq(companionRuntimeFences.deviceSessionId, deviceSessionId),
+        gt(companionRuntimeFences.expiresAt, now),
+      ))
+      .limit(1))[0];
+    return row ? serializeRuntimeFence(row) : null;
+  });
 }
 
 /** 查询钩子：该用户全部有效 fence（供广播/撤销逻辑使用）。 */
-export function listActiveRuntimeFences(userId: string): RuntimeFenceRecord[] {
-  sweepExpiredRuntimeFences();
-  const prefix = `${userId}${RUNTIME_FENCE_KEY_SEP}`;
-  const out: RuntimeFenceRecord[] = [];
-  for (const [key, record] of runtimeFenceStore) {
-    if (key.startsWith(prefix)) out.push(record);
-  }
-  return out;
+export async function listActiveRuntimeFences(
+  userId: string,
+  workspaceId: string,
+): Promise<RuntimeFenceRecord[]> {
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const now = new Date();
+    await tx.delete(companionRuntimeFences).where(and(
+      eq(companionRuntimeFences.userId, userId),
+      lte(companionRuntimeFences.expiresAt, now),
+    ));
+    const rows = await tx
+      .select()
+      .from(companionRuntimeFences)
+      .where(and(
+        eq(companionRuntimeFences.userId, userId),
+        gt(companionRuntimeFences.expiresAt, now),
+      ))
+      .orderBy(asc(companionRuntimeFences.expiresAt), asc(companionRuntimeFences.deviceSessionId));
+    return rows.map(serializeRuntimeFence);
+  });
 }
 
 export type { RuntimeFenceRecord };
+
+// ─── 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；Owner 决策 4）──────
+
+/** user_learning_preferences 表（迁移 0074；镜像树未同步，模块内声明）。 */
+const userLearningPreferencesTable = pgTable("user_learning_preferences", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull(),
+  workspaceId: uuid("workspace_id"),
+  explicitPreferences: jsonb("explicit_preferences").$type<Record<string, unknown>>(),
+  suggestedPreferences: jsonb("suggested_preferences").$type<Record<string, unknown>>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/** 07-9 冻结键：default_input_priority（voice/touch_structure/text；any=未设置） */
+const ANSWER_MODE_PREFERENCE_KEY = "default_input_priority" as const;
+const ANSWER_MODE_PREFERENCE_VALUES = new Set(["voice", "touch_structure", "text"]);
+
+/**
+ * 读作答模态偏好（account 级跨设备一致，workspace_id IS NULL）。
+ * "any" = 未设置（跟随安排，Supervisor 默认编排）。
+ */
+export async function getAnswerModePreference(
+  userId: string,
+  workspaceId: string,
+): Promise<{ preference: "voice" | "silent" | "text" | "any"; updatedAt: string | null }> {
+  // RLS（迁移 0075）：account 级行（workspace_id IS NULL）在任意 workspace
+  // 上下文可读（policy：user_id 匹配 AND (workspace_id IS NULL OR 等于上下文)）——
+  // 跨设备一致正是依赖该行；事务上下文必须传真实 UUID（空串会被
+  // normalizeContextUuid 拒绝）。
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const rows = await tx
+      .select({ explicitPreferences: userLearningPreferencesTable.explicitPreferences, updatedAt: userLearningPreferencesTable.updatedAt })
+      .from(userLearningPreferencesTable)
+      .where(and(
+        eq(userLearningPreferencesTable.userId, userId),
+        sql`${userLearningPreferencesTable.workspaceId} IS NULL`,
+      ))
+      .limit(1);
+    const row = rows[0];
+    const raw = row?.explicitPreferences?.[ANSWER_MODE_PREFERENCE_KEY];
+    const stored = typeof raw === "string" && ANSWER_MODE_PREFERENCE_VALUES.has(raw) ? raw : null;
+    // touch_structure（触控结构操作）即 silent 模态（05-1 静音结构化 proof）。
+    const preference = stored === "voice" ? "voice" as const
+      : stored === "touch_structure" ? "silent" as const
+      : stored === "text" ? "text" as const
+      : "any" as const;
+    return {
+      preference,
+      updatedAt: row?.updatedAt ? row.updatedAt.toISOString() : null,
+    };
+  });
+}
+
+/**
+ * 写作答模态偏好（upsert account 级行；CAS 由行锁保证）。
+ * "any" → 删除该键（回跟随安排）。
+ */
+export async function setAnswerModePreference(
+  userId: string,
+  workspaceId: string,
+  preference: "voice" | "silent" | "text" | "any",
+): Promise<{ preference: "voice" | "silent" | "text" | "any"; updatedAt: string }> {
+  const storedValue = preference === "any" ? undefined
+    : preference === "silent" ? "touch_structure"
+    : preference;
+  // RLS 同上：account 级行（workspace_id IS NULL）在任意 workspace 上下文可写。
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const now = new Date();
+    const existing = await tx
+      .select()
+      .from(userLearningPreferencesTable)
+      .where(and(
+        eq(userLearningPreferencesTable.userId, userId),
+        sql`${userLearningPreferencesTable.workspaceId} IS NULL`,
+      ))
+      .for("update");
+    const row = existing[0];
+    const explicit = { ...(row?.explicitPreferences ?? {}) };
+    if (storedValue === undefined) {
+      delete explicit[ANSWER_MODE_PREFERENCE_KEY];
+    } else {
+      explicit[ANSWER_MODE_PREFERENCE_KEY] = storedValue;
+    }
+    if (!row) {
+      await tx.insert(userLearningPreferencesTable).values({
+        userId,
+        explicitPreferences: explicit,
+        suggestedPreferences: {},
+        updatedAt: now,
+      });
+    } else {
+      await tx
+        .update(userLearningPreferencesTable)
+        .set({ explicitPreferences: explicit, updatedAt: now })
+        .where(eq(userLearningPreferencesTable.id, row.id));
+    }
+    return { preference, updatedAt: now.toISOString() };
+  });
+}

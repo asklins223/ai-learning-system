@@ -34,6 +34,7 @@ import {
 } from "./trust-service.ts";
 import {
   mapReducerToValidationOutcome,
+  EpisodeCommitDisposition,
   type CommitEpisodeResult,
   type EpisodeCommitInput,
 } from "./episode-commit.ts";
@@ -602,6 +603,18 @@ export interface VerticalSliceRepository {
 /** 注入的 COMMIT 执行器（真实为 episode-commit.commitEpisode 绑事务端口）。 */
 export type CommitExecutor = (input: EpisodeCommitInput) => Promise<CommitEpisodeResult>;
 
+/**
+ * M3：commit 应用成功的可注入回调（proactive 触发点）。默认 no-op；
+ * 生产绑定 fireCompanionTrigger("committed_change_display")。只在
+ * commitResult.ok 且非 operational_only 时调用——绝不伪造 commit 事件。
+ */
+export type OnCommitApplied = (ctx: {
+  workspaceId: string;
+  userId: string;
+  cardId: string;
+  disposition: string;
+}) => void;
+
 // ─── 编排（voice / silent 两条主路径）──────────────────────────────────────
 
 export class VerticalSliceError extends Error {
@@ -687,10 +700,11 @@ export async function stabilizeEpisode(
   input: StabilizeEpisodeInput,
   repo: VerticalSliceRepository,
   commit: CommitExecutor,
+  onCommitApplied?: OnCommitApplied,
 ): Promise<StabilizeEpisodeResult> {
   const episode = await repo.findEpisode(input.workspaceId, input.userId, input.episodeId);
   if (episode === null) {
-    throw new VerticalSliceError("EPISODE_NOT_FOUND", 404, `Episode ${input.episodeId} 不存在`);
+    throw new VerticalSliceError("episode_not_found", 404, `Episode ${input.episodeId} 不存在`);
   }
   let state: VerticalSliceState = {
     intent: "stabilize",
@@ -809,6 +823,16 @@ export async function stabilizeEpisode(
     commitResult.ok ? StabilizeAction.COMMIT_SUCCEEDED : StabilizeAction.COMMIT_FAILED,
   ).state;
 
+  // M3：commit 应用成功才触发 proactive（onCommitApplied 可注入；默认 no-op）。
+  if (commitResult.ok && commitResult.disposition !== EpisodeCommitDisposition.OPERATIONAL_ONLY) {
+    onCommitApplied?.({
+      workspaceId: input.workspaceId,
+      userId: input.userId,
+      cardId: input.cardId,
+      disposition: commitResult.disposition,
+    });
+  }
+
   let activeScheduleAssertion: SingleActiveScheduleAssertion | null = null;
   if (commitResult.ok && scheduleSideEffect !== "none") {
     const schedules = await repo.listActivePendingSchedules(
@@ -882,10 +906,11 @@ export async function clarifyEpisode(
   input: ClarifyEpisodeInput,
   repo: VerticalSliceRepository,
   commit: CommitExecutor,
+  onCommitApplied?: OnCommitApplied,
 ): Promise<ClarifyEpisodeResult> {
   const episode = await repo.findEpisode(input.workspaceId, input.userId, input.episodeId);
   if (episode === null) {
-    throw new VerticalSliceError("EPISODE_NOT_FOUND", 404, `Episode ${input.episodeId} 不存在`);
+    throw new VerticalSliceError("episode_not_found", 404, `Episode ${input.episodeId} 不存在`);
   }
   const state: VerticalSliceState = {
     intent: "clarify",
@@ -928,6 +953,16 @@ export async function clarifyEpisode(
       now: input.now,
     }),
   );
+
+  // M3：commit 应用成功才触发 proactive（onCommitApplied 可注入；默认 no-op）。
+  if (commitResult.ok && commitResult.disposition !== EpisodeCommitDisposition.OPERATIONAL_ONLY) {
+    onCommitApplied?.({
+      workspaceId: input.workspaceId,
+      userId: input.userId,
+      cardId: input.cardId,
+      disposition: commitResult.disposition,
+    });
+  }
 
   return {
     state: {

@@ -1,0 +1,21 @@
+{
+  "status": "candidate_only",
+  "sourcePath": "/Users/asklins/Downloads/ChatGPT Image 2026年8月10日 07_44_15.png",
+  "sourceSha256": "cb8be8b16da34151c43143f52f477416672fb23f52322d3716922bed806c941d",
+  "cleanInputPath": "docs/evidence/learning-companion-desktop-pet/P4-candidate/20260810-074415/source-clean.png",
+  "cleanInputSha256": "9c61395dc6c6db7a409fb91b6e24f8e6accfd3d4eee79bf33bac9d3afb4ff8f4",
+  "size": {
+    "width": 1024,
+    "height": 1536
+  },
+  "mode": "RGBA",
+  "alpha": {
+    "min": 0,
+    "max": 254,
+    "transparentPixels": 697406,
+    "partialPixels": 875458,
+    "opaquePixels": 0
+  },
+  "operation": "preserve alpha; clear RGB under alpha=0; no background removal or redraw",
+  "next": "run see-through offline decomposition only after P4 candidate approval and isolated runtime setup"
+}

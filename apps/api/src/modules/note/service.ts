@@ -48,11 +48,8 @@ async function chunkedInArraySelect<T>(
 import { CardStatus, ReviewStatus } from "@ailearn/shared";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
-import {
-  validateImageMagicBytes,
-  readImageDimensions,
-} from "../../lib/file-validation.ts";
-import { getObject, isStorageConfigured } from "../../lib/object-storage.ts";
+import { downloadAndValidateImageAsset } from "../../lib/image-asset.ts";
+import { isStorageConfigured } from "../../lib/object-storage.ts";
 import type { NoteCreateInput, NoteUpdateInput, NoteBlock } from "./schema.ts";
 
 /**
@@ -241,55 +238,42 @@ export async function ensureImageAssetsForBlocks<T extends { type: string; conte
   }
 
   // BUG-01 fix: 逐个处理图片资产，避免多张图片 Buffer 同时驻留内存导致 OOM。
-  // 每次迭代：加载 → 校验 → 计算 → 插入 → 释放，确保同一时刻最多一张图片在内存中。
-  // 添加 20MB 大小限制，防止异常大图片拖垮进程。
-  const MAX_IMAGE_BUFFER_BYTES = 20 * 1024 * 1024; // 20MB
+  // 每次迭代：加载 → 校验 → 计算 → 收集 → 释放，确保同一时刻最多一张图片
+  // 在内存中。收集完成后单条多行 INSERT（此前逐张一次往返）。
+  // 注意：下载（MinIO 网络 IO）仍在调用方事务内——连接占用时长在批量导入
+  // 场景由 preRegisterImageAssetsForImport（事务外）先行化解：事务内仅剩
+  // missingKeys 查询（预注册后为 0）。单篇保存等轻量路径保留此兜底。
+  const assetRows: {
+    workspaceId: string;
+    uploadedForNoteId: string | null;
+    objectKey: string;
+    sha256: string;
+    mimeType: string;
+    byteSize: number;
+    width: number;
+    height: number;
+    status: "ready";
+    createdBy: string;
+  }[] = [];
   for (const objectKey of missingKeys) {
-    let body: Buffer | null = null;
-    try {
-      const result = await getObject(objectKey);
-      body = result.body;
-      // 防御：跳过异常大图片，避免单张图片耗尽内存
-      if (body.length > MAX_IMAGE_BUFFER_BYTES) {
-        logger.warn(
-          { objectKey, byteSize: body.length, maxAllowed: MAX_IMAGE_BUFFER_BYTES },
-          "source-imported image exceeds size limit, skipping asset registration",
-        );
-        continue;
-      }
-      const contentType = result.contentType;
-      if (!validateImageMagicBytes(body, contentType)) {
-        logger.warn({ objectKey, contentType }, "source-imported image failed magic bytes validation");
-        continue;
-      }
-      const dimensions = readImageDimensions(body, contentType);
-      if (!dimensions) {
-        logger.warn({ objectKey, contentType }, "source-imported image dimensions could not be read");
-        continue;
-      }
-      const sha256 = createHash("sha256").update(body).digest("hex");
-      const byteSize = body.length;
-      // 在 DB 插入前释放 Buffer 引用，让 V8 可尽早回收
-      body = null;
-      await tx
-        .insert(noteImageAssets)
-        .values({
-          workspaceId,
-          uploadedForNoteId: noteId ?? null,
-          objectKey,
-          sha256,
-          mimeType: contentType,
-          byteSize,
-          width: dimensions.width,
-          height: dimensions.height,
-          status: "ready",
-          createdBy: userId,
-        })
-        .onConflictDoNothing();
-      logger.info({ objectKey, workspaceId }, "registered source-imported image as note_image_asset");
-    } catch (err) {
-      logger.warn({ objectKey, err }, "failed to register source-imported image asset");
+    const validated = await downloadAndValidateImageAsset(objectKey);
+    if (!validated) {
+      continue;
     }
+    assetRows.push({
+      workspaceId,
+      uploadedForNoteId: noteId ?? null,
+      ...validated,
+      status: "ready",
+      createdBy: userId,
+    });
+    logger.info({ objectKey, workspaceId }, "registered source-imported image as note_image_asset");
+  }
+  if (assetRows.length > 0) {
+    await tx
+      .insert(noteImageAssets)
+      .values(assetRows)
+      .onConflictDoNothing();
   }
 
   return resolveImageAssetIds(tx, workspaceId, blocks);
@@ -1593,11 +1577,17 @@ export async function physicalDeleteNote(
 
 /**
  * §2.5: 笔记版本历史列表（不含 blocks 详情，按需加载）。
+ * 2026-08-11（性能专项）：无分页全量返回改为 limit+offset 分页——
+ * 反复编辑的笔记版本数无界，全量返回随编辑次数线性膨胀。
+ * 返回数组（与既有测试/调用契约一致）；"是否还有更多"由
+ * items.length === limit 判定。
  */
 export async function listNoteVersions(
   executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
+  limit = 100,
+  offset = 0,
 ) {
   // CONC-03: 不返回已软删除笔记的版本历史
   const note = await executor.query.notes.findFirst({
@@ -1605,9 +1595,11 @@ export async function listNoteVersions(
   });
   if (!note) return null;
 
-  const versions = await executor.query.noteVersions.findMany({
+  return executor.query.noteVersions.findMany({
     where: eq(noteVersions.noteId, noteId),
     orderBy: (v, { desc: d }) => [d(v.versionNo)],
+    limit,
+    offset,
     columns: {
       id: true,
       noteId: true,
@@ -1617,8 +1609,6 @@ export async function listNoteVersions(
       updatedAt: true,
     },
   });
-
-  return versions;
 }
 
 /**

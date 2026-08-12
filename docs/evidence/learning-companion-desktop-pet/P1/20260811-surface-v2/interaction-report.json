@@ -1,0 +1,47 @@
+{
+  "checkedAt": "2026-08-11T02:19:24.957Z",
+  "checks": {
+    "character_short_click_opens_composer": true,
+    "character_direct_drag_moves_native_window": true,
+    "character_drag_suppresses_click": true,
+    "typed_drag_bridge_moves_native_window": true,
+    "locked_character_ignores_drag": true,
+    "locked_drag_attempt_suppresses_click": true,
+    "locked_character_short_click_still_works": true,
+    "character_context_click_opens_menu": true,
+    "renderer_has_no_runtime_errors": true
+  },
+  "positions": {
+    "unlocked": {
+      "before": [
+        1208,
+        360
+      ],
+      "after": [
+        1112,
+        296
+      ]
+    },
+    "directBridge": {
+      "before": [
+        1112,
+        296
+      ],
+      "after": [
+        1160,
+        328
+      ]
+    },
+    "locked": {
+      "before": [
+        1160,
+        328
+      ],
+      "after": [
+        1160,
+        328
+      ]
+    }
+  },
+  "rendererErrors": []
+}

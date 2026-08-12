@@ -740,6 +740,96 @@ html[data-theme="night"] .review-v06-page {
   letter-spacing: -0.02em;
 }
 
+.review-v06-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  margin-top: 21px;
+}
+
+.review-v06-state-primary,
+.review-v06-state-secondary {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 10px;
+  padding: 0 14px;
+  font-size: 11.5px;
+  font-weight: 720;
+  text-decoration: none;
+}
+
+.review-v06-state-primary {
+  border: 1px solid var(--color-action);
+  background: var(--color-action);
+  color: var(--color-on-action);
+  box-shadow: 0 6px 14px color-mix(in srgb, var(--color-action) 17%, transparent);
+}
+
+.review-v06-state-primary:hover {
+  background: var(--color-action-hover);
+}
+
+.review-v06-state-secondary {
+  border: 1px solid var(--color-border);
+  background: var(--color-paper);
+  color: var(--color-text-secondary);
+}
+
+.review-v06-state-secondary:hover {
+  background: var(--color-surface-soft);
+  color: var(--color-text);
+}
+
+.review-v06-state-actions svg {
+  width: 15px;
+  height: 15px;
+}
+
+.review-v06-state-notes {
+  display: grid;
+  width: min(100%, 620px);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 28px;
+  border-top: 1px solid var(--color-divider);
+}
+
+.review-v06-state-notes span {
+  display: grid;
+  min-height: 76px;
+  align-content: center;
+  justify-items: center;
+  gap: 3px;
+  border-right: 1px solid var(--color-divider);
+  padding: 10px;
+  text-align: center;
+}
+
+.review-v06-state-notes span:last-child {
+  border-right: 0;
+}
+
+.review-v06-state-notes svg {
+  width: 17px;
+  height: 17px;
+  margin-bottom: 2px;
+  color: var(--color-warning-text);
+}
+
+.review-v06-state-notes strong {
+  color: var(--color-text);
+  font-size: 11px;
+}
+
+.review-v06-state-notes small {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+}
+
 .review-v06-state p {
   max-width: 50ch;
   margin: 9px 0 0;
@@ -1055,6 +1145,29 @@ html[data-theme="night"] .review-v06-page {
     width: 100%;
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .review-v06-state-notes {
+    grid-template-columns: 1fr;
+  }
+
+  .review-v06-state-notes span {
+    min-height: 58px;
+    grid-template-columns: 22px minmax(0, auto);
+    align-items: center;
+    justify-items: start;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-divider);
+    text-align: left;
+  }
+
+  .review-v06-state-notes span:last-child {
+    border-bottom: 0;
+  }
+
+  .review-v06-state-notes svg {
+    grid-row: span 2;
+    margin: 0;
   }
 }
 

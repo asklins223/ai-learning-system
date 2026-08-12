@@ -7,6 +7,11 @@ WORKDIR /app
 # 国内 apk 镜像（清华 USTC），加速 alpine 包安装
 RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.ustc.edu.cn|g' /etc/apk/repositories
 
+# P3 前置（Owner 2026-08-11 批准）：Alpine ffmpeg/ffprobe 用于音频时长探测/转码。
+# 供应链影响：apk 包来自 Alpine 官方仓库（经 USTC 镜像），ffmpeg 为 LGPL/GPL 组合许可；
+# 体积影响见 phase-report（记录于 P2 收尾）。
+RUN apk add --no-cache ffmpeg
+
 # F-027: 使用 npm ci + lockfile 确保可复现构建
 FROM base AS deps
 COPY apps/api/package.json apps/api/package-lock.json ./

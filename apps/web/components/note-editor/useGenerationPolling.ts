@@ -10,6 +10,8 @@ import { useCallback, useEffect } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { api, ApiError } from "@/lib/api";
 import type { CardGenerationRunView } from "@/lib/api";
+/** 2026-08-11：轮询连续失败上限（达到即停止，防无限重试） */
+const MAX_POLL_CONSECUTIVE_FAILURES = 10;
 import {
   type GenerationPhase,
   type GenerationState,
@@ -129,6 +131,12 @@ export function useGenerationPolling(ctx: GenerationPollingContext): GenerationP
       } catch (error) {
         if (pollToken !== generationRunRef.current || !mountedRef.current) return;
         consecutiveReadFailures += 1;
+        // 2026-08-11：失败累计上限——此前无上限，网络/5xx 长期故障时按
+        // 1.5s/5s 无限重试（仅换消息文案）。达到上限停止轮询并提示手动刷新。
+        if (consecutiveReadFailures >= MAX_POLL_CONSECUTIVE_FAILURES) {
+          setGenMessage("生成进度同步失败次数过多，请刷新页面查看最新状态。");
+          return;
+        }
         if (error instanceof ApiError && error.status === 404) {
           forgetGenerationRun();
           setGenerationRun(null);

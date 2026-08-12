@@ -64,7 +64,7 @@ export async function noteRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/notes/:id", async (req, reply) => {
     // R-022: UUID 路径参数校验
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => getNoteWithVersion(
@@ -73,13 +73,13 @@ export async function noteRoutes(app: FastifyInstance) {
         req.session.workspaceId,
       ),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return result;
   });
 
   app.patch<{ Params: { id: string } }>("/notes/:id", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const body = parseBody(app, noteUpdateSchema, req.body);
     try {
       const result = await withWorkspaceTransaction(
@@ -92,7 +92,7 @@ export async function noteRoutes(app: FastifyInstance) {
           body,
         ),
       );
-      if (!result) return reply.code(404).send({ error: "not found" });
+      if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       return result;
     } catch (err) {
       if (err instanceof RevisionConflictError) {
@@ -117,12 +117,12 @@ export async function noteRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可删除
   app.delete<{ Params: { id: string } }>("/notes/:id", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => deleteNote(transaction, req.params.id, req.session.workspaceId),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return reply.code(204).send();
   });
 
@@ -131,12 +131,12 @@ export async function noteRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可物理删除
   app.delete<{ Params: { id: string } }>("/notes/:id/permanent", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => physicalDeleteNote(transaction, req.params.id, req.session.workspaceId),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
 
     // 事务已提交，fire-and-forget 清理对象存储中的图片（§3.11）
     if (result.imageObjectKeys?.length > 0) {
@@ -160,13 +160,13 @@ export async function noteRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可恢复
   app.post<{ Params: { id: string } }>("/notes/:id/restore", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     try {
       const result = await withWorkspaceTransaction(
         { workspaceId: req.session.workspaceId, userId: req.session.userId },
         (transaction) => restoreDeletedNote(transaction, req.params.id, req.session.workspaceId),
       );
-      if (!result) return reply.code(404).send({ error: "not found" });
+      if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       return result;
     } catch (err) {
       // P2-3: 笔记未删除时返回 409 Conflict，而非 404
@@ -178,14 +178,17 @@ export async function noteRoutes(app: FastifyInstance) {
   });
 
   // §2.5: GET /notes/:id/versions — 笔记版本历史列表（不含 blocks 详情）
-  app.get<{ Params: { id: string } }>("/notes/:id/versions", async (req, reply) => {
+  // 2026-08-11（性能专项）：支持 limit/offset 分页（默认 100/0）
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string } }>("/notes/:id/versions", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 200);
+    const offset = Math.max(Number(req.query.offset ?? 0) || 0, 0);
     const versions = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => listNoteVersions(transaction, req.params.id, req.session.workspaceId),
+      (transaction) => listNoteVersions(transaction, req.params.id, req.session.workspaceId, limit, offset),
     );
-    if (!versions) return reply.code(404).send({ error: "not found" });
+    if (!versions) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return { items: versions };
   });
 
@@ -200,7 +203,7 @@ export async function noteRoutes(app: FastifyInstance) {
     { preHandler: [requireOwner] },
     async (req, reply) => {
       const params = uuidParamSchema.safeParse(req.params);
-      if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+      if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
       // versionId 也必须是合法 UUID，否则返回 400 而非进入 DB 查询
       if (!z.string().uuid().safeParse(req.params.versionId).success) {
         return reply.code(400).send({ error: "invalid versionId format" });
@@ -220,7 +223,7 @@ export async function noteRoutes(app: FastifyInstance) {
           ),
         );
 
-        if (!result) return reply.code(404).send({ error: "not found" });
+        if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
         return result;
       } catch (err) {
         if (err instanceof RevisionConflictError) {

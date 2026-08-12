@@ -33,6 +33,7 @@ import { createRubricSceneCriticRole } from "../roles/rubric-scene-critic.ts";
 import { createAssessmentCriticRole } from "../roles/assessment-critic.ts";
 import { createGroundedTutorRole } from "../roles/grounded-tutor.ts";
 import { createGroundedAnswerCriticRole } from "../roles/grounded-answer-critic.ts";
+import { LEARNING_TOOL_MANIFEST_BY_ID } from "./tool-manifest.ts";
 
 /** deterministic（非 LLM）角色的 allowlist，定义在网关层（无 roles/ 文件） */
 const DETERMINISTIC_ROLE_TOOL_IDS: Readonly<Record<LearningAgentRole, readonly LearningToolId[]>> = {
@@ -229,9 +230,13 @@ export class LearningToolGateway {
         error: { code: "epoch_mismatch", message: epochCheck.reason },
       });
     }
-    // 3. 幂等键要求（side-effect tool 必须携带）
-    if (request.idempotencyKey === null && request.toolId !== "read_purified_contract_summary") {
-      // 骨架简化：所有工具统一要求幂等键（除纯读净化合同外）；严格清单实现于 W2 后续任务。
+    // 3. 幂等键要求（仅 side-effect tool 必须携带；纯读/纯展示工具按 manifest
+    //    hasSideEffect=false 放行，与 manifest 元数据保持一致。未注册工具
+    //    默认要求幂等键，fail-closed）
+    // 注：toolId 已通过 allowlist 校验，索引必然命中；as 断言仅收敛 string→union 类型。
+    const manifestEntry = LEARNING_TOOL_MANIFEST_BY_ID[request.toolId as LearningToolId];
+    const requiresIdempotencyKey = manifestEntry ? manifestEntry.hasSideEffect : true;
+    if (request.idempotencyKey === null && requiresIdempotencyKey) {
       return Promise.resolve({
         ok: false,
         error: { code: "missing_idempotency_key", message: `工具 ${request.toolId} 缺少幂等键` },

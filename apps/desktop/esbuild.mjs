@@ -29,7 +29,7 @@ const baseOptions = {
   format: "cjs",
   target: "node20",
   sourcemap: true,
-  external: ["electron", "electron-log"],
+  external: ["electron", "electron-log", "electron-updater"],
 };
 
 // Build configs for all three entry points.
@@ -48,11 +48,27 @@ const configs = [
     entryPoints: [path.join(root, "src", "preload.ts")],
     outfile: path.join(root, "dist", "preload.cjs"),
   },
+  // Pet Window preload — it exposes the same strict API without main-only
+  // app controls such as quit/external navigation.
+  {
+    ...baseOptions,
+    banner,
+    entryPoints: [path.join(root, "src", "pet-preload.ts")],
+    outfile: path.join(root, "dist", "pet-preload.cjs"),
+  },
   // Web worker — no banner (runs in a utility process, not Electron main).
   {
     ...baseOptions,
     entryPoints: [path.join(root, "src", "web-worker.ts")],
     outfile: path.join(root, "dist", "web-worker.cjs"),
+  },
+  // P6 §13 ASR utility worker — sherpa-onnx-node 是 native addon，
+  // 必须 external（运行时从 node_modules 解析 .node），不能 bundle。
+  {
+    ...baseOptions,
+    external: [...baseOptions.external, "sherpa-onnx-node"],
+    entryPoints: [path.join(root, "src", "voice", "asr-utility-worker.ts")],
+    outfile: path.join(root, "dist", "asr-utility-worker.cjs"),
   },
 ];
 

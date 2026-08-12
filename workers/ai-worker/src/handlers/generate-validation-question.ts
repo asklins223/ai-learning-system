@@ -20,6 +20,7 @@ import * as schema from "../schema/index.ts";
 import { createProvider } from "../lib/ai-provider.ts";
 import { generateValidationQuestionViaChat } from "../lib/business-ai-ops.ts";
 import {
+  AIConsentRequiredError,
   enforcePrivacyGovernanceWithPolicy,
   logAICall,
   resolveAIGovernanceContext,
@@ -107,7 +108,7 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
   if (!kp) throw new Error(`key point ${keyPointId} not found in workspace`);
   if (!card) throw new Error(`card ${cardId} not found or not active in workspace`);
   if (!govCtx.consentOk) {
-    throw new Error("AI consent not signed for this workspace");
+    throw new AIConsentRequiredError();
   }
 
   // Query hard evidence for this key point and user

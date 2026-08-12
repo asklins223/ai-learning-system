@@ -12,6 +12,7 @@
  */
 
 import { forwardRef } from "react";
+import Link from "next/link";
 import type { CardGenerationRunView } from "@/lib/api";
 import { Icon } from "@/components/ui/icons";
 import type { FailedGenerationUnit } from "./note-editor-types";
@@ -63,6 +64,14 @@ export const GenerationFailureDialog = forwardRef<HTMLDivElement, GenerationFail
     onRetry,
     onRestart,
   }, ref) {
+    const requiresAIConsent = generationRun.error?.code === "ai_consent_required"
+      || failedGenerationUnits.some((unit) => unit.errorCode === "ai_consent_required")
+      || generationRun.warnings.some((warning) => (
+        warning.code === "ai_consent_required"
+        || warning.details?.code === "ai_consent_required"
+        || warning.details?.reason === "ai_consent_required"
+      ));
+
     return (
       <div className="ne-genfail-overlay" role="presentation">
         <div
@@ -148,7 +157,16 @@ export const GenerationFailureDialog = forwardRef<HTMLDivElement, GenerationFail
             >
               稍后处理
             </button>
-            {generationRun.actions.retryable && (
+            {requiresAIConsent && (
+              <Link
+                href="/settings#model"
+                className="ne-btn ne-btn--primary"
+                onClick={onClose}
+              >
+                前往 AI 使用与数据
+              </Link>
+            )}
+            {!requiresAIConsent && generationRun.actions.retryable && (
               <button
                 type="button"
                 className="ne-btn ne-btn--primary"
@@ -162,7 +180,7 @@ export const GenerationFailureDialog = forwardRef<HTMLDivElement, GenerationFail
                     : "重试失败检查点"}
               </button>
             )}
-            {generationRun.actions.restartable && !generationRun.actions.retryable && (
+            {!requiresAIConsent && generationRun.actions.restartable && !generationRun.actions.retryable && (
               <button
                 type="button"
                 className="ne-btn ne-btn--primary"

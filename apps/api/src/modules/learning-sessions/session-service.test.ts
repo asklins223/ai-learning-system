@@ -102,6 +102,7 @@ class MemorySessionRepository implements SessionRepository {
   assistance: AssistanceSnapshotInput | null = null;
   runtimeEpoch = 0;
   activeSessionCount = 0;
+  activeSessionId: string | null = null;
   private sessionSeq = 0;
   private episodeSeq = 0;
 
@@ -125,6 +126,9 @@ class MemorySessionRepository implements SessionRepository {
   }
   async countActiveSessions(): Promise<number> {
     return this.activeSessionCount;
+  }
+  async findActiveSessionId(): Promise<string | null> {
+    return this.activeSessionId;
   }
   async createSession(
     values: Omit<SessionRow, "id" | "createdAt" | "updatedAt">,
@@ -201,7 +205,26 @@ class MemorySessionRepository implements SessionRepository {
   ): Promise<void> {
     const row = this.episodes.get(episodeId);
     if (row && row.workspaceId === workspaceId && row.userId === userId) {
-      this.episodes.set(episodeId, { ...row, status, updatedAt: now });
+      const processingPhase = status === "completed"
+        ? "committed"
+        : status === "cancelled"
+          ? "cancelled"
+          : status === "stale"
+            ? "stale"
+            : row.processingPhase;
+      this.episodes.set(episodeId, { ...row, status, processingPhase, updatedAt: now });
+    }
+  }
+
+  async updateEpisodeStatuses(
+    episodeIds: string[],
+    status: EpisodeRow["status"],
+    now: Date,
+    workspaceId: string,
+    userId: string,
+  ): Promise<void> {
+    for (const episodeId of episodeIds) {
+      await this.updateEpisodeStatus(episodeId, status, now, workspaceId, userId);
     }
   }
 
@@ -243,6 +266,7 @@ class MemorySessionRepository implements SessionRepository {
       budgetEnvelopeRef: "env:test",
       budgetEnvelopeHash: "env-hash",
       planHash: `plan-${keyPointId}`,
+      processingPhase: "committed",
       status: "completed",
       commitKey: `commit-${keyPointId}`,
       createdAt: now,
@@ -302,9 +326,28 @@ describe("PREPARE 候选生成", () => {
     assert.equal(result.episode.formalEligibilityKind, "initial_validation");
     assert.match(result.episode.planHash, /^plan:[0-9a-f]{64}$/);
     assert.match(result.episode.contentExposureKey, /^cex:/);
+    // 任务 14 接线：canonical claim 只有 1 个片段（<2）→ silent 资格与场景
+    // 数据同生命周期都不签发（无「有资格无场景」半签发，review 2026-08-12）。
+    assert.equal(result.episode.formalPlanKind, "structured_mastery_bundle");
+    assert.equal(result.episode.journeyPlan.mode, "practice");
+    assert.equal(result.episode.journeyPlan.scenes, undefined);
     assert.equal(result.envelope.nonBorrowable, true);
     assert.equal(repo.sessions.size, 1);
     assert.equal(repo.episodes.size, 1);
+  });
+
+  it("claim 充足（≥2 片段）→ 签发 silent 资格 + 场景数据（ordering/repair）", async () => {
+    const { repo, input } = await createReadyRepo();
+    repo.activeCanonical = [canonical("kp-1", {
+      claim: "先收集材料。再整理结构。最后检查结果。",
+    })];
+    const result = await createSession(input, repo);
+
+    assert.equal(result.episode.formalPlanKind, "structured_mastery_bundle");
+    assert.equal(result.episode.journeyPlan.mode, "silent");
+    assert.equal(result.episode.journeyPlan.scenes?.length, 2);
+    assert.equal(result.episode.journeyPlan.scenes?.[0].sceneType, "ordering");
+    assert.equal(result.episode.journeyPlan.scenes?.[0].targetKeyPointId, "kp-1");
   });
 
   it("official scheduler 到期候选优先于 canonical_gap", async () => {
@@ -345,14 +388,14 @@ describe("PREPARE 候选生成", () => {
     assert.equal(candidates[0]!.schedulingDecision.inputScheduleId, "repair-kp-3");
   });
 
-  it("无合法候选 → PREPARE_NO_CANDIDATES 阻断", async () => {
+  it("无合法候选 → prepare_no_candidates 阻断", async () => {
     const repo = new MemorySessionRepository();
     // active canonical 缺失：无任何候选
     const input = defaultCreateInput();
     await assert.rejects(
       createSession(input, repo),
       (err: unknown) =>
-        err instanceof SessionServiceError && err.code === "PREPARE_NO_CANDIDATES",
+        err instanceof SessionServiceError && err.code === "prepare_no_candidates",
     );
   });
 
@@ -393,7 +436,7 @@ describe("PREPARE 候选生成", () => {
     assert.equal(candidates[0]!.sceneFallbackRequired, true);
   });
 
-  it("预算不足 → BUDGET_INSUFFICIENT，在用户作答前阻断", async () => {
+  it("预算不足 → budget_insufficient，在用户作答前阻断", async () => {
     const { repo, input } = await createReadyRepo({
       estimatedRequiredProbes: 5,
       availableBudgetUnits: 0,
@@ -401,7 +444,7 @@ describe("PREPARE 候选生成", () => {
     await assert.rejects(
       createSession(input, repo),
       (err: unknown) =>
-        err instanceof SessionServiceError && err.code === "BUDGET_INSUFFICIENT",
+        err instanceof SessionServiceError && err.code === "budget_insufficient",
     );
   });
 
@@ -409,10 +452,13 @@ describe("PREPARE 候选生成", () => {
     const repo = new MemorySessionRepository();
     repo.activeCanonical = [canonical("kp-1")];
     repo.activeSessionCount = 1;
+    repo.activeSessionId = uuid(99);
     await assert.rejects(
       createSession(defaultCreateInput(), repo),
       (err: unknown) =>
-        err instanceof SessionServiceError && err.code === "SESSION_LIMIT_REACHED",
+        err instanceof SessionServiceError
+        && err.code === "session_limit_reached"
+        && err.recoveryData?.activeSessionId === uuid(99),
     );
   });
 
@@ -491,7 +537,7 @@ describe("checkpoint 语义", () => {
     });
   });
 
-  it("本 Episode 未落终态 → 拒绝继续下一站（EPISODE_NOT_TERMINAL）", async () => {
+  it("本 Episode 未落终态 → 拒绝继续下一站（episode_not_terminal）", async () => {
     const { repo, input } = await createReadyRepo();
     const created = await createSession(input, repo);
     await assert.rejects(
@@ -505,7 +551,7 @@ describe("checkpoint 语义", () => {
         repo,
       ),
       (err: unknown) =>
-        err instanceof SessionServiceError && err.code === "EPISODE_NOT_TERMINAL",
+        err instanceof SessionServiceError && err.code === "episode_not_terminal",
     );
   });
 
@@ -589,6 +635,7 @@ describe("cancel 零副作用（03-2 验收）", () => {
       budgetEnvelopeRef: "env:3",
       budgetEnvelopeHash: "eh:3",
       planHash: "plan:3",
+      processingPhase: "awaiting_response",
       status: "draft",
       commitKey: null,
     });
@@ -789,7 +836,7 @@ describe("Session loop 状态机", () => {
     assert.equal(ep.status, "completed");
   });
 
-  it("非法动作 → INVALID_LOOP_ACTION（409）", async () => {
+  it("非法动作 → invalid_loop_action（409）", async () => {
     const repo = new MemorySessionRepository();
     repo.activeCanonical = [canonical("kp-1")];
     const created = await createSession(
@@ -813,7 +860,7 @@ describe("Session loop 状态机", () => {
         repo,
       ),
       (err: unknown) =>
-        err instanceof SessionServiceError && err.code === "INVALID_LOOP_ACTION",
+        err instanceof SessionServiceError && err.code === "invalid_loop_action",
     );
   });
 
@@ -848,7 +895,7 @@ describe("Session loop 状态机", () => {
         repo,
       ),
       (err: unknown) =>
-        err instanceof SessionServiceError && err.code === "PREPARE_NO_CANDIDATES",
+        err instanceof SessionServiceError && err.code === "prepare_no_candidates",
     );
   });
 
@@ -899,6 +946,7 @@ describe("Session loop 状态机", () => {
       budgetEnvelopeRef: "env:3",
       budgetEnvelopeHash: "eh:3",
       planHash: "plan:3",
+      processingPhase: "awaiting_response",
       status: "draft",
       commitKey: null,
     });

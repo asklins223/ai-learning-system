@@ -212,8 +212,12 @@ async function voiceRequest<T>(
     let message = `${res.status} ${res.statusText}`;
     let code: string | undefined;
     try {
-      const data = (await res.json()) as { error?: string; code?: string };
-      if (typeof data?.error === "string" && data.error) message = data.error;
+      const data = (await res.json()) as { error?: string; code?: string; message?: string };
+      // 2026-08-12（错误契约审计 P1-2）：此前取 data.error（大写枚举码如
+      // AUDIO_TOO_LARGE）导致用户看到英文枚举——后端提供中文 data.message，
+      // 优先取 message，error 仅作 code 兜底。
+      if (typeof data?.message === "string" && data.message) message = data.message;
+      else if (typeof data?.error === "string" && data.error) message = data.error;
       code = data?.code;
     } catch {
       // 非 JSON 错误体，保留 statusText
@@ -226,6 +230,58 @@ async function voiceRequest<T>(
 
 // ─── 语义收口（transcribe / confirm / reRecord / switchModality）───────────
 
+/** 真实 /voice/transcribe（learning_session 分支）响应（voice-routes.ts）。 */
+export interface PlainTranscriptionResult {
+  text: string;
+  asrProvider: string;
+  asrModel: string;
+}
+
+/**
+ * 复习页 voice 纵切使用的 plain ASR 转写（14 方案阶段 A）。
+ *
+ * 与真实端点契约对齐：POST /voice/transcribe（learning_session 分支）返回
+ * `{ text, asrProvider, asrModel }`——不创建 voice artifact，不返回 draft/
+ * artifactId（那属于 learning-session 的 artifact 管线，复习页不适用）。
+ * 确认后的逐字 transcript 由宿主走既有 submitValidationAnswer 链提交。
+ */
+export async function transcribePlain(
+  audio: Blob,
+  opts: { language?: string; filename?: string } = {},
+): Promise<PlainTranscriptionResult> {
+  const form = new FormData();
+  if (opts.language) form.append("language", opts.language);
+  form.append("file", audio, opts.filename ?? "audio-upload.mp3");
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const csrf = getCsrfToken();
+  if (csrf) headers.set("x-csrf-token", csrf);
+  const res = await fetch(`${API_URL}${VOICE_BASE_PATH}/transcribe`, {
+    method: "POST",
+    headers,
+    credentials: "same-origin",
+    body: form,
+  });
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    let code: string | undefined;
+    try {
+      const data = (await res.json()) as { error?: string; code?: string; message?: string };
+      // 2026-08-12（错误契约审计 P1-2）：此前取 data.error（大写枚举码如
+      // AUDIO_TOO_LARGE）导致用户看到英文枚举——后端提供中文 data.message，
+      // 优先取 message，error 仅作 code 兜底。
+      if (typeof data?.message === "string" && data.message) message = data.message;
+      else if (typeof data?.error === "string" && data.error) message = data.error;
+      code = data?.code;
+    } catch {
+      // 非 JSON 错误体，保留 statusText
+    }
+    throw new ApiError(res.status, message, code);
+  }
+  return (await res.json()) as PlainTranscriptionResult;
+}
+
 export const voiceApi = {
   /**
    * ASR 转写（救火 6b 契约对齐）：multipart FormData 直接上传音频 blob，
@@ -233,11 +289,23 @@ export const voiceApi = {
    */
   transcribe(
     obligations: VoiceObligations,
-    body: { audio: Blob; filename?: string; language?: string },
+    body: {
+      audio: Blob;
+      filename?: string;
+      language?: string;
+      /** Companion uploads must identify their strict multipart contract. */
+      purpose?: "companion_dialogue";
+      durationMs?: number;
+    },
   ): Promise<TranscriptionOutcome> {
     const form = new FormData();
-    form.append("file", body.audio, body.filename ?? "audio-upload.mp3");
+    // @fastify/multipart exposes fields seen before the file part through
+    // `part.fields`; keep every contract field before `file` so the server
+    // cannot silently select the legacy learning-session branch.
+    if (body.purpose) form.append("purpose", body.purpose);
     if (body.language) form.append("language", body.language);
+    if (body.durationMs !== undefined) form.append("durationMs", String(body.durationMs));
+    form.append("file", body.audio, body.filename ?? "audio-upload.mp3");
     return voiceRequest<TranscriptionOutcome>("transcribe", obligations, { form });
   },
 

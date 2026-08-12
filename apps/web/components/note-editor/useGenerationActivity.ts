@@ -115,7 +115,7 @@ export function useGenerationActivity(ctx: GenerationActivityContext): Generatio
         signal,
       });
       if (cancelled || token !== tokenRef.current) return false;
-      mergePage(page.events);
+      mergePage(page.items);
       cursorRef.current = page.nextCursor;
       return page.hasMore;
     };
@@ -171,15 +171,20 @@ export function useGenerationActivity(ctx: GenerationActivityContext): Generatio
       if (transientFailure) {
         backoffMs = Math.min(MAX_BACKOFF_MS, backoffMs * 2);
       }
-      window.setTimeout(() => {
+      // 2026-08-11：timer 存局部变量供 cleanup 清除——此前 setTimeout 未入
+      // ref，runId/open/active 频繁变化时旧定时器仍触发一次空 tick（靠 token
+      // 兜底不污染状态，但属于未清理的挂起任务）。
+      timer = window.setTimeout(() => {
         void tick();
       }, delay);
     };
 
+    let timer: number | null = null;
     void tick();
     return () => {
       cancelled = true;
       controller.abort();
+      if (timer) window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, open, runId, active]);

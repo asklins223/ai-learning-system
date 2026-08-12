@@ -517,6 +517,21 @@ jobs:
         working-directory: apps/api
         run: npm run db:migrate
 
+      # 2026-08-11（测试质量修复）：db-commit-port/db-migrations 原以 .test.ts
+      # 命名被默认测试拾取，但单元 job 的 DATABASE_URL 指向不可达 DB（127.0.0.1:1）
+      # 导致永远静默 skip。改名 .integration.ts 后在此（真实 postgres 服务）接入。
+      - name: Verify commit port + migration idempotence against real PostgreSQL
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/db-commit-port.integration.ts \
+            src/integration-tests/db-migrations.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/commit-port-migrations.tap"
+
       - name: Apply and verify empty-database role grants
         env:
           REQUIRE_RLS_DISABLED: "true"
@@ -537,6 +552,17 @@ jobs:
           set -o pipefail
           node --import tsx --test src/integration-tests/rate-limit-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/rate-limit.tap"
+
+      - name: Verify G-009 understanding aggregation semantics (real PostgreSQL)
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/understanding-g009-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/understanding-g009.tap"
 
       - name: Verify SEC-01 policy catalog and restricted roles
         working-directory: apps/api
@@ -983,6 +1009,8 @@ jobs:
       DATABASE_URL_WORKER: postgres://ailearn_worker:ci-compose-worker-password@postgres:5432/ailearn
       CORS_ORIGIN: http://localhost:3000
       AI_PROVIDER_CARD: mock
+      # compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值；CI 必须提供（api 与 edge-tts 一致）
+      EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token
       WORKER_METRICS_PORT: "9100"
       DOCKER_BUILDKIT: "1"
     steps:
@@ -1008,12 +1036,21 @@ jobs:
       - name: Build Web production image
         run: docker compose build web
 
+      - name: Build edge-tts production image
+        # 2026-08-11 修复：此前未构建 edge-tts，后续 `up -d --no-build` 会因
+        # 镜像缺失失败，且该镜像从不被 Trivy 扫描。
+        run: docker compose build edge-tts
+
       - name: Verify production images run as non-root
         run: |
-          for image in ailearn_ci-api ailearn_ci-worker ailearn_ci-web; do
+          for image in ailearn_ci-api ailearn_ci-worker ailearn_ci-web ailearn_ci-edge-tts; do
             user="$(docker image inspect "$image" --format '{{.Config.User}}')"
-            test "$user" = "node" || {
-              echo >&2 "$image must run as node, got: ${user:-root}"
+            case "$image" in
+              *edge-tts) expected="nobody" ;;
+              *) expected="node" ;;
+            esac
+            test "$user" = "$expected" || {
+              echo >&2 "$image must run as $expected, got: ${user:-root}"
               exit 1
             }
           done
@@ -1043,6 +1080,16 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ailearn_ci-web
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+          ignore-unfixed: true
+
+      - name: Scan edge-tts image for vulnerabilities (Trivy)
+        # 2026-08-11 修复：edge-tts 镜像此前从不被扫描（python:3.12-slim 基础镜像）
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ailearn_ci-edge-tts
           severity: HIGH,CRITICAL
           exit-code: '1'
           format: table
@@ -1263,6 +1310,8 @@ jobs:
       E2E_SEED_OUTPUT: /tmp/e2e-seed-output.json
       # 卡组轮播 UI：dev server 编译期读取，否则 card-set-carousel.spec.ts 全部自动跳过
       NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: "true"
+      # dev compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值
+      EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token
     steps:
       - uses: actions/checkout@v4
 
@@ -1405,7 +1454,8 @@ jobs:
       # ── v0.6 E2E (计划 §13.3, M4 Gate) ─────────────────────────────────
       # Seeds v0.6 test data (fixed card UUID for deterministic navigation)
       # and runs the v0.6 E2E suite: review flow, card validation, axe-core.
-      # Uses continue-on-error until the suite is proven stable on CI.
+      # 2026-08-11：continue-on-error 移除——失败必须真实反映在 CI 状态上，
+      # 与 ADR-0008 §6.7 "PR 失败即阻断"一致（此前失败静默 CI 仍绿）。
       - name: Run v0.6 E2E seed
         if: success()
         env:
@@ -1422,7 +1472,7 @@ jobs:
       - name: Run v0.6 E2E tests
         if: success()
         working-directory: apps/web
-        continue-on-error: true
+        # 2026-08-11：不再 continue-on-error（v0.6 套件视为正式 Gate）
         env:
           E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
         run: npx playwright test
@@ -1603,11 +1653,19 @@ jobs:
 
       # Run only after aggregation so an exact tag is checked against concrete
       # test/scan/image/AIQ/approval evidence instead of failing before jobs run.
+      # 2026-08-11：无 registry 凭据时（本 workflow 从不 push GHCR），images
+      # 门禁降级为显式声明 --allow-unpublished-images（占位 digest 放行，其余
+      # 校验照常严格）；正式 release 在带 registry push 的流程以严格模式校验。
       - name: Verify exact-tag release manifest contract
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           RELEASE_MANIFEST_PATH: ${{ runner.temp }}/release-evidence/release-manifest-rc.json
-        run: node .github/scripts/release-manifest-contract.mjs
+        run: |
+          EXTRA=""
+          if [ -z "${{ steps.check-images.outputs.images_path }}" ]; then
+            EXTRA="--allow-unpublished-images"
+          fi
+          node .github/scripts/release-manifest-contract.mjs $EXTRA
 
       - name: Upload release evidence
         if: always()
@@ -1636,6 +1694,8 @@ jobs:
       DATABASE_URL: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
       DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
       E2E_SEED_OUTPUT: /tmp/e2e-nightly-seed-output.json
+      # dev compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值
+      EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token
     steps:
       - uses: actions/checkout@v4
 
@@ -1814,9 +1874,12 @@ jobs:
       BACKUP_BUCKET: ailearn-backups
       SOURCE_RELEASE: "0.5.0-alpha"
       SOURCE_COMMIT: ${{ github.sha }}
-      SOURCE_MIGRATION: "0039"
+      # SOURCE_MIGRATION 不再硬编码（此前 "0039" 已过期到 0103+）：
+      # alpha-env-setup.sh 从 _journal.json 动态取最新迁移号。
       CORS_ORIGIN: http://localhost:3000
       AUTH_COOKIE_SECURE: "false"
+      # compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值
+      EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token
     steps:
       - uses: actions/checkout@v4
 

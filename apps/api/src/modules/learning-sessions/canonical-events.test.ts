@@ -196,7 +196,7 @@ describe("validateCanonicalEventPayload", () => {
     assert.throws(
       () => validateCanonicalEventPayload({ userAnswer: "raw answer" }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "SENSITIVE_FIELD_DENIED",
+        err instanceof CanonicalEventValidationError && err.code === "sensitive_field_denied",
     );
   });
 
@@ -204,12 +204,12 @@ describe("validateCanonicalEventPayload", () => {
     assert.throws(
       () => validateCanonicalEventPayload({ chainOfThought: "raw reasoning" }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "SENSITIVE_FIELD_DENIED",
+        err instanceof CanonicalEventValidationError && err.code === "sensitive_field_denied",
     );
     assert.throws(
       () => validateCanonicalEventPayload({ chain_of_thought: "raw reasoning" }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "SENSITIVE_FIELD_DENIED",
+        err instanceof CanonicalEventValidationError && err.code === "sensitive_field_denied",
     );
   });
 
@@ -218,7 +218,7 @@ describe("validateCanonicalEventPayload", () => {
       assert.throws(
         () => validateCanonicalEventPayload(sensitive),
         (err: unknown) =>
-          err instanceof CanonicalEventValidationError && err.code === "SENSITIVE_FIELD_DENIED",
+          err instanceof CanonicalEventValidationError && err.code === "sensitive_field_denied",
         `应拒绝 ${Object.keys(sensitive)[0]}`,
       );
     }
@@ -230,7 +230,7 @@ describe("validateCanonicalEventPayload", () => {
         facetSummaries: [{ rubricItemId: "ri-1", verdict: "covered", confidence: 80, rationale: "raw" }],
       }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "SENSITIVE_FIELD_DENIED",
+        err instanceof CanonicalEventValidationError && err.code === "sensitive_field_denied",
     );
   });
 
@@ -238,7 +238,7 @@ describe("validateCanonicalEventPayload", () => {
     assert.throws(
       () => validateCanonicalEventPayload({ unknownField: "x" }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "UNKNOWN_PAYLOAD_FIELD",
+        err instanceof CanonicalEventValidationError && err.code === "unknown_payload_field",
     );
   });
 
@@ -246,12 +246,12 @@ describe("validateCanonicalEventPayload", () => {
     assert.throws(
       () => validateCanonicalEventPayload({ confidence: "80" }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "INVALID_PAYLOAD_TYPE",
+        err instanceof CanonicalEventValidationError && err.code === "invalid_payload_type",
     );
     assert.throws(
       () => validateCanonicalEventPayload({ keyPointId: 42 }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "INVALID_PAYLOAD_TYPE",
+        err instanceof CanonicalEventValidationError && err.code === "invalid_payload_type",
     );
   });
 });
@@ -322,7 +322,7 @@ describe("appendCanonicalEvent", () => {
         canonicalFact: understandingFact, // domain 不一致
       }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "EVENT_TYPE_DOMAIN_MISMATCH",
+        err instanceof CanonicalEventValidationError && err.code === "event_type_domain_mismatch",
     );
   });
 
@@ -336,7 +336,7 @@ describe("appendCanonicalEvent", () => {
         canonicalFact: validationFact,
       }),
       (err: unknown) =>
-        err instanceof CanonicalEventValidationError && err.code === "SENSITIVE_FIELD_DENIED",
+        err instanceof CanonicalEventValidationError && err.code === "sensitive_field_denied",
     );
     assert.equal(store.outboxRows.length, 0);
   });

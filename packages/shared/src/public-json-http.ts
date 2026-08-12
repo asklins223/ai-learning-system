@@ -4,6 +4,18 @@ import { isIP, type LookupFunction } from "node:net";
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const CONNECT_TIMEOUT_MS = 10_000;
+// 2026-08-12（模型调用面审计）：生产路径此前只有 10s connect 超时，响应体
+// 读取无任何上限——provider 半挂时请求无限挂起（http-pool 的 300s 只作用于
+// undici dispatcher 路径，node:https 直连不经它）。总超时 = connect + 响应
+// 体读取，默认 300s（长生成场景），可 AI_ENDPOINT_RESPONSE_TIMEOUT_MS 覆盖。
+const TOTAL_RESPONSE_TIMEOUT_MS = envTimeoutMs("AI_ENDPOINT_RESPONSE_TIMEOUT_MS", 300_000);
+
+function envTimeoutMs(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 1_000 ? value : fallback;
+}
 
 type PinnedAddress = { address: string; family: 4 | 6 };
 
@@ -127,6 +139,21 @@ export type PublicJsonRequester = (
   signal?: AbortSignal,
 ) => Promise<PublicJsonResponse>;
 
+export interface PublicStreamingResponse {
+  status: number;
+  statusText: string;
+  body: AsyncIterable<Uint8Array>;
+  /** Stop reading and close the underlying socket. */
+  cancel: () => void;
+}
+
+export type PublicStreamingRequester = (
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  signal?: AbortSignal,
+) => Promise<PublicStreamingResponse>;
+
 /** HTTPS-only JSON POST with DNS validation and connection-time IP pinning. */
 export const postJsonToPublicEndpoint: PublicJsonRequester = async (
   url,
@@ -157,7 +184,10 @@ export const postJsonToPublicEndpoint: PublicJsonRequester = async (
 
   return new Promise((resolve, reject) => {
     const request = httpsRequest(parsed, options, (response) => {
-      response.once("error", reject);
+      response.once("error", (error) => {
+        clearTimeout(totalTimer);
+        reject(error);
+      });
       const chunks: Buffer[] = [];
       let bytes = 0;
       response.on("data", (chunk: Buffer | string) => {
@@ -170,6 +200,7 @@ export const postJsonToPublicEndpoint: PublicJsonRequester = async (
         chunks.push(buffer);
       });
       response.once("end", () => {
+        clearTimeout(totalTimer);
         const raw = Buffer.concat(chunks).toString("utf8");
         let parsedBody: unknown = null;
         try {
@@ -189,6 +220,73 @@ export const postJsonToPublicEndpoint: PublicJsonRequester = async (
     // fake-IP VPN resolver handing out 198.18.x.x) would otherwise silently
     // burn the caller's entire provider budget and read as a model timeout.
     // Fail fast with a pointed, distinguishable error instead.
+    const connectTimer = setTimeout(() => {
+      request.destroy(new Error(
+        `AI endpoint TCP/TLS connection could not be established within ${CONNECT_TIMEOUT_MS}ms — check container network egress/proxy, or a fake-IP VPN DNS resolver (198.18.x.x)`,
+      ));
+    }, CONNECT_TIMEOUT_MS);
+    // 2026-08-12：整体响应超时（connect + 响应体读取）——provider 半挂时
+    // 不再无限挂起；触发后 destroy 走 request error 路径清理两个 timer。
+    const totalTimer = setTimeout(() => {
+      request.destroy(new Error(
+        `AI endpoint request exceeded total timeout ${TOTAL_RESPONSE_TIMEOUT_MS}ms (connect + response body)`,
+      ));
+    }, TOTAL_RESPONSE_TIMEOUT_MS);
+    request.on("socket", (socket) => {
+      if (!socket.connecting) {
+        clearTimeout(connectTimer);
+        return;
+      }
+      socket.once("secureConnect", () => clearTimeout(connectTimer));
+    });
+    request.once("response", () => clearTimeout(connectTimer));
+    request.once("error", (error) => {
+      clearTimeout(connectTimer);
+      clearTimeout(totalTimer);
+      reject(error);
+    });
+    request.end(encodedBody);
+  });
+};
+
+/** HTTPS-only streaming POST with the same DNS validation and connection-time IP pinning. */
+export const postSseToPublicEndpoint: PublicStreamingRequester = async (
+  url,
+  headers,
+  body,
+  signal,
+) => {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new Error("AI endpoints must use HTTPS");
+  if (parsed.username || parsed.password) throw new Error("AI endpoint URL credentials are not allowed");
+  const pinned = await resolvePublicAddress(parsed.hostname);
+  const encodedBody = Buffer.from(JSON.stringify(body));
+  const options: RequestOptions = {
+    method: "POST",
+    family: pinned.family,
+    lookup: pinnedLookup(pinned),
+    signal,
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+      "Content-Length": String(encodedBody.length),
+      "Accept-Encoding": "identity",
+    },
+  };
+  if (!isIP(parsed.hostname)) {
+    (options as RequestOptions & { servername: string }).servername = parsed.hostname;
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(parsed, options, (response) => {
+      clearTimeout(connectTimer);
+      resolve({
+        status: response.statusCode ?? 0,
+        statusText: response.statusMessage ?? "",
+        body: response,
+        cancel: () => response.destroy(),
+      });
+    });
     const connectTimer = setTimeout(() => {
       request.destroy(new Error(
         `AI endpoint TCP/TLS connection could not be established within ${CONNECT_TIMEOUT_MS}ms — check container network egress/proxy, or a fake-IP VPN DNS resolver (198.18.x.x)`,

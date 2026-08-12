@@ -146,26 +146,30 @@ export default function SearchPage() {
     return () => window.removeEventListener("popstate", syncFromUrl);
   }, [syncFromUrl]);
 
-  useEffect(() => {
-    if (!urlReady) return;
-    const url = new URL(window.location.href);
-    if (url.pathname !== "/search") return;
-    if (normalizedQuery) url.searchParams.set("q", query);
-    else url.searchParams.delete("q");
-    if (activeTab === "all") url.searchParams.delete("type");
-    else url.searchParams.set("type", activeTab);
-    window.history.replaceState(
-      window.history.state,
-      "",
-      `${url.pathname}${url.search}${url.hash}`,
-    );
-  }, [activeTab, normalizedQuery, query, urlReady]);
+  // 2026-08-11 修复：URL 同步不再用独立 effect（此前每 keystroke replaceState，
+  // 污染后退栈且无谓写入 history）。改到防抖搜索 effect 的 setTimeout 回调内，
+  // 仅在真实搜索提交（320ms 防抖后）时更新一次 URL。
 
   useEffect(() => {
     if (!urlReady) return;
     const requestId = requestSequenceRef.current + 1;
     requestSequenceRef.current = requestId;
     if (!normalizedQuery) {
+      // 清空输入时同步清理 URL 残留的 ?q=（replaceState 不进后退栈；
+      // 仅当存在 q 参数时才写入，避免无谓 history 操作）
+      if (window.location.pathname === "/search") {
+        const url = new URL(window.location.href);
+        const hadParams = url.searchParams.has("q") || url.searchParams.has("type");
+        if (hadParams) {
+          url.searchParams.delete("q");
+          url.searchParams.delete("type");
+          window.history.replaceState(
+            window.history.state,
+            "",
+            `${url.pathname}${url.search}${url.hash}`,
+          );
+        }
+      }
       setResults([]);
       setTotal(0);
       setNextOffset(null);
@@ -196,6 +200,19 @@ export default function SearchPage() {
     runImmediatelyRef.current = false;
 
     const timer = window.setTimeout(async () => {
+      // 搜索提交时同步 URL（replaceState，不进后退栈）
+      if (window.location.pathname === "/search") {
+        const url = new URL(window.location.href);
+        if (normalizedQuery) url.searchParams.set("q", normalizedQuery);
+        else url.searchParams.delete("q");
+        if (activeTab === "all") url.searchParams.delete("type");
+        else url.searchParams.set("type", activeTab);
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${url.pathname}${url.search}${url.hash}`,
+        );
+      }
       controller = new AbortController();
       setDebouncing(false);
       setLoading(true);
@@ -211,7 +228,7 @@ export default function SearchPage() {
         ) return;
         setResults(response.items);
         setTotal(response.total);
-        setNextOffset(response.nextOffset);
+        setNextOffset(response.nextCursor);
         setSearched(true);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
@@ -260,7 +277,7 @@ export default function SearchPage() {
         );
       });
       setTotal(response.total);
-      setNextOffset(response.nextOffset);
+      setNextOffset(response.nextCursor);
     } catch (error) {
       if (requestSequenceRef.current !== requestId) return;
       setLoadMoreError(error instanceof Error ? error.message : "更多结果加载失败");

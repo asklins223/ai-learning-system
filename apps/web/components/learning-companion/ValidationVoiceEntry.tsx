@@ -67,7 +67,7 @@ export function ValidationVoiceEntry({
   );
   const [submitting, setSubmitting] = useState(false);
 
-  const voiceAvailable = !voiceUnavailable && Boolean(onTranscribe);
+  const voiceAvailable = !voiceUnavailable && Boolean(onTranscribe) && Boolean(onConfirm);
 
   const handleSubmitText = async (text: string) => {
     setSubmitting(true);
@@ -81,8 +81,7 @@ export function ValidationVoiceEntry({
   return (
     <div className="validation-voice-entry" data-ui="validation-voice-entry">
       <p className="validation-voice-entry__pending-note" role="note">
-        ⚠ 伴星输入面板（语音/文字/结构式证明）当前为<b>接线演示</b>：提交不会写入学习记录，
-        请使用下方原验证区的「提交答案」完成正式验证（§6.5 服务端接入后此提示移除）。
+        这段输入仅在所属学习航程中使用；如果当前航程不支持某种方式，可以切换为文字回答。
       </p>
       <ModalSwitcher
         current={modality}
@@ -104,7 +103,11 @@ export function ValidationVoiceEntry({
           baseRevision={baseRevision}
           structuredProofEligible={structuredProofEligible}
           onTranscribe={onTranscribe as never}
-          onConfirm={onConfirm ?? (async () => {})}
+          onConfirm={onConfirm ?? (async () => {
+            // voiceAvailable 已排除 onConfirm 缺失；此分支仅为类型兜底。
+            // 绝不能静默成功——UI 显示"已确认"但服务端未锁定的假成功必须杜绝。
+            throw new Error("voice confirm 回调未注入（voice 模态不应可达）");
+          })}
           onReRecord={onReRecord}
           onSubmitText={({ text }) => handleSubmitText(text)}
           onSwitchToStructuredProof={onSwitchToStructuredProof}
@@ -119,13 +122,13 @@ export function ValidationVoiceEntry({
 
       {modality === "structured-proof-v1" && (
         <div className="validation-voice-entry__proof-hint" role="note">
-          <p>结构式证明（structured-proof-v1）：按冻结 Scene 完成排序 / 修复 / 关系重建。</p>
+          <p>结构式回答：按本题提供的步骤完成排序、修复或关系重建。</p>
           {onSwitchToStructuredProof ? (
             <button type="button" onClick={onSwitchToStructuredProof} className="validation-voice-entry__action">
               开始结构式证明
             </button>
           ) : (
-            <p className="validation-voice-entry__muted">（接线中：宿主应用接入 Scene 渲染后开放）</p>
+            <p className="validation-voice-entry__muted">这类结构式回答暂未对当前学习卡开放，请先使用文字回答。</p>
           )}
         </div>
       )}

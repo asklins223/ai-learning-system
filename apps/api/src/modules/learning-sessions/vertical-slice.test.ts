@@ -117,6 +117,7 @@ function episodeRow(overrides?: Partial<EpisodeRow>): EpisodeRow {
     budgetEnvelopeRef: "env-1",
     budgetEnvelopeHash: "env-h",
     planHash: "plan-hash-1",
+    processingPhase: "assessment_pending",
     status: "active",
     commitKey: null,
     createdAt: new Date("2026-08-08T00:00:00.000Z"),
@@ -634,6 +635,36 @@ describe("stabilizeEpisode 编排（voice 主路径）", () => {
     assert.equal(result.state.status, "committed");
   });
 
+  it("M3：commit 应用成功（canonical_mastery）→ onCommitApplied 触发 committed_change_display 上下文", async () => {
+    const repo = new MemorySliceRepo();
+    repo.schedules = [{ scheduleId: "sched-new", generation: 1, status: "pending" }];
+    const fired: Array<{ workspaceId: string; userId: string; cardId: string; disposition: string }> = [];
+    const result = await stabilizeEpisode(
+      stabilizeInput(),
+      repo,
+      recordingExecutor([]),
+      (ctx) => { fired.push(ctx); },
+    );
+    assert.equal(result.commit?.ok, true);
+    assert.equal(fired.length, 1);
+    assert.equal(fired[0]?.cardId, stabilizeInput().cardId);
+    assert.equal(fired[0]?.workspaceId, stabilizeInput().workspaceId);
+    assert.equal(fired[0]?.disposition, result.commit?.disposition);
+  });
+
+  it("M3：commit 失败 → onCommitApplied 不触发（fail-closed，绝不伪造 commit 事件）", async () => {
+    const repo = new MemorySliceRepo();
+    const fired: unknown[] = [];
+    const result = await stabilizeEpisode(
+      stabilizeInput(),
+      repo,
+      recordingExecutor([], { ok: false, disposition: "canonical_mastery" }),
+      (ctx) => { fired.push(ctx); },
+    );
+    assert.equal(result.commit?.ok, false);
+    assert.equal(fired.length, 0);
+  });
+
   it("voice 缺 required rubric → 最高 facet_eligible，0 schedule 副作用", async () => {
     const repo = new MemorySliceRepo();
     repo.assessments = [
@@ -682,7 +713,7 @@ describe("stabilizeEpisode 编排（voice 主路径）", () => {
     repo.episode = null as unknown as EpisodeRow;
     await assert.rejects(
       () => stabilizeEpisode(stabilizeInput(), repo, recordingExecutor([])),
-      (err: unknown) => err instanceof VerticalSliceError && err.code === "EPISODE_NOT_FOUND",
+      (err: unknown) => err instanceof VerticalSliceError && err.code === "episode_not_found",
     );
   });
 });

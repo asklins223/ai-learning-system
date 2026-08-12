@@ -62,12 +62,12 @@ export async function sourceRoutes(app: FastifyInstance) {
   // GET /sources/:id — 详情（含 segments）
   app.get<{ Params: { id: string } }>("/sources/:id", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => getSource(transaction, req.params.id, req.session.workspaceId),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return result;
   });
 
@@ -75,7 +75,7 @@ export async function sourceRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可更新来源
   app.patch<{ Params: { id: string } }>("/sources/:id", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const body = parseBody(app, sourceUpdateSchema, req.body);
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
@@ -86,7 +86,7 @@ export async function sourceRoutes(app: FastifyInstance) {
         body,
       ),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return result;
   });
 
@@ -94,13 +94,14 @@ export async function sourceRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可删除来源
   app.delete<{ Params: { id: string } }>("/sources/:id", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => deleteSource(transaction, req.params.id, req.session.workspaceId),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
-    return result;
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+    // 2026-08-11：契约统一——软删除返回 204（与 DELETE /notes/:id 一致）
+    return reply.code(204).send();
   });
 
   // POST /sources/:id/create-note — 从来源创建笔记草稿
@@ -108,7 +109,7 @@ export async function sourceRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可从来源创建笔记
   app.post<{ Params: { id: string }; Querystring: { force?: string } }>("/sources/:id/create-note", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const force = req.query?.force === "true";
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
@@ -120,7 +121,7 @@ export async function sourceRoutes(app: FastifyInstance) {
         { force },
       ),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     if ("error" in result) {
       if (result.error === "duplicate_content") {
         return reply.code(409).send({
@@ -145,12 +146,12 @@ export async function sourceRoutes(app: FastifyInstance) {
   // §2.7: GET /sources/:id/notes — 从此来源创建的笔记列表
   app.get<{ Params: { id: string } }>("/sources/:id/notes", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => listNotesBySource(transaction, req.params.id, req.session.workspaceId),
     );
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return { items: result };
   });
 }

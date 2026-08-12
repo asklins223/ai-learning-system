@@ -208,6 +208,7 @@ export const COMPANION_PAGE_KINDS = [
   "card-detail",
   "key-point",
   "fullscreen-validate",
+  "companion-stage",
   "review",
   "review-schedule",
   "now",
@@ -714,6 +715,23 @@ export const COMPANION_PAGE_COVERAGE_REGISTRY: CompanionPageCoverageRegistryV1 =
       owner: "web",
       requiredCapabilities: ["formal_assessment"],
     }),
+    coverageEntry({
+      routePattern: "/cards/:id/companion",
+      pageKind: "companion-stage",
+      access: "authenticated",
+      surfaceMode: "panel",
+      sensitivity: "normal",
+      manifestVersion: PAGE_COVERAGE_MANIFEST_VERSION,
+      actionAllowlist: ["read_operation", "trusted_handoff", "stop"],
+      forbiddenActions: [
+        ...FORMAL_FORBIDDEN,
+        "exaggerate_mastery",
+        "auto_continue_questions",
+        "celebration_masks_assessment_boundary",
+      ],
+      owner: "web",
+      requiredCapabilities: ["learning_session_v2_internal"],
+    }),
 
     // ── Review / 此刻（禁债务/红色逾期/静默延期/自动开始） ──
     coverageEntry({
@@ -850,7 +868,7 @@ export const COMPANION_PAGE_COVERAGE_REGISTRY: CompanionPageCoverageRegistryV1 =
       owner: "web",
     }),
     coverageEntry({
-      routePattern: "/settings/privacy",
+      routePattern: "/settings#model",
       pageKind: "settings-privacy",
       access: "authenticated",
       surfaceMode: "silent_anchor",
@@ -977,6 +995,53 @@ export const COMPANION_PAGE_COVERAGE_REGISTRY: CompanionPageCoverageRegistryV1 =
       forbiddenActions: ERROR_FORBIDDEN,
       owner: "web",
       manualFallbackTestId: "E2E-offline",
+    }),
+
+    // ── 桌宠 Pet Window（方案 13） ──
+    // Pet Window 页面本身不承载页面内 Companion surface，也不写入 canonical
+    // 学习事实；全量动作禁止，仅保留确定性降级动作。
+    coverageEntry({
+      routePattern: "/companion/pet",
+      pageKind: "companion-pet-window",
+      access: "authenticated",
+      surfaceMode: "static_help",
+      sensitivity: "normal",
+      manifestVersion: PAGE_COVERAGE_MANIFEST_VERSION,
+      actionAllowlist: ERROR_RECOVERY_ACTIONS,
+      forbiddenActions: [
+        ...LEARNING_INTEGRITY_FORBIDDEN,
+        ...CONTENT_FORBIDDEN,
+        "leak_answer_before_formal",
+        "observe_input",
+        "run_model",
+        "export_or_delete",
+        "auto_change_preference",
+      ],
+      owner: "web",
+      manualFallbackTestId: "E2E-companion-pet-window",
+    }),
+
+    // ── 完整对话页（方案 13 §4.5；P1 占位，P2 接入真实历史） ──
+    coverageEntry({
+      routePattern: "/companion/conversations",
+      pageKind: "companion-conversations",
+      access: "authenticated",
+      surfaceMode: "panel",
+      sensitivity: "normal",
+      manifestVersion: PAGE_COVERAGE_MANIFEST_VERSION,
+      actionAllowlist: [],
+      forbiddenActions: [
+        ...LEARNING_INTEGRITY_FORBIDDEN,
+        ...CONTENT_FORBIDDEN,
+        "leak_answer_before_formal",
+        "observe_input",
+        "run_model",
+        "export_or_delete",
+        "auto_change_preference",
+        "fabricate_result",
+      ],
+      owner: "web",
+      manualFallbackTestId: "E2E-companion-conversations",
     }),
 
     // ── internal / admin ──

@@ -1,0 +1,141 @@
+ M .gitignore
+ M apps/api/Dockerfile
+ M apps/api/package.json
+ M apps/api/src/db/migrations/meta/_journal.json
+ M apps/api/src/modules/job/service.ts
+ M apps/api/src/modules/learning-sessions/answer-submission.test.ts
+ M apps/api/src/modules/learning-sessions/answer-submission.ts
+ M apps/api/src/modules/learning-sessions/assessment-service.test.ts
+ M apps/api/src/modules/learning-sessions/assessment-service.ts
+ M apps/api/src/modules/learning-sessions/commit-port-pg.test.ts
+ M apps/api/src/modules/learning-sessions/commit-port-pg.ts
+ M apps/api/src/modules/learning-sessions/session-routes.ts
+ M apps/api/src/modules/learning-sessions/session-service.test.ts
+ M apps/api/src/modules/learning-sessions/session-service.ts
+ M apps/api/src/modules/learning-sessions/tutor-detour.test.ts
+ M apps/api/src/modules/learning-sessions/tutor-detour.ts
+ M apps/api/src/modules/learning-sessions/vertical-slice.test.ts
+ M apps/api/src/modules/learning-sessions/voice-routes.ts
+ M apps/api/src/modules/note/maintenance.ts
+ M apps/api/src/server.ts
+ M apps/desktop/electron-builder.yml
+ M apps/desktop/esbuild.mjs
+ M apps/desktop/package-lock.json
+ M apps/desktop/package.json
+ M apps/desktop/src/main.ts
+ M apps/desktop/src/preload.ts
+ M apps/desktop/tsconfig.json
+ M apps/web/Dockerfile
+ M apps/web/app/(auth)/login/page.tsx
+ M apps/web/app/(auth)/register/page.tsx
+ M apps/web/app/(workspace)/(default)/graph/page.tsx
+ M apps/web/app/(workspace)/(default)/review/page.tsx
+ M apps/web/app/(workspace)/(default)/settings/page.tsx
+ M apps/web/app/(workspace)/(default)/today/page.tsx
+ M apps/web/app/(workspace)/(focus)/cards/[id]/page.tsx
+ M apps/web/app/(workspace)/(focus)/cards/[id]/validate/page.tsx
+ M apps/web/app/globals.css
+ M apps/web/app/styles/card-detail.css
+ M apps/web/app/styles/components.css
+ M apps/web/app/styles/login.css
+ M apps/web/app/styles/pages.css
+ M apps/web/app/styles/review-v06.css
+ M apps/web/app/styles/search.css
+ M apps/web/app/styles/today.css
+ M apps/web/app/styles/understanding-graph.css
+ M apps/web/components/layout/AppShell.tsx
+ M apps/web/components/learning-companion/CompanionAvatar.tsx
+ M apps/web/components/learning-companion/CompanionSettings.tsx
+ M apps/web/components/learning-companion/LearningCardActions.tsx
+ M apps/web/components/learning-companion/TextOrMixedInput.tsx
+ M apps/web/components/learning-companion/ValidationVoiceEntry.tsx
+ M apps/web/components/learning-companion/VoiceInputPanel.tsx
+ M apps/web/lib/__tests__/feature-flags.test.ts
+ M apps/web/lib/api.ts
+ M apps/web/lib/feature-flags.ts
+ M apps/web/lib/learning-companion/page-coverage-registry.ts
+ M apps/web/next.config.mjs
+ M apps/web/package.json
+ M apps/web/tailwind.config.ts
+ M docker-compose.dev.yml
+ M docker-compose.yml
+ M docker/edge-tts/Dockerfile
+ M docs/evidence/learning-companion-v1/README.md
+ M docs/evidence/learning-companion-v1/release-manifest.json
+ M infra/postgres/roles.sql
+ M packages/db/src/schema/index.ts
+ M packages/db/src/schema/learning-sessions.ts
+ M packages/shared/package.json
+ M packages/shared/src/content-hash.ts
+ M packages/shared/src/enums.ts
+ M packages/shared/src/index.ts
+ M packages/shared/src/task-router.ts
+ M tests/e2e/seed/seed.ts
+ M workers/ai-worker/src/handlers/learning-session-assess.ts
+ M workers/ai-worker/src/index.ts
+ M workers/ai-worker/src/lib/handler-timeout-config.ts
+?? apps/api/d2.mjs
+?? apps/api/d3.mjs
+?? apps/api/p2-debug.mjs
+?? apps/api/src/config/
+?? apps/api/src/db/migrations/0080_learning_episode_processing_phase.sql
+?? apps/api/src/db/migrations/0081_learning_session_processing_outbox.sql
+?? apps/api/src/db/migrations/0082_learning_assessment_decision_hash.sql
+?? apps/api/src/db/migrations/0083_learning_tutor_detours.sql
+?? apps/api/src/db/migrations/0084_learning_session_practice_events.sql
+?? apps/api/src/db/migrations/0085_learning_worker_grants_repair.sql
+?? apps/api/src/db/migrations/0086_learning_worker_artifact_lock_grant.sql
+?? apps/api/src/db/migrations/0087_learning_worker_validation_grants.sql
+?? apps/api/src/db/migrations/0088_companion_conversation_foundation.sql
+?? apps/api/src/db/migrations/0089_companion_turn_runs_last_event_seq.sql
+?? apps/api/src/db/migrations/0090_companion_turn_runs_prompt_hash.sql
+?? apps/api/src/db/migrations/0091_companion_worker_grants.sql
+?? apps/api/src/integration-tests/companion-conversation-postgres.integration.ts
+?? apps/api/src/integration-tests/companion-migration-postgres.integration.ts
+?? apps/api/src/modules/companion-conversation/
+?? apps/api/src/modules/learning-sessions/assessment-processing-outbox.test.ts
+?? apps/api/src/modules/learning-sessions/assessment-processing-outbox.ts
+?? apps/api/src/modules/learning-sessions/companion-voice-service.ts
+?? apps/api/src/modules/learning-sessions/ffprobe.test.ts
+?? apps/api/src/modules/learning-sessions/ffprobe.ts
+?? apps/desktop/src/desktop-api-bridge.ts
+?? apps/desktop/src/ipc/
+?? apps/desktop/src/persistence/
+?? apps/desktop/src/pet-preload.ts
+?? apps/desktop/src/windows/
+?? apps/web/app/(pet)/
+?? apps/web/app/(workspace)/(default)/companion/
+?? apps/web/app/(workspace)/(focus)/cards/[id]/companion/
+?? apps/web/app/styles/companion-stage.css
+?? apps/web/app/styles/companion.css
+?? apps/web/components/learning-companion/CompanionAuthShell.tsx
+?? apps/web/components/learning-companion/TutorDetourPanel.tsx
+?? apps/web/features/
+?? apps/web/lib/learning-companion/companion-reference-assets.test.ts
+?? apps/web/lib/learning-companion/companion-reference-assets.ts
+?? apps/web/public/images/companion/
+?? apps/web/public/live2d-dev/
+?? apps/web/scripts/
+?? curl-tts.mjs
+?? docs/evidence/learning-companion-desktop-pet/
+?? docs/evidence/learning-companion-v1/reconstruction-v2/
+?? docs/plans/learning-companion/12-companion-experience-reconstruction.md
+?? docs/plans/learning-companion/13-desktop-pet-ai-learning-companion-reconstruction.md
+?? docs/plans/learning-companion/desktop-pet-handoff/
+?? packages/db/src/schema/companion-conversations.ts
+?? packages/shared/src/companion-character-contracts.test.ts
+?? packages/shared/src/companion-character-contracts.ts
+?? packages/shared/src/companion-conversation-contracts.test.ts
+?? packages/shared/src/companion-conversation-contracts.ts
+?? packages/shared/src/companion-persona.test.ts
+?? packages/shared/src/companion-persona.ts
+?? packages/shared/src/desktop-pet-contracts.ts
+?? packages/shared/src/learning-assessment.ts
+?? reference-projects/
+?? tests/e2e/tests/companion-session-journey.spec.ts
+?? workers/ai-worker/src/handlers/companion-dialogue.test.ts
+?? workers/ai-worker/src/handlers/companion-dialogue.ts
+?? workers/ai-worker/src/handlers/learning-session-assessment.test.ts
+?? workers/ai-worker/src/handlers/learning-session-assessment.ts
+?? workers/ai-worker/src/lib/tts-segments.test.ts
+?? workers/ai-worker/src/lib/tts-segments.ts

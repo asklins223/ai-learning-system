@@ -124,7 +124,7 @@ const ARTIFACT_REF_PREFIX = "artifact:";
 /** id → opaque artifact ref（`artifact:{id}`）；旧域只存这个 ref，不存 payload。 */
 export function toOpaqueArtifactRef(artifactId: string): string {
   if (typeof artifactId !== "string" || artifactId.trim() === "") {
-    throw new LegacyAdapterError("artifactId 不能为空", "MISSING_ARTIFACT_ID");
+    throw new LegacyAdapterError("artifactId 不能为空", "missing_artifact_id");
   }
   return `${ARTIFACT_REF_PREFIX}${artifactId}`;
 }
@@ -134,12 +134,12 @@ export function parseOpaqueArtifactRef(artifactRef: string): string {
   if (typeof artifactRef !== "string" || !artifactRef.startsWith(ARTIFACT_REF_PREFIX)) {
     throw new LegacyAdapterError(
       `非法 artifact ref（需要前缀 ${ARTIFACT_REF_PREFIX}）`,
-      "INVALID_ARTIFACT_REF",
+      "invalid_artifact_ref",
     );
   }
   const id = artifactRef.slice(ARTIFACT_REF_PREFIX.length);
   if (id.trim() === "") {
-    throw new LegacyAdapterError("artifact ref 缺少 id", "INVALID_ARTIFACT_REF");
+    throw new LegacyAdapterError("artifact ref 缺少 id", "invalid_artifact_ref");
   }
   return id;
 }
@@ -171,22 +171,22 @@ export function toLegacyDomainSummary(artifact: LegacyArtifactInput): LegacyDoma
 
 function validateArtifactInput(artifact: LegacyArtifactInput): void {
   if (typeof artifact.id !== "string" || artifact.id.trim() === "") {
-    throw new LegacyAdapterError("artifact 缺少 id", "MISSING_ARTIFACT_ID");
+    throw new LegacyAdapterError("artifact 缺少 id", "missing_artifact_id");
   }
   if (typeof artifact.contentHash !== "string" || artifact.contentHash.trim() === "") {
-    throw new LegacyAdapterError("artifact 缺少 content hash", "MISSING_ARTIFACT_HASH");
+    throw new LegacyAdapterError("artifact 缺少 content hash", "missing_artifact_hash");
   }
   if (typeof artifact.probeId !== "string" || artifact.probeId.trim() === "") {
-    throw new LegacyAdapterError("artifact 缺少 probeId", "MISSING_PROBE_ID");
+    throw new LegacyAdapterError("artifact 缺少 probeId", "missing_probe_id");
   }
   if (!LEGACY_MODALITIES.includes(artifact.modality)) {
     throw new LegacyAdapterError(
       `非法 modality（${String(artifact.modality)}）`,
-      "INVALID_MODALITY",
+      "invalid_modality",
     );
   }
   if (typeof artifact.revision !== "number" || !Number.isInteger(artifact.revision) || artifact.revision < 0) {
-    throw new LegacyAdapterError("artifact revision 非法", "INVALID_ARTIFACT_REVISION");
+    throw new LegacyAdapterError("artifact revision 非法", "invalid_artifact_revision");
   }
 }
 
@@ -265,20 +265,20 @@ export function fromLegacyAnswer(row: LegacyAnswerRowInput): LegacyInputUniquene
   if (contentHash === "") {
     throw new LegacyAdapterError(
       "旧域行缺少 artifact content hash（redaction 后为 tombstone，无法重建 uniqueness 键）",
-      "MISSING_ARTIFACT_HASH",
+      "missing_artifact_hash",
     );
   }
   const probeRef = row.probeRef?.trim() ?? "";
   if (probeRef === "") {
     throw new LegacyAdapterError(
       "旧域行缺少 probe ref，无法构建 input uniqueness 键",
-      "MISSING_PROBE_REF",
+      "missing_probe_ref",
     );
   }
   if (typeof row.version !== "number" || !Number.isInteger(row.version) || row.version < 0) {
     throw new LegacyAdapterError(
       "旧域行缺少 artifact version，无法构建 input uniqueness 键",
-      "MISSING_ARTIFACT_VERSION",
+      "missing_artifact_version",
     );
   }
   const key = buildLegacyUniquenessKey({
@@ -430,15 +430,15 @@ export function canonicalCompatibilityCheck(
   pending: PendingScheduleState,
 ): ScheduleCompatibilityResult {
   if (typeof inputScheduleId !== "string" || inputScheduleId.trim() === "") {
-    throw new LegacyAdapterError("inputScheduleId 不能为空", "MISSING_SCHEDULE_ID");
+    throw new LegacyAdapterError("inputScheduleId 不能为空", "missing_schedule_id");
   }
   if (typeof generation !== "number" || !Number.isInteger(generation) || generation < 0) {
-    throw new LegacyAdapterError("schedule generation 非法", "INVALID_SCHEDULE_GENERATION");
+    throw new LegacyAdapterError("schedule generation 非法", "invalid_schedule_generation");
   }
   if (pending.id !== inputScheduleId) {
     throw new LegacyAdapterError(
       `pending schedule 不匹配：请求 ${inputScheduleId}，实际 ${pending.id}`,
-      "SCHEDULE_MISMATCH",
+      "schedule_mismatch",
     );
   }
 

@@ -1,0 +1,52 @@
+# Third-Party Notices
+
+本应用（AI Learn desktop pet）包含以下第三方组件的源码、二进制或素材。
+许可证全文见各条目链接；模型/素材的再分发与商用限制见 `apps/web/public/images/companion/pet/live2d-v1/manifest.json`。
+
+## PIXI.js（vendor: `/live2d-dev/vendor/pixi.min.js`）
+- 用途：Live2D 渲染器宿主
+- 许可：MIT License
+- 来源：https://github.com/pixijs/pixijs
+
+## Live2D Cubism Core（vendor: `/live2d-dev/vendor/live2dcubismcore.min.js`）
+- 用途：Cubism 模型运行时
+- 许可：Live2D Proprietary（Cubism Core SDK License；商用需遵循 Live2D 收入/规模条款）
+- 来源：https://www.live2d.com/sdk/download/web/
+
+## Live2D Cubism 4 Web SDK（vendor: `/live2d-dev/vendor/cubism4.min.js`）
+- 用途：Cubism 4 模型加载与驱动
+- 许可：Live2D Proprietary（Cubism SDK License；商用需遵循 Live2D 条款）
+- 来源：https://www.live2d.com/sdk/download/web/
+
+## Mao PRO（Live2D 角色模型，`/images/companion/pet/live2d-v1/mao-pro/`）
+- 用途：桌面宠物角色模型（P4 production，Owner 批准 2026-08-11；2026-08-11 确认免费）
+- 仓库：EchoBot（MIT，锁定 commit `08e97a4a33b2ab611d24dd997038c1ec95ac6926`）
+- 模型素材许可：Live2D Free Material License Agreement and Terms of Use
+  （https://www.live2d.com/en/download/sample-data/）
+- 限制：免费使用（个人与商业，**无需商业许可**——Owner 确认 2026-08-11，
+  `commercialReleaseAllowed=true`）；不得再分发模型文件本身（`redistributionAllowed=false`）。
+
+## EchoBot-LICENSE（仓库 MIT 许可副本）
+- 位置：`apps/web/public/live2d-dev/EchoBot-LICENSE`
+- 覆盖：EchoBot 仓库源码（不含 Live2D 模型素材本身的许可限制）
+
+## sherpa-onnx-node（npm 依赖，`apps/desktop/node_modules/sherpa-onnx-node`）
+- 用途：P6 §13 本地 SenseVoice ASR（Electron utility process 内运行；onnxruntime
+  推理 + sherpa-onnx C API 绑定）
+- 许可：Apache-2.0（含平台二进制包 `sherpa-onnx-darwin-arm64` 等；onnxruntime
+  为 MIT）
+- 来源：https://github.com/k2-fsa/sherpa-onnx（npm `sherpa-onnx-node@1.13.5`）
+- 说明：native addon 随应用打包（asarUnpack）；运行时不持有任何 API Key
+
+## SenseVoice 模型（设备本地，不入仓库/打包）
+- 位置：设备本地模型目录（`ASR_SENSEVOICE_MODEL_DIR`；开发机
+  `/tmp/sherpa-onnx-models/.../model.int8.onnx` + `tokens.txt`）
+- 用途：本地 ASR（P6 §13 local_streaming 路由）；性能探测未通过时自动降级
+  SiliconFlow 云端转写
+- 许可：Apache-2.0（模型源自 FunAudioLLM/SenseVoice，经 sherpa-onnx 转换为
+  ONNX int8；sherpa-onnx 官方模型页以 Apache-2.0 分发）
+- 来源：https://github.com/FunAudioLLM/SenseVoice ；
+  https://github.com/k2-fsa/sherpa-onnx（asr-models release）
+- 说明：**不随应用分发**；应用仅在模型目录存在时启用 local_streaming，
+  缺失/探测失败时 fail-closed 到云端/文字降级
+

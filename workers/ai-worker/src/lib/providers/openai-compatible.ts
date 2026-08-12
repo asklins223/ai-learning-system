@@ -3,10 +3,13 @@ import {
   type AgentTurnResult,
   type ProviderCapability,
 } from "@ailearn/shared";
+import { createHash } from "node:crypto";
 import { resolveOpenAIChatCompletionsUrl, resolveOpenAIEmbeddingsUrl } from "@ailearn/shared/ai-endpoints";
 import {
+  postSseToPublicEndpoint,
   postJsonToPublicEndpoint,
   type PublicJsonRequester,
+  type PublicStreamingRequester,
 } from "@ailearn/shared/public-json-http";
 import { shouldUsePromptCache } from "@ailearn/shared";
 import type { AIProvider, ProviderUsage } from "../ai-provider.ts";
@@ -104,6 +107,18 @@ function abortError(signal: AbortSignal, phase: string): Error {
   return new Error(`AI request aborted ${phase}`);
 }
 
+async function readStreamingBodyText(body: AsyncIterable<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  for await (const chunk of body) {
+    bytes += chunk.byteLength;
+    if (bytes > 2 * 1024 * 1024) throw new Error("AI endpoint error response exceeded 2097152 bytes");
+    text += decoder.decode(chunk, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 export class OpenAICompatibleProvider implements AIProvider {
   readonly id: string;
   readonly promptVersion: string;
@@ -114,6 +129,7 @@ export class OpenAICompatibleProvider implements AIProvider {
   private readonly embeddingEndpoint: string;
   private readonly apiKey: string;
   private readonly request: PublicJsonRequester;
+  private readonly streamRequest: PublicStreamingRequester;
   private readonly extraRequestParams: Record<string, unknown> | undefined;
   private readonly extraHeaders: Record<string, string> | undefined;
   private readonly maxTokensStrategy: "always" | "env-gated";
@@ -145,11 +161,146 @@ export class OpenAICompatibleProvider implements AIProvider {
       options.maxTokens ?? 4096,
       options.temperature ?? 0.2,
       options.model ?? this.modelId,
+      options.responseFormat,
     );
     return {
       content,
       usage: usage ?? { totalTokens: null, promptTokens: null, completionTokens: null, requestId: null },
     };
+  }
+
+  /**
+   * §8.2 真实流式：`stream: true` + OpenAI-compatible SSE（`data: {...}` 行、
+   * `data: [DONE]` 结束、`choices[0].delta.content` 增量）。与 call() 相同的
+   * body/headers 构造，但走独立的 HTTPS streaming requester（PublicJsonRequester
+   * 只能整包读 JSON，无法承载流式）。abort 时立刻中断读取并抛 abortError。
+   */
+  async chatCompletionStream(
+    messages: ChatMessage[],
+    options: ChatOptions,
+    signal: AbortSignal | undefined,
+    onDelta: (deltaText: string) => void,
+  ): Promise<{ content: string }> {
+    if (signal?.aborted) throw abortError(signal, "before request");
+    const maxTokens = options.maxTokens ?? 4096;
+    const temperature = options.temperature ?? 0.2;
+    const model = options.model ?? this.modelId;
+    const disableMaxTokens = this.platformOptions?.disableMaxTokens
+      ?? process.env.OPENAI_COMPAT_DISABLE_MAX_TOKENS === "true";
+    const shouldSetMaxTokens = this.maxTokensStrategy === "always" || !disableMaxTokens;
+    const body: Record<string, unknown> = {
+      model,
+      messages,
+      temperature,
+      stream: true,
+      // Companion dialogue explicitly requests natural text. Keep the
+      // historical JSON default for agent/structured callers that omit the
+      // option, but never force JSON mode onto a text dialogue stream.
+      ...(options.responseFormat === "text"
+        ? {}
+        : { response_format: { type: "json_object" as const } }),
+      ...((this.platformOptions?.disableThinking ?? process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+        ? { enable_thinking: false }
+        : this.platformOptions?.enableThinking
+          ? { enable_thinking: true }
+          : {}),
+      ...this.extraRequestParams,
+    };
+    if (shouldSetMaxTokens) body.max_tokens = maxTokens;
+    const headers: Record<string, string> = {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+      ...this.extraHeaders,
+    };
+    const response = await this.streamRequest(this.endpoint, headers, body, signal);
+    if (signal?.aborted) {
+      response.cancel();
+      throw abortError(signal, "after response");
+    }
+    if (response.status < 200 || response.status >= 300) {
+      let providerCode: string | number | undefined;
+      try {
+        const raw = await readStreamingBodyText(response.body);
+        const parsed = raw ? JSON.parse(raw) : null;
+        providerCode = readProviderCode(parsed);
+      } catch {
+        // 非 JSON 错误体：保留原始状态码即可
+      }
+      throw new ProviderRequestError({
+        provider: this.id,
+        status: response.status,
+        providerCode,
+      });
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let content = "";
+    let responseBytes = 0;
+    const consumeData = (data: string): boolean => {
+      if (data === "[DONE]") return true;
+      try {
+        const parsed = JSON.parse(data) as {
+          choices?: Array<{ delta?: { content?: unknown } }>
+        };
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta.length > 0) {
+          content += delta;
+          onDelta(delta);
+        }
+      } catch {
+        // 忽略无法解析的 SSE 行（部分网关会插入空行/注释）
+      }
+      return false;
+    };
+    const abortListener = () => {
+      response.cancel();
+    };
+    signal?.addEventListener("abort", abortListener, { once: true });
+    try {
+      for await (const value of response.body) {
+        responseBytes += value.byteLength;
+        if (responseBytes > 8 * 1024 * 1024) {
+          response.cancel();
+          throw new Error(`${this.id} streaming response exceeded 8388608 bytes (${model})`);
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let lineEnd: number;
+        while ((lineEnd = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, lineEnd).replace(/\r$/, "");
+          buffer = buffer.slice(lineEnd + 1);
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const data = trimmed.slice(5).trim();
+          if (consumeData(data)) {
+            response.cancel();
+            if (!content.trim()) {
+              throw new Error(`${this.id} returned empty streaming output (${model})`);
+            }
+            return { content };
+          }
+        }
+      }
+      // Some compatible gateways close without a final newline or [DONE].
+      // Flush the decoder and parse that last complete data line instead of
+      // silently dropping the final token.
+      buffer += decoder.decode();
+      const trailing = buffer.trim();
+      if (trailing.startsWith("data:") && consumeData(trailing.slice(5).trim())) {
+        if (!content.trim()) {
+          throw new Error(`${this.id} returned empty streaming output (${model})`);
+        }
+        return { content };
+      }
+    } finally {
+      signal?.removeEventListener("abort", abortListener);
+    }
+    if (signal?.aborted) throw abortError(signal, "after stream");
+    if (!content.trim()) {
+      throw new Error(`${this.id} returned empty streaming output (${model})`);
+    }
+    return { content };
   }
 
   constructor(options: {
@@ -159,6 +310,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     visionModel?: string;
     embeddingModel?: string;
     request?: PublicJsonRequester;
+    streamRequest?: PublicStreamingRequester;
     // ── R1: Preset configuration for DashScope compatibility ──
     resolveEndpoint?: (baseUrl: string) => string;
     resolveEmbeddingEndpoint?: (baseUrl: string) => string;
@@ -183,6 +335,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     const resolveEmbeddingFn = options.resolveEmbeddingEndpoint ?? resolveOpenAIEmbeddingsUrl;
     this.embeddingEndpoint = resolveEmbeddingFn(options.baseUrl);
     this.request = options.request ?? postJsonToPublicEndpoint;
+    this.streamRequest = options.streamRequest ?? postSseToPublicEndpoint;
     this.extraRequestParams = options.extraRequestParams;
     this.extraHeaders = options.extraHeaders;
     this.maxTokensStrategy = options.maxTokensStrategy ?? "env-gated";
@@ -238,6 +391,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     maxTokens = 4096,
     temperature = 0.2,
     model = this.modelId,
+    responseFormat: ChatOptions["responseFormat"] = "json_object",
   ): Promise<{ content: string; usage: ProviderUsage | null }> {
     if (signal?.aborted) throw abortError(signal, "before request");
     // R1: maxTokensStrategy controls max_tokens ("always" for DashScope, "env-gated" for OpenAI-compatible)
@@ -250,8 +404,11 @@ export class OpenAICompatibleProvider implements AIProvider {
       messages,
       temperature,
       stream: false,
-      // Force the model to emit valid JSON, matching DashScope's behaviour.
-      response_format: { type: "json_object" as const },
+      // Keep structured JSON as the default for legacy callers, while
+      // allowing companion dialogue to request natural text explicitly.
+      ...(responseFormat === "text"
+        ? {}
+        : { response_format: { type: "json_object" as const } }),
       // Platform config options control thinking mode:
       //   disableThinking: explicitly disable (enable_thinking: false)
       //   enableThinking:  explicitly enable  (enable_thinking: true)
@@ -386,16 +543,25 @@ export class OpenAICompatibleProvider implements AIProvider {
     if (this.platformOptions?.extraHeaders) {
       Object.assign(headers, this.platformOptions.extraHeaders);
     }
-    console.error("[REPRO-LOG] REQUEST", JSON.stringify({
-      model: requestBody.model,
-      toolNames: (requestBody.tools as Array<{function:{name:string}}> | undefined)?.map(t => t.function.name),
-      toolChoice: requestBody.tool_choice,
-      maxTokens: requestBody.max_tokens,
-      msgCount: (requestBody.messages as Array<{role:string}>).length,
-      userMsgLen: (requestBody.messages as Array<{content:string}>).map(m => (m.content ?? "").length),
-      systemLen: ((requestBody.messages as Array<{role:string,content:string}>).find(m=>m.role==="system")?.content ?? "").length,
-      userContentPrefix: ((requestBody.messages as Array<{content:string}>).find(m=>m.content)?.content ?? "").slice(0, 600),
-    }));
+    // 2026-08-11：REPRO-LOG 加开关——此前无条件打印（含 RESPONSE 400 字符
+    // 内容预览）到 stderr，生产日志持续输出模型往返细节。仅当显式设置
+    // AI_PROVIDER_REPRO_LOG=1 时启用（调试复现用）。
+    const reproLogEnabled = process.env.AI_PROVIDER_REPRO_LOG === "1";
+    if (reproLogEnabled) {
+      const firstUserContent = (requestBody.messages as Array<{ content?: string }>).find(m => m.content)?.content ?? "";
+      // 2026-08-12（模型调用面审计）：不再打印用户内容原文——误开开关即泄漏
+      // 笔记/消息内容。只记录长度 + sha256 前缀指纹（可对照，不可还原）。
+      console.error("[REPRO-LOG] REQUEST", JSON.stringify({
+        model: requestBody.model,
+        toolNames: (requestBody.tools as Array<{function:{name:string}}> | undefined)?.map(t => t.function.name),
+        toolChoice: requestBody.tool_choice,
+        maxTokens: requestBody.max_tokens,
+        msgCount: (requestBody.messages as Array<{role:string}>).length,
+        userMsgLen: (requestBody.messages as Array<{content:string}>).map(m => (m.content ?? "").length),
+        systemLen: ((requestBody.messages as Array<{role:string,content:string}>).find(m=>m.role==="system")?.content ?? "").length,
+        userContentSha256: createHash("sha256").update(firstUserContent).digest("hex").slice(0, 16),
+      }));
+    }
     const response = await this.request(
       this.endpoint,
       headers,
@@ -414,12 +580,14 @@ export class OpenAICompatibleProvider implements AIProvider {
     }
 
     const body = response.body as Record<string, unknown>;
-    console.error("[REPRO-LOG] RESPONSE", JSON.stringify({
-      status: response.status,
-      finish: (body.choices as Array<{finish_reason:string}> | undefined)?.[0]?.finish_reason,
-      toolCalls: (body.choices as Array<{message:{tool_calls?: Array<{function:{name:string}}>}}> | undefined)?.[0]?.message?.tool_calls?.map(tc => tc.function.name),
-      contentPreview: ((body.choices as Array<{message:{content?:string}}> | undefined)?.[0]?.message?.content ?? "").slice(0, 400),
-    }));
+    if (reproLogEnabled) {
+      console.error("[REPRO-LOG] RESPONSE", JSON.stringify({
+        status: response.status,
+        finish: (body.choices as Array<{finish_reason:string}> | undefined)?.[0]?.finish_reason,
+        toolCalls: (body.choices as Array<{message:{tool_calls?: Array<{function:{name:string}}>}}> | undefined)?.[0]?.message?.tool_calls?.map(tc => tc.function.name),
+        contentPreview: ((body.choices as Array<{message:{content?:string}}> | undefined)?.[0]?.message?.content ?? "").slice(0, 400),
+      }));
+    }
     const usage = readUsage(response.body);
 
     // R1: Post-body-read abort check

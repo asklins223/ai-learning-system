@@ -100,7 +100,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           options(),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "MISSING_CLAIM",
+        err instanceof HandoffAdapterError && err.code === "missing_claim",
     );
   });
 
@@ -115,7 +115,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           options(),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "MISSING_EVIDENCE",
+        err instanceof HandoffAdapterError && err.code === "missing_evidence",
     );
   });
 
@@ -130,7 +130,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           options(),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "MISSING_SEMANTIC_SUPPORT",
+        err instanceof HandoffAdapterError && err.code === "missing_semantic_support",
     );
   });
 
@@ -145,7 +145,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           options({ cardSet: { id: "set-1", status: "active", generationEpoch: null } }),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "MISSING_CARD_REVISION",
+        err instanceof HandoffAdapterError && err.code === "missing_card_revision",
     );
   });
 
@@ -160,7 +160,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           options({ cardSet: { id: "set-1", status: "draft", generationEpoch: 1 } }),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "NOT_PUBLISHED",
+        err instanceof HandoffAdapterError && err.code === "not_published",
     );
   });
 
@@ -175,7 +175,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           options({ cardSet: { id: "set-1", status: "partial_ready", generationEpoch: 1 } }),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "NOT_PUBLISHED",
+        err instanceof HandoffAdapterError && err.code === "not_published",
     );
   });
 
@@ -196,7 +196,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           }),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "INVALID_CARD_SET_STATUS",
+        err instanceof HandoffAdapterError && err.code === "invalid_card_set_status",
     );
   });
 
@@ -211,7 +211,7 @@ describe("buildPublishedLearningAsset: required 缺失 fail closed", () => {
           options(),
         ),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "CARD_SET_MISMATCH",
+        err instanceof HandoffAdapterError && err.code === "card_set_mismatch",
     );
   });
 });
@@ -301,7 +301,7 @@ describe("forbidden 字段负向校验", () => {
         }),
       (err: unknown) =>
         err instanceof PublishedLearningAssetContractError &&
-        err.code === "FORBIDDEN_FIELDS_PRESENT",
+        err.code === "forbidden_fields_present",
     );
   });
 
@@ -440,7 +440,7 @@ describe("runHandoffIntegrationGate（Generation → Learning）", () => {
           forbiddenProbe: { harmless: true },
         }),
       (err: unknown) =>
-        err instanceof HandoffAdapterError && err.code === "HANDOFF_GATE_FAILED",
+        err instanceof HandoffAdapterError && err.code === "handoff_gate_failed",
     );
   });
 });

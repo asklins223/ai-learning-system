@@ -2,6 +2,7 @@
 
 import "@/app/styles/login.css";
 import { Suspense, useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "@/components/ThemeProvider";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
@@ -498,10 +499,10 @@ function RegisterPageContent() {
 
             <footer className="register-form-footer">
               <span>已有账号？</span>
-              <a href="/login" className="register-login-link">
+              <Link href="/login" className="register-login-link">
                 直接登录
                 <ArrowGlyph />
-              </a>
+              </Link>
             </footer>
           </div>
         </section>

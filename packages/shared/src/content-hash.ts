@@ -12,9 +12,53 @@ import { createHash } from "node:crypto";
 /** 裸 SHA-256 hex（内部工具；对外一律使用带前缀的 computeVoiceContentHash 等） */
 export function sha256Hex(value: string): string {
   const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(value, "utf8");
+  const hashUpdate = hash.update.bind(hash);
+  hashUpdate(value, "utf8");
   return hash.digest("hex");
+}
+
+/** 03 合同 §2.1：精确 UTF-8 bytes 的 SHA-256（小写 64 hex）。 */
+export function sha256Utf8V1(value: string): string {
+  return sha256Hex(value);
+}
+
+/**
+ * 03 合同 §2.1：canonical JSON（供 request_body_hash/create_body_hash/
+ * payload_sha256/contextRevision 等使用）。
+ * 规则：object key 按 Unicode code point 升序递归排序；array 保持顺序；
+ * string/boolean/null 用标准 JSON token；number 必须是 finite safe integer
+ * 且 -0 规范为 0；输出 UTF-8、无 BOM、无额外空白、末尾无换行。
+ */
+function canonicalizeValueV1(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeValueV1);
+  }
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const keys = Object.keys(source).sort((a, b) => {
+      // Unicode code point 升序（对非 BMP key 也稳定）
+      const aCode = a.codePointAt(0) ?? 0;
+      const bCode = b.codePointAt(0) ?? 0;
+      if (aCode !== bCode) return aCode - bCode;
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    const out: Record<string, unknown> = {};
+    for (const key of keys) {
+      out[key] = canonicalizeValueV1(source[key]);
+    }
+    return out;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || !Number.isSafeInteger(value)) {
+      throw new Error("canonicalJsonV1: number must be a finite safe integer");
+    }
+    return value === 0 ? 0 : value; // -0 → 0
+  }
+  return value;
+}
+
+export function canonicalJsonV1(value: unknown): string {
+  return JSON.stringify(canonicalizeValueV1(value));
 }
 
 /** voice canonical transcript 的确定性 hash（transcript 属于敏感学习数据，进导出/删除边界） */

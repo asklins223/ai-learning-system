@@ -1,5 +1,5 @@
 /**
- * Phase B/C：Agent 活动流 UI 契约（静态源码分析）。
+ * Phase B/C：Agent 活动流 UI 契约（静态源码分析 + 类型契约）。
  *
  * 红线（设计 §3.1）：
  * - 不暴露 raw conversation / chain-of-thought；活动流只展示
@@ -8,12 +8,25 @@
  *
  * 可访问性（§4.3/§6.4）：
  * - 活动流容器 role="log" + aria-live="polite"。
+ *
+ * 2026-08-11 测试质量修复：纯函数映射断言已移除（agent-event-text.test.ts
+ * 覆盖真实映射）；新增类型契约断言（组件 props 暴露 safePayload 时编译期失败）。
  */
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
+import type { GenerationOverlayProps } from "../../components/note-editor/GenerationOverlay";
+
+// 类型契约（编译期验证）：GenerationOverlay 不应暴露原始载荷 prop——
+// 红线破坏时（props 出现 safePayload/rawPayload/payload 键）OverlayRawKey
+// 非 never，_assertNoRawPayload 类型变 never，`= true` 赋值编译失败。
+// 注意不能写 `undefined as never`（never 可赋给任意类型，断言会永远通过）。
+type OverlayRawKey = Extract<keyof GenerationOverlayProps, "safePayload" | "rawPayload" | "payload">;
+type AssertNoRawPayloadKey = OverlayRawKey extends never ? true : never;
+const _assertNoRawPayloadKey: AssertNoRawPayloadKey = true;
+void _assertNoRawPayloadKey;
 
 const noteEditorDir = resolve(
   (import.meta.dirname ?? __dirname),
@@ -24,7 +37,6 @@ function readNoteEditorFile(name: string): string {
 }
 
 const streamSource = readNoteEditorFile("AgentStreamList.tsx");
-const mappingSource = readNoteEditorFile("agent-event-text.ts");
 const fabSource = readNoteEditorFile("GenerationProgressFab.tsx");
 const overlaySource = readNoteEditorFile("GenerationOverlay.tsx");
 
@@ -37,28 +49,11 @@ describe("红线：不渲染 raw safePayload 字符串值", () => {
   });
 
   it("活动流行文案来自 agentEventRowText 映射，不直接渲染 payload", () => {
-    assert.ok(
-      streamSource.includes("agentEventRowText"),
-      "AgentStreamRow 应使用事件→文案映射函数",
-    );
+    // 2026-08-11：纯函数映射断言已由 agent-event-text.test.ts 的真实实现
+    // 测试覆盖（含模板文案）；此处仅保留"组件不直接读 payload"红线。
     assert.ok(
       !streamSource.includes("event.safePayload"),
       "组件不应把 safePayload 直接渲染为文本",
-    );
-    // 行文案只来自映射结果 view.text。
-    assert.ok(streamSource.includes("view.text"), "行文案应来自 view.text");
-  });
-
-  it("映射函数不把 payload 字符串原样拼进文案", () => {
-    // 文案模板里只允许插值数字/已知枚举映射（template literal 中
-    // 不得出现对 args/result 等对象的直接字符串拼接）。
-    assert.ok(
-      mappingSource.includes('"委派「') || mappingSource.includes('委派「'),
-      "应有固定中文模板",
-    );
-    assert.ok(
-      !/\$\{[^}]*payload\.(args|result)\}/.test(mappingSource),
-      "模板插值不得直接取 payload.args / payload.result 的字符串值",
     );
   });
 });

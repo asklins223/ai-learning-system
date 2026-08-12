@@ -554,6 +554,14 @@ export interface VoiceArtifactRepository {
     userId: string,
     probeId: string,
   ): Promise<FrozenProbeRef | null>;
+  /** 取 episode 级事实（episodeTargetFingerprint / contentExposureKey）：
+   *  无来源路径的 artifact 必须用服务端 episode 值，不能写成空串导致
+   *  commit stale 判定与 FrozenProbe 匹配失真。 */
+  findEpisodeSummary(
+    workspaceId: string,
+    userId: string,
+    episodeId: string,
+  ): Promise<{ episodeTargetFingerprint: string; contentExposureKey: string } | null>;
   createArtifact(record: VoiceArtifactRecord): Promise<VoiceArtifactRecord>;
   /** CAS 写回：revision 必须等于 expectedRevision，否则抛 STALE_REVISION */
   updateArtifact(
@@ -929,6 +937,7 @@ export async function switchModality(
 
   // 有来源（手工编辑 ASR transcript）：supersede 来源 artifact 并继承其 probe 引用。
   let source: VoiceArtifactRecord | null = null;
+  let episodeSummary: { episodeTargetFingerprint: string; contentExposureKey: string } | null = null;
   if (input.sourceArtifactId !== undefined) {
     source = await requireArtifact(context, input.sourceArtifactId);
     if (source.probeId !== input.probeId) {
@@ -947,6 +956,13 @@ export async function switchModality(
       throw new VoiceServiceError("public scene hash 失配（stale）", "STALE_REVISION");
     }
     await requireFrozenProbe(context, source);
+  } else {
+    // 无来源路径：episode 级事实取自服务端 episode 行（不采信客户端值）。
+    episodeSummary = await context.repository.findEpisodeSummary(
+      context.workspaceId,
+      context.userId,
+      input.episodeId,
+    );
   }
 
   const artifact: VoiceArtifactRecord = {
@@ -976,8 +992,8 @@ export async function switchModality(
     supersedesArtifactId: source?.id ?? null,
     correctionMethod: "manual_text_edit",
     answerLockedAt: now.toISOString(),
-    episodeTargetFingerprint: source?.episodeTargetFingerprint ?? "",
-    contentExposureKey: source?.contentExposureKey ?? "",
+    episodeTargetFingerprint: source?.episodeTargetFingerprint ?? episodeSummary?.episodeTargetFingerprint ?? "",
+    contentExposureKey: source?.contentExposureKey ?? episodeSummary?.contentExposureKey ?? "",
     requestedTrustClass: TrustClass.MASTERY_ELIGIBLE,
     templateTrustCeiling: source?.templateTrustCeiling ?? frozenProbe.templateTrustCeiling,
     effectiveTrustClass: null,

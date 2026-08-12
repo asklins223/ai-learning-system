@@ -49,7 +49,7 @@ class InMemoryExposureRepository implements ExposureRepository {
   async lockProbeRow(_context: ExposureGuardContext, probeId: string): Promise<void> {
     this.lockOrder.push(`probe:${probeId}`);
     if (!this.probes.get(probeId)) {
-      throw new ExposureGuardError(`probe ${probeId} 不存在`, "INVALID_ARGUMENT");
+      throw new ExposureGuardError(`probe ${probeId} 不存在`, "invalid_argument");
     }
   }
 
@@ -85,7 +85,7 @@ class InMemoryExposureRepository implements ExposureRepository {
     if (!state || state.revision !== expectedRevision) {
       throw new ExposureGuardError(
         `revision CAS 失败：expected=${expectedRevision}`,
-        "STALE_REVISION",
+        "stale_revision",
       );
     }
     const next: LearningUnitExposureState = {
@@ -106,6 +106,18 @@ class InMemoryExposureRepository implements ExposureRepository {
     this.ledgerEdges.add(
       `${sourceContentExposureKey}::${affectedContentExposureKey}::${sharedEvidenceRef}`,
     );
+  }
+
+  async recordDependencies(
+    _workspaceId: string,
+    sourceContentExposureKey: string,
+    edges: ReadonlyArray<{ affectedContentExposureKey: string; sharedEvidenceRef: string }>,
+  ): Promise<void> {
+    for (const edge of edges) {
+      this.ledgerEdges.add(
+        `${sourceContentExposureKey}::${edge.affectedContentExposureKey}::${edge.sharedEvidenceRef}`,
+      );
+    }
   }
 
   async listAffectedKeys(_workspaceId: string, sourceContentExposureKey: string): Promise<string[]> {
@@ -235,7 +247,7 @@ describe("learningUnitGuard", () => {
     await assert.rejects(
       revealPath(guardContext(key, { baseRevision: 0, userActionNonce: "nonce-00000002" }), repo, { cooldownMs: 0 }),
       (error: unknown) =>
-        error instanceof ExposureGuardError && error.code === "STALE_REVISION",
+        error instanceof ExposureGuardError && error.code === "stale_revision",
     );
   });
 });

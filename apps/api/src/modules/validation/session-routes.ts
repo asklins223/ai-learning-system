@@ -146,7 +146,7 @@ export async function validationSessionRoutes(app: FastifyInstance) {
         req.session.workspaceId,
         req.session.userId,
       );
-      if (!item) return reply.code(404).send({ error: "not found" });
+      if (!item) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       reply.headers(NO_STORE);
       return item;
     } catch (error) {

@@ -21,6 +21,94 @@ type AccountInfo = {
   workspaceName: string;
 };
 
+interface DesktopPetApiShim {
+  getPetModeEnabled?: () => Promise<{ ok?: boolean; enabled?: boolean }>;
+  setPetModeEnabled?: (enabled: boolean) => Promise<{ ok?: boolean; enabled?: boolean }>;
+}
+
+/**
+ * 2026-08-12（Owner 需求）：头像二级菜单内的桌宠快捷开关。
+ * Electron 桌面应用显示（读/写 device-local petModeEnabled）；
+ * 浏览器无 desktopAPI → 不渲染（桌宠仅桌面可用）。
+ */
+function AccountPetModeToggle() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const desktopApi = typeof window !== "undefined"
+    ? (window as unknown as { desktopAPI?: DesktopPetApiShim }).desktopAPI
+    : undefined;
+
+  useEffect(() => {
+    if (!desktopApi?.getPetModeEnabled) {
+      // 浏览器/无桌面能力：显示 disabled 开关（不静默隐藏——Owner 要求菜单
+      // 里可见该入口，附"仅桌面应用可用"提示）。
+      setEnabled(false);
+      return;
+    }
+    let cancelled = false;
+    void desktopApi.getPetModeEnabled()
+      .then((result) => {
+        if (!cancelled && typeof result?.enabled === "boolean") setEnabled(result.enabled);
+      })
+      .catch(() => setEnabled(false));
+    return () => { cancelled = true; };
+  }, [desktopApi]);
+
+  if (!desktopApi?.setPetModeEnabled) {
+    // 浏览器降级：菜单项可见但不可操作
+    return (
+      <div className="account-menu-pet-item" role="menuitem" aria-disabled="true" title="仅桌面应用可用">
+        <span className="account-menu-pet-icon" aria-hidden="true">
+          <Icon.Sparkle />
+        </span>
+        <div>
+          <strong>桌宠伴星</strong>
+          <small>仅桌面应用可用</small>
+        </div>
+        <label className="account-menu-pet-switch" aria-label="桌宠开关">
+          <input type="checkbox" checked={false} disabled aria-label="桌宠开关" />
+          <i aria-hidden="true" />
+        </label>
+      </div>
+    );
+  }
+
+  if (enabled === null) return null;
+
+  const toggle = (): void => {
+    if (busy) return;
+    setBusy(true);
+    void desktopApi.setPetModeEnabled?.(!enabled)
+      .then((result) => {
+        if (typeof result?.enabled === "boolean") setEnabled(result.enabled);
+      })
+      .catch(() => {})
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="account-menu-pet-item" role="menuitem">
+      <span className="account-menu-pet-icon" aria-hidden="true">
+        <Icon.Sparkle />
+      </span>
+      <div>
+        <strong>桌宠伴星</strong>
+        <small>桌面角色与语音对话</small>
+      </div>
+      <label className="account-menu-pet-switch" aria-label="桌宠开关">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={() => toggle()}
+          disabled={busy}
+          aria-label="桌宠开关"
+        />
+        <i aria-hidden="true" />
+      </label>
+    </div>
+  );
+}
+
 export function AccountMenu({
   className = "",
   triggerClassName = "",
@@ -78,17 +166,24 @@ export function AccountMenu({
 
   useEffect(() => {
     let cancelled = false;
-    const loadAccount = () => api
-      .getMe()
-      .then((result) => {
-        if (cancelled) return;
-        setAccount(result);
-        setAvatarFailed(false);
-        setLoadFailed(false);
-      })
-      .catch(() => {
-        if (!cancelled) setLoadFailed(true);
-      });
+    // 2026-08-11：seq 守卫——IDENTITY_CHANGED_EVENT 快速连续触发时，旧慢响应
+    // 可能后到覆盖新数据（与 lib/use-current-user.ts 的 reloadSeqRef 同模式）。
+    let seq = 0;
+    const loadAccount = () => {
+      const requestSeq = seq + 1;
+      seq = requestSeq;
+      return api
+        .getMe()
+        .then((result) => {
+          if (cancelled || requestSeq !== seq) return;
+          setAccount(result);
+          setAvatarFailed(false);
+          setLoadFailed(false);
+        })
+        .catch(() => {
+          if (!cancelled && requestSeq === seq) setLoadFailed(true);
+        });
+    };
     void loadAccount();
     window.addEventListener(IDENTITY_CHANGED_EVENT, loadAccount);
     return () => {
@@ -132,8 +227,18 @@ export function AccountMenu({
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", updateMenuPosition);
-    window.addEventListener("scroll", updateMenuPosition, true);
+    // 2026-08-11（性能专项）：resize/scroll 用 rAF 合并——updateMenuPosition
+    // 内含 getBoundingClientRect + 多次 setState，高频滚动时逐事件执行开销大。
+    let rafHandle = 0;
+    const scheduleMenuPosition = () => {
+      if (rafHandle !== 0) return;
+      rafHandle = window.requestAnimationFrame(() => {
+        rafHandle = 0;
+        updateMenuPosition();
+      });
+    };
+    window.addEventListener("resize", scheduleMenuPosition);
+    window.addEventListener("scroll", scheduleMenuPosition, true);
     updateMenuPosition();
     window.requestAnimationFrame(() => {
       menuRef.current
@@ -142,11 +247,12 @@ export function AccountMenu({
     });
 
     return () => {
+      if (rafHandle !== 0) window.cancelAnimationFrame(rafHandle);
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", updateMenuPosition);
-      window.removeEventListener("scroll", updateMenuPosition, true);
+      window.removeEventListener("resize", scheduleMenuPosition);
+      window.removeEventListener("scroll", scheduleMenuPosition, true);
     };
   }, [open, updateMenuPosition]);
 
@@ -301,6 +407,7 @@ export function AccountMenu({
             </div>
 
             <div className="account-menu-items">
+              <AccountPetModeToggle />
               <Link href="/settings" role="menuitem">
                 <span>
                   <Icon.Settings aria-hidden="true" />

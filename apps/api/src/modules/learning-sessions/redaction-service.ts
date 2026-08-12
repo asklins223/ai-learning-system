@@ -84,7 +84,7 @@ export function assertValidArtifactTransition(from: ArtifactStatus, to: Artifact
   if (!allowed.includes(to)) {
     throw new RedactionServiceError(
       `非法状态转换 ${from} → ${to}（redacted 是 append-only 终态，不可恢复为 locked）`,
-      "INVALID_ARTIFACT_TRANSITION",
+      "invalid_artifact_transition",
     );
   }
 }
@@ -129,7 +129,7 @@ function assertValidReasonCode(reasonCode: string): void {
   }
   throw new RedactionServiceError(
     "删除原因必须为白名单枚举或 policy: 前缀格式",
-    "INVALID_REDACTION_REASON",
+    "invalid_redaction_reason",
   );
 }
 
@@ -181,29 +181,29 @@ export function applyRedaction(input: RedactArtifactInput): RedactionResult {
   if (input.status === "redacted") {
     throw new RedactionServiceError(
       "artifact 已是 redacted 终态，不能重复删除",
-      "ALREADY_REDACTED",
+      "already_redacted",
     );
   }
   if (input.status !== "locked") {
     throw new RedactionServiceError(
       `只有 locked artifact 可转为 redacted；当前状态 ${input.status}`,
-      "NOT_LOCKED",
+      "not_locked",
     );
   }
   if (!input.reasonCode || input.reasonCode.trim() === "") {
-    throw new RedactionServiceError("删除原因必须提供", "MISSING_REDACTION_REASON");
+    throw new RedactionServiceError("删除原因必须提供", "missing_redaction_reason");
   }
   assertValidReasonCode(input.reasonCode);
   if (!UUID_V4_RE.test(input.artifactId)) {
-    throw new RedactionServiceError("artifactId 必须为 UUID 格式", "INVALID_ARTIFACT_ID");
+    throw new RedactionServiceError("artifactId 必须为 UUID 格式", "invalid_artifact_id");
   }
   if (input.redactionId !== undefined && !UUID_V4_RE.test(input.redactionId)) {
-    throw new RedactionServiceError("redactionId 必须为 UUID 格式", "INVALID_REDACTION_ID");
+    throw new RedactionServiceError("redactionId 必须为 UUID 格式", "invalid_redaction_id");
   }
   if (input.deletionScope === "raw_audio") {
     throw new RedactionServiceError(
       "删除 raw audio 只结束声音复核能力，不把 artifact 转为 redacted（§13.2）",
-      "RAW_AUDIO_ONLY_NOT_REDACTION",
+      "raw_audio_only_not_redaction",
     );
   }
   const now = input.now ?? new Date().toISOString();
@@ -227,6 +227,7 @@ export function applyRedaction(input: RedactArtifactInput): RedactionResult {
 export type RedactionSurface =
   | "response_artifact"
   | "assessment"
+  | "assessment_report"
   | "critic_job_payload"
   | "tutor_job_payload"
   | "retry_payload"
@@ -239,8 +240,13 @@ export interface RedactionStep {
   readonly surface: RedactionSurface;
   /** 目标（表名 / 队列名 / cache namespace / 对象存储桶） */
   readonly target: string;
-  /** 清空字段：tombstone_marker = 固定 content-free 标记；null = 置 NULL */
-  readonly set: ReadonlyArray<{ field: string; value: "tombstone_marker" | "null" }>;
+  /** 清空字段：tombstone_marker = 固定 content-free 标记；null = 置 NULL；
+   *  jsonb_empty_array = 置 '[]'::jsonb（NOT NULL jsonb 数组字段专用，
+   *  如 learning_assessment_reports.rubric_assessments） */
+  readonly set: ReadonlyArray<{
+    field: string;
+    value: "tombstone_marker" | "null" | "jsonb_empty_array";
+  }>;
   /**
    * 匹配条件（参数化，security_review MEDIUM #3 修复）：
    * clause 为 SQL 条件模板（占位符 `?`），params 提供绑定值；
@@ -290,6 +296,17 @@ export function buildRedactionCascade(
           { field: "feedback", value: "null" },
         ],
         matcher: { clause: "artifactId = ?", params: [artifactId] },
+      },
+      {
+        // 支撑证据报告（learning_assessment_reports.rubricAssessments 的
+        // answerExcerpt 摘录）——置空数组保留结构，避免 NOT NULL 违规。
+        surface: "assessment_report",
+        target: "learning_assessment_reports",
+        set: [{ field: "rubric_assessments", value: "jsonb_empty_array" }],
+        matcher: {
+          clause: "episode_id IN (SELECT episode_id FROM learning_response_artifacts WHERE id = ?)",
+          params: [artifactId],
+        },
       },
       {
         surface: "critic_job_payload",
@@ -443,7 +460,7 @@ export function assertResidualFree(result: ResidualScanResult): void {
       .join("; ");
     throw new RedactionServiceError(
       `redaction 残留扫描未通过：${detail}`,
-      "RESIDUAL_FOUND",
+      "residual_found",
     );
   }
 }

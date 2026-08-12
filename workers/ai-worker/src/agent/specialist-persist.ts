@@ -15,12 +15,11 @@
 import { and, eq, inArray, max, notInArray, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import {
-  JobStatus,
-  JobType,
   sanitizeOperationalError,
   isTerminalUnitStatus,
   NON_TERMINAL_UNIT_STATUSES,
   TERMINAL_RUN_STATUSES,
+  SupervisorRunStatus,
   type DeckDraft,
   type DraftPatch,
   type QualityReport,
@@ -367,6 +366,11 @@ export async function persistExtractionResults(
     for (const b of assignedBundleRows) {
       bundleKeyToDbId.set(b.bundleKey, b.id);
     }
+    // O(1) 反向映射：member 行按 bundleId 反查 bundleKey，替代每行遍历全 map
+    const dbIdToBundleKey = new Map<string, string>();
+    for (const [key, dbId] of bundleKeyToDbId) {
+      dbIdToBundleKey.set(dbId, key);
+    }
     const assignedBundleDbIds = assignedBundleRows.map((b) => b.id);
     const allMemberRows = assignedBundleDbIds.length > 0
       ? await db
@@ -388,14 +392,8 @@ export async function persistExtractionResults(
     // 变量已在 if 块外声明，此处直接填充
 
     for (const m of allMemberRows) {
-      // 将 member 的 bundleId (DB UUID) 转换为 bundleKey
-      let bundleKey: string | null = null;
-      for (const [key, dbId] of bundleKeyToDbId) {
-        if (dbId === m.bundleId) {
-          bundleKey = key;
-          break;
-        }
-      }
+      // 将 member 的 bundleId (DB UUID) 转换为 bundleKey（O(1) 反查）
+      const bundleKey = dbIdToBundleKey.get(m.bundleId) ?? null;
       if (!bundleKey) continue;
 
       const isPrimary = m.membership === "primary";
@@ -721,6 +719,19 @@ export async function persistRepairPatches(
     : [];
 
   for (const patch of patches) {
+    // 2026-08-11：版本校验落地——patch.baseDraftHash 与当前 base draft 的
+    // contentHash 不一致时跳过（防止把基于旧 draft 的修改应用到新内容上，
+    // 覆盖并发产生的新修复）。
+    if (
+      patch.baseDraftHash &&
+      baseDraft.contentHash !== patch.baseDraftHash
+    ) {
+      logger.warn(
+        { runId, patchType: patch.type, expected: baseDraft.contentHash, got: patch.baseDraftHash },
+        "persistRepairPatches: patch 基于的 draft 版本与当前 base draft 不一致，跳过",
+      );
+      continue;
+    }
     const cardDraftId = patch.cardDraftId;
     const candidateId = patch.candidateId;
     // R70 修复：与 deck-draft.ts 的 handleApplyDraftPatch (R63 修复) 保持一致，
@@ -1087,33 +1098,23 @@ export async function resumeParentSupervisorIfNeeded(
     ? Number(parentCursor.turnNo ?? 0) + 1
     : 1;
 
-  await db.insert(schema.jobs).values({
-    type: JobType.EXECUTE_CARD_AGENT_TURN,
-    workspaceId,
-    requestedBy,
-    payload: {
-      generationRunId: childUnit.runId,
-      agentUnitId: childUnit.parentUnitId,
-      turnNo: parentTurnNo,
-      // 修复 E4（第5轮）：原代码使用 `turn:${parentTurnNo}:${childUnit.parentUnitId}` 字符串作为 inputHash，
-    // 不是 SHA-256 hash。计划 §5.2 要求 inputHash 是 turn 输入的 SHA-256 hash。
-    inputHash: createHash("sha256")
-      .update(JSON.stringify({
-        runId: childUnit.runId,
-        unitId: childUnit.parentUnitId,
-        turnNo: parentTurnNo,
-      }))
-      .digest("hex"),
-      userId: requestedBy,
-    },
-    status: JobStatus.PENDING,
-    generationRunId: childUnit.runId,
-    generationUnitId: childUnit.parentUnitId,
-    stage: "complete",
-    priority: 80,
-    resourceClass: "card_foreground",
-    idempotencyKey: `agent-turn:${childUnit.runId}:${childUnit.parentUnitId}:${parentTurnNo}`,
-  }).onConflictDoNothing();
+  // 跨 workspace 对账补投（jobs RLS 重开）：经 SECURITY DEFINER 函数入队
+  await db.execute(sql`
+    SELECT public.ailearn_enqueue_agent_turn_job(
+      ${workspaceId}, ${requestedBy}, ${childUnit.runId}, ${childUnit.parentUnitId},
+      ${parentTurnNo},
+      ${createHash("sha256")
+        .update(JSON.stringify({
+          runId: childUnit.runId,
+          unitId: childUnit.parentUnitId,
+          turnNo: parentTurnNo,
+        }))
+        .digest("hex")},
+      80, 'card_foreground',
+      ${`agent-turn:${childUnit.runId}:${childUnit.parentUnitId}:${parentTurnNo}`},
+      ${requestedBy}
+    )
+  `);
 
   // 更新 parent unit 的 scheduledAt
   await db
@@ -1206,17 +1207,13 @@ export async function reconcileStuckSupervisors(
       const stillRunning = children.filter((c) => !needsResumeStatuses.has(c.status));
       if (stillRunning.length > 0) continue;
 
-      // 检查是否已有 pending/running job
-      const [existingJob] = await db
-        .select({ id: schema.jobs.id })
-        .from(schema.jobs)
-        .where(and(
-          eq(schema.jobs.workspaceId, parent.workspaceId),
-          eq(schema.jobs.generationRunId, parent.runId),
-          eq(schema.jobs.generationUnitId, parent.id),
-          inArray(schema.jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
-        ))
-        .limit(1);
+      // 检查是否已有 pending/running job（跨 workspace 对账读经 SECURITY DEFINER 函数）
+      const existingRows = await db.execute<{ id: string }>(sql`
+        SELECT public.ailearn_find_active_turn_job(
+          ${parent.workspaceId}, ${parent.runId}, ${parent.id}
+        ) AS id
+      `) as unknown as Array<{ id: string }>;
+      const existingJob = existingRows[0]?.id ? { id: existingRows[0].id } : undefined;
 
       if (existingJob) continue; // 已有 job，跳过
 
@@ -1240,34 +1237,23 @@ export async function reconcileStuckSupervisors(
 
       if (!updated) continue; // CAS 失败，状态已变
 
-      await db.insert(schema.jobs).values({
-        type: JobType.EXECUTE_CARD_AGENT_TURN,
-        workspaceId: parent.workspaceId,
-        // 类型修复：requested_by 列是 uuid 类型且可空，传 "system-reconciler" 字符串
-        // 会抛 "invalid input syntax for type uuid"（此前 reconcile 每次补投都失败）。
-        // 系统对账任务无真实用户，传 null；payload.userId 是 jsonb 可保留标识字符串。
-        requestedBy: null,
-        payload: {
-          generationRunId: parent.runId,
-          agentUnitId: parent.id,
-          turnNo: parentTurnNo,
-          inputHash: createHash("sha256")
+      // 创建 resume job（jobs RLS 重开：跨 workspace 对账写经 SECURITY DEFINER 函数）
+      await db.execute(sql`
+        SELECT public.ailearn_enqueue_agent_turn_job(
+          ${parent.workspaceId}, NULL, ${parent.runId}, ${parent.id},
+          ${parentTurnNo},
+          ${createHash("sha256")
             .update(JSON.stringify({
               runId: parent.runId,
               unitId: parent.id,
               turnNo: parentTurnNo,
             }))
-            .digest("hex"),
-          userId: "system-reconciler",
-        },
-        status: JobStatus.PENDING,
-        generationRunId: parent.runId,
-        generationUnitId: parent.id,
-        stage: "complete",
-        priority: 80,
-        resourceClass: "card_foreground",
-        idempotencyKey: `agent-turn:${parent.runId}:${parent.id}:${parentTurnNo}`,
-      }).onConflictDoNothing();
+            .digest("hex")},
+          80, 'card_foreground',
+          ${`agent-turn:${parent.runId}:${parent.id}:${parentTurnNo}`},
+          'system-reconciler'
+        )
+      `);
 
       await db.update(schema.cardGenerationUnits)
         .set({ scheduledAt: now, updatedAt: now })
@@ -1286,7 +1272,12 @@ export async function reconcileStuckSupervisors(
     // ─── B. 终态 run 清理 ────────────────────────────────────────────
     //
     // 查找终态 run 下的非终态 unit，取消它们。
-    const terminalRunStatusList = TERMINAL_RUN_STATUSES as readonly string[];
+    // 与 reconciler.ts 的 DEAD_TERMINAL_RUN_STATUSES 语义一致：needs_attention
+    // 是"需注意/可恢复"状态，其下非终态 unit 不得被取消（否则 /retry 检查点
+    // 被静默删除，用户明确的重试意图丢失）。
+    const deadTerminalRunStatusList = TERMINAL_RUN_STATUSES.filter(
+      (s) => s !== SupervisorRunStatus.NEEDS_ATTENTION,
+    );
     const terminalRuns = await db
       .select({
         id: schema.cardGenerationRuns.id,
@@ -1298,7 +1289,7 @@ export async function reconcileStuckSupervisors(
         workspaceId
           ? eq(schema.cardGenerationRuns.workspaceId, workspaceId)
           : sql`TRUE`,
-        inArray(schema.cardGenerationRuns.status, [...terminalRunStatusList]),
+        inArray(schema.cardGenerationRuns.status, [...deadTerminalRunStatusList]),
       ));
 
     for (const run of terminalRuns) {

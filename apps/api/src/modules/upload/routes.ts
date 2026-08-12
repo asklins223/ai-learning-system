@@ -7,7 +7,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or } from "drizzle-orm";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { noteImageAssets, notes } from "../../db/schema/note.ts";
 import { users } from "../../db/schema/identity.ts";
@@ -20,6 +20,18 @@ import {
   deleteObject,
   isStorageConfigured,
 } from "../../lib/object-storage.ts";
+
+/**
+ * 2026-08-12（存储面审计）：区分“对象不存在/无权限”（折叠为 404，防
+ * 存在性 oracle）与“S3 服务端故障/网络错误”（503 + 日志，此前一律 404，
+ * MinIO 故障不可观测）。
+ */
+function isObjectMissingError(err: unknown): boolean {
+  const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+  // 仅 S3 明确返回 403/404（对象不存在或无权限）折叠为 404；
+  // 网络错误/超时等无 $metadata 的错误走 503 分支（可观测）。
+  return status === 403 || status === 404;
+}
 import {
   validateImageMagicBytes,
   ALLOWED_IMAGE_TYPES,
@@ -42,6 +54,11 @@ const DEFAULT_IMAGE_RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_IMAGE_RATE_LIMIT_MAX = 20;
 const DEFAULT_AVATAR_RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_AVATAR_RATE_LIMIT_MAX = 5;
+// 2026-08-12（存储面审计）：下载路由此前无限流——单请求峰值 50MB 内存
+// 读取，无并发上限时构成内存压力面。60/min per user（可配）足够正常
+// 多图笔记场景，同时限制异常拉取。
+const DEFAULT_DOWNLOAD_RATE_LIMIT_WINDOW_MS = 60_000;
+const DEFAULT_DOWNLOAD_RATE_LIMIT_MAX = 60;
 
 const defaultRateLimitStore = createRateLimitStoreFromEnv();
 
@@ -51,6 +68,8 @@ export interface UploadRoutesOptions {
   imageRateLimitMaxAttempts?: number;
   avatarRateLimitWindowMs?: number;
   avatarRateLimitMaxAttempts?: number;
+  downloadRateLimitWindowMs?: number;
+  downloadRateLimitMaxAttempts?: number;
 }
 
 function retryAfterSeconds(resetAt: number): number {
@@ -71,6 +90,10 @@ export async function uploadRoutes(
     windowMs: options.avatarRateLimitWindowMs ?? DEFAULT_AVATAR_RATE_LIMIT_WINDOW_MS,
     maxAttempts: options.avatarRateLimitMaxAttempts ?? DEFAULT_AVATAR_RATE_LIMIT_MAX,
   });
+  const downloadLimiter = new RateLimiter(options.rateLimitStore ?? defaultRateLimitStore, {
+    windowMs: options.downloadRateLimitWindowMs ?? DEFAULT_DOWNLOAD_RATE_LIMIT_WINDOW_MS,
+    maxAttempts: options.downloadRateLimitMaxAttempts ?? DEFAULT_DOWNLOAD_RATE_LIMIT_MAX,
+  });
 
   // ─── POST /uploads/images — 笔记图片上传 ───────────────────────
   // RBAC: 仅 owner 可上传笔记图片（笔记增删改属于 owner 权限）
@@ -79,7 +102,7 @@ export async function uploadRoutes(
     const imageDecision = await imageLimiter.consume(`upload:image:user:${req.session.userId}`);
     if (!imageDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(imageDecision.resetAt));
-      return reply.code(429).send({ error: "Too many image uploads. Please try again later." });
+      return reply.code(429).send({ error: "rate_limited", message: "上传过于频繁，请稍后重试" });
     }
 
     // CSRF check for cookie-authenticated requests
@@ -224,7 +247,7 @@ export async function uploadRoutes(
     const avatarDecision = await avatarLimiter.consume(`upload:avatar:user:${req.session.userId}`);
     if (!avatarDecision.allowed) {
       reply.header("Retry-After", retryAfterSeconds(avatarDecision.resetAt));
-      return reply.code(429).send({ error: "Too many avatar uploads. Please try again later." });
+      return reply.code(429).send({ error: "rate_limited", message: "上传过于频繁，请稍后重试" });
     }
 
     const credential = getRequestCredential(req);
@@ -295,10 +318,20 @@ export async function uploadRoutes(
 
     // 更新 users.avatarUrl
     const url = `/api/uploads/${objectKey}`;
-    await db
-      .update(users)
-      .set({ avatarUrl: url, updatedAt: new Date() })
-      .where(eq(users.id, req.session.userId));
+    try {
+      await db
+        .update(users)
+        .set({ avatarUrl: url, updatedAt: new Date() })
+        .where(eq(users.id, req.session.userId));
+    } catch (err) {
+      // 2026-08-12（存储面审计）：DB 更新失败时回收已上传的新头像对象，
+      // 否则成为永久孤儿（头像无 DB 登记表，无其他回收路径）。
+      deleteObject(objectKey).catch((cleanupError) => {
+        logger.warn({ cleanupError, objectKey }, "failed to clean up orphan avatar after DB update failure");
+      });
+      logger.error({ err, objectKey }, "failed to persist avatarUrl");
+      return reply.code(503).send({ error: "failed to persist avatar" });
+    }
 
     // 异步清理旧头像存储对象（不阻塞响应）
     if (oldAvatarUrl) {
@@ -320,33 +353,64 @@ export async function uploadRoutes(
 
   // ─── GET /uploads/* — 图片下载（租户/用户隔离） ────────────────
   app.get("/uploads/*", async (req, reply) => {
+    // 2026-08-12（存储面审计）：下载限流（60/min per user，防并发大 buffer 内存压力）
+    const downloadDecision = await downloadLimiter.consume(`upload:download:user:${req.session.userId}`);
+    if (!downloadDecision.allowed) {
+      reply.header("Retry-After", retryAfterSeconds(downloadDecision.resetAt));
+      return reply.code(429).send({ error: "rate_limited", message: "下载过于频繁，请稍后重试" });
+    }
     const path = (req.params as { "*": string })["*"];
-    if (!path) return reply.code(404).send({ error: "not found" });
+    if (!path) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
 
     // SEC-21 修复：拒绝包含路径遍历字符的请求，防止跨 workspace 文件访问
     if (path.includes("..") || path.includes("\\")) {
-      return reply.code(404).send({ error: "not found" });
+      return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     }
 
     // Validate path format and enforce tenant isolation
+    // 归属不匹配一律 404（不暴露资源存在性，避免 403 oracle）
     if (path.startsWith("avatars/")) {
       // Avatar path: avatars/{userId}/{uuid}.{ext}
       const parts = path.split("/");
-      if (parts.length < 3) return reply.code(404).send({ error: "not found" });
+      if (parts.length < 3) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       const pathUserId = parts[1];
       if (pathUserId !== req.session.userId) {
-        return reply.code(403).send({ error: "forbidden" });
+        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       }
     } else {
       // Note/source image path: {workspaceId}/notes/{noteId}/{uuid}.{ext}
       //   or: {workspaceId}/sources/{sourceId}/{uuid}.{ext}
       const parts = path.split("/");
       if (parts.length < 4 || (parts[1] !== "notes" && parts[1] !== "sources")) {
-        return reply.code(404).send({ error: "not found" });
+        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       }
       const pathWorkspaceId = parts[0];
       if (pathWorkspaceId !== req.session.workspaceId) {
-        return reply.code(403).send({ error: "forbidden" });
+        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+      }
+      // 登记校验：对象必须在 noteImageAssets 中登记，且所属笔记存在且未软删。
+      // 防止软删/物理删笔记的图片、以及从未登记的孤儿对象仍可被直连下载。
+      const assetRow = await db.query.noteImageAssets.findFirst({
+        where: and(
+          eq(noteImageAssets.workspaceId, parts[0]),
+          or(
+            eq(noteImageAssets.objectKey, path),
+            and(isNotNull(noteImageAssets.normalizedObjectKey), eq(noteImageAssets.normalizedObjectKey, path)),
+            and(isNotNull(noteImageAssets.thumbnailObjectKey), eq(noteImageAssets.thumbnailObjectKey, path)),
+          ),
+        ),
+      });
+      if (!assetRow) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+      if (parts[1] === "notes") {
+        // 笔记物理删除后 uploadedForNoteId 已置 NULL；软删除需显式排除
+        if (!assetRow.uploadedForNoteId) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+        const note = await db.query.notes.findFirst({
+          where: and(
+            eq(notes.id, assetRow.uploadedForNoteId),
+            isNull(notes.deletedAt),
+          ),
+        });
+        if (!note) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       }
     }
 
@@ -359,11 +423,13 @@ export async function uploadRoutes(
       let headResult;
       try {
         headResult = await headObject(path);
-      } catch {
-        return reply.code(404).send({ error: "not found" });
+      } catch (err) {
+        // 2026-08-12：S3 故障/网络错误 → 503（对象不存在已被 headObject 折叠为 null）
+        logger.error({ err, path }, "headObject failed in upload download route");
+        return reply.code(503).send({ error: "storage unavailable" });
       }
       if (!headResult) {
-        return reply.code(404).send({ error: "not found" });
+        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       }
 
       // RFC 7232: If-None-Match can be "*" (match any existing resource)
@@ -387,8 +453,13 @@ export async function uploadRoutes(
     let downloadResult;
     try {
       downloadResult = await getObject(path);
-    } catch {
-      return reply.code(404).send({ error: "not found" });
+    } catch (err) {
+      // 2026-08-12：对象缺失/无权限 → 404（防 oracle）；S3 故障/网络 → 503
+      if (isObjectMissingError(err)) {
+        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+      }
+      logger.error({ err, path }, "getObject failed in upload download route");
+      return reply.code(503).send({ error: "storage unavailable" });
     }
 
     // Set response headers

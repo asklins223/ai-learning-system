@@ -18,3 +18,8 @@
 **/.DS_Store
 **/npm-debug.log*
 **/yarn-error.log*
+# 2026-08-12（构建面审计 P2-6）：排除与镜像无关的大目录（实测
+# reference-projects 1.2G / outputs 530M）。注意：workers/、tests/ 被
+# worker/api 镜像的根 context 引用，**不可**排除。
+**/reference-projects
+**/outputs

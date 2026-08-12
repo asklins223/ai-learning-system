@@ -35,6 +35,8 @@ const DEFAULT_TIMEOUTS: Record<string, number> = {
   // 需要比普通单次 LLM 调用更长的超时时间。
   // 110_000 = LEASE_TIMEOUT_MS(120s) - 10s safety margin，是 clamp 后的最大值。
   execute_card_agent_turn: 110_000,
+  // P2 companion dialogue：单次 text_generation 调用 + 确定性落库，60s 足够。
+  companion_dialogue: 60_000,
 };
 
 const GLOBAL_DEFAULT_MS = 90_000;

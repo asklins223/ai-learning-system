@@ -26,10 +26,7 @@ const noteEditorStyles = readFileSync(
   resolve(WEB_ROOT, "app/styles/note-editor.css"),
   "utf8",
 );
-const routeLoadingSource = readFileSync(
-  resolve(WEB_ROOT, "components/layout/WorkspaceRouteLoading.tsx"),
-  "utf8",
-);
+const globalsSource = readFileSync(resolve(WEB_ROOT, "app/globals.css"), "utf8");
 
 describe("desktop window adaptation contract", () => {
   it("keeps native macOS controls without a separate native title strip", () => {
@@ -75,8 +72,10 @@ describe("desktop window adaptation contract", () => {
       layoutStyles,
       /\.skip-link\s*\{[\s\S]*?window-titlebar-safe-left[\s\S]*?-webkit-app-region:\s*no-drag/,
     );
-    assert.ok(routeLoadingSource.includes("var(--window-titlebar-safe-left)"));
-    assert.ok(routeLoadingSource.includes("var(--window-titlebar-safe-right)"));
+    // 2026-08-12 同步：WorkspaceRouteLoading 内联 <style> 已迁移至 globals.css
+    //（样式迁移专项），titlebar-safe 变量消费随之移动——断言迁移后的宿主。
+    assert.ok(globalsSource.includes("var(--window-titlebar-safe-left)"));
+    assert.ok(globalsSource.includes("var(--window-titlebar-safe-right)"));
   });
 
   it("does not force viewport-locked pages into document overflow", () => {

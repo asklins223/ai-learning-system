@@ -1,0 +1,98 @@
+name: Desktop platform build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "apps/web/**"
+      - "packages/shared/**"
+      - "package-lock.json"
+      - "apps/*/package-lock.json"
+      - ".github/workflows/desktop-platform.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-platform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.5
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/web/package-lock.json
+      - name: Install desktop and web dependencies
+        run: |
+          npm ci --prefix apps/desktop
+          npm ci --prefix apps/web
+      - name: Build Linux AppImage and deb
+        run: npm run dist:linux --prefix apps/desktop
+      - name: Launch packaged app under X11 smoke display
+        env:
+          AILEARN_DESKTOP_PET_SPIKE: "true"
+          AILEARN_SOAK_LOG_PATH: ${{ runner.temp }}/ailearn-linux-soak.jsonl
+          AILEARN_SOAK_INTERVAL_MS: "1000"
+        run: |
+          app_bin="$(find apps/desktop/release/linux-unpacked -maxdepth 1 -type f -executable -name 'AI Learn*' -print -quit)"
+          test -n "$app_bin"
+          set +e
+          timeout 30s xvfb-run --auto-servernum --server-args='-screen 0 1440x900x24' "$app_bin" --no-sandbox
+          status=$?
+          set -e
+          test "$status" -eq 124
+          test -s "$AILEARN_SOAK_LOG_PATH"
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ailearn-desktop-linux
+          path: apps/desktop/release/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.5
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/web/package-lock.json
+      - name: Install desktop and web dependencies
+        run: |
+          npm ci --prefix apps/desktop
+          npm ci --prefix apps/web
+      - name: Build Windows NSIS and portable artifacts
+        run: npm run dist:win --prefix apps/desktop
+      - name: Launch packaged Windows app smoke
+        shell: pwsh
+        env:
+          AILEARN_DESKTOP_PET_SPIKE: "true"
+        run: |
+          $app = Get-ChildItem -Path apps/desktop/release/win-unpacked -Filter "AI Learn.exe" -Recurse | Select-Object -First 1
+          if ($null -eq $app) { throw "Packaged AI Learn.exe not found" }
+          $process = Start-Process -FilePath $app.FullName -ArgumentList "--no-sandbox" -PassThru
+          try {
+            Start-Sleep -Seconds 20
+            if ($process.HasExited) { throw "Packaged app exited early with code $($process.ExitCode)" }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ailearn-desktop-windows
+          path: apps/desktop/release/*
+          if-no-files-found: error

@@ -267,7 +267,9 @@ export async function executePreparePhase(
     workspaceId: job.workspaceId,
     noteVersionId: runContext.noteVersionId,
     noteTitle: runDetail.titleSnapshot ?? "",
-    density: ((runDetail as Record<string, unknown>).density ?? "standard") as "overview" | "standard" | "complete",
+    // density 从 prepare unit 的 inputManifest 读取（requestDensity，105-116 行），
+    // 不再用 runs 表不存在的 density 列（恒 "standard" 的旧逻辑）。
+    density: requestDensity,
     blocks: blocks.map((b) => ({
       id: b.id,
       ordinal: b.ordinal,

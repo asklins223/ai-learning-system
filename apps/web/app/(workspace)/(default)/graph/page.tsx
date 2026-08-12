@@ -51,8 +51,11 @@ const NODE_TYPE_SHORT: Record<GraphNode["type"], string> = {
   key_point: "论点",
 };
 
-const RELATION_LABEL: Record<GraphEdge["type"], { incoming: string; outgoing: string }> = {
-  derived_from: { incoming: "提炼自", outgoing: "提炼为" },
+// 模块级共享空数组（稳定引用）：避免每渲染新建字面量使子组件 useMemo 失效。
+const EMPTY_EDGES: GraphEdge[] = [];
+const EMPTY_IDS: string[] = [];
+
+const RELATION_LABEL: Record<GraphEdge["type"], { incoming: string; outgoing: string }> = {  derived_from: { incoming: "提炼自", outgoing: "提炼为" },
   generated_from: { incoming: "生成自", outgoing: "生成学习卡" },
   contains: { incoming: "隶属于", outgoing: "包含论点" },
 };
@@ -121,6 +124,13 @@ export default function UnderstandingGraphPage() {
   const detailReturnFocusRef = useRef<HTMLElement | null>(null);
   const detailWasOpenRef = useRef(false);
   const searchSessionActiveRef = useRef(false);
+  // 全局 keydown 只挂载一次，通过渲染期同步的 ref 读取最新值
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const searchOpenRef = useRef(searchOpen);
+  searchOpenRef.current = searchOpen;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
 
   const loadGraph = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -148,10 +158,12 @@ export default function UnderstandingGraphPage() {
   }, [loadGraph]);
 
   useEffect(() => {
+    // 2026-08-11 修复：此前依赖 [query, searchOpen, selectedId] —— 输入每字符
+    // 重绑全局 keydown 监听。改为 ref 读取，effect 只挂载一次。
     function handleEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        if (searchOpen) setSearchOpen(false);
-        else if (selectedId) setSelectedId(null);
+        if (searchOpenRef.current) setSearchOpen(false);
+        else if (selectedIdRef.current) setSelectedId(null);
         return;
       }
 
@@ -163,7 +175,7 @@ export default function UnderstandingGraphPage() {
       if (event.key === "/") {
         event.preventDefault();
         searchInputRef.current?.focus();
-        setSearchOpen(Boolean(query.trim()));
+        setSearchOpen(Boolean(queryRef.current.trim()));
       } else if (event.key.toLocaleLowerCase("en-US") === "f") {
         event.preventDefault();
         universeRef.current?.fit();
@@ -171,7 +183,7 @@ export default function UnderstandingGraphPage() {
     }
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [query, searchOpen, selectedId]);
+  }, []);
 
   useEffect(() => {
     function handleOutsidePointer(event: PointerEvent) {
@@ -396,12 +408,19 @@ export default function UnderstandingGraphPage() {
   const cardCount = graph?.meta.cardCount ?? 0;
   const keyPointCount = graph?.meta.keyPointCount ?? 0;
   const edgeCount = graph?.meta.edgeCount ?? 0;
-  const renderedEdges = showLinks ? visibleGraph.edges : [];
+  // 模块级共享空数组：`?? []`/`[]` 字面量会每渲染新建数组，
+  // 使 UnderstandingUniverse 内部 useMemo（依赖数组引用）每渲染失效 →
+  // invalidateScene → 整图重绘。改用稳定引用。
+  const renderedEdges = useMemo(
+    () => (showLinks ? visibleGraph.edges : EMPTY_EDGES),
+    [showLinks, visibleGraph.edges],
+  );
+  const highlightedNodeIds = selectedPath?.nodeIds ?? EMPTY_IDS;
+  const highlightedEdgeIds = selectedPath?.edgeIds ?? EMPTY_IDS;
   const selectedCoverage = selectedNode?.evidenceCoverage ?? null;
   const evidenceStyle = {
     "--evidence-value": `${Math.round((selectedCoverage ?? 0) * 100)}%`,
   } as CSSProperties;
-
   return (
     <div
       className="universe-page"
@@ -415,8 +434,8 @@ export default function UnderstandingGraphPage() {
         edges={renderedEdges}
         positions={universeLayout.positions}
         selectedId={selectedId}
-        highlightedNodeIds={selectedPath?.nodeIds ?? []}
-        highlightedEdgeIds={selectedPath?.edgeIds ?? []}
+        highlightedNodeIds={highlightedNodeIds}
+        highlightedEdgeIds={highlightedEdgeIds}
         onSelect={selectNode}
         title="理解星图：你的真实知识宇宙"
       />
@@ -739,7 +758,9 @@ export default function UnderstandingGraphPage() {
                 <Icon.Target aria-hidden="true" /> 聚焦星体
               </button>
               {selectedNode.href && (
-                <Link href={selectedNode.href}>
+                <Link
+                  href={selectedNode.href}
+                >
                   打开{NODE_TYPE_SHORT[selectedNode.type]} <Icon.Arrow aria-hidden="true" />
                 </Link>
               )}

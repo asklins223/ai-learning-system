@@ -100,7 +100,7 @@ describe("默认推荐（§9）", () => {
     assert.ok(rec.includes("到期"));
     assert.ok(rec.includes("kp-a"));
     assert.ok(rec.includes("分钟"));
-    assert.ok(!rec.includes("fsrs") && !rec.includes("FSRS"));
+    assert.ok(!rec.includes("fsrs") && !rec.includes("fsrs"));
   });
 
   it("无可用候选 → 不推荐，文案不施加压力", () => {

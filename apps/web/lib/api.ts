@@ -199,6 +199,21 @@ import {
   splitMarkdownImportBatches,
   MARKDOWN_IMPORT_ROUTE_BYTES,
 } from "./api-types";
+import type {
+  CompanionOverview,
+  CompanionOnboardingTransitionResponse,
+  CreateLearningSessionInput,
+  LearningAnswerResult,
+  LearningAssessmentResult,
+  LearningSessionPublicView,
+  LearningTutorDetour,
+  LearningTutorTurnResult,
+} from "@/features/companion/api/contracts";
+import type {
+  AuthSurfaceManifestV1,
+  CompanionGroundedTutorGrantV1,
+  CompanionLearningSessionContextV1,
+} from "@ailearn/shared";
 
 // R-012: 浏览器端默认使用同源 /api（由 next.config.mjs rewrite 代理到 API 服务器），
 // 不再依赖 NEXT_PUBLIC_API_URL 指向 localhost，避免远程访问时请求访问者本机。
@@ -429,6 +444,9 @@ function uploadWithProgress(
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const result = JSON.parse(xhr.responseText) as UploadResult;
+          // 2026-08-12（数据面审计 P3）：上传直连 fetch/XHR 绕过 request()，
+          // 成功必须显式失效缓存——否则 /notes/{id} 等 GET 30s 内命中旧数据。
+          invalidateRequestGetCache();
           finish(() => resolve(result));
         } catch {
           finish(() => reject(new ApiError(xhr.status, xhr.responseText || "解析响应失败")));
@@ -482,6 +500,70 @@ function parseApiError(status: number, statusText: string, text: string): ApiErr
   return new ApiError(status, `API ${status}: ${text || statusText}`);
 }
 
+// 2026-08-11（性能专项）：GET 短 TTL 内存缓存——全站除 getMe 外无请求缓存，
+// 首页/today/cards 等反复拉同一接口。30s TTL，写操作（POST/PUT/PATCH/DELETE，
+// 含 204）全量失效；缓存返回对象引用（调用方只读消费，不做原地修改）。
+// 测试守卫（2026-08-12）：node --test 下 NODE_ENV 为 undefined（浏览器端
+// 由 Next 注入 development/production）→ 禁用缓存，否则同 URL 的多次 mock
+// 断言会跨用例命中缓存（v06-api-client/M4 泄漏检测回归）。
+// SSR 守卫（2026-08-12 review）：与 getMeCached 同款——Next SSR 模块实例
+// 跨请求复用（非"每请求独立实例"），服务端必须禁用，否则 30s TTL 内
+// 不同用户的同 URL 请求会命中同一缓存（跨用户数据泄漏面）。
+const REQUEST_CACHE_TTL_MS = 30_000;
+// 2026-08-12（数据面审计 P1-1/P2-3）：条目上限 + 过期清理——纯浏览长会话
+// 下 Map 只增不减（每条目持有 MB 级响应引用）。写入时先清过期，超限删最旧。
+const REQUEST_CACHE_MAX_ENTRIES = 200;
+const requestGetCache = new Map<string, { at: number; data: unknown }>();
+const requestCacheEnabled =
+  isBrowser
+  && process.env.NODE_ENV !== "test"
+  && process.env.NODE_ENV !== undefined;
+
+// 2026-08-12（数据面审计 P1-1）：跨标签页失效广播。缓存键无用户/工作区维度
+// （getToken 恒 null），失效只作用于发起请求的标签页模块实例——用户 Tab A
+// 切工作区后 Tab B 30s 内命中旧工作区缓存（真实数据隔离缺陷）。写操作时
+// 写 localStorage 时间戳，其它标签页经 storage 事件 clear（发起页已本地 clear）。
+const CACHE_BUST_STORAGE_KEY = "ailearn.request-cache-bust";
+let cacheBustListenerAttached = false;
+
+function attachCacheBustListener(): void {
+  if (cacheBustListenerAttached || typeof window === "undefined") return;
+  cacheBustListenerAttached = true;
+  window.addEventListener("storage", (event) => {
+    if (event.key === CACHE_BUST_STORAGE_KEY) requestGetCache.clear();
+  });
+}
+
+// 2026-08-12 review：模块加载时立即附加（浏览器端）——此前只在写操作
+// 发生时才 attach，纯读标签页收不到其它标签页的失效广播（跨标签页隔离
+// 缺陷在只读页场景依然存在）。node 下 typeof window 守卫直接跳过。
+attachCacheBustListener();
+
+function invalidateRequestGetCache(): void {
+  if (!isBrowser) return;
+  requestGetCache.clear();
+  attachCacheBustListener();
+  try {
+    // storage 事件不在发起页触发（本页已 clear），仅用于其它标签页
+    localStorage.setItem(CACHE_BUST_STORAGE_KEY, String(Date.now()));
+  } catch {
+    // 隐私模式/存储不可用——降级为仅本页失效
+  }
+}
+
+function cacheSetGet(cacheKey: string, at: number, data: unknown): void {
+  const now = Date.now();
+  for (const [key, entry] of requestGetCache) {
+    if (now - entry.at >= REQUEST_CACHE_TTL_MS) requestGetCache.delete(key);
+  }
+  requestGetCache.set(cacheKey, { at, data });
+  while (requestGetCache.size > REQUEST_CACHE_MAX_ENTRIES) {
+    const oldest = requestGetCache.keys().next().value;
+    if (oldest === undefined) break;
+    requestGetCache.delete(oldest);
+  }
+}
+
 async function requestResponse(path: string, init: RequestInit = {}): Promise<Response> {
   const requestGeneration = getMeCacheGeneration;
   const headers = new Headers(init.headers);
@@ -507,6 +589,26 @@ async function requestResponse(path: string, init: RequestInit = {}): Promise<Re
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const method = (init.method ?? "GET").toUpperCase();
+  // 2026-08-11（性能专项）：GET 短 TTL 缓存（30s）——命中直接返回，减少
+  // 跨页面重复请求；写操作（含 204）全量失效。
+  const cacheKey = `${method} ${path}`;
+  if (method === "GET" && requestCacheEnabled) {
+    const hit = requestGetCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < REQUEST_CACHE_TTL_MS) {
+      // 2026-08-12（数据面审计 P3）：命中缓存时调用方已 abort 则抛错
+      // （组件卸载后缓存命中会 resolve，多数有 mounted/seq 守卫兜底，
+      // 但显式 abort 语义应保持一致）。
+      if (init.signal?.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      return hit.data as T;
+    }
+  } else {
+    // 2026-08-11（review 修复）：失效必须在 204 提前返回之前——否则
+    // logout/DELETE 等 204 写操作绕过失效，缓存命中旧数据（跨会话泄漏）。
+    invalidateRequestGetCache();
+  }
   const res = await requestResponse(path, init);
   if (res.status === 204) {
     // fetch() resolves when response headers arrive. Drain the empty response
@@ -516,6 +618,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return undefined as T;
   }
   const data = await res.json() as T;
+  if (method === "GET" && requestCacheEnabled) {
+    cacheSetGet(cacheKey, Date.now(), data);
+  }
   // 登录/注册/切换工作区等端点在响应体中返回 csrfToken。当 Next.js
   // rewrite 代理丢弃了后端的 Set-Cookie: ailearn_csrf 时，前端需要
   // 从响应体兜底设置 cookie，否则后续 PUT/POST/DELETE 会因缺少
@@ -632,12 +737,140 @@ async function importMarkdownInBatches(
 /* ------------------------------------------------------------------ */
 
 export const api = {
+  /* companion reconstruction / learning session v2 */
+  getPublicAuthSurfaceManifest: () =>
+    request<{ manifest: AuthSurfaceManifestV1; testMode: boolean }>(
+      "/public/auth-surface-manifest",
+    ),
+  getCompanionOverview: (signal?: AbortSignal) =>
+    request<CompanionOverview>("/me/companion", { signal }),
+  updateCompanionAccount: (input: {
+    revision: number;
+    globalEnabled?: boolean;
+    presence?: { presence: "online" | "dnd" | "offline"; updatedAt?: string };
+    animationOff?: boolean;
+    voiceOff?: boolean;
+  }) =>
+    request<CompanionOverview["account"]>("/me/companion", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  transitionCompanionOnboarding: (
+    version: string,
+    input: { action: "start" | "skip" | "replay"; revision?: number },
+  ) =>
+    request<CompanionOnboardingTransitionResponse>(
+      `/me/companion/onboarding/${encodeURIComponent(version)}/transition`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  // 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；Owner 决策 4）。
+  getAnswerModePreference: (signal?: AbortSignal) =>
+    request<{ version: 1; preference: "voice" | "silent" | "text" | "any"; updatedAt: string | null }>(
+      "/me/companion/answer-mode-preference",
+      { signal },
+    ),
+  setAnswerModePreference: (preference: "voice" | "silent" | "text" | "any") =>
+    request<{ version: 1; preference: "voice" | "silent" | "text" | "any"; updatedAt: string }>(
+      "/me/companion/answer-mode-preference",
+      { method: "PATCH", body: JSON.stringify({ version: 1, preference }) },
+    ),
+  createLearningSession: (input: CreateLearningSessionInput, signal?: AbortSignal) =>
+    request<LearningSessionPublicView>("/learning-sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        origin: input.origin,
+        entry: { kind: "key_point", keyPointId: input.keyPointId },
+        intent: input.intent ?? "stabilize",
+      }),
+      signal,
+    }),
+  getLearningSession: (sessionId: string, signal?: AbortSignal) =>
+    request<LearningSessionPublicView>(`/learning-sessions/${sessionId}`, { signal }),
+  getCompanionLearningSessionContext: (sessionId: string, episodeId?: string, signal?: AbortSignal) =>
+    request<CompanionLearningSessionContextV1>(
+      `/learning-sessions/${sessionId}/companion-context${episodeId ? `?episodeId=${encodeURIComponent(episodeId)}` : ""}`,
+      { signal },
+    ),
+  createCompanionContextGrant: (
+    sessionId: string,
+    input: { version: 1; pageInstanceId: string; episodeId: string; contextRevision: string },
+    signal?: AbortSignal,
+  ) =>
+    request<CompanionGroundedTutorGrantV1>(
+      `/learning-sessions/${sessionId}/companion-context-grants`,
+      { method: "POST", body: JSON.stringify(input), signal },
+    ),
+  submitLearningAnswer: (
+    sessionId: string,
+    episodeId: string,
+    input: { modality: "text_or_mixed" | "voice"; text: string },
+    signal?: AbortSignal,
+  ) =>
+    request<LearningAnswerResult>(
+      `/learning-sessions/${sessionId}/episodes/${episodeId}/answer`,
+      { method: "POST", body: JSON.stringify(input), signal },
+    ),
+  assessLearningEpisode: (sessionId: string, episodeId: string, artifactId: string, signal?: AbortSignal) =>
+    request<LearningAssessmentResult>(
+      `/learning-sessions/${sessionId}/episodes/${episodeId}/assess`,
+      { method: "POST", body: JSON.stringify({ artifactId }), signal },
+    ),
+  endLearningSession: (sessionId: string, signal?: AbortSignal) =>
+    request<LearningSessionPublicView>(`/learning-sessions/${sessionId}/end`, { method: "POST", signal }),
+  issueTutorPermissionNonce: (sessionId: string, episodeId: string, targetId: string) =>
+    request<{ userActionNonce: string; expiresAt: string }>(
+      `/learning-sessions/${sessionId}/episodes/${episodeId}/tutor-permission-nonce`,
+      { method: "POST", body: JSON.stringify({ targetId }) },
+    ),
+  createTutorDetour: (
+    sessionId: string,
+    episodeId: string,
+    input: {
+      targetId: string;
+      questionId?: string;
+      contentExposureKey?: string;
+      userActionNonce?: string;
+      deviceSessionId?: string;
+      deviceSurfaceEpoch?: number;
+    },
+  ) =>
+    request<{
+      detour: LearningTutorDetour;
+      switchedFromTrustedToPractice: boolean;
+      foregroundBefore: "together" | "let_me_try" | "free_explore";
+    }>(
+      `/learning-sessions/${sessionId}/episodes/${episodeId}/tutor-detour`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  submitTutorTurn: (sessionId: string, detourId: string, question: string) =>
+    request<LearningTutorTurnResult>(
+      `/learning-sessions/${sessionId}/tutor-detours/${detourId}/turn`,
+      { method: "POST", body: JSON.stringify({ question }) },
+    ),
+  endTutorDetour: (
+    sessionId: string,
+    detourId: string,
+    input: {
+      endReason: "return_to_origin" | "end_session";
+      saveQuestionMarker?: boolean;
+      shouldFlag?: boolean;
+    },
+  ) =>
+    request<{ detour: LearningTutorDetour; questionMarkerSaved: boolean }>(
+      `/learning-sessions/${sessionId}/tutor-detours/${detourId}/end`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+
   /* auth */
-  login: (email: string, password: string, remember = false) =>
-    request<AuthResponse>("/auth/login", {
+  login: (email: string, password: string, remember = false) => {
+    // 2026-08-12（数据面审计 P3）：会话被服务端撤销后 login 页 restoreSession
+    // 会命中旧 getMe 缓存"恢复会话"跳回受保护页再被 401 踢回（闪烁）。
+    invalidateGetMeCache();
+    return request<AuthResponse>("/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password, remember }),
-    }),
+    });
+  },
 
   getAIPrivacySettings: () =>
     request<AIPrivacySettings>("/workspace/ai-settings"),
@@ -894,7 +1127,7 @@ Object.entries(params)
 .filter(([, v]) => v != null)
 .map(([k, v]) => [k, String(v)]) as [string, string][],
 ).toString();
-return request<{ items: SearchResult[]; total: number; nextOffset: number | null }>(`/search?${qs}`, { signal });
+return request<{ items: SearchResult[]; total: number; nextCursor: number | null }>(`/search?${qs}`, { signal });
 },
 
   // F-025: 搜索索引漂移检测与补偿
@@ -926,7 +1159,8 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
 
   /* jobs */
   listJobs: () => request<{ items: JobRow[] }>("/jobs"),
-  getJob: (id: string) => request<JobRow>(`/jobs/${id}`),
+  getJob: (id: string, signal?: AbortSignal) =>
+    request<JobRow>(`/jobs/${id}`, signal ? { signal } : undefined),
 
   /* validation (V0.1b) */
   // N-003: 服务端创建验证题，返回 questionId
@@ -1066,7 +1300,7 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
     ),
 
   /* reviews (V0.1b) */
-  listReviews: (params?: { status?: ReviewStatus; includeAll?: boolean; limit?: number; offset?: number }) => {
+  listReviews: (params?: { status?: ReviewStatus; includeAll?: boolean; limit?: number; offset?: number; dueFromMs?: number; dueToMs?: number }) => {
     const qs = params
       ? "?" +
         new URLSearchParams(
@@ -1075,7 +1309,7 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
             .map(([k, v]) => [k, String(v)]) as [string, string][],
         ).toString()
       : "";
-    return request<{ items: ReviewWithCard[]; total: number; nextOffset: number | null }>(`/reviews${qs}`);
+    return request<{ items: ReviewWithCard[]; total: number; nextCursor: number | null }>(`/reviews${qs}`);
   },
 
   /* v0.6 reviews — sanitized (计划 §9.4/§10.4) */
@@ -1086,7 +1320,7 @@ return request<{ items: SearchResult[]; total: number; nextOffset: number | null
     if (params?.limit !== undefined) baseParams.limit = String(params.limit);
     if (params?.offset !== undefined) baseParams.offset = String(params.offset);
     const qs = "?" + new URLSearchParams(baseParams).toString();
-    return request<{ items: SanitizedReviewItem[]; total: number; nextOffset: number | null }>(`/reviews${qs}`);
+    return request<{ items: SanitizedReviewItem[]; total: number; nextCursor: number | null }>(`/reviews${qs}`);
   },
 
   // v0.6 安全单个 review 元数据：不含 card title/claim/quote/blockContent
@@ -1397,11 +1631,16 @@ formData.append("file", file);
 const headers = buildCsrfHeaders();
 const token = getToken();
 if (token) headers["Authorization"] = `Bearer ${token}`;
+// 上传加 60s 超时（大头像/慢网络时避免无限挂起）；超时后中止请求
+const controller = new AbortController();
+const uploadTimeout = window.setTimeout(() => controller.abort(), 60_000);
+try {
 const res = await fetch(`${API_URL}/uploads/avatars`, {
   method: "POST",
   body: formData,
   credentials: "include",
   headers,
+  signal: controller.signal,
 });
 if (!res.ok) {
   // BUG-15 修复：401 时触发标准登录跳转
@@ -1409,6 +1648,20 @@ if (!res.ok) {
   const text = await res.text().catch(() => "");
   throw parseApiError(res.status, res.statusText, text);
 }
-return res.json() as Promise<{ url: string; objectKey: string; size: number; mimeType: string }>;
+const body = (await res.json()) as { url: string; objectKey: string; size: number; mimeType: string };
+window.clearTimeout(uploadTimeout);
+// 2026-08-12（数据面审计 P3）：头像上传直连 fetch 绕过 request()，成功须失效
+// 缓存（avatarUrl 变更后旧 getMe 缓存 20s 内仍显示旧头像）。
+invalidateRequestGetCache();
+invalidateGetMeCache();
+return body;
+} catch (err) {
+  // 超时中止（AbortError）转成可读错误
+  window.clearTimeout(uploadTimeout);
+  if (err instanceof DOMException && err.name === "AbortError") {
+    throw new Error("头像上传超时，请重试");
+  }
+  throw err;
+}
 },
 };

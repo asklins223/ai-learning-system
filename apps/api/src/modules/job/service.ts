@@ -14,15 +14,40 @@ export interface CreateJobInput {
   requestedBy: string;
   payload: Record<string, unknown>;
   dedupe?: {
-    payloadField: "noteVersionId" | "submissionId";
+    payloadField: "noteVersionId" | "submissionId" | "runId" | "actionRunId";
     value: string;
   };
+}
+
+export type JobFailureReason =
+  | "ai_consent_required"
+  | "external_ai_disabled"
+  | "unknown";
+
+/**
+ * Projects the persisted privacy-safe error into a user-actionable reason.
+ * `last_error` has already been sanitised by the worker, so this function must
+ * only inspect stable machine codes and must never return the stored string.
+ */
+export function classifyJobFailureReason(
+  lastError: string | null | undefined,
+): JobFailureReason | null {
+  if (!lastError) return null;
+  if (lastError.endsWith(":ai_consent_required")) {
+    return "ai_consent_required";
+  }
+  if (lastError.endsWith(":external_ai_disabled")) {
+    return "external_ai_disabled";
+  }
+  return "unknown";
 }
 
 function jobScheduling(type: JobType): { priority: number; resourceClass: string } {
   switch (type) {
     case JobType.EVALUATE_VALIDATION:
     case JobType.GENERATE_VALIDATION_QUESTION:
+    case JobType.COMPANION_DIALOGUE:
+    case JobType.COMPANION_ACTION:
       return { priority: 100, resourceClass: JobResourceClass.INTERACTIVE_AI };
     case JobType.PARSE_SOURCE:
       return { priority: 70, resourceClass: JobResourceClass.CARD_FOREGROUND };
@@ -128,6 +153,7 @@ export async function listJobs(workspaceId: string, userId: string) {
         startedAt: j.startedAt,
         finishedAt: j.finishedAt,
         lastError: j.lastError ? "error occurred" : null,
+        failureReason: classifyJobFailureReason(j.lastError),
       }));
     },
   );
@@ -156,6 +182,7 @@ export async function getJob(id: string, workspaceId: string, userId: string) {
         startedAt: job.startedAt,
         finishedAt: job.finishedAt,
         lastError: job.lastError ? "error occurred" : null,
+        failureReason: classifyJobFailureReason(job.lastError),
       };
     },
   );

@@ -1,10 +1,32 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const isDevelopment = process.env.NODE_ENV === "development";
 const contentSecurityPolicy = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDevelopment ? " 'unsafe-eval'" : ""}`,
-  "style-src 'self' 'unsafe-inline'",
+  // 2026-08-11 实测：Next 15.5 experimental.sri 只给外置 script 注入 integrity，
+  // 8 个 inline bootstrap scripts（self.__next_f）无 hash——script-src 去
+  // 'unsafe-inline' 会直接白屏（25 个 CSP 违规，Playwright 实测）。恢复
+  // 'unsafe-inline'（Next 架构必需）；SRI 保留——外置 chunk 带 integrity，
+  // 配合 'self' 阻断外置脚本篡改。真正的严格化需全站动态渲染 + nonce，
+  // 属架构级权衡（P3 记录；XSS 面已全绿兜底）。dev 需 unsafe-eval。
+  `script-src 'self' 'unsafe-inline' blob:${isDevelopment ? " 'unsafe-eval'" : ""}`,
+  // 2026-08-11：style 已全部外置（WorkspaceRouteLoading 内联 <style> 迁入
+  // globals.css；CompanionAvatar 同前），生产 'self' 实测无违规；dev 保留
+  // unsafe-inline（React dev overlay 注入）。
+  `style-src 'self'${isDevelopment ? " 'unsafe-inline'" : ""}`,
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
+  // P3/P6 TTS playback creates an object URL from the authenticated audio
+  // response.  Without an explicit media-src, Chromium falls back to
+  // default-src and rejects the blob before HTMLAudioElement can decode it.
+  "media-src 'self' blob:",
+  // 2026-08-12（P6 真机验证）：本地 ASR 双路径采集用 AudioWorklet，处理器
+  // 以 blob: URL 注册（addModule）。无 worker-src 时 Chromium 回退 script-src
+  // （无 blob:）→ AbortError "Unable to load a worklet's module" → 本地 PCM
+  // 缺失 → 识别降级 text_only。blob 只能由同源页面创建，风险可控。
+  "worker-src 'self' blob:",
   `connect-src 'self'${isDevelopment ? " ws: wss:" : ""}`,
   "object-src 'none'",
   "base-uri 'self'",
@@ -35,10 +57,26 @@ const nextConfig = {
   transpilePackages: ["@ailearn/shared"],
   // 关闭开发环境左下角的 Next.js 调试浮层，避免覆盖侧栏账户头像。
   devIndicators: false,
+  // 2026-08-12：Electron dev 以 http://localhost:<port> 加载页面，但
+  // 渲染进程访问 /_next/* 时 referer 可能是 127.0.0.1（macOS localhost
+  // 解析差异）。显式允许两种 dev origin，避免 "Cross origin request
+  // detected" 拦截静态资源（否则 Pet 页面裸渲染、角色不出现）。
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   // 生产构建时启用 standalone 输出 — Next.js 会 trace 所有 import，
   // 只打包实际用到的 node_modules 文件，排除 playwright、typescript、
   // @types、vue 等运行时不需要的包。桌面端打包时直接使用 standalone 产物。
   output: isDevelopment ? undefined : "standalone",
+  // 2026-08-11：CSP 配套——SRI 为构建产物外置 script 注入 integrity hash
+  //（实测 Next 15.5 只覆盖外置 chunk，inline bootstrap scripts 无 hash，
+  // 故 script-src 保留 'unsafe-inline'，见上方注释）。SRI 提供外置脚本
+  // 篡改防护，配合 'self' 阻断 CDN/中间人替换。
+  experimental: {
+    sri: { algorithm: "sha256" },
+  },
+  // Keep standalone tracing anchored to this repository. Without this explicit
+  // root, an unrelated lockfile above the workspace can make Next.js emit an
+  // incompatible `Documents/study/apps/web` layout or race its own trace copy.
+  outputFileTracingRoot: workspaceRoot,
   // Exclude packages that Next.js traces into standalone but are not
   // needed at runtime:
   // - sharp / @img: app does not use next/image (no image optimization)

@@ -4,6 +4,7 @@ import "@/app/styles/sources-list.css";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -74,7 +75,16 @@ function SourceTypeIcon({ type }: { type: SourceType }) {
   return <Icon.Quote aria-hidden="true" />;
 }
 
+// 2026-08-11：useSearchParams 需在 Suspense 内（Next 15 CSR bailout 约束）
 export default function SourcesPage() {
+  return (
+    <Suspense fallback={<div className="sources-library-loading">正在加载来源库…</div>}>
+      <SourcesPageInner />
+    </Suspense>
+  );
+}
+
+function SourcesPageInner() {
   const { isOwner, loading: ownerLoading } = useIsOwner();
   const router = useRouter();
   const searchParams = useSearchParams();

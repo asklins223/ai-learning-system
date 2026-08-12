@@ -21,6 +21,73 @@ const navMainItems = primaryNavItems;
 const navExploreItems = exploreNavItems;
 const navMineItems = mineNavItems;
 
+interface DesktopPetApiShim {
+  getPetModeEnabled?: () => Promise<{ ok?: boolean; enabled?: boolean }>;
+  setPetModeEnabled?: (enabled: boolean) => Promise<{ ok?: boolean; enabled?: boolean }>;
+}
+
+/**
+ * 2026-08-12（Owner 需求）：头像二级菜单内的桌宠快捷开关。
+ * Electron 桌面应用显示可操作开关；浏览器显示 disabled + "仅桌面应用可用"。
+ */
+function DropdownPetModeToggle() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const desktopApi = typeof window !== "undefined"
+    ? (window as unknown as { desktopAPI?: DesktopPetApiShim }).desktopAPI
+    : undefined;
+
+  useEffect(() => {
+    if (!desktopApi?.getPetModeEnabled) {
+      setEnabled(false);
+      return;
+    }
+    let cancelled = false;
+    void desktopApi.getPetModeEnabled()
+      .then((result) => {
+        if (!cancelled && typeof result?.enabled === "boolean") setEnabled(result.enabled);
+      })
+      .catch(() => setEnabled(false));
+    return () => { cancelled = true; };
+  }, [desktopApi]);
+
+  const toggle = (): void => {
+    if (busy || enabled === null || !desktopApi?.setPetModeEnabled) return;
+    setBusy(true);
+    void desktopApi.setPetModeEnabled(!enabled)
+      .then((result) => {
+        if (typeof result?.enabled === "boolean") setEnabled(result.enabled);
+      })
+      .catch(() => {})
+      .finally(() => setBusy(false));
+  };
+
+  const desktopAvailable = !!desktopApi?.setPetModeEnabled;
+  const checked = desktopAvailable ? enabled === true : false;
+
+  return (
+    <div className={`dropdown-menu-item pet-toggle${desktopAvailable ? "" : " is-unavailable"}`} role="menuitem">
+      <Icon.Sparkle className="dropdown-menu-icon" />
+      <span>桌宠伴星</span>
+      <small className="dropdown-menu-value">
+        {desktopAvailable
+          ? (busy ? "切换中…" : enabled === true ? "已开启" : "已关闭")
+          : "仅桌面应用可用"}
+      </small>
+      <label className="dropdown-pet-switch" aria-label="桌宠开关">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={() => toggle()}
+          disabled={!desktopAvailable || busy}
+          aria-label="桌宠开关"
+        />
+        <i aria-hidden="true" />
+      </label>
+    </div>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -57,14 +124,20 @@ export function Sidebar() {
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => api.getMe().then((info) => {
-      if (!cancelled) {
-        setUserInfo(info);
-        setUserLoadFailed(false);
-      }
-    }).catch(() => {
-      if (!cancelled) setUserLoadFailed(true);
-    });
+    // 2026-08-11：seq 守卫（同 AccountMenu/use-current-user 模式）
+    let seq = 0;
+    const load = () => {
+      const requestSeq = seq + 1;
+      seq = requestSeq;
+      return api.getMe().then((info) => {
+        if (!cancelled && requestSeq === seq) {
+          setUserInfo(info);
+          setUserLoadFailed(false);
+        }
+      }).catch(() => {
+        if (!cancelled && requestSeq === seq) setUserLoadFailed(true);
+      });
+    };
     void load();
     window.addEventListener(IDENTITY_CHANGED_EVENT, load);
     return () => {
@@ -283,6 +356,7 @@ export function Sidebar() {
 
               <div className="dropdown-menu-list">
                 <div className="dropdown-menu-label">偏好与账户</div>
+                <DropdownPetModeToggle />
                 <button
                   className="dropdown-menu-item"
                   type="button"

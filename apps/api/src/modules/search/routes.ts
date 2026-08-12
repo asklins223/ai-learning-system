@@ -23,7 +23,7 @@ export async function searchRoutes(app: FastifyInstance) {
     return withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       async (transaction) => {
-        if (!normalizedQuery) return { items: [], total: 0, nextOffset: null };
+        if (!normalizedQuery) return { items: [], total: 0, nextCursor: null };
         return search(transaction, req.session.workspaceId, normalizedQuery, {
           type: q.type,
           limit: q.limit,

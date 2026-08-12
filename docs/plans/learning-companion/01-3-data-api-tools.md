@@ -40,7 +40,7 @@ W0 必须先批准 **canonical event ADR**；原则是：**Session 对象负责�
 | --- | --- |
 | `user_companion_onboarding` | account-scoped |
 | `user_companion_account_state` | account-scoped |
-| `companion_runtime_fences / active_surface_leases` | ephemeral |
+| `companion_runtime_fences / active_surface_leases` | ephemeral（短 TTL server-side table；不存 page/entity/content） |
 | `companion_invitation_ledger` | workspace-scoped |
 | `learning_sessions` | 过程对象 |
 | `learning_episodes` | 过程对象 |

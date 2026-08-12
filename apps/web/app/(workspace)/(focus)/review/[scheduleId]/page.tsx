@@ -16,13 +16,17 @@ import { useParams, useRouter } from "next/navigation";
 import { FocusSessionHeader, ValidationFocus } from "@/components/ValidationFocus";
 import { Icon } from "@/components/ui/icons";
 import { api, ApiError, type SanitizedReviewMeta } from "@/lib/api";
-import { isQuestionFirstUIEnabled } from "@/lib/feature-flags";
+import { isQuestionFirstUIEnabled, isReviewVoiceEntryEnabled } from "@/lib/feature-flags";
+import { transcribePlain } from "@/lib/learning-companion/voice-api";
 
 export default function ReviewFocusPage() {
   const params = useParams<{ scheduleId: string }>();
   const router = useRouter();
   const scheduleId = params.scheduleId;
   const questionFirstEnabled = isQuestionFirstUIEnabled();
+  // 任务 14：复习页 voice 可选模态门禁（Owner 决策 1：text 默认、voice 可选；
+  // fail-closed——flag 关闭时复习页保持纯 text，现状路径完全不变）。
+  const reviewVoiceEnabled = isReviewVoiceEntryEnabled();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -98,6 +102,20 @@ export default function ReviewFocusPage() {
       exitHref="/review"
       exitLabel="返回复习队列"
       onExit={() => router.push("/review")}
+      voiceEntry={
+        reviewVoiceEnabled
+          ? {
+              enabled: true,
+              language: "zh-CN",
+              // ASR 转写注入：真实 /voice/transcribe 端点（04-1 voice-service；
+              // 失败由组件 fail-open 回文字路径，不卡死）。
+              onTranscribe: async (audio, meta) =>
+                (await transcribePlain(audio, {
+                  language: meta.language ?? "zh-CN",
+                })).text,
+            }
+          : undefined
+      }
     />
   );
 }

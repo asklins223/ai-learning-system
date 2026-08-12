@@ -1,7 +1,6 @@
 node_modules/
 dist/
 release/
+.dev-signing/
 *.dmg
 *.app
-build/icon.icns
-build/icon.png

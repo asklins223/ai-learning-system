@@ -29,7 +29,7 @@ export async function purgeSoftDeletedNotes(retentionDays = 30): Promise<number>
     .from(notes)
     .where(and(
       isNotNull(notes.deletedAt),
-      sql`${notes.deletedAt} < ${cutoff}`,
+      sql`${notes.deletedAt} < ${cutoff.toISOString()}`,
     ))
     .limit(50);
 

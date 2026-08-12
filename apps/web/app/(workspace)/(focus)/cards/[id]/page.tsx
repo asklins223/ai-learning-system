@@ -42,7 +42,7 @@ import {
   sanitizeTodayReturnTarget,
   withTodayReturnTarget,
 } from "@/lib/today-return";
-import { isQuestionFirstUIEnabled } from "@/lib/feature-flags";
+import { isCompanionV2InternalEnabled } from "@/lib/feature-flags";
 import { statusMap } from "@/lib/status-map";
 import {
   formatSafeImageUnitReference,
@@ -64,6 +64,93 @@ const EMPTY_PAGER: PagerState = {
   previousId: null,
   nextId: null,
 };
+
+// 2026-08-12（数据面审计 P1-2）：分页定位缓存——此前每次打开详情页都从
+// 第一页串行翻页直到定位当前卡（最多 50 页 ≈ 5000 张，网络风暴 + 冗余传输）。
+// 定位结果（index/total/prev/next）60s 内复用；翻页只查一次。
+interface PagerLocateResult {
+  pager: PagerState;
+  item: CardListItem;
+  nextReviewAt: string | null;
+}
+type PagerLocateOutcome =
+  | { kind: "located"; result: PagerLocateResult }
+  | { kind: "not-found"; total: number };
+
+const PAGER_LOCATE_TTL_MS = 60_000;
+const PAGER_LOCATE_MAX_ENTRIES = 100;
+const pagerLocateCache = new Map<string, { at: number; outcome: PagerLocateOutcome }>();
+
+async function locateCardInList(
+  cardId: string,
+): Promise<PagerLocateOutcome> {
+  // 2026-08-12 review nit：缓存键加 workspace 维度——切工作区后同 id 卡
+  // 的 index/prev/next 可能不同（getMeCached 已缓存，成本可忽略）。
+  let workspaceKey = "";
+  try {
+    const me = await api.getMe();
+    workspaceKey = `${me.workspaceId}:`;
+  } catch {
+    // getMe 失败时退回无前缀键（TTL 60s 内自愈）
+  }
+  const cacheKey = `${workspaceKey}${cardId}`;
+  const cached = pagerLocateCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < PAGER_LOCATE_TTL_MS) return cached.outcome;
+
+  let items: CardListItem[] = [];
+  let cursor: string | undefined;
+  let total = 0;
+  let pages = 0;
+  let outcome: PagerLocateOutcome;
+  while (true) {
+    const result = await api.listCards({ cursor, limit: 100 });
+    items = appendUniqueCards(items, result.items);
+    total = result.total;
+    const currentIndex = items.findIndex((item) => item.id === cardId);
+    const hasNextItem = currentIndex >= 0 && !!items[currentIndex + 1];
+
+    if (currentIndex >= 0 && (hasNextItem || !result.nextCursor)) {
+      outcome = {
+        kind: "located",
+        result: {
+          pager: {
+            index: currentIndex + 1,
+            total: Math.max(total, items.length, 1),
+            previousId: items[currentIndex - 1]?.id ?? null,
+            nextId: items[currentIndex + 1]?.id ?? null,
+          },
+          item: items[currentIndex],
+          nextReviewAt: items[currentIndex].nextReviewAt ?? null,
+        },
+      };
+      break;
+    }
+
+    if (!result.nextCursor) {
+      outcome = { kind: "not-found", total: Math.max(total, items.length, 1) };
+      break;
+    }
+
+    cursor = result.nextCursor;
+    pages += 1;
+    // 用最新 total 动态算页数上限（50 页 ≈ 5000 张，超出即放弃定位）
+    const maxPages = Math.min(Math.max(Math.ceil(total / 100), 1), 50);
+    if (pages >= maxPages) {
+      outcome = { kind: "not-found", total: Math.max(total, items.length, 1) };
+      break;
+    }
+  }
+
+  if (outcome.kind === "located") {
+    pagerLocateCache.set(cacheKey, { at: Date.now(), outcome });
+    while (pagerLocateCache.size > PAGER_LOCATE_MAX_ENTRIES) {
+      const oldest = pagerLocateCache.keys().next().value;
+      if (oldest === undefined) break;
+      pagerLocateCache.delete(oldest);
+    }
+  }
+  return outcome;
+}
 
 export default function CardPage() {
   const { isOwner, loading: ownerLoading } = useIsOwner();
@@ -99,6 +186,9 @@ export default function CardPage() {
   const deskRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const activeCardIdRef = useRef(cardId);
+  // regenerate 轮询句柄：新请求取消旧请求；卸载时 abort 飞行请求 + 清定时器
+  const regenerateAbortRef = useRef<AbortController | null>(null);
+  const regenerateTimersRef = useRef<number[]>([]);
   activeCardIdRef.current = cardId;
 
   const [data, setData] = useState<CardDetailResponse | null>(null);
@@ -125,11 +215,17 @@ export default function CardPage() {
     "idle" | "regenerating"
   >("idle");
   const [lifecycleMessage, setLifecycleMessage] = useState<string | null>(null);
+  const [lifecycleConsentRequired, setLifecycleConsentRequired] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // 取消未完成的 regenerate 轮询（abort 飞行请求 + 清定时器）
+      regenerateAbortRef.current?.abort();
+      regenerateAbortRef.current = null;
+      for (const timer of regenerateTimersRef.current) window.clearTimeout(timer);
+      regenerateTimersRef.current = [];
     };
   }, []);
 
@@ -173,6 +269,7 @@ export default function CardPage() {
     setEvidencePanelOpen(false);
     setLifecycleAction("idle");
     setLifecycleMessage(null);
+    setLifecycleConsentRequired(false);
   }, [cardId]);
 
   useEffect(() => {
@@ -289,44 +386,17 @@ export default function CardPage() {
     let cancelled = false;
     void (async () => {
       try {
-        let items: CardListItem[] = [];
-        let cursor: string | undefined;
-        let total = 0;
-
-        for (let page = 0; page < 10; page += 1) {
-          const result = await api.listCards({ cursor, limit: 100 });
-          items = appendUniqueCards(items, result.items);
-          total = result.total;
-          const currentIndex = items.findIndex((item) => item.id === cardId);
-          const hasNextItem = currentIndex >= 0 && !!items[currentIndex + 1];
-
-          if (
-            currentIndex >= 0 &&
-            (hasNextItem || !result.nextCursor)
-          ) {
-            if (cancelled) return;
-            const current = items[currentIndex];
-            setPager({
-              index: currentIndex + 1,
-              total: Math.max(total, items.length, 1),
-              previousId: items[currentIndex - 1]?.id ?? null,
-              nextId: items[currentIndex + 1]?.id ?? null,
-            });
-            setCardListItem(current);
-            setNextReviewAt(current.nextReviewAt ?? null);
-            return;
-          }
-
-          if (!result.nextCursor) {
-            if (cancelled) return;
-            setPager({
-              ...EMPTY_PAGER,
-              total: Math.max(total, items.length, 1),
-            });
-            return;
-          }
-
-          cursor = result.nextCursor;
+        // 2026-08-12（数据面审计 P1-2）：定位逻辑抽到模块级 locateCardInList
+        // + 60s 缓存（此前每次打开详情页都从第一页串行翻页，最多 50 页）。
+        const outcome = await locateCardInList(cardId);
+        if (cancelled) return;
+        if (outcome.kind === "located") {
+          setPager(outcome.result.pager);
+          setCardListItem(outcome.result.item);
+          setNextReviewAt(outcome.result.nextReviewAt);
+        } else {
+          // 未定位到当前卡：至少落一次分页状态（真实总数），不静默保持 EMPTY。
+          setPager({ ...EMPTY_PAGER, total: outcome.total });
         }
       } catch {
         // 翻页统计失败时保留安全默认值，详情主体仍可使用。
@@ -346,8 +416,15 @@ export default function CardPage() {
   const handleRegenerate = useCallback(async () => {
     if (!cardId) return;
     const requestCardId = cardId;
+    // 2026-08-11 修复：轮询可取消——新 regenerate 取消旧轮询；卸载时
+    // cleanup 会 abort 飞行请求并清定时器（此前 setTimeout 无法取消、
+    // getJob 无法中止，仅靠 mountedRef 兜底）。
+    regenerateAbortRef.current?.abort();
+    const controller = new AbortController();
+    regenerateAbortRef.current = controller;
     setLifecycleAction("regenerating");
     setLifecycleMessage(null);
+    setLifecycleConsentRequired(false);
 
     try {
       const { jobId, sameVersion } = await api.regenerateCard(cardId);
@@ -365,14 +442,17 @@ export default function CardPage() {
 
       let delay = 1500;
       for (let attempt = 0; attempt < 40; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, delay));
+        await new Promise<void>((resolve) => {
+          const timer = window.setTimeout(resolve, delay);
+          regenerateTimersRef.current.push(timer);
+        });
         if (
           !mountedRef.current ||
           activeCardIdRef.current !== requestCardId
         ) {
           return;
         }
-        const job = await api.getJob(jobId);
+        const job = await api.getJob(jobId, controller.signal);
         if (
           !mountedRef.current ||
           activeCardIdRef.current !== requestCardId
@@ -382,7 +462,7 @@ export default function CardPage() {
 
         if (job.status === "succeeded") {
           setLifecycleMessage(`学习卡已重新生成，正在返回${backLabel}…`);
-          window.setTimeout(
+          const navTimer = window.setTimeout(
             () => {
               if (
                 mountedRef.current &&
@@ -393,10 +473,16 @@ export default function CardPage() {
             },
             1200,
           );
+          regenerateTimersRef.current.push(navTimer);
           return;
         }
         if (job.status === "failed" || job.status === "dead") {
-          setLifecycleMessage("学习卡暂时没有重新生成成功，请稍后重试。");
+          if (job.failureReason === "ai_consent_required") {
+            setLifecycleMessage("重新生成需要先签署工作区 AI 使用协议。");
+            setLifecycleConsentRequired(true);
+          } else {
+            setLifecycleMessage("学习卡暂时没有重新生成成功，请稍后重试。");
+          }
           setLifecycleAction("idle");
           return;
         }
@@ -405,7 +491,17 @@ export default function CardPage() {
 
       setLifecycleMessage("等待超时，可稍后返回列表查看生成结果。");
       setLifecycleAction("idle");
-    } catch {
+    } catch (err) {
+      if (
+        !mountedRef.current ||
+        activeCardIdRef.current !== requestCardId
+      ) {
+        // 卸载/切换卡后丢弃（abort 触发的 AbortError 也落这里）
+        return;
+      }
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return;
+      }
       if (
         !mountedRef.current ||
         activeCardIdRef.current !== requestCardId
@@ -525,7 +621,6 @@ export default function CardPage() {
       item.effectiveOverride ?? item.userOverride,
     ),
   ).length;
-  const evidenceCount = allEvidence.length;
   const validationCount = Math.max(
     cardListItem?.validationCount ?? 0,
     validationHistory.length,
@@ -533,18 +628,6 @@ export default function CardPage() {
   const latestFeedback = validationHistory[0]?.feedback ?? null;
   const isCardActive = card.status === "active";
   const evidenceLoading = evidence === null && !evidenceError;
-  const eligibleKeyPointCount = evidenceGroups.filter((group) =>
-    group.evidences.some((item) =>
-      isHardEvidence(
-        item.alignment,
-        item.effectiveOverride ?? item.userOverride,
-      ),
-    ),
-  ).length;
-  const canValidate =
-    isCardActive && !evidenceLoading && eligibleKeyPointCount > 0;
-  const questionFirstEnabled = isQuestionFirstUIEnabled();
-  const canStartValidation = questionFirstEnabled && canValidate;
   const partialCoverageWarning = readPartialCardCoverageWarning(
     card.schemaJson,
   );
@@ -802,6 +885,11 @@ export default function CardPage() {
             <div className="card-detail-alert is-info">
               <Icon.Refresh aria-hidden="true" />
               <span>{lifecycleMessage}</span>
+              {lifecycleConsentRequired && (
+                <button type="button" onClick={() => router.push("/settings#model")}>
+                  签署 AI 使用协议
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -836,71 +924,25 @@ export default function CardPage() {
               </div>
             </div>
 
-            {layoutMode !== "compact" && (
-              <CardNextStep
-                cardId={cardId}
-                enabled={questionFirstEnabled}
-                active={isCardActive}
-                canValidate={canValidate}
-                evidenceLoading={evidenceLoading}
-                eligibleKeyPointCount={eligibleKeyPointCount}
-                onOpenEvidence={revealEvidenceWorkspace}
-              />
-            )}
-
-            {/* 伴星学习卡主行动（§8）：唯一主行动「开始/继续一小段航程」+ 内容工具。
-                朗读/查看证据/问一问按实际暴露记录 exposure（assistance cooldown 生效）。 */}
-            {(activeKeyPoint ?? keyPoints[0]) && (
+            {keyPoints[0] && (
               <LearningCardActions
-                cardId={cardId}
-                keyPointId={(activeKeyPoint ?? keyPoints[0]).id}
-                title={cardTitle}
-                summary={cardSummary}
-                keyPoints={keyPoints.map((kp) => ({ id: kp.id, claim: kp.claim }))}
-                dueLabel={nextReviewAt ? `下次复习 ${nextReviewAt}` : undefined}
-                published
-                contact={{ opened: true }}
-                journeyHint="语音 / 排序 / 修复 / 情境由本轮 Supervisor 决定"
+                compact={layoutMode === "compact"}
                 onStartJourney={() => {
                   const target = activeKeyPoint ?? keyPoints[0];
-                  if (target) {
-                    router.push(`/cards/${cardId}/validate?keyPoint=${encodeURIComponent(target.id)}`);
-                  }
-                }}
-                onReadAloud={async () => {
-                  // 救火 6：真实 TTS 朗读（edge-tts 容器 → mp3）——不再 console 桩。
-                  // 朗读摘要/论点：实际播放后由宿主记录 exposure（§8）。
                   try {
-                    const res = await fetch("/api/voice/tts", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ text: cardSummary, voice: "zh-CN-XiaoxiaoNeural" }),
-                    });
-                    if (!res.ok) {
-                      console.warn("[companion] tts failed", res.status);
-                      return;
-                    }
-                    const blob = await res.blob();
-                    const url = URL.createObjectURL(blob);
-                    const audio = new Audio(url);
-                    await audio.play();
-                    URL.revokeObjectURL(url);
-                    console.info("[companion] read aloud played", { cardId, length: cardSummary.length });
-                  } catch (err) {
-                    console.warn("[companion] tts error", err);
+                    sessionStorage.setItem(
+                      `companion-origin:${cardId}`,
+                      JSON.stringify({ href: window.location.href, scrollY: window.scrollY }),
+                    );
+                  } catch {
+                    // Origin restore is best effort; the Session remains authoritative.
                   }
+                  const route = isCompanionV2InternalEnabled()
+                    ? `/cards/${cardId}/companion?keyPoint=${encodeURIComponent(target.id)}`
+                    : `/cards/${cardId}/validate?keyPoint=${encodeURIComponent(target.id)}`;
+                  router.push(route);
                 }}
-                onViewEvidence={() => {
-                  const target = activeKeyPoint ?? keyPoints[0];
-                  if (target) {
-                    setOpenKeyPointId(target.id);
-                    setEvidencePanelOpen(true);
-                  }
-                }}
-                onAskTutor={() => {
-                  // 当前 target 有界 Tutor detour：实际问答时记录 exposure（practice-only）。
-                  console.info("[companion] ask tutor", cardId);
-                }}
+                onViewEvidence={revealEvidenceWorkspace}
               />
             )}
           </div>
@@ -944,34 +986,6 @@ export default function CardPage() {
         </section>
       </div>
 
-      {layoutMode === "compact" &&
-        !evidencePanelOpen &&
-        !openKeyPointId && (
-          <nav
-            className={`card-detail-action-dock ${canStartValidation ? "" : "is-single"}`}
-            aria-label="学习卡详情操作"
-          >
-            <button
-              type="button"
-              onClick={() => setEvidencePanelOpen(true)}
-            >
-              <Icon.Link aria-hidden="true" />
-              <span>{canStartValidation ? "证据线索" : "证据与复习"}</span>
-              <b>{evidenceCount}</b>
-            </button>
-            {canStartValidation && (
-              <button
-                type="button"
-                className="is-primary"
-                onClick={() => router.push(`/cards/${cardId}/validate`)}
-              >
-                <Icon.Target aria-hidden="true" />
-                <span>开始验证</span>
-              </button>
-            )}
-          </nav>
-        )}
-
       <Drawer
         open={evidencePanelOpen && layoutMode === "compact"}
         onClose={() => setEvidencePanelOpen(false)}
@@ -1007,101 +1021,6 @@ export default function CardPage() {
         />
       )}
     </div>
-  );
-}
-
-function CardNextStep({
-  cardId,
-  enabled,
-  active,
-  canValidate,
-  evidenceLoading,
-  eligibleKeyPointCount,
-  onOpenEvidence,
-}: {
-  cardId: string;
-  enabled: boolean;
-  active: boolean;
-  canValidate: boolean;
-  evidenceLoading: boolean;
-  eligibleKeyPointCount: number;
-  onOpenEvidence: () => void;
-}) {
-  const state = !active
-    ? "readonly"
-    : !enabled
-      ? "paused"
-      : evidenceLoading
-        ? "checking"
-        : canValidate
-          ? "ready"
-          : "needs-evidence";
-  const title = !active
-    ? "历史卡片仅供阅读"
-    : !enabled
-      ? "独立验证暂未开启"
-      : evidenceLoading
-        ? "正在检查验证条件"
-        : canValidate
-          ? "用一次独立回答检验理解"
-          : "先补齐可验证的学习依据";
-  const detail = !active
-    ? "这张卡已有更新版本，仍可回看内容与证据记录。"
-    : !enabled
-      ? "你仍可阅读理解要点、核对证据并查看复习安排。"
-      : evidenceLoading
-        ? "证据载入完成后，会自动确认哪些要点可以进入独立验证。"
-        : canValidate
-          ? `${eligibleKeyPointCount} 个要点已具备验证依据。作答时不会提前展示结论或原文。`
-          : "至少确认一条能够支持理解要点的硬证据，才能开始独立验证。";
-  const statusLabel = !active
-    ? "只读状态"
-    : !enabled
-      ? "功能已暂停"
-      : evidenceLoading
-        ? "检查中"
-        : canValidate
-          ? "可以开始"
-          : "等待硬证据";
-
-  return (
-    <aside className="card-detail-next-step" data-state={state} aria-labelledby="card-next-step-title">
-      <header className="card-detail-next-step-header">
-        <span className="card-detail-next-step-icon" aria-hidden="true">
-          <Icon.Target />
-        </span>
-        <div>
-          <span>下一步</span>
-          <h2 id="card-next-step-title">理解验证</h2>
-        </div>
-        <span className="card-detail-next-step-status">
-          <i aria-hidden="true" />
-          {statusLabel}
-        </span>
-      </header>
-
-      <div className="card-detail-next-step-body">
-        <h3>{title}</h3>
-        <p>{detail}</p>
-
-        {enabled && active && canValidate ? (
-          <Link href={`/cards/${cardId}/validate`} className="card-detail-next-step-primary">
-            开始验证
-            <Icon.Arrow aria-hidden="true" />
-          </Link>
-        ) : active && !evidenceLoading ? (
-          <button type="button" className="card-detail-next-step-secondary" onClick={onOpenEvidence}>
-            <Icon.Link aria-hidden="true" />
-            查看学习依据
-          </button>
-        ) : null}
-      </div>
-
-      <p className="card-detail-next-step-privacy">
-        <Icon.Lock aria-hidden="true" />
-        验证在独立页面进行，阅读内容不会被带入作答区。
-      </p>
-    </aside>
   );
 }
 

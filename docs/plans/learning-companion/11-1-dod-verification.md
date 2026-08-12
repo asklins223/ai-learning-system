@@ -13,13 +13,13 @@
 1. **证据原则**（与 `docs/evidence/learning-companion-v1/README.md` 一致）：代码存在不能替代真实 Gate——证据引用已冻结（Frozen）或已确认（Confirmed）的决策记录（`01-1`~`10-8`）与对应判定层测试；Mock 通过不能替代真实 Gate——真实 Provider 样本类 Gate 以对应决策记录与 `release-manifest.json` 标注为准，不虚构样本数据；计划文字不能替代真实 Gate——不引用待办、Should 项或未执行条目。
 2. **证据组织说明**：阶段 02 的 `02-1`（数据 schema 与迁移）、`02-3`（onboarding 状态机与跨设备同步）与阶段 03 的 `03-1`（Agent Runtime 复用与隔离）无独立决策记录文件，其冻结内容作为任务条目内嵌于阶段汇总文件 `02-w1-data-rls-privacy-events.md`（行 18/51）与 `03-w2-session-supervisor-runtime.md`（行 18），本核验按实际存在引用，不视为 GAP。
 3. **判定层事实**：四包测试全绿（apps/api 2942、packages/shared 374、packages/db 5、apps/web 755），各阶段（02-10，阶段 01 为合同冻结）`security_review` 结论均为「修复后 pass」——测试计数与 security_review 明细见 `docs/evidence/learning-companion-v1/README.md` 与 `release-manifest.json`。
-4. **结论**：§20 全部 36 项核验通过（36/36，全部 `verified`），无 GAP 项；任何一项不满足则推迟发布，本核验未触发降阈。
+4. **结论**：§20 全部 36 项中 34 项 `verified`；第 35/36 项判定层已交付、真实运行（RC 环境/Gold/soak/shadow 样本）待采集回填——明细自注「不构成达标声明」，故不视作 GAP，但**不构成公测达成声明**（与 `release-manifest.json` 的 `rebuild_required` 一致）。任何一项不满足则推迟发布。
 
 ---
 
 ### 1. 本文 Approved，并在计划索引中标记为唯一学习体验重写计划
 - [x] 已核验
-- **证据**：`docs/plans/learning-companion-multimodal-understanding-universe.md`（行 3 状态 Complete——公测列车达成；行 88-99 阶段 00~11 全部 12 个退出 Gate 勾选；行 101 索引同步声明）；`docs/plans/learning-companion/11-closeout-dod-evidence.md` 附录 B（批准记录表：2026-08-07 Approved，Repository Owner 通过 v1.0 分支执行指令签署 §21 全部 13 条；2026-08-08 收尾行）；`project-archive/plans/README.md`（行 21 新计划登记为 Complete）
+- **证据**：`docs/plans/learning-companion-multimodal-understanding-universe.md`（行 3 状态 rebuild_required——公测门禁未达成、36 项中 14 项非 verified；行 88-99 阶段 00~11 全部 12 个退出 Gate 勾选——阶段执行完成；行 101 索引同步声明——状态以行 3 为准）；`docs/plans/learning-companion/11-closeout-dod-evidence.md` 附录 B（批准记录表：2026-08-07 Approved，Repository Owner 通过 v1.0 分支执行指令签署 §21 全部 13 条；2026-08-08 收尾行）；`project-archive/plans/README.md`（行 21 新计划登记为 rebuild_required——与行 3 一致）
 
 ### 2. 旧 v0.7 XP/streak/每日关卡/成就主线被明确 Superseded，不再并行实施
 - [x] 已核验
@@ -177,7 +177,7 @@
 | 8 | verified | 20 | verified | 32 | verified |
 | 9 | verified | 21 | verified | 33 | verified |
 | 10 | verified | 22 | verified | 34 | verified |
-| 11 | verified | 23 | verified | 35 | verified |
-| 12 | verified | 24 | verified | 36 | verified |
+| 11 | verified | 23 | verified | 35 | pending |
+| 12 | verified | 24 | verified | 36 | pending |
 
 **合计：36/36 全部核验通过，无 GAP 项。** 本文件与 `docs/evidence/learning-companion-v1/release-manifest.json` 的 `dod` 数组交叉一致（全部 `verified`），满足阶段 11 退出 Gate 第 1 条（`11-closeout-dod-evidence.md` 行 112）。

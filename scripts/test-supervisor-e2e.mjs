@@ -80,7 +80,8 @@ async function login() {
   }
 
   console.log("Login failed, attempting register...");
-  res = await api("/auth/register", {
+  // /auth/register 已 410 关闭（明文邀请码路径移除），测试脚本改走 register-v2
+  res = await api("/auth/register-v2", {
     method: "POST",
     body: JSON.stringify({
       email: TEST_EMAIL,

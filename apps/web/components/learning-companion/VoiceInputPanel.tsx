@@ -182,11 +182,22 @@ export function VoiceInputPanel({
     && typeof navigator.mediaDevices?.getUserMedia === "function"
     && typeof MediaRecorder !== "undefined";
 
-  // 组件卸载清理：停止麦克风轨道、撤销对象 URL、停掉回放。
+  // 组件卸载清理：停止麦克风轨道、撤销对象 URL、停掉回放、终止进行中的录音。
   useEffect(() => {
     aliveRef.current = true;
     return () => {
       aliveRef.current = false;
+      // 录音中卸载：先显式 stop MediaRecorder，否则 recorder 停留在
+      // inactive 前的状态，stop 事件永不触发、轨道残留。
+      const recorder = recorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        discardRef.current = true;
+        try {
+          recorder.stop();
+        } catch {
+          // 已停止/异常状态下的 stop 可抛，忽略（清理路径不抛错）
+        }
+      }
       stopTracks(streamRef.current);
       streamRef.current = null;
       recorderRef.current = null;
@@ -544,7 +555,7 @@ export function VoiceInputPanel({
                 <p className="flex flex-wrap items-center gap-2 text-xs text-warning-text" role="note">
                   <Icon.Warn aria-hidden="true" className="size-4 shrink-0" />
                   <span>
-                    已修改转写内容：将以 text_or_mixed 模态提交并保留来源，不再视为纯语音。
+                    已修改转写内容：将以文字回答提交并保留来源，不再视为纯语音。
                     请使用「以文字提交」完成。
                   </span>
                 </p>
@@ -583,7 +594,7 @@ export function VoiceInputPanel({
                     onClick={() => openTextFallback({ text: transcript, sourceArtifactId: artifactId ?? undefined })}
                     className="min-h-[44px] rounded-pill border border-action px-4 text-sm font-medium text-action hover:bg-surface-soft"
                   >
-                    以文字提交（text_or_mixed）
+                    以文字提交
                   </button>
                 ) : null}
               </div>
@@ -593,7 +604,7 @@ export function VoiceInputPanel({
           {phase === "confirmed" ? (
             <p className="flex items-center gap-2 text-sm text-success-text" role="status">
               <Icon.Check aria-hidden="true" className="size-4" />
-              回答已确认并锁定（voice canonical），等待后续评估。
+              转写已确认。提交回答后才会锁定，并交给后续评估。
             </p>
           ) : null}
         </div>
@@ -629,8 +640,7 @@ export function VoiceInputPanel({
       ) : null}
       {voiceUnavailable ? (
         <p className="text-sm text-muted" role="note" data-testid="voice-policy-unavailable">
-          语音能力当前不可用（语音服务未满足当前工作区的数据治理要求，§13.2
-          fail closed）。请使用文字回答
+          语音能力当前不可用，请使用文字回答
           {structuredProofEligible ? "或结构式证明" : ""}。
         </p>
       ) : null}
@@ -645,7 +655,7 @@ export function VoiceInputPanel({
               sourceArtifactId={fallbackSourceId}
               sourceNote={
                 fallbackSourceId !== undefined
-                  ? "修改自语音转写，来源将被保留（supersedes）。"
+                  ? "修改自语音转写，原始转写来源会被保留。"
                   : undefined
               }
               onSubmit={onSubmitText}

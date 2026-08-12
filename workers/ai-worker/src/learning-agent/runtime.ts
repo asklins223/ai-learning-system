@@ -255,9 +255,18 @@ export function initAgentTurn(
   config: { runId: string; sessionId: string; episodeId: string },
   role: LearningAgentRole,
 ): LearningAgentTurnContext {
-  // 初始化：start turn → reserve turn budget
-  session.startTurn(role);
+  // 先预算后记账：reserveTurn 抛 LearningBudgetExhaustedError 时，
+  // 不能留下已推进 turnNo 且 status=running 的孤儿 turn 记录（状态泄漏）。
   budgetTracker.reserveTurn(role);
+  // 预算接线（2026-08-11）：reserveProviderCall 是全库唯一 providerCalls 计数
+  // 递增点，此前无任何调用者 → 上限形同虚设。此处每个 turn 预留一次 provider
+  // 调用。
+  // ⚠️ 骨架阶段状态：initAgentTurn 当前零调用者（W2 接线任务）；接线时成功路径
+  // 必须在 provider 调用完成后配对调用 settleProviderCall(role, usage) 冲抵
+  // 预留并累加 token——handleTurnFailure 已配对。settle 每次调用结算一次，
+  // 调用方负责严格配对，勿双重 settle（token 会重复累加）。
+  budgetTracker.reserveProviderCall(role);
+  session.startTurn(role);
 
   const state = session.getState();
   const turnCtx: LearningAgentTurnContext = {
@@ -298,7 +307,7 @@ export function handleTurnFailure(
  * 让上层逻辑正常处理（不抛出未处理异常）。
  */
 export function parseStructuredAction(rawOutput: string): LearningAgentTurnResult {
-  let parsed: Record<string, unknown>;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(rawOutput);
   } catch {
@@ -311,16 +320,28 @@ export function parseStructuredAction(rawOutput: string): LearningAgentTurnResul
     };
   }
 
-  const content = typeof parsed.content === "string" ? parsed.content : null;
-  const toolCalls: LearningToolCall[] = Array.isArray(parsed.toolCalls)
-    ? parsed.toolCalls.map((call: Record<string, unknown>) => ({
+  // BUG-14 防护补充：JSON.parse("null")/JSON.parse("42") 会成功返回非对象值，
+  // 直接访问属性会抛 TypeError 绕过外层 fail-soft 意图，这里统一按解析失败处理。
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      content: rawOutput,
+      toolCalls: [],
+      finishReason: "stop",
+      usage: null,
+      providerRequestId: null,
+    };
+  }
+  const record = parsed as Record<string, unknown>;
+  const content = typeof record.content === "string" ? record.content : null;
+  const toolCalls: LearningToolCall[] = Array.isArray(record.toolCalls)
+    ? record.toolCalls.map((call: Record<string, unknown>) => ({
         id: String(call.id ?? ""),
         name: String(call.name ?? ""),
         arguments: (call.arguments ?? {}) as Record<string, unknown>,
       }))
     : [];
-  const finishReason = typeof parsed.finishReason === "string"
-    ? parsed.finishReason
+  const finishReason = typeof record.finishReason === "string"
+    ? record.finishReason
     : toolCalls.length > 0
       ? "tool_calls"
       : "stop";

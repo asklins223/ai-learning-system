@@ -1,3 +1,7 @@
+
+// ⚠️ 静态源码契约快照（非行为测试）：断言的是源码文本特征，重构改名/换实现方式
+// 会误报，行为回归由 e2e/人工验证覆盖。2026-08-11 测试质量审计标注。
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -18,6 +22,10 @@ const factsSource = readFileSync(
 );
 const evidenceSource = readFileSync(
   resolve(WEB_ROOT, "components/study/EvidenceRail.tsx"),
+  "utf-8",
+);
+const actionsSource = readFileSync(
+  resolve(WEB_ROOT, "components/learning-companion/LearningCardActions.tsx"),
   "utf-8",
 );
 const reviewPlanSource = readFileSync(
@@ -66,42 +74,44 @@ describe("learning card detail UI contract", () => {
     assert.ok(!pageSource.includes('card.status === "superseded"'));
   });
 
-  it("always renders a useful next-step state while validation remains isolated", () => {
-    assert.ok(pageSource.includes("function CardNextStep"));
+  it("keeps one focused practice decision without repeating the learning card", () => {
+    assert.ok(pageSource.includes("<LearningCardActions"));
     assert.match(
       pageSource,
-      /\{layoutMode !== "compact" && \(\s*<CardNextStep/,
+      /className="card-detail-overview-grid"[\s\S]*<LearningCardActions[\s\S]*<UnderstandingFacts/,
     );
-    assert.ok(pageSource.includes("独立验证暂未开启"));
-    assert.ok(pageSource.includes("你仍可阅读理解要点、核对证据并查看复习安排。"));
-    assert.match(pageSource, /href=\{`\/cards\/\$\{cardId\}\/validate`\}/);
+    assert.ok(actionsSource.includes('data-ui="lc-card-primary-action"'));
+    assert.ok(actionsSource.includes('data-ui="lc-card-evidence-action"'));
+    assert.ok(actionsSource.includes("开始巩固练习"));
+    assert.ok(actionsSource.includes("查看原文依据"));
+    assert.ok(!actionsSource.includes("title:"));
+    assert.ok(!actionsSource.includes("summary:"));
+    assert.ok(!actionsSource.includes("keyPoints:"));
+    assert.ok(!actionsSource.includes("朗读"));
+    assert.ok(!actionsSource.includes("问一问"));
     assert.ok(!pageSource.includes("<ValidationPanel"));
     assert.ok(!pageSource.includes("<ValidationFocus"));
     assert.ok(!pageSource.includes("refQuote"));
   });
 
-  it("derives validation eligibility only from active status and hard evidence", () => {
-    assert.ok(pageSource.includes('const isCardActive = card.status === "active"'));
-    assert.ok(pageSource.includes("const eligibleKeyPointCount = evidenceGroups.filter"));
+  it("keeps evidence status factual and leaves assessment readiness to the service", () => {
     assert.ok(pageSource.includes("isHardEvidence("));
-    assert.match(
-      pageSource,
-      /const canValidate =\s*isCardActive && !evidenceLoading && eligibleKeyPointCount > 0/,
-    );
+    assert.ok(pageSource.includes("evidenceLoading"));
     assert.ok(!pageSource.includes("buildValidationPrompt"));
+    assert.ok(!actionsSource.includes("可以开始"));
+    assert.ok(actionsSource.includes("由系统依据这张学习卡完成评估"));
   });
 
   it("preserves accessible loading, failure, navigation and compact actions", () => {
     assert.match(pageSource, /className="card-detail-loading"[\s\S]{0,100}role="status"/);
     assert.match(pageSource, /className="card-detail-state"[\s\S]{0,100}role="alert"/);
     assert.ok(pageSource.includes('aria-label="学习卡导航"'));
-    assert.ok(pageSource.includes('aria-label="学习卡详情操作"'));
+    assert.ok(actionsSource.includes('aria-labelledby="card-practice-action-title"'));
     assert.ok(pageSource.includes('useState<DetailLayoutMode>("compact")'));
     assert.ok(pageSource.includes('width >= 1080 ? "medium" : "compact"'));
-    assert.ok(pageSource.includes('canStartValidation ? "" : "is-single"'));
-    assert.ok(pageSource.includes('canStartValidation ? "证据线索" : "证据与复习"'));
     assert.ok(!pageSource.includes("查看验证条件"));
-    assert.ok(cssSource.includes(".card-detail-action-dock.is-single"));
+    assert.ok(cssSource.includes(".card-detail-learning-actions"));
+    assert.ok(cssSource.includes(".card-detail-learning-actions-buttons"));
     assert.ok(cssSource.includes("safe-area-inset-bottom"));
     assert.ok(cssSource.includes(":focus-visible"));
   });
@@ -132,6 +142,7 @@ describe("learning card detail UI contract", () => {
   it("uses the shared 1142px detail rhythm and one responsive hierarchy", () => {
     assert.ok(cssSource.includes("width: min(100%, 1142px)"));
     assert.ok(cssSource.includes(".card-detail-overview-grid"));
+    assert.ok(cssSource.includes("grid-template-columns: minmax(0, 1fr) minmax(320px, 360px)"));
     assert.ok(cssSource.includes(".card-detail-content-grid"));
     assert.ok(cssSource.includes('data-layout="compact"'));
     assert.ok(

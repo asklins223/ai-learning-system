@@ -13,6 +13,7 @@ import {
   isRubricEvaluationEnabled,
   isCardSetDeckUIEnabled,
   isAgentActivityStreamEnabled,
+  isCompanionPetV1Enabled,
 } from "../feature-flags.ts";
 
 function withEnv<T>(env: Record<string, string | undefined>, fn: () => T): T {
@@ -182,6 +183,27 @@ describe("Client-side feature flags", () => {
           assert.equal(isAgentActivityStreamEnabled(), true);
         },
       );
+    });
+
+    describe("isCompanionPetV1Enabled (P1 desktop pet, 方案 13 §13.1)", () => {
+      it("defaults to false when unset (fail-closed)", () => {
+        withEnv({ NEXT_PUBLIC_COMPANION_PET_ENABLED: undefined }, () => {
+          assert.equal(isCompanionPetV1Enabled(), false);
+        });
+      });
+      it("requires an explicit true", () => {
+        withEnv({ NEXT_PUBLIC_COMPANION_PET_ENABLED: "false" }, () => {
+          assert.equal(isCompanionPetV1Enabled(), false);
+        });
+        withEnv({ NEXT_PUBLIC_COMPANION_PET_ENABLED: "1" }, () => {
+          assert.equal(isCompanionPetV1Enabled(), false);
+        });
+      });
+      it("enabled only for the exact true value", () => {
+        withEnv({ NEXT_PUBLIC_COMPANION_PET_ENABLED: "true" }, () => {
+          assert.equal(isCompanionPetV1Enabled(), true);
+        });
+      });
     });
   });
 });

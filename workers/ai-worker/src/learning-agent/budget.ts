@@ -249,8 +249,19 @@ export class LearningBudgetTracker {
     this.usage.providerCalls += 1;
   }
 
-  /** 结算一次 provider 调用的实际用量 */
-  settleProviderCall(_role: LearningAgentRole, usage: { promptTokens?: number; completionTokens?: number } | null): void {
+  /** 结算一次 provider 调用的实际用量（冲抵 reserveProviderCall 的预留） */
+  settleProviderCall(role: LearningAgentRole, usage: { promptTokens?: number; completionTokens?: number } | null): void {
+    this.assertEnvelopeNonBorrowable();
+    this.ensureRoleUsage(role);
+    // 冲抵在途计数：reserve 时 +1，settle 时 -1（成功/失败统一收尾），
+    // 否则 providerCalls 只增不减，maxProviderCalls 会被每个 turn 耗光。
+    if (this.usage.providerCalls > 0) {
+      this.usage.providerCalls -= 1;
+      const roleUsage = this.usage.roles[role];
+      if (roleUsage && roleUsage.providerCalls > 0) {
+        roleUsage.providerCalls -= 1;
+      }
+    }
     if (usage) {
       this.usage.inputTokens += usage.promptTokens ?? 0;
       this.usage.outputTokens += usage.completionTokens ?? 0;

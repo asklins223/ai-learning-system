@@ -14,6 +14,12 @@ import { runAlignEvidence, runEvaluateValidation, type JobPayload } from "./hand
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runGenerateValidationQuestion } from "./handlers/generate-validation-question.ts";
 import { runLearningSessionAssess } from "./handlers/learning-session-assess.ts";
+import { runCompanionDialogue } from "./handlers/companion-dialogue.ts";
+import { runCompanionAction } from "./handlers/companion-action.ts";
+import {
+  claimLearningAssessmentOutbox,
+  processLearningAssessmentOutboxJob,
+} from "./handlers/learning-session-assessment.ts";
 import { runEvaluateRubric } from "./handlers/evaluate-rubric.ts";
 import { runCardSupervisorAgent } from "./handlers/card-supervisor-agent.ts";
 import { reconcileSupervisorAgentRuns } from "./agent/reconciler.ts";
@@ -68,6 +74,9 @@ const HANDLERS = {
   generate_validation_question: runGenerateValidationQuestion,
   // 救火 4b：Learning Session 评测（接线点——经 API 编排独立评测）
   learning_session_assess: runLearningSessionAssess,
+  // P2 companion：日常对话流式回复（03 §8.1；payload 只含 opaque runId）
+  companion_dialogue: runCompanionDialogue,
+  companion_action: runCompanionAction,
 } as const;
 
 const POLL_MS = 500;
@@ -89,6 +98,19 @@ export function setupGracefulShutdown() {
   };
   process.on("SIGTERM", handler);
   process.on("SIGINT", handler);
+  // 2026-08-11：全局异步错误兜底——Node≥15 默认 unhandledRejection 直接 crash，
+  // 单点意外 rejection（DB 连接抖动、第三方库边缘）即崩整个 worker，在途 job
+  // 遗留、租约悬挂。记录并尝试优雅退出（shuttingDown 路径已处理 drain）。
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ reason: reason instanceof Error ? reason.stack ?? reason.message : String(reason) }, "unhandledRejection — exiting");
+    process.exitCode = 1;
+    process.kill(process.pid, "SIGTERM");
+  });
+  process.on("uncaughtException", (error) => {
+    logger.error({ err: error }, "uncaughtException — exiting");
+    process.exitCode = 1;
+    process.kill(process.pid, "SIGTERM");
+  });
 }
 setupGracefulShutdown();
 
@@ -248,14 +270,41 @@ async function projectAgentJobFailure(input: {
  */
 async function projectReapedGenerationJobs(reapedIds: string[]): Promise<number> {
   if (reapedIds.length === 0) return 0;
-  let deadRows: Array<typeof schema.jobs.$inferSelect> = [];
+  let deadRows: Array<{
+    id: string;
+    type: string;
+    payload: Record<string, unknown> | null;
+    workspaceId: string;
+    requestedBy: string | null;
+    attempts: number;
+    generationRunId: string | null;
+    lastError: string | null;
+  }> = [];
   try {
-    deadRows = await db.query.jobs.findMany({
-      where: and(
-        inArray(schema.jobs.id, reapedIds),
-        eq(schema.jobs.status, "dead"),
-      ),
-    });
+    // jobs RLS 重开（0100）后跨 workspace 维护读经 SECURITY DEFINER 函数
+    //（migrator owner BYPASSRLS）；worker 仅 EXECUTE，不直接读 jobs 全表。
+    const rows = await db.execute<{
+      id: string;
+      type: string;
+      payload: Record<string, unknown> | null;
+      workspace_id: string;
+      requested_by: string | null;
+      attempts: number;
+      generation_run_id: string | null;
+      last_error: string | null;
+    }>(sql`
+      SELECT * FROM public.ailearn_find_reaped_generation_jobs(${reapedIds})
+    `);
+    deadRows = rows.map((row) => ({
+      id: String(row.id),
+      type: String(row.type),
+      payload: row.payload,
+      workspaceId: String(row.workspace_id),
+      requestedBy: row.requested_by,
+      attempts: Number(row.attempts ?? 0),
+      generationRunId: row.generation_run_id,
+      lastError: row.last_error,
+    }));
   } catch (error) {
     logger.error(
       { error: sanitizeOperationalError(error) },
@@ -314,43 +363,7 @@ export async function reconcileTerminalGenerationJobs(): Promise<number> {
   let skippedBatches = 0;
   for (let batch = 0; batch < maxBatches; batch += 1) {
     const rows = await db.execute<{ id: string }>(sql`
-      WITH latest_generation_jobs AS (
-        SELECT DISTINCT ON (generation_unit_id)
-          id,
-          generation_run_id,
-          generation_unit_id,
-          status
-        FROM public.jobs
-        WHERE generation_run_id IS NOT NULL
-          AND generation_unit_id IS NOT NULL
-          AND scheduled_at >= clock_timestamp() - interval '30 days'
-        ORDER BY
-          generation_unit_id,
-          COALESCE(finished_at, started_at, scheduled_at) DESC,
-          id DESC
-      )
-      SELECT latest.id
-      FROM latest_generation_jobs AS latest
-      JOIN public.card_generation_units AS generation_unit
-        ON generation_unit.id = latest.generation_unit_id
-      JOIN public.card_generation_runs AS generation_run
-        ON generation_run.id = latest.generation_run_id
-      WHERE latest.status = 'dead'
-        AND generation_unit.status NOT IN (
-          'succeeded',
-          'terminal_failed',
-          'cancelled',
-          'superseded'
-        )
-        AND generation_run.status NOT IN (
-          'needs_attention',
-          'partial_ready',
-          'succeeded',
-          'cancelled',
-          'superseded'
-        )
-      ORDER BY latest.id
-      LIMIT ${batchSize}
+      SELECT * FROM public.ailearn_latest_dead_generation_job_ids(${batchSize})
     `) as unknown as Array<{ id: string }>;
     if (rows.length === 0) break;
 
@@ -548,7 +561,14 @@ export async function processJob(job: ClaimedJob): Promise<void> {
 // 在固定并发数（QUEUE_CONCURRENCY）的基础上，增加内存使用监控。
 // 当进程堆内存超过阈值时，暂停认领新 job，防止多个重型 job 同时运行导致 OOM。
 // 内存阈值默认为 1.5GB（可通过环境变量 WORKER_MEMORY_LIMIT_MB 配置）。
-const WORKER_MEMORY_LIMIT_MB = Number(process.env.WORKER_MEMORY_LIMIT_MB ?? 1536);
+// 2026-08-11：数值 env 裸 Number() 无校验——非法值（如 "abc"）→ NaN，
+// 内存背压静默失效。解析失败时回退默认值并告警。
+const WORKER_MEMORY_LIMIT_MB = (() => {
+  const raw = Number(process.env.WORKER_MEMORY_LIMIT_MB ?? 1536);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  logger.warn({ raw: process.env.WORKER_MEMORY_LIMIT_MB }, "WORKER_MEMORY_LIMIT_MB 非法，回退 1536");
+  return 1536;
+})();
 // 记录上次跳过认领的时间，避免日志刷屏
 let lastMemorySkipLogAt = 0;
 
@@ -580,6 +600,43 @@ function isMemoryAvailable(): boolean {
 }
 
 const inflight = new Set<Promise<void>>();
+const assessmentOutboxInflight = new Set<Promise<void>>();
+const ASSESSMENT_OUTBOX_LEASE_MS = 120_000;
+// 2026-08-11：workerId 含进程级随机后缀（防多副本 PID 碰撞）
+const ASSESSMENT_OUTBOX_WORKER_ID = `learning-assessment-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+// 2026-08-11：NaN 回退默认 1（非法 env 值此前使 outbox 并发恒 0 静默停摆）
+const ASSESSMENT_OUTBOX_CONCURRENCY = (() => {
+  const raw = Number(process.env.LEARNING_SESSION_ASSESSMENT_OUTBOX_CONCURRENCY ?? 1);
+  return Math.max(1, Math.min(4, Number.isFinite(raw) ? raw : 1));
+})();
+
+async function tickLearningAssessmentOutbox(): Promise<void> {
+  if (process.env.LEARNING_SESSION_ASSESSMENT_OUTBOX_WORKER_ENABLED === "false") return;
+  // 2026-08-11：shuttingDown 时停止 claim（在途 job 由续期/收尾完成）
+  if (shuttingDown) return;
+  const available = ASSESSMENT_OUTBOX_CONCURRENCY - assessmentOutboxInflight.size;
+  for (let index = 0; index < available; index += 1) {
+    // 2026-08-11：workerId 追加随机后缀——容器化多副本 PID 相同（每个 pod
+    // 常为 1），纯 PID 会使 lease_owner 跨实例碰撞（原 owner 迟到的
+    // WHERE lease_owner=... UPDATE 可能误标另一实例正在处理的行）。
+    const job = await claimLearningAssessmentOutbox(
+      ASSESSMENT_OUTBOX_WORKER_ID,
+      ASSESSMENT_OUTBOX_LEASE_MS,
+    );
+    if (!job) return;
+    const promise = processLearningAssessmentOutboxJob(job).then(() => undefined).catch((error) => {
+      logger.error(
+        { jobId: job.id, error: sanitizeOperationalError(error) },
+        "learning assessment outbox processing failed unexpectedly",
+      );
+    });
+    assessmentOutboxInflight.add(promise);
+    promise.then(
+      () => assessmentOutboxInflight.delete(promise),
+      () => assessmentOutboxInflight.delete(promise),
+    );
+  }
+}
 
 async function refreshQueueMetrics(nowMs = Date.now()): Promise<void> {
   if (nowMs - lastQueueMetricsRefreshAt < QUEUE_METRICS_REFRESH_MS) return;
@@ -587,17 +644,10 @@ async function refreshQueueMetrics(nowMs = Date.now()): Promise<void> {
   try {
     const [depthRows, ageRows] = await Promise.all([
       db.execute<{ status: string; total: number }>(sql`
-        SELECT status::text AS status, count(*)::integer AS total
-        FROM public.jobs
-        GROUP BY status
+        SELECT * FROM public.ailearn_queue_job_depth()
       `) as unknown as Promise<Array<{ status: string; total: number }>>,
       db.execute<{ oldest_pending_age_seconds: number }>(sql`
-        SELECT COALESCE(
-          EXTRACT(EPOCH FROM (clock_timestamp() - min(scheduled_at))),
-          0
-        )::double precision AS oldest_pending_age_seconds
-        FROM public.jobs
-        WHERE status = 'pending'
+        SELECT public.ailearn_queue_oldest_pending_age() AS oldest_pending_age_seconds
       `) as unknown as Promise<Array<{ oldest_pending_age_seconds: number }>>,
     ]);
     for (const status of JOB_STATUSES) {
@@ -652,6 +702,17 @@ export async function tick(): Promise<void> {
   // 当进程堆内存超过阈值时，暂停认领新 job，等待现有 job 完成释放内存
   if (!isMemoryAvailable()) return;
 
+  // The Learning Session command outbox is identifier-only. The worker
+  // restores workspace/user RLS context inside the direct application service.
+  try {
+    await tickLearningAssessmentOutbox();
+  } catch (error) {
+    logger.warn(
+      { error: sanitizeOperationalError(error) },
+      "learning assessment outbox poll failed",
+    );
+  }
+
   // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
   // 各 handler 事务中的 advisory lock 保证并发安全：
   //   execute_card_agent_turn — workspace 级锁，同 workspace 串行化
@@ -662,7 +723,24 @@ export async function tick(): Promise<void> {
   const available = QUEUE_CONCURRENCY - inflight.size;
   if (available <= 0) return;
 
-  const candidates = await claimJobs(undefined, available);
+  // 2026-08-11：DB 错误退避——tick 顶层 DB 调用（refreshQueueMetrics/reap/
+  // claimJobs）抛错时，若不做退避会以 POLL_MS 紧循环重试（DB 抖动时放大负载）。
+  // 连续失败指数退避至 POLL_MAX_MS，成功即重置（当前实现退避点：claimJobs；
+  // reap/refresh 抛错经 671 行 tick 的 catch 记录，仍按当前档位重试）。
+  let candidates: ClaimedJob[] = [];
+  try {
+    candidates = await claimJobs(undefined, available);
+  } catch (error) {
+    // 2026-08-11：DB 错误退避——tick 顶层 DB 调用抛错时若不退避会以
+    // POLL_MS 紧循环重试（DB 抖动放大负载）。复用 adaptive 机制指数退避。
+    logger.error(
+      { error: sanitizeOperationalError(error) },
+      "claimJobs failed — backing off",
+    );
+    currentPollMs = Math.min(POLL_MAX_MS, currentPollMs * 2);
+    return;
+  }
+  currentPollMs = POLL_MS;
 
   // QUAL-08: Adaptive polling — reset to fast poll when jobs are found,
   // exponentially back off when queue is idle.
@@ -776,6 +854,20 @@ export async function main() {
   // P0-06b: 定时执行 Supervisor Agent reconciler（每 60 秒）
   const RECONCILER_INTERVAL_MS = 60_000;
   const reconcilerTimer = setInterval(async () => {
+    // 2026-08-12（队列面审计 P1-2）：dead→generation 投影兜底并入周期
+    // reconciler——此前只在启动时跑一次（index.ts:826），job 置 dead 与
+    // checkpoint 投影两个事务之间进程若重启，unit 永久 running 且 /retry
+    // 捞不到，只能靠下次重启修复（生产可能数月不重启）。周期化后最多
+    // 60s 自愈。幂等：ailearn_latest_dead_generation_job_ids 只选每个 unit
+    // 的最新 dead job，projectReapedGenerationJobs 条件更新。
+    try {
+      await reconcileTerminalGenerationJobs();
+    } catch (error) {
+      logger.error(
+        { error: sanitizeOperationalError(error) },
+        "periodic dead-generation projection failed",
+      );
+    }
     try {
       await reconcileSupervisorAgentRuns();
     } catch (error) {
@@ -795,30 +887,41 @@ export async function main() {
       }
       // F-010: 优雅关停 — 不再认领新作业，等待在途 job 完成后退出。
       if (shuttingDown) {
-        if (inflight.size > 0) {
+        if (inflight.size > 0 || assessmentOutboxInflight.size > 0) {
           logger.info(
-            { inflight: inflight.size },
+            {
+              inflight: inflight.size,
+              assessmentOutboxInflight: assessmentOutboxInflight.size,
+            },
             "shutdown signal received, waiting for in-flight jobs to finish…",
           );
           // 修复：优雅关停 drain 必须有界。某个 handler（如底层 provider 调用不响应
           // abort）可能永远不结束，worker 会一直等，最后被 SIGKILL 强杀，在途 job
           // 遗留在 running 状态且 lease 未释放，整个 run 永久卡住（reaper 只在 tick 里跑）。
           // 到点后强制退出，遗留 job 由下一个 worker 启动时的 reapStaleJobs 回收。
+          // 2026-08-11：非法值（NaN）时回退默认 45s——此前 NaN 经 Math.max(1000, NaN)
+          // → NaN，setTimeout(NaN) 立即触发 → 优雅关停变即时强退。
           const drainTimeoutMs = Math.max(
             1_000,
-            Number(process.env.WORKER_DRAIN_TIMEOUT_MS ?? 45_000),
+            Number.isFinite(Number(process.env.WORKER_DRAIN_TIMEOUT_MS ?? 45_000))
+              ? Number(process.env.WORKER_DRAIN_TIMEOUT_MS)
+              : 45_000,
           );
           const drainDeadline = new Promise<void>((resolve) => {
             const t = setTimeout(resolve, drainTimeoutMs);
             t.unref();
           });
           await Promise.race([
-            Promise.allSettled([...inflight]),
+            Promise.allSettled([...inflight, ...assessmentOutboxInflight]),
             drainDeadline,
           ]);
-          if (inflight.size > 0) {
+          if (inflight.size > 0 || assessmentOutboxInflight.size > 0) {
             logger.warn(
-              { inflight: inflight.size, drainTimeoutMs },
+              {
+                inflight: inflight.size,
+                assessmentOutboxInflight: assessmentOutboxInflight.size,
+                drainTimeoutMs,
+              },
               "drain timeout reached, exiting anyway (orphaned running jobs will be reaped by the next worker startup)",
             );
           }

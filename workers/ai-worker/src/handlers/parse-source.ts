@@ -311,6 +311,17 @@ async function resolvePublicAddress(hostname: string): Promise<PinnedAddress> {
   }
 }
 
+/** 日志用 URL 脱敏：只保留 protocol+host+pathname，剥离 query/hash（来源 URL 可能携带敏感参数）。 */
+function stripUrlSensitiveParts(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    // 非标准 URL（如文件路径/相对串）截断到 200 字符
+    return rawUrl.slice(0, 200);
+  }
+}
+
 function getHeader(response: IncomingMessage, name: string): string | undefined {
   const value = response.headers[name.toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
@@ -464,7 +475,7 @@ async function requestPinnedUrl(
             }
             // 可观测性：记录压缩编码和响应大小，便于量化压缩编码分布和解压比
             logger.info(
-              { url: parsed.href, contentEncoding, compressedBytes: compressed.length, decompressedBytes: decompressed.length },
+              { url: stripUrlSensitiveParts(parsed.href), contentEncoding, compressedBytes: compressed.length, decompressedBytes: decompressed.length },
               "URL response decompressed",
             );
             resolve({
@@ -968,9 +979,17 @@ export async function fetchUrlContent(
         || lastError.message.includes("DNS resolution failed")
         || lastError.message.includes("socket hang up");
       if (!isTransient || attempt === FETCH_RETRY_COUNT) break;
-      // 重试触发时记录日志
+      // 重试触发时记录日志（URL 只记 origin+pathname，剥离 query/hash——
+      // 来源 URL 可能携带敏感参数；错误只记类别不记原文，与日志脱敏策略一致）。
       logger.warn(
-        { url, attempt: attempt + 1, errCode: errCode ?? "unknown", errMessage: lastError.message },
+        {
+          url: stripUrlSensitiveParts(url),
+          attempt: attempt + 1,
+          errCode: errCode ?? "unknown",
+          errCategory: lastError instanceof Error
+            ? (lastError as { name?: string }).name
+            : typeof lastError === "string" ? "string" : "unknown",
+        },
         "URL fetch retry triggered",
       );
       // 短暂等待后重试（绑定 signal，job 被 abort 时立即中断延迟）
@@ -1347,7 +1366,7 @@ export async function runParseSource(job: JobPayload) {
 
     // R-014: 如果标记了 fetchUrlContent，执行 HTTP 抓取
     if (fetchUrlContentFlag && url && !rawContent.trim()) {
-      logger.info({ sourceId, url }, "fetching URL content");
+      logger.info({ sourceId, url: stripUrlSensitiveParts(url) }, "fetching URL content");
       try {
         const fetched = await fetchUrlContent(url, job.signal);
         rawContent = fetched.text;
@@ -1404,7 +1423,7 @@ export async function runParseSource(job: JobPayload) {
 
         logger.info({ sourceId, contentLength: fetched.text.length }, "URL content fetched");
       } catch (fetchErr) {
-        logger.error({ sourceId, url, err: fetchErr }, "URL fetch failed");
+        logger.error({ sourceId, url: stripUrlSensitiveParts(url), err: fetchErr }, "URL fetch failed");
         const fetchError = fetchErr instanceof Error ? fetchErr.message : "unknown";
         failureProjection = {
           body: url,

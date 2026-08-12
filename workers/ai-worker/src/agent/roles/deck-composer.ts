@@ -172,17 +172,23 @@ function parseComposerResult(result: AgentTurnResult): DeckComposerTurnOutcome {
             deckTitle: String(proposal.deckTitle ?? ""),
             deckSummary: String(proposal.deckSummary ?? ""),
             cards: Array.isArray(proposal.cards)
-              ? (proposal.cards as Record<string, unknown>[]).map((c) => ({
-                  draftCardId: String(c.draftCardId ?? ""),
-                  canonicalCandidateIds: Array.isArray(c.canonicalCandidateIds)
-                    ? (c.canonicalCandidateIds as string[])
-                    : [],
-                  title: String(c.title ?? ""),
-                  summary: String(c.summary ?? ""),
-                  ordinal: Number(c.ordinal ?? 0),
-                  primarySection: String(c.primarySection ?? ""),
-                  groupKey: c.groupKey ? String(c.groupKey) : undefined,
-                }))
+              ? (proposal.cards as Record<string, unknown>[]).map((c, index) => {
+                  // 2026-08-11：ordinal 只接受有限数值——模型输出非法值
+                  // （NaN/Infinity/非数值字符串）时回退到出现顺序 index，
+                  // 避免 NaN 写进卡片排序导致 publish 后排序错乱。
+                  const rawOrdinal = Number(c.ordinal ?? index);
+                  return {
+                    draftCardId: String(c.draftCardId ?? ""),
+                    canonicalCandidateIds: Array.isArray(c.canonicalCandidateIds)
+                      ? (c.canonicalCandidateIds as string[])
+                      : [],
+                    title: String(c.title ?? ""),
+                    summary: String(c.summary ?? ""),
+                    ordinal: Number.isFinite(rawOrdinal) ? rawOrdinal : index,
+                    primarySection: String(c.primarySection ?? ""),
+                    groupKey: c.groupKey ? String(c.groupKey) : undefined,
+                  };
+                })
               : [],
           },
         };

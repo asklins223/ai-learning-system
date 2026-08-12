@@ -1,4 +1,4 @@
-import { and, eq, lte, sql, inArray } from "drizzle-orm";
+import { and, eq, gte, lte, sql, inArray } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID, type ApiTransaction } from "../../db/client.ts";
 import {
   reviewSchedules,
@@ -104,10 +104,19 @@ export interface SanitizedReviewMeta {
  */
 export async function listReviews(
   workspaceId: string,
-  filter: { status?: string; includeAll?: boolean; limit?: number; offset?: number },
+  filter: {
+    status?: string;
+    includeAll?: boolean;
+    limit?: number;
+    offset?: number;
+    /** 2026-08-11（性能专项）：nextReviewAt 窗口下界（ms） */
+    dueFromMs?: number;
+    /** 2026-08-11（性能专项）：nextReviewAt 窗口上界（ms） */
+    dueToMs?: number;
+  },
   userId?: string,
   tx?: ApiTransaction,
-): Promise<{ items: ReviewWithCard[]; total: number; nextOffset: number | null }> {
+): Promise<{ items: ReviewWithCard[]; total: number; nextCursor: number | null }> {
   // QUAL-58/SEC-26 修复：未提供 tx 时使用 withWorkspaceTransaction 确保 RLS 上下文
   if (!tx) {
     return withWorkspaceTransaction(
@@ -118,24 +127,33 @@ export async function listReviews(
   const queryDb = tx;
   let where;
   const userFilter = userId ? eq(reviewSchedules.userId, userId) : undefined;
+  // 2026-08-11（性能专项）：nextReviewAt 窗口过滤（today 按天拉取）
+  const dueWindow: ReturnType<typeof and>[] = [];
+  if (filter.dueFromMs !== undefined) {
+    dueWindow.push(gte(reviewSchedules.nextReviewAt, new Date(filter.dueFromMs)));
+  }
+  if (filter.dueToMs !== undefined) {
+    dueWindow.push(lte(reviewSchedules.nextReviewAt, new Date(filter.dueToMs)));
+  }
+  const windowFilter = dueWindow.length > 0 ? and(...dueWindow) : undefined;
   if (filter.includeAll) {
     where = userFilter
-      ? and(eq(reviewSchedules.workspaceId, workspaceId), userFilter)
-      : eq(reviewSchedules.workspaceId, workspaceId);
+      ? and(eq(reviewSchedules.workspaceId, workspaceId), userFilter, windowFilter)
+      : and(eq(reviewSchedules.workspaceId, workspaceId), windowFilter);
   } else if (filter.status && filter.status !== ReviewStatus.PENDING) {
     // 非 pending 状态（dismissed/completed 等）不过滤到期
     where = userFilter
-      ? and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, filter.status), userFilter)
-      : and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, filter.status));
+      ? and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, filter.status), userFilter, windowFilter)
+      : and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, filter.status), windowFilter);
   } else {
     // 默认或 status=pending：只返回到期的 pending
     where = userFilter
-      ? and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()), userFilter)
-      : and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()));
+      ? and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()), userFilter, windowFilter)
+      : and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()), windowFilter);
   }
 
   // subject_id is polymorphic and therefore has no database FK. Exclude stale
-  // schedules before count/pagination so `total` and `nextOffset` describe the
+  // schedules before count/pagination so `total` and `nextCursor` describe the
   // same displayable dataset that is hydrated below.
   // v0.6: also handle subjectType='key_point' schedules (计划 §6.6).
   where = and(where, reviewScheduleTargetsConsumableCardPredicate());
@@ -155,7 +173,7 @@ const [totalRow] = await queryDb
     offset,
   });
 
-  if (reviews.length === 0) return { items: [], total, nextOffset: null };
+  if (reviews.length === 0) return { items: [], total, nextCursor: null };
 
   // --- 批量查询关联数据，避免 N+1 ---
 
@@ -212,7 +230,7 @@ const [totalRow] = await queryDb
   }
 
   const cardIds = Array.from(cardIdSet);
-  if (cardIds.length === 0) return { items: [], total, nextOffset: null };
+  if (cardIds.length === 0) return { items: [], total, nextCursor: null };
 
   // 4. 批量查询 learningCards
   const cardRows = await queryDb.query.learningCards.findMany({
@@ -266,10 +284,10 @@ const [totalRow] = await queryDb
       ),
       orderBy: (evidence, { asc }) => [asc(evidence.createdAt), asc(evidence.id)],
     });
-    // N-005: 查询用户级 override
+    // N-005: 查询用户级 override（在事务内执行，传 queryDb 避免回退裸 db）
     const evIds = evRows.map((r) => r.id);
     const userOverrideMap = userId
-      ? await getUserOverrideMap(userId, evIds)
+      ? await getUserOverrideMap(userId, evIds, queryDb)
       : new Map<string, "confirmed" | "downgraded" | "rejected">();
     for (const ev of evRows) {
       if (!evidenceByKpId.has(ev.keyPointId)) {
@@ -386,7 +404,7 @@ const [totalRow] = await queryDb
   return {
     items: out,
     total,
-    nextOffset: consumed < total ? consumed : null,
+    nextCursor: consumed < total ? consumed : null,
   };
 }
 
@@ -404,7 +422,7 @@ export async function listSanitizedReviews(
   filter: { status?: string; includeAll?: boolean; limit?: number; offset?: number },
   userId?: string,
   tx?: ApiTransaction,
-): Promise<{ items: SanitizedReviewItem[]; total: number; nextOffset: number | null }> {
+): Promise<{ items: SanitizedReviewItem[]; total: number; nextCursor: number | null }> {
   // QUAL-58/SEC-26 修复：未提供 tx 时使用 withWorkspaceTransaction 确保 RLS 上下文
   if (!tx) {
     return withWorkspaceTransaction(
@@ -453,7 +471,7 @@ export async function listSanitizedReviews(
       };
     }),
     total: result.total,
-    nextOffset: result.nextOffset,
+    nextCursor: result.nextCursor,
   };
 }
 
@@ -570,7 +588,7 @@ export async function getSanitizedReviewMeta(
         ),
       });
       const userOverrideMap = userId
-        ? await getUserOverrideMap(userId, keyPointEvidences.map((evidence) => evidence.id))
+        ? await getUserOverrideMap(userId, keyPointEvidences.map((evidence) => evidence.id), queryDb)
         : new Map<string, "confirmed" | "downgraded" | "rejected">();
       const hasHardEvidence = keyPointEvidences.some((evidence) => {
         const alignment = userId

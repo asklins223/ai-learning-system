@@ -1,0 +1,6 @@
+API: listening on 127.0.0.1:4000 and completed /ready with HTTP 200.
+Web: Next 15.5.21 started and reported Ready.
+Worker: metrics server started, PostgreSQL LISTEN established, polling for jobs.
+Edge-TTS: container healthy.
+No new Module not found, API/Worker crash, migration/RLS, preload, or renderer error appeared in the checked log window.
+The required dev compose web build inherits NODE_ENV=development and fails on the existing Next /404 <Html> error; the same container build passes with NODE_ENV=production.

@@ -8,7 +8,9 @@ x-dev-database: &dev-database
   DATABASE_URL: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
   DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
   DATABASE_URL_API: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
-  DATABASE_URL_WORKER: postgres://ailearn:ailearn_dev@postgres:5432/ailearn
+  # Worker must use the restricted role; learning-session outbox RLS grants
+  # queue-wide claim access only to ailearn_worker.
+  DATABASE_URL_WORKER: postgres://ailearn_worker:ailearn_dev@postgres:5432/ailearn
 
 services:
   postgres:
@@ -161,6 +163,9 @@ services:
       PORT: 4000
       CORS_ORIGIN: http://localhost:3000
       TRUST_PROXY: loopback,linklocal,uniquelocal
+      # Dev-only explicit grant signing secret（compose 显式配置，非代码回退）：
+      # 未配置 AUTH_SURFACE_MANIFEST_SECRET 时 companion grant 签发 fail-closed 503。
+      AUTH_SURFACE_MANIFEST_SECRET: ailearn-dev-auth-surface-secret
       AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-memory}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
@@ -168,6 +173,16 @@ services:
       # and shadow paths. Production remains fail-closed unless explicitly set.
       SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v2}
       FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-true}
+      # P4 current Mao PRO model: explicit dev opt-in for Live2D capability.
+      COMPANION_LIVE2D_V1_ENABLED: ${COMPANION_LIVE2D_V1_ENABLED:-true}
+      # The development stack runs the approved P2/P3/P5 vertical slices by
+      # default. Production remains fail-closed in docker-compose.yml and
+      # must opt in explicitly with deployment-owned environment variables.
+      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-true}
+      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-true}
+      COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-true}
+      COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
+      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-true}
       # AI platform config — all provider/capability config in one JSON file.
       AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
@@ -185,6 +200,10 @@ services:
       # Force polling so tsx watch actually picks up source changes.
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "1000"
+      # Dev-only internal verification: expose the real Session/Tutor routes,
+      # while canonical mastery/schedule writes remain fail-closed.
+      LEARNING_SESSION_V2_INTERNAL: ${LEARNING_SESSION_V2_INTERNAL:-true}
+      LEARNING_SESSION_CANONICAL_COMMIT_ENABLED: ${LEARNING_SESSION_CANONICAL_COMMIT_ENABLED:-false}
       # Image upload: MinIO/S3 storage endpoint and credentials.
       # Must match the dev minio service's MINIO_ROOT_USER/PASSWORD below.
       STORAGE_ENDPOINT: http://minio:9000
@@ -229,6 +248,14 @@ services:
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
       API_INTERNAL_URL: http://api:4000
+      # Keep worker-side execution authorization aligned with the API
+      # bootstrap/routes; otherwise the API accepts a turn that the worker
+      # immediately rejects as feature-disabled.
+      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-true}
+      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-true}
+      COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-true}
+      COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
+      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-true}
       # Explicit development opt-ins for v0.6 worker write paths.
       AI_QUESTION_V1_ENABLED: ${AI_QUESTION_V1_ENABLED:-true}
       RUBRIC_EVALUATION_V1_ENABLED: ${RUBRIC_EVALUATION_V1_ENABLED:-true}
@@ -277,6 +304,8 @@ services:
       NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: ${NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED:-true}
       NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: ${NEXT_PUBLIC_AI_QUESTION_V1_ENABLED:-true}
       NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: ${NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED:-true}
+      NEXT_PUBLIC_COMPANION_PET_ENABLED: ${NEXT_PUBLIC_COMPANION_PET_ENABLED:-true}
+      NEXT_PUBLIC_COMPANION_V2_INTERNAL: ${NEXT_PUBLIC_COMPANION_V2_INTERNAL:-true}
       NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: ${NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED:-true}
       # Agent 活动流控制台（可选增强，fail-closed：默认关）
       NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: ${NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED:-false}
@@ -286,9 +315,20 @@ services:
       - ./apps/web/public:/app/public:ro
       - ./apps/web/app:/app/app
       - ./apps/web/components:/app/components
+      - ./apps/web/features:/app/features
       - ./apps/web/lib:/app/lib
+      # 2026-08-11：middleware.ts 是根级文件，dev 卷只挂子目录——不挂载则
+      # 容器内无 middleware，服务端鉴权不生效。
+      - ./apps/web/middleware.ts:/app/middleware.ts
       - ./packages/shared/src:/tmp/shared/src
       - ./packages/shared/package.json:/tmp/shared/package.json:ro
+    # 2026-08-12（构建面审计 P2-3）：web 服务健康检查（此前无 readiness 信号）
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     networks:
       - ailearn_net
 

@@ -1263,6 +1263,10 @@ html[data-theme="night"] .login-submit:hover:not(:disabled) {
     linear-gradient(180deg, color-mix(in srgb, var(--color-paper-muted) 88%, var(--color-surface-raised)), var(--color-paper-muted));
 }
 
+[data-ui="register-page"] .register-context > * {
+  flex-shrink: 0;
+}
+
 [data-ui="register-page"] .register-context::after {
   content: "";
   position: absolute;
@@ -1321,7 +1325,7 @@ html[data-theme="night"] .login-submit:hover:not(:disabled) {
 [data-ui="register-page"] .register-context-copy {
   position: relative;
   z-index: 1;
-  margin-top: clamp(48px, 6vh, 72px);
+  margin-top: clamp(24px, 3vh, 40px);
   padding-left: 23px;
 }
 
@@ -1434,9 +1438,9 @@ html[data-theme="night"] .login-submit:hover:not(:disabled) {
   display: flex;
   align-items: flex-start;
   gap: 9px;
-  margin-top: auto;
+  margin-top: 12px;
   margin-left: 22px;
-  padding-top: 20px;
+  padding-top: 12px;
   color: var(--color-text-secondary);
 }
 
@@ -2346,8 +2350,8 @@ html[data-theme="night"] [data-ui="register-page"] .register-section-invite {
   position: relative;
   z-index: 1;
   display: grid;
-  gap: 10px;
-  margin: clamp(30px, 4vh, 42px) 0 0 22px;
+  gap: 9px;
+  margin: clamp(16px, 2.5vh, 24px) 0 0 22px;
   padding: 0;
   list-style: none;
 }

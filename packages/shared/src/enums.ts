@@ -81,6 +81,12 @@ export const JobType = {
   GENERATE_VALIDATION_QUESTION: "generate_validation_question",
   // Supervisor Agent v1：唯一 Agent job type（计划 §5.2）
   EXECUTE_CARD_AGENT_TURN: "execute_card_agent_turn",
+  // P2 companion dialogue：日常对话流式回复（03 §8.1）
+  COMPANION_DIALOGUE: "companion_dialogue",
+  COMPANION_ACTION: "companion_action",
+  // 2026-08-11：learning_session_assess 已由 worker 消费（metrics allowlist 含），
+  // 枚举此前缺失导致类型标注无法引用该 job type。
+  LEARNING_SESSION_ASSESS: "learning_session_assess",
 } as const;
 export type JobType = (typeof JobType)[keyof typeof JobType];
 
@@ -113,6 +119,19 @@ export const AssessmentSource = {
   USER_DECLARED_UNABLE: "user_declared_unable",
 } as const;
 export type AssessmentSource = (typeof AssessmentSource)[keyof typeof AssessmentSource];
+
+/**
+ * 学习会话域评估来源（2026-08-12 契约收口；SQL 0074 CHECK 为权威，
+ * worker 本地 ASSESSMENT_SOURCES 双份定义已收口到此）。
+ * 注意与 validation 域 AssessmentSource 同名不同值域——两域分开命名。
+ */
+export const LearningAssessmentSource = {
+  DETERMINISTIC: "deterministic",
+  CRITIC: "critic",
+  USER_DECLARED_UNABLE: "user_declared_unable",
+} as const;
+export type LearningAssessmentSource =
+  (typeof LearningAssessmentSource)[keyof typeof LearningAssessmentSource];
 
 /** Validation submission status (计划 §6.4) */
 export const SubmissionStatus = {

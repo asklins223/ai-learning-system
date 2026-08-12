@@ -7,6 +7,7 @@ import {
 } from "./ai-endpoints.ts";
 import {
   isNonPublicAIEndpointAddress,
+  postSseToPublicEndpoint,
   postJsonToPublicEndpoint,
 } from "./public-json-http.ts";
 import {
@@ -90,6 +91,13 @@ describe("public endpoint address policy", () => {
   it("rejects a private literal endpoint before opening a socket", async () => {
     await assert.rejects(
       postJsonToPublicEndpoint("https://127.0.0.1/v1/chat/completions", {}, {}),
+      /non-public address/,
+    );
+  });
+
+  it("applies the same SSRF guard to streaming endpoints", async () => {
+    await assert.rejects(
+      postSseToPublicEndpoint("https://127.0.0.1/v1/chat/completions", {}, {}),
       /non-public address/,
     );
   });

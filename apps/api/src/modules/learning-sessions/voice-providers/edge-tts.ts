@@ -91,9 +91,12 @@ export async function edgeTtsSynthesize(
       signal: controller.signal,
     });
   } catch (err) {
+    // 不把 err.message / EDGE_TTS_BASE_URL / docker 配置提示透出（security_review MEDIUM
+    // 延续：内部配置不进入客户端可见 message；排查细节应进服务端日志，不进响应体）。
+    void err;
     throw new EdgeTtsError(
       "NETWORK_ERROR",
-      `edge-tts 容器不可达：${err instanceof Error ? err.message : String(err)}（检查 EDGE_TTS_BASE_URL 与 docker compose 中 edge-tts 服务）`,
+      "语音合成服务暂时不可达（edge-tts 网络错误）",
     );
   } finally {
     clearTimeout(timer);
@@ -113,4 +116,74 @@ export async function edgeTtsSynthesize(
     throw new EdgeTtsError("EMPTY_AUDIO", "edge-tts 返回空音频（fail closed）");
   }
   return { audio, voice: effectiveVoice, contentType };
+}
+
+export interface EdgeTtsStreamResult {
+  /** 上游 audio/mpeg 流（ReadableStream 透传，禁止 arrayBuffer 全量缓冲） */
+  stream: ReadableStream<Uint8Array>;
+  voice: string;
+  contentType: string;
+}
+
+/**
+ * P6 §13：edge-tts 流式合成（POST /v1/audio/speech/stream → chunked）。
+ * 与 edgeTtsSynthesize 的区别：返回 ReadableStream 透传（不 arrayBuffer），
+ * 供 /voice/tts/stream 边收边播；timeout 只覆盖「响应头到达前」（首字节），
+ * 头到达后不再整体 abort（长句流式）。
+ */
+export async function edgeTtsSynthesizeStream(
+  text: string,
+  voice: string,
+  options: EdgeTtsProviderOptions = {},
+): Promise<EdgeTtsStreamResult> {
+  if (typeof text !== "string" || text.trim() === "") {
+    throw new EdgeTtsError("INVALID_ARGUMENT", "TTS 文本为空（fail closed）");
+  }
+  const baseUrl = (options.baseUrl ?? process.env.EDGE_TTS_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+  const effectiveVoice = voice || (options.voice ?? DEFAULT_VOICE);
+  const rate = options.rate ?? "+0%";
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const authToken = options.authToken ?? process.env.EDGE_TTS_AUTH_TOKEN;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (authToken) headers["X-Edge-TTS-Token"] = authToken;
+    response = await fetchImpl(`${baseUrl}/v1/audio/speech/stream`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "edge-tts",
+        input: text,
+        voice: effectiveVoice,
+        rate,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    void err;
+    throw new EdgeTtsError(
+      "NETWORK_ERROR",
+      "语音合成服务暂时不可达（edge-tts 网络错误）",
+    );
+  } finally {
+    clearTimeout(timer); // 头到达后不再整体超时（流式长句）
+  }
+
+  if (!response.ok) {
+    await response.text().catch(() => "");
+    throw new EdgeTtsError(
+      "UPSTREAM_ERROR",
+      `edge-tts HTTP ${response.status}（内部细节不向用户透出）`,
+      response.status,
+    );
+  }
+  const contentType = response.headers.get("content-type") ?? "audio/mpeg";
+  if (!response.body) {
+    throw new EdgeTtsError("EMPTY_AUDIO", "edge-tts 无响应体（fail closed）");
+  }
+  return { stream: response.body, voice: effectiveVoice, contentType };
 }

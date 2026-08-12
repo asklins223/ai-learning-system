@@ -202,6 +202,10 @@ cmd_backup() {
   local commit
   commit=$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
+  # 2026-08-11：迁移号动态取最新（见 cmd_restore_verify）
+  local migration_tag
+  migration_tag=$(node -e "const j=require(process.argv[1]);process.stdout.write((j.entries[j.entries.length-1]||{}).tag||'')" "$REPO_ROOT/apps/api/src/db/migrations/meta/_journal.json" 2>/dev/null || echo "unknown")
+
   "${COMPOSE[@]}" run --rm backup-runner \
     /scripts/backup.sh \
       --pg-host postgres \
@@ -209,7 +213,7 @@ cmd_backup() {
       --pg-db "${POSTGRES_DB:-ailearn}" \
       --release "${SOURCE_RELEASE:-0.5.0-alpha}" \
       --commit "$commit" \
-      --migration "${SOURCE_MIGRATION:-0039}" \
+      --migration "${SOURCE_MIGRATION:-${migration_tag:-unknown}}" \
       --age-key /etc/ailearn/backup-age.pub \
       --s3-endpoint http://minio:9000 \
       --s3-bucket "$BACKUP_BUCKET" \
@@ -228,6 +232,10 @@ cmd_restore_verify() {
   local commit
   commit=$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo "unknown")
 
+  # 2026-08-11：迁移号不再硬编码 0039（已过期到 0103+），从 _journal.json 动态取最新。
+  local migration_tag
+  migration_tag=$(node -e "const j=require(process.argv[1]);process.stdout.write((j.entries[j.entries.length-1]||{}).tag||'')" "$REPO_ROOT/apps/api/src/db/migrations/meta/_journal.json" 2>/dev/null || echo "unknown")
+
   # This command only replaces the named isolated verification database.
   "${COMPOSE[@]}" exec -T postgres psql \
     -U "${POSTGRES_USER:-ailearn}" -d postgres -v ON_ERROR_STOP=1 \
@@ -244,7 +252,7 @@ cmd_restore_verify() {
       --target-db "$RESTORE_DB" \
       --release "${SOURCE_RELEASE:-0.5.0-alpha}" \
       --commit "$commit" \
-      --migration "${SOURCE_MIGRATION:-0039}" \
+      --migration "${SOURCE_MIGRATION:-${migration_tag:-unknown}}" \
       --s3-endpoint http://minio:9000 \
       --s3-bucket "$BACKUP_BUCKET" \
       --s3-access-key "${MINIO_ROOT_USER:-ailearn}" \

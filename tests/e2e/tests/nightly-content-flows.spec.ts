@@ -501,9 +501,8 @@ test.describe("Data boundary — 51 item pagination @nightly", () => {
     await expect(visibleQueueCount).toBeVisible({ timeout: 10_000 });
     const loadedCount = Number.parseInt((await visibleQueueCount.textContent()) ?? "", 10);
     expect(loadedCount).toBeGreaterThanOrEqual(40);
-    await expect(page.getByRole("button", { name: "完成本轮" })).toBeVisible({
-      timeout: 10_000,
-    });
+    // 2026-08-11：v0.5 的"完成本轮"按钮已随 UI 删除——队列计数断言保留
+    // （对 v0.6 仍有效），按钮断言移除。
   });
 });
 

@@ -5,9 +5,11 @@ import { createHash } from "node:crypto";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
+import { preRegisterImageAssetsForImport } from "../../lib/image-asset.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { markdownToBlocks, extractTitleFromBlocks } from "../../lib/markdown-parser.ts";
+import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
 import { upsertSearchDocument } from "../../lib/search-index.ts";
 import { logger } from "../../lib/logger.ts";
 
@@ -218,6 +220,28 @@ export async function importRoutes(app: FastifyInstance) {
       originalIndex,
       itemKey: computeItemKey(item.title, item.content),
     }));
+
+    // PERF 专项遗留修复：图片资产预注册移到业务事务外——
+    // MinIO 下载/校验/入库不再占持导入主事务连接（批量导入 100 篇时
+    // 每篇内嵌事务中的网络 IO 全部消除）。事务内 ensureImageAssetsForBlocks
+    // 退化为纯查询（预注册后 missingKeys=0）。
+    {
+      const imageKeys = new Set<string>();
+      for (const item of requestedItems) {
+        for (const block of markdownToBlocks(item.content)) {
+          if (block.type !== "image") {
+            continue;
+          }
+          const key = extractObjectKeyFromMarkdownImage(block.content);
+          if (key) {
+            imageKeys.add(key);
+          }
+        }
+      }
+      if (imageKeys.size > 0) {
+        await preRegisterImageAssetsForImport(workspaceId, [...imageKeys], userId);
+      }
+    }
 
     // G-006: 无 importId 时不做幂等检查，直接导入
     // BUG-70 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）

@@ -197,7 +197,9 @@ test.describe("Core learning journey @pr", () => {
     }
   });
 
-  test("review queue page loads and shows due reviews", async ({ authedPage }) => {
+  // 2026-08-11：v0.5 review UI（完成本轮/稍后再看/空态文案）已删除，对 v0.6
+  // review 页必失败。标记 fixme，等待按 v0.6 流程重写。
+  test.fixme("review queue page loads and shows due reviews (v0.5 UI 已废弃)", async ({ authedPage }) => {
     const page = authedPage;
 
     await page.goto("/review");

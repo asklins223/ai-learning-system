@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, IDENTITY_CHANGED_EVENT, type CurrentUser } from "@/lib/api";
 
 /**
@@ -18,20 +18,30 @@ export function useCurrentUser(): {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  // 竞态守卫：连续 reload（IDENTITY_CHANGED_EVENT 快速触发）时，
+  // 只允许最后一次请求的响应落地，旧响应不得覆盖新响应。
+  const reloadSeqRef = useRef(0);
 
   const reload = useCallback(() => {
+    const seq = reloadSeqRef.current + 1;
+    reloadSeqRef.current = seq;
     setLoading(true);
     setError(false);
     void api.getMe()
       .then((user) => {
+        if (reloadSeqRef.current !== seq) return;
         setCurrentUser(user);
         setError(false);
       })
       .catch(() => {
+        if (reloadSeqRef.current !== seq) return;
         setCurrentUser(null);
         setError(true);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (reloadSeqRef.current !== seq) return;
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {

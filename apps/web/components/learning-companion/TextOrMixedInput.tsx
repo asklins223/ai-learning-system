@@ -119,17 +119,21 @@ export function TextOrMixedInput({
   const blockedAsUnedited = fromTranscript && !edited;
 
   // 本地展示用 hash 预览（确定性；不影响提交校验）。仅在浏览器运行。
+  // 防抖 300ms：快速输入时避免每次按键都发起一次 async hash 计算。
   useEffect(() => {
     if (text.trim().length === 0) {
       setHashPreview(null);
       return;
     }
     let cancelled = false;
-    void computeTextContentHashPreview(text).then((hash) => {
-      if (!cancelled) setHashPreview(hash);
-    });
+    const timer = window.setTimeout(() => {
+      void computeTextContentHashPreview(text).then((hash) => {
+        if (!cancelled) setHashPreview(hash);
+      });
+    }, 300);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [text]);
 
@@ -177,11 +181,11 @@ export function TextOrMixedInput({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium text-ink" id={hintId}>
-          文字回答（text_or_mixed）
+          文字回答
         </p>
         <span className="inline-flex min-h-[44px] items-center gap-1.5 rounded-pill bg-surface-soft px-3 text-xs text-muted">
           <Icon.Lock aria-hidden="true" className="size-3.5" />
-          <span>原始文本将以确定性哈希原样绑定</span>
+          <span>回答会和本题绑定，方便之后继续</span>
         </span>
       </div>
 
@@ -232,16 +236,16 @@ export function TextOrMixedInput({
       {/* 手工编辑标记：来源保留，不伪装为纯 voice（§7.2） */}
       {edited ? (
         <p className="text-xs text-muted" data-testid="text-or-mixed-edited-flag">
-          已修改语音转写：将以 text_or_mixed 模态创建新 Artifact
-          {sourceArtifactId ? "，并保留来源（supersedes）" : ""}，不再视为纯语音。
+          已修改语音转写：将以文字回答提交
+          {sourceArtifactId ? "，并保留原始转写来源" : ""}，不再视为纯语音。
         </p>
       ) : null}
 
       {/* hash 语义：确定性绑定预览（仅展示；校验以服务端为准） */}
       <p className="break-all font-mono text-[11px] leading-relaxed text-faint">
         {hashPreview
-          ? `content hash 预览：${hashPreview}`
-          : "提交时将由服务端生成确定性内容 hash 并绑定到本题。"}
+          ? "回答内容将在提交时生成校验标记并绑定到本题。"
+          : "提交时会为回答生成校验标记并绑定到本题。"}
       </p>
 
       {error ? (
@@ -276,7 +280,7 @@ export function TextOrMixedInput({
 
       {submitted ? (
         <p className="text-sm text-success-text" role="status">
-          文字回答已锁定提交（text_or_mixed），可与本题的语音/结构式证明同级进入评估。
+          文字回答已锁定提交，可与本题的语音或结构式证明进入评估。
         </p>
       ) : null}
     </div>

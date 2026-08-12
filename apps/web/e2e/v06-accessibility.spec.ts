@@ -12,6 +12,15 @@
  */
 
 import { test, expect } from "@playwright/test";
+import {
+  skipIfNoServer,
+  authenticatedBeforeEach,
+  TEST_CARD_ID,
+} from "./helpers.ts";
+
+// 2026-08-12（e2e 质量审计 P1-1）：受保护页面统一真实登录
+authenticatedBeforeEach();
+
 import AxeBuilder from "@axe-core/playwright";
 
 const VIEWPORTS = {
@@ -27,10 +36,10 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
 
   for (const [name, viewport] of Object.entries(VIEWPORTS)) {
     test(`Focus page: axe-core WCAG 2.2 AA at ${name}`, async ({ page }) => {
-      test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+          skipIfNoServer();
 
       await page.setViewportSize(viewport);
-      await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+      await page.goto(`/cards/${TEST_CARD_ID}/validate`);
       await page.waitForLoadState("networkidle");
 
       const accessibilityScanResults = await new AxeBuilder({ page })
@@ -49,9 +58,9 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
   // ─── Keyboard navigation (计划 §9.5: "纯键盘路径") ────────────────────────
 
   test("Focus page: keyboard-only navigation", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     // Tab through the page — all interactive elements should be reachable
@@ -74,10 +83,10 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
   // ─── Touch target size (计划 §9.5: "触控目标至少 44×44") ────────────────
 
   test("Focus page: touch targets are at least 44x44px", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
     await page.setViewportSize(VIEWPORTS.mobile);
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     // Get all buttons
@@ -106,10 +115,10 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
   // ─── 200% zoom (计划 §9.5: "支持 200% zoom") ────────────────────────────
 
   test("Focus page: no horizontal overflow at 200% zoom", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
     await page.setViewportSize(VIEWPORTS.desktop);
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     // Set 200% zoom
@@ -127,7 +136,7 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
   // ─── Reduced motion (计划 §9.5: "支持 reduced motion") ──────────────────
 
   test("Focus page: respects prefers-reduced-motion", async ({ browser }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
     const context = await browser.newContext({
       colorScheme: "light",
@@ -135,19 +144,47 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
     });
     const reducedMotionPage = await context.newPage();
 
-    await reducedMotionPage.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await reducedMotionPage.goto(`/cards/${TEST_CARD_ID}/validate`);
     await reducedMotionPage.waitForLoadState("networkidle");
 
-    // Check that animations are disabled
-    const hasReducedMotion = await reducedMotionPage.evaluate(() => {
-      const styles = window.getComputedStyle(document.body);
-      // Check if transition is none or duration is 0
-      const transition = styles.transition;
-      return transition === "none" || transition.includes("0s");
-    });
+    // 2026-08-12（P1-2 修复）：此前只断言 body transition（body 几乎永无
+    // 过渡样式 → 恒真）。改为三段真验证：
+    // 1) 上下文确实以 reduce 启动（matchMedia 真值）；
+    // 2) 样式表存在针对具体动画类的 reduced-motion 清零规则
+    //    （card-detail.css:3691 .card-detail-loading>div animation:none 等）；
+    // 3) 页面无任何非零 animation/transition 元素（清零规则实际生效）。
+    const reduced = await reducedMotionPage.evaluate(() =>
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    expect(reduced).toBe(true);
 
-    // In reduced motion mode, transitions should be disabled or shortened
-    expect(hasReducedMotion).toBe(true);
+    const reducedMotionRules = await reducedMotionPage.evaluate(() => {
+      let found = false;
+      for (const sheet of Array.from(document.styleSheets)) {
+        try {
+          for (const rule of Array.from(sheet.cssRules)) {
+            if (rule instanceof CSSMediaRule
+              && rule.conditionText.includes("prefers-reduced-motion")
+              && /animation\s*:\s*none|transition\s*:\s*none/i.test(rule.cssText)) {
+              found = true;
+            }
+          }
+        } catch {
+          // 跨源样式表不可读——跳过
+        }
+      }
+      return found;
+    });
+    expect(reducedMotionRules).toBe(true);
+
+    const animatedCount = await reducedMotionPage.evaluate(() => {
+      const els = Array.from(document.querySelectorAll<HTMLElement>("*"));
+      return els.filter((el) => {
+        const s = window.getComputedStyle(el);
+        return s.animationName !== "none"
+          || (s.transitionDuration !== "0s" && s.transitionDuration !== "");
+      }).length;
+    });
+    expect(animatedCount).toBe(0);
 
     await reducedMotionPage.close();
     await context.close();
@@ -156,9 +193,9 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
   // ─── Color contrast (WCAG 2.2 AA) ──────────────────────────────────────
 
   test("Focus page: color contrast meets WCAG AA", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     const results = await new AxeBuilder({ page })
@@ -176,50 +213,61 @@ test.describe("v0.6 Accessibility (计划 §9.5, §10.4)", () => {
   // ─── ARIA roles and labels ──────────────────────────────────────────────
 
   test("Focus page: ARIA roles and labels present", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
     // Check for aria-label on interactive elements — buttons without aria-label
     // must have visible text content to serve as accessible name (WCAG 4.1.2)
-    const buttonsWithoutLabel = await page.locator("button:not([aria-label]):not([aria-labelledby])").count();
-    // Buttons without explicit aria-label should still have text content as accessible name
-    // If there are buttons without label, verify they all have text content
-    if (buttonsWithoutLabel > 0) {
-      const visibleButtons = page.locator("button:visible");
-      const visibleCount = await visibleButtons.count();
-      for (let i = 0; i < visibleCount; i++) {
-        const btn = visibleButtons.nth(i);
-        const text = (await btn.textContent()) ?? "";
-        const ariaLabel = await btn.getAttribute("aria-label");
-        const ariaLabelledby = await btn.getAttribute("aria-labelledby");
-        // At least one of these must be present and non-empty
-        expect(text.trim().length > 0 || ariaLabel || ariaLabelledby).toBe(true);
-      }
-    }
+    // 2026-08-11：此前循环内断言恒真（任一文本或 label 即过），且循环被
+    // if (buttonsWithoutLabel > 0) 包裹——无按钮时整个检查空转。改为直接统计
+    // 无可访问名的可见按钮数，必须为 0。
+    const inaccessibleButtons = await page.locator("button:visible").evaluateAll(
+      (buttons) => buttons.filter(
+        (button) => !((button.textContent ?? "").trim()
+          || button.getAttribute("aria-label")
+          || button.getAttribute("aria-labelledby")),
+      ).length,
+    );
+    expect(inaccessibleButtons).toBe(0);
 
-    // Check for role=alert for error messages — verified at source level in v06-keyboard-a11y.test.ts
-    const alertElements = await page.locator("[role='alert']").count();
-    // alert elements should only appear for error states (not always present)
-    expect(alertElements).toBeGreaterThanOrEqual(0);
-
-    // Check for radiogroup for confidence selection — verified at source level
-    const radioGroup = await page.locator("[role='radiogroup']").count();
-    // Confidence radio group should exist when question is shown (may be 0 if no question loaded)
-    expect(radioGroup).toBeGreaterThanOrEqual(0);
+    // 2026-08-11：删除恒真断言（alertElements >= 0 / radioGroup >= 0 无意义），
+    // 保留"页面实际渲染"底线：body 有可见文本内容。
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText.length).toBeGreaterThan(0);
   });
 
   // ─── Status not solely dependent on color (计划 §9.5) ───────────────────
 
   test("Focus page: outcome status has text labels, not just color", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
 
-    await page.goto("/cards/00000000-0000-0000-0000-000000000001/validate");
+    await page.goto(`/cards/${TEST_CARD_ID}/validate`);
     await page.waitForLoadState("networkidle");
 
-    // The source-level test (v06-keyboard-a11y.test.ts) verifies the component
-    // source contains text labels like "已基本掌握", "还差一点", etc.
-    // This E2E test would verify at runtime if needed
+    // 2026-08-12（P1-3 修复）：此前测试体为空（恒通过）。结果状态的
+    // “文本标签不依赖颜色”契约分两层验证：
+    // 1) 运行时：结果区（若渲染）必须携带非空文本；
+    // 2) 源码契约：getOutcomeMeta 的 3 个 outcome label 均为文本且渲染处
+    //    使用 label 字段（颜色只作 tone 辅助）——读组件源码静态断言。
+    const outcome = page.locator(".validation-focus-result-outcome");
+    if ((await outcome.count()) > 0) {
+      await expect(outcome.first()).not.toBeEmpty();
+    }
+
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "../../components/ValidationFocus.tsx"),
+      "utf8",
+    );
+    // 三个 outcome label 必须存在（文本标签）
+    for (const label of ["已基本掌握", "还差一点", "存在理解偏差"]) {
+      expect(source).toContain(`label: "${label}"`);
+    }
+    // 渲染处使用 label 而非仅 tone（颜色不能是唯一区分）
+    expect(source).toMatch(/meta\.label/);
+    expect(source).toMatch(/className={\`validation-focus-result-outcome[^}]*\$\{meta\.tone\}/);
   });
 });

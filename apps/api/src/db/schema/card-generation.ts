@@ -141,7 +141,8 @@ export const cardGenerationRuns = pgTable(
     ),
     engineModeIdx: index("card_generation_runs_engine_mode_idx")
       .on(t.workspaceId, t.engineMode, t.status, t.updatedAt),
-  }),
+
+    workspaceIdVersionUnique: uniqueIndex("card_generation_runs_workspace_id_version_unique_idx").on(t.workspaceId, t.id, t.noteVersionId),}),
 );
 
 export const cardGenerationEvents = pgTable(
@@ -227,6 +228,9 @@ export const noteEvidenceSpans = pgTable(
       .on(t.workspaceId, t.noteVersionId, t.unitKey),
     blockOrdinalIdx: index("note_evidence_spans_block_ordinal_idx")
       .on(t.workspaceId, t.noteVersionId, t.blockId, t.ordinal),
+    // 2026-08-12（generate 对齐）：0044 租户安全复合唯一
+    workspaceVersionIdUnique: uniqueIndex("note_evidence_spans_workspace_version_id_unique_idx")
+      .on(t.workspaceId, t.noteVersionId, t.id),
   }),
 );
 
@@ -262,6 +266,9 @@ export const noteImageInsights = pgTable(
       .on(t.workspaceId, t.imageAssetId, t.cacheKey),
     statusIdx: index("note_image_insights_status_idx")
       .on(t.workspaceId, t.status, t.updatedAt),
+    // 2026-08-12（generate 对齐）：0044 租户安全复合唯一
+    workspaceIdAssetUnique: uniqueIndex("note_image_insights_workspace_id_asset_unique_idx")
+      .on(t.workspaceId, t.id, t.imageAssetId),
   }),
 );
 
@@ -291,6 +298,9 @@ export const noteImageEvidenceUnits = pgTable(
       .on(t.workspaceId, t.imageInsightId, t.unitKey),
     assetOrdinalIdx: index("note_image_evidence_units_asset_ordinal_idx")
       .on(t.workspaceId, t.imageAssetId, t.ordinal),
+    // 2026-08-12（generate 对齐）：0044 租户安全复合唯一
+    workspaceInsightIdUnique: uniqueIndex("note_image_evidence_units_workspace_insight_id_unique_idx")
+      .on(t.workspaceId, t.imageInsightId, t.id),
   }),
 );
 
@@ -428,7 +438,8 @@ export const cardGenerationCandidates = pgTable(
       .on(t.workspaceId, t.runId, t.validationStatus, t.sectionKey),
     runKindIdx: index("card_generation_candidates_run_kind_idx")
       .on(t.workspaceId, t.runId, t.candidateKind, t.validationStatus),
-  }),
+
+    bundleIdx: index("card_generation_candidates_bundle_idx").on(t.workspaceId, t.runId, t.bundleId),}),
 );
 
 export const cardGenerationCandidateEvidence = pgTable(

@@ -167,7 +167,7 @@ describe("applyRedaction", () => {
           reasonCode: "user_request",
           deletionScope: "answer_content",
         }),
-        (err: unknown) => err instanceof RedactionServiceError && err.code === "NOT_LOCKED",
+        (err: unknown) => err instanceof RedactionServiceError && err.code === "not_locked",
         `status=${status} 应 fail closed`,
       );
     }
@@ -185,7 +185,7 @@ describe("applyRedaction", () => {
         reasonCode: "user_request",
         deletionScope: "answer_content",
       }),
-      (err: unknown) => err instanceof RedactionServiceError && err.code === "ALREADY_REDACTED",
+      (err: unknown) => err instanceof RedactionServiceError && err.code === "already_redacted",
     );
     assert.throws(
       () => applyRedaction({
@@ -198,7 +198,7 @@ describe("applyRedaction", () => {
         reasonCode: "",
         deletionScope: "answer_content",
       }),
-      (err: unknown) => err instanceof RedactionServiceError && err.code === "MISSING_REDACTION_REASON",
+      (err: unknown) => err instanceof RedactionServiceError && err.code === "missing_redaction_reason",
     );
     assert.throws(
       () => applyRedaction({
@@ -211,7 +211,7 @@ describe("applyRedaction", () => {
         reasonCode: "user_request",
         deletionScope: "raw_audio",
       }),
-      (err: unknown) => err instanceof RedactionServiceError && err.code === "RAW_AUDIO_ONLY_NOT_REDACTION",
+      (err: unknown) => err instanceof RedactionServiceError && err.code === "raw_audio_only_not_redaction",
     );
   });
 });
@@ -268,7 +268,7 @@ describe("redactionCascade", () => {
     const plan = buildRedactionCascade("artifact-1", "full");
     const executor: RedactionExecutor = {
       applyStep: async () => {
-        throw new RedactionServiceError("执行失败", "EXECUTION_FAILED");
+        throw new RedactionServiceError("执行失败", "execution_failed");
       },
     };
     await assert.rejects(() => applyRedactionCascade(plan, executor), RedactionServiceError);
@@ -292,7 +292,7 @@ describe("contentScan", () => {
     assert.ok(result.hits.length >= 3, "DB/queue/cache 残留应被命中");
     assert.throws(
       () => assertResidualFree(result),
-      (err: unknown) => err instanceof RedactionServiceError && err.code === "RESIDUAL_FOUND",
+      (err: unknown) => err instanceof RedactionServiceError && err.code === "residual_found",
     );
   });
 

@@ -283,28 +283,11 @@ function parseClaimVerdicts(raw: unknown): CriticClaimVerdict[] {
 /**
  * 判断 Critic 是否通过。
  *
- * P0-02 修复（2026-08-03）：
- * - perClaimVerdicts 不得为空。
- * - 不得包含 auto_verified reasonCode。
- * - 不得有 hard issues。
- * - criticStatus 必须为 passed。
+ * P0-02 修复（2026-08-03）：判定语义（perClaimVerdicts 非空、无 auto_verified、
+ * 无 hard issues、criticStatus === passed）已内联于 publish.ts 的发布门禁
+ * （P0-03，且更完整——含 partial/unsupported/contradicted 阻断）。此函数零引用，
+ * 2026-08-11 删除，避免双标准漂移。
  */
-export function isCriticPassed(report: QualityReport): boolean {
-  // 空 verdict 不通过
-  if (report.perClaimVerdicts.length === 0) {
-    return false;
-  }
-  // auto_verified reasonCode 不通过
-  if (report.perClaimVerdicts.some((v) => v.reasonCode === "auto_verified")) {
-    return false;
-  }
-  // hard issues 不通过
-  if (report.hardIssues.length > 0) {
-    return false;
-  }
-  // criticStatus 必须为 passed
-  return report.criticStatus === "passed";
-}
 
 /**
  * 获取可修复的 hard issues。

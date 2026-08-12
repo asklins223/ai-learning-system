@@ -1,8 +1,8 @@
 # AI 学习伴侣驱动的多模态理解宇宙：执行顺序与文档索引
 
-> 状态：**Complete（公测列车达成，2026-08-08：阶段 00~11 全部完成，DoD 36 项核验通过，发布证据见 `docs/evidence/learning-companion-v1/`）**<br>
-> 文档版本：1.3（本文为拆分后索引，详细内容见下方阶段文档）<br>
-> 日期：2026-08-08<br>
+> 状态：**rebuild_required（公测门禁未达成——2026-08-11 审计：阶段 00~11 交付，但 DoD 35/36 真实运行样本待 RC 回填（见 `11-1-dod-verification.md`），`release-manifest.json` `deliveryStatus: rebuild_required`、36 项中 14 项非 verified；此前“Complete/公测达成”声明已撤）**<br>
+> 文档版本：1.4（2026-08-11 修正状态声明与核验结论一致）<br>
+> 日期：2026-08-08（状态修正 2026-08-11）<br>
 > 目标发布：学习卡 Generation Supervisor v1 通过既定 Gate 后的首个学习体验正式公测列车，版本号由发布计划统一确定<br>
 > 学习运行时标识：`learning_session_supervisor_v1`<br>
 > 确定性外壳：`learning-session-shell-v1`<br>
@@ -96,6 +96,6 @@ flowchart LR
 - [x] 阶段 08 W7 跨模块 A11y、安全、隐私与可观测性审计（2026-08-08 完成：A11y/onboarding 审计 08-1、安全/隐私审计 08-2、故障矩阵演练 08-3、可观测性/runbook 08-4、全链路 0 容忍 E2E 08-5；security_review 修复后 pass；决策记录 `08-1`~`08-5`）
 - [x] 阶段 09 W8 质量、容量、故障与真实 Provider RC（2026-08-08 完成：Gold 两轮 09-1、release qualification 09-2、Critic/Tutor 质量 09-3、容量性能 09-4、故障注入 09-5、真实环境 RC 09-6、硬不变量收口 09-7；security_review 修复后 pass；决策记录 `09-1`~`09-7`）
 - [x] 阶段 10 W9 Shadow、Canary 与公测默认（2026-08-08 完成：capability 部署 10-1、shadow 10-2、internal allowlist 10-3、5% canary 10-4、rollback drill 10-5、25% canary 10-6、最终 soak 10-7、公测默认 10-8；security_review 修复后 pass；决策记录 `10-1`~`10-8`）
-- [x] 阶段 11 收尾：DoD 核验与发布证据（2026-08-08 完成：DoD 36 项逐项核验 `11-1-dod-verification.md`、发布证据目录 `docs/evidence/learning-companion-v1/` 15 文件含 `release-manifest.json`、批准记录表补登阶段 01~11 行；公测列车正式达成）
+- [x] 阶段 11 收尾：DoD 核验与发布证据（2026-08-08 完成：DoD 36 项逐项核验 `11-1-dod-verification.md`、发布证据目录 `docs/evidence/learning-companion-v1/` 15 文件含 `release-manifest.json`、批准记录表补登阶段 01~11 行；阶段执行完成——**公测门禁未达成**，35/36 真实运行样本待 RC 回填，见行 3 与 `11-1-dod-verification.md`）
 
-> 批准记录见阶段 11 文档（附录 B，2026-08-07 已签署 Approved）；计划索引（`docs/plans/learning-companion-multimodal-understanding-universe.md` 与历史索引 `project-archive/plans/README.md`）与旧 v0.7 状态（Superseded）已同步。
+> 批准记录见阶段 11 文档（附录 B，2026-08-07 已签署 Approved）；计划索引（`docs/plans/learning-companion-multimodal-understanding-universe.md` 与历史索引 `project-archive/plans/README.md`）与旧 v0.7 状态（Superseded）已同步——状态声明以本文行 3（rebuild_required）为准。

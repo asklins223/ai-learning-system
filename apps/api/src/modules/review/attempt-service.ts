@@ -1016,8 +1016,13 @@ export async function listReviewAttemptHistory(
         ? encodeCursor(lastItem.createdAt, lastItem.id)
         : null;
       const items = pageRows.map(({ createdAt: _createdAt, ...item }) => item);
+      // 2026-08-11：补 total——契约统一 {items, nextCursor, total}（此前缺 total）
+      const totalRows = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(reviewAttempts)
+        .where(whereCondition);
 
-      return { items, nextCursor };
+      return { items, nextCursor, total: Number(totalRows[0]?.count ?? 0) };
     },
   );
 }

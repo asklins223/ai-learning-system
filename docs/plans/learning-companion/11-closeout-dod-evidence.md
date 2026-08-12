@@ -113,7 +113,7 @@ docs/evidence/learning-companion-v1/
 - [x] 发布证据目录完整（任务 11-2，`docs/evidence/learning-companion-v1/` 15 文件含 `release-manifest.json`）；
 - [x] 批准记录与计划索引同步（任务 11-3，附录 B 批准表补登阶段 01~11 行，索引与旧 v0.7 Superseded 状态已同步）。
 
-本阶段完成后，公测列车正式达成，进入持续运营与观察。
+本阶段执行完成；**公测门禁未达成**——2026-08-11 审计：DoD 35/36 真实运行样本待 RC 回填、`release-manifest.json` `deliveryStatus: rebuild_required`、36 项中 14 项非 verified（见 `11-1-dod-verification.md`；全局状态声明见 `docs/plans/learning-companion-multimodal-understanding-universe.md` 行 3）。
 
 ---
 
@@ -157,5 +157,7 @@ docs/evidence/learning-companion-v1/
 | 2026-08-08 | W8 质量/RC（阶段 09） | Gold 两轮 09-1、release qualification 09-2、Critic/Tutor 质量 09-3、容量性能 09-4、故障注入 09-5、真实环境 RC 09-6、硬不变量收口 09-7 完成；security_review 修复后 pass；退出 Gate 达成，进入阶段 10 |
 | 2026-08-08 | W9 公测默认（阶段 10） | capability 部署 10-1、shadow 10-2、internal 10-3、5% canary 10-4、rollback drill 10-5、25% canary 10-6、最终 soak 10-7、公测默认 10-8 完成；security_review 修复后 pass；退出 Gate 达成，进入阶段 11 |
 | 2026-08-08 | 收尾（阶段 11） | DoD 36 项逐项核验通过（`11-1-dod-verification.md`）、发布证据目录完整（`docs/evidence/learning-companion-v1/` 15 文件 + `release-manifest.json`）、批准记录与计划索引同步；公测列车正式达成 |
+
+> **2026-08-11 修订注记**：上表阶段 11 行为 2026-08-08 当时的完成记录；当日之后审计（`11-1-dod-verification.md` 结论 4、`release-manifest.json`）确认公测门禁未达成——DoD 35/36 真实运行样本待 RC 回填、`deliveryStatus: rebuild_required`、36 项中 14 项非 verified，全局状态以 `docs/plans/learning-companion-multimodal-understanding-universe.md` 行 3（rebuild_required）为准。
 
 > 执行说明：阶段 01~11 的完成日期均登记为 2026-08-08，反映该计划在 v1.0 分支上一次连续性执行会话中完成（Owner 于 2026-08-07 经分支执行指令批准后，后续阶段按计划顺序连续推进）；自阶段 02（W1）起每阶段均独立运行测试、typecheck 与安全审查并留档（阶段 01 为合同冻结，见 `docs/evidence/learning-companion-v1/`）。

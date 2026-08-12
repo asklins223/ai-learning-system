@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   useCallback,
+  useMemo,
   type ReactNode,
 } from "react";
 
@@ -160,8 +161,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("storage", handleStorage);
   }, [setTheme, theme]);
 
+  const contextValue = useMemo(
+    () => ({ theme, toggleTheme, setTheme, isTransitioning, mounted }),
+    [theme, toggleTheme, setTheme, isTransitioning, mounted],
+  );
+
   return (
-    <ThemeContext.Provider value={{ theme, toggleTheme, setTheme, isTransitioning, mounted }}>
+    <ThemeContext.Provider value={contextValue}>
       {/* Inject script to prevent theme flash before hydration */}
       <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       {children}

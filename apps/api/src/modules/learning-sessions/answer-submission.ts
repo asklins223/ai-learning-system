@@ -2,13 +2,13 @@
  * 救火 3a：回答提交端点（审计 #2——Session API 死路）。
  *
  * 补上缺失的生产路径：把用户回答写入 learning_response_artifacts 并锁定
- * Episode（status → answered_locked），形成 Card → Session → 回答 → 锁定的
+ * Episode（processing_phase → assessment_pending），形成 Card → Session → 回答 → 锁定的
  * 最小垂直闭环（完整 Scene/评测/Commit 在后续救火步骤）。
  *
  * 端点：
  * - POST /learning-sessions/:id/episodes/:episodeId/answer
  *   body: { modality: "text_or_mixed" | "voice", text?: string, transcript?: string }
- *   → 写 artifact（status=locked）+ 锁 episode（status=answered_locked），
+ *   → 写 artifact（status=locked）+ 推进 episode processing_phase，
  *     返回 artifact public view。
  *
  * 语义（01-2 §7.2 状态机）：
@@ -83,7 +83,8 @@ export interface ArtifactPublicView {
 
 export interface SubmitAnswerResult {
   artifact: ArtifactPublicView;
-  episodeStatus: string;
+  episodeStatus: "active";
+  processingPhase: "assessment_pending";
 }
 
 /** 可注入 repository（PG 实现 + 单测内存实现） */
@@ -93,8 +94,11 @@ export interface AnswerSubmissionRepository {
     sessionId: string;
     keyPointId: string;
     status: string;
+    processingPhase: string;
     probeId: string | null;
     contentExposureKey: string;
+    /** Frozen content identity copied into the immutable artifact. */
+    episodeTargetFingerprint?: string;
   } | null>;
   /**
    * 确保当前 episode 存在可用的 probe 行（learning_session_probes 的
@@ -125,8 +129,18 @@ export interface AnswerSubmissionRepository {
     answerLockedAt: string;
     status: "locked";
     revision: number;
+    episodeTargetFingerprint?: string;
+    contentExposureKey?: string;
   }): Promise<{ id: string }>;
   lockEpisode(episodeId: string, now: string, workspaceId: string, userId: string): Promise<void>;
+  /** Same-transaction command enqueue; pure unit repositories may omit it. */
+  enqueueAssessment?(input: {
+    workspaceId: string;
+    userId: string;
+    sessionId: string;
+    episodeId: string;
+    artifactId: string;
+  }): Promise<void>;
 }
 
 // ─── 服务函数（纯逻辑 + 可注入 repo）───────────────────────────────────
@@ -138,22 +152,22 @@ export async function submitEpisodeAnswer(
   const now = input.now ?? new Date();
   const text = input.text?.trim() ?? "";
   if (text === "") {
-    throw new AnswerSubmissionError("EMPTY_ANSWER", "回答内容为空（fail closed）");
+    throw new AnswerSubmissionError("empty_answer", "回答内容为空（fail closed）");
   }
   if (input.modality !== "text_or_mixed" && input.modality !== "voice") {
-    throw new AnswerSubmissionError("INVALID_MODALITY", "不支持的作答模态");
+    throw new AnswerSubmissionError("invalid_modality", "不支持的作答模态");
   }
 
   const episode = await repo.findEpisode(input.workspaceId, input.userId, input.episodeId);
   if (episode === null) {
-    throw new AnswerSubmissionError("EPISODE_NOT_FOUND", "Episode 不存在", 404);
+    throw new AnswerSubmissionError("episode_not_found", "Episode 不存在", 404);
   }
   if (episode.sessionId !== input.sessionId) {
-    throw new AnswerSubmissionError("SESSION_MISMATCH", "Episode 不属于该 Session", 409);
+    throw new AnswerSubmissionError("session_mismatch", "Episode 不属于该 Session", 409);
   }
-  if (episode.status !== "active") {
+  if (episode.status !== "active" || episode.processingPhase !== "awaiting_response") {
     throw new AnswerSubmissionError(
-      "EPISODE_NOT_ANSWERABLE",
+      "episode_not_answerable",
       `Episode 当前状态 ${episode.status} 不可作答（需 active）`,
       409,
     );
@@ -193,6 +207,17 @@ export async function submitEpisodeAnswer(
     answerLockedAt: nowIso,
     status: "locked",
     revision: 0,
+    episodeTargetFingerprint: episode.episodeTargetFingerprint,
+    contentExposureKey: episode.contentExposureKey,
+  });
+  // The route wraps this repository in one DB transaction. If enqueue fails,
+  // the artifact and processing-phase CAS roll back together.
+  await repo.enqueueAssessment?.({
+    workspaceId: input.workspaceId,
+    userId: input.userId,
+    sessionId: input.sessionId,
+    episodeId: input.episodeId,
+    artifactId,
   });
 
   return {
@@ -206,7 +231,8 @@ export async function submitEpisodeAnswer(
       status: "locked",
       answerLockedAt: nowIso,
     },
-    episodeStatus: "answered_locked",
+    episodeStatus: "active",
+    processingPhase: "assessment_pending",
   };
 }
 
@@ -230,7 +256,10 @@ export function createPgAnswerSubmissionRepository(
       const rows = (await transaction.execute(
         sql`
           SELECT id, session_id AS "sessionId", key_point_id AS "keyPointId",
-                 status, content_exposure_key AS "contentExposureKey", NULL::uuid AS "probeId"
+                 status, processing_phase AS "processingPhase",
+                 content_exposure_key AS "contentExposureKey",
+                 episode_target_fingerprint AS "episodeTargetFingerprint",
+                 NULL::uuid AS "probeId"
           FROM learning_episodes
           WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND id = ${episodeId}
           LIMIT 1
@@ -243,7 +272,9 @@ export function createPgAnswerSubmissionRepository(
         sessionId: String(row.sessionId),
         keyPointId: String(row.keyPointId),
         status: String(row.status),
+        processingPhase: String(row.processingPhase ?? "awaiting_response"),
         contentExposureKey: String(row.contentExposureKey ?? ""),
+        episodeTargetFingerprint: String(row.episodeTargetFingerprint ?? ""),
         probeId: row.probeId != null ? String(row.probeId) : null,
       };
     },
@@ -289,32 +320,39 @@ export function createPgAnswerSubmissionRepository(
             ${input.modality}, ${input.contentHash}, ${JSON.stringify(input.payload)},
             ${input.capturedAt}, ${input.answerLockedAt},
             ${JSON.stringify({ assistanceLevel: "none", contentAssisted: false })},
-            '', '', 'mastery_eligible', 'mastery_eligible', 'trust-policy-v1',
-            ${JSON.stringify([])}, 'none', ${input.status}, ${input.revision}
+            ${input.episodeTargetFingerprint ?? ''}, ${input.contentExposureKey ?? ''},
+            'mastery_eligible', 'mastery_eligible', 'trust-policy-v1',
+            ARRAY[]::text[],
+            'none', ${input.status}, ${input.revision}
           )
         `,
       );
       return { id: input.id };
     },
     // should-fix #2（review）：条件 UPDATE 检查影响行数——并发双提交下第二个
-    // 请求 UPDATE 0 行 → 抛 EPISODE_NOT_ANSWERABLE（fail closed，不静默成功）。
+    // 请求 UPDATE 0 行 → 抛 episode_not_answerable（fail closed，不静默成功）。
     async lockEpisode(episodeId, _now, workspaceId, userId) {
       const rows = (await transaction.execute(
         sql`
           UPDATE learning_episodes
-          SET status = 'answered_locked', updated_at = now()
+          SET processing_phase = 'assessment_pending', updated_at = now()
           WHERE id = ${episodeId} AND workspace_id = ${workspaceId}
             AND user_id = ${userId} AND status = 'active'
+            AND processing_phase = 'awaiting_response'
           RETURNING id
         `,
       )) as Array<Record<string, unknown>>;
       if (rows.length === 0) {
         throw new AnswerSubmissionError(
-          "EPISODE_NOT_ANSWERABLE",
+          "episode_not_answerable",
           "Episode 已被并发提交锁定或状态不可作答（fail closed）",
           409,
         );
       }
+    },
+    async enqueueAssessment(input) {
+      const { createPgAssessmentProcessingOutboxRepository } = await import("./assessment-processing-outbox.ts");
+      await createPgAssessmentProcessingOutboxRepository(transaction).enqueueAssessment(input);
     },
   };
 }

@@ -21,6 +21,7 @@
  * Relationship Governance），本模块 0 直接写 mastery/schedule/canonical Card/relation。
  */
 
+import { sql } from "drizzle-orm";
 import {
   DEFAULT_LEARNING_FOREGROUND_STATE,
   resolveKnowledgeHelpGate,
@@ -35,6 +36,7 @@ import {
 
 export type TutorDetourStatus = "active" | "ended";
 export type TutorDetourEndReason = "return_to_origin" | "end_session";
+export const TUTOR_DETOUR_MAX_TURNS = 2;
 
 export const TUTOR_DETOUR_END_REASONS: readonly TutorDetourEndReason[] = [
   "return_to_origin",
@@ -56,16 +58,21 @@ export interface TutorDetourRecord {
   readonly endReason: TutorDetourEndReason | null;
   /** 是否已保存为问题标记（Should 动作；仅 Should flag 开启时可 true）。 */
   readonly questionMarkerSaved: boolean;
+  /** 已完成的 Tutor 回合数；只保留计数，不保存无限消息历史。 */
+  readonly turnCount: number;
+  readonly maxTurns: number;
   readonly createdAt: string;
   readonly endedAt: string | null;
 }
 
 export type TutorDetourErrorCode =
-  | "DETOUR_NOT_FOUND"
-  | "INVALID_END_REASON"
-  | "INVALID_END_TRANSITION"
-  | "SAVE_MARKER_FLAG_OFF"
-  | "MISSING_SWITCH_PARAMS";
+  | "detour_not_found"
+  | "invalid_end_reason"
+  | "invalid_end_transition"
+  | "save_marker_flag_off"
+  | "missing_switch_params"
+  | "episode_not_found"
+  | "turn_limit_reached";
 
 export class TutorDetourError extends Error {
   readonly code: TutorDetourErrorCode;
@@ -94,6 +101,8 @@ export function buildTutorDetourRecord(input: {
     status: "active",
     endReason: null,
     questionMarkerSaved: false,
+    turnCount: 0,
+    maxTurns: TUTOR_DETOUR_MAX_TURNS,
     createdAt: input.now.toISOString(),
     endedAt: null,
   };
@@ -141,12 +150,237 @@ export function transitionTutorDetourStatus(
   };
 }
 
+/** 消费一次 Tutor 回合：只递增计数，不写入消息历史。 */
+export function advanceTutorDetourTurn(
+  record: TutorDetourRecord,
+): { record: TutorDetourRecord; allowed: boolean; reason: string | null } {
+  if (record.status === "ended") {
+    return { record: { ...record }, allowed: false, reason: "detour 已结束，不能继续提问" };
+  }
+  if (record.turnCount >= record.maxTurns) {
+    return { record: { ...record }, allowed: false, reason: "本次陪伴最多支持两次说明" };
+  }
+  return {
+    record: {
+      ...record,
+      turnCount: record.turnCount + 1,
+      createdAt: record.createdAt,
+      endedAt: null,
+    },
+    allowed: true,
+    reason: null,
+  };
+}
+
 // ─── 端口（可注入；production 用 withWorkspaceTransaction 接线）────────────
 
 export interface TutorDetourRepo {
   saveDetour(scope: LearningScope, record: TutorDetourRecord): Promise<void>;
   findDetour(scope: LearningScope, detourId: string): Promise<TutorDetourRecord | null>;
   updateDetour(scope: LearningScope, record: TutorDetourRecord): Promise<void>;
+}
+
+/** Tutor PG 端口只依赖当前事务的 execute，避免把私有 Tutor 内容暴露给 Web。 */
+export interface TutorDetourTx {
+  execute(query: unknown): Promise<unknown>;
+}
+
+function rowToTutorDetour(row: Record<string, unknown>): TutorDetourRecord {
+  return {
+    detourId: String(row.detourId),
+    sessionId: String(row.sessionId),
+    episodeId: String(row.episodeId),
+    targetId: String(row.targetId),
+    questionId: String(row.questionId),
+    status: row.status === "ended" ? "ended" : "active",
+    endReason:
+      row.endReason === "return_to_origin" || row.endReason === "end_session"
+        ? row.endReason
+        : null,
+    questionMarkerSaved: row.questionMarkerSaved === true,
+    turnCount: Number(row.turnCount ?? 0),
+    maxTurns: Number(row.maxTurns ?? TUTOR_DETOUR_MAX_TURNS),
+    createdAt: new Date(String(row.createdAt)).toISOString(),
+    endedAt: row.endedAt === null || row.endedAt === undefined
+      ? null
+      : new Date(String(row.endedAt)).toISOString(),
+  };
+}
+
+/** 真实 PostgreSQL detour repo：所有读写都带 workspace + user 双重边界。 */
+export function createPgTutorDetourRepository(transaction: TutorDetourTx): TutorDetourRepo {
+  return {
+    async saveDetour(scope, record) {
+      await transaction.execute(sql`
+        INSERT INTO learning_tutor_detours (
+          id, workspace_id, user_id, session_id, episode_id, target_id, question_id,
+          status, end_reason, question_marker_saved, turn_count, max_turns,
+          created_at, ended_at, last_turn_at
+        ) VALUES (
+          ${record.detourId}, ${scope.workspaceId}, ${scope.userId}, ${record.sessionId},
+          ${record.episodeId}, ${record.targetId}, ${record.questionId}, ${record.status},
+          ${record.endReason}, ${record.questionMarkerSaved}, ${record.turnCount},
+          ${record.maxTurns}, ${record.createdAt}, ${record.endedAt}, NULL
+        )
+      `);
+    },
+    async findDetour(scope, detourId) {
+      const rows = (await transaction.execute(sql`
+        SELECT id AS "detourId", session_id AS "sessionId", episode_id AS "episodeId",
+               target_id AS "targetId", question_id AS "questionId", status,
+               end_reason AS "endReason", question_marker_saved AS "questionMarkerSaved",
+               turn_count AS "turnCount", max_turns AS "maxTurns",
+               created_at AS "createdAt", ended_at AS "endedAt"
+        FROM learning_tutor_detours
+        WHERE id = ${detourId} AND workspace_id = ${scope.workspaceId}
+          AND user_id = ${scope.userId}
+        LIMIT 1
+      `)) as Array<Record<string, unknown>>;
+      return rows[0] ? rowToTutorDetour(rows[0]) : null;
+    },
+    async updateDetour(scope, record) {
+      const rows = (await transaction.execute(sql`
+        UPDATE learning_tutor_detours
+        SET status = ${record.status}, end_reason = ${record.endReason},
+            question_marker_saved = ${record.questionMarkerSaved},
+            turn_count = ${record.turnCount}, max_turns = ${record.maxTurns},
+            ended_at = ${record.endedAt},
+            last_turn_at = CASE WHEN ${record.turnCount} > 0 THEN now() ELSE last_turn_at END
+        WHERE id = ${record.detourId} AND workspace_id = ${scope.workspaceId}
+          AND user_id = ${scope.userId} AND status = 'active'
+        RETURNING id
+      `)) as Array<Record<string, unknown>>;
+      if (rows.length === 0) {
+        throw new TutorDetourError(
+          "invalid_end_transition",
+          "Tutor 分流已结束或并发状态已变化",
+        );
+      }
+    },
+  };
+}
+
+/** 当前学习前台与 Tutor 权限的 PostgreSQL 适配器。 */
+export function createPgTutorLearningFrontRepository(transaction: TutorDetourTx): LearningFrontRepo {
+  return {
+    async readForegroundState(scope) {
+      const rows = (await transaction.execute(sql`
+        SELECT explicit_preferences ->> 'learningForegroundState' AS state
+        FROM user_learning_preferences
+        WHERE user_id = ${scope.userId}
+          AND (workspace_id = ${scope.workspaceId} OR workspace_id IS NULL)
+        ORDER BY CASE WHEN workspace_id IS NULL THEN 1 ELSE 0 END, updated_at DESC
+        LIMIT 1
+      `)) as Array<Record<string, unknown>>;
+      const state = rows[0]?.state;
+      return state === "together" || state === "let_me_try" || state === "free_explore"
+        ? state
+        : null;
+    },
+    async recordAssistanceAndExposure(scope, input) {
+      const snapshot = JSON.stringify({
+        assistanceLevel: "practice_only",
+        contentAssisted: false,
+        capturedAt: input.now.toISOString(),
+        capturedBy: "tutor_detour",
+      });
+      await transaction.execute(sql`
+        INSERT INTO learning_unit_exposure (
+          workspace_id, user_id, content_exposure_key, assistance_snapshot,
+          assisted_at, practice_only_since, revision
+        ) VALUES (
+          ${scope.workspaceId}, ${scope.userId}, ${input.contentExposureKey},
+          ${snapshot}::jsonb, ${input.now}, ${input.now}, 1
+        )
+        ON CONFLICT (workspace_id, content_exposure_key)
+        DO UPDATE SET
+          -- 不覆盖已有更高等级：lock 先赢（content_assisted）时 detour 的
+          -- practice_only 不得降级已冻结快照（exposure-service guard 语义：
+          -- 正式作答后 assistance 不得被 detour 入口重置）。
+          assistance_snapshot = CASE
+            WHEN learning_unit_exposure.assistance_snapshot IS NULL
+              OR learning_unit_exposure.assistance_snapshot->>'assistanceLevel'
+                 IS DISTINCT FROM 'content_assisted'
+            THEN EXCLUDED.assistance_snapshot
+            ELSE learning_unit_exposure.assistance_snapshot
+          END,
+          assisted_at = COALESCE(learning_unit_exposure.assisted_at, EXCLUDED.assisted_at),
+          practice_only_since = COALESCE(
+            learning_unit_exposure.practice_only_since, EXCLUDED.practice_only_since
+          ),
+          revision = learning_unit_exposure.revision + 1,
+          updated_at = now()
+      `);
+    },
+    async openTutorPermission(scope, input) {
+      await transaction.execute(sql`
+        INSERT INTO learning_tutor_permissions (workspace_id, user_id, target_id)
+        VALUES (${scope.workspaceId}, ${scope.userId}, ${input.keyPointId})
+        ON CONFLICT (workspace_id, user_id, target_id)
+        DO UPDATE SET updated_at = now()
+      `);
+    },
+    async writeForegroundState(scope, state) {
+      const preferences = JSON.stringify({ learningForegroundState: state });
+      if (scope.workspaceId === "") throw new Error("workspaceId is required");
+      await transaction.execute(sql`
+        INSERT INTO user_learning_preferences (
+          user_id, workspace_id, explicit_preferences, suggested_preferences
+        ) VALUES (
+          ${scope.userId}, ${scope.workspaceId}, ${preferences}::jsonb, '{}'::jsonb
+        )
+        ON CONFLICT (user_id, workspace_id) WHERE workspace_id IS NOT NULL
+        DO UPDATE SET explicit_preferences =
+          user_learning_preferences.explicit_preferences || EXCLUDED.explicit_preferences,
+          updated_at = now()
+      `);
+    },
+  };
+}
+
+/** 服务端签发的一次性切换 nonce，绑定当前 user/workspace/session/target。 */
+export interface TutorActionNonceRepo {
+  issue(input: {
+    scope: LearningScope;
+    sessionId: string;
+    keyPointId: string;
+    nonceHash: string;
+    expiresAt: Date;
+  }): Promise<void>;
+  consume(input: {
+    scope: LearningScope;
+    sessionId: string;
+    keyPointId: string;
+    nonceHash: string;
+    now: Date;
+  }): Promise<boolean>;
+}
+
+export function createPgTutorActionNonceRepository(transaction: TutorDetourTx): TutorActionNonceRepo {
+  return {
+    async issue(input) {
+      await transaction.execute(sql`
+        INSERT INTO learning_tutor_action_nonces (
+          workspace_id, user_id, session_id, key_point_id, nonce_hash, expires_at
+        ) VALUES (
+          ${input.scope.workspaceId}, ${input.scope.userId}, ${input.sessionId},
+          ${input.keyPointId}, ${input.nonceHash}, ${input.expiresAt}
+        )
+      `);
+    },
+    async consume(input) {
+      const rows = (await transaction.execute(sql`
+        UPDATE learning_tutor_action_nonces
+        SET consumed_at = ${input.now}
+        WHERE workspace_id = ${input.scope.workspaceId} AND user_id = ${input.scope.userId}
+          AND session_id = ${input.sessionId} AND key_point_id = ${input.keyPointId}
+          AND nonce_hash = ${input.nonceHash} AND consumed_at IS NULL
+          AND expires_at > ${input.now}
+        RETURNING id
+      `)) as Array<Record<string, unknown>>;
+      return rows.length > 0;
+    },
+  };
 }
 
 export interface TutorDetourDeps {
@@ -227,7 +461,7 @@ export async function createScopedTutorDetour(
         input.accountEpoch === undefined
       ) {
         throw new TutorDetourError(
-          "MISSING_SWITCH_PARAMS",
+          "missing_switch_params",
           "trusted challenge 切换需要 contentExposureKey/userActionNonce/deviceSessionId/accountEpoch",
         );
       }
@@ -286,7 +520,7 @@ export async function endScopedTutorDetour(
   return deps.transaction(async () => {
     const current = await deps.detourRepo.findDetour(input.scope, input.detourId);
     if (current === null) {
-      throw new TutorDetourError("DETOUR_NOT_FOUND", `detour ${input.detourId} 不存在`);
+      throw new TutorDetourError("detour_not_found", `detour ${input.detourId} 不存在`);
     }
     const next = transitionTutorDetourStatus(current, {
       endReason: input.endReason,
@@ -297,10 +531,10 @@ export async function endScopedTutorDetour(
     if (!next.allowed) {
       throw new TutorDetourError(
         next.reason?.startsWith("非法结束动作")
-          ? "INVALID_END_REASON"
+          ? "invalid_end_reason"
           : next.reason?.startsWith("保存为问题标记")
-            ? "SAVE_MARKER_FLAG_OFF"
-            : "INVALID_END_TRANSITION",
+            ? "save_marker_flag_off"
+            : "invalid_end_transition",
         next.reason ?? "结束转移不允许",
       );
     }

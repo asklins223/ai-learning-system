@@ -21,6 +21,7 @@ import * as schema from "../schema/index.ts";
 import { createProvider } from "../lib/ai-provider.ts";
 import { evaluateRubricViaChat } from "../lib/business-ai-ops.ts";
 import {
+  AIConsentRequiredError,
   enforcePrivacyGovernanceWithPolicy,
   logAICall,
   resolveAIGovernanceContext,
@@ -177,7 +178,7 @@ const userId = requireAuditUserId(job);
 
   const govCtx = await resolveAIGovernanceContext(job.workspaceId, userId);
   if (!govCtx.consentOk) {
-    throw new Error("AI consent not signed for this workspace");
+    throw new AIConsentRequiredError();
   }
 
   // R3: Route text_generation tasks to a potentially different (cheaper) provider

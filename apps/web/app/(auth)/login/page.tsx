@@ -2,6 +2,7 @@
 
 import "@/app/styles/login.css";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTheme } from "@/components/ThemeProvider";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
@@ -356,10 +357,10 @@ export default function LoginPage() {
 
             <div className="login-register-cta">
               <span className="login-register-text">没有账号？</span>
-              <a href="/register" className="login-register-link">
+              <Link href="/register" className="login-register-link">
                 立即注册
                 <ArrowGlyph />
-              </a>
+              </Link>
             </div>
           </div>
         </div>

@@ -390,7 +390,7 @@ export const DEFAULT_TRIGGER_POLICY: CompanionTriggerPolicyV1 = Object.freeze<Co
   },
   leaseTtlMs: 5 * 60 * 1000,
   defaultReasonBudget: 2,
-  keyPolicy: { keySeparator: "\u0000", maxKeyPartLength: 400, budgetKeyPrefix: "cb" },
+  keyPolicy: { keySeparator: "\u001f", maxKeyPartLength: 400, budgetKeyPrefix: "cb" },
   targetChangeRule: {
     mode: "canonical_content_fingerprint",
     fingerprintDimensions: ["canonicalContentHash", "publishedRevision"],
@@ -498,7 +498,10 @@ export function verifyTriggerPolicy(
 
 // ─── 5. 稳定身份与双预算 key 构造（Agent 无权生成/修改）────────────────────
 
-const KEY_SEP = "\u0000";
+// 分隔符不得用 NUL（\u0000）：postgres.js/驱动在参数传输层不允许 NUL 字节，
+// 真实 DB 的 SELECT/INSERT（参数化）会直接失败。用 Unit Separator（\u001f，
+// 控制字符、不可见、不参与 normalizeKeyPart 的可见部分）保持 key 无冲突拼接。
+const KEY_SEP = "\u001f";
 
 /** 规范化 key 分量：去空白、去控制字符、长度上限。 */
 export function normalizeKeyPart(value: string, maxLength: number): string {

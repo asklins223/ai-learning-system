@@ -94,7 +94,7 @@ describe("search service", () => {
     assert.match(compiledSql, /parent_set\.status = 'active'/);
     assert.match(compiledSql, /FROM evidences AS consumer_evidence/);
     assert.equal(result.total, 9);
-    assert.equal(result.nextOffset, 6);
+    assert.equal(result.nextCursor, 6);
     assert.deepEqual(result.items.map((item) => item.href), [
       "/notes/note-1",
       "/cards/card-1",
@@ -121,7 +121,7 @@ describe("search service", () => {
 
     const result = await search(executor, WORKSPACE_ID, "%_\\", { offset: 4 });
 
-    assert.deepEqual(result, { items: [], total: 4, nextOffset: null });
+    assert.deepEqual(result, { items: [], total: 4, nextCursor: null });
   });
 });
 

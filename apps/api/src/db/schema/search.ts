@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { pgTable, uuid, text, jsonb, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 /**
@@ -20,5 +21,9 @@ export const searchDocuments = pgTable(
   (t) => ({
     workspaceTypeIdx: index("search_documents_workspace_type_idx").on(t.workspaceId, t.objectType),
     objectIdx: uniqueIndex("search_documents_object_idx").on(t.workspaceId, t.objectType, t.objectId),
-  }),
+
+    bodyTrgmIdx: index("search_documents_body_trgm_idx").using("gin", sql`${t.body} gin_trgm_ops`),
+    titleTrgmIdx: index("search_documents_title_trgm_idx").using("gin", sql`${t.title} gin_trgm_ops`),
+    workspaceBodyTrgmIdx: index("search_documents_workspace_body_trgm_idx").using("gin", sql`${t.body} gin_trgm_ops`).where(sql`${t.workspaceId} is not null`),
+    workspaceTitleTrgmIdx: index("search_documents_workspace_title_trgm_idx").using("gin", sql`${t.title} gin_trgm_ops`).where(sql`${t.workspaceId} is not null`),}),
 );

@@ -8,7 +8,8 @@
     "start": "next start -p 3000",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test $(find lib -name '*.test.ts' | sort)",
+    "test": "node --import tsx --test $(find lib features -type f \\( -name '*.test.ts' -o -name '*.test.tsx' \\) | sort)",
+    "test:component": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:ci": "playwright test --reporter=list --reporter=html"
   },
@@ -19,11 +20,13 @@
     "katex": "^0.18.1",
     "next": "^15.5.21",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "sherpa-onnx": "^1.13.4"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.62.0",
+    "@testing-library/react": "^16.3.2",
     "@types/katex": "^0.16.8",
     "@types/node": "^22.10.1",
     "@types/react": "^19.0.0",
@@ -31,13 +34,15 @@
     "autoprefixer": "^10.5.2",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.1.0",
+    "jsdom": "^26.1.0",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.19",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.7"
   },
   "overrides": {
-    "postcss": "$postcss",
+    "postcss": "^8.5.26",
     "sharp": "0.35.3"
   }
 }

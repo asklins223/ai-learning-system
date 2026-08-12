@@ -29,7 +29,11 @@ export type AITaskType =
   | "rerank"               // 重排序
   // ── 未来 ──
   | "speech_recognition"   // 语音识别
-  | "image_generation";    // 文生图
+  | "image_generation"     // 文生图
+  // ── P2 companion（03 合同 §9.5 参数） ──
+  | "companion_dialogue"    // 日常对话流式回复（低复杂度）
+  // ── P5 learning action bridge（慢动作，worker 执行 Learning 公共入口） ──
+  | "companion_action";
 
 /** 任务 → 所需能力映射 */
 const TASK_CAPABILITY_MAP: Record<AITaskType, Capability> = {
@@ -41,6 +45,8 @@ const TASK_CAPABILITY_MAP: Record<AITaskType, Capability> = {
   evaluate_validation: "text_generation",
   generate_question:   "text_generation",
   evaluate_rubric:     "text_generation",
+  companion_dialogue:  "text_generation",
+  companion_action:    "text_generation",
   analyze_image:       "vision",
   embed:               "embedding",
   rerank:              "rerank",
@@ -65,6 +71,8 @@ const TASK_COMPLEXITY: Record<AITaskType, TaskComplexity> = {
   rerank:              "low",
   speech_recognition:  "low",
   image_generation:    "medium",
+  companion_dialogue:  "low",
+  companion_action:    "low",
 };
 
 /** 任务 → 所需能力 */

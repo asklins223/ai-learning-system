@@ -198,11 +198,23 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}
+      # companion grant 签名密钥：未配置时 grant 签发 fail-closed 503（turn-service.ts）。
+      # 生产必须设置为强随机值（.env.example 已要求）。
+      AUTH_SURFACE_MANIFEST_SECRET: ${AUTH_SURFACE_MANIFEST_SECRET:-}
       AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-postgres}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
       SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v1}
       FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-false}
+      # P4 Mao PRO is bundled and Owner-approved. Set false for an explicit
+      # rollback to Sprite without changing the asset manifest.
+      COMPANION_LIVE2D_V1_ENABLED: ${COMPANION_LIVE2D_V1_ENABLED:-true}
+      # P2/P3/P5 capabilities are independently gated and fail-closed.
+      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-false}
+      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-false}
+      COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-false}
+      COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
+      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-false}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-false}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
       # AI platform config — all provider/capability config in one JSON file.
@@ -255,6 +267,14 @@ services:
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-false}
       API_INTERNAL_URL: http://api:4000
+      # Keep worker-side execution authorization aligned with the API. The
+      # production stack remains fail-closed unless deployment env explicitly
+      # enables the approved companion capabilities.
+      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-false}
+      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-false}
+      COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-false}
+      COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
+      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-false}
       AI_QUESTION_V1_ENABLED: ${AI_QUESTION_V1_ENABLED:-false}
       RUBRIC_EVALUATION_V1_ENABLED: ${RUBRIC_EVALUATION_V1_ENABLED:-false}
       CARD_REPAIR_V1_ENABLED: ${CARD_REPAIR_V1_ENABLED:-false}
@@ -292,6 +312,8 @@ services:
         NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: ${NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED:-false}
         NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: ${NEXT_PUBLIC_AI_QUESTION_V1_ENABLED:-false}
         NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: ${NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED:-false}
+        NEXT_PUBLIC_COMPANION_PET_ENABLED: ${NEXT_PUBLIC_COMPANION_PET_ENABLED:-false}
+        NEXT_PUBLIC_COMPANION_V2_INTERNAL: ${NEXT_PUBLIC_COMPANION_V2_INTERNAL:-false}
         NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: ${NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED:-false}
         # Agent 活动流控制台（可选增强，fail-closed：默认关）
         NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: ${NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED:-false}
@@ -307,6 +329,13 @@ services:
       - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
     security_opt:
       - no-new-privileges:true
+    # 2026-08-12（构建面审计 P2-3）：web 服务健康检查（此前无 readiness 信号）
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     networks:
       - ailearn_net
 

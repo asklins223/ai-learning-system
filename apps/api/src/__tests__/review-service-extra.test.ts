@@ -98,19 +98,19 @@ describe("review listing filters and empty boundaries", () => {
     installReviewDb({ total: 0 });
 
     assert.deepEqual(await listReviews(WORKSPACE_ID, { includeAll: true }, undefined, FAKE_TX), {
-      items: [], total: 0, nextOffset: null,
+      items: [], total: 0, nextCursor: null,
     });
     assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.COMPLETED }, USER_ID, FAKE_TX), {
-      items: [], total: 0, nextOffset: null,
+      items: [], total: 0, nextCursor: null,
     });
     assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.DISMISSED }, undefined, FAKE_TX), {
-      items: [], total: 0, nextOffset: null,
+      items: [], total: 0, nextCursor: null,
     });
     assert.deepEqual(await listReviews(WORKSPACE_ID, { status: ReviewStatus.PENDING }, USER_ID, FAKE_TX), {
-      items: [], total: 0, nextOffset: null,
+      items: [], total: 0, nextCursor: null,
     });
     assert.deepEqual(await listReviews(WORKSPACE_ID, {}, undefined, FAKE_TX), {
-      items: [], total: 0, nextOffset: null,
+      items: [], total: 0, nextCursor: null,
     });
   });
 
@@ -122,7 +122,7 @@ describe("review listing filters and empty boundaries", () => {
     });
 
     assert.deepEqual(await listReviews(WORKSPACE_ID, { includeAll: true }, undefined, FAKE_TX), {
-      items: [], total: 1, nextOffset: null,
+      items: [], total: 1, nextCursor: null,
     });
   });
 });
@@ -179,7 +179,7 @@ describe("review hydration and reason derivation", () => {
     );
 
     assert.equal(result.total, 10);
-    assert.equal(result.nextOffset, 8);
+    assert.equal(result.nextCursor, 8);
     assert.deepEqual(result.items.map((item) => item.reviewReason), [
       "misunderstanding",
       "manual_pin",
@@ -211,7 +211,7 @@ describe("review hydration and reason derivation", () => {
 
     assert.equal(result.items[0]!.keyPoint?.id, "kp-first");
     assert.equal(result.items[0]!.reviewReason, "evidence_gap");
-    assert.equal(result.nextOffset, null);
+    assert.equal(result.nextCursor, null);
   });
 
   it("renders a card review even when it has no key points", async () => {

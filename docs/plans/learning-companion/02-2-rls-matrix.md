@@ -12,7 +12,7 @@
 
 - workspace-scoped 学习过程表使用 `workspace_id + user_id` 双条件 RLS；
 - account-scoped Companion 状态表只按认证 `user_id` 授权，不使用 workspace RLS，跨设备同步；
-- device-local hide 不写持久表，runtime-fence 仅 ephemeral；
+- device-local hide 不写持久表，runtime-fence 仅短 TTL server-side ephemeral table；
 - GRANT 按角色存在性 least-privilege，worker 无 account 表权限。
 
 实现：`apps/api/src/db/migrations/0075_learning_sessions_rls_matrix.sql`（全部语句幂等，fresh/upgrade/repeat/restore 可重跑）。
@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | `companion_invitation_ledger` | user-private-in-workspace | 双条件 `workspace_id + user_id`（任务 02-4 落库） |
 | `user_capability_projection` | user-private-in-workspace（可重算） | 双条件 `workspace_id + user_id`（或 user_id + 可选 workspace，参照 prefs） |
-| `companion_runtime_fences` / `active_surface_leases` | device-local / ephemeral | 不写持久表；仅 user + device session + surface epoch + TTL |
+| `companion_runtime_fences` / `active_surface_leases` | device-local / ephemeral | 短 TTL server-side table；仅 user + device session + surface epoch + TTL，不存 page/entity/content |
 | Companion page/action audit | user-private + 短 TTL | 导出/删除、去关联；不进入画像（任务 02-4） |
 
 ### 2.3 不落库/不入持久域的边界
@@ -111,7 +111,7 @@ CREATE POLICY user_learning_preferences_user_isolation
 ### 3.4 device-local hide：不写持久表
 
 - 0074 未创建任何 device-local 持久表，0075 不新增；
-- runtime-fence 仅保留 `user + device session + surface epoch + TTL`（ephemeral），落点在任务 02-3 的 lease/fence 实现；
+- runtime-fence 仅保留 `user + device session + surface epoch + TTL`（短 TTL server-side ephemeral table），落点在任务 02-3 的 lease/fence 实现；
 - 任何 `temporary_hidden`/auth-surface hide 值都不进入 account-scoped 或 workspace 持久域。
 
 ---
@@ -137,7 +137,7 @@ CREATE POLICY user_learning_preferences_user_isolation
 2. **workspace-scoped 学习表**：任意 `(workspaceId_A, userId_A)` 上下文下，SQL 可访问的行集合 ⊆ `{workspace_id = A AND user_id = A}`；`workspaceId_A` 下的其他 user 行不可见；`workspaceId_B` 全部不可见。
 3. **account-scoped 表**：`app.user_id` 缺失（workspace-only actor / 未登录）时读返回 0 行；其他 user_id 读返回 0 行；同 user 跨设备可见（跨设备同步语义）。
 4. **prefs 混合矩阵**：account 级行仅本人可见；workspace 级行仅本人且 workspace 匹配可见。
-5. **device-local**：不存在可被 RLS 覆盖的持久表 → 泄漏面为 0；runtime-fence 数据仅 ephemeral。
+5. **device-local**：temporary hidden 本身不存在可被 RLS 覆盖的持久表；runtime-fence 是短 TTL、FORCE RLS 的 content-free server-side 表，泄漏面仍限制为当前 user/device/epoch/TTL。
 6. **worker 边界**：worker 对 account 表无 GRANT（授权失败而非空读），学习表只读/写自己 actor 上下文的行（需事务携带原 actor 的 `app.user_id`）。
 7. **fail-closed**：`current_setting(..., true)` 缺失返回空串 → NULL 比较恒假 → 无上下文时任何角色都读不到行。
 

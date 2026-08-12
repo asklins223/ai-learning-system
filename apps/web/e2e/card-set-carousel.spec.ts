@@ -16,6 +16,14 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
+import {
+  skipIfNoServer,
+  authenticatedBeforeEach,
+} from "./helpers.ts";
+
+// 2026-08-12（e2e 质量审计 P1-1）：受保护页面统一真实登录
+authenticatedBeforeEach();
+
 import AxeBuilder from "@axe-core/playwright";
 
 const CREATED = "2026-08-01T00:00:00.000Z";
@@ -178,7 +186,7 @@ async function mockDeckApiWith(
           },
         });
       } else {
-        await route.fulfill({ status: 404, json: { error: "not found" } });
+        await route.fulfill({ status: 404, json: { error: "not_found", message: "资源不存在" } });
       }
       return;
     }
@@ -221,7 +229,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   }
 
   test("轮播渲染：3 副封面、焦点题注、指示器", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await expect(carousel(page)).toBeVisible();
@@ -234,7 +242,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("键盘切换：→ 移动焦点、Home/End 跳首/末", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await cover(page).first().focus();
@@ -250,7 +258,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("箭头切换：点击 next/prev 移动焦点", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await page.click('[data-ui="carousel-next"]');
@@ -260,7 +268,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("展开：焦点封面点击后原地展开成员（不跳详情页）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await cover(page).first().click();
@@ -274,7 +282,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-8: 展开态禁用轮播切换（←/→ 无效）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await cover(page).first().click();
@@ -285,7 +293,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-2: 收起后焦点归还封面按钮", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await cover(page).first().click();
@@ -300,7 +308,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-1: reduced-motion 下成员 stagger delay 归零", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     await page.emulateMedia({ reducedMotion: "reduce" });
     if (!(await ensureDeckUi(page))) return;
 
@@ -315,7 +323,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-10: 筛选切换时 live region 播报口径", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await page.click('button.cards-filter-btn:has-text("已归档")');
@@ -325,7 +333,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-7: 轮播页 axe-core serious/critical 为 0", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     const results = await new AxeBuilder({ page })
@@ -338,7 +346,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("深链：?set=&expand=1 自动展开目标卡组", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     await gotoDeck(page, `/cards?set=${CARD_SETS[1].id}&expand=1`);
     if ((await carousel(page).count()) === 0) {
       test.skip(true, "NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED 未在目标 app 开启");
@@ -349,7 +357,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("移动端：展开走底部 Drawer（deck-member）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     await page.setViewportSize({ width: 390, height: 844 });
     await gotoDeck(page);
     if ((await carousel(page).count()) === 0) {
@@ -362,7 +370,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("拖拽/滑动：向左拖焦点封面 → 下一副（§3.2）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     const box = await cover(page).first().boundingBox();
@@ -377,7 +385,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("拖拽/滑动：向右拖（端点外）只回弹不切换", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     const box = await cover(page).first().boundingBox();
@@ -392,7 +400,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-1: reduced-motion 下甩动不提交（只按位移阈值，§5.4）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     await page.emulateMedia({ reducedMotion: "reduce" });
     if (!(await ensureDeckUi(page))) return;
 
@@ -409,7 +417,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-2: 浏览器后退收起后焦点归还封面按钮（§4.2 三路径等效）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await cover(page).first().click();
@@ -424,7 +432,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-10: 搜索播报匹配数（§6.3）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await page.fill("#cards-search-input", "量子");
@@ -433,7 +441,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("G-7: 展开态 axe-core serious/critical 为 0", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     if (!(await ensureDeckUi(page))) return;
 
     await cover(page).first().click();
@@ -448,7 +456,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("空卡组库：展示空态 CTA（§6.1）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     await mockDeckApiWith(page, { items: [] });
     await page.goto("/cards");
     await page.waitForLoadState("networkidle");
@@ -456,7 +464,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("加载更早：cursor 追加下一页卡组（§6.4）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     const pageTwo = CARD_SETS.map((set, i) => ({
       ...set,
       id: `set-page2-${i}`,
@@ -471,7 +479,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("初始加载失败：错误态 + 重新加载可恢复（§6.1）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     await mockDeckApiWith(page, { failListOnce: true });
     await page.goto("/cards");
     await page.waitForLoadState("networkidle");
@@ -482,7 +490,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("深链目标不在已加载页：清参 + 播报（§6.5）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     await gotoDeck(page, "/cards?set=nonexistent-set&expand=1");
     if ((await carousel(page).count()) === 0) {
       test.skip(true, "NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED 未在目标 app 开启");
@@ -493,7 +501,7 @@ test.describe("card set carousel (卡组轮播)", () => {
   });
 
   test("cardCount=0 卡组：点击导航详情页而非展开（§6.5）", async ({ page }) => {
-    test.skip(!process.env.E2E_BASE_URL, "E2E_BASE_URL not set");
+        skipIfNoServer();
     const emptySet = {
       ...CARD_SETS[0],
       id: "set-00000000-0000-0000-0000-000000000099",

@@ -15,7 +15,7 @@
  * 可访问性：容器 `role="log"` + `aria-live="polite"`。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentEventView } from "@/lib/api";
 import { agentEventRowText } from "./agent-event-text";
 import type { AgentEventRowStatus } from "./agent-event-text";
@@ -198,7 +198,7 @@ export interface AgentStreamListProps {
   initiallyExpanded?: boolean;
 }
 
-export function AgentStreamList({ events, loading, error, initiallyExpanded = false }: AgentStreamListProps) {
+export const AgentStreamList = memo(function AgentStreamList({ events, loading, error, initiallyExpanded = false }: AgentStreamListProps) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
   // 滚动容器 ref（三种渲染分支共用一个 ref，换元素时自动重新绑定监听）。
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -349,4 +349,4 @@ export function AgentStreamList({ events, loading, error, initiallyExpanded = fa
       </button>
     </div>
   );
-}
+});

@@ -16,7 +16,7 @@
 
 import { and, eq, like } from "drizzle-orm";
 import { createHash } from "node:crypto";
-import { db } from "../../db.ts";
+import { db, withWorkerWorkspaceTransaction } from "../../db.ts";
 import * as schema from "../../schema/index.ts";
 import {
   AgentUnitKind,
@@ -184,6 +184,9 @@ export async function scheduleCriticForDraft(input: {
   }
 
   // 创建 Critic child unit
+  // slot 纪律：reserve 成功后，任何“未创建可释放的 Critic”的退出路径
+  // （return null / 异常抛出）都必须 release，否则 run 级并发槽永久泄漏。
+  try {
   const now = new Date();
   const [criticUnit] = await db
     .insert(schema.cardGenerationUnits)
@@ -230,6 +233,18 @@ export async function scheduleCriticForDraft(input: {
       .limit(1);
 
     if (existing2) {
+      // 幂等命中（复用已存在的 Critic unit）：本次 reserve 的并发槽没有对应
+      // 新任务——existing2 的槽由它自己的 reserve/完成路径管理。此处必须
+      // release，否则并发窗口下 currentParallelTasks 永久 +1，累计撞
+      // maxParallelTasks 卡死 run（与 330-342 的"未创建可释放 Critic 必须
+      // release"纪律一致）。
+      if (budgetReserved) {
+        try {
+          budgetTracker.releaseParallelTask("grounding_critic");
+        } catch {
+          // 容忍重复释放
+        }
+      }
       const alreadyCompleted = isTerminalUnitStatus(existing2.status);
       return {
         criticTaskId: existing2.id,
@@ -285,27 +300,31 @@ export async function scheduleCriticForDraft(input: {
 
       // 复用后必须创建新的 Critic job(idempotencyKey 加 draftHash，避免与旧 job 冲突)。
       // 缺失时 supervisor 等待一个永远不会执行的孩子 → 死锁。
-      await db.insert(schema.jobs).values({
-        type: JobType.EXECUTE_CARD_AGENT_TURN,
-        workspaceId,
-        requestedBy,
-        payload: {
+      // jobs RLS 重开（0098）后 INSERT 需带 workspace context。
+      await withWorkerWorkspaceTransaction(
+        { workspaceId, userId: requestedBy },
+        (tx) => tx.insert(schema.jobs).values({
+          type: JobType.EXECUTE_CARD_AGENT_TURN,
+          workspaceId,
+          requestedBy,
+          payload: {
+            generationRunId: runId,
+            agentUnitId: oldCritic.id,
+            turnNo: 1,
+            inputHash: createHash("sha256")
+              .update(JSON.stringify({ runId, unitId: oldCritic.id, turnNo: 1, draftHash }))
+              .digest("hex"),
+            userId: requestedBy,
+          },
+          status: JobStatus.PENDING,
           generationRunId: runId,
-          agentUnitId: oldCritic.id,
-          turnNo: 1,
-          inputHash: createHash("sha256")
-            .update(JSON.stringify({ runId, unitId: oldCritic.id, turnNo: 1, draftHash }))
-            .digest("hex"),
-          userId: requestedBy,
-        },
-        status: JobStatus.PENDING,
-        generationRunId: runId,
-        generationUnitId: oldCritic.id,
-        stage: "complete",
-        priority: 72,
-        resourceClass: "card_foreground",
-        idempotencyKey: `agent-turn:${runId}:${oldCritic.id}:1:${draftHash}`,
-      }).onConflictDoNothing();
+          generationUnitId: oldCritic.id,
+          stage: "complete",
+          priority: 72,
+          resourceClass: "card_foreground",
+          idempotencyKey: `agent-turn:${runId}:${oldCritic.id}:1:${draftHash}`,
+        }).onConflictDoNothing(),
+      );
 
       logger.warn(
         { runId, oldCriticUnitId: oldCritic.id, newDraftHash: draftHash, oldStatus: oldCritic.status },
@@ -324,37 +343,48 @@ export async function scheduleCriticForDraft(input: {
       { runId },
       "scheduleCriticForDraft: 无法创建 Critic unit",
     );
+    // 未创建 Critic：释放本次预留的并发槽（否则同 run 后续 Critic 撞 maxConcurrent）
+    if (budgetReserved) {
+      try {
+        budgetTracker.releaseParallelTask("grounding_critic");
+      } catch {
+        // 容忍重复释放
+      }
+    }
     return null;
   }
 
   // 创建 Critic job
-  await db.insert(schema.jobs).values({
-    type: JobType.EXECUTE_CARD_AGENT_TURN,
-    workspaceId,
-    requestedBy,
-    payload: {
+  await withWorkerWorkspaceTransaction(
+    { workspaceId, userId: requestedBy },
+    (tx) => tx.insert(schema.jobs).values({
+      type: JobType.EXECUTE_CARD_AGENT_TURN,
+      workspaceId,
+      requestedBy,
+      payload: {
+        generationRunId: runId,
+        agentUnitId: criticUnit.id,
+        turnNo: 1,
+        // 修复 E4(第5轮)：原代码使用 `turn:1:${criticUnit.id}` 字符串作为 inputHash，
+        // 不是 SHA-256 hash。计划 §5.2 要求 inputHash 是 turn 输入的 SHA-256 hash。
+        inputHash: createHash("sha256")
+          .update(JSON.stringify({
+            runId,
+            unitId: criticUnit.id,
+            turnNo: 1,
+          }))
+          .digest("hex"),
+        userId: requestedBy,
+      },
+      status: JobStatus.PENDING,
       generationRunId: runId,
-      agentUnitId: criticUnit.id,
-      turnNo: 1,
-      // 修复 E4(第5轮)：原代码使用 `turn:1:${criticUnit.id}` 字符串作为 inputHash，
-      // 不是 SHA-256 hash。计划 §5.2 要求 inputHash 是 turn 输入的 SHA-256 hash。
-      inputHash: createHash("sha256")
-        .update(JSON.stringify({
-          runId,
-          unitId: criticUnit.id,
-          turnNo: 1,
-        }))
-        .digest("hex"),
-      userId: requestedBy,
-    },
-    status: JobStatus.PENDING,
-    generationRunId: runId,
-    generationUnitId: criticUnit.id,
-    stage: "complete",
-    priority: 75,
-    resourceClass: "card_foreground",
-    idempotencyKey: `agent-turn:${runId}:${criticUnit.id}:1`,
-  }).onConflictDoNothing();
+      generationUnitId: criticUnit.id,
+      stage: "complete",
+      priority: 75,
+      resourceClass: "card_foreground",
+      idempotencyKey: `agent-turn:${runId}:${criticUnit.id}:1`,
+    }).onConflictDoNothing(),
+  );
 
   logger.info(
     { runId, criticUnitId: criticUnit.id, draftId },
@@ -368,6 +398,17 @@ export async function scheduleCriticForDraft(input: {
     idempotent: false,
     nextAction: "wait_for_children",
   };
+  } catch (err) {
+    // 异常退出且未创建可释放的 Critic：释放预留槽后重抛
+    if (budgetReserved) {
+      try {
+        budgetTracker.releaseParallelTask("grounding_critic");
+      } catch {
+        // 容忍重复释放
+      }
+    }
+    throw err;
+  }
 }
 
 export interface CriticScheduleResult {
@@ -704,33 +745,36 @@ async function handleRequestRepair(
   }
 
   // 创建 Repairer job
-  await db.insert(schema.jobs).values({
-    type: JobType.EXECUTE_CARD_AGENT_TURN,
-    workspaceId: ctx.workspaceId,
-    requestedBy: ctx.requestedBy,
-    payload: {
+  await withWorkerWorkspaceTransaction(
+    { workspaceId: ctx.workspaceId, userId: ctx.requestedBy },
+    (tx) => tx.insert(schema.jobs).values({
+      type: JobType.EXECUTE_CARD_AGENT_TURN,
+      workspaceId: ctx.workspaceId,
+      requestedBy: ctx.requestedBy,
+      payload: {
+        generationRunId: ctx.runId,
+        agentUnitId: repairUnit.id,
+        turnNo: 1,
+        // 修复 E4（第5轮）：原代码使用 `turn:1:${repairUnit.id}` 字符串作为 inputHash，
+        // 不是 SHA-256 hash。计划 §5.2 要求 inputHash 是 turn 输入的 SHA-256 hash。
+        inputHash: createHash("sha256")
+          .update(JSON.stringify({
+            runId: ctx.runId,
+            unitId: repairUnit.id,
+            turnNo: 1,
+          }))
+          .digest("hex"),
+        userId: ctx.requestedBy,
+      },
+      status: JobStatus.PENDING,
       generationRunId: ctx.runId,
-      agentUnitId: repairUnit.id,
-      turnNo: 1,
-      // 修复 E4（第5轮）：原代码使用 `turn:1:${repairUnit.id}` 字符串作为 inputHash，
-      // 不是 SHA-256 hash。计划 §5.2 要求 inputHash 是 turn 输入的 SHA-256 hash。
-      inputHash: createHash("sha256")
-        .update(JSON.stringify({
-          runId: ctx.runId,
-          unitId: repairUnit.id,
-          turnNo: 1,
-        }))
-        .digest("hex"),
-      userId: ctx.requestedBy,
-    },
-    status: JobStatus.PENDING,
-    generationRunId: ctx.runId,
-    generationUnitId: repairUnit.id,
-    stage: "complete",
-    priority: 72,
-    resourceClass: "card_foreground",
-    idempotencyKey: `agent-turn:${ctx.runId}:${repairUnit.id}:1`,
-  }).onConflictDoNothing();
+      generationUnitId: repairUnit.id,
+      stage: "complete",
+      priority: 72,
+      resourceClass: "card_foreground",
+      idempotencyKey: `agent-turn:${ctx.runId}:${repairUnit.id}:1`,
+    }).onConflictDoNothing(),
+  );
 
   logger.info(
     { runId: ctx.runId, repairUnitId: repairUnit.id, issueCount: args.issueIds.length },

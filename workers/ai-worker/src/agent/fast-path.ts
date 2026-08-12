@@ -15,6 +15,7 @@ import { writeProvisionalCandidates } from "./provisional-candidates.ts";
 import { scheduleCriticForDraft } from "./tools/quality.ts";
 import { createFastComposeUnit, createNextTurnJob, createSupervisorUnit } from "./unit-helpers.ts";
 import { BudgetTracker } from "./budget.ts";
+import { createDefaultRunBudget } from "@ailearn/shared";
 import type { AgentTurnExecutionResult } from "./types.ts";
 
 /**
@@ -123,15 +124,18 @@ async function resolveFastProvider(job: JobPayload, payload: AgentJobPayload): P
 }
 
 /** Fast provider 调用适配:单次 chatCompletion 即一轮 turn */
-function makeProviderTurn(provider: AIProvider): FastExtractProviderTurn {
+function makeProviderTurn(provider: AIProvider, signal?: AbortSignal): FastExtractProviderTurn {
   return {
     executeProviderTurn: async ({ systemPrompt, userMessage }) => {
+      // 2026-08-12（模型调用面审计）：透传 handler 级 AbortSignal——此前直调
+      // 无 signal，超时后底层 https 请求继续跑（烧额度、占 socket）。
       const res = await provider.chatCompletion(
         [
           { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
         { temperature: 0.2, maxTokens: 16_384 },
+        signal,
       );
       // ChatResult 无 finishReason(Shared 契约),Fast 校验的截断检测
       // 由 candidate 数量/内容信号兜底(validator 的 retryable/escalate 分类)
@@ -161,7 +165,7 @@ export async function executeFastExtractPhase(
     finishReason: "stop" as const,
   };
 
-  const result = await runFastExtract(makeProviderTurn(provider), {
+  const result = await runFastExtract(makeProviderTurn(provider, lease.signal), {
     systemPrompt: buildFastExtractSystemPrompt({
       noteTitle: inputs.title,
       evidence: inputs.evidence,
@@ -484,24 +488,27 @@ export async function executeFastComposePhase(
   );
 
   // P1-1 复用:自动创建 Critic(同一质量门禁,计划 §7 契约一致)
-  await scheduleCriticForDraft({
+  // 修复(2026-08-11):此前硬编码 maxParallelTasks: 0 使 reserveParallelTask
+  // 立即抛 → Critic 永不创建且返回值被丢弃。fast-path 不加载 run.budgetSnapshot
+  //（planned-path 才读真实预算），此处用默认预算（maxParallelTasks=6，
+  // deadline 动态）；若 run 配了更高并发，可后续改为读 budgetSnapshot。
+  const criticResult = await scheduleCriticForDraft({
     workspaceId: job.workspaceId,
     runId: payload.generationRunId,
     agentUnitId: payload.agentUnitId,
     requestedBy: job.requestedBy ?? "",
     draftId: composed.draftId,
     draftHash: composed.contentHash,
-    budgetTracker: new BudgetTracker({
-      maxProviderCalls: 60,
-      maxInputTokens: 2_000_000,
-      maxOutputTokens: 500_000,
-      roles: {},
-      maxEmbeddingTokens: 0,
-      maxParallelTasks: 0,
-      runDeadline: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      costCap: 0,
-    }),
+    budgetTracker: new BudgetTracker(createDefaultRunBudget()),
   });
+  if (criticResult === null) {
+    // 预算/并发槽耗尽等导致 Critic 未调度：记日志但不悬挂 run——
+    // draft 已落库，质量门禁缺口由 reconciliation/重试兜底。
+    logger.warn(
+      { runId: payload.generationRunId, unitId: payload.agentUnitId, draftId: composed.draftId },
+      "FAST_COMPOSE: 自动 Critic 调度失败(返回 null),draft 已落库,无质量门禁保护",
+    );
+  }
 
   await markUnitFinished(job, payload, "succeeded");
   return { kind: "complete" };

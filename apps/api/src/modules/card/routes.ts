@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
 import { noteVersions } from "../../db/schema/note.ts";
 import { learningCards } from "../../db/schema/card.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
@@ -28,9 +28,9 @@ export async function cardRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { id: string } }>("/cards/:id", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const data = await getCardWithDetail(req.params.id, req.session.workspaceId, req.session.userId);
-    if (!data) return reply.code(404).send({ error: "not found" });
+    if (!data) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return data;
   });
 
@@ -38,9 +38,9 @@ export async function cardRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可重新生成卡片
   app.post<{ Params: { id: string } }>("/cards/:id/regenerate", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await regenerateCard(req.params.id, req.session.workspaceId, req.session.userId);
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return result;
   });
 
@@ -48,9 +48,9 @@ export async function cardRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可忽略卡片
   app.post<{ Params: { id: string } }>("/cards/:id/dismiss", { preHandler: [requireOwner] }, async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await dismissCard(req.params.id, req.session.workspaceId, req.session.userId);
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return result;
   });
 }
@@ -59,61 +59,68 @@ export async function cardJobRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
 
   async function getGenerationState(workspaceId: string, noteVersionId: string, noteId: string) {
-    const existingCard = await db.query.learningCards.findFirst({
-      where: and(
-        eq(learningCards.workspaceId, workspaceId),
-        eq(learningCards.noteVersionId, noteVersionId),
-        activeLearningCardConsumerPredicate(),
-      ),
-      orderBy: [desc(learningCards.createdAt)],
+    // QUAL-58/SEC-26：这些读在 RLS 事务上下文内执行（learning_cards 等表
+    // RLS 重开时不被裸 db 查询静默破坏；0027 failsafe 期间行为不变）。
+    return withWorkspaceTransaction({ workspaceId, userId: SYSTEM_USER_ID }, async (tx) => {
+      const existingCard = await tx.query.learningCards.findFirst({
+        where: and(
+          eq(learningCards.workspaceId, workspaceId),
+          eq(learningCards.noteVersionId, noteVersionId),
+          activeLearningCardConsumerPredicate(),
+        ),
+        orderBy: [desc(learningCards.createdAt)],
+      });
+      const [previousCard] = await tx
+        .select({ id: learningCards.id, noteVersionId: learningCards.noteVersionId })
+        .from(learningCards)
+        .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
+        .where(and(
+          eq(learningCards.workspaceId, workspaceId),
+          activeLearningCardConsumerPredicate(),
+          eq(noteVersions.noteId, noteId),
+        ))
+        .orderBy(desc(learningCards.createdAt))
+        .limit(1);
+
+      if (existingCard) {
+        return {
+          state: "generated" as const,
+          cardId: existingCard.id,
+          jobId: null,
+          generatedVersionId: existingCard.noteVersionId,
+        };
+      }
+
+      if (previousCard) {
+        return {
+          state: "generated" as const,
+          cardId: previousCard.id,
+          jobId: null,
+          generatedVersionId: previousCard.noteVersionId,
+        };
+      }
+
+      return {
+        state: "idle" as const,
+        cardId: null,
+        jobId: null,
+        generatedVersionId: null,
+      };
     });
-    const [previousCard] = await db
-      .select({ id: learningCards.id, noteVersionId: learningCards.noteVersionId })
-      .from(learningCards)
-      .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
-      .where(and(
-        eq(learningCards.workspaceId, workspaceId),
-        activeLearningCardConsumerPredicate(),
-        eq(noteVersions.noteId, noteId),
-      ))
-      .orderBy(desc(learningCards.createdAt))
-      .limit(1);
-
-    if (existingCard) {
-      return {
-        state: "generated" as const,
-        cardId: existingCard.id,
-        jobId: null,
-        generatedVersionId: existingCard.noteVersionId,
-      };
-    }
-
-    if (previousCard) {
-      return {
-        state: "generated" as const,
-        cardId: previousCard.id,
-        jobId: null,
-        generatedVersionId: previousCard.noteVersionId,
-      };
-    }
-
-    return {
-      state: "idle" as const,
-      cardId: null,
-      jobId: null,
-      generatedVersionId: null,
-    };
   }
 
   app.get<{ Params: { id: string } }>("/note-versions/:id/card-status", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
-    const version = await db.query.noteVersions.findFirst({
-      where: and(
-        eq(noteVersions.id, req.params.id),
-        eq(noteVersions.workspaceId, req.session.workspaceId),
-      ),
-    });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const version = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: SYSTEM_USER_ID },
+      (tx) => tx.query.noteVersions.findFirst({
+        where: and(
+          eq(noteVersions.id, req.params.id),
+          eq(noteVersions.workspaceId, req.session.workspaceId),
+        ),
+      }),
+    );
     if (!version) return reply.code(404).send({ error: "note version not found" });
     return getGenerationState(req.session.workspaceId, req.params.id, version.noteId);
   });
@@ -121,10 +128,13 @@ export async function cardJobRoutes(app: FastifyInstance) {
   // RBAC: 仅 owner 可触发生成卡片（创建 AI 任务属于数据写入）
   app.post("/cards/generate", { preHandler: [requireOwner] }, async (req, reply) => {
     const body = parseBody(app, generateCardRequestSchema, req.body);
-    // 跨租户校验：noteVersion 必须属于当前 workspace
-    const version = await db.query.noteVersions.findFirst({
-      where: and(eq(noteVersions.id, body.noteVersionId), eq(noteVersions.workspaceId, req.session.workspaceId)),
-    });
+    // 跨租户校验：noteVersion 必须属于当前 workspace（RLS 事务上下文内）
+    const version = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: SYSTEM_USER_ID },
+      (tx) => tx.query.noteVersions.findFirst({
+        where: and(eq(noteVersions.id, body.noteVersionId), eq(noteVersions.workspaceId, req.session.workspaceId)),
+      }),
+    );
     if (!version) {
       return reply.code(404).send({ error: "note version not found" });
     }

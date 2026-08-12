@@ -1,0 +1,36 @@
+{
+  "assetStatus": "candidate_only",
+  "profileVersion": 2,
+  "character": "star-study-companion",
+  "sourcePsd": "seethrough-restored-candidate-live2d-v2.psd",
+  "canvas": [1024, 1024],
+  "activeLayerCount": 25,
+  "layerPack": "live2d-layer-pack-1024-prop-tail-restored-candidate",
+  "fallback": {
+    "driver": "sprite",
+    "required": true,
+    "reason": "Live2D runtime and model distribution are not yet approved"
+  },
+  "parameters": {
+    "ParamAngleX": [-30, 30],
+    "ParamAngleY": [-20, 20],
+    "ParamAngleZ": [-15, 15],
+    "ParamEyeLOpen": [0, 1],
+    "ParamEyeROpen": [0, 1],
+    "ParamEyeBallX": [-1, 1],
+    "ParamEyeBallY": [-1, 1],
+    "ParamBrowLY": [-1, 1],
+    "ParamBrowRY": [-1, 1],
+    "ParamMouthOpenY": [0, 1],
+    "ParamMouthForm": [-1, 1],
+    "ParamBreath": [0, 1],
+    "ParamHairSway": [-1, 1],
+    "ParamTailSway": [-1, 1],
+    "ParamPropSwing": [-1, 1]
+  },
+  "physicsGroups": ["hair_front", "hair_back", "tail", "prop_hanging"],
+  "hitAreas": ["head", "body", "eye_left", "eye_right", "tail", "prop"],
+  "runtimeStatus": "not_registered",
+  "distributionStatus": "blocked-license-not-confirmed",
+  "nextRequiredArtifacts": ["cmo3", "moc3", "model3.json", "physics3.json", "motion3.json", "expression3.json"]
+}

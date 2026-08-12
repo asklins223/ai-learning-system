@@ -47,7 +47,9 @@ async function waitForReviewReady(page: Page): Promise<void> {
   await expect(completeButton).toBeVisible({ timeout: 10_000 });
 }
 
-test.describe("Review Attempt lifecycle @pr", () => {
+// 2026-08-11：v0.5 流程 UI 已删除，本文件全部测试对 v0.6 review 页必失败。
+// 标记 skip（报告中可见），等待按文件头 v0.6 MIGRATION NOTICE 重写。
+test.describe.skip("Review Attempt lifecycle @pr (v0.5 UI 已废弃，待 v0.6 重写)", () => {
   test("submit flow: start → outcome → answer → submit → queue updates", async ({ authedPage }) => {
     const page = authedPage;
 

@@ -14,7 +14,7 @@ export async function evidenceRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: "invalid cardId format" });
     // N-005: 传递 userId 以获取用户级 override
     const data = await getCardEvidence(req.params.cardId, req.session.workspaceId, req.session.userId);
-    if (!data) return reply.code(404).send({ error: "not found" });
+    if (!data) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return data;
   });
 
@@ -25,10 +25,10 @@ export async function evidenceRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>("/evidences/:id/override", async (req, reply) => {
     // R-022: UUID 路径参数校验
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const body = parseBody(app, overrideSchema, req.body);
     const result = await overrideEvidence(req.params.id, req.session.workspaceId, req.session.userId, body.override);
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return result;
   });
 
@@ -37,9 +37,9 @@ export async function evidenceRoutes(app: FastifyInstance) {
    */
   app.delete<{ Params: { id: string } }>("/evidences/:id/override", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid id format" });
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await removeEvidenceOverride(req.params.id, req.session.workspaceId, req.session.userId);
-    if (!result) return reply.code(404).send({ error: "not found" });
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return result;
   });
 }

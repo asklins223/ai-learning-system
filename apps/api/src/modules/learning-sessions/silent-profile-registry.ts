@@ -25,128 +25,43 @@
  * 留待收口后接入）。
  */
 
-import { CapabilityFacet } from "@ailearn/shared";
-
-// ─── 本地契约类型（与 packages/shared/src/silent-proof-profile-contracts.ts
-//      同型；收口后迁移到 @ailearn/shared）──────────────────────────────────
-
-export const ProfileFamily = {
-  PROCEDURE: "procedure",
-  CAUSAL_BOUNDARY: "causal-boundary",
-  CONCEPT_APPLICATION: "concept-application",
-} as const;
-export type ProfileFamily = (typeof ProfileFamily)[keyof typeof ProfileFamily];
-
-export const ProfileStatus = {
-  DRAFT: "draft",
-  ACTIVE: "active",
-  RETIRED: "retired",
-} as const;
-export type ProfileStatus = (typeof ProfileStatus)[keyof typeof ProfileStatus];
-
-export const EligibilityStatus = {
-  ELIGIBLE: "eligible",
-  INELIGIBLE: "ineligible",
-} as const;
-export type EligibilityStatus = (typeof EligibilityStatus)[keyof typeof EligibilityStatus];
-
-/** 结构证据种类（01-2 §6.1 统一交互语法的结构题面，不泄漏答案）。 */
-export type StructuralEvidenceKind =
-  | "ordering_reconstruction" // 排：重建步骤/顺序（无提示排序）
-  | "repair_with_justification" // 修：定位并修复错误流程/论证，附用户依据
-  | "relation_reconstruction" // 连：在冻结结构内重建因果/组成/前置关系
-  | "conditional_variant" // 演：条件变式/后果预测
-  | "open_construction" // 开放构建：主动构建理由/条件 artifact
-  | "situated_application"; // 情境应用：迁移到新情境
-
-/** 任务区分度 basis（§6.4 降级因素的正面镜像）。 */
-export type DiscriminationBasis =
-  | "valid_distractors" // 存在有效 distractor/错误项
-  | "no_unique_slot_guess" // 非"只剩唯一槽位"推理
-  | "multi_step_dependency" // 多步依赖，不能单步猜中
-  | "no_snapping_assist" // 无吸附正确位辅助
-  | "sufficient_operation_count"; // 操作次数满足最大上限约束且可区分
-
-/** A11y 等价操作（01-2 §3.1 每个 Scene 冻结的等价路径）。 */
-export type A11yEquivalenceKind =
-  | "tap_select_place" // 点选对象 → 选择动作 → 点选目标
-  | "keyboard" // 键盘移动/连接/撤销/锁定
-  | "screen_reader" // 读屏可理解的节点/关系/顺序描述
-  | "reduced_motion"; // reduced-motion 静态变化等价路径
-
-/** SilentProofProfile（01-2 §8.2）：versioned 资格模板。 */
-export interface SilentProofProfile {
-  id: string;
-  version: string;
-  family: ProfileFamily;
-  /** 该 profile 可证明的 capability facet（recall 除外：结构题公开 token 不覆盖 recall） */
-  facets: CapabilityFacet[];
-  /** 互补 Scene 模板集合：每个合格 bundle 至少两个互补 Scene（01-2 §8.3 R5） */
-  complementarySceneIds: string[];
-  status: ProfileStatus;
-  /** 独立 Gold 认证 hash；active profile 必须持有，缺失则不得 eligible */
-  goldCertificationHash?: string;
-}
-
-/** 逐 facet 结构证据覆盖绑定。 */
-export interface FacetCoverageEvidence {
-  facet: CapabilityFacet;
-  /** 证据来源 Scene 模板（必须属于 profile.complementarySceneIds） */
-  sceneId: string;
-  evidenceKind: StructuralEvidenceKind;
-  /** 该证据在展示题面（public token）时不泄漏正确答案 */
-  answerNotLeaked: boolean;
-}
-
-/** 证明 1：全部 required facets 可由未泄漏答案的结构证据覆盖。 */
-export interface CoverageProof {
-  requiredFacetsCovered: boolean;
-  facetCoverage: FacetCoverageEvidence[];
-  disclosureBoundaryRespected: boolean;
-  reasonCodes: string[];
-}
-
-/** 证明 2：公开 token 不覆盖所声称的 recall。 */
-export interface RecallNonDisclosure {
-  claimedRecallFacets: CapabilityFacet[];
-  publicTokensDiscloseAnswer: boolean;
-  recallCoveredByStructuralEvidenceOnly: boolean;
-  reasonCodes: string[];
-}
-
-/** 证明 3：任务具有足够区分度。 */
-export interface DiscriminationProof {
-  sufficient: boolean;
-  basis: DiscriminationBasis[];
-  reasonCodes: string[];
-}
-
-/** 证明 4：A11y 等价操作不降低语义要求。 */
-export interface A11yEquivalenceProof {
-  semanticRequirementUnchanged: boolean;
-  equivalentOperations: A11yEquivalenceKind[];
-  reasonCodes: string[];
-}
-
-/** 证明 5：该 profile 已通过独立 Gold。 */
-export interface GoldPassedProof {
-  independentGoldPassed: boolean;
-  goldCertificationHash: string;
-  reasonCodes: string[];
-}
-
-/** structuredProofEligibilityReport（01-2 §8.2）：Key Point 级资格报告。 */
-export interface StructuredProofEligibilityReport {
-  profileId: string;
-  keyPointId: string;
-  requiredFacets: CapabilityFacet[];
-  coverageProof: CoverageProof;
-  recallNonDisclosure: RecallNonDisclosure;
-  discrimination: DiscriminationProof;
-  a11yEquivalence: A11yEquivalenceProof;
-  goldPassed: GoldPassedProof;
-  eligibility: EligibilityStatus;
-}
+import {
+  CapabilityFacet,
+  ProfileFamily,
+  ProfileStatus,
+  EligibilityStatus,
+  type StructuralEvidenceKind,
+  type DiscriminationBasis,
+  type A11yEquivalenceKind,
+  type SilentProofProfile,
+  type FacetCoverageEvidence,
+  type CoverageProof,
+  type RecallNonDisclosure,
+  type DiscriminationProof,
+  type A11yEquivalenceProof,
+  type GoldPassedProof,
+  type StructuredProofEligibilityReport,
+} from "@ailearn/shared";
+// 2026-08-12（契约收口）：类型/单量单一来源迁移到 @ailearn/shared
+// （silent-proof-profile-contracts.ts）；本文件保留 re-export 兼容既有消费者。
+export {
+  ProfileFamily,
+  ProfileStatus,
+  EligibilityStatus,
+};
+export type {
+  StructuralEvidenceKind,
+  DiscriminationBasis,
+  A11yEquivalenceKind,
+  SilentProofProfile,
+  FacetCoverageEvidence,
+  CoverageProof,
+  RecallNonDisclosure,
+  DiscriminationProof,
+  A11yEquivalenceProof,
+  GoldPassedProof,
+  StructuredProofEligibilityReport,
+};
 
 // ─── 独立 Gold 认证凭据（security_review MEDIUM #2 修复）────────────────
 /**

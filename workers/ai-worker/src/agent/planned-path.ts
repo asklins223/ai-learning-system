@@ -1,6 +1,6 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
-import { composeArtifactSchema } from "@ailearn/shared";
+import { composeArtifactSchema, createDefaultRunBudget } from "@ailearn/shared";
 import { db, withWorkerWorkspaceTransaction } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { logger } from "../lib/logger.ts";
@@ -135,6 +135,8 @@ export async function executePlannedSpecialistPhase(
         { role: "user", content: `## Bundle: ${bundleId}\n## 提取重点\n${extractionFocus}\n\n## 笔记内容\n${evidenceText.slice(0, 6000)}` },
       ],
       { temperature: 0.2, maxTokens: 12_288 },
+      // 2026-08-12（模型调用面审计）：透传 handler AbortSignal，超时真正中止底层请求
+      lease.signal,
     );
 
     const raw = res.content.replace(/```(?:json)?/g, "").trim();
@@ -309,6 +311,8 @@ export async function executePlannedComposePhase(
         { role: "user", content: `## 候选列表\n${candidatesText}\n\n卡片预算参考: ${density}\n\n候选 id 已含 bundle 前缀(如 a:c1);引用时须原样使用完整 id。` },
       ],
       { temperature: 0.2, maxTokens: 16_384 },
+      // 2026-08-12（模型调用面审计）：透传 handler AbortSignal，超时真正中止底层请求
+      lease.signal,
     );
 
     const raw = res.content.replace(/```(?:json)?/g, "").trim();
@@ -342,7 +346,10 @@ export async function executePlannedComposePhase(
           .where(and(
             eq(schema.cardGenerationDrafts.workspaceId, job.workspaceId),
             eq(schema.cardGenerationDrafts.runId, payload.generationRunId),
-          ));
+          ))
+          // 无 orderBy 时多版本行顺序不定 → 可能取到旧版本使版本号倒退/重复。
+          .orderBy(desc(schema.cardGenerationDrafts.draftVersion))
+          .limit(1);
         const draftVersion = (versionResult?.value ?? 0) + 1;
         const normalizedCards = compose.cards.map((card, index) => ({
           title: card.title,
@@ -412,7 +419,9 @@ export async function executePlannedComposePhase(
         maxOutputTokens: Number(runBudget.maxOutputTokens ?? 500_000),
         roles: (runBudget.roles as Record<string, unknown>) ?? {},
         maxEmbeddingTokens: Number(runBudget.maxEmbeddingTokens ?? 0),
-        maxParallelTasks: Number(runBudget.maxParallelTasks ?? 0),
+        // 旧 run 的 budgetSnapshot 可能不含 maxParallelTasks：
+        // `?? 0` 会使自动 Critic 的 reserveParallelTask 立即抛(同 fast-path 修复)。
+        maxParallelTasks: Number(runBudget.maxParallelTasks ?? createDefaultRunBudget().maxParallelTasks),
         runDeadline: String(runBudget.runDeadline ?? new Date(Date.now() + 30 * 60 * 1000).toISOString()),
         costCap: Number(runBudget.costCap ?? 0),
       }),

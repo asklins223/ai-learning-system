@@ -334,7 +334,7 @@ export function validateCanonicalEventPayload(
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new CanonicalEventValidationError(
       "payload 必须是对象",
-      "INVALID_PAYLOAD",
+      "invalid_payload",
     );
   }
   const result: Record<string, unknown> = {};
@@ -343,20 +343,20 @@ export function validateCanonicalEventPayload(
     if (PAYLOAD_DENIED_KEYS.has(key)) {
       throw new CanonicalEventValidationError(
         `payload 禁止敏感字段 ${key}（outbox 只存 schema action/IDs/hash/版本/计数/usage/安全摘要，不存 raw chain-of-thought/回答原文）`,
-        "SENSITIVE_FIELD_DENIED",
+        "sensitive_field_denied",
       );
     }
     if (!PAYLOAD_ALLOWED_KEYS.has(key)) {
       throw new CanonicalEventValidationError(
         `payload 含未知字段 ${key}（必须显式加入白名单）`,
-        "UNKNOWN_PAYLOAD_FIELD",
+        "unknown_payload_field",
       );
     }
     if (key === "facetSummaries") {
       if (!Array.isArray(value)) {
         throw new CanonicalEventValidationError(
           "facetSummaries 必须是数组",
-          "INVALID_PAYLOAD_TYPE",
+          "invalid_payload_type",
         );
       }
       result[key] = value.map((item) => normalizeFacetSummary(item));
@@ -364,14 +364,14 @@ export function validateCanonicalEventPayload(
       if (typeof value !== "number" || !Number.isFinite(value)) {
         throw new CanonicalEventValidationError(
           `payload 字段 ${key} 必须是有穷数字`,
-          "INVALID_PAYLOAD_TYPE",
+          "invalid_payload_type",
         );
       }
       result[key] = value;
     } else if (typeof value !== "string") {
       throw new CanonicalEventValidationError(
         `payload 字段 ${key} 必须是字符串`,
-        "INVALID_PAYLOAD_TYPE",
+        "invalid_payload_type",
       );
     } else {
       result[key] = value;
@@ -384,7 +384,7 @@ function normalizeFacetSummary(item: unknown): FacetSummaryPayload {
   if (!item || typeof item !== "object" || Array.isArray(item)) {
     throw new CanonicalEventValidationError(
       "facetSummaries 项必须是对象",
-      "INVALID_PAYLOAD_TYPE",
+      "invalid_payload_type",
     );
   }
   const obj = item as Record<string, unknown>;
@@ -392,26 +392,26 @@ function normalizeFacetSummary(item: unknown): FacetSummaryPayload {
     if (PAYLOAD_DENIED_KEYS.has(key)) {
       throw new CanonicalEventValidationError(
         `facetSummaries 项禁止敏感字段 ${key}`,
-        "SENSITIVE_FIELD_DENIED",
+        "sensitive_field_denied",
       );
     }
   }
   if (typeof obj.rubricItemId !== "string" || obj.rubricItemId === "") {
     throw new CanonicalEventValidationError(
       "facetSummaries 项缺 rubricItemId",
-      "INVALID_PAYLOAD_TYPE",
+      "invalid_payload_type",
     );
   }
   if (typeof obj.verdict !== "string" || obj.verdict === "") {
     throw new CanonicalEventValidationError(
       "facetSummaries 项缺 verdict",
-      "INVALID_PAYLOAD_TYPE",
+      "invalid_payload_type",
     );
   }
   if (typeof obj.confidence !== "number" || !Number.isFinite(obj.confidence)) {
     throw new CanonicalEventValidationError(
       "facetSummaries 项 confidence 必须是有穷数字",
-      "INVALID_PAYLOAD_TYPE",
+      "invalid_payload_type",
     );
   }
   const out: FacetSummaryPayload = {
@@ -423,7 +423,7 @@ function normalizeFacetSummary(item: unknown): FacetSummaryPayload {
     if (typeof obj.keyPointId !== "string") {
       throw new CanonicalEventValidationError(
         "facetSummaries 项 keyPointId 必须是字符串",
-        "INVALID_PAYLOAD_TYPE",
+        "invalid_payload_type",
       );
     }
     out.keyPointId = obj.keyPointId;
@@ -432,7 +432,7 @@ function normalizeFacetSummary(item: unknown): FacetSummaryPayload {
     if (typeof obj.rubricVersion !== "string") {
       throw new CanonicalEventValidationError(
         "facetSummaries 项 rubricVersion 必须是字符串",
-        "INVALID_PAYLOAD_TYPE",
+        "invalid_payload_type",
       );
     }
     out.rubricVersion = obj.rubricVersion;
@@ -485,7 +485,7 @@ export function eventTypeToDomain(eventType: CanonicalEventType): CanonicalEvent
 function invalidDomain(eventType: CanonicalEventType, _fact: CanonicalFactInsert): never {
   throw new CanonicalEventValidationError(
     `eventType=${eventType} 与权威事实 domain 不一致`,
-    "EVENT_TYPE_DOMAIN_MISMATCH",
+    "event_type_domain_mismatch",
   );
 }
 
@@ -510,7 +510,7 @@ export async function appendCanonicalEvent(
   if (eventTypeToDomain(eventType) !== canonicalFact.domain) {
     throw new CanonicalEventValidationError(
       `eventType=${eventType} 与权威事实 domain=${canonicalFact.domain} 不一致`,
-      "EVENT_TYPE_DOMAIN_MISMATCH",
+      "event_type_domain_mismatch",
     );
   }
   const safePayload = validateCanonicalEventPayload(payload);
@@ -555,7 +555,7 @@ export function stableStringify(value: unknown): string {
     if (typeof value === "number" && !Number.isFinite(value)) {
       throw new CanonicalEventValidationError(
         "投影/事件含非有限数字（NaN/Infinity），无法确定性序列化",
-        "INVALID_PAYLOAD_TYPE",
+        "invalid_payload_type",
       );
     }
     return JSON.stringify(value);
@@ -889,6 +889,11 @@ export function pgCanonicalEventStore(tx: ApiTransaction): CanonicalEventStore {
           if (r.cardId) conds.push(eq(validationEvents.cardId, r.cardId));
           if (r.keyPointId) conds.push(eq(validationEvents.keyPointId, r.keyPointId));
           if (r.sourceFingerprint) conds.push(eq(validationEvents.sourceFingerprint, r.sourceFingerprint));
+          // 幂等粒度对齐 validation_events_input_unique_idx(workspace, card, kp, user,
+          // question, user_answer)：同一 Key Point 的独立 Episode 若作答不同必须
+          // 各自落 validation 事实，不能被旧行的 (keyPointId+sourceFingerprint) 误判幂等。
+          conds.push(eq(validationEvents.question, r.question));
+          conds.push(eq(validationEvents.userAnswer, r.userAnswer));
           const found = await tx
             .select({ id: validationEvents.id })
             .from(validationEvents)
@@ -959,23 +964,31 @@ export function pgCanonicalEventStore(tx: ApiTransaction): CanonicalEventStore {
     async findCanonicalFactId(fact, scope) {
       switch (fact.domain) {
         case "validation": {
+          const r = fact.row;
+          // 冲突后回查只按唯一索引键
+          // validation_events_input_unique_idx(workspace_id, card_id,
+          // COALESCE(key_point_id,...), user_id, question, user_answer) 过滤：
+          // 带 submissionId/questionId/sourceFingerprint 等附加条件可能查不到
+          // 已被索引判定为重复的行（同一 kp 完全相同的作答、不同 submissionId）。
           const conds = [
             eq(validationEvents.workspaceId, scope.workspaceId),
             eq(validationEvents.userId, scope.userId),
+            eq(validationEvents.cardId, r.cardId),
+            eq(validationEvents.question, r.question),
+            eq(validationEvents.userAnswer, r.userAnswer),
           ];
-          const r = fact.row;
-          if (r.submissionId) conds.push(eq(validationEvents.submissionId, r.submissionId));
-          if (r.questionId) conds.push(eq(validationEvents.questionId, r.questionId));
-          if (r.cardId) conds.push(eq(validationEvents.cardId, r.cardId));
-          if (r.keyPointId) conds.push(eq(validationEvents.keyPointId, r.keyPointId));
-          if (r.sourceFingerprint) conds.push(eq(validationEvents.sourceFingerprint, r.sourceFingerprint));
+          if (r.keyPointId) {
+            conds.push(eq(validationEvents.keyPointId, r.keyPointId));
+          } else {
+            conds.push(sql`${validationEvents.keyPointId} IS NULL`);
+          }
           const found = await tx
             .select({ id: validationEvents.id })
             .from(validationEvents)
             .where(and(...conds))
             .limit(1);
           if (found.length === 0) {
-            throw new CanonicalEventValidationError("并发冲突后回查权威事实失败", "CANONICAL_FACT_NOT_FOUND");
+            throw new CanonicalEventValidationError("并发冲突后回查权威事实失败", "canonical_fact_not_found");
           }
           return found[0]!.id;
         }
@@ -990,7 +1003,7 @@ export function pgCanonicalEventStore(tx: ApiTransaction): CanonicalEventStore {
             ))
             .limit(1);
           if (found.length === 0) {
-            throw new CanonicalEventValidationError("并发冲突后回查权威事实失败", "CANONICAL_FACT_NOT_FOUND");
+            throw new CanonicalEventValidationError("并发冲突后回查权威事实失败", "canonical_fact_not_found");
           }
           return found[0]!.id;
         }
@@ -1007,7 +1020,7 @@ export function pgCanonicalEventStore(tx: ApiTransaction): CanonicalEventStore {
             ))
             .limit(1);
           if (found.length === 0) {
-            throw new CanonicalEventValidationError("并发冲突后回查权威事实失败", "CANONICAL_FACT_NOT_FOUND");
+            throw new CanonicalEventValidationError("并发冲突后回查权威事实失败", "canonical_fact_not_found");
           }
           return found[0]!.id;
         }

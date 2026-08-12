@@ -88,14 +88,18 @@ export function isNonRetryableError(error: unknown): boolean {
 
   // QUAL-24 修复：优先检查结构化错误类型
   // ProviderRequestError 包含 status 和 providerCode 字段，
- // 可直接通过 HTTP 状态码判断，避免文本匹配的误判风险
+  // 可直接通过 HTTP 状态码判断，避免文本匹配的误判风险
   if (error !== null && typeof error === "object" && "status" in error) {
     const status = (error as { status?: unknown }).status;
     if (typeof status === "number") {
       // 401 Unauthorized, 403 Forbidden → 不可重试
       if (status === 401 || status === 403) return true;
-      // 400 Bad Request 中包含不可重试的配置错误，
-      // 但也可能是可重试的验证错误，继续回退到文本匹配
+      // 2026-08-12（模型调用面审计）：与 generation-failure-policy 对齐——
+      // 400（含 context_length_exceeded）/404（模型不存在）/422（验证失败）
+      // 都是确定性请求错误，重试无意义（此前会无意义重试 3 次烧配额）。
+      // 仅 408/429/5xx 可重试。
+      if (status === 400 || status === 404 || status === 422) return true;
+      // 其他状态码（408/429/5xx）可重试，继续走文本匹配兜底
     }
   }
 

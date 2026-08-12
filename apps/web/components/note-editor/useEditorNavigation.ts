@@ -160,8 +160,12 @@ export function useEditorNavigation(ctx: EditorNavigationContext): EditorNavigat
   ]);
 
   // ── 大纲跳转 ────────────────────────────────────────────────────────
+  // 2026-08-11：重试上限——此前预览/编辑器未就绪时双帧无限递归（无上限、
+  // 无卸载守卫），组件卸载后 rAF 队列永不停止、持续占用主线程。改为
+  // attempt 计数，超过 MAX_NAV_RETRY_FRAMES（16 帧 ≈ 0.3s）后放弃。
+  const MAX_NAV_RETRY_FRAMES = 16;
 
-  const jumpToBlock = useCallback((block: Block) => {
+  const jumpToBlock = useCallback((block: Block, attempt = 0) => {
     // 预览模式：滚动预览面板到对应标题
     if (mode === "preview") {
       const previewPane = previewRef.current;
@@ -169,13 +173,15 @@ export function useEditorNavigation(ctx: EditorNavigationContext): EditorNavigat
         jumpToPreviewHeading(block);
         return;
       }
-      requestAnimationFrame(() => requestAnimationFrame(() => jumpToBlock(block)));
+      if (attempt >= MAX_NAV_RETRY_FRAMES) return;
+      requestAnimationFrame(() => requestAnimationFrame(() => jumpToBlock(block, attempt + 1)));
       return;
     }
     // 编辑模式：在 Milkdown 编辑器中找到标题元素并滚动
     const editorPane = editorPaneRef.current?.querySelector(".ProseMirror");
     if (!editorPane) {
-      requestAnimationFrame(() => requestAnimationFrame(() => jumpToBlock(block)));
+      if (attempt >= MAX_NAV_RETRY_FRAMES) return;
+      requestAnimationFrame(() => requestAnimationFrame(() => jumpToBlock(block, attempt + 1)));
       return;
     }
     const headingText = stripMarkdownTitle(block.content.trim());

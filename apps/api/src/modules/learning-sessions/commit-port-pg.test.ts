@@ -46,12 +46,22 @@ test("setCommitKey：执行 UPDATE（注入确认调用，不抛错）", async (
   const { tx } = makeTx({
     onExecute: () => {
       called = true;
-      return [];
+      // RETURNING id：1 行受影响
+      return [{ id: EPISODE }];
     },
   });
   const port = createPgCommitPort(tx);
   await port.setCommitKey({ workspaceId: WS, userId: USER }, EPISODE, "ck-new");
   assert.equal(called, true, "setCommitKey 执行了 UPDATE");
+});
+
+test("setCommitKey：episode 不存在/越权（0 行）→ 抛错而非静默成功", async () => {
+  const { tx } = makeTx({ onExecute: () => [] });
+  const port = createPgCommitPort(tx);
+  await assert.rejects(
+    port.setCommitKey({ workspaceId: WS, userId: USER }, EPISODE, "ck-new"),
+    /不存在或不属于当前 scope/,
+  );
 });
 
 test("lockSteps：执行 FOR UPDATE 行锁", async () => {
@@ -72,16 +82,119 @@ test("lockSteps：执行 FOR UPDATE 行锁", async () => {
   assert.equal(sawLock, true, "episode 行锁执行");
 });
 
-test("未实现方法：fail closed（CommitPortNotImplementedError，不假写）", async () => {
+test("loadCommitGuard：读取真实指纹、决策 hash 与 schedule generation", async () => {
+  let call = 0;
+  const { tx } = makeTx({
+    onExecute: () => {
+      call += 1;
+      if (call === 1) {
+        return [{
+          episodeEpoch: 3,
+          status: "active",
+          runtimeEpochSnapshot: 7,
+          contentFingerprint: "fingerprint-1",
+          schedulingDecision: {
+            decisionHash: "decision-hash-1",
+            inputScheduleId: "schedule-1",
+          },
+        }];
+      }
+      if (call === 2) return [{ id: "pending-1" }];
+      return [{ status: "pending", generation: 4 }];
+    },
+  });
+  const port = createPgCommitPort(tx);
+  const snapshot = await port.loadCommitGuard(
+    { workspaceId: WS, userId: USER },
+    EPISODE,
+  );
+
+  assert.equal(snapshot.currentRuntimeEpoch, 7);
+  assert.equal(snapshot.currentEpisodeEpoch, 3);
+  assert.equal(snapshot.currentContentFingerprint, "fingerprint-1");
+  assert.equal(snapshot.currentSchedulingDecisionHash, "decision-hash-1");
+  assert.equal(snapshot.activePendingScheduleExists, true);
+  assert.equal(snapshot.inputScheduleActive, true);
+  assert.equal(snapshot.currentInputScheduleGeneration, 4);
+  assert.equal(call, 3, "锁内快照同时读取 episode、pending schedule、input schedule");
+});
+
+test("未接入生产写端口的方法：fail closed（不假写）", async () => {
   const { tx } = makeTx({});
   const port = createPgCommitPort(tx);
   for (const call of [
-    () => port.writeOperationalOnly({ workspaceId: WS, userId: USER } as never),
     () => port.appendCanonicalEvent({ workspaceId: WS, userId: USER } as never),
-    () => port.applyScheduleSideEffect({ workspaceId: WS, userId: USER } as never),
-    () => port.writePracticeEvent({ workspaceId: WS, userId: USER } as never),
     () => port.writeFacetObservation({ workspaceId: WS, userId: USER } as never),
   ]) {
     await assert.rejects(call, CommitPortNotImplementedError);
   }
+});
+
+test("writeOperationalOnly：写入低敏 runtime_fence 审计，不写 canonical fact", async () => {
+  let called = false;
+  const { tx } = makeTx({
+    onExecute: () => {
+      called = true;
+      return [];
+    },
+  });
+  const port = createPgCommitPort(tx);
+  await port.writeOperationalOnly({
+    workspaceId: WS,
+    userId: USER,
+    episodeId: EPISODE,
+    keyPointId: "key-point-1",
+    attribution: "blocked",
+    casFailures: ["kill_active"],
+    reasonCodes: ["runtime_kill"],
+    now: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  assert.equal(called, true);
+});
+
+test("writePracticeEvent：仅保留安全摘要，并按 commitKey 幂等", async () => {
+  let call = 0;
+  const { tx } = makeTx({
+    onExecute: () => {
+      call += 1;
+      return call === 1 ? [{ id: "practice-event-1" }] : [];
+    },
+  });
+  const port = createPgCommitPort(tx);
+  await port.writePracticeEvent({
+    workspaceId: WS,
+    userId: USER,
+    episodeId: EPISODE,
+    keyPointId: "key-point-1",
+    eventType: "diagnostic",
+    summary: {
+      disposition: "practice_or_diagnostic",
+      sourceFingerprint: "fingerprint-1",
+      commitKey: "commit-1",
+      ignoredField: "must-not-persist",
+    },
+    now: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  assert.equal(call, 1, "首次 practice event 插入成功，不需要二次回查");
+});
+
+test("applyScheduleSideEffect：record_only 不产生 schedule 副作用", async () => {
+  const { tx } = makeTx({ onExecute: () => [{ count: 0 }] });
+  const port = createPgCommitPort(tx);
+  const result = await port.applyScheduleSideEffect({
+    workspaceId: WS,
+    userId: USER,
+    episodeId: EPISODE,
+    keyPointId: "key-point-1",
+    cardId: "card-1",
+    authorizedAction: "record_only",
+    intervalDays: 0,
+    nextReviewAt: new Date("2026-01-01T00:00:00.000Z"),
+    policyVersion: "discrete-v2",
+    policyEpoch: 1,
+    reasonCode: "facet_only",
+    idempotencyKey: "commit-1",
+    now: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  assert.deepEqual(result, { scheduleId: null, activeScheduleCount: 0, idempotent: true });
 });

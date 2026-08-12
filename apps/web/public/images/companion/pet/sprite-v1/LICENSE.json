@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "characterId": "learning-companion-owner-reference-v1",
+  "sourceOwner": "user (Owner 本人，2026-08-10 确认 8 张动作图为自有资产)",
+  "sourceReferenceSha256": "159f23153339db24815fcd9f8ed700907f55652ac15e859957c05e9b85dba2e5",
+  "permissions": {
+    "modify": true,
+    "commercialUse": true,
+    "redistributeDerivedAssets": true
+  },
+  "approvedBy": "user (Owner)",
+  "approvedAt": "2026-08-10T14:40:32Z",
+  "notes": "Owner 于 2026-08-10 亲自确认：8 张 Level A 透明 PNG 均为其自有资产，权属/修改/商业使用/再分发批准。"
+}

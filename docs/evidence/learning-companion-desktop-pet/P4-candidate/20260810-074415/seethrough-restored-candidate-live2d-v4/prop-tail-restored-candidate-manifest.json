@@ -1,0 +1,56 @@
+{
+  "assetStatus": "candidate_only",
+  "canvas": [1024, 1024],
+  "sourcePack": "live2d-layer-pack-1024",
+  "candidatePack": "live2d-layer-pack-1024-prop-tail-restored-candidate",
+  "replacementLayers": [
+    {
+      "original": "06-topwear-with-embedded-tail-original.png",
+      "replacement": "06-topwear-tail-masked-candidate.png",
+      "purpose": "remove the embedded tail while preserving the coat"
+    },
+    {
+      "original": "07-objects-incomplete-original.png",
+      "replacement": "07-objects-restored-candidate.png",
+      "purpose": "restore the complete star ring wand"
+    },
+    {
+      "original": null,
+      "replacement": "07-tail-restored-candidate.png",
+      "purpose": "independent tail layer for sway physics"
+    }
+  ],
+  "stackingOrder": [
+    "00-back-hair.png",
+    "01-legwear.png",
+    "07-objects-restored-candidate.png (before 02-handwear-r.png)",
+    "02-handwear-r.png",
+    "03-footwear.png",
+    "04-handwear-l.png",
+    "05-neck.png",
+    "06-topwear-tail-masked-candidate.png",
+    "07-tail-restored-candidate.png",
+    "08-ears-l.png",
+    "09-ears-r.png",
+    "10-face.png",
+    "11-nose.png",
+    "12-mouth.png",
+    "13-eyewhite-r.png",
+    "14-eyewhite-l.png",
+    "15-irides-l.png",
+    "16-irides-r.png",
+    "17-eyebrow-l.png",
+    "18-eyewear.png",
+    "19-eyebrow-r.png",
+    "20-eyelash-r.png",
+    "21-eyelash-l.png",
+    "22-front-hair.png",
+    "23-headwear.png"
+  ],
+  "qaPreview": "seethrough-composite-prop-tail-masked-checkerboard.png",
+  "notes": [
+    "The original PSD and original layer pack remain preserved.",
+    "Generated restoration is not pixel-identical to the source image.",
+    "Manual Cubism mesh, occlusion, and parameter QA remain required."
+  ]
+}

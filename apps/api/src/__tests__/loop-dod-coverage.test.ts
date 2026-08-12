@@ -28,7 +28,6 @@ import {
   type ReviewSchedulingInput,
 } from "../modules/review/scheduling-policy.ts";
 import type {
-  ReviewAttemptStartResult,
   ReviewAttemptSubmitResult,
   ReviewAttemptLaterResult,
   ReviewAttemptHistoryItem,
@@ -38,179 +37,11 @@ const NOW = new Date("2026-07-18T08:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
 // ─── 1. G-009: 错误理解只有新的有效验证才能关闭 ─────────────────────────
-
-/**
- * 模拟 understanding/service.ts 中 getUnderstandingStates 的 G-009 事件聚合逻辑。
- *
- * 关键规则（G-009）：
- *   - latestValidationEventType 只跟踪 "validated" 或 "misunderstood" 事件
- *   - "reviewed" 和 "seen" 事件不影响 latestValidationEventType
- *   - 如果 latestValidationEventType === "misunderstood"，状态为 "misunderstood"
- *   - 只有新的 "validated" 事件才能将状态从 "misunderstood" 改变
- */
-interface UnderstandingEventRow {
-  cardId: string;
-  eventType: string; // seen | validated | misunderstood | reviewed
-  createdAt: Date;
-}
-
-interface AggregatedUnderstanding {
-  latestEventType: string | null;
-  latestValidationEventType: string | null;
-  misunderstandingCount: number;
-  lastValidatedAt: string | null;
-}
-
-function aggregateUnderstandingEvents(
-  events: UnderstandingEventRow[],
-): Map<string, AggregatedUnderstanding> {
-  // 按 createdAt 降序排列（最新的在前）
-  const sorted = [...events].sort(
-    (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
-  );
-
-  const map = new Map<string, AggregatedUnderstanding>();
-  for (const row of sorted) {
-    const current = map.get(row.cardId) ?? {
-      latestEventType: null,
-      latestValidationEventType: null,
-      misunderstandingCount: 0,
-      lastValidatedAt: null,
-    };
-    if (!current.latestEventType) {
-      current.latestEventType = row.eventType;
-    }
-    // G-009: 只记录最新的验证事件（validated 或 misunderstood），忽略 reviewed/seen
-    if (
-      !current.latestValidationEventType &&
-      (row.eventType === "validated" || row.eventType === "misunderstood")
-    ) {
-      current.latestValidationEventType = row.eventType;
-      current.lastValidatedAt = row.createdAt.toISOString();
-    }
-    if (row.eventType === "misunderstood") {
-      current.misunderstandingCount++;
-    }
-    map.set(row.cardId, current);
-  }
-  return map;
-}
-
-function computeUnderstandingState(
-  aggregated: AggregatedUnderstanding | undefined,
-  isDueReview: boolean,
-): string {
-  const latestValidationType = aggregated?.latestValidationEventType;
-  if (latestValidationType === "misunderstood") {
-    return "misunderstood";
-  }
-  if (isDueReview) {
-    return "due_review";
-  }
-  if (!aggregated || !aggregated.latestEventType) {
-    return "unseen";
-  }
-  switch (aggregated.latestEventType) {
-    case "validated":
-      return "preliminary_understood";
-    case "reviewed":
-      return "reviewed";
-    case "seen":
-      return "seen";
-    default:
-      return "unseen";
-  }
-}
-
-describe("LOOP-01/02 DoD: 错误理解只有新的有效验证才能关闭 (G-009)", () => {
-  const CARD_ID = "card-001";
-
-  it("misunderstood 事件后跟 reviewed 事件，状态仍为 misunderstood", () => {
-    const events: UnderstandingEventRow[] = [
-      { cardId: CARD_ID, eventType: "misunderstood", createdAt: new Date(NOW.getTime() - 2 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "reviewed", createdAt: new Date(NOW.getTime() - 1 * DAY_MS) },
-    ];
-    const aggregated = aggregateUnderstandingEvents(events);
-    const state = computeUnderstandingState(aggregated.get(CARD_ID), false);
-    assert.equal(state, "misunderstood", "reviewed 事件不应清除 misunderstood 状态");
-  });
-
-  it("misunderstood 事件后跟新的 validated 事件，状态变为 preliminary_understood", () => {
-    const events: UnderstandingEventRow[] = [
-      { cardId: CARD_ID, eventType: "misunderstood", createdAt: new Date(NOW.getTime() - 2 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "validated", createdAt: new Date(NOW.getTime() - 1 * DAY_MS) },
-    ];
-    const aggregated = aggregateUnderstandingEvents(events);
-    const state = computeUnderstandingState(aggregated.get(CARD_ID), false);
-    assert.equal(state, "preliminary_understood", "新的 validated 事件应关闭 misunderstood 状态");
-  });
-
-  it("reviewed 事件不设置 latestValidationEventType", () => {
-    const events: UnderstandingEventRow[] = [
-      { cardId: CARD_ID, eventType: "reviewed", createdAt: NOW },
-    ];
-    const aggregated = aggregateUnderstandingEvents(events);
-    const result = aggregated.get(CARD_ID);
-    assert.ok(result);
-    assert.equal(result.latestValidationEventType, null, "reviewed 不应设置 latestValidationEventType");
-    assert.equal(result.latestEventType, "reviewed");
-  });
-
-  it("seen 事件不设置 latestValidationEventType", () => {
-    const events: UnderstandingEventRow[] = [
-      { cardId: CARD_ID, eventType: "seen", createdAt: NOW },
-    ];
-    const aggregated = aggregateUnderstandingEvents(events);
-    const result = aggregated.get(CARD_ID);
-    assert.ok(result);
-    assert.equal(result.latestValidationEventType, null, "seen 不应设置 latestValidationEventType");
-  });
-
-  it("多次 misunderstood 事件后 reviewed 仍不能清除状态", () => {
-    const events: UnderstandingEventRow[] = [
-      { cardId: CARD_ID, eventType: "misunderstood", createdAt: new Date(NOW.getTime() - 5 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "reviewed", createdAt: new Date(NOW.getTime() - 4 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "misunderstood", createdAt: new Date(NOW.getTime() - 3 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "reviewed", createdAt: new Date(NOW.getTime() - 2 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "reviewed", createdAt: new Date(NOW.getTime() - 1 * DAY_MS) },
-    ];
-    const aggregated = aggregateUnderstandingEvents(events);
-    const result = aggregated.get(CARD_ID);
-    assert.ok(result);
-    assert.equal(result.latestValidationEventType, "misunderstood");
-    assert.equal(result.misunderstandingCount, 2, "应累计 2 次误解");
-    const state = computeUnderstandingState(result, false);
-    assert.equal(state, "misunderstood", "多次复习后仍为 misunderstood");
-  });
-
-  it("validated 后跟 misunderstood，状态为 misunderstood（最新验证优先）", () => {
-    const events: UnderstandingEventRow[] = [
-      { cardId: CARD_ID, eventType: "validated", createdAt: new Date(NOW.getTime() - 3 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "reviewed", createdAt: new Date(NOW.getTime() - 2 * DAY_MS) },
-      { cardId: CARD_ID, eventType: "misunderstood", createdAt: new Date(NOW.getTime() - 1 * DAY_MS) },
-    ];
-    const aggregated = aggregateUnderstandingEvents(events);
-    const state = computeUnderstandingState(aggregated.get(CARD_ID), false);
-    assert.equal(state, "misunderstood", "最新 misunderstood 应覆盖之前的 validated");
-  });
-
-  it("无验证事件时 reviewed 后到期复习状态为 due_review", () => {
-    const events: UnderstandingEventRow[] = [
-      { cardId: CARD_ID, eventType: "reviewed", createdAt: new Date(NOW.getTime() - 1 * DAY_MS) },
-    ];
-    const aggregated = aggregateUnderstandingEvents(events);
-    const state = computeUnderstandingState(aggregated.get(CARD_ID), true);
-    assert.equal(state, "due_review", "无误解且到期复习应为 due_review");
-  });
-
-  it("无任何事件时状态为 unseen", () => {
-    const state = computeUnderstandingState(undefined, false);
-    assert.equal(state, "unseen");
-  });
-});
-
-// ─── 2. 幂等契约：重复提交不产生重复 attempt/schedule/event ────────────────
-
+// 2026-08-11（测试质量修复）：此处原有一份"复刻 getUnderstandingStates
+// G-009 聚合"的 JS 实现与 8 个测试——测的是测试文件内自带的复刻函数，
+// 而非生产代码（真实聚合在 SQL array_agg + FILTER 中，understanding/service.ts）。
+// 复刻实现可能随生产 SQL 漂移，提供虚假 DoD 信心，已删除。真实 G-009 语义
+// 需 DB 集成测试覆盖（integration-tests 待补，记录在案）。
 describe("LOOP-01/02 DoD: 幂等契约 — 重复提交不产生重复", () => {
   const SCHEDULE_ID = "123e4567-e89b-42d3-a456-426614174000";
   const QUESTION_ID = "123e4567-e89b-42d3-a456-426614174001";
@@ -254,49 +85,6 @@ describe("LOOP-01/02 DoD: 幂等契约 — 重复提交不产生重复", () => {
     assert.equal(reviewAttemptLaterSchema.safeParse(noKey).success, false, "缺少 idempotencyKey 应拒绝");
   });
 
-  it("相同 idempotencyKey 的重复 start 返回相同结果（idempotent=true）", () => {
-    // 验证 ReviewAttemptStartResult 接口包含 idempotent 标记
-    const result: ReviewAttemptStartResult = {
-      attemptId: ATTEMPT_ID,
-      reviewScheduleId: SCHEDULE_ID,
-      subjectType: "card",
-      subjectId: "card-001",
-      status: "started",
-      startedAt: NOW,
-      idempotent: true,
-    };
-    assert.equal(result.idempotent, true, "幂等返回应标记 idempotent=true");
-  });
-
-  it("相同 idempotencyKey 的重复 submit 返回相同结果（idempotent=true）", () => {
-    // 验证 ReviewAttemptSubmitResult 接口包含 idempotent 标记和完整调度信息
-    const result: ReviewAttemptSubmitResult = {
-      attemptId: ATTEMPT_ID,
-      status: "completed",
-      outcome: ReviewAttemptOutcome.CORRECT,
-      scheduleReasonCode: "correct_advance",
-      understandingEffect: "upgrade",
-      beforeIntervalDays: 1,
-      afterIntervalDays: 3,
-      nextReviewAt: new Date(NOW.getTime() + 3 * DAY_MS),
-      nextScheduleId: "next-schedule-001",
-      idempotent: true,
-    };
-    assert.equal(result.idempotent, true, "幂等返回应标记 idempotent=true");
-    assert.equal(result.attemptId, ATTEMPT_ID, "幂等返回相同 attemptId");
-  });
-
-  it("相同 idempotencyKey 的重复 later 返回相同结果（idempotent=true）", () => {
-    const result: ReviewAttemptLaterResult = {
-      attemptId: ATTEMPT_ID,
-      status: "skipped",
-      scheduleReasonCode: "later_short_deferral",
-      nextReviewAt: new Date(NOW.getTime() + 12 * 60 * 60 * 1_000),
-      intervalDays: 14,
-      idempotent: true,
-    };
-    assert.equal(result.idempotent, true, "幂等返回应标记 idempotent=true");
-  });
 });
 
 // ─── 3. 历史解释：用户可从历史中解释"为什么现在复习、为什么安排到这个时间" ────

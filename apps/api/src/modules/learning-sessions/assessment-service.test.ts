@@ -31,7 +31,8 @@ function makeRepo(overrides: Partial<AssessmentRepository> = {}) {
       return {
         episodeId: EPISODE,
         sessionId: SESSION,
-        status: "answered_locked",
+        status: "active",
+        processingPhase: "assessment_pending",
         rubricTargets: [
           { itemId: "rubric-0", evidenceHash: "hash-0", facet: "explain" },
           { itemId: "rubric-1", evidenceHash: "hash-1", facet: "explain" },
@@ -51,11 +52,12 @@ function baseInput(): AssessEpisodeInput {
   return { workspaceId: WS, userId: USER, sessionId: SESSION, episodeId: EPISODE, artifactId: ARTIFACT };
 }
 
-test("assessEpisode：锁定 artifact + answered_locked episode → 评测 + 写报告（sessionId 正确传递）", async () => {
+test("assessEpisode：锁定 artifact + assessment_pending episode → 诊断报告（fail closed）", async () => {
   const { repo, writes } = makeRepo();
   const result = await assessEpisode(baseInput(), repo);
-  assert.equal(result.reducerVerdict, "pass"); // 全部 covered + required → pass
-  assert.equal(result.disposition, "pass");
+  assert.equal(result.reducerVerdict, "not_assessable");
+  assert.equal(result.disposition, "not_assessable");
+  assert.equal(result.trustClass, "not_assessable");
   assert.match(result.decisionHash, /^[0-9a-f]{64}$/, "decisionHash 为确定性纯 hex");
   assert.equal(result.sessionId, SESSION);
   assert.equal(writes.length, 1);
@@ -77,13 +79,13 @@ test("assessEpisode：同输入重放 → decisionHash 一致（确定性，revi
 test("assessEpisode：空 rubric targets → 422（非 500，review should-fix）", async () => {
   const { repo } = makeRepo({
     findEpisodeRubricTargets: async () => ({
-      episodeId: EPISODE, sessionId: SESSION, status: "answered_locked", rubricTargets: [], episodeEpoch: 1,
+      episodeId: EPISODE, sessionId: SESSION, status: "active", processingPhase: "assessment_pending", rubricTargets: [], episodeEpoch: 1,
     }),
   });
   await assert.rejects(
     () => assessEpisode(baseInput(), repo),
     (err: unknown) =>
-      err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "RUBRIC_TARGETS_EMPTY",
+      err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "rubric_targets_empty",
   );
 });
 
@@ -95,7 +97,7 @@ test("assessEpisode：artifact 未锁定 → fail closed", async () => {
   });
   await assert.rejects(
     () => assessEpisode(baseInput(), repo),
-    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "ARTIFACT_NOT_LOCKED",
+    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "artifact_not_locked",
   );
 });
 
@@ -107,31 +109,31 @@ test("assessEpisode：artifact 属其他 Episode → 409", async () => {
   });
   await assert.rejects(
     () => assessEpisode(baseInput(), repo),
-    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "EPISODE_MISMATCH",
+    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "episode_mismatch",
   );
 });
 
 test("assessEpisode：episode 属于其他 session → 409（review should-fix）", async () => {
   const { repo } = makeRepo({
     findEpisodeRubricTargets: async () => ({
-      episodeId: EPISODE, sessionId: "other-session", status: "answered_locked", rubricTargets: [{ itemId: "r0" }], episodeEpoch: 1,
+      episodeId: EPISODE, sessionId: "other-session", status: "active", processingPhase: "assessment_pending", rubricTargets: [{ itemId: "r0" }], episodeEpoch: 1,
     }),
   });
   await assert.rejects(
     () => assessEpisode(baseInput(), repo),
-    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "SESSION_MISMATCH",
+    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "session_mismatch",
   );
 });
 
-test("assessEpisode：episode 非 answered_locked → fail closed", async () => {
+test("assessEpisode：episode 非 assessment_pending → fail closed", async () => {
   const { repo } = makeRepo({
     findEpisodeRubricTargets: async () => ({
-      episodeId: EPISODE, sessionId: SESSION, status: "active", rubricTargets: [{ itemId: "r0" }], episodeEpoch: 1,
+      episodeId: EPISODE, sessionId: SESSION, status: "active", processingPhase: "awaiting_response", rubricTargets: [{ itemId: "r0" }], episodeEpoch: 1,
     }),
   });
   await assert.rejects(
     () => assessEpisode(baseInput(), repo),
-    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "EPISODE_NOT_ASSESSABLE",
+    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "episode_not_assessable",
   );
 });
 
@@ -143,20 +145,20 @@ test("assessEpisode：空回答 → fail closed", async () => {
   });
   await assert.rejects(
     () => assessEpisode(baseInput(), repo),
-    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "EMPTY_ANSWER",
+    (err: unknown) => err instanceof AssessmentServiceError && (err as AssessmentServiceError).code === "empty_answer",
   );
 });
 
-test("deterministicRubricVerdict：非空答案 → 全部 covered；空 → missing", () => {
+test("deterministicRubricVerdict：Critic 未接入时无论答案内容都不能 covered", () => {
   const targets = [
     { itemId: "r0", evidenceHash: "h0" },
     { itemId: "r1", evidenceHash: "h1" },
   ];
   const covered = deterministicRubricVerdict("我的回答内容", targets);
   assert.equal(covered.length, 2);
-  assert.ok(covered.every((v) => v.verdict === "covered"));
+  assert.ok(covered.every((v) => v.verdict === "not_assessable"));
   const missing = deterministicRubricVerdict("", targets);
-  assert.ok(missing.every((v) => v.verdict === "missing"));
+  assert.ok(missing.every((v) => v.verdict === "not_assessable"));
 });
 
 test("extractAnswerText：text_or_mixed 取 text；voice 取 confirmedTranscript", () => {

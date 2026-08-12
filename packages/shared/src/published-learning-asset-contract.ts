@@ -127,14 +127,14 @@ export function parsePublishedLearningAsset(
   if (typeof input !== "object" || input === null) {
     throw new PublishedLearningAssetContractError(
       "PublishedLearningAssetContractV1 必须是对象",
-      "INVALID_INPUT",
+      "invalid_input",
     );
   }
   const forbidden = validateForbiddenFields(input as Record<string, unknown>);
   if (forbidden.length > 0) {
     throw new PublishedLearningAssetContractError(
       `forbidden 字段存在（00-3 §6.3）: ${forbidden.join(", ")}`,
-      "FORBIDDEN_FIELDS_PRESENT",
+      "forbidden_fields_present",
     );
   }
   return publishedLearningAssetContractSchema.parse(input);

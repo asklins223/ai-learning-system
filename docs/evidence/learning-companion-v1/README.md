@@ -5,7 +5,7 @@
 
 ## 本目录定位
 
-本目录是「AI 学习伴侣驱动的多模态理解宇宙」公测发布（v1.0）的证据归档。每份证据**只记录实际执行结果**，与任务 11-1 的 DoD 逐项核验（`docs/plans/learning-companion/11-1-dod-verification.md`）交叉一致，逐项引用。
+本目录是历史 v1.0 证据归档，不代表当前伴星重构已经具备公测发布资格。每份证据**只记录实际执行结果**；重构 v2 的最新状态以 `release-manifest.json` 的 `reconstructionV2` 和 `reconstruction-v2/` 为准。
 
 ## 证据原则
 
@@ -39,6 +39,8 @@
 | `w7-cross-module-security-privacy-observability.md` | A11y/安全/隐私审计、故障矩阵、可观测性、0 容忍 E2E | 08-1 ~ 08-5 |
 | `w8-real-provider-asr-rc.md` | Gold 两轮、release qualification、容量/故障/真实环境 RC、硬不变量 | 09-1 ~ 09-7 |
 | `w9-shadow-canary-public-beta.md` | capability 部署、shadow、internal、5%/25%、soak、公测默认 | 10-1 ~ 10-8 |
+| `reconstruction-v2/companion-session-journey-2026-08-09.md` | 本轮真实 Card/Worker/Review/Now/Star Map 浏览器、PostgreSQL 与容器证据 | 重构方案 R4/R7/R8 |
+| `reconstruction-v2/companion-reference-asset-matrix.png` / `.json` | 用户参考图的 11 状态资产审核矩阵；明确 authored/reused/pending，不代表发布包 | 重构方案 R1/R8 |
 | `legacy-reader-compatibility-matrix.md` | 旧 reader 兼容矩阵（question-first/Review Queue 回落、forward-only、drift replay） | 02-7、06-2/06-4、10-5、10-8 |
 | `cost-budget-report.md` | 成本预算（p50/p95、重试放大、hidden/off 成本 0、Tutor 隔离、导出/删除） | 01-5、02-4、03-6、08-4、09-6、10-7 |
 | `rollback-drill.md` | 三类回滚演练（soft drain / hard kill / legacy reader matrix） | 08-3、09-5、10-5 |
@@ -46,4 +48,4 @@
 
 ## 交叉一致声明
 
-本目录证据与 `docs/plans/learning-companion/11-1-dod-verification.md`（DoD 36 项逐项核验）逐项对应：DoD 编号在证据文件中以「佐证 DoD N」标注，`release-manifest.json` 的 `dod` 数组与核验文件结论一致（全部 `verified`）。
+历史 DoD 文件仍保留供追溯，但不能覆盖重构 v2 的阻塞项；`release-manifest.json` 明确标记当前为 `rebuild_required`，未完成项不得序列化为 `verified`。

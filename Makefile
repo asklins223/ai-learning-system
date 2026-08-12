@@ -28,6 +28,7 @@ DEV_PROFILES := --profile storage
 	coverage-gate skip-todo-gate release-manifest \
 	alpha-up alpha-down alpha-backup alpha-restore-verify alpha-status alpha-metrics \
 	desktop-install desktop-dev desktop-build desktop-dist desktop-dist-arm64 \
+	desktop-dist-linux desktop-dist-win \
 	desktop-up desktop-down desktop-logs
 
 # Local development stack: dev image targets, source bind mounts and hot
@@ -133,6 +134,7 @@ version-check:
 verify: version-check
 	node --test .github/scripts/version-contract.test.mjs .github/scripts/release-manifest-contract.test.mjs .github/scripts/coverage-gate-lib.test.mjs .github/scripts/ci-workflow-contract.test.mjs .github/scripts/postgres-integration-lifecycle.test.mjs
 	node .github/scripts/verify-schema-mirror.mjs
+	node .github/scripts/verify-companion-capability-config.mjs
 	node .github/scripts/verify-budget-contract.mjs
 	node .github/scripts/verify-deploy-readiness.mjs
 	cd packages/shared && npm run typecheck && npm test
@@ -201,20 +203,21 @@ alpha-status:
 alpha-metrics:
 	$(ALPHA_SCRIPT) metrics
 
-# ─── Desktop (macOS) ────────────────────────────────────────────────
-# The desktop app is an Electron shell that manages the Docker stack
-# and loads http://localhost:3000 in a native window.
+# ─── Desktop ───────────────────────────────────────────────────────
+# The desktop app is an Electron shell that loads the local web service.  It
+# shares the regular dev stack; there is no separate docker-compose.desktop.yml.
 
 DESKTOP_DIR := apps/desktop
-DESKTOP_COMPOSE := docker-compose.desktop.yml
-DESKTOP_PROJECT := ailearn-desktop
+DESKTOP_COMPOSE := docker-compose.dev.yml
+DESKTOP_PROJECT := ailearn-dev
 
 .PHONY: desktop-install desktop-dev desktop-build desktop-dist \
-	desktop-dist-arm64 desktop-up desktop-down desktop-logs
+	desktop-dist-arm64 desktop-dist-linux desktop-dist-win desktop-up desktop-down desktop-logs
 
 # Install desktop Electron dependencies.
+# 2026-08-11：npm ci（依赖与 lock 严格一致，锁文件已提交）
 desktop-install:
-	cd $(DESKTOP_DIR) && npm install
+	cd $(DESKTOP_DIR) && npm ci
 
 # Run the desktop app in development mode (requires Docker stack running).
 desktop-dev:
@@ -224,7 +227,8 @@ desktop-dev:
 desktop-build:
 	cd $(DESKTOP_DIR) && npm run build
 
-# Package the desktop app as a .dmg (both arm64 and x64).
+# Package the desktop app for the host platform (or the target passed through
+# the npm script).  Cross-platform CI invokes electron-builder explicitly.
 desktop-dist:
 	cd $(DESKTOP_DIR) && npm run dist
 
@@ -232,7 +236,15 @@ desktop-dist:
 desktop-dist-arm64:
 	cd $(DESKTOP_DIR) && npm run dist:arm64
 
-# Manually start the desktop Docker stack (without the Electron app).
+# Linux x64 AppImage/deb build (CI/Ubuntu runner).
+desktop-dist-linux:
+	cd $(DESKTOP_DIR) && npm run dist:linux
+
+# Windows x64 NSIS/portable build (CI/Windows runner or a configured Wine host).
+desktop-dist-win:
+	cd $(DESKTOP_DIR) && npm run dist:win
+
+# Manually start the shared development Docker stack (without the Electron app).
 desktop-up:
 	docker compose -f $(DESKTOP_COMPOSE) -p $(DESKTOP_PROJECT) up -d --build
 

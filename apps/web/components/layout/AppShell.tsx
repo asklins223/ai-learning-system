@@ -6,8 +6,6 @@ import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { MobileNav } from "./MobileNav";
 import { TabletTopBar } from "./TabletTopBar";
-import { CompanionShell } from "@/components/learning-companion/CompanionShell";
-import { isCompanionShellEnabled } from "@/lib/feature-flags";
 
 /**
  * AppShell — 全局应用外壳。
@@ -84,6 +82,7 @@ const ROUTE_PATTERNS: RoutePattern[] = [
   { variant: "internal", test: (p) => p === "/benchmark", page: "benchmark" },
   // ── focus variant 路由 ──
   { variant: "focus", test: (p) => /^\/cards\/[^/]+$/.test(p), page: "card-detail", ownsFocusHeader: true },
+  { variant: "focus", test: (p) => /^\/cards\/[^/]+\/companion$/.test(p), page: "companion-stage", ownsFocusHeader: true },
   { variant: "focus", test: (p) => /^\/card-sets\/[^/]+$/.test(p), page: "card-set-detail", ownsFocusHeader: true },
   { variant: "focus", test: (p) => /^\/notes\/[^/]+$/.test(p), page: "note-editor", ownsFocusHeader: true },
   { variant: "focus", test: (p) => /^\/sources\/[^/]+$/.test(p), page: "source-detail", ownsFocusHeader: true },
@@ -119,7 +118,7 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
   const matchedRoute = matchRoute(pathname, variant);
   const pageName = matchedRoute?.page;
   const hasOwnedFocusHeader = matchedRoute?.ownsFocusHeader === true;
-  const isSessionPage = pageName === "validation-session";
+  const isSessionPage = pageName === "validation-session" || pageName === "companion-stage";
 
   useEffect(() => {
     if (
@@ -231,10 +230,6 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
 
       {/* 移动端底部导航：仅 default */}
       {showMobileNav && <MobileNav />}
-
-      {/* 伴星壳（安静锚点 + 角色头像 + 侧板；救火 1：flag 关闭时不渲染——审计确认
-          面板仍为空壳/演示态，真实闭环完成前不冒充 v1 交付） */}
-      {isCompanionShellEnabled() && <CompanionShell />}
     </div>
   );
 }

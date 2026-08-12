@@ -91,6 +91,18 @@ export type EpisodeFormalEligibilityKind =
 
 export type LearningEpisodeStatus = "draft" | "active" | "completed" | "stale" | "cancelled";
 
+/** Processing pipeline state, independent from the Episode lifecycle. */
+export type LearningEpisodeProcessingPhase =
+  | "preparing"
+  | "scene_ready"
+  | "awaiting_response"
+  | "assessment_pending"
+  | "assessment_complete"
+  | "commit_pending"
+  | "committed"
+  | "cancelled"
+  | "stale";
+
 export type LearningProbeStatus =
   | "draft"
   | "safety_check"
@@ -194,6 +206,10 @@ export const learningEpisodes = pgTable(
     budgetEnvelopeRef: text("budget_envelope_ref").notNull(),
     budgetEnvelopeHash: text("budget_envelope_hash").notNull(),
     planHash: text("plan_hash").notNull(),
+    processingPhase: text("processing_phase")
+      .$type<LearningEpisodeProcessingPhase>()
+      .notNull()
+      .default("awaiting_response"),
     status: text("status").$type<LearningEpisodeStatus>().notNull().default("draft"),
     commitKey: text("commit_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -324,6 +340,7 @@ export const learningAssessmentReports = pgTable(
     assessmentSource: text("assessment_source").notNull().default("critic"), // deterministic | critic | user_declared_unable
     rubricAssessments: jsonb("rubric_assessments").$type<RubricAssessment[]>().notNull(),
     reportHash: text("report_hash").notNull(),
+    decisionHash: text("decision_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

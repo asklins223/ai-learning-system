@@ -26,6 +26,8 @@ import json
 import os
 import re
 import urllib.parse
+import queue as _queue
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -64,8 +66,8 @@ def _list_voices_cached():
     return data
 
 
-def _synthesize(input_text: str, voice: str, rate: str) -> bytes:
-    """同步合成（在 executor 中运行；edge-tts 6.x 为同步 API）。"""
+def _validate_input(input_text: str, voice: str, rate: str):
+    """公共输入校验：返回 (text, voice, rate)；非法抛 ValueError。"""
     text = input_text.strip()
     if not text:
         raise ValueError("empty input")
@@ -73,8 +75,14 @@ def _synthesize(input_text: str, voice: str, rate: str) -> bytes:
         raise ValueError(f"input too long (>{MAX_INPUT_LEN})")
     if SSML_RE.search(text) or URL_RE.search(text) or SCRIPT_RE.search(text):
         raise ValueError("unsafe input (SSML/URL/script markers not allowed)")
+    return text, voice, rate or "+0%"
 
-    communicate = edge_tts.Communicate(text, voice=voice, rate=rate or "+0%")
+
+def _synthesize(input_text: str, voice: str, rate: str) -> bytes:
+    """同步合成（在 executor 中运行；edge-tts 6.x 为同步 API）。"""
+    text, voice, rate = _validate_input(input_text, voice, rate)
+
+    communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
 
     async def _run() -> bytes:
         chunks = []
@@ -143,9 +151,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(401, _json_err(401, "unauthorized"), "application/json")
             return
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/v1/audio/speech":
+        if parsed.path not in ("/v1/audio/speech", "/v1/audio/speech/stream"):
             self._send(404, _json_err(404, "not found"), "application/json")
             return
+        is_stream = parsed.path.endswith("/stream")
         length = int(self.headers.get("Content-Length", 0))
         if length <= 0 or length > 64 * 1024:
             self._send(400, _json_err(400, "body too large or empty"), "application/json")
@@ -162,6 +171,16 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(text, str):
             self._send(400, _json_err(400, "missing 'input'"), "application/json")
             return
+
+        if is_stream:
+            try:
+                _validate_input(text, str(voice), str(rate) if rate else None)
+            except ValueError as exc:
+                self._send(400, _json_err(400, str(exc)), "application/json")
+                return
+            self._send_stream(text, str(voice), str(rate) if rate else None)
+            return
+
         try:
             audio = _pool.submit(_synthesize, text, str(voice), str(rate) if rate else None).result(timeout=30)
         except ValueError as exc:
@@ -171,6 +190,69 @@ class Handler(BaseHTTPRequestHandler):
             self._send(502, _json_err(502, f"synthesis failed: {exc}", "upstream_error"), "application/json")
             return
         self._send(200, audio, "audio/mpeg")
+
+    def _send_stream(self, text: str, voice: str, rate):
+        """chunked 流式响应：audio chunk 边产边写；流中异常 → 终止 chunk（客户端 fail closed）。"""
+        # Bound the hand-off queue and signal the producer when the client
+        # disconnects. Without both, a barge-in/slow client leaves edge-tts
+        # producing into an unbounded queue until the synthesis completes.
+        audio_queue = _queue.Queue(maxsize=8)
+        cancel_event = threading.Event()
+        _pool.submit(_synthesize_stream, text, voice, rate, audio_queue, cancel_event)
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            while True:
+                try:
+                    item = audio_queue.get(timeout=0.5)
+                except _queue.Empty:
+                    if cancel_event.is_set():
+                        break
+                    continue
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    break
+                frame = f"{len(item):x}\r\n".encode("ascii") + item + b"\r\n"
+                self.wfile.write(frame)
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            cancel_event.set()  # 客户端 abort（打断）——停止生产者背压等待
+        finally:
+            cancel_event.set()
+
+
+def _synthesize_stream(input_text: str, voice: str, rate: str, audio_queue, cancel_event: threading.Event):
+    """流式合成：audio chunk 逐个放入 queue；正常结束放 None；异常放 Exception。"""
+    def put(item) -> bool:
+        while not cancel_event.is_set():
+            try:
+                audio_queue.put(item, timeout=0.25)
+                return True
+            except _queue.Full:
+                continue
+        return False
+
+    try:
+        text, voice, rate = _validate_input(input_text, voice, rate)
+        communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
+
+        async def _run():
+            async for chunk in communicate.stream():
+                if cancel_event.is_set():
+                    break
+                if chunk.get("type") == "audio":
+                    if not put(chunk["data"]):
+                        break
+
+        asyncio.run(_run())
+        put(None)
+    except Exception as exc:  # noqa: BLE001
+        put(exc)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ export default function ReviewPage() {
       if (requestId !== loadRequestRef.current) return;
       setReviews(response.items);
       setReviewTotal(response.total);
-      setReviewNextOffset(response.nextOffset);
+      setReviewNextOffset(response.nextCursor);
     } catch {
       if (requestId !== loadRequestRef.current) return;
       setReviews(null);
@@ -79,7 +79,7 @@ export default function ReviewPage() {
         return base.concat(response.items.filter((item) => !seen.has(item.reviewId)));
       });
       setReviewTotal(response.total);
-      setReviewNextOffset(response.nextOffset);
+      setReviewNextOffset(response.nextCursor);
     } catch {
       if (requestId !== loadRequestRef.current) return;
       setLoadMoreError("更多复习暂时无法加载，请稍后重试。");
@@ -233,10 +233,20 @@ function ReviewFeatureDisabled() {
           <span className="review-v06-eyebrow">功能开关已关闭</span>
           <h2 id="review-v06-disabled-title">先回到学习卡继续学习</h2>
           <p>管理员重新开启验证功能后，到期任务会重新出现在这里。</p>
-          <Link href="/cards" className="review-v06-load-more">
-            查看全部学习卡
-            <Icon.Arrow aria-hidden="true" />
-          </Link>
+          <div className="review-v06-state-actions">
+            <Link href="/cards" className="review-v06-state-primary">
+              查看全部学习卡
+              <Icon.Arrow aria-hidden="true" />
+            </Link>
+            <Link href="/settings#model" className="review-v06-state-secondary">
+              查看功能设置
+            </Link>
+          </div>
+          <div className="review-v06-state-notes" aria-label="复习功能说明">
+            <span><Icon.Card aria-hidden="true" /><strong>先巩固卡片</strong><small>补充证据与理解</small></span>
+            <span><Icon.Target aria-hidden="true" /><strong>再开启验证</strong><small>回忆才会进入队列</small></span>
+            <span><Icon.Timeline aria-hidden="true" /><strong>最后安排复习</strong><small>按间隔回到这里</small></span>
+          </div>
         </section>
       </div>
     </div>

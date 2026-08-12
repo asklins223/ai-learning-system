@@ -115,13 +115,13 @@ export function buildPublishedLearningAsset(
   ) {
     throw new HandoffAdapterError(
       `Card Set ${options.cardSet.id} 未发布（status=${options.cardSet.status}），未 Publish 产物 forbidden（00-3 §6.3）`,
-      "NOT_PUBLISHED",
+      "not_published",
     );
   }
   if (cardRow.cardSetId !== options.cardSet.id) {
     throw new HandoffAdapterError(
       `Card ${cardRow.id} 不属于 Card Set ${options.cardSet.id}`,
-      "CARD_SET_MISMATCH",
+      "card_set_mismatch",
     );
   }
   // cardRevision 权威字段（generation_epoch）缺失 → fail closed
@@ -131,22 +131,22 @@ export function buildPublishedLearningAsset(
   ) {
     throw new HandoffAdapterError(
       "cardRevision 权威来源缺失（card_generation_runs.generation_epoch 未提供或非法）",
-      "MISSING_CARD_REVISION",
+      "missing_card_revision",
     );
   }
   if (typeof keyPointRow.claim !== "string" || keyPointRow.claim.trim() === "") {
-    throw new HandoffAdapterError("claim 缺失（required 字段 fail closed）", "MISSING_CLAIM");
+    throw new HandoffAdapterError("claim 缺失（required 字段 fail closed）", "missing_claim");
   }
   if (evidenceRows.length === 0) {
     throw new HandoffAdapterError(
       "exactEvidenceRefs 为空（required 字段 fail closed）",
-      "MISSING_EVIDENCE",
+      "missing_evidence",
     );
   }
   if (!semanticSupportReport.id.trim() || !semanticSupportReport.hash.trim()) {
     throw new HandoffAdapterError(
       "semantic support report 缺失（required 字段 fail closed）",
-      "MISSING_SEMANTIC_SUPPORT",
+      "missing_semantic_support",
     );
   }
 
@@ -163,7 +163,7 @@ export function buildPublishedLearningAsset(
         : (() => {
             throw new HandoffAdapterError(
               `Card Set ${options.cardSet.id} 生命周期状态非法（status=${options.cardSet.status}）`,
-              "INVALID_CARD_SET_STATUS",
+              "invalid_card_set_status",
             );
           })();
   const sourceFingerprint = computePublishedSourceFingerprint({
@@ -342,7 +342,7 @@ export function runHandoffIntegrationGate(params: {
   if (failed.length > 0) {
     throw new HandoffAdapterError(
       `Generation → Learning 集成 Gate 失败: ${failed.map((c) => c.name).join(", ")}`,
-      "HANDOFF_GATE_FAILED",
+      "handoff_gate_failed",
     );
   }
   return { passed: true, checks };

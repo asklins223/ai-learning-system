@@ -2735,6 +2735,17 @@ export async function retryQuestion(
   await withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
+      // 2026-08-11：并发竞态修复——先锁定 submission 行（FOR UPDATE）再计算
+      // phaseOrdinal。此前 MAX+1 计算与 INSERT 之间无锁：并发 retry 同一
+      // submission 会算出相同 ordinal，唯一索引
+      // val_sub_jobs_phase_idx(submissionId, phase, phaseOrdinal) 冲突被
+      // onConflictDoNothing 吞掉 → retry 的 job 记录（含 retryOfJobId 链）
+      // 静默丢失。
+      await tx.select({ id: validationSubmissions.id })
+        .from(validationSubmissions)
+        .where(eq(validationSubmissions.id, submissionId))
+        .for("update");
+
       // Determine phase ordinal
       const existingJobs = await tx.query.validationSubmissionJobs.findMany({
         where: and(

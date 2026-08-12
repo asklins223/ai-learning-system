@@ -490,27 +490,39 @@ describe("permission-guard: note/card/source/import 写操作使用 requireOwner
 // ─── 错误响应格式验证 ───────────────────────────────────────────────────
 
 describe("permission-guard: 错误响应格式", () => {
-  it("requireOwner 拒绝时返回 403 + { error: 'owner role required' }", () => {
-    // 这是 requireOwner 的文档化行为：
-    // return reply.code(403).send({ error: "owner role required" });
-    const expectedStatusCode = 403;
-    const expectedErrorBody = { error: "owner role required" };
+  it("非 owner 的 isWorkspaceOwner 判定为 false（requireOwner 据此返回 403）", () => {
+    // 2026-08-11（测试质量修复）：原断言是两个常量自比（从未调用被测逻辑）。
+    // 改为真实调用 isWorkspaceOwner——requireOwner 的 403 路径即
+    // `if (!isWorkspaceOwner(...)) return reply.code(403)`。
+    const notOwner = isWorkspaceOwner({
+      membershipRole: "member",
+      workspaceOwnerId: "owner-user",
+      userId: "current-user",
+    });
+    assert.equal(notOwner, false);
 
-    assert.equal(expectedStatusCode, 403);
-    assert.deepEqual(expectedErrorBody, { error: "owner role required" });
+    const ownerByRole = isWorkspaceOwner({
+      membershipRole: "owner",
+      workspaceOwnerId: "owner-user",
+      userId: "current-user",
+    });
+    assert.equal(ownerByRole, true);
+
+    const ownerByWorkspace = isWorkspaceOwner({
+      membershipRole: null,
+      workspaceOwnerId: "current-user",
+      userId: "current-user",
+    });
+    assert.equal(ownerByWorkspace, true);
   });
 
   it("isWorkspaceOwner 返回 false 时 requireOwner 应发送 403（语义验证）", () => {
-    // 当 isWorkspaceOwner 返回 false 时，requireOwner 的行为是：
-    // if (!isWorkspaceOwner(...)) { return reply.code(403).send({ error: "owner role required" }); }
     const isOwner = isWorkspaceOwner({
       membershipRole: "member",
       workspaceOwnerId: "other-user",
       userId: "current-user",
     });
     assert.equal(isOwner, false);
-    // !false === true → 进入 if 块 → 返回 403
-    assert.equal(!isOwner, true);
   });
 
   it("isWorkspaceOwner 返回 true 时 requireOwner 不发送错误（语义验证）", () => {

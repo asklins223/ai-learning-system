@@ -6,7 +6,8 @@
  * 角色规格（01-8 §3）：约 2.5~3 头身、发光星纹、短披风/围巾式彗尾、可变形的
  * 导航环；二维动画造型、干净色块、柔和描边；公测只交付一个统一基础角色。
  *
- * 本组件是 **CSS/SVG 呈现层**（02-10 spike 的降级层，一等公民）：
+ * 本组件默认使用 owner 提供的静态参考资产；CSS/SVG 仍保留为资源加载失败时
+ * 的最后降级层（02-10 spike）：
  * - 由 `CompanionVisualStateV1` props 驱动，动画只表达已发生的系统状态
  *   （系统事件权威映射在 lib/learning-companion/companion-visual-state.ts）；
  * - `systemEvent` 作为防御性入参：若提供的视觉状态与该事件不匹配，呈现
@@ -14,14 +15,15 @@
  * - `assessment_handoff` 可见退场：收起提示工具、退到场景边缘、独立观测环
  *   接管验证状态（表达「伴星不参与判分」）；
  * - reduced-motion：取消飞行 / 弹性缩放 / 视差 / 持续漂浮，静态呈现；
- * - 资产加载失败：静态立绘 + 图标化手势 + 标准控件继续可用（01-8 §9）；
+ * - 当前无 Rive 主资产时：按状态选择 owner 参考图静态立绘；资源失败再退回
+ *   图标化 SVG + 标准控件（01-8 §9）；
  * - `hidden`（temporary_hidden/global_off）立即停渲染（§5.5）。
  *
  * 未来 Rive 主引擎（.riv 矢量/骨骼）可在保持本 props 接口的前提下替换内部
  * 渲染实现，静态 fallback 语义不变。
  */
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   companionPoseForState,
   handoffViewFor,
@@ -31,6 +33,7 @@ import {
   type CompanionSystemEvent,
   type CompanionVisualStateV1,
 } from "@/lib/learning-companion/companion-visual-state";
+import { companionReferenceAssetForState } from "@/lib/learning-companion/companion-reference-assets";
 
 export interface CompanionAvatarProps {
   /** 视觉状态（由上层按系统事件权威映射驱动） */
@@ -39,7 +42,7 @@ export interface CompanionAvatarProps {
   systemEvent?: CompanionSystemEvent;
   /** prefers-reduced-motion: reduce（或 animation_off） */
   prefersReducedMotion?: boolean;
-  /** 动画资产（Rive .riv）加载成功；false → 静态立绘/图标化手势 */
+  /** 动画资产（Rive .riv）加载成功；当前默认使用参考图静态资产 */
   assetLoaded?: boolean;
   /** temporary_hidden / global_off：立即停渲染 */
   hidden?: boolean;
@@ -53,29 +56,10 @@ export interface CompanionAvatarProps {
   className?: string;
 }
 
-// ─── 组件内联动画（完整模式下才启用；reduced-motion 一律不应用）───────────
-const AVATAR_ANIMATION_CSS = `
-@keyframes lc-float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-2.5px); }
-}
-@keyframes lc-wave {
-  0%, 100% { transform: rotate(0deg); }
-  50% { transform: rotate(-14deg); }
-}
-@keyframes lc-ring {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-@keyframes lc-glow {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
-}
-.lc-anim-float { animation: lc-float 4s ease-in-out infinite; }
-.lc-anim-wave { animation: lc-wave 1.2s ease-in-out infinite; transform-box: fill-box; transform-origin: 20% 80%; }
-.lc-anim-ring { animation: lc-ring 16s linear infinite; transform-box: fill-box; transform-origin: center; }
-.lc-anim-glow { animation: lc-glow 2.4s ease-in-out infinite; }
-`;
+// ─── 组件内联动画说明 ──────────────────────────────────────────────────────
+// lc-* 动画 keyframes 与 .lc-anim-* 类已移至全局样式 apps/web/app/globals.css
+//（原每实例每渲染注入 <style> 会在多实例时重复注入同一批全局 @keyframes）。
+// reduced-motion 下 motionEnabled=false，组件不挂 .lc-anim-* 类，动画不应用。
 
 const PALETTE = {
   skin: "#FFD9B8",
@@ -285,7 +269,7 @@ export function CompanionAvatar({
   state,
   systemEvent,
   prefersReducedMotion = false,
-  assetLoaded = true,
+  assetLoaded = false,
   hidden = false,
   quiet = false,
   size = 96,
@@ -293,6 +277,7 @@ export function CompanionAvatar({
   ariaLabel,
   className,
 }: CompanionAvatarProps) {
+  const [referenceAssetFailed, setReferenceAssetFailed] = useState(false);
   const presentation: CompanionPresentation = useMemo(
     () =>
       resolveCompanionPresentation(state, {
@@ -318,41 +303,70 @@ export function CompanionAvatar({
   const waveAnim = motionEnabled && state === "invite_once";
 
   const label = ariaLabel ?? presentation.ariaLabel;
+  const referenceAsset = companionReferenceAssetForState(state);
+  const useReferenceAsset = Boolean(referenceAsset) && !referenceAssetFailed;
 
   return (
-    <div className={`inline-flex flex-col items-center gap-1 ${className ?? ""}`} data-testid="companion-avatar">
-      <style>{AVATAR_ANIMATION_CSS}</style>
-      <svg
-        width={size}
-        height={size}
-        viewBox="0 0 120 120"
-        role="img"
-        aria-label={label}
-        data-companion-state={state}
-        data-render-mode={presentation.renderMode}
-        className={floatAnim ? "lc-anim-float" : undefined}
-      >
-        {/* 角色组：assessment_handoff 时退到场景边缘（向左平移），观测环留在右上方 */}
-        <g
-          transform={handoff.retreatToEdge ? "translate(-26 0)" : undefined}
-          aria-hidden="true"
+    <div
+      className={`inline-flex flex-col items-center gap-1 ${className ?? ""}`}
+      data-testid="companion-avatar"
+      data-asset-source={useReferenceAsset ? "owner-reference-static" : "code-fallback"}
+    >
+      {useReferenceAsset ? (
+        <span
+          className={`relative inline-flex ${floatAnim ? "lc-anim-float" : ""}`}
+          style={handoff.retreatToEdge ? { transform: "translateX(-22%)" } : undefined}
+          data-companion-state={state}
+          data-render-mode={presentation.renderMode}
         >
-          {renderComet(pose, "comet")}
-          {renderRings(pose, handoff.observerRingActive, "rings", motionEnabled)}
-          {/* 身体（外套色块，柔和描边） */}
-          <rect x={45} y={52} width={30} height={32} rx={12} fill={PALETTE.coat} stroke={PALETTE.coatStroke} strokeWidth={2} />
-          {/* 腿 */}
-          <rect x={51} y={84} width={6.5} height={13} rx={3} fill={PALETTE.coatDark} />
-          <rect x={62.5} y={84} width={6.5} height={13} rx={3} fill={PALETTE.coatDark} />
-          {/* 头部 */}
-          <circle cx={60} cy={38} r={17} fill={PALETTE.skin} stroke={PALETTE.skinStroke} strokeWidth={2} />
-          {renderStar(pose, "star", motionEnabled)}
-          {renderEyes(pose, "eyes")}
-          {renderMouth(pose, "mouth")}
-          {renderHand(pose, "hand", waveAnim)}
-          {renderTool(pose, "tool")}
-        </g>
-      </svg>
+          <img
+            src={referenceAsset ?? undefined}
+            width={size}
+            height={size}
+            alt={label}
+            className="block object-contain"
+            onError={() => setReferenceAssetFailed(true)}
+          />
+          {handoff.observerRingActive ? (
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute right-0 top-1 size-3 rounded-full border-2 border-[#ff8a5c] bg-[#ff8a5c]/20"
+            />
+          ) : null}
+        </span>
+      ) : (
+        <svg
+          width={size}
+          height={size}
+          viewBox="0 0 120 120"
+          role="img"
+          aria-label={label}
+          data-companion-state={state}
+          data-render-mode={presentation.renderMode}
+          className={floatAnim ? "lc-anim-float" : undefined}
+        >
+          {/* 角色组：assessment_handoff 时退到场景边缘（向左平移），观测环留在右上方 */}
+          <g
+            transform={handoff.retreatToEdge ? "translate(-26 0)" : undefined}
+            aria-hidden="true"
+          >
+            {renderComet(pose, "comet")}
+            {renderRings(pose, handoff.observerRingActive, "rings", motionEnabled)}
+            {/* 身体（外套色块，柔和描边） */}
+            <rect x={45} y={52} width={30} height={32} rx={12} fill={PALETTE.coat} stroke={PALETTE.coatStroke} strokeWidth={2} />
+            {/* 腿 */}
+            <rect x={51} y={84} width={6.5} height={13} rx={3} fill={PALETTE.coatDark} />
+            <rect x={62.5} y={84} width={6.5} height={13} rx={3} fill={PALETTE.coatDark} />
+            {/* 头部 */}
+            <circle cx={60} cy={38} r={17} fill={PALETTE.skin} stroke={PALETTE.skinStroke} strokeWidth={2} />
+            {renderStar(pose, "star", motionEnabled)}
+            {renderEyes(pose, "eyes")}
+            {renderMouth(pose, "mouth")}
+            {renderHand(pose, "hand", waveAnim)}
+            {renderTool(pose, "tool")}
+          </g>
+        </svg>
+      )}
       {showLabel ? (
         <p className="text-center text-xs text-muted" role="note">
           {label}

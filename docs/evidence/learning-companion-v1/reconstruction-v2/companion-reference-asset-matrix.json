@@ -1,0 +1,64 @@
+{
+  "kind": "companion_reference_asset_matrix",
+  "source": "owner-supplied learning-companion-character-action-reference.png",
+  "authoredPoseCount": 8,
+  "stateCount": 11,
+  "entries": [
+    {
+      "state": "dormant",
+      "status": "authored",
+      "source": "dormant.png"
+    },
+    {
+      "state": "invite_once",
+      "status": "authored",
+      "source": "invite_once.png"
+    },
+    {
+      "state": "navigate",
+      "status": "authored",
+      "source": "navigate.png"
+    },
+    {
+      "state": "explain",
+      "status": "reused",
+      "source": "present_evidence.png"
+    },
+    {
+      "state": "present_evidence",
+      "status": "authored",
+      "source": "present_evidence.png"
+    },
+    {
+      "state": "assessment_handoff",
+      "status": "reused",
+      "source": "uncertain_or_retry.png"
+    },
+    {
+      "state": "listen",
+      "status": "authored",
+      "source": "listen.png"
+    },
+    {
+      "state": "uncertain_or_retry",
+      "status": "authored",
+      "source": "uncertain_or_retry.png"
+    },
+    {
+      "state": "committed_change",
+      "status": "authored",
+      "source": "committed_change.png"
+    },
+    {
+      "state": "co_manipulate",
+      "status": "authored",
+      "source": "co_manipulate.png"
+    },
+    {
+      "state": "exit_or_hidden",
+      "status": "suppressed",
+      "source": null
+    }
+  ],
+  "qualification": "review_only_pending_owner_asset_signoff"
+}

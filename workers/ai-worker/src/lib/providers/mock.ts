@@ -415,6 +415,30 @@ fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
   }
 
   /**
+   * §8.2 mock 流式：复用 chatCompletion 的确定性输出，按小块 + 短间隔
+   * 模拟真实 token 流，便于 worker 真流式路径的集成测试（delta 顺序、
+   * 拼接还原、abort 中断）。
+   */
+  async chatCompletionStream(
+    messages: ChatMessage[],
+    options: ChatOptions,
+    signal: AbortSignal | undefined,
+    onDelta: (deltaText: string) => void,
+  ): Promise<{ content: string }> {
+    if (signal?.aborted) throw new Error("aborted before chatCompletionStream");
+    const result = await this.chatCompletion(messages, options, signal);
+    const content = result.content;
+    const chunkSize = 8;
+    for (let i = 0; i < content.length; i += chunkSize) {
+      if (signal?.aborted) throw new Error("aborted during chatCompletionStream");
+      const piece = content.slice(i, i + chunkSize);
+      if (piece.length > 0) onDelta(piece);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return { content };
+  }
+
+  /**
    * R2: EmbeddingCapability — mock embed.
    *
    * Returns null to trigger upstream fallback to lexical/sequential search,

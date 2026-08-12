@@ -4,6 +4,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import sensible from "@fastify/sensible";
 import multipart from "@fastify/multipart";
+import compress from "@fastify/compress";
 import { logger } from "./lib/logger.ts";
 import { authRoutes } from "./modules/identity/routes.ts";
 import { noteRoutes } from "./modules/note/routes.ts";
@@ -24,11 +25,18 @@ import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
 import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
 import { companionShellRoutes } from "./modules/companion-shell/index.ts";
+import { companionConversationRoutes, companionConversationManagementRoutes, companionExportRoutes, companionProactiveRoutes } from "./modules/companion-conversation/index.ts";
+import { startCompanionNotifyListener, stopCompanionNotifyListener } from "./modules/companion-conversation/companion-notify.ts";
 import { learningSessionRoutes } from "./modules/learning-sessions/session-routes.ts";
 import { voiceRoutes } from "./modules/learning-sessions/voice-routes.ts";
 import { assessmentRoutes } from "./modules/learning-sessions/assessment-service.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
 import { purgeSoftDeletedNotes } from "./modules/note/maintenance.ts";
+import { runLearningTtlMaintenance } from "./modules/learning-sessions/ttl-maintenance.ts";
+import {
+  createCommitOutboxWorkerId,
+  runCommitOutboxTick,
+} from "./modules/learning-sessions/commit-outbox.ts";
 import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
 import {
   getMetricsText,
@@ -40,6 +48,8 @@ import {
   setReleaseInfo,
   statusToClass,
   normalizeRouteTemplate,
+  dbPoolActiveConnections,
+  dbMigrationVersion,
 } from "./lib/metrics.ts";
 
 const trustProxyValue = process.env.TRUST_PROXY?.trim();
@@ -54,6 +64,9 @@ const trustProxy = !trustProxyValue || normalizedTrustProxyValue === "false"
 
 const app = Fastify({
   loggerInstance: logger,
+  // 2026-08-11（可观测性）：默认 reqId 是进程内递增计数器——多副本部署下
+  // 各进程 id 相同，跨进程追踪不可用。改用随机 UUID（Node 20+ crypto.randomUUID）。
+  genReqId: () => crypto.randomUUID(),
   // 不再无条件信任任意 X-Forwarded-For。生产 Compose 只信任
   // loopback / Docker 私网代理，其他部署必须显式配置 TRUST_PROXY。
   trustProxy,
@@ -81,8 +94,11 @@ app.get("/metrics", async (_req, reply) => {
 // 在每个请求完成后记录 method、route template、status class 和延迟。
 // 路由参数被规范化为模板，避免高基数和参数泄漏。
 app.addHook("onResponse", async (request, reply) => {
-  // 排除 /metrics 和 /health 自身，避免自我放大
-  if (request.url === "/metrics" || request.url === "/health") return;
+  // 排除 /metrics 和 /health 自身，避免自我放大。
+  // 2026-08-11（review 修复）：用 routeOptions.url（不含 query）而非
+  // request.url 精确匹配——`/metrics?x=1` 也命中排除。
+  const selfRoute = request.routeOptions.url;
+  if (selfRoute === "/metrics" || selfRoute === "/health") return;
   const method = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
     .includes(request.method)
     ? request.method
@@ -99,6 +115,60 @@ app.addHook("onResponse", async (request, reply) => {
   if (statusClass === "5xx") {
     httpErrors5xxTotal.inc({ method, route });
   }
+  // 2026-08-11（可观测性，review 修复）：4xx 安全事件统一在 onResponse 记录——
+  // 此前放在 setErrorHandler，直接 reply.code(403/429).send() 的路径（限流、
+  // switch-workspace 拒绝）不走 error handler，日志不可达。此处覆盖所有路径；
+  // setErrorHandler 内的 4xx 日志已移除避免重复。
+  if (reply.statusCode === 401 || reply.statusCode === 403 || reply.statusCode === 429) {
+    request.log.warn({ statusCode: reply.statusCode, route }, "security event: auth/permission/rate-limit");
+  }
+});
+
+// security: 未捕获异常统一脱敏（SQL/S3/provider 细节不进响应体）。
+// 5xx 一律返回占位 message（细节进日志）；带 statusCode 的业务错误（4xx）
+// 保留 code + 产品文案 message（各业务错误类已按产品语义构造）。
+app.setErrorHandler((error, request, reply) => {
+  const statusCode = Number((error as { statusCode?: unknown }).statusCode ?? 500);
+  if (statusCode >= 500) {
+    // 2026-08-11：URL 脱敏——request.url 含 query（可能带参数）；改记 route
+    // 模板（ADR-0006），query 细节进 request.log 的完整请求日志而非 error 行。
+    const routeTemplate = request.routeOptions?.url ?? "unmatched";
+    // 2026-08-11（可观测性）：RLS 拒绝（Postgres error code 42501）计数——
+    // 此前 dbRlsDeniedTotal 定义后从未 set，RLS 误拦完全不可见。
+    const errorCode = (error as { code?: unknown }).code;
+    if (errorCode === "42501") {
+      import("./lib/metrics.ts").then(({ dbRlsDeniedTotal }) => dbRlsDeniedTotal.inc()).catch(() => {});
+    }
+    request.log.error({ err: error, route: typeof routeTemplate === "string" ? routeTemplate : "unmatched" }, "unhandled error");
+    return reply.code(500).send({ error: "internal_error", message: "服务器内部错误" });
+  }
+  const code = (error as { code?: unknown }).code;
+  // 2026-08-12（错误契约审计 P2-7）：4xx message 透传加形状白名单——
+  // 仅透传带短 code + 短 message 的受控业务/Fastify 错误；超长 message
+  // （可能是堆栈/内部细节）一律占位，防止未来 throw 未经包装的 Error 泄漏。
+  const knownErrorShape = typeof code === "string"
+    && code.length > 0
+    && code.length <= 64
+    && error instanceof Error
+    && error.message.length <= 300;
+  return reply.code(statusCode).send({
+    error: typeof code === "string" && code.length > 0 && code.length <= 64 ? code : "request_error",
+    message: knownErrorShape ? error.message : "请求错误",
+  });
+});
+
+// 2026-08-11：默认 404 会泄漏路由路径模板（如 "Route /notes/:id not found"）；
+// 统一为不泄漏内部路径的中文占位。
+app.setNotFoundHandler((_request, reply) => {
+  return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+});
+
+// 2026-08-11：server 侧全局异步兜底（与 setErrorHandler 互补——后者只覆盖
+// 请求生命周期内的错误；未捕获 rejection 会直接崩进程）。
+process.on("unhandledRejection", (reason) => {
+  app.log.error({ reason: reason instanceof Error ? reason.stack ?? reason.message : String(reason) }, "unhandledRejection — exiting");
+  process.exitCode = 1;
+  process.kill(process.pid, "SIGTERM");
 });
 
 /**
@@ -199,6 +269,10 @@ async function main() {
   // 提供 httpErrors（badRequest / unauthorized / notFound 等）和统一错误序列化。
   await app.register(sensible);
 
+  // 2026-08-11（性能专项）：响应压缩——graph/export/messages/notes 等 JSON 大响应
+  // 文本压缩率 >80%，显著降低带宽与传输时间（TLS 场景下压缩收益仍明显）。
+  await app.register(compress, { global: true });
+
   // 图片上传：multipart/form-data 解析插件
   // 在流式读取阶段就拒绝超大文件，防止 OOM
   await app.register(multipart, {
@@ -237,6 +311,22 @@ async function main() {
   await app.register(benchmarkRoutes);
   await app.register(uploadRoutes);
   await app.register(companionShellRoutes);
+  await app.register(companionConversationRoutes);
+  await app.register(companionConversationManagementRoutes);
+  await app.register(companionExportRoutes);
+  await app.register(companionProactiveRoutes);
+  // §11.6：启动清扫崩溃残留的临时探测音频（>1h hard cap；不阻塞启动）
+  import("./modules/learning-sessions/ffprobe.ts")
+    .then((m) => m.cleanupStaleTempAudio(60 * 60 * 1000, "/tmp"))
+    .catch(() => {});
+
+  // §5.4：进程级单 NOTIFY listener（conversation + account channels）——
+  // SSE live 订阅的即时 wake hint；各 SSE 处理器保留 durable fallback。
+  startCompanionNotifyListener(
+    process.env.DATABASE_URL_API?.trim() ??
+      process.env.DATABASE_URL?.trim() ??
+      "postgres://ailearn:ailearn_dev@postgres:5432/ailearn",
+  );
   await app.register(learningSessionRoutes);
   await app.register(voiceRoutes);
   await app.register(assessmentRoutes);
@@ -254,14 +344,19 @@ async function main() {
 
   let sessionCleanupTimer: NodeJS.Timeout | undefined;
   let notePurgeTimer: NodeJS.Timeout | undefined;
+  let commitOutboxTimer: NodeJS.Timeout | undefined;
   const shutdown = createGracefulShutdown({
     clearTimer: () => {
       if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
       sessionCleanupTimer = undefined;
       if (notePurgeTimer) clearInterval(notePurgeTimer);
       notePurgeTimer = undefined;
+      if (commitOutboxTimer) clearInterval(commitOutboxTimer);
+      commitOutboxTimer = undefined;
     },
     closeServer: () => app.close(),
+    // 2026-08-11：NOTIFY listener 连接必须显式关闭，否则进程退出挂起
+    afterClose: () => stopCompanionNotifyListener(),
     closeDatabase,
   });
   const handleSignal = (signal: NodeJS.Signals) => {
@@ -287,6 +382,32 @@ async function main() {
 
   // 每小时定时清理
   if (!shutdown.isShuttingDown()) {
+    // 2026-08-11（可观测性）：DB 池活跃连接 + 迁移版本周期 gauge（30s）——
+    // 此前两个 gauge 定义后从未 set，空转。
+    // 2026-08-11：in-flight 守卫变量（回调重叠防护，见下方注释）
+    let dbGaugeRunning = false;
+    const dbGaugeTimer = setInterval(async () => {
+      // 2026-08-11（review 修复）：in-flight 守卫——DB 慢查询时上一轮未完成
+      // 则跳过本轮，避免回调重叠堆积。
+      if (dbGaugeRunning) return;
+      dbGaugeRunning = true;
+      try {
+        const [poolRow, migRow] = await Promise.all([
+          db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database()`),
+          db.execute(sql`SELECT max(id)::int AS v FROM drizzle.__drizzle_migrations`),
+        ]);
+        const poolRows = poolRow as Array<Record<string, unknown>>;
+        const migRows = migRow as Array<Record<string, unknown>>;
+        dbPoolActiveConnections.set(Number(poolRows[0]?.n ?? 0));
+        dbMigrationVersion.set(Number(migRows[0]?.v ?? 0));
+      } catch (err) {
+        app.log.warn({ err }, "db gauges refresh failed");
+      } finally {
+        dbGaugeRunning = false;
+      }
+    }, 30_000);
+    dbGaugeTimer.unref?.();
+
     sessionCleanupTimer = setInterval(async () => {
       try {
         const deleted = await cleanupExpiredSessions();
@@ -311,6 +432,18 @@ async function main() {
     app.log.error({ err }, "note purge on startup failed");
   }
 
+  // Learning Companion TTL（0076/0081/0083 承诺的清理落地）：audit/ledger
+  // tombstone 化 + 已处理 outbox 与过期 nonce 删除。启动先跑一次，之后每 6 小时。
+  try {
+    const ttl = await runLearningTtlMaintenance();
+    const touched = ttl.auditedRows + ttl.ledgerRows + ttl.outboxRows + ttl.nonceRows;
+    if (touched > 0) {
+      app.log.info({ ttl }, "learning TTL maintenance ran on startup");
+    }
+  } catch (err) {
+    app.log.error({ err }, "learning TTL maintenance on startup failed");
+  }
+
   if (!shutdown.isShuttingDown()) {
     notePurgeTimer = setInterval(async () => {
       try {
@@ -321,8 +454,47 @@ async function main() {
       } catch (err) {
         app.log.error({ err }, "note purge failed");
       }
+      try {
+        const ttl = await runLearningTtlMaintenance();
+        const touched = ttl.auditedRows + ttl.ledgerRows + ttl.outboxRows + ttl.nonceRows;
+        if (touched > 0) {
+          app.log.info({ ttl }, "learning TTL maintenance ran");
+        }
+      } catch (err) {
+        app.log.error({ err }, "learning TTL maintenance failed");
+      }
     }, 6 * 60 * 60 * 1000); // 6 hours
     notePurgeTimer.unref();
+  }
+
+  // COMMIT-01: commit_requested outbox 消费（评估完成 → episode-commit 编排，
+  // 幂等 commit key + PgCommitPort；commit 应用后触发 committed_change_display）。
+  // 轮询 10s：commit 是评估→掌握的即时应答关键路径。
+  if (!shutdown.isShuttingDown()) {
+    const commitOutboxWorkerId = createCommitOutboxWorkerId();
+    // 2026-08-11（可观测性）：失败退避——DB 不可达时 10s 轮询会每秒刷 error
+    // 日志；失败后间隔翻倍（10s→20s→40s 封顶 60s），成功后立即回到 10s。
+    let commitOutboxIntervalMs = 10 * 1000;
+    let commitOutboxFailedStreak = 0;
+    const scheduleCommitOutboxTick = () => {
+      commitOutboxTimer = setTimeout(async () => {
+        try {
+          const processed = await runCommitOutboxTick(commitOutboxWorkerId, 60_000);
+          if (processed > 0) {
+            app.log.info({ processed }, "commit outbox processed");
+          }
+          commitOutboxFailedStreak = 0;
+          commitOutboxIntervalMs = 10 * 1000;
+        } catch (err) {
+          commitOutboxFailedStreak += 1;
+          commitOutboxIntervalMs = Math.min(10 * 1000 * (2 ** commitOutboxFailedStreak), 60_000);
+          app.log.error({ err, nextRetryMs: commitOutboxIntervalMs }, "commit outbox tick failed");
+        }
+        scheduleCommitOutboxTick();
+      }, commitOutboxIntervalMs);
+      commitOutboxTimer.unref();
+    };
+    scheduleCommitOutboxTick();
   }
 }
 

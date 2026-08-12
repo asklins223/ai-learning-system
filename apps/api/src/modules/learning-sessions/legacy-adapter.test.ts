@@ -156,15 +156,15 @@ describe("toLegacyDomainSummary", () => {
   it("非法输入 fail closed", () => {
     assert.throws(
       () => toLegacyDomainSummary(artifact({ modality: "graph" as never })),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "INVALID_MODALITY",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "invalid_modality",
     );
     assert.throws(
       () => toLegacyDomainSummary(artifact({ revision: -1 })),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "INVALID_ARTIFACT_REVISION",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "invalid_artifact_revision",
     );
     assert.throws(
       () => toLegacyDomainSummary(artifact({ id: "" })),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "MISSING_ARTIFACT_ID",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "missing_artifact_id",
     );
   });
 });
@@ -180,11 +180,11 @@ describe("opaque artifact ref", () => {
   it("非法 ref fail closed", () => {
     assert.throws(
       () => parseOpaqueArtifactRef("artifact:"),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "INVALID_ARTIFACT_REF",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "invalid_artifact_ref",
     );
     assert.throws(
       () => parseOpaqueArtifactRef("uuid-only"),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "INVALID_ARTIFACT_REF",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "invalid_artifact_ref",
     );
   });
 });
@@ -234,15 +234,15 @@ describe("fromLegacyAnswer: input uniqueness 键（content hash + probe/version�
   it("required 缺失 fail closed（redaction 后行/老行）", () => {
     assert.throws(
       () => fromLegacyAnswer({ ...row, artifactHash: "" }),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "MISSING_ARTIFACT_HASH",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "missing_artifact_hash",
     );
     assert.throws(
       () => fromLegacyAnswer({ ...row, probeRef: null }),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "MISSING_PROBE_REF",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "missing_probe_ref",
     );
     assert.throws(
       () => fromLegacyAnswer({ ...row, version: undefined }),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "MISSING_ARTIFACT_VERSION",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "missing_artifact_version",
     );
   });
 });
@@ -412,15 +412,15 @@ describe("canonicalCompatibilityCheck（旧 question-first / 新 Episode 唯一�
     const state = pendingState();
     assert.throws(
       () => canonicalCompatibilityCheck("", gen, "episode", state),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "MISSING_SCHEDULE_ID",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "missing_schedule_id",
     );
     assert.throws(
       () => canonicalCompatibilityCheck(SCHEDULE, -1, "episode", state),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "INVALID_SCHEDULE_GENERATION",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "invalid_schedule_generation",
     );
     assert.throws(
       () => canonicalCompatibilityCheck("sched-other", gen, "episode", state),
-      (err: unknown) => err instanceof LegacyAdapterError && err.code === "SCHEDULE_MISMATCH",
+      (err: unknown) => err instanceof LegacyAdapterError && err.code === "schedule_mismatch",
     );
   });
 });

@@ -21,8 +21,6 @@ import { logger } from "../lib/logger.ts";
 import {
   SupervisorRunStatus,
   AgentUnitKind,
-  JobType,
-  JobStatus,
   SUPERVISOR_AGENT_ENGINE_MODE,
   // P0-06 统一：从共享包导入状态枚举，消除本地重复定义
   NON_TERMINAL_UNIT_STATUSES,
@@ -153,28 +151,15 @@ async function cancelDanglingUnitsUnderTerminalRuns(): Promise<number> {
  * 不清 needs_attention run 的 job——那是一个可恢复状态，正等待用户重试。
  */
 async function markDeadJobsUnderTerminalRuns(): Promise<number> {
+  // 0098 起 jobs RLS 重新启用：跨 workspace 维护写路径收口为
+  // SECURITY DEFINER 函数 ailearn_mark_dead_jobs_under_terminal_runs()
+  // （migrator owner + BYPASSRLS，函数内绕过 RLS；worker 仅 EXECUTE）。
   const result = await db.execute(sql`
-    UPDATE jobs
-    SET status = 'dead',
-        finished_at = NOW()
-    WHERE jobs.status IN ('pending', 'running')
-      AND jobs.generation_run_id IS NOT NULL
-      AND EXISTS (
-        SELECT 1 FROM card_generation_runs
-        WHERE card_generation_runs.id = jobs.generation_run_id
-          AND card_generation_runs.engine_mode = ${SUPERVISOR_AGENT_ENGINE_MODE}
-          AND card_generation_runs.status IN (
-            ${SupervisorRunStatus.SUCCEEDED},
-            ${SupervisorRunStatus.PARTIAL_READY},
-            ${SupervisorRunStatus.CANCELLED},
-            ${SupervisorRunStatus.SUPERSEDED}
-          )
-      )
-    RETURNING jobs.id
+    SELECT public.ailearn_mark_dead_jobs_under_terminal_runs() AS marked
   `);
 
-  const count = (result as unknown as Array<{ id: string }>).length;
-  return count;
+  const row = (result as unknown as Array<{ marked: number | string }>)[0];
+  return typeof row?.marked === "number" ? row.marked : Number(row?.marked ?? 0);
 }
 
 /**
@@ -265,33 +250,21 @@ async function resumeStuckWaitingParents(): Promise<number> {
 
     if (!updated) continue;
 
-    // 创建 resume job
-    await db.insert(schema.jobs).values({
-      type: JobType.EXECUTE_CARD_AGENT_TURN,
-      workspaceId: parent.workspaceId,
-      // 类型修复：requested_by 列是 uuid 类型且可空，"system-reconciler" 字符串
-      // 会抛 "invalid input syntax for type uuid"；系统对账任务传 null。
-      requestedBy: null,
-      payload: {
-        generationRunId: parent.runId,
-        agentUnitId: parent.unitId,
-        turnNo: 999, // resume turn，由 run-phase-context 从 DB 恢复实际 turnNo
-        inputHash: hashJson({
+    // 创建 resume job（jobs RLS 重开：跨 workspace 对账写经 SECURITY DEFINER 函数）
+    await db.execute(sql`
+      SELECT public.ailearn_enqueue_agent_turn_job(
+        ${parent.workspaceId}, NULL, ${parent.runId}, ${parent.unitId}, 999,
+        ${hashJson({
           runId: parent.runId,
           unitId: parent.unitId,
           resume: true,
           reconciler: true,
-        }),
-        userId: "system-reconciler",
-      },
-      status: JobStatus.PENDING,
-      generationRunId: parent.runId,
-      generationUnitId: parent.unitId,
-      stage: "complete",
-      priority: 80, // 高优先级，尽快恢复卡死的 run
-      resourceClass: "card_foreground",
-      idempotencyKey: `agent-reconcile:${parent.runId}:${parent.unitId}`,
-    }).onConflictDoNothing();
+        })},
+        80, 'card_foreground',
+        ${`agent-reconcile:${parent.runId}:${parent.unitId}`},
+        'system-reconciler'
+      )
+    `);
 
     resumed++;
     logger.info(

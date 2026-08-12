@@ -1193,8 +1193,9 @@ export async function listCardGenerationAgentEvents(
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     const last = page.at(-1);
+    // 2026-08-11：契约统一——响应字段 events → items（其余端点分页均用 items）
     return {
-      events: page.map((event) => {
+      items: page.map((event) => {
         const base = {
           id: event.id,
           eventKey: event.eventKey,

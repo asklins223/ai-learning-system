@@ -315,6 +315,8 @@ export function NoteEditor({
   const noteDeletedRef = useRef(false);
   const generationRunRef = useRef(0);
   const lastRunAnnouncementRef = useRef<string | null>(null);
+  // 2026-08-11：记录上次已应用的 run 状态键，轮询同状态时跳过 setState 与
+  // localStorage 写入（见 applyGenerationRun）。
   const generationRequestKeyRef = useRef<{ versionId: string; key: string } | null>(null);
   const generationRestartRequestKeyRef = useRef<{ runId: string; key: string } | null>(null);
   const initialBlockCountRef = useRef(initialBlocks.length);
@@ -438,7 +440,14 @@ export function NoteEditor({
     }
   }, [generationRunStorageKey]);
 
+  const lastAppliedRunKeyRef = useRef<string | null>(null);
   const applyGenerationRun = useCallback((run: CardGenerationRunView) => {
+    // 2026-08-11：轮询每 1.5s 触发；run 停在同状态时跳过全部 setState 与
+    // localStorage 写入——此前每轮无条件 setGenerationRun 新对象 → NoteEditor
+    // 全树重渲染 + active 期间每 1.5s 写内容完全相同的 localStorage。
+    const stateKey = `${run.runId}:${run.stage}:${run.stateVersion}:${run.status}:${run.sourceSnapshot.versionNo}`;
+    if (lastAppliedRunKeyRef.current === stateKey) return;
+    lastAppliedRunKeyRef.current = stateKey;
     setGenerationRun(run);
     setGenerationRunId(run.runId);
     setGenerationVersionNo(run.sourceSnapshot.versionNo);

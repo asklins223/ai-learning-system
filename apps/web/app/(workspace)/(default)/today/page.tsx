@@ -170,8 +170,14 @@ async function listAllReviews(): Promise<ReviewWithCard[]> {
   const seenIds = new Set<string>();
   let offset = 0;
 
+  // 2026-08-11（性能专项）：按到期窗口拉取——只限上界（今天结束前），
+  // 避免历史未处理到期项被漏掉（dueReviews 语义 = pending 且已到期，
+  // 不限过去）。原实现 includeAll 全量拉取，复习历史大时串行瀑布几十页。
+  const now = new Date();
+  const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0).getTime();
+
   while (true) {
-    const page = await api.listReviews({ includeAll: true, limit: 100, offset });
+    const page = await api.listReviews({ includeAll: true, limit: 100, offset, dueToMs: dayEnd });
     for (const item of page.items) {
       if (!seenIds.has(item.review.id)) {
         seenIds.add(item.review.id);
@@ -179,11 +185,11 @@ async function listAllReviews(): Promise<ReviewWithCard[]> {
       }
     }
 
-    if (page.nextOffset === null) break;
-    if (page.nextOffset <= offset) {
+    if (page.nextCursor === null) break;
+    if (page.nextCursor <= offset) {
       throw new Error("复习分页游标未向前推进");
     }
-    offset = page.nextOffset;
+    offset = page.nextCursor;
   }
 
   return items;
@@ -521,6 +527,7 @@ export default function TodayPage() {
       const time = jobEventTime(job);
       if (!isWithinDay(time, startMs, endMs)) continue;
       const presentation = statusMap.jobStatus(job.status);
+      const needsAIConsent = job.failureReason === "ai_consent_required";
       const group: ActivityGroup =
         job.status === "failed" || job.status === "dead"
           ? "attention"
@@ -535,9 +542,13 @@ export default function TodayPage() {
         time,
         typeLabel: "自动任务",
         title: jobLabel(job.type),
-        description: jobDescription(job.status),
+        description: needsAIConsent
+          ? "当前工作区尚未签署 AI 使用协议，任务已安全停止。签署后可回到原内容重试。"
+          : jobDescription(job.status),
         statusLabel: presentation.label,
         statusTone: presentation.tone,
+        href: needsAIConsent ? "/settings#model" : undefined,
+        actionLabel: needsAIConsent ? "签署 AI 使用协议" : undefined,
       });
     }
 

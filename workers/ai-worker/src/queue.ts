@@ -22,7 +22,12 @@ export const MAX_ATTEMPTS_CLAMP_MAX = 10;
 
 // ARCH-02 fix: Make concurrency configurable via environment variable.
 // Falls back to 3 (conservative default) when not set.
-export const QUEUE_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.QUEUE_CONCURRENCY ?? 3)));
+export const QUEUE_CONCURRENCY = (() => {
+  const raw = Number(process.env.QUEUE_CONCURRENCY ?? 3);
+  // 2026-08-11：非法值（NaN）回退默认 3——此前 NaN 使并发上限失效（恒 0 停摆）
+  const parsed = Number.isFinite(raw) ? raw : 3;
+  return Math.max(1, Math.min(16, parsed));
+})();
 export const LEASE_TIMEOUT_MS = 120_000;
 
 export type ClaimedJob = {

@@ -2,7 +2,7 @@
 
 import "@/app/styles/notes-list.css";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -51,6 +51,10 @@ export default function NotesIndex() {
   const [filter, setFilter] = useState<"all" | "recent">("all");
   // P1-2: 回收站视图切换
   const [viewMode, setViewMode] = useState<"all" | "trash">("all");
+  // 视图切换竞态守卫：loadMore 的 async 闭包捕获的是发起时的 viewMode，
+  // await 恢复后读 state 仍是旧值（stale closure），必须用 ref 保存最新值。
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
 
   // 重命名
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -126,7 +130,11 @@ export default function NotesIndex() {
     setLoadingMore(true);
     setLoadMoreError(null);
     try {
+      // 视图切换竞态：请求发出后用户切到回收站/全部，旧响应的 items
+      // 不得追加到新视图。viewMode 闭包捕获是旧值（stale closure），
+      // 用 viewModeRef 读请求期间的**最新**视图，不一致则丢弃响应。
       const r = await api.listNotes({ cursor: nextCursor, limit: 50, trashed: viewMode === "trash" });
+      if (viewModeRef.current !== viewMode) return;
       setItems((previous) => {
         const current = previous ?? [];
         const knownIds = new Set(current.map((note) => note.id));
@@ -424,27 +432,33 @@ export default function NotesIndex() {
   }
 
   // 搜索与筛选只作用于已加载 items
+  // 2026-08-11（性能专项）：filtered/recentCount 由每次渲染重算改为 useMemo——
+  // 搜索输入每 keystroke 触发全量 items 过滤重建（cards 页同场景已 memo）。
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const filtered = (items ?? []).filter((note) => {
-    const matchesQuery =
-      !normalizedQuery ||
-      (note.title || "").toLocaleLowerCase().includes(normalizedQuery);
-    if (!matchesQuery) return false;
-    switch (filter) {
-      case "recent": {
-        const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-        return new Date(note.updatedAt).getTime() > dayAgo;
+  const filtered = useMemo(() => {
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    return (items ?? []).filter((note) => {
+      const matchesQuery =
+        !normalizedQuery ||
+        (note.title || "").toLocaleLowerCase().includes(normalizedQuery);
+      if (!matchesQuery) return false;
+      switch (filter) {
+        case "recent": {
+          return new Date(note.updatedAt).getTime() > dayAgo;
+        }
+        default:
+          return true;
       }
-      default:
-        return true;
-    }
-  });
+    });
+  }, [filter, items, normalizedQuery]);
 
   const loadedCount = items?.length ?? 0;
   const filteredCount = filtered.length;
   const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-  const recentCount =
-    items?.filter((n) => new Date(n.updatedAt).getTime() > dayAgo).length ?? 0;
+  const recentCount = useMemo(
+    () => items?.filter((n) => new Date(n.updatedAt).getTime() > dayAgo).length ?? 0,
+    [items, dayAgo],
+  );
   const hasQuery = normalizedQuery.length > 0;
   const hasFilter = filter !== "all";
   const hasLocalSelection = hasQuery || hasFilter;

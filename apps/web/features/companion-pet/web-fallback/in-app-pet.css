@@ -1,0 +1,243 @@
+/* Browser fallback: same interaction system, constrained to the app viewport. */
+
+.in-app-pet-host {
+  position: fixed;
+  right: 8px;
+  bottom: 8px;
+  z-index: var(--z-drawer, 50);
+  pointer-events: none;
+  transition: none;
+  will-change: transform;
+}
+
+.in-app-pet-host .pet-surface-root {
+  pointer-events: none;
+}
+
+.in-app-pet-host .pet-surface-root :is(
+  .pet-bubble,
+  .pet-composer,
+  .pet-menu,
+  .pet-confirmation-card,
+  .pet-character-toolbar,
+  .pet-drag-handle,
+  .pet-voice-control-button,
+  .pet-character-hit-zone
+) {
+  pointer-events: auto;
+}
+
+.in-app-pet-compact {
+  position: fixed;
+  right: max(8px, env(safe-area-inset-right, 0px));
+  bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  z-index: var(--z-drawer, 50);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: none;
+  font-family: var(--font-ui);
+}
+
+.in-app-pet-compact-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.in-app-pet-voice-btn {
+  pointer-events: auto;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 8px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--color-running) 48%, var(--color-border));
+  border-radius: 50%;
+  background: var(--color-surface-raised);
+  box-shadow: none;
+  color: var(--color-running-text);
+  cursor: pointer;
+}
+
+.in-app-pet-voice-btn.is-listening {
+  border-color: var(--color-action);
+  background: var(--color-action);
+  color: var(--color-on-action);
+}
+
+.in-app-pet-voice-btn:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.in-app-pet-voice-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.in-app-pet-voice-btn svg {
+  width: 19px;
+  height: 19px;
+}
+
+.in-app-pet-character-btn {
+  position: relative;
+  pointer-events: auto;
+  width: 92px;
+  height: 124px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 72%, transparent);
+  border-radius: 30px 30px 24px 24px;
+  background: var(--color-surface-raised);
+  box-shadow: none;
+  cursor: pointer;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.in-app-pet-character-btn::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border: 1px solid color-mix(in srgb, var(--color-evidence) 16%, transparent);
+  border-radius: 25px 25px 19px 19px;
+  pointer-events: none;
+}
+
+.in-app-pet-character-btn-pose {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.in-app-pet-character-btn-pose img {
+  width: 90%;
+  height: auto;
+  object-fit: contain;
+  object-position: bottom;
+  filter: none;
+  pointer-events: none;
+  user-select: none;
+}
+
+.in-app-pet-character-btn-label {
+  position: relative;
+  min-height: 26px;
+  display: grid;
+  place-items: center;
+  color: var(--color-evidence-text);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+}
+
+.in-app-pet-popover {
+  --pet-panel-width: 100%;
+  --pet-panel-radius: calc(var(--radius-lg) + 4px);
+  --pet-panel-bg: var(--color-surface-raised);
+  --pet-panel-bg-strong: var(--color-surface-raised);
+  --pet-panel-edge: color-mix(in srgb, var(--color-border-strong) 70%, transparent);
+  --pet-panel-inner: color-mix(in srgb, var(--color-surface) 86%, transparent);
+  --pet-accent: var(--color-evidence);
+  --pet-accent-soft: var(--color-evidence-soft);
+  --pet-accent-text: var(--color-evidence-text);
+  --pet-panel-shadow: none;
+  position: relative;
+  pointer-events: auto;
+  width: min(360px, calc(100vw - 16px));
+  max-height: min(72vh, 520px);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 66%, transparent);
+  border-radius: calc(var(--radius-lg) + 8px);
+  background: var(--color-surface-raised);
+  box-shadow: none;
+  color: var(--color-text);
+  font: 13px/1.5 var(--font-ui);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.in-app-pet-popover :is(.pet-bubble, .pet-composer, .pet-menu, .pet-confirmation-card) {
+  position: relative;
+  inset: auto;
+  left: auto;
+  top: auto;
+  width: 100%;
+  max-height: none;
+  box-shadow: none;
+  animation: none;
+}
+
+.in-app-pet-popover .pet-bubble::after {
+  display: none;
+}
+
+.in-app-pet-popover .pet-menu {
+  height: auto;
+  max-height: min(58vh, 430px);
+}
+
+.in-app-pet-popover .pet-menu-list {
+  max-height: 330px;
+}
+
+.in-app-pet-popover-close {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font: 650 11px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.in-app-pet-restore {
+  position: fixed;
+  right: max(8px, env(safe-area-inset-right, 0px));
+  bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  z-index: var(--z-drawer, 50);
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 66%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-raised);
+  box-shadow: none;
+  color: var(--color-evidence-text);
+  font: 700 11px/1 var(--font-ui);
+  cursor: pointer;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.in-app-pet-restore svg {
+  width: 17px;
+  height: 17px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .in-app-pet-host,
+  .in-app-pet-compact,
+  .in-app-pet-popover {
+    transition: none;
+  }
+}

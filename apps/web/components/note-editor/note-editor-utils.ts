@@ -341,7 +341,7 @@ export function generationFailedUnitName(
 
 export function generationUnitErrorLabel(errorCode: string | null): string {
   const labels: Record<string, string> = {
-    ai_consent_required: "需要先同意工作区 AI 数据处理条款",
+    ai_consent_required: "需要先签署当前工作区的 AI 使用协议",
     external_ai_disabled: "工作区尚未允许向外部 AI 服务发送内容",
     mock_provider_blocked_in_production: "当前工作区的 AI 模型配置为 Mock，无法在生产环境中生成学习卡",
     no_draft_for_verify: "未找到可校验的草稿",

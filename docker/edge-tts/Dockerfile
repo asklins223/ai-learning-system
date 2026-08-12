@@ -16,7 +16,8 @@ RUN apt-get update \
 RUN pip install --no-cache-dir "edge-tts>=6.1.0,<8"
 
 WORKDIR /app
-COPY server.py /app/server.py
+# compose 的 build context 是仓库根（context: .），因此这里用相对仓库根的路径。
+COPY docker/edge-tts/server.py /app/server.py
 
 EXPOSE 8080
 USER nobody

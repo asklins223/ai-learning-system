@@ -162,7 +162,7 @@ export function lineageToEdgeKind(lineage: ForeignKeyLineage): SharedTruthEdgeKi
     default:
       throw new StarMapProjectionError(
         `未知血缘外键 ${lineage.fkName}，不允许构建共享边`,
-        "UNKNOWN_LINEAGE_FK",
+        "unknown_lineage_fk",
       );
   }
 }
@@ -175,7 +175,7 @@ export function edgeKindFor(parent: SharedPlaneNodeType, child: SharedPlaneNodeT
   if (parent === "key_point" && child === "evidence") return "supported_by";
   throw new StarMapProjectionError(
     `不支持的血缘方向 ${parent} → ${child}`,
-    "INVALID_LINEAGE_DIRECTION",
+    "invalid_lineage_direction",
   );
 }
 
@@ -1044,7 +1044,7 @@ export function assertSceneConnectionDoesNotPublishEdge(
   if (input.autoPublishSharedEdge) {
     throw new StarMapProjectionError(
       "Scene 连线禁止自动创建共享边",
-      "SCENE_EDGE_AUTO_PUBLISH_DENIED",
+      "scene_edge_auto_publish_denied",
     );
   }
   return {

@@ -24,6 +24,9 @@ import type {
   DraftPatch,
   CriticIssue,
 } from "@ailearn/shared";
+import {
+  DraftPatchType,
+} from "@ailearn/shared";
 import type { AgentRuntime } from "./runtime.ts";
 import { initAgentTurn, handleTurnFailure, maybeReThrowRetryableProviderError } from "./runtime.ts";
 import type { AgentSession } from "./session.ts";
@@ -192,7 +195,10 @@ export async function executeRepairTurn(
     // 如果调用了 complete_agent_task，标记完成
     const hasComplete = result.toolCalls.some((c) => c.name === "complete_agent_task");
 
-    if (outcome.patches.length > 0 || hasComplete) {
+    // 有实际 patch 才算完成（2026-08-11 修复）：模型只调 complete_agent_task
+    // 却未提交任何 patch 时，不得当作"空修复成功"推进——与 critic 路径
+    // report=null → failed 对称，走下方重试/失败路径。
+    if (outcome.patches.length > 0) {
       if (hasComplete) {
         session.complete();
         outcome.state = "completed";
@@ -268,6 +274,12 @@ function parseRepairResult(
 }
 
 /** 解析单个 patch */
+// 2026-08-11：DraftPatch.type 白名单——此前 `data.type as DraftPatch["type"]`
+// 直接透传，非法 type（模型幻觉输出）落进 persistRepairPatches 的 default 分支
+// 被静默跳过（仅 warn），同一 hard issue 反复出现 → 修复死循环。
+// 改为在解析层尽早失败：非白名单 type 抛错，repair turn 走失败路径，不伪成功。
+const VALID_PATCH_TYPES = new Set<string>(Object.values(DraftPatchType));
+
 function parsePatch(
   data: Record<string, unknown>,
   baseDraftHash: string,
@@ -275,8 +287,21 @@ function parsePatch(
   // BUG-18: 原代码使用 `void baseDraftHash` 直接丢弃参数，
   // 导致返回的 patch 对象不包含 baseDraftHash，调用方无法验证
   // patch 是否基于正确的 draft 版本。现在将其附加到返回对象中。
+  const rawType = data.type;
+  if (typeof rawType !== "string" || !VALID_PATCH_TYPES.has(rawType)) {
+    throw new Error(
+      `submit_draft_patch: 非法 patch type ${JSON.stringify(rawType)}（允许：${[...VALID_PATCH_TYPES].join(", ")}）`,
+    );
+  }
+  // newOrdinal 只接受有限数值；NaN/Infinity/非数值会写坏卡片排序，置 undefined 丢弃
+  const rawOrdinal = data.newOrdinal;
+  const newOrdinal = rawOrdinal === undefined
+    ? undefined
+    : Number.isFinite(Number(rawOrdinal))
+      ? Number(rawOrdinal)
+      : undefined;
   return {
-    type: data.type as DraftPatch["type"],
+    type: rawType as DraftPatch["type"],
     issueIds: Array.isArray(data.issueIds) ? (data.issueIds as string[]) : [],
     candidateId: data.candidateId ? String(data.candidateId) : undefined,
     cardDraftId: data.cardDraftId ? String(data.cardDraftId) : undefined,
@@ -285,7 +310,7 @@ function parsePatch(
     newTitle: data.newTitle ? String(data.newTitle) : undefined,
     newSummary: data.newSummary ? String(data.newSummary) : undefined,
     newGroupKey: data.newGroupKey ? String(data.newGroupKey) : undefined,
-    newOrdinal: data.newOrdinal !== undefined ? Number(data.newOrdinal) : undefined,
+    newOrdinal,
     newPrimarySupportCandidateId: data.newPrimarySupportCandidateId
       ? String(data.newPrimarySupportCandidateId)
       : undefined,

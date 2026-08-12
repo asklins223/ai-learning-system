@@ -23,6 +23,9 @@ export function acquireBodyScrollLock(target: BodyScrollLockTarget): () => void 
   if (existing) {
     existing.count += 1;
   } else {
+    // 2026-08-11 防御：若 body 已是 hidden 但 registry 无记录（上次 effect
+    // cleanup 被错误边界/HMR 跳过导致泄漏），以当前值作 originalOverflow，
+    // 避免 release 时把 body 恢复成错误值（残留 hidden 的二次 acquire 场景）。
     scrollLockRegistry.set(target, {
       count: 1,
       originalOverflow: target.style.overflow,

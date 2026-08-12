@@ -221,6 +221,17 @@ export const companionAccountStateV1Schema = z.object({
 }).strict();
 export type CompanionAccountStateV1 = z.infer<typeof companionAccountStateV1Schema>;
 
+/** Account-wide revocation event delivered on the companion account SSE. */
+export const companionAccountGlobalOffEventV1Schema = z.object({
+  version: z.literal(1),
+  type: z.literal("account.global_off"),
+  userId: z.string().uuid(),
+  epoch: z.number().int().min(0),
+}).strict();
+export type CompanionAccountGlobalOffEventV1 = z.infer<
+  typeof companionAccountGlobalOffEventV1Schema
+>;
+
 export const companionAccountPatchSchema = z.object({
   /** 客户端持有的 base revision（CAS 乐观锁），必填。 */
   revision: z.number().int().min(0),
@@ -249,10 +260,10 @@ export const companionAccountPatchSchema = z.object({
 });
 export type CompanionAccountPatch = z.infer<typeof companionAccountPatchSchema>;
 
-// ─── Runtime fence（device session，ephemeral 不落库）────────────────────
+// ─── Runtime fence（device session，短 TTL server-side fence）─────────────
 
 export const runtimeFenceRequestSchema = z.object({
-  /** 设备本地会话 ID（device-local，不持久化为账号偏好）。 */
+  /** 设备本地会话 ID（不作为账号偏好；服务端仅短 TTL 保存）。 */
   deviceSessionId: z.string().min(1).max(200),
   /** 发起时客户端看到的 account surface epoch；服务端 fence 校验用。 */
   surfaceEpoch: z.number().int().min(0),
@@ -278,3 +289,23 @@ export const companionOverviewSchema = z.object({
   onboardingStates: z.array(companionOnboardingStateV1Schema).max(100),
 }).strict();
 export type CompanionOverview = z.infer<typeof companionOverviewSchema>;
+
+// ─── 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；决策 4）──────────────
+
+/** 用户显式设置的作答模态偏好；"any" = 未设置（跟随安排）。 */
+export const answerModePreferenceV1Schema = z.enum(["voice", "silent", "text", "any"]).default("any");
+export type AnswerModePreferenceV1 = z.infer<typeof answerModePreferenceV1Schema>;
+
+export const companionAnswerModePreferenceV1Schema = z.object({
+  version: z.literal(1),
+  /** 显式偏好；"any" = 未设置（Supervisor 默认编排）。 */
+  preference: answerModePreferenceV1Schema,
+  updatedAt: z.string().datetime().nullable(),
+}).strict();
+export type CompanionAnswerModePreferenceV1 = z.infer<typeof companionAnswerModePreferenceV1Schema>;
+
+export const companionAnswerModePreferencePatchV1Schema = z.object({
+  version: z.literal(1),
+  preference: answerModePreferenceV1Schema,
+}).strict();
+export type CompanionAnswerModePreferencePatchV1 = z.infer<typeof companionAnswerModePreferencePatchV1Schema>;

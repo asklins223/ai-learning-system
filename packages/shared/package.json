@@ -35,6 +35,36 @@
       "types": "./src/constants.ts",
       "import": "./src/constants.ts",
       "default": "./src/constants.ts"
+    },
+    "./companion-character-contracts": {
+      "types": "./src/companion-character-contracts.ts",
+      "import": "./src/companion-character-contracts.ts",
+      "default": "./src/companion-character-contracts.ts"
+    },
+    "./companion-shell-contracts": {
+      "types": "./src/companion-shell-contracts.ts",
+      "import": "./src/companion-shell-contracts.ts",
+      "default": "./src/companion-shell-contracts.ts"
+    },
+    "./desktop-pet-contracts": {
+      "types": "./src/desktop-pet-contracts.ts",
+      "import": "./src/desktop-pet-contracts.ts",
+      "default": "./src/desktop-pet-contracts.ts"
+    },
+    "./companion-conversation-contracts": {
+      "types": "./src/companion-conversation-contracts.ts",
+      "import": "./src/companion-conversation-contracts.ts",
+      "default": "./src/companion-conversation-contracts.ts"
+    },
+    "./companion-asr-contracts": {
+      "types": "./src/companion-asr-contracts.ts",
+      "import": "./src/companion-asr-contracts.ts",
+      "default": "./src/companion-asr-contracts.ts"
+    },
+    "./companion-learning-session-contracts": {
+      "types": "./src/companion-learning-session-contracts.ts",
+      "import": "./src/companion-learning-session-contracts.ts",
+      "default": "./src/companion-learning-session-contracts.ts"
     }
   },
   "dependencies": {
