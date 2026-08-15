@@ -6,8 +6,6 @@
  */
 
 export const GRAPH_NODE_TYPES = ["source", "note", "card", "key_point", "evidence"] as const;
-// §15.2（2026-08-15 恢复）：supports（evidence→kp）/prerequisite（前置→目标）
-// 为投影边 kind，旧 reader 图也接受（渲染按通用边处理）。
 export const GRAPH_EDGE_TYPES = ["derived_from", "generated_from", "contains", "supports", "prerequisite"] as const;
 
 export type GraphNodeType = (typeof GRAPH_NODE_TYPES)[number];
@@ -106,8 +104,8 @@ const TYPE_RANK: Record<GraphNodeType, number> = {
   source: 0,
   note: 1,
   card: 2,
-  evidence: 3,
   key_point: 3,
+  evidence: 4,
 };
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
@@ -118,8 +116,8 @@ export const STAR_MAP_NODE_RADIUS: Readonly<Record<GraphNodeType, number>> = {
   source: 53,
   note: 51,
   card: 59,
-  evidence: 57,
   key_point: 35,
+  evidence: 30,
 };
 
 function compareText(left: string, right: string) {
@@ -170,7 +168,20 @@ interface IndexedGraph {
   incident: Map<string, GraphEdge[]>;
 }
 
+// F#（round4 leftover）：按 graph 引用缓存索引结果——同一份图反复过滤/布局时
+// 不再每次重排序 + 重建邻接表。WeakMap 键是调用方传入的 graph 对象引用，
+// graph 不被复用即自动回收；indexGraph 只读地消费 graph，缓存安全。
+const indexCache = new WeakMap<UnderstandingGraph, IndexedGraph>();
+
 function indexGraph(input: UnderstandingGraph): IndexedGraph {
+  const cached = indexCache.get(input);
+  if (cached) return cached;
+  const result = indexGraphUncached(input);
+  indexCache.set(input, result);
+  return result;
+}
+
+function indexGraphUncached(input: UnderstandingGraph): IndexedGraph {
   const graph = normalizeUnderstandingGraph(input);
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
   const incoming = new Map<string, GraphEdge[]>();
@@ -338,14 +349,17 @@ export function filterUnderstandingGraph(
     if (states.size === 0 && nodeTypes.size === 0) {
       seedNodes = seedNodes.filter((node) => queryMatches.has(node.id));
     } else {
-      // A status/type filter normally selects cards or entity kinds. Let the
-      // search term match anywhere on each candidate's lineage, so searching a
-      // claim while "有误解" is active still finds its misunderstood card.
-      seedNodes = seedNodes.filter((node) => {
-        const ancestors = walkHierarchy(indexed, [node.id], "ancestors").nodeIds;
-        const descendants = walkHierarchy(indexed, [node.id], "descendants").nodeIds;
-        return [...ancestors, ...descendants].some((id) => queryMatches.has(id));
-      });
+      // F#（round4 leftover）：状态/类型筛选通常选中卡片或实体类型。让搜索词
+      // 命中候选行的任一级联（祖先/后代），例如在“有误解”生效时搜一条要点
+      // 仍能找到那张被误解的学习卡。原实现对每个候选 seed 各做一趟祖先 + 一趟
+      // 后代 BFS（逐 seed 全图遍历）；这里改成单次合并传播——从全部 query 命中
+      // 出发向上/向下各跑一趟，即可判定每个候选 seed 的级联是否命中 query：
+      //   lineage(S) ∩ Q ≠ ∅  ⟺  S ∈ (∪_{q∈Q} D(q)) ∪ (∪_{q∈Q} A(q))。
+      const queryAncestors = walkHierarchy(indexed, [...queryMatches], "ancestors").nodeIds;
+      const queryDescendants = walkHierarchy(indexed, [...queryMatches], "descendants").nodeIds;
+      seedNodes = seedNodes.filter((node) => (
+        queryAncestors.has(node.id) || queryDescendants.has(node.id)
+      ));
     }
   }
   const seedIds = seedNodes.map((node) => node.id);
@@ -356,7 +370,12 @@ export function filterUnderstandingGraph(
   } else if (filter.preserveLineage === false) {
     visibleIds = new Set(seedIds);
   } else {
-    visibleIds = new Set(getSelectedGraphPath(indexed.graph, seedIds).nodeIds);
+    // F#（round4 leftover）：getSelectedGraphPath 会对 seedIds 第三次走全图并
+    // 重建索引。改为对全部存活 seed 做一次合并的祖先/后代传播，得到与该路径
+    // 完全一致的 nodeIds（BFS 语义与可达性不变）。
+    const ancestors = walkHierarchy(indexed, seedIds, "ancestors");
+    const descendants = walkHierarchy(indexed, seedIds, "descendants");
+    visibleIds = new Set([...ancestors.nodeIds, ...descendants.nodeIds]);
   }
 
   if (filter.showSources === false) {

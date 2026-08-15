@@ -95,8 +95,8 @@ describe("fail-closed：flag 关闭时不渲染活动流", () => {
       "Overlay 内活动流面板应受特性开关门控",
     );
     assert.ok(
-      overlaySource.includes("gen-progress"),
-      "Overlay 应含暖纸主题活动流弹窗结构",
+      overlaySource.includes("lcg-details-shell"),
+      "Overlay 应含按需展开的处理详情结构",
     );
   });
 

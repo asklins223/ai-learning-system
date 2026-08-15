@@ -1,18 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { AllowedMainRouteV2, DesktopPetScaleV1 } from "@ailearn/shared";
+import type { DesktopPetScaleV1 } from "@ailearn/shared";
 import { createPetAdapter, type PetAdapterV1 } from "@/features/companion-pet/desktop/desktop-pet-adapter";
 import { PetRuntimeProvider } from "@/features/companion-pet/runtime/PetRuntimeProvider";
 import { PetSurface } from "@/features/companion-pet/surfaces/PetSurface";
-import { InAppPetHost } from "@/features/companion-pet/web-fallback/InAppPetHost";
-// §10.1/§14.3（2026-08-15 接线修复）：Journey 引导 + 主动 delivery + delta
-// 回执此前组件存在但从未挂载——桌宠只剩对话。此处挂载三层并做
-// journey/delivery/receipt 三者互斥（同一时刻一个 cue，§10.2）。
-import { PetJourneyLive } from "@/features/companion-pet/journey-live/PetJourneyLive";
-import { PetDeliveryLayer } from "@/features/companion-pet/deliveries/PetDeliveryLayer";
-import { DeltaReceiptNotice } from "@/features/companion-pet/deliveries/DeltaReceiptNotice";
-import { usePetBridgeContext } from "@/features/companion-bridge/usePetBridgeContext";
 import {
   COMPANION_BOOTSTRAP_POLL_MS,
   CompanionBootstrapError,
@@ -20,7 +12,12 @@ import {
   openCompanionAccountEventStream,
 } from "@/features/companion-pet/bootstrap";
 import { isCompanionPetV1Enabled } from "@/lib/feature-flags";
-import "@/features/companion-pet/web-fallback/in-app-pet.css";
+import { PetJourneyLive } from "@/features/companion-pet/journey-live/PetJourneyLive";
+import { PetDeliveryLayer } from "@/features/companion-pet/deliveries/PetDeliveryLayer";
+import { DeltaReceiptNotice } from "@/features/companion-pet/deliveries/DeltaReceiptNotice";
+import { usePetBridgeContext } from "@/features/companion-bridge/usePetBridgeContext";
+import "@/features/companion-pet/journey-live/pet-journey-live.css";
+import "@/components/liquid-orb/liquid-orb.css";
 import "./pet.css";
 
 /**
@@ -50,13 +47,6 @@ export default function PetPage() {
   // surface。默认 fail-closed；Electron 路径以 bootstrap 投影为准，不再
   // 由 build-time flag 单独决定。
   const [petSurfaceEnabled, setPetSurfaceEnabled] = useState(false);
-  // §10.1/§14.3（2026-08-15 接线修复）：Journey 引导与主动 delivery 由
-  // bootstrap 的 journey/deliveries 能力投影授权（fail-closed）。
-  const [journeyEnabled, setJourneyEnabled] = useState(false);
-  const [deliveriesEnabled, setDeliveriesEnabled] = useState(false);
-  // §10.2 同一时刻一个 cue：journey 卡片 / delivery 气泡 / delta 回执互斥。
-  const [journeyVisible, setJourneyVisible] = useState(false);
-  const [receiptVisible, setReceiptVisible] = useState(false);
   const [account, setAccount] = useState<
     | {
         userId: string;
@@ -68,17 +58,13 @@ export default function PetPage() {
       }
     | undefined
   >(undefined);
+  const [journeyVisible, setJourneyVisible] = useState(false);
+  // §10.2：delta 回执 notice 显示期间抑制 delivery（同一时刻一个 cue）。
+  const [deltaNoticeVisible, setDeltaNoticeVisible] = useState(false);
+  const [deliveryVisible, setDeliveryVisible] = useState(false);
   const api = typeof window === "undefined" ? undefined : window.desktopAPI;
   const adapter = useMemo<PetAdapterV1>(() => createPetAdapter(api), [api]);
-  // V2 bridge：主窗口 UI 事件（delta 回执）+ 主窗口路由跳转（journey/delivery
-  // 的 onOpen* 动作）。bridge 不可用时 fail-closed（函数返回 accepted:false）。
-  const { uiEvent, dispatchOpenRoute } = usePetBridgeContext();
-  const openMainRoute = useMemo(
-    () => async (route: AllowedMainRouteV2) => {
-      await dispatchOpenRoute(route);
-    },
-    [dispatchOpenRoute],
-  );
+  const petBridge = usePetBridgeContext();
 
   useEffect(() => {
     setReducedMotion(window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -131,16 +117,27 @@ export default function PetPage() {
         setLive2dEnabled(body.features.live2d);
         setLearningActionsEnabled(body.features.learningActions);
         setPetSurfaceEnabled(body.features.petSurface);
-        setJourneyEnabled(body.features.journey);
-        setDeliveriesEnabled(body.features.deliveries);
-        setAccount({
+        const nextAccount = {
           userId: body.userId,
           workspaceId: body.workspaceId,
           globalEnabled: body.account?.globalEnabled ?? true,
           accountEpoch: body.account?.epoch ?? 0,
           animationOff: body.account?.animationOff,
           voiceOff: body.account?.voiceOff,
-        });
+        };
+        // F#7（🟠6）：字段均未变时复用前一次引用，避免每 15s 轮询向
+        // PetRuntimeProvider 投递新的 account 引用驱动整棵子树无限重渲。
+        setAccount((current) =>
+          current
+            && current.userId === nextAccount.userId
+            && current.workspaceId === nextAccount.workspaceId
+            && current.globalEnabled === nextAccount.globalEnabled
+            && current.accountEpoch === nextAccount.accountEpoch
+            && current.animationOff === nextAccount.animationOff
+            && current.voiceOff === nextAccount.voiceOff
+            ? current
+            : nextAccount,
+        );
         setBootstrap("ready");
         void reportBootstrap({ version: 1, kind: "ready" });
       } catch (error) {
@@ -194,26 +191,43 @@ export default function PetPage() {
   }, []);
 
   if (bootstrap === "checking") {
-    return <div className="pet-bootstrap" aria-live="polite">正在验证桌面会话…</div>;
+    return (
+      <div className="pet-bootstrap" aria-live="polite" role="status">
+        <div className="pet-bootstrap-card">
+          <span className="pet-bootstrap-dots" aria-hidden="true"><i /><i /><i /></span>
+          <p className="pet-bootstrap-title">桌宠正在载入中…</p>
+          <p className="pet-bootstrap-subtitle">正在验证桌面会话</p>
+        </div>
+      </div>
+    );
   }
   if (bootstrap === "auth_required") {
     return (
       <div className="pet-bootstrap" role="status">
-        需要先登录主窗口，再使用学习伴星。
+        <div className="pet-bootstrap-card">
+          <p className="pet-bootstrap-title">需要先登录主窗口</p>
+          <p className="pet-bootstrap-subtitle">登录后即可使用学习伴星</p>
+        </div>
       </div>
     );
   }
   if (bootstrap === "global_off") {
     return (
       <div className="pet-bootstrap" role="status">
-        桌宠已由账号设置关闭。
+        <div className="pet-bootstrap-card">
+          <p className="pet-bootstrap-title">桌宠已由账号设置关闭</p>
+          <p className="pet-bootstrap-subtitle">可在账号设置中重新开启</p>
+        </div>
       </div>
     );
   }
   if (bootstrap === "error") {
     return (
       <div className="pet-bootstrap" role="alert">
-        桌宠初始化失败，请重新启动应用。
+        <div className="pet-bootstrap-card">
+          <p className="pet-bootstrap-title">桌宠初始化失败</p>
+          <p className="pet-bootstrap-subtitle">请重新启动应用</p>
+        </div>
       </div>
     );
   }
@@ -239,9 +253,17 @@ export default function PetPage() {
     );
   }
 
-  // Browser (no preload bridge): in-app fixed fallback, same surface code.
+  // 浏览器（无 preload bridge）：不渲染页面内桌宠（方案 16 §9.1——桌宠是
+  // 唯一桌面端前台；Web-only 只展示普通产品链接，不创建第二伴星形态）。
   if (bootstrap === "browser") {
-    return <InAppPetHost />;
+    return (
+      <div className="pet-bootstrap" role="status">
+        <div className="pet-bootstrap-card">
+          <p className="pet-bootstrap-title">学习伴星仅在桌面应用提供</p>
+          <p className="pet-bootstrap-subtitle">请下载桌面应用以使用学习伴星</p>
+        </div>
+      </div>
+    );
   }
 
   const surfaceKind = api ? "pet" : "web_fallback";
@@ -256,39 +278,48 @@ export default function PetPage() {
       textConversationEnabled={textConversationEnabled}
       voiceDialogueEnabled={voiceDialogueEnabled}
       streamingVoiceEnabled={streamingVoiceEnabled}
+      // 方案 16 §9.3：V2 正交状态外部信号（Journey 可见 → active；Delivery 可见 → cue）。
+      v2Signals={{
+        journey: journeyVisible ? "active" : undefined,
+        // §9.3：delivery 气泡真实显示状态（非 journey 时按组件上报）。
+        deliveryVisible: deliveryVisible || undefined,
+      }}
     >
-      <PetSurface
-        side={sideOverride ?? "bubble-left"}
-        petScale={petScale}
-        reducedMotion={reducedMotion}
-        animationOff={account?.animationOff ?? false}
-        live2dEnabled={live2dEnabled}
-        exposeDemoApi={exposeDemoApi}
-        textConversationEnabled={textConversationEnabled}
-        voiceDialogueEnabled={voiceDialogueEnabled}
-        learningActionsEnabled={learningActionsEnabled}
-      />
-      {/* §10.1：Journey 首次引导卡片（Electron 窗口；浏览器路径不渲染）。 */}
-      <PetJourneyLive
-        enabled={journeyEnabled}
-        workspaceId={account?.workspaceId}
-        onNavigate={(route) => void openMainRoute(route)}
-        onVisibleChange={setJourneyVisible}
-      />
-      {/* §14.3：主动 delivery 展示层（run 完成收尾/提议等，inbox SSE）。 */}
-      <PetDeliveryLayer
-        enabled={deliveriesEnabled}
-        journeyVisible={journeyVisible}
-        suppressed={receiptVisible}
-        onOpenRun={(runId) => void openMainRoute({ kind: "learning_run", runId })}
-        onOpenConversation={() => void openMainRoute({ kind: "conversation" })}
-      />
-      {/* §11.4：星图 delta 回执（主窗口 graph.delta_applied 事件驱动）。 */}
-      <DeltaReceiptNotice
-        uiEvent={uiEvent}
-        journeyVisible={journeyVisible}
-        onVisibleChange={setReceiptVisible}
-      />
+      <div className="pet-journey-live-host">
+        <PetSurface
+          side={sideOverride ?? "bubble-left"}
+          petScale={petScale}
+          reducedMotion={reducedMotion}
+          animationOff={account?.animationOff ?? false}
+          live2dEnabled={live2dEnabled}
+          exposeDemoApi={exposeDemoApi}
+          textConversationEnabled={textConversationEnabled}
+          voiceDialogueEnabled={voiceDialogueEnabled}
+          learningActionsEnabled={learningActionsEnabled}
+        />
+        {/* P6：Journey V2 首邀与推进（仅 Electron Pet 窗口；web 端不渲染桌宠）。 */}
+        <PetJourneyLive
+          enabled={Boolean(api)}
+          workspaceId={account?.workspaceId}
+          onNavigate={(route) => void petBridge.dispatchOpenRoute(route)}
+          onVisibleChange={setJourneyVisible}
+        />
+        {/* P8：durable delivery 主动消息（与 Journey 卡片互斥显示）。 */}
+        <PetDeliveryLayer
+          enabled={Boolean(api)}
+          journeyVisible={journeyVisible}
+          suppressed={deltaNoticeVisible}
+          onVisibleChange={setDeliveryVisible}
+          onOpenRun={(runId) => void petBridge.dispatchOpenRoute({ kind: "learning_run", runId })}
+          onOpenConversation={() => void petBridge.dispatchOpenRoute({ kind: "conversation" })}
+        />
+        {/* §11.4 第 9 步：星图显影回执表达（canonical 庆祝 / practice 明示 / 中性）。 */}
+        <DeltaReceiptNotice
+          uiEvent={petBridge.uiEvent}
+          journeyVisible={journeyVisible}
+          onVisibleChange={setDeltaNoticeVisible}
+        />
+      </div>
     </PetRuntimeProvider>
   );
 }

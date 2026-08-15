@@ -19,6 +19,29 @@ import { validateImageMagicBytes, readImageDimensions } from "./file-validation.
 import { logger } from "./logger.ts";
 
 const MAX_IMAGE_BUFFER_BYTES = 20 * 1024 * 1024; // 20MB
+// N#7-8: 镜像下载的有界并发（防止大导入路径上串行网络往返长链；也不宜过高以免打满 MinIO/内存）。
+const DOWNLOAD_CONCURRENCY = 4;
+// N#7-8: 预注册 INSERT 按 500/批分块，避免 ~6.5k 行时突破 postgres-js ~65535 绑定参数上限。
+const INSERT_BATCH = 500;
+
+/** N#7-8: 有界并发执行异步任务（map-并发），每个 worker 从队列拉取一项执行。 */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
 
 export interface ValidatedImageAsset {
   objectKey: string;
@@ -87,6 +110,8 @@ export async function preRegisterImageAssetsForImport(
   objectKeys: string[],
   userId: string,
 ): Promise<void> {
+  // N#7-8: 镜像下载用有界并发池（DOWNLOAD_CONCURRENCY），而非完全串行 await。
+  const validatedList = await mapWithConcurrency(objectKeys, DOWNLOAD_CONCURRENCY, downloadAndValidateImageAsset);
   const rows: Array<{
     workspaceId: string;
     uploadedForNoteId: null;
@@ -99,11 +124,8 @@ export async function preRegisterImageAssetsForImport(
     status: "ready";
     createdBy: string;
   }> = [];
-  for (const objectKey of objectKeys) {
-    const validated = await downloadAndValidateImageAsset(objectKey);
-    if (!validated) {
-      continue;
-    }
+  for (const validated of validatedList) {
+    if (!validated) continue;
     rows.push({
       workspaceId,
       uploadedForNoteId: null,
@@ -118,8 +140,12 @@ export async function preRegisterImageAssetsForImport(
   // note_image_assets FORCE RLS（0046）：ailearn_api 无 BYPASSRLS，INSERT 必须
   // 带 workspace 上下文——包一个短事务设置 app.workspace_id（与
   // withWorkspaceTransaction 同语义；下载/校验已在前方事务外完成）。
+  // N#7-8: 单事务内 500/批分块 INSERT，避免大行集突破绑定参数上限。
   await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT set_config('app.workspace_id', ${workspaceId}, true)`);
-    await tx.insert(noteImageAssets).values(rows).onConflictDoNothing();
+    for (let i = 0; i < rows.length; i += INSERT_BATCH) {
+      const chunk = rows.slice(i, i + INSERT_BATCH);
+      await tx.insert(noteImageAssets).values(chunk).onConflictDoNothing();
+    }
   });
 }

@@ -18,14 +18,33 @@ import { useIsOwner } from "@/lib/use-current-user";
 import { MemberNotice } from "@/components/settings/MemberNotice";
 import { relativeTime } from "@/lib/format";
 
+// F#7（第六轮 🟠3）：Intl 构造器提升为模块级单例——避免每行每渲染重建。
+const noteDateFmt = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+
 function formatNoteDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "时间未知";
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  }).format(date);
+  return noteDateFmt.format(date);
+}
+
+// F#7（第六轮 🟡9）：行内 toLocaleString 用模块单例替换。
+const noteFullFmt = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function formatNoteFull(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return noteFullFmt.format(date);
 }
 
 /**
@@ -434,9 +453,12 @@ export default function NotesIndex() {
   // 搜索与筛选只作用于已加载 items
   // 2026-08-11（性能专项）：filtered/recentCount 由每次渲染重算改为 useMemo——
   // 搜索输入每 keystroke 触发全量 items 过滤重建（cards 页同场景已 memo）。
+  // F11（round4）：`dayAgo`（24h 回看截止）用空依赖 useMemo 取稳定值——不再
+  // 每次渲染新建一个毫秒级不同的数导致 recentCount/filtered 的 memo 每渲失效
+  //（"recent" 是无须秒级精确的会话级回看窗口，挂载期固定即可）。
+  const dayAgo = useMemo(() => Date.now() - 24 * 60 * 60 * 1000, []);
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filtered = useMemo(() => {
-    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
     return (items ?? []).filter((note) => {
       const matchesQuery =
         !normalizedQuery ||
@@ -450,11 +472,10 @@ export default function NotesIndex() {
           return true;
       }
     });
-  }, [filter, items, normalizedQuery]);
+  }, [filter, items, normalizedQuery, dayAgo]);
 
   const loadedCount = items?.length ?? 0;
   const filteredCount = filtered.length;
-  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
   const recentCount = useMemo(
     () => items?.filter((n) => new Date(n.updatedAt).getTime() > dayAgo).length ?? 0,
     [items, dayAgo],
@@ -462,8 +483,12 @@ export default function NotesIndex() {
   const hasQuery = normalizedQuery.length > 0;
   const hasFilter = filter !== "all";
   const hasLocalSelection = hasQuery || hasFilter;
-  const confirmDeleteNoteTitle =
-    items?.find((note) => note.id === confirmDeleteId)?.title || "无标题笔记";
+  // F#7（第六轮 🟡5）：短路 null——绝大多数渲染 confirmDeleteId 为 null，
+  // 避免每渲染对全数组 find。
+  const confirmDeleteNoteTitle = useMemo(() => {
+    if (!confirmDeleteId) return "无标题笔记";
+    return items?.find((note) => note.id === confirmDeleteId)?.title || "无标题笔记";
+  }, [items, confirmDeleteId]);
 
   function clearNoteSearch() {
     setQuery("");
@@ -1076,7 +1101,7 @@ export default function NotesIndex() {
                               <small>最后更新</small>
                               <time
                                 dateTime={note.updatedAt}
-                                title={new Date(note.updatedAt).toLocaleString()}
+                                title={formatNoteFull(note.updatedAt)}
                               >
                                 {relativeTime(note.updatedAt)}
                               </time>
@@ -1086,7 +1111,7 @@ export default function NotesIndex() {
                               <small>创建日期</small>
                               <time
                                 dateTime={note.createdAt}
-                                title={new Date(note.createdAt).toLocaleString()}
+                                title={formatNoteFull(note.createdAt)}
                               >
                                 {formatNoteDate(note.createdAt)}
                               </time>

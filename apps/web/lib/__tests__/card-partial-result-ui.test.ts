@@ -105,14 +105,10 @@ describe("partial learning card presentation", () => {
     );
   });
 
-  it("labels archived partial cards as partial results in the library", () => {
-    assert.ok(listSource.includes('label: "部分结果"'));
-    assert.ok(listSource.includes('"cards-card--partial"'));
-    assert.ok(listSource.includes("查看部分结果"));
-    assert.ok(
-      listSource.includes(
-        "不会替换完整学习卡，不能用于验证或复习。",
-      ),
-    );
+  it("places partial results in a truthful check-first state in the library", () => {
+    assert.ok(listSource.includes("readPartialCardCoverageWarning(card.schemaJson)"));
+    assert.ok(listSource.includes('data-state={presentation.state}'));
+    assert.ok(listSource.includes("请先检查内容"));
+    assert.ok(listSource.includes('data-ui="learning-objective-primary-action"'));
   });
 });

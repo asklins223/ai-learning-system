@@ -50,6 +50,7 @@ import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
 import { downloadAndValidateImageAsset } from "../../lib/image-asset.ts";
 import { isStorageConfigured } from "../../lib/object-storage.ts";
+import { hookJourneyEntityCreated } from "../companion-journey/journey-hook.ts";
 import type { NoteCreateInput, NoteUpdateInput, NoteBlock } from "./schema.ts";
 
 /**
@@ -461,10 +462,19 @@ async function deleteSearchDocuments(
     objectIds.push(document.objectId);
     objectIdsByType.set(document.objectType, objectIds);
   }
-  const documentConditions = Array.from(objectIdsByType, ([objectType, objectIds]) => and(
-    eq(searchDocuments.objectType, objectType),
-    inArray(searchDocuments.objectId, objectIds),
-  ));
+  // Y4（round-3 审计）：原来每 type 一条 inArray(objectId, allIds)——某类批量删除
+  // （数万条）可能超 postgres-js 参数上限。现按 500/批把每类拆成多条
+  // `type = ? AND objectId IN (chunk)`，OR 连接，保持单条 DELETE 语义。
+  const CHUNK = 500;
+  const documentConditions: ReturnType<typeof and>[] = [];
+  for (const [objectType, objectIds] of objectIdsByType) {
+    for (let i = 0; i < objectIds.length; i += CHUNK) {
+      documentConditions.push(and(
+        eq(searchDocuments.objectType, objectType),
+        inArray(searchDocuments.objectId, objectIds.slice(i, i + CHUNK)),
+      ));
+    }
+  }
 
   try {
     await executor.transaction(async (savepoint) => {
@@ -507,6 +517,12 @@ async function createNoteTx(
       createdBy: userId,
     })
     .returning();
+
+  // P6 Journey：note 里程碑（同事务原子；无 active Journey 零开销）。
+  await hookJourneyEntityCreated(tx, { workspaceId, userId }, {
+    eventType: "note.created",
+    entityId: row.id,
+  });
 
   const [version] = await tx
     .insert(noteVersions)
@@ -1023,13 +1039,17 @@ export async function deleteNote(
     // 归档 active 卡片（使用 deletedAt 时间戳，供恢复时精确匹配）
     // CONC-10-edge: 同时设置专用标记列 archivedByNoteDeletionAt，
     // 不受其他操作（如 card/service archiveCard 覆盖 updatedAt）的影响。
-    await executor
-      .update(learningCards)
-      .set({ status: CardStatus.ARCHIVED, updatedAt: deletedAt, archivedByNoteDeletionAt: deletedAt })
-      .where(and(
-        inArray(learningCards.noteVersionId, versionIds),
-        eq(learningCards.status, CardStatus.ACTIVE),
-      ));
+    // N#7-13: versionIds 分批归档，避免大数组 IN 参数越界。
+    for (let i = 0; i < versionIds.length; i += 500) {
+      const chunk = versionIds.slice(i, i + 500);
+      await executor
+        .update(learningCards)
+        .set({ status: CardStatus.ARCHIVED, updatedAt: deletedAt, archivedByNoteDeletionAt: deletedAt })
+        .where(and(
+          inArray(learningCards.noteVersionId, chunk),
+          eq(learningCards.status, CardStatus.ACTIVE),
+        ));
+    }
 
     // CONC-08: 只取消被归档卡片的 pending 复习计划，与 restoreDeletedNote
     // 的恢复范围保持对称。查询刚被归档的卡片（archivedByNoteDeletionAt === deletedAt），
@@ -1211,9 +1231,13 @@ export async function restoreDeletedNote(
   if (result?.restoredCards?.length) {
     const cardIds = result.restoredCards.map((c) => c.id);
     // Batch query all keyPoints for restored cards in one query
-    const allKeyPoints = await executor.query.cardKeyPoints.findMany({
-      where: inArray(cardKeyPoints.cardId, cardIds),
-    });
+    // Y4（round-3 审计）：批量恢复大量卡片时裸 inArray 可能超参数上限，分块查询。
+    const allKeyPoints = await chunkedInArraySelect<typeof cardKeyPoints.$inferSelect>(
+      (chunk) => executor.query.cardKeyPoints.findMany({
+        where: inArray(cardKeyPoints.cardId, chunk),
+      }),
+      cardIds,
+    );
     // Group keyPoints by cardId
     const keyPointsByCard = new Map<string, typeof allKeyPoints>();
     for (const kp of allKeyPoints) {
@@ -1437,23 +1461,35 @@ export async function physicalDeleteNote(
     }
 
     // 11+12: 并行执行 ai_artifacts 删除（依赖步骤 9 结果）和 jobs 删除（独立）
-    // 12. 合并三组 jobs 删除条件为单次 OR 查询，减少数据库往返
-    const jobPayloadConditions: ReturnType<typeof or>[] = [];
+    // 12. 删除关联的 jobs —— N#7-13：JSONB payload->>'cardId'/'oldCardId'/'noteVersionId'/
+    //    'keyPointId' inArray 逐一 500/批分块，避免大工作区突破 postgres-js ~65535 绑定参数上限
+    //    （同文件 deleteSearchDocuments/chunkedInArray* 均已分块）。
+    const jobPayloadKeys: Array<{ ids: string[]; key: string }> = [];
     if (cardIds.length > 0) {
-      jobPayloadConditions.push(or(
-        inArray(sql<string>`${jobs.payload}->>'cardId'`, cardIds),
-        inArray(sql<string>`${jobs.payload}->>'oldCardId'`, cardIds),
-      ) as ReturnType<typeof or>);
+      const uniqCardIds = Array.from(new Set(cardIds));
+      jobPayloadKeys.push({ ids: uniqCardIds, key: "cardId" });
+      jobPayloadKeys.push({ ids: uniqCardIds, key: "oldCardId" });
     }
     if (versionIds.length > 0) {
-      jobPayloadConditions.push(
-        inArray(sql<string>`${jobs.payload}->>'noteVersionId'`, versionIds) as ReturnType<typeof or>,
-      );
+      jobPayloadKeys.push({ ids: versionIds, key: "noteVersionId" });
     }
     if (kpIds.length > 0) {
-      jobPayloadConditions.push(
-        inArray(sql<string>`${jobs.payload}->>'keyPointId'`, kpIds) as ReturnType<typeof or>,
-      );
+      jobPayloadKeys.push({ ids: kpIds, key: "keyPointId" });
+    }
+    const deleteJobPromises: Promise<unknown>[] = [];
+    for (const cond of jobPayloadKeys) {
+      for (let i = 0; i < cond.ids.length; i += 500) {
+        const chunk = cond.ids.slice(i, i + 500);
+        deleteJobPromises.push(
+          tx.delete(jobs).where(and(
+            eq(jobs.workspaceId, workspaceId),
+            inArray(sql<string>`${jobs.payload}->>'${sql.raw(cond.key)}'`, chunk),
+          )),
+        );
+      }
+    }
+    if (deleteJobPromises.length === 0) {
+      deleteJobPromises.push(Promise.resolve());
     }
 
     await Promise.all([
@@ -1462,13 +1498,8 @@ export async function physicalDeleteNote(
       cardIds.length > 0
         ? deleteCardArtifactsCascade(tx, cardIds, validationArtifactIds)
         : Promise.resolve(),
-      // 12. 删除关联的 jobs（合并三组条件为单次查询）
-      jobPayloadConditions.length > 0
-        ? tx.delete(jobs).where(and(
-            eq(jobs.workspaceId, workspaceId),
-            or(...jobPayloadConditions),
-          ))
-        : Promise.resolve(),
+      // 12. 删除关联的 jobs（分块）
+      Promise.all(deleteJobPromises),
     ]);
 
     // 13. 删除 learning_cards

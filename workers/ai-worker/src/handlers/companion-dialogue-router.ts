@@ -23,16 +23,8 @@ import { randomUUID, createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { AIProvider } from "../lib/ai-provider.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
-import {
-  COMPANION_ACTION_LEXEMES,
-  COMPANION_ACTION_ROUTER_OPTIONS,
-  COMPANION_ACTION_ROUTER_V1_PROMPT,
-  COMPANION_ACTION_ROUTER_V1_SHA256,
-  canonicalJsonV1,
-  companionActionClassifierInputV1Schema,
-  companionActionIntentV1Schema,
-  type CompanionActionIntentV1,
-} from "@ailearn/shared";
+import { COMPANION_ACTION_LEXEMES, COMPANION_ACTION_ROUTER_OPTIONS, COMPANION_ACTION_ROUTER_V1_PROMPT, COMPANION_ACTION_ROUTER_V1_SHA256, companionActionClassifierInputV1Schema, companionActionIntentV1Schema, type CompanionActionIntentV1,  } from "@ailearn/shared";
+import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 
 function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");

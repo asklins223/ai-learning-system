@@ -53,20 +53,10 @@ import {
   QuestionStatus,
   JobStatus,
 } from "@ailearn/shared";
-import {
-  reduceRubric,
-  toReviewOutcome,
-  calculateSchedule,
-  computeExposureFingerprint,
-  computeSourceFingerprint,
-  computeUnassistedEligibleAfter,
-  isUnassistedEligible,
-  RUBRIC_REDUCER_VERSION,
-  computeFSRSShadowDecision,
-  isFSRSShadowEnabled,
-  type FSRSShadowInput,
-  type RubricItemInput,
-} from "@ailearn/shared";
+import { reduceRubric, toReviewOutcome, calculateSchedule, RUBRIC_REDUCER_VERSION, computeFSRSShadowDecision, isFSRSShadowEnabled, type FSRSShadowInput, type RubricItemInput } from "@ailearn/shared";
+import { computeExposureFingerprint, isUnassistedEligible } from "@ailearn/shared/fingerprint";
+import { computeSourceFingerprint } from "@ailearn/shared/fingerprint";
+import { computeUnassistedEligibleAfter } from "@ailearn/shared/fingerprint";
 import {
   effectiveAlignmentForUser,
   getUserOverrideMap,
@@ -497,6 +487,7 @@ async function keyPointHasHardEvidence(
   const userOverrideMap = await getUserOverrideMap(
     userId,
     keyPointEvidences.map((evidence) => evidence.id),
+    tx, // N#7-3: 复用事务连接
   );
   return keyPointEvidences.some(
     (evidence) =>
@@ -566,6 +557,7 @@ async function computeSourceFingerprintFromDb(
   const userOverrideMap = await getUserOverrideMap(
     userId,
     keyPointEvidences.map((evidence) => evidence.id),
+    tx, // N#7-3: 复用事务连接，消除第二连接 + RLS 硬化
   );
 
   const evidenceParts = keyPointEvidences
@@ -637,6 +629,7 @@ async function computeExposureFingerprintFromDb(
   const userOverrideMap = await getUserOverrideMap(
     userId,
     keyPointEvidences.map((evidence) => evidence.id),
+    tx, // N#7-3: 复用事务连接
   );
 
   const evidenceParts = keyPointEvidences

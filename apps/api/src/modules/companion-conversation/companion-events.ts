@@ -22,6 +22,10 @@ import { logger } from "../../lib/logger.ts";
 // 可各自打满 3/10 上限），上线多实例前必须换共享存储（Redis/Postgres）。
 const SLOTS_PER_CONVERSATION = 3;
 const SLOTS_PER_USER = 10;
+// F10（round-4）：每次 replay/轮询最多加载的事件条数。SSE 以 cursor 递增在
+// 后续 poll（2.5s）与 replay flush 续读，validate 已确保窗口连续（窗口计数校验），
+// LIMIT 仅约束每连接每 tick 的内存/DB 体积，不丢事件（超出的下轮续读）。
+const COMPANION_EVENT_BATCH = 500;
 const conversationSlots = new Map<string, number>();
 const userSlots = new Map<string, number>();
 
@@ -152,7 +156,9 @@ async function loadCompanionEvents(
         gt(companionStreamEvents.seq, afterSeq),
         gt(companionStreamEvents.expiresAt, new Date()),
       ))
-      .orderBy(companionStreamEvents.seq);
+      .orderBy(companionStreamEvents.seq)
+      // F10：LIMIT 分批续读（cursor 递增机制保证无事件丢失，见常量注释）。
+      .limit(COMPANION_EVENT_BATCH);
     return rows as unknown as StreamEventRow[];
   });
 }
@@ -269,6 +275,13 @@ export async function openCompanionEventStream(args: {
   let closed = false;
   let cursor = resolved.after;
   let pumping = false;
+  // F10（round-5 审计）：live 阶段 TTL 清理仍可能删除窗口中间的 stream_event 行。
+  // 打开时的 validateCompanionCursor 只校验开局窗口连续；live 中若中间行被 TTL 删除，
+  // 后续 pump 的 seq>cursor 续读会产生静默缺口。这里在每次 pump 校验 seq 连续性，
+  // 发现缺口即置 gapDetected 并关闭流让客户端断开重连——重连会再走 validate，
+  // 中途缺口会命中窗口计数校验返回 CURSOR_EXPIRED → 客户端走 snapshot 恢复
+  // （即既有 §7.4 的缺口降级路径）。保持简单：不在此处自行重建，交给重连校验闭环。
+  let gapDetected = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -289,13 +302,36 @@ export async function openCompanionEventStream(args: {
   args.writer.onAbort(dispose);
 
   async function pump(): Promise<void> {
-    if (pumping || closed) return;
+    if (pumping || closed || gapDetected) return;
     pumping = true;
     try {
       const events = await loadCompanionEvents(args.conversationId, args.workspaceId, args.userId, cursor);
-      for (const event of events) {
-        args.writer.write(formatCompanionSse(event));
-        cursor = Number(event.seq);
+      if (events.length > 0) {
+        // F10（round-5）+ R#6-4：live 阶段窗口连续性校验——seq 严格自增。
+        // 除校验首个事件必须恰为 cursor+1 外，还断言批内相邻事件 seq 严格 +1，
+        // 以捕获「批首通过但批中被 TTL 清除」的中间缺口（返回 [101,102,104] 之类的场景）。
+        // 任一缺口 → 置 gapDetected 并关闭流，让客户端以 Last-Event-ID 重连走 validate，
+        // 缺口作为 CURSOR_EXPIRED 触发 snapshot 恢复，避免静默拼缺。
+        let seqGap = Number(events[0].seq) !== cursor + 1;
+        if (!seqGap) {
+          for (let i = 1; i < events.length; i++) {
+            if (Number(events[i].seq) !== Number(events[i - 1].seq) + 1) {
+              seqGap = true;
+              break;
+            }
+          }
+        }
+        if (seqGap) {
+          gapDetected = true;
+          // 关闭流（dispose 幂等）；客户端重连时校验/409 闭环接管缺口降级。
+          dispose();
+          return;
+        }
+        // 连续窗口才推流并推进 cursor。
+        for (const event of events) {
+          args.writer.write(formatCompanionSse(event));
+          cursor = Number(event.seq);
+        }
       }
     } catch (err) {
       // poll 失败静默（下轮重试）；NOTIFY/poll 均为 hint，SSE 不因瞬时错误断开。

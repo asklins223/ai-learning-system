@@ -18,7 +18,7 @@ import {
   isRunInPlannedBucket,
 } from "@ailearn/shared";
 import { logger } from "../lib/logger.ts";
-import { db } from "../db.ts";
+import { db, withWorkerWorkspaceTransaction } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import {
   assertJobLease,
@@ -319,27 +319,38 @@ export async function executePreparePhase(
   // QUAL-17 修复：将 190+ 行持久化逻辑提取到 agent/evidence-persist.ts，
   // 降低主 handler 复杂度，使逻辑可独立测试。
   // 幂等设计：重复执行不会报错（onConflictDoNothing + 回查已有 span）。
+  // RLS：note_evidence_spans / bundles / embeddings 全部受 workspace 隔离
+  // 策略保护，必须在 withWorkerWorkspaceTransaction 的同一连接上执行
+  // （全局 db 池的其它连接没有 app.workspace_id，插入会被 RLS 拒绝）。
   const now = new Date();
-  const refMap = await persistEvidenceAndBundles({
-    workspaceId: job.workspaceId,
-    runId: payload.generationRunId,
-    noteVersionId: runContext.noteVersionId,
-    evidence: prepareResult.evidence,
-    bundlePlan: prepareResult.bundlePlan,
-    now,
-  });
+  const refMap = await withWorkerWorkspaceTransaction(
+    { workspaceId: job.workspaceId, userId: job.requestedBy ?? null },
+    async (tx) => persistEvidenceAndBundles({
+      workspaceId: job.workspaceId,
+      runId: payload.generationRunId,
+      noteVersionId: runContext.noteVersionId,
+      evidence: prepareResult.evidence,
+      bundlePlan: prepareResult.bundlePlan,
+      now,
+      client: tx,
+    }),
+  );
 
   // G8 派生索引：为 text_span evidence 生成 embedding（SiliconFlow bge-m3）。
   // 同步生成，失败不阻断 run（embedding 缺失只影响检索质量，不影响 coverage/发布）。
-  await persistEvidenceEmbeddings({
-    workspaceId: job.workspaceId,
-    runId: payload.generationRunId,
-    noteVersionId: runContext.noteVersionId,
-    evidence: prepareResult.evidence,
-    refIdToSpanId: refMap.refIdToSpanId,
-    provider: await createEmbeddingProvider(job.requestedBy ?? undefined, govCtxForVision),
-    now,
-  });
+  await withWorkerWorkspaceTransaction(
+    { workspaceId: job.workspaceId, userId: job.requestedBy ?? null },
+    async (tx) => persistEvidenceEmbeddings({
+      workspaceId: job.workspaceId,
+      runId: payload.generationRunId,
+      noteVersionId: runContext.noteVersionId,
+      evidence: prepareResult.evidence,
+      refIdToSpanId: refMap.refIdToSpanId,
+      provider: await createEmbeddingProvider(job.requestedBy ?? undefined, govCtxForVision),
+      now,
+      client: tx,
+    }),
+  );
 
   // 更新 run 和 unit
   await withJobTransaction(job, async (tx) => {

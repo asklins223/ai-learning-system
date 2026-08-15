@@ -1,8 +1,8 @@
-import type { DesktopPetWindowStateV1 } from "@ailearn/shared";
-import type { AllowedMainRouteV1 } from "@ailearn/shared";
-import type { CompanionConversationSnapshotV1 } from "@ailearn/shared";
-import type { CompanionCharacterCueV1 } from "@ailearn/shared";
-import type { CharacterCueV1 } from "@ailearn/shared";
+import type { DesktopPetWindowStateV1 } from "@ailearn/shared/desktop-pet-contracts";
+import type { AllowedMainRouteV1 } from "@ailearn/shared/desktop-pet-contracts";
+import type { CompanionConversationSnapshotV1 } from "@ailearn/shared/companion-conversation-contracts";
+import type { CompanionCharacterCueV1 } from "@ailearn/shared/companion-conversation-contracts";
+import type { CharacterCueV1 } from "@ailearn/shared/companion-character-contracts";
 
 /**
  * P1 subset of the seven-domain runtime (02 §1–§5).
@@ -236,7 +236,7 @@ export type PetRuntimeEventV1 =  | { type: "bootstrap.authenticated"; userId: st
       generation: number;
       accountEpoch?: number;
       seq: number;
-      segment: { ordinal: number; segmentId: string; text: string };
+      segment: { ordinal: number; segmentId: string; text: string; emotion?: string };
     }
   | {
       type: "voice.playback_started";
@@ -425,46 +425,54 @@ export function deriveCharacterPresentation(
   return "idle";
 }
 
-// ─── §9.3/§9.4 V2 聚合投影类型（2026-08-15 恢复：web tracked 回退丢失，
-// pet-presentation-v2 按此投影）。V2 非第二真相源，仅供展示层消费。 ──────
+// ─── 方案 16 §9.3 PetRuntimeV2 正交状态（V1 域 + 会话外域聚合投影） ────────
 
-/** Journey 状态投影（PetJourneyLive 注入；默认 not_offered）。 */
+export type PetAttentionV2 = "passive" | "cue_pending" | "cue_visible" | "engaged" | "dnd";
+export type PetTaskV2 =
+  | "none"
+  | "attached"
+  | "assisting"
+  | "proposing"
+  | "confirming"
+  | "executing"
+  | "reporting";
 export type PetJourneyV2 =
   | "not_offered"
   | "offered"
   | "active"
-  | "deferred"
+  | "paused"
+  | "skipped"
   | "completed"
-  | "skipped";
+  | "recoverable_error";
+export type PetMemorySyncV2 = "idle" | "reading" | "writing" | "failed";
 
-/** §9.3 正交状态投影（生命周期 × 注意力 × 任务）。 */
+/**
+ * §9.3 正交状态：渲染优先级 安全/off > 用户输入或语音 > 当前回答 > 操作确认 >
+ * 执行结果 > 主动提示 > idle。由 V1 runtime 状态 + Journey/Delivery 外部信号
+ * 投影得到（非第二真相源）。
+ */
 export interface PetRuntimeV2 {
-  lifecycle: "boot" | "auth" | "fault" | "off" | "suspended" | "ready";
-  attention: "dnd" | "engaged" | "cue_visible" | "cue_pending" | "passive";
-  task: "confirming" | "executing" | "reporting" | "assisting" | "proposing" | "none";
+  lifecycle: "boot" | "auth" | "onboarding" | "ready" | "suspended" | "off" | "fault";
+  attention: PetAttentionV2;
+  task: PetTaskV2;
   turn: ConversationTurnStateV1;
   journey: PetJourneyV2;
-  activeContext: unknown;
+  activeContext: unknown | null;
   proactiveQueue: unknown[];
-  memorySync: "idle" | "syncing" | "synced" | "error";
+  memorySync: PetMemorySyncV2;
 }
 
-/** §9.4 展示投影（choices 无泄题语义；dismissPolicy 驱动气泡关闭策略）。 */
-export type PetPresentationV2 =
-  | {
-      messageId: string;
-      speechMode: "text_only";
-      proposedAction: { proposalId: string; impactSummary: string };
-      dismissPolicy: "explicit";
-    }
-  | {
-      messageId: string;
-      speechMode: "text_only";
-      progressCue: { state: "processing" | "ready" | "failed" };
-      dismissPolicy: "persistent_until_result" | "explicit" | "auto";
-    }
-  | {
-      messageId: string;
-      speechMode: "text_only" | "speak_message";
-      dismissPolicy: "auto";
-    };
+/** §9.4 PetPresentationV2 气泡协议（messageId 引用同一响应中已持久化的 AssistantMessage）。 */
+export type PetPresentationChoiceV2 =
+  | { kind: "reply"; choiceId: string; label: string; replyText: string }
+  | { kind: "proposal"; choiceId: string; label: string; proposalId: string };
+
+export interface PetPresentationV2 {
+  messageId: string;
+  speechMode: "text_only" | "speak_message";
+  choices?: PetPresentationChoiceV2[];
+  proposedAction?: { proposalId: string; impactSummary: string };
+  progressCue?: { state: "waiting" | "processing" | "ready" | "failed" };
+  contextRef?: { contextId: string; revision: string };
+  dismissPolicy: "auto" | "explicit" | "persistent_until_result";
+}

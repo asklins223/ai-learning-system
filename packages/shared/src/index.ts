@@ -6,7 +6,9 @@ export * from "./review-attempt.ts";
 export * from "./rubric-reducer.ts";
 export * from "./scheduling-policy-v2.ts";
 export * from "./scheduling-unified.ts";
-export * from "./fingerprint.ts";
+// 2026-08-13：fingerprint/content-hash/published-learning-asset-contract 为
+// 服务端专用（node: 依赖），改从子路径 import，不再经 index 全量导出
+//（客户端 bundle 加载会触发 node: 缺失崩溃）。
 export * from "./question-safety.ts";
 export * from "./deterministic-question.ts";
 export * from "./fsrs-shadow.ts";
@@ -18,15 +20,33 @@ export * from "./output-sanitizer.ts";
 export * from "./card-agent-contracts.ts";
 export * from "./provider-capabilities.ts";
 export * from "./provider-registry.ts";
-export * from "./task-router.ts";
+// 2026-08-13（web 客户端打包修复）：task-router 依赖 platform-config-node
+// （node:fs）——服务端专用，改从 @ailearn/shared/task-router 子路径 import，
+// 不再经 index 全量导出（客户端加载会触发 node:fs 缺失崩溃）。
 export * from "./platform-config.ts";
 export * from "./companion-shell-contracts.ts";
 export * from "./auth-surface-manifest.ts";
-export * from "./published-learning-asset-contract.ts";
+export * from "./learning-session-contracts.ts";
+// 2026-08-13：LearningRun V1 统一合同（文档 16 §12 冻结）——四对象 wire
+// contract 唯一来源。旧 learning-session-contracts.ts 仍作为内部演进细节保留。
+export * from "./learning-run-contracts.ts";
+// 消歧：TrustClass 在旧/新两模块同名导出（旧文件已 re-export 自新文件，
+// 值域一致）。显式导出以消除 export * 歧义。
+export { TrustClass } from "./learning-run-contracts.ts";
+// 2026-08-13：Main ↔ Pet Bridge V2 合同（文档 16 §14 冻结）。
+export * from "./companion-bridge-contracts.ts";
+// 2026-08-13：Journey V2 合同（文档 16 §10.1 冻结）。
+export * from "./companion-journey-contracts.ts";
+// 2026-08-14：方案 20（learning-card-v2）Generation 域合同——纯 zod schema
+// + 类型（无 node: 依赖，客户端安全）。hash 计算函数走
+// @ailearn/shared/card-generation-v2-hashing 子路径（服务端专用）。
+export * from "./card-generation-v2-contracts.ts";
+// 2026-08-14：方案 20 LearningCard V2 公共合同（Public Card/Reveal/Publication）。
+export * from "./learning-card-v2-contracts.ts";
+// 2026-08-14：方案 20 LearningTargetSnapshotV2 合同（§16 Target Rebase）。
+export * from "./learning-target-v2-contracts.ts";
 export * from "./voice-artifact-contracts.ts";
 export * from "./learning-trust-contracts.ts";
-export * from "./learning-assessment.ts";
-export * from "./content-hash.ts";
 export * from "./scene-contracts.ts";
 // 2026-08-12（契约收口）：完整导出 silent-proof-profile-contracts（此前仅
 // 4 个类型别名显式导出，ProfileStatus/EligibilityStatus 等契约符号 api 侧
@@ -71,35 +91,12 @@ export * from "./companion-asr-contracts.ts";
 export * from "./companion-character-contracts.ts";
 export * from "./companion-emotion-classifier.ts";
 export * from "./companion-conversation-contracts.ts";
-// §10.1/§11.4（2026-08-15 接线修复）：journey/bridge 合同此前**从未从 index
-// 导出**——API 侧 journey-service/delivery-routes/context 全部 TS2305，
-// 前端契约 import 亦只能走深路径。补齐后全链类型一致。
-export * from "./companion-journey-contracts.ts";
-export * from "./companion-bridge-contracts.ts";
-// §11.4（2026-08-15 接线修复）：understanding 投影合同此前**不存在**——
-// projection-routes 的 understandingRoutePlanRequestV1Schema 值导入缺失，
-// API 加载即崩。新建后随 index 导出。
-export * from "./understanding-projection-contracts.ts";
 export * from "./companion-learning-session-contracts.ts";
 export * from "./companion-persona.ts";
-
-// ─── 方案 20 V2 导出（R35 恢复：并行会话 19:59 恢复工作区时冲掉） ─────────
-export * from "./learning-target-v2-contracts.ts";
-export * from "./learning-run-contracts.ts";
-export * from "./learning-card-v2-contracts.ts";
-export * from "./learning-assessment.ts";
-// learning-session-contracts 的 TrustClass 与 learning-run-contracts 冲突：
-// 显式导出（TrustClass 以别名提供，值/类型均由 learning-run-contracts 提供权威名）。
-// learning-session-contracts：TrustClass 与 learning-run-contracts 同名冲突，
-// 手动 re-export（值/类型分开声明，避免 export * 歧义）。
-import { CapabilityFacet as LSCapabilityFacet, TrustClass as LSTrustClass } from "./learning-session-contracts.ts";
-export const CapabilityFacet = LSCapabilityFacet;
-export type CapabilityFacet = (typeof LSCapabilityFacet)[keyof typeof LSCapabilityFacet];
-export const LearningSessionTrustClass = LSTrustClass;
-export type LearningSessionTrustClass = (typeof LSTrustClass)[keyof typeof LSTrustClass];
-export type { RubricTarget, FrozenProbeRef } from "./learning-session-contracts.ts";
-export * from "./learning-trust-contracts.ts";
-export * from "./card-generation-v2-contracts.ts";
-export * from "./card-generation-v2-hashing.ts";
 export * from "./card-quality-v2-contracts.ts";
-export * from "./published-learning-asset-contract.ts";
+export * from "./voice-expression-tags.ts";
+
+export type * from "./published-learning-asset-contract.ts";
+export type * from "./fingerprint.ts";
+export type * from "./content-hash.ts";
+export type * from "./learning-assessment.ts";

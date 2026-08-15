@@ -14,7 +14,9 @@ const context = await browser.newContext({ viewport: { width: 900, height: 700 }
 
 // 拦截 Live2D vendor 脚本 → 加载失败
 await context.route("**/live2d-dev/vendor/*", (route) => route.abort());
-await context.route("**/live2d-dev/mao-pro/runtime/mao_pro.model3.json", (route) => route.abort());
+// F3：live2d-dev/mao-pro 死副本已删除；这里改为拦截运行时实际加载的
+// live2d-v1 模型路径，确保 vendor 失败锚点有效（运行时模型走 live2d-v1）。
+await context.route("**/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.model3.json", (route) => route.abort());
 
 const loginPage = await context.newPage();
 await loginPage.goto("http://127.0.0.1:3010/login", { waitUntil: "domcontentloaded" });

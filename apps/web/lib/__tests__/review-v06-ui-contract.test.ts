@@ -12,10 +12,6 @@ const reviewSource = readFileSync(
   resolve(WEB_ROOT, "app/(workspace)/(default)/review/page.tsx"),
   "utf-8",
 );
-const focusSource = readFileSync(
-  resolve(WEB_ROOT, "app/(workspace)/(focus)/review/[scheduleId]/page.tsx"),
-  "utf-8",
-);
 const reviewCss = readFileSync(
   resolve(WEB_ROOT, "app/styles/review-v06.css"),
   "utf-8",
@@ -37,8 +33,10 @@ describe("v0.6 review queue UI contract", () => {
 
   it("keeps the overview concise and avoids repeating the privacy rule in the queue header", () => {
     assert.ok(reviewSource.includes("隐藏学习内容"));
-    assert.ok(reviewSource.includes("完成后判断下一步"));
-    assert.ok(reviewSource.includes("计入理解记录"));
+    assert.ok(reviewSource.includes("随时切换方式"));
+    assert.ok(reviewSource.includes("可信结果才改排程"));
+    assert.ok(reviewSource.includes("约 1–3 分钟"));
+    assert.ok(reviewSource.includes("可直接跳过"));
     assert.ok(!reviewSource.includes("review-v06-privacy-note"));
   });
 
@@ -51,8 +49,6 @@ describe("v0.6 review queue UI contract", () => {
 
   it("uses safe error copy and a single compact metadata hand-off", () => {
     assert.ok(!reviewSource.includes("error instanceof Error"));
-    assert.ok(focusSource.includes("validation-focus-route-loading"));
-    assert.ok(!focusSource.includes('SessionProgressStage sessionKind="review" stage="loading"'));
     assert.match(
       reviewCss,
       /\.review-focus-route-loading::before\s*\{\s*display: none;/,

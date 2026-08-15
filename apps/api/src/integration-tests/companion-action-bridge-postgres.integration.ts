@@ -10,7 +10,8 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 import { companionGroundedTutorGrantV1Schema } from "@ailearn/shared";
-import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared";
+import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
+import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
 const sql = postgres(CONN, { max: 2 });
@@ -160,7 +161,7 @@ test("P5 §6.7：menu proposal create 原子（双消息 + proposal pending + ac
     assert.equal(rows.events.length, 1, "action.proposed event");
     assert.equal(rows.proposals[0].status, "pending");
 
-    // revision 不匹配 → 409 ACTION_STALE
+    // revision 不匹配 → 409 CONTEXT_STALE（与 payload 不匹配的 ACTION_STALE 区分）
     await assert.rejects(
       createCompanionMenuProposal({
         workspaceId, userId,
@@ -172,7 +173,7 @@ test("P5 §6.7：menu proposal create 原子（双消息 + proposal pending + ac
         },
         idempotencyKey: randomUUID(),
       }),
-      (err: { code?: string }) => err.code === "ACTION_STALE",
+      (err: { code?: string }) => err.code === "CONTEXT_STALE",
     );
   } finally {
     await cleanup();

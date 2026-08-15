@@ -112,7 +112,6 @@ export {
   type SearchDriftResult,
   type StatsOverview,
   type NoteVersionSummary,
-  type UnderstandingGraphResponse,
   type BenchmarkKeyPoint,
   type BenchmarkNoteResult,
   type BenchmarkReport,
@@ -185,7 +184,6 @@ import type {
   ReviewAttemptStartResult,
   ReviewAttemptSubmitResult,
   ReviewAttemptLaterResult,
-  UnderstandingGraphResponse,
 } from "./api-types";
 
 import {
@@ -635,11 +633,6 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   // 直接请求网络），避免 "anon" 占位键与真实 workspaceId 键并存的双键孤儿缓存。
   // key 仍保留 |ws= 格式；仅当 scope 不可达时缓存不可用，不改变命中/写语义。
   // F#7（第六轮 🟠1）：GET 增加通用 in-flight 去重（scope-null 也生效）。
-  // 第九轮 🟡A-1-handle（文档化边界）：getCacheUsable 在 request 入口按当时
-  // wsScope 冻结一次。若入口时 getMe 未解析（scope=null → false），而借用方在
-  // await 首发 promise 期间 scope 才解析，借用方仍按入口快照不补写——残余窄
-  // 冷窗口（getMe 通常先于业务 GET 解析，命中概率极低）。保持现状；如需彻底
-  // 消除，可在 resolve 后重算一次 wsScope/cacheKey 再补写。
   const wsScope = currentWorkspaceCacheScope();
   const cacheKey = `${method} ${path} |ws=${wsScope ?? "anon"}`;
   const getCacheUsable = method === "GET" && requestCacheEnabled && wsScope !== null;
@@ -667,10 +660,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       // 发起、而借用方此刻 scope 已解析，补写能消除「冷缓存窗口被首发者
       // scope 未就绪吞掉」的边界。保持 abort 语义：借用方 abort 不 abort
       // 首发请求，resolve 如期返回数据（沿用既有语义）。
-      const borrowedGen = requestCacheGeneration;
       const borrowed = await existing.promise as Promise<T>;
-      // 借用方在 await 期间若发生失效（代际 +1），同样不回填旧数据。
-      if (getCacheUsable && borrowedGen === requestCacheGeneration) {
+      const gen = requestCacheGeneration;
+      if (getCacheUsable && gen === requestCacheGeneration) {
         cacheSetGet(cacheKey, Date.now(), borrowed);
       }
       return borrowed;
@@ -1142,10 +1134,6 @@ importMarkdown: (items: MarkdownImportApiItem[], importId?: string) =>
   importMarkdownInBatches(items, importId),
 
   /* understanding (V0.3) */
-  // 2026-08-15（接线修复）：旧 reader 客户端方法缺失——服务端 GET /graph
-  // 完整存在，graph 页一直调用不存在的 api.getUnderstandingGraph（运行时
-  // TypeError → 星图永远 error 态）。补桥。
-  getUnderstandingGraph: () => request<UnderstandingGraphResponse>("/graph"),
   listUnderstandingStates: (params?: { state?: string }) => {
     const qs = params
       ? "?" + new URLSearchParams(
@@ -1154,70 +1142,6 @@ importMarkdown: (items: MarkdownImportApiItem[], importId?: string) =>
       : "";
     return request<{ items: UnderstandingState[] }>(`/understanding/states${qs}`);
   },
-  /* P5 学习会话（2026-08-15 恢复：web tracked 回退丢失的客户端方法，
-     服务端端点全部存在——POST /learning-sessions、GET/POST
-     /learning-sessions/:id、answer/assess/end、/companion/learning-context、
-     context-grant）。 */
-  createLearningSession: (input: {
-    origin: string;
-    keyPointId: string;
-    intent?: string;
-  }, signal?: AbortSignal) =>
-    request("/learning-sessions", {
-      method: "POST",
-      body: JSON.stringify(input),
-      signal,
-    }),
-  getLearningSession: (sessionId: string, signal?: AbortSignal) =>
-    request(`/learning-sessions/${encodeURIComponent(sessionId)}`, { signal }),
-  endLearningSession: (sessionId: string, signal?: AbortSignal) =>
-    request(`/learning-sessions/${encodeURIComponent(sessionId)}/end`, {
-      method: "POST",
-      signal,
-    }),
-  submitLearningAnswer: (
-    sessionId: string,
-    episodeId: string,
-    body: { modality: "text_or_mixed" | "voice"; text: string },
-    signal?: AbortSignal,
-  ) =>
-    request(`/learning-sessions/${encodeURIComponent(sessionId)}/episodes/${encodeURIComponent(episodeId)}/answer`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      signal,
-    }),
-  assessLearningEpisode: (
-    sessionId: string,
-    episodeId: string,
-    artifactId: string,
-    signal?: AbortSignal,
-  ) =>
-    request(`/learning-sessions/${encodeURIComponent(sessionId)}/episodes/${encodeURIComponent(episodeId)}/assess`, {
-      method: "POST",
-      body: JSON.stringify({ artifactId }),
-      signal,
-    }),
-  getCompanionLearningSessionContext: (
-    sessionId: string,
-    episodeId?: string,
-    signal?: AbortSignal,
-  ) =>
-    request(`/companion/learning-context?sessionId=${encodeURIComponent(sessionId)}${episodeId ? `&episodeId=${encodeURIComponent(episodeId)}` : ""}`, { signal }),
-  createCompanionContextGrant: (
-    sessionId: string,
-    body: {
-      version: 1;
-      pageInstanceId: string;
-      episodeId: string;
-      contextRevision: string;
-    },
-    signal?: AbortSignal,
-  ) =>
-    request(`/companion/sessions/${encodeURIComponent(sessionId)}/context-grant`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      signal,
-    }),
   /* P7：Understanding Projection V2（文档 16 §15）。 */
   getUnderstandingProjection: (
     params: { lens?: string; targetKeyPointId?: string; minimumCheckpoint?: string; continuation?: string },

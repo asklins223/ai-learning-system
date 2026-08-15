@@ -11,7 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { sha256Utf8V1 } from "@ailearn/shared";
+import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
 import { probeAudioDurationMs } from "./ffprobe.ts";

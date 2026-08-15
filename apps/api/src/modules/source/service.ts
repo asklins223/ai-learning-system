@@ -14,6 +14,7 @@ import { segmentsToBlocks, type ParsedSegment } from "../../lib/markdown-parser.
 import type { SourceCreateInput, SourceUpdateInput } from "./schema.ts";
 import { logger } from "../../lib/logger.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
+import { hookJourneyEntityCreated } from "../companion-journey/journey-hook.ts";
 
 type SourceSearchDocument = {
   workspaceId: string;
@@ -142,6 +143,12 @@ export async function createSource(
       })
       .returning();
 
+    // P6 Journey：source 里程碑（同事务原子；无 active Journey 零开销）。
+    await hookJourneyEntityCreated(tx, { workspaceId, userId }, {
+      eventType: "source.created",
+      entityId: row.id,
+    });
+
     // 同一事务内创建 parse_source job
     await tx.insert(jobs).values({
       type: JobType.PARSE_SOURCE,
@@ -191,6 +198,9 @@ export async function listSources(
     where: and(...conditions),
     orderBy: [desc(sources.createdAt), desc(sources.id)],
     limit: limit + 1,
+    // PERF-B11 修复：列表排除大 jsonb metadata（rawContent 可达数百 KB，
+    // 见 listSourceStatuses 注释），仅详情接口返回。
+    columns: { metadata: false },
     extras: {
       cursorTimestamp: sql<string>`to_char(${sources.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_timestamp"),
     },
@@ -281,9 +291,17 @@ export async function updateSource(
   workspaceId: string,
   input: SourceUpdateInput,
 ) {
-  const source = await executor.query.sources.findFirst({
-    where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
-  });
+  // F13（round-4）：metadata read-modify-write 无并发保护——并发 PATCH 读到同一
+  // base 会互相覆盖字段（lost update）。执行器为事务（ApiTransaction），用
+  // SELECT ... FOR UPDATE 锁定行后再读，串行化同一 source 的并发更新（最简，
+  // 无新增 CAS 列）。sources.id 为固定主键排序，避免死锁。
+  const sourceRows = await executor
+    .select()
+    .from(sources)
+    .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)))
+    .limit(1)
+    .for("update");
+  const source = sourceRows[0] ?? null;
   if (!source) return null;
 
   const updates: Record<string, unknown> = { updatedAt: new Date() };

@@ -1,10 +1,17 @@
-import type { CharacterPresentationStateV1 } from "@ailearn/shared";
+import type { CharacterPresentationStateV1 } from "@ailearn/shared/companion-character-contracts";
 import type { Live2DParameterRequest } from "./live2d-priority";
+import { parameterRequestsForEmotion } from "./emotion-expression-map";
 
 export interface Live2DParameterFrameInput {
   presentation: CharacterPresentationStateV1;
   nowMs: number;
   voiceLevel: number;
+  /**
+   * 15 方案 emotion 表现层：VAD 平滑后的情绪（null/undefined = 无情绪信号）。
+   * 有 emotion 时 facs 层由 emotion 接管（intensity 缩放），presentation
+   * 的 facs 投影降级为兜底（仅在无 emotion 时生效）。
+   */
+  emotion?: { emotion: string | null; intensity: number } | null;
 }
 
 /**
@@ -41,10 +48,11 @@ export function parameterRequestsForLive2DFrame(
     { layer: "blink", parameter: "ParamEyeROpen", value: blinkProgress },
   );
 
+  const presentationFacs: Live2DParameterRequest[] = [];
   switch (input.presentation) {
     case "encourage":
     case "celebrate":
-      requests.push(
+      presentationFacs.push(
         { layer: "facs", parameter: "ParamBrowLY", value: 0.25 },
         { layer: "facs", parameter: "ParamBrowRY", value: 0.25 },
         { layer: "facs", parameter: "ParamEyeLSmile", value: 0.35 },
@@ -54,7 +62,7 @@ export function parameterRequestsForLive2DFrame(
       );
       break;
     case "uncertain":
-      requests.push(
+      presentationFacs.push(
         { layer: "facs", parameter: "ParamBrowLY", value: -0.25 },
         { layer: "facs", parameter: "ParamBrowRY", value: -0.1 },
         { layer: "facs", parameter: "ParamMouthDown", value: 0.15 },
@@ -62,7 +70,7 @@ export function parameterRequestsForLive2DFrame(
       break;
     case "think":
     case "analyze":
-      requests.push(
+      presentationFacs.push(
         { layer: "facs", parameter: "ParamBrowLY", value: 0.1 },
         { layer: "facs", parameter: "ParamBrowRY", value: 0.1 },
       );
@@ -70,6 +78,13 @@ export function parameterRequestsForLive2DFrame(
     default:
       break;
   }
+
+  // 15 方案 emotion 表现层：有情绪信号 → facs 由 emotion 接管（intensity
+  // 缩放）；无情绪 → presentation facs 兜底（原行为）。
+  const emotionFacs = input.emotion?.emotion
+    ? parameterRequestsForEmotion(input.emotion.emotion, input.emotion.intensity)
+    : null;
+  requests.push(...(emotionFacs ?? presentationFacs));
 
   const voiceLevel = Number.isFinite(input.voiceLevel)
     ? Math.min(1, Math.max(0, input.voiceLevel))

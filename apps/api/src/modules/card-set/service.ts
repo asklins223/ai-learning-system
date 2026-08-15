@@ -61,7 +61,9 @@ export async function getCardSetWithDetail(
       cardSet.id,
       workspaceId,
       userId,
-      { limit: 30 },
+      // 详情路径必须含 schemaJson（card-sets/[id] 页消费 schemaJson.title）——
+      // 列表瘦列（PERF-B11）不得复用到详情，否则第三轮 R2 回归（TypeError）。
+      { limit: 30, includeSchemaJson: true },
     );
     if (!firstPage) return null;
 
@@ -112,7 +114,7 @@ export async function listCardSetCards(
   cardSetId: string,
   workspaceId: string,
   userId: string,
-  options?: { cursor?: string; limit?: number },
+  options?: { cursor?: string; limit?: number; includeSchemaJson?: boolean },
 ) {
   return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     const cardSet = await tx.query.learningCardSets.findFirst({
@@ -149,6 +151,10 @@ export async function listCardSetCards(
       where: and(...conditions),
       orderBy: [asc(learningCards.ordinal), asc(learningCards.id)],
       limit: limit + 1,
+      // PERF-B11 修复：列表排除大 jsonb schemaJson，仅详情返回
+      // （includeSchemaJson=true 的详情路径必须保留，否则 card-set 详情页
+      // 消费 schemaJson.title 会因 undefined 抛 TypeError——第三轮 R2 回归）。
+      columns: options?.includeSchemaJson ? undefined : { schemaJson: false },
     });
     const hasMore = rows.length > limit;
     const cards = rows.slice(0, limit);
@@ -203,6 +209,8 @@ export async function listCardSets(
       where: and(...conditions),
       orderBy: [desc(learningCardSets.createdAt), desc(learningCardSets.id)],
       limit: limit + 1,
+      // PERF-B11 修复：列表排除大 jsonb coverageReport，仅详情返回。
+      columns: { coverageReport: false },
       extras: {
         cursorTimestamp: sql<string>`
           to_char(

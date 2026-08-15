@@ -1,4 +1,4 @@
-import { and, count, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import type { ValidationFeedback } from "@ailearn/shared";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
@@ -92,8 +92,42 @@ async function restoreTable(
 }
 
 /**
- * 导出整个 workspace 的数据为 JSON。
+ * keyset 分批读取辅助（B#1，round-5 审计）。
  *
+ * 将全量 findMany 改为按稳定顺序 + 唯一游标（主键 id）分批扫描，逐批 `.limit(BATCH)`
+ * 循环读取拼接，把「整表一次性载入 JS 内存」拆成有界批次，消除大工作区导出 OOM 风险。
+ * 语义与旧全量读取一致：结果顺序由调用方 `load` 列表页的 SQL 决定，批间顺序无缝隙无重复
+ * （因为上一批最后一条的游标值作为下一批的 where 下界，配合 orderBy 严格唯一）。
+ *
+ * @template T 单批返回的行类型（由调用方 SQL 推导）
+ * @template K 唯一游标类型（通常是 { 排序列; id } 元组）
+ */
+async function loadInBatches<T, K>(opts: {
+  /** 给定上一批游标（首批为 null），返回下一个 size 有界可见行列表。必须按稳定唯一顺序排序并 LIMIT。 */
+  load: (cursor: K | null) => Promise<T[]>;
+  /** 从该批最后一行提取下一批游标。 */
+  cursorFrom: (lastRow: T) => K;
+  /** 每批大小，默认 1000。 */
+  batch?: number;
+}): Promise<T[]> {
+  const batch = opts.batch ?? 1000;
+  const out: T[] = [];
+  for (let cursor: K | null = null; ; ) {
+    const rows = await opts.load(cursor);
+    if (rows.length === 0) return out;
+    // 空批即扫描结束；填满批次时用最后一条推进游标。
+    out.push(...rows);
+    cursor = opts.cursorFrom(rows[rows.length - 1]);
+    if (rows.length < batch) return out;
+  }
+}
+
+// keyset 游标类型别名（各表 load 回调显式标注，解脱 TS 对 K/T 的联合推断）。
+type CreatedIdCursor = { createdAt: Date; id: string };
+type UpdatedIdCursor = { updatedAt: Date; id: string };
+type NoteIdVersionCursor = { noteId: string; versionNo: number; id: string };
+/**
+ * 导出整个 workspace 的数据为 JSON。
  * F-033: 使用事务保证一致性快照。
  * N-009: 导出包含 users 和 workspace_members，使数据可恢复到空库。
  *
@@ -141,7 +175,7 @@ const EXPORT_WARN_THRESHOLD = 50_000;
  * 如果任何表行数超过最大限制，抛出错误建议使用增量导出。
  */
 async function checkExportSize(tx: RestoreTx, workspaceId: string): Promise<void> {
-  const [noteCount, blockCount, evidenceCount] = await Promise.all([
+  const [noteCount, blockCount, evidenceCount, validationEventCount] = await Promise.all([
     tx.select({ cnt: count() })
       .from(notes)
       .where(and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt))),
@@ -151,25 +185,44 @@ async function checkExportSize(tx: RestoreTx, workspaceId: string): Promise<void
     tx.select({ cnt: count() })
       .from(evidences)
       .where(eq(evidences.workspaceId, workspaceId)),
+    tx.select({ cnt: count() })
+      .from(validationEvents)
+      .where(eq(validationEvents.workspaceId, workspaceId)),
+  ]);
+  // F14（round-4）：size 防护覆盖面原只覆盖 notes/note_blocks/evidences 3 个小表，
+  // 却导出 ~25 表。扩展覆盖另 5 个 append-only/易膨胀大表（validationEvents、
+  // sourceSegments、cardKeyPoints、reviewAttempts、aiArtifacts），它们可能远大于预检的 3 表。
+  const [sourceSegmentCount, cardKeyPointCount, reviewAttemptCount, aiArtifactCount] = await Promise.all([
+    tx.select({ cnt: count() })
+      .from(sourceSegments)
+      .where(eq(sourceSegments.workspaceId, workspaceId)),
+    tx.select({ cnt: count() })
+      .from(cardKeyPoints)
+      .where(eq(cardKeyPoints.workspaceId, workspaceId)),
+    tx.select({ cnt: count() })
+      .from(reviewAttempts)
+      .where(eq(reviewAttempts.workspaceId, workspaceId)),
+    tx.select({ cnt: count() })
+      .from(aiArtifacts)
+      .where(eq(aiArtifacts.workspaceId, workspaceId)),
   ]);
 
-  const totalRows = Number(noteCount[0]?.cnt ?? 0) + Number(blockCount[0]?.cnt ?? 0) + Number(evidenceCount[0]?.cnt ?? 0);
+  const counts: Record<string, number> = {
+    notes: Number(noteCount[0]?.cnt ?? 0),
+    note_blocks: Number(blockCount[0]?.cnt ?? 0),
+    evidences: Number(evidenceCount[0]?.cnt ?? 0),
+    validation_events: Number(validationEventCount[0]?.cnt ?? 0),
+    source_segments: Number(sourceSegmentCount[0]?.cnt ?? 0),
+    card_key_points: Number(cardKeyPointCount[0]?.cnt ?? 0),
+    review_attempts: Number(reviewAttemptCount[0]?.cnt ?? 0),
+    ai_artifacts: Number(aiArtifactCount[0]?.cnt ?? 0),
+  };
+  const totalRows = Object.values(counts).reduce((sum, n) => sum + n, 0);
   if (totalRows > EXPORT_WARN_THRESHOLD) {
-    logger.warn({
-      workspaceId,
-      notes: Number(noteCount[0]?.cnt ?? 0),
-      blocks: Number(blockCount[0]?.cnt ?? 0),
-      evidences: Number(evidenceCount[0]?.cnt ?? 0),
-      totalRows,
-    }, `导出工作区数据量较大，可能占用较多内存`);
+    logger.warn({ workspaceId, ...counts, totalRows }, `导出工作区数据量较大，可能占用较多内存`);
   }
   // 对单表设置硬限制，防止极端情况下的 OOM
-  for (const [table, result] of [
-    ["notes", noteCount],
-    ["note_blocks", blockCount],
-    ["evidences", evidenceCount],
-  ] as const) {
-    const rowCount = Number(result[0]?.cnt ?? 0);
+  for (const [table, rowCount] of Object.entries(counts)) {
     if (rowCount > EXPORT_MAX_ROWS_PER_TABLE) {
       throw new Error(
         `导出失败：表 ${table} 有 ${rowCount} 行，超过最大限制 ${EXPORT_MAX_ROWS_PER_TABLE}。` +
@@ -205,8 +258,17 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
     ]);
 
     // PERF-15 优化：Phase 2 — 所有 workspaceId 过滤的查询并行执行。
-    // 虽然事务内查询在 DB 连接层面仍为串行，但 Promise.all 可减少 JS 层的
-    // 逐个 await 开销，且让 Node.js 能更高效地批量发送查询。
+    // B#1（round-5 审计）：把「~25 表单事务 findMany 全量入内存」改为按稳定唯一顺序
+    // （orderBy 保持原有方向 + 主键 id 作为打破并列的确定性游标）+ keyset 分批（每批 1000）
+    // 循环读取拼接。保证：
+    //   - 导出内容与顺序与原先一致（各表原有的 orderBy 方向不变；仅对并列行追加 id 游标，
+    //     使批间无缝隙无重复，DB 原先对并列行的返回顺序就非确定，追加 id 后反而确定）。
+    //   - 峰值内存从「整表 × 2」降为「批 × 2」，消除大 jsonb 行导出的 OOM 风险。
+    //   - 恢复契约不变：表间先后顺序（父表先于子表）由导出对象字段顺序 / importManifest
+    //     决定，与行级顺序无关，故行内排序调整不破坏恢复兼容。
+    // 仍与流程主体并行（Promise.all 减少 JS 层逐个 await 开销）。
+    const EXPORT_BATCH = 1000;
+
     const [
       noteRows,
       noteVersionRows,
@@ -232,109 +294,391 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
       qualitySignalRows,
       onboardingStateRows,
     ] = await Promise.all([
-      // CONC-03: 只导出未软删除的笔记
-      tx.query.notes.findMany({
-        where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
-        orderBy: (n, { desc }) => [desc(n.updatedAt)],
+      // CONC-03: 只导出未软删除的笔记 — desc(updatedAt) + id 下界 keyset
+      loadInBatches({
+        load: (c: UpdatedIdCursor | null) =>
+          tx.select().from(notes).where(and(
+            and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+            c
+              ? or(
+                  lt(notes.updatedAt, c.updatedAt),
+                  and(eq(notes.updatedAt, c.updatedAt), lt(notes.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(notes.updatedAt), desc(notes.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ updatedAt: last.updatedAt, id: last.id }),
       }),
-      tx.query.noteVersions.findMany({
-        where: eq(noteVersions.workspaceId, workspaceId),
-        orderBy: (v, { asc: a }) => [a(v.noteId), a(v.versionNo)],
+      // asc(noteId, versionNo) + id 上界
+      loadInBatches({
+        load: (c: NoteIdVersionCursor | null) =>
+          tx.select().from(noteVersions).where(and(
+            eq(noteVersions.workspaceId, workspaceId),
+            c
+              ? or(
+                  or(
+                    gt(noteVersions.noteId, c.noteId),
+                    and(eq(noteVersions.noteId, c.noteId), gt(noteVersions.versionNo, c.versionNo)),
+                  ),
+                  and(
+                    eq(noteVersions.noteId, c.noteId),
+                    eq(noteVersions.versionNo, c.versionNo),
+                    gt(noteVersions.id, c.id),
+                  ),
+                )
+              : undefined,
+          )).orderBy(asc(noteVersions.noteId), asc(noteVersions.versionNo), asc(noteVersions.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ noteId: last.noteId, versionNo: last.versionNo, id: last.id }),
       }),
-      tx.query.noteBlocks.findMany({
-        where: eq(noteBlocks.workspaceId, workspaceId),
-        orderBy: (b, { asc: a }) => [a(b.versionId), a(b.ordinal)],
+      // asc(versionId, ordinal) + id 上界
+      loadInBatches({
+        load: (c: { versionId: string; ordinal: number; id: string } | null) =>
+          tx.select().from(noteBlocks).where(and(
+            eq(noteBlocks.workspaceId, workspaceId),
+            c
+              ? or(
+                  or(
+                    gt(noteBlocks.versionId, c.versionId),
+                    and(eq(noteBlocks.versionId, c.versionId), gt(noteBlocks.ordinal, c.ordinal)),
+                  ),
+                  and(
+                    eq(noteBlocks.versionId, c.versionId),
+                    eq(noteBlocks.ordinal, c.ordinal),
+                    gt(noteBlocks.id, c.id),
+                  ),
+                )
+              : undefined,
+          )).orderBy(asc(noteBlocks.versionId), asc(noteBlocks.ordinal), asc(noteBlocks.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ versionId: last.versionId, ordinal: last.ordinal, id: last.id }),
       }),
-      tx.query.sources.findMany({
-        where: eq(sources.workspaceId, workspaceId),
-        orderBy: (s, { desc }) => [desc(s.createdAt)],
+      // desc(createdAt) + id 下界
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(sources).where(and(
+            eq(sources.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(sources.createdAt, c.createdAt),
+                  and(eq(sources.createdAt, c.createdAt), lt(sources.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(sources.createdAt), desc(sources.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      tx.query.sourceSegments.findMany({
-        where: eq(sourceSegments.workspaceId, workspaceId),
-        orderBy: (s, { asc: a }) => [a(s.sourceId), s.ordinal],
+      // asc(sourceId, ordinal) + id 上界
+      loadInBatches({
+        load: (c: { sourceId: string; ordinal: number; id: string } | null) =>
+          tx.select().from(sourceSegments).where(and(
+            eq(sourceSegments.workspaceId, workspaceId),
+            c
+              ? or(
+                  or(
+                    gt(sourceSegments.sourceId, c.sourceId),
+                    and(eq(sourceSegments.sourceId, c.sourceId), gt(sourceSegments.ordinal, c.ordinal)),
+                  ),
+                  and(
+                    eq(sourceSegments.sourceId, c.sourceId),
+                    eq(sourceSegments.ordinal, c.ordinal),
+                    gt(sourceSegments.id, c.id),
+                  ),
+                )
+              : undefined,
+          )).orderBy(asc(sourceSegments.sourceId), asc(sourceSegments.ordinal), asc(sourceSegments.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ sourceId: last.sourceId, ordinal: last.ordinal, id: last.id }),
       }),
-      tx.query.learningCards.findMany({
-        where: eq(learningCards.workspaceId, workspaceId),
-        orderBy: (c, { desc }) => [desc(c.createdAt)],
+      // desc(createdAt) + id 下界
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(learningCards).where(and(
+            eq(learningCards.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(learningCards.createdAt, c.createdAt),
+                  and(eq(learningCards.createdAt, c.createdAt), lt(learningCards.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(learningCards.createdAt), desc(learningCards.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      tx.query.cardKeyPoints.findMany({
-        where: eq(cardKeyPoints.workspaceId, workspaceId),
-        orderBy: (k, { asc: a }) => [a(k.cardId), a(k.ordinal)],
+      // asc(cardId, ordinal) + id 上界
+      loadInBatches({
+        load: (c: { cardId: string; ordinal: number; id: string } | null) =>
+          tx.select().from(cardKeyPoints).where(and(
+            eq(cardKeyPoints.workspaceId, workspaceId),
+            c
+              ? or(
+                  or(
+                    gt(cardKeyPoints.cardId, c.cardId),
+                    and(eq(cardKeyPoints.cardId, c.cardId), gt(cardKeyPoints.ordinal, c.ordinal)),
+                  ),
+                  and(
+                    eq(cardKeyPoints.cardId, c.cardId),
+                    eq(cardKeyPoints.ordinal, c.ordinal),
+                    gt(cardKeyPoints.id, c.id),
+                  ),
+                )
+              : undefined,
+          )).orderBy(asc(cardKeyPoints.cardId), asc(cardKeyPoints.ordinal), asc(cardKeyPoints.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ cardId: last.cardId, ordinal: last.ordinal, id: last.id }),
       }),
-      tx.query.evidences.findMany({
-        where: eq(evidences.workspaceId, workspaceId),
+      // 原无显式排序（DB 默认）：统一为 asc(id) 上界，保持确定性 keyset
+      loadInBatches({
+        load: (c: string | null) =>
+          tx.select().from(evidences).where(and(
+            eq(evidences.workspaceId, workspaceId),
+            c ? gt(evidences.id, c) : undefined,
+          )).orderBy(asc(evidences.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => last.id,
       }),
-      // N-005: evidence overrides
-      tx.query.evidenceOverrides.findMany({
-        where: eq(evidenceOverrides.workspaceId, workspaceId),
+      // N-005: evidence overrides — asc(id)
+      loadInBatches({
+        load: (c: string | null) =>
+          tx.select().from(evidenceOverrides).where(and(
+            eq(evidenceOverrides.workspaceId, workspaceId),
+            c ? gt(evidenceOverrides.id, c) : undefined,
+          )).orderBy(asc(evidenceOverrides.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => last.id,
       }),
-      // N-003: validation questions
-      tx.query.validationQuestions.findMany({
-        where: eq(validationQuestions.workspaceId, workspaceId),
+      // N-003: validation questions — asc(id)
+      loadInBatches({
+        load: (c: string | null) =>
+          tx.select().from(validationQuestions).where(and(
+            eq(validationQuestions.workspaceId, workspaceId),
+            c ? gt(validationQuestions.id, c) : undefined,
+          )).orderBy(asc(validationQuestions.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => last.id,
       }),
-      tx.query.validationEvents.findMany({
-        where: eq(validationEvents.workspaceId, workspaceId),
-        orderBy: (v, { desc }) => [desc(v.createdAt)],
+      // desc(createdAt) + id 下界
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(validationEvents).where(and(
+            eq(validationEvents.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(validationEvents.createdAt, c.createdAt),
+                  and(eq(validationEvents.createdAt, c.createdAt), lt(validationEvents.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(validationEvents.createdAt), desc(validationEvents.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      tx.query.reviewSchedules.findMany({
-        where: eq(reviewSchedules.workspaceId, workspaceId),
-        orderBy: (r, { desc }) => [desc(r.createdAt)],
+      // desc(createdAt) + id 下界
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(reviewSchedules).where(and(
+            eq(reviewSchedules.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(reviewSchedules.createdAt, c.createdAt),
+                  and(eq(reviewSchedules.createdAt, c.createdAt), lt(reviewSchedules.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(reviewSchedules.createdAt), desc(reviewSchedules.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
       // review attempts (LOOP-01/02) — must follow review_schedules in export
-      // ordering so restore can insert parent before child.
-      tx.query.reviewAttempts.findMany({
-        where: eq(reviewAttempts.workspaceId, workspaceId),
-        orderBy: (a, { desc }) => [desc(a.createdAt)],
+      // ordering so restore can insert parent before child. desc(createdAt) + id
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(reviewAttempts).where(and(
+            eq(reviewAttempts.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(reviewAttempts.createdAt, c.createdAt),
+                  and(eq(reviewAttempts.createdAt, c.createdAt), lt(reviewAttempts.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(reviewAttempts.createdAt), desc(reviewAttempts.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      tx.query.understandingEvents.findMany({
-        where: eq(understandingEvents.workspaceId, workspaceId),
-        orderBy: (u, { desc }) => [desc(u.createdAt)],
+      // desc(createdAt) + id 下界
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(understandingEvents).where(and(
+            eq(understandingEvents.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(understandingEvents.createdAt, c.createdAt),
+                  and(eq(understandingEvents.createdAt, c.createdAt), lt(understandingEvents.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(understandingEvents.createdAt), desc(understandingEvents.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      tx.query.aiArtifacts.findMany({
-        where: eq(aiArtifacts.workspaceId, workspaceId),
-        orderBy: (a, { desc }) => [desc(a.createdAt)],
+      // desc(createdAt) + id 下界
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(aiArtifacts).where(and(
+            eq(aiArtifacts.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(aiArtifacts.createdAt, c.createdAt),
+                  and(eq(aiArtifacts.createdAt, c.createdAt), lt(aiArtifacts.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(aiArtifacts.createdAt), desc(aiArtifacts.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      // v0.6: 可信掌握闭环新表导出 (计划 §6.9)
-      tx.query.validationQuestionRubricItems.findMany({
-        where: eq(validationQuestionRubricItems.workspaceId, workspaceId),
-        orderBy: (r, { asc: a }) => [a(r.questionId), a(r.ordinal)],
+      // v0.6: 可信掌握闭环新表导出 (计划 §6.9) — asc(questionId, ordinal) + id
+      loadInBatches({
+        load: (c: { questionId: string; ordinal: number; id: string } | null) =>
+          tx.select().from(validationQuestionRubricItems).where(and(
+            eq(validationQuestionRubricItems.workspaceId, workspaceId),
+            c
+              ? or(
+                  or(
+                    gt(validationQuestionRubricItems.questionId, c.questionId),
+                    and(
+                      eq(validationQuestionRubricItems.questionId, c.questionId),
+                      gt(validationQuestionRubricItems.ordinal, c.ordinal),
+                    ),
+                  ),
+                  and(
+                    eq(validationQuestionRubricItems.questionId, c.questionId),
+                    eq(validationQuestionRubricItems.ordinal, c.ordinal),
+                    gt(validationQuestionRubricItems.id, c.id),
+                  ),
+                )
+              : undefined,
+          ))
+            .orderBy(
+              asc(validationQuestionRubricItems.questionId),
+              asc(validationQuestionRubricItems.ordinal),
+              asc(validationQuestionRubricItems.id),
+            )
+            .limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ questionId: last.questionId, ordinal: last.ordinal, id: last.id }),
       }),
-      // validation_submissions — user-private, RLS-enforced
-      tx.query.validationSubmissions.findMany({
-        where: eq(validationSubmissions.workspaceId, workspaceId),
-        orderBy: (s, { desc }) => [desc(s.createdAt)],
+      // validation_submissions — user-private, RLS-enforced. desc(createdAt) + id
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(validationSubmissions).where(and(
+            eq(validationSubmissions.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(validationSubmissions.createdAt, c.createdAt),
+                  and(eq(validationSubmissions.createdAt, c.createdAt), lt(validationSubmissions.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(validationSubmissions.createdAt), desc(validationSubmissions.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      // validation_action_commands — user-private, RLS-enforced
-      tx.query.validationActionCommands.findMany({
-        where: eq(validationActionCommands.workspaceId, workspaceId),
-        orderBy: (c, { desc }) => [desc(c.createdAt)],
+      // validation_action_commands — user-private, RLS-enforced. desc(createdAt) + id
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(validationActionCommands).where(and(
+            eq(validationActionCommands.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(validationActionCommands.createdAt, c.createdAt),
+                  and(eq(validationActionCommands.createdAt, c.createdAt), lt(validationActionCommands.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(validationActionCommands.createdAt), desc(validationActionCommands.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      // validation_assistance_exposures — user-private, RLS-enforced
-      tx.query.validationAssistanceExposures.findMany({
-        where: eq(validationAssistanceExposures.workspaceId, workspaceId),
-        orderBy: (e, { desc }) => [desc(e.lastExposedAt)],
+      // validation_assistance_exposures — user-private, RLS-enforced. desc(lastExposedAt) + id
+      loadInBatches({
+        load: (c: { lastExposedAt: Date; id: string } | null) =>
+          tx.select().from(validationAssistanceExposures).where(and(
+            eq(validationAssistanceExposures.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(validationAssistanceExposures.lastExposedAt, c.lastExposedAt),
+                  and(
+                    eq(validationAssistanceExposures.lastExposedAt, c.lastExposedAt),
+                    lt(validationAssistanceExposures.id, c.id),
+                  ),
+                )
+              : undefined,
+          ))
+            .orderBy(
+              desc(validationAssistanceExposures.lastExposedAt),
+              desc(validationAssistanceExposures.id),
+            )
+            .limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ lastExposedAt: last.lastExposedAt, id: last.id }),
       }),
-      // validation_point_assessments — user-private, RLS-enforced
-      tx.query.validationPointAssessments.findMany({
-        where: eq(validationPointAssessments.workspaceId, workspaceId),
-        orderBy: (p, { asc: a }) => [a(p.submissionId)],
+      // validation_point_assessments — user-private, RLS-enforced. asc(submissionId) + id
+      loadInBatches({
+        load: (c: { submissionId: string; id: string } | null) =>
+          tx.select().from(validationPointAssessments).where(and(
+            eq(validationPointAssessments.workspaceId, workspaceId),
+            c
+              ? or(
+                  gt(validationPointAssessments.submissionId, c.submissionId),
+                  and(
+                    eq(validationPointAssessments.submissionId, c.submissionId),
+                    gt(validationPointAssessments.id, c.id),
+                  ),
+                )
+              : undefined,
+          ))
+            .orderBy(
+              asc(validationPointAssessments.submissionId),
+              asc(validationPointAssessments.id),
+            )
+            .limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ submissionId: last.submissionId, id: last.id }),
       }),
-      // scheduling_shadow_decisions — user-private, RLS-enforced
-      tx.query.schedulingShadowDecisions.findMany({
-        where: eq(schedulingShadowDecisions.workspaceId, workspaceId),
-        orderBy: (s, { desc }) => [desc(s.createdAt)],
+      // scheduling_shadow_decisions — user-private, RLS-enforced. desc(createdAt) + id
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(schedulingShadowDecisions).where(and(
+            eq(schedulingShadowDecisions.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(schedulingShadowDecisions.createdAt, c.createdAt),
+                  and(
+                    eq(schedulingShadowDecisions.createdAt, c.createdAt),
+                    lt(schedulingShadowDecisions.id, c.id),
+                  ),
+                )
+              : undefined,
+          ))
+            .orderBy(
+              desc(schedulingShadowDecisions.createdAt),
+              desc(schedulingShadowDecisions.id),
+            )
+            .limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
-      // validation_quality_signals — user-private, RLS-enforced
-      tx.query.validationQualitySignals.findMany({
-        where: eq(validationQualitySignals.workspaceId, workspaceId),
-        orderBy: (q, { desc }) => [desc(q.createdAt)],
+      // validation_quality_signals — user-private, RLS-enforced. desc(createdAt) + id
+      loadInBatches({
+        load: (c: CreatedIdCursor | null) =>
+          tx.select().from(validationQualitySignals).where(and(
+            eq(validationQualitySignals.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(validationQualitySignals.createdAt, c.createdAt),
+                  and(
+                    eq(validationQualitySignals.createdAt, c.createdAt),
+                    lt(validationQualitySignals.id, c.id),
+                  ),
+                )
+              : undefined,
+          ))
+            .orderBy(
+              desc(validationQualitySignals.createdAt),
+              desc(validationQualitySignals.id),
+            )
+            .limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
       }),
       // onboarding states (SEC-02/ALPHA-01) — per-user onboarding progress.
       // invite_codes are NOT exported: they contain token hashes which are
-      // security-sensitive credentials, not business data.
-      tx.query.onboardingStates.findMany({
-        where: eq(onboardingStates.workspaceId, workspaceId),
-        orderBy: (o, { desc }) => [desc(o.updatedAt)],
+      // security-sensitive credentials, not business data. desc(updatedAt) + id
+      loadInBatches({
+        load: (c: UpdatedIdCursor | null) =>
+          tx.select().from(onboardingStates).where(and(
+            eq(onboardingStates.workspaceId, workspaceId),
+            c
+              ? or(
+                  lt(onboardingStates.updatedAt, c.updatedAt),
+                  and(eq(onboardingStates.updatedAt, c.updatedAt), lt(onboardingStates.id, c.id)),
+                )
+              : undefined,
+          )).orderBy(desc(onboardingStates.updatedAt), desc(onboardingStates.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ updatedAt: last.updatedAt, id: last.id }),
       }),
     ]);
 
@@ -348,11 +692,22 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
           })
         : Promise.resolve([]),
       // validation_submission_jobs — 依赖 submissionRows
+      // R#6-3：submissionIds 可能达 EXPORT_MAX_ROWS_PER_TABLE(100k)，远超 postgres-js
+      // ~65535 绑定参数上限 → 500/批分块查询后合并，避免大工作区导出 500。
       submissionRows.length
-        ? tx.query.validationSubmissionJobs.findMany({
-            where: inArray(validationSubmissionJobs.submissionId, submissionRows.map((s) => s.id)),
-            orderBy: (j, { asc: a }) => [a(j.submissionId), a(j.phase), a(j.phaseOrdinal)],
-          })
+        ? (async () => {
+            const submissionIds = submissionRows.map((s) => s.id);
+            const jobs: Array<Awaited<ReturnType<typeof tx.query.validationSubmissionJobs.findMany>>[number]> = [];
+            for (let i = 0; i < submissionIds.length; i += 500) {
+              const chunk = submissionIds.slice(i, i + 500);
+              const rows = await tx.query.validationSubmissionJobs.findMany({
+                where: inArray(validationSubmissionJobs.submissionId, chunk),
+                orderBy: (j, { asc: a }) => [a(j.submissionId), a(j.phase), a(j.phaseOrdinal)],
+              });
+              jobs.push(...rows);
+            }
+            return jobs;
+          })()
         : Promise.resolve([]),
     ]);
 
@@ -515,17 +870,15 @@ export async function restoreWorkspace(
 
   // N#8-2: 对导出侧 exportManifest.included 与恢复 schema 实际接收到的键做差集告警，防止未来
   // 导出新增表而 restoreSchema 未同步声明（zod strip 会静默丢弃 → 恢复丢数据）再次漂移。
-  // 恢复 schema 键 = data 中实际存在的数组键（zod safeParse 已 strip 未声明的键）。在 dry-run 与
-  // 真实恢复两条路径都执行，属廉价防御性检查。
+  // 恢复 schema 键 = data 中实际存在的数组键（zod safeParse 已 strip 未声明的键）。在 dry-run 与真实
+  // 恢复两条路径都执行，属廉价防御性检查。
   const rawIncluded = (manifest.included as unknown) ?? [];
   const declaredIncluded = Array.isArray(rawIncluded) ? (rawIncluded as string[]) : [];
   // `workspace` 与 `exportManifest` 是导出文件的清单/标记键，不是待恢复的表数据键，差集比对时排除。
   const receivedKeys = new Set(
     Object.keys(data).filter((k) => k !== "workspace" && k !== "exportManifest" && k !== "dryRun"),
   );
-  const declaredSet = new Set(
-    declaredIncluded.filter((k) => k !== "workspace" && k !== "exportManifest" && k !== "dryRun"),
-  );
+  const declaredSet = new Set(declaredIncluded.filter((k) => k !== "workspace" && k !== "exportManifest" && k !== "dryRun"));
   const missingInData = [...declaredSet].filter((k) => !receivedKeys.has(k));
   const unexpectedKeys = [...receivedKeys].filter((k) => !declaredSet.has(k));
   if (missingInData.length > 0 || unexpectedKeys.length > 0) {
@@ -874,13 +1227,23 @@ export async function restoreWorkspace(
         const noteUpdates = (data.notes as Record<string, unknown>[])
           .filter((note) => typeof note.currentVersionId === "string" && (note.currentVersionId as string).length > 0)
           .map((note) => ({ id: note.id as string, currentVersionId: note.currentVersionId as string }));
-        await Promise.all(
-          noteUpdates.map(({ id, currentVersionId }) =>
+        // PERF-99 修复：按 500/批顺序分批执行 UPDATE，避免对超大工作区一次性
+        // 并发数万条 UPDATE 打满连接池。各批 write 间无数据依赖，串行执行即可，
+        // 复用同文件 batchInsert/restoreTable 的 batchSize=500 批次语义。
+        // B1（round-3 审计复核）：批内逐行 `await` 是“表面分批”——消除连接池
+        // 打满风险，但把原本 Promise.all 的并发改为严格串行 N 次 RTT，超大工作区
+        // 回填变慢。此处批内用 Promise.all 并行下发（单事务单连接下 postgres.js
+        // 本就排队执行，收益是消除 JS 层逐条 await 的串行开销 + 批间仍串行保证
+        // 有界并发），批间保持串行。
+        const NOTE_BATCH_SIZE = 500;
+        for (let i = 0; i < noteUpdates.length; i += NOTE_BATCH_SIZE) {
+          const batch = noteUpdates.slice(i, i + NOTE_BATCH_SIZE);
+          await Promise.all(batch.map(({ id, currentVersionId }) =>
             tx.update(notes)
               .set({ currentVersionId })
               .where(and(eq(notes.id, id), eq(notes.workspaceId, targetWorkspaceId))),
-          ),
-        );
+          ));
+        }
       }
 
       // 7. 恢复 note_blocks（PERF-40 修复：批量 INSERT）

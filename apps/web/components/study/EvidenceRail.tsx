@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import {
   CardEvidenceGroup,
   effectiveAlignment,
@@ -23,34 +24,36 @@ export function EvidenceRail({
   onSelect: (keyPointId: string) => void;
   onRetry?: () => void;
 }) {
-  const rawEvidenceCount = groups.reduce(
-    (sum, group) => sum + group.evidences.length,
-    0,
-  );
-  const totalEvidence = groups.reduce(
-    (sum, group) =>
-      sum +
-      group.evidences.filter(
-        (item) =>
+  // F19（round4）：三段 reduce（raw/total/hard）此前各自遍历全部 evidences，
+  // 每渲重算；改为单趟 useMemo，groups 不变时复用，且一次遍历同时累计三类计数。
+  const { rawEvidenceCount, totalEvidence, hardEvidence } = useMemo(() => {
+    let raw = 0;
+    let total = 0;
+    let hard = 0;
+    for (const group of groups) {
+      for (const item of group.evidences) {
+        raw += 1;
+        if (
           effectiveAlignment(
             item.alignment,
             item.effectiveOverride ?? item.userOverride,
-          ) !== null,
-      ).length,
-    0,
-  );
+          ) !== null
+        ) {
+          total += 1;
+        }
+        if (
+          isHardEvidence(
+            item.alignment,
+            item.effectiveOverride ?? item.userOverride,
+          )
+        ) {
+          hard += 1;
+        }
+      }
+    }
+    return { rawEvidenceCount: raw, totalEvidence: total, hardEvidence: hard };
+  }, [groups]);
   const rejectedEvidence = rawEvidenceCount - totalEvidence;
-  const hardEvidence = groups.reduce(
-    (sum, group) =>
-      sum +
-      group.evidences.filter((item) =>
-        isHardEvidence(
-          item.alignment,
-          item.effectiveOverride ?? item.userOverride,
-        ),
-      ).length,
-    0,
-  );
 
   return (
     <section

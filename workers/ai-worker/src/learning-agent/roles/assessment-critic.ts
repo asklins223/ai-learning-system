@@ -24,7 +24,8 @@ import {
   LearningToolId,
   type LearningRoleSpec,
 } from "../types.ts";
-import { computeVoiceContentHash, LearningAssessmentSource } from "@ailearn/shared";
+import { LearningAssessmentSource } from "@ailearn/shared";
+import { computeVoiceContentHash } from "@ailearn/shared/content-hash";
 
 // ─── 枚举与常量 ─────────────────────────────────────────────────────────
 

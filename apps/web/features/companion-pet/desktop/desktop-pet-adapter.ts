@@ -8,7 +8,7 @@ import type {
   DesktopPetWindowStateV1,
   PetHitGeometryV1,
   DesktopLifecycleEventV1,
-} from "@ailearn/shared";
+} from "@ailearn/shared/desktop-pet-contracts";
 
 /**
  * Renderer-side adapter over the typed preload bridge. The browser fallback
@@ -145,9 +145,6 @@ function createBrowserPetAdapter(options: BrowserPetAdapterOptionsV1): PetAdapte
   };
 }
 
-// 2026-08-15 恢复：web tracked 回退丢失 export 修饰符（测试依赖导出）；
-// 路由参数按契约测试对齐（archive route 用 conversationId、graph 用
-// targetNodeId、learning_session 全参数透传）。
 export function browserRoutePath(route: AllowedMainRouteV1): string {
   switch (route.kind) {
     case "conversation":

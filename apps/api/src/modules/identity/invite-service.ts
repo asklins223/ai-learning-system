@@ -18,7 +18,7 @@ import {
   isValidInvitationToken,
 } from "./invitation-token.ts";
 import { canonicalizeEmail, hashPassword, issueSession, type SessionContext } from "./service.ts";
-import { resolveSystemProviderForCapability } from "@ailearn/shared";
+import { resolveSystemProviderForCapability } from "@ailearn/shared/task-router";
 // OPS-01: Funnel 指标（ADR-0006 §2）
 import { recordFunnelEvent } from "../../lib/metrics.ts";
 
@@ -265,6 +265,10 @@ export async function consumeInvite(
 
   const tokenHash = hashInvitationToken(token);
 
+  // R5（round-3 审计）：bcryptjs 纯 JS 主线程哈希；在开事务前计算，
+  // 避免持有连接池连接的同时在主线程 hash（~50-150ms）。不换库（依赖约束）。
+  const passwordHash = await hashPassword(password);
+
   let result: { userId: string; workspaceId: string } | null;
   try {
     result = await db.transaction(async (tx) => {
@@ -317,7 +321,7 @@ export async function consumeInvite(
         .insert(users)
         .values({
           email: normalizedEmail,
-          passwordHash: await hashPassword(password),
+          passwordHash,
           displayName: defaultDisplayName(options?.displayName, normalizedEmail),
           ...(options?.avatarUrl?.trim() ? { avatarUrl: options.avatarUrl.trim() } : {}),
         })
@@ -414,7 +418,12 @@ export interface MemberListItem {
 export async function listMembers(
   workspaceId: string,
   userId: string,
+  options?: { limit?: number },
 ): Promise<{ items: MemberListItem[]; total: number }> {
+  // Y10（round-3 审计）：原实现无 LIMIT 全量返回活跃成员（超大工作区成员很多时
+  // 无界响应）。新增可选 limit（默认 200，上限 500）；total 只在翻页满时（很可能还有
+  // 更多成员）才补一次 count 查询得到真实总数——小于 limit 的常见情形不额外查询。
+  const limit = Math.min(Math.max(options?.limit ?? 200, 1), 500);
   return withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
@@ -432,7 +441,23 @@ export async function listMembers(
             isNull(workspaceMembers.leftAt),
           ),
         )
-        .orderBy(desc(workspaceMembers.joinedAt));
+        .orderBy(desc(workspaceMembers.joinedAt))
+        .limit(limit);
+
+      let total = members.length;
+      if (members.length >= limit) {
+        // 已拿满一页：可能还有更多成员，取真实总数（供前端判断是否还有下一页）。
+        const [totalRows] = await tx
+          .select({ n: sql<number>`count(*)::integer` })
+          .from(workspaceMembers)
+          .where(
+            and(
+              eq(workspaceMembers.workspaceId, workspaceId),
+              isNull(workspaceMembers.leftAt),
+            ),
+          );
+        total = totalRows?.n ?? members.length;
+      }
 
       const userIds = members.map((m) => m.userId);
       const userRows =
@@ -451,7 +476,7 @@ export async function listMembers(
           role: m.role,
           joinedAt: m.joinedAt,
         })),
-        total: members.length,
+        total,
       };
     },
   );
@@ -574,43 +599,47 @@ async function deriveOnboardingSnapshot(
   userId: string,
   storedSteps: Record<string, boolean>,
 ): Promise<DerivedOnboardingSnapshot> {
-  const workspace = await tx.query.workspaces.findFirst({
-    where: eq(workspaces.id, workspaceId),
-  });
-  const firstContent = await tx
-    .select({ id: sources.id })
-    .from(sources)
-    .where(and(eq(sources.workspaceId, workspaceId), eq(sources.createdBy, userId)))
-    .limit(1);
-  // CONC-03: 软删除的笔记不计入 onboarding 判定
-  const firstNote = await tx
-    .select({ id: notes.id })
-    .from(notes)
-    .where(and(eq(notes.workspaceId, workspaceId), eq(notes.createdBy, userId), isNull(notes.deletedAt)))
-    .limit(1);
-  const firstCard = await tx
-    .select({ id: learningCards.id })
-    .from(learningCards)
-    .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
-    .innerJoin(notes, eq(notes.id, noteVersions.noteId))
-    .where(
-      and(
-        eq(learningCards.workspaceId, workspaceId),
-        eq(notes.createdBy, userId),
-        isNull(notes.deletedAt),
-      ),
-    )
-    .limit(1);
-  const firstValidation = await tx
-    .select({ id: validationEvents.id })
-    .from(validationEvents)
-    .where(
-      and(
-        eq(validationEvents.workspaceId, workspaceId),
-        eq(validationEvents.userId, userId),
-      ),
-    )
-    .limit(1);
+  // N#7-12：5 个派生查询相互无数据依赖，并行化（原来串行 5 次往返）。
+  // 该函数在 markOnboardingStep 的 FOR UPDATE 持有期内调用，并行化缩短写锁持有时间。
+  const [workspace, firstContent, firstNote, firstCard, firstValidation] = await Promise.all([
+    tx.query.workspaces.findFirst({
+      where: eq(workspaces.id, workspaceId),
+    }),
+    tx
+      .select({ id: sources.id })
+      .from(sources)
+      .where(and(eq(sources.workspaceId, workspaceId), eq(sources.createdBy, userId)))
+      .limit(1),
+    // CONC-03: 软删除的笔记不计入 onboarding 判定
+    tx
+      .select({ id: notes.id })
+      .from(notes)
+      .where(and(eq(notes.workspaceId, workspaceId), eq(notes.createdBy, userId), isNull(notes.deletedAt)))
+      .limit(1),
+    tx
+      .select({ id: learningCards.id })
+      .from(learningCards)
+      .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
+      .innerJoin(notes, eq(notes.id, noteVersions.noteId))
+      .where(
+        and(
+          eq(learningCards.workspaceId, workspaceId),
+          eq(notes.createdBy, userId),
+          isNull(notes.deletedAt),
+        ),
+      )
+      .limit(1),
+    tx
+      .select({ id: validationEvents.id })
+      .from(validationEvents)
+      .where(
+        and(
+          eq(validationEvents.workspaceId, workspaceId),
+          eq(validationEvents.userId, userId),
+        ),
+      )
+      .limit(1),
+  ]);
 
   // v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
   // 不再读 workspace.aiProvider 或 personal BYOK。

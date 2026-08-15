@@ -41,21 +41,8 @@ import {
   providerErrorsTotal,
   categorizeError,
 } from "../lib/metrics.ts";
-import {
-  ArtifactType,
-  ArtifactStatus,
-  CardStatus,
-  ReviewStatus,
-  ValidationOutcome,
-  AssessmentSource,
-  SubmissionStatus,
-  TerminalReason,
-  QuestionStatus,
-  isRubricEvaluationEnabled,
-  isEffectiveHardEvidence,
-  computeSourceFingerprint,
-  type ValidationFeedback,
-} from "@ailearn/shared";
+import { ArtifactType, ArtifactStatus, CardStatus, ReviewStatus, ValidationOutcome, AssessmentSource, SubmissionStatus, TerminalReason, QuestionStatus, isRubricEvaluationEnabled, isEffectiveHardEvidence, type ValidationFeedback,  } from "@ailearn/shared";
+import { computeSourceFingerprint } from "@ailearn/shared/fingerprint";
 import {
   evaluateRubricOutputSchema,
   reduceRubric,
@@ -196,7 +183,10 @@ const userId = requireAuditUserId(job);
     textRes.providerName,
   );
   if (!governanceResult.allowed) {
-    throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
+    // 2026-08-12+（15a 根因修复）：policy 拒绝（sendToExternal=false 等）本质
+    // 是"用户未在设置里开启 AI 数据发送/签署协议"——抛 AIConsentRequiredError
+    //（code=ai_consent_required，不可重试），前端据此引导用户去设置页。
+    throw new AIConsentRequiredError();
   }
 
   const provider = createProvider(textRes.providerName, textRes.providerConfig);

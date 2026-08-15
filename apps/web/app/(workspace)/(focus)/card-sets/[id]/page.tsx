@@ -102,15 +102,24 @@ export default function CardSetPage() {
     () => detail ? [...detail.cards].sort(compareCardSetMembers) : [],
     [detail],
   );
-  const overviewCard = orderedCards.find(
-    (item) => item.card.scope === "overview",
-  ) ?? null;
-  const sectionCards = orderedCards.filter(
-    (item) => item.card.id !== overviewCard?.card.id,
-  );
-  const selectedCard = orderedCards.find(
-    (item) => item.card.id === selectedCardId,
-  ) ?? orderedCards[0] ?? null;
+  // F#7（🟡16）：overviewCard / sectionCards / selectedCard 合并为一次派生，
+  // 把原先针对 orderedCards 的多次 .find/.filter 收拢进单趟 memo。
+  const { overviewCard, sectionCards, selectedCard } = useMemo(() => {
+    if (orderedCards.length === 0) {
+      return { overviewCard: null, sectionCards: [] as typeof orderedCards, selectedCard: null };
+    }
+    let overview: (typeof orderedCards)[number] | null = null;
+    for (const item of orderedCards) {
+      if (item.card.scope === "overview" && !overview) overview = item;
+    }
+    const overviewId = overview?.card.id ?? null;
+    const sections: typeof orderedCards = overviewId === null
+      ? orderedCards
+      : orderedCards.filter((item) => item.card.id !== overviewId);
+    const selected = orderedCards.find((item) => item.card.id === selectedCardId)
+      ?? orderedCards[0] ?? null;
+    return { overviewCard: overview, sectionCards: sections, selectedCard: selected };
+  }, [orderedCards, selectedCardId]);
   const selectedEvidenceCardId = selectedCard?.card.id ?? null;
 
   useEffect(() => {
@@ -235,6 +244,21 @@ export default function CardSetPage() {
     }
   }, [action, cardSetId]);
 
+  // F#7（🟡16）：evidenceGroups 自身 memo（避免 unstable dep）+ activeEvidenceGroup/
+  // activeKeyPoint 合并派生 memo。hook 必须在任何 early return（loadError/
+  // !detail 分支）之前调用（react-hooks/rules-of-hooks，2026-08-15 构建修复
+  // 上提）。
+  const evidenceGroups = useMemo(() => evidence ?? [], [evidence]);
+  const { activeEvidenceGroup, activeKeyPoint } = useMemo(() => {
+    const group = openKeyPointId
+      ? evidenceGroups.find((g) => g.keyPoint.id === openKeyPointId)
+      : null;
+    const keyPoint = selectedCard?.keyPoints.find(
+      (kp) => kp.id === openKeyPointId,
+    );
+    return { activeEvidenceGroup: group, activeKeyPoint: keyPoint };
+  }, [evidenceGroups, openKeyPointId, selectedCard]);
+
   if (loadError && !detail) {
     return (
       <main className="card-set-detail" data-page-root>
@@ -284,14 +308,6 @@ export default function CardSetPage() {
     isOwner
     && cardSet.status !== "archived"
     && cardSet.status !== "superseded";
-  const evidenceGroups = evidence ?? [];
-  const activeEvidenceGroup = openKeyPointId
-    ? evidenceGroups.find((group) => group.keyPoint.id === openKeyPointId)
-    : null;
-  const activeKeyPoint = selectedCard?.keyPoints.find(
-    (keyPoint) => keyPoint.id === openKeyPointId,
-  );
-
   return (
     <main className="card-set-detail" data-page-root>
       <CardSetHeader>
@@ -628,14 +644,17 @@ function appendUniqueCardSetMembers(
   ];
 }
 
+// F#7（第六轮 🟠3 扩展）：Intl 构造器提升为模块级单例。
+const cardSetDateFmt = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+
 function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "日期未知";
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  }).format(date);
+  return cardSetDateFmt.format(date);
 }
 
 function shortId(value: string): string {

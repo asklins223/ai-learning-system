@@ -1,5 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
 import { noteVersions } from "../../db/schema/note.ts";
@@ -142,7 +141,10 @@ export async function cardJobRoutes(app: FastifyInstance) {
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       {
         noteVersionId: body.noteVersionId,
-        idempotencyKey: `card-generate:${randomUUID()}`,
+        // N#7-4: 幂等键改为确定性派生（来自 noteVersionId），使同 noteVersionId 的
+        // 双击/HTTP 重试/客户端重放命中 createCardGenerationRun 的去重逻辑，避免重复 AI 派发。
+        // 参照 card-set/service.ts 的确定性键模式。
+        idempotencyKey: `card-generate:${body.noteVersionId}`,
       },
     );
     return getGenerationRunStatus(

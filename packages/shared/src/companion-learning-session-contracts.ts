@@ -4,7 +4,6 @@
  * SHA-256 implementation uses Node's crypto module and must never enter a
  * Next client bundle.
  */
-import { canonicalJsonV1, sha256Utf8V1 } from "./content-hash.ts";
 
 // ─── 学习会话域枚举（2026-08-12 契约收口）────────────────────────────────
 // SQL 迁移为权威（0074 learning_sessions/episodes status CHECK、
@@ -61,30 +60,4 @@ export interface CompanionLearningSessionContextRevisionInputV1 {
   sessionUpdatedAt: string;
   episodeUpdatedAt: string;
   answerLocked: boolean;
-}
-
-/**
- * Unique server-side revision entry point. Timestamps and answer lock are
- * included so a grant becomes stale after a learning state transition;
- * pageInstanceId remains an ephemeral page boundary and is excluded.
- */
-export function computeCompanionLearningSessionContextRevisionV1(
-  input: CompanionLearningSessionContextRevisionInputV1,
-): string {
-  return sha256Utf8V1(canonicalJsonV1({
-    version: 1,
-    sessionId: input.sessionId,
-    episodeId: input.episodeId,
-    cardId: input.cardId,
-    keyPointId: input.keyPointId,
-    sessionStatus: input.sessionStatus,
-    episodeStatus: input.episodeStatus,
-    processingPhase: input.processingPhase,
-    episodeEpoch: input.episodeEpoch,
-    planHash: input.planHash,
-    contentExposureKey: input.contentExposureKey,
-    sessionUpdatedAt: input.sessionUpdatedAt,
-    episodeUpdatedAt: input.episodeUpdatedAt,
-    answerLocked: input.answerLocked,
-  }));
 }

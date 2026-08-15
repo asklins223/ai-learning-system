@@ -19,5 +19,9 @@ export const sessions = pgTable(
     // 2026-08-12（schema 完整性审计）：0001:9 sessions_user_idx 此前未声明
     userIdx: index("sessions_user_idx").on(t.userId),
 
-    workspaceUserIdx: index("sessions_workspace_user_idx").on(t.workspaceId, t.userId),}),
+    workspaceUserIdx: index("sessions_workspace_user_idx").on(t.workspaceId, t.userId),
+    // 2026-08-12（generate 对齐）：0159 定义单列 (expires_at) 索引，支撑过期清理
+    // （ailearn_purge_expired_sessions / 会话扫描），避免全表扫。
+    expiresAtIdx: index("sessions_expires_at_idx").on(t.expiresAt),
+  }),
 );

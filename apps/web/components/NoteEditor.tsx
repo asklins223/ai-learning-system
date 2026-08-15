@@ -93,6 +93,7 @@ import { PreviewOutlineSidebar } from "./note-editor/PreviewOutlineSidebar";
 import { EditorSection } from "./note-editor/EditorSection";
 // PERF-04 拆分（第十四轮）：生成展示计算和笔记操作逻辑提取为自定义 Hook
 import { useGenerationPresentation } from "./note-editor/useGenerationPresentation";
+import { useAIConsentGate } from "@/lib/ai-consent-gate";
 import { useNoteActions } from "./note-editor/useNoteActions";
 // Props 类型别名——保持向后兼容
 interface Props extends NoteEditorProps {}
@@ -404,18 +405,23 @@ export function NoteEditor({
 
   const previewBlocks = useMemo(() => markdownToBlocks(source), [source]);
   const blockDelta = previewBlocks.length - initialBlockCountRef.current;
-  const wordCount = source.replace(/\s/g, "").length;
+  // F8：wordCount 逐击键全串正则→useMemo，仅在 source 变化时重算。
+  const wordCount = useMemo(() => source.replace(/\s/g, "").length, [source]);
   const allOutlineBlocks = useMemo(
     () => previewBlocks.filter((block) => block.type === "heading"),
     [previewBlocks],
   );
   const outlineBlocks = allOutlineBlocks;
-  const previewOutlineBlocks = useMemo(
-    () => hasDuplicateArticleLeadHeading(source, title)
+  // F24（round4）：previewOutlineBlocks 仅在预览模式被消费（PreviewOutlineSidebar
+  // 与滚动跟踪 effect 都 gate 在 mode==="preview"）。编辑态跳过其中
+  // hasDuplicateArticleLeadHeading（逐击键扫描标题文本的正则）计算——编辑模式
+  // 下该值只需一致即可，切到 preview 时再完整计算。
+  const previewOutlineBlocks = useMemo(() => {
+    if (mode !== "preview") return allOutlineBlocks;
+    return hasDuplicateArticleLeadHeading(source, title)
       ? allOutlineBlocks.slice(1)
-      : allOutlineBlocks,
-    [allOutlineBlocks, source, title],
-  );
+      : allOutlineBlocks;
+  }, [allOutlineBlocks, source, title, mode]);
 
   const savingPres = savingStatePresentation(saving, dirty);
 
@@ -773,7 +779,10 @@ export function NoteEditor({
     setDirty(true);
   }, []);
 
-  function updateSource(next: string) {
+  // F8：useCallback 稳定 updateSource——读写仅依赖 refs/稳定 setState/极少
+  // 变化的 isOwner/leaving/deleting，故 `[]`-级稳定；EditorSection memo 需
+  // onSourceChange 引用稳定方才有效。
+  const updateSource = useCallback(function updateSource(next: string) {
     if (!isOwner) return;
     if (
       leaving ||
@@ -787,7 +796,8 @@ export function NoteEditor({
     setSource(next);
     syncDirty();
     scheduleSave();
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOwner, leaving, deleting, setSource, syncDirty, scheduleSave]);
 
   // PERF-04 拆分（第十轮）：图片上传逻辑委托给 useImageUploads hook。
   // 使用 ref 包装 updateSource 和 isLocked，确保 hook 内部 useCallback 依赖稳定。
@@ -819,7 +829,8 @@ export function NoteEditor({
     isLocked: isImageUploadLocked,
   });
 
-  function updateTitle(next: string) {
+  // F8：useCallback 稳定 updateTitle——同 updateSource，使 onTitleChange 稳定。
+  const updateTitle = useCallback(function updateTitle(next: string) {
     if (!isOwner || ownerLoading) return;
     if (
       leaving ||
@@ -843,7 +854,8 @@ export function NoteEditor({
       latestDraftRef.current.source !== lastSavedSourceRef.current || titleChanged,
     );
     scheduleSave();
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOwner, ownerLoading, leaving, deleting, setTitle, setIsAutoTitle, setDirty, scheduleSave]);
 
   // PERF-04 拆分（第十三轮）：冲突解决逻辑提取到 useConflictResolution hook
   const {
@@ -917,16 +929,24 @@ export function NoteEditor({
     updateSource,
   });
 
+  // F8：稳定 onOpenVersions 引用（EditorSection memo 需要回调身份稳定）。
+  const handleOpenVersions = useCallback(() => {
+    setInspectorView("versions");
+    setInspectorOpen(true);
+  }, [setInspectorView, setInspectorOpen]);
+
   // PERF-04 拆分（第十三轮）：beforeunload 和卸载清理已移至 useNoteSave hook
 
   // PERF-04 拆分（第十二轮）：5 个生成动作函数提取为 useGenerationActions hook
   const {
     generateCard,
+    generateCardV2,
     cancelGenerationRun,
     retryGenerationRun,
     restartGenerationRun,
     forceRegenerate,
   } = useGenerationActions({
+    noteId,
     uploadingCount,
     imageUploads,
     generationRunId,
@@ -965,6 +985,29 @@ export function NoteEditor({
     endSession,
   });
 
+  // 2026-08-13（AI 协议前置判断）：生成学习卡前先检查 consent——未同意
+  // 时弹窗引导到设置页（不静默失败）。
+  const { requireConsent, dialog: aiConsentDialog } = useAIConsentGate();
+  const guardedGenerate = useCallback(async (): Promise<void> => {
+    if (!(await requireConsent())) return;
+    await generateCard();
+  }, [requireConsent, generateCard]);
+
+  // V2（方案 20 §19.1）：价值优先生成。flag 关闭或后端 404 时回退 legacy（不打扰）。
+  const { isCardGenerationV2Enabled } = require("@/lib/feature-flags");
+  const v2GenerationEnabled = isCardGenerationV2Enabled();
+  const guardedGenerateV2 = useCallback(async (): Promise<void> => {
+    if (!(await requireConsent())) return;
+    const started = await generateCardV2({
+      sourceScope: "whole_note",
+      learningGoal: "understand",
+      detailThreshold: "balanced",
+      hardMaxCards: null,
+      preferredStrategies: [],
+    });
+    if (!started) await generateCard();
+  }, [requireConsent, generateCardV2, generateCard]);
+
   const generatedIsCurrent = generatedVersionId === currentVersionId && !dirty;
   const generationNeedsAttention = generationRun?.status === "needs_attention";
   const generationPartialReady = generationRun?.status === "partial_ready";
@@ -994,7 +1037,9 @@ export function NoteEditor({
     failedImageUploadCount > 0 ||
     hasUnresolvedImagePlaceholder;
   // PERF-04 拆分（第十二轮）：genButton IIFE 提取为纯函数 computeGenButton
-  const genButton = computeGenButton({
+  // F8：useMemo 稳定 genButton 引用（EditorFooter memo 需要）——仅当生成相关
+  // 状态变化时重算，逐击键不重建。
+  const genButton = useMemo(() => computeGenButton({
     genState,
     generationOverlayDismissed,
     generationPartialReady,
@@ -1016,8 +1061,26 @@ export function NoteEditor({
       setGenerationResolutionError(null);
       setGenerationFailureDialogOpen(true);
     },
-    onGenerate: generateCard,
-  });
+    onGenerate: guardedGenerate,
+  }), [
+    genState,
+    generationOverlayDismissed,
+    generationPartialReady,
+    hasGeneratedResult,
+    generationNeedsAttention,
+    isOwner,
+    generatedVersionId,
+    generatedIsCurrent,
+    hasWritableContent,
+    generationBlocked,
+    conflictData,
+    uploadingCount,
+    failedImageUploadCount,
+    hasUnresolvedImagePlaceholder,
+    generatedCardHref,
+    router,
+    guardedGenerate,
+  ]);
 
   // PERF-04 拆分（第十四轮）：导出和返回操作提取到 useNoteActions hook
   const { handleExport, returnToLibrary } = useNoteActions({
@@ -1094,6 +1157,8 @@ export function NoteEditor({
       data-preview-outline-mode={previewOutlineMode}
       data-generation-active={generationOverlayActive ? "true" : undefined}
     >
+      {/* 2026-08-13（AI 协议前置判断）：未同意协议时点击生成的引导弹窗 */}
+      {aiConsentDialog}
       <TopBar
         returnLabel={returnLabel}
         leaving={leaving}
@@ -1245,10 +1310,9 @@ export function NoteEditor({
           onDiscardRecoveredConflictDraft={discardRecoveredConflictDraft}
           onRestoreDiscardedDraft={restoreDiscardedDraft}
           onApplyStarterTemplate={applyStarterTemplate}
-          onOpenVersions={() => {
-            setInspectorView("versions");
-            setInspectorOpen(true);
-          }}
+          onOpenVersions={handleOpenVersions}
+          v2Enabled={v2GenerationEnabled}
+          onGenerateV2={guardedGenerateV2}
         />
 
       </div>

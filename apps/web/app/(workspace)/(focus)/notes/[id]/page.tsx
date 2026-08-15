@@ -2,8 +2,9 @@
 
 import "@/app/styles/note-editor.css";
 import "@/app/styles/milkdown-editor.css";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import Link from "next/link";
 import { api, ApiError, CardGenerationStatus, NoteDetail } from "@/lib/api";
 import { NoteEditor } from "@/components/NoteEditor";
@@ -28,6 +29,20 @@ import { sanitizeTodayReturnTarget } from "@/lib/today-return";
  */
 export default function NotePage() {
   const params = useParams<{ id: string }>();
+  const noteId = params?.id;
+  // P5（文档 16 §14.6）：笔记详情/编辑器发布 bounded context。
+  // F#7（第六轮 🟡8）：useMemo 稳定对象，避免 hook 内 JSON.stringify 每渲重跑。
+  useMainPageContext(useMemo(
+    () => noteId ? {
+      routeRef: { kind: "note", noteId },
+      pageKind: "note",
+      entityRefs: [{ kind: "note", noteId }],
+      interactionState: "editing",
+      capabilityHints: [],
+      sensitivity: "normal",
+    } : null,
+    [noteId],
+  ));
   const searchParams = useSearchParams();
   const searchReturnTarget = sanitizeSearchReturnTarget(searchParams.get("returnTo"));
   const todayReturnTarget = sanitizeTodayReturnTarget(searchParams.get("returnTo"));

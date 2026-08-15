@@ -45,6 +45,10 @@ export interface ChatOptions {
   maxTokens?: number;
   model?: string;
   responseFormat?: "json_object" | "text";
+  /** 2026-08-12+（15a 新反馈）：显式关闭 provider 思考模式（如 DeepSeek
+   *  系模型的 enable_thinking）。优先级高于平台配置/env——companion 日常
+   *  对话用它换取首 token 速度（陪伴聊天快比准重要）。 */
+  disableThinking?: boolean;
 }
 
 /** Chat 调用结果 */

@@ -63,8 +63,11 @@ export default function LoginPage() {
   const { mounted } = useTheme();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  // 默认使用 sessionStorage；只有用户在私人设备上明确选择后才持久化。
-  const [remember, setRemember] = useState(false);
+  // 2026-08-13（客户端登录态修复）：默认勾选"记住登录"——桌面客户端
+  // 重启后应自动保留登录态（session cookie 在 Electron 退出即失效）。
+  // 原默认 false → 每次重启都要重新登录。私人设备场景默认持久化符合
+  // 产品预期；公共设备用户可手动取消勾选。
+  const [remember, setRemember] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [error, setError] = useState<string | null>(null);

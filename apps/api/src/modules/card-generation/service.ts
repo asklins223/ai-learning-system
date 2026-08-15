@@ -25,10 +25,15 @@ import {
   SupervisorShellStage,
   isFeedbackCollectionEnabled,
   isRunErrorRetryable,
-  resolveSystemProviderForCapability,
-  resolveSystemPlatform,
 } from "@ailearn/shared";
+import { resolveSystemProviderForCapability } from "@ailearn/shared/task-router";
+import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
+import {
+  isCardGenerationV1WriterEnabled,
+  isCardGenerationV2Enabled,
+} from "../../config/learning-companion-flags.ts";
+import { recordLegacyWriterHit } from "../card-generation-v2/legacy-consumer-audit.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { learningCards } from "../../db/schema/card.ts";
 import { cardGenerationAgentEvents,
@@ -711,14 +716,15 @@ export async function createCardGenerationRun(
   input: CreateCardGenerationRunInput & { oldCardId?: string },
 ): Promise<CardGenerationRunAccepted> {
   return withWorkspaceTransaction(context, async (tx) => {
-    // C8（R36 恢复，R33 实现被并行提交覆盖）：V2 已启用且 V1 writer 未显式
-    // 开启 → V1 生成直接 409 fail closed（防双 writer/旧 schema 反写）。
-    const { isCardGenerationV2Enabled, isCardGenerationV1WriterEnabled } = await import("../../config/learning-companion-flags.ts");
+    // §26 C8：V1 旧 writer 停写门禁。V2 启用（CARD_GENERATION_V2_ENABLED=true）
+    // 且未显式开启 V1 writer（CARD_GENERATION_V1_WRITER_ENABLED=true）时，
+    // V1 生成一律拒绝（fail closed）——防双 writer 与旧 schema 反写
+    // （C39：cutover 后只 pause/forward-fix，不反写旧 schema）。
     if (isCardGenerationV2Enabled() && !isCardGenerationV1WriterEnabled()) {
       throw new CardGenerationServiceError(
         "v1_writer_disabled",
         409,
-        "Card Generation V2 已启用且 V1 writer 未开启；V1 生成路径已停写",
+        "V1 卡片生成已停写（C8 cutover）；请改用 V2 生成路径",
       );
     }
     await tx.execute(sql`
@@ -739,21 +745,6 @@ export async function createCardGenerationRun(
           "idempotency_key_reused",
           409,
           "幂等键已被另一请求使用",
-        );
-      }
-      // N#8-3: 终态失败/取消的 run 不盲重放——否则同一个确定性幂等键（如 card-generate:${noteVersionId}）
-      // 会永久命中死 run，每次重试都返回失败 run、无清键/重试路径。此处抛 distinguishable 错误，
-      // 提示调用方用"新幂等键"重新派发（V1 writer 场景：改笔记→新 noteVersion→新键，或前端以此码
-      // 派生 attempt 后缀键重试）。活跃 run（幂等语义）与终态成功/部分就绪 run 仍正常重放。
-      const terminalFailure =
-        replay.status === SupervisorRunStatus.NEEDS_ATTENTION ||
-        replay.status === SupervisorRunStatus.CANCELLED ||
-        replay.status === SupervisorRunStatus.SUPERSEDED;
-      if (terminalFailure) {
-        throw new CardGenerationServiceError(
-          "run_terminal_failed",
-          409,
-          "幂等键对应的 run 已终态失败/取消；请使用新的幂等键重新发起",
         );
       }
       try {
@@ -1006,16 +997,6 @@ export async function createCardGenerationRun(
       })
       .returning();
 
-    // C8（R36 恢复）：V1 writer 放行路径记录 legacy hit 探针（观察窗口计数）。
-    const { recordLegacyWriterHit } = await import("../card-generation-v2/legacy-consumer-audit.ts");
-    await recordLegacyWriterHit(tx, {
-      runId: run.id,
-      workspaceId: context.workspaceId,
-      writerKind: "v1_supervisor",
-      hitAt: now.toISOString(),
-      note: "v1 writer allowed (CARD_GENERATION_V1_WRITER_ENABLED=true)",
-    });
-
     await tx
       .update(notes)
       .set({
@@ -1024,6 +1005,17 @@ export async function createCardGenerationRun(
         updatedAt: now,
       })
       .where(and(eq(notes.id, note.id), eq(notes.workspaceId, context.workspaceId)));
+
+    // §26 C0/C8：V1 旧 writer 命中探针（sidecar，不阻塞 V1 运行）。
+    // C8 Gate 检查观察窗口 hit=0 后方可停写 V1；fast/planned/fallback 为
+    // worker 内部路由细分，API 入口统一记 supervisor 命中。
+    await recordLegacyWriterHit(tx, {
+      runId: run.id,
+      workspaceId: context.workspaceId,
+      writerKind: "v1_supervisor",
+      hitAt: now.toISOString(),
+      note: "V1 supervisor run created (C8 probe)",
+    });
 
     await tx.insert(cardGenerationEvents).values({
       runId: run.id,

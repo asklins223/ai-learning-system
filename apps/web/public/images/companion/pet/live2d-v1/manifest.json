@@ -1,67 +1,67 @@
 {
- "schemaVersion": 1,
- "modelId": "companion-live2d-mao-pro-v1",
- "displayName": "Mao PRO (P4 production-internal)",
- "status": "production",
- "ownerApproved": {
-  "by": "Owner",
-  "date": "2026-08-11",
-  "note": "用户批准：使用当前在用的 Live2D 模型（Mao PRO）作为 P4 角色模型"
- },
- "source": {
-  "repository": "EchoBot",
-  "repositoryUrl": "https://github.com/KdaiP/EchoBot",
-  "commit": "08e97a4a33b2ab611d24dd997038c1ec95ac6926",
-  "sourcePath": "echobot/app/builtin_live2d/mao_pro_en",
-  "repositoryLicense": "MIT",
-  "repositoryLicenseFile": "EchoBot-LICENSE"
- },
- "modelLicense": {
-  "name": "Live2D Free Material License Agreement and Terms of Use",
-  "termsUrl": "https://www.live2d.com/en/download/sample-data/",
-  "readme": "ReadMe.txt",
-  "acceptanceRequired": true,
-  "commercialReleaseAllowed": true,
-  "redistributionAllowed": false,
-  "usage": "免费使用（Owner 确认 2026-08-11：Live2D Free Material 免费，无需商业许可）；再分发仍受 Live2D Free Material 条款约束（redistributionAllowed=false）"
- },
- "runtime": {
-  "model3": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.model3.json",
-  "moc3": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.moc3",
-  "texture": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.4096/texture_00.png",
-  "physics": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.physics3.json",
-  "pose": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.pose3.json",
-  "displayInfo": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.cdi3.json"
- },
- "vendorScripts": [
-  "/live2d-dev/vendor/pixi.min.js",
-  "/live2d-dev/vendor/live2dcubismcore.min.js",
-  "/live2d-dev/vendor/cubism4.min.js"
- ],
- "fileSha256": {
-  "mao-pro/runtime/mao_pro.model3.json": "27b71a0e5476d870ba69d1b52f5bd068ed5a03113739b4f5337e579e954b7e2a",
-  "mao-pro/runtime/mao_pro.moc3": "247d028f9900be2a46e4530816ece5749524d35013ba77424bd943598e0e54ff",
-  "mao-pro/runtime/mao_pro.4096/texture_00.png": "0a5f5436f26dcc908cf7c5ec1f8b54ff36b895cacaf9804daba31b92d424c594",
-  "mao-pro/runtime/mao_pro.pose3.json": "efac160eccb7183ee6555d4e53a739042e1c55b92f59a99c2e4bed8e73a5ab91",
-  "mao-pro/runtime/mao_pro.cdi3.json": "ec699097d81d19bee7d4dda85dc85d8261e1d3de032faae857452cf7d99e4c58",
-  "mao-pro/runtime/mao_pro.physics3.json": "b52221fe919dd7b84b74e594f50ac9a7878bf3a128ab6b4e3153447a037e2055",
-  "mao-pro/runtime/expressions/exp_01.exp3.json": "afbe54559e428acdaf43190d1c497792048c35ed37979f33d9a37c70181ddf5b",
-  "mao-pro/runtime/expressions/exp_02.exp3.json": "6d35132627f9e362e526c0ce8c2152ece2b305c9abd3368da43460c2af8538f6",
-  "mao-pro/runtime/expressions/exp_03.exp3.json": "460a3077d61adfdd1e6b9a062d0d7c3fcc2fb74c80f67ec3649982a9fab49bee",
-  "mao-pro/runtime/expressions/exp_04.exp3.json": "abad61f4ec7f1a157d6b914643e5bd4ffb29964e67f538cace420ebc9f69a716",
-  "mao-pro/runtime/expressions/exp_05.exp3.json": "331fe0d9c78861496a9cc9acba9650f295a72af8c36df7036ab8a372840d2cc1",
-  "mao-pro/runtime/expressions/exp_06.exp3.json": "52f1e391008d61efb17a33602c004a637a42bdb8af8aca3d2319ac5dac215ed1",
-  "mao-pro/runtime/expressions/exp_07.exp3.json": "8bf587d3d7bef509166c8ff95cc9f47c23c895eaf55f9d95110263e44452a53a",
-  "mao-pro/runtime/expressions/exp_08.exp3.json": "761190452e48d22727fce91e76270af2c27b0bb0ee3d04b2c6b0dc6cec49f88d",
-  "mao-pro/runtime/motions/mtn_01.motion3.json": "5456d9ee0b2e13ab1174918a077490cb79fb3f73cad74c962f5f78214e98b007",
-  "mao-pro/runtime/motions/mtn_02.motion3.json": "d5d4bd768336d88839d3e8d17802c8ce4fe4f232bd06b7507e02bd876f15a9d6",
-  "mao-pro/runtime/motions/mtn_03.motion3.json": "2e7f784918acde7c6cac0e9243cf5f826f64b4f18fadc3d27069f92c46679c5f",
-  "mao-pro/runtime/motions/mtn_04.motion3.json": "c84387bde7f862fda9f5e8fa29703664623649828de585650d170045f86a6bbc",
-  "mao-pro/runtime/motions/special_01.motion3.json": "846d5bbac4fc80c7451688f5d56a5cb60f01d951b5c719a36bbdfa46fe08b49f",
-  "mao-pro/runtime/motions/special_02.motion3.json": "6bc5d29371ea5edffe030271bd09a1a4fd51d35eaa511d977fbfb5703de75a57",
-  "mao-pro/runtime/motions/special_03.motion3.json": "5e3b89bb95f5abe067cdec47395c19c88882846051b4b35e5f7c8bc875b83d17",
-  "/live2d-dev/vendor/pixi.min.js": "403f2f2ee8145fa17f60c5c89403056efe2680e5096ec2762036486914ed19c5",
-  "/live2d-dev/vendor/live2dcubismcore.min.js": "942783587666a3a1bddea93afd349e26f798ed19dcd7a52449d0ae3322fcff7c",
-  "/live2d-dev/vendor/cubism4.min.js": "af1267e6d52759b245766c578d905bfa025b532d5c3cc727c370957c4409e21b"
- }
+  "schemaVersion": 1,
+  "modelId": "companion-live2d-mao-pro-v1",
+  "displayName": "Mao PRO (P4 production-internal)",
+  "status": "production",
+  "ownerApproved": {
+    "by": "Owner",
+    "date": "2026-08-11",
+    "note": "用户批准：使用当前在用的 Live2D 模型（Mao PRO）作为 P4 角色模型"
+  },
+  "source": {
+    "repository": "EchoBot",
+    "repositoryUrl": "https://github.com/KdaiP/EchoBot",
+    "commit": "08e97a4a33b2ab611d24dd997038c1ec95ac6926",
+    "sourcePath": "echobot/app/builtin_live2d/mao_pro_en",
+    "repositoryLicense": "MIT",
+    "repositoryLicenseFile": "EchoBot-LICENSE"
+  },
+  "modelLicense": {
+    "name": "Live2D Free Material License Agreement and Terms of Use",
+    "termsUrl": "https://www.live2d.com/en/download/sample-data/",
+    "readme": "ReadMe.txt",
+    "acceptanceRequired": true,
+    "commercialReleaseAllowed": true,
+    "redistributionAllowed": false,
+    "usage": "免费使用（Owner 确认 2026-08-11：Live2D Free Material 免费，无需商业许可）；再分发仍受 Live2D Free Material 条款约束（redistributionAllowed=false）"
+  },
+  "runtime": {
+    "model3": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.model3.json",
+    "moc3": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.moc3",
+    "texture": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.4096/texture_00.png",
+    "physics": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.physics3.json",
+    "pose": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.pose3.json",
+    "displayInfo": "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.cdi3.json"
+  },
+  "vendorScripts": [
+    "/live2d-dev/vendor/pixi.min.js",
+    "/live2d-dev/vendor/live2dcubismcore.min.js",
+    "/live2d-dev/vendor/cubism4.min.js"
+  ],
+  "fileSha256": {
+    "mao-pro/runtime/mao_pro.model3.json": "27b71a0e5476d870ba69d1b52f5bd068ed5a03113739b4f5337e579e954b7e2a",
+    "mao-pro/runtime/mao_pro.moc3": "247d028f9900be2a46e4530816ece5749524d35013ba77424bd943598e0e54ff",
+    "mao-pro/runtime/mao_pro.4096/texture_00.png": "0a5f5436f26dcc908cf7c5ec1f8b54ff36b895cacaf9804daba31b92d424c594",
+    "mao-pro/runtime/mao_pro.pose3.json": "efac160eccb7183ee6555d4e53a739042e1c55b92f59a99c2e4bed8e73a5ab91",
+    "mao-pro/runtime/mao_pro.cdi3.json": "ec699097d81d19bee7d4dda85dc85d8261e1d3de032faae857452cf7d99e4c58",
+    "mao-pro/runtime/mao_pro.physics3.json": "b52221fe919dd7b84b74e594f50ac9a7878bf3a128ab6b4e3153447a037e2055",
+    "mao-pro/runtime/expressions/exp_01.exp3.json": "afbe54559e428acdaf43190d1c497792048c35ed37979f33d9a37c70181ddf5b",
+    "mao-pro/runtime/expressions/exp_02.exp3.json": "6d35132627f9e362e526c0ce8c2152ece2b305c9abd3368da43460c2af8538f6",
+    "mao-pro/runtime/expressions/exp_03.exp3.json": "460a3077d61adfdd1e6b9a062d0d7c3fcc2fb74c80f67ec3649982a9fab49bee",
+    "mao-pro/runtime/expressions/exp_04.exp3.json": "abad61f4ec7f1a157d6b914643e5bd4ffb29964e67f538cace420ebc9f69a716",
+    "mao-pro/runtime/expressions/exp_05.exp3.json": "331fe0d9c78861496a9cc9acba9650f295a72af8c36df7036ab8a372840d2cc1",
+    "mao-pro/runtime/expressions/exp_06.exp3.json": "52f1e391008d61efb17a33602c004a637a42bdb8af8aca3d2319ac5dac215ed1",
+    "mao-pro/runtime/expressions/exp_07.exp3.json": "8bf587d3d7bef509166c8ff95cc9f47c23c895eaf55f9d95110263e44452a53a",
+    "mao-pro/runtime/expressions/exp_08.exp3.json": "761190452e48d22727fce91e76270af2c27b0bb0ee3d04b2c6b0dc6cec49f88d",
+    "mao-pro/runtime/motions/mtn_01.motion3.json": "5456d9ee0b2e13ab1174918a077490cb79fb3f73cad74c962f5f78214e98b007",
+    "mao-pro/runtime/motions/mtn_02.motion3.json": "d5d4bd768336d88839d3e8d17802c8ce4fe4f232bd06b7507e02bd876f15a9d6",
+    "mao-pro/runtime/motions/mtn_03.motion3.json": "2e7f784918acde7c6cac0e9243cf5f826f64b4f18fadc3d27069f92c46679c5f",
+    "mao-pro/runtime/motions/mtn_04.motion3.json": "c84387bde7f862fda9f5e8fa29703664623649828de585650d170045f86a6bbc",
+    "mao-pro/runtime/motions/special_01.motion3.json": "846d5bbac4fc80c7451688f5d56a5cb60f01d951b5c719a36bbdfa46fe08b49f",
+    "mao-pro/runtime/motions/special_02.motion3.json": "6bc5d29371ea5edffe030271bd09a1a4fd51d35eaa511d977fbfb5703de75a57",
+    "mao-pro/runtime/motions/special_03.motion3.json": "5e3b89bb95f5abe067cdec47395c19c88882846051b4b35e5f7c8bc875b83d17",
+    "/live2d-dev/vendor/pixi.min.js": "403f2f2ee8145fa17f60c5c89403056efe2680e5096ec2762036486914ed19c5",
+    "/live2d-dev/vendor/live2dcubismcore.min.js": "942783587666a3a1bddea93afd349e26f798ed19dcd7a52449d0ae3322fcff7c",
+    "/live2d-dev/vendor/cubism4.min.js": "af1267e6d52759b245766c578d905bfa025b532d5c3cc727c370957c4409e21b"
+  }
 }

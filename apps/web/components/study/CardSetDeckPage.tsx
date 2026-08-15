@@ -153,6 +153,10 @@ export function CardSetDeckPage() {
     void loadSets();
     return () => {
       loadRequestRef.current += 1;
+      // F24（round4）：卸载时同时递增 cardsRequestRef——否则卸载时在途的
+      // listCardSetCards 仍会 setCardsCache/setCardsError/setCardsLoading
+      // （loadSetCards 的竞态守卫只认 cardsRequestRef）。
+      cardsRequestRef.current += 1;
       if (collapseTimerRef.current !== null) {
         window.clearTimeout(collapseTimerRef.current);
       }

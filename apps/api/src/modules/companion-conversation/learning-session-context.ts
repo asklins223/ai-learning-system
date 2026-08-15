@@ -9,9 +9,33 @@
 
 import { sql } from "drizzle-orm";
 import {
-  computeCompanionLearningSessionContextRevisionV1,
   type CompanionLearningSessionContextV1,
+  type CompanionLearningSessionContextRevisionInputV1,
 } from "@ailearn/shared";
+import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
+
+// 2026-08-13（web 客户端打包修复）：revision 计算从 shared contracts 移入
+// api 侧——contracts 保持无 node 依赖（客户端可安全打包）。
+function computeCompanionLearningSessionContextRevisionV1(
+  input: CompanionLearningSessionContextRevisionInputV1,
+): string {
+  return sha256Utf8V1(canonicalJsonV1({
+    version: 1,
+    sessionId: input.sessionId,
+    episodeId: input.episodeId,
+    cardId: input.cardId,
+    keyPointId: input.keyPointId,
+    sessionStatus: input.sessionStatus,
+    episodeStatus: input.episodeStatus,
+    processingPhase: input.processingPhase,
+    episodeEpoch: input.episodeEpoch,
+    planHash: input.planHash,
+    contentExposureKey: input.contentExposureKey,
+    sessionUpdatedAt: input.sessionUpdatedAt,
+    episodeUpdatedAt: input.episodeUpdatedAt,
+    answerLocked: input.answerLocked,
+  }));
+}
 import type { ApiTransaction } from "../../db/client.ts";
 
 export interface CompanionLearningSessionContextRow {

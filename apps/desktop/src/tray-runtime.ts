@@ -21,6 +21,12 @@ export interface PetTrayOptions {
 export function setupPetTray(opts: PetTrayOptions): Tray | null {
   try {
     const icon = nativeImage.createFromPath(opts.iconPath);
+    // 2026-08-13（状态栏图标修复）：macOS 状态栏必须用 Template 图标
+    //（黑白 + alpha，系统自动适配深浅色）。此前用了 1024px 彩色应用图标
+    // → 状态栏显示巨大残缺贴图。空图标时回退 createEmpty（不炸）。
+    if (!icon.isEmpty()) {
+      icon.setTemplateImage(true);
+    }
     const tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
     const refresh = () => {
       tray.setContextMenu(

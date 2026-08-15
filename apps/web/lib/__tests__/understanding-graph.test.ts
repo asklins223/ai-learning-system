@@ -122,6 +122,45 @@ describe("understanding graph normalization and filtering", () => {
     assert.deepEqual(wrongState, { nodes: [], edges: [] });
   });
 
+  // F#（round4 leftover）：query + 状态/类型筛选同时启用走合并传播分支。
+  // 正例：query 命中某卡片点，跨状态把它所在级联带回；反例：query 只命中
+  // 另一状态的分支，选中状态下应无任何结果，且给定状态下的兄弟卡片不得
+  // 被命中链暴露出来。
+  it("matches lineage via merged propagation for combined query+type filters", () => {
+    const byClaim = filterUnderstandingGraph(fixture(), {
+      nodeTypes: ["card", "key_point"],
+      state: "reviewed",
+      query: "entropy", // 命中 card-a（misunderstood）下的 claim-a
+    });
+    assert.deepEqual(byClaim.nodes.map((item) => item.id), []);
+
+    const byOtherBranch = filterUnderstandingGraph(fixture(), {
+      nodeTypes: ["card", "key_point"],
+      state: "reviewed",
+      query: "subspace", // 命中 card-sibling → claim-sibling 分支
+    });
+    // 命中的 reviewed 分支整条级联可见；未命中的兄弟分支（card-b…
+    // claim-b）及其祖先不被不该出现的链路拖入。
+    assert.deepEqual(byOtherBranch.nodes.map((item) => item.id), [
+      "source-a",
+      "note-a",
+      "card-sibling",
+      "claim-sibling",
+    ]);
+
+    const reviewedTwo = filterUnderstandingGraph(fixture(), {
+      nodeTypes: ["card"],
+      state: "reviewed",
+      query: "head", // 命中卡片本人（Multi-head attention）
+    });
+    assert.deepEqual(reviewedTwo.nodes.map((item) => item.id), [
+      "source-a",
+      "note-a",
+      "card-sibling",
+      "claim-sibling",
+    ]);
+  });
+
   it("uses node type filters as lineage seeds and honors final visibility toggles", () => {
     const result = filterUnderstandingGraph(fixture(), {
       nodeTypes: ["card"],

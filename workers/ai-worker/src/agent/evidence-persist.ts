@@ -18,11 +18,18 @@
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
-import { db } from "../db.ts";
+import { db, type WorkerTransaction } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { PLANNER_VERSION, EMBEDDING_DIMENSIONS, EMBEDDING_PROFILE_VERSION } from "@ailearn/shared";
 import type { PlannableEvidence, BundlePlanResult } from "./bundle-planner.ts";
 import { logger } from "../lib/logger.ts";
+
+/**
+ * RLS 执行器：worker 侧所有带 workspace 写路径必须在 workspace 事务上下文
+ * （withWorkerWorkspaceTransaction 的同一连接）内执行——全局 db 连接池上的
+ * 其它连接没有 app.workspace_id，插入会被 RLS 拒绝。
+ */
+type EvidenceClient = typeof db | WorkerTransaction;
 
 /** refId 到 spanId/imageEvidenceUnitId 的映射 */
 export interface EvidenceRefMap {
@@ -55,8 +62,11 @@ export async function persistEvidenceAndBundles(params: {
   bundlePlan: BundlePlanResult;
   /** 创建时间戳 */
   now: Date;
+  /** RLS 执行器：workspace 事务上下文内传入 tx；否则用全局 db。 */
+  client?: EvidenceClient;
 }): Promise<EvidenceRefMap> {
   const { workspaceId, runId, noteVersionId, evidence, bundlePlan, now } = params;
+  const client = params.client ?? db;
   const refIdToSpanId = new Map<string, string>();
   const refIdToImageEvidenceId = new Map<string, string>();
 
@@ -65,7 +75,7 @@ export async function persistEvidenceAndBundles(params: {
   for (const ev of evidence) {
     if (ev.kind === "text_span") {
       const unitKey = ev.refId;
-      const [inserted] = await db
+      const [inserted] = await client
         .insert(schema.noteEvidenceSpans)
         .values({
           workspaceId,
@@ -89,7 +99,7 @@ export async function persistEvidenceAndBundles(params: {
         refIdToSpanId.set(ev.refId, inserted.id);
       } else {
         // 幂等命中：查询已有 span
-        const [existing] = await db
+        const [existing] = await client
           .select({ id: schema.noteEvidenceSpans.id })
           .from(schema.noteEvidenceSpans)
           .where(and(
@@ -113,7 +123,7 @@ export async function persistEvidenceAndBundles(params: {
 
   // ── 2. 持久化 source bundles 和 bundle members（幂等）──
   for (const bundle of bundlePlan.bundles) {
-    const [bundleRow] = await db.insert(schema.cardGenerationSourceBundles).values({
+    const [bundleRow] = await client.insert(schema.cardGenerationSourceBundles).values({
       workspaceId,
       runId,
       noteVersionId,
@@ -148,6 +158,7 @@ export async function persistEvidenceAndBundles(params: {
         refIdToSpanId,
         refIdToImageEvidenceId,
         now,
+        client,
       });
     }
 
@@ -165,6 +176,7 @@ export async function persistEvidenceAndBundles(params: {
         refIdToSpanId,
         refIdToImageEvidenceId,
         now,
+        client,
       });
     }
   }
@@ -186,15 +198,16 @@ async function insertBundleMember(params: {
   refIdToSpanId: Map<string, string>;
   refIdToImageEvidenceId: Map<string, string>;
   now: Date;
+  client: EvidenceClient;
 }): Promise<void> {
   const { workspaceId, runId, bundleId, memberOrdinal, refId, membership,
-    refIdToSpanId, refIdToImageEvidenceId, now } = params;
+    refIdToSpanId, refIdToImageEvidenceId, now, client } = params;
 
   const spanId = refIdToSpanId.get(refId);
   const imageEvidenceId = refIdToImageEvidenceId.get(refId);
 
   if (spanId) {
-    await db.insert(schema.cardGenerationSourceBundleMembers).values({
+    await client.insert(schema.cardGenerationSourceBundleMembers).values({
       workspaceId,
       runId,
       bundleId,
@@ -205,7 +218,7 @@ async function insertBundleMember(params: {
       createdAt: now,
     }).onConflictDoNothing();
   } else if (imageEvidenceId) {
-    await db.insert(schema.cardGenerationSourceBundleMembers).values({
+    await client.insert(schema.cardGenerationSourceBundleMembers).values({
       workspaceId,
       runId,
       bundleId,
@@ -246,8 +259,11 @@ export async function persistEvidenceEmbeddings(params: {
   refIdToSpanId: Map<string, string>;
   provider: EvidenceEmbeddingGenerator | null;
   now: Date;
+  /** RLS 执行器：workspace 事务上下文内传入 tx；否则用全局 db。 */
+  client?: EvidenceClient;
 }): Promise<void> {
   const { workspaceId, runId, noteVersionId, evidence, refIdToSpanId, provider, now } = params;
+  const client = params.client ?? db;
 
   // 无 provider（未配置 AI_PROVIDER_EMBEDDING 或创建失败）→ 跳过，不阻断 run
   if (!provider) {
@@ -355,7 +371,7 @@ export async function persistEvidenceEmbeddings(params: {
       // toISOString() 序列化后参数化插入成功。
       const ts = now.toISOString();
       for (const v of values) {
-        await db.execute(sql`
+        await client.execute(sql`
           INSERT INTO note_evidence_embeddings (
             id, workspace_id, note_version_id, evidence_ref_type, evidence_span_id,
             source_hash, input_hash, model_revision, dimensions, embedding,

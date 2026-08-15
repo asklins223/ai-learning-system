@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)",
     "test:v06:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/v06-migration-fresh-upgrade-repeat.integration.ts src/integration-tests/v06-rls-matrix-postgres.integration.ts src/integration-tests/v06-validation-session-postgres.integration.ts",
+    "test:learning-runs:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/learning-runs-postgres.integration.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
@@ -25,6 +26,8 @@
     "@fastify/cors": "^10.0.1",
     "@fastify/multipart": "^9.4.0",
     "@fastify/sensible": "^6.0.4",
+    "@fastify/websocket": "^11.3.0",
+    "@types/ws": "^8.18.1",
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.45.2",
@@ -32,6 +35,7 @@
     "pino": "^9.5.0",
     "postgres": "^3.4.5",
     "prom-client": "^15.1.0",
+    "ws": "^8.21.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

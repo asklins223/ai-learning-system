@@ -11,11 +11,13 @@
 
 import { z } from "zod";
 import { allowedMainRouteV1Schema } from "./desktop-pet-contracts.ts";
+import { allowedMainRouteV2Schema } from "./companion-bridge-contracts.ts";
 import { companionAccountStateV1Schema } from "./companion-shell-contracts.ts";
 import {
   characterCueEmotionV1Schema,
   characterCueIntentV1Schema,
 } from "./companion-character-contracts.ts";
+import { createLearningRunRequestSchema } from "./learning-run-contracts.ts";
 
 // ─── 基础 ────────────────────────────────────────────────────────────────
 
@@ -399,6 +401,42 @@ export const companionActionRunV1Schema = z.object({
 
 // ─── P5 §4.5 Learning action proposal（第一批冻结） ─────────────────────
 
+/**
+ * 方案 16 §18 plan_understanding_route 工具的请求合同（与
+ * POST /understanding/routes/plan 的 routePlanBodySchema 同构；共享侧为
+ * canonical，projection-routes 从此导入，禁止再本地复制一份）。
+ */
+export const understandingRoutePlanRequestV1Schema = z.object({
+  version: z.literal(1),
+  intent: z.enum(["repair_gap", "prepare_review", "explore_neighbors"]),
+  targetKeyPointId: z.string().uuid().optional(),
+  maxSteps: z.number().int().min(1).max(5),
+  lens: z.enum(["current_target", "evidence", "provenance", "issues"]),
+  filter: z.object({
+    showArchived: z.boolean(),
+    sourceId: z.string().uuid().optional(),
+    cardId: z.string().uuid().optional(),
+    relationKinds: z.array(z.string()).optional(),
+  }).passthrough(),
+  expectedCheckpointToken: z.string().min(1),
+  idempotencyKey: z.string().min(1).max(200),
+});
+export type UnderstandingRoutePlanRequestV1 = z.infer<typeof understandingRoutePlanRequestV1Schema>;
+
+/** §18.1 AssistantMemoryItemV1 kind（与 memory-service 一致）。 */
+export const assistantMemoryKindV1Schema = z.enum([
+  "preference",
+  "goal",
+  "learning_context",
+  "interaction_note",
+]);
+
+/** §18.1 defer_review 展示层 reason code（不修改 official dueAt）。 */
+export const deferReviewReasonCodeV1Schema = z.enum([
+  "user_requested",
+  "temporary_unavailable",
+]);
+
 export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("resume_session"), sessionId: z.string().uuid() }).strict(),
   z.object({
@@ -415,6 +453,79 @@ export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind"
     sessionId: z.string().uuid(),
     episodeId: z.string().uuid(),
     question: z.string().min(1).max(4_000),
+  }).strict(),
+  // 方案 16 §18：统一 LearningRun 工具（menu 候选直连 LearningRun API；
+  // 同步执行，confirm 后 proposal 直接 succeeded + resultRef=runId）。
+  z.object({
+    kind: z.literal("start_learning_run"),
+    request: createLearningRunRequestSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("resume_learning_run"),
+    runId: z.string().uuid(),
+  }).strict(),
+  // ── 方案 16 §18.1 工具网关（第二批：Orchestrator 动作工具全集） ──
+  // 全部为"用户确认后才执行"的业务动作；导航类同步 succeeded，业务类
+  // 事务内确定性执行（执行函数见 learning-action-bridge.ts）。
+  z.object({
+    kind: z.literal("pause_learning_run"),
+    runId: z.string().uuid(),
+  }).strict(),
+  z.object({
+    kind: z.literal("switch_task_variant"),
+    runId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    alternativeId: z.string().min(1).max(200),
+  }).strict(),
+  z.object({
+    kind: z.literal("request_hint_level"),
+    runId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    level: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  }).strict(),
+  z.object({
+    kind: z.literal("defer_review"),
+    scheduleId: z.string().uuid(),
+    // 乐观并发：schedule.generation 不匹配 → 409 ACTION_STALE。
+    scheduleGeneration: z.number().int().nonnegative(),
+    deferredUntil: z.string().datetime(),
+    reasonCode: deferReviewReasonCodeV1Schema,
+  }).strict(),
+  z.object({
+    kind: z.literal("plan_understanding_route"),
+    request: understandingRoutePlanRequestV1Schema,
+  }).strict(),
+  z.object({
+    kind: z.literal("focus_graph_node"),
+    keyPointId: z.string().uuid(),
+    lens: z.enum(["current_target", "evidence", "provenance", "issues"]),
+  }).strict(),
+  z.object({
+    kind: z.literal("restore_graph_viewport"),
+    runId: z.string().uuid(),
+  }).strict(),
+  z.object({
+    kind: z.literal("open_conversation_history"),
+    assistantSessionId: z.string().uuid().optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("propose_memory_candidate"),
+    memoryKind: assistantMemoryKindV1Schema,
+    value: z.string().min(1).max(4_000),
+    sourceMessageId: z.string().uuid(),
+  }).strict(),
+  z.object({
+    // revision = 目标记忆 updatedAt 的 epoch millis（单调 CAS 令牌；
+    // 记忆无独立 revision 列，见 assistant-memory 表）。
+    kind: z.literal("confirm_or_reject_memory"),
+    memoryId: z.string().uuid(),
+    revision: z.number().int().nonnegative(),
+    decision: z.enum(["confirm", "reject"]),
+  }).strict(),
+  z.object({
+    kind: z.literal("delete_assistant_memory"),
+    memoryId: z.string().uuid(),
+    revision: z.number().int().nonnegative(),
   }).strict(),
 ]);
 
@@ -455,7 +566,12 @@ export const companionProposalSnapshotV1Schema = z.object({
 
 export type CompanionProposalSnapshotV1 = z.infer<typeof companionProposalSnapshotV1Schema>;
 
-export const companionMenuCandidateIdV1Schema = z.enum(["resume_current", "start_short"]);
+export const companionMenuCandidateIdV1Schema = z.enum([
+  "resume_current",
+  "start_short",
+  "learning_run_resume",
+  "learning_run_start",
+]);
 
 // ─── P5 §6.7 Menu proposal create（只接受 resume/start 两类） ──────────
 
@@ -469,6 +585,19 @@ export const createMenuProposalRequestV1Schema = z.object({
   sourceSurface: z.enum(["pet", "main", "web_fallback"]),
 }).strict();
 
+// ── 方案 16 §18.1：通用工具 proposal 请求（Orchestrator 网关入口） ──
+export const createToolProposalRequestV1Schema = z.object({
+  version: z.literal(1),
+  conversationId: z.string().uuid().optional(),
+  clientMessageId: z.string().uuid(),
+  payload: proposedLearningActionPayloadV1Schema,
+  title: z.string().min(1).max(80),
+  targetSummary: z.string().min(1).max(160),
+  impactSummary: z.string().min(1).max(240),
+  sourceSurface: z.enum(["pet", "main", "web_fallback"]),
+}).strict();
+export type CreateToolProposalRequestV1 = z.infer<typeof createToolProposalRequestV1Schema>;
+
 export const createMenuProposalResponseV1Schema = z.object({
   version: z.literal(1),
   conversationId: z.string().uuid(),
@@ -478,29 +607,6 @@ export const createMenuProposalResponseV1Schema = z.object({
   eventCursor: z.number().int().positive(),
 }).strict();
 export type CreateMenuProposalResponseV1 = z.infer<typeof createMenuProposalResponseV1Schema>;
-
-// ─── §18 Tool proposal create（15 kind 学习动作白名单） ──────────────────
-// 2026-08-15 接线修复：工具网关请求合同此前缺失（API 无 /tool-proposals）。
-
-export const createToolProposalRequestV1Schema = z.object({
-  version: z.literal(1),
-  clientMessageId: z.string().uuid(),
-  payload: proposedLearningActionPayloadV1Schema,
-  title: z.string().min(1).max(80),
-  targetSummary: z.string().min(1).max(160),
-  impactSummary: z.string().min(1).max(240),
-  sourceSurface: z.enum(["pet", "main", "web_fallback"]),
-}).strict();
-
-export const createToolProposalResponseV1Schema = z.object({
-  version: z.literal(1),
-  conversationId: z.string().uuid(),
-  userMessageId: z.string().uuid(),
-  assistantMessageId: z.string().uuid(),
-  proposal: pendingLearningActionProposalV1Schema,
-  eventCursor: z.number().int().nonnegative().nullable(),
-}).strict();
-export type CreateToolProposalResponseV1 = z.infer<typeof createToolProposalResponseV1Schema>;
 
 // ─── P5 §6.6 Proposal decision（confirm/reject） ────────────────────────
 
@@ -520,7 +626,11 @@ export const proposalDecisionResponseV1Schema = z.object({
   status: z.enum(["rejected", "accepted", "executing", "succeeded", "failed"]),
   actionRunId: z.string().uuid().nullable(),
   resultRef: z.string().min(1).max(240).nullable(),
-  route: allowedMainRouteV1Schema.nullable(),
+  // 2026-08-15：服务端 navigationRouteFor 返回 V2 合同（§18 新导航 kind 的
+  // lens/restoreRun/assistantSessionId 是 V1 strict 之外的新键）——decision
+  // 响应必须用 V2 route schema，否则 focus_graph_node 等确认后客户端
+  // parse 502 INVALID_DECISION_RESPONSE。
+  route: allowedMainRouteV2Schema.nullable(),
   safeSummary: z.string().min(1).max(240).nullable(),
 }).strict();
 export type ProposalDecisionResponseV1 = z.infer<typeof proposalDecisionResponseV1Schema>;
@@ -539,6 +649,24 @@ export const companionLearningContextV1Schema = z.object({
   }).nullable(),
   startCandidate: z.object({
     candidateId: z.literal("start_short"),
+    title: z.string().min(1).max(80),
+    targetSummary: z.string().min(1).max(160),
+    impactSummary: z.string().min(1).max(240),
+    payloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).nullable(),
+  // 方案 16 §18：统一 LearningRun 菜单候选（learning_run_v1 生产入口）。
+  learningRunResumeCandidate: z.object({
+    candidateId: z.literal("learning_run_resume"),
+    runId: z.string().uuid(),
+    title: z.string().min(1).max(80),
+    targetSummary: z.string().min(1).max(160),
+    impactSummary: z.string().min(1).max(240),
+    payloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).nullable(),
+  learningRunStartCandidate: z.object({
+    candidateId: z.literal("learning_run_start"),
+    cardId: z.string().uuid(),
+    keyPointId: z.string().uuid(),
     title: z.string().min(1).max(80),
     targetSummary: z.string().min(1).max(160),
     impactSummary: z.string().min(1).max(240),
@@ -676,6 +804,10 @@ export const companionPublicErrorCodeV1Schema = z.enum([
   "ACTION_CONFIRMATION_REQUIRED",
   "ACTION_EXPIRED",
   "ACTION_STALE",
+  // 2026-08-12+（15a-E）：学习快捷方式错误码细分——context 变化/无进行中会话/无候选
+  "CONTEXT_STALE",
+  "NO_ACTIVE_SESSION",
+  "NO_CANDIDATE",
   "PAYLOAD_HASH_MISMATCH",
   "INTERNAL_ERROR",
 ]);
@@ -778,6 +910,8 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("voice.segment.ready"), payload: z.object({
     segmentId: z.string().regex(/^[a-f0-9]{64}$/), ordinal: z.number().int().min(1).max(20),
     text: z.string().min(1).max(160), textSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    // 15b 二期：段级情感（段内最后一个控制类标签，如 excited/laughing；无则省略）——live2d 协同预留
+    emotion: z.string().min(1).max(64).optional(),
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("proactive.delivery"), payload: z.object({
     deliveryId: z.string().uuid(), messageId: z.string().uuid(), expiresAt: z.string().datetime(),
@@ -819,10 +953,6 @@ export const companionBootstrapFeaturesV1Schema = z.object({
   live2d: z.boolean(),
   learningActions: z.boolean(),
   streamingVoice: z.boolean(),
-  // §10.1/§14.3（2026-08-15 接线修复）：Journey V2 引导与主动 delivery
-  // 由 COMPANION_JOURNEY_V2 同一开关授权（端点 fail-closed 404 对齐）。
-  journey: z.boolean(),
-  deliveries: z.boolean(),
 }).strict();
 
 export type CompanionBootstrapFeaturesV1 = z.infer<typeof companionBootstrapFeaturesV1Schema>;
@@ -842,10 +972,12 @@ export const companionTtsStreamRequestV1Schema = z.object({
   version: z.literal(1),
   runId: z.string().uuid(),
   generation: z.number().int().positive(),
-  ordinal: z.number().int().min(1).max(20),
+  ordinal: z.number().int().min(1).max(200),
   segmentId: z.string().regex(/^[a-f0-9]{64}$/),
   text: z.string().min(1).max(160),
   voice: z.string().min(1).max(120).optional(),
   // 2026-08-12（伴星语音设置）：语速（"-30%" | "+0%" | "+30%"）。
   rate: z.string().min(1).max(16).optional(),
+  // 15b：TTS 引擎选择（缺省 = config tts.engine；前端通常不传，由服务端决定）。
+  engine: z.enum(["qwen", "edge"]).optional(),
 }).strict();

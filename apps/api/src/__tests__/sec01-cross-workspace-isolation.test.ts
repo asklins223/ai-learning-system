@@ -124,8 +124,10 @@ describe("SEC-01: withWorkspaceTransaction 使用模式", () => {
       const hasTransaction = content.includes("withWorkspaceTransaction") || content.includes("db.transaction");
       // Some services delegate writes to other services (e.g. createJob) that
       // internally use transactions, or accept an executor parameter that is
-      // already a transaction from the caller.
-      const hasExecutorParam = content.includes("executor:") || /\btx: ApiTransaction/.test(content) || /\btx:/m.test(content);
+      // already a transaction from the caller. 惯例命名 `executor:` 或按类型
+      // 标注的事务参数（`tx: ApiTransaction`）都算"接受调用方事务"。
+      const hasExecutorParam = content.includes("executor:")
+        || /tx\s*:\s*ApiTransaction/.test(content);
       const delegatesToJobService = content.includes("createJob");
 
       if (hasWriteOps && !hasTransaction && !hasExecutorParam && !delegatesToJobService) {

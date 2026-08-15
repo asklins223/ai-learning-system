@@ -151,6 +151,11 @@ export const readinessStatus = new Gauge({
 });
 
 // ─── Job 指标 ───────────────────────────────────────────────────────────
+// DEPRECATED（PERF-B7）：以下 Job/Provider 维度的 9 个指标在 API 进程内
+// 无任何生产写点（全库 grep 命中仅本文件定义 + ops01 测试），实际由
+// `workers/ai-worker/src/lib/metrics.ts` 维护同义指标（Job 队列深度/终态/
+// 重试/租约丢失/时长、Provider 调用量/延迟/错误）。保留定义是为了兼容
+// ops01 测试对定义存在性与 label 契约的断言，不再新增 API 侧写点。
 
 /** Job 队列深度 gauge（按 status 分桶） */
 export const jobQueueDepth = new Gauge({
@@ -201,6 +206,8 @@ export const jobDurationSeconds = new Histogram({
 });
 
 // ─── Provider 指标 ──────────────────────────────────────────────────────
+// DEPRECATED（PERF-B7）：见上方 Job 指标说明，这些 Provider 维度指标由
+// ai-worker 侧维护，API 进程内无生产写点，保留定义以兼容 ops01 测试。
 
 /** Provider 调用计数器 */
 export const providerCallsTotal = new Counter({
@@ -258,6 +265,8 @@ export const dbRlsDeniedTotal = new Counter({
 });
 
 /** 最近成功备份时间戳 gauge（Unix epoch 秒） */
+// DEPRECATED（PERF-B7）：目前无生产备份写点，指标输出恒为 0；保留定义以兼容
+// ops01/metrics 测试对指标名的断言。
 export const dbLastSuccessfulBackupTimestamp = new Gauge({
   name: "ailearn_db_last_successful_backup_timestamp",
   help: "Unix timestamp of the last verified successful backup",

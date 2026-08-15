@@ -17,12 +17,18 @@ import {
 } from "./turn-service.ts";
 import { db, setApiTransactionContext } from "../../db/client.ts";
 import { logCompanionAudit } from "../companion-shell/audit-service.ts";
+import { logger } from "../../lib/logger.ts";
 
 export type ExportCompanionResult =
   | { ok: true; ndjson: string[] }
   | { ok: false; statusCode: number; code: string; message: string };
 
 const ACTIVE_RUN_STATUSES = "'accepted', 'running', 'cancel_requested'";
+
+// N#7-11: 每个 record 类型的行数上限（对齐主导出的 EXPORT_MAX_ROWS 思想）。
+// 命中上限时记告警并截断——导出仍成功返回，但超出部分不包含，规避超长历史用户
+// 全量累积 ~2× 载荷（原始行 + 序列化串）导致的内存压力。
+const COMPANION_EXPORT_MAX_ROWS = 50_000;
 
 // §12 keyset 游标：proactive/action 三类 record 表统一按
 // (conversation_id, created_at, id) 升序分页装载（与 conversations/messages
@@ -104,6 +110,14 @@ export async function exportCompanionData(args: {
           .limit(PAGE_SIZE);
         if (page.length === 0) break;
         conversations.push(...page);
+        // N#7-11: 每类型行数上限，超限截断 + 告警，避免大历史全量装载。
+        if (conversations.length >= COMPANION_EXPORT_MAX_ROWS) {
+          logger.warn(
+            { workspaceId: args.workspaceId, userId: args.userId, type: "conversations", limit: COMPANION_EXPORT_MAX_ROWS },
+            "companion export 达到 conversations 行数上限，导出被截断",
+          );
+          break;
+        }
         if (page.length < PAGE_SIZE) break;
         const last = page[page.length - 1]!;
         cursorCreatedAt = last.sortKey;
@@ -144,6 +158,14 @@ export async function exportCompanionData(args: {
           .limit(PAGE_SIZE);
         if (page.length === 0) break;
         messages.push(...page);
+        // N#7-11: 行数上限，超限截断 + 告警。
+        if (messages.length >= COMPANION_EXPORT_MAX_ROWS) {
+          logger.warn(
+            { workspaceId: args.workspaceId, userId: args.userId, type: "messages", limit: COMPANION_EXPORT_MAX_ROWS },
+            "companion export 达到 messages 行数上限，导出被截断",
+          );
+          break;
+        }
         if (page.length < PAGE_SIZE) break;
         const last = page[page.length - 1]!;
         cursorConv = last.conversationId;
@@ -169,6 +191,14 @@ export async function exportCompanionData(args: {
           `)) as unknown as Array<{ id: string; conversationId: string; createdAt: Date }>;
           if (page.length === 0) break;
           proactiveDeliveries.push(...page);
+          // N#7-11: 行数上限，超限截断 + 告警。
+          if (proactiveDeliveries.length >= COMPANION_EXPORT_MAX_ROWS) {
+            logger.warn(
+              { workspaceId: args.workspaceId, userId: args.userId, type: "proactiveDeliveries", limit: COMPANION_EXPORT_MAX_ROWS },
+              "companion export 达到 proactive_deliveries 行数上限，导出被截断",
+            );
+            break;
+          }
           if (page.length < PAGE_SIZE) break;
           const last = page[page.length - 1]!;
           cursor = { conversationId: String(last.conversationId), createdAt: last.createdAt, id: String(last.id) };
@@ -190,6 +220,14 @@ export async function exportCompanionData(args: {
           `)) as unknown as Array<{ id: string; conversationId: string; createdAt: Date }>;
           if (page.length === 0) break;
           actionProposals.push(...page);
+          // N#7-11: 行数上限，超限截断 + 告警。
+          if (actionProposals.length >= COMPANION_EXPORT_MAX_ROWS) {
+            logger.warn(
+              { workspaceId: args.workspaceId, userId: args.userId, type: "actionProposals", limit: COMPANION_EXPORT_MAX_ROWS },
+              "companion export 达到 action_proposals 行数上限，导出被截断",
+            );
+            break;
+          }
           if (page.length < PAGE_SIZE) break;
           const last = page[page.length - 1]!;
           cursor = { conversationId: String(last.conversationId), createdAt: last.createdAt, id: String(last.id) };
@@ -210,6 +248,14 @@ export async function exportCompanionData(args: {
           `)) as unknown as Array<{ id: string; conversationId: string; createdAt: Date }>;
           if (page.length === 0) break;
           actionRuns.push(...page);
+          // N#7-11: 行数上限，超限截断 + 告警。
+          if (actionRuns.length >= COMPANION_EXPORT_MAX_ROWS) {
+            logger.warn(
+              { workspaceId: args.workspaceId, userId: args.userId, type: "actionRuns", limit: COMPANION_EXPORT_MAX_ROWS },
+              "companion export 达到 action_runs 行数上限，导出被截断",
+            );
+            break;
+          }
           if (page.length < PAGE_SIZE) break;
           const last = page[page.length - 1]!;
           cursor = { conversationId: String(last.conversationId), createdAt: last.createdAt, id: String(last.id) };

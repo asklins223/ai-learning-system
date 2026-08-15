@@ -5,7 +5,7 @@ import {
   type SpriteLicenseV1,
   type SpriteManifestV1,
   validateSpriteManifestShape,
-} from "@ailearn/shared";
+} from "@ailearn/shared/companion-character-contracts";
 
 /**
  * Fail-closed validator for the Level A sprite pack
@@ -116,7 +116,10 @@ export async function validateSpritePack(
 const SPRITE_V1_BASE_URL = "/images/companion/pet/sprite-v1";
 
 async function fetchBytes(url: string): Promise<ArrayBuffer> {
-  const response = await fetch(url, { cache: "no-store" });
+  // F3：sprite 是冻结资产（manifest 含文件 hash 完整性校验），且上方
+  // loadSpriteAssetPack 已做模块级缓存兜底——移除 `cache: "no-store"`
+  // 允许浏览器 HTTP 缓存命中，避免每次 pet 首挂重复下载 ~4.7MB。
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`sprite asset fetch failed: ${url} (${response.status})`);
   }

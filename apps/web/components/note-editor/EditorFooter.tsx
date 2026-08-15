@@ -6,6 +6,7 @@
  * 从 NoteEditor.tsx 提取底部统计条、快捷键面板和学习下一步按钮，
  * 减少主文件约 70 行 JSX。
  */
+import { memo } from "react";
 import { Icon } from "@/components/ui/icons";
 import type { NoteVersionSummary } from "@/lib/api";
 import type { SavingPresentation } from "./TopBar";
@@ -37,6 +38,10 @@ export interface EditorFooterProps {
   generationLocked: boolean;
   /** 打开版本历史回调 */
   onOpenVersions: () => void;
+
+  /** V2 入口字段（与 EditorSection 共用 props 对象；本组件不使用） */
+  v2Enabled?: boolean;
+  onGenerateV2?: () => void;
 }
 
 /**
@@ -46,7 +51,7 @@ export interface EditorFooterProps {
  * 中间：快捷键折叠面板
  * 右侧：版本历史入口 + 学习下一步 + 生成按钮
  */
-export function EditorFooter({
+export const EditorFooter = memo(function EditorFooter({
   previewBlocksCount,
   wordCount,
   blockDelta,
@@ -135,4 +140,4 @@ export function EditorFooter({
       )}
     </div>
   );
-}
+});

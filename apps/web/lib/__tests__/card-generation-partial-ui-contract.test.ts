@@ -78,7 +78,7 @@ describe("strict/partial card generation UI contract", () => {
     assert.ok(allSources.includes("setGenerationRunId(accepted.runId)"));
     assert.ok(allSources.includes("pollGenerationRun(accepted.runId, pollToken)"));
     assert.ok(allSources.includes("部分结果不会替换已有完整学习卡"));
-    assert.ok(allSources.includes("图片（实际覆盖）"));
+    assert.ok(allSources.includes("只保留了可以确认的部分"));
     assert.ok(allSources.includes("查看部分结果"));
     assert.ok(allSources.includes("不会进入验证或复习流程"));
     assert.match(editorStyles, /data-generation-state="partial"/);

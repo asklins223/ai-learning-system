@@ -26,6 +26,31 @@ const OUTBOX_PROCESSED_TTL_DAYS = 30;
 const NONCE_TTL_DAYS = 7;
 const BATCH_LIMIT = 200;
 
+// W5：ai_audit_log 无保留策略 → 追加 90 天保留清理（依赖迁移 0156）。
+const AI_AUDIT_TTL_DAYS = 90;
+const AI_AUDIT_BATCH = 1000;
+const AI_AUDIT_MAX_BATCH_ROUNDS = 50;
+// WN-4：companion_proactive_deliveries 超期行清理（依赖迁移，num 待迁移作者定）。
+const PROACTIVE_BATCH = 1000;
+const PROACTIVE_MAX_BATCH_ROUNDS = 20;
+// W#6：companion_voice_artifacts 清理单批上限（0159 改单批，显式传参）。
+const VOICE_ARTIFACT_BATCH = 200;
+// F5（round-4）：card_generation_agent_events 纯 append-only，全仓无保留策略 →
+// 追加 90 天保留清理（依赖迁移 0160，SECURITY DEFINER 单批函数）。
+const AGENT_EVENTS_TTL_DAYS = 90;
+const AGENT_EVENTS_BATCH = 1000;
+const AGENT_EVENTS_MAX_BATCH_ROUNDS = 50;
+// 0159（round-3 兼容性）：0152 时代的函数体内自带 200 轮循环（单次调用可清大量）；
+// 0159 改为**单批**。TS 侧 expirePendingVoiceArtifacts 原为单次调用，现补外层循环
+// （与 purgeOldAiAuditLog/purgeExpiredProactiveDeliveries 一致的“返回 < batch 即停”
+// 分批语义），恢复等量吞吐，且每次调用独立事务、批间提交（消除双层分批长事务）。
+const VOICE_ARTIFACT_MAX_BATCH_ROUNDS = 50;
+// 0159（round-3 兼容整改，round-4 F1）：其余 5 个单批 TTL job（companion_audit /
+// invitation_ledger / processing_outbox / tutor_nonces / companion_stream_events）
+// 与 purgeOldAiAuditLog 等一致的“返回 < batch 即停”分批语义。batch 为 200/500，
+// 轮次上限与 ai_audit_log 对齐（50），消除每 6h 单批排水病态慢的积压。
+const GEN_BATCH_MAX_ROUNDS = 50;
+
 export interface LearningTtlMaintenanceResult {
   auditedRows: number;
   ledgerRows: number;
@@ -33,6 +58,12 @@ export interface LearningTtlMaintenanceResult {
   nonceRows: number;
   streamEventRows: number;
   expiredVoiceArtifactRows: number;
+  /** W5：ai_audit_log 清理（90 天保留，分批）中被删除的行数。 */
+  aiAuditLogRows: number;
+  /** WN-4：companion_proactive_deliveries 超期行清理中被删除的行数。 */
+  proactiveDeliveryRows: number;
+  /** F5：card_generation_agent_events 90 天保留清理（0160，分批）中被删除的行数。 */
+  agentEventRows: number;
 }
 
 /** 解析 SECURITY DEFINER 函数返回的 count（postgres-js rows 数组）。 */
@@ -44,74 +75,235 @@ function parseCount(rows: unknown, fallback = 0): number {
   return fallback;
 }
 
-/** companion_audit：超期行替换为 content-free tombstone（不删除行本身）。 */
+/**
+ * 检测约定 SECURITY DEFINER 清理函数是否已由迁移创建。
+ * 依赖的新函数（ai_audit_log / proactive_deliveries）可能尚未随迁移落地
+ * （迁移由另一子代理编写），此处用 pg_proc 存在性检查兜底，避免在迁移应用
+ * 前清理循环崩溃；函数缺失时记 warning 并跳过该类，迁移应用后自动恢复。
+ */
+async function functionExists(procName: string): Promise<boolean> {
+  const rows = await db.execute(sql`
+    SELECT 1 AS ok FROM pg_catalog.pg_proc
+    WHERE proname = ${procName}
+    LIMIT 1
+  `);
+  return rows.length > 0;
+}
+
+/**
+ * 通用“返回 < batch 即停”分批循环（0159 单批函数适配，round-4 F1）。
+ * 每批独立事务（DRY run 逻辑）；达到轮次上限或某批返回 < batch 时停止。
+ * 与 purgeOldAiAuditLog / purgeExpiredProactiveDeliveries / etc. 的既有模式一致，
+ * 消除单批 job 每 6h 只清一个 batch 的病态慢排水。
+ */
+async function runBatchLoop(
+  batch: number,
+  maxRounds: number,
+  call: () => Promise<number>,
+): Promise<number> {
+  let total = 0;
+  for (let round = 0; round < maxRounds; round++) {
+    const purged = await call();
+    total += purged;
+    if (purged < batch) break;
+  }
+  return total;
+}
+
+/** companion_audit：超期行替换为 content-free tombstone（不删除行本身）。
+ * F1：0159 单批函数 → 外层分批循环（返回 < limit 即停，至多半数轮），
+ * 每批独立事务（函数内一次 DELETE/tombstone），消除 6h 单批病态慢排水。
+ */
 export async function purgeExpiredCompanionAudit(
   retentionDays = AUDIT_TTL_DAYS,
   limit = BATCH_LIMIT,
 ): Promise<number> {
-  const rows = await db.execute(sql`
-    SELECT public.ailearn_purge_companion_audit_ttl(
-      ${retentionDays}, ${limit}
-    ) AS purged
-  `);
-  return parseCount(rows);
+  return runBatchLoop(limit, GEN_BATCH_MAX_ROUNDS, async () => {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_companion_audit_ttl(
+        ${retentionDays}, ${limit}
+      ) AS purged
+    `);
+    return parseCount(rows);
+  });
 }
 
-/** companion_invitation_ledger：超期行替换为预算 tombstone（保留预算键与终态）。 */
+/** companion_invitation_ledger：超期行替换为预算 tombstone（保留预算键与终态）。
+ * F1：同 companion_audit 补齐外层分批循环。
+ */
 export async function purgeExpiredInvitationLedger(
   retentionDays = LEDGER_TTL_DAYS,
   limit = BATCH_LIMIT,
 ): Promise<number> {
-  const rows = await db.execute(sql`
-    SELECT public.ailearn_purge_invitation_ledger_ttl(
-      ${retentionDays}, ${limit}
-    ) AS purged
-  `);
-  return parseCount(rows);
+  return runBatchLoop(limit, GEN_BATCH_MAX_ROUNDS, async () => {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_invitation_ledger_ttl(
+        ${retentionDays}, ${limit}
+      ) AS purged
+    `);
+    return parseCount(rows);
+  });
 }
 
-/** learning_session_processing_outbox：已处理历史行超期删除。 */
+/** learning_session_processing_outbox：已处理历史行超期删除。
+ * F1：补齐外层分批循环。
+ */
 export async function purgeProcessedOutboxRows(
   retentionDays = OUTBOX_PROCESSED_TTL_DAYS,
   limit = BATCH_LIMIT,
 ): Promise<number> {
-  const rows = await db.execute(sql`
-    SELECT public.ailearn_purge_processed_outbox_ttl(
-      ${retentionDays}, ${limit}
-    ) AS purged
-  `);
-  return parseCount(rows);
+  return runBatchLoop(limit, GEN_BATCH_MAX_ROUNDS, async () => {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_processed_outbox_ttl(
+        ${retentionDays}, ${limit}
+      ) AS purged
+    `);
+    return parseCount(rows);
+  });
 }
 
-/** learning_tutor_action_nonces：过期/已消费且超保留期删除。 */
+/** learning_tutor_action_nonces：过期/已消费且超保留期删除。
+ * F1：补齐外层分批循环。
+ */
 export async function purgeExpiredTutorNonces(
   retentionDays = NONCE_TTL_DAYS,
   limit = BATCH_LIMIT,
 ): Promise<number> {
-  const rows = await db.execute(sql`
-    SELECT public.ailearn_purge_tutor_nonces_ttl(
-      ${retentionDays}, ${limit}
-    ) AS purged
-  `);
-  return parseCount(rows);
+  return runBatchLoop(limit, GEN_BATCH_MAX_ROUNDS, async () => {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_tutor_nonces_ttl(
+        ${retentionDays}, ${limit}
+      ) AS purged
+    `);
+    return parseCount(rows);
+  });
 }
 
-/** companion_stream_events：终态事件超期删除（0104 §7.4，分批限流）。 */
+/** companion_stream_events：终态事件超期删除（0104 §7.4，分批限流）。
+ * F1：补齐外层分批循环（默认批 500）。
+ */
 export async function purgeExpiredCompanionStreamEvents(
   limit = 500,
 ): Promise<number> {
-  const rows = await db.execute(sql`
-    SELECT public.ailearn_purge_companion_stream_events_ttl(${limit}) AS purged
-  `);
-  return parseCount(rows);
+  return runBatchLoop(limit, GEN_BATCH_MAX_ROUNDS, async () => {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_companion_stream_events_ttl(${limit}) AS purged
+    `);
+    return parseCount(rows);
+  });
 }
 
-/** companion_voice_artifacts：pending 超期转 expired（0104 §7.5）。 */
-export async function expirePendingVoiceArtifacts(): Promise<number> {
-  const rows = await db.execute(sql`
-    SELECT public.ailearn_expire_pending_voice_artifacts() AS purged
-  `);
-  return parseCount(rows);
+/** companion_voice_artifacts：pending 超期转 expired（0104 §7.5，0159 改单批）。
+ * 显式传参 `p_limit`（0159 保留 DEFAULT 200 但仍显式传值更稳，避免签名缺省值被
+ * 未来改动破坏，修复第三轮 W#6）；与 0156/0157 一致的 `functionExists` 兜底，
+ * 函数未落地时跳过而非崩溃。
+ */
+export async function expirePendingVoiceArtifacts(
+  limit = VOICE_ARTIFACT_BATCH,
+): Promise<number> {
+  if (!(await functionExists("ailearn_expire_pending_voice_artifacts"))) {
+    logger.warn("ailearn_expire_pending_voice_artifacts not present — voice artifact expiry skipped");
+    return 0;
+  }
+  let total = 0;
+  for (let round = 0; round < VOICE_ARTIFACT_MAX_BATCH_ROUNDS; round++) {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_expire_pending_voice_artifacts(${limit}) AS purged
+    `);
+    const purged = parseCount(rows);
+    total += purged;
+    if (purged < limit) break;
+  }
+  return total;
+}
+
+/**
+ * W5：ai_audit_log 保留策略 — 删除超过 retention 天的行（纯 append-only 审计日志
+ * 不得无界增长）。分批循环直到某批返回 < batch（已清空）或达到轮次上限，避免长事务。
+ *
+ * 依赖迁移：`ailearn_purge_old_ai_audit_log(retention_days int, batch int)`
+ * SECURITY DEFINER 函数（migrator owner BYPASSRLS，删 ai_audit_log 的
+ * out-of-retention 行，返回删除行数）。函数未落地时存在性检查兜底跳过。
+ */
+export async function purgeOldAiAuditLog(
+  retentionDays = AI_AUDIT_TTL_DAYS,
+  batch = AI_AUDIT_BATCH,
+): Promise<number> {
+  if (!(await functionExists("ailearn_purge_old_ai_audit_log"))) {
+    logger.warn("ailearn_purge_old_ai_audit_log not present — ai_audit_log retention skipped");
+    return 0;
+  }
+  let total = 0;
+  for (let round = 0; round < AI_AUDIT_MAX_BATCH_ROUNDS; round++) {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_old_ai_audit_log(
+        ${retentionDays}, ${batch}
+      ) AS purged
+    `);
+    const deleted = parseCount(rows);
+    total += deleted;
+    if (deleted < batch) break;
+  }
+  return total;
+}
+
+/**
+ * WN-4：companion_proactive_deliveries 清理 — 删除 expires_at < now() 的超期行
+ * （pending/expired 等终端行目前只增不删）。分批循环避免长事务。
+ *
+ * 依赖迁移：`ailearn_purge_expired_proactive_deliveries(batch int)`
+ * SECURITY DEFINER 函数（删除 companion_proactive_deliveries 中
+ * expires_at < now() 的行，返回删除行数）。函数未落地时存在性检查兜底跳过。
+ */
+export async function purgeExpiredProactiveDeliveries(
+  batch = PROACTIVE_BATCH,
+): Promise<number> {
+  if (!(await functionExists("ailearn_purge_expired_proactive_deliveries"))) {
+    logger.warn("ailearn_purge_expired_proactive_deliveries not present — proactive delivery cleanup skipped");
+    return 0;
+  }
+  let total = 0;
+  for (let round = 0; round < PROACTIVE_MAX_BATCH_ROUNDS; round++) {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_expired_proactive_deliveries(${batch}) AS purged
+    `);
+    const deleted = parseCount(rows);
+    total += deleted;
+    if (deleted < batch) break;
+  }
+  return total;
+}
+
+/**
+ * F5：card_generation_agent_events 保留策略 — 删除超过 retention 天的行
+ * （纯 append-only 事件表不得无界增长，见 0160 迁移说明）。分批循环直到某批
+ * 返回 < batch（已清空）或达到轮次上限，避免长事务——与 purgeOldAiAuditLog 同型。
+ *
+ * 依赖迁移：`ailearn_purge_old_agent_events(retention_days int, batch int)`
+ * SECURITY DEFINER 函数（0160，删 card_generation_agent_events 的
+ * out-of-retention 行，返回删除行数；表 RLS 0111 启用，函数按 owner BYPASSRLS）。
+ * 函数未落地时存在性检查兜底跳过。
+ */
+export async function purgeOldAgentEvents(
+  retentionDays = AGENT_EVENTS_TTL_DAYS,
+  batch = AGENT_EVENTS_BATCH,
+): Promise<number> {
+  if (!(await functionExists("ailearn_purge_old_agent_events"))) {
+    logger.warn("ailearn_purge_old_agent_events not present — agent_events retention skipped");
+    return 0;
+  }
+  let total = 0;
+  for (let round = 0; round < AGENT_EVENTS_MAX_BATCH_ROUNDS; round++) {
+    const rows = await db.execute(sql`
+      SELECT public.ailearn_purge_old_agent_events(
+        ${retentionDays}, ${batch}
+      ) AS purged
+    `);
+    const deleted = parseCount(rows);
+    total += deleted;
+    if (deleted < batch) break;
+  }
+  return total;
 }
 
 async function runTtlJob(name: string, job: () => Promise<number>): Promise<number> {
@@ -128,13 +320,30 @@ async function runTtlJob(name: string, job: () => Promise<number>): Promise<numb
 
 /** 汇总入口：一次运行完成全部清理（每类独立分批，互不影响）。 */
 export async function runLearningTtlMaintenance(): Promise<LearningTtlMaintenanceResult> {
-  const [auditedRows, ledgerRows, outboxRows, nonceRows, streamEventRows, expiredVoiceArtifactRows] = await Promise.all([
+  const [
+    auditedRows, ledgerRows, outboxRows, nonceRows, streamEventRows,
+    expiredVoiceArtifactRows, aiAuditLogRows, proactiveDeliveryRows,
+    agentEventRows,
+  ] = await Promise.all([
     runTtlJob("companion_audit", purgeExpiredCompanionAudit),
     runTtlJob("invitation_ledger", purgeExpiredInvitationLedger),
     runTtlJob("processing_outbox", purgeProcessedOutboxRows),
     runTtlJob("tutor_nonces", purgeExpiredTutorNonces),
     runTtlJob("companion_stream_events", purgeExpiredCompanionStreamEvents),
     runTtlJob("companion_voice_artifacts", expirePendingVoiceArtifacts),
+    runTtlJob("ai_audit_log", purgeOldAiAuditLog), // W5：ai_audit_log 90 天保留
+    runTtlJob("proactive_deliveries", purgeExpiredProactiveDeliveries), // WN-4
+    runTtlJob("agent_events", purgeOldAgentEvents), // F5：agent_events 90 天保留（0160）
   ]);
-  return { auditedRows, ledgerRows, outboxRows, nonceRows, streamEventRows, expiredVoiceArtifactRows };
+  return {
+    auditedRows,
+    ledgerRows,
+    outboxRows,
+    nonceRows,
+    streamEventRows,
+    expiredVoiceArtifactRows,
+    aiAuditLogRows,
+    proactiveDeliveryRows,
+    agentEventRows,
+  };
 }

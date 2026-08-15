@@ -12,30 +12,6 @@ import { CardStatus, SourceStatus } from "@ailearn/shared";
 import { logger } from "../../lib/logger.ts";
 import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
 
-// N#7-1 / N#8-1: reindex 与 drift 读阶段每表的行上限，防止单工作区整表无界装载导致内存压力。
-// 超出上限时记告警并截断处理（超限部分不会进入投影），避免 OOM。
-// N#8-1 补充：reindex 与 drift 共用同一上限 + 同一确定排序，使两路径截断到同一个确定子集。
-const REINDEX_MAX_ROWS_PER_TABLE = 50_000;
-
-// N#8-1: reindex 与 drift 共用同一个"前 LIMIT 子集"的截断边界，避免两路径各取任意子集。
-// 关键：两处顶层表读都用完全相同的确定排序 + 同一上限。于是 reindex 建立的索引与 drift 读取的
-// 业务表都覆盖同一确定子集（按 updatedAt DESC → 最近写入优先），超出截断线的实体两侧都不会
-// 读取 → 不再被误判为 missing。cardSets 无 updatedAt 列，用 createdAt DESC + id 兜底；
-// 其余三表用 updatedAt DESC + id（与 0153/索引列对齐）。
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const reindexTopOrder: Record<string, (fields: any) => any[]> = {
-  notes: (fields) => [desc(fields.updatedAt), asc(fields.id)],
-  sources: (fields) => [desc(fields.updatedAt), asc(fields.id)],
-  cardSets: (fields) => [desc(fields.createdAt), asc(fields.id)],
-  cards: (fields) => [desc(fields.updatedAt), asc(fields.id)],
-};
-
-// N#8-1: 进程内记录"该工作区上一次 reindex 是否因单表行数上限被截断"。当域名表真实超过
-// REINDEX_MAX_ROWS_PER_TABLE 时，reindex 必然只索引确定前 LIMIT 子集，drift 也不会读超线实体，
-// 因而"超线实体不在索引中"是截断的既定结果而非漂移。auto-fix 借由此标记避免在该场景反复触发
-// reindex（进程内无跨副本同步；与 search count 缓存同一级的声明）。
-const lastReindexCapped = new Map<string, boolean>();
-
 export interface SearchResult {
   objectType: string;
   objectId: string;
@@ -112,6 +88,131 @@ const consumableSearchDocumentPredicate = sql<boolean>`(
   )
 )`;
 
+// ─── PERF-B2 修复：search count 短 TTL 缓存 ───────────────────────────────
+// count 用 DISTINCT ON 对 workspace 全量命中做去重计数，无法利用 LIMIT，
+// 是大结果集下每次击键触发的热点。total 只是展示性数字，允许短暂过期。
+// 此处用进程内短 TTL 缓存（默认 30s）+ 有界 Map（默认 500 条，超限淘汰最旧），
+// 避免每个击键都全表+DISTINCT 计数。写操作后的缓存一致性可接受（total 非强一致）。
+const SEARCH_COUNT_CACHE_TTL_MS = 30_000;
+const SEARCH_COUNT_CACHE_MAX_ENTRIES = 500;
+// N#7-18: 该缓存为进程内（无跨副本同步），无写失效。多副本部署下各实例的
+// total/nextCursor 口径可能短期漂移（≤TTL 30s）。total 为展示性数字，可接受短暂不一致；
+// 若未来需要强一致，应迁至副本感知的 TTL/版本号策略或移除缓存。
+
+// N#7-1: reindex 读阶段每表的行上限，防止单工作区整表无界装载导致内存压力。
+// 超出上限时记告警并截断处理（超限部分不会进入投影），避免 OOM。
+const REINDEX_MAX_ROWS_PER_TABLE = 50_000;
+
+// N#8-1: reindex 与 drift 共用同一个"前 LIMIT 子集"的截断边界，避免两路径各取任意子集。
+// 关键：两处顶层表读都用完全相同的确定排序 + 同一上限。于是 reindex 建立的索引与
+// drift 读取的业务表都覆盖同一确定子集（按 updatedAt DESC → 最近写入优先），
+// 超出截断线的实体两侧都不会读取 → 不再被误判为 missing。cardSets 无 updatedAt 列，
+// 用 createdAt DESC + id 兜底；其余三表用 updatedAt DESC + id（与 0153/索引列对齐）。
+// DB 排序规则约定：notes/sources/cards 均存在 (workspace_id, updated_at desc) 或等价索引。
+const reindexTopOrder: Record<string, any> = (() => {
+  return {
+    notes: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
+    sources: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
+    cardSets: (fields: any) => [desc(fields.createdAt), asc(fields.id)],
+    cards: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
+  };
+})();
+
+// N#8-1: 进程内记录"该工作区上一次 reindex 是否因单表行数上限被截断"。当域名表真实超过
+// REINDEX_MAX_ROWS_PER_TABLE 时，reindex 必然只索引确定前 LIMIT 子集，drift 也不会读超线实体，
+// 因而"超线实体不在索引中"是截断的既定结果而非漂移。auto-fix 借由此标记避免在该场景反复
+// 触发 reindex（进程内无跨副本同步；与 search count 缓存同一级的声明，见下方 autoFix 注释）。
+const lastReindexCapped = new Map<string, boolean>();
+interface SearchCountCacheEntry {
+  value: number;
+  insertedAt: number;
+}
+const searchCountCache = new Map<string, SearchCountCacheEntry>();
+
+/** 归一化缓存键用的小写去空格查询。 */
+function normalizeSearchQuery(query: string): string {
+  return query.trim().toLowerCase();
+}
+
+/**
+ * N#7-1: 分块 IN 查询辅助函数，避免大 ID 集合突破 postgres-js ~65535 绑定参数上限。
+ * 沿用项目已有 chunkedInArraySelect 模式（note/service.ts:36），默认 500/批。
+ */
+async function chunkedInArraySelect<T>(
+  queryFn: (chunk: string[]) => Promise<T[]>,
+  ids: string[],
+  chunkSize = 500,
+): Promise<T[]> {
+  const results: T[] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    results.push(...(await queryFn(chunk)));
+  }
+  return results;
+}
+
+/**
+ * 计算去重后的实体总数，优先命中短 TTL 缓存。
+ * 缓存键 = workspaceId + normalizedQuery + type。
+ */
+async function getSearchTotal(
+  executor: ApiTransaction,
+  workspaceId: string,
+  query: string,
+  type: string | null,
+): Promise<number> {
+  const normalizedQuery = normalizeSearchQuery(query);
+  const key = `${workspaceId}\u0000${normalizedQuery}\u0000${type ?? ""}`;
+
+  const now = Date.now();
+  const cached = searchCountCache.get(key);
+  if (cached && now - cached.insertedAt < SEARCH_COUNT_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  // 惰性清理过期条目，防止过期 key 长期占位。
+  for (const [k, v] of searchCountCache) {
+    if (now - v.insertedAt >= SEARCH_COUNT_CACHE_TTL_MS) {
+      searchCountCache.delete(k);
+    }
+  }
+
+  const rows = await executor.execute<{ count: string }>(sql`
+    SELECT count(*) as count FROM (
+      SELECT DISTINCT ON (
+        CASE
+          WHEN object_type = 'evidence' AND metadata->>'cardId' IS NOT NULL
+          THEN 'evidence-card:' || (metadata->>'cardId')
+          ELSE object_type || ':' || object_id
+        END
+      )
+        1
+      FROM search_documents AS search_document
+      WHERE workspace_id = ${workspaceId}
+        AND (
+          body ILIKE '%' || ${searchEscapedQuery(query)} || '%' ESCAPE '\\'
+          OR title ILIKE '%' || ${searchEscapedQuery(query)} || '%' ESCAPE '\\'
+        )
+        AND (${type}::text IS NULL OR object_type = ${type})
+        AND ${consumableSearchDocumentPredicate}
+    ) as distinct_entities
+  `);
+  const total = Number(rows[0]?.count ?? 0);
+
+  // 有界写入：超限时淘汰最旧条目（Map 保持插入序，首个 key 即最旧）。
+  if (searchCountCache.size >= SEARCH_COUNT_CACHE_MAX_ENTRIES && !searchCountCache.has(key)) {
+    const oldestKey = searchCountCache.keys().next().value;
+    if (oldestKey !== undefined) searchCountCache.delete(oldestKey);
+  }
+  searchCountCache.set(key, { value: total, insertedAt: now });
+  return total;
+}
+
+/** 与 search 内联查询一致的 ILIKE 转义。 */
+function searchEscapedQuery(query: string): string {
+  return query.replace(/[\\%_]/g, "\\$&");
+}
+
 /**
  * 全文搜索（pg_trgm + ILIKE，中文友好）。
  * N-012: 在 SQL 层按最终展示实体聚合去重，再计算 total 和分页。
@@ -141,9 +242,9 @@ export async function search(
     END
   `;
 
-  // The page and total are independent reads; run them concurrently to avoid
-  // paying two database round trips serially on every keystroke.
-  const [rows, countRows] = await Promise.all([
+  // The page read and the (cached) total are independent reads; run them in
+  // parallel. total 由 getSearchTotal 走短 TTL 缓存，命中时零 DB 往返。
+  const [rows, total] = await Promise.all([
     executor.execute<{
       object_type: string;
       object_id: string;
@@ -187,29 +288,8 @@ export async function search(
       LIMIT ${limit}
       OFFSET ${offset}
     `),
-    // N-012: total 统计去重后的实体数
-    executor.execute<{ count: string }>(sql`
-      SELECT count(*) as count FROM (
-        SELECT DISTINCT ON (
-          CASE
-            WHEN object_type = 'evidence' AND metadata->>'cardId' IS NOT NULL
-            THEN 'evidence-card:' || (metadata->>'cardId')
-            ELSE object_type || ':' || object_id
-          END
-        )
-          1
-        FROM search_documents AS search_document
-        WHERE workspace_id = ${workspaceId}
-          AND (
-            body ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
-            OR title ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
-          )
-          AND (${type}::text IS NULL OR object_type = ${type})
-          AND ${consumableSearchDocumentPredicate}
-      ) as distinct_entities
-    `),
+    getSearchTotal(executor, workspaceId, query, type),
   ]);
-  const total = Number(countRows[0]?.count ?? 0);
 
   // PERF-11: Create the highlight RegExp once, not per result row.
   // BUG-04 fix: snippet 高亮也需要转义 query 中的正则特殊字符，
@@ -331,14 +411,15 @@ export async function reindexWorkspaceSearch(
   const projectionStartedAt = new Date();
 
   // Collect top-level entities in parallel, then hydrate each child table in
-  // one query. The old implementation issued one blocks query per note, one
-  // segments query per source, and one key-point/evidence query per card.
+  // one query per entity type. The old implementation issued one blocks query
+  // per note, one segments query per source, and one key-point/evidence query
+  // per card.
   const [noteRows, sourceRows, cardSetRows, cardRows] = await Promise.all([
     // CONC-03: 软删除的笔记不应被重新索引到搜索文档中
-    // N#8-1: 顶层表读加行上限 + 确定排序（与 drift 对齐，见 reindexTopOrder）。
     executor.query.notes.findMany({
       where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
       limit: REINDEX_MAX_ROWS_PER_TABLE,
+      // N#8-1: 与 drift 用同一确定排序建立确定性截断子集（最近写入优先）。
       orderBy: reindexTopOrder.notes(notes),
     }),
     executor.query.sources.findMany({
@@ -386,36 +467,48 @@ export async function reindexWorkspaceSearch(
   const cardIds = cardRows.map((card) => card.id);
   const [blockRows, segmentRows, keyPointRows] = await Promise.all([
     currentVersionIds.length > 0
-      ? executor.query.noteBlocks.findMany({
-          where: inArray(noteBlocks.versionId, currentVersionIds),
-          orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
-        })
+      ? chunkedInArraySelect(
+          (chunk) => executor.query.noteBlocks.findMany({
+            where: inArray(noteBlocks.versionId, chunk),
+            orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
+          }),
+          currentVersionIds,
+        )
       : Promise.resolve([]),
     sourceIds.length > 0
-      ? executor.query.sourceSegments.findMany({
-          where: inArray(sourceSegments.sourceId, sourceIds),
-          orderBy: [asc(sourceSegments.sourceId), asc(sourceSegments.ordinal)],
-        })
+      ? chunkedInArraySelect(
+          (chunk) => executor.query.sourceSegments.findMany({
+            where: inArray(sourceSegments.sourceId, chunk),
+            orderBy: [asc(sourceSegments.sourceId), asc(sourceSegments.ordinal)],
+          }),
+          sourceIds,
+        )
       : Promise.resolve([]),
     cardIds.length > 0
-      ? executor.query.cardKeyPoints.findMany({
-          where: and(
-            eq(cardKeyPoints.workspaceId, workspaceId),
-            inArray(cardKeyPoints.cardId, cardIds),
-          ),
-          orderBy: [asc(cardKeyPoints.cardId), asc(cardKeyPoints.ordinal)],
-        })
+      ? chunkedInArraySelect(
+          (chunk) => executor.query.cardKeyPoints.findMany({
+            where: and(
+              eq(cardKeyPoints.workspaceId, workspaceId),
+              inArray(cardKeyPoints.cardId, chunk),
+            ),
+            orderBy: [asc(cardKeyPoints.cardId), asc(cardKeyPoints.ordinal)],
+          }),
+          cardIds,
+        )
       : Promise.resolve([]),
   ]);
 
   const keyPointIds = keyPointRows.map((keyPoint) => keyPoint.id);
   const evidenceRows = keyPointIds.length > 0
-    ? await executor.query.evidences.findMany({
-        where: and(
-          eq(evidences.workspaceId, workspaceId),
-          inArray(evidences.keyPointId, keyPointIds),
-        ),
-      })
+    ? await chunkedInArraySelect(
+        (chunk) => executor.query.evidences.findMany({
+          where: and(
+            eq(evidences.workspaceId, workspaceId),
+            inArray(evidences.keyPointId, chunk),
+          ),
+        }),
+        keyPointIds,
+      )
     : [];
 
   const blockContentsByVersion = new Map<string, string[]>();
@@ -752,7 +845,7 @@ export async function detectSearchDrift(
     indexedCards,
   ] = await Promise.all([
     // 1a. Notes business table (CONC-03: exclude soft-deleted)
-    // N#8-1: 顶端四表读加上限 + 确定排序（与 reindex 对齐），读取同一确定截断子集。
+    // N#8-1: 与 reindex 用同一上限 + 同一确定排序，读取同一确定截断子集，避免把超线实体误判 missing。
     executor.query.notes.findMany({
       where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
       columns: { id: true, title: true, currentVersionId: true },
@@ -816,6 +909,7 @@ export async function detectSearchDrift(
   //  - missing 只对"已读入窗口内但索引缺失"的实体报告（真实窗口内漂移，保持）；
   //  - ghost 对"索引有而业务读窗口无"的实体不再报告（超线实体可能仍合法存在于业务表中，
   //    只是未进入当前确定窗口，把它们当 ghost 会误报），并记告警。
+  // 这样 auto-fix 只在真实漂移时触发，截断场景不反复重索引。
   const capped = {
     note: noteRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
     source: sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
@@ -924,22 +1018,28 @@ export async function detectSearchDrift(
     // Evidence: query keyPoints → evidences (chained, but parallel with other batch 2 queries)
     (async (): Promise<Set<string>> => {
       if (activeCardIds.length === 0) return new Set<string>();
-      const activeKpRows = await executor.query.cardKeyPoints.findMany({
-        where: and(
-          eq(cardKeyPoints.workspaceId, workspaceId),
-          inArray(cardKeyPoints.cardId, activeCardIds),
-        ),
-        columns: { id: true },
-      });
+      const activeKpRows = await chunkedInArraySelect(
+        (chunk) => executor.query.cardKeyPoints.findMany({
+          where: and(
+            eq(cardKeyPoints.workspaceId, workspaceId),
+            inArray(cardKeyPoints.cardId, chunk),
+          ),
+          columns: { id: true },
+        }),
+        activeCardIds,
+      );
       const activeKpIds = activeKpRows.map((k) => k.id);
       if (activeKpIds.length === 0) return new Set<string>();
-      const evidenceRows = await executor.query.evidences.findMany({
-        where: and(
-          eq(evidences.workspaceId, workspaceId),
-          inArray(evidences.keyPointId, activeKpIds),
-        ),
-        columns: { id: true },
-      });
+      const evidenceRows = await chunkedInArraySelect(
+        (chunk) => executor.query.evidences.findMany({
+          where: and(
+            eq(evidences.workspaceId, workspaceId),
+            inArray(evidences.keyPointId, chunk),
+          ),
+          columns: { id: true },
+        }),
+        activeKpIds,
+      );
       return new Set(evidenceRows.map((e) => e.id));
     })(),
     // Evidence index
@@ -949,10 +1049,13 @@ export async function detectSearchDrift(
     }),
     // Stale body: batch-read note blocks
     currentVersionIds.length > 0
-      ? executor.query.noteBlocks.findMany({
-          where: inArray(noteBlocks.versionId, currentVersionIds),
-          orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
-        })
+      ? chunkedInArraySelect(
+          (chunk) => executor.query.noteBlocks.findMany({
+            where: inArray(noteBlocks.versionId, chunk),
+            orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
+          }),
+          currentVersionIds,
+        )
       : Promise.resolve([]),
   ]);
 
@@ -1055,26 +1158,6 @@ export async function autoFixSearchDrift(
     drift.missing.length +
     drift.staleTitles.length +
     drift.staleBodies.length;
-
-  // N#8-1: 截断场景不反复触发 reindex。
-  // 若某顶层表读命中行数上限（capped=true）且该工作区上一次 reindex 同样被截断，说明域名真实
-  // 超过 REINDEX_MAX_ROWS_PER_TABLE，能进入投影的只是确定的前 LIMIT 子集。"超线实体不在索引中"
-  // 是截断的既定结果而非恢复可修的漂移，再次 reindex 只会重扫同一截断子集、不收敛，造成抖动。
-  // 此时跳过自动修复并明确告警，待上限提升或业务量下降后再收敛。
-  const anyCapped = drift.capped.note || drift.capped.source || drift.capped.cardSet || drift.capped.card;
-  const lastCapped = lastReindexCapped.get(workspaceId) ?? false;
-  if (anyCapped && lastCapped) {
-    logger.warn(
-      {
-        workspaceId,
-        totalDrift,
-        capped: drift.capped,
-        note: "lastReindexCapped=true 且检测到截断；跳过 auto-fix，避免对必然截断的投影反复重索引",
-      },
-      "搜索索引检测到截断（域名表超过单表行数上限），auto-fix 已跳过重索引以避免抖动（ARCH-01）",
-    );
-    return { drift, autoFixed: false };
-  }
 
   // logger 已在文件顶部静态导入，直接使用
   if (totalDrift >= autoFixThreshold) {

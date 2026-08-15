@@ -15,8 +15,6 @@ const validBootstrap = {
   },
   features: {
     petSurface: true,
-    journey: true,
-    deliveries: true,
     textConversation: false,
     voiceDialogue: false,
     live2d: true,

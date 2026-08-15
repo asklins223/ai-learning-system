@@ -49,7 +49,22 @@ export interface PetIpcContext {
 export function registerPetIpc(context: PetIpcContext): () => void {
   const handlers: string[] = [];
   const handle = (channel: string, callback: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => {
-    ipcMain.handle(channel, callback);
+    ipcMain.handle(channel, (event, ...args) => {
+      try {
+        return callback(event, ...args);
+      } catch (error) {
+        // 2026-08-12+（15a 新反馈）：窗口销毁/退出竞态中 sender 校验（requireRole）
+        // 会抛 UNTRUSTED_DESKTOP_SENDER——属正常拒绝，但直接抛出会让 Electron
+        // 打印 "Error occurred in handler for 'pet:*'" 红色噪音。这里转 logger
+        // 记录（安全语义不变：请求不处理、invoke 返回 undefined），并避免
+        // 其他 handler 内部异常导致 invoke 挂起。
+        logger.warn(
+          { channel, error: error instanceof Error ? error.message : String(error) },
+          "pet ipc handler rejected",
+        );
+        return undefined;
+      }
+    });
     handlers.push(channel);
   };
 

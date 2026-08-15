@@ -79,6 +79,61 @@ export function attachErrorListeners(
       ) {
         return;
       }
+      // 方案 16：LearningRun Player 挂载时探测跨设备草稿，API 以 404
+      // （draft_not_found）表达“没有已保存的草稿”——这是预期业务响应，
+      // 不是资源加载失败。精确匹配 draft 端点路径，其余 404 仍阻断。
+      if (
+        msg.type() === "error" &&
+        /^Failed to load resource: the server responded with a status of 404 \(Not Found\)$/.test(text) &&
+        location.url &&
+        /^\/api\/learning-runs\/[0-9a-f-]{36}\/tasks\/[0-9a-f-]{36}\/draft$/.test(
+          new URL(location.url).pathname,
+        )
+      ) {
+        return;
+      }
+      // 方案 16：LearningRun 创建在 AI 协议未签署时被服务端 403 拒绝
+      // （AI_CONSENT_REQUIRED）——业务拒绝伴随显式错误面，浏览器仍会记录
+      // 资源加载失败。精确匹配 POST 端点（/api/learning-runs 仅 POST），
+      // 其余 403 仍阻断。
+      if (
+        msg.type() === "error" &&
+        /^Failed to load resource: the server responded with a status of 403 \(Forbidden\)$/.test(text) &&
+        location.url &&
+        new URL(location.url).pathname === "/api/learning-runs"
+      ) {
+        return;
+      }
+      // 方案 16 §7.5：语音转写（/api/voice/transcribe）在 ASR 服务暂不可用
+      // 或音频无有效语音时返回 502/4xx——UI 已 fail-open 回退到重录/文字
+      // 路径并显示提示，浏览器仍会记录资源加载失败。精确匹配该端点，
+      // 其余 502 仍阻断。
+      if (
+        msg.type() === "error" &&
+        /^Failed to load resource: the server responded with a status of 502 \(Bad Gateway\)$/.test(text) &&
+        location.url &&
+        new URL(location.url).pathname === "/api/voice/transcribe"
+      ) {
+        return;
+      }
+      // 方案 16：提交/评估过渡期的单发业务拒绝——draft 与 activity-lease
+      // 在 Run 离开 active 后返回 409（stale/invalid_phase）。这是服务端
+      // 状态机的正常裁决，不是资源失败；精确匹配这两个端点，其余 409 仍阻断。
+      if (
+        msg.type() === "error" &&
+        /^Failed to load resource: the server responded with a status of 409 \(Conflict\)$/.test(text) &&
+        location.url &&
+        (
+          /^\/api\/learning-runs\/[0-9a-f-]{36}\/tasks\/[0-9a-f-]{36}\/draft$/.test(
+            new URL(location.url).pathname,
+          )
+          || /^\/api\/learning-runs\/[0-9a-f-]{36}\/activity-lease$/.test(
+            new URL(location.url).pathname,
+          )
+        )
+      ) {
+        return;
+      }
       // Chromium emits this advisory when Next.js route preloading is
       // superseded by an immediate client navigation. It is limited to a
       // same-origin generated Next CSS asset; arbitrary preload warnings
@@ -133,6 +188,20 @@ export function attachErrorListeners(
       request.method() === "GET" &&
       requestedUrl.origin === pageUrl.origin &&
       requestedUrl.pathname === "/api/auth/me" &&
+      Date.now() - lastMainFrameNavigationAt < 2_000
+    ) {
+      return;
+    }
+    // 方案 16 e2e：浏览器在页面离开（main-frame 导航）时会主动取消
+    // 同源后台 GET（如 note editor 的 /api/note-versions/{id}/card-generation-latest
+    // 轮询）。这是正常取消而非资源失败，且只有导航窗口内（±2s）被
+    // abort 的 non-navigation GET 会被豁免——静止状态下的失败请求仍然
+    // 直接判失败，不会削弱门禁对真实网络错误的捕获。
+    if (
+      ["net::ERR_ABORTED", "NS_BINDING_ABORTED"].includes(failure) &&
+      request.method() === "GET" &&
+      !request.isNavigationRequest() &&
+      requestedUrl.origin === pageUrl.origin &&
       Date.now() - lastMainFrameNavigationAt < 2_000
     ) {
       return;

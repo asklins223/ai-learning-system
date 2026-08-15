@@ -108,22 +108,22 @@ export function useGenerationPresentation(
   // ── 生成面板标题 ──
   const heading =
     visualState === "status-error"
-      ? "暂时无法确认任务状态"
+      ? "生成状态待确认"
     : visualState === "partial"
-      ? "部分结果已就绪"
+      ? "已保留部分结果"
     : visualState === "attention"
-      ? "生成需要处理"
+      ? "先处理质量问题"
     : !isOwner
     ? generatedVersionId
-      ? "查看学习卡"
-      : "等待学习卡"
+      ? "使用现有学习卡"
+      : "尚无学习卡"
     : visualState === "success"
-      ? "学习卡已就绪"
+      ? "这一版已完成"
       : visualState === "generating"
         ? "正在生成学习卡"
         : visualState === "stale"
-          ? "更新学习卡"
-          : "生成学习卡";
+          ? "为最新版重新生成"
+          : "从当前版本生成";
 
   // ── 生成状态标签 ──
   const pres: { label: string; tone: StatusTone } =
@@ -157,26 +157,26 @@ export function useGenerationPresentation(
   // ── 生成遮罩标题 ──
   const overlayTitle =
     genState === "status-error"
-      ? "暂时无法确认任务状态"
+      ? "正在找回生成状态"
     : genState === "checking"
-      ? "正在确认学习卡任务状态"
+      ? "正在同步生成进度"
     : generationPhase === "saving"
-      ? "正在锁定当前笔记版本"
+      ? "正在固定本次笔记版本"
       : generationPhase === "queued"
-        ? "生成任务已进入队列"
-        : "正在提炼关键理解";
+        ? "已经排队，准备理解笔记"
+        : "正在提炼这版笔记的关键理解";
 
   // ── 生成遮罩描述 ──
   const overlayDescription =
     genState === "status-error"
-      ? "任务状态暂时不可用；编辑器不会因此保持锁定。"
+      ? "后台状态暂时不可用；笔记不会被锁定，也不会重复创建任务。"
     : genState === "checking"
-      ? "正在与后台重新同步进度；恢复期间仍可继续编辑。"
+      ? "正在与后台恢复连接；你仍然可以继续编辑笔记。"
     : generationPhase === "saving"
-      ? "正在保存并封存这一刻的内容；服务端接受任务后立即恢复编辑。"
+      ? "先保存一份不可变来源，确保生成结果始终能回到这版原文。"
       : generationPhase === "queued"
-        ? "系统正在准备模型与学习材料，很快开始提炼。"
-        : "正在从文章中识别关键概念、关系与可验证的学习要点。";
+        ? "任务已被接受；开始后会提炼关键理解并核对原文来源。"
+        : "正在设计回忆线索，并检查答案是否能由当前笔记支撑。";
 
   return {
     visualState,

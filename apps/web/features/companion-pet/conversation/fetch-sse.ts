@@ -156,23 +156,71 @@ export async function openCompanionSse(args: {
   lastEventId: string | null;
   signal: AbortSignal;
   callbacks: CompanionSseCallbacks;
-  /** 空闲看门狗（ms）：连接建立后超时无任何字节 → network 错误（2026-08-15 恢复）。 */
+  /** 2026-08-12+（15a 新反馈）：空闲看门狗——正常连接由服务端 15s heartbeat
+   *  维持，若超过 idleTimeoutMs 无任何字节（api 挂起/网络半开/TCP 静默断），
+   *  本地 abort 并报 network（调用方按 cursor 重连/失败兜底），避免
+   *  "伴星正在想"永久卡死。默认 45s > 15s 心跳 × 2。 */
   idleTimeoutMs?: number;
 }): Promise<void> {
+  const idleTimeoutMs = args.idleTimeoutMs ?? 45_000;
   const url = new URL(`/api/companion/conversations/${args.conversationId}/events`, window.location.origin);
   url.searchParams.set("after", String(args.after));
   const headers: Record<string, string> = { Accept: "text/event-stream" };
   if (args.lastEventId) headers["Last-Event-ID"] = args.lastEventId;
 
+  // 本地 AbortController：idle 超时只中断本次连接（可重连），不碰调用方 signal。
+  const local = new AbortController();
+  const onExternalAbort = (): void => {
+    if (!local.signal.aborted) local.abort(args.signal.reason);
+  };
+  args.signal.addEventListener("abort", onExternalAbort, { once: true });
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const idleFiredRef = { value: false };
+  const armIdle = (): void => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idleFiredRef.value = true;
+      local.abort(new Error("companion sse idle timeout"));
+      args.callbacks.onError({ kind: "network" });
+    }, idleTimeoutMs);
+  };
+  const disarmIdle = (): void => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+  };
+
+  try {
+    await openCompanionSseStream(url, headers, local.signal, args, armIdle, idleFiredRef);
+  } finally {
+    disarmIdle();
+    args.signal.removeEventListener("abort", onExternalAbort);
+  }
+}
+
+/** openCompanionSse 的流读取主体（见上；本地看门狗由 armIdle 驱动、外层
+ *  finally 清理，本函数内部 return 不再单独处理）。 */
+async function openCompanionSseStream(
+  url: URL,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  args: {
+    lastEventId: string | null;
+    callbacks: CompanionSseCallbacks;
+    signal: AbortSignal;
+  },
+  armIdle: () => void,
+  idleFiredRef: { value: boolean },
+): Promise<void> {
   let response: Response;
   try {
+    armIdle(); // fetch 挂起也纳入看门狗（网络半开时 fetch 可能永不 resolve）
     response = await fetch(url.toString(), {
       credentials: "same-origin",
       headers,
-      signal: args.signal,
+      signal,
     });
   } catch {
-    args.callbacks.onError({ kind: "network" });
+    if (!args.signal.aborted && !idleFiredRef.value) args.callbacks.onError({ kind: "network" });
     return;
   }
 
@@ -214,31 +262,11 @@ export async function openCompanionSse(args: {
   args.callbacks.onOpen?.();
 
   let buffer = "";
-  // 空闲看门狗：每次读到字节后重置；超时无任何字节 → network 错误
-  //（避免 api 挂起/网络半开时永久卡 thinking，2026-08-15 恢复）。
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  let idleFired = false;
-  const clearIdle = () => {
-    if (idleTimer) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  };
-  const armIdle = () => {
-    if (args.idleTimeoutMs == null) return;
-    clearIdle();
-    idleTimer = setTimeout(() => {
-      idleFired = true;
-      args.callbacks.onError({ kind: "network" });
-      void reader.cancel().catch(() => {});
-    }, args.idleTimeoutMs);
-  };
-  armIdle();
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      armIdle();
+      if (value && value.byteLength > 0) armIdle(); // 任何字节（含 15s heartbeat）都证明连接健康
       let text: string;
       try {
         text = decoder.decode(value, { stream: true });
@@ -281,8 +309,7 @@ export async function openCompanionSse(args: {
             // 2026-08-11 修复：透传 accountEpoch——此前丢弃导致账户 epoch≥1
             //（曾 global off 后恢复）时 reducer 把事件判 stale，流式对话卡 thinking。
             accountEpoch: envelope.accountEpoch,
-          });
-        } catch {
+          });        } catch {
           args.callbacks.onError({ kind: "fatal_parse" });
           await reader.cancel().catch(() => {});
           return;
@@ -305,10 +332,10 @@ export async function openCompanionSse(args: {
       args.callbacks.onError({ kind: "fatal_parse" });
       return;
     }
-    if (!args.signal.aborted && !idleFired) args.callbacks.onError({ kind: "network" });
+    if (!args.signal.aborted && !idleFiredRef.value) args.callbacks.onError({ kind: "network" });
   } catch {
-    if (!args.signal.aborted && !idleFired) args.callbacks.onError({ kind: "network" });
-  } finally {
-    clearIdle();
+    // idle 超时触发 local.abort → reader.read() reject 走这里：看门狗已报过
+    // network，不重复；外部 abort 不报；其余异常报 network。
+    if (!args.signal.aborted && !idleFiredRef.value) args.callbacks.onError({ kind: "network" });
   }
 }

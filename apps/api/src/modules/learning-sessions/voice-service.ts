@@ -494,8 +494,8 @@ export async function transcribe(options: TranscribeOptions): Promise<Transcript
 // ─── 哈希工具（确定性内容哈希）────────────────────────────────────────────
 // 单一来源：packages/shared/src/content-hash.ts（security_review HIGH #2 修复——
 // voice-service 与 assessment-critic 必须引用同一实现，避免格式断裂）。
-import { computeVoiceContentHash, computeTextContentHash } from "@ailearn/shared";
-export { computeVoiceContentHash, computeTextContentHash } from "@ailearn/shared";
+import { computeVoiceContentHash, computeTextContentHash } from "@ailearn/shared/content-hash";
+export { computeVoiceContentHash, computeTextContentHash } from "@ailearn/shared/content-hash";
 
 // ─── FrozenProbe 逐 hash 绑定（§7.2）─────────────────────────────────────
 

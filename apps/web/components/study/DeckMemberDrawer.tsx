@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useMemo } from "react";
 import type { CardDetailResponse, CardSetListItem } from "@/lib/api";
 import { statusMap, type StatusPresentation } from "@/lib/status-map";
 import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
@@ -42,9 +43,17 @@ export function DeckMemberDrawer({
   onRetry,
   presentation,
 }: DeckMemberDrawerProps) {
-  const ordered = (cards ?? []).slice().sort(compareCardSetMembers);
-  const overview = ordered.find((item) => item.card.scope === "overview") ?? null;
-  const sections = ordered.filter((item) => item.card.id !== overview?.card.id);
+  // F19（round4）：排序/找总览/分流此前每渲染重算（slice/sort/find/filter），
+  // cards 未变时用 useMemo 复用。
+  const { ordered, overview, sections } = useMemo(() => {
+    const sorted = (cards ?? []).slice().sort(compareCardSetMembers);
+    const overviewItem = sorted.find((item) => item.card.scope === "overview") ?? null;
+    return {
+      ordered: sorted,
+      overview: overviewItem,
+      sections: sorted.filter((item) => item.card.id !== overviewItem?.card.id),
+    };
+  }, [cards]);
 
   const footer = (
     <Link

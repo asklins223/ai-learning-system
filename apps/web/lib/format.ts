@@ -1,21 +1,4 @@
 /** 相对时间："3 分钟前"、"2 小时前"、"昨天"、"3 天前"，否则日期。 */
-// 第九轮 🟡today-relativeTime：≥7 天条目每行每渲调用 toLocaleDateString（today
-// 列表、cards、graph、search、notes 五处）。toLocaleDateString 无内建日期级缓存，
-// 按「本地日期字符串」键缓存格式化结果；有界（超限清空），防无限增长。
-// 键用 toDateString()（本地时区日期，含年），与 toLocaleDateString 同日粒度，不跨年串。
-const relativeDateCache = new Map<string, string>();
-const RELATIVE_DATE_CACHE_MAX = 512;
-
-function formatRelativeDate(d: Date): string {
-  const key = d.toDateString();
-  const hit = relativeDateCache.get(key);
-  if (hit !== undefined) return hit;
-  const out = d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
-  if (relativeDateCache.size >= RELATIVE_DATE_CACHE_MAX) relativeDateCache.clear();
-  relativeDateCache.set(key, out);
-  return out;
-}
-
 export function relativeTime(iso: string): string {
   const d = new Date(iso);
   const now = Date.now();
@@ -29,7 +12,7 @@ export function relativeTime(iso: string): string {
   const day = Math.floor(hr / 24);
   if (day === 1) return "昨天";
   if (day < 7) return `${day} 天前`;
-  return formatRelativeDate(d);
+  return d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
 }
 
 /** 完整日期时间，用于 hover/title。 */

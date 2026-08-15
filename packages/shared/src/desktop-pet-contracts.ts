@@ -101,8 +101,10 @@ const allowedMainRouteV1Schema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("settings"),
     // "pet" = 设置页“桌宠伴星”选项卡（伴星菜单当前唯一入口）；
+    // "model" = “AI 使用与数据”（AI_CONSENT_REQUIRED 引导入口，
+    //  2026-08-12+ 15a 新增）；
     // 保留 "companion"/"voice" 兼容既有调用方与未来入口。
-    section: z.enum(["companion", "voice", "pet"]),
+    section: z.enum(["companion", "voice", "pet", "model"]),
   }).strict(),
   z.object({ kind: z.literal("review") }).strict(),
   z.object({ kind: z.literal("card"), cardId: z.string().uuid() }).strict(),

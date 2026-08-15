@@ -10,9 +10,10 @@
  */
 
 import { eq } from "drizzle-orm";
-import { safeErrorMessage, resolveSystemPlatform, resolveLegacyProviderConfig } from "@ailearn/shared";
-import type { AITaskType } from "@ailearn/shared";
-import { getCapabilityForTask, getTaskComplexity } from "@ailearn/shared";
+import { safeErrorMessage, resolveLegacyProviderConfig } from "@ailearn/shared";
+import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
+import type { AITaskType } from "@ailearn/shared/task-router";
+import { getCapabilityForTask, getTaskComplexity } from "@ailearn/shared/task-router";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";
 import { logger } from "./logger.ts";

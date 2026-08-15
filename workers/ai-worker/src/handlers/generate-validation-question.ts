@@ -51,16 +51,8 @@ import {
   isAIQuestionEnabled,
   isEffectiveHardEvidence,
 } from "@ailearn/shared";
-import {
-  generateValidationQuestionOutputSchema,
-  assessQuestionOutput,
-  generateDeterministicQuestion,
-  computeSourceFingerprint,
-  RUBRIC_REDUCER_VERSION,
-  type GenerateValidationQuestionOutput,
-  type GenerateValidationQuestionInput,
-  type QuestionSafetyReport,
-} from "@ailearn/shared";
+import { generateValidationQuestionOutputSchema, assessQuestionOutput, generateDeterministicQuestion, RUBRIC_REDUCER_VERSION, type GenerateValidationQuestionOutput, type GenerateValidationQuestionInput, type QuestionSafetyReport,  } from "@ailearn/shared";
+import { computeSourceFingerprint } from "@ailearn/shared/fingerprint";
 import type { JobPayload } from "./index.ts";
 import type { WorkerTransaction } from "../db.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
@@ -234,7 +226,8 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
       textRes.providerName,
     );
     if (!governanceResult.allowed) {
-      throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
+      // 2026-08-12+（15a 根因修复）：policy 拒绝 → 引导用户去设置页签署协议。
+      throw new AIConsentRequiredError();
     }
 
     try {

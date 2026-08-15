@@ -10,7 +10,7 @@
 import "@/app/styles/review-v06.css";
 import "@/app/styles/workspace-headers.css";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusChip } from "@/components/ui/StatusChip";
@@ -18,29 +18,84 @@ import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { api, type SanitizedReviewItem } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
-import { isQuestionFirstUIEnabled } from "@/lib/feature-flags";
+import { isLearningRunV1Enabled, isQuestionFirstUIEnabled } from "@/lib/feature-flags";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { statusMap } from "@/lib/status-map";
+
+const REVIEW_UI_PREVIEW: SanitizedReviewItem[] = [
+  {
+    reviewId: "preview-review-due",
+    cardId: "preview-card-memory",
+    keyPointId: "preview-key-point-recall",
+    status: "pending",
+    nextReviewAt: "2026-08-13T01:30:00.000Z",
+    intervalDays: 2,
+    generation: 0,
+    reviewReason: "due_review",
+  },
+  {
+    reviewId: "preview-review-repair",
+    cardId: "preview-card-boundary",
+    keyPointId: "preview-key-point-boundary",
+    status: "pending",
+    nextReviewAt: "2026-08-12T07:20:00.000Z",
+    intervalDays: 1,
+    generation: 0,
+    reviewReason: "misunderstanding",
+  },
+  {
+    reviewId: "preview-review-evidence",
+    cardId: "preview-card-evidence",
+    keyPointId: "preview-key-point-evidence",
+    status: "pending",
+    nextReviewAt: "2026-08-11T04:00:00.000Z",
+    intervalDays: 4,
+    generation: 0,
+    reviewReason: "evidence_gap",
+  },
+];
+
+// F#7（第六轮 🟠3）：Intl 构造器提升为模块级单例——避免每行每渲染重建。
+const absoluteTimeFmt = new Intl.DateTimeFormat("zh-CN", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
 
 function formatAbsoluteTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+  return absoluteTimeFmt.format(date);
 }
 
 export default function ReviewPage() {
-  const questionFirstEnabled = isQuestionFirstUIEnabled();
+  // P5（文档 16 §14.2）：Review 队列页发布 bounded context。
+  // F#7（🟡8）：useMemo 稳定对象，避免 hook 内 JSON.stringify 每渲重跑。
+  useMainPageContext(useMemo(() => ({
+    routeRef: { kind: "review" },
+    pageKind: "review",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  }), []));
+  // 方案 16 统一入口：learning_run_v1 开启时复习队列由统一 LearningRun
+  // 承担（旧 question_first flag 不再挡住复习入口）。
+  const questionFirstEnabled = isQuestionFirstUIEnabled() || isLearningRunV1Enabled();
   const [reviews, setReviews] = useState<SanitizedReviewItem[] | null>(null);
   const [reviewTotal, setReviewTotal] = useState(0);
   const [reviewNextOffset, setReviewNextOffset] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [previewMode, setPreviewMode] = useState(false);
   const loadRequestRef = useRef(0);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    setPreviewMode(new URLSearchParams(window.location.search).get("uiPreview") === "full");
+  }, []);
 
   const loadReviews = useCallback(async () => {
     const requestId = ++loadRequestRef.current;
@@ -89,16 +144,19 @@ export default function ReviewPage() {
   }, [loadingMore, reviewNextOffset]);
 
   useEffect(() => {
-    if (!questionFirstEnabled) return;
+    if (!questionFirstEnabled || previewMode) return;
     void loadReviews();
     return () => {
       loadRequestRef.current += 1;
     };
-  }, [loadReviews, questionFirstEnabled]);
+  }, [loadReviews, previewMode, questionFirstEnabled]);
 
-  if (!questionFirstEnabled) {
+  if (!questionFirstEnabled && !previewMode) {
     return <ReviewFeatureDisabled />;
   }
+
+  const visibleReviews = previewMode ? REVIEW_UI_PREVIEW : reviews;
+  const visibleTotal = previewMode ? REVIEW_UI_PREVIEW.length : reviewTotal;
 
   return (
     <div className="review-v06-page">
@@ -106,7 +164,9 @@ export default function ReviewPage() {
         className="workspace-page-header"
         kicker="间隔复习"
         title="复习"
-        subtitle="按计划重新说清到期的理解，让每次复习都留下可信记录。"
+        subtitle={previewMode
+          ? "一次只处理一个要点；用最适合你的方式重新证明理解。"
+          : "按计划重新说清到期的理解，让每次复习都留下可信记录。"}
         actions={(
           <div className="review-v06-header-actions">
             <Link href="/cards" className="review-v06-header-link">
@@ -119,13 +179,19 @@ export default function ReviewPage() {
       />
 
       <div className="review-v06-content">
-        <ReviewOverview total={reviews ? reviewTotal : null} />
+        {previewMode && (
+          <div className="review-v06-preview-notice" role="status">
+            <Icon.Eye aria-hidden="true" />
+            <span><strong>UI 重绘预览</strong>以下为中性 fixture，只用于视觉验收，不读取或完成真实复习。</span>
+          </div>
+        )}
+        <ReviewOverview total={visibleReviews ? visibleTotal : null} uiPreview={previewMode} />
 
         {loadError ? (
           <ReviewError message={loadError} onRetry={() => void loadReviews()} />
-        ) : reviews === null ? (
+        ) : visibleReviews === null ? (
           <ReviewLoading />
-        ) : reviews.length === 0 ? (
+        ) : visibleReviews.length === 0 ? (
           <ReviewEmpty />
         ) : (
           <section className="review-v06-board" aria-labelledby="review-v06-board-title">
@@ -134,59 +200,23 @@ export default function ReviewPage() {
                 <span className="review-v06-eyebrow">待完成</span>
                 <span className="review-v06-board-heading">
                   <h2 id="review-v06-board-title">复习队列</h2>
-                  <span className="review-v06-board-count" aria-label={`共 ${reviewTotal} 项`}>
-                    {reviewTotal}
+                  <span className="review-v06-board-count" aria-label={`共 ${visibleTotal} 项`}>
+                    {visibleTotal}
                   </span>
                 </span>
               </div>
             </header>
 
             <ol className="review-v06-list" aria-label="到期复习队列">
-              {reviews.map((item, index) => {
-                const taskNumber = index + 1;
-                const reason = statusMap.reviewReason(item.reviewReason);
-                const dueAbsolute = formatAbsoluteTime(item.nextReviewAt);
-                const focusHref = `/review/${encodeURIComponent(item.reviewId)}`;
-
-                return (
-                  <li key={item.reviewId} className="review-v06-item-wrap">
-                    <Link
-                      href={focusHref}
-                      className="review-v06-item"
-                      aria-label={`开始复习任务 ${taskNumber}，${reason.label}，当前间隔 ${item.intervalDays} 天`}
-                    >
-                      <span className="review-v06-item-time">
-                        <time dateTime={item.nextReviewAt} suppressHydrationWarning>
-                          {relativeTime(item.nextReviewAt)}
-                        </time>
-                        {dueAbsolute && <small suppressHydrationWarning>{dueAbsolute}</small>}
-                      </span>
-
-                      <span className="review-v06-item-node" aria-hidden="true">
-                        <Icon.Review />
-                      </span>
-
-                      <span className="review-v06-item-body">
-                        <span className="review-v06-item-meta">
-                          <span className="review-v06-task-label">任务 {String(taskNumber).padStart(2, "0")}</span>
-                          <StatusChip tone={reason.tone} size="sm" dot>
-                            {reason.label}
-                          </StatusChip>
-                        </span>
-                        <strong className="review-v06-item-title">独立回忆这一项理解</strong>
-                        <span className="review-v06-item-description">
-                          当前间隔 {item.intervalDays} 天 · 进入后只呈现问题
-                        </span>
-                      </span>
-
-                      <span className="review-v06-item-action" aria-hidden="true">
-                        <span>开始</span>
-                        <Icon.Arrow />
-                      </span>
-                    </Link>
-                  </li>
-                );
-              })}
+              {visibleReviews.map((item, index) => (
+                <ReviewRow
+                  key={item.reviewId}
+                  item={item}
+                  index={index}
+                  previewMode={previewMode}
+                  learningRunEnabled={isLearningRunV1Enabled()}
+                />
+              ))}
             </ol>
 
             {(reviewNextOffset !== null || loadMoreError) && (
@@ -216,6 +246,93 @@ export default function ReviewPage() {
     </div>
   );
 }
+
+// F#7（第六轮 🟡9）：抽取 memo 化行组件——每行 item/render 只重建一次
+// URLSearchParams + relativeTime，父组件重渲（分页/加载态）不连带数字符串
+// 与 URL 构造重复执行。
+const ReviewRow = memo(function ReviewRow({
+  item,
+  index,
+  previewMode,
+  learningRunEnabled,
+}: {
+  item: SanitizedReviewItem;
+  index: number;
+  previewMode: boolean;
+  learningRunEnabled: boolean;
+}) {
+  const taskNumber = index + 1;
+  const reason = statusMap.reviewReason(item.reviewReason);
+  const dueAbsolute = formatAbsoluteTime(item.nextReviewAt);
+  const previewParams = new URLSearchParams({
+    origin: "review",
+    previewTask: String(index + 1),
+    scheduleId: item.reviewId,
+    cardId: item.cardId,
+    returnTo: "/review?uiPreview=full",
+  });
+  if (item.keyPointId) previewParams.set("keyPointId", item.keyPointId);
+  const runParams = new URLSearchParams({
+    origin: "review",
+    scheduleId: item.reviewId,
+    keyPointId: item.keyPointId ?? "",
+    generation: String(item.generation ?? 0),
+    returnTo: "/review",
+  });
+  const focusHref = learningRunEnabled
+    ? `/learning-runs/new?${runParams.toString()}`
+    : previewMode
+      ? `/learning-runs/ui-redraw?${previewParams.toString()}`
+      : `/review/${encodeURIComponent(item.reviewId)}`;
+
+  return (
+    <li className="review-v06-item-wrap">
+      <Link
+        href={focusHref}
+        className="review-v06-item"
+        aria-label={`开始复习任务 ${taskNumber}，${reason.label}，当前间隔 ${item.intervalDays} 天`}
+      >
+        <span className="review-v06-item-time">
+          <time dateTime={item.nextReviewAt} suppressHydrationWarning>
+            {relativeTime(item.nextReviewAt)}
+          </time>
+          {dueAbsolute && <small suppressHydrationWarning>{dueAbsolute}</small>}
+        </span>
+
+        <span className="review-v06-item-node" aria-hidden="true">
+          <Icon.Review />
+        </span>
+
+        <span className="review-v06-item-body">
+          <span className="review-v06-item-meta">
+            <span className="review-v06-task-label">任务 {String(taskNumber).padStart(2, "0")}</span>
+            <StatusChip tone={reason.tone} size="sm" dot>
+              {reason.label}
+            </StatusChip>
+          </span>
+          <strong className="review-v06-item-title">
+            {previewMode ? "用一个动作重新证明这项理解" : "独立回忆这一项理解"}
+          </strong>
+          <span className="review-v06-item-description">
+            当前间隔 {item.intervalDays} 天 · {previewMode ? "进入后直接开始推荐方式" : "进入后只呈现问题"}
+          </span>
+          {previewMode && (
+            <span className="review-v06-item-capabilities" aria-hidden="true">
+              <span>约 1–3 分钟</span>
+              <span>可换方式</span>
+              <span>可直接跳过</span>
+            </span>
+          )}
+        </span>
+
+        <span className="review-v06-item-action" aria-hidden="true">
+          <span>{previewMode ? "预览微旅程" : "开始"}</span>
+          <Icon.Arrow />
+        </span>
+      </Link>
+    </li>
+  );
+});
 
 function ReviewFeatureDisabled() {
   return (
@@ -253,13 +370,19 @@ function ReviewFeatureDisabled() {
   );
 }
 
-function ReviewOverview({ total }: { total: number | null }) {
+function ReviewOverview({ total, uiPreview }: { total: number | null; uiPreview: boolean }) {
   return (
     <section className="review-v06-overview" aria-labelledby="review-v06-overview-title">
       <div className="review-v06-overview-copy">
         <span className="review-v06-eyebrow">今日安排</span>
-        <h2 id="review-v06-overview-title">把到期的理解，再说清一次。</h2>
-        <p>每次只处理一个问题。先凭记忆作答，再查看判断和证据。</p>
+        <h2 id="review-v06-overview-title">
+          {uiPreview ? "三分钟内，确认一件事。" : "把到期的理解，再说清一次。"}
+        </h2>
+        <p>
+          {uiPreview
+            ? "直接说、动手排一排，或写两句。系统只依据你真正留下的证据更新复习计划。"
+            : "每次只处理一个问题。先凭记忆作答，再查看判断和证据。"}
+        </p>
       </div>
 
       <div className="review-v06-overview-score" aria-label={total === null ? "正在加载复习队列" : `有 ${total} 项待完成`}>
@@ -272,13 +395,20 @@ function ReviewOverview({ total }: { total: number | null }) {
           <Icon.Lock aria-hidden="true" />
           隐藏学习内容
         </span>
-        <span>
-          <Icon.Timeline aria-hidden="true" />
-          完成后判断下一步
-        </span>
+        {uiPreview ? (
+          <span>
+            <Icon.Keyboard aria-hidden="true" />
+            随时切换方式
+          </span>
+        ) : (
+          <span>
+            <Icon.Timeline aria-hidden="true" />
+            完成后判断下一步
+          </span>
+        )}
         <span>
           <Icon.Target aria-hidden="true" />
-          计入理解记录
+          {uiPreview ? "可信结果才改排程" : "计入理解记录"}
         </span>
       </div>
     </section>

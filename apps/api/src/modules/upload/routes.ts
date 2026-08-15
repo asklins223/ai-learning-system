@@ -22,6 +22,38 @@ import {
 } from "../../lib/object-storage.ts";
 
 /**
+ * PERF-B4 修复：@fastify/multipart 在正常 4xx 早返回时不会自动消费内存态
+ * file 流。显式 resume() 把 body 流读到结尾，避免请求体未读完导致 keep-alive
+ * 连接无法干净复用 / socket 挂起。
+ */
+function drainMultipartFile(
+  file: { file: { resume: () => unknown } } | null | undefined,
+): void {
+  if (file?.file?.resume) {
+    try {
+      file.file.resume();
+    } catch {
+      // 流已结束/损坏时静默忽略，仅作排空兜底。
+    }
+  }
+}
+
+/**
+ * R3（round-3 审计）：@fastify/multipart 在 fileSize 超限时，req.file()/toBuffer()
+ * 抛 error.code = "FST_REQ_FILE_TOO_LARGE"。识别并转 413（与 voice-routes 一致），
+ * 避免落入 Fastify 默认 500。也可识别错误类名 RequestFileTooLargeError。
+ */
+function fileTooLargeError(err: unknown): boolean {
+  if (err instanceof Error) {
+    const code = (err as { code?: string }).code;
+    if (code === "FST_REQ_FILE_TOO_LARGE") return true;
+    if (err.constructor.name === "RequestFileTooLargeError") return true;
+  }
+  return false;
+}
+
+
+/**
  * 2026-08-12（存储面审计）：区分“对象不存在/无权限”（折叠为 404，防
  * 存在性 oracle）与“S3 服务端故障/网络错误”（503 + 日志，此前一律 404，
  * MinIO 故障不可观测）。
@@ -115,13 +147,24 @@ export async function uploadRoutes(
       return reply.code(503).send({ error: "object storage is not configured" });
     }
 
-    const file = await req.file({ limits: { fileSize: MAX_IMAGE_SIZE } });
+    // R3（round-3 审计）：req.file()/toBuffer() 在超限（>10MB 全局 / >2MB 头像）时
+    // 抛 FST_REQ_FILE_TOO_LARGE → 此前落入 Fastify 默认 500。参照 voice-routes 转 413。
+    let file;
+    try {
+      file = await req.file({ limits: { fileSize: MAX_IMAGE_SIZE } });
+    } catch (err) {
+      if (fileTooLargeError(err)) {
+        return reply.code(413).send({ error: "file too large (max 10MB)", code: "FST_REQ_FILE_TOO_LARGE" });
+      }
+      throw err;
+    }
     if (!file) return reply.code(400).send({ error: "no file provided" });
 
     // noteId is required
     const noteIdField = file.fields["noteId"];
     const noteId = noteIdField && "value" in noteIdField ? String(noteIdField.value) : undefined;
     if (!noteId || !noteId.trim()) {
+      drainMultipartFile(file);
       return reply.code(400).send({ error: "noteId is required" });
     }
 
@@ -142,11 +185,13 @@ export async function uploadRoutes(
       }),
     );
     if (!note) {
+      drainMultipartFile(file);
       return reply.code(404).send({ error: "note not found in current workspace" });
     }
 
     // Validate file type
     if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype as typeof ALLOWED_IMAGE_TYPES[number])) {
+      drainMultipartFile(file);
       return reply.code(415).send({ error: "unsupported file type" });
     }
 
@@ -158,7 +203,17 @@ export async function uploadRoutes(
     //      第二道防线，防止 limits 配置被绕过
     //   3. magic bytes 校验在 toBuffer 后进行，因为需要检查前几字节
     //   4. 图片尺寸校验防止 decode-bomb（40 megapixel 限制）
-    const buffer = await file.toBuffer();
+    let buffer;
+    try {
+      buffer = await file.toBuffer();
+    } catch (err) {
+      // R3：读取阶段超限同样抛 FST_REQ_FILE_TOO_LARGE → 413（非 500）。
+      if (fileTooLargeError(err)) {
+        drainMultipartFile(file);
+        return reply.code(413).send({ error: "file too large (max 10MB)", code: "FST_REQ_FILE_TOO_LARGE" });
+      }
+      throw err;
+    }
 
     // Validate magic bytes
     if (!validateImageMagicBytes(buffer, file.mimetype)) {
@@ -259,11 +314,22 @@ export async function uploadRoutes(
       return reply.code(503).send({ error: "object storage is not configured" });
     }
 
-    const file = await req.file({ limits: { fileSize: MAX_AVATAR_SIZE } });
-    if (!file) return reply.code(400).send({ error: "no file provided" });
+    let avFile;
+    try {
+      avFile = await req.file({ limits: { fileSize: MAX_AVATAR_SIZE } });
+    } catch (err) {
+      // R3：req.file() 超限抛 FST_REQ_FILE_TOO_LARGE → 413（非 500）。
+      if (fileTooLargeError(err)) {
+        return reply.code(413).send({ error: "file too large (max 2MB)", code: "FST_REQ_FILE_TOO_LARGE" });
+      }
+      throw err;
+    }
+    if (!avFile) return reply.code(400).send({ error: "no file provided" });
+    const file = avFile;
 
     // Validate file type
     if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype as typeof ALLOWED_IMAGE_TYPES[number])) {
+      drainMultipartFile(file);
       return reply.code(415).send({ error: "unsupported file type" });
     }
 
@@ -275,7 +341,17 @@ export async function uploadRoutes(
     //      第二道防线，防止 limits 配置被绕过
     //   3. magic bytes 校验在 toBuffer 后进行，因为需要检查前几字节
     //   4. 图片尺寸校验防止 decode-bomb（40 megapixel 限制）
-    const buffer = await file.toBuffer();
+    let buffer;
+    try {
+      buffer = await file.toBuffer();
+    } catch (err) {
+      // R3：读取阶段超限同样抛 FST_REQ_FILE_TOO_LARGE → 413（非 500）。
+      if (fileTooLargeError(err)) {
+        drainMultipartFile(file);
+        return reply.code(413).send({ error: "file too large (max 2MB)", code: "FST_REQ_FILE_TOO_LARGE" });
+      }
+      throw err;
+    }
 
     // Validate magic bytes
     if (!validateImageMagicBytes(buffer, file.mimetype)) {

@@ -135,6 +135,8 @@ export interface ExposureGuardContext {
 // ─── 纯函数：contentExposureKey（公式冻结，§7.6）──────────────────────────
 
 const EXPOSURE_KEY_PREFIX = "cex:";
+// 轻微·14（round-4）：listAffectedKeys 单源最多返回的受影响 key 条数（防御性上限）。
+const EXPOSURE_LEDGER_AFFECTED_LIMIT = 500;
 
 /**
  * 计算稳定 exposure 键。
@@ -662,6 +664,8 @@ export function createPgExposureRepository(transaction: ApiTransaction): Exposur
         .onConflictDoNothing();
     },
     async listAffectedKeys(workspaceId, sourceKey) {
+      // 轻微·14（round-4）：热源边多时 affected key 数组无界增长。加 LIMIT
+      // 作为防御性上限（去重后仍可能超过；调用方为低频同步路径，兜底即可）。
       const rows = await transaction
         .select({ affectedContentExposureKey: ledgerTable.affectedContentExposureKey })
         .from(ledgerTable)
@@ -670,7 +674,8 @@ export function createPgExposureRepository(transaction: ApiTransaction): Exposur
             eq(ledgerTable.workspaceId, workspaceId),
             eq(ledgerTable.sourceContentExposureKey, sourceKey),
           ),
-        );
+        )
+        .limit(EXPOSURE_LEDGER_AFFECTED_LIMIT);
       return [...new Set(rows.map((row) => row.affectedContentExposureKey))].sort();
     },
   };

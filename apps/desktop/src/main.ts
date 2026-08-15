@@ -36,6 +36,7 @@ import {
 } from "./web-manager";
 import { PET_IPC_CHANNELS } from "./ipc/contract";
 import { registerPetIpc } from "./ipc/register-pet-ipc";
+import { registerCompanionBridgeBroker } from "./ipc/companion-bridge-ipc";
 import { registerAsrIpc } from "./ipc/register-asr-ipc";
 import { asrManager } from "./voice/asr-manager";
 import { PetHitTestController } from "./windows/pet-hit-test-controller";
@@ -66,6 +67,14 @@ import {
 } from "@ailearn/shared";
 import { createUpdateRuntime, type UpdateRuntimeV1 } from "./update-runtime.ts";
 import { createSoakJsonlWriter, SoakRunner } from "./soak-runner.ts";
+import { currentMainRoute } from "./main-route-path.ts";
+
+// 2026-08-15（打包修复）：Electron 30+ 默认关闭 WebGPU。液态玻璃球语音视觉
+//（LiquidOrb：桌宠语音岛 / 学习卡录音视觉）依赖 WebGPU；不加此开关时打包版
+// 静默回退旧视觉（与 dev 浏览器不一致）。必须在 app ready 前调用。
+app.commandLine.appendSwitch("enable-unsafe-webgpu");
+// 部分驱动/环境还需显式启用 WebGPU feature（低风险，与上方开关配套）。
+app.commandLine.appendSwitch("enable-features", "WebGPU");
 
 // ─── Window management ──────────────────────────────────────────────
 
@@ -225,26 +234,6 @@ function createSoakRuntimeIfConfigured(): SoakRunner | null {
   return runner;
 }
 
-function currentMainRoute(route: AllowedMainRouteV1): string {
-  switch (route.kind) {
-    case "conversation": {
-      const url = new URL("/companion/conversations", webBaseUrl ?? undefined);
-      if (route.conversationId) url.searchParams.set("conversationId", route.conversationId);
-      return url.pathname + url.search;
-    }
-    case "settings":
-      return `/settings?section=${encodeURIComponent(route.section)}`;
-    case "review":
-      return "/review";
-    case "card":
-      return `/cards/${route.cardId}`;
-    case "star_map":
-      return route.keyPointId ? `/graph?keyPointId=${route.keyPointId}` : "/graph";
-    case "learning_session":
-      return `/cards/${route.cardId}/companion?keyPointId=${route.keyPointId}&sessionId=${route.sessionId}&origin=${route.origin}`;
-  }
-}
-
 function focusMainWindow(route?: AllowedMainRouteV1): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (route && webBaseUrl) {
@@ -363,6 +352,13 @@ function createPetWindowForCurrentServer(): void {
   created.webContents.on("did-start-navigation", () => {
     petHitTest?.resetGeometry();
     rendererCrashReloaded = false;
+  });
+  // 2026-08-13（Live2D 调试）：渲染进程 console/异常转发到主进程日志——
+  // 桌宠窗口的 [Live2D]/WebGL 错误可在此查看（打包版无法直连 CDP 时）。
+  created.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (level >= 2) {
+      logger.warn(`[pet:renderer] ${message} (${sourceId}:${line})`);
+    }
   });
   created.webContents.on("render-process-gone", (_event, details) => {
     petHitTest?.resetGeometry();
@@ -484,10 +480,20 @@ function createMainWindow(baseUrl: string): BrowserWindow {
   // 注意：Next App Router 登录后是 SPA 客户端跳转（router.replace("/")），
   // 不触发 did-navigate（新文档导航），必须同时监听 did-navigate-in-page。
   const reloadPetAfterMainLogin = (_event: Electron.Event, url: string) => {
-    if (!petWindow || petWindow.isDestroyed() || petWindow.isVisible()) return;
     try {
       const parsed = new URL(url);
       if (parsed.origin !== expectedOrigin || parsed.pathname === "/login") return;
+      // P1（文档 16 §8.1.1）：注册/重新登录后 Pet 窗口不存在则主动创建——
+      // 全新安装默认偏好下桌宠自动出现；用户显式关闭过 Pet
+      // （petModeEnabled=false）则不强制创建。
+      if (!petWindow || petWindow.isDestroyed()) {
+        const preferences = loadDevicePetPreferences(app.getPath("userData"));
+        if (preferences?.petModeEnabled !== false) {
+          createPetWindowForCurrentServer();
+        }
+        return;
+      }
+      if (petWindow.isVisible()) return;
       void petWindow.loadURL(petRouteUrl(baseUrl)).catch((error: unknown) => {
         logger.warn("[pet] failed to reload pet window after login:", error);
       });
@@ -609,7 +615,10 @@ async function startupSequence(): Promise<void> {
       },
       requestTextInputFocus: () => {
         petWindow?.setFocusable(true);
-        petWindow?.show();
+        // 2026-08-12+（15a-D）：去掉冗余 show()——requestTextInputFocus 只发生
+        // 在用户已与可见桌宠窗口交互时，窗口必然 visible；对已显示窗口再调
+        // show() 与 showInactive 同类，可能触发 transparent 窗口 GPU 合成重置
+        // （闪烁）。focus() 已足够把键盘焦点带进 pet 窗口。
         petWindow?.focus();
         petState?.setInteractionMode("text_input");
         petHitTest?.setInteractionMode("text_input");
@@ -619,9 +628,14 @@ async function startupSequence(): Promise<void> {
       // 输入误入 pet 窗口；窗口保持可见不隐藏。
       // 2026-08-12（窗口闪烁修复）：去掉 showInactive——窗口本就可见未
       // 隐藏，transparent 窗口上对已显示窗口再调 showInactive 会触发 GPU
-      // 合成重置，表现为"整个窗口消失再出现"的闪烁。blur 已足够。
+      // 合成重置，表现为"整个窗口消失再出现"的闪烁。
+      // 2026-08-12+（15a-D 修正 2）：**去掉 blur()**——macOS 上 pet 窗口失焦
+      // 后系统把焦点回落到最近激活的窗口（主应用窗口），导致关闭输入面板时
+      // 主窗口被前置聚焦（用户反馈），且焦点切换本身触发 transparent 窗口
+      // 合成重排（闪烁同源）。关闭面板后 pet 页面无聚焦输入元素，保持焦点
+      // 无害；用户点击其他窗口时焦点自然切换。
       releaseTextInputFocus: () => {
-        petWindow?.blur();
+        logger.info({ channel: PET_IPC_CHANNELS.releaseTextInputFocus }, "pet ipc: composer closed, keep pet focus");
         broadcastWindowState();
       },
       setPetModeEnabled: (enabled) => {
@@ -694,11 +708,19 @@ async function startupSequence(): Promise<void> {
     const asrCleanup = registerAsrIpc({
       origin: new URL(webBaseUrl).origin,
       getPetWindow: () => petWindow,
+      getMainWindow: () => mainWindow,
       getModelConfig: () => null, // 仅 env 解析；未来可接设置存储
+    });
+    // P5：Main ↔ Pet Bridge V2 broker（context/event/command relay；sender 校验）。
+    const bridgeCleanup = registerCompanionBridgeBroker({
+      origin: new URL(webBaseUrl).origin,
+      getMainWindow: () => mainWindow,
+      getPetWindow: () => petWindow,
     });
     ipcCleanup = () => {
       petIpcCleanup();
       asrCleanup();
+      bridgeCleanup();
       void asrManager.dispose();
     };
     // BUG-49 修复：单独处理 loadURL 失败，区分页面加载错误和其他启动错误。
@@ -801,6 +823,12 @@ if (!gotTheLock) {
     handleDeepLink(url);
   });
 
+  // 2026-08-13（调试通道）：开发/联调时开放 CDP（9222）。生产关闭——
+  // 仅当环境变量 AILEARN_DEV_CDP=1 时启用，避免默认暴露调试端口。
+  if (process.env.AILEARN_DEV_CDP === "1") {
+    app.commandLine.appendSwitch("remote-debugging-port", "9222");
+  }
+
   app.whenReady().then(async () => {
     // 2026-08-11：打包后注册 ailearn:// 默认协议客户端（dev 不注册，避免
     // 污染系统协议绑定；dev 验证深链用 `open -a Electron "ailearn://open"`）。
@@ -887,10 +915,11 @@ if (!gotTheLock) {
           void updateRuntime.check();
         }
       },
-      // 打包后图标在 resources/icon.png（extraResources）；dev 用仓库 build 目录。
+      // 打包后图标在 resources/trayTemplate.png（extraResources）；dev 用仓库 build 目录。
+      // 2026-08-13：状态栏专用 16px Template 图标（此前用 1024px 应用图标 → 巨大贴图）。
       iconPath: require("node:path").join(
         app.isPackaged ? process.resourcesPath : require("node:path").resolve(__dirname, "../../build"),
-        "icon.png",
+        "trayTemplate.png",
       ),
     });
     startupSequence().catch((err) => {
@@ -964,6 +993,13 @@ if (!gotTheLock) {
     // 2026-08-12：记录 quit 来源（调试"启动后自动退出"）。event 无 reason 字段，
     // 靠各触发点日志定位；此处补 SIGTERM/SIGINT 与 uncaughtException 追踪。
     logger.info("[app] before-quit fired (appQuitting=" + appQuitting + ", shuttingDown=" + shuttingDown + ")");
+    // 2026-08-13（登录态修复）：退出前强制刷盘——Chromium 的 cookie/存储
+    // 刷盘有延迟，退出后立即重启会丢持久登录态（表现为每次都要重新登录）。
+    try {
+      session.defaultSession.flushStorageData();
+    } catch (error) {
+      logger.warn({ err: error }, "[app] flushStorageData failed");
+    }
     // 2026-08-12：追踪外部信号与未捕获异常（排除"无人操作却退出"的可能来源）。
     process.on("SIGTERM", () => logger.warn("[app] received SIGTERM"));
     process.on("SIGINT", () => logger.warn("[app] received SIGINT"));
@@ -978,11 +1014,15 @@ if (!gotTheLock) {
     appQuitting = true;
     event.preventDefault();
     broadcastLifecycle({ version: 1, kind: "app_quitting" });
-    ipcCleanup?.();
-    ipcCleanup = null;
     petTray?.destroy();
     petTray = null;
+    // 2026-08-12+（15a 新反馈）：先销毁 pet 窗口、再清理 IPC handler——
+    // 原顺序（先 ipcCleanup 后 destroyPetWindow）会让窗口销毁瞬间 renderer
+    // 仍在发出的 pet:* invoke（如 pet:set-interaction-mode）落在已移除的
+    // handler 上 → "No handler registered for 'pet:set-interaction-mode'"。
     destroyPetWindow();
+    ipcCleanup?.();
+    ipcCleanup = null;
     logger.info("[app] Stopping web server before quit…");
     // SEC-04: Await stopWebServer to give the Next.js process time to
     // shut down gracefully before app.exit(0). Without this, the child

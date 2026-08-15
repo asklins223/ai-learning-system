@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { CharacterPresentationStateV1 } from "@ailearn/shared";
+import type { CharacterPresentationStateV1 } from "@ailearn/shared/companion-character-contracts";
 import {
   LIVE2D_INVITE_ONCE_CUE,
   LIVE2D_MOTION_FOR_PRESENTATION,

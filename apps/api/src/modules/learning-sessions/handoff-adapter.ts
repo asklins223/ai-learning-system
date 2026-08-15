@@ -28,7 +28,7 @@ import {
   validateForbiddenFields,
   hashPublishedLearningAsset,
   type PublishedLearningAssetContractV1,
-} from "@ailearn/shared";
+} from "@ailearn/shared/published-learning-asset-contract";
 
 // ─── 输入类型（真实 published row 的最小只读视图）────────────────────────
 

@@ -132,7 +132,13 @@ test("active projections and learning-state mutations use Card Set eligibility",
 
   const understanding = readModule("understanding/service.ts");
   assert.ok(
-    (understanding.match(/activeLearningCardConsumerPredicate\(\)/g) ?? []).length >= 3,
+    (understanding.match(/activeLearningCardConsumerPredicate\(\)/g) ?? []).length >= 1,
+  );
+  // 2026-08-14（星图切流收口）：旧 /graph reader 删除后，投影 V2 是理解领域
+  // 的主消费面——shared 平面 card 查询同样必须走 Card Set eligibility。
+  const projection = readModule("understanding/projection-routes.ts");
+  assert.ok(
+    (projection.match(/activeLearningCardConsumerPredicate\(\)/g) ?? []).length >= 1,
   );
 
   const stats = readModule("stats/service.ts");

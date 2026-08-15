@@ -6,7 +6,7 @@ import {
   petReducer,
 } from "./pet-reducer";
 import { deriveCharacterPresentation, type PetRuntimeStateV1 } from "./pet-runtime-types";
-import type { CompanionConversationSnapshotV1 } from "@ailearn/shared";
+import type { CompanionConversationSnapshotV1 } from "@ailearn/shared/companion-conversation-contracts";
 
 function initialState(overrides: Partial<PetRuntimeStateV1> = {}): PetRuntimeStateV1 {
   return {
@@ -1124,4 +1124,49 @@ test("B4 fix：conversation.restored 保留用户正在编辑的草稿", () => {
   if (result.state.composer.kind === "editing") {
     assert.equal(result.state.composer.draft, "我正在输入的草稿");
   }
+});
+
+test("15a 根因修复：character.cue 消费 seq，后续 delta/final 不再被拒（卡 thinking 根因）", () => {
+  let state = initialState();
+  // 提交 turn → accepted（seq=88）（与既有 fixture 测试同路径）
+  state = petReducer(state, { type: "character.clicked" }).state;
+  state = petReducer(state, { type: "composer.draft_changed", draft: "测试" }).state;
+  state = petReducer(state, { type: "composer.submitted" }).state;
+  state = petReducer(state, {
+    type: "turn.accepted",
+    conversationId: "00000000-0000-4000-8000-000000000003",
+    runId: "00000000-0000-4000-8000-000000000004",
+    generation: 1,
+    seq: 1,
+  }).state;
+  assert.equal(state.context.latestEventSeq, 1);
+  // status（2）→ cue（3）→ delta（4）→ final（5）
+  state = petReducer(state, {
+    type: "assistant.status", runId: "00000000-0000-4000-8000-000000000004", generation: 1, seq: 2, phase: "thinking", accountEpoch: 0,
+  }).state;
+  assert.equal(state.context.latestEventSeq, 2);
+  const cueResult = petReducer(state, {
+    type: "character.cue",
+    runId: "00000000-0000-4000-8000-000000000004",
+    generation: 1,
+    seq: 3,
+    accountEpoch: 0,
+    cue: { version: 1, intent: "think", emotion: "curious", intensity: 0.35 },
+  });
+  assert.equal(cueResult.state.context.latestEventSeq, 3, "cue 必须消费 seq");
+  assert.equal(cueResult.state.emotion.cue?.intent, "think", "cue 存入 emotion 域");
+  assert.equal(cueResult.state.emotion.cue?.generation, 1, "emotion 域 cue 带 generation");
+  // delta（4）：cue 消费 seq 后不再被 future 拒绝
+  const deltaAfterCue = petReducer(cueResult.state, {
+    type: "assistant.delta", runId: "00000000-0000-4000-8000-000000000004", generation: 1, seq: 4, accountEpoch: 0, text: "你好",
+  });
+  assert.equal(deltaAfterCue.state.turn.kind, "running", "cue 消费 seq 后 delta 正常接受");
+  if (deltaAfterCue.state.turn.kind === "running") {
+    assert.equal(deltaAfterCue.state.turn.previewText, "你好");
+  }
+  // final（5）正常生效
+  const finalResult = petReducer(deltaAfterCue.state, {
+    type: "assistant.final", runId: "00000000-0000-4000-8000-000000000004", generation: 1, seq: 5, accountEpoch: 0, messageId: "00000000-0000-4000-8000-000000000005", text: "你好", textSha256: "0".repeat(64),
+  });
+  assert.equal(finalResult.state.turn.kind, "final");
 });

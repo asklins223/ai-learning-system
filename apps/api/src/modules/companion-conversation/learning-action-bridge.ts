@@ -12,14 +12,8 @@
  */
 
 import { sql } from "drizzle-orm";
-import {
-  canonicalJsonV1,
-  sha256Utf8V1,
-  companionGroundedTutorGrantV1Schema,
-  companionLearningSessionContextV1Schema,
-  companionProposalSnapshotV1Schema,
-  proposedLearningActionPayloadV1Schema,
-} from "@ailearn/shared";
+import { companionGroundedTutorGrantV1Schema, companionLearningSessionContextV1Schema, companionProposalSnapshotV1Schema, proposedLearningActionPayloadV1Schema, } from "@ailearn/shared";
+import { sha256Utf8V1, canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import type { CompanionLearningContextV1 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import { resolveAuthSurfaceManifestSecret } from "../companion-shell/auth-surface.ts";
@@ -29,6 +23,19 @@ import {
   contextRevisionForCompanionLearningSession,
   loadCompanionLearningSessionContext,
 } from "./learning-session-context.ts";
+// 方案 16 §18：LearningRun 工具在 decision 事务内同步执行（与 start_session
+// 的 PREPARE 同模式；confirm 后 proposal 直接 succeeded + resultRef=runId）。
+import { applyAction, createRun, getRunPublicView } from "../learning-runs/run-service.ts";
+import { LearningRunServiceError } from "../learning-runs/run-errors.ts";
+// 方案 16 §18.1：工具网关第二批执行单元（确定性、同事务）。
+import { createUnderstandingRoutePlan } from "../understanding/route-plan-service.ts";
+import { deferReviewSchedule } from "../review/review-defer-service.ts";
+import {
+  confirmMemory,
+  deleteMemory,
+  getMemory,
+  upsertMemory,
+} from "./memory-service.ts";
 
 function sanitizeText(value: string, max: number): string {
   return value
@@ -117,14 +124,91 @@ async function resolveCompanionLearningContextInTransaction(
     };
   }
 
+  // 方案 16 §18：LearningRun 菜单候选（learning_run_v1 生产入口）。
+  // resume：最近非终态 learning_run（含 preparing/active/assessing/checkpoint/
+  // committing/paused/recoverable_error；sandbox 不参与桌宠菜单）。
+  const runResumeRows = await tx.execute<{ id: string; key_point_id: string }>(sql`
+    SELECT r.id, r.key_point_id
+    FROM learning_runs r
+    WHERE r.workspace_id = ${args.workspaceId}
+      AND r.user_id = ${args.userId}
+      AND r.phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
+      AND r.sandbox_namespace_id IS NULL
+    ORDER BY r.created_at DESC
+    LIMIT 1
+  `);
+  let learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"] = null;
+  if (runResumeRows[0]) {
+    const titleRows = await tx.execute<{ claim: string | null }>(sql`
+      SELECT k.claim FROM card_key_points k
+      WHERE k.id = ${runResumeRows[0].key_point_id} AND k.workspace_id = ${args.workspaceId}
+      LIMIT 1
+    `);
+    const title = sanitizeText(titleRows[0]?.claim ?? "", 80) || "继续当前学习";
+    const payload = { kind: "resume_learning_run", runId: runResumeRows[0].id };
+    learningRunResumeCandidate = {
+      candidateId: "learning_run_resume",
+      runId: runResumeRows[0].id,
+      title,
+      targetSummary: sanitizeText(`继续学习：${title}`, 160),
+      impactSummary: "恢复当前学习运行",
+      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
+    };
+  }
+
+  // start：最近有 key point 的卡（构造 start_learning_run 候选；幂等键
+  // 按 keyPoint 稳定——重复确认重放同一 Run，不会重复创建）。
+  const runStartRows = await tx.execute<{
+    key_point_id: string;
+    card_id: string;
+    claim: string | null;
+  }>(sql`
+    SELECT k.id AS key_point_id, k.card_id, k.claim
+    FROM card_key_points k
+    WHERE k.workspace_id = ${args.workspaceId}
+    ORDER BY k.updated_at DESC
+    LIMIT 1
+  `);
+  let learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"] = null;
+  if (runStartRows[0]) {
+    const claim = runStartRows[0].claim ?? "";
+    const title = sanitizeText(claim, 80) || "开始三分钟巩固";
+    const idempotencyKey = `pet-menu:${runStartRows[0].key_point_id}`;
+    const payload = {
+      kind: "start_learning_run",
+      request: {
+        version: 1,
+        origin: {
+          kind: "card",
+          cardId: runStartRows[0].card_id,
+          keyPointId: runStartRows[0].key_point_id,
+        },
+        goal: "stabilize",
+        clientRequestId: idempotencyKey,
+        idempotencyKey,
+      },
+    };
+    learningRunStartCandidate = {
+      candidateId: "learning_run_start",
+      cardId: runStartRows[0].card_id,
+      keyPointId: runStartRows[0].key_point_id,
+      title,
+      targetSummary: sanitizeText(`用三分钟巩固：${title}`, 160),
+      impactSummary: "创建一次三分钟学习运行，完成后按真实结果安排复习",
+      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
+    };
+  }
+
   const contextRevision = sha256Utf8V1(
-    canonicalJsonV1({ resumeCandidate, startCandidate }),
+    canonicalJsonV1({ resumeCandidate, startCandidate, learningRunResumeCandidate, learningRunStartCandidate }),
   );
   return {
     version: 1,
     contextRevision,
     resumeCandidate,
     startCandidate,
+    learningRunResumeCandidate,
+    learningRunStartCandidate,
   };
 }
 
@@ -141,10 +225,7 @@ export async function resolveCompanionLearningContext(args: {
 // ─── P5 §6.7 Menu proposal create（原子事务） ───────────────────────────
 
 import { randomUUID } from "node:crypto";
-import {
-  canonicalJsonV1 as canonicalJson,
-  sha256Utf8V1 as sha256,
-} from "@ailearn/shared";
+import { canonicalJsonV1 as canonicalJson, sha256Utf8V1 as sha256 } from "@ailearn/shared/content-hash";
 import { CompanionConversationError } from "./turn-service.ts";
 import {
   createPgSessionRepository,
@@ -158,7 +239,7 @@ function menuProposalRequestHash(body: {
   version: 1;
   conversationId?: string;
   clientMessageId: string;
-  candidateId: "resume_current" | "start_short";
+  candidateId: "resume_current" | "start_short" | "learning_run_resume" | "learning_run_start";
   expectedContextRevision: string;
   expectedPayloadSha256: string;
   sourceSurface: "pet" | "main" | "web_fallback";
@@ -188,7 +269,7 @@ export async function createCompanionMenuProposal(args: {
     version: 1;
     conversationId?: string;
     clientMessageId: string;
-    candidateId: "resume_current" | "start_short";
+    candidateId: "resume_current" | "start_short" | "learning_run_resume" | "learning_run_start";
     expectedContextRevision: string;
     expectedPayloadSha256: string;
     sourceSurface: "pet" | "main" | "web_fallback";
@@ -199,11 +280,170 @@ export async function createCompanionMenuProposal(args: {
     { workspaceId: args.workspaceId, userId: args.userId },
     async (tx) => {
       // L11：事件携带当前账号世代（global off 后旧 action 事件被客户端拒绝）。
-      const accountEpoch = await getCompanionAccountEpoch(tx, args.userId);
-      // 幂等：同 key 同 body 返回同 response；异 body 冲突
-      // §2.1：idempotency key hash 对校验后的 UUID 小写 ASCII 原文计算。
-      const keyHash = sha256(args.idempotencyKey.toLowerCase());
       const requestBodyHash = menuProposalRequestHash(args.body);
+
+
+      // 重算 context（同事务只读）
+      const context = await resolveCompanionLearningContextInTransaction(tx, {
+        workspaceId: args.workspaceId,
+        userId: args.userId,
+      });
+      if (context.contextRevision !== args.body.expectedContextRevision) {
+        throw new CompanionConversationError(
+          "CONTEXT_STALE", 409, "context revision mismatch",
+        );
+      }
+      const candidate =
+        args.body.candidateId === "resume_current"
+          ? context.resumeCandidate
+          : args.body.candidateId === "learning_run_resume"
+            ? context.learningRunResumeCandidate
+            : args.body.candidateId === "learning_run_start"
+              ? context.learningRunStartCandidate
+              : context.startCandidate;
+      if (!candidate) {
+        // 2026-08-12+（15a-E）：细分 code——前端据此显示"当前没有进行中的学习/
+        // 没有可开始的学习"（此前 ACTION_STALE 无法区分）。
+        throw new CompanionConversationError(
+          args.body.candidateId === "resume_current" || args.body.candidateId === "learning_run_resume"
+            ? "NO_ACTIVE_SESSION"
+            : "NO_CANDIDATE", 409, "candidate unavailable",
+        );
+      }
+      if (candidate.payloadSha256 !== args.body.expectedPayloadSha256) {
+        throw new CompanionConversationError(
+          "ACTION_STALE", 409, "payload hash mismatch",
+        );
+      }
+      // 服务端重新构造候选 payload（引用来自只读查询），并精确验证其 sha256
+      // 与候选 payloadSha256/expected 一致（§6.7：payload 完全由服务端构造）。
+      let payload: { kind: string; [k: string]: unknown };
+      if (args.body.candidateId === "resume_current") {
+        const rows = await tx.execute<{ id: string }>(sql`
+          SELECT id FROM learning_sessions
+          WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
+            AND status = 'active'
+          ORDER BY created_at DESC LIMIT 1
+        `);
+        if (!rows[0]) {
+          throw new CompanionConversationError("NO_ACTIVE_SESSION", 409, "active learning session disappeared");
+        }
+        payload = { kind: "resume_session", sessionId: rows[0].id };
+      } else if (args.body.candidateId === "learning_run_resume") {
+        const rows = await tx.execute<{ id: string }>(sql`
+          SELECT id FROM learning_runs
+          WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
+            AND phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
+            AND sandbox_namespace_id IS NULL
+          ORDER BY created_at DESC LIMIT 1
+        `);
+        if (!rows[0]) {
+          throw new CompanionConversationError("NO_ACTIVE_SESSION", 409, "active learning run disappeared");
+        }
+        payload = { kind: "resume_learning_run", runId: rows[0].id };
+      } else if (args.body.candidateId === "learning_run_start") {
+        const rows = await tx.execute<{ key_point_id: string; card_id: string }>(sql`
+          SELECT k.id AS key_point_id, k.card_id
+          FROM card_key_points k
+          WHERE k.workspace_id = ${args.workspaceId}
+          ORDER BY k.updated_at DESC LIMIT 1
+        `);
+        if (!rows[0]) {
+          throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
+        }
+        const idempotencyKey = `pet-menu:${rows[0].key_point_id}`;
+        payload = {
+          kind: "start_learning_run",
+          request: {
+            version: 1,
+            origin: {
+              kind: "card",
+              cardId: rows[0].card_id,
+              keyPointId: rows[0].key_point_id,
+            },
+            goal: "stabilize",
+            clientRequestId: idempotencyKey,
+            idempotencyKey,
+          },
+        };
+      } else {
+        const rows = await tx.execute<{ key_point_id: string; card_id: string }>(sql`
+          SELECT k.id AS key_point_id, k.card_id
+          FROM learning_episodes e JOIN card_key_points k ON k.id = e.key_point_id
+          WHERE e.workspace_id = ${args.workspaceId} AND e.user_id = ${args.userId}
+            AND k.workspace_id = ${args.workspaceId}
+          ORDER BY e.created_at DESC LIMIT 1
+        `);
+        if (!rows[0]) {
+          throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
+        }
+        payload = {
+          kind: "start_session",
+          origin: "now",
+          cardId: rows[0].card_id,
+          keyPointId: rows[0].key_point_id,
+        };
+      }
+      const payloadHash = sha256(canonicalJson(payload));
+      if (payloadHash !== args.body.expectedPayloadSha256) {
+        throw new CompanionConversationError(
+          "ACTION_STALE", 409, "payload hash mismatch",
+        );
+      }
+
+      return createCompanionProposalInTransaction(tx, {
+        workspaceId: args.workspaceId,
+        userId: args.userId,
+        conversationId: args.body.conversationId,
+        clientMessageId: args.body.clientMessageId,
+        idempotencyKey: args.idempotencyKey,
+        requestBodyHash,
+        payload,
+        payloadSha256: payloadHash,
+        title: candidate.title,
+        targetSummary: candidate.targetSummary,
+        impactSummary: candidate.impactSummary,
+        userText:
+          args.body.candidateId === "resume_current"
+            ? `请继续当前学习：${candidate.targetSummary}`
+            : `请开始一小段学习：${candidate.targetSummary}`,
+        sourceSurface: args.body.sourceSurface,
+      });
+
+    },
+  );
+}
+
+/**
+ * §6.7/§18.1：proposal 原子创建（menu 与 tool 网关共用事务体）。
+ * 同一 RLS 事务：幂等检查（同 key 同 requestBodyHash 重放同 response）→
+ * conversation 校验/创建 → 原子插入 user action message + assistant
+ * confirmation（带 action_ref）+ pending proposal + action.proposed event。
+ * 任何验证失败零写入。
+ */
+async function createCompanionProposalInTransaction(
+  tx: ApiTransaction,
+  args: {
+    workspaceId: string;
+    userId: string;
+    conversationId?: string;
+    clientMessageId: string;
+    idempotencyKey: string;
+    requestBodyHash: string;
+    payload: { kind: string; [key: string]: unknown };
+    payloadSha256: string;
+    title: string;
+    targetSummary: string;
+    impactSummary: string;
+    userText: string;
+    sourceSurface: "pet" | "main" | "web_fallback";
+  },
+): Promise<unknown> {
+  // L11：事件携带当前账号世代（global off 后旧 action 事件被客户端拒绝）。
+  const accountEpoch = await getCompanionAccountEpoch(tx, args.userId);
+  // 幂等：同 key 同 body 返回同 response；异 body 冲突
+  // §2.1：idempotency key hash 对校验后的 UUID 小写 ASCII 原文计算。
+  const keyHash = sha256(args.idempotencyKey.toLowerCase());
       const existing = await tx.execute<{
         id: string;
         conversation_id: string;
@@ -244,7 +484,7 @@ export async function createCompanionMenuProposal(args: {
       `);
       if (existing[0]) {
         const row = existing[0];
-        if (row.request_body_sha256 !== requestBodyHash) {
+        if (row.request_body_sha256 !== args.requestBodyHash) {
           throw new CompanionConversationError(
             "IDEMPOTENCY_CONFLICT", 409, "menu proposal key reused with a different body",
           );
@@ -283,72 +523,8 @@ export async function createCompanionMenuProposal(args: {
           eventCursor: Number(row.event_cursor),
         };
       }
-
-      // 重算 context（同事务只读）
-      const context = await resolveCompanionLearningContextInTransaction(tx, {
-        workspaceId: args.workspaceId,
-        userId: args.userId,
-      });
-      if (context.contextRevision !== args.body.expectedContextRevision) {
-        throw new CompanionConversationError(
-          "ACTION_STALE", 409, "context revision mismatch",
-        );
-      }
-      const candidate =
-        args.body.candidateId === "resume_current"
-          ? context.resumeCandidate
-          : context.startCandidate;
-      if (!candidate) {
-        throw new CompanionConversationError(
-          "ACTION_STALE", 409, "candidate unavailable",
-        );
-      }
-      if (candidate.payloadSha256 !== args.body.expectedPayloadSha256) {
-        throw new CompanionConversationError(
-          "ACTION_STALE", 409, "payload hash mismatch",
-        );
-      }
-      // 服务端重新构造候选 payload（引用来自只读查询），并精确验证其 sha256
-      // 与候选 payloadSha256/expected 一致（§6.7：payload 完全由服务端构造）。
-      let payload: { kind: string; [k: string]: unknown };
-      if (args.body.candidateId === "resume_current") {
-        const rows = await tx.execute<{ id: string }>(sql`
-          SELECT id FROM learning_sessions
-          WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
-            AND status = 'active'
-          ORDER BY created_at DESC LIMIT 1
-        `);
-        if (!rows[0]) {
-          throw new CompanionConversationError("ACTION_STALE", 409, "active learning session disappeared");
-        }
-        payload = { kind: "resume_session", sessionId: rows[0].id };
-      } else {
-        const rows = await tx.execute<{ key_point_id: string; card_id: string }>(sql`
-          SELECT k.id AS key_point_id, k.card_id
-          FROM learning_episodes e JOIN card_key_points k ON k.id = e.key_point_id
-          WHERE e.workspace_id = ${args.workspaceId} AND e.user_id = ${args.userId}
-            AND k.workspace_id = ${args.workspaceId}
-          ORDER BY e.created_at DESC LIMIT 1
-        `);
-        if (!rows[0]) {
-          throw new CompanionConversationError("ACTION_STALE", 409, "learning candidate disappeared");
-        }
-        payload = {
-          kind: "start_session",
-          origin: "now",
-          cardId: rows[0].card_id,
-          keyPointId: rows[0].key_point_id,
-        };
-      }
-      const payloadHash = sha256(canonicalJson(payload));
-      if (payloadHash !== args.body.expectedPayloadSha256) {
-        throw new CompanionConversationError(
-          "ACTION_STALE", 409, "payload hash mismatch",
-        );
-      }
-
       // conversation：提供时校验；缺省时原子创建 dialogue
-      let conversationId = args.body.conversationId;
+      let conversationId = args.conversationId;
       if (conversationId) {
         const conv = await tx.execute<{ id: string; kind: string; status: string }>(sql`
           SELECT id, kind, status FROM companion_conversations WHERE id = ${conversationId}
@@ -385,9 +561,11 @@ export async function createCompanionMenuProposal(args: {
                     payload, payload_sha256, title, target_summary, impact_summary,
                     status, decision, expires_at, decided_at, created_at, updated_at
         `);
-        for (const row of expired) {
-          await appendActionExpiredEvent(tx, args.workspaceId, args.userId, row);
-        }
+        // 轻微·18（round-4）：批量 append expired 事件。原逐行 appendActionExpiredEvent
+        // （每行 getCompanionAccountEpoch + counter UPDATE RETURNING + INSERT = 3×N RTT）。
+        // 因 expired 行均属同一 conversation/同一 user，account_epoch 共享、seq 由单次
+        // counter UPDATE +N 后本地递推、INSERT 用多行 VALUES——降为 3 次 RTT（有界）。
+        await appendActionExpiredEventsBatch(tx, args.workspaceId, args.userId, conversationId, expired);
         const pending = await tx.execute<{ id: string }>(sql`
           SELECT id FROM companion_action_proposals
           WHERE conversation_id = ${conversationId} AND status = 'pending'
@@ -418,7 +596,7 @@ export async function createCompanionMenuProposal(args: {
           INSERT INTO companion_conversations
             (id, workspace_id, user_id, kind, title, title_source, status)
           VALUES (${randomUUID()}, ${args.workspaceId}, ${args.userId}, 'dialogue',
-                  ${candidate.title.slice(0, 80)}, 'auto', 'active')
+                  ${args.title.slice(0, 80)}, 'auto', 'active')
           RETURNING id
         `);
         if (!created[0]) {
@@ -433,7 +611,7 @@ export async function createCompanionMenuProposal(args: {
       const duplicateClientMessage = await tx.execute<{ id: string }>(sql`
         SELECT id FROM companion_messages
         WHERE conversation_id = ${conversationId}
-          AND client_message_id = ${args.body.clientMessageId}
+          AND client_message_id = ${args.clientMessageId}
         LIMIT 1
       `);
       if (duplicateClientMessage[0]) {
@@ -457,12 +635,9 @@ export async function createCompanionMenuProposal(args: {
       const userMessageId = randomUUID();
       const assistantMessageId = randomUUID();
       const proposalId = randomUUID();
-      const userText =
-        args.body.candidateId === "resume_current"
-          ? `请继续当前学习：${candidate.targetSummary}`
-          : `请开始一小段学习：${candidate.targetSummary}`;
+      const userText = args.userText;
       const assistantText =
-        `建议：${candidate.title}\n目标：${candidate.targetSummary}\n影响：${candidate.impactSummary}\n确认后才会执行。`;
+        `建议：${args.title}\n目标：${args.targetSummary}\n影响：${args.impactSummary}\n确认后才会执行。`;
 
       const userBlocks = [{ type: "text", text: userText }];
       // §3.3：assistant confirmation message kind='action'，blocks = safe text +
@@ -477,7 +652,7 @@ export async function createCompanionMenuProposal(args: {
            client_message_id, content_sha256)
         VALUES
           (${userMessageId}, ${conversationId}, ${args.workspaceId}, ${args.userId}, 'user',
-           ${messageSeq}, 'action', ${JSON.stringify(userBlocks)}, ${args.body.clientMessageId}, ${sha256(userText)}),
+           ${messageSeq}, 'action', ${JSON.stringify(userBlocks)}, ${args.clientMessageId}, ${sha256(userText)}),
           (${assistantMessageId}, ${conversationId}, ${args.workspaceId}, ${args.userId}, 'assistant',
            ${messageSeq + 1}, 'action', ${JSON.stringify(assistantBlocks)}, NULL, ${sha256(assistantText)})
       `);
@@ -498,9 +673,9 @@ export async function createCompanionMenuProposal(args: {
            idempotency_key_hash, request_body_sha256, expires_at)
         VALUES
           (${proposalId}, ${args.workspaceId}, ${args.userId}, ${conversationId}, ${userMessageId}, ${sourceGeneration},
-           ${JSON.stringify(payload)}, ${candidate.payloadSha256},
-           ${candidate.title}, ${candidate.targetSummary}, ${candidate.impactSummary}, 'pending',
-           ${keyHash}, ${requestBodyHash}, now() + make_interval(mins => ${PROPOSAL_TTL_MINUTES}))
+           ${JSON.stringify(args.payload)}, ${args.payloadSha256},
+           ${args.title}, ${args.targetSummary}, ${args.impactSummary}, 'pending',
+           ${keyHash}, ${args.requestBodyHash}, now() + make_interval(mins => ${PROPOSAL_TTL_MINUTES}))
         RETURNING expires_at, created_at, updated_at
       `);
       const proposalTimes = insertedProposal[0];
@@ -515,11 +690,11 @@ export async function createCompanionMenuProposal(args: {
           conversationId,
           sourceMessageId: userMessageId,
           sourceGeneration,
-          kind: payload,
-          payloadSha256: candidate.payloadSha256,
-          title: candidate.title,
-          targetSummary: candidate.targetSummary,
-          impactSummary: candidate.impactSummary,
+          kind: args.payload,
+          payloadSha256: args.payloadSha256,
+          title: args.title,
+          targetSummary: args.targetSummary,
+          impactSummary: args.impactSummary,
           status: "pending",
         },
       };
@@ -546,11 +721,11 @@ export async function createCompanionMenuProposal(args: {
           sourceMessageId: userMessageId,
           sourceGeneration,
           contextGrantId: null,
-          payload,
-          payloadSha256: candidate.payloadSha256,
-          title: candidate.title,
-          targetSummary: candidate.targetSummary,
-          impactSummary: candidate.impactSummary,
+          payload: args.payload,
+          payloadSha256: args.payloadSha256,
+          title: args.title,
+          targetSummary: args.targetSummary,
+          impactSummary: args.impactSummary,
           requiresConfirmation: true,
           status: "pending",
           decision: null,
@@ -562,14 +737,16 @@ export async function createCompanionMenuProposal(args: {
         },
         eventCursor: eventSeq,
       };
-    },
-  );
 }
+
+
+// ─── 方案 16 §18.1：通用工具 proposal（Orchestrator 网关入口） ───────────
 
 function toolProposalRequestHash(body: {
   version: 1;
+  conversationId?: string;
   clientMessageId: string;
-  payload: unknown;
+  payloadSha256: string;
   title: string;
   targetSummary: string;
   impactSummary: string;
@@ -577,8 +754,9 @@ function toolProposalRequestHash(body: {
 }): string {
   return sha256(canonicalJson({
     version: body.version,
+    conversationId: body.conversationId ?? null,
     clientMessageId: body.clientMessageId,
-    payload: body.payload,
+    payloadSha256: body.payloadSha256,
     title: body.title,
     targetSummary: body.targetSummary,
     impactSummary: body.impactSummary,
@@ -587,23 +765,19 @@ function toolProposalRequestHash(body: {
 }
 
 /**
- * §18：POST /companion/tool-proposals（2026-08-15 接线修复——此前只有
- * menu-proposals，工具网关入口与实现缺失，15 kind 学习动作无任何 UI 可触发）。
- *
- * 工具提案创建：客户端（桌宠/主窗口）提交 15 kind 学习动作 payload →
- * §18 白名单校验（proposedLearningActionPayloadV1Schema）→ 幂等（keyHash +
- * requestBodyHash，同 key 同 body 重放 / 异 body 409）→ 原子落库：
- * user action 消息 + assistant confirmation（action_ref）+ pending proposal
- * + action.proposed event。conversation：复用最近 active dialogue，无则新建
- * （限额 200，与对话 API 同口径）。执行仍由 decideCompanionProposal 消费。
+ * §18.1：POST /companion/tool-proposals — Orchestrator/桌宠工具网关入口。
+ * payload 全量按共享合同校验（fail closed）；服务端重算 payloadSha256 并
+ * 冻结；title/summaries 净化截断。同 key 同 body 幂等返回同 response，
+ * 异 body 409（复用 §6.7 proposal 原子事务体）。
  */
 export async function createCompanionToolProposal(args: {
   workspaceId: string;
   userId: string;
   body: {
     version: 1;
+    conversationId?: string;
     clientMessageId: string;
-    payload: unknown;
+    payload: { kind: string; [key: string]: unknown };
     title: string;
     targetSummary: string;
     impactSummary: string;
@@ -611,234 +785,66 @@ export async function createCompanionToolProposal(args: {
   };
   idempotencyKey: string;
 }): Promise<unknown> {
+  const parsed = proposedLearningActionPayloadV1Schema.safeParse(args.body.payload);
+  if (!parsed.success) {
+    throw new CompanionConversationError(
+      "INVALID_REQUEST", 400, "tool payload does not match the proposal contract",
+    );
+  }
+  const payload = parsed.data as unknown as { kind: string; [key: string]: unknown };
+  const payloadSha256 = sha256Utf8V1(canonicalJsonV1(payload));
+  const title = sanitizeText(args.body.title, 80);
+  const targetSummary = sanitizeText(args.body.targetSummary, 160);
+  const impactSummary = sanitizeText(args.body.impactSummary, 240);
+  if (!title || !targetSummary || !impactSummary) {
+    throw new CompanionConversationError(
+      "INVALID_REQUEST", 400, "title/targetSummary/impactSummary are required",
+    );
+  }
+  const requestBodyHash = toolProposalRequestHash({
+    version: 1,
+    conversationId: args.body.conversationId,
+    clientMessageId: args.body.clientMessageId,
+    payloadSha256,
+    title,
+    targetSummary,
+    impactSummary,
+    sourceSurface: args.body.sourceSurface,
+  });
   return withWorkspaceTransaction(
     { workspaceId: args.workspaceId, userId: args.userId },
-    async (tx) => {
-      // §18 白名单校验（fail-closed：非法 payload 不落库）。
-      const parsed = proposedLearningActionPayloadV1Schema.safeParse(args.body.payload);
-      if (!parsed.success) {
-        throw new CompanionConversationError("INVALID_REQUEST", 400, "tool payload 非法");
-      }
-      const payload = parsed.data;
-      const payloadHash = sha256(canonicalJson(payload));
-      const accountEpoch = await getCompanionAccountEpoch(tx, args.userId);
-      const keyHash = sha256(args.idempotencyKey.toLowerCase());
-      const requestBodyHash = toolProposalRequestHash(args.body);
-      const existing = await tx.execute<{ id: string; request_body_sha256: string | null }>(sql`
-        SELECT id, request_body_sha256 FROM companion_action_proposals
-        WHERE idempotency_key_hash = ${keyHash} LIMIT 1
-      `);
-      if (existing[0]) {
-        if (existing[0].request_body_sha256 !== requestBodyHash) {
-          throw new CompanionConversationError(
-            "IDEMPOTENCY_CONFLICT", 409, "tool proposal key reused with a different body",
-          );
-        }
-        const row = await tx.execute<{
-          id: string; conversation_id: string; source_message_id: string;
-          payload: { kind: string; [key: string]: unknown };
-          payload_sha256: string; title: string; target_summary: string;
-          impact_summary: string; status: string; expires_at: Date;
-          created_at: Date; updated_at: Date;
-        }>(sql`
-          SELECT id, conversation_id, source_message_id, payload, payload_sha256,
-                 title, target_summary, impact_summary, status, expires_at,
-                 created_at, updated_at
-          FROM companion_action_proposals WHERE id = ${existing[0].id}
-        `);
-        const proposal = row[0];
-        return {
-          version: 1,
-          conversationId: proposal.conversation_id,
-          userMessageId: proposal.source_message_id,
-          assistantMessageId: proposal.source_message_id,
-          proposal: {
-            version: 1,
-            proposalId: proposal.id,
-            conversationId: proposal.conversation_id,
-            sourceMessageId: proposal.source_message_id,
-            sourceGeneration: 0,
-            contextGrantId: null,
-            payload: proposal.payload,
-            payloadSha256: proposal.payload_sha256,
-            title: proposal.title,
-            targetSummary: proposal.target_summary,
-            impactSummary: proposal.impact_summary,
-            requiresConfirmation: true,
-            status: proposal.status,
-            decision: null,
-            actionRunId: null,
-            expiresAt: new Date(proposal.expires_at).toISOString(),
-            decidedAt: null,
-            createdAt: new Date(proposal.created_at).toISOString(),
-            updatedAt: new Date(proposal.updated_at).toISOString(),
-          },
-          eventCursor: null,
-        };
-      }
-
-      // conversation：复用最近 active dialogue，无则新建（限额 200）。
-      const latestDialogue = await tx.execute<{ id: string }>(sql`
-        SELECT id FROM companion_conversations
-        WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
-          AND kind = 'dialogue' AND status = 'active'
-        ORDER BY last_message_at DESC NULLS LAST, created_at DESC
-        LIMIT 1
-      `);
-      let conversationId = latestDialogue[0]?.id ?? null;
-      if (!conversationId) {
-        const dialogueCount = await tx.execute<{ n: string }>(sql`
-          SELECT count(*)::int AS n FROM companion_conversations
-          WHERE workspace_id = ${args.workspaceId}
-            AND user_id = ${args.userId}
-            AND kind = 'dialogue'
-            AND status = 'active'
-        `);
-        if (Number(dialogueCount[0]?.n ?? 0) >= 200) {
-          throw new CompanionConversationError(
-            "CONVERSATION_LIMIT_REACHED", 409, "max 200 user-created dialogue conversations",
-          );
-        }
-        const created = await tx.execute<{ id: string }>(sql`
-          INSERT INTO companion_conversations
-            (id, workspace_id, user_id, kind, title, title_source, status)
-          VALUES (${randomUUID()}, ${args.workspaceId}, ${args.userId}, 'dialogue',
-                  ${args.body.title.slice(0, 80)}, 'auto', 'active')
-          RETURNING id
-        `);
-        if (!created[0]) {
-          throw new CompanionConversationError("INTERNAL_ERROR", 500, "conversation create failed");
-        }
-        conversationId = created[0].id;
-      }
-
-      const duplicateClientMessage = await tx.execute<{ id: string }>(sql`
-        SELECT id FROM companion_messages
-        WHERE conversation_id = ${conversationId}
-          AND client_message_id = ${args.body.clientMessageId}
-        LIMIT 1
-      `);
-      if (duplicateClientMessage[0]) {
-        throw new CompanionConversationError(
-          "IDEMPOTENCY_CONFLICT", 409, "clientMessageId already used in conversation",
-        );
-      }
-
-      const counters = await tx.execute<{ next_message_seq: string; next_event_seq: string }>(sql`
-        UPDATE companion_conversations
-        SET next_message_seq = next_message_seq + 2,
-            next_event_seq = next_event_seq + 1,
-            last_message_at = now()
-        WHERE id = ${conversationId}
-        RETURNING next_message_seq, next_event_seq
-      `);
-      const messageSeq = Number(counters[0].next_message_seq) - 2;
-      const eventSeq = Number(counters[0].next_event_seq) - 1;
-
-      const userMessageId = randomUUID();
-      const assistantMessageId = randomUUID();
-      const proposalId = randomUUID();
-      const userText = `请执行：${args.body.targetSummary}`;
-      const assistantText =
-        `建议：${args.body.title}\n目标：${args.body.targetSummary}\n影响：${args.body.impactSummary}\n确认后才会执行。`;
-
-      const userBlocks = [{ type: "text", text: userText }];
-      const assistantBlocks = [
-        { type: "text", text: assistantText },
-        { type: "action_ref", proposalId },
-      ];
-      await tx.execute(sql`
-        INSERT INTO companion_messages
-          (id, conversation_id, workspace_id, user_id, role, seq, kind, blocks,
-           client_message_id, content_sha256)
-        VALUES
-          (${userMessageId}, ${conversationId}, ${args.workspaceId}, ${args.userId}, 'user',
-           ${messageSeq}, 'action', ${JSON.stringify(userBlocks)}, ${args.body.clientMessageId}, ${sha256(userText)}),
-          (${assistantMessageId}, ${conversationId}, ${args.workspaceId}, ${args.userId}, 'assistant',
-           ${messageSeq + 1}, 'action', ${JSON.stringify(assistantBlocks)}, NULL, ${sha256(assistantText)})
-      `);
-      const insertedProposal = await tx.execute<{
-        expires_at: Date; created_at: Date; updated_at: Date;
-      }>(sql`
-        INSERT INTO companion_action_proposals
-          (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
-           payload, payload_sha256, title, target_summary, impact_summary, status,
-           idempotency_key_hash, request_body_sha256, expires_at)
-        VALUES
-          (${proposalId}, ${args.workspaceId}, ${args.userId}, ${conversationId}, ${userMessageId}, 0,
-           ${JSON.stringify(payload)}, ${payloadHash},
-           ${args.body.title}, ${args.body.targetSummary}, ${args.body.impactSummary}, 'pending',
-           ${keyHash}, ${requestBodyHash}, now() + make_interval(mins => ${PROPOSAL_TTL_MINUTES}))
-        RETURNING expires_at, created_at, updated_at
-      `);
-      const proposalTimes = insertedProposal[0];
-      await tx.execute(sql`
-        UPDATE companion_messages SET action_ref = ${proposalId} WHERE id = ${assistantMessageId}
-      `);
-      const eventPayload = {
-        proposal: {
-          version: 1,
-          id: proposalId,
-          workspaceId: args.workspaceId,
-          conversationId,
-          sourceMessageId: userMessageId,
-          sourceGeneration: 0,
-          kind: payload,
-          payloadSha256: payloadHash,
-          title: args.body.title,
-          targetSummary: args.body.targetSummary,
-          impactSummary: args.body.impactSummary,
-          status: "pending",
-        },
-      };
-      await tx.execute(sql`
-        INSERT INTO companion_stream_events
-          (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch,
-           type, payload, expires_at)
-        VALUES
-          (${conversationId}, ${eventSeq}, ${args.workspaceId}, ${args.userId}, NULL, 0, ${accountEpoch},
-           'action.proposed', ${JSON.stringify(eventPayload)},
-           now() + interval '24 hours')
-      `);
-
-      return {
-        version: 1,
-        conversationId,
-        userMessageId,
-        assistantMessageId,
-        proposal: {
-          version: 1,
-          proposalId,
-          conversationId,
-          sourceMessageId: userMessageId,
-          sourceGeneration: 0,
-          contextGrantId: null,
-          payload,
-          payloadSha256: payloadHash,
-          title: args.body.title,
-          targetSummary: args.body.targetSummary,
-          impactSummary: args.body.impactSummary,
-          requiresConfirmation: true,
-          status: "pending",
-          decision: null,
-          actionRunId: null,
-          expiresAt: new Date(proposalTimes.expires_at).toISOString(),
-          decidedAt: null,
-          createdAt: new Date(proposalTimes.created_at).toISOString(),
-          updatedAt: new Date(proposalTimes.updated_at).toISOString(),
-        },
-        eventCursor: eventSeq,
-      };
-    },
+    (tx) => createCompanionProposalInTransaction(tx, {
+      workspaceId: args.workspaceId,
+      userId: args.userId,
+      conversationId: args.body.conversationId,
+      clientMessageId: args.body.clientMessageId,
+      idempotencyKey: args.idempotencyKey,
+      requestBodyHash,
+      payload,
+      payloadSha256,
+      title,
+      targetSummary,
+      impactSummary,
+      userText: `请执行：${title}`,
+      sourceSurface: args.body.sourceSurface,
+    }),
   );
 }
 
 // ─── P5 §6.6 Proposal decision（confirm/reject 原子消费） ───────────────
 
 import { createJob } from "../job/service.ts";
-import { JobType } from "@ailearn/shared";
+import { JobType, type LearningRunActionV1, type UnderstandingRoutePlanRequestV1 } from "@ailearn/shared";
 
-const NAVIGATION_KINDS = new Set(["open_review", "open_card", "open_star_map"]);
+// §18.1 导航工具（纯导航同步 succeeded）；业务工具在下方分支同步执行。
+const NAVIGATION_KINDS = new Set([
+  "open_review",
+  "open_card",
+  "open_star_map",
+  "focus_graph_node",
+  "restore_graph_viewport",
+  "open_conversation_history",
+]);
 
 /**
  * §6.6：POST /companion/proposals/:id/decision。
@@ -990,6 +996,202 @@ export async function decideCompanionProposal(args: {
           version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
           resultRef: null, route: route?.route ?? null, safeSummary: route?.safeSummary ?? "打开页面",
         };
+      }
+
+      // 方案 16 §18：LearningRun 工具（同步执行，事务内完成）。
+      if (kind === "start_learning_run" || kind === "resume_learning_run") {
+        let runId: string;
+        let safeSummary: string;
+        if (kind === "start_learning_run") {
+          const request = proposalPayload.request as Record<string, unknown> | undefined;
+          if (!request || typeof request !== "object") {
+            throw new CompanionConversationError("ACTION_STALE", 409, "learning run payload is stale");
+          }
+          try {
+            const run = await createRun(tx, {
+              workspaceId: args.workspaceId,
+              userId: args.userId,
+              request: request as never,
+            });
+            runId = run.runId;
+            safeSummary = "学习运行已创建";
+          } catch (error) {
+            if (error instanceof LearningRunServiceError) {
+              throw new CompanionConversationError("ACTION_STALE", 409, "learning run could not be prepared");
+            }
+            throw error;
+          }
+        } else {
+          const runIdRaw = proposalPayload.runId;
+          if (typeof runIdRaw !== "string") {
+            throw new CompanionConversationError("ACTION_STALE", 409, "learning run payload is stale");
+          }
+          try {
+            const run = await getRunPublicView(tx, {
+              workspaceId: args.workspaceId,
+              userId: args.userId,
+              runId: runIdRaw,
+            });
+            runId = run.runId;
+            safeSummary = "学习运行已恢复";
+          } catch (error) {
+            if (error instanceof LearningRunServiceError) {
+              throw new CompanionConversationError("ACTION_STALE", 409, "learning run could not be resumed");
+            }
+            throw error;
+          }
+        }
+        await tx.execute(sql`
+          UPDATE companion_action_proposals
+          SET status = 'succeeded', decision = 'confirm', decided_at = now(),
+              decision_key_hash = ${keyHash}, updated_at = now()
+          WHERE id = ${proposal.id}
+        `);
+        await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted", null);
+        return {
+          version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
+          resultRef: runId, route: null, safeSummary,
+        };
+      }
+
+      // ── 方案 16 §18.1：LearningRun 运行时工具（pause/request_hint/switch_variant） ──
+      // exposure-first：hint 只在用户确认后揭示（伴星模型不得自行生成题目提示）。
+      if (kind === "pause_learning_run" || kind === "request_hint_level" || kind === "switch_task_variant") {
+        const runId = proposalPayload.runId;
+        const taskId = proposalPayload.taskId;
+        if (typeof runId !== "string") {
+          throw new CompanionConversationError("ACTION_STALE", 409, "learning run payload is stale");
+        }
+        let action: LearningRunActionV1;
+        let safeSummary: string;
+        if (kind === "pause_learning_run") {
+          action = { kind: "pause" };
+          safeSummary = "学习运行已暂停";
+        } else if (kind === "request_hint_level") {
+          const level = proposalPayload.level;
+          if (typeof taskId !== "string" || (level !== 1 && level !== 2 && level !== 3)) {
+            throw new CompanionConversationError("ACTION_STALE", 409, "hint payload is stale");
+          }
+          action = { kind: "request_hint", level };
+          safeSummary = "已揭示提示（本题降级为练习）";
+        } else {
+          const alternativeId = proposalPayload.alternativeId;
+          if (typeof taskId !== "string" || typeof alternativeId !== "string") {
+            throw new CompanionConversationError("ACTION_STALE", 409, "variant payload is stale");
+          }
+          action = { kind: "switch_variant", alternativeId };
+          safeSummary = "已切换题目变体";
+        }
+        try {
+          const run = await getRunPublicView(tx, {
+            workspaceId: args.workspaceId,
+            userId: args.userId,
+            runId,
+          });
+          // §18：payload 的 taskId 必须匹配当前 active task（applyAction 只作用于
+          // 当前任务；不匹配即 stale，绝不作用于其他任务）。
+          if (typeof taskId === "string" && run.activeTaskId !== null && run.activeTaskId !== taskId) {
+            throw new CompanionConversationError("ACTION_STALE", 409, "task is not the active task");
+          }
+          await applyAction(tx, {
+            workspaceId: args.workspaceId,
+            userId: args.userId,
+            runId,
+            runRevision: run.revision,
+            runtimeEpoch: run.runtimeEpoch,
+            action,
+            idempotencyKey: `pet-tool:${proposal.id}:${kind}`,
+          });
+        } catch (error) {
+          if (error instanceof LearningRunServiceError || error instanceof CompanionConversationError) {
+            throw new CompanionConversationError("ACTION_STALE", 409, "learning run action could not be applied");
+          }
+          throw error;
+        }
+        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, runId, null, safeSummary);
+      }
+
+      // ── §18.1：plan_understanding_route（确定性选路，事务内） ──
+      if (kind === "plan_understanding_route") {
+        const request = proposalPayload.request;
+        if (!request || typeof request !== "object") {
+          throw new CompanionConversationError("ACTION_STALE", 409, "route plan payload is stale");
+        }
+        const plan = await createUnderstandingRoutePlan(
+          tx,
+          { workspaceId: args.workspaceId, userId: args.userId },
+          request as UnderstandingRoutePlanRequestV1,
+        );
+        if (plan.status !== "ok") {
+          throw new CompanionConversationError("ACTION_STALE", 409, "route plan is stale");
+        }
+        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, plan.routePlanId, null, "已规划复习路线");
+      }
+
+      // ── §18.1：defer_review（只写展示层 user_deferred_until） ──
+      if (kind === "defer_review") {
+        const payload = proposalPayload as unknown as {
+          scheduleId: string;
+          scheduleGeneration: number;
+          deferredUntil: string;
+          reasonCode: "user_requested" | "temporary_unavailable";
+        };
+        const outcome = await deferReviewSchedule(tx, { workspaceId: args.workspaceId, userId: args.userId }, {
+          scheduleId: payload.scheduleId,
+          scheduleGeneration: payload.scheduleGeneration,
+          deferredUntil: new Date(payload.deferredUntil),
+          reasonCode: payload.reasonCode,
+        });
+        if (outcome.status === "not_found") {
+          throw new CompanionConversationError("NOT_FOUND", 404, "review schedule not found");
+        }
+        if (outcome.status !== "ok") {
+          throw new CompanionConversationError("ACTION_STALE", 409, "review schedule generation changed");
+        }
+        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, outcome.scheduleId, null, "已延后复习提醒（不算完成复习）");
+      }
+
+      // ── §18.1：记忆工具（确定性 API 同事务执行；revision = updatedAt epoch ms） ──
+      if (kind === "propose_memory_candidate") {
+        const payload = proposalPayload as unknown as {
+          memoryKind: "preference" | "goal" | "learning_context" | "interaction_note";
+          value: string;
+        };
+        const item = await upsertMemory(tx, { workspaceId: args.workspaceId, userId: args.userId }, {
+          kind: payload.memoryKind,
+          content: payload.value,
+          sourceEventId: undefined,
+          sourceSessionId: undefined,
+          userStated: false,
+          candidate: true,
+        });
+        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, item.memoryItemId, null, "已记录记忆候选");
+      }
+      if (kind === "confirm_or_reject_memory" || kind === "delete_assistant_memory") {
+        const payload = proposalPayload as unknown as {
+          memoryId: string;
+          revision: number;
+          decision?: "confirm" | "reject";
+        };
+        const memoryId = payload.memoryId;
+        const memory = await getMemory(tx, { workspaceId: args.workspaceId, userId: args.userId }, memoryId);
+        if (!memory || new Date(memory.updatedAt).getTime() !== payload.revision) {
+          throw new CompanionConversationError("ACTION_STALE", 409, "memory revision changed");
+        }
+        const scope = { workspaceId: args.workspaceId, userId: args.userId };
+        if (kind === "confirm_or_reject_memory") {
+          if (payload.decision === "confirm") {
+            const confirmed = await confirmMemory(tx, scope, memoryId);
+            if (!confirmed) throw new CompanionConversationError("NOT_FOUND", 404, "memory not found");
+            return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, memoryId, null, "记忆已确认");
+          }
+          const rejected = await deleteMemory(tx, scope, memoryId);
+          if (!rejected) throw new CompanionConversationError("NOT_FOUND", 404, "memory not found");
+          return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, memoryId, null, "记忆已拒绝");
+        }
+        const deleted = await deleteMemory(tx, scope, memoryId);
+        if (!deleted) throw new CompanionConversationError("NOT_FOUND", 404, "memory not found");
+        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, memoryId, null, "记忆已删除");
       }
 
       // start_session must go through the canonical Learning Session PREPARE
@@ -1206,6 +1408,30 @@ export async function getCompanionProposalSnapshot(args: {
   );
 }
 
+/** §18 同步工具成功收尾：proposal → succeeded + decision 事件（不建 actionRun）。 */
+async function succeedSyncProposal(
+  tx: { execute(q: unknown): Promise<unknown[] | unknown> },
+  workspaceId: string,
+  userId: string,
+  proposal: { id: string; conversation_id: string },
+  keyHash: string,
+  resultRef: string | null,
+  route: unknown,
+  safeSummary: string,
+): Promise<unknown> {
+  await tx.execute(sql`
+    UPDATE companion_action_proposals
+    SET status = 'succeeded', decision = 'confirm', decided_at = now(),
+        decision_key_hash = ${keyHash}, updated_at = now()
+    WHERE id = ${proposal.id}
+  `);
+  await appendDecisionEvent(tx, workspaceId, userId, proposal, "accepted", null);
+  return {
+    version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
+    resultRef, route: route ?? null, safeSummary,
+  };
+}
+
 function navigationRouteFor(kind: string, payload: Record<string, unknown>): {
   route: { kind: string; [k: string]: unknown };
   safeSummary: string;
@@ -1217,6 +1443,18 @@ function navigationRouteFor(kind: string, payload: Record<string, unknown>): {
       return { route: { kind: "card", cardId: payload.cardId }, safeSummary: "打开卡片" };
     case "open_star_map":
       return { route: { kind: "star_map", keyPointId: payload.keyPointId ?? undefined }, safeSummary: "打开星图" };
+    case "focus_graph_node":
+      return {
+        route: { kind: "star_map", keyPointId: payload.keyPointId, lens: payload.lens },
+        safeSummary: "聚焦知识节点",
+      };
+    case "restore_graph_viewport":
+      return { route: { kind: "star_map", restoreRun: payload.runId }, safeSummary: "恢复星图视口" };
+    case "open_conversation_history":
+      return {
+        route: { kind: "conversation", assistantSessionId: payload.assistantSessionId ?? undefined },
+        safeSummary: "打开对话历史",
+      };
     default:
       return null;
   }
@@ -1280,28 +1518,45 @@ async function appendActionStartedEvent(
   `);
 }
 
-async function appendActionExpiredEvent(
+type ExpiredProposalRow = {
+  id: string; conversation_id: string;
+  source_message_id: string; source_generation: number; payload: unknown;
+  payload_sha256: string; title: string; target_summary: string; impact_summary: string;
+  status: string; decision: string | null; expires_at: Date;
+  decided_at: Date | null; created_at: Date; updated_at: Date;
+};
+
+/**
+ * 轻微·18（round-4）：批量写入同 conversation 的 N 个 action.expired 事件。
+ * account_epoch 共享（同 user），seq 由单次 counter UPDATE +N 后本地递推，
+ * INSERT 用多行 VALUES。与逐行 appendActionExpiredEvent 语义/字段完全一致。
+ */
+async function appendActionExpiredEventsBatch(
   tx: { execute(q: unknown): Promise<unknown[] | unknown> },
   workspaceId: string,
   userId: string,
-  proposal: { id: string; conversation_id: string },
+  conversationId: string,
+  expired: ExpiredProposalRow[],
 ): Promise<void> {
-  // L11：事件携带当前账号世代。
+  if (expired.length === 0) return;
   const accountEpoch = await getCompanionAccountEpoch(tx, userId);
   const counters = await tx.execute(sql`
-    UPDATE companion_conversations SET next_event_seq = next_event_seq + 1
-    WHERE id = ${proposal.conversation_id} RETURNING next_event_seq
+    UPDATE companion_conversations SET next_event_seq = next_event_seq + ${expired.length}
+    WHERE id = ${conversationId} RETURNING next_event_seq
   `);
-  const seq = Number((counters as Array<{ next_event_seq: string }>)[0].next_event_seq) - 1;
-  const expiredPayload = { proposalId: proposal.id };
+  const baseSeq = Number((counters as Array<{ next_event_seq: string }>)[0].next_event_seq) - expired.length;
+  // 多行 VALUES：用 sql.join 逐 tuple 参数化组装（每 tuple 的 uuid 字段经 ::uuid 绑定，
+  // 键/值均受控，无注入；conversation_id 来自已校验的 expired 行）。
+  const tuples = expired.map((row, i) =>
+    sql`(${conversationId}, ${baseSeq + i}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
+         'action.expired', ${JSON.stringify({ proposalId: row.id })},
+         now() + interval '24 hours')`,
+  );
   await tx.execute(sql`
     INSERT INTO companion_stream_events
       (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch,
        type, payload, expires_at)
-    VALUES (${proposal.conversation_id}, ${seq}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
-            'action.expired',
-            ${JSON.stringify(expiredPayload)},
-            now() + interval '24 hours')
+    VALUES ${sql.join(tuples, sql`, `)}
   `);
 }
 
@@ -1370,7 +1625,7 @@ export async function createCompanionContextGrant(args: {
       }
       const contextRevision = contextRevisionForCompanionLearningSession(episode);
       if (contextRevision !== args.body.contextRevision) {
-        throw new CompanionConversationError("ACTION_STALE", 409, "learning session context revision mismatch");
+        throw new CompanionConversationError("CONTEXT_STALE", 409, "learning session context revision mismatch");
       }
       if (
         episode.sessionStatus !== "active" ||

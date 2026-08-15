@@ -75,6 +75,11 @@ async function importItems(
   const searchDocuments: PendingSearchDocument[] = [];
   const errors: Array<{ index: number; title: string; error: string }> = [];
 
+  // F16·③（round-4）：保持逐篇串行。每一项是外层主事务内的 SAVEPOINT
+  // （nested transaction），且幂等去重依赖同一连接上前序 item 的 insert 结果；
+  // postgres-js 在同一连接上本就串行排队，异步并行不会带来 RTT 收益，反而会破坏
+  // SAVEPOINT 顺序与逐篇原子回滚语义——故维持串行（100 项 ~500 顺序往返可接受，
+  // 属低频一次性批量导入路径）。
   for (const item of items) {
     try {
       // 解析 Markdown 为 blocks
@@ -188,18 +193,23 @@ async function updateImportedNoteSearchIndexes(documents: PendingSearchDocument[
   // 搜索索引是可重建投影：必须等业务事务提交后再更新，失败仅记录日志。
   // BUG-47/PERF-20/PERF-39 修复：原代码使用串行 for 循环逐个更新搜索索引，
   // 对于 100 篇笔记的批量导入会产生 100 次串行 DB 往返。
-  // 改为 Promise.all 并行化所有 upsert 操作，并对每个操作添加独立的
-  // try-catch 错误隔离——单篇搜索索引更新失败不影响其他笔记的索引更新。
-  const results = await Promise.allSettled(
-    documents.map((doc) => upsertSearchDocument(doc)),
-  );
-  for (let i = 0; i < results.length; i++) {
-    const result = results[i]!;
-    if (result.status === "rejected") {
-      logger.error(
-        { err: result.reason, objectId: documents[i]!.objectId, title: documents[i]!.title },
-        "import: 搜索索引更新失败（单篇隔离，不影响其他笔记）",
-      );
+  // PERF-BN5 修复：原并发版本用 Promise.allSettled 一次性并发 100 篇 upsert，
+  // 压 max:10 连接池。现改为按 25/批分批，每批内并行、批间顺序等待，
+  // 既保留一定并行度又避免 100 并发尖峰。单篇失败仍隔离，不影响其他笔记。
+  const BATCH_SIZE = 25;
+  for (let start = 0; start < documents.length; start += BATCH_SIZE) {
+    const batch = documents.slice(start, start + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((doc) => upsertSearchDocument(doc)),
+    );
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i]!;
+      if (result.status === "rejected") {
+        logger.error(
+          { err: result.reason, objectId: batch[i]!.objectId, title: batch[i]!.title },
+          "import: 搜索索引更新失败（单篇隔离，不影响其他笔记）",
+        );
+      }
     }
   }
 }

@@ -31,7 +31,7 @@ export const companionConversations = pgTable(
     id: uuid("id").primaryKey(),
     workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
     userId: uuid("user_id").notNull().references(() => users.id),
-    kind: text("kind").$type<"dialogue" | "inbox">().notNull(),
+    kind: text("kind").$type<"dialogue" | "inbox" | "journey">().notNull(),
     title: text("title").notNull(),
     titleSource: text("title_source").$type<"placeholder" | "auto" | "user" | "system">().notNull(),
     status: text("status").$type<"active" | "archived">().notNull().default("active"),

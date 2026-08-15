@@ -14,14 +14,12 @@
  * - 整 run 最多一次 Repair
  */
 
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { db, withWorkerWorkspaceTransaction } from "../../db.ts";
 import * as schema from "../../schema/index.ts";
 import {
   AgentUnitKind,
-  JobStatus,
-  JobType,
   isTerminalUnitStatus,
   type CriticIssue,
   CriticIssueSeverity,
@@ -303,27 +301,27 @@ export async function scheduleCriticForDraft(input: {
       // jobs RLS 重开（0098）后 INSERT 需带 workspace context。
       await withWorkerWorkspaceTransaction(
         { workspaceId, userId: requestedBy },
-        (tx) => tx.insert(schema.jobs).values({
-          type: JobType.EXECUTE_CARD_AGENT_TURN,
-          workspaceId,
-          requestedBy,
-          payload: {
-            generationRunId: runId,
-            agentUnitId: oldCritic.id,
-            turnNo: 1,
-            inputHash: createHash("sha256")
-              .update(JSON.stringify({ runId, unitId: oldCritic.id, turnNo: 1, draftHash }))
-              .digest("hex"),
-            userId: requestedBy,
-          },
-          status: JobStatus.PENDING,
-          generationRunId: runId,
-          generationUnitId: oldCritic.id,
-          stage: "complete",
-          priority: 72,
-          resourceClass: "card_foreground",
-          idempotencyKey: `agent-turn:${runId}:${oldCritic.id}:1:${draftHash}`,
-        }).onConflictDoNothing(),
+        async (tx) => {
+          // 0098：worker 不直接 INSERT jobs（无 permissive INSERT policy），
+          // 经 SECURITY DEFINER 入队函数（migrator owner BYPASSRLS）。
+          const inputHash = createHash("sha256")
+            .update(JSON.stringify({ runId, unitId: oldCritic.id, turnNo: 1, draftHash }))
+            .digest("hex");
+          await tx.execute(sql`
+            SELECT public.ailearn_enqueue_agent_turn_job(
+              ${workspaceId}::uuid,
+              ${requestedBy ?? null}::uuid,
+              ${runId}::uuid,
+              ${oldCritic.id}::uuid,
+              1::integer,
+              ${inputHash}::text,
+              72::integer,
+              'card_foreground'::text,
+              ${`agent-turn:${runId}:${oldCritic.id}:1:${draftHash}`}::text,
+              ${requestedBy ?? ""}::text
+            )
+          `);
+        },
       );
 
       logger.warn(
@@ -357,33 +355,31 @@ export async function scheduleCriticForDraft(input: {
   // 创建 Critic job
   await withWorkerWorkspaceTransaction(
     { workspaceId, userId: requestedBy },
-    (tx) => tx.insert(schema.jobs).values({
-      type: JobType.EXECUTE_CARD_AGENT_TURN,
-      workspaceId,
-      requestedBy,
-      payload: {
-        generationRunId: runId,
-        agentUnitId: criticUnit.id,
-        turnNo: 1,
-        // 修复 E4(第5轮)：原代码使用 `turn:1:${criticUnit.id}` 字符串作为 inputHash，
-        // 不是 SHA-256 hash。计划 §5.2 要求 inputHash 是 turn 输入的 SHA-256 hash。
-        inputHash: createHash("sha256")
-          .update(JSON.stringify({
-            runId,
-            unitId: criticUnit.id,
-            turnNo: 1,
-          }))
-          .digest("hex"),
-        userId: requestedBy,
-      },
-      status: JobStatus.PENDING,
-      generationRunId: runId,
-      generationUnitId: criticUnit.id,
-      stage: "complete",
-      priority: 75,
-      resourceClass: "card_foreground",
-      idempotencyKey: `agent-turn:${runId}:${criticUnit.id}:1`,
-    }).onConflictDoNothing(),
+    async (tx) => {
+      // 0098：worker 不直接 INSERT jobs（无 permissive INSERT policy），
+      // 经 SECURITY DEFINER 入队函数（migrator owner BYPASSRLS）。
+      const inputHash = createHash("sha256")
+        .update(JSON.stringify({
+          runId,
+          unitId: criticUnit.id,
+          turnNo: 1,
+        }))
+        .digest("hex");
+      await tx.execute(sql`
+        SELECT public.ailearn_enqueue_agent_turn_job(
+          ${workspaceId}::uuid,
+          ${requestedBy ?? null}::uuid,
+          ${runId}::uuid,
+          ${criticUnit.id}::uuid,
+          1::integer,
+          ${inputHash}::text,
+          75::integer,
+          'card_foreground'::text,
+          ${`agent-turn:${runId}:${criticUnit.id}:1`}::text,
+          ${requestedBy ?? ""}::text
+        )
+      `);
+    },
   );
 
   logger.info(
@@ -747,33 +743,31 @@ async function handleRequestRepair(
   // 创建 Repairer job
   await withWorkerWorkspaceTransaction(
     { workspaceId: ctx.workspaceId, userId: ctx.requestedBy },
-    (tx) => tx.insert(schema.jobs).values({
-      type: JobType.EXECUTE_CARD_AGENT_TURN,
-      workspaceId: ctx.workspaceId,
-      requestedBy: ctx.requestedBy,
-      payload: {
-        generationRunId: ctx.runId,
-        agentUnitId: repairUnit.id,
-        turnNo: 1,
-        // 修复 E4（第5轮）：原代码使用 `turn:1:${repairUnit.id}` 字符串作为 inputHash，
-        // 不是 SHA-256 hash。计划 §5.2 要求 inputHash 是 turn 输入的 SHA-256 hash。
-        inputHash: createHash("sha256")
-          .update(JSON.stringify({
-            runId: ctx.runId,
-            unitId: repairUnit.id,
-            turnNo: 1,
-          }))
-          .digest("hex"),
-        userId: ctx.requestedBy,
-      },
-      status: JobStatus.PENDING,
-      generationRunId: ctx.runId,
-      generationUnitId: repairUnit.id,
-      stage: "complete",
-      priority: 72,
-      resourceClass: "card_foreground",
-      idempotencyKey: `agent-turn:${ctx.runId}:${repairUnit.id}:1`,
-    }).onConflictDoNothing(),
+    async (tx) => {
+      // 0098：worker 不直接 INSERT jobs（无 permissive INSERT policy），
+      // 经 SECURITY DEFINER 入队函数（migrator owner BYPASSRLS）。
+      const inputHash = createHash("sha256")
+        .update(JSON.stringify({
+          runId: ctx.runId,
+          unitId: repairUnit.id,
+          turnNo: 1,
+        }))
+        .digest("hex");
+      await tx.execute(sql`
+        SELECT public.ailearn_enqueue_agent_turn_job(
+          ${ctx.workspaceId}::uuid,
+          ${ctx.requestedBy ?? null}::uuid,
+          ${ctx.runId}::uuid,
+          ${repairUnit.id}::uuid,
+          1::integer,
+          ${inputHash}::text,
+          72::integer,
+          'card_foreground'::text,
+          ${`agent-turn:${ctx.runId}:${repairUnit.id}:1`}::text,
+          ${ctx.requestedBy ?? ""}::text
+        )
+      `);
+    },
   );
 
   logger.info(

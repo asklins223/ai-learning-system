@@ -120,7 +120,7 @@ export async function benchmarkRoutes(app: FastifyInstance) {
    * GET /benchmark/labels — 返回当前 workspace 已保存的人工标注。
    */
   app.get("/benchmark/labels", async (req) => {
-    return { labels: await getSavedBenchmarkLabels(req.session.workspaceId) };
+    return { labels: await getSavedBenchmarkLabels(req.session.workspaceId, req.session.userId) };
   });
 
   /**

@@ -68,17 +68,58 @@ async function main() {
       return;
     }
 
-    await sql.begin(async (tx) => {
-      for (const migration of toRun) {
-        for (const stmt of migration.sql) {
-          await tx.unsafe(stmt);
-        }
-        await tx`
-          INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
-          VALUES (${migration.hash}, ${migration.folderMillis})
-        `;
+    /**
+     * 行为变更（W4，2026 迁移拆批）：每条迁移独立事务。
+     *
+     * 此前整批 `toRun` 全部包在单个 `sql.begin` 大事务内：一是锁窗极大——
+     * 大索引（非 CONCURRENTLY）/全表回填（如 0148）期间整事务持写锁直至提交，
+     * 阻塞并发读写；二是不可恢复——任一迁移失败则整批回滚，需全部重跑。
+     *
+     * 改为每条迁移独占一个事务（for 内每迁移 `sql.begin`）：单条失败即停止并
+     * 打印已应用/待应用清单，成功迁移的 hash 已落地，`__drizzle_migrations`
+     * 作为 apply 标记天然幂等，后续重跑只补未应用的迁移。代价是迁移不再整体
+     * 原子——需迁移作者把「结构创建 + 数据回填」拆成幂等可部分恢复的语句
+     * （如 ON CONFLICT / 分批回填），以换取更小的锁窗口与失败可恢复性。
+     */
+    const appliedNames: string[] = [];
+    let failedMigration: string | null = null;
+    for (const migration of toRun) {
+      // MigrationMeta 在部分 drizzle-orm 版本无 path 字段；沿用上方 62 行的 cast 口径。
+      const tag = (migration as { path?: string }).path?.split("/").pop() ?? "?";
+      const current = tag.replace(/^\d+_/, "").replace(/\.sql$/, "");
+      try {
+        await sql.begin(async (tx) => {
+          for (const stmt of migration.sql) {
+            await tx.unsafe(stmt);
+          }
+          await tx`
+            INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
+            VALUES (${migration.hash}, ${migration.folderMillis})
+          `;
+        });
+        appliedNames.push(current);
+      } catch (error) {
+        failedMigration = current;
+        console.error(`Migration failed: ${current} — ${String(error)}`);
+        break;
       }
-    });
+    }
+    console.log(
+      `Migrations applied (${appliedNames.length}/${toRun.length}):`,
+      appliedNames.join(", "),
+    );
+    if (failedMigration) {
+      const pendingNames = toRun
+        .slice(appliedNames.length)
+        .map((m) => (m as { path?: string }).path?.split("/").pop() ?? "?");
+      console.error(
+        `Migration stopped at "${failedMigration}". Already-applied hashes are recorded ` +
+          `in __drizzle_migrations; re-running will resume from the first un-applied migration. ` +
+          `Pending (not run): ${pendingNames.join(", ")}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     console.log("Migrations complete.");
   } finally {
     await sql.end();

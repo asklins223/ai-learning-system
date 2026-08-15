@@ -203,7 +203,10 @@ test("keeps Worker queue claims, leases, reaping, and pool context atomic on Pos
       "UPDATE",
     );
 
-    assert.deepEqual(await readJobsRlsState(migrator), { enabled: false, forced: false });
+    // 生产迁移（0024 sec01 起）已永久启用 jobs RLS；worker 角色策略
+    // （sec01_v1_jobs_worker_workspace_*）允许跨 workspace claim/reap——
+    // 前置状态即真实 schema 状态（R24 修正陈旧断言，此前期望 RLS 关闭）。
+    assert.deepEqual(await readJobsRlsState(migrator), { enabled: true, forced: true });
 
     // Claim/reap intentionally cross workspace boundaries. Refuse to run when
     // an existing active queue could be mistaken for this test's fixtures.
@@ -551,12 +554,15 @@ test("keeps Worker queue claims, leases, reaping, and pool context atomic on Pos
   } finally {
     const cleanupFailures: unknown[] = [];
     if (jobsRlsMustBeRestored) {
+      // R24：生产迁移（0024 sec01）永久启用 jobs RLS——本测试只验证 RLS 下
+      // claim/reap 行为，绝不在 finally 关闭 RLS（旧逻辑会破坏生产安全状态）。
+      // 恢复为迁移后的强制状态（幂等，若被外部改动则纠正）。
       try {
-        await migrator`ALTER TABLE public.jobs NO FORCE ROW LEVEL SECURITY`;
-        await migrator`ALTER TABLE public.jobs DISABLE ROW LEVEL SECURITY`;
+        await migrator`ALTER TABLE public.jobs ENABLE ROW LEVEL SECURITY`;
+        await migrator`ALTER TABLE public.jobs FORCE ROW LEVEL SECURITY`;
         assert.deepEqual(
           await readJobsRlsState(migrator),
-          { enabled: false, forced: false },
+          { enabled: true, forced: true },
         );
       } catch (error) {
         cleanupFailures.push(error);

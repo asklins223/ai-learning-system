@@ -21,6 +21,7 @@ import {
   type SourceType,
 } from "@/lib/api";
 import { useIsOwner } from "@/lib/use-current-user";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { MemberNotice } from "@/components/settings/MemberNotice";
 import { AccountMenu } from "@/components/account/AccountMenu";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -187,6 +188,19 @@ export default function SourceDetailPage() {
   const { isOwner, loading: ownerLoading } = useIsOwner();
   const params = useParams<{ id: string }>();
   const sourceId = params?.id;
+  // P5（文档 16 §14.6）：来源详情页发布 bounded context。
+  // F#7（第六轮 🟡8）：useMemo 稳定对象，避免 hook 内 JSON.stringify 每渲重跑。
+  useMainPageContext(useMemo(
+    () => sourceId ? {
+      routeRef: { kind: "source", sourceId },
+      pageKind: "source",
+      entityRefs: [{ kind: "source", sourceId }],
+      interactionState: "idle",
+      capabilityHints: [],
+      sensitivity: "normal",
+    } : null,
+    [sourceId],
+  ));
   const router = useRouter();
   const searchParams = useSearchParams();
   const searchReturnTarget = sanitizeSearchReturnTarget(searchParams.get("returnTo"));
@@ -352,6 +366,19 @@ export default function SourceDetailPage() {
     const value = data?.source.metadata?.rawContent;
     return typeof value === "string" && value.trim() ? value : null;
   }, [data?.source.metadata]);
+
+  // F#7（第六轮 🟡7）：characterCount useMemo——rawContent 为 null 时不每渲
+  // 全量 reduce 所有 segments。hook 必须在任何 early return（loading/missing/
+  // error/!data 分支）之前调用（react-hooks/rules-of-hooks，2026-08-15
+  // 构建修复上提）。
+  const characterCount = useMemo(
+    () =>
+      rawContent?.length ??
+      (data
+        ? data.segments.reduce((total, segment) => total + segment.text.length, 0)
+        : 0),
+    [rawContent, data],
+  );
 
   useEffect(() => {
     if (!refreshAnnouncement) return;
@@ -573,8 +600,6 @@ export default function SourceDetailPage() {
   );
   const canCreateNote = isOwner && source.status === "ready" && hasSegments;
   const originUrl = isOpenableOrigin(source.origin) ? source.origin : null;
-  const characterCount =
-    rawContent?.length ?? segments.reduce((total, segment) => total + segment.text.length, 0);
   const detailMode: DetailMode =
     source.status === "archived"
       ? "archived"

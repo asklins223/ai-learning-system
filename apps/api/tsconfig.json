@@ -16,10 +16,18 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
-      "@ailearn/shared": ["./node_modules/@ailearn/shared/src/index.ts"]
+      "@ailearn/shared": [
+        "./node_modules/@ailearn/shared/src/index.ts"
+      ]
     },
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts", "node_modules/@ailearn/shared/src/**/*.ts"],
-  "exclude": ["node_modules/@ailearn/shared/src/**/*.test.ts"]
+  "include": [
+    "src/**/*.ts",
+    "node_modules/@ailearn/shared/src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules/@ailearn/shared/src/**/*.test.ts",
+    "node_modules/@ailearn/shared/src/**/*.test.tsx"
+  ]
 }

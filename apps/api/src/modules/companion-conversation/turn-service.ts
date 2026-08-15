@@ -14,11 +14,9 @@ import { bigint, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-
 import type { ApiTransaction } from "../../db/client.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { createJob } from "../job/service.ts";
-import {
-  canonicalJsonV1,
-  sha256Utf8V1,
-  type CompanionGroundedTutorGrantV1,
-} from "@ailearn/shared";
+import { type CompanionGroundedTutorGrantV1,  } from "@ailearn/shared";
+import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
+import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
   createCompanionTurnRequestV1Schema,
   createCompanionTurnResponseV1Schema,

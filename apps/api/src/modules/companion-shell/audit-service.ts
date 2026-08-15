@@ -20,7 +20,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, lt, isNull, sql } from "drizzle-orm";
+import { and, eq, lt, gt, or, isNull, sql } from "drizzle-orm";
 import {
   integer,
   jsonb,
@@ -738,24 +738,62 @@ export async function exportCompanionUserData(
   return withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
-      const [audit, ledger] = await Promise.all([
-        tx
+      // R10（round-3 审计）：原实现两大表各一条无 LIMIT 的全量 SELECT 一次性入内存返回体
+      // （超大工作区内存/响应峰值）。现按 keyset（createdAt,id）每批 1000 分页扫描，
+      // 结果保持 createdAt 有序拼接，输出与原先逐字节一致。
+      const BATCH = 1000;
+      const audit: AuditRow[] = [];
+      let aLastCreated: Date | null = null;
+      let aLastId: string | null = null;
+      for (;;) {
+        const page: AuditRow[] = await tx
           .select()
           .from(companionAudit)
           .where(and(
             eq(companionAudit.workspaceId, workspaceId),
             eq(companionAudit.userId, userId),
+            aLastCreated
+              ? or(
+                  gt(companionAudit.createdAt, aLastCreated),
+                  and(eq(companionAudit.createdAt, aLastCreated), gt(companionAudit.id, aLastId as string)),
+                )
+              : undefined,
           ))
-          .orderBy(companionAudit.createdAt),
-        tx
+          .orderBy(companionAudit.createdAt, companionAudit.id)
+          .limit(BATCH);
+        if (page.length === 0) break;
+        audit.push(...page);
+        const last: AuditRow = page[page.length - 1];
+        aLastCreated = last.createdAt;
+        aLastId = last.id;
+      }
+
+      const ledger: LedgerRow[] = [];
+      let lLastCreated: Date | null = null;
+      let lLastId: string | null = null;
+      for (;;) {
+        const page: LedgerRow[] = await tx
           .select()
           .from(companionInvitationLedger)
           .where(and(
             eq(companionInvitationLedger.workspaceId, workspaceId),
             eq(companionInvitationLedger.userId, userId),
+            lLastCreated
+              ? or(
+                  gt(companionInvitationLedger.createdAt, lLastCreated),
+                  and(eq(companionInvitationLedger.createdAt, lLastCreated), gt(companionInvitationLedger.id, lLastId as string)),
+                )
+              : undefined,
           ))
-          .orderBy(companionInvitationLedger.createdAt),
-      ]);
+          .orderBy(companionInvitationLedger.createdAt, companionInvitationLedger.id)
+          .limit(BATCH);
+        if (page.length === 0) break;
+        ledger.push(...page);
+        const last: LedgerRow = page[page.length - 1];
+        lLastCreated = last.createdAt;
+        lLastId = last.id;
+      }
+
       return {
         userId,
         exportedAt: new Date().toISOString(),
@@ -856,48 +894,60 @@ export async function sweepCompanionInvitationLedgerTtl(
           .returning({ id: companionInvitationLedger.id });
         return { mode, removed: removed.length, tombstoned: 0 };
       }
-      // 先取待 tombstone 行的原始 refs（生成不可逆替换键），再更新。
-      const stale = await tx
-        .select({
-          id: companionInvitationLedger.id,
-          stablePageContextKey: companionInvitationLedger.stablePageContextKey,
-          contextBudgetKey: companionInvitationLedger.contextBudgetKey,
-          reasonBudgetKey: companionInvitationLedger.reasonBudgetKey,
-        })
-        .from(companionInvitationLedger)
-        .where(and(
-          eq(companionInvitationLedger.workspaceId, options.workspaceId),
-          eq(companionInvitationLedger.userId, options.userId),
-          lt(companionInvitationLedger.updatedAt, cutoff),
-          isNull(companionInvitationLedger.tombstonedAt),
-        ));
-      // 2026-08-11：单条 UPDATE + VALUES 派生表批量 tombstone（此前逐行
-      // UPDATE，过期行上千时 N 次往返）。
-      const tuples = stale.map((row) => ({
-        id: row.id,
-        sk: contentFreeLedgerKey(row.stablePageContextKey),
-        ck: contentFreeLedgerKey(row.contextBudgetKey),
-        rk: contentFreeLedgerKey(row.reasonBudgetKey),
-      }));
+      // R10（round-3 审计）：原实现一次性 SELECT 全部待 tombstone 行（无界内存）+ 单个
+      // 巨型 VALUES。现分页取行（keyset by id，每批 1000）+ VALUES 按 500/批分块更新，
+      // 规避超大工作区一次性内存峰值与超长参数绑定。键集分块同 note/service 的
+      // chunkedInArray 语义。
       let tombstoned = 0;
-      if (tuples.length > 0) {
-        const updated = await tx.execute(sql`
-          UPDATE companion_invitation_ledger AS l
-          SET stable_page_context_key = v.sk,
-              context_budget_key = v.ck,
-              reason_budget_key = v.rk,
-              bounded_reason = NULL,
-              suggestion_lease = NULL,
-              one_time_permit = NULL,
-              tombstoned_at = now(),
-              updated_at = now()
-          FROM (VALUES ${sql.join(
-            tuples.map((t) => sql`(${t.id}, ${t.sk}, ${t.ck}, ${t.rk})`),
-            sql`, `,
-          )}) AS v(id, sk, ck, rk)
-          WHERE l.id = v.id
-        `);
-        tombstoned = Number((updated as unknown as { rowCount?: number }).rowCount ?? 0);
+      let lastId: string | null = null;
+      const STALE_BATCH = 1000;
+      const VALUES_CHUNK = 500;
+      for (;;) {
+        const stale = await tx
+          .select({
+            id: companionInvitationLedger.id,
+            stablePageContextKey: companionInvitationLedger.stablePageContextKey,
+            contextBudgetKey: companionInvitationLedger.contextBudgetKey,
+            reasonBudgetKey: companionInvitationLedger.reasonBudgetKey,
+          })
+          .from(companionInvitationLedger)
+          .where(and(
+            eq(companionInvitationLedger.workspaceId, options.workspaceId),
+            eq(companionInvitationLedger.userId, options.userId),
+            lt(companionInvitationLedger.updatedAt, cutoff),
+            isNull(companionInvitationLedger.tombstonedAt),
+            lastId ? gt(companionInvitationLedger.id, lastId) : undefined,
+          ))
+          .orderBy(companionInvitationLedger.id)
+          .limit(STALE_BATCH);
+        if (stale.length === 0) break;
+        lastId = stale[stale.length - 1].id;
+        const tuples = stale.map((row) => ({
+          id: row.id,
+          sk: contentFreeLedgerKey(row.stablePageContextKey),
+          ck: contentFreeLedgerKey(row.contextBudgetKey),
+          rk: contentFreeLedgerKey(row.reasonBudgetKey),
+        }));
+        for (let i = 0; i < tuples.length; i += VALUES_CHUNK) {
+          const chunk = tuples.slice(i, i + VALUES_CHUNK);
+          const updated = await tx.execute(sql`
+            UPDATE companion_invitation_ledger AS l
+            SET stable_page_context_key = v.sk,
+                context_budget_key = v.ck,
+                reason_budget_key = v.rk,
+                bounded_reason = NULL,
+                suggestion_lease = NULL,
+                one_time_permit = NULL,
+                tombstoned_at = now(),
+                updated_at = now()
+            FROM (VALUES ${sql.join(
+              chunk.map((t) => sql`(${t.id}, ${t.sk}, ${t.ck}, ${t.rk})`),
+              sql`, `,
+            )}) AS v(id, sk, ck, rk)
+            WHERE l.id = v.id
+          `);
+          tombstoned += Number((updated as unknown as { rowCount?: number }).rowCount ?? 0);
+        }
       }
       return { mode, removed: 0, tombstoned };
     },

@@ -1,30 +1,23 @@
 "use client";
 
 /**
- * 运行概览侧栏（设计稿"暖纸编辑主题"）。
+ * 生成结果摘要。
  *
- * - 当前任务卡：阶段描述 + mini 进度
- * - 阶段统计：候选 / 已完成 / 运行中
- * - 质量状态：原文证据覆盖 / 重复候选 / 阻塞性错误
- * - 技术详情：可折叠的 engine / unit 计数 / model activity / trace id
- *
- * 所有数值来自 run 视图（coverage）与 metrics（真实计数）。
+ * 默认只展示用户真正关心的三件事：现在做到哪里、筛出了什么、质量是否
+ * 可靠。引擎与 run id 被收进诊断详情，不再和学习价值争夺首屏注意力。
  */
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { AgentEventView, CardGenerationRunView } from "@/lib/api";
+import { Icon } from "@/components/ui/icons";
 import { agentEventRowText } from "./agent-event-text";
 
 export interface GenerationRunSummaryProps {
   run: CardGenerationRunView;
-  /** 最新代理事件（用于让"当前任务"随活动流实时变化） */
+  /** 最新代理事件，只用于安全的用户态文案映射。 */
   latestEvent?: AgentEventView | null;
 }
 
-/**
- * 当前任务描述：优先用最新代理事件实时反映"正在做什么"，
- * 让概览卡片不再停留在单一阶段文案；无事件时回退到阶段文案。
- */
 export function currentGenerationTask(
   run: CardGenerationRunView,
   latestEvent: AgentEventView | null,
@@ -32,120 +25,93 @@ export function currentGenerationTask(
   if (latestEvent) {
     const view = agentEventRowText(latestEvent);
     const inProgress = view.status === "running";
-    const title = `${inProgress ? "正在" : ""}${view.text}`;
-    const role = view.roleLabel;
-    const copy = role
-      ? `${role} · ${inProgress ? "执行中" : "已完成"}`
-      : "代理活动实时更新";
-    return { title, copy };
+    return {
+      title: inProgress ? `正在${view.text}` : view.text,
+      copy: view.roleLabel
+        ? `${view.roleLabel} · ${inProgress ? "执行中" : "已完成"}`
+        : "处理记录实时更新",
+    };
   }
+
   const stage = run.shellStage ?? run.stage;
-  if (stage === "preparing") {
-    return { title: "正在建立文章结构", copy: "把封存的笔记内容规划为可处理的素材单元。" };
+  if (stage === "queued") {
+    return { title: "等待开始", copy: "任务已经接受，可以返回笔记继续编辑。" };
   }
-  if (stage === "checking") {
-    return { title: "正在验证支撑与覆盖", copy: "逐条核对候选卡片的原文证据与引用完整性。" };
+  if (stage === "preparing") {
+    return { title: "正在理解这篇笔记", copy: "先辨认结构和重点，不按段落机械拆卡。" };
+  }
+  if (stage === "checking" || stage === "validating") {
+    return { title: "正在检查结果质量", copy: "核对证据、答案和当前生成规则。" };
   }
   if (stage === "publishing") {
-    return { title: "正在发布学习卡", copy: "把校验通过的草稿写入学习卡库。" };
+    return { title: "正在整理最终结果", copy: "只保存通过质量筛选的学习内容。" };
   }
-  if (stage === "generating") {
-    return { title: "正在提炼关键理解", copy: "识别关键概念、关系与可验证的学习要点。" };
+  if (stage === "generating" || stage === "running") {
+    return { title: "正在设计可回忆的问题", copy: "把关键理解转成需要主动思考才能回答的提问。" };
   }
-  return { title: "生成学习卡", copy: "后台代理正在协作生成。" };
+  return { title: "正在生成学习卡", copy: "结果会根据内容价值决定数量，可能一张也不生成。" };
 }
 
-function formatTokens(tokens: number | null | undefined): string {
-  if (tokens == null || tokens <= 0) return "—";
-  if (tokens >= 1000) return `≈ ${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k tokens`;
-  return `≈ ${tokens} tokens`;
+function evidenceLabel(run: CardGenerationRunView): string {
+  const coverage = run.coverage;
+  if (coverage.sourceUnitsTotal <= 0) return "等待检查";
+  if (coverage.sourceUnitsCompleted >= coverage.sourceUnitsTotal) return "已完成原文核对";
+  return "正在核对";
 }
 
 export function GenerationRunSummary({ run, latestEvent = null }: GenerationRunSummaryProps) {
   const [techOpen, setTechOpen] = useState(false);
+  const techId = useId();
   const metrics = run.metrics;
-  const coverage = run.coverage;
-
   const task = currentGenerationTask(run, latestEvent);
-
-  const miniPct = coverage.sourceCoverageBps != null
-    ? Math.max(0, Math.min(100, Math.round(coverage.sourceCoverageBps / 100)))
-    : 0;
-
-  const coverageValue = coverage.sourceCoverageBps != null
-    ? `${coverage.sourceUnitsCompleted}/${coverage.sourceUnitsTotal}`
-    : "待测量";
-
-  const alerts: string[] = [];
-  if (metrics && metrics.candidates.rejected > 0) {
-    alerts.push(`重复 / 无效候选：已排除 ${metrics.candidates.rejected} 条`);
-  }
-  if (metrics && metrics.critic.hardIssues > 0) {
-    alerts.push(`阻塞性问题：${metrics.critic.hardIssues} 个`);
-  }
-
-  const engineLabel: Record<string, string> = {
-    supervisor_agent_v1: "supervisor_agent_v1",
-  };
+  const rejected = metrics?.candidates.rejected ?? null;
+  const blockingIssues = metrics?.critic.hardIssues ?? 0;
 
   return (
-    <div className="gen-progress-side-content">
-      {/* 当前任务 */}
-      <div className="gen-current-card">
-        <div className="gen-current-label">当前任务</div>
-        <div className="gen-current-title">{task.title}</div>
-        <p className="gen-current-copy">{task.copy}</p>
-        <div className="gen-mini-progress" aria-label={`当前任务完成 ${miniPct}%`}>
-          <span style={{ width: `${miniPct}%` }} />
+    <div className="lcg-run-summary">
+      <section className="lcg-current-task" aria-labelledby="lcg-current-task-title">
+        <span className="lcg-current-task-icon" aria-hidden="true"><Icon.Sparkle /></span>
+        <div>
+          <p>当前正在做</p>
+          <h3 id="lcg-current-task-title">{task.title}</h3>
+          <span>{task.copy}</span>
         </div>
-      </div>
+      </section>
 
-      {/* 阶段统计 */}
-      <div className="gen-stats" aria-label="阶段统计">
-        <div className="gen-stat">
-          <div className="gen-stat-label">候选</div>
-          <div className="gen-stat-value">{metrics?.candidates.extracted ?? 0}</div>
+      <section className="lcg-quality-ledger" aria-label="质量检查">
+        <div>
+          <span className="lcg-quality-icon" data-tone="success" aria-hidden="true"><Icon.Quote /></span>
+          <span><strong>原文证据</strong><small>{evidenceLabel(run)}</small></span>
         </div>
-        <div className="gen-stat">
-          <div className="gen-stat-label">已完成</div>
-          <div className="gen-stat-value">{metrics?.childTasks.completed ?? 0}</div>
+        <div>
+          <span className="lcg-quality-icon" data-tone={rejected && rejected > 0 ? "success" : "neutral"} aria-hidden="true"><Icon.Filter /></span>
+          <span><strong>质量筛选</strong><small>{rejected && rejected > 0 ? "已执行去重与质量过滤" : "持续检查中"}</small></span>
         </div>
-        <div className="gen-stat">
-          <div className="gen-stat-label">运行中</div>
-          <div className="gen-stat-value">{metrics?.childTasks.running ?? 0}</div>
+        <div>
+          <span className="lcg-quality-icon" data-tone={blockingIssues > 0 ? "warning" : "success"} aria-hidden="true">
+            {blockingIssues > 0 ? <Icon.Warn /> : <Icon.Check />}
+          </span>
+          <span><strong>阻塞问题</strong><small>{blockingIssues > 0 ? "发现需要处理的问题" : "暂未发现"}</small></span>
         </div>
-      </div>
+      </section>
 
-      {/* 质量状态 */}
-      <div className="gen-section-title">质量状态</div>
-      <div className="gen-summary-list">
-        <div className="gen-summary-row">
-          <span>原文证据覆盖</span>
-          <strong>{coverageValue}</strong>
-        </div>
-        {alerts.map((alert) => (
-          <div key={alert} className="gen-alert">{alert}</div>
-        ))}
-      </div>
-
-      {/* 技术详情（可折叠） */}
       <button
         type="button"
-        className="gen-tech-toggle"
+        className="lcg-diagnostic-toggle"
         aria-expanded={techOpen}
-        aria-controls="gen-tech-details"
+        aria-controls={techId}
         onClick={() => setTechOpen((open) => !open)}
       >
-        <span>技术详情</span>
-        <span aria-hidden="true">{techOpen ? "⌃" : "⌄"}</span>
+        <span>运行诊断</span>
+        <Icon.Chevron aria-hidden="true" />
       </button>
-      <div className={`gen-tech-details${techOpen ? " is-open" : ""}`} id="gen-tech-details">
-        engine: {engineLabel[run.engineMode] ?? run.engineMode}<br />
-        {metrics
-          ? `completed: ${metrics.childTasks.completed} / running: ${metrics.childTasks.running} / queued: ${metrics.childTasks.pending}`
-          : "units: —"}<br />
-        model activity: {formatTokens(metrics?.usageTokens)}<br />
-        trace id: {run.runId}
+      <div className="lcg-diagnostic" id={techId} hidden={!techOpen}>
+        <dl>
+          <div><dt>来源版本</dt><dd>v{run.sourceSnapshot.versionNo}</dd></div>
+          <div><dt>引擎</dt><dd>{run.engineMode}</dd></div>
+          <div><dt>任务</dt><dd>{run.runId}</dd></div>
+          <div><dt>状态序号</dt><dd>{run.stateVersion}</dd></div>
+        </dl>
       </div>
     </div>
   );

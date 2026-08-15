@@ -1,7 +1,7 @@
 "use client";
 
 import "@/app/styles/search.css";
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api, type SearchResult } from "@/lib/api";
@@ -85,6 +85,95 @@ function renderTitle(title: string, query: string) {
   );
 }
 
+// F#7（🟡15）：memo 化搜索结果行——每行只渲染一次 withSearchReturnTarget
+// （原先每渲染 new URL + sanitize），父组件重渲不连带每行重建。
+const SearchResultRow = memo(function SearchResultRow({
+  result,
+  query,
+  searchReturnTarget,
+  onRememberPosition,
+}: {
+  result: SearchResult;
+  query: string;
+  searchReturnTarget: string;
+  onRememberPosition: (event: React.MouseEvent<HTMLAnchorElement>, resultKey: string) => void;
+}) {
+  const meta = typeMeta(result.objectType);
+  const title = result.title?.trim() || `无标题${meta.label}`;
+  const resultKey = `${result.objectType}:${result.objectId}`;
+  const resultHref = result.href
+    ? withSearchReturnTarget(result.href, searchReturnTarget)
+    : null;
+
+  return (
+    <li>
+      {resultHref ? (
+        <Link
+          href={resultHref}
+          className="search-result-card"
+          data-type={result.objectType}
+          data-search-result-key={resultKey}
+          aria-label={`打开${meta.label}：${title}`}
+          onClick={(event) => onRememberPosition(event, resultKey)}
+        >
+          <SearchResultBody result={result} title={title} query={query} meta={meta} resultHref={resultHref} />
+        </Link>
+      ) : (
+        <div
+          className="search-result-card search-result-card--static"
+          data-type={result.objectType}
+          data-search-result-key={resultKey}
+        >
+          <SearchResultBody result={result} title={title} query={query} meta={meta} resultHref={null} />
+        </div>
+      )}
+    </li>
+  );
+});
+
+function SearchResultBody({
+  result,
+  title,
+  query,
+  meta,
+  resultHref,
+}: {
+  result: SearchResult;
+  title: string;
+  query: string;
+  meta: { label: string; tone: StatusTone; description: string };
+  resultHref: string | null;
+}) {
+  return (
+    <>
+      <span className="search-result-icon" data-type={result.objectType}>
+        <SearchTypeIcon type={result.objectType} />
+      </span>
+      <div className="search-result-copy">
+        <div className="search-result-heading">
+          <h3>{renderTitle(title, query)}</h3>
+          <StatusChip tone={meta.tone} size="sm">{meta.label}</StatusChip>
+        </div>
+        <span className="search-result-snippet">{renderMarkedSnippet(result.snippet)}</span>
+        <span className="search-result-meta">
+          <span>索引于 {relativeTime(result.indexedAt)}</span>
+          {result.objectType === "evidence" && resultHref && (
+            <span>所属学习卡</span>
+          )}
+          {(result.matchCount ?? 0) > 1 && result.objectType === "evidence" && (
+            <strong>{result.matchCount} 条证据命中</strong>
+          )}
+        </span>
+      </div>
+      {resultHref && (
+        <span className="search-result-arrow" aria-hidden="true">
+          <Icon.Arrow />
+        </span>
+      )}
+    </>
+  );
+}
+
 function SearchParamsObserver({ onChange }: { onChange: () => void }) {
   const searchParams = useSearchParams();
   const serializedParams = searchParams.toString();
@@ -126,7 +215,12 @@ export default function SearchPage() {
   // 空查询时，发现区本身就是类型选择器；再显示一排相同筛选按钮会重复且
   // 引发布局跳动。真正开始搜索后再展开紧凑筛选条。
   const showFilters = hasQuery;
-  const searchReturnTarget = buildSearchReturnTarget(query, activeTab);
+  // F#7（🟡15）：buildSearchReturnTarget 每渲重建 URLSearchParams——用 useMemo
+  // 按 [query, activeTab] 稳定化。
+  const searchReturnTarget = useMemo(
+    () => buildSearchReturnTarget(query, activeTab),
+    [query, activeTab],
+  );
 
   const syncFromUrl = useCallback(() => {
     if (window.location.pathname !== "/search") return;
@@ -408,81 +502,21 @@ export default function SearchPage() {
     filterRefs.current[nextIndex]?.focus();
   }
 
-  function rememberSearchPosition(
-    event: React.MouseEvent<HTMLAnchorElement>,
-    resultKey: string,
-  ) {
-    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    restoredReturnRef.current = null;
-    saveSearchReturnRecord({
-      returnTo: searchReturnTarget,
-      scrollY: window.scrollY,
-      resultKey,
-      viewportTop: event.currentTarget.getBoundingClientRect().top,
-    });
-  }
-
-  function renderResult(result: SearchResult) {
-    const meta = typeMeta(result.objectType);
-    const title = result.title?.trim() || `无标题${meta.label}`;
-    const resultKey = `${result.objectType}:${result.objectId}`;
-    const resultHref = result.href
-      ? withSearchReturnTarget(result.href, searchReturnTarget)
-      : null;
-    const body = (
-      <>
-        <span className="search-result-icon" data-type={result.objectType}>
-          <SearchTypeIcon type={result.objectType} />
-        </span>
-        <div className="search-result-copy">
-          <div className="search-result-heading">
-            <h3>{renderTitle(title, normalizedQuery)}</h3>
-            <StatusChip tone={meta.tone} size="sm">{meta.label}</StatusChip>
-          </div>
-          <span className="search-result-snippet">{renderMarkedSnippet(result.snippet)}</span>
-          <span className="search-result-meta">
-            <span>索引于 {relativeTime(result.indexedAt)}</span>
-            {result.objectType === "evidence" && resultHref && (
-              <span>所属学习卡</span>
-            )}
-            {(result.matchCount ?? 0) > 1 && result.objectType === "evidence" && (
-              <strong>{result.matchCount} 条证据命中</strong>
-            )}
-          </span>
-        </div>
-        {resultHref && (
-          <span className="search-result-arrow" aria-hidden="true">
-            <Icon.Arrow />
-          </span>
-        )}
-      </>
-    );
-
-    return (
-      <li key={`${result.objectType}-${result.objectId}`}>
-        {resultHref ? (
-          <Link
-            href={resultHref}
-            className="search-result-card"
-            data-type={result.objectType}
-            data-search-result-key={resultKey}
-            aria-label={`打开${meta.label}：${title}`}
-            onClick={(event) => rememberSearchPosition(event, resultKey)}
-          >
-            {body}
-          </Link>
-        ) : (
-          <div
-            className="search-result-card search-result-card--static"
-            data-type={result.objectType}
-            data-search-result-key={resultKey}
-          >
-            {body}
-          </div>
-        )}
-      </li>
-    );
-  }
+  // F#7（🟡15）：remember 回调 useCallback 稳定化，避免传给 memo 行组件时每渲
+  // 新建函数引用使 memo 失效（只依赖 searchReturnTarget）。
+  const rememberSearchPosition = useCallback(
+    (event: React.MouseEvent<HTMLAnchorElement>, resultKey: string) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      restoredReturnRef.current = null;
+      saveSearchReturnRecord({
+        returnTo: searchReturnTarget,
+        scrollY: window.scrollY,
+        resultKey,
+        viewportTop: event.currentTarget.getBoundingClientRect().top,
+      });
+    },
+    [searchReturnTarget],
+  );
 
   const headerActions = (
     <ThemeToggle className="search-theme-toggle" />
@@ -676,7 +710,15 @@ export default function SearchPage() {
                 inert={busy ? true : undefined}
                 aria-hidden={busy ? true : undefined}
               >
-                {results.map(renderResult)}
+                {results.map((result) => (
+                  <SearchResultRow
+                    key={`${result.objectType}-${result.objectId}`}
+                    result={result}
+                    query={normalizedQuery}
+                    searchReturnTarget={searchReturnTarget}
+                    onRememberPosition={rememberSearchPosition}
+                  />
+                ))}
               </ol>
             )}
 

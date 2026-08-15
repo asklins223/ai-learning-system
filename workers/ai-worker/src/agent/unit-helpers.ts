@@ -13,12 +13,11 @@
  * - handleTurnResult: 处理 turn 结果，决定后续动作
  */
 
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import {
   AgentUnitKind,
   JobStatus,
-  JobType,
   SupervisorRunStatus,
   isRunErrorRetryable,
 } from "@ailearn/shared";
@@ -543,28 +542,24 @@ export async function createNextTurnJob(
         return;
       }
 
-      await tx
-        .insert(schema.jobs)
-        .values({
-          type: JobType.EXECUTE_CARD_AGENT_TURN,
-          workspaceId: job.workspaceId,
-          requestedBy: job.requestedBy,
-          payload: {
-            generationRunId: runId,
-            agentUnitId: unitId,
-            turnNo,
-            inputHash: turnInputHash,
-            userId: job.requestedBy,
-          },
-          status: JobStatus.PENDING,
-          generationRunId: runId,
-          generationUnitId: unitId,
-          stage: "complete",
-          priority: 80,
-          resourceClass: "card_foreground",
-          idempotencyKey,
-        })
-        .returning();
+      // 0098：worker 不直接 INSERT jobs（jobs RLS 对 worker 无 permissive
+      // INSERT policy，裸 INSERT 必被 RESTRICTIVE guard 拒绝）。统一经
+      // SECURITY DEFINER 入队函数 ailearn_enqueue_agent_turn_job（migrator
+      // owner BYPASSRLS），与 drizzle onConflictDoNothing 语义一致。
+      await tx.execute(sql`
+        SELECT public.ailearn_enqueue_agent_turn_job(
+          ${job.workspaceId}::uuid,
+          ${job.requestedBy ?? null}::uuid,
+          ${runId}::uuid,
+          ${unitId}::uuid,
+          ${turnNo}::integer,
+          ${turnInputHash}::text,
+          80::integer,
+          'card_foreground'::text,
+          ${idempotencyKey}::text,
+          ${job.requestedBy ?? ""}::text
+        )
+      `);
 
       // 更新 unit 的 scheduledAt
       await tx

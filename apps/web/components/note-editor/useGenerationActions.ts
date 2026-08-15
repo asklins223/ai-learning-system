@@ -40,9 +40,19 @@ interface RunRequestKey {
   key: string;
 }
 
+/** V2 生成控件草稿（来自 GenerationControls，映射到 §9.1 CreateRequest）。 */
+export interface GenerationControlDraftInputV2 {
+  sourceScope: "selection" | "section" | "whole_note";
+  learningGoal: "remember" | "understand" | "apply" | "exam";
+  detailThreshold: "concise" | "balanced" | "deep";
+  hardMaxCards: number | null;
+  preferredStrategies: Array<"recall" | "cloze" | "compare" | "sequence" | "why" | "boundary" | "application">;
+}
+
 /** useGenerationActions 的上下文参数 */
 export interface GenerationActionsContext {
   // ── 当前状态值 ──
+  noteId: string;
   uploadingCount: number;
   imageUploads: ImageUploadView[];
   generationRunId: string | null;
@@ -95,6 +105,7 @@ export interface GenerationActionsContext {
   pollGenerationRun: (activeRunId: string, pollToken: number) => Promise<void>;
   applyGenerationRun: (run: CardGenerationRunView) => void;
   endSession: () => void;
+
 }
 
 /**
@@ -454,8 +465,48 @@ export function useGenerationActions(ctx: GenerationActionsContext) {
     }
   }
 
+  /**
+   * V2（方案 20 §19.1）：价值优先生成。
+   * 用真实 api-client 创建 V2 run（带 Idempotency-Key），成功后跳转候选审核页；
+   * 后端未开启（404/503，V2 路由未注册）时返回 false，调用方回退 legacy。
+   * sourceScope 的 selection/section 细分由上层在 draft 中给出 blockRanges 前
+   * 暂以整篇兜底（§9.1 合同已支持，Web 选区采集后续迭代补全）。
+   */
+  async function generateCardV2(draft: GenerationControlDraftInputV2): Promise<boolean> {
+    const { createV2Client, newV2IdempotencyKey, isV2UnavailableError } = await import(
+      "@/features/card-generation-v2/api-client"
+    );
+    const client = createV2Client();
+    const noteVersionId = savedVersionIdRef.current;
+    if (!noteVersionId) return false;
+    try {
+      const run = await client.createRun(
+        {
+          version: 2,
+          noteVersionId,
+          sourceScope: { kind: "whole_note" },
+          learningGoal: draft.learningGoal,
+          detailThreshold: draft.detailThreshold,
+          quantity: draft.hardMaxCards != null
+            ? { kind: "adaptive", hardMaxCards: draft.hardMaxCards }
+            : { kind: "adaptive" },
+          preferredStrategies: draft.preferredStrategies.length > 0 ? draft.preferredStrategies : undefined,
+          clientRequestId: `web-${Date.now()}`,
+        },
+        newV2IdempotencyKey("gen"),
+      );
+      window.location.assign(`/notes/${encodeURIComponent(ctx.noteId)}/card-generation-v2?runId=${run.runId}`);
+      return true;
+    } catch (error) {
+      if (isV2UnavailableError(error)) return false;
+      console.error("card-generation-v2 create failed", error);
+      return false;
+    }
+  }
+
   return {
     generateCard,
+    generateCardV2,
     cancelGenerationRun,
     retryGenerationRun,
     restartGenerationRun,

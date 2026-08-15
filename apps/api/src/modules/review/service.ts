@@ -7,6 +7,11 @@ import {
 } from "../../db/schema/evidence.ts";
 import { validationAssistanceExposures } from "../../db/schema/validation-v2.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
+import {
+  learningObjectivesV2,
+  learningObjectiveRevisionsV2,
+  learningCardsV2,
+} from "../../db/schema/card-generation-v2.ts";
 import { noteBlocks } from "../../db/schema/note.ts";
 import { ReviewStatus } from "@ailearn/shared";
 import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
@@ -67,6 +72,8 @@ export interface SanitizedReviewItem {
   status: string;
   nextReviewAt: string;
   intervalDays: number;
+  /** P3 LearningRun 切流：review origin 的 CAS 字段（非答案化内容）。 */
+  generation: number;
   reviewReason: ReviewReason;
   unassistedEligibleAt: string | null;
   effectiveStartAt: string;
@@ -275,6 +282,66 @@ const [totalRow] = await queryDb
   }
   const keyPointIds = Array.from(allRelevantKpIds);
   const evidenceByKpId = new Map<string, typeof evidences.$inferSelect>();
+
+  // R35/C0-rebase（review/service.ts）：keyPointId 命中 V2 objective 时，
+  // 展示字段改用 V2 公共投影（publicSummary + active card front.cue），
+  // 不再读取 legacy claim/quoteText（§29.4：正式链路禁止 claim 语义扩散）。
+  const v2Display = new Map<string, { claim: string; quoteText: string }>();
+  if (keyPointIds.length > 0) {
+    const v2ObjRows = await queryDb
+      .select({
+        objectiveId: learningObjectivesV2.objectiveId,
+        currentObjectiveRevisionId: learningObjectivesV2.currentObjectiveRevisionId,
+      })
+      .from(learningObjectivesV2)
+      .where(and(
+        eq(learningObjectivesV2.workspaceId, workspaceId),
+        inArray(learningObjectivesV2.objectiveId, keyPointIds),
+      ));
+    const v2RevIds = v2ObjRows
+      .map((r) => r.currentObjectiveRevisionId)
+      .filter((id): id is string => Boolean(id));
+    const v2RevRows = v2RevIds.length > 0
+      ? await queryDb
+          .select({
+            objectiveRevisionId: learningObjectiveRevisionsV2.objectiveRevisionId,
+            publicSummary: learningObjectiveRevisionsV2.publicSummary,
+          })
+          .from(learningObjectiveRevisionsV2)
+          .where(and(
+            eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+            inArray(learningObjectiveRevisionsV2.objectiveRevisionId, v2RevIds),
+          ))
+      : [];
+    const v2ObjIds = v2ObjRows.map((r) => r.objectiveId);
+    const v2CardRows = v2ObjIds.length > 0
+      ? await queryDb
+          .select({ objectiveId: learningCardsV2.objectiveId, front: learningCardsV2.front })
+          .from(learningCardsV2)
+          .where(and(
+            eq(learningCardsV2.workspaceId, workspaceId),
+            inArray(learningCardsV2.objectiveId, v2ObjIds),
+            eq(learningCardsV2.lifecycle, "active"),
+          ))
+      : [];
+    const v2SummaryByRev = new Map(
+      v2RevRows.map((r) => [String(r.objectiveRevisionId), String(r.publicSummary)]),
+    );
+    const v2CueByObj = new Map(
+      v2CardRows.map((r) => [String(r.objectiveId), String((r.front as { cue?: string })?.cue ?? "")]),
+    );
+    for (const o of v2ObjRows) {
+      const summary = o.currentObjectiveRevisionId
+        ? v2SummaryByRev.get(String(o.currentObjectiveRevisionId))
+        : undefined;
+      if (summary !== undefined) {
+        v2Display.set(String(o.objectiveId), {
+          claim: summary,
+          quoteText: v2CueByObj.get(String(o.objectiveId)) ?? "",
+        });
+      }
+    }
+  }
   const keyPointHasHardEvidence = new Set<string>();
   if (keyPointIds.length > 0) {
     const evRows = await queryDb.query.evidences.findMany({
@@ -310,8 +377,13 @@ const [totalRow] = await queryDb
     .filter((id): id is string => id !== null);
   const blockMap = new Map<string, string>();
   if (blockIds.length > 0) {
+    // N#7-17: 补 workspace 谓词——兄弟 evidence/service.ts 的 noteBlocks 查询带
+    // workspace 过滤以确保租户隔离（RLS 前瞻硬化 + 索引利用）。
     const blockRows = await queryDb.query.noteBlocks.findMany({
-      where: inArray(noteBlocks.id, blockIds),
+      where: and(
+        eq(noteBlocks.workspaceId, workspaceId),
+        inArray(noteBlocks.id, blockIds),
+      ),
     });
     for (const blk of blockRows) {
       if (blk.type === "image") {
@@ -389,7 +461,9 @@ const [totalRow] = await queryDb
       review: r,
       card: { id: card.id, title: card.schemaJson?.title ?? "（未命名学习卡）" },
       keyPoint: kp
-        ? { id: kp.id, claim: kp.claim, quoteText: kp.quoteText }
+        ? (v2Display.get(kp.id)
+            ? { id: kp.id, claim: v2Display.get(kp.id)!.claim, quoteText: v2Display.get(kp.id)!.quoteText }
+            : { id: kp.id, claim: kp.claim, quoteText: kp.quoteText })
         : null,
       blockContent,
       reviewReason,
@@ -466,6 +540,9 @@ export async function listSanitizedReviews(
         status: item.review.status,
         nextReviewAt: item.review.nextReviewAt.toISOString(),
         intervalDays: item.review.intervalDays,
+        // P3 LearningRun 切流：generation 是 review origin 的 CAS 字段
+        // （后端 schedule_generation_changed 校验用），非答案化内容。
+        generation: item.review.generation ?? 0,
         reviewReason: item.reviewReason,
         ...availability,
       };
@@ -540,38 +617,47 @@ export async function getSanitizedReviewMeta(
 
   if (!cardId) return null;
 
-  const activeCard = await queryDb.query.learningCards.findFirst({
-    where: and(
-      eq(learningCards.id, cardId),
-      eq(learningCards.workspaceId, workspaceId),
-      activeLearningCardConsumerPredicate(),
-    ),
-    columns: { id: true },
-  });
-  if (!activeCard) return null;
-
-  if (keyPointId) {
-    const keyPoint = await queryDb.query.cardKeyPoints.findFirst({
+  // PERF-B5 修复：activeCard 校验与 keyPoint 解析仅依赖 cardId，相互独立，
+  // 用 Promise.all 并行，削减原串行 2 次往返。
+  let keyPointInvalid = false;
+  const [activeCard, resolvedKeyPointId] = await Promise.all([
+    queryDb.query.learningCards.findFirst({
       where: and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        eq(cardKeyPoints.cardId, cardId),
-        eq(cardKeyPoints.id, keyPointId),
+        eq(learningCards.id, cardId),
+        eq(learningCards.workspaceId, workspaceId),
+        activeLearningCardConsumerPredicate(),
       ),
-    });
-    if (!keyPoint) return null;
-    keyPointId = keyPoint.id;
-  } else {
-    // Keep Focus metadata consistent with listReviews for legacy card-level
-    // schedules that predate review_schedules.key_point_id.
-    const firstKeyPoint = await queryDb.query.cardKeyPoints.findFirst({
-      where: and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        eq(cardKeyPoints.cardId, cardId),
-      ),
-      orderBy: (keyPoint, { asc }) => [asc(keyPoint.ordinal), asc(keyPoint.id)],
-    });
-    keyPointId = firstKeyPoint?.id ?? null;
-  }
+      columns: { id: true },
+    }),
+    (async () => {
+      if (keyPointId) {
+        const keyPoint = await queryDb.query.cardKeyPoints.findFirst({
+          where: and(
+            eq(cardKeyPoints.workspaceId, workspaceId),
+            eq(cardKeyPoints.cardId, cardId),
+            eq(cardKeyPoints.id, keyPointId),
+          ),
+        });
+        if (!keyPoint) {
+          keyPointInvalid = true;
+          return null;
+        }
+        return keyPoint.id;
+      }
+      // Keep Focus metadata consistent with listReviews for legacy card-level
+      // schedules that predate review_schedules.key_point_id.
+      const firstKeyPoint = await queryDb.query.cardKeyPoints.findFirst({
+        where: and(
+          eq(cardKeyPoints.workspaceId, workspaceId),
+          eq(cardKeyPoints.cardId, cardId),
+        ),
+        orderBy: (keyPoint, { asc }) => [asc(keyPoint.ordinal), asc(keyPoint.id)],
+      });
+      return firstKeyPoint?.id ?? null;
+    })(),
+  ]);
+  if (!activeCard || keyPointInvalid) return null;
+  keyPointId = resolvedKeyPointId;
 
   // 计算复习原因（不加载 claim/quote/blockContent）
   let reviewReason: ReviewReason = "due_review";
@@ -580,47 +666,55 @@ export async function getSanitizedReviewMeta(
   }
   if (reviewReason === "due_review") {
     // 使用与 session start 相同的 effective hard evidence 规则。
-    if (keyPointId) {
-      const keyPointEvidences = await queryDb.query.evidences.findMany({
-        where: and(
-          eq(evidences.workspaceId, workspaceId),
-          eq(evidences.keyPointId, keyPointId),
-        ),
-      });
-      const userOverrideMap = userId
-        ? await getUserOverrideMap(userId, keyPointEvidences.map((evidence) => evidence.id), queryDb)
-        : new Map<string, "confirmed" | "downgraded" | "rejected">();
-      const hasHardEvidence = keyPointEvidences.some((evidence) => {
-        const alignment = userId
-          ? effectiveAlignmentForUser(
-              evidence.alignment,
-              evidence.userOverride,
-              userOverrideMap.get(evidence.id) ?? null,
-            )
-          : effectiveAlignment(evidence.alignment, evidence.userOverride);
-        return alignment === "aligned";
-      });
-      if (!hasHardEvidence) {
-        reviewReason = "evidence_gap";
-      }
-    } else {
+    if (!keyPointId) {
+      reviewReason = "evidence_gap";
+    }
+  }
+
+  // PERF-B5 修复：evidence 查询与 exposure 查询仅依赖 keyPointId（相互独立），
+  // 用 Promise.all 并行。evidence 仅在 due_review 分支使用。
+  const [keyPointEvidences, exposure] = await Promise.all([
+    reviewReason === "due_review" && keyPointId
+      ? queryDb.query.evidences.findMany({
+          where: and(
+            eq(evidences.workspaceId, workspaceId),
+            eq(evidences.keyPointId, keyPointId),
+          ),
+        })
+      : Promise.resolve([]),
+    userId && keyPointId
+      ? queryDb.query.validationAssistanceExposures.findFirst({
+          where: and(
+            eq(validationAssistanceExposures.workspaceId, workspaceId),
+            eq(validationAssistanceExposures.userId, userId),
+            eq(validationAssistanceExposures.keyPointId, keyPointId),
+          ),
+          orderBy: (row, { desc }) => [desc(row.unassistedEligibleAfter), desc(row.id)],
+        })
+      : Promise.resolve(null),
+  ]);
+
+  if (reviewReason === "due_review" && keyPointId) {
+    const userOverrideMap = userId
+      ? await getUserOverrideMap(userId, keyPointEvidences.map((evidence) => evidence.id), queryDb)
+      : new Map<string, "confirmed" | "downgraded" | "rejected">();
+    const hasHardEvidence = keyPointEvidences.some((evidence) => {
+      const alignment = userId
+        ? effectiveAlignmentForUser(
+            evidence.alignment,
+            evidence.userOverride,
+            userOverrideMap.get(evidence.id) ?? null,
+          )
+        : effectiveAlignment(evidence.alignment, evidence.userOverride);
+      return alignment === "aligned";
+    });
+    if (!hasHardEvidence) {
       reviewReason = "evidence_gap";
     }
   }
   if (reviewReason === "due_review" && schedule.intervalDays === 0) {
     reviewReason = "manual_pin";
   }
-
-  const exposure = userId && keyPointId
-    ? await queryDb.query.validationAssistanceExposures.findFirst({
-        where: and(
-          eq(validationAssistanceExposures.workspaceId, workspaceId),
-          eq(validationAssistanceExposures.userId, userId),
-          eq(validationAssistanceExposures.keyPointId, keyPointId),
-        ),
-        orderBy: (row, { desc }) => [desc(row.unassistedEligibleAfter), desc(row.id)],
-      })
-    : null;
   const availability = deriveReviewAvailability(
     schedule.nextReviewAt,
     exposure?.unassistedEligibleAfter ?? null,

@@ -24,19 +24,21 @@ import { statsRoutes } from "./modules/stats/routes.ts";
 import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
 import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
-// 方案 20（2026-08-15 接线修复）：V2 路由实现存在但从未注册——按
-// CARD_GENERATION_V2_ENABLED 条件注册（fail-closed 404）。
 import { cardGenerationV2Routes } from "./modules/card-generation-v2/routes.ts";
 import { isCardGenerationV2Enabled } from "./config/learning-companion-flags.ts";
 import { companionShellRoutes } from "./modules/companion-shell/index.ts";
-import { companionConversationRoutes, companionConversationManagementRoutes, companionExportRoutes, companionProactiveRoutes } from "./modules/companion-conversation/index.ts";
-// §10.1/§14.3（2026-08-15 接线修复）：Journey V2 引导 / delivery 消费端点
-// 实现早已存在但从未注册——Pet 端 useJourneyLive/useDeliveryInbox 全部 404。
-import { companionJourneyRoutes } from "./modules/companion-journey/routes.ts";
-import { deliveryRoutes } from "./modules/companion-conversation/delivery-routes.ts";
-import { proactiveInboxRoutes } from "./modules/companion-conversation/inbox-routes.ts";
+import { learningMetricRoutes } from "./modules/observability/routes.ts";
+import { companionConversationRoutes, companionConversationManagementRoutes, companionExportRoutes, assistantSessionRoutes } from "./modules/companion-conversation/index.ts";
 import { startCompanionNotifyListener, stopCompanionNotifyListener } from "./modules/companion-conversation/companion-notify.ts";
 import { learningSessionRoutes } from "./modules/learning-sessions/session-routes.ts";
+import { learningRunRoutes } from "./modules/learning-runs/run-routes.ts";
+import { companionBridgeRoutes } from "./modules/companion-bridge/routes.ts";
+import { companionJourneyRoutes } from "./modules/companion-journey/routes.ts";
+import { understandingProjectionRoutes } from "./modules/understanding/projection-routes.ts";
+import { proactiveInboxRoutes } from "./modules/companion-conversation/inbox-routes.ts";
+import { deliveryRoutes } from "./modules/companion-conversation/delivery-routes.ts";
+import { memoryRoutes } from "./modules/companion-conversation/memory-routes.ts";
+import { deliveryTimelineRoutes } from "./modules/companion-conversation/timeline-routes.ts";
 import { voiceRoutes } from "./modules/learning-sessions/voice-routes.ts";
 import { assessmentRoutes } from "./modules/learning-sessions/assessment-service.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
@@ -46,6 +48,7 @@ import {
   createCommitOutboxWorkerId,
   runCommitOutboxTick,
 } from "./modules/learning-sessions/commit-outbox.ts";
+import { runLearningRunProcessingTick, closeStructuredSolutionSql } from "./modules/learning-runs/run-processing-tick.ts";
 import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
 import {
   getMetricsText,
@@ -97,6 +100,15 @@ app.get("/health", async () => {
 app.get("/metrics", async (_req, reply) => {
   reply.header("Content-Type", getMetricsContentType());
   return getMetricsText();
+});
+
+// NFR-S（方案 16 §19.2）：全局基础安全头——API 独立服务暴露 4000，
+// 与 web（Next.js 已配 CSP/nosniff/DENY）同等的防御基线。SSE 走 hijack
+// （onSend 不触发），其 writeHead 已带 Content-Type/Cache-Control。
+app.addHook("onSend", async (_request, reply) => {
+  reply.header("X-Content-Type-Options", "nosniff");
+  reply.header("X-Frame-Options", "DENY");
+  reply.header("Referrer-Policy", "no-referrer");
 });
 
 // OPS-01: HTTP 请求指标收集 hook（ADR-0006 §1）
@@ -306,8 +318,11 @@ async function main() {
   await app.register(cardJobRoutes);
   await app.register(cardSetRoutes);
   await app.register(cardGenerationRoutes);
+  // §21.5：Card Generation V2 是原子 capability bundle，默认 fail-closed。
   if (isCardGenerationV2Enabled()) {
     await app.register(cardGenerationV2Routes);
+  } else {
+    app.log.info({ capability: "card_generation_v2" }, "card-generation-v2 disabled (CARD_GENERATION_V2_ENABLED not set)");
   }
   await app.register(jobRoutes);
   await app.register(evidenceRoutes);
@@ -323,15 +338,11 @@ async function main() {
   await app.register(benchmarkRoutes);
   await app.register(uploadRoutes);
   await app.register(companionShellRoutes);
+  await app.register(learningMetricRoutes);
   await app.register(companionConversationRoutes);
+  await app.register(assistantSessionRoutes);
   await app.register(companionConversationManagementRoutes);
   await app.register(companionExportRoutes);
-  await app.register(companionProactiveRoutes);
-  // §10.1/§14.3（2026-08-15 接线修复）：Journey bootstrap/actions + delivery
-  // lease/ack + inbox SSE——capability 门控 COMPANION_JOURNEY_V2（各自 404）。
-  await app.register(companionJourneyRoutes);
-  await app.register(deliveryRoutes);
-  await app.register(proactiveInboxRoutes);
   // §11.6：启动清扫崩溃残留的临时探测音频（>1h hard cap；不阻塞启动）
   import("./modules/learning-sessions/ffprobe.ts")
     .then((m) => m.cleanupStaleTempAudio(60 * 60 * 1000, "/tmp"))
@@ -345,6 +356,14 @@ async function main() {
       "postgres://ailearn:ailearn_dev@postgres:5432/ailearn",
   );
   await app.register(learningSessionRoutes);
+  await app.register(learningRunRoutes);
+  await app.register(companionBridgeRoutes);
+  await app.register(companionJourneyRoutes);
+  await app.register(understandingProjectionRoutes);
+  await app.register(proactiveInboxRoutes);
+  await app.register(deliveryRoutes);
+  await app.register(memoryRoutes);
+  await app.register(deliveryTimelineRoutes);
   await app.register(voiceRoutes);
   await app.register(assessmentRoutes);
 
@@ -362,6 +381,7 @@ async function main() {
   let sessionCleanupTimer: NodeJS.Timeout | undefined;
   let notePurgeTimer: NodeJS.Timeout | undefined;
   let commitOutboxTimer: NodeJS.Timeout | undefined;
+  let learningRunProcessingTimer: NodeJS.Timeout | undefined;
   const shutdown = createGracefulShutdown({
     clearTimer: () => {
       if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
@@ -370,10 +390,15 @@ async function main() {
       notePurgeTimer = undefined;
       if (commitOutboxTimer) clearInterval(commitOutboxTimer);
       commitOutboxTimer = undefined;
+      if (learningRunProcessingTimer) clearInterval(learningRunProcessingTimer);
+      learningRunProcessingTimer = undefined;
     },
     closeServer: () => app.close(),
     // 2026-08-11：NOTIFY listener 连接必须显式关闭，否则进程退出挂起
-    afterClose: () => stopCompanionNotifyListener(),
+    afterClose: () => {
+      void closeStructuredSolutionSql();
+      stopCompanionNotifyListener();
+    },
     closeDatabase,
   });
   const handleSignal = (signal: NodeJS.Signals) => {
@@ -487,7 +512,11 @@ async function main() {
   // COMMIT-01: commit_requested outbox 消费（评估完成 → episode-commit 编排，
   // 幂等 commit key + PgCommitPort；commit 应用后触发 committed_change_display）。
   // 轮询 10s：commit 是评估→掌握的即时应答关键路径。
-  if (!shutdown.isShuttingDown()) {
+  // 2026-08-15（方案 16 P9）：learning_run_v1 切流后旧 commit 消费者停用——
+  // 新链路（run-processing-tick）是唯一 Commit 执行者；旧 SECURITY DEFINER
+  // claim 函数（ailearn_claim_commit_outbox）在 schema 演进后列引用歧义
+  // （42702），且旧 outbox 已无新写入（P3 原子切流），停用即消除错误循环。
+  if (process.env.LEARNING_RUN_V1 !== "true" && !shutdown.isShuttingDown()) {
     const commitOutboxWorkerId = createCommitOutboxWorkerId();
     // 2026-08-11（可观测性）：失败退避——DB 不可达时 10s 轮询会每秒刷 error
     // 日志；失败后间隔翻倍（10s→20s→40s 封顶 60s），成功后立即回到 10s。
@@ -512,6 +541,34 @@ async function main() {
       commitOutboxTimer.unref();
     };
     scheduleCommitOutboxTick();
+  }
+
+  // LR-PROC-01: learning_run_processing_outbox 消费（assessment_requested →
+  // 确定性评估/Fail-closed → commit_requested → canonical_unable Commit）。
+  // 轮询 10s，与 commit outbox 同一节奏；失败退避同模式。
+  if (!shutdown.isShuttingDown()) {
+    const processingWorkerId = `run-proc:${crypto.randomUUID()}`;
+    let processingIntervalMs = 10 * 1000;
+    let processingFailedStreak = 0;
+    const scheduleProcessingTick = () => {
+      learningRunProcessingTimer = setTimeout(async () => {
+        try {
+          const result = await runLearningRunProcessingTick(processingWorkerId, 50);
+          if (result.processed > 0 || result.failed > 0) {
+            app.log.info({ ...result }, "learning run processing tick");
+          }
+          processingFailedStreak = 0;
+          processingIntervalMs = 10 * 1000;
+        } catch (err) {
+          processingFailedStreak += 1;
+          processingIntervalMs = Math.min(10 * 1000 * (2 ** processingFailedStreak), 60_000);
+          app.log.error({ err, nextRetryMs: processingIntervalMs }, "learning run processing tick failed");
+        }
+        scheduleProcessingTick();
+      }, processingIntervalMs);
+      learningRunProcessingTimer.unref();
+    };
+    scheduleProcessingTick();
   }
 }
 

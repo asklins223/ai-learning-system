@@ -24,13 +24,41 @@ export interface RateLimitStore {
 export class MemoryRateLimitStore implements RateLimitStore {
   private readonly entries = new Map<string, RateLimitEntry>();
 
+  /**
+   * PERF-B9 修复：memory 桶此前从不被 sweep（upload 独立实例无定时器），
+   * 大量 userId 桶随 increment 永久驻留 → 无界增长。现改为 increment 时惰性
+   * 清理：基于 resetAt 顺带淘汰已过期 key；达到阈值时整批扫过期，保证 Map 有界。
+   * 每次递增扫描是 O(n)，但对 dev/test 的有界用户集可接受，且避免了加定时器
+   * 与跨模块共享实例的复杂度。
+   */
   increment(key: string, windowMs: number, now: number): RateLimitEntry {
+    this.lazySweep(now);
     const current = this.entries.get(key);
     const entry = !current || now >= current.resetAt
       ? { count: 1, resetAt: now + windowMs }
       : { count: current.count + 1, resetAt: current.resetAt };
     this.entries.set(key, entry);
+
+    // Map 已膨胀时整批清一次过期桶，限制驻留规模。
+    if (this.entries.size > MemoryRateLimitStore.MAX_ENTRIES_BEFORE_SWEEP) {
+      this.sweep(now);
+    }
     return entry;
+  }
+
+  /**
+   * 惰性清理：基于 resetAt 删除过期条目。每批最多删除
+   * MAX_SWEEP_PER_CALL 条，避免单次请求扫描整个 Map。
+   */
+  private lazySweep(now: number): void {
+    if (this.entries.size === 0) return;
+    let removed = 0;
+    for (const [key, entry] of this.entries) {
+      if (now >= entry.resetAt) {
+        this.entries.delete(key);
+        if (++removed >= MemoryRateLimitStore.MAX_SWEEP_PER_CALL) break;
+      }
+    }
   }
 
   delete(key: string): void {
@@ -42,6 +70,9 @@ export class MemoryRateLimitStore implements RateLimitStore {
       if (now >= entry.resetAt) this.entries.delete(key);
     }
   }
+
+  private static readonly MAX_ENTRIES_BEFORE_SWEEP = 1_000;
+  private static readonly MAX_SWEEP_PER_CALL = 200;
 
   /** Exposed only for diagnostics/tests; callers cannot mutate the map. */
   get size(): number {

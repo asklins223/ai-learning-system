@@ -31,11 +31,6 @@ import { openCompanionEventStream } from "../modules/companion-conversation/comp
 import { exportCompanionData } from "../modules/companion-conversation/companion-export.ts";
 import { transcribeCompanionDialogueAudio } from "../modules/learning-sessions/companion-voice-service.ts";
 import { execFileSync } from "node:child_process";
-import {
-  createCompanionProactiveDelivery,
-  viewCompanionDelivery,
-  dismissCompanionDelivery,
-} from "../modules/companion-conversation/companion-proactive-service.ts";
 import { closeDatabase } from "../db/client.ts";
 
 test.after(async () => {
@@ -672,171 +667,9 @@ test("P2 §12：export 有 active turn → 409 RUN_ALREADY_ACTIVE", async () => 
   }
 });
 
-async function seedAccountState(workspaceId: string, userId: string, opts: {
-  globalEnabled?: boolean;
-  presence?: "online" | "dnd" | "offline";
-  notificationsEnabled?: boolean;
-}): Promise<void> {
-  await sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-    await tx`INSERT INTO user_companion_account_state
-             (user_id, global_enabled, presence, notification_boundary)
-             VALUES (${userId}, ${opts.globalEnabled ?? true},
-                     ${{ presence: opts.presence ?? "online" } as never},
-                     ${{ notificationsEnabled: opts.notificationsEnabled ?? true } as never})`;
-  });
-}
-
-async function cleanupAccountState(userId: string): Promise<void> {
-  await sql`DELETE FROM user_companion_account_state WHERE user_id = ${userId}`;
-}
 
 
-async function cleanupInboxConversations(workspaceId: string, userId: string): Promise<void> {
-  await sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-    await tx`DELETE FROM companion_stream_events WHERE conversation_id IN
-             (SELECT id FROM companion_conversations WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND kind = 'inbox')`;
-    // deliveries 引用 messages —— 必须先删 deliveries
-    await tx`DELETE FROM companion_proactive_deliveries WHERE conversation_id IN
-             (SELECT id FROM companion_conversations WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND kind = 'inbox')`;
-    await tx`DELETE FROM companion_turn_runs WHERE conversation_id IN
-             (SELECT id FROM companion_conversations WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND kind = 'inbox')`;
-    await tx`DELETE FROM companion_messages WHERE conversation_id IN
-             (SELECT id FROM companion_conversations WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND kind = 'inbox')`;
-    await tx`DELETE FROM companion_conversations WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND kind = 'inbox'`;
-  });
-}
 
-test("P2 §10：proactive delivery 创建（pending + proactive message + event）", async () => {
-  const { workspaceId, userId, cleanup } = await seedConversation();
-  try {
-    await seedAccountState(workspaceId, userId, { presence: "online" });
-    const result = await createCompanionProactiveDelivery({
-      workspaceId, userId,
-      permitId: `permit-${randomUUID()}`,
-      reasonId: "resume_paused_task",
-      suggestionClassId: "resume_learning",
-    });
-    assert.equal(result.statusCode, 201);
-    const body = result.body as { status: string; deliveryId: string; conversationId: string; messageId: string };
-    assert.equal(body.status, "pending");
-    assert.ok(body.deliveryId);
-
-    const rows = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      const delivery = await tx`SELECT status, reason_id, content_policy FROM companion_proactive_deliveries WHERE id = ${body.deliveryId}`;
-      const message = await tx`SELECT role, kind FROM companion_messages WHERE id = ${body.messageId}`;
-      const events = await tx`SELECT type FROM companion_stream_events WHERE conversation_id = ${body.conversationId} AND type = 'proactive.delivery'`;
-      return { delivery: delivery[0], message: message[0], events: events.length };
-    });
-    assert.equal(rows.delivery.status, "pending");
-    assert.equal(rows.delivery.reason_id, "resume_paused_task");
-    assert.equal(rows.delivery.content_policy, "content");
-    assert.equal(rows.message.role, "assistant");
-    assert.equal(rows.message.kind, "proactive");
-    assert.equal(rows.events, 1, "非 suppressed 有 proactive.delivery event");
-
-    // permit 重复 → 幂等（不重复创建）
-    const again = await createCompanionProactiveDelivery({
-      workspaceId, userId,
-      permitId: `permit-${"dup"}`,
-      reasonId: "resume_paused_task",
-      suggestionClassId: "resume_learning",
-    });
-    const againRows = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      const d = await tx`SELECT status FROM companion_proactive_deliveries WHERE permit_id = ${`permit-${"dup"}`}`;
-      return d[0]?.status;
-    });
-    assert.equal(againRows, "pending");
-    void again;
-  } finally {
-    await cleanupInboxConversations(workspaceId, userId);
-    await cleanupAccountState(userId);
-    await cleanup();
-  }
-});
-
-test("P2 §10：presence dnd → suppressed 且无 event；globalEnabled=false → skipped", async () => {
-  const { workspaceId, userId, cleanup } = await seedConversation();
-  try {
-    await seedAccountState(workspaceId, userId, { presence: "dnd" });
-    const dnd = await createCompanionProactiveDelivery({
-      workspaceId, userId,
-      permitId: `permit-dnd-${randomUUID()}`,
-      reasonId: "long_absence_resume",
-      suggestionClassId: "resume_learning",
-    });
-    // presence=dnd 映射 quiet 档（§10.2：quiet → 主动消息 0，准入在 permit 前 fail closed）
-    assert.equal(dnd.statusCode, 200);
-    assert.equal((dnd.body as { status: string }).status, "skipped");
-    // dnd 下不创建 delivery event
-    const dndRows = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      const events = await tx`SELECT count(*)::int AS n FROM companion_stream_events WHERE type = 'proactive.delivery' AND workspace_id = ${workspaceId}`;
-      return events[0].n;
-    });
-    assert.equal(dndRows, 0, "suppressed 不发 proactive.delivery event");
-
-    // globalEnabled=false → skipped（不创建、不消费）
-    await sql`UPDATE user_companion_account_state SET global_enabled = false WHERE user_id = ${userId}`;
-    const off = await createCompanionProactiveDelivery({
-      workspaceId, userId,
-      permitId: `permit-off-${randomUUID()}`,
-      reasonId: "resume_paused_task",
-      suggestionClassId: "resume_learning",
-    });
-    assert.equal((off.body as { status: string }).status, "skipped");
-  } finally {
-    await cleanupInboxConversations(workspaceId, userId);
-    await cleanupAccountState(userId);
-    await cleanup();
-  }
-});
-
-test("P2 §10：非法 reason → 400；viewed/dismiss 幂等", async () => {
-  const { workspaceId, userId, cleanup } = await seedConversation();
-  try {
-    await seedAccountState(workspaceId, userId, { presence: "online" });
-    await assert.rejects(
-      createCompanionProactiveDelivery({
-        workspaceId, userId,
-        permitId: `permit-bad-${randomUUID()}`,
-        reasonId: "make_user_feel_guilty",
-        suggestionClassId: "x",
-      }),
-      (err: { code?: string }) => err.code === "INVALID_REQUEST",
-    );
-
-    const created = await createCompanionProactiveDelivery({
-      workspaceId, userId,
-      permitId: `permit-vd-${randomUUID()}`,
-      reasonId: "active_tier_next_step",
-      suggestionClassId: "next_step",
-    });
-    const deliveryId = (created.body as { deliveryId: string }).deliveryId;
-
-    const viewed = await viewCompanionDelivery({ workspaceId, userId, deliveryId, deviceSessionHash: null });
-    assert.equal(viewed.body.status, "shown");
-    const viewedAgain = await viewCompanionDelivery({ workspaceId, userId, deliveryId, deviceSessionHash: null });
-    assert.equal(viewedAgain.body.status, "shown", "viewed 幂等");
-
-    const dismissed = await dismissCompanionDelivery({ workspaceId, userId, deliveryId });
-    assert.equal(dismissed.body.status, "dismissed");
-    const dismissedAgain = await dismissCompanionDelivery({ workspaceId, userId, deliveryId });
-    assert.equal(dismissedAgain.body.status, "dismissed", "dismiss 幂等");
-  } finally {
-    await cleanupInboxConversations(workspaceId, userId);
-    await cleanupAccountState(userId);
-    await cleanup();
-  }
-});
 
 test("P2 §14：dialogue flag off 时 P1 路径不受影响（fixture 回退开关 + shell 正常）", () => {
   // bootstrap fail-closed 单测已覆盖 textConversation=false；此处验证 flag 开关语义：
@@ -936,7 +769,7 @@ async function seedVoiceArtifact(workspaceId: string, userId: string, text: stri
   status?: string;
   expiresInMs?: number;
 }): Promise<{ voiceArtifactId: string; transcriptSha256: string }> {
-  const { sha256Utf8V1 } = await import("@ailearn/shared");
+  const { sha256Utf8V1 } = await import("@ailearn/shared/content-hash");
   const transcriptSha256 = sha256Utf8V1(text);
   const id = randomUUID();
   const expiresAt = new Date(Date.now() + (opts?.expiresInMs ?? 3_600_000));
@@ -1289,75 +1122,4 @@ test("H2 回归：GET conversation snapshot 不再因 SET TRANSACTION 顺序抛�
   }
 });
 
-test("M3 trigger-bridge：未知 reason 跳过；quiet presence 下所有 reason 被抑制（零打扰默认）", async () => {
-  const { workspaceId, userId, cleanup } = await seedConversation();
-  try {
-    const { fireCompanionTrigger } = await import(
-      "../modules/companion-conversation/companion-trigger-bridge.ts"
-    );
-    // 1) 未知 reason → skipped（fail-closed）
-    const skipped = await fireCompanionTrigger({
-      workspaceId,
-      userId,
-      reasonId: "model_invented_reason" as never,
-      pageKind: "card_detail",
-      routePattern: "/cards/:id",
-      canonicalTarget: "card:test",
-      canonicalOrigin: "source:test",
-    });
-    assert.equal(skipped.status, "skipped");
 
-    // 2) 默认 quiet presence → 合法 reason 也被 presence 抑制（零打扰默认）
-    const suppressed = await fireCompanionTrigger({
-      workspaceId,
-      userId,
-      reasonId: "committed_change_display",
-      pageKind: "card_detail",
-      routePattern: "/cards/:id",
-      canonicalTarget: "card:test",
-      canonicalOrigin: "source:test",
-    });
-    assert.equal(suppressed.status, "suppressed", "quiet 档位不产生任何 proactive 消息");
-  } finally {
-    await cleanup();
-  }
-});
-
-test("M3 worker 版 fireCompanionTriggerFromWorker：未知 reason 跳过；quiet 下合法 reason 被抑制", async () => {
-  const { workspaceId, userId, cleanup } = await seedConversation();
-  try {
-    const { fireCompanionTriggerFromWorker } = await import(
-      "../modules/companion-conversation/companion-trigger-bridge.ts"
-    );
-    const { withWorkspaceTransaction } = await import("../db/client.ts");
-    const skipped = await withWorkspaceTransaction(
-      { workspaceId, userId },
-      (tx) => fireCompanionTriggerFromWorker(tx as never, {
-        workspaceId,
-        userId,
-        reasonId: "bogus_reason" as never,
-        pageKind: "card_detail",
-        routePattern: "/cards/:id",
-        canonicalTarget: "card:test",
-        canonicalOrigin: "source:test",
-      }),
-    );
-    assert.equal(skipped.status, "skipped", "未知 reason fail-closed");
-
-    const suppressed = await withWorkspaceTransaction(
-      { workspaceId, userId },
-      (tx) => fireCompanionTriggerFromWorker(tx as never, {
-        workspaceId,
-        userId,
-        reasonId: "committed_change_display",
-        pageKind: "card_detail",
-        routePattern: "/cards/:id",
-        canonicalTarget: "card:test",
-        canonicalOrigin: "source:test",
-      }),
-    );
-    assert.equal(suppressed.status, "suppressed", "quiet 档位 worker 版也零打扰");
-  } finally {
-    await cleanup();
-  }
-});

@@ -13,6 +13,8 @@
  * BUG-22/77/SEC-13/SEC-24 修复：移除过于宽泛的模式匹配，改为使用精确短语匹配。
  */
 
+import { AIConsentRequiredError } from "./governance.ts";
+
 /**
  * Patterns that identify non-retryable errors.
  * Each entry is matched case-insensitively against the error message.
@@ -85,6 +87,11 @@ export function isNonRetryableError(error: unknown): boolean {
   // 输出协议错误（截断/参数损坏）是确定性失败：重试不会改变输出预算，
   // 重投只会空转。必须直接标记 dead，交给用户重新生成。
   if (error instanceof AgentOutputError) return true;
+
+  // 2026-08-12+（15a 根因修复）：AI 同意/协议缺失（sendToExternal=false、
+  // 未签署协议）——用户不操作设置重试必败，直接 dead 并让前端引导设置。
+  // 此前按可重试处理（重试 3 次全失败，浪费且错误信息无引导）。
+  if (error instanceof AIConsentRequiredError) return true;
 
   // QUAL-24 修复：优先检查结构化错误类型
   // ProviderRequestError 包含 status 和 providerCode 字段，

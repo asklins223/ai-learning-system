@@ -16,56 +16,6 @@
       "import": "./src/ai-endpoints.ts",
       "default": "./src/ai-endpoints.ts"
     },
-    "./public-json-http": {
-      "types": "./src/public-json-http.ts",
-      "import": "./src/public-json-http.ts",
-      "default": "./src/public-json-http.ts"
-    },
-    "./markdown-parser": {
-      "types": "./src/markdown-parser.ts",
-      "import": "./src/markdown-parser.ts",
-      "default": "./src/markdown-parser.ts"
-    },
-    "./prompts": {
-      "types": "./src/prompts.ts",
-      "import": "./src/prompts.ts",
-      "default": "./src/prompts.ts"
-    },
-    "./constants": {
-      "types": "./src/constants.ts",
-      "import": "./src/constants.ts",
-      "default": "./src/constants.ts"
-    },
-    "./companion-character-contracts": {
-      "types": "./src/companion-character-contracts.ts",
-      "import": "./src/companion-character-contracts.ts",
-      "default": "./src/companion-character-contracts.ts"
-    },
-    "./companion-shell-contracts": {
-      "types": "./src/companion-shell-contracts.ts",
-      "import": "./src/companion-shell-contracts.ts",
-      "default": "./src/companion-shell-contracts.ts"
-    },
-    "./desktop-pet-contracts": {
-      "types": "./src/desktop-pet-contracts.ts",
-      "import": "./src/desktop-pet-contracts.ts",
-      "default": "./src/desktop-pet-contracts.ts"
-    },
-    "./companion-conversation-contracts": {
-      "types": "./src/companion-conversation-contracts.ts",
-      "import": "./src/companion-conversation-contracts.ts",
-      "default": "./src/companion-conversation-contracts.ts"
-    },
-    "./companion-asr-contracts": {
-      "types": "./src/companion-asr-contracts.ts",
-      "import": "./src/companion-asr-contracts.ts",
-      "default": "./src/companion-asr-contracts.ts"
-    },
-    "./companion-learning-session-contracts": {
-      "types": "./src/companion-learning-session-contracts.ts",
-      "import": "./src/companion-learning-session-contracts.ts",
-      "default": "./src/companion-learning-session-contracts.ts"
-    },
     "./card-generation-v2-contracts": {
       "types": "./src/card-generation-v2-contracts.ts",
       "import": "./src/card-generation-v2-contracts.ts",
@@ -76,30 +26,115 @@
       "import": "./src/card-generation-v2-hashing.ts",
       "default": "./src/card-generation-v2-hashing.ts"
     },
-    "./hash-canonical-v2": {
-      "types": "./src/hash-canonical-v2.ts",
-      "import": "./src/hash-canonical-v2.ts",
-      "default": "./src/hash-canonical-v2.ts"
-    },
     "./card-quality-v2-contracts": {
       "types": "./src/card-quality-v2-contracts.ts",
       "import": "./src/card-quality-v2-contracts.ts",
       "default": "./src/card-quality-v2-contracts.ts"
     },
-    "./learning-card-v2-contracts": {
-      "types": "./src/learning-card-v2-contracts.ts",
-      "import": "./src/learning-card-v2-contracts.ts",
-      "default": "./src/learning-card-v2-contracts.ts"
+    "./companion-asr-contracts": {
+      "types": "./src/companion-asr-contracts.ts",
+      "import": "./src/companion-asr-contracts.ts",
+      "default": "./src/companion-asr-contracts.ts"
+    },
+    "./companion-bridge-revision": {
+      "types": "./src/companion-bridge-revision.ts",
+      "import": "./src/companion-bridge-revision.ts",
+      "default": "./src/companion-bridge-revision.ts"
+    },
+    "./companion-character-contracts": {
+      "types": "./src/companion-character-contracts.ts",
+      "import": "./src/companion-character-contracts.ts",
+      "default": "./src/companion-character-contracts.ts"
+    },
+    "./companion-conversation-contracts": {
+      "types": "./src/companion-conversation-contracts.ts",
+      "import": "./src/companion-conversation-contracts.ts",
+      "default": "./src/companion-conversation-contracts.ts"
+    },
+    "./companion-learning-session-contracts": {
+      "types": "./src/companion-learning-session-contracts.ts",
+      "import": "./src/companion-learning-session-contracts.ts",
+      "default": "./src/companion-learning-session-contracts.ts"
+    },
+    "./companion-shell-contracts": {
+      "types": "./src/companion-shell-contracts.ts",
+      "import": "./src/companion-shell-contracts.ts",
+      "default": "./src/companion-shell-contracts.ts"
+    },
+    "./constants": {
+      "types": "./src/constants.ts",
+      "import": "./src/constants.ts",
+      "default": "./src/constants.ts"
     },
     "./content-hash": {
       "types": "./src/content-hash.ts",
       "import": "./src/content-hash.ts",
       "default": "./src/content-hash.ts"
     },
-    "./companion-bridge-revision": {
-      "types": "./src/companion-bridge-revision.ts",
-      "import": "./src/companion-bridge-revision.ts",
-      "default": "./src/companion-bridge-revision.ts"
+    "./desktop-pet-contracts": {
+      "types": "./src/desktop-pet-contracts.ts",
+      "import": "./src/desktop-pet-contracts.ts",
+      "default": "./src/desktop-pet-contracts.ts"
+    },
+    "./fingerprint": {
+      "types": "./src/fingerprint.ts",
+      "import": "./src/fingerprint.ts",
+      "default": "./src/fingerprint.ts"
+    },
+    "./hash-canonical-v2": {
+      "types": "./src/hash-canonical-v2.ts",
+      "import": "./src/hash-canonical-v2.ts",
+      "default": "./src/hash-canonical-v2.ts"
+    },
+    "./learning-assessment": {
+      "types": "./src/learning-assessment.ts",
+      "import": "./src/learning-assessment.ts",
+      "default": "./src/learning-assessment.ts"
+    },
+    "./learning-card-v2-contracts": {
+      "types": "./src/learning-card-v2-contracts.ts",
+      "import": "./src/learning-card-v2-contracts.ts",
+      "default": "./src/learning-card-v2-contracts.ts"
+    },
+    "./learning-target-v2-contracts": {
+      "types": "./src/learning-target-v2-contracts.ts",
+      "import": "./src/learning-target-v2-contracts.ts",
+      "default": "./src/learning-target-v2-contracts.ts"
+    },
+    "./markdown-parser": {
+      "types": "./src/markdown-parser.ts",
+      "import": "./src/markdown-parser.ts",
+      "default": "./src/markdown-parser.ts"
+    },
+    "./platform-config-node": {
+      "types": "./src/platform-config-node.ts",
+      "import": "./src/platform-config-node.ts",
+      "default": "./src/platform-config-node.ts"
+    },
+    "./prompts": {
+      "types": "./src/prompts.ts",
+      "import": "./src/prompts.ts",
+      "default": "./src/prompts.ts"
+    },
+    "./public-json-http": {
+      "types": "./src/public-json-http.ts",
+      "import": "./src/public-json-http.ts",
+      "default": "./src/public-json-http.ts"
+    },
+    "./published-learning-asset-contract": {
+      "types": "./src/published-learning-asset-contract.ts",
+      "import": "./src/published-learning-asset-contract.ts",
+      "default": "./src/published-learning-asset-contract.ts"
+    },
+    "./task-router": {
+      "types": "./src/task-router.ts",
+      "import": "./src/task-router.ts",
+      "default": "./src/task-router.ts"
+    },
+    "./voice-expression-tags": {
+      "types": "./src/voice-expression-tags.ts",
+      "import": "./src/voice-expression-tags.ts",
+      "default": "./src/voice-expression-tags.ts"
     }
   },
   "dependencies": {

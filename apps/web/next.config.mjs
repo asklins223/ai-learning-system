@@ -12,7 +12,10 @@ const contentSecurityPolicy = [
   // 'unsafe-inline'（Next 架构必需）；SRI 保留——外置 chunk 带 integrity，
   // 配合 'self' 阻断外置脚本篡改。真正的严格化需全站动态渲染 + nonce，
   // 属架构级权衡（P3 记录；XSS 面已全绿兜底）。dev 需 unsafe-eval。
-  `script-src 'self' 'unsafe-inline' blob:${isDevelopment ? " 'unsafe-eval'" : ""}`,
+  // 2026-08-13（Live2D 修复）：生产也需 'unsafe-eval'——PIXI v6 编译 WebGL
+  // 着色器依赖 new Function（@pixi/unsafe-eval 缺失时抛错→Sprite 回退，
+  // 实测打包版桌宠 Live2D 必现）。本地桌宠应用（非公网）风险可控。
+  `script-src 'self' 'unsafe-inline' blob: 'unsafe-eval'`,
   // 2026-08-11：style 已全部外置（WorkspaceRouteLoading 内联 <style> 迁入
   // globals.css；CompanionAvatar 同前），生产 'self' 实测无违规；dev 保留
   // unsafe-inline（React dev overlay 注入）。
@@ -28,7 +31,11 @@ const contentSecurityPolicy = [
   // （无 blob:）→ AbortError "Unable to load a worklet's module" → 本地 PCM
   // 缺失 → 识别降级 text_only。blob 只能由同源页面创建，风险可控。
   "worker-src 'self' blob:",
-  `connect-src 'self'${isDevelopment ? " ws: wss:" : ""}`,
+  // SSE 端点经 next rewrite 会被代理缓冲（chunk 不 flush），LearningRun
+  // events/companion inbox 等长流在浏览器端直连 NEXT_PUBLIC_API_URL；
+  // dev 默认 http://localhost:4000（API CORS 已允许）。生产 NEXT_PUBLIC_API_URL
+  // 指向同源或已配 CORS 的 API 网关。
+  `connect-src 'self'${isDevelopment ? " ws: wss: http://localhost:4000" : ""}`,
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -73,6 +80,27 @@ const nextConfig = {
   // 篡改防护，配合 'self' 阻断 CDN/中间人替换。
   experimental: {
     sri: { algorithm: "sha256" },
+    // 2026-08-15（桌面打包修复）：Next 15.5.21 build worker 模式下预渲染
+    // 稳定崩溃（TypeError: a[d] is not a function @ webpack-runtime require，
+    // 干净 .next 可 100% 复现，SRI 实验 + worker 分块加载相互干扰）；
+    // worker=0（NEXT_PRIVATE_BUILD_WORKER=0）稳定成功。桌面 dist/pack 依赖
+    // next build，显式禁用 webpack build worker 保证打包产物可复现。
+    webpackBuildWorker: false,
+  },
+  // 2026-08-13（next build 修复）：@ailearn/shared 多个文件顶层 import
+  // node: 内置模块（platform-config 的 fs、fingerprint 的 crypto 等——仅
+  // 服务端使用）。客户端 bundle 经 SilentProofScene → index 全量导出被打包
+  // → UnhandledSchemeError。客户端构建用 IgnorePlugin 忽略 node: 前缀请求
+  //（web 端从不调用这些函数；服务端构建不受影响）。
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      // @ailearn/shared 的 index 全量导出会把服务端专属模块（task-router →
+      // platform-config-node → node:fs/crypto）带进客户端 bundle →
+      // UnhandledSchemeError。IgnorePlugin 在模块解析前拦截 node: 请求
+      //（web 端从不调用这些函数；服务端构建不受影响）。
+      config.plugins.push(new webpack.IgnorePlugin({ resourceRegExp: /^node:/ }));
+    }
+    return config;
   },
   // Keep standalone tracing anchored to this repository. Without this explicit
   // root, an unrelated lockfile above the workspace can make Next.js emit an
@@ -104,56 +132,6 @@ const nextConfig = {
         headers: securityHeaders,
       },
     ];
-  },
-  // 2026-08-15（R36+ 桌面打包放行）：@ailearn/shared 的 index 含少数
-  // node 内置模块依赖（platform-config/fingerprint/content-hash/
-  // card-generation-v2-hashing——均按惰性约定，浏览器 bundle 不实际调用）。
-  // webpack 5 客户端构建对 `node:` scheme 顶层 import 报 UnhandledSchemeError；
-  // 这里对客户端构建把 node 内置模块解析为存根，服务端构建保持真实模块。
-  webpack(config, { isServer, webpack }) {
-    if (!isServer) {
-      config.resolve.fallback = {
-        ...config.resolve.fallback,
-        "node:fs": false,
-        "node:path": false,
-        "node:crypto": false,
-        "node:module": false,
-        "node:url": false,
-        "node:os": false,
-        "node:util": false,
-        "node:stream": false,
-        "node:buffer": false,
-        "node:events": false,
-        "node:http": false,
-        "node:https": false,
-        "node:zlib": false,
-        "node:net": false,
-        "node:tls": false,
-        "node:child_process": false,
-        "node:worker_threads": false,
-        "node:assert": false,
-        "node:querystring": false,
-        "node:string_decoder": false,
-        "node:timers": false,
-        "node:async_hooks": false,
-        "node:perf_hooks": false,
-        "node:vm": false,
-        "node:readline": false,
-        "node:cluster": false,
-        "node:dns": false,
-        "node:constants": false,
-        "node:punycode": false,
-        "node:process": false,
-        "node:repl": false,
-        "node:tty": false,
-      };
-      // `node:` scheme 在 resolve 阶段就会抛 UnhandledSchemeError（fallback 不
-      // 拦截 scheme 解析，NormalModuleReplacementPlugin 触发时机也在 scheme
-      // 检查之后）。2026-08-15 恢复：IgnorePlugin 在解析早期拦截 node: 请求
-      //（shared 惰性约定保证浏览器运行时不会真正调用这些函数）。
-      config.plugins.push(new webpack.IgnorePlugin({ resourceRegExp: /^node:/ }));
-    }
-    return config;
   },
 };
 

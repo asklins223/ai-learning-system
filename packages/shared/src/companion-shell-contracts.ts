@@ -218,16 +218,15 @@ export const companionAccountStateV1Schema = z.object({
   animationOff: z.boolean().optional(),
   voiceOff: z.boolean().optional(),
   notificationBoundary: companionNotificationBoundarySchema.optional(),
-  // §10.2/§10.3（2026-08-15 接线修复）：主动介入强度 + 静默时段——迁移
-  // 0140 已加列、proactive-hook 已消费，但 account 契约与服务端序列化
-  // 从未包含（settings 页伴星分区读取时类型缺失）。
+  // 方案 16 §10.3：主动介入强度与静默时段（账号级；0140 迁移）。
   interventionLevel: z.enum(["quiet", "moderate", "active"]).optional(),
   quietHours: z
     .object({
-      startLocal: z.string(),
-      endLocal: z.string(),
-      timezone: z.string(),
+      startLocal: z.string().min(1).max(10),
+      endLocal: z.string().min(1).max(10),
+      timezone: z.string().min(1).max(64),
     })
+    .nullable()
     .optional(),
 }).strict();
 export type CompanionAccountStateV1 = z.infer<typeof companionAccountStateV1Schema>;
@@ -253,6 +252,16 @@ export const companionAccountPatchSchema = z.object({
   animationOff: z.boolean().optional(),
   voiceOff: z.boolean().optional(),
   notificationBoundary: companionNotificationBoundarySchema.optional(),
+  // 方案 16 §10.3：主动介入强度与静默时段。
+  interventionLevel: z.enum(["quiet", "moderate", "active"]).optional(),
+  quietHours: z
+    .object({
+      startLocal: z.string().min(1).max(10),
+      endLocal: z.string().min(1).max(10),
+      timezone: z.string().min(1).max(64),
+    })
+    .nullable()
+    .optional(),
 }).strict().superRefine((patch, ctx) => {
   const hasChange =
     patch.globalEnabled !== undefined ||
@@ -261,7 +270,9 @@ export const companionAccountPatchSchema = z.object({
     patch.suppression !== undefined ||
     patch.animationOff !== undefined ||
     patch.voiceOff !== undefined ||
-    patch.notificationBoundary !== undefined;
+    patch.notificationBoundary !== undefined ||
+    patch.interventionLevel !== undefined ||
+    patch.quietHours !== undefined;
   if (!hasChange) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

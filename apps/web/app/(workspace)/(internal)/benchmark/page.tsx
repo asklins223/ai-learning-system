@@ -18,7 +18,7 @@ import {
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
-import { BENCHMARK_QUALITY_THRESHOLDS } from "@ailearn/shared";
+import { BENCHMARK_QUALITY_THRESHOLDS } from "@ailearn/shared/constants";
 
 type Phase =
   | "idle"

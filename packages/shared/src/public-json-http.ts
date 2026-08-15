@@ -292,6 +292,18 @@ export const postSseToPublicEndpoint: PublicStreamingRequester = async (
         `AI endpoint TCP/TLS connection could not be established within ${CONNECT_TIMEOUT_MS}ms — check container network egress/proxy, or a fake-IP VPN DNS resolver (198.18.x.x)`,
       ));
     }, CONNECT_TIMEOUT_MS);
+    // 2026-08-12+（15a 根因修复）：流式通道补整体响应超时（此前只有
+    // connect 超时）。非流式 postJsonToPublicEndpoint 有 TOTAL_RESPONSE_TIMEOUT_MS
+    // 兜底，流式漏了——"TCP 已连但 HTTP 响应头永不返回"时 Promise 永不
+    // settle，worker 无限卡在 provider 调用 → run 永久 running → 前端永久
+    // "伴星正在想"（且无 failed 事件）。totalTimer 在 resolve（响应头到达）
+    // 后保留，同时覆盖"响应头到了但 body 永不推流"的挂起：触发 destroy →
+    // error → reject → 调用方（chatCompletionStream）抛错 → 标记 run failed。
+    const totalTimer = setTimeout(() => {
+      request.destroy(new Error(
+        `AI endpoint SSE request exceeded total timeout ${TOTAL_RESPONSE_TIMEOUT_MS}ms (connect + response body)`,
+      ));
+    }, TOTAL_RESPONSE_TIMEOUT_MS);
     request.on("socket", (socket) => {
       if (!socket.connecting) {
         clearTimeout(connectTimer);
@@ -302,6 +314,7 @@ export const postSseToPublicEndpoint: PublicStreamingRequester = async (
     request.once("response", () => clearTimeout(connectTimer));
     request.once("error", (error) => {
       clearTimeout(connectTimer);
+      clearTimeout(totalTimer);
       reject(error);
     });
     request.end(encodedBody);

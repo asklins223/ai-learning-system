@@ -85,7 +85,9 @@ test.describe("Workspace tenant boundaries @pr", () => {
     const responseText = await response.text();
 
     expect(response.status()).toBe(404);
-    expect(JSON.parse(responseText)).toEqual({ error: "not found" });
+    // 2026-08-14：API 默认 404 响应统一为 { error: "not_found", message: "资源不存在" }
+    // （server.ts setNotFoundHandler，不泄漏路由模板）。
+    expect(JSON.parse(responseText)).toEqual({ error: "not_found", message: "资源不存在" });
     expect(responseText).not.toContain("Tenant B Private Note");
     expect(responseText).not.toContain("Private tenant B content");
   });

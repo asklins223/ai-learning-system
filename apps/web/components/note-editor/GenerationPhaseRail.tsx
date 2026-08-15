@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * 生成阶段 stepper（设计稿"暖纸编辑主题"）。
+ * 学习卡生成阶段轨道。
  *
- * 阶段仍由 `shellStage` 推导（graph-plan §9.1），角色名不进入阶段栏。
- * 每步展示真实计数（来自 run.metrics / coverage），不是百分比。
+ * 轨道只呈现后端真实 shellStage；旧 run 没有 shellStage 时才从 stage
+ * 做一对一回退。阶段名称面向学习价值，而计数仍全部来自 run 聚合视图。
  */
 
 import type { CardGenerationRunView } from "@/lib/api";
@@ -12,88 +12,82 @@ import { shellStageStepStates } from "./note-editor-utils";
 
 export interface GenerationPhaseRailProps {
   run: CardGenerationRunView;
+  /** 抽屉等窄容器使用紧凑形态。 */
+  compact?: boolean;
 }
 
-export function GenerationPhaseRail({ run }: GenerationPhaseRailProps) {
-  const states = shellStageStepStates(run.shellStage);
-  const metrics = run.metrics;
+type PhaseKey = "preparing" | "generating" | "checking" | "publishing";
 
-  // 准备素材：bundles 总数 + 语义索引模式
-  let prepareDesc = "等待建立文章结构";
-  if (metrics && metrics.bundles.required > 0) {
-    prepareDesc = `已建立 ${metrics.bundles.required} 个文本单元`;
-  }
+function normalizedShellStage(run: CardGenerationRunView): PhaseKey | null {
+  const stage = run.shellStage ?? run.stage;
+  if (stage === "queued" || stage === "preparing" || stage === "snapshot") return "preparing";
+  if (stage === "running" || stage === "generating") return "generating";
+  if (stage === "validating" || stage === "checking") return "checking";
+  if (stage === "publishing" || stage === "complete") return "publishing";
+  return null;
+}
 
-  // 提炼卡片：child tasks / candidates 计数
-  let agentDesc = "多角色协作生成";
-  if (metrics) {
-    const child = metrics.childTasks;
-    if (child.completed > 0 || child.running > 0) {
-      agentDesc = `${child.completed}/${Math.max(child.completed + child.running + child.pending, 1)} 任务完成`;
-    } else if (metrics.candidates.extracted > 0) {
-      agentDesc = `已提取 ${metrics.candidates.extracted} 个候选`;
-    }
-  }
+export function generationPhasePosition(run: CardGenerationRunView): number {
+  const key = normalizedShellStage(run);
+  if (key === "preparing") return 1;
+  if (key === "generating") return 2;
+  if (key === "checking") return 3;
+  if (key === "publishing") return 4;
+  return 1;
+}
 
-  // 引用校验：critic 状态 + verify
-  let verifyDesc = "等待验证支撑";
-  if (metrics) {
-    if (metrics.critic.status === "passed") {
-      verifyDesc = "支撑校验通过";
-    } else if (metrics.critic.status === "failed") {
-      verifyDesc = `待处理 · 硬 ${metrics.critic.hardIssues} / 软 ${metrics.critic.softIssues}`;
-    } else if (metrics.verify) {
-      verifyDesc = `校验 ${metrics.verify.passedChecks}/${metrics.verify.totalChecks}`;
-    }
-  }
-
-  // 发布卡组：draft 版本
-  let publishDesc = "生成草稿并保存";
-  if (metrics && metrics.draft.version > 0) {
-    publishDesc = `草稿 v${metrics.draft.version}`;
-  }
+export function GenerationPhaseRail({ run, compact = false }: GenerationPhaseRailProps) {
+  const stage = normalizedShellStage(run);
+  const states = shellStageStepStates(stage);
 
   const steps = [
     {
+      key: "prepare",
       state: states.prepare,
-      index: states.prepare === "done" ? "✓" : "1",
-      name: "准备素材",
-      desc: prepareDesc,
+      name: "理解素材",
+      desc: `读取 v${run.sourceSnapshot.versionNo} 的结构与重点`,
     },
     {
+      key: "generate",
       state: states.agentRun,
-      index: states.agentRun === "done" ? "✓" : "2",
-      name: "提炼卡片",
-      desc: agentDesc,
+      name: "设计提问",
+      desc: "把关键理解转成可练习的问题",
     },
     {
+      key: "check",
       state: states.verify,
-      index: states.verify === "done" ? "✓" : "3",
-      name: "引用校验",
-      desc: verifyDesc,
+      name: "核对依据",
+      desc: "检查答案、来源与质量规则",
     },
     {
+      key: "publish",
       state: states.publish,
-      index: states.publish === "done" ? "✓" : "4",
-      name: "发布卡组",
-      desc: publishDesc,
+      name: "发布结果",
+      desc: "写入当前学习卡库",
     },
-  ];
+  ] as const;
 
   return (
-    <ol className="gen-progress-stepper" aria-label="生成进度" data-shell-stage={run.shellStage ?? undefined}>
-      {steps.map((step) => (
+    <ol
+      className="lcg-phase-rail"
+      aria-label="学习卡生成阶段"
+      data-compact={compact || undefined}
+      data-shell-stage={stage ?? undefined}
+    >
+      {steps.map((step, index) => (
         <li
-          key={step.name}
-          className="gen-progress-step"
+          key={step.key}
+          className="lcg-phase"
           data-state={step.state}
           aria-current={step.state === "active" ? "step" : undefined}
         >
-          <span className="gen-progress-step-index" aria-hidden="true">{step.index}</span>
-          <div>
-            <strong className="gen-progress-step-name">{step.name}</strong>
-            <p className="gen-progress-step-desc">{step.desc}</p>
-          </div>
+          <span className="lcg-phase-marker" aria-hidden="true">
+            {step.state === "done" ? "✓" : index + 1}
+          </span>
+          <span className="lcg-phase-copy">
+            <strong>{step.name}</strong>
+            {!compact && <small>{step.desc}</small>}
+          </span>
         </li>
       ))}
     </ol>

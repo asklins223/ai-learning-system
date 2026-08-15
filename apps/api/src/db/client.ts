@@ -197,6 +197,9 @@ export async function withWorkspaceTransaction<T>(
     }
     await setApiTransactionContext(transaction, normalized);
     const scopedTransaction = { context: normalized, transaction, open: true };
+    // 2026-08-14（16-remaining-issues #2）：慢响应可观测性——记录事务耗时，
+    // 定位"DB 侧无慢查询但 API 偶发 20-207s"的连接池/事件循环排队。
+    const startedAt = performance.now();
     try {
       return await workspaceTransactionStorage.run(
         scopedTransaction,
@@ -204,6 +207,22 @@ export async function withWorkspaceTransaction<T>(
       );
     } finally {
       scopedTransaction.open = false;
+      const elapsedMs = performance.now() - startedAt;
+      if (elapsedMs >= 5000) {
+        import("../lib/logger.ts").then(({ logger }) => {
+          logger.error(
+            { elapsedMs, context: normalized, poolMax: queryClient.options.max },
+            "workspace transaction slow (>5s)",
+          );
+        }).catch(() => {});
+      } else if (elapsedMs >= 1000) {
+        import("../lib/logger.ts").then(({ logger }) => {
+          logger.warn(
+            { elapsedMs, context: normalized },
+            "workspace transaction slow (>1s)",
+          );
+        }).catch(() => {});
+      }
     }
   });
 }

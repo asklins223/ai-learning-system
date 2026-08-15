@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { usePetVoiceLevel } from "../runtime/PetRuntimeProvider";
-import type { DesktopPetScaleV1 } from "@ailearn/shared";
-import type { CharacterPresentationStateV1 } from "@ailearn/shared";
+import { usePetVoiceLevel, usePetVoiceSegmentEmotion } from "../runtime/PetRuntimeProvider";
+import type { DesktopPetScaleV1 } from "@ailearn/shared/desktop-pet-contracts";
+import type { CharacterPresentationStateV1, CharacterCueV1 } from "@ailearn/shared/companion-character-contracts";
 import { loadSpriteAssetPack } from "./sprite-asset-validator";
 import {
   SpriteCharacterDriver,
@@ -34,6 +34,14 @@ export interface PetCharacterCanvasProps {
   occluded?: boolean;
   /** Incrementing counter: play the single-shot invite cue on change. */
   inviteOnceTrigger?: number;
+  /**
+   * 15 方案 emotion 表现层：reducer emotion 域的最近 cue（本地合同
+   * CharacterCueV1，含 generation）。receivedAt 变化时推入 Live2D 的
+   * VAD 状态机（facs 按 emotion 驱动）。
+   */
+  emotionCue?: CharacterCueV1 | null;
+  /** cue 到达时间（useEffect 依赖，避免同 cue 重复推送） */
+  emotionReceivedAt?: number;
   /** Called with Sprite hit-test functions once the Sprite driver is ready. */
   onSpriteReady?: (
     hitTest: (point: { x: number; y: number }) => boolean,
@@ -68,6 +76,8 @@ export function PetCharacterCanvas({
   live2dEnabled = false,
   occluded = false,
   inviteOnceTrigger = 0,
+  emotionCue = null,
+  emotionReceivedAt = 0,
   onSpriteReady,
   onRenderModeChange,
   style,
@@ -205,8 +215,7 @@ export function PetCharacterCanvas({
     }
     if (current !== "sprite") return;
     const driver = spriteDriverRef.current;
-    if (!driver) return;
-    const layout: Partial<SpriteLayoutV1> = {
+    if (!driver) return;    const layout: Partial<SpriteLayoutV1> = {
       side,
       petScale,
       reducedMotion,
@@ -230,6 +239,34 @@ export function PetCharacterCanvas({
       live2dDriverRef.current?.setVoiceLevel(voiceLevel);
     }
   }, [voiceLevel]);
+
+  // 15 方案 emotion 表现层：cue 到达（receivedAt 变化）→ 推入 Live2D VAD。
+  useEffect(() => {
+    if (!emotionCue) return;
+    if (modeRef.current !== "live2d") return; // sprite 模式无 facs 参数
+    live2dDriverRef.current?.pushEmotion({
+      emotion: emotionCue.emotion,
+      intensity: emotionCue.intensity,
+      at: Date.now(),
+    });
+  }, [emotionReceivedAt, emotionCue]);
+
+  // 15 方案 emotion 表现层扩展：段级情感（voice.segments 标签 emotion）→
+  // VAD 第二条输入源。F19（round4）：改从窄 context（PetVoiceSegmentEmotion）
+  // 订阅稳定的 onVoiceSegmentEmotion 回调，不再 usePetRuntime()——后者的
+  // value 随 state 每次 dispatch 重建，角色 renderer 无需随整棵 context 变化
+  // 重渲染。该回调恒稳定（useCallback([]) + ref 持有实现），effect 只订阅一次。
+  const onVoiceSegmentEmotion = usePetVoiceSegmentEmotion();
+  const onVoiceSegmentEmotionRef = useRef(onVoiceSegmentEmotion);
+  useEffect(() => {
+    return onVoiceSegmentEmotionRef.current((event) => {
+      if (modeRef.current !== "live2d") return;
+      live2dDriverRef.current?.pushEmotion({ ...event, at: Date.now() });
+    });
+    // 订阅一次即可：listener 读 modeRef/live2dDriverRef（稳定 ref），
+    // onVoiceSegmentEmotion 稳定（多 listener Set + useCallback([])）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Character click → invite-once cue (then back to idle) ─────────────
   const lastInviteRef = useRef(inviteOnceTrigger);

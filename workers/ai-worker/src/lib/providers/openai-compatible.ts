@@ -162,6 +162,7 @@ export class OpenAICompatibleProvider implements AIProvider {
       options.temperature ?? 0.2,
       options.model ?? this.modelId,
       options.responseFormat,
+      options.disableThinking ?? false,
     );
     return {
       content,
@@ -199,7 +200,9 @@ export class OpenAICompatibleProvider implements AIProvider {
       ...(options.responseFormat === "text"
         ? {}
         : { response_format: { type: "json_object" as const } }),
-      ...((this.platformOptions?.disableThinking ?? process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+      ...((options.disableThinking
+        || this.platformOptions?.disableThinking
+        || process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
         ? { enable_thinking: false }
         : this.platformOptions?.enableThinking
           ? { enable_thinking: true }
@@ -392,6 +395,8 @@ export class OpenAICompatibleProvider implements AIProvider {
     temperature = 0.2,
     model = this.modelId,
     responseFormat: ChatOptions["responseFormat"] = "json_object",
+    /** 2026-08-12+（15a 新反馈）：显式关闭思考模式（enable_thinking: false）。 */
+    disableThinking = false,
   ): Promise<{ content: string; usage: ProviderUsage | null }> {
     if (signal?.aborted) throw abortError(signal, "before request");
     // R1: maxTokensStrategy controls max_tokens ("always" for DashScope, "env-gated" for OpenAI-compatible)
@@ -413,7 +418,11 @@ export class OpenAICompatibleProvider implements AIProvider {
       //   disableThinking: explicitly disable (enable_thinking: false)
       //   enableThinking:  explicitly enable  (enable_thinking: true)
       //   neither:          use model/API default (no field)
-      ...((this.platformOptions?.disableThinking ?? process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+      // 2026-08-12+（15a 新反馈）：call 的 disableThinking 参数优先级最高
+      //（companion 日常对话用它显式关闭思考模式，换首 token 速度）。
+      ...((disableThinking
+        || this.platformOptions?.disableThinking
+        || process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
         ? { enable_thinking: false }
         : this.platformOptions?.enableThinking
           ? { enable_thinking: true }

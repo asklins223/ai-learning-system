@@ -1388,6 +1388,11 @@
   box-shadow: 0 0 0 16px color-mix(in srgb, var(--color-running-soft) 18%, transparent);
 }
 
+.today-context-panel.is-practice::before {
+  border-color: color-mix(in srgb, var(--color-evidence) 24%, transparent);
+  box-shadow: 0 0 0 16px color-mix(in srgb, var(--color-evidence-soft) 22%, transparent);
+}
+
 .today-context-heading {
   position: relative;
   display: grid;
@@ -1413,6 +1418,12 @@
   color: var(--color-running-text);
 }
 
+.today-context-panel.is-practice .today-context-icon {
+  border-color: color-mix(in srgb, var(--color-evidence) 30%, var(--color-border));
+  background: var(--color-evidence-soft);
+  color: var(--color-evidence-text);
+}
+
 .today-context-heading h2 {
   margin: 2px 0 0;
   color: var(--color-text);
@@ -1435,6 +1446,10 @@
   color: var(--color-running-text);
 }
 
+.today-context-panel.is-practice .today-context-heading > div > span {
+  color: var(--color-evidence-text);
+}
+
 .today-context-intro {
   margin: 14px 0;
   border-bottom: 1px dashed var(--color-divider);
@@ -1443,6 +1458,56 @@
   font-family: var(--font-ui);
   font-size: 11.5px;
   line-height: 1.6;
+}
+
+.today-context-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 7px;
+}
+
+.today-context-facts span {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0 8px;
+  background: color-mix(in srgb, var(--color-paper) 72%, transparent);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-ui);
+  font-size: 9.5px;
+  font-weight: 680;
+  line-height: 1;
+}
+
+.today-context-card-name {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--color-divider);
+  padding: 2px 2px 13px;
+}
+
+.today-context-card-name span {
+  color: var(--color-text-tertiary);
+  font-size: 9.5px;
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.today-context-card-name strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-editorial);
+  font-size: 15px;
+  font-weight: 610;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .today-context-list {
@@ -1667,7 +1732,11 @@
   .today-context-panel {
     position: relative;
     top: auto;
-    order: 0;
+    /* On a single-column canvas the next learning action belongs before the
+     * long activity ledger. The desktop two-column layout keeps it beside the
+     * ledger, while tablet/mobile users see it without scrolling through the
+     * historical record first. */
+    order: -1;
     width: 100%;
   }
 
@@ -2122,7 +2191,7 @@
   .today-context-panel {
     position: relative;
     top: auto;
-    order: 0;
+    order: -1;
     width: 100%;
   }
 }

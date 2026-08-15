@@ -25,8 +25,8 @@ import {
   CognitiveType,
   CandidateImportance,
   type ProviderCapability,
-  resolveSystemPlatform,
 } from "@ailearn/shared";
+import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
 import * as schema from "../schema/index.ts";

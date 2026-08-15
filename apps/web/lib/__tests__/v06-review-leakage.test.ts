@@ -83,6 +83,8 @@ const ALLOWED_SANITIZED_ITEM_FIELDS = [
   "status",
   "nextReviewAt",
   "intervalDays",
+  // P3 LearningRun 切流：generation 是 review origin 的 CAS 数字（非答案化内容）。
+  "generation",
   "reviewReason",
 ];
 
@@ -114,6 +116,7 @@ describe("v0.6 Review Sanitized Endpoints — Leakage Prevention", () => {
               status: "pending",
               nextReviewAt: "2026-07-26T00:00:00Z",
               intervalDays: 7,
+              generation: 0,
               reviewReason: "due_review",
             },
           ],
@@ -141,6 +144,7 @@ describe("v0.6 Review Sanitized Endpoints — Leakage Prevention", () => {
         status: "pending",
         nextReviewAt: "2026-07-26T00:00:00Z",
         intervalDays: 7,
+        generation: 0,
         reviewReason: "due_review",
       };
 

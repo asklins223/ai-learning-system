@@ -15,7 +15,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { DesktopPetWindowStateV1 } from "@ailearn/shared";
+import type { DesktopPetWindowStateV1 } from "@ailearn/shared/desktop-pet-contracts";
 import {
   petReducer,
   createInitialPetRuntimeState,
@@ -26,7 +26,9 @@ import {
   type PetEffectV1,
   type PetRuntimeStateV1,
   type PetActionV1WithDemo,
+  type PetRuntimeV2,
 } from "./pet-runtime-types";
+import { projectPetRuntimeV2, type PetV2Signals } from "../presentation/pet-presentation-v2";
 import type { PetAdapterV1 } from "../desktop/desktop-pet-adapter";
 import {
   assertMicStoppedBeforeSpeaking,
@@ -93,7 +95,16 @@ const BUILTIN_ASR_TEST_AUDIO: Float32Array = (() => {
 export interface PetRuntimeApiV1 {
   state: PetRuntimeStateV1;
   presentation: CharacterPresentationV1;
+  /** 方案 16 §9.3：V2 正交状态投影（journey/proactive 域由外部信号注入）。 */
+  v2: PetRuntimeV2;
   dispatch: (action: PetActionV1WithDemo) => void;
+  /**
+   * 15 方案 emotion 表现层扩展：订阅 voice.segments 的段级情感（标签 emotion），
+   * 作为 VAD 的第二条输入源（character.cue 之外）。返回取消订阅函数。
+   */
+  onVoiceSegmentEmotion: (
+    listener: (event: { emotion: string; intensity: number }) => void,
+  ) => () => void;
   side: "bubble-left" | "bubble-right";
   /** Latest main-process window state projection (device-local settings). */
   windowState: DesktopPetWindowStateV1 | null;
@@ -116,6 +127,9 @@ export interface PetRuntimeApiV1 {
 
 const PetRuntimeContext = createContext<PetRuntimeApiV1 | null>(null);
 
+/** 15 方案 emotion 表现层扩展：段级标签情感的固定强度（标签无强度概念） */
+const SEGMENT_EMOTION_INTENSITY = 0.65;
+
 /**
  * P1（性能）fix：TTS 音量电平（setVoiceLevel 每 100ms 一次）原先放在主
  * PetRuntimeContext value 里，导致每次电平变化整棵 Pet surface 子树全部
@@ -127,6 +141,24 @@ const PetVoiceLevelContext = createContext(0);
 
 export function usePetVoiceLevel(): number {
   return useContext(PetVoiceLevelContext);
+}
+
+/**
+ * 15 方案 emotion 表现层扩展：把稳定的 onVoiceSegmentEmotion 回调拆到独立
+ * context（F19/round4）。该回调是 useCallback([]) 恒稳定；PetCharacterCanvas
+ * 只需订阅它，不需要订阅整个 PetRuntimeContext（后者的 value 随 state 每次
+ * dispatch 重建，会把角色 renderer 整个重叠子树反复重渲染）。提供方用 ref
+ * 持有最新实现，消费方因此总是拿到当前稳定引用。
+ */
+export type PetVoiceSegmentEmotionListener = (event: { emotion: string; intensity: number }) => void;
+const PetVoiceSegmentEmotionContext = createContext<((listener: PetVoiceSegmentEmotionListener) => () => void) | null>(null);
+
+export function usePetVoiceSegmentEmotion(): (listener: PetVoiceSegmentEmotionListener) => () => void {
+  const value = useContext(PetVoiceSegmentEmotionContext);
+  if (!value) {
+    throw new Error("usePetVoiceSegmentEmotion must be used inside PetRuntimeProvider");
+  }
+  return value;
 }
 
 export const FIXTURE_REPLY_TEXT =
@@ -144,6 +176,7 @@ export function PetRuntimeProvider({
   textConversationEnabled = false,
   voiceDialogueEnabled = false,
   streamingVoiceEnabled = false,
+  v2Signals,
   children,
 }: {
   adapter: PetAdapterV1;
@@ -156,6 +189,8 @@ export function PetRuntimeProvider({
   voiceDialogueEnabled?: boolean;
   /** P6 §13：streaming voice（本地 SenseVoice + edge-tts 流式 + 三路由降级）。 */
   streamingVoiceEnabled?: boolean;
+  /** 方案 16 §9.3：V2 正交状态外部信号（Journey/Delivery 注入）。 */
+  v2Signals?: PetV2Signals;
   /** Authenticated account projection from the bootstrap fetch (P1 fixture). */
   account?: {
     userId: string;
@@ -230,6 +265,45 @@ export function PetRuntimeProvider({
     seqRef.current += 1;
     return seqRef.current;
   }, []);
+
+  // 15 方案 emotion 表现层（精确版）：段级情感先记录映射，段开始播放时
+  // 推入 VAD（流式 onSegmentStart 与非流式 pump 共用此回调）。
+  // FN5：多 listener Set（替代单引用覆盖），每个 subscribe 返回退订函数；
+  // 多个订阅方并存时不再互相静默覆盖。
+  const voiceSegmentEmotionListenersRef = useRef<Set<(event: { emotion: string; intensity: number }) => void>>(new Set());
+  const segmentEmotionRef = useRef(new Map<string, string>());
+  const pushSegmentEmotionOnPlay = useCallback((segmentId: string): void => {
+    const emotion = segmentEmotionRef.current.get(segmentId);
+    if (!emotion) return;
+    segmentEmotionRef.current.delete(segmentId);
+    const listeners = voiceSegmentEmotionListenersRef.current;
+    if (listeners.size === 0) return;
+    const event = { emotion, intensity: SEGMENT_EMOTION_INTENSITY };
+    for (const listener of listeners) {
+      try {
+        listener(event);
+      } catch {
+        // 单个监听器抛错不影响其它订阅方。
+      }
+    }
+  }, []);
+  const onVoiceSegmentEmotion = useCallback(
+    (listener: (event: { emotion: string; intensity: number }) => void) => {
+      const listeners = voiceSegmentEmotionListenersRef.current;
+      listeners.add(listener);
+      // FN5：返回退订函数——监听器只需自移除，不影响其它订阅方。
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    [],
+  );
+
+  // FN5：打断/接管播放时清空"已入队但未播放"段的 emotion 映射，避免残影。
+  const clearPendingSegmentEmotions = useCallback((): void => {
+    segmentEmotionRef.current.clear();
+  }, []);
+
   // B1 fix：本地合成事件（网络/服务端失败、AUTH_REQUIRED）不是服务端
   // durable 事件，不得用独立 seqRef 递增（与服务端 SSE seq 空间冲突，会
   // 被 classifyDialogueEvent 判 duplicate/future 静默丢弃）。本地失败事件
@@ -242,6 +316,12 @@ export function PetRuntimeProvider({
 
   const dispatch = useCallback((action: PetActionV1WithDemo) => {
     const prevTurnKind = stateRef.current.turn.kind;
+    // 15 方案 emotion 表现层（精确版）：voice.segments 段级情感先记录
+    // segmentId → emotion 映射，待该段真正开始播放时再推入 VAD（见
+    // streamPlayback onSegmentStart 与非流式 pump）。
+    if (action.type === "voice.segments" && action.segment?.emotion) {
+      segmentEmotionRef.current.set(action.segment.segmentId, action.segment.emotion);
+    }
     const { state: next, effects } = petReducer(stateRef.current, action);
     const turnEnded = prevTurnKind === "running" && next.turn.kind !== "running";
     stateRef.current = next;
@@ -276,10 +356,12 @@ export function PetRuntimeProvider({
           }
         : null,
       setVoiceLevel,
+      pushSegmentEmotionOnPlay,
+      clearPendingSegmentEmotions,
       pendingProposalRef,
       recoveryAbortRef,
     );
-  }, [adapter, nextSeq, nextLocalEventSeq, resources, textConversationEnabled, voiceDialogueEnabled]);
+  }, [adapter, nextSeq, nextLocalEventSeq, resources, textConversationEnabled, voiceDialogueEnabled, streamingVoiceEnabled, pushSegmentEmotionOnPlay, clearPendingSegmentEmotions]);
 
   const dispatchRef = useRef(dispatch);
   dispatchRef.current = dispatch;
@@ -608,15 +690,19 @@ export function PetRuntimeProvider({
 
   const value = useMemo<PetRuntimeApiV1>(() => {
     const presentation = deriveCharacterPresentation(state);
-    return { state, presentation, dispatch, side: "bubble-left", windowState, adapter, demo };
-  }, [state, dispatch, windowState, adapter, demo]);
+    // 方案 16 §9.3：V2 正交状态投影（从 V1 状态 + Journey/Delivery 外部信号）。
+    const v2 = projectPetRuntimeV2(state, v2Signals);
+    return { state, presentation, v2, dispatch, onVoiceSegmentEmotion, side: "bubble-left", windowState, adapter, demo };
+  }, [state, dispatch, onVoiceSegmentEmotion, windowState, adapter, demo, v2Signals]);
 
   return (
-    <PetVoiceLevelContext.Provider value={voiceLevel}>
-      <PetRuntimeContext.Provider value={value}>
-        {children}
-      </PetRuntimeContext.Provider>
-    </PetVoiceLevelContext.Provider>
+    <PetVoiceSegmentEmotionContext.Provider value={onVoiceSegmentEmotion}>
+      <PetVoiceLevelContext.Provider value={voiceLevel}>
+        <PetRuntimeContext.Provider value={value}>
+          {children}
+        </PetRuntimeContext.Provider>
+      </PetVoiceLevelContext.Provider>
+    </PetVoiceSegmentEmotionContext.Provider>
   );
 }
 
@@ -641,6 +727,9 @@ interface ActiveRealTurnV1 {
 interface PetRuntimeResourcesV1 {
   realTurnAbort: AbortController | null;
   activeRealTurn: ActiveRealTurnV1 | null;
+  /** 2026-08-12+（15a 新反馈）：turn 级硬超时 timer——无论服务端/网络怎么卡，
+   *  超时后本地强制结束 turn（fail-closed），杜绝"伴星正在想"永久卡死。 */
+  turnTimeoutTimer: ReturnType<typeof setTimeout> | null;
   activeVoiceCapture: ActiveVoiceCaptureV1 | null;
   voiceStartToken: number;
   completedVoiceUploads: Map<string, { blob: Blob; durationMs: number; localPcm: Float32Array }>;
@@ -663,6 +752,7 @@ function createPetRuntimeResources(): PetRuntimeResourcesV1 {
   return {
     realTurnAbort: null,
     activeRealTurn: null,
+    turnTimeoutTimer: null,
     activeVoiceCapture: null,
     voiceStartToken: 0,
     completedVoiceUploads: new Map(),
@@ -734,6 +824,27 @@ async function runRealTurn(
       seq: eventCursor,
     });
     runtimeResources.activeRealTurn = { client, controller, conversationId, runId, generation };
+    // 2026-08-12+（15a 新反馈）：turn 级硬超时（90s > worker 60s provider
+    // budget + 余量）——无论服务端卡死/网络静默/SSE 重连循环，超时后本地
+    // 强制结束 turn（fail-closed），杜绝"伴星正在想"永久卡死；终态事件
+    // 到达时清除（见下方 cleanup）。
+    runtimeResources.turnTimeoutTimer = setTimeout(() => {
+      if (runtimeResources.activeRealTurn?.controller === controller) {
+        if (runtimeResources.turnTimeoutTimer !== null) {
+          clearTimeout(runtimeResources.turnTimeoutTimer);
+          runtimeResources.turnTimeoutTimer = null;
+        }
+        runtimeResources.activeRealTurn = null;
+        if (runtimeResources.realTurnAbort === controller) runtimeResources.realTurnAbort = null;
+        controller.abort();
+        dispatch({
+          type: "turn.failed",
+          code: "TURN_TIMEOUT",
+          recoverable: true,
+          seq: nextSeq(),
+        });
+      }
+    }, 90_000);
     client.streamEvents({
       conversationId,
       after: eventCursor,
@@ -749,6 +860,7 @@ async function runRealTurn(
         if (event.type === "assistant.final" || event.type === "turn.cancelled" || event.type === "turn.failed") {
           if (runtimeResources.activeRealTurn?.controller === controller) runtimeResources.activeRealTurn = null;
           if (runtimeResources.realTurnAbort === controller) runtimeResources.realTurnAbort = null;
+          clearTurnTimeout(runtimeResources);
           // C1（审计修复）：终态事件到达后本流不会再有任何事件——必须 abort
           // 释放服务端 SSE 连接。服务端在 run 终态后不会主动关闭连接（1s→2.5s
           // durable poll + 15s heartbeat 持续），不 abort 会按每轮对话泄漏一条
@@ -761,6 +873,7 @@ async function runRealTurn(
         if (exhausted) {
           if (runtimeResources.activeRealTurn?.controller === controller) runtimeResources.activeRealTurn = null;
           if (runtimeResources.realTurnAbort === controller) runtimeResources.realTurnAbort = null;
+          clearTurnTimeout(runtimeResources);
           dispatch({
             type: "turn.failed",
             code: companionSseFailureCode(kind),
@@ -774,7 +887,16 @@ async function runRealTurn(
     if (controller.signal.aborted) return;
     if (runtimeResources.activeRealTurn?.controller === controller) runtimeResources.activeRealTurn = null;
     if (runtimeResources.realTurnAbort === controller) runtimeResources.realTurnAbort = null;
+    clearTurnTimeout(runtimeResources);
     dispatch({ type: "turn.failed", code: "NETWORK_ERROR", recoverable: true, seq: nextSeq() });
+  }
+}
+
+/** 2026-08-12+（15a 新反馈）：清除 turn 级硬超时 timer（终态到达/取消时调用）。 */
+function clearTurnTimeout(resources: PetRuntimeResourcesV1): void {
+  if (resources.turnTimeoutTimer !== null) {
+    clearTimeout(resources.turnTimeoutTimer);
+    resources.turnTimeoutTimer = null;
   }
 }
 
@@ -782,8 +904,7 @@ function companionSseFailureCode(kind: CompanionSseErrorKind): string {
   switch (kind) {
     case "auth": return "AUTH_REQUIRED";
     case "cursor_expired": return "CURSOR_EXPIRED";
-    case "invalid_cursor": return "INVALID_CURSOR";
-    case "fatal_parse": return "SSE_PARSE_ERROR";
+    case "invalid_cursor": return "INVALID_CURSOR";    case "fatal_parse": return "SSE_PARSE_ERROR";
     case "rate_limited": return "RATE_LIMITED";
     case "server": return "SERVER_ERROR";
     case "network": return "NETWORK_ERROR";
@@ -797,6 +918,7 @@ function companionSseFailureRecoverable(kind: CompanionSseErrorKind): boolean {
 async function cancelRealTurn(
   dispatch: (action: PetActionV1WithDemo) => void,
   resources: PetRuntimeResourcesV1,
+  nextSeq: () => number,
 ): Promise<void> {
   const active = resources.activeRealTurn;
   if (!active) {
@@ -804,30 +926,27 @@ async function cancelRealTurn(
     resources.realTurnAbort = null;
     return;
   }
+  const { client, controller, runId, generation } = active;
+  // 2026-08-12+（15a 新反馈）：停止必须**立即生效**，不依赖任何网络——
+  // 先本地终止 UI（abort SSE + 清 active + 派发 turn.cancelled），
+  // cancel API 后台 fire-and-forget 同步服务端。此前先 await cancelRun
+  // 再 dispatch，api 挂起时"停止按钮没任何作用"。
+  controller.abort();
+  if (resources.activeRealTurn?.controller === controller) resources.activeRealTurn = null;
+  if (resources.realTurnAbort === controller) resources.realTurnAbort = null;
+  clearTurnTimeout(resources);
+  dispatch({
+    type: "turn.cancelled",
+    runId,
+    generation,
+    seq: nextSeq(),
+  });
+  // 后台同步服务端（失败忽略——服务端 run 若存活，由下次 restore 按
+  // snapshot 纠正；本地已终止，不会出现"停不下来"）。
   try {
-    const result = await active.client.cancelRun({
-      runId: active.runId,
-      generation: active.generation,
-    });
-    active.controller.abort();
-    if (resources.activeRealTurn?.controller === active.controller) resources.activeRealTurn = null;
-    if (resources.realTurnAbort === active.controller) resources.realTurnAbort = null;
-    if (result.body.status === "cancelled") {
-      dispatch({
-        type: "turn.cancelled",
-        runId: result.body.runId,
-        generation: result.body.generation,
-        seq: result.body.eventCursor,
-      });
-      return;
-    }
-    // A concurrent provider completion won the race. Re-read the durable
-    // snapshot instead of inventing a local final/cancelled state.
-    const snapshot = await active.client.restoreDialogue();
-    if (snapshot) dispatch({ type: "conversation.restored", snapshot });
+    await client.cancelRun({ runId, generation });
   } catch {
-    // Keep the stream alive when the cancel request itself failed; the server
-    // remains authoritative and the next event can still complete the turn.
+    // 忽略：本地已终止。
   }
 }
 
@@ -1469,12 +1588,16 @@ function pumpRealPlayback(
   resources: PetRuntimeResourcesV1,
   dispatch: (action: PetActionV1WithDemo) => void,
   onVoiceLevel: VoiceLevelSinkV1,
+  /** 15 方案 emotion 表现层（精确版）：段开始播放 → 推 VAD */
+  onSegmentEmotionPlay: (segmentId: string) => void,
 ): void {
   if (resources.playbackPump) return;
   resources.playbackPump = (async () => {
     while (true) {
       const segment = nextSegmentToPlay(resources.playbackState);
       if (!segment) return;
+      // 15 方案 emotion 表现层（精确版）：该段即将播放（fetch 前）→ 推 VAD
+      onSegmentEmotionPlay(segment.segmentId);
       const result = await playOneRealTtsSegment(resources, dispatch, segment, onVoiceLevel);
       if (result === "cancelled") return;
       resources.playbackState = playbackReducer(
@@ -1518,6 +1641,8 @@ function enqueueRealPlayback(
   dispatch: (action: PetActionV1WithDemo) => void,
   segment: PlaybackSegment,
   onVoiceLevel: VoiceLevelSinkV1,
+  /** 15 方案 emotion 表现层（精确版）：段开始播放 → 推 VAD */
+  onSegmentEmotionPlay: (segmentId: string) => void,
 ): void {
   resources.playbackState = playbackReducer(
     resources.playbackState,
@@ -1541,7 +1666,7 @@ function enqueueRealPlayback(
     });
     return;
   }
-  pumpRealPlayback(resources, dispatch, onVoiceLevel);
+  pumpRealPlayback(resources, dispatch, onVoiceLevel, onSegmentEmotionPlay);
 }
 
 function stopRealPlayback(resources: PetRuntimeResourcesV1, onVoiceLevel?: VoiceLevelSinkV1): void {
@@ -1576,6 +1701,10 @@ function cleanupPetRuntimeResources(resources: PetRuntimeResourcesV1): void {
   for (const timer of resources.fixtureTimers) clearTimeout(timer);
   resources.fixtureTimers.clear();
   stopRealPlayback(resources);
+  // FN4：显式 dispose 流式播放运行时（含 rAF 电平环/streamPlayer），不依赖
+  // streamingVoiceEnabled effect cleanup 的执行顺序。
+  resources.streamPlayback?.dispose();
+  resources.streamPlayback = null;
   if (resources.audioContext) {
     void resources.audioContext.close().catch(() => undefined);
     resources.audioContext = null;
@@ -1594,6 +1723,10 @@ function runFixtureEffects(
   streamingVoiceEnabled: boolean,
   scope: { userId: string; workspaceId: string } | null,
   onVoiceLevel: VoiceLevelSinkV1,
+  /** 15 方案 emotion 表现层（精确版）：段开始播放 → 推 VAD（流式/非流式共用） */
+  onSegmentEmotionPlay: (segmentId: string) => void,
+  /** FN5：打断/接管播放时清空未播放段的 emotion 映射。 */
+  clearPendingSegmentEmotions: () => void,
   pendingProposalRef: { current: {
     proposalId: string;
     actionName: string;
@@ -1642,7 +1775,7 @@ function runFixtureEffects(
         break;
       case "cancel_turn":
         if (textConversationEnabled) {
-          void cancelRealTurn(dispatch, resources);
+          void cancelRealTurn(dispatch, resources, nextLocalEventSeq);
         } else {
           dispatch({
             type: "turn.cancelled",
@@ -1691,6 +1824,7 @@ function runFixtureEffects(
           const active = resources.activeRealTurn;
           resources.realTurnAbort?.abort();
           resources.realTurnAbort = null;
+          clearTurnTimeout(resources);
           // §5.2 资源释放：恢复(recovery) SSE 同样必须中止，不能挂起后残留。
           recoveryAbortRef.current?.abort();
           recoveryAbortRef.current = null;          if (active) {
@@ -1707,6 +1841,8 @@ function runFixtureEffects(
           // P6 §13 streaming：打断时 abort 当前 TTS HTTP 流 + 停播放器 + 清队。
           if (streamingVoiceEnabled && resources.streamPlayback) resources.streamPlayback.bargeIn();
           stopRealPlayback(resources, onVoiceLevel);
+          // FN5：打断/接管后清空未播放段的 emotion 映射，避免残影。
+          clearPendingSegmentEmotions();
         }
         break;
       case "schedule_voice_cooldown_done":
@@ -1747,6 +1883,10 @@ function runFixtureEffects(
                   // x-csrf-token（cookie 方式鉴权）；此前未传 → 403 →
                   // 前端拿不到音频，"正在播报"但无声。
                   csrfToken: getCsrfToken(),
+                  // 2026-08-13（问题4 修复）：流式播放口型联动——此前未传
+                  // onAudioLevel，voiceLevel 恒 0 → lipsync 参数不驱动，
+                  // Live2D 说话时嘴巴不动。
+                  onAudioLevel: onVoiceLevel,
                   // 2026-08-12（伴星语音设置）：音色/语速/段落间隔取自
                   // 设置 → 伴星 → 伴星语音（localStorage，跨窗口共享）。
                   ...(pickTtsSettingsForPlayback()),
@@ -1755,6 +1895,20 @@ function runFixtureEffects(
                     // 记录 code，便于定位（文字回复已在对话流中可读）。
                     console.warn("[tts] segment failed:", code);
                   },
+                  // 2026-08-12+（15a-A）：流式全部播完 → 派发 playback_finished。
+                  // 之前流式路径无任何完成信号，voice 永久卡 speaking（反馈 3）。
+                  // reducer 校验 runId/generation/segmentId 与当前 speaking 段
+                  // 匹配才生效，打断/换 run 后的迟到回调会被静默忽略（fail-closed）。
+                  onDrained: (lastSegment) => {
+                    dispatch({
+                      type: "voice.playback_finished",
+                      runId: lastSegment.runId,
+                      generation: lastSegment.generation,
+                      segmentId: lastSegment.segmentId,
+                    });
+                  },
+                  // 15 方案 emotion 表现层（精确版）：段开始播放 → 推 VAD
+                  onSegmentStart: (segment) => onSegmentEmotionPlay(segment.segmentId),
                 });
               }
             }
@@ -1773,7 +1927,7 @@ function runFixtureEffects(
               ordinal: effect.ordinal,
               segmentId: effect.segmentId,
               text: effect.text,
-            }, onVoiceLevel);
+            }, onVoiceLevel, onSegmentEmotionPlay);
           }
         }
         break;

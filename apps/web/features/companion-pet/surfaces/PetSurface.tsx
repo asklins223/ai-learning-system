@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DesktopPetScaleV1, PetHitGeometryV1 } from "@ailearn/shared";
+import type { DesktopPetScaleV1, PetHitGeometryV1 } from "@ailearn/shared/desktop-pet-contracts";
 import { usePetRuntime } from "../runtime/PetRuntimeProvider";
 import { PetCharacterCanvas } from "../character/PetCharacterCanvas";
 import type { SpriteHitMaskV1 } from "../character/SpriteCharacterDriver";
@@ -71,6 +71,8 @@ export function PetSurface({
   const { state, presentation, dispatch, adapter, demo, windowState } = runtime;
   const rootRef = useRef<HTMLDivElement>(null);
   const geometryRevision = useRef(0);
+  // F#9：几何重算 rAF 句柄——供 cleanup cancel，避免卸载后残留一帧触发。
+  const geometryRafRef = useRef<number | null>(null);
   const [inviteOnceTrigger, setInviteOnceTrigger] = useState(0);
   const [dragging, setDragging] = useState(false);
   const gestureRef = useRef<ActiveGestureV1 | null>(null);
@@ -108,12 +110,9 @@ export function PetSurface({
     // 手柄（法杖尖端 x≤370）。改为与 drag handle 同列（x=dragX），CSS top 同步
     // 下移到 toolbar 下方（392px），与 toolbar/drag handle 三者不再重叠。
     const voiceX = dragX;
-    // 2026-08-12（语音岛不挡人物）：语音岛不再横向伸进角色区（原 right/left 56px
-    // 相对按钮列，会盖住角色的腿/脚）。改为贴着按钮列向角色外侧展开：bubble-left
-    // 时角色在右、岛向左伸到右缘 490px（清出角色画布 300–544）；bubble-right 时
-    // 角色在左、岛向右伸到左缘 20px（清出角色画布 16–260）。顶部窗口 y 12–70
-    // 在 sprite/Live2D 两种渲染下都不与角色重叠，且不压气泡/输入框。
-    const voiceIslandX = side === "bubble-left" ? size.width - 490 : 20;
+    // 2026-08-12+（15a-C 终版）：完整版语音岛（178px）放人物头顶上方（CSS top
+    // 84，画布 y150 起不遮挡），水平居中于角色画布——bubble-left/right 通用。
+    const voiceIslandX = character.x + (character.width - 178) / 2;
     return {
       width: size.width,
       height: size.height,
@@ -381,7 +380,15 @@ export function PetSurface({
 
   // 几何重算：surface 状态 / mask revision 变化时只重算几何（不重建 observers）
   useEffect(() => {
-    window.requestAnimationFrame(() => registerGeometryRef.current());
+    // F#9（round3）：rAF id 存入 ref 并在 cleanup cancel——避免卸载后下一帧
+    // 仍触发一次 registerGeometry。
+    geometryRafRef.current = window.requestAnimationFrame(() => registerGeometryRef.current());
+    return () => {
+      if (geometryRafRef.current !== null) {
+        window.cancelAnimationFrame(geometryRafRef.current);
+        geometryRafRef.current = null;
+      }
+    };
   }, [registerGeometry, spriteHitMaskRevision]);
 
   useEffect(() => {
@@ -440,6 +447,8 @@ export function PetSurface({
             live2dEnabled={live2dEnabled}
             occluded={state.occluded}
             inviteOnceTrigger={inviteOnceTrigger}
+            emotionCue={state.emotion?.cue ?? null}
+            emotionReceivedAt={state.emotion?.receivedAt ?? 0}
             onSpriteReady={handleSpriteReady}
             onRenderModeChange={setLive2dActive}
             live2dStageSize={live2dActive ? { width: layout.live2dStageWidth, height: layout.height } : undefined}

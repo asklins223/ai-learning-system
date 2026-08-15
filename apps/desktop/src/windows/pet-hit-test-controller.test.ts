@@ -70,6 +70,30 @@ test("controller switches click-through only when the cursor crosses a region", 
   ]);
 });
 
+test("15a-D：passive 模式不强制立即翻转 setIgnoreMouseEvents（关闭输入面板不触发闪烁）", () => {
+  const calls: Array<{ ignore: boolean; forward: boolean }> = [];
+  const fakeWindow = {
+    isDestroyed: () => false,
+    isVisible: () => true,
+    getContentBounds: () => ({ x: 1000, y: 600, width: 560, height: 520 }),
+    setIgnoreMouseEvents: (ignore: boolean, options: { forward: boolean }) => calls.push({ ignore, forward: options.forward }),
+  };
+  let cursor = { x: 1020, y: 630 }; // 在 region 内 → ignore=false
+  const controller = new PetHitTestController(fakeWindow, () => cursor);
+  controller.registerGeometry(geometry);
+  controller.tick();
+  assert.deepEqual(calls, [{ ignore: false, forward: true }]);
+  // 光标不动、切到 passive（模拟关闭输入面板）：旧实现会强制重算并在瞬间翻转
+  // setIgnoreMouseEvents（窗口服务级路由重配 → transparent 窗口合成闪烁）。
+  controller.setInteractionMode("passive");
+  assert.equal(calls.length, 1, "passive 不强制重算，关闭面板瞬间不触发翻转");
+  // 光标移到空白区：自然翻转仍发生（点击穿透功能不受影响）
+  cursor = { x: 1400, y: 1000 };
+  controller.tick();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], { ignore: true, forward: true });
+});
+
 test("registerGeometry rejects regions outside content bounds (§9.1)", () => {
   const fakeWindow = {
     isDestroyed: () => false,

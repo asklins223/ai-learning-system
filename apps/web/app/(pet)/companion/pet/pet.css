@@ -8,6 +8,16 @@ html:has(.pet-surface-root) body {
   background: transparent !important;
 }
 
+/* 2026-08-12+（15a-B 修正）：bootstrap 阶段（.pet-bootstrap 加载/登录/错误
+   视图）没有 .pet-surface-root，body 会露出全局 --color-canvas 纸黄色背景
+   （base.css），在透明桌宠窗口里表现为"一块大纸黄色矩形"。bootstrap 视图
+   同样需要透明 html/body + 隐藏滚动。 */
+html:has(.pet-bootstrap),
+html:has(.pet-bootstrap) body {
+  background: transparent !important;
+  overflow: hidden;
+}
+
 html:has(.pet-surface-root) body {
   overflow: hidden;
 }
@@ -281,7 +291,9 @@ html:has(.pet-surface-root) body {
   z-index: 20;
   width: var(--pet-panel-width);
   min-height: 96px;
-  max-height: 184px;
+  /* 2026-08-12+（15c）：完整内容在气泡内展示——max-height 420（窗口 520、
+     气泡 top 88 底到 508），长回复滚动查看全部，不再跳转完整对话页。 */
+  max-height: 420px;
   padding: 10px 12px 11px;
   border-radius: var(--pet-panel-radius);
   overflow: visible;
@@ -431,7 +443,9 @@ html:has(.pet-surface-root) body {
 }
 
 .pet-bubble-scroll {
-  max-height: 86px;
+  /* 2026-08-12+（15c）：滚动区 280 → 330px（随气泡 420 高），完整内容在气泡内
+     滚动查看，不再提供"完整内容"跳转按钮。 */
+  max-height: 330px;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
@@ -492,6 +506,16 @@ html:has(.pet-surface-root) body {
 }
 
 /* ── Voice orb: three mutually exclusive tracks (bars / ring / waves) ── */
+
+/* 2026-08（Liquid Orb 重构）：WebGPU 液态玻璃球宿主。canvas 100% 填充，
+   球体由 shader 自绘（透明 Pet Window 上 alpha 由 fs_main 的 fit 保证）；
+   旧 CSS 三态仅作为 WebGPU 不可用时的 fallback 内容保留。 */
+.pet-voice-liquid-orb {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  filter: drop-shadow(0 3px 10px color-mix(in srgb, var(--color-running) 22%, transparent));
+}
 
 .pet-voice-orb {
   position: relative;
@@ -1332,12 +1356,12 @@ html:has(.pet-surface-root) body {
 }
 
 .pet-voice-island {
-  /* 2026-08-12（语音岛不挡人物）：作为 .pet-surface-root 的直接子元素渲染，
-     left 由 --pet-voice-island-x 提供（角色外侧安全区，bubble-left 靠右 490px、
-     bubble-right 靠左 20px），top 固定在窗口顶部 12px。z-index 1 低于角色画布
-     （.pet-character-renderer z2 / hit-zone z3），即使轻微重叠也永远压在角色身后。 */
+  /* 2026-08-12+（15a-C 终版）：恢复 178px 完整版（orb 44 + 标题 + 操作提示）。
+     位置 = 人物头顶上方：top 84（人物画布 y150 起，岛底 142 距头顶 8px 不遮挡）、
+     x 由 --pet-voice-island-x 提供（PetSurface 按角色画布水平居中 − 岛宽/2 计算，
+     bubble-left/right 通用）。z-index 1：与人物无垂直重叠，压画布之下即可。 */
   position: absolute;
-  top: 12px;
+  top: 84px;
   z-index: 1;
   width: 178px;
   height: 58px;
@@ -1712,10 +1736,63 @@ html:has(.pet-surface-root) body {
   inset: 0;
   display: grid;
   place-items: center;
-  padding: 32px;
+  padding: 24px;
+}
+
+.pet-bootstrap-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 224px;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 62%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--color-surface-raised) 76%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.10);
   color: var(--color-text-secondary);
   font: 13px/1.6 var(--font-ui);
   text-align: center;
+}
+
+.pet-bootstrap-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.pet-bootstrap-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-running);
+  animation: pet-bootstrap-pulse 1.2s ease-in-out infinite;
+}
+
+.pet-bootstrap-dots i:nth-child(2) { animation-delay: 0.14s; }
+.pet-bootstrap-dots i:nth-child(3) { animation-delay: 0.28s; }
+
+@keyframes pet-bootstrap-pulse {
+  0%, 60%, 100% { opacity: 0.35; transform: scale(0.85); }
+  30% { opacity: 1; transform: scale(1); }
+}
+
+.pet-bootstrap-title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.pet-bootstrap-subtitle {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .sr-only {
@@ -1821,6 +1898,7 @@ html:has(.pet-surface-root) body {
 
   .pet-character-aura > i,
   .pet-bubble-dots i,
+  .pet-bootstrap-dots i,
   .pet-voice-bars i,
   .pet-voice-ring-arc,
   .pet-voice-waves i,

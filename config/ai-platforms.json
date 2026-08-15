@@ -45,7 +45,7 @@
       "apiKey": "${TOKENRHYTHM_API_KEY}",
       "baseUrl": "https://tokenrhythm.studio/v1",
       "options": {
-        "disableThinking": true,
+        "enableThinking": true,
         "maxOutputTokens": 16384
       }
     },
@@ -69,6 +69,21 @@
     "embedding": {
       "platform": "siliconflow",
       "model": "BAAI/bge-m3"
+    }
+  },
+  "tts": {
+    "engine": "qwen",
+    "qwen": {
+      "model": "qwen-audio-3.0-tts-flash",
+      "voice": "longanlingxi",
+      "format": "mp3",
+      "sampleRate": 22050,
+      "workspaceId": "llm-55ujpy2wafojbdp8",
+      "instruction": "可爱的年轻女性声音，25 岁左右，声音甜美温柔、略带活泼，语速自然适中，适合轻松陪伴式对话"
+    },
+    "edge": {
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "rate": "+0%"
     }
   }
 }

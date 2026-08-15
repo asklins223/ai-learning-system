@@ -40,7 +40,13 @@ describe("source creation and reads", () => {
     };
     const executor = {
       execute: async () => undefined,
-      select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
+      // where() 返回 awaitable（SELECT 行集）且带 limit()（journey-service 等
+      // 需要完整链）；无 active Journey 时零开销路径返回空集。
+      select: () => ({
+        from: () => ({
+          where: () => Object.assign(async () => [], { limit: async () => [] }),
+        }),
+      }),
       insert: (table: unknown) => ({
         values: (value: any) => {
           inserted.push({ table, value });
@@ -105,7 +111,11 @@ describe("source creation and reads", () => {
     const source = { id: "source-inline", type: "text", title: "Inline" };
     const executor = {
       execute: async () => undefined,
-      select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
+      select: () => ({
+        from: () => ({
+          where: () => Object.assign(async () => [], { limit: async () => [] }),
+        }),
+      }),
       insert: (table: unknown) => ({
         values: (value: any) => {
           inserted.push(value);
@@ -230,11 +240,20 @@ describe("source updates and deletion", () => {
   it("merges metadata, updates the title, and returns refreshed detail", async () => {
     const source = { id: "source-1", title: "Old", metadata: { retained: true } };
     const refreshed = { ...source, title: "New", metadata: { retained: true, added: 1 } };
-    let lookup = 0;
     let updates: any;
+    // F13（round-4）：updateSource 改为 `select(...).for("update")` 锁定读——
+    // 该测试 mock 相应补 `select` 链（返回 base source 供 metadata 合并）；
+    // getSource 仍走 `query.sources.findFirst`（返回 refreshed）。
     const executor = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: () => ({ for: async () => [source] }),
+          }),
+        }),
+      }),
       query: {
-        sources: { findFirst: async () => (++lookup === 1 ? source : refreshed) },
+        sources: { findFirst: async () => refreshed },
         sourceSegments: { findMany: async () => [{ id: "segment-1" }] },
       },
       update: () => updateChain((value) => { updates = value; }),
@@ -251,7 +270,11 @@ describe("source updates and deletion", () => {
   });
 
   it("returns null when updating or deleting a missing source", async () => {
-    const executor = { query: { sources: { findFirst: async () => undefined } } } as any;
+    const executor = {
+      // F13：updateSource 现用 select(...).for("update") 读；缺失时 select 返回空。
+      select: () => ({ from: () => ({ where: () => ({ limit: () => ({ for: async () => [] }) }) }) }),
+      query: { sources: { findFirst: async () => undefined } },
+    } as any;
     assert.equal(await updateSource(executor, "missing", WORKSPACE_ID, {}), null);
     assert.equal(await deleteSource(executor, "missing", WORKSPACE_ID), null);
   });

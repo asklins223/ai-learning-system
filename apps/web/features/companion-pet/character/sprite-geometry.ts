@@ -1,4 +1,4 @@
-import type { DesktopPetScaleV1 } from "@ailearn/shared";
+import type { DesktopPetScaleV1 } from "@ailearn/shared/desktop-pet-contracts";
 
 /**
  * Pure geometry for the Level A sprite inside the 560×520 Pet Window

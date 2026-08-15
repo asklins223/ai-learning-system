@@ -40,6 +40,41 @@ import type {
 } from "./types.ts";
 
 /**
+ * P6 Journey 里程碑（worker 侧）：learning_cards/evidences 由 worker 创建，
+ * 以 (journeyId, domainEventId) 幂等写 pending events；JourneyReducer 仍在
+ * API 进程惰性 drain 消费（§10.1 乱序事件先入 pending buffer）。
+ */
+async function publishJourneyMilestone(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  workspaceId: string,
+  userId: string,
+  eventType: string,
+  entityId: string,
+): Promise<void> {
+  if (!userId || userId === "system") return;
+  const journeyRows = await tx
+    .select({ id: schema.companionJourneys.id })
+    .from(schema.companionJourneys)
+    .where(and(
+      eq(schema.companionJourneys.workspaceId, workspaceId),
+      eq(schema.companionJourneys.userId, userId),
+      eq(schema.companionJourneys.status, "active"),
+    ))
+    .limit(1);
+  const journeyId = journeyRows[0]?.id;
+  if (!journeyId) return;
+  await tx.insert(schema.companionJourneyPendingEvents).values({
+    journeyId,
+    workspaceId,
+    userId,
+    domainEventId: `${eventType}:${entityId}`,
+    eventType,
+    payload: { entityId },
+    status: "pending",
+  }).onConflictDoNothing();
+}
+
+/**
  * PUBLISH 阶段执行（计划 §5.1, §11.4, §W5）。
  *
  * Epoch-Fenced 原子发布。
@@ -438,6 +473,8 @@ export async function executePublishPhase(
               .returning();
             if (created) {
               cardIds.push(created.id);
+              // P6 Journey：card 里程碑（幂等 pending 事件，API 侧 drain）。
+              await publishJourneyMilestone(tx, input.workspaceId, input.userId, "card.created", created.id);
             }
           }
 
@@ -767,6 +804,13 @@ export async function executePublishPhase(
               for (let k = 0; k < rows.length; k++) {
                 const meta = evidenceMeta[j + k]!;
                 evidenceRowIdMap.set(meta.originalEvidenceId, rows[k]!.id);
+              }
+            }
+            // P6 Journey：evidence 里程碑（幂等 pending 事件；首个证据即可）。
+            if (evidenceValues.length > 0) {
+              const firstEvidenceId = [...evidenceRowIdMap.values()][0];
+              if (firstEvidenceId) {
+                await publishJourneyMilestone(tx, input.workspaceId, input.userId, "evidence.created", firstEvidenceId);
               }
             }
           }

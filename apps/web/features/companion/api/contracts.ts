@@ -7,9 +7,9 @@ export interface CompanionAccountState {
   presence?: { presence: "online" | "dnd" | "offline"; updatedAt?: string };
   animationOff?: boolean;
   voiceOff?: boolean;
-  // §10.2/§10.3（2026-08-15 恢复：settings 伴星分区读取；shared 合同已含）。
+  // 方案 16 §10.3：主动介入强度与静默时段。
   interventionLevel?: "quiet" | "moderate" | "active";
-  quietHours?: { startLocal: string; endLocal: string; timezone: string };
+  quietHours?: { startLocal: string; endLocal: string; timezone: string } | null;
 }
 
 export interface CompanionOverview {

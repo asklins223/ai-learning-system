@@ -1,7 +1,9 @@
 import type { Page } from "@playwright/test";
 import { test, expect, type SeedCredentials } from "../lib/fixtures";
 
-const PRIMARY_ACTION = "开始巩固练习";
+// 方案 16：卡片主按钮是统一 LearningRun 微旅程入口，真实文案随状态变化
+// （开始三分钟巩固 / 预览这次微旅程 / 开始巩固）。
+const PRIMARY_ACTION = "开始三分钟巩固";
 const EVIDENCE_ACTION = "查看原文依据";
 
 async function resolveCardId(
@@ -22,71 +24,33 @@ async function resolveCardId(
   return response;
 }
 
-async function expectPracticeSurface(page: Page): Promise<void> {
-  const main = page.locator("main[data-ui='companion-practice-page'][data-stage-state]");
-  await expect(main).toBeVisible({ timeout: 15_000 });
-  await expect(main.getByText("巩固练习", { exact: true }).first()).toBeVisible();
-  await expect(page.locator("#companion-answer")).toBeVisible();
-
-  // 巩固练习是一张单列任务页，不再用角色图和「航程」叙事包裹表单。
-  await expect(main.locator('img[alt="学习伴星"]')).toHaveCount(0);
-  await expect(main.locator(".companion-stage-intro, .companion-stage-portrait"))
-    .toHaveCount(0);
-  await expect(main.locator("aside")).toHaveCount(0);
-  await expect(main.getByText(/航程/)).toHaveCount(0);
-
-  const renderedColumns = await main.locator(".companion-stage-content").evaluate((element) =>
-    window.getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).filter(Boolean)
-  );
-  expect(renderedColumns).toHaveLength(1);
-
-  // 各视口下标题和作答区都应落在同一水平列，而不是左右分栏。
-  const headingBox = await main.locator("h1").boundingBox();
-  const answerBox = await page.locator("#companion-answer").boundingBox();
-  expect(headingBox).not.toBeNull();
-  expect(answerBox).not.toBeNull();
-  const horizontalOverlap = Math.min(
-    headingBox!.x + headingBox!.width,
-    answerBox!.x + answerBox!.width,
-  ) - Math.max(headingBox!.x, answerBox!.x);
-  expect(horizontalOverlap).toBeGreaterThan(0);
-}
-
-async function leavePractice(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "退出练习" }).click();
-}
-
-async function mockCreateSessionError(
-  page: Page,
-  code: "AI_CONSENT_REQUIRED" | "ai_consent_required" | "SESSION_LIMIT_REACHED",
-  message: string,
-  activeSessionId?: string,
-): Promise<void> {
-  await page.route("**/api/learning-sessions", async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.continue();
-      return;
-    }
-    await route.fulfill({
-      status: code.toLowerCase() === "ai_consent_required" ? 403 : 409,
-      contentType: "application/json",
-      body: JSON.stringify({ error: code, message, activeSessionId }),
-    });
-  });
+/** 点击卡片主按钮进入 LearningRun，等待 Run 创建完成并落到 [runId] 路由。 */
+async function enterLearningRun(page: Page, cardId: string): Promise<string> {
+  await page.goto(`/cards/${cardId}`);
+  await expect(page.locator(".card-detail-desk")).toBeVisible({ timeout: 15_000 });
+  await page.locator("[data-ui='lc-card-primary-action']").click();
+  await expect(page).toHaveURL(/\/learning-runs\/[\w-]+/, { timeout: 30_000 });
+  const runId = new URL(page.url()).pathname.split("/").at(-1);
+  expect(runId).toBeTruthy();
+  return runId!;
 }
 
 /**
- * Authenticated consolidation-practice vertical slice.
+ * 方案 16 统一 LearningRun 微旅程垂直切片（替代旧 consolidation practice）。
  *
- * These journeys deliberately drive the real authenticated browser. Typed
- * create errors and the asynchronous assessment phases use narrow response
- * mocks so every recovery/processing state is deterministic and no test
- * pretends that an assessment completed before the server says `committed`.
+ * 真实浏览器驱动真实 API/DB/评估链：
+ * - 卡片动作区：恰好一个三分钟巩固主按钮 + 一个证据动作；
+ * - 点击主按钮 → /learning-runs/new → 幂等创建 → [runId]；
+ * - Player 是单列任务页，无角色图/航程 chrome；
+ * - 提交 → 独立评估 → 确定性结算（checkpoint/结果），绝无假完成；
+ * - 创建失败（AI consent）时页面引导，不静默吞错；
+ * - 同一天重复进入恢复同一 Run（幂等）；
+ * - review/today/star map 不新增竞争入口。
  *
  * @pr
  */
-test.describe.serial("authenticated consolidation practice journeys", () => {
-  test("learning card keeps exactly one primary practice action and one evidence action @pr", async ({
+test.describe.serial("unified LearningRun journeys", () => {
+  test("learning card keeps exactly one primary run action and one evidence action @pr", async ({
     authedPage,
     seedCredentials,
   }) => {
@@ -115,273 +79,124 @@ test.describe.serial("authenticated consolidation practice journeys", () => {
     await expect(actions.getByText(cardSummary, { exact: true })).toHaveCount(0);
   });
 
-  test("Companion practice is a single-column task without character or journey chrome @pr", async ({
+  test("LearningRun player is a single-column task without character or journey chrome @pr", async ({
     authedPage,
     seedCredentials,
   }) => {
     const page = authedPage;
     const cardId = await resolveCardId(page, seedCredentials);
+    await enterLearningRun(page, cardId);
 
+    // 十秒内出现第一个可执行动作（§3.1）：题面 + 作答区。
+    await expect(page.getByRole("textbox", { name: "用你自然的表达回答" }))
+      .toBeVisible({ timeout: 15_000 });
+
+    // 单列任务：无角色图、无航程叙事；唯一伴随表面是「本轮操作」
+    // 操作栏（换个方式/提示/跳过），不是伴星面板或角色 chrome。
+    const main = page.locator("main");
+    await expect(main.locator('img[alt="学习伴星"]')).toHaveCount(0);
+    await expect(main.locator(".companion-stage-intro, .companion-stage-portrait"))
+      .toHaveCount(0);
+    await expect(main.getByText(/航程/)).toHaveCount(0);
+    const asides = main.locator("aside");
+    await expect(asides).toHaveCount(1);
+    await expect(asides.first()).toHaveAccessibleName("本轮操作");
+
+    // 返回学习卡，退出本轮入口。
+    await page.getByRole("button", { name: "返回学习卡" }).click();
+    await expect(page).toHaveURL(new RegExp(`/cards/${cardId}$`));
+  });
+
+  test("answer submission moves from locked assessment to a deterministic settlement @pr", async ({
+    authedPage,
+    seedCredentials,
+  }) => {
+    test.setTimeout(240_000);
+    const page = authedPage;
+    const cardId = await resolveCardId(page, seedCredentials);
+    await enterLearningRun(page, cardId);
+
+    const answer = page.getByRole("textbox", { name: "用你自然的表达回答" });
+    await expect(answer).toBeVisible({ timeout: 15_000 });
+    await answer.click();
+    await page.keyboard.type("刻意练习通过明确目标、即时反馈和适度挑战来改善表现，这是我的理解。");
+    const submit = page.getByRole("button", { name: /锁定并提交回答/ });
+    await expect(submit).toBeEnabled({ timeout: 10_000 });
+    await submit.click();
+
+    // 提交后进入评估：回答锁定、独立评估进行中（不提前声称已保存/已评估）。
+    await expect(page.getByText("正在独立评估", { exact: false }).first())
+      .toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(/回答已锁定|回答已安全锁定/).first())
+      .toBeVisible({ timeout: 15_000 });
+
+    // 真实 Critic 完成评估后出现确定性结算：检查点决定或本轮结果。
+    await expect(
+      page.getByText(/检查点|本轮结果|学习结算/).first(),
+    ).toBeVisible({ timeout: 120_000 });
+  });
+
+  test("AI consent create failure leads to an explicit recovery surface @pr", async ({
+    authedPage,
+    seedCredentials,
+  }) => {
+    const page = authedPage;
+    const cardId = await resolveCardId(page, seedCredentials);
     await page.goto(`/cards/${cardId}`);
-    let releaseCreate!: () => void;
-    const createGate = new Promise<void>((resolve) => {
-      releaseCreate = resolve;
-    });
-    await page.route("**/api/learning-sessions", async (route) => {
+    await expect(page.locator(".card-detail-desk")).toBeVisible({ timeout: 15_000 });
+
+    await page.route("**/api/learning-runs", async (route) => {
       if (route.request().method() !== "POST") {
         await route.continue();
         return;
       }
-      const response = await route.fetch();
-      await createGate;
-      await route.fulfill({ response });
-    });
-    await page.getByRole("button", { name: PRIMARY_ACTION, exact: true }).click();
-    const practicePage = page.locator("main[data-ui='companion-practice-page']");
-    await expect(practicePage).toHaveAttribute("data-stage-state", "creating");
-    await expect(
-      practicePage.getByRole("status").filter({ hasText: "正在准备练习…" }),
-    ).toBeVisible();
-    releaseCreate();
-    await expect(page).toHaveURL(
-      new RegExp(`/cards/${cardId}/companion\\?keyPoint=[^&]+&session=[^&]+`),
-    );
-    await page.unroute("**/api/learning-sessions");
-    await expectPracticeSurface(page);
-
-    await leavePractice(page);
-    await expect(page).toHaveURL(new RegExp(`/cards/${cardId}$`));
-  });
-
-  test("answer submission moves from assessment_pending to assessment_complete @pr", async ({
-    authedPage,
-    seedCredentials,
-  }) => {
-    const page = authedPage;
-    const cardId = await resolveCardId(page, seedCredentials);
-
-    await page.goto(`/cards/${cardId}`);
-    await page.getByRole("button", { name: PRIMARY_ACTION, exact: true }).click();
-    await expect(page).toHaveURL(
-      new RegExp(`/cards/${cardId}/companion\\?keyPoint=[^&]+&session=[^&]+`),
-    );
-    await expectPracticeSurface(page);
-
-    const stageUrl = new URL(page.url());
-    const sessionId = stageUrl.searchParams.get("session");
-    expect(sessionId).toBeTruthy();
-    const sessionResponse = await page.request.get(`/api/learning-sessions/${sessionId}`);
-    expect(sessionResponse.ok()).toBeTruthy();
-    const session = await sessionResponse.json() as {
-      activeEpisode?: {
-        episodeId?: string;
-        keyPointId?: string;
-        status?: string;
-        processingPhase?: string;
-      } | null;
-      episodes?: Array<{
-        episodeId?: string;
-        keyPointId?: string;
-        status?: string;
-        processingPhase?: string;
-      }>;
-      [key: string]: unknown;
-    };
-    const episode = session.activeEpisode ?? session.episodes?.[0];
-    expect(episode?.episodeId).toBeTruthy();
-
-    const artifactId = "00000000-0000-4000-8000-000000000101";
-    let releaseAnswer!: () => void;
-    const answerGate = new Promise<void>((resolve) => {
-      releaseAnswer = resolve;
-    });
-    await page.route(
-      `**/api/learning-sessions/${sessionId}/episodes/${episode!.episodeId}/answer`,
-      async (route) => {
-        await answerGate;
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            artifact: {
-              artifactId,
-              episodeId: episode!.episodeId,
-              keyPointId: episode!.keyPointId,
-              probeId: "00000000-0000-4000-8000-000000000102",
-              modality: "text_or_mixed",
-              contentHash: "e2e-answer-content-hash",
-              status: "locked",
-              answerLockedAt: new Date().toISOString(),
-            },
-            episodeStatus: "active",
-            processingPhase: "assessment_pending",
-          }),
-        });
-      },
-    );
-
-    const processingPhases = [
-      "assessment_pending",
-      "assessment_complete",
-      "committed",
-    ] as const;
-    let pollCount = 0;
-    await page.route(`**/api/learning-sessions/${sessionId}`, async (route) => {
-      if (route.request().method() !== "GET") {
-        await route.continue();
-        return;
-      }
-      const processingPhase = processingPhases[Math.min(pollCount, processingPhases.length - 1)];
-      pollCount += 1;
-      const updateEpisode = <T extends typeof episode>(value: T): T => ({
-        ...value,
-        status: processingPhase === "committed" ? "completed" : "active",
-        processingPhase,
-      });
       await route.fulfill({
-        status: 200,
+        status: 403,
         contentType: "application/json",
         body: JSON.stringify({
-          ...session,
-          activeEpisode: session.activeEpisode ? updateEpisode(session.activeEpisode) : null,
-          episodes: (session.episodes ?? []).map((item) =>
-            item.episodeId === episode!.episodeId ? updateEpisode(item) : item
-          ),
+          error: "AI_CONSENT_REQUIRED",
+          message: "工作区尚未签署 AI 使用协议",
         }),
       });
     });
-
-    await page.locator("#companion-answer").fill("我先用自己的话说明这张卡的核心理解。");
-    const answerResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return response.request().method() === "POST"
-        && /\/api\/learning-sessions\/[^/]+\/episodes\/[^/]+\/answer$/.test(url.pathname);
+    await page.locator("[data-ui='lc-card-primary-action']").click();
+    // 创建失败必须显示错误面，而不是静默吞掉（fail closed 不假装成功）。
+    await expect(page.locator(".learning-run-player--error")).toBeVisible({
+      timeout: 30_000,
     });
-    await page.getByRole("button", { name: "提交回答", exact: true }).click();
-    const practicePage = page.locator("main[data-ui='companion-practice-page']");
-    await expect(practicePage).toHaveAttribute("data-stage-state", "submitting");
-    await expect(
-      practicePage.getByRole("status").filter({ hasText: "正在保存你的回答…" }),
-    ).toBeVisible();
-    releaseAnswer();
-    const answerResponse = await answerResponsePromise;
-    expect(answerResponse.ok()).toBeTruthy();
-    const answerPayload = await answerResponse.json() as { processingPhase?: string };
-    expect(answerPayload.processingPhase).toBe("assessment_pending");
-
-    await expect(practicePage).toHaveAttribute("data-processing-phase", "assessment_pending");
-    await expect(
-      practicePage.getByRole("status").filter({
-        hasText: "回答已保存，正在等待独立评估…",
-      }),
-    ).toBeVisible();
-
-    await expect(practicePage).toHaveAttribute(
-      "data-processing-phase",
-      "assessment_complete",
-      { timeout: 45_000 },
+    await expect(page.locator(".learning-run-player--error").first()).toContainText(
+      /AI 使用协议|签署/,
     );
-    await expect(
-      practicePage.getByRole("status").filter({ hasText: "评估已完成，正在写入结果…" }),
-    ).toBeVisible();
+    await page.unroute("**/api/learning-runs");
+  });
 
-    await expect(practicePage).toHaveAttribute("data-processing-phase", "committed", {
-      timeout: 45_000,
-    });
-    const resultStatus = practicePage.getByRole("status").filter({ hasText: "巩固练习已完成" });
-    await expect(resultStatus.getByText("巩固练习已完成", { exact: true })).toBeVisible();
+  test("re-entering the same card on the same day resumes the same run @pr", async ({
+    authedPage,
+    seedCredentials,
+  }) => {
+    const page = authedPage;
+    const cardId = await resolveCardId(page, seedCredentials);
+    const firstRunId = await enterLearningRun(page, cardId);
+    await expect(page.getByRole("textbox", { name: "用你自然的表达回答" }))
+      .toBeVisible({ timeout: 15_000 });
 
-    await resultStatus.getByRole("button", { name: "返回学习卡", exact: true }).click();
+    // 返回卡片后再次进入：同天幂等键复用同一 Run（恢复语义，不重复创建）。
+    await page.getByRole("button", { name: "返回学习卡" }).click();
     await expect(page).toHaveURL(new RegExp(`/cards/${cardId}$`));
-    await expect(page.locator(".card-detail-desk")).toBeVisible({ timeout: 15_000 });
-  });
-
-  test("AI consent error codes lead to the AI agreement settings @pr", async ({
-    authedPage,
-    seedCredentials,
-  }) => {
-    const page = authedPage;
-    const cardId = await resolveCardId(page, seedCredentials);
-
-    for (const code of ["AI_CONSENT_REQUIRED", "ai_consent_required"] as const) {
-      await page.goto(`/cards/${cardId}`);
-      await mockCreateSessionError(page, code, "AI consent not signed");
-      await page.getByRole("button", { name: PRIMARY_ACTION, exact: true }).click();
-
-      const practicePage = page.locator("main[data-ui='companion-practice-page']");
-      await expect(practicePage).toHaveAttribute("data-error-code", code);
-      const alert = page.getByRole("alert");
-      await expect(alert).toContainText("需要先签署 AI 使用协议");
-      await expect(alert.getByRole("button", { name: "前往协议设置", exact: true })).toBeVisible();
-      await page.unroute("**/api/learning-sessions");
-    }
-
-    await page.getByRole("button", { name: "前往协议设置", exact: true }).click();
-    await expect(page).toHaveURL(/\/settings#model$/);
-  });
-
-  test("SESSION_LIMIT_REACHED explains that another practice is active @pr", async ({
-    authedPage,
-    seedCredentials,
-  }) => {
-    const page = authedPage;
-    const cardId = await resolveCardId(page, seedCredentials);
-    const blockedSessionId = "00000000-0000-4000-8000-000000000199";
-
-    await page.goto(`/cards/${cardId}`);
-    await mockCreateSessionError(
-      page,
-      "SESSION_LIMIT_REACHED",
-      "每用户同时只允许 1 个 active 学习会话",
-      blockedSessionId,
-    );
-    await page.getByRole("button", { name: PRIMARY_ACTION, exact: true }).click();
-
-    const practicePage = page.locator("main[data-ui='companion-practice-page']");
-    await expect(practicePage).toHaveAttribute("data-error-code", "SESSION_LIMIT_REACHED");
-    const alert = page.getByRole("alert");
-    await expect(alert).toContainText("已有巩固练习进行中");
-    await expect(alert).not.toContainText("稍后再试");
-    const recovery = alert.getByRole("button", {
-      name: "结束旧练习并重新开始",
-      exact: true,
-    });
-    await expect(recovery).toBeVisible();
-    await expect(alert.getByRole("button", { name: "返回学习卡", exact: true })).toBeVisible();
-
-    await page.unroute("**/api/learning-sessions");
-    await page.route(`**/api/learning-sessions/${blockedSessionId}/end`, async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ sessionId: blockedSessionId, status: "ended" }),
-      });
-    });
-    const endRequest = page.waitForRequest((request) =>
-      request.method() === "POST"
-      && request.url().endsWith(`/api/learning-sessions/${blockedSessionId}/end`)
-    );
-    await recovery.click();
-    await endRequest;
-    await page.unroute(`**/api/learning-sessions/${blockedSessionId}/end`);
-    await expectPracticeSurface(page);
-    await leavePractice(page);
+    const secondRunId = await enterLearningRun(page, cardId);
+    expect(secondRunId).toBe(firstRunId);
   });
 
   test("review, today and star map do not add competing practice actions @pr", async ({
     authedPage,
   }) => {
     const page = authedPage;
-
-    await page.goto("/review");
-    await expect(page.locator(".review-v06-companion-entry")).toHaveCount(0);
-    await expect(page.locator("a[href*='/companion?']")).toHaveCount(0);
-
-    await page.goto("/today");
-    await expect(page.locator(".today-context-companion-link")).toHaveCount(0);
-    await expect(page.locator("a[href*='/companion?']")).toHaveCount(0);
-
-    await page.goto("/graph");
-    await expect(page.locator("a[href*='/companion?']")).toHaveCount(0);
+    // 方案 16：统一入口之外不允许出现第二套伴星练习动作。
+    for (const path of ["/review", "/today", "/graph"]) {
+      await page.goto(path);
+      await page.waitForLoadState("networkidle");
+      await expect(page.locator("[data-ui='lc-card-primary-action']")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /开始巩固练习|开始.*航程/ })).toHaveCount(0);
+    }
   });
 });

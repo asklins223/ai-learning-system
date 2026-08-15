@@ -371,9 +371,9 @@ describe("currentGenerationTask — 当前任务随活动流变化", () => {
 
   it("无事件时回退到阶段文案", () => {
     const task = currentGenerationTask(runWith("checking"), null);
-    assert.equal(task.title, "正在验证支撑与覆盖");
-    assert.equal(currentGenerationTask(runWith("preparing"), null).title, "正在建立文章结构");
-    assert.equal(currentGenerationTask(runWith(null), null).title, "生成学习卡");
+    assert.equal(task.title, "正在检查结果质量");
+    assert.equal(currentGenerationTask(runWith("preparing"), null).title, "正在理解这篇笔记");
+    assert.equal(currentGenerationTask(runWith(null), null).title, "正在设计可回忆的问题");
   });
 });
 

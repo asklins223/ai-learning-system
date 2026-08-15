@@ -426,6 +426,8 @@ export function useNoteSave(ctx: NoteSaveContext): NoteSaveControls {
     const POLL_INTERVAL = 30_000;
 
     const checkNoteStatus = async () => {
+      // F20（round4）：后台标签跳过 note 状态轮询——避免不可见时每 30s GET。
+      if (document.visibilityState === "hidden") return;
       if (cancelled || !mountedRef.current) return;
       // 冲突/删除/保存中不轮询
       if (

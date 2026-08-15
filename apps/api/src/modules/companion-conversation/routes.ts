@@ -3,7 +3,7 @@ import { requireSession } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { getCompanionBootstrap } from "./bootstrap-service.ts";
 import { CompanionConversationError, createCompanionTurn, createCompanionConversation } from "./turn-service.ts";
-import { createCompanionContextGrantRequestV1Schema, createMenuProposalRequestV1Schema, proposalDecisionRequestV1Schema } from "@ailearn/shared";
+import { createCompanionContextGrantRequestV1Schema, createMenuProposalRequestV1Schema, createToolProposalRequestV1Schema, proposalDecisionRequestV1Schema } from "@ailearn/shared";
 import { cancelCompanionRun } from "./companion-cancel.ts";
 import { openCompanionEventStream } from "./companion-events.ts";
 import {
@@ -22,9 +22,8 @@ import {
   getCompanionProposalSnapshot,
   resolveCompanionLearningContext,
 } from "./learning-action-bridge.ts";
-import { createCompanionTurnRequestV1Schema, createToolProposalRequestV1Schema } from "@ailearn/shared";
+import { createCompanionTurnRequestV1Schema } from "@ailearn/shared";
 import { exportCompanionData } from "./companion-export.ts";
-import { viewCompanionDelivery, dismissCompanionDelivery, companionDeviceSessionHash } from "./companion-proactive-service.ts";
 import {
   COMPANION_RATE_LIMITS,
   companionRateLimit,
@@ -109,8 +108,8 @@ export async function companionConversationRoutes(app: FastifyInstance) {
     },
   );
 
-  // §18 POST /companion/tool-proposals：工具提案 create（15 kind 白名单，
-  // 2026-08-15 接线修复——此前工具网关只有 decide 消费，无创建入口）。
+  // 方案 16 §18.1 POST /companion/tool-proposals：Orchestrator/桌宠工具网关
+  // 入口（payload 全量校验 → 原子 proposal；确认后由 decision 同步执行）。
   app.post(
     "/companion/tool-proposals",
     { preHandler: [requireSession] },
@@ -646,59 +645,6 @@ export async function companionExportRoutes(app: FastifyInstance) {
       }
       reply.raw.end();
       return reply;
-    },
-  );
-}
-
-export async function companionProactiveRoutes(app: FastifyInstance) {
-  // POST /companion/deliveries/:id/viewed — §7.6/§10.5 标记显示（row lock 幂等）。
-  app.post<{ Params: { id: string } }>(
-    "/companion/deliveries/:id/viewed",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:delivery`, COMPANION_RATE_LIMITS.deliveryViewDismissPerMinute.limit, COMPANION_RATE_LIMITS.deliveryViewDismissPerMinute.windowMs)) return;
-      // §6.8：X-Companion-Device-Session 只保存 domain-separated HMAC；
-      // 缺失 header 或 secret 时 fail soft（不 claim 正文，不记录原值）。
-      const deviceSessionHeader = req.headers["x-companion-device-session"];
-      const deviceSessionHash = typeof deviceSessionHeader === "string" && deviceSessionHeader.length > 0
-        ? companionDeviceSessionHash(deviceSessionHeader)
-        : null;
-      try {
-        const result = await viewCompanionDelivery({
-          workspaceId: req.session.workspaceId,
-          userId: req.session.userId,
-          deliveryId: req.params.id,
-          deviceSessionHash,
-        });
-        return reply.code(result.statusCode).send(result.body);
-      } catch (err) {
-        if (err instanceof CompanionConversationError) {
-          return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: false, requestId: req.id });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // POST /companion/deliveries/:id/dismiss — §7.6/§10.5 dismiss（row lock 幂等）。
-  app.post<{ Params: { id: string } }>(
-    "/companion/deliveries/:id/dismiss",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:delivery`, COMPANION_RATE_LIMITS.deliveryViewDismissPerMinute.limit, COMPANION_RATE_LIMITS.deliveryViewDismissPerMinute.windowMs)) return;
-      try {
-        const result = await dismissCompanionDelivery({
-          workspaceId: req.session.workspaceId,
-          userId: req.session.userId,
-          deliveryId: req.params.id,
-        });
-        return reply.code(result.statusCode).send(result.body);
-      } catch (err) {
-        if (err instanceof CompanionConversationError) {
-          return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: false, requestId: req.id });
-        }
-        throw err;
-      }
     },
   );
 }

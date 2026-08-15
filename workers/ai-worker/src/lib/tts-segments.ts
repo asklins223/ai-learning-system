@@ -5,17 +5,24 @@
  *   validateCompanionOutput 后由本模块剔除，不进入 voice segment）；
  * - 切句优先 `。！？；\n` 或 `.?!;` + 空白；句子至少 8 个中文字符，
  *   final 强制 flush；单段最多 160 字符，超限在最近合法标点/空白强制切分；
- * - 每 run 最多 20 段、总可朗读文本最多 2000 字；超过后只显示文字（不发段）；
+ * - 每 run 最多 200 段、总可朗读文本最多 20000 字（与回复硬上限
+ *   COMPANION_HARD_MAX_CHARS 对齐——回复多长就朗读多长，实际不限制）；
+ *   2026-08-12+（15a 新反馈）：用户明确不要朗读上限，去掉原 20 段/2000 字、
+ *   40 段/4000 字的限制。
  * - 净化后为空 → 零段（不发 voice.segment.ready）；
  * - segmentId = sha256(runId:ordinal:text)（64 hex，稳定唯一）；textSha256 = sha256(text)。
  */
 
 import { createHash } from "node:crypto";
 
-export const TTS_MAX_SEGMENTS = 20;
-export const TTS_MAX_TOTAL_CHARS = 2_000;
+export const TTS_MAX_SEGMENTS = 200;
+export const TTS_MAX_TOTAL_CHARS = 20_000;
 export const TTS_MAX_SEGMENT_CHARS = 160;
 export const TTS_MIN_SEGMENT_CHARS = 8;
+/** 15b 二期（问题2 修复）：首段提前触发的最小字符数——流式文字生成中，
+ *  缓冲达到该长度即切出首段（不要求完整句），让 TTS 合成尽早开始，声音
+ *  与文字感官同步（"字幕般"）；后续段仍按完整句切，朗读连贯性不受影响。 */
+export const TTS_FIRST_SEGMENT_MIN_CHARS = 14;
 
 export interface CompanionTtsSegment {
   ordinal: number;
@@ -46,8 +53,132 @@ export function purifyVoiceText(text: string): string {
     .trim();
 }
 
-/** §11.3 切句：段 ≤160、优先合法标点/空白、final flush。 */
-export function splitCompanionTtsSegments(
+/**
+ * §11.3 增量切段（2026-08-12+ 15b：字幕般流式 TTS）。
+ *
+ * 与 splitCompanionTtsSegments 的区别：输入是"新增的流式文本"而非全文——
+ * 每次调用只切出**以句结束符结尾的完整句**，未完成句留在 rest 下次继续；
+ * isFinal=true 时把 rest 一并切出（final flush）。
+ *
+ * 段上限（maxSegments/maxTotalChars）按已发段累计维护：超限的剩余文本
+ * 直接丢弃（只显示文字、不朗读），与全文版语义一致。
+ *
+ * 注意：净化（purifyVoiceText）按"rest+新增"整体执行，跨 delta 的 markdown
+ * 边界处理可能不完美（偶发残留符号，可接受——TTS 文本）。
+ */
+export interface IncrementalTtsState {
+  /** 未完成句（净化后），等待与后续文本拼成完整句 */
+  rest: string;
+  /** 已发出段数（ordinal 从 sentCount+1 起） */
+  sentCount: number;
+  /** 已发出段总字符数 */
+  sentChars: number;
+}
+
+export interface IncrementalTtsSplit {
+  segments: CompanionTtsSegment[];
+  next: IncrementalTtsState;
+}
+
+export function splitCompanionTtsSegmentsIncremental(
+  text: string,
+  state: IncrementalTtsState,
+  isFinal = false,
+  opts?: {
+    maxSegments?: number;
+    maxTotalChars?: number;
+    maxSegmentChars?: number;
+    /** 首段提前触发的最小字符数（>0 且 sentCount===0 时生效） */
+    firstSegmentMinChars?: number;
+  },
+): IncrementalTtsSplit {
+  const maxSegments = opts?.maxSegments ?? TTS_MAX_SEGMENTS;
+  const maxTotalChars = opts?.maxTotalChars ?? TTS_MAX_TOTAL_CHARS;
+  const maxSegmentChars = opts?.maxSegmentChars ?? TTS_MAX_SEGMENT_CHARS;
+
+  const combined = purifyVoiceText(`${state.rest}${text}`);
+  if (combined.length === 0) {
+    return { segments: [], next: { ...state, rest: "" } };
+  }
+
+  // 15b 二期（问题2 修复）：首段提前——从未发过段且缓冲达到最小长度时，
+  // 不要求完整句直接切出首段（声音尽早开始，与流式文字感官同步）。
+  const firstMin = opts?.firstSegmentMinChars ?? 0;
+  if (!isFinal && state.sentCount === 0 && firstMin > 0 && combined.length >= firstMin) {
+    const segText = combined.trim();
+    if (segText.length > 0) {
+      const textSha256 = createHash("sha256").update(segText, "utf8").digest("hex");
+      return {
+        segments: [{
+          ordinal: 1,
+          text: segText,
+          textSha256,
+          segmentId: createHash("sha256")
+            .update(`1:${textSha256}`, "utf8")
+            .digest("hex"),
+        }],
+        next: { rest: "", sentCount: 1, sentChars: segText.length },
+      };
+    }
+  }
+
+  const sentences = combined.split(SPLIT_PATTERN).filter((s) => s.trim().length > 0);
+  const last = sentences[sentences.length - 1];
+  const lastComplete = isFinal || /[。！？；\n.!?;]$/.test(last.trim());
+  const complete = (lastComplete ? sentences : sentences.slice(0, -1))
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const rest = lastComplete ? "" : last.trim();
+
+  // 超长句硬切（与全文版一致：HARD_SPLIT_PATTERN 在最近标点/空白切）
+  const rawSegments: string[] = [];
+  for (const sentence of complete) {
+    if (sentence.length <= maxSegmentChars) {
+      rawSegments.push(sentence);
+      continue;
+    }
+    let r = sentence;
+    while (r.length > maxSegmentChars) {
+      const slice = r.slice(0, maxSegmentChars);
+      const hardMatch = HARD_SPLIT_PATTERN.exec(slice);
+      const cutAt = hardMatch ? hardMatch.index + 1 : maxSegmentChars;
+      rawSegments.push(slice.slice(0, cutAt).trim());
+      r = r.slice(cutAt).trim();
+    }
+    if (r.length > 0) rawSegments.push(r);
+  }
+
+  const out: CompanionTtsSegment[] = [];
+  let total = state.sentChars;
+  for (const segText of rawSegments) {
+    if (state.sentCount + out.length >= maxSegments) break; // 超段数：只显示文字
+    if (total + segText.length > maxTotalChars) break; // 超总字数：只显示文字
+    total += segText.length;
+    out.push({
+      ordinal: state.sentCount + out.length + 1,
+      text: segText,
+      textSha256: createHash("sha256").update(segText, "utf8").digest("hex"),
+      segmentId: "",
+    });
+  }
+  return {
+    segments: out.map((seg) => ({
+      ...seg,
+      segmentId: createHash("sha256")
+        .update(`${seg.ordinal}:${seg.textSha256}`, "utf8")
+        .digest("hex"),
+    })),
+    next: {
+      rest,
+      sentCount: state.sentCount + out.length,
+      sentChars: total,
+    },
+  };
+}
+
+/**
+ * §11.3 切句：段 ≤160、优先合法标点/空白、final flush。
+ */export function splitCompanionTtsSegments(
   text: string,
   opts?: {
     maxSegments?: number;
@@ -142,3 +273,16 @@ export function companionSegmentId(
     .update(`${runId}:${generation}:${ordinal}:${textSha256}`, "utf8")
     .digest("hex");
 }
+
+// ─── 15b 二期：情感与富语言标签（阿里百炼 Qwen-Audio-TTS） ───────────────
+// 双文本管线：LLM 输出可嵌入标签（仅 qwen 朗读文本保留），展示/入库文本
+// 必须剥离（stripVoiceExpressionTags）；段级情感由 extractVoiceEmotion
+// 解析（最后一个控制类标签 → emotion，供 live2d 协同，见 15 方案待办）。
+// 2026-08-13（引擎兼容）：实现迁移至 packages/shared/voice-expression-tags
+// （api edge 分支净化也需使用），此处 re-export 保持 worker 内部引用不变。
+export {
+  VOICE_EMOTION_TAGS,
+  VOICE_RICH_TAGS,
+  stripVoiceExpressionTags,
+  extractVoiceEmotion,
+} from "@ailearn/shared/voice-expression-tags";

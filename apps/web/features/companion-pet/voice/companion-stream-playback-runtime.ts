@@ -27,6 +27,11 @@ export interface StreamPlaybackRuntimeOptions {
   onAudioLevel?(level: number): void;
   onSegmentFailed?(segment: StreamSegment, code: string): void;
   onSegmentDone?(segment: StreamSegment): void;
+  /** 2026-08-12+（15a-A）：队列全部播完（非打断）时回调最后一段，供上层派发
+   *  voice.playback_finished（与 pump 路径同语义，reducer 校验后回 idle）。 */
+  onDrained?(lastSegment: StreamSegment): void;
+  /** 15 方案 emotion 表现层（精确版）：段音频开始播放时回调。 */
+  onSegmentStart?(segment: StreamSegment): void;
 }
 
 export interface StreamPlaybackRuntimeV1 {
@@ -108,6 +113,9 @@ export function createStreamPlaybackRuntime(options: StreamPlaybackRuntimeOption
       return response;
     },
     options.segmentGapMs ?? 0,
+    options.onDrained,
+    // 15 方案 emotion 表现层（精确版）：段开始播放 → 上层推 VAD
+    options.onSegmentStart,
   );
 
   // 播放电平监控（口型/呼吸联动）：挂一个 analyser 到 destination 前。

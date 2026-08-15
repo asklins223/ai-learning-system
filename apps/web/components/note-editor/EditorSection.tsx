@@ -14,6 +14,7 @@
  */
 
 import type { RefObject } from "react";
+import { memo } from "react";
 import dynamic from "next/dynamic";
 import { Icon } from "@/components/ui/icons";
 import { MemberNotice } from "@/components/settings/MemberNotice";
@@ -84,6 +85,10 @@ export interface EditorSectionProps {
   onRestoreDiscardedDraft: () => void;
   onApplyStarterTemplate: (template: string) => void;
   onOpenVersions: () => void;
+
+  // ── V2（方案 20 §19.1） ──
+  v2Enabled?: boolean;
+  onGenerateV2?: () => void;
 }
 
 /**
@@ -91,8 +96,11 @@ export interface EditorSectionProps {
  *
  * 渲染编辑器的核心交互区域，包括草稿恢复横幅、工具栏、
  * 编辑/预览面板和底部统计栏。
+ *
+ * F8：React.memo——NoteEditor 逐击键重渲时，若 props（source/title/callbacks）
+ * 浅比较不变则跳过整棵编辑器子树重渲。回调须在 NoteEditor 侧 useCallback 稳定。
  */
-export function EditorSection({
+export const EditorSection = memo(function EditorSection({
   title,
   isAutoTitle,
   mode,
@@ -136,6 +144,8 @@ export function EditorSection({
   onRestoreDiscardedDraft,
   onApplyStarterTemplate,
   onOpenVersions,
+  v2Enabled = false,
+  onGenerateV2,
 }: EditorSectionProps) {
   return (
     <section className="ne-editor">
@@ -260,7 +270,9 @@ export function EditorSection({
         genButton={genButton}
         generationLocked={generationLocked}
         onOpenVersions={onOpenVersions}
+        v2Enabled={v2Enabled}
+        onGenerateV2={onGenerateV2}
       />
     </section>
   );
-}
+});

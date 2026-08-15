@@ -1,3 +1,12 @@
+import { createRequire } from "node:module";
+
+// 2026-08-13（web 客户端打包修复）：node:crypto 惰性获取——客户端
+// bundle（IgnorePlugin 置空 node: 模块）顶层 createRequire 为 undefined，
+// nodeRequire 为 null；这些函数仅服务端调用，客户端不触发。
+const nodeRequire = typeof createRequire === "function"
+  ? createRequire(import.meta.url)
+  : null;
+
 /**
  * 内容哈希单一来源（阶段 04 收口，security_review HIGH #2 修复）
  *
@@ -7,10 +16,11 @@
  * 防护会短路或误伤。格式约定：`sha256:<64 hex>`（见 voice-artifact-contracts.ts
  * 的 SHA256_HASH_PATTERN）。
  */
-import { createHash } from "node:crypto";
 
 /** 裸 SHA-256 hex（内部工具；对外一律使用带前缀的 computeVoiceContentHash 等） */
 export function sha256Hex(value: string): string {
+  if (!nodeRequire) throw new Error("node:crypto unavailable in this environment");
+  const { createHash } = nodeRequire("node:crypto");
   const hash = createHash("sha256");
   const hashUpdate = hash.update.bind(hash);
   hashUpdate(value, "utf8");

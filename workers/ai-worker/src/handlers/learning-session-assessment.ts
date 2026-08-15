@@ -329,9 +329,9 @@ export async function buildCriticAssessments(
     providerSelection.providerName,
   );
   if (!governanceResult.allowed) {
-    throw new LearningSessionAssessmentRetryableError(
-      governanceResult.reason ?? "Critic 输入未通过隐私治理",
-    );
+    // 2026-08-12+（15a 根因修复）：policy 拒绝（sendToExternal=false）不可重试、
+    // 需用户在设置开启——抛 AIConsentRequiredError（前端引导），而非可重试错误。
+    throw new AIConsentRequiredError();
   }
   const safeInput = governanceResult.sanitizedData as {
     question: string;

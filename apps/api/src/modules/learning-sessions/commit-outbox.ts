@@ -7,9 +7,7 @@
  *   → API 定时器用 SECURITY DEFINER claim 函数（0109）跨 workspace 领取
  *   → withWorkspaceTransaction 内 stabilizeEpisode（Pg repo + Pg Commit
  *   executor）执行 episode-commit 编排（幂等 commit key + CAS 锁序 +
- *   canonical/schedule 写端口）→ 事务提交后对每个 commit 应用结果触发
- *   committed_change_display（fireCompanionTrigger，quiet/presence 抑制由
- *   proactive 服务负责，失败不阻塞）。
+ *   canonical/schedule 写端口）。
  *
  * 诚实边界（不伪造）：
  * - modality=voice 时评估报告足够完整签发 mastery；
@@ -23,7 +21,6 @@
 import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
-import { fireCompanionTrigger } from "../companion-conversation/companion-trigger-bridge.ts";
 import { createPgVerticalSliceRepository } from "./vertical-slice-repo-pg.ts";
 import { createPgCommitExecutor } from "./commit-executor-pg.ts";
 import {
@@ -280,23 +277,9 @@ export async function processCommitOutboxJob(job: CommitOutboxJob): Promise<"com
     },
   );
 
-  // commit 事务已提交 → 对每个 commit 应用结果触发 proactive（独立事务，
-  // quiet/presence/预算抑制由 proactive 服务负责；失败不阻塞、不回滚）。
-  for (const ctx of applied) {
-    try {
-      await fireCompanionTrigger({
-        workspaceId: ctx.workspaceId,
-        userId: ctx.userId,
-        reasonId: "committed_change_display",
-        pageKind: "card_detail",
-        routePattern: "/cards/:id",
-        canonicalTarget: `card:${ctx.cardId}`,
-        canonicalOrigin: "episode-commit",
-      });
-    } catch {
-      // proactive 是通知性质：失败不影响 commit 已应用的事实。
-    }
-  }
+  // 2026-08-15（方案 16 P9）：旧 permit-based proactive 触发桥已删除
+  // （learning_run_v1 下本 tick 停用；新主动路径 = proactive-hook 的
+  // run.completed 确定性 delivery）。
 
   return result.outcome;
 }

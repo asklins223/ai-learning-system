@@ -7,6 +7,7 @@
  * Markdown 格式工具按钮，减少主文件约 100 行 JSX。
  */
 import type { RefObject } from "react";
+import { memo } from "react";
 import { Icon } from "@/components/ui/icons";
 import type { MilkdownEditorHandle } from "@/components/MilkdownEditor";
 import type { EditorMode, SavingState } from "./note-editor-types";
@@ -50,7 +51,7 @@ export interface EditorToolbarProps {
  * 在非预览模式下显示标题输入和格式工具；
  * 预览模式下仅显示模式切换。
  */
-export function EditorToolbar({
+export const EditorToolbar = memo(function EditorToolbar({
   title,
   isAutoTitle,
   mode,
@@ -171,4 +172,4 @@ export function EditorToolbar({
       )}
     </div>
   );
-}
+});

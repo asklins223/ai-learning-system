@@ -50,6 +50,13 @@ export interface UnderstandingUniverseProps {
   onSelect: (id: string | null) => void;
   className?: string;
   title?: string;
+  /** 挂载时的初始视口（设备本地快照恢复；缺省自动 fit）。 */
+  initialViewport?: { zoom: number; offsetX: number; offsetY: number } | null;
+  /** 视口变化上报（节流；用于本地视口快照，文档 16 §15.6）。 */
+  onViewportChange?: (viewport: { zoom: number; offsetX: number; offsetY: number }) => void;
+  /** F18（round4）：offset 本地裁剪 key 的可选命名空间（调用方按工作区传入），
+   * 避免不同工作区/账户之间串态（local pruning 有界但 key 无维度）。 */
+  storageNamespace?: string;
 }
 
 export interface UnderstandingUniverseHandle {
@@ -202,7 +209,7 @@ const BASE_RADIUS: Record<GraphNode["type"], number> = {
   note: 15,
   card: 23,
   key_point: 8,
-  evidence: 10,
+  evidence: 5,
 };
 
 const DEFAULT_PALETTE: Palette = {
@@ -920,15 +927,32 @@ export const UnderstandingUniverse = forwardRef<
     onSelect,
     className = "",
     title = "理解星图",
+    initialViewport = null,
+    onViewportChange,
+    storageNamespace,
   },
   ref,
 ) {
+  // F18（round4）：offset 本地裁剪 key 可加工作区命名空间（调用方如星图页传
+  // checkpoint.workspaceId），跨工作区/账户隔离，避免 key 串态。
+  const offsetStorageKey = useMemo(
+    () => (storageNamespace
+      ? `${OFFSET_STORAGE_KEY}:${storageNamespace}`
+      : OFFSET_STORAGE_KEY),
+    [storageNamespace],
+  );
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const readoutRef = useRef<HTMLOutputElement>(null);
   const tooltipPointRef = useRef<UniversePoint | null>(null);
-  const viewportRef = useRef<Viewport>({ offsetX: 0, offsetY: 0, zoom: 1 });
+  // 2026-08-14（文档 16 §15.6）：外部可注入初始视口（设备本地快照恢复）。
+  const viewportRef = useRef<Viewport>(initialViewport ?? { offsetX: 0, offsetY: 0, zoom: 1 });
+  // 视口变化上报（节流 250ms；仅在视口实际移动时触发）。
+  const lastViewportReportRef = useRef<Viewport | null>(null);
+  const lastViewportReportTimeRef = useRef(0);
+  const viewportChangeCallbackRef = useRef(onViewportChange);
+  viewportChangeCallbackRef.current = onViewportChange;
   const targetViewportRef = useRef<Viewport | null>(null);
   const targetViewportResponseRef = useRef(VIEWPORT_RESPONSE_MS);
   const sizeRef = useRef<CanvasSize>({ width: 0, height: 0, dpr: 1 });
@@ -944,7 +968,10 @@ export const UnderstandingUniverse = forwardRef<
   const customRevisionRef = useRef(0);
   const storageLoadedRef = useRef(false);
   const paletteRef = useRef<Palette>(DEFAULT_PALETTE);
-  const dustRef = useRef<DustStar[]>(makeDust(240));
+  // F18（round4）：惰性初始化——useRef(makeDust(240)) 会在每次渲染求值函数实参
+  //（240 次迭代的工厂每渲重跑）；改为首次渲染才构造，之后仅引用/reassign。
+  const dustRef = useRef<DustStar[] | null>(null);
+  if (dustRef.current === null) dustRef.current = makeDust(240);
   const backgroundCacheRef = useRef<BackgroundCache | null>(null);
   const sceneCacheRef = useRef<SceneCache | null>(null);
   const spatialIndexRef = useRef<ScreenSpatialIndex | null>(null);
@@ -1139,15 +1166,15 @@ export const UnderstandingUniverse = forwardRef<
         };
       }
       if (Object.keys(offsets).length) {
-        window.localStorage.setItem(OFFSET_STORAGE_KEY, JSON.stringify({ version: 1, offsets }));
+        window.localStorage.setItem(offsetStorageKey, JSON.stringify({ version: 1, offsets }));
       } else {
-        window.localStorage.removeItem(OFFSET_STORAGE_KEY);
+        window.localStorage.removeItem(offsetStorageKey);
       }
     } catch {
       // Storage may be unavailable in private/embedded contexts. Dragging must
       // remain fully functional even when persistence is denied.
     }
-  }, [positions]);
+  }, [positions, offsetStorageKey]);
 
   const getPosition = useCallback(
     (nodeId: string): UniversePoint | null => {
@@ -1210,13 +1237,13 @@ export const UnderstandingUniverse = forwardRef<
     customRevisionRef.current += 1;
     if (typeof window !== "undefined") {
       try {
-        window.localStorage.removeItem(OFFSET_STORAGE_KEY);
+        window.localStorage.removeItem(offsetStorageKey);
       } catch {
         // Ignore storage denial; the in-memory reset still succeeds.
       }
     }
     setViewport(fitViewport(positionedNodes, positions, sizeRef.current), true);
-  }, [positionedNodes, positions, setViewport]);
+  }, [positionedNodes, positions, setViewport, offsetStorageKey]);
 
   const focusNode = useCallback(
     (nodeId: string, responseMs = FOCUS_RESPONSE_MS) => {
@@ -1611,7 +1638,8 @@ export const UnderstandingUniverse = forwardRef<
         backgroundContext.fillStyle = nebulaTwo;
         backgroundContext.fillRect(0, 0, width, height);
         backgroundContext.fillStyle = palette.dust;
-        for (const star of dustRef.current) {
+        // dustRef 已惰性初始化（首次渲染保证非空）。
+        for (const star of dustRef.current!) {
           const x = star.x * width;
           const y = star.y * height;
           backgroundContext.globalAlpha = star.alpha * (0.72 + Math.sin(star.phase) * 0.18);
@@ -1991,6 +2019,25 @@ export const UnderstandingUniverse = forwardRef<
     const elapsed = clamp(time - (lastLoopTimeRef.current || time - 16), 1, 48);
     lastLoopTimeRef.current = time;
 
+    // 2026-08-14（文档 16 §15.6）：视口变化上报（节流 250ms）——仅视口
+    // 实际移动时触发，供本地快照/恢复消费。
+    {
+      const vp = viewportRef.current;
+      const last = lastViewportReportRef.current;
+      if (
+        viewportChangeCallbackRef.current
+        && (lastViewportReportTimeRef.current === 0 || time - lastViewportReportTimeRef.current >= 250)
+        && (!last
+          || Math.abs(last.offsetX - vp.offsetX) > 0.5
+          || Math.abs(last.offsetY - vp.offsetY) > 0.5
+          || Math.abs(last.zoom - vp.zoom) > 0.001)
+      ) {
+        lastViewportReportRef.current = vp;
+        lastViewportReportTimeRef.current = time;
+        viewportChangeCallbackRef.current({ zoom: vp.zoom, offsetX: vp.offsetX, offsetY: vp.offsetY });
+      }
+    }
+
     const target = targetViewportRef.current;
     let moving = false;
     if (target) {
@@ -2063,7 +2110,7 @@ export const UnderstandingUniverse = forwardRef<
     if (!storageLoadedRef.current) {
       storageLoadedRef.current = true;
       try {
-        const raw = window.localStorage.getItem(OFFSET_STORAGE_KEY);
+        const raw = window.localStorage.getItem(offsetStorageKey);
         if (raw) {
           const parsed = JSON.parse(raw) as {
             version?: unknown;
@@ -2092,7 +2139,7 @@ export const UnderstandingUniverse = forwardRef<
       } catch {
         // Invalid or inaccessible storage should never block the graph.
         try {
-          window.localStorage.removeItem(OFFSET_STORAGE_KEY);
+          window.localStorage.removeItem(offsetStorageKey);
         } catch {
           // Storage is unavailable; there is nothing else to clean up.
         }
@@ -2119,7 +2166,7 @@ export const UnderstandingUniverse = forwardRef<
       invalidateScene();
       persistOffsets();
     }
-  }, [invalidateScene, persistOffsets, positionedNodes, positions]);
+  }, [invalidateScene, persistOffsets, positionedNodes, positions, offsetStorageKey]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -2346,6 +2393,14 @@ export const UnderstandingUniverse = forwardRef<
       <p id={liveId} className="universe-canvas-a11y-live" aria-live="polite">
         {selectedAnnouncement}
       </p>
+      <ul className="universe-canvas-a11y-list" aria-label="星图知识节点文本列表">
+        {positionedNodes.map((node) => (
+          <li key={node.id}>
+            {TYPE_LABEL[node.type]}：{node.label}
+            {node.state ? `，状态${STATE_LABEL[node.state] ?? node.state}` : "，状态未设置"}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 });

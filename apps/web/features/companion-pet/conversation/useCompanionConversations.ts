@@ -27,22 +27,56 @@ export function useCompanionConversations(requestedConversationId: string | null
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(requestedConversationId);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
-  const [messagesLoading, setMessagesLoading] = useState(false);
-  // 2026-08-15（接线修复）：历史分页（beforeSeq keyset）——"加载更早"此前
-  // 页面已接线（CompanionHistoryArchive hasEarlier/onLoadEarlier）但 hook 从未
-  // 实现这 4 个能力，页面解构报类型错误。
-  const [olderLoading, setOlderLoading] = useState(false);
-  const [olderAvailable, setOlderAvailable] = useState(false);
-  const oldestSeqRef = useRef<number | null>(null);
-  const olderInFlightRef = useRef(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   // 2026-08-11：SSE 重连游标——跟踪已收到的最大事件 seq，断线重连时
   // 以 after=lastSeq 增量续接，避免重复或丢事件。
   const lastSeqRef = useRef<number>(0);
+  // FN1：assistant.delta 的 rAF 聚合——一个帧内多个 delta 合并为一次
+  // setMessages，避免每个 SSE 事件都整树重渲 + 历史全量 Markdown 重解析。
+  // pendingDeltaRef: runId -> 本帧内累积的 delta 文本；deltaRafRef: 已排队的 rAF。
+  const pendingDeltaRef = useRef<Map<string, string>>(new Map());
+  const deltaRafRef = useRef<number | null>(null);
+  // FN10：assistant.final 重试的 500ms 退避定时器句柄——存入 ref 并在
+  // 卸载/中止时清除（bounded ≤2 次，此处仅补句柄管理）。
+  const reloadRetryTimerRef = useRef<number | null>(null);
+  // F#7（🟡19）：SSE 断线重连（onError 内 streamWithRetry）的重试定时器句柄。
+  // 存入 ref 并在卸载/中止时清除，避免重连风暴期间累积悬置定时器。
+  const streamRetryTimerRef = useRef<number | null>(null);
+  const flushPendingDeltas = useCallback(() => {
+    if (deltaRafRef.current !== null) {
+      cancelAnimationFrame(deltaRafRef.current);
+      deltaRafRef.current = null;
+    }
+    if (pendingDeltaRef.current.size === 0) return;
+    const deltas = pendingDeltaRef.current;
+    pendingDeltaRef.current = new Map();
+    setMessages((current) => {
+      let next = current;
+      deltas.forEach((delta, runId) => {
+        const pendingId = `assistant-${runId}`;
+        const existing = next.find((item) => item.id === pendingId);
+        if (existing) {
+          next = next.map((item) => item.id === pendingId
+            ? { ...item, blocks: [{ type: "text", text: `${textFromBlocks(item.blocks)}${delta}` }] }
+            : item);
+        } else {
+          next = [...next, {
+            id: pendingId,
+            role: "assistant",
+            seq: Number.MAX_SAFE_INTEGER,
+            blocks: [{ type: "text", text: delta }],
+            createdAt: new Date().toISOString(),
+          }];
+        }
+      });
+      return next;
+    });
+  }, []);
   // 2026-08-11：当前选中会话快照——在途 fetch（loadMessages/reloadAfterFinal）
   // 返回时校验会话未切换，杜绝旧对话结果混入新视图。
   const selectedIdRef = useRef<string | null>(requestedConversationId);
@@ -65,27 +99,16 @@ export function useCompanionConversations(requestedConversationId: string | null
     return Array.isArray(body.items) ? body.items : [];
   }, []);
 
-  async function fetchMessages(
-    conversationId: string,
-    beforeSeq?: number,
-  ): Promise<{ items: Message[]; hasMore: boolean; oldestSeq: number | null }> {
-    const query = beforeSeq != null
-      ? `?limit=50&beforeSeq=${beforeSeq}`
-      : "?limit=100";
-    const response = await fetch(`/api/companion/conversations/${conversationId}/messages${query}`, {
+  async function fetchMessages(conversationId: string): Promise<{ items: Message[]; hasMore: boolean }> {
+    const response = await fetch(`/api/companion/conversations/${conversationId}/messages?limit=100`, {
       credentials: "same-origin",
       cache: "no-store",
     });
     if (!response.ok) throw new Error(`message list failed: ${response.status}`);
-    const body = (await response.json()) as {
-      items?: Message[];
-      hasMore?: boolean;
-      oldestSeq?: number | null;
-    };
+    const body = (await response.json()) as { items?: Message[]; hasMore?: boolean };
     return {
       items: Array.isArray(body.items) ? body.items : [],
-      hasMore: body.hasMore === true,
-      oldestSeq: typeof body.oldestSeq === "number" ? body.oldestSeq : null,
+      hasMore: Boolean(body.hasMore),
     };
   }
 
@@ -93,40 +116,13 @@ export function useCompanionConversations(requestedConversationId: string | null
     async (conversationId: string, keepAssistantRunId?: string): Promise<void> => {
       // 2026-08-11（review 修复）：在途 fetch 返回时会话已切换（selectedIdRef
       // 比对）则丢弃——旧对话结果不混入新视图。
-      setMessagesLoading(true);
-      try {
-        const { items: incoming, hasMore, oldestSeq } = await fetchMessages(conversationId);
-        if (selectedIdRef.current !== conversationId) return;
-        setMessages((current) => mergeMessages(current, incoming, keepAssistantRunId));
-        setOlderAvailable(hasMore);
-        oldestSeqRef.current = oldestSeq;
-      } finally {
-        setMessagesLoading(false);
-      }
+      const incoming = await fetchMessages(conversationId);
+      if (selectedIdRef.current !== conversationId) return;
+      setOlderAvailable(incoming.hasMore);
+      setMessages((current) => mergeMessages(current, incoming.items, keepAssistantRunId));
     },
     [],
   );
-
-  // 2026-08-15（接线修复）：加载更早消息（beforeSeq keyset，prepend）。
-  const loadOlderMessages = useCallback(async (): Promise<void> => {
-    const conversationId = selectedIdRef.current;
-    const beforeSeq = oldestSeqRef.current;
-    if (!conversationId || beforeSeq == null || olderInFlightRef.current) return;
-    olderInFlightRef.current = true;
-    setOlderLoading(true);
-    try {
-      const { items: older, hasMore, oldestSeq } = await fetchMessages(conversationId, beforeSeq);
-      if (selectedIdRef.current !== conversationId) return;
-      setMessages((current) => [...older, ...current]);
-      setOlderAvailable(hasMore);
-      oldestSeqRef.current = oldestSeq;
-    } catch {
-      setError("暂时无法加载更早的消息。");
-    } finally {
-      olderInFlightRef.current = false;
-      setOlderLoading(false);
-    }
-  }, []);
 
   // 2026-08-11：assistant.final 后精确重拉——以 final payload 的 messageId 判断
   // 服务端是否已持久化该轮；未达时退避重试（最多 2 次），期间保留占位副本。
@@ -142,19 +138,20 @@ export function useCompanionConversations(requestedConversationId: string | null
   ): Promise<void> {
     const aborted = () => Boolean(controller?.signal.aborted);
     if (aborted()) return;
-    const { items: incoming, hasMore, oldestSeq } = await fetchMessages(conversationId);
+    const incoming = await fetchMessages(conversationId);
     if (aborted()) return;
     // 2026-08-11：会话已切换/删除——丢弃重拉结果
     if (selectedIdRef.current !== conversationId) return;
-    const hasFinal = messageId !== null && incoming.some((m) => m.id === messageId);
-    setMessages((current) => mergeMessages(current, incoming, hasFinal ? undefined : runId));
-    setOlderAvailable(hasMore);
-    oldestSeqRef.current = oldestSeq;
+    const hasFinal = messageId !== null && incoming.items.some((m) => m.id === messageId);
+    setMessages((current) => mergeMessages(current, incoming.items, hasFinal ? undefined : runId));
     if (!hasFinal && retries > 0 && !aborted()) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      // 等待期间可能已 abort——递归前再查一次
-      if (aborted()) return;
-      return reloadAfterFinal(conversationId, messageId, runId, retries - 1, controller);
+      // FN10：定时器句柄存入 ref，卸载/中止时清除。
+      reloadRetryTimerRef.current = window.setTimeout(() => {
+        reloadRetryTimerRef.current = null;
+        // 等待期间可能已 abort——递归前再查一次
+        if (aborted()) return;
+        return reloadAfterFinal(conversationId, messageId, runId, retries - 1, controller);
+      }, 500);
     }
   }
 
@@ -181,20 +178,43 @@ export function useCompanionConversations(requestedConversationId: string | null
     })();
     return () => {
       cancelled = true;
+      // FN1：卸载时取消未触发的 rAF 并 flush 残余 delta，保证最后一帧文本不丢。
+      flushPendingDeltas();
+      // FN10：清除 assistant.final 重试的 500ms 退避定时器。
+      if (reloadRetryTimerRef.current !== null) {
+        window.clearTimeout(reloadRetryTimerRef.current);
+        reloadRetryTimerRef.current = null;
+      }
+      // F#7（🟡19）：清除 SSE onError 重连的重试定时器。
+      if (streamRetryTimerRef.current !== null) {
+        window.clearTimeout(streamRetryTimerRef.current);
+        streamRetryTimerRef.current = null;
+      }
       streamAbortRef.current?.abort();
     };
-  }, [loadConversations, requestedConversationId]);
+  }, [flushPendingDeltas, loadConversations, requestedConversationId]);
 
   useEffect(() => {
     if (!selectedId || enabled !== true) {
       setMessages([]);
+      setMessagesLoading(false);
       return;
     }
     // 2026-08-11（review 修复）：切换对话前先清空 + 中止旧流——否则
     // loadMessages 合并时混入上一对话消息，且旧 SSE 流 delta 事件会写入新对话视图。
+    // FN1：先 flush 残余 delta，避免清空后残留 rAF 把旧会话文本写进新视图。
+    flushPendingDeltas();
     streamAbortRef.current?.abort();
+    setError(null);
     setMessages([]);
-    void loadMessages(selectedId).catch(() => setError("暂时无法加载这段对话。"));
+    setMessagesLoading(true);
+    void loadMessages(selectedId)
+      .catch(() => {
+        if (selectedIdRef.current === selectedId) setError("暂时无法加载这段对话。");
+      })
+      .finally(() => {
+        if (selectedIdRef.current === selectedId) setMessagesLoading(false);
+      });
   }, [enabled, loadMessages, selectedId]);
 
   async function createConversation(): Promise<string> {
@@ -239,18 +259,18 @@ export function useCompanionConversations(requestedConversationId: string | null
           if (event.type === "assistant.delta") {
             const delta = (event.payload as { textDelta?: unknown }).textDelta;
             if (typeof delta !== "string") return;
-            setMessages((current) => {
-              const pendingId = `assistant-${runId}`;
-              const existing = current.find((item) => item.id === pendingId);
-              if (existing) {
-                return current.map((item) => item.id === pendingId
-                  ? { ...item, blocks: [{ type: "text", text: `${textFromBlocks(item.blocks)}${delta}` }] }
-                  : item);
-              }
-              return [...current, { id: pendingId, role: "assistant", seq: Number.MAX_SAFE_INTEGER, blocks: [{ type: "text", text: delta }], createdAt: new Date().toISOString() }];
-            });
+            // FN1：rAF 聚合——合并本帧多个 delta 为一次 setMessages。
+            pendingDeltaRef.current.set(runId, (pendingDeltaRef.current.get(runId) ?? "") + delta);
+            if (deltaRafRef.current === null) {
+              deltaRafRef.current = requestAnimationFrame(() => flushPendingDeltas());
+            }
           }
           if (event.type === "assistant.final") {
+            // 缝隙2（round3）：final 到达当帧、rAF 尚未触发时，最后一段 delta
+            // 仍停在 pendingDeltaRef——这里先 flush 本帧残余 delta，使占位文本
+            // 完整落到视图再处理 final（与 companion-chat-client 在 final 前
+            // flushDeltas() 的语义对齐）。
+            flushPendingDeltas();
             // 2026-08-11（review 修复）：final 前清 user 的 pending-* 副本——
             // 服务端已持久化本轮消息，重载时以正式消息为准；assistant 副本
             // 由 reloadAfterFinal 按 messageId 精确替换/占位保留。
@@ -270,7 +290,11 @@ export function useCompanionConversations(requestedConversationId: string | null
             || error.kind === "rate_limited";
           if (retriable && opts.attempt < 2) {
             const delay = error.retryAfterMs ?? 500 * (2 ** opts.attempt);
-            setTimeout(() => {
+            if (streamRetryTimerRef.current !== null) {
+              window.clearTimeout(streamRetryTimerRef.current);
+            }
+            streamRetryTimerRef.current = window.setTimeout(() => {
+              streamRetryTimerRef.current = null;
               if (!controller.signal.aborted) {
                 void streamWithRetry({
                   ...opts,
@@ -292,6 +316,8 @@ export function useCompanionConversations(requestedConversationId: string | null
     if (!text || sending || enabled !== true) return;
     setSending(true);
     setError(null);
+    // FN1：发新消息前把残余 delta 落到视图再中断旧流，避免文本丢失。
+    flushPendingDeltas();
     streamAbortRef.current?.abort();
     // 2026-08-11（review 修复）：controller 在会话建立后再创建——此前在
     // createConversation 前创建，其 setSelectedId 触发切换 effect 会 abort
@@ -350,6 +376,8 @@ export function useCompanionConversations(requestedConversationId: string | null
     if (!selectedId) return;
     // 2026-08-11：删除前中止进行中的 SSE 流——否则删除后事件仍写入
     // setMessages（残留在新选中对话或已删对话的消息）。
+    // FN1：先 flush 残余 delta，避免删除后残留 rAF 写回已删对话。
+    flushPendingDeltas();
     streamAbortRef.current?.abort();
     const response = await fetch(`/api/companion/conversations/${selectedId}`, {
       method: "DELETE",
@@ -369,6 +397,49 @@ export function useCompanionConversations(requestedConversationId: string | null
     setSelectedId(id);
   }, []);
 
+  // P8 历史 cursor 分页：更早消息按 beforeSeq keyset 拉取（服务端 hasMore/
+  // oldestSeq 契约）。合并时更早消息在前，去重按 id。
+  // messages ref（loadOlder 用最新值，避免闭包旧列表）。
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  const [olderAvailable, setOlderAvailable] = useState(false);
+  const [olderLoading, setOlderLoading] = useState(false);
+  const loadOlderMessages = useCallback(async (): Promise<void> => {
+    const conversationId = selectedIdRef.current;
+    if (!conversationId || olderLoading) return;
+    setOlderLoading(true);
+    try {
+      const oldest = messagesRef.current.length > 0
+        ? Math.min(...messagesRef.current.map((m) => Number(m.seq ?? 0) || 0))
+        : null;
+      if (oldest === null || oldest <= 1) {
+        setOlderAvailable(false);
+        return;
+      }
+      const response = await fetch(
+        `/api/companion/conversations/${encodeURIComponent(conversationId)}/messages?limit=100&beforeSeq=${oldest}`,
+        { credentials: "same-origin", cache: "no-store" },
+      );
+      if (!response.ok) throw new Error(`older messages failed: ${response.status}`);
+      const body = (await response.json()) as { items?: Message[]; hasMore?: boolean };
+      const incoming = Array.isArray(body.items) ? body.items : [];
+      if (selectedIdRef.current !== conversationId) return;
+      if (incoming.length > 0) {
+        setMessages((current) => {
+          const known = new Set(current.map((m) => m.id));
+          return [...incoming.filter((m) => !known.has(m.id)), ...current];
+        });
+      }
+      setOlderAvailable(Boolean(body.hasMore));
+    } catch {
+      if (selectedIdRef.current === conversationId) setError("暂时无法加载更早的记录。");
+    } finally {
+      setOlderLoading(false);
+    }
+  }, [olderLoading]);
+
   return {
     enabled,
     conversations,
@@ -384,9 +455,9 @@ export function useCompanionConversations(requestedConversationId: string | null
     selectConversation,
     createConversation,
     sendMessage,
+    deleteSelected,
     loadOlderMessages,
     olderAvailable,
     olderLoading,
-    deleteSelected,
   };
 }

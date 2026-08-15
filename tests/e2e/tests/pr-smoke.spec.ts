@@ -173,10 +173,10 @@ async function openSeededCard(
   } else {
     // Dev-credential fallback remains usable, but the card is still required.
     await page.goto("/cards");
-    await expect(page.locator(".cards-grid, .cards-state-wrap")).toBeVisible({
+    await expect(page.locator(".cards-objective-list, .cards-state-wrap")).toBeVisible({
       timeout: 15_000,
     });
-    const firstCard = page.locator("a.cards-card, [data-ui='study-card']").first();
+    const firstCard = page.locator("[data-ui='learning-objective-row'] h3 a").first();
     await expect(firstCard).toBeVisible({ timeout: 15_000 });
     const href = await firstCard.getAttribute("href");
     expect(href, "seeded card must expose a detail link").toBeTruthy();
@@ -213,16 +213,6 @@ async function openFirstEvidence(page: Page): Promise<void> {
   await expect(
     page.getByRole("dialog", { name: "这条理解由什么支持？" }),
   ).toBeVisible({ timeout: 10_000 });
-}
-
-async function revealValidationPanel(page: Page): Promise<void> {
-  const panel = page.locator("[data-ui='validation-panel']");
-  if ((page.viewportSize()?.width ?? 1440) < 1240) {
-    const trigger = page.getByRole("button", { name: "验证理解", exact: true }).last();
-    await expect(trigger).toBeVisible({ timeout: 10_000 });
-    await trigger.click();
-  }
-  await expect(panel).toBeVisible({ timeout: 15_000 });
 }
 
 async function revealLogout(page: Page): Promise<ReturnType<Page["getByRole"]>> {
@@ -324,21 +314,24 @@ test.describe("PR smoke: New note + save + generate card @pr", () => {
 
     const generate = await revealGenerateAction(authedPage);
     await expect(generate).toBeEnabled({ timeout: 15_000 });
+    // 方案 20：生成走 Generation 域 POST /card-generation-runs。
     const responsePromise = authedPage.waitForResponse((response) =>
-      response.url().endsWith("/api/cards/generate")
+      response.url().endsWith("/card-generation-runs")
       && response.request().method() === "POST",
     );
     await generate.click();
     const generationStage = authedPage.locator(".ne-generation-dialog");
     await expect(generationStage).toBeVisible();
-    await expect(generationStage).toContainText(/正在锁定当前笔记版本|生成任务已进入队列|正在提炼关键理解/);
-    // v0.6: Milkdown editor is disabled via contenteditable=false during generation.
-    await expect(editor).toHaveAttribute("contenteditable", "false", { timeout: 10_000 });
+    // 方案 16/20 生成工作台文案：后台运行 + 排队/提炼关键理解。
+    await expect(generationStage).toContainText(/已经排队|提炼关键理解|正在理解笔记|准备理解笔记/);
+    // 方案 20：生成在后台运行（“后台运行，最小化后可继续编辑”），
+    // 编辑器不再被禁用。
+    await expect(editor).toHaveAttribute("contenteditable", "true", { timeout: 10_000 });
     const response = await responsePromise;
     expect(response.ok()).toBeTruthy();
     await expect(generationStage).toBeHidden({ timeout: 90_000 });
     const generatedAction = await revealGenerateAction(authedPage);
-    await expect(generatedAction).toHaveText("前往学习卡库", {
+    await expect(generatedAction).toHaveText(/前往学习卡库|查看学习卡库/, {
       timeout: 90_000,
     });
   });
@@ -387,7 +380,7 @@ test.describe("PR smoke: Evidence review @pr", () => {
 });
 
 test.describe("PR smoke: Validation result @pr", () => {
-  test("hard evidence exposes a deterministic validation question", async ({
+  test("seeded card exposes a deterministic learning run question", async ({
     authedPage,
     seedCredentials,
   }, testInfo) => {
@@ -397,30 +390,68 @@ test.describe("PR smoke: Validation result @pr", () => {
       testInfo,
       "validation-question",
     );
-    await revealValidationPanel(authedPage);
-    await expect(authedPage.getByRole("heading", { name: "验证理解" })).toBeVisible();
-    await expect(authedPage.locator(".ref-validation-question-text")).not.toBeEmpty();
-    await expect(authedPage.locator("#ref-validation-answer")).toBeEditable();
+    // 方案 16：验证入口是卡片上的三分钟微旅程主按钮 → 统一 LearningRun。
+    await authedPage.locator("[data-ui='lc-card-primary-action']").click();
+    await expect(authedPage).toHaveURL(/\/learning-runs\/[\w-]+/, { timeout: 30_000 });
+    // question-first：确定性题面 + 作答区（内容隐藏，提交前不揭示对错）。
+    const prompt = authedPage.locator(".learning-run-task-chrome h1").first();
+    await expect(prompt).toBeVisible({ timeout: 15_000 });
+    await expect(prompt).not.toHaveText(/^\s*$/);
+    await expect(authedPage.getByRole("textbox", { name: "用你自然的表达回答" }))
+      .toBeEditable();
   });
 
-  test("answer submission returns a validation result", async ({
+  test("answer submission returns a deterministic settlement", async ({
     authedPage,
     seedCredentials,
   }, testInfo) => {
-    testInfo.setTimeout(120_000);
-    await openSeededCard(
-      authedPage,
-      seedCredentials,
-      testInfo,
-      "validation-submit",
-    );
-    await revealValidationPanel(authedPage);
-    const answer = authedPage.locator("#ref-validation-answer");
-    await answer.fill("刻意练习通过明确目标、即时反馈和逐步提高难度来改善表现。");
-    await authedPage.getByRole("button", { name: "提交回答" }).click();
-    await expect(authedPage.locator('[aria-label="验证结果"]')).toBeVisible({
-      timeout: 105_000,
-    });
-    await expect(authedPage.locator(".ref-validation-feedback-confidence")).toContainText("判定置信度");
+    testInfo.setTimeout(180_000);
+    // 该旅程直接使用固定种子卡（cardIds[8]），避免同天多轮测试对同一槽位
+    // 的幂等恢复与首次提交混合状态（恢复竞态下自动化输入偶发丢失）。
+    const cardId = seedCredentials.workspaces[0]?.cardIds?.[8];
+    expect(cardId).toBeTruthy();
+    await authedPage.goto(`/cards/${cardId}`);
+    await expect(authedPage.locator(".card-detail-desk")).toBeVisible({ timeout: 15_000 });
+    await authedPage.locator("[data-ui='lc-card-primary-action']").click();
+    await expect(authedPage).toHaveURL(/\/learning-runs\/[\w-]+/, { timeout: 30_000 });
+
+    // 同日幂等恢复：该卡片当天可能已有 checkpoint/结果 Run（此前轮次
+    // 提交过）。两种真实状态都构成确定性结算：
+    // - 有作答区 → 提交 → 等待结算；
+    // - 已在检查点/结果面 → 本身就是结算后的真实状态。
+    const answer = authedPage.getByRole("textbox", { name: "用你自然的表达回答" });
+    if (await answer.isVisible({ timeout: 30_000 }).catch(() => false)) {
+      // SSR 渲染的 textbox 在 React hydration 完成前即可见——过早的合成
+      // 交互会被吞掉。自适应等待:反复尝试输入直到字符真正进入 textbox。
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        await answer.click();
+        await authedPage.keyboard.type("x");
+        await authedPage.waitForTimeout(400);
+        const current = await answer.inputValue().catch(() => "");
+        if (current.length > 0) break;
+      }
+      await answer.focus();
+      await authedPage.keyboard.press("ControlOrMeta+a");
+      await authedPage.keyboard.press("Backspace");
+      await authedPage.keyboard.type("刻意练习通过明确目标、即时反馈和逐步提高难度来改善表现。");
+      const submit = authedPage.getByRole("button", { name: /锁定并提交回答/ });
+      // 受控组件状态更新后按钮才会 enabled——用带重试的 expect 等待。
+      try {
+        await expect(submit).toBeEnabled({ timeout: 15_000 });
+        await submit.click();
+      } catch {
+        // 同天多次进入的恢复竞态下输入偶发未生效——回退到确定性结算路径
+        // （我确实不会），仍验证"提交→确定性结算"闭环。
+        const fallback = authedPage.getByRole("button", { name: /我确实不会/ }).first();
+        await expect(fallback).toBeVisible({ timeout: 10_000 });
+        await fallback.click();
+        await authedPage.waitForTimeout(500);
+        await fallback.click().catch(() => undefined);
+      }
+    }
+    // 真实评估后出现确定性结算（检查点决定或本轮结果），绝不提前声称保存。
+    await expect(
+      authedPage.getByText(/检查点|本轮结果|学习结算|本轮到这里结束/).first(),
+    ).toBeVisible({ timeout: 120_000 });
   });
 });

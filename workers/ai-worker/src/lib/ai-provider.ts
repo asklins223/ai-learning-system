@@ -107,7 +107,7 @@ import { OpenAICompatibleProvider } from "./providers/openai-compatible.ts";
 import { SiliconFlowProvider } from "./providers/siliconflow.ts";
 import { createCapabilityProvider, hasFactory } from "./provider-factory.ts";
 import type { ProviderRuntimeConfig as SharedRuntimeConfig } from "@ailearn/shared";
-import { resolveSystemPlatform } from "@ailearn/shared";
+import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import type { PlatformOptions } from "@ailearn/shared";
 
 export interface AIProviderRuntimeConfig {

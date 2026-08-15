@@ -476,7 +476,8 @@ export async function runEvaluateValidation(job: JobPayload) {
     textRes.providerName,
   );
   if (!governanceResult.allowed) {
-    throw new Error(governanceResult.reason ?? "AI privacy governance blocked this request");
+    // 2026-08-12+（15a 根因修复）：policy 拒绝 → 引导用户去设置页签署协议。
+    throw new AIConsentRequiredError();
   }
 
   const provider = createProvider(textRes.providerName, textRes.providerConfig);

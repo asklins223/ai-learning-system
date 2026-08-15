@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePetRuntime } from "../runtime/PetRuntimeProvider";
 import type { PetAdapterV1 } from "../desktop/desktop-pet-adapter";
+import type { AllowedMainRouteV2 } from "@ailearn/shared";
+import { usePetBridgeContext } from "@/features/companion-bridge/usePetBridgeContext";
 import { PetIcon, type PetIconNameV1 } from "./PetIcon";
-import { createLearningMenuProposal, fetchLearningContext } from "../learning-actions";
+import { createLearningMenuProposal, fetchLearningContext, LearningActionClientError } from "../learning-actions";
+import type { CompanionLearningContextV1, CreateMenuProposalResponseV1 } from "@ailearn/shared/companion-conversation-contracts";
 import { api } from "@/lib/api";
-import type { CompanionLearningContextV1 } from "@ailearn/shared";
 
 interface MenuItemV1 {
   id: string;
@@ -14,7 +16,7 @@ interface MenuItemV1 {
   description?: string;
   icon: PetIconNameV1;
   stage?: "P3" | "P5";
-  candidateId?: "resume_current" | "start_short";
+  candidateId?: "resume_current" | "start_short" | "learning_run_resume" | "learning_run_start";
   disabled?: boolean;
   disabledNote?: string;
   danger?: boolean;
@@ -43,8 +45,10 @@ const ROOT_ITEMS: readonly MenuItemV1[] = [
 ];
 
 const STUDY_ITEMS: readonly MenuItemV1[] = [
-  { id: "resume", label: "继续当前学习", icon: "study", action: "learning", candidateId: "resume_current", stage: "P5", disabledNote: "当前没有可继续的学习" },
-  { id: "start", label: "开始一小段学习", icon: "sparkles", action: "learning", candidateId: "start_short", stage: "P5", disabledNote: "当前没有可开始的学习" },
+  // 方案 16 §18：桌宠学习动作统一走 LearningRun（旧 LearningSession 候选
+  // 随 P9 旧栈删除；learning_runs 恢复/创建即跳转 Player）。
+  { id: "resume", label: "继续当前学习", icon: "study", action: "learning", candidateId: "learning_run_resume", stage: "P5", disabledNote: "当前没有可继续的学习" },
+  { id: "start", label: "开始三分钟巩固", icon: "sparkles", action: "learning", candidateId: "learning_run_start", stage: "P5", disabledNote: "当前没有可开始的学习" },
   { id: "review", label: "今日复习", icon: "review", action: "say", stage: "P5", disabled: true, disabledNote: "将在学习能力阶段开放" },
   { id: "card", label: "回到当前卡片", icon: "card", action: "say", stage: "P5", disabled: true, disabledNote: "将在学习能力阶段开放" },
   { id: "study-back", label: "返回", icon: "back", action: "back" },
@@ -66,7 +70,10 @@ function activate(
   item: MenuItemV1,
   runtime: ReturnType<typeof usePetRuntime>,
   adapter: PetAdapterV1,
-  onError?: (message: string) => void,
+  onError: ((message: string) => void) | undefined,
+  openRoute: (route: AllowedMainRouteV2) => void,
+  // F14（round4）：卸载/重开守卫——自动播报的异步 PATCH 迟到时不再 dispatch/报错。
+  isCancelled?: () => boolean,
 ): void {
   if (item.disabled) return;
   const { dispatch, state } = runtime;
@@ -92,7 +99,8 @@ function activate(
       break;
     case "full_conversation":
       dispatch({ type: "menu.closed" });
-      void adapter.openMainRoute({ kind: "conversation" });
+      // §14.4：导航统一走 Bridge V2（broker 校验 sender；浏览器无 bridge fail closed）。
+      void openRoute({ kind: "conversation" });
       break;
     case "auto_voice":
       // P6 §13.4：自动播报 = 账号级 voiceOff 开关（合同 01 §3.3）。
@@ -101,11 +109,13 @@ function activate(
       void (async () => {
         try {
           const overview = await api.getCompanionOverview();
+          if (isCancelled?.()) return;
           const nextVoiceOff = !state.context.voiceOff;
           const updated = await api.updateCompanionAccount({
             revision: overview.account.revision,
             voiceOff: nextVoiceOff,
           });
+          if (isCancelled?.()) return;
           dispatch({
             type: "account.preferences_changed",
             accountEpoch: updated.epoch,
@@ -113,6 +123,7 @@ function activate(
             voiceOff: updated.voiceOff ?? false,
           });
         } catch {
+          if (isCancelled?.()) return;
           onError?.("播报设置保存失败，请稍后重试");
         }
       })();
@@ -132,7 +143,7 @@ function activate(
       break;
     case "settings":
       dispatch({ type: "menu.closed" });
-      void adapter.openMainRoute({ kind: "settings", section: "pet" });
+      void openRoute({ kind: "settings", section: "pet" });
       break;
     case "quit_pet":
       void adapter.setPetModeEnabled(false);
@@ -157,7 +168,18 @@ function itemState(item: MenuItemV1, runtime: ReturnType<typeof usePetRuntime>):
 
 export function PetMenu({ learningActionsEnabled = false }: { learningActionsEnabled?: boolean }) {
   const runtime = usePetRuntime();
+  const petBridge = usePetBridgeContext();
   const { state, dispatch, adapter } = runtime;
+  // F14（round4）：异步 handler 的卸载守卫——组件卸载/重开后，旧 promise 的
+  // 迟到结果不再覆盖 status/context。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const isMounted = useCallback(() => mountedRef.current, []);
   const level = state.menu.kind;
   const [focusIndex, setFocusIndex] = useState(0);
   const [statusMessage, setStatusMessage] = useState("");
@@ -229,9 +251,12 @@ export function PetMenu({ learningActionsEnabled = false }: { learningActionsEna
 
   const learningCandidateFor = (item: MenuItemV1) => {
     if (!item.candidateId || !learningContext) return null;
-    return item.candidateId === "resume_current"
-      ? learningContext.resumeCandidate
-      : learningContext.startCandidate;
+    switch (item.candidateId) {
+      case "learning_run_resume": return learningContext.learningRunResumeCandidate;
+      case "learning_run_start": return learningContext.learningRunStartCandidate;
+      case "resume_current": return learningContext.resumeCandidate;
+      default: return learningContext.startCandidate;
+    }
   };
 
   const runLearningItem = async (item: MenuItemV1) => {
@@ -264,15 +289,58 @@ export function PetMenu({ learningActionsEnabled = false }: { learningActionsEna
     setLearningProposalBusy(true);
     setStatusMessage("正在确认当前学习状态…");
     try {
-      const response = await createLearningMenuProposal({
-        candidateId: item.candidateId,
-        contextRevision: context.contextRevision,
-        payloadSha256: candidate.payloadSha256,
-        sourceSurface,
-        conversationId: runtime.state.context.conversationId ?? undefined,
-        idempotencyKey: attempt.idempotencyKey,
-        clientMessageId: attempt.clientMessageId,
-      });
+      // 15a-E 修正：409（学习状态在菜单打开期间变化 / 候选消失）时自动
+      // 刷新 context 重试一次，而不是直接提示失败；重试换新 idempotencyKey
+      //（body 的 contextRevision 已变，复用旧 key 会 IDEMPOTENCY_CONFLICT）。
+      const submit = async (ctx: CompanionLearningContextV1, candidateSha: string, key: { idempotencyKey: string; clientMessageId: string }) => (
+        createLearningMenuProposal({
+          candidateId: item.candidateId!,
+          contextRevision: ctx.contextRevision,
+          payloadSha256: candidateSha,
+          sourceSurface,
+          conversationId: runtime.state.context.conversationId ?? undefined,
+          idempotencyKey: key.idempotencyKey,
+          clientMessageId: key.clientMessageId,
+        })
+      );
+      let response: CreateMenuProposalResponseV1;
+      try {
+        response = await submit(context, candidate.payloadSha256, attempt);
+        if (!isMounted()) return;
+      } catch (firstError) {
+        if (!(firstError instanceof LearningActionClientError) || firstError.status !== 409 || firstError.code === "IDEMPOTENCY_CONFLICT") {
+          throw firstError;
+        }
+        // 刷新 context 重试一次
+        setStatusMessage("学习状态已刷新，正在重试…");
+        const fresh = await fetchLearningContext();
+        if (isMounted()) setLearningContext(fresh);
+        if (!isMounted()) return;
+        const freshCandidate = fresh
+          ? (() => {
+              switch (item.candidateId) {
+                case "learning_run_resume": return fresh.learningRunResumeCandidate;
+                case "learning_run_start": return fresh.learningRunStartCandidate;
+                case "resume_current": return fresh.resumeCandidate;
+                default: return fresh.startCandidate;
+              }
+            })()
+          : null;
+        if (!freshCandidate) {
+          if (!isMounted()) return;
+          setStatusMessage(
+            item.candidateId === "resume_current" || item.candidateId === "learning_run_resume"
+              ? "当前没有进行中的学习"
+              : "当前没有可开始的学习",
+          );
+          return;
+        }
+        response = await submit(fresh, freshCandidate.payloadSha256, {
+          idempotencyKey: crypto.randomUUID(),
+          clientMessageId: crypto.randomUUID(),
+        });
+        if (!isMounted()) return;
+      }
       learningAttemptRef.current = null;
       dispatch({
         type: "bubble.learning_proposal_received",
@@ -281,10 +349,32 @@ export function PetMenu({ learningActionsEnabled = false }: { learningActionsEna
         target: response.proposal.targetSummary,
         impact: response.proposal.impactSummary,
       });
-    } catch {
-      setStatusMessage("提交失败，可重试");
+    } catch (error) {
+      // 15a-E：按错误码分类展示，不再无差别"提交失败，可重试"——
+      // LearningActionClientError 带 status/code（learning-actions.ts），
+      // 供用户判断下一步（重登录/刷新状态/功能未开放）。
+      if (!isMounted()) return;
+      if (error instanceof LearningActionClientError) {
+        if (error.status === 401 || error.status === 403) {
+          setStatusMessage("登录状态已过期，请回到主窗口后重试");
+        } else if (error.status === 404) {
+          setStatusMessage("学习功能暂未开放");
+        } else if (error.status === 409 && (error.code === "NO_ACTIVE_SESSION" || error.code === "NO_CANDIDATE")) {
+          setStatusMessage(error.code === "NO_ACTIVE_SESSION" ? "当前没有进行中的学习" : "当前没有可开始的学习");
+        } else if (error.status === 409) {
+          setStatusMessage("学习状态频繁变化，请稍后再试");
+        } else if (error.status >= 400 && error.status < 500) {
+          setStatusMessage("学习状态已变化，请重新打开菜单后重试");
+        } else {
+          setStatusMessage("提交失败，可重试");
+        }
+        console.warn("[learning] menu proposal failed:", error.status, error.code);
+      } else {
+        setStatusMessage("提交失败，可重试");
+        console.warn("[learning] menu proposal failed:", error);
+      }
     } finally {
-      setLearningProposalBusy(false);
+      if (isMounted()) setLearningProposalBusy(false);
     }
   };
 
@@ -313,7 +403,7 @@ export function PetMenu({ learningActionsEnabled = false }: { learningActionsEna
       void runLearningItem(item);
       return;
     }
-    activate(item, runtime, adapter, setStatusMessage);
+    activate(item, runtime, adapter, setStatusMessage, (route) => void petBridge.dispatchOpenRoute(route), isMounted);
   };
 
   const moveFocus = (key: string) => {

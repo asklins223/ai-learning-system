@@ -1,3 +1,12 @@
+import { createRequire } from "node:module";
+
+// 2026-08-13（web 客户端打包修复）：node:crypto 惰性获取——客户端
+// bundle（IgnorePlugin 置空 node: 模块）顶层 createRequire 为 undefined，
+// nodeRequire 为 null；这些函数仅服务端调用，客户端不触发。
+const nodeRequire = typeof createRequire === "function"
+  ? createRequire(import.meta.url)
+  : null;
+
 /**
  * source_fingerprint & exposure_fingerprint (计划 §6.7)
  *
@@ -19,7 +28,6 @@
  *   明确排除 question, prompt, model, rubric/policy version 和纯元数据
  */
 
-import { createHash } from "node:crypto";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -73,6 +81,8 @@ export function normalizeText(text: string): string {
  * Compute SHA-256 hash of a string, returning hex digest.
  */
 function sha256(data: string): string {
+  if (!nodeRequire) throw new Error("node:crypto unavailable in this environment");
+  const { createHash } = nodeRequire("node:crypto");
   return createHash("sha256").update(data, "utf8").digest("hex");
 }
 

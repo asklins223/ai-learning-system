@@ -142,8 +142,16 @@ export class PetHitTestController {
     this.interactionMode = mode;
     // 2026-08-11：模式切换后强制重算（即使光标未移动）——text_input 等
     // 强制交互模式必须立即生效，不能被光标去重跳过。
-    this.lastCursor = { x: Number.NaN, y: Number.NaN };
-    this.tick();
+    // 2026-08-12+（15a-D）：仅 text_input/dragging 等非 passive 模式强制立即
+    // 重算；passive（如关闭输入面板）**不**强制——否则关闭瞬间鼠标停在已卸载
+    // 面板区域会立即把 setIgnoreMouseEvents 从 false 翻到 true，该窗口服务级
+    // 路由重配在 transparent 窗口上会触发 GPU 合成重置（"整窗消失再出现"闪烁，
+    // 与 showInactive 同类）。passive 的翻转延后到下一次光标移动自然发生，
+    // 对交互无感。
+    if (mode !== "passive") {
+      this.lastCursor = { x: Number.NaN, y: Number.NaN };
+      this.tick();
+    }
   }
 
   start(): void {

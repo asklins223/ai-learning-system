@@ -21,16 +21,18 @@ import {
   type CompanionPageContextV1,
   type CancelCompanionRunResponseV1,
   type CreateCompanionTurnResponseV1,
-} from "@ailearn/shared";
+} from "@ailearn/shared/companion-conversation-contracts";
 import {
   allowedMainRouteV1Schema,
   type AllowedMainRouteV1,
-} from "@ailearn/shared";
+} from "@ailearn/shared/desktop-pet-contracts";
 
 export type SubmitCompanionTurnBody = CreateCompanionTurnResponseV1;
 
 export interface CompanionChatClientV1 {
   ensureDialogue(): Promise<string>;
+  /** 服务端 AssistantSession 解析（journey/inbox），无则 null。 */
+  resolveAssistantSession(signal?: AbortSignal): Promise<{ kind: "journey" | "inbox"; conversationId: string } | null>;
   /** Refresh-safe recovery: read the scoped durable dialogue snapshot, if any. */
   restoreDialogue(signal?: AbortSignal): Promise<CompanionConversationSnapshotV1 | null>;
   cancelRun(args: {
@@ -151,7 +153,7 @@ export interface CompanionSseMappedDispatch {
   /** character.cue：服务端受控表现 cue（§4.4 wire 版）。 */
   cue?: CompanionCharacterCueV1;
   /** voice.segments：单段（§11.3 worker 切句的 voice.segment.ready） */
-  segment?: { ordinal: number; segmentId: string; text: string; conversationId?: string };
+  segment?: { ordinal: number; segmentId: string; text: string; conversationId?: string; emotion?: string };
 }
 
 /** 纯函数：SSE 事件 → reducer dispatch（含 delta 累积）；runId 不匹配（旧 generation）返回 null。 */
@@ -228,6 +230,7 @@ export function mapCompanionSseEvent(args: {
         ordinal?: number;
         text?: string;
         textSha256?: string;
+        emotion?: string;
       };
       if (
         typeof v.ordinal !== "number" ||
@@ -257,6 +260,7 @@ export function mapCompanionSseEvent(args: {
             segmentId: v.segmentId,
             text: v.text,
             conversationId: args.event.conversationId ?? "",
+            emotion: typeof v.emotion === "string" && v.emotion.length > 0 ? v.emotion.slice(0, 64) : undefined,
           },
         },
         accumulatedText: args.accumulatedText,
@@ -379,7 +383,47 @@ export function mapCompanionSseEvent(args: {
 export function createCompanionChatClient(scope?: CompanionScope): CompanionChatClientV1 {
   const key = scopeKey(scope);
   return {
+    /** 服务端 AssistantSession 真相（P1/system_pet_v2 §22.2）：解析当前
+     *  workspace 的 journey/inbox 会话，替代 localStorage dialogue 真相。 */
+    async resolveAssistantSession(signal): Promise<{ kind: "journey" | "inbox"; conversationId: string } | null> {
+      const response = await fetch("/api/companion/session/current", {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal,
+      });
+      if (!response.ok) {
+        // 服务端不可用（旧部署）——回退 null 让调用方走旧路径。
+        if (response.status === 404 || response.status >= 500) return null;
+        throw new Error(`resolveAssistantSession failed: ${response.status}`);
+      }
+      const body = (await response.json()) as {
+        assistantSession?: { kind?: string; conversationId?: string } | null;
+      };
+      const session = body.assistantSession ?? null;
+      if (
+        session
+        && (session.kind === "journey" || session.kind === "inbox")
+        && typeof session.conversationId === "string"
+        && UUID_PATTERN.test(session.conversationId)
+      ) {
+        return { kind: session.kind, conversationId: session.conversationId };
+      }
+      return null;
+    },
+
     async ensureDialogue(): Promise<string> {
+      // 真相 1：服务端 AssistantSession 解析（journey/inbox 会话）。
+      try {
+        const resolved = await this.resolveAssistantSession(undefined);
+        if (resolved) {
+          rememberConversationId(key, resolved.conversationId);
+          return resolved.conversationId;
+        }
+      } catch {
+        // 解析失败不阻塞对话创建（服务端不可达时走旧路径）。
+      }
+      // 真相 2（缓存）：本地已知 id。
       const cached = cachedConversationIds.get(key) ?? readStoredConversationId(key);
       if (cached) cachedConversationIds.set(key, cached);
       if (cached) return cached;
@@ -407,6 +451,30 @@ export function createCompanionChatClient(scope?: CompanionScope): CompanionChat
     },
 
     async restoreDialogue(signal) {
+      // 真相 1：服务端 AssistantSession 解析优先。
+      try {
+        const resolved = await this.resolveAssistantSession(signal);
+        if (resolved) {
+          const snapshotResponse = await fetch(`/api/companion/conversations/${resolved.conversationId}`, {
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: { Accept: "application/json" },
+            signal,
+          });
+          if (snapshotResponse.status === 404) {
+            resetCompanionChatClientCache(scope);
+          } else {
+            if (!snapshotResponse.ok) throw new Error(`restoreDialogue failed: ${snapshotResponse.status}`);
+            const parsed = companionConversationSnapshotV1Schema.safeParse(await snapshotResponse.json());
+            if (!parsed.success) throw new Error("restoreDialogue returned an invalid snapshot");
+            rememberConversationId(key, parsed.data.conversation.id);
+            return parsed.data;
+          }
+        }
+      } catch (err) {
+        if ((err as { name?: string }).name === "AbortError") throw err;
+        // 解析/快照失败 → 走本地缓存回退（旧路径）。
+      }
       const cached = cachedConversationIds.get(key) ?? readStoredConversationId(key);
       if (cached) {
         const response = await fetch(`/api/companion/conversations/${cached}`, {
@@ -494,17 +562,30 @@ export function createCompanionChatClient(scope?: CompanionScope): CompanionChat
     },
 
     async cancelRun(args) {
-      const response = await fetch(`/api/companion/runs/${args.runId}/cancel`, {
-        method: "POST",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: companionMutationHeaders({ "Content-Type": "application/json", Accept: "application/json" }),
-        body: JSON.stringify({ version: 1, generation: args.generation, reason: "user" }),
-        signal: args.signal,
-      });
-      const parsed = cancelCompanionRunResponseV1Schema.safeParse(await response.json().catch(() => null));
-      if (!parsed.success) throw new Error(`cancelRun failed: ${response.status}`);
-      return { statusCode: response.status, body: parsed.data };
+      // 2026-08-12+（15a 新反馈）：cancel 请求本身加 10s 超时——api 挂起时
+      // 停止按钮不能再无限等；超时抛错由调用方本地终止 UI。
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error("cancel run timeout")), 10_000);
+      const onExternalAbort = (): void => {
+        if (!controller.signal.aborted) controller.abort(args.signal?.reason);
+      };
+      args.signal?.addEventListener("abort", onExternalAbort, { once: true });
+      try {
+        const response = await fetch(`/api/companion/runs/${args.runId}/cancel`, {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: companionMutationHeaders({ "Content-Type": "application/json", Accept: "application/json" }),
+          body: JSON.stringify({ version: 1, generation: args.generation, reason: "user" }),
+          signal: controller.signal,
+        });
+        const parsed = cancelCompanionRunResponseV1Schema.safeParse(await response.json().catch(() => null));
+        if (!parsed.success) throw new Error(`cancelRun failed: ${response.status}`);
+        return { statusCode: response.status, body: parsed.data };
+      } finally {
+        clearTimeout(timer);
+        args.signal?.removeEventListener("abort", onExternalAbort);
+      }
     },
 
     streamEvents(args) {
@@ -515,6 +596,31 @@ export function createCompanionChatClient(scope?: CompanionScope): CompanionChat
       let retries = 0;
       let eventsSinceOpen = 0;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      // F5：assistant.delta 的 rAF 聚合缓冲——同一帧内多个 delta 合并到一次
+      // 同步 flush 中按序 dispatch，借 React 18 自动批处理合成一帧渲染，避免
+      // 每个 SSE delta 事件都整棵 Pet surface 重渲。final/非 delta 事件立即
+      // 派发（先 flush 缓冲以保持事件顺序）。
+      let pendingDeltas: CompanionSseMappedDispatch[] = [];
+      let rafHandle: number | null = null;
+      const flushDeltas = () => {
+        if (rafHandle !== null) {
+          if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafHandle);
+          rafHandle = null;
+        }
+        if (pendingDeltas.length === 0) return;
+        const batch = pendingDeltas;
+        pendingDeltas = [];
+        for (const dispatch of batch) args.onDispatch(dispatch);
+      };
+      const scheduleDeltaFlush = () => {
+        if (rafHandle !== null) return;
+        if (typeof requestAnimationFrame === "function") {
+          rafHandle = requestAnimationFrame(flushDeltas);
+        } else {
+          // 非浏览器环境（测试/SSR）：立即 flush 以保持行为一致。
+          flushDeltas();
+        }
+      };
       const open = () => {
         if (args.signal.aborted) return;
         void openCompanionSse({
@@ -554,7 +660,16 @@ export function createCompanionChatClient(scope?: CompanionScope): CompanionChat
               });
               if (!mapped) return;
               accumulated = mapped.accumulatedText;
-              args.onDispatch(mapped.dispatch);
+              if (mapped.dispatch.type === "assistant.delta") {
+                // F5：入缓冲，由 rAF 统一 flush（保持 seq 连续与事件顺序）。
+                pendingDeltas.push(mapped.dispatch);
+                scheduleDeltaFlush();
+              } else {
+                // 非 delta（final/final 前的 status 等）：先按序 flush 已缓冲
+                // delta，再立即派发本事件，保证流式文本不滞后于终态。
+                flushDeltas();
+                args.onDispatch(mapped.dispatch);
+              }
             },
             onError(error) {
               const retryable = ["network", "server", "rate_limited"].includes(error.kind);
@@ -564,6 +679,7 @@ export function createCompanionChatClient(scope?: CompanionScope): CompanionChat
               if (!retryable || retries >= 5) return;
               const retryDelay = error.retryAfterMs ?? Math.min(1000 * 2 ** retries, 10_000);
               retries += 1;
+              flushDeltas();
               timer = setTimeout(open, retryDelay);
             },
           },
@@ -572,6 +688,7 @@ export function createCompanionChatClient(scope?: CompanionScope): CompanionChat
 
       args.signal.addEventListener("abort", () => {
         if (timer) clearTimeout(timer);
+        flushDeltas();
       }, { once: true });
       open();
     },

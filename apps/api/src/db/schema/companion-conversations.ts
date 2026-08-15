@@ -81,9 +81,11 @@ export const companionMessages = pgTable(
     clientMessageUnique: uniqueIndex("companion_messages_client_message_unique")
       .on(t.conversationId, t.clientMessageId)
       .where(sql`client_message_id IS NOT NULL`),
-    conversationSeqDescIdx: index("companion_messages_conversation_seq_desc_idx").on(t.conversationId, sql`seq DESC`),
     // 2026-08-12（generate 对齐）：迁移 0110 复合索引声明（workspace 前缀，RLS 过滤+
-    // SSE 游标按 conversation+seq 读取）
+    // SSE 游标按 conversation+seq 读取）。
+    // 注：0158 已 DROP 冗余 DESC 索引 companion_messages_conversation_seq_desc_idx
+    // （同键序的唯一约束 companion_messages_conversation_seq_unique 已覆盖，DESC 不提供
+    // 额外能力，且避免每条 INSERT 写两棵 B-tree）。此处**不声明**该索引，防 generate 重建。
     workspaceUserConvSeqIdx: index("companion_messages_workspace_user_conv_seq_idx")
       .on(t.workspaceId, t.userId, t.conversationId, sql`seq DESC`),
     // 2026-08-12（generate 对齐）：0093 定义单列 (action_ref) 部分索引
@@ -197,6 +199,11 @@ export const companionVoiceArtifacts = pgTable(
     messageUnique: uniqueIndex("companion_voice_artifacts_message_unique")
       .on(t.messageId)
       .where(sql`status = 'attached'`),
+    // 2026-08-12（generate 对齐）：0152 定义 (status, expires_at) 部分索引（仅 pending）。
+    // 支撑 ailearn_expire_pending_voice_artifacts() 的分批过期清理谓词，避免全表扫描。
+    pendingExpiresIdx: index("companion_voice_artifacts_pending_expires_idx")
+      .on(t.status, t.expiresAt)
+      .where(sql`status = 'pending'`),
   }),
 );
 

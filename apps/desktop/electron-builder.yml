@@ -10,7 +10,6 @@ appId: com.ailearn.desktop
 productName: AI Learn
 copyright: Copyright © 2026 AI Learn Team
 
-
 directories:
   output: release
   buildResources: build
@@ -70,16 +69,20 @@ win:
         - x64
   requestedExecutionLevel: asInvoker
   verifyUpdateCodeSignature: true
+  # 2026-08-12：electron-updater 在 publisherName==null 时直接跳过 Authenticode
+  # 校验(NsisUpdater.js:88-90)，verifyUpdateCodeSignature 形同虚设——必须显式
+  # 声明证书主体。dev 自签脚本(build-win-dev-signing.ps1)固定 CN=AI Learn
+  # Development，与此一致；正式发布前必须改为正式签名证书的 CN（不一致时
+  # 更新校验失败 = 拒绝安装，fail-closed 而非跳过校验）。
+  # 2026-08-15（打包修复）：publisherName 在 electron-builder 26.15 的 schema
+  # 中从 win 顶层移入 signtoolOptions（win.publisherName 会整段校验失败）。
+  signtoolOptions:
+    publisherName: "AI Learn Development"
 
 # Linux hardening: AppImage is the portable smoke artifact and deb is the
 # package-manager artifact.  Transparent click-through remains disabled by
 # the runtime on Linux because X11/Wayland support differs by compositor.
 linux:
-  # R36+：package.json name 含 @ 前缀（@ailearn/desktop）被当作默认
-  # executableName/artifact 名 → AppImage 文件名与 deb 输出目录非法字符报错；
-  # 显式指定安全名称与产物文件名。
-  executableName: ailearn-desktop
-  artifactName: ${productName}-${version}-${arch}.${ext}
   icon: build/icon.png
   category: Education
   synopsis: AI Learn desktop learning companion
@@ -98,13 +101,6 @@ publish:
   owner: asklins223
   repo: ai-learning-system
   releaseType: release
-  # 2026-08-12 注释：electron-updater 在 publisherName==null 时直接跳过
-  # Authenticode 校验，verifyUpdateCodeSignature 形同虚设——必须显式声明证书
-  # 主体。dev 自签脚本(build-win-dev-signing.ps1)固定 CN=AI Learn Development，
-  # 与此一致；正式发布前必须改为正式签名证书的 CN（不一致时更新校验失败 =
-  # 拒绝安装，fail-closed 而非跳过校验）。
-  publisherName:
-    - "AI Learn Development"
 
 # DMG (disk image) configuration.
 dmg:
@@ -125,6 +121,10 @@ dmg:
 extraResources:
   - from: build/icon.png
     to: icon.png
+  - from: build/trayTemplate.png
+    to: trayTemplate.png
+  - from: build/trayTemplate@2x.png
+    to: trayTemplate@2x.png
   - from: ../../apps/web/.next/standalone
     to: web/.next/standalone
     filter:

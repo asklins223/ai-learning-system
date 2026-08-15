@@ -61,6 +61,8 @@ test("settings 伴星分区存在（真实设置说明）", async ({ page }) => 
   const navItem = page.locator("button", { hasText: "伴星" }).first();
   await expect(navItem).toBeVisible();
   await navItem.click();
-  await expect(page.locator("text=存在感档位")).toBeVisible();
-  await expect(page.locator("text=首次引导")).toBeVisible();
+  // 伴星分区真实内容：heading + 默认作答方式（浏览器端桌面组件显示
+  // "仅桌面可用"占位，属 §9.1 平台边界；Electron 内为完整设置）。
+  await expect(page.locator("text=默认作答方式")).toBeVisible();
+  await expect(page.locator("text=桌面 AI 学习伴星")).toBeVisible();
 });

@@ -102,9 +102,9 @@ export const userCompanionAccountState = pgTable(
       .$type<CompanionAnimationVoiceOff>(),
     notificationBoundary: jsonb("notification_boundary")
       .$type<CompanionNotificationBoundary>(),
-    // §10.2/§10.3（2026-08-15 同步 schema）：主动介入强度 + 静默时段。
-    interventionLevel: text("intervention_level").notNull().default("moderate").$type<"quiet" | "moderate" | "active">(),
-    quietHours: jsonb("quiet_hours").$type<{ startLocal: string; endLocal: string; timezone: string }>(),
+    // 方案 16 §10.3：主动介入强度与静默时段（0140 迁移）。
+    interventionLevel: text("intervention_level").$type<"quiet" | "moderate" | "active">().notNull().default("moderate"),
+    quietHours: jsonb("quiet_hours").$type<{ startLocal: string; endLocal: string; timezone: string } | null>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -225,15 +225,20 @@ function serializeAccount(row: AccountRow): CompanionAccountStateV1 {
     animationOff: row.animationVoiceOff?.animationOff,
     voiceOff: row.animationVoiceOff?.voiceOff,
     notificationBoundary: row.notificationBoundary ?? undefined,
-    // §10.2/§10.3（2026-08-15 接线修复）：主动介入强度 + 静默时段随
-    // account 下发（settings 伴星分区读取；proactive-hook 同源消费）。
-    interventionLevel: row.interventionLevel ?? undefined,
+    // 方案 16 §10.3：主动介入强度与静默时段。
+    interventionLevel: row.interventionLevel,
     quietHours: row.quietHours ?? undefined,
   };
 }
 
 function emptyAccountState(): CompanionAccountStateV1 {
-  return { revision: 0, epoch: 0, globalEnabled: true };
+  return {
+    revision: 0,
+    epoch: 0,
+    globalEnabled: true,
+    interventionLevel: "moderate",
+    quietHours: undefined,
+  };
 }
 
 // ─── Onboarding transition（CAS 状态机）───────────────────────────────────
@@ -709,6 +714,9 @@ export async function updateCompanionAccountState(
         notificationBoundary: patch.notificationBoundary !== undefined
           ? patch.notificationBoundary
           : row.notificationBoundary,
+        // 方案 16 §10.3：主动介入强度与静默时段。
+        interventionLevel: patch.interventionLevel ?? row.interventionLevel,
+        quietHours: patch.quietHours !== undefined ? patch.quietHours : row.quietHours,
         revision: row.revision + 1,
         // global off → account epoch 单调递增：所有 active device session 的
         // surfaceEpoch 落后即视为撤销，迟到的 Companion 结果一律丢弃。

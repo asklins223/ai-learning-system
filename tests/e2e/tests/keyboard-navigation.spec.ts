@@ -375,8 +375,11 @@ test.describe("Keyboard navigation — login page @pr", () => {
 
     await page.keyboard.press("Tab");
     await expect(rememberCheckbox).toBeFocused();
-    await page.keyboard.press("Space");
+    // 登录页“在此私人设备保持登录”默认勾选（useState(true)）。
+    // Space 应切换为未勾选——断言真实 toggle 行为而非固定终态。
     await expect(rememberCheckbox).toBeChecked();
+    await page.keyboard.press("Space");
+    await expect(rememberCheckbox).not.toBeChecked();
 
     await page.keyboard.press("Tab");
     await expect(submitButton).toBeFocused();

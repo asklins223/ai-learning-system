@@ -2,8 +2,6 @@ import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import { AsyncLocalStorage } from "node:async_hooks";
-// R16（R35 恢复）：直接引用 apps/api 权威 schema，消除双 schema 漂移
-//（PgTransaction 跨实例类型分裂）。worker 本地 src/schema 镜像不再使用。
 import * as schema from "../../../apps/api/src/db/schema/index.ts";
 
 const DEFAULT_DATABASE_URL = "postgres://ailearn:ailearn_dev@postgres:5432/ailearn";
@@ -19,13 +17,21 @@ export function resolveWorkerDatabaseUrl(env: NodeJS.ProcessEnv = process.env): 
 
 const connectionString = resolveWorkerDatabaseUrl();
 
-// Pool size must accommodate QUEUE_CONCURRENCY (3) parallel jobs, each of which
-// may issue up to 4 concurrent queries via Promise.all (e.g. agent turn's
-// version+blocks+governance fan-out).  Peak demand = 3 × 4 = 12 concurrent
-// connections.  10 was slightly too small at peak — 2 queries would queue
-// inside the pool.  15 provides headroom for peak demand plus connection
-// lifecycle overhead (claim/reap/metrics queries running alongside handlers).
-const queryClient = postgres(connectionString, { max: 15 });
+// Pool size is derived from QUEUE_CONCURRENCY so the connection capacity stays
+// coupled to the actual parallel-job demand (W3). Each claimed job may issue up
+// to ~4 concurrent queries via Promise.all fan-out (version+blocks+governance
+// reads) plus lifecycle queries (claim/reap/metrics) running alongside handlers.
+//   pool = clamp(QUEUE_CONCURRENCY * 4, 15, 64)
+// QUEUE_CONCURRENCY parsing mirrors queue.ts (default 3, clamp [1,16]) so the
+// two constants never drift. Default concurrency 3 → 3×4=12 → min floor 15.
+function resolveWorkerConcurrency(input: string | undefined): number {
+  const raw = Number(input ?? 3);
+  const parsed = Number.isFinite(raw) ? raw : 3;
+  return Math.max(1, Math.min(16, parsed));
+}
+const workerConcurrency = resolveWorkerConcurrency(process.env.QUEUE_CONCURRENCY);
+const poolMax = Math.max(15, Math.min(64, workerConcurrency * 4));
+const queryClient = postgres(connectionString, { max: poolMax });
 export const db = drizzle(queryClient, { schema });
 
 export type WorkerTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -110,10 +116,13 @@ export async function setWorkerTransactionContext(
     assertWorkerWorkspaceTransactionContextCompatible(active.context, normalized);
   }
 
-  const rows = await transaction.execute<{ workspace_id: string; user_id: string }>(sql`
+  // userId 为 null 时必须设 NULL 而非空串：RLS 策略中 `user_id = ''::uuid`
+  // 是计划期常量转换，空串会直接抛 "invalid input syntax for type uuid: """，
+  // 与 OR 短路无关（0138 审查修复后验证到的真实故障）。
+  const rows = await transaction.execute<{ workspace_id: string; user_id: string | null }>(sql`
     SELECT
       pg_catalog.set_config('app.workspace_id', ${normalized.workspaceId}, true) AS workspace_id,
-      pg_catalog.set_config('app.user_id', ${normalized.userId ?? ""}, true) AS user_id
+      pg_catalog.set_config('app.user_id', ${normalized.userId ?? null}, true) AS user_id
   `);
   const applied = rows[0];
   if (

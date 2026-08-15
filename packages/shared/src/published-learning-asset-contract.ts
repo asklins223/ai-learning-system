@@ -13,7 +13,15 @@
  * 同一语义对象无论键序如何，hash 恒等；任何 required/内容变化必然改变 hash。
  */
 
-import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+
+// 2026-08-13（web 客户端打包修复）：node:crypto 惰性获取——客户端
+// bundle（IgnorePlugin 置空 node: 模块）顶层 createRequire 为 undefined，
+// nodeRequire 为 null；这些函数仅服务端调用，客户端不触发。
+const nodeRequire = typeof createRequire === "function"
+  ? createRequire(import.meta.url)
+  : null;
+
 import { z } from "zod";
 
 // ─── 常量 ────────────────────────────────────────────────────────────────
@@ -110,6 +118,8 @@ export function stableStringifyPublishedAsset(value: unknown): string {
 export function hashPublishedLearningAsset(
   asset: PublishedLearningAssetContractV1,
 ): string {
+  if (!nodeRequire) throw new Error("node:crypto unavailable in this environment");
+  const { createHash } = nodeRequire("node:crypto");
   return createHash("sha256")
     .update(stableStringifyPublishedAsset(asset), "utf8")
     .digest("hex");

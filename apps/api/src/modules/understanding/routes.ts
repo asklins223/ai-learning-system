@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
-import { getUnderstandingGraph, getUnderstandingStates } from "./service.ts";
+import { getUnderstandingStates } from "./service.ts";
 import { parseQuery } from "../../lib/pagination.ts";
 
 const understandingQuerySchema = z.object({
@@ -21,9 +21,7 @@ export async function understandingRoutes(app: FastifyInstance) {
     }, req.session.userId);
     return { items };
   });
-
-  // GET /graph — 真实来源血缘与学习对象关系图。
-  app.get("/graph", async (req) => {
-    return getUnderstandingGraph(req.session.workspaceId, req.session.userId);
-  });
+  // 2026-08-14（星图切流收口）：旧 GET /graph reader 已删除——graph 页主渲染
+  // 数据源为 UnderstandingProjectionV2（star_map_action_v1）；旧 reader 的
+  // getUnderstandingGraph/buildUnderstandingGraphDto 同步移除（§11.4）。
 }

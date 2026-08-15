@@ -4,8 +4,8 @@ import {
   SPRITE_POSE_BY_PRESENTATION,
   type CharacterPresentationStateV1,
   type SpritePoseV1,
-} from "@ailearn/shared";
-import type { DesktopPetScaleV1 } from "@ailearn/shared";
+} from "@ailearn/shared/companion-character-contracts";
+import type { DesktopPetScaleV1 } from "@ailearn/shared/desktop-pet-contracts";
 import { sha256Hex, type SpriteAssetPackV1 } from "./sprite-asset-validator";
 import {
   BREATH_SPECS,

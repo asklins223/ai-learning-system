@@ -76,7 +76,6 @@ export type ArtifactType = (typeof ArtifactType)[keyof typeof ArtifactType];
 export const JobType = {
   ALIGN_EVIDENCE: "align_evidence",
   EVALUATE_VALIDATION: "evaluate_validation",
-  SCHEDULE_REVIEW: "schedule_review",
   PARSE_SOURCE: "parse_source",
   GENERATE_VALIDATION_QUESTION: "generate_validation_question",
   // Supervisor Agent v1：唯一 Agent job type（计划 §5.2）

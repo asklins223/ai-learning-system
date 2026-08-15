@@ -19,6 +19,10 @@ export const sources = pgTable(
   },
   (t) => ({
     workspaceIdx: index("sources_workspace_idx").on(t.workspaceId),
+    // 2026-08-12（generate 对齐）：0153 定义 (workspace_id, updated_at DESC)，
+    // 支撑 listSources 按 updated_at DESC + id 排序走索引，避免 workspace 分区内 Sort。
+    workspaceUpdatedIdx: index("sources_workspace_updated_idx")
+      .on(t.workspaceId, sql`${t.updatedAt} desc`),
 
     idWorkspaceUnique: uniqueIndex("sources_id_workspace_unique").on(t.id, t.workspaceId),}),
 );

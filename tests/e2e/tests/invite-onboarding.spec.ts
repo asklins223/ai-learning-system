@@ -71,7 +71,7 @@ async function registerInvitee(
   expect(response.ok()).toBeTruthy();
   await expect(
     page.getByRole("heading", {
-      name: /今日学习|今日变化|建立你的第一条学习记录/,
+      name: /今日学习|今日变化|走完第一条学习闭环|建立你的第一条学习记录/,
     }),
   ).toBeVisible({ timeout: 30_000 });
   await expect(

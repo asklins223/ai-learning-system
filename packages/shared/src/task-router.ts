@@ -9,7 +9,7 @@
  */
 
 import type { Capability } from "./provider-capabilities.ts";
-import { resolveSystemPlatform } from "./platform-config.ts";
+import { resolveSystemPlatform } from "./platform-config-node.ts";
 
 /** AI 任务类型 — 可扩展 */
 export type AITaskType =
@@ -20,9 +20,9 @@ export type AITaskType =
   | "grounding_critic"     // Grounding Critic（中复杂度）
   | "repair"               // Repairer（中复杂度）
   // ── 验证评估 ──
-  | "evaluate_validation"  // 验证评估（低复杂度）
-  | "generate_question"    // 题目生成（低复杂度）
-  | "evaluate_rubric"      // 评分（低复杂度）
+  | "evaluate_validation"  // 验证评估（影响深→agent_turn）
+  | "generate_question"    // 题目生成（影响深→agent_turn）
+  | "evaluate_rubric"      // 评分（影响深→agent_turn）
   // ── 其他 ──
   | "analyze_image"        // 图片分析
   | "embed"                // 向量嵌入
@@ -35,18 +35,36 @@ export type AITaskType =
   // ── P5 learning action bridge（慢动作，worker 执行 Learning 公共入口） ──
   | "companion_action";
 
-/** 任务 → 所需能力映射 */
+/**
+ * 模型槽位语义（2026-08-13 按"用户体验"分级，而非任务复杂度）：
+ *
+ * 分级原则：**任何用户直接可见、或影响用户学习结论的任务 → agent_turn
+ * （专业模型）**；text_generation（小模型槽）仅保留给**用户不可见的内部
+ * 低影响任务**（当前无此类任务，槽位留空待用）。
+ *
+ * - agent_turn（专业模型，tokenrhythm + deepseek-v4-flash-0731）：
+ *   卡片生成、文本抽取、卡组编排、证据批判、修复、**题目生成、
+ *   验证/评估/评分（决定掌握度与复习调度）、日常对话、桌宠动作建议**——
+ *   全部用户可见/影响结论，一律专业模型（体验优先）。
+ * - text_generation（轻量槽，GLM-4-9B 小模型）：
+ *   **仅限用户不可见的内部辅助任务**（如日志/元数据分类）；质量不足以
+ *   面向用户，当前无任务分配至此。
+ * - vision / embedding / rerank：各自专用能力。
+ */
 const TASK_CAPABILITY_MAP: Record<AITaskType, Capability> = {
   card_generation:    "agent_turn",
   text_extraction:     "agent_turn",
   deck_composition:    "agent_turn",
   grounding_critic:    "agent_turn",
   repair:              "agent_turn",
-  evaluate_validation: "text_generation",
-  generate_question:   "text_generation",
-  evaluate_rubric:     "text_generation",
-  companion_dialogue:  "text_generation",
-  companion_action:    "text_generation",
+  // 2026-08-13（模型分级）：题目生成与评估对用户学习结论影响深——
+  // 一律 agent_turn（专业模型），不用小模型降级体验。
+  evaluate_validation: "agent_turn",
+  generate_question:   "agent_turn",
+  evaluate_rubric:     "agent_turn",
+  companion_dialogue:  "agent_turn",
+  // 桌宠动作建议是用户直接可见的文案——体验优先，专业模型。
+  companion_action:    "agent_turn",
   analyze_image:       "vision",
   embed:               "embedding",
   rerank:              "rerank",

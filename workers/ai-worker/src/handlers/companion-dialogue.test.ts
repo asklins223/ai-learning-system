@@ -1,10 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  COMPANION_PERSONA_V1,
-  COMPANION_PERSONA_V1_PROMPT_ID,
-  canonicalJsonV1,
-} from "@ailearn/shared";
+import { COMPANION_PERSONA_V2, COMPANION_PERSONA_V2_PROMPT_ID,  } from "@ailearn/shared";
+import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
   buildCompanionPersonaMessages,
   buildFinalCuePayload,
@@ -25,7 +22,7 @@ test("persona messages：system 固定 prompt + 结构化 user content", () => {
   });
   assert.equal(messages.length, 2);
   assert.equal(messages[0].role, "system");
-  assert.equal(messages[0].content, COMPANION_PERSONA_V1);
+  assert.equal(messages[0].content, COMPANION_PERSONA_V2);
   assert.equal(messages[1].role, "user");
   const parsed = JSON.parse(messages[1].content as string);
   assert.equal(parsed.version, 1);
@@ -105,6 +102,16 @@ test("validateCompanionOutput：空/超长/内部 token 泄露拒绝", () => {
   assert.equal(validateCompanionOutput("companion-persona-v1 泄露").ok, false);
 });
 
+test("validateCompanionOutput：剥离情感/富语言标签（双文本管线——入库零标签）", () => {
+  const r = validateCompanionOutput("[excited]太棒了！[laughing]我们继续吧！");
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.text, "太棒了！我们继续吧！");
+  // 未知标签不剥离（防误删正文方括号）
+  const r2 = validateCompanionOutput("[重要] 注意安全 [excited]走起");
+  assert.equal(r2.ok, true);
+  if (r2.ok) assert.equal(r2.text, "[重要] 注意安全 走起");
+});
+
 test("textOfCompanionBlocks：只取 text block", () => {
   assert.equal(textOfCompanionBlocks([{ type: "text", text: "hi" }, { type: "image" }]), "hi");
   assert.equal(textOfCompanionBlocks("not-array"), "");
@@ -131,5 +138,27 @@ test("buildFinalCuePayload：确定性常量（thinking/error）不被误改", (
 });
 
 test("prompt id 常量与 shared 一致", () => {
-  assert.equal(COMPANION_PERSONA_V1_PROMPT_ID, "companion-persona-v1");
+  assert.equal(COMPANION_PERSONA_V2_PROMPT_ID, "companion-persona-v2");
+});
+
+test("15c：validateCompanionOutput 剥离 markdown（标题/加粗/列表/链接）", () => {
+  const r = validateCompanionOutput(
+    "### 学习伴星功能\n\n**语音对话**：支持实时语音。\n\n- 功能一\n- 功能二\n\n[链接](https://x.com) 结尾。",
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.ok(!r.text.includes("###"), "标题标记已剥离");
+  assert.ok(!r.text.includes("**"), "加粗标记已剥离");
+  assert.ok(r.text.includes("语音对话"), "加粗内容保留");
+  assert.ok(!r.text.includes("[链接](https://x.com)"), "链接语法已剥离");
+  assert.ok(r.text.includes("链接"), "链接文本保留");
+  assert.ok(r.text.includes("· 功能一"), "列表转 · 符号");
+});
+
+test("15c：validateCompanionOutput 剥离代码块标记", () => {
+  const r = validateCompanionOutput("```ts\nconst a = 1;\n```\n后续正文。");
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.ok(!r.text.includes("```"), "代码块标记已剥离");
+  assert.ok(r.text.includes("const a = 1;"), "代码内容保留");
 });

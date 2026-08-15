@@ -6,13 +6,13 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import {
   api,
   CardDetailResponse,
-  CardSetDetailResponse,
   CardListItem,
   CardEvidenceGroup,
   EvidenceOverride,
@@ -21,7 +21,6 @@ import {
   type ValidationEvent,
 } from "@/lib/api";
 import { useIsOwner } from "@/lib/use-current-user";
-import { compareCardSetMembers } from "@/lib/card-set-members";
 import { MemberNotice } from "@/components/settings/MemberNotice";
 import { EvidenceDialog } from "@/components/EvidenceDialog";
 import { Drawer } from "@/components/ui/Drawer";
@@ -42,7 +41,8 @@ import {
   sanitizeTodayReturnTarget,
   withTodayReturnTarget,
 } from "@/lib/today-return";
-import { isCompanionV2InternalEnabled } from "@/lib/feature-flags";
+import { isLearningRunV1Enabled } from "@/lib/feature-flags";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { statusMap } from "@/lib/status-map";
 import {
   formatSafeImageUnitReference,
@@ -133,8 +133,9 @@ async function locateCardInList(
 
     cursor = result.nextCursor;
     pages += 1;
-    // 用最新 total 动态算页数上限（50 页 ≈ 5000 张，超出即放弃定位）
-    const maxPages = Math.min(Math.max(Math.ceil(total / 100), 1), 50);
+    // 用最新 total 动态算页数上限（F#3 round3：降到 20 页 ≈ 2000 张即可覆盖
+    // 绝大多数用户库，超出即放弃定位——冷路径最多 20 次往返，避免 50 页瀑布）
+    const maxPages = Math.min(Math.max(Math.ceil(total / 100), 1), 20);
     if (pages >= maxPages) {
       outcome = { kind: "not-found", total: Math.max(total, items.length, 1) };
       break;
@@ -156,6 +157,20 @@ export default function CardPage() {
   const { isOwner, loading: ownerLoading } = useIsOwner();
   const params = useParams<{ id: string }>();
   const cardId = params?.id;
+  // P5（文档 16 §14.2）：Card 详情页发布 bounded context（Key Point 由
+  // 选中目标补充；无选中时仅 card 实体）。
+  // F#7（第六轮 🟡8）：useMemo 稳定对象，避免 hook 内 JSON.stringify 每渲重跑。
+  useMainPageContext(useMemo(
+    () => cardId ? {
+      routeRef: { kind: "card", cardId },
+      pageKind: "card",
+      entityRefs: [{ kind: "card", cardId }],
+      interactionState: "idle",
+      capabilityHints: ["focus_ui_target"],
+      sensitivity: "normal",
+    } : null,
+    [cardId],
+  ));
   const router = useRouter();
   const searchParams = useSearchParams();
   const searchReturnTarget = sanitizeSearchReturnTarget(searchParams.get("returnTo"));
@@ -204,8 +219,6 @@ export default function CardPage() {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [nextReviewAt, setNextReviewAt] = useState<string | null>(null);
   const [cardListItem, setCardListItem] = useState<CardListItem | null>(null);
-  const [cardSetDetail, setCardSetDetail] =
-    useState<CardSetDetailResponse | null>(null);
   const [pager, setPager] = useState<PagerState>(EMPTY_PAGER);
   const [openKeyPointId, setOpenKeyPointId] = useState<string | null>(null);
   const [evidencePanelOpen, setEvidencePanelOpen] = useState(false);
@@ -263,7 +276,6 @@ export default function CardPage() {
     setValidationError(null);
     setNextReviewAt(null);
     setCardListItem(null);
-    setCardSetDetail(null);
     setPager(EMPTY_PAGER);
     setOpenKeyPointId(null);
     setEvidencePanelOpen(false);
@@ -271,30 +283,6 @@ export default function CardPage() {
     setLifecycleMessage(null);
     setLifecycleConsentRequired(false);
   }, [cardId]);
-
-  useEffect(() => {
-    const parentSetId =
-      data?.card.id === cardId ? data.card.cardSetId : null;
-    if (!parentSetId) {
-      setCardSetDetail(null);
-      return;
-    }
-
-    let cancelled = false;
-    void api.getCardSet(parentSetId)
-      .then((result) => {
-        if (!cancelled) setCardSetDetail(result);
-      })
-      .catch(() => {
-        // Membership still comes from the card row; sibling navigation is an
-        // enhancement and must not block the card itself.
-        if (!cancelled) setCardSetDetail(null);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [cardId, data?.card.cardSetId, data?.card.id]);
 
   const fetchCardDetail = useCallback(async () => {
     if (!cardId) return;
@@ -646,17 +634,6 @@ export default function CardPage() {
   const activeKeyPoint = keyPoints.find(
     (keyPoint) => keyPoint.id === openKeyPointId,
   );
-  const setCards = cardSetDetail
-    ? [...cardSetDetail.cards].sort(compareCardSetMembers)
-    : [];
-  const setCardIndex = setCards.findIndex(
-    (item) => item.card.id === card.id,
-  );
-  const previousSetCard =
-    setCardIndex > 0 ? setCards[setCardIndex - 1] : null;
-  const nextSetCard =
-    setCardIndex >= 0 ? setCards[setCardIndex + 1] ?? null : null;
-
   const openEvidenceDetail = (keyPointId: string) => {
     setEvidencePanelOpen(false);
     setOpenKeyPointId(keyPointId);
@@ -775,54 +752,6 @@ export default function CardPage() {
       </header>
 
       <div className="card-detail-main">
-        {card.cardSetId && (
-          <nav
-            className="card-detail-set-navigation"
-            aria-label="卡组内学习卡导航"
-          >
-            <Link
-              href={`/card-sets/${card.cardSetId}`}
-              className="card-detail-set-link"
-            >
-              <Icon.Card aria-hidden="true" />
-              <span>
-                {cardSetDetail?.cardSet.title?.trim() || "查看所属卡组"}
-              </span>
-            </Link>
-            {setCardIndex >= 0 && (
-              <>
-                <span className="card-detail-set-position">
-                  {card.scope === "overview" ? "总览卡" : "章节卡"} ·{" "}
-                  {setCardIndex + 1} / {setCards.length}
-                </span>
-                <span className="card-detail-set-siblings">
-                  {previousSetCard ? (
-                    <Link
-                      href={`/cards/${previousSetCard.card.id}`}
-                      aria-label="卡组内上一张学习卡"
-                    >
-                      <Icon.Chevron aria-hidden="true" />
-                      上一张
-                    </Link>
-                  ) : (
-                    <span aria-hidden="true">上一张</span>
-                  )}
-                  {nextSetCard ? (
-                    <Link
-                      href={`/cards/${nextSetCard.card.id}`}
-                      aria-label="卡组内下一张学习卡"
-                    >
-                      下一张
-                      <Icon.Chevron aria-hidden="true" />
-                    </Link>
-                  ) : (
-                    <span aria-hidden="true">下一张</span>
-                  )}
-                </span>
-              </>
-            )}
-          </nav>
-        )}
         <div className="card-detail-alerts" aria-live="polite">
           {partialCoverageWarning && (
             <div
@@ -910,7 +839,7 @@ export default function CardPage() {
               </div>
               <span className="card-detail-overview-kicker">
                 <i aria-hidden="true" />
-                个人理解工作台
+                单张学习卡
               </span>
               <h1 id="card-detail-title">{cardTitle}</h1>
               <div className="card-detail-core-understanding">
@@ -927,8 +856,12 @@ export default function CardPage() {
             {keyPoints[0] && (
               <LearningCardActions
                 compact={layoutMode === "compact"}
+                live={isLearningRunV1Enabled()}
                 onStartJourney={() => {
-                  const target = activeKeyPoint ?? keyPoints[0];
+                  // Legacy cards can still contain several key points. Keep the
+                  // formal target stable instead of letting an evidence click
+                  // silently change which objective the Run will assess.
+                  const target = keyPoints[0];
                   try {
                     sessionStorage.setItem(
                       `companion-origin:${cardId}`,
@@ -937,10 +870,12 @@ export default function CardPage() {
                   } catch {
                     // Origin restore is best effort; the Session remains authoritative.
                   }
-                  const route = isCompanionV2InternalEnabled()
-                    ? `/cards/${cardId}/companion?keyPoint=${encodeURIComponent(target.id)}`
-                    : `/cards/${cardId}/validate?keyPoint=${encodeURIComponent(target.id)}`;
-                  router.push(route);
+                  // 方案 16：统一 LearningRun 是唯一入口（旧 companion/validate
+                  // 分支已于 P9 删除）。fail closed：flag 关闭时不发起。
+                  const route = isLearningRunV1Enabled()
+                    ? `/learning-runs/new?origin=card&cardId=${encodeURIComponent(cardId)}&keyPointId=${encodeURIComponent(target.id)}&returnTo=${encodeURIComponent(`/cards/${cardId}`)}`
+                    : null;
+                  if (route) router.push(route);
                 }}
                 onViewEvidence={revealEvidenceWorkspace}
               />
@@ -1110,12 +1045,15 @@ function appendUniqueCards(
   ];
 }
 
+// F#7（第六轮 🟠3 扩展 + 🟡8）：Intl 构造器提升为模块级单例。
+const cardDateFmt = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+
 function formatCardDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "日期未知";
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(date);
+  return cardDateFmt.format(date);
 }

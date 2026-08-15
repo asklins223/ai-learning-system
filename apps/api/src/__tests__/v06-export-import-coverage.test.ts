@@ -113,11 +113,15 @@ test("v0.6 导出：exportManifest 包含所有 v0.6 新表", () => {
 test("v0.6 导出：exportWorkspace 查询所有 v0.6 新表", () => {
   const source = readExportService();
 
-  // Each v0.6 table should have a query (tx.query.xxx.findMany)
+  // B#1（round-5 审计）：导出查询已从 `tx.query.X.findMany` 全量加载改为 keyset 分批
+  // `tx.select().from(X)...limit(batch)`（见 modules/export/service.ts）。原断言检查
+  // `tx.query.${table}`/`.query.${table}` 是旧全量 findMany 机制的实现细节，随 B#1 失效。
+  // 现改为断言每张 v0.6 表仍在导出内被查询：大表走 keyset 分批（select().from），
+  // 唯 validation_submission_jobs 按 submission 外键有界（非 workspace 全量）仍走 findMany，
+  // 两者都证明表被导出读取。意图不变（每张 v0.6 表均进入导出文件）。
   for (const table of V06_NEW_TABLES) {
-    // Check that the table name appears in a query context
     assert.ok(
-      source.includes(`tx.query.${table}`) || source.includes(`.query.${table}`),
+      source.includes(`select().from(${table})`) || source.includes(`query.${table}`),
       `Export service should query ${table}`,
     );
   }

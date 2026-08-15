@@ -12,7 +12,7 @@
  * - 验证类型：ValidationEvent, StartSessionResult, RevealResultData 等
  * - 复习类型：ReviewWithCard, ReviewAttemptStartResult 等
  * - 来源类型：SourceRow, SourceDetail
- * - 理解星图类型：UnderstandingState, UnderstandingGraphResponse
+ * - 理解星图类型：UnderstandingState
  * - 搜索/统计/基准测试类型
  * - Markdown 导入类型和工具函数
  * - 证据对齐工具函数：effectiveAlignment, isHardEvidence
@@ -717,6 +717,8 @@ export interface SanitizedReviewItem {
   status: string;
   nextReviewAt: string;
   intervalDays: number;
+  /** P3 LearningRun 切流：review origin 的 CAS 字段。 */
+  generation: number;
   reviewReason: ReviewReason;
 }
 
@@ -847,54 +849,6 @@ export interface UnderstandingState {
   nextReviewAt: string | null;
   reviewStatus: string | null;
   misunderstandingCount: number;
-}
-
-export type UnderstandingGraphNodeType = "source" | "note" | "card" | "key_point";
-export type UnderstandingGraphEdgeType = "derived_from" | "generated_from" | "contains";
-
-export interface UnderstandingGraphNode {
-  id: string;
-  entityId: string;
-  type: UnderstandingGraphNodeType;
-  label: string;
-  description: string | null;
-  state: string | null;
-  href: string;
-  parentId: string | null;
-  evidenceCoverage: number | null;
-  hardEvidenceCount: number;
-  softEvidenceCount: number;
-  misunderstandingCount: number;
-  lastValidatedAt: string | null;
-  nextReviewAt: string | null;
-  metadata: Record<string, unknown>;
-}
-
-export interface UnderstandingGraphEdge {
-  id: string;
-  from: string;
-  to: string;
-  type: UnderstandingGraphEdgeType;
-  strength: number;
-}
-
-export interface UnderstandingGraphMeta {
-  generatedAt: string;
-  totalCards: number;
-  nodeCount: number;
-  edgeCount: number;
-  sourceCount: number;
-  noteCount: number;
-  cardCount: number;
-  keyPointCount: number;
-  truncated: boolean;
-  stateCounts: Record<string, number>;
-}
-
-export interface UnderstandingGraphResponse {
-  nodes: UnderstandingGraphNode[];
-  edges: UnderstandingGraphEdge[];
-  meta: UnderstandingGraphMeta;
 }
 
 // ─── 搜索类型 ────────────────────────────────────────────────────────

@@ -21,33 +21,41 @@ export function useCurrentUser(): {
   // 竞态守卫：连续 reload（IDENTITY_CHANGED_EVENT 快速触发）时，
   // 只允许最后一次请求的响应落地，旧响应不得覆盖新响应。
   const reloadSeqRef = useRef(0);
+  // F20（round4）：卸载守卫——对齐 useIsOwner 的 cancelled 模式，避免卸载后
+  // resolve 的迟到 setState（react18 虽无害，但与同文件 RBAC hook 一致化）。
+  const mountedRef = useRef(true);
 
   const reload = useCallback(() => {
+    if (!mountedRef.current) return;
     const seq = reloadSeqRef.current + 1;
     reloadSeqRef.current = seq;
     setLoading(true);
     setError(false);
     void api.getMe()
       .then((user) => {
-        if (reloadSeqRef.current !== seq) return;
+        if (!mountedRef.current || reloadSeqRef.current !== seq) return;
         setCurrentUser(user);
         setError(false);
       })
       .catch(() => {
-        if (reloadSeqRef.current !== seq) return;
+        if (!mountedRef.current || reloadSeqRef.current !== seq) return;
         setCurrentUser(null);
         setError(true);
       })
       .finally(() => {
-        if (reloadSeqRef.current !== seq) return;
+        if (!mountedRef.current || reloadSeqRef.current !== seq) return;
         setLoading(false);
       });
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     reload();
     window.addEventListener(IDENTITY_CHANGED_EVENT, reload);
-    return () => window.removeEventListener(IDENTITY_CHANGED_EVENT, reload);
+    return () => {
+      mountedRef.current = false;
+      window.removeEventListener(IDENTITY_CHANGED_EVENT, reload);
+    };
   }, [reload]);
 
   return { currentUser, loading, error, reload };

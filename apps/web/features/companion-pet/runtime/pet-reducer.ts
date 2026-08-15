@@ -913,6 +913,30 @@ export function petReducer(
       };
     }
 
+    // 15a 根因修复（2026-08-12+ 真机实测）：character.cue 必须消费 seq。
+    // worker 在 assistant.status 与 assistant.delta 之间下发 cue（seq 连续），
+    // 此前 reducer 无此 case → 事件被忽略且不推进 latestEventSeq → 后续
+    // delta/final 在 classifyDialogueEvent 判 "future" 全部被拒 → UI 永久卡
+    // "伴星正在想"（停止/播完全部失效）。此处消费 seq 并保存最近 cue
+    //（emotion 域，供表现层使用；cue 不参与 turn 状态）。
+    case "character.cue": {
+      return {
+        state: withSeq(
+          {
+            ...state,
+            emotion: {
+              // wire cue 无 generation（事件级携带），存入 emotion 域时补上供
+              // 表现层做过期守卫。
+              cue: action.cue ? { ...action.cue, generation: action.generation } : null,
+              receivedAt: Date.now(),
+            },
+          },
+          action.seq,
+        ),
+        effects,
+      };
+    }
+
     case "assistant.delta": {
       if (state.turn.kind !== "running" || state.turn.runId !== action.runId) {
         return { state, effects };
@@ -1024,13 +1048,23 @@ export function petReducer(
       // M3（审计修复）：已在 speaking 且同 run 时，pump 正在播放旧段——保持
       // 当前 segmentId 不变（否则 playback_finished 的 segmentId 校验失配，
       // voice 停在 speaking 无恢复），但仍入队新段由 pump 按 ordinal 续播。
+      // 15c 修正：**必须推进 segmentId**——onDrained 回传的是最后一段，若
+      // voice.segmentId 停留在第一段，playback_finished 校验必失配 → voice
+      // 永久卡 speaking（"伴星正在说"一直展示）。段事件在 delta 中逐个到达
+      //（15b），每段都更新 segmentId，最后一段必然匹配。
       if (
         state.voice.kind === "speaking" &&
         state.voice.runId === action.runId &&
         state.voice.generation === action.generation
       ) {
         return {
-          state: withSeq(state, action.seq),
+          state: withSeq(
+            {
+              ...state,
+              voice: { ...state.voice, segmentId: action.segment.segmentId },
+            },
+            action.seq,
+          ),
           effects: [{
             kind: "play_voice_segment",
             conversationId: action.conversationId,

@@ -22,6 +22,9 @@ import { requireSession } from "../identity/middleware.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
 import { assertSafeTtsInput, DEFAULT_VOICE_PROFILE } from "./voice-service.ts";
 import { edgeTtsSynthesize, edgeTtsSynthesizeStream, EdgeTtsError } from "./voice-providers/edge-tts.ts";
+import { stripVoiceExpressionTags } from "@ailearn/shared/voice-expression-tags";
+import { qwenTtsSynthesizeStream, QwenTtsError, withQwenConcurrencyLimit } from "./voice-providers/qwen-tts.ts";
+import { loadTtsEngineConfig } from "./voice-providers/tts-config.ts";
 import { companionTtsRequestV1Schema, companionTtsStreamRequestV1Schema } from "@ailearn/shared";
 import { siliconFlowTranscribe, SiliconFlowAsrError } from "./voice-providers/siliconflow-asr.ts";
 import {
@@ -164,8 +167,45 @@ export async function voiceRoutes(app: FastifyInstance) {
       });
     }
     try {
+      // 15b：TTS 引擎选择——请求显式 engine 优先，缺省用 config tts.engine（默认 qwen）。
+      const engine = parsed.data.engine ?? loadTtsEngineConfig().engine;
+      if (engine === "qwen") {
+        const cfg = loadTtsEngineConfig().qwen;
+        if (!cfg.workspaceId) {
+          return reply.code(502).send({
+            error: "TTS_FAILED", code: "TTS_FAILED",
+            message: "qwen TTS 未配置业务空间 ID（config tts.qwen.workspaceId）", recoverable: true,
+          });
+        }
+        const result = await withQwenConcurrencyLimit(() => qwenTtsSynthesizeStream(parsed.data.text, {
+          workspaceId: cfg.workspaceId,
+          apiKey: process.env.DASHSCOPE_API_KEY ?? "",
+          model: cfg.model,
+          // qwen 音色固定走 config（前端 voice 是 edge 音色，不混用）。
+          voice: cfg.voice,
+          format: cfg.format,
+          sampleRate: cfg.sampleRate,
+          // 15b 二期：指令控制（高质量声音描述，config tts.qwen.instruction）
+          instruction: cfg.instruction,
+        }));
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          "Content-Type": result.contentType,
+          "Cache-Control": "no-store",
+          "Transfer-Encoding": "chunked",
+        });
+        const nodeStream = Readable.fromWeb(result.stream as unknown as import("node:stream/web").ReadableStream);
+        nodeStream.on("error", () => reply.raw.destroy());
+        nodeStream.pipe(reply.raw);
+        req.raw.on("close", () => nodeStream.destroy()); // 打断 → 关闭上游 WS
+        return;
+      }
+      // 2026-08-13（引擎兼容）：情感/富语言标签是 qwen-audio 专属能力——
+      // edge-tts 会把 `[excited]` 等标签当普通文字朗读，合成前必须剥离。
+      // （emotion 字段仍由 worker 解析下发，Live2D 表情与引擎无关。）
+      const edgeText = stripVoiceExpressionTags(parsed.data.text);
       const result = await edgeTtsSynthesizeStream(
-        parsed.data.text,
+        edgeText,
         parsed.data.voice ?? "",
         {
           baseUrl: process.env.EDGE_TTS_BASE_URL,
@@ -184,10 +224,10 @@ export async function voiceRoutes(app: FastifyInstance) {
       nodeStream.pipe(reply.raw);
       req.raw.on("close", () => nodeStream.destroy()); // 打断 → abort 上游
     } catch (err) {
-      if (err instanceof EdgeTtsError) {
+      if (err instanceof EdgeTtsError || err instanceof QwenTtsError) {
         return reply.code(502).send({
           error: "TTS_FAILED", code: "TTS_FAILED",
-          message: "edge-tts 流式合成失败（降级纯文字）", recoverable: true,
+          message: "语音合成失败（降级纯文字）", recoverable: true,
         });
       }
       throw err;
@@ -286,10 +326,18 @@ export async function voiceRoutes(app: FastifyInstance) {
     // review nit：mimetype 校验（拒绝非音频，防伪装上传）
     const mimetype = part.mimetype ?? "";
     if (mimetype !== "" && !/^(audio|application\/octet-stream)/.test(mimetype)) {
+      // PERF-B4/N1 修复：早返回前排空 multipart 的 body 流，避免请求体未读完
+      // 导致连接无法干净 keep-alive 复用 / socket 挂起。
+      part.file.resume();
       return reply.code(415).send({ error: "UNSUPPORTED_MEDIA_TYPE", code: "UNSUPPORTED_MEDIA_TYPE", message: `不支持的内容类型 ${mimetype}` });
     }
     // review should-fix（防御性）：流读阶段超限同样抛 FST_REQ_FILE_TOO_LARGE——
     // 整块读取纳入同一 try/catch 转 413（非 500）。
+    // 轻微·19（round-4）：音频整体入内存经 Buffer.concat 组装。保持现状并标注——
+    // ① hard 10MB/请求 + 60s 速率上限使内存峰值有界（~2× 体积）；
+    // ② audioMagicMatchesDeclaration 需完整 buffer 做 magic-byte 校验，且对象存储
+    // 上传需一次性 body；改流式消费需在上传中途校验 magic 并处理"已上传一半但类型
+    // 不匹配"的回滚，复杂度与风险明显高于受 10MB 上限约束的整块读。故维持整块读。
     let audio: Buffer;
     try {
       const chunks: Uint8Array[] = [];

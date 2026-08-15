@@ -11,7 +11,8 @@
 
 import { eq, and, lt, desc, sql } from "drizzle-orm";
 import { createHmac, timingSafeEqual, randomUUID } from "node:crypto";
-import { sha256Utf8V1, companionConversationSnapshotV1Schema } from "@ailearn/shared";
+import { companionConversationSnapshotV1Schema } from "@ailearn/shared";
+import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import {
   companionConversations,
   companionMessages,
@@ -25,6 +26,9 @@ import { logCompanionAudit } from "../companion-shell/audit-service.ts";
 const CURSOR_CONTEXT = "companion-conversation-cursor-v1:";
 const CURSOR_TTL_MS = 24 * 3_600_000;
 const MAX_USER_INBOX_TITLE = "伴星消息";
+// F9（round-4）：snapshot 复原最多加载的 stream 事件条数（取最近 N 条），
+// 约束 24h TTL 窗口内长 run 的快照体体积。
+const SNAPSHOT_EVENT_LIMIT = 500;
 
 // ─── 签名 cursor（§6.3） ─────────────────────────────────────────────────
 
@@ -249,13 +253,21 @@ export async function getCompanionConversationSnapshot(args: {
       let activeRun: Record<string, unknown> | null = null;
       if (activeRuns[0]) {
         const run = activeRuns[0];
+        // F9（round-4）：snapshot 主路径曾无 LIMIT 全量加载该 run 全部 stream 事件
+        // （含 jsonb payload）入内存，长 run（24h TTL 窗口内）下快照体无界。改为
+        // 取最近 SNAPSHOT_EVENT_LIMIT 条（倒序 LIMIT 再正序），约束恢复主路径内存/
+        // 传输体积；lastEventSeq 基于尾部事件计算保持准确，preview 尾部拼接可能被
+        // 截断并由既有 previewTruncated 降级路径处理（与 delta TTL gap 一致语义）。
         const events = await tx.execute<{ seq: string; type: string; payload: unknown }>(sql`
           SELECT seq, type, payload
           FROM companion_stream_events
           WHERE conversation_id = ${args.conversationId}
             AND run_id = ${run.id}
-          ORDER BY seq ASC
+          ORDER BY seq DESC
+          LIMIT ${SNAPSHOT_EVENT_LIMIT}
         `);
+        // 倒序翻转回 seq 升序，保持既有顺序语义。
+        events.reverse();
         let previewText = "";
         let sawDelta = false;
         // delta 事件是 24h TTL 的短生命周期数据（§5.3），而 snapshot 是恢复
@@ -263,6 +275,10 @@ export async function getCompanionConversationSnapshot(args: {
         // 让恢复路径依赖可变 TTL 数据抛 500——降级为"已重建部分"，
         // previewTextSha256 对截断结果计算保持一致，完整文本由 durable message
         // 与后续 SSE delta 续读补全。
+        // F9（round-4）：用数组累积 textDelta 再 join 取代 `previewText += textDelta`
+        // （长 run 下 O(n²) 重复字符串拼接），仅用 running 字符计数做 appendFrom 校验。
+        const deltaChunks: string[] = [];
+        let previewLength = 0;
         let previewTruncated = false;
         for (const event of events) {
           if (event.type !== "assistant.delta") continue;
@@ -272,16 +288,18 @@ export async function getCompanionConversationSnapshot(args: {
           if (
             typeof appendFrom !== "number" ||
             !Number.isInteger(appendFrom) ||
-            appendFrom !== previewText.length ||
+            appendFrom !== previewLength ||
             typeof textDelta !== "string" ||
             textDelta.length < 1
           ) {
             previewTruncated = true;
             break;
           }
-          previewText += textDelta;
+          deltaChunks.push(textDelta);
+          previewLength += textDelta.length;
           sawDelta = true;
         }
+        if (deltaChunks.length > 0) previewText = deltaChunks.join("");
         if (previewTruncated) {
           // eslint-disable-next-line no-console
           console.warn(`companion snapshot: active run ${run.id} preview truncated (delta TTL gap)`);
@@ -631,14 +649,17 @@ export async function deleteCompanionConversation(args: {
         throw new CompanionConversationError("NOT_FOUND", 404, "conversation not found");
       }
 
-      // 仅 active turn（accepted/running/cancel_requested）：原子 superseded + job cancel fence
+      // 仅 active turn（accepted/running/cancel_requested）：原子 superseded + job cancel fence。
+      // 轻微·17（round-4）：不变量保证每会话恰 0/1 条 active turn，仍加 LIMIT 2
+      // 防数据异常下深加放大（安全阻尼，不改变语义）。
       const activeRuns = await tx
         .select({ id: companionTurnRuns.id, jobId: companionTurnRuns.jobId })
         .from(companionTurnRuns)
         .where(and(
           eq(companionTurnRuns.conversationId, args.conversationId),
           sql`${companionTurnRuns.status} IN ('accepted', 'running', 'cancel_requested')`,
-        ));
+        ))
+        .limit(2);
       if (activeRuns.length > 0) {
         for (const run of activeRuns) {
           await tx

@@ -277,9 +277,9 @@ Owner 于 2026-08-12 解除 streaming voice blocked（见 §4.5）。原"六文�
 | 文件 | 原状态 | 现状 |
 | --- | --- | --- |
 | `voice/companion-asr-router.ts` | dead | **已接线**：`companion-streaming-asr-runtime` 调 `decideAsrRoute`/`staticCompatPass`（三路由决策） |
-| `voice/companion-asr-probe-runner.ts` | dead | 纯逻辑基准仍无生产调用（worker 内以 `probeRecognizeElapsed` 等价实现跑真实探测） |
-| `voice/companion-sherpa-sensevoice.ts` | dead | **已接线**：Electron utility process（`desktop/src/voice/asr-utility-worker.ts`）以 sherpa-onnx-node `OfflineRecognizer` 实现同一语义；renderer 经 `companion-asr-client` 访问 |
-| `voice/companion-dual-capture.ts` | dead | 纯状态机无生产调用；运行时接线在 `companion-dual-capture-runtime`（AudioWorklet PCM + 下采样） |
+| `voice/companion-asr-probe-runner.ts` | dead | 2026-08-15 删除（worker 内 `probeRecognizeElapsed` 等价实现承担真实探测） |
+| `voice/companion-sherpa-sensevoice.ts` | dead | 2026-08-15 删除（Electron utility process `desktop/src/voice/asr-utility-worker.ts` 以 sherpa-onnx-node `OfflineRecognizer` 实现同一语义） |
+| `voice/companion-dual-capture.ts` | dead | 2026-08-15 删除（运行时接线在 `companion-dual-capture-runtime`：AudioWorklet PCM + 下采样） |
 | `voice/companion-stream-player.ts` | dead | **已接线**：`companion-stream-playback-runtime` 以 `StreamPlaybackController` 驱动 `/voice/tts/stream` 流式播放 |
 | `voice/companion-audio-buffer.ts` | dead | **已接线**：`companion-dual-capture-runtime` 用 `BoundedAudioBuffer` 累积 48k PCM |
 

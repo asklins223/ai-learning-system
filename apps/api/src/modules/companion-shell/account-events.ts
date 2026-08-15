@@ -125,12 +125,12 @@ export async function openCompanionAccountEventStream(args: {
       else writeIfNew(payload);
     });
 
-    const currentAccount = (await getCompanionOverview(args.userId, args.workspaceId)).account;
-    const initialEpoch =
-      !currentAccount.globalEnabled && currentAccount.epoch > resolved.after
-        ? currentAccount.epoch
-        : null;
-
+    // R7（round-3 审计）：onAbort(close) 必须在第一个可中断的 await
+    // （getCompanionOverview 的 DB 读）之前注册。原实现先 await 再 onAbort，
+    // 若客户端在 await 期间断开，Node 的 'close' 已被消费、不再回调后注册的
+    // 监听器 → close() 永不执行 → 账号槽位（每进程 6）与 NOTIFY 订阅永久泄漏
+    // → 触发 429。close 幂等（closed 守卫），即使先于 subscribe/start 触发也安全
+    // （unsubscribe/Pending 均可空）。start() 内的 onAbort(close) 保留为幂等兜底。
     const close = () => {
       if (closed) return;
       closed = true;
@@ -140,10 +140,13 @@ export async function openCompanionAccountEventStream(args: {
       releaseAccountSlot(args.userId);
       args.writer.close();
     };
-    // 2026-08-11：onAbort 在返回前注册（幂等 close）——此前只在 start() 内注册，
-    // open() 返回后、start() 前连接断开时（Node 'close' 已触发不再回调）
-    // close() 永不执行 → 每账号连接槽位与 NOTIFY 订阅泄漏，可被耗尽导致 429。
     args.writer.onAbort(close);
+
+    const currentAccount = (await getCompanionOverview(args.userId, args.workspaceId)).account;
+    const initialEpoch =
+      !currentAccount.globalEnabled && currentAccount.epoch > resolved.after
+        ? currentAccount.epoch
+        : null;
 
     return {
       statusCode: 200,

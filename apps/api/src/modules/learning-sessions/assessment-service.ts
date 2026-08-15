@@ -17,11 +17,7 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
-import {
-  computeAssessmentReportHash,
-  computeAssessmentInputHash,
-  computeFailClosedAssessmentDecisionHash,
-} from "@ailearn/shared";
+import { computeAssessmentReportHash, computeAssessmentInputHash, computeFailClosedAssessmentDecisionHash } from "@ailearn/shared/learning-assessment";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession } from "../identity/middleware.ts";
 import {
@@ -257,14 +253,25 @@ export interface AssessmentTx {
 export function createPgAssessmentRepository(transaction: AssessmentTx): AssessmentRepository {
   return {
     async findLockedArtifact(workspaceId, userId, artifactId) {
+      // 轻微·16（round-4）：不再载入整条 payload jsonb，只取 extractAnswerText
+      // 真正用到的两个字段（text 与 confirmedTranscript，按 modality 二选一）。
       const rows = (await transaction.execute(
         sql`
-          SELECT id, episode_id AS "episodeId", status, modality, payload
+          SELECT id, episode_id AS "episodeId", status, modality,
+                 payload->>'text' AS "text",
+                 payload->>'confirmedTranscript' AS "confirmedTranscript"
           FROM learning_response_artifacts
           WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND id = ${artifactId}
           LIMIT 1
         `,
-      )) as Array<Record<string, unknown>>;
+      )) as Array<{
+        id: unknown;
+        episodeId: unknown;
+        status: unknown;
+        modality: unknown;
+        text: unknown;
+        confirmedTranscript: unknown;
+      }>;
       const row = rows[0];
       if (!row) return null;
       return {
@@ -272,7 +279,12 @@ export function createPgAssessmentRepository(transaction: AssessmentTx): Assessm
         episodeId: String(row.episodeId),
         status: String(row.status),
         modality: String(row.modality),
-        payload: (row.payload as Record<string, unknown> | null) ?? null,
+        // 按 modality 合成最小 payload：text_or_mixed → text，voice → confirmedTranscript。
+        payload: {
+          ...(row.modality === "voice"
+            ? { confirmedTranscript: typeof row.confirmedTranscript === "string" ? row.confirmedTranscript : "" }
+            : { text: typeof row.text === "string" ? row.text : "" }),
+        },
       };
     },
     async findEpisodeRubricTargets(workspaceId, userId, episodeId) {

@@ -15,14 +15,44 @@
  * - `$...$` 行内数学公式 / `$$...$$` 块级数学公式（KaTeX 渲染）
  * - 行内自动转义 HTML
  */
-import React, { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import katex from "katex";
+import React, { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+
+// F4：KaTeX 改为按需加载——不再静态 `import katex`（会落入共享 chunk）。
+// module 级缓存 + 实例引用：renderMath 是同步调用，无法 await，因此在加载
+// 完成后缓存 katex 实例并发一次 re-render；尚未加载时公式以纯文本回退显示，
+// 加载完成后自动重渲为 KaTeX HTML，渲染行为与原先一致。
+let katexInstance: typeof import("katex") | null = null;
+let katexLoadPromise: Promise<typeof import("katex")> | null = null;
+
+function loadKatex(): Promise<typeof import("katex")> {
+  if (katexInstance) return Promise.resolve(katexInstance);
+  if (!katexLoadPromise) {
+    // F4：KaTeX 原先在根 layout 全局静态 import（全站每页下载 CSS/字体）；
+    // 改为按需 dynamic import——仅在实际渲染含公式的页面才加载 JS 与 CSS。
+    katexLoadPromise = Promise.all([
+      import("katex"),
+      import("katex/dist/katex.min.css"),
+    ]).then(([mod]) => {
+      // katex 是 CommonJS 模块：webpack 把导出 attach 到命名空间（含 `default`）。
+      // 取 `default` 若存在，否则用命名空间本身。
+      const candidate = (mod as { default?: unknown }).default;
+      const instance = (candidate && typeof candidate === "object" ? candidate : mod) as typeof import("katex");
+      katexInstance = instance;
+      return instance;
+    }).catch(() => {
+      // 加载失败：清除 promise 允许后续重试，当前以纯文本回退。
+      katexLoadPromise = null;
+      throw new Error("katex load failed");
+    });
+  }
+  return katexLoadPromise;
+}
 
 interface Props {
   source: string;
   /** 页面已有主标题时，将 Markdown 标题整体下移一级，避免出现多个 h1。 */
   demoteHeadings?: boolean;
-  /** 2026-08-15（恢复）：false 时远程图片不自动加载，渲染占位提示（默认 false）。 */
+  /** 只读审计页可禁用远程图片，避免打开历史记录时向第三方发送网络请求。 */
   allowRemoteImages?: boolean;
 }
 
@@ -113,25 +143,13 @@ function safeLinkDestination(escapedUrl: string): SafeLinkDestination | null {
 }
 
 /** 图片延续原安全边界：只允许 HTTPS 与规范化后的站内上传路径。 */
-/** 远程图片判定：http(s) 且非同源（本地 /uploads、data: 不算远程）。 */
-function isRemoteImageUrl(src: string): boolean {
-  try {
-    const base = typeof window !== "undefined" ? window.location.origin : "";
-    const url = new URL(src, base || "http://local.invalid");
-    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-    if (!base) return true; // SSR：http(s) 一律视为远程（保守）
-    return url.origin !== base;
-  } catch {
-    return false;
-  }
-}
-
-function safeImageDestination(escapedUrl: string): string | null {
+function safeImageDestination(escapedUrl: string, allowRemoteImages = true): string | null {
   const src = decodeEscapedHtml(escapedUrl);
   if (!src || src !== src.trim() || hasUnsafeUrlCharacters(src)) return null;
   if (src.startsWith("//") || src.startsWith("\\")) return null;
 
   if (/^https:\/\//i.test(src)) {
+    if (!allowRemoteImages) return null;
     try {
       const parsed = new URL(src);
       return parsed.protocol === "https:" ? escapedUrl : null;
@@ -166,7 +184,7 @@ function applyInlineStyles(escaped: string): string {
  * 同一次扫描同时处理 image/link，`!` 是匹配的一部分，因此图片不会先被
  * 链接规则消费。URL 和 alt 仍使用 escapeHtml() 后的值构造属性。
  */
-function renderInlineMarkup(escaped: string, allowRemoteImages = false): string {
+function renderInlineMarkup(escaped: string, allowRemoteImages: boolean): string {
   const markdownDestination = /(!?)\[([^\]\n]*)\]\(([^)\n]+)\)/g;
   let output = "";
   let cursor = 0;
@@ -177,14 +195,12 @@ function renderInlineMarkup(escaped: string, allowRemoteImages = false): string 
 
     const [whole, imageMarker, label, destination] = match;
     if (imageMarker === "!") {
-      const safeSrc = safeImageDestination(destination);
-      if (!safeSrc) {
-        output += applyInlineStyles(whole);
-      } else if (!allowRemoteImages && isRemoteImageUrl(safeSrc)) {
-        output += `<span class="md-image-blocked">远程图片未自动加载：${applyInlineStyles(label)}</span>`;
-      } else {
-        output += `<img src="${safeSrc}" alt="${label}" class="md-image md-image--inline" loading="lazy" />`;
-      }
+      const safeSrc = safeImageDestination(destination, allowRemoteImages);
+      output += safeSrc
+        ? `<img src="${safeSrc}" alt="${label}" class="md-image md-image--inline" loading="lazy" />`
+        : /^https:\/\//i.test(decodeEscapedHtml(destination)) && !allowRemoteImages
+          ? `<span class="md-image-blocked">远程图片未自动加载：${label || "未命名图片"}</span>`
+          : applyInlineStyles(whole);
     } else {
       const safeLink = safeLinkDestination(destination);
       if (!safeLink) {
@@ -204,18 +220,21 @@ function renderInlineMarkup(escaped: string, allowRemoteImages = false): string 
 /**
  * 用 KaTeX 渲染数学公式，失败时回退为纯文本。
  * formula 已经过 escapeHtml 处理，需要先 decode 还原 LaTeX 反斜杠等字符。
+ * F4：katex 为按需加载——加载完成前以纯文本回退（加载后组件 re-render 补渲）。
  */
 function renderMath(escapedFormula: string, displayMode: boolean): string {
   const formula = decodeEscapedHtml(escapedFormula);
+  const instance = katexInstance;
+  if (!instance) return escapedFormula;
   try {
-    return katex.renderToString(formula, { throwOnError: false, displayMode });
+    return instance.renderToString(formula, { throwOnError: false, displayMode });
   } catch {
     return escapedFormula;
   }
 }
 
 /** 行内数学公式 $...$ 分割，交由 KaTeX 渲染，其余走 renderInlineMarkup */
-function renderInlineMath(s: string, allowRemoteImages = false): string {
+function renderInlineMath(s: string, allowRemoteImages: boolean): string {
   return s
     .split(/(\$[^$\n]+\$)/g)
     .map((part) => {
@@ -228,7 +247,7 @@ function renderInlineMath(s: string, allowRemoteImages = false): string {
 }
 
 /** 行内强调 / code / link / image / inline math */
-function inline(s: string, allowRemoteImages = false): string {
+function inline(s: string, allowRemoteImages: boolean): string {
   const escaped = escapeHtml(s);
   return escaped
     .split(/(`[^`\n]+`)/g)
@@ -421,8 +440,24 @@ function tokenize(src: string): Token[] {
   return tokens;
 }
 
-export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteImages = true }: Props) {
-  const tokens = tokenize(source);
+export const MarkdownPreview = React.memo(function MarkdownPreview({ source, demoteHeadings = false, allowRemoteImages = true }: Props) {
+  const [katexReady, bumpKatexReady] = useReducer((value: number) => value + 1, 0);
+  useEffect(() => {
+    let cancelled = false;
+    // F4：按需加载 KaTeX，完成后 re-render 补渲公式。
+    loadKatex()
+      .then(() => {
+        if (!cancelled) bumpKatexReady();
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // 仅首次挂载需要；katexReady 变化只为触发重渲。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  void katexReady;
+  const tokens = useMemo(() => tokenize(source), [source]);
   const containerRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const lastFocusedRef = useRef<HTMLElement | null>(null);
@@ -541,7 +576,7 @@ export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteIma
             return (
               <ul key={idx} className="md-ul">
                 {(t.items ?? []).map((it, j) => (
-                  <li key={j} dangerouslySetInnerHTML={{ __html: inline(it) }} />
+                  <li key={j} dangerouslySetInnerHTML={{ __html: inline(it, allowRemoteImages) }} />
                 ))}
               </ul>
             );
@@ -549,7 +584,7 @@ export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteIma
             return (
               <ol key={idx} className="md-ol">
                 {(t.items ?? []).map((it, j) => (
-                  <li key={j} dangerouslySetInnerHTML={{ __html: inline(it) }} />
+                  <li key={j} dangerouslySetInnerHTML={{ __html: inline(it, allowRemoteImages) }} />
                 ))}
               </ol>
             );
@@ -559,12 +594,12 @@ export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteIma
             const m = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec((t.raw ?? "").trim());
             if (m) {
               const escapedSrc = escapeHtml(m[2]);
-              const safeSrc = safeImageDestination(escapedSrc);
-              if (safeSrc && allowRemoteImages) {
+              const safeSrc = safeImageDestination(escapedSrc, allowRemoteImages);
+              if (safeSrc) {
                 return <img key={idx} src={decodeEscapedHtml(safeSrc)} alt={m[1]} className="md-image" loading="lazy" />;
               }
-              if (safeSrc && isRemoteImageUrl(safeSrc)) {
-                return <p key={idx} className="md-image-blocked">远程图片未自动加载：{m[1]}</p>;
+              if (/^https:\/\//i.test(m[2]) && !allowRemoteImages) {
+                return <p key={idx} className="md-image-blocked">远程图片未自动加载：{m[1] || "未命名图片"}</p>;
               }
             }
             return <p key={idx} dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
@@ -588,7 +623,7 @@ export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteIma
                             key={columnIndex}
                             scope="col"
                             style={alignment ? { textAlign: alignment } : undefined}
-                            dangerouslySetInnerHTML={{ __html: inline(header) }}
+                            dangerouslySetInnerHTML={{ __html: inline(header, allowRemoteImages) }}
                           />
                         );
                       })}
@@ -603,7 +638,7 @@ export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteIma
                             <td
                               key={columnIndex}
                               style={alignment ? { textAlign: alignment } : undefined}
-                              dangerouslySetInnerHTML={{ __html: inline(cell) }}
+                              dangerouslySetInnerHTML={{ __html: inline(cell, allowRemoteImages) }}
                             />
                           );
                         })}
@@ -702,4 +737,4 @@ export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteIma
       })()}
     </div>
   );
-}
+});

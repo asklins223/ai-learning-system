@@ -1,16 +1,12 @@
-import { and, asc, count, desc, eq, inArray, isNull, sql, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql, or } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID, type ApiTransaction } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences, validationEvents, reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
-import { notes, noteVersions, sources } from "../../db/schema/note.ts";
 import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
-import {
-  buildUnderstandingGraphDto,
-  type GraphKeyPointRecord,
-  type UnderstandingGraph,
-  UNDERSTANDING_GRAPH_CARD_LIMIT,
-} from "./graph.ts";
 import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
+
+/** 聚合状态/星图列表上限（沿用旧 reader 的 200 卡截断；states 列表消费）。 */
+const UNDERSTANDING_GRAPH_CARD_LIMIT = 200;
 
 export interface UnderstandingState {
   subjectType: "card";
@@ -329,13 +325,14 @@ export async function getUnderstandingStates(
  * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
 
-// 2026-08-11（性能专项）：/understanding/states 与 /graph 每请求重建 6-8 条聚合
-// SQL（前端导航即触发）。加进程内短 TTL 缓存（30s）：统计/星图视图对实时性
-// 不敏感，缓存显著降低 DB 负载；写操作后至多 30s 延迟展示，可接受。
+// 2026-08-11（性能专项）：/understanding/states 每请求重建聚合 SQL（前端
+// 导航即触发）。加进程内短 TTL 缓存（30s）：统计视图对实时性不敏感，缓存
+// 显著降低 DB 负载；写操作后至多 30s 延迟展示，可接受。
 // tx 参数传入（事务内一致性）或 opts 变化时不走缓存。
+// 2026-08-14（星图切流收口）：旧 /graph reader（getUnderstandingGraph +
+// understandingGraphCache）已随 star_map_action_v1 切流删除（§11.4）。
 const UNDERSTANDING_CACHE_TTL_MS = 30_000;
 const understandingStatesCache = new Map<string, { at: number; data: UnderstandingState[] }>();
-const understandingGraphCache = new Map<string, { at: number; data: UnderstandingGraph }>();
 const cacheKey = (workspaceId: string, userId: string, extra = ""): string => `${workspaceId}:${userId}:${extra}`;
 
 // 2026-08-11（review 修复）：命中检查时顺带清理过期条目，避免 Map 随
@@ -345,243 +342,4 @@ function sweepUnderstandingCache(): void {
   for (const [key, entry] of understandingStatesCache) {
     if (now - entry.at >= UNDERSTANDING_CACHE_TTL_MS) understandingStatesCache.delete(key);
   }
-  for (const [key, entry] of understandingGraphCache) {
-    if (now - entry.at >= UNDERSTANDING_CACHE_TTL_MS) understandingGraphCache.delete(key);
-  }
-}
-export async function getUnderstandingGraph(
-  workspaceId: string,
-  userId: string,
-  tx?: ApiTransaction,
-): Promise<UnderstandingGraph> {
-  // 2026-08-11（性能专项）：非事务调用（HTTP 路由）走短 TTL 缓存。
-  const cache = !tx ? understandingGraphCache : null;
-  if (cache) sweepUnderstandingCache();
-  const cacheK = cacheKey(workspaceId, userId);
-  const cachedHit = cache?.get(cacheK);
-  if (cachedHit && Date.now() - cachedHit.at < UNDERSTANDING_CACHE_TTL_MS) {
-    return cachedHit.data;
-  }
-  // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
-  // 提供 tx（测试/内部调用）时直接运行，跳过事务上下文设置。
-  const run = async (tx: ApiTransaction): Promise<UnderstandingGraph> => {
-  const [states, totalRows] = await Promise.all([
-    getUnderstandingStates(workspaceId, undefined, userId, tx),
-    tx
-      .select({ count: count() })
-      .from(learningCards)
-      .where(and(
-        eq(learningCards.workspaceId, workspaceId),
-        activeLearningCardConsumerPredicate(),
-      )),
-  ]);
-
-  const totalCards = Number(totalRows[0]?.count ?? 0);
-  if (states.length === 0) {
-    return buildUnderstandingGraphDto({
-      generatedAt: new Date().toISOString(),
-      totalCards,
-      sources: [],
-      notes: [],
-      noteVersions: [],
-      cards: [],
-      keyPoints: [],
-    });
-  }
-
-  const cardIds = states.map((state) => state.subjectId);
-  // PERF-22 修复：cardRows、keyPointRows、validationRows 均只依赖 cardIds（来自 states），
-  // 三者之间无依赖关系，可以并行查询。原代码串行执行 3 次 DB 往返。
-  const [cardRows, keyPointRows, validationRows] = await Promise.all([
-    tx.query.learningCards.findMany({
-      where: and(
-        eq(learningCards.workspaceId, workspaceId),
-        activeLearningCardConsumerPredicate(),
-        inArray(learningCards.id, cardIds),
-      ),
-    }),
-    tx.query.cardKeyPoints.findMany({
-      where: and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        inArray(cardKeyPoints.cardId, cardIds),
-      ),
-      orderBy: [asc(cardKeyPoints.ordinal)],
-    }),
-    tx
-      .select({
-        cardId: validationEvents.cardId,
-        keyPointId: validationEvents.keyPointId,
-        outcome: validationEvents.outcome,
-        createdAt: validationEvents.createdAt,
-      })
-      .from(validationEvents)
-      .where(and(
-        eq(validationEvents.workspaceId, workspaceId),
-        eq(validationEvents.userId, userId),
-        inArray(validationEvents.cardId, cardIds),
-      ))
-      .orderBy(desc(validationEvents.createdAt)),
-  ]);
-  const cardById = new Map(cardRows.map((card) => [card.id, card]));
-
-  const noteVersionIds = Array.from(new Set(cardRows.map((card) => card.noteVersionId)));
-  // PERF-22 优化：noteVersionRows 和 evidenceRows 无依赖关系，可以并行。
-  // evidenceRows 依赖 keyPointIds（来自 keyPointRows），noteVersionRows 依赖 cardRows。
-  const keyPointIds = keyPointRows.map((keyPoint) => keyPoint.id);
-  const [noteVersionRows, evidenceRows] = await Promise.all([
-    noteVersionIds.length > 0
-      ? tx.query.noteVersions.findMany({
-          where: and(
-            eq(noteVersions.workspaceId, workspaceId),
-            inArray(noteVersions.id, noteVersionIds),
-          ),
-        })
-      : Promise.resolve([] as typeof noteVersions.$inferSelect[]),
-    keyPointIds.length > 0
-      ? tx
-          .select({
-            id: evidences.id,
-            keyPointId: evidences.keyPointId,
-            alignment: evidences.alignment,
-            legacyOverride: evidences.userOverride,
-          })
-          .from(evidences)
-          .where(and(
-            eq(evidences.workspaceId, workspaceId),
-            inArray(evidences.keyPointId, keyPointIds),
-          ))
-      : Promise.resolve([] as Array<{ id: string; keyPointId: string; alignment: string; legacyOverride: string | null }>),
-  ]);
-
-  const noteIds = Array.from(new Set(noteVersionRows.map((version) => version.noteId)));
-  const noteRows = noteIds.length > 0
-    ? await tx.query.notes.findMany({
-        where: and(
-          eq(notes.workspaceId, workspaceId),
-          inArray(notes.id, noteIds),
-          isNull(notes.deletedAt),
-        ),
-      })
-    : [];
-
-  const sourceIds = Array.from(new Set(
-    noteRows.flatMap((note) => note.sourceId ? [note.sourceId] : []),
-  ));
-  const sourceRows = sourceIds.length > 0
-    ? await tx.query.sources.findMany({
-        where: and(
-          eq(sources.workspaceId, workspaceId),
-          inArray(sources.id, sourceIds),
-        ),
-      })
-    : [];
-
-  const overrideMap = await getUserOverrideMap(userId, evidenceRows.map((row) => row.id), tx);
-
-  const evidenceStats = new Map<string, { hard: number; soft: number }>();
-  for (const row of evidenceRows) {
-    const effective = effectiveAlignmentForUser(
-      row.alignment,
-      row.legacyOverride,
-      overrideMap.get(row.id) ?? null,
-    );
-    if (effective === null) continue;
-    const current = evidenceStats.get(row.keyPointId) ?? { hard: 0, soft: 0 };
-    if (effective === "aligned") current.hard++;
-    if (effective === "soft") current.soft++;
-    evidenceStats.set(row.keyPointId, current);
-  }
-
-  const validationStats = new Map<string, { misunderstandingCount: number; lastValidatedAt: string | null }>();
-  const cardLastValidatedAt = new Map<string, string>();
-
-  for (const row of validationRows) {
-    // 这里必须来自真实 validation_events，而不是任意 understanding event。
-    if (!cardLastValidatedAt.has(row.cardId)) {
-      cardLastValidatedAt.set(row.cardId, row.createdAt.toISOString());
-    }
-    if (!row.keyPointId) continue;
-    const current = validationStats.get(row.keyPointId) ?? {
-      misunderstandingCount: 0,
-      lastValidatedAt: null,
-    };
-    if (!current.lastValidatedAt) current.lastValidatedAt = row.createdAt.toISOString();
-    if (row.outcome === "misunderstanding") current.misunderstandingCount++;
-    validationStats.set(row.keyPointId, current);
-  }
-
-  const graphKeyPoints: GraphKeyPointRecord[] = keyPointRows.map((keyPoint) => ({
-    id: keyPoint.id,
-    cardId: keyPoint.cardId,
-    ordinal: keyPoint.ordinal,
-    claim: keyPoint.claim,
-    quoteText: keyPoint.quoteText,
-    segmentRef: keyPoint.segmentRef,
-    hardEvidenceCount: evidenceStats.get(keyPoint.id)?.hard ?? 0,
-    softEvidenceCount: evidenceStats.get(keyPoint.id)?.soft ?? 0,
-    misunderstandingCount: validationStats.get(keyPoint.id)?.misunderstandingCount ?? 0,
-    lastValidatedAt: validationStats.get(keyPoint.id)?.lastValidatedAt ?? null,
-  }));
-  const stateByCardId = new Map(states.map((state) => [state.subjectId, state]));
-
-  return buildUnderstandingGraphDto({
-    generatedAt: new Date().toISOString(),
-    totalCards,
-    sources: sourceRows.map((source) => ({
-      id: source.id,
-      type: source.type,
-      title: source.title,
-      origin: source.origin,
-      status: source.status,
-      metadata: source.metadata,
-      createdAt: source.createdAt.toISOString(),
-      updatedAt: source.updatedAt.toISOString(),
-    })),
-    notes: noteRows.map((note) => ({
-      id: note.id,
-      title: note.title,
-      sourceId: note.sourceId,
-      currentVersionId: note.currentVersionId,
-      createdAt: note.createdAt.toISOString(),
-      updatedAt: note.updatedAt.toISOString(),
-    })),
-    noteVersions: noteVersionRows.map((version) => ({
-      id: version.id,
-      noteId: version.noteId,
-      versionNo: version.versionNo,
-      createdAt: version.createdAt.toISOString(),
-    })),
-    cards: states.flatMap((state) => {
-      const card = cardById.get(state.subjectId);
-      if (!card) return [];
-      return [{
-        id: card.id,
-        noteVersionId: card.noteVersionId,
-        title: card.schemaJson?.title ?? "（未命名学习卡）",
-        summary: card.schemaJson?.summary ?? "",
-        status: card.status,
-        state: state.state,
-        evidenceCoverage: state.evidenceCoverage,
-        hardEvidenceCount: state.hardEvidenceCount,
-        softEvidenceCount: state.softEvidenceCount,
-        misunderstandingCount: state.misunderstandingCount,
-        lastValidatedAt: cardLastValidatedAt.get(card.id) ?? null,
-        nextReviewAt: state.nextReviewAt,
-        createdAt: card.createdAt.toISOString(),
-        updatedAt: card.updatedAt.toISOString(),
-      }];
-    }),
-    keyPoints: graphKeyPoints.filter((keyPoint) => stateByCardId.has(keyPoint.cardId)),
-  });
-  };
-  if (tx) return run(tx);
-  const graphResult = await withWorkspaceTransaction(
-    { workspaceId, userId },
-    run,
-  );
-  // 2026-08-11（性能专项）：非事务路径计算完成后写入缓存
-  if (cache) {
-    cache.set(cacheK, { at: Date.now(), data: graphResult });
-  }
-  return graphResult;
 }

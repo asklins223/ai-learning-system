@@ -23,6 +23,7 @@ import {
 import { runEvaluateRubric } from "./handlers/evaluate-rubric.ts";
 import { runCardSupervisorAgent } from "./handlers/card-supervisor-agent.ts";
 import { reconcileSupervisorAgentRuns } from "./agent/reconciler.ts";
+import { pollV2Outbox, V2_POLL_TICK_BUDGET_MS } from "./handlers/card-generation-v2-handler.ts";
 
 /**
  * Dispatch evaluate_validation jobs based on payload format:
@@ -182,7 +183,12 @@ async function projectAgentJobFailure(input: {
   if (!input.terminal) return false;
 
   const sanitized = sanitizeOperationalError(input.error);
-  const errorCode = `agent_${sanitized.category}`;
+  // 2026-08-12+（15a 根因修复）：优先保留结构化错误码——AIConsentRequiredError
+  // 的 code="ai_consent_required" 必须透传到 run/unit（前端 GenerationFailureDialog
+  // 据此引导用户去 /settings#model 签署 AI 使用协议）；此前只用
+  // `agent_${category}`（=agent_configuration）导致前端拿不到 consent 错误码，
+  // 用户只看到普通失败、无引导。
+  const errorCode = sanitized.code ?? `agent_${sanitized.category}`;
 
   return withWorkerWorkspaceTransaction(
     { workspaceId: input.job.workspaceId, userId: input.job.requestedBy },
@@ -293,7 +299,9 @@ async function projectReapedGenerationJobs(reapedIds: string[]): Promise<number>
       generation_run_id: string | null;
       last_error: string | null;
     }>(sql`
-      SELECT * FROM public.ailearn_find_reaped_generation_jobs(${reapedIds})
+      SELECT * FROM public.ailearn_find_reaped_generation_jobs(
+        ARRAY[${sql.join(reapedIds.map((id) => sql`${id}::uuid`), sql`, `)}]
+      )
     `);
     deadRows = rows.map((row) => ({
       id: String(row.id),
@@ -763,6 +771,23 @@ export async function tick(): Promise<void> {
     inflight.add(promise);
     // BUG-10 修复：使用 .then().catch().finally() 链确保 inflight.delete 总是执行
     promise.then(() => inflight.delete(promise)).catch(() => inflight.delete(promise));
+  }
+
+  // V2 Card Generation outbox poll (方案 20 C2)。
+  // 第五轮审计 W#5：置于主队列 claim/分发**之后**——V2 串行 poll 不能再延迟主
+  // 队列并发配额（available）的分配与 claim；先按配额拿到主队列 job 并分发，
+  // 最后才 poll V2。round-7 🟡2 修复：主 tick 以 V2_POLL_TICK_BUDGET_MS（5s）调用
+  // poll，使本 tick 仅最多阻塞该预算即返回——V2 job 的运行（最长整套 ~8.75min）
+  // 不再串行阻塞**下一 tick** 主队列的 claim/分发。超预算时 poll 返回、运行中 job
+  // 继续后台跑（30min 租约 + lease CAS + reaper 兜底，不丢副作用、不重复计费）。
+  // 每个 job 已 fire-and-forget（inflight），V2 poll 失败仅告警不断主循环。
+  try {
+    await pollV2Outbox(1, V2_POLL_TICK_BUDGET_MS);
+  } catch (error) {
+    logger.warn(
+      { error: sanitizeOperationalError(error) },
+      "V2 card generation outbox poll failed",
+    );
   }
 }
 

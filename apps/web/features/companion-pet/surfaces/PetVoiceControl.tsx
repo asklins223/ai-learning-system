@@ -74,7 +74,11 @@ export function PetVoiceControl({
     <>
       {phase ? (
         <div className="pet-voice-island" style={{ left: `var(--pet-voice-island-x, 20px)` }}>
-          <PetVoiceVisualizer phase={phase} />
+          <PetVoiceVisualizer
+            phase={phase}
+            paused={state.occluded}
+            reducedMotion={state.context.reducedMotion || state.context.animationOff}
+          />
         </div>
       ) : null}
       <div

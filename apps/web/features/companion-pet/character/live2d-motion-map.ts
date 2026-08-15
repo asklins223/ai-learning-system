@@ -1,4 +1,4 @@
-import type { CharacterPresentationStateV1 } from "@ailearn/shared";
+import type { CharacterPresentationStateV1 } from "@ailearn/shared/companion-character-contracts";
 
 /**
  * P4 Live2D motion mapping (new presentation → current Mao PRO motion).

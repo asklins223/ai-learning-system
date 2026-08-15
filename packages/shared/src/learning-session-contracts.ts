@@ -3,17 +3,17 @@
  *
  * 单一来源（01-2 §5 冻结语义）。禁止在各模块内重复定义同型接口；
  * 字段改动必须回 W0（阶段 01）评审。
+ *
+ * 2026-08-13（文档 16 §12）：TrustClass 已并入 LearningRun V1 统一合同
+ * （learning-run-contracts.ts），值域完全一致；本文件 re-export 以保持旧
+ * Session/Episode 代码引用不变。CapabilityFacet 等旧语言符号继续保留。
  */
 
-/** Trust Class（01-2 §7.3）：服务端签发的可信等级 */
-export const TrustClass = {
-  MASTERY_ELIGIBLE: "mastery_eligible",
-  FACET_ELIGIBLE: "facet_eligible",
-  DIAGNOSTIC_ONLY: "diagnostic_only",
-  PRACTICE_ONLY: "practice_only",
-  NOT_ASSESSABLE: "not_assessable",
-} as const;
-export type TrustClass = (typeof TrustClass)[keyof typeof TrustClass];
+import { TrustClass as TrustClassValues } from "./learning-run-contracts.ts";
+import type { TrustClassV1 } from "./learning-run-contracts.ts";
+
+export const TrustClass = TrustClassValues;
+export type TrustClass = TrustClassV1;
 
 /** 能力切面（01-2 §7.4）：v1 六个 facet */
 export const CapabilityFacet = {

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { and, desc, eq, asc, inArray, sql } from "drizzle-orm";
-import { db, withSessionAdvisoryLock, withWorkspaceTransaction } from "../../db/client.ts";
+import { db, withSessionAdvisoryLock, withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
@@ -515,7 +515,7 @@ async function runPipelineForNote(
     );
 
     // 3. 轮询等待 card 生成完成（worker 异步处理）
-    const card = await waitForCard(version.id, workspaceId, 60_000);
+    const card = await waitForCard(version.id, workspaceId, userId, 60_000);
     if (!card) throw new Error("card generation timeout (60s)");
 
     result.cardId = card.id;
@@ -523,17 +523,20 @@ async function runPipelineForNote(
     result.cardSummary = (card.schemaJson as { summary: string }).summary;
 
     // 4. 查询 key points
-    const kps = await db.query.cardKeyPoints.findMany({
-      where: and(
-        eq(cardKeyPoints.cardId, card.id),
-        eq(cardKeyPoints.workspaceId, workspaceId),
-      ),
-      orderBy: asc(cardKeyPoints.ordinal),
-    });
+    // F11·①：key points 读取同样置于 workspace RLS executor 内。
+    const kps = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) =>
+      tx.query.cardKeyPoints.findMany({
+        where: and(
+          eq(cardKeyPoints.cardId, card.id),
+          eq(cardKeyPoints.workspaceId, workspaceId),
+        ),
+        orderBy: asc(cardKeyPoints.ordinal),
+      }),
+    );
 
     // 5. 等待 align_evidence 完成（worker 在 generation 完成后会自动排队 align_evidence）
     //    轮询等待所有 key point 的 evidence 出现
-    const evidenceReady = await waitForAlignEvidence(kps.map((k) => k.id), workspaceId, 60_000);
+    const evidenceReady = await waitForAlignEvidence(kps.map((k) => k.id), workspaceId, userId, 60_000);
     if (!evidenceReady) throw new Error("evidence alignment timeout (60s)");
 
     // 6. 收集每个 key point 的 alignment 结果
@@ -541,12 +544,14 @@ async function runPipelineForNote(
     //（此前每 kp 单独一次 findFirst，N 次往返）。
     const kpIds = kps.map((k) => k.id);
     const allEvidence = kpIds.length > 0
-      ? await db.query.evidences.findMany({
-          where: and(
-            inArray(evidences.keyPointId, kpIds),
-            eq(evidences.workspaceId, workspaceId),
-          ),
-        })
+      ? await withWorkspaceTransaction({ workspaceId, userId }, async (tx) =>
+          tx.query.evidences.findMany({
+            where: and(
+              inArray(evidences.keyPointId, kpIds),
+              eq(evidences.workspaceId, workspaceId),
+            ),
+          }),
+        )
       : [];
     const bestByKeyPoint = new Map<string, typeof allEvidence[number]>();
     for (const ev of allEvidence) {
@@ -590,20 +595,28 @@ async function runPipelineForNote(
 
 /**
  * 轮询等待 card 生成完成。
+ * F11·①（round-4）：读取曾用裸 `db`（workspace RLS 上下文之外）。改为经
+ * withWorkspaceTransaction 设置 app.workspace_id/app.user_id 后再查，确保
+ * learning_cards 这类 RLS 表的 tenant 隔离（worker 以 BYPASSRLS 写入，同
+ * workspace 行可被此 executor 读到）。WIT new 事务 per poll iteration 的开销
+ * 可接受（benchmark 非热路径，轮询 2s 间隔）。
  */
 async function waitForCard(
   noteVersionId: string,
   workspaceId: string,
+  userId: string,
   timeoutMs: number,
 ): Promise<typeof learningCards.$inferSelect | null> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const card = await db.query.learningCards.findFirst({
-      where: and(
-        eq(learningCards.noteVersionId, noteVersionId),
-        eq(learningCards.workspaceId, workspaceId),
-      ),
-    });
+    const card = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) =>
+      tx.query.learningCards.findFirst({
+        where: and(
+          eq(learningCards.noteVersionId, noteVersionId),
+          eq(learningCards.workspaceId, workspaceId),
+        ),
+      }),
+    );
     if (card) return card;
     await sleep(2000);
   }
@@ -612,10 +625,12 @@ async function waitForCard(
 
 /**
  * 轮询等待所有 key point 的 evidence 生成完成。
+ * F11·①：同 waitForCard，读取置于 workspace RLS executor 内。
  */
 async function waitForAlignEvidence(
   keyPointIds: string[],
   workspaceId: string,
+  userId: string,
   timeoutMs: number,
 ): Promise<boolean> {
   if (keyPointIds.length === 0) return true;
@@ -623,13 +638,15 @@ async function waitForAlignEvidence(
   while (Date.now() - start < timeoutMs) {
     // N-008: 使用 COUNT(DISTINCT key_point_id) 确保每个 key point 至少有一条 evidence
     // 旧逻辑用 evRows.length >= keyPointIds.length，但一个 key point 可产生多条候选
-    const evRows = await db.query.evidences.findMany({
-      where: and(
-        eq(evidences.workspaceId, workspaceId),
-        inArray(evidences.keyPointId, keyPointIds),
-      ),
-      columns: { keyPointId: true },
-    });
+    const evRows = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) =>
+      tx.query.evidences.findMany({
+        where: and(
+          eq(evidences.workspaceId, workspaceId),
+          inArray(evidences.keyPointId, keyPointIds),
+        ),
+        columns: { keyPointId: true },
+      }),
+    );
     const distinctKpCount = new Set(evRows.map((ev) => ev.keyPointId)).size;
     if (distinctKpCount >= keyPointIds.length) return true;
     await sleep(2000);
@@ -733,11 +750,13 @@ function calculateMetrics(
   };
 }
 
+const BENCHMARK_REPORTS_RETENTION = 50;
+
 async function persistBenchmarkReport(
   workspaceId: string,
   userId: string,
   report: BenchmarkReport,
-  database: Pick<typeof db, "insert"> = db,
+  database: Pick<typeof db, "insert" | "delete" | "select"> = db,
 ): Promise<void> {
   await database.insert(benchmarkReports).values({
     workspaceId,
@@ -748,6 +767,20 @@ async function persistBenchmarkReport(
     reportJson: report as unknown as Record<string, unknown>,
     hasLabels: report.hasLabels,
   });
+
+  // R8（round-3 审计）：benchmark_reports 每 run/每次保存 label 都整份写 reportJson
+  // （大 JSONB）+ results，此前无清理 → 无界增长。此处按 workspace 保留最新 50 条，
+  // 删除更旧的（刚插入的 report 必在最新 50 内，安全）。同事务内进行，依赖既有
+  // `benchmark:{workspaceId}` xact 锁避免并发交错。
+  await database.delete(benchmarkReports).where(
+    sql`${benchmarkReports.workspaceId} = ${workspaceId}
+        AND ${benchmarkReports.id} NOT IN (
+          SELECT ${benchmarkReports.id} FROM ${benchmarkReports}
+          WHERE ${benchmarkReports.workspaceId} = ${workspaceId}
+          ORDER BY ${benchmarkReports.createdAt} DESC, ${benchmarkReports.id} DESC
+          LIMIT ${BENCHMARK_REPORTS_RETENTION}
+        )`,
+  );
 }
 
 async function persistBenchmarkLabels(
@@ -787,11 +820,16 @@ async function persistBenchmarkLabels(
     });
 }
 
-export async function getSavedBenchmarkLabels(workspaceId: string): Promise<LabelFile[]> {
-  const rows = await db.query.benchmarkLabels.findMany({
-    where: eq(benchmarkLabels.workspaceId, workspaceId),
-    orderBy: [asc(benchmarkLabels.noteFile), asc(benchmarkLabels.keyPointOrdinal)],
-  });
+export async function getSavedBenchmarkLabels(workspaceId: string, userId: string): Promise<LabelFile[]> {
+  // 🟠-1（round-5 审计）：benchmark_labels 表迁移（0024）已 ENABLE+FORCE ROW LEVEL SECURITY，
+  // 原裸 `db.query.benchmarkLabels.findMany` 未经 workspace RLS executor，在 dev 库（RLS-off）
+  // 下看似正常，生产 RLS 生效时该读会静默返回 0 行。改由 withWorkspaceTransaction 设置
+  // app.workspace_id/app.user_id 上下文后分页读取，对齐 QUAL-58/SEC-26 模式。
+  const rows = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) =>
+    tx.select().from(benchmarkLabels)
+      .where(eq(benchmarkLabels.workspaceId, workspaceId))
+      .orderBy(asc(benchmarkLabels.noteFile), asc(benchmarkLabels.keyPointOrdinal)),
+  );
 
   const grouped = new Map<string, LabelEntry[]>();
   for (const row of rows) {
@@ -809,13 +847,24 @@ export async function getSavedBenchmarkLabels(workspaceId: string): Promise<Labe
 
 export async function getLatestBenchmarkReport(
   workspaceId: string,
-  database: Pick<typeof db, "query"> = db,
+  database?: Pick<typeof db, "query">,
 ): Promise<BenchmarkReport | null> {
-  const row = await database.query.benchmarkReports.findFirst({
-    where: eq(benchmarkReports.workspaceId, workspaceId),
-    orderBy: [desc(benchmarkReports.createdAt)],
-  });
-  return row ? row.reportJson as unknown as BenchmarkReport : null;
+  // R#6-6：未传 executor 时不再裸读全局 db（无 RLS 上下文），改走 withWorkspaceTransaction 设置
+  // app.workspace_id，与 B#2 一致（B#2 前瞻硬化）。调用方已持有事务连接可显式传入。
+  const run = async (exec: Pick<typeof db, "query">) => {
+    const row = await exec.query.benchmarkReports.findFirst({
+      where: eq(benchmarkReports.workspaceId, workspaceId),
+      orderBy: [desc(benchmarkReports.createdAt)],
+    });
+    return row ? row.reportJson as unknown as BenchmarkReport : null;
+  };
+  if (database) {
+    return run(database);
+  }
+  return withWorkspaceTransaction(
+    { workspaceId, userId: SYSTEM_USER_ID },
+    (tx) => run(tx),
+  );
 }
 
 /**
@@ -912,7 +961,7 @@ async function executeBenchmark(
   await withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`benchmark:${workspaceId}`}))`);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`benchmark:${workspaceId}`}, 0))`);
       await persistBenchmarkReport(workspaceId, userId, report, tx);
     },
   );
@@ -927,8 +976,17 @@ export async function runBenchmark(
   // one workspace across API replicas without holding an equally long DB
   // transaction; otherwise concurrent runs delete and supersede each other's
   // notes/jobs while they are still being evaluated.
+  // Y13（round-3 审计）：统一为 `benchmark:{workspaceId}` 键，且 session 锁内部用
+  // hashtextextended(key,0)，与 saveLabelsAndCalculate/executeBenchmark 写路径的
+  // xact 锁（同键同哈希）真正互斥（session 与 xact 锁共享同一 bigint 锁空间）。
+  // F11·②（round-4）：保持 session 锁贯穿整个 run。锁目的不是保护单次短写，而是
+  // 阻止同一 workspace 的并发 benchmark 在"仍有 note/job 在评估"期间互删对方产物
+  // （见 942-945 注释）。wait 轮询与建跑/收集交错在每 note 内（create→wait card→
+  // wait evidence→collect），无法在不重写整个多 note 流水线的前提下把轮询整体挪到
+  // 锁外。benchmark 为低频管理/QA 工具，单工作区串行（可能数分钟）可接受；
+  // 若未来需放宽，应把每 note 的"建产"与"轮询"拆成两阶段并把轮询提出锁体。
   return withSessionAdvisoryLock(
-    `benchmark-run:${workspaceId}`,
+    `benchmark:${workspaceId}`,
     () => executeBenchmark(workspaceId, userId),
   );
 }
@@ -946,8 +1004,11 @@ export async function saveLabelsAndCalculate(
   return withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
-      // 与新运行的最终报告写入共用工作区级事务锁，使校验与两次写入保持原子性。
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`benchmark:${workspaceId}`}))`);
+      // Y13（round-3 审计）：与新运行的最终写入共用同一 advisory 锁键 + 同一哈希
+      // （hashtextextended(key,0)），与 runBenchmark 的 session 锁真正互斥——此前
+      // run 用 session 锁 `benchmark-run:*`、此处用 xact 锁 `benchmark:*` + hashtext，
+      // 双键不互斥，label 可能落到将被打断的旧 report 上（runId 不匹配兜底 409）。
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`benchmark:${workspaceId}`}, 0))`);
 
     // 使用报告中冻结的运行结果计算，避免重扫数据库时混入另一轮产物。
     const latestReport = await getLatestBenchmarkReport(workspaceId, tx);

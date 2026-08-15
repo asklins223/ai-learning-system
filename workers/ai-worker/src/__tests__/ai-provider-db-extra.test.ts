@@ -8,12 +8,8 @@
 import assert from "node:assert/strict";
 import { describe, it, before, after, afterEach } from "node:test";
 import { resolveProviderSelection, createProvider } from "../lib/ai-provider.ts";
-import {
-  setPlatformConfig,
-  resetPlatformConfigCache,
-  resolveSystemPlatform,
-  resolveSystemProviderForCapability,
-} from "@ailearn/shared";
+import { resolveSystemProviderForCapability } from "@ailearn/shared/task-router";
+import { setPlatformConfig, resetPlatformConfigCache, resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import { db } from "../db.ts";
 
 const WS_ID = "00000000-0000-0000-0000-000000000001";

@@ -6,6 +6,7 @@ import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { MobileNav } from "./MobileNav";
 import { TabletTopBar } from "./TabletTopBar";
+import { MainBridgeHost } from "@/features/companion-bridge/MainBridgeHost";
 
 /**
  * AppShell — 全局应用外壳。
@@ -65,6 +66,8 @@ interface RoutePattern {
   page: string;
   /** 是否拥有自己的 Focus 头部（仅 focus variant） */
   ownsFocusHeader?: boolean;
+  /** 是否使用无额外 padding 的沉浸式 Session 工作区 */
+  session?: boolean;
 }
 
 const ROUTE_PATTERNS: RoutePattern[] = [
@@ -77,21 +80,22 @@ const ROUTE_PATTERNS: RoutePattern[] = [
   { variant: "default", test: (p) => p === "/search", page: "search" },
   { variant: "default", test: (p) => p === "/sources", page: "sources" },
   { variant: "default", test: (p) => p === "/today", page: "today" },
+  { variant: "default", test: (p) => p === "/companion/conversations", page: "companion-history" },
   { variant: "default", test: (p) => p === "/settings", page: "settings" },
   // ── internal variant 路由 ──
   { variant: "internal", test: (p) => p === "/benchmark", page: "benchmark" },
   // ── focus variant 路由 ──
   { variant: "focus", test: (p) => /^\/cards\/[^/]+$/.test(p), page: "card-detail", ownsFocusHeader: true },
-  { variant: "focus", test: (p) => /^\/cards\/[^/]+\/companion$/.test(p), page: "companion-stage", ownsFocusHeader: true },
+  {
+    variant: "focus",
+    test: (p) => /^\/learning-runs\/[^/]+$/.test(p),
+    page: "learning-run",
+    ownsFocusHeader: true,
+    session: true,
+  },
   { variant: "focus", test: (p) => /^\/card-sets\/[^/]+$/.test(p), page: "card-set-detail", ownsFocusHeader: true },
   { variant: "focus", test: (p) => /^\/notes\/[^/]+$/.test(p), page: "note-editor", ownsFocusHeader: true },
   { variant: "focus", test: (p) => /^\/sources\/[^/]+$/.test(p), page: "source-detail", ownsFocusHeader: true },
-  {
-    variant: "focus",
-    test: (p) => /^\/cards\/[^/]+\/validate$/.test(p) || /^\/review\/[^/]+$/.test(p),
-    page: "validation-session",
-    ownsFocusHeader: true,
-  },
 ];
 
 /** 根据当前 pathname 和 variant 匹配路由模式 */
@@ -118,7 +122,7 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
   const matchedRoute = matchRoute(pathname, variant);
   const pageName = matchedRoute?.page;
   const hasOwnedFocusHeader = matchedRoute?.ownsFocusHeader === true;
-  const isSessionPage = pageName === "validation-session" || pageName === "companion-stage";
+  const isSessionPage = matchedRoute?.session === true;
 
   useEffect(() => {
     if (
@@ -230,6 +234,11 @@ export function AppShell({ children, variant = "default" }: AppShellProps) {
 
       {/* 移动端底部导航：仅 default */}
       {showMobileNav && <MobileNav />}
+
+      {/* F#7（🟡13）：Pet → Main 表面命令宿主（无 UI；浏览器无 preload 时 fail
+          closed）。此前放在函数体作表达式语句，创建的元素被丢弃、宿主从未挂载；
+          现移入返回的 .app-canvas 树内实际渲染。 */}
+      <MainBridgeHost />
     </div>
   );
 }

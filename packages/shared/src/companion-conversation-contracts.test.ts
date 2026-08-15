@@ -7,17 +7,20 @@ import {
   companionPageContextV1Schema,
   companionPersistedPageContextV1Schema,
   companionLearningSessionContextV1Schema,
+  companionLearningContextV1Schema,
   companionStreamEventV1Schema,
   companionErrorV1Schema,
   createCompanionTurnResponseV1Schema,
   companionActionIntentV1Schema,
   companionActionClassifierInputV1Schema,
+  proposedLearningActionPayloadV1Schema,
+  proposalDecisionResponseV1Schema,
+  companionMenuCandidateIdV1Schema,
   COMPANION_ACTION_LEXEMES,
   COMPANION_ACTION_ROUTER_V1_SHA256,
   COMPANION_P2_LIMITS,
   type CompanionStreamEventV1,
 } from "./companion-conversation-contracts.ts";
-import { computeCompanionLearningSessionContextRevisionV1 } from "./companion-learning-session-contracts.ts";
 import { canonicalJsonV1, sha256Utf8V1, sha256Hex } from "./content-hash.ts";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
@@ -307,7 +310,9 @@ test("Learning Session page adapter contextRevision is deterministic and state-b
     episodeUpdatedAt: TIME,
     answerLocked: false,
   };
-  const revision = computeCompanionLearningSessionContextRevisionV1(input);
+  // 2026-08-13：revision 计算已移至 api 侧（learning-session-context.ts），
+  // 此处验证底层 content-hash 的确定性与输入绑定（revision 语义不变）。
+  const revision = sha256Utf8V1(canonicalJsonV1(input));
   const context = companionLearningSessionContextV1Schema.parse({
     version: 1,
     pageKind: "learning_session",
@@ -322,7 +327,7 @@ test("Learning Session page adapter contextRevision is deterministic and state-b
   });
   assert.equal(context.contextRevision, revision);
   assert.notEqual(
-    computeCompanionLearningSessionContextRevisionV1({ ...input, answerLocked: true }),
+    sha256Utf8V1(canonicalJsonV1({ ...input, answerLocked: true })),
     revision,
   );
 });
@@ -487,4 +492,177 @@ test("P5 §9.4：bounded lexeme 冻结列表含中文与英文动作词", () => 
   }
   // 冻结 classifier prompt 的 SHA-256 与 03 §9.4 记录一致
   assert.equal(COMPANION_ACTION_ROUTER_V1_SHA256, "99122a340328bbf248e3f3e434d27eebd6445226db6c2e0f1bb50543555b0dde");
+});
+
+
+
+// ─── 方案 16 §18：LearningRun 工具契约（2026-08-14 扩展） ───────────────
+
+test("proposedLearningActionPayload：accepts start_learning_run / resume_learning_run", () => {
+  const start = proposedLearningActionPayloadV1Schema.safeParse({
+    kind: "start_learning_run",
+    request: {
+      version: 1,
+      origin: { kind: "card", cardId: UUID, keyPointId: "223e4567-e89b-12d3-a456-426614174000" },
+      goal: "stabilize",
+      clientRequestId: "pet-menu:223e4567-e89b-12d3-a456-426614174000",
+      idempotencyKey: "pet-menu:223e4567-e89b-12d3-a456-426614174000",
+    },
+  });
+  assert.equal(start.success, true);
+  const resume = proposedLearningActionPayloadV1Schema.safeParse({
+    kind: "resume_learning_run",
+    runId: "323e4567-e89b-12d3-a456-426614174000",
+  });
+  assert.equal(resume.success, true);
+  // 缺 request / 缺 runId 拒绝
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "start_learning_run" }).success, false);
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "resume_learning_run" }).success, false);
+  // 未知 kind 拒绝
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "start_learning_loop" }).success, false);
+});
+
+test("menu candidate id：learning_run_start / learning_run_resume 合法", () => {
+  assert.equal(companionMenuCandidateIdV1Schema.safeParse("learning_run_start").success, true);
+  assert.equal(companionMenuCandidateIdV1Schema.safeParse("learning_run_resume").success, true);
+  assert.equal(companionMenuCandidateIdV1Schema.safeParse("resume_current").success, true);
+  assert.equal(companionMenuCandidateIdV1Schema.safeParse("unknown_kind").success, false);
+});
+
+// ─── 方案 16 §18.1：工具网关第二批（Orchestrator 动作工具全集） ────────
+
+test("proposedLearningActionPayload：accepts §18 全部工具 kind", () => {
+  const runId = "423e4567-e89b-12d3-a456-426614174000";
+  const taskId = "523e4567-e89b-12d3-a456-426614174000";
+  const keyPointId = "623e4567-e89b-12d3-a456-426614174000";
+  const scheduleId = "723e4567-e89b-12d3-a456-426614174000";
+  const memoryId = "823e4567-e89b-12d3-a456-426614174000";
+  const cases: unknown[] = [
+    { kind: "pause_learning_run", runId },
+    { kind: "switch_task_variant", runId, taskId, alternativeId: "variant-2" },
+    { kind: "request_hint_level", runId, taskId, level: 2 },
+    {
+      kind: "defer_review",
+      scheduleId,
+      scheduleGeneration: 3,
+      deferredUntil: "2026-08-20T09:00:00.000Z",
+      reasonCode: "user_requested",
+    },
+    {
+      kind: "plan_understanding_route",
+      request: {
+        version: 1,
+        intent: "repair_gap",
+        targetKeyPointId: keyPointId,
+        maxSteps: 3,
+        lens: "current_target",
+        filter: { showArchived: false },
+        expectedCheckpointToken: "v1:ws:uid:evt",
+        idempotencyKey: "route:tool:1",
+      },
+    },
+    { kind: "focus_graph_node", keyPointId, lens: "evidence" },
+    { kind: "restore_graph_viewport", runId },
+    { kind: "open_conversation_history" },
+    { kind: "open_conversation_history", assistantSessionId: "923e4567-e89b-12d3-a456-426614174000" },
+    { kind: "propose_memory_candidate", memoryKind: "preference", value: "喜欢安静的环境", sourceMessageId: "a23e4567-e89b-12d3-a456-426614174000" },
+    { kind: "confirm_or_reject_memory", memoryId, revision: 1720000000000, decision: "confirm" },
+    { kind: "delete_assistant_memory", memoryId, revision: 1720000000000 },
+  ];
+  for (const payload of cases) {
+    assert.equal(proposedLearningActionPayloadV1Schema.safeParse(payload).success, true, JSON.stringify(payload));
+  }
+});
+
+test("proposedLearningActionPayload：§18 工具非法变体拒绝", () => {
+  const runId = "423e4567-e89b-12d3-a456-426614174000";
+  // 缺 runId / 缺 level / level 越界 / 未知 reasonCode
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "pause_learning_run" }).success, false);
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "request_hint_level", runId }).success, false);
+  assert.equal(
+    proposedLearningActionPayloadV1Schema.safeParse({ kind: "request_hint_level", runId, taskId: runId, level: 4 }).success,
+    false,
+  );
+  assert.equal(
+    proposedLearningActionPayloadV1Schema.safeParse({
+      kind: "defer_review",
+      scheduleId: runId,
+      scheduleGeneration: 0,
+      deferredUntil: "2026-08-20T09:00:00.000Z",
+      reasonCode: "mystery",
+    }).success,
+    false,
+  );
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "focus_graph_node" }).success, false);
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "confirm_or_reject_memory", memoryId: runId, revision: 1 }).success, false);
+  assert.equal(
+    proposedLearningActionPayloadV1Schema.safeParse({ kind: "propose_memory_candidate", memoryKind: "preference", value: "" }).success,
+    false,
+  );
+});
+
+test("learning context：LearningRun 候选字段可解析；旧字段仍 required", () => {
+  const ok = companionLearningContextV1Schema.safeParse({
+    version: 1,
+    contextRevision: "a".repeat(64),
+    resumeCandidate: null,
+    startCandidate: null,
+    learningRunResumeCandidate: {
+      candidateId: "learning_run_resume",
+      runId: "323e4567-e89b-12d3-a456-426614174000",
+      title: "继续当前学习",
+      targetSummary: "继续学习：…",
+      impactSummary: "恢复当前学习运行",
+      payloadSha256: "b".repeat(64),
+    },
+    learningRunStartCandidate: {
+      candidateId: "learning_run_start",
+      cardId: UUID,
+      keyPointId: "223e4567-e89b-12d3-a456-426614174000",
+      title: "开始三分钟巩固",
+      targetSummary: "用三分钟巩固：…",
+      impactSummary: "创建一次三分钟学习运行",
+      payloadSha256: "c".repeat(64),
+    },
+  });
+  assert.equal(ok.success, true);
+  // 旧字段缺失仍拒绝（strict 向后兼容）
+  assert.equal(companionLearningContextV1Schema.safeParse({
+    version: 1,
+    contextRevision: "a".repeat(64),
+  }).success, false);
+});
+
+test("proposalDecisionResponseV1Schema：route 接受 §18 V2 导航 kind（lens/restoreRun/assistantSessionId）", () => {
+  const base = {
+    version: 1,
+    proposalId: "b23e4567-e89b-12d3-a456-426614174000",
+    status: "succeeded",
+    actionRunId: null,
+    resultRef: null,
+    safeSummary: "聚焦知识节点",
+  };
+  // focus_graph_node：star_map + keyPointId + lens
+  assert.equal(
+    proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "star_map", keyPointId: "623e4567-e89b-12d3-a456-426614174000", lens: "evidence" } }).success,
+    true,
+  );
+  // restore_graph_viewport：star_map + restoreRun
+  assert.equal(
+    proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "star_map", restoreRun: "423e4567-e89b-12d3-a456-426614174000" } }).success,
+    true,
+  );
+  // open_conversation_history：conversation + assistantSessionId
+  assert.equal(
+    proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "conversation", assistantSessionId: "923e4567-e89b-12d3-a456-426614174000" } }).success,
+    true,
+  );
+  // 旧导航 kind 仍接受
+  assert.equal(proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "review" } }).success, true);
+  assert.equal(proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "card", cardId: "a23e4567-e89b-12d3-a456-426614174000" } }).success, true);
+  // V1 旧字段 conversationId 不再接受（V2 合同）
+  assert.equal(
+    proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "conversation", conversationId: "923e4567-e89b-12d3-a456-426614174000" } }).success,
+    false,
+  );
 });

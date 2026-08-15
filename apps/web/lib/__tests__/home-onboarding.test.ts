@@ -14,14 +14,14 @@ describe("home onboarding visibility", () => {
     );
   });
 
-  it("keeps the learning path in an owned workspace after first use", () => {
+  it("does not show the legacy milestone projection in an active workspace", () => {
     assert.deepEqual(
       resolveHomeOnboardingVisibility({
         accountLoading: false,
         isPersonalWorkspace: true,
         isEmptyWorkspace: false,
       }),
-      { showOnboarding: true, isFirstUse: false },
+      { showOnboarding: false, isFirstUse: false },
     );
   });
 

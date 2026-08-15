@@ -1,9 +1,8 @@
 import {
   companionAccountGlobalOffEventV1Schema,
   companionAccountStateV1Schema,
-} from "@ailearn/shared";
-import { companionBootstrapFeaturesV1Schema } from "@ailearn/shared";
-import type { CompanionBootstrapFeaturesV1 } from "@ailearn/shared";
+} from "@ailearn/shared/companion-shell-contracts";
+import { companionBootstrapFeaturesV1Schema } from "@ailearn/shared/companion-conversation-contracts";
 
 /** Poll fallback for account-wide revocation when the account SSE is unavailable. */
 export const COMPANION_BOOTSTRAP_POLL_MS = 15_000;
@@ -19,7 +18,14 @@ export interface CompanionBootstrapV1 {
     animationOff?: boolean;
     voiceOff?: boolean;
   };
-  features: CompanionBootstrapFeaturesV1;
+  features: {
+    petSurface: boolean;
+    textConversation: boolean;
+    voiceDialogue: boolean;
+    live2d: boolean;
+    learningActions: boolean;
+    streamingVoice: boolean;
+  };
   serverTime: string;
 }
 

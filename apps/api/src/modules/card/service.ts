@@ -1,5 +1,4 @@
 import { and, asc, eq, desc, sql, inArray, count, or, isNull } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { notes, noteVersions } from "../../db/schema/note.ts";
@@ -75,15 +74,24 @@ export async function listCards(workspaceId: string, opts?: { cursor?: string; l
           where: and(...conditions),
           orderBy: [desc(learningCards.createdAt), desc(learningCards.id)],
           limit: limit + 1,
+          // PERF-B11 修复：列表查询排除大 jsonb schemaJson，仅详情接口返回，
+          // 避免每页 50 张整行读大 JSON。
+          columns: { schemaJson: false },
           extras: {
             cursorTimestamp: sql<string>`to_char(${learningCards.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_timestamp"),
           },
         }),
         // R-019: 服务端返回实际总数
+        // PERF-B19 修复：count 未滤 archived/superseded 会导致 total 虚高，
+        // 与列表实际返回的卡片（NOT IN ('archived','superseded')）不一致。
+        // 统一用与列表一致的过滤条件。
         tx
           .select({ count: count() })
           .from(learningCards)
-          .where(eq(learningCards.workspaceId, workspaceId)),
+          .where(and(
+            eq(learningCards.workspaceId, workspaceId),
+            sql`${learningCards.status} NOT IN ('archived', 'superseded')`,
+          )),
       ]);
       const hasMore = cardRows.length > limit;
       const cardsWithCursor = cardRows.slice(0, limit);
@@ -267,7 +275,10 @@ export async function regenerateCard(
     { workspaceId, userId },
     {
       noteVersionId: useVersionId,
-      idempotencyKey: `card-regenerate:${randomUUID()}`,
+      // N#7-4: 幂等键改为确定性派生 (cardId + noteVersionId)，使同一 (card, noteVersion)
+      // 的重复 regenerate 命中 createCardGenerationRun 去重，避免重复 AI 派发。
+      // 参照 card-set/service.ts 的确定性键模式。
+      idempotencyKey: `card-regenerate:${cardId}:${useVersionId}`,
       oldCardId: cardId,
     },
   );

@@ -15,7 +15,7 @@ import {
   hashInvitationToken as hashInvitationTokenLocal,
   isValidInvitationToken as isValidInvitationTokenLocal,
 } from "./invitation-token.ts";
-import { resolveSystemProviderForCapability } from "@ailearn/shared";
+import { resolveSystemProviderForCapability } from "@ailearn/shared/task-router";
 import { deleteObject } from "../../lib/object-storage.ts";
 import { logger } from "../../lib/logger.ts";
 
@@ -116,13 +116,12 @@ export async function loginWithPassword(
   password: string,
 ): Promise<{ token: string; ctx: SessionContext; workspaces: WorkspaceInfo[] } | null> {
   const normalizedEmail = canonicalizeEmail(email);
-  // BUG-07 修复：合并两次串行 DB 查询为单次 lower(email) 查询。
-  // canonicalizeEmail 已将邮箱转为小写，使用 lower(email) = normalizedEmail
-  // 可以在单次查询中同时匹配精确和大小写不一致的历史数据，
-  // 避免正常流程中的第二次 DB 往返。PostgreSQL 在 email 列上的
-  // lower(email) 表达式索引可以高效执行此查询。
+  // R4（round-3 审计）：不再用 lower(email) = ...（无表达式索引 → 每次登录 Seq Scan）。
+  // canonicalizeEmail 已在注册/邀请路径将 email 小写存储，直接 eq(users.email, ...)
+  // 命中 users_email_idx 唯一索引。若某历史账号为大小写混合（仅影响一次性注册去重，
+  // 见 registerWithoutInvite 的 legacy 兜底），登录已按 canonical 小写查找同样命中。
   const user = await db.query.users.findFirst({
-    where: sql`lower(${users.email}) = ${normalizedEmail}`,
+    where: eq(users.email, normalizedEmail),
   });
   if (!user) {
     await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
@@ -134,11 +133,6 @@ export async function loginWithPassword(
     await db.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, user.id));
   }
   // ADR-0009: 查询所有活跃工作区（left_at IS NULL），排除已退出的
-  // ── RLS 重开清单项 ──
-  // 以下两处（workspaceMembers、workspaces）以全局 `db` 裸读（非事务上下文）而非
-  // withWorkspaceTransaction/SYSTEM 上下文。在 RLS 关闭的当前部署下按 user.id 过滤，
-  // 语义正确；一旦按 0027 契约重开 RLS，需复核这两处是否被 workspace 策略静默空读，
-  // 必要时改为显式 BYPASSRLS/系统事务上下文承载。
   const memberships = await db.query.workspaceMembers.findMany({
     where: and(
       eq(workspaceMembers.userId, user.id),
@@ -204,9 +198,16 @@ export async function registerWithoutInvite(
   options?: { displayName?: string; avatarUrl?: string },
 ): Promise<{ token: string; ctx: SessionContext } | null> {
   const normalizedEmail = canonicalizeEmail(email);
+  // R5（round-3 审计）：bcryptjs 为纯 JS 主线程 CPU 密集（cost 10 ≈ 50-150ms）。
+  // 在开事务前计算哈希，避免持有 10 连接池之一的同时在主线程哈希。
+  // 不换库（依赖约束），保留纯 JS bcryptjs；未来可迁移 native bcrypt/worker。
+  // 副作用：重复注册（已在期用户）路径会多做一次哈希，但该路径罕见且开销可忽略。
+  const passwordHash = await hashPassword(password);
   let result: { userId: string; workspaceId: string } | null;
   try {
     result = await db.transaction(async (tx) => {
+      // 请求级去重：先走 eq 命中唯一索引；lower() 兜底仅用于检测历史混合大小写邮箱，
+      // 防止重复注册。该 lower() 仅在注册路径触发（非常热登录路径），故保留 legacy 兜底。
       const exactUser = await tx.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
       const existing = exactUser ?? await tx.query.users.findFirst({
         where: sql`lower(${users.email}) = ${normalizedEmail}`,
@@ -217,7 +218,7 @@ export async function registerWithoutInvite(
         .insert(users)
         .values({
           email: normalizedEmail,
-          passwordHash: await hashPassword(password),
+          passwordHash,
           displayName: generateDefaultDisplayName(options?.displayName, normalizedEmail),
           ...(options?.avatarUrl?.trim() ? { avatarUrl: options.avatarUrl.trim() } : {}),
         })
@@ -349,12 +350,36 @@ export async function resetRecoveredUserPassword(
   });
 }
 
+// R9（round-3 审计）：会话清理 in-flight 守卫。refer dbGaugeRunning 模式，
+// 防止 1h 定时任务在上一轮尚未结束（或重叠快照）时再次并发执行无界删除。
+let sessionCleanupRunning = false;
+const SESSION_CLEANUP_BATCH = 1000;
+
 export async function cleanupExpiredSessions(): Promise<number> {
-  const deleted = await db
-    .delete(sessions)
-    .where(lt(sessions.expiresAt, new Date()))
-    .returning({ token: sessions.token });
-  return deleted.length;
+  if (sessionCleanupRunning) return 0;
+  sessionCleanupRunning = true;
+  try {
+    let total = 0;
+    for (;;) {
+      // 分批删除：先取一批过期 token（LIMIT 有界），再按 id 删除，
+      // 避免单条无界 DELETE 在过期积压大时形成长事务。每批独立事务（隐式）。
+      const expired = await db
+        .select({ token: sessions.token })
+        .from(sessions)
+        .where(lt(sessions.expiresAt, new Date()))
+        .limit(SESSION_CLEANUP_BATCH);
+      if (expired.length === 0) break;
+      const ids = expired.map((r) => r.token);
+      // 按实际删除行计数（returning 中的 token 唯一；若个别 id 因并发已被删，
+      // returning 的 len 才反映真实删除数）。
+      const deleted = await db.delete(sessions).where(inArray(sessions.token, ids)).returning({ token: sessions.token });
+      total += deleted.length;
+      if (expired.length < SESSION_CLEANUP_BATCH) break;
+    }
+    return total;
+  } finally {
+    sessionCleanupRunning = false;
+  }
 }
 
 /**

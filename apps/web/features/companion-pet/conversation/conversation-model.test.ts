@@ -71,7 +71,13 @@ test("formatRelativeTime covers 刚刚/分钟/小时/天/日期 buckets", () => 
   assert.equal(formatRelativeTime(new Date(now - 2 * 3_600_000).toISOString()), "2 小时前");
   assert.equal(formatRelativeTime(new Date(now - 3 * 86_400_000).toISOString()), "3 天前");
   const oldDate = new Date(now - 30 * 86_400_000);
-  assert.equal(formatRelativeTime(oldDate.toISOString()), oldDate.toISOString().slice(0, 10));
+  // 日期桶按本地时区格式化（实现用 getFullYear/getMonth/getDate）；
+  // 断言也按本地日期计算，避免 UTC/本地跨时区差一天导致偶发失败。
+  const pad = (value: number) => String(value).padStart(2, "0");
+  assert.equal(
+    formatRelativeTime(oldDate.toISOString()),
+    `${oldDate.getFullYear()}-${pad(oldDate.getMonth() + 1)}-${pad(oldDate.getDate())}`,
+  );
   assert.equal(formatRelativeTime(null), "");
   assert.equal(formatRelativeTime("not-a-date"), "");
 });

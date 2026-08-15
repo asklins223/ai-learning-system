@@ -12,13 +12,11 @@
  * - nesting depth 永远为 1
  */
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, withWorkerWorkspaceTransaction } from "../../db.ts";
 import * as schema from "../../schema/index.ts";
 import {
   AgentUnitKind,
-  JobStatus,
-  JobType,
   isTerminalUnitStatus,
 } from "@ailearn/shared";
 import {
@@ -280,30 +278,29 @@ async function handleDelegateSpecialist(
         unitId = existing.id;
       }
 
-      // 2. 创建 child job（幂等）—— 同一事务内
-      await tx.insert(schema.jobs).values({
-        type: JobType.EXECUTE_CARD_AGENT_TURN,
-        workspaceId: ctx.workspaceId,
-        requestedBy: ctx.requestedBy,
-        payload: {
-          generationRunId: ctx.runId,
-          agentUnitId: unitId,
-          turnNo: 1,
-          inputHash: hashJson({
+      // 2. 创建 child job（幂等）—— 同一事务内。
+      // 0098：worker 不直接 INSERT jobs（无 permissive INSERT policy，
+      // 裸 INSERT 必被 RESTRICTIVE guard 拒绝）。统一经 SECURITY DEFINER
+      // 入队函数 ailearn_enqueue_agent_turn_job（migrator owner BYPASSRLS），
+      // 与 drizzle onConflictDoNothing 语义一致。
+      await tx.execute(sql`
+        SELECT public.ailearn_enqueue_agent_turn_job(
+          ${ctx.workspaceId}::uuid,
+          ${ctx.requestedBy ?? null}::uuid,
+          ${ctx.runId}::uuid,
+          ${unitId}::uuid,
+          1::integer,
+          ${hashJson({
             runId: ctx.runId,
             unitId,
             turnNo: 1,
-          }),
-          userId: ctx.requestedBy,
-        },
-        status: JobStatus.PENDING,
-        generationRunId: ctx.runId,
-        generationUnitId: unitId,
-        stage: "complete",
-        priority: 70,
-        resourceClass: "card_foreground",
-        idempotencyKey: `agent-turn:${ctx.runId}:${unitId}:1`,
-      }).onConflictDoNothing();
+          })}::text,
+          70::integer,
+          'card_foreground'::text,
+          ${`agent-turn:${ctx.runId}:${unitId}:1`}::text,
+          ${ctx.requestedBy ?? ""}::text
+        )
+      `);
 
       // 3. 更新 source bundles 的 assignedAgentUnitId —— 同一事务内
       // R24 修复：更新 bundle 的 assignedAgentUnitId 指向子 Agent unit。

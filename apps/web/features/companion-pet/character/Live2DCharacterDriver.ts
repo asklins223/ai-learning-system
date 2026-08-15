@@ -1,6 +1,6 @@
 "use client";
 
-import type { CharacterPresentationStateV1 } from "@ailearn/shared";
+import type { CharacterPresentationStateV1 } from "@ailearn/shared/companion-character-contracts";
 import { COMPANION_LIVE2D_MANIFEST } from "./companion-live2d-manifest.ts";
 import {
   LIVE2D_INVITE_ONCE_CUE,
@@ -9,6 +9,7 @@ import {
 import { arbitrateLive2DParameters } from "./live2d-priority";
 import { clampLive2DParameter } from "./companion-live2d-manifest";
 import { parameterRequestsForLive2DFrame } from "./live2d-parameter-frames";
+import { EmotionVadController, type EmotionVadEvent } from "./emotion-vad";
 
 /**
  * P4 Live2D driver (current Mao PRO model；Owner 批准 2026-08-11)。
@@ -166,14 +167,18 @@ export class Live2DCharacterDriver {
   private inviteOncePlaying = false;
   private currentPresentation: CharacterPresentationStateV1 = "idle";
   private voiceLevel = 0;
+  /** 15 方案 emotion 表现层：VAD 情绪状态机（cue/segment emotion → 平滑输出） */
+  private readonly emotionVad = new EmotionVadController();
   private readonly handleTicker = (): void => {
     if (this.disposed || !this.model) return;
     const core = this.model.internalModel?.coreModel;
     if (!core?.setParameterValueById) return;
+    const nowMs = typeof performance === "undefined" ? Date.now() : performance.now();
     const requests = parameterRequestsForLive2DFrame({
       presentation: this.currentPresentation,
-      nowMs: typeof performance === "undefined" ? Date.now() : performance.now(),
+      nowMs,
       voiceLevel: this.voiceLevel,
+      emotion: this.emotionVad.update(nowMs),
     });
     for (const request of arbitrateLive2DParameters(requests)) {
       const value = clampLive2DParameter(request.parameter, request.value);
@@ -303,6 +308,12 @@ export class Live2DCharacterDriver {
   /** Set normalized playback amplitude for the lipsync parameter layer. */
   setVoiceLevel(level: number): void {
     this.voiceLevel = Math.min(1, Math.max(0, Number.isFinite(level) ? level : 0));
+  }
+
+  /** 15 方案 emotion 表现层：推入情绪事件（character.cue / segment.emotion）。 */
+  pushEmotion(event: EmotionVadEvent): void {
+    if (this.disposed) return;
+    this.emotionVad.push(event);
   }
 
   /** Character click: play the single-shot invite cue once, then idle. */

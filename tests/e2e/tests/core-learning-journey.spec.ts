@@ -77,12 +77,11 @@ test.describe("Core learning journey @pr", () => {
     // Should navigate to the note editor page
     await expect(page).toHaveURL(/\/notes\/[\w-]+/);
 
-    // v0.6: Milkdown editor replaces textarea.ne-editor-textarea.
-    const editor = page.locator(".milkdown-editor .ProseMirror");
-    if (!(await editor.isVisible().catch(() => false))) {
-      await page.getByRole("button", { name: /^(编辑|写作)$/ }).click();
-    }
+    // 方案 16/20：note editor 已改版为原生 textbox（"笔记正文编辑区"），
+    // 旧 milkdown/ProseMirror 已移除。
+    const editor = page.getByRole("textbox", { name: "笔记正文编辑区" });
     await expect(editor).toBeVisible({ timeout: 10_000 });
+    await expect(editor).toBeEditable();
   });
 
   test("card detail page loads and shows key points", async ({ authedPage }) => {
@@ -91,15 +90,15 @@ test.describe("Core learning journey @pr", () => {
     // Navigate to cards list
     await page.goto("/cards");
 
-    // The cards page shows a skeleton grid (.cards-skeleton-grid) while items
-    // are loading from the API. Wait for the skeleton to be replaced by either
-    // the cards grid (.cards-grid) or the empty state (.cards-state-wrap).
-    await expect(page.locator(".cards-grid, .cards-state-wrap")).toBeVisible({
+    // 方案 16：卡片库已改版为“学习目标”库。加载中显示骨架
+    // （.cards-objective-skeletons），完成后是目标列表
+    // （.cards-objective-list）或空态（.cards-state-wrap）。
+    await expect(page.locator(".cards-objective-list, .cards-state-wrap")).toBeVisible({
       timeout: 10_000,
     });
 
-    // Card items use class "cards-card" and data-ui="study-card" attributes.
-    const cardItems = page.locator("a.cards-card, [data-ui='study-card']");
+    // 目标行 article[data-ui='learning-objective-row']，标题链接进入详情页。
+    const cardItems = page.locator("[data-ui='learning-objective-row'] h3 a");
     await expect(cardItems.first()).toBeVisible({ timeout: 10_000 });
 
     // Navigate directly to the card detail page via href. Using page.goto()
@@ -160,15 +159,15 @@ test.describe("Core learning journey @pr", () => {
     }
   });
 
-  test("validation panel is accessible from card detail", async ({ authedPage }) => {
+  test("validation entry is accessible from card detail", async ({ authedPage }) => {
     const page = authedPage;
 
     await page.goto("/cards");
-    // Wait for the skeleton to be replaced by cards grid or empty state.
-    await expect(page.locator(".cards-grid, .cards-state-wrap")).toBeVisible({
+    // 方案 16：学习目标库（列表或空态）。
+    await expect(page.locator(".cards-objective-list, .cards-state-wrap")).toBeVisible({
       timeout: 10_000,
     });
-    const cardItems = page.locator("a.cards-card, [data-ui='study-card']");
+    const cardItems = page.locator("[data-ui='learning-objective-row'] h3 a");
     await expect(cardItems.first()).toBeVisible({ timeout: 10_000 });
 
     // Navigate directly to the card detail page via href.
@@ -179,22 +178,14 @@ test.describe("Core learning journey @pr", () => {
     await expect(page).toHaveURL(/\/cards\/[\w-]+/);
     await expect(page.locator(".card-detail-desk")).toBeVisible({ timeout: 10_000 });
 
-    // Validation section should be present. The card detail page renders
-    // a validation sidebar (<aside> with heading "验证理解"). The validation
-    // section loads asynchronously after the card data, so we need to wait
-    // for it to appear.
-    const validationHeading = page.getByRole("heading", { name: /^验证理解/ });
-    const validationButton = page.getByRole("button", { name: /验证理解|查看验证状态/ });
-
-    // Wait for either the heading or button to appear in the DOM.
-    // Use toHaveCount(1) which auto-retries until the element renders.
-    try {
-      await expect(validationHeading).toHaveCount(1, { timeout: 10_000 });
-    } catch {
-      // If heading doesn't appear, a button to open validation might exist
-      const buttonVisible = await validationButton.first().isVisible({ timeout: 3_000 }).catch(() => false);
-      expect(buttonVisible).toBeTruthy();
-    }
+    // 方案 16：验证入口统一为卡片上的三分钟微旅程主按钮
+    // （LearningCardActions / LEARNING_RUN_V1）。旧的内联 validation-panel
+    // 已删除。点击后必须进入统一 LearningRun 创建入口。
+    const primaryAction = page.locator("[data-ui='lc-card-primary-action']");
+    await expect(primaryAction).toBeVisible({ timeout: 15_000 });
+    await expect(primaryAction).toHaveAccessibleName(/开始三分钟巩固|开始巩固/);
+    await primaryAction.click();
+    await expect(page).toHaveURL(/\/learning-runs\/new\?origin=card/, { timeout: 15_000 });
   });
 
   // 2026-08-11：v0.5 review UI（完成本轮/稍后再看/空态文案）已删除，对 v0.6
@@ -249,7 +240,7 @@ test.describe("Core learning journey @pr", () => {
     // Navigate to cards
     await page.goto("/cards");
     await expect(page).toHaveURL(/\/cards/);
-    await expect(page.locator(".cards-grid, .cards-state-wrap")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".cards-objective-list, .cards-state-wrap")).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState("networkidle");
 
     // Navigate to review
@@ -257,7 +248,9 @@ test.describe("Core learning journey @pr", () => {
     await expect(
       page.getByRole("heading", { name: /复习|review/i }).first(),
     ).toBeVisible();
-    await expect(page.locator('[aria-label="正在加载复习队列"]')).not.toBeVisible({ timeout: 15_000 });
+    // 队列数据加载完成（等列表项出现比等 loading 消失更稳：hydration 前后
+    // 骨架/计数均带 loading aria-label，列表项出现才代表真实数据落地）。
+    await expect(page.locator(".review-v06-item").first()).toBeVisible({ timeout: 60_000 });
     await page.waitForLoadState("networkidle");
 
     // Navigate back to today

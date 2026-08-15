@@ -168,7 +168,8 @@ services:
       AUTH_SURFACE_MANIFEST_SECRET: ailearn-dev-auth-surface-secret
       AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-memory}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
-      AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
+      # Dev 栈放宽登录限流（E2E 多 spec 连续登录）；生产 compose 保持默认 5 次。
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-100}
       # The standalone dev stack deliberately exercises the v0.6 scheduling
       # and shadow paths. Production remains fail-closed unless explicitly set.
       SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v2}
@@ -183,11 +184,6 @@ services:
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-true}
       COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
       COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-true}
-      # §10.1/§14.3（2026-08-15 接线修复）：Journey/delivery 门控 + Card Gen V2
-      # 路由注册门控——此前 API 容器缺失这两个 env，journey 端点 404、
-      # V2 路由不注册。
-      COMPANION_JOURNEY_V2: ${COMPANION_JOURNEY_V2:-true}
-      CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-true}
       # AI platform config — all provider/capability config in one JSON file.
       AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
@@ -195,6 +191,10 @@ services:
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      # 方案 16：LearningRun 独立 Assessment Critic（OpenAI-compatible；未配置 fail closed）。
+      ASSESSMENT_CRITIC_URL: ${ASSESSMENT_CRITIC_URL:-}
+      ASSESSMENT_CRITIC_KEY: ${ASSESSMENT_CRITIC_KEY:-}
+      ASSESSMENT_CRITIC_MODEL: ${ASSESSMENT_CRITIC_MODEL:-qwen-plus}
       # 语音：SiliconFlow ASR（外部 API）+ edge-tts TTS（Docker 容器）
       EDGE_TTS_BASE_URL: ${EDGE_TTS_BASE_URL:-http://edge-tts:8080}
       EDGE_TTS_AUTH_TOKEN: ${EDGE_TTS_AUTH_TOKEN:?Set EDGE_TTS_AUTH_TOKEN in .env（edge-tts 与 api 必须一致）}
@@ -209,6 +209,12 @@ services:
       # while canonical mastery/schedule writes remain fail-closed.
       LEARNING_SESSION_V2_INTERNAL: ${LEARNING_SESSION_V2_INTERNAL:-true}
       LEARNING_SESSION_CANONICAL_COMMIT_ENABLED: ${LEARNING_SESSION_CANONICAL_COMMIT_ENABLED:-false}
+      # 文档 16：LearningRun 统一底座与 Journey V2（与本地 node 直跑同一套 env 契约）。
+      LEARNING_RUN_V1: ${LEARNING_RUN_V1:-true}
+      COMPANION_JOURNEY_V2: ${COMPANION_JOURNEY_V2:-true}
+      COMPANION_BRIDGE_V2: ${COMPANION_BRIDGE_V2:-true}
+      LEARNING_DRAFT_ENC_KEY: ${LEARNING_DRAFT_ENC_KEY:-}
+      PROJECTION_CHECKPOINT_SECRET: ${PROJECTION_CHECKPOINT_SECRET:-}
       # Image upload: MinIO/S3 storage endpoint and credentials.
       # Must match the dev minio service's MINIO_ROOT_USER/PASSWORD below.
       STORAGE_ENDPOINT: http://minio:9000
@@ -251,6 +257,10 @@ services:
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      # 方案 16：LearningRun 独立 Assessment Critic（OpenAI-compatible；未配置 fail closed）。
+      ASSESSMENT_CRITIC_URL: ${ASSESSMENT_CRITIC_URL:-}
+      ASSESSMENT_CRITIC_KEY: ${ASSESSMENT_CRITIC_KEY:-}
+      ASSESSMENT_CRITIC_MODEL: ${ASSESSMENT_CRITIC_MODEL:-qwen-plus}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
       API_INTERNAL_URL: http://api:4000
       # Keep worker-side execution authorization aligned with the API
@@ -288,6 +298,20 @@ services:
       - ./packages/db/src:/tmp/db/src
       - ./packages/db/package.json:/tmp/db/package.json:ro
       - ./apps/api/src:/apps/api/src
+      # 2026-08-15（worker 崩溃修复）：worker 直接 import apps/api 的 schema
+      #（schema/index.ts export * 转发）。三要素缺一不可：
+      # 1) /apps/api/package.json（"type": "module"）——此前只挂 src，Node/tsx
+      #    把 api 的 .ts 当 CJS 转译，esbuild CJS 的 export * 转发链全部丢失
+      #    （schema 命名空间为空 → plan-repository 找不到 cardGenerationPlans
+      #    → SyntaxError，worker 22h 全任务失败）；
+      # 2) /apps/api/node_modules——schema 文件裸 import drizzle 按文件位置
+      #    向上解析（此前依赖 tsx 入口前缀缓存的非标准行为）；
+      # 3) @ailearn/shared 是 symlink（--preserve-symlinks），其目标
+      #    /packages/shared 与 shared 自带 zod/ts-fsrs 需可见。
+      - ./apps/api/package.json:/apps/api/package.json:ro
+      - ./apps/api/node_modules:/apps/api/node_modules
+      - ./packages/shared:/packages/shared
+      - ./packages/shared/node_modules:/packages/shared/node_modules
       - ./config:/app/config:ro
     networks:
       - ailearn_net
@@ -312,6 +336,10 @@ services:
       NEXT_PUBLIC_COMPANION_PET_ENABLED: ${NEXT_PUBLIC_COMPANION_PET_ENABLED:-true}
       NEXT_PUBLIC_COMPANION_V2_INTERNAL: ${NEXT_PUBLIC_COMPANION_V2_INTERNAL:-true}
       NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: ${NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED:-true}
+      # 文档 16：LearningRun/Journey V2/星图行动面（与本地 next dev 同一套 env 契约）。
+      NEXT_PUBLIC_LEARNING_RUN_V1: ${NEXT_PUBLIC_LEARNING_RUN_V1:-true}
+      NEXT_PUBLIC_STAR_MAP_ACTION_V1: ${NEXT_PUBLIC_STAR_MAP_ACTION_V1:-true}
+      NEXT_PUBLIC_COMPANION_JOURNEY_V2: ${NEXT_PUBLIC_COMPANION_JOURNEY_V2:-true}
       # Agent 活动流控制台（可选增强，fail-closed：默认关）
       NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: ${NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED:-false}
     ports:

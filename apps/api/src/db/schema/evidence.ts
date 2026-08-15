@@ -193,8 +193,8 @@ export const reviewSchedules = pgTable(
     policyVersion: text("policy_version"), // discrete-v2
     reasonCode: text("reason_code"),
     supersedesScheduleId: uuid("supersedes_schedule_id"),
-    // 0147 迁移已加列，schema 此前未同步（review-defer-service 类型缺失）：
-    // 队列 UI 的"用户手动推迟"展示字段（不修改 official 调度）。
+    // 方案 16 §18.1 defer_review：用户队列"展示层延后"（不改 official
+    // next_review_at、不消费 schedule、不创建 successor；仅队列 UI 展示）。
     userDeferredUntil: timestamp("user_deferred_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     // CONC-10: updatedAt 记录最近一次 status 变更时间。

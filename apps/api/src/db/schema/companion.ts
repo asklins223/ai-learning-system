@@ -121,11 +121,9 @@ export const userCompanionAccountState = pgTable(
     suppression: jsonb("suppression").$type<CompanionSuppression>(),
     animationVoiceOff: jsonb("animation_voice_off").$type<CompanionAnimationVoiceOff>(),
     notificationBoundary: jsonb("notification_boundary").$type<CompanionNotificationBoundary>(),
-    // §10.2/§10.3（0140 迁移已加列，schema 此前未同步——proactive-hook 读取
-    // 这两列时 drizzle 类型缺失）。interventionLevel=主动介入强度预算档位；
-    // quietHours=静默时段（时段内抑制全部主动 cue）。
-    interventionLevel: text("intervention_level").notNull().default("moderate").$type<"quiet" | "moderate" | "active">(),
-    quietHours: jsonb("quiet_hours").$type<{ startLocal: string; endLocal: string; timezone: string }>(),
+    // 方案 16 §10.3：主动介入强度与静默时段（账号级跨设备；0140 迁移）。
+    interventionLevel: text("intervention_level").$type<"quiet" | "moderate" | "active">().notNull().default("moderate"),
+    quietHours: jsonb("quiet_hours").$type<{ startLocal: string; endLocal: string; timezone: string } | null>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

@@ -89,13 +89,22 @@ export async function getUserOverrideMap(
   if (evidenceIds.length === 0) return new Map();
   // BUG-71: 优先使用传入的 executor（事务连接），否则回退到 db（向后兼容）
   const queryTarget = executor ?? db;
-  const rows = await queryTarget.query.evidenceOverrides.findMany({
-    where: and(
-      eq(evidenceOverrides.userId, userId),
-      inArray(evidenceOverrides.evidenceId, evidenceIds),
-    ),
-  });
-  return new Map(rows.map((r) => [r.evidenceId, r.override as EvidenceOverride]));
+  // Y3（round-3 审计）：原实现裸 inArray，超大工作区 evidenceIds 可能超过
+  // postgres-js 绑定参数上限（~65535）。现按 500/批分块（同 note/service
+  // chunkedInArraySelect 语义），合并结果。
+  const map = new Map<string, EvidenceOverride>();
+  const CHUNK = 500;
+  for (let i = 0; i < evidenceIds.length; i += CHUNK) {
+    const chunk = evidenceIds.slice(i, i + CHUNK);
+    const rows = await queryTarget.query.evidenceOverrides.findMany({
+      where: and(
+        eq(evidenceOverrides.userId, userId),
+        inArray(evidenceOverrides.evidenceId, chunk),
+      ),
+    });
+    for (const r of rows) map.set(r.evidenceId, r.override as EvidenceOverride);
+  }
+  return map;
 }
 
 /**

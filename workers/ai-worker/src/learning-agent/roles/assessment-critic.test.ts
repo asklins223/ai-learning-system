@@ -32,7 +32,7 @@ import {
   type LockedArtifactView,
   type ProposedAssessment,
 } from "./assessment-critic.ts";
-import { computeVoiceContentHash } from "@ailearn/shared";
+import { computeVoiceContentHash } from "@ailearn/shared/content-hash";
 
 // ─── fixtures ─────────────────────────────────────────────────────────────
 

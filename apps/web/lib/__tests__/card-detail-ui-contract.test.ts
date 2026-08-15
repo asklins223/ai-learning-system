@@ -82,15 +82,13 @@ describe("learning card detail UI contract", () => {
     );
     assert.ok(actionsSource.includes('data-ui="lc-card-primary-action"'));
     assert.ok(actionsSource.includes('data-ui="lc-card-evidence-action"'));
-    assert.ok(actionsSource.includes("开始巩固练习"));
+    assert.ok(actionsSource.includes("预览这次微旅程"));
     assert.ok(actionsSource.includes("查看原文依据"));
     assert.ok(!actionsSource.includes("title:"));
     assert.ok(!actionsSource.includes("summary:"));
     assert.ok(!actionsSource.includes("keyPoints:"));
     assert.ok(!actionsSource.includes("朗读"));
     assert.ok(!actionsSource.includes("问一问"));
-    assert.ok(!pageSource.includes("<ValidationPanel"));
-    assert.ok(!pageSource.includes("<ValidationFocus"));
     assert.ok(!pageSource.includes("refQuote"));
   });
 
@@ -99,7 +97,9 @@ describe("learning card detail UI contract", () => {
     assert.ok(pageSource.includes("evidenceLoading"));
     assert.ok(!pageSource.includes("buildValidationPrompt"));
     assert.ok(!actionsSource.includes("可以开始"));
-    assert.ok(actionsSource.includes("由系统依据这张学习卡完成评估"));
+    assert.ok(actionsSource.includes("提交后由系统独立评估"));
+    assert.ok(actionsSource.includes("不要求写长文"));
+    assert.ok(actionsSource.includes("不会自动下一题"));
   });
 
   it("preserves accessible loading, failure, navigation and compact actions", () => {

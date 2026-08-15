@@ -342,22 +342,34 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
       `;
 
       // 2. 创建工作区
+      // 方案 16/20 e2e：seed 工作区需具备已签署的 AI 使用协议（ai_consent_*）
+      // 且 ai_data_policy.send_to_external = true，否则前端 consent gate
+      // （ai-consent-gate.tsx）与 worker governance（checkAIConsent）会
+      // 拒绝所有 AI 生成任务，PR 旅程无法走通。
       const [workspace] = await tx`
-        INSERT INTO workspaces (id, name, owner_id)
+        INSERT INTO workspaces (id, name, owner_id, ai_consent_version, ai_consent_at, ai_consent_by, ai_data_policy)
         VALUES (
           ${randomUUID()},
           ${workspaceName},
-          ${owner.id}
+          ${owner.id},
+          'e2e-seed-consent-v1',
+          NOW(),
+          ${owner.id},
+          '{"sendToExternal": true, "sendImageContent": false, "piiDetection": true, "auditLogging": true}'::jsonb
         )
         RETURNING id
       `;
 
       const [isolatedWorkspace] = await tx`
-        INSERT INTO workspaces (id, name, owner_id)
+        INSERT INTO workspaces (id, name, owner_id, ai_consent_version, ai_consent_at, ai_consent_by, ai_data_policy)
         VALUES (
           ${randomUUID()},
           ${isolatedWorkspaceName},
-          ${isolatedOwner.id}
+          ${isolatedOwner.id},
+          'e2e-seed-consent-v1',
+          NOW(),
+          ${isolatedOwner.id},
+          '{"sendToExternal": true, "sendImageContent": false, "piiDetection": true, "auditLogging": true}'::jsonb
         )
         RETURNING id
       `;
@@ -658,7 +670,7 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
         await tx`
           INSERT INTO review_schedules (
             id, workspace_id, user_id, subject_type, subject_id, key_point_id,
-            status, next_review_at, interval_days
+            status, next_review_at, interval_days, generation
           )
           VALUES (
             ${randomUUID()},
@@ -669,12 +681,19 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
             ${keyPointIds[i]},
             'pending',
             NOW(),
+            1,
             1
           )
         `;
       }
 
       // 7. 创建 onboarding 状态：owner 已完成，member 待完成
+      // 7a. Journey V2 邀请(offered):sandbox/own-content 旅程的起始状态
+      // (P6 的 Pet 欢迎→offered 转换尚未接线;seed 提供 offered 初始契约)。
+      await tx`
+        INSERT INTO companion_account_invitations (user_id, status, offered_at, revision)
+        VALUES (${owner.id}, 'offered', NOW(), 1)
+      `;
       await tx`
         INSERT INTO onboarding_states (workspace_id, user_id, version, steps, status)
         VALUES (

@@ -3,6 +3,11 @@ import { after, describe, it } from "node:test";
 import { ReviewStatus } from "@ailearn/shared";
 import { db } from "../db/client.ts";
 import { evidences, reviewSchedules } from "../db/schema/evidence.ts";
+import {
+  learningObjectivesV2,
+  learningObjectiveRevisionsV2,
+  learningCardsV2,
+} from "../db/schema/card-generation-v2.ts";
 import { getSanitizedReviewMeta, listReviews } from "../modules/review/service.ts";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
@@ -74,6 +79,10 @@ function installReviewDb(fixture: ReviewFixture): void {
       }
       if (table === evidences) {
         return { where: async () => [{ count: fixture.evidenceCount ?? 0 }] };
+      }
+      if (table === learningObjectivesV2 || table === learningObjectiveRevisionsV2 || table === learningCardsV2) {
+        // R35/C0-rebase：V2 objective 投影查询（fixture 均为 V1 keyPoint → 空）
+        return { where: async () => [] };
       }
       assert.fail("unexpected table in review service test");
     },

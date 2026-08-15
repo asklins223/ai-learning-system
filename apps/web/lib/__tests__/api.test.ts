@@ -335,4 +335,48 @@ describe("API client", () => {
       exclusions: { unitIds: ["unit-1"] },
     });
   });
+
+  it("deduplicates concurrent same-path GET requests (in-flight dedup)", async () => {
+    let fetchCount = 0;
+    mockFetch((async () => {
+      fetchCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return Response.json({
+        account: { revision: 0, epoch: 0, globalEnabled: true },
+        onboardingStates: [],
+      });
+    }) as unknown as (url: string, init: RequestInit) => Response);
+
+    const [first, second] = await Promise.all([
+      api.getCompanionOverview(),
+      api.getCompanionOverview(),
+    ]);
+    // 同 path 且同 signal（均无）的并发 GET 共享一次 fetch。
+    assert.equal(fetchCount, 1);
+    assert.deepEqual(first, second);
+  });
+
+  it("does not dedup GETs with independent AbortSignals", async () => {
+    let fetchCount = 0;
+    mockFetch((async () => {
+      fetchCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return Response.json({
+        account: { revision: 0, epoch: 0, globalEnabled: true },
+        onboardingStates: [],
+      });
+    }) as unknown as (url: string, init: RequestInit) => Response);
+
+    const controllerA = new AbortController();
+    const controllerB = new AbortController();
+    const [a, b] = await Promise.all([
+      api.getCompanionOverview(controllerA.signal),
+      api.getCompanionOverview(controllerB.signal),
+    ]);
+    // 不同 signal：各自独立请求，不去重。
+    assert.equal(fetchCount, 2);
+    assert.deepEqual(a, b);
+    controllerA.abort();
+    controllerB.abort();
+  });
 });

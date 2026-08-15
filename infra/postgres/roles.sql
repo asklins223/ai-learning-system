@@ -498,6 +498,72 @@ BEGIN
   IF to_regclass('public.ai_audit_log') IS NOT NULL THEN
     GRANT INSERT ON TABLE public.ai_audit_log TO ailearn_worker;
   END IF;
+
+  -- ─── 方案 20 V2（迁移 0135/0138；与 0142 grant repair 对齐）──────────
+  -- V2 管线以 ailearn_worker（NOBYPASSRLS）直查 V2 表。roles.sql 是唯一
+  -- 授权源：不镜像的话每次 bootstrap 的 REVOKE ALL 会清掉 0135/0138 的
+  -- 迁移授权并导致 worker 管线 permission denied。
+  -- 16 张核心表 full CRUD（outbox claim/complete、runs/plans/candidates、
+  -- objectives/revisions/cards/publications/reminders/receipts/events）。
+  FOREACH table_name IN ARRAY ARRAY[
+    'card_generation_runs_v2',
+    'card_generation_plans_v2',
+    'card_generation_candidates_v2',
+    'learning_objectives_v2',
+    'learning_objective_revisions_v2',
+    'learning_cards_v2',
+    'learning_card_publication_revisions_v2',
+    'card_exposure_ledger_v2',
+    'initial_validation_reminders_v2',
+    'card_activation_receipts_v2',
+    'card_generation_events_v2',
+    'legacy_target_snapshot_attachments_v2',
+    'candidate_evidence_binding_plans_v2',
+    'evidence_eligibility_states_v2',
+    'card_generation_run_outbox_v2',
+    'learning_target_snapshots_v2'
+  ]
+  LOOP
+    IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO ailearn_worker',
+        table_name
+      );
+    END IF;
+  END LOOP;
+
+  -- capability state：worker 更新/读取 epoch（§18.1）
+  IF to_regclass('public.card_content_capability_state') IS NOT NULL THEN
+    GRANT SELECT, INSERT, UPDATE ON TABLE public.card_content_capability_state
+      TO ailearn_worker;
+  END IF;
+
+  -- 管线写入/回读表（specs/input snapshots/evidence 域/equivalence/lineage/
+  -- exposures/candidate quality+lineage+feedback）：worker SELECT + INSERT
+  FOREACH table_name IN ARRAY ARRAY[
+    'card_generation_semantic_specs_v2',
+    'card_generation_input_snapshots_v2',
+    'evidence_snapshots_v2',
+    'evidence_redactions_v2',
+    'semantic_support_reports_v2',
+    'learning_objective_evidence_bindings_v2',
+    'learning_objective_equivalence_reports_v2',
+    'learning_objective_revision_equivalence_v2',
+    'learning_objective_private_contracts_v2',
+    'learning_objective_lineage_v2',
+    'learning_exposures_v2',
+    'card_candidate_quality_reports_v2',
+    'card_candidate_lineage_v2',
+    'card_candidate_feedback_v2'
+  ]
+  LOOP
+    IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT SELECT, INSERT ON TABLE public.%I TO ailearn_worker',
+        table_name
+      );
+    END IF;
+  END LOOP;
 END
 $$;
 
@@ -589,6 +655,19 @@ BEGIN
     REVOKE ALL ON FUNCTION public.ailearn_find_active_turn_job(uuid,uuid,uuid)
       FROM PUBLIC, ailearn_api;
     GRANT EXECUTE ON FUNCTION public.ailearn_find_active_turn_job(uuid,uuid,uuid)
+      TO ailearn_worker;
+  END IF;
+
+  -- 0134（方案 16 e2e）：note_evidence_embeddings 写入需要 vector 类型
+  -- input function（`'[...]'::vector` 走 vector_in 而非 vector 函数本身）。
+  -- worker 是 embeddings 唯一写入者；api 无写路径，不授权（api 白名单
+  -- 校验会拒绝非白名单 EXECUTE）。
+  IF to_regprocedure('public.vector_in(cstring,oid,integer)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.vector_in(cstring, oid, integer)
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.vector(vector,integer,boolean)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.vector(vector, integer, boolean)
       TO ailearn_worker;
   END IF;
 
@@ -832,7 +911,39 @@ BEGIN
       ('companion_action_proposals', true, false, true, false),
       ('companion_action_runs', true, false, true, false),
       ('understanding_events', false, true, false, false),
-      ('ai_audit_log', false, true, false, false)
+      ('ai_audit_log', false, true, false, false),
+      -- 方案 20 V2（迁移 0135/0138；与 grant 授权镜像一致）
+      ('card_generation_runs_v2', true, true, true, true),
+      ('card_generation_plans_v2', true, true, true, true),
+      ('card_generation_candidates_v2', true, true, true, true),
+      ('learning_objectives_v2', true, true, true, true),
+      ('learning_objective_revisions_v2', true, true, true, true),
+      ('learning_cards_v2', true, true, true, true),
+      ('learning_card_publication_revisions_v2', true, true, true, true),
+      ('card_exposure_ledger_v2', true, true, true, true),
+      ('initial_validation_reminders_v2', true, true, true, true),
+      ('card_activation_receipts_v2', true, true, true, true),
+      ('card_generation_events_v2', true, true, true, true),
+      ('legacy_target_snapshot_attachments_v2', true, true, true, true),
+      ('candidate_evidence_binding_plans_v2', true, true, true, true),
+      ('evidence_eligibility_states_v2', true, true, true, true),
+      ('card_generation_run_outbox_v2', true, true, true, true),
+      ('learning_target_snapshots_v2', true, true, true, true),
+      ('card_content_capability_state', true, true, true, false),
+      ('card_generation_semantic_specs_v2', true, true, false, false),
+      ('card_generation_input_snapshots_v2', true, true, false, false),
+      ('evidence_snapshots_v2', true, true, false, false),
+      ('evidence_redactions_v2', true, true, false, false),
+      ('semantic_support_reports_v2', true, true, false, false),
+      ('learning_objective_evidence_bindings_v2', true, true, false, false),
+      ('learning_objective_equivalence_reports_v2', true, true, false, false),
+      ('learning_objective_revision_equivalence_v2', true, true, false, false),
+      ('learning_objective_private_contracts_v2', true, true, false, false),
+      ('learning_objective_lineage_v2', true, true, false, false),
+      ('learning_exposures_v2', true, true, false, false),
+      ('card_candidate_quality_reports_v2', true, true, false, false),
+      ('card_candidate_lineage_v2', true, true, false, false),
+      ('card_candidate_feedback_v2', true, true, false, false)
   ), actual AS (
     SELECT
       c.relname AS table_name,
@@ -998,7 +1109,11 @@ BEGIN
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_enqueue_agent_turn_job(uuid,uuid,uuid,uuid,integer,text,integer,text,text,text)')
     AND p.oid IS DISTINCT FROM
-      to_regprocedure('public.ailearn_find_active_turn_job(uuid,uuid,uuid)');
+      to_regprocedure('public.ailearn_find_active_turn_job(uuid,uuid,uuid)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.vector_in(cstring,oid,integer)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.vector(vector,integer,boolean)');
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'Worker has unexpected function EXECUTE privileges: %', mismatch;
   END IF;

@@ -11,16 +11,16 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { PublishedLearningAssetContractV1 } from "@ailearn/shared";
 import {
-  FORBIDDEN_PUBLISHED_ASSET_FIELDS,
-  hashPublishedLearningAsset,
-  parsePublishedLearningAsset,
   PublishedLearningAssetContractError,
   publishedLearningAssetContractSchema,
   stableStringifyPublishedAsset,
   validateForbiddenFields,
-  type PublishedLearningAssetContractV1,
-} from "@ailearn/shared";
+  parsePublishedLearningAsset,
+  hashPublishedLearningAsset,
+  FORBIDDEN_PUBLISHED_ASSET_FIELDS,
+} from "@ailearn/shared/published-learning-asset-contract";
 import {
   buildPublishedLearningAsset,
   computePublishedSourceFingerprint,

@@ -24,13 +24,23 @@ import { asrManager, resolveAsrModelConfig, type AsrModelConfigSourceV1 } from "
 export interface AsrIpcContext {
   origin: string;
   getPetWindow(): { isDestroyed(): boolean; webContents: { id: number } } | null;
+  /** 主窗口（学习卡练习等主流程页面也使用本地 ASR——2026-08-14 接线） */
+  getMainWindow(): { isDestroyed(): boolean; webContents: { id: number } } | null;
   /** 模型目录（受信来源）；null → 从环境变量解析 */
   getModelConfig(): AsrModelConfigSourceV1 | null;
 }
 
-function requirePetSender(event: IpcMainInvokeEvent, context: AsrIpcContext): void {
+function requireMainOrPetSender(event: IpcMainInvokeEvent, context: AsrIpcContext): void {
   const pet = context.getPetWindow();
   const petId = pet && !pet.isDestroyed() ? pet.webContents.id : null;
+  const main = context.getMainWindow();
+  const mainId = main && !main.isDestroyed() ? main.webContents.id : null;
+  // main 窗口：webContents id 匹配 + 同源即可（主窗口承载全部业务路由）；
+  // pet 窗口：额外要求 /companion/pet 路由（isTrustedSender role=pet 校验）。
+  if (event.sender.id === mainId) {
+    requireTrustedSender(event, mainId, context.origin, "main");
+    return;
+  }
   requireTrustedSender(event, petId, context.origin, "pet");
 }
 
@@ -58,7 +68,7 @@ export function registerAsrIpc(context: AsrIpcContext): () => void {
   };
 
   handle(ASR_IPC_CHANNELS.capability, (event) => {
-    requirePetSender(event, context);
+    requireMainOrPetSender(event, context);
     const capability = resolveCapability(context);
     return asrRuntimeCapabilityV1Schema.parse(capability);
   });
@@ -67,7 +77,7 @@ export function registerAsrIpc(context: AsrIpcContext): () => void {
   // 主进程主动 askForMediaAccess 请求 macOS TCC 麦克风授权。启动时（后台）
   // 请求不弹窗且返回 false → getUserMedia 拿全静音流 → 识别永远只有单字。
   handle(ASR_IPC_CHANNELS.ensurePermission, async (event) => {
-    requirePetSender(event, context);
+    requireMainOrPetSender(event, context);
     try {
       const status = systemPreferences.getMediaAccessStatus("microphone");
       if (status === "granted") return { granted: true, status };
@@ -89,7 +99,7 @@ export function registerAsrIpc(context: AsrIpcContext): () => void {
   });
 
   handle(ASR_IPC_CHANNELS.probe, async (event, payload: unknown) => {
-    requirePetSender(event, context);
+    requireMainOrPetSender(event, context);
     const parsed = asrIpcProbePayloadV1Schema.safeParse(payload);
     if (!parsed.success) throw new Error("INVALID_ASR_PAYLOAD");
     const resolved = resolveAsrModelConfig(context.getModelConfig());
@@ -100,7 +110,7 @@ export function registerAsrIpc(context: AsrIpcContext): () => void {
   });
 
   handle(ASR_IPC_CHANNELS.recognize, async (event, payload: unknown) => {
-    requirePetSender(event, context);
+    requireMainOrPetSender(event, context);
     const parsed = asrIpcRecognizePayloadV1Schema.safeParse(payload);
     if (!parsed.success) throw new Error("INVALID_ASR_PAYLOAD");
     const resolved = resolveAsrModelConfig(context.getModelConfig());
@@ -115,7 +125,7 @@ export function registerAsrIpc(context: AsrIpcContext): () => void {
   });
 
   handle(ASR_IPC_CHANNELS.dispose, async (event) => {
-    requirePetSender(event, context);
+    requireMainOrPetSender(event, context);
     await asrManager.dispose();
     return { version: 1, ok: true };
   });

@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import {
   CardDetailResponse,
   CardEvidenceGroup,
@@ -24,6 +25,12 @@ export function StudyPaper({
   const { keyPoints } = data;
   const misunderstandings = latestFeedback?.misunderstandings ?? [];
   const missingPoints = latestFeedback?.missingPoints ?? [];
+  // F19（round4）：把反复 `groups.find` 的 O(K×G) 换成一次构建的按 keyPoint.id
+  // 索引 Map（组列表不变时 memo 复用），避免每个 keyPoint 每次渲染重复线性查找。
+  const groupById = useMemo(
+    () => new Map(groups.map((group) => [group.keyPoint.id, group])),
+    [groups],
+  );
 
   return (
     <div className="study-card-stack" data-ui="study-paper">
@@ -57,9 +64,7 @@ export function StudyPaper({
           ) : (
             <ol className="paper-key-point-list">
               {keyPoints.map((keyPoint, index) => {
-                const group = groups.find(
-                  (item) => item.keyPoint.id === keyPoint.id,
-                );
+                const group = groupById.get(keyPoint.id);
                 const rawEvidenceCount = group?.evidences.length ?? 0;
                 const availableEvidence =
                   group?.evidences.filter(

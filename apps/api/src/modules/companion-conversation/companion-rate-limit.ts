@@ -13,8 +13,30 @@ interface RateBucket {
 
 const buckets = new Map<string, RateBucket>();
 const MAX_BUCKETS = 50_000;
+// 所有 bucket 共用同一个最长窗口，便于统一 prune 判断。
+const WINDOW_MS_MAX = 3_600_000; // 1h（最大窗口为 hourly bucket）
+// F2（round-4）：惰性逐窗口过期逐出参数。与 identity rate-limit 的 lazySweep
+// 同型：每次 increment 顺带清 MAX_SWEEP_PER_CALL 个 resetAt 已过的 key，使
+// Map 长期远低于 MAX_BUCKETS 阈值 → 命中路径的 50k 全扫 prune 几乎不可达。
+const MAX_BUCKETS_BEFORE_SWEEP = 40_000; // 低于 50k 阈值，先触发惰性整批清理
+const MAX_SWEEP_PER_CALL = 400;
 
-/** 清理过期 bucket；条目超上限时先清过期，仍超则重置全表（内存护栏）。 */
+/** 惰性清理：基于 windowStart + 最久窗口淘汰已过期 key，单次最多清 MAX_SWEEP_PER_CALL 条。 */
+function lazySweep(now: number): void {
+  if (buckets.size === 0) return;
+  let removed = 0;
+  for (const [key, bucket] of buckets) {
+    if (now - bucket.windowStart >= WINDOW_MS_MAX) {
+      buckets.delete(key);
+      if (++removed >= MAX_SWEEP_PER_CALL) break;
+    }
+  }
+}
+
+/** 清理过期 bucket；条目超上限时先清过期，仍超则重置全表（内存护栏）。
+ * F2：命中路径不再做 O(MAX_BUCKETS) 全扫——惰性清理维持 Map 有界后，此全扫
+ * 属真正极端兜底（一次性清全部过期，仍超则 clear）。
+ */
 function prune(now: number): void {
   if (buckets.size < MAX_BUCKETS) return;
   for (const [key, bucket] of buckets) {
@@ -23,9 +45,6 @@ function prune(now: number): void {
   if (buckets.size >= MAX_BUCKETS) buckets.clear();
 }
 
-/** 所有 bucket 共用同一个最长窗口，便于统一 prune 判断。 */
-const WINDOW_MS_MAX = 3_600_000; // 1h（最大窗口为 hourly bucket）
-
 export function companionRateLimit(args: {
   /** 稳定 scope 键，通常 `${workspaceId}:${userId}:${bucketName}`。 */
   key: string;
@@ -33,6 +52,15 @@ export function companionRateLimit(args: {
   windowMs: number;
 }): { allowed: boolean; retryAfterSeconds: number } {
   const now = Date.now();
+  // F2：先做惰性逐窗口过期逐出（增量分摊，不阻塞命中路径），再视驻留规模
+  // 触发整批清理。Map 长期远低于 MAX_BUCKETS → 下方 prune 的 50k 全扫几乎不可达。
+  lazySweep(now);
+  if (buckets.size >= MAX_BUCKETS_BEFORE_SWEEP) {
+    // 一次性清掉全部过期桶，避免状态持续逼近 MAX_BUCKETS 后触发 prune 的全扫尖刺。
+    for (const [key, bucket] of buckets) {
+      if (now - bucket.windowStart >= WINDOW_MS_MAX) buckets.delete(key);
+    }
+  }
   prune(now);
   const existing = buckets.get(args.key);
   if (!existing || now - existing.windowStart >= args.windowMs) {

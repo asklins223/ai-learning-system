@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 import type { CardDetailResponse, CardSetListItem } from "@/lib/api";
 import type { StatusPresentation } from "@/lib/status-map";
 import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
@@ -106,9 +106,17 @@ export function DeckExpandedView({
   presentation,
   leaving = false,
 }: DeckExpandedViewProps) {
-  const ordered = (cards ?? []).slice().sort(compareCardSetMembers);
-  const overview = ordered.find((item) => item.card.scope === "overview") ?? null;
-  const sections = ordered.filter((item) => item.card.id !== overview?.card.id);
+  // F19（round4）：排序 + 找总览 + 分流此前每渲染重建（slice/sort/find/filter）。
+  // cards 未变时用 useMemo 复用，避免每次渲染重复 O(n log n) 排序。
+  const { ordered, overview, sections } = useMemo(() => {
+    const sorted = (cards ?? []).slice().sort(compareCardSetMembers);
+    const overviewItem = sorted.find((item) => item.card.scope === "overview") ?? null;
+    return {
+      ordered: sorted,
+      overview: overviewItem,
+      sections: sorted.filter((item) => item.card.id !== overviewItem?.card.id),
+    };
+  }, [cards]);
   const collapseRef = useRef<HTMLButtonElement>(null);
 
   /* 展开后焦点移入面板（收起按钮），Esc 由页面全局处理 */

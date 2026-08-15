@@ -117,9 +117,7 @@ describe("learning card set UI contract", () => {
     assert.ok(cardSetSource.includes("更多学习卡暂时没有加载成功"));
   });
 
-  it("routes legacy generation results to individual cards or the card library", () => {
-    // 方案 20（2026-08-15）：CardSet 牌库已从 /cards IA 退役——生成结果
-    // 优先路由到单卡 /cards/:id，回退到卡片库 /cards；不再生成 /card-sets/ 链接。
+  it("opens the generated card directly and falls back to the card library", () => {
     const targetStart = noteEditorSource.indexOf(
       "const generatedCardHref",
     );
@@ -128,16 +126,19 @@ describe("learning card set UI contract", () => {
       targetStart,
     );
     const targetSource = noteEditorSource.slice(targetStart, targetEnd);
-    assert.ok(targetSource.includes("result?.cardId"));
+    assert.ok(targetSource.includes("generationRun?.result?.cardId"));
     assert.ok(targetSource.includes("/cards/${generationRun.result.cardId}"));
+    assert.ok(targetSource.includes(': "/cards"'));
     assert.ok(!targetSource.includes("/card-sets/"));
   });
 
-  it("links a member card back to its set and exposes sibling navigation", () => {
-    assert.ok(cardDetailSource.includes("api.getCardSet(parentSetId)"));
-    assert.ok(cardDetailSource.includes('aria-label="卡组内学习卡导航"'));
-    assert.ok(cardDetailSource.includes("previousSetCard"));
-    assert.ok(cardDetailSource.includes("nextSetCard"));
-    assert.ok(cardDetailSource.includes("/card-sets/${card.cardSetId}"));
+  it("keeps the card detail card-first and stabilizes its legacy Run target", () => {
+    assert.ok(!cardDetailSource.includes("api.getCardSet(parentSetId)"));
+    assert.ok(!cardDetailSource.includes('aria-label="卡组内学习卡导航"'));
+    assert.ok(!cardDetailSource.includes("previousSetCard"));
+    assert.ok(!cardDetailSource.includes("nextSetCard"));
+    assert.ok(!cardDetailSource.includes("/card-sets/${card.cardSetId}"));
+    assert.ok(cardDetailSource.includes("const target = keyPoints[0]"));
+    assert.ok(!cardDetailSource.includes("activeKeyPoint ?? keyPoints[0]"));
   });
 });

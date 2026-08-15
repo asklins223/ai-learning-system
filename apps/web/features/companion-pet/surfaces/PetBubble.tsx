@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePetRuntime } from "../runtime/PetRuntimeProvider";
-import { bubbleAutoDismissMs, shouldShowFullContentLink } from "./bubble-model";
+import { usePetBridgeContext } from "@/features/companion-bridge/usePetBridgeContext";
+import { bubbleAutoDismissMs } from "./bubble-model";
 import type {
   BubbleDisplayStateV1,
   ConversationTurnStateV1,
   VoiceDialogueStateV1,
 } from "../runtime/pet-runtime-types";
-import type { AllowedMainRouteV1 } from "@ailearn/shared";
+import type { AllowedMainRouteV1 } from "@ailearn/shared/desktop-pet-contracts";
 import { PetIcon, type PetIconNameV1 } from "./PetIcon";
 
 type BubbleToneV1 = "neutral" | "active" | "success" | "warning" | "danger";
@@ -23,6 +24,10 @@ interface BubbleViewV1 {
   dismissible: boolean;
   autoDismissKind: "incoming" | "final" | null;
   textLength: number;
+  /** 2026-08-12+（15a 根因修复）：生成中（thinking/streaming）可停止——气泡
+   *  上提供"停止生成"按钮。此前提交后 composer 被关闭、停止按钮随之消失，
+   *  用户无法取消 thinking 中的 turn（语音按钮只打断播放、不取消生成）。 */
+  cancellable?: boolean;
 }
 
 function turnBubbleView(
@@ -55,6 +60,7 @@ function turnBubbleView(
         liveLabel: turn.phase === "accepted" ? "已接收" : "组织回复中",
         dismissible: false,
         autoDismissKind: null,
+        cancellable: true,
         textLength: 0,
         content: (
           <div className="pet-thinking-line" role="status" aria-live="polite">
@@ -65,7 +71,6 @@ function turnBubbleView(
       };
     }
 
-    const long = shouldShowFullContentLink(turn.previewText);
     return {
       key: `streaming-${turn.runId}`,
       tone: "active",
@@ -74,11 +79,12 @@ function turnBubbleView(
       liveLabel: "回复生成中",
       dismissible: false,
       autoDismissKind: null,
+      cancellable: true,
       textLength: turn.previewText.length,
       content: (
         <div className="pet-bubble-answer" role="status" aria-live="polite">
           <div className="pet-bubble-scroll" data-bubble-scroll ref={scrollRef} onScroll={onScroll}>
-            <p className={`pet-bubble-copy pet-bubble-preview${long ? " is-long" : ""}`}>
+            <p className="pet-bubble-copy pet-bubble-preview">
               {turn.previewText || "正在写下第一句…"}
             </p>
           </div>
@@ -88,7 +94,6 @@ function turnBubbleView(
   }
 
   if (turn.kind === "final") {
-    const long = shouldShowFullContentLink(turn.previewText);
     return {
       key: `final-${turn.runId}`,
       tone: "success",
@@ -101,7 +106,7 @@ function turnBubbleView(
       content: (
         <div className="pet-bubble-answer is-final" aria-live="polite">
           <div className="pet-bubble-scroll" data-bubble-scroll ref={scrollRef} onScroll={onScroll}>
-            <p className={`pet-bubble-copy pet-bubble-preview${long ? " is-long" : ""}`}>
+            <p className="pet-bubble-copy pet-bubble-preview">
               {turn.previewText}
             </p>
           </div>
@@ -232,6 +237,25 @@ function bubbleView(
     case "voice_status":
       return voiceView;
     case "error":
+      if (bubble.code === "AI_CONSENT_REQUIRED") {
+        // 2026-08-12+（15a 根因修复）：workspace 未开启 AI 使用（未签署协议/
+        // sendToExternal=false）→ worker 拒绝 → 引导用户去设置页开启。
+        return {
+          key: `error-${bubble.code}`,
+          tone: "warning",
+          icon: "alert",
+          label: "AI 使用未开启",
+          liveLabel: "开启后即可对话",
+          dismissible: true,
+          autoDismissKind: null,
+          textLength: 0,
+          content: (
+            <div className="pet-bubble-action-result" role="status" aria-live="polite">
+              <p className="pet-bubble-copy">AI 对话需要先在设置中开启「AI 使用与数据」并签署协议，之后就能正常对话了。</p>
+            </div>
+          ),
+        };
+      }
       return {
         key: `error-${bubble.code}`,
         tone: "danger",
@@ -294,10 +318,10 @@ function bubbleView(
 
 export function PetBubble() {
   const { state, dispatch, adapter } = usePetRuntime();
+  const petBridge = usePetBridgeContext();
   const { bubble, turn, voice, composer, menu } = state;
   const timerRef = useRef<number | null>(null);
   const [held, setHeld] = useState(false);
-  const [contentOverflowing, setContentOverflowing] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
 
@@ -318,19 +342,26 @@ export function PetBubble() {
     if (element && stickToBottomRef.current) element.scrollTop = element.scrollHeight;
   }, [previewText, view?.key]);
 
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const element = scrollRef.current;
-      setContentOverflowing(Boolean(element && element.scrollHeight > element.clientHeight + 1));
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [previewText, view?.key]);
+  // 2026-08-13（问题3 修复）：final 气泡在语音播放结束后"读完即关"——
+  // 记录是否经历过 speaking（语音播放），播完回 idle 后短延时关闭，
+  // 不再等完整的 autoDismiss 时长（文字气泡是辅助通道，声音是主通道）。
+  const wasSpeakingRef = useRef(false);
+  if (voice.kind === "speaking") wasSpeakingRef.current = true;
 
   useEffect(() => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
     timerRef.current = null;
     if (!view || !view.autoDismissKind || held) return;
-    if (composer.kind !== "closed" || menu.kind !== "closed" || voice.kind === "speaking") return;
+    if (composer.kind !== "closed" || menu.kind !== "closed") return;
+    // 语音播放过：speaking/cooldown 期间不关（读完再关），回 idle 后 2 秒关闭
+    if (view.autoDismissKind === "final" && wasSpeakingRef.current) {
+      if (voice.kind !== "idle") return;
+      wasSpeakingRef.current = false;
+      timerRef.current = window.setTimeout(() => dispatch({ type: "bubble.dismissed" }), 2000);
+      return () => {
+        if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      };
+    }
     const duration = bubbleAutoDismissMs(view.autoDismissKind === "incoming" ? "incoming" : "turn", view.textLength);
     if (duration === null) return;
     timerRef.current = window.setTimeout(() => dispatch({ type: "bubble.dismissed" }), duration);
@@ -340,7 +371,8 @@ export function PetBubble() {
   }, [view, held, composer.kind, menu.kind, voice.kind, dispatch]);
 
   if (!view) return null;
-  const longText = contentOverflowing || (view.textLength > 0 && shouldShowFullContentLink(previewText ?? ""));
+  // 15c：完整内容直接在气泡内展示（滚动查看），不再提供"完整内容"跳转按钮。
+  const longText = false;
 
   return (
     <section
@@ -378,15 +410,15 @@ export function PetBubble() {
 
       <div className="pet-bubble-body">{view.content}</div>
 
-      {(longText || view.tone === "danger" || view.autoDismissKind === "incoming" || view.autoDismissKind === "final") ? (
+      {(longText || view.tone === "danger" || view.autoDismissKind === "incoming" || view.autoDismissKind === "final" || view.cancellable || (state.bubble.kind === "error" && state.bubble.code === "AI_CONSENT_REQUIRED")) ? (
         <footer className="pet-bubble-footer">
-          {longText ? (
+          {view.cancellable ? (
             <button
               type="button"
               className="pet-text-action"
-              onClick={() => void adapter.openMainRoute({ kind: "conversation" })}
+              onClick={() => dispatch({ type: "turn.cancel_requested" })}
             >
-              完整内容 <PetIcon name="chevron" />
+              停止生成 <PetIcon name="stop" />
             </button>
           ) : null}
           {view.tone === "danger" ? (
@@ -401,7 +433,16 @@ export function PetBubble() {
               改用文字 <PetIcon name="message" />
             </button>
           ) : null}
-          {!longText && view.tone !== "danger" ? (
+          {state.bubble.kind === "error" && state.bubble.code === "AI_CONSENT_REQUIRED" ? (
+            <button
+              type="button"
+              className="pet-text-action"
+              onClick={() => void petBridge.dispatchOpenRoute({ kind: "settings", section: "model" })}
+            >
+              前往设置开启 <PetIcon name="chevron" />
+            </button>
+          ) : null}
+          {!longText && view.tone !== "danger" && !view.cancellable ? (
             <button type="button" className="pet-text-action" onClick={() => dispatch({ type: "composer.opened" })}>
               继续聊 <PetIcon name="message" />
             </button>

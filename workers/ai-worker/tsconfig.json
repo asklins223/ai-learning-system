@@ -12,10 +12,19 @@
     "isolatedModules": true,
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
-    "preserveSymlinks": true,
+    "preserveSymlinks": false,
     "noEmit": true,
     "rootDir": "../..",
-    "outDir": "dist"
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "drizzle-orm": [
+        "../../apps/api/node_modules/drizzle-orm"
+      ],
+      "drizzle-orm/*": [
+        "../../apps/api/node_modules/drizzle-orm/*"
+      ]
+    }
   },
   "include": [
     "src/**/*.ts"

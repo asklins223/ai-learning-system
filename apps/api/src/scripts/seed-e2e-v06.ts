@@ -126,12 +126,14 @@ async function main() {
     })),
   };
 
+  // 先插 note（currentVersionId 置空），再插 noteVersions，最后回填
+  // currentVersionId——复合 FK (current_version_id, workspace_id) 要求
+  // note_versions 先行存在。
   await db.insert(notes).values({
     id: noteId,
     workspaceId,
     title: "E2E Test Note — Key Science Concepts",
     titleSource: "manual",
-    currentVersionId: noteVersionId,
     createdBy: userId,
   });
 
@@ -144,6 +146,10 @@ async function main() {
     contentHash: `hash-${noteVersionId.slice(0, 8)}`,
     createdBy: userId,
   });
+
+  await db.update(notes)
+    .set({ currentVersionId: noteVersionId })
+    .where(eq(notes.id, noteId));
 
   // Create note blocks (referenced by evidences.blockId)
   for (let i = 0; i < blockIds.length; i++) {
