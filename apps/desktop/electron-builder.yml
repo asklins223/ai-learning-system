@@ -83,6 +83,11 @@ win:
 # package-manager artifact.  Transparent click-through remains disabled by
 # the runtime on Linux because X11/Wayland support differs by compositor.
 linux:
+  # R36+：package.json name 含 @ 前缀（@ailearn/desktop）被当作默认
+  # executableName/artifact 名 → AppImage 文件名与 deb 输出目录非法字符报错；
+  # 显式指定安全名称与产物文件名。
+  executableName: ailearn-desktop
+  artifactName: ${productName}-${version}-${arch}.${ext}
   icon: build/icon.png
   category: Education
   synopsis: AI Learn desktop learning companion
