@@ -18,6 +18,7 @@ import {
   companionGroundedTutorGrantV1Schema,
   companionLearningSessionContextV1Schema,
   companionProposalSnapshotV1Schema,
+  proposedLearningActionPayloadV1Schema,
 } from "@ailearn/shared";
 import type { CompanionLearningContextV1 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
@@ -550,6 +551,273 @@ export async function createCompanionMenuProposal(args: {
           title: candidate.title,
           targetSummary: candidate.targetSummary,
           impactSummary: candidate.impactSummary,
+          requiresConfirmation: true,
+          status: "pending",
+          decision: null,
+          actionRunId: null,
+          expiresAt: new Date(proposalTimes.expires_at).toISOString(),
+          decidedAt: null,
+          createdAt: new Date(proposalTimes.created_at).toISOString(),
+          updatedAt: new Date(proposalTimes.updated_at).toISOString(),
+        },
+        eventCursor: eventSeq,
+      };
+    },
+  );
+}
+
+function toolProposalRequestHash(body: {
+  version: 1;
+  clientMessageId: string;
+  payload: unknown;
+  title: string;
+  targetSummary: string;
+  impactSummary: string;
+  sourceSurface: "pet" | "main" | "web_fallback";
+}): string {
+  return sha256(canonicalJson({
+    version: body.version,
+    clientMessageId: body.clientMessageId,
+    payload: body.payload,
+    title: body.title,
+    targetSummary: body.targetSummary,
+    impactSummary: body.impactSummary,
+    sourceSurface: body.sourceSurface,
+  }));
+}
+
+/**
+ * §18：POST /companion/tool-proposals（2026-08-15 接线修复——此前只有
+ * menu-proposals，工具网关入口与实现缺失，15 kind 学习动作无任何 UI 可触发）。
+ *
+ * 工具提案创建：客户端（桌宠/主窗口）提交 15 kind 学习动作 payload →
+ * §18 白名单校验（proposedLearningActionPayloadV1Schema）→ 幂等（keyHash +
+ * requestBodyHash，同 key 同 body 重放 / 异 body 409）→ 原子落库：
+ * user action 消息 + assistant confirmation（action_ref）+ pending proposal
+ * + action.proposed event。conversation：复用最近 active dialogue，无则新建
+ * （限额 200，与对话 API 同口径）。执行仍由 decideCompanionProposal 消费。
+ */
+export async function createCompanionToolProposal(args: {
+  workspaceId: string;
+  userId: string;
+  body: {
+    version: 1;
+    clientMessageId: string;
+    payload: unknown;
+    title: string;
+    targetSummary: string;
+    impactSummary: string;
+    sourceSurface: "pet" | "main" | "web_fallback";
+  };
+  idempotencyKey: string;
+}): Promise<unknown> {
+  return withWorkspaceTransaction(
+    { workspaceId: args.workspaceId, userId: args.userId },
+    async (tx) => {
+      // §18 白名单校验（fail-closed：非法 payload 不落库）。
+      const parsed = proposedLearningActionPayloadV1Schema.safeParse(args.body.payload);
+      if (!parsed.success) {
+        throw new CompanionConversationError("INVALID_REQUEST", 400, "tool payload 非法");
+      }
+      const payload = parsed.data;
+      const payloadHash = sha256(canonicalJson(payload));
+      const accountEpoch = await getCompanionAccountEpoch(tx, args.userId);
+      const keyHash = sha256(args.idempotencyKey.toLowerCase());
+      const requestBodyHash = toolProposalRequestHash(args.body);
+      const existing = await tx.execute<{ id: string; request_body_sha256: string | null }>(sql`
+        SELECT id, request_body_sha256 FROM companion_action_proposals
+        WHERE idempotency_key_hash = ${keyHash} LIMIT 1
+      `);
+      if (existing[0]) {
+        if (existing[0].request_body_sha256 !== requestBodyHash) {
+          throw new CompanionConversationError(
+            "IDEMPOTENCY_CONFLICT", 409, "tool proposal key reused with a different body",
+          );
+        }
+        const row = await tx.execute<{
+          id: string; conversation_id: string; source_message_id: string;
+          payload: { kind: string; [key: string]: unknown };
+          payload_sha256: string; title: string; target_summary: string;
+          impact_summary: string; status: string; expires_at: Date;
+          created_at: Date; updated_at: Date;
+        }>(sql`
+          SELECT id, conversation_id, source_message_id, payload, payload_sha256,
+                 title, target_summary, impact_summary, status, expires_at,
+                 created_at, updated_at
+          FROM companion_action_proposals WHERE id = ${existing[0].id}
+        `);
+        const proposal = row[0];
+        return {
+          version: 1,
+          conversationId: proposal.conversation_id,
+          userMessageId: proposal.source_message_id,
+          assistantMessageId: proposal.source_message_id,
+          proposal: {
+            version: 1,
+            proposalId: proposal.id,
+            conversationId: proposal.conversation_id,
+            sourceMessageId: proposal.source_message_id,
+            sourceGeneration: 0,
+            contextGrantId: null,
+            payload: proposal.payload,
+            payloadSha256: proposal.payload_sha256,
+            title: proposal.title,
+            targetSummary: proposal.target_summary,
+            impactSummary: proposal.impact_summary,
+            requiresConfirmation: true,
+            status: proposal.status,
+            decision: null,
+            actionRunId: null,
+            expiresAt: new Date(proposal.expires_at).toISOString(),
+            decidedAt: null,
+            createdAt: new Date(proposal.created_at).toISOString(),
+            updatedAt: new Date(proposal.updated_at).toISOString(),
+          },
+          eventCursor: null,
+        };
+      }
+
+      // conversation：复用最近 active dialogue，无则新建（限额 200）。
+      const latestDialogue = await tx.execute<{ id: string }>(sql`
+        SELECT id FROM companion_conversations
+        WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
+          AND kind = 'dialogue' AND status = 'active'
+        ORDER BY last_message_at DESC NULLS LAST, created_at DESC
+        LIMIT 1
+      `);
+      let conversationId = latestDialogue[0]?.id ?? null;
+      if (!conversationId) {
+        const dialogueCount = await tx.execute<{ n: string }>(sql`
+          SELECT count(*)::int AS n FROM companion_conversations
+          WHERE workspace_id = ${args.workspaceId}
+            AND user_id = ${args.userId}
+            AND kind = 'dialogue'
+            AND status = 'active'
+        `);
+        if (Number(dialogueCount[0]?.n ?? 0) >= 200) {
+          throw new CompanionConversationError(
+            "CONVERSATION_LIMIT_REACHED", 409, "max 200 user-created dialogue conversations",
+          );
+        }
+        const created = await tx.execute<{ id: string }>(sql`
+          INSERT INTO companion_conversations
+            (id, workspace_id, user_id, kind, title, title_source, status)
+          VALUES (${randomUUID()}, ${args.workspaceId}, ${args.userId}, 'dialogue',
+                  ${args.body.title.slice(0, 80)}, 'auto', 'active')
+          RETURNING id
+        `);
+        if (!created[0]) {
+          throw new CompanionConversationError("INTERNAL_ERROR", 500, "conversation create failed");
+        }
+        conversationId = created[0].id;
+      }
+
+      const duplicateClientMessage = await tx.execute<{ id: string }>(sql`
+        SELECT id FROM companion_messages
+        WHERE conversation_id = ${conversationId}
+          AND client_message_id = ${args.body.clientMessageId}
+        LIMIT 1
+      `);
+      if (duplicateClientMessage[0]) {
+        throw new CompanionConversationError(
+          "IDEMPOTENCY_CONFLICT", 409, "clientMessageId already used in conversation",
+        );
+      }
+
+      const counters = await tx.execute<{ next_message_seq: string; next_event_seq: string }>(sql`
+        UPDATE companion_conversations
+        SET next_message_seq = next_message_seq + 2,
+            next_event_seq = next_event_seq + 1,
+            last_message_at = now()
+        WHERE id = ${conversationId}
+        RETURNING next_message_seq, next_event_seq
+      `);
+      const messageSeq = Number(counters[0].next_message_seq) - 2;
+      const eventSeq = Number(counters[0].next_event_seq) - 1;
+
+      const userMessageId = randomUUID();
+      const assistantMessageId = randomUUID();
+      const proposalId = randomUUID();
+      const userText = `请执行：${args.body.targetSummary}`;
+      const assistantText =
+        `建议：${args.body.title}\n目标：${args.body.targetSummary}\n影响：${args.body.impactSummary}\n确认后才会执行。`;
+
+      const userBlocks = [{ type: "text", text: userText }];
+      const assistantBlocks = [
+        { type: "text", text: assistantText },
+        { type: "action_ref", proposalId },
+      ];
+      await tx.execute(sql`
+        INSERT INTO companion_messages
+          (id, conversation_id, workspace_id, user_id, role, seq, kind, blocks,
+           client_message_id, content_sha256)
+        VALUES
+          (${userMessageId}, ${conversationId}, ${args.workspaceId}, ${args.userId}, 'user',
+           ${messageSeq}, 'action', ${JSON.stringify(userBlocks)}, ${args.body.clientMessageId}, ${sha256(userText)}),
+          (${assistantMessageId}, ${conversationId}, ${args.workspaceId}, ${args.userId}, 'assistant',
+           ${messageSeq + 1}, 'action', ${JSON.stringify(assistantBlocks)}, NULL, ${sha256(assistantText)})
+      `);
+      const insertedProposal = await tx.execute<{
+        expires_at: Date; created_at: Date; updated_at: Date;
+      }>(sql`
+        INSERT INTO companion_action_proposals
+          (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
+           payload, payload_sha256, title, target_summary, impact_summary, status,
+           idempotency_key_hash, request_body_sha256, expires_at)
+        VALUES
+          (${proposalId}, ${args.workspaceId}, ${args.userId}, ${conversationId}, ${userMessageId}, 0,
+           ${JSON.stringify(payload)}, ${payloadHash},
+           ${args.body.title}, ${args.body.targetSummary}, ${args.body.impactSummary}, 'pending',
+           ${keyHash}, ${requestBodyHash}, now() + make_interval(mins => ${PROPOSAL_TTL_MINUTES}))
+        RETURNING expires_at, created_at, updated_at
+      `);
+      const proposalTimes = insertedProposal[0];
+      await tx.execute(sql`
+        UPDATE companion_messages SET action_ref = ${proposalId} WHERE id = ${assistantMessageId}
+      `);
+      const eventPayload = {
+        proposal: {
+          version: 1,
+          id: proposalId,
+          workspaceId: args.workspaceId,
+          conversationId,
+          sourceMessageId: userMessageId,
+          sourceGeneration: 0,
+          kind: payload,
+          payloadSha256: payloadHash,
+          title: args.body.title,
+          targetSummary: args.body.targetSummary,
+          impactSummary: args.body.impactSummary,
+          status: "pending",
+        },
+      };
+      await tx.execute(sql`
+        INSERT INTO companion_stream_events
+          (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch,
+           type, payload, expires_at)
+        VALUES
+          (${conversationId}, ${eventSeq}, ${args.workspaceId}, ${args.userId}, NULL, 0, ${accountEpoch},
+           'action.proposed', ${JSON.stringify(eventPayload)},
+           now() + interval '24 hours')
+      `);
+
+      return {
+        version: 1,
+        conversationId,
+        userMessageId,
+        assistantMessageId,
+        proposal: {
+          version: 1,
+          proposalId,
+          conversationId,
+          sourceMessageId: userMessageId,
+          sourceGeneration: 0,
+          contextGrantId: null,
+          payload,
+          payloadSha256: payloadHash,
+          title: args.body.title,
+          targetSummary: args.body.targetSummary,
+          impactSummary: args.body.impactSummary,
           requiresConfirmation: true,
           status: "pending",
           decision: null,

@@ -15,7 +15,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { DesktopPetWindowStateV1 } from "@ailearn/shared/desktop-pet-contracts";
+import type { DesktopPetWindowStateV1 } from "@ailearn/shared";
 import {
   petReducer,
   createInitialPetRuntimeState,

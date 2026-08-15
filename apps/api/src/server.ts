@@ -24,8 +24,17 @@ import { statsRoutes } from "./modules/stats/routes.ts";
 import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
 import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
+// 方案 20（2026-08-15 接线修复）：V2 路由实现存在但从未注册——按
+// CARD_GENERATION_V2_ENABLED 条件注册（fail-closed 404）。
+import { cardGenerationV2Routes } from "./modules/card-generation-v2/routes.ts";
+import { isCardGenerationV2Enabled } from "./config/learning-companion-flags.ts";
 import { companionShellRoutes } from "./modules/companion-shell/index.ts";
 import { companionConversationRoutes, companionConversationManagementRoutes, companionExportRoutes, companionProactiveRoutes } from "./modules/companion-conversation/index.ts";
+// §10.1/§14.3（2026-08-15 接线修复）：Journey V2 引导 / delivery 消费端点
+// 实现早已存在但从未注册——Pet 端 useJourneyLive/useDeliveryInbox 全部 404。
+import { companionJourneyRoutes } from "./modules/companion-journey/routes.ts";
+import { deliveryRoutes } from "./modules/companion-conversation/delivery-routes.ts";
+import { proactiveInboxRoutes } from "./modules/companion-conversation/inbox-routes.ts";
 import { startCompanionNotifyListener, stopCompanionNotifyListener } from "./modules/companion-conversation/companion-notify.ts";
 import { learningSessionRoutes } from "./modules/learning-sessions/session-routes.ts";
 import { voiceRoutes } from "./modules/learning-sessions/voice-routes.ts";
@@ -297,6 +306,9 @@ async function main() {
   await app.register(cardJobRoutes);
   await app.register(cardSetRoutes);
   await app.register(cardGenerationRoutes);
+  if (isCardGenerationV2Enabled()) {
+    await app.register(cardGenerationV2Routes);
+  }
   await app.register(jobRoutes);
   await app.register(evidenceRoutes);
   await app.register(validationRoutes);
@@ -315,6 +327,11 @@ async function main() {
   await app.register(companionConversationManagementRoutes);
   await app.register(companionExportRoutes);
   await app.register(companionProactiveRoutes);
+  // §10.1/§14.3（2026-08-15 接线修复）：Journey bootstrap/actions + delivery
+  // lease/ack + inbox SSE——capability 门控 COMPANION_JOURNEY_V2（各自 404）。
+  await app.register(companionJourneyRoutes);
+  await app.register(deliveryRoutes);
+  await app.register(proactiveInboxRoutes);
   // §11.6：启动清扫崩溃残留的临时探测音频（>1h hard cap；不阻塞启动）
   import("./modules/learning-sessions/ffprobe.ts")
     .then((m) => m.cleanupStaleTempAudio(60 * 60 * 1000, "/tmp"))

@@ -976,11 +976,9 @@ export function NoteEditor({
     failedGenerationUnits,
     generationRun?.error?.code,
   );
-  const generatedCardHref = generationRun?.result?.cardSetId
-    ? `/card-sets/${generationRun.result.cardSetId}`
-    : generationRun?.result?.cardId
-      ? `/cards/${generationRun.result.cardId}`
-      : "/cards";
+  const generatedCardHref = generationRun?.result?.cardId
+    ? `/cards/${generationRun.result.cardId}`
+    : "/cards";
   const hasGeneratedResult = Boolean(
     generationRun?.result?.cardSetId || generationRun?.result?.cardId,
   );

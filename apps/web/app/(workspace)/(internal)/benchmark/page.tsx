@@ -3,9 +3,11 @@
 import "@/app/styles/benchmark.css";
 import Link from "next/link";
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -16,7 +18,7 @@ import {
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
-import { BENCHMARK_QUALITY_THRESHOLDS } from "@ailearn/shared/constants";
+import { BENCHMARK_QUALITY_THRESHOLDS } from "@ailearn/shared";
 
 type Phase =
   | "idle"
@@ -116,6 +118,24 @@ export default function BenchmarkPage() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [isOwner, setIsOwner] = useState<boolean | null>(null);
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
+  // F12（round4）：稳定 onToggle——此前每渲染新建箭头闭包，配合 memo(NoteSection)
+  // 会让 memo 因 props 引用变化每渲失效。这里用 ref 镜像 report，展开切换不需要
+  // 重新渲染周期内的新闭包。
+  const reportRef = useRef(report);
+  // 第八轮 🟡B-3：镜像写入移入 useEffect（渲染期写 ref 是纯度过反模式）。
+  useEffect(() => {
+    reportRef.current = report;
+  }, [report]);
+  const toggleNote = useCallback((noteFile: string) => {
+    setExpandedNotes((current) => {
+      if (current[noteFile] != null) return { ...current, [noteFile]: !current[noteFile] };
+      // 首次切换：取默认展开态（前两条或含 error 的笔记默认展开）取反。
+      const results = reportRef.current?.results ?? [];
+      const idx = results.findIndex((note) => note.noteFile === noteFile);
+      const defaultExpanded = idx >= 0 && (idx < 2 || Boolean(results[idx].error));
+      return { ...current, [noteFile]: !defaultExpanded };
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -123,13 +143,18 @@ export default function BenchmarkPage() {
     setInitialLoadIncomplete(false);
     setError(null);
 
-    Promise.allSettled([
-      api.listBenchmarkNotes(),
-      api.getBenchmarkReport(),
-      api.getBenchmarkLabels(),
-      api.getMe(),
-    ] as const).then(([notesResult, reportResult, labelsResult, accountResult]) => {
+    // F#7（🟠8）：先 await getMe（缓存在该链路命中/合并 in-flight），使 scope
+    // 解析为真实 ws 键，随后批量 GET 全部落在带缓存路径（首帧冷缓存收益）。
+    void (async () => {
+      const account = await api.getMe().catch(() => null);
       if (cancelled) return;
+      const batch = await Promise.allSettled([
+        api.listBenchmarkNotes(),
+        api.getBenchmarkReport(),
+        api.getBenchmarkLabels(),
+      ] as const);
+      if (cancelled) return;
+      const [notesResult, reportResult, labelsResult] = batch;
 
       const loadingErrors: string[] = [];
       if (notesResult.status === "fulfilled") {
@@ -138,8 +163,8 @@ export default function BenchmarkPage() {
         loadingErrors.push("样本清单");
       }
 
-      if (accountResult.status === "fulfilled") {
-        setIsOwner(accountResult.value.role.toLowerCase() === "owner");
+      if (account) {
+        setIsOwner(account.role.toLowerCase() === "owner");
       } else {
         setIsOwner(null);
         loadingErrors.push("账户权限");
@@ -181,7 +206,7 @@ export default function BenchmarkPage() {
       );
       setInitialLoadIncomplete(loadingErrors.length > 0);
       setInitialLoading(false);
-    });
+    })();
 
     return () => {
       cancelled = true;
@@ -664,15 +689,9 @@ export default function BenchmarkPage() {
                       note={note}
                       phase={phase}
                       canEdit={isOwner === true}
-                      labels={labels}
+                      labels={labels[note.noteFile]}
                       expanded={expandedNotes[note.noteFile] ?? (index < 2 || Boolean(note.error))}
-                      onToggle={() => {
-                        const defaultExpanded = index < 2 || Boolean(note.error);
-                        setExpandedNotes((current) => ({
-                          ...current,
-                          [note.noteFile]: !(current[note.noteFile] ?? defaultExpanded),
-                        }));
-                      }}
+                      onToggle={toggleNote}
                       onSetVerdict={handleSetVerdict}
                       onSetExpected={handleSetExpected}
                     />
@@ -732,7 +751,12 @@ function MetricCard({
   );
 }
 
-function NoteSection({
+// F12（round4）：NoteSection 用 memo 包裹——label 切换/展开状态变化时，
+// 未受影响的笔记行不重渲（内部页，低危但成本极低）。
+// F#7（🟠7）：labels 传"本篇切片"labels[note.noteFile] 而非整个 map——
+// 任意一条判定只重建该 note 的切片，其它 NoteSection 的 labels prop 引用
+// 不变，memo 真正生效，避免全量重渲。
+const NoteSection = memo(function NoteSection({
   id,
   index,
   note,
@@ -749,21 +773,22 @@ function NoteSection({
   note: BenchmarkReport["results"][number];
   phase: Phase;
   canEdit: boolean;
-  labels: LabelState;
+  /** 本篇笔记的关键结论判定切片（labels[note.noteFile]）。 */
+  labels: Record<number, LabelEntry> | undefined;
   expanded: boolean;
-  onToggle: () => void;
+  onToggle: (noteFile: string) => void;
   onSetVerdict: (noteFile: string, ordinal: number, verdict: boolean) => void;
   onSetExpected: (noteFile: string, ordinal: number, value: string) => void;
 }) {
   const showReview = phase === "reviewing" || phase === "submittingLabels" || phase === "labeled";
   const editable = phase === "reviewing" && canEdit;
   const reviewedCount = note.keyPoints.filter(
-    (keyPoint) => labels[note.noteFile]?.[keyPoint.ordinal]?.isCorrectlyAligned != null,
+    (keyPoint) => labels?.[keyPoint.ordinal]?.isCorrectlyAligned != null,
   ).length;
 
   return (
     <section id={id} className={`bench-note-section${note.error ? " has-error" : ""}`}>
-      <button type="button" className="bench-note-header" onClick={onToggle} aria-expanded={expanded}>
+      <button type="button" className="bench-note-header" onClick={() => onToggle(note.noteFile)} aria-expanded={expanded}>
         <span className="bench-note-index">{String(index).padStart(2, "0")}</span>
         <span className="bench-note-title-wrap">
           <strong>{note.noteTitle}</strong>
@@ -782,7 +807,7 @@ function NoteSection({
           ) : (
             <div className="bench-keypoint-list">
               {note.keyPoints.map((keyPoint) => {
-                const label = labels[note.noteFile]?.[keyPoint.ordinal];
+                const label = labels?.[keyPoint.ordinal];
                 const verdict = label?.isCorrectlyAligned ?? null;
                 return (
                   <article
@@ -848,4 +873,4 @@ function NoteSection({
       )}
     </section>
   );
-}
+});

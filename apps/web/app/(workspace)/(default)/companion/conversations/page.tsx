@@ -1,165 +1,177 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { PetIcon } from "@/features/companion-pet/surfaces/PetIcon";
-import { ConversationComposer } from "@/features/companion-pet/conversation/ConversationComposer";
-import { ConversationMessages } from "@/features/companion-pet/conversation/ConversationMessages";
-import { ConversationSidebar } from "@/features/companion-pet/conversation/ConversationSidebar";
+import { Icon } from "@/components/ui/icons";
+import { CompanionHistoryArchive } from "@/features/companion-history/CompanionHistoryArchive";
+import { COMPANION_HISTORY_FIXTURES } from "@/features/companion-history/history-fixtures";
+import {
+  adaptProductionHistoryMessage,
+  type CompanionHistoryMessageInput,
+} from "@/features/companion-history/history-model";
 import { useCompanionConversations } from "@/features/companion-pet/conversation/useCompanionConversations";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import "./conversation-page.css";
 
-// 2026-08-11：useSearchParams 需在 Suspense 内（Next 15 CSR bailout 约束）——
-// 无 Suspense 时构建产生 warning，部署 Vercel 会拒。默认导出包 Suspense。
+/**
+ * 伴星交互记录现在是同一只 Live2D 桌面伴星的只读档案/审计页。
+ * 它复用现有真实历史读取链，但不再提供 create / composer / send / delete，
+ * 避免形成第二套聊天前台。
+ */
 export default function CompanionConversationsPage() {
   return (
-    <Suspense fallback={<main className="conversation-loading"><LoadingPanel /></main>}>
-      <CompanionConversationsInner />
+    <Suspense fallback={<HistoryLoading />}>
+      <CompanionConversationsRoute />
     </Suspense>
   );
 }
 
-function LoadingPanel() {
-  return (
-    <>
-      <aside className="conversation-loading__panel" aria-hidden="true">
-        <div className="conversation-loading__skeleton-line conversation-loading__skeleton-line--w58" />
-        <div className="conversation-loading__skeleton-line conversation-loading__skeleton-line--w92" />
-        <div className="conversation-loading__skeleton-line conversation-loading__skeleton-line--w78" />
-        <div className="conversation-loading__skeleton-line conversation-loading__skeleton-line--w86" />
-      </aside>
-      <section className="conversation-loading__panel" aria-hidden="true">
-        <div className="conversation-loading__skeleton-line conversation-loading__skeleton-line--w34" />
-      </section>
-    </>
-  );
+function CompanionConversationsRoute() {
+  const searchParams = useSearchParams();
+  if (process.env.NODE_ENV === "development" && searchParams.get("preview") === "full") {
+    return <CompanionHistoryPreview />;
+  }
+
+  const requestedConversationId = searchParams.get("conversationId")
+    ?? searchParams.get("conversation");
+  return <ProductionCompanionHistory requestedConversationId={requestedConversationId} />;
 }
 
-function CompanionConversationsInner() {
-  const searchParams = useSearchParams();
-  const requestedConversationId = searchParams.get("conversationId");
+function ProductionCompanionHistory({
+  requestedConversationId,
+}: {
+  requestedConversationId: string | null;
+}) {
+  // P5（文档 16 §14.2）：完整历史页发布 bounded context。
+  // 第八轮 🟡B-1：useMemo 稳定引用（取决于 requestedConversationId）。
+  useMainPageContext(useMemo(() => ({
+    routeRef: { kind: "conversation" },
+    pageKind: "conversation",
+    entityRefs: requestedConversationId
+      ? [{ kind: "assistant_session", assistantSessionId: requestedConversationId }]
+      : [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  }), [requestedConversationId]));
   const {
     enabled,
     conversations,
-    selected,
     selectedId,
     messages,
-    draft,
+    messagesLoading,
     loading,
-    sending,
     error,
-    setDraft,
     selectConversation,
-    createConversation,
-    sendMessage,
+    loadOlderMessages,
+    olderAvailable,
+    olderLoading,
     deleteSelected,
   } = useCompanionConversations(requestedConversationId);
-  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
 
-  const handleCreate = async () => {
-    if (creating) return;
-    setCreating(true);
-    try {
-      await createConversation();
-    } catch {
-      // createConversation 抛错时保持现状；hook 无 error 通道，静默即可
-      // 与旧行为一致（原页面 catch 由调用方 promise 链吞掉）。
-    } finally {
-      setCreating(false);
-    }
+  // FN1：稳定 entries 身份——useMemo 让未变的历史条目在流式 delta 时保持
+  // 对象引用，避免每次 delta 重建数组导致 CompanionHistoryArchive 全量重算。
+  const entries = useMemo(() => messages.map(
+    (message) => adaptProductionHistoryMessage(message as CompanionHistoryMessageInput),
+  ), [messages]);
+
+  if (loading) return <HistoryLoading />;
+
+  // P8（文档 16 §10.4/§21.3）：导出/删除/召回接线（服务端端点已存在）。
+  const handleExport = () => {
+    // NDJSON 下载（GET + cookie 鉴权；Content-Disposition attachment）。
+    window.open("/api/companion/export", "_blank", "noopener");
   };
-
-  const handleConfirmDelete = async () => {
-    setConfirmDeleteOpen(false);
-    await deleteSelected();
+  const handleDelete = () => {
+    if (!selectedId) return;
+    const confirmed = window.confirm("删除后将清除该对话的正文与索引，并保留最小审计留痕。已提交的学习事实不会改变。确定删除？");
+    if (!confirmed) return;
+    void deleteSelected();
   };
-
-  if (loading) {
-    return (
-      <main className="conversation-loading">
-        <LoadingPanel />
-      </main>
-    );
-  }
-  if (enabled === false) {
-    return (
-      <main className="conversation-loading conversation-loading--single">
-        <section className="conversation-loading__panel">
-          <h1 className="conversation-sidebar__title"><PetIcon name="history" />完整对话</h1>
-          <p className="conversation-loading__note">
-            文字对话能力尚未开启，桌宠仍可使用文字演示模式。
-          </p>
-        </section>
-      </main>
-    );
-  }
+  const handleRecallPet = () => {
+    // 仅 Electron Main 窗口存在 desktopAPI（浏览器 fail closed）。
+    window.desktopAPI?.setPetModeEnabled(true).catch(() => {});
+  };
 
   return (
-    <main className="conversation-page">
-      <ConversationSidebar
-        conversations={conversations}
-        selectedId={selectedId}
-        onSelect={selectConversation}
-        onCreate={() => void handleCreate()}
-      />
+    <CompanionHistoryArchive
+      conversations={conversations}
+      selectedId={selectedId}
+      entries={entries}
+      entriesLoading={messagesLoading}
+      onSelect={selectConversation}
+      source="production"
+      error={error}
+      limitationNote={enabled === false
+        ? "当前账户尚未开启文字历史读取；桌面伴星的其他能力不受影响。"
+        : "读取范围：最多 50 段活跃对话；每段最近 100 条，更早记录按需分页读取。"}
+      historyPage={{
+        loadedCount: entries.length,
+        // P8：真实 cursor 分页已接线（服务端 beforeSeq keyset + hasMore）。
+        hasEarlier: olderAvailable,
+        loading: olderLoading,
+        onLoadEarlier: () => void loadOlderMessages(),
+      }}
+      onExport={handleExport}
+      onDelete={handleDelete}
+      onRecallPet={handleRecallPet}
+    />
+  );
+}
 
-      <section className="conversation-main" aria-label="对话">
-        <header className="conversation-main__header">
-          <div className="conversation-main__heading">
-            <h2 className="conversation-main__title">
-              {selected?.title || "新对话"}
-            </h2>
-            <p className="conversation-main__subtitle">
-              <PetIcon name="sparkles" />
-              和伴星的对话会自动保存，随时回来接着聊
-            </p>
-          </div>
-          {selected ? (
-            <button
-              type="button"
-              className="conversation-main__delete"
-              onClick={() => setConfirmDeleteOpen(true)}
-            >
-              <PetIcon name="trash" />
-              删除
-            </button>
-          ) : null}
-        </header>
+function CompanionHistoryPreview() {
+  const [selectedId, setSelectedId] = useState(COMPANION_HISTORY_FIXTURES[0]?.id ?? null);
+  const [visibleEntryCount, setVisibleEntryCount] = useState(5);
+  const selected = COMPANION_HISTORY_FIXTURES.find((conversation) => conversation.id === selectedId) ?? null;
+  useEffect(() => setVisibleEntryCount(5), [selectedId]);
+  const allEntries = selected?.entries ?? [];
+  const visibleEntries = allEntries.slice(Math.max(0, allEntries.length - visibleEntryCount));
+  return (
+    <CompanionHistoryArchive
+      conversations={COMPANION_HISTORY_FIXTURES.map((conversation) => ({
+        id: conversation.id,
+        title: conversation.title,
+        createdAt: conversation.createdAt,
+        lastMessageAt: conversation.lastMessageAt,
+        messageCount: conversation.entries.length,
+      }))}
+      selectedId={selectedId}
+      entries={visibleEntries}
+      onSelect={setSelectedId}
+      source="prototype"
+      limitationNote="开发预览不会读取、创建或修改账户中的任何对话。"
+      historyPage={{
+        loadedCount: visibleEntries.length,
+        totalCount: allEntries.length,
+        hasEarlier: visibleEntries.length < allEntries.length,
+        onLoadEarlier: visibleEntries.length < allEntries.length
+          ? () => setVisibleEntryCount((count) => count + 20)
+          : undefined,
+      }}
+    />
+  );
+}
 
-        <ConversationMessages
-          messages={messages}
-          sending={sending}
-          hasConversation={Boolean(selected)}
-          onSuggestion={setDraft}
-        />
-
-        {error ? (
-          <p role="alert" className="conversation-error">
-            <PetIcon name="alert" />
-            {error}
-          </p>
-        ) : null}
-
-        <ConversationComposer
-          draft={draft}
-          sending={sending}
-          onChange={setDraft}
-          onSubmit={() => void sendMessage()}
-        />
-      </section>
-
-      <ConfirmDialog
-        open={confirmDeleteOpen}
-        title="删除这段对话？"
-        message="删除后这段对话将不再出现在列表里，操作无法撤销。"
-        confirmLabel="删除"
-        cancelLabel="取消"
-        variant="danger"
-        onConfirm={() => void handleConfirmDelete()}
-        onCancel={() => setConfirmDeleteOpen(false)}
-      />
-    </main>
+function HistoryLoading() {
+  return (
+    <div className="history-loading" aria-busy="true" aria-live="polite" role="status">
+      <span className="sr-only">正在打开伴星交互档案</span>
+      <header className="history-loading__masthead">
+        <div><i /><i /><i /></div>
+        <span><Icon.Lock aria-hidden="true" /></span>
+      </header>
+      <div className="history-loading__layout">
+        <aside>
+          <i className="history-loading__portrait" />
+          <i /><i /><i /><i />
+        </aside>
+        <section>
+          <i /><i />
+          <div className="history-loading__entry"><b /><span /></div>
+          <div className="history-loading__entry"><b /><span /></div>
+          <div className="history-loading__entry"><b /><span /></div>
+        </section>
+      </div>
+    </div>
   );
 }

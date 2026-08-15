@@ -8,7 +8,7 @@ import type {
   ConversationTurnStateV1,
   VoiceDialogueStateV1,
 } from "../runtime/pet-runtime-types";
-import type { AllowedMainRouteV1 } from "@ailearn/shared/desktop-pet-contracts";
+import type { AllowedMainRouteV1 } from "@ailearn/shared";
 import { PetIcon, type PetIconNameV1 } from "./PetIcon";
 
 type BubbleToneV1 = "neutral" | "active" | "success" | "warning" | "danger";

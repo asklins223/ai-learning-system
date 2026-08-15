@@ -1,11 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { DesktopPetScaleV1 } from "@ailearn/shared";
+import type { AllowedMainRouteV2, DesktopPetScaleV1 } from "@ailearn/shared";
 import { createPetAdapter, type PetAdapterV1 } from "@/features/companion-pet/desktop/desktop-pet-adapter";
 import { PetRuntimeProvider } from "@/features/companion-pet/runtime/PetRuntimeProvider";
 import { PetSurface } from "@/features/companion-pet/surfaces/PetSurface";
 import { InAppPetHost } from "@/features/companion-pet/web-fallback/InAppPetHost";
+// §10.1/§14.3（2026-08-15 接线修复）：Journey 引导 + 主动 delivery + delta
+// 回执此前组件存在但从未挂载——桌宠只剩对话。此处挂载三层并做
+// journey/delivery/receipt 三者互斥（同一时刻一个 cue，§10.2）。
+import { PetJourneyLive } from "@/features/companion-pet/journey-live/PetJourneyLive";
+import { PetDeliveryLayer } from "@/features/companion-pet/deliveries/PetDeliveryLayer";
+import { DeltaReceiptNotice } from "@/features/companion-pet/deliveries/DeltaReceiptNotice";
+import { usePetBridgeContext } from "@/features/companion-bridge/usePetBridgeContext";
 import {
   COMPANION_BOOTSTRAP_POLL_MS,
   CompanionBootstrapError,
@@ -43,6 +50,13 @@ export default function PetPage() {
   // surface。默认 fail-closed；Electron 路径以 bootstrap 投影为准，不再
   // 由 build-time flag 单独决定。
   const [petSurfaceEnabled, setPetSurfaceEnabled] = useState(false);
+  // §10.1/§14.3（2026-08-15 接线修复）：Journey 引导与主动 delivery 由
+  // bootstrap 的 journey/deliveries 能力投影授权（fail-closed）。
+  const [journeyEnabled, setJourneyEnabled] = useState(false);
+  const [deliveriesEnabled, setDeliveriesEnabled] = useState(false);
+  // §10.2 同一时刻一个 cue：journey 卡片 / delivery 气泡 / delta 回执互斥。
+  const [journeyVisible, setJourneyVisible] = useState(false);
+  const [receiptVisible, setReceiptVisible] = useState(false);
   const [account, setAccount] = useState<
     | {
         userId: string;
@@ -56,6 +70,15 @@ export default function PetPage() {
   >(undefined);
   const api = typeof window === "undefined" ? undefined : window.desktopAPI;
   const adapter = useMemo<PetAdapterV1>(() => createPetAdapter(api), [api]);
+  // V2 bridge：主窗口 UI 事件（delta 回执）+ 主窗口路由跳转（journey/delivery
+  // 的 onOpen* 动作）。bridge 不可用时 fail-closed（函数返回 accepted:false）。
+  const { uiEvent, dispatchOpenRoute } = usePetBridgeContext();
+  const openMainRoute = useMemo(
+    () => async (route: AllowedMainRouteV2) => {
+      await dispatchOpenRoute(route);
+    },
+    [dispatchOpenRoute],
+  );
 
   useEffect(() => {
     setReducedMotion(window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -108,6 +131,8 @@ export default function PetPage() {
         setLive2dEnabled(body.features.live2d);
         setLearningActionsEnabled(body.features.learningActions);
         setPetSurfaceEnabled(body.features.petSurface);
+        setJourneyEnabled(body.features.journey);
+        setDeliveriesEnabled(body.features.deliveries);
         setAccount({
           userId: body.userId,
           workspaceId: body.workspaceId,
@@ -242,6 +267,27 @@ export default function PetPage() {
         textConversationEnabled={textConversationEnabled}
         voiceDialogueEnabled={voiceDialogueEnabled}
         learningActionsEnabled={learningActionsEnabled}
+      />
+      {/* §10.1：Journey 首次引导卡片（Electron 窗口；浏览器路径不渲染）。 */}
+      <PetJourneyLive
+        enabled={journeyEnabled}
+        workspaceId={account?.workspaceId}
+        onNavigate={(route) => void openMainRoute(route)}
+        onVisibleChange={setJourneyVisible}
+      />
+      {/* §14.3：主动 delivery 展示层（run 完成收尾/提议等，inbox SSE）。 */}
+      <PetDeliveryLayer
+        enabled={deliveriesEnabled}
+        journeyVisible={journeyVisible}
+        suppressed={receiptVisible}
+        onOpenRun={(runId) => void openMainRoute({ kind: "learning_run", runId })}
+        onOpenConversation={() => void openMainRoute({ kind: "conversation" })}
+      />
+      {/* §11.4：星图 delta 回执（主窗口 graph.delta_applied 事件驱动）。 */}
+      <DeltaReceiptNotice
+        uiEvent={uiEvent}
+        journeyVisible={journeyVisible}
+        onVisibleChange={setReceiptVisible}
       />
     </PetRuntimeProvider>
   );

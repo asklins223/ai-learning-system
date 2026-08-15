@@ -21,11 +21,11 @@ import {
   type CompanionPageContextV1,
   type CancelCompanionRunResponseV1,
   type CreateCompanionTurnResponseV1,
-} from "@ailearn/shared/companion-conversation-contracts";
+} from "@ailearn/shared";
 import {
   allowedMainRouteV1Schema,
   type AllowedMainRouteV1,
-} from "@ailearn/shared/desktop-pet-contracts";
+} from "@ailearn/shared";
 
 export type SubmitCompanionTurnBody = CreateCompanionTurnResponseV1;
 

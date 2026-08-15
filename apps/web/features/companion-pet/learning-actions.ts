@@ -5,7 +5,7 @@ import {
   type CompanionLearningContextV1,
   type CreateMenuProposalResponseV1,
   type ProposalDecisionResponseV1,
-} from "@ailearn/shared/companion-conversation-contracts";
+} from "@ailearn/shared";
 
 export class LearningActionClientError extends Error {
   readonly status: number;

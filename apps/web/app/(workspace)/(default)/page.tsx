@@ -1,26 +1,48 @@
 "use client";
 
 import "@/app/styles/home.css";
-import "@/app/styles/onboarding-guide.css";
 import "@/app/styles/workspace-headers.css";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, CardListItem, JobRow, SanitizedReviewItem, StatsOverview } from "@/lib/api";
 import { useCurrentUser } from "@/lib/use-current-user";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
+import { resolveHomeOnboardingVisibility } from "@/lib/home-onboarding";
 import { relativeTime } from "@/lib/format";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Icon } from "@/components/ui/icons";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
-import { OnboardingGuide } from "@/components/study/OnboardingGuide";
 import { statusMap } from "@/lib/status-map";
-import { resolveHomeOnboardingVisibility } from "@/lib/home-onboarding";
 
 type CaptureMessageType = "success" | "error";
+const LEARNING_RUN_UI_PREVIEW = process.env.NODE_ENV === "development";
+
+function homeLearningRunUiPreviewHref(review: SanitizedReviewItem) {
+  if (!LEARNING_RUN_UI_PREVIEW) return null;
+  const params = new URLSearchParams({
+    origin: "today",
+    scheduleId: review.reviewId,
+    cardId: review.cardId,
+    returnTo: "/",
+  });
+  if (review.keyPointId) params.set("keyPointId", review.keyPointId);
+  return `/learning-runs/ui-redraw?${params.toString()}`;
+}
 
 export default function HomePage() {
   const { currentUser, loading: accountLoading } = useCurrentUser();
+  // P5（文档 16 §14.2/§14.6）：Home 页发布 bounded context。
+  // 第八轮 🟡B-1：useMemo 稳定引用。
+  useMainPageContext(useMemo(() => ({
+    routeRef: { kind: "home" },
+    pageKind: "other",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  }), []));
   const isOwner = Boolean(
     currentUser && (currentUser.role === "owner" || currentUser.isPersonal),
   );
@@ -61,6 +83,11 @@ export default function HomePage() {
   const loadHomeData = useCallback(async () => {
     const requestId = ++homeRequestRef.current;
     setHomeRefreshing(true);
+    // F#7（🟠8）：先 await getMe（缓存命中/合并 in-flight），使 scope 解析为
+    // 真实 ws 键，随后 5 个统计 GET 全部落在带缓存路径（首帧冷缓存收益），
+    // 并让通用 in-flight 去重在并发重载时合并同 path GET。
+    await api.getMe().catch(() => null);
+    if (requestId !== homeRequestRef.current) return;
     const [statsResult, notesResult, cardsResult, reviewsResult, jobsResult] =
       await Promise.allSettled([
         api.getStatsOverview(),
@@ -240,22 +267,40 @@ export default function HomePage() {
   const todayFocus = pendingReviewCount > 0
     ? {
         kind: "review" as const,
-        eyebrow: "今日下一步 · 到期复习",
-        title: "完成一轮独立复习",
-        summary: `今天有 ${pendingReviewCount} 条复习已经到期，先从最早的一条开始。`,
+        eyebrow: LEARNING_RUN_UI_PREVIEW
+          ? "今日下一步 · 三分钟微旅程"
+          : "今日下一步 · 到期复习",
+        title: LEARNING_RUN_UI_PREVIEW
+          ? "先证明一个到期要点"
+          : "完成一轮独立复习",
+        summary: LEARNING_RUN_UI_PREVIEW
+          ? `今天有 ${pendingReviewCount} 条复习已经到期。进入后直接用推荐方式开始，也可以随时改用语音、操作或短文字。`
+          : `今天有 ${pendingReviewCount} 条复习已经到期，先从最早的一条开始。`,
         meta: [
           { label: "到期复习", value: `${pendingReviewCount} 条` },
-          { label: "优先级", value: "今天" },
+          ...(LEARNING_RUN_UI_PREVIEW
+            ? [
+                { label: "单次用时", value: "1–3 分钟" },
+                { label: "自主操作", value: "可切换 / 可跳过" },
+              ]
+            : [{ label: "优先级", value: "今天" }]),
         ],
-        ctaLabel: "进入复习",
-        ctaHref: "/review",
+        ctaLabel: LEARNING_RUN_UI_PREVIEW ? "预览第一个到期要点" : "进入复习",
+        ctaHref: pendingReviews[0]
+          ? homeLearningRunUiPreviewHref(pendingReviews[0]) ??
+            `/review/${encodeURIComponent(pendingReviews[0].reviewId)}`
+          : "/review",
       }
     : primaryCard
       ? {
           kind: "continue" as const,
-          eyebrow: "今日下一步 · 继续理解",
+          eyebrow: LEARNING_RUN_UI_PREVIEW
+            ? "今日下一步 · 三分钟巩固"
+            : "今日下一步 · 继续理解",
           title: primaryCard.schemaJson?.title ?? "未命名学习卡",
-          summary: primaryCard.schemaJson?.summary ?? "回到这张学习卡，继续补充证据并验证理解。",
+          summary: primaryCard.schemaJson?.summary ?? (LEARNING_RUN_UI_PREVIEW
+            ? "回到这张学习卡，用语音、操作或短文字证明一个要点。"
+            : "回到这张学习卡，继续补充证据并验证理解。"),
           meta: [
             ...((primaryCard.evidenceHardCount ?? 0) > 0
               ? [{ label: "硬证据", value: `${primaryCard.evidenceHardCount} 条` }]
@@ -263,9 +308,12 @@ export default function HomePage() {
             ...((primaryCard.validationCount ?? 0) > 0
               ? [{ label: "验证", value: `${primaryCard.validationCount} 次` }]
               : []),
+            ...(LEARNING_RUN_UI_PREVIEW
+              ? [{ label: "单次用时", value: "1–3 分钟" }]
+              : []),
             { label: "创建", value: relativeTime(primaryCard.createdAt) },
           ],
-          ctaLabel: "继续学习",
+          ctaLabel: LEARNING_RUN_UI_PREVIEW ? "去卡片预览巩固" : "继续学习",
           ctaHref: `/cards/${primaryCard.id}`,
         }
       : null;
@@ -292,11 +340,13 @@ export default function HomePage() {
     !jobsError &&
     pendingReviewCount === 0 &&
     jobs.length === 0;
-  const { isFirstUse, showOnboarding } = resolveHomeOnboardingVisibility({
+  // 首页首次使用面（isFirstUse 由空个人工作区判定；onboarding 大卡已随
+  // §21.3 删除，桌宠 + Journey 承担新用户引导）。
+  const isFirstUse = resolveHomeOnboardingVisibility({
     accountLoading,
     isPersonalWorkspace,
     isEmptyWorkspace,
-  });
+  }).isFirstUse;
 
   return (
     <div
@@ -315,10 +365,10 @@ export default function HomePage() {
             <span className="learning-home-eyebrow-separator" aria-hidden="true">·</span>
             <span className="learning-home-date">{todayLabel}</span>
           </p>
-          <h1>{isFirstUse ? "建立你的第一条学习记录" : "今日学习"}</h1>
+          <h1>{isFirstUse ? "走完第一条学习闭环" : "今日学习"}</h1>
           <p className="learning-home-subtitle">
             {isFirstUse
-              ? "先放入一份材料，笔记、学习卡与复习会从这里自然接上。"
+              ? "从一份材料出发，逐步整理成可以验证的理解。"
               : "把今天最值得推进的理解，放在桌面中央。"}
           </p>
         </div>
@@ -406,27 +456,24 @@ export default function HomePage() {
                 className="learning-home-starter-intro"
                 aria-labelledby="learning-home-starter-title"
               >
-                <span className="learning-home-starter-label">
-                  <Icon.Sparkle aria-hidden="true" />
-                  从这里开始
+                  <span className="learning-home-starter-label">
+                    <Icon.Sparkle aria-hidden="true" />
+                  第一条学习闭环
                 </span>
                 <h2 id="learning-home-starter-title">
                   从一份真正想弄懂的材料开始
                 </h2>
                 <p>
-                  不用先整理格式。粘贴原文、Markdown、代码或网页链接，系统会先替你收好，再逐步整理成可验证的理解。
+                  不用先整理格式。先把材料收进来，后续只依据真实完成的动作推进。
                 </p>
                 <div className="learning-home-starter-outcome">
                   <span aria-hidden="true"><Icon.Card /></span>
                   <div>
-                    <strong>添加后会发生什么？</strong>
-                    <p>材料进入解析队列，随后可在笔记中提炼重点并生成学习卡。</p>
+                    <strong>这条路径会走到哪里？</strong>
+                    <p>材料 → 笔记 → 学习卡 → 一次不必写长文的可信巩固。</p>
                   </div>
                 </div>
               </section>
-            )}
-            {showOnboarding && (
-              <OnboardingGuide variant={isFirstUse ? "starter" : "default"} />
             )}
             {!isFirstUse && (focusLoading ? (
               <section className="learning-home-focus learning-home-focus--loading" aria-busy="true" aria-label="正在加载今日下一步">
@@ -468,7 +515,7 @@ export default function HomePage() {
                     ))}
                   </div>
                   <div className="learning-home-route" aria-label="学习路径">
-                    <span>材料</span><i aria-hidden="true" /><span>理解</span><i aria-hidden="true" /><span>验证</span>
+                    <span>材料</span><i aria-hidden="true" /><span>理解</span><i aria-hidden="true" /><span>证明</span>
                   </div>
                 </div>
               </section>
@@ -639,8 +686,11 @@ export default function HomePage() {
                         >
                           <span className="learning-home-queue-item-icon" aria-hidden="true"><Icon.Review /></span>
                           <span className="learning-home-queue-item-copy">
-                            <strong>独立回忆一项理解</strong>
-                            <small>{reason.label} · 间隔 {review.intervalDays} 天</small>
+                            <strong>{LEARNING_RUN_UI_PREVIEW ? "三分钟内证明一个要点" : "独立回忆一项理解"}</strong>
+                            <small>
+                              {reason.label} · 间隔 {review.intervalDays} 天
+                              {LEARNING_RUN_UI_PREVIEW ? " · 可换方式" : ""}
+                            </small>
                           </span>
                           <Icon.ChevronRight className="learning-home-queue-chevron" />
                         </Link>

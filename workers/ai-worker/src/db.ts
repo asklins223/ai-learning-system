@@ -2,7 +2,9 @@ import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import { AsyncLocalStorage } from "node:async_hooks";
-import * as schema from "./schema/index.ts";
+// R16（R35 恢复）：直接引用 apps/api 权威 schema，消除双 schema 漂移
+//（PgTransaction 跨实例类型分裂）。worker 本地 src/schema 镜像不再使用。
+import * as schema from "../../../apps/api/src/db/schema/index.ts";
 
 const DEFAULT_DATABASE_URL = "postgres://ailearn:ailearn_dev@postgres:5432/ailearn";
 

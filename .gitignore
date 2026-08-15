@@ -53,3 +53,4 @@ AI学习系统-v0.4-当前问题审核报告-*
 # Ensure Dockerfiles are tracked in this repo.
 !**/Dockerfile
 reasonix.toml
+/test-results/

@@ -8,7 +8,7 @@ import type {
   DesktopPetWindowStateV1,
   PetHitGeometryV1,
   DesktopLifecycleEventV1,
-} from "@ailearn/shared/desktop-pet-contracts";
+} from "@ailearn/shared";
 
 /**
  * Renderer-side adapter over the typed preload bridge. The browser fallback
@@ -145,11 +145,14 @@ function createBrowserPetAdapter(options: BrowserPetAdapterOptionsV1): PetAdapte
   };
 }
 
-function browserRoutePath(route: AllowedMainRouteV1): string {
+// 2026-08-15 恢复：web tracked 回退丢失 export 修饰符（测试依赖导出）；
+// 路由参数按契约测试对齐（archive route 用 conversationId、graph 用
+// targetNodeId、learning_session 全参数透传）。
+export function browserRoutePath(route: AllowedMainRouteV1): string {
   switch (route.kind) {
     case "conversation":
       return route.conversationId
-        ? `/companion/conversations?conversation=${encodeURIComponent(route.conversationId)}`
+        ? `/companion/conversations?conversationId=${encodeURIComponent(route.conversationId)}`
         : "/companion/conversations";
     case "settings":
       return `/settings?section=${encodeURIComponent(route.section)}`;
@@ -159,9 +162,9 @@ function browserRoutePath(route: AllowedMainRouteV1): string {
       return `/cards/${encodeURIComponent(route.cardId)}`;
     case "star_map":
       return route.keyPointId
-        ? `/knowledge?keyPoint=${encodeURIComponent(route.keyPointId)}`
-        : "/knowledge";
+        ? `/graph?targetNodeId=${encodeURIComponent(route.keyPointId)}`
+        : "/graph";
     case "learning_session":
-      return `/cards/${encodeURIComponent(route.cardId)}/companion?session=${encodeURIComponent(route.sessionId)}`;
+      return `/cards/${encodeURIComponent(route.cardId)}/companion?keyPoint=${encodeURIComponent(route.keyPointId)}&session=${encodeURIComponent(route.sessionId)}&origin=${encodeURIComponent(route.origin)}`;
   }
 }

@@ -1,0 +1,839 @@
+/**
+ * Card Generation V2 — Card 级 Reveal / Archive / Presentation-only Revisions /
+ * Regeneration + Initial Validation Reminder（方案 20 §17.3/§17.6）。
+ *
+ * 冻结依据：
+ * - Reveal exposure-first：先持久化 `learning_exposures_v2`（objective-scoped），
+ *   提交后才返回答案（§17.6/§15.2）；同一 Idempotency-Key 重放返回同一 Exposure；
+ * - front 与待 reveal 的 exact revision/publication 不一致 → 409 stale_presentation；
+ * - Archive 走 objective lifecycle CAS（§16.7 锁竞态），关闭 pending Schedule
+ *   （lifecycle reason、保留 generation/history、0 successor）与 Reminder；
+ * - Revisions 只允许 presentation-only patch（§15.4），仍重跑 leakage gate；
+ * - Initial Validation Reminder 不是 Schedule（§17.3）。
+ *
+ * 说明：Card/Objective 领域事件目前以返回值为准（generation 事件表与 outbox
+ * 均 run-scoped，card 级事件需独立投递通道，后续轮次接入）。
+ */
+
+import { randomUUID } from "node:crypto";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { withWorkspaceTransaction } from "../../db/client.ts";
+import type { ApiTransaction } from "../../db/client.ts";
+import {
+  learningCardsV2,
+  learningObjectiveRevisionsV2,
+  learningObjectivesV2,
+  learningCardPublicationRevisionsV2,
+  learningCardRevisionsV2,
+  learningExposuresV2,
+  initialValidationRemindersV2,
+} from "../../db/schema/card-generation-v2.ts";
+import { reviewSchedules } from "../../db/schema/evidence.ts";
+import {
+  parseLearningCardRevealV2,
+  parsePublicLearningCardV2,
+  type LearningCardRevealV2,
+  type PublicLearningCardV2,
+  type RevealCardRequestV2,
+  type ArchiveCardRequestV2,
+} from "@ailearn/shared/learning-card-v2-contracts";
+import {
+  computeCardRevealContextHashV2,
+  computeCanonicalAnswerHashV2,
+  computeCardPresentationHashV2,
+  computeCardPublicationPublicPayloadHashV2,
+  computeCardPublicationRevealPayloadHashV2,
+  computeExposureScopeIdV2,
+} from "@ailearn/shared/card-generation-v2-hashing";
+import {
+  CardGenerationV2ServiceError,
+  insertDomainEvent,
+  type RunContext,
+} from "./helpers.ts";
+
+export const PRE_RUN_REVEAL_POLICY_VERSION = "pre-run-reveal-policy-v1";
+export const REVEAL_COOLDOWN_MS = 24 * 60 * 60 * 1000; // V1 默认 cooldown 24h（§6.5）
+const PUBLIC_SERIALIZATION_POLICY = "public-serialization-v1";
+const EVIDENCE_PREVIEW_POLICY = "evidence-preview-v1";
+
+// ─── §17.6 Card Reveal（exposure-first） ─────────────────────────────────
+
+export async function revealCardV2(
+  ctx: RunContext,
+  body: RevealCardRequestV2,
+  idempotencyKey: string,
+): Promise<LearningCardRevealV2> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    // 幂等重放：同一 (workspace, user, idempotencyKey) 返回同一 Exposure
+    const existing = await tx.select().from(learningExposuresV2)
+      .where(and(
+        eq(learningExposuresV2.workspaceId, ctx.workspaceId),
+        eq(learningExposuresV2.userId, ctx.userId),
+        eq(learningExposuresV2.idempotencyKey, idempotencyKey),
+      ))
+      .limit(1);
+
+    if (existing.length > 0) {
+      const exp = existing[0];
+      return buildCardReveal(tx, ctx, exp.objectiveId, exp.exposureId, exp.exposedAt);
+    }
+
+    const { card, publication, revision, objective } = await loadCardClosure(
+      tx, ctx.workspaceId, body.cardId,
+    );
+
+    // §17.6：用户看到的 front 必须与待 reveal 的 exact publication 一致
+    if (publication.publicationRevision !== body.expectedPublicationRevision
+        || publication.publicPayloadHash !== body.expectedPublicPayloadHash) {
+      throw new CardGenerationV2ServiceError("stale_presentation", 409, "卡片版本已更新，请刷新");
+    }
+
+    // Exposure-first：先持久化，再返回答案
+    const exposureId = randomUUID();
+    const canonicalAnswerHash = computeCanonicalAnswerHashV2(revision.canonicalAnswer);
+    const exposureScopeId = computeExposureScopeIdV2({
+      workspaceId: ctx.workspaceId,
+      objectiveId: objective.objectiveId,
+    });
+    const contextHash = computeCardRevealContextHashV2({
+      workspaceId: ctx.workspaceId,
+      userId: ctx.userId,
+      objectiveId: objective.objectiveId,
+      exposureScopeId,
+      publicationRevision: publication.publicationRevision,
+      publicPayloadHash: publication.publicPayloadHash,
+      revealPayloadHash: publication.revealPayloadHash,
+      canonicalAnswerHash,
+      revealPolicyVersion: PRE_RUN_REVEAL_POLICY_VERSION,
+    });
+
+    await tx.insert(learningExposuresV2).values({
+      workspaceId: ctx.workspaceId,
+      exposureId,
+      userId: ctx.userId,
+      objectiveId: objective.objectiveId,
+      objectiveRevision: publication.objectiveRevision,
+      cardId: card.cardId,
+      cardRevision: publication.cardRevision,
+      exposureKind: "answer_reveal",
+      contextHash,
+      idempotencyKey,
+      exposedAt: new Date(),
+    });
+
+    // §17.3：仅对尚无 trusted first Commit 的 Objective，reveal 在 Exposure 事务内
+    // 原子 upsert 并延后 qualificationNotBefore；已 completed 的 Reminder 不重开。
+    await deferReminderOnReveal(tx, ctx, objective.objectiveId, exposureId);
+
+    // §17.7：learning_card.revealed（Today/Card 通知投影；个人 projector 0 变化）。
+    await insertDomainEvent(tx, ctx.workspaceId, {
+      eventType: "learning_card.revealed",
+      aggregateKind: "card",
+      aggregateId: card.cardId,
+      aggregateRevision: publication.cardRevision,
+      payload: {
+        objectiveId: objective.objectiveId,
+        publicationRevision: publication.publicationRevision,
+        exposureId,
+      },
+      idempotencyKey,
+    });
+
+    return buildCardReveal(tx, ctx, objective.objectiveId, exposureId, new Date());
+  });
+}
+
+// ─── §17.6 Card Archive（lifecycle CAS + Schedule/Reminder close） ───────
+
+export async function archiveCardV2(
+  ctx: RunContext,
+  body: ArchiveCardRequestV2,
+  idempotencyKey: string,
+): Promise<{
+  cardId: string;
+  objectiveId: string;
+  resultingLifecycle: "archived";
+  resultingLifecycleEpoch: number;
+  publicationRevision: number;
+  closedSchedules: number;
+  cancelledReminders: number;
+}> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const existing = await tx.select().from(learningExposuresV2)
+      .where(and(
+        eq(learningExposuresV2.workspaceId, ctx.workspaceId),
+        eq(learningExposuresV2.userId, ctx.userId),
+        eq(learningExposuresV2.idempotencyKey, idempotencyKey),
+      ))
+      .limit(1);
+    if (existing.length > 0) {
+      throw new CardGenerationV2ServiceError("already_archived", 409, "该请求已处理（幂等重放，请复用原响应）");
+    }
+
+    const { card, publication, revision, objective } = await loadCardClosure(
+      tx, ctx.workspaceId, body.cardId,
+    );
+
+    if (publication.publicationRevision !== body.expectedPublicationRevision
+        || publication.publicPayloadHash !== body.expectedPublicPayloadHash) {
+      throw new CardGenerationV2ServiceError("stale_presentation", 409, "卡片版本已更新，请刷新");
+    }
+    if (objective.lifecycleEpoch !== body.expectedObjectiveLifecycleEpoch) {
+      throw new CardGenerationV2ServiceError("stale_lifecycle_epoch", 409, "目标生命周期已变更，请刷新");
+    }
+
+    const newLifecycleEpoch = objective.lifecycleEpoch + 1;
+    const newPublicationRevision = publication.publicationRevision + 1;
+
+    // Objective + Card lifecycle 原子变更（§16.7：archive 先赢 → 后续 Run/Commit stale）
+    const objUpdated = await tx.update(learningObjectivesV2)
+      .set({ lifecycle: "archived", lifecycleEpoch: newLifecycleEpoch })
+      .where(and(
+        eq(learningObjectivesV2.objectiveId, objective.objectiveId),
+        eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+        eq(learningObjectivesV2.lifecycle, "active"),
+        eq(learningObjectivesV2.lifecycleEpoch, body.expectedObjectiveLifecycleEpoch),
+      ))
+      .returning({ id: learningObjectivesV2.id });
+    if (objUpdated.length === 0) {
+      throw new CardGenerationV2ServiceError("stale_lifecycle_epoch", 409, "目标生命周期已被并发修改，请刷新");
+    }
+
+    await tx.update(learningCardsV2)
+      .set({ lifecycle: "archived" })
+      .where(and(
+        eq(learningCardsV2.cardId, card.cardId),
+        eq(learningCardsV2.workspaceId, ctx.workspaceId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ));
+
+    // §15.5：lifecycle 变化创建新 publication revision，固定新的 public lifecycle hash
+    const presentationHash = computeCardPresentationHashV2({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      cardRevision: publication.cardRevision,
+      front: card.front,
+      strategy: card.strategy,
+      publicSerializationPolicyVersion: PUBLIC_SERIALIZATION_POLICY,
+    });
+    const publicSummaryHash = computeCanonicalAnswerHashV2(revision.publicSummary);
+    const publicPayloadHash = computeCardPublicationPublicPayloadHashV2({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      publicationRevision: newPublicationRevision,
+      cardPresentationHash: presentationHash,
+      objectiveId: objective.objectiveId,
+      objectiveRevision: publication.objectiveRevision,
+      publicSummaryHash,
+      knowledgeForm: revision.knowledgeForm,
+      lifecycle: "archived",
+      sourceLabel: card.sourceLabel,
+      publicSerializationPolicyVersion: PUBLIC_SERIALIZATION_POLICY,
+    });
+    const revealPayloadHash = computeCardPublicationRevealPayloadHashV2({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      publicationRevision: newPublicationRevision,
+      targetRevisionHash: revision.targetRevisionHash,
+      evidencePreviewPolicyVersion: EVIDENCE_PREVIEW_POLICY,
+    });
+
+    await tx.insert(learningCardPublicationRevisionsV2).values({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      publicationRevision: newPublicationRevision,
+      cardRevision: publication.cardRevision,
+      objectiveId: objective.objectiveId,
+      objectiveRevision: publication.objectiveRevision,
+      lifecycleAtPublication: "archived",
+      publicPayloadHash,
+      revealPayloadHash,
+      activatedAt: new Date(),
+    });
+
+    // §16.7：pending Schedule 以 lifecycle reason 关闭（保留 generation/history；0 successor）
+    const closedSchedules = await closePendingSchedules(tx, ctx.workspaceId, objective.objectiveId);
+
+    // Reminder 取消
+    const cancelledReminders = await tx.update(initialValidationRemindersV2)
+      .set({ status: "cancelled" })
+      .where(and(
+        eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+        eq(initialValidationRemindersV2.objectiveId, objective.objectiveId),
+        inArray(initialValidationRemindersV2.status, ["pending", "ready"]),
+      ))
+      .returning({ id: initialValidationRemindersV2.id, reminderId: initialValidationRemindersV2.reminderId });
+
+    // §17.7：archive lifecycle 事件（domain 通道；Today/Card 通知白名单）。
+    await insertDomainEvent(tx, ctx.workspaceId, {
+      eventType: "learning_card.archived",
+      aggregateKind: "card",
+      aggregateId: card.cardId,
+      aggregateRevision: publication.cardRevision,
+      payload: { objectiveId: objective.objectiveId, publicationRevision: newPublicationRevision },
+    });
+    await insertDomainEvent(tx, ctx.workspaceId, {
+      eventType: "learning_objective.archived",
+      aggregateKind: "objective",
+      aggregateId: objective.objectiveId,
+      aggregateRevision: publication.objectiveRevision,
+      payload: { lifecycleEpoch: newLifecycleEpoch },
+    });
+    for (const r of cancelledReminders) {
+      await insertDomainEvent(tx, ctx.workspaceId, {
+        eventType: "initial_validation_reminder.cancelled",
+        aggregateKind: "reminder",
+        aggregateId: r.reminderId,
+        payload: { objectiveId: objective.objectiveId, reasonCode: "lifecycle_archived" },
+      });
+    }
+
+    return {
+      cardId: card.cardId,
+      objectiveId: objective.objectiveId,
+      resultingLifecycle: "archived",
+      resultingLifecycleEpoch: newLifecycleEpoch,
+      publicationRevision: newPublicationRevision,
+      closedSchedules,
+      cancelledReminders: cancelledReminders.length,
+    };
+  });
+}
+
+// ─── §15.4 Presentation-only Card Revision ───────────────────────────────
+
+export async function updateCardPresentationV2(
+  ctx: RunContext,
+  cardId: string,
+  expectedPublicationRevision: number,
+  expectedPublicPayloadHash: string,
+  patch: { front?: { cue?: string; context?: string; prompt: string }; strategy?: string },
+): Promise<{
+  cardId: string;
+  cardRevision: number;
+  publicationRevision: number;
+  publicPayloadHash: string;
+}> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const { card, publication, revision, objective } = await loadCardClosure(
+      tx, ctx.workspaceId, cardId,
+    );
+    if (publication.publicationRevision !== expectedPublicationRevision
+        || publication.publicPayloadHash !== expectedPublicPayloadHash) {
+      throw new CardGenerationV2ServiceError("stale_presentation", 409, "卡片版本已更新，请刷新");
+    }
+
+    // leakage gate：presentation-only 变更仍必须重跑（§15.4/§17.6）
+    const currentFront = (card.front ?? {}) as { cue?: string; context?: string; prompt?: string };
+    const front = {
+      cue: patch.front?.cue ?? currentFront.cue ?? "",
+      context: patch.front?.context ?? currentFront.context,
+      prompt: patch.front?.prompt ?? currentFront.prompt ?? "",
+    };
+    const answerText = extractAnswerText(revision.canonicalAnswer);
+    if (answerText && front.prompt) {
+      const promptLower = front.prompt.toLowerCase();
+      if (answerText.length > 20 && promptLower.includes(answerText.slice(0, 50).toLowerCase())) {
+        throw new CardGenerationV2ServiceError("front_leaks_answer", 409, "正面提示语包含答案内容，请修改");
+      }
+    }
+
+    const newCardRevision = card.cardRevision + 1;
+    const newPublicationRevision = publication.publicationRevision + 1;
+    const presentationHash = computeCardPresentationHashV2({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      cardRevision: newCardRevision,
+      front,
+      strategy: patch.strategy ?? card.strategy,
+      publicSerializationPolicyVersion: PUBLIC_SERIALIZATION_POLICY,
+    });
+
+    await tx.update(learningCardsV2)
+      .set({ front, strategy: patch.strategy ?? card.strategy, cardRevision: newCardRevision, presentationHash })
+      .where(and(
+        eq(learningCardsV2.cardId, card.cardId),
+        eq(learningCardsV2.workspaceId, ctx.workspaceId),
+      ));
+
+    // §18.2（R36）：presentation-only 修订同样写不可变 revision 行。
+    await tx.insert(learningCardRevisionsV2).values({
+      workspaceId: ctx.workspaceId,
+      cardRevisionId: randomUUID(),
+      cardId: card.cardId,
+      revision: newCardRevision,
+      front: front as unknown as Record<string, unknown>,
+      strategy: patch.strategy ?? card.strategy,
+      presentationHash,
+      supersedesCardRevisionId: null,
+    });
+
+    const publicSummaryHash = computeCanonicalAnswerHashV2(revision.publicSummary);
+    const publicPayloadHash = computeCardPublicationPublicPayloadHashV2({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      publicationRevision: newPublicationRevision,
+      cardPresentationHash: presentationHash,
+      objectiveId: objective.objectiveId,
+      objectiveRevision: publication.objectiveRevision,
+      publicSummaryHash,
+      knowledgeForm: revision.knowledgeForm,
+      lifecycle: "active",
+      sourceLabel: card.sourceLabel,
+      publicSerializationPolicyVersion: PUBLIC_SERIALIZATION_POLICY,
+    });
+    const revealPayloadHash = computeCardPublicationRevealPayloadHashV2({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      publicationRevision: newPublicationRevision,
+      targetRevisionHash: revision.targetRevisionHash,
+      evidencePreviewPolicyVersion: EVIDENCE_PREVIEW_POLICY,
+    });
+
+    await tx.insert(learningCardPublicationRevisionsV2).values({
+      workspaceId: ctx.workspaceId,
+      cardId: card.cardId,
+      publicationRevision: newPublicationRevision,
+      cardRevision: newCardRevision,
+      objectiveId: objective.objectiveId,
+      objectiveRevision: publication.objectiveRevision,
+      lifecycleAtPublication: "active",
+      publicPayloadHash,
+      revealPayloadHash,
+      activatedAt: new Date(),
+    });
+
+    return {
+      cardId: card.cardId,
+      cardRevision: newCardRevision,
+      publicationRevision: newPublicationRevision,
+      publicPayloadHash,
+    };
+  });
+}
+
+// ─── §17.3 Initial Validation Reminder 读取/取消 ─────────────────────────
+
+/**
+ * §17.3 durable timer：把 `qualificationNotBefore` 已到期的 pending Reminder
+ * 以 (reminderId, reminderRevision) CAS 置为 ready 并幂等发
+ * `initial_validation_reminder.ready` 领域事件（重复调用幂等；延后 Exposure
+ * 赢得 CAS 时旧 timer 变 stale——WHERE 命中 revision 才更新）。
+ *
+ * 由读取路径（listReadyRemindersV2）与独立定时 tick 共同调用；任何调用方
+ * 都不创建 Schedule/mastery/canonical envelope（§17.3）。
+ */
+export async function promoteDueRemindersV2(ctx: RunContext): Promise<number> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const dueRows = await tx.select({
+      reminderId: initialValidationRemindersV2.reminderId,
+      reminderRevision: initialValidationRemindersV2.reminderRevision,
+      objectiveId: initialValidationRemindersV2.objectiveId,
+      qualificationNotBefore: initialValidationRemindersV2.qualificationNotBefore,
+    })
+      .from(initialValidationRemindersV2)
+      .where(and(
+        eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+        eq(initialValidationRemindersV2.userId, ctx.userId),
+        eq(initialValidationRemindersV2.status, "pending"),
+        sql`${initialValidationRemindersV2.qualificationNotBefore} <= now()`,
+      ))
+      .limit(50);
+
+    let promoted = 0;
+    for (const due of dueRows) {
+      const updated = await tx.update(initialValidationRemindersV2)
+        .set({ status: "ready", updatedAt: new Date() })
+        .where(and(
+          eq(initialValidationRemindersV2.reminderId, due.reminderId),
+          eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+          eq(initialValidationRemindersV2.reminderRevision, due.reminderRevision),
+          eq(initialValidationRemindersV2.status, "pending"),
+        ))
+        .returning({ id: initialValidationRemindersV2.id });
+      if (updated.length === 0) continue; // 并发延后赢 CAS → 旧 timer stale
+      promoted++;
+      await insertDomainEvent(tx, ctx.workspaceId, {
+        eventType: "initial_validation_reminder.ready",
+        aggregateKind: "reminder",
+        aggregateId: due.reminderId,
+        aggregateRevision: due.reminderRevision,
+        payload: {
+          objectiveId: due.objectiveId,
+          qualificationNotBefore: due.qualificationNotBefore.toISOString(),
+        },
+        idempotencyKey: `ready:${due.reminderId}:${due.reminderRevision}`,
+      });
+    }
+    return promoted;
+  });
+}
+
+export async function listReadyRemindersV2(ctx: RunContext) {
+  // §17.3 durable timer：读取前先惰性 promote 到期 pending（幂等 CAS）。
+  await promoteDueRemindersV2(ctx);
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const rows = await tx.select({
+      reminderId: initialValidationRemindersV2.reminderId,
+      objectiveId: initialValidationRemindersV2.objectiveId,
+      qualificationNotBefore: initialValidationRemindersV2.qualificationNotBefore,
+      status: initialValidationRemindersV2.status,
+    })
+      .from(initialValidationRemindersV2)
+      .where(and(
+        eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+        eq(initialValidationRemindersV2.userId, ctx.userId),
+        eq(initialValidationRemindersV2.status, "ready"),
+      ))
+      .orderBy(initialValidationRemindersV2.qualificationNotBefore);
+    return rows.map((r) => ({
+      reminderId: r.reminderId,
+      objectiveId: r.objectiveId,
+      qualificationNotBefore: r.qualificationNotBefore.toISOString(),
+    }));
+  });
+}
+
+export async function cancelReminderV2(
+  ctx: RunContext,
+  reminderId: string,
+): Promise<{ reminderId: string; status: "cancelled" }> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const updated = await tx.update(initialValidationRemindersV2)
+      .set({ status: "cancelled" })
+      .where(and(
+        eq(initialValidationRemindersV2.reminderId, reminderId),
+        eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+        eq(initialValidationRemindersV2.userId, ctx.userId),
+        inArray(initialValidationRemindersV2.status, ["pending", "ready"]),
+      ))
+      .returning({ id: initialValidationRemindersV2.id, objectiveId: initialValidationRemindersV2.objectiveId, reminderRevision: initialValidationRemindersV2.reminderRevision });
+    if (updated.length > 0) {
+      // §17.7：显式取消 → cancelled 领域事件（Today/Card 通知白名单）。
+      await insertDomainEvent(tx, ctx.workspaceId, {
+        eventType: "initial_validation_reminder.cancelled",
+        aggregateKind: "reminder",
+        aggregateId: reminderId,
+        aggregateRevision: updated[0].reminderRevision,
+        payload: { objectiveId: updated[0].objectiveId, reasonCode: "user_cancelled" },
+        idempotencyKey: `cancel:${reminderId}`,
+      });
+    }
+    // 已取消/已完成：幂等成功
+    return { reminderId, status: "cancelled" };
+  });
+}
+
+// ─── §17.6 Regeneration（校验 active 后走标准生成，planner 自动与既有目标去重） ──
+
+export async function createCardRegenerationRunV2(
+  ctx: RunContext,
+  cardId: string,
+  noteVersionId: string,
+  learningGoal: "remember" | "understand" | "apply" | "exam",
+  detailThreshold: "concise" | "balanced" | "deep",
+  quantity: { kind: "adaptive"; hardMaxCards?: number },
+  clientRequestId: string,
+  idempotencyKey: string,
+): Promise<{ runId: string; status: string }> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const cards = await tx.select().from(learningCardsV2)
+      .where(and(
+        eq(learningCardsV2.cardId, cardId),
+        eq(learningCardsV2.workspaceId, ctx.workspaceId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ))
+      .limit(1);
+    if (cards.length === 0) {
+      throw new CardGenerationV2ServiceError("card_not_found", 404, "卡片不存在或已归档");
+    }
+    // 委托标准生成（§6.8：新候选在用户确认前不覆盖旧卡；激活时由 ActivationIntent 决定语义）
+    const { createGenerationRunV2 } = await import("./generation-run-service.ts");
+    return createGenerationRunV2(
+      ctx,
+      noteVersionId,
+      {
+        version: 2,
+        noteVersionId,
+        sourceScope: { kind: "whole_note" },
+        learningGoal,
+        detailThreshold,
+        quantity,
+        clientRequestId,
+      },
+      idempotencyKey,
+    );
+  });
+}
+
+/** 公开卡视图（§15.1）——供列表/详情/Reminder 回显使用。 */
+export async function readPublicCardV2(
+  ctx: RunContext,
+  cardId: string,
+): Promise<PublicLearningCardV2 | null> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const cards = await tx.select().from(learningCardsV2)
+      .where(and(eq(learningCardsV2.cardId, cardId), eq(learningCardsV2.workspaceId, ctx.workspaceId)))
+      .limit(1);
+    if (cards.length === 0) return null;
+    const card = cards[0];
+    const pubs = await tx.select().from(learningCardPublicationRevisionsV2)
+      .where(and(
+        eq(learningCardPublicationRevisionsV2.cardId, cardId),
+        eq(learningCardPublicationRevisionsV2.workspaceId, ctx.workspaceId),
+        eq(learningCardPublicationRevisionsV2.publicationRevision, card.currentPublicationRevision),
+      ))
+      .limit(1);
+    if (pubs.length === 0) return null;
+    const pub = pubs[0];
+    const revs = await tx.select().from(learningObjectiveRevisionsV2)
+      .where(and(
+        eq(learningObjectiveRevisionsV2.objectiveId, card.objectiveId),
+        eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
+      ))
+      .orderBy(sql`${learningObjectiveRevisionsV2.revision} DESC`)
+      .limit(1);
+    if (revs.length === 0) return null;
+    const rev = revs[0];
+    return parsePublicLearningCardV2({
+      version: 2,
+      cardId: card.cardId,
+      publicationRevision: pub.publicationRevision,
+      cardRevision: pub.cardRevision,
+      objectiveId: card.objectiveId,
+      objectiveRevision: pub.objectiveRevision,
+      lifecycle: card.lifecycle,
+      front: card.front,
+      publicSummary: rev.publicSummary,
+      knowledgeForm: rev.knowledgeForm,
+      strategy: card.strategy,
+      sourceLabel: card.sourceLabel,
+      createdAt: card.createdAt.toISOString(),
+      updatedAt: card.updatedAt.toISOString(),
+      publicPayloadHash: pub.publicPayloadHash,
+    });
+  });
+}
+
+// ─── 内部辅助 ────────────────────────────────────────────────────────────
+
+type CardClosure = {
+  card: typeof learningCardsV2.$inferSelect;
+  publication: typeof learningCardPublicationRevisionsV2.$inferSelect;
+  revision: typeof learningObjectiveRevisionsV2.$inferSelect;
+  objective: typeof learningObjectivesV2.$inferSelect;
+};
+
+async function loadCardClosure(
+  tx: ApiTransaction,
+  workspaceId: string,
+  cardId: string,
+): Promise<CardClosure> {
+  const cards = await tx.select().from(learningCardsV2)
+    .where(and(eq(learningCardsV2.cardId, cardId), eq(learningCardsV2.workspaceId, workspaceId)))
+    .limit(1);
+  if (cards.length === 0) {
+    throw new CardGenerationV2ServiceError("card_not_found", 404, "卡片不存在");
+  }
+  const card = cards[0];
+
+  const pubs = await tx.select().from(learningCardPublicationRevisionsV2)
+    .where(and(
+      eq(learningCardPublicationRevisionsV2.cardId, cardId),
+      eq(learningCardPublicationRevisionsV2.workspaceId, workspaceId),
+      eq(learningCardPublicationRevisionsV2.publicationRevision, card.currentPublicationRevision),
+    ))
+    .limit(1);
+  if (pubs.length === 0) {
+    throw new CardGenerationV2ServiceError("publication_not_found", 404, "卡片发布版本不存在");
+  }
+  const publication = pubs[0];
+
+  const objectives = await tx.select().from(learningObjectivesV2)
+    .where(and(
+      eq(learningObjectivesV2.objectiveId, card.objectiveId),
+      eq(learningObjectivesV2.workspaceId, workspaceId),
+    ))
+    .limit(1);
+  if (objectives.length === 0) {
+    throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习目标不存在");
+  }
+  const objective = objectives[0];
+
+  const revisions = await tx.select().from(learningObjectiveRevisionsV2)
+    .where(and(
+      eq(learningObjectiveRevisionsV2.objectiveRevisionId, objective.currentObjectiveRevisionId ?? ""),
+      eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+    ))
+    .limit(1);
+  if (revisions.length === 0) {
+    throw new CardGenerationV2ServiceError("objective_revision_not_found", 404, "目标版本不存在");
+  }
+
+  return { card, publication, revision: revisions[0], objective };
+}
+
+async function loadRevisionAndPublicationByObjective(
+  tx: ApiTransaction,
+  workspaceId: string,
+  objectiveId: string,
+): Promise<{
+  publication: typeof learningCardPublicationRevisionsV2.$inferSelect;
+  revision: typeof learningObjectiveRevisionsV2.$inferSelect;
+  card: typeof learningCardsV2.$inferSelect;
+}> {
+  const cards = await tx.select().from(learningCardsV2)
+    .where(and(eq(learningCardsV2.objectiveId, objectiveId), eq(learningCardsV2.workspaceId, workspaceId)))
+    .limit(1);
+  const pubRows = cards.length > 0
+    ? await tx.select().from(learningCardPublicationRevisionsV2)
+        .where(and(
+          eq(learningCardPublicationRevisionsV2.cardId, cards[0].cardId),
+          eq(learningCardPublicationRevisionsV2.workspaceId, workspaceId),
+          eq(learningCardPublicationRevisionsV2.publicationRevision, cards[0].currentPublicationRevision),
+        ))
+        .limit(1)
+    : [];
+  const revRows = await tx.select().from(learningObjectiveRevisionsV2)
+    .where(and(
+      eq(learningObjectiveRevisionsV2.objectiveId, objectiveId),
+      eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+    ))
+    .orderBy(sql`${learningObjectiveRevisionsV2.revision} DESC`)
+    .limit(1);
+  if (cards.length === 0 || pubRows.length === 0 || revRows.length === 0) {
+    throw new CardGenerationV2ServiceError("card_not_found", 404, "卡片不存在");
+  }
+  return { card: cards[0], publication: pubRows[0], revision: revRows[0] };
+}
+
+async function buildCardReveal(
+  tx: ApiTransaction,
+  ctx: RunContext,
+  objectiveId: string,
+  exposureId: string,
+  exposedAt: Date,
+): Promise<LearningCardRevealV2> {
+  const { publication, revision } = await loadRevisionAndPublicationByObjective(
+    tx, ctx.workspaceId, objectiveId,
+  );
+  const reveal: LearningCardRevealV2 = {
+    version: 2,
+    cardId: publication.cardId,
+    publicationRevision: publication.publicationRevision,
+    cardRevision: publication.cardRevision,
+    objectiveId,
+    objectiveRevision: publication.objectiveRevision,
+    reveal: {
+      canonicalAnswer: revision.canonicalAnswer as LearningCardRevealV2["reveal"]["canonicalAnswer"],
+      explanation: (revision.learningSupport as { explanation?: string })?.explanation ?? "",
+      boundary: (revision.learningSupport as { boundary?: string })?.boundary,
+      misconception: (revision.learningSupport as { misconception?: string })?.misconception,
+      workedExample: (revision.learningSupport as { workedExample?: string })?.workedExample,
+    },
+    evidencePreviews: [],
+    exposureId,
+    exposedAt: exposedAt.toISOString(),
+    revealPayloadHash: publication.revealPayloadHash,
+  };
+  return parseLearningCardRevealV2(reveal);
+}
+
+async function deferReminderOnReveal(
+  tx: ApiTransaction,
+  ctx: RunContext,
+  objectiveId: string,
+  exposureId: string,
+) {
+  const scopeId = computeExposureScopeIdV2({ workspaceId: ctx.workspaceId, objectiveId });
+  const existing = await tx.select().from(initialValidationRemindersV2)
+    .where(and(
+      eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+      eq(initialValidationRemindersV2.userId, ctx.userId),
+      eq(initialValidationRemindersV2.objectiveId, objectiveId),
+    ))
+    .limit(1);
+
+  const now = new Date();
+  const deferred = new Date(now.getTime() + REVEAL_COOLDOWN_MS);
+
+  if (existing.length === 0) {
+    const reminderId = randomUUID();
+    await tx.insert(initialValidationRemindersV2).values({
+      workspaceId: ctx.workspaceId,
+      reminderId,
+      userId: ctx.userId,
+      objectiveId,
+      exposureScopeId: scopeId,
+      qualificationNotBefore: deferred,
+      lastExposureId: exposureId,
+      policyVersion: PRE_RUN_REVEAL_POLICY_VERSION,
+      status: "pending",
+      reminderRevision: 1,
+    });
+    // §17.7：pending（reveal 后 cooldown 延后）→ created/deferred 事件。
+    await insertDomainEvent(tx, ctx.workspaceId, {
+      eventType: "initial_validation_reminder.created",
+      aggregateKind: "reminder",
+      aggregateId: reminderId,
+      aggregateRevision: 1,
+      payload: {
+        objectiveId,
+        status: "pending",
+        qualificationNotBefore: deferred.toISOString(),
+        exposureId,
+      },
+      idempotencyKey: exposureId,
+    });
+  } else if (existing[0].status === "pending" || existing[0].status === "ready") {
+    // §17.3：再次 reveal 重新计算 qualificationNotBefore（CAS on reminderRevision）
+    await tx.update(initialValidationRemindersV2)
+      .set({
+        qualificationNotBefore: deferred,
+        lastExposureId: exposureId,
+        status: "pending",
+        reminderRevision: existing[0].reminderRevision + 1,
+      })
+      .where(and(
+        eq(initialValidationRemindersV2.reminderId, existing[0].reminderId),
+        eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+        eq(initialValidationRemindersV2.reminderRevision, existing[0].reminderRevision),
+      ));
+    // §17.7：deferred（CAS 赢得者写；旧 timer 变 stale）。
+    await insertDomainEvent(tx, ctx.workspaceId, {
+      eventType: "initial_validation_reminder.deferred",
+      aggregateKind: "reminder",
+      aggregateId: existing[0].reminderId,
+      aggregateRevision: existing[0].reminderRevision + 1,
+      payload: {
+        objectiveId,
+        qualificationNotBefore: deferred.toISOString(),
+        lastExposureId: exposureId,
+      },
+      idempotencyKey: exposureId,
+    });
+  }
+  // completed → 不重开（§17.3）
+}
+
+async function closePendingSchedules(
+  tx: ApiTransaction,
+  workspaceId: string,
+  objectiveId: string,
+): Promise<number> {
+  const rows = await tx.update(reviewSchedules)
+    .set({ status: "cancelled", reasonCode: "lifecycle_archived" })
+    .where(and(
+      eq(reviewSchedules.workspaceId, workspaceId),
+      eq(reviewSchedules.status, "pending"),
+      sql`(${reviewSchedules.keyPointId} = ${objectiveId} OR ${reviewSchedules.subjectId} = ${objectiveId})`,
+    ))
+    .returning({ id: reviewSchedules.id });
+  return rows.length;
+}
+
+function extractAnswerText(answer: unknown): string {
+  const a = answer as { kind?: string; unit?: { text?: string } } | null;
+  if (!a || a.kind !== "text" || !a.unit?.text) return "";
+  return a.unit.text;
+}

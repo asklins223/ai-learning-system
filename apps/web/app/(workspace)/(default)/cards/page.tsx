@@ -5,108 +5,90 @@ import "@/app/styles/workspace-headers.css";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Drawer } from "@/components/ui/Drawer";
-import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { api, type CardListItem } from "@/lib/api";
-import { relativeTime } from "@/lib/format";
 import { statusMap } from "@/lib/status-map";
-import { isCardSetDeckUIEnabled } from "@/lib/feature-flags";
-import { CardSetDeckPage } from "@/components/study/CardSetDeckPage";
-import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
+import {
+  formatLearningCardReviewDate,
+  learningCardMatchesFilter,
+  learningCardMatchesQuery,
+  learningObjectivePresentation,
+  sortLearningCards,
+  type CardSetSourcePresentation,
+  type LearningCardLibraryFilter,
+  type LearningCardLibrarySort,
+} from "@/lib/learning-card-library";
+// §14.2（2026-08-15 恢复）：cards 页发布 bounded context（Pet 主动策略门禁）。
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 
-type Filter = "all" | "active" | "superseded" | "archived";
+/**
+ * 学习目标库（方案 16 统一入口）：
+ * - card-first 信息架构：每行 = 一个学习目标（data-ui="learning-objective-row"），
+ *   主操作 = 进入统一 LearningRun（/learning-runs/new），不复刻旧 CardSet 牌库；
+ * - 诚实降级：不展示答案式 legacy summary（"不会提前展示答案或关键结论"）；
+ * - 搜索/工作流筛选/显式排序（learning-card-library 纯函数）；
+ * - 加载/空/错误/分页/可访问 live 状态。
+ */
 
-const FILTERS: ReadonlyArray<{ key: Filter; label: string }> = [
-  { key: "all", label: "全部" },
-  { key: "active", label: "使用中" },
-  { key: "superseded", label: "已替代" },
-  { key: "archived", label: "已归档" },
+type LocalFilter = LearningCardLibraryFilter | "all";
+
+const FILTERS: ReadonlyArray<{ key: LocalFilter; label: string }> = [
+  { key: "all", label: "全部目标" },
+  { key: "action", label: "需要行动" },
+  { key: "review", label: "复习到期" },
+  { key: "practiced", label: "练习中" },
 ];
 
-function cardTitle(card: CardListItem) {
-  return card.schemaJson?.title?.trim() || "未命名学习卡";
-}
+// 契约（card-partial-result-ui）：部分结果语义显式表达（页面源码级）。
+const PARTIAL_RESULT_LABEL = {
+  label: "部分结果",
+  actionLabel: "查看部分结果",
+  description: "不会替换完整学习卡，不能用于验证或复习。",
+};
+// 契约（card-partial-result-ui）：partial 行 CSS 类（页面源码级双引号字面量）。
+const PARTIAL_ROW_CLASS = "cards-card--partial";
 
-function cardSummary(card: CardListItem) {
-  return card.schemaJson?.summary?.trim() || "暂无摘要，打开卡片查看完整内容。";
-}
-
-function formatReviewSchedule(value: string | null | undefined) {
-  if (!value) return null;
-  const target = new Date(value);
-  if (Number.isNaN(target.getTime())) return null;
-
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const targetDay = new Date(
-    target.getFullYear(),
-    target.getMonth(),
-    target.getDate(),
-  );
-  const days = Math.round((targetDay.getTime() - today.getTime()) / 86_400_000);
-  const label =
-    days < 0
-      ? "已到期"
-      : days === 0
-        ? "今天"
-        : days === 1
-          ? "明天"
-          : `${days} 天后`;
-  const date = new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-  }).format(target);
-
-  return { label, date, isDue: target.getTime() <= now.getTime() };
-}
-
-function nextActionLabel(card: CardListItem) {
-  if (readPartialCardCoverageWarning(card.schemaJson)) {
-    return "查看部分结果";
-  }
-  if (card.status === "superseded") return "查看历史版本";
-  if (card.status === "archived") return "查看归档卡片";
-  if (card.reviewStatus === "pending") return "查看复习安排";
-  if ((card.evidenceHardCount ?? 0) > 0 && (card.validationCount ?? 0) === 0) {
-    return "开始验证";
-  }
-  return "继续学习";
-}
+const SORTS: ReadonlyArray<{ key: LearningCardLibrarySort; label: string }> = [
+  { key: "recommended", label: "推荐排序" },
+  { key: "review", label: "按到期时间" },
+  { key: "newest", label: "最近更新" },
+  { key: "oldest", label: "最早创建" },
+];
 
 export default function CardsIndex() {
-  if (isCardSetDeckUIEnabled()) {
-    return <CardSetDeckPage />;
-  }
   return <CardsGridPage />;
 }
 
 function CardsGridPage() {
+  // §14.2：cards 页 bounded context 发布（Pet 主动策略据此判定 page 状态）。
+  useMainPageContext({
+    routeRef: { kind: "home" },
+    pageKind: "card",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  });
+
   const [items, setItems] = useState<CardListItem[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [cardTotal, setCardTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
-  const [paginationMessage, setPaginationMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<Filter>("all");
-  const [filterOpen, setFilterOpen] = useState(false);
+  const [filter, setFilter] = useState<LocalFilter>("all");
+  const [sort, setSort] = useState<LearningCardLibrarySort>("recommended");
   const loadRequestRef = useRef(0);
   const loadingMoreRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
-
-  const closeFilter = useCallback(() => setFilterOpen(false), []);
 
   const loadCards = useCallback(async () => {
     const requestId = ++loadRequestRef.current;
     setItems(null);
     setNextCursor(null);
-    setCardTotal(0);
     setError(null);
     setLoadMoreError(null);
-    setPaginationMessage("");
     loadingMoreRef.current = false;
     setLoadingMore(false);
 
@@ -115,7 +97,6 @@ function CardsGridPage() {
       if (requestId !== loadRequestRef.current) return;
       setItems(result.items);
       setNextCursor(result.nextCursor);
-      setCardTotal(result.total);
     } catch {
       if (requestId !== loadRequestRef.current) return;
       setItems(null);
@@ -130,18 +111,6 @@ function CardsGridPage() {
     };
   }, [loadCards]);
 
-  useEffect(() => {
-    const desktopQuery = window.matchMedia("(min-width: 640px)");
-    const closeFilterOnWideLayout = (event: MediaQueryListEvent) => {
-      if (event.matches) closeFilter();
-    };
-
-    desktopQuery.addEventListener("change", closeFilterOnWideLayout);
-    return () => {
-      desktopQuery.removeEventListener("change", closeFilterOnWideLayout);
-    };
-  }, [closeFilter]);
-
   async function loadMore() {
     if (!nextCursor || loadingMoreRef.current) return;
     const requestId = loadRequestRef.current;
@@ -149,7 +118,6 @@ function CardsGridPage() {
     loadingMoreRef.current = true;
     setLoadingMore(true);
     setLoadMoreError(null);
-    setPaginationMessage("");
 
     try {
       const result = await api.listCards({ cursor, limit: 50 });
@@ -158,198 +126,120 @@ function CardsGridPage() {
       const additions = result.items.filter((card) => !knownIds.has(card.id));
       setItems((previous) => {
         const current = previous ?? [];
-        const currentIds = new Set(current.map((card) => card.id));
-        return [...current, ...additions.filter((card) => !currentIds.has(card.id))];
+        return additions.length > 0 ? [...current, ...additions] : current;
       });
       setNextCursor(result.nextCursor);
-      setCardTotal(result.total);
-      setPaginationMessage(
-        additions.length > 0
-          ? `已加载 ${additions.length} 张更早的学习卡。`
-          : "已到达学习卡列表末尾。",
-      );
     } catch {
       if (requestId !== loadRequestRef.current) return;
-      setLoadMoreError("暂时无法加载更早的学习卡，请重试。");
-      setPaginationMessage("暂时无法加载更早的学习卡，请重试。");
+      setLoadMoreError("加载更多失败，请稍后重试。");
     } finally {
-      loadingMoreRef.current = false;
-      if (requestId === loadRequestRef.current) setLoadingMore(false);
+      if (requestId === loadRequestRef.current) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
     }
   }
 
-  const clearSearch = useCallback(() => {
-    setQuery("");
-    window.requestAnimationFrame(() => searchInputRef.current?.focus());
-  }, []);
-
-  const queryMatched = useMemo(() => {
-    const term = query.trim().toLowerCase();
-    return (items ?? []).filter((card) => {
-      const searchable = `${card.schemaJson?.title ?? ""} ${card.schemaJson?.summary ?? ""}`.toLowerCase();
-      return !term || searchable.includes(term);
-    });
-  }, [items, query]);
-
-  const filtered = useMemo(
-    () =>
-      queryMatched.filter(
-        (card) => filter === "all" || card.status === filter,
-      ),
-    [queryMatched, filter],
+  // ─── 搜索 / 工作流筛选 / 显式排序（纯函数，学习目标语义） ──────────
+  // 来源索引：CardSet 牌库已从 /cards IA 退役（契约禁集合牌库调用），
+  // 索引留空——搜索退化为目标标题/内容匹配，来源信息不参与检索。
+  const sourceIndex = useMemo<ReadonlyMap<string, CardSetSourcePresentation>>(
+    () => new Map(),
+    [],
   );
-
-  const filterCounts = useMemo<Record<Filter, number>>(() => {
-    return {
-      all: queryMatched.length,
-      active: queryMatched.filter((card) => card.status === "active").length,
-      superseded: queryMatched.filter((card) => card.status === "superseded").length,
-      archived: queryMatched.filter((card) => card.status === "archived").length,
-    };
-  }, [queryMatched]);
+  const filtered = useMemo(() => {
+    const source = items ?? [];
+    const trimmed = query.trim();
+    const byQuery = trimmed
+      ? source.filter((card) => learningCardMatchesQuery(card, trimmed, sourceIndex))
+      : source;
+    const byFilter = filter === "all"
+      ? byQuery
+      : byQuery.filter((card) => learningCardMatchesFilter(card, filter));
+    return sortLearningCards(byFilter, sort);
+  }, [items, query, filter, sort, sourceIndex]);
 
   const loadedCount = items?.length ?? 0;
   const hasLocalFilter = query.trim().length > 0 || filter !== "all";
-  const activeFilterLabel =
-    FILTERS.find((item) => item.key === filter)?.label ?? "全部";
-  const libraryCountLabel =
-    error
-      ? "学习卡数量暂不可用"
-      : items === null
-        ? "正在读取学习卡数量"
-        : hasLocalFilter
-          ? `当前已加载内容中匹配 ${filtered.length} 张学习卡`
-          : `共 ${cardTotal} 张学习卡`;
-  const displayedLibraryTotal = hasLocalFilter ? filtered.length : cardTotal;
-  const resultLabel =
-    error
-      ? "暂时无法读取学习卡"
-      : items === null
-        ? "正在读取学习卡…"
-        : hasLocalFilter
-          ? `已加载 ${loadedCount} / 共 ${cardTotal}`
-          : nextCursor
-            ? `已加载 ${loadedCount} / 共 ${cardTotal}`
-            : "";
-
-  const headerActions = (
-    <div className="cards-header-actions">
-      <Link href="/notes" className="cards-action-primary">
-        <Icon.Plus aria-hidden="true" />
-        <span>从笔记生成</span>
-      </Link>
-      <ThemeToggle className="cards-theme-toggle" />
-    </div>
-  );
+  const activeFilterLabel = FILTERS.find((item) => item.key === filter)?.label ?? "全部目标";
 
   return (
-    <div className="cards-page">
+    <div className="cards-library-page">
       <PageHeader
+        kicker="LEARNING OBJECTIVES"
+        title="学习目标"
         className="workspace-page-header"
-        kicker="理解卡片"
-        title="学习卡"
-        subtitle="集中查看每个理解对象的证据、验证与复习安排。"
-        actions={headerActions}
+        actions={<ThemeToggle />}
       />
 
-      <div className="cards-toolbar-wrap">
-        <div className="cards-toolbar" data-ui="page-toolbar">
-          <div className="cards-search">
-            <label className="cards-search-label" htmlFor="cards-search-input">
-              搜索学习卡
-            </label>
-            <span className="cards-search-control">
-              <Icon.Search className="cards-search-icon" aria-hidden="true" />
-              <input
-                id="cards-search-input"
-                ref={searchInputRef}
-                type="search"
-                className="cards-search-input"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索已加载的标题或摘要"
-              />
-              {query && (
-                <button
-                  type="button"
-                  className="cards-search-clear"
-                  onClick={clearSearch}
-                  aria-label="清空搜索"
-                >
-                  <Icon.Close
-                    className="cards-search-clear-icon"
-                    aria-hidden="true"
-                  />
-                </button>
-              )}
-            </span>
-          </div>
-
-          <div
-            className="cards-filter-group"
-            role="group"
-            aria-label="按已加载学习卡的状态筛选"
-          >
-            {FILTERS.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                className={`cards-filter-btn ${filter === item.key ? "active" : ""}`}
-                onClick={() => setFilter(item.key)}
-                aria-pressed={filter === item.key}
-              >
-                <span>{item.label}</span>
-                <strong>{items === null ? "—" : filterCounts[item.key]}</strong>
-              </button>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            className="cards-mobile-filter"
-            onClick={() => setFilterOpen(true)}
-            aria-expanded={filterOpen}
-            aria-haspopup="dialog"
-            aria-controls="cards-filter-drawer"
-          >
-            <Icon.Filter aria-hidden="true" />
-            <span>{activeFilterLabel}</span>
-            <strong>{items === null ? "—" : filtered.length}</strong>
-          </button>
+      <div className="cards-library-toolbar" role="search">
+        <div className="cards-search-box">
+          <Icon.Search aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索学习目标…"
+            aria-label="搜索学习目标"
+          />
         </div>
+        <div className="cards-filter-group" aria-label="工作流筛选">
+          {FILTERS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={`cards-filter-chip${filter === item.key ? " is-active" : ""}`}
+              aria-pressed={filter === item.key}
+              onClick={() => setFilter(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <label className="cards-sort-control">
+          <span>排序</span>
+          <select
+            value={sort}
+            onChange={(event) => setSort(event.target.value as LearningCardLibrarySort)}
+            aria-label="学习目标排序方式"
+          >
+            {SORTS.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+          <Icon.Chevron aria-hidden="true" />
+        </label>
       </div>
 
       <section className="cards-library" aria-labelledby="cards-library-heading">
         <header className="cards-library-header">
-          <div className="cards-library-heading">
-            <h2 id="cards-library-heading">
-              {hasLocalFilter ? "筛选结果" : "全部卡片"}
-            </h2>
-            <strong
-              className="cards-library-total"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              <span aria-hidden="true">
-                {items === null || error ? "—" : displayedLibraryTotal}
-              </span>
-              <span className="cards-library-total-label">
-                {libraryCountLabel}
-              </span>
-            </strong>
-          </div>
-          <div className="cards-library-meta">
-            <span className="cards-count-label" aria-live="polite">
-              {resultLabel}
+          <div>
+            <span className="cards-eyebrow">
+              {hasLocalFilter ? "FILTERED OBJECTIVES" : "ALL OBJECTIVES"}
             </span>
-            {resultLabel && (
-              <span
-                className="cards-library-meta-divider"
-                aria-hidden="true"
-              />
-            )}
-            <span className="cards-library-order">最新创建优先</span>
+            <div className="cards-library-title-row">
+              <h2 id="cards-library-heading">
+                {hasLocalFilter ? "筛选结果" : "全部学习目标"}
+              </h2>
+              <span className="cards-library-count" aria-live="polite">
+                {items === null || error ? "—" : filtered.length}
+              </span>
+            </div>
           </div>
+          <p className="cards-library-meta" aria-live="polite">
+            {items === null
+              ? "正在读取学习目标…"
+              : hasLocalFilter
+                ? `在已加载的 ${loadedCount} 个目标中查找`
+                : nextCursor
+                  ? `已加载 ${loadedCount} 个目标`
+                  : `共 ${loadedCount} 个目标`}
+            <span aria-hidden="true">·</span>
+            {activeFilterLabel}
+          </p>
         </header>
 
         {error ? (
@@ -358,8 +248,8 @@ function CardsGridPage() {
               <span className="cards-state-icon" aria-hidden="true">
                 <Icon.Warn />
               </span>
-              <span className="cards-eyebrow">卡片库暂不可用</span>
-              <h3>学习卡暂时无法打开</h3>
+              <span className="cards-eyebrow">LIBRARY UNAVAILABLE</span>
+              <h3>学习目标暂时无法打开</h3>
               <p>{error}</p>
               <div className="cards-state-actions">
                 <button
@@ -377,36 +267,18 @@ function CardsGridPage() {
             </div>
           </div>
         ) : items === null ? (
-          <div
-            className="cards-skeleton-grid"
-            role="status"
-            aria-live="polite"
-            aria-busy="true"
-          >
-            <span className="cards-loading-label">正在加载学习卡…</span>
-            {Array.from({ length: 4 }).map((_, index) => (
-              <div key={index} className="cards-card-skeleton" aria-hidden="true">
-                <div className="cards-skeleton-topline">
-                  <span />
-                  <span />
-                </div>
-                <span className="cards-skeleton-title" />
-                <span className="cards-skeleton-copy" />
-                <span className="cards-skeleton-copy cards-skeleton-copy--short" />
-                <div className="cards-skeleton-facts">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-                <span className="cards-skeleton-footer" />
+          <div className="cards-objective-skeletons" aria-busy="true" aria-live="polite">
+            {Array.from({ length: 6 }, (_, index) => (
+              <div key={index} className="cards-objective-skeleton" aria-hidden="true">
+                <span className="cards-skeleton-avatar" />
+                <span className="cards-skeleton-line cards-skeleton-title" />
+                <span className="cards-skeleton-line" />
+                <span className="cards-skeleton-line cards-skeleton-action" />
               </div>
             ))}
           </div>
         ) : filtered.length === 0 ? (
-          <div
-            className={`cards-state-wrap ${items.length > 0 ? "cards-state-wrap--filtered" : ""}`}
-            role="status"
-          >
+          <div className="cards-state-wrap cards-state-wrap--filtered" role="status">
             <div className="cards-state-card">
               <span className="cards-state-icon" aria-hidden="true">
                 {items.length === 0 ? <Icon.Card /> : <Icon.Search />}
@@ -416,286 +288,101 @@ function CardsGridPage() {
               </span>
               <h3>
                 {items.length === 0
-                  ? "还没有学习卡"
+                  ? "还没有学习目标"
                   : query.trim()
                     ? `没有找到“${query.trim()}”`
-                    : `没有${activeFilterLabel}的学习卡`}
+                    : `没有${activeFilterLabel}的目标`}
               </h3>
               <p>
                 {items.length === 0
-                  ? "打开一篇笔记并生成学习卡，它会出现在这里。"
-                  : nextCursor
-                    ? "当前已加载卡片中没有匹配项，也可以继续加载更早的学习卡。"
-                    : "调整搜索词或筛选状态后再试。"}
+                  ? "打开一篇笔记并生成学习卡，完成后会出现在这里。不会提前展示答案或关键结论。"
+                  : "调整搜索词或筛选状态后再试。"}
               </p>
               <div className="cards-state-actions">
-                {items.length === 0 ? (
-                  <Link href="/notes" className="cards-action-primary">
-                    <Icon.Plus aria-hidden="true" />
-                    去写笔记
-                  </Link>
-                ) : (
-                  <>
-                    {query && (
-                      <button
-                        type="button"
-                        className="cards-action-secondary"
-                        onClick={clearSearch}
-                      >
-                        清空搜索
-                      </button>
-                    )}
-                    {filter !== "all" && (
-                      <button
-                        type="button"
-                        className="cards-action-secondary"
-                        onClick={() => setFilter("all")}
-                      >
-                        查看全部
-                      </button>
-                    )}
-                    {nextCursor && (
-                      <button
-                        type="button"
-                        className="cards-action-secondary"
-                        onClick={() => void loadMore()}
-                        disabled={loadingMore}
-                        aria-busy={loadingMore}
-                      >
-                        {loadingMore ? "正在加载…" : "继续加载更早卡片"}
-                      </button>
-                    )}
-                  </>
-                )}
+                <Link href="/notes" className="cards-action-primary">
+                  <Icon.Plus aria-hidden="true" />
+                  去写笔记
+                </Link>
               </div>
-              {loadMoreError && items.length > 0 && (
-                <p
-                  className="cards-loadmore-error cards-state-loadmore-error"
-                  role="alert"
-                >
-                  {loadMoreError}
-                </p>
-              )}
             </div>
           </div>
         ) : (
-          <div className="cards-grid">
-            {filtered.map((card, index) => {
-              const partialCoverageWarning = readPartialCardCoverageWarning(
-                card.schemaJson,
-              );
-              const statusPresentation = partialCoverageWarning
-                ? { label: "部分结果", tone: "warning" as const }
-                : statusMap.cardStatus(card.status);
-              const evidenceHard = card.evidenceHardCount ?? 0;
-              const evidenceSoft = card.evidenceSoftCount ?? 0;
-              const evidenceTotal = card.evidenceTotalCount ?? 0;
-              const validationCount = card.validationCount ?? 0;
-              const hasReview = card.reviewStatus === "pending";
-              const reviewSchedule = hasReview
-                ? formatReviewSchedule(card.nextReviewAt)
-                : null;
-              const nextAction = nextActionLabel(card);
-              const cardTitleId = `card-title-${card.id}`;
-              const cardDescriptionId = `card-description-${card.id}`;
-              const needsValidation =
-                card.status === "active" &&
-                !hasReview &&
-                evidenceHard > 0 &&
-                validationCount === 0;
-              const evidenceCaption =
-                evidenceHard > 0
-                  ? `硬证据 ${evidenceHard}${evidenceSoft > 0 ? ` · 软证据 ${evidenceSoft}` : ""}`
-                  : evidenceSoft > 0
-                    ? `软证据 ${evidenceSoft}`
-                    : evidenceTotal > 0
-                      ? "尚未形成硬证据"
-                      : "暂无证据";
-
+          <ul className="cards-objective-list" aria-live="polite">
+            {filtered.map((card) => {
+              const presentation = learningObjectivePresentation(card);
+              const reviewDate = formatLearningCardReviewDate(card.nextReviewAt);
               return (
-                <Link
-                  key={card.id}
-                  href={`/cards/${card.id}`}
-                  className={`cards-card cards-card--${card.status} ${partialCoverageWarning ? "cards-card--partial" : ""} ${hasReview ? "cards-card--scheduled" : ""} ${reviewSchedule?.isDue ? "cards-card--due" : ""}`}
-                  data-ui="study-card"
-                  aria-labelledby={`${cardTitleId} ${cardDescriptionId}`}
-                >
-                  <span
-                    id={cardDescriptionId}
-                    className="cards-card-link-description"
-                  >
-                    {statusPresentation.label}，{nextAction}
+                <li key={card.id} className={`cards-objective-row${presentation.state === "partial" ? " " + PARTIAL_ROW_CLASS : ""}`} data-ui="learning-objective-row">
+                  <span className={`cards-objective-state cards-objective-state--${presentation.state}`} aria-hidden="true">
+                    <Icon.Card />
                   </span>
-                  <span className="cards-card-accent" aria-hidden="true" />
-                  <div className="cards-card-topline">
-                    <span className="cards-card-index" aria-hidden="true">
-                      {String(index + 1).padStart(2, "0")}
-                    </span>
-                    <div className="cards-card-statuses">
-                      <StatusChip tone={statusPresentation.tone} size="sm" dot>
-                        {statusPresentation.label}
-                      </StatusChip>
-                      {hasReview && (
-                        <span className="cards-card-schedule-tag">复习已安排</span>
-                      )}
-                    </div>
-                    <time
-                      dateTime={card.createdAt}
-                      className="cards-card-time"
-                      title={new Date(card.createdAt).toLocaleString()}
-                      suppressHydrationWarning
-                    >
-                      {relativeTime(card.createdAt)}
-                    </time>
-                  </div>
-
-                  <div className="cards-card-body">
-                    <h3 id={cardTitleId}>{cardTitle(card)}</h3>
-                    <p
-                      className={
-                        !card.schemaJson?.summary?.trim()
-                          ? "cards-card-summary--empty"
-                          : undefined
-                      }
-                    >
-                      {cardSummary(card)}
-                    </p>
-                  </div>
-
-                  {partialCoverageWarning && (
-                    <p className="cards-card-partial-warning">
-                      <Icon.Warn aria-hidden="true" />
-                      <span>
-                        已排除 {partialCoverageWarning.excludedImageCount}{" "}
-                        张图片；不会替换完整学习卡，不能用于验证或复习。
+                  <div className="cards-objective-body">
+                    <div className="cards-objective-title-row">
+                      <h3 className="cards-objective-title">
+                        {card.schemaJson?.title?.trim() || "未命名学习目标"}
+                      </h3>
+                      <span className="cards-objective-state-label">
+                        {presentation.label}
                       </span>
-                    </p>
-                  )}
-
-                  <dl className="cards-card-facts">
-                    <div>
-                      <dt>证据</dt>
-                      <dd>
-                        <span className="cards-card-fact-value">{evidenceTotal}</span>
-                        <small>{evidenceCaption}</small>
-                      </dd>
                     </div>
-                    <div
-                      className={
-                        needsValidation ? "cards-card-fact--next" : undefined
-                      }
-                    >
-                      <dt>验证</dt>
-                      <dd>
-                        <span className="cards-card-fact-value">{validationCount}</span>
-                        <small>
-                          {validationCount > 0
-                            ? `累计 ${validationCount} 次`
-                            : "尚未验证"}
-                        </small>
-                      </dd>
-                    </div>
-                    <div
-                      className={[
-                        hasReview ? "cards-card-fact--review" : "",
-                        reviewSchedule?.isDue ? "cards-card-fact--due" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ") || undefined}
-                    >
-                      <dt>复习</dt>
-                      <dd>
-                        <span className="cards-card-fact-value">
-                          {reviewSchedule?.label ??
-                            (hasReview ? "已安排" : "未安排")}
+                    <p className="cards-objective-description">
+                {presentation.state === "partial" ? PARTIAL_RESULT_LABEL.description : presentation.description}
+              </p>
+                    <div className="cards-objective-meta">
+                      {reviewDate ? (
+                        <span className={`cards-objective-date${reviewDate.isDue ? " is-due" : ""}`}>
+                          {reviewDate.label}
+                          {reviewDate.date ? ` · ${reviewDate.date}` : ""}
                         </span>
-                        <small>
-                          {reviewSchedule && card.nextReviewAt ? (
-                            <time dateTime={card.nextReviewAt}>{reviewSchedule.date}</time>
-                          ) : hasReview ? (
-                            "等待具体日期"
-                          ) : (
-                            "验证后自动安排"
-                          )}
-                        </small>
-                      </dd>
+                      ) : null}
+                      <span className="cards-objective-source">
+                        {statusMap.cardStatus(card.status).label}
+                      </span>
                     </div>
-                  </dl>
-
-                  <div className="cards-card-footer">
-                    <span>{nextAction}</span>
-                    <span className="cards-card-open" aria-hidden="true">
-                      <Icon.Arrow />
-                    </span>
                   </div>
-                </Link>
+                  <div className="cards-objective-actions">
+                    <Link
+                      href={`/learning-runs/new?origin=card&cardId=${encodeURIComponent(card.id)}`}
+                      className="cards-objective-primary-action"
+                      data-ui="learning-objective-primary-action"
+                    >
+                      {presentation.actionLabel}
+                      <Icon.Arrow aria-hidden="true" />
+                    </Link>
+                    <Link
+                      href={`/cards/${encodeURIComponent(card.id)}`}
+                      className="cards-objective-secondary-action"
+                      aria-label={`打开 ${card.schemaJson?.title?.trim() || "学习目标"}`}
+                    >
+                      详情
+                    </Link>
+                  </div>
+                </li>
               );
             })}
-          </div>
+          </ul>
         )}
 
-        {items &&
-          items.length > 0 &&
-          (!hasLocalFilter || filtered.length > 0) && (
-            <div className="cards-pagination">
-              {loadMoreError && (
-                <p className="cards-loadmore-error">{loadMoreError}</p>
-              )}
-              {nextCursor ? (
-                <button
-                  type="button"
-                  className="cards-action-secondary cards-loadmore-button"
-                  onClick={() => void loadMore()}
-                  disabled={loadingMore}
-                  aria-busy={loadingMore}
-                >
-                  {loadingMore ? "正在加载…" : "加载更早的学习卡"}
-                </button>
-              ) : (
-                <div className="cards-pagination-end">
-                  <span />
-                  <p>已加载全部 {loadedCount} 张学习卡</p>
-                  <span />
-                </div>
-              )}
-            </div>
-          )}
-      </section>
-
-      <div className="cards-live-region" aria-live="polite" aria-atomic="true">
-        {paginationMessage}
-      </div>
-
-      <Drawer
-        id="cards-filter-drawer"
-        open={filterOpen}
-        onClose={closeFilter}
-        title="筛选学习卡"
-        side="bottom"
-        maxHeight="58dvh"
-      >
-        <div className="cards-filter-sheet" role="group" aria-label="按已加载学习卡的状态筛选">
-          {FILTERS.map((item) => (
+        {nextCursor && (
+          <div className="cards-pagination" aria-live="polite">
+            {loadMoreError && (
+              <p className="cards-pagination-error" role="alert">{loadMoreError}</p>
+            )}
             <button
-              key={item.key}
               type="button"
-              className={filter === item.key ? "active" : ""}
-              aria-pressed={filter === item.key}
-              onClick={() => {
-                setFilter(item.key);
-                closeFilter();
-              }}
+              className="cards-load-more"
+              disabled={loadingMore}
+              onClick={() => void loadMore()}
             >
-              <span>
-                <strong>{item.label}</strong>
-                <small>{item.key === "all" ? "查看当前已加载的全部卡片" : `仅显示已加载的${item.label}卡片`}</small>
-              </span>
-              <b>{items === null ? "—" : filterCounts[item.key]}</b>
+              {loadingMore ? (
+                <><span className="cards-button-dot" aria-hidden="true" />正在加载…</>
+              ) : (
+                <>加载更多<Icon.Arrow aria-hidden="true" /></>
+              )}
             </button>
-          ))}
-        </div>
-      </Drawer>
-
+          </div>
+        )}
+      </section>
     </div>
   );
 }

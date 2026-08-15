@@ -50,6 +50,49 @@ export function isAgentActivityStreamEnabled(): boolean {
 }
 
 /**
+ * LEARNING_RUN_V1 — 统一 LearningRun 生产入口（文档 16 §22.2）。
+ *
+ * 与 API 侧 LEARNING_RUN_V1 同一次切换原子开启：Card/Review/Today 的
+ * 三分钟入口、/learning-runs 路由与 Player 生产数据源同时生效。
+ * fail closed：flag 关闭时全部入口维持旧链路，/learning-runs/new 与
+ * /learning-runs/[runId] 返回 404。
+ *
+ * 2026-08-15 恢复：web tracked 文件曾被回退到 HEAD（本函数丢失），
+ * 按 §22.2 语义重建。
+ */
+export function isLearningRunV1Enabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_LEARNING_RUN_V1);
+}
+
+/**
+ * STAR_MAP_ACTION_V1 — 星图行动面（文档 16 §22.2）。
+ *
+ * 与 API 侧投影端点同一次切换开启：graph 页 checkpoint-aware 投影拉取、
+ * RoutePlan 与 delta 显影同时生效。fail closed：关闭时 graph 页继续使用
+ * 旧 /graph reader。
+ */
+export function isStarMapActionV1Enabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_STAR_MAP_ACTION_V1);
+}
+
+/**
+ * Journey V2 新用户竖切（文档 16 §22.2 journey_v2 capability 的前端投影）。
+ * 开启时：首页 onboarding 大卡停用，新用户引导由桌宠 + Journey 承担。
+ * 与 system_pet_v2 属于同一体验发布组（P6 原子切流）。
+ */
+export function isJourneyV2Enabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_COMPANION_JOURNEY_V2);
+}
+
+/**
+ * Card Generation V2 前端门禁（方案 20 §21.5/§25.7）。
+ * fail-closed：flag 关闭时所有 V2 生产入口隐藏并回退 legacy 路径。
+ */
+export function isCardGenerationV2Enabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED);
+}
+
+/**
  * 救火 1（审计）：伴星壳（CompanionShell）默认关闭。
  *
  * 审计确认伴星面板仍是空壳/演示态（panelContent undefined、朗读/问一问

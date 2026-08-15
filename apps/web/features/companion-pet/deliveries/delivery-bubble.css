@@ -1,0 +1,105 @@
+/* Durable delivery 展示气泡（文档 16 §14.3）。克制表面：一条消息 + 两个动作。 */
+
+.pet-delivery-bubble {
+  position: absolute;
+  left: calc(100% + 14px);
+  top: 24px;
+  width: min(280px, calc(100vw - 120px));
+  background: var(--surface-1, #ffffff);
+  color: var(--text-1, #1a1d21);
+  border: 1px solid var(--border-1, rgba(0, 0, 0, 0.12));
+  border-radius: 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 41;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.pet-delivery-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.pet-delivery-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2, #5a5f66);
+}
+
+.pet-delivery-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding-top: 2px;
+}
+
+.pet-delivery-action {
+  appearance: none;
+  border: 0;
+  background: var(--accent-1, #3b6fe0);
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.pet-delivery-action:hover {
+  filter: brightness(1.05);
+}
+
+.pet-delivery-link {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  font-size: 12px;
+  color: var(--text-3, #8a8f96);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (max-width: 480px) {
+  .pet-delivery-bubble {
+    left: 70px;
+    right: 10px;
+    top: 12px;
+    width: auto;
+  }
+}
+
+/* §11.4 delta 回执表达（Pet 端一次性 notice；与 delivery 气泡同层视觉）。 */
+.pet-delta-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  max-width: 260px;
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: rgba(20, 24, 34, 0.92);
+  color: #f4f5f7;
+  font-size: 13px;
+  line-height: 1.5;
+  z-index: 40;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  animation: pet-delta-notice-in 180ms ease-out;
+}
+
+@keyframes pet-delta-notice-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.pet-delta-notice-text {
+  margin: 0;
+}

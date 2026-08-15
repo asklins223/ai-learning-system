@@ -4,12 +4,14 @@ import "@/app/styles/settings.css";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentType,
   type SVGProps,
 } from "react";
 import { api, type SearchDriftResult, type CurrentUser } from "@/lib/api";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -185,48 +187,27 @@ function PetModeSetting() {
 // 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；Owner 决策 4）。
 // 偏好落在 account 级 user_learning_preferences（workspace_id IS NULL），
 // 跨设备同步；"any" = 未设置（跟随安排，Supervisor 默认编排）。
-function AnswerModePreferenceSetting() {
-  const [preference, setPreference] = useState<"voice" | "silent" | "text" | "any">("any");
-  const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void api.getAnswerModePreference()
-      .then((result) => {
-        if (cancelled) return;
-        setPreference(result.preference);
-        setLoaded(true);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setLoaded(true);
-        setError("暂时无法读取偏好，请稍后重试。");
-      });
-    return () => { cancelled = true; };
-  }, []);
-
+//
+// F#7（🟠1）：以下三个伴星控件由 CompanionSettingsPanel 在宠物面板层
+// 拉取一次共享数据（getCompanionOverview + getAnswerModePreference），
+// 以 props 接收，消除各自独立 GET 与独立 revision 副本的 CAS 冲突。
+function AnswerModePreferenceRow({
+  preference,
+  busy,
+  error,
+  onChoose,
+}: {
+  preference: "voice" | "silent" | "text" | "any";
+  busy: boolean;
+  error: string | null;
+  onChoose: (value: "voice" | "silent" | "text" | "any") => void;
+}) {
   const options: Array<{ value: "voice" | "silent" | "text" | "any"; label: string; hint: string }> = [
     { value: "any", label: "跟随安排", hint: "由伴星按当前要点自动选择（默认）" },
     { value: "voice", label: "语音优先", hint: "能语音时优先语音回答" },
     { value: "silent", label: "静音结构优先", hint: "优先排序/修复等不发声的结构作答" },
     { value: "text", label: "文字优先", hint: "始终先用文字回答" },
   ];
-
-  const choose = (value: "voice" | "silent" | "text" | "any"): void => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    void api.setAnswerModePreference(value)
-      .then((result) => setPreference(result.preference))
-      .catch(() => setError("保存失败，请重试。"))
-      .finally(() => setBusy(false));
-  };
-
-  if (!loaded) {
-    return <p className="settings-section-note">正在读取作答偏好…</p>;
-  }
 
   return (
     <div className="settings-ai-control-row" role="group" aria-label="默认作答方式">
@@ -246,7 +227,7 @@ function AnswerModePreferenceSetting() {
                 name="answer-mode-preference"
                 value={option.value}
                 checked={preference === option.value}
-                onChange={() => choose(option.value)}
+                onChange={() => onChoose(option.value)}
                 disabled={busy}
               />
               <span>
@@ -258,6 +239,250 @@ function AnswerModePreferenceSetting() {
         </span>
       </span>
     </div>
+  );
+}
+
+// 方案 16 §10.2/§10.3：主动介入强度（账号级跨设备；PATCH /me/companion CAS）。
+function InterventionLevelRow({
+  level,
+  busy,
+  error,
+  onChoose,
+}: {
+  level: "quiet" | "moderate" | "active";
+  busy: boolean;
+  error: string | null;
+  onChoose: (value: "quiet" | "moderate" | "active") => void;
+}) {
+  const options: Array<{ value: "quiet" | "moderate" | "active"; label: string; hint: string }> = [
+    { value: "quiet", label: "安静", hint: "不主动提醒（首次邀请与可恢复故障除外）" },
+    { value: "moderate", label: "适中", hint: "每天最多 3 条，间隔至少 30 分钟（默认）" },
+    { value: "active", label: "积极", hint: "每天最多 6 条，间隔至少 15 分钟" },
+  ];
+
+  return (
+    <div className="settings-ai-control-row" role="group" aria-label="主动提醒强度">
+      <span className="settings-ai-control-icon" aria-hidden="true"><Icon.Bell /></span>
+      <span className="settings-ai-control-copy">
+        <strong>主动提醒强度</strong>
+        <small>
+          桌宠在正式作答、输入与勿扰时段内不会打扰；此偏好跨设备一致。
+          {error ? <span className="settings-section-error">{error}</span> : null}
+        </small>
+        <span className="settings-radio-group" role="radiogroup" aria-label="主动提醒强度">
+          {options.map((option) => (
+            <label key={option.value} className="settings-radio-option">
+              <input
+                type="radio"
+                name="intervention-level"
+                value={option.value}
+                checked={level === option.value}
+                onChange={() => onChoose(option.value)}
+                disabled={busy}
+              />
+              <span>
+                <strong>{option.label}</strong>
+                <small>{option.hint}</small>
+              </span>
+            </label>
+          ))}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+// 方案 16 §10.2/§10.3：静默时段（账号级；时段内抑制全部主动 cue）。
+function QuietHoursRow({
+  quietHours,
+  busy,
+  error,
+  onSave,
+}: {
+  quietHours: { startLocal: string; endLocal: string; timezone: string } | null;
+  busy: boolean;
+  error: string | null;
+  onSave: (next: { startLocal: string; endLocal: string; timezone: string } | null) => void;
+}) {
+  const timezone = useMemo(() => (
+    typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC"
+  ), []);
+
+  const enabled = quietHours !== null;
+  const start = quietHours?.startLocal ?? "22:00";
+  const end = quietHours?.endLocal ?? "07:00";
+
+  return (
+    <div className="settings-ai-control-row" role="group" aria-label="静默时段">
+      <span className="settings-ai-control-icon" aria-hidden="true"><Icon.Moon /></span>
+      <span className="settings-ai-control-copy">
+        <strong>静默时段</strong>
+        <small>
+          时段内桌宠不主动提醒（例如夜间）。按你的本地时区（{timezone}）计算。
+          {error ? <span className="settings-section-error">{error}</span> : null}
+        </small>
+        <span className="settings-quiet-hours-controls">
+          <label className="settings-switch">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={() => onSave(enabled ? null : { startLocal: start, endLocal: end, timezone })}
+              disabled={busy}
+              aria-label="静默时段开关"
+            />
+            <i aria-hidden="true" />
+          </label>
+          {enabled ? (
+            <span className="settings-quiet-hours-inputs">
+              <label>
+                <span>开始</span>
+                <input
+                  type="time"
+                  value={start}
+                  disabled={busy}
+                  onChange={(event) => {
+                    if (!quietHours) return;
+                    const next = { ...quietHours, startLocal: event.target.value };
+                    onSave(next);
+                  }}
+                />
+              </label>
+              <label>
+                <span>结束</span>
+                <input
+                  type="time"
+                  value={end}
+                  disabled={busy}
+                  onChange={(event) => {
+                    if (!quietHours) return;
+                    const next = { ...quietHours, endLocal: event.target.value };
+                    onSave(next);
+                  }}
+                />
+              </label>
+            </span>
+          ) : null}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * F#7（🟠1）：伴星面板数据提升到面板层拉取一次共享。
+ *
+ * - 并行拉 getCompanionOverview + getAnswerModePreference 仅一次；
+ * - 维护单一 revision 来源（账号 CAS），消除 InterventionLevel /
+ *   QuietHours 两控件各自独立 revision 副本的后保存者 CAS 冲突；
+ * - 子控件为纯呈现（不各自 GET），面板自身始终挂载（父级仅 CSS hidden），
+ *   因此再次进入伴星 tab 不会重复发 GET。
+ */
+function CompanionSettingsPanel() {
+  const [overviewLoaded, setOverviewLoaded] = useState(false);
+  const [answerModeLoaded, setAnswerModeLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // 单一 revision 来源：每次 PATCH 成功用服务端返回的 account.revision 更新。
+  const [revision, setRevision] = useState(0);
+  const [interventionLevel, setInterventionLevel] = useState<"quiet" | "moderate" | "active">("moderate");
+  const [quietHours, setQuietHours] = useState<{ startLocal: string; endLocal: string; timezone: string } | null>(null);
+  const [answerMode, setAnswerMode] = useState<"voice" | "silent" | "text" | "any">("any");
+
+  // 各控件局部互动态（busy/error 不共享，避免一个控件的保存阻塞其它）。
+  const [answerModeBusy, setAnswerModeBusy] = useState(false);
+  const [answerModeError, setAnswerModeError] = useState<string | null>(null);
+  const [interventionBusy, setInterventionBusy] = useState(false);
+  const [interventionError, setInterventionError] = useState<string | null>(null);
+  const [quietBusy, setQuietBusy] = useState(false);
+  const [quietError, setQuietError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.allSettled([
+      api.getCompanionOverview(),
+      api.getAnswerModePreference(),
+    ]).then(([overviewResult, answerModeResult]) => {
+      if (cancelled) return;
+      if (overviewResult.status === "fulfilled") {
+        const account = overviewResult.value.account;
+        setRevision(account.revision);
+        setInterventionLevel(account.interventionLevel ?? "moderate");
+        setQuietHours(account.quietHours ?? null);
+        setOverviewLoaded(true);
+      } else {
+        setLoadError("暂时无法读取提醒偏好，请稍后重试。");
+      }
+      if (answerModeResult.status === "fulfilled") {
+        setAnswerMode(answerModeResult.value.preference);
+        setAnswerModeLoaded(true);
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const chooseIntervention = (value: "quiet" | "moderate" | "active"): void => {
+    if (interventionBusy) return;
+    setInterventionBusy(true);
+    setInterventionError(null);
+    void api.updateCompanionAccount({ revision, interventionLevel: value })
+      .then((account) => {
+        setInterventionLevel(account.interventionLevel ?? value);
+        setRevision(account.revision);
+      })
+      .catch(() => setInterventionError("保存失败，请重试。"))
+      .finally(() => setInterventionBusy(false));
+  };
+
+  const saveQuietHours = (next: { startLocal: string; endLocal: string; timezone: string } | null): void => {
+    if (quietBusy) return;
+    setQuietBusy(true);
+    setQuietError(null);
+    void api.updateCompanionAccount({ revision, quietHours: next })
+      .then((account) => {
+        setQuietHours(account.quietHours ?? null);
+        setRevision(account.revision);
+      })
+      .catch(() => setQuietError("保存失败，请重试。"))
+      .finally(() => setQuietBusy(false));
+  };
+
+  const chooseAnswerMode = (value: "voice" | "silent" | "text" | "any"): void => {
+    if (answerModeBusy) return;
+    setAnswerModeBusy(true);
+    setAnswerModeError(null);
+    void api.setAnswerModePreference(value)
+      .then((result) => setAnswerMode(result.preference))
+      .catch(() => setAnswerModeError("保存失败，请重试。"))
+      .finally(() => setAnswerModeBusy(false));
+  };
+
+  return (
+    <>
+      <AnswerModePreferenceRow
+        preference={answerMode}
+        busy={answerModeBusy}
+        error={answerModeError}
+        onChoose={chooseAnswerMode}
+      />
+      {!answerModeLoaded && !loadError
+        ? <p className="settings-section-note">正在读取作答偏好…</p>
+        : null}
+      <InterventionLevelRow
+        level={interventionLevel}
+        busy={interventionBusy}
+        error={interventionError || loadError}
+        onChoose={chooseIntervention}
+      />
+      {!overviewLoaded && !loadError
+        ? <p className="settings-section-note">正在读取主动提醒偏好…</p>
+        : null}
+      <QuietHoursRow
+        quietHours={quietHours}
+        busy={quietBusy}
+        error={quietError || loadError}
+        onSave={saveQuietHours}
+      />
+    </>
   );
 }
 
@@ -352,7 +577,27 @@ function TtsVoiceSettings() {
 
 export default function SettingsPage() {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("account");
+  // P5（文档 16 §14.6）：设置页发布 bounded context（凭据/隐私面敏感）。
+  // 第八轮 🟡B-1：useMemo 稳定引用。
+  useMainPageContext(useMemo(() => ({
+    routeRef: { kind: "settings" },
+    pageKind: "settings",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "credential_surface",
+  }), []));
   const navRef = useRef<HTMLElement>(null);
+  // F#8（round3）：unmount 守卫——异步 handler（loadAccount/handleSaveProfile/
+  // handleAvatarUploaded/checkDrift/handleReindex/handleExportWorkspace/handleImport）
+  // 在 await 后 setState，卸载后需跳过，避免 setState-after-unmount。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const [accountLoading, setAccountLoading] = useState(true);
   const [accountData, setAccountData] = useState<CurrentUser | null>(null);
@@ -381,13 +626,15 @@ export default function SettingsPage() {
       await api.updateProfile({
         displayName: nextDisplayName || null,
       });
+      if (!mountedRef.current) return;
       setProfileSuccess("档案已更新");
       setProfileEditing(false);
       await loadAccount();
     } catch (error) {
+      if (!mountedRef.current) return;
       setProfileError(error instanceof Error ? error.message : "档案更新失败");
     } finally {
-      setProfileSaving(false);
+      if (mountedRef.current) setProfileSaving(false);
     }
   }
 
@@ -398,12 +645,14 @@ export default function SettingsPage() {
     setProfileSuccess(null);
     try {
       await api.updateProfile({ avatarUrl: url });
+      if (!mountedRef.current) return;
       setProfileSuccess("头像已更新");
       await loadAccount();
     } catch (error) {
+      if (!mountedRef.current) return;
       setProfileError(error instanceof Error ? error.message : "头像更新失败");
     } finally {
-      setProfileSaving(false);
+      if (mountedRef.current) setProfileSaving(false);
     }
   }
 
@@ -443,14 +692,16 @@ export default function SettingsPage() {
     setAccountError(null);
     try {
       const data = await api.getMe();
+      if (!mountedRef.current) return;
       setAccountData(data);
       setAvatarFailed(false);
       setProfileDisplayName(data.displayName ?? "");
       setProfileAvatarUrl(data.avatarUrl ?? "");
     } catch (error) {
+      if (!mountedRef.current) return;
       setAccountError(error instanceof Error ? error.message : "账户信息暂时无法读取");
     } finally {
-      setAccountLoading(false);
+      if (mountedRef.current) setAccountLoading(false);
     }
   }, []);
 
@@ -549,11 +800,13 @@ export default function SettingsPage() {
       anchor.remove();
       // Safari may not have consumed the object URL when the click handler returns.
       window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      if (!mountedRef.current) return;
       setExportSuccess("工作区副本已开始下载");
     } catch (error) {
+      if (!mountedRef.current) return;
       setExportError(error instanceof Error ? error.message : "工作区导出失败");
     } finally {
-      setExportLoading(false);
+      if (mountedRef.current) setExportLoading(false);
     }
   }
 
@@ -567,6 +820,7 @@ export default function SettingsPage() {
       const requestId = importId || createImportId();
       if (!importId) setImportId(requestId);
       const result = await api.importMarkdown(importFiles.items, requestId);
+      if (!mountedRef.current) return;
       const failed = result.errors?.length ?? 0;
       if (failed > 0) {
         const failedKeys = result.errors!
@@ -594,9 +848,10 @@ export default function SettingsPage() {
         setImportId(createImportId());
       }
     } catch (error) {
+      if (!mountedRef.current) return;
       setImportError(error instanceof Error ? error.message : "Markdown 导入失败");
     } finally {
-      setImporting(false);
+      if (mountedRef.current) setImporting(false);
     }
   }
 
@@ -605,12 +860,15 @@ export default function SettingsPage() {
     setDriftError(null);
     setReindexResult(null);
     try {
-      setDriftResult(await api.detectSearchDrift());
+      const result = await api.detectSearchDrift();
+      if (!mountedRef.current) return;
+      setDriftResult(result);
     } catch (error) {
+      if (!mountedRef.current) return;
       setDriftError(error instanceof Error ? error.message : "索引检测失败");
       setDriftResult(null);
     } finally {
-      setDriftLoading(false);
+      if (mountedRef.current) setDriftLoading(false);
     }
   }, []);
 
@@ -621,13 +879,15 @@ export default function SettingsPage() {
     setReindexResult(null);
     try {
       const result = await api.reindexSearch();
+      if (!mountedRef.current) return;
       setReindexResult(result);
       setReindexTone(result.errors > 0 ? "warning" : "success");
       setDriftResult(null);
     } catch (error) {
+      if (!mountedRef.current) return;
       setReindexError(error instanceof Error ? error.message : "索引重建失败");
     } finally {
-      setReindexLoading(false);
+      if (mountedRef.current) setReindexLoading(false);
     }
   }, []);
 
@@ -948,16 +1208,16 @@ export default function SettingsPage() {
               aria-labelledby="settings-tab-pet"
               hidden={activeSection !== "pet"}
             >
-              {activeSection === "pet" && <>
+              {/* F#7（🟠1）：伴星面板始终挂载（仅 CSS hidden，不 && 卸载）+ 数据
+                  在面板层拉一次共享——再次进入 tab 不重复发 GET。 */}
               <SettingsPanelHeading
                 title="桌宠伴星"
                 description="桌面 AI 学习伴星（角色 + 气泡 + 语音对话）。新用户默认开启，可在桌面角色菜单随时退出。"
                 icon={Icon.Sparkle}
               />
               <PetModeSetting />
-              <AnswerModePreferenceSetting />
+              <CompanionSettingsPanel />
               <TtsVoiceSettings />
-              </>}
             </section>
 
             <section

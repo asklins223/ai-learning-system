@@ -22,6 +22,8 @@ interface Props {
   source: string;
   /** 页面已有主标题时，将 Markdown 标题整体下移一级，避免出现多个 h1。 */
   demoteHeadings?: boolean;
+  /** 2026-08-15（恢复）：false 时远程图片不自动加载，渲染占位提示（默认 false）。 */
+  allowRemoteImages?: boolean;
 }
 
 interface GalleryImage {
@@ -111,6 +113,19 @@ function safeLinkDestination(escapedUrl: string): SafeLinkDestination | null {
 }
 
 /** 图片延续原安全边界：只允许 HTTPS 与规范化后的站内上传路径。 */
+/** 远程图片判定：http(s) 且非同源（本地 /uploads、data: 不算远程）。 */
+function isRemoteImageUrl(src: string): boolean {
+  try {
+    const base = typeof window !== "undefined" ? window.location.origin : "";
+    const url = new URL(src, base || "http://local.invalid");
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (!base) return true; // SSR：http(s) 一律视为远程（保守）
+    return url.origin !== base;
+  } catch {
+    return false;
+  }
+}
+
 function safeImageDestination(escapedUrl: string): string | null {
   const src = decodeEscapedHtml(escapedUrl);
   if (!src || src !== src.trim() || hasUnsafeUrlCharacters(src)) return null;
@@ -151,7 +166,7 @@ function applyInlineStyles(escaped: string): string {
  * 同一次扫描同时处理 image/link，`!` 是匹配的一部分，因此图片不会先被
  * 链接规则消费。URL 和 alt 仍使用 escapeHtml() 后的值构造属性。
  */
-function renderInlineMarkup(escaped: string): string {
+function renderInlineMarkup(escaped: string, allowRemoteImages = false): string {
   const markdownDestination = /(!?)\[([^\]\n]*)\]\(([^)\n]+)\)/g;
   let output = "";
   let cursor = 0;
@@ -163,9 +178,13 @@ function renderInlineMarkup(escaped: string): string {
     const [whole, imageMarker, label, destination] = match;
     if (imageMarker === "!") {
       const safeSrc = safeImageDestination(destination);
-      output += safeSrc
-        ? `<img src="${safeSrc}" alt="${label}" class="md-image md-image--inline" loading="lazy" />`
-        : applyInlineStyles(whole);
+      if (!safeSrc) {
+        output += applyInlineStyles(whole);
+      } else if (!allowRemoteImages && isRemoteImageUrl(safeSrc)) {
+        output += `<span class="md-image-blocked">远程图片未自动加载：${applyInlineStyles(label)}</span>`;
+      } else {
+        output += `<img src="${safeSrc}" alt="${label}" class="md-image md-image--inline" loading="lazy" />`;
+      }
     } else {
       const safeLink = safeLinkDestination(destination);
       if (!safeLink) {
@@ -196,20 +215,20 @@ function renderMath(escapedFormula: string, displayMode: boolean): string {
 }
 
 /** 行内数学公式 $...$ 分割，交由 KaTeX 渲染，其余走 renderInlineMarkup */
-function renderInlineMath(s: string): string {
+function renderInlineMath(s: string, allowRemoteImages = false): string {
   return s
     .split(/(\$[^$\n]+\$)/g)
     .map((part) => {
       if (part.startsWith("$") && part.endsWith("$") && part.length > 2) {
         return renderMath(part.slice(1, -1), false);
       }
-      return renderInlineMarkup(part);
+      return renderInlineMarkup(part, allowRemoteImages);
     })
     .join("");
 }
 
 /** 行内强调 / code / link / image / inline math */
-function inline(s: string): string {
+function inline(s: string, allowRemoteImages = false): string {
   const escaped = escapeHtml(s);
   return escaped
     .split(/(`[^`\n]+`)/g)
@@ -217,7 +236,7 @@ function inline(s: string): string {
       if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
         return `<code class="md-code">${part.slice(1, -1)}</code>`;
       }
-      return renderInlineMath(part);
+      return renderInlineMath(part, allowRemoteImages);
     })
     .join("");
 }
@@ -402,7 +421,7 @@ function tokenize(src: string): Token[] {
   return tokens;
 }
 
-export function MarkdownPreview({ source, demoteHeadings = false }: Props) {
+export function MarkdownPreview({ source, demoteHeadings = false, allowRemoteImages = true }: Props) {
   const tokens = tokenize(source);
   const containerRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -489,35 +508,35 @@ export function MarkdownPreview({ source, demoteHeadings = false }: Props) {
         switch (t.kind) {
           case "h1":
             if (demoteHeadings) {
-              return <h2 key={idx} className="md-h1" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+              return <h2 key={idx} className="md-h1" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
             }
-            return <h1 key={idx} className="md-h1" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+            return <h1 key={idx} className="md-h1" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
           case "h2":
             if (demoteHeadings) {
-              return <h3 key={idx} className="md-h2" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+              return <h3 key={idx} className="md-h2" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
             }
-            return <h2 key={idx} className="md-h2" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+            return <h2 key={idx} className="md-h2" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
           case "h3":
             if (demoteHeadings) {
-              return <h4 key={idx} className="md-h3" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+              return <h4 key={idx} className="md-h3" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
             }
-            return <h3 key={idx} className="md-h3" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+            return <h3 key={idx} className="md-h3" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
           case "h4":
             if (demoteHeadings) {
-              return <h5 key={idx} className="md-h4" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+              return <h5 key={idx} className="md-h4" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
             }
-            return <h4 key={idx} className="md-h4" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+            return <h4 key={idx} className="md-h4" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
           case "h5":
             if (demoteHeadings) {
-              return <h6 key={idx} className="md-h5" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+              return <h6 key={idx} className="md-h5" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
             }
-            return <h5 key={idx} className="md-h5" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+            return <h5 key={idx} className="md-h5" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
           case "h6":
-            return <h6 key={idx} className="md-h6" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+            return <h6 key={idx} className="md-h6" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
           case "p":
-            return <p key={idx} className="md-p" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "").replace(/\n/g, "<br/>") }} />;
+            return <p key={idx} className="md-p" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages).replace(/\n/g, "<br/>") }} />;
           case "quote":
-            return <blockquote key={idx} className="md-quote" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "").replace(/\n/g, "<br/>") }} />;
+            return <blockquote key={idx} className="md-quote" dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages).replace(/\n/g, "<br/>") }} />;
           case "ul":
             return (
               <ul key={idx} className="md-ul">
@@ -541,11 +560,14 @@ export function MarkdownPreview({ source, demoteHeadings = false }: Props) {
             if (m) {
               const escapedSrc = escapeHtml(m[2]);
               const safeSrc = safeImageDestination(escapedSrc);
-              if (safeSrc) {
+              if (safeSrc && allowRemoteImages) {
                 return <img key={idx} src={decodeEscapedHtml(safeSrc)} alt={m[1]} className="md-image" loading="lazy" />;
               }
+              if (safeSrc && isRemoteImageUrl(safeSrc)) {
+                return <p key={idx} className="md-image-blocked">远程图片未自动加载：{m[1]}</p>;
+              }
             }
-            return <p key={idx} dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "") }} />;
+            return <p key={idx} dangerouslySetInnerHTML={{ __html: inline(t.raw ?? "", allowRemoteImages) }} />;
           }
           case "table":
             return (

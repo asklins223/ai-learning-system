@@ -479,6 +479,29 @@ export const createMenuProposalResponseV1Schema = z.object({
 }).strict();
 export type CreateMenuProposalResponseV1 = z.infer<typeof createMenuProposalResponseV1Schema>;
 
+// ─── §18 Tool proposal create（15 kind 学习动作白名单） ──────────────────
+// 2026-08-15 接线修复：工具网关请求合同此前缺失（API 无 /tool-proposals）。
+
+export const createToolProposalRequestV1Schema = z.object({
+  version: z.literal(1),
+  clientMessageId: z.string().uuid(),
+  payload: proposedLearningActionPayloadV1Schema,
+  title: z.string().min(1).max(80),
+  targetSummary: z.string().min(1).max(160),
+  impactSummary: z.string().min(1).max(240),
+  sourceSurface: z.enum(["pet", "main", "web_fallback"]),
+}).strict();
+
+export const createToolProposalResponseV1Schema = z.object({
+  version: z.literal(1),
+  conversationId: z.string().uuid(),
+  userMessageId: z.string().uuid(),
+  assistantMessageId: z.string().uuid(),
+  proposal: pendingLearningActionProposalV1Schema,
+  eventCursor: z.number().int().nonnegative().nullable(),
+}).strict();
+export type CreateToolProposalResponseV1 = z.infer<typeof createToolProposalResponseV1Schema>;
+
 // ─── P5 §6.6 Proposal decision（confirm/reject） ────────────────────────
 
 export const proposalDecisionRequestV1Schema = z.object({
@@ -796,6 +819,10 @@ export const companionBootstrapFeaturesV1Schema = z.object({
   live2d: z.boolean(),
   learningActions: z.boolean(),
   streamingVoice: z.boolean(),
+  // §10.1/§14.3（2026-08-15 接线修复）：Journey V2 引导与主动 delivery
+  // 由 COMPANION_JOURNEY_V2 同一开关授权（端点 fail-closed 404 对齐）。
+  journey: z.boolean(),
+  deliveries: z.boolean(),
 }).strict();
 
 export type CompanionBootstrapFeaturesV1 = z.infer<typeof companionBootstrapFeaturesV1Schema>;

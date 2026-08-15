@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import webpack from "next/dist/compiled/webpack/webpack-lib.js";
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const isDevelopment = process.env.NODE_ENV === "development";
@@ -103,6 +104,56 @@ const nextConfig = {
         headers: securityHeaders,
       },
     ];
+  },
+  // 2026-08-15（R36+ 桌面打包放行）：@ailearn/shared 的 index 含少数
+  // node 内置模块依赖（platform-config/fingerprint/content-hash/
+  // card-generation-v2-hashing——均按惰性约定，浏览器 bundle 不实际调用）。
+  // webpack 5 客户端构建对 `node:` scheme 顶层 import 报 UnhandledSchemeError；
+  // 这里对客户端构建把 node 内置模块解析为存根，服务端构建保持真实模块。
+  webpack(config, { isServer, webpack }) {
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        "node:fs": false,
+        "node:path": false,
+        "node:crypto": false,
+        "node:module": false,
+        "node:url": false,
+        "node:os": false,
+        "node:util": false,
+        "node:stream": false,
+        "node:buffer": false,
+        "node:events": false,
+        "node:http": false,
+        "node:https": false,
+        "node:zlib": false,
+        "node:net": false,
+        "node:tls": false,
+        "node:child_process": false,
+        "node:worker_threads": false,
+        "node:assert": false,
+        "node:querystring": false,
+        "node:string_decoder": false,
+        "node:timers": false,
+        "node:async_hooks": false,
+        "node:perf_hooks": false,
+        "node:vm": false,
+        "node:readline": false,
+        "node:cluster": false,
+        "node:dns": false,
+        "node:constants": false,
+        "node:punycode": false,
+        "node:process": false,
+        "node:repl": false,
+        "node:tty": false,
+      };
+      // `node:` scheme 在 resolve 阶段就会抛 UnhandledSchemeError（fallback 不
+      // 拦截 scheme 解析，NormalModuleReplacementPlugin 触发时机也在 scheme
+      // 检查之后）。2026-08-15 恢复：IgnorePlugin 在解析早期拦截 node: 请求
+      //（shared 惰性约定保证浏览器运行时不会真正调用这些函数）。
+      config.plugins.push(new webpack.IgnorePlugin({ resourceRegExp: /^node:/ }));
+    }
+    return config;
   },
 };
 

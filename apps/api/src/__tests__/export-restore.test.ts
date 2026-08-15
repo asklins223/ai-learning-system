@@ -6,6 +6,16 @@ import { learningCards } from "../db/schema/card.ts";
 import { validationEvents, reviewSchedules, reviewAttempts } from "../db/schema/evidence.ts";
 import { aiArtifacts } from "../db/schema/ai.ts";
 import { onboardingStates } from "../db/schema/identity.ts";
+import {
+  validationQuestionRubricItems,
+  validationSubmissions,
+  validationSubmissionJobs,
+  validationActionCommands,
+  validationAssistanceExposures,
+  validationPointAssessments,
+  schedulingShadowDecisions,
+  validationQualitySignals,
+} from "../db/schema/validation-v2.ts";
 
 type RestoreDatabase = NonNullable<Parameters<typeof restoreWorkspace>[3]>;
 type Operation = {
@@ -248,4 +258,153 @@ test("restore inserts FK parents before restoring note/card/validation reference
     createFirstCard: true,
     completeFirstReview: false,
   });
+});
+
+// N#8-2: restoreSchema 补报 8 张 v0.6 表后，含 v0.6 数据的 manifest 恢复应逐表恢复行。
+// 用 recording 数据库验证 restoreTable 对每张 v0.6 表实际执行了对应行数的 insert。
+test("N#8-2: restore 含 v0.6 数据的 manifest 恢复 8 张 v0.6 表行数", async () => {
+  const operations: Operation[] = [];
+  const workspaceId = "10000000-0000-4000-8000-00000000000f";
+  const userId = "20000000-0000-4000-8000-00000000000f";
+  const questionId = "c0000000-0000-4000-8000-000000000001";
+  const cardId = "60000000-0000-4000-8000-00000000000f";
+  const submissionIdA = "d0000000-0000-4000-8000-000000000001";
+  const submissionIdB = "d0000000-0000-4000-8000-000000000002";
+  const rubricIdA = "e0000000-0000-4000-8000-000000000001";
+  const rubricIdB = "e0000000-0000-4000-8000-000000000002";
+  const validationEventId = "a0000000-0000-4000-8000-00000000000e";
+
+  const result = await restoreWorkspace(
+    workspaceId,
+    {
+      workspace: { id: "source-workspace" },
+      exportManifest: {
+        version: "2.0",
+        included: [
+          "workspace",
+          "validationQuestionRubricItems",
+          "validationSubmissions",
+          "validationSubmissionJobs",
+          "validationActionCommands",
+          "validationAssistanceExposures",
+          "validationPointAssessments",
+          "schedulingShadowDecisions",
+          "validationQualitySignals",
+        ],
+      },
+      validationQuestionRubricItems: [{
+        id: rubricIdA, questionId, ordinal: 1, criterion: "c1",
+        expectedConcept: "ec1", weight: 1, required: true,
+      }, {
+        id: rubricIdB, questionId, ordinal: 2, criterion: "c2",
+        expectedConcept: "ec2", weight: 1, required: false,
+      }],
+      validationSubmissions: [{
+        id: submissionIdA, userId, cardId, keyPointId: null, questionId,
+        context: "ctx", reviewAttemptId: null, inputScheduleId: null,
+        status: "submitted", startIdempotencyKey: "start-1",
+      }, {
+        id: submissionIdB, userId, cardId, keyPointId: null, questionId,
+        context: "ctx2", reviewAttemptId: null, inputScheduleId: null,
+        status: "submitted", startIdempotencyKey: "start-2",
+      }],
+      validationSubmissionJobs: [{
+        id: "f1000000-0000-4000-8000-000000000001", submissionId: submissionIdA,
+        phase: "generate", phaseOrdinal: 1, jobId: "f2000000-0000-4000-8000-000000000001",
+      }],
+      validationActionCommands: [{
+        id: "f3000000-0000-4000-8000-000000000001", userId,
+        submissionId: submissionIdA, action: "start", idempotencyKey: "cmd-1",
+        requestHash: "hash-1", responseStatus: "applied",
+      }],
+      validationAssistanceExposures: [{
+        id: "f4000000-0000-4000-8000-000000000001", userId,
+        keyPointId: null, exposureFingerprint: "fp-1",
+        lastExposureKind: "unassisted",
+      }],
+      validationPointAssessments: [{
+        id: "f5000000-0000-4000-8000-000000000001", userId,
+        submissionId: submissionIdA, rubricItemId: rubricIdA,
+        verdict: "correct", assessmentSource: "ai",
+      }, {
+        id: "f5000000-0000-4000-8000-000000000002", userId,
+        submissionId: submissionIdA, rubricItemId: rubricIdB,
+        verdict: "correct", assessmentSource: "ai",
+      }],
+      schedulingShadowDecisions: [{
+        id: "f6000000-0000-4000-8000-000000000001", userId,
+        keyPointId: null, sourceType: "review", sourceId: cardId,
+        algorithm: "sm2", algorithmVersion: "1", parametersVersion: "1",
+      }],
+      validationQualitySignals: [{
+        id: "f7000000-0000-4000-8000-000000000001", userId,
+        validationEventId, submissionId: submissionIdA,
+        reason: "system",
+      }],
+    },
+    false,
+    createRecordingDatabase(operations),
+  );
+
+  assert.equal(result.success, true);
+
+  const countInsertedFor = (table: unknown): number =>
+    operations
+      .filter((o) => o.kind === "insert" && o.table === table)
+      .reduce((sum, o) => {
+        // batchInsert 按 500 分批，values 可能是数组（多行一批）或单对象
+        // （recording DB 对单元素批次解包为行对象）；按行计数。
+        return sum + (Array.isArray(o.values) ? o.values.length : 1);
+      }, 0);
+
+  assert.equal(
+    countInsertedFor(validationQuestionRubricItems),
+    2,
+    "restore should insert 2 validation_question_rubric_items",
+  );
+  assert.equal(
+    countInsertedFor(validationSubmissions),
+    2,
+    "restore should insert 2 validation_submissions",
+  );
+  assert.equal(
+    countInsertedFor(validationSubmissionJobs),
+    1,
+    "restore should insert 1 validation_submission_job",
+  );
+  assert.equal(
+    countInsertedFor(validationActionCommands),
+    1,
+    "restore should insert 1 validation_action_command",
+  );
+  assert.equal(
+    countInsertedFor(validationAssistanceExposures),
+    1,
+    "restore should insert 1 validation_assistance_exposure",
+  );
+  assert.equal(
+    countInsertedFor(validationPointAssessments),
+    2,
+    "restore should insert 2 validation_point_assessments",
+  );
+  assert.equal(
+    countInsertedFor(schedulingShadowDecisions),
+    1,
+    "restore should insert 1 scheduling_shadow_decision",
+  );
+  assert.equal(
+    countInsertedFor(validationQualitySignals),
+    1,
+    "restore should insert 1 validation_quality_signal",
+  );
+
+  // results.counts 也应反映各表恢复行数
+  assert.equal(result.counts?.validationQuestionRubricItems, 2);
+  assert.equal(result.counts?.validationSubmissions, 2);
+  assert.equal(result.counts?.validationSubmissionJobs, 1);
+  assert.equal(result.counts?.validationActionCommands, 1);
+  assert.equal(result.counts?.validationAssistanceExposures, 1);
+  assert.equal(result.counts?.validationPointAssessments, 2);
+  assert.equal(result.counts?.schedulingShadowDecisions, 1);
+  assert.equal(result.counts?.validationQualitySignals, 1);
 });

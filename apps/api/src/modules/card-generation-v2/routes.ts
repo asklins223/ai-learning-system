@@ -1,0 +1,534 @@
+/**
+ * Card Generation V2 — Fastify Routes（方案 20 §17）。
+ *
+ * 路由前缀：/v2
+ * 全部需要 requireSession（auth middleware）
+ * 创建/取消/激活操作需要 requireOwner
+ *
+ * 端点：
+ * POST   /v2/card-generation-runs                     — 创建生成运行
+ * GET    /v2/card-generation-runs/:runId               — 获取运行详情
+ * GET    /v2/card-generation-runs/:runId/plan          — 获取计划
+ * GET    /v2/card-generation-runs/:runId/candidates    — 获取候选列表
+ * GET    /v2/card-generation-runs/:runId/events        — 获取事件流
+ * POST   /v2/card-generation-runs/:runId/cancel        — 取消运行
+ * POST   /v2/card-generation-runs/:runId/close         — 关闭运行（不激活）
+ * POST   /v2/card-generation-runs/:runId/candidate-actions — 候选审核操作
+ * POST   /v2/card-generation-runs/:runId/candidates/:candidateId/reveal — 揭示答案
+ * POST   /v2/card-generation-runs/:runId/activate      — 激活候选
+ */
+
+import type { FastifyInstance, FastifyReply } from "fastify";
+import { z } from "zod";
+import { requireOwner, requireSession } from "../identity/middleware.ts";
+import { parseBody } from "../../lib/validate.ts";
+import { uuidParamSchema } from "../../lib/pagination.ts";
+import {
+  createCardGenerationRunRequestV2Schema,
+  candidateActionCommandV2Schema,
+  revealCandidateRequestV2Schema,
+  activateCardCandidatesRequestV2Schema,
+  type CreateCardGenerationRunRequestV2,
+  type CandidateActionCommandV2,
+  type RevealCandidateRequestV2,
+  type ActivateCardCandidatesRequestV2,
+} from "@ailearn/shared/card-generation-v2-contracts";
+import {
+  revealCardRequestV2Schema,
+  archiveCardRequestV2Schema,
+  type RevealCardRequestV2,
+  type ArchiveCardRequestV2,
+} from "@ailearn/shared/learning-card-v2-contracts";
+import {
+  revealCardV2,
+  archiveCardV2,
+  updateCardPresentationV2,
+  createCardRegenerationRunV2,
+  listReadyRemindersV2,
+  cancelReminderV2,
+  readPublicCardV2,
+} from "./card-service.ts";
+import {
+  createGenerationRunV2,
+  getGenerationRunV2,
+  getGenerationRunPlanV2,
+  getGenerationRunCandidatesV2,
+  getGenerationRunEventsV2,
+  closeGenerationRunV2,
+  cancelGenerationRunV2,
+} from "./generation-run-service.ts";
+import { revealCandidateV2 } from "./reveal-service.ts";
+import { handleCandidateActionV2 } from "./candidate-review-service.ts";
+import { activateCardCandidatesV2 } from "./activation-service.ts";
+import {
+  CardGenerationV2ServiceError,
+  NO_STORE,
+  type RunContext,
+} from "./helpers.ts";
+
+const eventsQuerySchema = z.object({
+  after: z.coerce.number().int().min(0).optional().default(0),
+});
+
+function context(req: { session: { workspaceId: string; userId: string } }): RunContext {
+  return { workspaceId: req.session.workspaceId, userId: req.session.userId };
+}
+
+/**
+ * §9.1：Idempotency-Key 只由 HTTP header 提供；缺失时 400（禁止服务端
+ * 随机生成——否则"同一 key、不同 payload 必须冲突"被静默架空）。
+ */
+function requireIdempotencyKey(req: { headers: Record<string, string | string[] | undefined> }): string {
+  const key = req.headers["x-idempotency-key"];
+  const value = Array.isArray(key) ? key[0] : key;
+  if (!value || value.length === 0 || value.length > 200) {
+    throw new CardGenerationV2ServiceError("idempotency_key_required", 400, "缺少 X-Idempotency-Key 请求头");
+  }
+  return value;
+}
+
+function sendServiceError(reply: FastifyReply, error: unknown) {
+  if (error instanceof CardGenerationV2ServiceError) {
+    return reply.code(error.statusCode).send({ error: error.code, message: error.message });
+  }
+  throw error;
+}
+
+export async function cardGenerationV2Routes(app: FastifyInstance) {
+  app.addHook("preHandler", requireSession);
+
+  // ─── POST /v2/card-generation-runs ─ 创建生成运行 ──────────────────────
+  app.post("/v2/card-generation-runs", { preHandler: [requireOwner] }, async (req, reply) => {
+    reply.headers(NO_STORE);
+    const body = parseBody(app, createCardGenerationRunRequestV2Schema, req.body) as CreateCardGenerationRunRequestV2;
+    const idempotencyKey = requireIdempotencyKey(req);
+    try {
+      const result = await createGenerationRunV2(context(req), body.noteVersionId, body, idempotencyKey);
+      return reply.code(202).send(result);
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // ─── GET /v2/card-generation-runs/:runId ─ 获取运行详情 ─────────────────
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId", async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+    }
+    try {
+      const run = await getGenerationRunV2(context(req), req.params.runId);
+      if (!run) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
+      return run;
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // ─── GET /v2/card-generation-runs/:runId/plan ─ 获取计划 ───────────────
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/plan", async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+    }
+    try {
+      const plan = await getGenerationRunPlanV2(context(req), req.params.runId);
+      if (!plan) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
+      return plan;
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // ─── GET /v2/card-generation-runs/:runId/candidates ─ 获取候选列表 ──────
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/candidates", async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+    }
+    try {
+      const candidates = await getGenerationRunCandidatesV2(context(req), req.params.runId);
+      if (!candidates) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
+      return { candidates };
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // ─── GET /v2/card-generation-runs/:runId/events ─ 获取事件流 ────────────
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/events", async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+    }
+    const query = eventsQuerySchema.parse(req.query);
+    try {
+      const events = await getGenerationRunEventsV2(context(req), req.params.runId, query.after);
+      return { events };
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // ─── GET /v2/card-generation-runs/:runId/events/stream ─ SSE 实时事件流 ─
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/events/stream", async (req, reply) => {
+    if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+    }
+    // SSE headers
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    let lastSeq = 0;
+    const runId = req.params.runId;
+    const ctx = context(req);
+    // Send initial comment
+    reply.raw.write(`: connected\n\n`);
+    let closed = false;
+    // B6（round-3 审计）：socket 级错误（EPIPE/ECONNRESET）必须吞掉——未处理会
+    // 冒泡为 unhandled error 并可能在 fastify 错误链产生 500（对齐 run-routes.ts）。
+    reply.raw.on("error", (err) => {
+      closed = true;
+      req.log.warn({ err, runId }, "sse: socket error");
+    });
+    // Poll for new events
+    const interval = setInterval(async () => {
+      try {
+        const events = await getGenerationRunEventsV2(ctx, runId, lastSeq);
+        for (const e of events) {
+          // B6：轮询写也要受 writableEnded 守卫（原只查 closed）——断开竞态窗口下
+          // 向已结束的 socket 写可能触发 EPIPE unhandled。
+          if (closed || reply.raw.writableEnded) return;
+          reply.raw.write(`id: ${e.eventSeq}\n`);
+          reply.raw.write(`event: ${e.eventType}\n`);
+          reply.raw.write(`data: ${JSON.stringify(e)}\n\n`);
+          lastSeq = e.eventSeq;
+        }
+      } catch {
+        // Silently skip errors, client will reconnect
+      }
+    }, 2000);
+    interval.unref();
+    // PERF-B6/N4 修复：加 15s heartbeat comment，防止 idle 长连接被代理空闲超时
+    // 端到端切断（对齐 companion-events.ts 的保活写法）。
+    const heartbeatTimer = setInterval(() => {
+      if (!closed && !reply.raw.writableEnded) {
+        reply.raw.write(`: heartbeat ${Date.now()}\n\n`);
+      }
+    }, 15_000);
+    heartbeatTimer.unref();
+    // Clean up on disconnect
+    req.raw.on("close", () => {
+      closed = true;
+      clearInterval(interval);
+      clearInterval(heartbeatTimer);
+      if (!reply.raw.writableEnded) reply.raw.end();
+    });
+  });
+
+  // ─── POST /v2/card-generation-runs/:runId/cancel ─ 取消运行 ────────────
+  app.post<{ Params: { runId: string } }>(
+    "/v2/card-generation-runs/:runId/cancel",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+      }
+      try {
+        const result = await cancelGenerationRunV2(context(req), req.params.runId);
+        if (!result) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
+        return result;
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── POST /v2/card-generation-runs/:runId/close ─ 关闭运行 ─────────────
+  app.post<{ Params: { runId: string } }>(
+    "/v2/card-generation-runs/:runId/close",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+      }
+      const body = parseBody(app, z.strictObject({
+        expectedReviewDraftRevision: z.number().int().min(1),
+      }), req.body);
+      try {
+        const result = await closeGenerationRunV2(context(req), req.params.runId, body.expectedReviewDraftRevision);
+        if (!result) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
+        return result;
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── POST /v2/card-generation-runs/:runId/candidate-actions ─ 候选审核操作 ─
+  app.post<{ Params: { runId: string } }>(
+    "/v2/card-generation-runs/:runId/candidate-actions",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+      }
+      const command = parseBody(app, candidateActionCommandV2Schema, req.body) as CandidateActionCommandV2;
+      // 确保 URL 中的 runId 与 body 中的 runId 一致
+      if (command.runId !== req.params.runId) {
+        return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
+      }
+      const idempotencyKey = requireIdempotencyKey(req);
+      try {
+        const result = await handleCandidateActionV2(context(req), command, idempotencyKey);
+        return result;
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── POST /v2/card-generation-runs/:runId/candidates/:candidateId/reveal ─ 揭示答案 ─
+  app.post<{ Params: { runId: string; candidateId: string } }>(
+    "/v2/card-generation-runs/:runId/candidates/:candidateId/reveal",
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success ||
+          !uuidParamSchema.safeParse({ id: req.params.candidateId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 ID 格式" });
+      }
+      const body = parseBody(app, revealCandidateRequestV2Schema, req.body) as RevealCandidateRequestV2;
+      // 确保 URL 中的 candidateId 与 body 中的一致
+      if (body.candidateId !== req.params.candidateId) {
+        return reply.code(400).send({ error: "candidate_id_mismatch", message: "URL 中的 candidateId 与请求体不一致" });
+      }
+      const idempotencyKey = requireIdempotencyKey(req);
+      try {
+        const reveal = await revealCandidateV2(
+          context(req),
+          req.params.runId,
+          body.candidateId,
+          body.expectedCandidateRevision,
+          body.expectedCandidateRevisionHash,
+          idempotencyKey,
+        );
+        return reveal;
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── POST /v2/card-generation-runs/:runId/activate ─ 激活候选 ──────────
+  app.post<{ Params: { runId: string } }>(
+    "/v2/card-generation-runs/:runId/activate",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+      }
+      const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body) as ActivateCardCandidatesRequestV2;
+      // 确保 URL 中的 runId 与 body 中的一致
+      if (body.runId !== req.params.runId) {
+        return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
+      }
+      const idempotencyKey = requireIdempotencyKey(req);
+      try {
+        const receipt = await activateCardCandidatesV2(context(req), body, idempotencyKey);
+        return reply.code(200).send(receipt);
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── POST /v2/card-generation-runs/:runId/activations ─ §17.1 复数别名 ──
+  app.post<{ Params: { runId: string } }>(
+    "/v2/card-generation-runs/:runId/activations",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+      }
+      const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body) as ActivateCardCandidatesRequestV2;
+      if (body.runId !== req.params.runId) {
+        return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
+      }
+      const idempotencyKey = requireIdempotencyKey(req);
+      try {
+        const receipt = await activateCardCandidatesV2(context(req), body, idempotencyKey);
+        return reply.code(200).send(receipt);
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── §17.6 Card 端点 ───────────────────────────────────────────────────
+
+  // GET /v2/cards/:cardId — Public Card（§15.1）
+  app.get<{ Params: { cardId: string } }>("/v2/cards/:cardId", async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse({ id: req.params.cardId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 cardId 格式" });
+    }
+    try {
+      const card = await readPublicCardV2(context(req), req.params.cardId);
+      if (!card) return reply.code(404).send({ error: "card_not_found", message: "卡片不存在" });
+      return card;
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // POST /v2/cards/:cardId/reveal — exposure-first（§15.2/§17.6）
+  app.post<{ Params: { cardId: string } }>("/v2/cards/:cardId/reveal", async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse({ id: req.params.cardId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 cardId 格式" });
+    }
+    const body = parseBody(app, revealCardRequestV2Schema, req.body) as RevealCardRequestV2;
+    if (body.cardId !== req.params.cardId) {
+      return reply.code(400).send({ error: "card_id_mismatch", message: "URL 中的 cardId 与请求体不一致" });
+    }
+    const idempotencyKey = requireIdempotencyKey(req);
+    try {
+      const reveal = await revealCardV2(context(req), body, idempotencyKey);
+      return reveal;
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // POST /v2/cards/:cardId/archive — §16.7 lifecycle close
+  app.post<{ Params: { cardId: string } }>(
+    "/v2/cards/:cardId/archive",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.cardId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 cardId 格式" });
+      }
+      const body = parseBody(app, archiveCardRequestV2Schema, req.body) as ArchiveCardRequestV2;
+      if (body.cardId !== req.params.cardId) {
+        return reply.code(400).send({ error: "card_id_mismatch", message: "URL 中的 cardId 与请求体不一致" });
+      }
+      const idempotencyKey = requireIdempotencyKey(req);
+      try {
+        const result = await archiveCardV2(context(req), body, idempotencyKey);
+        return result;
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // POST /v2/cards/:cardId/revisions — presentation-only patch（§15.4）
+  app.post<{ Params: { cardId: string } }>(
+    "/v2/cards/:cardId/revisions",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.cardId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 cardId 格式" });
+      }
+      const body = parseBody(app, z.strictObject({
+        expectedPublicationRevision: z.number().int().min(1),
+        expectedPublicPayloadHash: z.string().regex(/^[0-9a-f]{64}$/),
+        patch: z.strictObject({
+          front: z.strictObject({
+            cue: z.string().min(1).max(2000).optional(),
+            context: z.string().min(1).max(3000).optional(),
+            prompt: z.string().min(1).max(2000),
+          }).optional(),
+          strategy: z.enum(["recall", "cloze", "compare", "sequence", "why", "boundary", "application"]).optional(),
+        }),
+      }), req.body);
+      try {
+        const result = await updateCardPresentationV2(
+          context(req),
+          req.params.cardId,
+          body.expectedPublicationRevision,
+          body.expectedPublicPayloadHash,
+          body.patch,
+        );
+        return result;
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // POST /v2/cards/:cardId/regeneration-runs — §6.8/§17.6
+  app.post<{ Params: { cardId: string } }>(
+    "/v2/cards/:cardId/regeneration-runs",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.cardId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 cardId 格式" });
+      }
+      const body = parseBody(app, z.strictObject({
+        noteVersionId: z.string().uuid(),
+        learningGoal: z.enum(["remember", "understand", "apply", "exam"]),
+        detailThreshold: z.enum(["concise", "balanced", "deep"]),
+        quantity: z.strictObject({ kind: z.literal("adaptive"), hardMaxCards: z.number().int().min(0).max(50).optional() }),
+        clientRequestId: z.string().min(1).max(200),
+      }), req.body);
+      const idempotencyKey = requireIdempotencyKey(req);
+      try {
+        const result = await createCardRegenerationRunV2(
+          context(req),
+          req.params.cardId,
+          body.noteVersionId,
+          body.learningGoal,
+          body.detailThreshold,
+          body.quantity,
+          body.clientRequestId,
+          idempotencyKey,
+        );
+        return reply.code(202).send(result);
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── §17.3 Initial Validation Reminder 端点 ─────────────────────────────
+
+  // GET /v2/initial-validation-reminders?status=ready
+  app.get("/v2/initial-validation-reminders", async (req, reply) => {
+    reply.headers(NO_STORE);
+    try {
+      const reminders = await listReadyRemindersV2(context(req));
+      return { reminders };
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // POST /v2/initial-validation-reminders/:reminderId/cancel
+  app.post<{ Params: { reminderId: string } }>(
+    "/v2/initial-validation-reminders/:reminderId/cancel",
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.reminderId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 reminderId 格式" });
+      }
+      try {
+        const result = await cancelReminderV2(context(req), req.params.reminderId);
+        return result;
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+}

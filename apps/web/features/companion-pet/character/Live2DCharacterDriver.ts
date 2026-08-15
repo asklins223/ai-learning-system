@@ -1,6 +1,6 @@
 "use client";
 
-import type { CharacterPresentationStateV1 } from "@ailearn/shared/companion-character-contracts";
+import type { CharacterPresentationStateV1 } from "@ailearn/shared";
 import { COMPANION_LIVE2D_MANIFEST } from "./companion-live2d-manifest.ts";
 import {
   LIVE2D_INVITE_ONCE_CUE,

@@ -14,8 +14,10 @@
     "rewriteRelativeImportExtensions": true,
     "preserveSymlinks": true,
     "noEmit": true,
-    "rootDir": ".",
+    "rootDir": "../..",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }

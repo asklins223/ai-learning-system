@@ -22,6 +22,7 @@ export function getCompanionBootstrapFeatures(): CompanionBootstrapFeaturesV1 {
   const dialogueEnabled = process.env.COMPANION_DIALOGUE_V1_ENABLED === "true";
   const actionBridgeEnabled = process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED === "true";
   const live2dEnabled = process.env.COMPANION_LIVE2D_V1_ENABLED === "true";
+  const journeyEnabled = process.env.COMPANION_JOURNEY_V2 === "true";
   return {
     petSurface: petEnabled,
     textConversation: dialogueEnabled,
@@ -29,6 +30,10 @@ export function getCompanionBootstrapFeatures(): CompanionBootstrapFeaturesV1 {
     live2d: live2dEnabled,
     learningActions: dialogueEnabled && actionBridgeEnabled,
     streamingVoice: dialogueEnabled && process.env.COMPANION_STREAMING_VOICE_V1_ENABLED === "true",
+    // §10.1/§14.3（2026-08-15 接线修复）：Journey 引导 + 主动 delivery 由
+    // COMPANION_JOURNEY_V2 同一开关授权（端点 fail-closed 404 对齐）。
+    journey: journeyEnabled,
+    deliveries: journeyEnabled,
   };
 }
 

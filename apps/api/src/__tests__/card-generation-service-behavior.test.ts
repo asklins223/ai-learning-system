@@ -416,6 +416,36 @@ describe("D1: card-generation service behavior — idempotency key replay", () =
     assert.equal(result.sourceSnapshot?.noteVersionId, NOTE_VERSION_ID);
   });
 
+  it("N#8-3: 同一幂等键命中终态失败 run 时不重放，抛 run_terminal_failed 提示用新键重派", async () => {
+    for (const status of [
+      SupervisorRunStatus.NEEDS_ATTENTION,
+      SupervisorRunStatus.CANCELLED,
+      SupervisorRunStatus.SUPERSEDED,
+    ]) {
+      const replayRun = {
+        ...mockRunRow,
+        id: "run-failed-1",
+        status,
+      };
+      mutableDb.query.cardGenerationRuns.findFirst = async () => replayRun;
+      mutableDb.query.noteVersions.findFirst = async () => baseVersion;
+      mutableDb.transaction = createMockTransaction();
+
+      await assert.rejects(
+        createCardGenerationRun(
+          { workspaceId: WORKSPACE_ID, userId: USER_ID },
+          baseInput,
+        ),
+        (err: unknown) => {
+          assert.ok(err instanceof CardGenerationServiceError);
+          assert.equal(err.code, "run_terminal_failed");
+          assert.equal(err.statusCode, 409);
+          return true;
+        },
+      );
+    }
+  });
+
   it("throws 409 when idempotency key is reused with different noteVersionId", async () => {
     const replayRun = {
       id: "run-existing-2",

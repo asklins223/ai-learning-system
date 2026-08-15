@@ -3,7 +3,10 @@
   "version": "0.5.0",
   "private": true,
   "description": "AI Learn — cross-platform Electron desktop launcher (frontend lifecycle only)",
-  "author": "AI Learn Team",
+  "author": {
+    "name": "AI Learn Team",
+    "email": "dev@ailearn.local"
+  },
   "main": "dist/main.cjs",
   "scripts": {
     "dev": "node esbuild.mjs && concurrently -k \"node esbuild.mjs --watch\" \"electron .\"",
@@ -12,7 +15,7 @@
     "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)",
     "start": "electron .",
     "typecheck": "tsc --noEmit",
-    "prebuild:web": "cd ../../apps/web && npm install && NEXT_PUBLIC_COMPANION_PET_ENABLED=true NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED=true NEXT_PUBLIC_AI_QUESTION_V1_ENABLED=true NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED=true npm run build && mkdir -p .next/standalone/apps/web/.next && cp -r .next/static .next/standalone/apps/web/.next/static && cp -r public .next/standalone/apps/web/public",
+    "prebuild:web": "cd ../../apps/web && npm install && NEXT_PUBLIC_COMPANION_PET_ENABLED=true NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED=true NEXT_PUBLIC_AI_QUESTION_V1_ENABLED=true NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED=true NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED=true NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED=true NEXT_PUBLIC_LEARNING_RUN_V1=true NEXT_PUBLIC_STAR_MAP_ACTION_V1=true NEXT_PUBLIC_COMPANION_JOURNEY_V2=true NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED=true npm run build && mkdir -p .next/standalone/apps/web/.next && cp -r .next/static .next/standalone/apps/web/.next/static && cp -r public .next/standalone/apps/web/public",
     "pack": "npm run build && electron-builder --dir",
     "pack:linux": "npm run build && electron-builder --linux --x64 --dir",
     "pack:win": "npm run build && electron-builder --win --x64 --dir",
@@ -38,5 +41,6 @@
     "esbuild": "^0.28.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
-  }
+  },
+  "homepage": "https://github.com/asklins223/ai-learning-system"
 }

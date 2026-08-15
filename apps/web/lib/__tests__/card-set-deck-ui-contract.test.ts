@@ -171,11 +171,11 @@ describe("card set carousel UI contract", () => {
     }
   });
 
-  it("feature flag：/cards 按 isCardSetDeckUIEnabled 分支，flag 关时回退现有 grid", () => {
-    assert.ok(cardsPageSource.includes("isCardSetDeckUIEnabled()"));
-    assert.ok(cardsPageSource.includes("<CardSetDeckPage />"));
-    assert.ok(cardsPageSource.includes("return <CardsGridPage />"));
-    assert.ok(deckPageSource.includes("statusMap.cardSetStatus"));
+  it("retires the CardSet deck flag from the /cards information architecture", () => {
+    // 方案 20（2026-08-15）：/cards 已切到学习目标库（learning-objective rows），
+    // deck UI 分支与 flag 引用退役（learning-card-library-ui-contract 同断言）。
+    assert.ok(!cardsPageSource.includes("isCardSetDeckUIEnabled"));
+    assert.ok(!cardsPageSource.includes("CardSetDeckPage"));
   });
 
   it("展开态成员卡为普通 Link 到 /cards/[id]，不发牌截断（全量渲染）", () => {

@@ -134,6 +134,11 @@ export async function loginWithPassword(
     await db.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, user.id));
   }
   // ADR-0009: 查询所有活跃工作区（left_at IS NULL），排除已退出的
+  // ── RLS 重开清单项 ──
+  // 以下两处（workspaceMembers、workspaces）以全局 `db` 裸读（非事务上下文）而非
+  // withWorkspaceTransaction/SYSTEM 上下文。在 RLS 关闭的当前部署下按 user.id 过滤，
+  // 语义正确；一旦按 0027 契约重开 RLS，需复核这两处是否被 workspace 策略静默空读，
+  // 必要时改为显式 BYPASSRLS/系统事务上下文承载。
   const memberships = await db.query.workspaceMembers.findMany({
     where: and(
       eq(workspaceMembers.userId, user.id),

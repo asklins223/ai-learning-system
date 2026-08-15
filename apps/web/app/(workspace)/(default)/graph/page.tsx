@@ -42,6 +42,7 @@ const NODE_TYPE_LABEL: Record<GraphNode["type"], string> = {
   note: "笔记星座",
   card: "学习恒星",
   key_point: "论点卫星",
+  evidence: "证据陨石",
 };
 
 const NODE_TYPE_SHORT: Record<GraphNode["type"], string> = {
@@ -49,6 +50,7 @@ const NODE_TYPE_SHORT: Record<GraphNode["type"], string> = {
   note: "笔记",
   card: "学习卡",
   key_point: "论点",
+  evidence: "证据",
 };
 
 // 模块级共享空数组（稳定引用）：避免每渲染新建字面量使子组件 useMemo 失效。
@@ -58,6 +60,8 @@ const EMPTY_IDS: string[] = [];
 const RELATION_LABEL: Record<GraphEdge["type"], { incoming: string; outgoing: string }> = {  derived_from: { incoming: "提炼自", outgoing: "提炼为" },
   generated_from: { incoming: "生成自", outgoing: "生成学习卡" },
   contains: { incoming: "隶属于", outgoing: "包含论点" },
+  supports: { incoming: "由证据支持", outgoing: "支撑论点" },
+  prerequisite: { incoming: "前置依赖", outgoing: "推进目标" },
 };
 
 const FILTERS: ReadonlyArray<{
@@ -124,7 +128,13 @@ export default function UnderstandingGraphPage() {
   const detailReturnFocusRef = useRef<HTMLElement | null>(null);
   const detailWasOpenRef = useRef(false);
   const searchSessionActiveRef = useRef(false);
-  // 全局 keydown 只挂载一次，通过渲染期同步的 ref 读取最新值
+  // 全局 keydown 只挂载一次，通过渲染期同步的 ref 读取最新值。
+  // 第九轮 🟡graph-page-ref 豁免：渲染期写 ref 表面与 🟡B-3 规则（today/
+  // benchmark 已移入 effect）不一致，但此处是「latest-ref」模式——ref 仅被
+  // 单挂载的 keydown 处理器读取（Escape///f，L160-186），渲染期同步保证
+  // 事件处理器总能读到最新值、无 effect 延迟窗口；若移入 useEffect 会引入
+  // 「输入后立即按键读到旧值」的竞态。行为正确，保持现状（React 19
+  // useEvent 同款模式；B-3 针对的是渲染期写 ref 影响渲染一致性的场景，与此不同）。
   const queryRef = useRef(query);
   queryRef.current = query;
   const searchOpenRef = useRef(searchOpen);

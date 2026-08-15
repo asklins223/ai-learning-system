@@ -711,6 +711,16 @@ export async function createCardGenerationRun(
   input: CreateCardGenerationRunInput & { oldCardId?: string },
 ): Promise<CardGenerationRunAccepted> {
   return withWorkspaceTransaction(context, async (tx) => {
+    // C8（R36 恢复，R33 实现被并行提交覆盖）：V2 已启用且 V1 writer 未显式
+    // 开启 → V1 生成直接 409 fail closed（防双 writer/旧 schema 反写）。
+    const { isCardGenerationV2Enabled, isCardGenerationV1WriterEnabled } = await import("../../config/learning-companion-flags.ts");
+    if (isCardGenerationV2Enabled() && !isCardGenerationV1WriterEnabled()) {
+      throw new CardGenerationServiceError(
+        "v1_writer_disabled",
+        409,
+        "Card Generation V2 已启用且 V1 writer 未开启；V1 生成路径已停写",
+      );
+    }
     await tx.execute(sql`
       SELECT pg_advisory_xact_lock(
         hashtextextended(${`job-quota:${context.workspaceId}`}, 0)
@@ -729,6 +739,21 @@ export async function createCardGenerationRun(
           "idempotency_key_reused",
           409,
           "幂等键已被另一请求使用",
+        );
+      }
+      // N#8-3: 终态失败/取消的 run 不盲重放——否则同一个确定性幂等键（如 card-generate:${noteVersionId}）
+      // 会永久命中死 run，每次重试都返回失败 run、无清键/重试路径。此处抛 distinguishable 错误，
+      // 提示调用方用"新幂等键"重新派发（V1 writer 场景：改笔记→新 noteVersion→新键，或前端以此码
+      // 派生 attempt 后缀键重试）。活跃 run（幂等语义）与终态成功/部分就绪 run 仍正常重放。
+      const terminalFailure =
+        replay.status === SupervisorRunStatus.NEEDS_ATTENTION ||
+        replay.status === SupervisorRunStatus.CANCELLED ||
+        replay.status === SupervisorRunStatus.SUPERSEDED;
+      if (terminalFailure) {
+        throw new CardGenerationServiceError(
+          "run_terminal_failed",
+          409,
+          "幂等键对应的 run 已终态失败/取消；请使用新的幂等键重新发起",
         );
       }
       try {
@@ -980,6 +1005,16 @@ export async function createCardGenerationRun(
         coverageReport: { measurement: "planned", plannerVersion: null },
       })
       .returning();
+
+    // C8（R36 恢复）：V1 writer 放行路径记录 legacy hit 探针（观察窗口计数）。
+    const { recordLegacyWriterHit } = await import("../card-generation-v2/legacy-consumer-audit.ts");
+    await recordLegacyWriterHit(tx, {
+      runId: run.id,
+      workspaceId: context.workspaceId,
+      writerKind: "v1_supervisor",
+      hitAt: now.toISOString(),
+      note: "v1 writer allowed (CARD_GENERATION_V1_WRITER_ENABLED=true)",
+    });
 
     await tx
       .update(notes)

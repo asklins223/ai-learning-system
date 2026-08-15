@@ -72,6 +72,9 @@ test("bootstrap response schema：全 false features 合法", () => {
       live2d: false,
       learningActions: false,
       streamingVoice: false,
+      // §10.1/§14.3（2026-08-15）：Journey/delivery 能力投影字段。
+      journey: false,
+      deliveries: false,
     },
     serverTime: "2026-08-10T00:00:00.000Z",
   });

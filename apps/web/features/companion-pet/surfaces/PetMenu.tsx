@@ -6,7 +6,7 @@ import type { PetAdapterV1 } from "../desktop/desktop-pet-adapter";
 import { PetIcon, type PetIconNameV1 } from "./PetIcon";
 import { createLearningMenuProposal, fetchLearningContext } from "../learning-actions";
 import { api } from "@/lib/api";
-import type { CompanionLearningContextV1 } from "@ailearn/shared/companion-conversation-contracts";
+import type { CompanionLearningContextV1 } from "@ailearn/shared";
 
 interface MenuItemV1 {
   id: string;

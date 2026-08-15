@@ -813,6 +813,244 @@
       "when": 1786425006000,
       "tag": "0115_job_insert_notify",
       "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1786425007000,
+      "tag": "0116_learning_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1786425008000,
+      "tag": "0117_learning_run_processing_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1786425009000,
+      "tag": "0118_learning_task_variants_unique_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1786425010000,
+      "tag": "0119_learning_task_variants_standby",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1786425011000,
+      "tag": "0120_learning_task_variants_private_hashes",
+      "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1786425012000,
+      "tag": "0121_learning_run_processing_claim",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1786425013000,
+      "tag": "0122_assistant_page_contexts",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1786425014000,
+      "tag": "0123_learning_assessments_structured_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1786425015000,
+      "tag": "0124_companion_journey_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1786425016000,
+      "tag": "0125_worker_journey_pending_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1786425017000,
+      "tag": "0126_companion_conversation_journey_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1786425018000,
+      "tag": "0127_understanding_projection_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1786425019000,
+      "tag": "0128_route_plan_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1786425020000,
+      "tag": "0129_companion_sandbox_namespaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1786425021000,
+      "tag": "0130_learning_runs_sandbox_namespace_fk",
+      "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1786425022000,
+      "tag": "0131_assistant_deliveries",
+      "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1786425023000,
+      "tag": "0132_assistant_memory_items",
+      "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1786425024000,
+      "tag": "0133_learning_runs_legacy_episode_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1786425025000,
+      "tag": "0134_card_generation_vector_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1786425026000,
+      "tag": "0135_card_generation_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 136,
+      "version": "7",
+      "when": 1786425027000,
+      "tag": "0136_card_generation_legacy_writer_hits",
+      "breakpoints": true
+    },
+    {
+      "idx": 137,
+      "version": "7",
+      "when": 1786425028000,
+      "tag": "0137_card_generation_shadow_cutover",
+      "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1786425029000,
+      "tag": "0138_card_generation_v2_review_fixes",
+      "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1786425030000,
+      "tag": "0139_learning_run_v2_target_contract",
+      "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1786425031000,
+      "tag": "0140_account_preferences",
+      "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1786425032000,
+      "tag": "0141_rls_nullif_workspace_context",
+      "breakpoints": true
+    },
+    {
+      "idx": 142,
+      "version": "7",
+      "when": 1786425033000,
+      "tag": "0142_card_generation_v2_grant_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1786425034000,
+      "tag": "0143_presentation_history_run_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1786425035000,
+      "tag": "0144_interaction_qualifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1786425036000,
+      "tag": "0145_key_point_prerequisites",
+      "breakpoints": true
+    },
+    {
+      "idx": 146,
+      "version": "7",
+      "when": 1786425037000,
+      "tag": "0146_change_sets_projector_name",
+      "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1786425038000,
+      "tag": "0147_review_schedules_user_deferred_until",
+      "breakpoints": true
+    },
+    {
+      "idx": 148,
+      "version": "7",
+      "when": 1786425039000,
+      "tag": "0148_card_key_points_updated_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1786425040000,
+      "tag": "0149_learning_metric_events",
+      "breakpoints": true
     }
   ]
 }

@@ -5,8 +5,10 @@
  * be passed in directly, then filtered and laid out before the UI renders it.
  */
 
-export const GRAPH_NODE_TYPES = ["source", "note", "card", "key_point"] as const;
-export const GRAPH_EDGE_TYPES = ["derived_from", "generated_from", "contains"] as const;
+export const GRAPH_NODE_TYPES = ["source", "note", "card", "key_point", "evidence"] as const;
+// §15.2（2026-08-15 恢复）：supports（evidence→kp）/prerequisite（前置→目标）
+// 为投影边 kind，旧 reader 图也接受（渲染按通用边处理）。
+export const GRAPH_EDGE_TYPES = ["derived_from", "generated_from", "contains", "supports", "prerequisite"] as const;
 
 export type GraphNodeType = (typeof GRAPH_NODE_TYPES)[number];
 export type GraphEdgeType = (typeof GRAPH_EDGE_TYPES)[number];
@@ -104,6 +106,7 @@ const TYPE_RANK: Record<GraphNodeType, number> = {
   source: 0,
   note: 1,
   card: 2,
+  evidence: 3,
   key_point: 3,
 };
 
@@ -115,6 +118,7 @@ export const STAR_MAP_NODE_RADIUS: Readonly<Record<GraphNodeType, number>> = {
   source: 53,
   note: 51,
   card: 59,
+  evidence: 57,
   key_point: 35,
 };
 

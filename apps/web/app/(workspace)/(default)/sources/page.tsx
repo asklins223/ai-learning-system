@@ -2,6 +2,7 @@
 
 import "@/app/styles/sources-list.css";
 import Link from "next/link";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Suspense,
@@ -77,6 +78,16 @@ function SourceTypeIcon({ type }: { type: SourceType }) {
 
 // 2026-08-11：useSearchParams 需在 Suspense 内（Next 15 CSR bailout 约束）
 export default function SourcesPage() {
+  // P5（文档 16 §14.6）：来源库列表页发布 bounded context。
+  // 第八轮 🟡B-1：useMemo 稳定引用。
+  useMainPageContext(useMemo(() => ({
+    routeRef: { kind: "source" },
+    pageKind: "source",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  }), []));
   return (
     <Suspense fallback={<div className="sources-library-loading">正在加载来源库…</div>}>
       <SourcesPageInner />
@@ -206,22 +217,29 @@ function SourcesPageInner() {
     };
   }, [loadSources]);
 
-  const processingCount = useMemo(
-    () =>
-      sources.filter(
-        (source) =>
-          source.status === "processing" || source.status === "draft",
-      ).length,
-    [sources],
-  );
+  // F#7（第六轮 🟡6）：单趟派生——一次遍历 sources 同时产出 processing 计数、
+  // processing ids 与 ready/failed/all 计数，替代原先 processingCount 与
+  // processingIds 两个独立相同 filter 以及 loadedCounts 的再次 filter。
+  const statusDerived = useMemo(() => {
+    let processing = 0;
+    let ready = 0;
+    let failed = 0;
+    const ids: string[] = [];
+    for (const source of sources) {
+      if (source.status === "processing" || source.status === "draft") {
+        processing += 1;
+        ids.push(source.id);
+      } else if (source.status === "ready") {
+        ready += 1;
+      } else if (source.status === "failed") {
+        failed += 1;
+      }
+    }
+    return { processing, ready, failed, ids };
+  }, [sources]);
+  const processingCount = statusDerived.processing;
   const hasProcessing = processingCount > 0;
-  const processingIds = useMemo(
-    () => sources
-      .filter((source) => source.status === "processing" || source.status === "draft")
-      .map((source) => source.id),
-    [sources],
-  );
-  const processingIdsKey = processingIds.join(",");
+  const processingIdsKey = statusDerived.ids.join(",");
 
   useEffect(() => {
     if (!processingIdsKey) {
@@ -236,6 +254,13 @@ function SourcesPageInner() {
 
     const schedulePoll = () => {
       pollTimerRef.current = setTimeout(async () => {
+        // F20（round4）：页面切到后台（不可见）时跳过轮询 GET——后台标签持
+        // 有处理中来源时不再每 2–5s 请求；仅重排下一次 tick（轻量，不触网），
+        // 恢复可见后继续轮询。
+        if (document.visibilityState === "hidden") {
+          schedulePoll();
+          return;
+        }
         await loadSources({ fullReload: false, refreshIds: ids });
         if (cancelled) return;
         pollDelayRef.current = Math.min(5000, pollDelayRef.current * 1.5);
@@ -447,11 +472,11 @@ function SourcesPageInner() {
   const loadedCounts = useMemo<Record<FilterStatus, number>>(
     () => ({
       all: sources.length,
-      ready: sources.filter((source) => source.status === "ready").length,
-      processing: processingCount,
-      failed: sources.filter((source) => source.status === "failed").length,
+      ready: statusDerived.ready,
+      processing: statusDerived.processing,
+      failed: statusDerived.failed,
     }),
-    [processingCount, sources],
+    [sources.length, statusDerived.ready, statusDerived.processing, statusDerived.failed],
   );
 
   const filteredSources = useMemo(() => {
@@ -463,6 +488,13 @@ function SourcesPageInner() {
       return searchable.includes(query);
     });
   }, [searchQuery, sources, statusFilter]);
+
+  // F9：O(n·m) → O(n)——预先建立 id→stableIndex 索引，渲染内每行 O(1) 读取，
+  // 轮询重渲染时不再每 row 全数组 findIndex。
+  const sourceIndexMap = useMemo(
+    () => new Map(sources.map((item, index) => [item.id, index] as const)),
+    [sources],
+  );
 
   const hasLocalSelection =
     statusFilter !== "all" || searchQuery.trim().length > 0;
@@ -830,9 +862,7 @@ function SourcesPageInner() {
                   {filteredSources.map((source, index) => {
                     const statusPresentation = statusMap.sourceStatus(source.status);
                     const typeMeta = SOURCE_TYPE_META[source.type];
-                    const stableIndex = sources.findIndex(
-                      (item) => item.id === source.id,
-                    );
+                    const stableIndex = sourceIndexMap.get(source.id) ?? index;
                     const actionBusy =
                       creatingNoteId === source.id || archivingId === source.id;
                     const openActionLabel =

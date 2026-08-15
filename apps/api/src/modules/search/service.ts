@@ -1,4 +1,4 @@
-import { and, asc, eq, ne, sql, inArray, lt, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, ne, sql, inArray, lt, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   learningCards,
@@ -11,6 +11,30 @@ import { searchDocuments } from "../../db/schema/search.ts";
 import { CardStatus, SourceStatus } from "@ailearn/shared";
 import { logger } from "../../lib/logger.ts";
 import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
+
+// N#7-1 / N#8-1: reindex 与 drift 读阶段每表的行上限，防止单工作区整表无界装载导致内存压力。
+// 超出上限时记告警并截断处理（超限部分不会进入投影），避免 OOM。
+// N#8-1 补充：reindex 与 drift 共用同一上限 + 同一确定排序，使两路径截断到同一个确定子集。
+const REINDEX_MAX_ROWS_PER_TABLE = 50_000;
+
+// N#8-1: reindex 与 drift 共用同一个"前 LIMIT 子集"的截断边界，避免两路径各取任意子集。
+// 关键：两处顶层表读都用完全相同的确定排序 + 同一上限。于是 reindex 建立的索引与 drift 读取的
+// 业务表都覆盖同一确定子集（按 updatedAt DESC → 最近写入优先），超出截断线的实体两侧都不会
+// 读取 → 不再被误判为 missing。cardSets 无 updatedAt 列，用 createdAt DESC + id 兜底；
+// 其余三表用 updatedAt DESC + id（与 0153/索引列对齐）。
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const reindexTopOrder: Record<string, (fields: any) => any[]> = {
+  notes: (fields) => [desc(fields.updatedAt), asc(fields.id)],
+  sources: (fields) => [desc(fields.updatedAt), asc(fields.id)],
+  cardSets: (fields) => [desc(fields.createdAt), asc(fields.id)],
+  cards: (fields) => [desc(fields.updatedAt), asc(fields.id)],
+};
+
+// N#8-1: 进程内记录"该工作区上一次 reindex 是否因单表行数上限被截断"。当域名表真实超过
+// REINDEX_MAX_ROWS_PER_TABLE 时，reindex 必然只索引确定前 LIMIT 子集，drift 也不会读超线实体，
+// 因而"超线实体不在索引中"是截断的既定结果而非漂移。auto-fix 借由此标记避免在该场景反复触发
+// reindex（进程内无跨副本同步；与 search count 缓存同一级的声明）。
+const lastReindexCapped = new Map<string, boolean>();
 
 export interface SearchResult {
   objectType: string;
@@ -285,6 +309,8 @@ export interface SearchReindexResult {
     card: number;
     evidence: number;
   };
+  /** N#8-1: 本次 reindex 是否因单表行数上限被截断（投影可能只含确定的前 LIMIT 子集） */
+  capped: boolean;
 }
 
 /**
@@ -309,23 +335,49 @@ export async function reindexWorkspaceSearch(
   // segments query per source, and one key-point/evidence query per card.
   const [noteRows, sourceRows, cardSetRows, cardRows] = await Promise.all([
     // CONC-03: 软删除的笔记不应被重新索引到搜索文档中
-    executor.query.notes.findMany({ where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)) }),
+    // N#8-1: 顶层表读加行上限 + 确定排序（与 drift 对齐，见 reindexTopOrder）。
+    executor.query.notes.findMany({
+      where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.notes(notes),
+    }),
     executor.query.sources.findMany({
       where: and(eq(sources.workspaceId, workspaceId), ne(sources.status, SourceStatus.ARCHIVED)),
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.sources(sources),
     }),
     executor.query.learningCardSets.findMany({
       where: and(
         eq(learningCardSets.workspaceId, workspaceId),
         eq(learningCardSets.status, "active"),
       ),
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.cardSets(learningCardSets),
     }),
     executor.query.learningCards.findMany({
       where: and(
         eq(learningCards.workspaceId, workspaceId),
         activeLearningCardConsumerPredicate(),
       ),
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.cards(learningCards),
     }),
   ]);
+
+  // N#7-1: 每表读阶段加行上限，超出记告警（超限部分不进入投影）。
+  // N#8-1: 顺带记录"本次 reindex 是否截断"，供 auto-fix 判断是否应继续自动重索引。
+  const wasCapped =
+    noteRows.length >= REINDEX_MAX_ROWS_PER_TABLE ||
+    sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE ||
+    cardSetRows.length >= REINDEX_MAX_ROWS_PER_TABLE ||
+    cardRows.length >= REINDEX_MAX_ROWS_PER_TABLE;
+  if (wasCapped) {
+    logger.warn(
+      { workspaceId, limit: REINDEX_MAX_ROWS_PER_TABLE, counts: { notes: noteRows.length, sources: sourceRows.length, cardSets: cardSetRows.length, cards: cardRows.length } },
+      "reindexWorkspaceSearch 达到单表行数上限，投影可能不完整",
+    );
+  }
+  lastReindexCapped.set(workspaceId, wasCapped);
 
   const currentVersionIds = noteRows.flatMap((note) =>
     note.currentVersionId ? [note.currentVersionId] : [],
@@ -632,7 +684,7 @@ export async function reindexWorkspaceSearch(
     errors = 1;
   }
 
-  return { deleted: deletedCount, indexed, errors };
+  return { deleted: deletedCount, indexed, errors, capped: lastReindexCapped.get(workspaceId) ?? false };
 }
 
 /**
@@ -672,6 +724,9 @@ export interface SearchDriftResult {
   staleBodies: { objectType: string; objectId: string }[];
   /** 是否检测到漂移 */
   hasDrift: boolean;
+  /** N#8-1: 各顶层业务域表读是否命中行数上限（截断）。实体超过确定截断线时两侧都不会读取，
+   *  属既定截断而非漂移；auto-fix 据此避免反复重索引。 */
+  capped: Record<"note" | "source" | "cardSet" | "card", boolean>;
 }
 
 export async function detectSearchDrift(
@@ -697,9 +752,12 @@ export async function detectSearchDrift(
     indexedCards,
   ] = await Promise.all([
     // 1a. Notes business table (CONC-03: exclude soft-deleted)
+    // N#8-1: 顶端四表读加上限 + 确定排序（与 reindex 对齐），读取同一确定截断子集。
     executor.query.notes.findMany({
       where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
       columns: { id: true, title: true, currentVersionId: true },
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.notes(notes),
     }),
     // 1b. Notes index
     executor.query.searchDocuments.findMany({
@@ -710,6 +768,8 @@ export async function detectSearchDrift(
     executor.query.sources.findMany({
       where: and(eq(sources.workspaceId, workspaceId), ne(sources.status, SourceStatus.ARCHIVED)),
       columns: { id: true, title: true },
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.sources(sources),
     }),
     // 1d. Sources index
     executor.query.searchDocuments.findMany({
@@ -723,6 +783,8 @@ export async function detectSearchDrift(
         eq(learningCardSets.status, "active"),
       ),
       columns: { id: true, title: true },
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.cardSets(learningCardSets),
     }),
     // 1f. Card sets index
     executor.query.searchDocuments.findMany({
@@ -739,6 +801,8 @@ export async function detectSearchDrift(
         activeLearningCardConsumerPredicate(),
       ),
       columns: { id: true, schemaJson: true },
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.cards(learningCards),
     }),
     // 1h. Cards index
     executor.query.searchDocuments.findMany({
@@ -747,13 +811,27 @@ export async function detectSearchDrift(
     }),
   ]);
 
+  // N#8-1: 记录各顶层业务域表读是否命中行数上限（截断）。截断意味着域名表真实超过
+  // REINDEX_MAX_ROWS_PER_TABLE，能进入索引的只是确定的前 LIMIT 子集。此时：
+  //  - missing 只对"已读入窗口内但索引缺失"的实体报告（真实窗口内漂移，保持）；
+  //  - ghost 对"索引有而业务读窗口无"的实体不再报告（超线实体可能仍合法存在于业务表中，
+  //    只是未进入当前确定窗口，把它们当 ghost 会误报），并记告警。
+  const capped = {
+    note: noteRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
+    source: sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
+    cardSet: cardSetRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
+    card: cardRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
+  };
+
   // Process notes drift
   const noteIds = new Set(noteRows.filter((n) => n.currentVersionId).map((n) => n.id));
   const noteTitleMap = new Map(noteRows.filter((n) => n.currentVersionId).map((n) => [n.id, n.title]));
   const indexedNoteIds = new Set(indexedNotes.map((d) => d.objectId));
   for (const doc of indexedNotes) {
     if (!noteIds.has(doc.objectId)) {
-      ghosts.push({ objectType: "note", objectId: doc.objectId });
+      if (!capped.note) {
+        ghosts.push({ objectType: "note", objectId: doc.objectId });
+      }
     } else {
       const actualTitle = noteTitleMap.get(doc.objectId);
       if (actualTitle !== undefined && actualTitle !== doc.title) {
@@ -773,7 +851,9 @@ export async function detectSearchDrift(
   const indexedSourceIds = new Set(indexedSources.map((d) => d.objectId));
   for (const doc of indexedSources) {
     if (!sourceIds.has(doc.objectId)) {
-      ghosts.push({ objectType: "source", objectId: doc.objectId });
+      if (!capped.source) {
+        ghosts.push({ objectType: "source", objectId: doc.objectId });
+      }
     } else {
       const actualTitle = sourceTitleMap.get(doc.objectId);
       if (actualTitle !== undefined && actualTitle !== doc.title) {
@@ -793,7 +873,9 @@ export async function detectSearchDrift(
   const indexedCardSetIds = new Set(indexedCardSets.map((document) => document.objectId));
   for (const document of indexedCardSets) {
     if (!cardSetIds.has(document.objectId)) {
-      ghosts.push({ objectType: "card_set", objectId: document.objectId });
+      if (!capped.cardSet) {
+        ghosts.push({ objectType: "card_set", objectId: document.objectId });
+      }
     } else {
       const actualTitle = cardSetTitleMap.get(document.objectId);
       if (actualTitle !== undefined && actualTitle !== document.title) {
@@ -815,7 +897,9 @@ export async function detectSearchDrift(
   const indexedCardIds = new Set(indexedCards.map((d) => d.objectId));
   for (const doc of indexedCards) {
     if (!cardIds.has(doc.objectId)) {
-      ghosts.push({ objectType: "card", objectId: doc.objectId });
+      if (!capped.card) {
+        ghosts.push({ objectType: "card", objectId: doc.objectId });
+      }
     } else {
       const actualTitle = cardTitleMap.get(doc.objectId);
       if (actualTitle !== undefined && actualTitle !== doc.title) {
@@ -931,6 +1015,7 @@ export async function detectSearchDrift(
     missing,
     staleTitles,
     staleBodies,
+    capped,
     hasDrift: ghosts.length > 0 || missing.length > 0 || staleTitles.length > 0 || staleBodies.length > 0,
   };
 }
@@ -970,6 +1055,26 @@ export async function autoFixSearchDrift(
     drift.missing.length +
     drift.staleTitles.length +
     drift.staleBodies.length;
+
+  // N#8-1: 截断场景不反复触发 reindex。
+  // 若某顶层表读命中行数上限（capped=true）且该工作区上一次 reindex 同样被截断，说明域名真实
+  // 超过 REINDEX_MAX_ROWS_PER_TABLE，能进入投影的只是确定的前 LIMIT 子集。"超线实体不在索引中"
+  // 是截断的既定结果而非恢复可修的漂移，再次 reindex 只会重扫同一截断子集、不收敛，造成抖动。
+  // 此时跳过自动修复并明确告警，待上限提升或业务量下降后再收敛。
+  const anyCapped = drift.capped.note || drift.capped.source || drift.capped.cardSet || drift.capped.card;
+  const lastCapped = lastReindexCapped.get(workspaceId) ?? false;
+  if (anyCapped && lastCapped) {
+    logger.warn(
+      {
+        workspaceId,
+        totalDrift,
+        capped: drift.capped,
+        note: "lastReindexCapped=true 且检测到截断；跳过 auto-fix，避免对必然截断的投影反复重索引",
+      },
+      "搜索索引检测到截断（域名表超过单表行数上限），auto-fix 已跳过重索引以避免抖动（ARCH-01）",
+    );
+    return { drift, autoFixed: false };
+  }
 
   // logger 已在文件顶部静态导入，直接使用
   if (totalDrift >= autoFixThreshold) {

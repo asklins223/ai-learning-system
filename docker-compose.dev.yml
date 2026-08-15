@@ -183,6 +183,11 @@ services:
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-true}
       COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
       COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-true}
+      # §10.1/§14.3（2026-08-15 接线修复）：Journey/delivery 门控 + Card Gen V2
+      # 路由注册门控——此前 API 容器缺失这两个 env，journey 端点 404、
+      # V2 路由不注册。
+      COMPANION_JOURNEY_V2: ${COMPANION_JOURNEY_V2:-true}
+      CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-true}
       # AI platform config — all provider/capability config in one JSON file.
       AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}

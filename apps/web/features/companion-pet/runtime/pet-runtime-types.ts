@@ -1,8 +1,8 @@
-import type { DesktopPetWindowStateV1 } from "@ailearn/shared/desktop-pet-contracts";
-import type { AllowedMainRouteV1 } from "@ailearn/shared/desktop-pet-contracts";
-import type { CompanionConversationSnapshotV1 } from "@ailearn/shared/companion-conversation-contracts";
-import type { CompanionCharacterCueV1 } from "@ailearn/shared/companion-conversation-contracts";
-import type { CharacterCueV1 } from "@ailearn/shared/companion-character-contracts";
+import type { DesktopPetWindowStateV1 } from "@ailearn/shared";
+import type { AllowedMainRouteV1 } from "@ailearn/shared";
+import type { CompanionConversationSnapshotV1 } from "@ailearn/shared";
+import type { CompanionCharacterCueV1 } from "@ailearn/shared";
+import type { CharacterCueV1 } from "@ailearn/shared";
 
 /**
  * P1 subset of the seven-domain runtime (02 §1–§5).
@@ -424,3 +424,47 @@ export function deriveCharacterPresentation(
   if (bubble.kind === "incoming" && !context.privacyMode) return "invite";
   return "idle";
 }
+
+// ─── §9.3/§9.4 V2 聚合投影类型（2026-08-15 恢复：web tracked 回退丢失，
+// pet-presentation-v2 按此投影）。V2 非第二真相源，仅供展示层消费。 ──────
+
+/** Journey 状态投影（PetJourneyLive 注入；默认 not_offered）。 */
+export type PetJourneyV2 =
+  | "not_offered"
+  | "offered"
+  | "active"
+  | "deferred"
+  | "completed"
+  | "skipped";
+
+/** §9.3 正交状态投影（生命周期 × 注意力 × 任务）。 */
+export interface PetRuntimeV2 {
+  lifecycle: "boot" | "auth" | "fault" | "off" | "suspended" | "ready";
+  attention: "dnd" | "engaged" | "cue_visible" | "cue_pending" | "passive";
+  task: "confirming" | "executing" | "reporting" | "assisting" | "proposing" | "none";
+  turn: ConversationTurnStateV1;
+  journey: PetJourneyV2;
+  activeContext: unknown;
+  proactiveQueue: unknown[];
+  memorySync: "idle" | "syncing" | "synced" | "error";
+}
+
+/** §9.4 展示投影（choices 无泄题语义；dismissPolicy 驱动气泡关闭策略）。 */
+export type PetPresentationV2 =
+  | {
+      messageId: string;
+      speechMode: "text_only";
+      proposedAction: { proposalId: string; impactSummary: string };
+      dismissPolicy: "explicit";
+    }
+  | {
+      messageId: string;
+      speechMode: "text_only";
+      progressCue: { state: "processing" | "ready" | "failed" };
+      dismissPolicy: "persistent_until_result" | "explicit" | "auto";
+    }
+  | {
+      messageId: string;
+      speechMode: "text_only" | "speak_message";
+      dismissPolicy: "auto";
+    };

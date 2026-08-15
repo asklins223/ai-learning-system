@@ -6,7 +6,7 @@ import {
   petReducer,
 } from "./pet-reducer";
 import { deriveCharacterPresentation, type PetRuntimeStateV1 } from "./pet-runtime-types";
-import type { CompanionConversationSnapshotV1 } from "@ailearn/shared/companion-conversation-contracts";
+import type { CompanionConversationSnapshotV1 } from "@ailearn/shared";
 
 function initialState(overrides: Partial<PetRuntimeStateV1> = {}): PetRuntimeStateV1 {
   return {

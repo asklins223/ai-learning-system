@@ -117,7 +117,9 @@ describe("learning card set UI contract", () => {
     assert.ok(cardSetSource.includes("更多学习卡暂时没有加载成功"));
   });
 
-  it("prefers the generated card set and keeps single-card fallback navigation", () => {
+  it("routes legacy generation results to individual cards or the card library", () => {
+    // 方案 20（2026-08-15）：CardSet 牌库已从 /cards IA 退役——生成结果
+    // 优先路由到单卡 /cards/:id，回退到卡片库 /cards；不再生成 /card-sets/ 链接。
     const targetStart = noteEditorSource.indexOf(
       "const generatedCardHref",
     );
@@ -126,12 +128,9 @@ describe("learning card set UI contract", () => {
       targetStart,
     );
     const targetSource = noteEditorSource.slice(targetStart, targetEnd);
-    assert.ok(
-      targetSource.indexOf("result?.cardSetId")
-      < targetSource.indexOf("result?.cardId"),
-    );
-    assert.ok(targetSource.includes("/card-sets/${generationRun.result.cardSetId}"));
+    assert.ok(targetSource.includes("result?.cardId"));
     assert.ok(targetSource.includes("/cards/${generationRun.result.cardId}"));
+    assert.ok(!targetSource.includes("/card-sets/"));
   });
 
   it("links a member card back to its set and exposes sibling navigation", () => {

@@ -22,13 +22,10 @@
  *   - `lib/markdown-import-files.ts` — Markdown 导入
  *   - `lib/milkdown-lifecycle.ts` — Milkdown 生命周期
  *   - `lib/note-title-save.ts` — 笔记标题保存
- *   - `lib/review-attempt-format.ts` — 复习格式化
  *   - `lib/search-return.ts` — 搜索结果处理
  *   - `lib/source-return.ts` — 来源结果处理
  *   - `lib/today-return.ts` — 今日页面处理
  *   - `lib/understanding-graph.ts` — 理解星图
- *   - `lib/validation-action-keys.ts` — 验证操作键
- *   - `lib/validation-question.ts` — 验证问题
  *
  * 所有类型从 `api-types.ts` 导入并重新导出，保持向后兼容。
  * ──────────────────────────────────────────────────────────────────────
@@ -111,15 +108,11 @@ export {
   type SourceSegment,
   type SourceDetail,
   type UnderstandingState,
-  type UnderstandingGraphNodeType,
-  type UnderstandingGraphEdgeType,
-  type UnderstandingGraphNode,
-  type UnderstandingGraphEdge,
-  type UnderstandingGraphResponse,
   type SearchResult,
   type SearchDriftResult,
   type StatsOverview,
   type NoteVersionSummary,
+  type UnderstandingGraphResponse,
   type BenchmarkKeyPoint,
   type BenchmarkNoteResult,
   type BenchmarkReport,
@@ -167,7 +160,6 @@ import type {
   SourceType,
   SourceDetail,
   UnderstandingState,
-  UnderstandingGraphResponse,
   SearchResult,
   SearchDriftResult,
   StatsOverview,
@@ -193,26 +185,25 @@ import type {
   ReviewAttemptStartResult,
   ReviewAttemptSubmitResult,
   ReviewAttemptLaterResult,
+  UnderstandingGraphResponse,
 } from "./api-types";
 
 import {
   splitMarkdownImportBatches,
   MARKDOWN_IMPORT_ROUTE_BYTES,
 } from "./api-types";
+import type { CompanionOverview } from "@/features/companion/api/contracts";
 import type {
-  CompanionOverview,
-  CompanionOnboardingTransitionResponse,
-  CreateLearningSessionInput,
-  LearningAnswerResult,
-  LearningAssessmentResult,
-  LearningSessionPublicView,
-  LearningTutorDetour,
-  LearningTutorTurnResult,
-} from "@/features/companion/api/contracts";
-import type {
-  AuthSurfaceManifestV1,
-  CompanionGroundedTutorGrantV1,
-  CompanionLearningSessionContextV1,
+  CreateLearningRunRequestV1,
+  GetLearningRunResultResponseV1,
+  LearningRunActionRequestV1,
+  LearningRunActionResponseV1,
+  LearningRunPublicV1,
+  LearningRunReturnContractV1,
+  LearningTaskDraftV1,
+  PutLearningTaskDraftRequestV1,
+  SubmitTaskArtifactReceiptV1,
+  SubmitTaskArtifactV1,
 } from "@ailearn/shared";
 
 // R-012: 浏览器端默认使用同源 /api（由 next.config.mjs rewrite 代理到 API 服务器），
@@ -244,6 +235,19 @@ let getMeInFlight:
   | { token: string | null; promise: Promise<CurrentUser> }
   | null = null;
 let getMeCacheGeneration = 0;
+
+// F22（round5）：GET 缓存 key 的工作区维度——避免 30s 内跨工作区命中旧缓存。
+// 从 getMeCache 取当前 workspaceId；getMe 尚未解析时返回 null（浏览器端
+// getToken 恒 null，无其它稳定 scope）。GET 调用方在 scope 为 null 时必须
+// 短路缓存读写（见 request），避免以 "anon" 占位键与真实 workspaceId 键
+// 并存产生双键孤儿 GET 缓存。CurrentUser 已含 workspaceId。
+function currentWorkspaceCacheScope(): string | null {
+  const fromMe = getMeCache?.value.workspaceId;
+  if (fromMe) return fromMe;
+  const token = getToken();
+  if (token) return token;
+  return null;
+}
 
 /**
  * QUAL-06 fix: SSR-safe cache invalidation. Only mutates module state
@@ -542,6 +546,11 @@ attachCacheBustListener();
 function invalidateRequestGetCache(): void {
   if (!isBrowser) return;
   requestGetCache.clear();
+  // 第八轮 🟡B-4：代际 +1，使失效前已在途的旧 GET resolve 后无法把旧数据回写缓存。
+  requestCacheGeneration += 1;
+  // F#7（第六轮 🟠1）：跨工作区/写操作使缓存失效时，一并解除 in-flight 去重，
+  // 避免切换工作区瞬间的旧 in-flight GET 与新的同 path GET 去重混入旧 scope。
+  inFlightGetRequests.clear();
   attachCacheBustListener();
   try {
     // storage 事件不在发起页触发（本页已 clear），仅用于其它标签页
@@ -562,6 +571,34 @@ function cacheSetGet(cacheKey: string, at: number, data: unknown): void {
     if (oldest === undefined) break;
     requestGetCache.delete(oldest);
   }
+}
+
+// F#7（第六轮 🟠1）：通用 GET in-flight 去重。
+//
+// - key = 请求 path（含 query），scope-null 也去重；
+// - 仅对【同 path 且同 signal 身份】的并发 GET 共享一次 fetch：两个都无
+//   signal，或两个引用同一 AbortSignal。signal 不同（或一有一无）不共享，
+//   保证各自 abort 独立——被 abort 者只取消自己的请求。
+// - resolve 后由发起者按当时的 scope 写 GET 缓存（scope-null 则不写），
+//   去重借用的调用方直接拿到共享数据，不重复写缓存。
+// - 401 失效逻辑仍在 requestResponse 内保持（生成代际一致才跳登录）。
+const inFlightGetRequests = new Map<
+  string,
+  { signal: AbortSignal | null | undefined; promise: Promise<unknown> }
+>();
+
+// 第八轮 🟡B-4：GET 缓存写回代的代际计数器。写操作（invalidateRequestGetCache）
+// 时 +1；in-flight GET 在 resolve 后写缓存前比对「发起时的代际」，若期间发生过
+// 失效（可能已过期），则丢弃这次回写，避免「失效后迟完成的旧 GET 把旧数据回填
+// 回已清空的缓存」。
+let requestCacheGeneration = 0;
+
+function sameDedupSignal(
+  a: AbortSignal | null | undefined,
+  b: AbortSignal | null | undefined,
+): boolean {
+  // 两者都无 signal，或严格同一引用 —— 才是可安全共享的“同一次逻辑请求”。
+  return a === b;
 }
 
 async function requestResponse(path: string, init: RequestInit = {}): Promise<Response> {
@@ -592,8 +629,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method ?? "GET").toUpperCase();
   // 2026-08-11（性能专项）：GET 短 TTL 缓存（30s）——命中直接返回，减少
   // 跨页面重复请求；写操作（含 204）全量失效。
-  const cacheKey = `${method} ${path}`;
-  if (method === "GET" && requestCacheEnabled) {
+  // F18：缓存 key 增加工作区维度——避免同标签页 30s 内跨工作区命中旧缓存。
+  // `/auth/me` 自身不受工作区归属影响（用户身份），用后置 fallback 兜底。
+  // F22：getMe 未解析前 scope 为 null → 对 GET 缓存读写整体短路（不读不写，
+  // 直接请求网络），避免 "anon" 占位键与真实 workspaceId 键并存的双键孤儿缓存。
+  // key 仍保留 |ws= 格式；仅当 scope 不可达时缓存不可用，不改变命中/写语义。
+  // F#7（第六轮 🟠1）：GET 增加通用 in-flight 去重（scope-null 也生效）。
+  // 第九轮 🟡A-1-handle（文档化边界）：getCacheUsable 在 request 入口按当时
+  // wsScope 冻结一次。若入口时 getMe 未解析（scope=null → false），而借用方在
+  // await 首发 promise 期间 scope 才解析，借用方仍按入口快照不补写——残余窄
+  // 冷窗口（getMe 通常先于业务 GET 解析，命中概率极低）。保持现状；如需彻底
+  // 消除，可在 resolve 后重算一次 wsScope/cacheKey 再补写。
+  const wsScope = currentWorkspaceCacheScope();
+  const cacheKey = `${method} ${path} |ws=${wsScope ?? "anon"}`;
+  const getCacheUsable = method === "GET" && requestCacheEnabled && wsScope !== null;
+  if (getCacheUsable) {
     const hit = requestGetCache.get(cacheKey);
     if (hit && Date.now() - hit.at < REQUEST_CACHE_TTL_MS) {
       // 2026-08-12（数据面审计 P3）：命中缓存时调用方已 abort 则抛错
@@ -604,11 +654,67 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       }
       return hit.data as T;
     }
-  } else {
-    // 2026-08-11（review 修复）：失效必须在 204 提前返回之前——否则
-    // logout/DELETE 等 204 写操作绕过失效，缓存命中旧数据（跨会话泄漏）。
-    invalidateRequestGetCache();
   }
+
+  if (method === "GET") {
+    // GET in-flight 去重：同 path 且同 signal 身份（同无/同引用）的并发
+    // GET 共享一次 fetch。resolve 后缓存由发起者按当时 scope 写一次。
+    const signal = init.signal;
+    const existing = inFlightGetRequests.get(path);
+    if (existing && sameDedupSignal(existing.signal, signal)) {
+      // 第八轮 🟠A-1：去重借用方（非首发者）在 resolve 后也按【自己当时的
+      // scope/cacheKey】顺手补写一次缓存。若首发者在 scope 未解析（null）时
+      // 发起、而借用方此刻 scope 已解析，补写能消除「冷缓存窗口被首发者
+      // scope 未就绪吞掉」的边界。保持 abort 语义：借用方 abort 不 abort
+      // 首发请求，resolve 如期返回数据（沿用既有语义）。
+      const borrowedGen = requestCacheGeneration;
+      const borrowed = await existing.promise as Promise<T>;
+      // 借用方在 await 期间若发生失效（代际 +1），同样不回填旧数据。
+      if (getCacheUsable && borrowedGen === requestCacheGeneration) {
+        cacheSetGet(cacheKey, Date.now(), borrowed);
+      }
+      return borrowed;
+    }
+    const startedAtGeneration = requestCacheGeneration;
+    const promise = (async (): Promise<T> => {
+      const res = await requestResponse(path, init);
+      if (res.status === 204) {
+        await res.text();
+        return undefined as T;
+      }
+      const data = await res.json();
+      // 第八轮 🟡B-4：写缓存前校验代际——失效后在途完成的旧 GET（可能已过期）
+      // 不回填已清空的缓存。
+      if (getCacheUsable && startedAtGeneration === requestCacheGeneration) {
+        cacheSetGet(cacheKey, Date.now(), data);
+      }
+      // 登录/注册/切换工作区等端点在响应体中返回 csrfToken（见下非 GET 分支）。
+      if (
+        typeof window !== "undefined" &&
+        data &&
+        typeof data === "object" &&
+        "csrfToken" in data
+      ) {
+        const token = (data as { csrfToken?: unknown }).csrfToken;
+        if (typeof token === "string" && token) {
+          setCsrfCookie(token);
+        }
+      }
+      return data as T;
+    })();
+    inFlightGetRequests.set(path, { signal, promise: promise as Promise<unknown> });
+    try {
+      return await promise;
+    } finally {
+      // 仅当本 promise 仍是该 key 的当前条目时才删除——被不同 signal 覆盖时保留。
+      if (inFlightGetRequests.get(path)?.promise === promise) {
+        inFlightGetRequests.delete(path);
+      }
+    }
+  }
+
+  // 非 GET：失效必须在请求发出前执行（含 204 提前返回），避免缓存命中旧数据。
+  invalidateRequestGetCache();
   const res = await requestResponse(path, init);
   if (res.status === 204) {
     // fetch() resolves when response headers arrive. Drain the empty response
@@ -618,9 +724,6 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return undefined as T;
   }
   const data = await res.json() as T;
-  if (method === "GET" && requestCacheEnabled) {
-    cacheSetGet(cacheKey, Date.now(), data);
-  }
   // 登录/注册/切换工作区等端点在响应体中返回 csrfToken。当 Next.js
   // rewrite 代理丢弃了后端的 Set-Cookie: ailearn_csrf 时，前端需要
   // 从响应体兜底设置 cookie，否则后续 PUT/POST/DELETE 会因缺少
@@ -738,10 +841,6 @@ async function importMarkdownInBatches(
 
 export const api = {
   /* companion reconstruction / learning session v2 */
-  getPublicAuthSurfaceManifest: () =>
-    request<{ manifest: AuthSurfaceManifestV1; testMode: boolean }>(
-      "/public/auth-surface-manifest",
-    ),
   getCompanionOverview: (signal?: AbortSignal) =>
     request<CompanionOverview>("/me/companion", { signal }),
   updateCompanionAccount: (input: {
@@ -750,18 +849,37 @@ export const api = {
     presence?: { presence: "online" | "dnd" | "offline"; updatedAt?: string };
     animationOff?: boolean;
     voiceOff?: boolean;
+    // 方案 16 §10.3：主动介入强度与静默时段。
+    interventionLevel?: "quiet" | "moderate" | "active";
+    quietHours?: { startLocal: string; endLocal: string; timezone: string } | null;
   }) =>
     request<CompanionOverview["account"]>("/me/companion", {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
-  transitionCompanionOnboarding: (
-    version: string,
-    input: { action: "start" | "skip" | "replay"; revision?: number },
-  ) =>
-    request<CompanionOnboardingTransitionResponse>(
-      `/me/companion/onboarding/${encodeURIComponent(version)}/transition`,
-      { method: "POST", body: JSON.stringify(input) },
+  /* 方案 16 §10.3：分层记忆管理（candidate → confirm/reject；active → delete）。 */
+  listCompanionMemories: (includeCandidates = false) =>
+    request<{ version: 1; items: unknown[] }>(
+      `/companion/memory?includeCandidates=${includeCandidates}`,
+    ),
+  confirmCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  rejectCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  deleteCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}`, {
+      method: "DELETE",
+    }),
+  /* 方案 16 §10.4：完整历史全文搜索（redacted/已删内容不命中）。 */
+  searchCompanionHistory: (q: string, limit = 20) =>
+    request<{ version: 1; query: string; items: unknown[] }>(
+      `/companion/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
   // 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；Owner 决策 4）。
   getAnswerModePreference: (signal?: AbortSignal) =>
@@ -773,92 +891,6 @@ export const api = {
     request<{ version: 1; preference: "voice" | "silent" | "text" | "any"; updatedAt: string }>(
       "/me/companion/answer-mode-preference",
       { method: "PATCH", body: JSON.stringify({ version: 1, preference }) },
-    ),
-  createLearningSession: (input: CreateLearningSessionInput, signal?: AbortSignal) =>
-    request<LearningSessionPublicView>("/learning-sessions", {
-      method: "POST",
-      body: JSON.stringify({
-        origin: input.origin,
-        entry: { kind: "key_point", keyPointId: input.keyPointId },
-        intent: input.intent ?? "stabilize",
-      }),
-      signal,
-    }),
-  getLearningSession: (sessionId: string, signal?: AbortSignal) =>
-    request<LearningSessionPublicView>(`/learning-sessions/${sessionId}`, { signal }),
-  getCompanionLearningSessionContext: (sessionId: string, episodeId?: string, signal?: AbortSignal) =>
-    request<CompanionLearningSessionContextV1>(
-      `/learning-sessions/${sessionId}/companion-context${episodeId ? `?episodeId=${encodeURIComponent(episodeId)}` : ""}`,
-      { signal },
-    ),
-  createCompanionContextGrant: (
-    sessionId: string,
-    input: { version: 1; pageInstanceId: string; episodeId: string; contextRevision: string },
-    signal?: AbortSignal,
-  ) =>
-    request<CompanionGroundedTutorGrantV1>(
-      `/learning-sessions/${sessionId}/companion-context-grants`,
-      { method: "POST", body: JSON.stringify(input), signal },
-    ),
-  submitLearningAnswer: (
-    sessionId: string,
-    episodeId: string,
-    input: { modality: "text_or_mixed" | "voice"; text: string },
-    signal?: AbortSignal,
-  ) =>
-    request<LearningAnswerResult>(
-      `/learning-sessions/${sessionId}/episodes/${episodeId}/answer`,
-      { method: "POST", body: JSON.stringify(input), signal },
-    ),
-  assessLearningEpisode: (sessionId: string, episodeId: string, artifactId: string, signal?: AbortSignal) =>
-    request<LearningAssessmentResult>(
-      `/learning-sessions/${sessionId}/episodes/${episodeId}/assess`,
-      { method: "POST", body: JSON.stringify({ artifactId }), signal },
-    ),
-  endLearningSession: (sessionId: string, signal?: AbortSignal) =>
-    request<LearningSessionPublicView>(`/learning-sessions/${sessionId}/end`, { method: "POST", signal }),
-  issueTutorPermissionNonce: (sessionId: string, episodeId: string, targetId: string) =>
-    request<{ userActionNonce: string; expiresAt: string }>(
-      `/learning-sessions/${sessionId}/episodes/${episodeId}/tutor-permission-nonce`,
-      { method: "POST", body: JSON.stringify({ targetId }) },
-    ),
-  createTutorDetour: (
-    sessionId: string,
-    episodeId: string,
-    input: {
-      targetId: string;
-      questionId?: string;
-      contentExposureKey?: string;
-      userActionNonce?: string;
-      deviceSessionId?: string;
-      deviceSurfaceEpoch?: number;
-    },
-  ) =>
-    request<{
-      detour: LearningTutorDetour;
-      switchedFromTrustedToPractice: boolean;
-      foregroundBefore: "together" | "let_me_try" | "free_explore";
-    }>(
-      `/learning-sessions/${sessionId}/episodes/${episodeId}/tutor-detour`,
-      { method: "POST", body: JSON.stringify(input) },
-    ),
-  submitTutorTurn: (sessionId: string, detourId: string, question: string) =>
-    request<LearningTutorTurnResult>(
-      `/learning-sessions/${sessionId}/tutor-detours/${detourId}/turn`,
-      { method: "POST", body: JSON.stringify({ question }) },
-    ),
-  endTutorDetour: (
-    sessionId: string,
-    detourId: string,
-    input: {
-      endReason: "return_to_origin" | "end_session";
-      saveQuestionMarker?: boolean;
-      shouldFlag?: boolean;
-    },
-  ) =>
-    request<{ detour: LearningTutorDetour; questionMarkerSaved: boolean }>(
-      `/learning-sessions/${sessionId}/tutor-detours/${detourId}/end`,
-      { method: "POST", body: JSON.stringify(input) },
     ),
 
   /* auth */
@@ -1110,6 +1142,10 @@ importMarkdown: (items: MarkdownImportApiItem[], importId?: string) =>
   importMarkdownInBatches(items, importId),
 
   /* understanding (V0.3) */
+  // 2026-08-15（接线修复）：旧 reader 客户端方法缺失——服务端 GET /graph
+  // 完整存在，graph 页一直调用不存在的 api.getUnderstandingGraph（运行时
+  // TypeError → 星图永远 error 态）。补桥。
+  getUnderstandingGraph: () => request<UnderstandingGraphResponse>("/graph"),
   listUnderstandingStates: (params?: { state?: string }) => {
     const qs = params
       ? "?" + new URLSearchParams(
@@ -1118,7 +1154,101 @@ importMarkdown: (items: MarkdownImportApiItem[], importId?: string) =>
       : "";
     return request<{ items: UnderstandingState[] }>(`/understanding/states${qs}`);
   },
-  getUnderstandingGraph: () => request<UnderstandingGraphResponse>("/graph"),
+  /* P5 学习会话（2026-08-15 恢复：web tracked 回退丢失的客户端方法，
+     服务端端点全部存在——POST /learning-sessions、GET/POST
+     /learning-sessions/:id、answer/assess/end、/companion/learning-context、
+     context-grant）。 */
+  createLearningSession: (input: {
+    origin: string;
+    keyPointId: string;
+    intent?: string;
+  }, signal?: AbortSignal) =>
+    request("/learning-sessions", {
+      method: "POST",
+      body: JSON.stringify(input),
+      signal,
+    }),
+  getLearningSession: (sessionId: string, signal?: AbortSignal) =>
+    request(`/learning-sessions/${encodeURIComponent(sessionId)}`, { signal }),
+  endLearningSession: (sessionId: string, signal?: AbortSignal) =>
+    request(`/learning-sessions/${encodeURIComponent(sessionId)}/end`, {
+      method: "POST",
+      signal,
+    }),
+  submitLearningAnswer: (
+    sessionId: string,
+    episodeId: string,
+    body: { modality: "text_or_mixed" | "voice"; text: string },
+    signal?: AbortSignal,
+  ) =>
+    request(`/learning-sessions/${encodeURIComponent(sessionId)}/episodes/${encodeURIComponent(episodeId)}/answer`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+    }),
+  assessLearningEpisode: (
+    sessionId: string,
+    episodeId: string,
+    artifactId: string,
+    signal?: AbortSignal,
+  ) =>
+    request(`/learning-sessions/${encodeURIComponent(sessionId)}/episodes/${encodeURIComponent(episodeId)}/assess`, {
+      method: "POST",
+      body: JSON.stringify({ artifactId }),
+      signal,
+    }),
+  getCompanionLearningSessionContext: (
+    sessionId: string,
+    episodeId?: string,
+    signal?: AbortSignal,
+  ) =>
+    request(`/companion/learning-context?sessionId=${encodeURIComponent(sessionId)}${episodeId ? `&episodeId=${encodeURIComponent(episodeId)}` : ""}`, { signal }),
+  createCompanionContextGrant: (
+    sessionId: string,
+    body: {
+      version: 1;
+      pageInstanceId: string;
+      episodeId: string;
+      contextRevision: string;
+    },
+    signal?: AbortSignal,
+  ) =>
+    request(`/companion/sessions/${encodeURIComponent(sessionId)}/context-grant`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+    }),
+  /* P7：Understanding Projection V2（文档 16 §15）。 */
+  getUnderstandingProjection: (
+    params: { lens?: string; targetKeyPointId?: string; minimumCheckpoint?: string; continuation?: string },
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => Boolean(v)) as [string, string][],
+    ).toString();
+    return requestResponse(`/understanding/projection${qs ? `?${qs}` : ""}`, { signal }).then(
+      async (response) => ({
+        httpStatus: response.status,
+        payload: response.status === 204 ? null : await response.json() as unknown,
+      }),
+    );
+  },
+  createUnderstandingRoutePlan: (input: {
+    version: 1;
+    intent: string;
+    targetKeyPointId?: string;
+    maxSteps: number;
+    lens: string;
+    filter: Record<string, unknown>;
+    expectedCheckpointToken: string;
+    idempotencyKey: string;
+  }) =>
+    request<unknown>("/understanding/routes/plan", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getProjectionDelta: (changeSetId: string, signal?: AbortSignal) =>
+    request<unknown>(`/understanding/projection/deltas/${encodeURIComponent(changeSetId)}`, { signal }),
 
 /* search (V0.3) */
 search: (params: { q: string; type?: string; limit?: number; offset?: number }, signal?: AbortSignal) => {
@@ -1664,4 +1794,69 @@ return body;
   throw err;
 }
 },
+
+  /* LearningRun V1（文档 16 §13.1）——统一学习运行客户端。 */
+  createLearningRun: (
+    input: CreateLearningRunRequestV1,
+  ) =>
+    request<LearningRunPublicV1>("/learning-runs", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getLearningRun: (runId: string, signal?: AbortSignal) =>
+    request<LearningRunPublicV1>(`/learning-runs/${encodeURIComponent(runId)}`, { signal }),
+  submitLearningRunArtifact: (
+    runId: string,
+    taskId: string,
+    input: SubmitTaskArtifactV1,
+  ) =>
+    request<SubmitTaskArtifactReceiptV1>(
+      `/learning-runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/submissions`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  applyLearningRunAction: (
+    runId: string,
+    input: LearningRunActionRequestV1,
+  ) =>
+    request<LearningRunActionResponseV1>(
+      `/learning-runs/${encodeURIComponent(runId)}/actions`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  putLearningRunDraft: (
+    runId: string,
+    taskId: string,
+    input: PutLearningTaskDraftRequestV1,
+  ) =>
+    request<LearningTaskDraftV1>(
+      `/learning-runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/draft`,
+      { method: "PUT", body: JSON.stringify(input) },
+    ),
+  getLearningRunDraft: (runId: string, taskId: string, signal?: AbortSignal) =>
+    request<LearningTaskDraftV1 | null>(
+      `/learning-runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/draft`,
+      { signal },
+    ),
+  deleteLearningRunDraft: (runId: string, taskId: string) =>
+    request<void>(
+      `/learning-runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/draft`,
+      { method: "DELETE" },
+    ),
+  getLearningRunResult: (runId: string, signal?: AbortSignal) =>
+    request<GetLearningRunResultResponseV1>(
+      `/learning-runs/${encodeURIComponent(runId)}/result`,
+      { signal },
+    ),
+  getLearningRunReturnContract: (runId: string, signal?: AbortSignal) =>
+    request<LearningRunReturnContractV1>(
+      `/learning-runs/${encodeURIComponent(runId)}/return-contract`,
+      { signal },
+    ),
+  recordLearningRunActivityLease: (
+    runId: string,
+    input: { deviceSessionId: string; startedAt: string; endedAt: string },
+  ) =>
+    request<void>(
+      `/learning-runs/${encodeURIComponent(runId)}/activity-lease`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
 };

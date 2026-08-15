@@ -513,6 +513,34 @@ export async function restoreWorkspace(
 
   const counts: Record<string, number> = {};
 
+  // N#8-2: 对导出侧 exportManifest.included 与恢复 schema 实际接收到的键做差集告警，防止未来
+  // 导出新增表而 restoreSchema 未同步声明（zod strip 会静默丢弃 → 恢复丢数据）再次漂移。
+  // 恢复 schema 键 = data 中实际存在的数组键（zod safeParse 已 strip 未声明的键）。在 dry-run 与
+  // 真实恢复两条路径都执行，属廉价防御性检查。
+  const rawIncluded = (manifest.included as unknown) ?? [];
+  const declaredIncluded = Array.isArray(rawIncluded) ? (rawIncluded as string[]) : [];
+  // `workspace` 与 `exportManifest` 是导出文件的清单/标记键，不是待恢复的表数据键，差集比对时排除。
+  const receivedKeys = new Set(
+    Object.keys(data).filter((k) => k !== "workspace" && k !== "exportManifest" && k !== "dryRun"),
+  );
+  const declaredSet = new Set(
+    declaredIncluded.filter((k) => k !== "workspace" && k !== "exportManifest" && k !== "dryRun"),
+  );
+  const missingInData = [...declaredSet].filter((k) => !receivedKeys.has(k));
+  const unexpectedKeys = [...receivedKeys].filter((k) => !declaredSet.has(k));
+  if (missingInData.length > 0 || unexpectedKeys.length > 0) {
+    logger.warn(
+      {
+        dryRun,
+        missingInData,
+        unexpectedKeys,
+        declaredIncluded: declaredIncluded.length,
+        receivedKeys: receivedKeys.size,
+      },
+      "restore: exportManifest.included 与接收到的恢复键存在差集；未声明的键已被 zod strip 丢弃、将不会被恢复",
+    );
+  }
+
   if (dryRun) {
     // dry-run 模式：只统计将要恢复的数据量，不实际写入
     counts.users = Array.isArray(data.users) ? data.users.length : 0;

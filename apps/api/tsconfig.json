@@ -20,5 +20,6 @@
     },
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts", "node_modules/@ailearn/shared/src/**/*.ts"]
+  "include": ["src/**/*.ts", "node_modules/@ailearn/shared/src/**/*.ts"],
+  "exclude": ["node_modules/@ailearn/shared/src/**/*.test.ts"]
 }

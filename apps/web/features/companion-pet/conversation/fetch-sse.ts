@@ -156,6 +156,8 @@ export async function openCompanionSse(args: {
   lastEventId: string | null;
   signal: AbortSignal;
   callbacks: CompanionSseCallbacks;
+  /** 空闲看门狗（ms）：连接建立后超时无任何字节 → network 错误（2026-08-15 恢复）。 */
+  idleTimeoutMs?: number;
 }): Promise<void> {
   const url = new URL(`/api/companion/conversations/${args.conversationId}/events`, window.location.origin);
   url.searchParams.set("after", String(args.after));
@@ -212,10 +214,31 @@ export async function openCompanionSse(args: {
   args.callbacks.onOpen?.();
 
   let buffer = "";
+  // 空闲看门狗：每次读到字节后重置；超时无任何字节 → network 错误
+  //（避免 api 挂起/网络半开时永久卡 thinking，2026-08-15 恢复）。
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let idleFired = false;
+  const clearIdle = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+  const armIdle = () => {
+    if (args.idleTimeoutMs == null) return;
+    clearIdle();
+    idleTimer = setTimeout(() => {
+      idleFired = true;
+      args.callbacks.onError({ kind: "network" });
+      void reader.cancel().catch(() => {});
+    }, args.idleTimeoutMs);
+  };
+  armIdle();
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      armIdle();
       let text: string;
       try {
         text = decoder.decode(value, { stream: true });
@@ -282,8 +305,10 @@ export async function openCompanionSse(args: {
       args.callbacks.onError({ kind: "fatal_parse" });
       return;
     }
-    if (!args.signal.aborted) args.callbacks.onError({ kind: "network" });
+    if (!args.signal.aborted && !idleFired) args.callbacks.onError({ kind: "network" });
   } catch {
-    if (!args.signal.aborted) args.callbacks.onError({ kind: "network" });
+    if (!args.signal.aborted && !idleFired) args.callbacks.onError({ kind: "network" });
+  } finally {
+    clearIdle();
   }
 }

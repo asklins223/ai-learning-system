@@ -40,6 +40,18 @@ export async function exportRoutes(app: FastifyInstance) {
     understandingEvents: z.array(z.record(z.unknown())).optional(),
     aiArtifacts: z.array(z.record(z.unknown())).optional(),
     onboardingStates: z.array(z.record(z.unknown())).optional(),
+    // N#8-2: v0.6 可信掌握闭环 8 张新表。导出侧 exportManifest.included(service.ts) 明确包含这
+    // 8 表、恢复写路径 restoreTable(service.ts) 也逐一处理。若此处未声明，zod 默认 strip 会静默
+    // 剥离这些键 → 恢复时被跳过 → 数据丢失。逐一显式声明，与导出侧保持同一类型
+    // （z.record(z.unknown()) 同型），并靠 dry-run 差集告警防止未来再漂移。
+    validationQuestionRubricItems: z.array(z.record(z.unknown())).optional(),
+    validationSubmissions: z.array(z.record(z.unknown())).optional(),
+    validationSubmissionJobs: z.array(z.record(z.unknown())).optional(),
+    validationActionCommands: z.array(z.record(z.unknown())).optional(),
+    validationAssistanceExposures: z.array(z.record(z.unknown())).optional(),
+    validationPointAssessments: z.array(z.record(z.unknown())).optional(),
+    schedulingShadowDecisions: z.array(z.record(z.unknown())).optional(),
+    validationQualitySignals: z.array(z.record(z.unknown())).optional(),
     dryRun: z.boolean().optional().default(false),
   });
 

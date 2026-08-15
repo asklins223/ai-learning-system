@@ -125,7 +125,7 @@ describe("SEC-01: withWorkspaceTransaction 使用模式", () => {
       // Some services delegate writes to other services (e.g. createJob) that
       // internally use transactions, or accept an executor parameter that is
       // already a transaction from the caller.
-      const hasExecutorParam = content.includes("executor:") || content.includes("executor:");
+      const hasExecutorParam = content.includes("executor:") || /\btx: ApiTransaction/.test(content) || /\btx:/m.test(content);
       const delegatesToJobService = content.includes("createJob");
 
       if (hasWriteOps && !hasTransaction && !hasExecutorParam && !delegatesToJobService) {

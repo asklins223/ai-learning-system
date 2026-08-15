@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DesktopPetScaleV1, PetHitGeometryV1 } from "@ailearn/shared/desktop-pet-contracts";
+import type { DesktopPetScaleV1, PetHitGeometryV1 } from "@ailearn/shared";
 import { usePetRuntime } from "../runtime/PetRuntimeProvider";
 import { PetCharacterCanvas } from "../character/PetCharacterCanvas";
 import type { SpriteHitMaskV1 } from "../character/SpriteCharacterDriver";

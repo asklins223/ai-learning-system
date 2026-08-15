@@ -26,11 +26,14 @@ import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { useIsOwner } from "@/lib/use-current-user";
+import { isLearningRunV1Enabled } from "@/lib/feature-flags";
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 
 type ActivityType = "note" | "card" | "source" | "review" | "job";
 type ActivityGroup = "attention" | "running" | "recorded";
 type ActivityFilter = "all" | ActivityType;
 type DataKey = "notes" | "cards" | "reviews" | "jobs" | "sources";
+const LEARNING_RUN_UI_PREVIEW = process.env.NODE_ENV === "development";
 
 interface TodayActivity {
   id: string;
@@ -156,16 +159,63 @@ function jobDescription(status: string): string {
   }
 }
 
+// 第八轮 🟡B-6：模块级 Intl 单例 formatter（原实现每行 new Date().toLocaleTimeString
+// 每渲重建）。行渲染只做 format 调用，不重复创建 formatter。
+const activityClockFmt = new Intl.DateTimeFormat("zh-CN", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 function activityClock(iso: string): string {
-  return new Date(iso).toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
+  return activityClockFmt.format(new Date(iso));
+}
+
+function learningRunUiPreviewHref(input: {
+  origin: "today";
+  cardId?: string | null;
+  keyPointId?: string | null;
+  scheduleId?: string | null;
+}) {
+  // P3 切流：learning_run_v1 开 → 生产创建入口；否则开发态原型或 null。
+  if (isLearningRunV1Enabled()) {
+    const params = new URLSearchParams({ origin: "today", returnTo: "/today" });
+    if (input.keyPointId) params.set("keyPointId", input.keyPointId);
+    return `/learning-runs/new?${params.toString()}`;
+  }
+  if (!LEARNING_RUN_UI_PREVIEW) return null;
+  const params = new URLSearchParams({
+    origin: input.origin,
+    returnTo: "/today",
   });
+  if (input.cardId) params.set("cardId", input.cardId);
+  if (input.keyPointId) params.set("keyPointId", input.keyPointId);
+  if (input.scheduleId) params.set("scheduleId", input.scheduleId);
+  return `/learning-runs/ui-redraw?${params.toString()}`;
 }
 
 
+// F#2（round3）：当日复习分页瀑布——加页数硬上限 + 同日缓存，避免复习旺季
+// 每次进入都串行拉几十页且逐次重跑。页数上限 10 页（limit 100 → 至多 1000 条），
+// 超限即停止（当日到期复习远超此量属异常，宁可少拉也不制造 10+ 次串行往返）；
+// F3（round4）：缓存 key 加入 workspaceId 维度（避免同一会话当日切换工作区/账户
+// 命中他人复习列表——跨租户串数），并对 Map 做有界 eviction（最多保留 N 条，
+// 按写入序淘汰最旧，防止长驻 tab 无界累积）。
+const REVIEW_MAX_PAGES = 10;
+const REVIEW_CACHE_MAX_ENTRIES = 50;
+const listAllReviewsCache = new Map<string, ReviewWithCard[]>();
+
 async function listAllReviews(): Promise<ReviewWithCard[]> {
+  // F3：缓存的 key 必须含工作区维度。getMe 命中短 TTL 缓存，成本可忽略；
+  // getMe 失败时退化为仅 dayEnd（跨租户风险窗口缩小到一次调用，可接受）。
+  let workspaceScope = "anon";
+  try {
+    const me = await api.getMe();
+    workspaceScope = me.workspaceId || "anon";
+  } catch {
+    // getMe 失败时退化为无前缀 key（与 pages/cards 的 pagerLocateCache 同款兜底）。
+  }
+
   const items: ReviewWithCard[] = [];
   const seenIds = new Set<string>();
   let offset = 0;
@@ -175,7 +225,13 @@ async function listAllReviews(): Promise<ReviewWithCard[]> {
   // 不限过去）。原实现 includeAll 全量拉取，复习历史大时串行瀑布几十页。
   const now = new Date();
   const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0).getTime();
+  const cacheKey = `${workspaceScope}:${dayEnd}`;
 
+  // F#2/F3：同日同工作区已拉取过则复用缓存，不再重跑分页瀑布。
+  const cached = listAllReviewsCache.get(cacheKey);
+  if (cached && cached.length > 0) return cached;
+
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const page = await api.listReviews({ includeAll: true, limit: 100, offset, dueToMs: dayEnd });
     for (const item of page.items) {
@@ -189,9 +245,17 @@ async function listAllReviews(): Promise<ReviewWithCard[]> {
     if (page.nextCursor <= offset) {
       throw new Error("复习分页游标未向前推进");
     }
+    // F#2：页数硬上限——超限停止，避免无界串行瀑布。
+    if (offset >= (REVIEW_MAX_PAGES - 1) * 100) break;
     offset = page.nextCursor;
   }
 
+  listAllReviewsCache.set(cacheKey, items);
+  // F3：有界 eviction——超出上限时按写入序淘汰最旧条目。
+  if (listAllReviewsCache.size > REVIEW_CACHE_MAX_ENTRIES) {
+    const oldestKey = listAllReviewsCache.keys().next().value;
+    if (oldestKey !== undefined) listAllReviewsCache.delete(oldestKey);
+  }
   return items;
 }
 
@@ -211,9 +275,27 @@ function ActivityIcon({ type }: { type: ActivityType }) {
 
 export default function TodayPage() {
   const { isOwner } = useIsOwner();
+  // P5（文档 16 §14.2）：Today 页发布 bounded context。
+  // 第八轮 🟡B-1：传 useMemo 稳定引用——热轮询页避免每渲新建 input 触发
+  // JSON.stringify（useMemo 的稳定引用短路失效）。
+  useMainPageContext(useMemo(() => ({
+    routeRef: { kind: "today" },
+    pageKind: "today",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  }), []));
   const [notes, setNotes] = useState<NoteHeader[] | null>(null);
   const [cards, setCards] = useState<CardListItem[] | null>(null);
   const [reviews, setReviews] = useState<ReviewWithCard[] | null>(null);
+  // F#7（🟡14）：镜像 reviews 到 ref，供 60s interval 判断"是否有 review 刚跨过
+  // 到期阈值"（闭包若捕获 state 会因空依赖永远读到初始值）。
+  const reviewsRef = useRef(reviews);
+  // 第八轮 🟡B-3：镜像写入移入 useEffect（渲染期写 ref 是纯度过反模式）。
+  useEffect(() => {
+    reviewsRef.current = reviews;
+  }, [reviews]);
   const [jobs, setJobs] = useState<JobRow[] | null>(null);
   const [sources, setSources] = useState<SourceRow[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -230,6 +312,8 @@ export default function TodayPage() {
   // the previous date for users in Asia.
   const [dayAnchor, setDayAnchor] = useState<Date | null>(null);
   const [minuteTick, setMinuteTick] = useState(() => Date.now());
+  // F#7（🟡14）：上次到期判断的基准时间 ref——判断某分钟是否有 review 刚到期。
+  const minuteTickPrevRef = useRef(minuteTick);
 
   const [showCapture, setShowCapture] = useState(false);
   const [captureText, setCaptureText] = useState("");
@@ -244,6 +328,14 @@ export default function TodayPage() {
   const shouldScrollToCaptureRef = useRef(false);
   const captureBusyRef = useRef(false);
   const loadRequestRef = useRef(0);
+  // F#8：格式化 after-unmount 守卫——loadAll/retryDataset 在 await 后 setState。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const { startMs, endMs, dateTitle } = useMemo(() => {
     if (!dayAnchor) {
@@ -288,6 +380,7 @@ export default function TodayPage() {
     });
 
     if (requestId !== loadRequestRef.current) return;
+    if (!mountedRef.current) return;
 
     const [notesResult, cardsResult, reviewsResult, jobsResult, sourcesResult] = results;
     if (notesResult.status === "fulfilled") setNotes(notesResult.value.items);
@@ -326,27 +419,71 @@ export default function TodayPage() {
     return () => window.clearTimeout(timer);
   }, [dayAnchor, loadAll]);
 
-  useEffect(() => {
-    const timer = window.setInterval(() => setMinuteTick(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
+  // F#7（🟡14）：60s 间隔不再是无条件 setMinuteTick 整页重渲——仅当确有
+  // 某个 pending review 在 [上次 tick, 本次 tick) 窗口内跨过到期阈值才 touch
+  // state（到期判断下推：数据不变、无到期翻转的分钟不重渲整页）。
+  const bumpMinuteTickIfDueCrossed = useCallback(() => {
+    const currentReviews = reviewsRef.current ?? [];
+    const now = Date.now();
+    const prev = minuteTickPrevRef.current;
+    const crossed = currentReviews.some((item) => {
+      if (item.review.status !== "pending") return false;
+      const due = new Date(item.review.nextReviewAt ?? item.review.createdAt).getTime();
+      return due > prev && due <= now;
+    });
+    minuteTickPrevRef.current = now;
+    if (crossed) setMinuteTick(now);
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      // F#4（round3）：页面切到后台（不可见）时跳过——后台无需更新到期文案。
+      if (document.visibilityState === "hidden") return;
+      bumpMinuteTickIfDueCrossed();
+    }, 60_000);
+    // F#4（round4 leftover）：恢复可见后立即同步 minuteTick，避免切回前台后
+    // 要等下一次 60s interval 才刷新，最多滞后一分钟显示旧到期判断。
+    const syncMinuteTickOnVisible = () => {
+      if (document.visibilityState === "visible") bumpMinuteTickIfDueCrossed();
+    };
+    document.addEventListener("visibilitychange", syncMinuteTickOnVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", syncMinuteTickOnVisible);
+    };
+  }, [bumpMinuteTickIfDueCrossed]);
 
   const retryDataset = useCallback(async (key: DataKey) => {
     setRetryingKey(key);
     try {
-      if (key === "notes") setNotes((await api.listNotes()).items);
-      if (key === "cards") setCards((await api.listCards()).items);
-      if (key === "reviews") setReviews(await listAllReviews());
-      if (key === "jobs") setJobs((await api.listJobs()).items);
-      if (key === "sources") setSources((await api.listSources({ limit: 100 })).items);
+      let notes: NoteHeader[] | null = null;
+      let cards: CardListItem[] | null = null;
+      let reviews: ReviewWithCard[] | null = null;
+      let jobs: JobRow[] | null = null;
+      let sources: SourceRow[] | null = null;
+      // F23（round4）：先取数据（只写局部变量），所有 setState 都放到
+      // mounted 守卫之后——避免卸载中途 setState。
+      if (key === "notes") notes = (await api.listNotes()).items;
+      if (key === "cards") cards = (await api.listCards()).items;
+      if (key === "reviews") reviews = await listAllReviews();
+      if (key === "jobs") jobs = (await api.listJobs()).items;
+      if (key === "sources") sources = (await api.listSources({ limit: 100 })).items;
+      if (!mountedRef.current) return;
+      if (notes !== null) setNotes(notes);
+      if (cards !== null) setCards(cards);
+      if (reviews !== null) setReviews(reviews);
+      if (jobs !== null) setJobs(jobs);
+      if (sources !== null) setSources(sources);
       setErrors((current) => {
         const next = { ...current };
         delete next[key];
         return next;
       });
     } catch {
+      if (!mountedRef.current) return;
       setErrors((current) => ({ ...current, [key]: "重试后仍无法读取" }));
     } finally {
+      if (!mountedRef.current) return;
       setRetryingKey(null);
     }
   }, []);
@@ -709,6 +846,7 @@ export default function TodayPage() {
 
   const runningActivities = activities.filter((item) => item.group === "running");
   const runningContext = runningActivities.slice(0, 3);
+  const practiceCard = (cards ?? [])[0] ?? null;
   const errorKeys = Object.keys(errors) as DataKey[];
   const allFailed = errorKeys.length === 5 && Object.values(unavailableData).every(Boolean);
   const hasStaleDataErrors = errorKeys.some((key) => !unavailableData[key]);
@@ -1181,12 +1319,25 @@ export default function TodayPage() {
               <div className="today-context-heading">
                 <span className="today-context-icon"><Icon.Review /></span>
                 <div>
-                  <span>NEXT MOVE</span>
-                  <h2 id="today-context-title">当前到期复习</h2>
+                  <span>{LEARNING_RUN_UI_PREVIEW ? "3-MINUTE RUN" : "NEXT MOVE"}</span>
+                  <h2 id="today-context-title">
+                    {LEARNING_RUN_UI_PREVIEW ? "下一次微旅程" : "当前到期复习"}
+                  </h2>
                 </div>
                 <strong>{dueReviews.length}</strong>
               </div>
-              <p className="today-context-intro">这不是今日事件，而是此刻最值得处理的学习上下文。</p>
+              <p className="today-context-intro">
+                {LEARNING_RUN_UI_PREVIEW
+                  ? "先完成一个到期要点。进入后直接开始推荐动作，不要求先选模式。"
+                  : "这是此刻最值得处理的学习上下文。先从最早到期的一项开始。"}
+              </p>
+              {LEARNING_RUN_UI_PREVIEW && (
+                <div className="today-context-facts" aria-label="微旅程 UI 预览说明">
+                  <span>约 1–3 分钟</span>
+                  <span>可说 / 可操作 / 可写</span>
+                  <span>可信评估后才改排程</span>
+                </div>
+              )}
               <ol className="today-context-list">
                 {dueReviews.slice(0, 3).map((item, index) => (
                   <li key={item.review.id}>
@@ -1197,8 +1348,18 @@ export default function TodayPage() {
                   </li>
                 ))}
               </ol>
-              <Link href="/review" className="today-context-action">
-                开始今日复习
+              <Link
+                href={
+                  learningRunUiPreviewHref({
+                    origin: "today",
+                    scheduleId: dueReviews[0].review.id,
+                    cardId: dueReviews[0].card.id,
+                    keyPointId: dueReviews[0].keyPoint?.id,
+                  }) ?? `/review/${encodeURIComponent(dueReviews[0].review.id)}`
+                }
+                className="today-context-action"
+              >
+                {LEARNING_RUN_UI_PREVIEW ? "预览这次微旅程" : "开始今日复习"}
                 <Icon.Arrow />
               </Link>
             </aside>
@@ -1232,6 +1393,45 @@ export default function TodayPage() {
                 {refreshing ? "刷新中…" : "刷新处理状态"}
                 <Icon.Refresh />
               </button>
+            </aside>
+          )}
+
+          {!loading && dueReviews.length === 0 && runningContext.length === 0 && practiceCard && (
+            <aside className="today-context-panel is-practice" aria-labelledby="today-practice-title">
+              <div className="today-context-heading">
+                <span className="today-context-icon"><Icon.Target /></span>
+                <div>
+                  <span>OPTIONAL PRACTICE</span>
+                  <h2 id="today-practice-title">巩固一个要点</h2>
+                </div>
+              </div>
+              <p className="today-context-intro">
+                {LEARNING_RUN_UI_PREVIEW
+                  ? "今天没有到期复习。你可以从最近的学习卡预览一轮短练习，也可以先离开。"
+                  : "今天没有到期复习。可以回到最近的学习卡继续巩固，也可以先离开。"}
+              </p>
+              <div className="today-context-card-name">
+                <span>最近的学习卡</span>
+                <strong>{practiceCard.schemaJson?.title || "未命名学习卡"}</strong>
+              </div>
+              {LEARNING_RUN_UI_PREVIEW && (
+                <div className="today-context-facts" aria-label="巩固练习 UI 预览说明">
+                  <span>不自动下一题</span>
+                  <span>随时换方式</span>
+                </div>
+              )}
+              <Link
+                href={
+                  learningRunUiPreviewHref({
+                    origin: "today",
+                    cardId: practiceCard.id,
+                  }) ?? `/cards/${practiceCard.id}`
+                }
+                className="today-context-action"
+              >
+                {LEARNING_RUN_UI_PREVIEW ? "预览短练习" : "去学习卡继续"}
+                <Icon.Arrow />
+              </Link>
             </aside>
           )}
         </div>

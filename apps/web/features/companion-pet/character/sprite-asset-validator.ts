@@ -5,7 +5,7 @@ import {
   type SpriteLicenseV1,
   type SpriteManifestV1,
   validateSpriteManifestShape,
-} from "@ailearn/shared/companion-character-contracts";
+} from "@ailearn/shared";
 
 /**
  * Fail-closed validator for the Level A sprite pack

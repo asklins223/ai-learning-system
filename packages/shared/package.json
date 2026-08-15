@@ -65,6 +65,41 @@
       "types": "./src/companion-learning-session-contracts.ts",
       "import": "./src/companion-learning-session-contracts.ts",
       "default": "./src/companion-learning-session-contracts.ts"
+    },
+    "./card-generation-v2-contracts": {
+      "types": "./src/card-generation-v2-contracts.ts",
+      "import": "./src/card-generation-v2-contracts.ts",
+      "default": "./src/card-generation-v2-contracts.ts"
+    },
+    "./card-generation-v2-hashing": {
+      "types": "./src/card-generation-v2-hashing.ts",
+      "import": "./src/card-generation-v2-hashing.ts",
+      "default": "./src/card-generation-v2-hashing.ts"
+    },
+    "./hash-canonical-v2": {
+      "types": "./src/hash-canonical-v2.ts",
+      "import": "./src/hash-canonical-v2.ts",
+      "default": "./src/hash-canonical-v2.ts"
+    },
+    "./card-quality-v2-contracts": {
+      "types": "./src/card-quality-v2-contracts.ts",
+      "import": "./src/card-quality-v2-contracts.ts",
+      "default": "./src/card-quality-v2-contracts.ts"
+    },
+    "./learning-card-v2-contracts": {
+      "types": "./src/learning-card-v2-contracts.ts",
+      "import": "./src/learning-card-v2-contracts.ts",
+      "default": "./src/learning-card-v2-contracts.ts"
+    },
+    "./content-hash": {
+      "types": "./src/content-hash.ts",
+      "import": "./src/content-hash.ts",
+      "default": "./src/content-hash.ts"
+    },
+    "./companion-bridge-revision": {
+      "types": "./src/companion-bridge-revision.ts",
+      "import": "./src/companion-bridge-revision.ts",
+      "default": "./src/companion-bridge-revision.ts"
     }
   },
   "dependencies": {

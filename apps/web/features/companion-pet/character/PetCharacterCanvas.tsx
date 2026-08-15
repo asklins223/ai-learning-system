@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { usePetVoiceLevel } from "../runtime/PetRuntimeProvider";
-import type { DesktopPetScaleV1 } from "@ailearn/shared/desktop-pet-contracts";
-import type { CharacterPresentationStateV1 } from "@ailearn/shared/companion-character-contracts";
+import type { DesktopPetScaleV1 } from "@ailearn/shared";
+import type { CharacterPresentationStateV1 } from "@ailearn/shared";
 import { loadSpriteAssetPack } from "./sprite-asset-validator";
 import {
   SpriteCharacterDriver,

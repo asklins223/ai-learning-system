@@ -1,5 +1,5 @@
 /**
- * Worker 端共享的 drizzle schema。
- * 通过 @ailearn/db 包导入，确保与 API 使用同一个 drizzle-orm 实例。
+ * Worker 端共享的 drizzle schema（R35 恢复：R16 起直接引用 apps/api 权威
+ * schema——@ailearn/db 镜像会导致 PgTransaction 跨实例类型分裂）。
  */
-export * from "@ailearn/db";
+export * from "../../../../apps/api/src/db/schema/index.ts";

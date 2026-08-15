@@ -1,0 +1,47 @@
+# 方案 16 实施遗留记录(2026-08-14)
+
+> 本文件记录当前未收敛的问题,供后续会话优先处理。**已修复项**见各实现文件注释与
+> 方案 16 文档实施登记。
+
+## 1. SSE 间歇 500(`/learning-runs/:id/events`)—— 未收敛
+
+**现象**:
+- `GET /api/learning-runs/{runId}/events?lastEventId=N` 偶发返回 HTTP 500(浏览器
+  console.error),全量并发 e2e 时较常见,单跑偶发。
+- 失败场景:提交/评估期间的 run(事件数 >0),重连带 lastEventId 时。
+- 伴随现象:同期间 `GET /learning-runs/{runId}` 偶发 20-207s 慢响应(见 #2)。
+
+**已做的修复(有效但不收敛)**:
+- 2026-08-14:Critic HTTP 调用移出 DB 事务(三阶段:事务内读+标记 → 事务外 HTTP →
+  事务内写回)——消除"事务持有连接数十秒"的**确定性**连接池耗尽路径。
+- SSE handler 增加 `reply.raw.on("error")` 与 `writableEnded` 防御。
+- 环境修复:API 重启需 `set -a; . ./.env` 全量加载(缺失
+  `AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS` 会让 Critic 被 SSRF 拒绝);重启前必须
+  确认旧进程已释放 4000(EADDRINUSE 会让新进程静默死亡、旧代码继续服务)。
+
+**剩余假设(未验证)**:
+- SSE handler 的 `reply.raw.writeHead(200)` + `reply.hijack()` 在 fastify 5.1 的
+  竞态(客户端在 hijack 前断开 → writeHead 抛 ERR_STREAM_WRITE_AFTER_END → 500)。
+- withWorkspaceTransaction 的 postgres.js(max=10)在"SSE 3s 轮询 × 多 run + 页面
+  2s 轮询 + tick 10s + draft 保存"并发下的连接排队,叠加 #2 慢请求放大。
+
+**建议下一步**:
+1. 在 SSE handler 的 writeHead/hijack 处加 try/catch 与 request.log.error(当前
+   500 无任何服务端日志,先让 500 可观测);
+2. 对比其它 hijack 端点(inbox-routes/companion-events)确认是否同模式偶发;
+3. 测量连接池:并发下 `pg_stat_activity` 与 postgres.js 连接数。
+
+## 2. API 偶发慢响应(20-207s)—— 未收敛
+
+**现象**:`GET /learning-runs/{id}` 偶发 20-207s;DB 侧无慢查询(pg_stat_activity
+无 active 长查询、无锁等待),SQL 单测 71ms。疑为 API 进程内连接池调度/事件循环
+阻塞,与并发测试负载相关。
+
+**建议下一步**:在 withWorkspaceTransaction 入口加耗时日志;检查
+`structuredSolutionSql`(worker 角色, max=2)等长驻连接的复用;测量事件循环延迟。
+
+## 3. 方案 20 生成管线(搁置)
+
+- `card-generation-v2-journey` 2 条 + pr-smoke 生成卡 1 条失败:supervisor 模型
+  语义输出(未 compose candidate 即 request_verification → 设计上 fail-closed
+  protocol_error)。属方案 20 范畴,用户已指示搁置。

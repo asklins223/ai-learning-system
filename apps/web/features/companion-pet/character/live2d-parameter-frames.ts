@@ -1,4 +1,4 @@
-import type { CharacterPresentationStateV1 } from "@ailearn/shared/companion-character-contracts";
+import type { CharacterPresentationStateV1 } from "@ailearn/shared";
 import type { Live2DParameterRequest } from "./live2d-priority";
 
 export interface Live2DParameterFrameInput {

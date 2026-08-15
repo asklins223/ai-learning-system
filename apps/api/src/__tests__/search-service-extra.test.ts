@@ -228,6 +228,8 @@ describe("search projection rebuild", () => {
       deleted: 2,
       indexed: { note: 1, source: 2, cardSet: 1, card: 1, evidence: 1 },
       errors: 0,
+      // N#8-1: 新增 capped——本次 reindex 是否因单表行数上限被截断。
+      capped: false,
     });
     assert.equal(reconciled, 1);
     assert.equal(insertedBatches.length, 1);
@@ -285,6 +287,7 @@ describe("search projection rebuild", () => {
       deleted: 0,
       indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
       errors: 0,
+      capped: false,
     });
     assert.equal(childQueries, 0);
     assert.equal(inserts, 0);
@@ -313,6 +316,7 @@ describe("search projection rebuild", () => {
       deleted: 0,
       indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
       errors: 1,
+      capped: false,
     });
   });
 });
@@ -486,6 +490,8 @@ describe("search projection drift", () => {
       missing: [],
       staleTitles: [],
       staleBodies: [],
+      // N#8-1: 新增 capped 字段——各顶层域表读是否命中行数上限。
+      capped: { note: false, source: false, cardSet: false, card: false },
       hasDrift: false,
     });
   });

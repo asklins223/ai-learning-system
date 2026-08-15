@@ -185,6 +185,7 @@ const TYPE_LABEL: Record<GraphNode["type"], string> = {
   note: "笔记",
   card: "学习卡",
   key_point: "关键点",
+  evidence: "证据",
 };
 
 const STATE_LABEL: Record<string, string> = {
@@ -201,6 +202,7 @@ const BASE_RADIUS: Record<GraphNode["type"], number> = {
   note: 15,
   card: 23,
   key_point: 8,
+  evidence: 10,
 };
 
 const DEFAULT_PALETTE: Palette = {

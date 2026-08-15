@@ -16,12 +16,13 @@ import {
 import {
   createCompanionContextGrant,
   createCompanionMenuProposal,
+  createCompanionToolProposal,
   decideCompanionProposal,
   getCompanionLearningSessionContext,
   getCompanionProposalSnapshot,
   resolveCompanionLearningContext,
 } from "./learning-action-bridge.ts";
-import { createCompanionTurnRequestV1Schema } from "@ailearn/shared";
+import { createCompanionTurnRequestV1Schema, createToolProposalRequestV1Schema } from "@ailearn/shared";
 import { exportCompanionData } from "./companion-export.ts";
 import { viewCompanionDelivery, dismissCompanionDelivery, companionDeviceSessionHash } from "./companion-proactive-service.ts";
 import {
@@ -93,6 +94,43 @@ export async function companionConversationRoutes(app: FastifyInstance) {
       }
       try {
         const result = await createCompanionMenuProposal({
+          workspaceId: session.workspaceId,
+          userId: session.userId,
+          body: parsed.data,
+          idempotencyKey,
+        });
+        return reply.code(201).send(result);
+      } catch (err) {
+        if (err instanceof CompanionConversationError) {
+          return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: false, requestId: req.id });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // §18 POST /companion/tool-proposals：工具提案 create（15 kind 白名单，
+  // 2026-08-15 接线修复——此前工具网关只有 decide 消费，无创建入口）。
+  app.post(
+    "/companion/tool-proposals",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
+        return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
+      }
+      const session = req.session!;
+      const idempotencyKey = req.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+        return reply.code(400).send({ version: 1, error: "INVALID_REQUEST", message: "idempotency-key required", recoverable: false, requestId: req.id });
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!rateLimited(reply, req.id, `${session.workspaceId}:${session.userId}:write:turn`, COMPANION_RATE_LIMITS.menuProposalPerMinute.limit, COMPANION_RATE_LIMITS.menuProposalPerMinute.windowMs)) return;
+      const parsed = createToolProposalRequestV1Schema.safeParse(body);
+      if (!parsed.success) {
+        return reply.code(400).send({ version: 1, error: "INVALID_REQUEST", message: "tool proposal body invalid", recoverable: false, requestId: req.id });
+      }
+      try {
+        const result = await createCompanionToolProposal({
           workspaceId: session.workspaceId,
           userId: session.userId,
           body: parsed.data,

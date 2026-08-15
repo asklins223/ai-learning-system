@@ -29,6 +29,14 @@ export function useCompanionConversations(requestedConversationId: string | null
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  // 2026-08-15（接线修复）：历史分页（beforeSeq keyset）——"加载更早"此前
+  // 页面已接线（CompanionHistoryArchive hasEarlier/onLoadEarlier）但 hook 从未
+  // 实现这 4 个能力，页面解构报类型错误。
+  const [olderLoading, setOlderLoading] = useState(false);
+  const [olderAvailable, setOlderAvailable] = useState(false);
+  const oldestSeqRef = useRef<number | null>(null);
+  const olderInFlightRef = useRef(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
@@ -57,26 +65,68 @@ export function useCompanionConversations(requestedConversationId: string | null
     return Array.isArray(body.items) ? body.items : [];
   }, []);
 
-  async function fetchMessages(conversationId: string): Promise<Message[]> {
-    const response = await fetch(`/api/companion/conversations/${conversationId}/messages?limit=100`, {
+  async function fetchMessages(
+    conversationId: string,
+    beforeSeq?: number,
+  ): Promise<{ items: Message[]; hasMore: boolean; oldestSeq: number | null }> {
+    const query = beforeSeq != null
+      ? `?limit=50&beforeSeq=${beforeSeq}`
+      : "?limit=100";
+    const response = await fetch(`/api/companion/conversations/${conversationId}/messages${query}`, {
       credentials: "same-origin",
       cache: "no-store",
     });
     if (!response.ok) throw new Error(`message list failed: ${response.status}`);
-    const body = (await response.json()) as { items?: Message[] };
-    return Array.isArray(body.items) ? body.items : [];
+    const body = (await response.json()) as {
+      items?: Message[];
+      hasMore?: boolean;
+      oldestSeq?: number | null;
+    };
+    return {
+      items: Array.isArray(body.items) ? body.items : [],
+      hasMore: body.hasMore === true,
+      oldestSeq: typeof body.oldestSeq === "number" ? body.oldestSeq : null,
+    };
   }
 
   const loadMessages = useCallback(
     async (conversationId: string, keepAssistantRunId?: string): Promise<void> => {
       // 2026-08-11（review 修复）：在途 fetch 返回时会话已切换（selectedIdRef
       // 比对）则丢弃——旧对话结果不混入新视图。
-      const incoming = await fetchMessages(conversationId);
-      if (selectedIdRef.current !== conversationId) return;
-      setMessages((current) => mergeMessages(current, incoming, keepAssistantRunId));
+      setMessagesLoading(true);
+      try {
+        const { items: incoming, hasMore, oldestSeq } = await fetchMessages(conversationId);
+        if (selectedIdRef.current !== conversationId) return;
+        setMessages((current) => mergeMessages(current, incoming, keepAssistantRunId));
+        setOlderAvailable(hasMore);
+        oldestSeqRef.current = oldestSeq;
+      } finally {
+        setMessagesLoading(false);
+      }
     },
     [],
   );
+
+  // 2026-08-15（接线修复）：加载更早消息（beforeSeq keyset，prepend）。
+  const loadOlderMessages = useCallback(async (): Promise<void> => {
+    const conversationId = selectedIdRef.current;
+    const beforeSeq = oldestSeqRef.current;
+    if (!conversationId || beforeSeq == null || olderInFlightRef.current) return;
+    olderInFlightRef.current = true;
+    setOlderLoading(true);
+    try {
+      const { items: older, hasMore, oldestSeq } = await fetchMessages(conversationId, beforeSeq);
+      if (selectedIdRef.current !== conversationId) return;
+      setMessages((current) => [...older, ...current]);
+      setOlderAvailable(hasMore);
+      oldestSeqRef.current = oldestSeq;
+    } catch {
+      setError("暂时无法加载更早的消息。");
+    } finally {
+      olderInFlightRef.current = false;
+      setOlderLoading(false);
+    }
+  }, []);
 
   // 2026-08-11：assistant.final 后精确重拉——以 final payload 的 messageId 判断
   // 服务端是否已持久化该轮；未达时退避重试（最多 2 次），期间保留占位副本。
@@ -92,12 +142,14 @@ export function useCompanionConversations(requestedConversationId: string | null
   ): Promise<void> {
     const aborted = () => Boolean(controller?.signal.aborted);
     if (aborted()) return;
-    const incoming = await fetchMessages(conversationId);
+    const { items: incoming, hasMore, oldestSeq } = await fetchMessages(conversationId);
     if (aborted()) return;
     // 2026-08-11：会话已切换/删除——丢弃重拉结果
     if (selectedIdRef.current !== conversationId) return;
     const hasFinal = messageId !== null && incoming.some((m) => m.id === messageId);
     setMessages((current) => mergeMessages(current, incoming, hasFinal ? undefined : runId));
+    setOlderAvailable(hasMore);
+    oldestSeqRef.current = oldestSeq;
     if (!hasFinal && retries > 0 && !aborted()) {
       await new Promise((resolve) => setTimeout(resolve, 500));
       // 等待期间可能已 abort——递归前再查一次
@@ -323,6 +375,7 @@ export function useCompanionConversations(requestedConversationId: string | null
     selected,
     selectedId,
     messages,
+    messagesLoading,
     draft,
     loading,
     sending,
@@ -331,6 +384,9 @@ export function useCompanionConversations(requestedConversationId: string | null
     selectConversation,
     createConversation,
     sendMessage,
+    loadOlderMessages,
+    olderAvailable,
+    olderLoading,
     deleteSelected,
   };
 }
