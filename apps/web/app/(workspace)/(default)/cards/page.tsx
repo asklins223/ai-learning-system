@@ -11,6 +11,8 @@ import { Icon } from "@/components/ui/icons";
 import { api, type CardListItem } from "@/lib/api";
 import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
 import { relativeTime } from "@/lib/format";
+// §14.2（2026-08-15 恢复）：cards 页发布 bounded context（Pet 主动策略门禁）。
+import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import {
   formatLearningCardReviewDate,
   learningCardMatchesFilter,
@@ -74,6 +76,16 @@ function ObjectiveStateIcon({ state }: { state: LearningObjectiveState }) {
 }
 
 export default function CardsIndex() {
+  // §14.2：cards 页 bounded context 发布（Pet 主动策略据此判定 page 状态）。
+  useMainPageContext({
+    routeRef: { kind: "home" },
+    pageKind: "card",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  });
+
   const [items, setItems] = useState<CardListItem[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
