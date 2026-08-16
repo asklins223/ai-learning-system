@@ -11,7 +11,6 @@ import { PublicCardFront } from "./public-card/PublicCardFront";
 import { LearningCardReveal } from "./reveal/LearningCardReveal";
 import {
   learningCardInteractionLabels,
-  learningCardInteractionRendererRegistry,
 } from "./renderers/InteractionRendererRegistry";
 
 type StateActionIntent = "open_schedule" | "open_replacement" | "refresh" | "return";
@@ -128,7 +127,6 @@ export function ActiveLearningCardV2({
   const action = revealedContent
     ? { intent: "start" as const, label: revealedContent.practice.primaryActionLabel }
     : presentation.action;
-  const InteractionRenderer = learningCardInteractionRendererRegistry[card.front.kind];
   const isLearningAction = action.intent === "start" || action.intent === "continue" || action.intent === "review";
 
   const performPrimaryAction = () => {
@@ -177,7 +175,9 @@ export function ActiveLearningCardV2({
         </section>
       ) : (
         <PublicCardFront card={card} interactionLabel={learningCardInteractionLabels[card.front.kind]}>
-          <InteractionRenderer interaction={card.front} />
+          {/* 2026-08-16：详情页不再渲染可作答的交互输入区——真正作答发生在
+              学习 run（微旅程）里，详情页的输入框不提交任何数据，只会误导。 */}
+          {null}
         </PublicCardFront>
       )}
 

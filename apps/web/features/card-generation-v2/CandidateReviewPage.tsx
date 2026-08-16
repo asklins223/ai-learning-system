@@ -100,6 +100,7 @@ export function CandidateReviewPage({
   useEffect(() => {
     let cancelled = false;
     let activeClient = v2;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
     async function boot() {
       try {
@@ -109,9 +110,38 @@ export function CandidateReviewPage({
           if (!cancelled) setResolvedClient(activeClient);
         }
         const runResult = await activeClient.getRun(runId);
-        const planResult = await activeClient.getRunPlan(runId);
-        const candResult = await activeClient.getRunCandidates(runId);
+        let planResult: CardPlanV2 | null = null;
+        try {
+          planResult = await activeClient.getRunPlan(runId);
+        } catch (planErr) {
+          const status = (planErr as { statusCode?: number }).statusCode;
+          // 2026-08-16（实机验证修复）：plan 未就绪（404）不是"服务未开启"——
+          // 重新生成/新 run 刚创建时 plan 还在 worker 生成中，轮询等待而不是报错。
+          if (status !== 404) throw planErr;
+        }
+        let candResult: { candidates: CandidatePublicView[] } = { candidates: [] };
+        try {
+          candResult = await activeClient.getRunCandidates(runId);
+        } catch (candErr) {
+          const status = (candErr as { statusCode?: number }).statusCode;
+          if (status !== 404) throw candErr;
+        }
         if (cancelled) return;
+        // plan 或候选尚未就绪（仍在 planning/authoring/checking）：1.5s 后重试。
+        // 终态 run（no_cards_recommended/activated/failed 等）候选为空是正常
+        // 结果（渲染 ZeroCardResult 或空列表），不再轮询。
+        const terminal = [
+          "no_cards_recommended",
+          "activated",
+          "closed_without_activation",
+          "failed",
+          "cancelled",
+          "stale",
+        ].includes(runResult.status);
+        if (!planResult || (candResult.candidates.length === 0 && !terminal)) {
+          pollTimer = setTimeout(() => void boot(), 1500);
+          return;
+        }
         setRun(runResult);
         setPlan(planResult);
         setCandidates(candResult.candidates);
@@ -137,6 +167,7 @@ export function CandidateReviewPage({
     void boot();
     return () => {
       cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [v2, runId]);
 

@@ -484,15 +484,22 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
         // V2 新卡的 alias card_key_points 行存在，但父 legacy card 是 archived
         // 隐藏行，不会出现在上方 active legacy card 查询里；这里按 V2 卡显式
         // 补入 alias key point，并把 contains 边指向 V2 cardId。
+        //
+        // 溯源修复：V2 卡节点除了 contains 论点，还必须回到 source→note→card
+        // 血缘（学习卡不再只是“练习”，它就是正式学习卡）。noteVersionId 优先
+        // 取 learning_cards_v2 自身；历史 V2 行可能为空，再回退到 §29.4 隐藏
+        // legacy alias 卡上保留的 noteVersionId。
         const v2Cards = await tx.select({
           cardId: learningCardsV2.cardId,
           objectiveId: learningCardsV2.objectiveId,
+          noteVersionId: learningCardsV2.noteVersionId,
           createdAt: learningCardsV2.createdAt,
         }).from(learningCardsV2).where(and(
           eq(learningCardsV2.workspaceId, scope.workspaceId),
           eq(learningCardsV2.lifecycle, "active"),
         )).limit(1000);
-        const v2CardByObjective = new Map<string, { cardId: string; objectiveId: string; createdAt: Date }>();
+        const v2CardByObjective = new Map<string, { cardId: string; objectiveId: string; noteVersionId: string | null; createdAt: Date }>();
+        const v2AliasNoteVersionByObjective = new Map<string, string>();
         if (v2Cards.length > 0) {
           const v2ObjectiveIds = v2Cards.map((c) => c.objectiveId);
           const v2AliasRows = await tx.select({
@@ -504,6 +511,27 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
             eq(cardKeyPoints.workspaceId, scope.workspaceId),
             inArray(cardKeyPoints.id, v2ObjectiveIds),
           ));
+          const v2AliasLegacyCardIds = Array.from(new Set(
+            v2AliasRows.map((row) => row.cardId).filter((id): id is string => Boolean(id)),
+          ));
+          const v2AliasLegacyCards = v2AliasLegacyCardIds.length > 0
+            ? await tx.select({
+                id: learningCards.id,
+                noteVersionId: learningCards.noteVersionId,
+              }).from(learningCards).where(and(
+                eq(learningCards.workspaceId, scope.workspaceId),
+                inArray(learningCards.id, v2AliasLegacyCardIds),
+              ))
+            : [];
+          const v2AliasNoteVersionByLegacyCard = new Map(
+            v2AliasLegacyCards
+              .filter((row) => row.noteVersionId)
+              .map((row) => [row.id, row.noteVersionId as string]),
+          );
+          for (const row of v2AliasRows) {
+            const aliasNoteVersionId = v2AliasNoteVersionByLegacyCard.get(row.cardId);
+            if (aliasNoteVersionId) v2AliasNoteVersionByObjective.set(row.id, aliasNoteVersionId);
+          }
           for (const c of v2Cards) v2CardByObjective.set(c.objectiveId, c);
           const v2KpRows = v2AliasRows.map((row) => ({
             ...row,
@@ -573,7 +601,13 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
         }
 
         // shared 平面实体（noteVersion/note/source 血缘）。
-        const noteVersionIds = Array.from(new Set(sharedCardRows.map((card) => card.noteVersionId)));
+        const noteVersionIds = Array.from(new Set([
+          ...sharedCardRows.map((card) => card.noteVersionId),
+          ...v2Cards.flatMap((card) => [
+            card.noteVersionId,
+            v2AliasNoteVersionByObjective.get(card.objectiveId),
+          ]),
+        ].filter((id): id is string => Boolean(id))));
         const noteVersionRows = noteVersionIds.length > 0
           ? await tx.query.noteVersions.findMany({
               where: and(
@@ -829,12 +863,42 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
               lastCanonicalOccurredAt: null,
               practiceTrailCount: 0,
             };
+
+            // 与旧卡同一条 source→note→card 血缘；没有 note 时仍保留
+            // card→key_point（不能因为溯源缺失就丢掉理解目标本身）。
+            const resolvedNoteVersionId = v2card.noteVersionId
+              ?? v2AliasNoteVersionByObjective.get(v2card.objectiveId)
+              ?? null;
+            const version = resolvedNoteVersionId ? versionById.get(resolvedNoteVersionId) : undefined;
+            const note = version ? noteById.get(version.noteId) : undefined;
+            const source = note?.sourceId ? sourceById.get(note.sourceId) : undefined;
+            const noteNodeId = note ? `note:${note.id}` : null;
+            const sourceNodeId = source ? `source:${source.id}` : null;
+            if (source) {
+              addNode({
+                nodeRef: { kind: "source" as const, sourceId: source.id },
+                label: source.title,
+                shared: { archived: false, sourceFingerprint: "" },
+                personal: null,
+              }, sourceNodeId);
+            }
+            if (note) {
+              addNode({
+                nodeRef: { kind: "note" as const, noteId: note.id },
+                label: note.title,
+                shared: { archived: false, sourceFingerprint: "" },
+                personal: null,
+              }, noteNodeId);
+              if (sourceNodeId && noteNodeId) addEdge("derived_from", sourceNodeId, noteNodeId);
+            }
+
             addNode({
               nodeRef: { kind: "card" as const, cardId: v2card.cardId },
               label: (summaryByObj.get(objectiveId)?.publicSummary ?? "V2 学习卡").slice(0, 60),
-              shared: { archived: false, sourceFingerprint: "" },
+              shared: { archived: false, sourceFingerprint: "", cardVersion: 2 },
               personal: aggregateCardPersonal([kpPersonalForCard]),
             }, cardNodeId);
+            if (noteNodeId) addEdge("derived_from", noteNodeId, cardNodeId);
             addEdge("contains", cardNodeId, `key_point:${objectiveId}`);
           }
         }

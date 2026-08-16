@@ -258,7 +258,8 @@ export type LearningRunOriginV1 =
     };
 
 export type LearningRunReturnTargetV1 =
-  | { kind: "card"; cardId: string; keyPointId: string }
+  // objectiveId 为 V2 卡标记（V2 卡 run 返回走 /learning-cards/:cardId）
+  | { kind: "card"; cardId: string; keyPointId: string; objectiveId?: string }
   | { kind: "review"; scheduleId?: string; keyPointId: string }
   | {
       kind: "star_map";
@@ -911,7 +912,14 @@ export const learningRunOriginSchema = z.discriminatedUnion("kind", [
 ]);
 
 export const learningRunReturnTargetSchema = z.discriminatedUnion("kind", [
-  z.strictObject({ kind: z.literal("card"), cardId: z.string().uuid(), keyPointId: z.string().uuid() }),
+  // objectiveId 为 V2 卡标记：V2 学习 run 返回时应回 V2 卡详情 /learning-cards/:cardId
+  // （V1 returnTarget 无此字段，仍走 /cards/:cardId）。
+  z.strictObject({
+    kind: z.literal("card"),
+    cardId: z.string().uuid(),
+    keyPointId: z.string().uuid(),
+    objectiveId: z.string().uuid().optional(),
+  }),
   z.strictObject({
     kind: z.literal("review"),
     scheduleId: z.string().uuid().optional(),

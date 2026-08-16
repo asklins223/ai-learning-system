@@ -88,6 +88,12 @@ const ROUTE_PATTERNS: RoutePattern[] = [
   { variant: "focus", test: (p) => /^\/cards\/[^/]+$/.test(p), page: "card-detail", ownsFocusHeader: true },
   {
     variant: "focus",
+    test: (p) => /^\/learning-cards\/[^/]+$/.test(p),
+    page: "learning-card-detail",
+    ownsFocusHeader: true,
+  },
+  {
+    variant: "focus",
     test: (p) => /^\/learning-runs\/[^/]+$/.test(p),
     page: "learning-run",
     ownsFocusHeader: true,

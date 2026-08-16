@@ -498,6 +498,9 @@ export async function listReadyRemindersV2(ctx: RunContext) {
       reminderId: r.reminderId,
       objectiveId: r.objectiveId,
       qualificationNotBefore: r.qualificationNotBefore.toISOString(),
+      // 2026-08-16（实机验证修复）：补下发 status——此前投影缺该字段，
+      // 前端永远走到"首次验证已安排"分支（实际都是可立即开始的 ready）。
+      status: r.status as "ready",
     }));
   });
 }

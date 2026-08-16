@@ -9,14 +9,15 @@ import { Drawer } from "@/components/ui/Drawer";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { api, type CardListItem } from "@/lib/api";
-import type { PublicLearningCardV2 } from "@ailearn/shared";
 import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
 import { relativeTime } from "@/lib/format";
 // §14.2（2026-08-15 恢复）：cards 页发布 bounded context（Pet 主动策略门禁）。
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import {
   formatLearningCardReviewDate,
+  learningCardHref as cardHref,
   learningCardMatchesQuery,
+  toV2CardListItem,
   learningCardSource,
   learningObjectivePresentation,
   learningObjectiveState,
@@ -80,29 +81,6 @@ const SORTS: ReadonlyArray<{
 
 function cardTitle(card: CardListItem) {
   return card.schemaJson?.title?.trim() || "未命名学习目标";
-}
-
-function cardHref(card: CardListItem): string {
-  return card.isV2 ? `/learning-cards/${card.id}` : `/cards/${card.id}`;
-}
-
-function toV2CardListItem(card: PublicLearningCardV2): CardListItem {
-  return {
-    id: card.cardId,
-    noteVersionId: "",
-    workspaceId: "",
-    status: "active",
-    schemaJson: {
-      title: card.publicSummary,
-      summary: card.publicSummary,
-    },
-    artifactId: null,
-    createdAt: card.createdAt,
-    isV2: true,
-    objectiveId: card.objectiveId,
-    ...(card.reviewStatus ? { reviewStatus: card.reviewStatus } : {}),
-    ...(card.nextReviewAt ? { nextReviewAt: card.nextReviewAt } : {}),
-  };
 }
 
 function ObjectiveStateIcon({ state }: { state: LearningObjectiveState }) {

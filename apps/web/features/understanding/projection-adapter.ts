@@ -21,7 +21,7 @@ type ProjectionNodeRef =
 interface ProjectionNode {
   nodeRef: ProjectionNodeRef;
   label: string;
-  shared: { archived: boolean; sourceFingerprint: string };
+  shared: { archived: boolean; sourceFingerprint: string; cardVersion?: number };
   personal: {
     state: "unknown" | "forming" | "stable" | "fragile" | "needs_repair";
     nextReviewAt: string | null;
@@ -113,6 +113,12 @@ export function projectionToUnderstandingGraph(raw: unknown): UnderstandingGraph
 
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphEdge>();
+  // V2 卡节点显式标记 cardVersion=2；星图详情链接必须落到 /learning-cards。
+  const v2CardIds = new Set(
+    projection.nodes
+      .filter((node) => node.nodeRef?.kind === "card" && node.shared?.cardVersion === 2)
+      .map((node) => (node.nodeRef as { cardId: string }).cardId),
+  );
   // key_point → card 映射（href/parent 需要）。
   const cardByKp = new Map<string, string>();
   const parentOf = new Map<string, string>();
@@ -134,14 +140,19 @@ export function projectionToUnderstandingGraph(raw: unknown): UnderstandingGraph
     const key = refKey(ref);
     const entityId = refEntityId(ref);
     const type = ref.kind;
+    const parentCardId = type === "key_point" ? cardByKp.get(entityId) ?? null : null;
     const href = type === "source"
       ? `/sources/${entityId}`
       : type === "note"
         ? `/notes/${entityId}`
         : type === "card"
-          ? `/cards/${entityId}`
-          : type === "key_point" && cardByKp.get(entityId)
-            ? `/cards/${cardByKp.get(entityId)}`
+          ? v2CardIds.has(entityId)
+            ? `/learning-cards/${entityId}`
+            : `/cards/${entityId}`
+          : parentCardId
+            ? v2CardIds.has(parentCardId)
+              ? `/learning-cards/${parentCardId}`
+              : `/cards/${parentCardId}`
             : null;
     const state = type === "key_point" || type === "card" ? mapState(node.personal) : null;
     nodes.set(key, {
@@ -167,6 +178,7 @@ export function projectionToUnderstandingGraph(raw: unknown): UnderstandingGraph
         lastCanonicalEventId: node.personal?.lastCanonicalEventId ?? null,
         archived: node.shared?.archived ?? false,
         sourceFingerprint: node.shared?.sourceFingerprint ?? "",
+        cardVersion: node.shared?.cardVersion ?? null,
       },
     });
   }

@@ -2,6 +2,7 @@ import { and, eq, inArray, count, isNull } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
 import { logger } from "../../lib/logger.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
+import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2 } from "../../db/schema/card-generation-v2.ts";
 import { evidences, validationEvents, reviewSchedules } from "../../db/schema/evidence.ts";
 import { notes } from "../../db/schema/note.ts";
 import { ReviewStatus } from "@ailearn/shared";
@@ -67,7 +68,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
   // 对于有数千张活跃卡片的工作区会浪费大量内存。
   // 设计权衡：当 activeCardCount > 0 时多一次 DB 往返，但避免了
   // 空工作区和新工作区（常见场景）的无谓数据加载。
-  const [noteRows, allCardRows, activeCardCountRows] = await Promise.all([
+  const [noteRows, allCardRows, activeCardCountRows, v2CardRows, v2ActiveCardRows] = await Promise.all([
     tx
       .select({ count: count() })
       .from(notes)
@@ -83,10 +84,23 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
         eq(learningCards.workspaceId, workspaceId),
         activeLearningCardConsumerPredicate(),
       )),
+    tx
+      .select({ count: count() })
+      .from(learningCardsV2)
+      .where(eq(learningCardsV2.workspaceId, workspaceId)),
+    tx
+      .select({ count: count() })
+      .from(learningCardsV2)
+      .where(and(
+        eq(learningCardsV2.workspaceId, workspaceId),
+        eq(learningCardsV2.lifecycle, "active"),
+      )),
   ]);
   const noteCount = Number(noteRows[0]?.count ?? 0);
-  const cardCount = Number(allCardRows[0]?.count ?? 0);
-  const activeCardCount = Number(activeCardCountRows[0]?.count ?? 0);
+  const cardCount = Number(allCardRows[0]?.count ?? 0) + Number(v2CardRows[0]?.count ?? 0);
+  const legacyActiveCardCount = Number(activeCardCountRows[0]?.count ?? 0);
+  const v2ActiveCardCount = Number(v2ActiveCardRows[0]?.count ?? 0);
+  const activeCardCount = legacyActiveCardCount + v2ActiveCardCount;
 
   if (activeCardCount === 0) {
     return {
@@ -268,7 +282,55 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     (sum, r) => sum + Number(r?.count ?? 0),
     0,
   );
-  const pendingReviewCount = cardReviewCount + validationReviewCount;
+
+  // V2 学习卡也进入首页/统计口径：active V2 Objective 绑定的 sealed evidence
+  // 视为硬证据（V2 管线只有在 evidence 可用性通过后才允许激活）；V2 复习计划
+  // 使用 subjectType='key_point'（keyPointId = objectiveId alias），与旧卡的
+  // card/validation 两条路径并账，避免只有新版本学习卡时首页到期数与风险数恒为 0。
+  const v2BindingRows = v2ActiveCardCount > 0
+    ? await tx
+        .select({ evidenceSnapshotId: learningObjectiveEvidenceBindingsV2.evidenceSnapshotId })
+        .from(learningObjectiveEvidenceBindingsV2)
+        .innerJoin(
+          learningObjectiveRevisionsV2,
+          and(
+            eq(learningObjectiveEvidenceBindingsV2.objectiveRevisionId, learningObjectiveRevisionsV2.objectiveRevisionId),
+            eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+          ),
+        )
+        .innerJoin(
+          learningCardsV2,
+          and(
+            eq(learningCardsV2.objectiveId, learningObjectiveRevisionsV2.objectiveId),
+            eq(learningCardsV2.workspaceId, workspaceId),
+            eq(learningCardsV2.lifecycle, "active"),
+          ),
+        )
+        .where(eq(learningObjectiveEvidenceBindingsV2.workspaceId, workspaceId))
+    : [];
+  const v2HardEvidenceCount = new Set(v2BindingRows.map((row) => row.evidenceSnapshotId)).size;
+
+  const v2ReviewCountRows = v2ActiveCardCount > 0
+    ? await tx
+        .select({ count: count() })
+        .from(reviewSchedules)
+        .innerJoin(
+          learningCardsV2,
+          and(
+            eq(learningCardsV2.objectiveId, reviewSchedules.keyPointId),
+            eq(learningCardsV2.workspaceId, workspaceId),
+            eq(learningCardsV2.lifecycle, "active"),
+          ),
+        )
+        .where(and(
+          eq(reviewSchedules.workspaceId, workspaceId),
+          eq(reviewSchedules.status, ReviewStatus.PENDING),
+          eq(reviewSchedules.subjectType, "key_point"),
+          ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
+        ))
+    : [];
+  const v2ReviewCount = Number(v2ReviewCountRows[0]?.count ?? 0);
+  const pendingReviewCount = cardReviewCount + validationReviewCount + v2ReviewCount;
 
   return {
     noteCount,
@@ -276,10 +338,10 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     activeCardCount,
     misunderstandingCount,
     unclearCount,
-    evidenceCount,
+    evidenceCount: evidenceCount + v2HardEvidenceCount,
     pendingEvidenceCount,
     pendingReviewCount,
-    hardEvidenceCount,
+    hardEvidenceCount: hardEvidenceCount + v2HardEvidenceCount,
     // R#6-5：activeCardCount 超过 STATS_ACTIVE_CARDS_MAX 时明细按前 MAX 张卡聚合，
     // 返回降级标志供前端感知（计数与明细口径可能不一致）。
     capped: activeCardCount > STATS_ACTIVE_CARDS_MAX,

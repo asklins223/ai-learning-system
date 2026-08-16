@@ -1120,7 +1120,15 @@ export async function createRunV2(
     workspaceId,
     userId,
     origin: originV2 as never,
-    returnTarget: { kind: originV2.kind === "review" ? "review" : originV2.kind === "card" ? "card" : originV2.kind === "star_map" ? "star_map" : originV2.kind === "today" ? "today" : "onboarding", objectiveId } as never,
+    // 2026-08-16（实机验证修复）：V2 card run 的 returnTarget 必须带 cardId
+    // （此前只有 objectiveId，前端返回时拼出 /cards/undefined → "这张学习卡
+    // 暂时打不开"）。objectiveId 标记 V2 卡，前端据此回 V2 详情页。
+    returnTarget: originV2.kind === "card"
+      ? { kind: "card", cardId: originV2.cardId, keyPointId: objectiveId, objectiveId }
+      : {
+          kind: originV2.kind === "review" ? "review" : originV2.kind === "star_map" ? "star_map" : originV2.kind === "today" ? "today" : "onboarding",
+          objectiveId,
+        } as never,
     keyPointId: objectiveId,
     targetFingerprint: "",
     goal: request.goal,

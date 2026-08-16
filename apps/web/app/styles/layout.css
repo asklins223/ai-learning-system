@@ -2192,7 +2192,8 @@ height: 40px;
 
 .app-canvas[data-page="card-detail"] .card-detail-header,
 .app-canvas[data-page="card-set-detail"] .card-set-header,
-.app-canvas[data-page="source-detail"] .source-detail-header {
+.app-canvas[data-page="source-detail"] .source-detail-header,
+.app-canvas[data-page="learning-card-detail"] .card-detail-header {
   padding-left: max(clamp(18px, 2.2vw, 34px), var(--window-titlebar-safe-left));
   padding-right: max(clamp(18px, 2.2vw, 34px), var(--window-titlebar-safe-right));
 }

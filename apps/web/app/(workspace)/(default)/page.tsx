@@ -15,6 +15,7 @@ import { Icon } from "@/components/ui/icons";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { statusMap } from "@/lib/status-map";
+import { learningCardHref, mergeLearningCardsV2 } from "@/lib/learning-card-library";
 
 type CaptureMessageType = "success" | "error";
 
@@ -87,11 +88,12 @@ export default function HomePage() {
     // 并让通用 in-flight 去重在并发重载时合并同 path GET。
     await api.getMe().catch(() => null);
     if (requestId !== homeRequestRef.current) return;
-    const [statsResult, notesResult, cardsResult, reviewsResult, jobsResult] =
+    const [statsResult, notesResult, cardsResult, v2CardsResult, reviewsResult, jobsResult] =
       await Promise.allSettled([
         api.getStatsOverview(),
         api.listNotes({ limit: 1 }),
         api.listCards({ limit: 50 }),
+        api.listLearningCardsV2({ limit: 50 }),
         api.listSanitizedReviews({ status: "pending", limit: 3 }),
         api.listJobs({ limit: 50 }),
       ] as const);
@@ -112,11 +114,18 @@ export default function HomePage() {
       setNotesError("笔记");
     }
 
-    if (cardsResult.status === "fulfilled") {
-      setCards(cardsResult.value.items);
-      setHomeCardTotal(cardsResult.value.total);
+    if (cardsResult.status === "fulfilled" || v2CardsResult.status === "fulfilled") {
+      const legacyCards = cardsResult.status === "fulfilled" ? cardsResult.value.items : [];
+      const v2Cards = v2CardsResult.status === "fulfilled" ? v2CardsResult.value.items : [];
+      const mergedCards = mergeLearningCardsV2(legacyCards, v2Cards);
+      setCards(mergedCards);
+      // V2 列表接口没有 total；统计接口补上 V2 计数后 stats 会提供准确值。
+      // 这里退化为「旧卡 total + 本页 V2 数量」，避免 stats 失败时首页仍显示 0。
+      const legacyTotal = cardsResult.status === "fulfilled" ? cardsResult.value.total : 0;
+      setHomeCardTotal(legacyTotal + v2Cards.length);
       setCardsError(null);
     } else {
+      setCards(null);
       setCardsError("学习卡");
     }
 
@@ -296,7 +305,7 @@ export default function HomePage() {
             { label: "创建", value: relativeTime(primaryCard.createdAt) },
           ],
           ctaLabel: "开始三分钟巩固",
-          ctaHref: `/learning-cards/${primaryCard.id}`,
+          ctaHref: learningCardHref(primaryCard),
         }
       : null;
 
@@ -751,7 +760,7 @@ export default function HomePage() {
                 {recentCards.map((card, index) => {
                   const status = statusMap.cardStatus(card.status);
                   return (
-                    <Link key={card.id} href={`/cards/${card.id}`} className="learning-home-card">
+                    <Link key={card.id} href={learningCardHref(card)} className="learning-home-card">
                       <span className="learning-home-card-layer" aria-hidden="true" />
                       <div className="learning-home-card-topline">
                         <span className="learning-home-card-index">{String(index + 1).padStart(2, "0")}</span>

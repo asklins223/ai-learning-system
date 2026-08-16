@@ -28,6 +28,7 @@ import { Icon } from "@/components/ui/icons";
 import { useIsOwner } from "@/lib/use-current-user";
 import { isLearningRunV1Enabled } from "@/lib/feature-flags";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
+import { learningCardHref, mergeLearningCardsV2 } from "@/lib/learning-card-library";
 
 type ActivityType = "note" | "card" | "source" | "review" | "job";
 type ActivityGroup = "attention" | "running" | "recorded";
@@ -172,7 +173,7 @@ function activityClock(iso: string): string {
 }
 
 function learningRunUiPreviewHref(input: {
-  origin: "today";
+  origin: "today" | "today_v2";
   cardId?: string | null;
   keyPointId?: string | null;
   scheduleId?: string | null;
@@ -372,12 +373,13 @@ export default function TodayPage() {
     const results = await Promise.allSettled([
       api.listNotes({ limit: 100 }),
       api.listCards({ limit: 100 }),
+      api.listLearningCardsV2({ limit: 100 }),
       listAllReviews(),
       api.listJobs({ limit: 50 }),
       api.listSources({ limit: 100 }),
     ] as const);
     const nextErrors: Partial<Record<DataKey, string>> = {};
-    const keys: DataKey[] = ["notes", "cards", "reviews", "jobs", "sources"];
+    const keys: DataKey[] = ["notes", "cards", "cards", "reviews", "jobs", "sources"];
 
     results.forEach((result, index) => {
       const key = keys[index];
@@ -387,9 +389,14 @@ export default function TodayPage() {
     if (requestId !== loadRequestRef.current) return;
     if (!mountedRef.current) return;
 
-    const [notesResult, cardsResult, reviewsResult, jobsResult, sourcesResult] = results;
+    const [notesResult, cardsResult, v2CardsResult, reviewsResult, jobsResult, sourcesResult] = results;
     if (notesResult.status === "fulfilled") setNotes(notesResult.value.items);
-    if (cardsResult.status === "fulfilled") setCards(cardsResult.value.items);
+    if (cardsResult.status === "fulfilled" || v2CardsResult.status === "fulfilled") {
+      setCards(mergeLearningCardsV2(
+        cardsResult.status === "fulfilled" ? cardsResult.value.items : [],
+        v2CardsResult.status === "fulfilled" ? v2CardsResult.value.items : [],
+      ));
+    }
     if (reviewsResult.status === "fulfilled") setReviews(reviewsResult.value);
     if (jobsResult.status === "fulfilled") setJobs(jobsResult.value.items);
     if (sourcesResult.status === "fulfilled") setSources(sourcesResult.value.items);
@@ -469,7 +476,13 @@ export default function TodayPage() {
       // F23（round4）：先取数据（只写局部变量），所有 setState 都放到
       // mounted 守卫之后——避免卸载中途 setState。
       if (key === "notes") notes = (await api.listNotes({ limit: 100 })).items;
-      if (key === "cards") cards = (await api.listCards({ limit: 100 })).items;
+      if (key === "cards") {
+        const [legacyResult, v2Result] = await Promise.all([
+          api.listCards({ limit: 100 }),
+          api.listLearningCardsV2({ limit: 100 }),
+        ]);
+        cards = mergeLearningCardsV2(legacyResult.items, v2Result.items);
+      }
       if (key === "reviews") reviews = await listAllReviews();
       if (key === "jobs") jobs = (await api.listJobs({ limit: 50 })).items;
       if (key === "sources") sources = (await api.listSources({ limit: 100 })).items;
@@ -615,7 +628,7 @@ export default function TodayPage() {
         description: card.schemaJson?.summary || "从笔记生成了一张新的学习卡",
         statusLabel: "已生成",
         statusTone: "success",
-        href: `/cards/${card.id}`,
+        href: learningCardHref(card),
         actionLabel: "查看卡片",
       });
     }
@@ -660,7 +673,7 @@ export default function TodayPage() {
         description: "复习记录今天有更新",
         statusLabel: presentation.label,
         statusTone: presentation.tone,
-        href: `/cards/${review.card.id}`,
+        href: review.isV2 ? `/learning-cards/${review.card.id}` : `/cards/${review.card.id}`,
         actionLabel: "查看卡片",
       });
     }
@@ -1438,9 +1451,11 @@ export default function TodayPage() {
               <Link
                 href={
                   learningRunUiPreviewHref({
-                    origin: "today",
+                    origin: practiceCard.isV2 ? "today_v2" : "today",
                     cardId: practiceCard.id,
-                  }) ?? `/cards/${practiceCard.id}`
+                    keyPointId: practiceCard.isV2 ? practiceCard.objectiveId ?? null : null,
+                    isV2: practiceCard.isV2,
+                  }) ?? learningCardHref(practiceCard)
                 }
                 className="today-context-action"
               >

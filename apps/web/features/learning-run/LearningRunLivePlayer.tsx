@@ -172,7 +172,15 @@ export function LearningRunLivePlayer({ runId, create, createV2, fallbackReturnT
         // §15.5：星图返回带 changeSetId（一次性显影注释，graph 页消费）。
         const target = wireSnapshot.returnTarget;
         let returnTo: string | null = null;
-        if (target?.kind === "card") returnTo = `/cards/${target.cardId}`;
+        // 2026-08-16（实机验证修复）：V2 卡 run 的 returnTarget 带 objectiveId →
+        // 回 V2 卡详情 /learning-cards/:cardId；V1 卡仍回 /cards/:cardId。
+        // 兜底：修复前创建的旧 run 可能缺 cardId——绝不拼出 /xxx/undefined，
+        // 直接回学习卡库。
+        if (target?.kind === "card") {
+          returnTo = target.cardId
+            ? (target.objectiveId ? `/learning-cards/${target.cardId}` : `/cards/${target.cardId}`)
+            : "/cards";
+        }
         else if (target?.kind === "review") returnTo = "/review";
         else if (target?.kind === "star_map") {
           const changeSetId = wireSnapshot.result?.projection?.changeSetId;

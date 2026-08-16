@@ -8,6 +8,7 @@
  */
 
 import "@/app/styles/card-generation-v2.css";
+import "@/app/styles/card-detail.css";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -141,6 +142,17 @@ export default function LearningCardV2DetailPage() {
 
   useEffect(() => {
     let cancelled = false;
+    // 2026-08-16（实机验证修复）：旧 run 返回/手输可能带非 uuid cardId——
+    // 直接进入友好错误态，不再发请求得到"无效的 cardId 格式"技术报错。
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cardId)) {
+      setLoad({
+        status: "error",
+        message: "卡片链接无效或已失效，请从学习卡库重新进入。",
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     async function boot() {
       try {
         const mod = await import("@/features/card-generation-v2/api-client");
@@ -202,6 +214,24 @@ export default function LearningCardV2DetailPage() {
     [router],
   );
 
+  // 2026-08-16（实机验证修复）：此前 onStateAction 未接线，archived/superseded
+  // 卡的主按钮（返回学习卡库等）点击完全无反应。
+  const onStateAction = useCallback(
+    ({ intent }: { cardId: string; intent: "open_schedule" | "open_replacement" | "refresh" | "return" }) => {
+      if (intent === "return") {
+        router.push("/cards");
+        return;
+      }
+      if (intent === "refresh") {
+        window.location.reload();
+        return;
+      }
+      setNoticeTone("info");
+      setNotice(intent === "open_schedule" ? "首次验证安排已在上方提醒区显示。" : "该操作暂未接线，请从学习卡库重新进入。");
+    },
+    [router],
+  );
+
   const onLifecycleAction = useCallback(
     async (action: "edit" | "archive" | "regenerate") => {
       const client = clientRef.current;
@@ -225,6 +255,8 @@ export default function LearningCardV2DetailPage() {
           // 视图（此前只 router.refresh()，client state 不变 → UI 不更新）。
           const fresh = await client.readPublicCard(card.cardId);
           setCard(fresh);
+          // 已归档：首次验证提醒不再有意义，立即清空。
+          setReminders([]);
         } else if (action === "regenerate") {
           if (!card.noteId) {
             setNoticeTone("error");
@@ -282,57 +314,46 @@ export default function LearningCardV2DetailPage() {
 
   if (load.status === "loading") {
     return (
-      <main className="card-v2-route">
-        <header className="card-v2-route__bar">
-          <Link href="/cards" className="card-v2-button card-v2-button--quiet">← 学习卡库</Link>
-          <h1>学习卡</h1>
-          <ThemeToggle />
-        </header>
-        <div className="card-v2-lab__stage" aria-busy="true">
+      <div className="card-detail-desk" data-layout="medium">
+        <CardDetailSimpleHeader backHref="/cards" backLabel="学习卡库" replace={false} />
+        <div className="card-v2-route__inner" aria-busy="true">
           <section className="candidate-review__loading"><Icon.Sparkle />正在载入学习卡…</section>
         </div>
-      </main>
+      </div>
     );
   }
 
   if (load.status === "error" || !card) {
     return (
-      <main className="card-v2-route">
-        <header className="card-v2-route__bar">
-          <Link href="/cards" className="card-v2-button card-v2-button--quiet">← 学习卡库</Link>
-          <h1>学习卡</h1>
-          <ThemeToggle />
-        </header>
+      <div className="card-detail-desk" data-layout="medium">
+        <CardDetailSimpleHeader backHref="/cards" backLabel="学习卡库" replace={false} />
         <section className="candidate-review__error" role="alert">
           <Icon.Warn />
           <h2>卡片加载失败</h2>
           <p>{load.status === "error" ? load.message : "卡片不存在。"}</p>
         </section>
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="card-v2-route">
-      <header className="card-v2-route__bar">
-        <Link href="/cards" className="card-v2-button card-v2-button--quiet">← 学习卡库</Link>
-        <h1>学习卡</h1>
-        <ThemeToggle />
-      </header>
+    <div className="card-detail-desk" data-layout="medium">
+      <CardDetailSimpleHeader backHref="/cards" backLabel="学习卡库" replace={false} />
       <div className="card-v2-route__inner">
         <ActiveLearningCardV2
           card={toPublicLearningCardPreview(card)}
           capability="available"
           onReveal={onReveal}
           onStartLearning={onStartLearning}
+          onStateAction={onStateAction}
           onLifecycleAction={busy ? undefined : (action) => void onLifecycleAction(action)}
         />
-        {reminders.length > 0 && (
+        {card.lifecycle === "active" && reminders.length > 0 && (
           <section className="learning-card-v2__reminders" aria-label="首次验证提醒">
             <h2>首次验证提醒</h2>
             {reminders.map((reminder) => (
               <div key={reminder.reminderId} className="learning-card-v2__reminder">
-                <span>{reminder.status === "ready" ? "可以开始首次验证" : "首次验证已安排"}</span>
+                <span>{reminder.status === "ready" || reminder.status === undefined ? "可以开始首次验证" : "首次验证已安排"}</span>
                 <button
                   type="button"
                   className="card-v2-button card-v2-button--quiet"
@@ -370,6 +391,27 @@ export default function LearningCardV2DetailPage() {
           onSave={(cue, prompt) => void onSaveEdit(cue, prompt)}
         />
       )}
-    </main>
+    </div>
+  );
+}
+
+/** focus 布局下的详情页头部（与 V1 卡详情页一致：返回链接 + 主题切换）。 */
+function CardDetailSimpleHeader({
+  backHref,
+  backLabel,
+  replace,
+}: {
+  backHref: string;
+  backLabel: string;
+  replace: boolean;
+}) {
+  return (
+    <header className="card-detail-header card-detail-header--simple">
+      <Link href={backHref} replace={replace} className="card-detail-back">
+        <Icon.Chevron aria-hidden="true" />
+        <span>{backLabel}</span>
+      </Link>
+      <ThemeToggle className="card-detail-theme-toggle" />
+    </header>
   );
 }
