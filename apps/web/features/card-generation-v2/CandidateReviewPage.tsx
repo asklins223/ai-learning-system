@@ -53,6 +53,13 @@ export function CandidateReviewPage({
   client,
 }: CandidateReviewPageProps) {
   const v2 = useMemo(() => client ?? null, [client]);
+  // 2026-08-16（实机验证修复）：boot() 在 client 未注入时局部 fallback
+  // createV2Client() 加载数据成功，但未提升为 state → v2 恒 null →
+  // backend=undefined（页面显示"开发预览"）→ onActivate 的 `!v2` 短路，
+  // 点击"启用 N 张学习卡"完全无反应。此处把 fallback client 提升为 state，
+  // 使审核/激活真实走 API。
+  const [resolvedClient, setResolvedClient] = useState<V2Client | null>(null);
+  const effectiveV2 = v2 ?? resolvedClient;
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [run, setRun] = useState<RunPublicView | null>(null);
   const [plan, setPlan] = useState<CardPlanV2 | null>(null);
@@ -71,6 +78,7 @@ export function CandidateReviewPage({
         if (!activeClient) {
           const mod = await import("./api-client");
           activeClient = mod.createV2Client();
+          if (!cancelled) setResolvedClient(activeClient);
         }
         const runResult = await activeClient.getRun(runId);
         const planResult = await activeClient.getRunPlan(runId);
@@ -108,31 +116,39 @@ export function CandidateReviewPage({
   // buildBackend() 都新建对象，抵消 CandidateReview 将来的 memo 收益。仅当
   // v2/plan/runId 变化才重建。
   const backend = useMemo(() => {
-    if (!v2 || !plan) return undefined;
+    if (!effectiveV2 || !plan) return undefined;
     return {
       refresh: async () => {
-        const latest = await v2.getRunCandidates(runId);
-        const latestPlan = await v2.getRunPlan(runId);
+        const latest = await effectiveV2.getRunCandidates(runId);
+        const latestPlan = await effectiveV2.getRunPlan(runId);
         setCandidates(latest.candidates);
         if (latestPlan) setPlan(latestPlan);
         return latest.candidates.map(toCandidateReviewItem);
       },
       submitAction: async (request: CandidateActionRequestV2Local) => {
-        await v2.candidateAction(
+        await effectiveV2.candidateAction(
           runId,
-          toCandidateActionCommand(request, runId, plan),
+          toCandidateActionCommand(
+            request,
+            runId,
+            plan,
+            run?.reviewDraftRevision ?? 1,
+            // 2026-08-16：cardContentEpoch 从 run 取（plan 类型无此字段，
+            // 此前 plan.cardContentEpoch 为 undefined → 请求体缺字段 → 400）。
+            run?.cardContentEpoch ?? 1,
+          ),
           newV2IdempotencyKey("candidate-action"),
         );
       },
     };
-  }, [v2, runId, plan]);
+  }, [effectiveV2, runId, plan, run?.reviewDraftRevision]);
 
   const onReveal = useCallback(
     async (candidate: CandidateReviewItemV2): Promise<CandidateRevealContentV2> => {
-      if (!v2) throw new Error("V2 client 不可用。");
+      if (!effectiveV2) throw new Error("V2 client 不可用。");
       const pageCandidate = candidates.find((c) => c.candidateId === candidate.candidateId);
       if (!pageCandidate) throw new Error("候选不存在。");
-      const reveal = await v2.revealCandidate(
+      const reveal = await effectiveV2.revealCandidate(
         runId,
         candidate.candidateId,
         {
@@ -154,12 +170,12 @@ export function CandidateReviewPage({
         evidencePreview: reveal.evidencePreviews[0]?.preview ?? "",
       };
     },
-    [v2, runId, candidates],
+    [effectiveV2, runId, candidates],
   );
 
   const onActivate = useCallback(
     async (selected: CandidateReviewItemV2[]) => {
-      if (!v2 || !run || !plan) return;
+      if (!effectiveV2 || !run || !plan) return;
       setActivating(true);
       setActivationError(null);
       setActivated(false);
@@ -171,8 +187,9 @@ export function CandidateReviewPage({
           run,
           plan,
           selected: selectedPublic,
+          runSourceSnapshotHash: run.sourceSnapshotHash,
         });
-        const receipt = await v2.activateCandidates(
+        const receipt = await effectiveV2.activateCandidates(
           runId,
           request,
           newV2IdempotencyKey("candidate-activate"),
@@ -187,7 +204,7 @@ export function CandidateReviewPage({
         setActivating(false);
       }
     },
-    [v2, run, plan, runId, candidates],
+    [effectiveV2, run, plan, runId, candidates],
   );
 
   if (load.status === "loading") {
@@ -267,14 +284,18 @@ function toCandidateActionCommand(
   request: CandidateActionRequestV2Local,
   runId: string,
   plan: CardPlanV2,
+  reviewDraftRevision: number,
+  cardContentEpoch: number,
 ): CandidateActionCommandV2 {
   const base = {
     version: 2 as const,
     runId,
-    expectedCardContentEpoch: plan.cardContentEpoch,
+    expectedCardContentEpoch: cardContentEpoch,
     expectedPlanVersion: plan.planVersion,
     expectedPlanHash: plan.planHash,
-    expectedReviewDraftRevision: 1,
+    // 2026-08-16（实机验证修复）：reviewDraftRevision 用 run 实时值——此前
+    // 硬编码 1，keep 后服务端 revision 变化导致后续动作 stale_revision。
+    expectedReviewDraftRevision: reviewDraftRevision,
   };
   switch (request.type) {
     case "keep":

@@ -168,7 +168,11 @@ export function CandidateReview({
   const selectedBeforeReject = useRef<Record<string, boolean>>({});
 
   const selected = useMemo(
-    () => candidates.filter((candidate) => candidate.selected && candidate.reviewState === "ready"),
+    () => candidates.filter(
+      (candidate) =>
+        candidate.selected &&
+        (candidate.reviewState === "ready" || candidate.reviewState === "kept"),
+    ),
     [candidates],
   );
   const editingCandidate = candidates.find((candidate) => candidate.candidateId === editingId) ?? null;
@@ -195,11 +199,26 @@ export function CandidateReview({
   }
 
   function toggleCandidate(candidateId: string) {
-    replaceCandidate(candidateId, (candidate) => ({ ...candidate, selected: !candidate.selected }));
+    const current = candidates.find((c) => c.candidateId === candidateId);
+    const nextSelected = !(current?.selected ?? false);
+    replaceCandidate(candidateId, (candidate) => ({ ...candidate, selected: nextSelected }));
+    // 2026-08-16（实机验证修复）：勾选候选 = keep 审核决策，必须提交服务端
+    // （激活要求 review_decision=keep，仅本地勾选会在激活时 409 not_kept）。
+    if (backend && current && current.reviewState === "ready") {
+      void backend
+        .submitAction({
+          type: "keep",
+          candidateId,
+          expectedRevision: current.revision,
+          expectedRevisionHash: current.revisionHash,
+        })
+        .catch(() => setNotice("保留提交失败，请稍后重试。"));
+    }
   }
 
   async function reveal(candidate: CandidateReviewItemV2) {
-    if (reveals[candidate.candidateId] || revealingId || candidate.reviewState !== "ready") return;
+    if (reveals[candidate.candidateId] || revealingId ||
+      (candidate.reviewState !== "ready" && candidate.reviewState !== "kept")) return;
     setRevealingId(candidate.candidateId);
     setNotice(null);
     try {
@@ -272,7 +291,7 @@ export function CandidateReview({
           setCandidates(latest);
           const found = latest.find((c) => c.candidateId === candidateId);
           setNotice(
-            found?.reviewState === "ready"
+            found?.reviewState === "ready" || found?.reviewState === "kept"
               ? "服务端已完成重新检查，候选回到待启用队列。"
               : found?.reviewState === "rechecking"
                 ? "服务端仍在重新检查，暂时不能启用。"
@@ -408,7 +427,7 @@ export function CandidateReview({
                   <input
                     type="checkbox"
                     checked={candidate.selected}
-                    disabled={candidate.reviewState !== "ready"}
+                    disabled={candidate.reviewState !== "ready" && candidate.reviewState !== "kept"}
                     onChange={() => toggleCandidate(candidate.candidateId)}
                   />
                   <span aria-hidden="true"><Icon.Check /></span>
@@ -417,6 +436,7 @@ export function CandidateReview({
                 <div className="candidate-review-card__tags">
                   {candidate.reviewState === "rechecking" && <span className="is-rechecking">重新检查中</span>}
                   {candidate.reviewState === "rejected" && <span className="is-rejected">不保留</span>}
+                  {candidate.reviewState === "kept" && <span className="is-kept">已保留</span>}
                   <span>{candidate.knowledgeForm}</span>
                   <span>{candidate.strategyLabel}</span>
                   <span>约 {candidate.estimatedSeconds} 秒</span>
@@ -457,7 +477,14 @@ export function CandidateReview({
                   </div>
                 )}
 
-                {candidate.reviewState === "ready" && (revealContent ? (
+                {candidate.reviewState === "kept" && (
+                  <div className="candidate-review-card__kept-note" role="status">
+                    <Icon.Check />
+                    <span>已提交保留，将随启用一并创建学习卡。</span>
+                  </div>
+                )}
+
+                {(candidate.reviewState === "ready" || candidate.reviewState === "kept") && (revealContent ? (
                   <section className="candidate-review-card__reveal" aria-label="已揭示答案">
                     <p className="candidate-review-card__reveal-label">
                       <Icon.Warn aria-hidden="true" /> 已预习答案
@@ -490,6 +517,10 @@ export function CandidateReview({
                   <button type="button" className="candidate-review-card__undo" onClick={() => undoReject(candidate.candidateId)}>
                     <Icon.Refresh />撤销不保留
                   </button>
+                ) : candidate.reviewState === "kept" ? (
+                  <span className="candidate-review-card__kept-hint">
+                    <Icon.Check />已保留 · 启用时一并创建
+                  </span>
                 ) : (
                   <>
                     <button

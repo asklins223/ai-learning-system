@@ -32,6 +32,7 @@ const CANDIDATES: CandidateReviewItemV2[] = [
   {
     candidateId: "cand-1",
     revision: 1,
+    revisionHash: "test-rev-hash",
     objective: "OSI 七层各自职责",
     prompt: "请列出 OSI 模型七层并说明各自职责。",
     reason: "可检索、可判分，值得单独成卡。",
@@ -45,6 +46,7 @@ const CANDIDATES: CandidateReviewItemV2[] = [
   {
     candidateId: "cand-2",
     revision: 1,
+    revisionHash: "test-rev-hash",
     objective: "物理层职责",
     prompt: "物理层负责什么？",
     reason: "独立概念。",

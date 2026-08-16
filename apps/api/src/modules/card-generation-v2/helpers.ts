@@ -124,6 +124,9 @@ export async function serializeRunPublic(row: typeof cardGenerationRunsV2.$infer
     noteVersionId: row.noteVersionId,
     status: row.status,
     cardContentEpoch: row.cardContentEpoch,
+    // 2026-08-16（实机验证修复）：激活需要 sourceSnapshotHash 闭包——此前
+    // public view 未下发，前端激活被"服务端未下发闭包元数据"阻断。
+    sourceSnapshotHash: row.sourceSnapshotHash,
     semanticSpecHash: row.semanticSpecHash,
     inputSnapshotHash: row.inputSnapshotHash,
     generationFingerprint: row.generationFingerprint,
@@ -168,6 +171,10 @@ export function serializeCandidatePublic(row: typeof cardGenerationCandidatesV2.
     transformationKind: presentation.transformationKind,
     estimatedReviewSeconds: presentation.estimatedReviewSeconds,
     evidenceSetHash: row.evidenceSetHash,
+    // 2026-08-16（实机验证修复）：激活需要 candidateEvidenceBindingPlanHash
+    // 闭包——此前 public view 未下发，前端激活被阻断。字段名与前端
+    // CandidatePublicView.candidateEvidenceBindingPlanHash 对齐。
+    candidateEvidenceBindingPlanHash: row.evidenceBindingPlanHash,
     candidateRevisionHash: row.candidateRevisionHash,
     qualityState: row.qualityState,
     reviewDecision: row.reviewDecision,

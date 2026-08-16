@@ -25,6 +25,7 @@ export interface GenerationControlsDraftV2 {
 
 export type CandidateReviewStateV2 =
   | "ready"
+  | "kept"
   | "rechecking"
   | "rejected";
 
@@ -38,6 +39,8 @@ export interface CandidateMergeEligibilityV2 {
 export interface CandidateReviewItemV2 {
   candidateId: string;
   revision: number;
+  /** 2026-08-16：keep/reject 提交服务端所需（服务端 CAS 校验 revisionHash）。 */
+  revisionHash: string;
   objective: string;
   prompt: string;
   reason: string;

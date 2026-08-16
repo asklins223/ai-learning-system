@@ -14,9 +14,13 @@
 import type { CardPlanV2 } from "@ailearn/shared";
 import type { ActivateCardCandidatesRequestV2 } from "@ailearn/shared";
 import type { CandidatePublicView, RunPublicView } from "../api-client";
-import { sha256Hex } from "./sha256";
+// 2026-08-16（实机验证修复）：clientReviewHash 必须与服务端同源——WebCrypto
+// 复刻的 canonical hash（与服务端 computeClientReviewHashV2 逐字节一致）。
+// 此前前端用自研 sha256 拼接（版本串 "learning-card-v2-review-1" 也与服务端
+// "review-ui-v1" 不一致），两端 hash 恒不匹配 → 激活 409 client_review_hash_mismatch。
+import { computeClientReviewHashV2Web } from "./canonical-hash-web";
 
-const REVIEW_UI_CONTRACT_VERSION = "learning-card-v2-review-1";
+const REVIEW_UI_CONTRACT_VERSION = "review-ui-v1";
 
 export interface ActivationSource {
   run: RunPublicView;
@@ -25,7 +29,7 @@ export interface ActivationSource {
   runSourceSnapshotHash?: string;
 }
 
-/** §17.5 clientReviewHash：H(runId + rev + sorted candidateId:revision:hash)。 */
+/** §17.5 clientReviewHash：与服务端 computeClientReviewHashV2 完全一致。 */
 async function clientReviewHash(activation: {
   runId: string;
   expectedReviewDraftRevision: number;
@@ -35,13 +39,12 @@ async function clientReviewHash(activation: {
     revisionHash: string;
   }>;
 }): Promise<string> {
-  const sorted = [...activation.selected]
-    .sort((a, b) => a.candidateId.localeCompare(b.candidateId))
-    .map((s) => `${s.candidateId}:${s.revision}:${s.revisionHash}`)
-    .join("|");
-  return sha256Hex(
-    `${activation.runId}:${activation.expectedReviewDraftRevision}:${sorted}:${REVIEW_UI_CONTRACT_VERSION}`,
-  );
+  return computeClientReviewHashV2Web({
+    runId: activation.runId,
+    expectedReviewDraftRevision: activation.expectedReviewDraftRevision,
+    selected: activation.selected,
+    reviewUiContractVersion: REVIEW_UI_CONTRACT_VERSION,
+  });
 }
 
 /**

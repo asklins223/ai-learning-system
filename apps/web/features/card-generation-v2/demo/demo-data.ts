@@ -30,6 +30,7 @@ export const demoCandidates: CandidateReviewItemV2[] = [
   {
     candidateId: "candidate-osi-order",
     revision: 1,
+    revisionHash: "demo-rev-hash",
     objective: "从低到高重建 OSI 七层顺序",
     prompt: "不看笔记，从物理层开始写出 OSI 七层的完整顺序。",
     reason: "顺序本身是后续定位协议与故障层级的骨架，值得独立提取。",
@@ -47,6 +48,7 @@ export const demoCandidates: CandidateReviewItemV2[] = [
   {
     candidateId: "candidate-osi-match",
     revision: 1,
+    revisionHash: "demo-rev-hash",
     objective: "把关键职责匹配到 OSI 层级",
     prompt: "帧与纠错、路由、端到端传输分别属于哪一层？说明你的判断线索。",
     reason: "把原文列表转换为职责匹配，能检验是否真正理解每层分工。",

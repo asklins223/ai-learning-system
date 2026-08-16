@@ -51,6 +51,8 @@ export interface RunPublicView {
   noteVersionId: string;
   status: string;
   cardContentEpoch: number;
+  /** 2026-08-16：激活闭包字段（服务端 serializeRunPublic 已下发）。 */
+  sourceSnapshotHash?: string;
   semanticSpecHash: string;
   inputSnapshotHash: string;
   generationFingerprint: string;
@@ -212,6 +214,12 @@ export function createV2Client(fetchFn?: typeof fetch): V2Client {
   ): Promise<T> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (idempotencyKey) headers["x-idempotency-key"] = idempotencyKey;
+    // 2026-08-16（实机验证修复）：mutation 必须带 CSRF（服务端 403 csrf token
+    // required）——此前 activate/candidateAction/reveal 全 403，UI 闭环断在
+    // 最后一步。token 从 ailearn_csrf cookie 读，与 lib/api 的 addCsrfHeader
+    // 同源。
+    const csrf = getCookieValue("ailearn_csrf");
+    if (csrf) headers["x-csrf-token"] = decodeURIComponent(csrf);
     const res = await doFetch(`${BASE}${path}`, {
       method: "POST",
       headers,
@@ -227,6 +235,16 @@ export function createV2Client(fetchFn?: typeof fetch): V2Client {
       );
     }
     return res.json() as Promise<T>;
+  }
+
+  /** 读取 cookie 值（ailearn_csrf 等）。 */
+  function getCookieValue(name: string): string | null {
+    if (typeof document === "undefined") return null;
+    const match = document.cookie
+      .split("; ")
+      .map((c) => c.split("="))
+      .find(([k]) => k === name);
+    return match ? match[1] ?? null : null;
   }
 
   async function getJson<T>(path: string): Promise<T> {

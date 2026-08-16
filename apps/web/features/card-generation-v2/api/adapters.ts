@@ -61,6 +61,7 @@ export function toCandidateReviewItem(
   return {
     candidateId: candidate.candidateId,
     revision: candidate.revision,
+    revisionHash: candidate.candidateRevisionHash,
     objective: candidate.objective.statement,
     prompt: candidate.front.prompt,
     reason: recommendationReason(candidate),
@@ -71,8 +72,25 @@ export function toCandidateReviewItem(
     strategyLabel:
       STRATEGY_LABELS[candidate.strategy] ?? candidate.strategy,
     estimatedSeconds: candidate.estimatedReviewSeconds,
-    selected: candidate.recommendation.recommended,
-    reviewState: "ready",
+    // 2026-08-16（实机验证修复）：qualityState 与 reviewDecision 共同决定
+    // 展示状态——
+    //   failed      → rejected（无 binding plan，激活闭包必然缺字段，禁勾选）
+    //   keep        → kept（已保留，计入激活集合，勾选锁定不可取消）
+    //   passed 未决 → ready（可勾选；勾选即提交 keep）
+    //   其余        → rechecking（等待服务端重核）
+    reviewState: candidate.qualityState === "failed"
+      ? "rejected"
+      : candidate.reviewDecision === "keep"
+        ? "kept"
+        : candidate.isReviewReady
+          ? "ready"
+          : "rechecking",
+    // kept 候选已提交 keep，必须计入激活集合（否则 close 时被丢弃）。
+    selected:
+      (candidate.reviewDecision === "keep" &&
+        candidate.qualityState === "passed") ||
+      (Boolean(candidate.recommendation.recommended) &&
+        candidate.isReviewReady),
   };
 }
 
