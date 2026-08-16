@@ -6,10 +6,7 @@ import { PetIcon } from "./PetIcon";
 
 const MAX_DRAFT_LENGTH = 1_200;
 
-export function PetComposer({ textConversationEnabled = false, voiceDialogueEnabled = false }: {
-  textConversationEnabled?: boolean;
-  voiceDialogueEnabled?: boolean;
-}) {
+export function PetComposer() {
   const { state, dispatch } = usePetRuntime();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editing = state.composer.kind === "editing";
@@ -114,9 +111,6 @@ export function PetComposer({ textConversationEnabled = false, voiceDialogueEnab
 
       <footer className="pet-composer-footer">
         <span>{running ? "回复生成中，你可以先写下一条" : "Shift + Enter 换行"}</span>
-        <span className="pet-stage-chip">
-          {voiceDialogueEnabled ? "P3 · Voice" : textConversationEnabled ? "P2 · Text" : "P1 演示"}
-        </span>
       </footer>
     </section>
   );

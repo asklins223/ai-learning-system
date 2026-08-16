@@ -74,14 +74,22 @@ export function classifyDialogueEvent(
   // 拒绝，防止 global off 之前的输出污染新会话。
   if ("accountEpoch" in event && event.accountEpoch !== undefined && event.accountEpoch < context.accountEpoch) return "stale";
   if (event.seq <= context.latestEventSeq) return "duplicate";
-  if (event.seq !== context.latestEventSeq + 1) return "future";
-  if (!("generation" in event) || event.generation === undefined) return "apply";
+  // turn.accepted establishes the new generation (02 §5.1 POST response
+  // semantics): it is the fence for the whole turn and MUST NOT be gated by
+  // strict seq continuity. The client subscribes from eventCursor, but the
+  // reducer's latestEventSeq can lag far behind (e.g. conversation history
+  // predates the current session and no snapshot restore ran), so a strict
+  // `seq === latestEventSeq + 1` check would classify the accepted event as
+  // "future" and silently drop it — leaving the UI stuck on the client
+  // bubble "正在交给伴星…" forever. Any later seq than what we have seen is
+  // accepted; subsequent run-scoped events are then gated by continuity via
+  // latestEventSeq + 1 as usual.
   if (event.type === "turn.accepted") {
-    // turn.accepted establishes the new generation (02 §5.1 POST response
-    // semantics): any generation >= active is adopted and becomes the fence.
     if (event.generation < context.activeGeneration) return "stale";
     return "apply";
   }
+  if (event.seq !== context.latestEventSeq + 1) return "future";
+  if (!("generation" in event) || event.generation === undefined) return "apply";
   if (event.generation < context.activeGeneration) return "stale";
   if (event.generation > context.activeGeneration) return "future";
   return "apply";

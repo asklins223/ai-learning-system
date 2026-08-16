@@ -67,18 +67,17 @@ test("P6 纵切：invitation CAS → start_journey → 事件推进完成 → �
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const now = new Date();
 
-    // 1) bootstrap：缺省 invitation not_offered。
+    // 1) bootstrap：桌宠首邀卡出现即视为已 offer（文档 16 §8.1.1——
+    // 首邀卡渲染即发送邀请；不再停留在 not_offered 死态）。
     const boot1 = await withWorkspaceTransaction(scope, (tx) => bootstrapJourney(tx, scope, now));
-    assert.equal(boot1.invitation.status, "not_offered");
+    assert.equal(boot1.invitation.status, "offered");
     assert.equal(boot1.invitation.revision, 1);
     assert.equal(boot1.journey, null);
 
-    // 2) start_journey（not_offered → 需要先 offered；按 §10.1 offered 由系统展示——
-    // 测试直接构造 offered 状态再 start）。
-    await sql`UPDATE companion_account_invitations SET status='offered', offered_at=now(), revision=2 WHERE user_id=${seeded.userId}`;
+    // 2) start_journey（offered → accepted，直接可用 bootstrap revision）。
     const started = await withWorkspaceTransaction(scope, (tx) =>
       applyInvitationAction(tx, scope, {
-        expectedRevision: 2,
+        expectedRevision: boot1.invitation.revision,
         action: { kind: "start_journey", workspaceId: seeded.workspaceId, branch: "own_material" },
         idempotencyKey: "jv-start-1",
       }, now),

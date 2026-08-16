@@ -127,12 +127,15 @@ async function loadInvitation(tx: ApiTransaction, userId: string) {
 async function ensureInvitation(tx: ApiTransaction, userId: string, now: Date) {
   const existing = await loadInvitation(tx, userId);
   if (existing) return existing;
+  // 文档 16 §8.1.1：注册完成 → 桌宠首邀卡出现即视为 invitation 已 offer。
+  // 直接以 offered 起步，保证 start_journey/defer/skip 状态机可达。
   const inserted = await tx.insert(companionAccountInvitations).values({
     userId,
-    status: "not_offered",
+    status: "offered",
     revision: 1,
     createdAt: now,
     updatedAt: now,
+    offeredAt: now,
   }).returning();
   return inserted[0];
 }
@@ -145,6 +148,27 @@ export async function bootstrapJourney(
   now: Date = new Date(),
 ): Promise<CompanionJourneyBootstrapV2> {
   const invitation = await ensureInvitation(tx, scope.userId, now);
+  // 存量兼容（2026-08-16）：早期 ensureInvitation 以 not_offered 起步且无
+  // offer 转换路径，导致首邀卡可见但 start_journey 恒 409。此处惰性幂等
+  // 升级：邀请卡在桌宠窗口出现即视同已 offer（与 create 时 offered 同语义）。
+  if (invitation.status === "not_offered") {
+    const upgraded = await tx
+      .update(companionAccountInvitations)
+      .set({
+        status: "offered",
+        offeredAt: invitation.offeredAt ?? now,
+        revision: invitation.revision + 1,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(companionAccountInvitations.userId, scope.userId),
+        eq(companionAccountInvitations.status, "not_offered"),
+      ))
+      .returning();
+    if (upgraded[0]) {
+      return bootstrapJourney(tx, scope, now);
+    }
+  }
   // 惰性 drain：先消费 pending 里程碑事件，再返回最新投影。
   const activeRows = await tx
     .select({ id: companionJourneys.id })

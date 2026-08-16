@@ -502,7 +502,7 @@ export function PetSurface({
           />
 
           {state.bubble.kind === "confirmation" ? <PetConfirmationCard /> : <PetBubble />}
-          <PetComposer textConversationEnabled={textConversationEnabled} voiceDialogueEnabled={voiceDialogueEnabled} />
+          <PetComposer />
           <PetMenu learningActionsEnabled={learningActionsEnabled} />
           <PetVoiceControl
             left={layout.voiceX}
@@ -556,17 +556,6 @@ export function PetSurface({
               <PetIcon name="drag" />
             </button>
           ) : null}
-
-          <div
-            className="pet-prototype-badge"
-            title={voiceDialogueEnabled
-              ? "P3 Voice — 真实录音与 ASR；TTS 仍按服务端 capability 控制"
-              : textConversationEnabled
-                ? "P2 Text — 已连接服务端对话"
-                : "P1 Surface Prototype — 演示数据，未连接 AI 服务"}
-          >
-            <span aria-hidden="true" /> {voiceDialogueEnabled ? "P3 · Voice" : textConversationEnabled ? "P2 · Text" : "P1 · Fixture"}
-          </div>
 
           <div aria-live="polite" className="sr-only pet-aria-status">
             {state.turn.kind === "running" && state.turn.phase === "thinking" ? "正在思考" : ""}

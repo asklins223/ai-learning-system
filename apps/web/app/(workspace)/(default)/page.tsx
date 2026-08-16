@@ -248,7 +248,7 @@ export default function HomePage() {
       ? `${noteTotal}`
       : "—";
   const cardCountLabel = stats
-    ? `${stats.cardCount}`
+    ? `${stats.activeCardCount}`
     : homeCardTotal !== null
       ? `${homeCardTotal}`
       : "—";

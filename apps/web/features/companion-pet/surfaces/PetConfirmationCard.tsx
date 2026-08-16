@@ -239,7 +239,6 @@ export function PetConfirmationCard() {
           <small>需要你的确认</small>
           <strong id="pet-confirmation-title">{state.bubble.actionName}</strong>
         </span>
-        <span className="pet-stage-chip">P5</span>
       </header>
 
       <div className="pet-confirmation-body">

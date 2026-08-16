@@ -15,7 +15,6 @@ interface MenuItemV1 {
   label: string;
   description?: string;
   icon: PetIconNameV1;
-  stage?: "P3" | "P5";
   candidateId?: "resume_current" | "start_short" | "learning_run_resume" | "learning_run_start";
   disabled?: boolean;
   disabledNote?: string;
@@ -39,7 +38,7 @@ interface MenuItemV1 {
 
 const ROOT_ITEMS: readonly MenuItemV1[] = [
   { id: "say", label: "说句话", description: "打开快捷输入", icon: "message", action: "say" },
-  { id: "voice", label: "语音对话", description: "按住说话，松开发送", icon: "microphone", action: "voice", stage: "P3" },
+  { id: "voice", label: "语音对话", description: "按住说话，松开发送", icon: "microphone", action: "voice" },
   { id: "study", label: "学习", description: "继续与复习", icon: "study", action: "study" },
   { id: "more", label: "更多", description: "历史与设置", icon: "more", action: "more" },
 ];
@@ -47,10 +46,10 @@ const ROOT_ITEMS: readonly MenuItemV1[] = [
 const STUDY_ITEMS: readonly MenuItemV1[] = [
   // 方案 16 §18：桌宠学习动作统一走 LearningRun（旧 LearningSession 候选
   // 随 P9 旧栈删除；learning_runs 恢复/创建即跳转 Player）。
-  { id: "resume", label: "继续当前学习", icon: "study", action: "learning", candidateId: "learning_run_resume", stage: "P5", disabledNote: "当前没有可继续的学习" },
-  { id: "start", label: "开始三分钟巩固", icon: "sparkles", action: "learning", candidateId: "learning_run_start", stage: "P5", disabledNote: "当前没有可开始的学习" },
-  { id: "review", label: "今日复习", icon: "review", action: "say", stage: "P5", disabledNote: "复习页暂时不可用" },
-  { id: "card", label: "回到当前卡片", icon: "card", action: "say", stage: "P5", disabledNote: "当前没有打开的卡片" },
+  { id: "resume", label: "继续当前学习", icon: "study", action: "learning", candidateId: "learning_run_resume", disabledNote: "当前没有可继续的学习" },
+  { id: "start", label: "开始三分钟巩固", icon: "sparkles", action: "learning", candidateId: "learning_run_start", disabledNote: "当前没有可开始的学习" },
+  { id: "review", label: "今日复习", icon: "review", action: "say", disabledNote: "复习页暂时不可用" },
+  { id: "card", label: "回到当前卡片", icon: "card", action: "say", disabledNote: "当前没有打开的卡片" },
   { id: "study-back", label: "返回", icon: "back", action: "back" },
 ];
 
@@ -519,7 +518,6 @@ export function PetMenu({ learningActionsEnabled = false }: { learningActionsEna
                 {level === "root" && item.description ? <small>{item.description}</small> : null}
                 {level !== "root" && item.description ? <small>{item.description}</small> : null}
               </span>
-              {item.stage ? <span className="pet-stage-chip">{item.stage}</span> : null}
               {stateValue !== null ? (
                 <span className={`pet-toggle${stateValue ? " is-on" : ""}`} aria-hidden="true"><i /></span>
               ) : item.action === "study" || item.action === "more" || item.action === "full_conversation" ? (

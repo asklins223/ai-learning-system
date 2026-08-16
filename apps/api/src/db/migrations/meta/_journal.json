@@ -1212,6 +1212,20 @@
       "when": 1786729101423,
       "tag": "0172_companion_memory_maintenance",
       "breakpoints": true
+    },
+    {
+      "idx": 173,
+      "version": "7",
+      "when": 1786729102423,
+      "tag": "0173_worker_memory_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 174,
+      "version": "7",
+      "when": 1786729103423,
+      "tag": "0174_worker_memory_jobs_rls",
+      "breakpoints": true
     }
   ]
 }
