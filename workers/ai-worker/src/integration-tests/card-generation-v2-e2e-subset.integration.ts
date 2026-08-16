@@ -92,7 +92,7 @@ async function seedNote(
     await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
       VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${JSON.stringify({ blocks: [{ type: "paragraph", content }] })}, 'v2-e2e-hash', ${USER_ID})
+      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'v2-e2e-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${blockId}, ${versionId}, ${WORKSPACE_ID}, 'paragraph', ${content}, 1)
@@ -866,7 +866,7 @@ test("C21：生成期间编辑 Note → 本次绑定 sealed 旧版本，不读�
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${v2VersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${JSON.stringify({ blocks: [{ type: "paragraph", content: V2_CONTENT }] })}, 'v2-e2e-hash-2', ${USER_ID})
+      VALUES (${v2VersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content: V2_CONTENT }] })}, 'v2-e2e-hash-2', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${v2BlockId}, ${v2VersionId}, ${WORKSPACE_ID}, 'paragraph', ${V2_CONTENT}, 1)
@@ -933,7 +933,7 @@ test("C10：代码块不被文本归一化——typed evidence 缺失时拒绝�
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${codeVersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${JSON.stringify({ blocks: [{ type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-code', ${USER_ID})
+      VALUES (${codeVersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-code', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${codeBlockId}, ${codeVersionId}, ${WORKSPACE_ID}, 'code', ${CODE_SNIPPET}, 1)
@@ -962,7 +962,7 @@ test("C10：代码块不被文本归一化——typed evidence 缺失时拒绝�
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${mixedVersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${JSON.stringify({ blocks: [{ type: "paragraph", content: TEXT_PART }, { type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-mixed', ${USER_ID})
+      VALUES (${mixedVersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content: TEXT_PART }, { type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-mixed', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${mixedBlockA}, ${mixedVersionId}, ${WORKSPACE_ID}, 'paragraph', ${TEXT_PART}, 1), (${mixedBlockB}, ${mixedVersionId}, ${WORKSPACE_ID}, 'code', ${CODE_SNIPPET}, 2)

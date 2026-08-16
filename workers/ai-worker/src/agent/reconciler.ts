@@ -206,21 +206,21 @@ async function resumeStuckWaitingParents(): Promise<number> {
 
   let resumed = 0;
 
-  for (const parent of waitingParents) {
-    // 检查所有子任务是否都已终态
-    const children = await db
-      .select({
-        id: schema.cardGenerationUnits.id,
-        status: schema.cardGenerationUnits.status,
-      })
-      .from(schema.cardGenerationUnits)
-      .where(
-        and(
-          eq(schema.cardGenerationUnits.parentUnitId, parent.unitId),
-          eq(schema.cardGenerationUnits.workspaceId, parent.workspaceId),
-        ),
-      );
+  // 一次性批量加载所有 waiting parent 的子任务，避免 N+1 查询
+  const waitingParentIds = waitingParents.map((p) => p.unitId);
+  const allChildren = await db
+    .select({
+      id: schema.cardGenerationUnits.id,
+      status: schema.cardGenerationUnits.status,
+      parentUnitId: schema.cardGenerationUnits.parentUnitId,
+    })
+    .from(schema.cardGenerationUnits)
+    .where(inArray(schema.cardGenerationUnits.parentUnitId, waitingParentIds));
 
+  // 在内存中解析哪些 parent 可恢复（无子任务或全部子任务已终态）
+  const resumableParentIds: string[] = [];
+  for (const parent of waitingParents) {
+    const children = allChildren.filter((c) => c.parentUnitId === parent.unitId);
     if (children.length === 0) {
       // 没有子任务但仍在 waiting_child → 状态错误，标记为 running 以重新处理
       logger.warn(
@@ -233,44 +233,68 @@ async function resumeStuckWaitingParents(): Promise<number> {
       );
       if (stillRunning.length > 0) continue;
     }
+    resumableParentIds.push(parent.unitId);
+  }
 
-    // CAS: waiting_child → running，确保原子性
-    const now = new Date();
-    const [updated] = await db
-      .update(schema.cardGenerationUnits)
-      .set({ status: "running", updatedAt: now })
-      .where(
-        and(
-          eq(schema.cardGenerationUnits.id, parent.unitId),
-          eq(schema.cardGenerationUnits.workspaceId, parent.workspaceId),
-          eq(schema.cardGenerationUnits.status, "waiting_child"),
-        ),
-      )
-      .returning({ id: schema.cardGenerationUnits.id });
+  // 批量 CAS: waiting_child → running（仅更新仍为 waiting_child 的行，单次 round-trip）
+  const now = new Date();
+  const casUpdated = resumableParentIds.length > 0
+    ? await db
+        .update(schema.cardGenerationUnits)
+        .set({ status: "running", updatedAt: now })
+        .where(
+          and(
+            inArray(schema.cardGenerationUnits.id, resumableParentIds),
+            eq(schema.cardGenerationUnits.status, "waiting_child"),
+          ),
+        )
+        .returning({ id: schema.cardGenerationUnits.id })
+    : [];
+  const casUpdatedIds = new Set(casUpdated.map((u) => u.id));
 
-    if (!updated) continue;
+  // 为 CAS 成功的 parent 创建 resume job。SECURITY DEFINER 入队函数是标量 SQL
+  // 函数，参数各异但可用 unnest 并行数组一次调用，把 N 次 DB round-trip 合并为
+  // 1 次（与 specialist-persist 的批量对账读同构）。
+  const casUpdatedParents = waitingParents.filter((p) => casUpdatedIds.has(p.unitId));
+  if (casUpdatedParents.length > 0) {
+    // 显式 `{uuid,...}::uuid[]` 字面量（drizzle+postgres-js 数组参数序列化
+    // 不可靠；id 均来自本库 uuid 列，无逗号注入风险）。requested_by 固定 NULL。
+    const wsLiteral = `{${casUpdatedParents.map((p) => p.workspaceId).join(",")}}`;
+    const runLiteral = `{${casUpdatedParents.map((p) => p.runId).join(",")}}`;
+    const unitLiteral = `{${casUpdatedParents.map((p) => p.unitId).join(",")}}`;
+    const hashLiteral = `{${casUpdatedParents
+      .map((p) => `"${hashJson({
+        runId: p.runId,
+        unitId: p.unitId,
+        resume: true,
+        reconciler: true,
+      })}"`)
+      .join(",")}}`;
+    const idemLiteral = `{${casUpdatedParents
+      .map((p) => `"agent-reconcile:${p.runId}:${p.unitId}"`)
+      .join(",")}}`;
 
-    // 创建 resume job（jobs RLS 重开：跨 workspace 对账写经 SECURITY DEFINER 函数）
     await db.execute(sql`
       SELECT public.ailearn_enqueue_agent_turn_job(
-        ${parent.workspaceId}, NULL, ${parent.runId}, ${parent.unitId}, 999,
-        ${hashJson({
-          runId: parent.runId,
-          unitId: parent.unitId,
-          resume: true,
-          reconciler: true,
-        })},
-        80, 'card_foreground',
-        ${`agent-reconcile:${parent.runId}:${parent.unitId}`},
-        'system-reconciler'
+        v.workspace_id, NULL, v.run_id, v.unit_id, 999,
+        v.input_hash, 80, 'card_foreground', v.idem_key, 'system-reconciler'
       )
+      FROM unnest(
+        ${wsLiteral}::uuid[],
+        ${runLiteral}::uuid[],
+        ${unitLiteral}::uuid[],
+        ${hashLiteral}::text[],
+        ${idemLiteral}::text[]
+      ) AS v(workspace_id, run_id, unit_id, input_hash, idem_key)
     `);
 
-    resumed++;
-    logger.info(
-      { unitId: parent.unitId, runId: parent.runId },
-      "reconciler: 恢复卡死的 waiting_child parent",
-    );
+    for (const parent of casUpdatedParents) {
+      resumed++;
+      logger.info(
+        { unitId: parent.unitId, runId: parent.runId },
+        "reconciler: 恢复卡死的 waiting_child parent",
+      );
+    }
   }
 
   return resumed;

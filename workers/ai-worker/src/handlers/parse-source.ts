@@ -508,31 +508,46 @@ async function requestPinnedUrl(
 /**
  * 移除所有带指定 class 模式的 HTML 元素（含内容），支持嵌套同类标签。
  * 用简单的深度计数器找到匹配的闭合标签。
+ * 先收集所有匹配区间的边界，再做单次重建，避免逐个匹配时反复
+ * slice 拼接整个字符串导致 O(n^2)。
  */
 function removeElementsByClass(html: string, tagName: string, classPattern: string): string {
   const openRe = new RegExp(`<${tagName}[^>]*class="[^"]*\\b${classPattern}\\b[^"]*"[^>]*>`, "gi");
-  let result = html;
+  const tagRe = new RegExp(`</?${tagName}\\b[^>]*>`, "gi");
+  // 收集所有要移除的 [start, end) 区间
+  const ranges: Array<[number, number]> = [];
+  let cursor = 0;
   let match: RegExpExecArray | null;
   openRe.lastIndex = 0;
-  while ((match = openRe.exec(result)) !== null) {
+  while ((match = openRe.exec(html)) !== null) {
+    // 跳过已被之前区间覆盖的起始位置（避免处理嵌套中的内层匹配）
+    if (match.index < cursor) continue;
     const startIdx = match.index;
     let depth = 1;
     let idx = startIdx + match[0].length;
-    const tagRe = new RegExp(`</?${tagName}\\b[^>]*>`, "gi");
     tagRe.lastIndex = idx;
     let tagMatch: RegExpExecArray | null;
-    while (depth > 0 && (tagMatch = tagRe.exec(result)) !== null) {
+    while (depth > 0 && (tagMatch = tagRe.exec(html)) !== null) {
       depth += tagMatch[0].startsWith("</") ? -1 : 1;
       idx = tagRe.lastIndex;
     }
-    if (depth === 0) {
-      result = result.slice(0, startIdx) + " " + result.slice(idx);
-      openRe.lastIndex = startIdx;
-    } else {
-      break;
-    }
+    if (depth !== 0) break; // 未配平，停止
+    ranges.push([startIdx, idx]);
+    cursor = idx;
+    openRe.lastIndex = idx;
   }
-  return result;
+  if (ranges.length === 0) return html;
+
+  // 单次重建：按区间拼接保留片段
+  const parts: string[] = [];
+  let pos = 0;
+  for (const [start, end] of ranges) {
+    if (start > pos) parts.push(html.slice(pos, start));
+    parts.push(" ");
+    pos = end;
+  }
+  if (pos < html.length) parts.push(html.slice(pos));
+  return parts.join("");
 }
 
 /**
@@ -1269,22 +1284,33 @@ export async function fetchAndUploadSourceImages(
 
   // 去重：同一 URL 只下载一次
   const urlToKey = new Map<string, string | null>();
-  for (const match of externalImages) {
-    const url = match[2];
-    if (urlToKey.has(url)) continue;
-    if (signal?.aborted) break;
-    try {
-      logger.info({ sourceId, imageUrl: url }, "downloading source image");
-      const objectKey = await downloadAndUploadImage(url, workspaceId, sourceId, signal);
-      urlToKey.set(url, objectKey);
-      if (objectKey) {
-        logger.info({ sourceId, imageUrl: url, objectKey }, "source image uploaded");
+  const uniqueExternalUrls = [...new Set(externalImages.map((m) => m[2]))];
+  // PERF: 外部图片按 URL 去重后以有界并发（~4）并行下载，替代原来的串行
+  // await（网络 I/O 每张图片一次 RTT，顺序下载会线性拉长 parse_source 时长）。
+  // 各 URL 独立：单张失败记录 null 并继续，abort 信号仍逐调用传播。
+  const DOWNLOAD_CONCURRENCY = 4;
+  let nextImageIndex = 0;
+  const downloadWorkers = Array.from(
+    { length: Math.min(DOWNLOAD_CONCURRENCY, uniqueExternalUrls.length) },
+    async () => {
+      while (nextImageIndex < uniqueExternalUrls.length) {
+        const url = uniqueExternalUrls[nextImageIndex++];
+        if (signal?.aborted) break;
+        try {
+          logger.info({ sourceId, imageUrl: url }, "downloading source image");
+          const objectKey = await downloadAndUploadImage(url, workspaceId, sourceId, signal);
+          urlToKey.set(url, objectKey);
+          if (objectKey) {
+            logger.info({ sourceId, imageUrl: url, objectKey }, "source image uploaded");
+          }
+        } catch (err) {
+          logger.warn({ sourceId, imageUrl: url, err }, "source image download failed");
+          urlToKey.set(url, null);
+        }
       }
-    } catch (err) {
-      logger.warn({ sourceId, imageUrl: url, err }, "source image download failed");
-      urlToKey.set(url, null);
-    }
-  }
+    },
+  );
+  await Promise.all(downloadWorkers);
 
   // 替换文本中的 URL
   let result = text;

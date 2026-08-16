@@ -11,6 +11,29 @@ import { sql } from "drizzle-orm";
 import { evaluateProactivePolicy } from "./proactive-policy.ts";
 import { deliver } from "./delivery-service.ts";
 
+// PERF-WN: Intl.DateTimeFormat 构造带时区数据，开销可观且每次调用都重建。
+// 按 timezone 记忆化复用；时区来自账号设置（有限 IANA 集合），加容量上限
+// 防不可信输入导致 Map 无界增长。
+const QUIET_HOURS_FORMATTER_MAX = 128;
+const quietHoursFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+function getQuietHoursFormatter(timezone: string): Intl.DateTimeFormat {
+  const cached = quietHoursFormatterCache.get(timezone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  if (quietHoursFormatterCache.size >= QUIET_HOURS_FORMATTER_MAX) {
+    // 最简容量守卫：超限时淘汰最先插入的项（Map 保持插入序）。
+    quietHoursFormatterCache.delete(quietHoursFormatterCache.keys().next().value as string);
+  }
+  quietHoursFormatterCache.set(timezone, formatter);
+  return formatter;
+}
+
 /**
  * 静默时段判定（方案 16 §10.2）：HH:MM（startLocal/endLocal）+ IANA 时区。
  * 时段按"本地钟面时间"比较，跨午夜（start > end）按环绕处理。
@@ -21,12 +44,7 @@ export function isWithinQuietHours(
   now: Date,
 ): boolean {
   try {
-    const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: quietHours.timezone,
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    });
+    const formatter = getQuietHoursFormatter(quietHours.timezone);
     const parts = formatter.formatToParts(now);
     const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
     const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
@@ -52,6 +70,62 @@ export function isWithinQuietHours(
   }
 }
 
+export interface ProactiveMemoryDeferInput {
+  scope: { workspaceId: string; userId: string };
+  runId: string;
+  outcome: string;
+  trustOutcome: string;
+  keyPointClaim: string;
+  scheduleImpact: string;
+  now: Date;
+}
+
+/**
+ * 事务提交后刷新延迟的 LLM 记忆候选（P8）。LLM 网络调用不持有任何 DB 连接：
+ * 先生成候选，成功后在新事务里 upsert 记忆（失败静默降级，不影响确定性闭环）。
+ */
+export async function flushDeferredProactiveMemoryCandidates(
+  defer: ProactiveMemoryDeferInput,
+): Promise<void> {
+  try {
+    const { generateMemoryCandidates } = await import("./proactive-generator.ts");
+    const { upsertMemory } = await import("./memory-service.ts");
+    const { withWorkspaceTransaction } = await import("../../db/client.ts");
+    const generated = await generateMemoryCandidates({
+      outcome: defer.outcome,
+      trustOutcome: defer.trustOutcome,
+      keyPointClaim: defer.keyPointClaim,
+      scheduleImpact: defer.scheduleImpact,
+    });
+    if (!generated) return;
+    const { scope } = defer;
+    // upsert 在独立事务内执行（不再持有结算事务的连接）。
+    await withWorkspaceTransaction(scope, async (tx) => {
+      await upsertMemory(tx, scope, {
+        kind: "learning_context",
+        content: generated.learningContext,
+        sourceEventId: `run.completed:${defer.runId}`,
+        candidate: true,
+      }, defer.now);
+      if (generated.interactionNote) {
+        await upsertMemory(tx, scope, {
+          kind: "interaction_note",
+          content: generated.interactionNote,
+          sourceEventId: `run.completed:${defer.runId}:note`,
+          candidate: true,
+        }, defer.now);
+      }
+    });
+  } catch (err) {
+    // 生成/写入失败不阻塞确定性交付（fail-open 观察性降级）。
+    const { logger } = await import("../../lib/logger.ts");
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), runId: defer.runId },
+      "memory candidate generation skipped",
+    );
+  }
+}
+
 export async function hookProactiveOnRunCompleted(
   tx: ApiTransaction,
   scope: { workspaceId: string; userId: string },
@@ -64,59 +138,63 @@ export async function hookProactiveOnRunCompleted(
     scheduleImpact?: string;
   },
   now: Date = new Date(),
-): Promise<void> {
+): Promise<ProactiveMemoryDeferInput | null> {
   // P8 最小：读取账户真实偏好（介入强度 + 静默时段，方案 16 §10.2/§10.3）；
-  // DND/offline 读取账户 presence。
+  // DND/offline 读取账户 presence。四组只读查询相互独立——并行发出，
+  // 避免在结算路径上串行 4 个 DB 往返（PERF round-5）。
   const { userCompanionAccountState } = await import("../../db/schema/companion.ts");
   const { eq } = await import("drizzle-orm");
-  const accountRows = await tx
-    .select({
-      presence: userCompanionAccountState.presence,
-      globalEnabled: userCompanionAccountState.globalEnabled,
-      interventionLevel: userCompanionAccountState.interventionLevel,
-      quietHours: userCompanionAccountState.quietHours,
-    })
-    .from(userCompanionAccountState)
-    .where(eq(userCompanionAccountState.userId, scope.userId))
-    .limit(1);
+  const [accountRows, pageRows, shownRows, lastRows] = await Promise.all([
+    tx
+      .select({
+        presence: userCompanionAccountState.presence,
+        globalEnabled: userCompanionAccountState.globalEnabled,
+        interventionLevel: userCompanionAccountState.interventionLevel,
+        quietHours: userCompanionAccountState.quietHours,
+      })
+      .from(userCompanionAccountState)
+      .where(eq(userCompanionAccountState.userId, scope.userId))
+      .limit(1),
+    // 正式作答/处理中抑制（§6.5/§9.5/§20.2 Gate）：读最近未过期页面 context
+    // （Player 在 formal_answer 期间每 10s 续租，未过期即当前状态）。
+    tx.execute<{ interaction_state: string }>(sql`
+      SELECT interaction_state FROM assistant_page_contexts
+      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+        AND revoked_at IS NULL AND expires_at > now()
+      ORDER BY updated_at DESC LIMIT 1
+    `),
+    // 频率预算（§10.2 真实执行）：24h 主动 delivery 计数。
+    // dedupeKey（run.completed:<runId>）每次全新，cooldown 只看最近主动 delivery。
+    tx.execute<{ n: string }>(sql`
+      SELECT count(*)::int AS n FROM assistant_deliveries
+      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+        AND kind IN ('proactive_cue', 'system_event')
+        AND created_at > now() - interval '24 hours'
+    `),
+    // 最近一次展示时间。
+    tx.execute<{ created_at: Date }>(sql`
+      SELECT created_at FROM assistant_deliveries
+      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+        AND kind IN ('proactive_cue', 'system_event')
+      ORDER BY created_at DESC LIMIT 1
+    `),
+  ]);
   const presence = accountRows[0]?.presence as { presence?: "online" | "dnd" | "offline" } | null;
   const availability = presence?.presence ?? "online";
   if (accountRows[0] && accountRows[0].globalEnabled === false) {
-    return; // 全局关闭：不打扰。
+    return null; // 全局关闭：不打扰。
   }
   // 静默时段（账号级；按 IANA 时区计算本地时间）：时段内抑制全部主动 cue。
   const quietHours = accountRows[0]?.quietHours;
   if (quietHours && isWithinQuietHours(quietHours, now)) {
-    return;
+    return null;
   }
   const interventionLevel = accountRows[0]?.interventionLevel ?? "moderate";
 
-  // 正式作答/处理中抑制（§6.5/§9.5/§20.2 Gate）：读最近未过期页面 context
-  // （Player 在 formal_answer 期间每 10s 续租，未过期即当前状态）。
-  const pageRows = await tx.execute<{ interaction_state: string }>(sql`
-    SELECT interaction_state FROM assistant_page_contexts
-    WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-      AND revoked_at IS NULL AND expires_at > now()
-    ORDER BY updated_at DESC LIMIT 1
-  `);
   const pageState = pageRows[0]?.interaction_state;
   const formalAnswerInProgress = pageState === "formal_answer" || pageState === "processing";
 
-  // 频率预算（§10.2 真实执行）：24h 主动 delivery 计数 + 最近一次展示间隔。
-  // dedupeKey（run.completed:<runId>）每次全新，cooldown 只看最近主动 delivery。
-  const shownRows = await tx.execute<{ n: string }>(sql`
-    SELECT count(*)::int AS n FROM assistant_deliveries
-    WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-      AND kind IN ('proactive_cue', 'system_event')
-      AND created_at > now() - interval '24 hours'
-  `);
   const dailyShownTotal = Number(shownRows[0]?.n ?? 0);
-  const lastRows = await tx.execute<{ created_at: Date }>(sql`
-    SELECT created_at FROM assistant_deliveries
-    WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-      AND kind IN ('proactive_cue', 'system_event')
-    ORDER BY created_at DESC LIMIT 1
-  `);
   const msSinceLastShown = lastRows[0]
     ? now.getTime() - new Date(lastRows[0].created_at).getTime()
     : null;
@@ -133,7 +211,7 @@ export async function hookProactiveOnRunCompleted(
     expired: false,
     now: now.getTime(),
   });
-  if (!decision.allow) return;
+  if (!decision.allow) return null;
 
   await deliver(tx, scope, {
     assistantSessionId: null,
@@ -143,40 +221,16 @@ export async function hookProactiveOnRunCompleted(
     expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
   }, now);
 
-  // P8 模型生成接线：LLM 生成分层记忆候选（失败静默降级——确定性闭环照常）。
-  if (input.keyPointClaim) {
-    try {
-      const { generateMemoryCandidates } = await import("./proactive-generator.ts");
-      const { upsertMemory } = await import("./memory-service.ts");
-      const generated = await generateMemoryCandidates({
-        outcome: input.outcome ?? "unknown",
-        trustOutcome: input.trustOutcome ?? "unknown",
-        keyPointClaim: input.keyPointClaim,
-        scheduleImpact: input.scheduleImpact ?? "none",
-      });
-      if (generated) {
-        await upsertMemory(tx, scope, {
-          kind: "learning_context",
-          content: generated.learningContext,
-          sourceEventId: `run.completed:${input.runId}`,
-          candidate: true,
-        }, now);
-        if (generated.interactionNote) {
-          await upsertMemory(tx, scope, {
-            kind: "interaction_note",
-            content: generated.interactionNote,
-            sourceEventId: `run.completed:${input.runId}:note`,
-            candidate: true,
-          }, now);
-        }
-      }
-    } catch (err) {
-      // 生成/写入失败不阻塞结算事务之外的既有确定性交付（fail-open 观察性降级）。
-      const { logger } = await import("../../lib/logger.ts");
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err), runId: input.runId },
-        "memory candidate generation skipped",
-      );
-    }
-  }
+  // P8 模型生成接线：LLM 网络调用不能在结算事务内执行（会钉住连接）。这里
+  // 只返回延后所需的输入，由调用方在事务提交后调 flushDeferredProactiveMemoryCandidates。
+  if (!input.keyPointClaim) return null;
+  return {
+    scope,
+    runId: input.runId,
+    outcome: input.outcome ?? "unknown",
+    trustOutcome: input.trustOutcome ?? "unknown",
+    keyPointClaim: input.keyPointClaim,
+    scheduleImpact: input.scheduleImpact ?? "none",
+    now,
+  };
 }

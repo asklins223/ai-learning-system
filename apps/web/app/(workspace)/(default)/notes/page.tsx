@@ -120,7 +120,7 @@ export default function NotesIndex() {
     setItems(null);
     setLoadError(null);
     api
-      .listNotes({ trashed: viewMode === "trash" })
+      .listNotes({ limit: 50, trashed: viewMode === "trash" })
       .then((r) => {
         if (!active) return;
         setItems(r.items);
@@ -225,7 +225,7 @@ export default function NotesIndex() {
       }
       // 导入已经完成后，列表刷新失败不应被误报为“导入失败”。
       try {
-        const refreshed = await api.listNotes({ trashed: viewMode === "trash" });
+        const refreshed = await api.listNotes({ limit: 50, trashed: viewMode === "trash" });
         setItems(refreshed.items);
         setNextCursor(refreshed.nextCursor);
         setNoteTotal(refreshed.total);
@@ -257,7 +257,7 @@ export default function NotesIndex() {
     if (refreshingAfterImport || loadingMore) return;
     setRefreshingAfterImport(true);
     try {
-      const refreshed = await api.listNotes({ trashed: viewMode === "trash" });
+      const refreshed = await api.listNotes({ limit: 50, trashed: viewMode === "trash" });
       setItems(refreshed.items);
       setNextCursor(refreshed.nextCursor);
       setNoteTotal(refreshed.total);

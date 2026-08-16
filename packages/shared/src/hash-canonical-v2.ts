@@ -40,9 +40,17 @@ function sha256Hex(value: string): string {
 
 /** UTF-8 字节序比较（object key 排序；对合法 Unicode 与 code point 序一致）。 */
 function compareUtf8(a: string, b: string): number {
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  return Buffer.compare(ab, bb);
+  // 对合法 Unicode，UTF-8 字节序 == code point 序。直接按 code point 比较，
+  // 避免排序比较器每次分配两个 Buffer（hash 热路径上的常见开销）。
+  const len = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < len) {
+    const ca = a.codePointAt(i);
+    const cb = b.codePointAt(i);
+    if (ca !== cb) return ca! < cb! ? -1 : 1;
+    i += ca! > 0xffff ? 2 : 1;
+  }
+  return a.length - b.length;
 }
 
 /**

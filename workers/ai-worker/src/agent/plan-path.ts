@@ -8,7 +8,7 @@ import type { AgentJobPayload, RunContext } from "./types.ts";
 import { assertJobLease, type JobLeaseContext } from "../lib/job-lease.ts";
 import { createProvider } from "../lib/ai-provider.ts";
 import { insertPlanRecord } from "./plan-repository.ts";
-import { createNextTurnJob, createPlannedComposeUnit, createPlannedSpecialistUnit, createSupervisorUnit } from "./unit-helpers.ts";
+import { createNextTurnJob, createNextTurnJobs, createPlannedComposeUnit, createPlannedSpecialistUnit, createSupervisorUnit } from "./unit-helpers.ts";
 import { buildScheduleState, scheduleWaves } from "./specialist-dag.ts";
 import { detectGaps, hasEscalateGaps, affectedBundleIds, type SpecialistOutcome } from "./gap-detection.ts";
 import type { AgentTurnExecutionResult } from "./types.ts";
@@ -206,9 +206,13 @@ async function launchSpecialistDag(
     return await launchPlannedCompose(job, payload);
   }
 
-  for (const unitId of created) {
-    await createNextTurnJob(job, payload.generationRunId, unitId, 1);
-  }
+  // PERF: 批量入队所有 specialist unit 的首个 turn job（单事务/单语句），
+  // 替代逐个 createNextTurnJob（每个打开一个 workspace 事务的 N+1 串行）。
+  await createNextTurnJobs(
+    job,
+    payload.generationRunId,
+    created.map((unitId) => ({ unitId, turnNo: 1 })),
+  );
   // plan unit 置 waiting_child(由 resume 机制在全部 children 终态后重入)
   await db
     .update(schema.cardGenerationUnits)
@@ -366,7 +370,12 @@ async function advancePlannedPipeline(
       });
       created.push(unitId);
     }
-    for (const unitId of created) await createNextTurnJob(job, payload.generationRunId, unitId, 1);
+    // PERF: 批量入队 replan 产生的 specialist unit 首 turn job（单事务/单语句）
+    await createNextTurnJobs(
+      job,
+      payload.generationRunId,
+      created.map((unitId) => ({ unitId, turnNo: 1 })),
+    );
     await db
       .update(schema.cardGenerationUnits)
       .set({ status: "waiting_child", updatedAt: new Date() })

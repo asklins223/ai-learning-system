@@ -285,10 +285,12 @@ export function evaluateVoiceRecall(
   let coveredWeight = 0;
   let partialWeight = 0;
   let totalWeight = 0;
+  // 预索引 assessments 按 rubricItemId，避免每个 rubric target 线性扫描。
+  const assessmentByRubricItemId = new Map(
+    input.assessments.map((a) => [a.rubricItemId, a]),
+  );
   for (const target of input.rubricTargets) {
-    const assessment = input.assessments.find(
-      (a) => a.rubricItemId === target.rubricItemId,
-    );
+    const assessment = assessmentByRubricItemId.get(target.rubricItemId);
     const weight = target.required ? 2 : 1;
     totalWeight += weight;
     if (assessment?.verdict === "covered") coveredWeight += weight;

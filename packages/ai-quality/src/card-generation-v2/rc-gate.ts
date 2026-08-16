@@ -83,31 +83,40 @@ export function evaluateRcGateV2(input: RcGateInputV2): RcGateResultV2 {
   const total = input.scores.length || 1;
   const microScores = input.scores.filter((s) => s.cardCount <= 2);
 
+  // 聚合只算一次，后续 actual/passed 复用，避免对同一 scores 数组反复
+  // filter/reduce 造成多余 O(n) 扫描（300+ fixture 语料上明显）。
+  const countWithinRangeCount = input.scores.filter((s) => s.countWithinRange).length;
+  const criticalRecallSum = input.scores.reduce((a, s) => a + s.criticalRecall, 0);
+  const frontLeakCount = input.scores.filter((s) => s.frontLeaks.length > 0).length;
+  const supportOnlyCardedCount = input.scores.filter((s) => s.supportOnlyCarded.length > 0).length;
+  const microCountWithinRange = microScores.filter((s) => s.countWithinRange).length;
+
   const content: RcGateResultV2["contentGates"] = {
     microNoteCountWithinRange: {
-      actual: input.scores.filter((s) => s.countWithinRange).length / total,
+      actual: countWithinRangeCount / total,
       threshold: CONTENT_QUALITY_GATES_V2.microNoteCountWithinRange,
-      passed: input.scores.filter((s) => s.countWithinRange).length / total >= CONTENT_QUALITY_GATES_V2.microNoteCountWithinRange,
+      passed: countWithinRangeCount / total >= CONTENT_QUALITY_GATES_V2.microNoteCountWithinRange,
     },
     criticalObjectiveRecall: {
-      actual: input.scores.reduce((a, s) => a + s.criticalRecall, 0) / total,
+      actual: criticalRecallSum / total,
       threshold: CONTENT_QUALITY_GATES_V2.criticalObjectiveRecall,
-      passed: input.scores.reduce((a, s) => a + s.criticalRecall, 0) / total >= CONTENT_QUALITY_GATES_V2.criticalObjectiveRecall,
+      passed: criticalRecallSum / total >= CONTENT_QUALITY_GATES_V2.criticalObjectiveRecall,
     },
     frontLeakRate: {
-      actual: input.scores.filter((s) => s.frontLeaks.length > 0).length / total,
+      actual: frontLeakCount / total,
       threshold: CONTENT_QUALITY_GATES_V2.nonCriticalFrontLeakRate,
-      passed: input.scores.filter((s) => s.frontLeaks.length > 0).length / total <= CONTENT_QUALITY_GATES_V2.nonCriticalFrontLeakRate,
+      passed: frontLeakCount / total <= CONTENT_QUALITY_GATES_V2.nonCriticalFrontLeakRate,
     },
     supportOnlyCardedRate: {
-      actual: input.scores.filter((s) => s.supportOnlyCarded.length > 0).length / total,
+      actual: supportOnlyCardedCount / total,
       threshold: 0,
-      passed: input.scores.filter((s) => s.supportOnlyCarded.length > 0).length === 0,
+      passed: supportOnlyCardedCount === 0,
     },
   };
 
   // 零卡 precision/recall
-  const truePositive = input.zeroCardPredictedIds.filter((id) => input.zeroCardFixtureIds.includes(id)).length;
+  const zeroCardFixtureSet = new Set(input.zeroCardFixtureIds);
+  const truePositive = input.zeroCardPredictedIds.filter((id) => zeroCardFixtureSet.has(id)).length;
   const predicted = input.zeroCardPredictedIds.length || 1;
   const gold = input.zeroCardFixtureIds.length || 1;
   content.zeroCardPrecision = {
@@ -129,14 +138,17 @@ export function evaluateRcGateV2(input: RcGateInputV2): RcGateResultV2 {
 
   // micro 分桶：micro-note 退化不得被总平均掩盖
   const microPassed = microScores.every((s) => s.countWithinRange)
-    || microScores.filter((s) => s.countWithinRange).length / (microScores.length || 1) >= CONTENT_QUALITY_GATES_V2.microNoteCountWithinRange;
+    || microCountWithinRange / (microScores.length || 1) >= CONTENT_QUALITY_GATES_V2.microNoteCountWithinRange;
 
   // §23.5 全分桶：micro/long/zero/safety/modality 强制 ≥95% withinRange；
   // language 报告制（首版 zh 单语言）。
   const buckets: RcGateResultV2["buckets"] = {};
   const byBucket = new Map<string, DeterministicScoreV2[]>();
+  // 一次构建 fixtureId → score 的索引，避免每个 bucketAssignment 都线性扫全表。
+  const scoreByFixtureId = new Map<string, DeterministicScoreV2>();
+  for (const score of input.scores) scoreByFixtureId.set(score.fixtureId, score);
   for (const a of input.bucketAssignments ?? []) {
-    const score = input.scores.find((sc) => sc.fixtureId === a.fixtureId);
+    const score = scoreByFixtureId.get(a.fixtureId);
     if (!score) continue;
     const list = byBucket.get(a.bucket) ?? [];
     list.push(score);

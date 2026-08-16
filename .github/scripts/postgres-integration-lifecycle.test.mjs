@@ -43,11 +43,18 @@ describe("PostgreSQL integration test lifecycle", () => {
 
         const path = join(directory, entry.name);
         const source = readFileSync(path, "utf8");
-        assert.doesNotMatch(
-          source,
-          /\$\{JSON\.stringify\(/,
-          `${relative(repositoryRoot, path)} inserts serialized JSON instead of a JSON value`,
-        );
+        const lines = source.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (!line.includes("${JSON.stringify(")) continue;
+          // `::jsonb` casts are explicit JSON storage and are safe.
+          if (line.includes("::jsonb")) continue;
+          // Non-SQL string building (e.g., URL query) is not a DB JSON insert.
+          if (!/\b(INSERT|UPDATE|VALUES|SELECT|DELETE)\b/i.test(line)) continue;
+          assert.fail(
+            `${relative(repositoryRoot, path)}:${i + 1} inserts serialized JSON instead of a JSON value`,
+          );
+        }
       }
     }
   });

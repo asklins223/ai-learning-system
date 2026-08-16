@@ -15,9 +15,10 @@ RUN apk add --no-cache ffmpeg
 # F-027: 使用 npm ci + lockfile 确保可复现构建
 FROM base AS deps
 COPY apps/api/package.json apps/api/package-lock.json ./
+COPY packages/shared /packages/shared
 COPY packages/shared/package.json packages/shared/package-lock.json /tmp/shared/
 RUN npm config set registry https://registry.npmmirror.com \
- && npm ci --no-audit --no-fund \
+ && npm ci --install-links --no-audit --no-fund \
  && npm ci --no-audit --no-fund --prefix /tmp/shared --registry=https://registry.npmmirror.com
 
 FROM base AS dev

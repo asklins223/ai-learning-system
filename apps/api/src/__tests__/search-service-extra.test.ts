@@ -228,9 +228,12 @@ describe("search projection rebuild", () => {
       deleted: 2,
       indexed: { note: 1, source: 2, cardSet: 1, card: 1, evidence: 1 },
       errors: 0,
+      capped: false,
     });
     assert.equal(reconciled, 1);
-    assert.equal(insertedBatches.length, 1);
+    // PERF: 逐实体类型流式插入（note/source/card_set/card/evidence 各一批，
+    // 每批上限 500）。断言改为基于扁平化文档内容，而非旧实现中的单批数量。
+    assert.equal(insertedBatches.length, 5);
     const documents = insertedBatches.flat();
     assert.equal(documents.length, 6);
     assert.equal(documents.find((doc) => doc.objectId === "note-1")?.body, "first\nsecond");
@@ -285,6 +288,7 @@ describe("search projection rebuild", () => {
       deleted: 0,
       indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
       errors: 0,
+      capped: false,
     });
     assert.equal(childQueries, 0);
     assert.equal(inserts, 0);
@@ -313,6 +317,7 @@ describe("search projection rebuild", () => {
       deleted: 0,
       indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
       errors: 1,
+      capped: false,
     });
   });
 });
@@ -487,6 +492,7 @@ describe("search projection drift", () => {
       staleTitles: [],
       staleBodies: [],
       hasDrift: false,
+      capped: { note: false, source: false, cardSet: false, card: false, evidence: false },
     });
   });
 });

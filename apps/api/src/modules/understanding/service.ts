@@ -8,6 +8,23 @@ import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibilit
 /** 聚合状态/星图列表上限（沿用旧 reader 的 200 卡截断；states 列表消费）。 */
 const UNDERSTANDING_GRAPH_CARD_LIMIT = 200;
 
+/**
+ * PERF-10 风格分块查询辅助：把大 IN 数组拆成 500/批，避免 postgres-js
+ * 绑定参数超限与大 IN 子句性能退化，并合并各批结果。
+ */
+async function chunkedInArraySelect<T>(
+  queryFn: (chunk: string[]) => Promise<T[]>,
+  ids: string[],
+  chunkSize = 500,
+): Promise<T[]> {
+  const results: T[] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    results.push(...(await queryFn(chunk)));
+  }
+  return results;
+}
+
 export interface UnderstandingState {
   subjectType: "card";
   subjectId: string;
@@ -133,15 +150,19 @@ export async function getUnderstandingStates(
 
   const evidenceStats = new Map<string, { hard: number; soft: number; total: number; keyPointsWithHard: Set<string> }>();
   if (allKeyPointIds.size > 0) {
-    const evRows = await tx
-      .select({
-        id: evidences.id,
-        keyPointId: evidences.keyPointId,
-        alignment: evidences.alignment,
-        userOverride: evidences.userOverride,
-      })
-      .from(evidences)
-      .where(and(eq(evidences.workspaceId, workspaceId), inArray(evidences.keyPointId, Array.from(allKeyPointIds))));
+    // N#7-13: allKeyPointIds 可能很大，分块 inArray 避免大数组 IN 参数越界。
+    const evRows = await chunkedInArraySelect(
+      (chunk) => tx
+        .select({
+          id: evidences.id,
+          keyPointId: evidences.keyPointId,
+          alignment: evidences.alignment,
+          userOverride: evidences.userOverride,
+        })
+        .from(evidences)
+        .where(and(eq(evidences.workspaceId, workspaceId), inArray(evidences.keyPointId, chunk))),
+      Array.from(allKeyPointIds),
+    );
 
     // N-005: 查询用户级 override
     const evIds = evRows.map((r) => r.id);
@@ -307,7 +328,9 @@ export async function getUnderstandingStates(
   );
   // 2026-08-11（性能专项）：非事务路径计算完成后写入缓存
   if (cache) {
-    cache.set(cacheK, { at: Date.now(), data: results });
+    // 2026-08-16（性能专项）：写入时施加硬上限，超出逐出最旧插入条目，
+    // 防止突发不同 key 时进程内 Map 无界增长。
+    setUnderstandingCacheEntry(cache, cacheK, { at: Date.now(), data: results });
   }
   return results;
 }
@@ -332,13 +355,35 @@ export async function getUnderstandingStates(
 // 2026-08-14（星图切流收口）：旧 /graph reader（getUnderstandingGraph +
 // understandingGraphCache）已随 star_map_action_v1 切流删除（§11.4）。
 const UNDERSTANDING_CACHE_TTL_MS = 30_000;
+// 最大缓存条目数（硬上限）。即便 TTL 清扫被节流，突发不同 key 也不会超过此规模。
+const UNDERSTANDING_CACHE_MAX_ENTRIES = 500;
 const understandingStatesCache = new Map<string, { at: number; data: UnderstandingState[] }>();
 const cacheKey = (workspaceId: string, userId: string, extra = ""): string => `${workspaceId}:${userId}:${extra}`;
 
+function setUnderstandingCacheEntry(
+  cache: Map<string, { at: number; data: UnderstandingState[] }>,
+  key: string,
+  entry: { at: number; data: UnderstandingState[] },
+): void {
+  cache.set(key, entry);
+  // 硬上限：超限时逐出最旧插入的条目（Map 保持插入序）。TTL 清扫只负责过期条目，
+  // 这里保证突发不同 key 时也有确定的内存上界。
+  if (cache.size > UNDERSTANDING_CACHE_MAX_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) cache.delete(oldestKey);
+  }
+}
+
 // 2026-08-11（review 修复）：命中检查时顺带清理过期条目，避免 Map 随
 // (workspace,user,state) 组合缓慢无界增长。
+// PERF: throttle the full-map sweep to at most once per TTL interval instead of
+// running an O(cache-size) scan on every request. Individual expired entries are
+// ignored on lookup and overwritten on the next write, so correctness is kept.
+let lastUnderstandingSweepAt = 0;
 function sweepUnderstandingCache(): void {
   const now = Date.now();
+  if (now - lastUnderstandingSweepAt < UNDERSTANDING_CACHE_TTL_MS) return;
+  lastUnderstandingSweepAt = now;
   for (const [key, entry] of understandingStatesCache) {
     if (now - entry.at >= UNDERSTANDING_CACHE_TTL_MS) understandingStatesCache.delete(key);
   }

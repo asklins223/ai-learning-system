@@ -262,6 +262,7 @@ export function PetCharacterCanvas({
     return onVoiceSegmentEmotionRef.current((event) => {
       if (modeRef.current !== "live2d") return;
       live2dDriverRef.current?.pushEmotion({ ...event, at: Date.now() });
+      live2dDriverRef.current?.playEmotionMotion(event.emotion, event.intensity);
     });
     // 订阅一次即可：listener 读 modeRef/live2dDriverRef（稳定 ref），
     // onVoiceSegmentEmotion 稳定（多 listener Set + useCallback([])）。

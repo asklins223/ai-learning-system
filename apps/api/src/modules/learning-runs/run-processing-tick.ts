@@ -59,7 +59,7 @@ import {
   type RubricVerdictOutput,
 } from "./run-critic.ts";
 import { loadFrozenTargetSnapshotV2 } from "../card-generation-v2/target-snapshot-adapter.ts";
-import { insertDomainEvent } from "../card-generation-v2/helpers.ts";
+import { insertDomainEvents } from "../card-generation-v2/helpers.ts";
 import { materializeCanonicalChangeSet, materializePracticeChangeSet } from "../understanding/projection-service.ts";
 
 let criticTransport: CriticTransport | null = null;
@@ -190,18 +190,27 @@ async function processClaimedCommand(row: ClaimedCommand, workerId: string): Pro
   // 连接池纪律（2026-08-14）：Critic HTTP 调用（数十秒）绝不能在 DB 事务内
   // 执行——事务持有连接会耗尽连接池（并发评估时 SSE/队列请求 26-55s 等待
   // 甚至 500）。三阶段：事务内读+标记 → 事务外 HTTP → 事务内写。
-  const criticContext = await withWorkspaceTransaction(
+  // 同理（2026-08-16）：P8 LLM 记忆候选生成也是网络调用，由 processCommitCommand
+  // 返回延后描述，事务提交后再在新事务中刷新——不钉住结算事务连接。
+  const outcome = await withWorkspaceTransaction(
     { workspaceId: row.workspace_id, userId: row.user_id },
     async (tx) => {
       if (row.command_type === "assessment_requested") {
-        return await processAssessmentCommand(tx, typed);
+        return {
+          criticContext: await processAssessmentCommand(tx, typed),
+          proactiveDefer: null,
+        };
       }
       if (row.command_type === "commit_requested") {
-        await processCommitCommand(tx, typed);
+        return {
+          criticContext: null,
+          proactiveDefer: await processCommitCommand(tx, typed),
+        };
       }
-      return null;
+      return { criticContext: null, proactiveDefer: null };
     },
   );
+  const { criticContext, proactiveDefer } = outcome;
 
   if (criticContext) {
     // 事务外：真 Critic 调用（不持有任何 DB 连接）。
@@ -229,6 +238,15 @@ async function processClaimedCommand(row: ClaimedCommand, workerId: string): Pro
       (tx) => finishCriticAssessmentWrite(tx, typed, criticContext, verdicts),
     );
     process.stderr.write(`[run-tick] critic write-back done for assessment=${criticContext.assessmentId}\n`);
+  }
+
+  // 事务已提交：P8 LLM 记忆候选生成（含 upsert）在独立事务执行，不持有结算
+  // 事务的连接；函数内部 fail-open 静默降级，不阻塞后续标记/埋点。
+  if (proactiveDefer) {
+    const { flushDeferredProactiveMemoryCandidates } = await import(
+      "../companion-conversation/proactive-hook.ts"
+    );
+    await flushDeferredProactiveMemoryCandidates(proactiveDefer);
   }
 
   await db.execute(sql`
@@ -571,11 +589,29 @@ async function gatherCriticInput(
   tx: Parameters<Parameters<typeof withWorkspaceTransaction>[1]>[0],
   command: CommandRow,
 ): Promise<CriticInput> {
-  const artifactRows = await tx
-    .select()
-    .from(learningArtifacts)
-    .where(eq(learningArtifacts.id, command.artifactId ?? ""))
-    .limit(1);
+  // 并行读取相互独立的资源（artifact / task / run / contract），缩短 worker 路径耗时。
+  const [artifactRows, taskRows, runRows, contractRows] = await Promise.all([
+    tx
+      .select()
+      .from(learningArtifacts)
+      .where(eq(learningArtifacts.id, command.artifactId ?? ""))
+      .limit(1),
+    tx
+      .select()
+      .from(learningTasks)
+      .where(and(eq(learningTasks.id, command.taskId), eq(learningTasks.runId, command.runId)))
+      .limit(1),
+    tx
+      .select({ runId: learningRuns.id, keyPointId: learningRuns.keyPointId })
+      .from(learningRuns)
+      .where(eq(learningRuns.id, command.runId))
+      .limit(1),
+    tx
+      .select({ snapshotHash: learningRunPrivateContracts.snapshotHash })
+      .from(learningRunPrivateContracts)
+      .where(eq(learningRunPrivateContracts.runId, command.runId))
+      .limit(1),
+  ]);
   const artifact = artifactRows[0];
   const payload = (artifact?.payload ?? {}) as { kind?: string; text?: string; confirmedTranscript?: string };
   const answerText = payload.kind === "voice"
@@ -583,11 +619,6 @@ async function gatherCriticInput(
     : (payload.text ?? "").trim();
   if (answerText.length === 0) throw new CriticOutputError("empty answer text");
 
-  const taskRows = await tx
-    .select()
-    .from(learningTasks)
-    .where(and(eq(learningTasks.id, command.taskId), eq(learningTasks.runId, command.runId)))
-    .limit(1);
   const task = taskRows[0];
   if (!task) throw new CriticOutputError("task not found");
 
@@ -602,19 +633,8 @@ async function gatherCriticInput(
     : [];
   if (rubricTargetIds.length === 0) throw new CriticOutputError("no rubric targets");
 
-  const runRows = await tx
-    .select({ runId: learningRuns.id, keyPointId: learningRuns.keyPointId })
-    .from(learningRuns)
-    .where(eq(learningRuns.id, command.runId))
-    .limit(1);
-
   // §16.6：V2 run（private contract 带 snapshotHash）从 frozen snapshot 消费
   // objective/answer units/rubric units/evidence refs；禁止回查 claim/quoteText。
-  const contractRows = await tx
-    .select({ snapshotHash: learningRunPrivateContracts.snapshotHash })
-    .from(learningRunPrivateContracts)
-    .where(eq(learningRunPrivateContracts.runId, command.runId))
-    .limit(1);
   if (contractRows[0]?.snapshotHash) {
     const snapshot = await loadFrozenTargetSnapshotV2(tx, command.workspaceId, command.runId);
     if (!snapshot) throw new CriticOutputError("V2 run missing frozen snapshot");
@@ -976,17 +996,26 @@ async function revalidateV2CommitEpochs(
   }
 
   const evidence = [...snapshot.target.evidence].sort((a, b) => a.evidenceSnapshotId.localeCompare(b.evidenceSnapshotId));
+  if (evidence.length === 0) return;
+  // 批量锁定全部 evidence 行（一次 round-trip），按 evidenceSnapshotId 稳定排序
+  // 保持锁顺序一致，避免逐条 SELECT ... FOR UPDATE 的 N 次往返与锁持有时间延长。
+  const evidenceIds = evidence.map((e) => e.evidenceSnapshotId);
+  const evRows = await tx
+    .select({
+      evidenceSnapshotId: evidenceEligibilityStatesV2.evidenceSnapshotId,
+      status: evidenceEligibilityStatesV2.status,
+      eligibilityEpoch: evidenceEligibilityStatesV2.eligibilityEpoch,
+    })
+    .from(evidenceEligibilityStatesV2)
+    .where(and(
+      eq(evidenceEligibilityStatesV2.workspaceId, contract.workspaceId),
+      inArray(evidenceEligibilityStatesV2.evidenceSnapshotId, evidenceIds),
+    ))
+    .for("update")
+    .orderBy(evidenceEligibilityStatesV2.evidenceSnapshotId);
+  const byEvidenceId = new Map(evRows.map((r) => [r.evidenceSnapshotId, r]));
   for (const e of evidence) {
-    const rows = await tx
-      .select({ status: evidenceEligibilityStatesV2.status, eligibilityEpoch: evidenceEligibilityStatesV2.eligibilityEpoch })
-      .from(evidenceEligibilityStatesV2)
-      .where(and(
-        eq(evidenceEligibilityStatesV2.workspaceId, contract.workspaceId),
-        eq(evidenceEligibilityStatesV2.evidenceSnapshotId, e.evidenceSnapshotId),
-      ))
-      .for("update")
-      .limit(1);
-    const row = rows[0];
+    const row = byEvidenceId.get(e.evidenceSnapshotId);
     if (!row || row.status !== "usable") {
       throw new CriticOutputError(`commit fail-closed: evidence ${e.evidenceSnapshotId} not usable`);
     }
@@ -996,17 +1025,20 @@ async function revalidateV2CommitEpochs(
   }
 }
 
-async function processCommitCommand(tx: Parameters<Parameters<typeof withWorkspaceTransaction>[1]>[0], command: CommandRow): Promise<void> {
+async function processCommitCommand(
+  tx: Parameters<Parameters<typeof withWorkspaceTransaction>[1]>[0],
+  command: CommandRow,
+): Promise<import("../companion-conversation/proactive-hook.ts").ProactiveMemoryDeferInput | null> {
   const runRows = await tx.select().from(learningRuns).where(eq(learningRuns.id, command.runId)).limit(1);
   const run = runRows[0];
-  if (!run) return;
-  if (run.phase !== "committing") return; // 已提交或已 end。
+  if (!run) return null;
+  if (run.phase !== "committing") return null; // 已提交或已 end。
 
   // §16.4 防火墙：sandbox Run 无论评估结果如何都强制 sandbox_only——
   // 0 canonical envelope、0 official schedule、最多带 TTL 的 sandbox trail。
   if (run.sandboxNamespaceId) {
     await finishSandboxCommit(tx, command, run, new Date());
-    return;
+    return null;
   }
 
   const contractRows = await tx
@@ -1015,7 +1047,7 @@ async function processCommitCommand(tx: Parameters<Parameters<typeof withWorkspa
     .where(eq(learningRunPrivateContracts.runId, command.runId))
     .limit(1);
   const contract = contractRows[0];
-  if (!contract) return;
+  if (!contract) return null;
 
   // §16.7 V2 Commit：复验同一 target 闭包（objective lifecycle epoch + 全部
   // evidence eligibility epoch）。Trusted Commit 只在该闭包仍匹配且 evidence
@@ -1030,7 +1062,7 @@ async function processCommitCommand(tx: Parameters<Parameters<typeof withWorkspa
     .where(and(eq(learningAssessments.runId, command.runId), eq(learningAssessments.status, "completed")))
     .limit(1);
   const assessment = assessmentRows[0];
-  if (!assessment) return;
+  if (!assessment) return null;
 
   // 按命令 disposition 分派：mastery_evidence（demonstrated）、
   // facet_evidence（partial 结算：只写允许的 facet）、unable_evidence。
@@ -1045,11 +1077,11 @@ async function processCommitCommand(tx: Parameters<Parameters<typeof withWorkspa
   if (isCanonicalEvidence) {
     // demonstrated 只来自 assessment_critic 且 trustClass=mastery_eligible；
     // facet_evidence 允许 mastery_eligible 或 facet_eligible（§6.4 partial）。
-    if (payload.kind === "declared_unable") return;
+    if (payload.kind === "declared_unable") return null;
     const allowedTrust = isDemonstrated
       ? ["mastery_eligible"]
       : ["mastery_eligible", "facet_eligible"];
-    if (assessment.trustClass === null || !allowedTrust.includes(assessment.trustClass)) return;
+    if (assessment.trustClass === null || !allowedTrust.includes(assessment.trustClass)) return null;
     // §7.7 防御纵深：提交 Variant 的 ceiling 必须允许对应等级——
     // practice/diagnostic ceiling 的 Variant 绝不产 canonical。
     const ceiling = await readVariantCeiling(tx, command.artifactId);
@@ -1068,19 +1100,20 @@ async function processCommitCommand(tx: Parameters<Parameters<typeof withWorkspa
         })
         .where(eq(learningRuns.id, command.runId));
       await appendRunEvent(tx, command, "learning_commit.failed", {}, new Date());
-      return;
+      return null;
     }
   } else if (payload.kind !== "declared_unable") {
-    return;
+    return null;
   }
 
   const at = new Date();
   const authorization = contract.schedulingAuthorization as SchedulingAuthorizationV1;
+  const isV2Run = Boolean(contract.snapshotHash);
   // facet_evidence（partial 结算）按同一授权路径消费/创建 schedule——
   // §6.4：partial 允许写 facet，调度授权不因部分覆盖而作废。
   const scheduleImpact = isCanonicalEvidence
-    ? await applyDemonstratedSchedule(tx, command, authorization, at, disposition)
-    : await applyUnableSchedule(tx, command, authorization, at);
+    ? await applyDemonstratedSchedule(tx, command, authorization, at, disposition, isV2Run)
+    : await applyUnableSchedule(tx, command, authorization, at, isV2Run);
 
   // 发布恰好一个 canonical envelope（§16.2 unique commitId/canonicalEventId）。
   const commitId = crypto.randomUUID();
@@ -1243,21 +1276,19 @@ async function processCommitCommand(tx: Parameters<Parameters<typeof withWorkspa
         reminderId: initialValidationRemindersV2.reminderId,
         reminderRevision: initialValidationRemindersV2.reminderRevision,
       });
-    for (const r of completedReminders) {
-      await insertDomainEvent(tx, command.workspaceId, {
-        eventType: "initial_validation_reminder.completed",
-        aggregateKind: "reminder",
-        aggregateId: r.reminderId,
-        aggregateRevision: r.reminderRevision,
-        payload: {
-          objectiveId: contract.keyPointId,
-          runId: command.runId,
-          commitId,
-          factKind,
-        },
-        idempotencyKey: `completed:${commitId}:${r.reminderId}`,
-      });
-    }
+    await insertDomainEvents(tx, command.workspaceId, completedReminders.map((r) => ({
+      eventType: "initial_validation_reminder.completed",
+      aggregateKind: "reminder",
+      aggregateId: r.reminderId,
+      aggregateRevision: r.reminderRevision,
+      payload: {
+        objectiveId: contract.keyPointId,
+        runId: command.runId,
+        commitId,
+        factKind,
+      },
+      idempotencyKey: `completed:${commitId}:${r.reminderId}`,
+    })));
   }
     // §7.8：结算回填 presentation_history（outcome/exposed，按 runId 幂等）。
     await backfillPresentationHistory(tx, { runId: command.runId, outcome: result.outcome });
@@ -1266,8 +1297,9 @@ async function processCommitCommand(tx: Parameters<Parameters<typeof withWorkspa
     runId: command.runId,
     result: result as unknown as Record<string, unknown>,
   }, at);
-  // P8 Orchestrator：确定性 Policy 判定后 durable deliver + LLM 记忆候选生成。
-  await (await import("../companion-conversation/proactive-hook.ts")).hookProactiveOnRunCompleted(
+  // P8 Orchestrator：确定性 Policy 判定后 durable deliver（事务内）+ LLM
+  // 记忆候选生成（延后到事务提交后，避免网络调用钉住结算事务连接）。
+  return await (await import("../companion-conversation/proactive-hook.ts")).hookProactiveOnRunCompleted(
     tx,
     { workspaceId: command.workspaceId, userId: command.userId },
     {
@@ -1371,6 +1403,7 @@ async function applyDemonstratedSchedule(
   authorization: SchedulingAuthorizationV1,
   at: Date,
   disposition?: string,
+  isV2Run = false,
 ): Promise<LearningRunResultV1["scheduleImpact"]> {
   // §13.6：facet_evidence（partial/结构化 facet 结算）0 schedule effect——
   // 不消费 pending、不创建 successor（canonical facet observation 照常发布）。
@@ -1401,7 +1434,7 @@ async function applyDemonstratedSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: "validation",
+      subjectType: isV2Run ? "key_point" : "validation",
       subjectId: authorization.keyPointId,
       keyPointId: authorization.keyPointId,
       status: "pending",
@@ -1450,7 +1483,7 @@ async function applyDemonstratedSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: "validation",
+      subjectType: isV2Run ? "key_point" : "validation",
       subjectId: authorization.keyPointId,
       keyPointId: authorization.keyPointId,
       status: "pending",
@@ -1480,6 +1513,7 @@ async function applyUnableSchedule(
   command: CommandRow,
   authorization: SchedulingAuthorizationV1,
   at: Date,
+  isV2Run = false,
 ): Promise<LearningRunResultV1["scheduleImpact"]> {
   const shortIntervalDays = 1;
   if (authorization.kind === "create_initial") {
@@ -1487,7 +1521,7 @@ async function applyUnableSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: "validation",
+      subjectType: isV2Run ? "key_point" : "validation",
       subjectId: authorization.keyPointId,
       keyPointId: authorization.keyPointId,
       status: "pending",
@@ -1521,7 +1555,7 @@ async function applyUnableSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: "validation",
+      subjectType: isV2Run ? "key_point" : "validation",
       subjectId: authorization.keyPointId,
       keyPointId: authorization.keyPointId,
       status: "pending",

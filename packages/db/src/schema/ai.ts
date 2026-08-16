@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, jsonb, integer, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, jsonb, integer, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { artifactStatusEnum, artifactTypeEnum } from "./enums.ts";
 
 /**
@@ -31,5 +31,6 @@ export const aiArtifacts = pgTable(
     typeIdx: index("ai_artifacts_type_idx").on(t.type),
     workspaceIdx: index("ai_artifacts_workspace_idx").on(t.workspaceId),
     inputHashIdx: index("ai_artifacts_input_hash_idx").on(t.inputHash),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("ai_artifacts_id_workspace_unique").on(t.id, t.workspaceId),}),
 );

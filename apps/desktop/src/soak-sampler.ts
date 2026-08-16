@@ -60,7 +60,6 @@ export function sanitizeSoakValue(category: SoakCategory, raw: unknown): number 
 
 export class SoakSampler {
   private seq = 0;
-  private lastDeltaIndex = 0;
   private readonly samples: SoakSample[] = [];
 
   constructor(private readonly startedAt: number = Date.now()) {}
@@ -93,8 +92,11 @@ export class SoakSampler {
    */
   snapshotSinceLast(): SoakSnapshot {
     this.seq += 1;
-    const samples = this.samples.slice(this.lastDeltaIndex).map((sample) => ({ ...sample }));
-    this.lastDeltaIndex = this.samples.length;
+    // 只保留上次以来的增量：samples 只含未消费样本（每次都被清空），因此
+    // 整体即为 delta。清空数组并重置游标，防止 samples 随进程生命周期无限
+    // 增长（长 soak 每 30 分钟 tick 都会触发）。
+    const samples = this.samples.map((sample) => ({ ...sample }));
+    this.samples.length = 0;
     return { version: 1, startedAt: this.startedAt, seq: this.seq, samples };
   }
 

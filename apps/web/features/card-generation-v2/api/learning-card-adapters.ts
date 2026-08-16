@@ -54,11 +54,36 @@ export function toPublicLearningCardPreview(
       label: "内容是最新",
       detail: "正面与作答依据保持一致",
     },
-    personalState: {
-      status: card.lifecycle === "active" ? "initial_validation_ready" : "idle",
-      label: card.lifecycle === "active" ? "等待首次验证" : lifecycleLabel,
-      detail: card.lifecycle === "active" ? "尚未完成首次可信验证。" : lifecycleDetail,
-    },
+    personalState: (() => {
+      if (card.lifecycle !== "active") {
+        return {
+          status: "idle" as const,
+          label: lifecycleLabel,
+          detail: lifecycleDetail,
+        };
+      }
+      const reviewAt = card.nextReviewAt ? new Date(card.nextReviewAt) : null;
+      const hasValidReviewAt = Boolean(reviewAt && !Number.isNaN(reviewAt.getTime()));
+      if (card.reviewStatus === "pending" && hasValidReviewAt) {
+        const due = reviewAt!.getTime() <= Date.now();
+        return due
+          ? {
+              status: "review_due" as const,
+              label: "复习到期",
+              detail: "复习时间已经到达，可以从回忆开始。",
+            }
+          : {
+              status: "review_scheduled" as const,
+              label: "已安排复习",
+              detail: "已经安排下一次复习，仍可随时继续练习。",
+            };
+      }
+      return {
+        status: "initial_validation_ready" as const,
+        label: "等待首次验证",
+        detail: "尚未完成首次可信验证。",
+      };
+    })(),
     primaryAction: blocked
       ? { intent: "return", label: "返回学习卡库" }
       : { intent: "start", label: "开始学习" },

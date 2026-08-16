@@ -38,6 +38,10 @@ export class PetWindowStateController {
   private readonly displays: PetDisplayProvider;
   private readonly window: BrowserWindow;
   private readonly spikeEnabled: boolean;
+  // 2026-08-16（性能专项）：缓存显示器几何列表（含 SHA-256 指纹），避免每次
+  // getState()/selectDisplay() 都重新枚举所有显示器并重算指纹。显示器增删/指标
+  // 变更时由主进程调用 invalidateDisplayCache() 失效（见 main.ts display 事件）。
+  private displayCache: DisplayGeometryV1[] | null = null;
 
   constructor(options: PetWindowStateControllerOptions) {
     this.userDataPath = options.userDataPath;
@@ -52,6 +56,18 @@ export class PetWindowStateController {
 
   get currentPreferences(): DevicePetPreferencesV1 {
     return this.preferences;
+  }
+
+  /** 显示器增删/分辨率变化后由主进程调用，使缓存的显示器几何与指纹失效。 */
+  invalidateDisplayCache(): void {
+    this.displayCache = null;
+  }
+
+  private getDisplays(): DisplayGeometryV1[] {
+    if (this.displayCache === null) {
+      this.displayCache = this.displays.getAllDisplays();
+    }
+    return this.displayCache;
   }
 
   get petModeEnabled(): boolean {
@@ -217,8 +233,9 @@ export class PetWindowStateController {
   }
 
   private selectDisplay(): DisplayGeometryV1 {
-    return this.displays.getAllDisplays().find((display) => display.id === this.preferences.displayId)
-      ?? this.displays.getAllDisplays().find((display) => display.fingerprint === this.preferences.displayFingerprint)
+    const all = this.getDisplays();
+    return all.find((display) => display.id === this.preferences.displayId)
+      ?? all.find((display) => display.fingerprint === this.preferences.displayFingerprint)
       ?? this.displayContainingWindow()
       ?? this.displays.getPrimaryDisplay();
   }
@@ -229,7 +246,7 @@ export class PetWindowStateController {
    * 拖动后按旧显示器 clamp。找不到时返回 null 由调用方回退。
    */
   private displayContainingWindow(): DisplayGeometryV1 | null {
-    const all = this.displays.getAllDisplays();
+    const all = this.getDisplays();
     if (all.length === 0) return null;
     const bounds = this.window.getContentBounds();
     const centerX = bounds.x + bounds.width / 2;

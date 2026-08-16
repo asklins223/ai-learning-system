@@ -52,7 +52,7 @@ import {
   type ExtractorBundle,
   type CriticCandidateEntry,
 } from "./durable-pagination.ts";
-import { executeToolCall, type ToolExecutionContext, type ToolCallRequest } from "./tools/executor.ts";
+import { executeToolCalls, type ToolExecutionContext } from "./tools/executor.ts";
 import { scheduleCriticForDraft } from "./tools/quality.ts";
 import { autoProgressAfterChildUnit } from "./pipeline-auto-progress.ts";
 import type { EvidenceEmbeddingProvider } from "./tools/evidence.ts";
@@ -970,14 +970,19 @@ export async function processToolResults(turnCtx: TurnExecutionContext): Promise
   // P1-1：本 turn 是否由系统自动创建了 Critic(需强制 wait_for_children)
   let autoCreatedCritic = false;
 
-  for (const toolCall of outcome.toolCalls) {
-    const toolRequest: ToolCallRequest = {
+  // PERF: 批量执行本 turn 的全部 tool calls。executeToolCalls 对只读工具做
+  // 有界并行 + 逐调用错误隔离；含副作用的工具仍按原顺序串行执行，保留语义。
+  const toolResults = await executeToolCalls(
+    outcome.toolCalls.map((toolCall) => ({
       id: toolCall.id,
       name: toolCall.name,
       arguments: toolCall.arguments as Record<string, unknown>,
-    };
+    })),
+    toolExecCtx,
+  );
 
-    const toolResult = await executeToolCall(toolRequest, toolExecCtx);
+  for (const [i, toolCall] of outcome.toolCalls.entries()) {
+    const toolResult = toolResults[i];
 
     if (toolCall.name === "delegate_specialist" && toolResult.success) {
       const result = toolResult.result as { childTaskId?: string } | null;

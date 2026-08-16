@@ -135,6 +135,12 @@ export const publicLearningCardV2Schema = z
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
     publicPayloadHash: z.string().regex(/^[0-9a-f]{64}$/),
+    /** R37：供“重新生成”直接定位来源笔记页（不参与 hash/答案）。 */
+    noteId: z.string().uuid().optional(),
+    noteVersionId: z.string().uuid().optional(),
+    /** 列表展示用复习状态（非答案化；不参与 hash）。 */
+    reviewStatus: z.enum(["pending", "completed", "dismissed", "cancelled"]).optional(),
+    nextReviewAt: z.string().datetime({ offset: true }).optional(),
   })
   .strict();
 export type PublicLearningCardV2 = z.infer<typeof publicLearningCardV2Schema>;

@@ -47,6 +47,24 @@ export const MAX_PROJECTION_PAGES = 20;
  * - slice.continuationToken 收敛为 null（已完整合并）。
  * 任何一页形状非法 → null（调用方 fail closed）。
  */
+
+/**
+ * 生成 nodeRef 去重 key：对已知形态（kind + 对应 id）直接拼接字符串，
+ * 避免对每个节点 JSON.stringify 产生大临时字符串；未知形态回退 JSON。
+ */
+function nodeRefKey(ref: unknown): string {
+  if (ref && typeof ref === "object") {
+    const r = ref as { kind?: unknown; sourceId?: unknown; noteId?: unknown; cardId?: unknown; keyPointId?: unknown; evidenceId?: unknown };
+    const kind = r.kind;
+    if (kind === "source" && typeof r.sourceId === "string") return `source:${r.sourceId}`;
+    if (kind === "note" && typeof r.noteId === "string") return `note:${r.noteId}`;
+    if (kind === "card" && typeof r.cardId === "string") return `card:${r.cardId}`;
+    if (kind === "key_point" && typeof r.keyPointId === "string") return `key_point:${r.keyPointId}`;
+    if (kind === "evidence" && typeof r.evidenceId === "string") return `evidence:${r.evidenceId}`;
+  }
+  return JSON.stringify(ref);
+}
+
 export function mergeProjectionPages(pages: unknown[]): unknown | null {
   if (pages.length === 0) return null;
   const first = pages[0] as {
@@ -69,8 +87,8 @@ export function mergeProjectionPages(pages: unknown[]): unknown | null {
     const p = page as { nodes?: unknown[]; edges?: unknown[] };
     if (!p || typeof p !== "object" || !Array.isArray(p.nodes) || !Array.isArray(p.edges)) return null;
     for (const node of p.nodes) {
-      // nodeRef 字段顺序由服务端固定；JSON key 序列化顺序稳定。
-      const key = JSON.stringify((node as { nodeRef?: unknown })?.nodeRef ?? node);
+      // nodeRef 已知形态（kind+id）用拼接 key，未知才回退 JSON 序列化。
+      const key = nodeRefKey((node as { nodeRef?: unknown })?.nodeRef ?? node);
       if (seenNodes.has(key)) continue;
       seenNodes.add(key);
       nodes.push(node);

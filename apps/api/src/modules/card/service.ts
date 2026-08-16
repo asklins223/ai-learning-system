@@ -40,6 +40,97 @@ export async function getCardWithDetail(cardId: string, workspaceId: string, use
 }
 
 /**
+ * 单次请求返回某张活跃卡片在完整（活跃）列表中的分页位置（index/prev/next）
+ * 及其下次复习时间，避免前端串行翻页瀑布。与 listCards 的排序/过滤语义一致：
+ * 按 (createdAt, id) DESC，过滤 status NOT IN ('archived', 'superseded')；
+ * nextReviewAt 与 listCards 相同的用户级 review 聚合逻辑。
+ * PERF: 卡片详情页首访定位 prev/next 由 O(pages) 网络往返降为 1 次查询。
+ */
+export async function getCardPosition(cardId: string, workspaceId: string, userId?: string) {
+  return withWorkspaceTransaction(
+    { workspaceId, userId: userId ?? "00000000-0000-4000-8000-000000000000" },
+    async (tx) => {
+      const card = await tx.query.learningCards.findFirst({
+        where: and(eq(learningCards.id, cardId), eq(learningCards.workspaceId, workspaceId)),
+      });
+      if (!card) return null;
+      if (card.status === "archived" || card.status === "superseded") {
+        // 与 listCards 一致：非活跃卡片不参与列表排序定位。
+        return null;
+      }
+
+      const activePredicate = and(
+        eq(learningCards.workspaceId, workspaceId),
+        sql`${learningCards.status} NOT IN ('archived', 'superseded')`,
+      );
+
+      const [olderRow, newerRow, rankRows, totalRows, reviewRows] = await Promise.all([
+        // next（更旧）：(createdAt,id) < 当前，DESC 取最近一条
+        tx.query.learningCards.findFirst({
+          where: and(
+            activePredicate,
+            sql`(${learningCards.createdAt}, ${learningCards.id}) < (${card.createdAt}::timestamptz, ${card.id}::uuid)`,
+          ),
+          orderBy: [desc(learningCards.createdAt), desc(learningCards.id)],
+          columns: { id: true },
+        }),
+        // previous（更新）：(createdAt,id) > 当前，ASC 取最近一条
+        tx.query.learningCards.findFirst({
+          where: and(
+            activePredicate,
+            sql`(${learningCards.createdAt}, ${learningCards.id}) > (${card.createdAt}::timestamptz, ${card.id}::uuid)`,
+          ),
+          orderBy: [asc(learningCards.createdAt), asc(learningCards.id)],
+          columns: { id: true },
+        }),
+        // index（1-based，最新在前）：统计 (createdAt,id) >= 当前 的活跃卡片数
+        tx
+          .select({ count: count() })
+          .from(learningCards)
+          .where(and(
+            activePredicate,
+            sql`(${learningCards.createdAt}, ${learningCards.id}) >= (${card.createdAt}::timestamptz, ${card.id}::uuid)`,
+          )),
+        // total：活跃卡片总数
+        tx
+          .select({ count: count() })
+          .from(learningCards)
+          .where(activePredicate),
+        // nextReviewAt：与 listCards 的 review 聚合语义一致（用户级、pending 最近一条）
+        tx
+          .select({ nextReviewAt: reviewSchedules.nextReviewAt })
+          .from(reviewSchedules)
+          .innerJoin(
+            validationEvents,
+            and(
+              eq(reviewSchedules.subjectId, validationEvents.id),
+              eq(reviewSchedules.subjectType, "validation"),
+            ),
+          )
+          .where(
+            and(
+              eq(reviewSchedules.workspaceId, workspaceId),
+              eq(reviewSchedules.status, ReviewStatus.PENDING),
+              eq(validationEvents.cardId, cardId),
+              ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
+            ),
+          )
+          .orderBy(asc(reviewSchedules.nextReviewAt))
+          .limit(1),
+      ]);
+
+      return {
+        index: Number(rankRows[0]?.count ?? 0),
+        total: Number(totalRows[0]?.count ?? 0),
+        previousId: newerRow?.id ?? null,
+        nextId: olderRow?.id ?? null,
+        nextReviewAt: reviewRows[0]?.nextReviewAt ?? null,
+      };
+    },
+  );
+}
+
+/**
  * BUG-72 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）。
  */
 export async function listCards(workspaceId: string, opts?: { cursor?: string; limit?: number }, userId?: string) {

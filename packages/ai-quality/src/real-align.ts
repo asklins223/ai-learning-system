@@ -25,12 +25,20 @@ function normalize(s: string): string {
   return s.replace(/\s+/g, "").toLowerCase();
 }
 
-function trigrams(s: string): Set<string> {
-  const n = normalize(s);
+/**
+ * 从已规范化（去空白 + 小写）的字符串构建 trigram Set。
+ * 与 `trigrams` 的语义完全一致，但避免对已规范化文本再次执行
+ * `normalize`（normalize 对已规范化输入是幂等的）。
+ */
+function trigramSetFromNormalized(n: string): Set<string> {
   if (n.length < 3) return new Set([n]);
   const out = new Set<string>();
   for (let i = 0; i <= n.length - 3; i++) out.add(n.slice(i, i + 3));
   return out;
+}
+
+function trigrams(s: string): Set<string> {
+  return trigramSetFromNormalized(normalize(s));
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {
@@ -74,10 +82,23 @@ function alignSingle(
     let scoreFuzzy = 0;
     const window = Math.min(b.text.length, Math.max(80, quote.length * 2));
     const step = Math.max(1, Math.floor(window / 8));
+
+    // 预计算规范化偏移映射，避免每个窗口重复 normalize（去空白/小写扫描）。
+    const normStart = new Uint32Array(b.text.length + 1);
+    let normCount = 0;
+    for (let idx = 0; idx < b.text.length; idx++) {
+      if (!/\s/.test(b.text[idx])) normCount++;
+      normStart[idx + 1] = normCount;
+    }
+
+    const minSliceLen = quote.length * 0.5;
     for (let i = 0; i < b.text.length - 1; i += step) {
-      const slice = b.text.slice(i, i + window);
-      if (slice.length < quote.length * 0.5) break;
-      const j = jaccard(triQuote, trigrams(slice));
+      const rawEnd = Math.min(i + window, b.text.length);
+      if (rawEnd - i < minSliceLen) break;
+      // raw [i, rawEnd) 的规范化内容恰为 normText[normStart[i] .. normStart[rawEnd])
+      const from = normStart[i];
+      const to = normStart[rawEnd];
+      const j = jaccard(triQuote, trigramSetFromNormalized(normText.slice(from, to)));
       if (j > scoreFuzzy) scoreFuzzy = j;
     }
     scoreFuzzy = Math.round(scoreFuzzy * 100);

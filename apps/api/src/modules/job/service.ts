@@ -134,14 +134,14 @@ export async function createJob(input: CreateJobInput) {
 /**
  * BUG-73 修复：使用 withWorkspaceTransaction 设置 DB 级工作区上下文（防御纵深/RLS）。
  */
-export async function listJobs(workspaceId: string, userId: string) {
+export async function listJobs(workspaceId: string, userId: string, opts?: { limit?: number }) {
   return withWorkspaceTransaction(
     { workspaceId, userId },
     async (tx) => {
       const rows = await tx.query.jobs.findMany({
         where: eq(jobs.workspaceId, workspaceId),
         orderBy: (j, { desc }) => [desc(j.scheduledAt)],
-        limit: 50,
+        limit: Math.max(1, Math.min(100, opts?.limit ?? 50)),
       });
       // R-006: 脱敏 — 不返回 payload 中的敏感字段（question/userAnswer/userId）和完整 lastError
       return rows.map((j) => ({

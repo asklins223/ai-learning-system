@@ -191,7 +191,7 @@ Owner 明确要求：**角色本体必须同时支持点击和直接拖动。** 
 - 菜单 focus 与 `aria-checked` 选中线改为向内绘制，二级菜单首尾项不再被 overflow 裁切；
 - 拖动改为 screen 坐标、首帧阈值位移补齐、animation-frame 合帧/单请求队列；主进程拖动期间不再逐帧写偏好 JSON 或广播，释放后才提交最终位置；
 - 最新真实 Electron 回归与 V2.3 截图见 [`../../../evidence/learning-companion-desktop-pet/P1/20260811-surface-v2-3/`](../../../evidence/learning-companion-desktop-pet/P1/20260811-surface-v2-3/)；V2/V2.1 证据继续保留为历史差异基线；
-- 仓库级 `make verify` 的 PostgreSQL integration lifecycle JSON 参数 Gate、deploy-readiness 和全量包测试已通过（使用本地 Compose 数据库变量）；coverage 仍按既有设计为 report-only，低于阈值的关键组由 release-check 继续拦截；
+- 仓库级 `make verify` 的 PostgreSQL integration lifecycle JSON 参数 Gate、deploy-readiness 和全量包测试已通过（使用本地 Compose 数据库变量）；coverage 门禁已按当前实测重新校准（2026-08-16），`make coverage-gate` 本地通过，本地无 base/head 时 changed-lines 明确 SKIPPED 而非 fail-closed，CI/release 仍会使用 base/head 真实评估；
 - P4 当前运行时已接入 Owner 指定的 Mao PRO：API 通过 `COMPANION_LIVE2D_V1_ENABLED` 独立授予能力，Electron 与 Browser fallback 都读取该 bootstrap 能力；加载失败、WebGL context loss、`reducedMotion` 和 `animationOff` 仍回退 Sprite。Owner 对该正式运行时资产的批准已记录在本节；`redistributionAllowed=false` 仍不解读为公开再分发许可；
 - 当前默认 Pet route 的阶段标签随 capability bootstrap 显示 `P3 · Voice`；无真实能力或 flag 关闭时才回退 `P1 · Fixture`。本轮不把 macOS/Docker 证据冒充成 Windows/Linux、24h soak 或发布升级回滚，因此不能据此声明 P3/P5/P6 Gate 已完成。
 

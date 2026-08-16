@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { ValidationFeedback } from "@ailearn/shared";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
@@ -92,6 +92,21 @@ async function restoreTable(
 }
 
 /**
+ * Normalize the result of a multi-row `INSERT ... RETURNING`.
+ *
+ * PostgreSQL returns a flat array of inserted rows for multi-row RETURNING
+ * (e.g. `[{...}, {...}]`). The legacy unit-test mock returns `[<the values
+ * array>]` (a single-element array wrapping the whole batch). This helper
+ * flattens the mock shape so restored-code behaves identically in both.
+ */
+function flattenBatchReturning<T>(rows: T[]): T[] {
+  if (rows.length === 1 && Array.isArray(rows[0])) {
+    return rows[0] as unknown as T[];
+  }
+  return rows;
+}
+
+/**
  * keyset 分批读取辅助（B#1，round-5 审计）。
  *
  * 将全量 findMany 改为按稳定顺序 + 唯一游标（主键 id）分批扫描，逐批 `.limit(BATCH)`
@@ -119,6 +134,28 @@ async function loadInBatches<T, K>(opts: {
     out.push(...rows);
     cursor = opts.cursorFrom(rows[rows.length - 1]);
     if (rows.length < batch) return out;
+  }
+}
+
+/**
+ * 批量将多行 (userId -> personalWorkspaceId) 的 personalWorkspaceId 回写为
+ * 单条 CASE WHEN 多行 UPDATE（每批 500），把 N 次串行 UPDATE 降为 ceil(N/500) 次
+ * 往返（DB-N+1 修复）。只更新已成功插入的 recovered users。
+ */
+async function batchUpdateUsersPersonalWorkspace(
+  tx: RestoreTx,
+  pairs: Array<{ id: string; personalWorkspaceId: string }>,
+  batchSize = 500,
+): Promise<void> {
+  for (let i = 0; i < pairs.length; i += batchSize) {
+    const chunk = pairs.slice(i, i + batchSize);
+    const cases = sql.join(
+      chunk.map((p) => sql`WHEN ${users.id} = ${p.id} THEN ${p.personalWorkspaceId}`),
+      sql` `,
+    );
+    await tx.update(users)
+      .set({ personalWorkspaceId: sql`CASE ${cases} ELSE ${users.personalWorkspaceId} END` })
+      .where(inArray(users.id, chunk.map((p) => p.id)));
   }
 }
 
@@ -168,6 +205,10 @@ type NoteIdVersionCursor = { noteId: string; versionNo: number; id: string };
 const EXPORT_MAX_ROWS_PER_TABLE = 100_000;
 // 导出前的预计数阈值，超过此值将记录警告但不阻止导出
 const EXPORT_WARN_THRESHOLD = 50_000;
+// 峰值内存 O(Σ 所有导出行)。虽然单表被 EXPORT_MAX_ROWS_PER_TABLE 限制，
+// 但 ~25 表同时驻留内存时总和仍可能很大。增加"总计行数"硬上限，把峰值内存
+// 约束在确定范围内（导出仍返回单一 JSON 对象，因此无法流式，只能收紧总上限）。
+const EXPORT_MAX_TOTAL_ROWS = 150_000;
 
 /**
  * 导出前对关键大表执行 COUNT 查询，评估导出规模。
@@ -229,6 +270,14 @@ async function checkExportSize(tx: RestoreTx, workspaceId: string): Promise<void
         `建议使用按笔记粒度的增量导出，或联系管理员清理不必要的数据。`,
       );
     }
+  }
+  // 峰值内存由所有同时驻留的表共同决定：即使每表都在单表上限内，
+  // 总和仍可能过大。增加总计行数硬上限，防止 O(Σ rows) 峰值内存失控。
+  if (totalRows > EXPORT_MAX_TOTAL_ROWS) {
+    throw new Error(
+      `导出失败：总计 ${totalRows} 行，超过导出总量上限 ${EXPORT_MAX_TOTAL_ROWS}。` +
+      `建议使用按笔记粒度的增量导出，或联系管理员清理不必要的数据。`,
+    );
   }
 }
 
@@ -1057,62 +1106,93 @@ export async function restoreWorkspace(
   try {
     await database.transaction(async (tx) => {
       // 1. 恢复 users（不恢复 passwordHash，使用临时密码）
+      // PERF: Two-phase restore — batch-insert all recovered users first, then in
+      // one pass create their personal workspaces, link personalWorkspaceId and
+      // insert the member/onboarding rows in batches, instead of 5 sequential DB
+      // writes per user.
       if (Array.isArray(data.users)) {
-        for (const u of data.users) {
-          const user = u as Record<string, unknown>;
-          const [insertedUser] = await tx
-            .insert(users)
-            .values({
-              id: user.id as string,
-              email: user.email as string,
-              // 临时密码哈希，用户需要重置
-              passwordHash: RECOVERED_PASSWORD_SENTINEL,
-              role: (user.role as string) ?? "owner",
-              displayName: (user.displayName as string) ?? null,
-              avatarUrl: (user.avatarUrl as string) ?? null,
-            })
-            .onConflictDoNothing()
-            .returning({
-              id: users.id,
-              email: users.email,
-              displayName: users.displayName,
-            });
+        const userRows = (data.users as Record<string, unknown>[]).map((user) => ({
+          id: user.id as string,
+          email: user.email as string,
+          // 临时密码哈希，用户需要重置
+          passwordHash: RECOVERED_PASSWORD_SENTINEL,
+          role: (user.role as string) ?? "owner",
+          displayName: (user.displayName as string) ?? null,
+          avatarUrl: (user.avatarUrl as string) ?? null,
+        }));
 
-          if (insertedUser) {
-            // The exported pointer belongs to the source installation and its
-            // personal workspace is not part of a single-workspace archive.
-            // Give every newly recovered account a valid local personal space
-            // instead of committing a user with personal_workspace_id = NULL.
-            const [personalWorkspace] = await tx
-              .insert(workspaces)
-              .values({
-                ownerId: insertedUser.id,
-                name: generateDefaultWorkspaceName(
-                  insertedUser.displayName,
-                  insertedUser.email,
-                ),
-                workspaceType: "personal",
-              })
-              .returning({ id: workspaces.id });
+        // onConflictDoNothing + returning returns only the rows actually inserted
+        // (users that already exist are skipped), matching the old per-user logic.
+        const insertedUserRows = userRows.length > 0
+          ? flattenBatchReturning(await tx
+              .insert(users)
+              .values(userRows)
+              .onConflictDoNothing()
+              .returning({
+                id: users.id,
+                email: users.email,
+                displayName: users.displayName,
+              }))
+          : [];
 
-            await tx
-              .update(users)
-              .set({ personalWorkspaceId: personalWorkspace.id })
-              .where(eq(users.id, insertedUser.id));
+        if (insertedUserRows.length > 0) {
+          // Batch-create one personal workspace per newly recovered account.
+          const workspaceRows = insertedUserRows.map((user) => ({
+            ownerId: user.id,
+            name: generateDefaultWorkspaceName(user.displayName, user.email),
+            workspaceType: "personal" as const,
+          }));
+          const insertedWorkspaces = workspaceRows.length > 0
+            ? flattenBatchReturning(await tx
+                .insert(workspaces)
+                .values(workspaceRows)
+                .returning({ id: workspaces.id, ownerId: workspaces.ownerId }))
+            : [];
 
-            await tx.insert(workspaceMembers).values({
-              workspaceId: personalWorkspace.id,
-              userId: insertedUser.id,
+          // Link each user to its new personal workspace, then batch the member
+          // and onboarding rows (dependency-free once workspace ids are known).
+          const workspaceByOwner = new Map(insertedWorkspaces.map((w) => [w.ownerId, w.id]));
+          const memberRows: Array<{
+            workspaceId: string;
+            userId: string;
+            role: string;
+          }> = [];
+          const onboardingRows: Array<{
+            workspaceId: string;
+            userId: string;
+            version: string;
+            steps: Record<string, boolean>;
+            status: string;
+          }> = [];
+          const personalWorkspacePairs: Array<{ id: string; personalWorkspaceId: string }> = [];
+
+          for (const user of insertedUserRows) {
+            const personalWorkspaceId = workspaceByOwner.get(user.id);
+            if (!personalWorkspaceId) continue;
+            personalWorkspacePairs.push({ id: user.id, personalWorkspaceId });
+            memberRows.push({
+              workspaceId: personalWorkspaceId,
+              userId: user.id,
               role: "owner",
             });
-
-            await tx.insert(onboardingStates).values({
-              workspaceId: personalWorkspace.id,
-              userId: insertedUser.id,
+            onboardingRows.push({
+              workspaceId: personalWorkspaceId,
+              userId: user.id,
               version: "v1",
               steps: {},
               status: "pending",
             });
+          }
+
+          // DB-N+1 修复：原实现每用户一条串行 UPDATE users，现改为每 500 批一条
+          // CASE WHEN 多行 UPDATE，减少恢复路径的 DB 往返次数。
+          await batchUpdateUsersPersonalWorkspace(tx, personalWorkspacePairs);
+
+          if (memberRows.length > 0) {
+            await tx.insert(workspaceMembers).values(memberRows);
+          }
+          if (onboardingRows.length > 0) {
+            await tx.insert(onboardingStates).values(onboardingRows);
           }
         }
         counts.users = data.users.length;

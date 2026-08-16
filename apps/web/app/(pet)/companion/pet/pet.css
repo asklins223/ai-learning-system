@@ -214,7 +214,7 @@ html:has(.pet-surface-root) body {
 .pet-confirmation-card {
   border: 1px solid var(--pet-panel-edge);
   background: var(--pet-panel-bg);
-  box-shadow: none;
+  box-shadow: var(--shadow-panel);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
@@ -468,6 +468,105 @@ html:has(.pet-surface-root) body {
 .pet-bubble-preview.is-long {
   -webkit-mask-image: linear-gradient(to bottom, black 68%, transparent 98%);
   mask-image: linear-gradient(to bottom, black 68%, transparent 98%);
+}
+
+.pet-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+
+.pet-chat-user {
+  align-self: flex-end;
+  max-width: 86%;
+  padding: 7px 10px;
+  animation: pet-chat-user-in 180ms ease-out both;
+  border: 1px solid color-mix(in srgb, var(--pet-accent) 20%, transparent);
+  border-radius: 14px 14px 4px 14px;
+  background: color-mix(in srgb, var(--pet-accent-soft) 78%, var(--color-surface-raised));
+  color: var(--color-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-control);
+}
+
+.pet-chat-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  animation: pet-chat-assistant-in 220ms ease-out both;
+}
+
+.pet-chat-assistant-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.pet-chat-avatar {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  display: inline-block;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--pet-accent) 22%, white 10%), transparent 48%),
+    linear-gradient(135deg, var(--pet-accent), color-mix(in srgb, var(--pet-accent) 68%, var(--color-running)));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--pet-accent-soft) 70%, transparent);
+}
+
+.pet-chat-assistant.is-pending .pet-bubble-copy,
+.pet-chat-assistant.is-cancelled .pet-bubble-copy {
+  color: var(--color-text-secondary);
+}
+
+.pet-bubble-caption {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-height: 64px;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--pet-bubble-tone) 22%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--pet-bubble-tone-soft) 46%, transparent);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.pet-bubble-caption-label {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--pet-bubble-tone) 16%, transparent);
+  color: var(--pet-bubble-tone);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+}
+
+.pet-bubble-caption-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pet-bubble-caption-cursor {
+  display: inline-block;
+  width: 1.5px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: -0.15em;
+  border-radius: 2px;
+  background: currentColor;
+  animation: pet-caption-cursor-blink 0.9s steps(1) infinite;
 }
 
 .pet-thinking-line {
@@ -758,8 +857,8 @@ html:has(.pet-surface-root) body {
   gap: 6px;
   padding: 9px 7px 7px 12px;
   border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--pet-panel-inner) 92%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--pet-panel-inner) 96%, transparent);
   transition: border-color var(--motion-fast) var(--ease-standard), outline-color var(--motion-fast) var(--ease-standard);
 }
 
@@ -819,9 +918,10 @@ html:has(.pet-surface-root) body {
 
 .pet-composer-submit {
   border: 0;
-  background: var(--color-action);
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--color-action), color-mix(in srgb, var(--color-action) 82%, var(--color-running)));
   color: var(--color-on-action);
-  box-shadow: none;
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--color-action) 22%, transparent);
   cursor: pointer;
   transition: transform var(--motion-fast) var(--ease-standard), opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
 }
@@ -1370,7 +1470,7 @@ html:has(.pet-surface-root) body {
   border: 1px solid color-mix(in srgb, var(--color-running) 34%, var(--color-border));
   border-radius: 30px;
   background: var(--color-surface-raised);
-  box-shadow: none;
+  box-shadow: var(--shadow-panel);
   pointer-events: none;
   animation: pet-voice-island-in 280ms var(--ease-standard) both;
 }
@@ -1422,16 +1522,20 @@ html:has(.pet-surface-root) body {
 
 .pet-voice-control-button {
   position: relative;
-  width: 46px;
-  height: 46px;
+  width: 52px;
+  height: 52px;
   display: grid;
   place-items: center;
   padding: 0;
   overflow: visible;
-  border: 1px solid color-mix(in srgb, var(--color-running) 52%, var(--color-border));
+  border: 1px solid color-mix(in srgb, var(--color-running) 58%, var(--color-border));
   border-radius: 50%;
-  background: var(--color-surface-raised);
-  box-shadow: none;
+  background:
+    radial-gradient(circle at 32% 26%, color-mix(in srgb, var(--color-surface-raised) 88%, white 8%), transparent 46%),
+    var(--color-surface-raised);
+  box-shadow:
+    0 6px 16px color-mix(in srgb, var(--color-running) 16%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--color-surface-raised) 70%, transparent);
   color: var(--color-running-text);
   cursor: pointer;
   pointer-events: auto;
@@ -1814,6 +1918,22 @@ html:has(.pet-surface-root) body {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+@keyframes pet-chat-user-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes pet-chat-assistant-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pet-caption-cursor-blink {
+  0%, 45% { opacity: 1; }
+  50%, 95% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
 @keyframes pet-composer-in {
   from { opacity: 0; transform: translateY(9px); }
   to { opacity: 1; transform: translateY(0); }
@@ -1889,6 +2009,9 @@ html:has(.pet-surface-root) body {
   .pet-voice-control-button,
   .pet-voice-island,
   .pet-voice-orb,
+  .pet-chat-user,
+  .pet-chat-assistant,
+  .pet-bubble-caption-cursor,
   .pet-voice-bars,
   .pet-voice-ring,
   .pet-voice-waves {

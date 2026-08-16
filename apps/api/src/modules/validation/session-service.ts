@@ -2561,8 +2561,13 @@ export async function revealResult(
         ),
       });
 
+      // PERF: build a Map for O(1) rubricItemId → assessment lookup instead of
+      // scanning the whole assessments array per rubric item (O(N×M)).
+      const assessmentByRubricItemId = new Map(
+        assessments.map((a) => [a.rubricItemId, a]),
+      );
       const rubricResults = rubricItems.map((item) => {
-        const assessment = assessments.find((a) => a.rubricItemId === item.id);
+        const assessment = assessmentByRubricItemId.get(item.id);
         return {
           criterion: item.criterion,
           verdict: assessment?.verdict ?? "missing",

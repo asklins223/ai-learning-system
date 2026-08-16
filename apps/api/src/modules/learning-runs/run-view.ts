@@ -123,8 +123,16 @@ export function buildSchedulePolicySummary(schedulingAuthorization: unknown): Le
 export function buildRunPublicView(input: RunViewInput): LearningRunPublicV1 {
   const { run, tasks, variants, assessment, baselineCheckpoint } = input;
 
+  // 预索引：taskId → active variant，避免每个 task 线性扫描 variants。
+  const activeVariantByTaskId = new Map<string, typeof variants[number]>();
+  for (const v of variants) {
+    if (v.status === "active" && !activeVariantByTaskId.has(v.taskId)) {
+      activeVariantByTaskId.set(v.taskId, v);
+    }
+  }
+
   const summaries: LearningTaskSummaryV1[] = tasks.map((task) => {
-    const activeVariant = variants.find((v) => v.taskId === task.id && v.status === "active");
+    const activeVariant = activeVariantByTaskId.get(task.id);
     return {
       taskId: task.id,
       sequence: task.sequence,
@@ -137,7 +145,7 @@ export function buildRunPublicView(input: RunViewInput): LearningRunPublicV1 {
   let activeTask: LearningTaskPublicV1 | null = null;
   const activeTaskRow = tasks.find((t) => t.id === run.activeTaskId) ?? null;
   if (activeTaskRow) {
-    const activeVariantRow = variants.find((v) => v.taskId === activeTaskRow.id && v.status === "active");
+    const activeVariantRow = activeVariantByTaskId.get(activeTaskRow.id);
     if (activeVariantRow) {
       const alternatives: TaskAlternativeDescriptorV1[] = variants
         .filter((v) => v.taskId === activeTaskRow.id && v.id !== activeVariantRow.id && v.status === "standby")

@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 import { MAX_PENDING_JOBS_PER_WORKSPACE, SourceStatus } from "@ailearn/shared";
 import { jobs } from "../db/schema/job.ts";
 import { noteBlocks, notes, noteVersions, sources } from "../db/schema/note.ts";
-import { computeContentHash } from "../modules/note/service.ts";
 import {
   createNoteFromSource,
   createSource,
@@ -325,9 +324,6 @@ describe("source to note conversion", () => {
   });
 
   it("detects an existing note with identical converted content", async () => {
-    const contentHash = computeContentHash({
-      blocks: [{ type: "paragraph", content: "same body" }],
-    });
     const executor = {
       query: {
         sources: {
@@ -351,7 +347,10 @@ describe("source to note conversion", () => {
       select: () => ({
         from: () => ({
           innerJoin: () => ({
-            where: async () => [{ noteId: "note-existing", noteTitle: "Existing", versionHash: contentHash }],
+            where: () => ({
+              // createNoteFromSource's dedup query now ends with .limit(1).
+              limit: async () => [{ noteId: "note-existing", noteTitle: "Existing" }],
+            }),
           }),
         }),
       }),

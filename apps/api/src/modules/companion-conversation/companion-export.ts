@@ -23,6 +23,11 @@ export type ExportCompanionResult =
   | { ok: true; ndjson: string[] }
   | { ok: false; statusCode: number; code: string; message: string };
 
+/** 流式导出结果：不含 ndjson 数组——行由 onLine 回调在产生时立即写出。 */
+export type ExportCompanionStreamResult =
+  | { ok: true; statusCode?: never; code?: never; message?: never }
+  | { ok: false; statusCode: number; code: string; message: string };
+
 const ACTIVE_RUN_STATUSES = "'accepted', 'running', 'cancel_requested'";
 
 // N#7-11: 每个 record 类型的行数上限（对齐主导出的 EXPORT_MAX_ROWS 思想）。
@@ -40,12 +45,21 @@ function recordsKeysetWhere(cursor: RecordsCursor, table: string) {
              > (${cursor.conversationId}::uuid, ${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`;
 }
 
-export async function exportCompanionData(args: {
-  workspaceId: string;
-  userId: string;
-}): Promise<ExportCompanionResult> {
+/**
+ * 流式导出（round-5 修复）：每一行 NDJSON 在装载后立即交给 onLine 写出，不再
+ * 把整份输出累积进内存数组再返回。峰值内存被约束为「一页原始行 + 已写出行累
+ * 计 SHA-256 摘要」（footer 仍最后一行，recordsSha256 语义与旧实现一致）。
+ * 返回 { ok:true } 表示全部写出成功；{ ok:false } 携带错误状态（错误发生在任何
+ * 行写出前，故调用方无需回滚已写出内容）。
+ *
+ * 兼容旧 API 的 exportCompanionData 保留为薄封装（供测试/内部直接调用累积数组）。
+ */
+export async function exportCompanionDataStream(
+  args: { workspaceId: string; userId: string },
+  onLine: (line: string) => void | Promise<void>,
+): Promise<ExportCompanionStreamResult> {
   // read-only repeatable-read RLS transaction（§12 规则 4）；BEGIN 时设置隔离级别
-  const result = await db.transaction<ExportCompanionResult>(async (tx) => {
+  const result = await db.transaction<ExportCompanionStreamResult>(async (tx) => {
       // read-only 必须在事务第一条查询（set_config）之前设置
       await tx.execute(sql`SET TRANSACTION READ ONLY`);
       await setApiTransactionContext(tx, { workspaceId: args.workspaceId, userId: args.userId });
@@ -70,12 +84,37 @@ export async function exportCompanionData(args: {
       // conversations：dialogue（active/archived）+ inbox，升序，游标分页
       // （大 workspace 的全量单查询会占满连接缓冲；分批循环装载）
       const PAGE_SIZE = 200;
+      // 流式序列化：manifest 先行、footer 末行；每页装载后立即序列化并增量
+      // 更新 SHA-256，避免「整类 50k 原始行 + 已序列化串」同时驻留内存，
+      // 峰值内存被约束为「一页原始行 + 累计 ndjson 输出」。
+      const counts = {
+        conversations: 0,
+        messages: 0,
+        voiceProvenance: 0,
+        proactiveDeliveries: 0,
+        actionProposals: 0,
+        actionRuns: 0,
+      };
+      const hasher = createHash("sha256");
+      const emitLine = async (line: string): Promise<void> => {
+        // recordsSha256 覆盖 manifest 至 footer 前一行（每行含 LF）。
+        hasher.update(`${line}\n`);
+        await onLine(line);
+      };
+      await onLine(JSON.stringify({
+        version: 1,
+        kind: "manifest",
+        format: "companion-export-ndjson-v1",
+        workspaceId: args.workspaceId,
+        userId: args.userId,
+        exportedAt: new Date().toISOString(),
+      }));
+
+      // conversations：dialogue（active/archived）+ inbox，升序，游标分页
+      // （大 workspace 的全量单查询会占满连接缓冲；分批循环装载）
       let cursorCreatedAt: string | null = null;
       let cursorConversationId: string | null = null;
-      const conversations: Array<{
-        id: string; workspaceId: string; userId: string; kind: string; title: string;
-        titleSource: string; status: string; createdAt: Date; updatedAt: Date; lastMessageAt: Date | null;
-      }> = [];
+      let conversationCount = 0;
       for (;;) {
         const page: Array<{
           id: string; workspaceId: string; userId: string; kind: string; title: string;
@@ -109,9 +148,28 @@ export async function exportCompanionData(args: {
           .orderBy(companionConversations.createdAt, companionConversations.id)
           .limit(PAGE_SIZE);
         if (page.length === 0) break;
-        conversations.push(...page);
+        for (const c of page) {
+          await emitLine(JSON.stringify({
+            version: 1,
+            kind: "conversation",
+            value: {
+              version: 1,
+              id: c.id,
+              workspaceId: c.workspaceId,
+              userId: c.userId,
+              kind: c.kind,
+              title: c.title,
+              titleSource: c.titleSource,
+              status: c.status,
+              createdAt: new Date(c.createdAt).toISOString(),
+              updatedAt: new Date(c.updatedAt).toISOString(),
+              lastMessageAt: c.lastMessageAt ? new Date(c.lastMessageAt).toISOString() : null,
+            },
+          }));
+          conversationCount += 1;
+        }
         // N#7-11: 每类型行数上限，超限截断 + 告警，避免大历史全量装载。
-        if (conversations.length >= COMPANION_EXPORT_MAX_ROWS) {
+        if (conversationCount >= COMPANION_EXPORT_MAX_ROWS) {
           logger.warn(
             { workspaceId: args.workspaceId, userId: args.userId, type: "conversations", limit: COMPANION_EXPORT_MAX_ROWS },
             "companion export 达到 conversations 行数上限，导出被截断",
@@ -123,15 +181,12 @@ export async function exportCompanionData(args: {
         cursorCreatedAt = last.sortKey;
         cursorConversationId = last.id;
       }
+      counts.conversations = conversationCount;
 
       // messages：按 conversation 升序、conversation 内 seq 升序，游标分页
-      const messages: Array<{
-        id: string; conversationId: string; seq: number; role: string; kind: string;
-        blocks: unknown; runId: string | null; clientMessageId: string | null;
-        contentSha256: string | null; createdAt: Date;
-      }> = [];
       let cursorConv: string | null = null;
       let cursorSeq: number | null = null;
+      let messageCount = 0;
       for (;;) {
         const page: Array<{
           id: string; conversationId: string; seq: number; role: string; kind: string;
@@ -157,9 +212,28 @@ export async function exportCompanionData(args: {
           .orderBy(companionMessages.conversationId, companionMessages.seq)
           .limit(PAGE_SIZE);
         if (page.length === 0) break;
-        messages.push(...page);
+        for (const m of page) {
+          await emitLine(JSON.stringify({
+            version: 1,
+            kind: "message",
+            value: {
+              version: 1,
+              id: m.id,
+              conversationId: m.conversationId,
+              seq: Number(m.seq),
+              role: m.role,
+              kind: m.kind,
+              blocks: m.blocks,
+              runId: m.runId,
+              clientMessageId: m.clientMessageId,
+              contentSha256: m.contentSha256,
+              createdAt: new Date(m.createdAt).toISOString(),
+            },
+          }));
+          messageCount += 1;
+        }
         // N#7-11: 行数上限，超限截断 + 告警。
-        if (messages.length >= COMPANION_EXPORT_MAX_ROWS) {
+        if (messageCount >= COMPANION_EXPORT_MAX_ROWS) {
           logger.warn(
             { workspaceId: args.workspaceId, userId: args.userId, type: "messages", limit: COMPANION_EXPORT_MAX_ROWS },
             "companion export 达到 messages 行数上限，导出被截断",
@@ -171,12 +245,13 @@ export async function exportCompanionData(args: {
         cursorConv = last.conversationId;
         cursorSeq = Number(last.seq);
       }
+      counts.messages = messageCount;
 
       // proactive deliveries / action proposals / action runs（§12 六类 record 契约）：
       // keyset 分页循环装载（见 recordsKeysetWhere），避免全量单查询。
-      const proactiveDeliveries: Array<Record<string, unknown>> = [];
       {
         let cursor: RecordsCursor = null;
+        let recordCount = 0;
         for (;;) {
           const page = (await tx.execute(sql`
             SELECT id, conversation_id AS "conversationId", message_id AS "messageId",
@@ -188,11 +263,30 @@ export async function exportCompanionData(args: {
               AND ${recordsKeysetWhere(cursor, "companion_proactive_deliveries")}
             ORDER BY conversation_id, created_at, id
             LIMIT ${PAGE_SIZE}
-          `)) as unknown as Array<{ id: string; conversationId: string; createdAt: Date }>;
+          `)) as unknown as Array<Record<string, unknown>>;
           if (page.length === 0) break;
-          proactiveDeliveries.push(...page);
+          for (const delivery of page) {
+            await emitLine(JSON.stringify({
+              version: 1,
+              kind: "proactive_delivery",
+              value: {
+                id: delivery.id,
+                conversationId: delivery.conversationId,
+                messageId: delivery.messageId,
+                permitId: delivery.permitId,
+                reasonId: delivery.reasonId,
+                suggestionClassId: delivery.suggestionClassId,
+                contentPolicy: delivery.contentPolicy,
+                status: delivery.status,
+                createdAt: delivery.createdAt instanceof Date
+                  ? delivery.createdAt.toISOString()
+                  : new Date(String(delivery.createdAt ?? "")).toISOString(),
+              },
+            }));
+            recordCount += 1;
+          }
           // N#7-11: 行数上限，超限截断 + 告警。
-          if (proactiveDeliveries.length >= COMPANION_EXPORT_MAX_ROWS) {
+          if (recordCount >= COMPANION_EXPORT_MAX_ROWS) {
             logger.warn(
               { workspaceId: args.workspaceId, userId: args.userId, type: "proactiveDeliveries", limit: COMPANION_EXPORT_MAX_ROWS },
               "companion export 达到 proactive_deliveries 行数上限，导出被截断",
@@ -200,14 +294,15 @@ export async function exportCompanionData(args: {
             break;
           }
           if (page.length < PAGE_SIZE) break;
-          const last = page[page.length - 1]!;
+          const last = page[page.length - 1] as { conversationId: string; createdAt: Date; id: string };
           cursor = { conversationId: String(last.conversationId), createdAt: last.createdAt, id: String(last.id) };
         }
+        counts.proactiveDeliveries = recordCount;
       }
       // action 表（0092 建表）无 drizzle schema 对象——用原生 sql 查询
-      const actionProposals: Array<Record<string, unknown>> = [];
       {
         let cursor: RecordsCursor = null;
+        let recordCount = 0;
         for (;;) {
           const page = (await tx.execute(sql`
             SELECT id, conversation_id AS "conversationId", source_message_id AS "sourceMessageId",
@@ -217,11 +312,26 @@ export async function exportCompanionData(args: {
               AND ${recordsKeysetWhere(cursor, "companion_action_proposals")}
             ORDER BY conversation_id, created_at, id
             LIMIT ${PAGE_SIZE}
-          `)) as unknown as Array<{ id: string; conversationId: string; createdAt: Date }>;
+          `)) as unknown as Array<Record<string, unknown>>;
           if (page.length === 0) break;
-          actionProposals.push(...page);
+          for (const proposal of page) {
+            await emitLine(JSON.stringify({
+              version: 1,
+              kind: "action_proposal",
+              value: {
+                id: String(proposal.id),
+                conversationId: proposal.conversationId ? String(proposal.conversationId) : null,
+                sourceMessageId: proposal.sourceMessageId ? String(proposal.sourceMessageId) : null,
+                status: String(proposal.status ?? ""),
+                createdAt: proposal.createdAt instanceof Date
+                  ? proposal.createdAt.toISOString()
+                  : new Date(String(proposal.createdAt ?? "")).toISOString(),
+              },
+            }));
+            recordCount += 1;
+          }
           // N#7-11: 行数上限，超限截断 + 告警。
-          if (actionProposals.length >= COMPANION_EXPORT_MAX_ROWS) {
+          if (recordCount >= COMPANION_EXPORT_MAX_ROWS) {
             logger.warn(
               { workspaceId: args.workspaceId, userId: args.userId, type: "actionProposals", limit: COMPANION_EXPORT_MAX_ROWS },
               "companion export 达到 action_proposals 行数上限，导出被截断",
@@ -229,13 +339,14 @@ export async function exportCompanionData(args: {
             break;
           }
           if (page.length < PAGE_SIZE) break;
-          const last = page[page.length - 1]!;
+          const last = page[page.length - 1] as { conversationId: string; createdAt: Date; id: string };
           cursor = { conversationId: String(last.conversationId), createdAt: last.createdAt, id: String(last.id) };
         }
+        counts.actionProposals = recordCount;
       }
-      const actionRuns: Array<Record<string, unknown>> = [];
       {
         let cursor: RecordsCursor = null;
+        let recordCount = 0;
         for (;;) {
           const page = (await tx.execute(sql`
             SELECT id, conversation_id AS "conversationId", proposal_id AS "proposalId",
@@ -245,11 +356,26 @@ export async function exportCompanionData(args: {
               AND ${recordsKeysetWhere(cursor, "companion_action_runs")}
             ORDER BY conversation_id, created_at, id
             LIMIT ${PAGE_SIZE}
-          `)) as unknown as Array<{ id: string; conversationId: string; createdAt: Date }>;
+          `)) as unknown as Array<Record<string, unknown>>;
           if (page.length === 0) break;
-          actionRuns.push(...page);
+          for (const run of page) {
+            await emitLine(JSON.stringify({
+              version: 1,
+              kind: "action_run",
+              value: {
+                id: String(run.id),
+                conversationId: run.conversationId ? String(run.conversationId) : null,
+                proposalId: run.proposalId ? String(run.proposalId) : null,
+                status: String(run.status ?? ""),
+                createdAt: run.createdAt instanceof Date
+                  ? run.createdAt.toISOString()
+                  : new Date(String(run.createdAt ?? "")).toISOString(),
+              },
+            }));
+            recordCount += 1;
+          }
           // N#7-11: 行数上限，超限截断 + 告警。
-          if (actionRuns.length >= COMPANION_EXPORT_MAX_ROWS) {
+          if (recordCount >= COMPANION_EXPORT_MAX_ROWS) {
             logger.warn(
               { workspaceId: args.workspaceId, userId: args.userId, type: "actionRuns", limit: COMPANION_EXPORT_MAX_ROWS },
               "companion export 达到 action_runs 行数上限，导出被截断",
@@ -257,141 +383,21 @@ export async function exportCompanionData(args: {
             break;
           }
           if (page.length < PAGE_SIZE) break;
-          const last = page[page.length - 1]!;
+          const last = page[page.length - 1] as { conversationId: string; createdAt: Date; id: string };
           cursor = { conversationId: String(last.conversationId), createdAt: last.createdAt, id: String(last.id) };
         }
+        counts.actionRuns = recordCount;
       }
 
-      const ndjson: string[] = [];
-      const counts = {
-        conversations: 0,
-        messages: 0,
-        voiceProvenance: 0,
-        proactiveDeliveries: 0,
-        actionProposals: 0,
-        actionRuns: 0,
-      };
-
-      ndjson.push(JSON.stringify({
-        version: 1,
-        kind: "manifest",
-        format: "companion-export-ndjson-v1",
-        workspaceId: args.workspaceId,
-        userId: args.userId,
-        exportedAt: new Date().toISOString(),
-      }));
-
-      for (const c of conversations) {
-        ndjson.push(JSON.stringify({
-          version: 1,
-          kind: "conversation",
-          value: {
-            version: 1,
-            id: c.id,
-            workspaceId: c.workspaceId,
-            userId: c.userId,
-            kind: c.kind,
-            title: c.title,
-            titleSource: c.titleSource,
-            status: c.status,
-            createdAt: new Date(c.createdAt).toISOString(),
-            updatedAt: new Date(c.updatedAt).toISOString(),
-            lastMessageAt: c.lastMessageAt ? new Date(c.lastMessageAt).toISOString() : null,
-          },
-        }));
-        counts.conversations += 1;
-      }
-      for (const m of messages) {
-        ndjson.push(JSON.stringify({
-          version: 1,
-          kind: "message",
-          value: {
-            version: 1,
-            id: m.id,
-            conversationId: m.conversationId,
-            seq: Number(m.seq),
-            role: m.role,
-            kind: m.kind,
-            blocks: m.blocks,
-            runId: m.runId,
-            clientMessageId: m.clientMessageId,
-            contentSha256: m.contentSha256,
-            createdAt: new Date(m.createdAt).toISOString(),
-          },
-        }));
-        counts.messages += 1;
-      }
-
-      // proactive delivery / action proposal / action run 三类 record（§12）
-      for (const delivery of proactiveDeliveries) {
-        ndjson.push(JSON.stringify({
-          version: 1,
-          kind: "proactive_delivery",
-          value: {
-            id: delivery.id,
-            conversationId: delivery.conversationId,
-            messageId: delivery.messageId,
-            permitId: delivery.permitId,
-            reasonId: delivery.reasonId,
-            suggestionClassId: delivery.suggestionClassId,
-            contentPolicy: delivery.contentPolicy,
-            status: delivery.status,
-            createdAt: delivery.createdAt instanceof Date
-              ? delivery.createdAt.toISOString()
-              : new Date(String(delivery.createdAt ?? "")).toISOString(),
-          },
-        }));
-        counts.proactiveDeliveries += 1;
-      }
-      for (const proposal of actionProposals) {
-        ndjson.push(JSON.stringify({
-          version: 1,
-          kind: "action_proposal",
-          value: {
-            id: String(proposal.id),
-            conversationId: proposal.conversationId ? String(proposal.conversationId) : null,
-            sourceMessageId: proposal.sourceMessageId ? String(proposal.sourceMessageId) : null,
-            status: String(proposal.status ?? ""),
-            createdAt: proposal.createdAt instanceof Date
-              ? proposal.createdAt.toISOString()
-              : new Date(String(proposal.createdAt ?? "")).toISOString(),
-          },
-        }));
-        counts.actionProposals += 1;
-      }
-      for (const run of actionRuns) {
-        ndjson.push(JSON.stringify({
-          version: 1,
-          kind: "action_run",
-          value: {
-            id: String(run.id),
-            conversationId: run.conversationId ? String(run.conversationId) : null,
-            proposalId: run.proposalId ? String(run.proposalId) : null,
-            status: String(run.status ?? ""),
-            createdAt: run.createdAt instanceof Date
-              ? run.createdAt.toISOString()
-              : new Date(String(run.createdAt ?? "")).toISOString(),
-          },
-        }));
-        counts.actionRuns += 1;
-      }
-
-      // recordsSha256：manifest 起至 footer 前一行止的原始 UTF-8 NDJSON bytes（每行含 LF）
-      // 2026-08-11：流式增量 hash——此前先 join 成全量 Buffer 再 hash，
-      // 大导出（数千消息）时峰值内存翻倍。改为逐行 update。
-      const hasher = createHash("sha256");
-      for (const line of ndjson) {
-        hasher.update(`${line}\n`);
-      }
       const recordsSha256 = hasher.digest("hex");
-      ndjson.push(JSON.stringify({
+      await emitLine(JSON.stringify({
         version: 1,
         kind: "footer",
         counts,
         recordsSha256,
       }));
 
-      return { ok: true, ndjson };
+      return { ok: true };
     },
     { isolationLevel: "repeatable read" },
   );
@@ -406,4 +412,21 @@ export async function exportCompanionData(args: {
     }).catch(() => undefined);
   }
   return result;
+}
+
+/**
+ * 兼容旧 API：把流式导出的每一行累积进 ndjson 数组一次性返回。生产路由应使用
+ * exportCompanionDataStream 直接流式写出，避免整份输出驻留内存；本封装供集成
+ * 测试与内部调用保持既有契约。
+ */
+export async function exportCompanionData(args: {
+  workspaceId: string;
+  userId: string;
+}): Promise<ExportCompanionResult> {
+  const ndjson: string[] = [];
+  const result = await exportCompanionDataStream(args, (line) => {
+    ndjson.push(line);
+  });
+  if (!result.ok) return result;
+  return { ok: true, ndjson };
 }

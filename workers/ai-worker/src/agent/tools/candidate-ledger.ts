@@ -11,7 +11,7 @@
  * - CAS（Compare-And-Swap）：操作必须基于最新 ledger hash
  */
 
-import { and, eq, desc, inArray } from "drizzle-orm";
+import { and, eq, desc, inArray, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { db } from "../../db.ts";
 import * as schema from "../../schema/index.ts";
@@ -149,12 +149,14 @@ async function handleApplyCandidateOperations(
       .where(inArray(schema.noteEvidenceSpans.id, refIds));
     const spanIdSet = new Set(spanRows.map((r) => r.id));
     const seen = new Set<string>();
+    const rows: Array<Record<string, unknown>> = [];
     let ordinal = 0;
+    const now = new Date();
     for (const refId of refIds) {
       if (seen.has(refId)) continue;
       seen.add(refId);
       const isTextSpan = spanIdSet.has(refId);
-      await db.insert(schema.cardGenerationCandidateEvidence).values({
+      rows.push({
         workspaceId: ctx.workspaceId,
         runId: ctx.runId,
         noteVersionId,
@@ -165,9 +167,61 @@ async function handleApplyCandidateOperations(
         ordinal,
         sourceVerificationStatus: "verified",
         sourceVerificationMethod: "ledger_op",
-        createdAt: new Date(),
-      } as any).onConflictDoNothing();
+        createdAt: now,
+      });
       ordinal++;
+    }
+    if (rows.length > 0) {
+      // 批量多行 INSERT，替代每 ref 一次 round-trip
+      await db.insert(schema.cardGenerationCandidateEvidence).values(rows as any[]).onConflictDoNothing();
+    }
+  }
+
+  /**
+   * 为多个候选批量写入证据绑定行——把 N 次 span 查询 + N 次多行 INSERT 合并为
+   * 1 次 span 查询 + 1 次多行 INSERT（相比逐候选调用 persistEvidenceRefs）。
+   * 仅供同一操作内（merge/split/adjust_support）批量持久化使用。
+   */
+  async function persistEvidenceRefsForCandidates(
+    entries: Array<{ candidateDbId: string; refIds: string[] }>,
+  ): Promise<void> {
+    const effective = entries.filter((e) => e.refIds.length > 0);
+    if (!noteVersionId || effective.length === 0) return;
+    const allRefIds = [...new Set(effective.flatMap((e) => e.refIds))];
+    const spanRows = allRefIds.length > 0
+      ? await db
+          .select({ id: schema.noteEvidenceSpans.id })
+          .from(schema.noteEvidenceSpans)
+          .where(inArray(schema.noteEvidenceSpans.id, allRefIds))
+      : [];
+    const spanIdSet = new Set(spanRows.map((r) => r.id));
+    const now = new Date();
+    const rows: Array<Record<string, unknown>> = [];
+    for (const entry of effective) {
+      const seen = new Set<string>();
+      let ordinal = 0;
+      for (const refId of entry.refIds) {
+        if (seen.has(refId)) continue;
+        seen.add(refId);
+        const isTextSpan = spanIdSet.has(refId);
+        rows.push({
+          workspaceId: ctx.workspaceId,
+          runId: ctx.runId,
+          noteVersionId,
+          candidateId: entry.candidateDbId,
+          sourceKind: isTextSpan ? "text_span" : "image_evidence",
+          evidenceSpanId: isTextSpan ? refId : null,
+          imageEvidenceUnitId: isTextSpan ? null : refId,
+          ordinal,
+          sourceVerificationStatus: "verified",
+          sourceVerificationMethod: "ledger_op",
+          createdAt: now,
+        });
+        ordinal++;
+      }
+    }
+    if (rows.length > 0) {
+      await db.insert(schema.cardGenerationCandidateEvidence).values(rows as any[]).onConflictDoNothing();
     }
   }
 
@@ -284,15 +338,15 @@ async function handleApplyCandidateOperations(
           if (dbId) await persistEvidenceRefs(dbId, merged.evidenceRefIds);
         }
 
-        // 标记原候选为 merged
-        for (const removedId of result.removedCandidateIds) {
+        // 标记原候选为 merged（批量）
+        if (result.removedCandidateIds.length > 0) {
           await db.update(schema.cardGenerationCandidates).set({
             validationStatus: "merged",
             exclusionReason: `merged into ${result.resultCandidateId}`,
           }).where(and(
             eq(schema.cardGenerationCandidates.workspaceId, ctx.workspaceId),
             eq(schema.cardGenerationCandidates.runId, ctx.runId),
-            eq(schema.cardGenerationCandidates.id, removedId),
+            inArray(schema.cardGenerationCandidates.id, result.removedCandidateIds),
           ));
         }
       } else if (result.operationType === "split" && result.createdNew) {
@@ -316,82 +370,103 @@ async function handleApplyCandidateOperations(
           if (dbId) await persistEvidenceRefs(dbId, created.evidenceRefIds);
         }
 
-        // 标记原候选为 split，并持久化 derivedCandidateIds（hash 包含该字段）
+        // 标记原候选为 split，并持久化 derivedCandidateIds（hash 包含该字段，批量）
         const createdIds = result.createdCandidateIds ?? [];
-        for (const candidateId of candidateOp.candidateIds) {
-          const [existing] = await db
-            .select({ derivedCandidateIds: schema.cardGenerationCandidates.derivedCandidateIds })
+        if (candidateOp.candidateIds.length > 0) {
+          // 一次性批量读取全部原候选的现有 derivedCandidateIds
+          const existingRows = await db
+            .select({
+              id: schema.cardGenerationCandidates.id,
+              derivedCandidateIds: schema.cardGenerationCandidates.derivedCandidateIds,
+            })
             .from(schema.cardGenerationCandidates)
             .where(and(
               eq(schema.cardGenerationCandidates.workspaceId, ctx.workspaceId),
               eq(schema.cardGenerationCandidates.runId, ctx.runId),
-              eq(schema.cardGenerationCandidates.id, candidateId),
-            ))
-            .limit(1);
-          // 只记录属于该原候选的拆分结果（derived 候选的 derivedCandidateIds 指向其来源）
-          const ownDerivedIds = createdIds.filter((cid) =>
-            ctx.candidateLedger.getCandidate(cid)?.derivedCandidateIds.includes(candidateId),
-          );
-          await db.update(schema.cardGenerationCandidates).set({
-            validationStatus: "split",
-            exclusionReason: `split: ${candidateOp.reasonCode}`,
-            derivedCandidateIds: [...((existing?.derivedCandidateIds as string[]) ?? []), ...ownDerivedIds],
-          }).where(and(
-            eq(schema.cardGenerationCandidates.workspaceId, ctx.workspaceId),
-            eq(schema.cardGenerationCandidates.runId, ctx.runId),
-            eq(schema.cardGenerationCandidates.id, candidateId),
-          ));
+              inArray(schema.cardGenerationCandidates.id, candidateOp.candidateIds),
+            ));
+          const existingById = new Map<string, string[]>();
+          for (const r of existingRows) {
+            existingById.set(r.id, (r.derivedCandidateIds as string[]) ?? []);
+          }
+          // 计算每个原候选的合并后 derivedCandidateIds
+          const splitUpdates = candidateOp.candidateIds.map((candidateId) => {
+            // 只记录属于该原候选的拆分结果（derived 候选的 derivedCandidateIds 指向其来源）
+            const ownDerivedIds = createdIds.filter((cid) =>
+              ctx.candidateLedger.getCandidate(cid)?.derivedCandidateIds.includes(candidateId),
+            );
+            const merged = [...(existingById.get(candidateId) ?? []), ...ownDerivedIds];
+            return { candidateId, derivedCandidateIds: merged };
+          });
+          // 单次 VALUES 批量 UPDATE
+          await db.execute(sql`
+            UPDATE card_generation_candidates AS c
+            SET validation_status = 'split',
+                exclusion_reason = ${`split: ${candidateOp.reasonCode}`},
+                derived_candidate_ids = v.derived_candidate_ids::jsonb
+            FROM (VALUES
+              ${sql.join(splitUpdates.map((u) => sql`(${u.candidateId}, ${JSON.stringify(u.derivedCandidateIds)})`), sql`, `)}
+            ) AS v(candidate_id, derived_candidate_ids)
+            WHERE c.id = v.candidate_id
+              AND c.workspace_id = ${ctx.workspaceId}
+              AND c.run_id = ${ctx.runId}
+          `);
         }
       } else if (result.operationType === "restore") {
-        // 恢复被排除的候选
-        for (const candidateId of candidateOp.candidateIds) {
+        // 恢复被排除的候选（批量）
+        if (candidateOp.candidateIds.length > 0) {
           await db.update(schema.cardGenerationCandidates).set({
             validationStatus: "accepted",
             exclusionReason: null,
           }).where(and(
             eq(schema.cardGenerationCandidates.workspaceId, ctx.workspaceId),
             eq(schema.cardGenerationCandidates.runId, ctx.runId),
-            eq(schema.cardGenerationCandidates.id, candidateId),
+            inArray(schema.cardGenerationCandidates.id, candidateOp.candidateIds),
           ));
         }
       } else if (result.operationType === "adjust_support") {
-        // 调整候选的证据绑定
-        for (const candidateId of candidateOp.candidateIds) {
+        // 调整候选的证据绑定（批量删除 + 逐候选持久化）
+        if (candidateOp.candidateIds.length > 0) {
           await db.delete(schema.cardGenerationCandidateEvidence).where(and(
             eq(schema.cardGenerationCandidateEvidence.workspaceId, ctx.workspaceId),
             eq(schema.cardGenerationCandidateEvidence.runId, ctx.runId),
-            eq(schema.cardGenerationCandidateEvidence.candidateId, candidateId),
+            inArray(schema.cardGenerationCandidateEvidence.candidateId, candidateOp.candidateIds),
           ));
           if (candidateOp.unionEvidenceRefIds && candidateOp.unionEvidenceRefIds.length > 0) {
-            await persistEvidenceRefs(candidateId, candidateOp.unionEvidenceRefIds);
+            // PERF: 一次 span 查询 + 一次多行 INSERT 批量写全部候选的证据绑定，
+            // 替代逐候选 persistEvidenceRefs（每个候选一次 span SELECT + INSERT）。
+            await persistEvidenceRefsForCandidates(
+              candidateOp.candidateIds.map((candidateId) => ({
+                candidateDbId: candidateId,
+                refIds: candidateOp.unionEvidenceRefIds!,
+              })),
+            );
           }
         }
       } else if (result.operationType === "exclude") {
-        // 标记候选为 excluded
-        for (const candidateId of candidateOp.candidateIds) {
+        // 标记候选为 excluded（批量）
+        if (candidateOp.candidateIds.length > 0) {
           await db.update(schema.cardGenerationCandidates).set({
             validationStatus: "excluded",
             exclusionReason: candidateOp.excludeReason ?? candidateOp.reasonCode,
           }).where(and(
             eq(schema.cardGenerationCandidates.workspaceId, ctx.workspaceId),
             eq(schema.cardGenerationCandidates.runId, ctx.runId),
-            eq(schema.cardGenerationCandidates.id, candidateId),
+            inArray(schema.cardGenerationCandidates.id, candidateOp.candidateIds),
           ));
         }
       } else if (result.operationType === "calibrate" || result.operationType === "group") {
-        // 更新候选的 group 或 importance
+        // 更新候选的 group 或 importance（批量）
         const updateData: Record<string, unknown> = {};
         if (candidateOp.adjustedImportance) updateData.importance = candidateOp.adjustedImportance;
         if (candidateOp.groupKey !== undefined) updateData.groupKey = candidateOp.groupKey;
 
-        if (Object.keys(updateData).length > 0) {
-          for (const candidateId of candidateOp.candidateIds) {
-            await db.update(schema.cardGenerationCandidates).set(updateData).where(and(
-              eq(schema.cardGenerationCandidates.workspaceId, ctx.workspaceId),
-              eq(schema.cardGenerationCandidates.runId, ctx.runId),
-              eq(schema.cardGenerationCandidates.id, candidateId),
-            ));
-          }
+        if (Object.keys(updateData).length > 0 && candidateOp.candidateIds.length > 0) {
+          await db.update(schema.cardGenerationCandidates).set(updateData).where(and(
+            eq(schema.cardGenerationCandidates.workspaceId, ctx.workspaceId),
+            eq(schema.cardGenerationCandidates.runId, ctx.runId),
+            inArray(schema.cardGenerationCandidates.id, candidateOp.candidateIds),
+          ));
         }
       }
 

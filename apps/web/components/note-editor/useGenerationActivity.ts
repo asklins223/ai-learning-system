@@ -102,7 +102,10 @@ export function useGenerationActivity(ctx: GenerationActivityContext): Generatio
       // （StrictMode dev 双调用函数式更新，seen 是跨调用共享的引用，
       // 第二次调用时 seen 已被填充，结果被错误清空）。
       const next = mergeAgentEvents(eventsRef.current, page, seenRef.current);
-      for (const event of page) seenRef.current.add(event.eventKey);
+      // PERF: 把 seen 收敛到当前缓冲窗口内的 key——事件被环形截断丢弃后，
+      // 其 key 不再需要去重（重新出现即视为窗口内新事件），从而避免 seen
+      // 在整个 run 生命周期内无界增长。
+      seenRef.current = new Set(next.map((event) => event.eventKey));
       eventsRef.current = next;
       setEvents(next);
     };

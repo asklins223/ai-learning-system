@@ -52,7 +52,79 @@ export interface CompanionBridgeBrokerContext {
 
 export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerContext): () => void {
   const records = new Map<string, BridgeContextRecord>(); // contextId → record
+  // 二级索引：pageInstanceId → contextId，避免每次 UI/命令事件都把整个
+  // registry 展开成数组做线性扫描（compat 于 contextId 主键）。
+  const pageInstanceToContextId = new Map<string, string>();
+  // 2026-08-16（性能专项）：按 expiresAt 排序的最小堆，只用来定位"最早过期"
+  // 的 entry，避免每 30s 全量遍历 records（lazy-deletion：过期时若该 record
+  // 已被删除/续期则跳过）。
+  const expiresAtHeap: Array<{ expiresAt: number; contextId: string }> = [];
+  const heapPush = (entry: { expiresAt: number; contextId: string }): void => {
+    expiresAtHeap.push(entry);
+    let idx = expiresAtHeap.length - 1;
+    const item = expiresAtHeap[idx];
+    while (idx > 0) {
+      const parent = (idx - 1) >> 1;
+      const parentItem = expiresAtHeap[parent];
+      if (parentItem.expiresAt <= item.expiresAt) break;
+      expiresAtHeap[idx] = parentItem;
+      idx = parent;
+    }
+    expiresAtHeap[idx] = item;
+  };
+  const heapPop = (): { expiresAt: number; contextId: string } | undefined => {
+    const heap = expiresAtHeap;
+    const root = heap[0];
+    const last = heap.pop();
+    if (last === undefined) return root;
+    if (heap.length === 0) return root;
+    // 把原堆最后一个元素移到根位置，再向下 sift 恢复最小堆序
+    // （用 item 作参照，避免移动产生的空洞槽位残留旧值干扰比较）。
+    heap[0] = last;
+    let idx = 0;
+    const len = heap.length;
+    const item = last;
+    for (;;) {
+      const left = idx * 2 + 1;
+      const right = left + 1;
+      let smallest = idx;
+      // 以 item 为参照比较左右子节点（idx 是已上移产生的空洞，旧值已无效）。
+      if (left < len && heap[left].expiresAt < item.expiresAt) smallest = left;
+      if (right < len) {
+        const best = smallest === idx ? item.expiresAt : heap[smallest].expiresAt;
+        if (heap[right].expiresAt < best) smallest = right;
+      }
+      if (smallest === idx) break;
+      heap[idx] = heap[smallest];
+      idx = smallest;
+    }
+    heap[idx] = item;
+    return root;
+  };
   let pageSequence = 0;
+
+  const unregister = (contextId: string, record: BridgeContextRecord | undefined) => {
+    records.delete(contextId);
+    if (record?.pageInstanceId) {
+      pageInstanceToContextId.delete(record.pageInstanceId);
+    }
+  };
+
+  const sweepExpiredRecords = () => {
+    const now = Date.now();
+    // 只处理堆顶已过期的 entry；未过期 entry 无需扫描（其余 entry 的过期时间
+    // 都更晚）。lazy-deletion：record 已不存在或已被续期（expiresAt 变化）
+    // 时跳过即可。
+    for (;;) {
+      const top = expiresAtHeap[0];
+      if (!top || top.expiresAt >= now) break;
+      heapPop();
+      const record = records.get(top.contextId);
+      if (record && record.expiresAt === top.expiresAt) {
+        unregister(top.contextId, record);
+      }
+    }
+  };
 
   const senderId = (role: "main" | "pet"): number | null => {
     const window = role === "main" ? context.getMainWindow() : context.getPetWindow();
@@ -75,7 +147,7 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
   const revokeAllForMain = (mainWebContentsId: number) => {
     for (const [key, record] of records) {
       if (record.mainWebContentsId === mainWebContentsId) {
-        records.delete(key);
+        unregister(key, record);
       }
     }
   };
@@ -121,6 +193,8 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
       mainWebContentsId: mainWindow?.webContents.id ?? -1,
     };
     records.set(contextId, record);
+    pageInstanceToContextId.set(record.pageInstanceId, contextId);
+    heapPush({ expiresAt: record.expiresAt, contextId });
     petSend(COMPANION_BRIDGE_CHANNELS.petPageContext, {
       contextId,
       pageInstanceId,
@@ -144,14 +218,19 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
     const contextId = typeof input?.contextId === "string" ? input.contextId : "";
     const expectedRevision = typeof input?.expectedRevision === "string" ? input.expectedRevision : "";
     const record = records.get(contextId);
+    if (record && record.expiresAt < Date.now()) {
+      unregister(contextId, record);
+      return revoke ? { revoked: false } : { accepted: false, reasonCode: "expired" };
+    }
     if (!record) return revoke ? { revoked: false } : { accepted: false, reasonCode: "expired" };
     if (record.revision !== expectedRevision) return { accepted: false, reasonCode: "stale_context" };
     if (revoke) {
-      records.delete(contextId);
+      unregister(contextId, record);
       petSend(COMPANION_BRIDGE_CHANNELS.petPageContext, { contextId, revoked: true });
       return { revoked: true };
     }
     record.expiresAt = Date.now() + BRIDGE_CONTEXT_LEASE_MS;
+    heapPush({ expiresAt: record.expiresAt, contextId });
     return { accepted: true, revision: record.revision, expiresAt: new Date(record.expiresAt).toISOString() };
   };
   handle(COMPANION_BRIDGE_CHANNELS.mainRenewContext, (event, raw) => renewOrRevoke(event, raw, false));
@@ -170,7 +249,8 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
     const pageInstanceId = typeof body?.pageInstanceId === "string" ? body.pageInstanceId : "";
     const contextRevision = typeof body?.contextRevision === "string" ? body.contextRevision : "";
     const type = typeof body?.type === "string" ? body.type : "";
-    const record = [...records.values()].find((r) => r.pageInstanceId === pageInstanceId);
+    const contextId = pageInstanceToContextId.get(pageInstanceId);
+    const record = contextId ? records.get(contextId) : undefined;
     if (!record || record.revision !== contextRevision) {
       return { accepted: false, reasonCode: "stale_context" };
     }
@@ -217,9 +297,8 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
       }
       // §14.2：页内命令强制 freshness——target pageInstance 必须仍是当前
       // revision（旧 pageInstance/revision 一律拒绝）。
-      const record = [...records.values()].find(
-        (r) => r.pageInstanceId === envelope.targetPageInstanceId,
-      );
+      const targetContextId = pageInstanceToContextId.get(envelope.targetPageInstanceId);
+      const record = targetContextId ? records.get(targetContextId) : undefined;
       if (!record) return { accepted: false, reasonCode: "stale_context" };
       if (record.revision !== envelope.expectedContextRevision) {
         return { accepted: false, reasonCode: "stale_context" };
@@ -255,7 +334,11 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
     return { accepted: true };
   });
 
+  const sweepTimer = setInterval(sweepExpiredRecords, BRIDGE_CONTEXT_LEASE_MS);
+  sweepTimer.unref?.();
+
   return () => {
+    clearInterval(sweepTimer);
     for (const channel of Object.values(COMPANION_BRIDGE_CHANNELS)) {
       ipcMain.removeHandler(channel);
     }

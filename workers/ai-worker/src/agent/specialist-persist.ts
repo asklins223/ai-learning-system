@@ -420,7 +420,17 @@ export async function persistExtractionResults(
     candidatesByBundle.set(c.bundleId, group);
   }
 
-  // 写入候选 + 证据引用
+  // 写入候选 + 证据引用（批量，避免 N+1 顺序 DB round-trips）
+  // 先在内存中完成候选验证、构造待插入候选行与每候选的证据引用，
+  // 再用多行 VALUES 一次批量 INSERT 候选与证据。
+  interface InsertCandidateRow {
+    originalIndex: number;
+    localId: string;
+    row: Record<string, unknown>;
+    validEvidenceRefs: Array<{ refId: string; isTextSpan: boolean; isPrimary: boolean }>;
+  }
+  const insertCandidates: InsertCandidateRow[] = [];
+
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i]!;
     const localOrdinal = i + 1;
@@ -485,80 +495,107 @@ export async function persistExtractionResults(
       continue; // 跳过此候选，不插入 DB
     }
 
-    // 插入候选（使用 .returning() 获取 DB 生成的 ID）
-    const [inserted] = await db.insert(schema.cardGenerationCandidates).values({
-      workspaceId,
-      runId,
-      unitId: agentUnitId,
-      localOrdinal,
+    insertCandidates.push({
+      originalIndex: i,
       localId,
-      claim: c.claim,
-      normalizedClaimHash: createHash("sha256").update(c.claim, "utf8").digest("hex"),
-      topic: c.topic,
-      sectionKey: resolvedSectionKey,
-      cognitiveType: c.cognitiveType,
-      importance: c.importance,
-      // P1-11: 持久化候选难度
-      difficulty: c.difficulty ?? null,
-      validationStatus: "pending",
-      relationHints: (c.relationHints as Record<string, unknown>[]) ?? [],
-      createdAt: now,
-      // P1-09: 强制写入 bundleId
-      bundleId: c.bundleId,
-    } as any).onConflictDoNothing().returning();
+      row: {
+        workspaceId,
+        runId,
+        unitId: agentUnitId,
+        localOrdinal,
+        localId,
+        claim: c.claim,
+        normalizedClaimHash: createHash("sha256").update(c.claim, "utf8").digest("hex"),
+        topic: c.topic,
+        sectionKey: resolvedSectionKey,
+        cognitiveType: c.cognitiveType,
+        importance: c.importance,
+        // P1-11: 持久化候选难度
+        difficulty: c.difficulty ?? null,
+        validationStatus: "pending",
+        relationHints: (c.relationHints as Record<string, unknown>[]) ?? [],
+        createdAt: now,
+        // P1-09: 强制写入 bundleId
+        bundleId: c.bundleId,
+      },
+      validEvidenceRefs,
+    });
+  }
 
-    // 获取候选 ID（新插入或幂等命中已存在的）
-    let candidateDbId: string | null = inserted?.id ?? null;
-    if (!candidateDbId) {
-      // 幂等命中：查询已有候选的 ID
-      const [existing] = await db
-        .select({ id: schema.cardGenerationCandidates.id })
+  // 批量 INSERT 候选（多行 VALUES + onConflictDoNothing），一次 round-trip
+  const candidateDbIds = new Map<string, string>(); // localId -> candidate DB id
+  if (insertCandidates.length > 0) {
+    const insertedRows = await db
+      .insert(schema.cardGenerationCandidates)
+      .values(insertCandidates.map((ic) => ic.row) as any[])
+      .onConflictDoNothing()
+      .returning({ localId: schema.cardGenerationCandidates.localId, id: schema.cardGenerationCandidates.id });
+
+    for (const r of insertedRows) {
+      candidateDbIds.set(r.localId, r.id);
+    }
+
+    // 幂等命中（onConflictDoNothing 不返回冲突行）的 localId 一次性批量查询已有 ID
+    const missingLocalIds = insertCandidates
+      .filter((ic) => !candidateDbIds.has(ic.localId))
+      .map((ic) => ic.localId);
+    if (missingLocalIds.length > 0) {
+      const existingRows = await db
+        .select({
+          id: schema.cardGenerationCandidates.id,
+          localId: schema.cardGenerationCandidates.localId,
+        })
         .from(schema.cardGenerationCandidates)
         .where(and(
           eq(schema.cardGenerationCandidates.workspaceId, workspaceId),
           eq(schema.cardGenerationCandidates.runId, runId),
           eq(schema.cardGenerationCandidates.unitId, agentUnitId),
-          eq(schema.cardGenerationCandidates.localId, localId),
-        ))
-        .limit(1);
-      candidateDbId = existing?.id ?? null;
-    }
-
-    // P1-09: 使用预加载的 per-bundle evidence 集合持久化候选的证据引用。
-    // 已在上面验证了每个 evidenceRefId 属于候选的所属 bundle。
-    if (candidateDbId && validEvidenceRefs.length > 0) {
-      for (let ei = 0; ei < validEvidenceRefs.length; ei++) {
-        const evRef = validEvidenceRefs[ei]!;
-
-        if (evRef.isTextSpan) {
-          await db.insert(schema.cardGenerationCandidateEvidence).values({
-            workspaceId,
-            runId,
-            noteVersionId,
-            candidateId: candidateDbId,
-            sourceKind: "text_span",
-            evidenceSpanId: evRef.refId,
-            ordinal: ei,
-            sourceVerificationStatus: "verified",
-            sourceVerificationMethod: "exact_span_hash",
-            createdAt: now,
-          }).onConflictDoNothing();
-        } else {
-          await db.insert(schema.cardGenerationCandidateEvidence).values({
-            workspaceId,
-            runId,
-            noteVersionId,
-            candidateId: candidateDbId,
-            sourceKind: "image_evidence",
-            imageEvidenceUnitId: evRef.refId,
-            ordinal: ei,
-            sourceVerificationStatus: "verified",
-            sourceVerificationMethod: "image_region_hash",
-            createdAt: now,
-          }).onConflictDoNothing();
-        }
+          inArray(schema.cardGenerationCandidates.localId, missingLocalIds),
+        ));
+      for (const r of existingRows) {
+        candidateDbIds.set(r.localId, r.id);
       }
     }
+  }
+
+  // 批量 INSERT 全部证据引用（多行 VALUES + onConflictDoNothing），一次 round-trip
+  const evidenceRows: Array<Record<string, unknown>> = [];
+  for (const ic of insertCandidates) {
+    const candidateDbId = candidateDbIds.get(ic.localId) ?? null;
+    if (!candidateDbId || ic.validEvidenceRefs.length === 0) continue;
+    for (let ei = 0; ei < ic.validEvidenceRefs.length; ei++) {
+      const evRef = ic.validEvidenceRefs[ei]!;
+      if (evRef.isTextSpan) {
+        evidenceRows.push({
+          workspaceId,
+          runId,
+          noteVersionId,
+          candidateId: candidateDbId,
+          sourceKind: "text_span",
+          evidenceSpanId: evRef.refId,
+          ordinal: ei,
+          sourceVerificationStatus: "verified",
+          sourceVerificationMethod: "exact_span_hash",
+          createdAt: now,
+        });
+      } else {
+        evidenceRows.push({
+          workspaceId,
+          runId,
+          noteVersionId,
+          candidateId: candidateDbId,
+          sourceKind: "image_evidence",
+          imageEvidenceUnitId: evRef.refId,
+          ordinal: ei,
+          sourceVerificationStatus: "verified",
+          sourceVerificationMethod: "image_region_hash",
+          createdAt: now,
+        });
+      }
+    }
+  }
+  if (evidenceRows.length > 0) {
+    await db.insert(schema.cardGenerationCandidateEvidence).values(evidenceRows as any[]).onConflictDoNothing();
   }
 
   // P1-09 修复：按 bundleId 逐个更新 bundle 的 decision status 和 candidate count。
@@ -570,49 +607,54 @@ export async function persistExtractionResults(
     bundleCandidateCounts.set(c.bundleId, (bundleCandidateCounts.get(c.bundleId) ?? 0) + 1);
   }
 
-  // 更新 no-candidate bundles 的 decision status
+  // 更新 no-candidate bundles 的 decision status（批量 UPDATE，避免每 bundle 一次 round-trip）
   // QUAL-33 修复：同时持久化 candidateCount=0
   // 矛盾保护：如果某个 bundle 已产生候选，则其 noCandidate 决策与之矛盾，
   // 以候选为准（模型可能在同一 bundle 内把个别证据判为 decorative，但仍提取了候选）。
   // 原实现在候选循环之前无条件应用 noCandidate，导致「既有候选又有 noCandidate」的
   // bundle 被覆盖为 no_learnable_fact + candidateCount=0，与已持久化的候选矛盾，
   // 进而 candidateSurvivalCoverage 计算为 0、发布门禁 coverage_insufficient 失败。
-  for (const nc of noCandidates) {
-    const hasCandidates = (bundleCandidateCounts.get(nc.bundleId) ?? 0) > 0;
-    if (hasCandidates) continue;
-    await db.update(schema.cardGenerationSourceBundles).set({
-      decisionStatus: "no_learnable_fact",
-      decisionReason: nc.reason,
-      candidateCount: 0,
-      decidedAt: now,
-      updatedAt: now,
-    }).where(and(
-      eq(schema.cardGenerationSourceBundles.workspaceId, workspaceId),
-      eq(schema.cardGenerationSourceBundles.runId, runId),
-      eq(schema.cardGenerationSourceBundles.bundleKey, nc.bundleId),
-    ));
+  const noCandidateZero = noCandidates.filter((nc) => (bundleCandidateCounts.get(nc.bundleId) ?? 0) === 0);
+  if (noCandidateZero.length > 0) {
+    await db.execute(sql`
+      UPDATE card_generation_source_bundles AS b
+      SET decision_status = 'no_learnable_fact',
+          decision_reason = v.reason,
+          candidate_count = 0,
+          decided_at = ${now},
+          updated_at = ${now}
+      FROM (VALUES
+        ${sql.join(noCandidateZero.map((nc) => sql`(${nc.bundleId}, ${nc.reason})`), sql`, `)}
+      ) AS v(bundle_key, reason)
+      WHERE b.bundle_key = v.bundle_key
+        AND b.workspace_id = ${workspaceId}
+        AND b.run_id = ${runId}
+    `);
   }
 
-  for (const bundleId of assignedBundleIds) {
-    // 只要有候选，就标记为 candidate_emitted——即使该 bundle 也出现在 noCandidate 中
-    // （模型矛盾输出：既提取候选又判 noCandidate）。候选优先；无候选的 bundle 已由
-    // 上面的 noCandidate 循环标记为 no_learnable_fact。若在此处仍跳过 noCandidate 里的
-    // bundle，会导致「既有候选又有 noCandidate」的 bundle 停留在 pending、
-    // candidate_count=0，validate_draft 报 coverage_decision_incomplete。
-    const count = bundleCandidateCounts.get(bundleId) ?? 0;
-    if (count > 0) {
-      await db.update(schema.cardGenerationSourceBundles).set({
-        decisionStatus: "candidate_emitted",
-        decisionReason: `extracted ${count} candidates`,
-        candidateCount: count,
-        decidedAt: now,
-        updatedAt: now,
-      }).where(and(
-        eq(schema.cardGenerationSourceBundles.workspaceId, workspaceId),
-        eq(schema.cardGenerationSourceBundles.runId, runId),
-        eq(schema.cardGenerationSourceBundles.bundleKey, bundleId),
-      ));
-    }
+  // 只要有候选，就标记为 candidate_emitted（批量 UPDATE）——即使该 bundle 也出现在 noCandidate 中
+  // （模型矛盾输出：既提取候选又判 noCandidate）。候选优先；无候选的 bundle 已由
+  // 上面的 noCandidate 循环标记为 no_learnable_fact。若在此处仍跳过 noCandidate 里的
+  // bundle，会导致「既有候选又有 noCandidate」的 bundle 停留在 pending、
+  // candidate_count=0，validate_draft 报 coverage_decision_incomplete。
+  const candidateEmitted = assignedBundleIds
+    .map((bundleId) => ({ bundleId, count: bundleCandidateCounts.get(bundleId) ?? 0 }))
+    .filter((e) => e.count > 0);
+  if (candidateEmitted.length > 0) {
+    await db.execute(sql`
+      UPDATE card_generation_source_bundles AS b
+      SET decision_status = 'candidate_emitted',
+          decision_reason = 'extracted ' || v.count || ' candidates',
+          candidate_count = v.count,
+          decided_at = ${now},
+          updated_at = ${now}
+      FROM (VALUES
+        ${sql.join(candidateEmitted.map((e) => sql`(${e.bundleId}, ${e.count})`), sql`, `)}
+      ) AS v(bundle_key, count)
+      WHERE b.bundle_key = v.bundle_key
+        AND b.workspace_id = ${workspaceId}
+        AND b.run_id = ${runId}
+    `);
   }
 
   // P1-09 修复：覆盖率只从 DB 关系重算，禁止信任模型声明或内存累计值。
@@ -717,6 +759,16 @@ export async function persistRepairPatches(
   const cards = Array.isArray(baseContent.cards)
     ? [...(baseContent.cards as Record<string, unknown>[])]
     : [];
+  // 预建 draftCardId/localId -> 卡片索引映射，避免每个 patch 内 findIndex（O(patches×cards)）
+  const cardIndexById = new Map<string, number>();
+  cards.forEach((c, i) => {
+    if (c.draftCardId !== undefined && c.draftCardId !== null) cardIndexById.set(String(c.draftCardId), i);
+    if (c.localId !== undefined && c.localId !== null) cardIndexById.set(String(c.localId), i);
+  });
+  const findCardIndex = (id: string): number => cardIndexById.get(id) ?? -1;
+  // 收集 rewrite_claim 的候选 claim 更新，循环后批量 UPDATE（避免每 patch 一次 round-trip）
+  interface RewriteClaimUpdate { candidateId: string; newClaim: string; normalizedClaimHash: string }
+  const rewriteClaimUpdates: RewriteClaimUpdate[] = [];
 
   for (const patch of patches) {
     // 2026-08-11：版本校验落地——patch.baseDraftHash 与当前 base draft 的
@@ -740,12 +792,7 @@ export async function persistRepairPatches(
     // 其自身索引的字符串形式。对于 auto-assigned cards（draftCardId = "card-N"），
     // 该条件始终为 true，导致任何不匹配的 cardDraftId 都会错误匹配到第一个 card。
     // 修复后：只匹配 draftCardId 和 localId，与 handleApplyDraftPatch 一致。
-    const cardIndex = cardDraftId
-      ? cards.findIndex((c) =>
-          c.draftCardId === cardDraftId
-          || c.localId === cardDraftId,
-        )
-      : -1;
+    const cardIndex = cardDraftId ? findCardIndex(cardDraftId) : -1;
 
     switch (patch.type) {
       case "rewrite_claim":
@@ -756,14 +803,11 @@ export async function persistRepairPatches(
         // 重新审查时同一 hard issue 再次出现 → 修复失败。
         // 现在直接更新候选 claim（含 normalizedClaimHash），发布时卡片 key point 使用新 claim。
         if (patch.candidateId && patch.newClaim) {
-          await db.update(schema.cardGenerationCandidates).set({
-            claim: patch.newClaim,
+          rewriteClaimUpdates.push({
+            candidateId: patch.candidateId,
+            newClaim: patch.newClaim,
             normalizedClaimHash: createHash("sha256").update(patch.newClaim, "utf8").digest("hex"),
-          }).where(and(
-            eq(schema.cardGenerationCandidates.workspaceId, workspaceId),
-            eq(schema.cardGenerationCandidates.runId, runId),
-            eq(schema.cardGenerationCandidates.id, patch.candidateId),
-          ));
+          });
           logger.info(
             { runId, candidateId: patch.candidateId },
             "rewrite_claim patch 已应用到候选 claim",
@@ -809,10 +853,7 @@ export async function persistRepairPatches(
         // R71 修复：与 deck-draft.ts 的 handleApplyDraftPatch (R64 修复) 保持一致，
         // 移除有 bug 的第三条件，原因同 R70。
         if (patch.targetCardDraftId) {
-          const targetCardIndex = cards.findIndex((c) =>
-            c.draftCardId === patch.targetCardDraftId ||
-            c.localId === patch.targetCardDraftId,
-          );
+          const targetCardIndex = findCardIndex(patch.targetCardDraftId);
           if (targetCardIndex >= 0 && candidateId) {
             const targetCard = cards[targetCardIndex]!;
             const targetCandidateIds = Array.isArray(targetCard.candidateIds) ? targetCard.candidateIds as string[] : [];
@@ -871,6 +912,21 @@ export async function persistRepairPatches(
   // 缺少 patch 溯源信息，与通过 apply_draft_patch 工具创建的 Draft 不一致。
   // R69 修复：与 deck-draft.ts 的 handleApplyDraftPatch (R58 修复) 保持一致，
   // 收集 deferred 候选操作到 patchedContent.deferredCandidateOperations。
+  // 批量应用 rewrite_claim 的候选 claim 更新（单次 round-trip，替代每 patch 一次 UPDATE）
+  if (rewriteClaimUpdates.length > 0) {
+    await db.execute(sql`
+      UPDATE card_generation_candidates AS c
+      SET claim = v.new_claim,
+          normalized_claim_hash = v.normalized_claim_hash
+      FROM (VALUES
+        ${sql.join(rewriteClaimUpdates.map((u) => sql`(${u.candidateId}, ${u.newClaim}, ${u.normalizedClaimHash})`), sql`, `)}
+      ) AS v(candidate_id, new_claim, normalized_claim_hash)
+      WHERE c.id = v.candidate_id
+        AND c.workspace_id = ${workspaceId}
+        AND c.run_id = ${runId}
+    `);
+  }
+
   // rewrite_claim 已在上方直接应用到候选，不再 defer，避免重复处理。
   const deferredOps = patches.filter((p) =>
     p.type === "remove_evidence"
@@ -1184,60 +1240,84 @@ export async function reconcileStuckSupervisors(
         notInArray(schema.cardGenerationRuns.status, [...TERMINAL_RUN_STATUSES]),
       ));
 
-    for (const parent of waitingParents) {
-      // 检查所有 children 是否终态
-      const children = await db
-        .select({
-          id: schema.cardGenerationUnits.id,
-          status: schema.cardGenerationUnits.status,
-        })
-        .from(schema.cardGenerationUnits)
-        .where(and(
-          eq(schema.cardGenerationUnits.parentUnitId, parent.id),
-          eq(schema.cardGenerationUnits.workspaceId, parent.workspaceId),
-          eq(schema.cardGenerationUnits.runId, parent.runId),
-        ));
+    // PERF: 一次性批量加载所有 waiting_child parent 的 children，避免逐 parent
+    // 一次 SELECT（N+1）。children 以 parentUnitId 唯一归属到父 unit。
+    const waitingParentIds = waitingParents.map((p) => p.id);
+    const allChildren = waitingParentIds.length > 0
+      ? await db
+          .select({
+            id: schema.cardGenerationUnits.id,
+            status: schema.cardGenerationUnits.status,
+            parentUnitId: schema.cardGenerationUnits.parentUnitId,
+          })
+          .from(schema.cardGenerationUnits)
+          .where(inArray(schema.cardGenerationUnits.parentUnitId, waitingParentIds))
+      : [];
+    const childrenByParent = new Map<string, Array<{ id: string; status: string }>>();
+    for (const c of allChildren) {
+      if (!c.parentUnitId) continue; // 查询已按 parentUnitId 过滤，防御性跳过
+      const arr = childrenByParent.get(c.parentUnitId);
+      if (arr) arr.push({ id: c.id, status: c.status });
+      else childrenByParent.set(c.parentUnitId, [{ id: c.id, status: c.status }]);
+    }
 
-      if (children.length === 0) continue;
+    // 包含 retryable_failed 在内的“需要恢复”状态
+    const needsResumeStatuses = new Set([
+      "succeeded", "terminal_failed", "retryable_failed", "cancelled", "superseded",
+    ]);
+    // 在内存中筛选：有 children 且全部终态 的 parent 才是可恢复候选。
+    const resumableParents = waitingParents.filter((parent) => {
+      const children = childrenByParent.get(parent.id) ?? [];
+      if (children.length === 0) return false;
+      return children.every((c) => needsResumeStatuses.has(c.status));
+    });
 
-      // 包含 retryable_failed 在内的“需要恢复”状态
-      const needsResumeStatuses = new Set([
-        "succeeded", "terminal_failed", "retryable_failed", "cancelled", "superseded",
-      ]);
-      const stillRunning = children.filter((c) => !needsResumeStatuses.has(c.status));
-      if (stillRunning.length > 0) continue;
+    // 批量检查是否已有 pending/running job（跨 workspace 对账读经 SECURITY
+    // DEFINER 函数；用 unnest 一次查询全部候选，替代逐 parent 一次 SELECT）。
+    const existingJobByUnitId = new Map<string, string>();
+    if (resumableParents.length > 0) {
+      // 显式 `{uuid,...}::uuid[]` 字面量（drizzle+postgres-js 数组参数序列化
+      // 不可靠，id 均来自本库 uuid 列，无逗号注入风险）。
+      const wsLiteral = `{${resumableParents.map((p) => p.workspaceId).join(",")}}`;
+      const runLiteral = `{${resumableParents.map((p) => p.runId).join(",")}}`;
+      const unitLiteral = `{${resumableParents.map((p) => p.id).join(",")}}`;
+      const activeRows = await db.execute<{ unit_id: string; job_id: string | null }>(sql`
+        SELECT u.unit_id, public.ailearn_find_active_turn_job(
+          u.workspace_id, u.run_id, u.unit_id
+        ) AS job_id
+        FROM unnest(
+          ${wsLiteral}::uuid[], ${runLiteral}::uuid[], ${unitLiteral}::uuid[]
+        ) AS u(workspace_id, run_id, unit_id)
+      `);
+      for (const row of activeRows) {
+        if (row.job_id) existingJobByUnitId.set(String(row.unit_id), String(row.job_id));
+      }
+    }
+    const toResume = resumableParents.filter((p) => !existingJobByUnitId.has(p.id));
 
-      // 检查是否已有 pending/running job（跨 workspace 对账读经 SECURITY DEFINER 函数）
-      const existingRows = await db.execute<{ id: string }>(sql`
-        SELECT public.ailearn_find_active_turn_job(
-          ${parent.workspaceId}, ${parent.runId}, ${parent.id}
-        ) AS id
-      `) as unknown as Array<{ id: string }>;
-      const existingJob = existingRows[0]?.id ? { id: existingRows[0].id } : undefined;
+    // 批量 CAS：waiting_child → running（单次 round-trip），并把 scheduledAt
+    // 一并写入（原实现先 CAS 再单独 UPDATE scheduledAt，两个 round-trip）。
+    const now = new Date();
+    const casUpdated = toResume.length > 0
+      ? await db
+          .update(schema.cardGenerationUnits)
+          .set({ status: "running", scheduledAt: now, updatedAt: now })
+          .where(and(
+            inArray(schema.cardGenerationUnits.id, toResume.map((p) => p.id)),
+            eq(schema.cardGenerationUnits.status, "waiting_child"),
+          ))
+          .returning({ id: schema.cardGenerationUnits.id })
+      : [];
+    const casUpdatedIds = new Set(casUpdated.map((u) => u.id));
 
-      if (existingJob) continue; // 已有 job，跳过
+    for (const parent of toResume) {
+      if (!casUpdatedIds.has(parent.id)) continue; // CAS 失败，状态已变
 
-      // 创建 resume job
+      // 创建 resume job（jobs RLS 重开：跨 workspace 对账写经 SECURITY DEFINER 函数）
       const parentCursor = (parent.cursorJson as Record<string, unknown> | null) ?? null;
       const parentTurnNo = parentCursor
         ? Number(parentCursor.turnNo ?? 0) + 1
         : 1;
-      const now = new Date();
-
-      // CAS: waiting_child → running
-      const [updated] = await db
-        .update(schema.cardGenerationUnits)
-        .set({ status: "running", updatedAt: now })
-        .where(and(
-          eq(schema.cardGenerationUnits.id, parent.id),
-          eq(schema.cardGenerationUnits.workspaceId, parent.workspaceId),
-          eq(schema.cardGenerationUnits.status, "waiting_child"),
-        ))
-        .returning({ id: schema.cardGenerationUnits.id });
-
-      if (!updated) continue; // CAS 失败，状态已变
-
-      // 创建 resume job（jobs RLS 重开：跨 workspace 对账写经 SECURITY DEFINER 函数）
       await db.execute(sql`
         SELECT public.ailearn_enqueue_agent_turn_job(
           ${parent.workspaceId}, NULL, ${parent.runId}, ${parent.id},
@@ -1255,16 +1335,9 @@ export async function reconcileStuckSupervisors(
         )
       `);
 
-      await db.update(schema.cardGenerationUnits)
-        .set({ scheduledAt: now, updatedAt: now })
-        .where(and(
-          eq(schema.cardGenerationUnits.id, parent.id),
-          eq(schema.cardGenerationUnits.workspaceId, parent.workspaceId),
-        ));
-
       resumedParents++;
       logger.info(
-        { runId: parent.runId, parentUnitId: parent.id, childCount: children.length },
+        { runId: parent.runId, parentUnitId: parent.id, childCount: childrenByParent.get(parent.id)?.length ?? 0 },
         "reconcileStuckSupervisors: 补投 resume job",
       );
     }

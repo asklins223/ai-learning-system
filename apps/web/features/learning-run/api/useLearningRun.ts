@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type {
   CreateLearningRunRequestV1,
+  CreateLearningRunRequestV2,
   LearningRunActionV1,
   LearningRunPublicV1,
   SubmitTaskArtifactV1,
@@ -41,6 +42,7 @@ export interface LearningRunHook {
   error: string | null;
   load: (runId: string) => Promise<void>;
   create: (input: CreateLearningRunRequestV1) => Promise<LearningRunPublicV1>;
+  createV2: (input: CreateLearningRunRequestV2) => Promise<{ runId: string; phase: "preparing" }>;
   dispatchAction: (action: LearningRunActionV1, idempotencyKey?: string) => Promise<void>;
   submit: (taskId: string, request: Omit<SubmitTaskArtifactV1, "runRevision" | "taskRevision" | "idempotencyKey">) => Promise<void>;
   saveDraft: (taskId: string, input: { variantId: string; variantRevision: number; taskRevision: number; expectedDraftRevision: number | null; payload: unknown; rendererState: unknown }) => Promise<number | null>;
@@ -198,6 +200,13 @@ export function useLearningRun(): LearningRunHook {
     }
   }, []);
 
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
   const startPolling = useCallback(() => {
     stopPolling();
     // F7：页面隐藏（切标签/后台）时跳过轮询，镜像 useGenerationPolling.ts，
@@ -206,14 +215,7 @@ export function useLearningRun(): LearningRunHook {
       if (document.visibilityState === "hidden") return;
       void refresh().catch(() => {});
     }, POLL_INTERVAL_MS);
-  }, [refresh]);
-
-  const stopPolling = useCallback(() => {
-    if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-  }, []);
+  }, [refresh, stopPolling]);
 
   const applySnapshot = useCallback((next: LearningRunPublicV1) => {
     // 浅等守卫（F#7-1）：与 applySnapshot 共用同一表面比较，CAS 字段未变即
@@ -354,6 +356,23 @@ export function useLearningRun(): LearningRunHook {
     return created;
   }, [applySnapshot, startStream, startPolling, startLease]);
 
+  const createV2 = useCallback(async (input: CreateLearningRunRequestV2): Promise<{ runId: string; phase: "preparing" }> => {
+    setStatus("loading");
+    setError(null);
+    try {
+      const created = await api.createLearningRunV2(input);
+      runIdRef.current = created.runId;
+      // V2 create 只返回 runId/snapshotId/target；完整 snapshot 由
+      // [runId] 页面 load() 获取，这里不启动轮询/SSE。
+      return { runId: created.runId, phase: "preparing" };
+    } catch (err) {
+      if (!mountedRef.current) throw err;
+      setStatus("error");
+      setError(err instanceof Error ? err.message : "创建本轮学习失败");
+      throw err;
+    }
+  }, []);
+
   const dispatchAction = useCallback(async (action: LearningRunActionV1, idempotencyKey?: string) => {
     const current = snapshotRef.current;
     if (!current) return;
@@ -441,6 +460,7 @@ export function useLearningRun(): LearningRunHook {
     error,
     load,
     create,
+    createV2,
     dispatchAction,
     submit,
     saveDraft,

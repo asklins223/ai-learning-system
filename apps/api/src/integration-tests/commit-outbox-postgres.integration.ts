@@ -59,9 +59,9 @@ async function seedCommitFixture() {
     await tx`INSERT INTO notes (id, workspace_id, title, created_by, created_at, updated_at, title_source, card_generation_epoch)
              VALUES (${noteId}, ${workspaceId}, 'note', ${userId}, now(), now(), 'placeholder', 0)`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, created_by, created_at, content_hash, updated_at)
-             VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify({ blocks: [] })}, ${userId}, now(), 'nh-1', now())`;
+             VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [] })}, ${userId}, now(), 'nh-1', now())`;
     await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json, created_at, updated_at)
-             VALUES (${cardId}, ${noteVersionId}, ${workspaceId}, 'active', ${JSON.stringify({ version: 1 })}, now(), now())`;
+             VALUES (${cardId}, ${noteVersionId}, ${workspaceId}, 'active', ${tx.json({ version: 1 })}, now(), now())`;
     await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text)
              VALUES (${keyPointId}, ${cardId}, ${workspaceId}, 1, 'claim', 'quote')`;
     await tx`INSERT INTO learning_sessions (id, workspace_id, user_id, origin, origin_ref, intent, status, created_at, updated_at)
@@ -141,7 +141,7 @@ async function seedCommitFixture() {
     // companion account：默认开启 + active presence 档（committed_change_display
     // 的 allowedPresenceLevels=["moderate","active"] 允许）。
     await tx`INSERT INTO user_companion_account_state (id, user_id, revision, epoch, global_enabled, presence)
-             VALUES (${randomUUID()}, ${userId}, 1, 1, true, ${JSON.stringify({ presence: "active" })})`;
+             VALUES (${randomUUID()}, ${userId}, 1, 1, true, ${tx.json({ presence: "active" })})`;
     // commit_requested 入队（模拟 worker persist 后的同事务写入）
     await tx`INSERT INTO learning_session_processing_outbox (
                workspace_id, user_id, session_id, episode_id, command_type,

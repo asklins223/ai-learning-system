@@ -194,6 +194,11 @@ export async function listSources(
       );
     }
   }
+  // PERF: The total count and the note-count GROUP BY are both independent of
+  // each other once the page rows (and their source ids) are known, so run them
+  // concurrently — reducing the source list from 3 sequential DB round-trips to
+  // 2. The page query runs first so a malformed page row (missing cursor) still
+  // fails closed before any count query issues.
   const sourceRows = await executor.query.sources.findMany({
     where: and(...conditions),
     orderBy: [desc(sources.createdAt), desc(sources.id)],
@@ -212,34 +217,35 @@ export async function listSources(
     return source;
   });
 
-  // 批量查询每条来源的关联笔记数量，避免 N+1
+  // 批量查询每条来源的关联笔记数量，避免 N+1 —— 与总数查询并行（2 RTT 而非 3）。
   const sourceIds = items.map((s) => s.id);
-  const noteCountRows = sourceIds.length > 0
-    ? await executor
-        .select({
-          sourceId: notes.sourceId,
-          count: sql<number>`count(*)::int`,
-        })
-        .from(notes)
-        .where(and(
-          inArray(notes.sourceId, sourceIds),
-          eq(notes.workspaceId, workspaceId),
-          isNull(notes.deletedAt),
-        ))
-        .groupBy(notes.sourceId)
-    : [];
+  const [countRows, noteCountRows] = await Promise.all([
+    executor
+      .select({ count: sql<number>`count(*)::int` })
+      .from(sources)
+      .where(where),
+    sourceIds.length > 0
+      ? executor
+          .select({
+            sourceId: notes.sourceId,
+            count: sql<number>`count(*)::int`,
+          })
+          .from(notes)
+          .where(and(
+            inArray(notes.sourceId, sourceIds),
+            eq(notes.workspaceId, workspaceId),
+            isNull(notes.deletedAt),
+          ))
+          .groupBy(notes.sourceId)
+      : Promise.resolve([]),
+  ]);
+  const total = countRows[0]?.count ?? 0;
   const noteCountMap = new Map(noteCountRows.map((r) => [r.sourceId!, r.count]));
   const itemsWithCounts = items.map((s) => ({
     ...s,
     noteCount: noteCountMap.get(s.id) ?? 0,
   }));
 
-  // R-019: 服务端返回实际总数
-  const countRows = await executor
-    .select({ count: sql<number>`count(*)::int` })
-    .from(sources)
-    .where(where);
-  const total = countRows[0]?.count ?? 0;
   // R-019: 使用最后一条记录的 (createdAt, id) 作为下一页 cursor
   const lastItem = itemsWithCursor[itemsWithCursor.length - 1];
   const nextCursor = hasMore && lastItem
@@ -460,11 +466,12 @@ export async function createNoteFromSource(
   // 说明来源内容未变，重复创建会生成完全相同的笔记。
   // force=true 时跳过此检查（用户明确确认要再创建一篇）。
   if (!opts?.force) {
-    const existingNotes = await executor
+    // PERF: push the content-hash match into SQL with LIMIT 1 so we never load
+    // every non-deleted note of a source into memory just to find one hash match.
+    const [duplicate] = await executor
       .select({
         noteId: notes.id,
         noteTitle: notes.title,
-        versionHash: noteVersions.contentHash,
       })
       .from(notes)
       .innerJoin(noteVersions, eq(notes.currentVersionId, noteVersions.id))
@@ -472,9 +479,10 @@ export async function createNoteFromSource(
         eq(notes.sourceId, sourceId),
         eq(notes.workspaceId, workspaceId),
         isNull(notes.deletedAt),
-      ));
+        eq(noteVersions.contentHash, newContentHash),
+      ))
+      .limit(1);
 
-    const duplicate = existingNotes.find((n) => n.versionHash === newContentHash);
     if (duplicate) {
       return {
         error: "duplicate_content" as const,

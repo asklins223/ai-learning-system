@@ -19,7 +19,12 @@ export const sources = pgTable(
   },
   (t) => ({
     workspaceIdx: index("sources_workspace_idx").on(t.workspaceId),
-  }),
+    // 2026-08-12（generate 对齐）：0153 定义 (workspace_id, updated_at DESC)，
+    // 支撑 listSources 按 updated_at DESC + id 排序走索引，避免 workspace 分区内 Sort。
+    workspaceUpdatedIdx: index("sources_workspace_updated_idx")
+      .on(t.workspaceId, sql`${t.updatedAt} desc`),
+
+    idWorkspaceUnique: uniqueIndex("sources_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
 export const sourceSegments = pgTable(
@@ -61,6 +66,14 @@ export const notes = pgTable(
     sourceIdx: index("notes_source_idx").on(t.sourceId),
     // 查询 deleted_at IS NULL 时使用部分索引
     activeNotesIdx: index("notes_active_idx").on(t.workspaceId).where(sql`${t.deletedAt} IS NULL`),
+    // 2026-08-12（schema 完整性审计）：0114 列表排序索引（workspace + updated_at DESC）
+    activeUpdatedIdx: index("notes_active_updated_idx")
+      .on(t.workspaceId, sql`${t.updatedAt} desc`)
+      .where(sql`${t.deletedAt} IS NULL`),
+    // 2026-08-12（schema 完整性审计）：0044:17 租户安全复合唯一此前未声明
+    workspaceIdUniqueIdx: uniqueIndex("notes_workspace_id_unique_idx").on(t.workspaceId, t.id),
+    // 2026-08-12（generate 对齐）：0011 N-007 (id, workspace_id) 复合唯一
+    idWorkspaceUnique: uniqueIndex("notes_id_workspace_unique").on(t.id, t.workspaceId),
   }),
 );
 
@@ -84,6 +97,13 @@ export const noteVersions = pgTable(
     noteIdx: index("note_versions_note_idx").on(t.noteId, t.versionNo),
     uniqueNoteVersion: uniqueIndex("note_versions_unique_idx").on(t.noteId, t.versionNo),
     contentHashIdx: index("note_versions_content_hash_idx").on(t.noteId, t.contentHash),
+    // 2026-08-12（schema 完整性审计）：0044:19 租户安全复合唯一此前未声明
+    workspaceNoteIdIdUniqueIdx: uniqueIndex("note_versions_workspace_note_id_id_unique_idx")
+      .on(t.workspaceId, t.noteId, t.id),
+    // 2026-08-12（generate 对齐）：0011 N-007 (id, workspace_id) 复合唯一
+    idWorkspaceUnique: uniqueIndex("note_versions_id_workspace_unique").on(t.id, t.workspaceId),
+    // 2026-08-12（generate 对齐）：0044 (workspace_id, id) 复合唯一
+    workspaceIdUniqueIdx: uniqueIndex("note_versions_workspace_id_unique_idx").on(t.workspaceId, t.id),
   }),
 );
 
@@ -119,6 +139,9 @@ export const noteImageAssets = pgTable(
       .on(t.workspaceId, t.sha256),
     noteIdx: index("note_image_assets_note_idx")
       .on(t.workspaceId, t.uploadedForNoteId, t.createdAt),
+    // 2026-08-12（schema 完整性审计）：0114 (workspace_id, status) 查询索引
+    workspaceStatusIdx: index("note_image_assets_workspace_status_idx")
+      .on(t.workspaceId, t.status),
   }),
 );
 
@@ -138,5 +161,7 @@ export const noteBlocks = pgTable(
   (t) => ({
     versionIdx: index("note_blocks_version_idx").on(t.versionId, t.ordinal),
     imageAssetIdx: index("note_blocks_image_asset_idx").on(t.workspaceId, t.imageAssetId),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("note_blocks_id_workspace_unique").on(t.id, t.workspaceId),
+    workspaceVersionIdUnique: uniqueIndex("note_blocks_workspace_version_id_unique_idx").on(t.workspaceId, t.versionId, t.id),}),
 );

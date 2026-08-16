@@ -262,6 +262,66 @@ export async function insertDomainEvent(
   return eventId;
 }
 
+/**
+ * §17.7 批量领域事件（同一事务内一次多行 INSERT）。
+ * 与 insertDomainEvent 语义一致：每个事件独立 sanitize + 计算 payloadHash +
+ * 生成 eventId，但合并为单次 DB round-trip。幂等 key 由调用方保证互异。
+ */
+export async function insertDomainEvents(
+  tx: ApiTransaction,
+  workspaceId: string,
+  inputs: Array<{
+    eventType: "learning_objective.revised"
+      | "learning_objective.superseded"
+      | "learning_objective.archived"
+      | "learning_card.revised"
+      | "learning_card.revealed"
+      | "learning_card.archived"
+      | "initial_validation_reminder.created"
+      | "initial_validation_reminder.deferred"
+      | "initial_validation_reminder.ready"
+      | "initial_validation_reminder.completed"
+      | "initial_validation_reminder.cancelled";
+    aggregateKind: "objective" | "card" | "reminder";
+    aggregateId: string;
+    aggregateRevision?: number;
+    payload?: Record<string, unknown>;
+    causationId?: string;
+    correlationId?: string;
+    idempotencyKey?: string;
+  }>,
+): Promise<string[]> {
+  if (inputs.length === 0) return [];
+  const eventIds = inputs.map(() => randomUUID());
+  const rows = inputs.map((input, i) => {
+    const eventId = eventIds[i];
+    const sanitized = sanitizeEventPayloadV2(input.payload ?? {});
+    const payloadHash = hashCanonicalV2("card-domain-event-v2", {
+      eventType: input.eventType,
+      aggregateKind: input.aggregateKind,
+      aggregateId: input.aggregateId,
+      aggregateRevision: input.aggregateRevision ?? null,
+      payload: sanitized,
+    });
+    return {
+      workspaceId,
+      eventId,
+      eventType: input.eventType,
+      aggregateKind: input.aggregateKind,
+      aggregateId: input.aggregateId,
+      aggregateRevision: input.aggregateRevision ?? null,
+      payload: sanitized,
+      payloadHash,
+      causationId: input.causationId,
+      correlationId: input.correlationId,
+      idempotencyKey: input.idempotencyKey,
+      schemaVersion: 2,
+    };
+  });
+  await tx.insert(cardDomainEventsV2).values(rows);
+  return eventIds;
+}
+
 export function applyPatch(
   target: Record<string, unknown>,
   patch: Record<string, unknown>,

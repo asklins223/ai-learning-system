@@ -824,7 +824,8 @@ const existingObjRows = (await tx.execute(sql`
       ...c,
       evidenceSetHash: sealed.evidenceSetHash,
     }));
-    for (const candidate of candidates) {
+    if (candidates.length > 0) {
+      // 批量 INSERT 全部候选（多行 VALUES），避免每候选一次 round-trip
       await tx.execute(sql`
         INSERT INTO public.card_generation_candidates_v2
           (id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
@@ -832,7 +833,7 @@ const existingObjRows = (await tx.execute(sql`
            plan_objective_local_id, recommendation, derived_from,
            objective_draft, presentation_draft, evidence_set_hash,
            candidate_revision_hash, quality_state, review_decision, publish_state)
-        VALUES (
+        VALUES ${sql.join(candidates.map((candidate) => sql`(
           ${randomUUID()}, ${workspaceId}, ${runId},
           ${candidate.candidateId}, ${candidate.candidateRevisionId}, ${candidate.revision},
           ${candidate.planRevisionId}, ${candidate.planVersion}, ${candidate.planHash},
@@ -844,12 +845,16 @@ const existingObjRows = (await tx.execute(sql`
           ${candidate.evidenceSetHash},
           ${candidate.candidateRevisionHash},
           'authored', 'undecided', 'unpublished'
-        )
+        )`), sql`, `)}
       `);
-      await insertEvent(tx, workspaceId, runId, "card_candidate.authored", {
-        candidateId: candidate.candidateId,
-        candidateRevisionId: candidate.candidateRevisionId,
-      });
+      // 批量写入 authored 事件（一次 MAX + 一次多行 INSERT）
+      await insertEventsBatched(tx, workspaceId, runId, candidates.map((candidate) => ({
+        eventType: "card_candidate.authored",
+        payload: {
+          candidateId: candidate.candidateId,
+          candidateRevisionId: candidate.candidateRevisionId,
+        },
+      })));
     }
 
     // 11. Update run status to checking
@@ -904,6 +909,13 @@ async function critiqueAndFinalizeCandidates(
     const groundingContractReports: Record<string, Awaited<ReturnType<typeof runGroundingCritic>>> = {};
     const bindingPlanHashesByRevision: Record<string, string> = {};
     const passedCandidates: LearningCardCandidateRevisionV2[] = [];
+    // 批量写：候选状态更新与 grounding 事件在循环内累积，循环后一次性 flush
+    const candidateStatusUpdates: Array<{
+      candidateRevisionId: string;
+      newQualityState: string;
+      bindingPlanHash: string | null;
+    }> = [];
+    const groundingEvents: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
 
     for (const candidate of candidates) {
       // 12.1 deterministic precheck（补充信号）
@@ -1001,29 +1013,42 @@ async function critiqueAndFinalizeCandidates(
       const groundingPassed = qualityReport.verdict === "passed" && bindingPlanHash !== null;
       if (groundingPassed && bindingPlanHash) bindingPlanHashesByRevision[candidate.candidateRevisionId] = bindingPlanHash;
 
-      // 12.3 candidate 状态更新 + events
+      // 12.3 candidate 状态更新 + events（累积，循环后批量 flush）
       const newQualityState = groundingPassed ? "passed" : "failed";
-      await tx.execute(sql`
-        UPDATE public.card_generation_candidates_v2
-        SET quality_state = ${newQualityState}, updated_at = now(),
-            evidence_binding_plan_hash = ${bindingPlanHash}
-        WHERE candidate_revision_id = ${candidate.candidateRevisionId}
-          AND workspace_id = ${workspaceId}
-      `);
-
-      if (groundingPassed) {
-        await insertEvent(tx, workspaceId, runId, "card_candidate.grounding_passed", {
-          candidateId: candidate.candidateId,
-          bindingPlanHash,
-        });
-      } else {
-        await insertEvent(tx, workspaceId, runId, "card_candidate.grounding_failed", {
-          candidateId: candidate.candidateId,
-          issues: qualityReport.issues,
-        });
-      }
+      candidateStatusUpdates.push({
+        candidateRevisionId: candidate.candidateRevisionId,
+        newQualityState,
+        bindingPlanHash,
+      });
+      groundingEvents.push(groundingPassed
+        ? {
+            eventType: "card_candidate.grounding_passed",
+            payload: { candidateId: candidate.candidateId, bindingPlanHash },
+          }
+        : {
+            eventType: "card_candidate.grounding_failed",
+            payload: { candidateId: candidate.candidateId, issues: qualityReport.issues },
+          });
 
       if (groundingPassed) passedCandidates.push(candidate);
+    }
+
+    // 批量 flush candidate 状态更新（单次 VALUES 更新）
+    if (candidateStatusUpdates.length > 0) {
+      await tx.execute(sql`
+        UPDATE public.card_generation_candidates_v2 AS c
+        SET quality_state = v.new_quality_state, updated_at = now(),
+            evidence_binding_plan_hash = v.binding_plan_hash
+        FROM (VALUES
+          ${sql.join(candidateStatusUpdates.map((u) => sql`(${u.candidateRevisionId}, ${u.newQualityState}, ${u.bindingPlanHash})`), sql`, `)}
+        ) AS v(candidate_revision_id, new_quality_state, binding_plan_hash)
+        WHERE c.candidate_revision_id = v.candidate_revision_id
+          AND c.workspace_id = ${workspaceId}
+      `);
+    }
+    // 批量写 grounding 事件（一次 MAX + 一次多行 INSERT）
+    if (groundingEvents.length > 0) {
+      await insertEventsBatched(tx, workspaceId, runId, groundingEvents);
     }
 
     // 13. 独立 Pedagogy Critic（set-level，输入含 bindingPlanHashes）
@@ -1115,25 +1140,41 @@ async function critiqueAndFinalizeCandidates(
       plan.result.kind === "author_candidates" ? plan.result.activationHardMax : 0,
     );
 
-    // 15. 持久化质量报告（card_candidate_quality_reports_v2，真实 reportHash）
-    for (const qr of qualityReports) {
-      if (typeof qr.reportHash === "string" && qr.reportHash.length === 64) {
-        await insertQualityReport(tx, workspaceId, runId, qr);
-      }
+    // 15. 持久化质量报告（card_candidate_quality_reports_v2，真实 reportHash，批量）
+    const reportsToInsert = qualityReports.filter(
+      (qr) => typeof qr.reportHash === "string" && qr.reportHash.length === 64,
+    );
+    if (reportsToInsert.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO public.card_candidate_quality_reports_v2
+          (id, workspace_id, run_id, candidate_revision_id, report_type, input_hash,
+           report, verdict, gate_version, report_hash)
+        VALUES ${sql.join(reportsToInsert.map((qr) => sql`(
+          ${randomUUID()}, ${workspaceId}, ${runId}, ${qr.candidateRevisionId},
+          ${qr.reportType}, ${qr.inputHash}, ${JSON.stringify(qr)}::jsonb,
+          ${qr.verdict}, ${qr.gateVersion}, ${qr.reportHash}
+        )`), sql`, `)}
+      `);
     }
 
-    // 15b. R35/§17.7：per-candidate pedagogy 事件（此前缺失生产者）
-    for (const c of afterRepair) {
+    // 15b. R35/§17.7：per-candidate pedagogy 事件（此前缺失生产者，批量写）
+    const pedagogyEvents = afterRepair.map((c) => {
       const pc = pedagogyReport?.perCandidate.find((p) => p.candidateId === c.candidateId);
       const pedagogyPassed = pc?.verdict === "keep"
         || (pc?.verdict === "rewrite" && repaired);
-      await insertEvent(tx, workspaceId, runId, pedagogyPassed
-        ? "card_candidate.pedagogy_passed"
-        : "card_candidate.pedagogy_failed", {
-        candidateId: c.candidateId,
-        candidateRevisionId: c.candidateRevisionId,
-        verdict: pc?.verdict ?? "unknown",
-      });
+      return {
+        eventType: pedagogyPassed
+          ? "card_candidate.pedagogy_passed"
+          : "card_candidate.pedagogy_failed",
+        payload: {
+          candidateId: c.candidateId,
+          candidateRevisionId: c.candidateRevisionId,
+          verdict: pc?.verdict ?? "unknown",
+        },
+      };
+    });
+    if (pedagogyEvents.length > 0) {
+      await insertEventsBatched(tx, workspaceId, runId, pedagogyEvents);
     }
 
     // 16. 终态判定
@@ -1178,13 +1219,14 @@ async function critiqueAndFinalizeCandidates(
       SET status = 'review_ready', updated_at = now()
       WHERE id = ${runId} AND workspace_id = ${workspaceId}
     `);
-    for (const candidate of survivors) {
-      await insertEvent(tx, workspaceId, runId, "card_candidate.review_ready", {
+    await insertEventsBatched(tx, workspaceId, runId, survivors.map((candidate) => ({
+      eventType: "card_candidate.review_ready",
+      payload: {
         candidateId: candidate.candidateId,
         candidateRevisionId: candidate.candidateRevisionId,
         candidateEvidenceBindingPlanHash: bindingPlanHashesByRevision[candidate.candidateRevisionId] ?? null,
-      });
-    }
+      },
+    })));
 }
 
 // ─── 公共加载器（regenerate/replan 复用）──────────────────────────────────
@@ -1793,21 +1835,32 @@ function stripReportHash(report: { reportHash: string }) {
   return rest;
 }
 
-async function insertQualityReport(
+/**
+ * 批量写入 V2 领域事件（一次 MAX + 一次多行 INSERT）。
+ * event_seq 在同一 (workspace, run) 内唯一且递增；批量写入时按插入顺序
+ * 顺序分配 seq，避免逐事件 MAX 查询 + INSERT 的 N+1 round-trip。
+ * 仅在事务内调用（调用方已持有 run 行锁/事务上下文）。
+ */
+async function insertEventsBatched(
   tx: WorkerTransaction,
   workspaceId: string,
   runId: string,
-  qr: QualityReportV2,
+  events: Array<{ eventType: string; payload: Record<string, unknown> }>,
 ): Promise<void> {
+  if (events.length === 0) return;
+  const rows = await tx.execute(sql`
+    SELECT COALESCE(MAX(event_seq), 0) AS max_seq
+    FROM public.card_generation_events_v2
+    WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+  `);
+  const base = Number(rows[0]?.max_seq ?? 0);
   await tx.execute(sql`
-    INSERT INTO public.card_candidate_quality_reports_v2
-      (id, workspace_id, run_id, candidate_revision_id, report_type, input_hash,
-       report, verdict, gate_version, report_hash)
-    VALUES (
-      ${randomUUID()}, ${workspaceId}, ${runId}, ${qr.candidateRevisionId},
-      ${qr.reportType}, ${qr.inputHash}, ${JSON.stringify(qr)}::jsonb,
-      ${qr.verdict}, ${qr.gateVersion}, ${qr.reportHash}
-    )
+    INSERT INTO public.card_generation_events_v2
+      (id, workspace_id, run_id, event_seq, event_type, payload, created_at)
+    VALUES ${sql.join(events.map((e, i) => sql`(
+      gen_random_uuid(), ${workspaceId}, ${runId}, ${base + i + 1},
+      ${e.eventType}, ${JSON.stringify(e.payload)}::jsonb, now()
+    )`), sql`, `)}
   `);
 }
 

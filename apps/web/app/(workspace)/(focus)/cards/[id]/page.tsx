@@ -70,7 +70,7 @@ const EMPTY_PAGER: PagerState = {
 // 定位结果（index/total/prev/next）60s 内复用；翻页只查一次。
 interface PagerLocateResult {
   pager: PagerState;
-  item: CardListItem;
+  item: CardListItem | null;
   nextReviewAt: string | null;
 }
 type PagerLocateOutcome =
@@ -96,6 +96,36 @@ async function locateCardInList(
   const cacheKey = `${workspaceKey}${cardId}`;
   const cached = pagerLocateCache.get(cacheKey);
   if (cached && Date.now() - cached.at < PAGER_LOCATE_TTL_MS) return cached.outcome;
+
+  // PERF: 优先用服务端单请求位置接口（index/prev/next/nextReviewAt），
+  // 避免首访逐页串行翻页瀑布。接口不可用（旧后端）时回退到翻页 walk。
+  try {
+    const pos = await api.getCardPosition(cardId);
+    const outcome: PagerLocateOutcome = {
+      kind: "located",
+      result: {
+        pager: {
+          index: pos.index,
+          total: Math.max(pos.total, 1),
+          previousId: pos.previousId,
+          nextId: pos.nextId,
+        },
+        // 位置接口不返回列表聚合项（validationCount 等）；下游 validationCount
+        // 会回退到 validationHistory.length，故此处置 null 是安全的。
+        item: null,
+        nextReviewAt: pos.nextReviewAt,
+      },
+    };
+    pagerLocateCache.set(cacheKey, { at: Date.now(), outcome });
+    while (pagerLocateCache.size > PAGER_LOCATE_MAX_ENTRIES) {
+      const oldest = pagerLocateCache.keys().next().value;
+      if (oldest === undefined) break;
+      pagerLocateCache.delete(oldest);
+    }
+    return outcome;
+  } catch {
+    // 旧后端/网络异常：回退到原有的分页 walk。
+  }
 
   let items: CardListItem[] = [];
   let cursor: string | undefined;

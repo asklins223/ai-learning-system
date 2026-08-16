@@ -640,7 +640,10 @@ async function recentPresentedPayloadHashes(
       eq(learningTaskPresentationHistory.userId, scope.userId),
       eq(learningTaskPresentationHistory.keyPointId, scope.keyPointId),
       gte(learningTaskPresentationHistory.presentedAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)),
-    ));
+    ))
+    // 热路径：只取最近一批用于展示去重（presentation-dedup 只需近端历史）。
+    .orderBy(desc(learningTaskPresentationHistory.presentedAt))
+    .limit(50);
   return new Set(rows.map((row) => row.publicPayloadHash));
 }
 export async function createRun(
@@ -818,6 +821,24 @@ export async function createRun(
     createdAt,
     updatedAt: createdAt,
   });
+  // PERF-A#13：在变体循环前一次性 IN 查询两个 variant 的 disclosure profile
+  // 存在性，避免每个 variant 在 PREPARE 热路径各加一次 SELECT 往返。
+  const disclosureHashes = Array.from(new Set(
+    [primaryVariant, alternativeVariant]
+      .map((v) => v.disclosureProfileHash)
+      .filter((h): h is string => Boolean(h)),
+  ));
+  const existingDisclosureHashes = new Set<string>();
+  if (disclosureHashes.length > 0) {
+    const existingDisclosureRows = await tx
+      .select({ profileHash: learningTaskDisclosureProfiles.profileHash })
+      .from(learningTaskDisclosureProfiles)
+      .where(and(
+        eq(learningTaskDisclosureProfiles.workspaceId, workspaceId),
+        inArray(learningTaskDisclosureProfiles.profileHash, disclosureHashes),
+      ));
+    for (const r of existingDisclosureRows) existingDisclosureHashes.add(r.profileHash);
+  }
   for (const [index, variant] of [primaryVariant, alternativeVariant].entries()) {
     const closure = plan.closures[variant.variantId];
     await tx.insert(learningTaskVariants).values({
@@ -874,15 +895,8 @@ export async function createRun(
     });
     // disclosure profile：同 (workspace, profileHash) 幂等复用（同一目标的
     // 确定性变体重建不得撞 hash 唯一约束——23505 修复）。
-    const existingDisclosure = await tx
-      .select({ id: learningTaskDisclosureProfiles.id })
-      .from(learningTaskDisclosureProfiles)
-      .where(and(
-        eq(learningTaskDisclosureProfiles.workspaceId, workspaceId),
-        eq(learningTaskDisclosureProfiles.profileHash, variant.disclosureProfileHash),
-      ))
-      .limit(1);
-    if (!existingDisclosure[0]) {
+    // PERF-A#13：存在性已由循环前一次 IN 查询预载，无需每 variant SELECT。
+    if (!existingDisclosureHashes.has(variant.disclosureProfileHash)) {
       await tx.insert(learningTaskDisclosureProfiles).values({
         variantId: variant.variantId,
         workspaceId,
@@ -910,15 +924,15 @@ export async function createRun(
     createdAt,
   });
   // 幂等行已在事务开头占位（onConflictDoNothing）。
-  // 事件流（sequence 1..4，同步推进 eventCursor）。
+  // 事件流（sequence 1..4，同步推进 eventCursor）——一次多行 INSERT。
   const eventValues = [
     { runId, workspaceId, userId, eventType: "learning_run.created", payload: {} },
     { runId, workspaceId, userId, eventType: "learning_run.prepared", payload: {} },
     { runId, workspaceId, userId, eventType: "learning_run.started", payload: {} },
     { runId, workspaceId, userId, eventType: "learning_task.presented", payload: { taskId: task.taskId } },
   ];
-  for (const [index, event] of eventValues.entries()) {
-    await tx.insert(learningRunEvents).values({
+  await tx.insert(learningRunEvents).values(
+    eventValues.map((event, index) => ({
       runId: event.runId,
       workspaceId,
       userId,
@@ -926,8 +940,8 @@ export async function createRun(
       eventType: event.eventType as never,
       payload: event.payload,
       occurredAt: createdAt,
-    });
-  }
+    })),
+  );
   await tx.update(learningRuns)
     .set({ eventCursor: eventValues.length, updatedAt: createdAt })
     .where(eq(learningRuns.id, runId));
@@ -1255,6 +1269,24 @@ export async function createRunV2(
     createdAt,
     updatedAt: createdAt,
   });
+  // PERF-A#13：在变体循环前一次性 IN 查询两个 variant 的 disclosure profile
+  // 存在性，避免每个 variant 在 PREPARE 热路径各加一次 SELECT 往返。
+  const disclosureHashesV2 = Array.from(new Set(
+    [primaryVariant, alternativeVariant]
+      .map((v) => v.disclosureProfileHash)
+      .filter((h): h is string => Boolean(h)),
+  ));
+  const existingDisclosureHashesV2 = new Set<string>();
+  if (disclosureHashesV2.length > 0) {
+    const existingDisclosureRowsV2 = await tx
+      .select({ profileHash: learningTaskDisclosureProfiles.profileHash })
+      .from(learningTaskDisclosureProfiles)
+      .where(and(
+        eq(learningTaskDisclosureProfiles.workspaceId, workspaceId),
+        inArray(learningTaskDisclosureProfiles.profileHash, disclosureHashesV2),
+      ));
+    for (const r of existingDisclosureRowsV2) existingDisclosureHashesV2.add(r.profileHash);
+  }
   for (const [index, variant] of [primaryVariant, alternativeVariant].entries()) {
     const closure = plan.closures[variant.variantId];
     await tx.insert(learningTaskVariants).values({
@@ -1306,15 +1338,10 @@ export async function createRunV2(
       reportHash: closure.reportHash,
       createdAt,
     });
-    const existingDisclosure = await tx
-      .select({ id: learningTaskDisclosureProfiles.id })
-      .from(learningTaskDisclosureProfiles)
-      .where(and(
-        eq(learningTaskDisclosureProfiles.workspaceId, workspaceId),
-        eq(learningTaskDisclosureProfiles.profileHash, variant.disclosureProfileHash),
-      ))
-      .limit(1);
-    if (!existingDisclosure[0]) {
+    // disclosure profile：同 (workspace, profileHash) 幂等复用（同一目标的
+    // 确定性变体重建不得撞 hash 唯一约束——23505 修复）。
+    // PERF-A#13：存在性已由循环前一次 IN 查询预载，无需每 variant SELECT。
+    if (!existingDisclosureHashesV2.has(variant.disclosureProfileHash)) {
       await tx.insert(learningTaskDisclosureProfiles).values({
         variantId: variant.variantId,
         workspaceId,
@@ -2254,17 +2281,26 @@ async function revalidateV2ArtifactEpochs(
 
   // 2. 按稳定 evidence id 顺序锁定 eligibility 行并逐一复验（usable + epoch 匹配）。
   const evidence = [...snapshot.target.evidence].sort((a, b) => a.evidenceSnapshotId.localeCompare(b.evidenceSnapshotId));
+  if (evidence.length === 0) return;
+  // 批量锁定全部 evidence 行（一次 round-trip），按 evidenceSnapshotId 稳定排序
+  // 保持锁顺序一致，避免逐条 SELECT ... FOR UPDATE 的 N 次往返与锁持有时间延长。
+  const evidenceIds = evidence.map((e) => e.evidenceSnapshotId);
+  const evRows = await tx
+    .select({
+      evidenceSnapshotId: evidenceEligibilityStatesV2.evidenceSnapshotId,
+      status: evidenceEligibilityStatesV2.status,
+      eligibilityEpoch: evidenceEligibilityStatesV2.eligibilityEpoch,
+    })
+    .from(evidenceEligibilityStatesV2)
+    .where(and(
+      eq(evidenceEligibilityStatesV2.workspaceId, snapshot.workspaceId),
+      inArray(evidenceEligibilityStatesV2.evidenceSnapshotId, evidenceIds),
+    ))
+    .for("update")
+    .orderBy(evidenceEligibilityStatesV2.evidenceSnapshotId);
+  const byEvidenceId = new Map(evRows.map((r) => [r.evidenceSnapshotId, r]));
   for (const e of evidence) {
-    const rows = await tx
-      .select({ status: evidenceEligibilityStatesV2.status, eligibilityEpoch: evidenceEligibilityStatesV2.eligibilityEpoch })
-      .from(evidenceEligibilityStatesV2)
-      .where(and(
-        eq(evidenceEligibilityStatesV2.workspaceId, snapshot.workspaceId),
-        eq(evidenceEligibilityStatesV2.evidenceSnapshotId, e.evidenceSnapshotId),
-      ))
-      .for("update")
-      .limit(1);
-    const row = rows[0];
+    const row = byEvidenceId.get(e.evidenceSnapshotId);
     if (!row || row.status !== "usable") {
       throw new LearningRunServiceError("v2_artifact_evidence_not_usable",
         `evidence ${e.evidenceSnapshotId} 状态 ${row?.status ?? "missing"}`, 409);

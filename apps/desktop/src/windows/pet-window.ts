@@ -29,18 +29,31 @@ export function createPetWindow(options: CreatePetWindowOptions): BrowserWindow 
   // 与路由首编译完成之间的竞争窗口实测可达 15s+，尤其 .next 冷缓存时）。
   const targetUrl = petRouteUrl(options.baseUrl);
   let attempt = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  const cancelRetry = () => {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
   const loadWithRetry = (): void => {
+    // 窗口已销毁（closed）后不再尝试 loadURL（原实现残留的定时器仍会对
+    // 已销毁窗口调用 loadURL）。
+    if (window.isDestroyed()) return;
     attempt += 1;
     void window.loadURL(targetUrl).catch((error: unknown) => {
+      if (window.isDestroyed()) return;
       if (attempt >= 5) {
         console.error(`[pet] loadURL failed after ${attempt} attempts:`, error);
         return;
       }
       // 1s / 2s / 4s / 8s —— 累计约 15s 窗口覆盖冷编译。
-      setTimeout(loadWithRetry, 1_000 * 2 ** (attempt - 1));
+      retryTimer = setTimeout(loadWithRetry, 1_000 * 2 ** (attempt - 1));
     });
   };
   loadWithRetry();
+  // 关闭时取消仍在排队的 loadURL 重试定时器，避免对已销毁窗口调用 loadURL。
+  window.on("closed", cancelRetry);
   // 2026-08-12（P6 streaming 真机验证）：Pet Window 选项为 show:false 且
   // 此前无人触发显示——窗口创建后一直隐藏，桌宠"不出现"的根因。合同 §6.2
   // 要求 ready-to-show 后 showInactive()（不抢焦点）。ready-to-show 只在

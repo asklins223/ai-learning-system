@@ -23,16 +23,21 @@ export interface RateLimitStore {
 /** A small no-dependency store for local development and tests. */
 export class MemoryRateLimitStore implements RateLimitStore {
   private readonly entries = new Map<string, RateLimitEntry>();
+  /** 上一次惰性清理时间；用于把逐次 increment 的 O(n) lazySweep 变为周期执行。 */
+  private lastSweepAt = 0;
 
   /**
    * PERF-B9 修复：memory 桶此前从不被 sweep（upload 独立实例无定时器），
    * 大量 userId 桶随 increment 永久驻留 → 无界增长。现改为 increment 时惰性
    * 清理：基于 resetAt 顺带淘汰已过期 key；达到阈值时整批扫过期，保证 Map 有界。
-   * 每次递增扫描是 O(n)，但对 dev/test 的有界用户集可接受，且避免了加定时器
-   * 与跨模块共享实例的复杂度。
+   * lazySweep 仅在距上次清理超过 SWEEP_INTERVAL_MS 时执行一次（避免每次 consume
+   * 都全 Map 线性扫描）；阈值整批清理仍按需触发，驻留规模依然有界。
    */
   increment(key: string, windowMs: number, now: number): RateLimitEntry {
-    this.lazySweep(now);
+    if (now - this.lastSweepAt >= MemoryRateLimitStore.SWEEP_INTERVAL_MS) {
+      this.lazySweep(now);
+      this.lastSweepAt = now;
+    }
     const current = this.entries.get(key);
     const entry = !current || now >= current.resetAt
       ? { count: 1, resetAt: now + windowMs }
@@ -73,6 +78,8 @@ export class MemoryRateLimitStore implements RateLimitStore {
 
   private static readonly MAX_ENTRIES_BEFORE_SWEEP = 1_000;
   private static readonly MAX_SWEEP_PER_CALL = 200;
+  /** lazySweep 的最小执行间隔（ms）；避免每次 increment 全 Map 线性扫描。 */
+  private static readonly SWEEP_INTERVAL_MS = 1_000;
 
   /** Exposed only for diagnostics/tests; callers cannot mutate the map. */
   get size(): number {

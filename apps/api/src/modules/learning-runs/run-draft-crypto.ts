@@ -12,14 +12,26 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 const ALGORITHM = "aes-256-gcm";
 
+// 懒缓存解码后的密钥，按 env 原始值失效：env 不变时（生产热路径）避免重复
+// 读 env + 正则 + Buffer.from；env 变化时（测试场景）重新解码。
+let cachedRawKey: string | undefined;
+let cachedKey: Buffer | null | undefined;
+
 function loadKey(): Buffer | null {
   const raw = process.env.LEARNING_DRAFT_ENC_KEY?.trim();
-  if (!raw) return null;
-  if (!/^[0-9a-fA-F]{64}$/.test(raw)) {
-    // 密钥格式错误按未配置处理（fail closed），启动日志由调用方决定。
+  if (raw === cachedRawKey) return cachedKey ?? null;
+  cachedRawKey = raw;
+  if (!raw) {
+    cachedKey = null;
     return null;
   }
-  return Buffer.from(raw, "hex");
+  if (!/^[0-9a-fA-F]{64}$/.test(raw)) {
+    // 密钥格式错误按未配置处理（fail closed），启动日志由调用方决定。
+    cachedKey = null;
+    return null;
+  }
+  cachedKey = Buffer.from(raw, "hex");
+  return cachedKey;
 }
 
 export interface EncryptedDraftShape {

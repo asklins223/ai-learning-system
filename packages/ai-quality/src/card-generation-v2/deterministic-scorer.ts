@@ -52,14 +52,6 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/\s+/g, "");
 }
 
-function containsAny(text: string, needles: string[]): string | null {
-  const t = normalize(text);
-  for (const n of needles) {
-    if (t.includes(normalize(n))) return n;
-  }
-  return null;
-}
-
 /**
  * 对单个 fixture 打分。planView 为被测系统输出（计划 + 候选的公开视图）。
  */
@@ -70,6 +62,17 @@ export function scoreFixtureDeterministic(
   const candidates = planView.candidates ?? [];
   const cardCount = candidates.length;
 
+  // 预归一化每个候选的字符串一次，避免嵌套候选×目标/事实循环中对同一段
+  // 文本反复调用 normalize()（normalize 含 lower + 正则去空白，成本随文本
+  // 长度增长；预计算后各循环只做 includes 匹配）。
+  const normCandidates = candidates.map((c) => ({
+    id: c.candidateId,
+    objectiveStatement: normalize(c.objectiveStatement),
+    publicSummary: normalize(c.publicSummary),
+    frontPrompt: normalize(c.frontPrompt),
+    frontCue: normalize(c.frontCue),
+  }));
+
   // 1) 数量范围
   const countWithinRange =
     cardCount >= fixture.acceptableCardCountRange.min
@@ -78,29 +81,32 @@ export function scoreFixtureDeterministic(
   // 2) critical/important recall（目标描述匹配 objectiveStatement 或 publicSummary）
   const critical = fixture.requiredLearningObjectives.filter((o) => o.priority === "critical");
   const important = fixture.requiredLearningObjectives.filter((o) => o.priority === "important");
-  const hitObjective = (description: string): boolean =>
-    candidates.some((c) =>
-      normalize(c.objectiveStatement).includes(normalize(description).slice(0, 10))
-      || normalize(c.publicSummary).includes(normalize(description).slice(0, 10))
-      || normalize(description).includes(normalize(c.objectiveStatement).slice(0, 10)),
+  const hitObjective = (description: string): boolean => {
+    const nDesc = normalize(description);
+    const nDescPrefix = nDesc.slice(0, 10);
+    return normCandidates.some((c) =>
+      c.objectiveStatement.includes(nDescPrefix)
+      || c.publicSummary.includes(nDescPrefix)
+      || nDesc.includes(c.objectiveStatement.slice(0, 10)),
     );
+  };
   const criticalRecall = critical.length === 0 ? 1 : critical.filter((o) => hitObjective(o.description)).length / critical.length;
   const importantRecall = important.length === 0 ? 1 : important.filter((o) => hitObjective(o.description)).length / important.length;
 
   // 3) support-only 事实不得单独成卡
-  const supportOnlyCarded = fixture.supportOnlyFacts.filter((fact) =>
-    candidates.some((c) => normalize(c.objectiveStatement).includes(normalize(fact).slice(0, 16))),
-  );
+  const supportOnlyCarded = fixture.supportOnlyFacts.filter((fact) => {
+    const nFact = normalize(fact).slice(0, 16);
+    return normCandidates.some((c) => c.objectiveStatement.includes(nFact));
+  });
 
   // 4) mustMerge：gold 要求合并的组必须整体出现在**同一张**卡的答案/目标中
   const mustMergeViolations: string[][] = [];
   for (const group of fixture.mustMerge) {
     const owners = new Set<string>();
     for (const fact of group) {
-      const owner = candidates.find((c) =>
-        normalize(c.objectiveStatement).includes(normalize(fact).slice(0, 16)),
-      );
-      if (owner) owners.add(owner.candidateId);
+      const nFact = normalize(fact).slice(0, 16);
+      const ownerIndex = normCandidates.findIndex((c) => c.objectiveStatement.includes(nFact));
+      if (ownerIndex >= 0) owners.add(normCandidates[ownerIndex].id);
     }
     // 组内事实散落为多个独立目标 → 违规；并入单一候选（含都不成独立目标）→ 通过
     if (owners.size > 1) mustMergeViolations.push(group);
@@ -110,28 +116,28 @@ export function scoreFixtureDeterministic(
   //    同一卡上同时出现即视为错误合并）
   const mustNotMergeViolations: string[][] = [];
   for (const group of fixture.mustNotMerge) {
-    const hit = candidates.some((c) => {
-      const combined = normalize(c.objectiveStatement) + normalize(c.publicSummary);
+    const hit = normCandidates.some((c) => {
+      const combined = c.objectiveStatement + c.publicSummary;
       return group.every((fact) => combined.includes(normalize(fact).slice(0, 24)));
     });
     if (hit) mustNotMergeViolations.push(group);
   }
 
   // 6) mustNotCard：禁止成卡的内容
-  const mustNotCardViolations = fixture.mustNotCard.filter((fact) =>
-    candidates.some((c) =>
-      normalize(c.objectiveStatement).includes(normalize(fact).slice(0, 24))
-      || normalize(c.publicSummary).includes(normalize(fact).slice(0, 24)),
-    ),
-  );
+  const mustNotCardViolations = fixture.mustNotCard.filter((fact) => {
+    const nFact = normalize(fact).slice(0, 24);
+    return normCandidates.some((c) =>
+      c.objectiveStatement.includes(nFact) || c.publicSummary.includes(nFact),
+    );
+  });
 
   // 7) 正面泄漏
   const frontLeaks: string[] = [];
   for (const leak of fixture.forbiddenFrontLeaks) {
-    const hit = candidates.some((c) =>
-      containsAny(c.frontPrompt, [leak]) !== null || containsAny(c.frontCue, [leak]) !== null,
-    );
-    if (hit) frontLeaks.push(leak);
+    const nLeak = normalize(leak);
+    if (normCandidates.some((c) => c.frontPrompt.includes(nLeak) || c.frontCue.includes(nLeak))) {
+      frontLeaks.push(leak);
+    }
   }
 
   // 8) 零卡 reason 合法性
@@ -145,8 +151,8 @@ export function scoreFixtureDeterministic(
   // 9) safety
   const safetyViolations: string[] = [];
   for (const expectation of fixture.safetyExpectations ?? []) {
-    const violated = candidates.some((c) =>
-      normalize(c.frontPrompt).includes(normalize(expectation).slice(0, 24)),
+    const violated = normCandidates.some((c) =>
+      c.frontPrompt.includes(normalize(expectation).slice(0, 24)),
     );
     if (violated) safetyViolations.push(expectation);
   }

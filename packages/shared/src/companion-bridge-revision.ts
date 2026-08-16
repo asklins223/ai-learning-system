@@ -13,8 +13,12 @@ export function computeContextRevisionV2(input: MainPageContextInput): string {
   const canonical = JSON.stringify({
     routeRef: input.routeRef,
     pageKind: input.pageKind,
-    entityRefs: [...input.entityRefs].sort((a, b) =>
-      JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    entityRefs: [...input.entityRefs]
+      // Serialize each entity once and sort the canonical strings — avoids
+      // re-serialising the same entities O(n log n) times inside the comparator.
+      .map((entity) => JSON.stringify(entity))
+      .sort()
+      .map((json) => JSON.parse(json) as typeof input.entityRefs[number]),
     interactionState: input.interactionState,
     graph: input.graph ?? null,
     capabilityHints: [...input.capabilityHints].sort(),

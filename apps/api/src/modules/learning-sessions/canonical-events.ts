@@ -769,9 +769,9 @@ export function replayProjection(eventStream: CanonicalReplayEvent[]): Projectio
   let map: StarMapProjection = {};
   const eventTrace: string[] = [];
   for (const event of eventStream) {
-    mastery = reduceMastery({ ...mastery }, event);
-    facet = reduceFacet({ ...facet }, event);
-    map = reduceMap({ ...map }, event);
+    mastery = reduceMastery(mastery, event);
+    facet = reduceFacet(facet, event);
+    map = reduceMap(map, event);
     eventTrace.push(
       computeProjectionHash({
         workspaceId: event.workspaceId,

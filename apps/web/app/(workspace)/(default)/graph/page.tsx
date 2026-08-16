@@ -491,6 +491,14 @@ export default function UnderstandingGraphPage() {
     () => new Map(rawGraph.nodes.map((node) => [node.id, node])),
     [rawGraph.nodes],
   );
+  // F#性能（round4）：searchableText(node) 含 JSON.stringify(node.metadata)，
+  // 原实现在每次搜索键击的 filter 中对每个节点重算（O(n) 字符串构建）。
+  // 改为按 rawGraph 一次性预计算 node.id → searchText 的 Map，搜索时只做
+  // includes 查表；仅当图数据变化才重建。
+  const nodeSearchText = useMemo(
+    () => new Map(rawGraph.nodes.map((node) => [node.id, searchableText(node)])),
+    [rawGraph.nodes],
+  );
   const activeFilter = FILTERS.find((item) => item.value === stateFilter) ?? FILTERS[0];
   const visibleGraph = useMemo(
     () => filterUnderstandingGraph(rawGraph, {
@@ -704,14 +712,14 @@ export default function UnderstandingGraphPage() {
     const normalized = deferredQuery.trim().toLocaleLowerCase("zh-CN");
     if (!normalized) return [];
     return rawGraph.nodes
-      .filter((node) => searchableText(node).includes(normalized))
+      .filter((node) => nodeSearchText.get(node.id)?.includes(normalized))
       .sort((left, right) => {
         const leftStarts = left.label.toLocaleLowerCase("zh-CN").startsWith(normalized) ? 0 : 1;
         const rightStarts = right.label.toLocaleLowerCase("zh-CN").startsWith(normalized) ? 0 : 1;
         return leftStarts - rightStarts || left.label.localeCompare(right.label, "zh-CN");
       })
       .slice(0, 8);
-  }, [deferredQuery, rawGraph.nodes]);
+  }, [deferredQuery, nodeSearchText, rawGraph.nodes]);
 
   useEffect(() => {
     setSearchIndex(0);
@@ -753,11 +761,11 @@ export default function UnderstandingGraphPage() {
     const candidateIds = new Set<string>();
 
     if (selectedNode.type === "key_point") {
-      const parentCardIds = rawGraph.edges.flatMap((edge) => (
+      const parentCardIds = new Set(rawGraph.edges.flatMap((edge) => (
         edge.type === "contains" && edge.to === selectedNode.id ? [edge.from] : []
-      ));
+      )));
       for (const edge of rawGraph.edges) {
-        if (edge.type === "contains" && parentCardIds.includes(edge.from) && edge.to !== selectedNode.id) {
+        if (edge.type === "contains" && parentCardIds.has(edge.from) && edge.to !== selectedNode.id) {
           candidateIds.add(edge.to);
         }
       }

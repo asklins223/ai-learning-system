@@ -67,6 +67,20 @@ export const learningRunOriginV2Schema = z.discriminatedUnion("kind", [
 ]);
 export type LearningRunOriginV2 = z.infer<typeof learningRunOriginV2Schema>;
 
+/**
+ * §16.3 V2 PREPARE 请求（wire 上带 originV2；与 V1 origin 互斥）。
+ */
+export const createLearningRunV2RequestSchema = z.strictObject({
+  originV2: learningRunOriginV2Schema,
+  goal: z.enum(["stabilize", "clarify", "repair", "transfer", "explore"]),
+  requestedTimeBudgetSeconds: z.number().int().min(30).max(180).optional(),
+  responsePreference: z.enum(["adaptive", "voice", "text", "structured"]).optional(),
+  idempotencyKey: z.string().min(1).max(200),
+});
+export type CreateLearningRunRequestV2 = z.infer<
+  typeof createLearningRunV2RequestSchema
+>;
+
 export const learningRunReturnTargetV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("card"),

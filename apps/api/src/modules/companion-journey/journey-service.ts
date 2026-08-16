@@ -23,6 +23,7 @@ import type {
 import {
   applyJourneyAction,
   applyJourneyEvent,
+  classifyJourneyEvent,
   initialJourneyState,
   JourneyActionError,
   type JourneyReducerState,
@@ -43,6 +44,21 @@ export class JourneyServiceError extends Error {
 }
 
 const TERMINAL = ["skipped", "completed"];
+
+/**
+ * 轻量 refs 结构比较：refs 是扁平对象（各字段为可选 string）。逐键比较 key 集合
+ * 与值，避免在逐事件/逐行循环里对 next 与当前状态反复 JSON.stringify（O(refs) 且
+ * 每次分配字符串）。语义与 JSON.stringify 严格相等一致（值仅 string|undefined）。
+ */
+function refsEqual(a: CompanionJourneyV2["refs"], b: CompanionJourneyV2["refs"]): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (a[key as keyof typeof a] !== b[key as keyof typeof b]) return false;
+  }
+  return true;
+}
 
 // ─── 读取/映射 ──────────────────────────────────────────────────────────
 
@@ -530,7 +546,7 @@ export async function applyJourneyDomainEvent(
   });
   const changed = next.stepRevision !== journey.stepRevision
     || next.status !== journey.status
-    || JSON.stringify(next.refs) !== JSON.stringify(journey.refs)
+    || !refsEqual(next.refs, journey.refs)
     || next.completionKind !== journey.completionKind;
   if (changed) {
     await tx.update(companionJourneys)
@@ -596,7 +612,13 @@ export async function findActiveJourney(
   return rows[0] ? journeyToContract(rows[0]) : null;
 }
 
-/** 惰性 drain：按到达序消费 pending 事件（乱序保持 pending 等前置）。 */
+/** 惰性 drain：按到达序消费 pending 事件（乱序保持 pending 等前置）。
+ *
+ * 批量实现：单次 SELECT FOR UPDATE 锁定 journey 行，然后在内存中按序套用
+ * reducer，最后以少量批量 UPDATE（journey 一次、pending 按状态分两批）落库，
+ * 避免对每个事件重复 3-5 次 DB 往返。语义与逐事件 applyJourneyDomainEvent
+ * 一致：每次状态推进 revision +1，未推进的 noop 事件标 superseded，乱序保持
+ * pending。 */
 export async function drainPendingJourneyEvents(
   tx: ApiTransaction,
   scope: JourneyScope,
@@ -614,12 +636,83 @@ export async function drainPendingJourneyEvents(
     ))
     .orderBy(companionJourneyPendingEvents.createdAt)
     .limit(50);
+  if (rows.length === 0) return;
+
+  // 锁一次 journey 行（防并发 lost update，原则同 applyJourneyDomainEvent）。
+  const journeyRows = await tx
+    .select()
+    .from(companionJourneys)
+    .where(and(
+      eq(companionJourneys.id, journeyId),
+      eq(companionJourneys.workspaceId, scope.workspaceId),
+      eq(companionJourneys.userId, scope.userId),
+    ))
+    .limit(1)
+    .for("update")
+    .execute();
+  const row = journeyRows[0];
+  if (!row) return;
+
+  let state = stateFromContract(journeyToContract(row));
+  const appliedIds: string[] = [];
+  const supersededIds: string[] = [];
+
   for (const event of rows) {
-    await applyJourneyDomainEvent(tx, scope, {
-      journeyId,
+    const input = {
       domainEventId: event.domainEventId,
       eventType: event.eventType,
       payload: event.payload as Record<string, unknown>,
-    }, now);
+    };
+    const next = applyJourneyEvent(state, input);
+    const changed = next.stepRevision !== state.stepRevision
+      || next.status !== state.status
+      || !refsEqual(next.refs, state.refs)
+      || next.completionKind !== state.completionKind;
+    if (changed) {
+      state = next;
+      appliedIds.push(event.id);
+    } else {
+      const command = classifyJourneyEvent(input);
+      if (command.kind === "noop") {
+        supersededIds.push(event.id);
+      }
+      // 乱序：保持 pending，等待前置事件到达后再次 drain。
+    }
+  }
+
+  if (appliedIds.length > 0) {
+    await tx.update(companionJourneys)
+      .set({
+        status: state.status,
+        currentStep: state.currentStep,
+        stepRevision: state.stepRevision,
+        dismissedNarrationSteps: state.dismissedNarrationSteps as never,
+        refs: state.refs as never,
+        lastDomainEventId: state.lastDomainEventId,
+        pausedAt: state.pausedAt ? new Date(state.pausedAt) : null,
+        pauseReason: state.pauseReason,
+        completionKind: state.completionKind,
+        error: state.error as never,
+        // 逐事件推进时每个 changed event 使 revision +1（CAS 语义保持一致）。
+        revision: row.revision + appliedIds.length,
+        updatedAt: now,
+      })
+      .where(eq(companionJourneys.id, row.id));
+  }
+  if (appliedIds.length > 0) {
+    await tx.update(companionJourneyPendingEvents)
+      .set({ status: "applied", appliedAt: now })
+      .where(and(
+        eq(companionJourneyPendingEvents.journeyId, journeyId),
+        inArray(companionJourneyPendingEvents.id, appliedIds),
+      ));
+  }
+  if (supersededIds.length > 0) {
+    await tx.update(companionJourneyPendingEvents)
+      .set({ status: "superseded", appliedAt: now })
+      .where(and(
+        eq(companionJourneyPendingEvents.journeyId, journeyId),
+        inArray(companionJourneyPendingEvents.id, supersededIds),
+      ));
   }
 }

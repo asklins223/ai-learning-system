@@ -609,6 +609,17 @@ export function checkCrossWorkspaceRefReuse(
 ): readonly SecurityViolation[] {
   const violations: SecurityViolation[] = [];
   const seen: Map<string, string> = new Map();
+  // Build a workspace-by-key index ONCE so the per-active-ref lookup is O(1)
+  // instead of linearly scanning all previouslyIssuedRefKeys for every ref.
+  const issuedByKey = new Map<string, Set<string>>();
+  for (const issued of input.previouslyIssuedRefKeys) {
+    let workspaces = issuedByKey.get(issued.key);
+    if (!workspaces) {
+      workspaces = new Set();
+      issuedByKey.set(issued.key, workspaces);
+    }
+    workspaces.add(issued.workspaceId);
+  }
   for (const entry of input.activeRefs) {
     const priorWorkspace = seen.get(entry.contextKey);
     if (priorWorkspace !== undefined && priorWorkspace !== entry.workspaceId) {
@@ -618,11 +629,14 @@ export function checkCrossWorkspaceRefReuse(
     }
     seen.set(entry.contextKey, entry.workspaceId);
 
-    for (const issued of input.previouslyIssuedRefKeys) {
-      if (issued.key === entry.contextKey && issued.workspaceId !== entry.workspaceId) {
-        violations.push(
-          `跨 workspace ${entry.kind} ref "${entry.contextKey}" 复用了此前签发到 workspace ${issued.workspaceId} 的键（现用于 ${entry.workspaceId}）=0 被违反`,
-        );
+    const issuedWorkspaces = issuedByKey.get(entry.contextKey);
+    if (issuedWorkspaces && issuedWorkspaces.size > 0) {
+      for (const issuedWorkspace of issuedWorkspaces) {
+        if (issuedWorkspace !== entry.workspaceId) {
+          violations.push(
+            `跨 workspace ${entry.kind} ref "${entry.contextKey}" 复用了此前签发到 workspace ${issuedWorkspace} 的键（现用于 ${entry.workspaceId}）=0 被违反`,
+          );
+        }
       }
     }
   }

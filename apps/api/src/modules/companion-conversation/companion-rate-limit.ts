@@ -20,6 +20,11 @@ const WINDOW_MS_MAX = 3_600_000; // 1h（最大窗口为 hourly bucket）
 // Map 长期远低于 MAX_BUCKETS 阈值 → 命中路径的 50k 全扫 prune 几乎不可达。
 const MAX_BUCKETS_BEFORE_SWEEP = 40_000; // 低于 50k 阈值，先触发惰性整批清理
 const MAX_SWEEP_PER_CALL = 400;
+// F2（round-5）：lazySweep 与整批清理的最小执行间隔。原实现在每次 companion
+// API 调用上都跑一遍 lazySweep（O(n) 全 Map 扫描，n 最高 40k）。改为周期性
+// 执行：命中路径几乎不再线性扫 Map，Map 仍由阈值整批清理兜底保持有界。
+const SWEEP_INTERVAL_MS = 1_000;
+let lastSweepAt = 0;
 
 /** 惰性清理：基于 windowStart + 最久窗口淘汰已过期 key，单次最多清 MAX_SWEEP_PER_CALL 条。 */
 function lazySweep(now: number): void {
@@ -52,9 +57,13 @@ export function companionRateLimit(args: {
   windowMs: number;
 }): { allowed: boolean; retryAfterSeconds: number } {
   const now = Date.now();
-  // F2：先做惰性逐窗口过期逐出（增量分摊，不阻塞命中路径），再视驻留规模
-  // 触发整批清理。Map 长期远低于 MAX_BUCKETS → 下方 prune 的 50k 全扫几乎不可达。
-  lazySweep(now);
+  // F2：惰性逐窗口过期逐出不再每次调用全 Map 扫描——仅在距上次清理超过
+  // SWEEP_INTERVAL_MS 时执行（增量分摊）；Map 仍由阈值整批清理兜底保持有界，
+  // 下方 prune 的 50k 全扫仅作极端护栏。
+  if (now - lastSweepAt >= SWEEP_INTERVAL_MS) {
+    lazySweep(now);
+    lastSweepAt = now;
+  }
   if (buckets.size >= MAX_BUCKETS_BEFORE_SWEEP) {
     // 一次性清掉全部过期桶，避免状态持续逼近 MAX_BUCKETS 后触发 prune 的全扫尖刺。
     for (const [key, bucket] of buckets) {
@@ -113,4 +122,7 @@ export const COMPANION_RATE_LIMITS = Object.freeze({
   asrPerHour: { limit: 60, windowMs: 3_600_000 },
   ttsPerMinute: { limit: 60, windowMs: 60_000 },
   exportPerHour: { limit: 3, windowMs: 3_600_000 },
+  // companion bridge context 发布/续租/撤销（§14.2）：与其余 companion 路由
+  // 一致的 per-(workspace,user) 内存固定窗口限流，防认证客户端滥用端点。
+  bridgeContextPerMinute: { limit: 60, windowMs: 60_000 },
 } as const);

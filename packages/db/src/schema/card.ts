@@ -104,6 +104,9 @@ export const learningCards = pgTable(
   (t) => ({
     noteIdx: index("learning_cards_note_idx").on(t.noteVersionId),
     workspaceIdx: index("learning_cards_workspace_idx").on(t.workspaceId),
+    // 2026-08-12（schema 完整性审计）：0114 列表排序索引（workspace + created_at DESC）
+    workspaceCreatedIdx: index("learning_cards_workspace_created_idx")
+      .on(t.workspaceId, sql`${t.createdAt} desc`),
     activeVersionIdx: index("learning_cards_workspace_note_version_active_idx")
       .on(t.workspaceId, t.noteVersionId)
       .where(sql`${t.status} = 'active'`),
@@ -152,6 +155,9 @@ export const learningCards = pgTable(
         )
       `,
     ),
+
+    idWorkspaceUnique: uniqueIndex("learning_cards_id_workspace_unique").on(t.id, t.workspaceId),
+    workspaceIdUniqueIdx: uniqueIndex("learning_cards_workspace_id_unique_idx").on(t.workspaceId, t.id),
   }),
 );
 
@@ -173,5 +179,6 @@ export const cardKeyPoints = pgTable(
     candidateIdx: uniqueIndex("card_key_points_candidate_unique_idx")
       .on(t.workspaceId, t.candidateId)
       .where(sql`${t.candidateId} IS NOT NULL`),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("card_key_points_id_workspace_unique").on(t.id, t.workspaceId),}),
 );

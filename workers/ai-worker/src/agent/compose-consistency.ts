@@ -42,6 +42,13 @@ export interface ComposeConsistencyIssue {
 export function validateComposeConsistency(input: ComposeConsistencyInput): ComposeConsistencyIssue[] {
   const issues: ComposeConsistencyIssue[] = [];
 
+  // PERF: 一次性构建全局 candidate 集合，避免在 per-card 循环内对每个
+  // candidate 做 O(bundles) 的 Object.values().some() 扫描。
+  const allCandidateIds = new Set<string>();
+  for (const set of Object.values(input.bundleCandidates)) {
+    for (const cid of set) allCandidateIds.add(cid);
+  }
+
   for (const card of input.cards) {
     const seen = new Set<string>();
     for (const cid of card.candidateIds) {
@@ -57,7 +64,7 @@ export function validateComposeConsistency(input: ComposeConsistencyInput): Comp
       seen.add(cid);
 
       // candidate 存在性(任一 bundle 集合中有即可)
-      const known = Object.values(input.bundleCandidates).some((s) => s.has(cid));
+      const known = allCandidateIds.has(cid);
       if (!known) {
         issues.push({
           code: "card_refs_unknown_candidate",

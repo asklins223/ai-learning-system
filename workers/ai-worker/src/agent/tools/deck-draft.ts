@@ -316,6 +316,13 @@ async function handleApplyDraftPatch(
   // restore_candidate, adjust_primary_support, adjust_group, adjust_ordinal
   const baseContent = baseDraft.contentJson as Record<string, unknown>;
   const cards = Array.isArray(baseContent.cards) ? [...(baseContent.cards as Record<string, unknown>[])] : [];
+  // 预建 draftCardId/localId -> 卡片索引映射，避免操作循环内重复 findIndex（O(ops×cards)）
+  const cardIndexById = new Map<string, number>();
+  cards.forEach((c, i) => {
+    if (c.draftCardId !== undefined && c.draftCardId !== null) cardIndexById.set(String(c.draftCardId), i);
+    if (c.localId !== undefined && c.localId !== null) cardIndexById.set(String(c.localId), i);
+  });
+  const findCardIndex = (id: string): number => cardIndexById.get(id) ?? -1;
   // R58 修复：收集候选级别 deferred 操作（split/merge/restore）
   const deferredOps: Array<Record<string, unknown>> = [];
 
@@ -329,12 +336,7 @@ async function handleApplyDraftPatch(
     // R37/R63 修复：同时匹配 draftCardId 和 localId。
     // 原第三条件 `c.draftCardId === card-${cards.indexOf(c)}` 不与输入 cardDraftId 比较，
     // 导致任何不匹配的 cardDraftId 都会错误地匹配到第一个 auto-assigned card。
-    const cardIndex = cardDraftId
-      ? cards.findIndex((c) =>
-        c.draftCardId === cardDraftId
-        || c.localId === cardDraftId,
-      )
-      : -1;
+    const cardIndex = cardDraftId ? findCardIndex(cardDraftId) : -1;
 
     switch (patchType) {
       case "rewrite_claim": {
@@ -389,10 +391,7 @@ async function handleApplyDraftPatch(
         // 如果有目标卡片，添加候选到目标
         if (opRecord.targetCardDraftId) {
           // R64 修复：移除有 bug 的第三条件，与 cardIndex 查找逻辑保持一致
-          const targetCardIndex = cards.findIndex((c) =>
-            c.draftCardId === opRecord.targetCardDraftId ||
-            c.localId === opRecord.targetCardDraftId,
-          );
+          const targetCardIndex = findCardIndex(String(opRecord.targetCardDraftId));
           if (targetCardIndex >= 0 && candidateId) {
             const targetCard = cards[targetCardIndex]!;
             const targetCandidateIds = Array.isArray(targetCard.candidateIds) ? targetCard.candidateIds as string[] : [];

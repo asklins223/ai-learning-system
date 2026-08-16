@@ -4,7 +4,7 @@ import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
 import { noteVersions } from "../../db/schema/note.ts";
 import { learningCards } from "../../db/schema/card.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
-import { getCardWithDetail, listCards, regenerateCard, dismissCard } from "./service.ts";
+import { getCardWithDetail, listCards, regenerateCard, dismissCard, getCardPosition } from "./service.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
 import { activeLearningCardConsumerPredicate } from "./consumer-eligibility.ts";
 // QUAL-59 修复：将 import 语句从文件中间移到顶部，符合 ES 模块规范
@@ -31,6 +31,16 @@ export async function cardRoutes(app: FastifyInstance) {
     const data = await getCardWithDetail(req.params.id, req.session.workspaceId, req.session.userId);
     if (!data) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return data;
+  });
+
+  // PERF: 单请求定位卡片在完整列表中的分页位置（index/prev/next），
+  // 替代前端逐页串行翻页，降低首访详情页延迟。
+  app.get<{ Params: { id: string } }>("/cards/:id/position", async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const pos = await getCardPosition(req.params.id, req.session.workspaceId, req.session.userId);
+    if (!pos) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+    return pos;
   });
 
   // POST /cards/:id/regenerate — 重新生成学习卡

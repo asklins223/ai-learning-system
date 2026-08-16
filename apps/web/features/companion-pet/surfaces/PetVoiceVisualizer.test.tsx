@@ -10,7 +10,7 @@ test("listening renders the Liquid-Orb voice island with Siri preset and CSS fal
   assert.match(html, /data-voice-visual="listening"/);
   assert.match(html, /pet-voice-island-content is-listening/);
   assert.match(html, /正在听你说/);
-  assert.match(html, /说完再点一下结束/);
+  assert.match(html, /松开即可发送/);
   // WebGPU host：液态玻璃球容器 + Siri 青色 preset
   assert.match(html, /pet-voice-liquid-orb/);
   assert.match(html, /data-liquid-orb-preset="siri"/);

@@ -9,6 +9,8 @@ type OrderingTaskProps = {
   onDraftChange?: (draft: LearningTaskDraftV1) => void;
 };
 
+const EMPTY_LABELS: Record<string, string> = {};
+
 /**
  * 排序题（wire 合同 §12.2）：publicTokenIds 乱序 token + 可选 labels。
  * 用户把 token 按正确顺序放入答案区；确定性评估按位置对比。
@@ -18,9 +20,14 @@ export function OrderingTask({ task, onIntent, draft, onDraftChange }: OrderingT
     draft?.kind === "ordering" ? draft.orderedTokenIds : [],
   );
   const orderedIds = draft?.kind === "ordering" ? draft.orderedTokenIds : localOrderedIds;
-  const labels = task.interaction.publicTokenLabels ?? {};
+  const labels = task.interaction.publicTokenLabels ?? EMPTY_LABELS;
   const total = task.interaction.publicTokenIds.length;
-  const available = task.interaction.publicTokenIds.filter((id) => !orderedIds.includes(id));
+  // F#性能（round4）：`available` 是 O(n·m) 的 filter(!includes) 派生值，
+  // 原实现每渲染重算；用 useMemo + Set 只在 token 集/顺序变化时重建。
+  const available = useMemo(() => {
+    const orderedSet = new Set(orderedIds);
+    return task.interaction.publicTokenIds.filter((id) => !orderedSet.has(id));
+  }, [task.interaction.publicTokenIds, orderedIds]);
   // F#7：提交 busy-lock——防止双击在 phase 翻转前并发两条 submit intent。
   const [submitting, setSubmitting] = useState(false);
 

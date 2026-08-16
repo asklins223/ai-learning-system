@@ -9,6 +9,7 @@ import { Drawer } from "@/components/ui/Drawer";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { api, type CardListItem } from "@/lib/api";
+import type { PublicLearningCardV2 } from "@ailearn/shared";
 import { readPartialCardCoverageWarning } from "@/lib/card-coverage-warning";
 import { relativeTime } from "@/lib/format";
 // §14.2（2026-08-15 恢复）：cards 页发布 bounded context（Pet 主动策略门禁）。
@@ -66,6 +67,29 @@ function cardTitle(card: CardListItem) {
   return card.schemaJson?.title?.trim() || "未命名学习目标";
 }
 
+function cardHref(card: CardListItem): string {
+  return card.isV2 ? `/learning-cards/${card.id}` : `/cards/${card.id}`;
+}
+
+function toV2CardListItem(card: PublicLearningCardV2): CardListItem {
+  return {
+    id: card.cardId,
+    noteVersionId: "",
+    workspaceId: "",
+    status: "active",
+    schemaJson: {
+      title: card.publicSummary,
+      summary: card.publicSummary,
+    },
+    artifactId: null,
+    createdAt: card.createdAt,
+    isV2: true,
+    objectiveId: card.objectiveId,
+    ...(card.reviewStatus ? { reviewStatus: card.reviewStatus } : {}),
+    ...(card.nextReviewAt ? { nextReviewAt: card.nextReviewAt } : {}),
+  };
+}
+
 function ObjectiveStateIcon({ state }: { state: LearningObjectiveState }) {
   if (state === "partial") return <Icon.Warn aria-hidden="true" />;
   if (state === "due") return <Icon.Review aria-hidden="true" />;
@@ -88,6 +112,8 @@ export default function CardsIndex() {
 
   const [items, setItems] = useState<CardListItem[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  // V2 卡片列表分页游标（offset 字符串；null 表示已全部加载）。
+  const [v2Cursor, setV2Cursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [paginationMessage, setPaginationMessage] = useState("");
@@ -113,6 +139,7 @@ export default function CardsIndex() {
     const requestId = ++loadRequestRef.current;
     setItems(null);
     setNextCursor(null);
+    setV2Cursor(null);
     setError(null);
     setLoadMoreError(null);
     setPaginationMessage("");
@@ -120,10 +147,21 @@ export default function CardsIndex() {
     setLoadingMore(false);
 
     try {
-      const result = await api.listCards({ limit: 50 });
+      const [result, v2Result] = await Promise.all([
+        api.listCards({ limit: 50 }),
+        api.listLearningCardsV2({ limit: 100 }).catch(() => ({ items: [], nextCursor: null })),
+      ]);
       if (requestId !== loadRequestRef.current) return;
-      setItems(result.items);
+      const knownIds = new Set(result.items.map((card) => card.id));
+      const merged = [
+        ...result.items,
+        ...v2Result.items
+          .map(toV2CardListItem)
+          .filter((card) => !knownIds.has(card.id)),
+      ];
+      setItems(merged);
       setNextCursor(result.nextCursor);
+      setV2Cursor(v2Result.nextCursor);
     } catch {
       if (requestId !== loadRequestRef.current) return;
       setItems(null);
@@ -182,19 +220,30 @@ export default function CardsIndex() {
   }, []);
 
   async function loadMore() {
-    if (!nextCursor || loadingMoreRef.current) return;
+    if ((!nextCursor && !v2Cursor) || loadingMoreRef.current) return;
     const requestId = loadRequestRef.current;
     const cursor = nextCursor;
+    const v2Next = v2Cursor;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     setLoadMoreError(null);
     setPaginationMessage("");
 
     try {
-      const result = await api.listCards({ cursor, limit: 50 });
+      // 同时加载下一批 V1 卡与下一批 V2 卡（各自分页，逐页增量合并）。
+      const [result, v2Result] = await Promise.all([
+        cursor ? api.listCards({ cursor, limit: 50 }) : Promise.resolve(null),
+        v2Next
+          ? api.listLearningCardsV2({ cursor: v2Next, limit: 100 }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
       if (requestId !== loadRequestRef.current) return;
       const knownIds = new Set((items ?? []).map((card) => card.id));
-      const additions = result.items.filter((card) => !knownIds.has(card.id));
+      const v1Additions = result?.items.filter((card) => !knownIds.has(card.id)) ?? [];
+      const v2Additions = v2Result?.items
+        .map(toV2CardListItem)
+        .filter((card) => !knownIds.has(card.id)) ?? [];
+      const additions = [...v1Additions, ...v2Additions];
       setItems((previous) => {
         const current = previous ?? [];
         const currentIds = new Set(current.map((card) => card.id));
@@ -203,7 +252,8 @@ export default function CardsIndex() {
           ...additions.filter((card) => !currentIds.has(card.id)),
         ];
       });
-      setNextCursor(result.nextCursor);
+      setNextCursor(result?.nextCursor ?? null);
+      setV2Cursor(v2Result?.nextCursor ?? null);
       setPaginationMessage(
         additions.length > 0
           ? `已加载 ${additions.length} 个更早的学习目标。`
@@ -277,6 +327,7 @@ export default function CardsIndex() {
   }, [items, referenceNow]);
 
   const loadedCount = items?.length ?? 0;
+  const hasMorePages = Boolean(nextCursor || v2Cursor);
   const hasLocalFilter = query.trim().length > 0 || filter !== "all";
   const activeFilter = FILTERS.find((item) => item.key === filter) ?? FILTERS[0];
   const activeSort = SORTS.find((item) => item.key === sort) ?? SORTS[0];
@@ -430,7 +481,7 @@ export default function CardsIndex() {
               ? "正在读取学习目标…"
               : hasLocalFilter
                 ? `在已加载的 ${loadedCount} 个目标中查找`
-                : nextCursor
+                : hasMorePages
                   ? `已加载 ${loadedCount} 个目标`
                   : `共 ${loadedCount} 个目标`}
             <span aria-hidden="true">·</span>
@@ -502,7 +553,7 @@ export default function CardsIndex() {
               <p>
                 {items.length === 0
                   ? "打开一篇笔记并生成学习卡；有实际学习价值的目标会出现在这里。"
-                  : nextCursor
+                  : hasMorePages
                     ? "当前已加载范围内没有匹配项，也可以继续加载更早的目标。"
                     : "调整搜索词或筛选条件后再试。"}
               </p>
@@ -532,7 +583,7 @@ export default function CardsIndex() {
                         查看全部
                       </button>
                     )}
-                    {nextCursor && (
+                    {hasMorePages && (
                       <button
                         type="button"
                         className="cards-action-secondary"
@@ -614,7 +665,7 @@ export default function CardsIndex() {
                     </div>
 
                     <h3 id={titleId}>
-                      <Link href={`/cards/${card.id}`}>{cardTitle(card)}</Link>
+                      <Link href={cardHref(card)}>{cardTitle(card)}</Link>
                     </h3>
 
                     <div className="cards-objective-source" aria-label="学习目标来源">
@@ -672,7 +723,7 @@ export default function CardsIndex() {
                     <span>建议下一步</span>
                     <p id={descriptionId}>{presentation.description}</p>
                     <Link
-                      href={`/cards/${card.id}`}
+                      href={cardHref(card)}
                       className="cards-objective-action"
                       data-ui="learning-objective-primary-action"
                     >
@@ -693,7 +744,7 @@ export default function CardsIndex() {
                 {loadMoreError}
               </p>
             )}
-            {nextCursor ? (
+            {hasMorePages ? (
               <button
                 type="button"
                 className="cards-action-secondary cards-loadmore-button"

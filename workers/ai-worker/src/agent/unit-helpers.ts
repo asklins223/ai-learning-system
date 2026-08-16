@@ -13,7 +13,7 @@
  * - handleTurnResult: 处理 turn 结果，决定后续动作
  */
 
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import {
   AgentUnitKind,
@@ -569,6 +569,136 @@ export async function createNextTurnJob(
           eq(schema.cardGenerationUnits.id, unitId),
           eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
         ));
+    },
+  );
+}
+
+/**
+ * 批量创建多个下一 turn job——与 createNextTurnJob 语义完全一致，但把 N 个
+ * 独立 workspace 事务合并为 1 个，并把每个 (run, unit, turn) 的
+ * 「SELECT 既有 job → 重置/入队 → 更新 unit scheduledAt」合并为批量语句。
+ * 幂等语义逐项保持：
+ * - pending/running/succeeded 已存在 → 跳过（不更新 unit）；
+ * - failed/dead 已存在 → 批量重置为 pending（复用重跑语义，不更新 unit）；
+ * - 不存在 → 经 SECURITY DEFINER 入队函数批量创建，并批量更新 unit scheduledAt。
+ */
+export async function createNextTurnJobs(
+  job: JobPayload,
+  runId: string,
+  specs: Array<{ unitId: string; turnNo: number }>,
+): Promise<void> {
+  if (specs.length === 0) return;
+  const now = new Date();
+
+  const keys = specs.map((s) => `agent-turn:${runId}:${s.unitId}:${s.turnNo}`);
+  const hashes = specs.map((s) =>
+    createHash("sha256")
+      .update(JSON.stringify({ runId, unitId: s.unitId, turnNo: s.turnNo }))
+      .digest("hex"),
+  );
+
+  await withWorkerWorkspaceTransaction(
+    { workspaceId: job.workspaceId, userId: job.requestedBy },
+    async (tx) => {
+      // 1. 一次批量加载全部既有 job（按 idempotency key）
+      const existingRows = await tx
+        .select({
+          id: schema.jobs.id,
+          status: schema.jobs.status,
+          idempotencyKey: schema.jobs.idempotencyKey,
+        })
+        .from(schema.jobs)
+        .where(and(
+          eq(schema.jobs.workspaceId, job.workspaceId),
+          inArray(schema.jobs.idempotencyKey, keys),
+        ));
+      const existingByKey = new Map<string, { id: string; status: string }>();
+      for (const r of existingRows) {
+        if (r.idempotencyKey) existingByKey.set(r.idempotencyKey, { id: r.id, status: r.status });
+      }
+
+      const resetJobIds: string[] = [];
+      const toInsert: Array<{ unitId: string; turnNo: number; hash: string; key: string }> = [];
+      const insertedUnitIds: string[] = [];
+
+      for (let i = 0; i < specs.length; i++) {
+        const key = keys[i];
+        const ex = existingByKey.get(key);
+        if (!ex) {
+          toInsert.push({ unitId: specs[i].unitId, turnNo: specs[i].turnNo, hash: hashes[i], key });
+          insertedUnitIds.push(specs[i].unitId);
+          continue;
+        }
+        if (
+          ex.status === JobStatus.PENDING
+          || ex.status === JobStatus.RUNNING
+          || ex.status === JobStatus.SUCCEEDED
+        ) {
+          continue; // 已有调度或已真正完成，跳过
+        }
+        // failed/dead → 重置为 pending（复用原单条语义）
+        resetJobIds.push(ex.id);
+      }
+
+      // 2. 批量重置 failed/dead job（单次 UPDATE）
+      if (resetJobIds.length > 0) {
+        await tx
+          .update(schema.jobs)
+          .set({
+            status: JobStatus.PENDING,
+            attempts: 0,
+            lastError: null,
+            scheduledAt: now,
+            startedAt: null,
+            finishedAt: null,
+            leaseToken: null,
+            repairState: "none",
+            repairAttemptCount: 0,
+          })
+          .where(inArray(schema.jobs.id, resetJobIds));
+      }
+
+      // 3. 批量入队新 jobs（SECURITY DEFINER 函数，unnest 一次调用）。
+      //    显式 `{uuid,...}::uuid[]` 字面量（drizzle+postgres-js 数组参数
+      //    序列化不可靠；id 均来自本库 uuid 列，无逗号注入风险）。
+      if (toInsert.length > 0) {
+        const wsLiteral = `{${toInsert.map(() => job.workspaceId).join(",")}}`;
+        const runLiteral = `{${toInsert.map(() => runId).join(",")}}`;
+        const unitLiteral = `{${toInsert.map((t) => t.unitId).join(",")}}`;
+        const turnLiteral = `{${toInsert.map((t) => t.turnNo).join(",")}}`;
+        const hashLiteral = `{${toInsert.map((t) => `"${t.hash}"`).join(",")}}`;
+        const idemLiteral = `{${toInsert.map((t) => `"${t.key}"`).join(",")}}`;
+        const requestedByLiteral = job.requestedBy
+          ? `{${toInsert.map(() => job.requestedBy!).join(",")}}`
+          : `{${toInsert.map(() => "NULL").join(",")}}`;
+        const userIdLiteral = `{${toInsert.map(() => job.requestedBy ?? "").join(",")}}`;
+
+        await tx.execute(sql`
+          SELECT public.ailearn_enqueue_agent_turn_job(
+            v.workspace_id, v.requested_by, v.run_id, v.unit_id, v.turn_no,
+            v.input_hash, 80, 'card_foreground', v.idem_key, v.user_id
+          )
+          FROM unnest(
+            ${wsLiteral}::uuid[],
+            ${requestedByLiteral}::uuid[],
+            ${runLiteral}::uuid[],
+            ${unitLiteral}::uuid[],
+            ${turnLiteral}::integer[],
+            ${hashLiteral}::text[],
+            ${idemLiteral}::text[],
+            ${userIdLiteral}::text[]
+          ) AS v(workspace_id, requested_by, run_id, unit_id, turn_no, input_hash, idem_key, user_id)
+        `);
+
+        // 4. 批量更新新创建 turn 对应 unit 的 scheduledAt（与原语义一致：仅新增路径更新）
+        await tx
+          .update(schema.cardGenerationUnits)
+          .set({ scheduledAt: now, updatedAt: now })
+          .where(and(
+            inArray(schema.cardGenerationUnits.id, insertedUnitIds),
+            eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+          ));
+      }
     },
   );
 }

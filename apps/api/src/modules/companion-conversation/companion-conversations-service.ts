@@ -231,7 +231,7 @@ export async function getCompanionConversationSnapshot(args: {
         throw new CompanionConversationError("NOT_FOUND", 404, "conversation not found");
       }
 
-      const activeRuns = await tx.execute<{
+      const activeRunsPromise = tx.execute<{
         id: string;
         conversation_id: string;
         user_message_id: string;
@@ -250,9 +250,85 @@ export async function getCompanionConversationSnapshot(args: {
         LIMIT 1
       `);
 
+      const learningActionsEnabled =
+        process.env.COMPANION_DIALOGUE_V1_ENABLED === "true" &&
+        process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED === "true";
+
+      const proposalsPromise = learningActionsEnabled
+        ? tx.execute<{
+            id: string;
+            conversation_id: string;
+            source_message_id: string;
+            source_generation: number;
+            context_grant_id: string | null;
+            payload: unknown;
+            payload_sha256: string;
+            title: string;
+            target_summary: string;
+            impact_summary: string;
+            status: "pending";
+            decision: null;
+            expires_at: Date;
+            decided_at: Date | null;
+            created_at: Date;
+            updated_at: Date;
+          }>(sql`
+            SELECT id, conversation_id, source_message_id, source_generation,
+                   context_grant_id, payload, payload_sha256, title, target_summary,
+                   impact_summary, status, decision, expires_at, decided_at,
+                   created_at, updated_at
+            FROM companion_action_proposals
+            WHERE conversation_id = ${args.conversationId}
+              AND status = 'pending'
+              AND expires_at > now()
+            ORDER BY created_at DESC
+            LIMIT 1
+          `)
+        : Promise.resolve([] as never[]);
+
+      const actionRunsPromise = learningActionsEnabled
+        ? tx.execute<{
+            id: string;
+            proposal_id: string;
+            status: "accepted" | "running";
+            result_message_id: string | null;
+            result_ref: string | null;
+            route: unknown;
+            safe_summary: string | null;
+            error_code: string | null;
+            created_at: Date;
+            updated_at: Date;
+          }>(sql`
+            SELECT id, proposal_id, status, result_message_id, result_ref, route,
+                   safe_summary, error_code, created_at, updated_at
+            FROM companion_action_runs
+            WHERE conversation_id = ${args.conversationId}
+              AND status IN ('accepted', 'running')
+            ORDER BY created_at DESC
+            LIMIT 1
+          `)
+        : Promise.resolve([] as never[]);
+
+      // PERF: prop/action-run 读与 active-run 读相互独立，同一事务内并发发出，
+      // 仅在拿到 active run 后再串行取依赖其 id 的 stream 事件。
+      const [activeRuns, proposals, actionRuns] = await Promise.all([
+        activeRunsPromise,
+        proposalsPromise,
+        actionRunsPromise,
+      ]);
+
       let activeRun: Record<string, unknown> | null = null;
       if (activeRuns[0]) {
-        const run = activeRuns[0];
+        const run = activeRuns[0] as {
+          id: string;
+          conversation_id: string;
+          user_message_id: string;
+          assistant_message_id: string | null;
+          generation: number;
+          status: "accepted" | "running" | "cancel_requested";
+          created_at: Date;
+          updated_at: Date;
+        };
         // F9（round-4）：snapshot 主路径曾无 LIMIT 全量加载该 run 全部 stream 事件
         // （含 jsonb payload）入内存，长 run（24h TTL 窗口内）下快照体无界。改为
         // 取最近 SNAPSHOT_EVENT_LIMIT 条（倒序 LIMIT 再正序），约束恢复主路径内存/
@@ -328,41 +404,9 @@ export async function getCompanionConversationSnapshot(args: {
         };
       }
 
-      const learningActionsEnabled =
-        process.env.COMPANION_DIALOGUE_V1_ENABLED === "true" &&
-        process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED === "true";
       let pendingProposal: Record<string, unknown> | null = null;
       let activeActionRun: Record<string, unknown> | null = null;
       if (learningActionsEnabled) {
-        const proposals = await tx.execute<{
-          id: string;
-          conversation_id: string;
-          source_message_id: string;
-          source_generation: number;
-          context_grant_id: string | null;
-          payload: unknown;
-          payload_sha256: string;
-          title: string;
-          target_summary: string;
-          impact_summary: string;
-          status: "pending";
-          decision: null;
-          expires_at: Date;
-          decided_at: Date | null;
-          created_at: Date;
-          updated_at: Date;
-        }>(sql`
-          SELECT id, conversation_id, source_message_id, source_generation,
-                 context_grant_id, payload, payload_sha256, title, target_summary,
-                 impact_summary, status, decision, expires_at, decided_at,
-                 created_at, updated_at
-          FROM companion_action_proposals
-          WHERE conversation_id = ${args.conversationId}
-            AND status = 'pending'
-            AND expires_at > now()
-          ORDER BY created_at DESC
-          LIMIT 1
-        `);
         const proposal = proposals[0];
         if (proposal) {
           pendingProposal = {
@@ -388,26 +432,6 @@ export async function getCompanionConversationSnapshot(args: {
           };
         }
 
-        const actionRuns = await tx.execute<{
-          id: string;
-          proposal_id: string;
-          status: "accepted" | "running";
-          result_message_id: string | null;
-          result_ref: string | null;
-          route: unknown;
-          safe_summary: string | null;
-          error_code: string | null;
-          created_at: Date;
-          updated_at: Date;
-        }>(sql`
-          SELECT id, proposal_id, status, result_message_id, result_ref, route,
-                 safe_summary, error_code, created_at, updated_at
-          FROM companion_action_runs
-          WHERE conversation_id = ${args.conversationId}
-            AND status IN ('accepted', 'running')
-          ORDER BY created_at DESC
-          LIMIT 1
-        `);
         const actionRun = actionRuns[0];
         if (actionRun) {
           activeActionRun = {

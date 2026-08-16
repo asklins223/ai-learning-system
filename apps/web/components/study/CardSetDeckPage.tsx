@@ -349,6 +349,15 @@ export function CardSetDeckPage() {
   }, [sets, state.query, state.filter]);
 
   const loadedCount = sets?.length ?? 0;
+  // PERF: 预计算全部筛选计数（单次遍历），替代渲染体内每个按钮各扫一遍 O(n)。
+  const filterCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const key of FILTERS.map((f) => f.key)) counts.set(key, 0);
+    for (const set of filtered) {
+      counts.set(set.status, (counts.get(set.status) ?? 0) + 1);
+    }
+    return counts;
+  }, [filtered]);
   const safeFocus = clampFocus(state.focus, filtered.length);
   const expandedSet =
     (state.expandedId && sets?.find((item) => item.id === state.expandedId))
@@ -439,7 +448,7 @@ export function CardSetDeckPage() {
                 aria-pressed={state.filter === item.key}
               >
                 <span>{item.label}</span>
-                <strong>{sets === null ? "—" : filterCount(filtered, item.key)}</strong>
+                <strong>{sets === null ? "—" : filterCounts.get(item.key) ?? 0}</strong>
               </button>
             ))}
           </div>
@@ -691,7 +700,7 @@ export function CardSetDeckPage() {
                     : `仅显示已加载的${item.label}卡组`}
                 </small>
               </span>
-              <b>{sets === null ? "—" : filterCount(filtered, item.key)}</b>
+              <b>{sets === null ? "—" : filterCounts.get(item.key) ?? 0}</b>
             </button>
           ))}
         </div>
@@ -700,13 +709,7 @@ export function CardSetDeckPage() {
   );
 }
 
-function filterCount(filtered: CardSetListItem[], key: Filter): number {
-  if (key === "all") return filtered.length;
-  return filtered.filter((item) => item.status === key).length;
-}
-
-/** 在已加载卡组内按「状态档 + 标题/摘要」统计匹配数（§6.3 客户端语义）。 */
-function countMatching(
+/** 在已加载卡组内按「状态档 + 标题/摘要」统计匹配数（§6.3 客户端语义）。 */function countMatching(
   sets: CardSetListItem[],
   filter: Filter,
   query: string,

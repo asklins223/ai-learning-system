@@ -286,14 +286,14 @@ export async function processCommitOutboxJob(job: CommitOutboxJob): Promise<"com
 
 /** API 定时器入口：claim → 处理 → 标记/退避。 */
 export async function runCommitOutboxTick(workerId: string, leaseMs: number): Promise<number> {
-  const claimed: CommitOutboxJob[] = [];
+  // PERF-A#12：改为逐条 claim→处理→标记——先领 10 条再串行处理会令靠前
+  // claim 的租约在处理时点老化，慢处理时可能提前过期被另一实例重领重跑。
+  // 逐条领取保证每条在处理前租约都是新鲜的（与 run-processing-tick 的
+  // B#1/R1 修复同模式）。
+  let processed = 0;
   for (let i = 0; i < 10; i += 1) {
     const job = await claimCommitRequested(workerId, leaseMs, new Date());
     if (job === null) break;
-    claimed.push(job);
-  }
-  let processed = 0;
-  for (const job of claimed) {
     try {
       await processCommitOutboxJob(job);
       await markCommitOutboxProcessed(job.id, workerId);

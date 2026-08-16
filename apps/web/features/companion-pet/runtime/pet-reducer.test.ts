@@ -37,6 +37,9 @@ test("submitting a draft creates a turn and bubbles the client message", () => {
   const result = petReducer(state, { type: "composer.submitted" });
   assert.equal(result.state.composer.kind, "submitting");
   assert.equal(result.state.turn.kind, "submitting");
+  if (result.state.turn.kind === "submitting") {
+    assert.equal(result.state.turn.userText, " 你好 ");
+  }
   assert.equal(result.state.bubble.kind, "turn");
   assert.equal(result.effects[0].kind, "submit_turn");
   if (result.effects[0].kind === "submit_turn") {
@@ -74,6 +77,7 @@ test("full fixture turn pipeline: accepted → thinking → streaming → final"
     assert.equal(state.turn.runId, "run-1");
     assert.equal(state.turn.generation, 1);
     assert.equal(state.turn.lastSeq, 1);
+    assert.equal(state.turn.userText, "讲讲这个知识点");
   }
   assert.equal(state.composer.kind, "closed");
   assert.equal(state.context.activeGeneration, 1);
@@ -552,7 +556,7 @@ test("voice tap-to-toggle fixture state machine", () => {
   if (state.composer.kind === "editing") assert.equal(state.composer.draft, "识别后的文字");
 });
 
-test("真实 ASR transcript 回填并绑定 voice artifact；手工编辑后降级为普通文字", () => {
+test("真实 ASR transcript 自动发送并绑定 voice artifact", () => {
   let state = initialState();
   state = petReducer(state, { type: "voice.toggle_requested" }).state;
   state = petReducer(state, {
@@ -577,17 +581,23 @@ test("真实 ASR transcript 回填并绑定 voice artifact；手工编辑后降�
     voiceArtifactId: "123e4567-e89b-12d3-a456-426614174000",
     transcriptSha256: "a".repeat(64),
   }).state;
-  assert.equal(state.composer.kind, "editing");
-  if (state.composer.kind !== "editing") return;
-  assert.equal(state.composer.voiceArtifactId, "123e4567-e89b-12d3-a456-426614174000");
-  state = petReducer(state, { type: "composer.draft_changed", draft: "用户修正后的文字" }).state;
-  assert.equal(state.composer.kind, "editing");
-  assert.equal(state.composer.voiceArtifactId, undefined);
-  const submitted = petReducer(state, { type: "composer.submitted" });
-  assert.equal(submitted.effects[0]?.kind, "submit_turn");
-  if (submitted.effects[0]?.kind === "submit_turn") {
-    assert.equal(submitted.effects[0].voiceArtifactId, undefined);
+  assert.equal(state.voice.kind, "idle");
+  assert.equal(state.composer.kind, "submitting");
+  if (state.composer.kind === "submitting") {
+    assert.equal(state.composer.draftSnapshot, "原始逐字稿");
+    assert.equal(state.composer.voiceArtifactId, "123e4567-e89b-12d3-a456-426614174000");
+    assert.equal(state.composer.transcriptSha256, "a".repeat(64));
   }
+  assert.equal(state.turn.kind, "submitting");
+  const result = petReducer(state, {
+    type: "turn.accepted",
+    conversationId: "conv",
+    runId: "run",
+    generation: 1,
+    seq: 1,
+  });
+  // turn.accepted 后 composer 关闭、turn running，语音自动发送链路与文字一致。
+  assert.equal(result.state.turn.kind, "running");
 });
 
 test("voice permission denied is recoverable and keeps text path", () => {

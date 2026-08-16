@@ -142,17 +142,22 @@ function splitByDoubleNewline(content: string, _sourceType: string): ParsedSegme
 function parseMarkdown(content: string): ParsedSegment[] {
   const segments: ParsedSegment[] = [];
   const lines = content.split("\n");
-  let currentText = "";
+  // 用数组累积行，flush/收尾时才 join 一次，避免长文档逐行字符串
+  // `+=` 造成 O(n²) 的不可变字符串重建。
+  let currentLines: string[] = [];
+  const currentText = (): string =>
+    currentLines.length === 0 ? "" : currentLines.join("\n") + "\n";
   let currentType: ParsedSegment["segmentType"] = "paragraph";
   let charStart = 0;
   let currentOffset = 0;
 
   function flush() {
     // G-008: 调整 charStart 以跳过前导空白，确保 content.slice(charStart, charEnd) === text
-    const trimmedStart = currentText.trimStart();
+    const text = currentText();
+    const trimmedStart = text.trimStart();
     const trimmed = trimmedStart.trimEnd();
     if (trimmed) {
-      const leadingWs = currentText.length - trimmedStart.length;
+      const leadingWs = text.length - trimmedStart.length;
       segments.push({
         text: trimmed,
         segmentType: currentType,
@@ -160,12 +165,12 @@ function parseMarkdown(content: string): ParsedSegment[] {
         charEnd: charStart + leadingWs + trimmed.length,
       });
     }
-    currentText = "";
+    currentLines = [];
     currentType = "paragraph";
   }
 
   let inCodeBlock = false;
-  let codeBlockContent = "";
+  let codeBlockLines: string[] = [];
   let codeBlockStartOffset = 0;
 
   for (const line of lines) {
@@ -173,7 +178,8 @@ function parseMarkdown(content: string): ParsedSegment[] {
     if (line.trim().startsWith("```")) {
       if (inCodeBlock) {
         // 代码块结束
-        codeBlockContent += line + "\n";
+        codeBlockLines.push(line);
+        const codeBlockContent = codeBlockLines.join("\n") + "\n";
         const trimmedStart = codeBlockContent.trimStart();
         const text = trimmedStart.trimEnd();
         const leadingWhitespace = codeBlockContent.length - trimmedStart.length;
@@ -183,14 +189,14 @@ function parseMarkdown(content: string): ParsedSegment[] {
           charStart: codeBlockStartOffset + leadingWhitespace,
           charEnd: codeBlockStartOffset + leadingWhitespace + text.length,
         });
-        codeBlockContent = "";
+        codeBlockLines = [];
         inCodeBlock = false;
       } else {
         // 先 flush 当前段落
         flush();
         inCodeBlock = true;
         codeBlockStartOffset = currentOffset;
-        codeBlockContent = line + "\n";
+        codeBlockLines = [line];
       }
       currentOffset += line.length + 1; // +1 for \n
       charStart = currentOffset;
@@ -198,7 +204,7 @@ function parseMarkdown(content: string): ParsedSegment[] {
     }
 
     if (inCodeBlock) {
-      codeBlockContent += line + "\n";
+      codeBlockLines.push(line);
       currentOffset += line.length + 1;
       continue;
     }
@@ -206,7 +212,7 @@ function parseMarkdown(content: string): ParsedSegment[] {
     // 标题行
     if (/^#{1,6}\s/.test(line)) {
       flush();
-      currentText = line + "\n";
+      currentLines = [line];
       currentType = "heading";
       charStart = currentOffset;
       currentOffset += line.length + 1;
@@ -217,7 +223,7 @@ function parseMarkdown(content: string): ParsedSegment[] {
     // 图片行（独立行，![alt](url) 格式）
     if (/^!\[[^\]]*\]\([^)]+\)\s*$/.test(line)) {
       flush();
-      currentText = line + "\n";
+      currentLines = [line];
       currentType = "image";
       charStart = currentOffset;
       currentOffset += line.length + 1;
@@ -232,7 +238,7 @@ function parseMarkdown(content: string): ParsedSegment[] {
         currentType = "quote";
         charStart = currentOffset;
       }
-      currentText += line + "\n";
+      currentLines.push(line);
       currentOffset += line.length + 1;
       continue;
     }
@@ -244,7 +250,7 @@ function parseMarkdown(content: string): ParsedSegment[] {
         currentType = "list";
         charStart = currentOffset;
       }
-      currentText += line + "\n";
+      currentLines.push(line);
       currentOffset += line.length + 1;
       continue;
     }
@@ -264,12 +270,13 @@ function parseMarkdown(content: string): ParsedSegment[] {
       currentType = "paragraph";
       charStart = currentOffset;
     }
-    currentText += line + "\n";
+    currentLines.push(line);
     currentOffset += line.length + 1;
   }
 
   // flush 最后一段
-  if (inCodeBlock && codeBlockContent.trim()) {
+  if (inCodeBlock && codeBlockLines.length > 0 && codeBlockLines.join("\n").trim()) {
+    const codeBlockContent = codeBlockLines.join("\n") + "\n";
     const trimmedStart = codeBlockContent.trimStart();
     const text = trimmedStart.trimEnd();
     const leadingWhitespace = codeBlockContent.length - trimmedStart.length;

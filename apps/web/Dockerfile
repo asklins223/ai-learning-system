@@ -9,9 +9,10 @@ RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.ustc.edu.cn|g' /etc/apk/repositorie
 # F-027: 使用 npm ci + lockfile 确保可复现构建
 FROM base AS deps
 COPY apps/web/package.json apps/web/package-lock.json ./
+COPY packages/shared /packages/shared
 COPY packages/shared/package.json packages/shared/package-lock.json /tmp/shared/
 RUN npm config set registry https://registry.npmmirror.com \
- && npm ci --no-audit --no-fund \
+ && npm ci --install-links --no-audit --no-fund \
  && npm ci --no-audit --no-fund --prefix /tmp/shared --registry=https://registry.npmmirror.com
 
 FROM base AS dev

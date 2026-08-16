@@ -14,7 +14,7 @@
  * 输出对账报告。入口：apps/api/src/scripts/backfill-legacy-sessions.ts。
  */
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { learningRuns } from "../../db/schema/learning-runs.ts";
 import { learningSessions, learningEpisodes } from "../../db/schema/learning-sessions.ts";
@@ -146,17 +146,28 @@ export async function backfillLegacySessionsToRuns(
     ordinalByEpisode.set(episode.id, currentOrdinal);
   }
 
-  for (const episode of episodes) {
-    // 幂等：已迁移（legacyEpisodeId 存在）跳过。
-    const existing = await tx
-      .select({ id: learningRuns.id })
+  // 预加载已迁移的 legacyEpisodeId 集合，避免逐 episode 的存在性查询（N+1）。
+  // 幂等仍由 DB 部分唯一索引最终兜底。
+  const migratedEpisodeIds = new Set<string>();
+  if (episodes.length > 0) {
+    const migratedRows = await tx
+      .select({ legacyEpisodeId: learningRuns.legacyEpisodeId })
       .from(learningRuns)
       .where(and(
         eq(learningRuns.workspaceId, workspaceId),
-        eq(learningRuns.legacyEpisodeId, episode.id),
-      ))
-      .limit(1);
-    if (existing[0]) {
+        inArray(
+          learningRuns.legacyEpisodeId,
+          episodes.map((e) => e.id),
+        ),
+      ));
+    for (const r of migratedRows) {
+      if (r.legacyEpisodeId !== null) migratedEpisodeIds.add(r.legacyEpisodeId);
+    }
+  }
+
+  for (const episode of episodes) {
+    // 幂等：已迁移（legacyEpisodeId 存在）跳过。
+    if (migratedEpisodeIds.has(episode.id)) {
       report.skippedExisting += 1;
       continue;
     }
@@ -216,8 +227,10 @@ export async function verifyLegacyRunReconciliation(
   tx: ApiTransaction,
   workspaceId: string,
 ): Promise<{ migratedRuns: number; canonicalEnvelopes: number }> {
-  const runs = await tx
-    .select({ id: learningRuns.id })
+  // PERF-A#15：改用 SQL count(*) 聚合，避免把全部 Run/envelope 行物化进内存
+  // （大 workspace 下 unbounded）。语义不变（与原来的 .length 等价）。
+  const [runsRow] = await tx
+    .select({ count: sql<number>`count(*)::int` })
     .from(learningRuns)
     .where(and(
       eq(learningRuns.workspaceId, workspaceId),
@@ -226,11 +239,14 @@ export async function verifyLegacyRunReconciliation(
         .from(learningEpisodes)
         .where(eq(learningEpisodes.workspaceId, workspaceId))),
     ));
-  const envelopes = await tx
-    .select({ id: canonicalLearningEventOutbox.id })
+  const [envelopesRow] = await tx
+    .select({ count: sql<number>`count(*)::int` })
     .from(canonicalLearningEventOutbox)
     .where(eq(canonicalLearningEventOutbox.workspaceId, workspaceId));
-  return { migratedRuns: runs.length, canonicalEnvelopes: envelopes.length };
+  return {
+    migratedRuns: Number(runsRow?.count ?? 0),
+    canonicalEnvelopes: Number(envelopesRow?.count ?? 0),
+  };
 }
 
 

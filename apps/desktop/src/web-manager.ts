@@ -135,34 +135,37 @@ function isPortFree(port: number): Promise<boolean> {
  */
 async function findFreePort(startPort: number): Promise<number> {
   const maxExtension = 10;
-  
+
+  const probeRange = async (from: number, count: number, label: string): Promise<number | null> => {
+    const ports = Array.from({ length: count }, (_, i) => from + i);
+    // 并行探测候选端口，避免串行 isPortResponding（最坏每端口 1s 超时）
+    // 累积成几十秒的启动阻塞。仍按升序取第一个空闲端口，保证确定性。
+    const results = await Promise.all(ports.map(async (port) => {
+      // If something is already responding on this port, skip it —
+      // it's likely Docker or another service.
+      if (await isPortResponding(port)) {
+        logger.info(`[web] Port ${port} is already responding — skipping${label ? ` (${label})` : ""}.`);
+        return null;
+      }
+      // Verify the port is actually free to bind.
+      if (await isPortFree(port)) {
+        return port;
+      }
+      logger.info(`[web] Port ${port} is bound but not responding — skipping${label ? ` (${label})` : ""}.`);
+      return null;
+    }));
+    return results.find((p) => p !== null) ?? null;
+  };
+
   // 首次扫描：指定范围 3000-3019
-  for (let port = startPort; port < startPort + PORT_SCAN_RANGE; port++) {
-    // If something is already responding on this port, skip it —
-    // it's likely Docker or another service.
-    if (await isPortResponding(port)) {
-      logger.info(`[web] Port ${port} is already responding — skipping.`);
-      continue;
-    }
-
-    // Verify the port is actually free to bind.
-    if (await isPortFree(port)) {
-      return port;
-    }
-
-    logger.info(`[web] Port ${port} is bound but not responding — skipping.`);
-  }
+  const primary = await probeRange(startPort, PORT_SCAN_RANGE, "");
+  if (primary !== null) return primary;
 
   // SEC-05 修复：自动重试，扩大搜索范围到 3020-3029
-  for (let port = startPort + PORT_SCAN_RANGE; port < startPort + PORT_SCAN_RANGE + maxExtension; port++) {
-    if (await isPortResponding(port)) {
-      logger.info(`[web] Port ${port} is already responding — skipping (retry).`);
-      continue;
-    }
-    if (await isPortFree(port)) {
-      logger.info(`[web] Found free port ${port} after extension`);
-      return port;
-    }
+  const extended = await probeRange(startPort + PORT_SCAN_RANGE, maxExtension, "retry");
+  if (extended !== null) {
+    logger.info(`[web] Found free port ${extended} after extension`);
+    return extended;
   }
 
   throw new Error(

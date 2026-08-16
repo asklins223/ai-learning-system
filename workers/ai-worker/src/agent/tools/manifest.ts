@@ -164,18 +164,21 @@ async function handleGetNextUnassignedBundles(
   // 标记为 assigned（在事务中执行，确保原子性）
   const now = new Date();
   if (unassigned.length > 0) {
+    const unassignedIds = unassigned.map((b) => b.id);
     await db.transaction(async (tx) => {
-      for (const bundle of unassigned) {
-        await tx.update(schema.cardGenerationSourceBundles).set({
-          assignmentStatus: "assigned",
-          assignedAgentUnitId: ctx.agentUnitId,
-          updatedAt: now,
-        }).where(and(
-          eq(schema.cardGenerationSourceBundles.id, bundle.id),
-          eq(schema.cardGenerationSourceBundles.workspaceId, ctx.workspaceId),
-        ));
+      // 单条批量 UPDATE，避免每个 bundle 一次 round-trip
+      await tx.update(schema.cardGenerationSourceBundles).set({
+        assignmentStatus: "assigned",
+        assignedAgentUnitId: ctx.agentUnitId,
+        updatedAt: now,
+      }).where(and(
+        inArray(schema.cardGenerationSourceBundles.id, unassignedIds),
+        eq(schema.cardGenerationSourceBundles.workspaceId, ctx.workspaceId),
+        eq(schema.cardGenerationSourceBundles.assignmentStatus, "pending"),
+      ));
 
-        // 更新 CoverageLedger 内存状态
+      // 更新 CoverageLedger 内存状态
+      for (const bundle of unassigned) {
         ctx.coverageLedger.updateAssignment(bundle.bundleKey, "assigned", ctx.agentUnitId);
       }
     });

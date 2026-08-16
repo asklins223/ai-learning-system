@@ -10,6 +10,7 @@ import type {
   VoiceDialogueStateV1,
 } from "../runtime/pet-runtime-types";
 import type { AllowedMainRouteV1 } from "@ailearn/shared/desktop-pet-contracts";
+import { stripVoiceExpressionTags } from "@ailearn/shared";
 import { PetIcon, type PetIconNameV1 } from "./PetIcon";
 
 type BubbleToneV1 = "neutral" | "active" | "success" | "warning" | "danger";
@@ -36,6 +37,17 @@ function turnBubbleView(
   scrollRef: React.RefObject<HTMLDivElement | null>,
   onScroll: () => void,
 ): BubbleViewV1 | null {
+  const userText = "userText" in turn ? turn.userText : undefined;
+  const userBubble = userText?.trim() ? (
+    <div className="pet-chat-user"><span>{userText}</span></div>
+  ) : null;
+  const assistantHead = (
+    <div className="pet-chat-assistant-head">
+      <span className="pet-chat-avatar" aria-hidden="true" />
+      <span>伴星</span>
+    </div>
+  );
+
   if (bubble.ref.kind === "client") {
     return {
       key: `client-${bubble.ref.clientMessageId}`,
@@ -45,8 +57,16 @@ function turnBubbleView(
       liveLabel: "正在交给伴星",
       dismissible: false,
       autoDismissKind: null,
-      textLength: 0,
-      content: <p className="pet-bubble-copy">我收到了，马上看看。</p>,
+      textLength: userText?.length ?? 0,
+      content: (
+        <div className="pet-chat">
+          {userBubble}
+          <div className="pet-chat-assistant is-pending">
+            {assistantHead}
+            <p className="pet-bubble-copy">正在交给伴星…</p>
+          </div>
+        </div>
+      ),
     };
   }
 
@@ -61,11 +81,17 @@ function turnBubbleView(
         dismissible: false,
         autoDismissKind: null,
         cancellable: true,
-        textLength: 0,
+        textLength: userText?.length ?? 0,
         content: (
-          <div className="pet-thinking-line" role="status" aria-live="polite">
-            <span className="pet-bubble-dots" aria-hidden="true"><i /><i /><i /></span>
-            <span>正在整理一个清楚的回答</span>
+          <div className="pet-chat">
+            {userBubble}
+            <div className="pet-chat-assistant">
+              {assistantHead}
+              <div className="pet-thinking-line" role="status" aria-live="polite">
+                <span className="pet-bubble-dots" aria-hidden="true"><i /><i /><i /></span>
+                <span>正在整理一个清楚的回答</span>
+              </div>
+            </div>
           </div>
         ),
       };
@@ -82,11 +108,17 @@ function turnBubbleView(
       cancellable: true,
       textLength: turn.previewText.length,
       content: (
-        <div className="pet-bubble-answer" role="status" aria-live="polite">
-          <div className="pet-bubble-scroll" data-bubble-scroll ref={scrollRef} onScroll={onScroll}>
-            <p className="pet-bubble-copy pet-bubble-preview">
-              {turn.previewText || "正在写下第一句…"}
-            </p>
+        <div className="pet-chat">
+          {userBubble}
+          <div className="pet-chat-assistant">
+            {assistantHead}
+            <div className="pet-bubble-answer" role="status" aria-live="polite">
+              <div className="pet-bubble-scroll" data-bubble-scroll ref={scrollRef} onScroll={onScroll}>
+                <p className="pet-bubble-copy pet-bubble-preview">
+                  {turn.previewText || "正在写下第一句…"}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       ),
@@ -104,11 +136,17 @@ function turnBubbleView(
       autoDismissKind: "final",
       textLength: turn.previewText.length,
       content: (
-        <div className="pet-bubble-answer is-final" aria-live="polite">
-          <div className="pet-bubble-scroll" data-bubble-scroll ref={scrollRef} onScroll={onScroll}>
-            <p className="pet-bubble-copy pet-bubble-preview">
-              {turn.previewText}
-            </p>
+        <div className="pet-chat">
+          {userBubble}
+          <div className="pet-chat-assistant">
+            {assistantHead}
+            <div className="pet-bubble-answer is-final" aria-live="polite">
+              <div className="pet-bubble-scroll" data-bubble-scroll ref={scrollRef} onScroll={onScroll}>
+                <p className="pet-bubble-copy pet-bubble-preview">
+                  {turn.previewText}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       ),
@@ -123,8 +161,16 @@ function turnBubbleView(
       label: "回复已停止",
       dismissible: true,
       autoDismissKind: "final",
-      textLength: 6,
-      content: <p className="pet-bubble-copy">这一轮停在这里，你随时可以换个问法。</p>,
+      textLength: userText?.length ?? 6,
+      content: (
+        <div className="pet-chat">
+          {userBubble}
+          <div className="pet-chat-assistant is-cancelled">
+            {assistantHead}
+            <p className="pet-bubble-copy">这一轮停在这里，你随时可以换个问法。</p>
+          </div>
+        </div>
+      ),
     };
   }
 
@@ -370,6 +416,35 @@ export function PetBubble() {
     };
   }, [view, held, composer.kind, menu.kind, voice.kind, dispatch]);
 
+  // 朗读字幕：伴星说话时把当前 TTS 段逐字显示出来，形成"逐字读"的视觉同步。
+  const speakingText = voice.kind === "speaking"
+    ? stripVoiceExpressionTags(voice.speakingText ?? "")
+    : "";
+  const voiceSegmentId = voice.kind === "speaking" ? voice.segmentId : null;
+  const [revealCount, setRevealCount] = useState(0);
+  const speakingSegmentRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (voice.kind !== "speaking" || !speakingText || voiceSegmentId === null) return;
+    if (speakingSegmentRef.current !== voiceSegmentId) {
+      speakingSegmentRef.current = voiceSegmentId;
+      setRevealCount(0);
+    }
+    if (state.context.reducedMotion || state.context.animationOff) {
+      setRevealCount(speakingText.length);
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setRevealCount((count) => {
+        if (count >= speakingText.length) {
+          window.clearInterval(interval);
+          return count;
+        }
+        return count + 1;
+      });
+    }, 160);
+    return () => window.clearInterval(interval);
+  }, [voice.kind, voiceSegmentId, speakingText, state.context.reducedMotion, state.context.animationOff]);
+
   if (!view) return null;
   // 15c：完整内容直接在气泡内展示（滚动查看），不再提供"完整内容"跳转按钮。
   const longText = false;
@@ -409,6 +484,16 @@ export function PetBubble() {
       </header>
 
       <div className="pet-bubble-body">{view.content}</div>
+
+      {voice.kind === "speaking" && speakingText ? (
+        <div className="pet-bubble-caption" role="status" aria-live="polite">
+          <span className="pet-bubble-caption-label" aria-hidden="true">朗读</span>
+          <span className="pet-bubble-caption-text">
+            {speakingText.slice(0, revealCount)}
+            {revealCount < speakingText.length ? <span className="pet-bubble-caption-cursor" aria-hidden="true" /> : null}
+          </span>
+        </div>
+      ) : null}
 
       {(longText || view.tone === "danger" || view.autoDismissKind === "incoming" || view.autoDismissKind === "final" || view.cancellable || (state.bubble.kind === "error" && state.bubble.code === "AI_CONSENT_REQUIRED")) ? (
         <footer className="pet-bubble-footer">

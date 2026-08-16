@@ -1812,7 +1812,6 @@ export const UnderstandingUniverse = forwardRef<
         return 10;
       };
       const orderedNodes = [...screenNodes.values()].sort((left, right) => priority(left) - priority(right));
-      const labelCandidates = orderedNodes.slice().sort((left, right) => priority(right) - priority(left));
       const occupiedCells = new Set<string>();
       const labelPlacements: LabelPlacement[] = [];
       const labelBudget = quality === "interaction"
@@ -1824,7 +1823,9 @@ export const UnderstandingUniverse = forwardRef<
             : clamp(Math.floor((width * height) / 10_500), 28, 110);
       if (layerContext && labelBudget > 0) {
         layerContext.font = '500 12px "Noto Sans SC", "PingFang SC", sans-serif';
-        for (const screenNode of labelCandidates) {
+        // Descending priority: iterate orderedNodes (ascending) in reverse.
+        for (let i = orderedNodes.length - 1; i >= 0; i--) {
+          const screenNode = orderedNodes[i];
           if (labelPlacements.length >= labelBudget) break;
           const { node, x, y, radius } = screenNode;
           const selected = node.id === selectedId;

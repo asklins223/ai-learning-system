@@ -272,13 +272,18 @@ const ReviewRow = memo(function ReviewRow({
     returnTo: "/review?uiPreview=full",
   });
   if (item.keyPointId) previewParams.set("keyPointId", item.keyPointId);
+  const runOrigin = item.isV2 ? "review_v2" : "review";
   const runParams = new URLSearchParams({
-    origin: "review",
+    origin: runOrigin,
     scheduleId: item.reviewId,
-    keyPointId: item.keyPointId ?? "",
     generation: String(item.generation ?? 0),
     returnTo: "/review",
   });
+  if (item.isV2) {
+    runParams.set("objectiveId", item.keyPointId ?? "");
+  } else {
+    runParams.set("keyPointId", item.keyPointId ?? "");
+  }
   const focusHref = learningRunEnabled
     ? `/learning-runs/new?${runParams.toString()}`
     : previewMode

@@ -19,9 +19,8 @@ import { test, expect } from "../lib/fixtures";
  */
 
 test.describe("Card Generation V2 API journey @pr", () => {
-  test("create note, generate V2 run, review candidates, reveal, keep, and activate", async ({ authedPage, seedCredentials }) => {
+  test("create note, generate V2 run, review candidates, reveal, keep, and activate", async ({ authedPage }) => {
     const page = authedPage;
-    const ownerWs = seedCredentials.workspaces[0];
 
     // 获取 CSRF token（cookie-based auth 需要）
     const cookies = await page.context().cookies();

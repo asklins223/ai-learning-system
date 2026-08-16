@@ -18,32 +18,37 @@ export interface LearningRunStreamSubscription {
   close: () => void;
 }
 
-/** 解析一段 SSE 文本（id/event/data 三字段）。 */
+/** 解析单个 SSE block（id/event/data 三字段）。 */
+function parseSseBlock(block: string): LearningRunStreamEvent | null {
+  let id = "";
+  let eventType = "";
+  let data = "";
+  for (const line of block.split("\n")) {
+    if (line.startsWith("id:")) id = line.slice(3).trim();
+    else if (line.startsWith("event:")) eventType = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (id === "" || eventType === "") return null;
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = data ? (JSON.parse(data) as Record<string, unknown>) : {};
+  } catch {
+    payload = {};
+  }
+  return {
+    sequence: Number(id),
+    eventType,
+    payload,
+    occurredAt: new Date().toISOString(),
+  };
+}
+
+/** 解析一段 SSE 文本（id/event/data 三字段，空行分隔）。 */
 export function parseSseChunk(buffer: string): LearningRunStreamEvent[] {
   const events: LearningRunStreamEvent[] = [];
-  const blocks = buffer.split(/\n\n/);
-  for (const block of blocks) {
-    let id = "";
-    let eventType = "";
-    let data = "";
-    for (const line of block.split("\n")) {
-      if (line.startsWith("id:")) id = line.slice(3).trim();
-      else if (line.startsWith("event:")) eventType = line.slice(6).trim();
-      else if (line.startsWith("data:")) data += line.slice(5).trim();
-    }
-    if (id === "" || eventType === "") continue;
-    let payload: Record<string, unknown> = {};
-    try {
-      payload = data ? (JSON.parse(data) as Record<string, unknown>) : {};
-    } catch {
-      payload = {};
-    }
-    events.push({
-      sequence: Number(id),
-      eventType,
-      payload,
-      occurredAt: new Date().toISOString(),
-    });
+  for (const block of buffer.split(/\n\n/)) {
+    const event = parseSseBlock(block);
+    if (event) events.push(event);
   }
   return events;
 }
@@ -81,20 +86,24 @@ export async function subscribeLearningRunEvents(
   };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  // 增量解析：仅保留未完成块（tail），每块最多 split 一次并直接按块解析，
+  // 避免对整段累计 buffer 反复 split/join/再 split 的 O(n^2) 开销。
+  let tail = "";
   void (async () => {
     while (!closed) {
       const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split(/\n\n/);
-      buffer = lines.pop() ?? "";
-      for (const event of parseSseChunk(lines.join("\n\n"))) {
-        onEvent(event);
+      tail += decoder.decode(value, { stream: true });
+      const blocks = tail.split(/\n\n/);
+      tail = blocks.pop() ?? "";
+      for (const block of blocks) {
+        const event = parseSseBlock(block);
+        if (event) onEvent(event);
       }
     }
-    if (buffer.trim().length > 0) {
-      for (const event of parseSseChunk(buffer)) onEvent(event);
+    if (tail.trim().length > 0) {
+      const event = parseSseBlock(tail);
+      if (event) onEvent(event);
     }
   })();
   return { close };

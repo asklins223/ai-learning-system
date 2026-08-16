@@ -182,7 +182,7 @@ async function verifyEntityRefs(
     list.push({ id: key.id, label: `${key.table}/${key.id}` });
   }
 
-  for (const [table, entries] of byTable) {
+  await Promise.all([...byTable].map(async ([table, entries]) => {
     // 去重：同一实体多次引用只校验一次（归属对 workspace 一次成立）。
     const ids = [...new Set(entries.map((e) => e.id))];
     // 只做存在性 + workspace 归属校验；不读取实体正文。
@@ -202,5 +202,5 @@ async function verifyEntityRefs(
     if (missing.length > 0) {
       throw new ContextHydrationError(`entity not found in workspace: ${missing.join(",")}`);
     }
-  }
+  }));
 }

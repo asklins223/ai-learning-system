@@ -28,7 +28,7 @@ import {
 } from "../lib/governance.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
-import { COMPANION_PERSONA_V2, COMPANION_PERSONA_V2_PROMPT_ID, COMPANION_PERSONA_V2_SHA256, classifyCompanionReplyEmotion, isEffectiveHardEvidence, type ChatMessage,  } from "@ailearn/shared";
+import { COMPANION_PERSONA_V3, COMPANION_PERSONA_V3_PROMPT_ID, COMPANION_PERSONA_V3_SHA256, classifyCompanionReplyEmotion, isEffectiveHardEvidence, type ChatMessage,  } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
@@ -56,11 +56,12 @@ export interface CompanionDialogueHandlerContext {
 export const COMPANION_HARD_MAX_CHARS = 20_000;
 /** §9.5 P2 默认模型参数。
  *  2026-08-12+（15a 新反馈）：temperature 0.6 → 0.9（陪伴对话像真人、更随性，
- *  正确性其次）；disableThinking: true（丢掉思考模式——DeepSeek 系模型默认
- *  思考会显著拖慢首 token，日常陪伴对话快比准重要）。 */
+ *  正确性其次）。
+ *  2026-08-16（桌宠聊天风格优化）：temperature 0.9 → 1.0、maxTokens 600 → 700，
+ *  让回复更活泼、更“有来有回”，同时保留足够长度说一句轻快的小尾巴。 */
 const COMPANION_PROVIDER_OPTIONS = {
-  temperature: 0.9,
-  maxTokens: 600,
+  temperature: 1.0,
+  maxTokens: 700,
   responseFormat: "text" as const,
   // 2026-08-13（全链路诊断）：移除 disableThinking——flash 模型关思考后
   // 推理崩塌（用户反馈桌宠"蠢"，实测 9.11 vs 9.9 答错）。思考由平台
@@ -214,6 +215,7 @@ interface ReadContext {
   groundedTutorContext: GroundedTutorContext | null;
   userText: string;
   recentMessages: { role: "user" | "assistant"; text: string }[];
+  activeMemories: { kind: string; content: string }[];
   nextMessageSeq: number;
   nextEventSeq: number;
 }
@@ -323,6 +325,8 @@ export function buildCompanionPersonaMessages(input: {
   pageContext: unknown;
   workspacePolicy: { sendToExternal: boolean; piiDetection: boolean } | null;
   groundedTutorContext?: GroundedTutorContext | null;
+  /** 已确认/非候选的长期记忆（注入日常对话，让桌宠记得你说过的目标/偏好）。 */
+  activeMemories?: { kind: string; content: string }[];
 }): ChatMessage[] {
   const boundedRecent = input.recentMessages
     .slice(0, 20)
@@ -332,16 +336,20 @@ export function buildCompanionPersonaMessages(input: {
     const canonical = canonicalJsonV1(input.pageContext);
     pageContext = canonical.length > 2_000 ? canonical.slice(0, 2_000) : canonical;
   }
+  const activeMemories = (input.activeMemories ?? [])
+    .slice(0, 30)
+    .map((m) => ({ kind: m.kind, content: m.content.slice(0, 500) }));
   const userContent = {
     version: 1,
     workspacePolicy: input.workspacePolicy ?? { sendToExternal: false, piiDetection: true },
     recentMessages: boundedRecent,
     pageContext: input.groundedTutorContext ? null : pageContext,
+    activeMemories,
     currentMessage: input.userText.slice(0, 4_000),
     ...(input.groundedTutorContext ? { groundedTarget: input.groundedTutorContext } : {}),
   };
   return [
-    { role: "system", content: input.groundedTutorContext ? GROUNDED_TUTOR_COMPANION_PROMPT : COMPANION_PERSONA_V2 },
+    { role: "system", content: input.groundedTutorContext ? GROUNDED_TUTOR_COMPANION_PROMPT : COMPANION_PERSONA_V3 },
     { role: "user", content: canonicalJsonV1(userContent) },
   ];
 }
@@ -476,6 +484,21 @@ export async function runCompanionDialogue(
             role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
             text: textOfCompanionBlocks(m.blocks),
           }));
+        // 长期记忆：只注入已确认/非候选的活跃记忆（候选默认不参与主动策略，
+        // 也不进入日常对话上下文）。限制条数/长度，防止 prompt 被记忆撑爆。
+        const memoryRows = await tx.execute<{ kind: string; content: string }>(sql`
+          SELECT kind, content
+          FROM assistant_memory_items
+          WHERE workspace_id = ${ctx.workspaceId}
+            AND user_id = ${run.user_id}
+            AND deleted_at IS NULL
+            AND candidate = false
+          ORDER BY updated_at DESC
+          LIMIT 30
+        `);
+        const activeMemories = memoryRows
+          .slice(0, 30)
+          .map((m) => ({ kind: m.kind, content: m.content.slice(0, 500) }));
         const groundedTutorContext = await readGroundedTutorContext(
           tx,
           run.page_context,
@@ -493,6 +516,7 @@ export async function runCompanionDialogue(
           groundedTutorContext,
           userText,
           recentMessages,
+          activeMemories,
           nextMessageSeq: Number(conv.next_message_seq),
           nextEventSeq: Number(conv.next_event_seq),
         };
@@ -596,6 +620,7 @@ export async function runCompanionDialogue(
     recentMessages: read.recentMessages,
     pageContext: read.pageContext,
     groundedTutorContext: read.groundedTutorContext,
+    activeMemories: read.activeMemories,
     workspacePolicy: {
       sendToExternal: govCtx.policy.sendToExternal,
       piiDetection: govCtx.policy.piiDetection,
@@ -913,8 +938,8 @@ export async function runCompanionDialogue(
               assistant_message_id = ${assistantMessageId},
               provider_id = ${provider.id},
               model_id = ${provider.modelId},
-              prompt_version = ${read.groundedTutorContext ? GROUNDED_TUTOR_PROMPT_ID : COMPANION_PERSONA_V2_PROMPT_ID},
-              prompt_hash = ${read.groundedTutorContext ? groundedTutorPromptSha256 : COMPANION_PERSONA_V2_SHA256},
+              prompt_version = ${read.groundedTutorContext ? GROUNDED_TUTOR_PROMPT_ID : COMPANION_PERSONA_V3_PROMPT_ID},
+              prompt_hash = ${read.groundedTutorContext ? groundedTutorPromptSha256 : COMPANION_PERSONA_V3_SHA256},
               finished_at = now()
           WHERE id = ${read.runId}
         `);
@@ -1092,27 +1117,57 @@ async function runStreamingDialogue(args: StreamDialogueArgs): Promise<{ content
   // 15b：字幕般流式 TTS——delta 写库后增量切段（完整句立即成段下发）
   const voiceEnabled = isCompanionVoiceDialogueEnabled();
   let ttsState: import("../lib/tts-segments.ts").IncrementalTtsState = { rest: "", sentCount: 0, sentChars: 0 };
-  /** 15b：把切出的段逐个发 voice.segment.ready（独立事务；fence 拒绝即停）。 */
+  /**
+   * 15b：把切出的段发 voice.segment.ready。PERF：整个批次在单个 workspace 事务内
+   * 完成——fence 校验一次、next_event_seq 一次递增 N、多行 INSERT 一次、
+   * NOTIFY 一次（原实现每段一个独立事务 = N 次 DB round-trip）。fence 拒绝即停
+   * （与逐段语义一致：run 已终态时不再写后续段）。
+   */
   const emitSegments = async (segs: import("../lib/tts-segments.ts").CompanionTtsSegment[]): Promise<boolean> => {
-    for (const seg of segs) {
-      const ok = await emitCompanionTtsSegment({
-        workspaceId: ctx.workspaceId,
-        userId: read.userId,
-        runId: read.runId,
-        generation: read.generation,
-        accountEpoch: read.accountEpoch,
-        conversationId: read.conversationId,
-        expiresAt,
-        segmentId: companionSegmentId(read.runId, read.generation, seg.ordinal, seg.textSha256),
-        ordinal: seg.ordinal,
-        text: seg.text,
-        textSha256: seg.textSha256,
-        emotion: extractVoiceEmotion(seg.text) ?? undefined,
-        notifyCompanionEvent,
-      });
-      if (!ok) return false;
-    }
-    return true;
+    if (segs.length === 0) return true;
+    return withWorkerWorkspaceTransaction(
+      { workspaceId: ctx.workspaceId, userId: read.userId },
+      async (tx) => {
+        const alive = await tx.execute<{ id: string }>(sql`
+          UPDATE companion_turn_runs
+          SET status = 'running', updated_at = now()
+          WHERE id = ${read.runId} AND status IN ('accepted', 'running')
+            AND generation = ${read.generation}
+          RETURNING id
+        `);
+        if (!alive[0]) return false;
+        const counters = await tx.execute<{ next_event_seq: string }>(sql`
+          UPDATE companion_conversations
+          SET next_event_seq = next_event_seq + ${segs.length}
+          WHERE id = ${read.conversationId}
+          RETURNING next_event_seq
+        `);
+        const startSeq = Number(counters[0].next_event_seq) - segs.length;
+        const rows = segs.map((seg, i) => {
+          const emotion = extractVoiceEmotion(seg.text) ?? undefined;
+          return sql`(
+            ${read.conversationId}, ${startSeq + i}, ${ctx.workspaceId}, ${read.userId},
+            ${read.runId}, ${read.generation}, ${read.accountEpoch},
+            'voice.segment.ready',
+            ${JSON.stringify({
+              segmentId: companionSegmentId(read.runId, read.generation, seg.ordinal, seg.textSha256),
+              ordinal: seg.ordinal,
+              text: seg.text,
+              textSha256: seg.textSha256,
+              ...(emotion ? { emotion } : {}),
+            })},
+            ${expiresAt}
+          )`;
+        });
+        await tx.execute(sql`
+          INSERT INTO companion_stream_events
+            (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch, type, payload, expires_at)
+          VALUES ${sql.join(rows, sql`, `)}
+        `);
+        await notifyCompanionEvent(tx, startSeq + segs.length - 1);
+        return true;
+      },
+    );
   };
 
   const resetIdle = () => {
@@ -1282,7 +1337,11 @@ interface BatchedDeltasArgs {
 async function writeBatchedDeltas(args: BatchedDeltasArgs): Promise<boolean> {
   const { assistantText, ctx, read, expiresAt, notifyCompanionEvent } = args;
   const streamDeltas = chunkTextIntoDeltas(assistantText, 256);
-  for (let i = 0; i < streamDeltas.length; i += 1) {
+  // 每事务批量写入多个 delta，减少事务/DB round-trip 开销；
+  // 保留 fence + 数量级幂等续写语义，并在批次间保留 50ms 节流。
+  const DELTAS_PER_TX = 4;
+  for (let i = 0; i < streamDeltas.length; i += DELTAS_PER_TX) {
+    const batch = streamDeltas.slice(i, i + DELTAS_PER_TX);
     const written = await withWorkerWorkspaceTransaction(
       { workspaceId: ctx.workspaceId, userId: read.userId },
       async (tx) => {
@@ -1304,22 +1363,28 @@ async function writeBatchedDeltas(args: BatchedDeltasArgs): Promise<boolean> {
         if (writtenDeltaCount !== i) {
           throw new Error(`companion delta stream desync: written=${writtenDeltaCount} expected=${i}`);
         }
+        // 一次性递增 next_event_seq 为整个批次分配连续 seq
         const counters = await tx.execute<{ next_event_seq: string }>(sql`
           UPDATE companion_conversations
-          SET next_event_seq = next_event_seq + 1
+          SET next_event_seq = next_event_seq + ${batch.length}
           WHERE id = ${read.conversationId}
           RETURNING next_event_seq
         `);
-        const deltaSeq = Number(counters[0].next_event_seq) - 1;
+        const endSeq = Number(counters[0].next_event_seq) - 1;
+        const startSeq = endSeq - batch.length + 1;
+        // 多行批量 INSERT
         await tx.execute(sql`
           INSERT INTO companion_stream_events
             (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch, type, payload, expires_at)
-          VALUES
-            (${read.conversationId}, ${deltaSeq}, ${ctx.workspaceId}, ${read.userId},
-             ${read.runId}, ${read.generation}, ${read.accountEpoch}, 'assistant.delta',
-             ${JSON.stringify(streamDeltas[i])}, ${expiresAt})
+          VALUES ${sql.join(batch.map((delta, j) => sql`(
+            ${read.conversationId}, ${startSeq + j}, ${ctx.workspaceId}, ${read.userId},
+            ${read.runId}, ${read.generation}, ${read.accountEpoch}, 'assistant.delta',
+            ${JSON.stringify(delta)}, ${expiresAt}
+          )`), sql`, `)}
         `);
-        await notifyCompanionEvent(tx, deltaSeq);
+        for (let j = 0; j < batch.length; j++) {
+          await notifyCompanionEvent(tx, startSeq + j);
+        }
         return true;
       },
     );

@@ -59,7 +59,7 @@ test("E17：旧多 Episode Session 拆 Run（语义正确）+ 幂等 + 对账", 
     await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
     await tx`SELECT set_config('app.user_id', ${userId}, true)`;
     await tx`INSERT INTO learning_sessions (id, workspace_id, user_id, origin, origin_ref, intent, status)
-             VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card', ${JSON.stringify({ type: "card", id: cardId })}, 'stabilize', 'active')`;
+             VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card', ${tx.json({ type: "card", id: cardId })}, 'stabilize', 'active')`;
     await tx`INSERT INTO learning_episodes (
                id, session_id, workspace_id, user_id, key_point_id, origin, origin_ref, intent,
                formal_eligibility_kind, formal_plan, scheduling_decision,

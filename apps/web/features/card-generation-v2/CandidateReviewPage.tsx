@@ -28,7 +28,7 @@ import {
   buildActivateCandidatesRequest,
 } from "./api/activation-builder";
 import type { CandidateRevealContentV2, CandidateReviewItemV2 } from "./contracts/ui-contracts";
-import type { CardPlanV2, CandidateActionCommandV2 } from "@ailearn/shared";
+import type { CardPlanV2, CandidateActionCommandV2, CardActivationReceiptV2 } from "@ailearn/shared";
 
 export interface CandidateReviewPageProps {
   runId: string;
@@ -60,6 +60,7 @@ export function CandidateReviewPage({
   const [activationError, setActivationError] = useState<string | null>(null);
   const [activating, setActivating] = useState(false);
   const [activated, setActivated] = useState(false);
+  const [activatedReceipt, setActivatedReceipt] = useState<CardActivationReceiptV2 | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,11 +172,12 @@ export function CandidateReviewPage({
           plan,
           selected: selectedPublic,
         });
-        await v2.activateCandidates(
+        const receipt = await v2.activateCandidates(
           runId,
           request,
           newV2IdempotencyKey("candidate-activate"),
         );
+        setActivatedReceipt(receipt);
         setActivated(true);
       } catch (error) {
         setActivationError(
@@ -240,10 +242,22 @@ export function CandidateReviewPage({
           <Icon.Warn />{activationError}
         </p>
       )}
-      {activated && (
-        <p className="candidate-review__notice" role="status">
-          已启用。可开始第一次验证。
-        </p>
+      {activated && activatedReceipt?.mappings[0] && (
+        <div className="candidate-review__activated" role="status">
+          <p className="candidate-review__notice">已启用。可开始第一次验证。</p>
+          <a
+            className="card-v2-button card-v2-button--primary"
+            href={`/learning-runs/new?origin=card_v2&cardId=${encodeURIComponent(activatedReceipt.mappings[0].cardId)}&objectiveId=${encodeURIComponent(activatedReceipt.mappings[0].objectiveId)}&returnTo=${encodeURIComponent(`/notes/${encodeURIComponent(run?.noteId ?? "")}`)}`}
+          >
+            <Icon.Play />开始三分钟验证
+          </a>
+          <a
+            className="card-v2-button card-v2-button--quiet"
+            href={`/learning-cards/${encodeURIComponent(activatedReceipt.mappings[0].cardId)}`}
+          >
+            查看学习卡
+          </a>
+        </div>
       )}
     </div>
   );

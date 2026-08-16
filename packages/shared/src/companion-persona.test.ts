@@ -57,3 +57,28 @@ test("companion-persona-v2 canonical bytes 与 hash 固定", () => {
   assert.ok(COMPANION_PERSONA_V2.includes("上文的语音标签除外"), "标签例外");
   assert.ok(COMPANION_PERSONA_V2.endsWith("。"), "末行后无换行");
 });
+
+import {
+  COMPANION_PERSONA_V3,
+  COMPANION_PERSONA_V3_PROMPT_ID,
+  COMPANION_PERSONA_V3_SHA256,
+} from "./companion-persona.ts";
+
+// 2026-08-16：companion-persona-v3 canonical bytes 与 hash 固定（桌宠聊天风格优化）。
+test("companion-persona-v3 canonical bytes 与 hash 固定", () => {
+  const bytes = Buffer.from(COMPANION_PERSONA_V3, "utf8");
+  assert.equal(bytes.length, 3467, "canonical bytes 必须是 3467");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  assert.equal(hash, COMPANION_PERSONA_V3_SHA256, "SHA-256 必须匹配合同固定值");
+  assert.equal(hash, "383194f6da9eeec87908689711b07652ecc181d37fc5ca9b891c7371be40486c");
+  assert.equal(COMPANION_PERSONA_V3_PROMPT_ID, "companion-persona-v3");
+  // 小宠物有来有回风格约束必须存在
+  assert.ok(COMPANION_PERSONA_V3.includes("有来有回"), "有来有回");
+  assert.ok(COMPANION_PERSONA_V3.includes("小宠物"), "小宠物风格");
+  assert.ok(COMPANION_PERSONA_V3.includes("把球抛回去"), "延续对话");
+  assert.ok(COMPANION_PERSONA_V3.includes("50 字以内"), "短句约束");
+  assert.ok(COMPANION_PERSONA_V3.includes("嗯嗯"), "口语回应词");
+  assert.ok(COMPANION_PERSONA_V3.includes("不要堆砌"), "不堆砌");
+  assert.ok(COMPANION_PERSONA_V3.includes("[giggles]咯咯笑"), "语音标签表");
+  assert.ok(COMPANION_PERSONA_V3.endsWith("。"), "末行后无换行");
+});

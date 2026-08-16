@@ -364,7 +364,12 @@ function checkVerdictCandidateCoverage(
     // 无法检查时 fail-closed：如果没有提供 draft candidate IDs，
     // 至少检查 verdict 中没有重复
     const verdictIds = report.perClaimVerdicts.map((v) => v.candidateId);
-    const duplicates = verdictIds.filter((id, i) => verdictIds.indexOf(id) !== i);
+    const seenVerdicts = new Set<string>();
+    const duplicates = verdictIds.filter((id) => {
+      if (seenVerdicts.has(id)) return true;
+      seenVerdicts.add(id);
+      return false;
+    });
     return {
       name: "verdict_candidate_coverage",
       passed: duplicates.length === 0,
@@ -381,9 +386,14 @@ function checkVerdictCandidateCoverage(
   const extra = report.perClaimVerdicts
     .map((v) => v.candidateId)
     .filter((id) => !draftIds.has(id));
+  const duplicateIdsSet = new Set<string>();
   const duplicateIds = report.perClaimVerdicts
     .map((v) => v.candidateId)
-    .filter((id, i, arr) => arr.indexOf(id) !== i);
+    .filter((id) => {
+      if (duplicateIdsSet.has(id)) return true;
+      duplicateIdsSet.add(id);
+      return false;
+    });
 
   const passed = missing.length === 0 && extra.length === 0 && duplicateIds.length === 0;
 

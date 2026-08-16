@@ -43,19 +43,34 @@ export class BoundedAudioBuffer {
 
   /** 写入 chunk；满时丢弃最旧（返回丢弃的样本数） */
   push(chunk: Float32Array): number {
-    if (chunk.length === 0) return 0;
-    let dropped = 0;
-    for (let i = 0; i < chunk.length; i++) {
-      if (this.filled >= this.capacity) {
-        // 丢最旧：读指针推进
-        this.readIdx = (this.readIdx + 1) % this.capacity;
-        this.filled -= 1;
-        dropped += 1;
-      }
-      this.buf[this.writeIdx] = chunk[i];
-      this.writeIdx = (this.writeIdx + 1) % this.capacity;
-      this.filled += 1;
+    const len = chunk.length;
+    if (len === 0) return 0;
+
+    // 单次 chunk 即不小于容量：直接保留 chunk 最新 capacity 个样本。
+    if (len >= this.capacity) {
+      const dropped = this.filled + (len - this.capacity);
+      this.buf.set(chunk.subarray(len - this.capacity), 0);
+      this.readIdx = 0;
+      this.writeIdx = 0;
+      this.filled = this.capacity;
+      return dropped;
     }
+
+    // 先丢弃最旧样本腾出空间（若不足则丢弃恰好 overflow 个）。
+    const dropped = Math.max(0, this.filled + len - this.capacity);
+    if (dropped > 0) {
+      this.readIdx = (this.readIdx + dropped) % this.capacity;
+      this.filled -= dropped;
+    }
+
+    // 环形写入：用 TypedArray.set 整段拷贝，避免逐样本循环。
+    const head = Math.min(len, this.capacity - this.writeIdx);
+    this.buf.set(chunk.subarray(0, head), this.writeIdx);
+    if (head < len) {
+      this.buf.set(chunk.subarray(head), 0);
+    }
+    this.writeIdx = (this.writeIdx + len) % this.capacity;
+    this.filled += len;
     return dropped;
   }
 
@@ -63,10 +78,15 @@ export class BoundedAudioBuffer {
   read(maxSamples: number): Float32Array {
     const n = Math.min(maxSamples, this.filled);
     const out = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      out[i] = this.buf[this.readIdx];
-      this.readIdx = (this.readIdx + 1) % this.capacity;
-      this.filled -= 1;
+    if (n > 0) {
+      // 环形内有 (至多) 两段连续区：直接 TypedArray.set 整段拷贝，避免逐样本循环。
+      const head = Math.min(n, this.capacity - this.readIdx);
+      out.set(this.buf.subarray(this.readIdx, this.readIdx + head));
+      if (head < n) {
+        out.set(this.buf.subarray(0, n - head), head);
+      }
+      this.readIdx = (this.readIdx + n) % this.capacity;
+      this.filled -= n;
     }
     return out;
   }

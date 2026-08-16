@@ -122,6 +122,45 @@ export async function readPublicCardV2(
   };
 }
 
+type ObjectiveRevisionLite = {
+  objectiveId: string;
+  objectiveStatement: string;
+  publicSummary: string;
+  knowledgeForm: string;
+  preferredIntents: string[];
+  revision: number;
+};
+
+async function loadLatestObjectiveRevisions(
+  tx: ApiTransaction,
+  workspaceId: string,
+  objectiveIds: string[],
+): Promise<Map<string, ObjectiveRevisionLite>> {
+  const result = new Map<string, ObjectiveRevisionLite>();
+  if (objectiveIds.length === 0) return result;
+  const rows = await tx
+    .select({
+      objectiveId: learningObjectiveRevisionsV2.objectiveId,
+      objectiveStatement: learningObjectiveRevisionsV2.objectiveStatement,
+      publicSummary: learningObjectiveRevisionsV2.publicSummary,
+      knowledgeForm: learningObjectiveRevisionsV2.knowledgeForm,
+      preferredIntents: learningObjectiveRevisionsV2.preferredIntents,
+      revision: learningObjectiveRevisionsV2.revision,
+    })
+    .from(learningObjectiveRevisionsV2)
+    .where(and(
+      eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+      inArray(learningObjectiveRevisionsV2.objectiveId, objectiveIds),
+    ))
+    .orderBy(learningObjectiveRevisionsV2.objectiveId, desc(learningObjectiveRevisionsV2.revision));
+  for (const row of rows) {
+    if (!result.has(row.objectiveId)) {
+      result.set(row.objectiveId, row);
+    }
+  }
+  return result;
+}
+
 /**
  * 批量读取多个 Objective 的公开 Card 视图。
  * 用于 Today、Review 列表等场景。
@@ -133,10 +172,50 @@ export async function readPublicCardsBatchV2(
 ): Promise<PublicCardViewV2[]> {
   if (objectiveIds.length === 0) return [];
 
+  const uniqueIds = [...new Set(objectiveIds)];
+  const cardRows = await tx
+    .select()
+    .from(learningCardsV2)
+    .where(and(
+      eq(learningCardsV2.workspaceId, workspaceId),
+      inArray(learningCardsV2.objectiveId, uniqueIds),
+      inArray(learningCardsV2.lifecycle, ["active", "archived", "superseded"]),
+    ))
+    .orderBy(learningCardsV2.objectiveId, desc(learningCardsV2.updatedAt));
+
+  // Keep the latest card per objective (same semantics as readPublicCardV2).
+  const cardByObjective = new Map<string, typeof cardRows[number]>();
+  for (const card of cardRows) {
+    if (!cardByObjective.has(card.objectiveId)) {
+      cardByObjective.set(card.objectiveId, card);
+    }
+  }
+
+  const presentObjectiveIds = [...cardByObjective.keys()];
+  const revByObjective = await loadLatestObjectiveRevisions(tx, workspaceId, presentObjectiveIds);
+
   const results: PublicCardViewV2[] = [];
-  for (const objectiveId of objectiveIds) {
-    const card = await readPublicCardV2(tx, workspaceId, objectiveId);
-    if (card) results.push(card);
+  for (const objectiveId of uniqueIds) {
+    const card = cardByObjective.get(objectiveId);
+    if (!card) continue;
+    const objRev = revByObjective.get(objectiveId);
+    results.push({
+      cardId: card.cardId,
+      objectiveId,
+      cardRevision: card.cardRevision,
+      publicationRevision: card.currentPublicationRevision,
+      lifecycle: card.lifecycle as "active" | "archived" | "superseded",
+      front: card.front as { cue: string; context?: string; prompt: string },
+      publicSummary: card.publicSummary,
+      knowledgeForm: card.knowledgeForm,
+      strategy: card.strategy,
+      sourceLabel: card.sourceLabel,
+      objectiveRevision: objRev?.revision ?? 0,
+      objectiveStatement: objRev?.objectiveStatement ?? "",
+      preferredIntents: objRev?.preferredIntents ?? [],
+      createdAt: card.createdAt.toISOString(),
+      updatedAt: card.updatedAt.toISOString(),
+    });
   }
   return results;
 }
@@ -174,7 +253,13 @@ export async function listActiveObjectivesV2(
 
   if (rows.length === 0) return [];
 
-  // Load latest revision for each objective
+  // Load latest revision for each objective in one batched query.
+  const revByObjective = await loadLatestObjectiveRevisions(
+    tx,
+    workspaceId,
+    rows.map((row) => row.objectiveId),
+  );
+
   const result: Array<{
     objectiveId: string;
     objectiveStatement: string;
@@ -187,23 +272,7 @@ export async function listActiveObjectivesV2(
   }> = [];
 
   for (const row of rows) {
-    const revRows = await tx
-      .select({
-        objectiveStatement: learningObjectiveRevisionsV2.objectiveStatement,
-        publicSummary: learningObjectiveRevisionsV2.publicSummary,
-        knowledgeForm: learningObjectiveRevisionsV2.knowledgeForm,
-        preferredIntents: learningObjectiveRevisionsV2.preferredIntents,
-        revision: learningObjectiveRevisionsV2.revision,
-      })
-      .from(learningObjectiveRevisionsV2)
-      .where(and(
-        eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
-        eq(learningObjectiveRevisionsV2.objectiveId, row.objectiveId),
-      ))
-      .orderBy(desc(learningObjectiveRevisionsV2.revision))
-      .limit(1);
-
-    const rev = revRows[0];
+    const rev = revByObjective.get(row.objectiveId);
     if (rev) {
       result.push({
         objectiveId: row.objectiveId,
@@ -241,25 +310,15 @@ export async function listActiveCardsV2(
     .limit(limit)
     .offset(offset);
 
+  const revByObjective = await loadLatestObjectiveRevisions(
+    tx,
+    workspaceId,
+    cardRows.map((card) => card.objectiveId),
+  );
+
   const results: PublicCardViewV2[] = [];
   for (const card of cardRows) {
-    const objRevRows = await tx
-      .select({
-        objectiveStatement: learningObjectiveRevisionsV2.objectiveStatement,
-        publicSummary: learningObjectiveRevisionsV2.publicSummary,
-        knowledgeForm: learningObjectiveRevisionsV2.knowledgeForm,
-        preferredIntents: learningObjectiveRevisionsV2.preferredIntents,
-        revision: learningObjectiveRevisionsV2.revision,
-      })
-      .from(learningObjectiveRevisionsV2)
-      .where(and(
-        eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
-        eq(learningObjectiveRevisionsV2.objectiveId, card.objectiveId),
-      ))
-      .orderBy(desc(learningObjectiveRevisionsV2.revision))
-      .limit(1);
-
-    const objRev = objRevRows[0];
+    const objRev = revByObjective.get(card.objectiveId);
     results.push({
       cardId: card.cardId,
       objectiveId: card.objectiveId,

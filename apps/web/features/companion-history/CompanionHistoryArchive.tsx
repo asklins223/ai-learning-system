@@ -598,10 +598,14 @@ const HistoryBlock = memo(function HistoryBlock({ block }: { block: CompanionHis
 });
 
 function HistorySummary({ entries }: { entries: CompanionHistoryEntry[] }) {
+  // PERF: 汇总统计仅依赖 entries，用 useMemo 避免随父级重渲反复全量 filter。
+  const actionCount = useMemo(
+    () => entries.filter((entry) => ["action", "result", "route"].includes(entry.kind)).length,
+    [entries],
+  );
   if (entries.length === 0) return <p className="history-ledger__summary">这段档案还没有可展示的记录。</p>;
   const first = entries[0];
   const last = entries[entries.length - 1];
-  const actionCount = entries.filter((entry) => ["action", "result", "route"].includes(entry.kind)).length;
   return (
     <p className="history-ledger__summary">
       <span>{entries.length} 条记录</span>

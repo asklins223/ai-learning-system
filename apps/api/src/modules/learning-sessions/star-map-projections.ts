@@ -585,11 +585,11 @@ export function replayPersonalPlane(
   let trails: Record<string, TrailState> = {};
   const eventTrace: string[] = [];
   for (const event of events) {
-    durability = reduceDurability({ ...durability }, event);
-    facets = reduceFacets({ ...facets }, event);
-    assistance = reduceAssistance({ ...assistance }, event);
-    questions = reduceQuestions({ ...questions }, event);
-    trails = reduceTrails({ ...trails }, event);
+    durability = reduceDurability(durability, event);
+    facets = reduceFacets(facets, event);
+    assistance = reduceAssistance(assistance, event);
+    questions = reduceQuestions(questions, event);
+    trails = reduceTrails(trails, event);
     eventTrace.push(computePersonalEventHash(event));
   }
   const hash = sha256Hex(

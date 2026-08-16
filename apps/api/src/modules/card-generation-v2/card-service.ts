@@ -16,9 +16,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import type { ApiTransaction } from "../../db/client.ts";
+import { clampLimit, clampOffset } from "../../lib/pagination-utils.ts";
 import {
   learningCardsV2,
   learningObjectiveRevisionsV2,
@@ -28,6 +29,7 @@ import {
   learningExposuresV2,
   initialValidationRemindersV2,
 } from "../../db/schema/card-generation-v2.ts";
+import { noteVersions } from "../../db/schema/note.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
 import {
   parseLearningCardRevealV2,
@@ -441,29 +443,33 @@ export async function promoteDueRemindersV2(ctx: RunContext): Promise<number> {
       .limit(50);
 
     let promoted = 0;
-    for (const due of dueRows) {
-      const updated = await tx.update(initialValidationRemindersV2)
+    if (dueRows.length > 0) {
+      const dueTuples = dueRows.map((due) => sql`(${due.reminderId}, ${due.reminderRevision})`);
+      const updatedRows = await tx.update(initialValidationRemindersV2)
         .set({ status: "ready", updatedAt: new Date() })
         .where(and(
-          eq(initialValidationRemindersV2.reminderId, due.reminderId),
           eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
-          eq(initialValidationRemindersV2.reminderRevision, due.reminderRevision),
+          eq(initialValidationRemindersV2.userId, ctx.userId),
           eq(initialValidationRemindersV2.status, "pending"),
+          sql`(${initialValidationRemindersV2.reminderId}, ${initialValidationRemindersV2.reminderRevision}) IN (${sql.join(dueTuples, sql`, `)})`,
         ))
-        .returning({ id: initialValidationRemindersV2.id });
-      if (updated.length === 0) continue; // 并发延后赢 CAS → 旧 timer stale
-      promoted++;
-      await insertDomainEvent(tx, ctx.workspaceId, {
-        eventType: "initial_validation_reminder.ready",
-        aggregateKind: "reminder",
-        aggregateId: due.reminderId,
-        aggregateRevision: due.reminderRevision,
-        payload: {
-          objectiveId: due.objectiveId,
-          qualificationNotBefore: due.qualificationNotBefore.toISOString(),
-        },
-        idempotencyKey: `ready:${due.reminderId}:${due.reminderRevision}`,
-      });
+        .returning({ reminderId: initialValidationRemindersV2.reminderId });
+      const updatedIds = new Set(updatedRows.map((r) => r.reminderId));
+      for (const due of dueRows) {
+        if (!updatedIds.has(due.reminderId)) continue; // 并发延后赢 CAS → 旧 timer stale
+        promoted++;
+        await insertDomainEvent(tx, ctx.workspaceId, {
+          eventType: "initial_validation_reminder.ready",
+          aggregateKind: "reminder",
+          aggregateId: due.reminderId,
+          aggregateRevision: due.reminderRevision,
+          payload: {
+            objectiveId: due.objectiveId,
+            qualificationNotBefore: due.qualificationNotBefore.toISOString(),
+          },
+          idempotencyKey: `ready:${due.reminderId}:${due.reminderRevision}`,
+        });
+      }
     }
     return promoted;
   });
@@ -529,7 +535,7 @@ export async function cancelReminderV2(
 export async function createCardRegenerationRunV2(
   ctx: RunContext,
   cardId: string,
-  noteVersionId: string,
+  noteVersionId: string | undefined,
   learningGoal: "remember" | "understand" | "apply" | "exam",
   detailThreshold: "concise" | "balanced" | "deep",
   quantity: { kind: "adaptive"; hardMaxCards?: number },
@@ -547,14 +553,18 @@ export async function createCardRegenerationRunV2(
     if (cards.length === 0) {
       throw new CardGenerationV2ServiceError("card_not_found", 404, "卡片不存在或已归档");
     }
+    const resolvedNoteVersionId = noteVersionId ?? cards[0].noteVersionId;
+    if (!resolvedNoteVersionId) {
+      throw new CardGenerationV2ServiceError("note_version_required", 400, "该 V2 卡缺少来源 NoteVersion，无法直接重新生成");
+    }
     // 委托标准生成（§6.8：新候选在用户确认前不覆盖旧卡；激活时由 ActivationIntent 决定语义）
     const { createGenerationRunV2 } = await import("./generation-run-service.ts");
     return createGenerationRunV2(
       ctx,
-      noteVersionId,
+      resolvedNoteVersionId,
       {
         version: 2,
-        noteVersionId,
+        noteVersionId: resolvedNoteVersionId,
         sourceScope: { kind: "whole_note" },
         learningGoal,
         detailThreshold,
@@ -595,6 +605,20 @@ export async function readPublicCardV2(
       .limit(1);
     if (revs.length === 0) return null;
     const rev = revs[0];
+    const noteRow = card.noteVersionId
+      ? await tx.select({ noteId: noteVersions.noteId }).from(noteVersions)
+          .where(and(eq(noteVersions.id, card.noteVersionId), eq(noteVersions.workspaceId, ctx.workspaceId)))
+          .limit(1)
+      : [];
+    const schedRow = await tx.select({
+      status: reviewSchedules.status,
+      nextReviewAt: reviewSchedules.nextReviewAt,
+    }).from(reviewSchedules).where(and(
+      eq(reviewSchedules.workspaceId, ctx.workspaceId),
+      eq(reviewSchedules.userId, ctx.userId),
+      eq(reviewSchedules.keyPointId, card.objectiveId),
+      eq(reviewSchedules.status, "pending"),
+    )).orderBy(desc(reviewSchedules.nextReviewAt)).limit(1);
     return parsePublicLearningCardV2({
       version: 2,
       cardId: card.cardId,
@@ -611,7 +635,145 @@ export async function readPublicCardV2(
       createdAt: card.createdAt.toISOString(),
       updatedAt: card.updatedAt.toISOString(),
       publicPayloadHash: pub.publicPayloadHash,
+      ...(card.noteVersionId ? { noteVersionId: card.noteVersionId } : {}),
+      ...(noteRow[0] ? { noteId: noteRow[0].noteId } : {}),
+      ...(schedRow[0]
+        ? {
+            reviewStatus: schedRow[0].status,
+            nextReviewAt: schedRow[0].nextReviewAt.toISOString(),
+          }
+        : {}),
     });
+  });
+}
+
+/**
+ * §19.5 列表：返回当前 workspace active V2 卡片的分页公共视图。
+ * 供 `/cards` 页与 V2 Active Card 入口使用；不含任何 answer/rubric。
+ *
+ * 分页：limit 默认 100（clamp 1–100），offset 由 cursor（数字字符串）给出。
+ * 返回 `{ items, nextCursor }`，nextCursor 为 null 表示已到末尾；
+ * 向后兼容——不传参数时按分页返回，避免一次性物化全部 active 卡。
+ */
+export async function listActiveCardsV2(
+  ctx: RunContext,
+  opts?: { limit?: number; cursor?: string },
+): Promise<{ items: PublicLearningCardV2[]; nextCursor: string | null }> {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const limit = clampLimit(opts?.limit, 100);
+    // cursor 为 offset 的十进制字符串；非法值回退到第一页。
+    let offset = 0;
+    if (opts?.cursor != null && /^\d+$/.test(opts.cursor)) {
+      offset = clampOffset(Number(opts.cursor));
+    }
+    // 多取一行用于探测是否还有下一页。
+    const cards = await tx.select().from(learningCardsV2)
+      .where(and(
+        eq(learningCardsV2.workspaceId, ctx.workspaceId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ))
+      .orderBy(desc(learningCardsV2.createdAt))
+      .limit(limit + 1)
+      .offset(offset);
+    const hasMore = cards.length > limit;
+    const pageCards = hasMore ? cards.slice(0, limit) : cards;
+    if (pageCards.length === 0) return { items: [], nextCursor: null };
+
+    const cardIds = pageCards.map((c) => c.cardId);
+    const objectiveIds = pageCards.map((c) => c.objectiveId);
+
+    const pubs = await tx.select().from(learningCardPublicationRevisionsV2)
+      .where(and(
+        eq(learningCardPublicationRevisionsV2.workspaceId, ctx.workspaceId),
+        inArray(learningCardPublicationRevisionsV2.cardId, cardIds),
+      ));
+    const pubByCard = new Map<string, typeof pubs[number]>();
+    for (const p of pubs) {
+      const card = pageCards.find((c) => c.cardId === p.cardId);
+      if (card && p.publicationRevision === card.currentPublicationRevision) {
+        pubByCard.set(p.cardId, p);
+      }
+    }
+
+    const revisions = await tx.select().from(learningObjectiveRevisionsV2)
+      .where(and(
+        eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
+        inArray(learningObjectiveRevisionsV2.objectiveId, objectiveIds),
+      ));
+    const revByObjective = new Map<string, typeof revisions[number]>();
+    for (const r of revisions) {
+      const current = revByObjective.get(r.objectiveId);
+      if (!current || r.revision > current.revision) revByObjective.set(r.objectiveId, r);
+    }
+
+    const noteVersionIds = pageCards
+      .map((c) => c.noteVersionId)
+      .filter((id): id is string => Boolean(id));
+    const noteRows = noteVersionIds.length > 0
+      ? await tx.select({ id: noteVersions.id, noteId: noteVersions.noteId })
+          .from(noteVersions)
+          .where(and(
+            eq(noteVersions.workspaceId, ctx.workspaceId),
+            inArray(noteVersions.id, noteVersionIds),
+          ))
+      : [];
+    const noteByVersion = new Map(noteRows.map((r) => [r.id, r.noteId]));
+
+    const schedRows = objectiveIds.length > 0
+      ? await tx.select({
+          keyPointId: reviewSchedules.keyPointId,
+          status: reviewSchedules.status,
+          nextReviewAt: reviewSchedules.nextReviewAt,
+        }).from(reviewSchedules).where(and(
+          eq(reviewSchedules.workspaceId, ctx.workspaceId),
+          eq(reviewSchedules.userId, ctx.userId),
+          eq(reviewSchedules.status, "pending"),
+          inArray(reviewSchedules.keyPointId, objectiveIds),
+        )).orderBy(desc(reviewSchedules.nextReviewAt))
+      : [];
+    const schedByObjective = new Map<string, { status: string; nextReviewAt: Date }>();
+    for (const s of schedRows) {
+      const key = s.keyPointId ? String(s.keyPointId) : "";
+      if (!key || schedByObjective.has(key)) continue;
+      schedByObjective.set(key, { status: String(s.status), nextReviewAt: s.nextReviewAt });
+    }
+
+    const items: PublicLearningCardV2[] = [];
+    for (const card of pageCards) {
+      const pub = pubByCard.get(card.cardId);
+      const rev = revByObjective.get(card.objectiveId);
+      if (!pub || !rev) continue;
+      const sched = schedByObjective.get(card.objectiveId);
+      items.push(parsePublicLearningCardV2({
+        version: 2,
+        cardId: card.cardId,
+        publicationRevision: pub.publicationRevision,
+        cardRevision: pub.cardRevision,
+        objectiveId: card.objectiveId,
+        objectiveRevision: pub.objectiveRevision,
+        lifecycle: card.lifecycle,
+        front: card.front,
+        publicSummary: rev.publicSummary,
+        knowledgeForm: rev.knowledgeForm,
+        strategy: card.strategy,
+        sourceLabel: card.sourceLabel,
+        createdAt: card.createdAt.toISOString(),
+        updatedAt: card.updatedAt.toISOString(),
+        publicPayloadHash: pub.publicPayloadHash,
+        ...(card.noteVersionId ? { noteVersionId: card.noteVersionId } : {}),
+        ...(card.noteVersionId && noteByVersion.get(card.noteVersionId)
+          ? { noteId: noteByVersion.get(card.noteVersionId) }
+          : {}),
+        ...(sched
+          ? {
+              reviewStatus: sched.status as "pending",
+              nextReviewAt: sched.nextReviewAt.toISOString(),
+            }
+          : {}),
+      }));
+    }
+    const nextCursor = hasMore ? String(offset + limit) : null;
+    return { items, nextCursor };
   });
 }
 

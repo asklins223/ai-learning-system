@@ -22,7 +22,10 @@ function resolveConnectionString(): string {
 
 const connectionString = resolveConnectionString();
 
-const queryClient = postgres(connectionString, { max: 10 });
+// PERF-WN: 单 postgres 池承载常规请求 + SSE 轮询 + 后台任务；max=10 在大量
+// 长连接轮询/并发请求时成为瓶颈（配合 inbox/companion SSE 连接上限使用）。
+// 提到 25 摊薄峰值排队，仍受 DB 端 max_connections 约束。
+const queryClient = postgres(connectionString, { max: 25 });
 let closePromise: Promise<void> | null = null;
 
 export const db = drizzle(queryClient, { schema });

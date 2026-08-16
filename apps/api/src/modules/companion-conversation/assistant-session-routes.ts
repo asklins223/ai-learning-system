@@ -102,9 +102,14 @@ export async function assistantSessionRoutes(app: FastifyInstance) {
       }
       const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
       const keyword = `%${query.data.q}%`;
-      const rows = await withWorkspaceTransaction(scope, async (tx) => {
-        // blocks::text ILIKE：参数化防注入；只匹配当前 user/workspace（RLS）。
-        return tx
+      // PERF: blocks::text ILIKE '%q%' 前置通配符无法命中 B-tree——迁移 0169 已
+      // 为 companion_messages.blocks 建 pg_trgm GIN 索引（含 text 表达式），
+      // 使 ILIKE '%...%' 走索引候选扫描而非整用户历史全表扫描；LIMIT 仍约束
+      // 单次返回体积上限 50。
+      // PERF（round-5）：标题查询在同一个事务/RLS 快照内完成，不再另开第二个
+      // withWorkspaceTransaction（原实现会把事务数翻倍，且可能读到不一致标题）。
+      const { rows, titles } = await withWorkspaceTransaction(scope, async (tx) => {
+        const messageRows = await tx
           .select({
             messageId: companionMessages.id,
             conversationId: companionMessages.conversationId,
@@ -122,22 +127,23 @@ export async function assistantSessionRoutes(app: FastifyInstance) {
           ))
           .orderBy(desc(companionMessages.createdAt))
           .limit(query.data.limit);
-      });
-      // 会话标题（供结果展示；无会话引用时保持 null——消息 FK 保证存在）。
-      const conversationIds = Array.from(new Set(rows.map((row) => row.conversationId)));
-      const titles = conversationIds.length > 0
-        ? await withWorkspaceTransaction(scope, async (tx) => {
-            const convs = await tx
+        // 会话标题（供结果展示；无会话引用时保持 null——消息 FK 保证存在）。
+        const conversationIds = Array.from(new Set(messageRows.map((row) => row.conversationId)));
+        const convs = conversationIds.length > 0
+          ? await tx
               .select({ id: companionConversations.id, title: companionConversations.title })
               .from(companionConversations)
               .where(and(
                 eq(companionConversations.workspaceId, scope.workspaceId),
                 eq(companionConversations.userId, scope.userId),
                 conversationIds.length > 0 ? sql`${companionConversations.id} IN (${sql.join(conversationIds.map((id) => sql`${id}`), sql`, `)})` : sql`false`,
-              ));
-            return new Map(convs.map((conv) => [conv.id, conv.title]));
-          })
-        : new Map<string, string>();
+              ))
+          : [];
+        return {
+          rows: messageRows,
+          titles: new Map(convs.map((conv) => [conv.id, conv.title])),
+        };
+      });
       return reply.header("Cache-Control", "no-store").send({
         version: 1,
         query: query.data.q,

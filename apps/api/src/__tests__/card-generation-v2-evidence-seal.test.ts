@@ -113,8 +113,14 @@ describe("sealEvidenceSnapshotsV2", () => {
       assert.equal(e.sourceSnapshotId, SOURCE_SNAPSHOT_ID);
     }
     // eligibility state row inserted per snapshot（status=usable）
-    const eligInserts = inserts.filter((i) => (i as { vals: { status?: string } }).vals?.status === "usable");
-    assert.equal(eligInserts.length, 2);
+    // 批量实现可能一次插入多行；这里统计所有插入行中 status=usable 的行数。
+    const eligRows = inserts.flatMap((i) => {
+      const vals = (i as { vals?: unknown }).vals;
+      if (Array.isArray(vals)) return vals as Array<{ status?: string }>;
+      return vals ? [vals as { status?: string }] : [];
+    });
+    const eligUsableRows = eligRows.filter((v) => v.status === "usable");
+    assert.equal(eligUsableRows.length, 2);
     // manifest 携带每个 snapshot 的 targetUnit 引用所需字段
     const first = result.manifest.evidence[0];
     assert.ok(first.blockId);

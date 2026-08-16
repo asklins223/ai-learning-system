@@ -184,6 +184,7 @@ export function petReducer(
             clientMessageId,
             idempotencyKey,
             input: { kind: "text" },
+            userText: state.composer.draft,
           },
           bubble: { kind: "turn", ref: { kind: "client", clientMessageId } },
           window: { kind: "text_input" },
@@ -766,26 +767,41 @@ export function petReducer(
         action.streamId !== state.voice.streamId ||
         action.uploadId !== state.voice.uploadId
       ) return { state, effects };
+      // 语音对话自动发送：识别完成后不再停留在可编辑输入框等用户手动点发送。
+      // 本地 ASR（P6 §13）无服务端 artifact——null 时存 undefined，提交走
+      // text inputKind（普通聊天消息，不伪装正式 Voice Artifact）。
+      const clientMessageId = crypto.randomUUID();
+      const idempotencyKey = crypto.randomUUID();
       return {
         state: {
           ...state,
           voice: { kind: "idle", operationEpoch: state.voice.operationEpoch },
-          bubble: { kind: "hidden" },
           composer: {
-            kind: "editing",
-            draft: action.text,
-            // 本地 ASR（P6 §13）无服务端 artifact——null 时存 undefined，
-            // 提交走 text inputKind（普通聊天消息，不伪装正式 Voice Artifact）。
+            kind: "submitting",
+            draftSnapshot: action.text,
+            clientMessageId,
             voiceArtifactId: action.voiceArtifactId ?? undefined,
             transcriptSha256: action.transcriptSha256 ?? undefined,
           },
+          turn: {
+            kind: "submitting",
+            clientMessageId,
+            idempotencyKey,
+            input: { kind: "text" },
+            userText: action.text,
+          },
+          bubble: { kind: "turn", ref: { kind: "client", clientMessageId } },
           menu: { kind: "closed" },
           window: { kind: "text_input" },
         },
-        effects: [
-          { kind: "set_interaction_mode", mode: "text_input" },
-          { kind: "request_text_input_focus" },
-        ],
+        effects: [{
+          kind: "submit_turn",
+          clientMessageId,
+          idempotencyKey,
+          draft: action.text,
+          voiceArtifactId: action.voiceArtifactId ?? undefined,
+          transcriptSha256: action.transcriptSha256 ?? undefined,
+        }],
       };
     }
 
@@ -876,6 +892,7 @@ export function petReducer(
               phase: "accepted",
               previewText: "",
               lastSeq: action.seq,
+              userText: state.turn.kind === "submitting" ? state.turn.userText : undefined,
             },
             bubble: { kind: "turn", ref: { kind: "run", runId: action.runId } },
             window: state.menu.kind !== "closed" ? state.window : { kind: "passive" },
@@ -997,6 +1014,7 @@ export function petReducer(
               generation: action.generation,
               messageId: action.messageId,
               previewText: action.text,
+              userText: state.turn.kind === "running" ? state.turn.userText : undefined,
             },
             bubble: { kind: "turn", ref: { kind: "run", runId: action.runId } },
           },
@@ -1061,7 +1079,7 @@ export function petReducer(
           state: withSeq(
             {
               ...state,
-              voice: { ...state.voice, segmentId: action.segment.segmentId },
+              voice: { ...state.voice, segmentId: action.segment.segmentId, speakingText: action.segment.text },
             },
             action.seq,
           ),
@@ -1085,6 +1103,7 @@ export function petReducer(
               runId: action.runId,
               generation: action.generation,
               segmentId: action.segment.segmentId,
+              speakingText: action.segment.text,
               operationEpoch: state.voice.operationEpoch,
             },
           },
@@ -1116,6 +1135,7 @@ export function petReducer(
             runId: action.runId,
             generation: action.generation,
             segmentId: action.segmentId,
+            speakingText: state.voice.kind === "speaking" ? state.voice.speakingText : undefined,
             operationEpoch: state.voice.operationEpoch,
           },
         },
@@ -1167,6 +1187,7 @@ export function petReducer(
               kind: "cancelled",
               runId: action.runId,
               generation: action.generation,
+              userText: state.turn.kind === "running" ? state.turn.userText : undefined,
             },
             voice: { kind: "idle", operationEpoch: state.voice.operationEpoch + 1 },
           },
@@ -1251,6 +1272,9 @@ export function petReducer(
               runId: state.turn.kind === "running" ? state.turn.runId : undefined,
               generation:
                 state.turn.kind === "running" ? state.turn.generation : undefined,
+              userText: state.turn.kind === "submitting" || state.turn.kind === "running"
+                ? state.turn.userText
+                : undefined,
             },
             bubble: { kind: "error", code: action.code },
             composer,
@@ -1307,6 +1331,7 @@ export function petReducer(
             runId: action.runId,
             generation: action.generation,
             segmentId: action.segmentId,
+            speakingText: "演示语音内容",
             operationEpoch: state.voice.operationEpoch,
           },
         },

@@ -56,6 +56,7 @@ export interface ReviewWithCard {
   keyPoint: { id: string; claim: string; quoteText: string } | null;
   blockContent: string | null;
   reviewReason: ReviewReason;
+  isV2: boolean;
 }
 
 /**
@@ -78,6 +79,8 @@ export interface SanitizedReviewItem {
   unassistedEligibleAt: string | null;
   effectiveStartAt: string;
   blockedReason: ReviewBlockedReason;
+  /** V2 objective 排程：入口应使用 originV2。 */
+  isV2?: boolean;
 }
 
 /**
@@ -189,28 +192,9 @@ const [totalRow] = await queryDb
     .filter((r) => r.subjectType === "validation" && r.subjectId)
     .map((r) => r.subjectId);
 
-  // 2. 批量查询 validationEvents → 获取 cardId 映射 + outcome + keyPointId
+  // 2. subjectType=card 的 review 直接用 subjectId 作为 cardId
+  //    v0.6: subjectType=key_point 的 review 使用 keyPointId，稍后通过 cardKeyPoints 解析 cardId
   const cardIdSet = new Set<string>();
-  const validationToCardId = new Map<string, string>();
-  const validationToOutcome = new Map<string, string>();
-  const validationToKeyPointId = new Map<string, string | null>();
-  if (validationIds.length > 0) {
-    const veRows = await queryDb.query.validationEvents.findMany({
-      where: and(
-        eq(validationEvents.workspaceId, workspaceId),
-        inArray(validationEvents.id, validationIds),
-      ),
-    });
-    for (const ve of veRows) {
-      validationToCardId.set(ve.id, ve.cardId);
-      validationToOutcome.set(ve.id, ve.outcome);
-      validationToKeyPointId.set(ve.id, ve.keyPointId ?? null);
-      cardIdSet.add(ve.cardId);
-    }
-  }
-
-  // 3. subjectType=card 的 review 直接用 subjectId 作为 cardId
-  // v0.6: subjectType=key_point 的 review 使用 keyPointId，稍后通过 cardKeyPoints 解析 cardId
   const v06KeyPointIds: string[] = [];
   for (const r of reviews) {
     if (r.subjectType === "card" && r.subjectId) {
@@ -221,54 +205,117 @@ const [totalRow] = await queryDb
     }
   }
 
-  // v0.6: 批量查询 keyPoint → cardId 映射
+  // PERF-A#6：validationEvents 与 v0.6 keyPoint→cardId 两条批量查询仅依赖
+  // reviews，相互独立，用 Promise.all 并行（同一事务连接由 drizzle 排队），
+  // 削减原串行 2 次往返。
+  const validationToCardId = new Map<string, string>();
+  const validationToOutcome = new Map<string, string>();
+  const validationToKeyPointId = new Map<string, string | null>();
   const v06KpToCardId = new Map<string, string>();
-  if (v06KeyPointIds.length > 0) {
-    const v06KpRows = await queryDb.query.cardKeyPoints.findMany({
-      where: and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        inArray(cardKeyPoints.id, v06KeyPointIds),
-      ),
-    });
-    for (const kp of v06KpRows) {
-      v06KpToCardId.set(kp.id, kp.cardId);
-      cardIdSet.add(kp.cardId);
-    }
-  }
+  await Promise.all([
+    (async () => {
+      if (validationIds.length === 0) return;
+      const veRows = await queryDb.query.validationEvents.findMany({
+        where: and(
+          eq(validationEvents.workspaceId, workspaceId),
+          inArray(validationEvents.id, validationIds),
+        ),
+      });
+      for (const ve of veRows) {
+        validationToCardId.set(ve.id, ve.cardId);
+        validationToOutcome.set(ve.id, ve.outcome);
+        validationToKeyPointId.set(ve.id, ve.keyPointId ?? null);
+        cardIdSet.add(ve.cardId);
+      }
+    })(),
+    (async () => {
+      if (v06KeyPointIds.length === 0) return;
+      const v06KpRows = await queryDb.query.cardKeyPoints.findMany({
+        where: and(
+          eq(cardKeyPoints.workspaceId, workspaceId),
+          inArray(cardKeyPoints.id, v06KeyPointIds),
+        ),
+      });
+      for (const kp of v06KpRows) {
+        v06KpToCardId.set(kp.id, kp.cardId);
+        cardIdSet.add(kp.cardId);
+      }
+    })(),
+  ]);
 
   const cardIds = Array.from(cardIdSet);
   if (cardIds.length === 0) return { items: [], total, nextCursor: null };
 
-  // 4. 批量查询 learningCards
-  const cardRows = await queryDb.query.learningCards.findMany({
-    where: and(
-      eq(learningCards.workspaceId, workspaceId),
-      inArray(learningCards.id, cardIds),
-      activeLearningCardConsumerPredicate(),
-    ),
-  });
-  const cardMap = new Map(cardRows.map((c) => [c.id, c]));
+  // PERF-A#6：learningCards(+V2 解析) 与 cardKeyPoints(cardId) 两条批量查询
+  // 仅依赖 cardIds，相互独立，用 Promise.all 并行削减串行往返。
+  const [cardResult, kpResult] = await Promise.all([
+    (async () => {
+      // 4. 批量查询 learningCards
+      const cardRows = await queryDb.query.learningCards.findMany({
+        where: and(
+          eq(learningCards.workspaceId, workspaceId),
+          inArray(learningCards.id, cardIds),
+          activeLearningCardConsumerPredicate(),
+        ),
+      });
+      const cardMap = new Map(cardRows.map((c) => [c.id, c]));
 
-  // 5. 批量查询 cardKeyPoints（每个 card 取全部，以便按 validation keyPointId 选择）
-  const kpRows = await queryDb.query.cardKeyPoints.findMany({
-    where: and(
-      eq(cardKeyPoints.workspaceId, workspaceId),
-      inArray(cardKeyPoints.cardId, cardIds),
-    ),
-    orderBy: (k, { asc: a }) => [a(k.cardId), a(k.ordinal)],
-  });
-  // R-021: 每个 card 的 keyPoint 映射（不再只取第一个）
-  const kpByCard = new Map<string, Map<string, typeof kpRows[0]>>();
-  const firstKpByCard = new Map<string, typeof kpRows[0]>();
-  for (const kp of kpRows) {
-    if (!kpByCard.has(kp.cardId)) {
-      kpByCard.set(kp.cardId, new Map());
-    }
-    kpByCard.get(kp.cardId)!.set(kp.id, kp);
-    if (!firstKpByCard.has(kp.cardId)) {
-      firstKpByCard.set(kp.cardId, kp);
-    }
-  }
+      // R35/C0-rebase：V2 objective 的 alias 父 legacy card 是 archived 隐藏行，
+      // 不进入 active cardMap；这里单独把 active V2 card 映射为可展示的 card。
+      const v2KpToCardId = new Map<string, string>();
+      const v2CardByObjective = new Map<string, { id: string; title: string }>();
+      if (v06KeyPointIds.length > 0) {
+        const missingV2KpIds = v06KeyPointIds.filter((id) => {
+          const legacyCardId = v06KpToCardId.get(id);
+          return !legacyCardId || !cardMap.has(legacyCardId);
+        });
+        if (missingV2KpIds.length > 0) {
+          const v2Cards = await queryDb.query.learningCardsV2.findMany({
+            where: and(
+              eq(learningCardsV2.workspaceId, workspaceId),
+              eq(learningCardsV2.lifecycle, "active"),
+              inArray(learningCardsV2.objectiveId, missingV2KpIds),
+            ),
+          });
+          for (const v2card of v2Cards) {
+            v2KpToCardId.set(v2card.objectiveId, v2card.cardId);
+            v2CardByObjective.set(v2card.objectiveId, {
+              id: v2card.cardId,
+              title: v2card.publicSummary,
+            });
+          }
+        }
+      }
+      return { cardMap, v2KpToCardId, v2CardByObjective };
+    })(),
+    (async () => {
+      // 5. 批量查询 cardKeyPoints（每个 card 取全部，以便按 validation keyPointId 选择）
+      const kpRows = await queryDb.query.cardKeyPoints.findMany({
+        where: and(
+          eq(cardKeyPoints.workspaceId, workspaceId),
+          inArray(cardKeyPoints.cardId, cardIds),
+        ),
+        orderBy: (k, { asc: a }) => [a(k.cardId), a(k.ordinal)],
+      });
+      // R-021: 每个 card 的 keyPoint 映射（不再只取第一个）
+      const kpByCard = new Map<string, Map<string, typeof kpRows[0]>>();
+      const firstKpByCard = new Map<string, typeof kpRows[0]>();
+      for (const kp of kpRows) {
+        if (!kpByCard.has(kp.cardId)) {
+          kpByCard.set(kp.cardId, new Map());
+        }
+        kpByCard.get(kp.cardId)!.set(kp.id, kp);
+        if (!firstKpByCard.has(kp.cardId)) {
+          firstKpByCard.set(kp.cardId, kp);
+        }
+      }
+      return { kpRows, kpByCard, firstKpByCard };
+    })(),
+  ]);
+  const cardMap = cardResult.cardMap;
+  const v2KpToCardId = cardResult.v2KpToCardId;
+  const v2CardByObjective = cardResult.v2CardByObjective;
+  const { kpRows, kpByCard, firstKpByCard } = kpResult;
 
   // 6. 批量查询 evidences（按 keyPointId），同时统计每个 key point 是否有硬证据
   // R-021: 收集所有可能用到的 keyPointId（包括 validation 指定的和每张卡第一个）
@@ -281,95 +328,106 @@ const [totalRow] = await queryDb
     allRelevantKpIds.add(kpId);
   }
   const keyPointIds = Array.from(allRelevantKpIds);
-  const evidenceByKpId = new Map<string, typeof evidences.$inferSelect>();
 
-  // R35/C0-rebase（review/service.ts）：keyPointId 命中 V2 objective 时，
-  // 展示字段改用 V2 公共投影（publicSummary + active card front.cue），
-  // 不再读取 legacy claim/quoteText（§29.4：正式链路禁止 claim 语义扩散）。
-  const v2Display = new Map<string, { claim: string; quoteText: string }>();
-  if (keyPointIds.length > 0) {
-    const v2ObjRows = await queryDb
-      .select({
-        objectiveId: learningObjectivesV2.objectiveId,
-        currentObjectiveRevisionId: learningObjectivesV2.currentObjectiveRevisionId,
-      })
-      .from(learningObjectivesV2)
-      .where(and(
-        eq(learningObjectivesV2.workspaceId, workspaceId),
-        inArray(learningObjectivesV2.objectiveId, keyPointIds),
-      ));
-    const v2RevIds = v2ObjRows
-      .map((r) => r.currentObjectiveRevisionId)
-      .filter((id): id is string => Boolean(id));
-    const v2RevRows = v2RevIds.length > 0
-      ? await queryDb
-          .select({
-            objectiveRevisionId: learningObjectiveRevisionsV2.objectiveRevisionId,
-            publicSummary: learningObjectiveRevisionsV2.publicSummary,
-          })
-          .from(learningObjectiveRevisionsV2)
-          .where(and(
-            eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
-            inArray(learningObjectiveRevisionsV2.objectiveRevisionId, v2RevIds),
-          ))
-      : [];
-    const v2ObjIds = v2ObjRows.map((r) => r.objectiveId);
-    const v2CardRows = v2ObjIds.length > 0
-      ? await queryDb
-          .select({ objectiveId: learningCardsV2.objectiveId, front: learningCardsV2.front })
-          .from(learningCardsV2)
-          .where(and(
-            eq(learningCardsV2.workspaceId, workspaceId),
-            inArray(learningCardsV2.objectiveId, v2ObjIds),
-            eq(learningCardsV2.lifecycle, "active"),
-          ))
-      : [];
-    const v2SummaryByRev = new Map(
-      v2RevRows.map((r) => [String(r.objectiveRevisionId), String(r.publicSummary)]),
-    );
-    const v2CueByObj = new Map(
-      v2CardRows.map((r) => [String(r.objectiveId), String((r.front as { cue?: string })?.cue ?? "")]),
-    );
-    for (const o of v2ObjRows) {
-      const summary = o.currentObjectiveRevisionId
-        ? v2SummaryByRev.get(String(o.currentObjectiveRevisionId))
-        : undefined;
-      if (summary !== undefined) {
-        v2Display.set(String(o.objectiveId), {
-          claim: summary,
-          quoteText: v2CueByObj.get(String(o.objectiveId)) ?? "",
-        });
+  // PERF-A#6：V2 展示投影解析与 evidences 查询都仅依赖 keyPointIds（和 userId），
+  // 相互独立，用 Promise.all 并行削减串行往返。
+  const [v2Display, evidenceResult] = await Promise.all([
+    (async () => {
+      // R35/C0-rebase（review/service.ts）：keyPointId 命中 V2 objective 时，
+      // 展示字段改用 V2 公共投影（publicSummary + active card front.cue），
+      // 不再读取 legacy claim/quoteText（§29.4：正式链路禁止 claim 语义扩散）。
+      const v2Display = new Map<string, { claim: string; quoteText: string }>();
+      if (keyPointIds.length === 0) return v2Display;
+      const v2ObjRows = await queryDb
+        .select({
+          objectiveId: learningObjectivesV2.objectiveId,
+          currentObjectiveRevisionId: learningObjectivesV2.currentObjectiveRevisionId,
+        })
+        .from(learningObjectivesV2)
+        .where(and(
+          eq(learningObjectivesV2.workspaceId, workspaceId),
+          inArray(learningObjectivesV2.objectiveId, keyPointIds),
+        ));
+      const v2RevIds = v2ObjRows
+        .map((r) => r.currentObjectiveRevisionId)
+        .filter((id): id is string => Boolean(id));
+      const v2RevRows = v2RevIds.length > 0
+        ? await queryDb
+            .select({
+              objectiveRevisionId: learningObjectiveRevisionsV2.objectiveRevisionId,
+              publicSummary: learningObjectiveRevisionsV2.publicSummary,
+            })
+            .from(learningObjectiveRevisionsV2)
+            .where(and(
+              eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+              inArray(learningObjectiveRevisionsV2.objectiveRevisionId, v2RevIds),
+            ))
+        : [];
+      const v2ObjIds = v2ObjRows.map((r) => r.objectiveId);
+      const v2CardRows = v2ObjIds.length > 0
+        ? await queryDb
+            .select({ objectiveId: learningCardsV2.objectiveId, front: learningCardsV2.front })
+            .from(learningCardsV2)
+            .where(and(
+              eq(learningCardsV2.workspaceId, workspaceId),
+              inArray(learningCardsV2.objectiveId, v2ObjIds),
+              eq(learningCardsV2.lifecycle, "active"),
+            ))
+        : [];
+      const v2SummaryByRev = new Map(
+        v2RevRows.map((r) => [String(r.objectiveRevisionId), String(r.publicSummary)]),
+      );
+      const v2CueByObj = new Map(
+        v2CardRows.map((r) => [String(r.objectiveId), String((r.front as { cue?: string })?.cue ?? "")]),
+      );
+      for (const o of v2ObjRows) {
+        const summary = o.currentObjectiveRevisionId
+          ? v2SummaryByRev.get(String(o.currentObjectiveRevisionId))
+          : undefined;
+        if (summary !== undefined) {
+          v2Display.set(String(o.objectiveId), {
+            claim: summary,
+            quoteText: v2CueByObj.get(String(o.objectiveId)) ?? "",
+          });
+        }
       }
-    }
-  }
-  const keyPointHasHardEvidence = new Set<string>();
-  if (keyPointIds.length > 0) {
-    const evRows = await queryDb.query.evidences.findMany({
-      where: and(
-        eq(evidences.workspaceId, workspaceId),
-        inArray(evidences.keyPointId, keyPointIds),
-      ),
-      orderBy: (evidence, { asc }) => [asc(evidence.createdAt), asc(evidence.id)],
-    });
-    // N-005: 查询用户级 override（在事务内执行，传 queryDb 避免回退裸 db）
-    const evIds = evRows.map((r) => r.id);
-    const userOverrideMap = userId
-      ? await getUserOverrideMap(userId, evIds, queryDb)
-      : new Map<string, "confirmed" | "downgraded" | "rejected">();
-    for (const ev of evRows) {
-      if (!evidenceByKpId.has(ev.keyPointId)) {
-        evidenceByKpId.set(ev.keyPointId, ev);
+      return v2Display;
+    })(),
+    (async () => {
+      // 6. 批量查询 evidences（按 keyPointId），同时统计每个 key point 是否有硬证据
+      const evidenceByKpId = new Map<string, typeof evidences.$inferSelect>();
+      const keyPointHasHardEvidence = new Set<string>();
+      if (keyPointIds.length === 0) return { evidenceByKpId, keyPointHasHardEvidence };
+      const evRows = await queryDb.query.evidences.findMany({
+        where: and(
+          eq(evidences.workspaceId, workspaceId),
+          inArray(evidences.keyPointId, keyPointIds),
+        ),
+        orderBy: (evidence, { asc }) => [asc(evidence.createdAt), asc(evidence.id)],
+      });
+      // N-005: 查询用户级 override（在事务内执行，传 queryDb 避免回退裸 db）
+      const evIds = evRows.map((r) => r.id);
+      const userOverrideMap = userId
+        ? await getUserOverrideMap(userId, evIds, queryDb)
+        : new Map<string, "confirmed" | "downgraded" | "rejected">();
+      for (const ev of evRows) {
+        if (!evidenceByKpId.has(ev.keyPointId)) {
+          evidenceByKpId.set(ev.keyPointId, ev);
+        }
+        // N-005: 使用用户级 override
+        const userOv = userOverrideMap.get(ev.id) ?? null;
+        const ea = userId
+          ? effectiveAlignmentForUser(ev.alignment, ev.userOverride, userOv)
+          : effectiveAlignment(ev.alignment, ev.userOverride);
+        if (ea === "aligned") {
+          keyPointHasHardEvidence.add(ev.keyPointId);
+        }
       }
-      // N-005: 使用用户级 override
-      const userOv = userOverrideMap.get(ev.id) ?? null;
-      const ea = userId
-        ? effectiveAlignmentForUser(ev.alignment, ev.userOverride, userOv)
-        : effectiveAlignment(ev.alignment, ev.userOverride);
-      if (ea === "aligned") {
-        keyPointHasHardEvidence.add(ev.keyPointId);
-      }
-    }
-  }
+      return { evidenceByKpId, keyPointHasHardEvidence };
+    })(),
+  ]);
+  const evidenceByKpId = evidenceResult.evidenceByKpId;
+  const keyPointHasHardEvidence = evidenceResult.keyPointHasHardEvidence;
 
   // 7. 批量查询 noteBlocks（按 blockId）
   const blockIds = Array.from(evidenceByKpId.values())
@@ -402,6 +460,8 @@ const [totalRow] = await queryDb
   for (const r of reviews) {
     let cardId: string | null = null;
     let v06KeyPointId: string | null = null;
+    let legacyCardIdForKp: string | null = null;
+    let isV2Card = false;
 
     if (r.subjectType === "validation") {
       cardId = validationToCardId.get(r.subjectId) ?? null;
@@ -409,28 +469,40 @@ const [totalRow] = await queryDb
       cardId = r.subjectId;
     } else if (r.subjectType === "key_point" && r.keyPointId) {
       // v0.6: key_point schedule
-      cardId = v06KpToCardId.get(r.keyPointId) ?? null;
+      legacyCardIdForKp = v06KpToCardId.get(r.keyPointId) ?? null;
+      if (v2KpToCardId.has(r.keyPointId)) {
+        isV2Card = true;
+        cardId = v2KpToCardId.get(r.keyPointId)!;
+      } else {
+        cardId = legacyCardIdForKp;
+      }
       v06KeyPointId = r.keyPointId;
     }
 
     if (!cardId) continue;
-    const card = cardMap.get(cardId);
-    if (!card) continue;
+    const legacyCard = isV2Card ? null : cardMap.get(cardId);
+    const v2Card = isV2Card ? v2CardByObjective.get(v06KeyPointId ?? "") : undefined;
+    if (!isV2Card && !legacyCard) continue;
+    if (isV2Card && !v2Card) continue;
+    const card = isV2Card
+      ? { id: v2Card!.id, title: v2Card!.title }
+      : { id: legacyCard!.id, title: legacyCard!.schemaJson?.title ?? "（未命名学习卡）" };
 
     // R-021: 优先使用 validation 事件指定的 keyPointId，而不是固定取第一个
     // v0.6: key_point schedule 直接使用其 keyPointId
     let kp: typeof kpRows[0] | null = null;
+    const kpLookupCardId = isV2Card ? legacyCardIdForKp ?? "" : cardId;
     if (r.subjectType === "key_point" && v06KeyPointId) {
-      kp = kpByCard.get(cardId)?.get(v06KeyPointId) ?? null;
+      kp = kpByCard.get(kpLookupCardId)?.get(v06KeyPointId) ?? null;
     } else if (r.subjectType === "validation" && r.subjectId) {
       const veKpId = validationToKeyPointId.get(r.subjectId);
       if (veKpId) {
-        kp = kpByCard.get(cardId)?.get(veKpId) ?? null;
+        kp = kpByCard.get(kpLookupCardId)?.get(veKpId) ?? null;
       }
     }
     // 如果没有找到 validation 指定的 keyPoint，回退到第一个
     if (!kp) {
-      kp = firstKpByCard.get(cardId) ?? null;
+      kp = firstKpByCard.get(kpLookupCardId) ?? null;
     }
     let blockContent: string | null = null;
     if (kp) {
@@ -459,7 +531,7 @@ const [totalRow] = await queryDb
 
     out.push({
       review: r,
-      card: { id: card.id, title: card.schemaJson?.title ?? "（未命名学习卡）" },
+      card,
       keyPoint: kp
         ? (v2Display.get(kp.id)
             ? { id: kp.id, claim: v2Display.get(kp.id)!.claim, quoteText: v2Display.get(kp.id)!.quoteText }
@@ -467,6 +539,7 @@ const [totalRow] = await queryDb
         : null,
       blockContent,
       reviewReason,
+      isV2: isV2Card,
     });
   }
 
@@ -544,6 +617,7 @@ export async function listSanitizedReviews(
         // （后端 schedule_generation_changed 校验用），非答案化内容。
         generation: item.review.generation ?? 0,
         reviewReason: item.reviewReason,
+        isV2: item.isV2,
         ...availability,
       };
     }),
@@ -586,6 +660,8 @@ export async function getSanitizedReviewMeta(
   let cardId: string | null = null;
   let keyPointId: string | null = schedule.keyPointId ?? null;
   let validationOutcome: string | null = null;
+  let isV2Card = false;
+  let legacyCardIdForKp: string | null = null;
 
   if (schedule.subjectType === "card") {
     cardId = schedule.subjectId;
@@ -611,8 +687,24 @@ export async function getSanitizedReviewMeta(
       ),
     });
     if (!kp) return null;
-    cardId = kp.cardId;
+    legacyCardIdForKp = kp.cardId;
     keyPointId = kp.id;
+    // V2 objective：显示/跳转用 V2 cardId；alias key point 的父 legacy card
+    // 是 archived 隐藏行，不能作为 active consumer。
+    const v2Card = await queryDb.query.learningCardsV2.findFirst({
+      where: and(
+        eq(learningCardsV2.workspaceId, workspaceId),
+        eq(learningCardsV2.objectiveId, subjectKeyPointId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ),
+      columns: { cardId: true },
+    });
+    if (v2Card) {
+      isV2Card = true;
+      cardId = v2Card.cardId;
+    } else {
+      cardId = kp.cardId;
+    }
   }
 
   if (!cardId) return null;
@@ -621,23 +713,39 @@ export async function getSanitizedReviewMeta(
   // 用 Promise.all 并行，削减原串行 2 次往返。
   let keyPointInvalid = false;
   const [activeCard, resolvedKeyPointId] = await Promise.all([
-    queryDb.query.learningCards.findFirst({
-      where: and(
-        eq(learningCards.id, cardId),
-        eq(learningCards.workspaceId, workspaceId),
-        activeLearningCardConsumerPredicate(),
-      ),
-      columns: { id: true },
-    }),
+    isV2Card
+      ? queryDb.query.learningCardsV2.findFirst({
+          where: and(
+            eq(learningCardsV2.cardId, cardId),
+            eq(learningCardsV2.workspaceId, workspaceId),
+            eq(learningCardsV2.lifecycle, "active"),
+          ),
+          columns: { cardId: true },
+        })
+      : queryDb.query.learningCards.findFirst({
+          where: and(
+            eq(learningCards.id, cardId),
+            eq(learningCards.workspaceId, workspaceId),
+            activeLearningCardConsumerPredicate(),
+          ),
+          columns: { id: true },
+        }),
     (async () => {
       if (keyPointId) {
-        const keyPoint = await queryDb.query.cardKeyPoints.findFirst({
-          where: and(
-            eq(cardKeyPoints.workspaceId, workspaceId),
-            eq(cardKeyPoints.cardId, cardId),
-            eq(cardKeyPoints.id, keyPointId),
-          ),
-        });
+        const keyPoint = isV2Card
+          ? await queryDb.query.cardKeyPoints.findFirst({
+              where: and(
+                eq(cardKeyPoints.workspaceId, workspaceId),
+                eq(cardKeyPoints.id, keyPointId),
+              ),
+            })
+          : await queryDb.query.cardKeyPoints.findFirst({
+              where: and(
+                eq(cardKeyPoints.workspaceId, workspaceId),
+                eq(cardKeyPoints.cardId, cardId),
+                eq(cardKeyPoints.id, keyPointId),
+              ),
+            });
         if (!keyPoint) {
           keyPointInvalid = true;
           return null;
@@ -649,7 +757,7 @@ export async function getSanitizedReviewMeta(
       const firstKeyPoint = await queryDb.query.cardKeyPoints.findFirst({
         where: and(
           eq(cardKeyPoints.workspaceId, workspaceId),
-          eq(cardKeyPoints.cardId, cardId),
+          eq(cardKeyPoints.cardId, isV2Card ? legacyCardIdForKp ?? "" : cardId),
         ),
         orderBy: (keyPoint, { asc }) => [asc(keyPoint.ordinal), asc(keyPoint.id)],
       });

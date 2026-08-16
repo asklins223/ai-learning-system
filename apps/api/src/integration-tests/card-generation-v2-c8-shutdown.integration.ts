@@ -53,7 +53,7 @@ async function seedNote(title: string, content: string): Promise<{ versionId: st
     await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
       VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${JSON.stringify({ blocks: [{ type: "paragraph", content }] })}, 'c8-hash', ${USER_ID})
+      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'c8-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${blockId}, ${versionId}, ${WORKSPACE_ID}, 'paragraph', ${content}, 1)
@@ -123,7 +123,7 @@ test("C8：readiness → executeV1WriterShutdown（epoch bump + 事件落账）�
   const readiness = await withWorkspaceTransaction(ctx, (tx) =>
     checkLegacyWriterShutdownReadiness(tx, WORKSPACE_ID));
   assert.equal(readiness.canShutdown, true,
-    `无 legacy hits + 有 V2 run 时必须可以停写（blocking: ${JSON.stringify(readiness.blockingReasons)}）`);
+    `无 legacy hits + 有 V2 run 时必须可以停写（blocking: ${readiness.blockingReasons.join(",")}）`);
   assert.equal(readiness.totalHitsLast24Hours, 0);
   assert.equal(readiness.totalHitsLast7Days, 0);
 

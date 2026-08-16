@@ -11,11 +11,11 @@ export type VoiceVisualPhaseV1 = Extract<
 const COPY: Record<VoiceVisualPhaseV1, { title: string; hint: string }> = {
   requesting_permission: {
     title: "准备麦克风",
-    hint: "点按按钮可取消",
+    hint: "松开可取消",
   },
   listening: {
     title: "正在听你说",
-    hint: "说完再点一下结束",
+    hint: "松开即可发送",
   },
   finalizing: {
     title: "正在收好声音",

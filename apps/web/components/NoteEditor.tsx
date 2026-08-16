@@ -632,14 +632,19 @@ export function NoteEditor({
     }
 
     let frame = 0;
+    // 标题元素在内容变更（previewOutlineBlocks 变化）时缓存一次；滚动帧只
+    // 复用缓存的元素读取几何，不再每帧 querySelectorAll 整棵预览树。
+    let headings: HTMLElement[] = [];
     const updateActiveHeading = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const previewPane = previewRef.current;
         if (!previewPane) return;
-        const headings = Array.from(previewPane.querySelectorAll<HTMLElement>(
-          ".note-article-body h1, .note-article-body h2, .note-article-body h3, .note-article-body h4, .note-article-body h5, .note-article-body h6",
-        ));
+        if (headings.length === 0) {
+          headings = Array.from(previewPane.querySelectorAll<HTMLElement>(
+            ".note-article-body h1, .note-article-body h2, .note-article-body h3, .note-article-body h4, .note-article-body h5, .note-article-body h6",
+          ));
+        }
         if (headings.length === 0) {
           setActiveOutlineKey(outlineBlockKey(previewOutlineBlocks[0]));
           return;
@@ -647,9 +652,9 @@ export function NoteEditor({
 
         const readingAnchor = 138;
         let activeIndex = 0;
-        headings.forEach((heading, index) => {
-          if (heading.getBoundingClientRect().top <= readingAnchor) activeIndex = index;
-        });
+        for (let i = 0; i < headings.length; i++) {
+          if (headings[i].getBoundingClientRect().top <= readingAnchor) activeIndex = i;
+        }
         const activeBlock = previewOutlineBlocks[Math.min(activeIndex, previewOutlineBlocks.length - 1)];
         if (activeBlock) setActiveOutlineKey(outlineBlockKey(activeBlock));
       });
@@ -724,7 +729,9 @@ export function NoteEditor({
     return () => {
       active = false;
     };
-  }, [noteId, currentVersionNo]);
+    // PERF: 版本历史只在挂载/切换笔记时拉取一次，而非每次版本号变化
+    // （含 ~2.5s 一次的自动保存）都触发全量重取。
+  }, [noteId]);
 
   // PERF-04 拆分（第十三轮）：保存逻辑提取到 useNoteSave hook
   const {

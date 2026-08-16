@@ -45,6 +45,30 @@ async function chunkedInArraySelect<T>(
   }
   return results;
 }
+
+/**
+ * N#7-8: Bounded-concurrency async map (same shape as image-asset.ts's private
+ * helper). Used for the transaction fallback download path in
+ * ensureImageAssetsForBlocks so multi-image saves don't serialize MinIO network
+ * I/O one object at a time, while keeping the in-flight buffer count bounded.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
 import { CardStatus, ReviewStatus } from "@ailearn/shared";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
@@ -96,24 +120,25 @@ function pgJsonbSerialize(value: unknown): string {
     // 对于指数格式，使用 BigInt 精确转换（当数字为整数时），
     // 否则使用 toPrecision 并去除尾部零。非指数格式直接使用 String()。
     const str = String(value);
-    if (/[eE]/.test(str)) {
-      // 对于指数表示的数字，尝试使用更高精度转换
-      // PostgreSQL jsonb::text 使用 shortest round-trip representation
-      // 对于非整数的指数表示，使用 toPrecision(21) 然后去除尾部零
-      if (Number.isInteger(value)) {
-        // 整数使用 BigInt 精确表示
-        try {
-          return BigInt(value).toString();
-        } catch {
-          // 超出 BigInt 安全范围时回退到 toFixed
-          const fixed = value.toFixed(20).replace(/0+$/, "").replace(/\.$/, "");
-          return fixed || "0";
-        }
-      }
-      const fixed = value.toPrecision(21).replace(/0+$/, "").replace(/\.$/, "");
-      return fixed || "0";
+    // PERF: Fast path — the overwhelming majority of JSON numbers (integers and
+    // in-range decimals) have no exponent, so avoid the regex engine on the
+    // content-hash hot path. Only fall into the expensive BigInt/toPrecision
+    // path for exponential edge cases (|value| >= 1e21 or < 1e-6).
+    if (str.indexOf("e") === -1 && str.indexOf("E") === -1) {
+      return str;
     }
-    return str;
+    if (Number.isInteger(value)) {
+      // 整数使用 BigInt 精确表示
+      try {
+        return BigInt(value).toString();
+      } catch {
+        // 超出 BigInt 安全范围时回退到 toFixed
+        const fixed = value.toFixed(20).replace(/0+$/, "").replace(/\.$/, "");
+        return fixed || "0";
+      }
+    }
+    const fixed = value.toPrecision(21).replace(/0+$/, "").replace(/\.$/, "");
+    return fixed || "0";
   }
   if (typeof value === "boolean") return value ? "true" : "false";
   if (Array.isArray(value)) {
@@ -256,8 +281,12 @@ export async function ensureImageAssetsForBlocks<T extends { type: string; conte
     status: "ready";
     createdBy: string;
   }[] = [];
-  for (const objectKey of missingKeys) {
-    const validated = await downloadAndValidateImageAsset(objectKey);
+  // PERF: Download/validate missing image assets with bounded concurrency (4,
+  // matching preRegisterImageAssetsForImport) instead of one serial await per
+  // object. The 4-worker pool bounds the number of in-flight image Buffers.
+  const DOWNLOAD_CONCURRENCY = 4;
+  const validatedList = await mapWithConcurrency(missingKeys, DOWNLOAD_CONCURRENCY, downloadAndValidateImageAsset);
+  for (const validated of validatedList) {
     if (!validated) {
       continue;
     }
@@ -268,7 +297,7 @@ export async function ensureImageAssetsForBlocks<T extends { type: string; conte
       status: "ready",
       createdBy: userId,
     });
-    logger.info({ objectKey, workspaceId }, "registered source-imported image as note_image_asset");
+    logger.info({ objectKey: validated.objectKey, workspaceId }, "registered source-imported image as note_image_asset");
   }
   if (assetRows.length > 0) {
     await tx
@@ -376,28 +405,105 @@ async function updateVersionInPlace(
   contentJson: { blocks: Array<{ type: NoteBlock["type"]; content: string }> },
   contentHash: string,
   blocks: Array<{ type: NoteBlock["type"]; content: string }>,
-) {
-  // 删除旧 blocks
-  await tx.delete(noteBlocks).where(eq(noteBlocks.versionId, versionId));
-  // 插入新 blocks
-  if (blocks.length) {
-    const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, blocks);
-    await tx.insert(noteBlocks).values(
-      blocksWithAssets.map((b, idx) => ({
-        versionId,
-        workspaceId,
-        ordinal: idx,
-        type: b.type,
-        content: b.content,
-        imageAssetId: b.imageAssetId,
-      })),
-    );
+): Promise<Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>> {
+  // PERF: diff-based in-place update. Previously this path DELETE-all'd and
+  // re-INSERT-all'd note_blocks on every 2.5s autosave, causing constant write
+  // amplification / index churn / table bloat on large notes. Now we read the
+  // existing rows once and only UPDATE changed rows, INSERT new ordinals, and
+  // DELETE removed ordinals. An autosave where nothing changed becomes a single
+  // read + the note_versions row update instead of DELETE-all + INSERT-all.
+  const existingBlocks = await tx.query.noteBlocks.findMany({
+    where: eq(noteBlocks.versionId, versionId),
+    orderBy: (b, { asc }) => [asc(b.ordinal)],
+  });
+
+  const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, blocks);
+  const existingByOrdinal = new Map(existingBlocks.map((b) => [b.ordinal, b]));
+
+  const submitted = blocksWithAssets.map((b, idx) => {
+    const existing = existingByOrdinal.get(idx);
+    return {
+      versionId,
+      workspaceId,
+      ordinal: idx,
+      type: b.type,
+      content: b.content,
+      imageAssetId: b.imageAssetId,
+      // Preserve provenance on in-place edits instead of dropping sourceRef.
+      sourceRef: existing?.sourceRef ?? null,
+    };
+  });
+
+  const submittedByIdentity = new Map(submitted.map((b) => [b.ordinal, b]));
+  const toInsert: typeof submitted = [];
+  const toUpdate: Array<{ id: string; patch: (typeof submitted)[number] }> = [];
+  const toDelete: string[] = [];
+
+  for (const sub of submitted) {
+    const existing = existingByOrdinal.get(sub.ordinal);
+    if (!existing) {
+      toInsert.push(sub);
+    } else if (
+      existing.type !== sub.type ||
+      existing.content !== sub.content ||
+      existing.imageAssetId !== sub.imageAssetId
+    ) {
+      toUpdate.push({ id: existing.id, patch: sub });
+    }
   }
+  for (const existing of existingBlocks) {
+    if (!submittedByIdentity.has(existing.ordinal)) {
+      toDelete.push(existing.id);
+    }
+  }
+
+  if (toDelete.length > 0) {
+    await tx.delete(noteBlocks).where(inArray(noteBlocks.id, toDelete));
+  }
+  if (toInsert.length > 0) {
+    await tx.insert(noteBlocks).values(toInsert);
+  }
+  if (toUpdate.length > 0) {
+    // PERF: batch all changed blocks into a single multi-row UPDATE instead of
+    // issuing one serialized UPDATE per row on the 2.5s autosave hot path.
+    // The FROM (unnest(...)) form keeps PostgreSQL's query planner on one scan
+    // and avoids N serial DB round-trips. `ordinal`/`versionId`/`sourceRef` are
+    // unchanged (they equal the existing row values in `patch`), so they are
+    // deliberately not rewritten.
+    const ids = sql.join(toUpdate.map((u) => sql`${u.id}::uuid`), sql`, `);
+    const types = sql.join(toUpdate.map((u) => sql`${u.patch.type}::text`), sql`, `);
+    const contents = sql.join(toUpdate.map((u) => sql`${u.patch.content}::text`), sql`, `);
+    const imageIds = sql.join(toUpdate.map((u) => sql`${u.patch.imageAssetId}::uuid`), sql`, `);
+    await tx.execute(sql`
+      UPDATE note_blocks
+      SET type = u.type,
+          content = u.content,
+          image_asset_id = u.image_asset_id
+      FROM (
+        SELECT ord.id, ord.type, ord.content, ord.image_asset_id
+        FROM unnest(
+          ARRAY[${ids}],
+          ARRAY[${types}],
+          ARRAY[${contents}],
+          ARRAY[${imageIds}]
+        ) AS ord(id uuid, type text, content text, image_asset_id uuid)
+      ) AS u
+      WHERE note_blocks.id = u.id
+    `);
+  }
+
   // 更新版本内容（含 updatedAt 追踪原地修改时间）
   await tx
     .update(noteVersions)
     .set({ contentJson, contentHash, updatedAt: new Date() })
     .where(eq(noteVersions.id, versionId));
+
+  // Return the submitted blocks (preserving row metadata where the row already
+  // existed) so the caller can build the response without re-reading note_blocks.
+  return submitted.map((sub) => {
+    const existing = existingByOrdinal.get(sub.ordinal);
+    return existing ? { ...existing, ...sub } : sub;
+  }) as Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>;
 }
 
 type NoteSearchDocument = {
@@ -751,6 +857,14 @@ export async function updateNote(
         .where(eq(notes.id, noteId));
     }
 
+    // PERF: Build the response from data already in scope from the write branch
+    // instead of re-reading note/version/blocks after every content write
+    // (incl. the 2.5s autosave tick). Fields left null are re-read at the end —
+    // only for paths that genuinely lacked the data (e.g. title-only / no-op).
+    let resultNote: typeof note | null = null;
+    let resultVersion: typeof noteVersions.$inferSelect | null = null;
+    let resultBlocks: NoteBlock[] | null = null;
+
     // 标题单独修改时，精确克隆当前正文为一个新版本。currentVersionId 同时
     // 是客户端 OCC 令牌；如果只改 notes.title，多标签页会持有同一令牌并
     // 静默覆盖。仅对带 baseVersionId 的新协议请求推进版本，保留 service
@@ -809,6 +923,19 @@ export async function updateNote(
             updatedAt: new Date(),
           })
           .where(eq(notes.id, noteId));
+
+        resultNote = {
+          ...note,
+          currentVersionId: newVersion.id,
+          title: requestedManualTitle as string,
+          titleSource: "manual",
+          updatedAt: new Date(),
+        };
+        resultVersion = newVersion;
+        resultBlocks = currentBlocks.map((block) => ({
+          ...block,
+          versionId: newVersion.id,
+        })) as NoteBlock[];
       }
     }
 
@@ -854,11 +981,26 @@ export async function updateNote(
             })
             .where(eq(notes.id, noteId));
         }
+        resultNote = {
+          ...note,
+          currentVersionId: existingVersion.id,
+          title: dedupTitle,
+          titleSource: effectiveTitleSource,
+          ...(existingVersion.id !== note.currentVersionId || titleChanged
+            ? { updatedAt: new Date() }
+            : {}),
+        };
+        resultVersion = existingVersion;
+        resultBlocks = sanitizedBlocks.map((b, i) => ({
+          ...b,
+          ordinal: i,
+          imageAssetId: null,
+        })) as NoteBlock[];
       } else if (input.isAutosave && note.currentVersionId && !manualTitleChanged) {
         // 2. 自动保存模式：尝试原地更新当前版本
         const canInPlace = await canUpdateVersionInPlace(tx, note.currentVersionId);
         if (canInPlace) {
-          await updateVersionInPlace(tx, note.currentVersionId, workspaceId, contentJson, contentHash, sanitizedBlocks);
+          const inPlaceBlocks = await updateVersionInPlace(tx, note.currentVersionId, workspaceId, contentJson, contentHash, sanitizedBlocks);
           await tx
             .update(notes)
             .set({
@@ -867,6 +1009,16 @@ export async function updateNote(
               updatedAt: new Date(),
             })
             .where(eq(notes.id, noteId));
+          resultNote = {
+            ...note,
+            title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
+            titleSource: effectiveTitleSource,
+            updatedAt: new Date(),
+          };
+          // currentVersionId is unchanged by an in-place update; the version row
+          // itself is not in scope here (only id/sealedAt were locked), so it is
+          // re-read below — note/blocks no longer are.
+          resultBlocks = inPlaceBlocks as NoteBlock[];
         } else {
           // 有卡片引用，降级为创建新版本
           const latest = await tx.query.noteVersions.findFirst({
@@ -886,8 +1038,9 @@ export async function updateNote(
             })
             .returning();
 
+          let blocksWithAssets: Array<{ type: NoteBlock["type"]; content: string; imageAssetId: string | null }> = [];
           if (sanitizedBlocks.length) {
-            const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
+            blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
             await tx.insert(noteBlocks).values(
               blocksWithAssets.map((b, idx) => ({
                 versionId: newVersion.id,
@@ -909,6 +1062,18 @@ export async function updateNote(
               updatedAt: new Date(),
             })
             .where(eq(notes.id, noteId));
+          resultNote = {
+            ...note,
+            currentVersionId: newVersion.id,
+            title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
+            titleSource: effectiveTitleSource,
+            updatedAt: new Date(),
+          };
+          resultVersion = newVersion;
+          resultBlocks = blocksWithAssets.map((b, idx) => ({
+            ...b,
+            ordinal: idx,
+          })) as NoteBlock[];
         }
       } else {
         // 3. 显式保存或无法原地更新：创建新版本
@@ -929,8 +1094,9 @@ export async function updateNote(
           })
           .returning();
 
+        let blocksWithAssets: Array<{ type: NoteBlock["type"]; content: string; imageAssetId: string | null }> = [];
         if (sanitizedBlocks.length) {
-          const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
+          blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
           await tx.insert(noteBlocks).values(
             blocksWithAssets.map((b, idx) => ({
               versionId: newVersion.id,
@@ -952,23 +1118,42 @@ export async function updateNote(
             updatedAt: new Date(),
           })
           .where(eq(notes.id, noteId));
+        resultNote = {
+          ...note,
+          currentVersionId: newVersion.id,
+          title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
+          titleSource: effectiveTitleSource,
+          updatedAt: new Date(),
+        };
+        resultVersion = newVersion;
+        resultBlocks = blocksWithAssets.map((b, idx) => ({
+          ...b,
+          ordinal: idx,
+        })) as NoteBlock[];
       }
     }
 
-    // F-005: tx read inside transaction
-    const uNote = await tx.query.notes.findFirst({
-      where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
-    });
-    if (!uNote || !uNote.currentVersionId) return null;
-    const uVer = await tx.query.noteVersions.findFirst({
-      where: eq(noteVersions.id, uNote.currentVersionId),
-    });
-    if (!uVer) return null;
-    const uBlocks = await tx.query.noteBlocks.findMany({
-      where: eq(noteBlocks.versionId, uNote.currentVersionId),
-      orderBy: (b, { asc: a1 }) => [a1(b.ordinal)],
-    });
-    const result = { note: uNote, version: uVer, blocks: uBlocks as NoteBlock[] };
+    // F-005: tx read inside transaction — only re-read the fields the write
+    // branch did not already have in scope (PERF: avoids 3 redundant round-trips
+    // on every content write, incl. the 2.5s autosave tick).
+    if (!resultNote || !resultVersion || !resultBlocks) {
+      const uNote = resultNote ?? await tx.query.notes.findFirst({
+        where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
+      });
+      if (!uNote || !uNote.currentVersionId) return null;
+      const uVer = resultVersion ?? await tx.query.noteVersions.findFirst({
+        where: eq(noteVersions.id, uNote.currentVersionId),
+      });
+      if (!uVer) return null;
+      const uBlocks = resultBlocks ?? (await tx.query.noteBlocks.findMany({
+        where: eq(noteBlocks.versionId, uNote.currentVersionId),
+        orderBy: (b, { asc: a1 }) => [a1(b.ordinal)],
+      })) as NoteBlock[];
+      resultNote = uNote;
+      resultVersion = uVer;
+      resultBlocks = uBlocks;
+    }
+    const result = { note: resultNote, version: resultVersion, blocks: resultBlocks as NoteBlock[] };
 
   // R-017: 即使只改标题也更新搜索投影（标题投影不会持续过期）。
   if (result) {
@@ -1055,28 +1240,35 @@ export async function deleteNote(
     // 的恢复范围保持对称。查询刚被归档的卡片（archivedByNoteDeletionAt === deletedAt），
     // 而非所有关联卡片，避免取消 SUPERSEDED 等卡片的计划后无法正确恢复。
     // CONC-10-edge: 使用专用标记列匹配，即使 updatedAt 被其他操作覆盖也能正确识别。
-    const cardRows = await executor
-      .select({ id: learningCards.id })
-      .from(learningCards)
-      .where(and(
-        inArray(learningCards.noteVersionId, versionIds),
-        eq(learningCards.status, CardStatus.ARCHIVED),
-        eq(learningCards.archivedByNoteDeletionAt, deletedAt),
-      ));
+    const cardRows = await chunkedInArraySelect(
+      (chunk) => executor
+        .select({ id: learningCards.id })
+        .from(learningCards)
+        .where(and(
+          inArray(learningCards.noteVersionId, chunk),
+          eq(learningCards.status, CardStatus.ARCHIVED),
+          eq(learningCards.archivedByNoteDeletionAt, deletedAt),
+        )),
+      versionIds,
+    );
     const cardIds = cardRows.map((c) => c.id);
 
     if (cardIds.length > 0) {
       // CONC-10: 设置 updatedAt = deletedAt，供 restoreDeletedNote
       // 精确匹配被 deleteNote 取消的计划，避免误恢复之前手动取消的计划。
-      await executor
-        .update(reviewSchedules)
-        .set({ status: ReviewStatus.CANCELLED, updatedAt: deletedAt })
-        .where(and(
-          eq(reviewSchedules.workspaceId, workspaceId),
-          eq(reviewSchedules.status, ReviewStatus.PENDING),
-          eq(reviewSchedules.subjectType, "card"),
-          inArray(reviewSchedules.subjectId, cardIds),
-        ));
+      // N#7-13: cardIds 分批取消，避免大数组 IN 参数越界。
+      for (let i = 0; i < cardIds.length; i += 500) {
+        const chunk = cardIds.slice(i, i + 500);
+        await executor
+          .update(reviewSchedules)
+          .set({ status: ReviewStatus.CANCELLED, updatedAt: deletedAt })
+          .where(and(
+            eq(reviewSchedules.workspaceId, workspaceId),
+            eq(reviewSchedules.status, ReviewStatus.PENDING),
+            eq(reviewSchedules.subjectType, "card"),
+            inArray(reviewSchedules.subjectId, chunk),
+          ));
+      }
 
       // 清理卡片搜索索引
       await deleteSearchDocuments(executor, workspaceId,
@@ -1245,19 +1437,47 @@ export async function restoreDeletedNote(
       list.push(kp);
       keyPointsByCard.set(kp.cardId, list);
     }
-    for (const card of result.restoredCards) {
+    // PERF: Batch-insert restored-card search documents in one savepoint instead
+    // of one upsertSearchDocument (nested-transaction INSERT ... ON CONFLICT) per
+    // card — restoring a note with many cards used to cost N round-trips serially.
+    const cardDocs = result.restoredCards.map((card) => {
       const keyPoints = keyPointsByCard.get(card.id) ?? [];
       const cardBody = [
         card.schemaJson.summary,
         ...keyPoints.map((kp) => kp.claim),
       ].join("\n");
-      await upsertSearchDocument(executor, {
+      return {
         workspaceId,
-        objectType: "card",
+        objectType: "card" as const,
         objectId: card.id,
         title: card.schemaJson.title,
         body: cardBody,
-      });
+      };
+    });
+    const INSERT_BATCH_SIZE = 500;
+    for (let start = 0; start < cardDocs.length; start += INSERT_BATCH_SIZE) {
+      const chunk = cardDocs.slice(start, start + INSERT_BATCH_SIZE);
+      try {
+        await executor.transaction(async (savepoint) => {
+          await savepoint
+            .insert(searchDocuments)
+            .values(chunk.map((doc) => ({ ...doc, metadata: {}, indexedAt: new Date() })))
+            .onConflictDoUpdate({
+              target: [searchDocuments.workspaceId, searchDocuments.objectType, searchDocuments.objectId],
+              set: {
+                title: sql`excluded.title`,
+                body: sql`excluded.body`,
+                metadata: sql`excluded.metadata`,
+                indexedAt: sql`excluded.indexed_at`,
+              },
+            });
+        });
+      } catch (err) {
+        logger.error(
+          { err, workspaceId, objectType: "card", count: chunk.length },
+          "restoreDeletedNote: search index batched upsert failed — index may be stale, run reindex to compensate",
+        );
+      }
     }
   }
 
@@ -1512,12 +1732,15 @@ export async function physicalDeleteNote(
     // workspace 的其他笔记版本复用，必须在级联删除后重新检查引用，
     // 只有真正 orphan 的资产才允许删除对象。
     const allBlocks = versionIds.length > 0
-      ? await tx.query.noteBlocks.findMany({
-          where: and(
-            inArray(noteBlocks.versionId, versionIds),
-            eq(noteBlocks.workspaceId, workspaceId),
-          ),
-        })
+      ? await chunkedInArraySelect(
+          (chunk) => tx.query.noteBlocks.findMany({
+            where: and(
+              inArray(noteBlocks.versionId, chunk),
+              eq(noteBlocks.workspaceId, workspaceId),
+            ),
+          }),
+          versionIds,
+        )
       : [];
     const legacyImageObjectKeys = allBlocks
       .filter((b) => b.type === "image")
@@ -1525,19 +1748,40 @@ export async function physicalDeleteNote(
       .filter((key): key is string => key !== null);
     const blockAssetIds = [...new Set(allBlocks.flatMap((block) =>
       block.imageAssetId ? [block.imageAssetId] : []))];
-    const assetConditions = [eq(noteImageAssets.uploadedForNoteId, noteId)];
-    if (blockAssetIds.length > 0) {
-      assetConditions.push(inArray(noteImageAssets.id, blockAssetIds));
-    }
-    if (legacyImageObjectKeys.length > 0) {
-      assetConditions.push(inArray(noteImageAssets.objectKey, legacyImageObjectKeys));
-    }
-    const candidateAssets = await tx.query.noteImageAssets.findMany({
+    // N#7-13: blockAssetIds/legacyImageObjectKeys 可能很大，将 or(...) 分解为
+    // 若干分块查询后按 id 去重合并，避免大数组 IN 参数越界。
+    const candidateAssetsById = new Map<string, typeof noteImageAssets.$inferSelect>();
+    const collectAssets = (rows: typeof noteImageAssets.$inferSelect[]) => {
+      for (const row of rows) candidateAssetsById.set(row.id, row);
+    };
+    // 1) 归属本笔记的资产（uploaded_for_note_id，单值条件）
+    await tx.query.noteImageAssets.findMany({
       where: and(
         eq(noteImageAssets.workspaceId, workspaceId),
-        or(...assetConditions),
+        eq(noteImageAssets.uploadedForNoteId, noteId),
       ),
-    });
+    }).then(collectAssets);
+    // 2) blockAssetIds —— 分块
+    await chunkedInArraySelect(
+      (chunk) => tx.query.noteImageAssets.findMany({
+        where: and(
+          eq(noteImageAssets.workspaceId, workspaceId),
+          inArray(noteImageAssets.id, chunk),
+        ),
+      }),
+      blockAssetIds,
+    ).then(collectAssets);
+    // 3) legacyImageObjectKeys —— 分块
+    await chunkedInArraySelect(
+      (chunk) => tx.query.noteImageAssets.findMany({
+        where: and(
+          eq(noteImageAssets.workspaceId, workspaceId),
+          inArray(noteImageAssets.objectKey, chunk),
+        ),
+      }),
+      legacyImageObjectKeys,
+    ).then(collectAssets);
+    const candidateAssets = Array.from(candidateAssetsById.values());
 
     // 14. 物理删除 note（级联删除 note_versions + note_blocks）
     // 防御性条件：仅删除仍处于软删除状态的笔记，防止在级联清理过程中

@@ -284,7 +284,10 @@ export const postSseToPublicEndpoint: PublicStreamingRequester = async (
         status: response.statusCode ?? 0,
         statusText: response.statusMessage ?? "",
         body: response,
-        cancel: () => response.destroy(),
+        cancel: () => {
+          clearTimeout(totalTimer);
+          response.destroy();
+        },
       });
     });
     const connectTimer = setTimeout(() => {
@@ -299,7 +302,10 @@ export const postSseToPublicEndpoint: PublicStreamingRequester = async (
     // "伴星正在想"（且无 failed 事件）。totalTimer 在 resolve（响应头到达）
     // 后保留，同时覆盖"响应头到了但 body 永不推流"的挂起：触发 destroy →
     // error → reject → 调用方（chatCompletionStream）抛错 → 标记 run failed。
-    const totalTimer = setTimeout(() => {
+    // 2026-08-16（性能专项）：健康流正常结束或 cancel() 时清理 totalTimer 防
+    // 泄漏；且每收到一个 data chunk 就重置该计时器（body-stall 语义），使
+    // 合法长流（总时长 > TOTAL_RESPONSE_TIMEOUT_MS）不会被残留定时器误杀。
+    let totalTimer = setTimeout(() => {
       request.destroy(new Error(
         `AI endpoint SSE request exceeded total timeout ${TOTAL_RESPONSE_TIMEOUT_MS}ms (connect + response body)`,
       ));
@@ -311,7 +317,21 @@ export const postSseToPublicEndpoint: PublicStreamingRequester = async (
       }
       socket.once("secureConnect", () => clearTimeout(connectTimer));
     });
-    request.once("response", () => clearTimeout(connectTimer));
+    request.once("response", (response) => {
+      clearTimeout(connectTimer);
+      // 正常收尾与显式取消都清掉残留定时器，避免每连接泄漏一个 300s 定时器。
+      response.once("end", () => clearTimeout(totalTimer));
+      response.once("close", () => clearTimeout(totalTimer));
+      // body-stall：每次收到数据说明流仍在推进，重置整体超时。
+      response.on("data", () => {
+        clearTimeout(totalTimer);
+        totalTimer = setTimeout(() => {
+          request.destroy(new Error(
+            `AI endpoint SSE request exceeded total timeout ${TOTAL_RESPONSE_TIMEOUT_MS}ms (connect + response body)`,
+          ));
+        }, TOTAL_RESPONSE_TIMEOUT_MS);
+      });
+    });
     request.once("error", (error) => {
       clearTimeout(connectTimer);
       clearTimeout(totalTimer);

@@ -5,7 +5,7 @@
  * 功能：
  *   1. 对每个包运行 c8，并将该包全部生产源码纳入分母
  *   2. 解析文件级覆盖率计数并聚合全仓报告
- *   3. 按阈值规则检查（全仓 70%/60%，显式关键模块 85%/75%）
+ *   3. 按阈值规则检查（阈值定义见 coverage-gate-lib.mjs，支持按关键模块差异化）
  *   4. 生成机器可读 JSON 报告
  *
  * 用法：
@@ -449,7 +449,10 @@ if (!targetPackage && changedBase) {
 }
 const repositoryGates = targetPackage
   ? null
-  : evaluateRepositoryGates(repositoryFiles, { changedLinesCoverage });
+  : evaluateRepositoryGates(repositoryFiles, {
+      changedLinesCoverage,
+      requireChangedLines: Boolean(changedBase || process.env.CI),
+    });
 const testFailures = results.filter((result) =>
   ["test-fail", "no-tests"].includes(result.status),
 ).length;
@@ -486,14 +489,18 @@ writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
 
 console.log("");
 console.log("[coverage] ========================================");
+const statusLabel = (status) => {
+  if (reportOnly && status === "fail") return "REPORT";
+  return status.toUpperCase();
+};
 if (repositoryGates) {
   const { repository, criticalModules, changedLines } = repositoryGates;
   console.log(
-    `[coverage]  repository: lines=${repository.coverage.linePct.toFixed(2)}%/70%, branches=${repository.coverage.branchPct.toFixed(2)}%/60% → ${repository.status.toUpperCase()}`,
+    `[coverage]  repository: lines=${repository.coverage.linePct.toFixed(2)}%/${repository.thresholdValues.lines}%, branches=${repository.coverage.branchPct.toFixed(2)}%/${repository.thresholdValues.branches}% → ${statusLabel(repository.status)}${reportOnly ? " (report-only)" : ""}`,
   );
   for (const group of criticalModules) {
     console.log(
-      `[coverage]  critical/${group.id}: matched=${group.fileCount}, lines=${group.coverage.linePct.toFixed(2)}%/85%, branches=${group.coverage.branchPct.toFixed(2)}%/75% → ${group.status.toUpperCase()}`,
+      `[coverage]  critical/${group.id}: matched=${group.fileCount}, lines=${group.coverage.linePct.toFixed(2)}%/${group.thresholdValues.lines}%, branches=${group.coverage.branchPct.toFixed(2)}%/${group.thresholdValues.branches}% → ${statusLabel(group.status)}${reportOnly ? " (report-only)" : ""}`,
     );
     for (const file of group.files) console.log(`[coverage]    - ${file}`);
   }
@@ -501,12 +508,12 @@ if (repositoryGates) {
     ? `lines=${changedLines.coverage.linePct.toFixed(2)}%/${changedLines.thresholdValues.lines}%, executable=${changedLines.executableChangedLines}/${changedLines.changedSourceLines}, base=${changedLines.base?.slice(0, 12)}`
     : `need ${changedLines.thresholdValues.lines}%`;
   console.log(
-    `[coverage]  changed-lines: ${changedLineDetail} → ${changedLines.status.toUpperCase()}${changedLines.reason ? ` — ${changedLines.reason}` : ""}`,
+    `[coverage]  changed-lines: ${changedLineDetail} → ${statusLabel(changedLines.status)}${reportOnly && changedLines.status === "fail" ? " (report-only)" : ""}${changedLines.reason ? ` — ${changedLines.reason}` : ""}`,
   );
 } else {
   console.log(`[coverage]  target package diagnostic: ${targetPackage}`);
 }
-console.log(`[coverage]  汇总: ${summary.passed} 门禁通过, ${summary.failed} 门禁失败, ${summary.testFailures} 测试发现/执行失败, ${summary.noCoverage} 无覆盖率, ${summary.sourceInventoryFailures} 源码清单不完整`);
+console.log(`[coverage]  汇总: ${summary.passed} 门禁通过, ${summary.failed} 门禁未达标${reportOnly ? "（report-only 不阻断）" : ""}, ${summary.testFailures} 测试发现/执行失败, ${summary.noCoverage} 无覆盖率, ${summary.sourceInventoryFailures} 源码清单不完整`);
 console.log(`[coverage]  报告: ${summaryPath}`);
 console.log("[coverage] ========================================");
 

@@ -125,6 +125,11 @@ export function StructuredBundleTask({ task, onIntent, draft, onDraftChange }: S
     return pairs;
   }, [relationPart]);
 
+  // F#性能（round4）：`selectedTokens.includes()` 在 tokenIds.map 内是 O(n·m)
+  // 的每渲扫描；派生为 Set 后用 has() 降为 O(1)（随 selectedTokens 变化重建）。
+  // 必须在 early return 前调用，保证 Hooks 顺序稳定。
+  const selectedTokenSet = useMemo(() => new Set(selectedTokens), [selectedTokens]);
+
   if (!orderingPart || !relationPart) {
     return <p className="learning-run-renderer-note">这道组合题缺少完整结构，无法作答。</p>;
   }
@@ -156,8 +161,8 @@ export function StructuredBundleTask({ task, onIntent, draft, onDraftChange }: S
           <button
             key={tokenId}
             type="button"
-            className={`learning-run-token-chip${selectedTokens.includes(tokenId) ? " is-selected" : ""}`}
-            aria-pressed={selectedTokens.includes(tokenId)}
+            className={`learning-run-token-chip${selectedTokenSet.has(tokenId) ? " is-selected" : ""}`}
+            aria-pressed={selectedTokenSet.has(tokenId)}
             onClick={() => toggleToken(tokenId)}
           >
             {orderingLabels[tokenId] ?? tokenId}

@@ -174,6 +174,9 @@ export interface CardListItem extends LearningCardRecord {
   validationCount?: number;
   reviewStatus?: string | null;
   nextReviewAt?: string | null;
+  /** V2 卡标记：链接到 /learning-cards/:id，而非 legacy /cards/:id。 */
+  isV2?: boolean;
+  objectiveId?: string;
 }
 
 export interface CardSetRecord {
@@ -704,6 +707,7 @@ export interface ReviewWithCard {
   keyPoint: { id: string; claim: string; quoteText: string } | null;
   blockContent: string | null;
   reviewReason: ReviewReason;
+  isV2?: boolean;
 }
 
 /**
@@ -720,6 +724,7 @@ export interface SanitizedReviewItem {
   /** P3 LearningRun 切流：review origin 的 CAS 字段。 */
   generation: number;
   reviewReason: ReviewReason;
+  isV2?: boolean;
 }
 
 /**

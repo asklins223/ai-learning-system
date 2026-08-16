@@ -52,6 +52,7 @@ export type ConversationTurnStateV1 =
       clientMessageId: string;
       idempotencyKey: string;
       input: { kind: "text" };
+      userText?: string;
     }
   | {
       kind: "running";
@@ -61,6 +62,7 @@ export type ConversationTurnStateV1 =
       phase: "accepted" | "thinking" | "streaming" | "acting";
       previewText: string;
       lastSeq: number;
+      userText?: string;
     }
   | {
       kind: "final";
@@ -68,9 +70,10 @@ export type ConversationTurnStateV1 =
       generation: number;
       messageId: string;
       previewText: string;
+      userText?: string;
     }
-  | { kind: "cancelled"; runId: string; generation: number }
-  | { kind: "error"; runId?: string; generation?: number; code: string; recoverable: boolean };
+  | { kind: "cancelled"; runId: string; generation: number; userText?: string }
+  | { kind: "error"; runId?: string; generation?: number; code: string; recoverable: boolean; userText?: string };
 
 export type BubbleDisplayStateV1 =
   | { kind: "hidden" }
@@ -126,7 +129,7 @@ export type VoiceDialogueStateV1 =
   | { kind: "listening"; startedAt: number; streamId: string }
   | { kind: "finalizing"; streamId: string }
   | { kind: "transcribing"; streamId: string; uploadId: string }
-  | { kind: "speaking"; runId: string; generation: number; segmentId: string }
+  | { kind: "speaking"; runId: string; generation: number; segmentId: string; speakingText?: string }
   | { kind: "cooldown"; until: number }
   | { kind: "cancelled"; reason: string }
   | { kind: "error"; code: string; recoverable: boolean };

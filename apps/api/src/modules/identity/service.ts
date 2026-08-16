@@ -146,8 +146,10 @@ export async function loginWithPassword(
   const workspaceRows = await db.query.workspaces.findMany({
     where: inArray(workspaces.id, workspaceIds),
   });
+  // PERF: 一次性建 Map，避免 memberships.map 内逐条 find() 的 O(m*n)。
+  const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
   const workspacesList: WorkspaceInfo[] = memberships.map((m) => {
-    const ws = workspaceRows.find((w) => w.id === m.workspaceId);
+    const ws = workspaceById.get(m.workspaceId);
     // ADR-0009 §3.6: isPersonal 基于 ownerId === userId，而非 personalWorkspaceId
     const isPersonal = ws?.ownerId === user.id;
     return {
@@ -436,8 +438,10 @@ export async function listUserWorkspaces(userId: string): Promise<WorkspaceInfo[
     where: inArray(workspaces.id, workspaceIds),
   });
 
+  // PERF: 一次性建 Map 替代逐条 find() 的 O(m*n)。
+  const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
   return memberships.map((m) => {
-    const ws = workspaceRows.find((w) => w.id === m.workspaceId);
+    const ws = workspaceById.get(m.workspaceId);
     // ADR-0009 §3.6: isPersonal 基于 ownerId === userId，而非 personalWorkspaceId
     const isPersonal = ws?.ownerId === userId;
     return {

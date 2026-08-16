@@ -45,13 +45,51 @@ import {
   type CreateLearningRunV2Request,
 } from "./run-service.ts";
 import {
-  learningRunOriginV2Schema,
+  createLearningRunV2RequestSchema,
 } from "@ailearn/shared";
 import { LearningRunServiceError } from "./run-errors.ts";
+import { safeSseWrite } from "../../lib/safe-sse-write.ts";
 import { companionRateLimit } from "../companion-conversation/companion-rate-limit.ts";
 // 方案 16 §20：学习漏斗埋点（服务端权威写入，尽力而为）。
-import { recordLearningMetric, recordLearningMetrics } from "../observability/learning-metrics.ts";
+import { recordLearningMetric, recordLearningMetrics, type LearningMetricEventV1, type LearningMetricScope } from "../observability/learning-metrics.ts";
 import { isLearningRunV1Enabled } from "../../config/learning-companion-flags.ts";
+
+// PERF-A#10：fire-and-forget 学习埋点加背压——有界在途/排队，溢出即丢弃
+// （与 recordLearningMetric 的静默尽力而为语义一致），避免高流量下无界堆积
+// DB 写事务。单实例内存队列；无需持久化（埋点可丢）。
+const METRIC_MAX_INFLIGHT = 8;
+const METRIC_MAX_QUEUE = 100;
+let metricInFlight = 0;
+const metricQueue: Array<() => Promise<void>> = [];
+
+function drainMetricQueue(): void {
+  while (metricInFlight < METRIC_MAX_INFLIGHT && metricQueue.length > 0) {
+    const task = metricQueue.shift()!;
+    metricInFlight += 1;
+    void task().finally(() => {
+      metricInFlight -= 1;
+      drainMetricQueue();
+    });
+  }
+}
+
+function enqueueLearningMetric(
+  scope: LearningMetricScope,
+  event: LearningMetricEventV1,
+): void {
+  const task = () => recordLearningMetric(scope, event);
+  if (metricInFlight >= METRIC_MAX_INFLIGHT) {
+    // 队列已满：直接丢弃（尽力而为，埋点失败/丢弃均无学习副作用）。
+    if (metricQueue.length >= METRIC_MAX_QUEUE) return;
+    metricQueue.push(task);
+    return;
+  }
+  metricInFlight += 1;
+  void task().finally(() => {
+    metricInFlight -= 1;
+    drainMetricQueue();
+  });
+}
 
 const runParamsSchema = z.object({ runId: z.string().uuid() });
 const taskDraftParamsSchema = z.object({ runId: z.string().uuid(), taskId: z.string().uuid() });
@@ -60,16 +98,6 @@ const activityLeaseBodySchema = z.object({
   startedAt: z.string().min(1),
   endedAt: z.string().min(1),
 });
-
-/** §16.3 V2 PREPARE 请求（带 originV2；与 V1 origin 互斥）。 */
-const createLearningRunV2RequestSchema = z
-  .strictObject({
-    originV2: learningRunOriginV2Schema,
-    goal: z.enum(["stabilize", "clarify", "repair", "transfer", "explore"]),
-    requestedTimeBudgetSeconds: z.number().int().min(30).max(180).optional(),
-    responsePreference: z.enum(["adaptive", "voice", "text", "structured"]).optional(),
-    idempotencyKey: z.string().min(1).max(200),
-  });
 
 // 运维护栏（2026-08-15 审计）：learning-runs 写端点此前无限流——高频
 // create/submit 会持续排满评估任务队列。与 companion 限流同模式（内存
@@ -254,45 +282,73 @@ export async function learningRunRoutes(app: FastifyInstance) {
         closed = true;
         req.log.warn({ err, runId: params.data.runId }, "sse: socket error");
       });
-      const interval = setInterval(async () => {
-        if (closed) return;
+      // PERF-A#9：in-flight guard——DB poll 慢于 3s 时跳过本次 tick，防止
+      // 重叠 interval 在慢 DB 下堆积（N 客户端 × 每 3s 一次 DB 往返不叠加）。
+      // 空闲（无事件）时指数退避到 SSE_MAX_INTERVAL_MS，有事件立即恢复 3s。
+      let polling = false;
+      let pollIntervalMs = 3000;
+      const SSE_MAX_INTERVAL_MS = 30_000;
+      const SSE_EVENTS_BATCH = 200; // 对齐 run-service.getEventsAfter 的 LIMIT 值
+      const SSE_DRAIN_ROUNDS = 5;   // 单 tick 最多续读轮次，限制突发 drain 的峰值
+      let interval: ReturnType<typeof setInterval> | null = null;
+      const schedulePoll = () => {
+        if (interval) clearInterval(interval);
+        interval = setInterval(pollEvents, pollIntervalMs);
+        interval.unref();
+      };
+      const pollEvents = async () => {
+        if (closed || polling) return;
+        polling = true;
         try {
           // F8（round-5 审计）：getEventsAfter 有 WHERE seq > after + LIMIT SSE_EVENTS_BATCH(200)。
           // 突发攒 >200 条时若只拉一批、余条要等下一 3s tick 才能续读，端到端延迟放大。
           // 本轮 tick 内做有界 drain：每轮读到满批（==batch）则继续 round 续读，不足一批
           // 即排空；受 SSE_DRAIN_ROUNDS 上限约束，cursor 每轮推进，Last-Event-ID 无缝隙无重复。
-          const SSE_EVENTS_BATCH = 200; // 对齐 run-service.getEventsAfter 的 LIMIT 值
-          const SSE_DRAIN_ROUNDS = 5;   // 单 tick 最多续读轮次，限制突发 drain 的峰值
+          let emittedAny = false;
           for (let round = 0; round < SSE_DRAIN_ROUNDS && !closed; round++) {
             const events = await withWorkspaceTransaction(scope, async (tx) =>
               getEventsAfter(tx, { ...scope, runId: params.data.runId, afterSequence: cursor }),
             );
             for (const event of events) {
               cursor = event.sequence;
-              if (!reply.raw.writableEnded && !closed) {
-                reply.raw.write(`id: ${event.sequence}\nevent: ${event.eventType}\ndata: ${JSON.stringify(event.payload)}\n\n`);
+              emittedAny = true;
+              if (!closed) {
+                safeSseWrite(reply.raw, `id: ${event.sequence}\nevent: ${event.eventType}\ndata: ${JSON.stringify(event.payload)}\n\n`);
               }
             }
             if (events.length < SSE_EVENTS_BATCH) break;
           }
+          // 空闲退避：无事件时逐步拉长轮询间隔（上限 30s），有事件立即恢复 3s。
+          if (emittedAny) {
+            if (pollIntervalMs !== 3000) {
+              pollIntervalMs = 3000;
+              schedulePoll();
+            }
+          } else if (pollIntervalMs < SSE_MAX_INTERVAL_MS) {
+            pollIntervalMs = Math.min(pollIntervalMs * 2, SSE_MAX_INTERVAL_MS);
+            schedulePoll();
+          }
         } catch (err) {
-          clearInterval(interval);
+          if (interval) clearInterval(interval);
           if (!closed && !reply.raw.writableEnded) reply.raw.end();
           req.log.warn({ err }, "learning-run events stream error");
+        } finally {
+          polling = false;
         }
-      }, 3000);
+      };
+      interval = setInterval(pollEvents, pollIntervalMs);
+      interval.unref();
       // PERF-B6 修复：加 15s heartbeat comment，防止 idle 长连接被代理空闲超时切断
       //（对齐 companion-events.ts 的保活写法）。
       const heartbeatTimer = setInterval(() => {
-        if (!closed && !reply.raw.writableEnded) {
-          reply.raw.write(`: heartbeat ${Date.now()}\n\n`);
+        if (!closed) {
+          safeSseWrite(reply.raw, `: heartbeat ${Date.now()}\n\n`);
         }
       }, 15_000);
       heartbeatTimer.unref();
-      interval.unref();
       reply.raw.on("close", () => {
         closed = true;
-        clearInterval(interval);
+        if (interval) clearInterval(interval);
         clearInterval(heartbeatTimer);
       });
       return reply;
@@ -403,7 +459,8 @@ export async function learningRunRoutes(app: FastifyInstance) {
         // 故不再 await 阻塞 response（原在 reply.send 前加一个独立事务 RTT + 占用
         // 连接池 slot）。改为 fire-and-forget：recordLearningMetric 内部已 try/catch
         // 静默失败，void 不会产生 unhandled rejection，语义与 run-create 的尽力而为一致。
-        void recordLearningMetric(
+        // PERF-A#10：经有界队列（在途/排队上限 + 溢出丢弃）加背压，防高流量堆积。
+        enqueueLearningMetric(
           { workspaceId: req.session.workspaceId, userId: req.session.userId },
           {
             eventType: "artifact_locked",
@@ -451,7 +508,8 @@ export async function learningRunRoutes(app: FastifyInstance) {
             : body.action.kind;
         // F7（round-4）：同 artifact_locked，每次请求仅 1 条事件，改 fire-and-forget
         // 释放 response 前的连接池 slot（recordLearningMetric 内部静默吞错，void 安全）。
-        void recordLearningMetric(
+        // PERF-A#10：经有界队列（在途/排队上限 + 溢出丢弃）加背压，防高流量堆积。
+        enqueueLearningMetric(
           { workspaceId: req.session.workspaceId, userId: req.session.userId },
           {
             eventType: "action",

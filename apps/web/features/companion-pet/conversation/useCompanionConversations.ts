@@ -6,7 +6,6 @@ import { openCompanionSse } from "@/features/companion-pet/conversation/fetch-ss
 import {
   mergeMessages,
   seqFromEventId,
-  textFromBlocks,
   type Conversation,
   type Message,
 } from "./conversation-model";
@@ -41,6 +40,10 @@ export function useCompanionConversations(requestedConversationId: string | null
   // pendingDeltaRef: runId -> 本帧内累积的 delta 文本；deltaRafRef: 已排队的 rAF。
   const pendingDeltaRef = useRef<Map<string, string>>(new Map());
   const deltaRafRef = useRef<number | null>(null);
+  // 流式回复的累计纯文本（assistant-${runId} -> text）。避免每次 flush 都
+  // 通过 textFromBlocks(blocks) 重算整段文本并 map 重建整个 messages 数组，
+  // 从而把累计 flush 从 O(n^2) 降到 O(n)。
+  const streamingTextRef = useRef<Map<string, string>>(new Map());
   // FN10：assistant.final 重试的 500ms 退避定时器句柄——存入 ref 并在
   // 卸载/中止时清除（bounded ≤2 次，此处仅补句柄管理）。
   const reloadRetryTimerRef = useRef<number | null>(null);
@@ -56,25 +59,29 @@ export function useCompanionConversations(requestedConversationId: string | null
     const deltas = pendingDeltaRef.current;
     pendingDeltaRef.current = new Map();
     setMessages((current) => {
-      let next = current;
+      // 浅拷贝一次，按 index 定点更新，避免每个 run 都整树 map 重建。
+      const next = [...current];
+      let changed = false;
       deltas.forEach((delta, runId) => {
         const pendingId = `assistant-${runId}`;
-        const existing = next.find((item) => item.id === pendingId);
-        if (existing) {
-          next = next.map((item) => item.id === pendingId
-            ? { ...item, blocks: [{ type: "text", text: `${textFromBlocks(item.blocks)}${delta}` }] }
-            : item);
-        } else {
-          next = [...next, {
+        const prevText = streamingTextRef.current.get(runId) ?? "";
+        const text = prevText + delta;
+        streamingTextRef.current.set(runId, text);
+        const index = next.findIndex((item) => item.id === pendingId);
+        if (index === -1) {
+          next.push({
             id: pendingId,
             role: "assistant",
             seq: Number.MAX_SAFE_INTEGER,
-            blocks: [{ type: "text", text: delta }],
+            blocks: [{ type: "text", text }],
             createdAt: new Date().toISOString(),
-          }];
+          });
+        } else {
+          next[index] = { ...next[index], blocks: [{ type: "text", text }] };
         }
+        changed = true;
       });
-      return next;
+      return changed ? next : current;
     });
   }, []);
   // 2026-08-11：当前选中会话快照——在途 fetch（loadMessages/reloadAfterFinal）
@@ -197,6 +204,7 @@ export function useCompanionConversations(requestedConversationId: string | null
   useEffect(() => {
     if (!selectedId || enabled !== true) {
       setMessages([]);
+      streamingTextRef.current.clear();
       setMessagesLoading(false);
       return;
     }
@@ -207,6 +215,7 @@ export function useCompanionConversations(requestedConversationId: string | null
     streamAbortRef.current?.abort();
     setError(null);
     setMessages([]);
+    streamingTextRef.current.clear();
     setMessagesLoading(true);
     void loadMessages(selectedId)
       .catch(() => {
@@ -215,7 +224,7 @@ export function useCompanionConversations(requestedConversationId: string | null
       .finally(() => {
         if (selectedIdRef.current === selectedId) setMessagesLoading(false);
       });
-  }, [enabled, loadMessages, selectedId]);
+  }, [enabled, loadMessages, selectedId, flushPendingDeltas]);
 
   async function createConversation(): Promise<string> {
     const response = await fetch("/api/companion/conversations", {
@@ -275,6 +284,8 @@ export function useCompanionConversations(requestedConversationId: string | null
             // 服务端已持久化本轮消息，重载时以正式消息为准；assistant 副本
             // 由 reloadAfterFinal 按 messageId 精确替换/占位保留。
             setMessages((current) => current.filter((m) => !m.id.startsWith("pending-")));
+            // run 已终止，释放流式累计文本，避免 streamingTextRef 跨轮累积。
+            streamingTextRef.current.delete(runId);
             const finalPayload = event.payload as { messageId?: unknown };
             const finalMessageId = typeof finalPayload.messageId === "string" ? finalPayload.messageId : null;
             void reloadAfterFinal(opts.conversationId, finalMessageId, runId).catch(() => {
@@ -391,6 +402,7 @@ export function useCompanionConversations(requestedConversationId: string | null
     setConversations(remaining);
     setSelectedId(remaining[0]?.id ?? null);
     setMessages([]);
+    streamingTextRef.current.clear();
   }
 
   const selectConversation = useCallback((id: string) => {

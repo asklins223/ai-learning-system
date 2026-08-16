@@ -84,8 +84,17 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
   // 通过 ref 持有 pump 的最新实现，避免 useCallback 依赖环。
   const pumpImageUploadsRef = useRef<() => void>(() => {});
 
-  /** 同步上传状态到 React state（触发 UI 更新） */
+  // 进度事件的 rAF 合并句柄：onProgress 每帧可触发多次，合并到每帧一次
+  // setState，避免每次进度 tick 都重建整张上传列表视图。
+  const progressSyncRafRef = useRef<number | null>(null);
+
+  /** 同步上传状态到 React state（触发 UI 更新）。即时调用（状态机迁移）会
+   *  取消待执行的进度 rAF，避免重复同步；进度回调走 syncImageUploadProgress。 */
   const syncImageUploadState = useCallback(() => {
+    if (progressSyncRafRef.current !== null) {
+      cancelAnimationFrame(progressSyncRafRef.current);
+      progressSyncRafRef.current = null;
+    }
     const uploads = Array.from(imageUploadItemsRef.current.values());
     const pendingCount = uploads.filter(
       (upload) => upload.status === "queued" || upload.status === "uploading",
@@ -99,6 +108,15 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
       id, name, size, status, loaded, total, error,
     })));
   }, [mountedRef]);
+
+  /** 进度驱动的状态同步：按 rAF 节流，同帧多次进度只触发一次渲染。 */
+  const syncImageUploadProgress = useCallback(() => {
+    if (progressSyncRafRef.current !== null) return;
+    progressSyncRafRef.current = requestAnimationFrame(() => {
+      progressSyncRafRef.current = null;
+      syncImageUploadState();
+    });
+  }, [syncImageUploadState]);
 
   /** 从编辑器中移除上传占位符 */
   const removeImageUploadPlaceholder = useCallback((task: ImageUploadTask) => {
@@ -162,7 +180,7 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
           if (task.status !== "uploading") return;
           task.loaded = loaded;
           task.total = total > 0 ? total : task.size;
-          syncImageUploadState();
+          syncImageUploadProgress();
         },
       });
       if (task.status === "cancelled") return;
@@ -199,7 +217,7 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
       }
       pumpImageUploadsRef.current();
     }
-  }, [noteId, editorRef, latestDraftRef, updateSource, syncImageUploadState, mountedRef, scheduleImageUploadRemoval, imageUploadErrorMessage]);
+  }, [noteId, editorRef, latestDraftRef, updateSource, syncImageUploadState, syncImageUploadProgress, mountedRef, scheduleImageUploadRemoval, imageUploadErrorMessage]);
 
   /** 从队列中取出任务并启动上传（维持并发上限） */
   const pumpImageUploads = useCallback(() => {
@@ -310,6 +328,10 @@ export function useImageUploads(params: UseImageUploadsParams): UseImageUploadsR
     // 在 effect setup 时快照等价于清理时刻读取。
     const uploads = imageUploadItemsRef.current;
     return () => {
+      if (progressSyncRafRef.current !== null) {
+        cancelAnimationFrame(progressSyncRafRef.current);
+        progressSyncRafRef.current = null;
+      }
       imageUploadQueueRef.current = [];
       for (const upload of uploads.values()) {
         upload.status = "cancelled";

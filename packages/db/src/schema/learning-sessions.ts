@@ -28,6 +28,7 @@ import {
   index,
   uniqueIndex,
   check,
+  boolean,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -164,6 +165,10 @@ export const learningSessions = pgTable(
       t.workspaceId, t.userId, t.createdAt,
     ),
     statusIdx: index("learning_sessions_status_idx").on(t.workspaceId, t.userId, t.status),
+    // 2026-08-12（schema 完整性审计 P1-2）：0097 部分唯一索引声明
+    userActiveUniqueIdx: uniqueIndex("learning_sessions_user_active_unique_idx")
+      .on(t.workspaceId, t.userId)
+      .where(sql`${t.status} = 'active'`),
   }),
 );
 
@@ -229,7 +234,8 @@ export const learningEpisodes = pgTable(
     commitKeyUnique: uniqueIndex("learning_episodes_commit_key_unique_idx")
       .on(t.workspaceId, t.commitKey)
       .where(sql`${t.commitKey} IS NOT NULL`),
-  }),
+
+    processingPhaseIdx: index("learning_episodes_processing_phase_idx").on(t.workspaceId, t.userId, t.processingPhase),}),
 );
 
 // ─── learning_session_probes（FrozenProbeRef 语义）────────────────────────
@@ -349,5 +355,164 @@ export const learningAssessmentReports = pgTable(
     episodeReportHashUnique: uniqueIndex("learning_assessment_reports_episode_report_hash_unique_idx")
       .on(t.workspaceId, t.episodeId, t.reportHash),
     workspaceUserIdx: index("learning_assessment_reports_workspace_user_idx").on(t.workspaceId, t.userId),
+  }),
+);
+
+// ─── 0081/0083/0084 迁移表（2026-08-12 generate 对齐补齐）─────────────────
+// 此前 5 张表只在手写迁移中定义、schema 无声明——drizzle-kit generate 会
+// 产出 DROP TABLE。列/索引/CHECK/RLS 语义与 0081/0083/0084 逐项对齐。
+
+export const learningSessionProcessingOutbox = pgTable(
+  "learning_session_processing_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
+    episodeId: uuid("episode_id").notNull().references(() => learningEpisodes.id, { onDelete: "cascade" }),
+    commandType: text("command_type").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true }).defaultNow().notNull(),
+    leasedAt: timestamp("leased_at", { withTimezone: true }),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    commandCheck: check(
+      "learning_session_processing_outbox_command_check",
+      sql`${t.commandType} IN ('assessment_requested', 'commit_requested')`,
+    ),
+    payloadSafeCheck: check(
+      "learning_session_processing_outbox_payload_check",
+      // 0098 重建为 6 键(含 rationale/chainOfThought——思维链/理由也不得入队)
+      sql`NOT (${t.payload} ? 'answer') AND NOT (${t.payload} ? 'answerText') AND NOT (${t.payload} ? 'userAnswer') AND NOT (${t.payload} ? 'question') AND NOT (${t.payload} ? 'rationale') AND NOT (${t.payload} ? 'chainOfThought')`,
+    ),
+    scopeKeyUnique: uniqueIndex("learning_session_processing_outbox_scope_key_unique")
+      .on(t.workspaceId, t.idempotencyKey),
+    pendingIdx: index("learning_session_processing_outbox_pending_idx")
+      .on(t.availableAt, t.createdAt)
+      .where(sql`${t.processedAt} IS NULL`),
+    episodeIdx: index("learning_session_processing_outbox_episode_idx")
+      .on(t.workspaceId, t.episodeId, t.createdAt),
+  }),
+);
+
+export const learningTutorDetours = pgTable(
+  "learning_tutor_detours",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
+    episodeId: uuid("episode_id").notNull().references(() => learningEpisodes.id, { onDelete: "cascade" }),
+    targetId: uuid("target_id").notNull(),
+    questionId: text("question_id").notNull(),
+    status: text("status").notNull().default("active"),
+    endReason: text("end_reason"),
+    questionMarkerSaved: boolean("question_marker_saved").notNull().default(false),
+    turnCount: integer("turn_count").notNull().default(0),
+    maxTurns: integer("max_turns").notNull().default(2),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    lastTurnAt: timestamp("last_turn_at", { withTimezone: true }),
+  },
+  (t) => ({
+    statusCheck: check(
+      "learning_tutor_detours_status_check",
+      sql`${t.status} IN ('active', 'ended')`,
+    ),
+    endReasonCheck: check(
+      "learning_tutor_detours_end_reason_check",
+      sql`${t.endReason} IS NULL OR ${t.endReason} IN ('return_to_origin', 'end_session')`,
+    ),
+    turnCountCheck: check(
+      "learning_tutor_detours_turn_count_check",
+      sql`${t.turnCount} >= 0 AND ${t.turnCount} <= ${t.maxTurns}`,
+    ),
+    maxTurnsCheck: check(
+      "learning_tutor_detours_max_turns_check",
+      sql`${t.maxTurns} = 2`,
+    ),
+    workspaceUserIdx: index("learning_tutor_detours_workspace_user_idx")
+      .on(t.workspaceId, t.userId, sql`${t.createdAt} desc`),
+    sessionIdx: index("learning_tutor_detours_session_idx")
+      .on(t.workspaceId, t.userId, t.sessionId, t.episodeId),
+    // 2026-08-12（generate 对齐）：0098 部分唯一索引——同 episode 仅一个 active detour
+    episodeActiveUnique: uniqueIndex("learning_tutor_detours_episode_active_unique_idx")
+      .on(t.workspaceId, t.userId, t.episodeId)
+      .where(sql`${t.status} = 'active'`),
+  }),
+);
+
+export const learningTutorPermissions = pgTable(
+  "learning_tutor_permissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    targetId: uuid("target_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // 0083 UNIQUE (workspace_id, user_id, target_id)——drizzle 用 uniqueIndex 表达
+    workspaceUserTargetUnique: uniqueIndex("learning_tutor_permissions_workspace_id_user_id_target_id_key")
+      .on(t.workspaceId, t.userId, t.targetId),
+  }),
+);
+
+export const learningTutorActionNonces = pgTable(
+  "learning_tutor_action_nonces",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
+    keyPointId: uuid("key_point_id").notNull(),
+    nonceHash: text("nonce_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    nonceHashUnique: uniqueIndex("learning_tutor_action_nonces_nonce_hash_key").on(t.nonceHash),
+    lookupIdx: index("learning_tutor_action_nonces_lookup_idx")
+      .on(t.workspaceId, t.userId, t.sessionId, t.keyPointId, t.expiresAt),
+  }),
+);
+
+export const learningSessionPracticeEvents = pgTable(
+  "learning_session_practice_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
+    episodeId: uuid("episode_id").notNull().references(() => learningEpisodes.id, { onDelete: "cascade" }),
+    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    eventType: text("event_type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    typeCheck: check(
+      "learning_session_practice_events_type_check",
+      sql`${t.eventType} IN ('practice', 'diagnostic')`,
+    ),
+    summarySafeCheck: check(
+      "learning_session_practice_events_summary_safe_check",
+      sql`NOT (${t.summary} ? 'answer') AND NOT (${t.summary} ? 'answerText') AND NOT (${t.summary} ? 'userAnswer') AND NOT (${t.summary} ? 'question') AND NOT (${t.summary} ? 'rationale')`,
+    ),
+    idempotencyUnique: uniqueIndex("learning_session_practice_events_idempotency_idx")
+      .on(t.workspaceId, t.userId, t.episodeId, t.idempotencyKey),
+    sessionIdx: index("learning_session_practice_events_session_idx")
+      .on(t.workspaceId, t.userId, t.sessionId, t.createdAt),
   }),
 );

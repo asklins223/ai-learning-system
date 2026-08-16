@@ -5,6 +5,7 @@ import { COMPANION_LIVE2D_MANIFEST } from "./companion-live2d-manifest.ts";
 import {
   LIVE2D_INVITE_ONCE_CUE,
   motionForLive2DPresentation,
+  motionForLive2DEmotion,
 } from "./live2d-motion-map";
 import { arbitrateLive2DParameters } from "./live2d-priority";
 import { clampLive2DParameter } from "./companion-live2d-manifest";
@@ -165,6 +166,9 @@ export class Live2DCharacterDriver {
   private disposed = false;
   private lastCueKey = "";
   private inviteOncePlaying = false;
+  private emotionMotionPlaying = false;
+  private lastEmotionMotionKey = "";
+  private lastEmotionMotionAt = 0;
   private currentPresentation: CharacterPresentationStateV1 = "idle";
   private voiceLevel = 0;
   /** 15 方案 emotion 表现层：VAD 情绪状态机（cue/segment emotion → 平滑输出） */
@@ -316,6 +320,27 @@ export class Live2DCharacterDriver {
     this.emotionVad.push(event);
   }
 
+  /** 段级强情绪触发轻量动作（与语音/文本段对齐；弱情绪不打断 Idle）。 */
+  playEmotionMotion(emotion: string, intensity: number): void {
+    if (this.disposed || !this.model || this.inviteOncePlaying || this.emotionMotionPlaying) return;
+    if (intensity < 0.55) return;
+    const cue = motionForLive2DEmotion(emotion);
+    if (!cue) return;
+    const nowMs = typeof performance === "undefined" ? Date.now() : performance.now();
+    const key = `${cue.group}|${cue.index}`;
+    // 同一种动作 4s 内不重复触发，避免连续强情绪标签时手舞足蹈。
+    if (key === this.lastEmotionMotionKey && nowMs - this.lastEmotionMotionAt < 4000) return;
+    this.lastEmotionMotionKey = key;
+    this.lastEmotionMotionAt = nowMs;
+    this.emotionMotionPlaying = true;
+    void Promise.resolve(this.model.motion?.(cue.group, cue.index, 2))
+      .catch((error) => console.warn("[Live2D] emotion motion failed", error))
+      .finally(() => {
+        this.emotionMotionPlaying = false;
+        if (!this.disposed) this.applyPresentation(this.currentPresentation);
+      });
+  }
+
   /** Character click: play the single-shot invite cue once, then idle. */
   playInviteOnce(): void {
     if (this.disposed || !this.model) return;
@@ -347,6 +372,7 @@ export class Live2DCharacterDriver {
   destroy(): void {
     this.disposed = true;
     this.inviteOncePlaying = false;
+    this.emotionMotionPlaying = false;
     this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;

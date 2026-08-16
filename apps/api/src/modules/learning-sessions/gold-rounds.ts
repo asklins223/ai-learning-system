@@ -397,8 +397,34 @@ export function buildCoverageMatrix(input: CoverageMatrixInput): CoverageMatrixR
   const b = makeEntryBuilder();
   const { samples, thresholds } = input;
 
+  // PERF-A#16：改为单遍索引——在 samples 上走一次，把各维度组合计数写入 Map，
+  // 避免每个输出桶都对整个 samples 数组做 filter（O(samples × buckets)→O(samples)）。
+  let voiceTeachBackCount = 0;
+  const sceneModeCounts = new Map<string, number>();
+  const structuredProofCounts = new Map<string, number>();
+  const crossModalityCounts = new Map<string, number>();
+  for (const s of samples) {
+    // 1. 语音 Teach-back
+    if (s.coverage.voiceTeachBack) voiceTeachBackCount += 1;
+    // 2. ordering/graph/repair × formal/practice
+    if (s.coverage.sceneMode !== null) {
+      const key = `${s.coverage.sceneMode.kind}:${s.coverage.sceneMode.mode}`;
+      sceneModeCounts.set(key, (sceneModeCounts.get(key) ?? 0) + 1);
+    }
+    // 3. structured-proof-v1
+    if (s.coverage.structuredProof !== null) {
+      const key = `${s.coverage.structuredProof.profileId}:${s.coverage.structuredProof.bundleKind}`;
+      structuredProofCounts.set(key, (structuredProofCounts.get(key) ?? 0) + 1);
+    }
+    // 4. 跨模态公平性（deriveCrossModalityLayer 返回 null 的目标不计入任何层桶）
+    const layer = deriveCrossModalityLayer(s);
+    if (layer !== null) {
+      const key = `${s.facet}:${layer}:${s.modality}`;
+      crossModalityCounts.set(key, (crossModalityCounts.get(key) ?? 0) + 1);
+    }
+  }
+
   // 1. 语音 Teach-back
-  const voiceTeachBackCount = samples.filter((s) => s.coverage.voiceTeachBack).length;
   b.push(
     "voice_teachback",
     "语音 Teach-back 标注样本",
@@ -409,9 +435,7 @@ export function buildCoverageMatrix(input: CoverageMatrixInput): CoverageMatrixR
   // 2. ordering/graph/repair × formal/practice 两态
   for (const kind of SCENE_KINDS) {
     for (const mode of [SceneMode.FORMAL, SceneMode.PRACTICE] as const) {
-      const count = samples.filter(
-        (s) => s.coverage.sceneMode !== null && s.coverage.sceneMode.kind === kind && s.coverage.sceneMode.mode === mode,
-      ).length;
+      const count = sceneModeCounts.get(`${kind}:${mode}`) ?? 0;
       b.push(
         `scene_mode:${kind}:${mode}`,
         `${kind} Scene ${mode} 两态标注`,
@@ -424,11 +448,7 @@ export function buildCoverageMatrix(input: CoverageMatrixInput): CoverageMatrixR
   // 3. structured-proof-v1 全 bundle / 缺一 Scene
   for (const profileId of input.structuredProofProfileIds) {
     for (const bundleKind of BUNDLE_KINDS) {
-      const count = samples.filter(
-        (s) => s.coverage.structuredProof !== null &&
-          s.coverage.structuredProof.profileId === profileId &&
-          s.coverage.structuredProof.bundleKind === bundleKind,
-      ).length;
+      const count = structuredProofCounts.get(`${profileId}:${bundleKind}`) ?? 0;
       b.push(
         `structured_proof:${profileId}:${bundleKind}`,
         `structured-proof-v1 ${profileId} ${bundleKind}`,
@@ -444,9 +464,7 @@ export function buildCoverageMatrix(input: CoverageMatrixInput): CoverageMatrixR
   for (const facet of input.crossModalityFacets) {
     for (const layer of CROSS_MODALITY_LAYERS) {
       for (const modality of MODALITIES) {
-        const count = samples.filter(
-          (s) => s.modality === modality && s.facet === facet && deriveCrossModalityLayer(s) === layer,
-        ).length;
+        const count = crossModalityCounts.get(`${facet}:${layer}:${modality}`) ?? 0;
         b.push(
           `cross_modality:${facet}:${layer}:${modality}`,
           `跨模态公平性 ${facet}/${layer}/${modality} 分层`,

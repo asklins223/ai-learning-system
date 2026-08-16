@@ -176,11 +176,16 @@ function learningRunUiPreviewHref(input: {
   cardId?: string | null;
   keyPointId?: string | null;
   scheduleId?: string | null;
+  isV2?: boolean;
 }) {
   // P3 切流：learning_run_v1 开 → 生产创建入口；否则开发态原型或 null。
   if (isLearningRunV1Enabled()) {
-    const params = new URLSearchParams({ origin: "today", returnTo: "/today" });
-    if (input.keyPointId) params.set("keyPointId", input.keyPointId);
+    const params = new URLSearchParams({ origin: input.isV2 ? "today_v2" : "today", returnTo: "/today" });
+    if (input.isV2 && input.keyPointId) {
+      params.set("objectiveId", input.keyPointId);
+    } else if (input.keyPointId) {
+      params.set("keyPointId", input.keyPointId);
+    }
     return `/learning-runs/new?${params.toString()}`;
   }
   if (!LEARNING_RUN_UI_PREVIEW) return null;
@@ -365,10 +370,10 @@ export default function TodayPage() {
       setRetryingKey("all");
     }
     const results = await Promise.allSettled([
-      api.listNotes(),
-      api.listCards(),
+      api.listNotes({ limit: 100 }),
+      api.listCards({ limit: 100 }),
       listAllReviews(),
-      api.listJobs(),
+      api.listJobs({ limit: 50 }),
       api.listSources({ limit: 100 }),
     ] as const);
     const nextErrors: Partial<Record<DataKey, string>> = {};
@@ -463,10 +468,10 @@ export default function TodayPage() {
       let sources: SourceRow[] | null = null;
       // F23（round4）：先取数据（只写局部变量），所有 setState 都放到
       // mounted 守卫之后——避免卸载中途 setState。
-      if (key === "notes") notes = (await api.listNotes()).items;
-      if (key === "cards") cards = (await api.listCards()).items;
+      if (key === "notes") notes = (await api.listNotes({ limit: 100 })).items;
+      if (key === "cards") cards = (await api.listCards({ limit: 100 })).items;
       if (key === "reviews") reviews = await listAllReviews();
-      if (key === "jobs") jobs = (await api.listJobs()).items;
+      if (key === "jobs") jobs = (await api.listJobs({ limit: 50 })).items;
       if (key === "sources") sources = (await api.listSources({ limit: 100 })).items;
       if (!mountedRef.current) return;
       if (notes !== null) setNotes(notes);
@@ -1355,6 +1360,7 @@ export default function TodayPage() {
                     scheduleId: dueReviews[0].review.id,
                     cardId: dueReviews[0].card.id,
                     keyPointId: dueReviews[0].keyPoint?.id,
+                    isV2: dueReviews[0].isV2,
                   }) ?? `/review/${encodeURIComponent(dueReviews[0].review.id)}`
                 }
                 className="today-context-action"

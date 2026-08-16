@@ -21,7 +21,6 @@ import {
 } from "./fsrs-shadow.ts";
 import {
   calculateDiscreteV2Schedule,
-  DISCRETE_V2_INTERVAL_TIERS,
   DISCRETE_V2_POLICY_VERSION,
   type DiscreteV2Input,
   type DiscreteV2Decision,
@@ -239,35 +238,42 @@ function buildReport(
   const fsrsShorterPercent = validEntries.length > 0 ? (fsrsShorter / validEntries.length) * 100 : 0;
   const agreementPercent = validEntries.length > 0 ? (agreement / validEntries.length) * 100 : 0;
 
-  // Per-outcome breakdown
-  const byOutcome: Record<string, { count: number; meanDiff: number; fsrsLongerPercent: number }> = {};
+  // Per-outcome breakdown (single pass: accumulate sums, compute means at the end)
+  const outcomeAcc: Record<string, { count: number; diffSum: number; longerCount: number }> = {};
   for (const entry of validEntries) {
-    if (!byOutcome[entry.outcome]) {
-      byOutcome[entry.outcome] = { count: 0, meanDiff: 0, fsrsLongerPercent: 0 };
+    let acc = outcomeAcc[entry.outcome];
+    if (!acc) {
+      acc = outcomeAcc[entry.outcome] = { count: 0, diffSum: 0, longerCount: 0 };
     }
-    byOutcome[entry.outcome].count++;
+    acc.count += 1;
+    acc.diffSum += entry.intervalDiffDays;
+    if (entry.intervalDiffDays > 1) acc.longerCount += 1;
   }
-  for (const outcome of Object.keys(byOutcome)) {
-    const outcomeEntries = validEntries.filter((e) => e.outcome === outcome);
-    const outcomeDiffs = outcomeEntries.map((e) => e.intervalDiffDays);
-    byOutcome[outcome].meanDiff = mean(outcomeDiffs);
-    byOutcome[outcome].fsrsLongerPercent =
-      (outcomeDiffs.filter((d) => d > 1).length / outcomeDiffs.length) * 100;
+  const byOutcome: Record<string, { count: number; meanDiff: number; fsrsLongerPercent: number }> = {};
+  for (const [outcome, acc] of Object.entries(outcomeAcc)) {
+    byOutcome[outcome] = {
+      count: acc.count,
+      meanDiff: acc.diffSum / acc.count,
+      fsrsLongerPercent: (acc.longerCount / acc.count) * 100,
+    };
   }
 
-  // Per-interval-tier breakdown
+  // Per-interval-tier breakdown (single pass over the same collection)
   const byInterval: Record<number, { count: number; meanDiff: number; fsrsMeanInterval: number }> = {};
-  for (const tier of DISCRETE_V2_INTERVAL_TIERS) {
-    const tierEntries = validEntries.filter((e) => e.currentIntervalDays === tier);
-    if (tierEntries.length > 0) {
-      const tierDiffs = tierEntries.map((e) => e.intervalDiffDays);
-      const tierFsrsIntervals = tierEntries.map((e) => e.fsrsIntervalDays);
-      byInterval[tier] = {
-        count: tierEntries.length,
-        meanDiff: mean(tierDiffs),
-        fsrsMeanInterval: mean(tierFsrsIntervals),
-      };
+  for (const entry of validEntries) {
+    const tier = entry.currentIntervalDays;
+    let acc = byInterval[tier];
+    if (!acc) {
+      acc = byInterval[tier] = { count: 0, meanDiff: 0, fsrsMeanInterval: 0 };
     }
+    acc.count += 1;
+    acc.meanDiff += entry.intervalDiffDays;
+    acc.fsrsMeanInterval += entry.fsrsIntervalDays;
+  }
+  for (const tier of Object.keys(byInterval)) {
+    const acc = byInterval[Number(tier)];
+    acc.meanDiff /= acc.count;
+    acc.fsrsMeanInterval /= acc.count;
   }
 
   const reportText = formatReportText({

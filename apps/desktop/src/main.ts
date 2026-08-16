@@ -88,11 +88,39 @@ let appQuitting = false;
 let temporaryPetHidden = false;
 const deviceSessionId = randomUUID();
 let moveSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let broadcastStateTimer: ReturnType<typeof setTimeout> | null = null;
 let updateRuntime: UpdateRuntimeV1 | null = null;
 let soakRuntime: SoakRunner | null = null;
 let petTray: ReturnType<typeof setupPetTray> = null;
 
 const desktopPetSpikeEnabled = process.env.AILEARN_DESKTOP_PET_SPIKE === "true";
+
+// 2026-08-16（性能专项）：SIGTERM/SIGINT/uncaughtException/unhandledRejection
+// 诊断监听在模块加载时只注册一次。此前它们注册在 before-quit 处理函数内部，
+// 每次 before-quit 触发都会向 process 追加四份永久监听（内存泄漏）；注册时机
+// 提前到模块加载既避免重复，也能更早捕获到导致"自动退出"的外部信号。
+process.on("SIGTERM", () => logger.warn("[app] received SIGTERM"));
+process.on("SIGINT", () => logger.warn("[app] received SIGINT"));
+process.on("uncaughtException", (err) => logger.error("[app] uncaughtException:", err));
+process.on("unhandledRejection", (err) => logger.error("[app] unhandledRejection:", err));
+
+// 2026-08-16（性能专项）：缓存本机 petModeEnabled，避免主窗口每次 SPA 导航
+// （did-navigate-in-page 每路由触发）以及每次 pet-mode IPC 调用都在 Electron
+// main 事件循环上做同步 readFileSync + JSON.parse。persistPetMode（唯一的
+// 模块内写入点）会失效缓存。
+let cachedPetModeEnabled: boolean | null = null;
+// 区分"尚未加载"与"已加载但本地无持久化值"：文件缺失时缓存保持 null，若没有
+// 该标志，readPetModeEnabledCached 会在每次调用时反复同步读盘（null 无法区分
+// 未加载/已加载为空）。
+let petModeCacheLoaded = false;
+
+function readPetModeEnabledCached(userDataPath: string): boolean | null {
+  if (!petModeCacheLoaded) {
+    cachedPetModeEnabled = loadDevicePetPreferences(userDataPath)?.petModeEnabled ?? null;
+    petModeCacheLoaded = true;
+  }
+  return cachedPetModeEnabled;
+}
 
 function schedulePetWindowPositionSave(delayMs = 250): void {
   if (moveSaveTimer) clearTimeout(moveSaveTimer);
@@ -132,12 +160,21 @@ function shouldKeepMainWindow(): boolean {
 
 function broadcastWindowState(): void {
   if (!petState) return;
-  const state = desktopPetWindowStateV1Schema.parse(petState.getState());
-  for (const window of [mainWindow, petWindow]) {
-    if (window && !window.isDestroyed()) {
-      window.webContents.send(PET_IPC_CHANNELS.windowStateChanged, state);
+  // 2026-08-16（性能专项）：把每次状态变更的 zod parse + IPC 发送合并到下一
+  // 帧（trailing debounce）。同一帧内多次变更（如 IPC 偏好链式调用、move/
+  // show 组合）只解析并发送一次最新状态；renderer 按 revision 去重，天然
+  // 兼容合并后的最新快照，不会丢失终态。
+  if (broadcastStateTimer) clearTimeout(broadcastStateTimer);
+  broadcastStateTimer = setTimeout(() => {
+    broadcastStateTimer = null;
+    if (!petState) return;
+    const state = desktopPetWindowStateV1Schema.parse(petState.getState());
+    for (const window of [mainWindow, petWindow]) {
+      if (window && !window.isDestroyed()) {
+        window.webContents.send(PET_IPC_CHANNELS.windowStateChanged, state);
+      }
     }
-  }
+  }, 16);
 }
 
 function broadcastLifecycle(event: DesktopLifecycleEventV1): void {
@@ -312,6 +349,8 @@ function persistPetMode(enabled: boolean): void {
   const existing = loadDevicePetPreferences(app.getPath("userData"));
   const preferences = normalizeDevicePetPreferences(existing ?? getDefaultDevicePetPreferences(primary), primary);
   saveDevicePetPreferences(app.getPath("userData"), { ...preferences, petModeEnabled: enabled });
+  cachedPetModeEnabled = enabled;
+  petModeCacheLoaded = true;
 }
 
 function createPetWindowForCurrentServer(): void {
@@ -487,8 +526,8 @@ function createMainWindow(baseUrl: string): BrowserWindow {
       // 全新安装默认偏好下桌宠自动出现；用户显式关闭过 Pet
       // （petModeEnabled=false）则不强制创建。
       if (!petWindow || petWindow.isDestroyed()) {
-        const preferences = loadDevicePetPreferences(app.getPath("userData"));
-        if (preferences?.petModeEnabled !== false) {
+        // 用缓存的本机偏好做内存判断，避免每次导航同步读盘（性能专项）。
+        if (readPetModeEnabledCached(app.getPath("userData")) !== false) {
           createPetWindowForCurrentServer();
         }
         return;
@@ -650,10 +689,11 @@ async function startupSequence(): Promise<void> {
         broadcastWindowState();
       },
       getPetModeEnabled: () => {
-        const primary = displayProvider().getPrimaryDisplay();
-        const existing = loadDevicePetPreferences(app.getPath("userData"));
-        const preferences = normalizeDevicePetPreferences(existing ?? getDefaultDevicePetPreferences(primary), primary);
-        return preferences.petModeEnabled;
+        // 复用缓存本机值，避免每次 IPC 调用同步 readFileSync + JSON.parse
+        // 阻塞 main 事件循环；未持久化时回退到设备默认（petModeEnabled=true）。
+        const cached = readPetModeEnabledCached(app.getPath("userData"));
+        if (cached !== null) return cached;
+        return getDefaultDevicePetPreferences(displayProvider().getPrimaryDisplay()).petModeEnabled;
       },
       setAlwaysOnTop: (enabled) => {
         petState?.setAlwaysOnTop(enabled);
@@ -942,6 +982,7 @@ if (!gotTheLock) {
 
   app.whenReady().then(() => {
     const sendDisplayChange = () => {
+      petState?.invalidateDisplayCache();
       petState?.applySavedPosition();
       broadcastLifecycle({ version: 1, kind: "displays_changed" });
       broadcastWindowState();
@@ -1000,11 +1041,6 @@ if (!gotTheLock) {
     } catch (error) {
       logger.warn({ err: error }, "[app] flushStorageData failed");
     }
-    // 2026-08-12：追踪外部信号与未捕获异常（排除"无人操作却退出"的可能来源）。
-    process.on("SIGTERM", () => logger.warn("[app] received SIGTERM"));
-    process.on("SIGINT", () => logger.warn("[app] received SIGINT"));
-    process.on("uncaughtException", (err) => logger.error("[app] uncaughtException:", err));
-    process.on("unhandledRejection", (err) => logger.error("[app] unhandledRejection:", err));
     // 防止快连退出导致重复执行清理逻辑
     if (shuttingDown) {
       event.preventDefault();
@@ -1013,6 +1049,8 @@ if (!gotTheLock) {
     shuttingDown = true;
     appQuitting = true;
     event.preventDefault();
+    if (broadcastStateTimer) clearTimeout(broadcastStateTimer);
+    broadcastStateTimer = null;
     broadcastLifecycle({ version: 1, kind: "app_quitting" });
     petTray?.destroy();
     petTray = null;

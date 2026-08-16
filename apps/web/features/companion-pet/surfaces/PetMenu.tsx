@@ -39,7 +39,7 @@ interface MenuItemV1 {
 
 const ROOT_ITEMS: readonly MenuItemV1[] = [
   { id: "say", label: "说句话", description: "打开快捷输入", icon: "message", action: "say" },
-  { id: "voice", label: "语音对话", description: "点按开始，再点结束", icon: "microphone", action: "voice", stage: "P3" },
+  { id: "voice", label: "语音对话", description: "按住说话，松开发送", icon: "microphone", action: "voice", stage: "P3" },
   { id: "study", label: "学习", description: "继续与复习", icon: "study", action: "study" },
   { id: "more", label: "更多", description: "历史与设置", icon: "more", action: "more" },
 ];
@@ -49,8 +49,8 @@ const STUDY_ITEMS: readonly MenuItemV1[] = [
   // 随 P9 旧栈删除；learning_runs 恢复/创建即跳转 Player）。
   { id: "resume", label: "继续当前学习", icon: "study", action: "learning", candidateId: "learning_run_resume", stage: "P5", disabledNote: "当前没有可继续的学习" },
   { id: "start", label: "开始三分钟巩固", icon: "sparkles", action: "learning", candidateId: "learning_run_start", stage: "P5", disabledNote: "当前没有可开始的学习" },
-  { id: "review", label: "今日复习", icon: "review", action: "say", stage: "P5", disabled: true, disabledNote: "将在学习能力阶段开放" },
-  { id: "card", label: "回到当前卡片", icon: "card", action: "say", stage: "P5", disabled: true, disabledNote: "将在学习能力阶段开放" },
+  { id: "review", label: "今日复习", icon: "review", action: "say", stage: "P5", disabledNote: "复习页暂时不可用" },
+  { id: "card", label: "回到当前卡片", icon: "card", action: "say", stage: "P5", disabledNote: "当前没有打开的卡片" },
   { id: "study-back", label: "返回", icon: "back", action: "back" },
 ];
 
@@ -386,6 +386,23 @@ export function PetMenu({ learningActionsEnabled = false }: { learningActionsEna
       learningContextStatus !== "ready" ||
       !candidate
     );
+    if (item.id === "review") {
+      dispatch({ type: "menu.closed" });
+      void petBridge.dispatchOpenRoute({ kind: "review" });
+      return;
+    }
+    if (item.id === "card") {
+      dispatch({ type: "menu.closed" });
+      const current = petBridge.pageContext?.page.routeRef;
+      if (current?.kind === "card") {
+        void petBridge.dispatchOpenRoute({ kind: "card", cardId: current.cardId });
+      } else if (current?.kind === "card_set") {
+        void petBridge.dispatchOpenRoute({ kind: "card_set", cardSetId: current.cardSetId });
+      } else {
+        setStatusMessage("当前没有打开的卡片");
+      }
+      return;
+    }
     if (item.disabled || learningDisabled) {
       if (item.action === "learning" && learningContextStatus === "loading") {
         setStatusMessage("正在读取学习状态…");

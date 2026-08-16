@@ -8,7 +8,7 @@ import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.
 import { preRegisterImageAssetsForImport } from "../../lib/image-asset.ts";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
-import { markdownToBlocks, extractTitleFromBlocks } from "../../lib/markdown-parser.ts";
+import { markdownToBlocks, extractTitleFromBlocks, type ParsedBlock } from "../../lib/markdown-parser.ts";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
 import { upsertSearchDocument } from "../../lib/search-index.ts";
 import { logger } from "../../lib/logger.ts";
@@ -38,6 +38,8 @@ interface ItemWithIndex {
   content: string;
   originalIndex: number;
   itemKey: string;
+  /** Pre-parsed blocks, computed once per item to avoid double-parsing on import. */
+  blocks?: ParsedBlock[];
 }
 
 type ImportTransaction = ApiTransaction;
@@ -82,8 +84,8 @@ async function importItems(
   // 属低频一次性批量导入路径）。
   for (const item of items) {
     try {
-      // 解析 Markdown 为 blocks
-      const blocks = markdownToBlocks(item.content);
+      // 解析 Markdown 为 blocks（复用预解析结果，避免同一 item 二次解析）
+      const blocks = item.blocks ?? markdownToBlocks(item.content);
 
       // 自动提取标题
       const titleWasProvided = Boolean(item.title?.trim());
@@ -229,6 +231,10 @@ export async function importRoutes(app: FastifyInstance) {
       ...item,
       originalIndex,
       itemKey: computeItemKey(item.title, item.content),
+      // PERF: Parse each item exactly once here; importItems and the image
+      // pre-registration pass reuse these blocks instead of re-parsing up to
+      // 100 × 500KB strings twice per batch.
+      blocks: markdownToBlocks(item.content),
     }));
 
     // PERF 专项遗留修复：图片资产预注册移到业务事务外——
@@ -238,7 +244,7 @@ export async function importRoutes(app: FastifyInstance) {
     {
       const imageKeys = new Set<string>();
       for (const item of requestedItems) {
-        for (const block of markdownToBlocks(item.content)) {
+        for (const block of item.blocks ?? markdownToBlocks(item.content)) {
           if (block.type !== "image") {
             continue;
           }
@@ -285,13 +291,17 @@ export async function importRoutes(app: FastifyInstance) {
       async (tx) => {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
 
-      // G-006: 查询已存在的版本，确定哪些 items 已经导入
+      // G-006: 查询已存在的版本，确定哪些 items 已经导入。
+      // PERF: 只投影轻量字段，itemKey 在 SQL 侧用 content_json->>'itemKey' 提取，
+      // 不把整个 contentJson（单条可到 ~500KB）拉进内存。该 importId 下没有
+      // 安全的上限（需要全量 itemKey 才能正确幂等），故不做 LIMIT；
+      // 去掉 jsonb 载荷后每行只有几十字节，内存占用得到控制。
       const existingVersions = await tx
         .select({
           noteId: noteVersions.noteId,
           versionId: noteVersions.id,
           versionNo: noteVersions.versionNo,
-          contentJson: noteVersions.contentJson,
+          itemKey: sql<string | null>`content_json->>'itemKey'`,
         })
         .from(noteVersions)
         .where(
@@ -307,8 +317,7 @@ export async function importRoutes(app: FastifyInstance) {
       let legacyVersionCount = 0;
 
       for (const v of existingVersions) {
-        const cj = v.contentJson as Record<string, unknown> | null;
-        const itemKey = cj?.itemKey as string | undefined;
+        const itemKey = v.itemKey ?? undefined;
         if (itemKey) {
           existingByKey.set(itemKey, { noteId: v.noteId, versionId: v.versionId, versionNo: v.versionNo });
         } else {

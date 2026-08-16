@@ -39,6 +39,7 @@ interface AsrModelConfigV1 {
 interface ProbeMessage {
   version: 1;
   type: "probe";
+  requestId: number;
   config: AsrModelConfigV1;
   testAudio: Float32Array;
   sampleRate: number;
@@ -48,6 +49,7 @@ interface ProbeMessage {
 interface RecognizeMessage {
   version: 1;
   type: "recognize";
+  requestId: number;
   config: AsrModelConfigV1;
   pcm: Float32Array;
   sampleRate: number;
@@ -205,6 +207,7 @@ function handleProbe(message: ProbeMessage): unknown {
     return {
       version: 1,
       ok: false,
+      requestId: message.requestId,
       error: loaded.error,
     };
   }
@@ -225,6 +228,7 @@ function handleProbe(message: ProbeMessage): unknown {
   return {
     version: 1,
     ok: true,
+    requestId: message.requestId,
     probe: {
       coldStartMs: loaded.coldStartMs,
       warmRtf: Math.round(maxRtf * 100) / 100,
@@ -239,15 +243,16 @@ function handleProbe(message: ProbeMessage): unknown {
 function handleRecognize(message: RecognizeMessage): unknown {
   const loaded = ensureRecognizer(message.config);
   if (!loaded.ok) {
-    return { version: 1, ok: false, error: loaded.error, recoverable: true };
+    return { version: 1, ok: false, requestId: message.requestId, error: loaded.error, recoverable: true };
   }
   const result = recognizePcm(message.pcm, message.sampleRate);
   if (!result.ok) {
-    return { version: 1, ok: false, error: result.error, recoverable: true };
+    return { version: 1, ok: false, requestId: message.requestId, error: result.error, recoverable: true };
   }
   return {
     version: 1,
     ok: true,
+    requestId: message.requestId,
     text: result.text,
     elapsedMs: result.elapsedMs,
   };

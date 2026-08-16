@@ -78,8 +78,12 @@ function tokenize(text: string): string[] {
  * Calculate the overlap ratio between two texts.
  * Returns the fraction of textB's tokens that appear in textA.
  */
-function tokenOverlap(textA: string, textB: string): number {
-  const tokensA = new Set(tokenize(textA));
+/**
+ * Overlap ratio reusing a pre-built token Set for textA. Used to avoid
+ * re-tokenizing output.question (and rebuilding its Set) for every overlap
+ * check within a single assessQuestionOutput pass.
+ */
+function tokenOverlapWithTokenSet(tokensA: ReadonlySet<string>, textB: string): number {
   const tokensB = tokenize(textB);
   if (tokensB.length === 0) return 0;
   let hits = 0;
@@ -90,13 +94,56 @@ function tokenOverlap(textA: string, textB: string): number {
 }
 
 /**
- * Check if any contiguous fragment of `source` (>= minLength chars)
- * appears in `target`.
+ * Length of the longest whitespace-free run in `text`.
+ *
+ * A leak fragment in `hasDirectFragment` is always a contiguous non-whitespace
+ * run (extended to the next word boundary), so its length can never exceed the
+ * longest whitespace-free run of its source. This bounds how many target
+ * substrings we need to index for exact substring tests.
  */
-function hasDirectFragment(source: string, target: string, minLength: number): boolean {
+function longestWhitespaceFreeRunLen(text: string): number {
+  let max = 0;
+  let cur = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (/\s/.test(text[i])) {
+      cur = 0;
+    } else {
+      cur++;
+      if (cur > max) max = cur;
+    }
+  }
+  return max;
+}
+
+/**
+ * Build a Set of every contiguous substring of `text` whose length is in
+ * [minLength, maxLength]. This lets substring-inclusion queries run in O(1)
+ * per fragment instead of an O(n·m) `includes` scan, while keeping the set
+ * bounded by the longest possible fragment length. A normalized question is
+ * at most MAX_QUESTION_LENGTH chars, so the build is bounded and transient.
+ */
+function substringSet(text: string, minLength: number, maxLength: number): Set<string> {
+  const set = new Set<string>();
+  const n = text.length;
+  if (n < minLength) return set;
+  const high = Math.min(maxLength, n);
+  for (let len = minLength; len <= high; len++) {
+    for (let i = 0; i + len <= n; i++) {
+      set.add(text.slice(i, i + len));
+    }
+  }
+  return set;
+}
+
+/**
+ * Check if any contiguous fragment of `source` (>= minLength chars) appears
+ * in `targetSubstrings` (a precomputed Set of all target substrings with
+ * length >= minLength).
+ */
+function hasDirectFragment(source: string, targetSubstrings: Set<string>, minLength: number): boolean {
   const normSource = normalize(source);
-  const normTarget = normalize(target);
-  if (normSource.length < minLength || normTarget.length < minLength) return false;
+  if (normSource.length < minLength) return false;
+  if (targetSubstrings.size === 0) return false;
 
   // Check for direct substring of fragments
   for (let i = 0; i <= normSource.length - minLength; i++) {
@@ -107,7 +154,7 @@ function hasDirectFragment(source: string, target: string, minLength: number): b
       end++;
     }
     const fragment = normSource.slice(i, end);
-    if (fragment.length >= minLength && normTarget.includes(fragment)) {
+    if (fragment.length >= minLength && targetSubstrings.has(fragment)) {
       return true;
     }
   }
@@ -158,32 +205,47 @@ export function assessQuestionOutput(input: QuestionSafetyInput): QuestionSafety
   }
 
   // 3. Check for claim leakage
+  // Precompute once: every hasDirectFragment check below uses output.question
+  // as the target, so build its substring Set a single time and reuse it.
+  // Only index target substrings up to the longest possible source fragment
+  // (longest whitespace-free run across claim/quote/expectedConcept), which is
+  // exact and keeps the Set small.
+  const maxFragmentLen = Math.max(
+    longestWhitespaceFreeRunLen(normalize(claim)),
+    longestWhitespaceFreeRunLen(normalize(quote)),
+    ...output.rubricItems.map((item) => longestWhitespaceFreeRunLen(normalize(item.expectedConcept))),
+  );
+  const questionSubstrings = substringSet(normalize(output.question), MIN_FRAGMENT_LENGTH, maxFragmentLen);
+  // Tokenize output.question once and reuse its Set across all overlap checks
+  // below (avoid re-tokenizing + rebuilding a Set on identical input per check).
+  const questionTokens = new Set(tokenize(output.question));
+
   // Direct fragment check: does the question contain a significant portion of the claim?
-  if (hasDirectFragment(claim, output.question, MIN_FRAGMENT_LENGTH)) {
+  if (hasDirectFragment(claim, questionSubstrings, MIN_FRAGMENT_LENGTH)) {
     reasonCodes.push(QuestionSafetyReasonCode.LEAKS_CLAIM);
   }
 
   // Overlap check: high token overlap suggests the question is too close to the claim
-  if (tokenOverlap(output.question, claim) >= LEAK_OVERLAP_THRESHOLD) {
+  if (tokenOverlapWithTokenSet(questionTokens, claim) >= LEAK_OVERLAP_THRESHOLD) {
     reasonCodes.push(QuestionSafetyReasonCode.LEAKS_CLAIM);
   }
 
   // 4. Check for quote leakage
-  if (hasDirectFragment(quote, output.question, MIN_FRAGMENT_LENGTH)) {
+  if (hasDirectFragment(quote, questionSubstrings, MIN_FRAGMENT_LENGTH)) {
     reasonCodes.push(QuestionSafetyReasonCode.LEAKS_QUOTE);
   }
 
-  if (tokenOverlap(output.question, quote) >= LEAK_OVERLAP_THRESHOLD) {
+  if (tokenOverlapWithTokenSet(questionTokens, quote) >= LEAK_OVERLAP_THRESHOLD) {
     reasonCodes.push(QuestionSafetyReasonCode.LEAKS_QUOTE);
   }
 
   // 5. Check for expectedConcept leakage in the question
   for (const item of output.rubricItems) {
-    if (hasDirectFragment(item.expectedConcept, output.question, MIN_FRAGMENT_LENGTH)) {
+    if (hasDirectFragment(item.expectedConcept, questionSubstrings, MIN_FRAGMENT_LENGTH)) {
       reasonCodes.push(QuestionSafetyReasonCode.LEAKS_EXPECTED_CONCEPT);
       break;
     }
-    if (tokenOverlap(output.question, item.expectedConcept) >= LEAK_OVERLAP_THRESHOLD) {
+    if (tokenOverlapWithTokenSet(questionTokens, item.expectedConcept) >= LEAK_OVERLAP_THRESHOLD) {
       reasonCodes.push(QuestionSafetyReasonCode.LEAKS_EXPECTED_CONCEPT);
       break;
     }

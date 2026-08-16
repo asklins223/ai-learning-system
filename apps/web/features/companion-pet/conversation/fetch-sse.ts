@@ -42,7 +42,7 @@ export function parseCompanionSseChunk(
   let currentWireBytes = 0;
   const encoder = new TextEncoder();
 
-  function flushEvent(end: number): void {
+  function flushEvent(): void {
     if (!current) return;
     if (current.data === null) {
       // 无 data 行的事件（如纯 comment 事件）忽略
@@ -52,16 +52,17 @@ export function parseCompanionSseChunk(
     events.push({ id: current.id, event: current.event, data: current.data });
     current = null;
     currentWireBytes = 0;
-    void end;
   }
 
   while (cursor < combined.length) {
     const nl = combined.indexOf("\n", cursor);
     const lineEnd = nl === -1 ? combined.length : nl;
+    // 只截取当前这一行（而非反复对整个累计 buffer 切片），避免 O(n^2) 拷贝。
     let rawLine = combined.slice(lineStart, lineEnd);
     if (rawLine.endsWith("\r")) rawLine = rawLine.slice(0, -1); // CRLF
     if (nl === -1) {
-      const incompleteBytes = encoder.encode(combined.slice(lineStart)).byteLength;
+      // 不完整行——只编码本行字节，避免每次对整个剩余 buffer 做 encode。
+      const incompleteBytes = encoder.encode(rawLine).byteLength;
       if (currentWireBytes + incompleteBytes > maxEventBytes) {
         return { events, buffer: combined.slice(lineStart), fatal: { kind: "too_large" } };
       }
@@ -69,7 +70,7 @@ export function parseCompanionSseChunk(
     }
 
     if (rawLine === "") {
-      flushEvent(lineEnd);
+      flushEvent();
     } else if (rawLine.startsWith(":")) {
       // comment（heartbeat）
     } else if (rawLine.startsWith("retry:")) {
@@ -101,7 +102,8 @@ export function parseCompanionSseChunk(
     }
 
     if (current && rawLine !== "") {
-      currentWireBytes += encoder.encode(combined.slice(lineStart, lineEnd + 1)).byteLength;
+      // 接上行累加本行 wire 字节（含 LF），不再对累计 buffer 重新 encode。
+      currentWireBytes += encoder.encode(rawLine).byteLength + 1;
       if (currentWireBytes > maxEventBytes) {
         return { events, buffer: combined.slice(lineEnd + 1), fatal: { kind: "too_large" } };
       }

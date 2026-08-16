@@ -1605,3 +1605,72 @@
     animation: none;
   }
 }
+
+/* UI contract base layer (learning objective library) */
+.cards-library-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.cards-search-box {
+  min-width: 220px;
+}
+
+.cards-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cards-filter-chip.is-active {
+  font-weight: 700;
+}
+
+.cards-sort-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cards-objective-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cards-objective-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.cards-objective-state {
+  flex: 0 0 auto;
+}
+
+.cards-objective-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cards-objective-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.cards-objective-primary-action,
+.cards-objective-secondary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cards-load-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}

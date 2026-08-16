@@ -22,9 +22,31 @@ import {
   revokeContext,
 } from "./context-service.ts";
 import { ContextHydrationError } from "./context-hydration.ts";
+import {
+  COMPANION_RATE_LIMITS,
+  companionRateLimit,
+  companionRateLimitReply,
+} from "../companion-conversation/companion-rate-limit.ts";
 
 function isCompanionBridgeV2Enabled(): boolean {
   return process.env.COMPANION_BRIDGE_V2 === "true";
+}
+
+/** §6.10 限流 helper：达限写 429 并返回 false，调用方立即 return（与其余
+ * companion 路由同模式）。key 按 (workspace,user) 聚合。 */
+function bridgeRateLimited(
+  reply: { code(statusCode: number): { send(body: unknown): unknown }; send(body: unknown): unknown },
+  requestId: string,
+  key: string,
+): boolean {
+  const result = companionRateLimit({
+    key,
+    limit: COMPANION_RATE_LIMITS.bridgeContextPerMinute.limit,
+    windowMs: COMPANION_RATE_LIMITS.bridgeContextPerMinute.windowMs,
+  });
+  if (result.allowed) return true;
+  companionRateLimitReply(reply, requestId, result.retryAfterSeconds);
+  return false;
 }
 
 const publishBodySchema = z.object({
@@ -54,6 +76,11 @@ export async function companionBridgeRoutes(app: FastifyInstance) {
 
   app.post("/companion/bridge/contexts", { preHandler: [requireSession] }, async (req, reply) => {
     const body = parseBody(app, publishBodySchema, req.body);
+    if (!bridgeRateLimited(
+      reply,
+      req.id,
+      `${req.session.workspaceId}:${req.session.userId}:bridge:publish`,
+    )) return;
     const now = new Date();
     try {
       const snapshot = await withWorkspaceTransaction(
@@ -84,6 +111,11 @@ export async function companionBridgeRoutes(app: FastifyInstance) {
     { preHandler: [requireSession] },
     async (req, reply) => {
       const body = parseBody(app, renewBodySchema, req.body);
+      if (!bridgeRateLimited(
+        reply,
+        req.id,
+        `${req.session.workspaceId}:${req.session.userId}:bridge:renew`,
+      )) return;
       try {
         const renewed = await withWorkspaceTransaction(
           { workspaceId: req.session.workspaceId, userId: req.session.userId },
@@ -115,6 +147,11 @@ export async function companionBridgeRoutes(app: FastifyInstance) {
     { preHandler: [requireSession] },
     async (req, reply) => {
       const body = parseBody(app, renewBodySchema, req.body);
+      if (!bridgeRateLimited(
+        reply,
+        req.id,
+        `${req.session.workspaceId}:${req.session.userId}:bridge:revoke`,
+      )) return;
       try {
         await withWorkspaceTransaction(
           { workspaceId: req.session.workspaceId, userId: req.session.userId },

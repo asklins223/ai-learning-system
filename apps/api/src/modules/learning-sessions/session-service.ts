@@ -1112,7 +1112,12 @@ export interface AssistanceSnapshotInput {
  */
 export interface SessionRepository {
   // ── PREPARE 候选源（只读 canonical / scheduler / needs-repair）──
-  listDueReviews(workspaceId: string, userId: string, now: Date): Promise<DueReviewCandidateInput[]>;
+  listDueReviews(
+    workspaceId: string,
+    userId: string,
+    now: Date,
+    preferredKeyPointIds?: readonly string[],
+  ): Promise<DueReviewCandidateInput[]>;
   listNeedsRepair(workspaceId: string, userId: string): Promise<NeedsRepairCandidateInput[]>;
   listActiveCanonical(workspaceId: string, keyPointIds?: readonly string[]): Promise<ActiveCanonicalInput[]>;
   // ── 冻结输入 ──
@@ -1207,7 +1212,12 @@ export async function createSession(
 
   // 候选源读取（同事务，RLS 上下文由调用方 withWorkspaceTransaction 提供）
   const [dueReviews, needsRepair] = await Promise.all([
-    repo.listDueReviews(input.workspaceId, input.userId, now),
+    repo.listDueReviews(
+      input.workspaceId,
+      input.userId,
+      now,
+      resolved.keyPointId === null ? undefined : [resolved.keyPointId],
+    ),
     repo.listNeedsRepair(input.workspaceId, input.userId),
   ]);
   const targetKeyPoints = resolved.keyPointId === null
@@ -1478,13 +1488,27 @@ export async function continueSession(
 
   // continue / change_route：PREPARE 下一 Episode（排除已用 keyPoint，防重复路线）
   const usedKeyPointIds = episodes.map((e) => e.keyPointId);
-  const dueReviews = await repo.listDueReviews(input.workspaceId, input.userId, now);
-  const needsRepair = await repo.listNeedsRepair(input.workspaceId, input.userId);
-  const activeCanonical = await repo.listActiveCanonical(input.workspaceId);
   const resolved = resolvePrepareEntry(
     input.action === CheckpointAction.CHANGE_ROUTE
       ? { kind: "key_point", keyPointId: input.preferredKeyPointId ?? "" }
       : { kind: "review_entry", reviewScheduleId: "", keyPointId: undefined },
+  );
+  const preferredKeyPointId =
+    input.preferredKeyPointId !== undefined && input.preferredKeyPointId.trim() !== ""
+      ? input.preferredKeyPointId
+      : resolved.keyPointId === null ? undefined : resolved.keyPointId;
+  const dueReviews = await repo.listDueReviews(
+    input.workspaceId,
+    input.userId,
+    now,
+    preferredKeyPointId === undefined ? undefined : [preferredKeyPointId],
+  );
+  const needsRepair = await repo.listNeedsRepair(input.workspaceId, input.userId);
+  // 显式指定目标时只取该 key point 的 canonical（天然限定查询规模）；未指定时
+  // 限定候选集大小为几百行，供 selectEpisodeCandidate 自上而下消费。
+  const activeCanonical = await repo.listActiveCanonical(
+    input.workspaceId,
+    preferredKeyPointId === undefined ? undefined : [preferredKeyPointId],
   );
   const candidates = deriveEpisodeCandidates({
     workspaceId: input.workspaceId,
@@ -1731,15 +1755,20 @@ export async function endSession(
     .filter((episode) => episode.status === "active" || episode.status === "draft")
     .map((episode) => episode.id);
   await repo.updateEpisodeStatuses(cancellable, "cancelled", now, input.workspaceId, input.userId);
+  // 返回最新状态（episodes 已取消）：原地更新内存副本，避免第二次 listEpisodes 查询。
+  const cancellableSet = new Set(cancellable);
+  for (const episode of episodes) {
+    if (cancellableSet.has(episode.id)) {
+      episode.status = "cancelled";
+    }
+  }
   const updated = await repo.findSession(input.workspaceId, input.userId, session.id);
   if (updated === null) {
     throw new SessionServiceError("session_not_found", 404, "Session 不存在");
   }
-  // 返回最新状态（episodes 已取消）
-  const finalEpisodes = await repo.listEpisodes(input.workspaceId, input.userId, session.id);
   return buildSessionPublicView({
     session: updated,
-    episodes: finalEpisodes,
+    episodes,
   });
 }
 
@@ -1763,15 +1792,20 @@ export async function cancelSession(
     .map((episode) => episode.id);
   await repo.updateEpisodeStatuses(cancellable, "cancelled", now, input.workspaceId, input.userId);
   await repo.updateSessionStatus(session.id, "cancelled", now, input.workspaceId, input.userId);
+  // 返回最新状态（episodes 已取消）：原地更新内存副本，避免第二次 listEpisodes 查询。
+  const cancellableSet = new Set(cancellable);
+  for (const episode of episodes) {
+    if (cancellableSet.has(episode.id)) {
+      episode.status = "cancelled";
+    }
+  }
   const updated = await repo.findSession(input.workspaceId, input.userId, session.id);
   if (updated === null) {
     throw new SessionServiceError("session_not_found", 404, "Session 不存在");
   }
-  // 返回最新状态（episodes 已取消）
-  const finalEpisodes = await repo.listEpisodes(input.workspaceId, input.userId, session.id);
   return buildSessionPublicView({
     session: updated,
-    episodes: finalEpisodes,
+    episodes,
   });
 }
 
@@ -1826,7 +1860,18 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
   const sessions = learningSessionsTable;
   const episodes = learningEpisodesTable;
   return {
-    async listDueReviews(workspaceId, userId, now) {
+    async listDueReviews(workspaceId, userId, now, preferredKeyPointIds) {
+      const baseWhere = and(
+        eq(reviewSchedules.workspaceId, workspaceId),
+        eq(reviewSchedules.userId, userId),
+        eq(reviewSchedules.status, "pending"),
+        // postgres.js does not encode JavaScript Date values reliably for
+        // this Drizzle predicate; keep the boundary explicit and UTC.
+        sql`${reviewSchedules.nextReviewAt} <= ${now.toISOString()}`,
+        sql`${reviewSchedules.keyPointId} IS NOT NULL`,
+      );
+      // 热路径（createSession/continueSession）只需最高优先级的候选：限定 pending
+      // 到期 schedule 数量，避免用户长期缺席后一次性加载全部 pending。
       const rows = await transaction
         .select({
           id: reviewSchedules.id,
@@ -1836,17 +1881,28 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
           policyVersion: reviewSchedules.policyVersion,
         })
         .from(reviewSchedules)
-        .where(
-          and(
-            eq(reviewSchedules.workspaceId, workspaceId),
-            eq(reviewSchedules.userId, userId),
-            eq(reviewSchedules.status, "pending"),
-            // postgres.js does not encode JavaScript Date values reliably for
-            // this Drizzle predicate; keep the boundary explicit and UTC.
-            sql`${reviewSchedules.nextReviewAt} <= ${now.toISOString()}`,
-            sql`${reviewSchedules.keyPointId} IS NOT NULL`,
-          ),
-        );
+        .where(baseWhere)
+        .orderBy(reviewSchedules.nextReviewAt)
+        .limit(100);
+      // 显式选定的目标 key point 必须始终可命中（即使超出 LIMIT），否则会把
+      // 显式 review_entry 从 scheduled_review 降级为 canonical_gap。
+      const pendingPreferred = (preferredKeyPointIds ?? []).filter(
+        (kp) => !rows.some((r) => r.keyPointId === kp),
+      );
+      if (pendingPreferred.length > 0) {
+        const extraRows = await transaction
+          .select({
+            id: reviewSchedules.id,
+            keyPointId: reviewSchedules.keyPointId,
+            nextReviewAt: reviewSchedules.nextReviewAt,
+            generation: reviewSchedules.generation,
+            policyVersion: reviewSchedules.policyVersion,
+          })
+          .from(reviewSchedules)
+          .where(and(baseWhere, inArray(reviewSchedules.keyPointId, pendingPreferred)))
+          .limit(pendingPreferred.length);
+        rows.push(...extraRows);
+      }
       const keyPointIds = [...new Set(rows.map((r) => r.keyPointId as string))];
       const canonical = await loadCanonical(transaction, workspaceId, keyPointIds);
       return rows
@@ -1867,7 +1923,7 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
     },
     async listActiveCanonical(workspaceId, keyPointIds) {
       const ids = keyPointIds?.length ? [...keyPointIds] : undefined;
-      const rows = await transaction
+      const baseQuery = transaction
         .select({
           keyPointId: cardKeyPoints.id,
           cardId: cardKeyPoints.cardId,
@@ -1893,6 +1949,11 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
             ...(ids !== undefined ? [inArray(cardKeyPoints.id, ids)] : []),
           ),
         );
+      // 热路径（continueSession 无 keyPointIds 过滤）限定候选集规模：
+      // 按 keyPointId 确定性排序，保证同一 key point 的 evidences 连续且首个候选完整。
+      const rows = ids === undefined
+        ? await baseQuery.orderBy(cardKeyPoints.id).limit(400)
+        : await baseQuery;
       // cardRevision 权威来源：generation_run 的 generation_epoch（02-6）。
       const runIds = [...new Set(rows.map((r) => r.generationRunId))];
       const runEpochs = await fetchGenerationEpochs(transaction, workspaceId, runIds);

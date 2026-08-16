@@ -11,6 +11,7 @@ import {
   type SVGProps,
 } from "react";
 import { api, type SearchDriftResult, type CurrentUser } from "@/lib/api";
+import Link from "next/link";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
@@ -483,6 +484,58 @@ function CompanionSettingsPanel() {
         onSave={saveQuietHours}
       />
     </>
+  );
+}
+
+/** 桌宠记忆管理入口（设置 → 桌宠伴星 → 记忆管理）。
+ *  只展示数量摘要 + 跳转完整管理页，不在设置页重复实现列表/确认/删除，
+ *  避免与 /companion/memory 双份状态源。 */
+function MemoryManagementCard() {
+  const [summary, setSummary] = useState<{ active: number; candidates: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.listCompanionMemories(true)
+      .then((result) => {
+        if (cancelled) return;
+        const items = (result.items as Array<{ candidate?: boolean }>) ?? [];
+        setSummary({
+          active: items.filter((item) => !item.candidate).length,
+          candidates: items.filter((item) => item.candidate).length,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setError("暂时无法读取记忆");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  return (
+    <div className="settings-operation-card">
+      <div className="settings-operation-mark is-memory" aria-hidden="true"><Icon.Notepad /></div>
+      <div className="settings-operation-copy">
+        <h3>记忆管理</h3>
+        <p>
+          桌宠会记住你明确表达的目标、偏好与学习情境；候选记忆需要你确认后才会被使用。
+          删除记忆不会影响任何已提交的学习事实与复习安排。
+        </p>
+        {summary ? (
+          <div className="settings-operation-tags" aria-label="记忆数量">
+            <span>{summary.active} 条活跃记忆</span>
+            {summary.candidates > 0 ? <span>{summary.candidates} 条待确认</span> : null}
+          </div>
+        ) : error ? (
+          <small className="settings-section-error">{error}</small>
+        ) : (
+          <small>正在读取记忆…</small>
+        )}
+      </div>
+      <Link className="settings-primary-button" href="/companion/memory">
+        <Icon.Notepad aria-hidden="true" />
+        管理记忆
+      </Link>
+    </div>
   );
 }
 
@@ -1217,6 +1270,7 @@ export default function SettingsPage() {
               />
               <PetModeSetting />
               <CompanionSettingsPanel />
+              <MemoryManagementCard />
               <TtsVoiceSettings />
             </section>
 

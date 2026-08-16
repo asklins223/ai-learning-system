@@ -64,6 +64,25 @@ const REPLY_EMOTION_RULES: readonly EmotionRule[] = [
 
 const NEGATION_PREFIX = /(不|没|别|无|莫|非)$/u;
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 每个规则预编译一个合并正则：一次扫描文本即可命中该规则的全部关键词，
+ * 避免对 ~50 个关键词各自做一次全文 indexOf（对话热路径）。
+ * 命中顺序为文档顺序；与旧逐关键词扫描相比，matched 内容/计数完全一致。
+ */
+const REPLY_EMOTION_RULES_COMPILED: Array<{
+  emotion: CharacterCueEmotionV1;
+  baseIntensity: number;
+  regex: RegExp;
+}> = REPLY_EMOTION_RULES.map((rule) => ({
+  emotion: rule.emotion,
+  baseIntensity: rule.baseIntensity,
+  regex: new RegExp(rule.keywords.map(escapeRegExp).join("|"), "g"),
+}));
+
 /** 判断命中词是否被否定前缀抵消（如「不开心」「没关系」不触发 happy）。 */
 function isNegatedKeyword(text: string, index: number): boolean {
   if (index <= 0) return false;
@@ -83,16 +102,14 @@ export function classifyCompanionReplyEmotion(text: string): CompanionReplyEmoti
   if (normalized.length === 0) {
     return { emotion: "neutral", intensity: NEUTRAL_INTENSITY, matched: [] };
   }
-  for (const rule of REPLY_EMOTION_RULES) {
+  for (const rule of REPLY_EMOTION_RULES_COMPILED) {
     const matched: string[] = [];
-    for (const keyword of rule.keywords) {
-      let searchFrom = 0;
-      while (searchFrom <= normalized.length) {
-        const index = normalized.indexOf(keyword, searchFrom);
-        if (index < 0) break;
-        if (!isNegatedKeyword(normalized, index)) matched.push(keyword);
-        searchFrom = index + keyword.length;
-      }
+    rule.regex.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = rule.regex.exec(normalized)) !== null) {
+      if (!isNegatedKeyword(normalized, m.index)) matched.push(m[0]);
+      // 防御：避免零宽匹配死循环（本规则关键词均非空串）。
+      if (m[0].length === 0) rule.regex.lastIndex += 1;
     }
     if (matched.length > 0) {
       const bonus = Math.min(0.18, (matched.length - 1) * 0.06);

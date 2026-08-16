@@ -63,9 +63,9 @@ async function seed() {
     await tx`INSERT INTO notes (id, workspace_id, title, created_by, created_at, updated_at, title_source, card_generation_epoch)
              VALUES (${noteId}, ${workspaceId}, 'note', ${userId}, now(), now(), 'placeholder', 0)`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, created_by, created_at, content_hash, updated_at)
-             VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${JSON.stringify({ blocks: [] })}, ${userId}, now(), 'nh-1', now())`;
+             VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [] })}, ${userId}, now(), 'nh-1', now())`;
     await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json, created_at, updated_at)
-             VALUES (${cardId}, ${noteVersionId}, ${workspaceId}, 'active', ${JSON.stringify({ version: 1 })}, now(), now())`;
+             VALUES (${cardId}, ${noteVersionId}, ${workspaceId}, 'active', ${tx.json({ version: 1 })}, now(), now())`;
     await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text)
              VALUES (${keyPointId}, ${cardId}, ${workspaceId}, 1, '遗忘曲线表明复习间隔决定长期记忆', '间隔重复能显著降低遗忘率。')`;
   });

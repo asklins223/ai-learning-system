@@ -5,6 +5,7 @@ import {
   LIVE2D_INVITE_ONCE_CUE,
   LIVE2D_MOTION_FOR_PRESENTATION,
   motionForLive2DPresentation,
+  motionForLive2DEmotion,
 } from "./live2d-motion-map";
 
 test("hidden maps to null (live surface hidden)", () => {
@@ -36,4 +37,12 @@ test("all eleven presentations have a defined mapping", () => {
   const celebrate = motionForLive2DPresentation("celebrate");
   assert.notDeepEqual(think, navigate);
   assert.notDeepEqual(navigate, celebrate);
+});
+
+test("segment emotion maps to a light one-shot motion (or null for neutral/weak)", () => {
+  assert.deepEqual(motionForLive2DEmotion("excited"), { group: "", index: 5 });
+  assert.deepEqual(motionForLive2DEmotion("curious"), { group: "", index: 4 });
+  assert.equal(motionForLive2DEmotion("neutral"), null);
+  assert.equal(motionForLive2DEmotion("very slowly"), null);
+  assert.equal(motionForLive2DEmotion(undefined), null);
 });

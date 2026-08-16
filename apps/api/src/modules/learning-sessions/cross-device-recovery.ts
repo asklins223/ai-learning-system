@@ -722,8 +722,9 @@ export interface FailureRecoveryOffer {
 
 function buildRetryPlan(input: FailureRecoveryInput): RetryPlan {
   const applied = new Set(input.appliedSteps);
+  const stepsSet = new Set(input.steps);
   const stepsToRetry = input.steps.filter((step) => !applied.has(step));
-  const lost = input.confirmedSteps.filter((step) => !applied.has(step) && !input.steps.includes(step));
+  const lost = input.confirmedSteps.filter((step) => !applied.has(step) && !stepsSet.has(step));
   const canRetry = input.retryCount < input.maxRetries && stepsToRetry.length > 0;
   const retryIdempotent = lost.length === 0;
   return {

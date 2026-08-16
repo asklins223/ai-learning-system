@@ -119,6 +119,11 @@
 > 35.9s 一次成功（真实四阶段 → review_ready → §13.1 复验 → keep → 激活 →
 > PREPARE）；desktop `pack:linux`/`dist:linux` 打包链路通过。V1 writer 停写
 > guard 生效（V2 启用 + `CARD_GENERATION_V1_WRITER_ENABLED` 未设 → V1 409）。
+>
+> R37（2026-08-16）：补齐 V2 激活后生产闭环——新 V2 Objective 自动 hidden
+> legacy alias、V2 LearningRun 前端入口、`/learning-cards/[cardId]` Active Card
+> 页、`/cards` V2 列表、Review/Today V2 origin、星图 V2 节点、Reminder API UI。
+> 详见 `20-learning-card-v2-implementation-review.md` R37。
 
 1. **内容质量未放行**：确定性 Author 为占位复制实现（§10.5 明确禁止其发布），
    真实内容质量验收依赖 LLM 模式 + rc-gate + 人类双人盲评；LLM 模式已 E2E 验收（R31/R32）。

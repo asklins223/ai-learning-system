@@ -92,9 +92,9 @@ export default function HomePage() {
       await Promise.allSettled([
         api.getStatsOverview(),
         api.listNotes({ limit: 1 }),
-        api.listCards(),
-        api.listSanitizedReviews({ status: "pending" }),
-        api.listJobs(),
+        api.listCards({ limit: 50 }),
+        api.listSanitizedReviews({ status: "pending", limit: 3 }),
+        api.listJobs({ limit: 50 }),
       ] as const);
 
     if (requestId !== homeRequestRef.current) return;
@@ -204,7 +204,7 @@ export default function HomePage() {
       setCaptureMsgType("success");
       setCaptureText("");
 
-      void Promise.allSettled([api.listJobs(), api.getStatsOverview()]).then(
+      void Promise.allSettled([api.listJobs({ limit: 50 }), api.getStatsOverview()]).then(
         ([jobsResult, statsResult]) => {
           if (jobsResult.status === "fulfilled") {
             setJobs(jobsResult.value.items);

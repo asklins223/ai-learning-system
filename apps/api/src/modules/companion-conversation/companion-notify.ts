@@ -13,6 +13,8 @@ import postgres from "postgres";
 
 const CHANNEL = "ailearn_companion_events_v1";
 export const COMPANION_ACCOUNT_NOTIFY_CHANNEL = "ailearn_companion_account_v1";
+/** 专用 inbox delivery NOTIFY 通道（16 §14.3）：deliver() 写入新 delivery 时随事务 NOTIFY。 */
+export const COMPANION_INBOX_NOTIFY_CHANNEL = "ailearn_companion_inbox_v1";
 
 export interface CompanionNotifyPayload {
   conversationId: string;
@@ -24,11 +26,17 @@ export interface CompanionAccountNotifyPayload {
   epoch: number;
 }
 
+export interface CompanionInboxNotifyPayload {
+  userId: string;
+}
+
 type Subscriber = (payload: CompanionNotifyPayload) => void;
 type AccountSubscriber = (payload: CompanionAccountNotifyPayload) => void;
+type InboxSubscriber = (payload: CompanionInboxNotifyPayload) => void;
 
 const subscribersByConversation = new Map<string, Set<Subscriber>>();
 const accountSubscribersByUser = new Map<string, Set<AccountSubscriber>>();
+const inboxSubscribersByUser = new Map<string, Set<InboxSubscriber>>();
 let notifyConnection: postgres.Sql | null = null;
 let started = false;
 
@@ -46,6 +54,18 @@ function fanOut(payload: CompanionNotifyPayload): void {
 
 function fanOutAccount(payload: CompanionAccountNotifyPayload): void {
   const set = accountSubscribersByUser.get(payload.userId);
+  if (!set || set.size === 0) return;
+  for (const cb of set) {
+    try {
+      cb(payload);
+    } catch {
+      // subscriber 异常不得影响其他订阅者或 listener 本身
+    }
+  }
+}
+
+function fanOutInbox(payload: CompanionInboxNotifyPayload): void {
+  const set = inboxSubscribersByUser.get(payload.userId);
   if (!set || set.size === 0) return;
   for (const cb of set) {
     try {
@@ -88,6 +108,16 @@ export function startCompanionNotifyListener(connectionString: string): void {
         // 畸形 payload 忽略（NOTIFY 只作 hint）
       }
     }))
+    .then(() => sql.listen(COMPANION_INBOX_NOTIFY_CHANNEL, (message: string) => {
+      try {
+        const parsed = JSON.parse(message) as Partial<CompanionInboxNotifyPayload>;
+        if (typeof parsed.userId === "string") {
+          fanOutInbox(parsed as CompanionInboxNotifyPayload);
+        }
+      } catch {
+        // 畸形 payload 忽略（NOTIFY 只作 hint）
+      }
+    }))
     .catch((err: unknown) => {
       // 初始 LISTEN 失败：启动失败不应导致进程崩溃——SSE 的 poll 兜底仍可工作。
       // 必须显式 end() 释放底层 postgres 连接，否则该连接在进程生命周期内泄漏。
@@ -125,6 +155,7 @@ export function stopCompanionNotifyListener(): void {
   started = false;
   subscribersByConversation.clear();
   accountSubscribersByUser.clear();
+  inboxSubscribersByUser.clear();
 }
 
 /** 测试用：重置单例（仅测试进程调用）。 */
@@ -133,6 +164,7 @@ export function resetCompanionNotifyListenerForTests(): void {
   notifyConnection = null;
   started = false;
   subscribersByConversation.clear();  accountSubscribersByUser.clear();
+  inboxSubscribersByUser.clear();
 }
 
 /** 测试用：向当前进程 fan-out 一条通知（模拟 NOTIFY 到达）。 */
@@ -153,6 +185,23 @@ export function subscribeCompanionAccountEvents(
   return () => {
     set?.delete(cb);
     if (set && set.size === 0) accountSubscribersByUser.delete(userId);
+  };
+}
+
+/** 订阅某账号的新 inbox delivery 通知（16 §14.3）。返回取消订阅函数。 */
+export function subscribeCompanionInboxEvents(
+  userId: string,
+  cb: InboxSubscriber,
+): () => void {
+  let set = inboxSubscribersByUser.get(userId);
+  if (!set) {
+    set = new Set();
+    inboxSubscribersByUser.set(userId, set);
+  }
+  set.add(cb);
+  return () => {
+    set.delete(cb);
+    if (set.size === 0) inboxSubscribersByUser.delete(userId);
   };
 }
 

@@ -16,6 +16,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { parseBody } from "../../lib/validate.ts";
+import { safeSseWrite } from "../../lib/safe-sse-write.ts";
 import { requireSession } from "../identity/middleware.ts";
 import {
   companionAccountPatchSchema,
@@ -104,7 +105,7 @@ export async function companionShellRoutes(app: FastifyInstance) {
         lastEventId,
         writer: {
           write: (chunk) => {
-            if (!reply.raw.writableEnded) reply.raw.write(chunk);
+            safeSseWrite(reply.raw, chunk);
           },
           onAbort: (cb) => req.raw.on("close", cb),
           close: () => {

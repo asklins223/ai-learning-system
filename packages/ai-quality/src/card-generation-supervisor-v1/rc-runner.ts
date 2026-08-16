@@ -248,6 +248,20 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Boundedly drain a possibly-orphaned in-flight provider call after a deadline
+ * or infra abort. The abort signal is threaded into the runner so it should
+ * settle quickly; the 5s cap is a safety net for implementations that ignore
+ * abort, preventing retries from stalling while still bounding concurrency.
+ */
+async function drainInFlight(promise: Promise<unknown> | null): Promise<void> {
+  if (!promise) return;
+  await Promise.race([
+    promise.catch(() => undefined),
+    sleep(5_000),
+  ]);
+}
+
+/**
  * 判断错误是否为基础设施失败（可重试）。
  */
 export function isInfrastructureError(err: unknown): boolean {
@@ -327,6 +341,27 @@ export const DEFAULT_SUPERVISOR_RC_CONFIG: Omit<SupervisorRCConfig, "runner"> = 
 // ─── 单轮运行 ─────────────────────────────────────────────────────────────
 
 /**
+ * 有界并发池：以 `limit` 为上限并发执行 `fn`，并按原始顺序收集结果。
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) break;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
  * 运行单轮 RC 质量门禁。
  */
 async function runSingleRound(
@@ -338,123 +373,169 @@ async function runSingleRound(
   infraRetryDelayMs: number,
   deadlineAt: number,
   roundNumber: number,
+  budgetTracker: { maxSampleCostUsd: number },
 ): Promise<SupervisorRCRoundResult> {
-  const results: SampleRunResult[] = [];
   let costUsd = budgetAlreadyUsedUsd;
   let totalDurationMs = 0;
+  // 预算预留跟踪（并发安全）：多个 runSample worker 并发执行时，若只在完成后
+  // 累加 costUsd，它们可能都在 costUsd 尚未回写前通过预算上限检查，导致总成本
+  // 超限最多达 CONCURRENCY_LIMIT × 单样本成本。这里在启动每个样本前原子地预留
+  // 一份"参考成本"（已观测到的单样本最大成本），完成后再按实际成本结算，从而把
+  // 并发超限约束在约一个样本以内。maxSampleCostUsd 由调用方跨轮共享，保证后续
+  // 轮次复用上一轮已观测到的成本参考，覆盖"预算已接近上限时批量启动"的场景。
+  let inFlightReservedUsd = 0;
   const scorer = new GoldenSetScorer(samples as GoldenSet);
 
-  for (const sample of samples) {
+  // 每次并发最多运行 3 个样本：在尊重预算/时限的同时充分利用模型容量。
+  const CONCURRENCY_LIMIT = 3;
+
+  // 单个样本的完整旅程：重试、预算/时限检查、错误结果兜底。
+  const runSample = async (sample: GoldenSample): Promise<SampleRunResult> => {
+    // 启动前原子预留预算：check + reserve 在同一同步块内完成，避免并发 worker
+    // 基于同一份 costUsd 快照集体通过上限检查（见上方注释）。
+    const reserveUsd = Math.max(budgetTracker.maxSampleCostUsd, 0);
+    if (costUsd + inFlightReservedUsd + reserveUsd > maxBudgetUsd) {
+      throw new SupervisorRCError(
+        `预算超限：已使用 $${costUsd.toFixed(4)}（含 ${inFlightReservedUsd.toFixed(4)} 预留），上限 $${maxBudgetUsd}`,
+        "budget",
+        costUsd,
+      );
+    }
+    inFlightReservedUsd += reserveUsd;
+
     let runResult: SupervisorRunResult | null = null;
+    // 记录本次 attempt 的 in-flight provider 调用，超时/重试前先 drain，
+    // 避免孤儿调用在 deadline 后继续轮询并超过 CONCURRENCY_LIMIT。
+    let inflightRun: Promise<SupervisorRunResult> | null = null;
 
-    for (let attempt = 0; attempt <= maxInfraRetries; attempt++) {
-      // 预算检查
-      if (costUsd >= maxBudgetUsd) {
-        throw new SupervisorRCError(
-          `预算超限：已使用 $${costUsd.toFixed(4)}，上限 $${maxBudgetUsd}`,
-          "budget",
-          costUsd,
-        );
-      }
-
-      // 时限检查
-      const remainingMs = deadlineAt - Date.now();
-      if (remainingMs <= 0) {
-        throw new SupervisorRCError(
-          "RC 运行超过总时限",
-          "deadline",
-        );
-      }
-
-      const controller = new AbortController();
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(() => {
-          const error = new SupervisorRCError("RC 运行超过总时限", "deadline");
-          controller.abort(error);
-          reject(error);
-        }, remainingMs);
-      });
-
-      try {
-        const start = Date.now();
-        runResult = await Promise.race([
-          runner.runSample(sample as GoldenSample, controller.signal),
-          deadline,
-        ]);
-        const elapsed = Date.now() - start;
-        totalDurationMs += elapsed;
-
-        if (runResult.error) {
-          throw new SupervisorRCError(runResult.error, "content");
-        }
-
-        // P1-14: 拒绝 Mock provider 结果 — RC 门禁不得通过 Mock 成功。
-        // Mock provider 返回的完美分数会制造质量假象，必须立即阻断。
-        if (runResult.mockProvider === true) {
+    try {
+      for (let attempt = 0; attempt <= maxInfraRetries; attempt++) {
+        // 预算检查（含在途预留）
+        if (costUsd + inFlightReservedUsd >= maxBudgetUsd) {
           throw new SupervisorRCError(
-            `样本 ${sample.sampleId} 使用了 Mock provider (fingerprint: ${runResult.providerFingerprint ?? "null"})，RC 门禁拒绝 Mock 结果`,
-            "content",
-          );
-        }
-
-        costUsd += runResult.costUsd ?? 0;
-        if (costUsd > maxBudgetUsd) {
-          throw new SupervisorRCError(
-            `预算超限：已使用 $${costUsd.toFixed(4)}，上限 $${maxBudgetUsd}`,
+            `预算超限：已使用 $${costUsd.toFixed(4)}（含 ${inFlightReservedUsd.toFixed(4)} 预留），上限 $${maxBudgetUsd}`,
             "budget",
             costUsd,
           );
         }
 
-        results.push(toSampleRunResult(runResult));
-        break;
-      } catch (err) {
-        if (
-          err instanceof SupervisorRCError &&
-          (err.type === "budget" || err.type === "deadline")
-        ) {
-          throw err;
+        // 时限检查
+        const remainingMs = deadlineAt - Date.now();
+        if (remainingMs <= 0) {
+          throw new SupervisorRCError(
+            "RC 运行超过总时限",
+            "deadline",
+          );
         }
 
-        if (!isInfrastructureError(err) || attempt === maxInfraRetries) {
-          // 非基础设施失败，记录错误结果
-          results.push({
-            sampleId: sample.sampleId,
-            cards: [],
-            coverage: {
-              sourcePhysical: 0,
-              bundleAssignment: 0,
-              explicitDecision: 0,
-              candidateSurvival: 0,
-              publishedConcept: 0,
-            },
-            evidenceIntegrity: {
-              allowlistCompliant: false,
-              quoteHashValid: false,
-              typedEvidence: false,
-            },
-            unsupportedClaimCount: 0,
-            semanticSupport: { total: 0, supported: 0, partial: 0, unsupported: 0, contradicted: 0 },
-            conceptRecall: { importantHits: 0, importantTotal: sample.mustLearnConcepts.length, criticalHits: 0, criticalTotal: sample.criticalConcepts.length },
-            sectionRecall: { hits: 0, total: sample.expectedSections.length },
-            budgetCompliance: {
-              turnBudgetExceeded: false,
-              tokenBudgetExceeded: false,
-              toolCallBudgetExceeded: false,
-              costCapExceeded: false,
-            },
-            crossCardDuplicates: 0,
-          });
-          break;
-        }
+        const controller = new AbortController();
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            const error = new SupervisorRCError("RC 运行超过总时限", "deadline");
+            controller.abort(error);
+            reject(error);
+          }, remainingMs);
+        });
 
-        await sleep(infraRetryDelayMs);
-      } finally {
-        if (timeout) clearTimeout(timeout);
+        try {
+          const start = Date.now();
+          inflightRun = runner.runSample(sample, controller.signal);
+          runResult = await Promise.race([
+            inflightRun,
+            deadline,
+          ]);
+          const elapsed = Date.now() - start;
+          totalDurationMs += elapsed;
+
+          if (runResult.error) {
+            throw new SupervisorRCError(runResult.error, "content");
+          }
+
+          // P1-14: 拒绝 Mock provider 结果 — RC 门禁不得通过 Mock 成功。
+          // Mock provider 返回的完美分数会制造质量假象，必须立即阻断。
+          if (runResult.mockProvider === true) {
+            throw new SupervisorRCError(
+              `样本 ${sample.sampleId} 使用了 Mock provider (fingerprint: ${runResult.providerFingerprint ?? "null"})，RC 门禁拒绝 Mock 结果`,
+              "content",
+            );
+          }
+
+          // 结算：累计实际成本并更新最大单样本成本参考（check + 累加在同一同步块）。
+          const actualUsd = runResult.costUsd ?? 0;
+          costUsd += actualUsd;
+          budgetTracker.maxSampleCostUsd = Math.max(budgetTracker.maxSampleCostUsd, actualUsd);
+          if (costUsd > maxBudgetUsd) {
+            throw new SupervisorRCError(
+              `预算超限：已使用 $${costUsd.toFixed(4)}，上限 $${maxBudgetUsd}`,
+              "budget",
+              costUsd,
+            );
+          }
+
+          return toSampleRunResult(runResult);
+        } catch (err) {
+          if (
+            err instanceof SupervisorRCError &&
+            (err.type === "budget" || err.type === "deadline")
+          ) {
+            // 先 drain 在 deadline/budget 判定时仍在途的 provider 调用，
+            // 再向上抛出，避免其继续占用并发槽位或孤儿轮询。
+            await drainInFlight(inflightRun);
+            throw err;
+          }
+
+          if (!isInfrastructureError(err) || attempt === maxInfraRetries) {
+            // 非基础设施失败，记录错误结果
+            return {
+              sampleId: sample.sampleId,
+              cards: [],
+              coverage: {
+                sourcePhysical: 0,
+                bundleAssignment: 0,
+                explicitDecision: 0,
+                candidateSurvival: 0,
+                publishedConcept: 0,
+              },
+              evidenceIntegrity: {
+                allowlistCompliant: false,
+                quoteHashValid: false,
+                typedEvidence: false,
+              },
+              unsupportedClaimCount: 0,
+              semanticSupport: { total: 0, supported: 0, partial: 0, unsupported: 0, contradicted: 0 },
+              conceptRecall: { importantHits: 0, importantTotal: sample.mustLearnConcepts.length, criticalHits: 0, criticalTotal: sample.criticalConcepts.length },
+              sectionRecall: { hits: 0, total: sample.expectedSections.length },
+              budgetCompliance: {
+                turnBudgetExceeded: false,
+                tokenBudgetExceeded: false,
+                toolCallBudgetExceeded: false,
+                costCapExceeded: false,
+              },
+              crossCardDuplicates: 0,
+            };
+          }
+
+          await drainInFlight(inflightRun);
+          await sleep(infraRetryDelayMs);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
       }
+
+      // 不可达：循环内必然 return 或 throw。交给 TS 收尾。
+      throw new SupervisorRCError("样本运行未能产生结果", "infrastructure");
+    } finally {
+      // 无论成功/失败/预算/时限退出，都释放本样本的预留额度。
+      inFlightReservedUsd -= reserveUsd;
     }
-  }
+  };
+
+  const results = await mapLimit(
+    samples as unknown as GoldenSample[],
+    CONCURRENCY_LIMIT,
+    runSample,
+  );
 
   const scorerResult = scorer.score(results);
   const modelRevision = runner.getModelRevision();
@@ -523,6 +604,8 @@ export async function runSupervisorRCGate(
   const rounds: SupervisorRCRoundResult[] = [];
   let totalCostUsd = 0;
   const deadlineAt = Date.now() + config.maxRunDurationMs;
+  // 跨轮共享的单样本最大成本参考，用于预算预留（见 runSingleRound 注释）。
+  const budgetTracker: { maxSampleCostUsd: number } = { maxSampleCostUsd: 0 };
 
   for (let round = 1; round <= config.maxRounds; round++) {
     try {
@@ -535,6 +618,7 @@ export async function runSupervisorRCGate(
         config.infraRetryDelayMs,
         deadlineAt,
         round,
+        budgetTracker,
       );
       rounds.push(roundResult);
       totalCostUsd = roundResult.costUsd;

@@ -56,7 +56,7 @@ before(async () => {
     await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
       VALUES (${NOTE_ID}, ${WORKSPACE_ID}, 'V2 IT note', ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${VERSION_ID}, ${NOTE_ID}, ${WORKSPACE_ID}, 1, ${JSON.stringify({ blocks: [{ type: "paragraph", content: NOTE_CONTENT }] })}, 'v2-it-hash', ${USER_ID})
+      VALUES (${VERSION_ID}, ${NOTE_ID}, ${WORKSPACE_ID}, 1, ${tx.json({ blocks: [{ type: "paragraph", content: NOTE_CONTENT }] })}, 'v2-it-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${randomUUID()}, ${VERSION_ID}, ${WORKSPACE_ID}, 'paragraph', ${NOTE_CONTENT}, 1)

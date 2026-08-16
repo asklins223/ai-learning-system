@@ -7,7 +7,9 @@ export async function jobRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
 
   app.get("/jobs", async (req) => {
-    const items = await listJobs(req.session.workspaceId, req.session.userId);
+    const q = req.query as { limit?: string };
+    const limit = q.limit != null && /^\d+$/.test(q.limit) ? Number(q.limit) : undefined;
+    const items = await listJobs(req.session.workspaceId, req.session.userId, { limit });
     return { items };
   });
 

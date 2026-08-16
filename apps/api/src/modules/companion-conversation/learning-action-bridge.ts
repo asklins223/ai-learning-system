@@ -45,27 +45,95 @@ function sanitizeText(value: string, max: number): string {
     .slice(0, max);
 }
 
+/**
+ * resolveCompanionLearningContextInTransaction 的内部返回：除公开候选外，附带
+ * 已查出、供 proposal create 无重复查询地构造 payload 的最小引用 id。
+ * resumeCandidate/startCandidate 的合同不携带这些 id，故在内部透传。
+ */
+interface ResolvedCompanionContextInternal extends CompanionLearningContextV1 {
+  resumeSessionId: string | null;
+  startCardId: string | null;
+  startKeyPointId: string | null;
+}
+
+function toPublicContext(ctx: ResolvedCompanionContextInternal): CompanionLearningContextV1 {
+  return {
+    version: ctx.version,
+    contextRevision: ctx.contextRevision,
+    resumeCandidate: ctx.resumeCandidate,
+    startCandidate: ctx.startCandidate,
+    learningRunResumeCandidate: ctx.learningRunResumeCandidate,
+    learningRunStartCandidate: ctx.learningRunStartCandidate,
+  };
+}
+
 async function resolveCompanionLearningContextInTransaction(
   tx: ApiTransaction,
   args: {
     workspaceId: string;
     userId: string;
   },
-): Promise<CompanionLearningContextV1> {
+): Promise<ResolvedCompanionContextInternal> {
   // This helper deliberately accepts the caller's transaction. Proposal
   // creation must validate the read-only context and perform all writes under
   // the same RLS snapshot; opening a nested transaction here would leave a
   // race between validation and insertion.
-  // resume：最近 active session + 其 episode 的 key point
-  const sessions = await tx.execute<{ id: string; intent: string }>(sql`
-    SELECT s.id, s.intent
-    FROM learning_sessions s
-    WHERE s.workspace_id = ${args.workspaceId}
-      AND s.user_id = ${args.userId}
-      AND s.status = 'active'
-    ORDER BY s.created_at DESC
-    LIMIT 1
-  `);
+  // 四个根查询读不同表、互不依赖：同一事务内并发发出（repeatable-read
+  // 快照一致），之后的条件 follow-up（episode/title/claim）再串行基于结果执行。
+  const [sessions, startRows, runResumeRows, runStartRows] = await Promise.all([
+    // resume：最近 active session + 其 episode 的 key point
+    tx.execute<{ id: string; intent: string }>(sql`
+      SELECT s.id, s.intent
+      FROM learning_sessions s
+      WHERE s.workspace_id = ${args.workspaceId}
+        AND s.user_id = ${args.userId}
+        AND s.status = 'active'
+      ORDER BY s.created_at DESC
+      LIMIT 1
+    `),
+    // start：最近 episode 的 key point + card（构造 start_session payload）
+    tx.execute<{
+      key_point_id: string;
+      card_id: string;
+      claim: string | null;
+    }>(sql`
+      SELECT k.id AS key_point_id, k.card_id, k.claim
+      FROM learning_episodes e
+      JOIN card_key_points k ON k.id = e.key_point_id
+      WHERE e.workspace_id = ${args.workspaceId}
+        AND e.user_id = ${args.userId}
+        AND k.workspace_id = ${args.workspaceId}
+      ORDER BY e.created_at DESC
+      LIMIT 1
+    `),
+    // 方案 16 §18：LearningRun resume——最近非终态 learning_run
+    //（含 preparing/active/assessing/checkpoint/committing/paused/
+    // recoverable_error；sandbox 不参与桌宠菜单）。
+    tx.execute<{ id: string; key_point_id: string }>(sql`
+      SELECT r.id, r.key_point_id
+      FROM learning_runs r
+      WHERE r.workspace_id = ${args.workspaceId}
+        AND r.user_id = ${args.userId}
+        AND r.phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
+        AND r.sandbox_namespace_id IS NULL
+      ORDER BY r.created_at DESC
+      LIMIT 1
+    `),
+    // start：最近有 key point 的卡（构造 start_learning_run 候选；幂等键
+    // 按 keyPoint 稳定——重复确认重放同一 Run，不会重复创建）。
+    tx.execute<{
+      key_point_id: string;
+      card_id: string;
+      claim: string | null;
+    }>(sql`
+      SELECT k.id AS key_point_id, k.card_id, k.claim
+      FROM card_key_points k
+      WHERE k.workspace_id = ${args.workspaceId}
+      ORDER BY k.updated_at DESC
+      LIMIT 1
+    `),
+  ]);
+
   let resumeCandidate: CompanionLearningContextV1["resumeCandidate"] = null;
   if (sessions[0]) {
     const eps = await tx.execute<{ key_point_id: string; claim: string | null }>(sql`
@@ -90,21 +158,6 @@ async function resolveCompanionLearningContextInTransaction(
     };
   }
 
-  // start：最近 episode 的 key point + card（构造 start_session payload）
-  const startRows = await tx.execute<{
-    key_point_id: string;
-    card_id: string;
-    claim: string | null;
-  }>(sql`
-    SELECT k.id AS key_point_id, k.card_id, k.claim
-    FROM learning_episodes e
-    JOIN card_key_points k ON k.id = e.key_point_id
-    WHERE e.workspace_id = ${args.workspaceId}
-      AND e.user_id = ${args.userId}
-      AND k.workspace_id = ${args.workspaceId}
-    ORDER BY e.created_at DESC
-    LIMIT 1
-  `);
   let startCandidate: CompanionLearningContextV1["startCandidate"] = null;
   if (startRows[0]) {
     const claim = startRows[0].claim ?? "";
@@ -124,19 +177,6 @@ async function resolveCompanionLearningContextInTransaction(
     };
   }
 
-  // 方案 16 §18：LearningRun 菜单候选（learning_run_v1 生产入口）。
-  // resume：最近非终态 learning_run（含 preparing/active/assessing/checkpoint/
-  // committing/paused/recoverable_error；sandbox 不参与桌宠菜单）。
-  const runResumeRows = await tx.execute<{ id: string; key_point_id: string }>(sql`
-    SELECT r.id, r.key_point_id
-    FROM learning_runs r
-    WHERE r.workspace_id = ${args.workspaceId}
-      AND r.user_id = ${args.userId}
-      AND r.phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
-      AND r.sandbox_namespace_id IS NULL
-    ORDER BY r.created_at DESC
-    LIMIT 1
-  `);
   let learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"] = null;
   if (runResumeRows[0]) {
     const titleRows = await tx.execute<{ claim: string | null }>(sql`
@@ -156,19 +196,6 @@ async function resolveCompanionLearningContextInTransaction(
     };
   }
 
-  // start：最近有 key point 的卡（构造 start_learning_run 候选；幂等键
-  // 按 keyPoint 稳定——重复确认重放同一 Run，不会重复创建）。
-  const runStartRows = await tx.execute<{
-    key_point_id: string;
-    card_id: string;
-    claim: string | null;
-  }>(sql`
-    SELECT k.id AS key_point_id, k.card_id, k.claim
-    FROM card_key_points k
-    WHERE k.workspace_id = ${args.workspaceId}
-    ORDER BY k.updated_at DESC
-    LIMIT 1
-  `);
   let learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"] = null;
   if (runStartRows[0]) {
     const claim = runStartRows[0].claim ?? "";
@@ -209,6 +236,10 @@ async function resolveCompanionLearningContextInTransaction(
     startCandidate,
     learningRunResumeCandidate,
     learningRunStartCandidate,
+    // PERF-WN: 透传已查出的引用 id，避免 proposal create 侧重复 SELECT。
+    resumeSessionId: sessions[0]?.id ?? null,
+    startCardId: startRows[0]?.card_id ?? null,
+    startKeyPointId: startRows[0]?.key_point_id ?? null,
   };
 }
 
@@ -218,7 +249,7 @@ export async function resolveCompanionLearningContext(args: {
 }): Promise<CompanionLearningContextV1> {
   return withWorkspaceTransaction(
     { workspaceId: args.workspaceId, userId: args.userId },
-    (tx) => resolveCompanionLearningContextInTransaction(tx, args),
+    (tx) => resolveCompanionLearningContextInTransaction(tx, args).then(toPublicContext),
   );
 }
 
@@ -317,49 +348,35 @@ export async function createCompanionMenuProposal(args: {
       }
       // 服务端重新构造候选 payload（引用来自只读查询），并精确验证其 sha256
       // 与候选 payloadSha256/expected 一致（§6.7：payload 完全由服务端构造）。
+      // PERF-WN: 复用 context 解析时已查出的引用 id，不再为构造 payload 重复
+      // SELECT learning_sessions/learning_runs/card_key_points/learning_episodes。
       let payload: { kind: string; [k: string]: unknown };
       if (args.body.candidateId === "resume_current") {
-        const rows = await tx.execute<{ id: string }>(sql`
-          SELECT id FROM learning_sessions
-          WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
-            AND status = 'active'
-          ORDER BY created_at DESC LIMIT 1
-        `);
-        if (!rows[0]) {
+        if (!context.resumeSessionId) {
           throw new CompanionConversationError("NO_ACTIVE_SESSION", 409, "active learning session disappeared");
         }
-        payload = { kind: "resume_session", sessionId: rows[0].id };
+        payload = { kind: "resume_session", sessionId: context.resumeSessionId };
       } else if (args.body.candidateId === "learning_run_resume") {
-        const rows = await tx.execute<{ id: string }>(sql`
-          SELECT id FROM learning_runs
-          WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
-            AND phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
-            AND sandbox_namespace_id IS NULL
-          ORDER BY created_at DESC LIMIT 1
-        `);
-        if (!rows[0]) {
+        const runId = context.learningRunResumeCandidate?.runId;
+        if (!runId) {
           throw new CompanionConversationError("NO_ACTIVE_SESSION", 409, "active learning run disappeared");
         }
-        payload = { kind: "resume_learning_run", runId: rows[0].id };
+        payload = { kind: "resume_learning_run", runId };
       } else if (args.body.candidateId === "learning_run_start") {
-        const rows = await tx.execute<{ key_point_id: string; card_id: string }>(sql`
-          SELECT k.id AS key_point_id, k.card_id
-          FROM card_key_points k
-          WHERE k.workspace_id = ${args.workspaceId}
-          ORDER BY k.updated_at DESC LIMIT 1
-        `);
-        if (!rows[0]) {
+        const cardId = context.learningRunStartCandidate?.cardId;
+        const keyPointId = context.learningRunStartCandidate?.keyPointId;
+        if (!cardId || !keyPointId) {
           throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
         }
-        const idempotencyKey = `pet-menu:${rows[0].key_point_id}`;
+        const idempotencyKey = `pet-menu:${keyPointId}`;
         payload = {
           kind: "start_learning_run",
           request: {
             version: 1,
             origin: {
               kind: "card",
-              cardId: rows[0].card_id,
-              keyPointId: rows[0].key_point_id,
+              cardId,
+              keyPointId,
             },
             goal: "stabilize",
             clientRequestId: idempotencyKey,
@@ -367,21 +384,14 @@ export async function createCompanionMenuProposal(args: {
           },
         };
       } else {
-        const rows = await tx.execute<{ key_point_id: string; card_id: string }>(sql`
-          SELECT k.id AS key_point_id, k.card_id
-          FROM learning_episodes e JOIN card_key_points k ON k.id = e.key_point_id
-          WHERE e.workspace_id = ${args.workspaceId} AND e.user_id = ${args.userId}
-            AND k.workspace_id = ${args.workspaceId}
-          ORDER BY e.created_at DESC LIMIT 1
-        `);
-        if (!rows[0]) {
+        if (!context.startCardId || !context.startKeyPointId) {
           throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
         }
         payload = {
           kind: "start_session",
           origin: "now",
-          cardId: rows[0].card_id,
-          keyPointId: rows[0].key_point_id,
+          cardId: context.startCardId,
+          keyPointId: context.startKeyPointId,
         };
       }
       const payloadHash = sha256(canonicalJson(payload));

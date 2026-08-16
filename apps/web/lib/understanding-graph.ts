@@ -336,9 +336,21 @@ export function filterUnderstandingGraph(
   const nodeTypes = new Set(filter.nodeTypes ?? []);
   const hasSeedFilter = Boolean(query || states.size > 0 || nodeTypes.size > 0);
 
+  // Precompute each node's lowercased search text once per query so repeated
+  // nodeSearchText calls (which recursively flatten and sort metadata) are not
+  // re-done for every node on every filter pass.
+  const searchTextById = query
+    ? new Map(indexed.graph.nodes.map((node) => [node.id, nodeSearchText(node)]))
+    : null;
+
   const queryMatches = new Set(
-    query
-      ? indexed.graph.nodes.filter((node) => nodeSearchText(node).includes(query)).map((node) => node.id)
+    query && searchTextById
+      ? indexed.graph.nodes
+        .filter((node) => {
+          const text = searchTextById.get(node.id);
+          return text != null && text.includes(query);
+        })
+        .map((node) => node.id)
       : indexed.graph.nodes.map((node) => node.id),
   );
   let seedNodes = indexed.graph.nodes

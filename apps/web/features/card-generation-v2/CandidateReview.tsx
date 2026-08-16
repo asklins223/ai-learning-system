@@ -188,8 +188,9 @@ export function CandidateReview({
   }
 
   function clearReveal(candidateIds: string[]) {
+    const ids = new Set(candidateIds);
     setReveals((current) => Object.fromEntries(
-      Object.entries(current).filter(([candidateId]) => !candidateIds.includes(candidateId)),
+      Object.entries(current).filter(([candidateId]) => !ids.has(candidateId)),
     ));
   }
 
@@ -325,7 +326,8 @@ export function CandidateReview({
 
   function previewMerge() {
     if (!mergeSource || mergeTargetIds.length === 0) return;
-    const targets = candidates.filter((candidate) => mergeTargetIds.includes(candidate.candidateId));
+    const mergeTargetSet = new Set(mergeTargetIds);
+    const targets = candidates.filter((candidate) => mergeTargetSet.has(candidate.candidateId));
     if (targets.some((target) => !canMergeCandidates(mergeSource, target))) return;
 
     const affectedIds = [mergeSource.candidateId, ...mergeTargetIds];

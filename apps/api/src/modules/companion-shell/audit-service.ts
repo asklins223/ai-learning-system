@@ -34,6 +34,7 @@ import {
   type ApiTransaction,
 } from "../../db/client.ts";
 import { listUserWorkspaces } from "../identity/service.ts";
+import { logger } from "../../lib/logger.ts";
 
 // ─── 表定义（与迁移 0076 一致）────────────────────────────────────────
 // apps/api 的 db schema 镜像树尚未同步 companion.ts，因此在模块内声明读取用途的
@@ -741,7 +742,11 @@ export async function exportCompanionUserData(
       // R10（round-3 审计）：原实现两大表各一条无 LIMIT 的全量 SELECT 一次性入内存返回体
       // （超大工作区内存/响应峰值）。现按 keyset（createdAt,id）每批 1000 分页扫描，
       // 结果保持 createdAt 有序拼接，输出与原先逐字节一致。
+      // R10b（round-5）：即便分页，仍把每页 push 进无界数组——追加最大行数护栏，
+      // 命中上限截断并告警，避免极端大工作区把整表驻留内存（对齐 companion-export 的
+      // COMPANION_EXPORT_MAX_ROWS 思想）。
       const BATCH = 1000;
+      const MAX_ROWS = 50_000;
       const audit: AuditRow[] = [];
       let aLastCreated: Date | null = null;
       let aLastId: string | null = null;
@@ -763,6 +768,13 @@ export async function exportCompanionUserData(
           .limit(BATCH);
         if (page.length === 0) break;
         audit.push(...page);
+        if (audit.length >= MAX_ROWS) {
+          logger.warn(
+            { userId, workspaceId, table: "companion_audit", limit: MAX_ROWS },
+            "companion audit 导出达到行数上限，已截断",
+          );
+          break;
+        }
         const last: AuditRow = page[page.length - 1];
         aLastCreated = last.createdAt;
         aLastId = last.id;
@@ -789,6 +801,13 @@ export async function exportCompanionUserData(
           .limit(BATCH);
         if (page.length === 0) break;
         ledger.push(...page);
+        if (ledger.length >= MAX_ROWS) {
+          logger.warn(
+            { userId, workspaceId, table: "companion_invitation_ledger", limit: MAX_ROWS },
+            "companion invitation ledger 导出达到行数上限，已截断",
+          );
+          break;
+        }
         const last: LedgerRow = page[page.length - 1];
         lLastCreated = last.createdAt;
         lLastId = last.id;
@@ -857,10 +876,21 @@ export async function deleteAllUserCompanionAuditAndLedger(
   userId: string,
 ): Promise<{ perWorkspace: Array<CompanionDeleteResult & { workspaceId: string }> }> {
   const workspaces = await listUserWorkspaces(userId);
+  // PERF-WN（round-5 修复）：各 workspace 删除相互独立（RLS 按 workspace 隔离），
+  // 并行执行缩短多 workspace 账号的串行事务链；但原实现用 Promise.all 对所有
+  // workspace 同时开事务，连接池压力与竞态风险随 workspace 数无界增长。改为
+  // 小批量并发（每批 8 个），连接占用有上界。
   const perWorkspace: Array<CompanionDeleteResult & { workspaceId: string }> = [];
-  for (const ws of workspaces) {
-    const result = await deleteCompanionUserData(userId, ws.workspaceId);
-    perWorkspace.push({ workspaceId: ws.workspaceId, ...result });
+  const BATCH = 8;
+  for (let i = 0; i < workspaces.length; i += BATCH) {
+    const slice = workspaces.slice(i, i + BATCH);
+    const results = await Promise.all(
+      slice.map(async (ws) => {
+        const result = await deleteCompanionUserData(userId, ws.workspaceId);
+        return { workspaceId: ws.workspaceId, ...result };
+      }),
+    );
+    perWorkspace.push(...results);
   }
   return { perWorkspace };
 }

@@ -168,7 +168,13 @@ export class GoldenSetScorer {
    * 评估所有样本运行结果。
    */
   score(results: SampleRunResult[]): ScorerResult {
-    const sampleScores = results.map((result) => this.scoreSample(result));
+    // 建立 sampleId → GoldenSample 的一次性索引，避免每个 result 都线性扫描
+    // goldenSet（O(R×G)），改为 O(R) 哈希查找。
+    const goldenById = new Map<string, GoldenSet[number]>();
+    for (const sample of this.goldenSet) {
+      goldenById.set(sample.sampleId, sample);
+    }
+    const sampleScores = results.map((result) => this.scoreSample(result, goldenById));
 
     const aggregate = this.computeAggregate(sampleScores, results);
   const failedDimensions = this.collectFailedDimensions(sampleScores);
@@ -196,8 +202,11 @@ export class GoldenSetScorer {
   /**
    * 评估单个样本。
    */
-  private scoreSample(result: SampleRunResult): SampleScore {
-    const sample = this.goldenSet.find((s) => s.sampleId === result.sampleId);
+  private scoreSample(
+    result: SampleRunResult,
+    goldenById: ReadonlyMap<string, GoldenSet[number]>,
+  ): SampleScore {
+    const sample = goldenById.get(result.sampleId);
     if (!sample) {
       throw new Error(`样本 ${result.sampleId} 不在黄金集中`);
     }
@@ -476,7 +485,8 @@ export function compareBlind(
   const margin = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / denominator;
   const ciLower = center - margin;
 
-  // 关键维度回退
+  // 关键维度回退：先按维度聚合所有 delta，一次遍历即可，避免每个关键维度
+  // 都 flatMap+filter 全量 verdicts（O(keyDimensions × verdicts × deltas)）。
   const keyDimensions = [
     "coverage",
     "evidenceIntegrity",
@@ -484,13 +494,22 @@ export function compareBlind(
     "importantConceptRecall",
     "criticalConceptRecall",
   ];
+  const deltasByDimension = new Map<string, number[]>();
+  for (const verdict of pairwiseVerdicts) {
+    for (const delta of verdict.dimensionDeltas) {
+      const list = deltasByDimension.get(delta.dimension);
+      if (list) {
+        list.push(delta.delta);
+      } else {
+        deltasByDimension.set(delta.dimension, [delta.delta]);
+      }
+    }
+  }
 
   const dimensionRegressions = keyDimensions.map((dim) => {
-    const deltas = pairwiseVerdicts
-      .flatMap((v) => v.dimensionDeltas)
-      .filter((d) => d.dimension === dim);
+    const deltas = deltasByDimension.get(dim) ?? [];
     const avgDelta = deltas.length > 0
-      ? deltas.reduce((sum, d) => sum + d.delta, 0) / deltas.length
+      ? deltas.reduce((sum, d) => sum + d, 0) / deltas.length
       : 0;
     return {
       dimension: dim,

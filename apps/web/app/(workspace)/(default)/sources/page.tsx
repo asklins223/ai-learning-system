@@ -179,7 +179,7 @@ function SourcesPageInner() {
         return;
       }
 
-      const result = await api.listSources();
+      const result = await api.listSources({ limit: 50 });
       if (requestId !== listRequestRef.current) return;
 
       setSourceTotal(result.total);

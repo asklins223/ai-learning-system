@@ -49,7 +49,8 @@ export const evidences = pgTable(
     workspaceIdx: index("evidences_workspace_idx").on(t.workspaceId),
     evidenceSpanIdx: index("evidences_span_idx").on(t.workspaceId, t.evidenceSpanId),
     imageEvidenceIdx: index("evidences_image_evidence_idx").on(t.workspaceId, t.imageEvidenceUnitId),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("evidences_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
 /**
@@ -70,7 +71,8 @@ export const evidenceOverrides = pgTable(
   (t) => ({
     uniqueEvidenceUser: uniqueIndex("evidence_overrides_unique_idx").on(t.evidenceId, t.userId),
     workspaceIdx: index("evidence_overrides_workspace_idx").on(t.workspaceId),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("evidence_overrides_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
 /**
@@ -114,7 +116,8 @@ export const validationQuestions = pgTable(
     activeUniqueIdx: uniqueIndex("validation_questions_active_unique_idx")
       .on(t.workspaceId, t.userId, t.keyPointId, t.sourceFingerprint)
       .where(sql`${t.status} = 'active' AND ${t.userId} IS NOT NULL AND ${t.keyPointId} IS NOT NULL AND ${t.sourceFingerprint} IS NOT NULL`),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("validation_questions_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
 /**
@@ -138,7 +141,7 @@ export const validationEvents = pgTable(
     confidence: integer("confidence").notNull(), // 0-100，存储时 ×100 避免浮点
     feedback: jsonb("feedback").$type<ValidationFeedback | null>(),
     // N-003: 绑定服务端持久化的题目和异步 job
-    questionId: uuid("question_id"), // FK 在迁移中定义
+    questionId: uuid("question_id").references(() => validationQuestions.id, { onDelete: "set null" }), // 0011:19 FK
     jobId: uuid("job_id"), // 绑定 evaluate_validation job
     // ── v0.6 扩展 (计划 §6.6) ──
     submissionId: uuid("submission_id"),
@@ -152,6 +155,10 @@ export const validationEvents = pgTable(
   (t) => ({
     cardIdx: index("validation_events_card_idx").on(t.cardId),
     userIdx: index("validation_events_user_idx").on(t.userId, t.createdAt),
+    // 2026-08-12（schema 完整性审计）：0114 workspace 前缀聚合索引
+    // （迁移定义 (workspace_id, created_at DESC)——DESC 与 note/card 同款）
+    workspaceCreatedIdx: index("validation_events_workspace_created_idx")
+      .on(t.workspaceId, sql`${t.createdAt} desc`),
     keyPointIdx: index("validation_events_key_point_idx").on(t.keyPointId),
     jobUniqueIdx: uniqueIndex("validation_events_job_unique_idx")
       .on(t.jobId)
@@ -159,7 +166,8 @@ export const validationEvents = pgTable(
     // 并发安全兜底：防止相同输入组合的重复写入（advisory lock 的数据库层面兜底）
     inputUniqueIdx: uniqueIndex("validation_events_input_unique_idx")
       .on(t.workspaceId, t.cardId, sql`COALESCE(${t.keyPointId}, '00000000-0000-0000-0000-000000000000'::uuid)`, t.userId, t.question, t.userAnswer),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("validation_events_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
 /**
@@ -185,6 +193,9 @@ export const reviewSchedules = pgTable(
     policyVersion: text("policy_version"), // discrete-v2
     reasonCode: text("reason_code"),
     supersedesScheduleId: uuid("supersedes_schedule_id"),
+    // 方案 16 §18.1 defer_review：用户队列"展示层延后"（不改 official
+    // next_review_at、不消费 schedule、不创建 successor；仅队列 UI 展示）。
+    userDeferredUntil: timestamp("user_deferred_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     // CONC-10: updatedAt 记录最近一次 status 变更时间。
     // deleteNote 取消计划时设为 deletedAt，restoreDeletedNote 恢复时
@@ -197,11 +208,15 @@ export const reviewSchedules = pgTable(
     userStatusIdx: index("review_schedules_user_status_idx").on(t.userId, t.status, t.nextReviewAt),
     // v0.6: key point based scheduling
     keyPointIdx: index("review_schedules_key_point_idx").on(t.keyPointId, t.status, t.nextReviewAt),
+    // 2026-08-12（schema 完整性审计）：0114 listDue 高频路径索引（workspace 前缀）
+    workspaceStatusNextIdx: index("review_schedules_workspace_status_next_idx")
+      .on(t.workspaceId, t.status, t.nextReviewAt),
     // §10.6: 每个 (workspace,user,key_point) 最多一条 pending schedule
     pendingUniqueIdx: uniqueIndex("review_schedules_pending_unique_idx")
       .on(t.workspaceId, t.userId, t.keyPointId)
       .where(sql`${t.status} = 'pending' AND ${t.keyPointId} IS NOT NULL`),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("review_schedules_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
 /**
@@ -272,7 +287,8 @@ export const reviewAttempts = pgTable(
     activeStartedUniqueIdx: uniqueIndex("review_attempts_active_started_unique_idx").on(
       t.workspaceId, t.userId, t.reviewScheduleId,
     ).where(sql`${t.status} = 'started'`),
-  }),
+
+    activeScheduleIdx: index("review_attempts_active_schedule_idx").on(t.workspaceId, t.userId, t.reviewScheduleId, t.status).where(sql`${t.status} = 'started'`),}),
 );
 
 /**
@@ -294,5 +310,6 @@ export const understandingEvents = pgTable(
   (t) => ({
     userIdx: index("understanding_events_user_idx").on(t.userId, t.createdAt),
     subjectIdx: index("understanding_events_subject_idx").on(t.workspaceId, t.subjectType, t.subjectId, t.createdAt),
-  }),
+
+    idWorkspaceUnique: uniqueIndex("understanding_events_id_workspace_unique").on(t.id, t.workspaceId),}),
 );

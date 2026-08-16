@@ -31,6 +31,20 @@
 2. 对比其它 hijack 端点(inbox-routes/companion-events)确认是否同模式偶发;
 3. 测量连接池:并发下 `pg_stat_activity` 与 postgres.js 连接数。
 
+**2026-08-16 追加**:
+- 新增 `apps/api/src/lib/safe-sse-write.ts`,所有 SSE/NDJSON 写路径统一改为
+  `safeSseWrite`(检查 `writableEnded/destroyed` + try/catch,失败静默)。
+- 已应用到:
+  - `/learning-runs/:id/events`
+  - `/companion/deliveries/inbox/stream`
+  - `/companion/conversations/:id/events`
+  - `/me/companion/events`
+  - companion NDJSON export
+- 单测 `learning-run-sse-write.test.ts` 4 项通过;API 全量 1612/1612。
+- 新增 `scripts/sse-smoke.mjs` 并发冒烟工具（需已登录 Cookie + runId），
+  可用来在真实 API 上观察并发 SSE 是否出现 500/写失败。
+- 真实并发压测复现仍未完成,但“断开后 write 冒泡 500”的路径已被统一兜底。
+
 ## 2. API 偶发慢响应(20-207s)—— 未收敛
 
 **现象**:`GET /learning-runs/{id}` 偶发 20-207s;DB 侧无慢查询(pg_stat_activity
@@ -45,3 +59,19 @@
 - `card-generation-v2-journey` 2 条 + pr-smoke 生成卡 1 条失败:supervisor 模型
   语义输出(未 compose candidate 即 request_verification → 设计上 fail-closed
   protocol_error)。属方案 20 范畴,用户已指示搁置。
+
+## 4. 2026-08-16 更新：V2 生产闭环已补齐
+
+- 新增桌面 Electron E2E 冒烟骨架 `tests/e2e/tests/desktop-pet-smoke.spec.ts`
+  （默认 `DESKTOP_E2E` 未设时跳过；设置 `DESKTOP_E2E=1` +
+  `ELECTRON_APP_PATH` 后可启动 Electron 并验证窗口加载）。
+- 同时清理了 e2e `card-generation-v2-journey.spec.ts` 两个未使用变量，
+  `tests/e2e` 现在 `tsc --noEmit` 通过。
+
+- 新 V2 Objective 激活时自动创建 hidden legacy alias，`createRunV2` 不再要求
+  手工 alias；
+- `/learning-runs/new` 支持 `originV2`，候选激活后有“开始三分钟验证”；
+- `/learning-cards/[cardId]`、`/cards` V2 列表、Review/Today V2 origin、星图 V2
+  节点、Reminder UI 已接通；
+- 上述内容记录在方案 20 implementation-review R37 与 evidence-package。
+- SSE 500 / 慢响应仍保持“防御已加、真实并发压测复现未完成”状态。

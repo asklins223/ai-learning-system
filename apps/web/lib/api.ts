@@ -193,6 +193,7 @@ import {
 import type { CompanionOverview } from "@/features/companion/api/contracts";
 import type {
   CreateLearningRunRequestV1,
+  CreateLearningRunRequestV2,
   GetLearningRunResultResponseV1,
   LearningRunActionRequestV1,
   LearningRunActionResponseV1,
@@ -202,6 +203,7 @@ import type {
   PutLearningTaskDraftRequestV1,
   SubmitTaskArtifactReceiptV1,
   SubmitTaskArtifactV1,
+  PublicLearningCardV2,
 } from "@ailearn/shared";
 
 // R-012: 浏览器端默认使用同源 /api（由 next.config.mjs rewrite 代理到 API 服务器），
@@ -309,11 +311,12 @@ export function setToken(token: string | null, persistent = true) {
 
 function getCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
-  const prefix = `${name}=`;
-  const part = document.cookie.split(";").map((value) => value.trim()).find((value) => value.startsWith(prefix));
-  if (!part) return null;
+  // PERF: 用轻量正则直接匹配 cookie 串，避免每次请求 split+map 分配整数组。
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${escaped}=([^;]*)`));
+  if (!match) return null;
   try {
-    return decodeURIComponent(part.slice(prefix.length));
+    return decodeURIComponent(match[1]);
   } catch {
     return null;
   }
@@ -560,10 +563,15 @@ function invalidateRequestGetCache(): void {
 
 function cacheSetGet(cacheKey: string, at: number, data: unknown): void {
   const now = Date.now();
-  for (const [key, entry] of requestGetCache) {
-    if (now - entry.at >= REQUEST_CACHE_TTL_MS) requestGetCache.delete(key);
-  }
   requestGetCache.set(cacheKey, { at, data });
+  // 惰性清理：读路径已经按 TTL 判过期（过期的不会再命中），因此无需每次
+  // 写入都全表扫描清除过期项。只在缓存逼近容量上限时才做一次性 O(n) 清扫，
+  // 把突发大量唯一 GET 的写入从 O(n^2) 摊还到 O(n)。
+  if (requestGetCache.size >= REQUEST_CACHE_MAX_ENTRIES) {
+    for (const [key, entry] of requestGetCache) {
+      if (now - entry.at >= REQUEST_CACHE_TTL_MS) requestGetCache.delete(key);
+    }
+  }
   while (requestGetCache.size > REQUEST_CACHE_MAX_ENTRIES) {
     const oldest = requestGetCache.keys().next().value;
     if (oldest === undefined) break;
@@ -973,7 +981,22 @@ isAutosave?: boolean;
       : "";
     return request<{ items: CardListItem[]; nextCursor: string | null; total: number }>(`/cards${qs}`);
   },
+  listLearningCardsV2: (params?: { cursor?: string; limit?: number }) => {
+    const qs = params
+      ? "?" +
+        new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v != null)
+            .map(([k, v]) => [k, String(v)]) as [string, string][],
+        ).toString()
+      : "";
+    return request<{ items: PublicLearningCardV2[]; nextCursor: string | null }>(`/v2/cards${qs}`);
+  },
   getCard: (id: string) => request<CardDetailResponse>(`/cards/${id}`),
+  // PERF: 单请求获取卡片在完整列表中的分页位置（index/prev/next）——
+  // 替代前端逐页串行翻页，降低详情页首访延迟。
+  getCardPosition: (id: string) =>
+    request<{ index: number; total: number; previousId: string | null; nextId: string | null; nextReviewAt: string | null }>(`/cards/${id}/position`),
   listCardSets: (params?: {
     status?: CardSetStatus;
     noteId?: string;
@@ -1198,8 +1221,9 @@ return request<{ items: SearchResult[]; total: number; nextCursor: number | null
     request<StatsOverview>("/stats/overview"),
 
   /* note version history (§2.5) */
+  // PERF: 显式请求最近 100 个版本（服务端已支持 limit/offset，默认亦为 100）
   listNoteVersions: (id: string) =>
-    request<{ items: NoteVersionSummary[] }>(`/notes/${id}/versions`),
+    request<{ items: NoteVersionSummary[] }>(`/notes/${id}/versions?limit=100`),
 
   restoreNoteVersion: (noteId: string, versionId: string, baseVersionId?: string) =>
     request<NoteDetail>(`/notes/${noteId}/versions/${versionId}/restore`, {
@@ -1212,7 +1236,17 @@ return request<{ items: SearchResult[]; total: number; nextCursor: number | null
     request<{ items: Array<{ id: string; title: string; titleSource: string; createdAt: string; updatedAt: string; currentVersionId: string | null }> }>(`/sources/${id}/notes`),
 
   /* jobs */
-  listJobs: () => request<{ items: JobRow[] }>("/jobs"),
+  listJobs: (params?: { limit?: number }) => {
+    const qs = params
+      ? "?" +
+        new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v != null)
+            .map(([k, v]) => [k, String(v)]) as [string, string][],
+        ).toString()
+      : "";
+    return request<{ items: JobRow[] }>(`/jobs${qs}`);
+  },
   getJob: (id: string, signal?: AbortSignal) =>
     request<JobRow>(`/jobs/${id}`, signal ? { signal } : undefined),
 
@@ -1529,8 +1563,10 @@ createdAt: string;
     request<{ ok: boolean }>(`/invites/${inviteId}`, { method: "DELETE" }),
 
   /* SEC-02 / ALPHA-01: 成员管理 */
-  listMembers: () =>
-    request<{
+  // PERF: 显式请求成员上限（服务端默认 200、上限 500），避免超大工作区全量返回。
+  listMembers: (params?: { limit?: number }) => {
+    const qs = params ? `?limit=${params.limit}` : "";
+    return request<{
       items: Array<{
         userId: string;
         email: string;
@@ -1538,7 +1574,8 @@ createdAt: string;
         joinedAt: string;
       }>;
       total: number;
-    }>("/members"),
+    }>(`/members${qs}`);
+  },
 
   removeMember: (userId: string) =>
     request<{ ok: boolean }>(`/members/${userId}`, { method: "DELETE" }),
@@ -1724,6 +1761,13 @@ return body;
     input: CreateLearningRunRequestV1,
   ) =>
     request<LearningRunPublicV1>("/learning-runs", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  createLearningRunV2: (
+    input: CreateLearningRunRequestV2,
+  ) =>
+    request<{ version: 2; runId: string; snapshotId: string }>("/learning-runs", {
       method: "POST",
       body: JSON.stringify(input),
     }),

@@ -8,6 +8,12 @@ import {
 export interface PointV1 { x: number; y: number }
 export interface BoundsV1 { x: number; y: number; width: number; height: number }
 
+// 2026-08-16（性能专项）：光标轮询自适应退避。FAST 与旧 33ms（~30Hz）一致；
+// 静止超过 STATIC_BACKOFF_AFTER 次后降频到 IDLE，光标移动立即回到 FAST。
+const FAST_POLL_INTERVAL_MS = 33;
+const STATIC_BACKOFF_AFTER = 5;
+const IDLE_POLL_INTERVAL_MS = 500;
+
 export function contentPointFromScreenPoint(point: PointV1, bounds: BoundsV1): PointV1 {
   return { x: point.x - bounds.x, y: point.y - bounds.y };
 }
@@ -80,10 +86,13 @@ export class PetHitTestController {
   private geometry: PetHitGeometryV1 | null = null;
   private interactionMode: DesktopPetInteractionModeV1 = "passive";
   private ignored: boolean | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly alphaMaskCache: AlphaMaskCacheV1 = new Map();
   // 2026-08-11（性能专项）：上次光标位置——静止光标跳过命中计算
   private lastCursor: PointV1 = { x: Number.NaN, y: Number.NaN };
+  // 2026-08-16（性能专项）：连续静止 tick 计数；达到阈值后降低轮询频率，
+  // 避免光标静止时仍以 ~30Hz 反复发起原生光标查询。
+  private staticTicks = 0;
 
   constructor(
     private readonly window: HitTestWindow,
@@ -156,12 +165,18 @@ export class PetHitTestController {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.tick(), 33);
+    const loop = () => {
+      this.tick();
+      // 静止达阈值后降频（低开销光标轮询），一旦光标移动立即回快节奏。
+      const idle = this.staticTicks >= STATIC_BACKOFF_AFTER;
+      this.timer = setTimeout(loop, idle ? IDLE_POLL_INTERVAL_MS : FAST_POLL_INTERVAL_MS);
+    };
+    this.timer = setTimeout(loop, 0);
   }
 
   stop(): void {
     if (!this.timer) return;
-    clearInterval(this.timer);
+    clearTimeout(this.timer);
     this.timer = null;
   }
 
@@ -170,7 +185,11 @@ export class PetHitTestController {
     // 2026-08-11（性能专项）：光标未移动时跳过命中计算（33ms 轮询大部分
     // tick 是静止光标——pointHitsGeometry 含 alpha mask 遍历与 DPR 换算）。
     const cursor = this.getCursorScreenPoint();
-    if (cursor.x === this.lastCursor.x && cursor.y === this.lastCursor.y) return;
+    if (cursor.x === this.lastCursor.x && cursor.y === this.lastCursor.y) {
+      if (this.staticTicks < Number.MAX_SAFE_INTEGER) this.staticTicks += 1;
+      return;
+    }
+    this.staticTicks = 0;
     this.lastCursor = cursor;
     const forcedInteractive = this.interactionMode !== "passive";
     const shouldIgnore = !forcedInteractive && (!this.geometry || !pointHitsGeometry(

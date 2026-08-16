@@ -99,6 +99,10 @@ const VALID_COGNITIVE_TYPES = new Set(["concept", "comparison", "causal", "proce
 const VALID_IMPORTANCE = new Set(["core", "supporting", "detail"]);
 const VALID_DIFFICULTY = new Set(["basic", "intermediate", "advanced"]);
 const VALID_NOCANDIDATE_REASONS = new Set(["metadata", "duplicate", "example_only", "decorative", "no_learnable_fact"]);
+// 常量复用集：noCandidate 的 reason 混淆映射（每个候选调用都复用同一定义，
+// 避免在 sanitizeNoCandidate 内反复分配两个 Set）。
+const NOCANDIDATE_IMPORTANCE_VALUES = new Set(["detail", "core", "supporting"]);
+const NOCANDIDATE_COGNITIVE_VALUES = new Set(["concept", "comparison", "causal", "procedure", "boundary"]);
 
 /**
  * Repair common LLM output violations for card map candidates.
@@ -261,11 +265,9 @@ function sanitizeNoCandidate(raw: unknown): CardMapOutput["noCandidateUnitIds"][
   // type value into the reason field. Map the most common confusion to a
   // sensible default rather than discarding the entry.
   // QUAL-52 修复：将嵌套三元表达式改为 Set 查找，提高可读性和可维护性。
-  const IMPORTANCE_VALUES = new Set(["detail", "core", "supporting"]);
-  const COGNITIVE_VALUES = new Set(["concept", "comparison", "causal", "procedure", "boundary"]);
   const reason = VALID_NOCANDIDATE_REASONS.has(rawReason)
     ? rawReason
-    : (IMPORTANCE_VALUES.has(rawReason) || COGNITIVE_VALUES.has(rawReason))
+    : (NOCANDIDATE_IMPORTANCE_VALUES.has(rawReason) || NOCANDIDATE_COGNITIVE_VALUES.has(rawReason))
       ? "no_learnable_fact"
       : "";
   if (reason !== rawReason && reason !== "") {

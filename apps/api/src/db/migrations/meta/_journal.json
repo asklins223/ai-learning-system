@@ -1163,6 +1163,34 @@
       "when": 1786729094423,
       "tag": "0165_cutover_events_legacy_migration",
       "breakpoints": true
+    },
+    {
+      "idx": 166,
+      "version": "7",
+      "when": 1786729095423,
+      "tag": "0166_card_domain_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 167,
+      "version": "7",
+      "when": 1786729096423,
+      "tag": "0167_learning_card_revisions",
+      "breakpoints": true
+    },
+    {
+      "idx": 168,
+      "version": "7",
+      "when": 1786729097423,
+      "tag": "0168_learning_cards_v2_note_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 169,
+      "version": "7",
+      "when": 1786729098423,
+      "tag": "0169_companion_messages_blocks_trgm_idx",
+      "breakpoints": true
     }
   ]
 }

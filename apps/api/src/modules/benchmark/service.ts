@@ -9,6 +9,25 @@ import { upsertSearchDocument } from "../../lib/search-index.ts";
 import { createCardGenerationRun } from "../card-generation/service.ts";
 import { physicalDeleteNote, computeContentHash } from "../note/service.ts";
 
+/** Bounded-concurrency async map (worker-pool style, one in-flight item per worker). */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
 /**
  * 内置基准测试笔记（30 篇，覆盖技术、产品、学习、元数据干扰、
  * 长短文本以及中英混排）。
@@ -876,25 +895,32 @@ async function cleanupPreviousBenchmarkData(
   workspaceId: string,
   userId: string,
 ): Promise<void> {
-  await withWorkspaceTransaction({ workspaceId, userId }, async (transaction) => {
-    const benchmarkTitles = BUILTIN_NOTES.map((n) => n.title);
-    // 查找所有同名笔记
-    const oldNotes = await transaction.query.notes.findMany({
+  const benchmarkTitles = BUILTIN_NOTES.map((n) => n.title);
+  // 查找所有同名笔记（一次短暂的工作区事务即可；删除阶段不长时间占持连接）。
+  const oldNotes = await withWorkspaceTransaction({ workspaceId, userId }, async (transaction) =>
+    transaction.query.notes.findMany({
       where: and(
         eq(notes.workspaceId, workspaceId),
         inArray(notes.title, benchmarkTitles),
         eq(notes.titleSource, "benchmark"),
       ),
-    });
+    }),
+  );
 
-    for (const oldNote of oldNotes) {
-      // P1-1: 使用 physicalDeleteNote 彻底清理基准测试数据，
-      // 避免 deleteNote 软删除后数据残留导致重复运行冲突。
-      // CONC-07: force=true 跳过 deletedAt 检查，允许删除 active 笔记。
-      // benchmark 笔记通常是 active 状态（未被软删除），不加 force 会被
-      // physicalDeleteNote 的 CONC-07 守卫静默跳过，导致数据累积。
-      await physicalDeleteNote(transaction, oldNote.id, workspaceId, { force: true });
-    }
+  // PERF: physicalDeleteNote is a heavy cascading multi-table delete. Run them
+  // with a small bounded concurrency (3), each in its own workspace transaction,
+  // instead of N serial deletes inside a single long-lived transaction. This
+  // keeps workspace RLS context per delete and only touches a handful of rows.
+  // Concurrency within one transaction connection wouldn't parallelize in
+  // postgres-js, so separate workspace transactions are required for real gains.
+  const DELETE_CONCURRENCY = 3;
+  await mapWithConcurrency(oldNotes, DELETE_CONCURRENCY, async (oldNote) => {
+    // P1-1: 使用 physicalDeleteNote 彻底清理基准测试数据，
+    // 避免 deleteNote 软删除后数据残留导致重复运行冲突。
+    // CONC-07: force=true 跳过 deletedAt 检查，允许删除 active 笔记。
+    await withWorkspaceTransaction({ workspaceId, userId }, (transaction) =>
+      physicalDeleteNote(transaction, oldNote.id, workspaceId, { force: true }),
+    );
   });
 }
 

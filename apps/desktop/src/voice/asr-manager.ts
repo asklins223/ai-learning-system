@@ -56,7 +56,9 @@ interface AsrPendingRequest {
 
 class AsrManager {
   private child: UtilityProcess | null = null;
-  private pending: AsrPendingRequest | null = null;
+  /** 按 requestId 索引的在途请求；支持 probe/recognize 并发而不互相覆盖。 */
+  private pending = new Map<number, AsrPendingRequest>();
+  private nextRequestId = 1;
   private baselineMemoryMB: number | null = null;
   private disposed = false;
 
@@ -75,17 +77,24 @@ class AsrManager {
       });
       this.child = child;
       child.on("message", (message: unknown) => {
-        const pending = this.pending;
+        const rawRequestId = (message as { requestId?: unknown } | null)?.requestId;
+        if (typeof rawRequestId !== "number") return;
+        const pending = this.pending.get(rawRequestId);
         if (!pending) return;
-        this.pending = null;
+        this.pending.delete(rawRequestId);
         clearTimeout(pending.timer);
-        pending.resolve(message);
+        // 去掉内部 requestId 字段，保持下游（renderer 严格 schema）校验不变。
+        const { requestId: _droppedRequestId, ...payload } =
+          (message ?? {}) as { requestId?: number } & Record<string, unknown>;
+        void _droppedRequestId;
+        pending.resolve(payload);
       });
       child.on("exit", () => {
         this.child = null;
-        const pending = this.pending;
-        if (pending) {
-          this.pending = null;
+        // worker 退出：所有在途请求一律 fail-closed。
+        const failed = this.pending;
+        this.pending = new Map();
+        for (const [, pending] of failed) {
           clearTimeout(pending.timer);
           pending.resolve({ version: 1, ok: false, error: "asr_worker_exited", recoverable: true });
         }
@@ -101,7 +110,12 @@ class AsrManager {
   private disposeWorker(): void {
     const child = this.child;
     this.child = null;
-    this.pending = null;
+    const pending = this.pending;
+    this.pending = new Map();
+    for (const item of pending.values()) {
+      clearTimeout(item.timer);
+      item.resolve({ version: 1, ok: false, error: "asr_worker_unavailable", recoverable: true });
+    }
     this.baselineMemoryMB = null;
     this.disposed = true;
     if (child) {
@@ -185,18 +199,23 @@ class AsrManager {
     if (!child || this.disposed) {
       return Promise.resolve({ version: 1, ok: false, error: "asr_worker_unavailable", recoverable: true });
     }
+    const requestId = this.nextRequestId++;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        this.pending = null;
-        this.disposeWorker();
-        resolve({ version: 1, ok: false, error: "asr_worker_timeout", recoverable: true });
+        // 仅该请求超时；若还有其他在途请求则保留 worker，避免误杀并发调用。
+        if (this.pending.delete(requestId)) {
+          resolve({ version: 1, ok: false, error: "asr_worker_timeout", recoverable: true });
+        }
+        if (this.pending.size === 0) {
+          this.disposeWorker();
+        }
       }, timeoutMs);
-      this.pending = { resolve, timer };
+      this.pending.set(requestId, { resolve, timer });
       try {
-        child.postMessage(request);
+        child.postMessage({ ...(request as Record<string, unknown>), requestId });
       } catch {
         clearTimeout(timer);
-        this.pending = null;
+        this.pending.delete(requestId);
         resolve({ version: 1, ok: false, error: "asr_post_message_failed", recoverable: true });
       }
     });

@@ -110,6 +110,12 @@ export function isPromptCacheEnabled(): boolean {
   return process.env.PROMPT_CACHE_ENABLED === "true";
 }
 
+// PROMPT_CACHE_PROVIDERS is effectively static in production; parse it once
+// and reuse the Set to avoid per-call env split + allocation on hot LLM paths.
+// Cache is keyed by the raw env value so tests that mutate env still get correct
+// per-value parsing.
+let promptCacheProvidersCache: { raw: string | undefined; set: Set<string> } | null = null;
+
 /**
  * Get the set of provider IDs allowed to use prompt caching.
  *
@@ -121,14 +127,22 @@ export function isPromptCacheEnabled(): boolean {
  */
 export function getPromptCacheProviders(): Set<string> {
   const raw = process.env.PROMPT_CACHE_PROVIDERS;
-  if (!raw || raw.trim() === "") {
-    return new Set(["dashscope"]);
+  if (promptCacheProvidersCache && promptCacheProvidersCache.raw === raw) {
+    return promptCacheProvidersCache.set;
   }
-  const parsed = raw.split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter((s) => s.length > 0);
-  // If all entries were empty/whitespace, fall back to default
-  return parsed.length > 0 ? new Set(parsed) : new Set(["dashscope"]);
+
+  let parsed: Set<string>;
+  if (!raw || raw.trim() === "") {
+    parsed = new Set(["dashscope"]);
+  } else {
+    const items = raw.split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.length > 0);
+    // If all entries were empty/whitespace, fall back to default
+    parsed = items.length > 0 ? new Set(items) : new Set(["dashscope"]);
+  }
+  promptCacheProvidersCache = { raw, set: parsed };
+  return parsed;
 }
 
 /**

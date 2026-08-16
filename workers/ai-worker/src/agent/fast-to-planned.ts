@@ -53,6 +53,7 @@ export function attributeFastArtifactToBundles(
   for (const task of plan.bundleTasks) {
     const keywords = focusKeywords(task.extractionFocus);
     const bucket: BundleAttribution = { bundleId: task.bundleId, candidateIds: [], evidenceRefIds: [] };
+    const seenEvidence = new Set<string>();
 
     for (const c of artifact.candidates) {
       if (assigned.has(c.localId)) continue;
@@ -60,7 +61,12 @@ export function attributeFastArtifactToBundles(
       const hit = keywords.length === 0 || keywords.some((k) => haystack.includes(k));
       if (hit) {
         bucket.candidateIds.push(c.localId);
-        bucket.evidenceRefIds.push(...c.evidenceRefIds.filter((r) => !bucket.evidenceRefIds.includes(r)));
+        for (const r of c.evidenceRefIds) {
+          if (!seenEvidence.has(r)) {
+            seenEvidence.add(r);
+            bucket.evidenceRefIds.push(r);
+          }
+        }
         assigned.add(c.localId);
       }
     }

@@ -143,8 +143,12 @@ export const learningOutboxEvents = pgTable(
     // 投影派生主查询：按 workspace+user 顺序读取未消费事件。
     workspaceUserIdx: index("learning_outbox_workspace_user_idx")
       .on(t.workspaceId, t.userId, t.sequence),
-    // 未消费游标（投影 worker）。
-    unprocessedIdx: index("learning_outbox_unprocessed_idx").on(t.processedAt),
+    // 未消费游标（投影 worker）。2026-08-12（schema 完整性审计 P1-2）：
+    // 与 0078:72 对齐为部分索引 WHERE processed_at IS NULL——此前声明为全
+    // 索引，drizzle generate 会把部分索引重建为全索引（语义漂移）。
+    unprocessedIdx: index("learning_outbox_unprocessed_idx")
+      .on(t.processedAt)
+      .where(sql`${t.processedAt} IS NULL`),
     // 按事件类型查询。
     typeIdx: index("learning_outbox_type_idx").on(t.workspaceId, t.eventType, t.sequence),
   }),

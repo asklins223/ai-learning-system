@@ -21,7 +21,7 @@ import {
   loadProjectionCheckpoint,
   type StoredProjectionCheckpoint,
 } from "@/features/understanding/projection-client";
-import type { CreateLearningRunRequestV1 } from "@ailearn/shared";
+import type { CreateLearningRunRequestV1, CreateLearningRunRequestV2, LearningRunOriginV2 } from "@ailearn/shared";
 import { notFound } from "next/navigation";
 
 function safePath(candidate: string | null): string | null {
@@ -159,6 +159,79 @@ function buildCreateRequest(
   return null;
 }
 
+/**
+ * 方案 20 §16.3：V2 PREPARE 入口。
+ * 与 V1 互斥，query 使用 `origin=*_v2&objectiveId=...` 形态。
+ */
+function buildCreateV2Request(
+  params: URLSearchParams,
+): { request: CreateLearningRunRequestV2; returnTo: string } | null {
+  const origin = params.get("origin");
+  const cardId = params.get("cardId");
+  const objectiveId = params.get("objectiveId");
+  const scheduleId = params.get("scheduleId");
+  const generationRaw = params.get("generation");
+  const returnTo = safePath(params.get("returnTo")) ?? "/";
+  const dayBucket = new Date().toISOString().slice(0, 10);
+  const idempotencyKey = `lr-create-v2:${origin ?? "x"}:${objectiveId ?? cardId ?? scheduleId ?? "x"}:${dayBucket}`.slice(0, 200);
+  const goalParam = params.get("goal");
+  const goal = goalParam === "repair" || goalParam === "clarify" || goalParam === "transfer"
+    ? goalParam
+    : "stabilize";
+  const responsePreference = goal === "repair" ? "structured" as const : undefined;
+
+  let originV2: LearningRunOriginV2 | null = null;
+  if (origin === "card_v2" && cardId && objectiveId) {
+    originV2 = { kind: "card", cardId, objectiveId };
+  } else if (origin === "review_v2" && scheduleId && objectiveId && generationRaw) {
+    const generation = Number(generationRaw);
+    if (!Number.isSafeInteger(generation) || generation < 1) return null;
+    originV2 = { kind: "review", scheduleId, objectiveId, scheduleGeneration: generation };
+  } else if (origin === "today_v2" && objectiveId) {
+    originV2 = { kind: "today", objectiveId };
+  } else if (origin === "star_map_v2" && objectiveId) {
+    const routePlanId = params.get("routePlanId") ?? undefined;
+    const lens = params.get("lens");
+    const lensValue = lens === "evidence" || lens === "provenance" || lens === "issues" || lens === "current_target"
+      ? lens
+      : "current_target";
+    const storedCheckpoint =
+      typeof window !== "undefined"
+        ? loadProjectionCheckpoint(window.localStorage, "__star_map__")
+        : null;
+    const checkpoint = storedCheckpoint ?? readLatestProjectionCheckpoint();
+    if (!checkpoint) return null;
+    originV2 = {
+      kind: "star_map",
+      objectiveId,
+      lens: lensValue,
+      filter: { showArchived: false },
+      ...(routePlanId ? { routePlanId } : {}),
+      baselineCheckpoint: checkpoint,
+    };
+  } else if (origin === "onboarding_v2" && objectiveId) {
+    const sampleMode = params.get("sampleMode") === "sandbox" ? "sandbox" as const : "own_content" as const;
+    const sandboxNamespaceId = params.get("sandboxNamespaceId") ?? undefined;
+    originV2 = {
+      kind: "onboarding",
+      sampleMode,
+      objectiveId,
+      ...(sandboxNamespaceId ? { sandboxNamespaceId } : {}),
+    };
+  }
+  if (!originV2) return null;
+
+  return {
+    request: {
+      originV2,
+      goal,
+      ...(responsePreference ? { responsePreference } : {}),
+      idempotencyKey,
+    },
+    returnTo,
+  };
+}
+
 /** 扫描 localStorage 中最近保存的投影 checkpoint（跨 userId 键宽松读取）。 */
 function readLatestProjectionCheckpoint(): StoredProjectionCheckpoint | null {
   if (typeof window === "undefined") return null;
@@ -180,11 +253,13 @@ function readLatestProjectionCheckpoint(): StoredProjectionCheckpoint | null {
 function LearningRunNewEntry() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const plan = useMemo(() => buildCreateRequest(new URLSearchParams(searchParams.toString())), [searchParams]);
+  const params = useMemo(() => new URLSearchParams(searchParams.toString()), [searchParams]);
+  const plan = useMemo(() => buildCreateRequest(params), [params]);
+  const planV2 = useMemo(() => buildCreateV2Request(params), [params]);
 
   if (!isLearningRunV1Enabled()) notFound();
 
-  if (!plan) {
+  if (!plan && !planV2) {
     return (
       <section className="learning-run-player learning-run-player--error" role="alert">
         <p>该入口尚未开放，或参数不完整。</p>
@@ -195,8 +270,9 @@ function LearningRunNewEntry() {
 
   return (
     <LearningRunLivePlayer
-      create={plan.request}
-      fallbackReturnTo={plan.returnTo}
+      create={plan?.request}
+      createV2={planV2?.request}
+      fallbackReturnTo={plan?.returnTo ?? planV2?.returnTo}
     />
   );
 }

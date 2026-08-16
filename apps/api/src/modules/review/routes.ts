@@ -26,7 +26,9 @@ const reviewQuerySchema = z.object({
   status: z.enum(["pending", "accepted", "completed", "dismissed", "superseded", "cancelled"]).optional(),
   includeAll: z.enum(["true", "false"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
-  offset: z.coerce.number().int().min(0).max(100_000).optional(),
+  // PERF-A#7：offset 上限从 100k 收紧到 10k，防止客户端强制深扫描；配合
+  // limit≤100 与 nextReviewAt 窗口过滤，today 队列均可分页覆盖。
+  offset: z.coerce.number().int().min(0).max(10_000).optional(),
   // 2026-08-11（性能专项）：nextReviewAt 窗口过滤（today 页按天拉取，
   // 避免全量复习串行瀑布）。
   dueFromMs: z.coerce.number().int().min(0).optional(),

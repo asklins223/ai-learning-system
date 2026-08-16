@@ -114,7 +114,7 @@ export const learningRuns = pgTable(
     assistantSessionId: uuid("assistant_session_id"),
     origin: jsonb("origin").notNull(),
     returnTarget: jsonb("return_target").notNull(),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "restrict" }),
     targetFingerprint: text("target_fingerprint").notNull(),
     goal: text("goal").notNull(), // stabilize | clarify | repair | transfer | explore
     phase: text("phase").$type<LearningRunPhase>().notNull().default("preparing"),
@@ -175,6 +175,15 @@ export const learningRunPrivateContracts = pgTable(
     taskPlanHash: text("task_plan_hash").notNull(),
     projectionBaselineCheckpointToken: text("projection_baseline_checkpoint_token"),
     contractHash: text("contract_hash").notNull(),
+    // 0139（方案 20 §16.2 step 4/8）：V2 run 的 target contract 闭包。
+    // V1 run 全为 NULL；两路消费以 snapshot_id IS NOT NULL 判别。
+    snapshotId: uuid("snapshot_id"),
+    snapshotHash: text("snapshot_hash"),
+    semanticTargetFingerprint: text("semantic_target_fingerprint"),
+    targetRevisionHash: text("target_revision_hash"),
+    expectedObjectiveLifecycleEpoch: integer("expected_objective_lifecycle_epoch"),
+    evidenceEligibilityVectorHash: text("evidence_eligibility_vector_hash"),
+    publishedTargetEligibility: text("published_target_eligibility"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
@@ -504,6 +513,8 @@ export const learningTaskPresentationHistory = pgTable(
     presentedAt: timestamp("presented_at", { withTimezone: true }).notNull(),
     outcome: text("outcome").notNull().default("not_answered"),
     exposed: boolean("exposed").notNull().default(false),
+    // 迁移 0143：Run 结算时按 runId 幂等回填 outcome/exposed。
+    runId: uuid("run_id").references(() => learningRuns.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
@@ -513,6 +524,7 @@ export const learningTaskPresentationHistory = pgTable(
     payloadHashIdx: index("learning_task_pres_hist_payload_hash_idx").on(
       t.workspaceId, t.userId, t.keyPointId, t.publicPayloadHash,
     ),
+    runIdx: index("learning_task_pres_hist_run_idx").on(t.runId),
   }),
 );
 
@@ -640,5 +652,49 @@ export const learningRunProcessingOutbox = pgTable(
         AND NOT (${t.payload} ? 'userAnswer')
         AND NOT (${t.payload} ? 'transcript')`,
     ),
+  }),
+);
+
+// ─── interaction_qualifications（§7.7 family ceiling Gate 数据）───────────
+
+export const interactionQualifications = pgTable(
+  "interaction_qualifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    qualificationId: text("qualification_id").notNull(),
+    family: text("family").$type<"open_text" | "open_voice" | "ordering" | "relation" | "repair" | "scenario" | "choice_with_rationale" | "structured_bundle">().notNull(),
+    locale: text("locale").notNull().default("zh-CN"),
+    datasetVersion: text("dataset_version").notNull(),
+    rubricSetHash: text("rubric_set_hash").notNull(),
+    sampleSize: integer("sample_size").notNull(),
+    adversarialSampleSize: integer("adversarial_sample_size").notNull(),
+    annotatorCount: integer("annotator_count").notNull(),
+    adjudicationVersion: text("adjudication_version").notNull(),
+    metrics: jsonb("metrics").notNull(),
+    approvedCeiling: text("approved_ceiling").$type<"practice_only" | "diagnostic_only" | "facet_eligible" | "mastery_eligible">().notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    qualificationUnique: uniqueIndex("interaction_qualifications_qualification_unique_idx").on(t.qualificationId),
+    familyIdx: index("interaction_qualifications_family_idx").on(t.family, t.approvedAt),
+  }),
+);
+
+// ─── key_point_prerequisites（§15.2 weak_prerequisite 数据源，迁移 0145）────
+
+export const keyPointPrerequisites = pgTable(
+  "key_point_prerequisites",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    prerequisiteKeyPointId: uuid("prerequisite_key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    uniquePrereq: uniqueIndex("key_point_prerequisites_unique_idx").on(t.workspaceId, t.keyPointId, t.prerequisiteKeyPointId),
+    kpIdx: index("key_point_prerequisites_kp_idx").on(t.workspaceId, t.keyPointId),
   }),
 );

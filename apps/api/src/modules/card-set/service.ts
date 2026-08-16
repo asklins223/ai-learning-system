@@ -254,12 +254,22 @@ export async function listCardSets(
     return {
       items: selected.map(({ cursorTimestamp: _cursorTimestamp, ...cardSet }) => {
         const setCards = cardsBySet.get(cardSet.id) ?? [];
+        // PERF: compute sectionCardCount and overviewCardId in a single pass
+        // over the cards array instead of filter().length + find().
+        let sectionCardCount = 0;
+        let overviewCardId: string | null = null;
+        for (const card of setCards) {
+          if (card.scope === "section") {
+            sectionCardCount++;
+          } else if (card.scope === "overview" && overviewCardId === null) {
+            overviewCardId = card.id;
+          }
+        }
         return {
           ...cardSet,
           cardCount: setCards.length,
-          sectionCardCount: setCards.filter((card) => card.scope === "section").length,
-          overviewCardId:
-            setCards.find((card) => card.scope === "overview")?.id ?? null,
+          sectionCardCount,
+          overviewCardId,
         };
       }),
       nextCursor: hasMore && last

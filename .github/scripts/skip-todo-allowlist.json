@@ -38,5 +38,45 @@
     "approver": "owner",
     "expiresAt": "2026-08-24",
     "reason": "真实 DB 集成测试：npm test 无 DATABASE_URL_API 时跳过；DB 环境单独运行"
+  },
+  {
+    "testName": "Card Generation V2 is not enabled (CARD_GENERATION_V2_ENABLED not set)",
+    "package": "tests/e2e",
+    "type": "skip",
+    "issue": "#card-v2-e2e-env",
+    "owner": "ailearn-dev",
+    "approver": "owner",
+    "expiresAt": "2026-08-30",
+    "reason": "V2 生成 E2E 依赖 CARD_GENERATION_V2_ENABLED=true；未开启时按设计跳过"
+  },
+  {
+    "testName": "Desktop E2E requires DESKTOP_E2E=1",
+    "package": "tests/e2e",
+    "type": "skip",
+    "issue": "#desktop-e2e-env",
+    "owner": "ailearn-dev",
+    "approver": "owner",
+    "expiresAt": "2026-08-30",
+    "reason": "桌面 Electron E2E 需要 DESKTOP_E2E=1 + ELECTRON_APP_PATH；默认环境跳过"
+  },
+  {
+    "testName": "Review Attempt lifecycle @pr (v0.5 UI 已废弃，待 v0.6 重写)",
+    "package": "tests/e2e",
+    "type": "skip",
+    "issue": "#review-v06-rewrite",
+    "owner": "ailearn-dev",
+    "approver": "owner",
+    "expiresAt": "2026-08-30",
+    "reason": "v0.5 Review UI 已废弃，待 v0.6 重写后启用"
+  },
+  {
+    "testName": "review queue page loads and shows due reviews (v0.5 UI 已废弃)",
+    "package": "tests/e2e",
+    "type": "todo",
+    "issue": "#review-v06-rewrite",
+    "owner": "ailearn-dev",
+    "approver": "owner",
+    "expiresAt": "2026-08-30",
+    "reason": "v0.5 Review UI 已废弃，待 v0.6 重写后补测"
   }
 ]

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COMPANION_PERSONA_V2, COMPANION_PERSONA_V2_PROMPT_ID,  } from "@ailearn/shared";
+import { COMPANION_PERSONA_V3, COMPANION_PERSONA_V3_PROMPT_ID,  } from "@ailearn/shared";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
   buildCompanionPersonaMessages,
@@ -22,7 +22,7 @@ test("persona messages：system 固定 prompt + 结构化 user content", () => {
   });
   assert.equal(messages.length, 2);
   assert.equal(messages[0].role, "system");
-  assert.equal(messages[0].content, COMPANION_PERSONA_V2);
+  assert.equal(messages[0].content, COMPANION_PERSONA_V3);
   assert.equal(messages[1].role, "user");
   const parsed = JSON.parse(messages[1].content as string);
   assert.equal(parsed.version, 1);
@@ -50,6 +50,24 @@ test("grounded tutor：只把受限证据放入 provider 输入", () => {
     claim: "光合作用把光能转成化学能。",
     evidence: ["叶绿体中的色素吸收光能。"],
   });
+});
+
+test("activeMemories 注入 persona user content（桌宠记得长期记忆）", () => {
+  const messages = buildCompanionPersonaMessages({
+    userText: "今天继续学",
+    recentMessages: [],
+    pageContext: null,
+    workspacePolicy: null,
+    activeMemories: [
+      { kind: "preference", content: "喜欢用语音交流" },
+      { kind: "goal", content: "这周想掌握光合作用" },
+    ],
+  });
+  const parsed = JSON.parse(messages[1].content as string);
+  assert.deepEqual(parsed.activeMemories, [
+    { kind: "preference", content: "喜欢用语音交流" },
+    { kind: "goal", content: "这周想掌握光合作用" },
+  ]);
 });
 
 test("persona 输入边界：recent ≤20 条、12k/2k/4k 截断", () => {
@@ -138,7 +156,7 @@ test("buildFinalCuePayload：确定性常量（thinking/error）不被误改", (
 });
 
 test("prompt id 常量与 shared 一致", () => {
-  assert.equal(COMPANION_PERSONA_V2_PROMPT_ID, "companion-persona-v2");
+  assert.equal(COMPANION_PERSONA_V3_PROMPT_ID, "companion-persona-v3");
 });
 
 test("15c：validateCompanionOutput 剥离 markdown（标题/加粗/列表/链接）", () => {

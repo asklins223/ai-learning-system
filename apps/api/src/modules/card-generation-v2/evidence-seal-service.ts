@@ -17,7 +17,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   evidenceSnapshotsV2,
@@ -185,6 +184,8 @@ export async function sealEvidenceSnapshotsV2(
 
   const spans = filterBlocksBySourceScope(blocks, sourceScope);
   const evidence: SealedEvidenceEntryV2[] = [];
+  const snapshotValues: Array<typeof evidenceSnapshotsV2.$inferInsert> = [];
+  const eligibilityValues: Array<typeof evidenceEligibilityStatesV2.$inferInsert> = [];
 
   for (const span of spans) {
     const blockContentHash = hashCanonicalV2("block", { content: span.block.content });
@@ -206,14 +207,7 @@ export async function sealEvidenceSnapshotsV2(
       sourceContentHash,
     });
 
-    const existing = await tx
-      .select({ id: evidenceSnapshotsV2.id })
-      .from(evidenceSnapshotsV2)
-      .where(eq(evidenceSnapshotsV2.evidenceSnapshotId, evidenceSnapshotId))
-      .limit(1);
-    if (existing.length > 0) continue;
-
-    await tx.insert(evidenceSnapshotsV2).values({
+    snapshotValues.push({
       id: randomUUID(),
       workspaceId,
       evidenceSnapshotId,
@@ -238,7 +232,7 @@ export async function sealEvidenceSnapshotsV2(
       eligibilityEpoch: 1,
       status: "usable",
     });
-    await tx.insert(evidenceEligibilityStatesV2).values({
+    eligibilityValues.push({
       id: randomUUID(),
       workspaceId,
       eligibilityId: randomUUID(),
@@ -248,7 +242,7 @@ export async function sealEvidenceSnapshotsV2(
       eligibilityVectorHash: stateHash,
       restrictedReason: null,
       restrictedAt: null,
-    }).onConflictDoNothing();
+    });
 
     evidence.push({
       evidenceSnapshotId,
@@ -260,6 +254,13 @@ export async function sealEvidenceSnapshotsV2(
       quoteHash,
       blockContentHash,
     });
+  }
+
+  if (snapshotValues.length > 0) {
+    await tx.insert(evidenceSnapshotsV2).values(snapshotValues).onConflictDoNothing();
+  }
+  if (eligibilityValues.length > 0) {
+    await tx.insert(evidenceEligibilityStatesV2).values(eligibilityValues).onConflictDoNothing();
   }
 
   const manifest: EvidenceSealManifestV2 = {

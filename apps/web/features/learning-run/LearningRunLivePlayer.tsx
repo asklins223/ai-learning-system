@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { CreateLearningRunRequestV1, LearningRunPublicV1 as WireRunV1 } from "@ailearn/shared";
+import type { CreateLearningRunRequestV1, CreateLearningRunRequestV2, LearningRunPublicV1 as WireRunV1 } from "@ailearn/shared";
 import { ApiError } from "@/lib/api";
 import { Icon } from "@/components/ui/icons";
 import { LiquidOrb } from "@/components/liquid-orb/LiquidOrb";
@@ -30,11 +30,13 @@ export interface LearningRunLivePlayerProps {
   runId?: string;
   /** 创建请求（new 路由：创建后 redirect 到 [runId]）。 */
   create?: CreateLearningRunRequestV1;
+  /** V2 创建请求（方案 20 §16.3：带 originV2，创建后 redirect 到 [runId]）。 */
+  createV2?: CreateLearningRunRequestV2;
   /** 返回路径（进入前由入口页提供；服务端 returnTarget 为首选）。 */
   fallbackReturnTo?: string;
 }
 
-export function LearningRunLivePlayer({ runId, create, fallbackReturnTo }: LearningRunLivePlayerProps) {
+export function LearningRunLivePlayer({ runId, create, createV2, fallbackReturnTo }: LearningRunLivePlayerProps) {
   const router = useRouter();
   const hook = useLearningRun();
   const [drafts, setDrafts] = useState<Record<string, UiDraftV1>>({});
@@ -62,6 +64,11 @@ export function LearningRunLivePlayer({ runId, create, fallbackReturnTo }: Learn
     bootstrappedRef.current = true;
     if (runId) {
       void hook.load(runId);
+    } else if (createV2) {
+      void hook.createV2(createV2).then((created) => {
+        // V2 create 只返回 runId，完整快照由 [runId] 页 load() 获取。
+        window.location.replace(`/learning-runs/${encodeURIComponent(created.runId)}`);
+      }).catch(() => {});
     } else if (create) {
       void hook.create(create).then((created) => {
         // 幂等重放返回终态 Run（同一天已完成/checkpoint 结束）——自动以新键
@@ -90,7 +97,7 @@ export function LearningRunLivePlayer({ runId, create, fallbackReturnTo }: Learn
         navigateToRun(created.runId);
       }).catch(() => {});
     }
-  }, [hook, create, runId, router]);
+  }, [hook, create, createV2, runId, router]);
 
   // 草稿恢复：activeTask 出现时读取服务端草稿（wire → UI 形状映射）。
   useEffect(() => {
@@ -115,7 +122,7 @@ export function LearningRunLivePlayer({ runId, create, fallbackReturnTo }: Learn
         // 无草稿或不可用：忽略（恢复是 best effort）。
       }
     })();
-  }, [hook.snapshot?.runId, hook.snapshot?.activeTask?.taskId, runId]);
+  }, [hook.snapshot, hook.snapshot?.runId, hook.snapshot?.activeTask?.taskId, runId]);
 
   const wireSnapshot: WireRunV1 | null = hook.snapshot;
 

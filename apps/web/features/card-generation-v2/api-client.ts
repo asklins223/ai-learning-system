@@ -164,6 +164,7 @@ export interface V2Client {
   ): Promise<CardActivationReceiptV2>;
 
   // ── §17.6 Card / Reminder ──
+  listCardsV2(): Promise<{ items: PublicLearningCardV2[] }>;
   readPublicCard(cardId: string): Promise<PublicCardReadResponse>;
   revealCardV2(
     body: RevealCardRequestV2,
@@ -173,6 +174,22 @@ export interface V2Client {
     body: ArchiveCardRequestV2,
     idempotencyKey: string,
   ): Promise<{ cardId: string; lifecycle: string }>;
+  regenerateCardV2(
+    cardId: string,
+    idempotencyKey: string,
+  ): Promise<{ runId: string; status: string }>;
+  updateCardPresentationV2(
+    cardId: string,
+    body: {
+      expectedPublicationRevision: number;
+      expectedPublicPayloadHash: string;
+      patch: {
+        front?: { cue?: string; context?: string; prompt: string };
+        strategy?: string;
+      };
+    },
+    idempotencyKey: string,
+  ): Promise<{ cardId: string; cardRevision: number; publicationRevision: number; publicPayloadHash: string }>;
   listReadyReminders(): Promise<ReminderListResponse>;
   cancelReminder(reminderId: string): Promise<{ reminderId: string; status: string }>;
 
@@ -271,6 +288,7 @@ export function createV2Client(fetchFn?: typeof fetch): V2Client {
       ),
 
     // ─── §17.6 Card / Reminder ─────────────────────────────────────────
+    listCardsV2: () => getJson<{ items: PublicLearningCardV2[] }>(`/cards`),
     readPublicCard: (cardId) => getJson<PublicCardReadResponse>(`/cards/${cardId}`),
     revealCardV2: (body, idempotencyKey) =>
       postJson<LearningCardRevealV2>(
@@ -281,6 +299,18 @@ export function createV2Client(fetchFn?: typeof fetch): V2Client {
     archiveCardV2: (body, idempotencyKey) =>
       postJson<{ cardId: string; lifecycle: string }>(
         `/cards/${body.cardId}/archive`,
+        body,
+        idempotencyKey,
+      ),
+    regenerateCardV2: (cardId, idempotencyKey) =>
+      postJson<{ runId: string; status: string }>(
+        `/cards/${cardId}/regeneration-runs`,
+        {},
+        idempotencyKey,
+      ),
+    updateCardPresentationV2: (cardId, body, idempotencyKey) =>
+      postJson<{ cardId: string; cardRevision: number; publicationRevision: number; publicPayloadHash: string }>(
+        `/cards/${cardId}/revisions`,
         body,
         idempotencyKey,
       ),

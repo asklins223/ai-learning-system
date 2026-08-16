@@ -6,9 +6,10 @@
  * （跨设备只允许一个未过期租约，CAS）。全部 withWorkspaceTransaction 内。
  */
 
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, gt, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { assistantDeliveries } from "../../db/schema/assistant-deliveries.ts";
+import { COMPANION_INBOX_NOTIFY_CHANNEL } from "./companion-notify.ts";
 import type { AssistantDeliveryV2 } from "@ailearn/shared";
 
 export interface DeliveryScope {
@@ -98,6 +99,11 @@ export async function deliver(
     expiresAt: input.expiresAt,
     updatedAt: now,
   }).returning();
+  // Inbox SSE 即时唤醒：随同一事务 NOTIFY 专属 inbox 通道（提交才生效；
+  // 丢失只影响低延迟，SSE 的 durable poll 兜底仍会补齐）。
+  await tx.execute(sql`
+    SELECT pg_notify(${COMPANION_INBOX_NOTIFY_CHANNEL}, ${JSON.stringify({ userId: scope.userId })})
+  `);
   return toContract(inserted[0]);
 }
 

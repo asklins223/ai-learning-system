@@ -97,7 +97,7 @@ export function InviteMemberSettings() {
     try {
       const [invitesRes, membersRes] = await Promise.all([
         api.listInvites(),
-        api.listMembers(),
+        api.listMembers({ limit: 200 }),
       ]);
       setInvites(invitesRes.items);
       setInviteTotal(invitesRes.total);

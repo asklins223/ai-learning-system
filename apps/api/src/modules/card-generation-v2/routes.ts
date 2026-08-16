@@ -47,6 +47,7 @@ import {
   listReadyRemindersV2,
   cancelReminderV2,
   readPublicCardV2,
+  listActiveCardsV2,
 } from "./card-service.ts";
 import {
   createGenerationRunV2,
@@ -68,6 +69,12 @@ import {
 
 const eventsQuerySchema = z.object({
   after: z.coerce.number().int().min(0).optional().default(0),
+});
+
+// /v2/cards 列表分页：cursor 为十进制 offset 字符串（保持简单、可 clamp）。
+const v2CardsQuerySchema = z.object({
+  cursor: z.string().max(40).regex(/^\d+$/).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
 function context(req: { session: { workspaceId: string; userId: string } }): RunContext {
@@ -374,6 +381,21 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
 
   // ─── §17.6 Card 端点 ───────────────────────────────────────────────────
 
+  // GET /v2/cards — active V2 card 列表（§19.5，支持 limit/cursor 分页）
+  app.get("/v2/cards", async (req, reply) => {
+    reply.headers(NO_STORE);
+    try {
+      const query = v2CardsQuerySchema.parse(req.query);
+      const result = await listActiveCardsV2(context(req), {
+        limit: query.limit,
+        cursor: query.cursor,
+      });
+      return result;
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
   // GET /v2/cards/:cardId — Public Card（§15.1）
   app.get<{ Params: { cardId: string } }>("/v2/cards/:cardId", async (req, reply) => {
     reply.headers(NO_STORE);
@@ -477,12 +499,12 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
         return reply.code(400).send({ error: "invalid_id", message: "无效的 cardId 格式" });
       }
       const body = parseBody(app, z.strictObject({
-        noteVersionId: z.string().uuid(),
-        learningGoal: z.enum(["remember", "understand", "apply", "exam"]),
-        detailThreshold: z.enum(["concise", "balanced", "deep"]),
-        quantity: z.strictObject({ kind: z.literal("adaptive"), hardMaxCards: z.number().int().min(0).max(50).optional() }),
-        clientRequestId: z.string().min(1).max(200),
-      }), req.body);
+        noteVersionId: z.string().uuid().optional(),
+        learningGoal: z.enum(["remember", "understand", "apply", "exam"]).default("understand"),
+        detailThreshold: z.enum(["concise", "balanced", "deep"]).default("balanced"),
+        quantity: z.strictObject({ kind: z.literal("adaptive"), hardMaxCards: z.number().int().min(0).max(50).optional() }).default({ kind: "adaptive" }),
+        clientRequestId: z.string().min(1).max(200).default(`regenerate-${Date.now()}`),
+      }), req.body ?? {});
       const idempotencyKey = requireIdempotencyKey(req);
       try {
         const result = await createCardRegenerationRunV2(

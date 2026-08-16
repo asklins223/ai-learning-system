@@ -88,6 +88,15 @@ test("missing critical source and unavailable changed-line mapping fail closed",
   assert.equal(gates.thresholdsPassed, false);
 });
 
+test("unavailable changed-line mapping can be skipped for local/report-only runs", () => {
+  const gates = evaluateRepositoryGates(criticalFiles, { requireChangedLines: false });
+
+  assert.equal(gates.changedLines.status, "skipped");
+  assert.equal(gates.changedLines.passed, true);
+  assert.equal(gates.changedLines.coverage, null);
+  assert.equal(gates.thresholdsPassed, true);
+});
+
 test("a matched path with no executable lines cannot satisfy a threshold", () => {
   const gates = evaluateRepositoryGates([
     coveredFile("apps/api/src/modules/identity/types.ts", {

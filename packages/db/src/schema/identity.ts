@@ -60,24 +60,32 @@ export const workspaceMembers = pgTable(
   }),
 );
 
-export const inviteCodes = pgTable("invite_codes", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  code: text("code"),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  createdBy: uuid("created_by").notNull().references(() => users.id),
-  expiresAt: timestamp("expires_at", { withTimezone: true }),
-  consumedBy: uuid("consumed_by").references(() => users.id),
-  consumedAt: timestamp("consumed_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  // SEC-02 / ADR-0002: secure token storage
-  tokenHash: text("token_hash"),
-  tokenHint: text("token_hint"),
-  revokedAt: timestamp("revoked_at", { withTimezone: true }),
-  revokedBy: uuid("revoked_by").references(() => users.id),
-  role: text("role").notNull().default("member"),
-  // ADR-0009: 区分邀请码消费场景
-  consumeContext: text("consume_context").notNull().default("registration"), // registration | workspace_join
-});
+export const inviteCodes = pgTable(
+  "invite_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    code: text("code"),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by").notNull().references(() => users.id),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    consumedBy: uuid("consumed_by").references(() => users.id),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    // SEC-02 / ADR-0002: secure token storage
+    tokenHash: text("token_hash"),
+    tokenHint: text("token_hint"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id),
+    role: text("role").notNull().default("member"),
+    // ADR-0009: 区分邀请码消费场景
+    consumeContext: text("consume_context").notNull().default("registration"), // registration | workspace_join
+  },
+  (t) => ({
+    // 2026-08-12（schema 完整性审计）：0021:80-87 两索引此前未声明
+    tokenHashIdx: index("invite_codes_token_hash_idx").on(t.tokenHash),
+    workspaceCreatedIdx: index("invite_codes_workspace_created_idx").on(t.workspaceId, t.createdAt),
+  }),
+);
 
 /**
  * Server-side onboarding state per (workspace, user, version).

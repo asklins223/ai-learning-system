@@ -47,7 +47,7 @@ async function seedNote(content: string): Promise<string> {
     await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
       VALUES (${NOTE_ID}, ${WORKSPACE_ID}, 'de', ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, 1, ${JSON.stringify({ blocks: [{ type: "paragraph", content }] })}, 'de-hash', ${USER_ID})
+      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, 1, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'de-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${blockId}, ${versionId}, ${WORKSPACE_ID}, 'paragraph', ${content}, 1)

@@ -103,7 +103,6 @@ export async function cleanupStaleTempAudio(
   dir = "/tmp",
 ): Promise<number> {
   const { readdir, stat } = await import("node:fs/promises");
-  let removed = 0;
   let entries: string[];
   try {
     entries = await readdir(dir);
@@ -111,17 +110,20 @@ export async function cleanupStaleTempAudio(
     return 0; // 目录不存在——无残留可清
   }
   const now = Date.now();
-  for (const name of entries) {
-    if (!name.startsWith("companion-ffprobe-") || !name.endsWith(".bin")) continue;
+  const candidates = entries.filter((name) =>
+    name.startsWith("companion-ffprobe-") && name.endsWith(".bin"),
+  );
+  const results = await Promise.all(candidates.map(async (name) => {
     try {
       const st = await stat(`${dir}/${name}`);
       if (now - st.mtimeMs > maxAgeMs) {
         await rm(`${dir}/${name}`, { force: true });
-        removed += 1;
+        return 1;
       }
     } catch {
       // 单个文件 stat/删除失败不影响其余
     }
-  }
-  return removed;
+    return 0;
+  }));
+  return results.reduce<number>((sum, n) => sum + n, 0);
 }

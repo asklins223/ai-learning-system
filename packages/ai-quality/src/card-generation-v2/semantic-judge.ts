@@ -106,13 +106,16 @@ export function runDeterministicSemanticJudgeV2(input: {
 
   for (const c of candidates) {
     const normStmt = normalizeJudge(c.objectiveStatement);
+    // 预归一化一次 frontPrompt，避免在下面的 leakedNeedles.some(...) 里对
+    // 每个 needle 重复 normalizeJudge 扫描。
+    const normFrontPrompt = normalizeJudge(c.frontPrompt);
     let verdict: SemanticJudgeVerdictV2 = "worth_reviewing";
     let reason = "";
 
     if (normStmt.length > 0 && normSource.includes(normStmt)) {
       verdict = "surface_paraphrase_only";
       reason = "objectiveStatement 逐字复述来源（无教学转换）";
-    } else if (leakedNeedles.some((n) => n.length > 0 && normalizeJudge(c.frontPrompt).includes(n))) {
+    } else if (leakedNeedles.some((n) => n.length > 0 && normFrontPrompt.includes(n))) {
       verdict = "front_leaks_answer";
       reason = "正面 prompt 泄漏 gold 禁止内容";
     } else if ((c.frontCue ?? "").trim().length === 0 || c.frontPrompt.trim().length < 8) {

@@ -207,14 +207,34 @@ async function getCardEvidenceFromApi(
 }
 
 /**
- * P1-14: 收集所有卡片的实际证据指标。
- *
- * 从 API 查询每张卡片的证据对齐状态，返回实际的对齐计数和完整性指标。
- * 不再从 succeeded 推导。
+ * 有界并发池：以 `limit` 为上限并发执行 `fn`，并按原始顺序收集结果。
  */
-async function collectActualEvidenceMetrics(
+async function mapLimitCards<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) break;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * P1-14: 以有界并发拉取单张卡片的实际证据指标。
+ *
+ * 返回该卡片贡献的计数，无匹配时 unsupported 计数为 1。
+ */
+async function collectCardEvidenceMetrics(
   token: string,
-  cards: Array<{ cardId: string; title: string; summary: string }>,
+  card: { cardId: string; title: string; summary: string },
 ): Promise<{
   totalEvidence: number;
   alignedCount: number;
@@ -230,37 +250,74 @@ async function collectActualEvidenceMetrics(
   let autoVerifiedCount = 0;
   let unsupportedCount = 0;
 
-  // 单次遍历：同时收集 evidence 指标和 unsupported 卡片数
-  for (const card of cards) {
-    if (!card.cardId) continue;
-    const evidenceData = await getCardEvidenceFromApi(token, card.cardId);
-    if (!evidenceData?.keyPoints) {
-      unsupportedCount++;
-      continue;
-    }
+  if (!card.cardId) return { totalEvidence, alignedCount, unalignedCount, softCount, autoVerifiedCount, unsupportedCount };
+  const evidenceData = await getCardEvidenceFromApi(token, card.cardId);
+  if (!evidenceData?.keyPoints) {
+    unsupportedCount++;
+    return { totalEvidence, alignedCount, unalignedCount, softCount, autoVerifiedCount, unsupportedCount };
+  }
 
-    let cardHasAligned = false;
-    for (const kp of evidenceData.keyPoints) {
-      if (!kp.evidences) continue;
-      for (const ev of kp.evidences) {
-        totalEvidence++;
-        const alignment = ev.alignment ?? "unaligned";
-        if (alignment === "aligned") {
-          alignedCount++;
-          cardHasAligned = true;
-        } else if (alignment === "soft") {
-          softCount++;
-        } else {
-          unalignedCount++;
-        }
+  let cardHasAligned = false;
+  for (const kp of evidenceData.keyPoints) {
+    if (!kp.evidences) continue;
+    for (const ev of kp.evidences) {
+      totalEvidence++;
+      const alignment = ev.alignment ?? "unaligned";
+      if (alignment === "aligned") {
+        alignedCount++;
+        cardHasAligned = true;
+      } else if (alignment === "soft") {
+        softCount++;
+      } else {
+        unalignedCount++;
+      }
 
-        if (ev.alignmentMethod === "auto_verified") {
-          autoVerifiedCount++;
-        }
+      if (ev.alignmentMethod === "auto_verified") {
+        autoVerifiedCount++;
       }
     }
+  }
 
-    if (!cardHasAligned) unsupportedCount++;
+  if (!cardHasAligned) unsupportedCount++;
+
+  return { totalEvidence, alignedCount, unalignedCount, softCount, autoVerifiedCount, unsupportedCount };
+}
+
+/**
+ * P1-14: 收集所有卡片的实际证据指标。
+ *
+ * 从 API 查询每张卡片的证据对齐状态，返回实际的对齐计数和完整性指标。
+ * 不再从 succeeded 推导。HTTP 请求以有界并发执行，避免 N+1 串行等待。
+ */
+async function collectActualEvidenceMetrics(
+  token: string,
+  cards: Array<{ cardId: string; title: string; summary: string }>,
+): Promise<{
+  totalEvidence: number;
+  alignedCount: number;
+  unalignedCount: number;
+  softCount: number;
+  autoVerifiedCount: number;
+  unsupportedCount: number;
+}> {
+  const CONCURRENCY_LIMIT = 8;
+  const perCard = await mapLimitCards(cards, CONCURRENCY_LIMIT, (card) =>
+    collectCardEvidenceMetrics(token, card),
+  );
+
+  let totalEvidence = 0;
+  let alignedCount = 0;
+  let unalignedCount = 0;
+  let softCount = 0;
+  let autoVerifiedCount = 0;
+  let unsupportedCount = 0;
+  for (const c of perCard) {
+    totalEvidence += c.totalEvidence;
+    alignedCount += c.alignedCount;
+    unalignedCount += c.unalignedCount;
+    softCount += c.softCount;
+    autoVerifiedCount += c.autoVerifiedCount;
+    unsupportedCount += c.unsupportedCount;
   }
 
   return {
@@ -421,9 +478,11 @@ function computeCrossCardDuplicates(
 async function getCardGenerationRun(
   token: string,
   runId: string,
+  signal?: AbortSignal,
 ): Promise<CardGenRunView | null> {
   const res = await fetch(`${API_BASE_URL}/card-generation-runs/${runId}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal,
   });
   if (res.status === 404) return null;
   if (!res.ok) {
@@ -445,20 +504,53 @@ async function pollRunUntilTerminal(
   token: string,
   runId: string,
   timeoutMs = 300_000,
+  signal?: AbortSignal,
 ): Promise<CardGenRunView> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const run = await getCardGenerationRun(token, runId);
-    if (!run) throw new Error(`Run ${runId} not found`);
-
-    if (TERMINAL_STATUSES.has(run.status)) {
-      return run;
-    }
-
-    // Wait 3 seconds before polling again
-    await new Promise((r) => setTimeout(r, 3000));
+  // 单个 abort 监听在整轮轮询期间只注册一次，避免每个 3s 迭代都往共享的
+  // AbortSignal 上追加 listener（长运行会累积上百个监听）。监听器通过外层
+  // 可变引用唤醒当前等待并清理 timer；finally 里移除，跨调用也不泄漏。
+  let abortResolve: (() => void) | null = null;
+  let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+  const onAbort = () => {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = null;
+    abortResolve?.();
+    abortResolve = null;
+  };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
   }
-  throw new Error(`Run ${runId} timed out after ${timeoutMs / 1000}s`);
+
+  try {
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error(`Run ${runId} aborted`);
+      const run = await getCardGenerationRun(token, runId, signal);
+      if (!run) throw new Error(`Run ${runId} not found`);
+
+      if (TERMINAL_STATUSES.has(run.status)) {
+        return run;
+      }
+
+      // Wait 3 seconds before polling again (abort wakes the wait immediately).
+      await new Promise<void>((r) => {
+        if (signal?.aborted) {
+          r();
+          return;
+        }
+        abortResolve = r;
+        pendingTimer = setTimeout(() => {
+          pendingTimer = null;
+          abortResolve = null;
+          r();
+        }, 3000);
+      });
+    }
+    throw new Error(`Run ${runId} timed out after ${timeoutMs / 1000}s`);
+  } finally {
+    if (signal) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 // ─── SupervisorRunner 实现 ────────────────────────────────────────────────
@@ -505,8 +597,9 @@ class ApiSupervisorRunner implements SupervisorRunner {
         sample.density,
       );
 
-      // 3. Poll until terminal
-      const finalRun = await pollRunUntilTerminal(this.token, run.runId, 300_000);
+      // 3. Poll until terminal (threaded AbortSignal so a deadline/abort
+      //    actually cancels the long polling loop instead of orphaning it).
+      const finalRun = await pollRunUntilTerminal(this.token, run.runId, 300_000, signal);
 
       // 4. Check for cancellation
       if (signal?.aborted) throw new Error("aborted during polling");

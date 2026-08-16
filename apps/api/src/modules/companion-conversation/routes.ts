@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { requireSession } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
+import { safeSseWrite } from "../../lib/safe-sse-write.ts";
 import { getCompanionBootstrap } from "./bootstrap-service.ts";
 import { CompanionConversationError, createCompanionTurn, createCompanionConversation } from "./turn-service.ts";
 import { createCompanionContextGrantRequestV1Schema, createMenuProposalRequestV1Schema, createToolProposalRequestV1Schema, proposalDecisionRequestV1Schema } from "@ailearn/shared";
@@ -23,7 +24,7 @@ import {
   resolveCompanionLearningContext,
 } from "./learning-action-bridge.ts";
 import { createCompanionTurnRequestV1Schema } from "@ailearn/shared";
-import { exportCompanionData } from "./companion-export.ts";
+import { exportCompanionDataStream } from "./companion-export.ts";
 import {
   COMPANION_RATE_LIMITS,
   companionRateLimit,
@@ -406,7 +407,7 @@ export async function companionConversationRoutes(app: FastifyInstance) {
         lastEventId,
         writer: {
           write: (chunk) => {
-            if (!reply.raw.writableEnded) reply.raw.write(chunk);
+            safeSseWrite(reply.raw, chunk);
           },
           onAbort: (cb) => {
             req.raw.on("close", cb);
@@ -433,7 +434,7 @@ export async function companionConversationRoutes(app: FastifyInstance) {
         "Connection": "keep-alive",
       });
       // §5.3：retry 指令属于 SSE 事件流本身，不在 HTTP 头（规范要求）。
-      if (!reply.raw.writableEnded) reply.raw.write("retry: 1500\n\n");
+      safeSseWrite(reply.raw, "retry: 1500\n\n");
       result.stream.start();
       return reply;
     },
@@ -620,11 +621,34 @@ export async function companionExportRoutes(app: FastifyInstance) {
     { preHandler: [requireSession] },
     async (req, reply) => {
       if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:export`, COMPANION_RATE_LIMITS.exportPerHour.limit, COMPANION_RATE_LIMITS.exportPerHour.windowMs)) return;
-      const result = await exportCompanionData({
+      // PERF（round-5）：改为流式导出——每一行 NDJSON 产生后立即写出到 socket，
+      // 不再把整份输出（最多 6×50k 行）累积进内存数组。错误（如 active turn 409）
+      // 都发生在首行 manifest 写出之前，此时尚未 hijack/发响应头，可按原契约返回
+      // 错误 JSON。
+      let started = false;
+      const result = await exportCompanionDataStream({
         workspaceId: req.session.workspaceId,
         userId: req.session.userId,
+      }, (line) => {
+        if (!started) {
+          started = true;
+          reply.hijack();
+          reply.raw.writeHead(200, {
+            "Content-Type": "application/x-ndjson; charset=utf-8",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": 'attachment; filename="companion-export-v1.ndjson"',
+          });
+        }
+        // 流式写出失败即中止导出（safeSseWrite 返回 false）。
+        if (!safeSseWrite(reply.raw, `${line}\n`)) {
+          const err = new Error("companion export stream closed");
+          (err as Error & { code?: string }).code = "EXPORT_STREAM_CLOSED";
+          throw err;
+        }
       });
       if (!result.ok) {
+        // 错误只可能发生在首行写出前（active-turn 检查），此时未 hijack。
         return reply.code(result.statusCode).send({
           version: 1,
           error: result.code,
@@ -633,15 +657,15 @@ export async function companionExportRoutes(app: FastifyInstance) {
           requestId: req.id,
         });
       }
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        "Content-Type": "application/x-ndjson; charset=utf-8",
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": 'attachment; filename="companion-export-v1.ndjson"',
-      });
-      for (const line of result.ndjson) {
-        reply.raw.write(`${line}\n`);
+      if (!started) {
+        // 防御：极端情况下无任何行输出（manifest 恒为首行，正常不会走到）。
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Disposition": 'attachment; filename="companion-export-v1.ndjson"',
+        });
       }
       reply.raw.end();
       return reply;

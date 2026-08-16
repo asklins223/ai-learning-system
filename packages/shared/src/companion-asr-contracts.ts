@@ -43,6 +43,8 @@ export const asrProbeRequestV1Schema = z.object({
   version: z.literal(1),
   /** worker 消息分发键（asr-utility-worker switch message.type） */
   type: z.literal("probe"),
+  /** 请求 id：main 侧在 postMessage 前注入，用于把并发响应路由回正确的调用方 */
+  requestId: z.number().int().nonnegative().optional(),
   config: asrModelConfigV1Schema,
   /** 内置测试音频（3–5s 16kHz mono PCM，Float32Array；结构化克隆） */
   testAudio: z.custom<Float32Array>((v) => v instanceof Float32Array),
@@ -87,6 +89,8 @@ export const asrWorkerRecognizeRequestV1Schema = z.object({
   version: z.literal(1),
   /** worker 消息分发键（asr-utility-worker switch message.type） */
   type: z.literal("recognize"),
+  /** 请求 id：main 侧在 postMessage 前注入，用于把并发响应路由回正确的调用方 */
+  requestId: z.number().int().nonnegative().optional(),
   config: asrModelConfigV1Schema,
   pcm: z.custom<Float32Array>((v) => v instanceof Float32Array),
   sampleRate: z.number().int().min(8000).max(48000).default(16000),
