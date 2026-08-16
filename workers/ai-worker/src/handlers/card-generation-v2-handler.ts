@@ -211,15 +211,21 @@ export async function completeV2OutboxJob(jobId: string, leaseToken: string): Pr
  * Mark outbox job as failed and increment attempts（status + lease 门闩）。
  *
  * §17.1 重试分类：
- * - retryable（provider/网络 5xx/429/408/超时）→ 保留 pending，attempts < 3 重试；
+ * - retryable（provider/网络 5xx/429/408/超时）→ 保留 pending，attempts < 6 重试；
  * - non-retryable（schema/协议错误）→ 直接 failed。
  * 门闩条件与 complete 相同：仅当 lease_token 匹配且仍 processing 时生效。
+ *
+ * 2026-08-16（实机验证修复）：outbox 终态 failed 时同步把 run 置为
+ * `needs_attention` 并写 error（此前 run 永远卡 planning，用户端只见
+ * "生成中"永不结束）。retryable 重试中不动 run（仍 planning/processing）。
  */
 export async function failV2OutboxJob(
   jobId: string,
   leaseToken: string,
   error: string,
   retryable = true,
+  runId?: string | null,
+  workspaceId?: string | null,
 ): Promise<void> {
   if (!retryable) {
     await db.execute(sql`
@@ -228,12 +234,22 @@ export async function failV2OutboxJob(
           started_at = NULL, lease_token = NULL, lease_expires_at = NULL
       WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
     `);
+    if (runId && workspaceId) {
+      await db.execute(sql`
+        UPDATE public.card_generation_runs_v2
+        SET status = 'needs_attention', error_code = 'generation_failed', error_message = ${error},
+            updated_at = now()
+        WHERE id = ${runId} AND workspace_id = ${workspaceId}
+          AND status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
+                             'closed_without_activation', 'failed', 'cancelled', 'stale')
+      `);
+    }
     return;
   }
   await db.execute(sql`
     UPDATE public.card_generation_run_outbox_v2
     SET status = CASE
-      WHEN attempts >= 3 THEN 'failed'
+      WHEN attempts >= 6 THEN 'failed'
       ELSE 'pending'
     END,
     attempts = attempts + 1,
@@ -241,6 +257,27 @@ export async function failV2OutboxJob(
     started_at = NULL, lease_token = NULL, lease_expires_at = NULL
     WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
   `);
+  if (runId && workspaceId) {
+    await db.execute(sql`
+      UPDATE public.card_generation_runs_v2
+      SET status = CASE
+        WHEN attempts + 1 >= 6 THEN 'needs_attention'
+        ELSE status
+      END,
+      error_code = CASE
+        WHEN attempts + 1 >= 6 THEN 'generation_failed'
+        ELSE error_code
+      END,
+      error_message = CASE
+        WHEN attempts + 1 >= 6 THEN ${error}
+        ELSE error_message
+      END,
+      updated_at = now()
+      WHERE id = ${runId} AND workspace_id = ${workspaceId}
+        AND status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
+                           'closed_without_activation', 'failed', 'cancelled', 'stale')
+    `);
+  }
 }
 
 /**
@@ -266,7 +303,7 @@ export async function reapStaleV2OutboxJobs(limit = 100): Promise<number> {
   const rows = await db.execute(sql`
     UPDATE public.card_generation_run_outbox_v2
     SET status = CASE
-        WHEN attempts + 1 >= 3 THEN 'failed'
+        WHEN attempts + 1 >= 6 THEN 'failed'
         ELSE 'pending'
       END,
         attempts = attempts + 1,
@@ -373,7 +410,7 @@ export async function processV2OutboxJob(job: PendingOutboxJob): Promise<void> {
       console.error("V2_JOB_DEBUG", job.jobType, job.runId, (error as Error)?.stack ?? String(error));
     }
     logger.error({ jobId: job.id, runId: job.runId, error: message, retryable }, "V2 outbox job failed");
-    await failV2OutboxJob(job.id, job.leaseToken, message, retryable);
+    await failV2OutboxJob(job.id, job.leaseToken, message, retryable, job.runId, job.workspaceId);
   }
 }
 
@@ -756,6 +793,15 @@ const existingObjRows = (await tx.execute(sql`
 
     // 6. Persist plan
     const plan = plannerResult.plan;
+    // 2026-08-16（实机验证，溯源日志）：planner 阶段结果摘要。
+    logger.info({
+      runId,
+      stage: "planner",
+      resultKind: plan.result.kind,
+      objectiveCount: plan.result.kind === "author_candidates" ? plan.result.objectives.length : 0,
+      atomDecisions: plan.atomDecisions.length,
+      planHash: plan.planHash,
+    }, "[v2-pipeline] planner completed");
     await tx.execute(sql`
       INSERT INTO public.card_generation_plans_v2
         (id, workspace_id, run_id, plan_revision_id, plan_version, previous_plan_revision_id,
@@ -818,6 +864,13 @@ const existingObjRows = (await tx.execute(sql`
       SET status = 'authoring', updated_at = now()
       WHERE id = ${runId} AND workspace_id = ${workspaceId}
     `);
+    // 2026-08-16（实机验证，溯源日志）：author 阶段结果摘要。
+    logger.info({
+      runId,
+      stage: "author",
+      candidateCount: authorResult.candidates.length,
+      candidateIds: authorResult.candidates.map((c) => c.candidateId),
+    }, "[v2-pipeline] author completed");
 
     // 10. Persist candidates + set evidenceSetHash（基于 sealed manifest）
     const candidates = authorResult.candidates.map((c) => ({
@@ -1010,6 +1063,15 @@ async function critiqueAndFinalizeCandidates(
       }
 
       qualityReports.push(qualityReport);
+      // 2026-08-16（实机验证，溯源日志）：每候选 grounding 结果。
+      logger.info({
+        runId,
+        stage: "grounding",
+        candidateId: candidate.candidateId,
+        verdict: qualityReport.verdict,
+        bindingPlanHash: bindingPlanHash ?? null,
+        issues: qualityReport.issues.slice(0, 10).map((i) => ({ code: i.code, detail: String(i.detail).slice(0, 200) })),
+      }, "[v2-pipeline] grounding per-candidate result");
       const groundingPassed = qualityReport.verdict === "passed" && bindingPlanHash !== null;
       if (groundingPassed && bindingPlanHash) bindingPlanHashesByRevision[candidate.candidateRevisionId] = bindingPlanHash;
 
@@ -1040,7 +1102,7 @@ async function critiqueAndFinalizeCandidates(
         SET quality_state = v.new_quality_state, updated_at = now(),
             evidence_binding_plan_hash = v.binding_plan_hash
         FROM (VALUES
-          ${sql.join(candidateStatusUpdates.map((u) => sql`(${u.candidateRevisionId}, ${u.newQualityState}, ${u.bindingPlanHash})`), sql`, `)}
+          ${sql.join(candidateStatusUpdates.map((u) => sql`(${u.candidateRevisionId}::uuid, ${u.newQualityState}, ${u.bindingPlanHash})`), sql`, `)}
         ) AS v(candidate_revision_id, new_quality_state, binding_plan_hash)
         WHERE c.candidate_revision_id = v.candidate_revision_id
           AND c.workspace_id = ${workspaceId}
@@ -1068,6 +1130,19 @@ async function critiqueAndFinalizeCandidates(
         )
       : null;
 
+    // 2026-08-16（实机验证，溯源日志）：pedagogy 集合级结果。
+    if (pedagogyReport) {
+      logger.info({
+        runId,
+        stage: "pedagogy",
+        verdict: pedagogyReport.verdict,
+        perCandidate: pedagogyReport.perCandidate.map((p) => `${p.candidateId}:${p.verdict}`),
+        readyCandidateCount: readyCandidates.length,
+      }, "[v2-pipeline] pedagogy completed");
+    } else {
+      logger.info({ runId, stage: "pedagogy", readyCandidateCount: readyCandidates.length }, "[v2-pipeline] pedagogy skipped (no ready candidates)");
+    }
+
     // 13.1 依据 pedagogy 结论过滤候选
     let afterRepair = readyCandidates;
     let repaired = false;
@@ -1089,8 +1164,14 @@ async function critiqueAndFinalizeCandidates(
           }
         }
         if (repairedRevisions.length > 0) {
-          // 新 revision 已过作者；此处让其在集合中（重跑 gate 用）
-          afterRepair = [...afterRepair.filter((c) => !rewriteSet.has(c.candidateId)), ...repairedRevisions];
+          // 2026-08-16（实机验证修复）：repair 的新 revision **不进入** deck
+          // gate 名单——它没有重新跑 grounding/pedagogy（报告仍绑定旧
+          // revision），混入必然触发 candidate_revision_mismatch 导致整个
+          // run 无法 review_ready（deepseek-v4-flash 实测：1 个 rewrite 候选
+          // repair 后 deck gate failed → run needs_attention）。新 revision
+          // 保持 authored 状态，由候选审核页的 recheck 流程重新走质量门禁。
+          // keep 候选照常 review_ready。
+          afterRepair = afterRepair.filter((c) => !rewriteSet.has(c.candidateId));
         }
       }
       afterRepair = afterRepair.filter((c) => keepSet.has(c.candidateId) || rewriteSet.has(c.candidateId));

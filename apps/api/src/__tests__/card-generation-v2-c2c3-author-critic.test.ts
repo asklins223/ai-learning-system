@@ -205,8 +205,10 @@ describe("C3: Grounding Critic Precheck", () => {
       },
     });
     const issues = deterministicGroundingPrecheck(candidate, "分布式共识是指多个节点对某个值达成一致的协议。");
-    const hardIssues = issues.filter((i) => i.severity === "hard");
-    assert.ok(hardIssues.length > 0, "should detect ungrounded answer");
+    // 2026-08-16：按方案 20 §13.1「字符重合只能作为风险信号」，重叠检查降级
+    // 为 soft——断言改为软信号而非 hard gate。
+    const softIssues = issues.filter((i) => i.severity === "soft" && i.code === "answer_not_grounded");
+    assert.ok(softIssues.length > 0, "should flag ungrounded answer as soft risk");
   });
 
   test("passes for grounded answer", () => {

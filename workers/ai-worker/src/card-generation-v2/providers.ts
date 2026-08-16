@@ -14,6 +14,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { logger } from "../lib/logger.ts";
 import { createProvider, resolveProviderSelection, type AIProvider, type AIProviderRuntimeConfig } from "../lib/ai-provider.ts";
 import { extractJsonFromText } from "../lib/providers/json-response.ts";
 import type { ChatMessage, ChatOptions } from "@ailearn/shared";
@@ -22,7 +23,7 @@ import type {
   GenerationStageRuntimeSnapshotV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import { z } from "zod";
-import { cardPresentationDraftV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardPresentationDraftV2Schema, canonicalAnswerV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
 import type {
   ExtractedKnowledgeAtom,
   AtomExtractionProvider,
@@ -76,7 +77,13 @@ export class CardGenerationProviderError extends Error {
 
 export function parseError(stage: string, err: unknown): CardGenerationProviderError {
   const detail = err instanceof Error ? err.message : String(err);
-  return new CardGenerationProviderError("non-retryable", `${stage} failed zod strict parse: ${detail}`);
+  // 2026-08-16（实机验证修复）：LLM 输出 schema 违规改为 **retryable**。
+  // 模型对复杂嵌套 JSON（author/grounding 全量输出）的完整性是随机的——
+  // 一次不完整不代表下次不完整；此前 non-retryable 直接 failed 使真实 LLM
+  // 管线（deepseek-v4-flash）在偶发输出缺字段时永久失败。重试（outbox
+  // attempts < 6）能显著提高成功率；prompt 已明确"只输出 JSON"且 schema
+  // 校验仍在（fail-closed 语义不变：重试耗尽后仍 failed，绝不带病发布）。
+  return new CardGenerationProviderError("retryable", `${stage} failed zod strict parse: ${detail}`);
 }
 
 export function classifyProviderError(stage: string, err: unknown): CardGenerationProviderError {
@@ -154,23 +161,66 @@ export class CardGenerationProviderRuntime {
       { role: "user", content: user },
     ];
     const s = this.sampling(stage);
-    const options: ChatOptions = { temperature: s.temperature, model: s.model, responseFormat: "json_object" };
+    const options: ChatOptions = {
+      temperature: s.temperature,
+      model: s.model,
+      responseFormat: "json_object",
+      // 2026-08-16（实机验证修复）：V2 生成是结构化 JSON 任务（planner/author/
+      // grounding/pedagogy 都要求严格 JSON 输出），显式关闭 thinking——部分
+      // thinking 模型（deepseek-v4-flash）长 reasoning 导致 75s 单调用超时或
+      // content 偶发为空；关 thinking 后输出更快更稳（prompt 已明确"只输出 JSON"）。
+      disableThinking: true,
+    };
     // 组合外部 signal 与单调用超时：任一触发即真中止底层 HTTP 调用。
     const timeoutSignal = AbortSignal.timeout(resolveV2ProviderCallTimeoutMs());
     const effectiveSignal = signal
       ? AbortSignal.any([signal, timeoutSignal])
       : timeoutSignal;
+    // 2026-08-16（实机验证，溯源日志）：每个阶段 LLM 调用记录——阶段名、
+    // prompt 规模、调用耗时、返回内容长度与摘要，失败时打印原始输出片段，
+    // 不再黑盒排查。
+    const startedAt = Date.now();
+    logger.info({
+      stage,
+      model: s.model,
+      systemLen: system.length,
+      userLen: user.length,
+      provider: this.provider.id,
+    }, "[v2-llm] chatJson start");
     try {
       const result = await this.provider.chatCompletion(messages, options, effectiveSignal);
+      const elapsedMs = Date.now() - startedAt;
+      logger.info({
+        stage,
+        elapsedMs,
+        contentLen: result.content.length,
+        contentHead: result.content.slice(0, 200),
+      }, "[v2-llm] chatJson response");
       const parsed = extractJsonFromText(result.content);
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        logger.warn({
+          stage,
+          elapsedMs,
+          contentHead: result.content.slice(0, 500),
+        }, "[v2-llm] chatJson result is not a JSON object");
         throw new CardGenerationProviderError(
           "non-retryable",
           `${stage}: provider result is not a JSON object: ${result.content.slice(0, 200)}`,
         );
       }
+      logger.info({
+        stage,
+        elapsedMs,
+        topKeys: Object.keys(parsed as Record<string, unknown>).slice(0, 10),
+      }, "[v2-llm] chatJson parsed ok");
       return parsed as Record<string, unknown>;
     } catch (err) {
+      const elapsedMs = Date.now() - startedAt;
+      logger.warn({
+        stage,
+        elapsedMs,
+        err: err instanceof Error ? err.message : String(err),
+      }, "[v2-llm] chatJson failed");
       throw classifyProviderError(stage, err);
     }
   }
@@ -226,10 +276,13 @@ export class PlannerAtomExtractionProvider implements AtomExtractionProvider {
         knowledgeFormHint: toKnowledgeForm(entry.knowledgeFormHint),
       });
     });
-    // fail-closed：模型未产出任何原子 → 协议错误（non-retryable），不是 0 卡。
+    // fail-closed：模型未产出任何原子 → 协议错误（retryable：可能是模型输出
+    // 质量问题，重试可能产出原子；重试耗尽仍 failed，不是 0 卡）。
     if (atoms.length === 0) {
-      throw new CardGenerationProviderError("non-retryable", "planner returned no atoms (protocol error, not no_cards)");
+      logger.warn({ stage: "planner", rawHead: JSON.stringify(raw).slice(0, 800) }, "[v2-planner] no atoms extracted");
+      throw new CardGenerationProviderError("retryable", "planner returned no atoms (protocol error, not no_cards)");
     }
+    logger.info({ stage: "planner", atomCount: atoms.length }, "[v2-planner] atoms extracted");
     return atoms;
   }
 }
@@ -250,11 +303,11 @@ const modelObjectiveDraftSchema = z
       "procedure", "causal_model", "boundary", "application_rule",
     ]),
     preferredTaskIntents: z.array(z.enum(["recall", "explain", "apply", "compare", "generate"])).min(1).max(6),
-    canonicalAnswer: z
-      .strictObject({
-        kind: z.literal("text"),
-        unit: z.strictObject({ unitId: z.string().min(1).max(160), text: z.string().min(1).max(8000) }),
-      }),
+    // 2026-08-16（实机验证修复）：改用正式 canonicalAnswerV2Schema（7 种形态：
+    // text 单对象 / bullets / ordered_steps / mapping / comparison / formula / code）。
+    // 此前只接受 kind:"text"+unit 单对象——模型输出多 answer unit（数组）时被拒，
+    // author 阶段反复 schema violation（deepseek-v4-flash 实测连续 4+ 次失败）。
+    canonicalAnswer: canonicalAnswerV2Schema,
     learningSupport: z.strictObject({
       // R30：允许空串——模型按 prompt 对无证据支持字段输出 ""（不编造）
       explanation: z.string().max(6000),
@@ -335,18 +388,41 @@ export class CardAuthoringProvider implements AuthoringProvider {
     const objParse = modelObjectiveDraftSchema.safeParse(strippedObjective);
     if (!objParse.success) {
       const paths = objParse.error.issues.map((i) => i.path.join(".")).join(",");
+      // 2026-08-16（实机验证，溯源日志）：schema 违规始终记录完整 issues 与
+      // 原始输出摘要，不依赖 V2_E2E_DEBUG_ERRORS（排查黑盒）。
+      logger.warn({
+        stage: "author",
+        issues: objParse.error.issues.slice(0, 20).map((i) => ({
+          path: i.path.join("."),
+          code: i.code,
+          message: i.message,
+        })),
+        rawHead: JSON.stringify(rawObjective).slice(0, 1200),
+      }, "[v2-author] objective schema violation");
       if (process.env.V2_E2E_DEBUG_ERRORS === "1") {
         // eslint-disable-next-line no-console
         console.error("AUTHOR_RAW_OUTPUT", JSON.stringify(rawObjective).slice(0, 1200));
         // eslint-disable-next-line no-console
         console.error("AUTHOR_PARSE_ISSUES", JSON.stringify(objParse.error.issues).slice(0, 1200));
       }
-      throw new CardGenerationProviderError("non-retryable", `author output objective schema violation: ${paths}`);
+      // 2026-08-16（实机验证修复）：LLM 输出 schema 违规是随机质量问题（同一
+      // prompt 下一次可能完整），改 retryable 让 outbox 重试（attempts < 6），
+      // 重试耗尽仍 failed（fail-closed 不变）。此前 non-retryable 一次失败即死。
+      throw new CardGenerationProviderError("retryable", `author output objective schema violation: ${paths}`);
     }
     const presParse = cardPresentationDraftV2Schema.safeParse(presentation);
     if (!presParse.success) {
       const paths = presParse.error.issues.map((i) => i.path.join(".")).join(",");
-      throw new CardGenerationProviderError("non-retryable", `author output presentation schema violation: ${paths}`);
+      logger.warn({
+        stage: "author",
+        issues: presParse.error.issues.slice(0, 20).map((i) => ({
+          path: i.path.join("."),
+          code: i.code,
+          message: i.message,
+        })),
+        rawHead: JSON.stringify(presentation).slice(0, 1200),
+      }, "[v2-author] presentation schema violation");
+      throw new CardGenerationProviderError("retryable", `author output presentation schema violation: ${paths}`);
     }
     const validated = objParse.data;
     // 归一化：保留模型引用的 evidenceRefIds（未引用处补 []，no_evidence_reference
@@ -487,10 +563,28 @@ function finalizeGroundingReport(raw: Record<string, unknown>): GroundingCriticR
   try {
     parsed = parseGroundingCriticReportV2(parseTarget);
   } catch (err) {
+    // 2026-08-16（实机验证，溯源日志）：记录原始输出与 issues，便于定位
+    // 模型输出结构问题（此前黑盒）。
+    const issues = (err as { issues?: unknown }).issues;
+    logger.warn({
+      stage: "grounding",
+      issues: Array.isArray(issues)
+        ? (issues as Array<{ path?: unknown; message?: unknown }>).slice(0, 20).map((i) => ({ path: String(i.path), message: i.message }))
+        : undefined,
+      rawHead: JSON.stringify(raw).slice(0, 1200),
+    }, "[v2-grounding] report parse failed");
     throw parseError("grounding", err);
   }
   const { reportHash: _drop, ...withoutHash } = parsed;
   const computed = computeGroundingReportHash(withoutHash);
+  logger.info({
+    stage: "grounding",
+    verdict: parsed.verdict,
+    answerUnits: parsed.answerUnits.length,
+    learningSupport: parsed.learningSupport.length,
+    relations: parsed.relationSupport.length,
+    hardIssues: parsed.hardIssues.length,
+  }, "[v2-grounding] report parsed");
   return { ...parsed, reportHash: computed };
 }
 
@@ -502,10 +596,24 @@ function finalizePedagogyReport(raw: Record<string, unknown>): PedagogyCriticRep
   try {
     parsed = parsePedagogyCriticReportV2(parseTarget);
   } catch (err) {
+    const issues = (err as { issues?: unknown }).issues;
+    logger.warn({
+      stage: "pedagogy",
+      issues: Array.isArray(issues)
+        ? (issues as Array<{ path?: unknown; message?: unknown }>).slice(0, 20).map((i) => ({ path: String(i.path), message: i.message }))
+        : undefined,
+      rawHead: JSON.stringify(raw).slice(0, 1200),
+    }, "[v2-pedagogy] report parse failed");
     throw parseError("pedagogy", err);
   }
   const { reportHash: _, ...withoutHash } = parsed;
   const computed = computePedagogyReportHash(withoutHash);
+  logger.info({
+    stage: "pedagogy",
+    verdict: parsed.verdict,
+    perCandidate: (parsed as unknown as { perCandidate?: Array<{ candidateId: string; verdict: string }> }).perCandidate?.map((p) => `${p.candidateId}:${p.verdict}`),
+    recommendedFinalCount: parsed.recommendedFinalCount,
+  }, "[v2-pedagogy] report parsed");
   return { ...parsed, reportHash: computed };
 }
 

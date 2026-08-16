@@ -64,18 +64,22 @@ export function runCandidateDeterministicGatesV2(
 
 /**
  * §13.1 objective atomicity：只允许一个稳定 Objective；不得用"以及/分别/同时/
- * 和"把多个独立目标拼接进 statement 或 prompt。
+ * 和"把多个独立目标拼接进 statement。
+ *
+ * 2026-08-16（实机验证修复）：只检查 objectiveStatement——front.prompt 是问题
+ * 措辞，"请分别写出 F、m、a 的单位"是正常列举指令，不是目标拼接；把 prompt
+ * 纳入检查会误杀合法候选（deepseek-v4-flash 实测 3/4 候选因 prompt 的"分别/
+ * 以及"被拒，尽管 statement 是原子的）。
  */
 export function objectiveAtomicityGate(
   candidate: LearningCardCandidateRevisionV2,
 ): QualityIssue[] {
   const issues: QualityIssue[] = [];
   const statement = candidate.objective.objectiveStatement || "";
-  const text = `${statement} ${candidate.presentation.front.prompt || ""}`;
 
-  if (text.includes("以及") || text.includes("分别") || text.includes("同时")) {
+  if (statement.includes("以及") || statement.includes("分别") || statement.includes("同时")) {
     // "X 以及 Y" / "X 分别 Y" / "X 同时 Y" —— 拼接多个独立目标的风险信号。
-    if (/(以及|同时)[^。；;]{4,}/.test(text) || /分别/.test(text)) {
+    if (/(以及|同时)[^。；;]{4,}/.test(statement) || /分别/.test(statement)) {
       issues.push({
         code: "objective_not_atomic",
         severity: "hard",

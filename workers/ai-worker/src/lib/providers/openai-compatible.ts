@@ -444,31 +444,48 @@ export class OpenAICompatibleProvider implements AIProvider {
       Authorization: `Bearer ${this.apiKey}`,
       ...this.extraHeaders,
     };
-    const response = await this.request(
-      this.endpoint,
-      headers,
-      body,
-      signal,
-    );
-    // R1: Post-response abort check (matching DashScope's behavior)
-    if (signal?.aborted) throw abortError(signal, "after response");
-    if (response.status < 200 || response.status >= 300) {
-      throw new ProviderRequestError({
-        provider: this.id,
-        status: response.status,
-        providerCode: readProviderCode(response.body),
-      });
+    // 2026-08-16（实机验证）：thinking 模式（enable_thinking: true）下部分
+    // provider（如 tokenrhythm deepseek-v4-flash）偶发返回空 content（内容
+    // 全部落入 reasoning_content 或输出被截断）。空输出重试同一请求（最多
+    // 3 次总尝试），外层 AbortSignal（75s 单调用预算）仍会中止悬挂调用，
+    // 不改变超时语义。每次尝试都是独立 HTTP 请求（幂等：chat completion
+    // 无副作用）。
+    const MAX_EMPTY_OUTPUT_ATTEMPTS = 3;
+    let content: string | null = null;
+    let usage: ProviderUsage | null = null;
+    for (let attempt = 1; attempt <= MAX_EMPTY_OUTPUT_ATTEMPTS; attempt++) {
+      if (signal?.aborted) throw abortError(signal, "before request");
+      const response = await this.request(
+        this.endpoint,
+        headers,
+        body,
+        signal,
+      );
+      // R1: Post-response abort check (matching DashScope's behavior)
+      if (signal?.aborted) throw abortError(signal, "after response");
+      if (response.status < 200 || response.status >= 300) {
+        throw new ProviderRequestError({
+          provider: this.id,
+          status: response.status,
+          providerCode: readProviderCode(response.body),
+        });
+      }
+      // R1: Post-body-read abort check
+      if (signal?.aborted) throw abortError(signal, "after body read");
+      const candidate = readChatCompletionContent(response.body);
+      if (typeof candidate === "string" && candidate.trim()) {
+        content = candidate;
+        // v0.6: Extract usage from API response (计划 §6.6, §10.5)
+        usage = readUsage(response.body);
+        break;
+      }
+      if (attempt < MAX_EMPTY_OUTPUT_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+      }
     }
-    // R1: Post-body-read abort check
-    if (signal?.aborted) throw abortError(signal, "after body read");
-    const content = readChatCompletionContent(response.body);
-    if (typeof content !== "string" || !content.trim()) {
+    if (content === null) {
       throw new Error(`${this.id} returned empty output (${model})`);
     }
-
-    // v0.6: Extract usage from API response (计划 §6.6, §10.5)
-    const usage = readUsage(response.body);
-
     return { content, usage };
   }
 

@@ -146,7 +146,11 @@ export function deterministicGroundingPrecheck(
       if (overlapCount / answerWords.size < 0.2) {
         issues.push({
           code: "answer_not_grounded",
-          severity: "hard",
+          // 2026-08-16（实机验证修复）：按方案 20 §13.1「字符重合只能作为风险
+          // 信号，不能作为教学转换是否发生的充分条件」，重叠检查从 hard 降级
+          // 为 soft——真实 LLM 的教学转换（尤其中文改写）与原文词/字重叠天然
+          // 偏低，hard 会误杀合法候选（deepseek-v4-flash 实测 100% 被拒）。
+          severity: "soft",
           detail: "Canonical answer has <20% word overlap with source content",
         });
       }
@@ -165,7 +169,8 @@ export function deterministicGroundingPrecheck(
         if (charOverlap / answerChars.size < 0.15) {
           issues.push({
             code: "answer_not_grounded",
-            severity: "hard",
+            // 2026-08-16：同词级检查，按 §13.1 降级为 soft 风险信号。
+            severity: "soft",
             detail: "Canonical answer has <15% character overlap with source content",
           });
         }
