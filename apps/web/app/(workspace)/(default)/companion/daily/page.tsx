@@ -57,7 +57,7 @@ export default function CompanionDailyPage() {
       <header className="companion-daily-head">
         <span className="companion-daily-eyebrow">COMPANION DAILY</span>
         <h1>桌宠日记</h1>
-        <p>桌宠每天凌晨 1 点把昨天的学习和对话整理成一篇笔记；本页只读。</p>
+        <p>每天醒来，桌宠都会把昨天你学过的、聊过的整理成一篇小日记，帮你轻松回顾。</p>
       </header>
 
       {error && (
@@ -71,13 +71,13 @@ export default function CompanionDailyPage() {
         <section className="companion-daily-loading" role="status">正在读取…</section>
       ) : data?.status === "not_generated" ? (
         <section className="companion-daily-empty" role="status">
-          <strong>桌宠还在等凌晨 1 点写日记</strong>
-          <p>如果今天有学习或对话活动，明天凌晨会自动生成。</p>
+          <strong>桌宠还在悄悄整理</strong>
+          <p>昨天学过的、聊过的内容，明天一早就会变成一篇小日记。</p>
         </section>
       ) : data?.status === "failed" ? (
         <section className="companion-daily-failed" role="status">
-          <strong>昨晚生成失败</strong>
-          <p>系统稍后会自动重试，无需手动操作。</p>
+          <strong>这篇日记暂时没写好</strong>
+          <p>别担心，桌宠稍后会再试一次。</p>
         </section>
       ) : data?.status === "generated" ? (
         <article className="companion-daily-card">
