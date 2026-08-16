@@ -31,7 +31,7 @@ export const companionConversationV1Schema = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
   userId: z.string().uuid(),
-  kind: z.enum(["dialogue", "inbox"]),
+  kind: z.enum(["dialogue", "inbox", "journey"]),
   title: z.string().min(1).max(120),
   titleSource: z.enum(["placeholder", "auto", "user", "system"]),
   status: z.enum(["active", "archived"]),

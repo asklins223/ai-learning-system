@@ -34,7 +34,8 @@ COPY apps/web/lib ./lib
 # 2026-08-11：middleware.ts 根级鉴权文件（base 与 prod 段都需包含）
 COPY apps/web/middleware.ts ./middleware.ts
 RUN mkdir -p node_modules/@ailearn \
- && ln -sf /tmp/shared node_modules/@ailearn/shared
+ && rm -rf node_modules/@ailearn/shared \
+ && ln -s /tmp/shared node_modules/@ailearn/shared
 EXPOSE 3000
 CMD ["npm", "run", "dev"]
 
@@ -79,7 +80,8 @@ COPY apps/web/lib ./lib
 # 2026-08-11：middleware.ts 根级鉴权文件（base 与 prod 段都需包含）
 COPY apps/web/middleware.ts ./middleware.ts
 RUN mkdir -p node_modules/@ailearn \
- && ln -sf /tmp/shared node_modules/@ailearn/shared \
+ && rm -rf node_modules/@ailearn/shared \
+ && ln -s /tmp/shared node_modules/@ailearn/shared \
  && npm run build \
  # 2026-08-12（构建面审计 P2-1）：镜像瘦身——next build 后裁剪 devDeps
  # （typescript/eslint/tailwind/@playwright/test 等运行时不需要的包），

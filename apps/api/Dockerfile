@@ -31,7 +31,8 @@ COPY apps/api/tsconfig.json ./tsconfig.json
 COPY apps/api/drizzle.config.ts ./drizzle.config.ts
 COPY apps/api/src ./src
 RUN mkdir -p node_modules/@ailearn \
- && ln -sf /tmp/shared node_modules/@ailearn/shared
+ && rm -rf node_modules/@ailearn/shared \
+ && ln -s /tmp/shared node_modules/@ailearn/shared
 EXPOSE 4000
 CMD ["npm", "run", "dev"]
 
@@ -46,7 +47,8 @@ COPY apps/api/tsconfig.json ./tsconfig.json
 COPY apps/api/drizzle.config.ts ./drizzle.config.ts
 COPY apps/api/src ./src
 RUN mkdir -p node_modules/@ailearn \
- && ln -sf /tmp/shared node_modules/@ailearn/shared \
+ && rm -rf node_modules/@ailearn/shared \
+ && ln -s /tmp/shared node_modules/@ailearn/shared \
  && npm run typecheck \
  && npm run build
 # F-027: 以非 root 用户运行
