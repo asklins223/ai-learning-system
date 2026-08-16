@@ -1,12 +1,12 @@
 "use client";
 
 /**
- * 桌宠日记只读页（22-real-desktop-pet-memory-context-prd-tdd.md §15.2）。
+ * 桌宠日记 — 桌宠手写小笔记风格。
  * 只读展示；不提供手动生成/重新生成入口。
  */
 
 import { useCallback, useEffect, useState } from "react";
-import "../conversations/conversation-page.css";
+import "./daily-note.css";
 import { api } from "@/lib/api";
 
 interface DailySummary {
@@ -52,62 +52,96 @@ export default function CompanionDailyPage() {
     reload();
   }, [reload]);
 
+  const facts = data?.status === "generated" ? Object.entries(data.facts).filter(([, value]) => Number(value) > 0) : [];
+  const highlights = data?.status === "generated" ? data.conversationHighlights : [];
+
   return (
-    <main className="companion-daily-page">
-      <header className="companion-daily-head">
-        <span className="companion-daily-eyebrow">COMPANION DAILY</span>
-        <h1>桌宠日记</h1>
-        <p>每天醒来，桌宠都会把昨天你学过的、聊过的整理成一篇小日记，帮你轻松回顾。</p>
-      </header>
+    <main className="pet-note-page">
+      <div className="pet-note">
+        <div className="pet-note-tape" aria-hidden="true" />
 
-      {error && (
-        <section className="companion-daily-error" role="alert">
-          {error}
-          <button type="button" onClick={reload}>重新加载</button>
-        </section>
-      )}
+        {error && (
+          <section className="pet-note-state" role="alert">
+            <span className="pet-note-emoji" aria-hidden="true">😿</span>
+            <strong>这篇笔记暂时没打开</strong>
+            <p>{error}</p>
+            <button type="button" onClick={reload}>再试一次</button>
+          </section>
+        )}
 
-      {!data && !error ? (
-        <section className="companion-daily-loading" role="status">正在读取…</section>
-      ) : data?.status === "not_generated" ? (
-        <section className="companion-daily-empty" role="status">
-          <strong>桌宠还在悄悄整理</strong>
-          <p>昨天学过的、聊过的内容，明天一早就会变成一篇小日记。</p>
-        </section>
-      ) : data?.status === "failed" ? (
-        <section className="companion-daily-failed" role="status">
-          <strong>这篇日记暂时没写好</strong>
-          <p>别担心，桌宠稍后会再试一次。</p>
-        </section>
-      ) : data?.status === "generated" ? (
-        <article className="companion-daily-card">
-          <p className="companion-daily-date">{data.date}</p>
-          <p className="companion-daily-summary">{data.summary}</p>
-          {Object.keys(data.facts).length > 0 && (
-            <dl className="companion-daily-facts">
-              {Object.entries(data.facts).map(([key, value]) => (
-                <div key={key}>
-                  <dt>{FACT_LABELS[key] ?? key}</dt>
-                  <dd>{String(value)}</dd>
-                </div>
-              ))}
-            </dl>
-          )}
-          {data.conversationHighlights.length > 0 && (
-            <section className="companion-daily-highlights" aria-label="对话拾遗">
-              <h2>对话拾遗</h2>
-              <ul>
-                {data.conversationHighlights.map((item, index) => (
-                  <li key={index}>
-                    <strong>{item.role === "assistant" ? "伴星" : "你"}：</strong>
-                    {item.text}
-                  </li>
-                ))}
-              </ul>
+        {!data && !error && (
+          <section className="pet-note-state" role="status">
+            <span className="pet-note-emoji" aria-hidden="true">✍️</span>
+            <strong>桌宠正在翻昨天的记忆…</strong>
+          </section>
+        )}
+
+        {data?.status === "not_generated" && (
+          <section className="pet-note-state" role="status">
+            <span className="pet-note-emoji" aria-hidden="true">🌙</span>
+            <strong>桌宠还在悄悄整理</strong>
+            <p>昨天学过的、聊过的内容，明天一早就会变成一篇小日记。</p>
+          </section>
+        )}
+
+        {data?.status === "failed" && (
+          <section className="pet-note-state" role="status">
+            <span className="pet-note-emoji" aria-hidden="true">🩹</span>
+            <strong>这篇日记暂时没写好</strong>
+            <p>别担心，桌宠稍后会再试一次。</p>
+          </section>
+        )}
+
+        {data?.status === "generated" && (
+          <>
+            <header className="pet-note-head">
+              <div className="pet-note-avatar" aria-hidden="true">🐾</div>
+              <div className="pet-note-head-text">
+                <span className="pet-note-eyebrow">桌宠日记</span>
+                <h1>{data.date}</h1>
+                <p className="pet-note-date-label">这是桌宠给你写的小笔记～</p>
+              </div>
+            </header>
+
+            <section className="pet-note-letter" aria-label="桌宠留言">
+              <p>{data.summary || "昨天好像很安静，桌宠先帮你记着这一天。"}</p>
             </section>
-          )}
-        </article>
-      ) : null}
+
+            {facts.length > 0 && (
+              <section className="pet-note-facts" aria-label="昨天的小统计">
+                <h2>昨天的小脚印</h2>
+                <div className="pet-note-fact-grid">
+                  {facts.map(([key, value]) => (
+                    <span className="pet-note-fact" key={key}>
+                      <b>{String(value)}</b>
+                      <small>{FACT_LABELS[key] ?? key}</small>
+                    </span>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {highlights.length > 0 && (
+              <section className="pet-note-highlights" aria-label="对话拾遗">
+                <h2>我们聊过的话</h2>
+                <div className="pet-note-sticky-grid">
+                  {highlights.map((item, index) => (
+                    <blockquote
+                      className={`pet-note-sticky ${index % 2 === 0 ? "is-left" : "is-right"}`}
+                      key={index}
+                    >
+                      <span className="pet-note-sticky-role">
+                        {item.role === "assistant" ? "桌宠说" : "你说"}
+                      </span>
+                      {item.text}
+                    </blockquote>
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
+        )}
+      </div>
     </main>
   );
 }

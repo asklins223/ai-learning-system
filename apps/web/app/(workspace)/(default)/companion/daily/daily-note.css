@@ -1,0 +1,279 @@
+/* 桌宠日记 — 手写小笔记风格（22 方案）。 */
+
+.pet-note-page {
+  min-height: 100vh;
+  padding: var(--space-8) var(--space-4) 80px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  background:
+    radial-gradient(circle at 15% 20%, color-mix(in srgb, var(--color-highlight) 10%, transparent), transparent 42%),
+    radial-gradient(circle at 85% 10%, color-mix(in srgb, var(--color-evidence) 8%, transparent), transparent 40%),
+    var(--color-canvas);
+}
+
+.pet-note {
+  position: relative;
+  width: min(680px, 100%);
+  background:
+    linear-gradient(180deg, transparent 0 31px, color-mix(in srgb, var(--color-border) 22%, transparent) 31px 32px, transparent 32px),
+    var(--color-paper-note);
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 70%, transparent);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-paper);
+  padding: var(--space-8) var(--space-6) var(--space-6);
+  font-family: var(--font-note);
+  color: var(--color-text);
+  transform: rotate(-0.35deg);
+  transition: transform var(--motion-base) var(--ease-standard);
+}
+
+.pet-note:hover {
+  transform: rotate(0deg);
+}
+
+.pet-note-tape {
+  position: absolute;
+  top: -14px;
+  left: 50%;
+  width: 132px;
+  height: 34px;
+  transform: translateX(-50%) rotate(-2deg);
+  background: color-mix(in srgb, var(--color-highlight) 72%, white);
+  border-radius: 3px;
+  box-shadow: var(--shadow-control);
+  opacity: 0.9;
+}
+
+.pet-note-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.pet-note-avatar {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  font-size: 30px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  box-shadow: var(--shadow-control);
+}
+
+.pet-note-head-text {
+  min-width: 0;
+}
+
+.pet-note-eyebrow {
+  display: inline-block;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--color-text-tertiary);
+  margin-bottom: 2px;
+}
+
+.pet-note-head h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--color-text);
+}
+
+.pet-note-date-label {
+  margin: 4px 0 0;
+  font-size: 15px;
+  color: var(--color-text-secondary);
+}
+
+.pet-note-letter {
+  position: relative;
+  margin: var(--space-5) 0;
+  padding: var(--space-5) var(--space-5) var(--space-5) calc(var(--space-5) + 22px);
+  background: var(--color-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-control);
+}
+
+.pet-note-letter::before {
+  content: "“";
+  position: absolute;
+  left: 12px;
+  top: 6px;
+  font-size: 42px;
+  line-height: 1;
+  color: var(--color-evidence);
+  opacity: 0.55;
+}
+
+.pet-note-letter p {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+}
+
+.pet-note-facts {
+  margin-top: var(--space-6);
+}
+
+.pet-note-facts h2,
+.pet-note-highlights h2 {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0 0 var(--space-3);
+  color: var(--color-text);
+}
+
+.pet-note-fact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  gap: var(--space-3);
+}
+
+.pet-note-fact {
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  padding: var(--space-3) var(--space-2);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 18px 18px 18px 6px;
+  box-shadow: var(--shadow-control);
+}
+
+.pet-note-fact b {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--color-action-text);
+}
+
+.pet-note-fact small {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.pet-note-highlights {
+  margin-top: var(--space-6);
+}
+
+.pet-note-sticky-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-4);
+}
+
+.pet-note-sticky {
+  position: relative;
+  margin: 8px 0;
+  padding: var(--space-4) var(--space-4) var(--space-5);
+  background: var(--color-paper-note);
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 55%, transparent);
+  border-radius: 4px;
+  box-shadow: var(--shadow-panel);
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--color-text);
+}
+
+.pet-note-sticky::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -8px;
+  width: 70px;
+  height: 16px;
+  transform: translateX(-50%) rotate(-1deg);
+  background: color-mix(in srgb, var(--color-highlight) 58%, transparent);
+  border-radius: 2px;
+}
+
+.pet-note-sticky.is-left {
+  transform: rotate(-0.8deg);
+}
+
+.pet-note-sticky.is-right {
+  transform: rotate(0.8deg);
+}
+
+.pet-note-sticky-role {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+  letter-spacing: 0.04em;
+}
+
+.pet-note-state {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+}
+
+.pet-note-state .pet-note-emoji {
+  font-size: 44px;
+}
+
+.pet-note-state strong {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.pet-note-state p {
+  margin: 0;
+  max-width: 34ch;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.pet-note-state button {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 18px;
+  border: 1px solid var(--color-action);
+  border-radius: var(--radius-sm);
+  background: var(--color-action);
+  color: var(--color-on-action);
+  cursor: pointer;
+}
+
+@media (max-width: 560px) {
+  .pet-note {
+    padding: var(--space-6) var(--space-4) var(--space-5);
+  }
+
+  .pet-note-head h1 {
+    font-size: 24px;
+  }
+
+  .pet-note-letter p {
+    font-size: 17px;
+  }
+
+  .pet-note-sticky-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-note,
+  .pet-note:hover {
+    transform: none;
+    transition: none;
+  }
+
+  .pet-note-sticky.is-left,
+  .pet-note-sticky.is-right {
+    transform: none;
+  }
+}
