@@ -76,6 +76,11 @@ export const mineNavItems: NavItem[] = [
     label: "学习动态",
     href: "/today",
   },
+  {
+    icon: Icon.Sparkle,
+    label: "桌宠日记",
+    href: "/companion/daily",
+  },
 ];
 
 /** 移动端“我的”面板比桌面侧栏多提供设置入口。 */
