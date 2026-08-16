@@ -46,12 +46,12 @@ test("corrupt or out-of-range preferences recover without throwing", () => {
   assert.equal(normalized.displayFingerprint, display.fingerprint);
 });
 
-test("position persistence is normalized, clamped, and atomic", () => {
+test("position persistence is normalized, clamped, and atomic", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ailearn-pet-"));
   try {
     const base = getDefaultDevicePetPreferences(display);
     const moved = updatePreferencesForPosition(base, display, { x: 400, y: 200 }, { width: 560, height: 520 });
-    saveDevicePetPreferences(dir, moved);
+    await saveDevicePetPreferences(dir, moved);
     assert.deepEqual(loadDevicePetPreferences(dir), moved);
     writeFileSync(path.join(dir, "desktop-pet-preferences-v1.json"), "not-json", "utf8");
     assert.equal(loadDevicePetPreferences(dir), null);

@@ -17,18 +17,17 @@ import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { statusMap } from "@/lib/status-map";
 
 type CaptureMessageType = "success" | "error";
-const LEARNING_RUN_UI_PREVIEW = process.env.NODE_ENV === "development";
 
-function homeLearningRunUiPreviewHref(review: SanitizedReviewItem) {
-  if (!LEARNING_RUN_UI_PREVIEW) return null;
+/** 首页统一入口：到期复习也走 LearningRun（方案 16 三分钟微旅程）。 */
+function homeLearningRunHref(review: SanitizedReviewItem) {
   const params = new URLSearchParams({
-    origin: "today",
+    origin: review.isV2 ? "review_v2" : "review",
     scheduleId: review.reviewId,
     cardId: review.cardId,
     returnTo: "/",
   });
   if (review.keyPointId) params.set("keyPointId", review.keyPointId);
-  return `/learning-runs/ui-redraw?${params.toString()}`;
+  return `/learning-runs/new?${params.toString()}`;
 }
 
 export default function HomePage() {
@@ -267,40 +266,25 @@ export default function HomePage() {
   const todayFocus = pendingReviewCount > 0
     ? {
         kind: "review" as const,
-        eyebrow: LEARNING_RUN_UI_PREVIEW
-          ? "今日下一步 · 三分钟微旅程"
-          : "今日下一步 · 到期复习",
-        title: LEARNING_RUN_UI_PREVIEW
-          ? "先证明一个到期要点"
-          : "完成一轮独立复习",
-        summary: LEARNING_RUN_UI_PREVIEW
-          ? `今天有 ${pendingReviewCount} 条复习已经到期。进入后直接用推荐方式开始，也可以随时改用语音、操作或短文字。`
-          : `今天有 ${pendingReviewCount} 条复习已经到期，先从最早的一条开始。`,
+        eyebrow: "今日下一步 · 三分钟微旅程",
+        title: "先证明一个到期要点",
+        summary: `今天有 ${pendingReviewCount} 条复习已经到期。进入后直接用推荐方式开始，也可以随时改用语音、操作或短文字。`,
         meta: [
           { label: "到期复习", value: `${pendingReviewCount} 条` },
-          ...(LEARNING_RUN_UI_PREVIEW
-            ? [
-                { label: "单次用时", value: "1–3 分钟" },
-                { label: "自主操作", value: "可切换 / 可跳过" },
-              ]
-            : [{ label: "优先级", value: "今天" }]),
+          { label: "单次用时", value: "1–3 分钟" },
+          { label: "自主操作", value: "可切换 / 可跳过" },
         ],
-        ctaLabel: LEARNING_RUN_UI_PREVIEW ? "预览第一个到期要点" : "进入复习",
+        ctaLabel: "开始三分钟验证",
         ctaHref: pendingReviews[0]
-          ? homeLearningRunUiPreviewHref(pendingReviews[0]) ??
-            `/review/${encodeURIComponent(pendingReviews[0].reviewId)}`
-          : "/review",
+          ? homeLearningRunHref(pendingReviews[0])
+          : "/learning-runs/new",
       }
     : primaryCard
       ? {
           kind: "continue" as const,
-          eyebrow: LEARNING_RUN_UI_PREVIEW
-            ? "今日下一步 · 三分钟巩固"
-            : "今日下一步 · 继续理解",
+          eyebrow: "今日下一步 · 三分钟微旅程",
           title: primaryCard.schemaJson?.title ?? "未命名学习卡",
-          summary: primaryCard.schemaJson?.summary ?? (LEARNING_RUN_UI_PREVIEW
-            ? "回到这张学习卡，用语音、操作或短文字证明一个要点。"
-            : "回到这张学习卡，继续补充证据并验证理解。"),
+          summary: "回到这张学习卡，用语音、操作或短文字证明一个要点。",
           meta: [
             ...((primaryCard.evidenceHardCount ?? 0) > 0
               ? [{ label: "硬证据", value: `${primaryCard.evidenceHardCount} 条` }]
@@ -308,13 +292,11 @@ export default function HomePage() {
             ...((primaryCard.validationCount ?? 0) > 0
               ? [{ label: "验证", value: `${primaryCard.validationCount} 次` }]
               : []),
-            ...(LEARNING_RUN_UI_PREVIEW
-              ? [{ label: "单次用时", value: "1–3 分钟" }]
-              : []),
+            { label: "单次用时", value: "1–3 分钟" },
             { label: "创建", value: relativeTime(primaryCard.createdAt) },
           ],
-          ctaLabel: LEARNING_RUN_UI_PREVIEW ? "去卡片预览巩固" : "继续学习",
-          ctaHref: `/cards/${primaryCard.id}`,
+          ctaLabel: "开始三分钟巩固",
+          ctaHref: `/learning-cards/${primaryCard.id}`,
         }
       : null;
 
@@ -679,17 +661,16 @@ export default function HomePage() {
                       return (
                         <Link
                           key={review.reviewId}
-                          href={`/review/${encodeURIComponent(review.reviewId)}`}
+                          href={homeLearningRunHref(review)}
                           className="learning-home-queue-item"
                           data-kind="review"
-                          aria-label={`开始复习：${reason.label}`}
+                          aria-label={`开始三分钟验证：${reason.label}`}
                         >
                           <span className="learning-home-queue-item-icon" aria-hidden="true"><Icon.Review /></span>
                           <span className="learning-home-queue-item-copy">
-                            <strong>{LEARNING_RUN_UI_PREVIEW ? "三分钟内证明一个要点" : "独立回忆一项理解"}</strong>
+                            <strong>三分钟内证明一个要点</strong>
                             <small>
-                              {reason.label} · 间隔 {review.intervalDays} 天
-                              {LEARNING_RUN_UI_PREVIEW ? " · 可换方式" : ""}
+                              {reason.label} · 间隔 {review.intervalDays} 天 · 可换方式
                             </small>
                           </span>
                           <Icon.ChevronRight className="learning-home-queue-chevron" />

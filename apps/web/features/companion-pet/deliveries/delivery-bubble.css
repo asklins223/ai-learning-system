@@ -68,6 +68,12 @@
   text-underline-offset: 2px;
 }
 
+.pet-delivery-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger-1, #c0392b);
+}
+
 @media (max-width: 480px) {
   .pet-delivery-bubble {
     left: 70px;

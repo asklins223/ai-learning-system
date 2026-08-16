@@ -75,3 +75,14 @@
   节点、Reminder UI 已接通；
 - 上述内容记录在方案 20 implementation-review R37 与 evidence-package。
 - SSE 500 / 慢响应仍保持“防御已加、真实并发压测复现未完成”状态。
+
+## 5. 2026-08-16 再次回审
+
+- 对方案 16/20 文档与代码再次交叉核对（见 `16-audit-20260814.md` §36 与
+  `20-learning-card-v2-implementation-review.md` R38）。
+- 方案 16 此前“剩余（下轮）”中的 review/cards/graph context、
+  graph.delta_applied、PetMenu V2 bridge、pet 三层挂载均已关闭。
+- 剩余仍为外部依赖/流程/环境类：真实 Electron E2E、SSE 并发压测复现、
+  慢响应收敛、LLM trusted-Commit 完整旅程、生产性能观测、人类双盲、
+  C8 生产停写。
+- Coverage 门禁已修复：`make verify` 与 `make coverage-gate` 均通过。

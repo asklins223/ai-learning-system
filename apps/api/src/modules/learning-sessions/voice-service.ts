@@ -401,6 +401,11 @@ export function assessTranscriptionQuality(
   }
   const critical = [...new Set(options.criticalTerms.map(normalizeToken).filter((t) => t !== ""))];
   const criticalSet = new Set(critical);
+  // PERF（api-learning #6）：把含关键术语的逐段 includes 扫描（segments × terms）
+  // 收敛为单次正则匹配（o(segments × 1)），语义与 critical.some(t => text.includes(t)) 等价。
+  const criticalRegex = critical.length > 0
+    ? new RegExp(critical.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))
+    : null;
   const minSeg = options.minSegmentConfidence;
   const minOverall = options.minOverallConfidence;
 
@@ -409,7 +414,7 @@ export function assessTranscriptionQuality(
     overall = Math.min(overall, seg.confidence);
     if (seg.confidence < minSeg) {
       const segText = normalizeToken(seg.text);
-      if (critical.some((term) => segText.includes(term))) {
+      if (criticalRegex && criticalRegex.test(segText)) {
         return {
           kind: "not_assessable",
           reason: `关键术语低置信：segment「${seg.text}」置信度 ${seg.confidence}`,

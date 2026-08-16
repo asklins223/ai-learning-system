@@ -16,6 +16,12 @@ import { runGenerateValidationQuestion } from "./handlers/generate-validation-qu
 import { runLearningSessionAssess } from "./handlers/learning-session-assess.ts";
 import { runCompanionDialogue } from "./handlers/companion-dialogue.ts";
 import { runCompanionAction } from "./handlers/companion-action.ts";
+import { runCompanionMemoryExtract } from "./handlers/companion-memory-extractor.ts";
+import { runCompanionSummarizer } from "./handlers/companion-summarizer.ts";
+import { runCompanionMemoryEmbeddingRebuild } from "./handlers/companion-memory-embedding.ts";
+import { runCompanionDailySummary } from "./handlers/companion-daily-summary.ts";
+import { tickCompanionDailySummaryScheduler } from "./handlers/companion-daily-summary-scheduler.ts";
+import { tickCompanionMemoryMaintenance } from "./handlers/companion-memory-maintenance.ts";
 import {
   claimLearningAssessmentOutbox,
   processLearningAssessmentOutboxJob,
@@ -78,6 +84,11 @@ const HANDLERS = {
   // P2 companion：日常对话流式回复（03 §8.1；payload 只含 opaque runId）
   companion_dialogue: runCompanionDialogue,
   companion_action: runCompanionAction,
+  // 22 真桌宠记忆与上下文：日常提取 / 会话摘要 / embedding 重建
+  companion_memory_extract: runCompanionMemoryExtract,
+  companion_summarizer: runCompanionSummarizer,
+  companion_memory_embedding_rebuild: runCompanionMemoryEmbeddingRebuild,
+  companion_daily_summary: runCompanionDailySummary,
 } as const;
 
 const POLL_MS = 500;
@@ -623,15 +634,18 @@ async function tickLearningAssessmentOutbox(): Promise<void> {
   // 2026-08-11：shuttingDown 时停止 claim（在途 job 由续期/收尾完成）
   if (shuttingDown) return;
   const available = ASSESSMENT_OUTBOX_CONCURRENCY - assessmentOutboxInflight.size;
-  for (let index = 0; index < available; index += 1) {
-    // 2026-08-11：workerId 追加随机后缀——容器化多副本 PID 相同（每个 pod
-    // 常为 1），纯 PID 会使 lease_owner 跨实例碰撞（原 owner 迟到的
-    // WHERE lease_owner=... UPDATE 可能误标另一实例正在处理的行）。
-    const job = await claimLearningAssessmentOutbox(
-      ASSESSMENT_OUTBOX_WORKER_ID,
-      ASSESSMENT_OUTBOX_LEASE_MS,
-    );
-    if (!job) return;
+  if (available <= 0) return;
+  // PERF-36: 并发发起可用数量的 claim（每个 claim 是独立事务 + FOR UPDATE SKIP LOCKED，
+  // 天然互不冲突），替代逐一串行 claim，减少队列吞吐时的串行延迟。
+  const claims = await Promise.all(
+    Array.from({ length: available }, () =>
+      claimLearningAssessmentOutbox(
+        ASSESSMENT_OUTBOX_WORKER_ID,
+        ASSESSMENT_OUTBOX_LEASE_MS,
+      )),
+  );
+  for (const job of claims) {
+    if (!job) continue;
     const promise = processLearningAssessmentOutboxJob(job).then(() => undefined).catch((error) => {
       logger.error(
         { jobId: job.id, error: sanitizeOperationalError(error) },
@@ -720,6 +734,10 @@ export async function tick(): Promise<void> {
       "learning assessment outbox poll failed",
     );
   }
+
+  // 22 方案：桌宠日记每日 01:00 调度 + 记忆衰减维护（内部 throttle）。
+  await tickCompanionDailySummaryScheduler();
+  await tickCompanionMemoryMaintenance();
 
   // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
   // 各 handler 事务中的 advisory lock 保证并发安全：

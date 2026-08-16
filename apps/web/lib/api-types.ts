@@ -994,10 +994,6 @@ export interface MarkdownImportApiResult {
 const MARKDOWN_IMPORT_BATCH_BYTES = 1_750_000;
 const MARKDOWN_IMPORT_ROUTE_BYTES = 2 * 1024 * 1024;
 
-function markdownImportPayloadBytes(items: MarkdownImportApiItem[], importId: string) {
-  return new TextEncoder().encode(JSON.stringify({ items, importId })).byteLength;
-}
-
 /**
  * Fastify 为导入路由保留 2 MiB body limit；这里按 UTF-8 字节拆批，避免多文件导入
  * 因 JSON 总体积超过传输限制。每个文件仍是一篇独立笔记。
@@ -1009,18 +1005,37 @@ export function splitMarkdownImportBatches(
 ) {
   const batches: MarkdownImportApiItem[][] = [];
   let current: MarkdownImportApiItem[] = [];
+  let currentBytes = 0;
+
+  // 递增累计批次字节数，避免每个 item 都对整个候选 JSON.stringify+encode
+  // （Produces O(batch²) 工作）。编码格式固定为 {"items":[...],"importId":"..."}，
+  // 因此每个 item 的增量 = 该 item 的序列化字节数 + 1（数组内逗号）；首个 item
+  // 无前导逗号，需计入固定前缀/后缀。
   const sizeProbeId = `${importId.slice(0, 90)}:100`;
+  const prefixBytes = new TextEncoder().encode('{"items":[').byteLength;
+  const suffixBytes = new TextEncoder().encode(`],"importId":"${sizeProbeId}"}`).byteLength;
+  const encoder = new TextEncoder();
 
   for (const item of items) {
-    const candidate = [...current, item];
+    const itemBytes = encoder.encode(JSON.stringify(item)).byteLength;
+    // 若当前批非空，追加新 item 的增量 = itemBytes + 1（数组逗号）；否则为整批
+    // （前缀 + item + 后缀）。字节口径与完整 JSON.stringify({items, importId})
+    // 编码完全一致。
+    const candidateBytes =
+      current.length === 0
+        ? prefixBytes + itemBytes + suffixBytes
+        : currentBytes + itemBytes + 1;
+
     if (
       current.length > 0 &&
-      (current.length >= 100 || markdownImportPayloadBytes(candidate, sizeProbeId) > maxBytes)
+      (current.length >= 100 || candidateBytes > maxBytes)
     ) {
       batches.push(current);
       current = [item];
+      currentBytes = prefixBytes + itemBytes + suffixBytes;
     } else {
-      current = candidate;
+      current = [...current, item];
+      currentBytes = candidateBytes;
     }
   }
   if (current.length > 0) batches.push(current);

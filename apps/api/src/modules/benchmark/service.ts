@@ -655,18 +655,18 @@ async function waitForAlignEvidence(
   if (keyPointIds.length === 0) return true;
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    // N-008: 使用 COUNT(DISTINCT key_point_id) 确保每个 key point 至少有一条 evidence
-    // 旧逻辑用 evRows.length >= keyPointIds.length，但一个 key point 可产生多条候选
-    const evRows = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) =>
-      tx.query.evidences.findMany({
-        where: and(
-          eq(evidences.workspaceId, workspaceId),
-          inArray(evidences.keyPointId, keyPointIds),
-        ),
-        columns: { keyPointId: true },
-      }),
+    // N-008: 使用 COUNT(DISTINCT key_point_id) 确保每个 key point 至少有一条 evidence。
+    // 旧逻辑把每个 key point 的全部 evidence 行拉到内存再取 distinct 集合，
+    // 在热轮询循环里反复传输无界行集；改为数据库端聚合只回传一个数字。
+    const rows = await withWorkspaceTransaction({ workspaceId, userId }, async (tx) =>
+      tx.execute<{ distinct_kp_count: string }>(sql`
+        SELECT COUNT(DISTINCT key_point_id) AS distinct_kp_count
+        FROM evidences
+        WHERE workspace_id = ${workspaceId}
+          AND key_point_id = ANY(ARRAY[${sql.join(keyPointIds.map((id) => sql`${id}::uuid`), sql`, `)}])
+      `),
     );
-    const distinctKpCount = new Set(evRows.map((ev) => ev.keyPointId)).size;
+    const distinctKpCount = Number(rows[0]?.distinct_kp_count ?? 0);
     if (distinctKpCount >= keyPointIds.length) return true;
     await sleep(2000);
   }

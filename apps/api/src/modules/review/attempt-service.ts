@@ -975,9 +975,6 @@ export async function listReviewAttemptHistory(
         );
       }
 
-      // N#7-14: 记录不含游标谓词的基过滤条件，供 total 真总数计数使用。
-      const baseWhereCondition = whereCondition;
-
       if (cursor) {
         whereCondition = and(
           whereCondition,
@@ -1019,16 +1016,10 @@ export async function listReviewAttemptHistory(
         ? encodeCursor(lastItem.createdAt, lastItem.id)
         : null;
       const items = pageRows.map(({ createdAt: _createdAt, ...item }) => item);
-      // N#7-14（round-7）：此前 total 复用含游标谓词的 whereCondition → 游标页的 total 是
-      // 「游标后剩余行数」而非真总数，且是第二次无谓扫描。修正为：total 只用**不含游标**的
-      // 基过滤条件（workspace/user/可选的 schedule subject 过滤）计真总数；游标谓词只作用于
-      // 分页扫描，不再污染 count。调用方已知 hasMore，total 仅作展示。
-      const totalRows = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(reviewAttempts)
-        .where(baseWhereCondition);
-
-      return { items, nextCursor, total: Number(totalRows[0]?.count ?? 0) };
+      // PERF（api-learning #7）：history 页已用 limit+1 探测 hasMore 生成
+      // nextCursor，total 未被任何调用方消费（web ReviewAttemptHistoryResult
+      // 类型不含 total）。移除每页全表 count(*) 以消除重复扫描。
+      return { items, nextCursor };
     },
   );
 }

@@ -17,7 +17,7 @@ function isCompanionJourneyV2Enabled(): boolean {
   return process.env.COMPANION_JOURNEY_V2 === "true";
 }
 
-const DELIVERY_KINDS = ["message", "proposal", "action_result", "proactive_cue", "system_event"] as const;
+const DELIVERY_KINDS = ["message", "proposal", "action_result", "proactive_cue", "system_event", "memory_candidate"] as const;
 
 const timelineQuerySchema = z.object({
   after: z.coerce.number().int().min(0).optional(),

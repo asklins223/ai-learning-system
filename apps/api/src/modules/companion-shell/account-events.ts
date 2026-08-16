@@ -130,7 +130,7 @@ export async function openCompanionAccountEventStream(args: {
     // 若客户端在 await 期间断开，Node 的 'close' 已被消费、不再回调后注册的
     // 监听器 → close() 永不执行 → 账号槽位（每进程 6）与 NOTIFY 订阅永久泄漏
     // → 触发 429。close 幂等（closed 守卫），即使先于 subscribe/start 触发也安全
-    // （unsubscribe/Pending 均可空）。start() 内的 onAbort(close) 保留为幂等兜底。
+    // （unsubscribe/Pending 均可空）。
     const close = () => {
       if (closed) return;
       closed = true;
@@ -165,7 +165,6 @@ export async function openCompanionAccountEventStream(args: {
           heartbeatTimer = setInterval(() => {
             if (!closed) args.writer.write(`: heartbeat ${Date.now()}\n\n`);
           }, 15_000);
-          args.writer.onAbort(close);
         },
       },
     };

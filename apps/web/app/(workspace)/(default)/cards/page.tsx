@@ -16,10 +16,10 @@ import { relativeTime } from "@/lib/format";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import {
   formatLearningCardReviewDate,
-  learningCardMatchesFilter,
   learningCardMatchesQuery,
   learningCardSource,
   learningObjectivePresentation,
+  learningObjectiveState,
   sortLearningCards,
   type LearningCardLibraryFilter,
   type LearningCardLibrarySort,
@@ -27,6 +27,21 @@ import {
 } from "@/lib/learning-card-library";
 
 const EMPTY_CARD_SET_SOURCE_INDEX = new Map();
+
+// F#7（第八轮 🟡？）：filter 匹配只依赖学习目标状态，抽成基于预计算 state 的
+// 判定，避免 repeated learningCardMatchesFilter 内部反复跑 coverage 警告与
+// nextReviewAt 日期解析。
+function stateMatchesFilter(
+  state: LearningObjectiveState,
+  filter: LearningCardLibraryFilter,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "action") {
+    return ["partial", "due", "validate", "collecting"].includes(state);
+  }
+  if (filter === "review") return state === "due" || state === "scheduled";
+  return state === "practiced" || state === "scheduled" || state === "due";
+}
 
 // F#7（第六轮 🟡9）：行内 toLocaleString 用模块单例替换。
 const cardCreatedTitleFmt = new Intl.DateTimeFormat("zh-CN", {
@@ -287,6 +302,17 @@ export default function CardsIndex() {
     [items, query],
   );
 
+  // F#7（第八轮）：每个卡的学习目标状态（含 coverage 警告解析 + nextReviewAt
+  // 日期解析）只算一次，供 filterCounts/queueCounts/渲染复用，替代原来
+  // learningCardMatchesFilter 每张卡重复 3~4 次重算。
+  const cardStates = useMemo(() => {
+    const map = new Map<string, LearningObjectiveState>();
+    for (const card of items ?? []) {
+      map.set(card.id, learningObjectiveState(card, referenceNow));
+    }
+    return map;
+  }, [items, referenceNow]);
+
   // F#7（第六轮 🟠4）：单趟派生——把 filtered（含 sort）× filterCounts（原先
   // 3 趟）合并为一次遍历 queryMatched，同时产出当前筛选列表与
   // action/review/practiced 计数（与原先 queueCounts 保持同为全 items 口径）。
@@ -296,10 +322,11 @@ export default function CardsIndex() {
     let practiced = 0;
     const matched: CardListItem[] = [];
     for (const card of queryMatched) {
-      if (learningCardMatchesFilter(card, "action", referenceNow)) action += 1;
-      if (learningCardMatchesFilter(card, "review", referenceNow)) review += 1;
-      if (learningCardMatchesFilter(card, "practiced", referenceNow)) practiced += 1;
-      if (learningCardMatchesFilter(card, filter, referenceNow)) matched.push(card);
+      const state = cardStates.get(card.id) ?? "collecting";
+      if (stateMatchesFilter(state, "action")) action += 1;
+      if (stateMatchesFilter(state, "review")) review += 1;
+      if (stateMatchesFilter(state, "practiced")) practiced += 1;
+      if (stateMatchesFilter(state, filter)) matched.push(card);
     }
     return {
       filtered: sortLearningCards(matched, sort, referenceNow),
@@ -310,7 +337,7 @@ export default function CardsIndex() {
         practiced,
       } as Record<LearningCardLibraryFilter, number>,
     };
-  }, [queryMatched, filter, referenceNow, sort]);
+  }, [cardStates, queryMatched, filter, referenceNow, sort]);
 
   // F#7（第六轮 🟠4）：queueCounts 单趟——一次遍历 items 产出三个计数，
   // 替代原先 3 个独立 filter。
@@ -319,12 +346,13 @@ export default function CardsIndex() {
     let review = 0;
     let practiced = 0;
     for (const card of items ?? []) {
-      if (learningCardMatchesFilter(card, "action", referenceNow)) action += 1;
-      if (learningCardMatchesFilter(card, "review", referenceNow)) review += 1;
+      const state = cardStates.get(card.id) ?? "collecting";
+      if (stateMatchesFilter(state, "action")) action += 1;
+      if (stateMatchesFilter(state, "review")) review += 1;
       if ((card.validationCount ?? 0) > 0) practiced += 1;
     }
     return { action, review, practiced };
-  }, [items, referenceNow]);
+  }, [items, cardStates]);
 
   const loadedCount = items?.length ?? 0;
   const hasMorePages = Boolean(nextCursor || v2Cursor);

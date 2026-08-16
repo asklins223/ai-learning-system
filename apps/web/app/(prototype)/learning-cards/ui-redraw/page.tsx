@@ -1,7 +1,9 @@
-import "@/app/styles/card-generation-v2.css";
-import { CardGenerationV2Lab } from "@/features/card-generation-v2/CardGenerationV2Lab";
+import { redirect } from "next/navigation";
 
-export default function LearningCardsUiRedrawPage() {
-  return <CardGenerationV2Lab />;
+/**
+ * UI redraw 的生成设置已并入 NoteEditor 的 V2 生成流程；
+ * 学习卡库入口统一到生产 /cards。
+ */
+export default function LearningCardsUiRedrawRedirect() {
+  redirect("/cards");
 }
-

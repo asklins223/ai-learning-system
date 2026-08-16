@@ -70,6 +70,26 @@ test("activeMemories 注入 persona user content（桌宠记得长期记忆）",
   ]);
 });
 
+test("petProfile 注入 system prompt（22 人格档案生效）", () => {
+  const messages = buildCompanionPersonaMessages({
+    userText: "你好",
+    recentMessages: [],
+    pageContext: null,
+    workspacePolicy: null,
+    petProfile: {
+      name: "冷静学霸",
+      speakingStyle: "理性、简洁、高效",
+      personalityTags: ["理性", "简洁"],
+      examples: [{ text: "建议先做第 3 题。" }],
+    },
+  });
+  const system = String(messages[0].content);
+  assert.match(system, /当前人格：冷静学霸/);
+  assert.match(system, /说话风格：理性、简洁、高效/);
+  assert.match(system, /建议先做第 3 题/);
+  assert.notEqual(system, COMPANION_PERSONA_V3);
+});
+
 test("persona 输入边界：recent ≤20 条、12k/2k/4k 截断", () => {
   const many = Array.from({ length: 30 }, (_, i) => ({
     role: "user" as const,

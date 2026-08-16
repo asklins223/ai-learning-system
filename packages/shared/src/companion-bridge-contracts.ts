@@ -175,8 +175,9 @@ export type AssistantDeliveryPayloadRefV2 =
   | { kind: "message"; messageId: string }
   | { kind: "proposal"; proposalId: string }
   | { kind: "action_result"; actionRunId: string }
-  | { kind: "proactive_cue"; cueId: string }
-  | { kind: "system_event"; systemEventId: string };
+  | { kind: "proactive_cue"; cueId: string; text?: string }
+  | { kind: "system_event"; systemEventId: string; text?: string }
+  | { kind: "memory_item"; memoryItemId: string };
 
 export type AssistantDeliveryV2 = {
   version: 2;
@@ -195,7 +196,7 @@ export type AssistantDeliveryV2 = {
     | "snoozed"
     | "expired"
     | "suppressed";
-  kind: "message" | "proposal" | "action_result" | "proactive_cue" | "system_event";
+  kind: "message" | "proposal" | "action_result" | "proactive_cue" | "system_event" | "memory_candidate";
   payloadRef: AssistantDeliveryPayloadRefV2;
   displayLease: {
     deviceSessionId: string;
@@ -409,13 +410,14 @@ export const assistantDeliveryV2Schema = z.strictObject({
   state: z.enum([
     "queued", "delivered", "displayed", "acted", "dismissed", "snoozed", "expired", "suppressed",
   ]),
-  kind: z.enum(["message", "proposal", "action_result", "proactive_cue", "system_event"]),
+  kind: z.enum(["message", "proposal", "action_result", "proactive_cue", "system_event", "memory_candidate"]),
   payloadRef: z.discriminatedUnion("kind", [
     z.strictObject({ kind: z.literal("message"), messageId: z.string().uuid() }),
     z.strictObject({ kind: z.literal("proposal"), proposalId: z.string().uuid() }),
     z.strictObject({ kind: z.literal("action_result"), actionRunId: z.string().uuid() }),
-    z.strictObject({ kind: z.literal("proactive_cue"), cueId: z.string().uuid() }),
-    z.strictObject({ kind: z.literal("system_event"), systemEventId: z.string().min(1) }),
+    z.strictObject({ kind: z.literal("proactive_cue"), cueId: z.string().uuid(), text: z.string().min(1).max(240).optional() }),
+    z.strictObject({ kind: z.literal("system_event"), systemEventId: z.string().min(1), text: z.string().min(1).max(240).optional() }),
+    z.strictObject({ kind: z.literal("memory_item"), memoryItemId: z.string().uuid() }),
   ]),
   displayLease: z
     .strictObject({

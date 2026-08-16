@@ -898,7 +898,7 @@ export async function createRuntimeFence(
   });
 }
 
-/** 查询钩子：该 device session 是否在有效 fence 内（过期即删除并返回 null）。 */
+/** 查询钩子：该 device session 是否在有效 fence 内（过期即返回 null）。 */
 export async function getActiveRuntimeFence(
   userId: string,
   workspaceId: string,
@@ -906,10 +906,8 @@ export async function getActiveRuntimeFence(
 ): Promise<RuntimeFenceRecord | null> {
   return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     const now = new Date();
-    await tx.delete(companionRuntimeFences).where(and(
-      eq(companionRuntimeFences.userId, userId),
-      lte(companionRuntimeFences.expiresAt, now),
-    ));
+    // F5（审计 #15）：读路径纯 SELECT——过期行的物理清理统一由写路径
+    // createRuntimeFence（以及将来的维护任务）负责，读路径不再突变表。
     const row = (await tx
       .select()
       .from(companionRuntimeFences)
@@ -930,10 +928,8 @@ export async function listActiveRuntimeFences(
 ): Promise<RuntimeFenceRecord[]> {
   return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     const now = new Date();
-    await tx.delete(companionRuntimeFences).where(and(
-      eq(companionRuntimeFences.userId, userId),
-      lte(companionRuntimeFences.expiresAt, now),
-    ));
+    // F5（审计 #15）：读路径纯 SELECT——过期行的物理清理统一由写路径
+    // createRuntimeFence（以及将来的维护任务）负责，读路径不再突变表。
     const rows = await tx
       .select()
       .from(companionRuntimeFences)

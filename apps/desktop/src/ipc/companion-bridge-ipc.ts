@@ -101,6 +101,26 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
     heap[idx] = item;
     return root;
   };
+  // 2026-08-16（性能专项）：撤销/续期会往堆里重复 push 引用，旧引用要等其过期
+  // 时间到达才被 sweep 惰性回收——churn 下堆会瞬时膨胀。改在 unregister/renew/
+  // publish 后按阈值重建堆，把堆大小约束在存活 record 数的常数倍内。
+  const compactExpiresAtHeap = (): void => {
+    const entries: Array<{ expiresAt: number; contextId: string }> = [];
+    for (const [contextId, record] of records) {
+      if (record.expiresAt >= Date.now()) {
+        entries.push({ expiresAt: record.expiresAt, contextId });
+      }
+    }
+    expiresAtHeap.length = 0;
+    for (const entry of entries) heapPush(entry);
+  };
+  const maybeCompactExpiresAtHeap = (): void => {
+    // 堆里混入的失效引用数 = heap.length - records.size（近似，记录可能已过期）。
+    // 超过 2×+16 时重建，避免每次操作都重建（重建 O(n log n)）。
+    if (expiresAtHeap.length > records.size * 2 + 16) {
+      compactExpiresAtHeap();
+    }
+  };
   let pageSequence = 0;
 
   const unregister = (contextId: string, record: BridgeContextRecord | undefined) => {
@@ -108,6 +128,7 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
     if (record?.pageInstanceId) {
       pageInstanceToContextId.delete(record.pageInstanceId);
     }
+    maybeCompactExpiresAtHeap();
   };
 
   const sweepExpiredRecords = () => {
@@ -195,6 +216,7 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
     records.set(contextId, record);
     pageInstanceToContextId.set(record.pageInstanceId, contextId);
     heapPush({ expiresAt: record.expiresAt, contextId });
+    maybeCompactExpiresAtHeap();
     petSend(COMPANION_BRIDGE_CHANNELS.petPageContext, {
       contextId,
       pageInstanceId,
@@ -231,6 +253,7 @@ export function registerCompanionBridgeBroker(context: CompanionBridgeBrokerCont
     }
     record.expiresAt = Date.now() + BRIDGE_CONTEXT_LEASE_MS;
     heapPush({ expiresAt: record.expiresAt, contextId });
+    maybeCompactExpiresAtHeap();
     return { accepted: true, revision: record.revision, expiresAt: new Date(record.expiresAt).toISOString() };
   };
   handle(COMPANION_BRIDGE_CHANNELS.mainRenewContext, (event, raw) => renewOrRevoke(event, raw, false));

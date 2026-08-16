@@ -38,6 +38,8 @@ import { understandingProjectionRoutes } from "./modules/understanding/projectio
 import { proactiveInboxRoutes } from "./modules/companion-conversation/inbox-routes.ts";
 import { deliveryRoutes } from "./modules/companion-conversation/delivery-routes.ts";
 import { memoryRoutes } from "./modules/companion-conversation/memory-routes.ts";
+import { petProfileRoutes } from "./modules/companion-conversation/pet-profile-routes.ts";
+import { dailySummaryRoutes } from "./modules/companion-conversation/daily-summary-routes.ts";
 import { deliveryTimelineRoutes } from "./modules/companion-conversation/timeline-routes.ts";
 import { voiceRoutes } from "./modules/learning-sessions/voice-routes.ts";
 import { assessmentRoutes } from "./modules/learning-sessions/assessment-service.ts";
@@ -363,6 +365,8 @@ async function main() {
   await app.register(proactiveInboxRoutes);
   await app.register(deliveryRoutes);
   await app.register(memoryRoutes);
+  await app.register(petProfileRoutes);
+  await app.register(dailySummaryRoutes);
   await app.register(deliveryTimelineRoutes);
   await app.register(voiceRoutes);
   await app.register(assessmentRoutes);
@@ -378,12 +382,17 @@ async function main() {
     process.exit(1);
   }
 
+  let dbGaugeTimer: NodeJS.Timeout | undefined;
   let sessionCleanupTimer: NodeJS.Timeout | undefined;
   let notePurgeTimer: NodeJS.Timeout | undefined;
   let commitOutboxTimer: NodeJS.Timeout | undefined;
   let learningRunProcessingTimer: NodeJS.Timeout | undefined;
   const shutdown = createGracefulShutdown({
     clearTimer: () => {
+      // F5（审计 #13）：dbGaugeTimer 也纳入关停清理，避免优雅停机期间继续每
+      // 30s 发 DB gauge 查询。
+      if (dbGaugeTimer) clearInterval(dbGaugeTimer);
+      dbGaugeTimer = undefined;
       if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
       sessionCleanupTimer = undefined;
       if (notePurgeTimer) clearInterval(notePurgeTimer);
@@ -428,7 +437,7 @@ async function main() {
     // 此前两个 gauge 定义后从未 set，空转。
     // 2026-08-11：in-flight 守卫变量（回调重叠防护，见下方注释）
     let dbGaugeRunning = false;
-    const dbGaugeTimer = setInterval(async () => {
+    dbGaugeTimer = setInterval(async () => {
       // 2026-08-11（review 修复）：in-flight 守卫——DB 慢查询时上一轮未完成
       // 则跳过本轮，避免回调重叠堆积。
       if (dbGaugeRunning) return;
@@ -448,7 +457,7 @@ async function main() {
         dbGaugeRunning = false;
       }
     }, 30_000);
-    dbGaugeTimer.unref?.();
+    dbGaugeTimer?.unref?.();
 
     sessionCleanupTimer = setInterval(async () => {
       try {

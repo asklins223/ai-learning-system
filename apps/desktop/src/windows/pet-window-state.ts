@@ -131,7 +131,7 @@ export class PetWindowStateController {
     const size = petContentSizeForScale(this.preferences.petScale);
     const [x, y] = this.window.getPosition();
     this.preferences = updatePreferencesForPosition(this.preferences, display, { x, y }, size);
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
   }
 
   setWindowPosition(x: number, y: number): void {
@@ -144,39 +144,39 @@ export class PetWindowStateController {
       { x, y },
       size,
     );
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
     this.revision += 1;
   }
 
   setPetModeEnabled(enabled: boolean): void {
     this.preferences = { ...this.preferences, petModeEnabled: enabled };
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
     this.revision += 1;
   }
 
   setAlwaysOnTop(enabled: boolean): void {
     this.preferences = { ...this.preferences, alwaysOnTop: enabled };
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
     this.window.setAlwaysOnTop(enabled);
     this.revision += 1;
   }
 
   setLocked(locked: boolean): void {
     this.preferences = { ...this.preferences, locked };
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
     this.revision += 1;
   }
 
   setPetScale(petScale: DesktopPetScaleV1): void {
     this.preferences = { ...this.preferences, petScale };
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
     // applySavedPosition 末尾已 revision += 1（位置/尺寸变化），不再重复递增。
     this.applySavedPosition();
   }
 
   setPrivacyMode(privacyMode: boolean): void {
     this.preferences = { ...this.preferences, privacyMode };
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
     this.revision += 1;
   }
 
@@ -187,7 +187,7 @@ export class PetWindowStateController {
     const x = display.workArea.x + Math.max(0, display.workArea.width - size.width - margin);
     const y = display.workArea.y + Math.max(0, display.workArea.height - size.height - margin);
     this.preferences = updatePreferencesForPosition(this.preferences, display, { x, y }, size);
-    saveDevicePetPreferences(this.userDataPath, this.preferences);
+    void saveDevicePetPreferences(this.userDataPath, this.preferences);
     this.window.setPosition(x, y, false);
     this.revision += 1;
   }

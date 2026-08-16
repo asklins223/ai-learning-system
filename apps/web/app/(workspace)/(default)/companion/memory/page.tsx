@@ -1,12 +1,13 @@
 "use client";
 
 /**
- * 伴星记忆管理（方案 16 §10.3：有来源、可审计、可删除）。
+ * 真桌宠记忆管理（22-real-desktop-pet-memory-context-prd-tdd.md §10.2.2）。
  *
- * - 列表：active（参与主动策略）+ candidate（模型候选，默认不参与）；
- * - candidate → 确认/拒绝（确认后参与主动策略；拒绝 soft delete 审计保留）；
- * - active → 删除（soft delete；canonical 学习事实与 schedule 绝不受影响）；
- * - 记忆删除与学习真相解耦：本页不显示也不修改掌握度/复习安排。
+ * - 搜索/类型/状态筛选；
+ * - candidate → 确认 / 拒绝 / 忽略；
+ * - active → 固定 / 归档 / 删除；
+ * - archived → 恢复 / 删除；
+ * - 一键清空（二次确认由浏览器 confirm 保证）。
  */
 
 import "../conversations/conversation-page.css";
@@ -17,13 +18,21 @@ import { Icon } from "@/components/ui/icons";
 
 interface MemoryItem {
   memoryItemId: string;
-  kind: "preference" | "goal" | "learning_context" | "interaction_note";
+  kind: "preference" | "goal" | "learning_context" | "interaction_note" | "episodic";
   content: string;
   sourceEventId: string | null;
   sourceSessionId: string | null;
   userStated: boolean;
   userConfirmed: boolean;
   candidate: boolean;
+  importance: number;
+  confidence: number;
+  scope: "global" | "workspace" | "task";
+  pinned: boolean;
+  archived: boolean;
+  dismissedAt: string | null;
+  embeddingStatus: "none" | "pending" | "ready" | "failed";
+  sourceType: "user_stated" | "model_inferred" | "confirmed" | "summary" | "legacy";
   createdAt: string;
   updatedAt: string;
 }
@@ -33,7 +42,10 @@ const KIND_LABEL: Record<MemoryItem["kind"], string> = {
   goal: "目标",
   learning_context: "学习情境",
   interaction_note: "互动备注",
+  episodic: "情景摘要",
 };
+
+const KIND_OPTIONS = Object.entries(KIND_LABEL).map(([value, label]) => ({ value, label }));
 
 // F#7（第六轮 🟡9）：行内 toLocaleDateString 用模块单例替换。
 const memoryDateFmt = new Intl.DateTimeFormat("zh-CN", {
@@ -50,6 +62,12 @@ function MemoryStatusBadge({ item }: { item: MemoryItem }) {
   if (item.candidate) {
     return <span className="memory-badge is-candidate">候选待确认</span>;
   }
+  if (item.archived) {
+    return <span className="memory-badge is-archived">已归档</span>;
+  }
+  if (item.pinned) {
+    return <span className="memory-badge is-pinned">已固定</span>;
+  }
   if (!item.userConfirmed && !item.userStated) {
     return <span className="memory-badge is-derived">派生记忆</span>;
   }
@@ -61,17 +79,21 @@ function MemoryActions({
   onChanged,
 }: {
   item: MemoryItem;
-  onChanged: (id: string, kind: "confirm" | "reject" | "delete") => void;
+  onChanged: (id: string, kind: "confirm" | "reject" | "delete" | "pin" | "archive" | "restore" | "dismiss") => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const act = useCallback(async (kind: "confirm" | "reject" | "delete") => {
+  const act = useCallback(async (kind: "confirm" | "reject" | "delete" | "pin" | "archive" | "restore" | "dismiss") => {
     setBusy(true);
     setError(null);
     try {
       if (kind === "confirm") await api.confirmCompanionMemory(item.memoryItemId);
       else if (kind === "reject") await api.rejectCompanionMemory(item.memoryItemId);
-      else await api.deleteCompanionMemory(item.memoryItemId);
+      else if (kind === "delete") await api.deleteCompanionMemory(item.memoryItemId);
+      else if (kind === "pin") await api.pinCompanionMemory(item.memoryItemId);
+      else if (kind === "archive") await api.archiveCompanionMemory(item.memoryItemId);
+      else if (kind === "restore") await api.restoreCompanionMemory(item.memoryItemId);
+      else if (kind === "dismiss") await api.dismissCompanionMemory(item.memoryItemId);
       onChanged(item.memoryItemId, kind);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "操作失败");
@@ -90,11 +112,33 @@ function MemoryActions({
           <button type="button" disabled={busy} onClick={() => void act("reject")}>
             拒绝
           </button>
+          <button type="button" disabled={busy} onClick={() => void act("dismiss")}>
+            忽略
+          </button>
+        </>
+      ) : item.archived ? (
+        <>
+          <button type="button" disabled={busy} onClick={() => void act("restore")}>
+            恢复
+          </button>
+          <button type="button" disabled={busy} onClick={() => void act("delete")}>
+            删除
+          </button>
         </>
       ) : (
-        <button type="button" disabled={busy} onClick={() => void act("delete")}>
-          删除
-        </button>
+        <>
+          {!item.pinned && (
+            <button type="button" disabled={busy} onClick={() => void act("pin")}>
+              固定
+            </button>
+          )}
+          <button type="button" disabled={busy} onClick={() => void act("archive")}>
+            归档
+          </button>
+          <button type="button" disabled={busy} onClick={() => void act("delete")}>
+            删除
+          </button>
+        </>
       )}
       {error && <small className="memory-action-error">{error}</small>}
     </span>
@@ -114,32 +158,70 @@ export default function CompanionMemoryPage() {
 
   const [items, setItems] = useState<MemoryItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  const [kind, setKind] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [showCandidates, setShowCandidates] = useState(true);
 
   const reload = useCallback(() => {
     setError(null);
-    void api.listCompanionMemories(true).then((result) => {
+    void api.listCompanionMemories({
+      includeCandidates: showCandidates,
+      includeArchived: showArchived,
+      q: q || undefined,
+      kind: (kind || undefined) as MemoryItem["kind"] | undefined,
+    }).then((result) => {
       setItems((result.items as MemoryItem[]) ?? []);
     }).catch((caught) => {
       setError(caught instanceof Error ? caught.message : "暂时无法读取记忆");
     });
-  }, []);
+  }, [q, kind, showArchived, showCandidates]);
 
-  // F#7（🟡17）：单项操作后仅局部 mutate 列表，不整表 reload。confirm 把候选
-  // 提升为活跃；reject/delete 从列表移除（soft delete 审计保留由服务端负责）。
-  const handleMemoryChanged = useCallback((id: string, kind: "confirm" | "reject" | "delete") => {
+  // 单项操作后仅局部 mutate 列表，不整表 reload。
+  const handleMemoryChanged = useCallback((id: string, action: "confirm" | "reject" | "delete" | "pin" | "archive" | "restore" | "dismiss") => {
     setItems((current) => {
       if (!current) return current;
-      if (kind === "confirm") {
+      if (action === "confirm") {
         return current.map((item) =>
           item.memoryItemId === id
             ? { ...item, candidate: false, userConfirmed: true }
             : item,
         );
       }
-      if (kind === "reject" || kind === "delete") {
+      if (action === "pin") {
+        return current.map((item) =>
+          item.memoryItemId === id ? { ...item, pinned: true } : item,
+        );
+      }
+      if (action === "archive") {
+        return current.map((item) =>
+          item.memoryItemId === id ? { ...item, archived: true } : item,
+        );
+      }
+      if (action === "restore") {
+        return current.map((item) =>
+          item.memoryItemId === id ? { ...item, archived: false } : item,
+        );
+      }
+      if (action === "dismiss") {
+        return current.map((item) =>
+          item.memoryItemId === id ? { ...item, dismissedAt: new Date().toISOString() } : item,
+        );
+      }
+      if (action === "reject" || action === "delete") {
         return current.filter((item) => item.memoryItemId !== id);
       }
       return current;
+    });
+  }, []);
+
+  const handleClearAll = useCallback(() => {
+    if (!window.confirm("确定清空全部桌宠记忆？该操作不会影响学习事实与对话历史。")) return;
+    setError(null);
+    void api.clearCompanionMemories().then(() => {
+      setItems([]);
+    }).catch((caught) => {
+      setError(caught instanceof Error ? caught.message : "清空失败");
     });
   }, []);
 
@@ -158,6 +240,33 @@ export default function CompanionMemoryPage() {
         </p>
       </header>
 
+      <section className="companion-memory-toolbar" aria-label="记忆筛选">
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索记忆内容"
+          aria-label="搜索记忆内容"
+        />
+        <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="记忆类型">
+          <option value="">全部类型</option>
+          {KIND_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <label>
+          <input type="checkbox" checked={showCandidates} onChange={(e) => setShowCandidates(e.target.checked)} />
+          显示候选
+        </label>
+        <label>
+          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+          显示归档
+        </label>
+        <button type="button" className="memory-clear-all" onClick={handleClearAll}>
+          一键清空
+        </button>
+      </section>
+
       {error && (
         <section className="companion-memory-error" role="alert">
           <Icon.Warn aria-hidden="true" />
@@ -173,13 +282,13 @@ export default function CompanionMemoryPage() {
       ) : items !== null && items.length === 0 ? (
         <section className="companion-memory-empty" role="status">
           <Icon.Sparkle aria-hidden="true" />
-          <strong>还没有保存的记忆</strong>
+          <strong>还没有匹配的记忆</strong>
           <p>当你在对话中明确表达目标、偏好或约束时，伴星会在这里保存可审计的记忆。</p>
         </section>
       ) : (
         <ul className="companion-memory-list" aria-label="记忆列表">
           {items!.map((item) => (
-            <li key={item.memoryItemId} data-candidate={item.candidate || undefined}>
+            <li key={item.memoryItemId} data-candidate={item.candidate || undefined} data-archived={item.archived || undefined}>
               <div className="memory-item-main">
                 <span className="memory-item-kind">{KIND_LABEL[item.kind]}</span>
                 <p>{item.content}</p>
@@ -189,6 +298,7 @@ export default function CompanionMemoryPage() {
                 <small>
                   创建 {formatMemoryDate(item.createdAt)}
                   {item.sourceSessionId ? ` · 会话 ${item.sourceSessionId.slice(0, 8)}` : ""}
+                  {item.importance !== undefined ? ` · 重要度 ${item.importance.toFixed(1)}` : ""}
                 </small>
               </div>
               <MemoryActions item={item} onChanged={handleMemoryChanged} />

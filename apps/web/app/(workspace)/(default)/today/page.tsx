@@ -699,11 +699,20 @@ export default function TodayPage() {
       running: 1,
       recorded: 2,
     };
-    return rows.sort(
-      (a, b) =>
-        groupPriority[a.group] - groupPriority[b.group] ||
-        new Date(b.time).getTime() - new Date(a.time).getTime(),
-    );
+    // 预计算每行的时间戳与组优先级一次，避免 comparator 在 O(n log n) 内对
+    // 每对比较重复 new Date(b.time) 解析。
+    const keyed = rows.map((row) => ({
+      row,
+      timeMs: new Date(row.time).getTime(),
+      groupPriority: groupPriority[row.group],
+    }));
+    return keyed
+      .sort(
+        (a, b) =>
+          a.groupPriority - b.groupPriority ||
+          b.timeMs - a.timeMs,
+      )
+      .map((entry) => entry.row);
   }, [cards, endMs, jobs, notes, reviews, sources, startMs]);
 
   const dueReviews = useMemo(

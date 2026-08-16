@@ -62,13 +62,16 @@ export function companionRateLimit(args: {
   // 下方 prune 的 50k 全扫仅作极端护栏。
   if (now - lastSweepAt >= SWEEP_INTERVAL_MS) {
     lazySweep(now);
-    lastSweepAt = now;
-  }
-  if (buckets.size >= MAX_BUCKETS_BEFORE_SWEEP) {
-    // 一次性清掉全部过期桶，避免状态持续逼近 MAX_BUCKETS 后触发 prune 的全扫尖刺。
-    for (const [key, bucket] of buckets) {
-      if (now - bucket.windowStart >= WINDOW_MS_MAX) buckets.delete(key);
+    // F5（round-5 审计 #10）：整批清理同样受 SWEEP_INTERVAL_MS 门控——原实现
+    // 一旦 size >= MAX_BUCKETS_BEFORE_SWEEP 就在每次调用上全 Map 扫描。改为与
+    // lazySweep 同频率（至多每秒一次）执行，命中路径不再因逼近阈值而线性扫 Map。
+    if (buckets.size >= MAX_BUCKETS_BEFORE_SWEEP) {
+      // 一次性清掉全部过期桶，避免状态持续逼近 MAX_BUCKETS 后触发 prune 的全扫尖刺。
+      for (const [key, bucket] of buckets) {
+        if (now - bucket.windowStart >= WINDOW_MS_MAX) buckets.delete(key);
+      }
     }
+    lastSweepAt = now;
   }
   prune(now);
   const existing = buckets.get(args.key);

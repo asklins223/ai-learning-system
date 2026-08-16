@@ -90,6 +90,57 @@ function p4StableContextCacheFor(runId: string): StableContextCacheLike {
 }
 
 /**
+ * PERF-34: 按 runId 缓存稳定上下文适配器 + ContextBuilder（含 ContextPacker）。
+ *
+ * loadAgentRunPhaseContext 每个 turn 都会新建 ContextBuilder。provider 能力
+ * 在 run 内被冻结（providerSnapshot），因此 token 预算/工具 schema 稳定段在
+ * run 内不变，ContextBuilder 可安全跨 turn 复用。缓存有界（简单 LRU 淘汰），
+ * 防止 worker 长时间运行处理大量 run 时无界增长。
+ */
+interface P4RunBuilderEntry {
+  optionsKey: string;
+  adapter: StableContextCacheLike;
+  builder: ContextBuilder;
+}
+const p4RunBuilderCache = new Map<string, P4RunBuilderEntry>();
+const P4_RUN_BUILDER_CACHE_MAX = 128;
+function p4RunBuilderCacheGet(runId: string): P4RunBuilderEntry | undefined {
+  const entry = p4RunBuilderCache.get(runId);
+  if (entry) {
+    // LRU: 重新插入到末尾
+    p4RunBuilderCache.delete(runId);
+    p4RunBuilderCache.set(runId, entry);
+  }
+  return entry;
+}
+function p4RunBuilderCacheSet(runId: string, entry: P4RunBuilderEntry): void {
+  if (p4RunBuilderCache.size >= P4_RUN_BUILDER_CACHE_MAX) {
+    const oldest = p4RunBuilderCache.keys().next().value;
+    if (oldest !== undefined) p4RunBuilderCache.delete(oldest);
+  }
+  p4RunBuilderCache.set(runId, entry);
+}
+/** 获取（或创建）某 run 的稳定缓存适配器 + ContextBuilder，跨 turn 复用。 */
+function getOrCreateRunContextBuilder(
+  runId: string,
+  options: {
+    contextWindowTokens: number;
+    reservedOutputTokens: number;
+    maxOutputTokens: number;
+  },
+): { adapter: StableContextCacheLike; builder: ContextBuilder } {
+  const optionsKey = `${options.contextWindowTokens}:${options.reservedOutputTokens}:${options.maxOutputTokens}`;
+  const existing = p4RunBuilderCacheGet(runId);
+  if (existing && existing.optionsKey === optionsKey) {
+    return { adapter: existing.adapter, builder: existing.builder };
+  }
+  const adapter = p4StableContextCacheFor(runId);
+  const builder = new ContextBuilder(toolRegistry, options, adapter);
+  p4RunBuilderCacheSet(runId, { optionsKey, adapter, builder });
+  return { adapter, builder };
+}
+
+/**
  * 加载 AGENT_RUN 阶段所需的全部上下文。
  *
  * 包括从数据库重建 AgentSession、BudgetTracker、CoverageLedger、
@@ -164,15 +215,73 @@ export async function loadAgentRunPhaseContext(
     return { abort: true, reason: "budget_exhausted" };
   }
 
-  // 4. 加载 source bundles（Coverage Ledger 数据源）
-  const sourceBundles = await db
-    .select()
-    .from(schema.cardGenerationSourceBundles)
-    .where(and(
-      eq(schema.cardGenerationSourceBundles.runId, payload.generationRunId),
-      eq(schema.cardGenerationSourceBundles.workspaceId, job.workspaceId),
-    ))
-    .orderBy(schema.cardGenerationSourceBundles.bundleOrdinal);
+  // PERF-27: 将相互独立的 DB 加载并行化（source bundles / candidates / agent
+  // events / latest draft / 子任务 / 已完成子任务），减少每个 turn 的串行往返。
+  const [sourceBundles, candidates, agentEvents, latestDraft, childUnits, completedChildUnits] = await Promise.all([
+    db
+      .select()
+      .from(schema.cardGenerationSourceBundles)
+      .where(and(
+        eq(schema.cardGenerationSourceBundles.runId, payload.generationRunId),
+        eq(schema.cardGenerationSourceBundles.workspaceId, job.workspaceId),
+      ))
+      .orderBy(schema.cardGenerationSourceBundles.bundleOrdinal),
+    db
+      .select()
+      .from(schema.cardGenerationCandidates)
+      .where(and(
+        eq(schema.cardGenerationCandidates.runId, payload.generationRunId),
+        eq(schema.cardGenerationCandidates.workspaceId, job.workspaceId),
+      )),
+    db
+      .select()
+      .from(schema.cardGenerationAgentEvents)
+      .where(and(
+        eq(schema.cardGenerationAgentEvents.runId, payload.generationRunId),
+        eq(schema.cardGenerationAgentEvents.workspaceId, job.workspaceId),
+      ))
+      .orderBy(schema.cardGenerationAgentEvents.createdAt)
+      .limit(200),
+    db
+      .select()
+      .from(schema.cardGenerationDrafts)
+      .where(and(
+        eq(schema.cardGenerationDrafts.runId, payload.generationRunId),
+        eq(schema.cardGenerationDrafts.workspaceId, job.workspaceId),
+      ))
+      .orderBy(desc(schema.cardGenerationDrafts.draftVersion))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
+    db
+      .select({
+        id: schema.cardGenerationUnits.id,
+        status: schema.cardGenerationUnits.status,
+        inputManifest: schema.cardGenerationUnits.inputManifest,
+      })
+      .from(schema.cardGenerationUnits)
+      .where(and(
+        eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+        eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+        eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
+        inArray(schema.cardGenerationUnits.status, ["pending", "waiting_child", "running"]),
+      )),
+    db
+      .select({
+        id: schema.cardGenerationUnits.id,
+        status: schema.cardGenerationUnits.status,
+        inputManifest: schema.cardGenerationUnits.inputManifest,
+        artifactHash: schema.cardGenerationUnits.artifactHash,
+      })
+      .from(schema.cardGenerationUnits)
+      .where(and(
+        eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
+        eq(schema.cardGenerationUnits.runId, payload.generationRunId),
+        eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
+        eq(schema.cardGenerationUnits.status, "succeeded"),
+      ))
+      .orderBy(desc(schema.cardGenerationUnits.updatedAt))
+      .limit(30),
+  ]);
 
   // 重建 CoverageLedger
   const coverageLedger = new CoverageLedger();
@@ -199,34 +308,41 @@ export async function loadAgentRunPhaseContext(
     }
   }
 
-  // 5. 加载候选 ledger
-  const candidates = await db
-    .select()
-    .from(schema.cardGenerationCandidates)
-    .where(and(
-      eq(schema.cardGenerationCandidates.runId, payload.generationRunId),
-      eq(schema.cardGenerationCandidates.workspaceId, job.workspaceId),
-    ));
+  // 5. 加载候选 ledger —— candidates 已在上方并行批次中加载。
 
   // R17 修复：从 card_generation_candidate_evidence 表加载候选的证据引用
+  //（依赖 candidates）与 Quality Report（依赖 latestDraft）并行加载。
   const candidateIds = candidates.map((c) => c.id);
-  const candidateEvidenceRows = candidateIds.length > 0
-    ? await db
-        .select({
-          candidateId: schema.cardGenerationCandidateEvidence.candidateId,
-          evidenceSpanId: schema.cardGenerationCandidateEvidence.evidenceSpanId,
-          imageEvidenceUnitId: schema.cardGenerationCandidateEvidence.imageEvidenceUnitId,
-          sourceKind: schema.cardGenerationCandidateEvidence.sourceKind,
-          ordinal: schema.cardGenerationCandidateEvidence.ordinal,
-        })
-        .from(schema.cardGenerationCandidateEvidence)
-        .where(and(
-          eq(schema.cardGenerationCandidateEvidence.workspaceId, job.workspaceId),
-          eq(schema.cardGenerationCandidateEvidence.runId, payload.generationRunId),
-          inArray(schema.cardGenerationCandidateEvidence.candidateId, candidateIds),
-        ))
-        .orderBy(schema.cardGenerationCandidateEvidence.ordinal)
-    : [];
+  const [candidateEvidenceRows, latestReport] = await Promise.all([
+    candidateIds.length > 0
+      ? db
+          .select({
+            candidateId: schema.cardGenerationCandidateEvidence.candidateId,
+            evidenceSpanId: schema.cardGenerationCandidateEvidence.evidenceSpanId,
+            imageEvidenceUnitId: schema.cardGenerationCandidateEvidence.imageEvidenceUnitId,
+            sourceKind: schema.cardGenerationCandidateEvidence.sourceKind,
+            ordinal: schema.cardGenerationCandidateEvidence.ordinal,
+          })
+          .from(schema.cardGenerationCandidateEvidence)
+          .where(and(
+            eq(schema.cardGenerationCandidateEvidence.workspaceId, job.workspaceId),
+            eq(schema.cardGenerationCandidateEvidence.runId, payload.generationRunId),
+            inArray(schema.cardGenerationCandidateEvidence.candidateId, candidateIds),
+          ))
+          .orderBy(schema.cardGenerationCandidateEvidence.ordinal)
+      : Promise.resolve([]),
+    latestDraft
+      ? db
+          .select()
+          .from(schema.cardGenerationQualityReports)
+          .where(and(
+            eq(schema.cardGenerationQualityReports.draftId, latestDraft.id),
+            eq(schema.cardGenerationQualityReports.workspaceId, job.workspaceId),
+          ))
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+      : Promise.resolve(null),
+  ]);
 
   // 构建候选 ID 到 evidenceRefIds 的映射
   const candidateEvidenceMap = new Map<string, string[]>();
@@ -261,40 +377,7 @@ export async function loadAgentRunPhaseContext(
     derivedCandidateIds: (c.derivedCandidateIds as string[]) ?? [],
   })));
 
-  // 6. 加载 Agent events（全部加载，由 ContextPacker 按信息价值分层压缩）
-  // 安全上限 200 条防止异常场景下加载过多数据（正常 30-turn run 约 90 条）
-  const agentEvents = await db
-    .select()
-    .from(schema.cardGenerationAgentEvents)
-    .where(and(
-      eq(schema.cardGenerationAgentEvents.runId, payload.generationRunId),
-      eq(schema.cardGenerationAgentEvents.workspaceId, job.workspaceId),
-    ))
-    .orderBy(schema.cardGenerationAgentEvents.createdAt)
-    .limit(200);
-
-  // 7. 加载 Draft（如果有）—— 按 draftVersion 降序获取最新版本
-  const [latestDraft] = await db
-    .select()
-    .from(schema.cardGenerationDrafts)
-    .where(and(
-      eq(schema.cardGenerationDrafts.runId, payload.generationRunId),
-      eq(schema.cardGenerationDrafts.workspaceId, job.workspaceId),
-    ))
-    .orderBy(desc(schema.cardGenerationDrafts.draftVersion))
-    .limit(1);
-
-  // 8. 加载 Quality Report（如果有）
-  const [latestReport] = latestDraft
-    ? await db
-        .select()
-        .from(schema.cardGenerationQualityReports)
-        .where(and(
-          eq(schema.cardGenerationQualityReports.draftId, latestDraft.id),
-          eq(schema.cardGenerationQualityReports.workspaceId, job.workspaceId),
-        ))
-        .limit(1)
-    : [null];
+  // Agent events / latestDraft / latestReport 已在上方 PERF-27 并行批次中加载。
 
   // 9-10. 构建 provider 和 runtime（先创建 provider，再创建 context builder）
   // P1-12 修复：后续 turn 只能重建同一 provider 快照；配置变化只影响新 run。
@@ -412,11 +495,12 @@ export async function loadAgentRunPhaseContext(
   // 使用 provider 实际 capability 构建 context builder（而非从 providerSnapshot 读取不存在的字段）
   // P4-1 接线:注入稳定上下文缓存(runId 前缀隔离;工具 schema 稳定段跨 turn 复用,
   // 不再每 turn 重建;key 维度含 runId+role,与 stableContextCacheKey 语义一致)
-  const contextBuilder = new ContextBuilder(toolRegistry, {
+  // PERF-34:跨 turn 复用 run 级 ContextBuilder/ContextPacker，避免每 turn 重建。
+  const { builder: contextBuilder } = getOrCreateRunContextBuilder(payload.generationRunId, {
     contextWindowTokens: providerCapability.contextWindowTokens,
     reservedOutputTokens: providerCapability.reservedOutputTokens,
     maxOutputTokens: providerCapability.maxOutputTokens,
-  }, p4StableContextCacheFor(payload.generationRunId));
+  });
 
   const { AgentRuntime } = await import("./runtime.ts");
 
@@ -495,42 +579,13 @@ export async function loadAgentRunPhaseContext(
       }))
     : [];
 
-  // R46: 查询 pending 和 waiting_child 状态的子任务
-  const childUnits = await db
-    .select({
-      id: schema.cardGenerationUnits.id,
-      status: schema.cardGenerationUnits.status,
-      inputManifest: schema.cardGenerationUnits.inputManifest,
-    })
-    .from(schema.cardGenerationUnits)
-    .where(and(
-      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
-      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
-      eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
-      inArray(schema.cardGenerationUnits.status, ["pending", "waiting_child", "running"]),
-    ));
+  // R46: 子任务状态已在上方 PERF-27 并行批次中加载（childUnits）。
   const pendingTasksFromDb = childUnits.map((u) => ({
     taskId: u.id,
     role: (((u.inputManifest as Record<string, unknown>)?.agentRole as string) ?? "unknown") as AgentRole,
   }));
 
-  // R48: 查询已完成的子任务摘要
-  const completedChildUnits = await db
-    .select({
-      id: schema.cardGenerationUnits.id,
-      status: schema.cardGenerationUnits.status,
-      inputManifest: schema.cardGenerationUnits.inputManifest,
-      artifactHash: schema.cardGenerationUnits.artifactHash,
-    })
-    .from(schema.cardGenerationUnits)
-    .where(and(
-      eq(schema.cardGenerationUnits.workspaceId, job.workspaceId),
-      eq(schema.cardGenerationUnits.runId, payload.generationRunId),
-      eq(schema.cardGenerationUnits.parentUnitId, payload.agentUnitId),
-      eq(schema.cardGenerationUnits.status, "succeeded"),
-    ))
-    .orderBy(desc(schema.cardGenerationUnits.updatedAt))
-    .limit(30); // 上限 30，由 ContextPacker 按需压缩
+  // R48: 已完成的子任务摘要已在上方 PERF-27 并行批次中加载（completedChildUnits）。
   const taskResultsFromDb = completedChildUnits.map((u) => ({
     taskId: u.id,
     role: (((u.inputManifest as Record<string, unknown>)?.agentRole as string) ?? "unknown") as AgentRole,

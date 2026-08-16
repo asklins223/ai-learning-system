@@ -52,6 +52,10 @@ function jobScheduling(type: JobType): { priority: number; resourceClass: string
     case JobType.PARSE_SOURCE:
       return { priority: 70, resourceClass: JobResourceClass.CARD_FOREGROUND };
     case JobType.ALIGN_EVIDENCE:
+    case JobType.COMPANION_MEMORY_EXTRACT:
+    case JobType.COMPANION_SUMMARIZER:
+    case JobType.COMPANION_DAILY_SUMMARY:
+    case JobType.COMPANION_MEMORY_EMBEDDING_REBUILD:
       return { priority: 10, resourceClass: JobResourceClass.MAINTENANCE };
     default:
       return { priority: 40, resourceClass: JobResourceClass.MAINTENANCE };

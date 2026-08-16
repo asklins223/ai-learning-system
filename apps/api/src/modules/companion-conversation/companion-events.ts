@@ -10,7 +10,7 @@
  * - latest-generation fence 由 Worker 写侧保证（cancel/supersede 后迟到输出零写入）。
  */
 
-import { eq, and, gt, lte, sql } from "drizzle-orm";
+import { eq, and, gt, gte, lte, sql } from "drizzle-orm";
 import { companionConversations, companionStreamEvents } from "./turn-service.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { subscribeCompanionEvents } from "./companion-notify.ts";
@@ -185,15 +185,23 @@ async function validateCompanionCursor(
     if (after > latestEventSeq) {
       return { ok: false, statusCode: 400, code: "INVALID_CURSOR", message: "after exceeds latest event seq" };
     }
+    // F5（round-5 审计 #12）：min(seq) 由「整段会话历史」收窄到当前 replay 窗口
+    // [after+1, latest]（PK (conversation_id, seq) 前缀索引范围扫描），避免每个
+    // SSE 连接都从会话开头扫到首个未过期行。窗口连续性仍由下方 count(*) 全量
+    // 校验兜底（该 count 本就受 seq 范围 + PK 前缀约束，代价与窗口大小成正比）。
     const minRows = await tx
       .select({ min: sql<string>`min(${companionStreamEvents.seq})` })
       .from(companionStreamEvents)
       .where(and(
         eq(companionStreamEvents.conversationId, conversationId),
+        gte(companionStreamEvents.seq, after + 1),
+        lte(companionStreamEvents.seq, latestEventSeq),
         gt(companionStreamEvents.expiresAt, new Date()),
       ));
     const minReplayable = minRows[0]?.min != null ? Number(minRows[0].min) : null;
     // after+1 < minReplayable → after 落在过期缺口，无法连续 replay
+    // （窗口为空/首行缺失也会由下方 count 不一致捕获，这里保留首个可 replay
+    // 行的早退检查，二者共同维持与原来一致的 CURSOR_EXPIRED 语义）。
     if (minReplayable != null && after + 1 < minReplayable) {
       return { ok: false, statusCode: 409, code: "CURSOR_EXPIRED", message: "cursor expired; fetch snapshot and reconnect" };
     }

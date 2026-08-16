@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { rename, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { DesktopPetScaleV1 } from "@ailearn/shared";
 
@@ -106,14 +107,88 @@ export function loadDevicePetPreferences(userDataPath: string): DevicePetPrefere
   }
 }
 
+// 2026-08-16（性能专项，IO-Blocking）：把同步的 writeFileSync+renameSync 改造成
+// 异步 + last-write-wins 合并写入。桌宠拖动/切换等高频 setter 不再阻塞 Electron
+// main 事件循环；同一文件的突发写入会被合并成一次原子 write+rename。Data writes
+// 仍保证原子性（临时文件 + rename），崩溃时最多丢失最近一次未刷盘的写入。
+// 应用退出前应调用 flushDevicePetPreferences() 刷盘（见 main.ts before-quit）。
+
+const WRITE_DEBOUNCE_MS = 150;
+
+interface PendingPetPreferencesWrite {
+  temp: string;
+  file: string;
+  content: string;
+  timer: NodeJS.Timeout;
+  resolvers: Array<() => void>;
+  rejecters: Array<(error: unknown) => void>;
+}
+
+const pendingPreferencesWrites = new Map<string, PendingPetPreferencesWrite>();
+
+function flushPreferencesWrite(pending: PendingPetPreferencesWrite): Promise<void> {
+  pendingPreferencesWrites.delete(pending.file);
+  clearTimeout(pending.timer);
+  return (async () => {
+    try {
+      await writeFile(pending.temp, pending.content, { encoding: "utf8", mode: 0o600 });
+      await rename(pending.temp, pending.file);
+      for (const resolve of pending.resolvers) resolve();
+    } catch (error) {
+      for (const reject of pending.rejecters) reject(error);
+    }
+  })();
+}
+
+function schedulePreferencesWrite(file: string, temp: string, content: string): Promise<void> {
+  const existing = pendingPreferencesWrites.get(file);
+  if (existing) {
+    // last-write-wins：同一窗口内的后续写入直接覆盖内容，复用待落盘任务。
+    existing.content = content;
+    clearTimeout(existing.timer);
+    existing.timer = setTimeout(() => {
+      void flushPreferencesWrite(existing);
+    }, WRITE_DEBOUNCE_MS);
+    existing.timer.unref?.();
+    return new Promise<void>((resolve, reject) => {
+      existing.resolvers.push(resolve);
+      existing.rejecters.push(reject);
+    });
+  }
+  const pending: PendingPetPreferencesWrite = {
+    temp,
+    file,
+    content,
+    timer: setTimeout(() => {
+      void flushPreferencesWrite(pending);
+    }, WRITE_DEBOUNCE_MS),
+    resolvers: [],
+    rejecters: [],
+  };
+  pending.timer.unref?.();
+  pendingPreferencesWrites.set(file, pending);
+  return new Promise<void>((resolve, reject) => {
+    pending.resolvers.push(resolve);
+    pending.rejecters.push(reject);
+  });
+}
+
 export function saveDevicePetPreferences(
   userDataPath: string,
   preferences: DevicePetPreferencesV1,
-): void {
+): Promise<void> {
   const file = preferenceFilePath(userDataPath);
   const temp = `${file}.tmp-${process.pid}`;
-  writeFileSync(temp, `${JSON.stringify(preferences)}\n`, { encoding: "utf8", mode: 0o600 });
-  renameSync(temp, file);
+  const content = `${JSON.stringify(preferences)}\n`;
+  return schedulePreferencesWrite(file, temp, content);
+}
+
+/** Flush any pending prefs write for `userDataPath` (resolves once persisted). */
+export function flushDevicePetPreferences(userDataPath: string): Promise<void> {
+  const file = preferenceFilePath(userDataPath);
+  const pending = pendingPreferencesWrites.get(file);
+  if (!pending) return Promise.resolve();
+  return flushPreferencesWrite(pending);
 }
 
 export function resolvePetPosition(

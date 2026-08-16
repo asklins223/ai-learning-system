@@ -9,7 +9,10 @@ const searchQuerySchema = z.object({
   q: z.string().optional(),
   type: z.enum(["note", "card_set", "card", "source", "evidence"]).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
-  offset: z.coerce.number().int().min(0).max(100_000).optional(),
+  // PERF: 深度 OFFSET 在 DISTINCT ON + ILIKE 上会退化为深扫描。把翻页上限
+  // 从 100k 大幅降到 1000（50 条/页 × 20 页），超过即终止翻页并返回 nextCursor=null，
+  // 防止单次请求把整个匹配集做 DISTINCT ON 后深 OFFSET。
+  offset: z.coerce.number().int().min(0).max(1000).optional(),
 });
 
 export async function searchRoutes(app: FastifyInstance) {

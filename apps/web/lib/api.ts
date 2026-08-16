@@ -857,11 +857,38 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
-  /* 方案 16 §10.3：分层记忆管理（candidate → confirm/reject；active → delete）。 */
-  listCompanionMemories: (includeCandidates = false) =>
-    request<{ version: 1; items: unknown[] }>(
-      `/companion/memory?includeCandidates=${includeCandidates}`,
-    ),
+  /* 方案 16 §10.3 + 22 方案：分层记忆管理（候选确认/固定/归档/纠正/清空）。 */
+  listCompanionMemories: (
+    includeCandidatesOrParams: boolean | { includeCandidates?: boolean; includeArchived?: boolean; q?: string; kind?: string; scope?: string } = false,
+  ) => {
+    const params = typeof includeCandidatesOrParams === "boolean"
+      ? { includeCandidates: includeCandidatesOrParams }
+      : includeCandidatesOrParams;
+    const search = new URLSearchParams();
+    if (params.includeCandidates) search.set("includeCandidates", "true");
+    if (params.includeArchived) search.set("includeArchived", "true");
+    if (params.q) search.set("q", params.q);
+    if (params.kind) search.set("kind", params.kind);
+    if (params.scope) search.set("scope", params.scope);
+    const qs = search.toString();
+    return request<{ version: 2; items: unknown[] }>(
+      `/companion/memory${qs ? `?${qs}` : ""}`,
+    );
+  },
+  createCompanionMemory: (input: {
+    kind: "preference" | "goal" | "learning_context" | "interaction_note" | "episodic";
+    content: string;
+    sourceEventId?: string;
+    importance?: number;
+    confidence?: number;
+    scope?: "global" | "workspace" | "task";
+    sourceType?: "user_stated" | "model_inferred" | "confirmed" | "summary" | "legacy";
+    candidate?: boolean;
+  }) =>
+    request<unknown>("/companion/memory", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   confirmCompanionMemory: (memoryId: string) =>
     request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/confirm`, {
       method: "POST",
@@ -872,10 +899,112 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+  pinCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/pin`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  archiveCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/archive`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  restoreCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  dismissCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/dismiss`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  correctCompanionMemory: (memoryId: string, content: string, reason?: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/correct`, {
+      method: "POST",
+      body: JSON.stringify({ content, ...(reason ? { reason } : {}) }),
+    }),
   deleteCompanionMemory: (memoryId: string) =>
     request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}`, {
       method: "DELETE",
     }),
+  clearCompanionMemories: () =>
+    request<{ deletedCount: number }>("/companion/memory", {
+      method: "DELETE",
+    }),
+  getCompanionMemoryStarMap: () =>
+    request<{ version: 1; nodes: unknown[]; cursor: null }>("/companion/memory/star-map"),
+  listCompanionMemoryConflicts: () =>
+    request<{ version: 1; items: unknown[] }>("/companion/memory/conflicts"),
+  resolveCompanionMemoryConflict: (keepId: string, removeId: string) =>
+    request<{ version: 1; ok: boolean }>(
+      `/companion/memory/${encodeURIComponent(keepId)}/resolve-conflict`,
+      { method: "POST", body: JSON.stringify({ removeId }) },
+    ),
+  rebuildCompanionMemoryEmbeddings: () =>
+    request<{ version: 1; queued: boolean }>("/companion/memory/rebuild-embeddings", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  getPetProfile: () =>
+    request<{
+      version: 1;
+      profile: {
+        id: string;
+        name: string;
+        personalityTags: string[];
+        speakingStyle: string;
+        examples: { text: string }[];
+        activeness: "quiet" | "moderate" | "active";
+        boundaries: { allowPlayful?: boolean; allowNudgeLearning?: boolean; allowVoiceTags?: boolean; catchphrase?: string | null };
+        presetId: string | null;
+        revision: number;
+      } | null;
+      presets: Array<{
+        presetId: string;
+        name: string;
+        personalityTags: string[];
+        speakingStyle: string;
+        examples: { text: string }[];
+        activeness: "quiet" | "moderate" | "active";
+        boundaries: Record<string, unknown>;
+      }>;
+      activePreset: unknown;
+    }>("/companion/pet-profile"),
+  updatePetProfile: (input: {
+    presetId?: string | null;
+    name: string;
+    personalityTags: string[];
+    speakingStyle: string;
+    examples: { text: string }[];
+    activeness: "quiet" | "moderate" | "active";
+    boundaries: { allowPlayful?: boolean; allowNudgeLearning?: boolean; allowVoiceTags?: boolean; catchphrase?: string | null };
+  }) =>
+    request<{ version: 1; profile: unknown }>("/companion/pet-profile", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  resetPetProfile: () =>
+    request<{ version: 1; ok: boolean }>("/companion/pet-profile/reset", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  summarizeCompanionConversation: (conversationId: string) =>
+    request<{ version: 1; queued: boolean }>(
+      `/companion/conversations/${encodeURIComponent(conversationId)}/summarize`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  getCompanionDailySummary: (date?: string) =>
+    request<{
+      version: 1;
+      date: string | null;
+      status: "generated" | "not_generated" | "failed";
+      generatedAt: string | null;
+      summary: string;
+      facts: Record<string, unknown>;
+      conversationHighlights: unknown[];
+      memory: { memoryItemId: string; candidate: boolean } | null;
+    }>(`/companion/daily${date ? `?date=${encodeURIComponent(date)}` : ""}`),
   /* 方案 16 §10.4：完整历史全文搜索（redacted/已删内容不命中）。 */
   searchCompanionHistory: (q: string, limit = 20) =>
     request<{ version: 1; query: string; items: unknown[] }>(

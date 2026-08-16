@@ -16,7 +16,9 @@ import { PetJourneyLive } from "@/features/companion-pet/journey-live/PetJourney
 import { PetDeliveryLayer } from "@/features/companion-pet/deliveries/PetDeliveryLayer";
 import { DeltaReceiptNotice } from "@/features/companion-pet/deliveries/DeltaReceiptNotice";
 import { usePetBridgeContext } from "@/features/companion-bridge/usePetBridgeContext";
+import { PetJourneyRedrawLab } from "@/features/companion-pet/journey/PetJourneyRedrawLab";
 import "@/features/companion-pet/journey-live/pet-journey-live.css";
+import "@/app/styles/pet-journey.css";
 import "@/components/liquid-orb/liquid-orb.css";
 import "./pet.css";
 
@@ -37,6 +39,8 @@ type BootstrapViewV1 =
 export default function PetPage() {
   const [bootstrap, setBootstrap] = useState<BootstrapViewV1>("checking");
   const [petScale, setPetScale] = useState<DesktopPetScaleV1>(1);
+  // UI redraw 预览：/companion/pet?preview=redraw 在 dev 下挂载 PetJourneyRedrawLab。
+  const [previewRedraw, setPreviewRedraw] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const [textConversationEnabled, setTextConversationEnabled] = useState(false);
   const [voiceDialogueEnabled, setVoiceDialogueEnabled] = useState(false);
@@ -72,6 +76,11 @@ export default function PetPage() {
     const onChange = () => setReducedMotion(media.matches);
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    setPreviewRedraw(new URLSearchParams(window.location.search).get("preview") === "redraw");
   }, []);
 
   useEffect(() => {
@@ -189,6 +198,10 @@ export default function PetPage() {
     const param = new URLSearchParams(window.location.search).get("petSide");
     return param === "right" ? ("bubble-right" as const) : null;
   }, []);
+
+  if (previewRedraw) {
+    return <PetJourneyRedrawLab />;
+  }
 
   if (bootstrap === "checking") {
     return (

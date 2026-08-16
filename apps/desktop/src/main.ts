@@ -50,6 +50,7 @@ import { DESKTOP_UPDATE_FEED_URL } from "./update-feed.ts";
 import { isAllowedExternalUrl, isAllowedWindowNavigation } from "./windows/window-security";
 import {
   displayFingerprint,
+  flushDevicePetPreferences,
   getDefaultDevicePetPreferences,
   loadDevicePetPreferences,
   normalizeDevicePetPreferences,
@@ -348,7 +349,7 @@ function persistPetMode(enabled: boolean): void {
   const primary = displayProvider().getPrimaryDisplay();
   const existing = loadDevicePetPreferences(app.getPath("userData"));
   const preferences = normalizeDevicePetPreferences(existing ?? getDefaultDevicePetPreferences(primary), primary);
-  saveDevicePetPreferences(app.getPath("userData"), { ...preferences, petModeEnabled: enabled });
+  void saveDevicePetPreferences(app.getPath("userData"), { ...preferences, petModeEnabled: enabled });
   cachedPetModeEnabled = enabled;
   petModeCacheLoaded = true;
 }
@@ -1040,6 +1041,12 @@ if (!gotTheLock) {
       session.defaultSession.flushStorageData();
     } catch (error) {
       logger.warn({ err: error }, "[app] flushStorageData failed");
+    }
+    // 2026-08-16（性能专项）：桌宠偏好改为异步 debounce 写入，退出前刷盘兜底。
+    try {
+      await flushDevicePetPreferences(app.getPath("userData"));
+    } catch (error) {
+      logger.warn({ err: error }, "[app] flushDevicePetPreferences failed");
     }
     // 防止快连退出导致重复执行清理逻辑
     if (shuttingDown) {

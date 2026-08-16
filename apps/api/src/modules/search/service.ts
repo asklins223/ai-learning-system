@@ -264,7 +264,10 @@ export async function search(
   opts?: { type?: string; limit?: number; offset?: number },
 ): Promise<{ items: SearchResult[]; total: number; nextCursor: number | null }> {
   const limit = Math.min(opts?.limit ?? 20, 50);
-  const offset = Math.max(opts?.offset ?? 0, 0);
+  // PERF: 限制深度 OFFSET（与 routes.ts schema 一致），避免 DISTINCT ON + ILIKE
+  // 上对全部匹配文档做深 OFFSET 扫描。达到上限后由 nextCursor 逻辑自然结束翻页。
+  const MAX_SEARCH_OFFSET = 1000;
+  const offset = Math.min(Math.max(opts?.offset ?? 0, 0), MAX_SEARCH_OFFSET);
   const type = opts?.type ?? null;
   // ILIKE treats `%` and `_` as wildcards. Escape them so the public API keeps
   // literal keyword semantics and a query such as `%` cannot scan/return every
@@ -412,10 +415,13 @@ export async function search(
   });
 
   const consumed = offset + items.length;
+  // 不超过深度 OFFSET 上限（MAX_SEARCH_OFFSET）时才提供下一页游标；
+  // 达到上限后返回 null 让前端停止翻页，避免深扫描。
+  const nextCursor = consumed < total && consumed <= MAX_SEARCH_OFFSET ? consumed : null;
   return {
     items,
     total,
-    nextCursor: consumed < total ? consumed : null,
+    nextCursor,
   };
 }
 

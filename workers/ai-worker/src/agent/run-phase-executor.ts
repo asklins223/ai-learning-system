@@ -147,9 +147,18 @@ export function countConsecutiveReadOnlySupervisorTurns(
     "validate_draft",
   ]);
 
+  // PERF: 只采集当前 turn 向前的有限窗口内的工具集合，避免为每次 supervisor
+  // 调用重建完整事件 Map。自旋检测阈值固定为 3，窗口取 10 已足够判断连续自旋
+  // （超过 10 个连续只读 turn 时同样满足 ≥3 触发条件，行为等价）。
+  const MAX_SPIN_WINDOW = 10;
+  const windowStart = Math.max(1, currentTurnNo - MAX_SPIN_WINDOW);
+
   const toolsByTurn = new Map<number, Set<string>>();
   for (const ev of agentEvents) {
     if (ev.agentRole !== "generation_supervisor" || ev.eventType !== "tool_request" || !ev.toolName || ev.turnNo == null) {
+      continue;
+    }
+    if (ev.turnNo < windowStart || ev.turnNo > currentTurnNo) {
       continue;
     }
     if (!toolsByTurn.has(ev.turnNo)) {
@@ -169,7 +178,7 @@ export function countConsecutiveReadOnlySupervisorTurns(
 
   let consecutive = 0;
   let turn = currentTurnNo;
-  while (turn >= 1) {
+  while (turn >= windowStart) {
     const tools = toolsByTurn.get(turn);
     if (!tools || tools.size === 0) break;
     let allReadOnly = true;
@@ -601,29 +610,30 @@ async function executeCriticProviderCall(turnCtx: TurnExecutionContext): Promise
   const draftContent = criticDraft ? JSON.stringify(criticDraft.contentJson) : "{}";
   const candidatesContent = JSON.stringify(candidateLedger.getActiveCandidates());
 
-  // 加载文本证据（R44 修复：移除 .limit(100) 截断）
-  const evidenceRows = await db
-    .select({ span: schema.noteEvidenceSpans, block: schema.noteBlocks })
-    .from(schema.noteEvidenceSpans)
-    .innerJoin(schema.noteBlocks, eq(schema.noteEvidenceSpans.blockId, schema.noteBlocks.id))
-    .where(and(
-      eq(schema.noteEvidenceSpans.workspaceId, job.workspaceId),
-      eq(schema.noteEvidenceSpans.noteVersionId, runContext.noteVersionId),
-    ));
+  // 加载文本证据（R44 修复：移除 .limit(100) 截断；PERF-29:仅加载候选实际引用的
+  // 证据 span，避免每个 critic turn 全量扫描 noteEvidenceSpans JOIN noteBlocks）。
+  const candidateEvidenceRefIds = Array.from(new Set(
+    candidateLedger.getActiveCandidates().flatMap((c) => c.evidenceRefIds ?? []),
+  ));
+  const evidenceRows = candidateEvidenceRefIds.length > 0
+    ? await db
+        .select({ span: schema.noteEvidenceSpans, block: schema.noteBlocks })
+        .from(schema.noteEvidenceSpans)
+        .innerJoin(schema.noteBlocks, eq(schema.noteEvidenceSpans.blockId, schema.noteBlocks.id))
+        .where(and(
+          eq(schema.noteEvidenceSpans.workspaceId, job.workspaceId),
+          eq(schema.noteEvidenceSpans.noteVersionId, runContext.noteVersionId),
+          inArray(schema.noteEvidenceSpans.id, candidateEvidenceRefIds),
+        ))
+    : [];
 
-  // R66 修复：加载图片证据
-  const imageBlockAssetIds = (await db
-    .select({ imageAssetId: schema.noteBlocks.imageAssetId })
-    .from(schema.noteBlocks)
-    .where(eq(schema.noteBlocks.versionId, runContext.noteVersionId)))
-    .map((b) => b.imageAssetId)
-    .filter((id): id is string => id !== null);
-
-  const imageEvidenceRows = imageBlockAssetIds.length > 0
+  // R66 / PERF-29: 图片证据——直接按候选引用的图片证据单元 id 查询，
+  // 替代“全量扫描 noteBlocks 取 imageAssetId 再查图片证据”的无界路径。
+  const imageEvidenceRows = candidateEvidenceRefIds.length > 0
     ? await db.select().from(schema.noteImageEvidenceUnits)
         .where(and(
           eq(schema.noteImageEvidenceUnits.workspaceId, job.workspaceId),
-          inArray(schema.noteImageEvidenceUnits.imageAssetId, imageBlockAssetIds),
+          inArray(schema.noteImageEvidenceUnits.id, candidateEvidenceRefIds),
         ))
     : [];
 

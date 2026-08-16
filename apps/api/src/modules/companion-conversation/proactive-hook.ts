@@ -213,10 +213,37 @@ export async function hookProactiveOnRunCompleted(
   });
   if (!decision.allow) return null;
 
+  // 22 方案：个性化主动文案（受 Policy Gate 批准后；确定性模板 + 记忆引用）。
+  let proactiveText: string | undefined;
+  if (process.env.COMPANION_PROACTIVE_PERSONALIZED_V1 === "true") {
+    try {
+      const memoryRows = await tx.execute<{ content: string }>(sql`
+        SELECT content FROM assistant_memory_items
+        WHERE workspace_id = ${scope.workspaceId}
+          AND user_id = ${scope.userId}
+          AND deleted_at IS NULL
+          AND candidate = false
+          AND archived_at IS NULL
+        ORDER BY pinned DESC, importance DESC, updated_at DESC
+        LIMIT 3
+      `);
+      const topMemory = (Array.isArray(memoryRows) ? memoryRows : [])[0]?.content;
+      if (topMemory) {
+        proactiveText = `我注意到你最近在关注「${topMemory.slice(0, 60)}」。刚才的学习已完成，要继续吗？`;
+      }
+    } catch {
+      proactiveText = undefined; // 个性化失败回退模板文案。
+    }
+  }
+
   await deliver(tx, scope, {
     assistantSessionId: null,
     kind: "system_event",
-    payloadRef: { kind: "system_event", systemEventId: `run.completed:${input.runId}` },
+    payloadRef: {
+      kind: "system_event",
+      systemEventId: `run.completed:${input.runId}`,
+      ...(proactiveText ? { text: proactiveText } : {}),
+    },
     dedupeKey: `run.completed:${input.runId}`,
     expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
   }, now);

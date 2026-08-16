@@ -423,12 +423,13 @@ export const understandingRoutePlanRequestV1Schema = z.object({
 });
 export type UnderstandingRoutePlanRequestV1 = z.infer<typeof understandingRoutePlanRequestV1Schema>;
 
-/** §18.1 AssistantMemoryItemV1 kind（与 memory-service 一致）。 */
+/** §18.1 AssistantMemoryItemV1 kind（与 memory-service 一致；22 方案新增 episodic）。 */
 export const assistantMemoryKindV1Schema = z.enum([
   "preference",
   "goal",
   "learning_context",
   "interaction_note",
+  "episodic",
 ]);
 
 /** §18.1 defer_review 展示层 reason code（不修改 official dueAt）。 */
@@ -883,6 +884,12 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
     messageId: z.string().uuid(), textLength: z.number().int().nonnegative(),
     textSha256: z.string().regex(/^[a-f0-9]{64}$/),
     messageContentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    // 22 方案 §12.3/§14.5/§16.3：本轮真正使用的记忆引用，仅 UI 展示。
+    memoryRefs: z.array(z.object({
+      memoryId: z.string().uuid(),
+      kind: z.string().min(1).max(64),
+      content: z.string().min(1).max(80),
+    }).strict()).max(3).optional(),
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("character.cue"), payload: z.object({
     cue: characterCuePayloadV1Schema,

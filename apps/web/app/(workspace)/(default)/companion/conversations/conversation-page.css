@@ -2132,3 +2132,101 @@ a.history-reference > svg:last-child {
 .memory-actions button:first-child { border-color: var(--color-evidence, #7c5cff); color: var(--color-evidence, #7c5cff); }
 .memory-actions button:disabled { opacity: 0.5; cursor: default; }
 .memory-action-error { color: var(--danger, #c0392b); }
+
+/* ─── 22 方案：记忆管理工具栏/状态扩展 ─────────────────────────────── */
+.companion-memory-toolbar {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  margin-bottom: 16px; padding: 12px; border: 1px solid var(--border, #d8dce4);
+  border-radius: 12px; background: var(--surface, #fff);
+}
+.companion-memory-toolbar input[type="search"],
+.companion-memory-toolbar select {
+  min-height: 32px; padding: 0 10px; border: 1px solid var(--border, #d8dce4);
+  border-radius: 8px; font-size: 13px; background: var(--surface, #fff);
+}
+.companion-memory-toolbar input[type="search"] { flex: 1 1 180px; }
+.companion-memory-toolbar label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--text-secondary, #5b6270);
+}
+.memory-clear-all {
+  margin-left: auto; font-size: 13px; padding: 6px 14px; border-radius: 8px;
+  border: 1px solid var(--danger, #c0392b); color: var(--danger, #c0392b);
+  background: var(--surface, #fff); cursor: pointer;
+}
+.companion-memory-list li[data-archived] { opacity: 0.72; }
+.memory-badge.is-archived { background: #ececf0; color: #6b6f78; }
+.memory-badge.is-pinned { background: #fff0d6; color: #8a5a00; }
+
+/* ─── 22 方案：桌宠日记只读页 ─────────────────────────────────────── */
+.companion-daily-page {
+  max-width: 760px; margin: 0 auto; padding: 32px 24px 64px;
+  color: var(--text-primary, #1f2430);
+}
+.companion-daily-head { margin-bottom: 24px; }
+.companion-daily-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 12px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--color-evidence, #7c5cff);
+}
+.companion-daily-head h1 { font-size: 24px; margin: 8px 0 6px; }
+.companion-daily-head p { color: var(--text-secondary, #5b6270); font-size: 14px; line-height: 1.6; }
+.companion-daily-error {
+  display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+  border-radius: 10px; background: var(--danger-soft, #fdecec); color: var(--danger, #c0392b);
+}
+.companion-daily-loading, .companion-daily-empty, .companion-daily-failed {
+  padding: 48px 24px; text-align: center; color: var(--text-secondary, #5b6270);
+  border: 1px dashed var(--border, #d8dce4); border-radius: 12px;
+}
+.companion-daily-empty strong, .companion-daily-failed strong {
+  display: block; color: var(--text-primary, #1f2430); margin-bottom: 6px;
+}
+.companion-daily-card {
+  padding: 20px; border: 1px solid var(--border, #d8dce4); border-radius: 12px;
+  background: var(--surface, #fff);
+}
+.companion-daily-date { font-weight: 600; margin: 0 0 8px; }
+.companion-daily-summary { line-height: 1.7; white-space: pre-wrap; }
+.companion-daily-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-top: 16px; }
+.companion-daily-facts div { padding: 8px; border-radius: 8px; background: var(--surface-soft, #f6f7f9); }
+.companion-daily-facts dt { font-size: 12px; color: var(--text-tertiary, #8a90a0); }
+.companion-daily-facts dd { margin: 2px 0 0; font-weight: 600; }
+
+/* ─── 22 方案：记忆星图只读视图 ───────────────────────────────────── */
+.memory-star-map-page { max-width: 960px; margin: 0 auto; padding: 32px 24px 64px; }
+.memory-star-map-page header { margin-bottom: 20px; }
+.memory-star-map-page h1 { font-size: 24px; margin: 0 0 6px; }
+.memory-star-map-page p { color: var(--text-secondary, #5b6270); }
+.memory-star-map-error { color: var(--danger, #c0392b); }
+.memory-star-map-list { list-style: none; padding: 0; display: grid; gap: 12px; }
+.memory-star-map-list li {
+  padding: 14px 16px; border: 1px solid var(--border, #d8dce4); border-radius: 12px;
+  background: var(--surface, #fff); display: grid; gap: 6px;
+}
+.memory-star-map-kind {
+  font-size: 12px; padding: 2px 8px; border-radius: 999px; width: fit-content;
+  background: var(--color-evidence-soft, #efe9ff); color: var(--color-evidence, #7c5cff);
+}
+.memory-star-map-links { margin: 4px 0 0; padding-left: 18px; color: var(--text-tertiary, #8a90a0); }
+
+/* ─── 22 方案：桌宠人格设置页 ───────────────────────────────────── */
+.pet-profile-page { max-width: 720px; margin: 0 auto; padding: 32px 24px 64px; }
+.pet-profile-page h1 { font-size: 24px; margin: 0 0 16px; }
+.pet-profile-page label { display: grid; gap: 6px; margin: 12px 0; font-size: 14px; }
+.pet-profile-page input, .pet-profile-page textarea, .pet-profile-page select {
+  padding: 8px 10px; border: 1px solid var(--border, #d8dce4); border-radius: 8px; font-size: 14px;
+}
+.pet-profile-page textarea { min-height: 80px; }
+.pet-profile-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.pet-profile-presets button {
+  padding: 6px 14px; border-radius: 999px; border: 1px solid var(--border, #d8dce4);
+  background: var(--surface, #fff); cursor: pointer;
+}
+.pet-profile-actions { display: flex; gap: 10px; margin-top: 16px; }
+.pet-profile-actions button {
+  padding: 8px 18px; border-radius: 8px; border: 1px solid var(--color-evidence, #7c5cff);
+  background: var(--color-evidence, #7c5cff); color: #fff; cursor: pointer;
+}
+.pet-profile-actions button:last-child { background: var(--surface, #fff); color: var(--text-secondary, #5b6270); }
+.pet-profile-error { color: var(--danger, #c0392b); }
+.pet-profile-saved { color: #1e7a46; }

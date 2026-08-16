@@ -312,7 +312,7 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
           durationMs: Date.now() - aiCallStart,
           status: "failed",
           errorMessage: "deterministic fallback failed safety gate",
-        });
+        }, { policy: govCtx.policy });
         return;
       }
 
@@ -349,7 +349,7 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
         durationMs: Date.now() - aiCallStart,
         status: "failed",
         errorMessage: `AI failed and deterministic fallback failed safety gate: ${aiError?.message}`,
-      });
+      }, { policy: govCtx.policy });
       return;
     }
 
@@ -587,7 +587,7 @@ export async function runGenerateValidationQuestion(job: JobPayload) {
       costTokens: usedFallback ? null : (questionUsage?.totalTokens ?? null),
       durationMs: Date.now() - aiCallStart,
       status: "success",
-    });
+    }, { policy: govCtx.policy });
   }
 }
 

@@ -123,6 +123,12 @@ export async function listReviews(
     dueFromMs?: number;
     /** 2026-08-11（性能专项）：nextReviewAt 窗口上界（ms） */
     dueToMs?: number;
+    /**
+     * PERF（api-learning #5）：sanitized=true 时跳过列表页无需渲染的重型水合
+     * （noteBlocks 内容、V2 展示投影），仅保留中性 id/keyPoint/reviewReason 解析。
+     * 语义与列表页一致；调用方（listSanitizedReviews）只消费 card.id/keyPoint.id。
+     */
+    sanitized?: boolean;
   },
   userId?: string,
   tx?: ApiTransaction,
@@ -333,6 +339,9 @@ const [totalRow] = await queryDb
   // 相互独立，用 Promise.all 并行削减串行往返。
   const [v2Display, evidenceResult] = await Promise.all([
     (async () => {
+      // PERF（api-learning #5）：sanitized 列表只消费 keyPoint.id，不需要 V2
+      // 展示投影（publicSummary/quoteText），直接返回空 map 跳过三张表查询。
+      if (filter.sanitized) return new Map<string, { claim: string; quoteText: string }>();
       // R35/C0-rebase（review/service.ts）：keyPointId 命中 V2 objective 时，
       // 展示字段改用 V2 公共投影（publicSummary + active card front.cue），
       // 不再读取 legacy claim/quoteText（§29.4：正式链路禁止 claim 语义扩散）。
@@ -430,9 +439,12 @@ const [totalRow] = await queryDb
   const keyPointHasHardEvidence = evidenceResult.keyPointHasHardEvidence;
 
   // 7. 批量查询 noteBlocks（按 blockId）
-  const blockIds = Array.from(evidenceByKpId.values())
-    .map((ev) => ev.blockId)
-    .filter((id): id is string => id !== null);
+  // PERF（api-learning #5）：sanitized 列表不返回 blockContent，跳过该查询。
+  const blockIds = !filter.sanitized
+    ? Array.from(evidenceByKpId.values())
+        .map((ev) => ev.blockId)
+        .filter((id): id is string => id !== null)
+    : [];
   const blockMap = new Map<string, string>();
   if (blockIds.length > 0) {
     // N#7-17: 补 workspace 谓词——兄弟 evidence/service.ts 的 noteBlocks 查询带
@@ -533,9 +545,13 @@ const [totalRow] = await queryDb
       review: r,
       card,
       keyPoint: kp
-        ? (v2Display.get(kp.id)
-            ? { id: kp.id, claim: v2Display.get(kp.id)!.claim, quoteText: v2Display.get(kp.id)!.quoteText }
-            : { id: kp.id, claim: kp.claim, quoteText: kp.quoteText })
+        ? (filter.sanitized
+            // PERF（api-learning #5）：sanitized 只消费 keyPoint.id；不携带
+            // claim/quoteText（无论 V2 投影还是 legacy 内容）。
+            ? { id: kp.id, claim: "", quoteText: "" }
+            : v2Display.get(kp.id)
+              ? { id: kp.id, claim: v2Display.get(kp.id)!.claim, quoteText: v2Display.get(kp.id)!.quoteText }
+              : { id: kp.id, claim: kp.claim, quoteText: kp.quoteText })
         : null,
       blockContent,
       reviewReason,
@@ -578,7 +594,9 @@ export async function listSanitizedReviews(
     );
   }
   const queryDb = tx;
-  const result = await listReviews(workspaceId, filter, userId, tx);
+  // PERF（api-learning #5）：走轻量水合路径（跳过 blockContent / V2 展示投影），
+  // 仍然解析 card/keyPoint id 并推导 reviewReason，语义与完整列表一致。
+  const result = await listReviews(workspaceId, { ...filter, sanitized: true }, userId, tx);
   const keyPointIds = result.items
     .map((item) => item.keyPoint?.id)
     .filter((id): id is string => Boolean(id));
@@ -680,25 +698,29 @@ export async function getSanitizedReviewMeta(
     validationOutcome = ve.outcome;
   } else if (schedule.subjectType === "key_point") {
     const subjectKeyPointId = schedule.keyPointId ?? schedule.subjectId;
-    const kp = await queryDb.query.cardKeyPoints.findFirst({
-      where: and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        eq(cardKeyPoints.id, subjectKeyPointId),
-      ),
-    });
+    // PERF（api-learning #3）：kp 与 v2Card 查询只依赖 subjectKeyPointId，相互
+    // 独立，用 Promise.all 并行削减一次串行往返。
+    const [kp, v2Card] = await Promise.all([
+      queryDb.query.cardKeyPoints.findFirst({
+        where: and(
+          eq(cardKeyPoints.workspaceId, workspaceId),
+          eq(cardKeyPoints.id, subjectKeyPointId),
+        ),
+      }),
+      // V2 objective：显示/跳转用 V2 cardId；alias key point 的父 legacy card
+      // 是 archived 隐藏行，不能作为 active consumer。
+      queryDb.query.learningCardsV2.findFirst({
+        where: and(
+          eq(learningCardsV2.workspaceId, workspaceId),
+          eq(learningCardsV2.objectiveId, subjectKeyPointId),
+          eq(learningCardsV2.lifecycle, "active"),
+        ),
+        columns: { cardId: true },
+      }),
+    ]);
     if (!kp) return null;
     legacyCardIdForKp = kp.cardId;
     keyPointId = kp.id;
-    // V2 objective：显示/跳转用 V2 cardId；alias key point 的父 legacy card
-    // 是 archived 隐藏行，不能作为 active consumer。
-    const v2Card = await queryDb.query.learningCardsV2.findFirst({
-      where: and(
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.objectiveId, subjectKeyPointId),
-        eq(learningCardsV2.lifecycle, "active"),
-      ),
-      columns: { cardId: true },
-    });
     if (v2Card) {
       isV2Card = true;
       cardId = v2Card.cardId;

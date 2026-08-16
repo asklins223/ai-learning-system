@@ -76,6 +76,7 @@ async function seedBase(): Promise<Seeded> {
       await tx`DELETE FROM companion_stream_events WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${workspaceId}`;
+      await tx`DELETE FROM assistant_deliveries WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_messages WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM assistant_memory_items WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM understanding_route_plans WHERE workspace_id = ${workspaceId}`;
@@ -129,7 +130,7 @@ async function createActiveRun(seeded: Seeded) {
 async function createToolProposal(
   seeded: Seeded,
   payload: { kind: string; [key: string]: unknown },
-  opts: { title?: string; idempotencyKey?: string; clientMessageId?: string } = {},
+  opts: { title?: string; idempotencyKey?: string; clientMessageId?: string; sourceSurface?: "pet" | "main" | "web_fallback" } = {},
 ): Promise<{
   proposalId: string;
   conversationId: string;
@@ -146,7 +147,7 @@ async function createToolProposal(
       title: opts.title ?? "工具动作",
       targetSummary: "执行一次工具动作",
       impactSummary: "完成后更新对应业务状态",
-      sourceSurface: "pet",
+      sourceSurface: opts.sourceSurface ?? "pet",
     },
     idempotencyKey: opts.idempotencyKey ?? randomUUID(),
   })) as {
@@ -237,6 +238,45 @@ test("§18.1：tool proposal create——校验/原子落库/幂等重放/异 bo
   }
 });
 
+test("§18.1：main 发起 proposal → inbox 投递 proposal；confirm → 投递 action_result", async () => {
+  const seeded = await seedBase();
+  try {
+    const keyPointId = seeded.keyPointId;
+    const proposal = await createToolProposal(
+      seeded,
+      { kind: "focus_graph_node", keyPointId, lens: "evidence" },
+      { sourceSurface: "main" },
+    );
+
+    // main/web_fallback 发起的 proposal 需要推送到 pet inbox。
+    const proposalDeliveries = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
+      return tx`SELECT kind, payload_ref FROM assistant_deliveries
+        WHERE workspace_id = ${seeded.workspaceId} AND user_id = ${seeded.userId}
+          AND dedupe_key = ${`proposal:${proposal.proposalId}`}`;
+    });
+    assert.equal(proposalDeliveries.length, 1, "proposal delivery 已投递");
+    assert.equal(proposalDeliveries[0].kind, "proposal");
+    assert.equal(proposalDeliveries[0].payload_ref.proposalId, proposal.proposalId);
+
+    const result = await confirmProposal(seeded, proposal.proposalId, proposal.payloadSha256);
+    assert.equal(result.status, "succeeded");
+    const actionDeliveries = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
+      return tx`SELECT kind, payload_ref FROM assistant_deliveries
+        WHERE workspace_id = ${seeded.workspaceId} AND user_id = ${seeded.userId}
+          AND dedupe_key = ${`action_result:${proposal.proposalId}`}`;
+    });
+    assert.equal(actionDeliveries.length, 1, "action_result delivery 已投递");
+    assert.equal(actionDeliveries[0].kind, "action_result");
+    assert.equal(actionDeliveries[0].payload_ref.actionRunId, proposal.proposalId);
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
 test("§18.1：focus_graph_node——confirm 导航同步 succeeded + route", async () => {
   const seeded = await seedBase();
   try {
@@ -248,6 +288,15 @@ test("§18.1：focus_graph_node——confirm 导航同步 succeeded + route", as
     assert.equal(result.route?.keyPointId, keyPointId);
     assert.equal(result.route?.lens, "evidence");
     assert.equal(result.resultRef, null);
+    const actionDeliveries = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
+      return tx`SELECT kind, payload_ref FROM assistant_deliveries
+        WHERE workspace_id = ${seeded.workspaceId} AND user_id = ${seeded.userId}
+          AND dedupe_key = ${`action_result:${proposal.proposalId}`}`;
+    });
+    assert.equal(actionDeliveries.length, 1, "pet 发起 confirm 也会投递 action_result");
+    assert.equal(actionDeliveries[0].payload_ref.actionRunId, proposal.proposalId);
   } finally {
     await seeded.cleanup();
   }

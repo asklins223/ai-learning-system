@@ -20,7 +20,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
-import { createProvider, type AIProvider } from "../lib/ai-provider.ts";
+import { createProvider, createEmbeddingProvider, type AIProvider } from "../lib/ai-provider.ts";
 import {
   AIConsentRequiredError,
   resolveAIGovernanceContext,
@@ -42,6 +42,7 @@ import {
   type RouterDecisionV1,
 } from "./companion-dialogue-router.ts";
 import { splitCompanionTtsSegmentsIncremental, companionSegmentId, stripVoiceExpressionTags, extractVoiceEmotion, TTS_FIRST_SEGMENT_MIN_CHARS } from "../lib/tts-segments.ts";
+import { assembleCompanionContext, type ContextAssemblyResult } from "./companion-context-orchestrator.ts";
 
 export interface CompanionDialogueHandlerContext {
   id: string;
@@ -216,6 +217,12 @@ interface ReadContext {
   userText: string;
   recentMessages: { role: "user" | "assistant"; text: string }[];
   activeMemories: { kind: string; content: string }[];
+  petProfile: {
+    name: string;
+    speakingStyle: string;
+    personalityTags: string[];
+    examples: { text: string }[];
+  } | null;
   nextMessageSeq: number;
   nextEventSeq: number;
 }
@@ -327,6 +334,13 @@ export function buildCompanionPersonaMessages(input: {
   groundedTutorContext?: GroundedTutorContext | null;
   /** 已确认/非候选的长期记忆（注入日常对话，让桌宠记得你说过的目标/偏好）。 */
   activeMemories?: { kind: string; content: string }[];
+  /** 22 方案：用户自定义人格档案（有值则覆盖默认人格风格）。 */
+  petProfile?: {
+    name: string;
+    speakingStyle: string;
+    personalityTags: string[];
+    examples: { text: string }[];
+  } | null;
 }): ChatMessage[] {
   const boundedRecent = input.recentMessages
     .slice(0, 20)
@@ -348,8 +362,22 @@ export function buildCompanionPersonaMessages(input: {
     currentMessage: input.userText.slice(0, 4_000),
     ...(input.groundedTutorContext ? { groundedTarget: input.groundedTutorContext } : {}),
   };
+  const systemContent = input.groundedTutorContext
+    ? GROUNDED_TUTOR_COMPANION_PROMPT
+    : input.petProfile
+      ? [
+          COMPANION_PERSONA_V3,
+          "",
+          `当前人格：${input.petProfile.name}`,
+          `性格标签：${input.petProfile.personalityTags.join("、")}`,
+          `说话风格：${input.petProfile.speakingStyle}`,
+          ...(input.petProfile.examples.length > 0
+            ? [`示例回复：`, ...input.petProfile.examples.map((e) => `- ${e.text}`)]
+            : []),
+        ].join("\n")
+      : COMPANION_PERSONA_V3;
   return [
-    { role: "system", content: input.groundedTutorContext ? GROUNDED_TUTOR_COMPANION_PROMPT : COMPANION_PERSONA_V3 },
+    { role: "system", content: systemContent },
     { role: "user", content: canonicalJsonV1(userContent) },
   ];
 }
@@ -499,6 +527,32 @@ export async function runCompanionDialogue(
         const activeMemories = memoryRows
           .slice(0, 30)
           .map((m) => ({ kind: m.kind, content: m.content.slice(0, 500) }));
+        const petProfileRows = await tx.execute<{
+          name: string;
+          speaking_style: string;
+          personality_tags: unknown;
+          examples: unknown;
+        }>(sql`
+          SELECT name, speaking_style, personality_tags, examples
+          FROM pet_profiles
+          WHERE workspace_id = ${ctx.workspaceId} AND user_id = ${run.user_id}
+          LIMIT 1
+        `);
+        const petProfileRow = petProfileRows[0];
+        const petProfile = petProfileRow
+          ? {
+              name: petProfileRow.name,
+              speakingStyle: petProfileRow.speaking_style,
+              personalityTags: Array.isArray(petProfileRow.personality_tags)
+                ? petProfileRow.personality_tags.map(String)
+                : [],
+              examples: Array.isArray(petProfileRow.examples)
+                ? (petProfileRow.examples as Array<{ text?: unknown }>)
+                    .map((e) => ({ text: String(e.text ?? "") }))
+                    .filter((e) => e.text.length > 0)
+                : [],
+            }
+          : null;
         const groundedTutorContext = await readGroundedTutorContext(
           tx,
           run.page_context,
@@ -517,6 +571,7 @@ export async function runCompanionDialogue(
           userText,
           recentMessages,
           activeMemories,
+          petProfile,
           nextMessageSeq: Number(conv.next_message_seq),
           nextEventSeq: Number(conv.next_event_seq),
         };
@@ -615,12 +670,50 @@ export async function runCompanionDialogue(
     routerDecision = null;
   }
 
+  // ── 22 方案：Context Orchestrator 检索长期记忆（非 grounded_tutor）──
+  let memoryContext: ContextAssemblyResult = {
+    activeMemories: read.activeMemories,
+    memoryRefs: [],
+    retrievalMode: "keyword_fallback",
+    usedMemoryIds: [],
+  };
+  if (isCompanionMemoryContextEnabled() && !read.groundedTutorContext) {
+    try {
+      const embeddingProvider = await createEmbeddingProvider(read.userId, govCtx);
+      memoryContext = await withWorkerWorkspaceTransaction(
+        { workspaceId: ctx.workspaceId, userId: read.userId },
+        (tx) => assembleCompanionContext(
+          tx,
+          { workspaceId: ctx.workspaceId, userId: read.userId },
+          {
+            userText: read.userText,
+            recentMessages: read.recentMessages,
+            provider: embeddingProvider,
+            runId: read.runId,
+            groundedTutorContext: read.groundedTutorContext,
+          },
+        ),
+      );
+      read.activeMemories = memoryContext.activeMemories;
+    } catch (err) {
+      // 检索失败不阻塞对话：保留 read 阶段已读取的旧记忆作为兜底。
+      logger.warn({ jobId: ctx.id, runId: read.runId, err }, "companion memory context assembly skipped");
+      memoryContext = {
+        activeMemories: read.activeMemories,
+        memoryRefs: [],
+        retrievalMode: "keyword_fallback",
+        usedMemoryIds: [],
+      };
+    }
+  }
+
   const messages = buildCompanionPersonaMessages({
     userText: read.userText,
     recentMessages: read.recentMessages,
     pageContext: read.pageContext,
     groundedTutorContext: read.groundedTutorContext,
     activeMemories: read.activeMemories,
+    petProfile: read.petProfile,
     workspacePolicy: {
       sendToExternal: govCtx.policy.sendToExternal,
       piiDetection: govCtx.policy.piiDetection,
@@ -909,6 +1002,9 @@ export async function runCompanionDialogue(
                textLength: assistantText.length,
                textSha256,
                messageContentSha256: contentSha256,
+               ...(memoryContext.memoryRefs.length > 0
+                 ? { memoryRefs: memoryContext.memoryRefs }
+                 : {}),
              })}, ${expiresAt})
         `);
 
@@ -943,6 +1039,15 @@ export async function runCompanionDialogue(
               finished_at = now()
           WHERE id = ${read.runId}
         `);
+
+        // 22 方案：终态事务内异步入队记忆提取/摘要任务。
+        await enqueueCompanionMemoryJobs(tx, {
+          workspaceId: ctx.workspaceId,
+          userId: read.userId,
+          runId: read.runId,
+          conversationId: read.conversationId,
+          messageSeq,
+        });
 
         // 终态事务：该 run 全部 event 的 expires_at 原子改为 finished_at+24h
         await tx.execute(sql`
@@ -980,6 +1085,55 @@ function categorizeProviderFailure(err: unknown): string {
 
 function isCompanionDialogueEnabled(): boolean {
   return process.env.COMPANION_DIALOGUE_V1_ENABLED === "true";
+}
+
+/** 22 方案记忆上下文开关：任一记忆相关 flag 开启即启用新检索/回传链路。 */
+function isCompanionMemoryContextEnabled(): boolean {
+  return process.env.COMPANION_MEMORY_VECTOR_V1 === "true"
+    || process.env.COMPANION_MEMORY_EXTRACTOR_V1 === "true"
+    || process.env.COMPANION_SUMMARIZER_V1 === "true";
+}
+
+/**
+ * 在终态事务内异步入队记忆提取/摘要任务。
+ * 幂等：jobs.idempotency_key 唯一索引兜底。
+ */
+async function enqueueCompanionMemoryJobs(
+  tx: { execute(query: unknown): Promise<unknown> },
+  args: {
+    workspaceId: string;
+    userId: string;
+    runId: string;
+    conversationId: string;
+    messageSeq: number;
+  },
+): Promise<void> {
+  if (process.env.COMPANION_MEMORY_EXTRACTOR_V1 === "true") {
+    await tx.execute(sql`
+      INSERT INTO jobs
+        (type, workspace_id, requested_by, payload, status, priority, resource_class, idempotency_key)
+      VALUES
+        ('companion_memory_extract', ${args.workspaceId}, ${args.userId},
+         ${JSON.stringify({ runId: args.runId, userId: args.userId })},
+         'pending', 10, 'maintenance', ${`memory-extract:${args.runId}`})
+      ON CONFLICT (workspace_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+      DO NOTHING
+    `);
+  }
+  if (process.env.COMPANION_SUMMARIZER_V1 === "true" && args.messageSeq >= 30) {
+    await tx.execute(sql`
+      INSERT INTO jobs
+        (type, workspace_id, requested_by, payload, status, priority, resource_class, idempotency_key)
+      VALUES
+        ('companion_summarizer', ${args.workspaceId}, ${args.userId},
+         ${JSON.stringify({ conversationId: args.conversationId, userId: args.userId, sourceRunId: args.runId })},
+         'pending', 10, 'maintenance', ${`summary:${args.conversationId}:${args.runId}`})
+      ON CONFLICT (workspace_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+      DO NOTHING
+    `);
+  }
 }
 
 function isCompanionVoiceDialogueEnabled(): boolean {

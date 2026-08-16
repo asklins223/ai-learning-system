@@ -86,6 +86,11 @@ export const JobType = {
   // 2026-08-11：learning_session_assess 已由 worker 消费（metrics allowlist 含），
   // 枚举此前缺失导致类型标注无法引用该 job type。
   LEARNING_SESSION_ASSESS: "learning_session_assess",
+  // 22 真桌宠记忆与上下文：日常对话记忆提取 / 会话摘要 / 每日总结 / embedding 重建
+  COMPANION_MEMORY_EXTRACT: "companion_memory_extract",
+  COMPANION_SUMMARIZER: "companion_summarizer",
+  COMPANION_DAILY_SUMMARY: "companion_daily_summary",
+  COMPANION_MEMORY_EMBEDDING_REBUILD: "companion_memory_embedding_rebuild",
 } as const;
 export type JobType = (typeof JobType)[keyof typeof JobType];
 

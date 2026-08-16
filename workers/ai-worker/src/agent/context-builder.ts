@@ -149,6 +149,14 @@ export class ContextBuilder {
   private readonly packer: ContextPacker;
   private readonly stableCache?: StableContextCacheLike;
 
+  /**
+   * PERF: 本进程内按 role 缓存解析后的工具 schema 对象 + 其序列化长度，
+   * 避免每次 turn 对缓存字符串做 JSON.parse，以及重复 JSON.stringify 做 token 估算。
+   * 有界（role 数量很少，最多 ~7 个角色）。
+   */
+  private readonly toolSchemaCache = new Map<string, { schemas: AgentTurnRequest["tools"]; serializedLength: number }>();
+  private static readonly TOOL_SCHEMA_CACHE_MAX = 64;
+
   constructor(
     toolRegistry: ToolRegistry,
     options?: {
@@ -177,14 +185,44 @@ export class ContextBuilder {
 
   /** P4-1:带稳定段缓存的工具 schema 读取(缓存键含 role;值与原计算逐字节一致) */
   private getToolSchemasCached(role: AgentRole): AgentTurnRequest["tools"] {
+    const cachedParsed = this.toolSchemaCache.get(role);
+    if (cachedParsed) {
+      return cachedParsed.schemas;
+    }
     const key = `toolSchemas:${role}`;
     const cached = this.stableCache?.get(key);
+    let schemas: AgentTurnRequest["tools"];
     if (cached !== undefined && cached !== null) {
-      return JSON.parse(cached) as AgentTurnRequest["tools"];
+      schemas = JSON.parse(cached) as AgentTurnRequest["tools"];
+    } else {
+      schemas = this.toolRegistry.getToolSchemasForRole(role);
+      this.stableCache?.set(key, JSON.stringify(schemas));
     }
-    const schemas = this.toolRegistry.getToolSchemasForRole(role);
-    this.stableCache?.set(key, JSON.stringify(schemas));
+    this.cacheParsedToolSchemas(role, schemas);
     return schemas;
+  }
+
+  /**
+   * 返回工具 schema 的序列化长度(用于 token 估算)，复用已解析缓存,
+   * 避免重复 JSON.stringify。
+   */
+  private getToolSchemaSerializedLength(role: AgentRole): number {
+    const cached = this.toolSchemaCache.get(role);
+    if (cached) return cached.serializedLength;
+    this.getToolSchemasCached(role);
+    return this.toolSchemaCache.get(role)?.serializedLength ?? 0;
+  }
+
+  /** 有界缓存解析后的 schema 对象 + 序列化长度 */
+  private cacheParsedToolSchemas(role: AgentRole, schemas: AgentTurnRequest["tools"]): void {
+    if (this.toolSchemaCache.size >= ContextBuilder.TOOL_SCHEMA_CACHE_MAX) {
+      const oldest = this.toolSchemaCache.keys().next().value;
+      if (oldest !== undefined) this.toolSchemaCache.delete(oldest);
+    }
+    this.toolSchemaCache.set(role, {
+      schemas,
+      serializedLength: JSON.stringify(schemas).length,
+    });
   }
 
   // ─── Supervisor ────────────────────────────────────────────────────────
@@ -326,7 +364,7 @@ export class ContextBuilder {
     // 统一打包
     const toolSchemas = this.getToolSchemasCached(role);
     const systemPromptTokens = estimateTokens(systemPrompt);
-    const toolSchemaTokens = Math.max(1_024, Math.ceil(JSON.stringify(toolSchemas).length / 4));
+    const toolSchemaTokens = Math.max(1_024, Math.ceil(this.getToolSchemaSerializedLength(role) / 4));
     const overheadTokens = systemPromptTokens + toolSchemaTokens;
 
     const packed = this.packer.pack(sections, overheadTokens);
@@ -487,7 +525,7 @@ export class ContextBuilder {
   ): AgentTurnRequest {
     const toolSchemas = this.getToolSchemasCached(role);
     const systemPromptTokens = estimateTokens(systemPrompt);
-    const toolSchemaTokens = Math.max(1_024, Math.ceil(JSON.stringify(toolSchemas).length / 4));
+    const toolSchemaTokens = Math.max(1_024, Math.ceil(this.getToolSchemaSerializedLength(role) / 4));
     const overheadTokens = systemPromptTokens + toolSchemaTokens;
 
     const packed = this.packer.pack(sections, overheadTokens);

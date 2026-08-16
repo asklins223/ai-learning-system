@@ -16,6 +16,7 @@ import { companionGroundedTutorGrantV1Schema, companionLearningSessionContextV1S
 import { sha256Utf8V1, canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import type { CompanionLearningContextV1 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
+import { deliver } from "./delivery-service.ts";
 import { resolveAuthSurfaceManifestSecret } from "../companion-shell/auth-surface.ts";
 import { getCompanionAccountEpoch } from "./companion-account-epoch.ts";
 import {
@@ -719,6 +720,23 @@ async function createCompanionProposalInTransaction(
       `);
       void eventPayload;
 
+      // 方案 16 §14.3：proposal 创建后入 inbox（pet 自身发起的 proposal 已有
+      // 本地确认卡，避免重复展示；main/web_fallback 发起的需要推送给 pet）。
+      if (args.sourceSurface !== "pet") {
+        await deliver(
+          tx,
+          { workspaceId: args.workspaceId, userId: args.userId },
+          {
+            assistantSessionId: null,
+            kind: "proposal",
+            payloadRef: { kind: "proposal", proposalId },
+            dedupeKey: `proposal:${proposalId}`,
+            expiresAt: new Date(proposalTimes.expires_at),
+          },
+          new Date(proposalTimes.created_at),
+        );
+      }
+
       return {
         version: 1,
         conversationId,
@@ -1002,6 +1020,7 @@ export async function decideCompanionProposal(args: {
         // Do not emit action.completed here: the wire event requires a real
         // actionRunId, while navigation intentionally creates no action run.
         await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted", null);
+        await deliverActionResultForProposal(tx, args.workspaceId, args.userId, proposal.id);
         return {
           version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
           resultRef: null, route: route?.route ?? null, safeSummary: route?.safeSummary ?? "打开页面",
@@ -1058,6 +1077,7 @@ export async function decideCompanionProposal(args: {
           WHERE id = ${proposal.id}
         `);
         await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted", null);
+        await deliverActionResultForProposal(tx, args.workspaceId, args.userId, proposal.id);
         return {
           version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
           resultRef: runId, route: null, safeSummary,
@@ -1164,7 +1184,7 @@ export async function decideCompanionProposal(args: {
       // ── §18.1：记忆工具（确定性 API 同事务执行；revision = updatedAt epoch ms） ──
       if (kind === "propose_memory_candidate") {
         const payload = proposalPayload as unknown as {
-          memoryKind: "preference" | "goal" | "learning_context" | "interaction_note";
+          memoryKind: "preference" | "goal" | "learning_context" | "interaction_note" | "episodic";
           value: string;
         };
         const item = await upsertMemory(tx, { workspaceId: args.workspaceId, userId: args.userId }, {
@@ -1251,8 +1271,7 @@ export async function decideCompanionProposal(args: {
             decision_key_hash = ${keyHash}, action_run_id = ${actionRunId}, updated_at = now()
         WHERE id = ${proposal.id}
       `);
-      await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted", actionRunId);
-      await appendActionStartedEvent(tx, args.workspaceId, args.userId, proposal, actionRunId);
+      await appendDecisionAndActionStartedEvents(tx, args.workspaceId, args.userId, proposal, "accepted", actionRunId);
 
       // job 创建（payload 只传 opaque actionRunId——执行在 worker，见 P5-5）
       await createJob({
@@ -1419,8 +1438,28 @@ export async function getCompanionProposalSnapshot(args: {
 }
 
 /** §18 同步工具成功收尾：proposal → succeeded + decision 事件（不建 actionRun）。 */
+/** 同步工具成功收尾后向 pet inbox 投递 action_result（§14.3）。 */
+async function deliverActionResultForProposal(
+  tx: ApiTransaction,
+  workspaceId: string,
+  userId: string,
+  proposalId: string,
+): Promise<void> {
+  await deliver(
+    tx,
+    { workspaceId, userId },
+    {
+      assistantSessionId: null,
+      kind: "action_result",
+      payloadRef: { kind: "action_result", actionRunId: proposalId },
+      dedupeKey: `action_result:${proposalId}`,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  );
+}
+
 async function succeedSyncProposal(
-  tx: { execute(q: unknown): Promise<unknown[] | unknown> },
+  tx: ApiTransaction,
   workspaceId: string,
   userId: string,
   proposal: { id: string; conversation_id: string },
@@ -1436,6 +1475,7 @@ async function succeedSyncProposal(
     WHERE id = ${proposal.id}
   `);
   await appendDecisionEvent(tx, workspaceId, userId, proposal, "accepted", null);
+  await deliverActionResultForProposal(tx, workspaceId, userId, proposal.id);
   return {
     version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
     resultRef, route: route ?? null, safeSummary,
@@ -1502,29 +1542,46 @@ async function appendDecisionEvent(
   `);
 }
 
-async function appendActionStartedEvent(
+/**
+ * PERF（api-learning #11）：把 confirm 路径上背靠背的 appendDecisionEvent +
+ * appendActionStartedEvent（各 3 次 RTT：account_epoch + counter UPDATE + INSERT，
+ * 共 6 次）合并为一次批量写入：account_epoch 只取一次、counter 一次 +2、两行
+ * VALUES 单 INSERT。seq/字段与逐调用 appendDecisionEvent/appendActionStartedEvent
+ * 完全一致（decision 在前取 baseSeq，started 在后取 baseSeq+1）。
+ */
+async function appendDecisionAndActionStartedEvents(
   tx: { execute(q: unknown): Promise<unknown[] | unknown> },
   workspaceId: string,
   userId: string,
   proposal: { id: string; conversation_id: string },
+  status: string,
   actionRunId: string,
 ): Promise<void> {
-  // L11：事件携带当前账号世代。
+  // L11：事件携带当前账号世代（global off 后旧 action 事件被客户端拒绝）。
   const accountEpoch = await getCompanionAccountEpoch(tx, userId);
   const counters = await tx.execute(sql`
-    UPDATE companion_conversations SET next_event_seq = next_event_seq + 1
+    UPDATE companion_conversations SET next_event_seq = next_event_seq + 2
     WHERE id = ${proposal.conversation_id} RETURNING next_event_seq
   `);
-  const seq = Number((counters as Array<{ next_event_seq: string }>)[0].next_event_seq) - 1;
+  const baseSeq = Number((counters as Array<{ next_event_seq: string }>)[0].next_event_seq) - 2;
+  const decisionPayload = {
+    proposalId: proposal.id,
+    decision: status === "accepted" ? "confirm" : "reject",
+    status,
+    actionRunId,
+  };
   const startedPayload = { proposalId: proposal.id, actionRunId };
+  const tuples = [
+    sql`(${proposal.conversation_id}, ${baseSeq}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
+         'action.decision', ${JSON.stringify(decisionPayload)}, now() + interval '24 hours')`,
+    sql`(${proposal.conversation_id}, ${baseSeq + 1}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
+         'action.started', ${JSON.stringify(startedPayload)}, now() + interval '24 hours')`,
+  ];
   await tx.execute(sql`
     INSERT INTO companion_stream_events
       (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch,
        type, payload, expires_at)
-    VALUES (${proposal.conversation_id}, ${seq}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
-            'action.started',
-            ${JSON.stringify(startedPayload)},
-            now() + interval '24 hours')
+    VALUES ${sql.join(tuples, sql`, `)}
   `);
 }
 

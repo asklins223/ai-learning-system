@@ -98,8 +98,8 @@ function tokenOverlapWithTokenSet(tokensA: ReadonlySet<string>, textB: string): 
  *
  * A leak fragment in `hasDirectFragment` is always a contiguous non-whitespace
  * run (extended to the next word boundary), so its length can never exceed the
- * longest whitespace-free run of its source. This bounds how many target
- * substrings we need to index for exact substring tests.
+ * longest whitespace-free run of its source. This bounds the maximum fragment
+ * length we need to consider for exact substring tests.
  */
 function longestWhitespaceFreeRunLen(text: string): number {
   let max = 0;
@@ -116,34 +116,18 @@ function longestWhitespaceFreeRunLen(text: string): number {
 }
 
 /**
- * Build a Set of every contiguous substring of `text` whose length is in
- * [minLength, maxLength]. This lets substring-inclusion queries run in O(1)
- * per fragment instead of an O(n·m) `includes` scan, while keeping the set
- * bounded by the longest possible fragment length. A normalized question is
- * at most MAX_QUESTION_LENGTH chars, so the build is bounded and transient.
+ * Check if any contiguous fragment of `source` (length in [minLength,
+ * maxLength], extended to the next word boundary) appears verbatim in
+ * `question`. This is the exact inverse of the previous design, which built a
+ * Set of every substring of the question (O(n²) memory for whitespace-free
+ * text such as Chinese). Instead we walk the bounded source once and run a
+ * single `includes` per word-extended fragment, keeping memory O(source) and
+ * avoiding transient tens-of-MB substring sets.
  */
-function substringSet(text: string, minLength: number, maxLength: number): Set<string> {
-  const set = new Set<string>();
-  const n = text.length;
-  if (n < minLength) return set;
-  const high = Math.min(maxLength, n);
-  for (let len = minLength; len <= high; len++) {
-    for (let i = 0; i + len <= n; i++) {
-      set.add(text.slice(i, i + len));
-    }
-  }
-  return set;
-}
-
-/**
- * Check if any contiguous fragment of `source` (>= minLength chars) appears
- * in `targetSubstrings` (a precomputed Set of all target substrings with
- * length >= minLength).
- */
-function hasDirectFragment(source: string, targetSubstrings: Set<string>, minLength: number): boolean {
+function hasDirectFragment(source: string, question: string, minLength: number, maxLength: number): boolean {
   const normSource = normalize(source);
-  if (normSource.length < minLength) return false;
-  if (targetSubstrings.size === 0) return false;
+  const normQuestion = normalize(question);
+  if (normSource.length < minLength || normQuestion.length < minLength || maxLength < minLength) return false;
 
   // Check for direct substring of fragments
   for (let i = 0; i <= normSource.length - minLength; i++) {
@@ -154,7 +138,8 @@ function hasDirectFragment(source: string, targetSubstrings: Set<string>, minLen
       end++;
     }
     const fragment = normSource.slice(i, end);
-    if (fragment.length >= minLength && targetSubstrings.has(fragment)) {
+    if (fragment.length > maxLength) continue;
+    if (fragment.length >= minLength && normQuestion.includes(fragment)) {
       return true;
     }
   }
@@ -205,23 +190,20 @@ export function assessQuestionOutput(input: QuestionSafetyInput): QuestionSafety
   }
 
   // 3. Check for claim leakage
-  // Precompute once: every hasDirectFragment check below uses output.question
-  // as the target, so build its substring Set a single time and reuse it.
-  // Only index target substrings up to the longest possible source fragment
-  // (longest whitespace-free run across claim/quote/expectedConcept), which is
-  // exact and keeps the Set small.
+  // Compute the longest possible source fragment once so direct-substring
+  // checks can stop extending beyond it (exact upper bound).
   const maxFragmentLen = Math.max(
     longestWhitespaceFreeRunLen(normalize(claim)),
     longestWhitespaceFreeRunLen(normalize(quote)),
     ...output.rubricItems.map((item) => longestWhitespaceFreeRunLen(normalize(item.expectedConcept))),
   );
-  const questionSubstrings = substringSet(normalize(output.question), MIN_FRAGMENT_LENGTH, maxFragmentLen);
+  const normQuestion = normalize(output.question);
   // Tokenize output.question once and reuse its Set across all overlap checks
   // below (avoid re-tokenizing + rebuilding a Set on identical input per check).
   const questionTokens = new Set(tokenize(output.question));
 
   // Direct fragment check: does the question contain a significant portion of the claim?
-  if (hasDirectFragment(claim, questionSubstrings, MIN_FRAGMENT_LENGTH)) {
+  if (hasDirectFragment(claim, normQuestion, MIN_FRAGMENT_LENGTH, maxFragmentLen)) {
     reasonCodes.push(QuestionSafetyReasonCode.LEAKS_CLAIM);
   }
 
@@ -231,7 +213,7 @@ export function assessQuestionOutput(input: QuestionSafetyInput): QuestionSafety
   }
 
   // 4. Check for quote leakage
-  if (hasDirectFragment(quote, questionSubstrings, MIN_FRAGMENT_LENGTH)) {
+  if (hasDirectFragment(quote, normQuestion, MIN_FRAGMENT_LENGTH, maxFragmentLen)) {
     reasonCodes.push(QuestionSafetyReasonCode.LEAKS_QUOTE);
   }
 
@@ -241,7 +223,7 @@ export function assessQuestionOutput(input: QuestionSafetyInput): QuestionSafety
 
   // 5. Check for expectedConcept leakage in the question
   for (const item of output.rubricItems) {
-    if (hasDirectFragment(item.expectedConcept, questionSubstrings, MIN_FRAGMENT_LENGTH)) {
+    if (hasDirectFragment(item.expectedConcept, normQuestion, MIN_FRAGMENT_LENGTH, maxFragmentLen)) {
       reasonCodes.push(QuestionSafetyReasonCode.LEAKS_EXPECTED_CONCEPT);
       break;
     }

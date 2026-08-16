@@ -820,8 +820,6 @@ async function handleValidateDraft(
   // soft issue 不阻断发布，仅记日志（repair 启用时），
   // Supervisor 通过 Critic 的 softIssues 字段获取语义级 soft issues 决定是否修复。
   if (contentJson.cards && contentJson.cards.length > 0 && run?.noteVersionId) {
-    const noteVersionId = run.noteVersionId;
-
     // 1. 加载所有候选的 claim
     const qualityCandidates = await db
       .select({
@@ -912,15 +910,12 @@ async function handleValidateDraft(
       }
     }
 
-    // 5. 加载 note blocks 作为 sourceBlocks（用于 quote_not_in_source 检查）
-    const noteBlocksRows = await db
-      .select({ content: schema.noteBlocks.content })
-      .from(schema.noteBlocks)
-      .where(and(
-        eq(schema.noteBlocks.versionId, noteVersionId),
-        eq(schema.noteBlocks.workspaceId, ctx.workspaceId),
-      ));
-    const sourceBlocks = noteBlocksRows.map((b) => b.content ?? "").filter((c) => c.length > 0);
+    // 5. 构建 sourceBlocks（用于 quote_not_in_source 检查）。
+    // PERF: 只收集证据 span 实际引用的 note blocks（上述 evidenceSpanRows 已 JOIN
+    // 加载了对应 block 内容），不再对整张 note_blocks 表做无 LIMIT 全量扫描。
+    const sourceBlocks = evidenceSpanRows
+      .map((row) => row.block?.content ?? "")
+      .filter((c) => c.length > 0);
 
     // 图片证据的 OCR/结构化文本不在 note_blocks 中，需要追加到 sourceBlocks，
     // 否则图片证据支撑的 quote_text 会触发 quote_not_in_source 误报。

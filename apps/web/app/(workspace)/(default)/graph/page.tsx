@@ -726,17 +726,19 @@ export default function UnderstandingGraphPage() {
   }, [query]);
 
   const filterCounts = useMemo(() => {
-    const cards = rawGraph.nodes.filter((node) => node.type === "card");
-    return {
-      all: cards.length,
-      attention: cards.filter((node) =>
-        node.state === "misunderstood" || node.state === "due_review",
-      ).length,
-      unseen: cards.filter((node) => node.state === "unseen" || node.state === "seen").length,
-      understood: cards.filter((node) =>
-        node.state === "preliminary_understood" || node.state === "reviewed",
-      ).length,
-    } satisfies Record<StateFilter, number>;
+    let all = 0;
+    let attention = 0;
+    let unseen = 0;
+    let understood = 0;
+    // 单趟遍历：对每个 card 节点一次性累计四类计数，避免原先 4 次独立 filter 全表扫描。
+    for (const node of rawGraph.nodes) {
+      if (node.type !== "card") continue;
+      all += 1;
+      if (node.state === "misunderstood" || node.state === "due_review") attention += 1;
+      if (node.state === "unseen" || node.state === "seen") unseen += 1;
+      if (node.state === "preliminary_understood" || node.state === "reviewed") understood += 1;
+    }
+    return { all, attention, unseen, understood } satisfies Record<StateFilter, number>;
   }, [rawGraph.nodes]);
 
   const selectedNeighbors = useMemo(() => {

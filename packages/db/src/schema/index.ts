@@ -19,6 +19,7 @@ export * from "./understanding-projection.ts";
 export * from "./companion-sandbox.ts";
 export * from "./assistant-deliveries.ts";
 export * from "./assistant-memory.ts";
+export * from "./companion-memory.ts";
 export * from "./companion.ts";
 export * from "./companion-conversations.ts";
 export * from "./learning-exposure.ts";

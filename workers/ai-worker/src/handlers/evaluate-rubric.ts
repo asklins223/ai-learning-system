@@ -310,7 +310,7 @@ const userId = requireAuditUserId(job);
       durationMs: Date.now() - aiCallStart,
       status: "failed",
       errorMessage: aiError?.message ?? "contract violation",
-      });
+      }, { policy: govCtx.policy });
     }
     throw aiError ?? new Error("evaluate_rubric contract violation");
   }
@@ -988,7 +988,7 @@ const userId = requireAuditUserId(job);
       costTokens: rubricUsage?.totalTokens ?? null,
       durationMs: Date.now() - aiCallStart,
       status: "success",
-    });
+    }, { policy: govCtx.policy });
   }
 }
 

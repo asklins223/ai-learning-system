@@ -269,10 +269,13 @@ export class OpenAICompatibleProvider implements AIProvider {
           throw new Error(`${this.id} streaming response exceeded 8388608 bytes (${model})`);
         }
         buffer += decoder.decode(value, { stream: true });
+        // PERF: 用 consumed 游标扫描本 chunk 内完整行，仅在末尾一次性截取未处理尾部，
+        // 避免每个 line 都执行 buffer.slice() 造成 O(n²) 复制。
         let lineEnd: number;
-        while ((lineEnd = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, lineEnd).replace(/\r$/, "");
-          buffer = buffer.slice(lineEnd + 1);
+        let consumed = 0;
+        while ((lineEnd = buffer.indexOf("\n", consumed)) !== -1) {
+          const line = buffer.slice(consumed, lineEnd).replace(/\r$/, "");
+          consumed = lineEnd + 1;
           const trimmed = line.trim();
           if (!trimmed.startsWith("data:")) continue;
           const data = trimmed.slice(5).trim();
@@ -284,6 +287,8 @@ export class OpenAICompatibleProvider implements AIProvider {
             return { content };
           }
         }
+        // 保留未处理的尾部（可能包含不完整的行），等待下个 chunk 补全。
+        buffer = buffer.slice(consumed);
       }
       // Some compatible gateways close without a final newline or [DONE].
       // Flush the decoder and parse that last complete data line instead of

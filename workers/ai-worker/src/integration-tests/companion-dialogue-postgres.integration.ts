@@ -146,11 +146,12 @@ test("P2 §5.2：accepted run → assistant message + status/delta/final 事件 
     assert.ok(types.includes("assistant.delta"), "assistant.delta 事件存在");
     assert.ok(types.includes("assistant.final"), "assistant.final 事件存在");
     assert.equal(types[0], "assistant.status", "事件顺序：status 最先");
-    // §11.3：worker 是 TTS 切句唯一所有者——voice.segment.ready 在 final 之后。
+    // §11.3：worker 是 TTS 切句唯一所有者——voice.segment.ready 在 final 之后；
+    // 终态回复情绪 cue 也在 final 之后（同一终态事务原子写入）。
     const finalIdx = types.indexOf("assistant.final");
     assert.ok(
-      types.slice(finalIdx + 1).every((t: string) => t === "voice.segment.ready"),
-      "事件顺序：final 之后只有 voice.segment.ready",
+      types.slice(finalIdx + 1).every((t: string) => t === "voice.segment.ready" || t === "character.cue"),
+      "事件顺序：final 之后只有 voice.segment.ready / character.cue",
     );
     assert.ok(Number(rows.conv.next_event_seq) > 1, "conversation 计数器推进");
   } finally {

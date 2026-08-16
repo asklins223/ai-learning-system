@@ -1191,6 +1191,27 @@
       "when": 1786729098423,
       "tag": "0169_companion_messages_blocks_trgm_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1786729099423,
+      "tag": "0170_companion_memory_context",
+      "breakpoints": true
+    },
+    {
+      "idx": 171,
+      "version": "7",
+      "when": 1786729100423,
+      "tag": "0171_companion_daily_summary_scheduler",
+      "breakpoints": true
+    },
+    {
+      "idx": 172,
+      "version": "7",
+      "when": 1786729101423,
+      "tag": "0172_companion_memory_maintenance",
+      "breakpoints": true
     }
   ]
 }

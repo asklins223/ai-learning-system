@@ -267,6 +267,10 @@ export function deliverySummary(delivery: AssistantDeliveryV2): { title: string;
       const eventId = delivery.payloadRef.kind === "system_event"
         ? delivery.payloadRef.systemEventId
         : "";
+      const text = delivery.payloadRef.kind === "system_event"
+        ? delivery.payloadRef.text
+        : undefined;
+      if (text) return { title: "伴星提醒", body: text };
       if (eventId.startsWith("run.completed:")) {
         const runId = eventId.slice("run.completed:".length);
         return runId
@@ -281,8 +285,14 @@ export function deliverySummary(delivery: AssistantDeliveryV2): { title: string;
       return { title: "操作建议", body: "伴星有一个操作建议，等待你的确认。" };
     case "action_result":
       return { title: "操作已完成", body: "刚才的操作已经完成。" };
-    case "proactive_cue":
-      return { title: "伴星提醒", body: "伴星想提醒你一件事。" };
+    case "proactive_cue": {
+      const text = delivery.payloadRef.kind === "proactive_cue"
+        ? delivery.payloadRef.text
+        : undefined;
+      return { title: "伴星提醒", body: text ?? "伴星想提醒你一件事。" };
+    }
+    case "memory_candidate":
+      return { title: "记忆待确认", body: "伴星记住了一条新信息，等待你确认。" };
     default:
       return { title: "伴星消息", body: "有一条新的消息。" };
   }

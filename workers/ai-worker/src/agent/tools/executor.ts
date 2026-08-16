@@ -32,7 +32,8 @@ import { executeQualityTool } from "./quality.ts";
  * PERF-10 修复：进程级幂等缓存。
  *
  * 原代码每次工具调用都查询 DB 检查幂等性，即使该工具在本进程内刚执行过。
- * 此 Set 缓存本进程已执行过的 idempotencyKey，命中时跳过 DB 查询。
+ * 此 Map 缓存本进程已执行过的 idempotencyKey → 脱敏结果载荷，
+ * 命中时直接重放内存结果，跳过 DB SELECT（P1-12 语义保持：返回原始 typed result）。
  *
  * 安全性说明：
  * - 缓存仅作为性能优化，不替代 DB 幂等检查
@@ -40,21 +41,26 @@ import { executeQualityTool } from "./quality.ts";
  * - onConflictDoNothing 保证 DB 层面的幂等性不受影响
  * - 缓存大小有限（最多 5000 条），防止内存无限增长
  */
-const executedToolCache = new Set<string>();
+interface ExecutedToolCacheEntry {
+  success: boolean;
+  result: unknown;
+  error?: string;
+}
+const executedToolCache = new Map<string, ExecutedToolCacheEntry>();
 const EXECUTED_TOOL_CACHE_MAX = 5000;
 
-/** 将已执行的 key 加入缓存，在缓存满时淘汰旧数据 */
-function markExecuted(key: string): void {
+/** 将已执行的 key 及结果载荷加入缓存，在缓存满时淘汰旧数据 */
+function markExecuted(key: string, payload: ExecutedToolCacheEntry): void {
   if (executedToolCache.size >= EXECUTED_TOOL_CACHE_MAX) {
     // 简单淘汰策略：清空一半缓存。仅在极端情况（单进程执行 5000+ 工具调用）触发。
     const halfSize = Math.floor(EXECUTED_TOOL_CACHE_MAX / 2);
     let count = 0;
-    for (const k of executedToolCache) {
+    for (const k of executedToolCache.keys()) {
       executedToolCache.delete(k);
       if (++count >= halfSize) break;
     }
   }
-  executedToolCache.add(key);
+  executedToolCache.set(key, payload);
 }
 
 /** 工具执行上下文 */
@@ -169,38 +175,19 @@ export async function executeToolCall(
   });
 
   // 4. 幂等检查：先查内存缓存，命中则跳过 DB 查询
-  if (executedToolCache.has(idempotencyKey)) {
+  const cachedExecuted = executedToolCache.get(idempotencyKey);
+  if (cachedExecuted) {
     logger.debug(
       { runId, toolName: call.name, toolCallId: call.id },
       "Tool 幂等命中（内存缓存），跳过执行",
     );
-    // P1-12 修复：幂等命中时重放原始 typed result，而非返回通用 message。
-    // 从 DB 加载原始 tool_result 事件中的完整结果。
-    const [cachedResult] = await db
-      .select({ safePayload: schema.cardGenerationAgentEvents.safePayload })
-      .from(schema.cardGenerationAgentEvents)
-      .where(and(
-        eq(schema.cardGenerationAgentEvents.runId, runId),
-        eq(schema.cardGenerationAgentEvents.eventKey, `tool_result:${idempotencyKey}`),
-      ))
-      .limit(1);
-
-    if (cachedResult?.safePayload) {
-      const payload = cachedResult.safePayload as Record<string, unknown>;
-      return {
-        toolCallId: call.id,
-        toolName: call.name,
-        success: payload.success === true,
-        result: payload.result ?? null,
-        error: payload.error as string | undefined,
-      };
-    }
-    // 如果 DB 中没有找到结果（极端情况），回退到通用 message
+    // P1-12 修复：幂等命中时重放原始 typed result（内存载荷），不再发 DB SELECT。
     return {
       toolCallId: call.id,
       toolName: call.name,
-      success: true,
-      result: { idempotent: true, message: "tool already executed" },
+      success: cachedExecuted.success,
+      result: cachedExecuted.result ?? null,
+      error: cachedExecuted.error as string | undefined,
     };
   }
 
@@ -337,8 +324,13 @@ export async function executeToolCall(
     }).onConflictDoNothing();
   }
 
-  // PERF-10 优化：将已执行的 key 加入内存缓存
-  markExecuted(idempotencyKey);
+  // PERF-10 优化：将已执行的 key 及脱敏结果载荷加入内存缓存，
+  // 使后续幂等命中可重放结果而无需 DB SELECT。
+  markExecuted(idempotencyKey, {
+    success: result.success,
+    result: sanitizedResult,
+    error: result.error ?? undefined,
+  });
 
   return result;
 }

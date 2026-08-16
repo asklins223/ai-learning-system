@@ -27,6 +27,52 @@ function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+/**
+ * 方案 16 §14.3：worker 侧 action_result delivery 投递（与 API delivery-service
+ * 同一张表/同一 NOTIFY 通道；避免跨包引入 API db/client 依赖）。
+ */
+async function deliverActionInbox(
+  tx: { execute(query: unknown): Promise<unknown> },
+  input: {
+    workspaceId: string;
+    userId: string;
+    kind: "proposal" | "action_result" | "proactive_cue" | "system_event";
+    payloadRef: unknown;
+    dedupeKey: string;
+    expiresAt: Date;
+  },
+): Promise<void> {
+  const existing = await tx.execute(sql`
+    SELECT id FROM assistant_deliveries
+    WHERE workspace_id = ${input.workspaceId} AND user_id = ${input.userId}
+      AND dedupe_key = ${input.dedupeKey}
+    LIMIT 1
+  `) as Array<{ id: string }>;
+  if (existing[0]) return;
+
+  const maxRows = await tx.execute(sql`
+    SELECT inbox_sequence FROM assistant_deliveries
+    WHERE workspace_id = ${input.workspaceId} AND user_id = ${input.userId}
+    ORDER BY inbox_sequence DESC LIMIT 1
+    FOR UPDATE
+  `) as Array<{ inbox_sequence: string }>;
+  const inboxSequence = (Number(maxRows[0]?.inbox_sequence ?? 0)) + 1;
+
+  const expiresAt = input.expiresAt.toISOString();
+  await tx.execute(sql`
+    INSERT INTO assistant_deliveries
+      (id, assistant_session_id, workspace_id, user_id, inbox_sequence, dedupe_key,
+       state, kind, payload_ref, created_at, expires_at, updated_at)
+    VALUES
+      (${randomUUID()}, NULL, ${input.workspaceId}, ${input.userId}, ${inboxSequence},
+       ${input.dedupeKey}, 'queued', ${input.kind}, ${JSON.stringify(input.payloadRef)}::jsonb,
+       now(), ${expiresAt}, now())
+  `);
+  await tx.execute(sql`
+    SELECT pg_notify('ailearn_companion_inbox_v1', ${JSON.stringify({ userId: input.userId })})
+  `);
+}
+
 interface ActionRunRow {
   [k: string]: unknown;
   id: string;
@@ -326,6 +372,15 @@ export async function runCompanionAction(ctx: CompanionActionHandlerContext): Pr
       await tx.execute(sql`
         SELECT pg_notify('ailearn_companion_events_v1', ${JSON.stringify({ conversationId: run.conversation_id, maxSeq: eventSeq })})
       `);
+      // 方案 16 §14.3：异步 action 完成后向 pet inbox 投递 action_result。
+      await deliverActionInbox(tx, {
+        workspaceId: run.workspace_id,
+        userId: run.user_id,
+        kind: "action_result",
+        payloadRef: { kind: "action_result", actionRunId: run.id },
+        dedupeKey: `action_result:${run.id}`,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      });
       return { skipped: false as const, failed: false as const };
       },
     );
@@ -343,7 +398,7 @@ export async function runCompanionAction(ctx: CompanionActionHandlerContext): Pr
       logger.error({ runId, code, error: sanitizeOperationalError(projectionError) }, "companion action failure projection failed");
       throw projectionError;
     }
-    logger.warn({ runId, code }, "companion action projected as failed");
+    logger.warn({ runId, code, err: error }, "companion action projected as failed");
     return;
   }
 

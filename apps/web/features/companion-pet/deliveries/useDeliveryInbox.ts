@@ -31,6 +31,10 @@ export interface UseDeliveryInboxResult {
 const RECONNECT_MS = 5_000;
 const RECONNECT_MAX_MS = 30_000;
 const CLAIM_TIMEOUT_MS = 8_000;
+// 待处理队列上限：同一时刻只展示一条，claim 最多 8s；保留 N 条最近的即可，
+// 超过上限时丢弃最旧项（推进持久化游标，等效已消费），避免服务端突发积压
+// 让 pendingRef 无限增长（内存泄漏）。
+const MAX_PENDING_DELIVERIES = 50;
 
 export function useDeliveryInbox(enabled: boolean): UseDeliveryInboxResult {
   const [display, setDisplay] = useState<DeliveryDisplayState>({ kind: "idle" });
@@ -163,6 +167,12 @@ export function useDeliveryInbox(enabled: boolean): UseDeliveryInboxResult {
               cursorRef.current = Math.max(cursorRef.current, delivery.inboxSequence);
               persistInboxCursor(delivery.inboxSequence);
               pendingRef.current.push(delivery);
+              // 队列超限：丢弃最旧项（推进持久化游标，等效已消费/跳过），
+              // 与下方对 expired/terminal 条目的跳过语义一致，保证有界。
+              while (pendingRef.current.length > MAX_PENDING_DELIVERIES) {
+                const dropped = pendingRef.current.shift();
+                if (dropped) persistInboxCursor(dropped.inboxSequence);
+              }
               void tryShowNext();
             },
             onError: (err) => {

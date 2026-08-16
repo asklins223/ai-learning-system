@@ -587,6 +587,10 @@ export interface AICallAuditParams {
 }
 
 interface AuditLogDependencies {
+  /** Pre-resolved workspace AI policy. When provided, avoids an extra `workspaces` SELECT.
+   *  Callers that already resolved governance earlier (e.g. via resolveAIGovernanceContext)
+   *  should pass their resolved policy here (PERF: no redundant DB query per audit write). */
+  policy?: WorkspaceAIPolicy;
   getPolicy?: (workspaceId: string) => Promise<WorkspaceAIPolicy>;
   write?: (values: typeof schema.aiAuditLog.$inferInsert) => Promise<void>;
 }
@@ -597,7 +601,7 @@ export async function logAICall(
 ): Promise<boolean> {
   try {
     const getPolicy = dependencies.getPolicy ?? getWorkspaceAIPolicy;
-    const policy = await getPolicy(params.workspaceId);
+    const policy = dependencies.policy ?? await getPolicy(params.workspaceId);
     if (!policy.auditLogging) {
       logger.debug(
         { workspaceId: params.workspaceId, operation: params.operation },

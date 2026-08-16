@@ -544,7 +544,10 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
 
         // evidence 节点（§15.2 UnderstandingNodeRefV1 kind:"evidence"）：
         // 全图/聚焦模式都按 kpIds 全量读取（含 quoteText 供节点 label）。
-        const evidenceRows = kpIds.length > 0
+        // PERF：fetch limit+1 以探测是否触达 500 上限；触达时截断并显式标记，
+        // 避免静默返回不完整的投影图（调用方/日志可感知）。
+        const PROJECTION_MAX_EVIDENCE = 500;
+        const evidenceRowsRaw = kpIds.length > 0
           ? await tx
               .select({
                 id: evidences.id,
@@ -556,8 +559,18 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
                 eq(evidences.workspaceId, scope.workspaceId),
                 inArray(evidences.keyPointId, kpIds),
               ))
-              .limit(500)
+              .limit(PROJECTION_MAX_EVIDENCE + 1)
           : [];
+        const evidenceCapped = evidenceRowsRaw.length > PROJECTION_MAX_EVIDENCE;
+        const evidenceRows = evidenceCapped
+          ? evidenceRowsRaw.slice(0, PROJECTION_MAX_EVIDENCE)
+          : evidenceRowsRaw;
+        if (evidenceCapped) {
+          logger.warn(
+            { workspaceId: scope.workspaceId, keyPointCount: kpIds.length },
+            "projection evidence query capped at 500 — projection graph silently incomplete",
+          );
+        }
 
         // shared 平面实体（noteVersion/note/source 血缘）。
         const noteVersionIds = Array.from(new Set(sharedCardRows.map((card) => card.noteVersionId)));
@@ -894,6 +907,7 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
                 )
               : null,
           },
+          evidenceTruncated: evidenceCapped,
           nodes,
           edges,
           currentTarget: targetKeyPointId

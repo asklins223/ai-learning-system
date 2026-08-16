@@ -140,10 +140,15 @@ export const CompanionHistoryArchive = memo(function CompanionHistoryArchive({
   };
 
   const filterCounts = useMemo(() => {
-    return new Map(FILTERS.map(({ id }) => [
-      id,
-      entries.filter((entry) => matchesFilter(entry.kind, id)).length,
-    ]));
+    // 单趟遍历 entries，每类 filter 独立计数；避免原先对每个 filter 各做一次
+    // entries.filter 全表扫描（O(F×N)）。
+    const counts = new Map<HistoryFilter, number>(FILTERS.map(({ id }) => [id, 0]));
+    for (const entry of entries) {
+      for (const { id } of FILTERS) {
+        if (matchesFilter(entry.kind, id)) counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+    }
+    return counts;
   }, [entries]);
 
   return (

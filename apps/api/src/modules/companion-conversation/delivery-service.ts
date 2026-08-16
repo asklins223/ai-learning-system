@@ -213,7 +213,7 @@ export async function ackDelivery(
 export async function listInbox(
   tx: ApiTransaction,
   scope: DeliveryScope,
-  input: { afterSequence: number; limit: number; kind?: "message" | "proposal" | "action_result" | "proactive_cue" | "system_event" },
+  input: { afterSequence: number; limit: number; kind?: "message" | "proposal" | "action_result" | "proactive_cue" | "system_event" | "memory_candidate" },
 ): Promise<AssistantDeliveryV2[]> {
   const rows = await tx
     .select()

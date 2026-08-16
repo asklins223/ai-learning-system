@@ -524,7 +524,7 @@ export async function runEvaluateValidation(job: JobPayload) {
         durationMs: Date.now() - aiCallStart,
         status: "failed",
         errorMessage: err instanceof Error ? err.message : String(err),
-      });
+      }, { policy: govCtx.policy });
     }
     throw err;
   }
@@ -691,6 +691,6 @@ export async function runEvaluateValidation(job: JobPayload) {
       costTokens: evalUsage?.totalTokens ?? null, // R5: usage from return value
       durationMs: Date.now() - aiCallStart,
       status: "success",
-    });
+    }, { policy: govCtx.policy });
   }
 }

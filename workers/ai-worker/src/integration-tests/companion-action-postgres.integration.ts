@@ -141,6 +141,7 @@ async function seedRun(
       await tx`UPDATE companion_action_proposals SET action_run_id = NULL WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${ws}`;
+      await tx`DELETE FROM assistant_deliveries WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_messages WHERE conversation_id = ${cid}`;
       await tx`DELETE FROM companion_stream_events WHERE conversation_id = ${cid}`;
       await tx`DELETE FROM learning_sessions WHERE workspace_id = ${ws}`;
@@ -191,7 +192,8 @@ test("P5 §6.8：start_session → learning_session + 恰好一条 result + run 
       const sessions = await tx`SELECT intent, status FROM learning_sessions WHERE workspace_id = ${workspaceId}`;
       const events = await tx`SELECT type FROM companion_stream_events WHERE conversation_id = ${cid} AND type = 'action.completed'`;
       const routes = await tx`SELECT route FROM companion_action_runs WHERE id = ${s.runId}`;
-      return { run: run[0], proposal: proposal[0], results, sessions, events, routes };
+      const deliveries = await tx`SELECT kind, payload_ref FROM assistant_deliveries WHERE workspace_id = ${workspaceId} AND user_id = ${userId}`;
+      return { run: run[0], proposal: proposal[0], results, sessions, events, routes, deliveries };
     });
     assert.equal(rows.run.status, "succeeded");
     assert.equal(rows.proposal.status, "succeeded");
@@ -201,18 +203,23 @@ test("P5 §6.8：start_session → learning_session + 恰好一条 result + run 
     assert.equal(rows.sessions[0].intent, "stabilize");
     assert.equal(rows.routes[0].route.kind, "learning_session");
     assert.equal(rows.events.length, 1, "action.completed event");
+    assert.equal(rows.deliveries.length, 1, "action_result delivery 已投递");
+    assert.equal(rows.deliveries[0].kind, "action_result");
+    assert.equal(rows.deliveries[0].payload_ref.actionRunId, s.runId, "action_result payloadRef 指向 actionRunId");
 
-    // 成功后的重复 job 只能被 run 状态 fence 跳过，不能创建第二个 session/result。
+    // 成功后的重复 job 只能被 run 状态 fence 跳过，不能创建第二个 session/result/delivery。
     await runCompanionAction({ payload: { actionRunId: s.runId }, workspaceId, requestedBy: userId });
     const repeat = await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
       const results = await tx`SELECT count(*)::int AS c FROM companion_messages WHERE conversation_id = ${cid} AND kind = 'result'`;
       const sessions = await tx`SELECT count(*)::int AS c FROM learning_sessions WHERE workspace_id = ${workspaceId}`;
-      return { results: results[0].c, sessions: sessions[0].c };
+      const deliveries = await tx`SELECT count(*)::int AS c FROM assistant_deliveries WHERE workspace_id = ${workspaceId} AND user_id = ${userId} AND kind = 'action_result'`;
+      return { results: results[0].c, sessions: sessions[0].c, deliveries: deliveries[0].c };
     });
     assert.equal(repeat.results, 1);
     assert.equal(repeat.sessions, 1);
+    assert.equal(repeat.deliveries, 1, "重复 job 不重复投递 action_result");
   } finally {
     await s.cleanup();
   }
