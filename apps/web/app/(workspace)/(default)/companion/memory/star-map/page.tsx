@@ -44,14 +44,15 @@ export default function MemoryStarMapPage() {
   return (
     <main className="memory-star-map-page">
       <header>
+        <span className="companion-memory-eyebrow"><i aria-hidden="true" /> MEMORY STAR MAP</span>
         <h1>记忆星图</h1>
         <p>记忆节点挂在 card / keyPoint / note / source / learning_run 等实体上。</p>
       </header>
       {error && <p className="memory-star-map-error" role="alert">{error}</p>}
       {!nodes && !error ? (
-        <p>正在读取…</p>
+        <p className="memory-star-map-loading" role="status">正在读取…</p>
       ) : nodes && nodes.length === 0 ? (
-        <p>还没有可展示的记忆节点。</p>
+        <p className="memory-star-map-empty">还没有可展示的记忆节点。</p>
       ) : (
         <ul className="memory-star-map-list">
           {nodes?.map((node) => (

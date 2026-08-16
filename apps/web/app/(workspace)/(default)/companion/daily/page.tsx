@@ -15,9 +15,24 @@ interface DailySummary {
   generatedAt: string | null;
   summary: string;
   facts: Record<string, unknown>;
-  conversationHighlights: unknown[];
+  conversationHighlights: { role: "user" | "assistant"; text: string }[];
   memory: { memoryItemId: string; candidate: boolean } | null;
 }
+
+const FACT_LABELS: Record<string, string> = {
+  notesCreated: "新建笔记",
+  notesUpdated: "更新笔记",
+  cardsCreated: "新增学习卡",
+  sourcesCreated: "收录资料",
+  jobsCreated: "后台任务",
+  jobsCompleted: "完成任务",
+  learningRunsCreated: "学习运行",
+  learningRunsCompleted: "完成运行",
+  pageContexts: "活跃页面",
+  conversationMessages: "桌宠对话",
+  userMessages: "你说",
+  assistantMessages: "伴星说",
+};
 
 export default function CompanionDailyPage() {
   const [data, setData] = useState<DailySummary | null>(null);
@@ -26,7 +41,7 @@ export default function CompanionDailyPage() {
   const reload = useCallback(() => {
     setError(null);
     void api.getCompanionDailySummary().then((result) => {
-      setData(result);
+      setData(result as DailySummary);
     }).catch((caught) => {
       setError(caught instanceof Error ? caught.message : "暂时无法读取桌宠日记");
     });
@@ -71,11 +86,24 @@ export default function CompanionDailyPage() {
             <dl className="companion-daily-facts">
               {Object.entries(data.facts).map(([key, value]) => (
                 <div key={key}>
-                  <dt>{key}</dt>
+                  <dt>{FACT_LABELS[key] ?? key}</dt>
                   <dd>{String(value)}</dd>
                 </div>
               ))}
             </dl>
+          )}
+          {data.conversationHighlights.length > 0 && (
+            <section className="companion-daily-highlights" aria-label="对话拾遗">
+              <h2>对话拾遗</h2>
+              <ul>
+                {data.conversationHighlights.map((item, index) => (
+                  <li key={index}>
+                    <strong>{item.role === "assistant" ? "伴星" : "你"}：</strong>
+                    {item.text}
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
         </article>
       ) : null}

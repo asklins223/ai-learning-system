@@ -1,9 +1,9 @@
-import { redirect } from "next/navigation";
+"use client";
 
-/**
- * UI redraw 已并入生产 Pet 路由的 dev preview：
- * /companion/pet?preview=redraw
- */
-export default function PetJourneyUiRedrawRedirect() {
-  redirect("/companion/pet?preview=redraw");
+import "@/app/(pet)/companion/pet/pet.css";
+import "@/app/styles/pet-journey.css";
+import { PetJourneyRedrawLab } from "@/features/companion-pet/journey/PetJourneyRedrawLab";
+
+export default function PetJourneyUiRedrawPage() {
+  return <PetJourneyRedrawLab />;
 }

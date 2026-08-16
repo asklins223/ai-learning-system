@@ -1,8 +1,12 @@
-import { redirect } from "next/navigation";
+import { Suspense } from "react";
+import "@/app/styles/learning-run.css";
+import "@/components/liquid-orb/liquid-orb.css";
+import { LearningRunRedrawLab } from "@/features/learning-run/demo/LearningRunRedrawLab";
 
-/**
- * UI redraw 已并入生产 LearningRun 流程；统一入口为 /learning-runs/new。
- */
-export default function LearningRunUiRedrawRedirect() {
-  redirect("/learning-runs/new");
+export default function LearningRunUiRedrawPage() {
+  return (
+    <Suspense fallback={<div className="learning-run-route-loading" role="status">正在准备学习界面…</div>}>
+      <LearningRunRedrawLab />
+    </Suspense>
+  );
 }

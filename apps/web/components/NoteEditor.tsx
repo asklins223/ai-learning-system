@@ -1003,16 +1003,17 @@ export function NoteEditor({
   // V2（方案 20 §19.1）：价值优先生成。flag 关闭或后端 404 时回退 legacy（不打扰）。
   const { isCardGenerationV2Enabled } = require("@/lib/feature-flags");
   const v2GenerationEnabled = isCardGenerationV2Enabled();
-  const generateV2WithControls = useCallback(async (controls: GenerationControlsDraftV2): Promise<void> => {
+  const guardedGenerateV2 = useCallback(async (): Promise<void> => {
     if (!(await requireConsent())) return;
-    const started = await generateCardV2(controls);
+    const started = await generateCardV2({
+      sourceScope: "whole_note",
+      learningGoal: "understand",
+      detailThreshold: "balanced",
+      hardMaxCards: null,
+      preferredStrategies: [],
+    });
     if (!started) await generateCard();
   }, [requireConsent, generateCardV2, generateCard]);
-  const openV2Settings = useCallback(() => setV2SettingsOpen(true), []);
-  const submitV2Settings = useCallback(async (controls: GenerationControlsDraftV2): Promise<void> => {
-    setV2SettingsOpen(false);
-    await generateV2WithControls(controls);
-  }, [generateV2WithControls]);
 
   const generatedIsCurrent = generatedVersionId === currentVersionId && !dirty;
   const generationNeedsAttention = generationRun?.status === "needs_attention";
@@ -1087,18 +1088,6 @@ export function NoteEditor({
     router,
     guardedGenerate,
   ]);
-
-  // V2（方案 20 §19.1）：主生成按钮在 V2 可用时先打开生成设置，而不是直接 legacy。
-  const effectiveGenButton = useMemo(() => {
-    if (
-      v2GenerationEnabled &&
-      !genButton.disabled &&
-      (genButton.label === "生成学习卡" || genButton.label === "生成新版学习卡")
-    ) {
-      return { ...genButton, onClick: openV2Settings };
-    }
-    return genButton;
-  }, [v2GenerationEnabled, genButton, openV2Settings]);
 
   // PERF-04 拆分（第十四轮）：导出和返回操作提取到 useNoteActions hook
   const { handleExport, returnToLibrary } = useNoteActions({
@@ -1189,7 +1178,7 @@ export function NoteEditor({
         savingPres={savingPres}
         onSave={save}
         generationVisualState={generationVisualState}
-        genButton={effectiveGenButton}
+        genButton={genButton}
         generationLocked={generationLocked}
         viewMode={viewMode}
         onChangeViewMode={changeViewMode}
@@ -1308,7 +1297,7 @@ export function NoteEditor({
           savingPres={savingPres}
           generationHeading={generationHeading}
           generationVisualState={generationVisualState}
-          genButton={effectiveGenButton}
+          genButton={genButton}
           imageUploads={imageUploads}
           uploadingCount={uploadingCount}
           failedImageUploadCount={failedImageUploadCount}
@@ -1330,7 +1319,7 @@ export function NoteEditor({
           onApplyStarterTemplate={applyStarterTemplate}
           onOpenVersions={handleOpenVersions}
           v2Enabled={v2GenerationEnabled}
-          onGenerateV2={openV2Settings}
+          onGenerateV2={guardedGenerateV2}
         />
 
       </div>
@@ -1381,7 +1370,7 @@ export function NoteEditor({
                 visualState={generationVisualState}
                 heading={generationHeading}
                 pres={genPres}
-                button={effectiveGenButton}
+                button={genButton}
                 isOwner={isOwner}
                 currentVersionNo={currentVersionNo}
                 generationVersionNo={generationVersionNo}
@@ -1414,28 +1403,6 @@ export function NoteEditor({
           )}
         </div>
       </Drawer>
-
-      {v2GenerationEnabled && (
-        <Drawer
-          id="note-editor-v2-settings"
-          open={v2SettingsOpen}
-          onClose={() => setV2SettingsOpen(false)}
-          title="学习卡生成设置"
-          side={compactDrawer ? "bottom" : "right"}
-          width="min(420px, calc(100vw - 32px))"
-          maxHeight="84dvh"
-        >
-          <GenerationControls
-            value={v2Controls}
-            noteVersion={currentVersionNo ?? 0}
-            sourceLabel={title}
-            onChange={setV2Controls}
-            onSubmit={() => void submitV2Settings(v2Controls)}
-            onCancel={() => setV2SettingsOpen(false)}
-            capability="available"
-          />
-        </Drawer>
-      )}
 
       {generationOverlayVisible && (
         <GenerationOverlay

@@ -31,6 +31,7 @@ interface MemoryItem {
   pinned: boolean;
   archived: boolean;
   dismissedAt: string | null;
+  conflictGroup: string | null;
   embeddingStatus: "none" | "pending" | "ready" | "failed";
   sourceType: "user_stated" | "model_inferred" | "confirmed" | "summary" | "legacy";
   createdAt: string;
@@ -157,6 +158,7 @@ export default function CompanionMemoryPage() {
   }), []));
 
   const [items, setItems] = useState<MemoryItem[] | null>(null);
+  const [conflicts, setConflicts] = useState<MemoryItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [kind, setKind] = useState("");
@@ -165,17 +167,32 @@ export default function CompanionMemoryPage() {
 
   const reload = useCallback(() => {
     setError(null);
-    void api.listCompanionMemories({
-      includeCandidates: showCandidates,
-      includeArchived: showArchived,
-      q: q || undefined,
-      kind: (kind || undefined) as MemoryItem["kind"] | undefined,
-    }).then((result) => {
-      setItems((result.items as MemoryItem[]) ?? []);
+    void Promise.all([
+      api.listCompanionMemories({
+        includeCandidates: showCandidates,
+        includeArchived: showArchived,
+        q: q || undefined,
+        kind: (kind || undefined) as MemoryItem["kind"] | undefined,
+      }),
+      api.listCompanionMemoryConflicts(),
+    ]).then(([listResult, conflictResult]) => {
+      setItems((listResult.items as MemoryItem[]) ?? []);
+      setConflicts((conflictResult.items as MemoryItem[]) ?? []);
     }).catch((caught) => {
       setError(caught instanceof Error ? caught.message : "暂时无法读取记忆");
     });
   }, [q, kind, showArchived, showCandidates]);
+
+  const handleResolveConflict = useCallback(async (keepId: string, removeId: string) => {
+    setError(null);
+    try {
+      await api.resolveCompanionMemoryConflict(keepId, removeId);
+      setConflicts((current) => current.filter((item) => item.memoryItemId !== keepId && item.memoryItemId !== removeId));
+      setItems((current) => current?.filter((item) => item.memoryItemId !== removeId) ?? current);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "冲突裁决失败");
+    }
+  }, []);
 
   // 单项操作后仅局部 mutate 列表，不整表 reload。
   const handleMemoryChanged = useCallback((id: string, action: "confirm" | "reject" | "delete" | "pin" | "archive" | "restore" | "dismiss") => {
@@ -266,6 +283,31 @@ export default function CompanionMemoryPage() {
           一键清空
         </button>
       </section>
+
+      {conflicts.length > 0 && (
+        <section className="companion-memory-conflicts" aria-label="记忆冲突">
+          <h2>记忆冲突</h2>
+          <ul>
+            {conflicts.map((item) => {
+              const pair = conflicts.find((c) => c.conflictGroup === item.conflictGroup && c.memoryItemId !== item.memoryItemId);
+              if (!pair || pair.memoryItemId < item.memoryItemId) return null;
+              return (
+                <li key={item.memoryItemId}>
+                  <span>{KIND_LABEL[item.kind]}：{item.content}</span>
+                  <span>vs</span>
+                  <span>{KIND_LABEL[pair.kind]}：{pair.content}</span>
+                  <button type="button" onClick={() => void handleResolveConflict(item.memoryItemId, pair.memoryItemId)}>
+                    保留前者
+                  </button>
+                  <button type="button" onClick={() => void handleResolveConflict(pair.memoryItemId, item.memoryItemId)}>
+                    保留后者
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
 
       {error && (
         <section className="companion-memory-error" role="alert">
