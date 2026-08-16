@@ -198,6 +198,24 @@ export function CandidateReview({
     ));
   }
 
+  /**
+   * 2026-08-16（实机验证修复）：本地乐观更新与服务端提交失败脱节时，
+   * 重新拉取服务端候选真实状态覆盖本地，避免"候选正在重新检查"但
+   * 服务端根本没有任务（提交失败被静默吞掉）的假象。
+   */
+  function rollbackAfterFailure(message: string) {
+    setNotice(message);
+    if (backend) {
+      void backend
+        .refresh()
+        .then((latest) => {
+          setCandidates(latest);
+          setRecheckReasons({});
+        })
+        .catch(() => setNotice("刷新候选状态失败，请稍后重试。"));
+    }
+  }
+
   function toggleCandidate(candidateId: string) {
     const current = candidates.find((c) => c.candidateId === candidateId);
     const nextSelected = !(current?.selected ?? false);
@@ -212,7 +230,7 @@ export function CandidateReview({
           expectedRevision: current.revision,
           expectedRevisionHash: current.revisionHash,
         })
-        .catch(() => setNotice("保留提交失败，请稍后重试。"));
+        .catch(() => rollbackAfterFailure("保留提交失败，已恢复服务端状态，请重试。"));
     }
   }
 
@@ -225,6 +243,8 @@ export function CandidateReview({
       const content = await onReveal(candidate);
       setReveals((current) => ({ ...current, [candidate.candidateId]: content }));
       setNotice("答案已显示，并已记为本次预习。立即开始时将先进入练习模式。");
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : "答案加载失败，请稍后重试。");
     } finally {
       setRevealingId(null);
     }
@@ -243,7 +263,7 @@ export function CandidateReview({
           expectedRevisionHash: "",
         })
         .catch(() => {
-          setNotice("不保留提交失败，请稍后重试或撤销。");
+          rollbackAfterFailure("不保留提交失败，已恢复服务端状态，请重试或撤销。");
         });
     }
   }
@@ -270,7 +290,7 @@ export function CandidateReview({
             expectedRevision: item.revision,
             expectedRevisionHash: "",
           })
-          .catch(() => setNotice("撤销提交失败，请稍后重试。"));
+          .catch(() => rollbackAfterFailure("撤销提交失败，已恢复服务端状态，请重试。"));
       }
     }
   }
@@ -329,10 +349,10 @@ export function CandidateReview({
             type: "edit",
             candidateId,
             expectedRevision: item.revision,
-            expectedRevisionHash: "",
+            expectedRevisionHash: item.revisionHash,
             patch: { objectiveStatement: objective, front: { prompt } },
           })
-          .catch(() => setNotice("编辑提交失败，请稍后重试。"));
+          .catch(() => rollbackAfterFailure("编辑提交失败，已恢复服务端状态，请重试。"));
       }
     }
   }
@@ -379,7 +399,7 @@ export function CandidateReview({
           candidateIds: affectedIds,
           patch: { front: { prompt: mergedPrompt } },
         })
-        .catch(() => setNotice("合并提交失败，请稍后重试。"));
+        .catch(() => rollbackAfterFailure("合并提交失败，已恢复服务端状态，请重试。"));
     }
   }
 
@@ -493,10 +513,16 @@ export function CandidateReview({
                     <p>{revealContent.answer}</p>
                     <h4>理解线索</h4>
                     <p>{revealContent.explanation}</p>
-                    <details>
-                      <summary>查看原文依据</summary>
-                      <blockquote>{revealContent.evidencePreview}</blockquote>
-                    </details>
+                    {revealContent.evidencePreview ? (
+                      <details>
+                        <summary>查看原文依据</summary>
+                        <blockquote>{revealContent.evidencePreview}</blockquote>
+                      </details>
+                    ) : (
+                      <p className="candidate-review-card__reveal-empty-evidence">
+                        暂无原文依据预览
+                      </p>
+                    )}
                   </section>
                 ) : (
                   <button

@@ -28,8 +28,10 @@ import {
   learningCardRevisionsV2,
   learningExposuresV2,
   initialValidationRemindersV2,
+  learningObjectiveEvidenceBindingsV2,
+  evidenceSnapshotsV2,
 } from "../../db/schema/card-generation-v2.ts";
-import { noteVersions } from "../../db/schema/note.ts";
+import { noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
 import {
   parseLearningCardRevealV2,
@@ -893,12 +895,69 @@ async function buildCardReveal(
       misconception: (revision.learningSupport as { misconception?: string })?.misconception,
       workedExample: (revision.learningSupport as { workedExample?: string })?.workedExample,
     },
-    evidencePreviews: [],
+    evidencePreviews: await loadObjectiveEvidencePreviews(tx, ctx.workspaceId, revision.objectiveRevisionId),
     exposureId,
     exposedAt: exposedAt.toISOString(),
     revealPayloadHash: publication.revealPayloadHash,
   };
   return parseLearningCardRevealV2(reveal);
+}
+
+/**
+ * 2026-08-16（实机验证修复）：学习卡"来源与依据"此前恒为空数组——
+ * 从 objective 级 evidence binding（§14.3）查证据快照，按 blockId 从
+ * note_blocks 原文按 [startOffset, endOffset) 切片作为预览
+ * （与候选 reveal / worker loadSealedEvidence 同源语义）。
+ */
+async function loadObjectiveEvidencePreviews(
+  tx: ApiTransaction,
+  workspaceId: string,
+  objectiveRevisionId: string,
+): Promise<LearningCardRevealV2["evidencePreviews"]> {
+  const bindings = await tx.select().from(learningObjectiveEvidenceBindingsV2)
+    .where(and(
+      eq(learningObjectiveEvidenceBindingsV2.workspaceId, workspaceId),
+      eq(learningObjectiveEvidenceBindingsV2.objectiveRevisionId, objectiveRevisionId),
+    ))
+    .limit(20);
+  const snapshotIds = [...new Set(bindings.map((b) => b.evidenceSnapshotId))];
+  if (snapshotIds.length === 0) return [];
+
+  const snapRows = await tx.select().from(evidenceSnapshotsV2)
+    .where(and(
+      eq(evidenceSnapshotsV2.workspaceId, workspaceId),
+      inArray(evidenceSnapshotsV2.evidenceSnapshotId, snapshotIds),
+    ))
+    .limit(20);
+  if (snapRows.length === 0) return [];
+
+  const blockIds = [...new Set(
+    snapRows.map((r) => r.blockId).filter((b): b is string => Boolean(b)),
+  )];
+  const blockTextById = new Map<string, string>();
+  if (blockIds.length > 0) {
+    const blockRows = await tx.select().from(noteBlocks)
+      .where(and(
+        eq(noteBlocks.workspaceId, workspaceId),
+        inArray(noteBlocks.id, blockIds),
+      ));
+    for (const b of blockRows) blockTextById.set(b.id, b.content);
+  }
+
+  const previews: LearningCardRevealV2["evidencePreviews"] = [];
+  for (const row of snapRows) {
+    const blockText = row.blockId ? blockTextById.get(row.blockId) ?? "" : "";
+    const start = Math.max(0, row.startOffset ?? 0);
+    const end = Math.min(blockText.length, row.endOffset ?? blockText.length);
+    const preview = blockText.slice(start, end).trim();
+    if (!preview) continue;
+    previews.push({
+      evidenceSnapshotId: row.evidenceSnapshotId,
+      preview: preview.slice(0, 2000),
+      sourceLabel: null,
+    });
+  }
+  return previews;
 }
 
 async function deferReminderOnReveal(

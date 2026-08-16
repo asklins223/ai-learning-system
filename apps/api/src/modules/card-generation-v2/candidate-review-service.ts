@@ -293,7 +293,14 @@ async function handleEdit(
 
   // 应用 patch 到 objectiveDraft 和 presentationDraft
   const objectiveDraft = applyPatch(candidate.objectiveDraft as Record<string, unknown>, buildObjectivePatch(action.patch));
-  const presentationDraft = applyPatch(candidate.presentationDraft as Record<string, unknown>, buildPresentationPatch(action.patch));
+  // 2026-08-16（实机验证修复）：front 必须与现有 draft 深合并——此前直接
+  // applyPatch({ front: { prompt } }) 是浅合并，整个 front 被替换导致
+  // cue/context/mediaRefs 丢失，recheck 时 grounding 报 empty cue → 候选 failed，
+  // 且 worker 侧表现为"没有可审核的候选"。
+  const presentationDraft = applyPatch(
+    candidate.presentationDraft as Record<string, unknown>,
+    buildPresentationPatch(action.patch, candidate.presentationDraft as { front?: Record<string, unknown> } | null),
+  );
 
   // 创建新的 candidate revision
   const newRevision = candidate.revision + 1;
@@ -429,7 +436,7 @@ async function handleMerge(
   );
   const presentationDraft = applyPatch(
     firstCandidate.presentationDraft as Record<string, unknown>,
-    buildPresentationPatch(action.mergedDraft),
+    buildPresentationPatch(action.mergedDraft, firstCandidate.presentationDraft as { front?: Record<string, unknown> } | null),
   );
 
   const derivedFrom = candidates.map((c) => ({
@@ -685,9 +692,19 @@ function buildObjectivePatch(patch: import("@ailearn/shared/card-generation-v2-c
   return result;
 }
 
-function buildPresentationPatch(patch: import("@ailearn/shared/card-generation-v2-contracts").CandidateEditablePatchV2): Record<string, unknown> {
+function buildPresentationPatch(
+  patch: import("@ailearn/shared/card-generation-v2-contracts").CandidateEditablePatchV2,
+  current?: { front?: Record<string, unknown> } | null,
+): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  if (patch.front !== undefined) result.front = patch.front;
+  if (patch.front !== undefined) {
+    // front 是子对象 patch：必须与现有 front 深合并，保留 cue/context/mediaRefs
+    // 等未编辑字段（浅替换会丢 cue → recheck grounding empty cue → 候选 failed）。
+    result.front = {
+      ...(current?.front ?? {}),
+      ...patch.front,
+    };
+  }
   if (patch.strategy !== undefined) result.strategy = patch.strategy;
   return result;
 }

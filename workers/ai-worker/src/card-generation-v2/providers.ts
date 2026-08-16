@@ -554,10 +554,32 @@ export function computePedagogyReportHash(report: unknown): string {
   return hashCanonicalV2("card-generation-v2/pedagogy-critic-report", report);
 }
 
+function isOptionalLearningSupportHardIssue(issue: string): boolean {
+  return /learningSupport\.(boundary|misconception|workedExample)/.test(issue)
+    || /(boundary|misconception|workedExample)\s*无证据支持/.test(issue);
+}
+
+function normalizeGroundingReport(raw: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...raw };
+  for (const key of ["answerUnits", "learningSupport", "relationSupport"] as const) {
+    const list = next[key];
+    if (!Array.isArray(list)) continue;
+    next[key] = list.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      const obj = { ...(item as Record<string, unknown>) };
+      if (obj.verdict === "supported") obj.verdict = "entailed";
+      else if (obj.verdict === "unsupported") obj.verdict = "insufficient";
+      return obj;
+    });
+  }
+  return next;
+}
+
 function finalizeGroundingReport(raw: Record<string, unknown>): GroundingCriticReportV2 {
   // R28：reportHash 是服务端确定性哈希——parse 前覆盖模型回填值（模型编造的 hash
   // 违反 64-hex 正则 / 缺失都会 zod strict parse 失败），校验通过后由本层计算真实值。
-  const { reportHash: _modelHash, ...withoutModelHash } = raw;
+  const normalized = normalizeGroundingReport(raw);
+  const { reportHash: _modelHash, ...withoutModelHash } = normalized;
   const parseTarget = { ...withoutModelHash, reportHash: "a".repeat(64) };
   let parsed: GroundingCriticReportV2;
   try {
@@ -576,16 +598,37 @@ function finalizeGroundingReport(raw: Record<string, unknown>): GroundingCriticR
     throw parseError("grounding", err);
   }
   const { reportHash: _drop, ...withoutHash } = parsed;
-  const computed = computeGroundingReportHash(withoutHash);
+  // 可选 learningSupport 字段（boundary/misconception/workedExample）没有可靠
+  // 证据时不应成为 hard issue；把它们从 hardIssues 里剔除，避免整个候选失败。
+  const filteredHardIssues = parsed.hardIssues.filter(
+    (issue) => !isOptionalLearningSupportHardIssue(issue),
+  );
+  // 如果 hardIssues 被清空且原 verdict 是 fail，说明失败只来自可选 learningSupport
+  // 字段不足；这些字段不阻断候选，整体 verdict 应降级为 pass。
+  const finalVerdict =
+    filteredHardIssues.length === 0 && parsed.verdict === "fail"
+      ? "pass"
+      : parsed.verdict;
+  const reportForHash = {
+    ...withoutHash,
+    verdict: finalVerdict,
+    hardIssues: filteredHardIssues,
+  };
+  const computed = computeGroundingReportHash(reportForHash);
   logger.info({
     stage: "grounding",
-    verdict: parsed.verdict,
+    verdict: finalVerdict,
     answerUnits: parsed.answerUnits.length,
     learningSupport: parsed.learningSupport.length,
     relations: parsed.relationSupport.length,
-    hardIssues: parsed.hardIssues.length,
+    hardIssues: filteredHardIssues.length,
   }, "[v2-grounding] report parsed");
-  return { ...parsed, reportHash: computed };
+  return {
+    ...parsed,
+    verdict: finalVerdict,
+    hardIssues: filteredHardIssues,
+    reportHash: computed,
+  };
 }
 
 function finalizePedagogyReport(raw: Record<string, unknown>): PedagogyCriticReportV2 {

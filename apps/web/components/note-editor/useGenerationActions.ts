@@ -467,18 +467,21 @@ export function useGenerationActions(ctx: GenerationActionsContext) {
 
   /**
    * V2（方案 20 §19.1）：价值优先生成。
-   * 用真实 api-client 创建 V2 run（带 Idempotency-Key），成功后跳转候选审核页；
-   * 后端未开启（404/503，V2 路由未注册）时返回 false，调用方回退 legacy。
+   * 用真实 api-client 创建 V2 run（带 Idempotency-Key），成功后返回 runId，
+   * 由调用方进入“生成过程”等待阶段，不再直接跳转候选审核页。
+   * 后端未开启（404/503，V2 路由未注册）时返回 { ok: false }。
    * sourceScope 的 selection/section 细分由上层在 draft 中给出 blockRanges 前
    * 暂以整篇兜底（§9.1 合同已支持，Web 选区采集后续迭代补全）。
    */
-  async function generateCardV2(draft: GenerationControlDraftInputV2): Promise<boolean> {
+  async function generateCardV2(
+    draft: GenerationControlDraftInputV2,
+  ): Promise<{ ok: true; runId: string } | { ok: false }> {
     const { createV2Client, newV2IdempotencyKey, isV2UnavailableError } = await import(
       "@/features/card-generation-v2/api-client"
     );
     const client = createV2Client();
     const noteVersionId = savedVersionIdRef.current;
-    if (!noteVersionId) return false;
+    if (!noteVersionId) return { ok: false };
     try {
       const run = await client.createRun(
         {
@@ -495,12 +498,19 @@ export function useGenerationActions(ctx: GenerationActionsContext) {
         },
         newV2IdempotencyKey("gen"),
       );
-      window.location.assign(`/notes/${encodeURIComponent(ctx.noteId)}/card-generation-v2?runId=${run.runId}`);
-      return true;
+      return { ok: true, runId: run.runId };
     } catch (error) {
-      if (isV2UnavailableError(error)) return false;
+      if (isV2UnavailableError(error)) return { ok: false };
       console.error("card-generation-v2 create failed", error);
-      return false;
+      // V2 已启用时不能静默回退 V1（V1 writer 在 V2 开启后默认停写）；
+      // 直接把 V2 错误展示给用户。
+      setGenState("idle");
+      setGenMessage(
+        error instanceof Error && error.message
+          ? error.message
+          : "V2 学习卡生成失败，请稍后重试。",
+      );
+      return { ok: false };
     }
   }
 

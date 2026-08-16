@@ -398,6 +398,38 @@ describe("handleCandidateActionV2 — edit", () => {
     );
     assert.ok(!exposureInsert, "should NOT have written answer_editor_view exposure with subjectCandidateId");
   });
+
+  it("preserves front.cue when edit patch only updates prompt (deep merge)", async () => {
+    const { insertCalls } = setupStandardTx();
+
+    await handleCandidateActionV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      makeCommand({
+        type: "edit",
+        candidateId: CANDIDATE_ID,
+        expectedRevision: 1,
+        expectedRevisionHash: CANDIDATE_REVISION_HASH,
+        patch: {
+          front: { prompt: "Edited prompt" },
+        },
+      }),
+      "edit-merge-001",
+    );
+
+    const candidateInsert = insertCalls.find((i) =>
+      i.values.candidateRevisionId !== undefined && i.values.candidateRevisionId !== "crev-1",
+    );
+    assert.ok(candidateInsert, "should have inserted new candidate revision");
+    const presentation = candidateInsert!.values.presentationDraft as {
+      front?: { cue?: string; prompt?: string };
+    };
+    assert.equal(
+      presentation?.front?.cue,
+      "Cue",
+      "cue must survive the edit patch (regression: shallow merge wiped cue → recheck empty cue → candidate failed)",
+    );
+    assert.equal(presentation?.front?.prompt, "Edited prompt");
+  });
 });
 
 describe("handleCandidateActionV2 — guards", () => {

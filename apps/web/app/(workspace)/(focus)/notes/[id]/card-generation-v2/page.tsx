@@ -3,7 +3,6 @@
 import "@/app/styles/card-generation-v2.css";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { CandidateReviewPage } from "@/features/card-generation-v2/CandidateReviewPage";
 
 /**
@@ -20,15 +19,6 @@ export default function CardGenerationV2ReviewRoutePage() {
 
   return (
     <main className="card-v2-route">
-      <header className="card-v2-route__bar">
-        <div>
-          <Link href={noteId ? `/notes/${noteId}` : "/notes"} className="card-v2-button card-v2-button--quiet">
-            ← 返回笔记
-          </Link>
-          <h1>学习卡 · 候选审核</h1>
-        </div>
-        <ThemeToggle />
-      </header>
       {runId ? (
         <CandidateReviewPage runId={runId} />
       ) : (

@@ -223,7 +223,11 @@ export function ActiveLearningCardV2({
         </button>
       </footer>
 
-      <LifecycleActions capability={capability} onAction={onLifecycleAction} />
+      {/* 2026-08-16：终态卡（已归档/已有新版）不显示编辑/重新生成/归档管理按钮——
+          这些操作对已结束生命周期的卡没有意义；stale（内容需刷新）仍保留管理入口。 */}
+      {presentation.tone !== "archived" && presentation.tone !== "superseded" && (
+        <LifecycleActions capability={capability} onAction={onLifecycleAction} />
+      )}
     </article>
   );
 }

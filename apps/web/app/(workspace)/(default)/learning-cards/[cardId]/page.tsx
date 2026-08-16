@@ -10,7 +10,15 @@
 import "@/app/styles/card-generation-v2.css";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "@/components/ui/icons";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { ActiveLearningCardV2 } from "@/features/learning-card-v2/ActiveLearningCardV2";
@@ -24,6 +32,100 @@ type LoadState =
   | { status: "error"; message: string }
   | { status: "ready" };
 
+/** 2026-08-16（实机验证修复）：Electron 宿主不支持 window.prompt——
+ *  编辑改为真实弹窗，避免 "prompt() is not supported." 崩溃。 */
+function CardEditDialog({
+  card,
+  busy,
+  onClose,
+  onSave,
+}: {
+  card: PublicLearningCardV2;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (cue: string, prompt: string) => void;
+}) {
+  const [cue, setCue] = useState(card.front.cue ?? "");
+  const [prompt, setPrompt] = useState(card.front.prompt ?? "");
+  const titleId = useId();
+  const cueId = useId();
+  const promptId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="candidate-edit-overlay" role="presentation" onMouseDown={onClose}>
+      <div
+        ref={dialogRef}
+        className="candidate-edit-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <p>LEARNING CARD V2</p>
+            <h2 id={titleId}>编辑学习卡正面</h2>
+            <span>修改会直接发布新卡片版本。</span>
+          </div>
+          <button type="button" aria-label="关闭编辑" onClick={onClose}>
+            <Icon.Close />
+          </button>
+        </header>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSave(cue.trim(), prompt.trim());
+          }}
+        >
+          <label htmlFor={cueId}>
+            <span>回忆线索（cue）</span>
+            <input
+              id={cueId}
+              value={cue}
+              maxLength={2000}
+              required
+              onChange={(event) => setCue(event.target.value)}
+            />
+          </label>
+          <label htmlFor={promptId}>
+            <span>正面作答提示（prompt）</span>
+            <textarea
+              id={promptId}
+              value={prompt}
+              rows={5}
+              maxLength={2000}
+              required
+              onChange={(event) => setPrompt(event.target.value)}
+            />
+          </label>
+          <footer>
+            <button type="button" className="card-v2-button card-v2-button--quiet" onClick={onClose}>取消</button>
+            <button
+              type="submit"
+              className="card-v2-button card-v2-button--primary"
+              disabled={busy || !cue.trim() || !prompt.trim()}
+            >
+              <Icon.Check />{busy ? "正在保存…" : "保存改动"}
+            </button>
+          </footer>
+        </form>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export default function LearningCardV2DetailPage() {
   const params = useParams<{ cardId: string }>();
   const router = useRouter();
@@ -33,6 +135,8 @@ export default function LearningCardV2DetailPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reminders, setReminders] = useState<InitialValidationReminderV2[]>([]);
+  const [editOpen, setEditOpen] = useState(false);
+  const [noticeTone, setNoticeTone] = useState<"info" | "error">("info");
   const clientRef = useMemo<{ current: V2Client | null }>(() => ({ current: null }), []);
 
   useEffect(() => {
@@ -115,10 +219,15 @@ export default function LearningCardV2DetailPage() {
             },
             `archive-${card.cardId}-${Date.now()}`,
           );
+          setNoticeTone("info");
           setNotice("已归档。");
-          router.refresh();
+          // 2026-08-16：归档成功后重新拉取卡状态，页面立即切换为"已归档"
+          // 视图（此前只 router.refresh()，client state 不变 → UI 不更新）。
+          const fresh = await client.readPublicCard(card.cardId);
+          setCard(fresh);
         } else if (action === "regenerate") {
           if (!card.noteId) {
+            setNoticeTone("error");
             setNotice("这张卡缺少来源笔记信息，请从笔记的“价值优先生成”入口发起。");
             return;
           }
@@ -128,27 +237,47 @@ export default function LearningCardV2DetailPage() {
           );
           router.push(`/notes/${encodeURIComponent(card.noteId)}/card-generation-v2?runId=${encodeURIComponent(result.runId)}`);
         } else {
-          const nextPrompt = window.prompt("编辑正面作答提示", card.front.prompt);
-          if (nextPrompt === null || !nextPrompt.trim()) return;
-          await client.updateCardPresentationV2(
-            card.cardId,
-            {
-              expectedPublicationRevision: card.publicationRevision,
-              expectedPublicPayloadHash: card.publicPayloadHash,
-              patch: { front: { cue: card.front.cue, prompt: nextPrompt.trim() } },
-            },
-            `edit-${card.cardId}-${Date.now()}`,
-          );
-          setNotice("已保存正面编辑。");
-          window.location.reload();
+          // Electron 宿主不支持 window.prompt：改为真实编辑弹窗。
+          setEditOpen(true);
         }
       } catch (error) {
+        setNoticeTone("error");
         setNotice(error instanceof Error ? error.message : "操作失败。");
       } finally {
         setBusy(false);
       }
     },
     [clientRef, card, router],
+  );
+
+  const onSaveEdit = useCallback(
+    async (cue: string, prompt: string) => {
+      const client = clientRef.current;
+      if (!client || !card) return;
+      setBusy(true);
+      setNotice(null);
+      try {
+        await client.updateCardPresentationV2(
+          card.cardId,
+          {
+            expectedPublicationRevision: card.publicationRevision,
+            expectedPublicPayloadHash: card.publicPayloadHash,
+            patch: { front: { cue, prompt } },
+          },
+          `edit-${card.cardId}-${Date.now()}`,
+        );
+        setEditOpen(false);
+        setNoticeTone("info");
+        setNotice("已保存正面编辑。");
+        window.location.reload();
+      } catch (error) {
+        setNoticeTone("error");
+        setNotice(error instanceof Error ? error.message : "保存失败。");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [clientRef, card],
   );
 
   if (load.status === "loading") {
@@ -190,7 +319,7 @@ export default function LearningCardV2DetailPage() {
         <h1>学习卡</h1>
         <ThemeToggle />
       </header>
-      <div className="card-v2-lab__stage">
+      <div className="card-v2-route__inner">
         <ActiveLearningCardV2
           card={toPublicLearningCardPreview(card)}
           capability="available"
@@ -215,8 +344,10 @@ export default function LearningCardV2DetailPage() {
                     try {
                       await client.cancelReminder(reminder.reminderId);
                       setReminders((prev) => prev.filter((r) => r.reminderId !== reminder.reminderId));
+                      setNoticeTone("info");
                       setNotice("提醒已取消。");
                     } catch (error) {
+                      setNoticeTone("error");
                       setNotice(error instanceof Error ? error.message : "取消失败。");
                     } finally {
                       setBusy(false);
@@ -229,8 +360,16 @@ export default function LearningCardV2DetailPage() {
             ))}
           </section>
         )}
-        {notice && <p className="candidate-review__notice" role="status">{notice}</p>}
       </div>
+      {notice && <p className="card-v2-toast" data-tone={noticeTone} role="status">{notice}</p>}
+      {editOpen && card && (
+        <CardEditDialog
+          card={card}
+          busy={busy}
+          onClose={() => setEditOpen(false)}
+          onSave={(cue, prompt) => void onSaveEdit(cue, prompt)}
+        />
+      )}
     </main>
   );
 }

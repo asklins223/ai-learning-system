@@ -105,7 +105,13 @@ export function toLearningCardRevealContent(
             ? reveal.reveal.canonicalAnswer.pairs.map((p) => `${p.left} → ${p.right}`).join("；")
             : reveal.reveal.canonicalAnswer.kind === "comparison"
               ? reveal.reveal.canonicalAnswer.rows.map((r) => `${r.dimension}: ${r.values.join(" / ")}`).join("\n")
-              : "参考答案";
+              : reveal.reveal.canonicalAnswer.kind === "formula"
+                ? reveal.reveal.canonicalAnswer.latex
+                : reveal.reveal.canonicalAnswer.kind === "code"
+                  ? reveal.reveal.canonicalAnswer.code
+                  // 兜底：未知/缺失 kind 时不再把占位文本当答案展示（此前
+                  // formula/code 会显示成字面"参考答案"）。
+                  : JSON.stringify(reveal.reveal.canonicalAnswer) || "";
 
   return {
     exposureId: reveal.exposureId,

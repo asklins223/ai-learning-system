@@ -198,6 +198,16 @@ export function assembleCandidateEvidenceBindingPlanV2(
         `missing grounding verdict for learning support field ${ls.field}`,
       );
     }
+    // explanation 是必选教学支持；boundary/misconception/workedExample 是可选增强。
+    // 可选字段 grounding 不足（insufficient/contradicted/unsupported）时跳过绑定，
+    // 不阻断整个候选生成。
+    const isRequiredSupport = ls.field === "explanation";
+    if (
+      !isRequiredSupport &&
+      (entry.verdict === "insufficient" || entry.verdict === "contradicted")
+    ) {
+      continue;
+    }
     requirements.push({
       targetUnit: { kind: "learning_support", field: ls.field },
       verdict: entry.verdict,

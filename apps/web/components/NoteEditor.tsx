@@ -42,6 +42,37 @@ import type {
   CardGenerationRunView,
   NoteVersionSummary,
 } from "@/lib/api";
+import type { CardPlanV2 } from "@ailearn/shared";
+
+type PersistedV2RunState = {
+  runId: string;
+  status: "progress" | "ready" | "error";
+  error?: string | null;
+};
+
+function v2RunStorageKey(noteId: string): string {
+  return `ailearn.v2GenerationRun.${noteId}`;
+}
+
+function loadV2RunState(noteId: string): PersistedV2RunState | null {
+  try {
+    const raw = window.localStorage.getItem(v2RunStorageKey(noteId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedV2RunState;
+    if (typeof parsed?.runId !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveV2RunState(noteId: string, state: PersistedV2RunState): void {
+  try {
+    window.localStorage.setItem(v2RunStorageKey(noteId), JSON.stringify(state));
+  } catch {
+    // ignore storage errors
+  }
+}
 import {
   type EditorMode,
   type ViewMode,
@@ -87,6 +118,9 @@ import { ConflictDialog } from "./note-editor/ConflictDialog";
 import { ConfirmDialogs } from "./note-editor/ConfirmDialogs";
 // PERF-04 拆分（第十二轮）：生成动作逻辑提取为自定义 Hook
 import { useGenerationActions } from "./note-editor/useGenerationActions";
+import { CardGenerationV2SettingsDialog } from "./note-editor/CardGenerationV2SettingsDialog";
+import { CardGenerationV2ProgressDialog } from "./note-editor/CardGenerationV2ProgressDialog";
+import type { GenerationControlsDraftV2 } from "@/features/card-generation-v2/contracts/ui-contracts";
 // PERF-04 拆分（第十四轮）：预览目录侧栏提取为独立组件
 import { PreviewOutlineSidebar } from "./note-editor/PreviewOutlineSidebar";
 // PERF-04 拆分（第十四轮）：编辑器主体区域提取为独立组件
@@ -184,6 +218,36 @@ export function NoteEditor({
   // 关闭,再从生成面板/生成按钮重新打开。排除确认(ConfirmDialog)期间让位。
   const [generationFailureDialogOpen, setGenerationFailureDialogOpen] = useState(false);
   const [generationOverlayDismissed, setGenerationOverlayDismissed] = useState(false);
+  // V2（方案 20）：价值优先生成设置弹窗
+  const [v2SettingsOpen, setV2SettingsOpen] = useState(false);
+  const [v2Controls, setV2Controls] = useState<GenerationControlsDraftV2>({
+    sourceScope: "whole_note",
+    learningGoal: "understand",
+    detailThreshold: "balanced",
+    hardMaxCards: null,
+    preferredStrategies: [],
+  });
+  // V2（方案 20）：创建 run 后进入“生成过程”等待阶段；任务状态提升到
+  // 编辑器层，关闭弹窗后继续轮询，按钮和重新打开弹窗都反映当前进度。
+  const [v2Run, setV2Run] = useState<{
+    status: "progress" | "ready" | "error";
+    runId: string;
+    error?: string | null;
+  } | null>(null);
+  const [v2RunDetail, setV2RunDetail] = useState<{ status: string; stage?: string } | null>(null);
+  const [v2ProgressOpen, setV2ProgressOpen] = useState(false);
+
+  // 恢复本笔记未完成的 V2 生成任务，避免返回笔记后状态丢失。
+  useEffect(() => {
+    const saved = loadV2RunState(noteId);
+    if (saved?.runId) {
+      setV2Run({
+        status: saved.status,
+        runId: saved.runId,
+        error: saved.error ?? null,
+      });
+    }
+  }, [noteId]);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorView, setInspectorView] = useState<InspectorView>("overview");
   const [compactDrawer, setCompactDrawer] = useState(false);
@@ -465,6 +529,14 @@ export function NoteEditor({
     const announce = () => {
       if (lastRunAnnouncementRef.current === announcementKey) return;
       lastRunAnnouncementRef.current = announcementKey;
+      // 2026-08-16：被取消的 run 是终态且无操作价值——每次进入页面恢复时
+      // 都会重新 apply 并弹出"已取消基于 vN 的学习卡生成"横幅，反复打扰。
+      // 取消结果由按钮/FAB 状态变化确认；顺带清掉 cancelGenerationRun 的
+      // "正在取消生成任务…"临时消息，避免残留。
+      if (run.status === "cancelled") {
+        setGenMessage(null);
+        return;
+      }
       setGenMessage(generationRunMessage(run));
     };
 
@@ -1000,20 +1072,143 @@ export function NoteEditor({
     await generateCard();
   }, [requireConsent, generateCard]);
 
-  // V2（方案 20 §19.1）：价值优先生成。flag 关闭或后端 404 时回退 legacy（不打扰）。
+  // V2（方案 20 §19.1）：价值优先生成。V2 开启时主生成入口打开设置弹窗，
+  // 提交后直接走 V2 路径，不再回退 V1（V1 writer 在 V2 开启后默认停写）。
   const { isCardGenerationV2Enabled } = require("@/lib/feature-flags");
   const v2GenerationEnabled = isCardGenerationV2Enabled();
-  const guardedGenerateV2 = useCallback(async (): Promise<void> => {
-    if (!(await requireConsent())) return;
-    const started = await generateCardV2({
+
+  const handleV2Ready = useCallback((runId: string): void => {
+    // 2026-08-16（实机验证修复）：不再 setV2Run(null)——跳转前清空内存状态，
+    // 用户从候选审核页返回（浏览器后退/bfcache 恢复不重新执行 mount effect）时
+    // 按钮会退回"生成学习卡"、点击后重新走生成流程，候选审查状态丢失。
+    // 保留 v2Run=ready：返回后按钮显示"查看候选审核"，点击回到同一 run。
+    setV2ProgressOpen(false);
+    window.location.assign(
+      `/notes/${encodeURIComponent(noteId)}/card-generation-v2?runId=${encodeURIComponent(runId)}&noteId=${encodeURIComponent(noteId)}`,
+    );
+  }, [noteId]);
+
+  const openV2Settings = useCallback((): void => {
+    // 已有进行中/失败任务：重新打开过程弹窗，而不是回到第一步。
+    if (v2Run?.status === "progress" || v2Run?.status === "error") {
+      setV2ProgressOpen(true);
+      return;
+    }
+    // 已就绪：直接进入候选审核。
+    if (v2Run?.status === "ready") {
+      handleV2Ready(v2Run.runId);
+      return;
+    }
+    setV2Controls({
       sourceScope: "whole_note",
       learningGoal: "understand",
       detailThreshold: "balanced",
       hardMaxCards: null,
       preferredStrategies: [],
     });
-    if (!started) await generateCard();
-  }, [requireConsent, generateCardV2, generateCard]);
+    setV2SettingsOpen(true);
+  }, [v2Run, handleV2Ready]);
+
+  // 2026-08-16：error 态不能卡死——清空 v2Run（含 localStorage）后重新打开设置弹窗。
+  const handleV2Retry = useCallback((): void => {
+    setV2Run(null);
+    setV2ProgressOpen(false);
+    try {
+      window.localStorage.removeItem(v2RunStorageKey(noteId));
+    } catch {
+      // ignore storage errors
+    }
+    setV2Controls({
+      sourceScope: "whole_note",
+      learningGoal: "understand",
+      detailThreshold: "balanced",
+      hardMaxCards: null,
+      preferredStrategies: [],
+    });
+    setV2SettingsOpen(true);
+  }, [noteId]);
+
+  const submitV2Settings = useCallback(async (value: GenerationControlsDraftV2): Promise<void> => {
+    if (!(await requireConsent())) return;
+    setV2Controls(value);
+    setV2SettingsOpen(false);
+    const result = await generateCardV2(value);
+    if (result.ok) {
+      setGenMessage(null);
+      setV2RunDetail({ status: "planning" });
+      setV2Run({ status: "progress", runId: result.runId });
+      setV2ProgressOpen(true);
+      saveV2RunState(noteId, { status: "progress", runId: result.runId });
+    }
+  }, [requireConsent, generateCardV2]);
+
+  // V2 后台轮询：关闭弹窗后继续取任务状态，plan 就绪后按钮/弹窗自动切换。
+  useEffect(() => {
+    if (!v2Run || v2Run.status !== "progress") return;
+    const runId = v2Run.runId;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function poll() {
+      try {
+        const mod = await import("@/features/card-generation-v2/api-client");
+        const client = mod.createV2Client();
+        // 先确认 run 存在；plan 接口在 plan 未就绪时也会返回 404，
+        // 不能把那种 404 当成“运行不存在”。
+        const run = await client.getRun(runId);
+        if (cancelled) return;
+        if (!run) {
+          const error = "生成运行不存在";
+          setV2Run({ status: "error", runId, error });
+          saveV2RunState(noteId, { status: "error", runId, error });
+          return;
+        }
+        // 实时更新进度弹窗里的当前阶段
+        setV2RunDetail({ status: run.status, stage: (run as { stage?: string }).stage });
+        if (
+          run.status === "failed" ||
+          run.status === "terminal_failed" ||
+          run.status === "cancelled" ||
+          run.status === "closed_without_activation"
+        ) {
+          const error =
+            run.status === "cancelled"
+              ? "生成已取消"
+              : run.error?.message ?? "生成失败，请稍后重试。";
+          setV2Run({ status: "error", runId, error });
+          saveV2RunState(noteId, { status: "error", runId, error });
+          return;
+        }
+        let plan: CardPlanV2 | null = null;
+        try {
+          plan = await client.getRunPlan(runId);
+        } catch (planErr) {
+          const status = (planErr as { statusCode?: number }).statusCode;
+          if (status !== 404) throw planErr;
+          // 404 = plan 还没生成，继续等待
+        }
+        if (cancelled) return;
+        if (plan) {
+          // 生成完成：自动跳转候选审核
+          saveV2RunState(noteId, { status: "ready", runId });
+          handleV2Ready(runId);
+          return;
+        }
+        timer = setTimeout(() => void poll(), 1500);
+      } catch (err) {
+        if (cancelled) return;
+        const error = err instanceof Error ? err.message : "生成过程加载失败。";
+        setV2Run({ status: "error", runId, error });
+        saveV2RunState(noteId, { status: "error", runId, error });
+      }
+    }
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [v2Run, handleV2Ready]);
 
   const generatedIsCurrent = generatedVersionId === currentVersionId && !dirty;
   const generationNeedsAttention = generationRun?.status === "needs_attention";
@@ -1046,30 +1241,44 @@ export function NoteEditor({
   // PERF-04 拆分（第十二轮）：genButton IIFE 提取为纯函数 computeGenButton
   // F8：useMemo 稳定 genButton 引用（EditorFooter memo 需要）——仅当生成相关
   // 状态变化时重算，逐击键不重建。
-  const genButton = useMemo(() => computeGenButton({
-    genState,
-    generationOverlayDismissed,
-    generationPartialReady,
-    hasGeneratedResult,
-    generationNeedsAttention,
-    isOwner,
-    generatedVersionId,
-    generatedIsCurrent,
-    hasWritableContent,
-    generationBlocked,
-    conflictData,
-    uploadingCount,
-    failedImageUploadCount,
-    hasUnresolvedImagePlaceholder,
-    generatedCardHref,
-    onShowOverlay: () => setGenerationOverlayDismissed(false),
-    onViewCards: () => router.push(generatedCardHref),
-    onOpenFailureDialog: () => {
-      setGenerationResolutionError(null);
-      setGenerationFailureDialogOpen(true);
-    },
-    onGenerate: guardedGenerate,
-  }), [
+  const genButton = useMemo(() => {
+    const base = computeGenButton({
+      genState,
+      generationOverlayDismissed,
+      generationPartialReady,
+      hasGeneratedResult,
+      generationNeedsAttention,
+      isOwner,
+      generatedVersionId,
+      generatedIsCurrent,
+      hasWritableContent,
+      generationBlocked,
+      conflictData,
+      uploadingCount,
+      failedImageUploadCount,
+      hasUnresolvedImagePlaceholder,
+      generatedCardHref,
+      onShowOverlay: () => setGenerationOverlayDismissed(false),
+      onViewCards: () => router.push(generatedCardHref),
+      onOpenFailureDialog: () => {
+        setGenerationResolutionError(null);
+        setGenerationFailureDialogOpen(true);
+      },
+      onGenerate: v2GenerationEnabled ? openV2Settings : guardedGenerate,
+    });
+    if (v2GenerationEnabled && v2Run) {
+      if (v2Run.status === "progress") {
+        return { ...base, label: "正在生成学习卡…", disabled: false };
+      }
+      if (v2Run.status === "ready") {
+        return { ...base, label: "查看候选审核", disabled: false };
+      }
+      if (v2Run.status === "error") {
+        return { ...base, label: "生成失败 · 查看详情", disabled: false };
+      }
+    }
+    return base;
+  }, [
     genState,
     generationOverlayDismissed,
     generationPartialReady,
@@ -1086,7 +1295,10 @@ export function NoteEditor({
     hasUnresolvedImagePlaceholder,
     generatedCardHref,
     router,
+    v2GenerationEnabled,
+    openV2Settings,
     guardedGenerate,
+    v2Run,
   ]);
 
   // PERF-04 拆分（第十四轮）：导出和返回操作提取到 useNoteActions hook
@@ -1199,6 +1411,7 @@ export function NoteEditor({
         saving={saving}
         genMessage={genMessage}
         genState={genState}
+        suppressGenMessage={v2Run !== null}
         onDismissExportError={() => setExportError(null)}
         onDismissDeleteError={() => setDeleteError(null)}
         onRetrySave={() => void flushLatestDraft()}
@@ -1319,7 +1532,7 @@ export function NoteEditor({
           onApplyStarterTemplate={applyStarterTemplate}
           onOpenVersions={handleOpenVersions}
           v2Enabled={v2GenerationEnabled}
-          onGenerateV2={guardedGenerateV2}
+          onGenerateV2={openV2Settings}
         />
 
       </div>
@@ -1439,6 +1652,29 @@ export function NoteEditor({
         localSource={latestDraftRef.current.source}
         onResolveWithServer={resolveWithServer}
         onResolveWithLocal={() => void resolveWithLocal()}
+      />
+
+      {/* V2（方案 20）：价值优先生成设置弹窗 */}
+      <CardGenerationV2SettingsDialog
+        open={v2SettingsOpen}
+        noteVersion={currentVersionNo}
+        sourceLabel={title || "整篇笔记"}
+        initialValue={v2Controls}
+        onClose={() => setV2SettingsOpen(false)}
+        onSubmit={(value) => { void submitV2Settings(value); }}
+      />
+
+      {/* V2（方案 20）：生成过程等待弹窗 */}
+      <CardGenerationV2ProgressDialog
+        open={v2ProgressOpen}
+        runId={v2Run?.runId ?? ""}
+        status={v2Run?.status ?? "progress"}
+        runStatus={v2RunDetail?.status}
+        runStage={v2RunDetail?.stage}
+        error={v2Run?.error}
+        onClose={() => setV2ProgressOpen(false)}
+        onReady={handleV2Ready}
+        onRetry={handleV2Retry}
       />
 
       {/* 失败素材处理弹窗:needs_attention 的处理入口。列出全部失败检查点

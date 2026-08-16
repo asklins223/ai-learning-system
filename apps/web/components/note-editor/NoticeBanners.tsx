@@ -23,6 +23,8 @@ export interface NoticeBannersProps {
   saving: SavingState;
   genMessage: string | null;
   genState: GenerationState;
+  /** V2 生成任务激活时隐藏旧 V1 生成横幅，避免误导。 */
+  suppressGenMessage?: boolean;
 
   // ── 状态设置器 ──
   onDismissExportError: () => void;
@@ -44,6 +46,7 @@ export function NoticeBanners({
   saving,
   genMessage,
   genState,
+  suppressGenMessage = false,
   onDismissExportError,
   onDismissDeleteError,
   onRetrySave,
@@ -87,7 +90,7 @@ export function NoticeBanners({
       )}
 
       {/* ── 生成消息 ── */}
-      {genMessage && genState === "idle" && (
+      {genMessage && genState === "idle" && !suppressGenMessage && (
         <div className="ne-notice ne-notice--danger" role="alert">
           <p>{genMessage}</p>
           <button type="button" className="ne-notice-dismiss" onClick={onDismissGenMessage}>关闭</button>

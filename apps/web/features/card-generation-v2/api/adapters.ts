@@ -48,7 +48,24 @@ function recommendationReason(candidate: CandidatePublicView): string {
     return "系统认为它的价值主要在其支撑的合并目标里。";
   }
   const codes = candidate.recommendation.reasonCodes
-    .map((code) => REASON_LABELS[code])
+    .map((code) => {
+      if (REASON_LABELS[code]) return REASON_LABELS[code];
+      const learnability = /^learnability-(\d+)$/.exec(code);
+      if (learnability) {
+        const v = Number(learnability[1]);
+        if (v >= 9000) return "学习价值很高，值得优先练习";
+        if (v >= 8000) return "学习价值较高，适合稳定回忆";
+        return "有一定学习价值";
+      }
+      const importance = /^importance-(\d+)$/.exec(code);
+      if (importance) {
+        const v = Number(importance[1]);
+        if (v >= 9000) return "核心概念，重要度高";
+        if (v >= 8000) return "重要概念，需要掌握";
+        return "基础概念，值得记住";
+      }
+      return "";
+    })
     .filter(Boolean);
   if (codes.length > 0) return codes.join("；");
   return "它是本目标里值得稳定回忆的核心内容。";

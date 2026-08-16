@@ -5,12 +5,15 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { withWorkspaceTransaction } from "../../db/client.ts";
+import type { ApiTransaction } from "../../db/client.ts";
 import {
   cardGenerationCandidatesV2,
   cardExposureLedgerV2,
+  evidenceSnapshotsV2,
 } from "../../db/schema/card-generation-v2.ts";
+import { noteBlocks } from "../../db/schema/note.ts";
 import {
   parseCandidateRevealV2,
   type CandidateRevealV2,
@@ -55,7 +58,7 @@ export async function revealCandidateV2(
       if (candidates.length === 0) {
         throw new CardGenerationV2ServiceError("candidate_not_found", 404, "候选不存在");
       }
-      return buildCandidateReveal(candidates[0], exp.exposureId, exp.exposedAt.toISOString());
+      return await buildCandidateReveal(tx, ctx.workspaceId, candidates[0], exp.exposureId, exp.exposedAt.toISOString());
     }
 
     const candidates = await tx.select().from(cardGenerationCandidatesV2)
@@ -102,15 +105,26 @@ export async function revealCandidateV2(
       candidateId, candidateRevisionId: candidate.candidateRevisionId, exposureId,
     });
 
-    return buildCandidateReveal(candidate, exposureId, new Date().toISOString());
+    return await buildCandidateReveal(tx, ctx.workspaceId, candidate, exposureId, new Date().toISOString());
   });
 }
 
-function buildCandidateReveal(
+/**
+ * 构造候选 reveal 响应（§17.6）。
+ *
+ * 原文依据（evidencePreviews）不是占位空数组：候选 objectiveDraft.evidenceRefIds
+ * 引用 sealed evidence snapshot，正文按 blockId 从 note_blocks 原文按
+ * [startOffset, endOffset) 切片（与 worker loadSealedEvidence 同源），
+ * 取前 2000 字符作为预览。引用缺失/正文不可得时如实返回空数组
+ * （前端显示"暂无原文依据预览"）。
+ */
+async function buildCandidateReveal(
+  tx: ApiTransaction,
+  workspaceId: string,
   candidate: typeof cardGenerationCandidatesV2.$inferSelect,
   exposureId: string,
   exposedAt: string,
-): CandidateRevealV2 {
+): Promise<CandidateRevealV2> {
   const obj = candidate.objectiveDraft as {
     canonicalAnswer: CandidateRevealV2["canonicalAnswer"];
     learningSupport: {
@@ -119,6 +133,7 @@ function buildCandidateReveal(
       misconception?: string;
       workedExample?: string;
     };
+    evidenceRefIds?: string[];
   };
   const reveal: CandidateRevealV2 = {
     version: 2,
@@ -128,11 +143,57 @@ function buildCandidateReveal(
     exposureId,
     canonicalAnswer: obj.canonicalAnswer,
     explanation: obj.learningSupport.explanation,
-    boundary: obj.learningSupport.boundary,
-    misconception: obj.learningSupport.misconception,
-    workedExample: obj.learningSupport.workedExample,
-    evidencePreviews: [],
+    boundary: obj.learningSupport.boundary || undefined,
+    misconception: obj.learningSupport.misconception || undefined,
+    workedExample: obj.learningSupport.workedExample || undefined,
+    evidencePreviews: await loadEvidencePreviews(tx, workspaceId, obj.evidenceRefIds ?? []),
     exposedAt,
   };
   return parseCandidateRevealV2(reveal);
+}
+
+/** 按 evidenceRefIds 取 sealed 证据原文切片作为预览（最多 20 条，每条 ≤2000 字符）。 */
+async function loadEvidencePreviews(
+  tx: ApiTransaction,
+  workspaceId: string,
+  refIds: string[],
+): Promise<CandidateRevealV2["evidencePreviews"]> {
+  const ids = [...new Set(refIds)].slice(0, 20);
+  if (ids.length === 0) return [];
+
+  const rows = await tx.select().from(evidenceSnapshotsV2)
+    .where(and(
+      eq(evidenceSnapshotsV2.workspaceId, workspaceId),
+      inArray(evidenceSnapshotsV2.evidenceSnapshotId, ids),
+    ))
+    .limit(20);
+  if (rows.length === 0) return [];
+
+  const blockIds = [...new Set(
+    rows.map((r) => r.blockId).filter((b): b is string => Boolean(b)),
+  )];
+  const blockTextById = new Map<string, string>();
+  if (blockIds.length > 0) {
+    const blockRows = await tx.select().from(noteBlocks)
+      .where(and(
+        eq(noteBlocks.workspaceId, workspaceId),
+        inArray(noteBlocks.id, blockIds),
+      ));
+    for (const b of blockRows) blockTextById.set(b.id, b.content);
+  }
+
+  const previews: CandidateRevealV2["evidencePreviews"] = [];
+  for (const row of rows) {
+    const blockText = row.blockId ? blockTextById.get(row.blockId) ?? "" : "";
+    const start = Math.max(0, row.startOffset ?? 0);
+    const end = Math.min(blockText.length, row.endOffset ?? blockText.length);
+    const preview = blockText.slice(start, end).trim();
+    if (!preview) continue;
+    previews.push({
+      evidenceSnapshotId: row.evidenceSnapshotId,
+      preview: preview.slice(0, 2000),
+      sourceLabel: null,
+    });
+  }
+  return previews;
 }

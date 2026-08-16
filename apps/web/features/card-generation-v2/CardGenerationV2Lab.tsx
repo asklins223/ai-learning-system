@@ -130,11 +130,13 @@ export function CardGenerationV2Lab() {
 
         {view === "activation" && (
           <section className="activation-result" aria-labelledby="activation-result-title">
-            <div className="activation-result__seal"><Icon.Check /></div>
             <p className="activation-result__eyebrow">2 张学习卡已启用</p>
-            <h2 id="activation-result-title">
-              {activationMode === "formal" ? "现在可以开始第一次验证" : "内容已保存，先从练习开始"}
-            </h2>
+            <div className="activation-result__heading">
+              <div className="activation-result__seal"><Icon.Check /></div>
+              <h2 id="activation-result-title">
+                {activationMode === "formal" ? "现在可以开始第一次验证" : "内容已保存，先从练习开始"}
+              </h2>
+            </div>
             <p>
               {activationMode === "formal"
                 ? "你还没有查看答案。完成一次可信验证后，系统才会安排后续复习。"

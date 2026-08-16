@@ -27,8 +27,9 @@ import {
 import {
   buildActivateCandidatesRequest,
 } from "./api/activation-builder";
+import { CardGenerationV2ActivationDialog } from "@/components/note-editor/CardGenerationV2ActivationDialog";
 import type { CandidateRevealContentV2, CandidateReviewItemV2 } from "./contracts/ui-contracts";
-import type { CardPlanV2, CandidateActionCommandV2, CardActivationReceiptV2 } from "@ailearn/shared";
+import type { CardPlanV2, CandidateActionCommandV2, CardActivationReceiptV2, CanonicalAnswerV2 } from "@ailearn/shared";
 
 export interface CandidateReviewPageProps {
   runId: string;
@@ -48,6 +49,31 @@ type LoadState =
  * activate → activateCandidates（缺服务端未下发的闭包 hash 时会明确阻断）。
  * `client` 可注入以便测试。
  */
+function formatCanonicalAnswer(answer: CanonicalAnswerV2): string {
+  switch (answer.kind) {
+    case "text":
+      return answer.unit.text;
+    case "bullets":
+      return answer.items.map((item) => `• ${item.text}`).join("\n");
+    case "ordered_steps":
+      return answer.steps.map((step, index) => `${index + 1}. ${step.text}`).join("\n");
+    case "mapping":
+      return answer.pairs.map((pair) => `${pair.left} → ${pair.right}`).join("\n");
+    case "comparison":
+      return [
+        answer.columns.join(" | "),
+        ...answer.rows.map((row) => `${row.dimension}: ${row.values.join(" | ")}`),
+      ].join("\n");
+    case "formula":
+      return answer.latex;
+    case "code":
+      return answer.code;
+    default:
+      // 兜底：未知/缺失 kind 时返回可读内容而不是抛错或显示占位文本。
+      return JSON.stringify(answer) || "";
+  }
+}
+
 export function CandidateReviewPage({
   runId,
   client,
@@ -65,9 +91,11 @@ export function CandidateReviewPage({
   const [plan, setPlan] = useState<CardPlanV2 | null>(null);
   const [candidates, setCandidates] = useState<CandidatePublicView[]>([]);
   const [activationError, setActivationError] = useState<string | null>(null);
+  const [activationErrorOpen, setActivationErrorOpen] = useState(false);
   const [activating, setActivating] = useState(false);
-  const [activated, setActivated] = useState(false);
   const [activatedReceipt, setActivatedReceipt] = useState<CardActivationReceiptV2 | null>(null);
+  const [activationModalOpen, setActivationModalOpen] = useState(false);
+  const [activationHasExposure, setActivationHasExposure] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,16 +154,18 @@ export function CandidateReviewPage({
         return latest.candidates.map(toCandidateReviewItem);
       },
       submitAction: async (request: CandidateActionRequestV2Local) => {
+        // 每次动作前拉最新 run，避免 keep/reveal 后 reviewDraftRevision 过期
+        // 导致 edit/keep 失败、服务端不产生 recheck 任务。
+        const latestRun = await effectiveV2.getRun(runId);
+        setRun(latestRun);
         await effectiveV2.candidateAction(
           runId,
           toCandidateActionCommand(
             request,
             runId,
             plan,
-            run?.reviewDraftRevision ?? 1,
-            // 2026-08-16：cardContentEpoch 从 run 取（plan 类型无此字段，
-            // 此前 plan.cardContentEpoch 为 undefined → 请求体缺字段 → 400）。
-            run?.cardContentEpoch ?? 1,
+            latestRun?.reviewDraftRevision ?? 1,
+            latestRun?.cardContentEpoch ?? 1,
           ),
           newV2IdempotencyKey("candidate-action"),
         );
@@ -162,10 +192,7 @@ export function CandidateReviewPage({
         candidateId: reveal.candidateId,
         revision: reveal.revision,
         exposureId: reveal.exposureId,
-        answer:
-          reveal.canonicalAnswer.kind === "text"
-            ? reveal.canonicalAnswer.unit.text
-            : "参考答案",
+        answer: formatCanonicalAnswer(reveal.canonicalAnswer),
         explanation: reveal.explanation,
         evidencePreview: reveal.evidencePreviews[0]?.preview ?? "",
       };
@@ -174,20 +201,48 @@ export function CandidateReviewPage({
   );
 
   const onActivate = useCallback(
-    async (selected: CandidateReviewItemV2[]) => {
+    async (selected: CandidateReviewItemV2[], hasExposure: boolean) => {
       if (!effectiveV2 || !run || !plan) return;
       setActivating(true);
       setActivationError(null);
-      setActivated(false);
+      setActivationErrorOpen(false);
       try {
+        // 激活要求服务端 review_decision=keep；先为所有“ready”但尚未 keep
+        // 的已选候选提交 keep，避免激活时 409 not_kept。
+        // 每次 keep 后 reviewDraftRevision 会变化，必须重新拉取 run 用最新值。
+        let latestRun = run;
+        for (const item of selected) {
+          if (item.reviewState !== "ready") continue;
+          const pageCandidate = candidates.find((c) => c.candidateId === item.candidateId);
+          if (!pageCandidate) continue;
+          await effectiveV2.candidateAction(
+            runId,
+            toCandidateActionCommand(
+              {
+                type: "keep",
+                candidateId: item.candidateId,
+                expectedRevision: item.revision,
+                expectedRevisionHash: item.revisionHash,
+              },
+              runId,
+              plan,
+              latestRun?.reviewDraftRevision ?? 1,
+              latestRun?.cardContentEpoch ?? 1,
+            ),
+            newV2IdempotencyKey("candidate-keep"),
+          );
+          latestRun = await effectiveV2.getRun(runId);
+        }
+        if (latestRun) setRun(latestRun);
+
         const selectedPublic = selected
           .map((item) => candidates.find((c) => c.candidateId === item.candidateId))
           .filter((c): c is CandidatePublicView => Boolean(c));
         const request = await buildActivateCandidatesRequest({
-          run,
+          run: latestRun ?? run,
           plan,
           selected: selectedPublic,
-          runSourceSnapshotHash: run.sourceSnapshotHash,
+          runSourceSnapshotHash: (latestRun ?? run).sourceSnapshotHash,
         });
         const receipt = await effectiveV2.activateCandidates(
           runId,
@@ -195,11 +250,19 @@ export function CandidateReviewPage({
           newV2IdempotencyKey("candidate-activate"),
         );
         setActivatedReceipt(receipt);
-        setActivated(true);
+        setActivationHasExposure(hasExposure);
+        setActivationModalOpen(true);
+        // 激活成功：清除笔记页持久化的 V2 run 状态（key 与 NoteEditor 一致），
+        // 避免返回笔记页后按钮仍显示"查看候选审核"、跳转到已关闭的 run。
+        try {
+          window.localStorage.removeItem(`ailearn.v2GenerationRun.${run.noteId}`);
+        } catch {
+          // ignore storage errors
+        }
       } catch (error) {
-        setActivationError(
-          error instanceof Error ? error.message : "激活失败。",
-        );
+        const message = error instanceof Error ? error.message : "激活失败。";
+        setActivationError(message);
+        setActivationErrorOpen(true);
       } finally {
         setActivating(false);
       }
@@ -235,48 +298,64 @@ export function CandidateReviewPage({
   }
 
   return (
-    <div className="card-v2-lab__stage">
-      {plan && run && (
-        <CandidateReview
-          summary={toCandidateSetSummary(
-            run,
-            candidates,
-            plan.atomDecisions.length,
-          )}
-          initialCandidates={candidates.map(toCandidateReviewItem)}
-          onReveal={onReveal}
-          onActivate={(sel) => void onActivate(sel)}
-          backend={backend}
+    <>
+      <div className="card-v2-lab__stage">
+        {plan && run && (
+          <CandidateReview
+            summary={toCandidateSetSummary(
+              run,
+              candidates,
+              plan.atomDecisions.length,
+            )}
+            initialCandidates={candidates.map(toCandidateReviewItem)}
+            onReveal={onReveal}
+            onActivate={(sel, exposed) => void onActivate(sel, exposed)}
+            backend={backend}
+          />
+        )}
+        {activating && (
+          <p className="candidate-review__notice" role="status">
+            <Icon.Refresh />正在启用所选学习卡…
+          </p>
+        )}
+      </div>
+
+      {activatedReceipt && activationModalOpen && (
+        <CardGenerationV2ActivationDialog
+          open={activationModalOpen}
+          hasExposure={activationHasExposure}
+          receipt={activatedReceipt}
+          noteId={run?.noteId ?? ""}
+          onClose={() => setActivationModalOpen(false)}
         />
       )}
-      {activating && (
-        <p className="candidate-review__notice" role="status">
-          <Icon.Refresh />正在启用所选学习卡…
-        </p>
-      )}
-      {activationError && (
-        <p className="candidate-review__notice candidate-review__notice--error" role="alert">
-          <Icon.Warn />{activationError}
-        </p>
-      )}
-      {activated && activatedReceipt?.mappings[0] && (
-        <div className="candidate-review__activated" role="status">
-          <p className="candidate-review__notice">已启用。可开始第一次验证。</p>
-          <a
-            className="card-v2-button card-v2-button--primary"
-            href={`/learning-runs/new?origin=card_v2&cardId=${encodeURIComponent(activatedReceipt.mappings[0].cardId)}&objectiveId=${encodeURIComponent(activatedReceipt.mappings[0].objectiveId)}&returnTo=${encodeURIComponent(`/notes/${encodeURIComponent(run?.noteId ?? "")}`)}`}
-          >
-            <Icon.Play />开始三分钟验证
-          </a>
-          <a
-            className="card-v2-button card-v2-button--quiet"
-            href={`/learning-cards/${encodeURIComponent(activatedReceipt.mappings[0].cardId)}`}
-          >
-            查看学习卡
-          </a>
+
+      {activationErrorOpen && activationError && (
+        <div className="candidate-edit-overlay card-v2-settings-overlay" role="alertdialog" aria-modal="true" aria-label="启用失败">
+          <div className="candidate-edit-dialog card-v2-activation-dialog">
+            <header>
+              <div>
+                <p>LEARNING CARD V2</p>
+                <h2>启用失败</h2>
+                <span>请处理后重试。</span>
+              </div>
+              <button type="button" onClick={() => setActivationErrorOpen(false)} aria-label="关闭">
+                <Icon.Close />
+              </button>
+            </header>
+            <div className="card-v2-activation-dialog__body">
+              <div className="candidate-review__notice candidate-review__notice--error" role="alert">
+                <Icon.Warn />
+                <p>{activationError}</p>
+              </div>
+              <footer className="card-v2-activation-dialog__footer">
+                <button type="button" className="card-v2-button card-v2-button--quiet" onClick={() => setActivationErrorOpen(false)}>关闭</button>
+              </footer>
+            </div>
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
