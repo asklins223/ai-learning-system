@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * 桌宠日记 — 桌宠手写小笔记风格。
+ * 桌宠日记 — 一页干净、温暖的桌宠手记。
  * 只读展示；不提供手动生成/重新生成入口。
  */
 
@@ -57,12 +57,10 @@ export default function CompanionDailyPage() {
 
   return (
     <main className="pet-note-page">
-      <div className="pet-note">
-        <div className="pet-note-tape" aria-hidden="true" />
-
+      <article className="pet-note">
         {error && (
           <section className="pet-note-state" role="alert">
-            <span className="pet-note-emoji" aria-hidden="true">😿</span>
+            <span className="pet-note-state-emoji" aria-hidden="true">😿</span>
             <strong>这篇笔记暂时没打开</strong>
             <p>{error}</p>
             <button type="button" onClick={reload}>再试一次</button>
@@ -71,14 +69,14 @@ export default function CompanionDailyPage() {
 
         {!data && !error && (
           <section className="pet-note-state" role="status">
-            <span className="pet-note-emoji" aria-hidden="true">✍️</span>
-            <strong>桌宠正在翻昨天的记忆…</strong>
+            <span className="pet-note-state-emoji" aria-hidden="true">✍️</span>
+            <strong>正在翻开昨天的记忆…</strong>
           </section>
         )}
 
         {data?.status === "not_generated" && (
           <section className="pet-note-state" role="status">
-            <span className="pet-note-emoji" aria-hidden="true">🌙</span>
+            <span className="pet-note-state-emoji" aria-hidden="true">🌙</span>
             <strong>桌宠还在悄悄整理</strong>
             <p>昨天学过的、聊过的内容，明天一早就会变成一篇小日记。</p>
           </section>
@@ -86,7 +84,7 @@ export default function CompanionDailyPage() {
 
         {data?.status === "failed" && (
           <section className="pet-note-state" role="status">
-            <span className="pet-note-emoji" aria-hidden="true">🩹</span>
+            <span className="pet-note-state-emoji" aria-hidden="true">🩹</span>
             <strong>这篇日记暂时没写好</strong>
             <p>别担心，桌宠稍后会再试一次。</p>
           </section>
@@ -97,9 +95,9 @@ export default function CompanionDailyPage() {
             <header className="pet-note-head">
               <div className="pet-note-avatar" aria-hidden="true">🐾</div>
               <div className="pet-note-head-text">
-                <span className="pet-note-eyebrow">桌宠日记</span>
+                <span className="pet-note-eyebrow">COMPANION DAILY</span>
                 <h1>{data.date}</h1>
-                <p className="pet-note-date-label">这是桌宠给你写的小笔记～</p>
+                <p className="pet-note-date-label">桌宠写给你的一页小记</p>
               </div>
             </header>
 
@@ -112,10 +110,10 @@ export default function CompanionDailyPage() {
                 <h2>昨天的小脚印</h2>
                 <div className="pet-note-fact-grid">
                   {facts.map(([key, value]) => (
-                    <span className="pet-note-fact" key={key}>
+                    <div className="pet-note-fact" key={key}>
                       <b>{String(value)}</b>
-                      <small>{FACT_LABELS[key] ?? key}</small>
-                    </span>
+                      <span>{FACT_LABELS[key] ?? key}</span>
+                    </div>
                   ))}
                 </div>
               </section>
@@ -124,24 +122,21 @@ export default function CompanionDailyPage() {
             {highlights.length > 0 && (
               <section className="pet-note-highlights" aria-label="对话拾遗">
                 <h2>我们聊过的话</h2>
-                <div className="pet-note-sticky-grid">
+                <ul className="pet-note-highlight-list">
                   {highlights.map((item, index) => (
-                    <blockquote
-                      className={`pet-note-sticky ${index % 2 === 0 ? "is-left" : "is-right"}`}
-                      key={index}
-                    >
-                      <span className="pet-note-sticky-role">
+                    <li key={index} className={item.role === "assistant" ? "is-assistant" : "is-user"}>
+                      <span className="pet-note-highlight-role">
                         {item.role === "assistant" ? "桌宠说" : "你说"}
                       </span>
-                      {item.text}
-                    </blockquote>
+                      <p>{item.text}</p>
+                    </li>
                   ))}
-                </div>
+                </ul>
               </section>
             )}
           </>
         )}
-      </div>
+      </article>
     </main>
   );
 }
