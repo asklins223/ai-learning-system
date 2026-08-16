@@ -68,6 +68,32 @@ export function buildExtractMessages(input: {
   ];
 }
 
+/**
+ * 2026-08-16（实机溯源修复）：LLM 输出容错解析——
+ * tokenrhythm 偶发在 JSON 外包裹 ```json fence 或前后赘述，
+ * 此前直接 JSON.parse 失败即整轮丢弃（记忆提取成功率低）。
+ * 依次尝试：原样 → 剥 fence → 提取首个 {…} 平衡片段。
+ */
+export function parseMemoryExtractJson(raw: string): unknown {
+  const attempts: string[] = [raw.trim()];
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced?.[1]) attempts.push(fenced[1].trim());
+  // 提取首个从 { 到最后一个 } 的平衡片段（容忍前后赘述）。
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    attempts.push(raw.slice(firstBrace, lastBrace + 1).trim());
+  }
+  for (const attempt of attempts) {
+    try {
+      return JSON.parse(attempt);
+    } catch {
+      // 继续尝试下一形态
+    }
+  }
+  throw new SyntaxError("memory extract JSON parse failed after all fallbacks");
+}
+
 export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> {
   const runId = job.payload.runId as string | undefined;
   const userId = job.payload.userId as string | undefined;
@@ -134,34 +160,65 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
   }
 
   const messages = buildExtractMessages(context);
-  let raw: string;
-  try {
-    const result = await runWithAbortBudget(
-      (signal) => provider.chatCompletion(messages, { temperature: 0.2, maxTokens: 800, responseFormat: "text" }, signal),
-      job.signal,
-      resolveProviderCallTimeout("companion_dialogue"),
-      (lateError) => logger.warn({ jobId: job.id, err: lateError }, "memory extract provider settled late"),
+  // 2026-08-16（实机溯源修复）：LLM 输出不可解析或 schema 校验失败先重试
+  // 一次（provider 偶发输出半截/非 JSON/字段缺失），重试仍失败才跳过——
+  // 记忆提取从"一次失误即丢"改为容错。
+  let raw: string | null = null;
+  let parsed: z.SafeParseReturnType<unknown, z.infer<typeof memoryExtractOutputSchema>> | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await runWithAbortBudget(
+        (signal) => provider.chatCompletion(messages, { temperature: 0.2, maxTokens: 800, responseFormat: "text" }, signal),
+        job.signal,
+        resolveProviderCallTimeout("companion_dialogue"),
+        (lateError) => logger.warn({ jobId: job.id, err: lateError }, "memory extract provider settled late"),
+      );
+      raw = result.content;
+      let candidate: z.SafeParseReturnType<unknown, z.infer<typeof memoryExtractOutputSchema>> | null = null;
+      try {
+        candidate = memoryExtractOutputSchema.safeParse(parseMemoryExtractJson(raw));
+      } catch {
+        candidate = null;
+      }
+      if (candidate?.success) {
+        parsed = candidate;
+        break;
+      }
+      if (attempt === 0) {
+        logger.warn(
+          { jobId: job.id, runId, schemaOk: candidate?.success ?? false },
+          "memory extract JSON unparsable or schema-invalid; retrying once",
+        );
+        continue;
+      }
+      break;
+    } catch (err) {
+      logger.warn({ jobId: job.id, runId, err, attempt }, "memory extract provider failed; skipping");
+      return;
+    }
+  }
+  if (raw === null || !parsed) return;
+  const parseResult = parsed as z.SafeParseReturnType<unknown, z.infer<typeof memoryExtractOutputSchema>>;
+  if (!parseResult.success) {
+    logger.warn({ jobId: job.id, runId, error: parseResult.error.message }, "memory extract invalid JSON; skipping");
+    return;
+  }
+
+  const candidates = parseResult.data.candidates.filter((c) => c.confidence >= 0.6);
+  if (candidates.length === 0) {
+    // 2026-08-16（溯源）：候选被过滤/为空时留痕——区分"LLM 没提取到"与
+    // "提取到但置信不足"，便于排查记忆链路。
+    logger.info(
+      {
+        jobId: job.id,
+        runId,
+        rawCandidates: parseResult.data.candidates.length,
+        rawPreview: raw.slice(0, 160),
+      },
+      "memory extract no candidates after confidence filter",
     );
-    raw = result.content;
-  } catch (err) {
-    logger.warn({ jobId: job.id, runId, err }, "memory extract provider failed; skipping");
     return;
   }
-
-  let parsed: z.SafeParseReturnType<unknown, z.infer<typeof memoryExtractOutputSchema>>;
-  try {
-    parsed = memoryExtractOutputSchema.safeParse(JSON.parse(raw));
-  } catch (err) {
-    logger.warn({ jobId: job.id, runId, err }, "memory extract invalid JSON; skipping");
-    return;
-  }
-  if (!parsed.success) {
-    logger.warn({ jobId: job.id, runId, error: parsed.error.message }, "memory extract invalid JSON; skipping");
-    return;
-  }
-
-  const candidates = parsed.data.candidates.filter((c) => c.confidence >= 0.6);
-  if (candidates.length === 0) return;
 
   await withJobTransaction(job, async (tx) => {
     // 防止同一用户并发提取时 inbox_sequence 冲突。
