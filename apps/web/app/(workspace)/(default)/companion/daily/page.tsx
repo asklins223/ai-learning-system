@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import "../conversations/conversation-page.css";
 import { api } from "@/lib/api";
 
 interface DailySummary {
