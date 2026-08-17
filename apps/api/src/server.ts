@@ -27,6 +27,7 @@ import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
 import { cardGenerationV2Routes } from "./modules/card-generation-v2/routes.ts";
 import { learningObjectiveRoutes } from "./modules/learning-objectives/routes.ts";
 import { learningDashboardRoutes } from "./modules/learning-dashboard/routes.ts";
+import { understandingTopologyV3Routes } from "./modules/understanding-v3/routes.ts";
 import { isCardGenerationV2Enabled } from "./config/learning-companion-flags.ts";
 import { companionShellRoutes } from "./modules/companion-shell/index.ts";
 import { learningMetricRoutes } from "./modules/observability/routes.ts";
@@ -332,6 +333,7 @@ async function main() {
   // learning_objective_system_v3 capability 统一 gate，见 §22）。
   await app.register(learningObjectiveRoutes);
   await app.register(learningDashboardRoutes);
+  await app.register(understandingTopologyV3Routes);
   await app.register(jobRoutes);
   await app.register(evidenceRoutes);
   await app.register(validationRoutes);
