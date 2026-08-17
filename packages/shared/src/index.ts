@@ -95,6 +95,8 @@ export * from "./companion-learning-session-contracts.ts";
 export * from "./companion-persona.ts";
 export * from "./card-quality-v2-contracts.ts";
 export * from "./voice-expression-tags.ts";
+export * from "./learning-objective-surface-contracts.ts";
+export * from "./understanding-topology-v3-contracts.ts";
 
 export type * from "./published-learning-asset-contract.ts";
 export type * from "./fingerprint.ts";

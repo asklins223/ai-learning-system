@@ -32,13 +32,17 @@ export interface LegacyConsumerEntry {
   /** 模块路径或文件名 */
   module: string;
   /** 消费的字段 */
-  fields: ReadonlyArray<"claim" | "quoteText" | "keyPointId">;
+  fields: ReadonlyArray<"claim" | "quoteText" | "keyPointId" | "schemaJson">;
   /** 处置策略 */
   action: ConsumerAction;
   /** 说明 */
   reason: string;
   /** C0 标记日期 */
   taggedAt: string;
+  /** W0-02：模块 owner（负责把该模块切到 Objective Surface 的人/角色）。 */
+  owner?: string;
+  /** W0-02：是否正式消费者（Home/Cards/Detail/Today/Review/Search/Graph/Pet/Stats/Export/Note lifecycle）。 */
+  formal?: boolean;
   /** R35 复核状态（未标注 = 待复核） */
   status?: RegistryEntryStatus;
   /** 状态标注日期 */
@@ -63,14 +67,14 @@ export const LEGACY_CONSUMER_REGISTRY: ReadonlyArray<LegacyConsumerEntry> = [
   { module: "apps/api/src/modules/review/service.ts", fields: ["claim", "keyPointId"], action: "rebase", reason: "Review service 切换到 V2 objectiveId", taggedAt: "2026-08-14", status: "done", statusAt: "2026-08-15" },
   { module: "apps/api/src/modules/review/consumer-eligibility.ts", fields: ["keyPointId"], action: "rebase", reason: "Eligibility 切换到 V2 objective lifecycle", taggedAt: "2026-08-14", status: "done", statusAt: "2026-08-15" },
   { module: "apps/api/src/modules/review/attempt-service.ts", fields: ["claim", "quoteText"], action: "rebase", reason: "Attempt service 切换到 V2 target snapshot", taggedAt: "2026-08-14", status: "dual", statusAt: "2026-08-15" },
-  { module: "apps/web/app/(workspace)/(default)/review/page.tsx", fields: ["claim", "keyPointId"], action: "rebase", reason: "Review 页面切换到 V2", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
+  { module: "apps/web/app/(workspace)/(default)/review/page.tsx", fields: ["claim", "keyPointId"], action: "rebase", reason: "Review 卡面切到 Objective Surface（Schedule identity 保留）", owner: "fe-review", formal: true, taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
   { module: "apps/web/app/(workspace)/(focus)/review/[scheduleId]/page.tsx", fields: ["keyPointId", "claim"], action: "rebase", reason: "Review detail 切换到 V2", taggedAt: "2026-08-14" },
 
   // ── Today ─────────────────────────────────────────────────────────
-  { module: "apps/web/app/(workspace)/(default)/today/page.tsx", fields: ["claim", "keyPointId"], action: "rebase", reason: "Today 页切换到 V2 objective", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
+  { module: "apps/web/app/(workspace)/(default)/today/page.tsx", fields: ["claim", "keyPointId"], action: "rebase", reason: "Today 切到 Objective queue（action 与 Dashboard 一致）", owner: "fe-today", formal: true, taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
 
   // ── Graph / Star Map ──────────────────────────────────────────────
-  { module: "apps/web/app/(workspace)/(default)/graph/page.tsx", fields: ["claim", "keyPointId"], action: "rebase", reason: "Star Map 切换到 V2 objective ID", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
+  { module: "apps/web/app/(workspace)/(default)/graph/page.tsx", fields: ["claim", "keyPointId"], action: "rebase", reason: "Star Map 切到 Topology V3 objective-native node", owner: "fe-graph", formal: true, taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
   { module: "apps/api/src/modules/understanding/graph.ts", fields: ["keyPointId", "claim"], action: "rebase", reason: "Graph service 切换到 V2 objective", taggedAt: "2026-08-14" },
   { module: "apps/api/src/modules/understanding/service.ts", fields: ["keyPointId"], action: "rebase", reason: "Understanding service 切换到 V2 objective", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
 
@@ -104,9 +108,22 @@ export const LEGACY_CONSUMER_REGISTRY: ReadonlyArray<LegacyConsumerEntry> = [
   { module: "apps/api/src/modules/validation/session-service.ts", fields: ["claim", "quoteText", "keyPointId"], action: "rebase", reason: "Validation session 切换到 V2 target snapshot", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
 
   // ── Other ─────────────────────────────────────────────────────────
-  { module: "apps/api/src/modules/stats/service.ts", fields: ["keyPointId"], action: "rebase", reason: "Stats 切换到 V2 objective", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
-  { module: "apps/api/src/modules/export/service.ts", fields: ["claim", "quoteText"], action: "rebase", reason: "Export 切换到 V2 canonical answer", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
-  { module: "apps/api/src/modules/search/service.ts", fields: ["keyPointId"], action: "rebase", reason: "Search 切换到 V2 objective", taggedAt: "2026-08-14" , status: "dual", statusAt: "2026-08-15" },
+  { module: "apps/api/src/modules/stats/service.ts", fields: ["keyPointId"], action: "rebase", reason: "Stats 切到 Objective 口径（active/validated/due 与 Dashboard 对账，hidden alias=0）", owner: "api-stats", formal: true, taggedAt: "2026-08-14", status: "dual", statusAt: "2026-08-15" },
+  { module: "apps/api/src/modules/export/service.ts", fields: ["claim", "quoteText"], action: "rebase", reason: "Export 增加 Objective/Origin，不导出私有 rubric", owner: "api-export", formal: true, taggedAt: "2026-08-14", status: "dual", statusAt: "2026-08-15" },
+  { module: "apps/api/src/modules/search/service.ts", fields: ["keyPointId"], action: "rebase", reason: "Search 建立 Objective 索引（conceptLabel/source/note 可搜；answer/rubric 不进索引）", owner: "api-search", formal: true, taggedAt: "2026-08-14", status: "dual", statusAt: "2026-08-15" },
+
+  { module: "apps/web/app/(workspace)/(default)/cards/page.tsx", fields: ["schemaJson", "keyPointId"], action: "rebase", reason: "卡库切到 Objective list，不再做 V1/V2 数组合并与有损转换", owner: "fe-cards", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/web/app/(workspace)/(focus)/learning-cards/[cardId]/page.tsx", fields: ["schemaJson", "keyPointId"], action: "rebase", reason: "详情切到 Objective Surface controller，移除完整题面主视觉与伪作答", owner: "fe-detail", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/web/app/(workspace)/(default)/search/page.tsx", fields: ["schemaJson", "keyPointId"], action: "rebase", reason: "Search 结果切到 Objective 索引（不索引 answer/rubric）", owner: "fe-search", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  // ── Plan 23 正式消费者（W0-02；owner/formal 标记）──────────────────
+  { module: "apps/web/app/(workspace)/(default)/page.tsx", fields: ["schemaJson", "keyPointId"], action: "rebase", reason: "首页切到 /v2/learning-dashboard，不再读 listCards + schemaJson.title/summary", owner: "fe-home", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/web/app/(workspace)/(default)/stats/page.tsx", fields: ["schemaJson", "keyPointId"], action: "rebase", reason: "Stats 页切到 Objective 口径（与 Dashboard 对账）", owner: "fe-stats", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/web/app/(workspace)/(default)/search/page.tsx", fields: ["schemaJson", "keyPointId"], action: "rebase", reason: "Search 页切到 Objective 索引结果（不索引 answer/rubric）", owner: "fe-search", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/api/src/modules/companion-bridge/context-hydration.ts", fields: ["claim", "schemaJson", "keyPointId"], action: "rebase", reason: "Pet 读取 Objective label/state，不再用 claim/summary 拼标题", owner: "fe-pet", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/api/src/modules/note/service.ts", fields: ["schemaJson", "keyPointId"], action: "rebase", reason: "Note archive/version update 处理 Objective Origin freshness/lifecycle", owner: "api-note", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/web/lib/learning-card-library.ts", fields: ["schemaJson", "claim"], action: "delete", reason: "依赖 legacy CardListItem/CardSet 的卡库辅助，切到 Objective Surface 后删除", owner: "fe-cards", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/web/lib/api.ts", fields: ["schemaJson"], action: "rebase", reason: "V2 列表无 total；新增 Objective API client，不复用 legacy CardListItem", owner: "fe-api", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
+  { module: "apps/web/lib/api-types.ts", fields: ["schemaJson", "claim", "quoteText"], action: "rebase", reason: "公共类型库继续承载 CardListItem/claim 类型；W3 后只保留 legacy/history 类型", owner: "fe-api", formal: true, taggedAt: "2026-08-16", status: "pending", statusAt: "2026-08-16" },
 
   // ── Worker (V1 pipeline) ──────────────────────────────────────────
   { module: "workers/ai-worker/src/agent/prepare.ts", fields: ["claim"], action: "delete", reason: "V1 PREPARE 被 V2 Planner 替代后删除", taggedAt: "2026-08-14" },
@@ -217,4 +234,69 @@ export function generateConsumerAuditReport(
     byField,
     entries: [...registry],
   };
+}
+
+// ─── Plan 23 W0-02: 正式消费者 gate（§22/§30）─────────────────────────────
+// 旧 C0 gate 只阻止“新增”claim 依赖；“登记为 dual”只是文档事实，不是可执行
+// release gate（23 方案 §2.7）。以下 gate 把「正式消费者必须脱离 pending」变成
+// 可执行条件，供 CI / 实施记录使用。
+
+/** Plan 23 §22/§30：必须由 Objective Surface 驱动的正式消费者（官方页面/服务）。 */
+export const FORMAL_CONSUMER_REQUIRED_MODULES: ReadonlyArray<string> = [
+  // Home
+  "apps/web/app/(workspace)/(default)/page.tsx",
+  // Cards library / Detail
+  "apps/web/app/(workspace)/(default)/cards/page.tsx",
+  "apps/web/app/(workspace)/(focus)/learning-cards/[cardId]/page.tsx",
+  // Today / Review / Search / Graph
+  "apps/web/app/(workspace)/(default)/today/page.tsx",
+  "apps/web/app/(workspace)/(default)/review/page.tsx",
+  "apps/web/app/(workspace)/(default)/search/page.tsx",
+  "apps/web/app/(workspace)/(default)/graph/page.tsx",
+  // Pet / Companion Bridge
+  "apps/api/src/modules/companion-bridge/context-hydration.ts",
+  // Stats / Export / Note lifecycle
+  "apps/api/src/modules/stats/service.ts",
+  "apps/api/src/modules/export/service.ts",
+  "apps/api/src/modules/note/service.ts",
+];
+
+export interface FormalConsumerGateReport {
+  pass: boolean;
+  /** 必需但未登记的正式消费者模块。 */
+  missingModules: string[];
+  /** 已登记但 status 仍为 pending 或缺失的正式消费者。 */
+  pendingFormalConsumers: LegacyConsumerEntry[];
+}
+
+export function formalConsumerGateReport(
+  registry: ReadonlyArray<LegacyConsumerEntry> = LEGACY_CONSUMER_REGISTRY,
+): FormalConsumerGateReport {
+  const registered = new Set(registry.map((e) => e.module));
+  const missingModules = FORMAL_CONSUMER_REQUIRED_MODULES.filter(
+    (m) => !registered.has(m),
+  );
+  const pendingFormalConsumers = registry.filter(
+    (e) => e.formal === true && (e.status === undefined || e.status === "pending"),
+  );
+  return {
+    pass: missingModules.length === 0 && pendingFormalConsumers.length === 0,
+    missingModules,
+    pendingFormalConsumers,
+  };
+}
+
+/** W0-02 可执行 gate：正式消费者不允许停留在 pending（§2.7 的 release gate 落地）。 */
+export function assertFormalConsumerGate(
+  registry: ReadonlyArray<LegacyConsumerEntry> = LEGACY_CONSUMER_REGISTRY,
+): { pass: true } {
+  const report = formalConsumerGateReport(registry);
+  if (!report.pass) {
+    const missing = report.missingModules.join(", ") || "(none)";
+    const pending = report.pendingFormalConsumers.map((e) => e.module).join(", ") || "(none)";
+    throw new Error(
+      "Formal consumer gate failed: missingModules=[" + missing + "] pendingFormalConsumers=[" + pending + "]",
+    );
+  }
+  return { pass: true };
 }

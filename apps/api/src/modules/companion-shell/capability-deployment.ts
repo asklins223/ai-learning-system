@@ -69,14 +69,14 @@ export function assertBundleGraphValid(): readonly string[] {
   const must = new Set<string>(MUST_BUNDLE_CAPABILITY_IDS);
   const should = new Set<string>(SHOULD_BUNDLE_CAPABILITY_IDS);
 
-  if (CAPABILITY_IDS.length !== 18) {
-    problems.push(`capability 枚举总数应为 18，实际 ${CAPABILITY_IDS.length}`);
+  if (CAPABILITY_IDS.length !== 19) {
+    problems.push(`capability 枚举总数应为 19，实际 ${CAPABILITY_IDS.length}`);
   }
   if (MUST_BUNDLE_CAPABILITY_IDS.length !== 9) {
     problems.push(`Must bundle flag 应为 9 个，实际 ${MUST_BUNDLE_CAPABILITY_IDS.length}`);
   }
-  if (SHOULD_BUNDLE_CAPABILITY_IDS.length !== 3) {
-    problems.push(`Should flag 应为 3 个，实际 ${SHOULD_BUNDLE_CAPABILITY_IDS.length}`);
+  if (SHOULD_BUNDLE_CAPABILITY_IDS.length !== 4) {
+    problems.push(`Should flag 应为 4 个（含 Plan 23 learning_objective_system_v3），实际 ${SHOULD_BUNDLE_CAPABILITY_IDS.length}`);
   }
   if (INTERNAL_ATOMIC_CAPABILITY_IDS.length !== 6) {
     problems.push(`内部原子能力应为 6 个，实际 ${INTERNAL_ATOMIC_CAPABILITY_IDS.length}`);

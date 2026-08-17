@@ -51,6 +51,8 @@ export const SHOULD_FLAG_IDS = [
   "learning_question_markers",
   "semantic_relationships",
   "tutor_workspace_expansion",
+  /** Plan 23 W0-09：Objective 系统原子切流 bundle（默认 OFF）。 */
+  "learning_objective_system_v3",
 ] as const;
 
 /** 全部 capability flag（Must + Should）。 */
@@ -149,6 +151,10 @@ export const SHOULD_BUNDLE_DEPENDENCIES: readonly ShouldBundleDependency[] = [
   { flag: "learning_question_markers", requires: [] },
   { flag: "semantic_relationships", requires: [] },
   { flag: "tutor_workspace_expansion", requires: ["trusted_multimodal_core"] },
+  {
+    flag: "learning_objective_system_v3",
+    requires: ["trusted_multimodal_core"],
+  },
 ];
 
 /**

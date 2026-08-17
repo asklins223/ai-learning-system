@@ -49,6 +49,8 @@ export const SHOULD_BUNDLE_CAPABILITY_IDS = [
   "learning_question_markers",
   "semantic_relationships",
   "tutor_workspace_expansion",
+  /** Plan 23 W0-09：Objective 系统原子切流 bundle（默认 OFF，无行为变化）。 */
+  "learning_objective_system_v3",
 ] as const;
 export type ShouldBundleCapabilityId = (typeof SHOULD_BUNDLE_CAPABILITY_IDS)[number];
 
@@ -145,6 +147,11 @@ export const CAPABILITY_DEPENDENCY_EDGES: readonly CapabilityDependencyEdge[] = 
   { capability: "learning_question_markers", requires: [] },
   { capability: "semantic_relationships", requires: [] },
   { capability: "tutor_workspace_expansion", requires: ["trusted_multimodal_core", "grounded_answer_critic"] },
+  {
+    // Plan 23 W0-09：Objective 系统（Surface/Dashboard/Topology V3）原子切流 bundle。
+    capability: "learning_objective_system_v3",
+    requires: ["trusted_multimodal_core"],
+  },
   { capability: "scene", requires: ["critic", "commit"] },
   { capability: "critic", requires: ["trusted_multimodal_core"] },
   { capability: "commit", requires: ["trusted_multimodal_core"] },
