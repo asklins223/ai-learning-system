@@ -1,39 +1,14 @@
 /**
- * v0.6 Feature Flags (计划 §12.2)
+ * Feature Flags
  *
  * Client-side feature flag utilities. Flags are read from NEXT_PUBLIC_
  * environment variables so they are available at build time.
  *
- * When a flag is disabled, the UI falls back to a safe state (计划 §12.2:
- * "关闭 flag 时必须 fail closed：可以回到只读卡片、确定性题目或旧 schedule
- * 展示，但不能恢复客户端题面/outcome 的升级权力").
+ * When a flag is disabled, the UI falls back to a safe state (fail closed).
  */
 
 function isExplicitlyEnabled(value: string | undefined): boolean {
   return value === "true";
-}
-
-/** QUESTION_FIRST_UI_ENABLED — controls v0.6 question-first Focus UI (计划 §12.2) */
-export function isQuestionFirstUIEnabled(): boolean {
-  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED);
-}
-
-/** AI_QUESTION_V1_ENABLED — controls server-side AI question generation */
-export function isAIQuestionEnabled(): boolean {
-  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_AI_QUESTION_V1_ENABLED);
-}
-
-/** RUBRIC_EVALUATION_V1_ENABLED — controls server-side rubric evaluation */
-export function isRubricEvaluationEnabled(): boolean {
-  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED);
-}
-
-/**
- * @deprecated 学习卡 V2 已移除 CardSet 作为产品主信息架构。
- * 仅供 legacy 只读兼容代码识别旧部署配置；/cards 不得再读取此开关。
- */
-export function isCardSetDeckUIEnabled(): boolean {
-  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED);
 }
 
 /**
@@ -41,8 +16,7 @@ export function isCardSetDeckUIEnabled(): boolean {
  *
  * 与 API 侧 LEARNING_RUN_V1 同一次切换原子开启：Card/Review/Today 的
  * 三分钟入口、/learning-runs 路由与 Player 生产数据源同时生效。
- * fail closed：flag 关闭时全部入口维持旧链路（旧 validation/companion），
- * /learning-runs/new 与 /learning-runs/[runId] 返回 404。
+ * fail closed：flag 关闭时 /learning-runs/new 与 /learning-runs/[runId] 返回 404。
  */
 export function isLearningRunV1Enabled(): boolean {
   return isExplicitlyEnabled(process.env.NEXT_PUBLIC_LEARNING_RUN_V1);
@@ -68,28 +42,6 @@ export function isStarMapActionV1Enabled(): boolean {
  */
 export function isAgentActivityStreamEnabled(): boolean {
   return isExplicitlyEnabled(process.env.NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED);
-}
-
-/**
- * 救火 1（审计）：伴星壳（CompanionShell）默认关闭。
- *
- * 审计确认伴星面板仍是空壳/演示态（panelContent undefined、朗读/问一问
- * 仅 console 桩、语音端点未接生产路径）——在完成真实闭环前不得展示，
- * 避免把演示 UI 冒充 v1 交付（§12.2 fail closed：flag 关闭时不渲染）。
- *
- * 生产接入真实面板内容/端点后，由部署方显式设
- * `NEXT_PUBLIC_COMPANION_SHELL_ENABLED=true` 开启。
- */
-export function isCompanionShellEnabled(): boolean {
-  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_COMPANION_SHELL_ENABLED);
-}
-
-/**
- * Companion v2 reconstruction surface. This is an internal-only build flag;
- * it is intentionally separate from the retired empty-shell flag above.
- */
-export function isCompanionV2InternalEnabled(): boolean {
-  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_COMPANION_V2_INTERNAL);
 }
 
 /**
@@ -137,4 +89,16 @@ export function isReviewVoiceEntryEnabled(): boolean {
  */
 export function isCardGenerationV2Enabled(): boolean {
   return isExplicitlyEnabled(process.env.NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED);
+}
+
+/**
+ * Plan 23 W0-09：Objective 系统前端门禁（capability learning_objective_system_v3 的
+ * 前端投影）。
+ *
+ * fail-closed：flag 关闭时保持现状路径；开启后 Home/Cards/Detail/Graph 的
+ * Objective Surface 入口同时生效（原子切流，§22.1 禁止按页面独立开启）。
+ * 与 API 侧能力开关分开——前端只控制展示与接线，服务端路由始终注册。
+ */
+export function isLearningObjectiveSystemV3Enabled(): boolean {
+  return isExplicitlyEnabled(process.env.NEXT_PUBLIC_LEARNING_OBJECTIVE_SYSTEM_V3);
 }

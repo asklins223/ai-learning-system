@@ -18,7 +18,8 @@ import type {
   LearningObjectivePrimaryActionV3,
 } from "@ailearn/shared";
 import { learningObjectiveApi } from "@/lib/learning-objective-api";
-import { ObjectiveStatusChip, type ObjectiveChipState } from "./ObjectiveStatusChip";
+import { ObjectiveStatusChip } from "./ObjectiveStatusChip";
+import { objectiveChipStateFromList } from "./objective-state";
 import { ObjectiveSourceLine } from "./ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "./ObjectivePrimaryAction";
 import { ObjectiveSkeleton, ObjectiveError, ObjectiveEmpty } from "./ObjectiveStatePrimitives";
@@ -41,14 +42,7 @@ const SORTS: ReadonlyArray<{ key: LibrarySort; label: string }> = [
   { key: "oldest", label: "最早创建" },
 ];
 
-function chipStateOf(item: ObjectiveListItemV3): ObjectiveChipState {
-  if (item.lifecycle === "archived") return "archived";
-  if (item.primaryAction.kind === "resume_run") return "run";
-  if (item.primaryAction.kind === "create_review_run") return "due";
-  if (item.freshness === "source_outdated") return "outdated";
-  if (item.personalState.state === "unvalidated") return "ready";
-  return "ready";
-}
+// 状态映射由 objective-state.ts 统一提供（FE-18/FE-27 可测试）。
 
 function itemHref(item: ObjectiveListItemV3): string {
   return "/learning-objectives/" + item.objectiveId;
@@ -267,7 +261,7 @@ export function ObjectiveLibrary(): JSX.Element {
             <li key={item.objectiveId} className="objective-library-row">
               <div className="objective-library-row-main">
                 <div className="objective-library-row-topline">
-                  <ObjectiveStatusChip state={chipStateOf(item)} />
+                  <ObjectiveStatusChip state={objectiveChipStateFromList(item)} />
                   <span className="objective-library-row-form">{item.knowledgeForm}</span>
                 </div>
                 <h3>

@@ -20,7 +20,8 @@ import type {
   LearningObjectivePrimaryActionV3,
 } from "@ailearn/shared";
 import { learningObjectiveApi } from "@/lib/learning-objective-api";
-import { ObjectiveStatusChip, type ObjectiveChipState } from "./ObjectiveStatusChip";
+import { ObjectiveStatusChip } from "./ObjectiveStatusChip";
+import { objectiveChipStateFromSurface } from "./objective-state";
 import { ObjectiveSourceLine } from "./ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "./ObjectivePrimaryAction";
 import { ObjectiveSkeleton, ObjectiveError, ObjectiveEmpty } from "./ObjectiveStatePrimitives";
@@ -60,18 +61,13 @@ function actionHref(action: LearningObjectivePrimaryActionV3, returnTo: string):
   }
 }
 
-function chipStateFor(dashboard: LearningDashboardV2, objectiveId: string): ObjectiveChipState {
+function chipStateFor(dashboard: LearningDashboardV2, objectiveId: string): ReturnType<typeof objectiveChipStateFromSurface> {
   const surface = dashboard.queue.find((q) => q.objective.objectiveId === objectiveId)?.objective
     ?? dashboard.recentObjectives.find((o) => o.objectiveId === objectiveId);
   const primary = dashboard.primaryFocus?.objective;
   const target = primary?.objectiveId === objectiveId ? primary : surface;
   if (!target) return "ready";
-  if (target.personal.activeRun) return "run";
-  if (target.personal.review?.status === "due") return "due";
-  if (target.personal.review?.status === "scheduled") return "scheduled";
-  if (target.content.freshness === "source_outdated") return "outdated";
-  if (target.content.lifecycle === "archived") return "archived";
-  return "ready";
+  return objectiveChipStateFromSurface(target);
 }
 
 export function DashboardHome(props: {
