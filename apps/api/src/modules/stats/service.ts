@@ -1,8 +1,8 @@
-import { and, eq, inArray, count, isNull } from "drizzle-orm";
+import { and, eq, inArray, count, isNull, sql } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
 import { logger } from "../../lib/logger.ts";
 import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
-import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2 } from "../../db/schema/card-generation-v2.ts";
+import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
 import { evidences, validationEvents, reviewSchedules } from "../../db/schema/evidence.ts";
 import { notes } from "../../db/schema/note.ts";
 import { ReviewStatus } from "@ailearn/shared";
@@ -41,6 +41,9 @@ export interface StatsOverview {
   /** R#6-5：降级标志——true 表示 activeCardCount 超过 STATS_ACTIVE_CARDS_MAX，
    *  明细聚合按前 MAX 张活跃卡计算，计数与明细口径可能不一致。 */
   capped: boolean;
+  /** Plan 23 CS-04：Objective 口径（与 /v2/learning-dashboard 对账；hidden alias=0）。 */
+  activeObjectiveCount: number;
+  objectiveReviewDueCount: number;
 }
 
 /**
@@ -102,6 +105,30 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
   const v2ActiveCardCount = Number(v2ActiveCardRows[0]?.count ?? 0);
   const activeCardCount = legacyActiveCardCount + v2ActiveCardCount;
 
+  // Plan 23 CS-04：Objective 口径（hidden alias=0；与 Dashboard 对账）
+  const [activeObjectiveRows, objectiveDueRows] = await Promise.all([
+    tx
+      .select({ count: count() })
+      .from(learningObjectivesV2)
+      .where(and(
+        eq(learningObjectivesV2.workspaceId, workspaceId),
+        eq(learningObjectivesV2.lifecycle, "active"),
+      )),
+    tx
+      .select({ count: count() })
+      .from(reviewSchedules)
+      .where(and(
+        eq(reviewSchedules.workspaceId, workspaceId),
+        eq(reviewSchedules.status, ReviewStatus.PENDING),
+        // 只统计可指向 Objective 的 schedule（keyPointId 命中 objective）
+        sql`EXISTS (SELECT 1 FROM learning_objectives_v2 o
+           WHERE o.workspace_id = review_schedules.workspace_id
+             AND o.objective_id = review_schedules.key_point_id)`,
+      )),
+  ]);
+  const activeObjectiveCount = Number(activeObjectiveRows[0]?.count ?? 0);
+  const objectiveReviewDueCount = Number(objectiveDueRows[0]?.count ?? 0);
+
   if (activeCardCount === 0) {
     return {
       noteCount,
@@ -115,6 +142,8 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
       hardEvidenceCount: 0,
       // R#6-5：无活跃卡 → 无降级。
       capped: false,
+      activeObjectiveCount,
+      objectiveReviewDueCount,
     };
   }
 
@@ -345,6 +374,9 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     // R#6-5：activeCardCount 超过 STATS_ACTIVE_CARDS_MAX 时明细按前 MAX 张卡聚合，
     // 返回降级标志供前端感知（计数与明细口径可能不一致）。
     capped: activeCardCount > STATS_ACTIVE_CARDS_MAX,
+    // Plan 23 CS-04：Objective 口径（与 Dashboard 对账）
+    activeObjectiveCount,
+    objectiveReviewDueCount,
   };
     },
   );
