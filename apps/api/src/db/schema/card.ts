@@ -100,6 +100,9 @@ export const learningCards = pgTable(
     // restoreDeletedNote 恢复时用此列精确匹配并清除。不受其他操作（如
     // card/service archiveCard）覆盖 updatedAt 的影响。
     archivedByNoteDeletionAt: timestamp("archived_by_note_deletion_at", { withTimezone: true }),
+    // Plan 23 W1-06：显式 alias/迁移角色。正式 consumer predicate 必须排除
+    // objective_fk_alias/hidden_identity/migration_only（迁移 0175，§21.5）。
+    compatibilityRole: text("compatibility_role"),
   },
   (t) => ({
     noteIdx: index("learning_cards_note_idx").on(t.noteVersionId),

@@ -158,6 +158,9 @@ export const learningObjectivesV2 = pgTable(
     lifecycleEpoch: integer("lifecycle_epoch").notNull().default(1),
     currentObjectiveRevisionId: uuid("current_objective_revision_id"),
     currentRevision: integer("current_revision").notNull().default(0),
+    // W1-08：Surface 公共读模型 revision / 失效时间（支撑 ETag；独立于 semantic fingerprint）。
+    surfaceRevision: integer("surface_revision").notNull().default(0),
+    surfaceUpdatedAt: timestamp("surface_updated_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -179,6 +182,8 @@ export const learningObjectiveRevisionsV2 = pgTable(
     revision: integer("revision").notNull(),
     objectiveStatement: text("objective_statement").notNull(),
     publicSummary: text("public_summary").notNull(),
+    // W1-05：概念级知识标题（不把 cue/prompt 当概念标题）；迁移期允许 NULL。
+    conceptLabel: text("concept_label"),
     knowledgeForm: text("knowledge_form").notNull(),
     preferredIntents: text("preferred_intents").array().notNull(),
     canonicalAnswer: jsonb("canonical_answer").notNull(),
@@ -970,5 +975,104 @@ export const cardGenerationCutoverEvents = pgTable(
     // 防 drizzle-kit diff 反向删除约束。
     typeCheck: check("cgce_v2_type_chk", sql`${t.eventType} IN ('v1_writer_shutdown','v1_writer_epoch_bump','rollback_drill','legacy_card_migration')`),
     wsTypeIdx: index("cgce_v2_ws_type_idx").on(t.workspaceId, t.eventType, t.createdAt),
+  }),
+);
+
+// ─── Plan 23 W1-01..W1-04: Objective Origin（迁移 0175）────────────────────
+// 知识血缘属于 Objective revision（§3.3），不挂在可替换的 Card Presentation。
+// origin_kind 条件字段由 DB CHECK 约束（W1-02）；正式消费者以 objectiveId 读取。
+
+export const objectiveOriginKindV3Values = [
+  "note",
+  "manual",
+  "imported",
+  "legacy_migrated",
+] as const;
+export type ObjectiveOriginKindV3 = (typeof objectiveOriginKindV3Values)[number];
+
+export const learningObjectiveOriginsV2 = pgTable(
+  "learning_objective_origins_v2",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    originId: uuid("origin_id").notNull(),
+    objectiveId: uuid("objective_id").notNull(),
+    objectiveRevisionId: uuid("objective_revision_id").notNull(),
+    originKind: text("origin_kind").$type<ObjectiveOriginKindV3>().notNull(),
+    // note kind：主来源（可多 note 并行；一 note 只能绑定一次）
+    noteId: uuid("note_id"),
+    noteVersionId: uuid("note_version_id"),
+    sourceSnapshotId: uuid("source_snapshot_id"),
+    evidenceSnapshotIds: uuid("evidence_snapshot_ids").array().notNull().default(sql`'{}'::uuid[]`),
+    // imported kind
+    importBatchRef: text("import_batch_ref"),
+    // legacy_migrated kind
+    legacyCardId: uuid("legacy_card_id"),
+    legacyKeyPointId: uuid("legacy_key_point_id"),
+    integrity: text("integrity").notNull().default("verified"),
+    provenance: jsonb("provenance").notNull().default(sql`'{}'::jsonb`),
+    boundAt: timestamp("bound_at", { withTimezone: true }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    originIdUnique: uniqueIndex("loo_v2_origin_id_unique_idx").on(t.workspaceId, t.originId),
+    noteBindingUnique: uniqueIndex("loo_v2_note_binding_unique_idx")
+      .on(t.workspaceId, t.objectiveRevisionId, t.noteVersionId)
+      .where(sql`${t.originKind} = 'note' AND ${t.noteVersionId} IS NOT NULL`),
+    objectiveIdx: index("loo_v2_objective_idx").on(t.workspaceId, t.objectiveId, t.objectiveRevisionId),
+    noteIdx: index("loo_v2_note_idx").on(t.workspaceId, t.noteId, t.noteVersionId),
+    sourceIdx: index("loo_v2_source_idx").on(t.workspaceId, t.sourceSnapshotId),
+    kindCheck: check("loo_v2_kind_chk", sql`${t.originKind} IN ('note','manual','imported','legacy_migrated')`),
+    integrityCheck: check("loo_v2_integrity_chk", sql`${t.integrity} IN ('verified','legacy_unreviewed')`),
+    kindFieldsCheck: check("loo_v2_kind_fields_chk", sql`(
+      (${t.originKind} = 'note' AND ${t.noteId} IS NOT NULL AND ${t.noteVersionId} IS NOT NULL
+        AND ${t.importBatchRef} IS NULL AND ${t.legacyKeyPointId} IS NULL)
+      OR (${t.originKind} = 'manual' AND ${t.noteId} IS NULL AND ${t.noteVersionId} IS NULL
+        AND ${t.importBatchRef} IS NULL AND ${t.legacyKeyPointId} IS NULL)
+      OR (${t.originKind} = 'imported' AND ${t.importBatchRef} IS NOT NULL
+        AND ${t.noteId} IS NULL AND ${t.noteVersionId} IS NULL AND ${t.legacyKeyPointId} IS NULL)
+      OR (${t.originKind} = 'legacy_migrated' AND ${t.legacyKeyPointId} IS NOT NULL
+        AND ${t.importBatchRef} IS NULL)
+    )`),
+  }),
+);
+
+// ─── Plan 23 W1-07: Legacy Route Mapping（迁移 0175）──────────────────────
+
+export const legacyRouteMappingStatusValues = [
+  "mapped",
+  "gone",
+  "ambiguous",
+  "forbidden",
+] as const;
+export type LegacyRouteMappingStatusV3 = (typeof legacyRouteMappingStatusValues)[number];
+
+export const legacyRouteMappingsV2 = pgTable(
+  "legacy_route_mappings_v2",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    mappingId: uuid("mapping_id").notNull(),
+    legacyKind: text("legacy_kind").notNull(),
+    legacyId: uuid("legacy_id").notNull(),
+    status: text("status").$type<LegacyRouteMappingStatusV3>().notNull().default("mapped"),
+    objectiveId: uuid("objective_id"),
+    cardId: uuid("card_id"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    mappingIdUnique: uniqueIndex("lrm_v2_mapping_id_unique_idx").on(t.workspaceId, t.mappingId),
+    legacyUnique: uniqueIndex("lrm_v2_legacy_unique_idx").on(t.workspaceId, t.legacyKind, t.legacyId),
+    objectiveIdx: index("lrm_v2_objective_idx").on(t.workspaceId, t.objectiveId),
+    cardIdx: index("lrm_v2_card_idx").on(t.workspaceId, t.cardId),
+    kindCheck: check("lrm_v2_kind_chk", sql`${t.legacyKind} IN ('card','key_point')`),
+    statusCheck: check("lrm_v2_status_chk", sql`${t.status} IN ('mapped','gone','ambiguous','forbidden')`),
+    mappedCheck: check("lrm_v2_mapped_chk", sql`(
+      (${t.status} = 'mapped' AND ${t.objectiveId} IS NOT NULL)
+      OR (${t.status} <> 'mapped' AND ${t.objectiveId} IS NULL)
+    )`),
   }),
 );
