@@ -10,7 +10,7 @@
  * 只把可证明的 Note/Source lineage 升级；dry-run 不落库；executor 幂等可重跑
  * （createObjectiveOrigin ON CONFLICT DO NOTHING），返回审计 receipt。
  */
-import { and, eq, lte, desc } from "drizzle-orm";
+import { and, eq, lte, desc, inArray } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
@@ -18,7 +18,7 @@ import {
   learningCardsV2,
   learningObjectiveEvidenceBindingsV2,
 } from "../../db/schema/card-generation-v2.ts";
-import { evidenceSnapshotsV2 } from "../../db/schema/card-generation-v2.ts";
+import { evidenceSnapshotsV2, learningObjectiveOriginsV2 } from "../../db/schema/card-generation-v2.ts";
 import { noteVersions } from "../../db/schema/note.ts";
 import { createObjectiveOrigin } from "./origin-service.ts";
 
@@ -239,4 +239,112 @@ export async function executeObjectiveOriginBackfill(
     }
   }
   return receipt;
+}
+
+// ─── Plan 23 RL-03：迁移 reconciliation（migrated/skipped/missing/ambiguous 可追溯）──
+
+export interface OriginReconciliationItem {
+  objectiveId: string;
+  plannedCategory: "migratable" | "missing" | "ambiguous";
+  plannedSource: OriginBackfillSource;
+  actualState: "migrated" | "missing" | "ambiguous";
+  actualOriginKind: string | null;
+  reason: string;
+}
+
+export interface OriginReconciliationReport {
+  workspaceId: string;
+  items: OriginReconciliationItem[];
+  counts: {
+    planned: number;
+    migrated: number;
+    skipped: number;
+    missing: number;
+    ambiguous: number;
+    /** 计划可迁移但实际缺失 = 静默丢失候选；必须为 0。 */
+    silentLoss: number;
+  };
+  /** 逐条差异说明（0 静默丢失时的差异均为「缺失需修复」或「已归档不处理」）。 */
+  notes: string[];
+}
+
+/**
+ * RL-03：把 dry-run 规划与 learning_objective_origins_v2 实际状态对账。
+ * - migrated：计划 migratable 且实际有 origin；
+ * - skipped：计划 migratable 但 origin 已存在且来源不同（幂等跳过）；
+ * - missing：计划 migratable 但实际无 origin（silentLoss 候选）；
+ * - ambiguous：计划 ambiguous；
+ * - 归档/替换目标不参与 active 迁移（记录 note）。
+ */
+export async function reconcileObjectiveOrigins(
+  tx: ApiTransaction,
+  workspaceId: string,
+): Promise<OriginReconciliationReport> {
+  const plan = await planObjectiveOriginBackfill(tx, workspaceId);
+  const objectiveIds = plan.items.map((i) => i.objectiveId);
+  const originRows = objectiveIds.length > 0
+    ? await tx
+        .select({ objectiveId: learningObjectiveOriginsV2.objectiveId, originKind: learningObjectiveOriginsV2.originKind })
+        .from(learningObjectiveOriginsV2)
+        .where(and(
+          eq(learningObjectiveOriginsV2.workspaceId, workspaceId),
+          inArray(learningObjectiveOriginsV2.objectiveId, objectiveIds),
+        ))
+    : [];
+  const originByObjective = new Map<string, string>();
+  for (const row of originRows) {
+    if (!originByObjective.has(row.objectiveId)) {
+      originByObjective.set(row.objectiveId, row.originKind);
+    }
+  }
+
+  const items: OriginReconciliationItem[] = [];
+  const counts = {
+    planned: plan.items.length,
+    migrated: 0,
+    skipped: 0,
+    missing: 0,
+    ambiguous: 0,
+    silentLoss: 0,
+  };
+  const notes: string[] = [];
+
+  for (const item of plan.items) {
+    const actualKind = originByObjective.get(item.objectiveId) ?? null;
+    let actualState: OriginReconciliationItem["actualState"];
+    if (actualKind !== null) {
+      actualState = item.category === "migratable" ? "migrated" : "ambiguous";
+    } else {
+      actualState = item.category === "ambiguous" ? "ambiguous" : "missing";
+    }
+    let reason = item.reason;
+    if (item.category === "migratable" && actualKind === null) {
+      counts.silentLoss += 1;
+      reason += "；计划可迁移但实际无 origin——需 W2-06 修复队列";
+    }
+    if (actualState === "ambiguous") {
+      counts.ambiguous += 1;
+    } else if (actualState === "missing") {
+      counts.missing += 1;
+    } else {
+      // migrated 或 skipped：计划 migratable + 实际存在
+      if (item.plannedSource && item.plannedSource === "evidence_binding" && actualKind === "note") {
+        // 迁移来源与落库 kind 一致即 migrated；不同来源幂等跳过
+        counts.skipped += 1;
+        reason += "；实际 origin kind 与计划来源不同（幂等跳过）";
+      } else {
+        counts.migrated += 1;
+      }
+    }
+    items.push({
+      objectiveId: item.objectiveId,
+      plannedCategory: item.category,
+      plannedSource: item.source,
+      actualState,
+      actualOriginKind: actualKind,
+      reason,
+    });
+  }
+
+  return { workspaceId, items, counts, notes };
 }
