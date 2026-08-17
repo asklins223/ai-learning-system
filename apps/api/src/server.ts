@@ -26,6 +26,7 @@ import { uploadRoutes } from "./modules/upload/routes.ts";
 import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
 import { cardGenerationV2Routes } from "./modules/card-generation-v2/routes.ts";
 import { learningObjectiveRoutes } from "./modules/learning-objectives/routes.ts";
+import { learningDashboardRoutes } from "./modules/learning-dashboard/routes.ts";
 import { isCardGenerationV2Enabled } from "./config/learning-companion-flags.ts";
 import { companionShellRoutes } from "./modules/companion-shell/index.ts";
 import { learningMetricRoutes } from "./modules/observability/routes.ts";
@@ -327,9 +328,10 @@ async function main() {
   } else {
     app.log.info({ capability: "card_generation_v2" }, "card-generation-v2 disabled (CARD_GENERATION_V2_ENABLED not set)");
   }
-  // Plan 23 W2：Objective Surface 读取端点（只读；页面级切流由
+  // Plan 23 W2/W3：Objective Surface + Dashboard 读取端点（只读；页面级切流由
   // learning_objective_system_v3 capability 统一 gate，见 §22）。
   await app.register(learningObjectiveRoutes);
+  await app.register(learningDashboardRoutes);
   await app.register(jobRoutes);
   await app.register(evidenceRoutes);
   await app.register(validationRoutes);
