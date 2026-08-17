@@ -1,0 +1,252 @@
+/**
+ * Plan 23 W2-19/W2-20：Objective history reader + legacy route resolver。
+ *
+ * - history：只返回 revision/lifecycle/可信公开摘要（publicSummary/conceptLabel），
+ *   不泄漏 private assessment/rubric（§13.2）。
+ * - route resolver：旧 card/keyPoint URL 确定性解析——mapped / gone / ambiguous /
+ *   forbidden（§21.4），绝不返回模糊 V2 404；解析结果幂等落 legacy_route_mappings_v2。
+ */
+import { and, eq, desc, asc, lt, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import type { ApiTransaction } from "../../db/client.ts";
+import {
+  learningObjectiveRevisionsV2,
+  legacyRouteMappingsV2,
+} from "../../db/schema/card-generation-v2.ts";
+import { cardKeyPoints, learningCards } from "../../db/schema/card.ts";
+import { learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
+import type { ObjectiveRevisionClassV2 } from "@ailearn/shared";
+
+// ─── W2-19: history ──────────────────────────────────────────────────────
+
+export interface ObjectiveHistoryItemV3 {
+  objectiveRevisionId: string;
+  revision: number;
+  revisionClass: ObjectiveRevisionClassV2;
+  conceptLabel: string | null;
+  publicSummary: string;
+  knowledgeForm: string;
+  supersedesObjectiveRevisionId: string | null;
+  publishedAt: string;
+}
+
+/**
+ * 目标历史（公开摘要）；revisionClass 由指纹变化推断：
+ * - 首版 → presentation_only 标记占位（实际由 equivalence report 判定）；
+ * - 后续版本：semanticTargetFingerprint 变化 → semantic_change；
+ *   targetRevisionHash 变化 → target_equivalent；否则 presentation_only。
+ */
+export async function readObjectiveHistoryV3(
+  tx: ApiTransaction,
+  workspaceId: string,
+  objectiveId: string,
+  options: { limit?: number; cursor?: number } = {},
+): Promise<{ items: ObjectiveHistoryItemV3[]; total: number; nextCursor: number | null }> {
+  const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
+  const rows = await tx
+    .select()
+    .from(learningObjectiveRevisionsV2)
+    .where(and(
+      eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+      eq(learningObjectiveRevisionsV2.objectiveId, objectiveId),
+      options.cursor !== undefined
+        ? lt(learningObjectiveRevisionsV2.revision, options.cursor)
+        : undefined,
+    ))
+    .orderBy(desc(learningObjectiveRevisionsV2.revision))
+    .limit(limit + 1);
+
+  const page = rows.slice(0, limit);
+  // 需要 prior revision 的指纹做分类
+  const items: ObjectiveHistoryItemV3[] = page.map((row, index) => {
+    const prior = page[index + 1];
+    let revisionClass: ObjectiveRevisionClassV2;
+    if (!prior) {
+      revisionClass = "presentation_only";
+    } else if (prior.semanticTargetFingerprint !== row.semanticTargetFingerprint) {
+      revisionClass = "semantic_change";
+    } else if (prior.targetRevisionHash !== row.targetRevisionHash) {
+      revisionClass = "target_equivalent";
+    } else {
+      revisionClass = "presentation_only";
+    }
+    return {
+      objectiveRevisionId: row.objectiveRevisionId,
+      revision: row.revision,
+      revisionClass,
+      conceptLabel: row.conceptLabel,
+      publicSummary: row.publicSummary,
+      knowledgeForm: row.knowledgeForm,
+      supersedesObjectiveRevisionId: row.supersedesObjectiveRevisionId,
+      publishedAt: row.createdAt.toISOString(),
+    };
+  });
+
+  const totalRows = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(learningObjectiveRevisionsV2)
+    .where(and(
+      eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+      eq(learningObjectiveRevisionsV2.objectiveId, objectiveId),
+    ));
+  const total = Number(totalRows[0]?.n ?? 0);
+  const nextCursor =
+    rows.length > limit && page.length > 0 ? page[page.length - 1].revision : null;
+  return { items, total, nextCursor };
+}
+
+// ─── W2-20: legacy route resolver ────────────────────────────────────────
+
+export type LegacyRouteResolutionStatus =
+  | "mapped"
+  | "gone"
+  | "ambiguous"
+  | "forbidden";
+
+export interface LegacyRouteResolutionV3 {
+  legacyKind: "card" | "key_point";
+  legacyId: string;
+  status: LegacyRouteResolutionStatus;
+  objectiveId: string | null;
+  cardId: string | null;
+  note: string | null;
+}
+
+/**
+ * 解析旧 URL（§21.4）：
+ * - keyPointId：本身就是 objectiveId（alias 规则）→ mapped；
+ * - legacy card：恰好 1 个 key point 且其为 objectiveId → mapped；
+ *   多个 key point → ambiguous（迁移选择页）；无 key point → gone；
+ * - alias（compatibility_role='objective_fk_alias'）→ forbidden（不进入正式面）。
+ * 结果幂等落 legacy_route_mappings_v2（ON CONFLICT DO NOTHING 后读取既有行）。
+ */
+export async function resolveLegacyRouteV3(
+  tx: ApiTransaction,
+  workspaceId: string,
+  input: { legacyKind: "card" | "key_point"; legacyId: string },
+): Promise<LegacyRouteResolutionV3> {
+  const { legacyKind, legacyId } = input;
+  let resolution: LegacyRouteResolutionV3;
+
+  if (legacyKind === "key_point") {
+    // alias 或真实 key point
+    const objectiveRows = await tx
+      .select({ objectiveId: learningObjectivesV2.objectiveId })
+      .from(learningObjectivesV2)
+      .where(and(
+        eq(learningObjectivesV2.workspaceId, workspaceId),
+        eq(learningObjectivesV2.objectiveId, legacyId),
+      ))
+      .limit(1);
+    if (objectiveRows[0]) {
+      resolution = {
+        legacyKind,
+        legacyId,
+        status: "mapped",
+        objectiveId: objectiveRows[0].objectiveId,
+        cardId: null,
+        note: "keyPointId 即 objectiveId（alias 规则）",
+      };
+    } else {
+      resolution = {
+        legacyKind,
+        legacyId,
+        status: "gone",
+        objectiveId: null,
+        cardId: null,
+        note: "key point 无对应 Objective",
+      };
+    }
+  } else {
+    // legacy card
+    const kpRows = await tx
+      .select({
+        kpId: cardKeyPoints.id,
+        legacyCardStatus: learningCards.status,
+        compatibilityRole: learningCards.compatibilityRole,
+      })
+      .from(cardKeyPoints)
+      .innerJoin(learningCards, eq(cardKeyPoints.cardId, learningCards.id))
+      .where(and(
+        eq(cardKeyPoints.workspaceId, workspaceId),
+        eq(cardKeyPoints.cardId, legacyId),
+      ))
+      .orderBy(asc(cardKeyPoints.ordinal));
+    if (kpRows.length === 0) {
+      resolution = {
+        legacyKind,
+        legacyId,
+        status: "gone",
+        objectiveId: null,
+        cardId: null,
+        note: "legacy card 无 key point",
+      };
+    } else if (
+      kpRows[0].compatibilityRole === "objective_fk_alias" ||
+      kpRows[0].compatibilityRole === "hidden_identity"
+    ) {
+      resolution = {
+        legacyKind,
+        legacyId,
+        status: "forbidden",
+        objectiveId: null,
+        cardId: null,
+        note: "alias 卡不进入正式产品面",
+      };
+    } else if (kpRows.length === 1) {
+      const objectiveRows = await tx
+        .select({ objectiveId: learningObjectivesV2.objectiveId })
+        .from(learningObjectivesV2)
+        .where(and(
+          eq(learningObjectivesV2.workspaceId, workspaceId),
+          eq(learningObjectivesV2.objectiveId, kpRows[0].kpId),
+        ))
+        .limit(1);
+      if (objectiveRows[0]) {
+        resolution = {
+          legacyKind,
+          legacyId,
+          status: "mapped",
+          objectiveId: objectiveRows[0].objectiveId,
+          cardId: null,
+          note: "单 key point → objective",
+        };
+      } else {
+        resolution = {
+          legacyKind,
+          legacyId,
+          status: "gone",
+          objectiveId: null,
+          cardId: null,
+          note: "legacy card 的 key point 无对应 Objective",
+        };
+      }
+    } else {
+      resolution = {
+        legacyKind,
+        legacyId,
+        status: "ambiguous",
+        objectiveId: null,
+        cardId: null,
+        note: "多 key point legacy card：迁移选择页",
+      };
+    }
+  }
+
+  // 幂等落 mapping（供统计/审计；既有行不覆盖）
+  await tx
+    .insert(legacyRouteMappingsV2)
+    .values({
+      workspaceId,
+      mappingId: randomUUID(),
+      legacyKind,
+      legacyId,
+      status: resolution.status,
+      objectiveId: resolution.objectiveId,
+      cardId: resolution.cardId,
+      resolvedAt: new Date(),
+      note: resolution.note,
+    })
+    .onConflictDoNothing();
+  return resolution;
+}

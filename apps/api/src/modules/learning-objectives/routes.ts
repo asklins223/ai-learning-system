@@ -17,6 +17,10 @@ import {
   toObjectiveListItemV3,
   ObjectiveNotFoundError,
 } from "./surface-service.ts";
+import {
+  readObjectiveHistoryV3,
+  resolveLegacyRouteV3,
+} from "./history-route-service.ts";
 
 interface ListQuery {
   lifecycle?: string;
@@ -70,5 +74,37 @@ export async function learningObjectiveRoutes(app: FastifyInstance) {
       }
       throw err;
     }
+  });
+
+  // W2-23：目标历史（公开摘要；无 private assessment）
+  app.get("/v2/learning-objectives/:objectiveId/history", async (req) => {
+    const { objectiveId } = req.params as Params;
+    const query = req.query as { limit?: string; cursor?: string };
+    const ctx = { workspaceId: req.session.workspaceId, userId: req.session.userId };
+    return withWorkspaceTransaction(ctx, (tx) =>
+      readObjectiveHistoryV3(tx, ctx.workspaceId, objectiveId, {
+        limit: Number(query.limit ?? 20),
+        cursor: query.cursor ? Number(query.cursor) : undefined,
+      }),
+    );
+  });
+
+  // W2-24：旧 URL 确定性解析（mapped/gone/ambiguous/forbidden；不返回模糊 404）
+  app.get("/v2/route-resolution", async (req) => {
+    const query = req.query as { legacyKind?: string; legacyId?: string };
+    if (query.legacyKind !== "card" && query.legacyKind !== "key_point") {
+      return { error: "invalid_legacy_kind" };
+    }
+    const legacyId = query.legacyId;
+    if (!legacyId) {
+      return { error: "missing_legacy_id" };
+    }
+    const ctx = { workspaceId: req.session.workspaceId, userId: req.session.userId };
+    return withWorkspaceTransaction(ctx, (tx) =>
+      resolveLegacyRouteV3(tx, ctx.workspaceId, {
+        legacyKind: query.legacyKind as "card" | "key_point",
+        legacyId,
+      }),
+    );
   });
 }
