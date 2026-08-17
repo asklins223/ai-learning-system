@@ -6,6 +6,11 @@ import {
   cardKeyPoints,
 } from "../../db/schema/card.ts";
 import { evidences } from "../../db/schema/evidence.ts";
+import {
+  learningObjectivesV2,
+  learningObjectiveRevisionsV2,
+  learningObjectiveOriginsV2,
+} from "../../db/schema/card-generation-v2.ts";
 import { notes, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
 import { CardStatus, SourceStatus } from "@ailearn/shared";
@@ -71,19 +76,12 @@ const consumableSearchDocumentPredicate = sql<boolean>`(
     AND EXISTS (
       SELECT 1
       FROM evidences AS consumer_evidence
-      JOIN card_key_points AS consumer_key_point
-        ON consumer_key_point.id = consumer_evidence.key_point_id
-       AND consumer_key_point.workspace_id = consumer_evidence.workspace_id
-      JOIN learning_cards AS consumer_card
-        ON consumer_card.id = consumer_key_point.card_id
-       AND consumer_card.workspace_id = consumer_key_point.workspace_id
-      LEFT JOIN learning_card_sets AS parent_set
-        ON parent_set.id = consumer_card.card_set_id
-        AND parent_set.workspace_id = consumer_card.workspace_id
+      JOIN learning_objectives_v2 AS consumer_objective
+        ON consumer_objective.objective_id = consumer_evidence.key_point_id
+       AND consumer_objective.workspace_id = consumer_evidence.workspace_id
       WHERE consumer_evidence.id = search_document.object_id
         AND consumer_evidence.workspace_id = search_document.workspace_id
-        AND consumer_card.status = 'active'
-        AND (consumer_card.card_set_id IS NULL OR parent_set.status = 'active')
+        AND consumer_objective.lifecycle = 'active'
     )
   )
 )`;
@@ -433,6 +431,8 @@ export interface SearchReindexResult {
     cardSet: number;
     card: number;
     evidence: number;
+    /** Plan 23 CS-03：Objective 文档（conceptLabel/publicSummary/来源；不含答案/rubric）。 */
+    objective: number;
   };
   /** N#8-1: 本次 reindex 是否因单表行数上限被截断（投影可能只含确定的前 LIMIT 子集） */
   capped: boolean;
@@ -451,7 +451,7 @@ export async function reindexWorkspaceSearch(
   workspaceId: string,
 ): Promise<SearchReindexResult & { errors: number }> {
   let deletedCount = 0;
-  let indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 };
+  let indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 };
   let errors = 0;
   const projectionStartedAt = new Date();
 
@@ -628,6 +628,78 @@ export async function reindexWorkspaceSearch(
   });
   const cardsById = new Map(cardRows.map((card) => [card.id, card]));
 
+  // ── Plan 23 CS-03：Objective 搜索文档 ──────────────────────────────────
+  // 索引 conceptLabel / publicSummary / 来源笔记标题 / source label；
+  // canonicalAnswer / rubric / learningSupport 永不进入搜索文档（§6/§20.1）。
+  let objectiveData: Array<{ id: string; title: string; body: string; lifecycle: string }> = [];
+  {
+    const objectiveRows = await executor.query.learningObjectivesV2.findMany({
+      where: eq(learningObjectivesV2.workspaceId, workspaceId),
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: desc(learningObjectivesV2.updatedAt),
+    });
+    const revisionIds = objectiveRows
+      .map((o) => o.currentObjectiveRevisionId)
+      .filter((id): id is string => Boolean(id));
+    const objectiveRevRows = revisionIds.length > 0
+      ? await executor
+          .select({
+            objectiveRevisionId: learningObjectiveRevisionsV2.objectiveRevisionId,
+            objectiveId: learningObjectiveRevisionsV2.objectiveId,
+            conceptLabel: learningObjectiveRevisionsV2.conceptLabel,
+            publicSummary: learningObjectiveRevisionsV2.publicSummary,
+          })
+          .from(learningObjectiveRevisionsV2)
+          .where(and(
+            eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+            inArray(learningObjectiveRevisionsV2.objectiveRevisionId, revisionIds),
+          ))
+      : [];
+    const revisionByObjective = new Map(
+      objectiveRevRows.map((rev) => [rev.objectiveId, rev]),
+    );
+    const objectiveIds = objectiveRows.map((o) => o.objectiveId);
+    const originRows = objectiveIds.length > 0
+      ? await executor
+          .select({ objectiveId: learningObjectiveOriginsV2.objectiveId, noteId: learningObjectiveOriginsV2.noteId })
+          .from(learningObjectiveOriginsV2)
+          .where(and(
+            eq(learningObjectiveOriginsV2.workspaceId, workspaceId),
+            inArray(learningObjectiveOriginsV2.objectiveId, objectiveIds),
+          ))
+      : [];
+    const noteIds = [...new Set(originRows.map((o) => o.noteId).filter((id): id is string => Boolean(id)))];
+    const noteTitleById = new Map(
+      noteIds.length > 0
+        ? (await executor
+            .select({ id: notes.id, title: notes.title })
+            .from(notes)
+            .where(inArray(notes.id, noteIds)))
+            .map((n) => [n.id, n.title])
+        : [],
+    );
+    objectiveData = objectiveRows.map((objective) => {
+      const revision = revisionByObjective.get(objective.objectiveId);
+      const noteTitles = [
+        ...new Set(
+          originRows
+            .filter((o) => o.objectiveId === objective.objectiveId)
+            .map((o) => noteTitleById.get(o.noteId ?? ""))
+            .filter((t): t is string => Boolean(t)),
+        ),
+      ];
+      return {
+        id: objective.objectiveId,
+        title: revision?.conceptLabel ?? revision?.publicSummary.slice(0, 80) ?? "未命名目标",
+        body: [
+          revision?.publicSummary ?? "",
+          ...noteTitles,
+        ].filter(Boolean).join("\n"),
+        lifecycle: objective.lifecycle,
+      };
+    });
+  }
+
   // R-017: 原子事务 — 删除 + 重建在同一事务内
   try {
     await executor.transaction(async (tx) => {
@@ -746,6 +818,21 @@ export async function reindexWorkspaceSearch(
         }),
       ));
 
+      // Plan 23 CS-03：Objective 文档（conceptLabel/publicSummary/来源标题；
+      // canonicalAnswer/rubric/learningSupport 永不进入搜索文档）。
+      await insertBatch(objectiveData.map((objective) => ({
+        workspaceId,
+        objectType: "objective",
+        objectId: objective.id,
+        title: objective.title,
+        body: objective.body,
+        metadata: {
+          objectiveId: objective.id,
+          lifecycle: objective.lifecycle,
+        },
+        indexedAt: projectionStartedAt,
+      })));
+
       // A domain row can be deleted or archived after the snapshot was read
       // but before this transaction starts. Reconcile the freshly inserted
       // projection against the current domain tables so such a race cannot
@@ -768,6 +855,7 @@ export async function reindexWorkspaceSearch(
       cardSet: cardSetRows.length,
       card: cardRows.length,
       evidence: evidenceRows.length,
+      objective: objectiveData.length,
     };
 
     await executor.execute(sql`
@@ -825,25 +913,12 @@ export async function reindexWorkspaceSearch(
               AND NOT EXISTS (
                 SELECT 1
                 FROM evidences AS domain_evidence
-                JOIN card_key_points AS domain_key_point
-                  ON domain_key_point.id = domain_evidence.key_point_id
-                 AND domain_key_point.workspace_id = domain_evidence.workspace_id
-                JOIN learning_cards AS domain_card
-                  ON domain_card.id = domain_key_point.card_id
-                 AND domain_card.workspace_id = domain_key_point.workspace_id
+                JOIN learning_objectives_v2 AS domain_objective
+                  ON domain_objective.objective_id = domain_evidence.key_point_id
+                 AND domain_objective.workspace_id = domain_evidence.workspace_id
                 WHERE domain_evidence.id = search_document.object_id
                   AND domain_evidence.workspace_id = ${workspaceId}
-                  AND domain_card.status = ${CardStatus.ACTIVE}
-                  AND (
-                    domain_card.card_set_id IS NULL
-                    OR EXISTS (
-                      SELECT 1
-                      FROM learning_card_sets AS parent_set
-                      WHERE parent_set.id = domain_card.card_set_id
-                        AND parent_set.workspace_id = domain_card.workspace_id
-                        AND parent_set.status = 'active'
-                    )
-                  )
+                  AND domain_objective.lifecycle = 'active'
               )
             )
           )
@@ -852,7 +927,7 @@ export async function reindexWorkspaceSearch(
     // A rolled-back rebuild changed neither the old index nor the reported
     // counters. The old code leaked pre-rollback counts as if work succeeded.
     deletedCount = 0;
-    indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 };
+    indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 };
     logger.error({ err, workspaceId }, "reindex transaction failed — old index preserved");
     errors = 1;
   }
