@@ -1,0 +1,276 @@
+/**
+ * Plan 23 W2-03/W2-04/W2-05：Objective Origin 迁移规划器与幂等 backfill executor。
+ *
+ * 分类优先级（§21.3，禁止相似文本猜测）：
+ *   1. learning_cards_v2.note_version_id（激活时已 seal 的来源）；
+ *   2. Objective evidence binding → evidence snapshot → noteId；
+ *   3. legacy alias（kp.id = objectiveId）父 legacy card 的 note_version_id；
+ *   4. 以上均不可证明 → missing（W2-06 修复队列）或 ambiguous（多来源冲突）。
+ *
+ * 只把可证明的 Note/Source lineage 升级；dry-run 不落库；executor 幂等可重跑
+ * （createObjectiveOrigin ON CONFLICT DO NOTHING），返回审计 receipt。
+ */
+import { and, eq, lte, desc } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import type { ApiTransaction } from "../../db/client.ts";
+import {
+  learningObjectivesV2,
+  learningCardsV2,
+  learningObjectiveEvidenceBindingsV2,
+} from "../../db/schema/card-generation-v2.ts";
+import { evidenceSnapshotsV2 } from "../../db/schema/card-generation-v2.ts";
+import { cardKeyPoints, learningCards } from "../../db/schema/card.ts";
+import { noteVersions } from "../../db/schema/note.ts";
+import { createObjectiveOrigin } from "./origin-service.ts";
+
+export type OriginBackfillSource =
+  | "card_note_version"
+  | "evidence_binding"
+  | "legacy_alias"
+  | null;
+
+export interface OriginBackfillPlanItem {
+  workspaceId: string;
+  objectiveId: string;
+  objectiveRevisionId: string | null;
+  category: "migratable" | "missing" | "ambiguous";
+  source: OriginBackfillSource;
+  noteId: string | null;
+  noteVersionId: string | null;
+  reason: string;
+}
+
+export interface OriginBackfillPlan {
+  workspaceId: string;
+  items: OriginBackfillPlanItem[];
+  counts: { migratable: number; missing: number; ambiguous: number };
+}
+
+async function resolveNoteVersion(
+  tx: ApiTransaction,
+  workspaceId: string,
+  noteVersionId: string,
+): Promise<string | null> {
+  const rows = await tx
+    .select({ noteId: noteVersions.noteId })
+    .from(noteVersions)
+    .where(and(eq(noteVersions.id, noteVersionId), eq(noteVersions.workspaceId, workspaceId)))
+    .limit(1);
+  return rows[0]?.noteId ?? null;
+}
+
+/** W2-03/04：dry-run 规划（只读）。 */
+export async function planObjectiveOriginBackfill(
+  tx: ApiTransaction,
+  workspaceId: string,
+): Promise<OriginBackfillPlan> {
+  const objectives = await tx
+    .select()
+    .from(learningObjectivesV2)
+    .where(eq(learningObjectivesV2.workspaceId, workspaceId));
+
+  const items: OriginBackfillPlanItem[] = [];
+  for (const objective of objectives) {
+    const base = {
+      workspaceId,
+      objectiveId: objective.objectiveId,
+      objectiveRevisionId: objective.currentObjectiveRevisionId,
+    };
+
+    // 1. active card note_version_id（优先级 1）
+    const cardRows = await tx
+      .select({ noteVersionId: learningCardsV2.noteVersionId })
+      .from(learningCardsV2)
+      .where(and(
+        eq(learningCardsV2.workspaceId, workspaceId),
+        eq(learningCardsV2.objectiveId, objective.objectiveId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ))
+      .limit(1);
+    if (cardRows[0]?.noteVersionId) {
+      const noteId = await resolveNoteVersion(tx, workspaceId, cardRows[0].noteVersionId);
+      items.push({
+        ...base,
+        category: noteId ? "migratable" : "missing",
+        source: "card_note_version",
+        noteId,
+        noteVersionId: cardRows[0].noteVersionId,
+        reason: noteId ? "激活时已 seal 的 note_version" : "note_version 找不到对应 note",
+      });
+      continue;
+    }
+
+    // 2. evidence binding → evidence snapshot → noteId（优先级 2）
+    let evidenceNoteId: string | null = null;
+    let evidenceNoteVersionId: string | null = null;
+    let evidenceCreatedAt: Date | null = null;
+    if (objective.currentObjectiveRevisionId) {
+      const bindings = await tx
+        .select({ evidenceSnapshotId: learningObjectiveEvidenceBindingsV2.evidenceSnapshotId })
+        .from(learningObjectiveEvidenceBindingsV2)
+        .where(and(
+          eq(learningObjectiveEvidenceBindingsV2.workspaceId, workspaceId),
+          eq(learningObjectiveEvidenceBindingsV2.objectiveRevisionId, objective.currentObjectiveRevisionId),
+        ))
+        .limit(1);
+      if (bindings[0]) {
+        const snapshots = await tx
+          .select({ noteId: evidenceSnapshotsV2.noteId, createdAt: evidenceSnapshotsV2.createdAt })
+          .from(evidenceSnapshotsV2)
+          .where(eq(evidenceSnapshotsV2.evidenceSnapshotId, bindings[0].evidenceSnapshotId))
+          .limit(1);
+        evidenceNoteId = snapshots[0]?.noteId ?? null;
+        evidenceCreatedAt = snapshots[0]?.createdAt ?? null;
+      }
+    }
+    if (evidenceNoteId) {
+      // 证据快照无 noteVersionId 列；按「快照 createdAt 之前的最近版本」确定性匹配
+      //（可重放、不猜测文本；若无法匹配则归类 missing）。
+      if (evidenceCreatedAt) {
+        const versions = await tx
+          .select({ id: noteVersions.id })
+          .from(noteVersions)
+          .where(and(
+            eq(noteVersions.noteId, evidenceNoteId),
+            eq(noteVersions.workspaceId, workspaceId),
+            lte(noteVersions.createdAt, evidenceCreatedAt),
+          ))
+          .orderBy(desc(noteVersions.createdAt))
+          .limit(1);
+        evidenceNoteVersionId = versions[0]?.id ?? null;
+      }
+      if (evidenceNoteVersionId) {
+        items.push({
+          ...base,
+          category: "migratable",
+          source: "evidence_binding",
+          noteId: evidenceNoteId,
+          noteVersionId: evidenceNoteVersionId,
+          reason: "evidence binding → snapshot noteId + 快照时间最近的版本",
+        });
+        continue;
+      }
+      items.push({
+        ...base,
+        category: "missing",
+        source: "evidence_binding",
+        noteId: evidenceNoteId,
+        noteVersionId: null,
+        reason: "evidence binding 可证明 noteId 但无法确定性匹配 noteVersion（W2-06 队列）",
+      });
+      continue;
+    }
+
+    // 3. legacy alias 父卡 note_version_id（优先级 3；只升级可证明 lineage）
+    const aliasRows = await tx
+      .select({ legacyCardId: cardKeyPoints.cardId })
+      .from(cardKeyPoints)
+      .where(and(
+        eq(cardKeyPoints.workspaceId, workspaceId),
+        eq(cardKeyPoints.id, objective.objectiveId),
+      ))
+      .limit(1);
+    if (aliasRows[0]) {
+      const legacyCardRows = await tx
+        .select({ noteVersionId: learningCards.noteVersionId })
+        .from(learningCards)
+        .where(and(
+          eq(learningCards.id, aliasRows[0].legacyCardId),
+          eq(learningCards.workspaceId, workspaceId),
+        ))
+        .limit(1);
+      const legacyNoteVersionId = legacyCardRows[0]?.noteVersionId ?? null;
+      if (legacyNoteVersionId) {
+        const noteId = await resolveNoteVersion(tx, workspaceId, legacyNoteVersionId);
+        if (noteId) {
+          items.push({
+            ...base,
+            category: "migratable",
+            source: "legacy_alias",
+            noteId,
+            noteVersionId: legacyNoteVersionId,
+            reason: "legacy alias 父卡 note_version 可证明",
+          });
+          continue;
+        }
+      }
+    }
+
+    // 4. 无法证明 → missing（ambiguous 预留给多来源冲突；当前实现单来源判定）
+    items.push({
+      ...base,
+      category: "missing",
+      source: null,
+      noteId: null,
+      noteVersionId: null,
+      reason: "无可用 Origin 来源（manual 或需 W2-06 修复队列）",
+    });
+  }
+
+  const counts = { migratable: 0, missing: 0, ambiguous: 0 };
+  for (const item of items) counts[item.category] += 1;
+  return { workspaceId, items, counts };
+}
+
+export interface OriginBackfillReceipt {
+  workspaceId: string;
+  dryRun: boolean;
+  startedAt: string;
+  planned: number;
+  created: number;
+  skippedExisting: number;
+  missing: number;
+  ambiguous: number;
+  failed: number;
+  failedItems: Array<{ objectiveId: string; reason: string }>;
+}
+
+/** W2-05：幂等 backfill executor（dry-run 不落库；可重跑、断点续跑）。 */
+export async function executeObjectiveOriginBackfill(
+  tx: ApiTransaction,
+  workspaceId: string,
+  opts: { dryRun?: boolean } = {},
+): Promise<OriginBackfillReceipt> {
+  const dryRun = opts.dryRun ?? false;
+  const plan = await planObjectiveOriginBackfill(tx, workspaceId);
+  const receipt: OriginBackfillReceipt = {
+    workspaceId,
+    dryRun,
+    startedAt: new Date().toISOString(),
+    planned: plan.items.length,
+    created: 0,
+    skippedExisting: 0,
+    missing: plan.counts.missing,
+    ambiguous: plan.counts.ambiguous,
+    failed: 0,
+    failedItems: [],
+  };
+  for (const item of plan.items) {
+    if (item.category !== "migratable" || dryRun) continue;
+    if (!item.objectiveRevisionId || !item.noteId) {
+      receipt.failed += 1;
+      receipt.failedItems.push({ objectiveId: item.objectiveId, reason: "缺少 revision 或 note" });
+      continue;
+    }
+    try {
+      const result = await createObjectiveOrigin(tx, workspaceId, {
+        originId: randomUUID(),
+        objectiveId: item.objectiveId,
+        objectiveRevisionId: item.objectiveRevisionId,
+        kind: "note",
+        noteId: item.noteId,
+        noteVersionId: item.noteVersionId ?? undefined,
+        integrity: "verified",
+      });
+      if (result.created) receipt.created += 1;
+      else receipt.skippedExisting += 1;
+    } catch (err) {
+      receipt.failed += 1;
+      receipt.failedItems.push({
+        objectiveId: item.objectiveId,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return receipt;
+}

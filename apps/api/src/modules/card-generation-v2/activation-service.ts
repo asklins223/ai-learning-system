@@ -52,6 +52,10 @@ import {
   cardGenerationRunOutboxV2,
 } from "../../db/schema/card-generation-v2.ts";
 import {
+  writeActivationNoteOrigin,
+  copyOriginsToRevision,
+} from "../learning-objectives/origin-service.ts";
+import {
   parseCardActivationReceiptV2,
   type ActivateCardCandidatesRequestV2,
   type CardActivationReceiptV2,
@@ -739,6 +743,9 @@ async function ensureLegacyAliasRow(
     noteVersionId,
     workspaceId: ctx.workspaceId,
     status: CardStatus.ARCHIVED,
+    // Plan 23 W1-06：显式 alias 角色——正式 consumer predicate 必须排除
+    // objective_fk_alias，仅旧 FK/历史 Run/Schedule 兼容读取（§21.5）。
+    compatibilityRole: "objective_fk_alias",
     schemaJson: {
       title: objectiveDraft.objectiveStatement.slice(0, 200),
       summary: objectiveDraft.publicSummary.slice(0, 500),
@@ -1030,6 +1037,16 @@ async function createOrUpdateObjectiveAndCard(
       // 否则 learning_runs.key_point_id / review_schedules.keyPointId 等既有 FK
       // 与查询无法指向新目标；隐藏 legacy card 用 archived 避免混入旧卡列表。
       await ensureLegacyAliasRow(tx, ctx, noteVersionId, objectiveId, objectiveDraft);
+
+      // Plan 23 W2-07：激活事务内绑定已 seal 的来源（note 血缘）。
+      // 同一事务失败即整体回滚 → 0 canonical Objective/Card 或 0 无来源绑定；
+      // noteVersionId 缺失时留给 missing_origin 修复队列（W2-06）。
+      await writeActivationNoteOrigin(tx, ctx.workspaceId, {
+        originId: randomUUID(),
+        objectiveId,
+        objectiveRevisionId,
+        noteVersionId,
+      });
 
       return {
         cardId,
@@ -1325,6 +1342,16 @@ async function createOrUpdateObjectiveAndCard(
         targetRevisionHash,
         privatePayloadHash,
       });
+
+      // Plan 23 W2-07：target-equivalent 发布时按 exact revision 复制 Origin
+      //（§18.2：Origin 按 exact revision 复制或重新封存；旧行不改写）。
+      if (obj.currentObjectiveRevisionId) {
+        await copyOriginsToRevision(tx, ctx.workspaceId, {
+          fromRevisionId: obj.currentObjectiveRevisionId,
+          toRevisionId: newObjectiveRevisionId,
+          objectiveId: intent.objectiveId,
+        });
+      }
 
       // CAS update：确保 objective revision 未被并发修改
       const updatedObj = await tx.update(learningObjectivesV2)
