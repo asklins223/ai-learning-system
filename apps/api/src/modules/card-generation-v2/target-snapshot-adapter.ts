@@ -6,8 +6,7 @@
  *   LearningTargetSnapshotV2（全部 §16.1 字段）；
  * - 正式链路（planner/structured/critic/commit）只消费 frozen snapshot，
  *   不再直接读取 card_key_points.claim/quoteText；
- * - keyPointId 只作为 Objective ID alias；
- * - §21.3 legacy attachment sidecar（additive，不改旧 hash）。
+ * - keyPointId 只作为 Objective ID alias。
  *
  * 职责：
  * 1. freezeTargetSnapshotV2：workspace-scoped query active Objective + current
@@ -15,7 +14,6 @@
  *    + eligibility + exposures → 组装完整 §16.1 对象并持久化；任一环节缺失
  *    fail closed。
  * 2. loadFrozenTargetSnapshotV2：按 runId 读回并重建 §16.1 对象。
- * 3. createLegacyTargetSnapshotAttachmentV2：V1 run 的 additive sidecar。
  */
 
 import { randomUUID } from "node:crypto";
@@ -23,7 +21,6 @@ import { and, eq, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   learningTargetSnapshotsV2,
-  legacyTargetSnapshotAttachmentsV2,
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
   learningCardsV2,
@@ -34,11 +31,9 @@ import {
   learningExposuresV2,
   cardContentCapabilityStateV2,
 } from "../../db/schema/card-generation-v2.ts";
-import { reviewSchedules } from "../../db/schema/evidence.ts";
 import type {
   LearningTargetSnapshotV2,
   LearningRunTargetPublicV2,
-  LegacyTargetSnapshotAttachmentV2,
 } from "@ailearn/shared";
 import {
   computeTargetRevisionHashV2,
@@ -50,9 +45,7 @@ import {
   computeEvidenceEligibilityVectorHashV2,
   computeSemanticSupportReportSetHashV2,
   computeLearningTargetSnapshotHashV2,
-  computeLegacyTargetSnapshotAttachmentHashV2,
 } from "@ailearn/shared/card-generation-v2-hashing";
-import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import type {
   ObjectiveRubricV2,
   CanonicalAnswerV2,
@@ -331,57 +324,16 @@ async function readCardContentEpoch(tx: ApiTransaction, workspaceId: string): Pr
  * 计算 publishedTargetEligibility（§16.1/§16.2）：
  * - lifecycle/evidence 异常 → blocked；
  * - 有近期 reveal → practice_only；
- * - R35/C35：legacy 迁移来源（semantic_identity_class_id 以 legacy-migration:
- *   开头）且从未被正式 review（无任何 review_schedules 记录）→ practice_only
- *   （"旧版内容需重新生成"不静默参与可信 Run，§21.4 #10；不伪造 V2 eligibility）；
  * - 其余 → eligible。
  */
 export function computePublishedTargetEligibility(input: {
   lifecycleActive: boolean;
   evidenceUsable: boolean;
   sameCueRecentlyRevealed: boolean;
-  legacyUnreviewed: boolean;
 }): "eligible" | "practice_only" | "blocked" {
   if (!input.lifecycleActive || !input.evidenceUsable) return "blocked";
-  if (input.sameCueRecentlyRevealed || input.legacyUnreviewed) return "practice_only";
+  if (input.sameCueRecentlyRevealed) return "practice_only";
   return "eligible";
-}
-
-/**
- * R35/C35：判定 objective 是否为「legacy 迁移来源且从未被正式 review」。
- *
- * 条件：
- * 1. semantic_identity_class_id 以 `legacy-migration:` 开头（C34 迁移标记，
- *    保留原 Card ID）；
- * 2. 该 objective（key_point_id=objectiveId alias）在 review_schedules 中
- *    无任何记录（从未正式 review 过）。
- */
-export async function detectLegacyUnreviewedV2(
-  tx: ApiTransaction,
-  workspaceId: string,
-  objectiveId: string,
-): Promise<boolean> {
-  const objRows = await tx
-    .select({ semanticIdentityClassId: learningObjectivesV2.semanticIdentityClassId })
-    .from(learningObjectivesV2)
-    .where(and(
-      eq(learningObjectivesV2.workspaceId, workspaceId),
-      eq(learningObjectivesV2.objectiveId, objectiveId),
-    ))
-    .limit(1);
-  if (objRows.length === 0) return false;
-  const classId = String(objRows[0].semanticIdentityClassId ?? "");
-  if (!classId.startsWith("legacy-migration:")) return false;
-
-  const schedRows = await tx
-    .select({ id: reviewSchedules.id })
-    .from(reviewSchedules)
-    .where(and(
-      eq(reviewSchedules.workspaceId, workspaceId),
-      eq(reviewSchedules.keyPointId, objectiveId),
-    ))
-    .limit(1);
-  return schedRows.length === 0;
 }
 
 /**
@@ -493,15 +445,10 @@ export async function freezeTargetSnapshotV2(
   );
 
   // eligibility ceiling
-  // R35/C35：legacy 迁移来源且从未被正式 review → practice_only
-  //（不伪造 V2 eligibility；C34 迁移的 legacy objective 在重新生成前
-  //  不允许参与正式 Commit）。
-  const legacyUnreviewed = await detectLegacyUnreviewedV2(tx, workspaceId, objectiveId);
   const publishedTargetEligibility = computePublishedTargetEligibility({
     lifecycleActive,
     evidenceUsable: true, // loadEvidenceClosure 已 fail closed 保证全部 usable
     sameCueRecentlyRevealed: planningExposure.sameCueRecentlyRevealed,
-    legacyUnreviewed,
   });
 
   const canonicalAnswer = revision.canonicalAnswer as CanonicalAnswerV2;
@@ -774,166 +721,6 @@ export async function prepareCardContentEpoch(
   workspaceId: string,
 ): Promise<number> {
   return readCardContentEpoch(tx, workspaceId);
-}
-
-/**
- * §21.3：为 legacy V1 run 创建 additive target snapshot attachment。
- * 只追加不改旧 hash：legacyRunId/legacyKeyPointId/mappedObjectiveId/sourceRefs/
- * integrityClass/attachmentHash/backfilledAt。旧 Run/Artifact/Assessment/Commit
- * 序列字节级不动。
- */
-export async function createLegacyTargetSnapshotAttachmentV2(
-  tx: ApiTransaction,
-  input: {
-    workspaceId: string;
-    legacyRunId: string;
-    legacyKeyPointId: string;
-    mappedObjectiveId: string | null;
-    legacyClaim: string;
-    legacyQuoteText: string;
-    sourceRefs: string[];
-    /** §21.3：按 source 可验证性分类。 */
-    integrityClass: "verified_source_only" | "partial_source" | "unverifiable";
-    now?: () => Date;
-  },
-): Promise<{ attachmentId: string; attachmentHash: string }> {
-  const now = (input.now ?? (() => new Date()))();
-  const attachmentId = randomUUID();
-  const attachmentWithoutHash: Omit<LegacyTargetSnapshotAttachmentV2, "attachmentHash"> = {
-    version: 2,
-    attachmentId,
-    legacyRunId: input.legacyRunId,
-    workspaceId: input.workspaceId,
-    legacyKeyPointId: input.legacyKeyPointId,
-    mappedObjectiveId: input.mappedObjectiveId,
-    sourceRefs: input.sourceRefs,
-    integrityClass: input.integrityClass,
-    backfilledAt: now.toISOString(),
-  };
-  const attachmentHash = computeLegacyTargetSnapshotAttachmentHashV2(attachmentWithoutHash);
-
-  await tx.insert(legacyTargetSnapshotAttachmentsV2).values({
-    workspaceId: input.workspaceId,
-    attachmentId,
-    runId: input.legacyRunId,
-    keyPointId: input.legacyKeyPointId,
-    semanticTargetFingerprint: hashCanonicalV2("legacy-target-fingerprint-v2", {
-      workspaceId: input.workspaceId,
-      keyPointId: input.legacyKeyPointId,
-      claim: input.legacyClaim,
-    }),
-    targetRevisionHash: hashCanonicalV2("legacy-target-revision-v2", {
-      claim: input.legacyClaim,
-      quoteText: input.legacyQuoteText,
-    }),
-    legacyClaim: input.legacyClaim,
-    legacyQuoteText: input.legacyQuoteText,
-    evidenceContentHashes: [],
-    // 0138/0139 §21.3 列
-    mappedObjectiveId: input.mappedObjectiveId ?? null,
-    sourceRefs: input.sourceRefs as never,
-    integrityClass: input.integrityClass,
-    backfilledAt: now,
-    snapshotHash: attachmentHash,
-    frozenAt: now,
-  }).onConflictDoNothing();
-
-  return { attachmentId, attachmentHash };
-}
-
-// ─── 向后兼容：旧 V1 sidecar 签名 ─────────────────────────────────────────
-
-/**
- * 旧版 createLegacyTargetSnapshotAttachment（V1 迁移期）保留：内部委托到
- * §21.3 版本，改指 runId → legacyRunId，legacyClaim/quote 保留。
- * @deprecated 新代码应使用 createLegacyTargetSnapshotAttachmentV2。
- */
-export async function createLegacyTargetSnapshotAttachment(
-  tx: ApiTransaction,
-  input: {
-    workspaceId: string;
-    runId: string;
-    keyPointId: string;
-    legacyClaim: string;
-    legacyQuoteText: string;
-    evidenceContentHashes: string[];
-  },
-): Promise<{ attachmentId: string; snapshotHash: string }> {
-  const { attachmentId, attachmentHash } = await createLegacyTargetSnapshotAttachmentV2(tx, {
-    workspaceId: input.workspaceId,
-    legacyRunId: input.runId,
-    legacyKeyPointId: input.keyPointId,
-    mappedObjectiveId: input.keyPointId,
-    legacyClaim: input.legacyClaim,
-    legacyQuoteText: input.legacyQuoteText,
-    sourceRefs: [],
-    integrityClass: "unverifiable",
-  });
-  return { attachmentId, snapshotHash: attachmentHash };
-}
-
-// ─── keyPointId Deprecation Adapter ──────────────────────────────────────
-
-/**
- * §16.4: keyPointId → objectiveId deprecation adapter。
- *
- * 迁移期间旧代码仍使用 keyPointId 作为 Objective ID alias：
- * - 若 keyPointId 已是 V2 objectiveId（存在 active Objective），直接返回；
- * - 否则查 legacy_target_snapshot_attachments_v2 的 mapped_objective_id；
- * - 否则退回 V1 cards.key_point_id → learning_cards_v2.objective_id 映射；
- * - 找不到返回 null（调用方 fail closed）。
- */
-export async function resolveKeyPointIdToObjectiveId(
-  tx: ApiTransaction,
-  workspaceId: string,
-  keyPointId: string,
-): Promise<string | null> {
-  // 1. keyPointId 可能本身就是 objectiveId（active Objective）。
-  const directRows = await tx
-    .select({ objectiveId: learningObjectivesV2.objectiveId })
-    .from(learningObjectivesV2)
-    .where(and(
-      eq(learningObjectivesV2.workspaceId, workspaceId),
-      eq(learningObjectivesV2.objectiveId, keyPointId),
-      eq(learningObjectivesV2.lifecycle, "active"),
-    ))
-    .limit(1);
-  if (directRows[0]) return directRows[0].objectiveId;
-
-  // 2. legacy attachment mapped_objective_id。
-  const legacyRows = await tx
-    .select({ mappedObjectiveId: legacyTargetSnapshotAttachmentsV2.mappedObjectiveId })
-    .from(legacyTargetSnapshotAttachmentsV2)
-    .where(and(
-      eq(legacyTargetSnapshotAttachmentsV2.workspaceId, workspaceId),
-      eq(legacyTargetSnapshotAttachmentsV2.keyPointId, keyPointId),
-    ))
-    .limit(1);
-  if (legacyRows[0]?.mappedObjectiveId) return legacyRows[0].mappedObjectiveId;
-
-  // 3. V1 cards.key_point_id → learning_cards_v2.objective_id 映射。
-  // 2026-08-14 修复：旧 `public.cards` 表在本仓库不存在（实际为
-  // learning_cards，且无 key_point_id 列）——该遗留映射链路当前不可用。
-  // 查询失败时 fail-open 返回 null（attachment 以 unverifiable 写入），
-  // 绝不阻塞方案 16 的 LearningRun PREPARE 主链路。
-  try {
-    const v1Rows = await tx.execute(sql`
-      SELECT lc.objective_id
-      FROM public.learning_cards_v2 lc
-      JOIN public.cards c ON c.id = lc.card_id
-      WHERE lc.workspace_id = ${workspaceId}
-        AND c.key_point_id = ${keyPointId}
-        AND lc.lifecycle = 'active'
-      LIMIT 1
-    `);
-    if (v1Rows.length > 0) {
-      return String((v1Rows[0] as { objective_id: string }).objective_id);
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
 }
 
 // ─── Error ───────────────────────────────────────────────────────────────

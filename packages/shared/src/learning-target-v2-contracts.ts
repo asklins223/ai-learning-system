@@ -214,47 +214,12 @@ export type LearningRunTargetPublicV2 = z.infer<
   typeof learningRunTargetPublicV2Schema
 >;
 
-// ─── §21.3 Legacy Target Snapshot Attachment (additive sidecar) ───────
-
-/**
- * §21.3：历史 V1 Run 的 additive sidecar。
- * 不得写入或重算既有 PrivateRunContract/Artifact/Assessment/
- * CanonicalLearningEventEnvelope，不得改变任何旧 hash/sequence。
- */
-export const legacyTargetSnapshotAttachmentV2Schema = z
-  .strictObject({
-    version: z.literal(2),
-    attachmentId: z.string().uuid(),
-    legacyRunId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    legacyKeyPointId: z.string().uuid(),
-    mappedObjectiveId: z.string().uuid().nullable(),
-    sourceRefs: z.array(z.string().min(1).max(500)).max(100),
-    integrityClass: z.enum([
-      "verified_source_only",
-      "partial_source",
-      "unverifiable",
-    ]),
-    attachmentHash: z.string().regex(/^[0-9a-f]{64}$/),
-    backfilledAt: z.string().datetime({ offset: true }),
-  })
-  .strict();
-export type LegacyTargetSnapshotAttachmentV2 = z.infer<
-  typeof legacyTargetSnapshotAttachmentV2Schema
->;
-
 // ─── Parse helpers ─────────────────────────────────────────────────────
 
 export function parseLearningTargetSnapshotV2(
   input: unknown,
 ): LearningTargetSnapshotV2 {
   return learningTargetSnapshotV2Schema.parse(input);
-}
-
-export function parseLegacyTargetSnapshotAttachmentV2(
-  input: unknown,
-): LegacyTargetSnapshotAttachmentV2 {
-  return legacyTargetSnapshotAttachmentV2Schema.parse(input);
 }
 
 export function parseLearningRunOriginV2(

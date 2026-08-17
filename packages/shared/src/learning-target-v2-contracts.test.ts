@@ -8,11 +8,9 @@ import {
   learningRunReturnTargetV2Schema,
   learningRunTargetPublicV2Schema,
   parseLearningTargetSnapshotV2,
-  parseLegacyTargetSnapshotAttachmentV2,
   parseLearningRunOriginV2,
   parseLearningRunTargetPublicV2,
   type LearningTargetSnapshotV2,
-  type LegacyTargetSnapshotAttachmentV2,
   type LearningRunOriginV2,
   type LearningRunTargetPublicV2,
 } from "../src/learning-target-v2-contracts.ts";
@@ -79,21 +77,6 @@ function baseSnapshot(): LearningTargetSnapshotV2 {
     publishedTargetEligibility: "eligible",
     preparedAt: "2026-08-14T00:00:00Z",
     snapshotHash: FAKE_HASH,
-  };
-}
-
-function baseLegacyAttachment(): LegacyTargetSnapshotAttachmentV2 {
-  return {
-    version: 2,
-    attachmentId: FAKE_UUID,
-    legacyRunId: FAKE_UUID,
-    workspaceId: FAKE_UUID,
-    legacyKeyPointId: FAKE_UUID,
-    mappedObjectiveId: null,
-    sourceRefs: ["note-version-1"],
-    integrityClass: "verified_source_only",
-    attachmentHash: FAKE_HASH,
-    backfilledAt: "2026-08-14T00:00:00Z",
   };
 }
 
@@ -182,28 +165,6 @@ describe("learningRunTargetPublicV2Schema", () => {
       canonicalAnswer: { kind: "text", unit: { unitId: "u1", text: "leak" } },
     };
     assert.throws(() => learningRunTargetPublicV2Schema.parse(target));
-  });
-});
-
-describe("legacyTargetSnapshotAttachmentV2Schema", () => {
-  it("parses a valid attachment", () => {
-    const att = baseLegacyAttachment();
-    const result = parseLegacyTargetSnapshotAttachmentV2(att);
-    assert.equal(result.version, 2);
-    assert.equal(result.integrityClass, "verified_source_only");
-  });
-
-  it("accepts mapped objective id", () => {
-    const att = baseLegacyAttachment();
-    att.mappedObjectiveId = FAKE_UUID;
-    const result = parseLegacyTargetSnapshotAttachmentV2(att);
-    assert.equal(result.mappedObjectiveId, FAKE_UUID);
-  });
-
-  it("rejects invalid version", () => {
-    const att = baseLegacyAttachment() as unknown as Record<string, unknown>;
-    att.version = 1;
-    assert.throws(() => parseLegacyTargetSnapshotAttachmentV2(att));
   });
 });
 

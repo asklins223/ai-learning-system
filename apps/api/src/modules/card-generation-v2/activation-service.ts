@@ -87,7 +87,6 @@ import {
   insertDomainEvent,
   type RunContext,
 } from "./helpers.ts";
-import { assertNotShadowRun } from "./shadow-cutover-service.ts";
 
 type ReceiptMapping = {
   candidateRevisionId: string;
@@ -187,10 +186,6 @@ export async function activateCardCandidatesV2(
   idempotencyKey: string,
 ): Promise<CardActivationReceiptV2> {
   return withWorkspaceTransaction(ctx, async (tx) => {
-    // 0. shadow run 不得激活（§C7 Gate / §21.5 禁止混合状态）：
-    //    必须先于任何 canonical 读取/写入执行，避免 shadow 产生 canonical side effects。
-    await assertNotShadowRun(tx, ctx.workspaceId, body.runId);
-
     // 1. 幂等检查
     const existingReceipt = await tx.select().from(cardActivationReceiptsV2)
       .where(and(

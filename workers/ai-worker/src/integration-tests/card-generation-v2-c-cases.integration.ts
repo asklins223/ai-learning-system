@@ -274,17 +274,27 @@ async function activate(versionId: string, intent: { kind: "create_new" } | {
   return { receipt, runId, mapping: receipt.mappings[0], candidate: first };
 }
 
-/** §29.4 迁移期 stable objective ID = legacy keyPoint UUID alias。 */
-async function insertObjectiveAlias(objectiveId: string, versionId: string) {
-  const legacyCardId = randomUUID();
-  await admin.begin(async (tx) => {
-    await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json)
-      VALUES (${legacyCardId}, ${versionId}, ${WORKSPACE_ID}, 'active', '{}'::jsonb)
-      ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text, segment_ref)
-      VALUES (${objectiveId}, ${legacyCardId}, ${WORKSPACE_ID}, 1, 'CC', 'CC', '{"type":"text"}'::jsonb)
-      ON CONFLICT (id) DO NOTHING`;
-  });
+/** 公共投影读视图（objectiveId → current publication + current revision，§15.1）。 */
+async function readViewByObjective(objectiveId: string) {
+  const card = await admin`
+    SELECT card_id, current_publication_revision FROM learning_cards_v2
+    WHERE workspace_id = ${WORKSPACE_ID} AND objective_id = ${objectiveId}
+      AND lifecycle = 'active' LIMIT 1`;
+  if (card.length === 0) return null;
+  const obj = await admin`
+    SELECT current_objective_revision_id FROM learning_objectives_v2
+    WHERE workspace_id = ${WORKSPACE_ID} AND objective_id = ${objectiveId} LIMIT 1`;
+  if (obj.length === 0) return null;
+  const rev = await admin`
+    SELECT revision, public_summary FROM learning_objective_revisions_v2
+    WHERE objective_revision_id = ${obj[0].current_objective_revision_id}
+      AND workspace_id = ${WORKSPACE_ID} LIMIT 1`;
+  if (rev.length === 0) return null;
+  return {
+    objectiveId,
+    objectiveRevision: Number(rev[0].revision),
+    publicSummary: String(rev[0].public_summary),
+  };
 }
 
 /** PREPARE：冻结 LearningTargetSnapshotV2（真实 createRunV2）。 */
@@ -340,8 +350,7 @@ test("C27：presentation-only Card edit → 旧 Run 可读、objective/mastery i
   const { versionId } = await seedNote("C27", CONTENT_A);
   const { mapping } = await activate(versionId, { kind: "create_new" });
 
-  // 旧 Run 冻结：激活后先 PREPARE（alias 后）
-  await insertObjectiveAlias(mapping.objectiveId, versionId);
+  // 旧 Run 冻结：激活后先 PREPARE（key_point_id 即 objectiveId）
   const prepareKey = `c27-prepare-${randomUUID()}`;
   const oldRun = await prepare(mapping.objectiveId, mapping.cardId, prepareKey);
   const oldSnap = await admin`
@@ -444,16 +453,7 @@ test("C28：answer/rubric semantic change → 新 Objective ID；旧对象 super
   assert.equal(lineageRows[0].reason, "semantic_replace");
 
   // C37-lite：同一 Objective 在所有读视图一致（card 行 ↔ objective 行 ↔ 公共投影）
-  const { readPublicCardV2 } = await import(
-    "../../../../apps/api/src/modules/card-generation-v2/legacy-read-adapter.ts"
-  );
-  const { withWorkspaceTransaction } = await import(
-    "../../../../apps/api/src/db/client.ts"
-  );
-  const pub = await withWorkspaceTransaction(
-    { workspaceId: WORKSPACE_ID, userId: USER_ID },
-    (tx) => readPublicCardV2(tx, WORKSPACE_ID, m2.objectiveId),
-  );
+  const pub = await readViewByObjective(m2.objectiveId);
   assert.ok(pub, "C37 read view must resolve the new objective");
   assert.equal(String(pub.objectiveId), m2.objectiveId, "C37 read view objectiveId must match");
   const rev2Row = await admin`
@@ -471,7 +471,6 @@ test("C28：answer/rubric semantic change → 新 Objective ID；旧对象 super
 test("C38：PREPARE 后 target-equivalent 修订 → 旧 Run 读 frozen rev1；新 Run 用 rev2；lineage edit", async () => {
   const { versionId: v1 } = await seedNote("C38-F", CONTENT_F);
   const { mapping: m1 } = await activate(v1, { kind: "create_new" });
-  await insertObjectiveAlias(m1.objectiveId, v1);
 
   // 1. 首次 PREPARE → rev1 冻结
   const oldRun = await prepare(m1.objectiveId, m1.cardId, `c38-prepare-1-${randomUUID()}`);
@@ -553,16 +552,7 @@ test("C38：PREPARE 后 target-equivalent 修订 → 旧 Run 读 frozen rev1；�
   assert.notEqual(newRun.snapshotId, oldRun.snapshotId, "C38 new run must have its own snapshot");
 
   // C37-lite：公共投影一致性（读视图 objectiveRevision=2 且 publicSummary 匹配 rev2）
-  const { readPublicCardV2 } = await import(
-    "../../../../apps/api/src/modules/card-generation-v2/legacy-read-adapter.ts"
-  );
-  const { withWorkspaceTransaction } = await import(
-    "../../../../apps/api/src/db/client.ts"
-  );
-  const pub = await withWorkspaceTransaction(
-    { workspaceId: WORKSPACE_ID, userId: USER_ID },
-    (tx) => readPublicCardV2(tx, WORKSPACE_ID, m1.objectiveId),
-  );
+  const pub = await readViewByObjective(m1.objectiveId);
   assert.ok(pub, "C37 read view must resolve the objective");
   assert.equal(Number(pub.objectiveRevision), 2, "C37 read view must expose the current objective revision");
   const rev2Summary = await admin`

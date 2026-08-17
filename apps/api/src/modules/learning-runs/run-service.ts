@@ -795,16 +795,6 @@ export async function createRun(
     contractHash,
     createdAt,
   });
-  // §21.3 legacy additive sidecar：V1 run 无 V2 snapshot，PREPARE 时追加只读
-  // attachment（不改写任何旧 hash/序列）。
-  // 2026-08-14 摘除（方案 20 C5 中间态）：其映射查询依赖的 `public.cards`
-  // 表不存在、attachment 表对 ailearn_api 尚无 RLS INSERT 权限——在 createRun
-  // 单事务内失败会把整个事务标记 aborted（"current transaction is aborted"），
-  // 直接破坏方案 16 的 PREPARE 主链路。方案 20 恢复实施时必须以事务外
-  // （新事务/异步）方式重新接入，且表/权限就绪后再放开。
-  // 接入点：createRun 成功返回后，以独立 withWorkspaceTransaction 调用
-  //   resolveKeyPointIdToObjectiveId + createLegacyTargetSnapshotAttachmentV2
-  //   （两者仍在 card-generation-v2/target-snapshot-adapter.ts 导出）。
   await tx.insert(learningTasks).values({
     id: task.taskId,
     runId,

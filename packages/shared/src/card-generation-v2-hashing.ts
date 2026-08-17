@@ -24,7 +24,7 @@ import type {
   ObjectiveEquivalenceReportV2,
   ObjectiveEquivalenceBindingV2,
 } from "./learning-card-v2-contracts.ts";
-import type { LegacyTargetSnapshotAttachmentV2 } from "./learning-target-v2-contracts.ts";
+import type { LearningTargetSnapshotV2 } from "./learning-target-v2-contracts.ts";
 
 /** §15.6 semanticTargetFingerprint */
 export function computeSemanticTargetFingerprintV2(input: {
@@ -383,14 +383,6 @@ export function computeObjectiveEquivalenceBindingHashV2(
   binding: Omit<ObjectiveEquivalenceBindingV2, "bindingHash">,
 ): string {
   return hashCanonicalV2("learning-objective-equivalence-binding-v2", binding);
-}
-
-// ─── §21.3 Legacy attachment hash ───────────────────────────────────────
-
-export function computeLegacyTargetSnapshotAttachmentHashV2(
-  attachment: Omit<LegacyTargetSnapshotAttachmentV2, "attachmentHash">,
-): string {
-  return hashCanonicalV2("legacy-target-snapshot-attachment-v2", attachment);
 }
 
 /**

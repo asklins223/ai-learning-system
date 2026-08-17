@@ -33,7 +33,6 @@ import {
   isCardGenerationV1WriterEnabled,
   isCardGenerationV2Enabled,
 } from "../../config/learning-companion-flags.ts";
-import { recordLegacyWriterHit } from "../card-generation-v2/legacy-consumer-audit.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { learningCards } from "../../db/schema/card.ts";
 import { cardGenerationAgentEvents,
@@ -1006,17 +1005,7 @@ export async function createCardGenerationRun(
       })
       .where(and(eq(notes.id, note.id), eq(notes.workspaceId, context.workspaceId)));
 
-    // §26 C0/C8：V1 旧 writer 命中探针（sidecar，不阻塞 V1 运行）。
-    // C8 Gate 检查观察窗口 hit=0 后方可停写 V1；fast/planned/fallback 为
-    // worker 内部路由细分，API 入口统一记 supervisor 命中。
-    await recordLegacyWriterHit(tx, {
-      runId: run.id,
-      workspaceId: context.workspaceId,
-      writerKind: "v1_supervisor",
-      hitAt: now.toISOString(),
-      note: "V1 supervisor run created (C8 probe)",
-    });
-
+    // §26 C0/C8：V1 旧 writer 命中探针已随 legacy-consumer-audit 退役删除。
     await tx.insert(cardGenerationEvents).values({
       runId: run.id,
       workspaceId: context.workspaceId,
