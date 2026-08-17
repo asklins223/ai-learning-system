@@ -19,13 +19,10 @@ import type {
 } from "@ailearn/shared";
 import { learningObjectiveApi } from "@/lib/learning-objective-api";
 import { ObjectiveStatusChip } from "./ObjectiveStatusChip";
-import { objectiveChipStateFromList } from "./objective-state";
+import { objectiveChipStateFromList, filterObjectiveItems, type LibraryFilter, type LibrarySort } from "./objective-state";
 import { ObjectiveSourceLine } from "./ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "./ObjectivePrimaryAction";
 import { ObjectiveSkeleton, ObjectiveError, ObjectiveEmpty } from "./ObjectiveStatePrimitives";
-
-type LibraryFilter = "all" | "active" | "due" | "run" | "outdated" | "archived";
-type LibrarySort = "recommended" | "newest" | "oldest";
 
 const FILTERS: ReadonlyArray<{ key: LibraryFilter; label: string }> = [
   { key: "all", label: "全部" },
@@ -130,45 +127,10 @@ export function ObjectiveLibrary(): JSX.Element {
     };
   }, [load]);
 
-  // 客户端搜索/筛选/排序（正式读取已在服务端按 lifecycle/cursor 完成）
+  // 客户端搜索/筛选/排序（纯函数见 objective-state.ts；FE-15/FE-18 可测试）
   const visible = useMemo(() => {
     if (!items) return [];
-    const query = searchText.trim().toLowerCase();
-    let result = items.filter((item) => {
-      if (filter === "active" && item.lifecycle !== "active") return false;
-      if (filter === "archived" && item.lifecycle !== "archived") return false;
-      if (filter === "due" && item.primaryAction.kind !== "create_review_run") return false;
-      if (filter === "run" && item.primaryAction.kind !== "resume_run") return false;
-      if (filter === "outdated" && item.freshness !== "source_outdated") return false;
-      if (query) {
-        const haystack = [
-          item.conceptLabel ?? "",
-          item.publicSummary,
-          item.primaryNoteTitle ?? "",
-        ].join(" ").toLowerCase();
-        if (!haystack.includes(query)) return false;
-      }
-      return true;
-    });
-    const actionRank = (item: ObjectiveListItemV3): number => {
-      switch (item.primaryAction.kind) {
-        case "resume_run": return 0;
-        case "create_review_run": return 1;
-        case "create_run": return 2;
-        case "practice_only": return 3;
-        case "view_successor": return 4;
-        case "refresh": return 5;
-        default: return 6;
-      }
-    };
-    if (sort === "newest") {
-      result = [...result].sort((a, b) => b.objectiveId.localeCompare(a.objectiveId));
-    } else if (sort === "oldest") {
-      result = [...result].sort((a, b) => a.objectiveId.localeCompare(b.objectiveId));
-    } else {
-      result = [...result].sort((a, b) => actionRank(a) - actionRank(b));
-    }
-    return result;
+    return filterObjectiveItems(items, { searchText, filter, sort });
   }, [items, searchText, filter, sort]);
 
   const execute = (action: LearningObjectivePrimaryActionV3) => {
