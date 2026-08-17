@@ -9,6 +9,7 @@ import type {
   LearningObjectiveSurfaceV3,
   ObjectiveListPageV3,
   LearningDashboardV2,
+  UnderstandingTopologySnapshotV3,
 } from "@ailearn/shared";
 import { request } from "./api.ts";
 
@@ -71,4 +72,6 @@ export const learningObjectiveApi = {
     const qs = new URLSearchParams({ legacyKind, legacyId });
     return request<LegacyRouteResolution>("/v2/route-resolution?" + qs.toString());
   },
+
+  getTopology: () => request<UnderstandingTopologySnapshotV3>("/v3/understanding/topology"),
 };

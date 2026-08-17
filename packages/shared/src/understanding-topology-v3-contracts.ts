@@ -111,6 +111,10 @@ export const understandingNodeProjectionV3Schema = z.union([
 export type UnderstandingNodeProjectionV3 = z.infer<
   typeof understandingNodeProjectionV3Schema
 >;
+export type SourceNodeProjectionV3 = z.infer<typeof sourceNodeProjectionV3Schema>;
+export type NoteNodeProjectionV3 = z.infer<typeof noteNodeProjectionV3Schema>;
+export type ObjectiveNodeProjectionV3 = z.infer<typeof objectiveNodeProjectionV3Schema>;
+export type EvidenceNodeProjectionV3 = z.infer<typeof evidenceNodeProjectionV3Schema>;
 
 // ─── edges ──────────────────────────────────────────────────────────────
 
