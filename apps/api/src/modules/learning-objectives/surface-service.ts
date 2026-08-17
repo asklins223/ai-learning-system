@@ -314,9 +314,12 @@ export async function listObjectiveSurfacesV3(
   options: ObjectiveListOptions,
 ): Promise<{ items: LearningObjectiveSurfaceV3[]; total: number; nextCursor: string | null }> {
   const limit = Math.min(Math.max(options.limit, 1), 100);
+  // RL-01：与 Dashboard 同一 eligibility cutoff——未显式指定 lifecycle 时只列
+  // active（archived/superseded 默认隐藏，§25.3 数量对账的前提）。
+  const lifecycle = options.lifecycle ?? "active";
   const where = and(
     eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
-    options.lifecycle ? eq(learningObjectivesV2.lifecycle, options.lifecycle) : undefined,
+    eq(learningObjectivesV2.lifecycle, lifecycle),
     options.cursor ? lt(learningObjectivesV2.createdAt, new Date(options.cursor)) : undefined,
   );
   const rows = await tx
@@ -335,7 +338,7 @@ export async function listObjectiveSurfacesV3(
     .from(learningObjectivesV2)
     .where(and(
       eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
-      options.lifecycle ? eq(learningObjectivesV2.lifecycle, options.lifecycle) : undefined,
+      eq(learningObjectivesV2.lifecycle, lifecycle),
     ));
   const total = Number(countRows[0]?.n ?? 0);
   const nextCursor =
