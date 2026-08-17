@@ -99,4 +99,15 @@ test("CS-03: reindex 写入 objective 文档且可被搜索命中、无私有载
   );
   const objectiveHit = searchResult.items.find((item) => item.objectType === "objective");
   assert.ok(objectiveHit, "搜索必须命中 objective 文档（关键词：" + keyword + "）");
+
+  // type=objective 过滤 + href 直达档案路由
+  const typed = await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) => search(tx, FIXTURE_WORKSPACE, keyword, { type: "objective", limit: 20 }),
+  );
+  assert.ok(typed.total >= 1, "type=objective 过滤必须有命中");
+  for (const item of typed.items) {
+    assert.equal(item.objectType, "objective");
+    assert.ok(item.href.startsWith("/learning-objectives/"), "objective 命中 href 必须直达档案");
+  }
 });

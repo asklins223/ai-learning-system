@@ -20,7 +20,7 @@ import {
   withSearchReturnTarget,
 } from "@/lib/search-return";
 
-type TabType = "all" | "note" | "card" | "source" | "evidence";
+type TabType = "all" | "note" | "card" | "source" | "evidence" | "objective";
 
 const SEARCH_TABS: ReadonlyArray<{ key: TabType; label: string }> = [
   { key: "all", label: "全部" },
@@ -28,6 +28,8 @@ const SEARCH_TABS: ReadonlyArray<{ key: TabType; label: string }> = [
   { key: "card", label: "学习卡" },
   { key: "source", label: "来源" },
   { key: "evidence", label: "证据" },
+  // Plan 23 CS-03：学习目标 tab（conceptLabel/说明/来源可搜）
+  { key: "objective", label: "学习目标" },
 ];
 
 const TYPE_META: Record<
@@ -38,6 +40,8 @@ const TYPE_META: Record<
   card: { label: "学习卡", tone: "success", description: "摘要与关键理解" },
   source: { label: "来源", tone: "warning", description: "来源标题与原文片段" },
   evidence: { label: "证据", tone: "evidence", description: "引用内容与证据命中" },
+  // Plan 23 CS-03：Objective 命中（概念/说明/来源可搜；不索引答案）
+  objective: { label: "学习目标", tone: "success", description: "概念标题、公开说明与来源" },
 };
 
 function isTabType(value: string | null): value is TabType {
@@ -45,7 +49,7 @@ function isTabType(value: string | null): value is TabType {
 }
 
 function typeMeta(type: string) {
-  if (type === "note" || type === "card" || type === "source" || type === "evidence") {
+  if (type === "note" || type === "card" || type === "source" || type === "evidence" || type === "objective") {
     return TYPE_META[type];
   }
   return { label: type || "对象", tone: "muted" as StatusTone, description: "学习对象" };
@@ -56,6 +60,7 @@ function SearchTypeIcon({ type }: { type: string }) {
   if (type === "card") return <Icon.Card aria-hidden="true" />;
   if (type === "source") return <Icon.Inbox aria-hidden="true" />;
   if (type === "evidence") return <Icon.Quote aria-hidden="true" />;
+  if (type === "objective") return <Icon.Target aria-hidden="true" />;
   return <Icon.Search aria-hidden="true" />;
 }
 

@@ -383,6 +383,10 @@ export async function search(
       case "source":
         href = `/sources/${row.object_id}`;
         break;
+      case "objective":
+        // Plan 23 CS-03：Objective 命中直达目标档案（web 端 /learning-objectives/[id] 重定向到详情）
+        href = `/learning-objectives/${row.object_id}`;
+        break;
       case "evidence": {
         const cardId = typeof metadata?.cardId === "string"
           ? metadata.cardId
