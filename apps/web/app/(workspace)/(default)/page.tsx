@@ -9,13 +9,14 @@ import { api, CardListItem, JobRow, SanitizedReviewItem, StatsOverview } from "@
 import { useCurrentUser } from "@/lib/use-current-user";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { resolveHomeOnboardingVisibility } from "@/lib/home-onboarding";
-import { relativeTime } from "@/lib/format";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Icon } from "@/components/ui/icons";
-import { StatusChip } from "@/components/ui/StatusChip";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { statusMap } from "@/lib/status-map";
-import { learningCardHref, mergeLearningCardsV2 } from "@/lib/learning-card-library";
+import { mergeLearningCardsV2 } from "@/lib/learning-card-library";
+// Plan 23 FE-07：首页主内容切到 /v2/learning-dashboard（Objective Surface）。
+import "@/app/styles/home-dashboard.css";
+import { DashboardHome } from "@/features/learning-objective/DashboardHome";
 
 type CaptureMessageType = "success" | "error";
 
@@ -241,73 +242,11 @@ export default function HomePage() {
   const pendingReviews = reviews ?? [];
   const pendingReviewCount = homeReviewTotal ?? pendingReviews.length;
   const activeJobs = jobs?.filter((job) => job.status === "pending" || job.status === "running") ?? [];
-  const recentCards = (cards ?? []).slice(0, 4);
-  const primaryCard = (cards ?? []).find((card) => card.status === "active");
-
-  const misunderstandingCount = stats?.misunderstandingCount ?? 0;
-  const unclearCount = stats?.unclearCount ?? 0;
-  const pendingEvidenceCount = stats?.pendingEvidenceCount ?? 0;
-  const riskCount = stats
-    ? misunderstandingCount + unclearCount + pendingEvidenceCount
-    : null;
-
-  const noteCountLabel = stats
-    ? `${stats.noteCount}`
-    : noteTotal !== null
-      ? `${noteTotal}`
-      : "—";
-  const cardCountLabel = stats
-    ? `${stats.activeCardCount}`
-    : homeCardTotal !== null
-      ? `${homeCardTotal}`
-      : "—";
-  const reviewCountLabel = homeReviewTotal !== null ? `${homeReviewTotal}` : "—";
-  const noteCountAvailable = stats !== null || noteTotal !== null;
-  const cardCountAvailable = stats !== null || homeCardTotal !== null;
-
-  const focusLoading =
-    (reviews === null && !reviewsError) ||
-    (cards === null && !cardsError);
+  // Plan 23 FE-07：概览计数/今日重点由 DashboardHome（/v2/learning-dashboard）提供，
+  // 移除依赖 schemaJson.title/summary 的 legacy 派生（§2.2/§2.3）。
   const queueLoading =
     (reviews === null && !reviewsError) ||
     (jobs === null && !jobsError);
-
-  const todayFocus = pendingReviewCount > 0
-    ? {
-        kind: "review" as const,
-        eyebrow: "今日下一步 · 三分钟微旅程",
-        title: "先证明一个到期要点",
-        summary: `今天有 ${pendingReviewCount} 条复习已经到期。进入后直接用推荐方式开始，也可以随时改用语音、操作或短文字。`,
-        meta: [
-          { label: "到期复习", value: `${pendingReviewCount} 条` },
-          { label: "单次用时", value: "1–3 分钟" },
-          { label: "自主操作", value: "可切换 / 可跳过" },
-        ],
-        ctaLabel: "开始三分钟验证",
-        ctaHref: pendingReviews[0]
-          ? homeLearningRunHref(pendingReviews[0])
-          : "/learning-runs/new",
-      }
-    : primaryCard
-      ? {
-          kind: "continue" as const,
-          eyebrow: "今日下一步 · 三分钟微旅程",
-          title: primaryCard.schemaJson?.title ?? "未命名学习卡",
-          summary: "回到这张学习卡，用语音、操作或短文字证明一个要点。",
-          meta: [
-            ...((primaryCard.evidenceHardCount ?? 0) > 0
-              ? [{ label: "硬证据", value: `${primaryCard.evidenceHardCount} 条` }]
-              : []),
-            ...((primaryCard.validationCount ?? 0) > 0
-              ? [{ label: "验证", value: `${primaryCard.validationCount} 次` }]
-              : []),
-            { label: "单次用时", value: "1–3 分钟" },
-            { label: "创建", value: relativeTime(primaryCard.createdAt) },
-          ],
-          ctaLabel: "开始三分钟巩固",
-          ctaHref: learningCardHref(primaryCard),
-        }
-      : null;
 
   const visibleReviews = pendingReviews.slice(0, 3);
   const visibleJobs = activeJobs.slice(0, Math.max(0, Math.min(3, 4 - visibleReviews.length)));
@@ -381,48 +320,10 @@ export default function HomePage() {
 
       <div className="learning-home-content">
         {!isFirstUse && (
-        <section className="learning-home-overview" aria-labelledby="learning-home-overview-title">
-          <div className="learning-home-overview-intro">
-            <span className="learning-home-overview-kicker">今日概览</span>
-            <h2 id="learning-home-overview-title">学习概览</h2>
-            <p>今天的理解工作台</p>
-          </div>
-
-          <dl className="learning-home-facts">
-            <div className="learning-home-fact">
-              <span className="learning-home-fact-icon" aria-hidden="true"><Icon.Notepad /></span>
-              <div>
-                <dt>笔记</dt>
-                <dd>{noteCountAvailable ? noteCountLabel : "—"}</dd>
-                <span>{noteCountAvailable ? "已整理内容" : "暂不可用"}</span>
-              </div>
-            </div>
-            <div className="learning-home-fact">
-              <span className="learning-home-fact-icon" aria-hidden="true"><Icon.Card /></span>
-              <div>
-                <dt>学习卡</dt>
-                <dd>{cardCountAvailable ? cardCountLabel : "—"}</dd>
-                <span>{cardCountAvailable ? "可继续验证" : "暂不可用"}</span>
-              </div>
-            </div>
-            <div className="learning-home-fact" data-tone={pendingReviewCount > 0 ? "warning" : "neutral"}>
-              <span className="learning-home-fact-icon" aria-hidden="true"><Icon.Review /></span>
-              <div>
-                <dt>到期复习</dt>
-                <dd>{reviewsError ? "—" : reviewCountLabel}</dd>
-                <span>{reviewsError ? "暂不可用" : pendingReviewCount > 0 ? "需要优先处理" : "今天无到期"}</span>
-              </div>
-            </div>
-            <div className="learning-home-fact" data-tone={riskCount && riskCount > 0 ? "danger" : "neutral"}>
-              <span className="learning-home-fact-icon" aria-hidden="true"><Icon.Target /></span>
-              <div>
-                <dt>理解风险</dt>
-                <dd>{statsError || riskCount === null ? "—" : riskCount}</dd>
-                <span>{statsError ? "暂不可用" : riskCount ? "仍需补证或澄清" : "当前状态稳定"}</span>
-              </div>
-            </div>
-          </dl>
-        </section>
+        <DashboardHome
+          isOwner={isOwner}
+          onOpenCapture={openCapture}
+        />
         )}
 
         {errorList.length > 0 && (
@@ -466,80 +367,6 @@ export default function HomePage() {
                 </div>
               </section>
             )}
-            {!isFirstUse && (focusLoading ? (
-              <section className="learning-home-focus learning-home-focus--loading" aria-busy="true" aria-label="正在加载今日下一步">
-                <div className="learning-home-focus-skeleton-label" />
-                <div className="learning-home-focus-skeleton-title" />
-                <Skeleton lines={3} />
-                <div className="learning-home-focus-skeleton-button" />
-              </section>
-            ) : todayFocus ? (
-              <section className="learning-home-focus" data-kind={todayFocus.kind} data-ui="primary-object">
-                <span className="learning-home-focus-layer" aria-hidden="true" />
-                <div className="learning-home-focus-topline">
-                  <span className="learning-home-focus-tag">
-                    {todayFocus.kind === "review" ? <Icon.Review /> : <Icon.Sparkle />}
-                    {todayFocus.eyebrow}
-                  </span>
-                  <span className="learning-home-focus-index">今日重点</span>
-                </div>
-
-                <div className="learning-home-focus-body">
-                  <div className="learning-home-focus-copy">
-                    <p className="learning-home-focus-label">今天最值得推进的学习对象</p>
-                    <h2>{todayFocus.title}</h2>
-                    <p className="learning-home-focus-summary">{todayFocus.summary}</p>
-                  </div>
-                  <Link href={todayFocus.ctaHref} className="learning-home-focus-cta">
-                    <span>{todayFocus.ctaLabel}</span>
-                    <Icon.Arrow />
-                  </Link>
-                </div>
-
-                <div className="learning-home-focus-footer">
-                  <div className="learning-home-focus-meta">
-                    {todayFocus.meta.slice(0, 3).map((item) => (
-                      <span key={`${item.label}-${item.value}`}>
-                        <small>{item.label}</small>
-                        <strong>{item.value}</strong>
-                      </span>
-                    ))}
-                  </div>
-                  <div className="learning-home-route" aria-label="学习路径">
-                    <span>材料</span><i aria-hidden="true" /><span>理解</span><i aria-hidden="true" /><span>证明</span>
-                  </div>
-                </div>
-              </section>
-            ) : (
-              <section className="learning-home-focus learning-home-focus--empty" data-ui="primary-object">
-                <div className="learning-home-focus-topline">
-                  <span className="learning-home-focus-tag"><Icon.Sparkle />今天的学习桌面</span>
-                  <span className="learning-home-focus-index">今日重点</span>
-                </div>
-                <div className="learning-home-focus-empty-copy">
-                  <span className="learning-home-focus-empty-icon" aria-hidden="true"><Icon.Plus /></span>
-                  <div>
-                    <h2>桌面上还没有学习对象</h2>
-                    <p>
-                      {isOwner
-                        ? "粘贴原文、Markdown、代码或链接，系统会把它整理成后续可验证的学习对象。"
-                        : "你当前以成员身份浏览，可以先从工作区已有资料和学习记录开始。"}
-                    </p>
-                  </div>
-                </div>
-                {isOwner ? (
-                  <button className="learning-home-focus-cta" type="button" onClick={openCapture}>
-                    <span>打开快速捕获</span>
-                    <Icon.Arrow />
-                  </button>
-                ) : (
-                  <Link className="learning-home-focus-cta" href="/sources">
-                    <span>浏览来源资料</span>
-                    <Icon.Arrow />
-                  </Link>
-                )}
-              </section>
-            ))}
           </div>
 
           <aside className="learning-home-tools" aria-label="今日学习工具">
@@ -713,79 +540,6 @@ export default function HomePage() {
           </aside>
         </div>
 
-        {!isFirstUse && (
-        <section className="learning-home-recent" aria-labelledby="learning-home-recent-title">
-          <header className="learning-home-section-header">
-            <div>
-              <p>最近更新</p>
-              <h2 id="learning-home-recent-title">最近学习卡</h2>
-              <span>继续补充证据，或回到尚未说清楚的地方。</span>
-            </div>
-            <Link href="/cards" className="learning-home-section-link">
-              查看全部
-              <Icon.Arrow />
-            </Link>
-          </header>
-
-          <div className="learning-home-recent-body">
-            {cardsError ? (
-              <div className="learning-home-recent-state" data-tone="error">
-                <Icon.Warn />
-                <span>学习卡加载失败</span>
-                <button
-                  type="button"
-                  disabled={homeRefreshing}
-                  aria-busy={homeRefreshing}
-                  onClick={() => void loadHomeData()}
-                >
-                  {homeRefreshing ? "正在加载…" : "重新加载"}
-                </button>
-              </div>
-            ) : cards === null ? (
-              <div className="learning-home-card-grid" aria-busy="true">
-                {[0, 1, 2, 3].map((item) => (
-                  <div className="learning-home-card learning-home-card--loading" key={item}>
-                    <Skeleton lines={4} />
-                  </div>
-                ))}
-              </div>
-            ) : recentCards.length === 0 ? (
-              <div className="learning-home-recent-state">
-                <Icon.Card />
-                <span>还没有学习卡，先从笔记生成一张可验证的理解卡。</span>
-                <Link href="/notes">去笔记</Link>
-              </div>
-            ) : (
-              <div className="learning-home-card-grid">
-                {recentCards.map((card, index) => {
-                  const status = statusMap.cardStatus(card.status);
-                  return (
-                    <Link key={card.id} href={learningCardHref(card)} className="learning-home-card">
-                      <span className="learning-home-card-layer" aria-hidden="true" />
-                      <div className="learning-home-card-topline">
-                        <span className="learning-home-card-index">{String(index + 1).padStart(2, "0")}</span>
-                        <StatusChip tone={status.tone} size="sm">{status.label}</StatusChip>
-                        <span className="learning-home-card-time">{relativeTime(card.createdAt)}</span>
-                      </div>
-                      <h3>{card.schemaJson?.title ?? "未命名学习卡"}</h3>
-                      <p>{card.schemaJson?.summary ?? "这张学习卡还没有摘要，打开后继续整理核心理解。"}</p>
-                      <div className="learning-home-card-footer">
-                        <div className="learning-home-card-meta">
-                          {(card.evidenceHardCount ?? 0) > 0 && <span>{card.evidenceHardCount} 条硬证据</span>}
-                          {(card.validationCount ?? 0) > 0 && <span>{card.validationCount} 次验证</span>}
-                          {card.reviewStatus === "pending" && <span data-tone="warning">已安排复习</span>}
-                          {(card.evidenceHardCount ?? 0) === 0 && (card.validationCount ?? 0) === 0 && card.reviewStatus !== "pending" && <span>等待继续整理</span>}
-                        </div>
-                        <span className="learning-home-card-open" aria-hidden="true"><Icon.Arrow /></span>
-                      </div>
-                    </Link>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </section>
-        )}
       </div>
     </div>
   );

@@ -1,0 +1,145 @@
+/**
+ * Plan 23 FE-01：Learning Objective 系统视觉 token（§36.3）。
+ * 暖白「档案页」语言；详情/星图/首页共用。
+ * 不在这里放业务样式——只放 token 与基础原子类。
+ */
+:root {
+  --objective-canvas: #f1eee6;
+  --objective-surface: #fffdf8;
+  --objective-surface-muted: #f7f4ed;
+  --objective-ink: #242720;
+  --objective-muted: #686d64;
+  --objective-primary: #116b51;
+  --objective-source: #4b82b8;
+  --objective-due: #c4862f;
+  --objective-danger: #a64b43;
+  --objective-border: #ddd5c6;
+  --objective-radius-panel: 28px;
+  --objective-radius-control: 14px;
+  --objective-shadow: 0 12px 36px rgb(37 52 45 / 10%);
+}
+
+.objective-surface {
+  color: var(--objective-ink);
+  background: var(--objective-surface);
+  border: 1px solid var(--objective-border);
+  border-radius: var(--objective-radius-panel);
+  box-shadow: var(--objective-shadow);
+}
+
+.objective-surface-muted {
+  background: var(--objective-surface-muted);
+}
+
+.objective-primary-action {
+  min-block-size: 44px;
+  padding-inline: 20px;
+  color: #fff;
+  background: var(--objective-primary);
+  border: 0;
+  border-radius: var(--objective-radius-control);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.objective-primary-action:focus-visible,
+.objective-secondary-action:focus-visible,
+.objective-chip:focus-visible,
+.objective-source-line:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--objective-primary), white 55%);
+  outline-offset: 3px;
+}
+
+.objective-secondary-action {
+  min-block-size: 44px;
+  padding-inline: 20px;
+  color: var(--objective-primary);
+  background: transparent;
+  border: 1px solid var(--objective-border);
+  border-radius: var(--objective-radius-control);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* 状态 chip：不只靠颜色区分（§36.2/§37 视觉断言） */
+.objective-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-block-size: 28px;
+  padding-inline: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--objective-border);
+  background: var(--objective-surface-muted);
+  color: var(--objective-ink);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.objective-chip[data-state="ready"] {
+  border-color: color-mix(in srgb, var(--objective-primary), transparent 45%);
+  color: var(--objective-primary);
+}
+.objective-chip[data-state="due"] {
+  border-color: color-mix(in srgb, var(--objective-due), transparent 45%);
+  color: var(--objective-due);
+}
+.objective-chip[data-state="run"] {
+  border-color: color-mix(in srgb, var(--objective-source), transparent 45%);
+  color: var(--objective-source);
+}
+.objective-chip[data-state="outdated"] {
+  border-color: color-mix(in srgb, var(--objective-danger), transparent 45%);
+  color: var(--objective-danger);
+}
+.objective-chip[data-state="archived"] {
+  opacity: 0.6;
+}
+
+/* 来源血缘线：Source/Note 蓝色系 */
+.objective-source-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--objective-source);
+  font-size: 0.85rem;
+}
+
+/* 加载 / 空 / 错误原语 */
+.objective-skeleton {
+  border-radius: var(--objective-radius-control);
+  background: color-mix(in srgb, var(--objective-border), transparent 40%);
+  animation: objective-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes objective-shimmer {
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .objective-skeleton {
+    animation: none;
+  }
+}
+
+.objective-empty {
+  padding: 32px 24px;
+  text-align: center;
+  color: var(--objective-muted);
+}
+
+.objective-error {
+  padding: 24px;
+  border: 1px solid color-mix(in srgb, var(--objective-danger), transparent 50%);
+  border-radius: var(--objective-radius-panel);
+  color: var(--objective-danger);
+}
+
+/* 响应式（§36.6） */
+@media (max-width: 719px) {
+  :root {
+    --objective-radius-panel: 20px;
+  }
+}

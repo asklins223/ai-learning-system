@@ -631,7 +631,8 @@ async function requestResponse(path: string, init: RequestInit = {}): Promise<Re
   return res;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Plan 23 FE-06：导出供 learning-objective-api.ts 复用（正式消费者统一走 request）。 */
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method ?? "GET").toUpperCase();
   // 2026-08-11（性能专项）：GET 短 TTL 缓存（30s）——命中直接返回，减少
   // 跨页面重复请求；写操作（含 204）全量失效。
