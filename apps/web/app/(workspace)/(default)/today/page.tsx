@@ -29,6 +29,10 @@ import { useIsOwner } from "@/lib/use-current-user";
 import { isLearningRunV1Enabled } from "@/lib/feature-flags";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { learningCardHref, mergeLearningCardsV2 } from "@/lib/learning-card-library";
+// Plan 23 CS-01：Today 的“巩固一个要点”建议改由 Objective Surface 提供。
+import { learningObjectiveApi } from "@/lib/learning-objective-api";
+import { objectiveActionHref } from "@/features/learning-objective/action-navigation";
+import type { ObjectiveListItemV3 } from "@ailearn/shared";
 
 type ActivityType = "note" | "card" | "source" | "review" | "job";
 type ActivityGroup = "attention" | "running" | "recorded";
@@ -875,6 +879,24 @@ export default function TodayPage() {
   const runningContext = runningActivities.slice(0, 3);
   const practiceCard = (cards ?? [])[0] ?? null;
   const errorKeys = Object.keys(errors) as DataKey[];
+  // Plan 23 CS-01：Objective 队列（active；服务端 cutoff 与 Dashboard 一致）。
+  // 空状态“巩固一个要点”优先使用真实概念标题（修复 V2 卡显示“未命名学习卡”，§2.2）。
+  const [topObjective, setTopObjective] = useState<ObjectiveListItemV3 | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    learningObjectiveApi
+      .listObjectives({ limit: 5 })
+      .then((page) => {
+        if (cancelled) return;
+        setTopObjective(page.items[0] ?? null);
+      })
+      .catch(() => {
+        // Objective 队列不可用不阻塞 Today（legacy practiceCard 兜底）
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const allFailed = errorKeys.length === 5 && Object.values(unavailableData).every(Boolean);
   const hasStaleDataErrors = errorKeys.some((key) => !unavailableData[key]);
   const activeUnavailableKey =
@@ -1424,7 +1446,7 @@ export default function TodayPage() {
             </aside>
           )}
 
-          {!loading && dueReviews.length === 0 && runningContext.length === 0 && practiceCard && (
+          {!loading && dueReviews.length === 0 && runningContext.length === 0 && (topObjective || practiceCard) && (
             <aside className="today-context-panel is-practice" aria-labelledby="today-practice-title">
               <div className="today-context-heading">
                 <span className="today-context-icon"><Icon.Target /></span>
@@ -1435,33 +1457,52 @@ export default function TodayPage() {
               </div>
               <p className="today-context-intro">
                 {LEARNING_RUN_UI_PREVIEW
-                  ? "今天没有到期复习。你可以从最近的学习卡预览一轮短练习，也可以先离开。"
-                  : "今天没有到期复习。可以回到最近的学习卡继续巩固，也可以先离开。"}
+                  ? "今天没有到期复习。你可以从最近的学习目标预览一轮短练习，也可以先离开。"
+                  : "今天没有到期复习。可以回到最近的学习目标继续巩固，也可以先离开。"}
               </p>
-              <div className="today-context-card-name">
-                <span>最近的学习卡</span>
-                <strong>{practiceCard.schemaJson?.title || "未命名学习卡"}</strong>
-              </div>
-              {LEARNING_RUN_UI_PREVIEW && (
-                <div className="today-context-facts" aria-label="巩固练习 UI 预览说明">
-                  <span>不自动下一题</span>
-                  <span>随时换方式</span>
-                </div>
+              {topObjective ? (
+                <>
+                  <div className="today-context-card-name">
+                    <span>最近的学习目标</span>
+                    <strong>{topObjective.conceptLabel ?? topObjective.publicSummary.slice(0, 40)}</strong>
+                  </div>
+                  <Link
+                    href={objectiveActionHref(topObjective.primaryAction, "/today")
+                      ?? "/learning-objectives/" + topObjective.objectiveId}
+                    className="today-context-action"
+                  >
+                    {topObjective.primaryAction.kind === "resume_run" ? "继续本次巩固" : "开始一次巩固"}
+                    <Icon.Arrow />
+                  </Link>
+                </>
+              ) : (
+                <>
+                  <div className="today-context-card-name">
+                    <span>最近的学习卡</span>
+                    <strong>{practiceCard?.schemaJson?.title || "未命名学习卡"}</strong>
+                  </div>
+                  {LEARNING_RUN_UI_PREVIEW && (
+                    <div className="today-context-facts" aria-label="巩固练习 UI 预览说明">
+                      <span>不自动下一题</span>
+                      <span>随时换方式</span>
+                    </div>
+                  )}
+                  <Link
+                    href={
+                      practiceCard && (learningRunUiPreviewHref({
+                        origin: practiceCard.isV2 ? "today_v2" : "today",
+                        cardId: practiceCard.id,
+                        keyPointId: practiceCard.isV2 ? practiceCard.objectiveId ?? null : null,
+                        isV2: practiceCard.isV2,
+                      }) ?? learningCardHref(practiceCard))
+                    }
+                    className="today-context-action"
+                  >
+                    {LEARNING_RUN_UI_PREVIEW ? "预览短练习" : "去学习卡继续"}
+                    <Icon.Arrow />
+                  </Link>
+                </>
               )}
-              <Link
-                href={
-                  learningRunUiPreviewHref({
-                    origin: practiceCard.isV2 ? "today_v2" : "today",
-                    cardId: practiceCard.id,
-                    keyPointId: practiceCard.isV2 ? practiceCard.objectiveId ?? null : null,
-                    isV2: practiceCard.isV2,
-                  }) ?? learningCardHref(practiceCard)
-                }
-                className="today-context-action"
-              >
-                {LEARNING_RUN_UI_PREVIEW ? "预览短练习" : "去学习卡继续"}
-                <Icon.Arrow />
-              </Link>
             </aside>
           )}
         </div>
