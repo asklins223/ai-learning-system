@@ -61,8 +61,6 @@ import {
   type CardActivationReceiptV2,
   type ActivationIntentV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
-import { CardStatus } from "@ailearn/shared";
-import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
   computeClientReviewHashV2,
@@ -714,49 +712,6 @@ async function activateSingleCandidate(
 
 // ─── 创建/更新 Objective + Card ──────────────────────────────────────────────
 
-/**
- * §29.4 迁移期 stable objective ID = legacy keyPoint UUID alias。
- *
- * 新 V2 激活链路必须为每个新 Objective 创建一条隐藏的 legacy `card_key_points`
- * 别名行（id = objectiveId），并配一个 archived 的 legacy `learning_cards`
- * 父行以满足 FK。这样 `learning_runs.key_point_id`、`learning_task_presentation_history`
- * 等既有表/查询仍可指向 V2 目标，而不会污染旧卡列表。
- */
-async function ensureLegacyAliasRow(
-  tx: ApiTransaction,
-  ctx: RunContext,
-  noteVersionId: string,
-  objectiveId: string,
-  objectiveDraft: {
-    objectiveStatement: string;
-    publicSummary: string;
-  },
-): Promise<void> {
-  const legacyCardId = randomUUID();
-  await tx.insert(learningCards).values({
-    id: legacyCardId,
-    noteVersionId,
-    workspaceId: ctx.workspaceId,
-    status: CardStatus.ARCHIVED,
-    // Plan 23 W1-06：显式 alias 角色——正式 consumer predicate 必须排除
-    // objective_fk_alias，仅旧 FK/历史 Run/Schedule 兼容读取（§21.5）。
-    compatibilityRole: "objective_fk_alias",
-    schemaJson: {
-      title: objectiveDraft.objectiveStatement.slice(0, 200),
-      summary: objectiveDraft.publicSummary.slice(0, 500),
-    },
-  }).onConflictDoNothing();
-  await tx.insert(cardKeyPoints).values({
-    id: objectiveId,
-    cardId: legacyCardId,
-    workspaceId: ctx.workspaceId,
-    ordinal: 1,
-    claim: objectiveDraft.objectiveStatement,
-    quoteText: objectiveDraft.publicSummary,
-    segmentRef: null,
-  }).onConflictDoNothing();
-}
-
 async function createOrUpdateObjectiveAndCard(
   tx: ApiTransaction,
   ctx: RunContext,
@@ -1027,11 +982,6 @@ async function createOrUpdateObjectiveAndCard(
         publicPayloadHash,
         revealPayloadHash,
       });
-
-      // §29.4：新 V2 Objective 必须同时落一个隐藏 legacy card_key_points alias，
-      // 否则 learning_runs.key_point_id / review_schedules.keyPointId 等既有 FK
-      // 与查询无法指向新目标；隐藏 legacy card 用 archived 避免混入旧卡列表。
-      await ensureLegacyAliasRow(tx, ctx, noteVersionId, objectiveId, objectiveDraft);
 
       // Plan 23 W2-07：激活事务内绑定已 seal 的来源（note 血缘）。
       // 同一事务失败即整体回滚 → 0 canonical Objective/Card 或 0 无来源绑定；

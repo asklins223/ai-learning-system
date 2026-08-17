@@ -493,35 +493,6 @@ export const learningTargetSnapshotsV2 = pgTable(
   }),
 );
 
-// ─── §16.4 Legacy Target Snapshot Attachment V2 ──────────────────────────
-
-export const legacyTargetSnapshotAttachmentsV2 = pgTable(
-  "legacy_target_snapshot_attachments_v2",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull(),
-    attachmentId: uuid("attachment_id").notNull(),
-    runId: uuid("run_id").notNull(),
-    keyPointId: uuid("key_point_id").notNull(),
-    semanticTargetFingerprint: text("semantic_target_fingerprint").notNull(),
-    targetRevisionHash: text("target_revision_hash").notNull(),
-    legacyClaim: text("legacy_claim").notNull(),
-    legacyQuoteText: text("legacy_quote_text").notNull(),
-    evidenceContentHashes: text("evidence_content_hashes").array().notNull().default(sql`'{}'::text[]`),
-    snapshotHash: text("snapshot_hash").notNull(),
-    // 0138/0139 §21.3 additive sidecar 字段
-    mappedObjectiveId: uuid("mapped_objective_id"),
-    sourceRefs: jsonb("source_refs").notNull().default(sql`'[]'::jsonb`),
-    integrityClass: text("integrity_class").notNull().default("unverifiable"),
-    backfilledAt: timestamp("backfilled_at", { withTimezone: true }),
-    frozenAt: timestamp("frozen_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    attachmentIdUnique: uniqueIndex("ltsa_v2_attachment_id_idx").on(t.workspaceId, t.attachmentId),
-    wsRunIdx: index("ltsa_v2_ws_run_idx").on(t.workspaceId, t.runId, t.keyPointId),
-  }),
-);
-
 // ─── §12.2 Candidate Evidence Binding Plan V2 ─────────────────────────────
 
 export const candidateEvidenceBindingPlansV2 = pgTable(

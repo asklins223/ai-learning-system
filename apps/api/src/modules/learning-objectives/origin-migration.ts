@@ -4,7 +4,7 @@
  * 分类优先级（§21.3，禁止相似文本猜测）：
  *   1. learning_cards_v2.note_version_id（激活时已 seal 的来源）；
  *   2. Objective evidence binding → evidence snapshot → noteId；
- *   3. legacy alias（kp.id = objectiveId）父 legacy card 的 note_version_id；
+ *   3. （0176 退役后移除）legacy alias 来源；
  *   4. 以上均不可证明 → missing（W2-06 修复队列）或 ambiguous（多来源冲突）。
  *
  * 只把可证明的 Note/Source lineage 升级；dry-run 不落库；executor 幂等可重跑
@@ -19,14 +19,12 @@ import {
   learningObjectiveEvidenceBindingsV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { evidenceSnapshotsV2 } from "../../db/schema/card-generation-v2.ts";
-import { cardKeyPoints, learningCards } from "../../db/schema/card.ts";
 import { noteVersions } from "../../db/schema/note.ts";
 import { createObjectiveOrigin } from "./origin-service.ts";
 
 export type OriginBackfillSource =
   | "card_note_version"
   | "evidence_binding"
-  | "legacy_alias"
   | null;
 
 export interface OriginBackfillPlanItem {
@@ -161,40 +159,8 @@ export async function planObjectiveOriginBackfill(
       continue;
     }
 
-    // 3. legacy alias 父卡 note_version_id（优先级 3；只升级可证明 lineage）
-    const aliasRows = await tx
-      .select({ legacyCardId: cardKeyPoints.cardId })
-      .from(cardKeyPoints)
-      .where(and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        eq(cardKeyPoints.id, objective.objectiveId),
-      ))
-      .limit(1);
-    if (aliasRows[0]) {
-      const legacyCardRows = await tx
-        .select({ noteVersionId: learningCards.noteVersionId })
-        .from(learningCards)
-        .where(and(
-          eq(learningCards.id, aliasRows[0].legacyCardId),
-          eq(learningCards.workspaceId, workspaceId),
-        ))
-        .limit(1);
-      const legacyNoteVersionId = legacyCardRows[0]?.noteVersionId ?? null;
-      if (legacyNoteVersionId) {
-        const noteId = await resolveNoteVersion(tx, workspaceId, legacyNoteVersionId);
-        if (noteId) {
-          items.push({
-            ...base,
-            category: "migratable",
-            source: "legacy_alias",
-            noteId,
-            noteVersionId: legacyNoteVersionId,
-            reason: "legacy alias 父卡 note_version 可证明",
-          });
-          continue;
-        }
-      }
-    }
+    // 3.（0176 后移除）legacy alias 父卡 note_version_id 来源——V1 卡已退役，
+    //    无 alias 行可证明，直接落入 missing 队列。
 
     // 4. 无法证明 → missing（ambiguous 预留给多来源冲突；当前实现单来源判定）
     items.push({

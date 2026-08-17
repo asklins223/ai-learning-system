@@ -1233,6 +1233,13 @@
       "when": 1786729104423,
       "tag": "0175_learning_objective_content_topology",
       "breakpoints": true
+    },
+    {
+      "idx": 176,
+      "version": "7",
+      "when": 1786729104424,
+      "tag": "0176_retire_legacy_card_compat",
+      "breakpoints": true
     }
   ]
 }

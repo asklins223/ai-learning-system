@@ -3,19 +3,19 @@
  *
  * - history：只返回 revision/lifecycle/可信公开摘要（publicSummary/conceptLabel），
  *   不泄漏 private assessment/rubric（§13.2）。
- * - route resolver：旧 card/keyPoint URL 确定性解析——mapped / gone / ambiguous /
- *   forbidden（§21.4），绝不返回模糊 V2 404；解析结果幂等落 legacy_route_mappings_v2。
+ * - route resolver：旧 card/keyPoint URL 确定性解析——mapped / gone / forbidden
+ *   （§21.4；V1 卡 0176 退役后无 ambiguous），绝不返回模糊 V2 404；解析结果幂等落
+ *   legacy_route_mappings_v2。
  */
-import { and, eq, desc, asc, lt, sql } from "drizzle-orm";
+import { and, eq, desc, lt, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   learningObjectiveRevisionsV2,
   legacyRouteMappingsV2,
   learningCardsV2,
+  learningObjectivesV2,
 } from "../../db/schema/card-generation-v2.ts";
-import { cardKeyPoints, learningCards } from "../../db/schema/card.ts";
-import { learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
 import type { ObjectiveRevisionClassV2 } from "@ailearn/shared";
 
 // ─── W2-19: history ──────────────────────────────────────────────────────
@@ -114,11 +114,10 @@ export interface LegacyRouteResolutionV3 {
 }
 
 /**
- * 解析旧 URL（§21.4）：
+ * 解析旧 URL（§21.4，V1 卡退役后简化版）：
  * - keyPointId：本身就是 objectiveId（alias 规则）→ mapped；
- * - legacy card：恰好 1 个 key point 且其为 objectiveId → mapped；
- *   多个 key point → ambiguous（迁移选择页）；无 key point → gone；
- * - alias（compatibility_role='objective_fk_alias'）→ forbidden（不进入正式面）。
+ * - legacy card：V1 卡已退役 → 仅 V2 card 可 mapped，其余 gone；
+ *   （alias/hidden 兼容行已随 0176 清空，不再需要 forbidden 分支）
  * 结果幂等落 legacy_route_mappings_v2（ON CONFLICT DO NOTHING 后读取既有行）。
  */
 export async function resolveLegacyRouteV3(
@@ -130,7 +129,7 @@ export async function resolveLegacyRouteV3(
   let resolution: LegacyRouteResolutionV3;
 
   if (legacyKind === "key_point") {
-    // alias 或真实 key point
+    // keyPointId 即 objectiveId（alias 规则）
     const objectiveRows = await tx
       .select({ objectiveId: learningObjectivesV2.objectiveId })
       .from(learningObjectivesV2)
@@ -177,94 +176,15 @@ export async function resolveLegacyRouteV3(
         cardId: legacyId,
         note: "V2 card → objective",
       };
-      // 幂等落 mapping（供统计/审计；既有行不覆盖）
-      await tx
-        .insert(legacyRouteMappingsV2)
-        .values({
-          workspaceId,
-          mappingId: randomUUID(),
-          legacyKind,
-          legacyId,
-          status: resolution.status,
-          objectiveId: resolution.objectiveId,
-          cardId: resolution.cardId,
-          resolvedAt: new Date(),
-          note: resolution.note,
-        })
-        .onConflictDoNothing();
-      return resolution;
-    }
-    // legacy card
-    const kpRows = await tx
-      .select({
-        kpId: cardKeyPoints.id,
-        legacyCardStatus: learningCards.status,
-        compatibilityRole: learningCards.compatibilityRole,
-      })
-      .from(cardKeyPoints)
-      .innerJoin(learningCards, eq(cardKeyPoints.cardId, learningCards.id))
-      .where(and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        eq(cardKeyPoints.cardId, legacyId),
-      ))
-      .orderBy(asc(cardKeyPoints.ordinal));
-    if (kpRows.length === 0) {
+    } else {
+      // V1 卡已退役（0176 清空）：旧 card 深链一律 gone
       resolution = {
         legacyKind,
         legacyId,
         status: "gone",
         objectiveId: null,
         cardId: null,
-        note: "legacy card 无 key point",
-      };
-    } else if (
-      kpRows[0].compatibilityRole === "objective_fk_alias" ||
-      kpRows[0].compatibilityRole === "hidden_identity"
-    ) {
-      resolution = {
-        legacyKind,
-        legacyId,
-        status: "forbidden",
-        objectiveId: null,
-        cardId: null,
-        note: "alias 卡不进入正式产品面",
-      };
-    } else if (kpRows.length === 1) {
-      const objectiveRows = await tx
-        .select({ objectiveId: learningObjectivesV2.objectiveId })
-        .from(learningObjectivesV2)
-        .where(and(
-          eq(learningObjectivesV2.workspaceId, workspaceId),
-          eq(learningObjectivesV2.objectiveId, kpRows[0].kpId),
-        ))
-        .limit(1);
-      if (objectiveRows[0]) {
-        resolution = {
-          legacyKind,
-          legacyId,
-          status: "mapped",
-          objectiveId: objectiveRows[0].objectiveId,
-          cardId: null,
-          note: "单 key point → objective",
-        };
-      } else {
-        resolution = {
-          legacyKind,
-          legacyId,
-          status: "gone",
-          objectiveId: null,
-          cardId: null,
-          note: "legacy card 的 key point 无对应 Objective",
-        };
-      }
-    } else {
-      resolution = {
-        legacyKind,
-        legacyId,
-        status: "ambiguous",
-        objectiveId: null,
-        cardId: null,
-        note: "多 key point legacy card：迁移选择页",
+        note: "legacy card 已退役",
       };
     }
   }

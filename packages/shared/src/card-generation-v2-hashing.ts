@@ -24,7 +24,6 @@ import type {
   ObjectiveEquivalenceReportV2,
   ObjectiveEquivalenceBindingV2,
 } from "./learning-card-v2-contracts.ts";
-import type { LearningTargetSnapshotV2 } from "./learning-target-v2-contracts.ts";
 
 /** §15.6 semanticTargetFingerprint */
 export function computeSemanticTargetFingerprintV2(input: {
