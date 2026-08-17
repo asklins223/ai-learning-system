@@ -41,14 +41,10 @@ test("RL-01: Home/Cards/Graph 的 active Objective 数量完全一致", async ()
   const [dashboard, listPage, topology, objectiveCount] = await withWorkspaceTransaction(
     ctx,
     async (tx) => {
-      const [d, l, t, c] = await Promise.all([
+      const [d, l, t] = await Promise.all([
         buildLearningDashboardV2(tx, ctx),
         listObjectiveSurfacesV3(tx, ctx, { limit: 100 }),
         buildTopologySnapshotV3(tx, ctx),
-        tx
-          .select({ n: 1 })
-          .from(learningObjectivesV2)
-          .where(eq(learningObjectivesV2.workspaceId, PURE_V2_WORKSPACE)),
       ]);
       const countRows = await tx
         .select({ n: sql<number>`count(*)::int` })
@@ -57,7 +53,6 @@ test("RL-01: Home/Cards/Graph 的 active Objective 数量完全一致", async ()
           eq(learningObjectivesV2.workspaceId, PURE_V2_WORKSPACE),
           eq(learningObjectivesV2.lifecycle, "active"),
         ));
-      void c;
       return [d, l, t, Number(countRows[0].n)] as const;
     },
   );
@@ -66,7 +61,9 @@ test("RL-01: Home/Cards/Graph 的 active Objective 数量完全一致", async ()
   const listTotal = listPage.total;
   // Graph 含 archived/superseded 历史节点（§36.5 可选历史层）——parity 只对账 active
   const graphActiveNodes = topology.nodes.filter(
-    (n) => n.nodeRef.kind === "objective" && n.lifecycle === "active",
+    (n) =>
+      n.nodeRef.kind === "objective" &&
+      (n as { lifecycle?: string }).lifecycle === "active",
   ).length;
   assert.equal(
     dashboardCount,
