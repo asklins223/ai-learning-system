@@ -25,6 +25,8 @@ coverage/
 /tests/e2e/test-results/
 /apps/web/playwright-report/
 /apps/web/test-results/
+/apps/web/outputs/
+.dsh-vision-router/
 /project-archive/
 /product-design-assets/
 /e2e-artifacts/
@@ -32,6 +34,8 @@ coverage/
 /reference-projects/learning-companion/repos/
 scripts/*.py
 scripts/*.js
+scripts/*.mjs
+apps/web/preview-ui.mjs
 
 # Documentation artifacts (keep source, ignore generated)
 *.pdf

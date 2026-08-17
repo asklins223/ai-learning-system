@@ -485,7 +485,11 @@ export function CandidateReview({
                       </p>
                     </div>
                     <button type="button" onClick={() => finishRecheck(candidate.candidateId)}>
-                      {recheckReason === "redesign" ? "退出状态预览" : "标记本地检查完成"}
+                      {recheckReason === "redesign"
+                        ? "退出状态预览"
+                        : backend
+                          ? "刷新检查状态"
+                          : "标记本地检查完成"}
                     </button>
                   </div>
                 )}

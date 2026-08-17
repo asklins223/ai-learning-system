@@ -28,6 +28,19 @@ const ORIGIN_LABELS: Record<string, string> = {
   onboarding: "首次引导",
 };
 
+/** gapFacets（intent 标识）→ 中文可读文案（结果页"仍需巩固"展示用）。 */
+const INTENT_LABELS: Record<string, string> = {
+  recall: "回忆",
+  paraphrase: "转述",
+  explain: "解释",
+  example: "举例",
+  apply: "应用",
+  boundary: "边界",
+  procedure: "步骤",
+  relate: "关联",
+  repair: "补强",
+};
+
 const PHASE_LABELS: Record<string, string> = {
   preparing: "正在准备",
   active: "开始作答",
@@ -54,6 +67,17 @@ export function returnLabel(run: WireRunV1): string {
     case "star_map": return "返回理解星图";
     case "today": return "返回今日学习";
     case "onboarding": return "返回学习首页";
+  }
+}
+
+/** 将 ISO 日期字符串格式化为中文可读日期（如 "8月20日"）。 */
+function formatDueDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return `${d.getMonth() + 1}月${d.getDate()}日`;
+  } catch {
+    return iso;
   }
 }
 
@@ -106,6 +130,9 @@ export function adaptRunToUi(run: WireRunV1): UiRunV1 {
           })),
           trustCeiling: task.activeVariant.templateTrustCeiling,
           estimatedActiveSeconds: task.activeVariant.estimatedActiveSeconds,
+          // 2026-08-16（实机验证修复）：hint 透传——hook 在 hint_revealed 后
+          // 把提示文本合并进 wire task（TaskChrome 据此渲染提示卡）。
+          hint: (task as { hint?: string }).hint,
           status: task.status,
           revision: task.revision,
         }
@@ -149,14 +176,34 @@ export function adaptRunToUi(run: WireRunV1): UiRunV1 {
       ? {
           outcome: run.result.outcome,
           eyebrow: "本轮结果",
-          title: run.result.outcome === "demonstrated" ? "证明了这项理解" : run.result.outcome === "partial" ? "证明了其中一部分" : run.result.outcome === "declared_unable" ? "已记录：本次还不会" : run.result.outcome,
-          summary: run.result.gapFacets.length > 0 ? `仍需巩固：${run.result.gapFacets.join("、")}` : "",
+          // 2026-08-16（实机验证修复）：兜底不再是 outcome 原值——此前
+          // practice_completed/skipped 等会直接把英文状态码当标题渲染。
+          title: run.result.outcome === "demonstrated"
+            ? "证明了这项理解"
+            : run.result.outcome === "partial"
+              ? "证明了其中一部分"
+              : run.result.outcome === "needs_repair"
+                ? "这次没有完全证明"
+                : run.result.outcome === "not_assessable"
+                  ? "这次无法评估"
+                  : run.result.outcome === "declared_unable"
+                    ? "已记录：本次还不会"
+                    : run.result.outcome === "practice_completed"
+                      ? "本轮练习完成"
+                      : run.result.outcome === "skipped"
+                        ? "本轮已跳过"
+                        : run.result.outcome,
+          // 2026-08-16（实机验证修复）：gapFacets 是 intent 标识——映射为中文
+          // 可读文案（此前直接拼原始英文如 "explain"）。
+          summary: run.result.gapFacets.length > 0
+            ? `仍需巩固：${run.result.gapFacets.map((f) => INTENT_LABELS[f as keyof typeof INTENT_LABELS] ?? f).join("、")}`
+            : "",
           demonstratedFacets: run.result.demonstratedFacets,
           gapFacets: run.result.gapFacets,
           scheduleImpact: run.result.scheduleImpact.kind === "created"
-            ? { kind: "created", dueLabel: run.result.scheduleImpact.dueAt, explanation: "已安排下一次复习" }
+            ? { kind: "created", dueLabel: formatDueDate(run.result.scheduleImpact.dueAt), explanation: "已安排下一次复习" }
             : run.result.scheduleImpact.kind === "rescheduled"
-              ? { kind: "rescheduled", dueLabel: run.result.scheduleImpact.dueAt, explanation: "复习时间已更新" }
+              ? { kind: "rescheduled", dueLabel: formatDueDate(run.result.scheduleImpact.dueAt), explanation: "复习时间已更新" }
               : { kind: "none", explanation: "本次不改变复习安排" },
           nextStep: "返回后继续",
         }

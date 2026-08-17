@@ -387,6 +387,18 @@ export function useLearningRun(): LearningRunHook {
       });
       // F4：卸载守卫——禁止 setState-after-unmount。
       if (!mountedRef.current) return;
+      // 2026-08-16（实机验证修复）：hint_revealed 的提示文本此前被丢弃——
+      // 只 applySnapshot（run 状态不变）导致点"降为练习并查看"后页面毫无
+      // 反馈。把 hint.text 合并进 activeTask（TaskChrome 渲染提示卡）。
+      if (response.actionResult.kind === "hint_revealed" && response.actionResult.text) {
+        applySnapshot({
+          ...response.snapshot,
+          activeTask: response.snapshot.activeTask
+            ? { ...response.snapshot.activeTask, hint: response.actionResult.text }
+            : null,
+        } as never);
+        return;
+      }
       applySnapshot(response.snapshot);
     } catch (err) {
       // 409 stale：自动重读最新快照（CAS 冲突后让用户在新 revision 上重试）。

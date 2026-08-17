@@ -1,6 +1,23 @@
 import { Icon } from "@/components/ui/icons";
 import type { LearningRunPublicV1, LearningRunUiIntentV1 } from "../contracts";
 
+/** gapFacets / demonstratedFacets（intent 标识）→ 中文可读文案。 */
+const INTENT_LABELS: Record<string, string> = {
+  recall: "回忆",
+  paraphrase: "转述",
+  explain: "解释",
+  example: "举例",
+  apply: "应用",
+  boundary: "边界",
+  procedure: "步骤",
+  relate: "关联",
+  repair: "补强",
+};
+
+function facetLabel(facet: string): string {
+  return INTENT_LABELS[facet] ?? facet;
+}
+
 const RESULT_TONE = {
   demonstrated: "success",
   partial: "warning",
@@ -43,7 +60,7 @@ export function ResultView({ run, onIntent }: ResultViewProps) {
           <div>
             <h2>这次证明了什么</h2>
             {result.demonstratedFacets.length > 0 ? (
-              <ul>{result.demonstratedFacets.map((facet) => <li key={facet}>{facet}</li>)}</ul>
+              <ul>{result.demonstratedFacets.map((facet) => <li key={facet}>{facetLabel(facet)}</li>)}</ul>
             ) : (
               <p>本轮没有形成可确认的正式理解证据。</p>
             )}
@@ -55,7 +72,7 @@ export function ResultView({ run, onIntent }: ResultViewProps) {
           <div>
             <h2>还缺什么</h2>
             {result.gapFacets.length > 0 ? (
-              <ul>{result.gapFacets.map((facet) => <li key={facet}>{facet}</li>)}</ul>
+              <ul>{result.gapFacets.map((facet) => <li key={facet}>{facetLabel(facet)}</li>)}</ul>
             ) : (
               <p>本轮目标已经覆盖，不需要追加题目。</p>
             )}
@@ -86,9 +103,17 @@ export function ResultView({ run, onIntent }: ResultViewProps) {
         ) : null}
         {canRetryInput ? (
           <>
-            <button className="learning-run-button is-secondary" type="button" onClick={() => onIntent({ kind: "switch_variant", alternativeId: "text" })}>
-              换成两三句话
-            </button>
+            {(() => {
+              const textAlt = run.activeTask?.alternatives.find((a) => a.interactionKind === "text_response");
+              if (textAlt) {
+                return (
+                  <button className="learning-run-button is-secondary" type="button" onClick={() => onIntent({ kind: "switch_variant", alternativeId: textAlt.alternativeId })}>
+                    换成两三句话
+                  </button>
+                );
+              }
+              return null;
+            })()}
             <button className="learning-run-button is-primary" type="button" onClick={() => onIntent({ kind: "retry" })}>
               重新录制
               <Icon.Refresh aria-hidden="true" />

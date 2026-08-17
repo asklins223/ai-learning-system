@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760" role="img" aria-labelledby="title desc">
+  <title id="title">学习目标详情与三分钟旅程职责边界</title>
+  <desc id="desc">左侧为只读学习目标档案，右侧为真正可作答、提交和评估的三分钟旅程。</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="20" flood-color="#21342c" flood-opacity=".12"/></filter>
+    <style>
+      .title{font:700 30px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#252820}
+      .h1{font:700 25px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#252820}
+      .h2{font:650 17px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#2d312a}
+      .body{font:400 14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#686d64}
+      .small{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#70766d;letter-spacing:.4px}
+      .kicker{font:700 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;letter-spacing:2px;fill:#137158}
+      .button{font:650 14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#fff}
+      .run-kicker{font:700 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;letter-spacing:2px;fill:#72c2a5}
+      .run-title{font:700 25px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#f7f3e9}
+      .run-body{font:400 14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#c5d1ca}
+      .run-small{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#9fb2a8;letter-spacing:.4px}
+      .run-label{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#8fc6b1;letter-spacing:.4px}
+      .run-heading{font:650 17px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#f1f4ee}
+    </style>
+  </defs>
+  <rect width="1600" height="760" fill="#f1eee6"/>
+  <text x="70" y="65" class="kicker">CARD DETAIL ≠ LEARNING RUN</text>
+  <text x="70" y="105" class="title">一个负责看清目标，一个负责真正作答</text>
+  <text x="70" y="137" class="body">详情页没有输入、提交和判分；Run 独占草稿、Artifact、Assessment 与 Commit。</text>
+
+  <g transform="translate(70 182)" filter="url(#shadow)">
+    <rect width="600" height="500" rx="28" fill="#fffdf8" stroke="#ddd5c6"/>
+    <text x="32" y="40" class="kicker">LEARNING OBJECTIVE DETAIL</text>
+    <text x="32" y="79" class="h1">牛顿第二定律：物理量与单位</text>
+    <text x="32" y="107" class="body">掌握 F = ma 中三个物理量的含义与单位。</text>
+    <rect x="32" y="137" width="536" height="62" rx="16" fill="#eff6f2" stroke="#c6ddd2"/>
+    <text x="52" y="162" class="small">状态</text>
+    <text x="52" y="185" class="h2">等待首次可信验证</text>
+    <rect x="32" y="219" width="536" height="84" rx="16" fill="#f7f4ed" stroke="#e1dacd"/>
+    <text x="52" y="245" class="small">来源</text>
+    <text x="52" y="271" class="h2">力学基础笔记 · v12 · 来源当前</text>
+    <text x="52" y="291" class="body">查看笔记、证据与版本血缘</text>
+    <rect x="32" y="323" width="536" height="68" rx="16" fill="#faf6ed" stroke="#e6d5b9"/>
+    <text x="52" y="349" class="small">练习建议</text>
+    <text x="52" y="376" class="h2">开放回忆 · 预计 2 分钟</text>
+    <text x="32" y="433" class="body">查看参考内容会记录 Exposure，并影响本轮 Trust。</text>
+    <rect x="352" y="418" width="216" height="48" rx="16" fill="#116b51"/>
+    <text x="400" y="448" class="button">开始首次验证</text>
+    <text x="32" y="482" class="small">只读档案 · 来源 · 状态 · 历史 · 管理</text>
+  </g>
+
+  <g transform="translate(708 387)">
+    <path d="M0 0 H118" stroke="#157159" stroke-width="4" stroke-linecap="round"/>
+    <path d="M102 -12 L120 0 L102 12" fill="none" stroke="#157159" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="5" y="-18" class="small">typed action</text>
+    <text x="5" y="28" class="small">create/resume Run</text>
+  </g>
+
+  <g transform="translate(860 182)" filter="url(#shadow)">
+    <rect width="670" height="500" rx="28" fill="#17241f" stroke="#31463d"/>
+    <text x="32" y="40" class="run-kicker">THREE-MINUTE LEARNING RUN</text>
+    <text x="32" y="78" class="run-title">先不看答案，写出三个单位</text>
+    <text x="32" y="106" class="run-body">任务 1 / 2 · 开放回忆 · 正式验证候选</text>
+    <rect x="32" y="136" width="606" height="74" rx="18" fill="#22332c" stroke="#3d5a4e"/>
+    <text x="52" y="164" class="run-label">作答要求</text>
+    <text x="52" y="191" class="run-heading">分别写出 F、m、a 的单位，并说明判断依据。</text>
+    <rect x="32" y="232" width="606" height="120" rx="18" fill="#fbfaf5" stroke="#ddd5c6"/>
+    <text x="52" y="263" class="small">你的回答</text>
+    <text x="52" y="296" class="body">F 的单位是…</text>
+    <path d="M52 321 H614" stroke="#d7d1c6"/>
+    <rect x="32" y="371" width="186" height="40" rx="14" fill="#283c33" stroke="#5e7a6d"/>
+    <text x="76" y="397" class="button">换一种作答方式</text>
+    <rect x="438" y="371" width="200" height="40" rx="14" fill="#1a8060"/>
+    <text x="490" y="397" class="button">锁定并提交</text>
+    <text x="32" y="450" class="run-small">草稿保存 · Artifact lock · Assessment · Commit</text>
+    <text x="32" y="477" class="run-body">只有这里的提交可以改变理解状态并创建复习安排。</text>
+  </g>
+</svg>

@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120" role="img" aria-labelledby="title desc">
+  <title id="title">Learning Objective 系统四个核心页面视觉方向</title>
+  <desc id="desc">首页、学习目标库、学习目标详情和理解星图的浅色界面示意。</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#25342d" flood-opacity="0.10"/>
+    </filter>
+    <style>
+      .title{font:700 28px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#222620}
+      .kicker{font:700 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;letter-spacing:2px;fill:#137158}
+      .h1{font:700 25px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#242720}
+      .h2{font:650 18px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#242720}
+      .body{font:400 14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#63695f}
+      .small{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#797e75}
+      .strong{font:650 14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#30342d}
+      .button{font:650 13px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#fff}
+      .button-dark{font:650 13px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#185d49}
+      .graph-kicker{font:700 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;letter-spacing:2px;fill:#78c6aa}
+      .graph-title{font:700 25px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#f5f2e9}
+      .graph-body{font:400 14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#d1ded7}
+      .graph-source{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#d6e5ee}
+      .graph-note{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#d6e8df}
+      .graph-objective{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#f4dfb9}
+      .graph-objective-alt{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#d4eee4}
+      .graph-evidence{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;fill:#e6d7b8}
+    </style>
+  </defs>
+  <rect width="1600" height="1120" fill="#f1eee6"/>
+  <circle cx="1420" cy="80" r="260" fill="#e8ddc6" opacity=".45"/>
+  <circle cx="130" cy="1040" r="260" fill="#dce9e1" opacity=".55"/>
+  <text x="72" y="66" class="kicker">LEARNING OBJECTIVE SYSTEM · UI DIRECTION</text>
+  <text x="72" y="105" class="title">同一目标，在首页、卡库、详情和星图保持同一身份</text>
+  <text x="72" y="134" class="body">暖白工作台 · 深绿行动色 · 蓝色来源 · 琥珀色到期状态 · 不在详情页伪装正式作答</text>
+
+  <!-- Home -->
+  <g transform="translate(72 176)" filter="url(#shadow)">
+    <rect width="710" height="396" rx="28" fill="#fffdf8" stroke="#ddd5c6"/>
+    <text x="32" y="38" class="kicker">01 · TODAY</text>
+    <text x="32" y="70" class="h1">今天最值得推进的理解</text>
+    <rect x="32" y="94" width="646" height="70" rx="18" fill="#f5f1e8" stroke="#e3dccf"/>
+    <text x="54" y="122" class="small">学习概览</text>
+    <text x="54" y="148" class="strong">25 篇笔记</text>
+    <text x="190" y="148" class="strong">3 个学习目标</text>
+    <text x="353" y="148" class="strong">1 个待首次验证</text>
+    <text x="548" y="148" class="strong">0 个到期复习</text>
+    <rect x="32" y="184" width="646" height="162" rx="22" fill="#eef6f1" stroke="#bcd8ca"/>
+    <rect x="54" y="207" width="92" height="25" rx="12.5" fill="#d9ece3"/>
+    <text x="71" y="224" class="small" fill="#17664f">首次验证</text>
+    <text x="54" y="261" class="h2">牛顿第二定律：物理量与单位</text>
+    <text x="54" y="287" class="body">来源：力学基础笔记 · 当前版本</text>
+    <text x="54" y="316" class="small">用自己的话解释后，系统才会安排后续复习。</text>
+    <rect x="491" y="286" width="163" height="40" rx="14" fill="#116b51"/>
+    <text x="522" y="311" class="button">开始三分钟验证</text>
+    <text x="32" y="376" class="small">首页直接执行下一步；标题仍可进入目标详情。</text>
+  </g>
+
+  <!-- Library -->
+  <g transform="translate(818 176)" filter="url(#shadow)">
+    <rect width="710" height="396" rx="28" fill="#fffdf8" stroke="#ddd5c6"/>
+    <text x="32" y="38" class="kicker">02 · OBJECTIVE LIBRARY</text>
+    <text x="32" y="70" class="h1">学习目标库</text>
+    <rect x="32" y="92" width="646" height="44" rx="14" fill="#f7f4ed" stroke="#ddd6ca"/>
+    <text x="52" y="120" class="body">搜索概念、笔记或来源…</text>
+    <g transform="translate(32 154)">
+      <rect width="646" height="92" rx="18" fill="#fff" stroke="#ded8cc"/>
+      <circle cx="27" cy="28" r="10" fill="#e4ae54"/>
+      <text x="48" y="31" class="small">等待首次验证 · 5 小时前</text>
+      <text x="22" y="60" class="h2">牛顿第二定律：物理量与单位</text>
+      <text x="22" y="81" class="small">力学基础笔记 · 1 条主来源 · 来源当前</text>
+      <rect x="500" y="27" width="124" height="38" rx="13" fill="#116b51"/>
+      <text x="529" y="51" class="button">开始验证</text>
+    </g>
+    <g transform="translate(32 258)">
+      <rect width="646" height="92" rx="18" fill="#fff" stroke="#ded8cc"/>
+      <circle cx="27" cy="28" r="10" fill="#4b82b8"/>
+      <text x="48" y="31" class="small">来源已更新 · 昨天</text>
+      <text x="22" y="60" class="h2">共点力合成的取值边界</text>
+      <text x="22" y="81" class="small">力学基础笔记 · 封存版本 v12 · 可查看变化</text>
+      <rect x="500" y="27" width="124" height="38" rx="13" fill="#edf5f0" stroke="#86b7a4"/>
+      <text x="532" y="51" class="button-dark">查看目标</text>
+    </g>
+    <text x="32" y="376" class="small">列表不提前展示答案；来源和行动由同一个 Surface 返回。</text>
+  </g>
+
+  <!-- Detail -->
+  <g transform="translate(72 612)" filter="url(#shadow)">
+    <rect width="710" height="430" rx="28" fill="#fffdf8" stroke="#ddd5c6"/>
+    <text x="32" y="38" class="kicker">03 · OBJECTIVE DETAIL</text>
+    <text x="32" y="72" class="small">概念关系 · 来源当前 · 等待首次验证</text>
+    <text x="32" y="112" class="h1">牛顿第二定律：物理量与单位</text>
+    <text x="32" y="140" class="body">掌握 F = ma 中力、质量和加速度的物理含义与标准单位。</text>
+    <rect x="32" y="166" width="646" height="74" rx="18" fill="#f7f4ed" stroke="#e2dacb"/>
+    <text x="52" y="191" class="small">个人学习状态</text>
+    <text x="52" y="219" class="strong">还没有完成首次可信验证</text>
+    <rect x="32" y="258" width="311" height="89" rx="18" fill="#f6faf8" stroke="#c8ddd3"/>
+    <text x="52" y="284" class="small">来源与证据</text>
+    <text x="52" y="311" class="strong">力学基础笔记 · v12</text>
+    <text x="52" y="334" class="small">1 条主来源 · 2 条证据</text>
+    <rect x="367" y="258" width="311" height="89" rx="18" fill="#faf6ee" stroke="#e7d5b7"/>
+    <text x="387" y="284" class="small">建议练习方式</text>
+    <text x="387" y="311" class="strong">开放回忆 · 约 2 分钟</text>
+    <text x="387" y="334" class="small">正式任务会按当前状态选择</text>
+    <text x="32" y="389" class="button-dark">查看参考内容</text>
+    <rect x="472" y="366" width="206" height="44" rx="15" fill="#116b51"/>
+    <text x="519" y="394" class="button">开始首次验证</text>
+  </g>
+
+  <!-- Graph -->
+  <g transform="translate(818 612)" filter="url(#shadow)">
+    <rect width="710" height="430" rx="28" fill="#182520" stroke="#31463d"/>
+    <text x="32" y="38" class="graph-kicker">04 · UNDERSTANDING TOPOLOGY V3</text>
+    <text x="32" y="71" class="graph-title">笔记星座与学习目标</text>
+    <path d="M112 199 C184 162 230 156 302 194" fill="none" stroke="#5f8fae" stroke-width="2" opacity=".8"/>
+    <path d="M302 194 C390 142 434 164 495 219" fill="none" stroke="#6db092" stroke-width="2.5"/>
+    <path d="M302 194 C388 244 435 270 510 293" fill="none" stroke="#6db092" stroke-width="2.5"/>
+    <path d="M495 219 C545 205 576 203 617 232" fill="none" stroke="#ae8b51" stroke-width="1.5" stroke-dasharray="5 5"/>
+    <circle cx="112" cy="199" r="29" fill="#365f78" stroke="#78a8c4" stroke-width="3"/>
+    <text x="73" y="243" class="graph-source">来源资料</text>
+    <circle cx="302" cy="194" r="36" fill="#38584b" stroke="#72b093" stroke-width="3"/>
+    <text x="265" y="246" class="graph-note">力学笔记</text>
+    <circle cx="495" cy="219" r="27" fill="#c4862f" stroke="#f0c77c" stroke-width="3"/>
+    <text x="452" y="261" class="graph-objective">单位目标</text>
+    <circle cx="510" cy="293" r="24" fill="#2e745d" stroke="#79c4a8" stroke-width="3"/>
+    <text x="467" y="335" class="graph-objective-alt">边界目标</text>
+    <circle cx="617" cy="232" r="12" fill="#756340" stroke="#c9a96c"/>
+    <text x="585" y="262" class="graph-evidence">证据</text>
+    <rect x="32" y="357" width="646" height="48" rx="15" fill="#22342d" stroke="#3b574b"/>
+    <text x="52" y="386" class="graph-body">Card 不再单独成星；Objective 是唯一知识节点，个人状态只是覆盖层。</text>
+  </g>
+</svg>

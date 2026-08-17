@@ -16,6 +16,12 @@ type VoiceTeachbackTaskProps = {
   onDraftChange?: (draft: LearningTaskDraftV1) => void;
 };
 
+/** 从 alternatives 中找到文字变体的 alternativeId；找不到时返回 null。 */
+function findTextAlternativeId(task: LearningTaskPublicV1): string | null {
+  const textAlt = task.alternatives.find((a) => a.interactionKind === "text_response");
+  return textAlt?.alternativeId ?? null;
+}
+
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   const candidates = [
@@ -245,10 +251,21 @@ export function VoiceTeachbackTask({ task, onIntent, draft, onDraftChange }: Voi
         </section>
         <div className="learning-run-response__submit is-split">
           <button className="learning-run-button is-secondary" type="button" onClick={() => setPhase("idle")}>重新检测</button>
-          <button className="learning-run-button is-primary" type="button" onClick={() => onIntent({ kind: "switch_variant", alternativeId: "text" })}>
-            换成两三句话
-            <Icon.Arrow aria-hidden="true" />
-          </button>
+          {(() => {
+            const textAltId = findTextAlternativeId(task);
+            if (textAltId) {
+              return (
+                <button className="learning-run-button is-primary" type="button" onClick={() => onIntent({ kind: "switch_variant", alternativeId: textAltId })}>
+                  换成两三句话
+                  <Icon.Arrow aria-hidden="true" />
+                </button>
+              );
+            }
+            // 没有可用的文字变体：提示用户当前无法切换回文字
+            return (
+              <span className="learning-run-mic-note" role="alert">当前无法切换回文字模式，可重试检测或先结束本轮。</span>
+            );
+          })()}
         </div>
       </div>
     );
@@ -339,13 +356,21 @@ export function VoiceTeachbackTask({ task, onIntent, draft, onDraftChange }: Voi
           <span className="learning-run-mic-note">麦克风只在你点击后开启</span>
         ) : null}
       </div>
-      <button
-        className="learning-run-text-fallback"
-        type="button"
-        onClick={() => onIntent({ kind: "switch_variant", alternativeId: "text" })}
-      >
-        麦克风不可用？改用文字
-      </button>
+      {(() => {
+        const textAltId = findTextAlternativeId(task);
+        if (textAltId) {
+          return (
+            <button
+              className="learning-run-text-fallback"
+              type="button"
+              onClick={() => onIntent({ kind: "switch_variant", alternativeId: textAltId })}
+            >
+              麦克风不可用？改用文字
+            </button>
+          );
+        }
+        return null;
+      })()}
     </div>
   );
 }

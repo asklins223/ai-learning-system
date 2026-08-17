@@ -173,7 +173,12 @@ function buildCreateV2Request(
   const generationRaw = params.get("generation");
   const returnTo = safePath(params.get("returnTo")) ?? "/";
   const dayBucket = new Date().toISOString().slice(0, 10);
-  const idempotencyKey = `lr-create-v2:${origin ?? "x"}:${objectiveId ?? cardId ?? scheduleId ?? "x"}:${dayBucket}`.slice(0, 200);
+  // 2026-08-16（实机验证修复）：V2 幂等键必须带随机后缀——V1 的"按天分桶"
+  // 语义（同一天重复进入复用同一 Run）对 V2 不成立：用户点"开始首次验证"
+  // 期望的是新旅程，复用同日旧 run（可能已"本轮已跳过"/completed）会让
+  // 按钮完全失效。随机后缀 + 页面级 useMemo 缓存：每次进入 new 页 = 新 run，
+  // 同页双击仍命中同一 key（幂等防重不丢）。
+  const idempotencyKey = `lr-create-v2:${origin ?? "x"}:${objectiveId ?? cardId ?? scheduleId ?? "x"}:${dayBucket}:${globalThis.crypto.randomUUID()}`.slice(0, 200);
   const goalParam = params.get("goal");
   const goal = goalParam === "repair" || goalParam === "clarify" || goalParam === "transfer"
     ? goalParam

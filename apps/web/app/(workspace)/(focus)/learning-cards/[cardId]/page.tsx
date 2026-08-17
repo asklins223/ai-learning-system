@@ -227,7 +227,11 @@ export default function LearningCardV2DetailPage() {
         return;
       }
       setNoticeTone("info");
-      setNotice(intent === "open_schedule" ? "首次验证安排已在上方提醒区显示。" : "该操作暂未接线，请从学习卡库重新进入。");
+      setNotice(
+        intent === "open_schedule"
+          ? "复习已安排，可在“今日学习”或“复习”页按时开始。"
+          : "该操作暂未接线，请从学习卡库重新进入。",
+      );
     },
     [router],
   );
