@@ -29,9 +29,9 @@ function actionHref(action: LearningObjectivePrimaryActionV3, returnTo: string):
   switch (action.kind) {
     case "create_run": {
       const params = new URLSearchParams({
-        origin: "card",
+        origin: "card_v2",
         cardId: action.cardId ?? action.objectiveId,
-        keyPointId: action.objectiveId,
+        objectiveId: action.objectiveId,
         goal: action.goal,
         returnTo,
       });
@@ -41,9 +41,9 @@ function actionHref(action: LearningObjectivePrimaryActionV3, returnTo: string):
       return "/learning-runs/" + action.runId + "?returnTo=" + encodeURIComponent(returnTo);
     case "create_review_run": {
       const params = new URLSearchParams({
-        origin: "review",
+        origin: "review_v2",
         scheduleId: action.scheduleId,
-        keyPointId: action.objectiveId,
+        objectiveId: action.objectiveId,
         generation: String(action.generation),
         returnTo,
       });

@@ -12,6 +12,7 @@ import type { ApiTransaction } from "../../db/client.ts";
 import {
   learningObjectiveRevisionsV2,
   legacyRouteMappingsV2,
+  learningCardsV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { cardKeyPoints, learningCards } from "../../db/schema/card.ts";
 import { learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
@@ -158,6 +159,41 @@ export async function resolveLegacyRouteV3(
       };
     }
   } else {
+    // V2 card（Plan 23 FE-19：详情页经 resolver 找 objective，避免 V2 404）
+    const v2CardRows = await tx
+      .select({ objectiveId: learningCardsV2.objectiveId })
+      .from(learningCardsV2)
+      .where(and(
+        eq(learningCardsV2.workspaceId, workspaceId),
+        eq(learningCardsV2.cardId, legacyId),
+      ))
+      .limit(1);
+    if (v2CardRows[0]) {
+      resolution = {
+        legacyKind,
+        legacyId,
+        status: "mapped",
+        objectiveId: v2CardRows[0].objectiveId,
+        cardId: legacyId,
+        note: "V2 card → objective",
+      };
+      // 幂等落 mapping（供统计/审计；既有行不覆盖）
+      await tx
+        .insert(legacyRouteMappingsV2)
+        .values({
+          workspaceId,
+          mappingId: randomUUID(),
+          legacyKind,
+          legacyId,
+          status: resolution.status,
+          objectiveId: resolution.objectiveId,
+          cardId: resolution.cardId,
+          resolvedAt: new Date(),
+          note: resolution.note,
+        })
+        .onConflictDoNothing();
+      return resolution;
+    }
     // legacy card
     const kpRows = await tx
       .select({
