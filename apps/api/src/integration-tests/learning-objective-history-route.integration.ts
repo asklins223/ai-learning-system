@@ -17,7 +17,8 @@ import {
   learningObjectivesV2,
   legacyRouteMappingsV2,
 } from "../db/schema/card-generation-v2.ts";
-import { cardKeyPoints } from "../db/schema/card.ts";
+
+
 
 const FIXTURE_WORKSPACE = "4f825f38-1a65-492a-8dec-c82868e6ea0f";
 const SYSTEM_USER = "00000000-0000-0000-0000-000000000000";
@@ -91,41 +92,31 @@ test("W2-20: key_point=objectiveId → mapped；未知 key point → gone", asyn
   assert.equal(gone.status, "gone");
 });
 
-test("W2-20: legacy alias 父卡 → mapped；解析幂等落 mapping", async () => {
-  const aliasCard = await withWorkspaceTransaction(
+test("W2-20: V2 card → mapped（解析幂等落 mapping）；legacy 卡已退役 → gone", async () => {
+  // 0176 后：V1 卡退役清空，V2 card 是唯一可 mapped 的 card 类型
+  const v2CardId = await withWorkspaceTransaction(
     { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
     async (tx) => {
-      // kp.id 命中 objective_id（alias 规则）
-      const objectiveRows = await tx
-        .select({ objectiveId: learningObjectivesV2.objectiveId })
-        .from(learningObjectivesV2)
-        .where(eq(learningObjectivesV2.workspaceId, FIXTURE_WORKSPACE))
-        .limit(50);
-      const objectiveIds = objectiveRows.map((r) => r.objectiveId);
-      if (objectiveIds.length === 0) return null;
-      const { inArray } = await import("drizzle-orm");
-      const kpRows = await tx
-        .select({ cardId: cardKeyPoints.cardId })
-        .from(cardKeyPoints)
+      const { learningCardsV2 } = await import("../db/schema/card-generation-v2.ts");
+      const rows = await tx
+        .select({ cardId: learningCardsV2.cardId, objectiveId: learningCardsV2.objectiveId })
+        .from(learningCardsV2)
         .where(and(
-          eq(cardKeyPoints.workspaceId, FIXTURE_WORKSPACE),
-          inArray(cardKeyPoints.id, objectiveIds),
+          eq(learningCardsV2.workspaceId, FIXTURE_WORKSPACE),
+          eq(learningCardsV2.lifecycle, "active"),
         ))
         .limit(1);
-      return kpRows[0]?.cardId ?? null;
+      return rows[0] ?? null;
     },
   );
-  if (!aliasCard) {
-    // fixture 无 alias 父卡数据时跳过（早期测试卡）
-    console.log("skip alias card case: fixture 无 alias 父卡");
-    return;
-  }
+  assert.ok(v2CardId, "fixture 必须有 active V2 card");
+
   const resolution = await withWorkspaceTransaction(
     { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
-    (tx) => resolveLegacyRouteV3(tx, FIXTURE_WORKSPACE, { legacyKind: "card", legacyId: aliasCard }),
+    (tx) => resolveLegacyRouteV3(tx, FIXTURE_WORKSPACE, { legacyKind: "card", legacyId: v2CardId!.cardId }),
   );
   assert.equal(resolution.status, "mapped");
-  assert.ok(resolution.objectiveId !== null);
+  assert.equal(resolution.objectiveId, v2CardId!.objectiveId);
 
   // mapping 已落库
   const rows = await withWorkspaceTransaction(
@@ -137,9 +128,16 @@ test("W2-20: legacy alias 父卡 → mapped；解析幂等落 mapping", async ()
         .where(and(
           eq(legacyRouteMappingsV2.workspaceId, FIXTURE_WORKSPACE),
           eq(legacyRouteMappingsV2.legacyKind, "card"),
-          eq(legacyRouteMappingsV2.legacyId, aliasCard),
+          eq(legacyRouteMappingsV2.legacyId, v2CardId!.cardId),
         )),
   );
   assert.ok(rows.length >= 1);
   assert.equal(rows[0].status, "mapped");
+
+  // 未知 legacy card → gone（V1 已退役）
+  const gone = await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) => resolveLegacyRouteV3(tx, FIXTURE_WORKSPACE, { legacyKind: "card", legacyId: randomUUID() }),
+  );
+  assert.equal(gone.status, "gone");
 });
