@@ -79,6 +79,20 @@ V2 active>0 / alias>0 / schedules>0 / runs>0），当前全绿。
 | W0-09 capability 空壳 | 完成 | capability-bundle.ts 新增 learning_objective_system_v3（OFF；默认无行为变化） |
 | W0-10 基线报告 | 完成 | 本文档 |
 
+## 6. 后续演进记录（2026-08-17）
+
+- **W0-02 audit 模块退役**：正式消费者全部完成 Objective 切流后，并行实施
+  （commit 3c9723f）按 RL-17 删除了 legacy-consumer-audit.ts 及
+  legacy-read-adapter / migration-service / shutdown-rc / shadow-cutover 等
+  迁移期兼容层。audit gate 的「dual 不是 release gate」问题以「整层退役」终结；
+  跨面一致性改由 RL-01/02 parity 集成测试（learning-objective-parity.integration.ts）
+  执行：Dashboard.activeObjectives = Cards list total = Graph active 节点数 =
+  objectives 表 active 计数。
+- **列表默认 cutoff**：listObjectiveSurfacesV3 未指定 lifecycle 时只列 active
+  （与 Dashboard 同一 eligibility cutoff；parity 测试暴露并修复）。
+- 本报告 §1/§2 基线数据与迁移前快照（outputs/plan23-w0-inventory-baseline.json）
+  仍然有效；后续执行以 commit 历史与集成测试为准。
+
 **Gate G0 结论**：W0-03、W0-05、W0-06 已进入可执行脚本与断言；W0-08 复验
 挂到 RL-04（W2 迁移后）。G0 视为通过，允许进入 W1 写入类任务。
 
