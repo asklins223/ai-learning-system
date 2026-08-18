@@ -40,10 +40,6 @@ import {
   learningTasks,
 } from "../../db/schema/learning-runs.ts";
 import {
-  cardKeyPoints,
-  learningCards,
-} from "../../db/schema/card.ts";
-import {
   evidenceEligibilityStatesV2,
   learningObjectivesV2,
 } from "../../db/schema/card-generation-v2.ts";
@@ -164,282 +160,6 @@ async function loadRun(tx: ApiTransaction, scope: RunScope, runId: string, forUp
   return row;
 }
 
-// ─── createRun（PREPARE：origin 解析 → 授权 → 确定性规划 → 原子写入）────
-
-async function resolveOriginTarget(
-  tx: ApiTransaction,
-  scope: RunScope,
-  request: CreateLearningRunRequestV1,
-): Promise<{
-  keyPointId: string;
-  fingerprint: string;
-  claim: string;
-  evidenceContentHashes: string[];
-  quote?: string;
-  sandboxNamespaceId?: string;
-  schedulingAuthorization: SchedulingAuthorizationV1;
-  returnTarget: LearningRunPublicV1["returnTarget"];
-}> {
-  const origin = request.origin;
-
-  if (origin.kind === "star_map") {
-    // P7：星图行动面已接入 Projection V2——校验基线 checkpoint（解析失败、
-    // 作用域不符或落后于最新投影 → 409 stale，禁止基于陈旧图启动 Run）。
-    const { parseCheckpointToken, watermarkBehind } = await import("../understanding/projection-checkpoint.ts");
-    const baseline = parseCheckpointToken(origin.baselineCheckpoint.token);
-    if (!baseline
-      || baseline.workspaceId !== scope.workspaceId
-      || baseline.userId !== scope.userId) {
-      throw contextStale("投影基线 checkpoint 无效或作用域不符");
-    }
-    const { understandingProjectionCheckpoints } = await import("../../db/schema/understanding-projection.ts");
-    const latestRows = await tx
-      .select({
-        canonical: understandingProjectionCheckpoints.lastCanonicalEventId,
-        practice: understandingProjectionCheckpoints.lastPracticeEventId,
-        capturedAt: understandingProjectionCheckpoints.capturedAt,
-      })
-      .from(understandingProjectionCheckpoints)
-      .where(and(
-        eq(understandingProjectionCheckpoints.workspaceId, scope.workspaceId),
-        eq(understandingProjectionCheckpoints.userId, scope.userId),
-      ))
-      .orderBy(desc(understandingProjectionCheckpoints.capturedAt))
-      .limit(1);
-    const latest = latestRows[0]
-      ? {
-          workspaceId: scope.workspaceId,
-          userId: scope.userId,
-          lastCanonicalEventId: latestRows[0].canonical,
-          lastPracticeEventId: latestRows[0].practice,
-          capturedAt: latestRows[0].capturedAt.toISOString(),
-        }
-      : null;
-    if (watermarkBehind(baseline, latest)) {
-      throw contextStale("投影基线已过期（星图有新的变化）");
-    }
-    const canonical = await fetchCanonicalTarget(tx, scope, origin.keyPointId);
-    // star_map 从行动面启动：无 pending review schedule 时 create_initial
-    // （与 card 入口同一授权规则）；有 pending 则 consume_pending。
-    const schedRows = await tx
-      .select({ id: reviewSchedules.id, generation: reviewSchedules.generation, status: reviewSchedules.status })
-      .from(reviewSchedules)
-      .where(and(
-        eq(reviewSchedules.keyPointId, origin.keyPointId),
-        eq(reviewSchedules.workspaceId, scope.workspaceId),
-        eq(reviewSchedules.userId, scope.userId),
-        eq(reviewSchedules.status, "pending"),
-      ))
-      .orderBy(desc(reviewSchedules.generation))
-      .limit(1);
-    const schedulingAuthorization: SchedulingAuthorizationV1 = schedRows[0]
-      ? {
-          kind: "consume_pending",
-          scheduleId: schedRows[0].id,
-          scheduleGeneration: schedRows[0].generation,
-          keyPointId: origin.keyPointId,
-          targetFingerprint: canonical.fingerprint,
-          dueAt: new Date().toISOString(),
-          schedulerPolicyId: "review-schedule-v1",
-        }
-      : {
-          kind: "create_initial",
-          keyPointId: origin.keyPointId,
-          targetFingerprint: canonical.fingerprint,
-          schedulerPolicyId: "review-schedule-v1",
-        };
-    return {
-      keyPointId: origin.keyPointId,
-      ...canonical,
-      schedulingAuthorization,
-      returnTarget: {
-        kind: "star_map",
-        keyPointId: origin.keyPointId,
-        lens: origin.lens,
-        filter: origin.filter,
-        routePlanId: origin.routePlanId,
-      },
-    };
-  }
-  if (origin.kind === "onboarding" && origin.sampleMode === "sandbox") {
-    // §16.4：sandbox Run 必须携带有效 namespace（active + 未过期 + 属于本
-    // user/workspace）；缺失/无效 fail closed（不冒充隔离教学空间）。
-    const { companionSandboxNamespaces } = await import("../../db/schema/companion-sandbox.ts");
-    if (!origin.sandboxNamespaceId) {
-      throw contextStale("沙箱教学空间参数缺失");
-    }
-    const nsRows = await tx
-      .select({ id: companionSandboxNamespaces.id, status: companionSandboxNamespaces.status, expiresAt: companionSandboxNamespaces.expiresAt })
-      .from(companionSandboxNamespaces)
-      .where(and(
-        eq(companionSandboxNamespaces.id, origin.sandboxNamespaceId),
-        eq(companionSandboxNamespaces.workspaceId, scope.workspaceId),
-        eq(companionSandboxNamespaces.userId, scope.userId),
-      ))
-      .limit(1);
-    const namespace = nsRows[0];
-    if (!namespace || namespace.status !== "active" || namespace.expiresAt.getTime() < Date.now()) {
-      throw contextStale("沙箱教学空间不存在或已过期");
-    }
-    const canonical = await fetchCanonicalTarget(tx, scope, origin.keyPointId);
-    return {
-      keyPointId: origin.keyPointId,
-      ...canonical,
-      sandboxNamespaceId: origin.sandboxNamespaceId,
-      schedulingAuthorization: { kind: "no_effect", reasonCode: "sandbox" },
-      returnTarget: { kind: "onboarding", destination: "today" },
-    };
-  }
-
-  if (origin.kind === "card") {
-    const kpRows = await tx
-      .select({ kpId: cardKeyPoints.id, claim: cardKeyPoints.claim })
-      .from(cardKeyPoints)
-      .innerJoin(learningCards, eq(learningCards.id, cardKeyPoints.cardId))
-      .where(and(
-        eq(cardKeyPoints.id, origin.keyPointId),
-        eq(cardKeyPoints.workspaceId, scope.workspaceId),
-        eq(learningCards.id, origin.cardId),
-        eq(learningCards.workspaceId, scope.workspaceId),
-        eq(learningCards.status, "active"),
-      ))
-      .limit(1);
-    if (kpRows.length === 0) throw contextStale("学习卡或要点不存在");
-    return buildCardTarget(tx, scope, origin.keyPointId, {
-      kind: "card",
-      cardId: origin.cardId,
-      keyPointId: origin.keyPointId,
-    });
-  }
-
-  if (origin.kind === "review") {
-    const schedRows = await tx
-      .select({
-        id: reviewSchedules.id,
-        keyPointId: reviewSchedules.keyPointId,
-        generation: reviewSchedules.generation,
-        status: reviewSchedules.status,
-      })
-      .from(reviewSchedules)
-      .where(and(
-        eq(reviewSchedules.id, origin.scheduleId),
-        eq(reviewSchedules.workspaceId, scope.workspaceId),
-        eq(reviewSchedules.userId, scope.userId),
-      ))
-      .limit(1);
-    const sched = schedRows[0];
-    if (!sched || sched.keyPointId !== origin.keyPointId || sched.generation !== origin.scheduleGeneration) {
-      throw scheduleGenerationChanged();
-    }
-    if (sched.status !== "pending") {
-      throw scheduleGenerationChanged();
-    }
-    const kpRows = await tx
-      .select({ claim: cardKeyPoints.claim })
-      .from(cardKeyPoints)
-      .where(and(
-        eq(cardKeyPoints.id, origin.keyPointId),
-        eq(cardKeyPoints.workspaceId, scope.workspaceId),
-      ))
-      .limit(1);
-    if (kpRows.length === 0) throw contextStale("学习要点不存在");
-    const canonical = await fetchCanonicalTarget(tx, scope, origin.keyPointId);
-    const schedulingAuthorization: SchedulingAuthorizationV1 = {
-      kind: "consume_pending",
-      scheduleId: origin.scheduleId,
-      scheduleGeneration: origin.scheduleGeneration,
-      keyPointId: origin.keyPointId,
-      targetFingerprint: canonical.fingerprint,
-      dueAt: new Date().toISOString(),
-      schedulerPolicyId: "review-schedule-v1",
-    };
-    return {
-      keyPointId: origin.keyPointId,
-      ...canonical,
-      schedulingAuthorization,
-      returnTarget: { kind: "review", scheduleId: origin.scheduleId, keyPointId: origin.keyPointId },
-    };
-  }
-
-  if (origin.kind === "today" || origin.kind === "onboarding") {
-    const canonical = await fetchCanonicalTarget(tx, scope, origin.keyPointId);
-    return {
-      keyPointId: origin.keyPointId,
-      ...canonical,
-      schedulingAuthorization: {
-        kind: "no_effect",
-        reasonCode: "not_authorized",
-      },
-      returnTarget: origin.kind === "today"
-        ? { kind: "today" }
-        : { kind: "onboarding", destination: "today" },
-    };
-  }
-
-  throw contextStale("不支持的入口");
-}
-
-async function buildCardTarget(
-  tx: ApiTransaction,
-  scope: RunScope,
-  keyPointId: string,
-  returnTarget: LearningRunPublicV1["returnTarget"],
-) {
-  const canonical = await fetchCanonicalTarget(tx, scope, keyPointId);
-  // 卡上巩固：若该 keyPoint 已有 pending schedule，不重复创建也不消费
-  // （到期复习走 review origin；卡上巩固 0 schedule 副作用）。
-  const schedRows = await tx
-    .select({ id: reviewSchedules.id })
-    .from(reviewSchedules)
-    .where(and(
-      eq(reviewSchedules.workspaceId, scope.workspaceId),
-      eq(reviewSchedules.userId, scope.userId),
-      eq(reviewSchedules.keyPointId, keyPointId),
-      eq(reviewSchedules.status, "pending"),
-    ))
-    .limit(1);
-  const schedulingAuthorization: SchedulingAuthorizationV1 = schedRows.length === 0
-    ? {
-        kind: "create_initial",
-        keyPointId,
-        targetFingerprint: canonical.fingerprint,
-        schedulerPolicyId: "review-schedule-v1",
-      }
-    : { kind: "no_effect", reasonCode: "not_authorized" };
-  return { keyPointId, ...canonical, schedulingAuthorization, returnTarget };
-}
-
-/** 从 canonical 输入计算 target fingerprint（card+evidence content 哈希）。 */
-async function fetchCanonicalTarget(
-  tx: ApiTransaction,
-  scope: RunScope,
-  keyPointId: string,
-): Promise<{ fingerprint: string; claim: string; evidenceContentHashes: string[]; quote?: string }> {
-  const rows = await tx
-    .select({
-      keyPointId: cardKeyPoints.id,
-      claim: cardKeyPoints.claim,
-      quote: cardKeyPoints.quoteText,
-    })
-    .from(cardKeyPoints)
-    .where(and(
-      eq(cardKeyPoints.id, keyPointId),
-      eq(cardKeyPoints.workspaceId, scope.workspaceId),
-    ))
-    .limit(1);
-  const row = rows[0];
-  if (!row) throw contextStale("学习要点不存在");
-  const fingerprint = sha256Hex(
-    `kp:${row.keyPointId}|claim:${row.claim}|quote:${row.quote}`,
-  );
-  return {
-    fingerprint,
-    claim: row.claim,
-    evidenceContentHashes: [sha256Hex(row.quote)],
-    // P4 relation 题面节点 label（公开引用原文，非答案）。
-    quote: row.quote,
-  };
-}
 
 /**
  * §6.2/§12.2 补充证据 Task（V1 practice 微修补）：activate_followup 时即时
@@ -452,25 +172,39 @@ async function planFollowupTask(
   run: typeof learningRuns.$inferSelect,
   at: Date,
 ): Promise<{ taskId: string }> {
-  // run.origin 存的是 request.origin（无外层包装）；resolveOriginTarget 需要完整 request。
-  const target = await resolveOriginTarget(tx, scope, { origin: run.origin } as never);
+  // V2：从该 run 已冻结的 LearningTargetSnapshotV2 取 canonical 目标。
+  // V1 的 live cardKeyPoints/claim 读取已随旧栈退役（方案 20 §16）。
+  const snapshot = await loadFrozenTargetSnapshotV2(tx, scope.workspaceId, run.id);
+  if (!snapshot) {
+    throw new LearningRunServiceError("target_snapshot_missing", "该 run 缺少冻结的 target snapshot", 409);
+  }
+  const t = snapshot.target;
   const taskId = crypto.randomUUID();
-  // resolveOriginTarget 返回 fingerprint（V1/V2 统一语义）；planner 需要
-  // sourceFingerprint 字段名。
+  // snapshot 提供 fingerprint / objectiveStatement / evidence hashes（V1/V2 统一语义）。
   const plannerTarget: RunPlannerTargetInput = {
-    keyPointId: target.keyPointId,
-    claim: target.claim,
-    sourceFingerprint: target.fingerprint,
-    evidenceContentHashes: target.evidenceContentHashes,
-    quote: target.quote,
+    keyPointId: t.objectiveId,
+    claim: t.objectiveStatement,
+    sourceFingerprint: t.semanticTargetFingerprint,
+    evidenceContentHashes: t.evidence.map((e) => e.evidenceSnapshotHash),
+    v2: {
+      objectiveStatement: t.objectiveStatement,
+      publicSummary: t.publicSummary,
+      knowledgeForm: t.knowledgeForm,
+      preferredIntents: t.preferredIntents,
+      canonicalAnswer: t.canonicalAnswer,
+      scoringRubric: t.scoringRubric,
+      relations: t.relations,
+      evidence: t.evidence,
+      publishedTargetEligibility: snapshot.publishedTargetEligibility,
+    },
   };
   const followupTask: PlannedTaskInput = {
     taskId,
     runId: run.id,
     sequence: 2,
     intent: "repair",
-    prompt: `请补充说明这个要点：${target.claim}。指出上次回答中不准确或不完整的部分并纠正。`,
-    targetSummary: target.claim.slice(0, 160),
+    prompt: `请补充说明这个要点：${t.objectiveStatement}。指出上次回答中不准确或不完整的部分并纠正。`,
+    targetSummary: t.objectiveStatement.slice(0, 160),
     hintLevels: 1,
     primaryFamily: "text",
     purpose: "practice",
@@ -627,18 +361,23 @@ async function loadInteractionQualifications(
   return data;
 }
 
-/** §7.8：查询同一 (user,kp,intent) 最近 30 天已呈现的 publicPayloadHash 集合。 */
+/** §7.8：查询同一 (user,objective,intent) 最近 30 天已呈现的 publicPayloadHash 集合。 */
 async function recentPresentedPayloadHashes(
   tx: ApiTransaction,
   scope: { workspaceId: string; userId: string; keyPointId: string },
 ): Promise<Set<string>> {
+  // V1 的 presentation_history.key_point_id 列已退役；经 runId 关联到
+  // learning_runs.origin（V2 run 的 origin 携带 keyPointId=objectiveId alias）
+  // 保持 objective 维度去重（surface-service 同款惯例，方案 20 §16/§29.4）。
+  const objectiveId = scope.keyPointId;
   const rows = await tx
     .select({ publicPayloadHash: learningTaskPresentationHistory.publicPayloadHash })
     .from(learningTaskPresentationHistory)
+    .innerJoin(learningRuns, eq(learningRuns.id, sql`${learningTaskPresentationHistory.runId}`))
     .where(and(
       eq(learningTaskPresentationHistory.workspaceId, scope.workspaceId),
       eq(learningTaskPresentationHistory.userId, scope.userId),
-      eq(learningTaskPresentationHistory.keyPointId, scope.keyPointId),
+      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
       gte(learningTaskPresentationHistory.presentedAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)),
     ))
     // 热路径：只取最近一批用于展示去重（presentation-dedup 只需近端历史）。
@@ -646,323 +385,84 @@ async function recentPresentedPayloadHashes(
     .limit(50);
   return new Set(rows.map((row) => row.publicPayloadHash));
 }
+
+/**
+ * V1 兼容薄壳（方案 20 §16.3）：V1 origin 的 keyPointId 即 objectiveId alias。
+ * 所有旧卡表（cardKeyPoints/learningCards/claim/quote）读取已随 V1 退役，
+ * 创建统一走 createRunV2（frozen target snapshot）。
+ */
 export async function createRun(
   tx: ApiTransaction,
   input: CreateRunInput,
   now: () => Date = () => new Date(),
 ): Promise<LearningRunPublicV1> {
   const { workspaceId, userId } = input;
-  const request = input.request;
-
-  // 幂等：同 key 重放返回既有 Run 的公共快照；请求内容不同 → idempotency_conflict。
-  // client_request_id 列保存请求指纹（origin/goal/预算/偏好），用于重放校验。
-  // P7：star_map origin 的 baselineCheckpoint 是发起时刻快照（capturedAt/token
-  // 每次投影刷新都会变化），不属于请求语义内容——指纹中剥离，否则同一天
-  // 幂等重放必然 409（checkpoint 新鲜度由 resolveOriginTarget 单独校验）。
-  const fingerprintOrigin = request.origin.kind === "star_map"
-    ? { ...request.origin, baselineCheckpoint: { version: 1, token: "<opaque>" } }
-    : request.origin;
-  const requestFingerprint = sha256Hex(JSON.stringify({
-    origin: fingerprintOrigin,
-    goal: request.goal,
-    requestedTimeBudgetSeconds: request.requestedTimeBudgetSeconds ?? null,
-    responsePreference: request.responsePreference ?? null,
-  }));
-  const idemRows = await tx
-    .select({ runId: learningRunIdempotency.runId, clientRequestId: learningRunIdempotency.clientRequestId })
-    .from(learningRunIdempotency)
-    .where(and(
-      eq(learningRunIdempotency.workspaceId, workspaceId),
-      eq(learningRunIdempotency.userId, userId),
-      eq(learningRunIdempotency.idempotencyKey, request.idempotencyKey),
-    ))
-    .limit(1);
-  if (idemRows[0]) {
-    if (idemRows[0].clientRequestId !== requestFingerprint) {
-      throw idempotencyConflict();
-    }
-    return getRunPublicView(tx, { workspaceId, userId, runId: idemRows[0].runId });
-  }
-
-  const target = await resolveOriginTarget(tx, { workspaceId, userId }, request);
-
-  const timeBudgetSeconds = clampTimeBudget(request.requestedTimeBudgetSeconds);
-  const runId = crypto.randomUUID();
-  const [recentPublicPayloadHashes, interactionQualifications] = await Promise.all([
-    recentPresentedPayloadHashes(tx, {
-      workspaceId,
-      userId,
-      keyPointId: target.keyPointId,
-    }),
-    loadInteractionQualifications(tx),
-  ]);
-  const plannerOptions: PlannerOptions = {
-    runId,
-    goal: request.goal,
-    responsePreference: request.responsePreference ?? "adaptive",
-    timeBudgetSeconds,
-    recentPublicPayloadHashes,
-    interactionQualifications,
-  };
-  const plan = planRun(
-    {
-      keyPointId: target.keyPointId,
-      claim: target.claim,
-      sourceFingerprint: target.fingerprint,
-      evidenceContentHashes: target.evidenceContentHashes,
-      quote: target.quote,
+  const req = input.request;
+  const result = await createRunV2(tx, {
+    workspaceId,
+    userId,
+    request: {
+      originV2: mapV1OriginToV2(req.origin),
+      goal: req.goal,
+      requestedTimeBudgetSeconds: req.requestedTimeBudgetSeconds,
+      responsePreference: req.responsePreference,
+      idempotencyKey: req.idempotencyKey,
     },
-    plannerOptions,
-  );
+  }, now);
+  return getRunPublicView(tx, { workspaceId, userId, runId: result.runId });
+}
 
-  const runtimeEpoch = 0;
-  const contractHash = computeRunContractHash({
-    runId,
-    workspaceId,
-    userId,
-    keyPointId: target.keyPointId,
-    targetFingerprint: target.fingerprint,
-    runtimeEpoch,
-    timeBudgetSeconds,
-    planningClosesAtActiveSecond: 150,
-    schedulingAuthorization: target.schedulingAuthorization,
-    taskPlanHash: plan.runPlanHash,
-    projectionBaselineCheckpointToken: null,
-  });
-
-  const task = plan.tasks[0];
-  const primaryVariant = plan.primaryVariant;
-  const alternativeVariant = plan.alternativeVariant;
-
-  // 事务内原子写入：run + private contract + task + variants + closures + events。
-  const createdAt = now();
-  await tx.insert(learningRuns).values({
-    id: runId,
-    workspaceId,
-    userId,
-    origin: request.origin,
-    returnTarget: target.returnTarget,
-    keyPointId: target.keyPointId,
-    targetFingerprint: target.fingerprint,
-    goal: request.goal,
-    phase: "active",
-    timeBudgetSeconds,
-    plannedActiveSeconds: plan.plannedActiveSeconds,
-    activeTaskId: task.taskId,
-    revision: 1,
-    runtimeEpoch,
-    sandboxNamespaceId: target.sandboxNamespaceId ?? null,
-    createdAt,
-    updatedAt: createdAt,
-  });
-  // 幂等占位（onConflictDoNothing）：并发同 key 双请求只有一方插入成功；
-  // 输者删除自己刚插入的 Run 行并返回 winner 视图——绝不因唯一索引冲突 500。
-  const insertedIdem = await tx.insert(learningRunIdempotency).values({
-    workspaceId,
-    userId,
-    idempotencyKey: request.idempotencyKey,
-    clientRequestId: requestFingerprint,
-    runId,
-    createdAt,
-  }).onConflictDoNothing().returning({ runId: learningRunIdempotency.runId });
-  if (insertedIdem.length === 0) {
-    await tx.delete(learningRuns).where(eq(learningRuns.id, runId));
-    const winner = await tx
-      .select({ runId: learningRunIdempotency.runId, clientRequestId: learningRunIdempotency.clientRequestId })
-      .from(learningRunIdempotency)
-      .where(and(
-        eq(learningRunIdempotency.workspaceId, workspaceId),
-        eq(learningRunIdempotency.userId, userId),
-        eq(learningRunIdempotency.idempotencyKey, request.idempotencyKey),
-      ))
-      .limit(1);
-    if (!winner[0]) throw idempotencyConflict();
-    if (winner[0].clientRequestId !== requestFingerprint) throw idempotencyConflict();
-    return getRunPublicView(tx, { workspaceId, userId, runId: winner[0].runId });
+/** V1 origin → originV2 映射：V1 keyPointId 即 objectiveId（V1 卡入口退役后
+ * 由旧客户端携带，alias 语义见方案 20 §5.2/§29.4）。 */
+function mapV1OriginToV2(origin: CreateLearningRunRequestV1["origin"]): LearningRunOriginV2 {
+  switch (origin.kind) {
+    case "card":
+      return { kind: "card", cardId: origin.cardId, objectiveId: origin.keyPointId };
+    case "review":
+      return {
+        kind: "review",
+        scheduleId: origin.scheduleId,
+        objectiveId: origin.keyPointId,
+        scheduleGeneration: origin.scheduleGeneration,
+      };
+    case "star_map":
+      return {
+        kind: "star_map",
+        objectiveId: origin.keyPointId,
+        lens: origin.lens,
+        filter: origin.filter,
+        ...(origin.routePlanId ? { routePlanId: origin.routePlanId } : {}),
+        baselineCheckpoint: origin.baselineCheckpoint,
+      };
+    case "today":
+      return {
+        kind: "today",
+        ...(origin.recommendationId ? { recommendationId: origin.recommendationId } : {}),
+        objectiveId: origin.keyPointId,
+      };
+    case "onboarding":
+      return {
+        kind: "onboarding",
+        sampleMode: origin.sampleMode,
+        objectiveId: origin.keyPointId,
+        ...(origin.sandboxNamespaceId ? { sandboxNamespaceId: origin.sandboxNamespaceId } : {}),
+      };
   }
-  await tx.insert(learningRunPrivateContracts).values({
-    runId,
-    workspaceId,
-    userId,
-    keyPointId: target.keyPointId,
-    targetFingerprint: target.fingerprint,
-    runtimeEpoch,
-    timeBudgetSeconds,
-    planningClosesAtActiveSecond: 150,
-    schedulingAuthorization: target.schedulingAuthorization,
-    taskPlanHash: plan.runPlanHash,
-    projectionBaselineCheckpointToken: null,
-    contractHash,
-    createdAt,
-  });
-  await tx.insert(learningTasks).values({
-    id: task.taskId,
-    runId,
-    workspaceId,
-    userId,
-    sequence: task.sequence,
-    intent: task.intent,
-    prompt: task.prompt,
-    targetSummary: task.targetSummary,
-    hintLevels: task.hintLevels,
-    status: "active",
-    revision: 1,
-    presentedAt: createdAt,
-    createdAt,
-    updatedAt: createdAt,
-  });
-  // PERF-A#13：在变体循环前一次性 IN 查询两个 variant 的 disclosure profile
-  // 存在性，避免每个 variant 在 PREPARE 热路径各加一次 SELECT 往返。
-  const disclosureHashes = Array.from(new Set(
-    [primaryVariant, alternativeVariant]
-      .map((v) => v.disclosureProfileHash)
-      .filter((h): h is string => Boolean(h)),
-  ));
-  const existingDisclosureHashes = new Set<string>();
-  if (disclosureHashes.length > 0) {
-    const existingDisclosureRows = await tx
-      .select({ profileHash: learningTaskDisclosureProfiles.profileHash })
-      .from(learningTaskDisclosureProfiles)
-      .where(and(
-        eq(learningTaskDisclosureProfiles.workspaceId, workspaceId),
-        inArray(learningTaskDisclosureProfiles.profileHash, disclosureHashes),
-      ));
-    for (const r of existingDisclosureRows) existingDisclosureHashes.add(r.profileHash);
-  }
-  for (const [index, variant] of [primaryVariant, alternativeVariant].entries()) {
-    const closure = plan.closures[variant.variantId];
-    await tx.insert(learningTaskVariants).values({
-      id: variant.variantId,
-      taskId: task.taskId,
-      workspaceId,
-      userId,
-      purpose: task.purpose,
-      templateTrustCeiling: task.templateTrustCeiling,
-      estimatedActiveSeconds: task.estimatedActiveSeconds,
-      interaction: variant.interaction,
-      publicPayloadHash: variant.publicPayloadHash,
-      inputSchemaHash: variant.inputSchemaHash,
-      disclosureProfileHash: variant.disclosureProfileHash,
-      // 0120：private 闭包冗余到 variant 行（api 进程提交时读；private 表
-      // 对 ailearn_api 保持仅 INSERT 无 SELECT 的隔离）。
-      privateSolutionHash: closure.privateSolutionHash,
-      safetyReportHash: closure.reportHash,
-      rubricTargetIds: rubricTargetIdsOf(closure.solution),
-      alternatives: [],
-      revision: 1,
-      // §7.4：备选 Variant 预授权但未激活（standby）；主 Variant active。
-      status: index === 0 ? "active" : "standby",
-      createdAt,
-      updatedAt: createdAt,
-    });
-    await tx.insert(learningTaskPrivateSolutions).values({
-      variantId: variant.variantId,
-      workspaceId,
-      userId,
-      solution: closure.solution,
-      privateSolutionHash: closure.privateSolutionHash,
-      runPlanHash: closure.runPlanHash,
-      createdAt,
-    });
-    await tx.insert(learningTaskSafetyReports).values({
-      taskId: task.taskId,
-      variantId: variant.variantId,
-      workspaceId,
-      userId,
-      publicPayloadHash: variant.publicPayloadHash,
-      inputSchemaHash: variant.inputSchemaHash,
-      privateSolutionHash: closure.privateSolutionHash,
-      disclosureProfileHash: variant.disclosureProfileHash,
-      qualificationProfileHash: null,
-      runPlanHash: closure.runPlanHash,
-      injectionScan: closure.safetyReport.injectionScan,
-      privateLeakageScan: closure.safetyReport.privateLeakageScan,
-      schemaValidation: closure.safetyReport.schemaValidation,
-      accessibilityProfile: closure.safetyReport.accessibilityProfile,
-      activationDecision: closure.safetyReport.activationDecision,
-      reportHash: closure.reportHash,
-      createdAt,
-    });
-    // disclosure profile：同 (workspace, profileHash) 幂等复用（同一目标的
-    // 确定性变体重建不得撞 hash 唯一约束——23505 修复）。
-    // PERF-A#13：存在性已由循环前一次 IN 查询预载，无需每 variant SELECT。
-    if (!existingDisclosureHashes.has(variant.disclosureProfileHash)) {
-      await tx.insert(learningTaskDisclosureProfiles).values({
-        variantId: variant.variantId,
-        workspaceId,
-        userId,
-        disclosedFieldPaths: closure.disclosure.disclosedFieldPaths,
-        hiddenFieldPaths: closure.disclosure.hiddenFieldPaths,
-        answerBearingFieldsHidden: true,
-        profileHash: variant.disclosureProfileHash,
-        createdAt,
-      });
-    }
-  }
-  await tx.insert(learningTaskPresentationHistory).values({
-    workspaceId,
-    userId,
-    keyPointId: target.keyPointId,
-    intent: task.intent,
-    publicPayloadHash: primaryVariant.publicPayloadHash,
-    interactionFamily: primaryVariant.interaction.kind,
-    presentedAt: createdAt,
-    outcome: "not_answered",
-    exposed: false,
-    // 迁移 0143：runId 关联，结算时回填 outcome/exposed（§7.8）。
-    runId,
-    createdAt,
-  });
-  // 幂等行已在事务开头占位（onConflictDoNothing）。
-  // 事件流（sequence 1..4，同步推进 eventCursor）——一次多行 INSERT。
-  const eventValues = [
-    { runId, workspaceId, userId, eventType: "learning_run.created", payload: {} },
-    { runId, workspaceId, userId, eventType: "learning_run.prepared", payload: {} },
-    { runId, workspaceId, userId, eventType: "learning_run.started", payload: {} },
-    { runId, workspaceId, userId, eventType: "learning_task.presented", payload: { taskId: task.taskId } },
-  ];
-  await tx.insert(learningRunEvents).values(
-    eventValues.map((event, index) => ({
-      runId: event.runId,
-      workspaceId,
-      userId,
-      sequence: index + 1,
-      eventType: event.eventType as never,
-      payload: event.payload,
-      occurredAt: createdAt,
-    })),
-  );
-  await tx.update(learningRuns)
-    .set({ eventCursor: eventValues.length, updatedAt: createdAt })
-    .where(eq(learningRuns.id, runId));
-
-  return getRunPublicView(tx, { workspaceId, userId, runId });
 }
 
 // ─── createRunV2（§16.2 PREPARE：V2 Origin → freeze snapshot → V2 planner）────
 
 /**
- * V2 run 的 keyPointId 语义：作为 Objective ID alias（§16.3）。DB 列
- * learning_runs.key_point_id 仍是 cardKeyPoints FK（RESTRICT），因此要求该
- * objective 存在相应急剧的 cardKeyPoint 别名行（迁移期 objectiveId 常复用
- * 原 keyPoint UUID）；无别名 → fail closed（未做 V1→V2 alias 迁移）。
+ * V2 run 的 keyPointId 语义：作为 Objective ID alias（§16.3/§29.4）。
+ * V1 的 cardKeyPoints 别名表已退役；objective 的有效性由
+ * freezeTargetSnapshotV2 统一 fail-closed 校验（workspace-scoped active
+ * Objective），此处仅保留 alias 语义返回。
  */
 async function resolveV2ObjectiveKeyPoint(
-  tx: ApiTransaction,
-  scope: RunScope,
+  _tx: ApiTransaction,
+  _scope: RunScope,
   objectiveId: string,
 ): Promise<{ keyPointId: string }> {
-  const rows = await tx
-    .select({ id: cardKeyPoints.id })
-    .from(cardKeyPoints)
-    .where(and(
-      eq(cardKeyPoints.id, objectiveId),
-      eq(cardKeyPoints.workspaceId, scope.workspaceId),
-    ))
-    .limit(1);
-  if (!rows[0]) {
-    throw contextStale("该 objective 还没有可用的 keyPointId alias（V2 迁移未完成）");
-  }
   return { keyPointId: objectiveId };
 }
 
@@ -987,7 +487,8 @@ async function resolveV2Scheduling(
       .where(and(
         eq(reviewSchedules.workspaceId, scope.workspaceId),
         eq(reviewSchedules.userId, scope.userId),
-        eq(reviewSchedules.keyPointId, objectiveId),
+        eq(reviewSchedules.subjectType, "card"),
+        eq(reviewSchedules.subjectId, objectiveId),
         eq(reviewSchedules.status, "pending"),
       ))
       .orderBy(desc(reviewSchedules.generation))
@@ -999,7 +500,7 @@ async function resolveV2Scheduling(
     const rows = await tx
       .select({
         id: reviewSchedules.id,
-        keyPointId: reviewSchedules.keyPointId,
+        subjectId: reviewSchedules.subjectId,
         generation: reviewSchedules.generation,
         status: reviewSchedules.status,
       })
@@ -1011,7 +512,7 @@ async function resolveV2Scheduling(
       ))
       .limit(1);
     const sched = rows[0];
-    if (!sched || sched.keyPointId !== objectiveId || sched.generation !== origin.scheduleGeneration) {
+    if (!sched || sched.subjectId !== objectiveId || sched.generation !== origin.scheduleGeneration) {
       throw scheduleGenerationChanged();
     }
     if (sched.status !== "pending") throw scheduleGenerationChanged();
@@ -1119,7 +620,7 @@ export async function createRunV2(
           kind: originV2.kind === "review" ? "review" : originV2.kind === "star_map" ? "star_map" : originV2.kind === "today" ? "today" : "onboarding",
           objectiveId,
         } as never,
-    keyPointId: objectiveId,
+    // V1 keyPointId 列已退役；目标身份经 origin JSONB（keyPointId=objectiveId alias）。
     targetFingerprint: "",
     goal: request.goal,
     createdAt: createdAt0,
@@ -1233,7 +734,7 @@ export async function createRunV2(
     runId,
     workspaceId,
     userId,
-    keyPointId: objectiveId,
+    // V1 keyPointId 列已退役；objective 身份经 snapshotId→snapshot 关联。
     targetFingerprint: frozen.snapshot.target.semanticTargetFingerprint,
     runtimeEpoch,
     timeBudgetSeconds,
@@ -1355,7 +856,7 @@ export async function createRunV2(
   await tx.insert(learningTaskPresentationHistory).values({
     workspaceId,
     userId,
-    keyPointId: objectiveId,
+    // V1 keyPointId 列已退役：目标是经 runId 关联到 run.origin 判别。
     intent: task.intent,
     publicPayloadHash: primaryVariant.publicPayloadHash,
     interactionFamily: primaryVariant.interaction.kind,
@@ -1393,6 +894,16 @@ export async function createRunV2(
 
 // ─── getRunPublicView ────────────────────────────────────────────────────
 
+/** 从 run.origin 取目标 ID（V1 keyPointId / V2 objectiveId 同一 alias，§29.4）。 */
+function originObjectiveId(origin: unknown): string {
+  if (origin && typeof origin === "object") {
+    const o = origin as { objectiveId?: unknown; keyPointId?: unknown };
+    if (typeof o.objectiveId === "string") return o.objectiveId;
+    if (typeof o.keyPointId === "string") return o.keyPointId;
+  }
+  return "";
+}
+
 export async function getRunPublicView(
   tx: ApiTransaction,
   input: RunScope & { runId: string },
@@ -1416,7 +927,8 @@ export async function getRunPublicView(
       assistantSessionId: runRow.assistantSessionId,
       origin: runRow.origin as never,
       returnTarget: runRow.returnTarget as never,
-      keyPointId: runRow.keyPointId,
+      // V1 keyPointId 列已退役：从 origin JSONB 取 objective alias（§29.4）。
+      keyPointId: originObjectiveId(runRow.origin),
       targetFingerprint: runRow.targetFingerprint,
       goal: runRow.goal as never,
       phase: runRow.phase,
@@ -1826,20 +1338,36 @@ export async function applyAction(
         throw invalidPhase(run.phase ?? "none", "recoverable_error(stage=prepare)");
       }
       const at = now();
-      const target = await resolveOriginTarget(tx, { workspaceId: input.workspaceId, userId: input.userId }, run.origin as never);
+      // V2：重跑规划从该 run 已冻结的 LearningTargetSnapshotV2 消费（V1 的
+      // live cardKeyPoints/claim 读取已随旧栈退役，方案 20 §16）。
+      const snap = await loadFrozenTargetSnapshotV2(tx, input.workspaceId, run.id);
+      if (!snap) {
+        throw new LearningRunServiceError("target_snapshot_missing", "该 run 缺少冻结的 target snapshot", 409);
+      }
+      const st = snap.target;
       const timeBudgetSeconds = clampTimeBudget(run.timeBudgetSeconds);
       const recentPublicPayloadHashes = await recentPresentedPayloadHashes(tx, {
         workspaceId: input.workspaceId,
         userId: input.userId,
-        keyPointId: target.keyPointId,
+        keyPointId: st.objectiveId,
       });
       const plan = planRun(
         {
-          keyPointId: target.keyPointId,
-          claim: target.claim,
-          sourceFingerprint: target.fingerprint,
-          evidenceContentHashes: target.evidenceContentHashes,
-          quote: target.quote,
+          keyPointId: st.objectiveId,
+          claim: st.objectiveStatement,
+          sourceFingerprint: st.semanticTargetFingerprint,
+          evidenceContentHashes: st.evidence.map((e) => e.evidenceSnapshotHash),
+          v2: {
+            objectiveStatement: st.objectiveStatement,
+            publicSummary: st.publicSummary,
+            knowledgeForm: st.knowledgeForm,
+            preferredIntents: st.preferredIntents,
+            canonicalAnswer: st.canonicalAnswer,
+            scoringRubric: st.scoringRubric,
+            relations: st.relations,
+            evidence: st.evidence,
+            publishedTargetEligibility: snap.publishedTargetEligibility,
+          },
         },
         {
           runId: run.id,

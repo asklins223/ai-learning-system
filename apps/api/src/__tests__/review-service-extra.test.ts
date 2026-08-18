@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { ReviewStatus } from "@ailearn/shared";
 import { db } from "../db/client.ts";
-import { evidences, reviewSchedules } from "../db/schema/evidence.ts";
+import { reviewSchedules } from "../db/schema/evidence.ts";
 import {
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
@@ -24,16 +24,9 @@ const original = {
   reviewSchedulesFindMany: mutableDb.query.reviewSchedules.findMany,
   reviewSchedulesFindFirst: mutableDb.query.reviewSchedules.findFirst,
   validationEventsFindMany: mutableDb.query.validationEvents.findMany,
-  validationEventsFindFirst: mutableDb.query.validationEvents.findFirst,
-  learningCardsFindMany: mutableDb.query.learningCards.findMany,
-  learningCardsFindFirst: mutableDb.query.learningCards.findFirst,
-  cardKeyPointsFindMany: mutableDb.query.cardKeyPoints.findMany,
-  cardKeyPointsFindFirst: mutableDb.query.cardKeyPoints.findFirst,
-  evidencesFindMany: mutableDb.query.evidences.findMany,
-  noteBlocksFindMany: mutableDb.query.noteBlocks.findMany,
-  evidenceOverridesFindMany: mutableDb.query.evidenceOverrides.findMany,
-  validationAssistanceExposuresFindFirst:
-    mutableDb.query.validationAssistanceExposures.findFirst,
+  learningCardsV2FindMany: mutableDb.query.learningCardsV2.findMany,
+  learningCardsV2FindFirst: mutableDb.query.learningCardsV2.findFirst,
+  exposureFindMany: mutableDb.query.validationAssistanceExposures.findMany,
 };
 
 after(() => {
@@ -41,65 +34,54 @@ after(() => {
   mutableDb.query.reviewSchedules.findMany = original.reviewSchedulesFindMany;
   mutableDb.query.reviewSchedules.findFirst = original.reviewSchedulesFindFirst;
   mutableDb.query.validationEvents.findMany = original.validationEventsFindMany;
-  mutableDb.query.validationEvents.findFirst = original.validationEventsFindFirst;
-  mutableDb.query.learningCards.findMany = original.learningCardsFindMany;
-  mutableDb.query.learningCards.findFirst = original.learningCardsFindFirst;
-  mutableDb.query.cardKeyPoints.findMany = original.cardKeyPointsFindMany;
-  mutableDb.query.cardKeyPoints.findFirst = original.cardKeyPointsFindFirst;
-  mutableDb.query.evidences.findMany = original.evidencesFindMany;
-  mutableDb.query.noteBlocks.findMany = original.noteBlocksFindMany;
-  mutableDb.query.evidenceOverrides.findMany = original.evidenceOverridesFindMany;
-  mutableDb.query.validationAssistanceExposures.findFirst =
-    original.validationAssistanceExposuresFindFirst;
+  mutableDb.query.learningCardsV2.findMany = original.learningCardsV2FindMany;
+  mutableDb.query.learningCardsV2.findFirst = original.learningCardsV2FindFirst;
+  mutableDb.query.validationAssistanceExposures.findMany = original.exposureFindMany;
 });
 
 type ReviewFixture = {
   total?: number;
   reviews?: any[];
   validations?: any[];
-  cards?: any[];
-  activeCard?: any;
-  keyPoints?: any[];
-  evidences?: any[];
-  blocks?: any[];
-  overrides?: any[];
   schedule?: any;
-  validation?: any;
-  keyPointFindFirst?: any[];
-  evidenceCount?: number;
-  exposure?: any;
+  // V2 objective → card hydration fixtures
+  v2Cards?: any[];
+  // single active V2 card (learningCardsV2.findFirst)
+  v2Objective?: any;
+  // learningObjectivesV2 projection rows
+  v2Objectives?: any[];
+  // learningObjectiveRevisionsV2 projection rows
+  v2Revisions?: any[];
+  exposures?: any[];
 };
 
 function installReviewDb(fixture: ReviewFixture): void {
-  const keyPointFindFirst = [...(fixture.keyPointFindFirst ?? [])];
+  const v2Cards = fixture.v2Cards ?? [];
+  const v2Objectives = fixture.v2Objectives ?? [];
+  const v2Revisions = fixture.v2Revisions ?? [];
   mutableDb.select = () => ({
     from: (table: unknown) => {
       if (table === reviewSchedules) {
         return { where: async () => [{ count: fixture.total ?? 0 }] };
       }
-      if (table === evidences) {
-        return { where: async () => [{ count: fixture.evidenceCount ?? 0 }] };
+      if (table === learningObjectivesV2) {
+        return { where: async () => v2Objectives };
       }
-      if (table === learningObjectivesV2 || table === learningObjectiveRevisionsV2 || table === learningCardsV2) {
-        // R35/C0-rebase：V2 objective 投影查询（fixture 均为 V1 keyPoint → 空）
-        return { where: async () => [] };
+      if (table === learningObjectiveRevisionsV2) {
+        return { where: async () => v2Revisions };
       }
-      assert.fail("unexpected table in review service test");
+      if (table === learningCardsV2) {
+        return { where: async () => v2Cards };
+      }
+      assert.fail(`unexpected table in review service test: ${String((table as any)?.name)}`);
     },
   });
   mutableDb.query.reviewSchedules.findMany = async () => fixture.reviews ?? [];
   mutableDb.query.reviewSchedules.findFirst = async () => fixture.schedule;
   mutableDb.query.validationEvents.findMany = async () => fixture.validations ?? [];
-  mutableDb.query.validationEvents.findFirst = async () => fixture.validation;
-  mutableDb.query.learningCards.findMany = async () => fixture.cards ?? [];
-  mutableDb.query.learningCards.findFirst = async () =>
-    fixture.activeCard === null ? undefined : fixture.activeCard ?? { id: "active-card" };
-  mutableDb.query.cardKeyPoints.findMany = async () => fixture.keyPoints ?? [];
-  mutableDb.query.cardKeyPoints.findFirst = async () => keyPointFindFirst.shift();
-  mutableDb.query.evidences.findMany = async () => fixture.evidences ?? [];
-  mutableDb.query.noteBlocks.findMany = async () => fixture.blocks ?? [];
-  mutableDb.query.evidenceOverrides.findMany = async () => fixture.overrides ?? [];
-  mutableDb.query.validationAssistanceExposures.findFirst = async () => fixture.exposure;
+  mutableDb.query.learningCardsV2.findMany = async () => v2Cards;
+  mutableDb.query.learningCardsV2.findFirst = async () => fixture.v2Objective;
+  mutableDb.query.validationAssistanceExposures.findMany = async () => fixture.exposures ?? [];
 }
 
 describe("review listing filters and empty boundaries", () => {
@@ -136,47 +118,30 @@ describe("review listing filters and empty boundaries", () => {
   });
 });
 
-describe("review hydration and reason derivation", () => {
-  it("hydrates mixed review subjects in batches and derives all four reasons", async () => {
+describe("review hydration and reason derivation (V2 objectives)", () => {
+  it("hydrates card reviews and derives all v2 reasons from objective evidence", async () => {
     const reviews = [
-      { id: "review-mis", subjectType: "validation", subjectId: "validation-mis", intervalDays: 3 },
-      { id: "review-manual", subjectType: "validation", subjectId: "validation-manual", intervalDays: 0 },
+      { id: "review-manual", subjectType: "card", subjectId: "card-manual", intervalDays: 0 },
       { id: "review-gap", subjectType: "card", subjectId: "card-gap", intervalDays: 3 },
       { id: "review-due", subjectType: "card", subjectId: "card-due", intervalDays: 3 },
-      { id: "review-stale-validation", subjectType: "validation", subjectId: "validation-stale", intervalDays: 3 },
-      { id: "review-stale-card", subjectType: "card", subjectId: "card-stale", intervalDays: 3 },
     ];
     installReviewDb({
       total: 10,
       reviews,
-      validations: [
-        { id: "validation-mis", cardId: "card-mis", outcome: "misunderstanding", keyPointId: "kp-mis" },
-        { id: "validation-manual", cardId: "card-manual", outcome: "preliminary_understanding", keyPointId: "kp-manual" },
+      v2Cards: [
+        { cardId: "card-manual", objectiveId: "obj-manual", publicSummary: "Manual objective", front: { cue: "Manual cue" }, lifecycle: "active" },
+        { cardId: "card-gap", objectiveId: "obj-gap", publicSummary: "Gap objective", front: { cue: "Gap cue" }, lifecycle: "active" },
+        { cardId: "card-due", objectiveId: "obj-due", publicSummary: "Due objective", front: { cue: "Due cue" }, lifecycle: "active" },
       ],
-      cards: [
-        { id: "card-mis", schemaJson: { title: "Misunderstanding" } },
-        { id: "card-manual", schemaJson: {} },
-        { id: "card-gap", schemaJson: { title: "Gap" } },
-        { id: "card-due", schemaJson: { title: "Due" } },
+      v2Objectives: [
+        // currentRevisionId = 由 select 别名投影出的硬证据信号字段（resolveObjectiveEvidence）。
+        { objectiveId: "obj-manual", currentObjectiveRevisionId: "rev-manual", currentRevisionId: "rev-manual" },
+        { objectiveId: "obj-due", currentObjectiveRevisionId: "rev-due", currentRevisionId: "rev-due" },
+        // obj-gap has no revision → no hard evidence → evidence_gap
       ],
-      keyPoints: [
-        { id: "kp-mis", cardId: "card-mis", claim: "Mis claim", quoteText: "Mis quote" },
-        { id: "kp-manual", cardId: "card-manual", claim: "Manual claim", quoteText: "Manual quote" },
-        { id: "kp-gap", cardId: "card-gap", claim: "Gap claim", quoteText: "Gap quote" },
-        { id: "kp-due", cardId: "card-due", claim: "Due claim", quoteText: "Due quote" },
-      ],
-      evidences: [
-        { id: "ev-mis", keyPointId: "kp-mis", alignment: "aligned", userOverride: null, blockId: "block-image-alt" },
-        { id: "ev-mis-later", keyPointId: "kp-mis", alignment: "soft", userOverride: null, blockId: null },
-        { id: "ev-manual", keyPointId: "kp-manual", alignment: "aligned", userOverride: null, blockId: "block-image-empty" },
-        { id: "ev-gap", keyPointId: "kp-gap", alignment: "soft", userOverride: null, blockId: "block-text" },
-        { id: "ev-due", keyPointId: "kp-due", alignment: "soft", userOverride: null, blockId: null },
-      ],
-      overrides: [{ evidenceId: "ev-due", override: "confirmed" }],
-      blocks: [
-        { id: "block-image-alt", type: "image", content: "![Architecture](https://secret.test/image.png)" },
-        { id: "block-image-empty", type: "image", content: "![](https://secret.test/image.png)" },
-        { id: "block-text", type: "paragraph", content: "Visible context" },
+      v2Revisions: [
+        { objectiveRevisionId: "rev-manual", publicSummary: "Manual objective" },
+        { objectiveRevisionId: "rev-due", publicSummary: "Due objective" },
       ],
     });
 
@@ -188,116 +153,67 @@ describe("review hydration and reason derivation", () => {
     );
 
     assert.equal(result.total, 10);
-    assert.equal(result.nextCursor, 8);
     assert.deepEqual(result.items.map((item) => item.reviewReason), [
-      "misunderstanding",
       "manual_pin",
       "evidence_gap",
       "due_review",
     ]);
-    assert.deepEqual(result.items.map((item) => item.blockContent), [
-      "Architecture",
-      "[图片]",
-      "Visible context",
-      null,
-    ]);
-    assert.equal(result.items[0]!.keyPoint?.id, "kp-mis");
-    assert.equal(result.items[1]!.card.title, "（未命名学习卡）");
+    assert.equal(result.items[0]!.card.title, "Manual objective");
+    assert.equal(result.items[1]!.card.title, "Gap objective");
+    assert.equal(result.items[2]!.card.title, "Due objective");
+    assert.equal(result.items[0]!.objective?.id, "obj-manual");
+    assert.equal(result.items[2]!.objective?.id, "obj-due");
   });
 
-  it("falls back to the first key point and legacy override without a user", async () => {
+  it("falls back to objective evidence when no user is supplied", async () => {
     installReviewDb({
       total: 1,
       reviews: [{ id: "review-1", subjectType: "card", subjectId: "card-1", intervalDays: 2 }],
-      cards: [{ id: "card-1", schemaJson: { title: "Legacy" } }],
-      keyPoints: [{ id: "kp-first", cardId: "card-1", claim: "Claim", quoteText: "Quote" }],
-      evidences: [
-        { id: "ev-rejected", keyPointId: "kp-first", alignment: "aligned", userOverride: "rejected", blockId: null },
-      ],
+      v2Cards: [{ cardId: "card-1", objectiveId: "obj-1", publicSummary: "Legacy", front: { cue: "cue" }, lifecycle: "active" }],
+      v2Objectives: [{ objectiveId: "obj-1", currentObjectiveRevisionId: "rev-1", currentRevisionId: "rev-1" }],
+      v2Revisions: [{ objectiveRevisionId: "rev-1", publicSummary: "Legacy" }],
     });
 
     const result = await listReviews(WORKSPACE_ID, { includeAll: true }, undefined, FAKE_TX);
 
-    assert.equal(result.items[0]!.keyPoint?.id, "kp-first");
-    assert.equal(result.items[0]!.reviewReason, "evidence_gap");
+    assert.equal(result.items[0]!.card.title, "Legacy");
+    assert.equal(result.items[0]!.reviewReason, "due_review");
     assert.equal(result.nextCursor, null);
   });
 
-  it("renders a card review even when it has no key points", async () => {
+  it("renders a card review even when its objective has no hard evidence", async () => {
     installReviewDb({
       total: 1,
       reviews: [{ id: "review-1", subjectType: "card", subjectId: "card-1", intervalDays: 1 }],
-      cards: [{ id: "card-1", schemaJson: { title: "No key points" } }],
-      keyPoints: [],
+      v2Cards: [{ cardId: "card-1", objectiveId: "obj-1", publicSummary: "No evidence", front: { cue: "cue" }, lifecycle: "active" }],
+      v2Objectives: [],
     });
 
     const result = await listReviews(WORKSPACE_ID, { includeAll: true }, USER_ID, FAKE_TX);
 
-    assert.equal(result.items[0]!.keyPoint, null);
+    assert.equal(result.items[0]!.card.title, "No evidence");
     assert.equal(result.items[0]!.blockContent, null);
     assert.equal(result.items[0]!.reviewReason, "evidence_gap");
   });
 });
 
-describe("legacy review Focus metadata", () => {
+describe("review Focus metadata (V2 objectives)", () => {
   const nextReviewAt = new Date("2026-07-24T13:02:00.000Z");
 
-  it("recovers a validation schedule key point from its validation event", async () => {
-    installReviewDb({
-      schedule: {
-        id: "schedule-validation",
-        userId: USER_ID,
-        subjectType: "validation",
-        subjectId: "validation-1",
-        validationEventId: null,
-        keyPointId: null,
-        status: "pending",
-        nextReviewAt,
-        intervalDays: 1,
-      },
-      validation: {
-        id: "validation-1",
-        userId: USER_ID,
-        cardId: "card-1",
-        keyPointId: "kp-validation",
-        outcome: "misunderstanding",
-      },
-      keyPointFindFirst: [{ id: "kp-validation", cardId: "card-1" }],
-    });
-
-    const result = await getSanitizedReviewMeta(
-      WORKSPACE_ID,
-      "schedule-validation",
-      USER_ID,
-      FAKE_TX,
-    );
-
-    assert.equal(result?.cardId, "card-1");
-    assert.equal(result?.keyPointId, "kp-validation");
-    assert.equal(result?.reviewReason, "misunderstanding");
-  });
-
-  it("uses the same first-key-point fallback as the queue for legacy card schedules", async () => {
+  it("resolves the objective id for a card schedule", async () => {
     installReviewDb({
       schedule: {
         id: "schedule-card",
         userId: USER_ID,
         subjectType: "card",
-        subjectId: "card-legacy",
+        subjectId: "card-1",
         validationEventId: null,
-        keyPointId: null,
         status: "pending",
         nextReviewAt,
-        intervalDays: 3,
+        intervalDays: 1,
       },
-      keyPointFindFirst: [{ id: "kp-first", cardId: "card-legacy" }],
-      evidences: [{
-        id: "ev-first",
-        keyPointId: "kp-first",
-        alignment: "aligned",
-        userOverride: null,
-        blockId: null,
-      }],
+      v2Objective: { cardId: "card-1", objectiveId: "obj-1", publicSummary: "Objective", lifecycle: "active" },
+      exposures: [],
     });
 
     const result = await getSanitizedReviewMeta(
@@ -307,30 +223,57 @@ describe("legacy review Focus metadata", () => {
       FAKE_TX,
     );
 
-    assert.equal(result?.cardId, "card-legacy");
-    assert.equal(result?.keyPointId, "kp-first");
+    assert.equal(result?.cardId, "card-1");
+    assert.equal(result?.objectiveId, "obj-1");
     assert.equal(result?.reviewReason, "due_review");
   });
 
-  it("hides a schedule when its card is no longer consumer-active", async () => {
+  it("uses the linked objective for an objective schedule", async () => {
     installReviewDb({
       schedule: {
-        id: "schedule-inactive-set",
+        id: "schedule-objective",
         userId: USER_ID,
-        subjectType: "card",
-        subjectId: "card-inactive-set",
+        subjectType: "objective",
+        subjectId: "obj-1",
         validationEventId: null,
-        keyPointId: null,
         status: "pending",
         nextReviewAt,
         intervalDays: 3,
       },
-      activeCard: null,
+      v2Objective: { cardId: "card-obj", objectiveId: "obj-1", publicSummary: "Objective", lifecycle: "active" },
+      exposures: [],
     });
 
     const result = await getSanitizedReviewMeta(
       WORKSPACE_ID,
-      "schedule-inactive-set",
+      "schedule-objective",
+      USER_ID,
+      FAKE_TX,
+    );
+
+    assert.equal(result?.cardId, "card-obj");
+    assert.equal(result?.objectiveId, "obj-1");
+    assert.equal(result?.reviewReason, "due_review");
+  });
+
+  it("hides a schedule when its objective card is no longer consumer-active", async () => {
+    installReviewDb({
+      schedule: {
+        id: "schedule-inactive",
+        userId: USER_ID,
+        subjectType: "objective",
+        subjectId: "obj-inactive",
+        validationEventId: null,
+        status: "pending",
+        nextReviewAt,
+        intervalDays: 3,
+      },
+      v2Objective: undefined,
+    });
+
+    const result = await getSanitizedReviewMeta(
+      WORKSPACE_ID,
+      "schedule-inactive",
       USER_ID,
       FAKE_TX,
     );

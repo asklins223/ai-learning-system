@@ -63,8 +63,9 @@ export function safeLearningRunReturnPath(candidate: string | null): string | nu
 
 function returnLabelForPath(returnTo: string, fallback: string): string {
   const pathname = returnTo.split(/[?#]/, 1)[0];
-  if (pathname === "/") return "返回学习首页";
-  if (pathname === "/cards" || pathname.startsWith("/cards/")) return "返回学习卡";
+  if (pathname === "/" ) return "返回学习首页";
+  if (pathname === "/cards" || pathname.startsWith("/cards/")) return "返回学习目标库";
+  if (pathname.startsWith("/learning-cards/")) return "返回学习卡";
   if (pathname === "/review" || pathname.startsWith("/review/")) return "返回复习队列";
   if (pathname === "/graph" || pathname.startsWith("/graph/")) return "返回理解星图";
   if (pathname === "/today" || pathname.startsWith("/today/")) return "返回今日学习";
@@ -84,7 +85,7 @@ export function resolveLearningRunDemoQuery(params: SearchParamsReader): Learnin
   const targetReference = keyPointId ?? targetNodeId ?? scheduleId ?? refId ?? cardId;
 
   const defaultReturn = normalized.origin === "card" && cardId
-    ? `/cards/${encodeURIComponent(cardId)}`
+    ? `/learning-cards/${encodeURIComponent(cardId)}`
     : presentation.route;
   const returnTo = safeLearningRunReturnPath(value(params, "returnTo")) ?? defaultReturn;
   const returnLabel = returnLabelForPath(returnTo, presentation.returnLabel);

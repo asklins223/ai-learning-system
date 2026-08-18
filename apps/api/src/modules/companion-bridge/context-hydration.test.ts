@@ -68,10 +68,14 @@ test("buildContextSnapshot：安全字段来自服务端输入，revision 与输
   assert.equal(snapshot.expiresAt, new Date(now.getTime() + 30_000).toISOString());
 });
 
-test("entityLookupKey：全部 EntityRef kind 有明确表映射（含 P6/P7 占位）", () => {
+test("entityLookupKey：全部 EntityRef kind 有明确映射（V1 卡表退役后 fail soft）", () => {
   const sourceId = uuid();
   assert.deepEqual(entityLookupKey({ kind: "source", sourceId }), { table: "sources", id: sourceId });
-  assert.equal(entityLookupKey({ kind: "card", cardId: uuid() })?.table, "learning_cards");
+  // V1 卡/卡组/要点表已随旧栈退役：card→learning_cards_v2；key_point→objective；
+  // card_set 无 V2 等价物 → null（不查询已删表）。
+  assert.equal(entityLookupKey({ kind: "card", cardId: uuid() })?.table, "learning_cards_v2");
+  assert.equal(entityLookupKey({ kind: "key_point", keyPointId: uuid() })?.table, "learning_objectives_v2");
+  assert.equal(entityLookupKey({ kind: "card_set", cardSetId: uuid() }), null);
   assert.equal(entityLookupKey({ kind: "learning_run", runId: uuid() })?.table, "learning_runs");
   assert.equal(entityLookupKey({ kind: "learning_task", runId: uuid(), taskId: uuid() })?.table, "learning_tasks");
   assert.equal(entityLookupKey({ kind: "assistant_session", assistantSessionId: uuid() })?.table, "companion_conversations");

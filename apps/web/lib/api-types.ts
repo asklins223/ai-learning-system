@@ -7,8 +7,8 @@
  * 包含：
  * - 用户与认证类型：CurrentUser, AuthResponse, AIPrivacySettings 等
  * - 笔记类型：NoteHeader, Block, NoteVersion, NoteDetail
- * - 卡片类型：LearningCardRecord, CardSetRecord, CardDetailResponse 等
- * - 证据类型：EvidenceRow, EvidenceAlignment, CardEvidenceGroup
+ * - 卡片类型：LearningCardRecord, CardSetRecord, CardDetailResponse 等（V1 卡/卡组 UI 已退役，类型保留兼容）
+ * - 证据类型：EvidenceRow, EvidenceAlignment
  * - 验证类型：ValidationEvent, StartSessionResult, RevealResultData 等
  * - 复习类型：ReviewWithCard, ReviewAttemptStartResult 等
  * - 来源类型：SourceRow, SourceDetail
@@ -279,12 +279,6 @@ export function isHardEvidence(
   userOverride: EvidenceOverride | null,
 ): boolean {
   return effectiveAlignment(alignment, userOverride) === "aligned";
-}
-
-/** /cards/:cardId/evidence 返回数组：{ keyPoint, evidences[] }（后端 getCardEvidence 结构）。 */
-export interface CardEvidenceGroup {
-  keyPoint: CardKeyPoint;
-  evidences: EvidenceRow[];
 }
 
 // ─── 作业类型 ────────────────────────────────────────────────────────

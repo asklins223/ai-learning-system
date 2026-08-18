@@ -70,7 +70,8 @@ function dueReview(kp: string, overrides: Partial<DueReviewCandidateInput> = {})
   return {
     reviewScheduleId: `sched-${kp}`,
     scheduleGeneration: 1,
-    keyPointId: kp,
+    subjectType: "card",
+    subjectId: kp,
     overdue: false,
     policyVersion: "scheduler-policy-v1",
     policyEpoch: 1,

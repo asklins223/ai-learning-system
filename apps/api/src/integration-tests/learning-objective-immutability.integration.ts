@@ -38,7 +38,8 @@ async function snapshotRuns(workspaceId: string): Promise<string> {
       const rows = await tx
         .select({
           id: learningRuns.id,
-          keyPointId: learningRuns.keyPointId,
+          // V1 keyPointId 列已退役：目标身份经 origin JSONB（alias）进入快照。
+          origin: learningRuns.origin,
           phase: learningRuns.phase,
           updatedAt: learningRuns.updatedAt,
           createdAt: learningRuns.createdAt,

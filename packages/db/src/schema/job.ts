@@ -2,7 +2,6 @@ import { sql } from "drizzle-orm";
 import { pgTable, uuid, text, integer, jsonb, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { jobStatusEnum } from "./enums.ts";
 import { users } from "./identity.ts";
-import { cardGenerationRuns, cardGenerationUnits } from "./card-generation.ts";
 
 export const jobs = pgTable(
   "jobs",
@@ -27,8 +26,7 @@ export const jobs = pgTable(
     repairState: text("repair_state").notNull().default("none"),
     // CHECK (0..1) enforced at DB level via migration.
     repairAttemptCount: integer("repair_attempt_count").notNull().default(0),
-    generationRunId: uuid("generation_run_id").references(() => cardGenerationRuns.id, { onDelete: "cascade" }),
-    generationUnitId: uuid("generation_unit_id").references(() => cardGenerationUnits.id, { onDelete: "cascade" }),
+    // V1 generation run reference removed
     stage: text("stage"),
     priority: integer("priority").notNull().default(50),
     resourceClass: text("resource_class").notNull().default("maintenance"),
@@ -40,13 +38,11 @@ export const jobs = pgTable(
     workspaceRequestedByIdx: index("jobs_workspace_requested_by_idx")
       .on(t.workspaceId, t.requestedBy)
       .where(sql`${t.requestedBy} IS NOT NULL`),
-    generationRunIdx: index("jobs_generation_run_idx").on(t.generationRunId, t.stage, t.status),
     idempotencyUniqueIdx: uniqueIndex("jobs_workspace_idempotency_unique_idx")
       .on(t.workspaceId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
 
     idWorkspaceUnique: uniqueIndex("jobs_id_workspace_unique").on(t.id, t.workspaceId),
-    generationUnitIdx: index("jobs_generation_unit_idx").on(t.generationRunId, t.generationUnitId, t.status),
     // 2026-08-12（generate 对齐）：表达式+部分唯一索引——同 noteVersion 的
     // generate_card 不得并发重复(worker 幂等兜底)。drizzle 表达式索引用 sql 模板。
     generateCardActiveUnique: uniqueIndex("jobs_generate_card_active_unique_idx")

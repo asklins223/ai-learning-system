@@ -331,7 +331,7 @@ async function resolveV2Display(
     ));
   const v2RevIds = v2ObjRows
     .map((r: { currentObjectiveRevisionId: string | null }) => r.currentObjectiveRevisionId)
-    .filter((id): id is string => Boolean(id));
+    .filter((id: string | null): id is string => Boolean(id));
   const v2RevRows = v2RevIds.length > 0
     ? await queryDb
         .select({
@@ -355,10 +355,10 @@ async function resolveV2Display(
           eq(learningCardsV2.lifecycle, "active"),
         ))
     : [];
-  const v2SummaryByRev = new Map(
+  const v2SummaryByRev = new Map<string, string>(
     v2RevRows.map((r: { objectiveRevisionId: string; publicSummary: string }) => [String(r.objectiveRevisionId), String(r.publicSummary)]),
   );
-  const v2CueByObj = new Map(
+  const v2CueByObj = new Map<string, string>(
     v2CardRows.map((r: { objectiveId: string; front: unknown }) => [String(r.objectiveId), String((r.front as { cue?: string })?.cue ?? "")]),
   );
   for (const o of v2ObjRows) {

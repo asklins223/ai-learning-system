@@ -355,10 +355,16 @@ test("v0.6 删除：validation_assistance_exposures 有 ON DELETE CASCADE 关联
   if (!existsSync(schemaPath)) return;
 
   const source = readFileSync(schemaPath, "utf8");
-  // Check that key_point_id has cascade
+  // V2: 原 V1 key_point 引用（key_point_id）已随 key_point 表删除移除（见 schema
+  // 注释 "V1 keyPoint reference removed"）。保留的级联契约是 user_id → users.cascade。
+  // 级联到复习目标改由 learning_card_v2 的 objective_id 外键承担（见 card-generation-v2.ts）。
   assert.ok(
-    source.includes("key_point_id") && source.includes("cascade"),
-    "validation_assistance_exposures should cascade on key_point deletion",
+    source.includes('userId: uuid("user_id")') && source.includes("onDelete: \"cascade\""),
+    "validation_assistance_exposures should cascade on user deletion",
+  );
+  assert.ok(
+    !source.includes("key_point_id"),
+    "validation_assistance_exposures should no longer reference deleted key_point_id",
   );
 });
 

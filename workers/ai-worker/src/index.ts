@@ -9,7 +9,6 @@ import { logger } from "./lib/logger.ts";
 import postgres from "postgres";
 import { closeDatabase, db, resolveWorkerDatabaseUrl } from "./db.ts";
 import { NOTIFY_CHANNEL } from "./lib/job-notify.ts";
-import { type JobPayload } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runCompanionDialogue } from "./handlers/companion-dialogue.ts";
 import { runCompanionAction } from "./handlers/companion-action.ts";

@@ -41,7 +41,8 @@ function createEmptyMockDatabase(): RestoreDatabase {
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return []; } },
+      // V2 卡片表：V1 learning_cards 已退役，服务用 learningCardsV2 检测冲突
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -81,7 +82,7 @@ function createConflictMockDatabase(): RestoreDatabase {
     query: {
       notes: { async findMany() { return [{ id: "existing" }]; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return []; } },
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -101,10 +102,10 @@ function validExportData(overrides: Record<string, unknown> = {}): Record<string
       version: "2.0",
       included: [
         "workspace", "users", "workspaceMembers", "notes", "noteVersions",
-        "noteBlocks", "sources", "sourceSegments", "learningCards",
-        "cardKeyPoints", "evidences", "evidenceOverrides",
-        "validationQuestions", "validationEvents", "reviewSchedules",
-        "reviewAttempts", "understandingEvents", "aiArtifacts", "onboardingStates",
+        "noteBlocks", "sources", "sourceSegments", "evidences",
+        "evidenceOverrides", "validationQuestions", "validationEvents",
+        "reviewSchedules", "reviewAttempts", "understandingEvents",
+        "aiArtifacts", "onboardingStates",
       ],
       excluded: {
         searchDocuments: "可重建",
@@ -125,8 +126,6 @@ function validExportData(overrides: Record<string, unknown> = {}): Record<string
     noteBlocks: [],
     sources: [],
     sourceSegments: [],
-    learningCards: [],
-    cardKeyPoints: [],
     evidences: [],
     evidenceOverrides: [],
     validationQuestions: [],
@@ -239,7 +238,6 @@ test("dry-run 模式空数据返回零计数", async () => {
   assert.equal(result.counts!.users, 1);
   assert.equal(result.counts!.notes, 0);
   assert.equal(result.counts!.sources, 0);
-  assert.equal(result.counts!.learningCards, 0);
   assert.equal(result.counts!.reviewAttempts, 0);
 });
 
@@ -261,46 +259,19 @@ test("dry-run 检测到 evidence_override 引用不存在的 evidence 时失败"
   assert.ok(result.message.includes("引用完整性") || result.message.includes("missing evidence"));
 });
 
-test("dry-run 检测到 validation_event 引用不存在的 card 时失败", async () => {
-  const data = validExportData({
-    validationEvents: [
-      { id: "ve1", userId: USER_ID, cardId: "nonexistent-card", artifactId: null, question: "Q?", questionType: "explain", userAnswer: "A", outcome: "preliminary_understanding", confidence: 80, jobId: null },
-    ],
-  });
-  const result = await restoreWorkspace(
-    WORKSPACE_ID,
-    data,
-    true,
-    createEmptyMockDatabase(),
-  );
-  assert.equal(result.success, false);
-  assert.ok(result.message.includes("引用完整性") || result.message.includes("missing card"));
-});
-
-test("dry-run 检测到 validation_question 引用不存在的 card 时失败", async () => {
-  const data = validExportData({
-    validationQuestions: [
-      { id: "vq1", cardId: "nonexistent-card", keyPointId: null, question: "Q?", questionType: "explain", expiresAt: null },
-    ],
-  });
-  const result = await restoreWorkspace(
-    WORKSPACE_ID,
-    data,
-    true,
-    createEmptyMockDatabase(),
-  );
-  assert.equal(result.success, false);
-  assert.ok(result.message.includes("引用完整性") || result.message.includes("missing card"));
-});
+// ── V1 退役：以下两个用例整体只测已删的 V1 恢复行为 ──
+// validation_event / validation_question 的 cardId 列已随 V1 卡表删除，
+// dry-run 引用完整性校验不再检查 card/keyPoint 引用（服务只校验 questionId）。
+// 故删除这两个「引用不存在的 card 时失败」的 V1 用例。
 
 test("dry-run 引用完整性通过时返回成功", async () => {
-  const cardId = "60000000-0000-4000-8000-000000000001";
+  const qId = "60000000-0000-4000-8000-000000000001";
   const data = validExportData({
-    learningCards: [
-      { id: cardId, noteVersionId: null, status: "active", schemaJson: {}, artifactId: null },
+    validationQuestions: [
+      { id: qId, questionType: "explain", question: "Q?" },
     ],
     validationEvents: [
-      { id: "ve1", userId: USER_ID, cardId, artifactId: null, question: "Q?", questionType: "explain", userAnswer: "A", outcome: "preliminary_understanding", confidence: 80, jobId: null },
+      { id: "ve1", userId: USER_ID, artifactId: null, question: "Q?", questionType: "explain", userAnswer: "A", outcome: "preliminary_understanding", confidence: 80, jobId: null, questionId: qId },
     ],
   });
   const result = await restoreWorkspace(
@@ -369,9 +340,6 @@ test("非 dry-run 恢复成功时返回 counts 和成功消息", async () => {
     sources: [
       { id: "s1", type: "text", title: "来源", origin: null, status: "ready", metadata: {}, createdBy: USER_ID },
     ],
-    learningCards: [
-      { id: "c1", noteVersionId: null, status: "active", schemaJson: { title: "T", summary: "S" }, artifactId: null },
-    ],
     reviewAttempts: [
       {
         id: "ra1", userId: USER_ID, reviewScheduleId: "rs1",
@@ -405,7 +373,6 @@ test("非 dry-run 恢复成功时返回 counts 和成功消息", async () => {
   assert.equal(result.counts!.workspaceMembers, 1);
   assert.equal(result.counts!.notes, 1);
   assert.equal(result.counts!.sources, 1);
-  assert.equal(result.counts!.learningCards, 1);
   assert.equal(result.counts!.reviewAttempts, 1);
   assert.equal(result.counts!.onboardingStates, 1);
   assert.ok(result.message.includes("恢复成功"));
@@ -416,7 +383,7 @@ test("非 dry-run 恢复事务失败时返回错误", async () => {
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return []; } },
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -457,7 +424,7 @@ test("非 dry-run 恢复 note 带 currentVersionId 时执行 update 回填", asy
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return []; } },
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -526,7 +493,7 @@ test("非 dry-run 恢复 note 不带 currentVersionId 时不执行 update", asyn
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return []; } },
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -602,9 +569,8 @@ test("dry-run 正确统计所有数据类型计数", async () => {
     noteBlocks: [{ id: "nb1", versionId: "nv1", ordinal: 0, type: "paragraph", content: "text" }],
     sources: [{ id: "s1", type: "text", title: "S", origin: null, status: "ready", metadata: {}, createdBy: USER_ID }],
     sourceSegments: [{ id: "ss1", sourceId: "s1", ordinal: 0, text: "seg", charStart: 0, charEnd: 3 }],
-    learningCards: [{ id: "c1", noteVersionId: null, status: "active", schemaJson: {}, artifactId: null }],
-    cardKeyPoints: [{ id: "kp1", cardId: "c1", ordinal: 0, claim: "C", quoteText: "Q" }],
-    evidences: [{ id: "e1", keyPointId: "kp1", blockId: null, blockOrdinal: null, quoteText: "Q", alignment: "aligned" }],
+    // V1 退役：learning_cards / card_key_points 表已删除，不再统计其计数
+    evidences: [{ id: "e1", blockId: null, blockOrdinal: null, quoteText: "Q", alignment: "aligned" }],
     evidenceOverrides: [{ id: "eo1", evidenceId: "e1", userId: USER_ID, override: "confirmed" }],
     validationQuestions: [{ id: "vq1", cardId: "c1", keyPointId: null, questionType: "explain", question: "Q?" }],
     validationEvents: [{ id: "ve1", userId: USER_ID, cardId: "c1", artifactId: null, question: "Q?", questionType: "explain", userAnswer: "A", outcome: "preliminary_understanding", confidence: 80, jobId: null }],
@@ -628,8 +594,6 @@ test("dry-run 正确统计所有数据类型计数", async () => {
   assert.equal(result.counts!.noteBlocks, 1);
   assert.equal(result.counts!.sources, 1);
   assert.equal(result.counts!.sourceSegments, 1);
-  assert.equal(result.counts!.learningCards, 1);
-  assert.equal(result.counts!.cardKeyPoints, 1);
   assert.equal(result.counts!.evidences, 1);
   assert.equal(result.counts!.evidenceOverrides, 1);
   assert.equal(result.counts!.validationQuestions, 1);
@@ -647,7 +611,6 @@ test("dry-run 对非数组字段安全处理返回零计数", async () => {
     users: "not an array",
     notes: null,
     sources: undefined,
-    learningCards: 42,
   });
   const result = await restoreWorkspace(
     WORKSPACE_ID,
@@ -659,7 +622,6 @@ test("dry-run 对非数组字段安全处理返回零计数", async () => {
   assert.equal(result.counts!.users, 0);
   assert.equal(result.counts!.notes, 0);
   assert.equal(result.counts!.sources, 0);
-  assert.equal(result.counts!.learningCards, 0);
 });
 
 // ─── 冲突检测细化 ────────────────────────────────────────────────────────
@@ -669,7 +631,7 @@ test("目标已有 sources 时返回冲突", async () => {
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return [{ id: "existing" }]; } },
-      learningCards: { async findMany() { return []; } },
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -688,12 +650,12 @@ test("目标已有 sources 时返回冲突", async () => {
   assert.ok(result.message.includes("已有数据"));
 });
 
-test("目标已有 learningCards 时返回冲突", async () => {
+test("目标已有 learningCardsV2 时返回冲突", async () => {
   const conflictDb: RestoreDatabase = {
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return [{ id: "existing" }]; } },
+      learningCardsV2: { async findMany() { return [{ id: "existing" }]; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -717,7 +679,7 @@ test("目标已有 jobs 时返回冲突", async () => {
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return []; } },
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return [{ id: "existing" }]; } },
       aiArtifacts: { async findMany() { return []; } },
     },
@@ -741,7 +703,7 @@ test("目标已有 aiArtifacts 时返回冲突", async () => {
     query: {
       notes: { async findMany() { return []; } },
       sources: { async findMany() { return []; } },
-      learningCards: { async findMany() { return []; } },
+      learningCardsV2: { async findMany() { return []; } },
       jobs: { async findMany() { return []; } },
       aiArtifacts: { async findMany() { return [{ id: "existing" }]; } },
     },
@@ -761,41 +723,17 @@ test("目标已有 aiArtifacts 时返回冲突", async () => {
 });
 
 // ─── dry-run 引用完整性细化 ───────────────────────────────────────────────
-
-test("dry-run 检测到 validation_event 引用不存在的 keyPoint 时失败", async () => {
-  const cardId = "60000000-0000-4000-8000-000000000001";
-  const data = validExportData({
-    learningCards: [
-      { id: cardId, noteVersionId: null, status: "active", schemaJson: {}, artifactId: null },
-    ],
-    validationEvents: [
-      {
-        id: "ve1", userId: USER_ID, cardId, artifactId: null,
-        question: "Q?", questionType: "explain", userAnswer: "A",
-        outcome: "preliminary_understanding", confidence: 80, jobId: null,
-        keyPointId: "nonexistent-kp",
-      },
-    ],
-  });
-  const result = await restoreWorkspace(
-    WORKSPACE_ID,
-    data,
-    true,
-    createEmptyMockDatabase(),
-  );
-  assert.equal(result.success, false);
-  assert.ok(result.message.includes("引用完整性") || result.message.includes("missing key_point"));
-});
+// V1 退役：validation_event / validation_question 的 cardId/keyPointId 引用
+// 完整性校验已移除（列随 V1 卡表删除），以下仅保留仍然有效的 question 引用校验。
 
 test("dry-run 检测到 validation_event 引用不存在的 question 时失败", async () => {
-  const cardId = "60000000-0000-4000-8000-000000000001";
   const data = validExportData({
-    learningCards: [
-      { id: cardId, noteVersionId: null, status: "active", schemaJson: {}, artifactId: null },
+    validationQuestions: [
+      { id: "vq-001", questionType: "explain", question: "Q?" },
     ],
     validationEvents: [
       {
-        id: "ve1", userId: USER_ID, cardId, artifactId: null,
+        id: "ve1", userId: USER_ID, artifactId: null,
         question: "Q?", questionType: "explain", userAnswer: "A",
         outcome: "preliminary_understanding", confidence: 80, jobId: null,
         questionId: "nonexistent-question",
@@ -812,26 +750,17 @@ test("dry-run 检测到 validation_event 引用不存在的 question 时失败",
   assert.ok(result.message.includes("引用完整性") || result.message.includes("missing question"));
 });
 
-test("dry-run 引用完整性校验通过（含 keyPoint 和 question 引用）", async () => {
-  const cardId = "60000000-0000-4000-8000-000000000001";
-  const kpId = "kp-001";
+test("dry-run 引用完整性校验通过（validation_event 引用存在的 question）", async () => {
   const qId = "vq-001";
   const data = validExportData({
-    learningCards: [
-      { id: cardId, noteVersionId: null, status: "active", schemaJson: {}, artifactId: null },
-    ],
-    cardKeyPoints: [
-      { id: kpId, cardId, ordinal: 0, claim: "C", quoteText: "Q" },
-    ],
     validationQuestions: [
-      { id: qId, cardId, keyPointId: kpId, questionType: "explain", question: "Q?" },
+      { id: qId, questionType: "explain", question: "Q?" },
     ],
     validationEvents: [
       {
-        id: "ve1", userId: USER_ID, cardId, artifactId: null,
+        id: "ve1", userId: USER_ID, artifactId: null,
         question: "Q?", questionType: "explain", userAnswer: "A",
         outcome: "preliminary_understanding", confidence: 80, jobId: null,
-        keyPointId: kpId,
         questionId: qId,
       },
     ],

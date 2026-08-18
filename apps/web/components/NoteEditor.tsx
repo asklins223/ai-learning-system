@@ -1221,8 +1221,9 @@ export function NoteEditor({
     failedGenerationUnits,
     generationRun?.error?.code,
   );
+  // V1 卡详情页已退役：生成结果导航改指 V2 学习卡详情页（learning-cards）。
   const generatedCardHref = generationRun?.result?.cardId
-    ? `/cards/${generationRun.result.cardId}`
+    ? `/learning-cards/${generationRun.result.cardId}`
     : "/cards";
   const hasGeneratedResult = Boolean(
     generationRun?.result?.cardSetId || generationRun?.result?.cardId,

@@ -8,9 +8,12 @@ import {
 } from "../../db/schema/identity.ts";
 import { sessions } from "../../db/schema/session.ts";
 import { onboardingStates } from "../../db/schema/identity.ts";
-import { notes, noteVersions, sources } from "../../db/schema/note.ts";
-import { learningCards } from "../../db/schema/card.ts";
+import { notes, sources } from "../../db/schema/note.ts";
 import { evidences, validationEvents } from "../../db/schema/evidence.ts";
+import {
+  learningCardsV2,
+  learningObjectiveOriginsV2,
+} from "../../db/schema/card-generation-v2.ts";
 import {
   generateInvitationToken,
   createInvitationTokenStorage,
@@ -616,14 +619,17 @@ async function deriveOnboardingSnapshot(
       .from(notes)
       .where(and(eq(notes.workspaceId, workspaceId), eq(notes.createdBy, userId), isNull(notes.deletedAt)))
       .limit(1),
+    // V2: 检测用户是否已有学习卡（first_card 步骤）。
+    // V1 退役：原查询经 learningCards.noteVersionId 直连 note（V1 表已删）。
+    // V2 卡片经 objectiveId 关联 objective，再经 learningObjectiveOriginsV2 回溯到 note。
     tx
-      .select({ id: learningCards.id })
-      .from(learningCards)
-      .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
-      .innerJoin(notes, eq(notes.id, noteVersions.noteId))
+      .select({ id: learningCardsV2.id })
+      .from(learningCardsV2)
+      .innerJoin(learningObjectiveOriginsV2, eq(learningObjectiveOriginsV2.objectiveId, learningCardsV2.objectiveId))
+      .innerJoin(notes, eq(notes.id, learningObjectiveOriginsV2.noteId))
       .where(
         and(
-          eq(learningCards.workspaceId, workspaceId),
+          eq(learningCardsV2.workspaceId, workspaceId),
           eq(notes.createdBy, userId),
           isNull(notes.deletedAt),
         ),

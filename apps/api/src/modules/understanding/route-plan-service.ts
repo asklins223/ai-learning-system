@@ -86,26 +86,29 @@ export async function createUnderstandingRoutePlan(
     return { status: "stale" };
   }
   // 确定性选路：到期复习优先（due pending schedule 的 keyPoint 按到期时间序）。
+  // V2：reviewSchedules 没有 keyPointId 列，objective 维度的 schedule 用
+  // subjectType='card' + subjectId=<objectiveId>（方案 20 §29.4）。
   const dueRows = await tx
     .select({
       scheduleId: reviewSchedules.id,
-      keyPointId: reviewSchedules.keyPointId,
+      subjectId: reviewSchedules.subjectId,
       nextReviewAt: reviewSchedules.nextReviewAt,
     })
     .from(reviewSchedules)
     .where(and(
       eq(reviewSchedules.workspaceId, scope.workspaceId),
       eq(reviewSchedules.userId, scope.userId),
+      eq(reviewSchedules.subjectType, "card"),
       eq(reviewSchedules.status, "pending"),
       lte(reviewSchedules.nextReviewAt, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
     ))
     .orderBy(reviewSchedules.nextReviewAt)
     .limit(body.maxSteps);
   const steps = dueRows
-    .filter((r) => r.keyPointId !== null)
+    .filter((r) => r.subjectId !== null)
     .map((r, index) => ({
       ordinal: index + 1,
-      nodeRef: { kind: "key_point", keyPointId: r.keyPointId! },
+      nodeRef: { kind: "key_point", keyPointId: r.subjectId! },
       incomingEdgeIds: [],
       reasonCode: "review_due",
     }));

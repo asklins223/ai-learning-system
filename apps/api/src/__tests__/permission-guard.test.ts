@@ -265,9 +265,6 @@ describe("permission-guard: owner-only 路由守卫清单", () => {
     // search routes
     { file: "search/routes.ts", routePattern: '"/search/drift"', method: "GET" },
     { file: "search/routes.ts", routePattern: '"/search/reindex"', method: "POST" },
-    // benchmark routes
-    { file: "benchmark/routes.ts", routePattern: '"/benchmark/run"', method: "POST" },
-    { file: "benchmark/routes.ts", routePattern: '"/benchmark/labels"', method: "POST" },
   ];
 
   for (const { file, routePattern } of ownerOnlyRoutes) {
@@ -309,13 +306,6 @@ describe("permission-guard: owner-only 路由守卫清单", () => {
     assert.ok(content.includes('"/search/reindex"'));
     assert.ok(content.includes("requireOwner"));
   });
-
-  it("benchmark/routes.ts 中 run 和 labels 路由使用 requireOwner", () => {
-    const content = readRouteFile("benchmark/routes.ts");
-    assert.ok(content.includes('"/benchmark/run"'));
-    assert.ok(content.includes('"/benchmark/labels"'));
-    assert.ok(content.includes("requireOwner"));
-  });
 });
 
 // ─── Session-only 路由验证：不应有 requireOwner ─────────────────────────
@@ -329,9 +319,8 @@ describe("permission-guard: session-only 路由不应有 requireOwner", () => {
 
   // 这些模块的所有路由都应该是 session-only（用户级操作，非 owner-only）
   // 成员可以使用：验证理解、复习、查看统计、查看证据
+  // （V1 evidence/benchmark/card/card-generation/validation 模块已随旧栈退役）
   const sessionOnlyModules = [
-    "evidence/routes.ts",
-    "validation/routes.ts",
     "review/routes.ts",
     "understanding/routes.ts",
     "stats/routes.ts",
@@ -436,23 +425,6 @@ describe("permission-guard: note/card/source/import 写操作使用 requireOwner
     );
   });
 
-  // card/routes.ts: 写操作应挂载 requireOwner
-  it("card/routes.ts 导入并使用 requireOwner", () => {
-    const content = readRouteFile("card/routes.ts");
-    assert.ok(content.includes("requireOwner"), "card/routes.ts 应导入并使用 requireOwner");
-  });
-
-  it("card/routes.ts 写操作挂载 requireOwner", () => {
-    const content = readRouteFile("card/routes.ts");
-    const preHandlerWithOwner = content.match(/preHandler:\s*\[requireOwner\]/g);
-    // POST /cards/:id/regenerate, POST /cards/:id/dismiss,
-    // POST /cards/generate = 3（accept 死功能已移除）
-    assert.ok(
-      preHandlerWithOwner !== null && preHandlerWithOwner.length >= 3,
-      `card/routes.ts 应至少有 3 个路由使用 requireOwner，实际找到 ${preHandlerWithOwner?.length ?? 0}`,
-    );
-  });
-
   // source/routes.ts: 写操作应挂载 requireOwner
   it("source/routes.ts 导入并使用 requireOwner", () => {
     const content = readRouteFile("source/routes.ts");
@@ -547,13 +519,11 @@ describe("permission-guard: 所有路由模块使用 requireSession 基线", () 
   }
 
   // 所有路由模块都应使用 requireSession 作为基线认证
+  // （V1 card/evidence/benchmark 模块已随旧栈退役，不再列入）
   const allRouteModules = [
     "identity/routes.ts",
     "note/routes.ts",
-    "card/routes.ts",
     "source/routes.ts",
-    "evidence/routes.ts",
-    "validation/routes.ts",
     "review/routes.ts",
     "understanding/routes.ts",
     "stats/routes.ts",
@@ -561,7 +531,6 @@ describe("permission-guard: 所有路由模块使用 requireSession 基线", () 
     "import/routes.ts",
     "export/routes.ts",
     "search/routes.ts",
-    "benchmark/routes.ts",
   ];
 
   for (const moduleFile of allRouteModules) {

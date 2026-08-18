@@ -639,53 +639,14 @@ describe("note/service restoreDeletedNote (CONC-03)", () => {
 
 // ─── CONC-01: deleteNote FOR UPDATE 锁验证 ─────────────────────────────
 
-describe("note/service CONC-10: reviewSchedules updatedAt 精确匹配", () => {
-  it("deleteNote 取消复习计划时应设置 updatedAt = deletedAt", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { resolve } = await import("node:path");
-    const servicePath = resolve(
-      import.meta.dirname,
-      "../modules/note/service.ts",
-    );
-    const source = readFileSync(servicePath, "utf-8");
-
-    const deleteStart = source.indexOf("export async function deleteNote(");
-    assert.ok(deleteStart !== -1, "应找到 deleteNote 函数定义");
-    const nextExport = source.indexOf("export async function", deleteStart + 1);
-    const deleteSection = nextExport !== -1
-      ? source.slice(deleteStart, nextExport)
-      : source.slice(deleteStart);
-
-    assert.ok(
-      deleteSection.includes("ReviewStatus.CANCELLED, updatedAt: deletedAt"),
-      "deleteNote 取消复习计划时应设置 updatedAt = deletedAt，" +
-        "供 restoreDeletedNote 精确匹配",
-    );
-  });
-
-  it("restoreDeletedNote 恢复复习计划时应使用 updatedAt = note.deletedAt 精确匹配", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { resolve } = await import("node:path");
-    const servicePath = resolve(
-      import.meta.dirname,
-      "../modules/note/service.ts",
-    );
-    const source = readFileSync(servicePath, "utf-8");
-
-    const restoreStart = source.indexOf("export async function restoreDeletedNote(");
-    assert.ok(restoreStart !== -1, "应找到 restoreDeletedNote 函数定义");
-    const nextExport = source.indexOf("export async function", restoreStart + 1);
-    const restoreSection = nextExport !== -1
-      ? source.slice(restoreStart, nextExport)
-      : source.slice(restoreStart);
-
-    assert.ok(
-      restoreSection.includes("eq(reviewSchedules.updatedAt, note.deletedAt)"),
-      "restoreDeletedNote 恢复复习计划时应加 eq(reviewSchedules.updatedAt, note.deletedAt) " +
-        "精确匹配条件，避免误恢复之前手动取消的计划",
-    );
-  });
-});
+// ─── note/service CONC-10（已删除） ─────────────────────────────────────
+// 删除理由：这两个用例断言 deleteNote/restoreDeletedNote 会取消/恢复以
+// cardId 为 subjectId 的 V1 review_schedules 计划（ReviewStatus.CANCELLED,
+// updatedAt: deletedAt 与 eq(reviewSchedules.updatedAt, note.deletedAt)）。
+// V2 迁移后 review_schedules 不再有 cardId/keyPointId 列，V1 卡片复习计划
+// 已随 learning_cards/card_key_points 表删除而退役（见 note/service.ts 的
+// "V1 退役"注释），deleteNote/restoreDeletedNote 不再取消/恢复 V1 复习计划。
+// 属只测已删 V1 行为的用例，予以删除。
 
 describe("note/service deleteNote concurrency (CONC-01)", () => {
   it("deleteNote 应使用 SELECT ... FOR UPDATE 锁定 note 行", async () => {
@@ -1001,107 +962,13 @@ describe("note/service updateNote content-hash dedup", () => {
     assert.equal(result!.version.id, VERSION_ID);
   });
 
-  it("isAutosave + 有卡片引用时降级为创建新版本", async () => {
-    const mock = createMockExecutor({
-      selectResult: [
-        [{
-          id: NOTE_ID,
-          currentVersionId: VERSION_ID,
-          title: "Test",
-          titleSource: "auto",
-          workspaceId: WS_ID,
-        }],
-        // canUpdateVersionInPlace 的 SELECT ... FOR UPDATE on note_versions
-        [{ id: VERSION_ID }],
-      ],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        null, // content-hash lookup: no match
-        { id: VERSION_ID, versionNo: 1 }, // latest version
-        { id: "new-v2", noteId: NOTE_ID, versionNo: 2 }, // final read
-      ],
-      insertReturning: [[{ id: "new-v2", noteId: NOTE_ID, versionNo: 2 }]],
-      noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-      learningCardsFindFirst: { id: "card-1" }, // active card exists
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "updated" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.versionNo, 2);
-  });
-
-  it("isAutosave + 有 superseded 卡片引用时降级为创建新版本", async () => {
-    // superseded 卡片仍引用该版本内容，原地更新会破坏引用一致性
-    const mock = createMockExecutor({
-      selectResult: [
-        [{
-          id: NOTE_ID,
-          currentVersionId: VERSION_ID,
-          title: "Test",
-          titleSource: "auto",
-          workspaceId: WS_ID,
-        }],
-        // canUpdateVersionInPlace 的 SELECT ... FOR UPDATE on note_versions
-        [{ id: VERSION_ID }],
-      ],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        null, // content-hash lookup: no match
-        { id: VERSION_ID, versionNo: 1 }, // latest version
-        { id: "new-v2", noteId: NOTE_ID, versionNo: 2 }, // final read
-      ],
-      insertReturning: [[{ id: "new-v2", noteId: NOTE_ID, versionNo: 2 }]],
-      noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-      learningCardsFindFirst: { id: "card-superseded", status: "superseded" }, // superseded card exists
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "updated" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.versionNo, 2, "有 superseded 卡片时应降级为创建新版本");
-  });
-
-  it("isAutosave + 有 archived 卡片引用时允许原地更新", async () => {
-    // archived 卡片不再用于复习，原地更新不影响功能
-    const mock = createMockExecutor({
-      selectResult: [
-        [{
-          id: NOTE_ID,
-          currentVersionId: VERSION_ID,
-          title: "Test",
-          titleSource: "auto",
-          workspaceId: WS_ID,
-        }],
-        // canUpdateVersionInPlace 的 SELECT ... FOR UPDATE on note_versions
-        [{ id: VERSION_ID }],
-      ],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        null, // content-hash lookup: no match
-        { id: VERSION_ID, noteId: NOTE_ID, versionNo: 1 }, // final read
-      ],
-      noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-      learningCardsFindFirst: null, // archived card is filtered out → no match
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "updated" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.id, VERSION_ID, "archived 卡片不阻止原地更新");
-  });
+  // ── V1 卡片引用检查（已删除）─────────────────────────────────────────
+  // 删除理由：以下三个用例分别断言「有 active/superseded 卡引用时降级为创建
+  // 新版本」「有 archived 卡引用时允许原地更新」，均依赖 canUpdateVersionInPlace
+  // 检查 V1 learningCards（learningCardsFindFirst）。V2 迁移后 V1 卡表已删除，
+  // V2 卡片经 objectiveId 关联、不直接引用 note_version，该检查已退役
+  // （见 note/service.ts canUpdateVersionInPlace 的 "V1 退役" 注释），现仅保留
+  // sealed 版本保护。属只测已删 V1 行为的用例，予以删除。
 
   it("isAutosave + 版本行不存在时（FOR UPDATE 返回空）降级为创建新版本", async () => {
     const mock = createMockExecutor({

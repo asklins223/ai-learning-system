@@ -11,19 +11,17 @@
  * unless the caller explicitly requests the full attempt.
  */
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import {
   reviewAttempts,
   reviewSchedules,
-  validationEvents,
   validationQuestions,
-  evidences,
-  evidenceOverrides,
   understandingEvents,
 } from "../../db/schema/evidence.ts";
 import { validationActionCommands } from "../../db/schema/index.ts";
+import { learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
 import { ReviewStatus } from "@ailearn/shared";
 import {
   REVIEW_ATTEMPT_LATER_REASON,
@@ -32,10 +30,6 @@ import {
   type ReviewAttemptLaterInput,
   type ReviewAttemptHistoryPagination,
 } from "@ailearn/shared";
-import {
-  effectiveAlignmentForUser,
-  type EvidenceOverride,
-} from "../../lib/evidence.ts";
 import { calculateReviewSchedule } from "./scheduling-policy.ts";
 import { reviewScheduleTargetsConsumableCardPredicate } from "./consumer-eligibility.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
@@ -211,73 +205,50 @@ async function findAttemptByIdempotencyKey(
 }
 
 /**
- * Check whether the target key point has at least one aligned (hard) evidence
- * for the given user, accounting for both legacy and user-level overrides.
+ * Check whether the target objective has hard (demonstrated) evidence.
+ *
+ * V2 migration: the V1 `evidences.keyPointId` column was removed, so hard
+ * evidence can no longer be resolved per key point. Reviews now target
+ * objectives (`subjectId = objectiveId`); an objective counts as having hard
+ * evidence when it has a revision (mirrors resolveObjectiveEvidence in
+ * service.ts).
  */
-async function keyPointHasHardEvidence(
+async function objectiveHasHardEvidence(
   transaction: ApiTransaction,
-  keyPointId: string | null | undefined,
+  objectiveId: string | null | undefined,
   workspaceId: string,
-  userId: string,
 ): Promise<boolean> {
-  if (!keyPointId) return false;
-  const keyPointEvidences = await transaction.query.evidences.findMany({
+  if (!objectiveId) return false;
+  const objective = await transaction.query.learningObjectivesV2.findFirst({
     where: and(
-      eq(evidences.keyPointId, keyPointId),
-      eq(evidences.workspaceId, workspaceId),
+      eq(learningObjectivesV2.objectiveId, objectiveId),
+      eq(learningObjectivesV2.workspaceId, workspaceId),
     ),
+    columns: { objectiveId: true, currentObjectiveRevisionId: true },
   });
-  if (keyPointEvidences.length === 0) return false;
-  const userOverrideRows = await transaction.query.evidenceOverrides.findMany({
-    where: and(
-      eq(evidenceOverrides.workspaceId, workspaceId),
-      eq(evidenceOverrides.userId, userId),
-      inArray(
-        evidenceOverrides.evidenceId,
-        keyPointEvidences.map((evidence) => evidence.id),
-      ),
-    ),
-    columns: {
-      evidenceId: true,
-      override: true,
-    },
-  });
-  const userOverrideMap = new Map<string, EvidenceOverride>(
-    userOverrideRows.map((row) => [row.evidenceId, row.override as EvidenceOverride]),
-  );
-  return keyPointEvidences.some(
-    (evidence) =>
-      effectiveAlignmentForUser(
-        evidence.alignment,
-        evidence.userOverride,
-        userOverrideMap.get(evidence.id) ?? null,
-      ) === "aligned",
-  );
+  return Boolean(objective?.currentObjectiveRevisionId);
 }
 
 /**
- * Validate that a server-side question is active and belongs to the schedule's
- * card. Returns the question row or null.
+ * Validate that a server-side question is active. Returns the question row or
+ * null. Questions are bound per user (validationQuestions.cardId removed).
  */
 async function loadActiveQuestion(
   transaction: ApiTransaction,
   questionId: string | undefined,
   workspaceId: string,
-  cardId: string | null,
-): Promise<{ id: string; keyPointId: string | null; expiresAt: Date | null } | null> {
-  if (!questionId || !cardId) return null;
+): Promise<{ id: string; expiresAt: Date | null } | null> {
+  if (!questionId) return null;
   const question = await transaction.query.validationQuestions.findFirst({
     where: and(
       eq(validationQuestions.id, questionId),
       eq(validationQuestions.workspaceId, workspaceId),
-      eq(validationQuestions.cardId, cardId),
     ),
   });
   if (!question) return null;
   if (question.expiresAt && question.expiresAt <= new Date()) return null;
   return {
     id: question.id,
-    keyPointId: question.keyPointId ?? null,
     expiresAt: question.expiresAt,
   };
 }
@@ -486,47 +457,28 @@ export async function submitReviewAttempt(
         throw new ReviewAttemptError("schedule_not_pending");
       }
 
-      // 3. Resolve the card and key point for evidence checking.
-      let cardId: string | null = null;
-      let keyPointId: string | null = schedule.keyPointId ?? null;
+      // 3. Resolve the objective this schedule targets. V2 review runs by
+      // objective (方案 20): subjectType='card' with subjectId=<objectiveId>.
+      const objectiveId = schedule.subjectId;
 
-      if (schedule.subjectType === "card") {
-        cardId = schedule.subjectId;
-      } else if (schedule.subjectType === "validation" && schedule.validationEventId) {
-        const ve = await tx.query.validationEvents.findFirst({
-          where: and(
-            eq(validationEvents.id, schedule.validationEventId),
-            eq(validationEvents.workspaceId, workspaceId),
-          ),
-        });
-        if (ve) {
-          cardId = ve.cardId;
-          keyPointId = ve.keyPointId ?? null;
-        }
-      }
-
-      // 4. Load the validation question (if provided).
+      // 4. Load the validation question (if provided). Questions are bound per
+      // user, not per card (validationQuestions.cardId removed).
       const question = await loadActiveQuestion(
         tx,
         input.validationQuestionId,
         workspaceId,
-        cardId,
       );
       const hasValidServerQuestion = question !== null;
       if (input.validationQuestionId && !question) {
         // The client explicitly referenced a question that is missing or expired.
         // We still record the attempt but the scheduling policy will block upgrade.
       }
-      if (question?.keyPointId) {
-        keyPointId = question.keyPointId;
-      }
 
-      // 5. Check hard evidence for the key point.
-      const hasHardEvidence = await keyPointHasHardEvidence(
+      // 5. Check hard evidence for the target objective.
+      const hasHardEvidence = await objectiveHasHardEvidence(
         tx,
-        keyPointId,
+        objectiveId,
         workspaceId,
-        userId,
       );
 
       // 6. Compute the scheduling decision.
@@ -573,7 +525,6 @@ export async function submitReviewAttempt(
           subjectType: schedule.subjectType,
           subjectId: schedule.subjectId,
           validationEventId: schedule.validationEventId,
-          keyPointId,
           status: ReviewStatus.PENDING,
           nextReviewAt: decision.nextReviewAt,
           intervalDays: decision.afterIntervalDays,
@@ -590,7 +541,6 @@ export async function submitReviewAttempt(
           outcome: input.outcome,
           confidence: input.confidence,
           validationQuestionId: question?.id ?? null,
-          keyPointId,
           scheduleBeforeIntervalDays: decision.beforeIntervalDays,
           scheduleAfterIntervalDays: decision.afterIntervalDays,
           scheduleReasonCode: decision.reasonCode,

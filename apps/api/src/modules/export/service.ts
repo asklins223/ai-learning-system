@@ -3,7 +3,6 @@ import type { ValidationFeedback } from "@ailearn/shared";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
 import { computeContentHash } from "../note/service.ts";
-import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
 import {
   evidences,
   validationEvents,
@@ -238,15 +237,13 @@ async function checkExportSize(tx: RestoreTx, workspaceId: string): Promise<void
       .where(eq(validationEvents.workspaceId, workspaceId)),
   ]);
   // F14（round-4）：size 防护覆盖面原只覆盖 notes/note_blocks/evidences 3 个小表，
-  // 却导出 ~25 表。扩展覆盖另 5 个 append-only/易膨胀大表（validationEvents、
-  // sourceSegments、cardKeyPoints、reviewAttempts、aiArtifacts），它们可能远大于预检的 3 表。
-  const [sourceSegmentCount, cardKeyPointCount, reviewAttemptCount, aiArtifactCount] = await Promise.all([
+  // 却导出 ~25 表。扩展覆盖另 4 个 append-only/易膨胀大表（validationEvents、
+  // sourceSegments、reviewAttempts、aiArtifacts），它们可能远大于预检的 3 表。
+  // V1 退役：原 cardKeyPoints 计数项随 V1 表删除，一并移除。
+  const [sourceSegmentCount, reviewAttemptCount, aiArtifactCount] = await Promise.all([
     tx.select({ cnt: count() })
       .from(sourceSegments)
       .where(eq(sourceSegments.workspaceId, workspaceId)),
-    tx.select({ cnt: count() })
-      .from(cardKeyPoints)
-      .where(eq(cardKeyPoints.workspaceId, workspaceId)),
     tx.select({ cnt: count() })
       .from(reviewAttempts)
       .where(eq(reviewAttempts.workspaceId, workspaceId)),
@@ -261,7 +258,6 @@ async function checkExportSize(tx: RestoreTx, workspaceId: string): Promise<void
     evidences: Number(evidenceCount[0]?.cnt ?? 0),
     validation_events: Number(validationEventCount[0]?.cnt ?? 0),
     source_segments: Number(sourceSegmentCount[0]?.cnt ?? 0),
-    card_key_points: Number(cardKeyPointCount[0]?.cnt ?? 0),
     review_attempts: Number(reviewAttemptCount[0]?.cnt ?? 0),
     ai_artifacts: Number(aiArtifactCount[0]?.cnt ?? 0),
   };
@@ -331,8 +327,6 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
       noteBlockRows,
       sourceRows,
       sourceSegmentRows,
-      cardRows,
-      cardKeyPointRows,
       evidenceRows,
       evidenceOverrideRows,
       validationQuestionRows,
@@ -441,41 +435,10 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
           )).orderBy(asc(sourceSegments.sourceId), asc(sourceSegments.ordinal), asc(sourceSegments.id)).limit(EXPORT_BATCH),
         cursorFrom: (last) => ({ sourceId: last.sourceId, ordinal: last.ordinal, id: last.id }),
       }),
-      // desc(createdAt) + id 下界
-      loadInBatches({
-        load: (c: CreatedIdCursor | null) =>
-          tx.select().from(learningCards).where(and(
-            eq(learningCards.workspaceId, workspaceId),
-            c
-              ? or(
-                  lt(learningCards.createdAt, c.createdAt),
-                  and(eq(learningCards.createdAt, c.createdAt), lt(learningCards.id, c.id)),
-                )
-              : undefined,
-          )).orderBy(desc(learningCards.createdAt), desc(learningCards.id)).limit(EXPORT_BATCH),
-        cursorFrom: (last) => ({ createdAt: last.createdAt, id: last.id }),
-      }),
-      // asc(cardId, ordinal) + id 上界
-      loadInBatches({
-        load: (c: { cardId: string; ordinal: number; id: string } | null) =>
-          tx.select().from(cardKeyPoints).where(and(
-            eq(cardKeyPoints.workspaceId, workspaceId),
-            c
-              ? or(
-                  or(
-                    gt(cardKeyPoints.cardId, c.cardId),
-                    and(eq(cardKeyPoints.cardId, c.cardId), gt(cardKeyPoints.ordinal, c.ordinal)),
-                  ),
-                  and(
-                    eq(cardKeyPoints.cardId, c.cardId),
-                    eq(cardKeyPoints.ordinal, c.ordinal),
-                    gt(cardKeyPoints.id, c.id),
-                  ),
-                )
-              : undefined,
-          )).orderBy(asc(cardKeyPoints.cardId), asc(cardKeyPoints.ordinal), asc(cardKeyPoints.id)).limit(EXPORT_BATCH),
-        cursorFrom: (last) => ({ cardId: last.cardId, ordinal: last.ordinal, id: last.id }),
-      }),
+      // V1 退役：旧版学习卡表 learningCards / cardKeyPoints（V1 表）已删除，
+      // 不再导出。V2 卡片导出见下方 learningCardsV2 / objectivesV2 等分块加载。
+      // 原 asc(cardId, ordinal) + id 上界 cursor（cardKeyPoints）cursorType 一并移除。
+      // 原 desc(createdAt) + id 下界 cursor（learningCards）一并移除。
       // 原无显式排序（DB 默认）：统一为 asc(id) 上界，保持确定性 keyset
       loadInBatches({
         load: (c: string | null) =>
@@ -843,8 +806,6 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
       noteBlocks: noteBlockRows,
       sources: sourceRows,
       sourceSegments: sourceSegmentRows,
-      learningCards: cardRows,
-      cardKeyPoints: cardKeyPointRows,
       evidences: evidenceRows,
       evidenceOverrides: evidenceOverrideRows,
       validationQuestions: validationQuestionRows,
@@ -883,8 +844,6 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
           "noteBlocks",
           "sources",
           "sourceSegments",
-          "learningCards",
-          "cardKeyPoints",
           "evidences",
           "evidenceOverrides",
           "validationQuestions",
@@ -962,7 +921,7 @@ export async function restoreWorkspace(
   const [existingNotes, existingSources, existingCards, existingJobs, existingArtifacts] = await Promise.all([
     database.query.notes.findMany({ where: and(eq(notes.workspaceId, targetWorkspaceId), isNull(notes.deletedAt)), limit: 1 }),
     database.query.sources.findMany({ where: eq(sources.workspaceId, targetWorkspaceId), limit: 1 }),
-    database.query.learningCards.findMany({ where: eq(learningCards.workspaceId, targetWorkspaceId), limit: 1 }),
+    database.query.learningCardsV2.findMany({ where: eq(learningCardsV2.workspaceId, targetWorkspaceId), limit: 1 }),
     database.query.jobs.findMany({ where: eq(jobs.workspaceId, targetWorkspaceId), limit: 1 }),
     database.query.aiArtifacts.findMany({ where: eq(aiArtifacts.workspaceId, targetWorkspaceId), limit: 1 }),
   ]);
@@ -1013,8 +972,6 @@ export async function restoreWorkspace(
     counts.noteBlocks = Array.isArray(data.noteBlocks) ? data.noteBlocks.length : 0;
     counts.sources = Array.isArray(data.sources) ? data.sources.length : 0;
     counts.sourceSegments = Array.isArray(data.sourceSegments) ? data.sourceSegments.length : 0;
-    counts.learningCards = Array.isArray(data.learningCards) ? data.learningCards.length : 0;
-    counts.cardKeyPoints = Array.isArray(data.cardKeyPoints) ? data.cardKeyPoints.length : 0;
     counts.evidences = Array.isArray(data.evidences) ? data.evidences.length : 0;
     counts.evidenceOverrides = Array.isArray(data.evidenceOverrides) ? data.evidenceOverrides.length : 0;
     counts.validationQuestions = Array.isArray(data.validationQuestions) ? data.validationQuestions.length : 0;
@@ -1037,8 +994,6 @@ export async function restoreWorkspace(
     // N-009: dry-run 引用完整性校验
     const refErrors: string[] = [];
     const evidenceIds = new Set((Array.isArray(data.evidences) ? data.evidences : []).map((e: Record<string, unknown>) => e.id as string));
-    const cardIds = new Set((Array.isArray(data.learningCards) ? data.learningCards : []).map((c: Record<string, unknown>) => c.id as string));
-    const keyPointIds = new Set((Array.isArray(data.cardKeyPoints) ? data.cardKeyPoints : []).map((k: Record<string, unknown>) => k.id as string));
     const questionIds = new Set((Array.isArray(data.validationQuestions) ? data.validationQuestions : []).map((q: Record<string, unknown>) => q.id as string));
     const scheduleIds = new Set((Array.isArray(data.reviewSchedules) ? data.reviewSchedules : []).map((r: Record<string, unknown>) => r.id as string));
     const validationEventIds = new Set((Array.isArray(data.validationEvents) ? data.validationEvents : []).map((v: Record<string, unknown>) => v.id as string));
@@ -1052,26 +1007,18 @@ export async function restoreWorkspace(
         }
       }
     }
-    // validation_events 引用完整性
+    // validation_events 引用完整性（V1 退役：cardId / keyPointId 列已删除，仅校验 questionId）
     if (Array.isArray(data.validationEvents)) {
       for (const v of data.validationEvents as Record<string, unknown>[]) {
-        if (!cardIds.has(v.cardId as string)) {
-          refErrors.push(`validation_event references missing card ${v.cardId}`);
-        }
-        if (v.keyPointId && !keyPointIds.has(v.keyPointId as string)) {
-          refErrors.push(`validation_event references missing key_point ${v.keyPointId}`);
-        }
         if (v.questionId && !questionIds.has(v.questionId as string)) {
           refErrors.push(`validation_event references missing question ${v.questionId}`);
         }
       }
     }
-    // validation_questions 引用完整性
     if (Array.isArray(data.validationQuestions)) {
       for (const q of data.validationQuestions as Record<string, unknown>[]) {
-        if (!cardIds.has(q.cardId as string)) {
-          refErrors.push(`validation_question references missing card ${q.cardId}`);
-        }
+        // V1 退役: validation_questions 的 cardId 列已删除，不再校验
+        void q;
       }
     }
     if (Array.isArray(data.reviewAttempts)) {
@@ -1084,9 +1031,6 @@ export async function restoreWorkspace(
         }
         if (a.validationQuestionId && !questionIds.has(a.validationQuestionId as string)) {
           refErrors.push(`review_attempt references missing question ${a.validationQuestionId}`);
-        }
-        if (a.keyPointId && !keyPointIds.has(a.keyPointId as string)) {
-          refErrors.push(`review_attempt references missing key_point ${a.keyPointId}`);
         }
         if (a.evidenceId && !evidenceIds.has(a.evidenceId as string)) {
           refErrors.push(`review_attempt references missing evidence ${a.evidenceId}`);
@@ -1118,14 +1062,9 @@ export async function restoreWorkspace(
 
     if (Array.isArray(data.validationSubmissions)) {
       for (const s of data.validationSubmissions as Record<string, unknown>[]) {
-        if (!cardIds.has(s.cardId as string)) {
-          refErrors.push(`validation_submission references missing card ${s.cardId}`);
-        }
+        // V1 退役: validation_submissions 的 cardId / keyPointId 列已删除
         if (s.questionId && !questionIds.has(s.questionId as string)) {
           refErrors.push(`validation_submission references missing question ${s.questionId}`);
-        }
-        if (s.keyPointId && !keyPointIds.has(s.keyPointId as string)) {
-          refErrors.push(`validation_submission references missing key_point ${s.keyPointId}`);
         }
       }
     }
@@ -1420,41 +1359,15 @@ export async function restoreWorkspace(
         }),
       );
 
-      // 9. 恢复 learning_cards（PERF-40 修复：批量 INSERT）
-      counts.learningCards = await restoreTable(
-        tx, learningCards, data.learningCards,
-        (card) => ({
-          id: card.id as string,
-          noteVersionId: card.noteVersionId as string,
-          workspaceId: targetWorkspaceId,
-          status: (card.status as string) ?? "active",
-          schemaJson: card.schemaJson as { title: string; summary: string },
-          artifactId: (card.artifactId as string) ?? null,
-          supersededByCardId: (card.supersededByCardId as string) ?? null,
-        }),
-      );
+      // V1 退役：learning_cards / card_key_points（V1 表）已删除，不再恢复。
+      // V2 卡片数据（learning_cards_v2 / objectives_v2）在下方单独恢复。
 
-      // 10. 恢复 card_key_points（PERF-40 修复：批量 INSERT）
-      counts.cardKeyPoints = await restoreTable(
-        tx, cardKeyPoints, data.cardKeyPoints,
-        (kp) => ({
-          id: kp.id as string,
-          cardId: kp.cardId as string,
-          workspaceId: targetWorkspaceId,
-          ordinal: kp.ordinal as number,
-          claim: kp.claim as string,
-          quoteText: kp.quoteText as string,
-          segmentRef: (kp.segmentRef as Record<string, unknown>) ?? null,
-        }),
-      );
-
-      // 11. 恢复 evidences（PERF-40 修复：批量 INSERT）
+      // 恢复 evidences（PERF-40 修复：批量 INSERT）
       counts.evidences = await restoreTable(
         tx, evidences, data.evidences,
         (ev) => ({
           id: ev.id as string,
           workspaceId: targetWorkspaceId,
-          keyPointId: ev.keyPointId as string,
           blockId: (ev.blockId as string) ?? null,
           blockOrdinal: (ev.blockOrdinal as number) ?? null,
           quoteText: ev.quoteText as string,

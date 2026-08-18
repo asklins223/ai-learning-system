@@ -224,7 +224,7 @@ describe("public-beta-default: Should flags 独立（不阻塞第 8 步）", () 
     assert.equal(evalResult.states["learning_question_markers"], "disabled");
     assert.equal(evalResult.states["semantic_relationships"], "enabled");
     assert.equal(evalResult.states["tutor_workspace_expansion"], "degraded");
-    assert.equal(SHOULD_FLAG_IDS.length, 3);
+    assert.equal(SHOULD_FLAG_IDS.length, 4);
   });
 });
 

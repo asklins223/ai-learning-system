@@ -14,7 +14,7 @@ describe("Pet to Main route handoff", () => {
     );
   });
 
-  it("uses the learning-session parameters consumed by the page", () => {
+  it("routes the legacy learning-session to the V2 learning card page", () => {
     assert.equal(
       currentMainRoute({
         kind: "learning_session",
@@ -23,7 +23,7 @@ describe("Pet to Main route handoff", () => {
         sessionId: SESSION_ID,
         origin: "review",
       }),
-      `/cards/${CARD_ID}/companion?keyPoint=${KEY_POINT_ID}&session=${SESSION_ID}&origin=review`,
+      `/learning-cards/${CARD_ID}`,
     );
   });
 });

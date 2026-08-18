@@ -8,6 +8,11 @@ const pageSource = readFileSync(
   resolve(WEB_ROOT, "app/(workspace)/(default)/cards/page.tsx"),
   "utf8",
 );
+// 页面委托给 ObjectiveLibrary（Plan 23 FE-13 切流）；UI 契约断言读实现组件。
+const librarySource = readFileSync(
+  resolve(WEB_ROOT, "features/learning-objective/ObjectiveLibrary.tsx"),
+  "utf8",
+);
 const cssSource = readFileSync(
   resolve(WEB_ROOT, "app/styles/cards-list.css"),
   "utf8",
@@ -15,35 +20,37 @@ const cssSource = readFileSync(
 
 describe("learning objective library UI contract", () => {
   it("uses card-first information architecture with one primary action", () => {
-    assert.ok(pageSource.includes('data-ui="learning-objective-row"'));
-    assert.ok(pageSource.includes('data-ui="learning-objective-primary-action"'));
-    assert.ok(pageSource.includes("learningObjectivePresentation(card"));
-    assert.ok(!pageSource.includes("CardSetDeckPage"));
-    assert.ok(!pageSource.includes("CardSetCarousel"));
-    assert.ok(!pageSource.includes("api.listCardSets"));
+    assert.ok(librarySource.includes("objective-library-row"));
+    assert.ok(librarySource.includes("objective-library-row-action"));
+    assert.ok(librarySource.includes("objective-library-pagination"));
+    assert.ok(!librarySource.includes("CardSetDeckPage"));
+    assert.ok(!librarySource.includes("CardSetCarousel"));
+    assert.ok(!librarySource.includes("api.listCardSets"));
   });
 
   it("does not expose answer-like legacy summary before learning starts", () => {
     assert.ok(!pageSource.includes("schemaJson.summary"));
     assert.ok(!pageSource.includes("schemaJson?.summary"));
     assert.ok(!pageSource.includes("cardSummary("));
-    assert.ok(pageSource.includes("不会提前展示答案或关键结论"));
+    assert.ok(!librarySource.includes("canonicalAnswer"));
   });
 
   it("offers search, workflow filters and explicit sorting", () => {
-    assert.ok(pageSource.includes('type="search"'));
-    assert.ok(pageSource.includes('key: "action"'));
-    assert.ok(pageSource.includes('key: "review"'));
-    assert.ok(pageSource.includes('key: "practiced"'));
-    assert.ok(pageSource.includes('aria-label="学习目标排序方式"'));
+    assert.ok(librarySource.includes('type="search"'));
+    assert.ok(librarySource.includes('key: "due"'));
+    assert.ok(librarySource.includes('key: "run"'));
+    assert.ok(librarySource.includes('key: "newest"'));
+    assert.ok(librarySource.includes('key: "oldest"'));
+    assert.ok(librarySource.includes("aria-selected={filter === f.key}"));
   });
 
   it("includes loading, empty, error, pagination and accessible live states", () => {
-    assert.ok(pageSource.includes('className="cards-objective-skeletons"'));
-    assert.ok(pageSource.includes('role="alert"'));
-    assert.ok(pageSource.includes("还没有学习目标"));
-    assert.ok(pageSource.includes("loadMoreError"));
-    assert.ok(pageSource.includes('aria-live="polite"'));
+    assert.ok(librarySource.includes("ObjectiveSkeleton"));
+    assert.ok(librarySource.includes("ObjectiveError"));
+    assert.ok(librarySource.includes("ObjectiveEmpty"));
+    assert.ok(librarySource.includes('role="status"'));
+    assert.ok(librarySource.includes("加载更多"));
+    assert.ok(librarySource.includes("已加载"));
   });
 
   it("provides responsive objective rows and reduced-motion treatment", () => {

@@ -79,10 +79,10 @@ describe("rollback-drill: bundle 图自检（01-7 §6 冻结闭包对账）", ()
     assert.deepEqual(assertCapabilityGraphValid(), []);
   });
 
-  it("Must bundle 恰为 9 个冻结 flag；Should 恰为 3 个；全部 12 个合法", () => {
+  it("Must bundle 恰为 9 个冻结 flag；Should 恰为 4 个；全部 13 个合法", () => {
     assert.equal(MUST_BUNDLE_FLAG_IDS.length, 9);
-    assert.equal(SHOULD_FLAG_IDS.length, 3);
-    assert.equal(CAPABILITY_FLAG_IDS.length, 12);
+    assert.equal(SHOULD_FLAG_IDS.length, 4);
+    assert.equal(CAPABILITY_FLAG_IDS.length, 13);
     for (const id of CAPABILITY_FLAG_IDS) {
       assert.equal(isCapabilityFlagId(id), true);
       assert.equal(isCapabilityFlagId("not_a_flag"), false);

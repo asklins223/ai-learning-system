@@ -621,7 +621,8 @@ export async function readPublicCardV2(
     }).from(reviewSchedules).where(and(
       eq(reviewSchedules.workspaceId, ctx.workspaceId),
       eq(reviewSchedules.userId, ctx.userId),
-      eq(reviewSchedules.keyPointId, card.objectiveId),
+      eq(reviewSchedules.subjectType, "card"),
+      eq(reviewSchedules.subjectId, card.objectiveId),
       eq(reviewSchedules.status, "pending"),
     )).orderBy(desc(reviewSchedules.nextReviewAt)).limit(1);
     return parsePublicLearningCardV2({
@@ -726,19 +727,20 @@ export async function listActiveCardsV2(
 
     const schedRows = objectiveIds.length > 0
       ? await tx.select({
-          keyPointId: reviewSchedules.keyPointId,
+          subjectId: reviewSchedules.subjectId,
           status: reviewSchedules.status,
           nextReviewAt: reviewSchedules.nextReviewAt,
         }).from(reviewSchedules).where(and(
           eq(reviewSchedules.workspaceId, ctx.workspaceId),
           eq(reviewSchedules.userId, ctx.userId),
+          eq(reviewSchedules.subjectType, "card"),
           eq(reviewSchedules.status, "pending"),
-          inArray(reviewSchedules.keyPointId, objectiveIds),
+          inArray(reviewSchedules.subjectId, objectiveIds),
         )).orderBy(desc(reviewSchedules.nextReviewAt))
       : [];
     const schedByObjective = new Map<string, { status: string; nextReviewAt: Date }>();
     for (const s of schedRows) {
-      const key = s.keyPointId ? String(s.keyPointId) : "";
+      const key = s.subjectId ? String(s.subjectId) : "";
       if (!key || schedByObjective.has(key)) continue;
       schedByObjective.set(key, { status: String(s.status), nextReviewAt: s.nextReviewAt });
     }
@@ -1049,8 +1051,9 @@ async function closePendingSchedules(
     .set({ status: "cancelled", reasonCode: "lifecycle_archived" })
     .where(and(
       eq(reviewSchedules.workspaceId, workspaceId),
+      eq(reviewSchedules.subjectType, "card"),
+      eq(reviewSchedules.subjectId, objectiveId),
       eq(reviewSchedules.status, "pending"),
-      sql`(${reviewSchedules.keyPointId} = ${objectiveId} OR ${reviewSchedules.subjectId} = ${objectiveId})`,
     ))
     .returning({ id: reviewSchedules.id });
   return rows.length;

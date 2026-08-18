@@ -1,21 +1,14 @@
 import { and, asc, desc, eq, ne, sql, inArray, lt, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
-  learningCards,
-  learningCardSets,
-  cardKeyPoints,
-} from "../../db/schema/card.ts";
-import { evidences } from "../../db/schema/evidence.ts";
-import {
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
   learningObjectiveOriginsV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { notes, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
-import { CardStatus, SourceStatus } from "@ailearn/shared";
+import { SourceStatus } from "@ailearn/shared";
 import { logger } from "../../lib/logger.ts";
-import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
 
 export interface SearchResult {
   objectType: string;
@@ -34,56 +27,12 @@ export interface SearchResult {
 /**
  * PERF-06 优化：提取为模块级 SQL 片段以便 PostgreSQL planner 缓存执行计划。
  *
- * 实现说明：使用 EXISTS 子查询 + LEFT JOIN 模式。每个 EXISTS 子查询内部
- * 通过 LEFT JOIN 关联 card_set 表，避免在 EXISTS 外部做 JOIN 产生笛卡尔积。
- * 提取为模块级常量后，PostgreSQL 可以缓存执行计划，避免每次搜索重新编译。
- * 结合 PERF-05 的 GIN trigram 索引，搜索性能在大数据量下不会线性退化。
- *
- * 语义等价规则：
- * - 非 card/card_set/evidence 类型始终通过
- * - card_set 必须为 active
- * - card 必须为 active 且（无 card_set 或 card_set 为 active）
- * - evidence 必须属于 active card 且 card 的 card_set 为 active 或 null
+ * 语义等价规则（V1 卡片/V1 卡片集已下线，reindex 不再投影 card/card_set/evidence）：
+ * - card / card_set / evidence 类型不再可消费（V1 卡片搜索已删除）
+ * - 其余类型（note / source / objective 等）始终通过
  */
 const consumableSearchDocumentPredicate = sql<boolean>`(
   search_document.object_type NOT IN ('card', 'card_set', 'evidence')
-  OR (
-    search_document.object_type = 'card_set'
-    AND EXISTS (
-      SELECT 1
-      FROM learning_card_sets AS parent_set
-      WHERE parent_set.id = search_document.object_id
-        AND parent_set.workspace_id = search_document.workspace_id
-        AND parent_set.status = 'active'
-    )
-  )
-  OR (
-    search_document.object_type = 'card'
-    AND EXISTS (
-      SELECT 1
-      FROM learning_cards AS consumer_card
-      LEFT JOIN learning_card_sets AS parent_set
-        ON parent_set.id = consumer_card.card_set_id
-        AND parent_set.workspace_id = consumer_card.workspace_id
-      WHERE consumer_card.id = search_document.object_id
-        AND consumer_card.workspace_id = search_document.workspace_id
-        AND consumer_card.status = 'active'
-        AND (consumer_card.card_set_id IS NULL OR parent_set.status = 'active')
-    )
-  )
-  OR (
-    search_document.object_type = 'evidence'
-    AND EXISTS (
-      SELECT 1
-      FROM evidences AS consumer_evidence
-      JOIN learning_objectives_v2 AS consumer_objective
-        ON consumer_objective.objective_id = consumer_evidence.key_point_id
-       AND consumer_objective.workspace_id = consumer_evidence.workspace_id
-      WHERE consumer_evidence.id = search_document.object_id
-        AND consumer_evidence.workspace_id = search_document.workspace_id
-        AND consumer_objective.lifecycle = 'active'
-    )
-  )
 )`;
 
 // ─── PERF-B2 修复：search count 短 TTL 缓存 ───────────────────────────────
@@ -104,15 +53,13 @@ const REINDEX_MAX_ROWS_PER_TABLE = 50_000;
 // N#8-1: reindex 与 drift 共用同一个"前 LIMIT 子集"的截断边界，避免两路径各取任意子集。
 // 关键：两处顶层表读都用完全相同的确定排序 + 同一上限。于是 reindex 建立的索引与
 // drift 读取的业务表都覆盖同一确定子集（按 updatedAt DESC → 最近写入优先），
-// 超出截断线的实体两侧都不会读取 → 不再被误判为 missing。cardSets 无 updatedAt 列，
-// 用 createdAt DESC + id 兜底；其余三表用 updatedAt DESC + id（与 0153/索引列对齐）。
-// DB 排序规则约定：notes/sources/cards 均存在 (workspace_id, updated_at desc) 或等价索引。
+// 超出截断线的实体两侧都不会读取 → 不再被误判为 missing。
+// V1 卡片/卡片集已下线，仅保留 notes/sources 两个业务域表。
+// DB 排序规则约定：notes/sources 均存在 (workspace_id, updated_at desc) 或等价索引。
 const reindexTopOrder: Record<string, any> = (() => {
   return {
     notes: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
     sources: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
-    cardSets: (fields: any) => [desc(fields.createdAt), asc(fields.id)],
-    cards: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
   };
 })();
 
@@ -147,38 +94,6 @@ async function chunkedInArraySelect<T>(
     results.push(...(await queryFn(chunk)));
   }
   return results;
-}
-
-/**
- * 分块 IN 查询（带总行数上限）。与 chunkedInArraySelect 类似，但累计结果达到
- * max 即停止，用于把派生表（如 reindex 的 evidence）投影限制为
- * REINDEX_MAX_ROWS_PER_TABLE 以内的确定性子集，避免无界内存占用。
- * 返回是否因达到上限而被截断（capped）。截断顺序为输入 id 分块的确定顺序。
- */
-async function chunkedInArraySelectCapped<T>(
-  queryFn: (chunk: string[]) => Promise<T[]>,
-  ids: string[],
-  max: number,
-  chunkSize = 500,
-): Promise<{ rows: T[]; capped: boolean }> {
-  const results: T[] = [];
-  let capped = false;
-  for (let i = 0; i < ids.length; i += chunkSize) {
-    if (results.length >= max) {
-      capped = true;
-      break;
-    }
-    const chunk = ids.slice(i, i + chunkSize);
-    const rows = await queryFn(chunk);
-    const remaining = max - results.length;
-    if (rows.length > remaining) {
-      results.push(...rows.slice(0, remaining));
-      capped = true;
-      break;
-    }
-    results.push(...rows);
-  }
-  return { rows: results, capped };
 }
 
 /**
@@ -448,7 +363,9 @@ export interface SearchReindexResult {
  * 整个 reindex 在单个事务内执行：先删除旧索引，再逐项重建。
  * 如果任何 INSERT 失败，事务回滚，旧索引保留，不会留下空/半索引。
  *
- * 只索引当前可用对象：笔记、未归档来源、active 学习卡，以及这些卡片下的 evidence。
+ * 只索引当前可用对象：笔记、未归档来源，以及 V2 Objective（Plan 23 CS-03）。
+ * V1 卡片 / 卡片集 / 其下 evidence（learning_card_sets / learning_cards /
+ * cardKeyPoints / evidences.keyPointId）均已下线，不再投影。
  */
 export async function reindexWorkspaceSearch(
   executor: ApiTransaction,
@@ -460,10 +377,8 @@ export async function reindexWorkspaceSearch(
   const projectionStartedAt = new Date();
 
   // Collect top-level entities in parallel, then hydrate each child table in
-  // one query per entity type. The old implementation issued one blocks query
-  // per note, one segments query per source, and one key-point/evidence query
-  // per card.
-  const [noteRows, sourceRows, cardSetRows, cardRows] = await Promise.all([
+  // one query per entity type.
+  const [noteRows, sourceRows] = await Promise.all([
     // CONC-03: 软删除的笔记不应被重新索引到搜索文档中
     executor.query.notes.findMany({
       where: and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
@@ -476,34 +391,16 @@ export async function reindexWorkspaceSearch(
       limit: REINDEX_MAX_ROWS_PER_TABLE,
       orderBy: reindexTopOrder.sources(sources),
     }),
-    executor.query.learningCardSets.findMany({
-      where: and(
-        eq(learningCardSets.workspaceId, workspaceId),
-        eq(learningCardSets.status, "active"),
-      ),
-      limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: reindexTopOrder.cardSets(learningCardSets),
-    }),
-    executor.query.learningCards.findMany({
-      where: and(
-        eq(learningCards.workspaceId, workspaceId),
-        activeLearningCardConsumerPredicate(),
-      ),
-      limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: reindexTopOrder.cards(learningCards),
-    }),
   ]);
 
   // N#7-1: 每表读阶段加行上限，超出记告警（超限部分不进入投影）。
   // N#8-1: 顺带记录"本次 reindex 是否截断"，供 auto-fix 判断是否应继续自动重索引。
   let wasCapped =
     noteRows.length >= REINDEX_MAX_ROWS_PER_TABLE ||
-    sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE ||
-    cardSetRows.length >= REINDEX_MAX_ROWS_PER_TABLE ||
-    cardRows.length >= REINDEX_MAX_ROWS_PER_TABLE;
+    sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE;
   if (wasCapped) {
     logger.warn(
-      { workspaceId, limit: REINDEX_MAX_ROWS_PER_TABLE, counts: { notes: noteRows.length, sources: sourceRows.length, cardSets: cardSetRows.length, cards: cardRows.length } },
+      { workspaceId, limit: REINDEX_MAX_ROWS_PER_TABLE, counts: { notes: noteRows.length, sources: sourceRows.length } },
       "reindexWorkspaceSearch 达到单表行数上限，投影可能不完整",
     );
   }
@@ -521,8 +418,7 @@ export async function reindexWorkspaceSearch(
     note.currentVersionId ? [note.currentVersionId] : [],
   );
   const sourceIds = sourceRows.map((source) => source.id);
-  const cardIds = cardRows.map((card) => card.id);
-  const [blockRows, segmentRows, keyPointRows] = await Promise.all([
+  const [blockRows, segmentRows] = await Promise.all([
     currentVersionIds.length > 0
       ? chunkedInArraySelect(
           (chunk) => executor.query.noteBlocks.findMany({
@@ -541,47 +437,7 @@ export async function reindexWorkspaceSearch(
           sourceIds,
         )
       : Promise.resolve([]),
-    cardIds.length > 0
-      ? chunkedInArraySelect(
-          (chunk) => executor.query.cardKeyPoints.findMany({
-            where: and(
-              eq(cardKeyPoints.workspaceId, workspaceId),
-              inArray(cardKeyPoints.cardId, chunk),
-            ),
-            orderBy: [asc(cardKeyPoints.cardId), asc(cardKeyPoints.ordinal)],
-          }),
-          cardIds,
-        )
-      : Promise.resolve([]),
   ]);
-
-  const keyPointIds = keyPointRows.map((keyPoint) => keyPoint.id);
-  // N#7-1: evidence 为派生投影，限制为 REINDEX_MAX_ROWS_PER_TABLE 以内的
-  // 确定性子集（与顶层实体的行数上限一致），避免无界内存占用。
-  let wasEvidenceCapped = false;
-  let evidenceRows: Array<typeof evidences.$inferSelect> = [];
-  if (keyPointIds.length > 0) {
-    const res = await chunkedInArraySelectCapped(
-      (chunk) => executor.query.evidences.findMany({
-        where: and(
-          eq(evidences.workspaceId, workspaceId),
-          inArray(evidences.keyPointId, chunk),
-        ),
-      }),
-      keyPointIds,
-      REINDEX_MAX_ROWS_PER_TABLE,
-    );
-    evidenceRows = res.rows;
-    wasEvidenceCapped = res.capped;
-  }
-  if (wasEvidenceCapped) {
-    wasCapped = true;
-    lastReindexCapped.set(workspaceId, true);
-    logger.warn(
-      { workspaceId, limit: REINDEX_MAX_ROWS_PER_TABLE, evidences: evidenceRows.length },
-      "reindexWorkspaceSearch evidence 达到派生表行数上限，投影可能不完整",
-    );
-  }
 
   const blockContentsByVersion = new Map<string, string[]>();
   for (const block of blockRows) {
@@ -594,18 +450,6 @@ export async function reindexWorkspaceSearch(
     const contents = segmentContentsBySource.get(segment.sourceId) ?? [];
     contents.push(segment.text);
     segmentContentsBySource.set(segment.sourceId, contents);
-  }
-  const keyPointsByCard = new Map<string, typeof keyPointRows>();
-  for (const keyPoint of keyPointRows) {
-    const entries = keyPointsByCard.get(keyPoint.cardId) ?? [];
-    entries.push(keyPoint);
-    keyPointsByCard.set(keyPoint.cardId, entries);
-  }
-  const evidencesByKeyPoint = new Map<string, typeof evidenceRows>();
-  for (const evidence of evidenceRows) {
-    const entries = evidencesByKeyPoint.get(evidence.keyPointId) ?? [];
-    entries.push(evidence);
-    evidencesByKeyPoint.set(evidence.keyPointId, entries);
   }
 
   const noteData = noteRows.flatMap((note) => note.currentVersionId
@@ -630,7 +474,6 @@ export async function reindexWorkspaceSearch(
       type: source.type,
     };
   });
-  const cardsById = new Map(cardRows.map((card) => [card.id, card]));
 
   // ── Plan 23 CS-03：Objective 搜索文档 ──────────────────────────────────
   // 索引 conceptLabel / publicSummary / 来源笔记标题 / source label；
@@ -765,63 +608,6 @@ export async function reindexWorkspaceSearch(
         indexedAt: projectionStartedAt,
       })));
 
-      // card sets
-      await insertBatch(cardSetRows.map((cardSet) => ({
-        workspaceId,
-        objectType: "card_set",
-        objectId: cardSet.id,
-        title: cardSet.title,
-        body: cardSet.summary,
-        metadata: {
-          cardSetId: cardSet.id,
-          noteId: cardSet.noteId,
-          noteVersionId: cardSet.noteVersionId,
-        },
-        indexedAt: projectionStartedAt,
-      })));
-
-      // cards
-      await insertBatch(cardRows.map((card) => {
-        const keyPoints = keyPointsByCard.get(card.id) ?? [];
-        return {
-          workspaceId,
-          objectType: "card",
-          objectId: card.id,
-          title: card.schemaJson.title,
-          body: [card.schemaJson.summary, ...keyPoints.map((keyPoint) => keyPoint.claim)].join("\n"),
-          metadata: {
-            noteVersionId: card.noteVersionId,
-            cardSetId: card.cardSetId,
-            scope: card.scope,
-            ordinal: card.ordinal,
-          },
-          indexedAt: projectionStartedAt,
-        };
-      }));
-
-      // evidences
-      await insertBatch(keyPointRows.flatMap((keyPoint) =>
-        (evidencesByKeyPoint.get(keyPoint.id) ?? []).map((evidence) => {
-          const card = cardsById.get(keyPoint.cardId);
-          return {
-            workspaceId,
-            objectType: "evidence",
-            objectId: evidence.id,
-            title: keyPoint.claim,
-            body: evidence.quoteText,
-            metadata: {
-              keyPointId: keyPoint.id,
-              cardId: keyPoint.cardId,
-              cardSetId: card?.cardSetId ?? null,
-              scope: card?.scope ?? null,
-              ordinal: card?.ordinal ?? null,
-              alignment: evidence.alignment,
-            },
-            indexedAt: projectionStartedAt,
-          };
-        }),
-      ));
-
       // Plan 23 CS-03：Objective 文档（conceptLabel/publicSummary/来源标题；
       // canonicalAnswer/rubric/learningSupport 永不进入搜索文档）。
       await insertBatch(objectiveData.map((objective) => ({
@@ -856,9 +642,9 @@ export async function reindexWorkspaceSearch(
     indexed = {
       note: noteData.length,
       source: sourceData.length,
-      cardSet: cardSetRows.length,
-      card: cardRows.length,
-      evidence: evidenceRows.length,
+      cardSet: 0,
+      card: 0,
+      evidence: 0,
       objective: objectiveData.length,
     };
 
@@ -884,47 +670,8 @@ export async function reindexWorkspaceSearch(
                   AND domain_source.status <> ${SourceStatus.ARCHIVED}
               )
             )
-            OR (
-              search_document.object_type = 'card_set'
-              AND NOT EXISTS (
-                SELECT 1 FROM learning_card_sets AS domain_card_set
-                WHERE domain_card_set.id = search_document.object_id
-                  AND domain_card_set.workspace_id = ${workspaceId}
-                  AND domain_card_set.status = 'active'
-              )
-            )
-            OR (
-              search_document.object_type = 'card'
-              AND NOT EXISTS (
-                SELECT 1 FROM learning_cards AS domain_card
-                WHERE domain_card.id = search_document.object_id
-                  AND domain_card.workspace_id = ${workspaceId}
-                  AND domain_card.status = ${CardStatus.ACTIVE}
-                  AND (
-                    domain_card.card_set_id IS NULL
-                    OR EXISTS (
-                      SELECT 1
-                      FROM learning_card_sets AS parent_set
-                      WHERE parent_set.id = domain_card.card_set_id
-                        AND parent_set.workspace_id = domain_card.workspace_id
-                        AND parent_set.status = 'active'
-                    )
-                  )
-              )
-            )
-            OR (
-              search_document.object_type = 'evidence'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM evidences AS domain_evidence
-                JOIN learning_objectives_v2 AS domain_objective
-                  ON domain_objective.objective_id = domain_evidence.key_point_id
-                 AND domain_objective.workspace_id = domain_evidence.workspace_id
-                WHERE domain_evidence.id = search_document.object_id
-                  AND domain_evidence.workspace_id = ${workspaceId}
-                  AND domain_objective.lifecycle = 'active'
-              )
-            )
+            -- V1 卡片/卡片集/其 evidence 已下线：清除任何遗留的旧版投影文档。
+            OR search_document.object_type IN ('card', 'card_set', 'evidence')
           )
       `);
   } catch (err) {
@@ -992,19 +739,11 @@ export async function detectSearchDrift(
   const staleTitles: { objectType: string; objectId: string; indexedTitle: string | null; actualTitle: string }[] = [];
 
   // PERF-07: Parallelize queries across entity types.
-  // Previously 12 serial DB round-trips; now 2 parallel batches.
+  // Previously 12 serial DB round-trips; now a small parallel batch.
+  // V1 卡片/卡片集/其 evidence 已下线，drift 只对比 note / source。
 
-  // ── Batch 1: All business table + index queries for notes, sources, card_sets, cards ──
-  const [
-    noteRows,
-    indexedNotes,
-    sourceRows,
-    indexedSources,
-    cardSetRows,
-    indexedCardSets,
-    cardRows,
-    indexedCards,
-  ] = await Promise.all([
+  // ── Batch 1: notes + sources 业务表与索引查询 ──
+  const [noteRows, indexedNotes, sourceRows, indexedSources] = await Promise.all([
     // 1a. Notes business table (CONC-03: exclude soft-deleted)
     // N#8-1: 与 reindex 用同一上限 + 同一确定排序，读取同一确定截断子集，避免把超线实体误判 missing。
     executor.query.notes.findMany({
@@ -1034,43 +773,6 @@ export async function detectSearchDrift(
       limit: REINDEX_MAX_ROWS_PER_TABLE,
       orderBy: [desc(searchDocuments.indexedAt), asc(searchDocuments.objectId)],
     }),
-    // 1e. Card sets business table (active only)
-    executor.query.learningCardSets.findMany({
-      where: and(
-        eq(learningCardSets.workspaceId, workspaceId),
-        eq(learningCardSets.status, "active"),
-      ),
-      columns: { id: true, title: true },
-      limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: reindexTopOrder.cardSets(learningCardSets),
-    }),
-    // 1f. Card sets index (deterministic limit matches business-table cap; capped side = known truncation)
-    executor.query.searchDocuments.findMany({
-      where: and(
-        eq(searchDocuments.workspaceId, workspaceId),
-        eq(searchDocuments.objectType, "card_set"),
-      ),
-      columns: { objectId: true, title: true },
-      limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: [desc(searchDocuments.indexedAt), asc(searchDocuments.objectId)],
-    }),
-    // 1g. Cards business table (active consumer predicate)
-    executor.query.learningCards.findMany({
-      where: and(
-        eq(learningCards.workspaceId, workspaceId),
-        activeLearningCardConsumerPredicate(),
-      ),
-      columns: { id: true, schemaJson: true },
-      limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: reindexTopOrder.cards(learningCards),
-    }),
-    // 1h. Cards index (deterministic limit matches business-table cap; capped side = known truncation)
-    executor.query.searchDocuments.findMany({
-      where: and(eq(searchDocuments.workspaceId, workspaceId), eq(searchDocuments.objectType, "card")),
-      columns: { objectId: true, title: true },
-      limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: [desc(searchDocuments.indexedAt), asc(searchDocuments.objectId)],
-    }),
   ]);
 
   // N#8-1: 记录各顶层业务域表读是否命中行数上限（截断）。截断意味着域名表真实超过
@@ -1082,9 +784,9 @@ export async function detectSearchDrift(
   const capped: Record<"note" | "source" | "cardSet" | "card" | "evidence", boolean> = {
     note: noteRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
     source: sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
-    cardSet: cardSetRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
-    card: cardRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
-    // evidence 在 batch 2 得到 indexedEvidences 后填充（见下方证据漂移处理前）。
+    // V1 卡片/卡片集/其 evidence 已下线，无漂移检测。
+    cardSet: false,
+    card: false,
     evidence: false,
   };
 
@@ -1132,125 +834,19 @@ export async function detectSearchDrift(
     }
   }
 
-  // Process card sets drift
-  const cardSetIds = new Set(cardSetRows.map((cardSet) => cardSet.id));
-  const cardSetTitleMap = new Map(cardSetRows.map((cardSet) => [cardSet.id, cardSet.title]));
-  const indexedCardSetIds = new Set(indexedCardSets.map((document) => document.objectId));
-  for (const document of indexedCardSets) {
-    if (!cardSetIds.has(document.objectId)) {
-      if (!capped.cardSet) {
-        ghosts.push({ objectType: "card_set", objectId: document.objectId });
-      }
-    } else {
-      const actualTitle = cardSetTitleMap.get(document.objectId);
-      if (actualTitle !== undefined && actualTitle !== document.title) {
-        staleTitles.push({ objectType: "card_set", objectId: document.objectId, indexedTitle: document.title, actualTitle });
-      }
-    }
-  }
-  for (const id of cardSetIds) {
-    if (!indexedCardSetIds.has(id)) {
-      missing.push({ objectType: "card_set", objectId: id });
-    }
-  }
-
-  // Process cards drift
-  const cardIds = new Set(cardRows.map((c) => c.id));
-  const cardTitleMap = new Map(
-    cardRows.map((c) => [c.id, (c.schemaJson as { title?: string }).title ?? ""]),
-  );
-  const indexedCardIds = new Set(indexedCards.map((d) => d.objectId));
-  for (const doc of indexedCards) {
-    if (!cardIds.has(doc.objectId)) {
-      if (!capped.card) {
-        ghosts.push({ objectType: "card", objectId: doc.objectId });
-      }
-    } else {
-      const actualTitle = cardTitleMap.get(doc.objectId);
-      if (actualTitle !== undefined && actualTitle !== doc.title) {
-        staleTitles.push({ objectType: "card", objectId: doc.objectId, indexedTitle: doc.title, actualTitle });
-      }
-    }
-  }
-  for (const id of cardIds) {
-    if (!indexedCardIds.has(id)) {
-      missing.push({ objectType: "card", objectId: id });
-    }
-  }
-
-  // ── Batch 2: Evidence queries (depend on cardIds) + stale body detection (depends on noteRows) ──
-  const activeCardIds = Array.from(cardIds);
+  // ── Batch 2: stale body detection (depends on noteRows) ──
   const currentVersionIds = noteRows.flatMap((note) =>
     note.currentVersionId ? [note.currentVersionId] : [],
   );
-
-  // Run evidence and stale-body queries in parallel
-  const [evidenceIds, indexedEvidences, currentBlocks] = await Promise.all([
-    // Evidence: query keyPoints → evidences (chained, but parallel with other batch 2 queries)
-    (async (): Promise<Set<string>> => {
-      if (activeCardIds.length === 0) return new Set<string>();
-      const activeKpRows = await chunkedInArraySelect(
-        (chunk) => executor.query.cardKeyPoints.findMany({
-          where: and(
-            eq(cardKeyPoints.workspaceId, workspaceId),
-            inArray(cardKeyPoints.cardId, chunk),
-          ),
-          columns: { id: true },
+  const currentBlocks = currentVersionIds.length > 0
+    ? await chunkedInArraySelect(
+        (chunk) => executor.query.noteBlocks.findMany({
+          where: inArray(noteBlocks.versionId, chunk),
+          orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
         }),
-        activeCardIds,
-      );
-      const activeKpIds = activeKpRows.map((k) => k.id);
-      if (activeKpIds.length === 0) return new Set<string>();
-      const evidenceRows = await chunkedInArraySelect(
-        (chunk) => executor.query.evidences.findMany({
-          where: and(
-            eq(evidences.workspaceId, workspaceId),
-            inArray(evidences.keyPointId, chunk),
-          ),
-          columns: { id: true },
-        }),
-        activeKpIds,
-      );
-      return new Set(evidenceRows.map((e) => e.id));
-    })(),
-    // Evidence index (deterministic limit keeps drift analysis bounded; capped side = known truncation)
-    executor.query.searchDocuments.findMany({
-      where: and(eq(searchDocuments.workspaceId, workspaceId), eq(searchDocuments.objectType, "evidence")),
-      columns: { objectId: true },
-      limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: [desc(searchDocuments.indexedAt), asc(searchDocuments.objectId)],
-    }),
-    // Stale body: batch-read note blocks
-    currentVersionIds.length > 0
-      ? chunkedInArraySelect(
-          (chunk) => executor.query.noteBlocks.findMany({
-            where: inArray(noteBlocks.versionId, chunk),
-            orderBy: [asc(noteBlocks.versionId), asc(noteBlocks.ordinal)],
-          }),
-          currentVersionIds,
-        )
-      : Promise.resolve([]),
-  ]);
-
-  // 证据索引读同样被 REINDEX_MAX_ROWS_PER_TABLE 限行：命中上限即视为已知截断。
-  capped.evidence = indexedEvidences.length >= REINDEX_MAX_ROWS_PER_TABLE;
-
-  // Process evidence drift
-  const indexedEvidenceIds = new Set(indexedEvidences.map((d) => d.objectId));
-  for (const doc of indexedEvidences) {
-    if (!evidenceIds.has(doc.objectId)) {
-      ghosts.push({ objectType: "evidence", objectId: doc.objectId });
-    }
-  }
-  for (const id of evidenceIds) {
-    if (!indexedEvidenceIds.has(id)) {
-      // 证据索引读被截断时，业务侧超线 id 可能只是尚未进入确定读窗口，
-      // 而非真正缺失 —— 属既定截断，不报 missing（避免误触发 auto-fix）。
-      if (!capped.evidence) {
-        missing.push({ objectType: "evidence", objectId: id });
-      }
-    }
-  }
+        currentVersionIds,
+      )
+    : [];
 
   // Process stale bodies
   // BUG-51 修复：过滤 image block，与 upsertSearchDocument 保持一致。
@@ -1279,16 +875,16 @@ export async function detectSearchDrift(
   const expected = {
     note: noteIds.size,
     source: sourceIds.size,
-    cardSet: cardSetIds.size,
-    card: cardIds.size,
-    evidence: evidenceIds.size,
+    cardSet: 0,
+    card: 0,
+    evidence: 0,
   };
   const actual = {
     note: indexedNotes.length,
     source: indexedSources.length,
-    cardSet: indexedCardSets.length,
-    card: indexedCards.length,
-    evidence: indexedEvidences.length,
+    cardSet: 0,
+    card: 0,
+    evidence: 0,
   };
 
   return {

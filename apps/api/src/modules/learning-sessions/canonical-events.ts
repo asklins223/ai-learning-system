@@ -886,12 +886,10 @@ export function pgCanonicalEventStore(tx: ApiTransaction): CanonicalEventStore {
           const r = fact.row;
           if (r.submissionId) conds.push(eq(validationEvents.submissionId, r.submissionId));
           if (r.questionId) conds.push(eq(validationEvents.questionId, r.questionId));
-          if (r.cardId) conds.push(eq(validationEvents.cardId, r.cardId));
-          if (r.keyPointId) conds.push(eq(validationEvents.keyPointId, r.keyPointId));
           if (r.sourceFingerprint) conds.push(eq(validationEvents.sourceFingerprint, r.sourceFingerprint));
-          // 幂等粒度对齐 validation_events_input_unique_idx(workspace, card, kp, user,
+          // 幂等粒度对齐 validation_events_input_unique_idx(workspace_id, user_id,
           // question, user_answer)：同一 Key Point 的独立 Episode 若作答不同必须
-          // 各自落 validation 事实，不能被旧行的 (keyPointId+sourceFingerprint) 误判幂等。
+          // 各自落 validation 事实，不能被旧行的 sourceFingerprint 误判幂等。
           conds.push(eq(validationEvents.question, r.question));
           conds.push(eq(validationEvents.userAnswer, r.userAnswer));
           const found = await tx
@@ -966,22 +964,15 @@ export function pgCanonicalEventStore(tx: ApiTransaction): CanonicalEventStore {
         case "validation": {
           const r = fact.row;
           // 冲突后回查只按唯一索引键
-          // validation_events_input_unique_idx(workspace_id, card_id,
-          // COALESCE(key_point_id,...), user_id, question, user_answer) 过滤：
-          // 带 submissionId/questionId/sourceFingerprint 等附加条件可能查不到
-          // 已被索引判定为重复的行（同一 kp 完全相同的作答、不同 submissionId）。
+          // validation_events_input_unique_idx(workspace_id, user_id, question,
+          // user_answer) 过滤：带 submissionId/questionId/sourceFingerprint 等
+          // 附加条件可能查不到已被索引判定为重复的行（同一作答、不同 submissionId）。
           const conds = [
             eq(validationEvents.workspaceId, scope.workspaceId),
             eq(validationEvents.userId, scope.userId),
-            eq(validationEvents.cardId, r.cardId),
             eq(validationEvents.question, r.question),
             eq(validationEvents.userAnswer, r.userAnswer),
           ];
-          if (r.keyPointId) {
-            conds.push(eq(validationEvents.keyPointId, r.keyPointId));
-          } else {
-            conds.push(sql`${validationEvents.keyPointId} IS NULL`);
-          }
           const found = await tx
             .select({ id: validationEvents.id })
             .from(validationEvents)
@@ -1051,7 +1042,7 @@ export function pgCanonicalFactReader(tx: ApiTransaction): CanonicalFactReader {
           scheduleId: reviewSchedules.id,
           subjectType: reviewSchedules.subjectType,
           subjectId: reviewSchedules.subjectId,
-          keyPointId: reviewSchedules.keyPointId,
+          keyPointId: reviewSchedules.subjectId, // V2: card 型 subjectId = objectiveId（V1 keyPointId 已退役）
           status: reviewSchedules.status,
           nextReviewAt: reviewSchedules.nextReviewAt,
           intervalDays: reviewSchedules.intervalDays,
@@ -1089,7 +1080,7 @@ export function pgCanonicalFactReader(tx: ApiTransaction): CanonicalFactReader {
       const rows = await tx
         .select({
           eventId: validationEvents.id,
-          keyPointId: validationEvents.keyPointId,
+          keyPointId: sql<string | null>`NULL`, // V2: validation_events 已移除 card/keyPoint 列，无直接 objectiveId 列
           outcome: validationEvents.outcome,
           confidence: validationEvents.confidence,
           createdAt: validationEvents.createdAt,

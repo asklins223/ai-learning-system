@@ -27,8 +27,8 @@ export function routePath(route: AllowedMainRouteV2): string {
     case "today": return "/today";
     case "source": return route.sourceId ? `/sources/${encodeURIComponent(route.sourceId)}` : "/sources";
     case "note": return `/notes/${encodeURIComponent(route.noteId)}`;
-    case "card_set": return `/card-sets/${encodeURIComponent(route.cardSetId)}`;
-    case "card": return `/cards/${encodeURIComponent(route.cardId)}`;
+    case "card_set": return "/cards"; // V2：无卡组概念，回学习目标库（/cards 已是 ObjectiveLibrary）
+    case "card": return `/learning-cards/${encodeURIComponent(route.cardId)}`; // V2 学习卡详情
     case "review": return route.scheduleId ? `/review?scheduleId=${encodeURIComponent(route.scheduleId)}` : "/review";
     case "star_map":
       // §18.1：restore_graph_viewport（restoreRun）优先；focus_graph_node 带 lens。

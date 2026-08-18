@@ -104,7 +104,9 @@ test("persona 输入边界：recent ≤20 条、12k/2k/4k 截断", () => {
   const parsed = JSON.parse(messages[1].content as string);
   assert.equal(parsed.recentMessages.length, 20);
   assert.equal(parsed.currentMessage.length, 4_000);
-  assert.ok(parsed.pageContext.length <= 2_000);
+  // 记忆/上下文不再截断（截断的残缺上下文会产生误导；6bf2ac3）：
+  // pageContext 以完整 canonical JSON 注入。
+  assert.equal(parsed.pageContext, canonicalJsonV1({ big: "y".repeat(3_000) }));
   assert.equal(parsed.workspacePolicy.sendToExternal, false, "null policy 回退默认投影");
 });
 

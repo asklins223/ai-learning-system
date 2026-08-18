@@ -30,9 +30,9 @@ export interface BridgeScope {
 const HYDRATABLE_TABLES = new Set([
   "sources",
   "notes",
-  "learning_card_sets",
-  "learning_cards",
-  "card_key_points",
+  // V1 卡/卡组/要点表已随旧栈退役：V2 用 learning_cards_v2 / learning_objectives_v2。
+  "learning_cards_v2",
+  "learning_objectives_v2",
   "evidences",
   "review_schedules",
   "learning_runs",

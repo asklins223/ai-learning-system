@@ -38,7 +38,6 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { cardKeyPoints } from "./card.ts";
 import { users } from "./identity.ts";
 
 // ─── 列级枚举（服务端存储值，与 wire contract 字面量一致）────────────────
@@ -114,7 +113,7 @@ export const learningRuns = pgTable(
     assistantSessionId: uuid("assistant_session_id"),
     origin: jsonb("origin").notNull(),
     returnTarget: jsonb("return_target").notNull(),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "restrict" }),
+    // V1 keyPoint reference removed (cardKeyPoints table deleted)
     targetFingerprint: text("target_fingerprint").notNull(),
     goal: text("goal").notNull(), // stabilize | clarify | repair | transfer | explore
     phase: text("phase").$type<LearningRunPhase>().notNull().default("preparing"),
@@ -148,7 +147,7 @@ export const learningRuns = pgTable(
     workspaceUserPhaseIdx: index("learning_runs_workspace_user_phase_idx").on(
       t.workspaceId, t.userId, t.phase,
     ),
-    keyPointIdx: index("learning_runs_key_point_idx").on(t.workspaceId, t.userId, t.keyPointId),
+    // V1 keyPointIdx removed
     activeTaskIdx: index("learning_runs_active_task_idx").on(t.activeTaskId),
     // 0133：E17 backfill 幂等（legacyEpisodeId 部分唯一）。
     legacyEpisodeUnique: uniqueIndex("learning_runs_legacy_episode_unique_idx")
@@ -166,7 +165,7 @@ export const learningRunPrivateContracts = pgTable(
     runId: uuid("run_id").notNull().references(() => learningRuns.id, { onDelete: "cascade" }),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    // V1 keyPoint reference removed (cardKeyPoints table deleted)
     targetFingerprint: text("target_fingerprint").notNull(),
     runtimeEpoch: integer("runtime_epoch").notNull(),
     timeBudgetSeconds: integer("time_budget_seconds").notNull(),
@@ -506,7 +505,7 @@ export const learningTaskPresentationHistory = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    // V1 keyPoint reference removed (cardKeyPoints table deleted)
     intent: text("intent").notNull(),
     publicPayloadHash: text("public_payload_hash").notNull(),
     interactionFamily: text("interaction_family").notNull(),
@@ -518,11 +517,9 @@ export const learningTaskPresentationHistory = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    userKeyPointIntentIdx: index("learning_task_pres_hist_user_kp_intent_idx").on(
-      t.workspaceId, t.userId, t.keyPointId, t.intent, t.presentedAt,
-    ),
-    payloadHashIdx: index("learning_task_pres_hist_payload_hash_idx").on(
-      t.workspaceId, t.userId, t.keyPointId, t.publicPayloadHash,
+    // V1 keyPointIdx indexes removed
+    intentIdx: index("learning_task_pres_hist_intent_idx").on(
+      t.workspaceId, t.userId, t.intent, t.presentedAt,
     ),
     runIdx: index("learning_task_pres_hist_run_idx").on(t.runId),
   }),
@@ -539,7 +536,7 @@ export const canonicalLearningEventOutbox = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     runId: uuid("run_id").notNull().references(() => learningRuns.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    // V1 keyPoint reference removed (cardKeyPoints table deleted)
     envelope: jsonb("envelope").notNull(),
     status: text("status").notNull().default("pending"), // pending | published | failed
     attempts: integer("attempts").notNull().default(0),
@@ -566,7 +563,7 @@ export const practiceTrailEventOutbox = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     runId: uuid("run_id").notNull().references(() => learningRuns.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    // V1 keyPoint reference removed (cardKeyPoints table deleted)
     scope: text("scope").notNull(), // official_user | sandbox
     event: jsonb("event").notNull(),
     status: text("status").notNull().default("pending"),
@@ -689,12 +686,12 @@ export const keyPointPrerequisites = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
-    prerequisiteKeyPointId: uuid("prerequisite_key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    // V1 keyPoint reference removed (cardKeyPoints table deleted)
+    // V1 prerequisiteKeyPoint reference removed (cardKeyPoints table deleted)
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    uniquePrereq: uniqueIndex("key_point_prerequisites_unique_idx").on(t.workspaceId, t.keyPointId, t.prerequisiteKeyPointId),
-    kpIdx: index("key_point_prerequisites_kp_idx").on(t.workspaceId, t.keyPointId),
+    // V1 keyPoint indexes removed
+    workspaceIdx: index("key_point_prerequisites_workspace_idx").on(t.workspaceId),
   }),
 );

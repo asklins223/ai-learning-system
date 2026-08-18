@@ -155,96 +155,6 @@ function buildStartPayloadV2(
   };
 }
 
-/**
- * 过渡期回退：legacy card_key_points / learning_sessions 路径。
- * 只在没有 active Objective 时触发（RL-17 后整个函数可移除）。
- */
-async function resolveLegacyCompanionCandidates(
-  tx: ApiTransaction,
-  args: { workspaceId: string; userId: string },
-): Promise<{
-  resumeCandidate: CompanionLearningContextV1["resumeCandidate"];
-  startCandidate: CompanionLearningContextV1["startCandidate"];
-  learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"];
-  learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"];
-}> {
-  const empty: {
-    resumeCandidate: CompanionLearningContextV1["resumeCandidate"];
-    startCandidate: CompanionLearningContextV1["startCandidate"];
-    learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"];
-    learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"];
-  } = {
-    resumeCandidate: null,
-    startCandidate: null,
-    learningRunResumeCandidate: null,
-    learningRunStartCandidate: null,
-  };
-  // 最近 active learning_run（学习运行优先于 learning_session）。
-  const runResumeRows = await tx.execute<{ id: string; key_point_id: string }>(sql`
-    SELECT r.id, r.key_point_id
-    FROM learning_runs r
-    WHERE r.workspace_id = ${args.workspaceId}
-      AND r.user_id = ${args.userId}
-      AND r.phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
-      AND r.sandbox_namespace_id IS NULL
-    ORDER BY r.created_at DESC
-    LIMIT 1
-  `);
-  if (runResumeRows[0]) {
-    const titleRows = await tx.execute<{ claim: string | null }>(sql`
-      SELECT k.claim FROM card_key_points k
-      WHERE k.id = ${runResumeRows[0].key_point_id} AND k.workspace_id = ${args.workspaceId}
-      LIMIT 1
-    `);
-    const title = sanitizeText(titleRows[0]?.claim ?? "", 80) || "继续当前学习";
-    const payload = { kind: "resume_learning_run", runId: runResumeRows[0].id };
-    empty.learningRunResumeCandidate = {
-      candidateId: "learning_run_resume",
-      runId: runResumeRows[0].id,
-      title,
-      targetSummary: sanitizeText(`继续学习：${title}`, 160),
-      impactSummary: "恢复当前学习运行",
-      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
-    };
-  }
-  // 最近有 key point 的卡（构造 start_learning_run 候选；幂等键按 keyPoint 稳定）。
-  const runStartRows = await tx.execute<{
-    key_point_id: string;
-    card_id: string;
-    claim: string | null;
-  }>(sql`
-    SELECT k.id AS key_point_id, k.card_id, k.claim
-    FROM card_key_points k
-    WHERE k.workspace_id = ${args.workspaceId}
-    ORDER BY k.updated_at DESC
-    LIMIT 1
-  `);
-  if (runStartRows[0]) {
-    const claim = runStartRows[0].claim ?? "";
-    const title = sanitizeText(claim, 80) || "开始三分钟巩固";
-    const idempotencyKey = `pet-menu:${runStartRows[0].key_point_id}`;
-    const payload = {
-      kind: "start_learning_run",
-      request: {
-        version: 1,
-        origin: { kind: "card", cardId: runStartRows[0].card_id, keyPointId: runStartRows[0].key_point_id },
-        goal: "stabilize",
-        clientRequestId: idempotencyKey,
-        idempotencyKey,
-      },
-    };
-    empty.learningRunStartCandidate = {
-      candidateId: "learning_run_start",
-      cardId: runStartRows[0].card_id,
-      keyPointId: runStartRows[0].key_point_id,
-      title,
-      targetSummary: sanitizeText(`用三分钟巩固：${title}`, 160),
-      impactSummary: "创建一次三分钟学习运行，完成后按真实结果安排复习",
-      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
-    };
-  }
-  return empty;
-}
 
 async function resolveCompanionLearningContextInTransaction(
   tx: ApiTransaction,
@@ -354,15 +264,8 @@ async function resolveCompanionLearningContextInTransaction(
     void v2RunId;
   }
 
-  // 过渡期回退：没有 active Objective 且无可用候选时，保留 legacy 路径
-  //（迁移未完成的工作区；这些工作区的 card_key_points 行仍然保留）。
-  if (!learningRunStartCandidate && !learningRunResumeCandidate) {
-    const fallback = await resolveLegacyCompanionCandidates(tx, args);
-    resumeCandidate = fallback.resumeCandidate;
-    startCandidate = fallback.startCandidate;
-    learningRunResumeCandidate = fallback.learningRunResumeCandidate;
-    learningRunStartCandidate = fallback.learningRunStartCandidate;
-  }
+  // V1 过渡回退已移除（card_key_points/learning_sessions 旧表已随旧栈退役，
+  // 无 active Objective 时即为空上下文，不构造 V1 候选）。
 
   const contextRevision = sha256Utf8V1(
     canonicalJsonV1({ resumeCandidate, startCandidate, learningRunResumeCandidate, learningRunStartCandidate }),

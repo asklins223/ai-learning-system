@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { db } from "../db/client.ts";
-import { evidences, reviewSchedules, understandingEvents } from "../db/schema/evidence.ts";
+import { reviewSchedules, understandingEvents } from "../db/schema/evidence.ts";
+import {
+  learningObjectiveEvidenceBindingsV2,
+} from "../db/schema/card-generation-v2.ts";
 import {
   getUnderstandingStates,
 } from "../modules/understanding/service.ts";
@@ -17,64 +20,49 @@ const FAKE_TX = {
 } as any;
 const original = {
   select: mutableDb.select,
-  learningCardsFindMany: mutableDb.query.learningCards.findMany,
-  cardKeyPointsFindMany: mutableDb.query.cardKeyPoints.findMany,
-  evidenceOverridesFindMany: mutableDb.query.evidenceOverrides.findMany,
+  learningCardsV2FindMany: mutableDb.query.learningCardsV2.findMany,
+  learningObjectivesV2FindMany: mutableDb.query.learningObjectivesV2.findMany,
 };
 
 after(() => {
   mutableDb.select = original.select;
-  mutableDb.query.learningCards.findMany = original.learningCardsFindMany;
-  mutableDb.query.cardKeyPoints.findMany = original.cardKeyPointsFindMany;
-  mutableDb.query.evidenceOverrides.findMany = original.evidenceOverridesFindMany;
+  mutableDb.query.learningCardsV2.findMany = original.learningCardsV2FindMany;
+  mutableDb.query.learningObjectivesV2.findMany = original.learningObjectivesV2FindMany;
 });
 
 type StateDbFixture = {
+  // V2 active learning cards（learningCardsV2.findMany）：
+  // { cardId, objectiveId, lifecycle:'active', publicSummary, front, createdAt }
   cards: any[];
+  // learningObjectivesV2 投影行（解析 currentObjectiveRevisionId）
+  objectives?: any[];
+  // understanding_events 聚合行（按 subjectId = objectiveId）
   events?: any[];
-  keyPoints?: any[];
-  evidenceRows?: any[];
-  overrides?: any[];
-  validationReviews?: any[];
+  // learningObjectiveEvidenceBindingsV2 行（{ objectiveRevisionId, supportStrength }）
+  bindings?: any[];
+  // review_schedules 聚合行（subjectType='card' + subjectId=objectiveId）
   cardReviews?: any[];
 };
 
 function installStateDb(fixture: StateDbFixture): void {
-  mutableDb.query.learningCards.findMany = async () => fixture.cards;
-  mutableDb.query.cardKeyPoints.findMany = async () => fixture.keyPoints ?? [];
-  mutableDb.query.evidenceOverrides.findMany = async () => fixture.overrides ?? [];
+  mutableDb.query.learningCardsV2.findMany = async () => fixture.cards;
+  mutableDb.query.learningObjectivesV2.findMany = async () => fixture.objectives ?? [];
   mutableDb.select = () => ({
     from: (table: unknown) => {
       if (table === understandingEvents) {
         return {
-          innerJoin: () => ({
-            // PERF-23：服务端用 SQL GROUP BY 聚合 understanding_events
-            where: () => ({ groupBy: async () => fixture.events ?? [] }),
-          }),
+          // PERF-23：服务端用 SQL GROUP BY 聚合 understanding_events
+          where: () => ({ groupBy: async () => fixture.events ?? [] }),
         };
       }
-      if (table === evidences) {
-        return { where: async () => fixture.evidenceRows ?? [] };
+      if (table === learningObjectiveEvidenceBindingsV2) {
+        return { where: async () => fixture.bindings ?? [] };
       }
       if (table === reviewSchedules) {
         return {
-          // PERF-23 后：validation + card 两类 schedule 合并为一次 leftJoin 查询，
-          // 结果行的 cardId = COALESCE(validation.card_id, schedule.subject_id)。
-          leftJoin: () => ({
-            where: () => ({
-              orderBy: async () => [
-                ...(fixture.validationReviews ?? []).map((r) => ({
-                  cardId: r.cardId,
-                  nextReviewAt: r.nextReviewAt,
-                  status: r.status,
-                })),
-                ...(fixture.cardReviews ?? []).map((r) => ({
-                  cardId: r.subjectId,
-                  nextReviewAt: r.nextReviewAt,
-                  status: r.status,
-                })),
-              ],
-            }),
+          // V2：objective 维度复习计划用 subjectType='card' + subjectId=objectiveId
+          where: () => ({
+            orderBy: async () => fixture.cardReviews ?? [],
           }),
         };
       }
@@ -83,10 +71,13 @@ function installStateDb(fixture: StateDbFixture): void {
   });
 }
 
-function stateCard(id: string, title?: string): any {
+function stateCard(id: string, objectiveId: string, title?: string): any {
   return {
-    id,
-    schemaJson: title === undefined ? {} : { title },
+    cardId: id,
+    objectiveId,
+    lifecycle: "active",
+    publicSummary: title ?? "",
+    front: title === undefined ? {} : { cue: title },
     createdAt: new Date("2026-07-20T00:00:00.000Z"),
   };
 }
@@ -104,88 +95,84 @@ describe("understanding state aggregation", () => {
     assert.equal(selects, 0);
   });
 
-  it("derives every visible state and per-user evidence/review aggregates", async () => {
+  it("derives every visible state and per-objective evidence/review aggregates", async () => {
     const cards = [
-      stateCard("card-misunderstood", "Misunderstood"),
-      stateCard("card-due", "Due"),
-      stateCard("card-unseen"),
-      stateCard("card-validated", "Validated"),
-      stateCard("card-reviewed", "Reviewed"),
-      stateCard("card-seen", "Seen"),
-      stateCard("card-unknown", "Unknown"),
+      stateCard("card-misunderstood", "obj-misunderstood", "Misunderstood"),
+      stateCard("card-due", "obj-due", "Due"),
+      stateCard("card-unseen", "obj-unseen"),
+      stateCard("card-validated", "obj-validated", "Validated"),
+      stateCard("card-reviewed", "obj-reviewed", "Reviewed"),
+      stateCard("card-seen", "obj-seen", "Seen"),
+      stateCard("card-unknown", "obj-unknown", "Unknown"),
     ];
     installStateDb({
       cards,
-      // PERF-23 后服务端用 SQL GROUP BY 聚合，fixture 提供聚合行：
-      // { cardId, latestEventType, latestValidationEventType, lastValidatedAt, misunderstandingCount }
+      objectives: [
+        { objectiveId: "obj-misunderstood", currentObjectiveRevisionId: "rev-misunderstood" },
+        { objectiveId: "obj-due", currentObjectiveRevisionId: "rev-due" },
+        { objectiveId: "obj-unseen", currentObjectiveRevisionId: "rev-unseen" },
+        { objectiveId: "obj-validated", currentObjectiveRevisionId: "rev-validated" },
+        { objectiveId: "obj-reviewed", currentObjectiveRevisionId: "rev-reviewed" },
+        { objectiveId: "obj-seen", currentObjectiveRevisionId: "rev-seen" },
+        { objectiveId: "obj-unknown", currentObjectiveRevisionId: null },
+      ],
+      // events 按 subjectId = objectiveId 聚合（V2：objective 承担旧 keyPointId 角色）
       events: [
         {
-          cardId: "card-misunderstood",
+          subjectId: "obj-misunderstood",
           latestEventType: "reviewed",
           latestValidationEventType: "misunderstood",
           lastValidatedAt: new Date("2026-07-20T00:00:00Z"),
           misunderstandingCount: 2,
         },
         {
-          cardId: "card-due",
+          subjectId: "obj-due",
           latestEventType: "seen",
           latestValidationEventType: null,
           lastValidatedAt: null,
           misunderstandingCount: 0,
         },
         {
-          cardId: "card-validated",
+          subjectId: "obj-validated",
           latestEventType: "validated",
           latestValidationEventType: "validated",
           lastValidatedAt: new Date("2026-07-20T00:00:00Z"),
           misunderstandingCount: 0,
         },
         {
-          cardId: "card-reviewed",
+          subjectId: "obj-reviewed",
           latestEventType: "reviewed",
           latestValidationEventType: null,
           lastValidatedAt: null,
           misunderstandingCount: 0,
         },
         {
-          cardId: "card-seen",
+          subjectId: "obj-seen",
           latestEventType: "seen",
           latestValidationEventType: null,
           lastValidatedAt: null,
           misunderstandingCount: 0,
         },
         {
-          cardId: "card-unknown",
+          subjectId: "obj-unknown",
           latestEventType: "custom",
           latestValidationEventType: null,
           lastValidatedAt: null,
           misunderstandingCount: 0,
         },
       ],
-      keyPoints: [
-        { id: "kp-misunderstood", cardId: "card-misunderstood" },
-        { id: "kp-due-hard", cardId: "card-due" },
-        { id: "kp-due-soft", cardId: "card-due" },
-        { id: "kp-orphan", cardId: "not-visible" },
-      ],
-      evidenceRows: [
-        { id: "ev-rejected", keyPointId: "kp-misunderstood", alignment: "aligned", userOverride: null },
-        { id: "ev-hard", keyPointId: "kp-due-hard", alignment: "soft", userOverride: null },
-        { id: "ev-soft", keyPointId: "kp-due-soft", alignment: "aligned", userOverride: null },
-        { id: "ev-legacy-hard", keyPointId: "kp-due-hard", alignment: "aligned", userOverride: null },
-        { id: "ev-orphan", keyPointId: "kp-unknown", alignment: "aligned", userOverride: null },
-      ],
-      overrides: [
-        { evidenceId: "ev-rejected", override: "rejected" },
-        { evidenceId: "ev-hard", override: "confirmed" },
-        { evidenceId: "ev-soft", override: "downgraded" },
-      ],
-      validationReviews: [
-        { cardId: "card-due", nextReviewAt: new Date("2099-01-01T00:00:00Z"), status: "pending" },
-      ],
+      // allReviewRows 的投影字段为 objectiveId（service 用 reviewSchedules.subjectId 别名）
       cardReviews: [
-        { subjectId: "card-due", nextReviewAt: new Date("2020-01-01T00:00:00Z"), status: "pending" },
-        { subjectId: "card-due", nextReviewAt: new Date("2098-01-01T00:00:00Z"), status: "pending" },
+        { objectiveId: "obj-due", nextReviewAt: new Date("2020-01-01T00:00:00Z"), status: "pending" },
+        { objectiveId: "obj-due", nextReviewAt: new Date("2098-01-01T00:00:00Z"), status: "pending" },
+      ],
+      // bindings 按 objectiveRevisionId 关联（服务经 objectiveRevisionId→objectiveId
+      // 反向映射聚合；revision id ≠ objectiveId）。
+      bindings: [
+        { objectiveRevisionId: "rev-misunderstood", supportStrength: "hard" },
+        { objectiveRevisionId: "rev-misunderstood", supportStrength: "hard" },
+        { objectiveRevisionId: "rev-misunderstood", supportStrength: "soft" },
+        { objectiveRevisionId: "rev-due", supportStrength: "soft" },
       ],
     });
 
@@ -194,10 +181,13 @@ describe("understanding state aggregation", () => {
 
     assert.equal(byId.get("card-misunderstood")?.state, "misunderstood");
     assert.equal(byId.get("card-misunderstood")?.misunderstandingCount, 2);
+    assert.equal(byId.get("card-misunderstood")?.hardEvidenceCount, 2);
+    assert.equal(byId.get("card-misunderstood")?.softEvidenceCount, 1);
+    // coverage 按全部有 revision 的 objective 数归一化（3 bindings / 6 revisions）。
+    assert.equal(byId.get("card-misunderstood")?.evidenceCoverage, 0.5);
     assert.equal(byId.get("card-due")?.state, "due_review");
-    assert.equal(byId.get("card-due")?.hardEvidenceCount, 2);
+    assert.equal(byId.get("card-due")?.hardEvidenceCount, 0);
     assert.equal(byId.get("card-due")?.softEvidenceCount, 1);
-    assert.equal(byId.get("card-due")?.evidenceCoverage, 0.5);
     assert.equal(byId.get("card-unseen")?.state, "unseen");
     assert.equal(byId.get("card-unseen")?.title, "（未命名学习卡）");
     assert.equal(byId.get("card-validated")?.state, "preliminary_understood");
@@ -206,28 +196,28 @@ describe("understanding state aggregation", () => {
     assert.equal(byId.get("card-unknown")?.state, "unseen");
   });
 
-  it("uses legacy evidence overrides without a user and filters by derived state", async () => {
+  it("filters by derived state without a user", async () => {
     installStateDb({
-      cards: [stateCard("card-soft", "Soft")],
+      cards: [
+        stateCard("card-soft", "obj-soft", "Soft"),
+        stateCard("card-unknown", "obj-unknown", "Unknown"),
+      ],
       events: [{
-        cardId: "card-soft",
+        subjectId: "obj-soft",
         latestEventType: "seen",
         latestValidationEventType: null,
         lastValidatedAt: null,
         misunderstandingCount: 0,
       }],
-      keyPoints: [{ id: "kp-soft", cardId: "card-soft" }],
-      evidenceRows: [
-        { id: "ev-soft", keyPointId: "kp-soft", alignment: "aligned", userOverride: "downgraded" },
-        { id: "ev-rejected", keyPointId: "kp-soft", alignment: "aligned", userOverride: "rejected" },
+      objectives: [
+        { objectiveId: "obj-soft", currentObjectiveRevisionId: "rev-soft" },
+        { objectiveId: "obj-unknown", currentObjectiveRevisionId: null },
       ],
     });
 
     assert.deepEqual(await getUnderstandingStates(WORKSPACE_ID, { state: "misunderstood" }, undefined, FAKE_TX), []);
     const seen = await getUnderstandingStates(WORKSPACE_ID, { state: "seen" }, undefined, FAKE_TX);
     assert.equal(seen.length, 1);
-    assert.equal(seen[0]!.softEvidenceCount, 1);
-    assert.equal(seen[0]!.hardEvidenceCount, 0);
+    assert.equal(seen[0]!.subjectId, "card-soft");
   });
 });
-

@@ -94,13 +94,15 @@ describe("Card V2 UI redraw contract", () => {
     assert.ok(!zero.includes("手动创建"));
   });
 
-  it("routes legacy generation results to individual cards or the card library", () => {
+  it("routes legacy generation results to V2 learning cards or the card library", () => {
     const targetStart = noteEditor.indexOf("const generatedCardHref");
     const targetEnd = noteEditor.indexOf("const hasWritableContent", targetStart);
     const target = noteEditor.slice(targetStart, targetEnd);
     assert.ok(target.includes("result?.cardId"));
-    assert.ok(target.includes("/cards/${generationRun.result.cardId}"));
+    // V1 卡详情页已退役：生成结果导航改指 V2 /learning-cards/:cardId。
+    assert.ok(target.includes("/learning-cards/${generationRun.result.cardId}"));
     assert.ok(!target.includes("/card-sets/"));
+    assert.ok(!target.includes("`/cards/${generationRun.result.cardId}`"));
   });
 
   it("retires the CardSet deck flag from the /cards information architecture", () => {

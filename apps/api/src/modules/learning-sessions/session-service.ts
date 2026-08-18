@@ -1905,7 +1905,7 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
       // 无权威 needs-repair 落点（W5 scheduler 接入）；保持确定性空结果。
       return [];
     },
-    async listActiveCanonical(workspaceId, keyPointIds) {
+    async listActiveCanonical(_workspaceId, _keyPointIds) {
       // V2 implementation: 从 learning_cards_v2 + evidence_snapshots_v2 加载
       // TODO: 完全实现 V2 canonical 加载（方案 20 §15）
       return [];
@@ -2169,10 +2169,8 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
 
 // ─── PG repository 内部辅助 ───────────────────────────────────────────────
 
-// 复用 apps/api 镜像树的现有表对象（review_schedules / learning_cards /
-// card_key_points / learning_card_sets / evidences 已在镜像树中）。
-import { reviewSchedules, evidences } from "../../db/schema/evidence.ts";
-import { learningCardsV2 } from "../../db/schema/card-generation-v2.ts";
+// 复用 apps/api 镜像树的现有表对象（review_schedules 已在镜像树中）。
+import { reviewSchedules } from "../../db/schema/evidence.ts";
 import { learningUnitExposureTable } from "./exposure-service.ts";
 
 /** user_learning_preferences（迁移 0074；镜像树未同步，模块内声明） */
@@ -2185,55 +2183,6 @@ const userLearningPreferencesTable = pgTable("user_learning_preferences", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
-
-async function loadCanonical(
-  transaction: ApiTransaction,
-  workspaceId: string,
-  keyPointIds: readonly string[],
-): Promise<Map<string, ActiveCanonicalInput>> {
-  // V2 implementation: 从 learning_cards_v2 + evidence_snapshots_v2 加载
-  if (keyPointIds.length === 0) return new Map();
-  // TODO: 完全实现 V2 canonical 加载（方案 20 §15）
-  return new Map();
-}
-
-async function fetchGenerationEpochs(
-  transaction: ApiTransaction,
-  workspaceId: string,
-  runIds: readonly string[],
-): Promise<Map<string, number>> {
-  const map = new Map<string, number>();
-  if (runIds.length === 0) return map;
-  const rows = await transaction
-    .select({ id: cardGenerationRunsV2.id, cardContentEpoch: cardGenerationRunsV2.cardContentEpoch })
-    .from(cardGenerationRunsV2)
-    .where(and(
-      eq(cardGenerationRunsV2.workspaceId, workspaceId),
-      inArray(cardGenerationRunsV2.id, [...runIds]),
-    ));
-  for (const row of rows) map.set(row.id, row.cardContentEpoch);
-  return map;
-}
-
-/** card_generation_runs_v2（V2 schema，替代 V1 card-generation.ts） */
-import { cardGenerationRunsV2 } from "../../db/schema/card-generation-v2.ts";
-
-function computeSourceFingerprint(group: {
-  objectiveId: string;
-  cardId: string;
-  cardRevision: number;
-  objectiveStatement: string;
-  evidenceContentHashes: string[];
-}): string {
-  // deterministic hash of card + objective + evidence content（方案 20 §18 语义）。
-  return sha256Hex(stableStringify({
-    cardId: group.cardId,
-    cardRevision: group.cardRevision,
-    objectiveId: group.objectiveId,
-    objectiveStatement: normalizeForHash(group.objectiveStatement),
-    evidenceContentHashes: group.evidenceContentHashes,
-  }));
-}
 
 function rowToSession(row: {
   id: string;

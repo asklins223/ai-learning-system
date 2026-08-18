@@ -60,6 +60,5 @@ test("GET keeps submission recovery and question reads in one RLS-scoped transac
   assert.match(section, /withWorkspaceTransaction\(/);
   assert.match(section, /reconcilePendingJobProjection\(tx,/);
   assert.match(section, /tx\.query\.validationQuestions\.findFirst/);
-  assert.match(section, /tx\.query\.cardKeyPoints\.findFirst/);
-  assert.doesNotMatch(section, /db\.query\./);
+  assert.doesNotMatch(section, /db\.query\.|cardKeyPoints/);
 });

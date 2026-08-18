@@ -32,24 +32,14 @@ import {
   workspaceMembers,
 } from "../db/schema/identity.ts";
 import { notes, noteVersions, noteBlocks } from "../db/schema/note.ts";
-import { learningCards, cardKeyPoints } from "../db/schema/card.ts";
-import { evidences, reviewSchedules, validationQuestions } from "../db/schema/evidence.ts";
-import {
-  CardStatus,
-  EvidenceAlignment,
-  ReviewStatus,
-  QuestionStatus,
-  GeneratorKind,
-} from "@ailearn/shared";
 
 // ─── Configuration ────────────────────────────────────────────────────────
 
 const E2E_USER_EMAIL = process.env.E2E_TEST_USER_EMAIL || "e2e-test@ailearn.local";
 const E2E_USER_PASSWORD = process.env.E2E_TEST_USER_PASSWORD || "e2e_test_password_2026";
 
-// Fixed UUID for deterministic E2E navigation
-const E2E_CARD_ID = "00000000-0000-0000-0000-000000000001";
-const E2E_REVIEW_SCHEDULE_ID = "00000000-0000-0000-0000-000000000002";
+// V1 退役：原固定 E2E 卡 UUID（E2E_CARD_ID / E2E_REVIEW_SCHEDULE_ID）随 V1
+// learningCards 数据播种一并移除，V2 卡片/复习场景需要另定标识符。
 
 // ─── Main ──────────────────────────────────────────────────────────────────
 
@@ -164,108 +154,17 @@ async function main() {
   }
   console.log(`  ✓ Note: ${noteId} (${blockIds.length} blocks)`);
 
-  // ── 4. Create active card with key points ─────────────────────────────
-  // Clean up old E2E card if exists
-  await db.delete(learningCards).where(eq(learningCards.id, E2E_CARD_ID));
-  await db.delete(reviewSchedules).where(eq(reviewSchedules.id, E2E_REVIEW_SCHEDULE_ID));
-
-  const keyPointIds = [randomUUID(), randomUUID(), randomUUID()];
-  const keyPointClaims = [
-    "Earth's orbital period is 365 days",
-    "Photosynthesis converts light to chemical energy",
-    "DNA replication is semiconservative",
-  ];
-
-  await db.insert(learningCards).values({
-    id: E2E_CARD_ID,
-    workspaceId,
-    noteVersionId,
-    status: CardStatus.ACTIVE,
-    schemaJson: {
-      title: "E2E Test Card — Science Fundamentals",
-      summary: "Three key science concepts for E2E testing",
-    },
-  });
-
-  for (let i = 0; i < keyPointIds.length; i++) {
-    await db.insert(cardKeyPoints).values({
-      id: keyPointIds[i],
-      cardId: E2E_CARD_ID,
-      workspaceId,
-      ordinal: i + 1,
-      claim: keyPointClaims[i],
-      quoteText: blockTexts[i],
-      segmentRef: { blockId: blockIds[i], blockOrdinal: i },
-    });
-  }
-  console.log(`  ✓ Card: ${E2E_CARD_ID} (${keyPointIds.length} key points)`);
-
-  // ── 5. Create hard evidence for each key point ────────────────────────
-  const evidenceIds = [randomUUID(), randomUUID(), randomUUID()];
-
-  for (let i = 0; i < evidenceIds.length; i++) {
-    await db.insert(evidences).values({
-      id: evidenceIds[i],
-      workspaceId,
-      keyPointId: keyPointIds[i],
-      blockId: blockIds[i],
-      blockOrdinal: i,
-      quoteText: blockTexts[i],
-      alignment: EvidenceAlignment.ALIGNED,
-      alignmentScore: 95,
-      alignmentMethod: "manual",
-    });
-  }
-  console.log(`  ✓ Evidence: ${evidenceIds.length} records (all aligned)`);
-
-  // ── 6. Create a pending review schedule for review E2E ────────────────
-  const now = new Date();
-
-  await db.insert(reviewSchedules).values({
-    id: E2E_REVIEW_SCHEDULE_ID,
-    workspaceId,
-    userId,
-    subjectType: "key_point",
-    subjectId: keyPointIds[0],
-    keyPointId: keyPointIds[0],
-    status: ReviewStatus.PENDING,
-    nextReviewAt: now,
-    intervalDays: 1,
-    generation: 1,
-    policyVersion: "discrete-v2",
-    reasonCode: "initial_validation",
-  });
-  console.log(`  ✓ Review schedule: ${E2E_REVIEW_SCHEDULE_ID}`);
-
-  // ── 7. Create an active validation question for the first key point ────
-  const questionId = randomUUID();
-  const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
-
-  await db.insert(validationQuestions).values({
-    id: questionId,
-    workspaceId,
-    userId,
-    cardId: E2E_CARD_ID,
-    keyPointId: keyPointIds[0],
-    noteVersionId,
-    questionType: "explain",
-    question: "Explain why the earth's orbital period is approximately 365 days.",
-    createdBy: userId,
-    expiresAt,
-    status: QuestionStatus.ACTIVE,
-    generatorKind: GeneratorKind.DETERMINISTIC,
-    rubricVersion: "rubric-reducer-v1",
-    sourceFingerprint: `e2e-fp-${questionId.slice(0, 8)}`,
-  });
-  console.log(`  ✓ Question: ${questionId} (active, deterministic)`);
+  // V1 退役（E2E seed）：原步骤 4-7 播种 V1 学习卡数据（learningCards /
+  // cardKeyPoints / evidences-by-keyPointId / review_schedules-by-keyPointId /
+  // validation_questions-by-cardId）。V1 表及其 keyPointId/cardId 列均已删除，
+  // 这些旧 V1 卡数据已无意义，故整段移除；基于 V2（learning_cards_v2 /
+  // objectives_v2）的 E2E 卡数据播种需另行设计。
 
   // ── Summary ───────────────────────────────────────────────────────────
-  console.log("\n✅ E2E seed data complete:");
+  console.log("\n✅ E2E seed data complete (V1 卡数据已退役):");
   console.log(`   User:       ${E2E_USER_EMAIL}`);
-  console.log(`   Password:   ${E2E_USER_PASSWORD}`);
-  console.log(`   Card URL:   /cards/${E2E_CARD_ID}`);
-  console.log(`   Review URL: /review/${E2E_REVIEW_SCHEDULE_ID}`);
-  console.log(`   Validate:   /cards/${E2E_CARD_ID}/validate`);
+  console.log(`   Workspace:  ${workspaceId}`);
+  console.log(`   Note:       ${noteId}`);
 
   process.exit(0);
 }

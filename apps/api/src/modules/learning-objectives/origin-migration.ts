@@ -328,7 +328,7 @@ export async function reconcileObjectiveOrigins(
       counts.missing += 1;
     } else {
       // migrated 或 skipped：计划 migratable + 实际存在
-      if (item.plannedSource && item.plannedSource === "evidence_binding" && actualKind === "note") {
+      if (item.source && item.source === "evidence_binding" && actualKind === "note") {
         // 迁移来源与落库 kind 一致即 migrated；不同来源幂等跳过
         counts.skipped += 1;
         reason += "；实际 origin kind 与计划来源不同（幂等跳过）";

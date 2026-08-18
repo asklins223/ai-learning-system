@@ -156,12 +156,13 @@ export function browserRoutePath(route: AllowedMainRouteV1): string {
     case "review":
       return "/review";
     case "card":
-      return `/cards/${encodeURIComponent(route.cardId)}`;
+      return `/learning-cards/${encodeURIComponent(route.cardId)}`; // V2 学习卡详情
     case "star_map":
       return route.keyPointId
         ? `/graph?targetNodeId=${encodeURIComponent(route.keyPointId)}`
         : "/graph";
     case "learning_session":
-      return `/cards/${encodeURIComponent(route.cardId)}/companion?keyPoint=${encodeURIComponent(route.keyPointId)}&session=${encodeURIComponent(route.sessionId)}&origin=${encodeURIComponent(route.origin)}`;
+      // V1 卡片 companion session 已退役：回到 V2 学习卡页（test env 卡数据全为 V2）。
+      return `/learning-cards/${encodeURIComponent(route.cardId)}`;
   }
 }

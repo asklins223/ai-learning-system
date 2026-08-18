@@ -95,8 +95,8 @@ describe("capability-deployment: bundle 图与冻结闭包", () => {
     assert.deepEqual(assertBundleGraphValid(), []);
   });
 
-  it("capability 枚举：9 Must + 3 Should + 6 内部原子 = 18", () => {
-    assert.equal(CAPABILITY_IDS.length, 18);
+  it("capability 枚举：9 Must + 4 Should + 6 内部原子 = 19", () => {
+    assert.equal(CAPABILITY_IDS.length, 19);
   });
 
   it("global_companion_shell 关闭闭包：onboarding → session companion → tutor（01-7 §6）", () => {

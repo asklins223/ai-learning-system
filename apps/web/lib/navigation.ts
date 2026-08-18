@@ -117,7 +117,8 @@ export function getCurrentPageLabel(pathname: string | null): string {
   if (item) return item.label;
   if (pathname.startsWith("/settings")) return "设置";
   if (pathname.startsWith("/benchmark")) return "理解评测";
-  if (pathname.startsWith("/cards/")) return "学习卡详情";
+  if (pathname.startsWith("/learning-cards/")) return "学习卡详情";
+  if (pathname === "/cards" || pathname.startsWith("/cards/")) return "学习目标库";
   if (pathname.startsWith("/notes/")) return "笔记编辑";
   if (pathname.startsWith("/sources/")) return "来源阅读";
   return "理解引擎";

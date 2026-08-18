@@ -58,9 +58,7 @@ export {
   type CardSetRegenerateRequest,
   type CardSetRegenerateResponse,
   type EvidenceAlignment,
-  type EvidenceOverride,
   type EvidenceRow,
-  type CardEvidenceGroup,
   type JobType,
   type JobStatus,
   type JobRow,
@@ -144,8 +142,6 @@ import type {
   CardGenerationRunView,
   CardGenerationStatus,
   AgentEventPage,
-  CardEvidenceGroup,
-  EvidenceOverride,
   JobRow,
   MarkdownImportApiItem,
   MarkdownImportApiResult,
@@ -1229,8 +1225,6 @@ isAutosave?: boolean;
   /* Legacy generation compatibility. */
   getCardGenerationStatus: (noteVersionId: string) =>
     request<CardGenerationStatus>(`/note-versions/${noteVersionId}/card-status`),
-  getCardEvidence: (cardId: string) =>
-    request<CardEvidenceGroup[]>(`/cards/${cardId}/evidence`),
 
   /* card lifecycle (V0.3) */
   regenerateCard: (cardId: string) =>
@@ -1239,13 +1233,6 @@ isAutosave?: boolean;
     }),
   dismissCard: (cardId: string) =>
     request<{ ok: boolean }>(`/cards/${cardId}/dismiss`, { method: "POST" }),
-
-  /* evidence */
-  overrideEvidence: (evidenceId: string, override: EvidenceOverride) =>
-    request<{ ok: boolean }>(`/evidences/${evidenceId}/override`, {
-      method: "POST",
-      body: JSON.stringify({ override }),
-    }),
 
   /* sources (V0.3) */
   listSources: (params?: { status?: SourceStatus; cursor?: string; limit?: number }) => {

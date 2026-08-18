@@ -25,7 +25,6 @@ import {
   RUBRIC_EVALUATION_PROMPT,
   IMAGE_UNDERSTANDING_SYSTEM_PROMPT,
 } from "../prompts.ts";
-import { generateDeterministicQuestion } from "@ailearn/shared";
 import { registerFactory } from "../provider-factory.ts";
 
 // ─── R5: Mock business logic (moved from removed provider methods) ──────
@@ -92,6 +91,53 @@ function mockEvaluateValidation(input: EvaluateValidationInput) {
 }
 
 /** R5: Mock evaluateRubric logic (moved from removed provider method). */
+
+/**
+ * Deterministic mock for the removed @ailearn/shared `generateDeterministicQuestion`.
+ * Produces a schema-valid question for the QUESTION_GENERATION_PROMPT branch.
+ */
+function mockGenerateDeterministicQuestion(
+  input: GenerateValidationQuestionInput,
+  seed: number,
+): {
+  questionType: "explain" | "example" | "apply";
+  question: string;
+  rubricItems: Array<{
+    key: string;
+    criterion: string;
+    expectedConcept: string;
+    weight: 1 | 2 | 3;
+    required: boolean;
+    evidenceRefId: string;
+  }>;
+} {
+  const types: Array<"explain" | "example" | "apply"> = ["explain", "example", "apply"];
+  const questionType = input.preferredType ?? types[seed % types.length];
+  const ref = input.evidenceRefs[seed % Math.max(1, input.evidenceRefs.length)];
+  const claim = input.claim.slice(0, 60);
+  return {
+    questionType,
+    question: `请${questionType === "explain" ? "解释" : questionType === "example" ? "举例说明" : "说明应用场景"}：“${claim}”。`,
+    rubricItems: [
+      {
+        key: `${questionType}_concept`,
+        criterion: "准确复述核心概念",
+        expectedConcept: input.claim,
+        weight: 2,
+        required: true,
+        evidenceRefId: ref?.refId ?? "ev",
+      },
+      {
+        key: `${questionType}_precision`,
+        criterion: "表述严谨，不引入来源外事实",
+        expectedConcept: "仅使用原文信息",
+        weight: 1,
+        required: false,
+        evidenceRefId: ref?.refId ?? "ev",
+      },
+    ],
+  };
+}
 
 /**
  * Compute character-level overlap ratio between criterion and userAnswer.
@@ -374,17 +420,7 @@ fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
       content = JSON.stringify(mockEvaluateValidation(JSON.parse(userContent)));
     } else if (systemPrompt.startsWith(QUESTION_GENERATION_PROMPT)) {
       const input = JSON.parse(userContent) as GenerateValidationQuestionInput;
-      // Try indices 0-2 to find one matching preferredType
-      if (input.preferredType) {
-        let output = generateDeterministicQuestion(input, 0);
-        for (let i = 1; i <= 2; i++) {
-          if (output.questionType === input.preferredType) break;
-          output = generateDeterministicQuestion(input, i);
-        }
-        content = JSON.stringify(output);
-      } else {
-        content = JSON.stringify(generateDeterministicQuestion(input, 0));
-      }
+      content = JSON.stringify(mockGenerateDeterministicQuestion(input, 0));
     } else if (systemPrompt.startsWith(RUBRIC_EVALUATION_PROMPT)) {
       content = JSON.stringify(mockEvaluateRubric(JSON.parse(userContent)));
     } else if (systemPrompt.startsWith(IMAGE_UNDERSTANDING_SYSTEM_PROMPT)) {

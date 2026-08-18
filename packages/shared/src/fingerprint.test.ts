@@ -100,9 +100,9 @@ describe("fingerprint", () => {
       assert.notEqual(a, b);
     });
 
-    it("changes when key point changes", () => {
+    it("changes when objective changes", () => {
       const a = computeSourceFingerprint(baseSourceInput());
-      const b = computeSourceFingerprint(baseSourceInput({ keyPointId: "kp-2" }));
+      const b = computeSourceFingerprint(baseSourceInput({ objectiveId: "obj-2" }));
       assert.notEqual(a, b);
     });
 

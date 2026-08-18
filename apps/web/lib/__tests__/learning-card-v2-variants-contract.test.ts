@@ -27,7 +27,9 @@ describe("Learning Card V2 interaction variants", () => {
     for (const kind of ["recall", "cloze", "compare", "sequence", "why", "boundary", "application"]) {
       assert.match(registry, new RegExp(`${kind}: ${kind}Renderer`));
     }
-    assert.match(activeCard, /learningCardInteractionRendererRegistry\[card\.front\.kind\]/);
+    // 详情页按设计不再渲染可作答输入区（作答发生在学习 run 微旅程）；正面
+    // 以 learningCardInteractionLabels[card.front.kind] 做策略分发。
+    assert.match(activeCard, /learningCardInteractionLabels\[card\.front\.kind\]/);
     assert.doesNotMatch(registry, /canonicalAnswer|exposureId|misconception/);
   });
 

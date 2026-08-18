@@ -18,7 +18,7 @@ import {
 function createMockDatabase(config: {
   notes?: any[];
   sources?: any[];
-  learningCards?: any[];
+  learningCardsV2?: any[];
   jobs?: any[];
   aiArtifacts?: any[];
   insertError?: Error;
@@ -27,7 +27,8 @@ function createMockDatabase(config: {
     query: {
       notes: { findMany: async () => config.notes ?? [] },
       sources: { findMany: async () => config.sources ?? [] },
-      learningCards: { findMany: async () => config.learningCards ?? [] },
+      // V2 卡片表：V1 learning_cards 已退役，服务用 learningCardsV2 检测冲突
+      learningCardsV2: { findMany: async () => config.learningCardsV2 ?? [] },
       jobs: { findMany: async () => config.jobs ?? [] },
       aiArtifacts: { findMany: async () => config.aiArtifacts ?? [] },
     },
@@ -115,9 +116,9 @@ describe("export/service restoreWorkspace 冲突检测", () => {
     assert.equal(result.success, false);
   });
 
-  it("目标工作区已有 cards 时返回冲突", async () => {
+  it("目标工作区已有 V2 卡片时返回冲突", async () => {
     const db = createMockDatabase({
-      learningCards: [{ id: "existing-card" }],
+      learningCardsV2: [{ id: "existing-card" }],
     });
     const result = await restoreWorkspace(WS_ID, {
       workspace: { id: WS_ID },
@@ -160,8 +161,6 @@ describe("export/service restoreWorkspace 冲突检测", () => {
       noteBlocks: [],
       sources: [],
       sourceSegments: [],
-      learningCards: [],
-      cardKeyPoints: [],
       evidences: [],
       evidenceOverrides: [],
       validationQuestions: [],
@@ -189,12 +188,11 @@ describe("export/service restoreWorkspace dryRun", () => {
     noteBlocks: [{ id: "b1", versionId: "v1" }],
     sources: [{ id: "s1" }],
     sourceSegments: [{ id: "ss1" }],
-    learningCards: [{ id: "c1" }],
-    cardKeyPoints: [{ id: "k1", cardId: "c1" }],
-    evidences: [{ id: "e1", keyPointId: "k1" }],
+    // V1 退役：learning_cards / card_key_points 表已删除，不再统计其计数
+    evidences: [{ id: "e1" }],
     evidenceOverrides: [{ id: "eo1", evidenceId: "e1" }],
-    validationQuestions: [{ id: "q1", cardId: "c1" }],
-    validationEvents: [{ id: "ve1", cardId: "c1" }],
+    validationQuestions: [{ id: "q1" }],
+    validationEvents: [{ id: "ve1" }],
     reviewSchedules: [{ id: "rs1" }],
     reviewAttempts: [{ id: "ra1", reviewScheduleId: "rs1" }],
     understandingEvents: [{ id: "ue1" }],
@@ -216,8 +214,6 @@ describe("export/service restoreWorkspace dryRun", () => {
     assert.equal(result.counts!.noteBlocks, 1);
     assert.equal(result.counts!.sources, 1);
     assert.equal(result.counts!.sourceSegments, 1);
-    assert.equal(result.counts!.learningCards, 1);
-    assert.equal(result.counts!.cardKeyPoints, 1);
     assert.equal(result.counts!.evidences, 1);
     assert.equal(result.counts!.evidenceOverrides, 1);
     assert.equal(result.counts!.validationQuestions, 1);
@@ -241,56 +237,22 @@ describe("export/service restoreWorkspace dryRun", () => {
     assert.ok(result.message.includes("missing-evidence"));
   });
 
-  it("dryRun 检测 validation_events 引用缺失的 card", async () => {
-    const db = createMockDatabase();
-    const data = {
-      ...validData,
-      validationEvents: [{ id: "ve1", cardId: "missing-card" }],
-    };
-    const result = await restoreWorkspace(WS_ID, data as any, true, db);
-
-    assert.equal(result.success, false);
-    assert.ok(result.message.includes("引用完整性"));
-    assert.ok(result.message.includes("missing-card"));
-  });
-
-  it("dryRun 检测 validation_events 引用缺失的 key_point", async () => {
-    const db = createMockDatabase();
-    const data = {
-      ...validData,
-      validationEvents: [{ id: "ve1", cardId: "c1", keyPointId: "missing-kp" }],
-    };
-    const result = await restoreWorkspace(WS_ID, data as any, true, db);
-
-    assert.equal(result.success, false);
-    assert.ok(result.message.includes("引用完整性"));
-    assert.ok(result.message.includes("missing-kp"));
-  });
+  // ── V1 退役：以下用例只测已删的 V1 恢复行为 ──
+  // validation_events 的 cardId/keyPointId 列与 validation_questions 的 cardId 列
+  // 已随 V1 卡表删除，dry-run 引用完整性校验不再检查 card/keyPoint 引用，
+  // 故删除「引用缺失 card/key_point 时失败」的 V1 用例。
 
   it("dryRun 检测 validation_events 引用缺失的 question", async () => {
     const db = createMockDatabase();
     const data = {
       ...validData,
-      validationEvents: [{ id: "ve1", cardId: "c1", questionId: "missing-q" }],
+      validationEvents: [{ id: "ve1", questionId: "missing-q" }],
     };
     const result = await restoreWorkspace(WS_ID, data as any, true, db);
 
     assert.equal(result.success, false);
     assert.ok(result.message.includes("引用完整性"));
     assert.ok(result.message.includes("missing-q"));
-  });
-
-  it("dryRun 检测 validation_questions 引用缺失的 card", async () => {
-    const db = createMockDatabase();
-    const data = {
-      ...validData,
-      validationQuestions: [{ id: "q1", cardId: "missing-card" }],
-    };
-    const result = await restoreWorkspace(WS_ID, data as any, true, db);
-
-    assert.equal(result.success, false);
-    assert.ok(result.message.includes("引用完整性"));
-    assert.ok(result.message.includes("missing-card"));
   });
 
   it("dryRun 引用完整性全部通过时返回成功", async () => {
@@ -313,8 +275,6 @@ describe("export/service restoreWorkspace dryRun", () => {
       noteBlocks: [],
       sources: [],
       sourceSegments: [],
-      learningCards: [],
-      cardKeyPoints: [],
       evidences: [],
       evidenceOverrides: [],
       validationQuestions: [],
@@ -366,12 +326,10 @@ describe("export/service restoreWorkspace 实际恢复", () => {
       noteBlocks: [{ id: "b1", versionId: "v1", ordinal: 0, type: "paragraph", content: "text" }],
       sources: [{ id: "s1", type: "text", title: "源", createdBy: "u1" }],
       sourceSegments: [{ id: "ss1", sourceId: "s1", ordinal: 0, text: "段落", charStart: 0, charEnd: 2 }],
-      learningCards: [{ id: "c1", noteVersionId: "v1", schemaJson: { title: "卡片" } }],
-      cardKeyPoints: [{ id: "k1", cardId: "c1", ordinal: 0, claim: "要点", quoteText: "引用" }],
-      evidences: [{ id: "e1", keyPointId: "k1", quoteText: "引用", alignment: "aligned" }],
+      evidences: [{ id: "e1", quoteText: "引用", alignment: "aligned" }],
       evidenceOverrides: [{ id: "eo1", evidenceId: "e1", userId: "u1", override: "confirmed" }],
-      validationQuestions: [{ id: "q1", cardId: "c1", questionType: "free_text", question: "问题", createdBy: "u1" }],
-      validationEvents: [{ id: "ve1", cardId: "c1", userId: "u1", question: "问题", questionType: "free_text", userAnswer: "答案", outcome: "correct", confidence: 90 }],
+      validationQuestions: [{ id: "q1", questionType: "free_text", question: "问题", createdBy: "u1" }],
+      validationEvents: [{ id: "ve1", userId: "u1", question: "问题", questionType: "free_text", userAnswer: "答案", outcome: "correct", confidence: 90 }],
       reviewSchedules: [{ id: "rs1", userId: "u1", subjectType: "card", subjectId: "c1", status: "pending", nextReviewAt: "2026-01-01T00:00:00.000Z", intervalDays: 1 }],
       reviewAttempts: [{ id: "ra1", userId: "u1", reviewScheduleId: "rs1", subjectType: "card", subjectId: "c1", idempotencyKey: "key1", status: "completed", startedAt: "2026-01-01T00:00:00.000Z" }],
       understandingEvents: [{ id: "ue1", userId: "u1", subjectType: "card", subjectId: "c1", eventType: "reviewed", payload: {} }],
@@ -416,11 +374,10 @@ describe("export/service exportManifest 字段验证", () => {
         version: "2.0",
         included: [
           "workspace", "users", "workspaceMembers", "notes", "noteVersions",
-          "noteBlocks", "sources", "sourceSegments", "learningCards",
-          "cardKeyPoints", "evidences", "evidenceOverrides",
-          "validationQuestions", "validationEvents", "reviewSchedules",
-          "reviewAttempts", "understandingEvents", "aiArtifacts",
-          "onboardingStates",
+          "noteBlocks", "sources", "sourceSegments", "evidences",
+          "evidenceOverrides", "validationQuestions", "validationEvents",
+          "reviewSchedules", "reviewAttempts", "understandingEvents",
+          "aiArtifacts", "onboardingStates",
         ],
         excluded: {},
         notes: [],

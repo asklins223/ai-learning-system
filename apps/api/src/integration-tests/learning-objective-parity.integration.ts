@@ -15,7 +15,6 @@ import assert from "node:assert/strict";
 import { and, eq, sql } from "drizzle-orm";
 import { findPrivatePayloadLeaks } from "@ailearn/shared";
 import { learningObjectivesV2 } from "../db/schema/card-generation-v2.ts";
-import { learningCards } from "../db/schema/card.ts";
 
 const PURE_V2_WORKSPACE = "4f825f38-1a65-492a-8dec-c82868e6ea0f";
 const SYSTEM_USER = "00000000-0000-0000-0000-000000000000";
@@ -98,17 +97,3 @@ test("RL-01: 每个 active Objective 都能装配可行动、无泄漏 Surface",
   });
 });
 
-test("RL-02: 隐藏 alias 不进入任何正式计数（纯 V2 fixture 无 active legacy 卡）", async () => {
-  const ctx = { workspaceId: PURE_V2_WORKSPACE, userId: SYSTEM_USER };
-  const result = await withWorkspaceTransaction(ctx, async (tx) => {
-    const activeLegacy = await tx
-      .select({ n: sql<number>`count(*)::int` })
-      .from(learningCards)
-      .where(and(
-        eq(learningCards.workspaceId, PURE_V2_WORKSPACE),
-        eq(learningCards.status, "active"),
-      ));
-    return Number(activeLegacy[0].n);
-  });
-  assert.equal(result, 0, "纯 V2 fixture 不得有 active legacy 卡进入任何计数");
-});

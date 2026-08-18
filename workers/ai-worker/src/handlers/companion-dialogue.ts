@@ -396,7 +396,7 @@ export function buildCompanionPersonaMessages(input: {
     : input.petProfile
       ? [
           COMPANION_PERSONA_V3,
-          MEMORY_SAFETY_GUARD,
+          ...(activeMemories.length > 0 ? [MEMORY_SAFETY_GUARD] : []),
           "",
           `当前人格：${input.petProfile.name}`,
           `性格标签：${input.petProfile.personalityTags.join("、")}`,
@@ -408,7 +408,7 @@ export function buildCompanionPersonaMessages(input: {
         ].join("\n")
       : [
           COMPANION_PERSONA_V3,
-          MEMORY_SAFETY_GUARD,
+          ...(activeMemories.length > 0 ? [MEMORY_SAFETY_GUARD] : []),
           ...(memoryDataBlock ? ["", memoryDataBlock] : []),
         ].join("\n");
   return [

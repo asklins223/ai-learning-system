@@ -7,6 +7,11 @@ import {
   reindexWorkspaceSearch,
   search,
 } from "../modules/search/service.ts";
+import { notes } from "../db/schema/note.ts";
+import {
+  learningObjectiveRevisionsV2,
+  learningObjectiveOriginsV2,
+} from "../db/schema/card-generation-v2.ts";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -28,21 +33,12 @@ describe("search service", () => {
               match_count: "1",
             },
             {
-              object_type: "card",
-              object_id: "card-1",
-              title: "A card",
-              body: "Needle card body",
+              object_type: "objective",
+              object_id: "objective-1",
+              title: "An objective",
+              body: "Needle objective body",
               indexed_at: "2026-07-20T01:02:02.000Z",
-              metadata: null,
-              match_count: "0",
-            },
-            {
-              object_type: "card_set",
-              object_id: "set-1",
-              title: "A card set",
-              body: "Needle set body",
-              indexed_at: "2026-07-20T01:02:01.500Z",
-              metadata: { cardSetId: "set-1" },
+              metadata: { objectiveId: "objective-1", lifecycle: "active" },
               match_count: "1",
             },
             {
@@ -53,15 +49,6 @@ describe("search service", () => {
               indexed_at: "2026-07-20T01:02:01.000Z",
               metadata: null,
               match_count: "1",
-            },
-            {
-              object_type: "evidence",
-              object_id: "evidence-1",
-              title: null,
-              body: "no matching text",
-              indexed_at: "2026-07-20T01:02:00.000Z",
-              metadata: { cardId: "card-2" },
-              match_count: "3",
             },
             {
               object_type: "other",
@@ -89,28 +76,23 @@ describe("search service", () => {
       .map((statement) => new PgDialect().sqlToQuery(statement as SQL).sql)
       .join("\n");
     assert.match(compiledSql, /FROM search_documents AS search_document/);
-    assert.match(compiledSql, /search_document\.object_type = 'card_set'/);
-    assert.match(compiledSql, /consumer_card\.card_set_id IS NULL/);
-    assert.match(compiledSql, /parent_set\.status = 'active'/);
-    assert.match(compiledSql, /FROM evidences AS consumer_evidence/);
+    // V2: 只消费 non-V1 类型——card/card_set/evidence 均被排除，objective 通过。
+    assert.match(compiledSql, /search_document\.object_type NOT IN \('card', 'card_set', 'evidence'\)/);
     assert.equal(result.total, 9);
-    assert.equal(result.nextCursor, 6);
+    assert.equal(result.nextCursor, 4);
     assert.deepEqual(result.items.map((item) => item.href), [
       "/notes/note-1",
-      "/cards/card-1",
-      "/card-sets/set-1",
+      "/learning-objectives/objective-1",
       "/sources/source-1",
-      "/cards/card-2",
       "",
     ]);
     assert.match(result.items[0]!.snippet, /^…/);
     assert.match(result.items[0]!.snippet, /«Needle»/);
     assert.match(result.items[0]!.snippet, /…$/);
     assert.equal(result.items[0]!.indexedAt, "2026-07-20T01:02:03.000Z");
+    assert.equal(result.items[1]!.objectType, "objective");
     assert.equal(result.items[1]!.matchCount, 1);
-    assert.equal(result.items[4]!.matchCount, 3);
-    assert.equal(result.items[5]!.matchCount, 1);
-    assert.equal(result.items[2]!.cardSetId, "set-1");
+    assert.equal(result.items[3]!.matchCount, 1);
   });
 
   it("returns no continuation when the final page exhausts the total", async () => {
@@ -155,25 +137,9 @@ describe("search projection rebuild", () => {
             },
           ],
         },
-        learningCardSets: {
-          findMany: async () => [{
-            id: "set-1",
-            noteId: "note-1",
-            noteVersionId: "version-1",
-            title: "Set",
-            summary: "Set summary",
-          }],
-        },
-        learningCards: {
+        learningObjectivesV2: {
           findMany: async () => [
-            {
-              id: "card-1",
-              noteVersionId: "version-1",
-              cardSetId: "set-1",
-              scope: "overview",
-              ordinal: 0,
-              schemaJson: { title: "Card", summary: "Summary" },
-            },
+            { objectiveId: "objective-1", currentObjectiveRevisionId: "rev-1", lifecycle: "active" },
           ],
         },
         noteBlocks: {
@@ -188,22 +154,31 @@ describe("search projection rebuild", () => {
             { sourceId: "source-1", text: "segment two" },
           ],
         },
-        cardKeyPoints: {
-          findMany: async () => [
-            { id: "key-point-1", cardId: "card-1", claim: "Claim" },
-          ],
-        },
-        evidences: {
-          findMany: async () => [
-            {
-              id: "evidence-1",
-              keyPointId: "key-point-1",
-              quoteText: "Quote",
-              alignment: "aligned",
-            },
-          ],
-        },
       },
+      // Plan 23 CS-03：objective 投影需要读取 revision/origin/来源笔记标题。
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async () => {
+            if (table === learningObjectiveRevisionsV2) {
+              return [
+                {
+                  objectiveRevisionId: "rev-1",
+                  objectiveId: "objective-1",
+                  conceptLabel: "Obj label",
+                  publicSummary: "Obj summary",
+                },
+              ];
+            }
+            if (table === learningObjectiveOriginsV2) {
+              return [{ objectiveId: "objective-1", noteId: "note-1" }];
+            }
+            if (table === notes) {
+              return [{ id: "note-1", title: "One" }];
+            }
+            return [];
+          },
+        }),
+      }),
       transaction: async (run: (tx: any) => Promise<void>) => run({
         delete: () => ({
           where: () => ({ returning: async () => [{ id: "old-1" }, { id: "old-2" }] }),
@@ -226,37 +201,28 @@ describe("search projection rebuild", () => {
 
     assert.deepEqual(result, {
       deleted: 2,
-      indexed: { note: 1, source: 2, cardSet: 1, card: 1, evidence: 1 },
+      indexed: { note: 1, source: 2, cardSet: 0, card: 0, evidence: 0, objective: 1 },
       errors: 0,
       capped: false,
     });
     assert.equal(reconciled, 1);
-    // PERF: 逐实体类型流式插入（note/source/card_set/card/evidence 各一批，
-    // 每批上限 500）。断言改为基于扁平化文档内容，而非旧实现中的单批数量。
-    assert.equal(insertedBatches.length, 5);
+    // PERF: 逐实体类型流式插入（note/source/objective 各一批，每批上限 500）。
+    assert.equal(insertedBatches.length, 3);
     const documents = insertedBatches.flat();
-    assert.equal(documents.length, 6);
+    assert.equal(documents.length, 4);
     assert.equal(documents.find((doc) => doc.objectId === "note-1")?.body, "first\nsecond");
     assert.equal(documents.find((doc) => doc.objectId === "source-1")?.body, "segment one\nsegment two");
     assert.equal(
       documents.find((doc) => doc.objectId === "source-2")?.body,
       "origin body\nraw body\nhttps://example.test",
     );
-    assert.equal(documents.find((doc) => doc.objectId === "card-1")?.body, "Summary\nClaim");
-    assert.deepEqual(documents.find((doc) => doc.objectId === "card-1")?.metadata, {
-      noteVersionId: "version-1",
-      cardSetId: "set-1",
-      scope: "overview",
-      ordinal: 0,
-    });
-    assert.equal(documents.find((doc) => doc.objectId === "set-1")?.objectType, "card_set");
-    assert.deepEqual(documents.find((doc) => doc.objectId === "evidence-1")?.metadata, {
-      keyPointId: "key-point-1",
-      cardId: "card-1",
-      cardSetId: "set-1",
-      scope: "overview",
-      ordinal: 0,
-      alignment: "aligned",
+    const objectiveDoc = documents.find((doc) => doc.objectType === "objective");
+    assert.equal(objectiveDoc.objectId, "objective-1");
+    assert.equal(objectiveDoc.title, "Obj label");
+    assert.equal(objectiveDoc.body, "Obj summary\nOne");
+    assert.deepEqual(objectiveDoc.metadata, {
+      objectiveId: "objective-1",
+      lifecycle: "active",
     });
   });
 
@@ -267,13 +233,11 @@ describe("search projection rebuild", () => {
       query: {
         notes: { findMany: async () => [] },
         sources: { findMany: async () => [] },
-        learningCardSets: { findMany: async () => [] },
-        learningCards: { findMany: async () => [] },
+        learningObjectivesV2: { findMany: async () => [] },
         noteBlocks: { findMany: async () => { childQueries += 1; return []; } },
         sourceSegments: { findMany: async () => { childQueries += 1; return []; } },
-        cardKeyPoints: { findMany: async () => { childQueries += 1; return []; } },
-        evidences: { findMany: async () => { childQueries += 1; return []; } },
       },
+      select: () => ({ from: () => ({ where: async () => [] }) }),
       transaction: async (run: (tx: any) => Promise<void>) => run({
         delete: () => ({ where: () => ({ returning: async () => [] }) }),
         insert: () => { inserts += 1; return {}; },
@@ -286,7 +250,7 @@ describe("search projection rebuild", () => {
 
     assert.deepEqual(result, {
       deleted: 0,
-      indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
+      indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 },
       errors: 0,
       capped: false,
     });
@@ -299,13 +263,11 @@ describe("search projection rebuild", () => {
       query: {
         notes: { findMany: async () => [] },
         sources: { findMany: async () => [] },
-        learningCardSets: { findMany: async () => [] },
-        learningCards: { findMany: async () => [] },
+        learningObjectivesV2: { findMany: async () => [] },
         noteBlocks: { findMany: async () => [] },
         sourceSegments: { findMany: async () => [] },
-        cardKeyPoints: { findMany: async () => [] },
-        evidences: { findMany: async () => [] },
       },
+      select: () => ({ from: () => ({ where: async () => [] }) }),
       transaction: async () => {
         throw new Error("database unavailable");
       },
@@ -315,7 +277,7 @@ describe("search projection rebuild", () => {
 
     assert.deepEqual(result, {
       deleted: 0,
-      indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
+      indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 },
       errors: 1,
       capped: false,
     });
@@ -340,24 +302,6 @@ describe("search projection drift", () => {
             { id: "source-missing", title: "Missing source" },
           ],
         },
-        learningCardSets: {
-          findMany: async () => [
-            { id: "set-stale", title: "Current set" },
-            { id: "set-missing", title: "Missing set" },
-          ],
-        },
-        learningCards: {
-          findMany: async () => [
-            { id: "card-stale", schemaJson: { title: "Current card" } },
-            { id: "card-missing", schemaJson: {} },
-          ],
-        },
-        cardKeyPoints: {
-          findMany: async () => [{ id: "key-point-1" }],
-        },
-        evidences: {
-          findMany: async () => [{ id: "evidence-present" }, { id: "evidence-missing" }],
-        },
         noteBlocks: {
           findMany: async () => [
             { versionId: "version-stale", content: "current body" },
@@ -373,25 +317,10 @@ describe("search projection drift", () => {
                   { objectId: "note-stale", title: "Old note", body: "old body" },
                   { objectId: "note-ghost", title: "Ghost", body: "ghost" },
                 ];
-              case 2:
+              default:
                 return [
                   { objectId: "source-stale", title: "Old source" },
                   { objectId: "source-ghost", title: "Ghost source" },
-                ];
-              case 3:
-                return [
-                  { objectId: "set-stale", title: "Old set" },
-                  { objectId: "set-ghost", title: "Ghost set" },
-                ];
-              case 4:
-                return [
-                  { objectId: "card-stale", title: "Old card" },
-                  { objectId: "card-ghost", title: "Ghost card" },
-                ];
-              default:
-                return [
-                  { objectId: "evidence-present" },
-                  { objectId: "evidence-ghost" },
                 ];
             }
           },
@@ -401,33 +330,29 @@ describe("search projection drift", () => {
 
     const result = await detectSearchDrift(executor, WORKSPACE_ID);
 
+    assert.equal(indexedQuery, 2);
+    // V2：drift 只对比 note / source（card/card_set/evidence 已下线）。
     assert.deepEqual(result.expected, {
       note: 2,
       source: 2,
-      cardSet: 2,
-      card: 2,
-      evidence: 2,
+      cardSet: 0,
+      card: 0,
+      evidence: 0,
     });
     assert.deepEqual(result.actual, {
       note: 2,
       source: 2,
-      cardSet: 2,
-      card: 2,
-      evidence: 2,
+      cardSet: 0,
+      card: 0,
+      evidence: 0,
     });
     assert.deepEqual(result.ghosts, [
       { objectType: "note", objectId: "note-ghost" },
       { objectType: "source", objectId: "source-ghost" },
-      { objectType: "card_set", objectId: "set-ghost" },
-      { objectType: "card", objectId: "card-ghost" },
-      { objectType: "evidence", objectId: "evidence-ghost" },
     ]);
     assert.deepEqual(result.missing, [
       { objectType: "note", objectId: "note-missing" },
       { objectType: "source", objectId: "source-missing" },
-      { objectType: "card_set", objectId: "set-missing" },
-      { objectType: "card", objectId: "card-missing" },
-      { objectType: "evidence", objectId: "evidence-missing" },
     ]);
     assert.deepEqual(result.staleTitles, [
       {
@@ -442,34 +367,18 @@ describe("search projection drift", () => {
         indexedTitle: "Old source",
         actualTitle: "Current source",
       },
-      {
-        objectType: "card_set",
-        objectId: "set-stale",
-        indexedTitle: "Old set",
-        actualTitle: "Current set",
-      },
-      {
-        objectType: "card",
-        objectId: "card-stale",
-        indexedTitle: "Old card",
-        actualTitle: "Current card",
-      },
     ]);
     assert.deepEqual(result.staleBodies, [{ objectType: "note", objectId: "note-stale" }]);
     assert.equal(result.hasDrift, true);
   });
 
-  it("returns a clean result and skips evidence/block hydration for empty domains", async () => {
+  it("returns a clean result and skips block hydration for empty domains", async () => {
     let forbiddenQueries = 0;
     let indexedQuery = 0;
     const executor = {
       query: {
         notes: { findMany: async () => [] },
         sources: { findMany: async () => [] },
-        learningCardSets: { findMany: async () => [] },
-        learningCards: { findMany: async () => [] },
-        cardKeyPoints: { findMany: async () => { forbiddenQueries += 1; return []; } },
-        evidences: { findMany: async () => { forbiddenQueries += 1; return []; } },
         noteBlocks: { findMany: async () => { forbiddenQueries += 1; return []; } },
         searchDocuments: {
           findMany: async () => {
@@ -482,7 +391,7 @@ describe("search projection drift", () => {
 
     const result = await detectSearchDrift(executor, WORKSPACE_ID);
 
-    assert.equal(indexedQuery, 5);
+    assert.equal(indexedQuery, 2);
     assert.equal(forbiddenQueries, 0);
     assert.deepEqual(result, {
       expected: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },

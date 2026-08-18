@@ -516,6 +516,8 @@ function setupFlexibleTx(options: {
   existingReceipt?: Record<string, unknown> | null;
   /** 表感知覆盖：额外表名 → 行；缺省回退 [candidate]（兼容旧调用） */
   tableRowsOverride?: Record<string, unknown[]>;
+  /** learning_objective_origins_v2 行（W2-07 来源；缺省空） */
+  origins?: Record<string, unknown>[];
 } = {}) {
   const run = makeRun(options.run);
   const plan = makePlan(options.plan);
@@ -556,6 +558,13 @@ function setupFlexibleTx(options: {
         return [existingCard];
       case "learning_card_publication_revisions_v2":
         return [makePublicationRevision()];
+      // W2-07 来源绑定：默认无来源（note_versions 不命中 → writeActivationNoteOrigin
+      // 早退；learning_objective_origins_v2 无既有 Origin → copyOriginsToRevision 复制 0 行）。
+      // 不得回退到 [candidate]，否则 rowToWire(candidate) 抛 unknown origin_kind。
+      case "note_versions":
+        return [];
+      case "learning_objective_origins_v2":
+        return options.origins ?? [];
       default:
         return [candidate]; // 兼容旧调用：未识别表回退候选行
     }
@@ -1241,6 +1250,7 @@ describe("activateCardCandidatesV2 — presentation_update", () => {
           const evRowsPre = checkEvidenceTable(table).rows;
           if (evRowsPre !== null) return { where: () => makeWhereResult(evRowsPre) };
           selectCount++;
+          if (columns !== undefined && String((table as { [k: symbol]: unknown })?.[Symbol.for("drizzle:Name")]) === "note_versions") return { where: () => makeWhereResult([]) };
           if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
           const evRowsX = checkEvidenceTable(table).rows;
           if (evRowsX !== null) return { where: () => makeWhereResult(evRowsX) };
@@ -1400,7 +1410,8 @@ describe("activateCardCandidatesV2 — keep_existing lifecycle", () => {
             const evRowsPre = checkEvidenceTable(table).rows;
             if (evRowsPre !== null) return { where: () => makeWhereResult(evRowsPre) };
             selectCount++;
-            if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
+            if (columns !== undefined && String((table as { [k: symbol]: unknown })?.[Symbol.for("drizzle:Name")]) === "note_versions") return { where: () => makeWhereResult([]) };
+          if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
             const evRowsX = checkEvidenceTable(table).rows;
           if (evRowsX !== null) return { where: () => makeWhereResult(evRowsX) };
           if (selectCount === 1) return { where: () => makeWhereResult([]) };
@@ -1465,6 +1476,7 @@ describe("activateCardCandidatesV2 — keep_existing lifecycle", () => {
           const evRowsPre = checkEvidenceTable(table).rows;
           if (evRowsPre !== null) return { where: () => makeWhereResult(evRowsPre) };
           selectCount++;
+          if (columns !== undefined && String((table as { [k: symbol]: unknown })?.[Symbol.for("drizzle:Name")]) === "note_versions") return { where: () => makeWhereResult([]) };
           if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
           const evRowsX = checkEvidenceTable(table).rows;
           if (evRowsX !== null) return { where: () => makeWhereResult(evRowsX) };
@@ -1532,6 +1544,7 @@ describe("activateCardCandidatesV2 — multi-candidate activation", () => {
           const evRowsPre = checkEvidenceTable(table).rows;
           if (evRowsPre !== null) return { where: () => makeWhereResult(evRowsPre) };
           selectCount++;
+          if (columns !== undefined && String((table as { [k: symbol]: unknown })?.[Symbol.for("drizzle:Name")]) === "note_versions") return { where: () => makeWhereResult([]) };
           if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
           const evRowsX = checkEvidenceTable(table).rows;
           if (evRowsX !== null) return { where: () => makeWhereResult(evRowsX) };
@@ -1675,6 +1688,7 @@ describe("activateCardCandidatesV2 — Initial Validation Reminder precision exp
           const evRowsPre = checkEvidenceTable(table).rows;
           if (evRowsPre !== null) return { where: () => makeWhereResult(evRowsPre) };
           selectCount++;
+          if (columns !== undefined && String((table as { [k: symbol]: unknown })?.[Symbol.for("drizzle:Name")]) === "note_versions") return { where: () => makeWhereResult([]) };
           if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
           const evRowsX = checkEvidenceTable(table).rows;
           if (evRowsX !== null) return { where: () => makeWhereResult(evRowsX) };
@@ -1744,6 +1758,7 @@ describe("activateCardCandidatesV2 — Initial Validation Reminder precision exp
           const evRowsPre = checkEvidenceTable(table).rows;
           if (evRowsPre !== null) return { where: () => makeWhereResult(evRowsPre) };
           selectCount++;
+          if (columns !== undefined && String((table as { [k: symbol]: unknown })?.[Symbol.for("drizzle:Name")]) === "note_versions") return { where: () => makeWhereResult([]) };
           if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
           const evRowsX = checkEvidenceTable(table).rows;
           if (evRowsX !== null) return { where: () => makeWhereResult(evRowsX) };
@@ -1800,6 +1815,7 @@ describe("activateCardCandidatesV2 — Initial Validation Reminder precision exp
           const evRowsPre = checkEvidenceTable(table).rows;
           if (evRowsPre !== null) return { where: () => makeWhereResult(evRowsPre) };
           selectCount++;
+          if (columns !== undefined && String((table as { [k: symbol]: unknown })?.[Symbol.for("drizzle:Name")]) === "note_versions") return { where: () => makeWhereResult([]) };
           if (columns !== undefined) return { where: () => makeWhereResult([{ maxSeq: 0 }]) };
           const evRowsX = checkEvidenceTable(table).rows;
           if (evRowsX !== null) return { where: () => makeWhereResult(evRowsX) };

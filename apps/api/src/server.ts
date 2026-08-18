@@ -9,7 +9,7 @@ import { logger } from "./lib/logger.ts";
 import { authRoutes } from "./modules/identity/routes.ts";
 import { noteRoutes } from "./modules/note/routes.ts";
 import { jobRoutes } from "./modules/job/routes.ts";
-import { evidenceRoutes } from "./modules/evidence/routes.ts";
+// V1 evidence module removed — V2 evidence via card-generation-v2 (evidence snapshots)
 // V1 validation routes removed - V2 flows via LearningRun
 import { validationSessionRoutes } from "./modules/validation/session-routes.ts";
 import { reviewRoutes } from "./modules/review/routes.ts";
@@ -327,7 +327,7 @@ async function main() {
   await app.register(learningDashboardRoutes);
   await app.register(understandingTopologyV3Routes);
   await app.register(jobRoutes);
-  await app.register(evidenceRoutes);
+  // V1 evidence routes removed - V2 flows via card-generation-v2
   // V1 validation routes removed - V2 flows via LearningRun
   await app.register(validationSessionRoutes);
   await app.register(reviewRoutes);

@@ -35,7 +35,6 @@ import {
   learningTasks,
   learningTaskVariants,
 } from "../../db/schema/learning-runs.ts";
-import { cardKeyPoints } from "../../db/schema/card.ts";
 import {
   evidenceEligibilityStatesV2,
   initialValidationRemindersV2,
@@ -61,6 +60,16 @@ import {
 import { loadFrozenTargetSnapshotV2 } from "../card-generation-v2/target-snapshot-adapter.ts";
 import { insertDomainEvents } from "../card-generation-v2/helpers.ts";
 import { materializeCanonicalChangeSet, materializePracticeChangeSet } from "../understanding/projection-service.ts";
+
+/** 从 run.origin 取目标 ID（V1 keyPointId / V2 objectiveId 同一 alias，§29.4）。 */
+function originObjectiveId(origin: unknown): string {
+  if (origin && typeof origin === "object") {
+    const o = origin as { objectiveId?: unknown; keyPointId?: unknown };
+    if (typeof o.objectiveId === "string") return o.objectiveId;
+    if (typeof o.keyPointId === "string") return o.keyPointId;
+  }
+  return "00000000-0000-0000-0000-000000000000";
+}
 
 let criticTransport: CriticTransport | null = null;
 function getCriticTransport(): CriticTransport {
@@ -589,8 +598,8 @@ async function gatherCriticInput(
   tx: Parameters<Parameters<typeof withWorkspaceTransaction>[1]>[0],
   command: CommandRow,
 ): Promise<CriticInput> {
-  // 并行读取相互独立的资源（artifact / task / run / contract），缩短 worker 路径耗时。
-  const [artifactRows, taskRows, runRows, contractRows] = await Promise.all([
+  // 并行读取相互独立的资源（artifact / task / contract），缩短 worker 路径耗时。
+  const [artifactRows, taskRows, contractRows] = await Promise.all([
     tx
       .select()
       .from(learningArtifacts)
@@ -600,11 +609,6 @@ async function gatherCriticInput(
       .select()
       .from(learningTasks)
       .where(and(eq(learningTasks.id, command.taskId), eq(learningTasks.runId, command.runId)))
-      .limit(1),
-    tx
-      .select({ runId: learningRuns.id, keyPointId: learningRuns.keyPointId })
-      .from(learningRuns)
-      .where(eq(learningRuns.id, command.runId))
       .limit(1),
     tx
       .select({ snapshotHash: learningRunPrivateContracts.snapshotHash })
@@ -633,58 +637,41 @@ async function gatherCriticInput(
     : [];
   if (rubricTargetIds.length === 0) throw new CriticOutputError("no rubric targets");
 
-  // §16.6：V2 run（private contract 带 snapshotHash）从 frozen snapshot 消费
-  // objective/answer units/rubric units/evidence refs；禁止回查 claim/quoteText。
-  if (contractRows[0]?.snapshotHash) {
-    const snapshot = await loadFrozenTargetSnapshotV2(tx, command.workspaceId, command.runId);
-    if (!snapshot) throw new CriticOutputError("V2 run missing frozen snapshot");
-    const canon = snapshot.target;
-    const answerUnits = flattenAnswerUnits(canon.canonicalAnswer);
-    const requiredRubric = canon.scoringRubric.units.filter((u) => u.required);
-    const optionalRubric = canon.scoringRubric.units.filter((u) => !u.required);
-    return {
-      taskPrompt: task.prompt,
-      claim: canon.objectiveStatement,
-      evidenceQuotes: canon.evidence.map((e) => `${e.evidenceSnapshotHash}`),
-      answerText,
-      intent: task.intent,
-      rubricTargetIds,
-      v2: {
-        objectiveStatement: canon.objectiveStatement,
-        canonicalAnswerUnits: answerUnits,
-        requiredRubricUnits: requiredRubric.map((u) => ({ rubricUnitId: u.rubricUnitId, criterion: u.criterion })),
-        optionalRubricUnits: optionalRubric.map((u) => ({ rubricUnitId: u.rubricUnitId, criterion: u.criterion })),
-        evidenceRefs: canon.evidence.map((e) => ({ evidenceSnapshotHash: e.evidenceSnapshotHash, preview: e.evidenceSnapshotHash })),
-        taskIntent: task.intent,
-        taskPrompt: task.prompt,
-        interactionFamily: typeof variant?.interaction === "object" && variant.interaction && "kind" in variant.interaction
-          ? String((variant.interaction as { kind: string }).kind)
-          : "unknown",
-        publicPayloadHash: variant?.publicPayloadHash ?? null,
-        artifactText: answerText,
-        semanticTargetFingerprint: canon.semanticTargetFingerprint,
-        targetRevisionHash: canon.targetRevisionHash,
-        snapshotHash: snapshot.snapshotHash,
-        criticVersion: "critic-snapshot-v2.1",
-      },
-    };
-  }
-
-  const kpRows = await tx
-    .select({ claim: cardKeyPoints.claim, quote: cardKeyPoints.quoteText })
-    .from(cardKeyPoints)
-    .where(eq(cardKeyPoints.id, runRows[0]?.keyPointId ?? ""))
-    .limit(1);
-  const kp = kpRows[0];
-  if (!kp) throw new CriticOutputError("key point not found");
-
+  // V1 的 cardKeyPoints/claim/quote 读取已随旧栈退役：非 V2（无 frozen
+  // snapshot）的 run 一律 fail closed（不猜题面，方案 20 §16）。
+  const snapshot = contractRows[0]?.snapshotHash
+    ? await loadFrozenTargetSnapshotV2(tx, command.workspaceId, command.runId)
+    : null;
+  if (!snapshot) throw new CriticOutputError("V2 run missing frozen snapshot");
+  const canon = snapshot.target;
+  const answerUnits = flattenAnswerUnits(canon.canonicalAnswer);
+  const requiredRubric = canon.scoringRubric.units.filter((u) => u.required);
+  const optionalRubric = canon.scoringRubric.units.filter((u) => !u.required);
   return {
     taskPrompt: task.prompt,
-    claim: kp.claim,
-    evidenceQuotes: [kp.quote],
+    claim: canon.objectiveStatement,
+    evidenceQuotes: canon.evidence.map((e) => `${e.evidenceSnapshotHash}`),
     answerText,
     intent: task.intent,
     rubricTargetIds,
+    v2: {
+      objectiveStatement: canon.objectiveStatement,
+      canonicalAnswerUnits: answerUnits,
+      requiredRubricUnits: requiredRubric.map((u) => ({ rubricUnitId: u.rubricUnitId, criterion: u.criterion })),
+      optionalRubricUnits: optionalRubric.map((u) => ({ rubricUnitId: u.rubricUnitId, criterion: u.criterion })),
+      evidenceRefs: canon.evidence.map((e) => ({ evidenceSnapshotHash: e.evidenceSnapshotHash, preview: e.evidenceSnapshotHash })),
+      taskIntent: task.intent,
+      taskPrompt: task.prompt,
+      interactionFamily: typeof variant?.interaction === "object" && variant.interaction && "kind" in variant.interaction
+        ? String((variant.interaction as { kind: string }).kind)
+        : "unknown",
+      publicPayloadHash: variant?.publicPayloadHash ?? null,
+      artifactText: answerText,
+      semanticTargetFingerprint: canon.semanticTargetFingerprint,
+      targetRevisionHash: canon.targetRevisionHash,
+      snapshotHash: snapshot.snapshotHash,
+      criticVersion: "critic-snapshot-v2.1",
+    },
   };
 }
 
@@ -862,18 +849,18 @@ async function finishStructuredAssessment(
   // §16.2：每个无 canonical Commit 的 Run 最多一个聚合 practice event
   // （UNIQUE(run_id, scope)）；同 Run 后续 task 的轨迹并入同一事件，不新插。
   const runRow = (await tx
-    .select({ keyPointId: learningRuns.keyPointId, returnTarget: learningRuns.returnTarget })
+    .select({ origin: learningRuns.origin, returnTarget: learningRuns.returnTarget })
     .from(learningRuns)
     .where(eq(learningRuns.id, command.runId))
     .limit(1))[0];
-  const keyPointId = runRow?.keyPointId ?? "00000000-0000-0000-0000-000000000000";
+  // V1 keyPointId 列已退役：从 origin JSONB 取 objective alias。
+  const keyPointId = originObjectiveId(runRow?.origin);
   const practiceEventId = `practice:${sha256Hex(`${command.runId}:structured`).slice(0, 24)}`;
   await tx.insert(practiceTrailEventOutbox).values({
     practiceEventId,
     workspaceId: command.workspaceId,
     userId: command.userId,
     runId: command.runId,
-    keyPointId,
     scope: "official_user",
     event: {
       version: 1,
@@ -1109,6 +1096,8 @@ async function processCommitCommand(
   const at = new Date();
   const authorization = contract.schedulingAuthorization as SchedulingAuthorizationV1;
   const isV2Run = Boolean(contract.snapshotHash);
+  // V1 keyPointId 列已退役：objective 身份从 run.origin 取（§29.4 alias）。
+  const objectiveId = originObjectiveId(run.origin);
   // facet_evidence（partial 结算）按同一授权路径消费/创建 schedule——
   // §6.4：partial 允许写 facet，调度授权不因部分覆盖而作废。
   const scheduleImpact = isCanonicalEvidence
@@ -1134,7 +1123,7 @@ async function processCommitCommand(
       canonicalEventId,
       commitId,
       runId: command.runId,
-      keyPointId: contract.keyPointId,
+      keyPointId: objectiveId,
       fact: { kind: factKind, disposition: factDisposition },
     })),
     commitId,
@@ -1143,7 +1132,7 @@ async function processCommitCommand(
     runId: command.runId,
     taskIds: [command.taskId],
     artifactIds: command.artifactId ? [command.artifactId] : ["00000000-0000-0000-0000-000000000000"],
-    keyPointId: contract.keyPointId,
+    keyPointId: objectiveId,
     targetFingerprint: contract.targetFingerprint,
     fact: {
       kind: factKind,
@@ -1170,7 +1159,7 @@ async function processCommitCommand(
     workspaceId: command.workspaceId,
     userId: command.userId,
     runId: command.runId,
-    keyPointId: contract.keyPointId,
+    // V1 keyPointId 列已退役；objective 身份经 runId+snapshot 关联。
     envelope: envelope as never,
     status: "pending",
     createdAt: at,
@@ -1269,7 +1258,7 @@ async function processCommitCommand(
       .where(and(
         eq(initialValidationRemindersV2.workspaceId, command.workspaceId),
         eq(initialValidationRemindersV2.userId, command.userId),
-        eq(initialValidationRemindersV2.objectiveId, contract.keyPointId),
+        eq(initialValidationRemindersV2.objectiveId, objectiveId),
         inArray(initialValidationRemindersV2.status, ["pending", "ready"]),
       ))
       .returning({
@@ -1282,7 +1271,7 @@ async function processCommitCommand(
       aggregateId: r.reminderId,
       aggregateRevision: r.reminderRevision,
       payload: {
-        objectiveId: contract.keyPointId,
+        objectiveId,
         runId: command.runId,
         commitId,
         factKind,
@@ -1322,17 +1311,17 @@ async function finishSandboxCommit(
 ): Promise<void> {
   const practiceEventId = `sandbox:${sha256Hex(`${command.runId}:sandbox`).slice(0, 24)}`;
   const runRows = await tx
-    .select({ keyPointId: learningRuns.keyPointId })
+    .select({ origin: learningRuns.origin })
     .from(learningRuns)
     .where(eq(learningRuns.id, command.runId))
     .limit(1);
-  const keyPointId = runRows[0]?.keyPointId ?? "00000000-0000-0000-0000-000000000000";
+  // V1 keyPointId 列已退役：从 origin JSONB 取 objective alias。
+  const keyPointId = originObjectiveId(runRows[0]?.origin);
   await tx.insert(practiceTrailEventOutbox).values({
     practiceEventId,
     workspaceId: command.workspaceId,
     userId: command.userId,
     runId: command.runId,
-    keyPointId,
     scope: "sandbox",
     event: {
       version: 1,
@@ -1403,25 +1392,17 @@ async function applyDemonstratedSchedule(
   authorization: SchedulingAuthorizationV1,
   at: Date,
   disposition?: string,
-  isV2Run = false,
+  _isV2Run = false,
 ): Promise<LearningRunResultV1["scheduleImpact"]> {
   // §13.6：facet_evidence（partial/结构化 facet 结算）0 schedule effect——
   // 不消费 pending、不创建 successor（canonical facet observation 照常发布）。
   if (disposition === "facet_evidence") {
     return { kind: "none", reasonCode: "facet_only" };
   }
-  // 证据存在性：key point 有 quote 即视为 hard evidence（P2 保守口径）。
-  const authKeyPointId = authorization.kind === "create_initial" || authorization.kind === "consume_pending"
-    ? authorization.keyPointId
-    : "";
-  const kpRows = authKeyPointId.length > 0
-    ? await tx
-        .select({ quote: cardKeyPoints.quoteText })
-        .from(cardKeyPoints)
-        .where(eq(cardKeyPoints.id, authKeyPointId))
-        .limit(1)
-    : [];
-  const hasHardEvidence = Boolean(kpRows[0]?.quote && kpRows[0].quote.length > 0);
+  // 证据存在性：V1 的 cardKeyPoints.quote 读取已退役。可走到 Commit 的
+  // canonical run 必然已通过 V2 evidence closure 复验（revalidateV2CommitEpochs
+  // 要求全部 usable，fail closed），故 hard evidence 恒成立（P2 保守口径）。
+  const hasHardEvidence = true;
 
   if (authorization.kind === "create_initial") {
     const decision = calculateReviewSchedule({
@@ -1434,9 +1415,10 @@ async function applyDemonstratedSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: isV2Run ? "key_point" : "validation",
+      // V2 objective 维度：subjectType="card" + subjectId=objectiveId（§29.4
+      // 惯例；与 surface-service/card-service 读取端一致）。
+      subjectType: "card",
       subjectId: authorization.keyPointId,
-      keyPointId: authorization.keyPointId,
       status: "pending",
       nextReviewAt: decision.nextReviewAt,
       intervalDays: decision.afterIntervalDays,
@@ -1483,9 +1465,8 @@ async function applyDemonstratedSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: isV2Run ? "key_point" : "validation",
+      subjectType: "card",
       subjectId: authorization.keyPointId,
-      keyPointId: authorization.keyPointId,
       status: "pending",
       nextReviewAt: decision.nextReviewAt,
       intervalDays: decision.afterIntervalDays,
@@ -1513,7 +1494,7 @@ async function applyUnableSchedule(
   command: CommandRow,
   authorization: SchedulingAuthorizationV1,
   at: Date,
-  isV2Run = false,
+  _isV2Run = false,
 ): Promise<LearningRunResultV1["scheduleImpact"]> {
   const shortIntervalDays = 1;
   if (authorization.kind === "create_initial") {
@@ -1521,9 +1502,8 @@ async function applyUnableSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: isV2Run ? "key_point" : "validation",
+      subjectType: "card",
       subjectId: authorization.keyPointId,
-      keyPointId: authorization.keyPointId,
       status: "pending",
       nextReviewAt,
       intervalDays: shortIntervalDays,
@@ -1555,9 +1535,8 @@ async function applyUnableSchedule(
     await tx.insert(reviewSchedules).values({
       workspaceId: command.workspaceId,
       userId: command.userId,
-      subjectType: isV2Run ? "key_point" : "validation",
+      subjectType: "card",
       subjectId: authorization.keyPointId,
-      keyPointId: authorization.keyPointId,
       status: "pending",
       nextReviewAt,
       intervalDays: shortIntervalDays,

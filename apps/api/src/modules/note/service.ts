@@ -1,33 +1,9 @@
-import { and, desc, eq, inArray, isNull, isNotNull, or, sql, type Column } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "../../db/schema/note.ts";
-import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
-import { evidences, validationEvents, reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
-import { aiArtifacts } from "../../db/schema/ai.ts";
-import { jobs } from "../../db/schema/job.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
 import { logger } from "../../lib/logger.ts";
-
-/**
- * PERF-10: Chunked delete helper for large IN arrays.
- *
- * PostgreSQL's IN clause degrades when parameter count exceeds ~1000.
- * This helper splits large ID arrays into batches and deletes them
- * sequentially within the same transaction.
- */
-async function chunkedInArrayDelete(
-  tx: ApiTransaction,
-  table: Parameters<typeof tx.delete>[0],
-  column: Column,
-  ids: string[],
-  chunkSize = 500,
-): Promise<void> {
-  for (let i = 0; i < ids.length; i += chunkSize) {
-    const chunk = ids.slice(i, i + chunkSize);
-    await tx.delete(table).where(inArray(column, chunk));
-  }
-}
 
 /**
  * PERF-10: Chunked select helper for large IN arrays.
@@ -69,7 +45,6 @@ async function mapWithConcurrency<T, R>(
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
   return results;
 }
-import { CardStatus, ReviewStatus } from "@ailearn/shared";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
 import { downloadAndValidateImageAsset } from "../../lib/image-asset.ts";
@@ -379,15 +354,10 @@ async function canUpdateVersionInPlace(
     .where(eq(noteVersions.id, versionId))
     .for("update");
   if (versionRows.length === 0) return false;
-  if (versionRows[0]?.sealedAt) return false;
-
-  const card = await tx.query.learningCards.findFirst({
-    where: and(
-      eq(learningCards.noteVersionId, versionId),
-      inArray(learningCards.status, [CardStatus.ACTIVE, CardStatus.SUPERSEDED]),
-    ),
-  });
-  return !card;
+  // V1 退役：旧版学习卡 learningCards（V1 表）已删除。原先这里还检查是否有
+  // active/superseded 的 V1 卡引用该版本以决定不可原地更新；V2 卡片通过
+  // objectiveId 关联、不直接引用 note_version，此处仅保留 sealed 版本保护。
+  return !versionRows[0].sealedAt;
 }
 
 /**
@@ -1020,7 +990,9 @@ export async function updateNote(
           // re-read below — note/blocks no longer are.
           resultBlocks = inPlaceBlocks as NoteBlock[];
         } else {
-          // 有卡片引用，降级为创建新版本
+          // 无法原地更新（版本被 sealed 或缺失），降级为创建新版本。
+          // V1 退役说明：原先在「有 V1 卡引用版本」时也会降级，V2 已不再
+          // 通过 note_version 直接引用卡片，故仅剩 sealed 保护触发此分支。
           const latest = await tx.query.noteVersions.findFirst({
             where: eq(noteVersions.noteId, noteId),
             orderBy: (v, { desc: desc1 }) => [desc1(v.versionNo)],
@@ -1213,69 +1185,10 @@ export async function deleteNote(
     .set({ deletedAt, updatedAt: deletedAt })
     .where(eq(notes.id, noteId));
 
-  // P2-2: 归档关联的 active 卡片，取消 pending 复习计划，清理卡片搜索索引
-  const versionRows = await executor
-    .select({ id: noteVersions.id })
-    .from(noteVersions)
-    .where(eq(noteVersions.noteId, noteId));
-  const versionIds = versionRows.map((v) => v.id);
-
-  if (versionIds.length > 0) {
-    // 归档 active 卡片（使用 deletedAt 时间戳，供恢复时精确匹配）
-    // CONC-10-edge: 同时设置专用标记列 archivedByNoteDeletionAt，
-    // 不受其他操作（如 card/service archiveCard 覆盖 updatedAt）的影响。
-    // N#7-13: versionIds 分批归档，避免大数组 IN 参数越界。
-    for (let i = 0; i < versionIds.length; i += 500) {
-      const chunk = versionIds.slice(i, i + 500);
-      await executor
-        .update(learningCards)
-        .set({ status: CardStatus.ARCHIVED, updatedAt: deletedAt, archivedByNoteDeletionAt: deletedAt })
-        .where(and(
-          inArray(learningCards.noteVersionId, chunk),
-          eq(learningCards.status, CardStatus.ACTIVE),
-        ));
-    }
-
-    // CONC-08: 只取消被归档卡片的 pending 复习计划，与 restoreDeletedNote
-    // 的恢复范围保持对称。查询刚被归档的卡片（archivedByNoteDeletionAt === deletedAt），
-    // 而非所有关联卡片，避免取消 SUPERSEDED 等卡片的计划后无法正确恢复。
-    // CONC-10-edge: 使用专用标记列匹配，即使 updatedAt 被其他操作覆盖也能正确识别。
-    const cardRows = await chunkedInArraySelect(
-      (chunk) => executor
-        .select({ id: learningCards.id })
-        .from(learningCards)
-        .where(and(
-          inArray(learningCards.noteVersionId, chunk),
-          eq(learningCards.status, CardStatus.ARCHIVED),
-          eq(learningCards.archivedByNoteDeletionAt, deletedAt),
-        )),
-      versionIds,
-    );
-    const cardIds = cardRows.map((c) => c.id);
-
-    if (cardIds.length > 0) {
-      // CONC-10: 设置 updatedAt = deletedAt，供 restoreDeletedNote
-      // 精确匹配被 deleteNote 取消的计划，避免误恢复之前手动取消的计划。
-      // N#7-13: cardIds 分批取消，避免大数组 IN 参数越界。
-      for (let i = 0; i < cardIds.length; i += 500) {
-        const chunk = cardIds.slice(i, i + 500);
-        await executor
-          .update(reviewSchedules)
-          .set({ status: ReviewStatus.CANCELLED, updatedAt: deletedAt })
-          .where(and(
-            eq(reviewSchedules.workspaceId, workspaceId),
-            eq(reviewSchedules.status, ReviewStatus.PENDING),
-            eq(reviewSchedules.subjectType, "card"),
-            inArray(reviewSchedules.subjectId, chunk),
-          ));
-      }
-
-      // 清理卡片搜索索引
-      await deleteSearchDocuments(executor, workspaceId,
-        cardIds.map((id) => ({ objectType: "card" as const, objectId: id })),
-      );
-    }
-  }
+  // V1 退役：旧版学习卡（learningCards / cardKeyPoints，V1 表）与以其 cardId
+  // 为 subjectId 的 review_schedules 计划已随 V1 表删除，此处不再归档 V1 卡片 /
+  // 取消 V1 卡片复习计划 / 清理 V1 卡片搜索索引。V2 卡片经 objectiveId 关联，
+  // 其生命周期不在 note 模块管理。
 
   // 清理搜索索引 — 软删除后笔记不应出现在搜索结果中
   await deleteSearchDocuments(executor, workspaceId, [
@@ -1314,82 +1227,19 @@ export async function restoreDeletedNote(
       .set({ deletedAt: null, updatedAt: new Date() })
       .where(eq(notes.id, noteId));
 
-    // P2-2: 恢复被软删除时归档的卡片和取消的复习计划
-    // 只恢复被 deleteNote 归档的卡片（updatedAt 与 deletedAt 精确匹配），
-    // 避免恢复用户在笔记删除前就已手动归档的卡片
-    const versionRows = await tx
-      .select({ id: noteVersions.id })
-      .from(noteVersions)
-      .where(eq(noteVersions.noteId, noteId));
-    const versionIds = versionRows.map((v) => v.id);
-
-    let restoredCards: Array<{ id: string; schemaJson: { title: string; summary: string } }> = [];
-    if (versionIds.length > 0 && note.deletedAt) {
-      // 查找被 deleteNote 归档的卡片（archivedByNoteDeletionAt === deletedAt）
-      // CONC-10-edge: 使用专用标记列匹配，即使卡片在笔记软删除后被其他操作
-      // （如 card/service archiveCard）覆盖了 updatedAt，仍能正确识别并恢复。
-      const archivedByDelete = await tx
-        .select({
-          id: learningCards.id,
-          schemaJson: learningCards.schemaJson,
-        })
-        .from(learningCards)
-        .where(and(
-          inArray(learningCards.noteVersionId, versionIds),
-          eq(learningCards.status, CardStatus.ARCHIVED),
-          eq(learningCards.archivedByNoteDeletionAt, note.deletedAt),
-        ));
-      const restoredCardIds = archivedByDelete.map((c) => c.id);
-      restoredCards = archivedByDelete;
-
-      if (restoredCardIds.length > 0) {
-        // 恢复被 deleteNote 归档的卡片为 active
-        // CONC-10-edge: 清除专用标记列 archivedByNoteDeletionAt
-        await tx
-          .update(learningCards)
-          .set({ status: CardStatus.ACTIVE, updatedAt: new Date(), archivedByNoteDeletionAt: null })
-          .where(and(
-            inArray(learningCards.id, restoredCardIds),
-            eq(learningCards.status, CardStatus.ARCHIVED),
-          ));
-
-        // 恢复被 deleteNote 取消的复习计划（仅针对被恢复的卡片）。
-        // CONC-08: deleteNote 只取消被归档卡片的 PENDING 计划，
-        // 与此处的恢复范围对称。
-        // CONC-10: 用 updatedAt = note.deletedAt 精确匹配被 deleteNote
-        // 取消的计划（deleteNote 取消时将 updatedAt 设为 deletedAt），
-        // 避免误恢复用户在笔记删除前就已手动取消的计划。
-        //
-        // SEC-01 说明：此处使用 updatedAt 时间戳匹配恢复范围，存在极端竞态窗口。
-        // 卡片恢复已通过专用标记列 archivedByNoteDeletionAt 精确匹配（见上方），
-        // 但复习计划仍依赖 updatedAt 精确匹配 deletedAt。
-        // 风险：如果 deleteNote 和 restoreDeletedNote 之间的时间精度不一致
-        //（PostgreSQL timestamptz 微秒精度 vs JS Date 毫秒精度），可能导致匹配失败。
-        // 缓解措施：deleteNote 在同一事务内设置 deletedAt 和 updatedAt，
-        // 使用相同的 Date 对象，确保时间戳一致。实际竞态概率极低。
-        // 建议改进：未来为 reviewSchedules 添加专用标记列（如 cancelledByNoteDeletionAt），
-        // 彻底消除时间戳匹配的竞态风险。
-        await tx
-          .update(reviewSchedules)
-          .set({ status: ReviewStatus.PENDING, updatedAt: new Date() })
-          .where(and(
-            eq(reviewSchedules.workspaceId, workspaceId),
-            eq(reviewSchedules.status, ReviewStatus.CANCELLED),
-            eq(reviewSchedules.subjectType, "card"),
-            inArray(reviewSchedules.subjectId, restoredCardIds),
-            eq(reviewSchedules.updatedAt, note.deletedAt),
-          ));
-      }
-    }
+    // V1 退役：旧版学习卡（learningCards / cardKeyPoints，V1 表）与以其 cardId
+    // 为 subjectId 的 review_schedules 计划已随 V1 表删除，此处不再恢复被
+    // deleteNote 归档的 V1 卡片及其复习计划。V2 卡片经 objectiveId 关联，其
+    // 生命周期不在 note 模块管理。
 
     // 返回恢复后的完整数据
     const versionId = note.currentVersionId;
-    if (!versionId) return { note: { ...note, deletedAt: null }, version: null, blocks: [] as NoteBlock[], restoredCards };
+    if (!versionId) return { note: { ...note, deletedAt: null }, version: null, blocks: [] as NoteBlock[] };
 
     const version = await tx.query.noteVersions.findFirst({
       where: eq(noteVersions.id, versionId),
     });
-    if (!version) return { note: { ...note, deletedAt: null }, version: null, blocks: [] as NoteBlock[], restoredCards };
+    if (!version) return { note: { ...note, deletedAt: null }, version: null, blocks: [] as NoteBlock[] };
 
     const blocks = await tx.query.noteBlocks.findMany({
       where: eq(noteBlocks.versionId, versionId),
@@ -1400,7 +1250,6 @@ export async function restoreDeletedNote(
       note: { ...note, deletedAt: null },
       version,
       blocks: blocks as NoteBlock[],
-      restoredCards,
     };
 
   // 恢复后重建搜索索引
@@ -1418,68 +1267,8 @@ export async function restoreDeletedNote(
     });
   }
 
-  // 重建被恢复卡片的搜索索引（deleteNote 清理了卡片搜索文档）
-  // BUG-02 fix: Batch query keyPoints for all restored cards instead of N+1 queries.
-  if (result?.restoredCards?.length) {
-    const cardIds = result.restoredCards.map((c) => c.id);
-    // Batch query all keyPoints for restored cards in one query
-    // Y4（round-3 审计）：批量恢复大量卡片时裸 inArray 可能超参数上限，分块查询。
-    const allKeyPoints = await chunkedInArraySelect<typeof cardKeyPoints.$inferSelect>(
-      (chunk) => executor.query.cardKeyPoints.findMany({
-        where: inArray(cardKeyPoints.cardId, chunk),
-      }),
-      cardIds,
-    );
-    // Group keyPoints by cardId
-    const keyPointsByCard = new Map<string, typeof allKeyPoints>();
-    for (const kp of allKeyPoints) {
-      const list = keyPointsByCard.get(kp.cardId) ?? [];
-      list.push(kp);
-      keyPointsByCard.set(kp.cardId, list);
-    }
-    // PERF: Batch-insert restored-card search documents in one savepoint instead
-    // of one upsertSearchDocument (nested-transaction INSERT ... ON CONFLICT) per
-    // card — restoring a note with many cards used to cost N round-trips serially.
-    const cardDocs = result.restoredCards.map((card) => {
-      const keyPoints = keyPointsByCard.get(card.id) ?? [];
-      const cardBody = [
-        card.schemaJson.summary,
-        ...keyPoints.map((kp) => kp.claim),
-      ].join("\n");
-      return {
-        workspaceId,
-        objectType: "card" as const,
-        objectId: card.id,
-        title: card.schemaJson.title,
-        body: cardBody,
-      };
-    });
-    const INSERT_BATCH_SIZE = 500;
-    for (let start = 0; start < cardDocs.length; start += INSERT_BATCH_SIZE) {
-      const chunk = cardDocs.slice(start, start + INSERT_BATCH_SIZE);
-      try {
-        await executor.transaction(async (savepoint) => {
-          await savepoint
-            .insert(searchDocuments)
-            .values(chunk.map((doc) => ({ ...doc, metadata: {}, indexedAt: new Date() })))
-            .onConflictDoUpdate({
-              target: [searchDocuments.workspaceId, searchDocuments.objectType, searchDocuments.objectId],
-              set: {
-                title: sql`excluded.title`,
-                body: sql`excluded.body`,
-                metadata: sql`excluded.metadata`,
-                indexedAt: sql`excluded.indexed_at`,
-              },
-            });
-        });
-      } catch (err) {
-        logger.error(
-          { err, workspaceId, objectType: "card", count: chunk.length },
-          "restoreDeletedNote: search index batched upsert failed — index may be stale, run reindex to compensate",
-        );
-      }
-    }
-  }
+  // V1 退役：原「重建被恢复 V1 卡片的搜索索引」逻辑（cardKeyPoints / 卡片
+  // 搜索文档）已随 V1 表删除；V2 卡片搜索索引由 card 模块自行维护。
 
   return result;
 }
@@ -1496,37 +1285,6 @@ export async function restoreDeletedNote(
  *   用于 benchmark 清理等需要强制删除 active 笔记的场景。正常定时任务和
  *   管理员手动触发不传此参数，保持 CONC-07 的安全检查。
  */
-
-/**
- * QUAL-03 修复：提取命名函数替代 IIFE 模式。
- * 级联删除卡片关联的 AI artifacts（包括卡片 artifact 和验证 artifact）。
- * 使用分块查询和分块删除避免大数组 IN 子句性能退化。
- *
- * @param tx 事务执行器
- * @param cardIds 待删除卡片关联的 card IDs
- * @param validationArtifactIds 验证事件关联的 artifact IDs
- */
-async function deleteCardArtifactsCascade(
-  tx: ApiTransaction,
-  cardIds: string[],
-  validationArtifactIds: string[],
-): Promise<void> {
-  // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
-  const cardRowsForArtifacts = await chunkedInArraySelect<{ artifactId: string | null }>(
-    (chunk) => tx.select({ artifactId: learningCards.artifactId })
-      .from(learningCards)
-      .where(inArray(learningCards.id, chunk)),
-    cardIds,
-  );
-  const cardArtifactIds = cardRowsForArtifacts
-    .map((c) => c.artifactId)
-    .filter((id): id is string => id !== null);
-  const allArtifactIds = [...cardArtifactIds, ...validationArtifactIds];
-  if (allArtifactIds.length > 0) {
-    // PERF-10 补漏: 使用分块删除避免大数组 IN 子句性能退化
-    await chunkedInArrayDelete(tx, aiArtifacts, aiArtifacts.id, allArtifactIds);
-  }
-}
 
 export async function physicalDeleteNote(
   executor: ApiTransaction,
@@ -1560,173 +1318,11 @@ export async function physicalDeleteNote(
       .where(eq(noteVersions.noteId, noteId));
     const versionIds = versionRows.map((v) => v.id);
 
-    // QUAL-11 fix: Parallelize independent ID collection queries.
-    // Steps 2-5 were previously serial, but 3 (kpIds) depends on 2 (cardIds),
-    // and 5 (veIds) also depends on 2 (cardIds). However, 2 itself can run
-    // concurrently with nothing else (it depends on 1). Steps 3 and 5 can
-    // run in parallel once cardIds is known, and step 4 depends on 3.
-    // 2. 查出所有关联的 card IDs
-    // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
-    let cardIds: string[] = [];
-    if (versionIds.length > 0) {
-      const cardRows = await chunkedInArraySelect<{ id: string }>(
-        (chunk) => tx.select({ id: learningCards.id })
-          .from(learningCards)
-          .where(inArray(learningCards.noteVersionId, chunk)),
-        versionIds,
-      );
-      cardIds = cardRows.map((c) => c.id);
-    }
-
-    // 3 & 5: kpIds depends on cardIds, veIds also depends on cardIds — run in parallel.
-    // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
-    const [kpRowsResult, veRowsResult] = await Promise.all([
-      cardIds.length > 0
-        ? chunkedInArraySelect<{ id: string }>(
-            (chunk) => tx.select({ id: cardKeyPoints.id }).from(cardKeyPoints).where(inArray(cardKeyPoints.cardId, chunk)),
-            cardIds,
-          )
-        : Promise.resolve([] as { id: string }[]),
-      cardIds.length > 0
-        ? chunkedInArraySelect<{ id: string }>(
-            (chunk) => tx.select({ id: validationEvents.id }).from(validationEvents).where(inArray(validationEvents.cardId, chunk)),
-            cardIds,
-          )
-        : Promise.resolve([] as { id: string }[]),
-    ]);
-    const kpIds = kpRowsResult.map((k) => k.id);
-    const veIds = veRowsResult.map((v) => v.id);
-
-    // 4. 查出所有关联的 evidence IDs（用于搜索索引清理）
-    // PERF-10 补漏: 使用分块查询避免大数组 IN 子句性能退化
-    let evidenceIds: string[] = [];
-    if (kpIds.length > 0) {
-      const evRows = await chunkedInArraySelect<{ id: string }>(
-        (chunk) => tx.select({ id: evidences.id })
-          .from(evidences)
-          .where(inArray(evidences.keyPointId, chunk)),
-        kpIds,
-      );
-      evidenceIds = evRows.map((e) => e.id);
-    }
-
-    // QUAL-11 优化：合并同表删除操作并并行执行，减少数据库往返次数。
-    // 步骤 6-8、10 互不依赖，使用 Promise.all 并行执行；
-    // 步骤 7、8 的 veIds 和 cardIds 条件合并为单次 OR 查询。
-
-    // 7+8: 构建合并的 understanding_events 和 review_schedules 删除条件
-    const understandingConditions: ReturnType<typeof and>[] = [];
-    if (veIds.length > 0) {
-      understandingConditions.push(and(
-        eq(understandingEvents.subjectType, "validation"),
-        inArray(understandingEvents.subjectId, veIds),
-      ) as ReturnType<typeof and>);
-    }
-    if (cardIds.length > 0) {
-      understandingConditions.push(and(
-        eq(understandingEvents.subjectType, "card"),
-        inArray(understandingEvents.subjectId, cardIds),
-      ) as ReturnType<typeof and>);
-    }
-    const reviewConditions: ReturnType<typeof and>[] = [];
-    if (veIds.length > 0) {
-      reviewConditions.push(and(
-        eq(reviewSchedules.subjectType, "validation"),
-        inArray(reviewSchedules.subjectId, veIds),
-      ) as ReturnType<typeof and>);
-    }
-    if (cardIds.length > 0) {
-      reviewConditions.push(and(
-        eq(reviewSchedules.subjectType, "card"),
-        inArray(reviewSchedules.subjectId, cardIds),
-      ) as ReturnType<typeof and>);
-    }
-
-    // 6+7+8+10: 并行执行不依赖彼此结果的删除操作
-    await Promise.all([
-      // 6. 删除 evidences（通过 keyPointId 关联）
-      // PERF-10: 使用分块删除避免大数组 IN 子句性能退化
-      kpIds.length > 0
-        ? chunkedInArrayDelete(tx, evidences, evidences.keyPointId, kpIds)
-        : Promise.resolve(),
-      // 7. 删除 understanding_events（合并 veIds 和 cardIds 条件为单次查询）
-      understandingConditions.length > 0
-        ? tx.delete(understandingEvents).where(or(...understandingConditions))
-        : Promise.resolve(),
-      // 8. 删除 review_schedules（合并 veIds 和 cardIds 条件为单次查询）
-      reviewConditions.length > 0
-        ? tx.delete(reviewSchedules).where(or(...reviewConditions))
-        : Promise.resolve(),
-      // 10. 删除 card_key_points
-      // PERF-10: 使用分块删除避免大数组 IN 子句性能退化
-      cardIds.length > 0
-        ? chunkedInArrayDelete(tx, cardKeyPoints, cardKeyPoints.cardId, cardIds)
-        : Promise.resolve(),
-    ]);
-
-    // 9. 删除 validation_events（需先收集 artifactIds 供步骤 11 使用）
-    let validationArtifactIds: string[] = [];
-    if (cardIds.length > 0) {
-      // PERF-10: 使用分块查询/删除避免大数组 IN 子句性能退化
-      const veArtifactRows = await chunkedInArraySelect<{ artifactId: string | null }>(
-        (chunk) => tx.select({ artifactId: validationEvents.artifactId })
-          .from(validationEvents)
-          .where(inArray(validationEvents.cardId, chunk)),
-        cardIds,
-      );
-      validationArtifactIds = veArtifactRows
-        .map((v) => v.artifactId)
-        .filter((id): id is string => id !== null);
-      await chunkedInArrayDelete(tx, validationEvents, validationEvents.cardId, cardIds);
-    }
-
-    // 11+12: 并行执行 ai_artifacts 删除（依赖步骤 9 结果）和 jobs 删除（独立）
-    // 12. 删除关联的 jobs —— N#7-13：JSONB payload->>'cardId'/'oldCardId'/'noteVersionId'/
-    //    'keyPointId' inArray 逐一 500/批分块，避免大工作区突破 postgres-js ~65535 绑定参数上限
-    //    （同文件 deleteSearchDocuments/chunkedInArray* 均已分块）。
-    const jobPayloadKeys: Array<{ ids: string[]; key: string }> = [];
-    if (cardIds.length > 0) {
-      const uniqCardIds = Array.from(new Set(cardIds));
-      jobPayloadKeys.push({ ids: uniqCardIds, key: "cardId" });
-      jobPayloadKeys.push({ ids: uniqCardIds, key: "oldCardId" });
-    }
-    if (versionIds.length > 0) {
-      jobPayloadKeys.push({ ids: versionIds, key: "noteVersionId" });
-    }
-    if (kpIds.length > 0) {
-      jobPayloadKeys.push({ ids: kpIds, key: "keyPointId" });
-    }
-    const deleteJobPromises: Promise<unknown>[] = [];
-    for (const cond of jobPayloadKeys) {
-      for (let i = 0; i < cond.ids.length; i += 500) {
-        const chunk = cond.ids.slice(i, i + 500);
-        deleteJobPromises.push(
-          tx.delete(jobs).where(and(
-            eq(jobs.workspaceId, workspaceId),
-            inArray(sql<string>`${jobs.payload}->>'${sql.raw(cond.key)}'`, chunk),
-          )),
-        );
-      }
-    }
-    if (deleteJobPromises.length === 0) {
-      deleteJobPromises.push(Promise.resolve());
-    }
-
-    await Promise.all([
-      // 11. 删除 ai_artifacts（依赖步骤 9 收集的 validationArtifactIds）
-      // QUAL-03 修复：提取命名函数替代 IIFE 模式，提高可读性
-      cardIds.length > 0
-        ? deleteCardArtifactsCascade(tx, cardIds, validationArtifactIds)
-        : Promise.resolve(),
-      // 12. 删除关联的 jobs（分块）
-      Promise.all(deleteJobPromises),
-    ]);
-
-    // 13. 删除 learning_cards
-    // PERF-10 补漏: 使用分块删除避免大数组 IN 子句性能退化
-    if (versionIds.length > 0) {
-      await chunkedInArrayDelete(tx, learningCards, learningCards.noteVersionId, versionIds);
-    }
+    // V1 退役：原物理删除的级联清理（steps 2-13：learning_cards /
+    // cardKeyPoints / evidences / validation_events / 以 cardId 为 subjectId 的
+    // review_schedules / understanding_events / ai_artifacts / jobs）全部服务于
+    // 已删除的 V1 卡片表，无 V2 等价物，已整体移除。V2 卡片/客观对象的清理由
+    // 各自模块负责。以下仅保留 note 自身的级联（image asset 收集与 note 删除）。
 
     // 收集图片资产与旧版 Markdown object key。Typed asset 可能被同一
     // workspace 的其他笔记版本复用，必须在级联删除后重新检查引用，
@@ -1835,16 +1431,14 @@ export async function physicalDeleteNote(
       ]),
     ])];
 
-    return { cardIds, evidenceIds, imageObjectKeys };
+    return { imageObjectKeys };
   };
 
   const cleanupIds = await collectAndDeleteCascade(executor);
 
-  // 清理搜索索引
+  // 清理搜索索引（仅 note；V1 卡片/evidence 搜索文档已随 V1 卡片级联退役移除）
   await deleteSearchDocuments(executor, workspaceId, [
     { objectType: "note", objectId: noteId },
-    ...cleanupIds.cardIds.map((objectId) => ({ objectType: "card" as const, objectId })),
-    ...cleanupIds.evidenceIds.map((objectId) => ({ objectType: "evidence" as const, objectId })),
   ]);
 
   return { ok: true, imageObjectKeys: cleanupIds.imageObjectKeys };

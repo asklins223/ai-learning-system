@@ -8,6 +8,12 @@
  * GET  /understanding/projection/deltas/:changeSetId  一次性显影（no-store）。
  *
  * 全部 requireSession + RLS；响应不含 private solution/evidence 正文。
+ *
+ * V2 迁移：V1 learningCards/cardKeyPoints 已删除；本模块以 V2 的
+ * learning_objectives_v2（objectiveId 作为外部 keyPointId）与
+ * learning_cards_v2（cardId 作为外部 cardId）为数据源。key_point 语义单元
+ * 即 V2 objective；evidence / prerequisite 数据源在 V2 无对应列，本模块不再
+ * 发射 supports / prerequisite 边（edge kind 助手仍保留，保持外部形状）。
  */
 
 import { count, and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
@@ -16,9 +22,12 @@ import { z } from "zod";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { reviewSchedules, evidences } from "../../db/schema/evidence.ts";
-import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
-import { learningCardsV2, learningObjectiveRevisionsV2 } from "../../db/schema/card-generation-v2.ts";
+import { reviewSchedules } from "../../db/schema/evidence.ts";
+import {
+  learningCardsV2,
+  learningObjectivesV2,
+  learningObjectiveRevisionsV2,
+} from "../../db/schema/card-generation-v2.ts";
 import { notes, noteVersions, sources } from "../../db/schema/note.ts";
 import {
   understandingChangeSets,
@@ -30,9 +39,8 @@ import { understandingRoutePlanRequestV1Schema } from "@ailearn/shared";
 import {
   canonicalLearningEventOutbox,
   practiceTrailEventOutbox,
+  learningRuns,
 } from "../../db/schema/learning-runs.ts";
-import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
-import { keyPointPrerequisites } from "../../db/schema/learning-runs.ts";
 import { issueCheckpointToken, parseCheckpointToken, watermarkBehind, type CheckpointWatermark } from "./projection-checkpoint.ts";
 import { sha256Hex } from "@ailearn/shared/content-hash";
 import { logger } from "../../lib/logger.ts";
@@ -50,16 +58,17 @@ export function projectionKpPageSize(): number {
 }
 
 // N#7-5: 投影全图模式（无 cardId/targetKeyPointId/routeCardIds 过滤）下 card 装载上限，防止
-// 大工作区全量活跃消费卡无界装载（含 schemaJson jsonb → 大 payload + 内存压力）。与 kp
-// 分片思想对齐：超限记告警并截断（超限部分的卡及其 kp 不进入投影快照）。
+// 大工作区全量活跃消费卡无界装载。与 kp 分片思想对齐：超限记告警并截断（超限部分的卡及其 kp
+// 不进入投影快照）。
 const PROJECTION_MAX_CARDS = 5000;
 
 const CURSOR_TIME_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/;
 
 /** kp 游标时间戳：to_char 微秒文本（UTC 固定格式）——字典序即时间序，
- * 且不受 JS Date 毫秒截断影响（timestamptz 微秒精度全保真）。 */
+ * 且不受 JS Date 毫秒截断影响（timestamptz 微秒精度全保真）。
+ * V2：kp 单元 = learningObjectivesV2 行，时间轴取 objective 的 createdAt。 */
 function projectionKpCreatedAtText() {
-  return sql<string>`to_char(${cardKeyPoints.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')`;
+  return sql<string>`to_char(${learningObjectivesV2.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')`;
 }
 
 /** 分页游标编码（opaque base64url JSON；客户端不得解析或自行构造）。 */
@@ -286,66 +295,63 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
             .map((step) => step.nodeRef?.keyPointId)
             .filter((id): id is string => Boolean(id));
           if (routeKpIds.length > 0) {
+            // V2：route step 的 keyPointId 是 objectiveId；由 V2 卡反查 cardId。
             const kpCardRows = await tx
-              .select({ cardId: cardKeyPoints.cardId })
-              .from(cardKeyPoints)
+              .select({ cardId: learningCardsV2.cardId })
+              .from(learningCardsV2)
               .where(and(
-                eq(cardKeyPoints.workspaceId, scope.workspaceId),
-                inArray(cardKeyPoints.id, routeKpIds),
+                eq(learningCardsV2.workspaceId, scope.workspaceId),
+                eq(learningCardsV2.lifecycle, "active"),
+                inArray(learningCardsV2.objectiveId, routeKpIds),
               ));
             routeCardIds = Array.from(new Set(kpCardRows.map((row) => row.cardId).filter((id): id is string => Boolean(id))));
           }
         }
         const showArchived = query.data.showArchived ?? false;
 
-        // ── shared 平面：cards（active consumer）→ keyPoints → noteVersions →
-        //    notes → sources（血缘与旧 /graph reader 同源；§15.2 shared plane）。
-        // target 聚焦时先解析 target kp 的 card 作为血缘根。
+        // ── shared 平面：V2 cards（active）→ keyPoints(objectives) →
+        //    noteVersions → notes → sources（§15.2 shared plane）。
+        // target 聚焦时先解析 target objective 的 card 作为血缘根。
         let targetCardId: string | null = null;
         if (targetKeyPointId) {
           const targetRows = await tx
-            .select({ cardId: cardKeyPoints.cardId })
-            .from(cardKeyPoints)
+            .select({ cardId: learningCardsV2.cardId })
+            .from(learningCardsV2)
             .where(and(
-              eq(cardKeyPoints.id, targetKeyPointId),
-              eq(cardKeyPoints.workspaceId, scope.workspaceId),
+              eq(learningCardsV2.objectiveId, targetKeyPointId),
+              eq(learningCardsV2.workspaceId, scope.workspaceId),
+              eq(learningCardsV2.lifecycle, "active"),
             ))
             .limit(1);
           targetCardId = targetRows[0]?.cardId ?? null;
         }
         const cardFilterCondition = query.data.cardId
-          ? eq(learningCards.id, query.data.cardId)
+          ? eq(learningCardsV2.cardId, query.data.cardId)
           : targetCardId
-            ? eq(learningCards.id, targetCardId)
+            ? eq(learningCardsV2.cardId, targetCardId)
             : routeCardIds.length > 0
-              ? inArray(learningCards.id, routeCardIds)
+              ? inArray(learningCardsV2.cardId, routeCardIds)
               : undefined;
         // N#7-5: 全图模式（card 无过滤，cardFilterCondition===undefined）会对整工作区活跃消费卡无界装载，
         // 加 limit 对齐 kp 分片；单卡/路由模式集合已受过滤约束，无需 limit。
         const isUnboundedCardLoad = cardFilterCondition === undefined;
-        // N#8-4(批次 6): 卡标题只按 SQL 路径投影 schemaJson->>'title'，不再整列装载 jsonb
-        // （schemaJson 每卡可数十 KB，5000 卡整列 = 数十 MB 内存/payload）。drizzle 以
-        // `sql` 模板支持该 json 子表达式，查询改为 select().from() 显式投影。
-        // `.$dynamic()` 允许后续按分支追加 limit/orderBy（drizzle 动态查询）。
+        // V2：卡标题用 publicSummary（font jsonb 的 cue 不再参与标题）；cardId 是稳定公共卡 id。
         let cardQuery = tx
           .select({
-            id: learningCards.id,
-            noteVersionId: learningCards.noteVersionId,
-            title: sql<string>`${learningCards.schemaJson}->>'title'`,
-            archivedByNoteDeletionAt: learningCards.archivedByNoteDeletionAt,
+            id: learningCardsV2.cardId,
+            objectiveId: learningCardsV2.objectiveId,
+            noteVersionId: learningCardsV2.noteVersionId,
+            title: learningCardsV2.publicSummary,
           })
-          .from(learningCards)
+          .from(learningCardsV2)
           .where(and(
-            eq(learningCards.workspaceId, scope.workspaceId),
-            activeLearningCardConsumerPredicate(),
-            !showArchived ? isNull(learningCards.archivedByNoteDeletionAt) : undefined,
+            eq(learningCardsV2.workspaceId, scope.workspaceId),
+            eq(learningCardsV2.lifecycle, "active"),
             cardFilterCondition,
           ))
           .$dynamic();
-        // N#8-4: 一律加确定排序使输出稳定；全图模式再加 limit。按最近更新优先 + id 兜底
-        // （learningCards 有 (workspace_id, status, updated_at[created_at] desc) 近似索引；
-        // id 为唯一键保证全序确定）。
-        cardQuery = cardQuery.orderBy(desc(learningCards.updatedAt), asc(learningCards.id));
+        // 一律加确定排序使输出稳定；全图模式再加 limit。
+        cardQuery = cardQuery.orderBy(desc(learningCardsV2.updatedAt), asc(learningCardsV2.cardId));
         if (isUnboundedCardLoad) {
           cardQuery = cardQuery.limit(PROJECTION_MAX_CARDS);
         }
@@ -356,11 +362,10 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
           try {
             const total = await tx
               .select({ count: count() })
-              .from(learningCards)
+              .from(learningCardsV2)
               .where(and(
-                eq(learningCards.workspaceId, scope.workspaceId),
-                activeLearningCardConsumerPredicate(),
-                !showArchived ? isNull(learningCards.archivedByNoteDeletionAt) : undefined,
+                eq(learningCardsV2.workspaceId, scope.workspaceId),
+                eq(learningCardsV2.lifecycle, "active"),
               ));
             totalActiveCards = Number(total[0]?.count ?? 0);
           } catch {
@@ -383,14 +388,14 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
         // sourceId 过滤：只保留该 source 链上的 card（节点与 kp 同时收窄）。
         const filteredCardIds = query.data.sourceId
           ? (await tx
-              .select({ cardId: learningCards.id })
-              .from(learningCards)
-              .innerJoin(noteVersions, eq(noteVersions.id, learningCards.noteVersionId))
+              .select({ cardId: learningCardsV2.cardId })
+              .from(learningCardsV2)
+              .innerJoin(noteVersions, eq(noteVersions.id, learningCardsV2.noteVersionId))
               .innerJoin(notes, and(eq(notes.id, noteVersions.noteId), isNull(notes.deletedAt)))
               .where(and(
-                eq(learningCards.workspaceId, scope.workspaceId),
+                eq(learningCardsV2.workspaceId, scope.workspaceId),
                 eq(notes.sourceId, query.data.sourceId),
-                cardIds.length > 0 ? inArray(learningCards.id, cardIds) : undefined,
+                cardIds.length > 0 ? inArray(learningCardsV2.cardId, cardIds) : undefined,
               )))
               .map((row) => row.cardId)
           : cardIds;
@@ -417,197 +422,137 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
         }
         // 全图模式 kp 游标分页：(createdAtText, id) 复合键保证全序——游标时间
         // 用 to_char 微秒文本（不受 JS Date 毫秒截断影响），批量插入同刻时靠
-        // id 决胜；页大小按 env 可调，超页返回 continuationToken。
+        // objectiveId 决胜；页大小按 env 可调，超页返回 continuationToken。
+        // V2：kp 单元 = learningObjectivesV2（objectiveId 为稳定外部 id）。
         const kpPageSize = projectionKpPageSize();
+        const isWorkspaceMap = !targetKeyPointId && !routePlanId;
+        const kpObjectiveIds = Array.from(new Set([
+          ...(targetKeyPointId ? [targetKeyPointId] : []),
+          ...(routeKpIds ?? []),
+          ...(sharedCardRows.map((card) => card.objectiveId)),
+        ].filter((id): id is string => Boolean(id))));
+
         let kpHasMore = false;
-        let kpRows = targetKeyPointId
-          ? await tx
+        let objectiveRows: Array<{ objectiveId: string; createdAtText: string }> = [];
+        if (kpObjectiveIds.length > 0) {
+          if (isWorkspaceMap) {
+            const raw = await tx
               .select({
-                id: cardKeyPoints.id,
-                claim: cardKeyPoints.claim,
-                cardId: cardKeyPoints.cardId,
+                objectiveId: learningObjectivesV2.objectiveId,
                 createdAtText: projectionKpCreatedAtText(),
               })
-              .from(cardKeyPoints)
+              .from(learningObjectivesV2)
               .where(and(
-                eq(cardKeyPoints.id, targetKeyPointId),
-                eq(cardKeyPoints.workspaceId, scope.workspaceId),
+                eq(learningObjectivesV2.workspaceId, scope.workspaceId),
+                inArray(learningObjectivesV2.objectiveId, kpObjectiveIds),
+                continuation
+                  ? or(
+                      sql`${projectionKpCreatedAtText()} > ${continuation.createdAtText}`,
+                      and(
+                        sql`${projectionKpCreatedAtText()} = ${continuation.createdAtText}`,
+                        gt(learningObjectivesV2.objectiveId, continuation.kpId),
+                      ),
+                    )
+                  : undefined,
               ))
-              .limit(1)
-          : routeKpIds && routeKpIds.length > 0
-            ? await tx
-                .select({
-                  id: cardKeyPoints.id,
-                  claim: cardKeyPoints.claim,
-                  cardId: cardKeyPoints.cardId,
-                  createdAtText: projectionKpCreatedAtText(),
-                })
-                .from(cardKeyPoints)
-                .where(and(
-                  eq(cardKeyPoints.workspaceId, scope.workspaceId),
-                  inArray(cardKeyPoints.id, routeKpIds),
-                ))
-            : effectiveCardIds.length > 0
-            ? await (async () => {
-                const raw = await tx
-                  .select({
-                    id: cardKeyPoints.id,
-                    claim: cardKeyPoints.claim,
-                    cardId: cardKeyPoints.cardId,
-                    createdAtText: projectionKpCreatedAtText(),
-                  })
-                  .from(cardKeyPoints)
-                  .where(and(
-                    eq(cardKeyPoints.workspaceId, scope.workspaceId),
-                    // N#7-5: effectiveCardIds 受卡片装载上限（PROJECTION_MAX_CARDS=5000）约束，
-                    // 远低于 postgres-js ~65535 绑定参数上限，无需再分块；且本查询带游标 continuation +
-                    // 全局 order/limit，按 cardId 分块会破坏翻页语义。参数越界风险已由卡片装载 limit 兜底。
-                    inArray(cardKeyPoints.cardId, effectiveCardIds),
-                    continuation
-                      ? or(
-                          sql`${projectionKpCreatedAtText()} > ${continuation.createdAtText}`,
-                          and(
-                            sql`${projectionKpCreatedAtText()} = ${continuation.createdAtText}`,
-                            gt(cardKeyPoints.id, continuation.kpId),
-                          ),
-                        )
-                      : undefined,
-                  ))
-                  .orderBy(asc(cardKeyPoints.createdAt), asc(cardKeyPoints.id))
-                  .limit(kpPageSize + 1);
-                kpHasMore = raw.length > kpPageSize;
-                return kpHasMore ? raw.slice(0, kpPageSize) : raw;
-              })()
-            : [];
-
-        // 方案 20 §19.5/§21.5：把 active V2 Card/Objective 也并入星图。
-        // V2 新卡的 alias card_key_points 行存在，但父 legacy card 是 archived
-        // 隐藏行，不会出现在上方 active legacy card 查询里；这里按 V2 卡显式
-        // 补入 alias key point，并把 contains 边指向 V2 cardId。
-        //
-        // 溯源修复：V2 卡节点除了 contains 论点，还必须回到 source→note→card
-        // 血缘（学习卡不再只是“练习”，它就是正式学习卡）。noteVersionId 优先
-        // 取 learning_cards_v2 自身；历史 V2 行可能为空，再回退到 §29.4 隐藏
-        // legacy alias 卡上保留的 noteVersionId。
-        const v2Cards = await tx.select({
-          cardId: learningCardsV2.cardId,
-          objectiveId: learningCardsV2.objectiveId,
-          noteVersionId: learningCardsV2.noteVersionId,
-          createdAt: learningCardsV2.createdAt,
-        }).from(learningCardsV2).where(and(
-          eq(learningCardsV2.workspaceId, scope.workspaceId),
-          eq(learningCardsV2.lifecycle, "active"),
-        )).limit(1000);
-        const v2CardByObjective = new Map<string, { cardId: string; objectiveId: string; noteVersionId: string | null; createdAt: Date }>();
-        const v2AliasNoteVersionByObjective = new Map<string, string>();
-        if (v2Cards.length > 0) {
-          const v2ObjectiveIds = v2Cards.map((c) => c.objectiveId);
-          const v2AliasRows = await tx.select({
-            id: cardKeyPoints.id,
-            claim: cardKeyPoints.claim,
-            cardId: cardKeyPoints.cardId,
-            createdAtText: projectionKpCreatedAtText(),
-          }).from(cardKeyPoints).where(and(
-            eq(cardKeyPoints.workspaceId, scope.workspaceId),
-            inArray(cardKeyPoints.id, v2ObjectiveIds),
-          ));
-          const v2AliasLegacyCardIds = Array.from(new Set(
-            v2AliasRows.map((row) => row.cardId).filter((id): id is string => Boolean(id)),
-          ));
-          const v2AliasLegacyCards = v2AliasLegacyCardIds.length > 0
-            ? await tx.select({
-                id: learningCards.id,
-                noteVersionId: learningCards.noteVersionId,
-              }).from(learningCards).where(and(
-                eq(learningCards.workspaceId, scope.workspaceId),
-                inArray(learningCards.id, v2AliasLegacyCardIds),
-              ))
-            : [];
-          const v2AliasNoteVersionByLegacyCard = new Map(
-            v2AliasLegacyCards
-              .filter((row) => row.noteVersionId)
-              .map((row) => [row.id, row.noteVersionId as string]),
-          );
-          for (const row of v2AliasRows) {
-            const aliasNoteVersionId = v2AliasNoteVersionByLegacyCard.get(row.cardId);
-            if (aliasNoteVersionId) v2AliasNoteVersionByObjective.set(row.id, aliasNoteVersionId);
+              .orderBy(asc(learningObjectivesV2.createdAt), asc(learningObjectivesV2.objectiveId))
+              .limit(kpPageSize + 1);
+            if (raw.length > kpPageSize) {
+              objectiveRows = raw.slice(0, kpPageSize);
+              kpHasMore = true;
+            } else {
+              objectiveRows = raw;
+            }
+          } else {
+            objectiveRows = await tx
+              .select({
+                objectiveId: learningObjectivesV2.objectiveId,
+                createdAtText: projectionKpCreatedAtText(),
+              })
+              .from(learningObjectivesV2)
+              .where(and(
+                eq(learningObjectivesV2.workspaceId, scope.workspaceId),
+                inArray(learningObjectivesV2.objectiveId, kpObjectiveIds),
+              ));
           }
-          for (const c of v2Cards) v2CardByObjective.set(c.objectiveId, c);
-          const v2KpRows = v2AliasRows.map((row) => ({
-            ...row,
-            // contains 边指向 V2 card，而不是隐藏 legacy card。
-            cardId: v2CardByObjective.get(row.id)?.cardId ?? row.cardId,
-            isV2: true as const,
-          }));
-          kpRows = [...kpRows, ...v2KpRows];
         }
 
+        // objective → cardId（V2 卡，active）。
+        const cardByObjective = new Map<string, string>();
+        if (kpObjectiveIds.length > 0) {
+          const kpCardRows = await tx
+            .select({
+              objectiveId: learningCardsV2.objectiveId,
+              cardId: learningCardsV2.cardId,
+            })
+            .from(learningCardsV2)
+            .where(and(
+              eq(learningCardsV2.workspaceId, scope.workspaceId),
+              eq(learningCardsV2.lifecycle, "active"),
+              inArray(learningCardsV2.objectiveId, kpObjectiveIds),
+            ));
+          for (const r of kpCardRows) cardByObjective.set(r.objectiveId, r.cardId);
+        }
+        // objective → label（最新 revision 的 conceptLabel ?? publicSummary）。
+        const labelByObjective = new Map<string, string>();
+        if (kpObjectiveIds.length > 0) {
+          const revRows = await tx
+            .select({
+              objectiveId: learningObjectiveRevisionsV2.objectiveId,
+              publicSummary: learningObjectiveRevisionsV2.publicSummary,
+              conceptLabel: learningObjectiveRevisionsV2.conceptLabel,
+              revision: learningObjectiveRevisionsV2.revision,
+            })
+            .from(learningObjectiveRevisionsV2)
+            .where(and(
+              eq(learningObjectiveRevisionsV2.workspaceId, scope.workspaceId),
+              inArray(learningObjectiveRevisionsV2.objectiveId, kpObjectiveIds),
+            ));
+          const latestByObj = new Map<string, { publicSummary: string; conceptLabel: string | null; revision: number }>();
+          for (const r of revRows) {
+            const current = latestByObj.get(r.objectiveId);
+            if (!current || r.revision > current.revision) {
+              latestByObj.set(r.objectiveId, {
+                publicSummary: r.publicSummary,
+                conceptLabel: r.conceptLabel,
+                revision: r.revision,
+              });
+            }
+          }
+          for (const [objId, rev] of latestByObj) {
+            labelByObjective.set(objId, rev.conceptLabel ?? rev.publicSummary);
+          }
+        }
+
+        const kpRows = objectiveRows.map((o) => ({
+          id: o.objectiveId,
+          claim: labelByObjective.get(o.objectiveId) ?? "理解目标",
+          cardId: cardByObjective.get(o.objectiveId) ?? null,
+          createdAtText: o.createdAtText,
+          isV2: true as const,
+        }));
+
         const kpIds = kpRows.map((row) => row.id);
+        // review schedule：objective 维度（subjectType='card' + subjectId=objectiveId）。
         const schedRows = kpIds.length > 0
           ? await tx
-              .select({ id: reviewSchedules.id, keyPointId: reviewSchedules.keyPointId, nextReviewAt: reviewSchedules.nextReviewAt, status: reviewSchedules.status })
+              .select({ id: reviewSchedules.id, subjectId: reviewSchedules.subjectId, nextReviewAt: reviewSchedules.nextReviewAt, status: reviewSchedules.status })
               .from(reviewSchedules)
               .where(and(
                 eq(reviewSchedules.workspaceId, scope.workspaceId),
                 eq(reviewSchedules.userId, scope.userId),
-                inArray(reviewSchedules.keyPointId, kpIds),
+                eq(reviewSchedules.subjectType, "card"),
+                inArray(reviewSchedules.subjectId, kpIds),
               ))
               .orderBy(desc(reviewSchedules.createdAt))
               .limit(kpIds.length * 3)
           : [];
-        // §15.2 prerequisite 数据源（迁移 0145）：前置关系 → prerequisite 边 +
-        // weak_prerequisite reason code（前置状态弱时）。
-        const prereqRows = kpIds.length > 0
-          ? await tx
-              .select({
-                keyPointId: keyPointPrerequisites.keyPointId,
-                prerequisiteKeyPointId: keyPointPrerequisites.prerequisiteKeyPointId,
-              })
-              .from(keyPointPrerequisites)
-              .where(and(
-                eq(keyPointPrerequisites.workspaceId, scope.workspaceId),
-                inArray(keyPointPrerequisites.keyPointId, kpIds),
-              ))
-          : [];
-
-        // evidence 节点（§15.2 UnderstandingNodeRefV1 kind:"evidence"）：
-        // 全图/聚焦模式都按 kpIds 全量读取（含 quoteText 供节点 label）。
-        // PERF：fetch limit+1 以探测是否触达 500 上限；触达时截断并显式标记，
-        // 避免静默返回不完整的投影图（调用方/日志可感知）。
-        const PROJECTION_MAX_EVIDENCE = 500;
-        const evidenceRowsRaw = kpIds.length > 0
-          ? await tx
-              .select({
-                id: evidences.id,
-                keyPointId: evidences.keyPointId,
-                quoteText: evidences.quoteText,
-              })
-              .from(evidences)
-              .where(and(
-                eq(evidences.workspaceId, scope.workspaceId),
-                inArray(evidences.keyPointId, kpIds),
-              ))
-              .limit(PROJECTION_MAX_EVIDENCE + 1)
-          : [];
-        const evidenceCapped = evidenceRowsRaw.length > PROJECTION_MAX_EVIDENCE;
-        const evidenceRows = evidenceCapped
-          ? evidenceRowsRaw.slice(0, PROJECTION_MAX_EVIDENCE)
-          : evidenceRowsRaw;
-        if (evidenceCapped) {
-          logger.warn(
-            { workspaceId: scope.workspaceId, keyPointCount: kpIds.length },
-            "projection evidence query capped at 500 — projection graph silently incomplete",
-          );
-        }
 
         // shared 平面实体（noteVersion/note/source 血缘）。
-        const noteVersionIds = Array.from(new Set([
-          ...sharedCardRows.map((card) => card.noteVersionId),
-          ...v2Cards.flatMap((card) => [
-            card.noteVersionId,
-            v2AliasNoteVersionByObjective.get(card.objectiveId),
-          ]),
-        ].filter((id): id is string => Boolean(id))));
+        const noteVersionIds = Array.from(new Set(
+          sharedCardRows.map((card) => card.noteVersionId)
+            .filter((id): id is string => Boolean(id)),
+        ));
         const noteVersionRows = noteVersionIds.length > 0
           ? await tx.query.noteVersions.findMany({
               where: and(
@@ -667,13 +612,14 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
           };
           return {
             canonicalEventId: row.canonicalEventId,
+            // envelope.keyPointId 即 V2 objectiveId 别名。
             keyPointId: envelope.keyPointId ?? null,
             factKind: envelope.fact?.kind ?? null,
             disposition: envelope.fact?.disposition ?? null,
             occurredAt: envelope.occurredAt ?? row.createdAt.toISOString(),
           };
         });
-        // 按 keyPointId 分组(全图模式)。
+        // 按 keyPointId(=objectiveId) 分组(全图模式)。
         const factsByKp = new Map<string, typeof canonicalFacts>();
         for (const fact of canonicalFacts) {
           if (!fact.keyPointId) continue;
@@ -681,17 +627,36 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
           list.push(fact);
           factsByKp.set(fact.keyPointId, list);
         }
+        // practice → objective：practiceTrailEventOutbox 无 keyPointId；经 learningRuns
+        // 的 origin JSONB `->>'keyPointId'`（= objectiveId 别名）关联。
         const practiceByKp = new Map<string, number>();
-        for (const row of practiceRows) {
-          if (!row.keyPointId) continue;
-          practiceByKp.set(row.keyPointId, (practiceByKp.get(row.keyPointId) ?? 0) + 1);
+        if (practiceRows.length > 0) {
+          const runIds = Array.from(new Set(practiceRows.map((row) => row.runId)));
+          const runRows = runIds.length > 0
+            ? await tx
+                .select({
+                  id: learningRuns.id,
+                  objectiveId: sql<string>`${learningRuns.origin}->>'keyPointId'`,
+                })
+                .from(learningRuns)
+                .where(and(
+                  eq(learningRuns.workspaceId, scope.workspaceId),
+                  inArray(learningRuns.id, runIds),
+                ))
+            : [];
+          const objectiveByRun = new Map(runRows.map((r) => [r.id, r.objectiveId]));
+          for (const row of practiceRows) {
+            const objectiveId = objectiveByRun.get(row.runId);
+            if (!objectiveId) continue;
+            practiceByKp.set(objectiveId, (practiceByKp.get(objectiveId) ?? 0) + 1);
+          }
         }
         const schedByKp = new Map<string, typeof schedRows>();
         for (const s of schedRows) {
-          if (!s.keyPointId) continue;
-          const list = schedByKp.get(s.keyPointId) ?? [];
+          if (!s.subjectId) continue;
+          const list = schedByKp.get(s.subjectId) ?? [];
           list.push(s);
-          schedByKp.set(s.keyPointId, list);
+          schedByKp.set(s.subjectId, list);
         }
 
         const now = new Date();
@@ -748,7 +713,7 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
           });
         };
 
-        // key_point 节点 + card→kp contains 边。
+        // key_point 节点（V2 objective）+ card→kp contains 边。
         const kpsByCard = new Map<string, typeof kpRows>();
         for (const kp of kpRows) {
           const kpNodeId = `key_point:${kp.id}`;
@@ -771,22 +736,6 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
             group.push(kp);
             kpsByCard.set(kp.cardId, group);
           }
-        }
-
-        // evidence 节点 + supports 边（evidence → key_point；§15.2 边 kind）。
-        for (const ev of evidenceRows) {
-          const evNodeId = `evidence:${ev.id}`;
-          addNode({
-            nodeRef: { kind: "evidence" as const, evidenceId: ev.id },
-            label: (ev.quoteText ?? "证据引用").slice(0, 60),
-            shared: { archived: false, sourceFingerprint: "" },
-            personal: null,
-          }, evNodeId);
-          addEdge("supports", evNodeId, `key_point:${ev.keyPointId}`);
-        }
-        // prerequisite 边（前置 → 目标，kind "prerequisite"）。
-        for (const prereq of prereqRows) {
-          addEdge("prerequisite", `key_point:${prereq.prerequisiteKeyPointId}`, `key_point:${prereq.keyPointId}`);
         }
 
         // card / note / source 节点 + 血缘边（source→note / note→card derived_from）。
@@ -818,7 +767,7 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
           addNode({
             nodeRef: { kind: "card" as const, cardId: card.id },
             label: card.title ?? "（未命名学习卡）",
-            shared: { archived: Boolean(card.archivedByNoteDeletionAt), sourceFingerprint: "" },
+            shared: { archived: false, sourceFingerprint: "", cardVersion: 2 },
             // §15.2：Key Point 有独立 personal state；card 输出子 kp 的聚合视图。
             personal: aggregateCardPersonal(
               cardKps.map((kp) => kpPersonal.get(kp.id) ?? {
@@ -834,93 +783,12 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
           if (noteNodeId) addEdge("derived_from", noteNodeId, cardNodeId);
         }
 
-        // V2 Card 节点：与 alias key point 建立 contains 边（§21.5）。
-        if (v2Cards.length > 0) {
-          const v2ObjectiveIds = v2Cards.map((c) => c.objectiveId);
-          const v2RevRows = await tx.select({
-            objectiveId: learningObjectiveRevisionsV2.objectiveId,
-            publicSummary: learningObjectiveRevisionsV2.publicSummary,
-            revision: learningObjectiveRevisionsV2.revision,
-          }).from(learningObjectiveRevisionsV2).where(and(
-            eq(learningObjectiveRevisionsV2.workspaceId, scope.workspaceId),
-            inArray(learningObjectiveRevisionsV2.objectiveId, v2ObjectiveIds),
-          ));
-          const summaryByObj = new Map<string, { publicSummary: string; revision: number }>();
-          for (const r of v2RevRows) {
-            const current = summaryByObj.get(r.objectiveId);
-            if (!current || r.revision > current.revision) {
-              summaryByObj.set(r.objectiveId, { publicSummary: r.publicSummary, revision: r.revision });
-            }
-          }
-          for (const v2card of v2Cards) {
-            const cardNodeId = `card:${v2card.cardId}`;
-            const objectiveId = v2card.objectiveId;
-            const kpPersonalForCard = kpPersonal.get(objectiveId) ?? {
-              state: "unknown",
-              nextReviewAt: null,
-              activeScheduleId: null,
-              lastCanonicalEventId: null,
-              lastCanonicalOccurredAt: null,
-              practiceTrailCount: 0,
-            };
-
-            // 与旧卡同一条 source→note→card 血缘；没有 note 时仍保留
-            // card→key_point（不能因为溯源缺失就丢掉理解目标本身）。
-            const resolvedNoteVersionId = v2card.noteVersionId
-              ?? v2AliasNoteVersionByObjective.get(v2card.objectiveId)
-              ?? null;
-            const version = resolvedNoteVersionId ? versionById.get(resolvedNoteVersionId) : undefined;
-            const note = version ? noteById.get(version.noteId) : undefined;
-            const source = note?.sourceId ? sourceById.get(note.sourceId) : undefined;
-            const noteNodeId = note ? `note:${note.id}` : null;
-            const sourceNodeId = source ? `source:${source.id}` : null;
-            if (source) {
-              addNode({
-                nodeRef: { kind: "source" as const, sourceId: source.id },
-                label: source.title,
-                shared: { archived: false, sourceFingerprint: "" },
-                personal: null,
-              }, sourceNodeId);
-            }
-            if (note) {
-              addNode({
-                nodeRef: { kind: "note" as const, noteId: note.id },
-                label: note.title,
-                shared: { archived: false, sourceFingerprint: "" },
-                personal: null,
-              }, noteNodeId);
-              if (sourceNodeId && noteNodeId) addEdge("derived_from", sourceNodeId, noteNodeId);
-            }
-
-            addNode({
-              nodeRef: { kind: "card" as const, cardId: v2card.cardId },
-              label: (summaryByObj.get(objectiveId)?.publicSummary ?? "V2 学习卡").slice(0, 60),
-              shared: { archived: false, sourceFingerprint: "", cardVersion: 2 },
-              personal: aggregateCardPersonal([kpPersonalForCard]),
-            }, cardNodeId);
-            if (noteNodeId) addEdge("derived_from", noteNodeId, cardNodeId);
-            addEdge("contains", cardNodeId, `key_point:${objectiveId}`);
-          }
-        }
-
         const reasonCodes: string[] = [];
         const due = targetKeyPointId
           ? (schedByKp.get(targetKeyPointId) ?? []).find((s) => s.status === "pending" && s.nextReviewAt.getTime() <= now.getTime())
           : undefined;
         if (due) reasonCodes.push("review_due");
-        if (evidenceRows.length === 0 && factsByKp.get(targetKeyPointId ?? "")?.length) reasonCodes.push("missing_required_facet");
         if ((factsByKp.get(targetKeyPointId ?? "")?.length ?? 0) === 0 && practiceByKp.get(targetKeyPointId ?? "") !== undefined) reasonCodes.push("new_card_unvalidated");
-        // §15.2 reasonCodes：目标 kp 有前置且前置 personal state 弱
-        // （unknown/fragile/needs_repair）→ weak_prerequisite（测试数据源 0145）。
-        const targetPrereqs = prereqRows.filter((row) => row.keyPointId === targetKeyPointId);
-        if (targetPrereqs.length > 0) {
-          const weakPrereq = targetPrereqs.some((row) => {
-            // 前置 kp 不在当前 slice（target 聚焦）时按未验证（unknown）处理。
-            const state = kpPersonal.get(row.prerequisiteKeyPointId)?.state;
-            return !state || state === "unknown" || state === "fragile" || state === "needs_repair";
-          });
-          if (weakPrereq) reasonCodes.push("weak_prerequisite");
-        }
         // §15.2 reasonCodes：最近 7 天内出现 unable_evidence（误解）→ recent_misconception。
         const recentUnable = factsByKp.get(targetKeyPointId ?? "")?.some((fact) =>
           fact.disposition === "unable_evidence"
@@ -971,7 +839,8 @@ export async function understandingProjectionRoutes(app: FastifyInstance) {
                 )
               : null,
           },
-          evidenceTruncated: evidenceCapped,
+          // V2：无 evidence 数据源（V1 evidence.keyPointId 已删），故不截断。
+          evidenceTruncated: false,
           nodes,
           edges,
           currentTarget: targetKeyPointId

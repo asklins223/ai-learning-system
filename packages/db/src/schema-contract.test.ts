@@ -5,6 +5,14 @@ import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import { ArtifactType } from "@ailearn/shared";
 import * as schema from "./index.ts";
 
+/**
+ * 全量导出表快照（V2 学习卡栈）。
+ *
+ * V1 旧表（learning_cards / card_key_points / card_generation_runs /
+ * card_generation_units / benchmark_* / note_evidence_spans /
+ * provisional_candidates 等）已随旧栈退役，不再出现在 schema 导出中。
+ * 快照更新：2026-08-18（清理 V1 旧栈 + 同步 apps/api schema 副本后）。
+ */
 const expectedTables = [
   "ai_artifacts",
   "ai_audit_log",
@@ -13,8 +21,6 @@ const expectedTables = [
   "assistant_memory_items",
   "assistant_page_contexts",
   "auth_rate_limits",
-  "benchmark_labels",
-  "benchmark_reports",
   "candidate_evidence_binding_plans_v2",
   "canonical_learning_event_outbox",
   "card_activation_receipts_v2",
@@ -24,27 +30,15 @@ const expectedTables = [
   "card_content_capability_state",
   "card_domain_events_v2",
   "card_exposure_ledger_v2",
-  "card_generation_agent_events",
-  "card_generation_candidate_evidence",
-  "card_generation_candidates",
   "card_generation_candidates_v2",
   "card_generation_cutover_events",
-  "card_generation_drafts",
-  "card_generation_events",
   "card_generation_events_v2",
   "card_generation_input_snapshots_v2",
-  "card_generation_plans",
   "card_generation_plans_v2",
   "card_generation_post_activation_consumptions",
-  "card_generation_quality_reports",
   "card_generation_run_outbox_v2",
-  "card_generation_runs",
   "card_generation_runs_v2",
   "card_generation_semantic_specs_v2",
-  "card_generation_source_bundle_members",
-  "card_generation_source_bundles",
-  "card_generation_units",
-  "card_key_points",
   "companion_account_invitations",
   "companion_action_proposals",
   "companion_action_runs",
@@ -78,8 +72,6 @@ const expectedTables = [
   "learning_assessments",
   "learning_card_publication_revisions_v2",
   "learning_card_revisions_v2",
-  "learning_card_sets",
-  "learning_cards",
   "learning_cards_v2",
   "learning_episodes",
   "learning_exposure_dependency_ledger",
@@ -88,6 +80,7 @@ const expectedTables = [
   "learning_objective_equivalence_reports_v2",
   "learning_objective_evidence_bindings_v2",
   "learning_objective_lineage_v2",
+  "learning_objective_origins_v2",
   "learning_objective_private_contracts_v2",
   "learning_objective_revision_equivalence_v2",
   "learning_objective_revisions_v2",
@@ -116,21 +109,16 @@ const expectedTables = [
   "learning_tutor_detours",
   "learning_tutor_permissions",
   "learning_unit_exposure",
-  "legacy_target_snapshot_attachments_v2",
+  "legacy_route_mappings_v2",
   "memory_links",
   "memory_usage_log",
   "note_blocks",
-  "note_evidence_embeddings",
-  "note_evidence_spans",
   "note_image_assets",
-  "note_image_evidence_units",
-  "note_image_insights",
   "note_versions",
   "notes",
   "onboarding_states",
   "pet_profiles",
   "practice_trail_event_outbox",
-  "provisional_candidates",
   "review_attempts",
   "review_schedules",
   "scheduling_shadow_decisions",
@@ -174,10 +162,10 @@ describe("database schema package contract", () => {
   it("keeps tenant and lifecycle columns on the core persisted entities", () => {
     for (const [table, lifecycleColumn] of [
       [schema.notes, "createdAt"],
-      [schema.learningCards, "createdAt"],
+      [schema.learningCardsV2, "createdAt"],
       [schema.evidences, "createdAt"],
       [schema.reviewAttempts, "createdAt"],
-      [schema.cardGenerationRuns, "createdAt"],
+      [schema.cardGenerationRunsV2, "createdAt"],
       [schema.jobs, "scheduledAt"],
     ] as const) {
       const columns = getTableColumns(table) as Record<string, unknown>;
@@ -187,29 +175,29 @@ describe("database schema package contract", () => {
     }
   });
 
-  it("keeps generation runs separate from leased execution jobs", () => {
-    const runColumns = getTableColumns(schema.cardGenerationRuns) as Record<string, unknown>;
+  it("keeps the V2 generation run fingerprint closure separate from leased execution jobs", () => {
+    const runColumns = getTableColumns(schema.cardGenerationRunsV2) as Record<string, unknown>;
     const jobColumns = getTableColumns(schema.jobs) as Record<string, unknown>;
 
     for (const column of [
-      "generationEpoch",
-      "blockManifest",
-      "assetManifest",
       "status",
-      "stage",
-      "stateVersion",
-      "nextEventSequence",
+      "cardContentEpoch",
+      "semanticSpecHash",
+      "inputSnapshotHash",
+      "generationFingerprint",
+      "sourceSnapshotHash",
+      "currentPlanVersion",
     ]) {
-      assert.ok(runColumns[column], `card_generation_runs must have ${column}`);
+      assert.ok(runColumns[column], `card_generation_runs_v2 must have ${column}`);
     }
-    assert.ok(jobColumns.generationRunId, "jobs must link to a generation run");
     assert.ok(jobColumns.resourceClass, "jobs must declare a resource class");
     assert.ok(jobColumns.priority, "jobs must declare a priority");
+    assert.ok(jobColumns.stage, "jobs must keep a stage column");
   });
 
-  it("models the result contract and card-set member constraints", () => {
-    const cardConfig = getTableConfig(schema.learningCards);
-    const runConfig = getTableConfig(schema.cardGenerationRuns);
+  it("models the V2 card lifecycle and candidate contract", () => {
+    const cardConfig = getTableConfig(schema.learningCardsV2);
+    const runConfig = getTableConfig(schema.cardGenerationRunsV2);
     const cardIndexNames = new Set(
       cardConfig.indexes.map((index) => index.config.name),
     );
@@ -217,13 +205,11 @@ describe("database schema package contract", () => {
     const runCheckNames = new Set(runConfig.checks.map((check) => check.name));
 
     assert.ok(
-      cardIndexNames.has("learning_cards_generation_set_identity_unique_idx"),
+      cardIndexNames.has("lc_v2_ws_obj_active_idx"),
     );
-    assert.ok(cardIndexNames.has("learning_cards_set_scope_key_unique_idx"));
-    assert.ok(cardCheckNames.has("learning_cards_card_set_shape_check"));
-    assert.ok(
-      runCheckNames.has("card_generation_runs_result_contract_check"),
-    );
+    assert.ok(cardCheckNames.has("lc_v2_lifecycle_chk"));
+    assert.ok(runCheckNames.has("cg_v2_status_chk"));
+    assert.ok(runCheckNames.has("cg_v2_epoch_chk"));
   });
 
   it("exports PostgreSQL enum columns with non-empty values", () => {

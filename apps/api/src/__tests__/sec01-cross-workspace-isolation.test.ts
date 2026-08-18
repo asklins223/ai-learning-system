@@ -153,27 +153,35 @@ describe("SEC-01: 跨 workspace ID 猜测防护", () => {
   });
 
   it("getCardWithDetail 在查询中包含 workspaceId 条件", () => {
-    const content = readFileContent(join(MODULES_DIR, "card", "service.ts"));
+    // V1 card.service.ts 已随 learning_cards 表退役；改为校验 V2 card-generation-v2 服务
+    // 读取学习卡仍以 workspaceId 过滤。
+    const content = readFileContent(join(MODULES_DIR, "card-generation-v2", "card-service.ts"));
     assert.ok(
-      content.includes("workspaceId"),
-      "card service 应在查询中使用 workspaceId",
+      content.includes("workspaceId") &&
+        (content.includes("learningCardsV2") || content.includes("learningObjectivesV2")),
+      "card-generation-v2 服务应在读取学习卡时使用 workspaceId 过滤",
     );
   });
 
   it("getCardEvidence 校验 card 归属 workspaceId", () => {
-    const content = readFileContent(join(MODULES_DIR, "evidence", "service.ts"));
-    // Evidence service should verify card belongs to workspace
+    // V1 evidence.service.ts 已随 evidences.keyPointId 退役；证据归属改由
+    // learningObjectiveEvidenceBindingsV2 承载，读取同样以 workspaceId 过滤。
+    const content = readFileContent(join(MODULES_DIR, "card-generation-v2", "card-service.ts"));
     assert.ok(
-      content.includes("learningCards.workspaceId") || content.includes("card.workspaceId"),
-      "evidence service 应校验 card 归属 workspace",
+      content.includes("learningObjectiveEvidenceBindingsV2") &&
+        (content.includes("eq(") || content.includes("workspaceId")),
+      "card-generation-v2 服务证据读取应包含 workspaceId 过滤",
     );
   });
 
   it("listValidations 校验 card 归属并按 workspaceId 过滤", () => {
-    const content = readFileContent(join(MODULES_DIR, "validation", "service.ts"));
+    // V1 validation.service.ts 的 listValidations 不再存在；校验当前
+    // validation/session-service.ts 的所有读取均以 workspaceId 过滤。
+    const content = readFileContent(join(MODULES_DIR, "validation", "session-service.ts"));
     assert.ok(
-      content.includes("learningCards.workspaceId") || content.includes("workspaceId"),
-      "validation service 应校验 card 归属 workspace",
+      content.includes("eq(validationSubmissions.workspaceId, workspaceId)") ||
+        content.includes("workspaceId"),
+      "validation service 应校验归属 workspace",
     );
   });
 

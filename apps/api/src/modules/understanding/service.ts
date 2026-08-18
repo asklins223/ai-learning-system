@@ -1,9 +1,11 @@
-import { and, asc, desc, eq, inArray, sql, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID, type ApiTransaction } from "../../db/client.ts";
-import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
-import { evidences, validationEvents, reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
-import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
-import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
+import {
+  learningCardsV2,
+  learningObjectivesV2,
+  learningObjectiveEvidenceBindingsV2,
+} from "../../db/schema/card-generation-v2.ts";
+import { reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
 
 /** 聚合状态/星图列表上限（沿用旧 reader 的 200 卡截断；states 列表消费）。 */
 const UNDERSTANDING_GRAPH_CARD_LIMIT = 200;
@@ -43,10 +45,16 @@ export interface UnderstandingState {
  * 聚合理解状态列表。
  *
  * 聚合逻辑：
- * 1. 查所有 active learning_cards（workspace 内）
- * 2. 对每张 card，join understanding_events → validation_events 找到最新事件
- * 3. 映射为理解状态
- * 4. 关联 card/note 信息（标题、证据覆盖率、上次验证时间、下次复习时间）
+ * 1. 查所有 active learning_cards_v2（workspace 内）
+ * 2. 对每张 card（稳定公共标识为 cardId），关联到其 objectiveId（旧的 keyPointId 角色）
+ * 3. 按 objective 聚合 understanding_events → 理解状态（seen/validated/misunderstood/reviewed）
+ * 4. 关联 card 信息（标题、证据覆盖率、上次验证时间）与 objective 维度复习计划
+ *
+ * V2 迁移说明：V1 的 learningCards/cardKeyPoints 与 validationEvents.cardId 连接已退役。
+ * - 枚举 active V2 卡，external subjectId = learningCardsV2.cardId
+ * - 事件/状态按 objectiveId（= 旧 keyPointId 别名）从 understandingEvents 直接聚合
+ * - 复习计划按 subjectType='card' + subjectId=objectiveId（objective 维度）
+ * - 证据覆盖率由 learningObjectiveEvidenceBindingsV2（经 currentObjectiveRevisionId）计数
  *
  * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */
@@ -67,64 +75,68 @@ export async function getUnderstandingStates(
   // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
   // 提供 tx（测试/内部调用）时直接运行，跳过事务上下文设置。
   const run = async (tx: ApiTransaction): Promise<UnderstandingState[]> => {
-  // 1. 查所有 active cards
-  const cards = await tx.query.learningCards.findMany({
+  // 1. 查所有 active V2 cards
+  const cards = await tx.query.learningCardsV2.findMany({
     where: and(
-      eq(learningCards.workspaceId, workspaceId),
-      activeLearningCardConsumerPredicate(),
+      eq(learningCardsV2.workspaceId, workspaceId),
+      eq(learningCardsV2.lifecycle, "active"),
     ),
-    orderBy: [desc(learningCards.createdAt)],
+    orderBy: [desc(learningCardsV2.createdAt)],
     limit: UNDERSTANDING_GRAPH_CARD_LIMIT,
   });
 
   if (cards.length === 0) return [];
 
-  const cardIds = cards.map((c) => c.id);
+  // V2：cardId 是稳定公共卡标识（外部 subjectId）；objectiveId 链接到 objective
+  // （objective 承担旧 keyPointId 的角色）。非 active objective 一并忽略，
+  // 但保留 card 主导枚举，以维持 subjectType:'card' + subjectId=cardId 语义。
+  const objectiveIds = Array.from(new Set(cards.map((c) => c.objectiveId)));
 
-  // PERF-23 修复：使用 SQL GROUP BY 聚合替代应用层聚合。
-  // 原代码加载所有 understanding_events 到内存后在 JS 中遍历聚合，
-  // 现改为在数据库层面使用 PostgreSQL 的 array_agg + FILTER 子句直接计算：
+  // 2. 为每个 objective 解析 currentObjectiveRevisionId（用于证据绑定计数）
+  const objRows = await tx.query.learningObjectivesV2.findMany({
+    where: and(
+      eq(learningObjectivesV2.workspaceId, workspaceId),
+      inArray(learningObjectivesV2.objectiveId, objectiveIds),
+      eq(learningObjectivesV2.lifecycle, "active"),
+    ),
+  });
+  // objectiveRevisionId → objectiveId 反向映射：bindings 行按 objectiveRevisionId
+  // 关联（revision 是真实 revision id，不等于 objectiveId）。
+  const objectiveIdByRevision = new Map<string, string>();
+  for (const o of objRows) {
+    if (o.currentObjectiveRevisionId) objectiveIdByRevision.set(o.currentObjectiveRevisionId, o.objectiveId);
+  }
+  const objectiveRevisionIds = Array.from(
+    new Set(objRows.map((o) => o.currentObjectiveRevisionId).filter((id): id is string => Boolean(id))),
+  );
+
+  // 3. 按 objective 聚合 understanding_events。
+  // PERF-23 修复：使用 SQL GROUP BY 聚合替代应用层聚合，直接用 array_agg + FILTER 计算：
   //   - latest_event_type: 按时间倒序的第一条事件类型
   //   - latest_validation_event_type: 按 validated/misunderstood 过滤后的最新事件类型
   //   - last_validated_at: validated/misunderstood 事件的最新时间戳
   //   - misunderstanding_count: misunderstood 事件计数
-  // 这将每张卡 50 行事件数据降为 1 行聚合结果，大幅减少内存使用和数据传输量。
-  const [eventAggRows, allKps] = await Promise.all([
-    tx
-      .select({
-        cardId: validationEvents.cardId,
-        latestEventType: sql<string | null>`(array_agg(${understandingEvents.eventType} ORDER BY ${understandingEvents.createdAt} DESC))[1]`,
-        latestValidationEventType: sql<string | null>`(array_agg(${understandingEvents.eventType} ORDER BY ${understandingEvents.createdAt} DESC) FILTER (WHERE ${understandingEvents.eventType} IN ('validated', 'misunderstood')))[1]`,
-        lastValidatedAt: sql<Date | null>`MAX(${understandingEvents.createdAt}) FILTER (WHERE ${understandingEvents.eventType} IN ('validated', 'misunderstood'))`,
-        misunderstandingCount: sql<number>`COUNT(*) FILTER (WHERE ${understandingEvents.eventType} = 'misunderstood')`,
-      })
-      .from(understandingEvents)
-      .innerJoin(
-        validationEvents,
-        and(
-          eq(understandingEvents.subjectId, validationEvents.id),
-          eq(understandingEvents.subjectType, "validation"),
-        ),
-      )
-      .where(and(
-        eq(understandingEvents.workspaceId, workspaceId),
-        inArray(validationEvents.cardId, cardIds),
-        // R-006: 按 userId 过滤，普通成员只能看到自己的理解事件
-        ...(userId ? [eq(validationEvents.userId, userId)] : []),
-      ))
-      .groupBy(validationEvents.cardId),
-    // 3. 批量查 keyPoints（B14: 替代 for 循环逐个查询）
-    tx.query.cardKeyPoints.findMany({
-      where: and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        inArray(cardKeyPoints.cardId, cardIds),
-      ),
-    }),
-  ]);
-  const allKeyPointIds = new Set<string>();
-  const cardKeyPointMap = new Map<string, string[]>();
+  // V2：validationEvents 已无 cardId 列，无法重建 card join；改为按 objectiveId（=旧 keyPointId
+  // 别名）直接聚合 understandingEvents.subjectId，保持相同状态映射语义。
+  const eventAggRows = await tx
+    .select({
+      subjectId: understandingEvents.subjectId,
+      latestEventType: sql<string | null>`(array_agg(${understandingEvents.eventType} ORDER BY ${understandingEvents.createdAt} DESC))[1]`,
+      latestValidationEventType: sql<string | null>`(array_agg(${understandingEvents.eventType} ORDER BY ${understandingEvents.createdAt} DESC) FILTER (WHERE ${understandingEvents.eventType} IN ('validated', 'misunderstood')))[1]`,
+      lastValidatedAt: sql<Date | null>`MAX(${understandingEvents.createdAt}) FILTER (WHERE ${understandingEvents.eventType} IN ('validated', 'misunderstood'))`,
+      misunderstandingCount: sql<number>`COUNT(*) FILTER (WHERE ${understandingEvents.eventType} = 'misunderstood')`,
+    })
+    .from(understandingEvents)
+    .where(and(
+      eq(understandingEvents.workspaceId, workspaceId),
+      inArray(understandingEvents.subjectId, objectiveIds),
+      // R-006: 按 userId 过滤，普通成员只能看到自己的理解事件
+      ...(userId ? [eq(understandingEvents.userId, userId)] : []),
+    ))
+    .groupBy(understandingEvents.subjectId);
 
-  // PERF-23 修复：直接使用 SQL 聚合结果构建 eventMap，无需 JS 遍历
+  // PERF-23 修复：直接使用 SQL 聚合结果构建 eventMap，无需 JS 遍历。
+  // eventMap 以 objectiveId 为键（V2：objective 承担旧 keyPointId 角色）。
   const eventMap = new Map<string, {
     latestEventType: string | null;
     misunderstandingCount: number;
@@ -133,7 +145,7 @@ export async function getUnderstandingStates(
   }>();
 
   for (const row of eventAggRows) {
-    eventMap.set(row.cardId, {
+    eventMap.set(row.subjectId, {
       latestEventType: row.latestEventType,
       misunderstandingCount: Number(row.misunderstandingCount),
       latestValidationEventType: row.latestValidationEventType,
@@ -141,126 +153,85 @@ export async function getUnderstandingStates(
     });
   }
 
-  for (const kp of allKps) {
-    const arr = cardKeyPointMap.get(kp.cardId) ?? [];
-    arr.push(kp.id);
-    cardKeyPointMap.set(kp.cardId, arr);
-    allKeyPointIds.add(kp.id);
-  }
-
-  const evidenceStats = new Map<string, { hard: number; soft: number; total: number; keyPointsWithHard: Set<string> }>();
-  if (allKeyPointIds.size > 0) {
-    // N#7-13: allKeyPointIds 可能很大，分块 inArray 避免大数组 IN 参数越界。
+  // 4. 证据覆盖率：按 objective 当前 revision 的 evidence binding 计数
+  //（learningObjectiveEvidenceBindingsV2 经 objectiveRevisionId 关联）。
+  // V1 的 evidences.keyPointId 已退役；无当前 revision /无 binding 时计数为 0。
+  const evidenceStats = new Map<string, { hard: number; soft: number }>();
+  if (objectiveRevisionIds.length > 0) {
+    // N#7-13: objectiveRevisionIds 可能很大，分块 inArray 避免大数组 IN 参数越界。
     const evRows = await chunkedInArraySelect(
       (chunk) => tx
         .select({
-          id: evidences.id,
-          keyPointId: evidences.keyPointId,
-          alignment: evidences.alignment,
-          userOverride: evidences.userOverride,
+          objectiveRevisionId: learningObjectiveEvidenceBindingsV2.objectiveRevisionId,
+          supportStrength: learningObjectiveEvidenceBindingsV2.supportStrength,
         })
-        .from(evidences)
-        .where(and(eq(evidences.workspaceId, workspaceId), inArray(evidences.keyPointId, chunk))),
-      Array.from(allKeyPointIds),
+        .from(learningObjectiveEvidenceBindingsV2)
+        .where(and(
+          eq(learningObjectiveEvidenceBindingsV2.workspaceId, workspaceId),
+          inArray(learningObjectiveEvidenceBindingsV2.objectiveRevisionId, chunk),
+        )),
+      objectiveRevisionIds,
     );
 
-    // N-005: 查询用户级 override
-    const evIds = evRows.map((r) => r.id);
-    const userOverrideMap = userId
-      ? await getUserOverrideMap(userId, evIds, tx)
-      : new Map<string, "confirmed" | "downgraded" | "rejected">();
-
-    // 按 card 聚合（通过 keyPoint → card 映射）
-    const kpToCard = new Map<string, string>();
-    for (const [cardId, kpIds] of cardKeyPointMap) {
-      for (const kpId of kpIds) {
-        kpToCard.set(kpId, cardId);
-      }
-    }
-
+    // 按 objective 聚合（通过 objectiveRevisionId → objectiveId 反向映射）
     for (const row of evRows) {
-      const cardId = kpToCard.get(row.keyPointId);
-      if (!cardId) continue;
-
-      // N-005: 使用用户级 override（如果有），否则回退到 legacy userOverride
-      const userOv = userOverrideMap.get(row.id) ?? null;
-      const ea = userId
-        ? effectiveAlignmentForUser(row.alignment, row.userOverride, userOv)
-        : effectiveAlignment(row.alignment, row.userOverride);
-      if (ea === null) continue;
-
-      const stats = evidenceStats.get(cardId) ?? { hard: 0, soft: 0, total: 0, keyPointsWithHard: new Set<string>() };
-      stats.total++;
-      if (ea === "aligned") {
+      const objectiveId = objectiveIdByRevision.get(row.objectiveRevisionId);
+      if (!objectiveId) continue;
+      const stats = evidenceStats.get(objectiveId) ?? { hard: 0, soft: 0 };
+      // V2 supportStrength：treat hard as strong (hard) evidence, otherwise soft.
+      if (row.supportStrength === "hard") {
         stats.hard++;
-        // N-004: 记录有硬证据的 keyPoint
-        stats.keyPointsWithHard.add(row.keyPointId);
-      } else if (ea === "soft") {
+      } else {
         stats.soft++;
       }
-      evidenceStats.set(cardId, stats);
+      evidenceStats.set(objectiveId, stats);
     }
   }
 
-  // PERF-23 修复：合并两个串行的 review_schedules 查询为单个查询。
-  // 原代码分别查询 subjectType='validation'（join validation_events）
-  // 和 subjectType='card'（直接按 subjectId 查询），现合并为单次 OR 条件查询。
+  // 5. 合并查询 objective 维度复习计划（subjectType='card' + subjectId=objectiveId）。
   const reviewMap = new Map<string, { nextReviewAt: string | null; reviewStatus: string | null }>();
-  const rememberEarlierReview = (cardId: string, nextReviewAt: Date, status: string) => {
-    const current = reviewMap.get(cardId);
+  const rememberEarlierReview = (objectiveId: string, nextReviewAt: Date, status: string) => {
+    const current = reviewMap.get(objectiveId);
     if (!current?.nextReviewAt || nextReviewAt.getTime() < new Date(current.nextReviewAt).getTime()) {
-      reviewMap.set(cardId, {
+      reviewMap.set(objectiveId, {
         nextReviewAt: nextReviewAt.toISOString(),
         reviewStatus: status,
       });
     }
   };
-  // 合并查询：validation 类型（通过 join 获取 cardId）+ card 类型（直接 subjectId 即 cardId）
+  // V2：reviewSchedules 无 keyPointId 列，objective 维度用 subjectType='card' + subjectId=objectiveId。
   const allReviewRows = await tx
     .select({
-      cardId: sql<string>`COALESCE(${validationEvents.cardId}, ${reviewSchedules.subjectId})`,
+      objectiveId: reviewSchedules.subjectId,
       nextReviewAt: reviewSchedules.nextReviewAt,
       status: reviewSchedules.status,
     })
     .from(reviewSchedules)
-    .leftJoin(
-      validationEvents,
-      and(
-        eq(reviewSchedules.subjectId, validationEvents.id),
-        eq(reviewSchedules.subjectType, "validation"),
-      ),
-    )
     .where(
       and(
         eq(reviewSchedules.workspaceId, workspaceId),
+        eq(reviewSchedules.subjectType, "card"),
+        inArray(reviewSchedules.subjectId, objectiveIds),
         eq(reviewSchedules.status, "pending"),
-        or(
-          // validation 类型：通过 join 的 card_id 匹配
-          inArray(validationEvents.cardId, cardIds),
-          // card 类型：subject_id 直接是 cardId
-          and(
-            eq(reviewSchedules.subjectType, "card"),
-            inArray(reviewSchedules.subjectId, cardIds),
-          ),
-        ),
         // R-006: 按 userId 过滤复习计划
         ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
       ),
     )
     .orderBy(asc(reviewSchedules.nextReviewAt));
   for (const row of allReviewRows) {
-    rememberEarlierReview(row.cardId, row.nextReviewAt, row.status);
+    rememberEarlierReview(row.objectiveId, row.nextReviewAt, row.status);
   }
 
-  // 5. 组装结果
+  // 6. 组装结果
   // QUAL-26 修复：当指定了 state 过滤时，在组装阶段直接跳过不匹配的卡片，
   // 避免为不匹配的卡片构建完整的结果对象（虽然仍需计算状态，但跳过了不必要的字段组装）。
   const stateFilter = opts?.state;
   const results: UnderstandingState[] = [];
   for (const card of cards) {
-    const eventInfo = eventMap.get(card.id);
-    const evStats = evidenceStats.get(card.id) ?? { hard: 0, soft: 0, total: 0, keyPointsWithHard: new Set<string>() };
-    const reviewInfo = reviewMap.get(card.id);
+    const objectiveId = card.objectiveId;
+    const eventInfo = eventMap.get(objectiveId);
+    const evStats = evidenceStats.get(objectiveId) ?? { hard: 0, soft: 0 };
+    const reviewInfo = reviewMap.get(objectiveId);
 
     const isDueReview =
       reviewInfo?.reviewStatus === "pending" &&
@@ -297,17 +268,23 @@ export async function getUnderstandingStates(
     // QUAL-26 优化：如果指定了 state 过滤且不匹配，跳过此卡片
     if (stateFilter && state !== stateFilter) continue;
 
-    // N-004: 证据覆盖率改为 keyPoint 级别 — 有硬证据的 keyPoint 数 / 总 keyPoint 数
-    const totalKps = cardKeyPointMap.get(card.id)?.length ?? 0;
-    const kpsWithHard = evStats.keyPointsWithHard?.size ?? 0;
-    const evidenceCoverage = totalKps > 0
-      ? Math.round((kpsWithHard / totalKps) * 100) / 100
+    // 证据覆盖率：根据该 objective 的 evidence binding 计数。
+    // 有硬证据 binding 的 objective 视为 fully covered；否则按比例/0。
+    const totalBindings = evStats.hard + evStats.soft;
+    const evidenceCoverage = totalBindings > 0
+      ? Math.round((evStats.hard + evStats.soft) / Math.max(1, objectiveRevisionIds.length) * 100) / 100
       : 0;
+
+    // V2 标题：publicSummary（回退 front.cue，再回退占位符）
+    const title = card.publicSummary?.trim()
+      || (card.front as { cue?: string } | null)?.cue?.trim()
+      || "（未命名学习卡）";
 
     results.push({
       subjectType: "card" as const,
-      subjectId: card.id,
-      title: card.schemaJson?.title ?? "（未命名学习卡）",
+      // V2：外部 subjectId 用稳定公共 cardId
+      subjectId: card.cardId,
+      title,
       state,
       evidenceCoverage,
       hardEvidenceCount: evStats.hard,

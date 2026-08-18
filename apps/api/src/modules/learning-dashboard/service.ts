@@ -27,7 +27,6 @@ import {
   dashboardBuildDurationSeconds,
   dashboardEmptyWithActiveObjectivesTotal,
   objectivesWithoutOriginGauge,
-  surfaceQueryDurationSeconds,
 } from "../../lib/metrics.ts";
 
 const ACTIVE_RUN_PHASES = [

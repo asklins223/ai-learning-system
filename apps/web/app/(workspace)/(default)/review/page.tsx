@@ -18,7 +18,7 @@ import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { api, type SanitizedReviewItem } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
-import { isLearningRunV1Enabled, isQuestionFirstUIEnabled } from "@/lib/feature-flags";
+import { isLearningRunV1Enabled } from "@/lib/feature-flags";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { statusMap } from "@/lib/status-map";
 
@@ -81,8 +81,8 @@ export default function ReviewPage() {
     sensitivity: "normal",
   }), []));
   // 方案 16 统一入口：learning_run_v1 开启时复习队列由统一 LearningRun
-  // 承担（旧 question_first flag 不再挡住复习入口）。
-  const questionFirstEnabled = isQuestionFirstUIEnabled() || isLearningRunV1Enabled();
+  // 承担（旧 question_first flag 已退役，不再挡住复习入口）。
+  const questionFirstEnabled = isLearningRunV1Enabled();
   const [reviews, setReviews] = useState<SanitizedReviewItem[] | null>(null);
   const [reviewTotal, setReviewTotal] = useState(0);
   const [reviewNextOffset, setReviewNextOffset] = useState<number | null>(null);

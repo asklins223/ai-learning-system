@@ -5,7 +5,7 @@
  * projection，不先查 active Card 再反推（§15.3）。节点只允许 source/note/
  * objective/evidence（无 card/key_point）。
  */
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { notes, sources } from "../../db/schema/note.ts";
 import { learningObjectivesV2, learningObjectiveRevisionsV2, learningObjectiveLineageV2, learningObjectiveOriginsV2, evidenceSnapshotsV2 } from "../../db/schema/card-generation-v2.ts";
@@ -85,36 +85,40 @@ export async function buildTopologySnapshotV3(
   );
 
   // personal overlay（TP-06）：active run + review per objective
+  // V2：learningRuns 没有 keyPointId 列（V1 退役），run.origin JSONB 中的
+  // keyPointId = objectiveId（方案 20 §29.4 alias 规则）；经 origin JSON 路径取。
   const runRows = objectiveIds.length > 0
     ? await tx
-        .select({ runId: learningRuns.id, phase: learningRuns.phase, keyPointId: learningRuns.keyPointId, createdAt: learningRuns.createdAt })
+        .select({ runId: learningRuns.id, phase: learningRuns.phase, origin: learningRuns.origin, createdAt: learningRuns.createdAt })
         .from(learningRuns)
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
-          inArray(learningRuns.keyPointId, objectiveIds),
+          sql`${learningRuns.origin}->>'keyPointId' = ANY(${sql.raw(`ARRAY[${objectiveIds.map((id) => `'${id}'`).join(",")}]::text[]`)})`,
           inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
         ))
     : [];
   const runByObjective = new Map<string, { runId: string; phase: string }>();
   for (const run of runRows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
-    if (run.keyPointId) runByObjective.set(run.keyPointId, { runId: run.runId, phase: run.phase });
+    const objectiveId = ((run.origin as Record<string, unknown> | null)?.keyPointId) as string | undefined;
+    if (objectiveId) runByObjective.set(objectiveId, { runId: run.runId, phase: run.phase });
   }
   const scheduleRows = objectiveIds.length > 0
     ? await tx
-        .select({ id: reviewSchedules.id, keyPointId: reviewSchedules.keyPointId, nextReviewAt: reviewSchedules.nextReviewAt, generation: reviewSchedules.generation })
+        .select({ id: reviewSchedules.id, subjectId: reviewSchedules.subjectId, nextReviewAt: reviewSchedules.nextReviewAt, generation: reviewSchedules.generation })
         .from(reviewSchedules)
         .where(and(
           eq(reviewSchedules.workspaceId, ctx.workspaceId),
           eq(reviewSchedules.userId, ctx.userId),
+          eq(reviewSchedules.subjectType, "card"),
           eq(reviewSchedules.status, "pending"),
-          inArray(reviewSchedules.keyPointId, objectiveIds),
+          inArray(reviewSchedules.subjectId, objectiveIds),
         ))
     : [];
   const scheduleByObjective = new Map<string, { scheduleId: string; nextReviewAt: Date; generation: number }>();
   for (const s of scheduleRows) {
-    if (s.keyPointId) {
-      scheduleByObjective.set(s.keyPointId, { scheduleId: s.id, nextReviewAt: s.nextReviewAt, generation: s.generation });
+    if (s.subjectId) {
+      scheduleByObjective.set(s.subjectId, { scheduleId: s.id, nextReviewAt: s.nextReviewAt, generation: s.generation });
     }
   }
 

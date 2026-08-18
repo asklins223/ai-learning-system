@@ -25,7 +25,6 @@ import {
   uniqueIndex,
   boolean,
 } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
 import { users } from "./identity.ts";
 import { validationQuestions, validationEvents } from "./evidence.ts";
 import { evidences } from "./evidence.ts";

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { requireAuditUserId } from "../handlers/index.ts";
 import {
   HandlerTimeoutError,
   runWithAbortTimeout,
@@ -445,24 +444,6 @@ test("auditLogging policy disables writes without changing attribution", async (
   assert.equal(enabled, true);
   assert.equal(writes.length, 1);
   assert.equal((writes[0] as { userId: string }).userId, "initiator-1");
-});
-
-test("job actor attribution trusts requestedBy and rejects payload overrides", () => {
-  assert.throws(
-    () => requireAuditUserId({ requestedBy: null, payload: { userId: "payload-actor" } }),
-    /refusing to fabricate AI audit attribution/,
-  );
-  assert.equal(
-    requireAuditUserId({ requestedBy: "initiator-1", payload: {} }),
-    "initiator-1",
-  );
-  assert.throws(
-    () => requireAuditUserId({
-      requestedBy: "trusted-actor",
-      payload: { userId: "payload-actor" },
-    }),
-    /does not match trusted requestedBy/,
-  );
 });
 
 test("workspace policy normalization preserves explicit false values", () => {
