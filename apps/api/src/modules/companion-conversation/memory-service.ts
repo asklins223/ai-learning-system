@@ -451,3 +451,34 @@ export async function getMemory(
     .limit(1);
   return rows[0] ? toContract(rows[0]) : null;
 }
+
+/**
+ * 导出当前用户全部记忆（§13.2）。
+ * 包含状态、来源、时间、关联实体；不含 embedding。
+ * 含已归档记忆，不含已删除记忆。
+ */
+export async function exportMemories(
+  executor: ApiTransaction,
+  scope: MemoryScope,
+): Promise<{
+  version: 1;
+  exportedAt: string;
+  items: MemoryItemV2[];
+}> {
+  const rows = await executor
+    .select()
+    .from(assistantMemoryItems)
+    .where(and(
+      eq(assistantMemoryItems.workspaceId, scope.workspaceId),
+      eq(assistantMemoryItems.userId, scope.userId),
+      isNull(assistantMemoryItems.deletedAt),
+    ))
+    .orderBy(desc(assistantMemoryItems.pinned), asc(assistantMemoryItems.updatedAt))
+    .limit(10000);
+
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    items: rows.map(toContract),
+  };
+}

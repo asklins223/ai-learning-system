@@ -286,6 +286,8 @@ export type PetRuntimeEventV1 =  | { type: "bootstrap.authenticated"; userId: st
       messageId: string;
       text: string;
       textSha256: string;
+      // §12.3/§16.3：本轮使用的记忆引用（仅 UI 展示，≤3 条）。
+      memoryRefs?: { memoryId: string; kind: string; content: string }[];
     }
   | {
       type: "character.cue";
@@ -463,6 +465,8 @@ export interface PetRuntimeV2 {
   activeContext: unknown | null;
   proactiveQueue: unknown[];
   memorySync: PetMemorySyncV2;
+  // §12.3/§16.3：最近一次 assistant.final 携带的记忆引用（≤3 条，仅 UI 展示）。
+  lastMemoryRefs: { memoryId: string; kind: string; content: string }[];
 }
 
 /** §9.4 PetPresentationV2 气泡协议（messageId 引用同一响应中已持久化的 AssistantMessage）。 */

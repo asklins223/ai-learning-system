@@ -232,6 +232,28 @@ export default function CompanionMemoryPage() {
     });
   }, []);
 
+  const [exporting, setExporting] = useState(false);
+
+  const handleExport = useCallback(() => {
+    setError(null);
+    setExporting(true);
+    void api.exportCompanionMemories().then((result) => {
+      const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `companion-memory-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }).catch((caught) => {
+      setError(caught instanceof Error ? caught.message : "导出失败");
+    }).finally(() => {
+      setExporting(false);
+    });
+  }, []);
+
   const handleClearAll = useCallback(() => {
     if (!window.confirm("确定清空全部桌宠记忆？该操作不会影响学习事实与对话历史。")) return;
     setError(null);
@@ -279,6 +301,14 @@ export default function CompanionMemoryPage() {
           <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
           显示归档
         </label>
+        <button
+          type="button"
+          className="memory-export"
+          disabled={exporting}
+          onClick={handleExport}
+        >
+          {exporting ? "导出中…" : "导出记忆"}
+        </button>
         <button type="button" className="memory-clear-all" onClick={handleClearAll}>
           一键清空
         </button>

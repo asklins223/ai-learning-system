@@ -1025,6 +1025,8 @@ export function petReducer(
               userText: state.turn.kind === "running" ? state.turn.userText : undefined,
             },
             bubble: { kind: "turn", ref: { kind: "run", runId: action.runId } },
+            // §12.3/§16.3：保存本轮使用的记忆引用（仅 UI 展示，不做历史持久化）。
+            lastMemoryRefs: action.memoryRefs ?? [],
           },
           action.seq,
         ),

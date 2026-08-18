@@ -277,6 +277,12 @@ export function mapCompanionSseEvent(args: {
           messageId: payload.messageId ?? "",
           text: args.accumulatedText,
           textSha256: payload.textSha256 ?? "",
+          // §12.3/§16.3：本轮使用的记忆引用（仅 UI 展示，≤3 条）。
+          memoryRefs: Array.isArray(payload.memoryRefs)
+            ? (payload.memoryRefs as { memoryId: string; kind: string; content: string }[])
+                .filter((r) => typeof r?.memoryId === "string" && typeof r?.content === "string")
+                .slice(0, 3)
+            : [],
         },
         accumulatedText: args.accumulatedText,
       };

@@ -933,6 +933,13 @@ export const api = {
     request<{ deletedCount: number }>("/companion/memory", {
       method: "DELETE",
     }),
+  // §13.2：导出当前用户全部记忆 JSON（不含 embedding）。
+  exportCompanionMemories: () =>
+    request<{
+      version: 1;
+      exportedAt: string;
+      items: unknown[];
+    }>("/companion/memory/export"),
   getCompanionMemoryStarMap: () =>
     request<{ version: 1; nodes: unknown[]; cursor: null }>("/companion/memory/star-map"),
   listCompanionMemoryConflicts: () =>
