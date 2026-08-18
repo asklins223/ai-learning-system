@@ -2339,3 +2339,40 @@ a.history-reference > svg:last-child {
 }
 .pet-profile-add-example:hover { border-color: var(--color-action); background: var(--color-action-soft); }
 .pet-profile-add-example:disabled { opacity: 0.5; cursor: default; }
+
+/* ─── 快捷链接（记忆管理 / 星图 / 日记页通用） ─── */
+.companion-memory-links,
+.memory-star-map-links-nav {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-5);
+}
+
+.companion-memory-link,
+.memory-star-map-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 500 12px/1.4 var(--font-ui);
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-soft);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  transition: border-color var(--motion-fast) var(--ease-standard),
+              color var(--motion-fast) var(--ease-standard);
+}
+
+.companion-memory-link:hover,
+.memory-star-map-link:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.companion-memory-link svg,
+.memory-star-map-link svg {
+  width: 14px;
+  height: 14px;
+}

@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { Icon } from "@/components/ui/icons";
+import Link from "next/link";
 
 interface MemoryItem {
   memoryItemId: string;
@@ -278,6 +279,21 @@ export default function CompanionMemoryPage() {
           确认后才会被使用。删除记忆不影响任何已提交的学习事实与复习安排。
         </p>
       </header>
+
+      <nav className="companion-memory-links" aria-label="快捷入口">
+        <Link href="/companion/memory/star-map" className="companion-memory-link">
+          <Icon.StarMap />
+          <span>记忆星图</span>
+        </Link>
+        <Link href="/companion/daily" className="companion-memory-link">
+          <Icon.Sparkle />
+          <span>桌宠日记</span>
+        </Link>
+        <Link href="/companion/conversations" className="companion-memory-link">
+          <Icon.Timeline />
+          <span>对话历史</span>
+        </Link>
+      </nav>
 
       <section className="companion-memory-toolbar" aria-label="记忆筛选">
         <input

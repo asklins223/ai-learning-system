@@ -81,6 +81,16 @@ export const mineNavItems: NavItem[] = [
     label: "桌宠日记",
     href: "/companion/daily",
   },
+  {
+    icon: Icon.StarMap,
+    label: "记忆星图",
+    href: "/companion/memory/star-map",
+  },
+  {
+    icon: Icon.Pin,
+    label: "伴星记忆",
+    href: "/companion/memory",
+  },
 ];
 
 /** 移动端“我的”面板比桌面侧栏多提供设置入口。 */
@@ -140,9 +150,13 @@ export const mobileBottomNavItems: NavItem[] = [
  * 判断导航项是否高亮。
  * - 首页 `/` 需要精确匹配。
  * - 其他路由使用前缀匹配。
+ * - 如果两个导航项存在前缀包含关系（如 /companion/memory 和 /companion/memory/star-map），
+ *   更长的路径优先匹配，避免短路径错误地高亮。
  */
 export function isNavActive(href: string, pathname: string | null): boolean {
   if (!pathname) return false;
   if (href === "/") return pathname === "/";
-  return pathname.startsWith(href);
+  if (pathname === href) return true;
+  // 前缀匹配：pathname 必须以 href + "/" 开头（子路由），或精确等于 href。
+  return pathname.startsWith(href + "/");
 }

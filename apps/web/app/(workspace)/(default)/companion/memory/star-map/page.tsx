@@ -6,8 +6,10 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import "../../conversations/conversation-page.css";
 import { api } from "@/lib/api";
+import { Icon } from "@/components/ui/icons";
 
 interface MemoryStarMapNode {
   memoryId: string;
@@ -49,6 +51,21 @@ export default function MemoryStarMapPage() {
         <h1>记忆星图</h1>
         <p>记忆节点挂在 card / keyPoint / note / source / learning_run 等实体上。</p>
       </header>
+
+      <nav className="memory-star-map-links-nav" aria-label="快捷入口">
+        <Link href="/companion/memory" className="memory-star-map-link">
+          <Icon.Pin />
+          <span>记忆管理</span>
+        </Link>
+        <Link href="/companion/daily" className="memory-star-map-link">
+          <Icon.Sparkle />
+          <span>桌宠日记</span>
+        </Link>
+        <Link href="/companion/conversations" className="memory-star-map-link">
+          <Icon.Timeline />
+          <span>对话历史</span>
+        </Link>
+      </nav>
       {error && <p className="memory-star-map-error" role="alert">{error}</p>}
       {!nodes && !error ? (
         <p className="memory-star-map-loading" role="status">正在读取…</p>

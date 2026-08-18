@@ -48,6 +48,10 @@ const STATIC_WORKSPACE_ROUTES = [
   "/today",
   "/settings",
   "/benchmark",
+  "/companion/conversations",
+  "/companion/memory",
+  "/companion/memory/star-map",
+  "/companion/daily",
 ] as const;
 
 let workspacePrefetchState: "idle" | "scheduled" | "complete" = "idle";
@@ -81,6 +85,8 @@ const ROUTE_PATTERNS: RoutePattern[] = [
   { variant: "default", test: (p) => p === "/sources", page: "sources" },
   { variant: "default", test: (p) => p === "/today", page: "today" },
   { variant: "default", test: (p) => p === "/companion/conversations", page: "companion-history" },
+  { variant: "default", test: (p) => p === "/companion/memory" || p === "/companion/memory/star-map", page: "companion-memory" },
+  { variant: "default", test: (p) => p === "/companion/daily", page: "companion-daily" },
   { variant: "default", test: (p) => p === "/settings", page: "settings" },
   // ── internal variant 路由 ──
   { variant: "internal", test: (p) => p === "/benchmark", page: "benchmark" },

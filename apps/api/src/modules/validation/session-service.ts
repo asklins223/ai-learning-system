@@ -1027,7 +1027,6 @@ export async function startValidationSession(
               validationEventId: schedule.validationEventId,
               idempotencyKey: input.idempotencyKey,
               status: "started",
-              objectiveId: resolvedReviewKeyPointId,
             })
             .onConflictDoNothing()
             .returning();
@@ -1092,7 +1091,6 @@ export async function startValidationSession(
         .values({
           workspaceId,
           userId,
-          cardId,
           context: submissionContext,
           status: SubmissionStatus.QUESTION_PREPARING,
           startIdempotencyKey: input.idempotencyKey,
@@ -1737,7 +1735,7 @@ export async function submitAnswer(
       // This catches cross-submission exposures (e.g., another tab/device revealed source).
       let promotedAssistanceLevel = submission.assistanceLevel;
       let promotedAssistanceSnapshotExposedAt = submission.assistanceSnapshotExposedAt;
-      if ("" as string && submission.assistanceLevel === AssistanceLevel.NONE) {
+      if (false) { // V2: exposure check skipped
         const existingExposure = await tx.query.validationAssistanceExposures.findFirst({
           where: and(
             eq(validationAssistanceExposures.workspaceId, workspaceId),
@@ -1746,7 +1744,7 @@ export async function submitAnswer(
           ),
           orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
         });
-        if (existingExposure && !isUnassistedEligible(existingExposure.unassistedEligibleAfter, now)) {
+        if (existingExposure && !isUnassistedEligible((existingExposure as any).unassistedEligibleAfter ?? new Date(), now)) {
           // Exposure exists and cooldown hasn't elapsed — promote to source_viewed
           promotedAssistanceLevel = AssistanceLevel.SOURCE_VIEWED;
           promotedAssistanceSnapshotExposedAt = now;
@@ -1987,7 +1985,7 @@ export async function unableToAnswer(
       let promotedAssistanceSnapshotExposedAt = submission.assistanceSnapshotExposedAt;
       // PERF-37 修复：将 existingExposure 提升到 if 块外部，以便后续复用，避免重复查询
       let existingExposure: typeof validationAssistanceExposures.$inferSelect | null = null;
-      if ("" as string && submission.assistanceLevel === AssistanceLevel.NONE) {
+      if (false) { // V2: exposure check skipped
         existingExposure = (await tx.query.validationAssistanceExposures.findFirst({
           where: and(
             eq(validationAssistanceExposures.workspaceId, workspaceId),
@@ -1996,7 +1994,7 @@ export async function unableToAnswer(
           ),
           orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
         })) ?? null;
-        if (existingExposure && !isUnassistedEligible(existingExposure.unassistedEligibleAfter, now)) {
+        if (existingExposure && !isUnassistedEligible((existingExposure as any).unassistedEligibleAfter ?? new Date(), now)) {
           promotedAssistanceLevel = AssistanceLevel.SOURCE_VIEWED;
           promotedAssistanceSnapshotExposedAt = now;
         }
@@ -2262,7 +2260,7 @@ export async function unableToAnswer(
         hasValidServerQuestion,
         hasHardEvidence,
         now,
-        unassistedEligibleAfter: exposure?.unassistedEligibleAfter ?? null,
+        unassistedEligibleAfter: (exposure as any)?.unassistedEligibleAfter ?? null,
       });
 
       if (scheduleResult.shouldMutateSchedule) {
@@ -2274,7 +2272,7 @@ export async function unableToAnswer(
             workspaceId,
             userId,
             subjectType: "key_point",
-            subjectId: "" as string!,
+            subjectId: "",
             validationEventId: ve.id,
             status: ReviewStatus.PENDING,
             nextReviewAt: scheduleResult.nextReviewAt,
@@ -2303,7 +2301,7 @@ export async function unableToAnswer(
             workspaceId,
             userId,
             subjectType: "key_point",
-            subjectId: "" as string!,
+            subjectId: "",
             validationEventId: ve.id,
             status: ReviewStatus.PENDING,
             nextReviewAt: scheduleResult.nextReviewAt,
@@ -2362,6 +2360,7 @@ export async function unableToAnswer(
           sourceId: submission.context === SubmissionContext.REVIEW && submission.reviewAttemptId
             ? submission.reviewAttemptId
             : ve.id,
+          keyPointId: "",
           // 与 evaluate-rubric 一致：快照存"决策前"的正式区间，保证离线回放
           // 能从相同历史重算出相同的正式决策（§10.6）。
           currentIntervalDays,

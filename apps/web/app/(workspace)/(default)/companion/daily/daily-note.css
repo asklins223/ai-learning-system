@@ -232,9 +232,150 @@
   }
 }
 
+/* ─── 日期导航栏 ─── */
+.pet-note-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.pet-note-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 13px/1.4 var(--font-ui);
+  padding: 8px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard),
+              background var(--motion-fast) var(--ease-standard),
+              color var(--motion-fast) var(--ease-standard);
+}
+
+.pet-note-nav-btn:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: var(--color-paper);
+  color: var(--color-text);
+}
+
+.pet-note-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pet-note-nav-date {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.pet-note-nav-current {
+  font: 700 16px/1.4 var(--font-ui);
+  color: var(--color-text);
+}
+
+.pet-note-nav-latest {
+  font: 500 12px/1.4 var(--font-ui);
+  color: var(--color-action-text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pet-note-nav-latest:hover {
+  opacity: 0.8;
+}
+
+/* ─── 快捷链接 ─── */
+.pet-note-links {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-5);
+}
+
+.pet-note-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 500 12px/1.4 var(--font-ui);
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-soft);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  transition: border-color var(--motion-fast) var(--ease-standard),
+              color var(--motion-fast) var(--ease-standard);
+}
+
+.pet-note-link:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.pet-note-link svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ─── 关联记忆提示 ─── */
+.pet-note-memory-ref {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: var(--space-6);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-evidence-soft);
+  font: 500 13px/1.5 var(--font-ui);
+  color: var(--color-text-secondary);
+}
+
+.pet-note-memory-ref svg {
+  width: 16px;
+  height: 16px;
+  color: var(--color-evidence-text);
+  flex-shrink: 0;
+}
+
+.pet-note-memory-link {
+  margin-left: auto;
+  color: var(--color-action-text);
+  text-decoration: none;
+  font: 600 13px/1.4 var(--font-ui);
+}
+
+.pet-note-memory-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pet-note,
-  .pet-note-state button {
+  .pet-note-state button,
+  .pet-note-nav-btn,
+  .pet-note-link {
     transition: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .pet-note-nav-btn span {
+    display: none;
+  }
+
+  .pet-note-links {
+    gap: var(--space-2);
   }
 }
