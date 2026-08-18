@@ -16,8 +16,8 @@ import { withWorkspaceTransaction } from "../../db/client.ts";
 import { companionDailySummaries } from "../../db/schema/companion-memory.ts";
 
 function isDailySummaryEnabled(): boolean {
-  return process.env.COMPANION_DAILY_SUMMARY_V1 === "true"
-    || process.env.COMPANION_JOURNEY_V2 === "true";
+  // §15.3：该 flag 独立于 COMPANION_JOURNEY_V2，默认关闭，.env 显式开启。
+  return process.env.COMPANION_DAILY_SUMMARY_V1 === "true";
 }
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);

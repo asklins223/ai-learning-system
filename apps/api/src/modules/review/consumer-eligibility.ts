@@ -6,6 +6,8 @@ import { reviewSchedules } from "../../db/schema/evidence.ts";
  * learning card. V2 only — legacy card/card_set references removed.
  *
  * Only V2 objectives (learning_objectives_v2 + learning_cards_v2) are supported.
+ * §29.4 alias 规则：V2 review schedule 使用 subjectType='card' + subjectId=objectiveId。
+ * 仍接受 subjectType='objective' 以兼容可能存在的早期数据。
  */
 export function reviewScheduleTargetsConsumableCardPredicate() {
   return sql<boolean>`(
@@ -23,9 +25,10 @@ export function reviewScheduleTargetsConsumableCardPredicate() {
     )
     OR
     (
-      -- V2 key_point 排程目标可消费性：仅检查 V2 objective 是否为 active。
-      -- §29.4：keyPointId 即 objectiveId alias。
-      ${reviewSchedules.subjectType} = 'objective'
+      -- V2 objective 排程目标可消费性：仅检查 V2 objective 是否为 active。
+      -- §29.4：subjectType='card' + subjectId=objectiveId alias。
+      -- 同时接受 subjectType='objective' 以兼容可能的早期数据。
+      ${reviewSchedules.subjectType} IN ('card', 'objective')
       AND EXISTS (
         SELECT 1
         FROM learning_objectives_v2 AS v2_consumer_obj

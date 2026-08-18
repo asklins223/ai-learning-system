@@ -11,7 +11,6 @@ import {
 } from "react";
 import {
   api,
-  type CardListItem,
   type JobRow,
   type NoteHeader,
   type ReviewWithCard,
@@ -50,12 +49,12 @@ function yesterdayISO(date: Date): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
-import { learningCardHref, mergeLearningCardsV2 } from "@/lib/learning-card-library";
-// Plan 23 CS-01：Today 的“巩固一个要点”建议改由 Objective Surface 提供。
+// Plan 23 CS-01：Today 全面切到 Objective Surface，不再读取 legacy CardListItem。
 import { learningObjectiveApi } from "@/lib/learning-objective-api";
 import { objectiveActionHref } from "@/features/learning-objective/action-navigation";
-import type { ObjectiveListItemV3 } from "@ailearn/shared";
+import type { LearningDashboardV2, LearningObjectiveSurfaceV3 } from "@ailearn/shared";
 
+// Plan 23 CS-01：card 活动改为 objective，不再使用 legacy CardListItem。
 type ActivityType = "note" | "card" | "source" | "review" | "job";
 type ActivityGroup = "attention" | "running" | "recorded";
 type ActivityFilter = "all" | ActivityType;
@@ -81,7 +80,7 @@ interface TodayActivity {
 const FILTERS: Array<{ value: ActivityFilter; label: string }> = [
   { value: "all", label: "全部" },
   { value: "note", label: "笔记" },
-  { value: "card", label: "学习卡" },
+  { value: "card", label: "学习目标" },
   { value: "source", label: "来源" },
   { value: "review", label: "复习" },
   { value: "job", label: "自动任务" },
@@ -110,7 +109,7 @@ const GROUP_META: Record<
 
 const DATA_LABELS: Record<DataKey, string> = {
   notes: "笔记",
-  cards: "学习卡",
+  cards: "学习目标",
   reviews: "复习计划",
   jobs: "自动任务",
   sources: "来源资料",
@@ -296,7 +295,7 @@ function ActivityIcon({ type }: { type: ActivityType }) {
     type === "note"
       ? Icon.Notepad
       : type === "card"
-        ? Icon.Card
+        ? Icon.Target
         : type === "source"
           ? Icon.Folder
           : type === "review"
@@ -319,7 +318,8 @@ export default function TodayPage() {
     sensitivity: "normal",
   }), []));
   const [notes, setNotes] = useState<NoteHeader[] | null>(null);
-  const [cards, setCards] = useState<CardListItem[] | null>(null);
+  // Plan 23 CS-01：cards state 现在存储 Objective Surface（来自 Dashboard recentObjectives）。
+  const [cards, setCards] = useState<LearningObjectiveSurfaceV3[] | null>(null);
   const [reviews, setReviews] = useState<ReviewWithCard[] | null>(null);
   // F#7（🟡14）：镜像 reviews 到 ref，供 60s interval 判断"是否有 review 刚跨过
   // 到期阈值"（闭包若捕获 state 会因空依赖永远读到初始值）。
@@ -396,16 +396,17 @@ export default function TodayPage() {
       setLoading(true);
       setRetryingKey("all");
     }
+    // Plan 23 CS-01：移除 legacy api.listCards / api.listLearningCardsV2，
+    // 改用 Dashboard API（recentObjectives 携带完整 Surface + createdAt/updatedAt）。
     const results = await Promise.allSettled([
       api.listNotes({ limit: 100 }),
-      api.listCards({ limit: 100 }),
-      api.listLearningCardsV2({ limit: 100 }),
+      learningObjectiveApi.getDashboard(),
       listAllReviews(),
       api.listJobs({ limit: 50 }),
       api.listSources({ limit: 100 }),
     ] as const);
     const nextErrors: Partial<Record<DataKey, string>> = {};
-    const keys: DataKey[] = ["notes", "cards", "cards", "reviews", "jobs", "sources"];
+    const keys: DataKey[] = ["notes", "cards", "reviews", "jobs", "sources"];
 
     results.forEach((result, index) => {
       const key = keys[index];
@@ -415,13 +416,11 @@ export default function TodayPage() {
     if (requestId !== loadRequestRef.current) return;
     if (!mountedRef.current) return;
 
-    const [notesResult, cardsResult, v2CardsResult, reviewsResult, jobsResult, sourcesResult] = results;
+    const [notesResult, dashboardResult, reviewsResult, jobsResult, sourcesResult] = results;
     if (notesResult.status === "fulfilled") setNotes(notesResult.value.items);
-    if (cardsResult.status === "fulfilled" || v2CardsResult.status === "fulfilled") {
-      setCards(mergeLearningCardsV2(
-        cardsResult.status === "fulfilled" ? cardsResult.value.items : [],
-        v2CardsResult.status === "fulfilled" ? v2CardsResult.value.items : [],
-      ));
+    if (dashboardResult.status === "fulfilled") {
+      // Plan 23 CS-01：使用 Dashboard recentObjectives（完整 Surface 含 updatedAt）。
+      setCards(dashboardResult.value.recentObjectives);
     }
     if (reviewsResult.status === "fulfilled") setReviews(reviewsResult.value);
     if (jobsResult.status === "fulfilled") setJobs(jobsResult.value.items);
@@ -495,19 +494,17 @@ export default function TodayPage() {
     setRetryingKey(key);
     try {
       let notes: NoteHeader[] | null = null;
-      let cards: CardListItem[] | null = null;
+      let cards: LearningObjectiveSurfaceV3[] | null = null;
       let reviews: ReviewWithCard[] | null = null;
       let jobs: JobRow[] | null = null;
       let sources: SourceRow[] | null = null;
       // F23（round4）：先取数据（只写局部变量），所有 setState 都放到
       // mounted 守卫之后——避免卸载中途 setState。
       if (key === "notes") notes = (await api.listNotes({ limit: 100 })).items;
+      // Plan 23 CS-01：重试 cards 改用 Dashboard API。
       if (key === "cards") {
-        const [legacyResult, v2Result] = await Promise.all([
-          api.listCards({ limit: 100 }),
-          api.listLearningCardsV2({ limit: 100 }),
-        ]);
-        cards = mergeLearningCardsV2(legacyResult.items, v2Result.items);
+        const dashboard = await learningObjectiveApi.getDashboard();
+        cards = dashboard.recentObjectives;
       }
       if (key === "reviews") reviews = await listAllReviews();
       if (key === "jobs") jobs = (await api.listJobs({ limit: 50 })).items;
@@ -641,21 +638,28 @@ export default function TodayPage() {
       });
     }
 
-    for (const card of cards ?? []) {
-      if (!isWithinDay(card.createdAt, startMs, endMs)) continue;
+    // Plan 23 CS-01：card 活动改用 Objective Surface 字段。
+    // 使用 updatedAt 判断今日活动；展示 conceptLabel/publicSummary。
+    for (const objective of cards ?? []) {
+      const createdToday = isWithinDay(objective.createdAt, startMs, endMs);
+      const updatedToday = isWithinDay(objective.updatedAt, startMs, endMs);
+      if (!createdToday && !updatedToday) continue;
+      const time = createdToday ? objective.createdAt : objective.updatedAt;
       rows.push({
-        id: `card:${card.id}:${card.createdAt}`,
-        objectId: card.id,
+        id: `card:${objective.objectiveId}:${time}`,
+        objectId: objective.objectiveId,
         type: "card",
         group: "recorded",
-        time: card.createdAt,
-        typeLabel: "学习卡",
-        title: card.schemaJson?.title || "未命名学习卡",
-        description: card.schemaJson?.summary || "从笔记生成了一张新的学习卡",
-        statusLabel: "已生成",
+        time,
+        typeLabel: "学习目标",
+        title: objective.content.conceptLabel ?? objective.content.publicSummary.slice(0, 60),
+        description: createdToday ? "新的学习目标已建立" : "学习目标今天有更新",
+        statusLabel: createdToday ? "新建" : "已更新",
         statusTone: "success",
-        href: learningCardHref(card),
-        actionLabel: "查看卡片",
+        href: objective.content.presentation.cardId
+          ? `/learning-cards/${objective.content.presentation.cardId}`
+          : `/learning-objectives/${objective.objectiveId}`,
+        actionLabel: "查看目标",
       });
     }
 
@@ -699,8 +703,9 @@ export default function TodayPage() {
         description: "复习记录今天有更新",
         statusLabel: presentation.label,
         statusTone: presentation.tone,
-        href: review.isV2 ? `/learning-cards/${review.card.id}` : `/cards/${review.card.id}`,
-        actionLabel: "查看卡片",
+        // Plan 23 CS-01：复习活动链接统一指向 V2 卡详情或 Objective 详情。
+        href: review.isV2 ? `/learning-cards/${review.card.id}` : `/learning-objectives/${review.keyPoint?.id ?? review.card.id}`,
+        actionLabel: "查看目标",
       });
     }
 
@@ -899,23 +904,25 @@ export default function TodayPage() {
 
   const runningActivities = activities.filter((item) => item.group === "running");
   const runningContext = runningActivities.slice(0, 3);
-  const practiceCard = (cards ?? [])[0] ?? null;
   const errorKeys = Object.keys(errors) as DataKey[];
-  // Plan 23 CS-01：Objective 队列（active；服务端 cutoff 与 Dashboard 一致）。
-  // 空状态“巩固一个要点”优先使用真实概念标题（修复 V2 卡显示“未命名学习卡”，§2.2）。
-  const [topObjective, setTopObjective] = useState<ObjectiveListItemV3 | null>(null);
+  // Plan 23 CS-01：topObjective 来自 Dashboard primaryFocus（完整 Surface）。
+  // 不再使用 legacy practiceCard / schemaJson.title 兜底。
+  const [dashboard, setDashboard] = useState<LearningDashboardV2 | null>(null);
   // 22 方案 §15.2：昨日桌宠日记预览
   const [dailyPreview, setDailyPreview] = useState<DailySummaryPreview | null>(null);
+  // Plan 23 CS-01：Dashboard 提供 primaryFocus（完整 Surface + action）。
+  // 与首页使用同一 action resolver，不再自行推断。
+  const topObjective = dashboard?.primaryFocus?.objective ?? null;
   useEffect(() => {
     let cancelled = false;
     learningObjectiveApi
-      .listObjectives({ limit: 5 })
-      .then((page) => {
+      .getDashboard()
+      .then((data) => {
         if (cancelled) return;
-        setTopObjective(page.items[0] ?? null);
+        setDashboard(data);
       })
       .catch(() => {
-        // Objective 队列不可用不阻塞 Today（legacy practiceCard 兜底）
+        // Dashboard 不可用不阻塞 Today 页
       });
     return () => {
       cancelled = true;
@@ -940,7 +947,8 @@ export default function TodayPage() {
       cancelled = true;
     };
   }, [dayAnchor]);
-  const allFailed = errorKeys.length === 5 && Object.values(unavailableData).every(Boolean);
+  // Plan 23 CS-01：数据源从 6 个减为 5 个（cards 合并到 Dashboard）。
+  const allFailed = errorKeys.length === Object.keys(DATA_LABELS).length && Object.values(unavailableData).every(Boolean);
   const hasStaleDataErrors = errorKeys.some((key) => !unavailableData[key]);
   const activeUnavailableKey =
     activeFilter === "all" ? null : (FILTER_DATA_KEY[activeFilter] ?? null);
@@ -1170,9 +1178,9 @@ export default function TodayPage() {
               onClick={() => handleOverviewFilter("card")}
               aria-pressed={activeFilter === "card"}
             >
-              <span>学习卡</span>
+              <span>学习目标</span>
               <strong>{loading || isFilterUnavailable("card") ? "—" : filterCounts.card}</strong>
-              <small>今日新生成</small>
+              <small>新建与更新</small>
             </button>
             <button
               type="button"
@@ -1517,7 +1525,7 @@ export default function TodayPage() {
             </aside>
           )}
 
-          {!loading && dueReviews.length === 0 && runningContext.length === 0 && (topObjective || practiceCard) && (
+          {!loading && dueReviews.length === 0 && runningContext.length === 0 && topObjective && (
             <aside className="today-context-panel is-practice" aria-labelledby="today-practice-title">
               <div className="today-context-heading">
                 <span className="today-context-icon"><Icon.Target /></span>
@@ -1531,49 +1539,18 @@ export default function TodayPage() {
                   ? "今天没有到期复习。你可以从最近的学习目标预览一轮短练习，也可以先离开。"
                   : "今天没有到期复习。可以回到最近的学习目标继续巩固，也可以先离开。"}
               </p>
-              {topObjective ? (
-                <>
-                  <div className="today-context-card-name">
-                    <span>最近的学习目标</span>
-                    <strong>{topObjective.conceptLabel ?? topObjective.publicSummary.slice(0, 40)}</strong>
-                  </div>
-                  <Link
-                    href={objectiveActionHref(topObjective.primaryAction, "/today")
-                      ?? "/learning-objectives/" + topObjective.objectiveId}
-                    className="today-context-action"
-                  >
-                    {topObjective.primaryAction.kind === "resume_run" ? "继续本次巩固" : "开始一次巩固"}
-                    <Icon.Arrow />
-                  </Link>
-                </>
-              ) : (
-                <>
-                  <div className="today-context-card-name">
-                    <span>最近的学习卡</span>
-                    <strong>{practiceCard?.schemaJson?.title || "未命名学习卡"}</strong>
-                  </div>
-                  {LEARNING_RUN_UI_PREVIEW && (
-                    <div className="today-context-facts" aria-label="巩固练习 UI 预览说明">
-                      <span>不自动下一题</span>
-                      <span>随时换方式</span>
-                    </div>
-                  )}
-                  <Link
-                    href={
-                      practiceCard && (learningRunUiPreviewHref({
-                        origin: practiceCard.isV2 ? "today_v2" : "today",
-                        cardId: practiceCard.id,
-                        keyPointId: practiceCard.isV2 ? practiceCard.objectiveId ?? null : null,
-                        isV2: practiceCard.isV2,
-                      }) ?? learningCardHref(practiceCard))
-                    }
-                    className="today-context-action"
-                  >
-                    {LEARNING_RUN_UI_PREVIEW ? "预览短练习" : "去学习卡继续"}
-                    <Icon.Arrow />
-                  </Link>
-                </>
-              )}
+              <div className="today-context-card-name">
+                <span>最近的学习目标</span>
+                <strong>{topObjective.content.conceptLabel ?? topObjective.content.publicSummary.slice(0, 40)}</strong>
+              </div>
+              <Link
+                href={objectiveActionHref(topObjective.primaryAction, "/today")
+                  ?? "/learning-objectives/" + topObjective.objectiveId}
+                className="today-context-action"
+              >
+                {topObjective.primaryAction.kind === "resume_run" ? "继续本次巩固" : "开始一次巩固"}
+                <Icon.Arrow />
+              </Link>
             </aside>
           )}
         </div>

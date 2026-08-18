@@ -557,21 +557,10 @@ export async function runCompanionDialogue(
             role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
             text: textOfCompanionBlocks(m.blocks),
           }));
-        // 长期记忆：只注入已确认/非候选的活跃记忆（候选默认不参与主动策略，
-        // 也不进入日常对话上下文）。限制条数/长度，防止 prompt 被记忆撑爆。
-        const memoryRows = await tx.execute<{ kind: string; content: string }>(sql`
-          SELECT kind, content
-          FROM assistant_memory_items
-          WHERE workspace_id = ${ctx.workspaceId}
-            AND user_id = ${run.user_id}
-            AND deleted_at IS NULL
-            AND candidate = false
-          ORDER BY updated_at DESC
-          LIMIT 30
-        `);
-        const activeMemories = memoryRows
-          .slice(0, 30)
-          .map((m) => ({ kind: m.kind, content: m.content.slice(0, 500) }));
+        // §3.5：记忆检索由 Context Orchestrator 统一负责（向量/keyword fallback）。
+        // read 阶段不再直接"取最近 30 条记忆"——当记忆上下文功能关闭时回退空记忆，
+        // 开启时由后续 assembleCompanionContext 阶段检索填充。
+        const activeMemories: { kind: string; content: string }[] = [];
         const petProfileRows = await tx.execute<{
           name: string;
           speaking_style: string;

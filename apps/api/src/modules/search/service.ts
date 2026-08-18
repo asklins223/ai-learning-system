@@ -270,30 +270,17 @@ export async function search(
       ? snippet.replace(highlightRe, (match) => `«${match}»`)
       : snippet;
 
-    const metadata = row.metadata as Record<string, unknown> | null;
-    const cardSetId = typeof metadata?.cardSetId === "string"
-      ? metadata.cardSetId
-      : null;
-    const scope = metadata?.scope === "overview" || metadata?.scope === "section"
-      ? metadata.scope
-      : null;
-    const ordinal = typeof metadata?.ordinal === "number"
-      ? metadata.ordinal
-      : null;
+    // Plan 23 CS-02：cardSetId/scope/ordinal 是 V1 card/card_set 的遗留字段，
+    // 已不再产生新投影。为保持 SearchResult 接口兼容性（前端可能读取），仍输出 null。
 
     // 生成 href
+    // Plan 23 CS-02：card / card_set / evidence 已退役（consumableSearchDocumentPredicate
+    // 排除），不再生成指向 /cards 或 /card-sets 的 V1 路由。遗留文档（reindex 前的
+    // 投影）会被 consumable predicate 过滤；此处移除 dead code 防止误路由。
     let href = "";
     switch (row.object_type) {
       case "note":
         href = `/notes/${row.object_id}`;
-        break;
-      case "card":
-        href = cardSetId
-          ? `/card-sets/${cardSetId}?cardId=${row.object_id}`
-          : `/cards/${row.object_id}`;
-        break;
-      case "card_set":
-        href = `/card-sets/${row.object_id}`;
         break;
       case "source":
         href = `/sources/${row.object_id}`;
@@ -302,17 +289,7 @@ export async function search(
         // Plan 23 CS-03：Objective 命中直达目标档案（web 端 /learning-objectives/[id] 重定向到详情）
         href = `/learning-objectives/${row.object_id}`;
         break;
-      case "evidence": {
-        const cardId = typeof metadata?.cardId === "string"
-          ? metadata.cardId
-          : null;
-        href = cardSetId
-          ? `/card-sets/${cardSetId}${cardId ? `?cardId=${cardId}` : ""}`
-          : cardId
-            ? `/cards/${cardId}`
-            : "";
-        break;
-      }
+      // card / card_set / evidence：V1 已下线，不生成 href（consumable predicate 已排除）。
       default:
         href = "";
     }
@@ -325,9 +302,11 @@ export async function search(
       indexedAt: row.indexed_at instanceof Date ? row.indexed_at.toISOString() : row.indexed_at,
       href,
       matchCount: Number(row.match_count) || 1,
-      cardSetId,
-      scope,
-      ordinal,
+      // Plan 23 CS-02：cardSetId/scope/ordinal 是 V1 card/card_set 遗留字段，
+      // 永远为 null（不再产生新投影）；保留输出以维持接口兼容。
+      cardSetId: null,
+      scope: null,
+      ordinal: null,
     };
   });
 

@@ -1,8 +1,8 @@
 # 冗余代码审计报告
 
-> 审计日期：2026-08-18（第五轮补充：2026-08-18）
-> 审计范围：`apps/`、`packages/`、`workers/`、`.github/scripts/`、`infra/`
-> 审计方法：通过 feature flag 追踪、退役注释 grep、已删除文件残留引用检查、新旧版本共存模式分析、重复函数定义检测、死代码路径（if(false)/void 抑制）扫描、501 占位路由检查、退役类型枚举值分析、DB schema 镜像检测、前端路由残留检查、错误类定义普查、Schema V1 注释普查、API 客户端零调用方法检测、@deprecated 标注扫描、Infra 配置 V1 引用检测、恒 null/void 抑制调用链追踪、shared 零消费方 parse 函数检测、重复 URLSearchParams 构造模式分析、V1 遗留类型零 import 消费方检测、重复 helper/util 函数定义普查、重复错误发送函数检测、CSS 引用零确认
+> 审计日期：2026-08-18（第九轮补充：2026-08-18）
+> 审计范围：`apps/`、`packages/`、`workers/`、`.github/scripts/`、`infra/`、`apps/desktop/`
+> 审计方法：通过 feature flag 追踪、退役注释 grep、已删除文件残留引用检查、新旧版本共存模式分析、重复函数定义检测、死代码路径（if(false)/void 抑制）扫描、501 占位路由检查、退役类型枚举值分析、DB schema 镜像检测、前端路由残留检查、错误类定义普查、Schema V1 注释普查、API 客户端零调用方法检测、@deprecated 标注扫描、Infra 配置 V1 引用检测、恒 null/void 抑制调用链追踪、shared 零消费方 parse 函数检测、重复 URLSearchParams 构造模式分析、V1 遗留类型零 import 消费方检测、重复 helper/util 函数定义普查、重复错误发送函数检测、CSS 引用零确认、DEPRECATED 指标定义检测、backward-compatibility re-export 检测、void userId 抑制模式检测、DashScopeProvider 兼容包装器检测、sanitizeCardOutput backward-compatible wrapper 检测、capability-gated 路由 `void req` 模式检测、`resolveFSRSPromotionStatus` 恒返回 shadow_only 检测、`MemoryItemV1` 类型别名残留检测、Desktop legacy IPC 通道残留检测、`parseExposureV2`/`parseObjectiveEquivalence*`/`parseInitialValidationReminderV2` 零消费方 parse 函数检测、`handoff-adapter.ts` 重复 `stableStringify` 新增副本检测、全项目 `void` 抑制模式全面普查（含测试文件、Desktop、前端组件、integration-tests）、零调用 feature flag 函数补充检测（`isPromptCacheEnabled`/`isCardRepairEnabled`）、错误类定义全项目精确普查、V1 遗留恒零字段检测（`StatsOverview`/`SearchResult`/`SearchDriftResult`）、V1 遗留图节点类型检测（`GRAPH_NODE_TYPES`）、搜索路由 V1 枚举值残留检测、`exposure-service.ts` 重复 `sha256Hex` 新增副本检测、`projection-checkpoint.ts` 重复 `sha256Hex` 新增副本检测、`origin-service.ts` legacy 迁移兼容残留检测
 
 ---
 
@@ -1157,3 +1157,1229 @@
 | **P3 - 长期** | 28.2 Migration SQL 中的 V1 表定义 | 历史文件 | 低（仅在 squash 时清理） |
 | **P3 - 长期** | 37.2 `formatDate` 重复定义（2 处） | ~10 行 | 低 |
 | **P3 - 长期** | 42.1 `ReviewSchedule.subjectType` V1 枚举值 | 类型修改 | 中 |
+
+---
+
+## 四十三、API 端 DEPRECATED 指标定义（无生产写点）
+
+### 43.1 `apps/api/src/lib/metrics.ts` 中 10 个 DEPRECATED 指标
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/lib/metrics.ts` |
+| **位置** | 第 154–274 行 |
+| **冗余内容** | 共 10 个 Job/Provider/DB 指标被标注 `DEPRECATED（PERF-B7）`：`jobQueueDepth`、`jobOldestPendingAgeSeconds`、`jobTerminalTotal`、`jobRetriesTotal`、`jobLeaseLostTotal`、`jobDurationSeconds`、`providerCallsTotal`、`providerCallDurationSeconds`、`providerErrorsTotal`、`dbLastSuccessfulBackupTimestamp` |
+| **现状** | 注释明确说明这些指标在 API 进程内无任何生产写点（全库 grep 命中仅本文件定义 + ops01 测试），实际由 `workers/ai-worker/src/lib/metrics.ts` 维护同义指标。`dbLastSuccessfulBackupTimestamp` 更标注"目前无生产备份写点，指标输出恒为 0" |
+| **注意** | `alerts.yml` 仍然引用 `ailearn_job_queue_depth`、`ailearn_job_oldest_pending_age_seconds`、`ailearn_provider_calls_total`、`ailearn_provider_errors_total`、`ailearn_db_last_successful_backup_timestamp` 等指标进行告警——这意味着告警规则引用了在 API 进程中不产生数据的指标 |
+| **建议** | P1 — 确认 worker 端是否已提供同名指标。若是，API 端定义可删除（仅保留 worker 端）。`alerts.yml` 中的引用应确保指向 worker 端的 scrape target。`dbLastSuccessfulBackupTimestamp` 需确认是否有 backup exporter 实际写入此指标 |
+
+---
+
+## 四十四、Backward-compatibility re-export（零消费方的 re-export）
+
+### 44.1 `ai-provider.ts` 中 `DEFAULT_CONTEXT_WINDOW_TOKENS` 的 re-export
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `workers/ai-worker/src/lib/ai-provider.ts` |
+| **位置** | 第 14–15 行 |
+| **冗余内容** | `export { DEFAULT_CONTEXT_WINDOW_TOKENS } from "./provider-constants.ts";` — 注释标注 "Re-exported here for backward compatibility" |
+| **现状** | 全项目无任何文件从 `ai-provider.ts` 导入 `DEFAULT_CONTEXT_WINDOW_TOKENS`。所有消费方直接从 `provider-constants.ts` 导入（`openai-compatible.ts` 和 `mock.ts` 均直接导入 `provider-constants.ts`） |
+| **建议** | P2 — 删除该 re-export 语句 |
+
+### 44.2 `card-quality.ts` 中 `ngramSet` / `jaccard` 的 re-export
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `workers/ai-worker/src/lib/card-quality.ts` |
+| **位置** | 第 25–26 行 |
+| **冗余内容** | `export { ngramSet, jaccard };` — 注释标注 "Re-export for backward compatibility" |
+| **现状** | 全项目无任何文件从 `card-quality.ts` 导入 `ngramSet` 或 `jaccard`。这两个函数直接从 `text-similarity.ts` 导入（`align.ts` 和 `card-quality.ts` 自身均直接导入 `text-similarity.ts`） |
+| **建议** | P2 — 删除该 re-export 语句 |
+
+### 44.3 `EvaluateValidationInput` 接口（仅测试消费的 backward-compatibility 类型）
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `workers/ai-worker/src/lib/ai-provider.ts` |
+| **位置** | 第 49–58 行 |
+| **冗余内容** | `export interface EvaluateValidationInput` — 注释标注 "R5: kept here for backward compatibility. Previously used by provider.evaluateValidation(); now used by the evaluateValidationViaChat() helper in business-ai-ops.ts." |
+| **现状** | 被 `business-ai-ops.ts`（第 53、82 行）和 `mock.ts`（第 4、45 行）引用。`mock.ts` 中的 `mockEvaluateValidation` 是 mock provider 的测试实现 |
+| **建议** | P2 — 确认 `evaluateValidationViaChat()` 是否仍在生产路径中使用。若否，该接口可移至测试文件或删除 |
+
+---
+
+## 四十五、`void userId` 抑制模式（BYOK 迁移后残留）
+
+### 45.1 `governance.ts` 中 `resolveAIGovernanceContext` 的 userId 参数
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `workers/ai-worker/src/lib/governance.ts` |
+| **位置** | 第 232 行 |
+| **冗余内容** | `void userId; // userId no longer used for BYOK lookup` |
+| **现状** | `resolveAIGovernanceContext(workspaceId, userId)` 接受 `userId` 参数但立即 `void` 抑制。v0.6 单一配置源重构后，不再查 personal BYOK，平台解析完全收敛到 `config/ai-platforms.json` |
+| **建议** | P2 — 从函数签名中移除 `userId` 参数，更新所有调用方 |
+
+### 45.2 `ai-provider.ts` 中 `createEmbeddingProvider` 的 userId 参数
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `workers/ai-worker/src/lib/ai-provider.ts` |
+| **位置** | 第 304 行 |
+| **冗余内容** | `void userId; // No longer used for BYOK lookup` |
+| **现状** | `createEmbeddingProvider(userId?, cachedGovCtx?)` 接受 `userId` 参数但立即 `void` 抑制。注释标注 "Kept for API compatibility but no longer used (platform config is system-level)" |
+| **建议** | P2 — 从函数签名中移除 `userId` 参数，更新所有调用方 |
+
+---
+
+## 四十六、`DashScopeProvider` 兼容包装器
+
+### 46.1 仅为测试保留的 Provider 包装类
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `workers/ai-worker/src/lib/providers/dashscope.ts` |
+| **位置** | 第 61 行起 |
+| **冗余内容** | `DashScopeProvider` 类注释标注 "This class is kept for backward compatibility with existing test files. New code should use `createProvider("dashscope", ...)` or the future provider registry factory." |
+| **现状** | 类本身只是 `OpenAICompatibleProvider` 的薄包装，将旧版 DashScope 构造参数翻译为 OpenAICompatibleProvider 预设配置。被 `ai-provider.ts` 的 `createProvider` 函数使用（第 105、166 行），以及多个测试文件引用 |
+| **建议** | P2 — 评估是否可将测试文件迁移到使用 `createProvider("dashscope", ...)` 工厂函数，然后移除该包装类 |
+
+---
+
+## 四十七、`sanitizeCardOutput` backward-compatible wrapper
+
+### 47.1 仅测试使用的旧版函数包装
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `workers/ai-worker/src/lib/card-quality.ts` |
+| **位置** | 第 404–420 行 |
+| **冗余内容** | `sanitizeCardOutput()` 函数注释标注 "这是 sanitizeCardOutput 的向后兼容包装，调用 assessCardOutput 并只返回 sanitized。v0.6 新代码应直接使用 assessCardOutput 获取结构化质量报告。" |
+| **现状** | 生产代码中无调用方（生产代码已直接使用 `assessCardOutput`）。仅在 `card-quality.test.ts` 和 `card-assess-repair.test.ts` 中被测试引用 |
+| **建议** | P2 — 将测试迁移到直接使用 `assessCardOutput().sanitized`，然后删除该包装函数 |
+
+---
+
+## 四十八、`parseCandidateActionCommandV2` 零消费方
+
+### 48.1 Card Generation V2 Contracts 中的零调用 parse 函数
+
+| 函数 | 文件 | 状态 |
+|---|---|---|
+| `parseCandidateActionCommandV2()` | `packages/shared/src/card-generation-v2-contracts.ts`（第 1147 行） | ⚠️ 零外部消费方（仅在定义文件自身出现） |
+
+> **现状**：该 `parse*` 函数是 zod schema `candidateActionCommandV2Schema.parse()` 的薄包装。全项目无任何文件 import 或调用该函数。
+>
+> **建议**：P2 — 删除该函数（保留 schema 导出即可）。
+
+> 注：`parseActivateCardCandidatesRequestV2`、`parseCardActivationReceiptV2`、`parseCandidateRevealV2` 有外部消费方（`reveal-service.ts`、`activation-service.ts`、集成测试），不属于冗余。
+
+---
+
+## 四十九、`sha256Hex` 重复定义更新（从 14 处增加到 25 处）
+
+### 49.1 新增的 sha256Hex 私有副本
+
+经第六轮扫描确认，`sha256Hex` 的重复定义从第五轮审计的 14 处增加到了以下 **25 处**：
+
+| # | 文件 | 行号 | 可见性 |
+|---|---|---|---|
+| 1 | `packages/shared/src/content-hash.ts` | 21 | `export`（权威实现，含 node:crypto 惰性获取） |
+| 2 | `packages/shared/src/hash-canonical-v2.ts` | 33 | `private` |
+| 3 | `packages/shared/src/learning-assessment.ts` | 12 | `private` |
+| 4 | `apps/api/src/modules/learning-runs/run-planner.ts` | 28 | `export` |
+| 5 | `apps/api/src/modules/learning-runs/shadow-translator.ts` | 46 | `private` |
+| 6 | `apps/api/src/modules/learning-runs/run-structured.ts` | 20 | `export` |
+| 7 | `apps/api/src/modules/learning-sessions/canonical-events.ts` | 547 | `private` |
+| 8 | `apps/api/src/modules/learning-sessions/episode-commit.ts` | 482 | `private` |
+| 9 | `apps/api/src/modules/learning-sessions/scene-safety.ts` | 345 | `private` |
+| 10 | `apps/api/src/modules/learning-sessions/silent-scene-author.ts` | 46 | `private` |
+| 11 | `apps/api/src/modules/learning-sessions/relation-governance.ts` | 187 | `private` |
+| 12 | `apps/api/src/modules/learning-sessions/redaction-service.ts` | 610 | `private` |
+| 13 | `apps/api/src/modules/learning-sessions/handoff-adapter.ts` | 211 | `private` |
+| 14 | `apps/api/src/modules/learning-sessions/legacy-adapter.ts` | 487 | `private` |
+| 15 | `apps/api/src/modules/learning-sessions/exposure-service.ts` | 716 | `private` |
+| 16 | `apps/api/src/modules/learning-sessions/scene-activation.ts` | 255 | `private` |
+| 17 | `apps/api/src/modules/learning-sessions/star-map-projections.ts` | 131 | `private` |
+| 18 | `apps/api/src/modules/learning-sessions/session-service.ts` | 639 | `private` |
+| 19 | `apps/api/src/modules/learning-sessions/trust-service.ts` | 105 | `private` |
+| 20 | `apps/api/src/modules/understanding/projection-checkpoint.ts` | 31 | `private` |
+| 21 | `workers/ai-worker/src/handlers/companion-action.ts` | 26 | `private` |
+| 22 | `workers/ai-worker/src/handlers/companion-dialogue-router.ts` | 29 | `private` |
+| 23 | `apps/web/features/card-generation-v2/api/sha256.ts` | 11 | `export`（浏览器端，async Web Crypto） |
+| 24 | `apps/web/features/card-generation-v2/api/canonical-hash-web.ts` | 63 | `private`（浏览器端，async Web Crypto） |
+| 25 | `apps/web/features/companion-pet/character/sprite-asset-validator.ts` | 33 | `export`（浏览器端，接收 ArrayBuffer） |
+
+> **新增条目**（相比第五轮审计）：
+> - `exposure-service.ts`（第 716 行）
+> - `scene-activation.ts`（第 255 行）
+> - `star-map-projections.ts`（第 131 行）
+> - `session-service.ts`（第 639 行）
+> - `trust-service.ts`（第 105 行）
+> - `projection-checkpoint.ts`（第 31 行）
+> - `companion-action.ts`（第 26 行）
+> - `companion-dialogue-router.ts`（第 29 行）
+> - `apps/web` 前端 3 处（浏览器端用 Web Crypto API，与 Node 端实现不同，可能属于合理重复）
+>
+> **建议**：P1 — 将所有 Node 端私有 `sha256Hex` 替换为从 `@ailearn/shared/content-hash` 导入。浏览器端的 3 处使用 Web Crypto API，实现不同，可能需单独提取为前端公共模块。预计可消除约 130 行重复代码（从 80 行增加）。
+
+---
+
+## 五十、重复 Error 类定义更新（从 21 个增加到 50+ 个）
+
+### 50.1 新增的 extends Error 子类
+
+经第六轮扫描确认，项目中自定义 `extends Error` 子类从第五轮审计的 21 个增加到了 **50+ 个**。新增的类包括：
+
+| # | 文件 | 类名 | 用途 |
+|---|---|---|---|
+| 22 | `apps/api/src/modules/learning-sessions/release-qualification.ts` | `ReleaseQualificationError` | 发布资格错误 |
+| 23 | `apps/api/src/modules/learning-sessions/exposure-service.ts` | `ExposureGuardError` | 曝光守卫错误 |
+| 24 | `apps/api/src/modules/learning-sessions/handoff-adapter.ts` | `HandoffAdapterError` | 移交适配器错误 |
+| 25 | `apps/api/src/modules/learning-sessions/scene-activation.ts` | `SceneActivationError` | 场景激活错误 |
+| 26 | `apps/api/src/modules/learning-sessions/silent-profile-registry.ts` | `EligibilityReportError` | 资格报告错误 |
+| 27 | `apps/api/src/modules/learning-sessions/star-map-projections.ts` | `StarMapProjectionError` | 星图投影错误 |
+| 28 | `apps/api/src/modules/learning-sessions/legacy-adapter.ts` | `LegacyAdapterError` | 遗留适配器错误 |
+| 29 | `apps/api/src/modules/learning-sessions/assessment-service.ts` | `AssessmentServiceError` | 评估服务错误 |
+| 30 | `apps/api/src/modules/learning-sessions/voice-service.ts` | `VoiceServiceError` | 语音服务错误 |
+| 31 | `apps/api/src/modules/learning-sessions/vertical-slice.ts` | `VerticalSliceError` | 垂直切片错误 |
+| 32 | `apps/api/src/modules/learning-sessions/redaction-service.ts` | `RedactionServiceError` | 编辑服务错误 |
+| 33 | `apps/api/src/modules/learning-sessions/commit-port-pg.ts` | `CommitPortNotImplementedError` | 提交端口未实现错误 |
+| 34 | `apps/api/src/modules/learning-sessions/session-service.ts` | `SessionServiceError` | 会话服务错误 |
+| 35 | `apps/api/src/modules/learning-sessions/trust-service.ts` | `ReducerError` | 归约器错误 |
+| 36 | `apps/api/src/modules/learning-sessions/canonical-events.ts` | `CanonicalEventValidationError` | 规范事件校验错误 |
+| 37 | `apps/api/src/modules/learning-objectives/surface-service.ts` | `ObjectiveNotFoundError` | 目标未找到错误 |
+| 38 | `apps/api/src/modules/learning-objectives/origin-service.ts` | `OriginValidationError` / `ObjectiveRevisionNotFoundError` | 来源校验/修订未找到错误 |
+| 39 | `apps/api/src/modules/observability/metrics-schema.ts` | `MetricSchemaError` | 指标 schema 错误 |
+| 40 | `apps/api/src/modules/identity/service.ts` | `JoinWorkspaceError` | 加入工作区错误 |
+| 41 | `apps/api/src/modules/companion-shell/canary-stage.ts` | `CanaryStageError` | 金丝雀阶段错误 |
+| 42 | `apps/api/src/modules/companion-shell/service.ts` | `CompanionStateError` | 伙伴状态错误 |
+| 43 | `apps/api/src/modules/companion-shell/presence-control.ts` | `PresenceControlError` | 在场控制错误 |
+| 44 | `apps/api/src/modules/companion-shell/shell-actions.ts` | `ShellActionError` | 壳操作错误 |
+| 45 | `apps/api/src/modules/companion-shell/audit-service.ts` | `CompanionAuditError` | 伙伴审计错误 |
+| 46 | `apps/api/src/modules/companion-conversation/delivery-service.ts` | `DeliveryServiceError` | 递送服务错误 |
+| 47 | `apps/api/src/modules/companion-conversation/turn-service.ts` | `CompanionConversationError` | 伙伴对话错误 |
+| 48 | `apps/api/src/modules/identity/invite-service.ts` | `ConsumeInviteError` | 消费邀请错误 |
+| 49 | `apps/api/src/modules/note/service.ts` | `RevisionConflictError` | 修订冲突错误 |
+
+> **现状**：项目中有 50+ 个自定义 Error 子类，大部分实现模式完全相同——构造函数设置 `statusCode`、`code`、`message`。没有一个统一的 `DomainError` 基类。
+>
+> **建议**：P1 — 提取 `DomainError` 基类（含 `statusCode`、`code`、`message`），所有自定义错误继承它。减少约 250+ 行重复构造函数代码（从 100 行增加）。
+
+---
+
+## 五十一、`stableStringify` 重复定义更新（从 7 处增加到 8 处）
+
+### 51.1 新增的 stableStringify 私有副本
+
+经第六轮扫描确认，`stableStringify` 的重复定义从第五轮审计的 7 处增加到了 **8 处**：
+
+| # | 文件 | 行号 | 可见性 |
+|---|---|---|---|
+| 1 | `apps/api/src/modules/learning-sessions/canonical-events.ts` | 552 | `export` |
+| 2 | `apps/api/src/modules/learning-sessions/scene-activation.ts` | 238 | `private` |
+| 3 | `apps/api/src/modules/learning-sessions/session-service.ts` | 618 | `private` |
+| 4 | `apps/api/src/modules/learning-sessions/trust-service.ts` | 88 | `private` |
+| 5 | `apps/api/src/modules/learning-sessions/scene-safety.ts` | 328 | `private` |
+| 6 | `packages/shared/src/published-learning-asset-contract.ts` | 99 | `export`（命名为 `stableStringifyPublishedAsset`） |
+| 7 | `packages/shared/src/learning-assessment.ts` | 23 | `private` |
+| 8 | `apps/api/src/modules/learning-sessions/handoff-adapter.ts` | *(新增)* | `private` |
+
+> **建议**：P2 — 统一为 `canonical-events.ts` 的 `stableStringify` 或抽取到 `@ailearn/shared` 的公共模块。预计可消除约 70 行重复代码。
+
+---
+
+## 五十二、`alerts.yml` 引用 DEPRECATED 指标的配置不一致
+
+### 52.1 告警规则引用 API 端不产生数据的指标
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `infra/prometheus/alerts.yml` |
+| **位置** | 第 87、99、113、128、146–148、162、174、186、229–230 行 |
+| **冗余/不一致内容** | `alerts.yml` 中的告警规则引用 `ailearn_job_queue_depth`、`ailearn_job_oldest_pending_age_seconds`、`ailearn_job_terminal_total`、`ailearn_job_lease_lost_total`、`ailearn_provider_calls_total`、`ailearn_provider_errors_total`、`ailearn_provider_call_duration_seconds`、`ailearn_db_last_successful_backup_timestamp` 等指标。但这些指标在 API 进程中被标注为 DEPRECATED（PERF-B7），无生产写点 |
+| **现状** | 这些指标的实际写点在 `workers/ai-worker/src/lib/metrics.ts` 中。如果 Prometheus 只 scrape API 端口而不 scrape worker 端口，告警将永远无法触发。反之如果同时 scrape worker，则 API 端的 DEPRECATED 定义是冗余的 |
+| **建议** | P1 — 确认 Prometheus scrape 配置是否覆盖 worker 端。若是，删除 API 端 DEPRECATED 指标定义。若否，需确保 worker 端被 scrape。`dbLastSuccessfulBackupTimestamp` 特别需要确认是否有独立的 backup exporter 进程写入此指标 |
+
+---
+
+## 五十三、Capability-gated 路由中的 `void req` 抑制模式
+
+### 53.1 capability off 时 `void req` 丢弃请求对象
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/companion-conversation/delivery-routes.ts`、`inbox-routes.ts`、`timeline-routes.ts`、`pet-profile-routes.ts`、`daily-summary-routes.ts`、`memory-routes.ts`、`apps/api/src/modules/companion-journey/routes.ts`、`apps/api/src/modules/companion-bridge/routes.ts` |
+| **位置** | 每个路由文件中 `app.addHook("onRequest", async (req, reply) => { if (!isXxxEnabled()) { void req; return reply.code(404)...` |
+| **冗余内容** | 共 **8 个路由文件**中存在相同的 `void req;` 抑制模式：当 capability flag 关闭时，`req` 参数被 `void req;` 抑制以避免 linter 的 unused 告警。这是一种重复的 hack |
+| **现状** | 这些路由使用 capability flag 进行 fail-closed 门控（`isCompanionJourneyV2Enabled()`、`isDailySummaryEnabled()`、`isPetProfileEnabled()`、`isMemoryContextEnabled()`、`isCompanionBridgeV2Enabled()`）。flag 关闭时返回 404。`void req;` 仅为满足 linter |
+| **建议** | P2 — 将 `req` 参数改名为 `_req` 或使用下划线前缀（TypeScript 忽略 unused 约定），消除全部 8 处 `void req;` 抑制 |
+
+### 53.2 `run-routes.ts` 中的 `void req` 门控
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/learning-runs/run-routes.ts` |
+| **位置** | 第 134–137 行 |
+| **冗余内容** | `if (!isLearningRunV1Enabled()) { void req; return reply.code(404).send(...)` |
+| **现状** | 与 §53.1 相同的 `void req;` 抑制模式 |
+| **建议** | P2 — 同 §53.1 |
+
+---
+
+## 五十四、`resolveFSRSPromotionStatus` 恒返回 `shadow_only`
+
+### 54.1 `agentOnline` 参数被 void 抑制
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/learning-sessions/official-scheduler.ts` |
+| **位置** | 第 594–598 行 |
+| **冗余内容** | `export function resolveFSRSPromotionStatus(agentOnline: boolean): FSRSPromotionStatus { void agentOnline; return "shadow_only"; }` — 函数接受 `agentOnline` 参数但立即 `void` 抑制，恒返回 `"shadow_only"` |
+| **现状** | 注释标注 "Agent 在线状态不影响 FSRS 转正：转正只由独立 Gate 判定（§9）"。`agentOnline` 参数已完全无用，函数本质上是常量 `() => "shadow_only"` |
+| **建议** | P2 — 从函数签名中移除 `agentOnline` 参数（更新所有调用方），或将函数简化为直接返回常量 |
+
+---
+
+## 五十五、`run-planner.ts` 中 4 个 void 抑制的未使用参数
+
+### 55.1 `planVariant` 函数参数全部被 void
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/learning-runs/run-planner.ts` |
+| **位置** | 第 518–523 行 |
+| **冗余内容** | `function planVariant(runId: ..., taskId: ..., target: ..., task: ...): PlannedVariant { void runId; void taskId; void target; void task; ... }` — 函数接受 4 个参数但全部 `void` 抑制 |
+| **现状** | 4 个参数全部未被使用，仅为保持签名兼容性 |
+| **建议** | P2 — 移除未使用的参数，更新调用方 |
+
+---
+
+## 五十六、`run-service.ts` 中 `void run` 抑制（2 处）
+
+### 56.1 `loadRun` 结果未使用
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/learning-runs/run-service.ts` |
+| **位置** | 第 1699–1700 行、第 1713–1714 行 |
+| **冗余内容** | 两处 `const run = await loadRun(tx, input, input.runId); void run;` — 调用 `loadRun` 获取 run 对象但立即 `void` 抑制 |
+| **现状** | `loadRun` 在这两处仅用于存在性校验（不存在会抛错），但 run 对象本身未使用 |
+| **建议** | P2 — 如果 `loadRun` 的存在性校验是必需的，改为调用 `assertRunExists(tx, input)` 语义函数；否则移除调用 |
+
+---
+
+## 五十七、`learning-action-bridge.ts` 中 `void eventPayload` 抑制
+
+### 57.1 `eventPayload` 计算后未使用
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/companion-conversation/learning-action-bridge.ts` |
+| **位置** | 第 782–785 行 |
+| **冗余内容** | `eventPayload` 被构造并插入 SQL（`JSON.stringify(eventPayload)`），但随后 `void eventPayload;` 被调用抑制 unused 告警 |
+| **现状** | eventPayload 在 SQL 字符串模板中通过 `JSON.stringify` 内联使用，变量本身未被直接引用 |
+| **建议** | P2 — 直接内联 `JSON.stringify(...)` 到 SQL 模板中，消除中间变量和 void 抑制 |
+
+---
+
+## 五十八、Desktop 中的 legacy IPC 通道与 V1 路由残留
+
+### 58.1 `legacyOpenExternal` / `legacyGetVersion` IPC 通道
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/desktop/src/ipc/contract.ts`、`apps/desktop/src/ipc/register-pet-ipc.ts` |
+| **位置** | `contract.ts` 第 21–22 行（定义）、`register-pet-ipc.ts` 第 225–240 行（处理） |
+| **冗余内容** | `legacyOpenExternal: "desktop:open-external"` 和 `legacyGetVersion: "desktop:get-version"` — 两个 IPC 通道名称中带有 `legacy` 前缀，暗示它们是旧版兼容通道 |
+| **现状** | 这两个通道仍在使用（`register-pet-ipc.ts` 中有 `ipcMain.on(PET_IPC_CHANNELS.legacyOpenExternal, ...)` 和 `handle(PET_IPC_CHANNELS.legacyGetVersion, ...)` 的处理逻辑）。命名中 `legacy` 前缀可能是历史遗留 |
+| **建议** | P2 — 如果功能仍在使用，将通道名中的 `legacy` 前缀移除（重命名为 `openExternal` / `getVersion`），避免混淆 |
+
+### 58.2 Desktop `main-route-path.ts` 中的 V1 退役路由注释
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/desktop/src/main-route-path.ts` |
+| **位置** | 第 19 行、第 26 行 |
+| **冗余内容** | 第 19 行注释 "V2：旧 /cards/:id 详情页已退役，学习卡详情在 /learning-cards/:cardId"；第 26 行注释 "V1 卡片 companion session 已退役：回到 V2 学习卡页" |
+| **现状** | 代码逻辑已正确路由到 V2 路径，注释仅作为历史记录 |
+| **建议** | P2 — 清理退役注释 |
+
+---
+
+## 五十九、`parseExposureV2` / `parseObjectiveEquivalence*` / `parseInitialValidationReminderV2` 零消费方
+
+### 59.1 Learning Card V2 Contracts 中新增的零调用 parse 函数
+
+| 函数 | 文件 | 状态 |
+|---|---|---|
+| `parseExposureV2()` | `packages/shared/src/learning-card-v2-contracts.ts`（第 393 行） | ⚠️ 零外部消费方（仅在定义文件自身出现） |
+| `parseObjectiveEquivalenceReportV2()` | 同上（第 397 行） | ⚠️ 零外部消费方 |
+| `parseObjectiveEquivalenceBindingV2()` | 同上（第 403 行） | ⚠️ 零外部消费方 |
+| `parseInitialValidationReminderV2()` | 同上（第 409 行） | ⚠️ 零外部消费方 |
+
+> **现状**：这些 `parse*` 函数是 zod schema 的 `.parse()` 薄包装。全项目无任何文件 import 或调用这些函数（`parseExposureV2`、`parseObjectiveEquivalenceReportV2`、`parseObjectiveEquivalenceBindingV2`、`parseInitialValidationReminderV2` 仅在定义文件 `learning-card-v2-contracts.ts` 中出现）。
+>
+> **建议**：P2 — 删除这 4 个函数（保留 schema 导出即可）。与 §32.2（`parseObjectiveEquivalenceReportV2`/`parseObjectiveEquivalenceBindingV2`/`parseInitialValidationReminderV2` 已在 §32.2 中记录）合并确认。`parseExposureV2` 为本轮新增发现。
+
+---
+
+## 六十、`MemoryItemV1` 类型别名残留
+
+### 60.1 `MemoryItemV1` 纯别名等于 `MemoryItemV2`
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/companion-conversation/memory-service.ts` |
+| **位置** | 第 63–64 行 |
+| **冗余内容** | `export type MemoryItemV1 = MemoryItemV2;` — 纯类型别名，注释标注 "兼容旧名：现有调用方仍可用 MemoryItemV1 指代扩展后的 V2 形状" |
+| **现状** | V2 形状已完全替代 V1，`MemoryItemV1` 与 `MemoryItemV2` 完全相同。别名仅为旧调用方提供兼容名 |
+| **建议** | P2 — 确认所有调用方已迁移到 `MemoryItemV2`，然后移除 `MemoryItemV1` 别名 |
+
+---
+
+## 六十一、`deterministic-gates.ts` 中 `void answerText` 抑制
+
+### 61.1 `answerText` 参数未使用
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/card-generation-v2/deterministic-gates.ts` |
+| **位置** | 第 242 行 |
+| **冗余内容** | `void answerText;` — 函数接受 `answerText` 参数但未使用 |
+| **现状** | 参数被传入但仅被 `void` 抑制，未参与任何逻辑 |
+| **建议** | P2 — 移除未使用参数或改为 `_answerText` |
+
+---
+
+## 六十二、`binding-plan-assembler.ts` 中 `void workspaceId` 抑制
+
+### 62.1 `workspaceId` 参数校验后被 void
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/card-generation-v2/binding-plan-assembler.ts` |
+| **位置** | 第 317 行 |
+| **冗余内容** | `void workspaceId;` — 函数接受 `workspaceId` 参数，注释说明 "sealed manifest 本身按 workspace 约束"，但参数被 `void` 抑制 |
+| **现状** | workspace 校验由 sealed manifest 自身完成，`workspaceId` 参数在本函数中未直接使用 |
+| **建议** | P2 — 移除未使用参数或改为 `_workspaceId` |
+
+---
+
+## 六十三、`assessment-service.ts` 中 `void normalizedAnswer` / `void target.evidenceHash` 抑制
+
+### 63.1 两个未使用的解构变量
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/learning-sessions/assessment-service.ts` |
+| **位置** | 第 120–121 行 |
+| **冗余内容** | `void normalizedAnswer; void target.evidenceHash;` — 两个变量被解构但未使用 |
+| **现状** | `normalizedAnswer` 和 `target.evidenceHash` 从 target 中解构但未在函数体中使用 |
+| **建议** | P2 — 移除未使用的解构变量 |
+
+---
+
+## 六十四、`voice-routes.ts` 中 `void language` 抑制
+
+### 64.1 `language` 参数仅用于日志但被 void
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/learning-sessions/voice-routes.ts` |
+| **位置** | 第 363 行 |
+| **冗余内容** | `void language;` — 注释说明 "language 为日志元数据（SenseVoice 自动检测语言，无需传给 provider）" |
+| **现状** | `language` 参数从请求中解析但未传给 provider（SenseVoice 自动检测），也未被日志使用（被 void 抑制说明未引用） |
+| **建议** | P2 — 将 `language` 写入日志上下文或移除参数 |
+
+---
+
+## 六十五、`export-service.ts` 中 `void q` 抑制（V1 退役残留）
+
+### 65.1 遍历 `validationQuestions` 但每项被 void
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/export/service.ts` |
+| **位置** | 第 1019–1022 行 |
+| **冗余内容** | `for (const q of data.validationQuestions as Record<string, unknown>[]) { void q; }` — 遍历 `validationQuestions` 数组但每项 `void q;` 抑制 |
+| **现状** | 注释标注 "V1 退役: validation_questions 的 cardId 列已删除，不再校验"。遍历保留但循环体为空 |
+| **建议** | P2 — 移除整个空循环 |
+
+---
+
+## 六十六、`edge-tts.ts` 中 `void err` 抑制（2 处）
+
+### 66.1 catch 块中 `err` 被丢弃
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/modules/learning-sessions/voice-providers/edge-tts.ts` |
+| **位置** | 第 96 行、第 167 行 |
+| **冗余内容** | 两处 `} catch (err) { void err; throw new EdgeTtsError(...) }` — 捕获的错误被 `void err;` 丢弃，仅抛出自定义错误 |
+| **现状** | 注释说明 "内部配置不进入客户端可见 message；排查细节应进服务端日志，不进响应体"。但 `err` 被完全丢弃，未写入日志 |
+| **建议** | P2 — 将 `err` 写入服务端日志（`logger.warn`）而非完全丢弃，或改名为 `_err` |
+
+---
+
+## 六十七、`companion-conversation-contracts.test.ts` 中的 `void _o` / `void _v2` 抑制
+
+### 67.1 测试中的兼容性验证残留
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `packages/shared/src/companion-conversation-contracts.test.ts` |
+| **位置** | 第 550–551 行 |
+| **冗余内容** | `void _o; void _v2;` — 测试中解构 V2 字段（`objectiveId`/`originV2`）以验证向后兼容性，但解构后的变量被 `void` 抑制 |
+| **现状** | 这是"向后兼容验证"的一部分：从 `learningRunStartCandidate` 中提取 V2 字段后，验证仅含 V1 字段的对象也能通过 schema。`void _o; void _v2;` 是 linter 抑制 |
+| **建议** | P3 — 将变量名改为 `_$o` / `_$v2` 或使用 `// eslint-disable-next-line` 替代 `void` 抑制 |
+
+---
+
+## 六十八、`integration-tests` 中的 `void` 抑制残留
+
+### 68.1 `understanding-projection-postgres.integration.ts` 中的 `void envelopeRows` / `void projectionRows`
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/integration-tests/understanding-projection-postgres.integration.ts` |
+| **位置** | 第 126 行（`void envelopeRows;`）、第 129 行（`void projectionRows;`） |
+| **冗余内容** | 两个查询结果变量被定义后 `void` 抑制。注释标注 "直接查 checkpoint 表（projection 端点需 HTTP；此处验证数据底座）" |
+| **现状** | 查询结果仅用于验证"查询不报错"，但行数据本身未被断言使用 |
+| **建议** | P3 — 如果查询结果应被断言，添加断言；如果是仅验证查询成功，改名为 `_envelopeRows` / `_projectionRows` |
+
+---
+
+## 六十九、`card-generation-v2-activation-service.test.ts` 中的 `void _st` 抑制
+
+### 69.1 `setupFlexibleTx` 被赋值后 void
+
+| 项目 | 详情 |
+|---|---|
+| **文件** | `apps/api/src/__tests__/card-generation-v2-activation-service.test.ts` |
+| **位置** | 第 814–815 行 |
+| **冗余内容** | `const { setupFlexibleTx: _st } = { setupFlexibleTx }; void _st;` — 从对象中解构 `setupFlexibleTx` 重命名为 `_st`，然后 `void` 抑制 |
+| **现状** | 这是一种"显式标记未使用"的模式。`_st` 被赋值但从未在测试中使用 |
+| **建议** | P3 — 如果 `setupFlexibleTx` 不需要在该测试文件中引用，直接移除该行 |
+
+---
+
+## 七十、优先级建议（第七轮更新）
+
+| 优先级 | 类别 | 预估清理量 | 风险 |
+|---|---|---|---|
+| **P0 - 立即** | 4.1 RC manifest fill 脚本（已弃用，引用已删除文件） | 127 行 | 低 |
+| **P0 - 立即** | 6.1 无调用的 feature flag 函数（isCardGenerationV1WriterEnabled 等） | ~60 行 | 低 |
+| **P0 - 立即** | 12.2 `void resolveObjAndCard` 抑制的未使用函数（55 行实现） | ~55 行 | 低 |
+| **P0 - 立即** | 16.2 `void v2RunId` 抑制 | 2 行 | 低 |
+| **P1 - 短期** | 20.1 `packages/db` 整个镜像包（无 import 消费方） | ~25 个文件 | 中（需确认 drizzle-kit 不依赖） |
+| **P1 - 短期** | 11.1/49.1 sha256Hex 重复定义（25 处，其中 Node 端 22 处） | ~130 行 | 低 |
+| **P1 - 短期** | 12.1 `if (false)` 死分支（8 处） | ~30 行 | 低 |
+| **P1 - 短期** | 22.1 AppShell `/card-sets/` 路由匹配 | 1 行 | 低 |
+| **P1 - 短期** | 26.1–26.5 前端零调用 API 客户端方法（8 个） | ~80 行 | 低 |
+| **P1 - 短期** | 27.1–27.2 `@deprecated` governance 函数（checkAIConsent + enforcePrivacyGovernance） | ~60 行 | 中（需确认替代方已接线） |
+| **P1 - 短期** | 2.1 discrete-v1 调度策略旧版逻辑 | ~120 行 + 测试 | 中（需确认灰度完成） |
+| **P1 - 短期** | 3.1–3.7 V1 退役注释清理 | 注释 | 低 |
+| **P1 - 短期** | 7.1–7.2 Card Set CSS 文件 + DeckCover.tsx | ~1970 行 | 低（已确认零引用） |
+| **P1 - 短期** | 34.1/50.1 重复的错误类定义（50+ 个 extends Error） | ~250+ 行 | 中 |
+| **P1 - 短期** | 43.1 API 端 DEPRECATED 指标定义（10 个） | ~80 行 | 中（需确认 worker 端覆盖） |
+| **P1 - 短期** | 52.1 `alerts.yml` 引用 DEPRECATED 指标的配置不一致 | 配置修改 | 中 |
+| **P2 - 中期** | 11.2/51.1 stableStringify 重复定义（8 处私有副本） | ~70 行 | 低 |
+| **P2 - 中期** | 2.4 首页 Onboarding legacy fallback | ~10 行 | 低 |
+| **P2 - 中期** | 3.2 Learning Runs V1 兼容薄壳 | ~60 行 | 中（需确认前端迁移完成） |
+| **P2 - 中期** | 5.1 Legacy Adapter | ~526 行 + 测试 | 高（需确认数据迁移完成） |
+| **P2 - 中期** | 5.2 Learning Card Library 合并函数 | ~20 行 | 中 |
+| **P2 - 中期** | 14.1 `LegacyRouteResolutionStatus` 退役枚举值 | 类型修改 | 低 |
+| **P2 - 中期** | 14.2 `CardSetRecord`/`CardSetListItem` 退役类型 | 类型修改 | 中 |
+| **P2 - 中期** | 15.1 Origin Migration 已移除分支注释 | 注释 | 低 |
+| **P2 - 中期** | 16.1 Companion Bridge V1 payload 兼容分支 | ~40 行 | 中（需确认客户端升级） |
+| **P2 - 中期** | 21.1 Worker index.ts V1 删除注释 | 注释 | 低 |
+| **P2 - 中期** | 22.2 Focus Layout 注释中的 `/card-sets/[id]` | 注释 | 低 |
+| **P2 - 中期** | 22.3 Learning Card 详情页 `forbidden`/`ambiguous` 错误消息 | ~4 行 | 低 |
+| **P2 - 中期** | 24. Schema 注释中的 V1 引用残留（20+ 处） | 注释 | 低 |
+| **P2 - 中期** | 27.3 `adaptFetchToPublicJsonRequester` TEST-ONLY 适配器 | ~30 行 | 中（需替代 mock 方案） |
+| **P2 - 中期** | 27.4 `LogAICallParams.userId` 废弃字段 | 类型修改 | 低 |
+| **P2 - 中期** | 28.1 Supervisor Agent V1 Grafana dashboard | ~366 行 JSON | 中（需确认指标已退役） |
+| **P2 - 中期** | 29.1 `getToken()` 恒 null 的残留调用方 | ~10 行 | 低 |
+| **P2 - 中期** | 30.1 `setToken()` 恒无效的残留调用方 | ~15 行 | 低 |
+| **P2 - 中期** | 31.1 `registerWithInviteToken`/`registerPersonal` 零调用方法 | ~20 行 | 低 |
+| **P2 - 中期** | 32.1/48.1 `parse*` 辅助函数零消费方（更新：9 个） | ~45 行 | 低 |
+| **P2 - 中期** | 33.1 URLSearchParams 重复构造模式（11 处） | ~50 行 | 低 |
+| **P2 - 中期** | 35.1 `types.ts` V1 遗留类型（8 个零消费方） | ~60 行 | 低 |
+| **P2 - 中期** | 36.1 `normalizeText` 重复定义（3 处） | ~6 行 | 低 |
+| **P2 - 中期** | 37.1 `relativeTime`/`formatRelativeTime` 重复定义 | ~30 行 | 低 |
+| **P2 - 中期** | 38.1 `sendSessionError`/`sendServiceError` 重复模式 | ~20 行 | 低 |
+| **P2 - 中期** | 38.2 `validateSubmissionId`/`validateEventId` 近似重复 | ~20 行 | 低 |
+| **P2 - 中期** | 39.1 CSS 文件 + DeckCover 完全无引用确认 | ~1970 行 | 低 |
+| **P2 - 中期** | 44.1–44.3 Backward-compatibility re-export（3 个） | ~5 行 | 低 |
+| **P2 - 中期** | 45.1–45.2 `void userId` 抑制模式（2 处） | ~4 行 | 低 |
+| **P2 - 中期** | 46.1 `DashScopeProvider` 兼容包装器 | ~40 行 | 中（需迁移测试） |
+| **P2 - 中期** | 47.1 `sanitizeCardOutput` backward-compatible wrapper | ~15 行 | 低 |
+| **P2 - 中期** | 53.1–53.2 Capability-gated 路由 `void req` 抑制（9 处） | ~9 行 | 低 |
+| **P2 - 中期** | 54.1 `resolveFSRSPromotionStatus` 恒返回 `shadow_only` | ~5 行 | 低 |
+| **P2 - 中期** | 55.1 `run-planner.ts` 4 个 void 抑制参数 | ~4 行 | 低 |
+| **P2 - 中期** | 56.1 `run-service.ts` `void run` 抑制（2 处） | ~4 行 | 低 |
+| **P2 - 中期** | 57.1 `learning-action-bridge.ts` `void eventPayload` | ~2 行 | 低 |
+| **P2 - 中期** | 58.1 Desktop legacy IPC 通道命名 | 命名修改 | 低 |
+| **P2 - 中期** | 58.2 Desktop `main-route-path.ts` V1 退役注释 | 注释 | 低 |
+| **P2 - 中期** | 59.1 `parseExposureV2` 零消费方 | ~3 行 | 低 |
+| **P2 - 中期** | 60.1 `MemoryItemV1` 类型别名残留 | 1 行 | 低 |
+| **P2 - 中期** | 61.1 `deterministic-gates.ts` `void answerText` | 1 行 | 低 |
+| **P2 - 中期** | 62.1 `binding-plan-assembler.ts` `void workspaceId` | 1 行 | 低 |
+| **P2 - 中期** | 63.1 `assessment-service.ts` `void normalizedAnswer`/`evidenceHash` | 2 行 | 低 |
+| **P2 - 中期** | 64.1 `voice-routes.ts` `void language` | 1 行 | 低 |
+| **P2 - 中期** | 65.1 `export-service.ts` `void q` 空循环 | ~3 行 | 低 |
+| **P2 - 中期** | 66.1 `edge-tts.ts` `void err`（2 处） | ~2 行 | 低 |
+| **P3 - 长期** | 5.3 Understanding V1 vs V3 reader | 整个模块 | 高（需评估路由调用方） |
+| **P3 - 长期** | 8. 备份快照目录 | 整个目录 | 低 |
+| **P3 - 长期** | 13.1 501 占位路由（Topology V3 deltas） | 5 行 | 低 |
+| **P3 - 长期** | 14.3 `LearningCardRecord` V1 字段 | 类型修改 | 中 |
+| **P3 - 长期** | 17.1–17.2 Review Service V1 路径 | ~30 行 | 高（需确认历史数据） |
+| **P3 - 长期** | 18.1 Shadow Translator | 149 行 | 高（需确认 cutover 完成） |
+| **P3 - 长期** | 20.2 `legacySessionId`/`legacyEpisodeId`/`legacyOrdinal` 列 | 3 列 + 1 索引 | 高（需确认迁移完成） |
+| **P3 - 长期** | 20.3 `legacy_unrubriced` 枚举值 | 枚举修改 | 中 |
+| **P3 - 长期** | 23.1 `deprecatedProgress` 测试断言 | 1 行 | 低 |
+| **P3 - 长期** | 28.2 Migration SQL 中的 V1 表定义 | 历史文件 | 低（仅在 squash 时清理） |
+| **P3 - 长期** | 37.2 `formatDate` 重复定义（2 处） | ~10 行 | 低 |
+| **P3 - 长期** | 42.1 `ReviewSchedule.subjectType` V1 枚举值 | 类型修改 | 中 |
+| **P3 - 长期** | 67.1 `companion-conversation-contracts.test.ts` `void _o`/`void _v2` | 2 行 | 低 |
+| **P3 - 长期** | 68.1 `understanding-projection-postgres.integration.ts` `void envelopeRows`/`void projectionRows` | 2 行 | 低 |
+| **P3 - 长期** | 69.1 `card-generation-v2-activation-service.test.ts` `void _st` | 1 行 | 低 |
+
+> 注：本轮（第七轮）审计新增了 §53–§69 共 17 个小节。主要集中在 `void` 抑制模式的全项目普查（capability-gated 路由、FSRS promotionStatus、run-planner/run-service 未使用参数、edge-tts catch 块、export-service 空循环等）、Desktop legacy IPC 通道命名残留、`parseExposureV2` 零消费方确认、`MemoryItemV1` 类型别名残留等。这些冗余风险等级普遍为低（多为 1–9 行的抑制语句），但数量累积后影响代码可读性和可维护性。
+
+---
+
+## 七十、`void` 抑制模式全项目补充普查（第八轮新增）
+
+### 70.1 `relation-governance.test.ts` 中 `void verdict` 抑制
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/learning-sessions/relation-governance.test.ts` |
+|| **位置** | 第 178 行 |
+|| **冗余内容** | `const verdict = supportCheck(propose(), { support: "direct" });` 赋值后立即 `void verdict;` 抑制。变量计算了但从未在测试断言中使用 |
+|| **现状** | 该测试用例只使用了 `verdictNoReport`（另一个变量），`verdict` 本身被赋值但未引用 |
+|| **建议** | P3 — 如果 `verdict` 不需要在该用例中使用，直接移除该变量声明 |
+
+### 70.2 `v06-export-import-coverage.test.ts` 中 `void rubricItemsPos`/`void submissionsPos` 抑制
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/__tests__/v06-export-import-coverage.test.ts` |
+|| **位置** | 第 234–235 行 |
+|| **冗余内容** | `const rubricItemsPos = source.indexOf("validationQuestionRubricItems");` 和 `const submissionsPos = source.indexOf("validationSubmissions");` 赋值后立即 `void rubricItemsPos; void submissionsPos;` 抑制 |
+|| **现状** | 这两个位置索引变量被定义但未在后续断言中使用。注释说明"rubric_items should be restored before submissions"，但实际未用变量值做比较 |
+|| **建议** | P3 — 如果依赖顺序检查需要，添加实际的断言比较；否则移除变量声明 |
+
+### 70.3 `asr-manager.ts` 中 `void _droppedRequestId` 抑制
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/desktop/src/voice/asr-manager.ts` |
+|| **位置** | 第 89 行 |
+|| **冗余内容** | `const { requestId: _droppedRequestId, ...payload } = (message ?? {}) as { requestId?: number } & Record<string, unknown>;` 解构后立即 `void _droppedRequestId;` 抑制 |
+|| **现状** | 从消息中解构出 `requestId` 仅为将其从 `payload` 中排除，`_droppedRequestId` 本身不需要使用。`void` 抑制仅为满足 linter |
+|| **建议** | P3 — 使用 `// eslint-disable-next-line @typescript-eslint/no-unused-vars` 替代 `void` 抑制，或将变量名改为 `_$droppedRequestId` 以利用 TypeScript 的 `_` 前缀约定 |
+
+### 70.4 `MarkdownPreview.tsx` 中 `void katexReady` 抑制
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/web/components/MarkdownPreview.tsx` |
+|| **位置** | 第 459 行 |
+|| **冗余内容** | `void katexReady;` — `katexReady` 是 `useState` 的状态变量，在 `useEffect` 依赖数组中被 eslint-disable 忽略，然后 `void` 抑制以避免 unused 告警 |
+|| **现状** | 注释说明"仅首次挂载需要；katexReady 变化只为触发重渲"。`katexReady` 被设置但不直接读取，其作用是通过状态变更触发组件重渲染 |
+|| **建议** | P3 — 使用 `useReducer` 或 `useRef` + `forceUpdate` 模式替代 `void katexReady;`，或改为 `const [, setKatexReady] = useState(false)` 忽略 state 值 |
+
+### 70.5 `agent-stream-ui-contract.test.ts` 中 `void _assertNoRawPayloadKey` 抑制
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/web/lib/__tests__/agent-stream-ui-contract.test.ts` |
+|| **位置** | 第 29 行 |
+|| **冗余内容** | `const _assertNoRawPayloadKey: AssertNoRawPayloadKey = true;` 赋值后立即 `void _assertNoRawPayloadKey;` 抑制 |
+|| **现状** | 这是一条编译期类型契约——如果 `GenerationOverlayProps` 包含 `safePayload`/`rawPayload`/`payload` 键，`AssertNoRawPayloadKey` 变为 `never`，赋值 `= true` 会编译失败。变量本身不用于运行时 |
+|| **建议** | P3 — 作为编译期类型断言保留无风险。若清理可改为 `const _assertNoRawPayloadKey: AssertNoRawPayloadKey = true as AssertNoRawPayloadKey;` 或使用 `// @ts-expect-error` 注释替代 |
+
+### 70.6 `card-generation-v2-postgres.integration.ts` 中 `void WORKER_URL` 抑制
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `workers/ai-worker/src/integration-tests/card-generation-v2-postgres.integration.ts` |
+|| **位置** | 第 31 行 |
+|| **冗余内容** | `const WORKER_URL = process.env.DATABASE_URL_WORKER ?? "postgres://ailearn_worker:...";` 赋值后 `void WORKER_URL;` 抑制。注释说明"测试体以 ailearn_worker 角色执行 pollV2Outbox" |
+|| **现状** | `WORKER_URL` 被定义但在测试中通过 `process.env.DATABASE_URL_WORKER` 间接使用，变量本身未被直接引用 |
+|| **建议** | P3 — 如果 `WORKER_URL` 不需要在该测试中直接使用，移除变量声明；如果需要作为文档存在，改为注释 |
+
+### 70.7 `presence-control.test.ts` 中 `void _ignored` 抑制
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/companion-shell/presence-control.test.ts` |
+|| **位置** | 第 434 行 |
+|| **冗余内容** | `void _ignored;` — 测试中解构出的 `_ignored` 变量被 `void` 抑制 |
+|| **现状** | 类似于 §69.1 的模式，从对象中解构但未使用的变量 |
+|| **建议** | P3 — 直接移除该变量声明 |
+
+---
+
+## 七十一、零调用 feature flag 函数补充（第八轮新增）
+
+### 71.1 `isPromptCacheEnabled()` — 零外部调用
+
+|| 函数 | 文件 | 状态 |
+||---|---|---|
+|| `isPromptCacheEnabled()` | `packages/shared/src/feature-flags.ts`（第 109 行） | ⚠️ 零外部调用 |
+
+> **现状**：该函数仅在 `feature-flags.ts` 中定义，全项目无任何文件 import 或调用该函数。`PROMPT_CACHE_ENABLED` 环境变量可能已预埋但从未接线。
+>
+> **建议**：P1 — 如果 prompt cache 功能不会启用，删除该函数及对应 flag 文档。
+
+### 71.2 `isCardRepairEnabled()` — 零外部调用
+
+|| 函数 | 文件 | 状态 |
+||---|---|---|
+|| `isCardRepairEnabled()` | `packages/shared/src/feature-flags.ts`（第 80 行） | ⚠️ 零外部调用（仅定义和测试） |
+
+> **现状**：该函数仅在 `feature-flags.ts` 中定义和 `feature-flags.test.ts` 中引用，生产代码中无调用方。注释说明"gates conditional card repair (计划 §7.7)"，但该计划可能尚未实施。
+>
+> **建议**：P1 — 如果 card repair 功能不会启用，删除该函数及对应 flag 文档。
+
+---
+
+## 七十二、错误类定义全项目精确普查（第八轮更新）
+
+### 72.1 全项目 `extends Error` 类定义完整清单
+
+经全项目精确普查（含 `apps/`、`workers/`、`packages/`），共发现 **70+ 个**自定义 Error 子类，远超第七轮统计的 50+。以下是完整清单：
+
+**API 端（`apps/api/`）— 38 个：**
+
+| # | 文件 | 类名 |
+|---|---|---|
+| 1 | `db/client.ts` | `WorkspaceTransactionContextError` |
+| 2 | `db/client.ts` | `AdvisoryLockUnavailableError` |
+| 3 | `modules/validation/session-service.ts` | `SessionError` |
+| 4 | `modules/learning-runs/run-errors.ts` | `LearningRunServiceError` |
+| 5 | `modules/learning-runs/run-critic.ts` | `CriticUnavailableError` |
+| 6 | `modules/learning-runs/run-critic.ts` | `CriticOutputError` |
+| 7 | `modules/review/attempt-service.ts` | `ReviewAttemptError` |
+| 8 | `modules/review/scheduling-policy.ts` | `ReviewSchedulingPolicyError` |
+| 9 | `modules/companion-journey/journey-reducer.ts` | `JourneyActionError` |
+| 10 | `modules/companion-journey/journey-service.ts` | `JourneyServiceError` |
+| 11 | `modules/card-generation-v2/target-snapshot-adapter.ts` | `TargetSnapshotError` |
+| 12 | `modules/card-generation-v2/author-service.ts` | `AuthorValidationError` |
+| 13 | `modules/card-generation-v2/helpers.ts` | `CardGenerationV2ServiceError` |
+| 14 | `modules/learning-sessions/tutor-detour.ts` | `TutorDetourError` |
+| 15 | `modules/learning-sessions/voice-providers/openai-compatible.ts` | `OpenAiCompatibleError` |
+| 16 | `modules/learning-sessions/voice-providers/qwen-tts.ts` | `QwenTtsError` |
+| 17 | `modules/learning-sessions/voice-providers/siliconflow-asr.ts` | `SiliconFlowAsrError` |
+| 18 | `modules/learning-sessions/voice-providers/edge-tts.ts` | `EdgeTtsError` |
+| 19 | `modules/learning-sessions/relation-governance.ts` | `RelationGovernanceError` |
+| 20 | `modules/learning-sessions/answer-submission.ts` | `AnswerSubmissionError` |
+| 21 | `modules/learning-sessions/qualification-report.ts` | `QualificationReportError` |
+| 22 | `modules/learning-sessions/commit-outbox.ts` | `CommitOutboxError` |
+| 23 | `modules/learning-sessions/redaction-service.ts` | `RedactionServiceError` |
+| 24 | `modules/learning-sessions/canonical-events.ts` | `CanonicalEventValidationError` |
+| 25 | `modules/learning-sessions/handoff-adapter.ts` | `HandoffAdapterError` |
+| 26 | `modules/learning-sessions/exposure-service.ts` | `ExposureGuardError` |
+| 27 | `modules/learning-sessions/scene-activation.ts` | `SceneActivationError` |
+| 28 | `modules/learning-sessions/assessment-service.ts` | `AssessmentServiceError` |
+| 29 | `modules/learning-sessions/vertical-slice.ts` | `VerticalSliceError` |
+| 30 | `modules/learning-sessions/legacy-adapter.ts` | `LegacyAdapterError` |
+| 31 | `modules/learning-sessions/voice-service.ts` | `VoiceServiceError` |
+| 32 | `modules/learning-sessions/release-qualification.ts` | `ReleaseQualificationError` |
+| 33 | `modules/learning-sessions/star-map-projections.ts` | `StarMapProjectionError` |
+| 34 | `modules/learning-sessions/gold-rounds.ts` | `GoldRoundsError` |
+| 35 | `modules/learning-sessions/silent-profile-registry.ts` | `EligibilityReportError` |
+| 36 | `modules/learning-sessions/session-service.ts` | `SessionServiceError` |
+| 37 | `modules/learning-sessions/trust-service.ts` | `ReducerError` |
+| 38 | `modules/learning-sessions/commit-port-pg.ts` | `CommitPortNotImplementedError` |
+| 39 | `modules/learning-objectives/surface-service.ts` | `ObjectiveNotFoundError` |
+| 40 | `modules/learning-objectives/origin-service.ts` | `OriginValidationError` |
+| 41 | `modules/learning-objectives/origin-service.ts` | `ObjectiveRevisionNotFoundError` |
+| 42 | `modules/companion-shell/service.ts` | `CompanionStateError` |
+| 43 | `modules/companion-shell/canary-stage.ts` | `CanaryStageError` |
+| 44 | `modules/companion-shell/presence-control.ts` | `PresenceControlError` |
+| 45 | `modules/companion-shell/shell-actions.ts` | `ShellActionError` |
+| 46 | `modules/companion-shell/audit-service.ts` | `CompanionAuditError` |
+| 47 | `modules/note/service.ts` | `RevisionConflictError` |
+| 48 | `modules/note/service.ts` | `NoteNotDeletedError` |
+| 49 | `modules/observability/metrics-schema.ts` | `MetricSchemaError` |
+| 50 | `modules/companion-conversation/delivery-service.ts` | `DeliveryServiceError` |
+| 51 | `modules/companion-conversation/turn-service.ts` | `CompanionConversationError` |
+| 52 | `modules/companion-bridge/context-hydration.ts` | `ContextHydrationError` |
+
+**Worker 端（`workers/ai-worker/`）— 20 个：**
+
+| # | 文件 | 类名 |
+|---|---|---|
+| 1 | `db.ts` | `WorkerWorkspaceTransactionContextError` |
+| 2 | `learning-agent/budget.ts` | `LearningBudgetExhaustedError` |
+| 3 | `learning-agent/runtime.ts` | `LearningEpochMismatchError` |
+| 4 | `learning-agent/roles/assessment-critic.ts` | `AssessmentCriticError` |
+| 5 | `learning-agent/roles/grounded-answer-critic.ts` | `GroundedAnswerCriticError` |
+| 6 | `learning-agent/roles/grounded-tutor.ts` | `GroundedTutorError` |
+| 7 | `learning-agent/policies.ts` | `LearningCommitBlockedError` |
+| 8 | `learning-agent/policies.ts` | `LateResponseAuditError` |
+| 9 | `lib/job-lease.ts` | `JobLeaseLostError` |
+| 10 | `lib/handler-timeout.ts` | `HandlerTimeoutError` |
+| 11 | `lib/source-unit-planner.ts` | `SourcePlanningError` |
+| 12 | `lib/non-retryable-errors.ts` | `AgentOutputError` |
+| 13 | `lib/generation-failure-policy.ts` | `BudgetExhaustedError` |
+| 14 | `lib/generation-failure-policy.ts` | `CoverageViolationError` |
+| 15 | `lib/generation-failure-policy.ts` | `GenerationRunBlockedError` |
+| 16 | `lib/generation-failure-policy.ts` | `ProviderRequestError` |
+| 17 | `lib/governance.ts` | `AIConsentRequiredError` |
+| 18 | `card-generation-v2/providers.ts` | `CardGenerationProviderError` |
+
+**Web 端（`apps/web/`）— 6 个：**
+
+| # | 文件 | 类名 |
+|---|---|---|
+| 1 | `features/card-generation-v2/api-client.ts` | `V2ApiError` |
+| 2 | `features/companion-pet/deliveries/delivery-client.ts` | `DeliveryClientError` |
+| 3 | `features/companion-pet/bootstrap.ts` | `CompanionBootstrapError` |
+| 4 | `features/companion-pet/learning-actions.ts` | `LearningActionClientError` |
+| 5 | `features/companion-pet/journey-live/journey-live-client.ts` | `JourneyClientError` |
+| 6 | `lib/api.ts` | `ApiError` |
+
+> **现状**：全项目共 **76 个**自定义 Error 子类。大部分实现模式完全相同——构造函数设置 `statusCode`、`code`、`message`。没有一个统一的 `DomainError` 基类。第七轮统计为"50+"，实际精确统计后为 76 个。
+>
+> **建议**：P1 — 提取 `DomainError` 基类（含 `statusCode`、`code`、`message`），所有自定义错误继承它。预计可消除约 **350+ 行**重复构造函数代码。比第五轮估计的 100 行和第七轮估计的 250+ 行更为严重。
+
+---
+
+## 七十三、`companion-bridge/context-hydration.ts` 中 `card_set` 恒返回 null 分支
+
+### 73.1 EntityRef `card_set` kind 恒返回 null
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/companion-bridge/context-hydration.ts` |
+|| **位置** | 第 73 行 |
+|| **冗余内容** | `case "card_set": return null;` — V1 卡组表已删除，`card_set` kind 在 `entityLookupKey` 中恒返回 `null` |
+|| **现状** | 注释标注"V1 卡/卡组/要点表已随旧栈退役...card_set 无 V2 等价物 → 不支持（fail soft，不查询已删表）"。该分支永远返回 null，调用方需要对 null 做防御处理 |
+|| **建议** | P2 — 确认是否仍有调用方传入 `card_set` kind 的 EntityRef。若无，可从 `EntityRefV2` 类型中移除 `card_set` kind 和该 case 分支 |
+
+---
+
+## 七十四、`extractAuthCredential` 中 Bearer token 兼容残留
+
+### 74.1 Bearer token 检查恒无结果（Cookie 迁移后）
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/identity/session-auth.ts` |
+|| **位置** | 第 36–37 行 |
+|| **冗余内容** | `extractAuthCredential()` 注释标注"Bearer remains the first-choice credential for backwards compatibility"。函数首先检查 `Authorization: Bearer <token>` 头 |
+|| **现状** | 与 §29.1 中的 `getToken()` 恒返回 null 类似，前端已迁移到 HttpOnly cookie 认证。但 API 端仍保留 Bearer token 检查作为"第一选择凭证"。实际生产中该检查永远不命中 |
+|| **建议** | P2 — 确认是否仍有 API 客户端使用 Bearer token 认证。若已全面迁移到 cookie，移除 Bearer token 检查分支，简化为仅 cookie 认证 |
+
+---
+
+## 七十五、`platform-config-node.ts` 中 Legacy env var 解析残留
+
+### 75.1 `resolveLegacyEnvProvider()` 向后兼容分支
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `packages/shared/src/platform-config-node.ts` |
+|| **位置** | 第 231 行起 |
+|| **冗余内容** | `resolveLegacyEnvProvider()` 函数注释标注"Legacy env var resolution (backward compatibility when no config file exists). Maps capabilities to provider names via AI_PROVIDER_* env vars." |
+|| **现状** | 当 `config/ai-platforms.json` 存在时（生产环境），该函数不会被调用。仅在无配置文件时作为回退路径 |
+|| **建议** | P2 — 确认是否仍有环境不使用 `ai-platforms.json` 配置文件。若所有环境都已使用配置文件，可移除该 legacy 回退路径 |
+
+---
+
+## 七十六、`review/attempt-service.ts` 中 idempotencyKey 向后兼容注释
+
+### 76.1 idempotencyKey unique index 保留作为向后兼容安全网
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/review/attempt-service.ts` |
+|| **位置** | 第 617–620 行、第 760–762 行 |
+|| **冗余内容** | 注释标注"The existing reviewAttempts.idempotencyKey unique index is kept as a secondary safety net for backward compatibility." |
+|| **现状** | idempotencyKey 的 unique index 在 V2 中可能已有替代机制，但旧索引仍保留作为"二级安全网" |
+|| **建议** | P3 — 确认 V2 的幂等机制是否已完全替代。若是，可移除 unique index 和相关注释 |
+
+---
+
+## 七十七、优先级建议（第八轮更新）
+
+| 优先级 | 类别 | 预估清理量 | 风险 |
+|---|---|---|---|
+| **P0 - 立即** | 4.1 RC manifest fill 脚本（已弃用，引用已删除文件） | 127 行 | 低 |
+| **P0 - 立即** | 6.1 无调用的 feature flag 函数（isCardGenerationV1WriterEnabled 等） | ~60 行 | 低 |
+| **P0 - 立即** | 12.2 `void resolveObjAndCard` 抑制的未使用函数（55 行实现） | ~55 行 | 低 |
+| **P0 - 立即** | 16.2 `void v2RunId` 抑制 | 2 行 | 低 |
+| **P1 - 短期** | 71.1–71.2 `isPromptCacheEnabled`/`isCardRepairEnabled` 零调用 flag | ~20 行 | 低 |
+| **P1 - 短期** | 72.1 重复的错误类定义（76 个 extends Error，精确普查） | ~350+ 行 | 中 |
+| **P1 - 短期** | 20.1 `packages/db` 整个镜像包（无 import 消费方） | ~25 个文件 | 中（需确认 drizzle-kit 不依赖） |
+| **P1 - 短期** | 11.1/49.1 sha256Hex 重复定义（25 处，其中 Node 端 22 处） | ~130 行 | 低 |
+| **P1 - 短期** | 12.1 `if (false)` 死分支（8 处） | ~30 行 | 低 |
+| **P1 - 短期** | 22.1 AppShell `/card-sets/` 路由匹配 | 1 行 | 低 |
+| **P1 - 短期** | 26.1–26.5 前端零调用 API 客户端方法（8 个） | ~80 行 | 低 |
+| **P1 - 短期** | 27.1–27.2 `@deprecated` governance 函数（checkAIConsent + enforcePrivacyGovernance） | ~60 行 | 中（需确认替代方已接线） |
+| **P1 - 短期** | 2.1 discrete-v1 调度策略旧版逻辑 | ~120 行 + 测试 | 中（需确认灰度完成） |
+| **P1 - 短期** | 3.1–3.7 V1 退役注释清理 | 注释 | 低 |
+| **P1 - 短期** | 7.1–7.2 Card Set CSS 文件 + DeckCover.tsx | ~1970 行 | 低（已确认零引用） |
+| **P1 - 短期** | 43.1 API 端 DEPRECATED 指标定义（10 个） | ~80 行 | 中（需确认 worker 端覆盖） |
+| **P1 - 短期** | 52.1 `alerts.yml` 引用 DEPRECATED 指标的配置不一致 | 配置修改 | 中 |
+| **P2 - 中期** | 70.1–70.7 新增 `void` 抑制模式（7 处） | ~10 行 | 低 |
+| **P2 - 中期** | 73.1 `card_set` kind 恒返回 null 分支 | ~3 行 | 低（需确认无调用方） |
+| **P2 - 中期** | 74.1 `extractAuthCredential` Bearer 兼容残留 | ~5 行 | 低（需确认无 Bearer 客户端） |
+| **P2 - 中期** | 75.1 `resolveLegacyEnvProvider` 向后兼容回退 | ~30 行 | 中（需确认所有环境用配置文件） |
+| **P2 - 中期** | 11.2/51.1 stableStringify 重复定义（8 处私有副本） | ~70 行 | 低 |
+| **P2 - 中期** | 2.4 首页 Onboarding legacy fallback | ~10 行 | 低 |
+| **P2 - 中期** | 3.2 Learning Runs V1 兼容薄壳 | ~60 行 | 中（需确认前端迁移完成） |
+| **P2 - 中期** | 5.1 Legacy Adapter | ~526 行 + 测试 | 高（需确认数据迁移完成） |
+| **P2 - 中期** | 5.2 Learning Card Library 合并函数 | ~20 行 | 中 |
+| **P2 - 中期** | 14.1 `LegacyRouteResolutionStatus` 退役枚举值 | 类型修改 | 低 |
+| **P2 - 中期** | 14.2 `CardSetRecord`/`CardSetListItem` 退役类型 | 类型修改 | 中 |
+| **P2 - 中期** | 15.1 Origin Migration 已移除分支注释 | 注释 | 低 |
+| **P2 - 中期** | 16.1 Companion Bridge V1 payload 兼容分支 | ~40 行 | 中（需确认客户端升级） |
+| **P2 - 中期** | 21.1 Worker index.ts V1 删除注释 | 注释 | 低 |
+| **P2 - 中期** | 22.2 Focus Layout 注释中的 `/card-sets/[id]` | 注释 | 低 |
+| **P2 - 中期** | 22.3 Learning Card 详情页 `forbidden`/`ambiguous` 错误消息 | ~4 行 | 低 |
+| **P2 - 中期** | 24. Schema 注释中的 V1 引用残留（20+ 处） | 注释 | 低 |
+| **P2 - 中期** | 27.3 `adaptFetchToPublicJsonRequester` TEST-ONLY 适配器 | ~30 行 | 中（需替代 mock 方案） |
+| **P2 - 中期** | 27.4 `LogAICallParams.userId` 废弃字段 | 类型修改 | 低 |
+| **P2 - 中期** | 28.1 Supervisor Agent V1 Grafana dashboard | ~366 行 JSON | 中（需确认指标已退役） |
+| **P2 - 中期** | 29.1 `getToken()` 恒 null 的残留调用方 | ~10 行 | 低 |
+| **P2 - 中期** | 30.1 `setToken()` 恒无效的残留调用方 | ~15 行 | 低 |
+| **P2 - 中期** | 31.1 `registerWithInviteToken`/`registerPersonal` 零调用方法 | ~20 行 | 低 |
+| **P2 - 中期** | 32.1/48.1 `parse*` 辅助函数零消费方（更新：9 个） | ~45 行 | 低 |
+| **P2 - 中期** | 33.1 URLSearchParams 重复构造模式（11 处） | ~50 行 | 低 |
+| **P2 - 中期** | 35.1 `types.ts` V1 遗留类型（8 个零消费方） | ~60 行 | 低 |
+| **P2 - 中期** | 36.1 `normalizeText` 重复定义（3 处） | ~6 行 | 低 |
+| **P2 - 中期** | 37.1 `relativeTime`/`formatRelativeTime` 重复定义 | ~30 行 | 低 |
+| **P2 - 中期** | 38.1 `sendSessionError`/`sendServiceError` 重复模式 | ~20 行 | 低 |
+| **P2 - 中期** | 38.2 `validateSubmissionId`/`validateEventId` 近似重复 | ~20 行 | 低 |
+| **P2 - 中期** | 39.1 CSS 文件 + DeckCover 完全无引用确认 | ~1970 行 | 低 |
+| **P2 - 中期** | 44.1–44.3 Backward-compatibility re-export（3 个） | ~5 行 | 低 |
+| **P2 - 中期** | 45.1–45.2 `void userId` 抑制模式（2 处） | ~4 行 | 低 |
+| **P2 - 中期** | 46.1 `DashScopeProvider` 兼容包装器 | ~40 行 | 中（需迁移测试） |
+| **P2 - 中期** | 47.1 `sanitizeCardOutput` backward-compatible wrapper | ~15 行 | 低 |
+| **P2 - 中期** | 53.1–53.2 Capability-gated 路由 `void req` 抑制（9 处） | ~9 行 | 低 |
+| **P2 - 中期** | 54.1 `resolveFSRSPromotionStatus` 恒返回 `shadow_only` | ~5 行 | 低 |
+| **P2 - 中期** | 55.1 `run-planner.ts` 4 个 void 抑制参数 | ~4 行 | 低 |
+| **P2 - 中期** | 56.1 `run-service.ts` `void run` 抑制（2 处） | ~4 行 | 低 |
+| **P2 - 中期** | 57.1 `learning-action-bridge.ts` `void eventPayload` | ~2 行 | 低 |
+| **P2 - 中期** | 58.1 Desktop legacy IPC 通道命名 | 命名修改 | 低 |
+| **P2 - 中期** | 58.2 Desktop `main-route-path.ts` V1 退役注释 | 注释 | 低 |
+| **P2 - 中期** | 59.1 `parseExposureV2` 零消费方 | ~3 行 | 低 |
+| **P2 - 中期** | 60.1 `MemoryItemV1` 类型别名残留 | 1 行 | 低 |
+| **P2 - 中期** | 61.1 `deterministic-gates.ts` `void answerText` | 1 行 | 低 |
+| **P2 - 中期** | 62.1 `binding-plan-assembler.ts` `void workspaceId` | 1 行 | 低 |
+| **P2 - 中期** | 63.1 `assessment-service.ts` `void normalizedAnswer`/`evidenceHash` | 2 行 | 低 |
+| **P2 - 中期** | 64.1 `voice-routes.ts` `void language` | 1 行 | 低 |
+| **P2 - 中期** | 65.1 `export-service.ts` `void q` 空循环 | ~3 行 | 低 |
+| **P2 - 中期** | 66.1 `edge-tts.ts` `void err`（2 处） | ~2 行 | 低 |
+| **P3 - 长期** | 76.1 idempotencyKey unique index 向后兼容残留 | DB index | 低 |
+| **P3 - 长期** | 5.3 Understanding V1 vs V3 reader | 整个模块 | 高（需评估路由调用方） |
+| **P3 - 长期** | 8. 备份快照目录 | 整个目录 | 低 |
+| **P3 - 长期** | 13.1 501 占位路由（Topology V3 deltas） | 5 行 | 低 |
+| **P3 - 长期** | 14.3 `LearningCardRecord` V1 字段 | 类型修改 | 中 |
+| **P3 - 长期** | 17.1–17.2 Review Service V1 路径 | ~30 行 | 高（需确认历史数据） |
+| **P3 - 长期** | 18.1 Shadow Translator | 149 行 | 高（需确认 cutover 完成） |
+| **P3 - 长期** | 20.2 `legacySessionId`/`legacyEpisodeId`/`legacyOrdinal` 列 | 3 列 + 1 索引 | 高（需确认迁移完成） |
+| **P3 - 长期** | 20.3 `legacy_unrubriced` 枚举值 | 枚举修改 | 中 |
+| **P3 - 长期** | 23.1 `deprecatedProgress` 测试断言 | 1 行 | 低 |
+| **P3 - 长期** | 28.2 Migration SQL 中的 V1 表定义 | 历史文件 | 低（仅在 squash 时清理） |
+| **P3 - 长期** | 37.2 `formatDate` 重复定义（2 处） | ~10 行 | 低 |
+| **P3 - 长期** | 42.1 `ReviewSchedule.subjectType` V1 枚举值 | 类型修改 | 中 |
+| **P3 - 长期** | 67.1 `companion-conversation-contracts.test.ts` `void _o`/`void _v2` | 2 行 | 低 |
+| **P3 - 长期** | 68.1 `understanding-projection-postgres.integration.ts` `void envelopeRows`/`void projectionRows` | 2 行 | 低 |
+| **P3 - 长期** | 69.1 `card-generation-v2-activation-service.test.ts` `void _st` | 1 行 | 低 |
+
+> 注：本轮（第八轮）审计新增了 §70–§76 共 7 个小节。主要发现：
+> 1. **新 `void` 抑制模式**（§70.1–70.7）：全项目普查补充了第七轮遗漏的 7 处 `void` 抑制，涵盖测试文件（`relation-governance.test.ts`、`v06-export-import-coverage.test.ts`、`agent-stream-ui-contract.test.ts`、`presence-control.test.ts`）、Desktop 语音模块（`asr-manager.ts`）、前端组件（`MarkdownPreview.tsx`）、worker 集成测试（`card-generation-v2-postgres.integration.ts`）。
+> 2. **零调用 feature flag**（§71.1–71.2）：补充了 `isPromptCacheEnabled()` 和 `isCardRepairEnabled()` 两个零调用 flag 函数，第六轮审计遗漏。
+> 3. **错误类精确普查**（§72.1）：全项目精确普查后确认共 76 个自定义 Error 子类（API 端 52 个、Worker 端 18 个、Web 端 6 个），比第七轮统计的"50+"更为精确。重复代码量预估从 250+ 行修正为 350+ 行。
+> 4. **向后兼容残留分支**（§73–§76）：发现 `card_set` kind 恒返回 null 分支、`extractAuthCredential` 中 Bearer token 兼容残留、`resolveLegacyEnvProvider` 向后兼容回退路径、idempotencyKey unique index 向后兼容安全网注释。
+>
+> 本轮冗余风险等级：P1 项 2 个（零调用 flag + 错误类重复），P2 项 4 个（向后兼容残留分支），P3 项 7 个（void 抑制 + DB index 残留）。总预估可清理代码量约 400+ 行（不含注释清理）。
+
+---
+
+## 七十八、V1 遗留恒零字段（StatsOverview）
+
+### 78.1 `StatsOverview` 中三个恒返回 0 的 V1 遗留字段
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/stats/service.ts` |
+|| **位置** | 第 12–13 行（接口定义）、第 110–113 行（空工作区分支）、第 177–180 行（正常返回分支） |
+|| **冗余字段** | `misunderstandingCount`、`unclearCount`、`pendingEvidenceCount` |
+|| **现状** | 这三个字段是 V1 `validation_events` 表的统计维度。注释标注 "V1 validation 统计已移除（V1 validation_events.cardId 不再可用）"。V1 表已删除后，这三个字段恒返回 `0`，不再有实际数据来源 |
+|| **前端类型** | `apps/web/lib/api-types.ts` 第 826–828 行的 `StatsOverview` 接口仍保留这三个字段定义 |
+|| **建议** | P2 — 确认前端是否仍消费这三个字段。若前端已忽略 0 值，可从 `StatsOverview` 接口中移除，同时清理 `service.ts` 中的硬编码 0 返回 |
+
+---
+
+## 七十九、搜索服务中的 V1 遗留类型字段
+
+### 79.1 `SearchResult` 中三个恒返回 null 的 V1 遗留字段
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/search/service.ts` |
+|| **位置** | 第 22–24 行（接口定义）、第 305–309 行（返回值） |
+|| **冗余字段** | `cardSetId`、`scope`、`ordinal` |
+|| **现状** | 注释标注 "cardSetId/scope/ordinal 是 V1 card/card_set 的遗留字段，已不再产生新投影。为保持 SearchResult 接口兼容性（前端可能读取），仍输出 null"。这三个字段恒返回 `null` |
+|| **前端类型** | `apps/web/lib/api-types.ts` 第 793–795 行的 `SearchResult` 接口仍保留这三个可选字段 |
+|| **建议** | P2 — 确认前端是否仍消费这三个字段。若已不使用，可从 `SearchResult` 接口中移除，同时清理 `service.ts` 中的 `null` 返回 |
+
+### 79.2 `SearchReindexResult.indexed` 中三个恒返回 0 的 V1 遗留字段
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/search/service.ts` |
+|| **位置** | 第 329–331 行（接口定义）、第 624–626 行（返回值）、第 660 行（错误返回值） |
+|| **冗余字段** | `indexed.cardSet`、`indexed.card`、`indexed.evidence` |
+|| **现状** | V1 卡片/卡片集/evidence 已下线，reindex 不再投影这些类型。这三个计数字段恒返回 `0` |
+|| **建议** | P2 — 从 `SearchReindexResult.indexed` 接口中移除这三个字段，同时清理 `service.ts` 中的 0 返回 |
+
+### 79.3 `SearchDriftResult` 中 V1 遗留类型字段
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/search/service.ts` |
+|| **位置** | 第 680–694 行（`expected`/`actual` 接口）、第 854–867 行（返回值）、第 709 行（`capped` 接口） |
+|| **冗余字段** | `expected.cardSet`、`expected.card`、`expected.evidence`、`actual.cardSet`、`actual.card`、`actual.evidence`、`capped.cardSet`、`capped.card`、`capped.evidence` |
+|| **现状** | V1 卡片/卡片集/evidence 已下线，drift 不再检测这些类型。`expected` 和 `actual` 中这三个字段恒返回 `0`，`capped` 中恒返回 `false` |
+|| **前端类型** | `apps/web/lib/api-types.ts` 第 799–812 行的 `SearchDriftResult` 接口仍保留这些字段 |
+|| **建议** | P2 — 从 `SearchDriftResult` 接口中移除 V1 遗留字段，简化类型定义 |
+
+### 79.4 搜索路由中 V1 枚举值残留
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/search/routes.ts` |
+|| **位置** | 第 11 行 |
+|| **冗余内容** | `type: z.enum(["note", "card_set", "card", "source", "evidence", "objective"]).optional()` — `card_set`、`card`、`evidence` 三个枚举值是 V1 类型，`consumableSearchDocumentPredicate` 已排除这些类型的搜索结果。用户传入这些 type 值将永远返回空结果 |
+|| **建议** | P1 — 从 `searchQuerySchema` 的 `type` 枚举中移除 `card_set`、`card`、`evidence`，只保留 `note`、`source`、`objective` |
+
+---
+
+## 八十、前端理解图 V1 节点类型残留
+
+### 80.1 `GRAPH_NODE_TYPES` 中的 V1 节点类型
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/web/lib/understanding-graph.ts` |
+|| **位置** | 第 8 行 |
+|| **冗余内容** | `export const GRAPH_NODE_TYPES = ["source", "note", "card", "key_point", "evidence"] as const;` — `card` 和 `key_point` 是 V1 节点类型。V3 topology（`topology-repository.ts`）只产生 `source`、`note`、`objective`、`evidence` 节点，不再产生 `card` 或 `key_point` 节点 |
+|| **现状** | `GraphNode` 接口（第 14–30 行）中的 `evidenceCoverage`、`hardEvidenceCount`、`softEvidenceCount`、`misunderstandingCount`、`lastValidatedAt`、`nextReviewAt` 等字段也是 V1 卡片统计维度，在 V3 topology 中已不再产生 |
+|| **建议** | P2 — 更新 `GRAPH_NODE_TYPES` 移除 `card` 和 `key_point`，添加 `objective`。同时评估 `GraphNode` 接口中 V1 遗留字段是否可移除 |
+
+---
+
+## 八十一、`exposure-service.ts` 和 `projection-checkpoint.ts` 新增 `sha256Hex` 重复定义
+
+### 81.1 `exposure-service.ts` 中的 `sha256Hex` 重复定义
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/learning-sessions/exposure-service.ts` |
+|| **位置** | 第 716 行 |
+|| **可见性** | `private` |
+|| **现状** | 该函数是 `sha256Hex` 的私有副本，与 `packages/shared/src/content-hash.ts` 的权威实现逻辑完全相同。第八轮审计遗漏了此文件 |
+|| **建议** | P1 — 替换为从 `@ailearn/shared/content-hash` 导入 |
+
+### 81.2 `projection-checkpoint.ts` 中的 `sha256Hex` 重复定义
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/understanding/projection-checkpoint.ts` |
+|| **位置** | 第 31 行 |
+|| **可见性** | `private` |
+|| **现状** | 该函数是 `sha256Hex` 的私有副本。第八轮审计遗漏了此文件（属于 V1 understanding 模块） |
+|| **建议** | P1 — 替换为从 `@ailearn/shared/content-hash` 导入，或随 V1 understanding 模块一并移除（参见 §5.3） |
+
+---
+
+## 八十二、`origin-service.ts` 中的 legacy 迁移兼容残留
+
+### 82.1 `legacy_migrated` origin kind 和 `legacyCardId`/`legacyKeyPointId` 字段
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/learning-objectives/origin-service.ts` |
+|| **位置** | 第 37–39 行（接口定义）、第 81–103 行（创建逻辑）、第 183 行（读取映射）、第 192–195 行（wire 映射）、第 308–309 行（更新映射） |
+|| **冗余内容** | `OriginRecordV2` 接口中的 `legacyCardId?: string | null`、`legacyKeyPointId?: string | null`、`integrity?: "verified" | "legacy_unreviewed"` 字段。`originKind === "legacy_migrated"` 分支处理 V1 迁移来的 origin，要求携带 `legacyKeyPointId` |
+|| **现状** | V1 卡表已删除（0176 迁移），`legacy_migrated` origin 不应再新增。但代码仍保留完整的创建、读取和更新逻辑 |
+|| **建议** | P2 — 确认数据库中是否仍有 `legacy_migrated` origin。若迁移已完成，可移除 `legacy_migrated` 分支和 `legacyCardId`/`legacyKeyPointId` 字段 |
+
+---
+
+## 八十三、`consumer-eligibility.ts` 中的 `validation` subjectType 分支残留
+
+### 83.1 `validation` subjectType SQL 谓词分支
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/review/consumer-eligibility.ts` |
+|| **位置** | 第 11–25 行 |
+|| **冗余内容** | SQL 谓词仍保留 `subjectType = 'validation'` 分支（检查 `validation_events` 表存在性）。注释标注 "V2 only — legacy card/card_set references removed"，但 `validation` 分支仍保留 |
+|| **现状** | 与 §17.2 相同的问题，但本文件在最近修改中新增了注释说明 "仍接受 subjectType='objective' 以兼容可能存在的早期数据"。`validation` 分支和 `objective` 兼容分支共存 |
+|| **建议** | P3 — 确认 `validation` subjectType 是否仍有消费方。若无，可移除该分支。同时确认 `objective` 兼容分支是否可移除 |
+
+---
+
+## 八十四、`normalizeText` 重复定义新增副本
+
+### 84.1 `scene-safety.ts` 中的 `normalizeText` 重复定义
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/learning-sessions/scene-safety.ts` |
+|| **位置** | 第 743 行 |
+|| **可见性** | `private` |
+|| **现状** | 与 `workers/ai-worker/src/lib/text-similarity.ts`（第 28 行）和 `packages/shared/src/fingerprint.ts`（第 76 行）的 `normalizeText` 逻辑相同。第六轮审计已记录 3 处重复（§36.1），但遗漏了 `scene-safety.ts` 中的副本 |
+|| **建议** | P2 — 统一到 `@ailearn/shared` 的公共实现 |
+
+---
+
+## 八十五、`learning-action-bridge.ts` 中的 V1 payload 兼容分支
+
+### 85.1 `start_learning_run` V1 payload 分支
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/companion-conversation/learning-action-bridge.ts` |
+|| **位置** | 第 429–450 行 |
+|| **冗余内容** | 当 `start.objectiveId && start.originV2` 为 false 时，回退到 V1 `start_learning_run` payload（使用 `cardId`/`keyPointId`）。注释标注 "legacy V1 候选（无 objectiveId）沿用 V1 payload" |
+|| **现状** | V1 卡表已删除，`learningRunStartCandidate` 中的 `cardId`/`keyPointId` 实际是 V2 objectiveId 的 alias。V1 payload 分支仍保留完整逻辑 |
+|| **建议** | P2 — 确认是否有未升级客户端仍发送 V1 候选。若所有客户端已使用 V2，可移除 V1 payload 分支 |
+
+---
+
+## 八十六、`understanding/service.ts` V1 reader 仍在使用
+
+### 86.1 V1 understanding reader 仍被调用
+
+|| 项目 | 详情 |
+||---|---|
+|| **文件** | `apps/api/src/modules/understanding/service.ts` |
+|| **位置** | 全文件 |
+|| **现状** | V3 reader（`topology-repository.ts`）已实现并接线，但 V1 reader（使用 `learningCardsV2` + `understandingEvents` 聚合）仍存在。§5.3 已记录此问题，但确认 V1 reader 仍被路由调用 |
+|| **冗余内容** | `misunderstandingCount`（第 295 行）等 V1 统计字段仍在 V1 reader 中产生，但 V3 topology 不再产生这些字段 |
+|| **建议** | P3 — 评估 V1 reader 的路由调用方是否可迁移到 V3。若可迁移，移除 V1 reader |
+
+---
+
+## 八十七、优先级建议（第九轮更新）
+
+|| 优先级 | 类别 | 预估清理量 | 风险 |
+||---|---|---|---|
+|| **P0 - 立即** | 4.1 RC manifest fill 脚本（已弃用，引用已删除文件） | 127 行 | 低 |
+|| **P0 - 立即** | 6.1 无调用的 feature flag 函数（isCardGenerationV1WriterEnabled 等） | ~60 行 | 低 |
+|| **P0 - 立即** | 12.2 `void resolveObjAndCard` 抑制的未使用函数（55 行实现） | ~55 行 | 低 |
+|| **P0 - 立即** | 16.2 `void v2RunId` 抑制 | 2 行 | 低 |
+|| **P1 - 短期** | 79.4 搜索路由 V1 枚举值残留（`card_set`/`card`/`evidence`） | 1 行 | 低 |
+|| **P1 - 短期** | 81.1–81.2 新增 `sha256Hex` 重复定义（2 处） | ~12 行 | 低 |
+|| **P1 - 短期** | 71.1–71.2 `isPromptCacheEnabled`/`isCardRepairEnabled` 零调用 flag | ~20 行 | 低 |
+|| **P1 - 短期** | 72.1 重复的错误类定义（76 个 extends Error，精确普查） | ~350+ 行 | 中 |
+|| **P1 - 短期** | 20.1 `packages/db` 整个镜像包（无 import 消费方） | ~25 个文件 | 中（需确认 drizzle-kit 不依赖） |
+|| **P1 - 短期** | 11.1/49.1/81.1–81.2 sha256Hex 重复定义（更新：27 处，新增 2 处） | ~140 行 | 低 |
+|| **P1 - 短期** | 12.1 `if (false)` 死分支（8 处） | ~30 行 | 低 |
+|| **P1 - 短期** | 22.1 AppShell `/card-sets/` 路由匹配 | 1 行 | 低 |
+|| **P1 - 短期** | 26.1–26.5 前端零调用 API 客户端方法（8 个） | ~80 行 | 低 |
+|| **P1 - 短期** | 27.1–27.2 `@deprecated` governance 函数（checkAIConsent + enforcePrivacyGovernance） | ~60 行 | 中（需确认替代方已接线） |
+|| **P1 - 短期** | 2.1 discrete-v1 调度策略旧版逻辑 | ~120 行 + 测试 | 中（需确认灰度完成） |
+|| **P1 - 短期** | 3.1–3.7 V1 退役注释清理 | 注释 | 低 |
+|| **P1 - 短期** | 7.1–7.2 Card Set CSS 文件 + DeckCover.tsx | ~1970 行 | 低（已确认零引用） |
+|| **P1 - 短期** | 43.1 API 端 DEPRECATED 指标定义（10 个） | ~80 行 | 中（需确认 worker 端覆盖） |
+|| **P1 - 短期** | 52.1 `alerts.yml` 引用 DEPRECATED 指标的配置不一致 | 配置修改 | 中 |
+|| **P2 - 中期** | 78.1 `StatsOverview` V1 遗留恒零字段（3 个） | ~10 行 | 低 |
+|| **P2 - 中期** | 79.1–79.3 搜索服务 V1 遗留类型字段（`SearchResult`/`SearchReindexResult`/`SearchDriftResult`） | ~30 行 | 低 |
+|| **P2 - 中期** | 80.1 前端理解图 V1 节点类型残留 | ~5 行 | 低 |
+|| **P2 - 中期** | 82.1 `origin-service.ts` legacy 迁移兼容残留 | ~20 行 | 中（需确认数据迁移完成） |
+|| **P2 - 中期** | 84.1 `normalizeText` 新增副本（`scene-safety.ts`） | ~3 行 | 低 |
+|| **P2 - 中期** | 85.1 `learning-action-bridge.ts` V1 payload 兼容分支 | ~20 行 | 中（需确认客户端升级） |
+|| **P2 - 中期** | 70.1–70.7 新增 `void` 抑制模式（7 处） | ~10 行 | 低 |
+|| **P2 - 中期** | 73.1 `card_set` kind 恒返回 null 分支 | ~3 行 | 低（需确认无调用方） |
+|| **P2 - 中期** | 74.1 `extractAuthCredential` Bearer 兼容残留 | ~5 行 | 低（需确认无 Bearer 客户端） |
+|| **P2 - 中期** | 75.1 `resolveLegacyEnvProvider` 向后兼容回退 | ~30 行 | 中（需确认所有环境用配置文件） |
+|| **P2 - 中期** | 11.2/51.1 stableStringify 重复定义（8 处私有副本） | ~70 行 | 低 |
+|| **P2 - 中期** | 2.4 首页 Onboarding legacy fallback | ~10 行 | 低 |
+|| **P2 - 中期** | 3.2 Learning Runs V1 兼容薄壳 | ~60 行 | 中（需确认前端迁移完成） |
+|| **P2 - 中期** | 5.1 Legacy Adapter | ~526 行 + 测试 | 高（需确认数据迁移完成） |
+|| **P2 - 中期** | 5.2 Learning Card Library 合并函数 | ~20 行 | 中 |
+|| **P2 - 中期** | 14.1 `LegacyRouteResolutionStatus` 退役枚举值 | 类型修改 | 低 |
+|| **P2 - 中期** | 14.2 `CardSetRecord`/`CardSetListItem` 退役类型 | 类型修改 | 中 |
+|| **P2 - 中期** | 15.1 Origin Migration 已移除分支注释 | 注释 | 低 |
+|| **P2 - 中期** | 16.1 Companion Bridge V1 payload 兼容分支 | ~40 行 | 中（需确认客户端升级） |
+|| **P2 - 中期** | 21.1 Worker index.ts V1 删除注释 | 注释 | 低 |
+|| **P2 - 中期** | 22.2 Focus Layout 注释中的 `/card-sets/[id]` | 注释 | 低 |
+|| **P2 - 中期** | 22.3 Learning Card 详情页 `forbidden`/`ambiguous` 错误消息 | ~4 行 | 低 |
+|| **P2 - 中期** | 24. Schema 注释中的 V1 引用残留（20+ 处） | 注释 | 低 |
+|| **P2 - 中期** | 27.3 `adaptFetchToPublicJsonRequester` TEST-ONLY 适配器 | ~30 行 | 中（需替代 mock 方案） |
+|| **P2 - 中期** | 27.4 `LogAICallParams.userId` 废弃字段 | 类型修改 | 低 |
+|| **P2 - 中期** | 28.1 Supervisor Agent V1 Grafana dashboard | ~366 行 JSON | 中（需确认指标已退役） |
+|| **P2 - 中期** | 29.1 `getToken()` 恒 null 的残留调用方 | ~10 行 | 低 |
+|| **P2 - 中期** | 30.1 `setToken()` 恒无效的残留调用方 | ~15 行 | 低 |
+|| **P2 - 中期** | 31.1 `registerWithInviteToken`/`registerPersonal` 零调用方法 | ~20 行 | 低 |
+|| **P2 - 中期** | 32.1/48.1 `parse*` 辅助函数零消费方（更新：9 个） | ~45 行 | 低 |
+|| **P2 - 中期** | 33.1 URLSearchParams 重复构造模式（11 处） | ~50 行 | 低 |
+|| **P2 - 中期** | 35.1 `types.ts` V1 遗留类型（8 个零消费方） | ~60 行 | 低 |
+|| **P2 - 中期** | 36.1/84.1 `normalizeText` 重复定义（更新：4 处） | ~8 行 | 低 |
+|| **P2 - 中期** | 37.1 `relativeTime`/`formatRelativeTime` 重复定义 | ~30 行 | 低 |
+|| **P2 - 中期** | 38.1 `sendSessionError`/`sendServiceError` 重复模式 | ~20 行 | 低 |
+|| **P2 - 中期** | 38.2 `validateSubmissionId`/`validateEventId` 近似重复 | ~20 行 | 低 |
+|| **P2 - 中期** | 39.1 CSS 文件 + DeckCover 完全无引用确认 | ~1970 行 | 低 |
+|| **P2 - 中期** | 44.1–44.3 Backward-compatibility re-export（3 个） | ~5 行 | 低 |
+|| **P2 - 中期** | 45.1–45.2 `void userId` 抑制模式（2 处） | ~4 行 | 低 |
+|| **P2 - 中期** | 46.1 `DashScopeProvider` 兼容包装器 | ~40 行 | 中（需迁移测试） |
+|| **P2 - 中期** | 47.1 `sanitizeCardOutput` backward-compatible wrapper | ~15 行 | 低 |
+|| **P2 - 中期** | 53.1–53.2 Capability-gated 路由 `void req` 抑制（9 处） | ~9 行 | 低 |
+|| **P2 - 中期** | 54.1 `resolveFSRSPromotionStatus` 恒返回 `shadow_only` | ~5 行 | 低 |
+|| **P2 - 中期** | 55.1 `run-planner.ts` 4 个 void 抑制参数 | ~4 行 | 低 |
+|| **P2 - 中期** | 56.1 `run-service.ts` `void run` 抑制（2 处） | ~4 行 | 低 |
+|| **P2 - 中期** | 57.1 `learning-action-bridge.ts` `void eventPayload` | ~2 行 | 低 |
+|| **P2 - 中期** | 58.1 Desktop legacy IPC 通道命名 | 命名修改 | 低 |
+|| **P2 - 中期** | 58.2 Desktop `main-route-path.ts` V1 退役注释 | 注释 | 低 |
+|| **P2 - 中期** | 59.1 `parseExposureV2` 零消费方 | ~3 行 | 低 |
+|| **P2 - 中期** | 60.1 `MemoryItemV1` 类型别名残留 | 1 行 | 低 |
+|| **P2 - 中期** | 61.1 `deterministic-gates.ts` `void answerText` | 1 行 | 低 |
+|| **P2 - 中期** | 62.1 `binding-plan-assembler.ts` `void workspaceId` | 1 行 | 低 |
+|| **P2 - 中期** | 63.1 `assessment-service.ts` `void normalizedAnswer`/`evidenceHash` | 2 行 | 低 |
+|| **P2 - 中期** | 64.1 `voice-routes.ts` `void language` | 1 行 | 低 |
+|| **P2 - 中期** | 65.1 `export-service.ts` `void q` 空循环 | ~3 行 | 低 |
+|| **P2 - 中期** | 66.1 `edge-tts.ts` `void err`（2 处） | ~2 行 | 低 |
+|| **P3 - 长期** | 83.1 `consumer-eligibility.ts` `validation`/`objective` subjectType 分支 | ~15 行 | 中（需确认消费方） |
+|| **P3 - 长期** | 86.1 V1 understanding reader 仍被调用 | 整个模块 | 高（需评估路由调用方） |
+|| **P3 - 长期** | 76.1 idempotencyKey unique index 向后兼容残留 | DB index | 低 |
+|| **P3 - 长期** | 5.3 Understanding V1 vs V3 reader | 整个模块 | 高（需评估路由调用方） |
+|| **P3 - 长期** | 8. 备份快照目录 | 整个目录 | 低 |
+|| **P3 - 长期** | 13.1 501 占位路由（Topology V3 deltas） | 5 行 | 低 |
+|| **P3 - 长期** | 14.3 `LearningCardRecord` V1 字段 | 类型修改 | 中 |
+|| **P3 - 长期** | 17.1–17.2 Review Service V1 路径 | ~30 行 | 高（需确认历史数据） |
+|| **P3 - 长期** | 18.1 Shadow Translator | 149 行 | 高（需确认 cutover 完成） |
+|| **P3 - 长期** | 20.2 `legacySessionId`/`legacyEpisodeId`/`legacyOrdinal` 列 | 3 列 + 1 索引 | 高（需确认迁移完成） |
+|| **P3 - 长期** | 20.3 `legacy_unrubriced` 枚举值 | 枚举修改 | 中 |
+|| **P3 - 长期** | 23.1 `deprecatedProgress` 测试断言 | 1 行 | 低 |
+|| **P3 - 长期** | 28.2 Migration SQL 中的 V1 表定义 | 历史文件 | 低（仅在 squash 时清理） |
+|| **P3 - 长期** | 37.2 `formatDate` 重复定义（2 处） | ~10 行 | 低 |
+|| **P3 - 长期** | 42.1 `ReviewSchedule.subjectType` V1 枚举值 | 类型修改 | 中 |
+|| **P3 - 长期** | 67.1 `companion-conversation-contracts.test.ts` `void _o`/`void _v2` | 2 行 | 低 |
+|| **P3 - 长期** | 68.1 `understanding-projection-postgres.integration.ts` `void envelopeRows`/`void projectionRows` | 2 行 | 低 |
+|| **P3 - 长期** | 69.1 `card-generation-v2-activation-service.test.ts` `void _st` | 1 行 | 低 |
+
+> 注：本轮（第九轮）审计新增了 §78–§86 共 9 个小节。主要发现：
+> 1. **V1 遗留恒零/恒 null 字段**（§78.1、§79.1–79.3）：`StatsOverview` 中 3 个恒返回 0 的 V1 统计字段（`misunderstandingCount`/`unclearCount`/`pendingEvidenceCount`）、`SearchResult` 中 3 个恒返回 null 的 V1 字段（`cardSetId`/`scope`/`ordinal`）、`SearchReindexResult` 和 `SearchDriftResult` 中 V1 类型计数字段恒返回 0/false。这些字段在 V1 表删除后已无数据来源，但仍保留在接口定义和返回值中。
+> 2. **搜索路由 V1 枚举值残留**（§79.4）：搜索路由的 `type` 参数仍接受 `card_set`/`card`/`evidence` 三个 V1 类型枚举值，但 `consumableSearchDocumentPredicate` 已排除这些类型，用户传入将永远返回空结果。
+> 3. **前端理解图 V1 节点类型**（§80.1）：`GRAPH_NODE_TYPES` 仍包含 `card` 和 `key_point` 两个 V1 节点类型，但 V3 topology 只产生 `objective` 节点。
+> 4. **新增 `sha256Hex` 重复定义**（§81.1–81.2）：`exposure-service.ts`（第 716 行）和 `projection-checkpoint.ts`（第 31 行）中的 `sha256Hex` 私有副本在第八轮审计中被遗漏。
+> 5. **`normalizeText` 新增副本**（§84.1）：`scene-safety.ts`（第 743 行）中的 `normalizeText` 私有副本在第六轮审计中被遗漏。
+> 6. **legacy 迁移兼容残留**（§82.1）：`origin-service.ts` 中 `legacy_migrated` origin kind 和 `legacyCardId`/`legacyKeyPointId` 字段的完整创建/读取/更新逻辑仍保留。
+> 7. **V1 payload 兼容分支**（§85.1）：`learning-action-bridge.ts` 中 V1 `start_learning_run` payload 分支仍保留。
+> 8. **V1 understanding reader 仍在使用**（§86.1）：确认 V1 reader 仍被路由调用，且仍产生 V1 统计字段。
+>
+> 本轮冗余风险等级：P1 项 2 个（搜索路由 V1 枚举 + 新增 sha256Hex 重复），P2 项 6 个（V1 遗留字段 + legacy 兼容残留），P3 项 2 个（consumer-eligibility 分支 + V1 reader）。总预估新增可清理代码量约 100+ 行（不含注释清理）。

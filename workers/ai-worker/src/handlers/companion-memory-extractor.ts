@@ -204,7 +204,8 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
     return;
   }
 
-  const candidates = parseResult.data.candidates.filter((c) => c.confidence >= 0.6);
+  // §9.1：只有置信度 > 0.6 才生成候选（严格大于，不含等于）。
+  const candidates = parseResult.data.candidates.filter((c) => c.confidence > 0.6);
   if (candidates.length === 0) {
     // 2026-08-16（溯源）：候选被过滤/为空时留痕——区分"LLM 没提取到"与
     // "提取到但置信不足"，便于排查记忆链路。

@@ -168,9 +168,13 @@ async function computeFreshness(
     .from(notes)
     .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds as string[])));
   const currentByNote = new Map(noteRows.map((n) => [n.id, n.currentVersionId]));
+  // 修复：origin.noteVersionId 为 null 时（手动迁移/早期数据），
+  // 无法做版本比较，不应误判为 source_outdated。只有当 origin 有明确
+  // noteVersionId 且与当前版本不一致时才标记 outdated。
   const outdated = noteOrigins.some(
     (o) =>
       o.kind === "note" &&
+      o.noteVersionId !== null &&
       currentByNote.get(o.noteId) !== null &&
       currentByNote.get(o.noteId) !== undefined &&
       currentByNote.get(o.noteId) !== o.noteVersionId,
@@ -624,6 +628,9 @@ async function batchAssembleObjectiveSurfacesV3(
   }
 
   // 7. 批量查 active runs（通过 origin->>'keyPointId' JSON 路径查询）
+  // 安全修复：不在 SQL 中用 sql.raw 拼接 objectiveIds（SQL 注入风险）。
+  // 改为按 workspace/user/phase 查活跃 runs，在内存中按 objectiveId 过滤。
+  const objectiveIdSet = new Set(objectiveIds);
   const runRows = objectiveIds.length > 0
     ? await tx
         .select({
@@ -636,7 +643,6 @@ async function batchAssembleObjectiveSurfacesV3(
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
-          sql`${learningRuns.origin}->>'keyPointId' = ANY(${sql.raw(`ARRAY[${objectiveIds.map((id) => `'${id}'`).join(",")}]::text[]`)})`,
           inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
         ))
         .orderBy(desc(learningRuns.createdAt))
@@ -645,7 +651,7 @@ async function batchAssembleObjectiveSurfacesV3(
   for (const run of runRows) {
     const origin = run.origin as Record<string, unknown> | null;
     const keyPointId = origin?.keyPointId as string | undefined;
-    if (keyPointId && !runByObjective.has(keyPointId)) {
+    if (keyPointId && objectiveIdSet.has(keyPointId) && !runByObjective.has(keyPointId)) {
       runByObjective.set(keyPointId, { runId: run.runId, phase: run.phase });
     }
   }
@@ -810,6 +816,8 @@ async function batchAssembleObjectiveSurfacesV3(
     } else {
       const outdated = noteOrigins.some((o) => {
         if (o.kind !== "note") return false;
+        // 修复：origin.noteVersionId 为 null 时不参与版本比较（同 computeFreshness）。
+        if (o.noteVersionId === null) return false;
         const noteRow = noteById.get(o.noteId);
         return noteRow && noteRow.currentVersionId !== null
           && noteRow.currentVersionId !== undefined

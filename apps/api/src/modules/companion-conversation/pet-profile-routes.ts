@@ -28,6 +28,8 @@ function isPetProfileEnabled(): boolean {
 }
 
 const petProfileBodySchema = z.object({
+  // §12.1.3：revision 用于 CAS 乐观锁，防止并发覆盖。
+  revision: z.number().int().positive().optional(),
   presetId: z.string().min(1).max(80).nullable().optional(),
   name: z.string().min(1).max(60),
   personalityTags: z.array(z.string().min(1).max(20)).min(1).max(10),
@@ -78,9 +80,32 @@ export async function petProfileRoutes(app: FastifyInstance) {
       const body = petProfileBodySchema.safeParse(req.body ?? {});
       if (!body.success) throw app.httpErrors.badRequest("pet profile body 非法");
       const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
-      const profile = await withWorkspaceTransaction(scope, (tx) =>
-        upsertPetProfile(tx, scope, body.data),
-      );
+      // §12.1.3：CAS 乐观锁——检查与写入必须在同一事务内，防止 TOCTOU 竞态。
+      // 之前用两个独立事务（先 getPetProfile 校验，再 upsertPetProfile 写入），
+      // 两个事务之间的窗口期允许并发请求绕过 CAS 检查导致覆盖。
+      let casConflict = false;
+      let conflictRevision = 0;
+      let profile: Awaited<ReturnType<typeof upsertPetProfile>> | null = null;
+      try {
+        profile = await withWorkspaceTransaction(scope, async (tx) => {
+          const existing = await getPetProfile(tx, scope);
+          if (existing && body.data.revision !== undefined && body.data.revision !== existing.revision) {
+            casConflict = true;
+            conflictRevision = existing.revision;
+            return null;
+          }
+          return upsertPetProfile(tx, scope, body.data);
+        });
+      } catch {
+        throw app.httpErrors.internalServerError("pet profile upsert failed");
+      }
+      if (casConflict) {
+        return reply.code(409).send({
+          error: "PROFILE_CAS_CONFLICT",
+          message: "人格档案已被修改，请刷新后重试",
+          currentRevision: conflictRevision,
+        });
+      }
       // §9.9：记录人格变更指标
       try {
         companionPetProfileChangedTotal.inc();

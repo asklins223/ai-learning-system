@@ -205,7 +205,8 @@
 
 .search-filter-group {
   display: inline-grid;
-  grid-template-columns: repeat(5, minmax(54px, auto));
+  /* Plan 23 CS-03：card/evidence 退役，筛选项从 5 减到 4。 */
+  grid-template-columns: repeat(4, minmax(54px, auto));
   gap: 3px;
   border: 1px solid var(--color-border);
   border-radius: 11px;
@@ -325,7 +326,8 @@
 .search-scope-grid {
   display: grid;
   min-width: 0;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* Plan 23 CS-03：card/evidence 退役，发现区从 4 列减到 3 列。 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -354,9 +356,9 @@
     transform var(--motion-fast) var(--ease-standard);
 }
 
-.search-scope-grid button[data-type="card"] {
-  --search-type-accent: var(--color-success-text);
-  --search-type-soft: var(--color-success-soft);
+.search-scope-grid button[data-type="note"] {
+  --search-type-accent: var(--color-evidence-text);
+  --search-type-soft: var(--color-evidence-soft);
 }
 
 .search-scope-grid button[data-type="source"] {
@@ -364,9 +366,9 @@
   --search-type-soft: var(--color-warning-soft);
 }
 
-.search-scope-grid button[data-type="evidence"] {
-  --search-type-accent: var(--color-evidence-text);
-  --search-type-soft: var(--color-evidence-soft);
+.search-scope-grid button[data-type="objective"] {
+  --search-type-accent: var(--color-success-text);
+  --search-type-soft: var(--color-success-soft);
 }
 
 .search-scope-grid button:hover,
@@ -501,9 +503,9 @@
     color var(--motion-fast) var(--ease-standard);
 }
 
-.search-result-card[data-type="card"] {
-  --search-type-accent: var(--color-success-text);
-  --search-type-soft: var(--color-success-soft);
+.search-result-card[data-type="note"] {
+  --search-type-accent: var(--color-evidence-text);
+  --search-type-soft: var(--color-evidence-soft);
 }
 
 .search-result-card[data-type="source"] {
@@ -511,9 +513,9 @@
   --search-type-soft: var(--color-warning-soft);
 }
 
-.search-result-card[data-type="evidence"] {
-  --search-type-accent: var(--color-evidence-text);
-  --search-type-soft: var(--color-evidence-soft);
+.search-result-card[data-type="objective"] {
+  --search-type-accent: var(--color-success-text);
+  --search-type-soft: var(--color-success-soft);
 }
 
 .search-result-card:not(.search-result-card--static):hover,
@@ -805,7 +807,8 @@
 
   .search-filter-group {
     width: 100%;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    /* Plan 23 CS-03：筛选项从 5 减到 4。 */
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .search-discovery {
@@ -887,7 +890,8 @@
 
   .search-filter-group {
     width: 100%;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    /* Plan 23 CS-03：筛选项从 5 减到 4。 */
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 2px;
     padding: 3px;
   }

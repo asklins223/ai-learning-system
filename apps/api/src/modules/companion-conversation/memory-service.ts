@@ -9,7 +9,7 @@
  * 事务，满足 SEC-01 跨 workspace 隔离审计。
  */
 
-import { and, asc, desc, eq, ilike, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
 import { assistantMemoryItems } from "../../db/schema/assistant-memory.ts";
@@ -373,7 +373,7 @@ export async function listMemories(
       input.includeCandidates ? undefined : eq(assistantMemoryItems.candidate, false),
       input.q ? ilike(assistantMemoryItems.content, `%${input.q}%`) : undefined,
     ))
-    .orderBy(desc(assistantMemoryItems.pinned), asc(assistantMemoryItems.updatedAt))
+    .orderBy(desc(assistantMemoryItems.pinned), desc(assistantMemoryItems.updatedAt))
     .limit(MEMORY_LIST_LIMIT);
   return rows.map(toContract);
 }
@@ -473,7 +473,7 @@ export async function exportMemories(
       eq(assistantMemoryItems.userId, scope.userId),
       isNull(assistantMemoryItems.deletedAt),
     ))
-    .orderBy(desc(assistantMemoryItems.pinned), asc(assistantMemoryItems.updatedAt))
+    .orderBy(desc(assistantMemoryItems.pinned), desc(assistantMemoryItems.updatedAt))
     .limit(10000);
 
   return {

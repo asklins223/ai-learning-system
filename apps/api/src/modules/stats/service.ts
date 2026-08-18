@@ -1,4 +1,4 @@
-import { and, eq, count, isNull, sql } from "drizzle-orm";
+import { and, eq, count, isNull, lt } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
@@ -71,6 +71,9 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
   const activeCardCount = v2ActiveCardCount;
 
   // Plan 23 CS-04：Objective 口径（hidden alias=0；与 Dashboard 对账）
+  // V2：review_schedules 无 key_point_id 列（V1 退役）。
+  // 按 §29.4 alias 规则：subjectType='card' + subjectId=objectiveId。
+  const now = new Date();
   const [activeObjectiveRows, objectiveDueRows] = await Promise.all([
     tx
       .select({ count: count() })
@@ -82,13 +85,18 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     tx
       .select({ count: count() })
       .from(reviewSchedules)
+      .innerJoin(
+        learningObjectivesV2,
+        and(
+          eq(learningObjectivesV2.workspaceId, reviewSchedules.workspaceId),
+          eq(learningObjectivesV2.objectiveId, reviewSchedules.subjectId),
+        ),
+      )
       .where(and(
         eq(reviewSchedules.workspaceId, workspaceId),
         eq(reviewSchedules.status, ReviewStatus.PENDING),
-        // 只统计可指向 Objective 的 schedule（keyPointId 命中 objective）
-        sql`EXISTS (SELECT 1 FROM learning_objectives_v2 o
-           WHERE o.workspace_id = review_schedules.workspace_id
-             AND o.objective_id = review_schedules.key_point_id)`,
+        eq(reviewSchedules.subjectType, "card"),
+        lt(reviewSchedules.nextReviewAt, now),
       )),
   ]);
   const activeObjectiveCount = Number(activeObjectiveRows[0]?.count ?? 0);
@@ -139,7 +147,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     : [];
   const v2HardEvidenceCount = new Set(v2BindingRows.map((row) => row.evidenceSnapshotId)).size;
 
-  // V2 review 计数（subjectType='objective'）
+  // V2 review 计数（subjectType='card'，§29.4 alias 规则：subjectId=objectiveId）
   const v2ReviewCountRows = v2ActiveCardCount > 0
     ? await tx
         .select({ count: count() })
@@ -155,7 +163,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
         .where(and(
           eq(reviewSchedules.workspaceId, workspaceId),
           eq(reviewSchedules.status, ReviewStatus.PENDING),
-          eq(reviewSchedules.subjectType, "objective"),
+          eq(reviewSchedules.subjectType, "card"),
           ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
         ))
     : [];

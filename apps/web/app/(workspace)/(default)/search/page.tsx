@@ -20,14 +20,13 @@ import {
   withSearchReturnTarget,
 } from "@/lib/search-return";
 
-type TabType = "all" | "note" | "card" | "source" | "evidence" | "objective";
+// Plan 23 CS-03：card / evidence 已退役，只保留 note / source / objective。
+type TabType = "all" | "note" | "source" | "objective";
 
 const SEARCH_TABS: ReadonlyArray<{ key: TabType; label: string }> = [
   { key: "all", label: "全部" },
   { key: "note", label: "笔记" },
-  { key: "card", label: "学习卡" },
   { key: "source", label: "来源" },
-  { key: "evidence", label: "证据" },
   // Plan 23 CS-03：学习目标 tab（conceptLabel/说明/来源可搜）
   { key: "objective", label: "学习目标" },
 ];
@@ -37,9 +36,7 @@ const TYPE_META: Record<
   { label: string; tone: StatusTone; description: string }
 > = {
   note: { label: "笔记", tone: "neutral", description: "标题与正文" },
-  card: { label: "学习卡", tone: "success", description: "摘要与关键理解" },
   source: { label: "来源", tone: "warning", description: "来源标题与原文片段" },
-  evidence: { label: "证据", tone: "evidence", description: "引用内容与证据命中" },
   // Plan 23 CS-03：Objective 命中（概念/说明/来源可搜；不索引答案）
   objective: { label: "学习目标", tone: "success", description: "概念标题、公开说明与来源" },
 };
@@ -49,18 +46,18 @@ function isTabType(value: string | null): value is TabType {
 }
 
 function typeMeta(type: string) {
-  if (type === "note" || type === "card" || type === "source" || type === "evidence" || type === "objective") {
-    return TYPE_META[type];
+  // Plan 23 CS-03：card / evidence 已退役，只有 note / source / objective 是正式类型。
+  if (type === "note" || type === "source" || type === "objective") {
+    return TYPE_META[type as Exclude<TabType, "all">];
   }
   return { label: type || "对象", tone: "muted" as StatusTone, description: "学习对象" };
 }
 
 function SearchTypeIcon({ type }: { type: string }) {
   if (type === "note") return <Icon.Notepad aria-hidden="true" />;
-  if (type === "card") return <Icon.Card aria-hidden="true" />;
   if (type === "source") return <Icon.Inbox aria-hidden="true" />;
-  if (type === "evidence") return <Icon.Quote aria-hidden="true" />;
   if (type === "objective") return <Icon.Target aria-hidden="true" />;
+  // Plan 23 CS-03：card / evidence 已退役，不再渲染对应图标。
   return <Icon.Search aria-hidden="true" />;
 }
 
@@ -162,12 +159,6 @@ function SearchResultBody({
         <span className="search-result-snippet">{renderMarkedSnippet(result.snippet)}</span>
         <span className="search-result-meta">
           <span>索引于 {relativeTime(result.indexedAt)}</span>
-          {result.objectType === "evidence" && resultHref && (
-            <span>所属学习卡</span>
-          )}
-          {(result.matchCount ?? 0) > 1 && result.objectType === "evidence" && (
-            <strong>{result.matchCount} 条证据命中</strong>
-          )}
         </span>
       </div>
       {resultHref && (
@@ -537,7 +528,7 @@ export default function SearchPage() {
         className="workspace-page-header search-page-header"
         kicker="全域检索"
         title="搜索"
-        subtitle="在笔记、学习卡、来源与证据之间，快速找回已经形成的理解。"
+        subtitle="在笔记、来源与学习目标之间，快速找回已经形成的理解。"
         actions={headerActions}
       />
 

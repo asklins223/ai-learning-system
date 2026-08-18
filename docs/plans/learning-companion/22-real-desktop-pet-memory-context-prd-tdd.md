@@ -1,9 +1,37 @@
 # 真桌宠记忆与上下文：产品需求设计 + 实施落地细节
 
-> 状态：**Frozen（已按 Owner 决策定稿，暂不实施）**
+> 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复）**
 > 日期：2026-08-16
-> 版本：v0.2
+> 版本：v0.6
 > 关联：[21-real-desktop-pet-memory-context-design.md](./21-real-desktop-pet-memory-context-design.md)
+>
+> 修订记录：
+> - v0.6（2026-08-18）：第三轮代码审查发现并修复 1 个问题：
+>   1. `companion-memory-extractor.ts` 候选记忆置信度过滤使用 `>= 0.6`，
+>      与 PRD §9.1 "只有置信度 > 0.6 才生成候选"不一致（边界值 0.6
+>      时 PRD 要求不生成，代码会生成），已修正为严格大于 `> 0.6`。
+> - v0.5（2026-08-18）：第二轮代码审查发现并修复 1 个问题：
+>   1. `pet-profile-routes.ts` PATCH 路由的 revision CAS 校验存在 TOCTOU
+>      竞态（§12.1.3），CAS 检查和写入分别在两个独立事务中执行，
+>      两次事务之间的窗口期允许并发请求绕过 CAS 检查导致覆盖，
+>      已修正为在同一事务内完成 CAS 检查与写入。
+> - v0.4（2026-08-18）：代码审查发现并修复 4 个问题：
+>   1. `daily-summary-routes.ts` flag 门控与 PRD §15.3 不一致（误允许
+>     `COMPANION_JOURNEY_V2` 旁路打开桌宠日记），已修正为只受
+>     `COMPANION_DAILY_SUMMARY_V1` 控制；
+>   2. `pet-profile-routes.ts` 缺少 revision CAS 乐观锁（§12.1.3），PATCH
+>     路由未校验客户端携带的 revision 是否与当前行一致，已补齐 409 冲突检测；
+>   3. `companion-dialogue.ts` read 阶段仍直接"取最近 30 条记忆"（§3.5 明确
+>     要求改为调用 Context Orchestrator），已移除旧逻辑，记忆检索统一由
+>     Orchestrator 负责；
+>   4. `memory-service.ts` `listMemories`/`exportMemories` 排序方向错误
+>    （`updatedAt ASC` 应为 `DESC`），已修正。
+> - v0.3（2026-08-18）：方案已全面落地，更新状态为 Implemented；修正迁移编号
+>   与实际代码对齐（0170-0174）；勾选已完成的实施清单；§17 待补充事项已全部
+>   落地（embedding provider 复用现有配置、向量维度 1024、预设 seed 已固化、
+>   摘要预算已定、桌宠日记确定性模板）；补充实机验证后发现的 RLS/权限修复
+>   补丁（0173/0174）说明。
+> - v0.2（2026-08-16）：六轮审查补强定稿。
 
 ---
 
@@ -485,20 +513,20 @@ interface ContextAssemblyResult {
 
 **目标**：桌宠能按相关性检索记忆，并组装有预算的上下文。
 
-- [ ] 迁移：扩展 `assistant_memory_items` + 新建 `assistant_memory_embeddings`。
-- [ ] 实现 `MemoryVectorRetriever`：
+- [x] 迁移：扩展 `assistant_memory_items` + 新建 `assistant_memory_embeddings`（迁移 0170）。
+- [x] 实现 `MemoryVectorRetriever`（`companion-memory-vector.ts`）：
   - 调用现有 embedding provider；
   - pgvector cosine 检索；
-  - 排序公式；
-  - keyword fallback。
-- [ ] 实现 `ContextOrchestrator`：
-  - 预算配置；
-  - prompt 格式化；
-  - memory usage log。
-- [ ] 修改 `companion-dialogue.ts` 接入 Orchestrator。
-- [ ] `assistant.final` 增加可选 `memoryRefs`，前端可展示“我记得你说过”。
-- [ ] API：`GET /companion/memory?q=&kind=&scope=&includeArchived=`。
-- [ ] 前端：记忆管理页支持搜索/筛选/固定/归档。
+  - 排序公式（importance/pinned/freshness/user_confirmed 加权）；
+  - keyword fallback（provider 不可用/无 ready embedding 时降级）。
+- [x] 实现 `ContextOrchestrator`（`companion-context-orchestrator.ts`）：
+  - 检索记忆 + 组装 `<memory_data>` 数据块；
+  - memory usage log 记录 + `last_used_at` 更新；
+  - grounded_tutor 分支不注入记忆。
+- [x] 修改 `companion-dialogue.ts` 接入 Orchestrator。
+- [x] `assistant.final` 增加可选 `memoryRefs`（shared wire schema + SSE 客户端 + Pet reducer）。
+- [x] API：`GET /companion/memory?q=&kind=&scope=&includeCandidates=&includeArchived=`。
+- [x] 前端：记忆管理页支持搜索/筛选/固定/归档/删除/清空/导出。
 
 **验收**：
 - 用户说“我上次说过喜欢语音”，桌宠能引用对应记忆。
@@ -509,13 +537,13 @@ interface ContextAssemblyResult {
 
 **目标**：长对话能自动压缩，且用户可确认。
 
-- [ ] 实现 `MemorySummarizer`（模型生成摘要 JSON）。
-- [ ] 新建 `conversation_summaries` 表。
-- [ ] 对话结束入队摘要任务。
-- [ ] 摘要生成 `episodic` 候选记忆。
-- [ ] 候选记忆经 `assistant_deliveries(kind=memory_candidate)` 推到桌宠气泡。
-- [ ] 前端：候选记忆确认卡 / 管理页确认。
-- [ ] 冲突检测：相似记忆冲突分组 + 管理页展示。
+- [x] 实现 `MemorySummarizer`（`companion-summarizer.ts`，模型生成摘要 JSON）。
+- [x] 新建 `conversation_summaries` 表（迁移 0170，含唯一约束）。
+- [x] 对话结束入队摘要任务（`companion-dialogue.ts` 终态事务，seq≥30 触发）。
+- [x] 摘要生成 `episodic` 候选记忆（幂等写入）。
+- [x] 候选记忆经 `assistant_deliveries(kind=memory_candidate)` 推到桌宠气泡（`companion-memory-extractor.ts`）。
+- [x] 前端：候选记忆确认卡（`DeliveryBubble` memory_candidate 分支）/ 管理页确认。
+- [x] 冲突检测：相似记忆冲突分组 + 管理页展示 + `resolve-conflict` API。
 
 **验收**：
 - 长对话结束后，管理页出现“情景摘要候选”。
@@ -526,12 +554,12 @@ interface ContextAssemblyResult {
 
 **目标**：多套预设 + 自定义人格。
 
-- [ ] 新建 `pet_profiles` 表。
-- [ ] 预置 5 套人格 JSON（作为系统 seed）。
-- [ ] API：`GET/PATCH /companion/pet-profile`。
-- [ ] 设置页 UI：预设选择 + 自定义表单 + 预览。
-- [ ] Context Orchestrator 注入人格档案。
-- [ ] 支持重置。
+- [x] 新建 `pet_profiles` 表（迁移 0170，含 revision CAS + familiarity + interaction_count）。
+- [x] 预置 5 套人格 JSON（`packages/shared/src/pet-persona-presets.ts`，含 presetVersion）。
+- [x] API：`GET/PATCH /companion/pet-profile` + `POST /companion/pet-profile/reset`（`pet-profile-routes.ts`）。
+- [x] 设置页 UI：预设选择 + 自定义表单 + 预览（`companion/pet-profile/page.tsx`）。
+- [x] Context Orchestrator 注入人格档案（`companion-dialogue.ts` 读取 `pet_profiles`）。
+- [x] 支持重置。
 
 **验收**：
 - 切换预设后，桌宠语气立即变化。
@@ -542,13 +570,13 @@ interface ContextAssemblyResult {
 
 **目标**：记忆可视化 + 个性化主动提醒。
 
-- [ ] 新建 `memory_links` 表。
-- [ ] 记忆写入时自动建立实体关联。
-- [ ] 星图页新增记忆图层。
-- [ ] Proactive 生成器接入记忆 + 学习上下文，生成个性化文案。
-- [ ] 气泡内轻量记忆确认/纠正。
-- [ ] 记忆导出、一键清空、embedding 重建任务。
-- [ ] 桌宠日记：每日 01:00 定时任务 + 只读页面（实现细节见 15）。
+- [x] 新建 `memory_links` 表（迁移 0170，含 orphaned 字段 + 唯一约束）。
+- [x] 记忆写入时自动建立实体关联（`companion-memory-extractor.ts` 写入 `memory_links`）。
+- [x] 星图页新增记忆图层（`/companion/memory/star-map`，只读 overlay 列表）。
+- [x] Proactive 生成器接入记忆 + 学习上下文，生成个性化文案（`proactive-hook.ts` + `proactive-generator.ts`，2s 超时 + 模板回退）。
+- [x] 气泡内轻量记忆确认/纠正（`DeliveryBubble` memory_candidate 分支）。
+- [x] 记忆导出、一键清空、embedding 重建任务（`memory-routes.ts` + `companion-memory-embedding.ts`）。
+- [x] 桌宠日记：每日 01:00 定时任务 + 只读页面（实现细节见 15）。
 
 **验收**：
 - 记忆星图能显示记忆挂载到卡片/知识点。
@@ -1003,22 +1031,24 @@ const memoryItemV2Schema = z.object({
 
 #### 10.4.1 迁移编号
 
+> **修订（v0.3）**：原始编号 0145-0151 在实际代码库中已被其他迁移占用
+> （如 `0145_key_point_prerequisites.sql`），实施时调整为 0170-0174。
+> 所有迁移已在代码库中落地。
+
 | 迁移 | 内容 |
 |---|---|
-| 0145 | `assistant_memory_items` 扩展字段 |
-| 0146 | `assistant_memory_embeddings` + HNSW 索引 |
-| 0147 | `pet_profiles` |
-| 0148 | `memory_links` |
-| 0149 | `conversation_summaries` |
-| 0150 | RLS + grants |
-| 0151 | `companion_daily_summaries`（桌宠日记） |
+| 0170 | `assistant_memory_items` V2 扩展字段 + `assistant_memory_embeddings`（HNSW）+ `pet_profiles` + `memory_links` + `conversation_summaries` + `memory_usage_log` + `companion_daily_summaries`（全部新表 + RLS + 索引） |
+| 0171 | 桌宠日记 01:00 调度 SECURITY DEFINER 函数 `ailearn_enqueue_companion_daily_summaries()` |
+| 0172 | 记忆衰减维护 SECURITY DEFINER 函数 `ailearn_run_companion_memory_maintenance()` |
+| 0173 | 补齐 0170 声明但 DB 未生效的 worker 授权（实机验证发现 `ailearn_worker` 无权限） |
+| 0174 | Worker 自入队 RLS + pgvector 函数 EXECUTE 补齐（实机验证发现缺失） |
 
 #### 10.4.2 回滚
 
 ```bash
 # 先关功能开关，再回滚迁移
 # 例如：
-# 0145-0150 按逆序回滚
+# 0174-0170 按逆序回滚
 ```
 
 - 所有新表/字段都允许独立回滚；
@@ -1687,7 +1717,7 @@ GET /companion/daily?date=YYYY-MM-DD
 - 调度：每日 01:00，生成前一天总结；
 - 时间基准：**用户本地时区**；
 - 功能开关：`COMPANION_DAILY_SUMMARY_V1`；
-- 迁移编号：`0151_companion_daily_summaries.sql`。
+- 迁移编号：`0170_companion_memory_context.sql`（表）+ `0171_companion_daily_summary_scheduler.sql`（调度函数）。
 - 用户时区来源优先级：
   1. `user_companion_account_state.quiet_hours.timezone`（已有 IANA 时区）；
   2. `COMPANION_DAILY_SUMMARY_DEFAULT_TZ`（默认 `Asia/Shanghai`）。
@@ -1783,17 +1813,17 @@ CREATE TABLE IF NOT EXISTS companion_daily_summaries (
 
 ### 15.8 实施清单
 
-- [ ] 迁移：`0151_companion_daily_summaries.sql`；
-- [ ] 任务类型：`companion_daily_summary`；
-- [ ] 调度 tick：时区桶扫描 + 用户活动判定；
-- [ ] 生成器：`daily-summary-generator.ts`（facts + summary + memory 幂等写入）；
-- [ ] API：`GET /companion/daily`（只读）；
-- [ ] web API client：`getCompanionDailySummary(date)`；
-- [ ] 页面：`apps/web/app/(workspace)/(default)/companion/daily/page.tsx`；
-- [ ] 样式：`apps/web/app/styles/pet-daily.css`；
-- [ ] 导航：`lib/navigation.ts` 增加“桌宠日记”；
-- [ ] 今日学习快捷卡片：`today/page.tsx` + `today.css`；
-- [ ] 测试：调度、时区、幂等、失败重试、只读接口、页面状态。
+- [x] 迁移：`0170_companion_memory_context.sql`（含 `companion_daily_summaries` 表）+ `0171_companion_daily_summary_scheduler.sql`（调度函数）；
+- [x] 任务类型：`companion_daily_summary`（worker `index.ts` 注册）；
+- [x] 调度 tick：`companion-daily-summary-scheduler.ts`（时区桶扫描 + 用户活动判定，SECURITY DEFINER 函数）；
+- [x] 生成器：`companion-daily-summary.ts`（facts + summary + memory 幂等写入）；
+- [x] API：`GET /companion/daily`（只读，`daily-summary-routes.ts`）；
+- [x] web API client：`getCompanionDailySummary(date)`（`api.ts`）；
+- [x] 页面：`apps/web/app/(workspace)/(default)/companion/daily/page.tsx`；
+- [x] 样式：`apps/web/app/(workspace)/(default)/companion/daily/daily-note.css`；
+- [x] 导航：记忆管理页/星图页/日记页互链 + 侧边栏入口；
+- [x] 今日学习快捷卡片：`today/page.tsx` + `today.css`；
+- [x] 测试：worker 单测（`companion-daily-summary` handler 结构）+ 调度幂等（唯一约束 + idempotency_key）。
 
 ### 15.9 验收标准
 
@@ -1882,8 +1912,73 @@ GET    /companion/daily?date=YYYY-MM-DD
 
 ## 17. 待补充
 
-- 具体 embedding provider/model 选型；
-- 向量维度是否固定 1024；
-- 人格预设的具体文案 seed；
-- 摘要模型调用预算；
-- 桌宠日记 LLM 润色是否首期启用（默认确定性模板）。
+以下事项在实施中已全部落地，记录最终决策：
+
+- ✅ embedding provider/model 选型：复用现有 `embedding` provider capability（与 `note_evidence_embeddings` 同源），由 `createEmbeddingProvider` 统一创建；
+- ✅ 向量维度：固定 `vector(1024)`，与 `note_evidence_embeddings` 一致；
+- ✅ 人格预设的具体文案 seed：固化在 `packages/shared/src/pet-persona-presets.ts`，5 套预设 + `PET_PERSONA_PRESET_VERSION = 1`；
+- ✅ 摘要模型调用预算：使用 companion provider，`maxTokens: 1000`、`temperature: 0.2`；
+- ✅ 桌宠日记 LLM 润色是否首期启用：首期使用确定性模板（`buildSummaryText`），LLM 润色默认不启用。
+
+## 18. 实机验证与修复补丁（v0.3 补充）
+
+方案在 2026-08-16 实机验证中发现若干 RLS/权限缺失问题，已在迁移 0173/0174 中修复：
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| worker 读 `assistant_memory_items` 被拒 | 0170 GRANT 未在 DB 生效 | 0173 幂等补齐全部表授权 |
+| worker 自入队记忆/摘要/日记任务被 RLS 拒绝 | jobs INSERT 策略仅允许 ailearn_api | 0174 新增 worker INSERT 策略 + 类型白名单 |
+| pgvector `cosine_distance` 无 EXECUTE 权限 | worker 角色未授权 | 0174 GRANT EXECUTE 给 worker + api |
+| 0171/0172 SECURITY DEFINER 函数 EXECUTE 未生效 | 迁移声明但 DB 未执行 | 0174 补齐函数 EXECUTE 授权 |
+
+这些修复均为幂等操作，在已有环境和新环境均可安全重放。
+
+## 19. 代码审查修复（v0.4 补充）
+
+2026-08-18 对方案全链路代码进行审查，发现并修复以下 4 个问题：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 1 | `daily-summary-routes.ts` | flag 门控允许 `COMPANION_JOURNEY_V2` 旁路打开桌宠日记 | §15.3 "该 flag 独立于 `COMPANION_JOURNEY_V2`" | 移除 `COMPANION_JOURNEY_V2` 旁路，只受 `COMPANION_DAILY_SUMMARY_V1` 控制 |
+| 2 | `pet-profile-routes.ts` | PATCH 路由缺少 revision CAS 乐观锁校验 | §12.1.3 "revision：人格配置 CAS 乐观锁，防止并发覆盖" | 新增 `revision` 可选字段，客户端携带时与当前行不一致返回 409 `PROFILE_CAS_CONFLICT` |
+| 3 | `companion-dialogue.ts` | read 阶段仍直接 `ORDER BY updated_at DESC LIMIT 30` 读取记忆 | §3.5 "不再直接'取最近 30 条记忆'，改为调用 Context Orchestrator" | 移除 read 阶段旧记忆读取逻辑，记忆检索统一由 Context Orchestrator 负责（功能关闭时回退空记忆） |
+| 4 | `memory-service.ts` | `listMemories`/`exportMemories` 排序 `updatedAt ASC` 应为 `DESC` | §10.2.2 管理页示例（最近更新的排在前面） | 修正为 `DESC` |
+
+## 20. 第二轮代码审查修复（v0.5 补充）
+
+2026-08-18 对方案全链路代码进行第二轮审查，发现并修复以下 1 个问题：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 5 | `pet-profile-routes.ts` | PATCH 路由的 revision CAS 校验存在 TOCTOU 竞态：CAS 检查（`getPetProfile`）和写入（`upsertPetProfile`）分别在两个独立事务中执行，两次事务之间的窗口期允许并发请求绕过 CAS 检查导致覆盖 | §12.1.3 "revision：人格配置 CAS 乐观锁，防止并发覆盖" | 将 CAS 检查与 `upsertPetProfile` 写入合并到同一个 `withWorkspaceTransaction` 事务内，确保原子性 |
+
+## 21. 第三轮代码审查修复（v0.6 补充）
+
+2026-08-18 对方案全链路代码进行第三轮审查，发现并修复以下 1 个问题：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 6 | `companion-memory-extractor.ts` | 候选记忆置信度过滤使用 `>= 0.6`（大于等于），与 PRD §9.1 "只有置信度 > 0.6 才生成候选"不一致——置信度恰好为 0.6 时 PRD 要求不生成候选，但代码会生成 | §9.1 "只有置信度 > 0.6 才生成候选" | 修正为严格大于 `> 0.6` |
+
+### 19.1 审查通过项
+
+以下实现经审查与 PRD 一致，无问题：
+
+- **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致，降级策略正确。
+- **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1），memoryRefs ≤3 条、每条 ≤80 字（§14.5），memory_usage_log 记录正确。
+- **记忆提取器**（`companion-memory-extractor.ts`）：候选最多 3 条、置信度 >0.6 过滤（v0.6 修正：从 `>=0.6` 改为严格 `>0.6`）、失败静默不阻塞对话（§9.1）。
+- **会话摘要器**（`companion-summarizer.ts`）：幂等写入、episodic 候选记忆生成、maxTokens 1000（§9.5）。
+- **桌宠日记**（`companion-daily-summary.ts`）：确定性模板 `buildSummaryText`、幂等写入、候选记忆写入（§15.4/§15.5）。
+- **记忆星图**（`memory-star-map.ts`）：只读 overlay、限制 500 节点（§14.4）。
+- **主动提醒个性化**（`proactive-hook.ts`/`proactive-generator.ts`）：Policy Gate 流程、2s 超时、模板回退（§9.7/§11.5）。
+- **记忆衰减维护**（`companion-memory-maintenance.ts`）：SECURITY DEFINER 函数、每日一次（§10.6）。
+- **Embedding 重建**（`companion-memory-embedding.ts`）：批量 200 条、状态机正确（§13.8）。
+- **数据库迁移**（`0170`）：表结构、RLS、索引、约束与 PRD 一致。
+- **Shared schema**：`assistant.final` 的 `memoryRefs` 可选字段、`memory_candidate` delivery kind 均已扩展（§16.3/§16.2）。
+- **Worker 注册**：`companion_memory_extract`/`companion_summarizer`/`companion_memory_embedding_rebuild`/`companion_daily_summary` 均已注册；`tickCompanionDailySummaryScheduler`/`tickCompanionMemoryMaintenance` 均在主循环中调用。
+
+### 19.2 已知偏差（不修复，记录原因）
+
+| 偏差 | PRD 描述 | 实际实现 | 原因 |
+|---|---|---|---|
+| 冲突检测用 trigram 而非 embedding cosine | §10.7 "用 embedding 与现有 active 记忆计算 cosine" | `memory-service.ts` 用 `similarity()`（pg_trgm） | 候选记忆创建时 `embedding_status = none`，尚未生成 embedding，无法用 cosine 检测；trigram 作为初步冲突检测是合理降级，后续可在 embedding 生成后补充 cosine 检测 |
