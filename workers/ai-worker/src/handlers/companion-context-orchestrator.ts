@@ -35,27 +35,8 @@ export interface ContextAssemblyResult {
 
 type Executor = { execute(query: unknown): Promise<unknown> };
 
-const MEMORY_DATA_MAX_CHARS = 1000;
-const EPISODIC_MAX_CHARS = 600;
 const MEMORY_REF_MAX = 3;
 const MEMORY_REF_CONTENT_MAX = 80;
-
-function trimMemoryData(items: ContextMemoryItem[]): ContextMemoryItem[] {
-  const semantic: ContextMemoryItem[] = [];
-  const episodic: ContextMemoryItem[] = [];
-  let semanticChars = 0;
-  let episodicChars = 0;
-  for (const item of items) {
-    const budget = item.kind === "episodic" ? EPISODIC_MAX_CHARS : MEMORY_DATA_MAX_CHARS;
-    const target = item.kind === "episodic" ? episodic : semantic;
-    const used = item.kind === "episodic" ? episodicChars : semanticChars;
-    if (used + item.content.length > budget) continue;
-    target.push(item);
-    if (item.kind === "episodic") episodicChars += item.content.length;
-    else semanticChars += item.content.length;
-  }
-  return [...semantic, ...episodic];
-}
 
 /**
  * 检索并组装上下文。
@@ -104,6 +85,8 @@ export async function assembleCompanionContext(
     },
   );
 
+  // 记忆不截断内容：截断后的残缺记忆会产生误导，不如完整放入或不放。
+  // 条数由检索阶段 topK=8 控制，此处不再做字符预算过滤。
   const items: ContextMemoryItem[] = result.items.map((item) => ({
     memoryId: item.memoryId,
     kind: item.kind,
@@ -113,22 +96,23 @@ export async function assembleCompanionContext(
     lastUsedAt: item.lastUsedAt,
     userConfirmed: item.userConfirmed,
   }));
-  const trimmed = trimMemoryData(items);
 
-  const activeMemories = trimmed.map((item) => ({
+  const activeMemories = items.map((item) => ({
     kind: item.kind,
-    content: item.content.slice(0, 500),
+    content: item.content,
   }));
-  const memoryRefs = trimmed.slice(0, MEMORY_REF_MAX).map((item) => ({
+  // memoryRefs 仅用于 UI 展示"我记得你说过"（§14.5：≤3 条，每条 ≤80 字），
+  // 不影响注入 prompt 的完整记忆内容。
+  const memoryRefs = items.slice(0, MEMORY_REF_MAX).map((item) => ({
     memoryId: item.memoryId,
     kind: item.kind,
     content: item.content.slice(0, MEMORY_REF_CONTENT_MAX),
   }));
 
   // 记录检索日志 + 更新 last_used_at（幂等，失败不阻断对话）。
-  if (trimmed.length > 0) {
+  if (items.length > 0) {
     try {
-      const ids = trimmed.map((item) => item.memoryId);
+      const ids = items.map((item) => item.memoryId);
       // R29/R32：drizzle+postgres-js 数组参数序列化不可靠，使用显式 uuid[] 字面量。
       const idsLiteral = `{${ids.join(",")}}`;
       await tx.execute(sql`
@@ -153,7 +137,7 @@ export async function assembleCompanionContext(
   // §9.9：记录检索模式与使用记忆数指标（失败不阻断对话）。
   try {
     companionMemoryRetrievalModeTotal.labels(result.mode).inc();
-    companionMemoryUsedCount.observe(trimmed.length);
+    companionMemoryUsedCount.observe(items.length);
   } catch {
     // metrics 记录失败不影响对话。
   }
@@ -162,7 +146,7 @@ export async function assembleCompanionContext(
   logger.debug(
     {
       runId: input.runId,
-      memoryIds: trimmed.map((item) => item.memoryId),
+      memoryIds: items.map((item) => item.memoryId),
       retrievalLatencyMs: result.latencyMs,
       retrievalMode: result.mode,
       contextBudgetUsed: activeMemories.reduce((sum, m) => sum + m.content.length, 0),
@@ -174,6 +158,6 @@ export async function assembleCompanionContext(
     activeMemories,
     memoryRefs,
     retrievalMode: result.mode,
-    usedMemoryIds: trimmed.map((item) => item.memoryId),
+    usedMemoryIds: items.map((item) => item.memoryId),
   };
 }
