@@ -18,6 +18,7 @@ import {
   characterCueIntentV1Schema,
 } from "./companion-character-contracts.ts";
 import { createLearningRunRequestSchema } from "./learning-run-contracts.ts";
+import { createLearningRunV2RequestSchema } from "./learning-target-v2-contracts.ts";
 
 // ─── 基础 ────────────────────────────────────────────────────────────────
 
@@ -465,6 +466,11 @@ export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind"
     kind: z.literal("resume_learning_run"),
     runId: z.string().uuid(),
   }).strict(),
+  // Plan 23 CS-06：V2 学习运行（originV2 → createRunV2；pet 不自建 origin/参数）。
+  z.object({
+    kind: z.literal("start_learning_run_v2"),
+    request: createLearningRunV2RequestSchema,
+  }).strict(),
   // ── 方案 16 §18.1 工具网关（第二批：Orchestrator 动作工具全集） ──
   // 全部为"用户确认后才执行"的业务动作；导航类同步 succeeded，业务类
   // 事务内确定性执行（执行函数见 learning-action-bridge.ts）。
@@ -672,6 +678,9 @@ export const companionLearningContextV1Schema = z.object({
     targetSummary: z.string().min(1).max(160),
     impactSummary: z.string().min(1).max(240),
     payloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    // Plan 23 CS-05/CS-06：V2 字段（可选；兼容 V1 客户端跳过）。
+    objectiveId: z.string().uuid().optional(),
+    originV2: createLearningRunV2RequestSchema.shape.originV2.optional(),
   }).nullable(),
 }).strict();
 

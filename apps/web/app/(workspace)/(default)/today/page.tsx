@@ -27,6 +27,28 @@ import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { Icon } from "@/components/ui/icons";
 import { useIsOwner } from "@/lib/use-current-user";
 import { isLearningRunV1Enabled } from "@/lib/feature-flags";
+
+// 22 方案 §15.2：桌宠日记快捷卡片 — 预览昨日日记。
+interface DailySummaryPreview {
+  version: 1;
+  date: string | null;
+  status: "generated" | "not_generated" | "failed";
+  generatedAt: string | null;
+  summary: string;
+  facts: Record<string, unknown>;
+  conversationHighlights: { role: "user" | "assistant"; text: string }[];
+  memory: { memoryItemId: string; candidate: boolean } | null;
+}
+
+function yesterdayISO(date: Date): string {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - 1);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { learningCardHref, mergeLearningCardsV2 } from "@/lib/learning-card-library";
 // Plan 23 CS-01：Today 的“巩固一个要点”建议改由 Objective Surface 提供。
@@ -882,6 +904,8 @@ export default function TodayPage() {
   // Plan 23 CS-01：Objective 队列（active；服务端 cutoff 与 Dashboard 一致）。
   // 空状态“巩固一个要点”优先使用真实概念标题（修复 V2 卡显示“未命名学习卡”，§2.2）。
   const [topObjective, setTopObjective] = useState<ObjectiveListItemV3 | null>(null);
+  // 22 方案 §15.2：昨日桌宠日记预览
+  const [dailyPreview, setDailyPreview] = useState<DailySummaryPreview | null>(null);
   useEffect(() => {
     let cancelled = false;
     learningObjectiveApi
@@ -897,6 +921,25 @@ export default function TodayPage() {
       cancelled = true;
     };
   }, []);
+
+  // 22 方案 §15.2：加载昨日桌宠日记预览（不传 date 即取最近一条；
+  // 传昨日期可精确定位昨日内容。失败不阻塞 Today 页）
+  useEffect(() => {
+    let cancelled = false;
+    const dateParam = dayAnchor ? yesterdayISO(dayAnchor) : undefined;
+    api
+      .getCompanionDailySummary(dateParam)
+      .then((result) => {
+        if (cancelled) return;
+        setDailyPreview(result as DailySummaryPreview);
+      })
+      .catch(() => {
+        // 日记功能未开放或加载失败时静默降级为空状态
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dayAnchor]);
   const allFailed = errorKeys.length === 5 && Object.values(unavailableData).every(Boolean);
   const hasStaleDataErrors = errorKeys.some((key) => !unavailableData[key]);
   const activeUnavailableKey =
@@ -1153,6 +1196,34 @@ export default function TodayPage() {
             </button>
           </div>
         </section>
+
+        {/* 22 方案 §15.2：桌宠日记快捷卡片 — 预览昨日日记 */}
+        <Link
+          href="/companion/daily"
+          className={`today-companion-daily-card ${dailyPreview?.status === "generated" ? "has-content" : "is-empty"}`}
+          aria-labelledby="today-companion-daily-title"
+        >
+          <div className="today-companion-daily-icon" aria-hidden="true">
+            {dailyPreview?.status === "generated" ? <Icon.Sparkle /> : <Icon.Review />}
+          </div>
+          <div className="today-companion-daily-copy">
+            <span className="today-companion-daily-eyebrow">COMPANION DAILY</span>
+            <h2 id="today-companion-daily-title">桌宠日记</h2>
+            {dailyPreview?.status === "generated" && dailyPreview.summary ? (
+              <p className="today-companion-daily-preview">{dailyPreview.summary}</p>
+            ) : dailyPreview?.status === "not_generated" ? (
+              <p className="today-companion-daily-placeholder">昨天的日记还没整理好，稍后再来看看。</p>
+            ) : dailyPreview?.status === "failed" ? (
+              <p className="today-companion-daily-placeholder">这篇日记暂时没写好，桌宠稍后会再试一次。</p>
+            ) : (
+              <p className="today-companion-daily-placeholder">桌宠每天凌晨 1 点把昨天的学习和对话整理成一篇笔记。</p>
+            )}
+          </div>
+          <span className="today-companion-daily-action">
+            {dailyPreview?.status === "generated" ? "查看完整日记" : "打开桌宠日记"}
+            <Icon.Arrow />
+          </span>
+        </Link>
 
         <section id="today-ledger" className="today-ledger-toolbar" aria-labelledby="today-ledger-title">
           <div className="today-ledger-title-wrap">

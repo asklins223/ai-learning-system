@@ -496,7 +496,66 @@ test("P5 §9.4：bounded lexeme 冻结列表含中文与英文动作词", () => 
 
 
 
-// ─── 方案 16 §18：LearningRun 工具契约（2026-08-14 扩展） ───────────────
+// ─── Plan 23 CS-05/CS-06：V2 学习运行 payload 与候选扩展 ────────────────
+
+test("proposedLearningActionPayload：accepts start_learning_run_v2（originV2 路径）", () => {
+  const objectiveId = "123e4567-e89b-12d3-a456-426614174000";
+  const cardId = "223e4567-e89b-12d3-a456-426614174000";
+  const v2 = proposedLearningActionPayloadV1Schema.safeParse({
+    kind: "start_learning_run_v2",
+    request: {
+      originV2: { kind: "card", cardId, objectiveId },
+      goal: "stabilize",
+      idempotencyKey: "pet-menu-v2:" + objectiveId,
+    },
+  });
+  assert.equal(v2.success, true);
+  // V1 路径仍兼容
+  const v1 = proposedLearningActionPayloadV1Schema.safeParse({
+    kind: "start_learning_run",
+    request: {
+      version: 1,
+      origin: { kind: "card", cardId, keyPointId: objectiveId },
+      goal: "stabilize",
+      clientRequestId: "pet-menu:" + objectiveId,
+      idempotencyKey: "pet-menu:" + objectiveId,
+    },
+  });
+  assert.equal(v1.success, true);
+});
+
+test("learningRunStartCandidate：V2 字段可选，向后兼容", () => {
+  const ctx = {
+    version: 1 as const,
+    contextRevision: "a".repeat(64),
+    resumeCandidate: null,
+    startCandidate: null,
+    learningRunResumeCandidate: null,
+    learningRunStartCandidate: {
+      candidateId: "learning_run_start" as const,
+      cardId: "223e4567-e89b-12d3-a456-426614174000",
+      keyPointId: "323e4567-e89b-12d3-a456-426614174000",
+      title: "开始验证",
+      targetSummary: "用三分钟了解光的折射",
+      impactSummary: "创建一次学习运行",
+      payloadSha256: "b".repeat(64),
+      // V2 字段
+      objectiveId: "423e4567-e89b-12d3-a456-426614174000",
+      originV2: { kind: "card" as const, cardId: "223e4567-e89b-12d3-a456-426614174000", objectiveId: "423e4567-e89b-12d3-a456-426614174000" },
+    },
+  };
+  assert.equal(companionLearningContextV1Schema.safeParse(ctx).success, true);
+  // 无 V2 字段时同样通过（向后兼容）
+  const { objectiveId: _o, originV2: _v2, ...legacyOnly } = ctx.learningRunStartCandidate!;
+  void _o;
+  void _v2;
+  assert.equal(companionLearningContextV1Schema.safeParse({
+    ...ctx,
+    learningRunStartCandidate: legacyOnly,
+  }).success, true);
+});
+
+
 
 test("proposedLearningActionPayload：accepts start_learning_run / resume_learning_run", () => {
   const start = proposedLearningActionPayloadV1Schema.safeParse({

@@ -43,6 +43,7 @@ export function createInitialPetRuntimeState(context: Partial<PetRuntimeContextV
       privacyMode: false,
       windowStateRevision: 0,
     },
+    lastMemoryRefs: [],
   };
 }
 

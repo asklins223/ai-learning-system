@@ -23,6 +23,12 @@ import {
   type SurfaceContext,
 } from "../learning-objectives/surface-service.ts";
 import { resolvePrimaryActionV3 } from "../learning-objectives/action-resolver.ts";
+import {
+  dashboardBuildDurationSeconds,
+  dashboardEmptyWithActiveObjectivesTotal,
+  objectivesWithoutOriginGauge,
+  surfaceQueryDurationSeconds,
+} from "../../lib/metrics.ts";
 
 const ACTIVE_RUN_PHASES = [
   "preparing",
@@ -48,6 +54,9 @@ export async function buildLearningDashboardV2(
 ): Promise<LearningDashboardV2> {
   const now = new Date();
   const snapshotAt = now.toISOString();
+
+  // ── RL-09 指标：Dashboard 全流程计时 ──────────────────────────────────
+  const dashboardStartedAt = Date.now();
 
   // ── counts（W3-01）─────────────────────────────────────────────────────
   let counts: LearningDashboardV2["counts"];
@@ -124,6 +133,15 @@ export async function buildLearningDashboardV2(
     mode = "objectives_ready";
   }
 
+  // ── RL-09/RL-10 metrics（post-mode）────────────────────────────────
+  objectivesWithoutOriginGauge.set(counts.needsRepair);
+  if (
+    (mode === "first_use" || mode === "notes_without_objectives") &&
+    counts.activeObjectives > 0
+  ) {
+    dashboardEmptyWithActiveObjectivesTotal.inc();
+  }
+
   // ── primary focus / queue / recent（W3-02..W3-04）──────────────────────
   let primaryFocus: LearningDashboardV2["primaryFocus"] = null;
   let queue: LearningDashboardV2["queue"] = [];
@@ -194,6 +212,9 @@ export async function buildLearningDashboardV2(
     .update(JSON.stringify({ counts, surfaceRevisionSum, snapshotAt }))
     .digest("hex")
     .slice(0, 24);
+
+  // RL-09：Dashboard E2E 延迟记录。
+  dashboardBuildDurationSeconds.observe((Date.now() - dashboardStartedAt) / 1000);
 
   return {
     version: 2,

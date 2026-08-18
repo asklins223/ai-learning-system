@@ -152,6 +152,8 @@ export interface CompanionSseMappedDispatch {
   safeSummary?: string;
   /** character.cue：服务端受控表现 cue（§4.4 wire 版）。 */
   cue?: CompanionCharacterCueV1;
+  /** §12.3/§16.3：assistant.final 携带的记忆引用（≤3 条，仅 UI 展示）。 */
+  memoryRefs?: { memoryId: string; kind: string; content: string }[];
   /** voice.segments：单段（§11.3 worker 切句的 voice.segment.ready） */
   segment?: { ordinal: number; segmentId: string; text: string; conversationId?: string; emotion?: string };
 }
@@ -196,6 +198,7 @@ export function mapCompanionSseEvent(args: {
     segmentId?: string;
     ordinal?: number;
     text?: string;
+    memoryRefs?: { memoryId: string; kind: string; content: string }[];
   };
   switch (args.event.type) {
     case "assistant.status":

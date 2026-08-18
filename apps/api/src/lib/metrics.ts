@@ -283,6 +283,51 @@ export const funnelEventsTotal = new Counter({
   registers: [registry],
 });
 
+// ─── RL-09/RL-10：Plan 23 P0 一致性指标 ──────────────────────────────────
+
+/**
+ * LearningObjective Surface 装配耗时直方图（RL-09 P0）。
+ * 分桶覆盖冷/热路径；label lifecycle 区分 active/archived 查询成本差异。
+ */
+export const surfaceQueryDurationSeconds = new Histogram({
+  name: "ailearn_surface_query_duration_seconds",
+  help: "assembleObjectiveSurfaceV3 + listObjectiveSurfacesV3 latency by query type",
+  labelNames: ["query_type"] as const,
+  buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
+/**
+ * Dashboard 首页空但存在 active objective 的异常计数器（RL-10 P0）。
+ * 表示前端/服务端态不一致（应有 primaryFocus 时却返回空首页）。
+ */
+export const dashboardEmptyWithActiveObjectivesTotal = new Counter({
+  name: "ailearn_dashboard_empty_with_active_objectives_total",
+  help: "Dashboard home returned empty mode (first_use/notes_without) while learning_objectives_v2 had active rows",
+  registers: [registry],
+});
+
+/**
+ * Origin 缺失（needsRepair > 0）的 workspace 数量 Gauge（RL-09 P0）。
+ * 跟踪待修复（missing origin）objective 数量；非零数分钟级需告警。
+ */
+export const objectivesWithoutOriginGauge = new Gauge({
+  name: "ailearn_objectives_without_origin_total",
+  help: "Active learning_objectives_v2 rows missing any origin row (learning_objective_origins_v2)",
+  registers: [registry],
+});
+
+/**
+ * Dashboard 装配耗时直方图（RL-09 P0）。
+ * 含 counts + listObjectiveSurfacesV3 全流程；慢请求（>1s）需告警。
+ */
+export const dashboardBuildDurationSeconds = new Histogram({
+  name: "ailearn_dashboard_build_duration_seconds",
+  help: "buildLearningDashboardV2 E2E latency",
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
 // ─── Release 指标 ───────────────────────────────────────────────────────
 
 /** Release 信息 gauge（固定值，用于 Prometheus label 关联） */

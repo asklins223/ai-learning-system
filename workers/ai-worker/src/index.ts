@@ -4,16 +4,13 @@
 import { initHttpPool } from "./lib/http-pool.ts";
 initHttpPool();
 
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { logger } from "./lib/logger.ts";
 import postgres from "postgres";
-import { closeDatabase, db, resolveWorkerDatabaseUrl, withWorkerWorkspaceTransaction } from "./db.ts";
+import { closeDatabase, db, resolveWorkerDatabaseUrl } from "./db.ts";
 import { NOTIFY_CHANNEL } from "./lib/job-notify.ts";
-import * as schema from "./schema/index.ts";
-import { runAlignEvidence, runEvaluateValidation, type JobPayload } from "./handlers/index.ts";
+import { type JobPayload } from "./handlers/index.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
-import { runGenerateValidationQuestion } from "./handlers/generate-validation-question.ts";
-import { runLearningSessionAssess } from "./handlers/learning-session-assess.ts";
 import { runCompanionDialogue } from "./handlers/companion-dialogue.ts";
 import { runCompanionAction } from "./handlers/companion-action.ts";
 import { runCompanionMemoryExtract } from "./handlers/companion-memory-extractor.ts";
@@ -22,33 +19,12 @@ import { runCompanionMemoryEmbeddingRebuild } from "./handlers/companion-memory-
 import { runCompanionDailySummary } from "./handlers/companion-daily-summary.ts";
 import { tickCompanionDailySummaryScheduler } from "./handlers/companion-daily-summary-scheduler.ts";
 import { tickCompanionMemoryMaintenance } from "./handlers/companion-memory-maintenance.ts";
-import {
-  claimLearningAssessmentOutbox,
-  processLearningAssessmentOutboxJob,
-} from "./handlers/learning-session-assessment.ts";
-import { runEvaluateRubric } from "./handlers/evaluate-rubric.ts";
-import { runCardSupervisorAgent } from "./handlers/card-supervisor-agent.ts";
-import { reconcileSupervisorAgentRuns } from "./agent/reconciler.ts";
 import { pollV2Outbox, V2_POLL_TICK_BUDGET_MS } from "./handlers/card-generation-v2-handler.ts";
 
-/**
- * Dispatch evaluate_validation jobs based on payload format:
- * - v0.6: payload contains `submissionId` → use runEvaluateRubric (rubric-based evaluation)
- * - v0.5: legacy payload with cardId/question/userAnswer → use runEvaluateValidation
- *
- * This ensures backward compatibility while routing new v0.6 sessions to the
- * trusted mastery closed-loop handler.
- */
-function dispatchEvaluateValidation(job: JobPayload) {
-  if (job.payload.submissionId) {
-    return runEvaluateRubric(job);
-  }
-  return runEvaluateValidation(job);
-}
 import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
 import { resolveHandlerTimeout, RESOLVED_TIMEOUT_INFO } from "./lib/handler-timeout-config.ts";
 import { isNonRetryableError } from "./lib/non-retryable-errors.ts";
-import { safeErrorMessage, sanitizeOperationalError, NON_TERMINAL_UNIT_STATUSES } from "@ailearn/shared";
+import { safeErrorMessage, sanitizeOperationalError } from "@ailearn/shared";
 import {
   claimJobs,
   markJobDead,
@@ -73,14 +49,7 @@ import {
 } from "./lib/metrics.ts";
 
 const HANDLERS = {
-  // Supervisor Agent v1：唯一 Agent job type（计划 §5.2）
-  execute_card_agent_turn: runCardSupervisorAgent,
-  align_evidence: runAlignEvidence,
-  evaluate_validation: dispatchEvaluateValidation,
   parse_source: runParseSource,
-  generate_validation_question: runGenerateValidationQuestion,
-  // 救火 4b：Learning Session 评测（接线点——经 API 编排独立评测）
-  learning_session_assess: runLearningSessionAssess,
   // P2 companion：日常对话流式回复（03 §8.1；payload 只含 opaque runId）
   companion_dialogue: runCompanionDialogue,
   companion_action: runCompanionAction,
@@ -125,299 +94,6 @@ export function setupGracefulShutdown() {
   });
 }
 setupGracefulShutdown();
-
-// Agent job 的 payload 结构与文本管线 job 不同（使用 agentUnitId 而非
-// generationUnitId，且没有 noteVersionId），需要独立的失败投影路径。
-const AGENT_TERMINAL_RUN_STATUSES = new Set([
-  "needs_attention",
-  "partial_ready",
-  "succeeded",
-  "cancelled",
-  "superseded",
-]);
-
-async function projectGenerationFailure(
-  job: ClaimedJob,
-  error: unknown,
-  terminal: boolean,
-  retryable: boolean,
-): Promise<boolean> {
-  if (!job.payload.generationRunId) return false;
-  try {
-    if (job.type === "execute_card_agent_turn") {
-      return await projectAgentJobFailure({
-        job,
-        error,
-        terminal,
-        retryable,
-      });
-    }
-    return false;
-  } catch (projectionError) {
-    // The job terminal transition is already committed. Keep the projection
-    // failure privacy-safe so reconciliation can repair the run later without
-    // leaking provider/database text into logs.
-    logger.error(
-      {
-        jobId: job.id,
-        error: sanitizeOperationalError(projectionError),
-      },
-      "failed to project generation job state to generation run",
-    );
-    return false;
-  }
-}
-
-/**
- * Agent job (execute_card_agent_turn) 的失败投影。
- *
- * Agent job 的 payload 使用 agentUnitId（而非 generationUnitId）且没有
- * noteVersionId，需要独立的失败投影路径。
- *
- * 非终态失败时，agent handler 的 catch 块已将 unit 标记为 retryable_failed，
- * 此处无需重复操作，直接返回 false。
- *
- * 终态失败时，将 unit 标记为 terminal_failed，原子取消同一 run 下所有
- * 非终态 unit，并将 run 标记为 needs_attention。
- */
-async function projectAgentJobFailure(input: {
-  job: ClaimedJob;
-  error: unknown;
-  terminal: boolean;
-  retryable: boolean;
-}): Promise<boolean> {
-  const agentUnitId = input.job.payload.agentUnitId;
-  const runId = input.job.payload.generationRunId;
-  if (typeof agentUnitId !== "string" || typeof runId !== "string") return false;
-
-  // 非终态：agent handler 已标记 unit 为 retryable_failed，无需额外投影
-  if (!input.terminal) return false;
-
-  const sanitized = sanitizeOperationalError(input.error);
-  // 2026-08-12+（15a 根因修复）：优先保留结构化错误码——AIConsentRequiredError
-  // 的 code="ai_consent_required" 必须透传到 run/unit（前端 GenerationFailureDialog
-  // 据此引导用户去 /settings#model 签署 AI 使用协议）；此前只用
-  // `agent_${category}`（=agent_configuration）导致前端拿不到 consent 错误码，
-  // 用户只看到普通失败、无引导。
-  const errorCode = sanitized.code ?? `agent_${sanitized.category}`;
-
-  return withWorkerWorkspaceTransaction(
-    { workspaceId: input.job.workspaceId, userId: input.job.requestedBy },
-    async (tx) => {
-      const [run] = await tx
-        .select({
-          id: schema.cardGenerationRuns.id,
-          workspaceId: schema.cardGenerationRuns.workspaceId,
-          status: schema.cardGenerationRuns.status,
-          stateVersion: schema.cardGenerationRuns.stateVersion,
-          nextEventSequence: schema.cardGenerationRuns.nextEventSequence,
-        })
-        .from(schema.cardGenerationRuns)
-        .where(and(
-          eq(schema.cardGenerationRuns.id, runId),
-          eq(schema.cardGenerationRuns.workspaceId, input.job.workspaceId),
-        ))
-        .for("update");
-      if (!run || AGENT_TERMINAL_RUN_STATUSES.has(run.status)) return false;
-
-      const now = new Date();
-
-      // 标记当前 unit 为 terminal_failed
-      await tx
-        .update(schema.cardGenerationUnits)
-        .set({
-          status: "terminal_failed",
-          errorCode,
-          finishedAt: now,
-          updatedAt: now,
-        })
-        .where(and(
-          eq(schema.cardGenerationUnits.id, agentUnitId),
-          eq(schema.cardGenerationUnits.workspaceId, input.job.workspaceId),
-        ));
-
-      // 原子取消同一 run 下所有非终态 unit（保留 waiting_child parent 链）。
-      // 检查点保留修复：waiting_child 的 parent 正在等它的子任务完成，是重试恢复的
-      // 关键链路。若把 parent 也取消，用户 `/retry` 重排队失败的子任务后，
-      // resumeParentSupervisorIfNeeded 因 parent 已终态而无法恢复，run 会永久卡死。
-      // 因此只取消 pending/running/retryable_failed 等兄弟 unit，保留 waiting_child。
-      await tx
-        .update(schema.cardGenerationUnits)
-        .set({
-          status: "cancelled",
-          finishedAt: now,
-          updatedAt: now,
-        })
-        .where(and(
-          eq(schema.cardGenerationUnits.runId, runId),
-          eq(schema.cardGenerationUnits.workspaceId, input.job.workspaceId),
-          inArray(schema.cardGenerationUnits.status, NON_TERMINAL_UNIT_STATUSES),
-          ne(schema.cardGenerationUnits.id, agentUnitId),
-          ne(schema.cardGenerationUnits.status, "waiting_child"),
-        ));
-
-      // 标记 run 为 needs_attention
-      await tx
-        .update(schema.cardGenerationRuns)
-        .set({
-          status: "needs_attention",
-          stateVersion: sql`${schema.cardGenerationRuns.stateVersion} + 1`,
-          nextEventSequence: sql`${schema.cardGenerationRuns.nextEventSequence} + 1`,
-          errorCode,
-          retryable: input.retryable,
-          updatedAt: now,
-          finishedAt: now,
-        })
-        .where(and(
-          eq(schema.cardGenerationRuns.id, run.id),
-          eq(schema.cardGenerationRuns.workspaceId, run.workspaceId),
-          eq(schema.cardGenerationRuns.stateVersion, run.stateVersion),
-        ));
-
-      return true;
-    },
-  );
-}
-
-/**
- * 关键补漏:SQL reaper 只翻转 jobs 行。worker 崩溃/断电后被 reaper 判死的
- * generation job,如果不在这里投影回 run/unit,对应检查点会永远停在
- * "running",整个 run 卡死且 /retry 也捞不到它。lease 已失效,但失败
- * 投影本身不依赖 lease(走 workspace 事务 + run 行锁),可以安全补账。
- */
-async function projectReapedGenerationJobs(reapedIds: string[]): Promise<number> {
-  if (reapedIds.length === 0) return 0;
-  let deadRows: Array<{
-    id: string;
-    type: string;
-    payload: Record<string, unknown> | null;
-    workspaceId: string;
-    requestedBy: string | null;
-    attempts: number;
-    generationRunId: string | null;
-    lastError: string | null;
-  }> = [];
-  try {
-    // jobs RLS 重开（0100）后跨 workspace 维护读经 SECURITY DEFINER 函数
-    //（migrator owner BYPASSRLS）；worker 仅 EXECUTE，不直接读 jobs 全表。
-    const rows = await db.execute<{
-      id: string;
-      type: string;
-      payload: Record<string, unknown> | null;
-      workspace_id: string;
-      requested_by: string | null;
-      attempts: number;
-      generation_run_id: string | null;
-      last_error: string | null;
-    }>(sql`
-      SELECT * FROM public.ailearn_find_reaped_generation_jobs(
-        ARRAY[${sql.join(reapedIds.map((id) => sql`${id}::uuid`), sql`, `)}]
-      )
-    `);
-    deadRows = rows.map((row) => ({
-      id: String(row.id),
-      type: String(row.type),
-      payload: row.payload,
-      workspaceId: String(row.workspace_id),
-      requestedBy: row.requested_by,
-      attempts: Number(row.attempts ?? 0),
-      generationRunId: row.generation_run_id,
-      lastError: row.last_error,
-    }));
-  } catch (error) {
-    logger.error(
-      { error: sanitizeOperationalError(error) },
-      "failed to load reaped jobs for generation projection",
-    );
-    return 0;
-  }
-  let projected = 0;
-  // PERF-46/62 修复：将串行处理改为分批并行处理。
-  // 每个 dead job 的 failure projection 涉及独立的事务（workspace 事务 + 行锁），
-  // 不同 workspace/run 之间无依赖关系，可以安全并行。
-  // 使用每批 10 个的并发度，避免同时开启过多事务。
-  const BATCH_SIZE = 10;
-  for (let i = 0; i < deadRows.length; i += BATCH_SIZE) {
-    const batch = deadRows.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(
-      batch.map(async (row) => {
-        if (!row.generationRunId) return false;
-        const updated = await projectGenerationFailure(
-          {
-            id: row.id,
-            type: row.type,
-            payload: (row.payload ?? {}) as Record<string, unknown>,
-            workspaceId: row.workspaceId,
-            requestedBy: row.requestedBy,
-            attempts: row.attempts ?? 0,
-            // lease 已失效，但失败投影不依赖 lease（workspace 事务 + 行锁）
-            leaseToken: "",
-          },
-          row.lastError
-            ?? new Error("job lease expired and was reaped (worker crash or stall)"),
-          true,
-          true,
-        );
-        return updated;
-      }),
-    );
-    projected += results.filter(Boolean).length;
-  }
-  return projected;
-}
-
-/**
- * Recover the narrow crash window where a queue job reached `dead` but its
- * generation checkpoint projection failed (for example because the process
- * restarted between the two transactions). Without this startup sweep the
- * unit can remain `running` forever even though no active queue job exists.
- *
- * Select only the latest job for each generation unit. Older dead attempts
- * must never overwrite a newer pending/running/succeeded retry.
- */
-export async function reconcileTerminalGenerationJobs(): Promise<number> {
-  const batchSize = 500;
-  const maxBatches = 10;
-  let projectedTotal = 0;
-  let skippedBatches = 0;
-  for (let batch = 0; batch < maxBatches; batch += 1) {
-    const rows = await db.execute<{ id: string }>(sql`
-      SELECT * FROM public.ailearn_latest_dead_generation_job_ids(${batchSize})
-    `) as unknown as Array<{ id: string }>;
-    if (rows.length === 0) break;
-
-    // ARCH-08 fix: Wrap batch projection in try/catch and continue the loop
-    // even when a batch yields 0 projections. Previously, a batch returning
-    // 0 projected jobs would break the loop, leaving subsequent batches of
-    // dead jobs unprocessed until the next restart. Now we only break when
-    // there are no more rows to process (rows.length < batchSize means we've
-    // consumed all dead jobs).
-    let projected = 0;
-    try {
-      projected = await projectReapedGenerationJobs(rows.map((row) => row.id));
-      projectedTotal += projected;
-    } catch (error) {
-      // Log and continue — individual job projections inside
-      // projectReapedGenerationJobs already have their own try/catch, but
-      // a catastrophic failure (e.g., DB disconnect) should not prevent
-      // the next batch from being attempted.
-      logger.error(
-        { batch, error: sanitizeOperationalError(error) },
-        "reconcileTerminalGenerationJobs: batch projection failed, continuing to next batch",
-      );
-      skippedBatches += 1;
-    }
-
-    if (rows.length < batchSize) break;
-  }
-  if (skippedBatches > 0) {
-    logger.warn(
-      { skippedBatches, projectedTotal },
-      "reconcileTerminalGenerationJobs: some batches were skipped due to errors; remaining dead jobs will be retried on next startup",
-    );
-  }
-  return projectedTotal;
-}
 
 // 处理单个 job 的完整生命周期（claim 后的执行 + 状态转换 + 指标记录）。
 // 从 tick() 提取为独立函数以支持 fire-and-forget 并行处理。
@@ -505,12 +181,6 @@ export async function processJob(job: ClaimedJob): Promise<void> {
         );
         return;
       }
-      await projectGenerationFailure(
-        job,
-        err,
-        true,
-        false,
-      );
       jobNonRetryableDeadTotal.labels(job.type).inc();
       jobTerminalTotal.labels(job.type, "dead").inc();
       logger.error(
@@ -540,21 +210,9 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     }
     // OPS-01: 记录重试或终态
     if (failure.status === "pending") {
-      await projectGenerationFailure(
-        job,
-        err,
-        false,
-        true,
-      );
       jobRetriesTotal.labels(job.type).inc();
     } else {
       // dead — 终态
-      await projectGenerationFailure(
-        job,
-        err,
-        true,
-        true,
-      );
       jobTerminalTotal.labels(job.type, "dead").inc();
     }
     logger.error(
@@ -619,46 +277,6 @@ function isMemoryAvailable(): boolean {
 }
 
 const inflight = new Set<Promise<void>>();
-const assessmentOutboxInflight = new Set<Promise<void>>();
-const ASSESSMENT_OUTBOX_LEASE_MS = 120_000;
-// 2026-08-11：workerId 含进程级随机后缀（防多副本 PID 碰撞）
-const ASSESSMENT_OUTBOX_WORKER_ID = `learning-assessment-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
-// 2026-08-11：NaN 回退默认 1（非法 env 值此前使 outbox 并发恒 0 静默停摆）
-const ASSESSMENT_OUTBOX_CONCURRENCY = (() => {
-  const raw = Number(process.env.LEARNING_SESSION_ASSESSMENT_OUTBOX_CONCURRENCY ?? 1);
-  return Math.max(1, Math.min(4, Number.isFinite(raw) ? raw : 1));
-})();
-
-async function tickLearningAssessmentOutbox(): Promise<void> {
-  if (process.env.LEARNING_SESSION_ASSESSMENT_OUTBOX_WORKER_ENABLED === "false") return;
-  // 2026-08-11：shuttingDown 时停止 claim（在途 job 由续期/收尾完成）
-  if (shuttingDown) return;
-  const available = ASSESSMENT_OUTBOX_CONCURRENCY - assessmentOutboxInflight.size;
-  if (available <= 0) return;
-  // PERF-36: 并发发起可用数量的 claim（每个 claim 是独立事务 + FOR UPDATE SKIP LOCKED，
-  // 天然互不冲突），替代逐一串行 claim，减少队列吞吐时的串行延迟。
-  const claims = await Promise.all(
-    Array.from({ length: available }, () =>
-      claimLearningAssessmentOutbox(
-        ASSESSMENT_OUTBOX_WORKER_ID,
-        ASSESSMENT_OUTBOX_LEASE_MS,
-      )),
-  );
-  for (const job of claims) {
-    if (!job) continue;
-    const promise = processLearningAssessmentOutboxJob(job).then(() => undefined).catch((error) => {
-      logger.error(
-        { jobId: job.id, error: sanitizeOperationalError(error) },
-        "learning assessment outbox processing failed unexpectedly",
-      );
-    });
-    assessmentOutboxInflight.add(promise);
-    promise.then(
-      () => assessmentOutboxInflight.delete(promise),
-      () => assessmentOutboxInflight.delete(promise),
-    );
-  }
-}
 
 async function refreshQueueMetrics(nowMs = Date.now()): Promise<void> {
   if (nowMs - lastQueueMetricsRefreshAt < QUEUE_METRICS_REFRESH_MS) return;
@@ -712,9 +330,6 @@ export async function tick(): Promise<void> {
       },
       "reaped stale running jobs",
     );
-    // Reaped-to-dead generation jobs must settle their run checkpoints, or
-    // the run wedges in a permanently "running" unit (see helper docstring).
-    await projectReapedGenerationJobs(reaped.ids);
   }
 
   // F-010: 优雅关停时不认领新作业
@@ -724,28 +339,17 @@ export async function tick(): Promise<void> {
   // 当进程堆内存超过阈值时，暂停认领新 job，等待现有 job 完成释放内存
   if (!isMemoryAvailable()) return;
 
-  // The Learning Session command outbox is identifier-only. The worker
-  // restores workspace/user RLS context inside the direct application service.
-  try {
-    await tickLearningAssessmentOutbox();
-  } catch (error) {
-    logger.warn(
-      { error: sanitizeOperationalError(error) },
-      "learning assessment outbox poll failed",
-    );
-  }
-
   // 22 方案：桌宠日记每日 01:00 调度 + 记忆衰减维护（内部 throttle）。
   await tickCompanionDailySummaryScheduler();
   await tickCompanionMemoryMaintenance();
 
   // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
   // 各 handler 事务中的 advisory lock 保证并发安全：
-  //   execute_card_agent_turn — workspace 级锁，同 workspace 串行化
   //   align_evidence   — key point 级锁，不同 key point 可并行
   //   evaluate_validation — 输入维度锁（cardId+keyPointId+userId+question+userAnswer），
   //                         防止相同输入的不同 job 并发写入重复 validation_events
   // AI 模型调用是网络 IO，并行处理可让多个 job 的模型调用同时进行。
+  // V1 evaluate_validation handler removed — no longer dispatched.
   const available = QUEUE_CONCURRENCY - inflight.size;
   if (available <= 0) return;
 
@@ -866,62 +470,6 @@ export async function main() {
     "AI worker started, polling for jobs…",
   );
   try {
-    const reconciled = await reconcileTerminalGenerationJobs();
-    if (reconciled > 0) {
-      logger.warn(
-        { projectedJobs: reconciled },
-        "reconciled terminal generation jobs left without a durable checkpoint projection",
-      );
-    }
-  } catch (error) {
-    logger.error(
-      { error: sanitizeOperationalError(error) },
-      "startup generation projection reconciliation failed",
-    );
-  }
-  // P0-06b: 启动时执行 Supervisor Agent reconciler
-  try {
-    const supResult = await reconcileSupervisorAgentRuns();
-    if (supResult.cancelledUnits > 0 || supResult.resumedParents > 0) {
-      logger.warn(
-        supResult,
-        "startup supervisor agent reconciliation: cleaned up dangling units and resumed stuck parents",
-      );
-    }
-  } catch (error) {
-    logger.error(
-      { error: sanitizeOperationalError(error) },
-      "startup supervisor agent reconciliation failed",
-    );
-  }
-  // P0-06b: 定时执行 Supervisor Agent reconciler（每 60 秒）
-  const RECONCILER_INTERVAL_MS = 60_000;
-  const reconcilerTimer = setInterval(async () => {
-    // 2026-08-12（队列面审计 P1-2）：dead→generation 投影兜底并入周期
-    // reconciler——此前只在启动时跑一次（index.ts:826），job 置 dead 与
-    // checkpoint 投影两个事务之间进程若重启，unit 永久 running 且 /retry
-    // 捞不到，只能靠下次重启修复（生产可能数月不重启）。周期化后最多
-    // 60s 自愈。幂等：ailearn_latest_dead_generation_job_ids 只选每个 unit
-    // 的最新 dead job，projectReapedGenerationJobs 条件更新。
-    try {
-      await reconcileTerminalGenerationJobs();
-    } catch (error) {
-      logger.error(
-        { error: sanitizeOperationalError(error) },
-        "periodic dead-generation projection failed",
-      );
-    }
-    try {
-      await reconcileSupervisorAgentRuns();
-    } catch (error) {
-      logger.error(
-        { error: sanitizeOperationalError(error) },
-        "periodic supervisor agent reconciliation failed",
-      );
-    }
-  }, RECONCILER_INTERVAL_MS);
-  reconcilerTimer.unref(); // 不阻止进程退出
-  try {
     while (true) {
       try {
         await tick();
@@ -930,11 +478,10 @@ export async function main() {
       }
       // F-010: 优雅关停 — 不再认领新作业，等待在途 job 完成后退出。
       if (shuttingDown) {
-        if (inflight.size > 0 || assessmentOutboxInflight.size > 0) {
+        if (inflight.size > 0) {
           logger.info(
             {
               inflight: inflight.size,
-              assessmentOutboxInflight: assessmentOutboxInflight.size,
             },
             "shutdown signal received, waiting for in-flight jobs to finish…",
           );
@@ -955,14 +502,13 @@ export async function main() {
             t.unref();
           });
           await Promise.race([
-            Promise.allSettled([...inflight, ...assessmentOutboxInflight]),
+            Promise.allSettled([...inflight]),
             drainDeadline,
           ]);
-          if (inflight.size > 0 || assessmentOutboxInflight.size > 0) {
+          if (inflight.size > 0) {
             logger.warn(
               {
                 inflight: inflight.size,
-                assessmentOutboxInflight: assessmentOutboxInflight.size,
                 drainTimeoutMs,
               },
               "drain timeout reached, exiting anyway (orphaned running jobs will be reaped by the next worker startup)",
@@ -975,7 +521,6 @@ export async function main() {
       await new Promise((resolve) => setTimeout(resolve, currentPollMs));
     }
   } finally {
-    clearInterval(reconcilerTimer);
     if (notifyConnection) {
       await notifyConnection.end({ timeout: 2 }).catch(() => undefined);
     }

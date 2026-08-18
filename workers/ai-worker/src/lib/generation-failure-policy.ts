@@ -1,6 +1,21 @@
 import { isNonRetryableError, AgentOutputError } from "./non-retryable-errors.ts";
-import { BudgetExhaustedError } from "../agent/budget.ts";
-import { CoverageViolationError } from "../agent/coverage-ledger.ts";
+
+// V1 agent 相关类已删除，保留类型兼容
+export class BudgetExhaustedError extends Error {
+  constructor() {
+    super("budget exhausted");
+    this.name = "BudgetExhaustedError";
+  }
+}
+
+export class CoverageViolationError extends Error {
+  readonly code: string;
+  constructor(code: string) {
+    super(`coverage violation: ${code}`);
+    this.name = "CoverageViolationError";
+    this.code = code;
+  }
+}
 
 export type GenerationRunBlockedCode =
   | "ai_consent_required"

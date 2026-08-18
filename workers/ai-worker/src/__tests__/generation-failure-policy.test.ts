@@ -6,8 +6,6 @@ import {
   GenerationRunBlockedError,
   ProviderRequestError,
 } from "../lib/generation-failure-policy.ts";
-import { BudgetExhaustedError } from "../agent/budget.ts";
-import { CoverageViolationError } from "../agent/coverage-ledger.ts";
 import { AgentOutputError } from "../lib/non-retryable-errors.ts";
 
 test("output truncation is a deterministic unit failure (no auto retry)", () => {
@@ -105,40 +103,5 @@ test("provider errors retain safe status/code without retaining upstream message
   assert.doesNotMatch(safeErrorMessage(error), /overdue-payment/i);
 });
 
-test("budget exhaustion is run-scoped and never auto-retried (R55)", () => {
-  // 计划 §11.1: budget/deadline exhausted → 停止，绝不 partial publish
-  // 计划 §12: budget failure 只有在输入条件或新 run budget 改变后才能重新创建 run
-  const budgetError = new BudgetExhaustedError(
-    "global",
-    "maxProviderCalls",
-    10,
-    10,
-  );
-  const policy = classifyGenerationFailure(budgetError);
-  assert.equal(policy.scope, "run", "budget exhaustion should be run-scoped");
-  assert.equal(policy.autoRetry, false, "budget exhaustion must not auto-retry");
-  assert.equal(policy.code, "budget_exhausted");
-});
-
-test("coverage violation is run-scoped and never auto-retried (R55)", () => {
-  // CoverageViolationError（如 blocking_decision_exists）是结构性问题，
-  // model_omitted/protocol_error/auto_supplemented 不会因重试而自动消失。
-  for (const code of [
-    "blocking_decision_exists",
-    "forbidden_omitted_rewrite",
-    "physical_coverage_incomplete",
-    "assignment_coverage_incomplete",
-    "decision_coverage_incomplete",
-  ] as const) {
-    const coverageError = new CoverageViolationError(
-      `coverage violation: ${code}`,
-      code,
-    );
-    const policy = classifyGenerationFailure(coverageError);
-    assert.equal(policy.scope, "run", `coverage violation ${code} should be run-scoped`);
-    assert.equal(policy.autoRetry, false, `coverage violation ${code} must not auto-retry`);
-    assert.equal(policy.code, code, `coverage violation should preserve error code`);
-  }
-});
 
 

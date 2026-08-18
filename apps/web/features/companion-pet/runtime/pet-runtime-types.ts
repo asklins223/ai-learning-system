@@ -171,6 +171,8 @@ export interface PetRuntimeStateV1 {
   emotion: PetEmotionStateV1;
   window: PetWindowInteractionStateV1;
   context: PetRuntimeContextV1;
+  // §12.3/§16.3：最近一次 assistant.final 携带的记忆引用（≤3 条，仅 UI 展示）。
+  lastMemoryRefs: { memoryId: string; kind: string; content: string }[];
 }
 
 // ─── 3. Events (02 §3.1 / §3.2, P1 subset) ───────────────────────────────

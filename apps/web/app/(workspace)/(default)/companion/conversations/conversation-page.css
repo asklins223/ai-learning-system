@@ -2175,6 +2175,16 @@ a.history-reference > svg:last-child {
   font: 500 12px/1.4 var(--font-ui); color: var(--color-text-secondary); cursor: pointer;
 }
 .companion-memory-toolbar label input { accent-color: var(--color-action); }
+.memory-export {
+  font: 550 12px/1.4 var(--font-ui); padding: 6px 14px; border-radius: var(--radius-sm);
+  border: 1px solid var(--color-divider); color: var(--color-text);
+  background: var(--color-paper); cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.memory-export:hover { background: var(--color-paper-muted); }
+.memory-export:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.memory-export:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .memory-clear-all {
   margin-left: auto; font: 550 12px/1.4 var(--font-ui); padding: 6px 14px; border-radius: var(--radius-sm);
   border: 1px solid var(--color-danger); color: var(--color-danger-text);

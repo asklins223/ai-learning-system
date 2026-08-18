@@ -2,6 +2,7 @@
  * 真桌宠记忆路由（22-real-desktop-pet-memory-context-prd-tdd.md §3.3/§13.2）。
  *
  * GET    /companion/memory                    — 列表 + 搜索 + 筛选
+ * GET    /companion/memory/export             — 导出全部记忆 JSON
  * POST   /companion/memory                    — 手动新增
  * POST   /companion/memory/:id/confirm        — 确认候选
  * POST   /companion/memory/:id/reject         — 拒绝候选（soft delete）
@@ -30,6 +31,7 @@ import {
   correctMemory,
   deleteMemory,
   dismissMemory,
+  exportMemories,
   listMemories,
   listMemoryConflicts,
   pinMemory,
@@ -164,6 +166,16 @@ export async function memoryRoutes(app: FastifyInstance) {
         return reply.code(409).send({ error: "memory_conflict_resolution_failed", message: "冲突裁决失败" });
       }
       return reply.header("Cache-Control", "no-store").send({ version: 1, ok: true });
+    },
+  );
+
+  app.get(
+    "/companion/memory/export",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
+      const result = await withWorkspaceTransaction(scope, (tx) => exportMemories(tx, scope));
+      return reply.header("Cache-Control", "no-store").send(result);
     },
   );
 

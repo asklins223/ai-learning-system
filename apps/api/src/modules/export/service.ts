@@ -16,6 +16,12 @@ import {
 import { aiArtifacts } from "../../db/schema/ai.ts";
 import { jobs } from "../../db/schema/job.ts";
 import { workspaces, workspaceMembers, users, onboardingStates } from "../../db/schema/identity.ts";
+import {
+  learningObjectivesV2,
+  learningObjectiveRevisionsV2,
+  learningObjectiveOriginsV2,
+  learningCardsV2,
+} from "../../db/schema/card-generation-v2.ts";
 // v0.6: 可信掌握闭环新表 (计划 §6.9: 导出/导入覆盖)
 import {
   validationQuestionRubricItems,
@@ -163,6 +169,7 @@ async function batchUpdateUsersPersonalWorkspace(
 type CreatedIdCursor = { createdAt: Date; id: string };
 type UpdatedIdCursor = { updatedAt: Date; id: string };
 type NoteIdVersionCursor = { noteId: string; versionNo: number; id: string };
+type PlainIdCursor = { id: string };
 /**
  * 导出整个 workspace 的数据为 JSON。
  * F-033: 使用事务保证一致性快照。
@@ -734,7 +741,15 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
     // PERF-15 优化：Phase 3 — 依赖 Phase 1/2 结果的查询并行执行
     // N-009: 导出相关 users（不导出 passwordHash，恢复时需要重新设置密码）
     const userIds = [workspace?.ownerId, ...memberRows.map((m) => m.userId)].filter(Boolean) as string[];
-    const [userRows, submissionJobRows] = await Promise.all([
+    const [
+      userRows,
+      submissionJobRows,
+      // Plan 23 CS-07
+      objectiveRows,
+      objectiveRevisionRows,
+      objectiveOriginRows,
+      learningCardV2Rows,
+    ] = await Promise.all([
       userIds.length
         ? tx.query.users.findMany({
             where: inArray(users.id, userIds),
@@ -758,6 +773,42 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
             return jobs;
           })()
         : Promise.resolve([]),
+      // Plan 23 CS-07：learning_objectives_v2
+      loadInBatches({
+        load: (c: PlainIdCursor | null) =>
+          tx.select().from(learningObjectivesV2).where(and(
+            eq(learningObjectivesV2.workspaceId, workspaceId),
+            c ? lt(learningObjectivesV2.id, c.id) : undefined,
+          )).orderBy(desc(learningObjectivesV2.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ id: last.id }),
+      }),
+      // Plan 23 CS-07：learning_objective_revisions_v2
+      loadInBatches({
+        load: (c: PlainIdCursor | null) =>
+          tx.select().from(learningObjectiveRevisionsV2).where(and(
+            eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+            c ? lt(learningObjectiveRevisionsV2.id, c.id) : undefined,
+          )).orderBy(desc(learningObjectiveRevisionsV2.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ id: last.id }),
+      }),
+      // Plan 23 CS-07：learning_objective_origins_v2
+      loadInBatches({
+        load: (c: PlainIdCursor | null) =>
+          tx.select().from(learningObjectiveOriginsV2).where(and(
+            eq(learningObjectiveOriginsV2.workspaceId, workspaceId),
+            c ? lt(learningObjectiveOriginsV2.id, c.id) : undefined,
+          )).orderBy(desc(learningObjectiveOriginsV2.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ id: last.id }),
+      }),
+      // Plan 23 CS-07：learning_cards_v2
+      loadInBatches({
+        load: (c: PlainIdCursor | null) =>
+          tx.select().from(learningCardsV2).where(and(
+            eq(learningCardsV2.workspaceId, workspaceId),
+            c ? lt(learningCardsV2.id, c.id) : undefined,
+          )).orderBy(desc(learningCardsV2.id)).limit(EXPORT_BATCH),
+        cursorFrom: (last) => ({ id: last.id }),
+      }),
     ]);
 
     return {
@@ -812,6 +863,11 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
       validationPointAssessments: pointAssessmentRows,
       schedulingShadowDecisions: shadowDecisionRows,
       validationQualitySignals: qualitySignalRows,
+      // Plan 23 CS-07：导出 learning_objectives_v2 / revision / origin / cards_v2
+      objectivesV2: objectiveRows,
+      objectiveRevisionsV2: objectiveRevisionRows,
+      objectiveOriginsV2: objectiveOriginRows,
+      learningCardsV2: learningCardV2Rows,
       /**
        * 导出清单：明确哪些数据已包含、哪些未包含。
        * N-009: 新增 users 和 workspaceMembers，导出文件现在可用于恢复。

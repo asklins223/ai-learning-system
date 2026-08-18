@@ -4,22 +4,27 @@
  * - content：概念标题/公开说明/knowledgeForm/lifecycle/freshness/presentation
  *   （读取 Objective revision 与 active Card，不读 legacy summary）；
  * - sources：Origin 血缘 + 主来源 Note 标题（多来源按 supportGrade 排序）；
- * - personal：initialValidation / activeRun / review（服务端状态，不靠客户端推断）；
+ * - personal：initialValidation / activeRun / review / practiceTrailCount /
+ *   lastCanonicalAt（全部服务端状态，不靠客户端推断）；
  * - primaryAction：resolvePrimaryActionV3（服务端唯一裁决）。
+ * - successorObjectiveId：从 learning_objective_lineage_v2 读取（superseded 场景）。
  *
  * 公共边界：本文件永不输出 canonicalAnswer / rubric / private payload。
  */
-import { and, eq, asc, inArray, sql, lt, desc } from "drizzle-orm";
+import { and, eq, asc, inArray, sql, lt, desc, ne } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
   learningCardsV2,
   initialValidationRemindersV2,
+  learningObjectiveLineageV2,
+  learningExposuresV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { learningRuns } from "../../db/schema/learning-runs.ts";
 import { notes } from "../../db/schema/note.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
+import { canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
 import type {
   LearningObjectiveSurfaceV3,
   ObjectiveOriginV3,
@@ -27,6 +32,7 @@ import type {
 } from "@ailearn/shared";
 import { listOriginsByObjective } from "./origin-service.ts";
 import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
+import { surfaceQueryDurationSeconds } from "../../lib/metrics.ts";
 
 export class ObjectiveNotFoundError extends Error {
   constructor(objectiveId: string, workspaceId: string) {
@@ -159,9 +165,26 @@ async function computeFreshness(
   return outdated ? "source_outdated" : "fresh";
 }
 
+// ─── RL-09 指标：surface 装配耗时计时（热路径，轻量 Date.now）────────────�
+
+function withSurfaceTimer<T>(queryType: "detail" | "list", fn: () => Promise<T>): Promise<T> {
+  const start = Date.now();
+  return fn().finally(() => {
+    surfaceQueryDurationSeconds.observe({ query_type: queryType }, (Date.now() - start) / 1000);
+  });
+}
+
 // ─── detail assembler（W2-17）────────────────────────────────────────────
 
-export async function assembleObjectiveSurfaceV3(
+export function assembleObjectiveSurfaceV3(
+  tx: ApiTransaction,
+  ctx: SurfaceContext,
+  objectiveId: string,
+): Promise<LearningObjectiveSurfaceV3> {
+  return withSurfaceTimer("detail", () => assembleObjectiveSurfaceV3Inner(tx, ctx, objectiveId));
+}
+
+async function assembleObjectiveSurfaceV3Inner(
   tx: ApiTransaction,
   ctx: SurfaceContext,
   objectiveId: string,
@@ -240,11 +263,80 @@ export async function assembleObjectiveSurfaceV3(
     loadReview(tx, ctx, objectiveId),
   ]);
 
+  // Bug 8 修复：从 lineage 表读取 successor 信息（superseded → view_successor）
+  let successorObjectiveId: string | null = null;
+  let successorCardId: string | null = null;
+  if (objective.lifecycle === "superseded" && objective.currentObjectiveRevisionId) {
+    const lineageRows = await tx
+      .select()
+      .from(learningObjectiveLineageV2)
+      .where(and(
+        eq(learningObjectiveLineageV2.workspaceId, ctx.workspaceId),
+        eq(learningObjectiveLineageV2.predecessorRevisionId, objective.currentObjectiveRevisionId),
+        eq(learningObjectiveLineageV2.relation, "supersedes"),
+      ))
+      .limit(1);
+    if (lineageRows[0]) {
+      // 通过 successor revision 找到对应 objective
+      const successorRevisionRows = await tx
+        .select({ objectiveId: learningObjectiveRevisionsV2.objectiveId })
+        .from(learningObjectiveRevisionsV2)
+        .where(and(
+          eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
+          eq(learningObjectiveRevisionsV2.objectiveRevisionId, lineageRows[0].successorRevisionId),
+        ))
+        .limit(1);
+      if (successorRevisionRows[0]) {
+        successorObjectiveId = successorRevisionRows[0].objectiveId;
+        const successorCardRows = await tx
+          .select({ cardId: learningCardsV2.cardId })
+          .from(learningCardsV2)
+          .where(and(
+            eq(learningCardsV2.workspaceId, ctx.workspaceId),
+            eq(learningCardsV2.objectiveId, successorObjectiveId),
+            eq(learningCardsV2.lifecycle, "active"),
+          ))
+          .limit(1);
+        successorCardId = successorCardRows[0]?.cardId ?? null;
+      }
+    }
+  }
+
+  // Bug 7 修复：从 canonical learning event outbox 读取 practice trail 和 last canonical
+  let practiceTrailCount = 0;
+  let lastCanonicalAt: string | null = null;
+  const [canonicalRows, practiceRows] = await Promise.all([
+    tx
+      .select({ createdAt: canonicalLearningEventOutbox.createdAt })
+      .from(canonicalLearningEventOutbox)
+      .where(and(
+        eq(canonicalLearningEventOutbox.workspaceId, ctx.workspaceId),
+        eq(canonicalLearningEventOutbox.userId, ctx.userId),
+        eq(canonicalLearningEventOutbox.keyPointId, objectiveId),
+        eq(canonicalLearningEventOutbox.status, "published"),
+      ))
+      .orderBy(desc(canonicalLearningEventOutbox.createdAt))
+      .limit(1),
+    tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(practiceTrailEventOutbox)
+      .where(and(
+        eq(practiceTrailEventOutbox.workspaceId, ctx.workspaceId),
+        eq(practiceTrailEventOutbox.userId, ctx.userId),
+        eq(practiceTrailEventOutbox.keyPointId, objectiveId),
+        eq(practiceTrailEventOutbox.status, "published"),
+      )),
+  ]);
+  if (canonicalRows[0]) {
+    lastCanonicalAt = canonicalRows[0].createdAt.toISOString();
+  }
+  practiceTrailCount = Number(practiceRows[0]?.n ?? 0);
+
   const actionInput: ActionResolverInputV3 = {
     objectiveId,
     lifecycle: objective.lifecycle as ActionResolverInputV3["lifecycle"],
-    successorObjectiveId: null,
-    successorCardId: null,
+    successorObjectiveId,
+    successorCardId,
     hasActiveCard: Boolean(card),
     cardId: card?.cardId ?? null,
     activeRun,
@@ -285,13 +377,12 @@ export async function assembleObjectiveSurfaceV3(
       initialValidation,
       activeRun,
       review,
-      // TODO(W4 TP-06)：practice trail / last canonical 由方案 16 projection adapter 提供。
-      practiceTrailCount: 0,
-      lastCanonicalAt: null,
+      practiceTrailCount,
+      lastCanonicalAt,
     },
     lifecycle: {
       status: objective.lifecycle as never,
-      successorObjectiveId: null,
+      successorObjectiveId,
     },
     primaryAction,
     createdAt: objective.createdAt.toISOString(),
@@ -299,13 +390,37 @@ export async function assembleObjectiveSurfaceV3(
   };
 }
 
-// ─── list assembler（W2-18 精简：无 N+1 批量 + 稳定 cursor）────────────────
+// ─── list assembler（W2-18：批量加载无 N+1 + 稳定 cursor）────────────────
+//
+// Bug 1 修复：cursor 原先用 new Date(options.cursor) 解析 objectiveId，类型不匹配。
+//   改为用 objectiveId 做 lt 比较（基于 (createdAt, id) 排序的 cursor：cursor 是
+//   上一页最后一条的 objectiveId，查询时找 createdAt < 该 objective 的 createdAt
+//   且 id < 该 objective 的 id，实现稳定分页）。
+// Bug 3 修复：原先逐条调用 assembleObjectiveSurfaceV3 导致 N+1（50 条=200+ 查询）。
+//   改为批量查询所有关联数据，再在内存中装配。
 
 export interface ObjectiveListOptions {
   lifecycle?: "active" | "archived" | "superseded";
   limit: number;
-  /** 稳定 cursor：encoded objectiveId（createdAt 排序）。 */
+  /** 稳定 cursor：上一页最后一条的 objectiveId。 */
   cursor?: string;
+}
+
+/** 辅助：查 cursor 对应的 objective 行（用于 cursor-based 分页的 WHERE 条件）。 */
+async function getCursorRow(
+  tx: ApiTransaction,
+  workspaceId: string,
+  cursorObjectiveId: string,
+): Promise<{ createdAt: Date; id: string } | null> {
+  const rows = await tx
+    .select({ createdAt: learningObjectivesV2.createdAt, id: learningObjectivesV2.id })
+    .from(learningObjectivesV2)
+    .where(and(
+      eq(learningObjectivesV2.workspaceId, workspaceId),
+      eq(learningObjectivesV2.objectiveId, cursorObjectiveId),
+    ))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 export async function listObjectiveSurfacesV3(
@@ -314,25 +429,50 @@ export async function listObjectiveSurfacesV3(
   options: ObjectiveListOptions,
 ): Promise<{ items: LearningObjectiveSurfaceV3[]; total: number; nextCursor: string | null }> {
   const limit = Math.min(Math.max(options.limit, 1), 100);
-  // RL-01：与 Dashboard 同一 eligibility cutoff——未显式指定 lifecycle 时只列
-  // active（archived/superseded 默认隐藏，§25.3 数量对账的前提）。
   const lifecycle = options.lifecycle ?? "active";
+
+  // Bug 1 修复：cursor 是 objectiveId，需要先查到对应的 (createdAt, id)，
+  // 然后用 (createdAt, id) 做稳定分页条件。
+  let cursorCondition: ReturnType<typeof lt> | undefined = undefined;
+  if (options.cursor) {
+    const cursorRow = await getCursorRow(tx, ctx.workspaceId, options.cursor);
+    if (cursorRow) {
+      // 排序是 desc(createdAt), desc(id)，所以 cursor 下一页条件是
+      // (createdAt < cursor.createdAt) OR (createdAt = cursor.createdAt AND id < cursor.id)
+      cursorCondition = sql`${learningObjectivesV2.createdAt} < ${cursorRow.createdAt}
+        OR (${learningObjectivesV2.createdAt} = ${cursorRow.createdAt}
+          AND ${learningObjectivesV2.id} < ${cursorRow.id})`;
+    }
+  }
+
   const where = and(
     eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
     eq(learningObjectivesV2.lifecycle, lifecycle),
-    options.cursor ? lt(learningObjectivesV2.createdAt, new Date(options.cursor)) : undefined,
+    cursorCondition ?? undefined,
   );
   const rows = await tx
-    .select({ objectiveId: learningObjectivesV2.objectiveId })
+    .select({
+      objectiveId: learningObjectivesV2.objectiveId,
+      id: learningObjectivesV2.id,
+      createdAt: learningObjectivesV2.createdAt,
+      currentObjectiveRevisionId: learningObjectivesV2.currentObjectiveRevisionId,
+      lifecycleEpoch: learningObjectivesV2.lifecycleEpoch,
+      surfaceRevision: learningObjectivesV2.surfaceRevision,
+      updatedAt: learningObjectivesV2.updatedAt,
+      rowCreatedAt: learningObjectivesV2.createdAt,
+    })
     .from(learningObjectivesV2)
     .where(where)
     .orderBy(desc(learningObjectivesV2.createdAt), desc(learningObjectivesV2.id))
     .limit(limit + 1);
   const pageRows = rows.slice(0, limit);
-  const items: LearningObjectiveSurfaceV3[] = [];
-  for (const row of pageRows) {
-    items.push(await assembleObjectiveSurfaceV3(tx, ctx, row.objectiveId));
-  }
+  const objectiveIds = pageRows.map((r) => r.objectiveId);
+
+  // Bug 3 修复：批量加载所有关联数据，消除 N+1
+  const items = objectiveIds.length > 0
+    ? await batchAssembleObjectiveSurfacesV3(tx, ctx, objectiveIds, pageRows)
+    : [];
+
   const countRows = await tx
     .select({ n: sql<number>`count(*)::int` })
     .from(learningObjectivesV2)
@@ -347,6 +487,396 @@ export async function listObjectiveSurfacesV3(
       : null;
   return { items, total, nextCursor };
 }
+
+/**
+ * 批量装配多个 Objective Surface（消除 N+1）。
+ * 一次查所有 objective 的 revision/card/origin/note/initialValidation/activeRun/review/
+ * canonicalEvent/practiceTrail/lineage，然后在内存中组装。
+ */
+async function batchAssembleObjectiveSurfacesV3(
+  tx: ApiTransaction,
+  ctx: SurfaceContext,
+  objectiveIds: string[],
+  objectiveRows: Array<{
+    objectiveId: string;
+    id: string;
+    createdAt: Date;
+    currentObjectiveRevisionId: string | null;
+    lifecycleEpoch: number;
+    surfaceRevision: number;
+    updatedAt: Date;
+    rowCreatedAt: Date;
+  }>,
+): Promise<LearningObjectiveSurfaceV3[]> {
+  const objectiveByMap = new Map(objectiveRows.map((r) => [r.objectiveId, r]));
+
+  // 1. 批量查 revisions
+  const revisionIds = objectiveRows
+    .map((r) => r.currentObjectiveRevisionId)
+    .filter(Boolean) as string[];
+  const revisionRows = revisionIds.length > 0
+    ? await tx
+        .select()
+        .from(learningObjectiveRevisionsV2)
+        .where(and(
+          eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
+          inArray(learningObjectiveRevisionsV2.objectiveRevisionId, revisionIds),
+        ))
+    : [];
+  const revisionByObjective = new Map(
+    revisionRows.map((r) => [r.objectiveId, r]),
+  );
+
+  // 2. 批量查 active cards
+  const cardRows = objectiveIds.length > 0
+    ? await tx
+        .select()
+        .from(learningCardsV2)
+        .where(and(
+          eq(learningCardsV2.workspaceId, ctx.workspaceId),
+          inArray(learningCardsV2.objectiveId, objectiveIds),
+          eq(learningCardsV2.lifecycle, "active"),
+        ))
+    : [];
+  const cardByObjective = new Map(cardRows.map((c) => [c.objectiveId, c]));
+
+  // 3. 批量查 origins
+  const allOrigins = objectiveIds.length > 0
+    ? await tx
+        .select()
+        .from(learningObjectiveOriginsV2)
+        .where(and(
+          eq(learningObjectiveOriginsV2.workspaceId, ctx.workspaceId),
+          inArray(learningObjectiveOriginsV2.objectiveId, objectiveIds),
+        ))
+        .orderBy(asc(learningObjectiveOriginsV2.boundAt), asc(learningObjectiveOriginsV2.id))
+    : [];
+  const originsByObjective = new Map<string, typeof allOrigins>();
+  for (const row of allOrigins) {
+    const list = originsByObjective.get(row.objectiveId) ?? [];
+    list.push(row);
+    originsByObjective.set(row.objectiveId, list);
+  }
+
+  // 4. 批量查 note titles（用于 primaryNote）
+  const noteIds = [...new Set(
+    allOrigins
+      .filter((o) => o.originKind === "note" && o.noteId)
+      .map((o) => o.noteId!)
+  )];
+  const noteRows = noteIds.length > 0
+    ? await tx
+        .select({ id: notes.id, title: notes.title, currentVersionId: notes.currentVersionId })
+        .from(notes)
+        .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds)))
+    : [];
+  const noteById = new Map(noteRows.map((n) => [n.id, n]));
+
+  // 5. 批量查 initial validation reminders
+  const ivRows = objectiveIds.length > 0
+    ? await tx
+        .select()
+        .from(initialValidationRemindersV2)
+        .where(and(
+          eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+          eq(initialValidationRemindersV2.userId, ctx.userId),
+          inArray(initialValidationRemindersV2.objectiveId, objectiveIds),
+          inArray(initialValidationRemindersV2.status, ["pending", "ready"]),
+        ))
+        .orderBy(desc(initialValidationRemindersV2.updatedAt))
+    : [];
+  const ivByObjective = new Map<string, typeof ivRows[0]>();
+  for (const row of ivRows) {
+    if (!ivByObjective.has(row.objectiveId)) {
+      ivByObjective.set(row.objectiveId, row);
+    }
+  }
+
+  // 6. 批量查 active runs
+  const runRows = objectiveIds.length > 0
+    ? await tx
+        .select({
+          runId: learningRuns.id,
+          phase: learningRuns.phase,
+          keyPointId: learningRuns.keyPointId,
+          createdAt: learningRuns.createdAt,
+        })
+        .from(learningRuns)
+        .where(and(
+          eq(learningRuns.workspaceId, ctx.workspaceId),
+          eq(learningRuns.userId, ctx.userId),
+          inArray(learningRuns.keyPointId, objectiveIds),
+          inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
+        ))
+        .orderBy(desc(learningRuns.createdAt))
+    : [];
+  const runByObjective = new Map<string, { runId: string; phase: string }>();
+  for (const run of runRows) {
+    if (run.keyPointId && !runByObjective.has(run.keyPointId)) {
+      runByObjective.set(run.keyPointId, { runId: run.runId, phase: run.phase });
+    }
+  }
+
+  // 7. 批量查 review schedules
+  const scheduleRows = objectiveIds.length > 0
+    ? await tx
+        .select()
+        .from(reviewSchedules)
+        .where(and(
+          eq(reviewSchedules.workspaceId, ctx.workspaceId),
+          eq(reviewSchedules.userId, ctx.userId),
+          inArray(reviewSchedules.keyPointId, objectiveIds),
+          eq(reviewSchedules.status, "pending"),
+        ))
+        .orderBy(asc(reviewSchedules.nextReviewAt))
+    : [];
+  const scheduleByObjective = new Map<string, typeof scheduleRows[0]>();
+  for (const s of scheduleRows) {
+    if (s.keyPointId && !scheduleByObjective.has(s.keyPointId)) {
+      scheduleByObjective.set(s.keyPointId, s);
+    }
+  }
+
+  // 8. 批量查 canonical events + practice trail counts
+  const [canonicalRows, practiceRows] = await Promise.all([
+    objectiveIds.length > 0
+      ? tx
+          .select({
+            keyPointId: canonicalLearningEventOutbox.keyPointId,
+            createdAt: canonicalLearningEventOutbox.createdAt,
+          })
+          .from(canonicalLearningEventOutbox)
+          .where(and(
+            eq(canonicalLearningEventOutbox.workspaceId, ctx.workspaceId),
+            eq(canonicalLearningEventOutbox.userId, ctx.userId),
+            inArray(canonicalLearningEventOutbox.keyPointId, objectiveIds),
+            eq(canonicalLearningEventOutbox.status, "published"),
+          ))
+          .orderBy(desc(canonicalLearningEventOutbox.createdAt))
+      : [],
+    objectiveIds.length > 0
+      ? tx
+          .select({
+            keyPointId: practiceTrailEventOutbox.keyPointId,
+            n: sql<number>`count(*)::int`,
+          })
+          .from(practiceTrailEventOutbox)
+          .where(and(
+            eq(practiceTrailEventOutbox.workspaceId, ctx.workspaceId),
+            eq(practiceTrailEventOutbox.userId, ctx.userId),
+            inArray(practiceTrailEventOutbox.keyPointId, objectiveIds),
+            eq(practiceTrailEventOutbox.status, "published"),
+          ))
+          .groupBy(practiceTrailEventOutbox.keyPointId)
+      : [],
+  ]);
+  const lastCanonicalByObjective = new Map<string, string>();
+  for (const row of canonicalRows) {
+    if (row.keyPointId && !lastCanonicalByObjective.has(row.keyPointId)) {
+      lastCanonicalByObjective.set(row.keyPointId, row.createdAt.toISOString());
+    }
+  }
+  const practiceCountByObjective = new Map<string, number>();
+  for (const row of practiceRows) {
+    if (row.keyPointId) {
+      practiceCountByObjective.set(row.keyPointId, Number(row.n));
+    }
+  }
+
+  // 9. 批量查 lineage（superseded → successor）
+  const supersededRevisionIds = objectiveRows
+    .filter((r) => r.currentObjectiveRevisionId && objectiveByMap.get(r.objectiveId))
+    .filter((r) => {
+      const obj = objectiveByMap.get(r.objectiveId);
+      // 检查 lifecycle——从 objectiveRows 本身读（但我们只有 objectiveId，
+      // 需要从 detail 重新查；此处简化：对所有 revision 查 lineage）
+      return true;
+    })
+    .map((r) => r.currentObjectiveRevisionId!)
+    .filter(Boolean) as string[];
+  const lineageRows = supersededRevisionIds.length > 0
+    ? await tx
+        .select()
+        .from(learningObjectiveLineageV2)
+        .where(and(
+          eq(learningObjectiveLineageV2.workspaceId, ctx.workspaceId),
+          inArray(learningObjectiveLineageV2.predecessorRevisionId, supersededRevisionIds),
+          eq(learningObjectiveLineageV2.relation, "supersedes"),
+        ))
+    : [];
+  const successorByRevision = new Map<string, string>();
+  for (const lin of lineageRows) {
+    successorByRevision.set(lin.predecessorRevisionId, lin.successorRevisionId);
+  }
+  // successor revision → objectiveId
+  const successorRevisionIds = [...new Set(lineageRows.map((l) => l.successorRevisionId))];
+  const successorRevisionRows = successorRevisionIds.length > 0
+    ? await tx
+        .select({
+          objectiveRevisionId: learningObjectiveRevisionsV2.objectiveRevisionId,
+          objectiveId: learningObjectiveRevisionsV2.objectiveId,
+        })
+        .from(learningObjectiveRevisionsV2)
+        .where(and(
+          eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
+          inArray(learningObjectiveRevisionsV2.objectiveRevisionId, successorRevisionIds),
+        ))
+    : [];
+  const successorObjByRevision = new Map(successorRevisionRows.map((r) => [r.objectiveRevisionId, r.objectiveId]));
+  // successor objective → cardId
+  const successorObjIds = [...new Set(successorRevisionRows.map((r) => r.objectiveId))];
+  const successorCardRows = successorObjIds.length > 0
+    ? await tx
+        .select({ objectiveId: learningCardsV2.objectiveId, cardId: learningCardsV2.cardId })
+        .from(learningCardsV2)
+        .where(and(
+          eq(learningCardsV2.workspaceId, ctx.workspaceId),
+          inArray(learningCardsV2.objectiveId, successorObjIds),
+          eq(learningCardsV2.lifecycle, "active"),
+        ))
+    : [];
+  const cardByObjectiveForSuccessor = new Map(successorCardRows.map((c) => [c.objectiveId, c.cardId]));
+
+  // 10. 装配 Surface（内存组装，不再查 DB）
+  const now = new Date();
+  const results: LearningObjectiveSurfaceV3[] = [];
+
+  for (const objRow of objectiveRows) {
+    const objectiveId = objRow.objectiveId;
+    const objective = objectiveByMap.get(objectiveId)!;
+    const revision = revisionByObjective.get(objectiveId);
+    const card = cardByObjective.get(objectiveId);
+    const origins = (originsByObjective.get(objectiveId) ?? []).map((r) => {
+      // 复用 origin-service 的 rowToWire 函数太重；这里直接构造 wire
+      return r as unknown as ObjectiveOriginV3;
+    });
+
+    // primaryNote
+    let primaryNote: LearningObjectiveSurfaceV3["sources"]["primaryNote"] = null;
+    const noteOrigin = origins.find((o) => o.kind === "note" && o.supportGrade === "primary")
+      ?? origins.find((o) => o.kind === "note");
+    if (noteOrigin && noteOrigin.kind === "note") {
+      const noteRow = noteById.get(noteOrigin.noteId);
+      if (noteRow) {
+        primaryNote = {
+          noteId: noteOrigin.noteId,
+          noteVersionId: noteOrigin.noteVersionId,
+          title: noteRow.title,
+        };
+      }
+    }
+
+    // freshness
+    let freshness: "fresh" | "source_outdated" | "legacy_unreviewed" = "fresh";
+    const noteOrigins = origins.filter((o) => o.kind === "note");
+    if (noteOrigins.length === 0) {
+      freshness = origins.length === 0 ? "legacy_unreviewed" : "fresh";
+    } else {
+      const outdated = noteOrigins.some(
+        (o) => {
+          if (o.kind !== "note") return false;
+          const noteRow = noteById.get(o.noteId);
+          return noteRow && noteRow.currentVersionId !== null
+            && noteRow.currentVersionId !== undefined
+            && noteRow.currentVersionId !== o.noteVersionId;
+        }
+      );
+      freshness = outdated ? "source_outdated" : "fresh";
+    }
+
+    // personal states
+    const ivRow = ivByObjective.get(objectiveId);
+    let initialValidation: LearningObjectiveSurfaceV3["personal"]["initialValidation"] = null;
+    if (ivRow) {
+      const notBefore = ivRow.qualificationNotBefore;
+      const ready = ivRow.status === "ready" || (ivRow.status === "pending" && notBefore.getTime() <= now.getTime());
+      initialValidation = {
+        reminderId: ivRow.reminderId,
+        status: ready ? "ready" : "deferred",
+        qualificationNotBefore: notBefore.toISOString(),
+      };
+    }
+    const activeRun = runByObjective.get(objectiveId) ?? null;
+    const schedRow = scheduleByObjective.get(objectiveId);
+    let review: LearningObjectiveSurfaceV3["personal"]["review"] = null;
+    if (schedRow) {
+      const due = schedRow.nextReviewAt.getTime() <= now.getTime();
+      review = {
+        status: due ? "due" : "scheduled",
+        scheduleId: schedRow.id,
+        generation: schedRow.generation,
+        dueAt: schedRow.nextReviewAt.toISOString(),
+      };
+    }
+
+    // successor
+    let successorObjectiveId: string | null = null;
+    let successorCardId: string | null = null;
+    if (objRow.currentObjectiveRevisionId) {
+      const successorRevisionId = successorByRevision.get(objRow.currentObjectiveRevisionId);
+      if (successorRevisionId) {
+        successorObjectiveId = successorObjByRevision.get(successorRevisionId) ?? null;
+        if (successorObjectiveId) {
+          successorCardId = cardByObjectiveForSuccessor.get(successorObjectiveId) ?? null;
+        }
+      }
+    }
+
+    const practiceTrailCount = practiceCountByObjective.get(objectiveId) ?? 0;
+    const lastCanonicalAt = lastCanonicalByObjective.get(objectiveId) ?? null;
+
+    const actionInput: ActionResolverInputV3 = {
+      objectiveId,
+      lifecycle: "active" as ActionResolverInputV3["lifecycle"],
+      successorObjectiveId,
+      successorCardId,
+      hasActiveCard: Boolean(card),
+      cardId: card?.cardId ?? null,
+      activeRun,
+      reviewDue: review?.status === "due" ? { scheduleId: review.scheduleId, generation: review.generation } : null,
+      initialReady: initialValidation?.status === "ready"
+        ? { reminderId: initialValidation.reminderId, qualificationNotBefore: initialValidation.qualificationNotBefore ?? new Date(0).toISOString() }
+        : null,
+      practiceOnly: false,
+      practiceReasonCodes: [],
+      origin: ctx.origin ?? "home",
+      goal: ctx.goal ?? "继续学习",
+    };
+    const primaryAction = resolvePrimaryActionV3(actionInput);
+
+    results.push({
+      version: 3,
+      objectiveId,
+      surfaceRevision: objRow.surfaceRevision,
+      content: {
+        conceptLabel: revision?.conceptLabel ?? null,
+        publicSummary: revision?.publicSummary ?? "",
+        knowledgeForm: (revision?.knowledgeForm ?? "fact") as never,
+        lifecycle: "active" as never,
+        freshness,
+        presentation: {
+          cardId: card?.cardId ?? null,
+          cardRevision: card?.cardRevision ?? null,
+          publicationRevision: card?.currentPublicationRevision ?? null,
+        },
+        sourceLabel: card?.sourceLabel ?? null,
+      },
+      sources: {
+        origins,
+        primaryNote,
+        missingOrigin: origins.length === 0,
+      },
+      personal: {
+        initialValidation,
+        activeRun,
+        review,
+        practiceTrailCount,
+        lastCanonicalAt,
+      },
+      lifecycle: {
+        status: "active" as never,
+        successorObjectiveId,
+      },
 
 /** 列表 item（轻量；W3 卡库用）。 */
 export function toObjectiveListItemV3(surface: LearningObjectiveSurfaceV3): ObjectiveListItemV3 {

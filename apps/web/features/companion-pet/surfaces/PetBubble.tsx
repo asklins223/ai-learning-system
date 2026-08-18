@@ -36,6 +36,7 @@ function turnBubbleView(
   turn: ConversationTurnStateV1,
   scrollRef: React.RefObject<HTMLDivElement | null>,
   onScroll: () => void,
+  memoryRefs: { memoryId: string; kind: string; content: string }[],
 ): BubbleViewV1 | null {
   const userText = "userText" in turn ? turn.userText : undefined;
   const userBubble = userText?.trim() ? (
@@ -147,6 +148,16 @@ function turnBubbleView(
                 </p>
               </div>
             </div>
+            {memoryRefs.length > 0 ? (
+              <div className="pet-bubble-memory-refs" role="note" aria-label="桌宠记得的记忆">
+                <span className="pet-bubble-memory-refs-label">我记得你说过</span>
+                <ul>
+                  {memoryRefs.map((ref) => (
+                    <li key={ref.memoryId} title={ref.content}>{ref.content}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         </div>
       ),
@@ -245,6 +256,7 @@ function bubbleView(
   scrollRef: React.RefObject<HTMLDivElement | null>,
   onScroll: () => void,
   onOpenRoute: (route: AllowedMainRouteV1) => void,
+  lastMemoryRefs: { memoryId: string; kind: string; content: string }[],
 ): BubbleViewV1 | null {
   const voiceView = voiceBubbleView(voice);
   if (voiceView) return voiceView;
@@ -253,7 +265,7 @@ function bubbleView(
     case "hidden":
       return null;
     case "turn":
-      return turnBubbleView(bubble, turn, scrollRef, onScroll);
+      return turnBubbleView(bubble, turn, scrollRef, onScroll, lastMemoryRefs);
     case "incoming":
       // §10.3：手动隐私模式只显示无正文占位，不显示 proactive 正文。
       if (privacyMode) {
@@ -378,8 +390,8 @@ export function PetBubble() {
   }, []);
 
   const view = useMemo(
-    () => bubbleView(bubble, turn, voice, state.context.privacyMode, scrollRef, handleScroll, (route) => void adapter.openMainRoute(route)),
-    [adapter, bubble, turn, voice, state.context.privacyMode, handleScroll],
+    () => bubbleView(bubble, turn, voice, state.context.privacyMode, scrollRef, handleScroll, (route) => void adapter.openMainRoute(route), state.lastMemoryRefs),
+    [adapter, bubble, turn, voice, state.context.privacyMode, handleScroll, state.lastMemoryRefs],
   );
 
   const previewText = turn.kind === "running" || turn.kind === "final" ? turn.previewText : undefined;

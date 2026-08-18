@@ -72,6 +72,7 @@ export function projectPetRuntimeV2(
     activeContext: null,
     proactiveQueue: Array.from({ length: signals.proactiveQueueLength ?? 0 }),
     memorySync: "idle",
+    lastMemoryRefs: [],
   };
 }
 

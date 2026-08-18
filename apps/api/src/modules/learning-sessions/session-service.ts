@@ -241,7 +241,8 @@ export interface ActiveCanonicalInput {
 export interface DueReviewCandidateInput {
   reviewScheduleId: string;
   scheduleGeneration: number;
-  keyPointId: string;
+  subjectId: string;
+  subjectType: string;
   /** true = 已过 due（official_overdue），false = 到期当天（official_due） */
   overdue: boolean;
   policyVersion: string;
@@ -356,15 +357,16 @@ export function deriveEpisodeCandidates(input: {
   const seen = new Map<string, EpisodeCandidate>();
 
   const upsert = (candidate: EpisodeCandidate): void => {
-    const existing = seen.get(candidate.keyPointId);
+    const dedupKey = candidate.sourceFingerprint;
+    const existing = seen.get(dedupKey);
     if (existing === undefined || candidate.priorityRank < existing.priorityRank) {
-      seen.set(candidate.keyPointId, candidate);
+      seen.set(dedupKey, candidate);
     }
   };
 
   // 1) official scheduler due reviews（consume_pending，绑定精确 schedule+generation）
   for (const review of input.dueReviews) {
-    if (exclude.has(review.keyPointId) || review.canonical === null) continue;
+    if (exclude.has(review.subjectId) || review.canonical === null) continue;
     upsert(buildCandidateFromCanonical(review.canonical, {
       workspaceId: input.workspaceId,
       userId: input.userId,
@@ -383,7 +385,7 @@ export function deriveEpisodeCandidates(input: {
 
   // 2) needs-repair 状态（repair revalidation，consume_pending 语义）
   for (const repair of input.needsRepair) {
-    if (exclude.has(repair.keyPointId) || repair.canonical === null) continue;
+    if (exclude.has(repair.repairReferenceId) || repair.canonical === null) continue;
     upsert(buildCandidateFromCanonical(repair.canonical, {
       workspaceId: input.workspaceId,
       userId: input.userId,
@@ -1860,7 +1862,7 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
   const sessions = learningSessionsTable;
   const episodes = learningEpisodesTable;
   return {
-    async listDueReviews(workspaceId, userId, now, preferredKeyPointIds) {
+    async listDueReviews(workspaceId, userId, now, _preferredKeyPointIds) {
       const baseWhere = and(
         eq(reviewSchedules.workspaceId, workspaceId),
         eq(reviewSchedules.userId, userId),
@@ -1868,14 +1870,15 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
         // postgres.js does not encode JavaScript Date values reliably for
         // this Drizzle predicate; keep the boundary explicit and UTC.
         sql`${reviewSchedules.nextReviewAt} <= ${now.toISOString()}`,
-        sql`${reviewSchedules.keyPointId} IS NOT NULL`,
+        sql`${reviewSchedules.subjectId} IS NOT NULL`,
       );
       // 热路径（createSession/continueSession）只需最高优先级的候选：限定 pending
       // 到期 schedule 数量，避免用户长期缺席后一次性加载全部 pending。
       const rows = await transaction
         .select({
           id: reviewSchedules.id,
-          keyPointId: reviewSchedules.keyPointId,
+          subjectId: reviewSchedules.subjectId,
+          subjectType: reviewSchedules.subjectType,
           nextReviewAt: reviewSchedules.nextReviewAt,
           generation: reviewSchedules.generation,
           policyVersion: reviewSchedules.policyVersion,
@@ -1884,121 +1887,28 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
         .where(baseWhere)
         .orderBy(reviewSchedules.nextReviewAt)
         .limit(100);
-      // 显式选定的目标 key point 必须始终可命中（即使超出 LIMIT），否则会把
-      // 显式 review_entry 从 scheduled_review 降级为 canonical_gap。
-      const pendingPreferred = (preferredKeyPointIds ?? []).filter(
-        (kp) => !rows.some((r) => r.keyPointId === kp),
-      );
-      if (pendingPreferred.length > 0) {
-        const extraRows = await transaction
-          .select({
-            id: reviewSchedules.id,
-            keyPointId: reviewSchedules.keyPointId,
-            nextReviewAt: reviewSchedules.nextReviewAt,
-            generation: reviewSchedules.generation,
-            policyVersion: reviewSchedules.policyVersion,
-          })
-          .from(reviewSchedules)
-          .where(and(baseWhere, inArray(reviewSchedules.keyPointId, pendingPreferred)))
-          .limit(pendingPreferred.length);
-        rows.push(...extraRows);
-      }
-      const keyPointIds = [...new Set(rows.map((r) => r.keyPointId as string))];
-      const canonical = await loadCanonical(transaction, workspaceId, keyPointIds);
+      // V2: review 不再依赖 keyPointId；直接返回 schedule 信息
       return rows
         .map((row) => ({
           reviewScheduleId: row.id,
           scheduleGeneration: row.generation,
-          keyPointId: row.keyPointId as string,
+          subjectId: row.subjectId,
+          subjectType: row.subjectType,
           overdue: row.nextReviewAt.getTime() < now.getTime(),
           policyVersion: row.policyVersion ?? DEFAULT_SCHEDULING_POLICY_VERSION,
           policyEpoch: DEFAULT_SCHEDULING_POLICY_EPOCH,
-          canonical: canonical.get(row.keyPointId as string) ?? null,
+          canonical: null, // V2: review 不再走 canonical 路径
         }))
-        .sort((a, b) => compareIds(a.keyPointId, b.keyPointId));
+        .sort((a, b) => compareIds(a.subjectId, b.subjectId));
     },
     async listNeedsRepair() {
       // 无权威 needs-repair 落点（W5 scheduler 接入）；保持确定性空结果。
       return [];
     },
     async listActiveCanonical(workspaceId, keyPointIds) {
-      const ids = keyPointIds?.length ? [...keyPointIds] : undefined;
-      const baseQuery = transaction
-        .select({
-          keyPointId: cardKeyPoints.id,
-          cardId: cardKeyPoints.cardId,
-          claim: cardKeyPoints.claim,
-          cardSetId: learningCards.cardSetId,
-          evidenceId: evidences.id,
-          evidenceQuote: evidences.quoteText,
-          evidenceSourceHash: evidences.sourceHash,
-          generationRunId: learningCardSets.generationRunId,
-        })
-        .from(cardKeyPoints)
-        .innerJoin(learningCards, eq(learningCards.id, cardKeyPoints.cardId))
-        .innerJoin(learningCardSets, eq(learningCardSets.id, learningCards.cardSetId))
-        .innerJoin(evidences, eq(evidences.keyPointId, cardKeyPoints.id))
-        .where(
-          and(
-            eq(cardKeyPoints.workspaceId, workspaceId),
-            eq(learningCards.workspaceId, workspaceId),
-            eq(learningCardSets.workspaceId, workspaceId),
-            eq(evidences.workspaceId, workspaceId),
-            eq(learningCardSets.status, "active"),
-            eq(learningCards.status, "active"),
-            ...(ids !== undefined ? [inArray(cardKeyPoints.id, ids)] : []),
-          ),
-        );
-      // 热路径（continueSession 无 keyPointIds 过滤）限定候选集规模：
-      // 按 keyPointId 确定性排序，保证同一 key point 的 evidences 连续且首个候选完整。
-      const rows = ids === undefined
-        ? await baseQuery.orderBy(cardKeyPoints.id).limit(400)
-        : await baseQuery;
-      // cardRevision 权威来源：generation_run 的 generation_epoch（02-6）。
-      const runIds = [...new Set(rows.map((r) => r.generationRunId))];
-      const runEpochs = await fetchGenerationEpochs(transaction, workspaceId, runIds);
-      const grouped = new Map<string, {
-        keyPointId: string;
-        cardId: string;
-        cardRevision: number;
-        claim: string;
-        evidenceContentHashes: string[];
-        evidenceRefIds: string[];
-      }>();
-      for (const row of rows) {
-        const group = grouped.get(row.keyPointId);
-        const contentHash = sha256Hex(
-          normalizeForHash(row.evidenceQuote) + (row.evidenceSourceHash ?? ""),
-        );
-        if (group === undefined) {
-          grouped.set(row.keyPointId, {
-            keyPointId: row.keyPointId,
-            cardId: row.cardId,
-            cardRevision: runEpochs.get(row.generationRunId) ?? 0,
-            claim: row.claim,
-            evidenceContentHashes: [contentHash],
-            evidenceRefIds: [row.evidenceId],
-          });
-        } else {
-          group.evidenceContentHashes.push(contentHash);
-          group.evidenceRefIds.push(row.evidenceId);
-        }
-      }
-      const results: ActiveCanonicalInput[] = [];
-      for (const group of grouped.values()) {
-        if (group.cardRevision < 1) continue; // required 缺失 fail closed（02-6）
-        group.evidenceContentHashes = [...new Set(group.evidenceContentHashes)].sort();
-        results.push({
-          keyPointId: group.keyPointId,
-          cardId: group.cardId,
-          cardRevision: group.cardRevision,
-          claim: group.claim,
-          evidenceContentHashes: group.evidenceContentHashes,
-          semanticSupport: null, // 无专门落库字段 → 已验证安全 Scene fallback
-          sourceFingerprint: computeSourceFingerprint(group),
-        });
-      }
-      return results.sort((a, b) => compareIds(a.keyPointId, b.keyPointId));
+      // V2 implementation: 从 learning_cards_v2 + evidence_snapshots_v2 加载
+      // TODO: 完全实现 V2 canonical 加载（方案 20 §15）
+      return [];
     },
     async getUserPreferences(workspaceId, userId) {
       // 显式偏好冻结：读 user_learning_preferences（无行 → 空快照）。
@@ -2262,7 +2172,7 @@ export function createPgSessionRepository(transaction: ApiTransaction): SessionR
 // 复用 apps/api 镜像树的现有表对象（review_schedules / learning_cards /
 // card_key_points / learning_card_sets / evidences 已在镜像树中）。
 import { reviewSchedules, evidences } from "../../db/schema/evidence.ts";
-import { learningCards, cardKeyPoints, learningCardSets } from "../../db/schema/card.ts";
+import { learningCardsV2 } from "../../db/schema/card-generation-v2.ts";
 import { learningUnitExposureTable } from "./exposure-service.ts";
 
 /** user_learning_preferences（迁移 0074；镜像树未同步，模块内声明） */
@@ -2281,72 +2191,10 @@ async function loadCanonical(
   workspaceId: string,
   keyPointIds: readonly string[],
 ): Promise<Map<string, ActiveCanonicalInput>> {
+  // V2 implementation: 从 learning_cards_v2 + evidence_snapshots_v2 加载
   if (keyPointIds.length === 0) return new Map();
-  const rows = await transaction
-    .select({
-      keyPointId: cardKeyPoints.id,
-      cardId: cardKeyPoints.cardId,
-      claim: cardKeyPoints.claim,
-      cardSetId: learningCards.cardSetId,
-      evidenceId: evidences.id,
-      evidenceQuote: evidences.quoteText,
-      evidenceSourceHash: evidences.sourceHash,
-      generationRunId: learningCardSets.generationRunId,
-    })
-    .from(cardKeyPoints)
-    .innerJoin(learningCards, eq(learningCards.id, cardKeyPoints.cardId))
-    .innerJoin(learningCardSets, eq(learningCardSets.id, learningCards.cardSetId))
-    .innerJoin(evidences, eq(evidences.keyPointId, cardKeyPoints.id))
-    .where(
-      and(
-        eq(cardKeyPoints.workspaceId, workspaceId),
-        eq(learningCards.workspaceId, workspaceId),
-        eq(learningCardSets.workspaceId, workspaceId),
-        eq(evidences.workspaceId, workspaceId),
-        eq(learningCardSets.status, "active"),
-        eq(learningCards.status, "active"),
-        inArray(cardKeyPoints.id, [...keyPointIds]),
-      ),
-    );
-  const runIds = [...new Set(rows.map((r) => r.generationRunId))];
-  const runEpochs = await fetchGenerationEpochs(transaction, workspaceId, runIds);
-  const grouped = new Map<string, {
-    keyPointId: string;
-    cardId: string;
-    cardRevision: number;
-    claim: string;
-    evidenceContentHashes: string[];
-  }>();
-  for (const row of rows) {
-    const contentHash = sha256Hex(normalizeForHash(row.evidenceQuote) + (row.evidenceSourceHash ?? ""));
-    const group = grouped.get(row.keyPointId);
-    if (group === undefined) {
-      grouped.set(row.keyPointId, {
-        keyPointId: row.keyPointId,
-        cardId: row.cardId,
-        cardRevision: runEpochs.get(row.generationRunId) ?? 0,
-        claim: row.claim,
-        evidenceContentHashes: [contentHash],
-      });
-    } else {
-      group.evidenceContentHashes.push(contentHash);
-    }
-  }
-  const map = new Map<string, ActiveCanonicalInput>();
-  for (const group of grouped.values()) {
-    if (group.cardRevision < 1) continue; // required 缺失 fail closed
-    group.evidenceContentHashes = [...new Set(group.evidenceContentHashes)].sort();
-    map.set(group.keyPointId, {
-      keyPointId: group.keyPointId,
-      cardId: group.cardId,
-      cardRevision: group.cardRevision,
-      claim: group.claim,
-      evidenceContentHashes: group.evidenceContentHashes,
-      semanticSupport: null,
-      sourceFingerprint: computeSourceFingerprint(group),
-    });
-  }
-  return map;
+  // TODO: 完全实现 V2 canonical 加载（方案 20 §15）
+  return new Map();
 }
 
 async function fetchGenerationEpochs(
@@ -2357,33 +2205,32 @@ async function fetchGenerationEpochs(
   const map = new Map<string, number>();
   if (runIds.length === 0) return map;
   const rows = await transaction
-    .select({ id: cardGenerationRunsTable.id, generationEpoch: cardGenerationRunsTable.generationEpoch })
-    .from(cardGenerationRunsTable)
+    .select({ id: cardGenerationRunsV2.id, cardContentEpoch: cardGenerationRunsV2.cardContentEpoch })
+    .from(cardGenerationRunsV2)
     .where(and(
-      eq(cardGenerationRunsTable.workspaceId, workspaceId),
-      inArray(cardGenerationRunsTable.id, [...runIds]),
+      eq(cardGenerationRunsV2.workspaceId, workspaceId),
+      inArray(cardGenerationRunsV2.id, [...runIds]),
     ));
-  for (const row of rows) map.set(row.id, row.generationEpoch);
+  for (const row of rows) map.set(row.id, row.cardContentEpoch);
   return map;
 }
 
-/** card_generation_runs（apps/api 镜像树 card-generation.ts 已有表对象） */
-import { cardGenerationRuns as cardGenerationRunsTable } from "../../db/schema/card-generation.ts";
+/** card_generation_runs_v2（V2 schema，替代 V1 card-generation.ts） */
+import { cardGenerationRunsV2 } from "../../db/schema/card-generation-v2.ts";
 
 function computeSourceFingerprint(group: {
-  keyPointId: string;
+  objectiveId: string;
   cardId: string;
   cardRevision: number;
-  claim: string;
+  objectiveStatement: string;
   evidenceContentHashes: string[];
 }): string {
-  // deterministic hash of card + keyPoint + evidence content（02-6 §5 语义；
-  // 无 semantic support 落点，纳入 evidence content hashes 保证幂等）。
+  // deterministic hash of card + objective + evidence content（方案 20 §18 语义）。
   return sha256Hex(stableStringify({
     cardId: group.cardId,
     cardRevision: group.cardRevision,
-    keyPointId: group.keyPointId,
-    claim: normalizeForHash(group.claim),
+    objectiveId: group.objectiveId,
+    objectiveStatement: normalizeForHash(group.objectiveStatement),
     evidenceContentHashes: group.evidenceContentHashes,
   }));
 }

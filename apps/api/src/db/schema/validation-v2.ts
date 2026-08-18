@@ -26,8 +26,6 @@ import {
   boolean,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { cardKeyPoints } from "./card.ts";
-import { learningCards } from "./card.ts";
 import { users } from "./identity.ts";
 import { validationQuestions, validationEvents } from "./evidence.ts";
 import { evidences } from "./evidence.ts";
@@ -80,8 +78,7 @@ export const validationSubmissions = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    cardId: uuid("card_id").notNull().references(() => learningCards.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
+    // V1 card/keyPoint references removed
     questionId: uuid("question_id"), // nullable until ready/answer_saved
     context: text("context").notNull(), // initial_validation | review
     reviewAttemptId: uuid("review_attempt_id"), // review context only
@@ -107,18 +104,12 @@ export const validationSubmissions = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    workspaceUserKeyPointIdx: index("val_submissions_w_u_kp_idx").on(
-      t.workspaceId, t.userId, sql`COALESCE(${t.keyPointId}, '00000000-0000-0000-0000-000000000000'::uuid)`, t.status,
-    ),
     startIdempotencyUniqueIdx: uniqueIndex("val_submissions_start_idem_idx").on(
       t.workspaceId, t.userId, t.startIdempotencyKey,
     ),
     reviewAttemptIdx: index("val_submissions_review_attempt_idx").on(t.reviewAttemptId),
     statusIdx: index("val_submissions_status_idx").on(t.workspaceId, t.userId, t.status),
-    // §6.4: 同一 (workspace,user,key_point,context) 最多一个未终态 submission
-    activeUniqueIdx: uniqueIndex("val_submissions_active_unique_idx")
-      .on(t.workspaceId, t.userId, t.keyPointId, t.context)
-      .where(sql`${t.status} NOT IN ('question_blocked', 'completed', 'stale', 'abandoned') AND ${t.keyPointId} IS NOT NULL`),
+    // V1 keyPoint-based unique index removed
   }),
 );
 
@@ -185,7 +176,7 @@ export const validationAssistanceExposures = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    // V1 keyPoint reference removed
     exposureFingerprint: text("exposure_fingerprint").notNull(),
     lastExposureKind: text("last_exposure_kind").notNull(), // pre_submit_source | post_result_feedback
     firstExposedAt: timestamp("first_exposed_at", { withTimezone: true }).notNull(),
@@ -198,9 +189,9 @@ export const validationAssistanceExposures = pgTable(
   },
   (t) => ({
     uniqueExposure: uniqueIndex("val_assist_exp_unique_idx").on(
-      t.workspaceId, t.userId, t.keyPointId, t.exposureFingerprint,
+      t.workspaceId, t.userId, t.exposureFingerprint,
     ),
-    userKeyPointIdx: index("val_assist_exp_user_kp_idx").on(t.userId, t.keyPointId),
+    workspaceUserIdx: index("val_assist_exp_workspace_user_idx").on(t.workspaceId, t.userId),
   }),
 );
 
@@ -245,7 +236,7 @@ export const schedulingShadowDecisions = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
+    // V1 keyPoint reference removed
     sourceType: text("source_type").notNull(), // validation_event | review_attempt
     sourceId: uuid("source_id").notNull(),
     algorithm: text("algorithm").notNull(), // fsrs
@@ -262,7 +253,7 @@ export const schedulingShadowDecisions = pgTable(
     uniqueShadow: uniqueIndex("sched_shadow_unique_idx").on(
       t.sourceType, t.sourceId, t.algorithm, t.parametersVersion,
     ),
-    userKeyPointIdx: index("sched_shadow_user_kp_idx").on(t.userId, t.keyPointId),
+    userIdx: index("sched_shadow_user_idx").on(t.userId),
   }),
 );
 

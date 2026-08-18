@@ -8,8 +8,6 @@ import compress from "@fastify/compress";
 import { logger } from "./lib/logger.ts";
 import { authRoutes } from "./modules/identity/routes.ts";
 import { noteRoutes } from "./modules/note/routes.ts";
-import { cardRoutes, cardJobRoutes } from "./modules/card/routes.ts";
-import { cardSetRoutes } from "./modules/card-set/routes.ts";
 import { jobRoutes } from "./modules/job/routes.ts";
 import { evidenceRoutes } from "./modules/evidence/routes.ts";
 import { validationRoutes } from "./modules/validation/routes.ts";
@@ -21,9 +19,7 @@ import { understandingRoutes } from "./modules/understanding/routes.ts";
 import { searchRoutes } from "./modules/search/routes.ts";
 import { exportRoutes } from "./modules/export/routes.ts";
 import { statsRoutes } from "./modules/stats/routes.ts";
-import { benchmarkRoutes } from "./modules/benchmark/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
-import { cardGenerationRoutes } from "./modules/card-generation/routes.ts";
 import { cardGenerationV2Routes } from "./modules/card-generation-v2/routes.ts";
 import { learningObjectiveRoutes } from "./modules/learning-objectives/routes.ts";
 import { learningDashboardRoutes } from "./modules/learning-dashboard/routes.ts";
@@ -319,10 +315,6 @@ async function main() {
 
   await app.register(authRoutes);
   await app.register(noteRoutes);
-  await app.register(cardRoutes);
-  await app.register(cardJobRoutes);
-  await app.register(cardSetRoutes);
-  await app.register(cardGenerationRoutes);
   // §21.5：Card Generation V2 是原子 capability bundle，默认 fail-closed。
   if (isCardGenerationV2Enabled()) {
     await app.register(cardGenerationV2Routes);
@@ -345,7 +337,6 @@ async function main() {
   await app.register(searchRoutes);
   await app.register(exportRoutes);
   await app.register(statsRoutes);
-  await app.register(benchmarkRoutes);
   await app.register(uploadRoutes);
   await app.register(companionShellRoutes);
   await app.register(learningMetricRoutes);

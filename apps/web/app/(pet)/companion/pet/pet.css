@@ -442,6 +442,41 @@ html:has(.pet-surface-root) body {
   min-width: 0;
 }
 
+/* §12.3/§16.3：记忆引用气泡（“我记得你说过”） */
+.pet-bubble-memory-refs {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--pet-bubble-tone) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--pet-bubble-tone) 16%, transparent);
+}
+
+.pet-bubble-memory-refs-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pet-text-muted, rgba(0, 0, 0, 0.5));
+  display: block;
+  margin-bottom: 4px;
+}
+
+.pet-bubble-memory-refs ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pet-bubble-memory-refs li {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--pet-text-muted, rgba(0, 0, 0, 0.5));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pet-bubble-scroll {
   /* 2026-08-12+（15c）：滚动区 280 → 330px（随气泡 420 高），完整内容在气泡内
      滚动查看，不再提供"完整内容"跳转按钮。 */

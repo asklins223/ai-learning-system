@@ -10,12 +10,9 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { evidenceAlignmentEnum, validationOutcomeEnum, reviewStatusEnum } from "./enums.ts";
-import { cardKeyPoints } from "./card.ts";
 import { noteBlocks, noteImageAssets } from "./note.ts";
-import { learningCards } from "./card.ts";
 import { aiArtifacts } from "./ai.ts";
 import { users } from "./identity.ts";
-import { noteEvidenceSpans, noteImageEvidenceUnits, noteImageInsights } from "./card-generation.ts";
 import type { ValidationFeedback } from "@ailearn/shared";
 
 export const evidences = pgTable(
@@ -23,32 +20,29 @@ export const evidences = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
-    keyPointId: uuid("key_point_id").notNull().references(() => cardKeyPoints.id, { onDelete: "cascade" }),
+    // V1 keyPointId reference removed
     blockId: uuid("block_id").references(() => noteBlocks.id, { onDelete: "set null" }),
     blockOrdinal: integer("block_ordinal"),
     quoteText: text("quote_text").notNull(),
     alignment: evidenceAlignmentEnum("alignment").notNull().default("unaligned"),
     alignmentScore: integer("alignment_score").notNull().default(0), // store 0-100
     alignmentMethod: text("alignment_method").notNull().default("fuzzy"), // embedding | fuzzy | exact | manual
-    evidenceSpanId: uuid("evidence_span_id").references(() => noteEvidenceSpans.id, { onDelete: "set null" }),
+    // V1 evidenceSpanId reference removed
     sourceKind: text("source_kind"),
     charStart: integer("char_start"),
     charEnd: integer("char_end"),
     sourceHash: text("source_hash"),
     imageAssetId: uuid("image_asset_id").references(() => noteImageAssets.id, { onDelete: "set null" }),
-    imageInsightId: uuid("image_insight_id").references(() => noteImageInsights.id, { onDelete: "set null" }),
-    imageEvidenceUnitId: uuid("image_evidence_unit_id").references(() => noteImageEvidenceUnits.id, { onDelete: "set null" }),
     regionJson: jsonb("region_json").$type<{ x: number; y: number; width: number; height: number; page?: number } | null>(),
     extractorVersion: text("extractor_version"),
     userOverride: text("user_override"), // confirmed | downgraded | rejected — 保留向后兼容，新逻辑使用 evidence_overrides 表
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    keyPointIdx: index("evidences_key_point_idx").on(t.keyPointId),
+    // V1 keyPointIdx removed
     blockIdx: index("evidences_block_idx").on(t.blockId),
     workspaceIdx: index("evidences_workspace_idx").on(t.workspaceId),
-    evidenceSpanIdx: index("evidences_span_idx").on(t.workspaceId, t.evidenceSpanId),
-    imageEvidenceIdx: index("evidences_image_evidence_idx").on(t.workspaceId, t.imageEvidenceUnitId),
+    // V1 evidenceSpanIdx and imageEvidenceIdx removed
 
     idWorkspaceUnique: uniqueIndex("evidences_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
@@ -85,8 +79,7 @@ export const validationQuestions = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
-    cardId: uuid("card_id").notNull().references(() => learningCards.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
+    // V1 card/keyPoint references removed
     noteVersionId: uuid("note_version_id"),
     questionType: text("question_type").notNull(), // explain | example | apply
     question: text("question").notNull(),
@@ -107,16 +100,9 @@ export const validationQuestions = pgTable(
     useCount: integer("use_count").notNull().default(0),
   },
   (t) => ({
-    cardIdx: index("validation_questions_card_idx").on(t.cardId),
     workspaceIdx: index("validation_questions_workspace_idx").on(t.workspaceId),
-    keyPointIdx: index("validation_questions_key_point_idx").on(t.keyPointId),
-    // v0.6: 每个 (workspace,user,key_point,source_fingerprint) 最多一条 active question
-    userKeyPointIdx: index("validation_questions_user_kp_idx").on(t.userId, t.keyPointId, t.status),
-    // §6.2: 每个 (workspace,user,key_point,source_fingerprint) 最多一条 active question
-    activeUniqueIdx: uniqueIndex("validation_questions_active_unique_idx")
-      .on(t.workspaceId, t.userId, t.keyPointId, t.sourceFingerprint)
-      .where(sql`${t.status} = 'active' AND ${t.userId} IS NOT NULL AND ${t.keyPointId} IS NOT NULL AND ${t.sourceFingerprint} IS NOT NULL`),
-
+    // V1 card/keyPoint-based indexes removed
+    userIdx: index("validation_questions_user_idx").on(t.userId, t.status),
     idWorkspaceUnique: uniqueIndex("validation_questions_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
@@ -131,8 +117,7 @@ export const validationEvents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    cardId: uuid("card_id").notNull().references(() => learningCards.id, { onDelete: "cascade" }),
-    keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
+    // V1 card/keyPoint references removed
     artifactId: uuid("artifact_id").references(() => aiArtifacts.id, { onDelete: "set null" }),
     question: text("question").notNull(),
     questionType: text("question_type").notNull(), // explain | example | apply
@@ -153,19 +138,15 @@ export const validationEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    cardIdx: index("validation_events_card_idx").on(t.cardId),
     userIdx: index("validation_events_user_idx").on(t.userId, t.createdAt),
-    // 2026-08-12（schema 完整性审计）：0114 workspace 前缀聚合索引
-    // （迁移定义 (workspace_id, created_at DESC)——DESC 与 note/card 同款）
     workspaceCreatedIdx: index("validation_events_workspace_created_idx")
       .on(t.workspaceId, sql`${t.createdAt} desc`),
-    keyPointIdx: index("validation_events_key_point_idx").on(t.keyPointId),
+    // V1 card/keyPoint-based indexes removed
     jobUniqueIdx: uniqueIndex("validation_events_job_unique_idx")
       .on(t.jobId)
       .where(sql`${t.jobId} IS NOT NULL`),
-    // 并发安全兜底：防止相同输入组合的重复写入（advisory lock 的数据库层面兜底）
     inputUniqueIdx: uniqueIndex("validation_events_input_unique_idx")
-      .on(t.workspaceId, t.cardId, sql`COALESCE(${t.keyPointId}, '00000000-0000-0000-0000-000000000000'::uuid)`, t.userId, t.question, t.userAnswer),
+      .on(t.workspaceId, t.userId, t.question, t.userAnswer),
 
     idWorkspaceUnique: uniqueIndex("validation_events_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
@@ -187,8 +168,6 @@ export const reviewSchedules = pgTable(
     nextReviewAt: timestamp("next_review_at", { withTimezone: true }).notNull(),
     intervalDays: integer("interval_days").notNull().default(1),
     lastReviewAt: timestamp("last_review_at", { withTimezone: true }),
-    // ── v0.6 扩展 (计划 §6.6) ──
-    keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
     generation: integer("generation").notNull().default(0),
     policyVersion: text("policy_version"), // discrete-v2
     reasonCode: text("reason_code"),
@@ -206,15 +185,8 @@ export const reviewSchedules = pgTable(
     subjectIdx: index("review_schedules_subject_idx").on(t.subjectType, t.subjectId),
     nextIdx: index("review_schedules_next_idx").on(t.nextReviewAt, t.status),
     userStatusIdx: index("review_schedules_user_status_idx").on(t.userId, t.status, t.nextReviewAt),
-    // v0.6: key point based scheduling
-    keyPointIdx: index("review_schedules_key_point_idx").on(t.keyPointId, t.status, t.nextReviewAt),
-    // 2026-08-12（schema 完整性审计）：0114 listDue 高频路径索引（workspace 前缀）
     workspaceStatusNextIdx: index("review_schedules_workspace_status_next_idx")
       .on(t.workspaceId, t.status, t.nextReviewAt),
-    // §10.6: 每个 (workspace,user,key_point) 最多一条 pending schedule
-    pendingUniqueIdx: uniqueIndex("review_schedules_pending_unique_idx")
-      .on(t.workspaceId, t.userId, t.keyPointId)
-      .where(sql`${t.status} = 'pending' AND ${t.keyPointId} IS NOT NULL`),
 
     idWorkspaceUnique: uniqueIndex("review_schedules_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
@@ -239,7 +211,6 @@ export const reviewAttempts = pgTable(
     subjectId: uuid("subject_id").notNull(),
     validationEventId: uuid("validation_event_id").references(() => validationEvents.id, { onDelete: "set null" }),
     validationQuestionId: uuid("validation_question_id"),
-    keyPointId: uuid("key_point_id").references(() => cardKeyPoints.id, { onDelete: "set null" }),
     evidenceId: uuid("evidence_id").references(() => evidences.id, { onDelete: "set null" }),
     noteVersionId: uuid("note_version_id"),
     answerType: text("answer_type"),
