@@ -14,8 +14,13 @@
 import { sql } from "drizzle-orm";
 import { companionGroundedTutorGrantV1Schema, companionLearningSessionContextV1Schema, companionProposalSnapshotV1Schema, proposedLearningActionPayloadV1Schema, } from "@ailearn/shared";
 import { sha256Utf8V1, canonicalJsonV1 } from "@ailearn/shared/content-hash";
-import type { CompanionLearningContextV1 } from "@ailearn/shared";
+import type { CompanionLearningContextV1, LearningRunOriginV2 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
+// Plan 23 CS-05/CS-06：Objective Surface 派生 companion 上下文（不再依赖 card_key_points.claim）。
+import {
+  listObjectiveSurfacesV3,
+  type SurfaceContext,
+} from "../learning-objectives/surface-service.ts";
 import { deliver } from "./delivery-service.ts";
 import { resolveAuthSurfaceManifestSecret } from "../companion-shell/auth-surface.ts";
 import { getCompanionAccountEpoch } from "./companion-account-epoch.ts";
@@ -26,7 +31,7 @@ import {
 } from "./learning-session-context.ts";
 // 方案 16 §18：LearningRun 工具在 decision 事务内同步执行（与 start_session
 // 的 PREPARE 同模式；confirm 后 proposal 直接 succeeded + resultRef=runId）。
-import { applyAction, createRun, getRunPublicView } from "../learning-runs/run-service.ts";
+import { applyAction, createRun, createRunV2, getRunPublicView, type CreateLearningRunV2Request } from "../learning-runs/run-service.ts";
 import { LearningRunServiceError } from "../learning-runs/run-errors.ts";
 // 方案 16 §18.1：工具网关第二批执行单元（确定性、同事务）。
 import { createUnderstandingRoutePlan } from "../understanding/route-plan-service.ts";
@@ -55,6 +60,10 @@ interface ResolvedCompanionContextInternal extends CompanionLearningContextV1 {
   resumeSessionId: string | null;
   startCardId: string | null;
   startKeyPointId: string | null;
+  // Plan 23 CS-05/CS-06：V2 候选透传字段（用于 payload construction）。
+  resumeObjectiveId: string | null;
+  startObjectiveId: string | null;
+  startOriginV2: LearningRunOriginV2 | null;
 }
 
 function toPublicContext(ctx: ResolvedCompanionContextInternal): CompanionLearningContextV1 {
@@ -68,6 +77,175 @@ function toPublicContext(ctx: ResolvedCompanionContextInternal): CompanionLearni
   };
 }
 
+/**
+ * Plan 23 CS-05/CS-06：兼容 V2 run 请求的 originV2 类型守卫。
+ * pet 不自建 origin 对象；以下仅作 narrow，保证下游 createRunV2 类型安全。
+ */
+function isLearningRunOriginV2(value: unknown): value is LearningRunOriginV2 {
+  if (!value || typeof value !== "object") return false;
+  const kind = (value as { kind?: unknown }).kind;
+  return kind === "card" || kind === "review" || kind === "today" || kind === "star_map" || kind === "onboarding";
+}
+
+/**
+ * Plan 23 CS-05/CS-06：从 Objective Surface 主 action 构造 V2 run 请求。
+ * 绝不从 claim/summary 自推断 run 参数；所有参数都来自 Surface 的 typed action。
+ *
+ * 返回 null 表示当前 action 不适合菜单创建（如 none / refresh）。
+ */
+function buildStartPayloadV2(
+  surface: Awaited<ReturnType<typeof listObjectiveSurfacesV3>>["items"][number],
+): {
+  request: {
+    originV2: LearningRunOriginV2;
+    goal: "stabilize" | "clarify" | "repair" | "transfer" | "explore";
+    idempotencyKey: string;
+    requestedTimeBudgetSeconds?: number;
+    responsePreference?: "adaptive" | "voice" | "text" | "structured";
+  };
+} | null {
+  const objectiveId = surface.objectiveId;
+  const cardId = surface.content.presentation.cardId;
+  let originV2: LearningRunOriginV2;
+  switch (surface.primaryAction.kind) {
+    case "create_run": {
+      const cardRef = cardId ?? surface.objectiveId; // fallback to objectiveId
+      originV2 = { kind: "card", cardId: cardRef, objectiveId };
+      break;
+    }
+    case "create_review_run": {
+      const review = surface.personal.review;
+      if (!review) return null;
+      originV2 = {
+        kind: "review",
+        scheduleId: review.scheduleId,
+        objectiveId,
+        scheduleGeneration: review.generation,
+      };
+      break;
+    }
+    case "resume_run": {
+      // resume 语义走 resume_learning_run；create 入口仍需一个 create 语义。
+      // pet 菜单在 resume 存在时展示 resume 而非 start；此处 fallback 到 card origin
+      // 只是为了候选构建的完整性；实际上 resume 分支会被优先使用。
+      const cardRef = cardId ?? surface.objectiveId;
+      originV2 = { kind: "card", cardId: cardRef, objectiveId };
+      break;
+    }
+    case "view_successor":
+      // view_successor 不是可"创建 run"的 action；菜单不展示。
+      return null;
+    case "refresh":
+    case "practice_only":
+    case "none":
+      // 这些 action 不适合 pet 菜单创建 run。
+      return null;
+    default:
+      return null;
+  }
+  const goal = "stabilize" as const;
+  const idempotencyKey = `pet-menu-v2:${objectiveId}`;
+  return {
+    request: {
+      originV2,
+      goal,
+      idempotencyKey,
+      requestedTimeBudgetSeconds: 180,
+    },
+  };
+}
+
+/**
+ * 过渡期回退：legacy card_key_points / learning_sessions 路径。
+ * 只在没有 active Objective 时触发（RL-17 后整个函数可移除）。
+ */
+async function resolveLegacyCompanionCandidates(
+  tx: ApiTransaction,
+  args: { workspaceId: string; userId: string },
+): Promise<{
+  resumeCandidate: CompanionLearningContextV1["resumeCandidate"];
+  startCandidate: CompanionLearningContextV1["startCandidate"];
+  learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"];
+  learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"];
+}> {
+  const empty: {
+    resumeCandidate: CompanionLearningContextV1["resumeCandidate"];
+    startCandidate: CompanionLearningContextV1["startCandidate"];
+    learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"];
+    learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"];
+  } = {
+    resumeCandidate: null,
+    startCandidate: null,
+    learningRunResumeCandidate: null,
+    learningRunStartCandidate: null,
+  };
+  // 最近 active learning_run（学习运行优先于 learning_session）。
+  const runResumeRows = await tx.execute<{ id: string; key_point_id: string }>(sql`
+    SELECT r.id, r.key_point_id
+    FROM learning_runs r
+    WHERE r.workspace_id = ${args.workspaceId}
+      AND r.user_id = ${args.userId}
+      AND r.phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
+      AND r.sandbox_namespace_id IS NULL
+    ORDER BY r.created_at DESC
+    LIMIT 1
+  `);
+  if (runResumeRows[0]) {
+    const titleRows = await tx.execute<{ claim: string | null }>(sql`
+      SELECT k.claim FROM card_key_points k
+      WHERE k.id = ${runResumeRows[0].key_point_id} AND k.workspace_id = ${args.workspaceId}
+      LIMIT 1
+    `);
+    const title = sanitizeText(titleRows[0]?.claim ?? "", 80) || "继续当前学习";
+    const payload = { kind: "resume_learning_run", runId: runResumeRows[0].id };
+    empty.learningRunResumeCandidate = {
+      candidateId: "learning_run_resume",
+      runId: runResumeRows[0].id,
+      title,
+      targetSummary: sanitizeText(`继续学习：${title}`, 160),
+      impactSummary: "恢复当前学习运行",
+      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
+    };
+  }
+  // 最近有 key point 的卡（构造 start_learning_run 候选；幂等键按 keyPoint 稳定）。
+  const runStartRows = await tx.execute<{
+    key_point_id: string;
+    card_id: string;
+    claim: string | null;
+  }>(sql`
+    SELECT k.id AS key_point_id, k.card_id, k.claim
+    FROM card_key_points k
+    WHERE k.workspace_id = ${args.workspaceId}
+    ORDER BY k.updated_at DESC
+    LIMIT 1
+  `);
+  if (runStartRows[0]) {
+    const claim = runStartRows[0].claim ?? "";
+    const title = sanitizeText(claim, 80) || "开始三分钟巩固";
+    const idempotencyKey = `pet-menu:${runStartRows[0].key_point_id}`;
+    const payload = {
+      kind: "start_learning_run",
+      request: {
+        version: 1,
+        origin: { kind: "card", cardId: runStartRows[0].card_id, keyPointId: runStartRows[0].key_point_id },
+        goal: "stabilize",
+        clientRequestId: idempotencyKey,
+        idempotencyKey,
+      },
+    };
+    empty.learningRunStartCandidate = {
+      candidateId: "learning_run_start",
+      cardId: runStartRows[0].card_id,
+      keyPointId: runStartRows[0].key_point_id,
+      title,
+      targetSummary: sanitizeText(`用三分钟巩固：${title}`, 160),
+      impactSummary: "创建一次三分钟学习运行，完成后按真实结果安排复习",
+      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
+    };
+  }
+  return empty;
+}
+
 async function resolveCompanionLearningContextInTransaction(
   tx: ApiTransaction,
   args: {
@@ -79,152 +257,111 @@ async function resolveCompanionLearningContextInTransaction(
   // creation must validate the read-only context and perform all writes under
   // the same RLS snapshot; opening a nested transaction here would leave a
   // race between validation and insertion.
-  // 四个根查询读不同表、互不依赖：同一事务内并发发出（repeatable-read
-  // 快照一致），之后的条件 follow-up（episode/title/claim）再串行基于结果执行。
-  const [sessions, startRows, runResumeRows, runStartRows] = await Promise.all([
-    // resume：最近 active session + 其 episode 的 key point
-    tx.execute<{ id: string; intent: string }>(sql`
-      SELECT s.id, s.intent
-      FROM learning_sessions s
-      WHERE s.workspace_id = ${args.workspaceId}
-        AND s.user_id = ${args.userId}
-        AND s.status = 'active'
-      ORDER BY s.created_at DESC
-      LIMIT 1
-    `),
-    // start：最近 episode 的 key point + card（构造 start_session payload）
-    tx.execute<{
-      key_point_id: string;
-      card_id: string;
-      claim: string | null;
-    }>(sql`
-      SELECT k.id AS key_point_id, k.card_id, k.claim
-      FROM learning_episodes e
-      JOIN card_key_points k ON k.id = e.key_point_id
-      WHERE e.workspace_id = ${args.workspaceId}
-        AND e.user_id = ${args.userId}
-        AND k.workspace_id = ${args.workspaceId}
-      ORDER BY e.created_at DESC
-      LIMIT 1
-    `),
-    // 方案 16 §18：LearningRun resume——最近非终态 learning_run
-    //（含 preparing/active/assessing/checkpoint/committing/paused/
-    // recoverable_error；sandbox 不参与桌宠菜单）。
-    tx.execute<{ id: string; key_point_id: string }>(sql`
-      SELECT r.id, r.key_point_id
-      FROM learning_runs r
-      WHERE r.workspace_id = ${args.workspaceId}
-        AND r.user_id = ${args.userId}
-        AND r.phase NOT IN ('completed', 'ended', 'skipped', 'cancelled', 'stale')
-        AND r.sandbox_namespace_id IS NULL
-      ORDER BY r.created_at DESC
-      LIMIT 1
-    `),
-    // start：最近有 key point 的卡（构造 start_learning_run 候选；幂等键
-    // 按 keyPoint 稳定——重复确认重放同一 Run，不会重复创建）。
-    tx.execute<{
-      key_point_id: string;
-      card_id: string;
-      claim: string | null;
-    }>(sql`
-      SELECT k.id AS key_point_id, k.card_id, k.claim
-      FROM card_key_points k
-      WHERE k.workspace_id = ${args.workspaceId}
-      ORDER BY k.updated_at DESC
-      LIMIT 1
-    `),
-  ]);
+  // Plan 23 CS-05/CS-06：优先使用 learning_objectives_v2 派生候选；legacy
+  // card_key_points / learning_episodes 路径仅在没有 active Objective 时回退
+  //（过渡期兼容；RL-17 退场后整个 legacy 分支可被移除）。
+  const surfaceCtx: SurfaceContext = {
+    workspaceId: args.workspaceId,
+    userId: args.userId,
+    origin: "pet",
+    goal: "stabilize",
+  };
+  const objectiveLimit = 5;
+  const { items: objectives } = await listObjectiveSurfacesV3(tx, surfaceCtx, {
+    limit: objectiveLimit,
+    lifecycle: "active",
+  });
 
+  // 排序：resume_run > create_run > create_review_run > 其他；同一优先级
+  // 按 surface 顺位（已在 listObjectiveSurfacesV3 按 created_at DESC 返回）。
+  const rank = (kind: string): number => {
+    switch (kind) {
+      case "resume_run": return 0;
+      case "create_run": return 1;
+      case "create_review_run": return 2;
+      case "view_successor": return 3;
+      case "practice_only": return 4;
+      case "refresh": return 5;
+      default: return 6;
+    }
+  };
+  const sorted = [...objectives].sort((a, b) => rank(a.primaryAction.kind) - rank(b.primaryAction.kind));
+
+  // resume：带 activeRun 的第一个 Objective（typed resume_run）。
   let resumeCandidate: CompanionLearningContextV1["resumeCandidate"] = null;
-  if (sessions[0]) {
-    const eps = await tx.execute<{ key_point_id: string; claim: string | null }>(sql`
-      SELECT e.key_point_id, k.claim
-      FROM learning_episodes e
-      JOIN card_key_points k ON k.id = e.key_point_id
-      WHERE e.session_id = ${sessions[0].id}
-        AND e.workspace_id = ${args.workspaceId}
-        AND e.user_id = ${args.userId}
-        AND k.workspace_id = ${args.workspaceId}
-      LIMIT 1
-    `);
-    const claim = eps[0]?.claim ?? sessions[0].intent;
-    const title = sanitizeText(claim, 80) || "继续当前学习";
-    const payload = { kind: "resume_session", sessionId: sessions[0].id };
-    resumeCandidate = {
-      candidateId: "resume_current",
-      title,
-      targetSummary: sanitizeText(`继续学习：${title}`, 160),
-      impactSummary: "完成后更新学习进度",
-      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
-    };
-  }
-
-  let startCandidate: CompanionLearningContextV1["startCandidate"] = null;
-  if (startRows[0]) {
-    const claim = startRows[0].claim ?? "";
-    const title = sanitizeText(claim, 80) || "开始一小段学习";
-    const payload = {
-      kind: "start_session",
-      origin: "now",
-      cardId: startRows[0].card_id,
-      keyPointId: startRows[0].key_point_id,
-    };
-    startCandidate = {
-      candidateId: "start_short",
-      title,
-      targetSummary: sanitizeText(`开始学习：${title}`, 160),
-      impactSummary: "完成后更新学习进度",
-      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
-    };
-  }
-
   let learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"] = null;
-  if (runResumeRows[0]) {
-    const titleRows = await tx.execute<{ claim: string | null }>(sql`
-      SELECT k.claim FROM card_key_points k
-      WHERE k.id = ${runResumeRows[0].key_point_id} AND k.workspace_id = ${args.workspaceId}
-      LIMIT 1
-    `);
-    const title = sanitizeText(titleRows[0]?.claim ?? "", 80) || "继续当前学习";
-    const payload = { kind: "resume_learning_run", runId: runResumeRows[0].id };
+  let resumeObjectiveId: string | null = null;
+  const resumeObjective = sorted.find((s) => s.personal.activeRun);
+  if (resumeObjective) {
+    const runId = resumeObjective.personal.activeRun!.runId;
+    const label = resumeObjective.content.conceptLabel;
+    const title = sanitizeText(label ?? "", 80) || "继续本次巩固";
+    const summaryPreview = resumeObjective.content.publicSummary.split("\n")[0] ?? "";
+    resumeObjectiveId = resumeObjective.objectiveId;
+    const payload = { kind: "resume_learning_run", runId };
     learningRunResumeCandidate = {
       candidateId: "learning_run_resume",
-      runId: runResumeRows[0].id,
+      runId,
       title,
-      targetSummary: sanitizeText(`继续学习：${title}`, 160),
+      targetSummary: sanitizeText(summaryPreview || `继续：${title}`, 160),
       impactSummary: "恢复当前学习运行",
       payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
     };
   }
 
+  // start：可执行的第一个 Objective（typed create_run / create_review_run）。
+  let startCandidate: CompanionLearningContextV1["startCandidate"] = null;
   let learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"] = null;
-  if (runStartRows[0]) {
-    const claim = runStartRows[0].claim ?? "";
-    const title = sanitizeText(claim, 80) || "开始三分钟巩固";
-    const idempotencyKey = `pet-menu:${runStartRows[0].key_point_id}`;
-    const payload = {
-      kind: "start_learning_run",
-      request: {
-        version: 1,
-        origin: {
-          kind: "card",
-          cardId: runStartRows[0].card_id,
-          keyPointId: runStartRows[0].key_point_id,
-        },
-        goal: "stabilize",
-        clientRequestId: idempotencyKey,
-        idempotencyKey,
-      },
-    };
+  let startObjectiveIdValue: string | null = null;
+  let startOriginV2Value: LearningRunOriginV2 | null = null;
+  const actionableObjective = sorted.find((s) => {
+    const k = s.primaryAction.kind;
+    return k === "create_run" || k === "create_review_run" || k === "resume_run";
+  });
+  if (actionableObjective) {
+    const label = actionableObjective.content.conceptLabel;
+    const claimText = label ?? "";
+    const payloadV2 = buildStartPayloadV2(actionableObjective);
+    startObjectiveIdValue = actionableObjective.objectiveId;
+    if (payloadV2 && isLearningRunOriginV2(payloadV2.request.originV2)) {
+      startOriginV2Value = payloadV2.request.originV2;
+    }
+    // 统一走 V2 候选：V2 payload 已内嵌 originV2；同时保留 legacy V1 payload
+    // 字段（cardId / keyPointId 仍然兼容，供未升级客户端继续使用）。
+    const v2RunId = `pet-menu-v2:${actionableObjective.objectiveId}`;
+    const v1CardId = actionableObjective.content.presentation.cardId ?? actionableObjective.objectiveId;
+    const v1KeyPointId = actionableObjective.objectiveId;
+    // V2 优先：payloadSha256 从 V2 派生；后向兼容 V1 时仍按 V1 形状填充候选。
+    const v2Payload = payloadV2 ? {
+      kind: "start_learning_run_v2" as const,
+      request: payloadV2.request,
+    } : null;
     learningRunStartCandidate = {
       candidateId: "learning_run_start",
-      cardId: runStartRows[0].card_id,
-      keyPointId: runStartRows[0].key_point_id,
-      title,
-      targetSummary: sanitizeText(`用三分钟巩固：${title}`, 160),
-      impactSummary: "创建一次三分钟学习运行，完成后按真实结果安排复习",
-      payloadSha256: sha256Utf8V1(canonicalJsonV1(payload)),
+      cardId: v1CardId,
+      keyPointId: v1KeyPointId,
+      title: sanitizeText(claimText, 80)
+        || (actionableObjective.primaryAction.kind === "create_review_run" ? "开始复习" : "开始验证"),
+      targetSummary: sanitizeText(actionableObjective.content.publicSummary.split("\n")[0]
+        || `开始：${claimText}`, 160),
+      impactSummary: actionableObjective.personal.review?.status === "due"
+        ? "完成复习运行，恢复记忆曲线"
+        : "创建一次学习运行，完成后按真实结果安排复习",
+      payloadSha256: sha256Utf8V1(canonicalJsonV1(v2Payload)),
+      objectiveId: actionableObjective.objectiveId,
+      ...(payloadV2 ? { originV2: payloadV2.request.originV2 } : {}),
     };
+    void v2RunId;
+  }
+
+  // 过渡期回退：没有 active Objective 且无可用候选时，保留 legacy 路径
+  //（迁移未完成的工作区；这些工作区的 card_key_points 行仍然保留）。
+  if (!learningRunStartCandidate && !learningRunResumeCandidate) {
+    const fallback = await resolveLegacyCompanionCandidates(tx, args);
+    resumeCandidate = fallback.resumeCandidate;
+    startCandidate = fallback.startCandidate;
+    learningRunResumeCandidate = fallback.learningRunResumeCandidate;
+    learningRunStartCandidate = fallback.learningRunStartCandidate;
   }
 
   const contextRevision = sha256Utf8V1(
@@ -237,10 +374,14 @@ async function resolveCompanionLearningContextInTransaction(
     startCandidate,
     learningRunResumeCandidate,
     learningRunStartCandidate,
-    // PERF-WN: 透传已查出的引用 id，避免 proposal create 侧重复 SELECT。
-    resumeSessionId: sessions[0]?.id ?? null,
-    startCardId: startRows[0]?.card_id ?? null,
-    startKeyPointId: startRows[0]?.key_point_id ?? null,
+    // PERF-WN：透传已查出的引用 id，避免 proposal create 侧重复 SELECT。
+    resumeSessionId: null, // V2 无 episode 概念
+    startCardId: learningRunStartCandidate?.cardId ?? null,
+    startKeyPointId: learningRunStartCandidate?.keyPointId ?? null,
+    // Plan 23 CS-05/CS-06：V2 透传字段
+    resumeObjectiveId,
+    startObjectiveId: startObjectiveIdValue,
+    startOriginV2: startOriginV2Value,
   };
 }
 
@@ -364,26 +505,45 @@ export async function createCompanionMenuProposal(args: {
         }
         payload = { kind: "resume_learning_run", runId };
       } else if (args.body.candidateId === "learning_run_start") {
-        const cardId = context.learningRunStartCandidate?.cardId;
-        const keyPointId = context.learningRunStartCandidate?.keyPointId;
-        if (!cardId || !keyPointId) {
+        const start = context.learningRunStartCandidate;
+        if (!start) {
           throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
         }
-        const idempotencyKey = `pet-menu:${keyPointId}`;
-        payload = {
-          kind: "start_learning_run",
-          request: {
-            version: 1,
-            origin: {
-              kind: "card",
-              cardId,
-              keyPointId,
+        // Plan 23 CS-06：V2 候选（有 objectiveId）使用 V2 payload；
+        // legacy V1 候选（无 objectiveId）沿用 V1 payload。
+        if (start.objectiveId && start.originV2) {
+          const idempotencyKey = `pet-menu-v2:${start.objectiveId}`;
+          payload = {
+            kind: "start_learning_run_v2",
+            request: {
+              originV2: start.originV2,
+              goal: "stabilize",
+              idempotencyKey,
+              requestedTimeBudgetSeconds: 180,
             },
-            goal: "stabilize",
-            clientRequestId: idempotencyKey,
-            idempotencyKey,
-          },
-        };
+          };
+        } else {
+          const cardId = start.cardId;
+          const keyPointId = start.keyPointId;
+          if (!cardId || !keyPointId) {
+            throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
+          }
+          const idempotencyKey = `pet-menu:${keyPointId}`;
+          payload = {
+            kind: "start_learning_run",
+            request: {
+              version: 1,
+              origin: {
+                kind: "card",
+                cardId,
+                keyPointId,
+              },
+              goal: "stabilize",
+              clientRequestId: idempotencyKey,
+              idempotencyKey,
+            },
+          };
+        }
       } else {
         if (!context.startCardId || !context.startKeyPointId) {
           throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
@@ -1027,8 +1187,8 @@ export async function decideCompanionProposal(args: {
         };
       }
 
-      // 方案 16 §18：LearningRun 工具（同步执行，事务内完成）。
-      if (kind === "start_learning_run" || kind === "resume_learning_run") {
+      // 方案 16 §18 / Plan 23 CS-06：LearningRun 工具（同步执行，事务内完成）。
+      if (kind === "start_learning_run" || kind === "start_learning_run_v2" || kind === "resume_learning_run") {
         let runId: string;
         let safeSummary: string;
         if (kind === "start_learning_run") {
@@ -1041,6 +1201,26 @@ export async function decideCompanionProposal(args: {
               workspaceId: args.workspaceId,
               userId: args.userId,
               request: request as never,
+            });
+            runId = run.runId;
+            safeSummary = "学习运行已创建";
+          } catch (error) {
+            if (error instanceof LearningRunServiceError) {
+              throw new CompanionConversationError("ACTION_STALE", 409, "learning run could not be prepared");
+            }
+            throw error;
+          }
+        } else if (kind === "start_learning_run_v2") {
+          // Plan 23 CS-06：V2 PREPARE 路径（originV2 → createRunV2）。
+          const request = proposalPayload.request as CreateLearningRunV2Request | undefined;
+          if (!request || typeof request !== "object" || !("originV2" in request)) {
+            throw new CompanionConversationError("ACTION_STALE", 409, "learning run v2 payload is stale");
+          }
+          try {
+            const run = await createRunV2(tx, {
+              workspaceId: args.workspaceId,
+              userId: args.userId,
+              request: request as CreateLearningRunV2Request,
             });
             runId = run.runId;
             safeSummary = "学习运行已创建";
