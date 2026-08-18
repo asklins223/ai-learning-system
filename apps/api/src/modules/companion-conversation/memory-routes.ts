@@ -24,6 +24,7 @@ import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { createJob } from "../job/service.ts";
+import { companionMemoryCandidateTotal } from "../../lib/metrics.ts";
 import {
   archiveMemory,
   clearMemories,
@@ -220,6 +221,25 @@ export async function memoryRoutes(app: FastifyInstance) {
           candidate: body.data.candidate ?? false,
         }),
       );
+      // §9.9：记录候选创建指标
+      try {
+        companionMemoryCandidateTotal.labels("created").inc();
+      } catch {
+        // metrics 记录失败不阻断请求
+      }
+      // §13.8：确认后的记忆自动触发 embedding 重建（仅非候选记忆）
+      if (!body.data.candidate && process.env.COMPANION_MEMORY_VECTOR_V1 === "true") {
+        try {
+          await createJob({
+            type: "companion_memory_embedding_rebuild",
+            workspaceId: scope.workspaceId,
+            requestedBy: scope.userId,
+            payload: { userId: scope.userId },
+          });
+        } catch {
+          // embedding 重建入队失败不阻断主请求
+        }
+      }
       return reply.header("Cache-Control", "no-store").code(201).send(item);
     },
   );
@@ -237,6 +257,25 @@ export async function memoryRoutes(app: FastifyInstance) {
       if (!item) {
         return reply.code(404).send({ error: "memory_not_found", message: "记忆不存在" });
       }
+      // §9.9：记录候选确认指标
+      try {
+        companionMemoryCandidateTotal.labels("confirmed").inc();
+      } catch {
+        // metrics 记录失败不阻断请求
+      }
+      // §13.8：确认后的记忆自动触发 embedding 重建
+      if (process.env.COMPANION_MEMORY_VECTOR_V1 === "true") {
+        try {
+          await createJob({
+            type: "companion_memory_embedding_rebuild",
+            workspaceId: scope.workspaceId,
+            requestedBy: scope.userId,
+            payload: { userId: scope.userId },
+          });
+        } catch {
+          // embedding 重建入队失败不阻断主请求
+        }
+      }
       return reply.header("Cache-Control", "no-store").send(item);
     },
   );
@@ -253,6 +292,12 @@ export async function memoryRoutes(app: FastifyInstance) {
       );
       if (!deleted) {
         return reply.code(404).send({ error: "memory_not_found", message: "记忆不存在" });
+      }
+      // §9.9：记录候选拒绝指标（reject 路由）
+      try {
+        companionMemoryCandidateTotal.labels("rejected").inc();
+      } catch {
+        // metrics 记录失败不阻断请求
       }
       return reply.code(204).send();
     },
@@ -356,6 +401,12 @@ export async function memoryRoutes(app: FastifyInstance) {
       );
       if (!deleted) {
         return reply.code(404).send({ error: "memory_not_found", message: "记忆不存在" });
+      }
+      // §9.9：记录候选删除指标（delete 路由）
+      try {
+        companionMemoryCandidateTotal.labels("deleted").inc();
+      } catch {
+        // metrics 记录失败不阻断请求
       }
       return reply.code(204).send();
     },

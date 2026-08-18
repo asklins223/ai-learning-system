@@ -12,6 +12,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
+import { companionPetProfileChangedTotal } from "../../lib/metrics.ts";
 import {
   getPetProfile,
   getPresetById,
@@ -80,6 +81,12 @@ export async function petProfileRoutes(app: FastifyInstance) {
       const profile = await withWorkspaceTransaction(scope, (tx) =>
         upsertPetProfile(tx, scope, body.data),
       );
+      // §9.9：记录人格变更指标
+      try {
+        companionPetProfileChangedTotal.inc();
+      } catch {
+        // metrics 记录失败不阻断请求
+      }
       return reply.header("Cache-Control", "no-store").send({ version: 1, profile });
     },
   );
@@ -90,6 +97,12 @@ export async function petProfileRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
       await withWorkspaceTransaction(scope, (tx) => resetPetProfile(tx, scope));
+      // §9.9：记录人格变更指标（重置也是一次变更）
+      try {
+        companionPetProfileChangedTotal.inc();
+      } catch {
+        // metrics 记录失败不阻断请求
+      }
       return reply.header("Cache-Control", "no-store").send({ version: 1, ok: true });
     },
   );

@@ -8,8 +8,13 @@
  */
 
 import { sql } from "drizzle-orm";
+import { logger } from "../lib/logger.ts";
 import type { EmbeddingProviderLike } from "./companion-memory-vector.ts";
 import { retrieveCompanionMemories } from "./companion-memory-vector.ts";
+import {
+  companionMemoryRetrievalModeTotal,
+  companionMemoryUsedCount,
+} from "../lib/metrics.ts";
 
 export interface ContextMemoryItem {
   memoryId: string;
@@ -144,6 +149,26 @@ export async function assembleCompanionContext(
       console.warn("companion memory usage log write failed", error);
     }
   }
+
+  // §9.9：记录检索模式与使用记忆数指标（失败不阻断对话）。
+  try {
+    companionMemoryRetrievalModeTotal.labels(result.mode).inc();
+    companionMemoryUsedCount.observe(trimmed.length);
+  } catch {
+    // metrics 记录失败不影响对话。
+  }
+
+  // §9.9：结构化日志字段——memoryIds / retrievalLatencyMs / contextBudgetUsed
+  logger.debug(
+    {
+      runId: input.runId,
+      memoryIds: trimmed.map((item) => item.memoryId),
+      retrievalLatencyMs: result.latencyMs,
+      retrievalMode: result.mode,
+      contextBudgetUsed: activeMemories.reduce((sum, m) => sum + m.content.length, 0),
+    },
+    "companion context assembled",
+  );
 
   return {
     activeMemories,

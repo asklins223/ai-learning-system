@@ -20,6 +20,7 @@ import {
 import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
+import { companionSummaryTotal } from "../lib/metrics.ts";
 import type { JobPayload } from "./index.ts";
 
 export const conversationSummaryOutputSchema = z.object({
@@ -97,6 +98,12 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
     raw = result.content;
   } catch (err) {
     logger.warn({ jobId: job.id, conversationId, err }, "summarizer provider failed");
+    // §9.9：记录摘要失败指标
+    try {
+      companionSummaryTotal.labels("failed").inc();
+    } catch {
+      // metrics 记录失败不阻断错误传播
+    }
     throw err;
   }
 
@@ -105,6 +112,12 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
     summary = conversationSummaryOutputSchema.parse(JSON.parse(raw));
   } catch (err) {
     logger.warn({ jobId: job.id, conversationId, err }, "summarizer invalid output; skipping");
+    // §9.9：记录摘要失败指标（输出校验失败）
+    try {
+      companionSummaryTotal.labels("failed").inc();
+    } catch {
+      // metrics 记录失败不阻断
+    }
     return;
   }
 
@@ -140,4 +153,10 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
   });
 
   logger.info({ jobId: job.id, conversationId, idempotencyKey }, "summarizer completed");
+  // §9.9：记录摘要成功指标
+  try {
+    companionSummaryTotal.labels("success").inc();
+  } catch {
+    // metrics 记录失败不阻断
+  }
 }

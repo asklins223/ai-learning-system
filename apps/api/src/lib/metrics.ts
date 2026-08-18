@@ -328,6 +328,58 @@ export const dashboardBuildDurationSeconds = new Histogram({
   registers: [registry],
 });
 
+// ─── 方案 22：Companion Memory 可观测性（§9.9）──────────────────────────
+
+/**
+ * 桌宠记忆检索模式计数器（vector / keyword_fallback）。
+ * 每次 Context Orchestrator 检索后由 worker 侧记录。
+ */
+export const companionMemoryRetrievalModeTotal = new Counter({
+  name: "ailearn_companion_memory_retrieval_mode_total",
+  help: "Companion memory retrieval mode (vector or keyword_fallback)",
+  labelNames: ["mode"] as const,
+  registers: [registry],
+});
+
+/**
+ * 每轮对话实际使用的记忆数量直方图。
+ */
+export const companionMemoryUsedCount = new Histogram({
+  name: "ailearn_companion_memory_used_count",
+  help: "Number of memories used per companion dialogue turn",
+  buckets: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+  registers: [registry],
+});
+
+/**
+ * 记忆候选生命周期计数器（created / confirmed / rejected / deleted）。
+ */
+export const companionMemoryCandidateTotal = new Counter({
+  name: "ailearn_companion_memory_candidate_total",
+  help: "Companion memory candidate lifecycle events",
+  labelNames: ["event"] as const,
+  registers: [registry],
+});
+
+/**
+ * 会话摘要任务结果计数器（success / failed）。
+ */
+export const companionSummaryTotal = new Counter({
+  name: "ailearn_companion_summary_total",
+  help: "Companion summarizer task results",
+  labelNames: ["status"] as const,
+  registers: [registry],
+});
+
+/**
+ * 桌宠人格变更计数器。
+ */
+export const companionPetProfileChangedTotal = new Counter({
+  name: "ailearn_companion_pet_profile_changed_total",
+  help: "Companion pet profile changes",
+  registers: [registry],
+});
+
 // ─── Release 指标 ───────────────────────────────────────────────────────
 
 /** Release 信息 gauge（固定值，用于 Prometheus label 关联） */
