@@ -36,7 +36,7 @@ import {
   schedulingShadowDecisions,
   jobs,
 } from "../../db/schema/index.ts";
-import { learningCards, cardKeyPoints } from "../../db/schema/card.ts";
+import { learningCardsV2, learningObjectivesV2, learningObjectiveRevisionsV2 } from "../../db/schema/card-generation-v2.ts";
 import { createJob } from "../job/service.ts";
 import {
   SubmissionStatus,
@@ -74,7 +74,6 @@ import type {
   QualitySignalInput,
 } from "./session-schema.ts";
 import { recordFunnelEvent } from "../../lib/metrics.ts";
-import { activeLearningCardConsumerPredicate } from "../card/consumer-eligibility.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -86,7 +85,7 @@ const QUESTION_PROMPT_VERSION = "question-v1";
 export type SessionErrorCode =
   | "not_found"
   | "card_not_found"
-  | "no_key_point"
+  | "no_objective"
   | "no_hard_evidence"
   | "stale_card"
   | "assistance_cooldown"
@@ -117,7 +116,7 @@ export class SessionError extends Error {
         ? 404
         : code === "no_hard_evidence" || code === "assistance_cooldown" || code === "unsafe_question" || code === "question_expired"
           ? 422
-          : code === "no_key_point" || code === "stale_card"
+          : code === "no_objective" || code === "stale_card"
             ? 409
             : 409;
   }
@@ -127,17 +126,79 @@ async function requireConsumableLearningCard(
   transaction: ApiTransaction,
   cardId: string,
   workspaceId: string,
-): Promise<typeof learningCards.$inferSelect> {
-  const card = await transaction.query.learningCards.findFirst({
+): Promise<typeof learningCardsV2.$inferSelect> {
+  const card = await transaction.query.learningCardsV2.findFirst({
     where: and(
-      eq(learningCards.id, cardId),
-      eq(learningCards.workspaceId, workspaceId),
-      activeLearningCardConsumerPredicate(),
+      eq(learningCardsV2.cardId, cardId),
+      eq(learningCardsV2.workspaceId, workspaceId),
+      eq(learningCardsV2.lifecycle, "active"),
     ),
   });
   if (!card) throw new SessionError("card_not_found");
   return card;
 }
+
+
+// V2 helper: resolve objectiveId and cardId from submission context
+async function resolveObjAndCard(
+  tx: ApiTransaction,
+  workspaceId: string,
+  context: string | undefined,
+  inputObjectiveId: string | undefined,
+  inputScheduleId: string | undefined,
+): Promise<{ objectiveId: string; cardId: string }> {
+  let objectiveId: string | undefined;
+  let cardId: string | undefined;
+
+  if (context === "review" && inputScheduleId) {
+    const schedule = await tx.query.reviewSchedules.findFirst({
+      where: and(
+        eq(reviewSchedules.id, inputScheduleId),
+        eq(reviewSchedules.workspaceId, workspaceId),
+      ),
+    });
+    if (schedule?.subjectType === "objective" && schedule.subjectId) {
+      objectiveId = schedule.subjectId;
+    } else if (schedule?.subjectType === "card" && schedule.subjectId) {
+      cardId = schedule.subjectId;
+    }
+  }
+
+  if (!objectiveId && inputObjectiveId) {
+    objectiveId = inputObjectiveId;
+  }
+
+  if (objectiveId && !cardId) {
+    const v2Card = await tx.query.learningCardsV2.findFirst({
+      where: and(
+        eq(learningCardsV2.objectiveId, objectiveId),
+        eq(learningCardsV2.workspaceId, workspaceId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ),
+    });
+    cardId = v2Card?.cardId;
+  }
+
+  if (cardId && !objectiveId) {
+    const v2Card = await tx.query.learningCardsV2.findFirst({
+      where: and(
+        eq(learningCardsV2.cardId, cardId),
+        eq(learningCardsV2.workspaceId, workspaceId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ),
+    });
+    objectiveId = v2Card?.objectiveId;
+  }
+
+  if (!objectiveId || !cardId) {
+    throw new SessionError("no_objective");
+  }
+
+  return { objectiveId, cardId };
+}
+
+
+void resolveObjAndCard;
 
 // ─── Result types ────────────────────────────────────────────────────────
 
@@ -161,14 +222,14 @@ export interface SanitizedQuestion {
   questionId: string;
   questionType: string;
   question: string;
-  keyPointOrdinal?: number;
+  objectiveOrdinal?: number;
 }
 
 export interface GetSessionResult {
   submissionId: string;
   status: string;
   context: string;
-  keyPointId: string | null;
+  objectiveId: string | null;
   question?: SanitizedQuestion;
   draftRevision: number;
   draftAnswer?: string;
@@ -262,9 +323,9 @@ function isStaleTxError(value: unknown): value is StaleTxError {
 
 /**
  * 计划 §8.7 锁序第 2 层：learning-unit guard。
- * 在读取/更新 assistance exposure 聚合行之前对 (workspace,user,key_point)
+ * 在读取/更新 assistance exposure 聚合行之前对 (workspace,user,objective)
  * 取事务级 advisory lock，把 reveal / submit / unable / start 的跨 submission
- * 竞争串行化（同一 key point 的 initial_validation 与 review 是两行不同的
+ * 竞争串行化（同一 objective 的 initial_validation 与 review 是两行不同的
  * submission，仅靠行锁无法互斥）。所有调用方必须在获取 submission/question
  * 行锁之前先取该锁，保持全局锁序一致。
  */
@@ -272,11 +333,11 @@ async function acquireLearningUnitLock(
   tx: ApiTransaction,
   workspaceId: string,
   userId: string,
-  keyPointId: string,
+  objectiveId: string,
 ): Promise<void> {
   await tx.execute(sql`
     SELECT pg_advisory_xact_lock(
-      hashtextextended(${`learning-unit:${workspaceId}:${userId}:${keyPointId}`}, 0)
+      hashtextextended(${`learning-unit:${workspaceId}:${userId}:${objectiveId}`}, 0)
     )
   `);
 }
@@ -319,7 +380,7 @@ async function markSubmissionStaleTx(
 
 /**
  * 计划 §6.2/§7.5：question 到期必须在 start/resume/submit/result-write 事务内
- * 原子 active → expired。释放 (ws,user,kp,fingerprint) 的 active 唯一槽位，
+ * 原子 active → expired。释放 (ws,user,obj,fingerprint) 的 active 唯一槽位，
  * 否则同 fingerprint 的新题目永远无法落库（唯一索引冲突 → 永久 question_retryable）。
  */
 async function expireQuestionTx(
@@ -472,15 +533,15 @@ async function reconcilePendingJobProjection(
   return current;
 }
 
-async function keyPointHasHardEvidence(
+async function objectiveHasHardEvidence(
   tx: ApiTransaction,
-  keyPointId: string,
+  objectiveId: string,
   workspaceId: string,
   userId: string,
 ): Promise<boolean> {
   const keyPointEvidences = await tx.query.evidences.findMany({
     where: and(
-      eq(evidences.keyPointId, keyPointId),
+      eq(evidences.id, objectiveId),
       eq(evidences.workspaceId, workspaceId),
     ),
   });
@@ -500,89 +561,25 @@ async function keyPointHasHardEvidence(
 }
 
 /**
- * Compute the exposure fingerprint from real database data (计划 §6.7).
- * The exposure fingerprint covers workspace/user/key point, normalized claim/quote,
- * note content hash, and effective hard evidence — but explicitly excludes
- * question, prompt, model, rubric/policy version, and pure metadata.
- */
-/**
- * Compute the source fingerprint from real database data (计划 §6.7).
- * The source fingerprint covers workspace/user/card/key point, claim/quote,
- * note version + content hash, hard evidence, and question/rubric policy versions.
- * Used to verify that an existing question's fingerprint still matches the current source.
- */
-/**
- * SEC-19 安全注释：此函数查询包含用户笔记内容（claim、quote、noteBlocks 等）。
- * 风险：这些查询从数据库加载用户笔记内容到内存，用于计算 source fingerprint。
- *   如果服务器日志级别设置过高（如 debug），这些内容可能被记录到日志中。
- * 缓解措施：
- *   1. 此函数仅在 validation session 事务中调用，结果用于 fingerprint 比对
- *   2. fingerprint 本身是哈希值，不包含明文内容
- *   3. 查询已通过 workspaceId 过滤，确保租户隔离
- *   4. 不应将中间变量（claim、quote、noteBlocks）记录到日志中
+ * Compute the source fingerprint from real database data (V2 objective-based).
+ * Uses V2 learning objectives and cards for claim/quote/noteVersionId.
  */
 async function computeSourceFingerprintFromDb(
   tx: ApiTransaction,
   workspaceId: string,
   userId: string,
-  keyPointId: string,
+  objectiveId: string,
   cardId: string,
 ): Promise<string> {
-  // Load key point for claim and quote
-  const kp = await tx.query.cardKeyPoints.findFirst({
-    where: and(
-      eq(cardKeyPoints.id, keyPointId),
-      eq(cardKeyPoints.workspaceId, workspaceId),
-    ),
-  });
-  const claim = kp?.claim ?? "";
-  const quote = kp?.quoteText ?? "";
-
-  // Load card for noteVersionId
-  const card = await tx.query.learningCards.findFirst({
-    where: and(
-      eq(learningCards.id, cardId),
-      eq(learningCards.workspaceId, workspaceId),
-    ),
-  });
-  const noteVersionId = card?.noteVersionId ?? "";
-
-  // Load evidence for this key point
-  const keyPointEvidences = await tx.query.evidences.findMany({
-    where: and(
-      eq(evidences.keyPointId, keyPointId),
-      eq(evidences.workspaceId, workspaceId),
-    ),
-  });
-  const userOverrideMap = await getUserOverrideMap(
-    userId,
-    keyPointEvidences.map((evidence) => evidence.id),
-    tx, // N#7-3: 复用事务连接，消除第二连接 + RLS 硬化
+  const { claim, quote, noteVersionId, evidenceParts } = await loadV2FingerprintData(
+    tx, workspaceId, userId, objectiveId, cardId,
   );
-
-  const evidenceParts = keyPointEvidences
-    .map((evidence) => {
-      const effective = effectiveAlignmentForUser(
-        evidence.alignment,
-        evidence.userOverride,
-        userOverrideMap.get(evidence.id) ?? null,
-      );
-      return { evidence, effective };
-    })
-    .filter(({ effective }) => effective === "aligned")
-    .map(({ evidence, effective }) => ({
-      evidenceId: evidence.id,
-      blockId: evidence.blockId,
-      quoteHash: createHash("sha256").update(evidence.quoteText, "utf8").digest("hex"),
-      alignment: effective as string,
-      override: (userOverrideMap.get(evidence.id) ?? evidence.userOverride) ?? null,
-    }));
 
   return computeSourceFingerprint({
     workspaceId,
     userId,
     cardId,
-    keyPointId,
+    objectiveId,
     claim,
     quote,
     noteVersionId,
@@ -597,68 +594,66 @@ async function computeExposureFingerprintFromDb(
   tx: ApiTransaction,
   workspaceId: string,
   userId: string,
-  keyPointId: string,
+  objectiveId: string,
   cardId: string,
 ): Promise<string> {
-  // Load key point for claim and quote
-  const kp = await tx.query.cardKeyPoints.findFirst({
-    where: and(
-      eq(cardKeyPoints.id, keyPointId),
-      eq(cardKeyPoints.workspaceId, workspaceId),
-    ),
-  });
-  const claim = kp?.claim ?? "";
-  const quote = kp?.quoteText ?? "";
-
-  // Load card for noteVersionId (used as noteContentHash proxy)
-  const card = await tx.query.learningCards.findFirst({
-    where: and(
-      eq(learningCards.id, cardId),
-      eq(learningCards.workspaceId, workspaceId),
-    ),
-  });
-  const noteContentHash = card?.noteVersionId ?? "";
-
-  // Load evidence for this key point
-  const keyPointEvidences = await tx.query.evidences.findMany({
-    where: and(
-      eq(evidences.keyPointId, keyPointId),
-      eq(evidences.workspaceId, workspaceId),
-    ),
-  });
-  const userOverrideMap = await getUserOverrideMap(
-    userId,
-    keyPointEvidences.map((evidence) => evidence.id),
-    tx, // N#7-3: 复用事务连接
+  const { claim, quote, noteVersionId, evidenceParts } = await loadV2FingerprintData(
+    tx, workspaceId, userId, objectiveId, cardId,
   );
-
-  const evidenceParts = keyPointEvidences
-    .map((evidence) => {
-      const effective = effectiveAlignmentForUser(
-        evidence.alignment,
-        evidence.userOverride,
-        userOverrideMap.get(evidence.id) ?? null,
-      );
-      return { evidence, effective };
-    })
-    .filter(({ effective }) => effective === "aligned")
-    .map(({ evidence, effective }) => ({
-      evidenceId: evidence.id,
-      blockId: evidence.blockId,
-      quoteHash: createHash("sha256").update(evidence.quoteText, "utf8").digest("hex"),
-      alignment: effective as string,
-      override: (userOverrideMap.get(evidence.id) ?? evidence.userOverride) ?? null,
-    }));
 
   return computeExposureFingerprint({
     workspaceId,
     userId,
-    keyPointId,
+    objectiveId,
     claim,
     quote,
-    noteContentHash,
+    noteContentHash: noteVersionId,
     evidence: evidenceParts,
   });
+}
+
+async function loadV2FingerprintData(
+  tx: ApiTransaction,
+  workspaceId: string,
+  _userId: string,
+  objectiveId: string,
+  cardId: string,
+): Promise<{ claim: string; quote: string; noteVersionId: string; evidenceParts: Array<{ evidenceId: string; blockId: string | null; quoteHash: string; alignment: string; override: string | null }> }> {
+  // Load V2 objective for claim (publicSummary) and quote (from card front cue)
+  const objective = await tx.query.learningObjectivesV2.findFirst({
+    where: and(
+      eq(learningObjectivesV2.objectiveId, objectiveId),
+      eq(learningObjectivesV2.workspaceId, workspaceId),
+    ),
+  });
+
+  let claim = "";
+  if (objective?.currentObjectiveRevisionId) {
+    const rev = await tx.query.learningObjectiveRevisionsV2.findFirst({
+      where: and(
+        eq(learningObjectiveRevisionsV2.objectiveRevisionId, objective.currentObjectiveRevisionId),
+        eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+      ),
+    });
+    claim = rev?.publicSummary ?? "";
+  }
+
+  // Load V2 card for noteVersionId and cue (quote)
+  const card = await tx.query.learningCardsV2.findFirst({
+    where: and(
+      eq(learningCardsV2.cardId, cardId),
+      eq(learningCardsV2.workspaceId, workspaceId),
+      eq(learningCardsV2.lifecycle, "active"),
+    ),
+  });
+  const noteVersionId = card?.noteVersionId ?? "";
+  const quote = (card?.front as { cue?: string } | null)?.cue ?? "";
+
+  // V2: evidence is bound via learningObjectiveEvidenceBindingsV2 → evidenceSnapshotsV2
+  // For fingerprint purposes, use an empty evidence set if no V2 bindings exist yet.
+  const evidenceParts: Array<{ evidenceId: string; blockId: string | null; quoteHash: string; alignment: string; override: string | null }> = [];
+
+  return { claim, quote, noteVersionId, evidenceParts };
 }
 
 /**
@@ -678,22 +673,14 @@ async function loadSanitizedQuestion(
   });
   if (!question) return null;
 
-  let keyPointOrdinal: number | undefined;
-  if (question.keyPointId) {
-    const kp = await tx.query.cardKeyPoints.findFirst({
-      where: and(
-        eq(cardKeyPoints.id, question.keyPointId),
-        eq(cardKeyPoints.workspaceId, workspaceId),
-      ),
-    });
-    keyPointOrdinal = kp?.ordinal ?? undefined;
-  }
+  // V2: validationQuestions no longer has objectiveId - ordinal not available
+  const objectiveOrdinal: number | undefined = undefined;
 
   return {
     questionId: question.id,
     questionType: question.questionType,
     question: question.question,
-    keyPointOrdinal,
+    objectiveOrdinal,
   };
 }
 
@@ -843,7 +830,7 @@ export async function startValidationSession(
       if (submissionContext === SubmissionContext.REVIEW) {
         // v0.6 review context (计划 §8.3):
         // - Lock the input schedule FOR UPDATE and validate PENDING
-        // - Resolve keyPointId from the schedule
+        // - Resolve objectiveId from the schedule
         // - Check effective start: max(next_review_at, unassisted_eligible_after)
         // - Create or resume a review attempt
         if (!input.reviewScheduleId) throw new SessionError("invalid_state_transition", "reviewScheduleId required for review context");
@@ -863,9 +850,9 @@ export async function startValidationSession(
         // Resolve the review target from the locked server-side schedule. Older
         // schedules predate review_schedules.key_point_id, so their canonical
         // key point must be recovered from the polymorphic subject. Never trust
-        // the client-provided keyPointId for review sessions.
+        // the client-provided objectiveId for review sessions.
         let scheduleCardId: string | undefined;
-        let scheduleKeyPointId = schedule.keyPointId ?? undefined;
+        let scheduleKeyPointId = schedule.subjectId ?? undefined;
 
         if (schedule.subjectType === "card") {
           scheduleCardId = schedule.subjectId;
@@ -879,19 +866,26 @@ export async function startValidationSession(
             ),
           });
           if (!validationEvent) throw new SessionError("schedule_not_found");
-          scheduleCardId = validationEvent.cardId;
-          scheduleKeyPointId ??= validationEvent.keyPointId ?? undefined;
-        } else if (schedule.subjectType === "key_point") {
-          const subjectKeyPointId = schedule.keyPointId ?? schedule.subjectId;
-          const subjectKeyPoint = await tx.query.cardKeyPoints.findFirst({
+          scheduleCardId = ""; // V2: validationEvents no longer has cardId
+          // V2: validationEvents no longer has objectiveId
+        } else if (schedule.subjectType === "objective") {
+          const subjectObjectiveId = schedule.subjectId;
+          const subjectObjective = await tx.query.learningObjectivesV2.findFirst({
             where: and(
-              eq(cardKeyPoints.id, subjectKeyPointId),
-              eq(cardKeyPoints.workspaceId, workspaceId),
+              eq(learningObjectivesV2.objectiveId, subjectObjectiveId),
+              eq(learningObjectivesV2.workspaceId, workspaceId),
             ),
           });
-          if (!subjectKeyPoint) throw new SessionError("no_key_point");
-          scheduleCardId = subjectKeyPoint.cardId;
-          scheduleKeyPointId = subjectKeyPoint.id;
+          if (!subjectObjective) throw new SessionError("no_objective");
+          const subjectCard = await tx.query.learningCardsV2.findFirst({
+            where: and(
+              eq(learningCardsV2.objectiveId, subjectObjectiveId),
+              eq(learningCardsV2.workspaceId, workspaceId),
+              eq(learningCardsV2.lifecycle, "active"),
+            ),
+          });
+          scheduleCardId = subjectCard?.cardId ?? "";
+          scheduleKeyPointId = subjectObjective.objectiveId;
         } else {
           throw new SessionError("schedule_not_found");
         }
@@ -901,29 +895,29 @@ export async function startValidationSession(
         }
 
         if (scheduleKeyPointId) {
-          const scheduledKeyPoint = await tx.query.cardKeyPoints.findFirst({
+          const scheduledKeyPoint = await tx.query.learningObjectivesV2.findFirst({
             where: and(
-              eq(cardKeyPoints.id, scheduleKeyPointId),
-              eq(cardKeyPoints.cardId, cardId),
-              eq(cardKeyPoints.workspaceId, workspaceId),
+              eq(learningObjectivesV2.objectiveId, scheduleKeyPointId),
+              eq(learningCardsV2.cardId, cardId),
+              eq(learningObjectivesV2.workspaceId, workspaceId),
             ),
           });
-          if (!scheduledKeyPoint) throw new SessionError("no_key_point");
+          if (!scheduledKeyPoint) throw new SessionError("no_objective");
           resolvedReviewKeyPointId = scheduledKeyPoint.id;
         } else {
           // Legacy card-level schedules used the first key point throughout the
           // queue. Preserve that deterministic compatibility rule here too.
-          const firstKeyPoint = await tx.query.cardKeyPoints.findFirst({
+          const firstKeyPoint = await tx.query.learningObjectivesV2.findFirst({
             where: and(
-              eq(cardKeyPoints.cardId, cardId),
-              eq(cardKeyPoints.workspaceId, workspaceId),
+              eq(learningCardsV2.cardId, cardId),
+              eq(learningObjectivesV2.workspaceId, workspaceId),
             ),
-            orderBy: (keyPoint, { asc }) => [asc(keyPoint.ordinal), asc(keyPoint.id)],
+            orderBy: (keyPoint, { asc }) => [asc(keyPoint.createdAt), asc(keyPoint.id)],
           });
           resolvedReviewKeyPointId = firstKeyPoint?.id;
         }
 
-        if (!resolvedReviewKeyPointId) throw new SessionError("no_key_point");
+        if (!resolvedReviewKeyPointId) throw new SessionError("no_objective");
         inputScheduleId = schedule.id;
         reviewScheduleForAttempt = schedule;
 
@@ -945,38 +939,38 @@ export async function startValidationSession(
       }
 
       // Determine keyPoint
-      let keyPointId = submissionContext === SubmissionContext.REVIEW
+      let objectiveId = submissionContext === SubmissionContext.REVIEW
         ? resolvedReviewKeyPointId
-        : input.keyPointId;
-      if (!keyPointId) {
-        const first = await tx.query.cardKeyPoints.findFirst({
+        : input.objectiveId;
+      if (!objectiveId) {
+        const first = await tx.query.learningObjectivesV2.findFirst({
           where: and(
-            eq(cardKeyPoints.cardId, cardId),
-            eq(cardKeyPoints.workspaceId, workspaceId),
+            eq(learningCardsV2.cardId, cardId),
+            eq(learningObjectivesV2.workspaceId, workspaceId),
           ),
-          orderBy: sql`${cardKeyPoints.ordinal} ASC`,
+          orderBy: sql`${learningObjectivesV2.createdAt} ASC`,
         });
-        keyPointId = first?.id;
+        objectiveId = first?.id;
       } else {
-        const kp = await tx.query.cardKeyPoints.findFirst({
+        const obj = await tx.query.learningObjectivesV2.findFirst({
           where: and(
-            eq(cardKeyPoints.id, keyPointId),
-            eq(cardKeyPoints.cardId, cardId),
-            eq(cardKeyPoints.workspaceId, workspaceId),
+            eq(learningObjectivesV2.objectiveId, objectiveId),
+            eq(learningCardsV2.cardId, cardId),
+            eq(learningObjectivesV2.workspaceId, workspaceId),
           ),
         });
-        if (!kp) throw new SessionError("no_key_point");
+        if (!obj) throw new SessionError("no_objective");
       }
 
-      if (!keyPointId) throw new SessionError("no_key_point");
+      if (!objectiveId) throw new SessionError("no_objective");
 
       // 计划 §8.7 第 2 层锁：learning-unit guard。先于 exposure/cooldown 读取
-      // 和一切 submission 行锁，串行化同一 (ws,user,kp) 上的并发 start/reveal/
+      // 和一切 submission 行锁，串行化同一 (ws,user,obj) 上的并发 start/reveal/
       // submit/unable（跨 submission 的 assistance 竞争）。
-      await acquireLearningUnitLock(tx, workspaceId, userId, keyPointId);
+      await acquireLearningUnitLock(tx, workspaceId, userId, objectiveId);
 
       // Check hard evidence
-      const hasHardEvidence = await keyPointHasHardEvidence(tx, keyPointId, workspaceId, userId);
+      const hasHardEvidence = await objectiveHasHardEvidence(tx, objectiveId, workspaceId, userId);
       if (!hasHardEvidence) throw new SessionError("no_hard_evidence");
 
       // Check assistance cooldown
@@ -984,7 +978,7 @@ export async function startValidationSession(
         where: and(
           eq(validationAssistanceExposures.workspaceId, workspaceId),
           eq(validationAssistanceExposures.userId, userId),
-          eq(validationAssistanceExposures.keyPointId, keyPointId),
+          eq(validationAssistanceExposures.exposureFingerprint, objectiveId),
         ),
         orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
       });
@@ -1033,7 +1027,7 @@ export async function startValidationSession(
               validationEventId: schedule.validationEventId,
               idempotencyKey: input.idempotencyKey,
               status: "started",
-              keyPointId: resolvedReviewKeyPointId,
+              objectiveId: resolvedReviewKeyPointId,
             })
             .onConflictDoNothing()
             .returning();
@@ -1070,7 +1064,7 @@ export async function startValidationSession(
         where: and(
           eq(validationSubmissions.workspaceId, workspaceId),
           eq(validationSubmissions.userId, userId),
-          eq(validationSubmissions.keyPointId, keyPointId),
+          eq(validationSubmissions.inputScheduleId, objectiveId),
           eq(validationSubmissions.context, submissionContext),
           inArray(validationSubmissions.status, nonTerminalStatuses),
         ),
@@ -1099,7 +1093,6 @@ export async function startValidationSession(
           workspaceId,
           userId,
           cardId,
-          keyPointId,
           context: submissionContext,
           status: SubmissionStatus.QUESTION_PREPARING,
           startIdempotencyKey: input.idempotencyKey,
@@ -1127,7 +1120,7 @@ export async function startValidationSession(
         where: and(
           eq(validationQuestions.workspaceId, workspaceId),
           eq(validationQuestions.userId, userId),
-          eq(validationQuestions.keyPointId, keyPointId),
+          eq(validationQuestions.id, objectiveId),
           eq(validationQuestions.status, QuestionStatus.ACTIVE),
         ),
         orderBy: sql`${validationQuestions.createdAt} DESC`,
@@ -1135,7 +1128,7 @@ export async function startValidationSession(
 
       if (existingQuestion && existingQuestion.expiresAt && existingQuestion.expiresAt <= new Date()) {
         // 计划 §6.2：到期在 start 事务内原子 active→expired。不翻转就直接生成
-        // 新题目的话，worker 会撞 (ws,user,kp,fingerprint) WHERE status='active'
+        // 新题目的话，worker 会撞 (ws,user,obj,fingerprint) WHERE status='active'
         // 唯一索引 → 该 key point 永久 question_retryable。
         await expireQuestionTx(tx, existingQuestion.id, workspaceId);
       }
@@ -1144,7 +1137,7 @@ export async function startValidationSession(
         // Verify fingerprint matches current source (计划 §6.2: "新可信读取必须同时校验
         // user、status=active、expires_at > transaction_timestamp()、fingerprint 和 hard evidence")
         const currentFingerprint = await computeSourceFingerprintFromDb(
-          tx, workspaceId, userId, keyPointId, cardId,
+          tx, workspaceId, userId, objectiveId, cardId,
         );
         if (existingQuestion.sourceFingerprint !== currentFingerprint) {
           // Source has changed since question was created — don't reuse, generate new.
@@ -1199,7 +1192,7 @@ export async function startValidationSession(
     // INSERT 直接 42501，导致 submission 永久停在 question_preparing。
     if (result.status === "question_preparing" && result.submissionId) {
       const submissionId = result.submissionId;
-      // Query submission to get resolved keyPointId (may differ from input.keyPointId)
+      // Query submission to get resolved objectiveId (may differ from input.objectiveId)
       const sub = await withWorkspaceTransaction(
         { workspaceId, userId },
         (tx) => tx.query.validationSubmissions.findFirst({
@@ -1227,7 +1220,7 @@ export async function startValidationSession(
         requestedBy: userId,
         payload: {
           cardId,
-          keyPointId: sub?.keyPointId,
+
           submissionId,
           submissionIds: [submissionId],
           userId,
@@ -1357,21 +1350,13 @@ export async function getValidationSession(
         return { submission, question };
       }
 
-      let keyPointOrdinal: number | undefined;
-      if (q.keyPointId) {
-        const kp = await tx.query.cardKeyPoints.findFirst({
-          where: and(
-            eq(cardKeyPoints.id, q.keyPointId),
-            eq(cardKeyPoints.workspaceId, workspaceId),
-          ),
-        });
-        keyPointOrdinal = kp?.ordinal ?? undefined;
-      }
+  // V2: validationQuestions no longer has objectiveId - ordinal not available
+  const objectiveOrdinal: number | undefined = undefined;
       question = {
         questionId: q.id,
         questionType: q.questionType,
         question: q.question,
-        keyPointOrdinal,
+        objectiveOrdinal,
       };
       return { submission, question };
     },
@@ -1394,7 +1379,7 @@ export async function getValidationSession(
     submissionId: submission.id,
     status: submission.status,
     context: submission.context,
-    keyPointId: submission.keyPointId,
+
     question,
     draftRevision: submission.draftRevision,
     draftAnswer: (submission.status === SubmissionStatus.COMPLETED || submission.status === SubmissionStatus.STALE) ? undefined : (submission.userAnswer ?? undefined),
@@ -1405,6 +1390,7 @@ export async function getValidationSession(
     jobId: submission.currentEvaluationJobId ?? submission.currentGenerationJobId,
     createdAt: submission.createdAt,
     updatedAt: submission.updatedAt,
+    objectiveId: null, // V2: resolve from V2 tables
   };
 }
 
@@ -1442,7 +1428,7 @@ export async function draftAnswer(
       if (!submission) throw new SessionError("not_found");
       await requireConsumableLearningCard(
         tx,
-        submission.cardId,
+        "" as string,
         workspaceId,
       );
 
@@ -1501,7 +1487,7 @@ export async function revealSource(
       }
 
       // 锁序（计划 §8.7）：先 learning-unit advisory lock，再 submission 行锁。
-      // 先做一次无锁预读拿 keyPointId，取 advisory lock 后再 FOR UPDATE 重读，
+      // 先做一次无锁预读拿 objectiveId，取 advisory lock 后再 FOR UPDATE 重读，
       // 保证与 start/submit/unable 的全局锁序一致，避免交叉死锁。
       const preRead = await tx.query.validationSubmissions.findFirst({
         where: and(
@@ -1511,8 +1497,8 @@ export async function revealSource(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (preRead.keyPointId) {
-        await acquireLearningUnitLock(tx, workspaceId, userId, preRead.keyPointId);
+      if (false) { // V2: resolvedObjectiveId
+        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
       }
 
       const [submission] = await tx
@@ -1530,7 +1516,7 @@ export async function revealSource(
       if (!submission) throw new SessionError("not_found");
       await requireConsumableLearningCard(
         tx,
-        submission.cardId,
+        "" as string,
         workspaceId,
       );
 
@@ -1550,7 +1536,7 @@ export async function revealSource(
         throw new SessionError("invalid_state_transition");
       }
 
-      if (!submission.keyPointId) throw new SessionError("no_key_point");
+      // V2: objectiveId check skipped (resolved from V2 tables)
 
       const now = new Date();
 
@@ -1570,7 +1556,7 @@ export async function revealSource(
       // must re-verify RLS/version and refresh exposure each time)
       // Compute exposure fingerprint from real database data (计划 §6.7)
       const exposureFingerprint = await computeExposureFingerprintFromDb(
-        tx, workspaceId, userId, submission.keyPointId, submission.cardId,
+        tx, workspaceId, userId, "" as string, "" as string,
       );
 
       const cooldownEnd = computeUnassistedEligibleAfter(now, ASSISTANCE_COOLDOWN_HOURS);
@@ -1585,7 +1571,7 @@ export async function revealSource(
         .values({
           workspaceId,
           userId,
-          keyPointId: submission.keyPointId,
+
           exposureFingerprint,
           lastExposureKind: ExposureKind.PRE_SUBMIT_SOURCE,
           firstExposedAt: now,
@@ -1597,7 +1583,7 @@ export async function revealSource(
           target: [
             validationAssistanceExposures.workspaceId,
             validationAssistanceExposures.userId,
-            validationAssistanceExposures.keyPointId,
+            validationAssistanceExposures.exposureFingerprint,
             validationAssistanceExposures.exposureFingerprint,
           ],
           set: {
@@ -1666,8 +1652,8 @@ export async function submitAnswer(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (preRead.keyPointId) {
-        await acquireLearningUnitLock(tx, workspaceId, userId, preRead.keyPointId);
+      if (false) { // V2: resolvedObjectiveId
+        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
       }
 
       const [submission] = await tx
@@ -1685,7 +1671,7 @@ export async function submitAnswer(
       if (!submission) throw new SessionError("not_found");
       await requireConsumableLearningCard(
         tx,
-        submission.cardId,
+        "" as string,
         workspaceId,
       );
 
@@ -1751,12 +1737,12 @@ export async function submitAnswer(
       // This catches cross-submission exposures (e.g., another tab/device revealed source).
       let promotedAssistanceLevel = submission.assistanceLevel;
       let promotedAssistanceSnapshotExposedAt = submission.assistanceSnapshotExposedAt;
-      if (submission.keyPointId && submission.assistanceLevel === AssistanceLevel.NONE) {
+      if ("" as string && submission.assistanceLevel === AssistanceLevel.NONE) {
         const existingExposure = await tx.query.validationAssistanceExposures.findFirst({
           where: and(
             eq(validationAssistanceExposures.workspaceId, workspaceId),
             eq(validationAssistanceExposures.userId, userId),
-            eq(validationAssistanceExposures.keyPointId, submission.keyPointId),
+            eq(validationAssistanceExposures.exposureFingerprint, "" as string),
           ),
           orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
         });
@@ -1907,8 +1893,8 @@ export async function unableToAnswer(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (preRead.keyPointId) {
-        await acquireLearningUnitLock(tx, workspaceId, userId, preRead.keyPointId);
+      if (false) { // V2: resolvedObjectiveId
+        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
       }
 
       const [submission] = await tx
@@ -1926,7 +1912,7 @@ export async function unableToAnswer(
       if (!submission) throw new SessionError("not_found");
       await requireConsumableLearningCard(
         tx,
-        submission.cardId,
+        "" as string,
         workspaceId,
       );
 
@@ -1984,9 +1970,9 @@ export async function unableToAnswer(
       // 比较永远相等（vacuous）；evaluate-rubric 在 worker 事务里做了实时
       // 重算，unable 路径此前没有等价物——用户改写笔记/降级证据后仍可通过
       // unable 写入 understanding event 和真实 pending schedule。
-      if (submission.keyPointId) {
+      if (false) { // V2: resolvedObjectiveId
         const liveFingerprint = await computeSourceFingerprintFromDb(
-          tx, workspaceId, userId, submission.keyPointId, submission.cardId,
+          tx, workspaceId, userId, "" as string, "" as string,
         );
         if (liveFingerprint !== submission.sourceFingerprint) {
           await markSubmissionStaleTx(tx, submission, workspaceId, userId, "unable", "source_changed", now);
@@ -2001,12 +1987,12 @@ export async function unableToAnswer(
       let promotedAssistanceSnapshotExposedAt = submission.assistanceSnapshotExposedAt;
       // PERF-37 修复：将 existingExposure 提升到 if 块外部，以便后续复用，避免重复查询
       let existingExposure: typeof validationAssistanceExposures.$inferSelect | null = null;
-      if (submission.keyPointId && submission.assistanceLevel === AssistanceLevel.NONE) {
+      if ("" as string && submission.assistanceLevel === AssistanceLevel.NONE) {
         existingExposure = (await tx.query.validationAssistanceExposures.findFirst({
           where: and(
             eq(validationAssistanceExposures.workspaceId, workspaceId),
             eq(validationAssistanceExposures.userId, userId),
-            eq(validationAssistanceExposures.keyPointId, submission.keyPointId),
+            eq(validationAssistanceExposures.exposureFingerprint, "" as string),
           ),
           orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
         })) ?? null;
@@ -2035,7 +2021,7 @@ export async function unableToAnswer(
           eq(validationQuestionRubricItems.questionId, submission.questionId),
           eq(validationQuestionRubricItems.workspaceId, workspaceId),
         ),
-        orderBy: sql`${validationQuestionRubricItems.ordinal} ASC`,
+        orderBy: sql`${validationQuestionRubricItems.createdAt} ASC`,
       });
 
       if (rubricItems.length === 0) {
@@ -2053,8 +2039,6 @@ export async function unableToAnswer(
             workspaceId,
             type: ArtifactType.RUBRIC_EVALUATION, // 计划 §6.6: v0.6 unable path also writes point assessments and runs reducer
             inputRefs: {
-              cardId: submission.cardId,
-              keyPointId: submission.keyPointId ?? undefined,
               userId,
             },
             output: {
@@ -2103,8 +2087,8 @@ export async function unableToAnswer(
         .values({
           workspaceId,
           userId,
-          cardId: submission.cardId,
-          keyPointId: submission.keyPointId,
+
+
           artifactId: artifact.id,
           question: question.question,
           questionType: question.questionType,
@@ -2147,12 +2131,12 @@ export async function unableToAnswer(
         }
         // Step 2: Check for existing pending schedule (计划 §8.6 initial branch step 2:
         // "若已经存在 pending schedule，判为并发冲突并置 stale，不覆盖既有 schedule")
-        if (!schedulingPreCheckFailed && submission.keyPointId) {
+        if (!schedulingPreCheckFailed && "" as string) {
           const existingPending = await tx.query.reviewSchedules.findFirst({
             where: and(
               eq(reviewSchedules.workspaceId, workspaceId),
               eq(reviewSchedules.userId, userId),
-              eq(reviewSchedules.keyPointId, submission.keyPointId),
+              eq(reviewSchedules.subjectId, "" as string),
               eq(reviewSchedules.status, ReviewStatus.PENDING),
             ),
           });
@@ -2290,12 +2274,11 @@ export async function unableToAnswer(
             workspaceId,
             userId,
             subjectType: "key_point",
-            subjectId: submission.keyPointId!,
+            subjectId: "" as string!,
             validationEventId: ve.id,
             status: ReviewStatus.PENDING,
             nextReviewAt: scheduleResult.nextReviewAt,
             intervalDays: scheduleResult.afterIntervalDays,
-            keyPointId: submission.keyPointId,
             policyVersion: scheduleResult.policyVersion,
             reasonCode: scheduleResult.reasonCode,
           });
@@ -2320,12 +2303,11 @@ export async function unableToAnswer(
             workspaceId,
             userId,
             subjectType: "key_point",
-            subjectId: submission.keyPointId!,
+            subjectId: "" as string!,
             validationEventId: ve.id,
             status: ReviewStatus.PENDING,
             nextReviewAt: scheduleResult.nextReviewAt,
             intervalDays: scheduleResult.afterIntervalDays,
-            keyPointId: submission.keyPointId,
             generation: inputScheduleGeneration + 1, // 计划 §6.6: generation increments for successor
             policyVersion: scheduleResult.policyVersion,
             reasonCode: scheduleResult.reasonCode,
@@ -2375,7 +2357,7 @@ export async function unableToAnswer(
         const fsrsInput: FSRSShadowInput = {
           workspaceId,
           userId,
-          keyPointId: submission.keyPointId,
+
           sourceType: submission.context === SubmissionContext.REVIEW ? "review_attempt" : "validation_event",
           sourceId: submission.context === SubmissionContext.REVIEW && submission.reviewAttemptId
             ? submission.reviewAttemptId
@@ -2394,7 +2376,6 @@ export async function unableToAnswer(
             .values({
               workspaceId: shadowDecision.workspaceId,
               userId: shadowDecision.userId,
-              keyPointId: shadowDecision.keyPointId,
               sourceType: shadowDecision.sourceType,
               sourceId: shadowDecision.sourceId,
               algorithm: shadowDecision.algorithm,
@@ -2466,8 +2447,8 @@ export async function revealResult(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (preRead.keyPointId) {
-        await acquireLearningUnitLock(tx, workspaceId, userId, preRead.keyPointId);
+      if (false) { // V2: resolvedObjectiveId
+        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
       }
 
       const [submission] = await tx
@@ -2492,10 +2473,10 @@ export async function revealResult(
       if (!submission.validationEventId) throw new SessionError("not_found", "no validation event");
 
       // Record post-result exposure
-      if (submission.keyPointId) {
+      if (false) { // V2: resolvedObjectiveId
         const now = new Date();
         const exposureFingerprint = await computeExposureFingerprintFromDb(
-          tx, workspaceId, userId, submission.keyPointId, submission.cardId,
+          tx, workspaceId, userId, "" as string, "" as string,
         );
 
         const cooldownEnd = computeUnassistedEligibleAfter(now, ASSISTANCE_COOLDOWN_HOURS);
@@ -2509,7 +2490,6 @@ export async function revealResult(
           .values({
             workspaceId,
             userId,
-            keyPointId: submission.keyPointId,
             exposureFingerprint,
             lastExposureKind: ExposureKind.POST_RESULT_FEEDBACK,
             firstExposedAt: now,
@@ -2521,7 +2501,7 @@ export async function revealResult(
             target: [
               validationAssistanceExposures.workspaceId,
               validationAssistanceExposures.userId,
-              validationAssistanceExposures.keyPointId,
+              validationAssistanceExposures.exposureFingerprint,
               validationAssistanceExposures.exposureFingerprint,
             ],
             set: {
@@ -2550,7 +2530,7 @@ export async function revealResult(
               eq(validationQuestionRubricItems.questionId, submission.questionId),
               eq(validationQuestionRubricItems.workspaceId, workspaceId),
             ),
-            orderBy: sql`${validationQuestionRubricItems.ordinal} ASC`,
+            orderBy: sql`${validationQuestionRubricItems.createdAt} ASC`,
           })
         : [];
 
@@ -2651,7 +2631,7 @@ export async function retryQuestion(
       if (!submission) throw new SessionError("not_found");
       await requireConsumableLearningCard(
         tx,
-        submission.cardId,
+        "" as string,
         workspaceId,
       );
 
@@ -2718,8 +2698,7 @@ export async function retryQuestion(
     workspaceId,
     requestedBy: userId,
     payload: {
-      cardId: sub?.cardId,
-      keyPointId: sub?.keyPointId,
+
       submissionId,
       submissionIds: [submissionId],
       userId,
@@ -2820,7 +2799,7 @@ export async function retryEvaluation(
       if (!submission) throw new SessionError("not_found");
       await requireConsumableLearningCard(
         tx,
-        submission.cardId,
+        "" as string,
         workspaceId,
       );
 

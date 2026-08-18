@@ -10,7 +10,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { companionDailySummaries } from "../../db/schema/companion-memory.ts";
@@ -73,6 +73,21 @@ export async function dailySummaryRoutes(app: FastifyInstance) {
         });
       }
 
+      // §15.3/§15.5：查找与该日记关联的候选记忆（source_event_id = daily-summary:<date>）。
+      const memory = await withWorkspaceTransaction(scope, async (tx) => {
+        const sourceEventId = `daily-summary:${result.date}`;
+        const rows = await tx.execute<{ id: string; candidate: boolean }>(sql`
+          SELECT id, candidate FROM assistant_memory_items
+          WHERE workspace_id = ${scope.workspaceId}
+            AND user_id = ${scope.userId}
+            AND source_event_id = ${sourceEventId}
+            AND deleted_at IS NULL
+          LIMIT 1
+        `);
+        const row = (Array.isArray(rows) ? rows : [])[0];
+        return row ? { memoryItemId: row.id, candidate: row.candidate } : null;
+      });
+
       return reply.header("Cache-Control", "no-store").send({
         version: 1,
         date: result.date,
@@ -81,7 +96,7 @@ export async function dailySummaryRoutes(app: FastifyInstance) {
         summary: result.summary,
         facts: result.facts,
         conversationHighlights: result.highlights,
-        memory: null,
+        memory,
       });
     },
   );

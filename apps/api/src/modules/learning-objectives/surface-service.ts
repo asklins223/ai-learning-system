@@ -10,8 +10,19 @@
  * - successorObjectiveId：从 learning_objective_lineage_v2 读取（superseded 场景）。
  *
  * 公共边界：本文件永不输出 canonicalAnswer / rubric / private payload。
+ *
+ * Bug 1 修复：cursor 原先用 new Date(options.cursor) 解析 objectiveId，类型不匹配。
+ * Bug 3 修复：原先逐条调用 assembleObjectiveSurfaceV3 导致 N+1，改为批量加载。
+ * Bug 7 修复：practiceTrailCount / lastCanonicalAt 从 outbox 读取（不再硬编码）。
+ * Bug 8 修复：successorObjectiveId 从 lineage 表读取（不再硬编码 null）。
+ *
+ * 注意：API 端 schema 中 V1 keyPointId 已移除：
+ * - learning_runs 没有 keyPointId 列，origin JSONB 中的 keyPointId = objectiveId（alias 规则）
+ * - review_schedules 没有 keyPointId 列，用 subjectType='card' + subjectId=objectiveId
+ * - canonical_learning_event_outbox / practice_trail_event_outbox 没有 keyPointId 列，
+ *   通过 runId 间接关联（run.origin->>'keyPointId' = objectiveId）
  */
-import { and, eq, asc, inArray, sql, lt, desc, ne } from "drizzle-orm";
+import { and, eq, asc, inArray, sql, desc } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   learningObjectivesV2,
@@ -19,18 +30,17 @@ import {
   learningCardsV2,
   initialValidationRemindersV2,
   learningObjectiveLineageV2,
-  learningExposuresV2,
+  learningObjectiveOriginsV2,
 } from "../../db/schema/card-generation-v2.ts";
-import { learningRuns } from "../../db/schema/learning-runs.ts";
+import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
 import { notes } from "../../db/schema/note.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
-import { canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
 import type {
   LearningObjectiveSurfaceV3,
   ObjectiveOriginV3,
   ObjectiveListItemV3,
 } from "@ailearn/shared";
-import { listOriginsByObjective } from "./origin-service.ts";
+import { listOriginsByObjective, rowToWire } from "./origin-service.ts";
 import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
 import { surfaceQueryDurationSeconds } from "../../lib/metrics.ts";
 
@@ -58,7 +68,7 @@ const ACTIVE_RUN_PHASES = [
   "paused",
 ] as const;
 
-// ─── 个人状态 loader（W2-11..13 精简版；投影 adapter 边界在 W4 收紧）──────
+// ─── 个人状态 loader（W2-11..13）──────────────────────────────────────────
 
 async function loadInitialValidation(
   tx: ApiTransaction,
@@ -94,14 +104,15 @@ async function loadActiveRun(
   ctx: SurfaceContext,
   objectiveId: string,
 ): Promise<LearningObjectiveSurfaceV3["personal"]["activeRun"]> {
-  // V2 run 通过 key_point_id = objectiveId（alias 规则，方案 20 §29.4）
+  // V2：learningRuns 没有 keyPointId 列（V1 退役），origin JSONB 中的
+  // keyPointId = objectiveId（方案 20 §29.4 alias 规则）。
   const rows = await tx
     .select({ runId: learningRuns.id, phase: learningRuns.phase })
     .from(learningRuns)
     .where(and(
       eq(learningRuns.workspaceId, ctx.workspaceId),
       eq(learningRuns.userId, ctx.userId),
-      eq(learningRuns.keyPointId, objectiveId),
+      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
       inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
     ))
     .orderBy(desc(learningRuns.createdAt))
@@ -115,13 +126,15 @@ async function loadReview(
   ctx: SurfaceContext,
   objectiveId: string,
 ): Promise<LearningObjectiveSurfaceV3["personal"]["review"]> {
+  // V2：reviewSchedules 没有 keyPointId 列，用 subjectType='card' + subjectId=objectiveId。
   const rows = await tx
     .select()
     .from(reviewSchedules)
     .where(and(
       eq(reviewSchedules.workspaceId, ctx.workspaceId),
       eq(reviewSchedules.userId, ctx.userId),
-      eq(reviewSchedules.keyPointId, objectiveId),
+      eq(reviewSchedules.subjectType, "card"),
+      eq(reviewSchedules.subjectId, objectiveId),
       eq(reviewSchedules.status, "pending"),
     ))
     .orderBy(asc(reviewSchedules.nextReviewAt))
@@ -137,7 +150,7 @@ async function loadReview(
   };
 }
 
-// ─── freshness（W2-08 简化：note 新版本 → source_outdated）────────────────
+// ─── freshness（W2-08：note 新版本 → source_outdated）────────────────────
 
 async function computeFreshness(
   tx: ApiTransaction,
@@ -165,7 +178,7 @@ async function computeFreshness(
   return outdated ? "source_outdated" : "fresh";
 }
 
-// ─── RL-09 指标：surface 装配耗时计时（热路径，轻量 Date.now）────────────�
+// ─── RL-09 指标：surface 装配耗时计时 ──────────────────────────────────────
 
 function withSurfaceTimer<T>(queryType: "detail" | "list", fn: () => Promise<T>): Promise<T> {
   const start = Date.now();
@@ -277,7 +290,6 @@ async function assembleObjectiveSurfaceV3Inner(
       ))
       .limit(1);
     if (lineageRows[0]) {
-      // 通过 successor revision 找到对应 objective
       const successorRevisionRows = await tx
         .select({ objectiveId: learningObjectiveRevisionsV2.objectiveId })
         .from(learningObjectiveRevisionsV2)
@@ -302,35 +314,50 @@ async function assembleObjectiveSurfaceV3Inner(
     }
   }
 
-  // Bug 7 修复：从 canonical learning event outbox 读取 practice trail 和 last canonical
+  // Bug 7 修复：从 outbox 读取 practice trail 和 last canonical
+  // outbox 没有 keyPointId 列，通过 runId 间接关联。
   let practiceTrailCount = 0;
   let lastCanonicalAt: string | null = null;
-  const [canonicalRows, practiceRows] = await Promise.all([
-    tx
-      .select({ createdAt: canonicalLearningEventOutbox.createdAt })
-      .from(canonicalLearningEventOutbox)
-      .where(and(
-        eq(canonicalLearningEventOutbox.workspaceId, ctx.workspaceId),
-        eq(canonicalLearningEventOutbox.userId, ctx.userId),
-        eq(canonicalLearningEventOutbox.keyPointId, objectiveId),
-        eq(canonicalLearningEventOutbox.status, "published"),
-      ))
-      .orderBy(desc(canonicalLearningEventOutbox.createdAt))
-      .limit(1),
-    tx
-      .select({ n: sql<number>`count(*)::int` })
-      .from(practiceTrailEventOutbox)
-      .where(and(
-        eq(practiceTrailEventOutbox.workspaceId, ctx.workspaceId),
-        eq(practiceTrailEventOutbox.userId, ctx.userId),
-        eq(practiceTrailEventOutbox.keyPointId, objectiveId),
-        eq(practiceTrailEventOutbox.status, "published"),
-      )),
-  ]);
-  if (canonicalRows[0]) {
-    lastCanonicalAt = canonicalRows[0].createdAt.toISOString();
+
+  // 先找到该 objective 的所有 runId
+  const runIdRows = await tx
+    .select({ runId: learningRuns.id })
+    .from(learningRuns)
+    .where(and(
+      eq(learningRuns.workspaceId, ctx.workspaceId),
+      eq(learningRuns.userId, ctx.userId),
+      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
+    ));
+  const runIds = runIdRows.map((r) => r.runId);
+
+  if (runIds.length > 0) {
+    const [canonicalRows, practiceRows] = await Promise.all([
+      tx
+        .select({ createdAt: canonicalLearningEventOutbox.createdAt })
+        .from(canonicalLearningEventOutbox)
+        .where(and(
+          eq(canonicalLearningEventOutbox.workspaceId, ctx.workspaceId),
+          eq(canonicalLearningEventOutbox.userId, ctx.userId),
+          inArray(canonicalLearningEventOutbox.runId, runIds),
+          eq(canonicalLearningEventOutbox.status, "published"),
+        ))
+        .orderBy(desc(canonicalLearningEventOutbox.createdAt))
+        .limit(1),
+      tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(practiceTrailEventOutbox)
+        .where(and(
+          eq(practiceTrailEventOutbox.workspaceId, ctx.workspaceId),
+          eq(practiceTrailEventOutbox.userId, ctx.userId),
+          inArray(practiceTrailEventOutbox.runId, runIds),
+          eq(practiceTrailEventOutbox.status, "published"),
+        )),
+    ]);
+    if (canonicalRows[0]) {
+      lastCanonicalAt = canonicalRows[0].createdAt.toISOString();
+    }
+    practiceTrailCount = Number(practiceRows[0]?.n ?? 0);
   }
-  practiceTrailCount = Number(practiceRows[0]?.n ?? 0);
 
   const actionInput: ActionResolverInputV3 = {
     objectiveId,
@@ -391,13 +418,6 @@ async function assembleObjectiveSurfaceV3Inner(
 }
 
 // ─── list assembler（W2-18：批量加载无 N+1 + 稳定 cursor）────────────────
-//
-// Bug 1 修复：cursor 原先用 new Date(options.cursor) 解析 objectiveId，类型不匹配。
-//   改为用 objectiveId 做 lt 比较（基于 (createdAt, id) 排序的 cursor：cursor 是
-//   上一页最后一条的 objectiveId，查询时找 createdAt < 该 objective 的 createdAt
-//   且 id < 该 objective 的 id，实现稳定分页）。
-// Bug 3 修复：原先逐条调用 assembleObjectiveSurfaceV3 导致 N+1（50 条=200+ 查询）。
-//   改为批量查询所有关联数据，再在内存中装配。
 
 export interface ObjectiveListOptions {
   lifecycle?: "active" | "archived" | "superseded";
@@ -428,20 +448,25 @@ export async function listObjectiveSurfacesV3(
   ctx: SurfaceContext,
   options: ObjectiveListOptions,
 ): Promise<{ items: LearningObjectiveSurfaceV3[]; total: number; nextCursor: string | null }> {
+  return withSurfaceTimer("list", () => listObjectiveSurfacesV3Inner(tx, ctx, options));
+}
+
+async function listObjectiveSurfacesV3Inner(
+  tx: ApiTransaction,
+  ctx: SurfaceContext,
+  options: ObjectiveListOptions,
+): Promise<{ items: LearningObjectiveSurfaceV3[]; total: number; nextCursor: string | null }> {
   const limit = Math.min(Math.max(options.limit, 1), 100);
   const lifecycle = options.lifecycle ?? "active";
 
-  // Bug 1 修复：cursor 是 objectiveId，需要先查到对应的 (createdAt, id)，
-  // 然后用 (createdAt, id) 做稳定分页条件。
-  let cursorCondition: ReturnType<typeof lt> | undefined = undefined;
+  // Bug 1 修复：cursor 是 objectiveId，先查到对应的 (createdAt, id)，再做稳定分页。
+  let cursorCondition = undefined;
   if (options.cursor) {
     const cursorRow = await getCursorRow(tx, ctx.workspaceId, options.cursor);
     if (cursorRow) {
-      // 排序是 desc(createdAt), desc(id)，所以 cursor 下一页条件是
-      // (createdAt < cursor.createdAt) OR (createdAt = cursor.createdAt AND id < cursor.id)
-      cursorCondition = sql`${learningObjectivesV2.createdAt} < ${cursorRow.createdAt}
+      cursorCondition = sql`(${learningObjectivesV2.createdAt} < ${cursorRow.createdAt}
         OR (${learningObjectivesV2.createdAt} = ${cursorRow.createdAt}
-          AND ${learningObjectivesV2.id} < ${cursorRow.id})`;
+          AND ${learningObjectivesV2.id} < ${cursorRow.id}))`;
     }
   }
 
@@ -459,7 +484,6 @@ export async function listObjectiveSurfacesV3(
       lifecycleEpoch: learningObjectivesV2.lifecycleEpoch,
       surfaceRevision: learningObjectivesV2.surfaceRevision,
       updatedAt: learningObjectivesV2.updatedAt,
-      rowCreatedAt: learningObjectivesV2.createdAt,
     })
     .from(learningObjectivesV2)
     .where(where)
@@ -468,7 +492,6 @@ export async function listObjectiveSurfacesV3(
   const pageRows = rows.slice(0, limit);
   const objectiveIds = pageRows.map((r) => r.objectiveId);
 
-  // Bug 3 修复：批量加载所有关联数据，消除 N+1
   const items = objectiveIds.length > 0
     ? await batchAssembleObjectiveSurfacesV3(tx, ctx, objectiveIds, pageRows)
     : [];
@@ -505,12 +528,20 @@ async function batchAssembleObjectiveSurfacesV3(
     lifecycleEpoch: number;
     surfaceRevision: number;
     updatedAt: Date;
-    rowCreatedAt: Date;
   }>,
 ): Promise<LearningObjectiveSurfaceV3[]> {
-  const objectiveByMap = new Map(objectiveRows.map((r) => [r.objectiveId, r]));
 
-  // 1. 批量查 revisions
+  // 1. 批量查完整 objective 行（含 lifecycle 字段，用于 successor 判断）
+  const fullObjectiveRows = await tx
+    .select()
+    .from(learningObjectivesV2)
+    .where(and(
+      eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+      inArray(learningObjectivesV2.objectiveId, objectiveIds),
+    ));
+  const fullObjectiveByMap = new Map(fullObjectiveRows.map((r) => [r.objectiveId, r]));
+
+  // 2. 批量查 revisions
   const revisionIds = objectiveRows
     .map((r) => r.currentObjectiveRevisionId)
     .filter(Boolean) as string[];
@@ -527,7 +558,7 @@ async function batchAssembleObjectiveSurfacesV3(
     revisionRows.map((r) => [r.objectiveId, r]),
   );
 
-  // 2. 批量查 active cards
+  // 3. 批量查 active cards
   const cardRows = objectiveIds.length > 0
     ? await tx
         .select()
@@ -540,8 +571,8 @@ async function batchAssembleObjectiveSurfacesV3(
     : [];
   const cardByObjective = new Map(cardRows.map((c) => [c.objectiveId, c]));
 
-  // 3. 批量查 origins
-  const allOrigins = objectiveIds.length > 0
+  // 4. 批量查 origins（直接从表查，再用 rowToOriginWire 转换）
+  const allOriginRows = objectiveIds.length > 0
     ? await tx
         .select()
         .from(learningObjectiveOriginsV2)
@@ -551,16 +582,16 @@ async function batchAssembleObjectiveSurfacesV3(
         ))
         .orderBy(asc(learningObjectiveOriginsV2.boundAt), asc(learningObjectiveOriginsV2.id))
     : [];
-  const originsByObjective = new Map<string, typeof allOrigins>();
-  for (const row of allOrigins) {
+  const originsByObjective = new Map<string, ObjectiveOriginV3[]>();
+  for (const row of allOriginRows) {
     const list = originsByObjective.get(row.objectiveId) ?? [];
-    list.push(row);
+    list.push(rowToWire(row));
     originsByObjective.set(row.objectiveId, list);
   }
 
-  // 4. 批量查 note titles（用于 primaryNote）
+  // 5. 批量查 note titles
   const noteIds = [...new Set(
-    allOrigins
+    allOriginRows
       .filter((o) => o.originKind === "note" && o.noteId)
       .map((o) => o.noteId!)
   )];
@@ -572,7 +603,7 @@ async function batchAssembleObjectiveSurfacesV3(
     : [];
   const noteById = new Map(noteRows.map((n) => [n.id, n]));
 
-  // 5. 批量查 initial validation reminders
+  // 6. 批量查 initial validation reminders
   const ivRows = objectiveIds.length > 0
     ? await tx
         .select()
@@ -592,32 +623,34 @@ async function batchAssembleObjectiveSurfacesV3(
     }
   }
 
-  // 6. 批量查 active runs
+  // 7. 批量查 active runs（通过 origin->>'keyPointId' JSON 路径查询）
   const runRows = objectiveIds.length > 0
     ? await tx
         .select({
           runId: learningRuns.id,
           phase: learningRuns.phase,
-          keyPointId: learningRuns.keyPointId,
+          origin: learningRuns.origin,
           createdAt: learningRuns.createdAt,
         })
         .from(learningRuns)
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
-          inArray(learningRuns.keyPointId, objectiveIds),
+          sql`${learningRuns.origin}->>'keyPointId' = ANY(${sql.raw(`ARRAY[${objectiveIds.map((id) => `'${id}'`).join(",")}]::text[]`)})`,
           inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];
   const runByObjective = new Map<string, { runId: string; phase: string }>();
   for (const run of runRows) {
-    if (run.keyPointId && !runByObjective.has(run.keyPointId)) {
-      runByObjective.set(run.keyPointId, { runId: run.runId, phase: run.phase });
+    const origin = run.origin as Record<string, unknown> | null;
+    const keyPointId = origin?.keyPointId as string | undefined;
+    if (keyPointId && !runByObjective.has(keyPointId)) {
+      runByObjective.set(keyPointId, { runId: run.runId, phase: run.phase });
     }
   }
 
-  // 7. 批量查 review schedules
+  // 8. 批量查 review schedules（subjectType='card', subjectId=objectiveId）
   const scheduleRows = objectiveIds.length > 0
     ? await tx
         .select()
@@ -625,82 +658,89 @@ async function batchAssembleObjectiveSurfacesV3(
         .where(and(
           eq(reviewSchedules.workspaceId, ctx.workspaceId),
           eq(reviewSchedules.userId, ctx.userId),
-          inArray(reviewSchedules.keyPointId, objectiveIds),
+          eq(reviewSchedules.subjectType, "card"),
+          inArray(reviewSchedules.subjectId, objectiveIds),
           eq(reviewSchedules.status, "pending"),
         ))
         .orderBy(asc(reviewSchedules.nextReviewAt))
     : [];
   const scheduleByObjective = new Map<string, typeof scheduleRows[0]>();
   for (const s of scheduleRows) {
-    if (s.keyPointId && !scheduleByObjective.has(s.keyPointId)) {
-      scheduleByObjective.set(s.keyPointId, s);
+    if (!scheduleByObjective.has(s.subjectId)) {
+      scheduleByObjective.set(s.subjectId, s);
     }
   }
 
-  // 8. 批量查 canonical events + practice trail counts
-  const [canonicalRows, practiceRows] = await Promise.all([
-    objectiveIds.length > 0
-      ? tx
-          .select({
-            keyPointId: canonicalLearningEventOutbox.keyPointId,
-            createdAt: canonicalLearningEventOutbox.createdAt,
-          })
-          .from(canonicalLearningEventOutbox)
-          .where(and(
-            eq(canonicalLearningEventOutbox.workspaceId, ctx.workspaceId),
-            eq(canonicalLearningEventOutbox.userId, ctx.userId),
-            inArray(canonicalLearningEventOutbox.keyPointId, objectiveIds),
-            eq(canonicalLearningEventOutbox.status, "published"),
-          ))
-          .orderBy(desc(canonicalLearningEventOutbox.createdAt))
-      : [],
-    objectiveIds.length > 0
-      ? tx
-          .select({
-            keyPointId: practiceTrailEventOutbox.keyPointId,
-            n: sql<number>`count(*)::int`,
-          })
-          .from(practiceTrailEventOutbox)
-          .where(and(
-            eq(practiceTrailEventOutbox.workspaceId, ctx.workspaceId),
-            eq(practiceTrailEventOutbox.userId, ctx.userId),
-            inArray(practiceTrailEventOutbox.keyPointId, objectiveIds),
-            eq(practiceTrailEventOutbox.status, "published"),
-          ))
-          .groupBy(practiceTrailEventOutbox.keyPointId)
-      : [],
-  ]);
+  // 9. 批量查 canonical events + practice trail counts（通过 runId 间接关联）
+  const allRunIds = runRows.map((r) => r.runId);
   const lastCanonicalByObjective = new Map<string, string>();
-  for (const row of canonicalRows) {
-    if (row.keyPointId && !lastCanonicalByObjective.has(row.keyPointId)) {
-      lastCanonicalByObjective.set(row.keyPointId, row.createdAt.toISOString());
-    }
-  }
   const practiceCountByObjective = new Map<string, number>();
-  for (const row of practiceRows) {
-    if (row.keyPointId) {
-      practiceCountByObjective.set(row.keyPointId, Number(row.n));
+
+  if (allRunIds.length > 0) {
+    const [canonicalRows, practiceRows] = await Promise.all([
+      tx
+        .select({
+          runId: canonicalLearningEventOutbox.runId,
+          createdAt: canonicalLearningEventOutbox.createdAt,
+        })
+        .from(canonicalLearningEventOutbox)
+        .where(and(
+          eq(canonicalLearningEventOutbox.workspaceId, ctx.workspaceId),
+          eq(canonicalLearningEventOutbox.userId, ctx.userId),
+          inArray(canonicalLearningEventOutbox.runId, allRunIds),
+          eq(canonicalLearningEventOutbox.status, "published"),
+        ))
+        .orderBy(desc(canonicalLearningEventOutbox.createdAt)),
+      tx
+        .select({
+          runId: practiceTrailEventOutbox.runId,
+          n: sql<number>`count(*)::int`,
+        })
+        .from(practiceTrailEventOutbox)
+        .where(and(
+          eq(practiceTrailEventOutbox.workspaceId, ctx.workspaceId),
+          eq(practiceTrailEventOutbox.userId, ctx.userId),
+          inArray(practiceTrailEventOutbox.runId, allRunIds),
+          eq(practiceTrailEventOutbox.status, "published"),
+        ))
+        .groupBy(practiceTrailEventOutbox.runId),
+    ]);
+
+    // runId → objectiveId 映射
+    const runIdToObjective = new Map<string, string>();
+    for (const run of runRows) {
+      const origin = run.origin as Record<string, unknown> | null;
+      const keyPointId = origin?.keyPointId as string | undefined;
+      if (keyPointId) {
+        runIdToObjective.set(run.runId, keyPointId);
+      }
+    }
+
+    for (const row of canonicalRows) {
+      const objId = runIdToObjective.get(row.runId);
+      if (objId && !lastCanonicalByObjective.has(objId)) {
+        lastCanonicalByObjective.set(objId, row.createdAt.toISOString());
+      }
+    }
+    for (const row of practiceRows) {
+      const objId = runIdToObjective.get(row.runId);
+      if (objId) {
+        practiceCountByObjective.set(objId, (practiceCountByObjective.get(objId) ?? 0) + Number(row.n));
+      }
     }
   }
 
-  // 9. 批量查 lineage（superseded → successor）
-  const supersededRevisionIds = objectiveRows
-    .filter((r) => r.currentObjectiveRevisionId && objectiveByMap.get(r.objectiveId))
-    .filter((r) => {
-      const obj = objectiveByMap.get(r.objectiveId);
-      // 检查 lifecycle——从 objectiveRows 本身读（但我们只有 objectiveId，
-      // 需要从 detail 重新查；此处简化：对所有 revision 查 lineage）
-      return true;
-    })
-    .map((r) => r.currentObjectiveRevisionId!)
+  // 10. 批量查 lineage（superseded → successor）
+  const allRevisionIds = objectiveRows
+    .map((r) => r.currentObjectiveRevisionId)
     .filter(Boolean) as string[];
-  const lineageRows = supersededRevisionIds.length > 0
+  const lineageRows = allRevisionIds.length > 0
     ? await tx
         .select()
         .from(learningObjectiveLineageV2)
         .where(and(
           eq(learningObjectiveLineageV2.workspaceId, ctx.workspaceId),
-          inArray(learningObjectiveLineageV2.predecessorRevisionId, supersededRevisionIds),
+          inArray(learningObjectiveLineageV2.predecessorRevisionId, allRevisionIds),
           eq(learningObjectiveLineageV2.relation, "supersedes"),
         ))
     : [];
@@ -708,7 +748,6 @@ async function batchAssembleObjectiveSurfacesV3(
   for (const lin of lineageRows) {
     successorByRevision.set(lin.predecessorRevisionId, lin.successorRevisionId);
   }
-  // successor revision → objectiveId
   const successorRevisionIds = [...new Set(lineageRows.map((l) => l.successorRevisionId))];
   const successorRevisionRows = successorRevisionIds.length > 0
     ? await tx
@@ -723,7 +762,6 @@ async function batchAssembleObjectiveSurfacesV3(
         ))
     : [];
   const successorObjByRevision = new Map(successorRevisionRows.map((r) => [r.objectiveRevisionId, r.objectiveId]));
-  // successor objective → cardId
   const successorObjIds = [...new Set(successorRevisionRows.map((r) => r.objectiveId))];
   const successorCardRows = successorObjIds.length > 0
     ? await tx
@@ -737,19 +775,17 @@ async function batchAssembleObjectiveSurfacesV3(
     : [];
   const cardByObjectiveForSuccessor = new Map(successorCardRows.map((c) => [c.objectiveId, c.cardId]));
 
-  // 10. 装配 Surface（内存组装，不再查 DB）
+  // 11. 装配 Surface（内存组装，不再查 DB）
   const now = new Date();
   const results: LearningObjectiveSurfaceV3[] = [];
 
   for (const objRow of objectiveRows) {
     const objectiveId = objRow.objectiveId;
-    const objective = objectiveByMap.get(objectiveId)!;
+    const fullObjective = fullObjectiveByMap.get(objectiveId);
+    const lifecycle = (fullObjective?.lifecycle ?? "active") as "active" | "archived" | "superseded";
     const revision = revisionByObjective.get(objectiveId);
     const card = cardByObjective.get(objectiveId);
-    const origins = (originsByObjective.get(objectiveId) ?? []).map((r) => {
-      // 复用 origin-service 的 rowToWire 函数太重；这里直接构造 wire
-      return r as unknown as ObjectiveOriginV3;
-    });
+    const origins = originsByObjective.get(objectiveId) ?? [];
 
     // primaryNote
     let primaryNote: LearningObjectiveSurfaceV3["sources"]["primaryNote"] = null;
@@ -772,15 +808,13 @@ async function batchAssembleObjectiveSurfacesV3(
     if (noteOrigins.length === 0) {
       freshness = origins.length === 0 ? "legacy_unreviewed" : "fresh";
     } else {
-      const outdated = noteOrigins.some(
-        (o) => {
-          if (o.kind !== "note") return false;
-          const noteRow = noteById.get(o.noteId);
-          return noteRow && noteRow.currentVersionId !== null
-            && noteRow.currentVersionId !== undefined
-            && noteRow.currentVersionId !== o.noteVersionId;
-        }
-      );
+      const outdated = noteOrigins.some((o) => {
+        if (o.kind !== "note") return false;
+        const noteRow = noteById.get(o.noteId);
+        return noteRow && noteRow.currentVersionId !== null
+          && noteRow.currentVersionId !== undefined
+          && noteRow.currentVersionId !== o.noteVersionId;
+      });
       freshness = outdated ? "source_outdated" : "fresh";
     }
 
@@ -827,7 +861,7 @@ async function batchAssembleObjectiveSurfacesV3(
 
     const actionInput: ActionResolverInputV3 = {
       objectiveId,
-      lifecycle: "active" as ActionResolverInputV3["lifecycle"],
+      lifecycle,
       successorObjectiveId,
       successorCardId,
       hasActiveCard: Boolean(card),
@@ -852,7 +886,7 @@ async function batchAssembleObjectiveSurfacesV3(
         conceptLabel: revision?.conceptLabel ?? null,
         publicSummary: revision?.publicSummary ?? "",
         knowledgeForm: (revision?.knowledgeForm ?? "fact") as never,
-        lifecycle: "active" as never,
+        lifecycle: lifecycle as never,
         freshness,
         presentation: {
           cardId: card?.cardId ?? null,
@@ -874,9 +908,17 @@ async function batchAssembleObjectiveSurfacesV3(
         lastCanonicalAt,
       },
       lifecycle: {
-        status: "active" as never,
+        status: lifecycle as never,
         successorObjectiveId,
       },
+      primaryAction,
+      createdAt: objRow.createdAt.toISOString(),
+      updatedAt: objRow.updatedAt.toISOString(),
+    });
+  }
+
+  return results;
+}
 
 /** 列表 item（轻量；W3 卡库用）。 */
 export function toObjectiveListItemV3(surface: LearningObjectiveSurfaceV3): ObjectiveListItemV3 {

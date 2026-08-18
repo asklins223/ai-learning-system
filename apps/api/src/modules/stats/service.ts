@@ -1,30 +1,9 @@
-import { and, eq, inArray, count, isNull, sql } from "drizzle-orm";
+import { and, eq, count, isNull, sql } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
-import { logger } from "../../lib/logger.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
-import { evidences, validationEvents, reviewSchedules } from "../../db/schema/evidence.ts";
+import { reviewSchedules } from "../../db/schema/evidence.ts";
 import { notes } from "../../db/schema/note.ts";
 import { ReviewStatus } from "@ailearn/shared";
-import { effectiveAlignment, effectiveAlignmentForUser, getUserOverrideMap } from "../../lib/evidence.ts";
-
-/**
- * PERF-B12 修复：分块 inArray 查询辅助。PostgreSQL 的 IN 子句在参数数量
- * 超过约 1000 时退化，且 postgres-js 对绑定参数数量有硬上限。把活跃卡 id
- * 按 500/批拆分多次查询再合并返回（对照 note/service.ts 的
- * chunkedInArraySelect 模式——该 helper 未导出，此处本地复制一份）。
- */
-async function chunkedInArraySelect<T>(
-  queryFn: (chunk: string[]) => Promise<T[]>,
-  ids: string[],
-  chunkSize = 500,
-): Promise<T[]> {
-  const results: T[] = [];
-  for (let i = 0; i < ids.length; i += chunkSize) {
-    const chunk = ids.slice(i, i + chunkSize);
-    results.push(...await queryFn(chunk));
-  }
-  return results;
-}
 
 export interface StatsOverview {
   noteCount: number;
@@ -133,17 +112,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     };
   }
 
-  // V2-only stats: 由于 V1 表已删除，移除 V1（keyPoint/card/evidence 明细）统计。
-  // 仅保留 note/card 计数、V2 objective 绑定 evidence 计数、review 计数。
-  const activeCardIds: string[] = [];
-  const activeObjectiveIds = await tx
-    .select({ objectiveId: learningCardsV2.objectiveId })
-    .from(learningCardsV2)
-    .where(and(
-      eq(learningCardsV2.workspaceId, workspaceId),
-      eq(learningCardsV2.lifecycle, "active"),
-    ))
-    .limit(STATS_ACTIVE_CARDS_MAX);
+  // V2-only stats: since V1 tables removed, only count V2 objective evidence bindings.
   const capped = activeCardCount > STATS_ACTIVE_CARDS_MAX;
 
   // V2 学习卡绑定的 evidence 计数

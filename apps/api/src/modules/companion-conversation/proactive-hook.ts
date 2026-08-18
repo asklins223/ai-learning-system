@@ -78,6 +78,8 @@ export interface ProactiveMemoryDeferInput {
   keyPointClaim: string;
   scheduleImpact: string;
   now: Date;
+  /** 22 方案 §9.7/§11.5：个性化文案延迟生成所需的记忆快照。 */
+  topMemories?: string[];
 }
 
 /**
@@ -123,6 +125,116 @@ export async function flushDeferredProactiveMemoryCandidates(
       { err: err instanceof Error ? err.message : String(err), runId: defer.runId },
       "memory candidate generation skipped",
     );
+  }
+
+  // 22 方案 §9.7/§11.5：个性化主动文案异步生成 + 2s 超时 + 回退模板。
+  // delivery 已在事务内以模板文案入队；此处异步生成成功后更新 text 字段。
+  if (defer.topMemories && defer.topMemories.length > 0) {
+    try {
+      const personalizedText = await generatePersonalizedProactiveText({
+        runId: defer.runId,
+        topMemories: defer.topMemories,
+        outcome: defer.outcome,
+        keyPointClaim: defer.keyPointClaim,
+      });
+      if (personalizedText) {
+        // 在独立事务中更新已入队 delivery 的 text 字段。
+        const { withWorkspaceTransaction } = await import("../../db/client.ts");
+        const { sql } = await import("drizzle-orm");
+        await withWorkspaceTransaction(defer.scope, async (tx) => {
+          await tx.execute(sql`
+            UPDATE assistant_deliveries
+            SET payload_ref = jsonb_set(
+              payload_ref,
+              '{text}',
+              ${JSON.stringify(personalizedText)}::jsonb
+            )
+            WHERE workspace_id = ${defer.scope.workspaceId}
+              AND user_id = ${defer.scope.userId}
+              AND dedupe_key = ${`run.completed:${defer.runId}`}
+          `);
+        });
+      }
+    } catch (err) {
+      // 个性化文案生成失败不阻塞已入队的模板文案。
+      const { logger } = await import("../../lib/logger.ts");
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), runId: defer.runId },
+        "personalized proactive text generation skipped",
+      );
+    }
+  }
+}
+
+/**
+ * 22 方案 §10.3.4/§11.5：个性化主动提醒文案生成。
+ *
+ * 调用 LLM 生成简短、自然、不打扰的提醒文案；输入为用户记忆 + 学习上下文。
+ * - 2s 超时（§11.5）；
+ * - 不编造记忆中没有的事实（§10.3.4）；
+ * - 生成的文案必须通过安全校验（不泄露内部 ID）；
+ * - 失败/超时返回 null，由调用方回退模板文案。
+ */
+async function generatePersonalizedProactiveText(input: {
+  runId: string;
+  topMemories: string[];
+  outcome: string;
+  keyPointClaim: string;
+}): Promise<string | null> {
+  const url = process.env.ASSESSMENT_CRITIC_URL?.trim();
+  const key = process.env.ASSESSMENT_CRITIC_KEY?.trim() ?? process.env.DASHSCOPE_API_KEY?.trim();
+  if (!url || !key) return null;
+  const model = process.env.ASSESSMENT_CRITIC_MODEL?.trim() ?? "qwen-plus";
+
+  const memoryBlock = input.topMemories
+    .slice(0, 3)
+    .map((m, i) => `[记忆${i + 1}] ${m.slice(0, 200)}`)
+    .join("\n");
+
+  const prompt = [
+    "根据用户记忆和当前学习上下文，生成一条简短、自然、不打扰的提醒。",
+    "不要编造记忆中没有的事实。",
+    "受提醒类型模板约束：学习完成的提醒。",
+    "只输出提醒文案本身，不要输出其他内容。",
+    "文案不超过 80 字。",
+    "",
+    `学习结果：${input.outcome}`,
+    `知识点：${input.keyPointClaim.slice(0, 200)}`,
+    "",
+    "用户记忆：",
+    memoryBlock,
+  ].join("\n");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
+  try {
+    const { postJsonToPublicEndpoint } = await import("@ailearn/shared/public-json-http");
+    const response = await postJsonToPublicEndpoint(
+      url,
+      {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      {
+        model,
+        messages: [
+          { role: "system", content: "你是学习伴星的提醒文案生成器，输出简短自然的中文提醒。" },
+          { role: "user", content: prompt },
+        ],
+        stream: false,
+      },
+      controller.signal,
+    );
+    const content = (response.body as { choices?: Array<{ message?: { content?: string } }> })
+      ?.choices?.[0]?.message?.content?.trim();
+    if (!content || content.length > 200) return null;
+    // 安全校验：不泄露内部 ID（uuid 格式）
+    if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(content)) return null;
+    return content;
+  } catch {
+    return null; // 超时/网络失败回退模板文案
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -213,8 +325,10 @@ export async function hookProactiveOnRunCompleted(
   });
   if (!decision.allow) return null;
 
-  // 22 方案：个性化主动文案（受 Policy Gate 批准后；确定性模板 + 记忆引用）。
-  let proactiveText: string | undefined;
+  // 22 方案 §9.7/§11.5：个性化主动文案。
+  // 在事务内只读取记忆快照（不调 LLM，避免钉住连接）；
+  // 事务提交后由 flushDeferredProactiveMemoryCandidates 异步生成文案并更新 delivery。
+  let topMemories: string[] | undefined;
   if (process.env.COMPANION_PROACTIVE_PERSONALIZED_V1 === "true") {
     try {
       const memoryRows = await tx.execute<{ content: string }>(sql`
@@ -227,22 +341,24 @@ export async function hookProactiveOnRunCompleted(
         ORDER BY pinned DESC, importance DESC, updated_at DESC
         LIMIT 3
       `);
-      const topMemory = (Array.isArray(memoryRows) ? memoryRows : [])[0]?.content;
-      if (topMemory) {
-        proactiveText = `我注意到你最近在关注「${topMemory.slice(0, 60)}」。刚才的学习已完成，要继续吗？`;
-      }
+      topMemories = (Array.isArray(memoryRows) ? memoryRows : [])
+        .map((row) => row.content)
+        .filter((content) => content.length > 0);
+      if (topMemories.length === 0) topMemories = undefined;
     } catch {
-      proactiveText = undefined; // 个性化失败回退模板文案。
+      topMemories = undefined; // 读取失败不阻塞，后续走模板文案。
     }
   }
 
+  // 模板文案：作为 fallback 先入队，异步生成成功后覆盖。
+  const templateText = "刚才的学习已完成，要继续吗？";
   await deliver(tx, scope, {
     assistantSessionId: null,
     kind: "system_event",
     payloadRef: {
       kind: "system_event",
       systemEventId: `run.completed:${input.runId}`,
-      ...(proactiveText ? { text: proactiveText } : {}),
+      text: templateText,
     },
     dedupeKey: `run.completed:${input.runId}`,
     expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
@@ -250,14 +366,15 @@ export async function hookProactiveOnRunCompleted(
 
   // P8 模型生成接线：LLM 网络调用不能在结算事务内执行（会钉住连接）。这里
   // 只返回延后所需的输入，由调用方在事务提交后调 flushDeferredProactiveMemoryCandidates。
-  if (!input.keyPointClaim) return null;
+  if (!input.keyPointClaim && !topMemories) return null;
   return {
     scope,
     runId: input.runId,
     outcome: input.outcome ?? "unknown",
     trustOutcome: input.trustOutcome ?? "unknown",
-    keyPointClaim: input.keyPointClaim,
+    keyPointClaim: input.keyPointClaim ?? "",
     scheduleImpact: input.scheduleImpact ?? "none",
     now,
+    topMemories,
   };
 }

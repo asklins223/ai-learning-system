@@ -191,6 +191,19 @@ export async function buildTopologySnapshotV3(
       },
     });
 
+  // ── Bug 4 修复：Source → Note contains_note 边 ────────────────────────
+  for (const note of noteRows) {
+    if (note.sourceId) {
+      edges.push({
+        edgeId: "contains_note-" + note.sourceId + "-" + note.id.slice(0, 8),
+        kind: "contains_note",
+        from: { kind: "source", id: note.sourceId },
+        to: { kind: "note", id: note.id },
+        reasonCodes: ["source_note"],
+      });
+    }
+  }
+
     // TP-03：Note → Objective sourced_from 边（multi-origin）
     for (const origin of origins) {
       if (origin.noteId && noteById.has(origin.noteId)) {

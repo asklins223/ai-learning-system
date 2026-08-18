@@ -9,7 +9,7 @@ import { z } from "zod";
 // ─── Start ───────────────────────────────────────────────────────────────
 
 export const startSessionSchema = z.object({
-  keyPointId: z.string().uuid().optional(),
+  objectiveId: z.string().uuid().optional(),
   idempotencyKey: z.string().min(1).max(128),
   // v0.6 review context (计划 §8.3): when context="review", the session is
   // started from a review schedule. The server selects the key point from the

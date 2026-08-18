@@ -35,7 +35,7 @@ export interface SourceFingerprintInput {
   workspaceId: string;
   userId: string;
   cardId: string;
-  keyPointId: string;
+  objectiveId: string;
   claim: string;
   quote: string;
   noteVersionId: string;
@@ -48,7 +48,7 @@ export interface SourceFingerprintInput {
 export interface ExposureFingerprintInput {
   workspaceId: string;
   userId: string;
-  keyPointId: string;
+  objectiveId: string;
   claim: string;
   quote: string;
   noteContentHash: string;
@@ -128,7 +128,7 @@ export function computeSourceFingerprint(input: SourceFingerprintInput): string 
     `ws:${input.workspaceId}`,
     `u:${input.userId}`,
     `c:${input.cardId}`,
-    `kp:${input.keyPointId}`,
+    `obj:${input.objectiveId}`,
     `claim:${sha256(normalizeText(input.claim))}`,
     `quote:${sha256(normalizeText(input.quote))}`,
     `nv:${input.noteVersionId}`,
@@ -157,7 +157,7 @@ export function computeExposureFingerprint(input: ExposureFingerprintInput): str
   const components = [
     `ws:${input.workspaceId}`,
     `u:${input.userId}`,
-    `kp:${input.keyPointId}`,
+    `obj:${input.objectiveId}`,
     `claim:${sha256(normalizeText(input.claim))}`,
     `quote:${sha256(normalizeText(input.quote))}`,
     `nch:${input.noteContentHash}`,

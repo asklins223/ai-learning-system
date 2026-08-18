@@ -33,6 +33,7 @@ export const understandingEdgeKindV3Schema = z.enum([
   "supported_by", // objective → evidence
   "relates_to", // objective ↔ objective 语义关系
   "supersedes", // old objective → new objective
+  "contains_note", // source → note（来源包含笔记）
 ]);
 export type UnderstandingEdgeKindV3 = z.infer<
   typeof understandingEdgeKindV3Schema

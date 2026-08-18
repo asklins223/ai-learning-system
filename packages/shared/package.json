@@ -126,6 +126,11 @@
       "import": "./src/published-learning-asset-contract.ts",
       "default": "./src/published-learning-asset-contract.ts"
     },
+    "./pet-persona-presets": {
+      "types": "./src/pet-persona-presets.ts",
+      "import": "./src/pet-persona-presets.ts",
+      "default": "./src/pet-persona-presets.ts"
+    },
     "./task-router": {
       "types": "./src/task-router.ts",
       "import": "./src/task-router.ts",

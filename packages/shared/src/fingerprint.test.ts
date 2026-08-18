@@ -31,7 +31,7 @@ function baseSourceInput(overrides: Partial<SourceFingerprintInput> = {}): Sourc
     workspaceId: "ws-1",
     userId: "user-1",
     cardId: "card-1",
-    keyPointId: "kp-1",
+    objectiveId: "obj-1",
     claim: "The earth orbits the sun",
     quote: "The earth orbits the sun in 365 days",
     noteVersionId: "nv-1",
@@ -47,7 +47,7 @@ function baseExposureInput(overrides: Partial<ExposureFingerprintInput> = {}): E
   return {
     workspaceId: "ws-1",
     userId: "user-1",
-    keyPointId: "kp-1",
+    objectiveId: "obj-1",
     claim: "The earth orbits the sun",
     quote: "The earth orbits the sun in 365 days",
     noteContentHash: "nch-1",

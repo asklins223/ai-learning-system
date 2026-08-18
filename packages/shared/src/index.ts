@@ -9,8 +9,6 @@ export * from "./scheduling-unified.ts";
 // 2026-08-13：fingerprint/content-hash/published-learning-asset-contract 为
 // 服务端专用（node: 依赖），改从子路径 import，不再经 index 全量导出
 //（客户端 bundle 加载会触发 node: 缺失崩溃）。
-export * from "./question-safety.ts";
-export * from "./deterministic-question.ts";
 export * from "./fsrs-shadow.ts";
 export * from "./fsrs-compare-report.ts";
 export * from "./feature-flags.ts";
@@ -93,6 +91,7 @@ export * from "./companion-emotion-classifier.ts";
 export * from "./companion-conversation-contracts.ts";
 export * from "./companion-learning-session-contracts.ts";
 export * from "./companion-persona.ts";
+export * from "./pet-persona-presets.ts";
 export * from "./card-quality-v2-contracts.ts";
 export * from "./voice-expression-tags.ts";
 export * from "./learning-objective-surface-contracts.ts";

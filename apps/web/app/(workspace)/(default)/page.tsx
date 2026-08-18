@@ -5,7 +5,7 @@ import "@/app/styles/workspace-headers.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, CardListItem, JobRow, SanitizedReviewItem, StatsOverview } from "@/lib/api";
+import { api, JobRow, SanitizedReviewItem } from "@/lib/api";
 import { useCurrentUser } from "@/lib/use-current-user";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { resolveHomeOnboardingVisibility } from "@/lib/home-onboarding";
@@ -13,10 +13,13 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Icon } from "@/components/ui/icons";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { statusMap } from "@/lib/status-map";
-import { mergeLearningCardsV2 } from "@/lib/learning-card-library";
 // Plan 23 FE-07：首页主内容切到 /v2/learning-dashboard（Objective Surface）。
+// Bug 2 修复：移除 legacy card 拉取逻辑（listCards/mergeLearningCardsV2），
+// isEmptyWorkspace 由 dashboard mode === 'first_use' 判定，不再依赖 card count。
 import "@/app/styles/home-dashboard.css";
 import { DashboardHome } from "@/features/learning-objective/DashboardHome";
+import { learningObjectiveApi } from "@/lib/learning-objective-api";
+import type { LearningDashboardV2 } from "@ailearn/shared";
 
 type CaptureMessageType = "success" | "error";
 
@@ -50,13 +53,8 @@ export default function HomePage() {
   const isPersonalWorkspace = Boolean(currentUser?.isPersonal);
   const router = useRouter();
   const [todayLabel, setTodayLabel] = useState("今天");
-  const [stats, setStats] = useState<StatsOverview | null>(null);
-  const [statsError, setStatsError] = useState<string | null>(null);
-  const [noteTotal, setNoteTotal] = useState<number | null>(null);
-  const [notesError, setNotesError] = useState<string | null>(null);
-  const [cards, setCards] = useState<CardListItem[] | null>(null);
-  const [homeCardTotal, setHomeCardTotal] = useState<number | null>(null);
-  const [cardsError, setCardsError] = useState<string | null>(null);
+  // Bug 2 修复：移除 legacy stats/cards/notes state，改用 dashboard 判定 isEmptyWorkspace
+  const [dashboardMode, setDashboardMode] = useState<LearningDashboardV2["mode"] | null>(null);
   const [reviews, setReviews] = useState<SanitizedReviewItem[] | null>(null);
   const [homeReviewTotal, setHomeReviewTotal] = useState<number | null>(null);
   const [reviewsError, setReviewsError] = useState<string | null>(null);
@@ -84,50 +82,23 @@ export default function HomePage() {
   const loadHomeData = useCallback(async () => {
     const requestId = ++homeRequestRef.current;
     setHomeRefreshing(true);
-    // F#7（🟠8）：先 await getMe（缓存命中/合并 in-flight），使 scope 解析为
-    // 真实 ws 键，随后 5 个统计 GET 全部落在带缓存路径（首帧冷缓存收益），
-    // 并让通用 in-flight 去重在并发重载时合并同 path GET。
+    // Bug 2 修复：移除 legacy stats/cards/notes API 调用；dashboard mode 由
+    // DashboardHome 的 /v2/learning-dashboard 请求驱动；这里只拉队列数据。
     await api.getMe().catch(() => null);
     if (requestId !== homeRequestRef.current) return;
-    const [statsResult, notesResult, cardsResult, v2CardsResult, reviewsResult, jobsResult] =
+    const [dashboardResult, reviewsResult, jobsResult] =
       await Promise.allSettled([
-        api.getStatsOverview(),
-        api.listNotes({ limit: 1 }),
-        api.listCards({ limit: 50 }),
-        api.listLearningCardsV2({ limit: 50 }),
+        learningObjectiveApi.getDashboard(),
         api.listSanitizedReviews({ status: "pending", limit: 3 }),
         api.listJobs({ limit: 50 }),
       ] as const);
 
     if (requestId !== homeRequestRef.current) return;
 
-    if (statsResult.status === "fulfilled") {
-      setStats(statsResult.value);
-      setStatsError(null);
+    if (dashboardResult.status === "fulfilled") {
+      setDashboardMode(dashboardResult.value.mode);
     } else {
-      setStatsError("学习概览");
-    }
-
-    if (notesResult.status === "fulfilled") {
-      setNoteTotal(notesResult.value.total);
-      setNotesError(null);
-    } else {
-      setNotesError("笔记");
-    }
-
-    if (cardsResult.status === "fulfilled" || v2CardsResult.status === "fulfilled") {
-      const legacyCards = cardsResult.status === "fulfilled" ? cardsResult.value.items : [];
-      const v2Cards = v2CardsResult.status === "fulfilled" ? v2CardsResult.value.items : [];
-      const mergedCards = mergeLearningCardsV2(legacyCards, v2Cards);
-      setCards(mergedCards);
-      // V2 列表接口没有 total；统计接口补上 V2 计数后 stats 会提供准确值。
-      // 这里退化为「旧卡 total + 本页 V2 数量」，避免 stats 失败时首页仍显示 0。
-      const legacyTotal = cardsResult.status === "fulfilled" ? cardsResult.value.total : 0;
-      setHomeCardTotal(legacyTotal + v2Cards.length);
-      setCardsError(null);
-    } else {
-      setCards(null);
-      setCardsError("学习卡");
+      setDashboardMode(null);
     }
 
     if (reviewsResult.status === "fulfilled") {
@@ -213,17 +184,16 @@ export default function HomePage() {
       setCaptureMsgType("success");
       setCaptureText("");
 
-      void Promise.allSettled([api.listJobs({ limit: 50 }), api.getStatsOverview()]).then(
-        ([jobsResult, statsResult]) => {
+      void Promise.allSettled([api.listJobs({ limit: 50 }), learningObjectiveApi.getDashboard()]).then(
+        ([jobsResult, dashboardResult]) => {
           if (jobsResult.status === "fulfilled") {
             setJobs(jobsResult.value.items);
             setJobsError(null);
           } else {
             setJobsError("运行任务");
           }
-          if (statsResult.status === "fulfilled") {
-            setStats(statsResult.value);
-            setStatsError(null);
+          if (dashboardResult.status === "fulfilled") {
+            setDashboardMode(dashboardResult.value.mode);
           }
         },
       );
@@ -255,21 +225,18 @@ export default function HomePage() {
     pendingReviewCount + activeJobs.length - visibleReviews.length - visibleJobs.length,
   );
   const queueCount = pendingReviewCount + activeJobs.length;
-  const errorList = [statsError, notesError, cardsError, reviewsError, jobsError].filter(Boolean);
-  const resolvedNoteCount = stats?.noteCount ?? noteTotal;
-  const resolvedCardCount = stats?.cardCount ?? homeCardTotal;
+  const errorList = [reviewsError, jobsError].filter(Boolean);
+  // Bug 2 修复：isEmptyWorkspace 由 dashboard mode === 'first_use' 判定，
+  // 不再依赖 legacy card count / stats。
   const isEmptyWorkspace =
-    resolvedNoteCount === 0 &&
-    resolvedCardCount === 0 &&
-    cards !== null &&
-    reviews !== null &&
-    jobs !== null &&
-    !notesError &&
-    !cardsError &&
-    !reviewsError &&
-    !jobsError &&
-    pendingReviewCount === 0 &&
-    jobs.length === 0;
+    dashboardMode === "first_use" ||
+    (dashboardMode === null &&
+     reviews !== null &&
+     jobs !== null &&
+     !reviewsError &&
+     !jobsError &&
+     pendingReviewCount === 0 &&
+     jobs.length === 0);
   // 首页首次使用面（isFirstUse 由空个人工作区判定；onboarding 大卡已随
   // §21.3 删除，桌宠 + Journey 承担新用户引导）。
   const isFirstUse = resolveHomeOnboardingVisibility({

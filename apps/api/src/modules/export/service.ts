@@ -903,6 +903,11 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
           "validationPointAssessments",
           "schedulingShadowDecisions",
           "validationQualitySignals",
+          // Plan 23 CS-07：V2 表
+          "objectivesV2",
+          "objectiveRevisionsV2",
+          "objectiveOriginsV2",
+          "learningCardsV2",
         ],
         excluded: {
           searchDocuments: "可重建 — 调用 POST /search/reindex 即可从主表重建",
