@@ -1241,18 +1241,9 @@ test("C5：LearningRun PREPARE 冻结 LearningTargetSnapshotV2（真实 DB + 幂
   const mapping = receipt.mappings[0];
   assert.ok(mapping.cardId && mapping.objectiveId, "C5 activation must produce card+objective");
 
-  // §29.4：迁移期 stable objective ID = legacy keyPoint UUID alias（DoD 要求）。
-  // card_key_points.card_id FK → V1 learning_cards(id)，先补 legacy 卡行。
-  const legacyCardId = randomUUID();
-  await admin.begin(async (tx) => {
-    await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json)
-      VALUES (${legacyCardId}, ${versionId}, ${WORKSPACE_ID}, 'active', '{}'::jsonb)
-      ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text, segment_ref)
-      VALUES (${mapping.objectiveId}, ${legacyCardId}, ${WORKSPACE_ID}, 1,
-              '遗忘曲线复习策略', '遗忘曲线复习策略', '{"type":"text"}'::jsonb)
-      ON CONFLICT (id) DO NOTHING`;
-  });
+  // V1 legacy 桥接数据（learning_cards + card_key_points）已不需要——
+  // 迁移 0176 后 key_point_id FK 直接引用 learning_objectives_v2(objective_id)，
+  // V2 createRunV2 直接使用 objectiveId，无需 card_key_points alias 行。
 
   // PREPARE：冻结 LearningTargetSnapshotV2
   const { createRunV2 } = await import(

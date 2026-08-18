@@ -12,6 +12,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
+import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 // 测试专用 checkpoint 密钥（同 AUTH_SURFACE_MANIFEST_SECRET 模式；模块级
 // 读取发生在 import 时，必须在动态 import 前设置）。
@@ -43,69 +44,19 @@ interface Seeded {
   cleanup: () => Promise<void>;
 }
 
-async function seedBase(): Promise<Seeded> {
-  const workspaceId = randomUUID();
-  const userId = randomUUID();
-  const cardId = randomUUID();
-  const keyPointId = randomUUID();
-  await sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-    await tx`INSERT INTO users (id, email, password_hash, role)
-             VALUES (${userId}, ${`tg-it-${userId.slice(0, 8)}@example.test`}, 'h', 'owner')`;
-    await tx`INSERT INTO workspaces (id, name, owner_id)
-             VALUES (${workspaceId}, ${`ws-${workspaceId.slice(0, 8)}`}, ${userId})`;
-    await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
-             VALUES (${workspaceId}, ${userId}, 'owner')`;
-    const noteId = randomUUID();
-    const noteVersionId = randomUUID();
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, created_at, updated_at, title_source, card_generation_epoch)
-             VALUES (${noteId}, ${workspaceId}, 'note', ${userId}, now(), now(), 'placeholder', 0)`;
-    await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, created_by, created_at, content_hash, updated_at)
-             VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [] })}, ${userId}, now(), 'nh-1', now())`;
-    await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json, created_at, updated_at)
-             VALUES (${cardId}, ${noteVersionId}, ${workspaceId}, 'active', ${tx.json({ version: 1 })}, now(), now())`;
-    await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text)
-             VALUES (${keyPointId}, ${cardId}, ${workspaceId}, 1, '工具网关纵切测试要点', '测试引文')`;
+async function seedBase() : Promise<Seeded> {
+  const fixture = await seedV2Fixture(sql, {
+    objectiveStatement: "工具网关纵切测试要点",
+    publicSummary: "遗忘曲线",
+    front: { cue: "遗忘曲线", prompt: "什么是遗忘曲线？" },
   });
-  const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`UPDATE companion_messages SET action_ref = NULL WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM companion_stream_events WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM assistant_deliveries WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM companion_messages WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM assistant_memory_items WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM understanding_route_plans WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_events WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_action_ledger WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_idempotency WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_processing_outbox WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_assessments WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_artifacts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_drafts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_private_solutions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_safety_reports WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_disclosure_profiles WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_variants WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_tasks WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_private_contracts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_runs WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM review_schedules WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_key_points WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_cards WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM companion_conversations WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
-      await tx`DELETE FROM users WHERE id = ${userId}`;
-    });
+  return {
+    workspaceId: fixture.workspaceId,
+    userId: fixture.userId,
+    cardId: fixture.cardId,
+    keyPointId: fixture.objectiveId,
+    cleanup: fixture.cleanup,
   };
-  return { workspaceId, userId, cardId, keyPointId, cleanup };
 }
 
 async function createActiveRun(seeded: Seeded) {

@@ -82,22 +82,14 @@ export default function NotePage() {
     setError(null);
     setNotFound(false);
     Promise.all([api.getNote(params.id), api.getMe()])
-      .then(async ([result, currentUser]) => {
-        let generation: CardGenerationStatus;
-        try {
-          generation = await api.getCardGenerationStatus(result.version.id);
-        } catch {
-          // Keep the note readable while the editor rechecks this auxiliary
-          // state. Owners stay write-locked until we can prove that no card job
-          // is active; otherwise a refresh could mutate a version mid-run.
-          generation = {
-            state: "checking",
-            cardId: null,
-            jobId: null,
-            generatedVersionId: null,
-            message: "正在重新确认学习卡任务状态…",
-          };
-        }
+      .then(([result, currentUser]) => {
+        // V1 getCardGenerationStatus endpoint has been deleted;
+        // default to "checking" so V2 run recovery (useGenerationPolling) takes over.
+        const generation: CardGenerationStatus = {
+          state: "checking",
+          generatedVersionId: null,
+          message: "正在确认学习卡任务状态…",
+        };
         return { result, currentUser, generation };
       })
       .then(({ result, currentUser, generation }) => {

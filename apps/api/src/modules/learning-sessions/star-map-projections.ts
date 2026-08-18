@@ -5,9 +5,9 @@
  *
  * - 平面一「共享知识真值」（§10.1，workspace-owned）：
  *   Source/Note/Card/Key Point/Evidence 与**确定性血缘**。唯一变化来源是
- *   canonical Publish 事件（节点发布/版本/fingerprint）与现有外键血缘
- *   （source←notes.sourceId、note←note_versions.noteId←cards.noteVersionId、
- *   card←card_key_points.cardId、key_point←evidences.keyPointId）。
+*   canonical Publish 事件（节点发布/版本/fingerprint）与现有外键血缘
+*   （source←notes.sourceId、note←note_versions.noteId←cards.noteVersionId、
+*   key_point←evidences.keyPointId）。
  *   `replaySharedPlane` 是纯函数：相同 Publish 事件流 → 相同节点/边/hash。
  *   血缘边全部标记 provenance="foreign_key"，公测关系透镜只展示这类边
  *   （§10.2 关系透镜；§10.1 不把 relation hints 画成共享语义边）。
@@ -53,19 +53,19 @@ export type SharedPlaneNodeType =
 /** 确定性血缘边种类（全部由现有外键支持，非语义推断）。 */
 export type SharedTruthEdgeKind =
   | "derived_from" // source → note（notes.source_id）
-  | "generated_from" // note → card（cards.note_version_id → note_versions.note_id）
-  | "contains" // card → key_point（card_key_points.card_id）
+  | "generated_from" // note → card（cards.note_version_id → note_versions.note_id)
+  | "contains" // card → key_point/objective（learning_cards_v2.objective_id）
   | "supported_by"; // key_point → evidence（evidences.key_point_id）
 
 /** 现有外键血缘（§10.1：唯一变化来源之一）。 */
 export interface ForeignKeyLineage {
-  /** 父实体类型（血缘边的 from 端） */
-  parentType: SharedPlaneNodeType;
-  /** 父实体 id */
-  parentEntityId: string;
-  /** 外键名（确定性溯源：notes.source_id / note_versions.note_id /
-   *  card_key_points.card_id / evidences.key_point_id） */
-  fkName: string;
+/** 父实体类型（血缘边的 from 端） */
+parentType: SharedPlaneNodeType;
+/** 父实体 id */
+parentEntityId: string;
+/** 外键名（确定性溯源：notes.source_id / note_versions.note_id /
+*  evidences.key_point_id） */
+fkName: string;
 }
 
 /**
@@ -150,21 +150,21 @@ function publishEventFingerprint(event: SharedPublishEvent): string {
 
 /** 由 FK 血缘推导血缘边种类（纯函数）。 */
 export function lineageToEdgeKind(lineage: ForeignKeyLineage): SharedTruthEdgeKind {
-  switch (lineage.fkName) {
-    case "notes.source_id":
-      return "derived_from";
-    case "note_versions.note_id":
-      return "generated_from";
-    case "card_key_points.card_id":
-      return "contains";
-    case "evidences.key_point_id":
-      return "supported_by";
-    default:
-      throw new StarMapProjectionError(
-        `未知血缘外键 ${lineage.fkName}，不允许构建共享边`,
-        "unknown_lineage_fk",
-      );
-  }
+switch (lineage.fkName) {
+case "notes.source_id":
+return "derived_from";
+case "note_versions.note_id":
+return "generated_from";
+case "learning_cards_v2.objective_id":
+return "contains";
+case "evidences.key_point_id":
+return "supported_by";
+default:
+throw new StarMapProjectionError(
+`未知血缘外键 ${lineage.fkName}，不允许构建共享边`,
+"unknown_lineage_fk",
+);
+}
 }
 
 /** 由父子节点类型推导血缘边种类（纯函数，防御校验）。 */

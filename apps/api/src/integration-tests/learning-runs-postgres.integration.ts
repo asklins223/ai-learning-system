@@ -7,6 +7,9 @@
  * canonical envelope + result）→ 幂等重放（创建/提交）→ text 提交在 Critic
  * 未配置时 fail closed 到 not_assessable checkpoint（0 canonical/schedule）。
  *
+ * V1 夹具已退役：seed() 使用 V2 fixture 助手创建 learning_objectives_v2 +
+ * learning_cards_v2，createRun 的 V1 薄壳将 keyPointId 映射为 objectiveId。
+ *
  * 运行：DATABASE_URL_API="postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn"
  *   node --import tsx --test --test-concurrency=1 src/integration-tests/learning-runs-postgres.integration.ts
  */
@@ -15,6 +18,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
+import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 // db client 读取 DATABASE_URL_API；未设置时与 CONN 同源（本地 dev 默认）。
@@ -42,66 +46,24 @@ interface Seeded {
   workspaceId: string;
   userId: string;
   cardId: string;
+  /** V2 objectiveId（V1 keyPointId alias；createRun V1 薄壳映射二者一致）。 */
   keyPointId: string;
   cleanup: () => Promise<void>;
 }
 
 async function seed(): Promise<Seeded> {
-  const workspaceId = randomUUID();
-  const userId = randomUUID();
-  const cardId = randomUUID();
-  const keyPointId = randomUUID();
-  await sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-    await tx`INSERT INTO users (id, email, password_hash, role)
-             VALUES (${userId}, ${`lr-it-${userId.slice(0, 8)}@example.test`}, 'h', 'owner')`;
-    await tx`INSERT INTO workspaces (id, name, owner_id)
-             VALUES (${workspaceId}, ${`ws-${workspaceId.slice(0, 8)}`}, ${userId})`;
-    await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
-             VALUES (${workspaceId}, ${userId}, 'owner')`;
-    const noteId = randomUUID();
-    const noteVersionId = randomUUID();
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, created_at, updated_at, title_source, card_generation_epoch)
-             VALUES (${noteId}, ${workspaceId}, 'note', ${userId}, now(), now(), 'placeholder', 0)`;
-    await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, created_by, created_at, content_hash, updated_at)
-             VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [] })}, ${userId}, now(), 'nh-1', now())`;
-    await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json, created_at, updated_at)
-             VALUES (${cardId}, ${noteVersionId}, ${workspaceId}, 'active', ${tx.json({ version: 1 })}, now(), now())`;
-    await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text)
-             VALUES (${keyPointId}, ${cardId}, ${workspaceId}, 1, '遗忘曲线表明复习间隔决定长期记忆', '间隔重复能显著降低遗忘率。')`;
+  const fixture = await seedV2Fixture(sql, {
+    objectiveStatement: "遗忘曲线表明复习间隔决定长期记忆",
+    publicSummary: "遗忘曲线",
+    front: { cue: "遗忘曲线", prompt: "什么是遗忘曲线？" },
   });
-  const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`DELETE FROM learning_run_events WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_action_ledger WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_idempotency WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM canonical_learning_event_outbox WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM practice_trail_event_outbox WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_processing_outbox WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_assessments WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_artifacts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_drafts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_private_solutions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_safety_reports WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_disclosure_profiles WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_variants WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_tasks WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_private_contracts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_runs WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM review_schedules WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_key_points WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_cards WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
-      await tx`DELETE FROM users WHERE id = ${userId}`;
-    });
+  return {
+    workspaceId: fixture.workspaceId,
+    userId: fixture.userId,
+    cardId: fixture.cardId,
+    keyPointId: fixture.objectiveId,
+    cleanup: fixture.cleanup,
   };
-  return { workspaceId, userId, cardId, keyPointId, cleanup };
 }
 
 test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit → schedule+envelope", async () => {
@@ -210,7 +172,7 @@ test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit 
     const schedRows = await sql`
       SELECT id, generation, interval_days, reason_code FROM review_schedules
       WHERE workspace_id = ${seeded.workspaceId} AND user_id = ${seeded.userId}
-        AND key_point_id = ${seeded.keyPointId} AND status = 'pending'
+        AND subject_id = ${seeded.keyPointId} AND status = 'pending'
     `;
     assert.equal(schedRows.length, 1);
     assert.equal(schedRows[0].generation, 1);
@@ -299,7 +261,7 @@ test("P2 fail closed：text 提交 + Critic 未配置 → not_assessable checkpo
     assert.equal(envelopeCount[0].n, 0);
     const schedCount = await sql`
       SELECT count(*)::int AS n FROM review_schedules
-      WHERE workspace_id = ${seeded.workspaceId} AND key_point_id = ${seeded.keyPointId}
+      WHERE workspace_id = ${seeded.workspaceId} AND subject_id = ${seeded.keyPointId}
     `;
     assert.equal(schedCount[0].n, 0);
   } finally {
@@ -577,8 +539,8 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
     // 预置 pending schedule（到期）供 review origin 消费。
     const scheduleId = randomUUID();
     await sql`
-      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, key_point_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
-      VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'key_point', ${seeded.keyPointId}, ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 7, 'discrete-v2', 'initial_validation', now(), now())
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 7, 'discrete-v2', 'initial_validation', now(), now())
     `;
 
     // 1) review origin 创建（consume_pending 授权 + generation 校验）。
@@ -633,7 +595,7 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
       SELECT id FROM review_schedules
       WHERE workspace_id = ${seeded.workspaceId}
         AND id <> ${scheduleId}
-        AND key_point_id = ${seeded.keyPointId}
+        AND subject_id = ${seeded.keyPointId}
     `;
     assert.equal(successors.length, 1, "恰好一个 successor");
 

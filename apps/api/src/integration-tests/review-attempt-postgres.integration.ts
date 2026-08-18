@@ -20,7 +20,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import postgres, { type TransactionSql } from "postgres";
+import postgres from "postgres";
+import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const databaseUrl = process.env.REVIEW_ATTEMPT_TEST_DATABASE_URL;
 if (!databaseUrl) {
@@ -30,71 +31,6 @@ if (!databaseUrl) {
 }
 
 const sql = postgres(databaseUrl, { max: 2 });
-
-// ─── Helpers ─────────────────────────────────────────────────────────────
-
-async function seedWorkspaceAndSchedule(
-  tx: TransactionSql,
-): Promise<{
-  workspaceId: string;
-  userId: string;
-  scheduleId: string;
-  cardId: string;
-}> {
-  const workspaceId = randomUUID();
-  const userId = randomUUID();
-  const cardId = randomUUID();
-  const scheduleId = randomUUID();
-  const noteId = randomUUID();
-  const noteVersionId = randomUUID();
-
-  // Insert user first — workspaces.owner_id has a non-deferrable FK to users.id.
-  await tx`
-    INSERT INTO users (id, email, password_hash, role)
-    VALUES (${userId}, ${`test-${userId.slice(0, 8)}@example.test`}, 'test-hash', 'owner')
-  `;
-  await tx`
-    INSERT INTO workspaces (id, name, owner_id)
-    VALUES (${workspaceId}, ${`test-ws-${workspaceId.slice(0, 8)}`}, ${userId})
-  `;
-  await tx`
-    INSERT INTO workspace_members (workspace_id, user_id, role)
-    VALUES (${workspaceId}, ${userId}, 'owner')
-  `;
-  // Create note + note_version — learning_cards.note_version_id is NOT NULL.
-  await tx`
-    INSERT INTO notes (id, workspace_id, title, created_by)
-    VALUES (${noteId}, ${workspaceId}, 'Test Note', ${userId})
-  `;
-  await tx`
-    INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-    VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [] })}, ${`hash-${noteVersionId.slice(0, 8)}`}, ${userId})
-  `;
-  await tx`
-    UPDATE notes SET current_version_id = ${noteVersionId} WHERE id = ${noteId}
-  `;
-  await tx`
-    INSERT INTO learning_cards (id, workspace_id, note_version_id, status, schema_json)
-    VALUES (${cardId}, ${workspaceId}, ${noteVersionId}, 'active', ${tx.json({ title: "Test Card", summary: "Test" })})
-  `;
-  await tx`
-    INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days)
-    VALUES (${scheduleId}, ${workspaceId}, ${userId}, 'card', ${cardId}, 'pending', NOW(), 1)
-  `;
-
-  return { workspaceId, userId, scheduleId, cardId };
-}
-
-async function cleanupWorkspace(tx: TransactionSql, workspaceId: string, userId: string) {
-  await tx`DELETE FROM review_attempts WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM review_schedules WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM learning_cards WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
-  await tx`DELETE FROM users WHERE id = ${userId}`;
-}
 
 // ─── Tests ───────────────────────────────────────────────────────────────
 
@@ -163,19 +99,30 @@ test("review_attempts table structure matches schema definition", async () => {
 
 test("idempotency unique index enforces (workspace_id, user_id, idempotency_key)", async () => {
   // A unique violation aborts and rolls back the entire transaction, including
-  // its fixtures. Assert the exact PostgreSQL error instead of swallowing it.
+  // its fixtures. We need to create the fixture outside the tx to keep it alive.
+  const fixture = await seedV2Fixture(sql);
+  const scheduleId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${fixture.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${fixture.userId}, true)`;
+    await tx`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days)
+      VALUES (${scheduleId}, ${fixture.workspaceId}, ${fixture.userId}, 'card', ${fixture.cardId}, 'pending', NOW(), 1)
+    `;
+  });
+
+  // A unique violation aborts and rolls back the entire transaction.
   await assert.rejects(
     () => sql.begin(async (tx) => {
-      const seed = await seedWorkspaceAndSchedule(tx);
-
+      await tx`SELECT set_config('app.workspace_id', ${fixture.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${fixture.userId}, true)`;
       await tx`
         INSERT INTO review_attempts (workspace_id, user_id, review_schedule_id, subject_type, subject_id, idempotency_key, status)
-        VALUES (${seed.workspaceId}, ${seed.userId}, ${seed.scheduleId}, 'card', ${seed.scheduleId}, 'test-key-001', 'started')
+        VALUES (${fixture.workspaceId}, ${fixture.userId}, ${scheduleId}, 'card', ${scheduleId}, 'test-key-001', 'started')
       `;
-
       await tx`
         INSERT INTO review_attempts (workspace_id, user_id, review_schedule_id, subject_type, subject_id, idempotency_key, status)
-        VALUES (${seed.workspaceId}, ${seed.userId}, ${seed.scheduleId}, 'card', ${seed.scheduleId}, 'test-key-001', 'started')
+        VALUES (${fixture.workspaceId}, ${fixture.userId}, ${scheduleId}, 'card', ${scheduleId}, 'test-key-001', 'started')
       `;
     }),
     (error: unknown) => {
@@ -190,28 +137,33 @@ test("idempotency unique index enforces (workspace_id, user_id, idempotency_key)
 
   // A different key succeeds in a fresh transaction.
   await sql.begin(async (tx) => {
-    const seed = await seedWorkspaceAndSchedule(tx);
-
+    await tx`SELECT set_config('app.workspace_id', ${fixture.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${fixture.userId}, true)`;
     await tx`
       INSERT INTO review_attempts (workspace_id, user_id, review_schedule_id, subject_type, subject_id, idempotency_key, status)
-      VALUES (${seed.workspaceId}, ${seed.userId}, ${seed.scheduleId}, 'card', ${seed.scheduleId}, 'test-key-002', 'started')
+      VALUES (${fixture.workspaceId}, ${fixture.userId}, ${scheduleId}, 'card', ${scheduleId}, 'test-key-002', 'started')
     `;
 
     // Verify the row was inserted.
-    const [row] = await tx`SELECT id FROM review_attempts WHERE workspace_id = ${seed.workspaceId} AND idempotency_key = 'test-key-002'`;
+    const [row] = await tx`SELECT id FROM review_attempts WHERE workspace_id = ${fixture.workspaceId} AND idempotency_key = 'test-key-002'`;
     assert.ok(row, "review attempt with different key should be inserted");
-
-    await cleanupWorkspace(tx, seed.workspaceId, seed.userId);
   });
+  await fixture.cleanup();
 });
 
 test("FK cascade: deleting review_schedules cascades to review_attempts", async () => {
+  const fixture = await seedV2Fixture(sql);
+  const scheduleId = randomUUID();
   await sql.begin(async (tx) => {
-    const { workspaceId, userId, scheduleId } = await seedWorkspaceAndSchedule(tx);
-
+    await tx`SELECT set_config('app.workspace_id', ${fixture.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${fixture.userId}, true)`;
+    await tx`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days)
+      VALUES (${scheduleId}, ${fixture.workspaceId}, ${fixture.userId}, 'card', ${fixture.cardId}, 'pending', NOW(), 1)
+    `;
     await tx`
       INSERT INTO review_attempts (workspace_id, user_id, review_schedule_id, subject_type, subject_id, idempotency_key, status)
-      VALUES (${workspaceId}, ${userId}, ${scheduleId}, 'card', ${scheduleId}, 'cascade-test-001', 'started')
+      VALUES (${fixture.workspaceId}, ${fixture.userId}, ${scheduleId}, 'card', ${scheduleId}, 'cascade-test-001', 'started')
     `;
 
     // Verify the attempt exists.
@@ -223,9 +175,8 @@ test("FK cascade: deleting review_schedules cascades to review_attempts", async 
 
     const [after] = await tx`SELECT id FROM review_attempts WHERE review_schedule_id = ${scheduleId}`;
     assert.equal(after, undefined, "review_attempt should be cascade-deleted with schedule");
-
-    await cleanupWorkspace(tx, workspaceId, userId);
   });
+  await fixture.cleanup();
 });
 
 test("RLS expand-phase policies exist on review_attempts", async () => {
@@ -278,9 +229,15 @@ test("RLS remains disabled in expand phase (SEC-01 enforce gate)", async () => {
 });
 
 test("history query excludes answer_text (privacy boundary)", async () => {
+  const fixture = await seedV2Fixture(sql);
+  const scheduleId = randomUUID();
   await sql.begin(async (tx) => {
-    const { workspaceId, userId, scheduleId } = await seedWorkspaceAndSchedule(tx);
-
+    await tx`SELECT set_config('app.workspace_id', ${fixture.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${fixture.userId}, true)`;
+    await tx`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days)
+      VALUES (${scheduleId}, ${fixture.workspaceId}, ${fixture.userId}, 'card', ${fixture.cardId}, 'pending', NOW(), 1)
+    `;
     await tx`
       INSERT INTO review_attempts (
         workspace_id, user_id, review_schedule_id, subject_type, subject_id,
@@ -289,7 +246,7 @@ test("history query excludes answer_text (privacy boundary)", async () => {
         schedule_reason_code, understanding_effect, next_review_at, completed_at
       )
       VALUES (
-        ${workspaceId}, ${userId}, ${scheduleId}, 'card', ${scheduleId},
+        ${fixture.workspaceId}, ${fixture.userId}, ${scheduleId}, 'card', ${scheduleId},
         'privacy-test-001', 'completed', 'recall', 'secret-answer-text', 'correct', 90,
         1, 3, 'correct_advance', 'upgrade', NOW() + INTERVAL '3 days', NOW()
       )
@@ -303,7 +260,7 @@ test("history query excludes answer_text (privacy boundary)", async () => {
              schedule_reason_code, understanding_effect, next_review_at,
              status, started_at, completed_at
       FROM review_attempts
-      WHERE workspace_id = ${workspaceId} AND user_id = ${userId}
+      WHERE workspace_id = ${fixture.workspaceId} AND user_id = ${fixture.userId}
     `;
 
     assert.equal(rows.length, 1);
@@ -314,11 +271,10 @@ test("history query excludes answer_text (privacy boundary)", async () => {
     );
 
     // But the data IS stored in the table (for audit).
-    const [fullRow] = await tx`SELECT answer_text FROM review_attempts WHERE workspace_id = ${workspaceId} AND user_id = ${userId}`;
+    const [fullRow] = await tx`SELECT answer_text FROM review_attempts WHERE workspace_id = ${fixture.workspaceId} AND user_id = ${fixture.userId}`;
     assert.equal(fullRow?.answer_text, "secret-answer-text", "answer_text should be stored in the table");
-
-    await cleanupWorkspace(tx, workspaceId, userId);
   });
+  await fixture.cleanup();
 });
 
 // ─── Cleanup ────────────────────────────────────────────────────────────

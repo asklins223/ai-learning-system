@@ -66,7 +66,7 @@ export async function runCompanionDailySummary(job: JobPayload): Promise<void> {
         (SELECT count(*)::int FROM notes WHERE workspace_id = ${job.workspaceId} AND created_by = ${userId}
           AND updated_at >= (SELECT day_start FROM day) AND updated_at < (SELECT day_end FROM day)
           AND deleted_at IS NULL) AS notes_updated,
-        (SELECT count(*)::int FROM learning_cards WHERE workspace_id = ${job.workspaceId}
+        (SELECT count(*)::int FROM learning_cards_v2 WHERE workspace_id = ${job.workspaceId}
           AND created_at >= (SELECT day_start FROM day) AND created_at < (SELECT day_end FROM day)) AS cards_created,
         (SELECT count(*)::int FROM sources WHERE workspace_id = ${job.workspaceId}
           AND created_at >= (SELECT day_start FROM day) AND created_at < (SELECT day_end FROM day)) AS sources_created,

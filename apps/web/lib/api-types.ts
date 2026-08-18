@@ -7,7 +7,7 @@
  * 包含：
  * - 用户与认证类型：CurrentUser, AuthResponse, AIPrivacySettings 等
  * - 笔记类型：NoteHeader, Block, NoteVersion, NoteDetail
- * - 卡片类型：LearningCardRecord, CardSetRecord, CardDetailResponse 等（V1 卡/卡组 UI 已退役，类型保留兼容）
+ * - 卡片类型：LearningCardRecord, CardListItem
  * - 证据类型：EvidenceRow, EvidenceAlignment
  * - 验证类型：ValidationEvent, StartSessionResult, RevealResultData 等
  * - 复习类型：ReviewWithCard, ReviewAttemptStartResult 等
@@ -111,12 +111,6 @@ export interface NoteDetail {
 
 export type CardStatus = "active" | "superseded" | "archived";
 export type CardScope = "overview" | "section";
-export type CardSetStatus =
-  | "draft"
-  | "active"
-  | "partial_ready"
-  | "superseded"
-  | "archived";
 
 export interface LearningCardSchema {
   title: string;
@@ -134,14 +128,6 @@ export interface LearningCardSchema {
   };
 }
 
-export interface CardKeyPoint {
-  id: string;
-  cardId: string;
-  ordinal: number;
-  claim: string;
-  quoteText: string;
-  segmentRef: { blockId?: string; blockOrdinal?: number } | null;
-}
 
 export interface LearningCardRecord {
   id: string;
@@ -159,11 +145,6 @@ export interface LearningCardRecord {
   ordinal?: number | null;
 }
 
-/** /cards/:id 返回 { card, keyPoints }（后端 getCardWithDetail 结构）。 */
-export interface CardDetailResponse {
-  card: LearningCardRecord;
-  keyPoints: CardKeyPoint[];
-}
 
 /** /cards 列表行（listCards 返回含聚合统计）。 */
 export interface CardListItem extends LearningCardRecord {
@@ -178,62 +159,6 @@ export interface CardListItem extends LearningCardRecord {
   isV2?: boolean;
   objectiveId?: string;
 }
-
-export interface CardSetRecord {
-  id: string;
-  workspaceId: string;
-  noteId: string;
-  noteVersionId: string;
-  generationRunId: string;
-  status: CardSetStatus;
-  title: string;
-  summary: string;
-  coverageReport: Record<string, unknown> | null;
-  createdAt: string;
-  activatedAt: string | null;
-  supersededAt: string | null;
-}
-
-export interface CardSetListItem extends CardSetRecord {
-  cardCount: number;
-  sectionCardCount: number;
-  overviewCardId: string | null;
-}
-
-export interface CardSetDetailResponse {
-  cardSet: CardSetRecord;
-  cards: CardDetailResponse[];
-  nextCursor: string | null;
-}
-
-export interface CardSetCardsPageResponse {
-  cardSetId: string;
-  items: CardDetailResponse[];
-  /** Opaque server cursor; clients must only pass it back unchanged. */
-  nextCursor: string | null;
-}
-
-export interface CardSetListResponse {
-  items: CardSetListItem[];
-  nextCursor: string | null;
-  total: number;
-}
-
-export interface CardSetRegenerateRequest {
-  mode?: string;
-  exclusions?: Record<string, unknown> | string[];
-}
-
-export interface CardSetRegenerateResponse {
-  runId: string;
-  rootRunId?: string;
-  status?: string;
-  mode?: string;
-  /** Compatibility with the initial M5 service response. */
-  jobId?: string | null;
-  sameVersion?: boolean;
-}
-
 // ─── 证据类型 ────────────────────────────────────────────────────────
 
 export type EvidenceAlignment = "aligned" | "soft" | "unaligned" | "stale_alignment";
@@ -301,11 +226,16 @@ export interface JobRow {
 
 // ─── 卡片生成类型 ────────────────────────────────────────────────────
 
+/**
+ * 笔记编辑器的生成状态初始化接口。
+ *
+ * V1 `getCardGenerationStatus` API 已删除；此类型仅作为 `notes/[id]` 页面
+ * 向 NoteEditor 传递初始生成状态的内部接口。V2 run recovery 由
+ * `useGenerationPolling` 通过 `getCardGenerationRun` / `getLatestCardGenerationRun` 接管。
+ */
 export interface CardGenerationStatus {
   /** `checking` is a frontend-only recovery state used while card status is unavailable. */
   state: "idle" | "checking" | "generating" | "generated";
-  cardId: string | null;
-  jobId: string | null;
   generatedVersionId: string | null;
   message?: string;
 }

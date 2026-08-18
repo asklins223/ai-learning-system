@@ -149,13 +149,15 @@ export async function resolveAvailableIntentsInWorker(args: {
         ORDER BY s.created_at DESC
         LIMIT 1
       `);
+      // V2: key_point_id is now an alias for objective_id;
+      // check existence via learning_objectives_v2.
       const startRows = await tx.execute<{ key_point_id: string }>(sql`
-        SELECT k.id AS key_point_id
+        SELECT e.key_point_id
         FROM learning_episodes e
-        JOIN card_key_points k ON k.id = e.key_point_id
+        JOIN learning_objectives_v2 o ON o.objective_id = e.key_point_id
         WHERE e.workspace_id = ${workspaceId}
           AND e.user_id = ${userId}
-          AND k.workspace_id = ${workspaceId}
+          AND o.workspace_id = ${workspaceId}
         ORDER BY e.created_at DESC
         LIMIT 1
       `);
@@ -230,13 +232,21 @@ export async function constructActionProposalInWorker(args: {
     impactSummary = "完成后更新学习进度";
     payload = { kind: "resume_session", sessionId: session.id };
   } else {
+    // V2: key_point_id is now an alias for objective_id;
+    // card_id from learning_cards_v2; claim → objective_statement from
+    // learning_objective_revisions_v2.
     const rows = await tx.execute(sql`
-      SELECT k.id AS key_point_id, k.card_id, k.claim
+      SELECT e.key_point_id AS key_point_id,
+             c.card_id AS card_id,
+             rev.objective_statement AS claim
       FROM learning_episodes e
-      JOIN card_key_points k ON k.id = e.key_point_id
+      JOIN learning_objectives_v2 o ON o.objective_id = e.key_point_id
+      JOIN learning_objective_revisions_v2 rev ON rev.objective_revision_id = o.current_objective_revision_id
+      LEFT JOIN learning_cards_v2 c ON c.objective_id = e.key_point_id
+        AND c.workspace_id = ${workspaceId}
       WHERE e.workspace_id = ${workspaceId}
         AND e.user_id = ${userId}
-        AND k.workspace_id = ${workspaceId}
+        AND o.workspace_id = ${workspaceId}
       ORDER BY e.created_at DESC LIMIT 1
     `);
     const candidate = rows[0] as { key_point_id: string; card_id: string; claim: string | null } | undefined;

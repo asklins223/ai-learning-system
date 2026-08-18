@@ -30,7 +30,6 @@ export interface GenerationPollingContext {
   generationRunStorageKey: string;
   initialGenerationStatus: {
     state: GenerationState;
-    jobId?: string | null;
     message?: string | null;
     generatedVersionId?: string | null;
   };
@@ -79,24 +78,14 @@ export interface GenerationPollingControls {
  */
 export function useGenerationPolling(ctx: GenerationPollingContext): GenerationPollingControls {
   const {
-    noteId,
     noteVersionId,
-    versionNo,
     generationRunStorageKey,
-    initialGenerationStatus,
     mountedRef,
     generationRunRef,
-    noteDeletedRef,
-    generationRunId,
-    generationRunRecoveryResolved,
     setGenState,
     setGenMessage,
     setGenerationRun,
     setGenerationRunId,
-    setGenerationVersionNo,
-    setGenerationPhase,
-    setGeneratedVersionId,
-    setSaving,
     setGenerationRunRecoveryResolved,
     applyGenerationRun,
     forgetGenerationRun,
@@ -221,83 +210,9 @@ export function useGenerationPolling(ctx: GenerationPollingContext): GenerationP
     setGenerationRunRecoveryResolved,
   ]);
 
-  // ── 兼容恢复 effect：从旧版 card-generation-status 端点恢复 ────────
-
-  useEffect(() => {
-    if (!generationRunRecoveryResolved || generationRunId) return;
-    const needsRecovery =
-      initialGenerationStatus.state === "checking" ||
-      (initialGenerationStatus.state === "generating" && !initialGenerationStatus.jobId);
-    if (!needsRecovery) return;
-
-    let cancelled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    const recheckGenerationStatus = async () => {
-      try {
-        const status = await api.getCardGenerationStatus(noteVersionId);
-        if (cancelled || !mountedRef.current) return;
-        if (status.state === "generating") {
-          // Legacy job-based generation is no longer supported;
-          // treat as idle and let the user create a new run.
-          setGenState("idle");
-          setGenMessage("检测到旧版生成任务，请重新生成当前版本。");
-          return;
-        }
-        if (status.state === "generated" && status.generatedVersionId) {
-          setGeneratedVersionId(status.generatedVersionId);
-          setGenState("generated");
-          setGenMessage(
-            status.generatedVersionId === noteVersionId
-              ? `v${versionNo} 的学习卡已生成，可前往学习卡库查看。`
-              : null,
-          );
-          return;
-        }
-        if (status.state === "idle") {
-          setGeneratedVersionId(status.generatedVersionId);
-          setGenState("idle");
-          setGenMessage(null);
-          return;
-        }
-        throw new Error("学习卡状态仍在确认中");
-      } catch (error) {
-        if (cancelled || !mountedRef.current) return;
-        if (error instanceof ApiError && error.status === 404) {
-          try {
-            await api.getNote(noteId);
-            if (cancelled || !mountedRef.current) return;
-            setGenState("status-error");
-            setGenMessage("当前版本的任务状态无法读取。可重新检查，或返回后重新打开笔记。");
-            return;
-          } catch (noteError) {
-            if (cancelled || !mountedRef.current) return;
-            if (noteError instanceof ApiError && noteError.status === 404) {
-              noteDeletedRef.current = true;
-              setSaving("deleted");
-              setGenState("idle");
-              setGenMessage("笔记已被删除，无法继续同步生成状态。");
-              return;
-            }
-          }
-        }
-        setGenState("checking");
-        setGenMessage("暂时无法确认任务状态，正在自动重试；确认完成前编辑保持暂停。");
-        retryTimer = setTimeout(() => void recheckGenerationStatus(), 5000);
-      }
-    };
-
-    void recheckGenerationStatus();
-    return () => {
-      cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
-    };
-  }, [
-    generationRunId, generationRunRecoveryResolved, initialGenerationStatus,
-    noteId, noteVersionId, versionNo, generationRunRef,
-    mountedRef, noteDeletedRef,
-    setGenState, setGenMessage, setGenerationVersionNo, setGenerationPhase,
-    setGeneratedVersionId, setSaving,
-  ]);
+  // ── 兼容恢复 effect 已删除 ──────────────────────────────────────
+  // V1 getCardGenerationStatus 端点已删除；V2 run 恢复 effect（上方）已覆盖
+  // 所有运行时场景。旧版 job-based generation 不再支持。
 
   return { pollGenerationRun };
 }

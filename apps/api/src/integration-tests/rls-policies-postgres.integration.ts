@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import postgres, { type Sql, type TransactionSql } from "postgres";
-
 const POLICY_CATALOG_REPAIR_STATEMENTS = readFileSync(
   new URL("../db/migrations/0039_sec01_policy_catalog_repair.sql", import.meta.url),
   "utf8",
@@ -21,9 +20,7 @@ const POLICY_TABLES = [
   "notes",
   "note_versions",
   "note_blocks",
-  "learning_cards",
-  "card_key_points",
-  "evidences",
+  // V1 tables removed: learning_cards, card_key_points, evidences
   "validation_questions",
   "search_documents",
   "ai_artifacts",
@@ -591,36 +588,38 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
           )
       `;
       await transaction`
-        INSERT INTO learning_cards (
-          id, note_version_id, workspace_id, schema_json, artifact_id
+        INSERT INTO learning_cards_v2 (
+          id, workspace_id, card_id, objective_id, note_version_id, card_revision,
+          current_publication_revision, lifecycle, front, public_summary,
+          knowledge_form, strategy, presentation_hash
         ) VALUES (
-          ${cardA}, ${noteVersionA}, ${workspaceA},
-          ${transaction.json({ title: 'card A', summary: 'fixture' })},
-          ${sharedArtifactA}
+          ${cardA}, ${workspaceA}, ${cardA}, ${cardA}, ${noteVersionA}, 1,
+          1, 'active', ${transaction.json({ cue: 'card', prompt: 'card' })},
+          'card', 'definition', 'recall', ${'c'.repeat(64)}
         )
       `;
       await transaction`
         INSERT INTO validation_events (
-          id, workspace_id, user_id, card_id, artifact_id,
+          id, workspace_id, user_id, artifact_id,
           question, question_type, user_answer, outcome, confidence
         ) VALUES (
-          ${validationAUserA}, ${workspaceA}, ${userA}, ${cardA}, ${privateArtifactA},
+          ${validationAUserA}, ${workspaceA}, ${userA}, ${privateArtifactA},
           'fixture question', 'explain', 'fixture answer',
           'preliminary_understanding', 80
         )
       `;
       await transaction`
         INSERT INTO validation_questions (
-          id, workspace_id, card_id, note_version_id,
+          id, workspace_id, note_version_id,
           question_type, question, created_by
         )
         VALUES
           (
-            ${questionAUserA}, ${workspaceA}, ${cardA}, ${noteVersionA},
+            ${questionAUserA}, ${workspaceA}, ${noteVersionA},
             'explain', 'private question A', ${userA}
           ),
           (
-            ${questionAUserB}, ${workspaceA}, ${cardA}, ${noteVersionA},
+            ${questionAUserB}, ${workspaceA}, ${noteVersionA},
             'explain', 'private question B', ${userB}
           )
       `;
@@ -1016,7 +1015,7 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
           DELETE FROM understanding_events
           WHERE id IN (${eventAUserA}, ${eventAUserB}, ${eventBUserB})
         `;
-        await migrator`DELETE FROM learning_cards WHERE id = ${cardA}`;
+        await migrator`DELETE FROM learning_cards_v2 WHERE workspace_id = ${workspaceA}`;
         await migrator`
           DELETE FROM ai_artifacts
           WHERE id IN (${sharedArtifactA}, ${privateArtifactA}, ${sharedArtifactB})

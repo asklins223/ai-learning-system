@@ -215,7 +215,7 @@ describe("star-map-projections: 重放同 hash", () => {
       sharedPublish(1, "source", "src-1", null),
       sharedPublish(2, "note", "note-1", { parentType: "source", parentEntityId: "src-1", fkName: "notes.source_id" }),
       sharedPublish(3, "card", "card-1", { parentType: "note", parentEntityId: "note-1", fkName: "note_versions.note_id" }),
-      sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "card_key_points.card_id" }),
+      sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "learning_cards_v2.objective_id" }),
       sharedPublish(5, "evidence", "ev-1", { parentType: "key_point", parentEntityId: "kp-1", fkName: "evidences.key_point_id" }),
     ];
     const a = replaySharedPlane(events);
@@ -262,7 +262,7 @@ describe("star-map-projections: 两平面分离", () => {
       sharedPublish(1, "source", "src-1", null),
       sharedPublish(2, "note", "note-1", { parentType: "source", parentEntityId: "src-1", fkName: "notes.source_id" }),
       sharedPublish(3, "card", "card-1", { parentType: "note", parentEntityId: "note-1", fkName: "note_versions.note_id" }),
-      sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "card_key_points.card_id" }),
+      sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "learning_cards_v2.objective_id" }),
     ];
     const shared = replaySharedPlane(sharedEvents);
 
@@ -335,8 +335,8 @@ describe("star-map-projections: 四透镜", () => {
     sharedPublish(1, "source", "src-1", null),
     sharedPublish(2, "note", "note-1", { parentType: "source", parentEntityId: "src-1", fkName: "notes.source_id" }),
     sharedPublish(3, "card", "card-1", { parentType: "note", parentEntityId: "note-1", fkName: "note_versions.note_id" }),
-    sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "card_key_points.card_id" }),
-    sharedPublish(5, "key_point", "kp-2", { parentType: "card", parentEntityId: "card-1", fkName: "card_key_points.card_id" }),
+    sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "learning_cards_v2.objective_id" }),
+    sharedPublish(5, "key_point", "kp-2", { parentType: "card", parentEntityId: "card-1", fkName: "learning_cards_v2.objective_id" }),
     sharedPublish(6, "evidence", "ev-1", { parentType: "key_point", parentEntityId: "kp-1", fkName: "evidences.key_point_id" }),
   ];
   const shared = replaySharedPlane(sharedEvents);

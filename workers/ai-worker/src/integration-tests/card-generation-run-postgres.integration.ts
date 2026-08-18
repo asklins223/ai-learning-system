@@ -166,10 +166,10 @@ test("worker fences and atomically publishes a run-backed generation", async () 
       run.stage,
       run.result_card_id,
       (SELECT count(*)::int FROM card_generation_events WHERE run_id = run.id) AS event_count,
-      (SELECT count(*)::int FROM learning_cards
+      (SELECT count(*)::int FROM learning_cards_v2
         WHERE workspace_id = run.workspace_id
           AND note_version_id = run.note_version_id
-          AND status = 'active') AS active_card_count
+          AND lifecycle = 'active') AS active_card_count
     FROM card_generation_runs AS run
     WHERE run.id = ${RUN_ID}
   `;

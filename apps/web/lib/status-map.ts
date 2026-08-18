@@ -28,19 +28,6 @@ const CARD_STATUS_MAP: Record<string, StatusPresentation> = {
   archived: { label: "已归档", tone: "muted" },
 };
 
-/* ── CardSetStatus 映射 ──
- * 学习卡组状态。draft / partial_ready 是生成 run 的状态，无写卡组表路径
- * （docs/plans/card-set-carousel-ui.md §0.2-2），仅类型存在；此处为防御性兜底。
- */
-
-const CARD_SET_STATUS_MAP: Record<string, StatusPresentation> = {
-  draft: { label: "草稿", tone: "muted", description: "卡组尚未完成" },
-  active: { label: "使用中", tone: "success" },
-  partial_ready: { label: "部分结果", tone: "warning", description: "部分素材未能完成处理" },
-  superseded: { label: "已替代", tone: "muted", description: "已有更新的卡组" },
-  archived: { label: "已归档", tone: "muted" },
-};
-
 /* ── EvidenceAlignment 映射 ── */
 
 const EVIDENCE_ALIGNMENT_MAP: Record<string, StatusPresentation> = {
@@ -140,7 +127,6 @@ function lookup(map: Record<string, StatusPresentation>, key: string | undefined
 
 export const statusMap = {
   cardStatus: (s: string | undefined | null) => lookup(CARD_STATUS_MAP, s),
-  cardSetStatus: (s: string | undefined | null) => lookup(CARD_SET_STATUS_MAP, s),
   evidenceAlignment: (s: string | undefined | null) => lookup(EVIDENCE_ALIGNMENT_MAP, s),
   evidenceOverride: (s: string | undefined | null) => lookup(EVIDENCE_OVERRIDE_MAP, s),
   validationOutcome: (s: string | undefined | null) => lookup(VALIDATION_OUTCOME_MAP, s),

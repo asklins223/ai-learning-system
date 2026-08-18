@@ -242,22 +242,24 @@ export async function runCompanionAction(ctx: CompanionActionHandlerContext): Pr
         // The API decision path already ran the canonical PREPARE transaction.
         // Resolve that real session/episode and never fabricate a container-only
         // session in the worker.
+        // V2: key_point_id is now an alias for objective_id;
+        // card_id resolves through learning_cards_v2.objective_id.
         const prepared = await tx.execute<{
           session_id: string;
           card_id: string;
           key_point_id: string;
           origin: "card" | "review" | "star_map" | "now";
         }>(sql`
-          SELECT s.id AS session_id, k.card_id, e.key_point_id, s.origin
+          SELECT s.id AS session_id, c.card_id, e.key_point_id, s.origin
           FROM learning_sessions s
           JOIN learning_episodes e ON e.session_id = s.id
-          JOIN card_key_points k ON k.id = e.key_point_id
+          JOIN learning_cards_v2 c ON c.objective_id = e.key_point_id
           WHERE s.workspace_id = ${run.workspace_id}
             AND s.user_id = ${run.user_id}
             AND e.workspace_id = ${run.workspace_id}
             AND e.user_id = ${run.user_id}
-            AND k.workspace_id = ${run.workspace_id}
-            AND k.card_id = ${proposalPayload.cardId ?? ""}
+            AND c.workspace_id = ${run.workspace_id}
+            AND c.card_id = ${proposalPayload.cardId ?? ""}
             AND s.status = 'active'
             AND e.status IN ('draft', 'active')
             AND e.key_point_id = ${proposalPayload.keyPointId ?? ""}
@@ -287,21 +289,23 @@ export async function runCompanionAction(ctx: CompanionActionHandlerContext): Pr
           LIMIT 1
         `);
         if (!resumed[0]) throw new Error("ACTION_STALE: active learning session disappeared");
+        // V2: key_point_id is now an alias for objective_id;
+        // card_id resolves through learning_cards_v2.objective_id.
         const routeRows = await tx.execute<{
           card_id: string;
           key_point_id: string;
           origin: "card" | "review" | "star_map" | "now";
         }>(sql`
-          SELECT k.card_id, e.key_point_id, s.origin
+          SELECT c.card_id, e.key_point_id, s.origin
           FROM learning_sessions s
           JOIN learning_episodes e ON e.session_id = s.id
-          JOIN card_key_points k ON k.id = e.key_point_id
+          JOIN learning_cards_v2 c ON c.objective_id = e.key_point_id
           WHERE s.id = ${proposalPayload.sessionId ?? ""}
             AND s.workspace_id = ${run.workspace_id}
             AND s.user_id = ${run.user_id}
             AND e.workspace_id = ${run.workspace_id}
             AND e.user_id = ${run.user_id}
-            AND k.workspace_id = ${run.workspace_id}
+            AND c.workspace_id = ${run.workspace_id}
             AND e.status IN ('draft', 'active')
           ORDER BY e.created_at ASC
           LIMIT 1

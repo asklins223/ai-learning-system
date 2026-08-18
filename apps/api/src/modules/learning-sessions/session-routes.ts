@@ -553,17 +553,18 @@ export async function learningSessionRoutes(app: FastifyInstance) {
             );
           }
           const rows = (await tx.execute(sql`
-            SELECT kp.claim, e.id AS "evidenceId", e.quote_text AS quote
-            FROM card_key_points kp
-            LEFT JOIN evidences e ON e.key_point_id = kp.id AND e.workspace_id = kp.workspace_id
-            WHERE kp.id = ${current.targetId} AND kp.workspace_id = ${scope.workspaceId}
-            ORDER BY e.created_at ASC NULLS LAST, e.id ASC
-            LIMIT 3
+            SELECT rev.objective_statement AS claim
+            FROM learning_objectives_v2 o
+            JOIN learning_objective_revisions_v2 rev
+              ON rev.objective_id = o.objective_id
+              AND rev.workspace_id = o.workspace_id
+              AND rev.revision = o.current_revision
+            WHERE o.objective_id = ${current.targetId}
+              AND o.workspace_id = ${scope.workspaceId}
+            LIMIT 1
           `)) as Array<Record<string, unknown>>;
           const claim = String(rows[0]?.claim ?? "当前学习卡还没有可展开的核心理解。");
-          const evidence = rows
-            .filter((row) => row.evidenceId !== null && row.quote !== null)
-            .map((row) => ({ evidenceId: String(row.evidenceId), quote: String(row.quote) }));
+          const evidence: Array<{ evidenceId: string; quote: string }> = [];
           await detourRepo.updateDetour(scope, next.record);
           return {
             detour: next.record,

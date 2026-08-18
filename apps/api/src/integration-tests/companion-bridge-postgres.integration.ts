@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 import type { MainPageContextInputV2 } from "@ailearn/shared";
+import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
@@ -33,42 +34,18 @@ after(async () => {
 });
 
 async function seed() {
-  const workspaceId = randomUUID();
-  const userId = randomUUID();
-  const cardId = randomUUID();
-  const keyPointId = randomUUID();
-  await sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-    await tx`INSERT INTO users (id, email, password_hash, role) VALUES (${userId}, ${`cb-it-${userId.slice(0, 8)}@example.test`}, 'h', 'owner')`;
-    await tx`INSERT INTO workspaces (id, name, owner_id) VALUES (${workspaceId}, 'cb-ws', ${userId})`;
-    await tx`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${workspaceId}, ${userId}, 'owner')`;
-    const noteId = randomUUID();
-    const noteVersionId = randomUUID();
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, created_at, updated_at, title_source, card_generation_epoch)
-             VALUES (${noteId}, ${workspaceId}, 'note', ${userId}, now(), now(), 'placeholder', 0)`;
-    await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, created_by, created_at, content_hash, updated_at)
-             VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1, '{}', ${userId}, now(), 'nh-1', now())`;
-    await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json, created_at, updated_at)
-             VALUES (${cardId}, ${noteVersionId}, ${workspaceId}, 'active', '{"version":1}', now(), now())`;
-    await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text)
-             VALUES (${keyPointId}, ${cardId}, ${workspaceId}, 1, '遗忘曲线', '间隔重复。')`;
+  const fixture = await seedV2Fixture(sql, {
+    objectiveStatement: "遗忘曲线",
+    publicSummary: "遗忘曲线",
+    front: { cue: "遗忘曲线", prompt: "什么是遗忘曲线？" },
   });
-  const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`DELETE FROM assistant_page_contexts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_key_points WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_cards WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
-      await tx`DELETE FROM users WHERE id = ${userId}`;
-    });
+  return {
+    workspaceId: fixture.workspaceId,
+    userId: fixture.userId,
+    cardId: fixture.cardId,
+    keyPointId: fixture.objectiveId,
+    cleanup: fixture.cleanup,
   };
-  return { workspaceId, userId, cardId, keyPointId, cleanup };
 }
 
 function makePage(cardId: string, keyPointId: string): MainPageContextInputV2 {

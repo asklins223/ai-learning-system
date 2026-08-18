@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { companionGroundedTutorGrantV1Schema } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
+import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
 const sql = postgres(CONN, { max: 2 });
@@ -53,8 +54,6 @@ async function seedBase(): Promise<{ workspaceId: string; userId: string; cleanu
       await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM learning_episodes WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM learning_sessions WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM card_key_points WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM learning_cards WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM note_versions WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM notes WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_conversations WHERE workspace_id = ${ws}`;
@@ -311,20 +310,15 @@ test("P5 §6.6：confirm session 动作 → 202 accepted + action run + companio
 
 test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
+  // 使用 V2 fixture 创建 objective + card（替代旧 learning_cards + card_key_points）
+  const v2Fixture = await seedV2Fixture(sql, {
+    objectiveStatement: "context-grant 测试",
+    publicSummary: "grant",
+    front: { cue: "grant", prompt: "什么是 grant？" },
+  });
+  const cardId = v2Fixture.cardId;
+  const kpId = v2Fixture.objectiveId;
   try {
-    const cardId = randomUUID();
-    const kpId = randomUUID();
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`INSERT INTO notes (id, workspace_id, title, created_by) VALUES (${randomUUID()}, ${workspaceId}, '笔记', ${userId})`;
-      await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, created_by, content_hash)
-               VALUES (${randomUUID()}, (SELECT id FROM notes WHERE workspace_id = ${workspaceId} LIMIT 1), ${workspaceId}, 1, ${{} as never}, ${userId}, ${"0".repeat(64)})`;
-      await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, status, schema_json)
-               VALUES (${cardId}, (SELECT id FROM note_versions WHERE workspace_id = ${workspaceId} LIMIT 1), ${workspaceId}, 'active', ${{} as never})`;
-      await tx`INSERT INTO card_key_points (id, card_id, workspace_id, ordinal, claim, quote_text)
-               VALUES (${kpId}, ${cardId}, ${workspaceId}, 1, '要点', '引用')`;
-    });
     const sessionId = randomUUID();
     const episodeId = randomUUID();
     await sql.begin(async (tx) => {
@@ -333,7 +327,7 @@ test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）"
       await tx`INSERT INTO learning_sessions (id, workspace_id, user_id, origin, origin_ref, intent, status)
                VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card', ${{ cardId } as never}, 'resume', 'active')`;
       await tx`INSERT INTO learning_episodes
-               (id, session_id, workspace_id, user_id, key_point_id, origin, origin_ref, intent,
+               (id, session_id, workspace_id, user_id, origin, origin_ref, intent,
                 formal_eligibility_kind, formal_plan, scheduling_decision, episode_target_fingerprint,
                 content_exposure_key, rubric_targets, max_turns,
                 assistance_policy_version, rubric_policy_version, scene_policy_version,
@@ -341,7 +335,7 @@ test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）"
                 provider_policy_version, commit_policy_version, provider_config_id, model_id,
                 capability_snapshot_hash, runtime_epoch_snapshot, episode_epoch,
                 budget_envelope_ref, budget_envelope_hash, plan_hash, status, processing_phase)
-               VALUES (${episodeId}, ${sessionId}, ${workspaceId}, ${userId}, ${kpId}, 'card',
+               VALUES (${episodeId}, ${sessionId}, ${workspaceId}, ${userId}, 'card',
                        ${{ cardId, keyPointId: kpId } as never}, 'resume', 'formal',
                        ${{ plan: "p" } as never}, ${{ decision: "d" } as never},
                        'fp', 'cek', ${[] as never}, 1,
@@ -372,6 +366,7 @@ test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）"
     const ttlMs = new Date(typedGrant.expiresAt).getTime() - Date.now();
     assert.ok(ttlMs <= 5 * 60_000 && ttlMs > 4 * 60_000, "5min TTL");
   } finally {
+    await v2Fixture.cleanup();
     await cleanup();
   }
 });

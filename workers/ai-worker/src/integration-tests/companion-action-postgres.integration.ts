@@ -37,57 +37,81 @@ async function seedRun(
   const runId = randomUUID();
   const proposalId = randomUUID();
   const userMsg = randomUUID();
+  // V2: keyPointId is now an alias for objective_id; cardId is learning_cards_v2.card_id
+  const objectiveId = String(payload.keyPointId ?? randomUUID());
   const cardId = String(payload.cardId ?? randomUUID());
-  const keyPointId = String(payload.keyPointId ?? randomUUID());
   const noteId = randomUUID();
   const noteVersionId = randomUUID();
-  const blockId = randomUUID();
-  const evidenceId = randomUUID();
-  const generationRunId = randomUUID();
-  const cardSetId = randomUUID();
+  const objectiveRevisionId = randomUUID();
   const sessionId = randomUUID();
   const episodeId = randomUUID();
+
+  // V2 fixture constants (match v2-card-fixture.ts helpers)
+  const SHA256_HEX = "f".repeat(64);
+  const TARGET_REVISION_HASH = "e".repeat(64);
+  const PRIVATE_PAYLOAD_HASH = "d".repeat(64);
+  const PRESENTATION_HASH = "c".repeat(64);
+  const PUBLIC_PAYLOAD_HASH = "b".repeat(64);
+  const REVEAL_PAYLOAD_HASH = "a".repeat(64);
+  const DEFAULT_CANONICAL_ANSWER = JSON.stringify({
+    kind: "text",
+    unit: { unitId: "u1", text: "Fixture canonical answer" },
+  });
+  const DEFAULT_LEARNING_SUPPORT = JSON.stringify({ explanation: "Fixture learning support" });
+  const DEFAULT_SCORING_RUBRIC = JSON.stringify({ units: [], passingPolicy: {} });
+
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
     await tx`SELECT set_config('app.user_id', ${uid}, true)`;
     if (prepareLearning) {
-      await tx`INSERT INTO notes (id, workspace_id, title, created_by)
-               VALUES (${noteId}, ${ws}, 'Worker fixture note', ${uid})`;
+      // V2: note + note_version
+      await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
+               VALUES (${noteId}, ${ws}, 'Worker fixture note', ${uid}, 1)`;
       await tx`INSERT INTO note_versions
                (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
                VALUES (${noteVersionId}, ${noteId}, ${ws}, 1, ${tx.json({ blocks: [] })}, 'fixture-note-hash', ${uid})`;
       await tx`UPDATE notes SET current_version_id = ${noteVersionId} WHERE id = ${noteId}`;
-      await tx`INSERT INTO note_blocks (id, version_id, workspace_id, ordinal, type, content)
-               VALUES (${blockId}, ${noteVersionId}, ${ws}, 0, 'paragraph', 'Worker fixture evidence')`;
-      await tx`INSERT INTO card_generation_runs
-               (id, workspace_id, note_id, note_version_id, request_idempotency_key,
-                generation_fingerprint, generation_epoch, title_snapshot,
-                source_content_hash, block_manifest_hash, asset_manifest_hash)
-               VALUES (${generationRunId}, ${ws}, ${noteId}, ${noteVersionId}, ${`fixture-${generationRunId}`},
-                       ${`fixture-fingerprint-${generationRunId}`}, 1, 'Worker fixture card',
-                       'source', 'blocks', 'assets')`;
-      await tx`INSERT INTO learning_card_sets
-               (id, workspace_id, note_id, note_version_id, generation_run_id, status, title, summary)
-               VALUES (${cardSetId}, ${ws}, ${noteId}, ${noteVersionId}, ${generationRunId},
-                       'active', 'Worker fixture card set', 'Worker fixture')`;
-      await tx`INSERT INTO learning_cards
-               (id, note_version_id, workspace_id, card_set_id, generation_run_id,
-                scope, scope_key, ordinal, status, schema_json)
-               VALUES (${cardId}, ${noteVersionId}, ${ws}, ${cardSetId}, ${generationRunId},
-                       'overview', ${`fixture-${cardId}`}, 0, 'active',
-                       ${tx.json({ title: "Worker fixture card", summary: "Worker fixture" })})`;
-      await tx`INSERT INTO card_key_points
-               (id, card_id, workspace_id, ordinal, claim, quote_text)
-               VALUES (${keyPointId}, ${cardId}, ${ws}, 0, 'Worker fixture claim', 'Worker fixture quote')`;
-      await tx`INSERT INTO evidences
-               (id, workspace_id, key_point_id, block_id, block_ordinal, quote_text,
-                alignment, alignment_score, alignment_method)
-               VALUES (${evidenceId}, ${ws}, ${keyPointId}, ${blockId}, 0,
-                       'Worker fixture evidence', 'aligned', 100, 'exact')`;
+
+      // V2: learning_objectives_v2
+      await tx`INSERT INTO learning_objectives_v2
+               (id, workspace_id, objective_id, semantic_identity_class_id, semantic_identity_policy_version,
+                semantic_target_fingerprint, lifecycle, lifecycle_epoch, current_objective_revision_id, current_revision)
+               VALUES (gen_random_uuid(), ${ws}, ${objectiveId}, 'fixture:class', 'sem-id-v1',
+                       ${SHA256_HEX}, 'active', 1, ${objectiveRevisionId}, 1)`;
+
+      // V2: learning_objective_revisions_v2
+      await tx`INSERT INTO learning_objective_revisions_v2
+               (id, workspace_id, objective_revision_id, objective_id, revision, objective_statement, public_summary,
+                knowledge_form, preferred_intents, canonical_answer, learning_support, scoring_rubric, relations,
+                evidence_bindings, semantic_target_fingerprint, target_revision_hash, private_payload_hash)
+               VALUES (gen_random_uuid(), ${ws}, ${objectiveRevisionId}, ${objectiveId}, 1,
+                       'Worker fixture claim', 'Worker fixture summary', 'definition', ARRAY['recall'],
+                       ${DEFAULT_CANONICAL_ANSWER}::jsonb,
+                       ${DEFAULT_LEARNING_SUPPORT}::jsonb,
+                       ${DEFAULT_SCORING_RUBRIC}::jsonb,
+                       '[]'::jsonb, '[]'::jsonb, ${SHA256_HEX}, ${TARGET_REVISION_HASH}, ${PRIVATE_PAYLOAD_HASH})`;
+
+      // V2: learning_cards_v2
+      await tx`INSERT INTO learning_cards_v2
+               (id, workspace_id, card_id, objective_id, note_version_id, card_revision, current_publication_revision, lifecycle,
+                front, public_summary, knowledge_form, strategy, presentation_hash)
+               VALUES (gen_random_uuid(), ${ws}, ${cardId}, ${objectiveId}, ${noteVersionId},
+                       1, 1, 'active',
+                       ${tx.json({ cue: "Fixture", prompt: "Fixture prompt?" })},
+                       'Worker fixture summary', 'definition', 'recall', ${PRESENTATION_HASH})`;
+
+      // V2: learning_card_publication_revisions_v2
+      await tx`INSERT INTO learning_card_publication_revisions_v2
+               (id, workspace_id, card_id, publication_revision, card_revision, objective_id, objective_revision,
+                lifecycle_at_publication, public_payload_hash, reveal_payload_hash)
+               VALUES (gen_random_uuid(), ${ws}, ${cardId}, 1, 1, ${objectiveId}, 1, 'active',
+                       ${PUBLIC_PAYLOAD_HASH}, ${REVEAL_PAYLOAD_HASH})`;
+
+      // learning_sessions + learning_episodes (schema unchanged; key_point_id = objective_id)
       await tx`INSERT INTO learning_sessions
                (id, workspace_id, user_id, origin, origin_ref, intent, status)
                VALUES (${sessionId}, ${ws}, ${uid}, 'now',
-                       ${tx.json({ type: "key_point", id: keyPointId })},
+                       ${tx.json({ type: "key_point", id: objectiveId })},
                        'stabilize', 'active')`;
       await tx`INSERT INTO learning_episodes
                (id, session_id, workspace_id, user_id, key_point_id, origin, origin_ref, intent,
@@ -99,8 +123,8 @@ async function seedRun(
                 provider_config_id, model_id, required_capability_ids, capability_snapshot_hash,
                 runtime_epoch_snapshot, episode_epoch, budget_envelope_ref, budget_envelope_hash,
                 plan_hash, status, processing_phase)
-               VALUES (${episodeId}, ${sessionId}, ${ws}, ${uid}, ${keyPointId}, 'now',
-                       ${tx.json({ type: "key_point", id: keyPointId })}, 'stabilize',
+               VALUES (${episodeId}, ${sessionId}, ${ws}, ${uid}, ${objectiveId}, 'now',
+                       ${tx.json({ type: "key_point", id: objectiveId })}, 'stabilize',
                        'initial_validation', ${tx.json({ kind: "practice", requiredProbeIds: [] })},
                        ${tx.json({
                          decisionRef: "fixture",
@@ -145,11 +169,11 @@ async function seedRun(
       await tx`DELETE FROM companion_messages WHERE conversation_id = ${cid}`;
       await tx`DELETE FROM companion_stream_events WHERE conversation_id = ${cid}`;
       await tx`DELETE FROM learning_sessions WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM evidences WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM card_key_points WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM learning_cards WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM learning_card_sets WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM card_generation_runs WHERE workspace_id = ${ws}`;
+      // V2 cleanup: V2 tables instead of V1 card_key_points/learning_cards/learning_card_sets
+      await tx`DELETE FROM learning_card_publication_revisions_v2 WHERE workspace_id = ${ws}`;
+      await tx`DELETE FROM learning_cards_v2 WHERE workspace_id = ${ws}`;
+      await tx`DELETE FROM learning_objective_revisions_v2 WHERE workspace_id = ${ws}`;
+      await tx`DELETE FROM learning_objectives_v2 WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM note_versions WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM notes WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_conversations WHERE id = ${cid}`;

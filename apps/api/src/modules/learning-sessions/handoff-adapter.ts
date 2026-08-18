@@ -1,25 +1,23 @@
 /**
  * Generation → Learning handoff adapter（任务 02-6，§0.3）
  *
- * 消费边界（00-3 §3.1/§6.1）：只读已确定性 Publish 的 canonical Card/Key Point/
+ * 消费边界（00-3 §3.1/§6.1）：只读已确定性 Publish 的 canonical Card/Objective/
  * Evidence 的 required 字段；不读取 generation draft、Candidate Ledger、relation
  * hints、private draft 或未 Publish 产物（00-3 §6.3）。本模块是纯转换器，不写
  * 任何学习事实（learning_episodes / 复习 / 理解事件一律不在此写入）。
  *
- * 权威字段确认（Generation 侧实际字段名）：
- * - learning_card_sets.status（draft|active|partial_ready|superseded|archived）
- *   是 active/superseded 生命周期的权威来源；每 note 至多一个 active set
- *   （learning_card_sets_active_note_unique_idx 约束）。
- * - Generation 侧没有显式 card_revision 列；cardRevision 的权威版本代数字段是
- *   card_generation_runs.generation_epoch（note 级递增整数、同 note 唯一），
- *   链路：learning_cards.card_set_id → learning_card_sets.generation_run_id →
- *   card_generation_runs.generation_epoch。本 adapter 不查库，由调用方解析该
- *   epoch 后以 cardSet.generationEpoch 传入；缺省即 required 缺失 → fail closed。
+ * 权威字段确认（V2 Generation 侧实际字段名）：
+ * - learning_cards_v2.lifecycle（active|archived）
+ *   是 active/archived 生命周期的权威来源。
+ * - V2 card_revision / publication_revision 由 learning_cards_v2 / learning_card_publication_revisions_v2
+ *   提供；objective_revision 由 learning_objective_revisions_v2 提供。
  * - semantic support report 在 Generation 侧没有专门落库字段，由调用方以
  *   SemanticSupportReportRef 传入（未来 semantic support 管线产物或已验证安全
  *   Scene 的 report ref）。
- * - sourceFingerprint：Generation 侧 learning_cards 无该列，用 deterministic
- *   hash of card + keyPoint + evidence content 计算（00-3 §6.1）。
+ * - sourceFingerprint：Generation 侧 learning_cards_v2 无该列，用 deterministic
+ *   hash of card + objective + evidence content 计算（00-3 §6.1）。
+ * - V1 表（learning_cards / card_key_points / evidences / learning_card_sets）
+ *   已退役（migration 0176）；key_point_id 现为 learning_objectives_v2.objective_id 的别名。
  */
 
 import { createHash } from "node:crypto";
@@ -51,19 +49,20 @@ export interface PublishedCardSetInput {
   generationEpoch: number | null;
 }
 
-/** learning_cards 行的只读 canonical 字段 */
+/** learning_cards_v2 行的只读 canonical 字段 */
 export interface PublishedCardInput {
   id: string;
   cardSetId: string | null;
 }
 
-/** card_key_points 行的只读 canonical 字段 */
+/** learning_objectives_v2 行的只读 canonical 字段（V1 card_key_points 退役后由 objective 派生） */
 export interface PublishedKeyPointInput {
   id: string;
   claim: string;
 }
 
-/** evidences 行的只读 canonical 字段（仅用于 exactEvidenceRefs 与 fingerprint） */
+/** evidence 行的只读 canonical 字段（仅用于 exactEvidenceRefs 与 fingerprint）
+ *  V1 evidences 表已退役；数据来自 evidence_snapshots_v2 + bindings。 */
 export interface PublishedEvidenceInput {
   id: string;
   keyPointId: string;

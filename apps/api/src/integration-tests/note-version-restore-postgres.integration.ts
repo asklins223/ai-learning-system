@@ -149,7 +149,6 @@ async function cleanupWorkspace(
 ) {
   await tx`DELETE FROM search_documents WHERE workspace_id = ${workspaceId}`;
   await tx`DELETE FROM note_blocks WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM learning_cards WHERE workspace_id = ${workspaceId}`;
   await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
   await tx`DELETE FROM notes WHERE id = ${noteId}`;
   await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
@@ -395,19 +394,17 @@ test("restore: manual title is preserved during restore", async () => {
   });
 });
 
-test("canUpdateVersionInPlace: superseded card blocks in-place update", async () => {
+test("canUpdateVersionInPlace: sealed version blocks in-place update", async () => {
   await withTestSql(async (tx) => {
     const { workspaceId, userId, noteId, v2Id } = await seedWorkspaceNoteWithTwoVersions(tx);
 
     try {
-      // Insert a superseded card referencing v2
-      await tx`
-        INSERT INTO learning_cards (id, workspace_id, note_version_id, status, schema_json)
-        VALUES (${randomUUID()}, ${workspaceId}, ${v2Id}, 'superseded', ${tx.json({ title: "Old Card", summary: "Superseded" })})
-      `;
+      // Seal v2 — sealed versions block in-place update (V2: replaces old
+      // superseded learning_cards check which is no longer applicable).
+      await tx`UPDATE note_versions SET sealed_at = NOW() WHERE id = ${v2Id}`;
 
       // Attempt autosave (isAutosave=true) — should fall back to creating v3
-      // because superseded card references the current version
+      // because the current version is sealed.
       const result = await withServiceTransaction((serviceTx) =>
         updateNote(serviceTx, noteId, workspaceId, userId, {
           blocks: [{ type: "paragraph", content: "updated content" }],

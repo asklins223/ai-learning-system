@@ -1,6 +1,10 @@
 /**
  * R5: Business AI operations — decoupled from provider.
  *
+ * V1 评估辅助函数（evaluateValidationViaChat / generateValidationQuestionViaChat /
+ * evaluateRubricViaChat / analyzeImageViaChat）——仅被 provider 兼容性测试引用，
+ * 不属学习卡 V2 运行链。保留用于 provider 测试基建。
+ *
  * Previously, prompt selection and schema validation were embedded inside
  * provider methods (evaluateValidation, generateValidationQuestion, evaluateRubric).
  * R5 moves this logic to standalone helper functions that use the provider's

@@ -409,11 +409,10 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
       `;
 
       // 5. 创建笔记/卡片/复习计划（数量由 profile 决定）。
-      // 每张卡需要独立的 note_version_id，因为唯一索引
-      // learning_cards_workspace_note_version_active_unique_idx
-      // 要求每个 (workspace_id, note_version_id) 只能有一张 active 卡。
+      // V2 schema：每张卡需要独立的 note_version_id；V2 表
+      // learning_cards_v2 / learning_objectives_v2 替代旧 V1 表。
       const cardIds: string[] = [];
-      const keyPointIds: string[] = [];
+      const objectiveIds: string[] = [];
       const noteIds: string[] = [];
       for (let i = 0; i < config.noteCount; i++) {
         const quoteText = `Supporting quote for card ${i + 1}`;
@@ -454,162 +453,67 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           WHERE id = ${note.id}
         `;
 
-        // The Companion PREPARE path consumes the same canonical card graph as
-        // production: active card set → active card → generation run epoch →
-        // evidence. Keep the seed fixture on that path instead of creating a
-        // legacy standalone card that can render but cannot start a Session.
-        const generationRunId = randomUUID();
-        const cardSetId = randomUUID();
+        // V2 schema: create learning_objectives_v2 + learning_objective_revisions_v2
+        // + learning_cards_v2 + learning_card_publication_revisions_v2.
+        // This replaces the old V1 flow (card_generation_runs /
+        // learning_card_sets / learning_cards / card_key_points / evidences).
+        const objectiveId = randomUUID();
+        const objectiveRevisionId = randomUUID();
+        const cardId = randomUUID();
+        const SHA256_HEX = "f".repeat(64);
+        const TARGET_REVISION_HASH = "e".repeat(64);
+        const PRIVATE_PAYLOAD_HASH = "d".repeat(64);
+        const PRESENTATION_HASH = "c".repeat(64);
+        const PUBLIC_PAYLOAD_HASH = "b".repeat(64);
+        const REVEAL_PAYLOAD_HASH = "a".repeat(64);
+        const canonicalAnswer = JSON.stringify({
+          kind: "text",
+          unit: { unitId: "u1", text: `Answer for seed card ${i + 1}` },
+        });
+        const learningSupport = JSON.stringify({ explanation: `Explanation for card ${i + 1}` });
+        const scoringRubric = JSON.stringify({ units: [], passingPolicy: {} });
+        const front = { cue: `Seed ${i + 1}`, prompt: `What is seed card ${i + 1}?` };
+
+        // 3. learning_objectives_v2
         await tx`
-          INSERT INTO card_generation_runs (
-            id,
-            workspace_id,
-            note_id,
-            note_version_id,
-            requested_by,
-            request_idempotency_key,
-            generation_fingerprint,
-            generation_epoch,
-            title_snapshot,
-            source_content_hash,
-            block_manifest_hash,
-            asset_manifest_hash,
-            status,
-            stage,
-            started_at,
-            updated_at
-          )
-          VALUES (
-            ${generationRunId},
-            ${workspace.id},
-            ${note.id},
-            ${noteVersion.id},
-            ${owner.id},
-            ${`e2e-${runId}-${i}`},
-            ${`e2e-fingerprint-${runId}-${i}`},
-            1,
-            ${`Seed Note ${i + 1}`},
-            md5(${contentJson}::text),
-            md5(${blockContent}),
-            md5(''),
-            'queued',
-            'queued',
-            NOW(),
-            NOW()
-          )
+          INSERT INTO learning_objectives_v2
+            (id, workspace_id, objective_id, semantic_identity_class_id, semantic_identity_policy_version,
+             semantic_target_fingerprint, lifecycle, lifecycle_epoch, current_objective_revision_id, current_revision)
+          VALUES (gen_random_uuid(), ${workspace.id}, ${objectiveId}, 'seed:class', 'sem-id-v1',
+                  ${SHA256_HEX}, 'active', 1, ${objectiveRevisionId}, 1)
         `;
+
+        // 4. learning_objective_revisions_v2
         await tx`
-          INSERT INTO learning_card_sets (
-            id,
-            workspace_id,
-            note_id,
-            note_version_id,
-            generation_run_id,
-            status,
-            title,
-            summary,
-            activated_at
-          )
-          VALUES (
-            ${cardSetId},
-            ${workspace.id},
-            ${note.id},
-            ${noteVersion.id},
-            ${generationRunId},
-            'active',
-            ${`Seed Card Set ${i + 1}`},
-            ${`Seed card set for Companion E2E ${i + 1}.`},
-            NOW()
-          )
+          INSERT INTO learning_objective_revisions_v2
+            (id, workspace_id, objective_revision_id, objective_id, revision, objective_statement, public_summary,
+             knowledge_form, preferred_intents, canonical_answer, learning_support, scoring_rubric, relations,
+             evidence_bindings, semantic_target_fingerprint, target_revision_hash, private_payload_hash)
+          VALUES (gen_random_uuid(), ${workspace.id}, ${objectiveRevisionId}, ${objectiveId}, 1,
+                  ${`Key point for seed card ${i + 1}`}, ${`Seed Card ${i + 1}`}, 'definition', ARRAY['recall'],
+                  ${canonicalAnswer}::jsonb, ${learningSupport}::jsonb, ${scoringRubric}::jsonb,
+                  '[]'::jsonb, '[]'::jsonb, ${SHA256_HEX}, ${TARGET_REVISION_HASH}, ${PRIVATE_PAYLOAD_HASH})
         `;
 
-        const [noteBlock] = await tx`
-          INSERT INTO note_blocks (id, version_id, workspace_id, ordinal, type, content)
-          VALUES (
-            ${randomUUID()},
-            ${noteVersion.id},
-            ${workspace.id},
-            0,
-            'paragraph',
-            ${blockContent}
-          )
-          RETURNING id
-        `;
-
-        // 创建学习卡
-        const [card] = await tx`
-          INSERT INTO learning_cards (
-            id, note_version_id, workspace_id, card_set_id, generation_run_id,
-            scope, scope_key, ordinal, status, schema_json
-          )
-          VALUES (
-            ${randomUUID()},
-            ${noteVersion.id},
-            ${workspace.id},
-            ${cardSetId},
-            ${generationRunId},
-            'section',
-            ${`section-${i}`},
-            1,
-            'active',
-            ${JSON.stringify({
-              title: `Seed Card ${i + 1}`,
-              summary: `Test card ${i + 1} for E2E review attempt journey.`,
-            })}::jsonb
-          )
-          RETURNING id
-        `;
-        cardIds.push(card.id);
-
+        // 5. learning_cards_v2
         await tx`
-          UPDATE card_generation_runs
-          SET status = 'succeeded',
-              stage = 'complete',
-              result_card_set_id = ${cardSetId},
-              result_card_id = ${card.id},
-              finished_at = NOW(),
-              updated_at = NOW()
-          WHERE id = ${generationRunId}
+          INSERT INTO learning_cards_v2
+            (id, workspace_id, card_id, objective_id, note_version_id, card_revision, current_publication_revision, lifecycle,
+             front, public_summary, knowledge_form, strategy, presentation_hash)
+          VALUES (gen_random_uuid(), ${workspace.id}, ${cardId}, ${objectiveId}, ${noteVersion.id},
+                  1, 1, 'active', ${tx.json(front)}, ${`Seed Card ${i + 1}`}, 'definition', 'recall', ${PRESENTATION_HASH})
         `;
 
-        // 为每张卡创建一个 key point
-        const [keyPoint] = await tx`
-          INSERT INTO card_key_points (card_id, workspace_id, ordinal, claim, quote_text)
-          VALUES (
-            ${card.id},
-            ${workspace.id},
-            0,
-            ${`Key point for seed card ${i + 1}`},
-            ${quoteText}
-          )
-          RETURNING id
-        `;
-        keyPointIds.push(keyPoint.id);
-
+        // 6. learning_card_publication_revisions_v2
         await tx`
-          INSERT INTO evidences (
-            id,
-            workspace_id,
-            key_point_id,
-            block_id,
-            block_ordinal,
-            quote_text,
-            alignment,
-            alignment_score,
-            alignment_method
-          )
-          VALUES (
-            ${randomUUID()},
-            ${workspace.id},
-            ${keyPoint.id},
-            ${noteBlock.id},
-            0,
-            ${quoteText},
-            'aligned',
-            100,
-            'exact'
-          )
+          INSERT INTO learning_card_publication_revisions_v2
+            (id, workspace_id, card_id, publication_revision, card_revision, objective_id, objective_revision,
+             lifecycle_at_publication, public_payload_hash, reveal_payload_hash)
+          VALUES (gen_random_uuid(), ${workspace.id}, ${cardId}, 1, 1, ${objectiveId}, 1, 'active',
+                  ${PUBLIC_PAYLOAD_HASH}, ${REVEAL_PAYLOAD_HASH})
         `;
+        cardIds.push(cardId);
+        objectiveIds.push(objectiveId);
       }
 
       // A minimal isolated tenant fixture provides a real foreign note ID for
@@ -663,8 +567,8 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
       `;
 
       // 6. 创建到期复习计划（owner），用于 review attempt E2E 旅程
-      // 每张卡都有独立的到期复习计划。PR profile 的 12 条队列同时
-      // 支持多个会消费 schedule 的旅程，并为 CI retry 留出余量。
+      // V2 schema: review_schedules.key_point_id now references
+      // learning_objectives_v2.objective_id (V2 alias for key_point_id).
       const scheduleCount = cardIds.length;
       for (let i = 0; i < scheduleCount; i++) {
         await tx`
@@ -678,7 +582,7 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
             ${owner.id},
             'card',
             ${cardIds[i]},
-            ${keyPointIds[i]},
+            ${objectiveIds[i]},
             'pending',
             NOW(),
             1,

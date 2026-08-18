@@ -1,25 +1,18 @@
 #!/usr/bin/env node
 /**
- * REL-01: RC manifest aiQuality 字段填充脚本
+ * REL-01: RC manifest aiQuality 字段填充脚本（已弃用 — V1 supervisor-rc-gate 已删除）
+ *
+ * 该脚本原调用 packages/ai-quality/src/cli/supervisor-rc-gate.ts 驱动 V1 golden 集。
+ * V1 CLI 已于学习卡 V1 清理阶段 E 删除，本脚本保留但输出 not_run 占位，
+ * 等待 V2 RC gate CLI（packages/ai-quality/src/card-generation-v2/）就绪后重写。
  *
  * 用法：
- *   DASHSCOPE_MODEL=qwen-plus \
  *   node .github/scripts/rc-manifest-fill.mjs \
  *     --input /path/to/release-manifest-rc.json \
  *     --output /path/to/release-manifest-rc-filled.json
- *
- * 该脚本：
- * 1. 读取 RC manifest（由 release-manifest-generate.mjs --rc 生成）
- * 2. 运行 supervisor-rc-gate CLI（登录 ailearn API 并驱动真实 provider 跑 golden set）
- * 3. 将 supervisor-rc-gate 输出填充到 manifest.aiQuality 字段
- * 4. 输出填充后的 manifest 到指定路径
- *
- * 注意：实际 AI provider 由 ailearn API/worker 按 config/ai-platforms.json 解析；
- * 本脚本不直接使用 DASHSCOPE_API_KEY。DASHSCOPE_MODEL / DASHSCOPE_BASE_URL 仅
- * 作为 supervisor-rc-gate 的模型/端点覆盖（默认 qwen-plus / dashscope）。
+ */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 
 // ─── 参数解析 ─────────────────────────────────────────────────────
@@ -65,17 +58,11 @@ Options:
   --output, -o   Path where filled manifest will be written
   --evidence-output Path for the raw RC gate evidence JSON
 
-Environment variables:
-  DASHSCOPE_MODEL       Optional: Model ID override (default: qwen-plus)
-  DASHSCOPE_BASE_URL    Optional: Endpoint override (default: dashscope)
-  AIQ_RC_MAX_BUDGET_USD Optional: Max budget in USD (default: 10)
-  AIQ_RC_PREVIOUS_METRICS_JSON Optional: Previous RC metrics JSON
-
-Note: the RC gate logs into the ailearn API and drives the real provider
-resolved by config/ai-platforms.json. It does NOT use DASHSCOPE_API_KEY.
+Note: V1 supervisor-rc-gate has been deleted. This script currently
+outputs the manifest with aiQuality status "not_run". A V2 RC gate
+CLI is pending.
 
 Example:
-  DASHSCOPE_MODEL=qwen-plus \\
   node .github/scripts/rc-manifest-fill.mjs \\
     --input outputs/release-manifest-rc.json \\
     --output outputs/release-manifest-rc-filled.json
@@ -86,9 +73,7 @@ Example:
 // ─── 主逻辑 ─────────────────────────────────────────────────────
 
 async function main() {
-  const { input: inputPath, output: outputPath, evidenceOutput } = parseArgs();
-  const repoRoot = resolve(import.meta.dirname, "../..");
-  const evidencePath = resolve(evidenceOutput ?? `${outputPath}.aiq-evidence.json`);
+  const { input: inputPath, output: outputPath } = parseArgs();
 
   // 1. 验证输入 manifest 存在
   if (!existsSync(inputPath)) {
@@ -112,88 +97,12 @@ async function main() {
     process.exit(1);
   }
 
-  // 4. 运行 supervisor-rc-gate
-  console.error(`Running supervisor-rc-gate on: ${inputPath}`);
-  console.error(`Budget: $${process.env.AIQ_RC_MAX_BUDGET_USD ?? 10}, Model: ${process.env.DASHSCOPE_MODEL ?? "qwen-plus"}`);
+  // 4. V1 supervisor-rc-gate 已删除（学习卡 V1 清理阶段 E）；
+  //    暂以 not_run 占位输出，待 V2 RC gate CLI 就绪后重写本段。
+  console.error(`V1 supervisor-rc-gate 已删除，aiQuality 保持 not_run 占位`);
 
-  let rcGateExitCode = 0;
-  try {
-    execFileSync(
-      "node",
-      [
-        "--import",
-        "tsx",
-        resolve(repoRoot, "packages/ai-quality/src/cli/supervisor-rc-gate.ts"),
-        "--output",
-        evidencePath,
-      ],
-      {
-      cwd: resolve(repoRoot, "packages/ai-quality"),
-      env: process.env,
-      encoding: "utf8",
-      stdio: ["ignore", "inherit", "inherit"],
-      },
-    );
-  } catch (error) {
-    rcGateExitCode = Number.isInteger(error?.status) ? error.status : 1;
-    if (!existsSync(evidencePath)) {
-      console.error(`Failed to run supervisor-rc-gate: ${error instanceof Error ? error.message : String(error)}`);
-      process.exit(1);
-    }
-    console.error(`supervisor-rc-gate exited ${rcGateExitCode}; preserving its failed evidence in the manifest`);
-  }
-
-  const artifact = JSON.parse(readFileSync(evidencePath, "utf8"));
-  const rcGateOutput = artifact?.result;
-  if (
-    artifact?.schemaVersion !== 1
-    || !/^sha256:[0-9a-f]{64}$/.test(artifact.datasetDigest ?? "")
-    || !Number.isInteger(artifact.sampleCount)
-    || artifact.sampleCount < 30
-    || !/^[0-9a-f]{40}$/.test(artifact.scorerCommit ?? "")
-    || !rcGateOutput
-    || typeof rcGateOutput.passed !== "boolean"
-    || !rcGateOutput.config
-    || !Array.isArray(rcGateOutput.rounds)
-  ) {
-    console.error("RC gate evidence is incomplete or malformed; refusing to synthesize defaults");
-    process.exit(1);
-  }
-
-  const mapMetrics = (metrics) => ({
-    hardCitationPrecision: metrics?.hardCitationPrecision ?? null,
-    keyPointHardCoverage: metrics?.keyPointHardCoverage ?? null,
-    expectedBlockHardCoverage: metrics?.validationExpectedPointsHardCoverage ?? null,
-  });
-  const runId = process.env.GITHUB_RUN_ID ?? "local";
-  const runResults = rcGateOutput.rounds.map((round) => ({
-    runId: `aiq-${runId}-round-${round.round}`,
-    completedAt: round.report?.timestamp ?? null,
-    metrics: mapMetrics(round.report?.metrics),
-    evidence: [`ci://run/${runId}/ai-quality/round-${round.round}`],
-  }));
-
-  // 5. 填充 manifest.aiQuality
-  manifest.aiQuality = {
-    status: rcGateOutput.passed ? "passed" : "failed",
-    datasetVersion: rcGateOutput.config.datasetVersion,
-    datasetDigest: artifact.datasetDigest,
-    sampleCount: artifact.sampleCount,
-    labelVersion: rcGateOutput.config.labelVersion,
-    scorerCommit: artifact.scorerCommit,
-    promptVersion: rcGateOutput.config.promptVersion,
-    provider: {
-      endpointOrigin: rcGateOutput.config.providerEndpointOrigin,
-      modelId: rcGateOutput.config.modelId,
-      modelRevision: rcGateOutput.config.modelRevision,
-      temperature: rcGateOutput.config.temperature,
-    },
-    runs: runResults.length,
-    runResults,
-    metrics: mapMetrics(rcGateOutput.averageMetrics),
-    costUsd: rcGateOutput.budgetUsedUsd,
-    evidence: [`ci://run/${runId}/ai-quality/supervisor-rc-gate`],
-  };
+  // 5. 保持 manifest.aiQuality 原状（status: not_run）
+  manifest.aiQuality = manifest.aiQuality ?? { status: "not_run" };
 
   // 6. 写入输出 manifest
   try {
@@ -206,13 +115,8 @@ async function main() {
     process.exit(1);
   }
 
-  // 7. 根据 supervisor-rc-gate 结果设置退出码
-  if (rcGateExitCode !== 0 || !rcGateOutput.passed) {
-    console.error(`Supervisor RC gate failed: metrics do not meet thresholds`);
-    process.exit(1);
-  }
-
-  console.error(`Supervisor RC gate passed`);
+  // 7. V1 已删除，不执行 RC gate 判定
+  console.error(`RC gate skipped — V1 supervisor-rc-gate 已删除，等待 V2 重写`);
   process.exit(0);
 }
 

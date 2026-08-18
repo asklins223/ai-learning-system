@@ -79,7 +79,7 @@ export async function loadCompanionLearningSessionContext(
   }>(sql`
     SELECT s.id AS session_id,
            e.id AS episode_id,
-           k.card_id,
+           o.objective_id AS card_id,
            e.key_point_id,
            s.status AS session_status,
            e.status AS episode_status,
@@ -99,8 +99,8 @@ export async function loadCompanionLearningSessionContext(
            ) AS answer_locked
     FROM learning_sessions s
     JOIN learning_episodes e ON e.session_id = s.id
-    JOIN card_key_points k ON k.id = e.key_point_id
-      AND k.workspace_id = ${args.workspaceId}
+    JOIN learning_objectives_v2 o ON o.objective_id = e.key_point_id
+      AND o.workspace_id = ${args.workspaceId}
     WHERE s.workspace_id = ${args.workspaceId}
       AND s.user_id = ${args.userId}
       AND e.workspace_id = ${args.workspaceId}

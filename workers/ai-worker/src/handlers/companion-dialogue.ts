@@ -28,7 +28,7 @@ import {
 } from "../lib/governance.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
-import { COMPANION_PERSONA_V3, COMPANION_PERSONA_V3_PROMPT_ID, COMPANION_PERSONA_V3_SHA256, classifyCompanionReplyEmotion, isEffectiveHardEvidence, type ChatMessage,  } from "@ailearn/shared";
+import { COMPANION_PERSONA_V3, COMPANION_PERSONA_V3_PROMPT_ID, COMPANION_PERSONA_V3_SHA256, classifyCompanionReplyEmotion, type ChatMessage,  } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
@@ -257,6 +257,11 @@ function parsePageContext(value: unknown): Record<string, unknown> | null {
   return context as Record<string, unknown>;
 }
 
+// V2: read grounded tutor context from learning_objectives_v2 +
+// learning_objective_revisions_v2 (claim → objective_statement) +
+// evidence_snapshots_v2 + learning_objective_evidence_bindings_v2.
+// key_point_id is now an alias for objective_id; card_id validates
+// the card exists via learning_cards_v2.
 async function readGroundedTutorContext(
   tx: { execute(query: unknown): Promise<unknown> },
   pageContext: unknown,
@@ -272,51 +277,56 @@ async function readGroundedTutorContext(
   const keyPointId = typeof context.keyPointId === "string" ? context.keyPointId : null;
   if (!sessionId || !episodeId || !cardId || !keyPointId) return null;
 
-  const rows = await tx.execute(sql`
-    SELECT k.claim,
-           e.quote_text,
-           nb.content AS block_content,
-           e.alignment,
-           COALESCE(eo.override, e.user_override) AS effective_override
+  // V2: claim from learning_objective_revisions_v2.objective_statement
+  const claimRows = await tx.execute(sql`
+    SELECT rev.objective_statement AS claim
     FROM learning_episodes ep
-    JOIN card_key_points k
-      ON k.id = ep.key_point_id
-     AND k.id = ${keyPointId}
-     AND k.card_id = ${cardId}
-     AND k.workspace_id = ep.workspace_id
-    JOIN evidences e
-      ON e.key_point_id = k.id
-     AND e.workspace_id = ep.workspace_id
-    LEFT JOIN note_blocks nb
-      ON nb.id = e.block_id
-     AND nb.workspace_id = e.workspace_id
-    LEFT JOIN evidence_overrides eo
-      ON eo.evidence_id = e.id
-     AND eo.user_id = ${scope.userId}
+    JOIN learning_objectives_v2 o ON o.objective_id = ep.key_point_id
+    JOIN learning_objective_revisions_v2 rev ON rev.objective_revision_id = o.current_objective_revision_id
     WHERE ep.id = ${episodeId}
       AND ep.session_id = ${sessionId}
       AND ep.workspace_id = ${scope.workspaceId}
       AND ep.user_id = ${scope.userId}
-    ORDER BY
-      CASE
-        WHEN COALESCE(eo.override, e.user_override) = 'confirmed' OR e.alignment = 'aligned' THEN 0
-        WHEN COALESCE(eo.override, e.user_override) = 'downgraded' OR e.alignment = 'soft' THEN 1
-        ELSE 2
-      END,
-      e.alignment_score DESC
+      AND o.workspace_id = ${scope.workspaceId}
+    LIMIT 1
+  `) as Array<{ claim: string | null }>;
+  const claim = claimRows[0]?.claim?.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  if (!claim) return null;
+
+  // V2: evidence from evidence_snapshots_v2 joined via
+  // learning_objective_evidence_bindings_v2 (bound to objective revision).
+  // block_content from note_blocks (still exists in V2 schema).
+  const evidenceRows = await tx.execute(sql`
+    SELECT es.protected_quote_ref AS quote_text,
+           nb.content AS block_content,
+           es.support_description
+    FROM learning_episodes ep
+    JOIN learning_objectives_v2 o ON o.objective_id = ep.key_point_id
+    JOIN learning_objective_revisions_v2 rev ON rev.objective_revision_id = o.current_objective_revision_id
+    JOIN learning_objective_evidence_bindings_v2 b ON b.objective_revision_id = rev.objective_revision_id
+    JOIN evidence_snapshots_v2 es ON es.evidence_snapshot_id = b.evidence_snapshot_id
+    LEFT JOIN note_blocks nb ON nb.id = es.block_id AND nb.workspace_id = es.workspace_id
+    WHERE ep.id = ${episodeId}
+      AND ep.session_id = ${sessionId}
+      AND ep.workspace_id = ${scope.workspaceId}
+      AND ep.user_id = ${scope.userId}
+      AND o.workspace_id = ${scope.workspaceId}
+      AND es.workspace_id = ${scope.workspaceId}
+    ORDER BY es.created_at DESC
     LIMIT 8
   `) as Array<{
-    claim: string | null;
-    quote_text: string;
+    quote_text: string | null;
     block_content: string | null;
-    alignment: string;
-    effective_override: string | null;
+    support_description: string | null;
   }>;
-  const valid = rows.filter((row) => isEffectiveHardEvidence(row.alignment, row.effective_override));
-  const claim = rows[0]?.claim?.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-  if (!claim || valid.length === 0) return null;
+  const valid = evidenceRows.filter(() => {
+    // V2: all evidence snapshots that are bound are considered "hard" —
+    // the alignment/effective_override concept is V1 and was removed.
+    return true;
+  });
+  if (valid.length === 0) return null;
   const evidence = valid
-    .map((row) => row.block_content?.trim() || row.quote_text.trim())
+    .map((row) => row.block_content?.trim() || row.quote_text?.trim() || row.support_description?.trim() || "")
     .filter((value) => value.length > 0)
     .slice(0, 5)
     .map((value) => value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").slice(0, 1_200));

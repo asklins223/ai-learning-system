@@ -133,9 +133,9 @@ export function createPgCommitPort(transaction: CommitPortTx): CommitPort {
           case "authoritative_target_guard":
             await transaction.execute(
               sql`
-                SELECT kp.id
-                FROM card_key_points kp
-                JOIN learning_episodes e ON e.key_point_id = kp.id
+                SELECT o.id
+                FROM learning_objectives_v2 o
+                JOIN learning_episodes e ON e.key_point_id = o.objective_id
                 WHERE e.id = ${episodeId}
                   AND e.workspace_id = ${scope.workspaceId}
                   AND e.user_id = ${scope.userId}

@@ -44,19 +44,9 @@ export {
   type NoteDetail,
   type CardStatus,
   type CardScope,
-  type CardSetStatus,
   type LearningCardSchema,
-  type CardKeyPoint,
   type LearningCardRecord,
-  type CardDetailResponse,
   type CardListItem,
-  type CardSetRecord,
-  type CardSetListItem,
-  type CardSetDetailResponse,
-  type CardSetCardsPageResponse,
-  type CardSetListResponse,
-  type CardSetRegenerateRequest,
-  type CardSetRegenerateResponse,
   type EvidenceAlignment,
   type EvidenceRow,
   type JobType,
@@ -130,17 +120,9 @@ import type {
   NoteHeader,
   Block,
   NoteDetail,
-  CardSetStatus,
-  CardSetRegenerateRequest,
   CardListItem,
-  CardSetListResponse,
-  CardSetDetailResponse,
-  CardSetCardsPageResponse,
-  CardSetRegenerateResponse,
-  CardDetailResponse,
   CardGenerationRunAccepted,
   CardGenerationRunView,
-  CardGenerationStatus,
   AgentEventPage,
   JobRow,
   MarkdownImportApiItem,
@@ -1125,59 +1107,11 @@ isAutosave?: boolean;
       : "";
     return request<{ items: PublicLearningCardV2[]; nextCursor: string | null }>(`/v2/cards${qs}`);
   },
-  getCard: (id: string) => request<CardDetailResponse>(`/cards/${id}`),
   // PERF: 单请求获取卡片在完整列表中的分页位置（index/prev/next）——
   // 替代前端逐页串行翻页，降低详情页首访延迟。
   getCardPosition: (id: string) =>
     request<{ index: number; total: number; previousId: string | null; nextId: string | null; nextReviewAt: string | null }>(`/cards/${id}/position`),
-  listCardSets: (params?: {
-    status?: CardSetStatus;
-    noteId?: string;
-    cursor?: string;
-    limit?: number;
-  }) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, value]) => value != null)
-            .map(([key, value]) => [key, String(value)]) as [string, string][],
-        ).toString()
-      : "";
-    return request<CardSetListResponse>(`/card-sets${qs}`);
-  },
-  getCardSet: (id: string) =>
-    request<CardSetDetailResponse>(`/card-sets/${id}`),
-  listCardSetCards: (
-    id: string,
-    params?: { cursor?: string; limit?: number },
-  ) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, value]) => value != null)
-            .map(([key, value]) => [key, String(value)]) as [string, string][],
-        ).toString()
-      : "";
-    return request<CardSetCardsPageResponse>(
-      `/card-sets/${id}/cards${qs}`,
-    );
-  },
-  dismissCardSet: (id: string) =>
-    request<{ cardSetId: string; status: CardSetStatus }>(
-      `/card-sets/${id}/dismiss`,
-      { method: "POST" },
-    ),
-  regenerateCardSet: (
-    id: string,
-    body: CardSetRegenerateRequest = {},
-  ) =>
-    request<CardSetRegenerateResponse>(`/card-sets/${id}/regenerate`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  createCardGenerationRun: (body: { noteVersionId: string; idempotencyKey: string; density?: "overview" | "standard" | "complete"; force?: boolean; feedbackSummary?: string }) =>
+  createCardGenerationRun: (body: { noteVersionId: string; idempotencyKey: string; force?: boolean; feedbackSummary?: string }) =>
     request<CardGenerationRunAccepted>("/card-generation-runs", {
       method: "POST",
       body: JSON.stringify(body),
@@ -1221,18 +1155,6 @@ isAutosave?: boolean;
       `/note-versions/${noteVersionId}/card-generation-latest`,
       { signal },
     ),
-
-  /* Legacy generation compatibility. */
-  getCardGenerationStatus: (noteVersionId: string) =>
-    request<CardGenerationStatus>(`/note-versions/${noteVersionId}/card-status`),
-
-  /* card lifecycle (V0.3) */
-  regenerateCard: (cardId: string) =>
-    request<{ jobId: string; sameVersion: boolean }>(`/cards/${cardId}/regenerate`, {
-      method: "POST",
-    }),
-  dismissCard: (cardId: string) =>
-    request<{ ok: boolean }>(`/cards/${cardId}/dismiss`, { method: "POST" }),
 
   /* sources (V0.3) */
   listSources: (params?: { status?: SourceStatus; cursor?: string; limit?: number }) => {

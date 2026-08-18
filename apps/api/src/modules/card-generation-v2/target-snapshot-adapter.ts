@@ -5,7 +5,7 @@
  * - PREPARE 从激活的 LearningObjectiveV2 + LearningCardV2 冻结完整
  *   LearningTargetSnapshotV2（全部 §16.1 字段）；
  * - 正式链路（planner/structured/critic/commit）只消费 frozen snapshot，
- *   不再直接读取 card_key_points.claim/quoteText；
+ *   不再直接读取 V1 card_key_points.claim/quoteText（V1 表已退役）；
  * - keyPointId 只作为 Objective ID alias。
  *
  * 职责：

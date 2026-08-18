@@ -1,8 +1,8 @@
 /**
  * P5 §6.7：Learning menu context adapter（只读）。
  *
- * GET /companion/learning-context：只调用 Learning Session/service 的只读
- * public adapter（learning_sessions/learning_episodes/card_key_points 查询），
+* GET /companion/learning-context：只调用 Learning Session/service 的只读
+* public adapter（learning_sessions/learning_episodes/learning_objectives_v2 查询），
  * 零 canonical write、零 conversation write、零模型调用。
  * - resumeCandidate：最近 active learning_session（null → 菜单项 disabled）；
  * - startCandidate：最近 episode 对应的 key point/card（null → disabled）；
@@ -16,7 +16,7 @@ import { companionGroundedTutorGrantV1Schema, companionLearningSessionContextV1S
 import { sha256Utf8V1, canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import type { CompanionLearningContextV1, LearningRunOriginV2 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
-// Plan 23 CS-05/CS-06：Objective Surface 派生 companion 上下文（不再依赖 card_key_points.claim）。
+// Plan 23 CS-05/CS-06：Objective Surface 派生 companion 上下文（不再依赖 V1 card_key_points.claim）。
 import {
   listObjectiveSurfacesV3,
   type SurfaceContext,
@@ -167,9 +167,10 @@ async function resolveCompanionLearningContextInTransaction(
   // creation must validate the read-only context and perform all writes under
   // the same RLS snapshot; opening a nested transaction here would leave a
   // race between validation and insertion.
-  // Plan 23 CS-05/CS-06：优先使用 learning_objectives_v2 派生候选；legacy
-  // card_key_points / learning_episodes 路径仅在没有 active Objective 时回退
-  //（过渡期兼容；RL-17 退场后整个 legacy 分支可被移除）。
+// Plan 23 CS-05/CS-06：优先使用 learning_objectives_v2 派生候选；
+// learning_episodes 路径仅在没有 active Objective 时回退
+//（过渡期兼容；RL-17 退场后整个 legacy 分支可被移除）。
+// V1 card_key_points 表已退役（migration 0176），key_point_id 现为 objective_id 别名。
   const surfaceCtx: SurfaceContext = {
     workspaceId: args.workspaceId,
     userId: args.userId,

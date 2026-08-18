@@ -316,9 +316,9 @@ export async function getUnderstandingStates(
  * 构建理解星图。
  *
  * 图中的每条边都对应数据库中的真实外键或血缘：
- * source -> note (notes.source_id)
- * note -> card (learning_cards.note_version_id -> note_versions.note_id)
- * card -> keyPoint (card_key_points.card_id)
+* source -> note (notes.source_id)
+* note -> card (learning_cards_v2.note_version_id -> note_versions.note_id)
+* card -> objective (learning_cards_v2.objective_id -> learning_objectives_v2.objective_id)
  *
  * active card 最多投影 200 张；totalCards/truncated 会说明是否截断。
  *

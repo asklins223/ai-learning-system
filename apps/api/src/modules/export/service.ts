@@ -1341,7 +1341,7 @@ export async function restoreWorkspace(
       );
 
       // 8. 恢复 ai_artifacts（PERF-40 修复：批量 INSERT）
-      // learning_cards 和 validation_events 都通过复合 FK 引用它，必须先于这两类子记录插入。
+      // V1 learning_cards 已退役；validation_events 复合 FK 已改指 learning_objectives_v2。
       counts.aiArtifacts = await restoreTable(
         tx, aiArtifacts, data.aiArtifacts,
         (art) => ({
@@ -1359,8 +1359,9 @@ export async function restoreWorkspace(
         }),
       );
 
-      // V1 退役：learning_cards / card_key_points（V1 表）已删除，不再恢复。
-      // V2 卡片数据（learning_cards_v2 / objectives_v2）在下方单独恢复。
+// V1 退役：learning_cards / card_key_points（V1 表）已删除，不再恢复。
+// V2 卡片数据（learning_cards_v2 / objectives_v2）在下方单独恢复。
+// migration 0176 已清空 V1 表并改指 FK。
 
       // 恢复 evidences（PERF-40 修复：批量 INSERT）
       counts.evidences = await restoreTable(
