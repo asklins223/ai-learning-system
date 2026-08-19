@@ -32,7 +32,8 @@
  * 测试用内存实现）。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError } from "@ailearn/shared";
 import { stableStringify } from "./canonical-events.ts";
 
 export const RELATION_GOVERNANCE_CONTRACT_VERSION = "relation-governance-v1" as const;
@@ -175,17 +176,10 @@ export interface RelationGovernanceFlags {
   semanticRelationGovernance: boolean;
 }
 
-export class RelationGovernanceError extends Error {
-  readonly code: string;
+export class RelationGovernanceError extends DomainError {
   constructor(message: string, code: string) {
-    super(message);
-    this.name = "RelationGovernanceError";
-    this.code = code;
+    super({ name: "RelationGovernanceError", code, message, statusCode: 500 });
   }
-}
-
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
 }
 
 // ─── Should flag（flag 关闭时动作不可见不可用，fail closed）─────────────────

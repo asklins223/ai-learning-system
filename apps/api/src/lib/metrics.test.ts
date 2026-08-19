@@ -10,9 +10,6 @@ import {
   registry,
   httpRequestsTotal,
   httpRequestDurationSeconds,
-  jobQueueDepth,
-  jobTerminalTotal,
-  providerCallsTotal,
   statusToClass,
   normalizeRouteTemplate,
   categorizeError,
@@ -28,13 +25,9 @@ test("metrics registry 暴露所有定义的指标", async () => {
   // 验证关键指标存在
   assert.match(text, /ailearn_http_requests_total/);
   assert.match(text, /ailearn_http_request_duration_seconds/);
-  assert.match(text, /ailearn_job_queue_depth/);
-  assert.match(text, /ailearn_job_terminal_total/);
-  assert.match(text, /ailearn_provider_calls_total/);
   assert.match(text, /ailearn_funnel_events_total/);
   assert.match(text, /ailearn_release_info/);
   assert.match(text, /ailearn_db_migration_version/);
-  assert.match(text, /ailearn_db_last_successful_backup_timestamp/);
 });
 
 test("HTTP 请求计数器按 method/route/status_class 正确递增", async () => {
@@ -57,36 +50,6 @@ test("HTTP 延迟直方图正确记录观察值", async () => {
 
   const text = await getMetricsText();
   assert.match(text, /ailearn_http_request_duration_seconds_count\{method="GET",route="\/health"\} 2/);
-});
-
-test("Job 队列深度 gauge 正确设置值", async () => {
-  jobQueueDepth.set({ status: "pending" }, 5);
-  jobQueueDepth.set({ status: "running" }, 2);
-  jobQueueDepth.set({ status: "dead" }, 1);
-
-  const text = await getMetricsText();
-  assert.match(text, /ailearn_job_queue_depth\{status="pending"\} 5/);
-  assert.match(text, /ailearn_job_queue_depth\{status="running"\} 2/);
-  assert.match(text, /ailearn_job_queue_depth\{status="dead"\} 1/);
-});
-
-test("Job 终态计数器按 type/status 正确递增", async () => {
-  jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
-  jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
-  jobTerminalTotal.inc({ type: "parse_source", status: "dead" });
-
-  const text = await getMetricsText();
-  assert.match(text, /ailearn_job_terminal_total\{type="execute_card_agent_turn",status="succeeded"\} 2/);
-  assert.match(text, /ailearn_job_terminal_total\{type="parse_source",status="dead"\} 1/);
-});
-
-test("Provider 调用计数器按 operation/status 正确递增", async () => {
-  providerCallsTotal.inc({ operation: "execute_card_agent_turn", status: "success" });
-  providerCallsTotal.inc({ operation: "execute_card_agent_turn", status: "error" });
-
-  const text = await getMetricsText();
-  assert.match(text, /ailearn_provider_calls_total\{operation="execute_card_agent_turn",status="success"\} 1/);
-  assert.match(text, /ailearn_provider_calls_total\{operation="execute_card_agent_turn",status="error"\} 1/);
 });
 
 test("Funnel 事件通过 recordFunnelEvent 正确记录", async () => {
@@ -235,10 +198,6 @@ test("指标文本不包含原始 URL query 参数", async () => {
 });
 
 test("指标文本不包含 lease token 原始值", async () => {
-  // 验证 job 指标不暴露 lease token
-  jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
-
   const text = await getMetricsText();
-  // 不应包含 "lease_token" 或类似敏感字段
   assert.doesNotMatch(text, /lease_token/);
 });

@@ -981,14 +981,10 @@ type AuditActorIdentity =
   | {
       /** Canonical field for the user who initiated the job/request. */
       actorUserId: string;
-      /** @deprecated Use actorUserId. */
-      userId?: string;
-    }
+          }
   | {
       actorUserId?: undefined;
-      /** @deprecated Use actorUserId. Kept for worker/API compatibility during migration. */
-      userId: string;
-    };
+          };
 
 export type LogAICallParams = AuditActorIdentity & {
   workspaceId: string;
@@ -1005,7 +1001,7 @@ export type LogAICallParams = AuditActorIdentity & {
 };
 
 export async function logAICall(params: LogAICallParams): Promise<void> {
-  const actorUserId = params.actorUserId ?? params.userId;
+  const actorUserId = params.actorUserId;
   if (!actorUserId) {
     throw new Error("AI audit log requires actorUserId (the initiating user UUID)");
   }

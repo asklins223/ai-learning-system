@@ -158,8 +158,7 @@ export const QuestionStatus = {
   STALE: "stale",
   SUPERSEDED: "superseded",
   EXPIRED: "expired",
-  LEGACY_UNRUBRICED: "legacy_unrubriced",
-} as const;
+  } as const;
 export type QuestionStatus = (typeof QuestionStatus)[keyof typeof QuestionStatus];
 
 /** Question generator kind (计划 §6.2) */

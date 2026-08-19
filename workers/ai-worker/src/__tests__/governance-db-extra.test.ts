@@ -2,15 +2,14 @@
  * governance.ts DB 依赖函数补充测试
  *
  * 通过 mock db 对象的 transaction/query 属性，
- * 测试 checkAIConsent / getWorkspaceAIPolicy / enforcePrivacyGovernance / logAICall 的核心业务逻辑分支。
+ * 测试 getWorkspaceAIPolicy / enforcePrivacyGovernanceWithPolicy / logAICall 的核心业务逻辑分支。
  */
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import {
-  checkAIConsent,
   getWorkspaceAIPolicy,
-  enforcePrivacyGovernance,
+  enforcePrivacyGovernanceWithPolicy,
   logAICall,
   DEFAULT_AI_DATA_POLICY,
   type AICallAuditParams,
@@ -80,58 +79,6 @@ function chainable(value: any): any {
   });
 }
 
-// ─── checkAIConsent ─────────────────────────────────────────────────────
-
-describe("governance checkAIConsent (DB mock)", () => {
-  it("mock provider 总是返回 true", async () => {
-    setupDbMock({ workspace: undefined });
-    const result = await checkAIConsent(WS_ID, "mock");
-    assert.equal(result, true);
-  });
-
-  it("工作区不存在时返回 false", async () => {
-    setupDbMock({ workspace: undefined });
-    const result = await checkAIConsent(WS_ID, "dashscope");
-    assert.equal(result, false);
-  });
-
-  it("非 mock provider 且已签署同意时返回 true", async () => {
-    setupDbMock({
-      workspace: {
-        id: WS_ID,
-        aiConsentVersion: "v1",
-        aiConsentAt: new Date(),
-      },
-    });
-    const result = await checkAIConsent(WS_ID, "dashscope");
-    assert.equal(result, true);
-  });
-
-  it("非 mock provider 且未签署同意时返回 false", async () => {
-    setupDbMock({
-      workspace: {
-        id: WS_ID,
-        aiConsentVersion: null,
-        aiConsentAt: null,
-      },
-    });
-    const result = await checkAIConsent(WS_ID, "dashscope");
-    assert.equal(result, false);
-  });
-
-  it("部分同意（version 有但 time 无）返回 false", async () => {
-    setupDbMock({
-      workspace: {
-        id: WS_ID,
-        aiConsentVersion: "v1",
-        aiConsentAt: null,
-      },
-    });
-    const result = await checkAIConsent(WS_ID, "openai_compatible");
-    assert.equal(result, false);
-  });
-});
-
 // ─── getWorkspaceAIPolicy ──────────────────────────────────────────────
 
 describe("governance getWorkspaceAIPolicy (DB mock)", () => {
@@ -167,65 +114,54 @@ describe("governance getWorkspaceAIPolicy (DB mock)", () => {
   });
 });
 
-// ─── enforcePrivacyGovernance ───────────────────────────────────────────
+// ─── enforcePrivacyGovernanceWithPolicy ───────────────────────────────
 
-describe("governance enforcePrivacyGovernance (DB mock)", () => {
-  it("mock provider 总是允许", async () => {
-    setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: false, piiDetection: true, auditLogging: true } },
-    });
-    const result = await enforcePrivacyGovernance(
-      WS_ID, ["note_content"], { text: "some data" }, "mock",
+describe("governance enforcePrivacyGovernanceWithPolicy", () => {
+  const policy = { sendToExternal: false, piiDetection: true, auditLogging: true };
+
+  it("mock provider 总是允许", () => {
+    const result = enforcePrivacyGovernanceWithPolicy(
+      policy, WS_ID, ["note_content"], { text: "some data" }, "mock",
     );
     assert.equal(result.allowed, true);
     assert.deepEqual(result.sanitizedData, { text: "some data" });
     assert.equal(result.piiDetectedTypes.length, 0);
   });
 
-  it("非 mock provider + sendToExternal=false 时拒绝", async () => {
-    setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: false, piiDetection: true, auditLogging: true } },
-    });
-    const result = await enforcePrivacyGovernance(
-      WS_ID, ["note_content"], { text: "some data" }, "dashscope",
+  it("非 mock provider + sendToExternal=false 时拒绝", () => {
+    const result = enforcePrivacyGovernanceWithPolicy(
+      policy, WS_ID, ["note_content"], { text: "some data" }, "dashscope",
     );
     assert.equal(result.allowed, false);
     assert.ok(result.reason?.includes("sendToExternal"));
   });
 
-  it("非 mock provider + sendToExternal=true + 无 PII 时允许", async () => {
-    setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: true } },
-    });
-    const result = await enforcePrivacyGovernance(
-      WS_ID, ["note_content"], { text: "no pii here" }, "dashscope",
+  it("非 mock provider + sendToExternal=true + 无 PII 时允许", () => {
+    const openPolicy = { sendToExternal: true, piiDetection: true, auditLogging: true };
+    const result = enforcePrivacyGovernanceWithPolicy(
+      openPolicy, WS_ID, ["note_content"], { text: "no pii here" }, "dashscope",
     );
     assert.equal(result.allowed, true);
     assert.equal(result.piiDetectedTypes.length, 0);
   });
 
-  it("非 mock provider + sendToExternal=true + 有 PII 时脱敏", async () => {
-    setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: true } },
-    });
-    const result = await enforcePrivacyGovernance(
-      WS_ID, ["note_content"], { text: "联系邮箱 test@example.com" }, "dashscope",
+  it("非 mock provider + sendToExternal=true + 有 PII 时脱敏", () => {
+    const openPolicy = { sendToExternal: true, piiDetection: true, auditLogging: true };
+    const result = enforcePrivacyGovernanceWithPolicy(
+      openPolicy, WS_ID, ["note_content"], { text: "联系邮箱 test@example.com" }, "dashscope",
     );
     assert.equal(result.allowed, true);
     assert.ok(result.piiDetectedTypes.length > 0);
     assert.ok(result.piiDetectedTypes.includes("email"));
   });
 
-  it("非 mock provider + piiDetection=false 时不检测 PII", async () => {
-    setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: true, piiDetection: false, auditLogging: true } },
-    });
-    const result = await enforcePrivacyGovernance(
-      WS_ID, ["note_content"], { text: "联系邮箱 test@example.com" }, "dashscope",
+  it("非 mock provider + piiDetection=false 时不检测 PII", () => {
+    const noPiiPolicy = { sendToExternal: true, piiDetection: false, auditLogging: true };
+    const result = enforcePrivacyGovernanceWithPolicy(
+      noPiiPolicy, WS_ID, ["note_content"], { text: "联系邮箱 test@example.com" }, "dashscope",
     );
     assert.equal(result.allowed, true);
     assert.equal(result.piiDetectedTypes.length, 0);
-    // Data should not be sanitized
     assert.deepEqual(result.sanitizedData, { text: "联系邮箱 test@example.com" });
   });
 });

@@ -29,7 +29,8 @@
  *   CanonicalFactReader 直接读权威表，不依赖投影（readCanonicalFacts）。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError } from "@ailearn/shared";
 import { and, eq, sql } from "drizzle-orm";
 import {
   pgTable,
@@ -311,13 +312,9 @@ const PAYLOAD_NUMERIC_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** canonical-events 的错误（fail closed）。 */
-export class CanonicalEventValidationError extends Error {
-  readonly code: string;
-
+export class CanonicalEventValidationError extends DomainError {
   constructor(message: string, code: string) {
-    super(message);
-    this.name = "CanonicalEventValidationError";
-    this.code = code;
+    super({ name: "CanonicalEventValidationError", code, message, statusCode: 500 });
   }
 }
 
@@ -543,10 +540,6 @@ export async function appendCanonicalEvent(
 }
 
 // ─── 确定性 hash / 稳定序列化 ─────────────────────────────────────────────
-
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
-}
 
 /** 对象键按字典序排序的稳定序列化（数组保持顺序，数字/布尔/null 原样）。 */
 export function stableStringify(value: unknown): string {

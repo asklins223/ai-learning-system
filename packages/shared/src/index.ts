@@ -2,6 +2,7 @@ export * from "./enums.ts";
 export * from "./types.ts";
 export * from "./schemas.ts";
 export * from "./constants.ts";
+export * from "./domain-error.ts";
 export * from "./review-attempt.ts";
 export * from "./rubric-reducer.ts";
 export * from "./scheduling-policy-v2.ts";

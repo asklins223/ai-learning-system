@@ -12,7 +12,8 @@
  *   （title/targetSummary/impactSummary 或执行结果），不引用模型原话。
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import { logger } from "../lib/logger.ts";
 export interface CompanionActionHandlerContext {
   payload: Record<string, unknown>;
@@ -22,10 +23,6 @@ export interface CompanionActionHandlerContext {
 import { sql } from "drizzle-orm";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
 import { sanitizeOperationalError } from "@ailearn/shared";
-
-function sha256Hex(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
 
 /**
  * 方案 16 §14.3：worker 侧 action_result delivery 投递（与 API delivery-service

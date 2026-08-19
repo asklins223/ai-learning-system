@@ -1497,8 +1497,8 @@ export default function SettingsPage() {
                     </div>
                   </div>
                   <div className="settings-drift-stats">
-                    {(["note", "source", "card", "evidence"] as const).map((type) => {
-                      const labels = { note: "笔记", source: "来源", card: "学习卡", evidence: "证据" };
+                    {(["note", "source"] as const).map((type) => {
+                      const labels = { note: "笔记", source: "来源" };
                       return (
                         <div key={type}>
                           <span>{labels[type]}</span>

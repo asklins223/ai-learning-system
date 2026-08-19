@@ -180,8 +180,7 @@ export const learningEpisodes = pgTable(
     sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    // V1 keyPoint reference removed (cardKeyPoints table deleted)
-    origin: text("origin").$type<LearningSessionOrigin>().notNull(),
+        origin: text("origin").$type<LearningSessionOrigin>().notNull(),
     originRef: jsonb("origin_ref").$type<LearningSessionOriginRef>().notNull(),
     intent: text("intent").$type<LearningSessionIntent>().notNull(),
     formalEligibilityKind: text("formal_eligibility_kind")
@@ -278,8 +277,7 @@ export const learningResponseArtifacts = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
     episodeId: uuid("episode_id").notNull().references(() => learningEpisodes.id, { onDelete: "cascade" }),
-    // V1 keyPoint reference removed (cardKeyPoints table deleted)
-    probeId: uuid("probe_id").notNull().references(() => learningSessionProbes.id, { onDelete: "cascade" }),
+        probeId: uuid("probe_id").notNull().references(() => learningSessionProbes.id, { onDelete: "cascade" }),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     publicSceneContractId: text("public_scene_contract_id").notNull(),
@@ -473,8 +471,7 @@ export const learningTutorActionNonces = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
-    // V1 keyPointId reference removed
-    targetFingerprint: text("target_fingerprint").notNull(),
+        targetFingerprint: text("target_fingerprint").notNull(),
     nonceHash: text("nonce_hash").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
@@ -482,8 +479,7 @@ export const learningTutorActionNonces = pgTable(
   },
   (t) => ({
     nonceHashUnique: uniqueIndex("learning_tutor_action_nonces_nonce_hash_key").on(t.nonceHash),
-    // V1 keyPointId index removed
-    lookupIdx: index("learning_tutor_action_nonces_lookup_idx")
+        lookupIdx: index("learning_tutor_action_nonces_lookup_idx")
       .on(t.workspaceId, t.userId, t.sessionId, t.expiresAt),
   }),
 );
@@ -496,8 +492,7 @@ export const learningSessionPracticeEvents = pgTable(
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id").notNull().references(() => learningSessions.id, { onDelete: "cascade" }),
     episodeId: uuid("episode_id").notNull().references(() => learningEpisodes.id, { onDelete: "cascade" }),
-    // V1 keyPoint reference removed (cardKeyPoints table deleted)
-    eventType: text("event_type").notNull(),
+        eventType: text("event_type").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
     summary: jsonb("summary").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

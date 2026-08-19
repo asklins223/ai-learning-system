@@ -6,7 +6,7 @@
  * Electron broker 与 API hydration 使用同一公式，保证 revision 两端一致。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "./content-hash.ts";
 import type { MainPageContextInput } from "./companion-bridge-contracts.ts";
 
 export function computeContextRevisionV2(input: MainPageContextInput): string {
@@ -24,5 +24,5 @@ export function computeContextRevisionV2(input: MainPageContextInput): string {
     capabilityHints: [...input.capabilityHints].sort(),
     sensitivity: input.sensitivity,
   });
-  return createHash("sha256").update(canonical).digest("hex");
+  return sha256Hex(canonical);
 }

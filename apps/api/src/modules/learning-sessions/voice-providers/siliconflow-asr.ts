@@ -38,14 +38,13 @@ const DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
 const DEFAULT_MODEL = "FunAudioLLM/SenseVoiceSmall";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+import { DomainError } from "@ailearn/shared";
+
 /** SiliconFlow API 错误（服务端错误消息不透出到 UI，仅内部记录） */
-export class SiliconFlowAsrError extends Error {
-  readonly code: string;
+export class SiliconFlowAsrError extends DomainError {
   readonly status?: number;
   constructor(code: string, message: string, status?: number) {
-    super(message);
-    this.name = "SiliconFlowAsrError";
-    this.code = code;
+    super({ name: "SiliconFlowAsrError", code, message, statusCode: status });
     this.status = status;
   }
 }

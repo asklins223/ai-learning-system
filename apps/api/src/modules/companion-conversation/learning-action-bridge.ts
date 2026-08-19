@@ -239,7 +239,6 @@ async function resolveCompanionLearningContextInTransaction(
     }
     // 统一走 V2 候选：V2 payload 已内嵌 originV2；同时保留 legacy V1 payload
     // 字段（cardId / keyPointId 仍然兼容，供未升级客户端继续使用）。
-    const v2RunId = `pet-menu-v2:${actionableObjective.objectiveId}`;
     const v1CardId = actionableObjective.content.presentation.cardId ?? actionableObjective.objectiveId;
     const v1KeyPointId = actionableObjective.objectiveId;
     // V2 优先：payloadSha256 从 V2 派生；后向兼容 V1 时仍按 V1 形状填充候选。
@@ -262,7 +261,6 @@ async function resolveCompanionLearningContextInTransaction(
       objectiveId: actionableObjective.objectiveId,
       ...(payloadV2 ? { originV2: payloadV2.request.originV2 } : {}),
     };
-    void v2RunId;
   }
 
   // V1 过渡回退已移除（card_key_points/learning_sessions 旧表已随旧栈退役，
@@ -782,9 +780,7 @@ async function createCompanionProposalInTransaction(
            'action.proposed', ${JSON.stringify(eventPayload)},
            now() + interval '24 hours')
       `);
-      void eventPayload;
-
-      // 方案 16 §14.3：proposal 创建后入 inbox（pet 自身发起的 proposal 已有
+            // 方案 16 §14.3：proposal 创建后入 inbox（pet 自身发起的 proposal 已有
       // 本地确认卡，避免重复展示；main/web_fallback 发起的需要推送给 pet）。
       if (args.sourceSurface !== "pet") {
         await deliver(

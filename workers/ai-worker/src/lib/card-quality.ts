@@ -20,10 +20,8 @@
 
 import type { LearningCardOutput } from "@ailearn/shared";
 import { CardRepairReasonCode } from "@ailearn/shared";
-import { normalizeText, ngramSet, jaccard, containment } from "./text-similarity.ts";
+import { normalizeText, jaccard, containment } from "./text-similarity.ts";
 
-// Re-export for backward compatibility.
-export { ngramSet, jaccard };
 
 // ─── v0.6: assessCardOutput (计划 §7.7) ───────────────────────────────────
 

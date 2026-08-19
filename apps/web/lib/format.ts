@@ -1,8 +1,12 @@
-/** 相对时间："3 分钟前"、"2 小时前"、"昨天"、"3 天前"，否则日期。 */
-export function relativeTime(iso: string): string {
+/** 相对时间："3 分钟前"、"2 小时前"、"昨天"、"3 天前"，否则日期。null/undefined/无效输入返回空串。 */
+export function relativeTime(iso: string | null | undefined): string {
+  if (!iso) return "";
   const d = new Date(iso);
+  const time = d.getTime();
+  if (!Number.isFinite(time)) return "";
   const now = Date.now();
-  const diff = now - d.getTime();
+  const diff = now - time;
+  if (diff < 0) return "刚刚";
   const sec = Math.floor(diff / 1000);
   if (sec < 60) return "刚刚";
   const min = Math.floor(sec / 60);
@@ -18,6 +22,17 @@ export function relativeTime(iso: string): string {
 /** 完整日期时间，用于 hover/title。 */
 export function fullTime(iso: string): string {
   return new Date(iso).toLocaleString("zh-CN");
+}
+
+/** 格式化日期为简短的中文日期时间。 */
+export function formatDate(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /** 任务状态 → tone + 文案。 */

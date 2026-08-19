@@ -19,16 +19,13 @@
  *   user text。
  */
 
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import type { AIProvider } from "../lib/ai-provider.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
 import { COMPANION_ACTION_LEXEMES, COMPANION_ACTION_ROUTER_OPTIONS, COMPANION_ACTION_ROUTER_V1_PROMPT, COMPANION_ACTION_ROUTER_V1_SHA256, companionActionClassifierInputV1Schema, companionActionIntentV1Schema, type CompanionActionIntentV1,  } from "@ailearn/shared";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
-
-function sha256Hex(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
 
 // 2026-08-12（契约收口）：冻结参数单一来源迁移到 @ailearn/shared
 // （COMPANION_ACTION_ROUTER_OPTIONS）——此前本地双份定义与 shared

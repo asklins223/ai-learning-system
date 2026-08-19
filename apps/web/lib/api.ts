@@ -25,7 +25,6 @@
  *   - `lib/search-return.ts` — 搜索结果处理
  *   - `lib/source-return.ts` — 来源结果处理
  *   - `lib/today-return.ts` — 今日页面处理
- *   - `lib/understanding-graph.ts` — 理解星图
  *
  * 所有类型从 `api-types.ts` 导入并重新导出，保持向后兼容。
  * ──────────────────────────────────────────────────────────────────────
@@ -149,11 +148,8 @@ import type {
   UnableResult,
   RetryResult,
   AbandonResult,
-  QualitySignalReason,
-  QualitySignalResult,
   RevealSourceResult,
   RevealResultData,
-  ValidationEvent,
   UploadImageOptions,
   SourceRow,
   SourceStatusSnapshot,
@@ -197,6 +193,20 @@ const CSRF_COOKIE_KEY = "ailearn_csrf";
 const CSRF_HEADER_KEY = "x-csrf-token";
 export const IDENTITY_CHANGED_EVENT = "ailearn:identity-changed";
 
+/**
+ * 从 params 对象构建 query string（含 "?" 前缀）。
+ * - null/undefined 值自动过滤。
+ * - 空结果返回空串（不附加 "?"）。
+ */
+function buildQueryString(params: Record<string, unknown> | undefined | null): string {
+  if (!params) return "";
+  const entries = Object.entries(params)
+    .filter(([, v]) => v != null)
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  if (entries.length === 0) return "";
+  return "?" + new URLSearchParams(entries).toString();
+}
+
 // ARCH-04: CurrentUser, AIPrivacySettings 等类型已迁移到 api-types.ts
 
 const GET_ME_CACHE_TTL_MS = 20_000;
@@ -207,23 +217,20 @@ const GET_ME_CACHE_TTL_MS = 20_000;
 const isBrowser = typeof window !== "undefined";
 
 let getMeCache:
-  | { token: string | null; value: CurrentUser; expiresAt: number }
+  | { value: CurrentUser; expiresAt: number }
   | null = null;
 let getMeInFlight:
-  | { token: string | null; promise: Promise<CurrentUser> }
+  | { promise: Promise<CurrentUser> }
   | null = null;
 let getMeCacheGeneration = 0;
 
 // F22（round5）：GET 缓存 key 的工作区维度——避免 30s 内跨工作区命中旧缓存。
-// 从 getMeCache 取当前 workspaceId；getMe 尚未解析时返回 null（浏览器端
-// getToken 恒 null，无其它稳定 scope）。GET 调用方在 scope 为 null 时必须
-// 短路缓存读写（见 request），避免以 "anon" 占位键与真实 workspaceId 键
-// 并存产生双键孤儿 GET 缓存。CurrentUser 已含 workspaceId。
+// 从 getMeCache 取当前 workspaceId；getMe 尚未解析时返回 null。GET 调用方在
+// scope 为 null 时必须短路缓存读写（见 request），避免以 "anon" 占位键与
+// 真实 workspaceId 键并存产生双键孤儿 GET 缓存。CurrentUser 已含 workspaceId。
 function currentWorkspaceCacheScope(): string | null {
   const fromMe = getMeCache?.value.workspaceId;
   if (fromMe) return fromMe;
-  const token = getToken();
-  if (token) return token;
   return null;
 }
 
@@ -261,14 +268,13 @@ function clearSensitiveLocalState() {
   }
 }
 
-export function getToken(): string | null {
-  // Browser sessions use the HttpOnly ailearn_session cookie. Keeping this
-  // legacy accessor null prevents new code from reintroducing Web Storage
-  // bearer tokens; non-browser/API clients continue using Authorization.
-  return null;
-}
-
-export function setToken(token: string | null, persistent = true) {
+/**
+ * Clear any pre-migration bearer token from Web Storage.
+ * After the HttpOnly cookie migration, the browser never persists bearer
+ * credentials — this function only cleans up legacy localStorage / sessionStorage
+ * entries that may remain from older sessions.
+ */
+export function clearLegacyTokenStorage() {
   invalidateGetMeCache();
   if (typeof window === "undefined") return;
   try {
@@ -281,10 +287,6 @@ export function setToken(token: string | null, persistent = true) {
   } catch {
     // Session storage is optional.
   }
-  // `token` and `persistent` remain in the signature for source compatibility;
-  // the browser never persists bearer credentials after the cookie migration.
-  void token;
-  void persistent;
 }
 
 function getCookie(name: string): string | null {
@@ -343,7 +345,6 @@ function handleUnauthorized(requestGeneration: number) {
   if (typeof window === "undefined") return;
   if (requestGeneration !== getMeCacheGeneration) return;
   clearSensitiveLocalState();
-  setToken(null);
   if (window.location.pathname !== "/login") {
     window.location.href = "/login";
   }
@@ -502,8 +503,8 @@ const requestCacheEnabled =
   && process.env.NODE_ENV !== "test"
   && process.env.NODE_ENV !== undefined;
 
-// 2026-08-12（数据面审计 P1-1）：跨标签页失效广播。缓存键无用户/工作区维度
-// （getToken 恒 null），失效只作用于发起请求的标签页模块实例——用户 Tab A
+// 2026-08-12（数据面审计 P1-1）：跨标签页失效广播。缓存键无用户/工作区维度，
+// 失效只作用于发起请求的标签页模块实例——用户 Tab A
 // 切工作区后 Tab B 30s 内命中旧工作区缓存（真实数据隔离缺陷）。写操作时
 // 写 localStorage 时间戳，其它标签页经 storage 事件 clear（发起页已本地 clear）。
 const CACHE_BUST_STORAGE_KEY = "ailearn.request-cache-bust";
@@ -592,8 +593,6 @@ async function requestResponse(path: string, init: RequestInit = {}): Promise<Re
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const token = getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   addCsrfHeader(headers, init.method ?? "GET");
 
   const res = await fetch(`${API_URL}${path}`, {
@@ -732,15 +731,11 @@ async function getMeCached(): Promise<CurrentUser> {
     return request<CurrentUser>("/auth/me");
   }
 
-  const token = getToken();
   const now = Date.now();
-  if (
-    getMeCache?.token === token &&
-    getMeCache.expiresAt > now
-  ) {
+  if (getMeCache && getMeCache.expiresAt > now) {
     return getMeCache.value;
   }
-  if (getMeInFlight?.token === token) {
+  if (getMeInFlight?.promise) {
     return getMeInFlight.promise;
   }
 
@@ -748,11 +743,9 @@ async function getMeCached(): Promise<CurrentUser> {
   const promise = request<CurrentUser>("/auth/me")
     .then((value) => {
       if (
-        generation === getMeCacheGeneration &&
-        getToken() === token
+        generation === getMeCacheGeneration
       ) {
         getMeCache = {
-          token,
           value,
           expiresAt: Date.now() + GET_ME_CACHE_TTL_MS,
         };
@@ -765,7 +758,7 @@ async function getMeCached(): Promise<CurrentUser> {
       }
     });
 
-  getMeInFlight = { token, promise };
+  getMeInFlight = { promise };
   return promise;
 }
 
@@ -927,11 +920,6 @@ export const api = {
       `/companion/memory/${encodeURIComponent(keepId)}/resolve-conflict`,
       { method: "POST", body: JSON.stringify({ removeId }) },
     ),
-  rebuildCompanionMemoryEmbeddings: () =>
-    request<{ version: 1; queued: boolean }>("/companion/memory/rebuild-embeddings", {
-      method: "POST",
-      body: JSON.stringify({}),
-    }),
   getPetProfile: () =>
     request<{
       version: 1;
@@ -975,11 +963,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
-  summarizeCompanionConversation: (conversationId: string) =>
-    request<{ version: 1; queued: boolean }>(
-      `/companion/conversations/${encodeURIComponent(conversationId)}/summarize`,
-      { method: "POST", body: JSON.stringify({}) },
-    ),
   getCompanionDailySummary: (date?: string) =>
     request<{
       version: 1;
@@ -991,11 +974,6 @@ export const api = {
       conversationHighlights: unknown[];
       memory: { memoryItemId: string; candidate: boolean } | null;
     }>(`/companion/daily${date ? `?date=${encodeURIComponent(date)}` : ""}`),
-  /* 方案 16 §10.4：完整历史全文搜索（redacted/已删内容不命中）。 */
-  searchCompanionHistory: (q: string, limit = 20) =>
-    request<{ version: 1; query: string; items: unknown[] }>(
-      `/companion/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-    ),
   // 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；Owner 决策 4）。
   getAnswerModePreference: (signal?: AbortSignal) =>
     request<{ version: 1; preference: "voice" | "silent" | "text" | "any"; updatedAt: string | null }>(
@@ -1037,19 +1015,12 @@ export const api = {
     invalidateGetMeCache();
     await request<void>("/auth/logout", { method: "POST", keepalive: true });
     clearSensitiveLocalState();
-    setToken(null);
+    clearLegacyTokenStorage();
   },
 
 /* notes */
 listNotes: (params?: { cursor?: string; limit?: number; trashed?: boolean }) => {
-const qs = params
-? "?" +
-new URLSearchParams(
-Object.entries(params)
-.filter(([, v]) => v != null)
-.map(([k, v]) => [k, String(v)]) as [string, string][],
-).toString()
-: "";
+const qs = buildQueryString(params);
 return request<{ items: NoteHeader[]; nextCursor: string | null; total: number }>(`/notes${qs}`);
 },
   createNote: (
@@ -1086,25 +1057,11 @@ isAutosave?: boolean;
 
   /* cards */
   listCards: (params?: { cursor?: string; limit?: number }) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, v]) => v != null)
-            .map(([k, v]) => [k, String(v)]) as [string, string][],
-        ).toString()
-      : "";
+    const qs = buildQueryString(params);
     return request<{ items: CardListItem[]; nextCursor: string | null; total: number }>(`/cards${qs}`);
   },
   listLearningCardsV2: (params?: { cursor?: string; limit?: number }) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, v]) => v != null)
-            .map(([k, v]) => [k, String(v)]) as [string, string][],
-        ).toString()
-      : "";
+    const qs = buildQueryString(params);
     return request<{ items: PublicLearningCardV2[]; nextCursor: string | null }>(`/v2/cards${qs}`);
   },
   // PERF: 单请求获取卡片在完整列表中的分页位置（index/prev/next）——
@@ -1158,14 +1115,7 @@ isAutosave?: boolean;
 
   /* sources (V0.3) */
   listSources: (params?: { status?: SourceStatus; cursor?: string; limit?: number }) => {
-    const qs = params
-        ? "?" +
-          new URLSearchParams(
-            Object.entries(params)
-              .filter(([, v]) => v != null)
-              .map(([k, v]) => [k, String(v)]) as [string, string][],
-          ).toString()
-        : "";
+    const qs = buildQueryString(params);
     return request<{ items: SourceRow[]; nextCursor: string | null; total: number }>(`/sources${qs}`);
   },
   getSourceStatuses: (ids: string[]) =>
@@ -1204,11 +1154,11 @@ importMarkdown: (items: MarkdownImportApiItem[], importId?: string) =>
 
   /* understanding (V0.3) */
   listUnderstandingStates: (params?: { state?: string }) => {
-    const qs = params
-      ? "?" + new URLSearchParams(
-          Object.entries(params).filter(([, v]) => Boolean(v)) as [string, string][],
-        ).toString()
-      : "";
+    // Boolean(v) 过滤：空串也不传
+    const filtered = params
+      ? Object.fromEntries(Object.entries(params).filter(([, v]) => Boolean(v)))
+      : undefined;
+    const qs = buildQueryString(filtered);
     return request<{ items: UnderstandingState[] }>(`/understanding/states${qs}`);
   },
   /* P7：Understanding Projection V2（文档 16 §15）。 */
@@ -1216,41 +1166,23 @@ importMarkdown: (items: MarkdownImportApiItem[], importId?: string) =>
     params: { lens?: string; targetKeyPointId?: string; minimumCheckpoint?: string; continuation?: string },
     signal?: AbortSignal,
   ) => {
-    const qs = new URLSearchParams(
-      Object.entries(params).filter(([, v]) => Boolean(v)) as [string, string][],
-    ).toString();
-    return requestResponse(`/understanding/projection${qs ? `?${qs}` : ""}`, { signal }).then(
+    // Boolean(v) 过滤：空串也不传
+    const filtered = Object.fromEntries(Object.entries(params).filter(([, v]) => Boolean(v)));
+    const qs = buildQueryString(filtered);
+    return requestResponse(`/understanding/projection${qs}`, { signal }).then(
       async (response) => ({
         httpStatus: response.status,
         payload: response.status === 204 ? null : await response.json() as unknown,
       }),
     );
   },
-  createUnderstandingRoutePlan: (input: {
-    version: 1;
-    intent: string;
-    targetKeyPointId?: string;
-    maxSteps: number;
-    lens: string;
-    filter: Record<string, unknown>;
-    expectedCheckpointToken: string;
-    idempotencyKey: string;
-  }) =>
-    request<unknown>("/understanding/routes/plan", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
   getProjectionDelta: (changeSetId: string, signal?: AbortSignal) =>
     request<unknown>(`/understanding/projection/deltas/${encodeURIComponent(changeSetId)}`, { signal }),
 
 /* search (V0.3) */
 search: (params: { q: string; type?: string; limit?: number; offset?: number }, signal?: AbortSignal) => {
-const qs = new URLSearchParams(
-Object.entries(params)
-.filter(([, v]) => v != null)
-.map(([k, v]) => [k, String(v)]) as [string, string][],
-).toString();
-return request<{ items: SearchResult[]; total: number; nextCursor: number | null }>(`/search?${qs}`, { signal });
+const qs = buildQueryString(params);
+return request<{ items: SearchResult[]; total: number; nextCursor: number | null }>(`/search${qs}`, { signal });
 },
 
   // F-025: 搜索索引漂移检测与补偿
@@ -1283,14 +1215,7 @@ return request<{ items: SearchResult[]; total: number; nextCursor: number | null
 
   /* jobs */
   listJobs: (params?: { limit?: number }) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, v]) => v != null)
-            .map(([k, v]) => [k, String(v)]) as [string, string][],
-        ).toString()
-      : "";
+    const qs = buildQueryString(params);
     return request<{ items: JobRow[] }>(`/jobs${qs}`);
   },
   getJob: (id: string, signal?: AbortSignal) =>
@@ -1325,13 +1250,6 @@ return request<{ items: SearchResult[]; total: number; nextCursor: number | null
       method: "POST",
       body: JSON.stringify(body),
     }),
-  listValidations: (cardId: string) =>
-    request<{ items: ValidationEvent[] }>(`/cards/${cardId}/validations`),
-  getValidation: (id: string) => request<ValidationEvent>(`/validations/${id}`),
-  // N-003: 按 jobId 直接取回验证结果，不再猜匹配
-  getValidationByJobId: (jobId: string) =>
-    request<ValidationEvent>(`/validations/by-job/${jobId}`),
-
   /* v0.6 可信掌握闭环 — Validation Session API (计划 §8.2) */
   startValidationSession: (
     cardId: string,
@@ -1423,37 +1341,26 @@ return request<{ items: SearchResult[]; total: number; nextCursor: number | null
       { method: "POST", body: JSON.stringify(body) },
     ),
 
-  /* v0.6 quality signal (计划 §8.4 Should) */
-  submitQualitySignal: (
-    eventId: string,
-    body: { reason: QualitySignalReason; comment?: string },
-  ) =>
-    request<QualitySignalResult>(
-      `/validation-events/${eventId}/quality-signal`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
   /* reviews (V0.1b) */
   listReviews: (params?: { status?: ReviewStatus; includeAll?: boolean; limit?: number; offset?: number; dueFromMs?: number; dueToMs?: number }) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, v]) => v !== undefined && v !== false)
-            .map(([k, v]) => [k, String(v)]) as [string, string][],
-        ).toString()
-      : "";
+    // includeAll=false 时不传（buildQueryString 过滤 null/undefined），但 false 需要显式过滤
+    const filtered = params
+      ? Object.fromEntries(
+          Object.entries(params).filter(([, v]) => v !== undefined && v !== false),
+        )
+      : undefined;
+    const qs = buildQueryString(filtered);
     return request<{ items: ReviewWithCard[]; total: number; nextCursor: number | null }>(`/reviews${qs}`);
   },
 
   /* v0.6 reviews — sanitized (计划 §9.4/§10.4) */
   // 安全列表：不含 card title/claim/quote/blockContent
   listSanitizedReviews: (params?: { status?: ReviewStatus; limit?: number; offset?: number }) => {
-    const baseParams: Record<string, string> = { sanitized: "true" };
+    const baseParams: Record<string, unknown> = { sanitized: "true" };
     if (params?.status) baseParams.status = params.status;
-    if (params?.limit !== undefined) baseParams.limit = String(params.limit);
-    if (params?.offset !== undefined) baseParams.offset = String(params.offset);
-    const qs = "?" + new URLSearchParams(baseParams).toString();
+    if (params?.limit !== undefined) baseParams.limit = params.limit;
+    if (params?.offset !== undefined) baseParams.offset = params.offset;
+    const qs = buildQueryString(baseParams);
     return request<{ items: SanitizedReviewItem[]; total: number; nextCursor: number | null }>(`/reviews${qs}`);
   },
 
@@ -1498,34 +1405,9 @@ return request<{ items: SearchResult[]; total: number; nextCursor: number | null
     cursor?: string;
     reviewScheduleId?: string;
   }) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, v]) => v !== undefined)
-            .map(([k, v]) => [k, String(v)]) as [string, string][],
-        ).toString()
-      : "";
+    const qs = buildQueryString(params);
 return request<ReviewAttemptHistoryResult>(`/reviews/attempts/history${qs}`);
 },
-
-/* review attempt active query (V05-RISK-04) */
-getActiveReviewAttempt: (reviewScheduleId: string) =>
-request<{ activeAttempt: {
-attemptId: string;
-reviewScheduleId: string;
-subjectType: string;
-subjectId: string;
-status: string;
-startedAt: string;
-idempotencyKey: string;
-} | null }>(`/reviews/attempts/active?reviewScheduleId=${reviewScheduleId}`),
-
-/* review attempt abandon (V05-RISK-04) */
-abandonReviewAttempt: (attemptId: string) =>
-request<{ attemptId: string; status: string; abandonedAt: string }>(`/reviews/attempts/${attemptId}/abandon`, {
-method: "POST",
-}),
 
   /* benchmark (§2.1) */
   runBenchmark: () =>
@@ -1581,14 +1463,7 @@ createdAt: string;
 }>("/invites", { method: "POST", body: JSON.stringify(params) }),
 
   listInvites: (params?: { limit?: number; offset?: number }) => {
-    const qs = params
-      ? "?" +
-        new URLSearchParams(
-          Object.entries(params)
-            .filter(([, v]) => v !== undefined)
-            .map(([k, v]) => [k, String(v)]) as [string, string][],
-        ).toString()
-      : "";
+    const qs = buildQueryString(params);
     return request<{
       items: Array<{
         id: string;
@@ -1626,17 +1501,6 @@ createdAt: string;
   removeMember: (userId: string) =>
     request<{ ok: boolean }>(`/members/${userId}`, { method: "DELETE" }),
 
-  /* SEC-02 / ALPHA-01: Onboarding 状态 */
-  getOnboardingState: () =>
-    request<{
-      id: string;
-      workspaceId: string;
-      userId: string;
-      version: string;
-      steps: Record<string, boolean>;
-      status: string;
-    }>("/onboarding/state"),
-
   markOnboardingStep: (step: "evidence_review", evidenceId: string) =>
     request<{ ok: boolean }>("/onboarding/steps", {
       method: "POST",
@@ -1646,31 +1510,6 @@ createdAt: string;
       keepalive: true,
       body: JSON.stringify({ step, completed: true, evidenceId }),
     }),
-
-/* SEC-02 / ALPHA-01: v0.5 邀请注册 */
-registerWithInviteToken: (params: {
-email: string;
-password: string;
-inviteToken: string;
-displayName?: string;
-avatarUrl?: string;
-}) =>
-request<AuthResponse>("/auth/register-v2", {
-method: "POST",
-body: JSON.stringify(params),
-}),
-
-/* ADR-0009: 无邀请码注册 — 只创建个人工作区 */
-registerPersonal: (params: {
-email: string;
-password: string;
-displayName?: string;
-avatarUrl?: string;
-}) =>
-request<AuthResponse>("/auth/register-personal", {
-method: "POST",
-body: JSON.stringify(params),
-}),
 
 /* PROFILE-01 / ADR-0009: 统一注册端点（有/无邀请码均可） */
 register: (params: {
@@ -1766,8 +1605,6 @@ formData.append("file", file);
 // BUG-15 修复：使用 requestResponse 包装器，统一 401 处理和错误解析
 // QUAL-22 修复：使用共享的 buildCsrfHeaders 函数，统一 CSRF header 注入逻辑
 const headers = buildCsrfHeaders();
-const token = getToken();
-if (token) headers["Authorization"] = `Bearer ${token}`;
 // 上传加 60s 超时（大头像/慢网络时避免无限挂起）；超时后中止请求
 const controller = new AbortController();
 const uploadTimeout = window.setTimeout(() => controller.abort(), 60_000);

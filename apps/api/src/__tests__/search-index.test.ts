@@ -117,7 +117,7 @@ test("upsertSearchDocument 对缺失 metadata 使用空对象", async () => {
   await upsertSearchDocument(
     {
       workspaceId: "ws-1",
-      objectType: "card",
+      objectType: "note",
       objectId: "obj-2",
       title: "Title",
       body: "Body",
@@ -168,7 +168,7 @@ test("upsertSearchDocument 失败时返回 false 而非抛异常（F-025）", as
 
 test("upsertSearchDocument 对所有 objectType 类型都能正常工作", async () => {
   const { db } = createSuccessMockDb();
-  for (const objectType of ["note", "card_set", "card", "source", "evidence"] as const) {
+  for (const objectType of ["note", "source"] as const) {
     const result = await upsertSearchDocument(
       {
         workspaceId: "ws-1",

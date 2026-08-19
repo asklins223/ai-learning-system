@@ -25,8 +25,8 @@
  * COMMIT/repository 接入，本模块只提供端口契约与内存实现。
  */
 
-import { createHash } from "node:crypto";
-import { TrustClass } from "@ailearn/shared";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError, TrustClass } from "@ailearn/shared";
 import {
   computeDisclosureProfileHash,
   SceneMode,
@@ -58,12 +58,9 @@ export type NoActivateActor = (typeof NO_ACTIVATE_ACTOR_IDS)[number];
 /** 唯一授权 actor：deterministic Scene Activation Service（03-4 网关角色）。 */
 export const ACTIVATION_AUTHORIZED_ACTOR = "scene_activation" as const;
 
-export class SceneActivationError extends Error {
-  readonly code: string;
+export class SceneActivationError extends DomainError {
   constructor(code: string, message: string) {
-    super(message);
-    this.name = "SceneActivationError";
-    this.code = code;
+    super({ name: "SceneActivationError", code, message, statusCode: 500 });
   }
 }
 
@@ -250,13 +247,6 @@ function stableStringify(value: unknown): string {
     pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
   }
   return `{${pairs.join(",")}}`;
-}
-
-function sha256Hex(data: string): string {
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(data, "utf8");
-  return hash.digest("hex");
 }
 
 /** 计算 activation nonce（exactly-once；同冻结输入恒等）。 */

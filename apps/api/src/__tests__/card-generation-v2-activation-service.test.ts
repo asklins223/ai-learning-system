@@ -812,8 +812,7 @@ describe("activateCardCandidatesV2 — target_equivalent_update", () => {
   it("P8: throws stale_target_revision when targetRevisionHash mismatch (not semanticTargetFingerprint)", async () => {
     const objective = makeObjective({ currentRevision: 1, currentObjectiveRevisionId: OBJECTIVE_REVISION_ID });
     const { setupFlexibleTx: _st } = { setupFlexibleTx };
-    void _st;
-    let selectCount = 0;
+        let selectCount = 0;
     setupTx({
       select: (columns?: unknown) => ({
         from: (table: unknown) => {

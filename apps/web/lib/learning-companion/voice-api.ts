@@ -35,7 +35,6 @@ import {
   ApiError,
   API_URL,
   getCsrfToken,
-  getToken,
 } from "@/lib/api";
 import type { VoicePayload } from "@ailearn/shared";
 
@@ -198,8 +197,6 @@ async function voiceRequest<T>(
     headers.set("Content-Type", "application/json");
     body = JSON.stringify({ ...options.json, ...obligations });
   }
-  const token = getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   const csrf = getCsrfToken();
   if (csrf) headers.set("x-csrf-token", csrf);
   const res = await fetch(`${API_URL}${VOICE_BASE_PATH}/${action}`, {
@@ -253,8 +250,6 @@ export async function transcribePlain(
   if (opts.language) form.append("language", opts.language);
   form.append("file", audio, opts.filename ?? "audio-upload.mp3");
   const headers = new Headers();
-  const token = getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   const csrf = getCsrfToken();
   if (csrf) headers.set("x-csrf-token", csrf);
   const res = await fetch(`${API_URL}${VOICE_BASE_PATH}/transcribe`, {

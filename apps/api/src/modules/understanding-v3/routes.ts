@@ -26,10 +26,4 @@ export async function understandingTopologyV3Routes(app: FastifyInstance) {
     return snapshot;
   });
 
-  app.get("/v3/understanding/topology/deltas/:changeSetId", async (_req, reply) => {
-    return reply.code(501).send({
-      error: "change_set_deltas_not_implemented",
-      note: "W4 后续：基于 change set 物化的增量拓扑（不伪造空结果）",
-    });
-  });
 }

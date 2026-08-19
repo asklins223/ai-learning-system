@@ -70,8 +70,7 @@ export function entityLookupKey(ref: EntityRefV2): { table: string; id: string }
     case "note": return { table: "notes", id: ref.noteId };
     // V1 卡/卡组/要点表已随旧栈退役：card→V2 卡表；key_point→objective（alias）；
     // card_set 无 V2 等价物 → 不支持（fail soft，不查询已删表）。
-    case "card_set": return null;
-    case "card": return { table: "learning_cards_v2", id: ref.cardId };
+        case "card": return { table: "learning_cards_v2", id: ref.cardId };
     case "key_point": return { table: "learning_objectives_v2", id: ref.keyPointId };
     case "evidence": return { table: "evidences", id: ref.evidenceId };
     case "review_schedule": return { table: "review_schedules", id: ref.scheduleId };
@@ -81,6 +80,7 @@ export function entityLookupKey(ref: EntityRefV2): { table: string; id: string }
     case "assistant_session": return { table: "companion_conversations", id: ref.assistantSessionId };
     case "route_plan": return { table: "understanding_route_plans", id: ref.routePlanId };
     case "change_set": return { table: "understanding_change_sets", id: ref.changeSetId };
+    default: return null;
   }
 }
 

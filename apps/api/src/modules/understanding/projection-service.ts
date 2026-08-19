@@ -20,7 +20,7 @@ import {
 import { canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
 import type { CanonicalLearningEventEnvelopeV1 } from "@ailearn/shared";
 import { issueCheckpointToken, parseCheckpointToken } from "./projection-checkpoint.ts";
-import { sha256Hex } from "../learning-runs/run-planner.ts";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 
 export interface ProjectionScope {
   workspaceId: string;

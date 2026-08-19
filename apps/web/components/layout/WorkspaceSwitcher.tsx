@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useState } from "react";
-import { api, setToken, type CurrentUser } from "@/lib/api";
+import { api, clearLegacyTokenStorage, type CurrentUser } from "@/lib/api";
 import { Icon } from "@/components/ui/icons";
 
 interface WorkspaceOption {
@@ -56,8 +56,8 @@ export function WorkspaceSwitcher({ currentUser, onSwitched }: WorkspaceSwitcher
     setSwitching(true);
     setError(null);
     try {
-      const result = await api.switchWorkspace(workspaceId);
-      setToken(result.token);
+      await api.switchWorkspace(workspaceId);
+      clearLegacyTokenStorage();
       setExpanded(false);
       onSwitched?.();
       // 工作区是整个客户端数据树的租户边界。必须硬刷新，避免保留旧工作区的

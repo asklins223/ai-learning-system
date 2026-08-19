@@ -33,7 +33,7 @@ const MIGRATION_SOURCE = readFileSync(
 );
 
 const SHARED_SCHEMA_SOURCE = readFileSync(
-  new URL("../../../../packages/db/src/schema/evidence.ts", import.meta.url),
+  new URL("../db/schema/evidence.ts", import.meta.url),
   "utf8",
 );
 

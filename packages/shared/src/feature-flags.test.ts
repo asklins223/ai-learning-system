@@ -9,7 +9,6 @@ import {
   isRubricEvaluationEnabled,
   getSchedulerPolicyVersion,
   isSchedulerPolicyV2,
-  isCardRepairEnabled,
 } from "./feature-flags.ts";
 import { isFSRSShadowEnabled } from "./fsrs-shadow.ts";
 
@@ -84,53 +83,26 @@ test("RUBRIC_EVALUATION_V1_ENABLED: true when set to 'true'", () => {
   });
 });
 
-// ─── SCHEDULER_POLICY_VERSION ────────────────────────────────────────────
+// ─── SCHEDULER_POLICY_VERSION (retired — always discrete-v2) ───────────
 
-test("SCHEDULER_POLICY_VERSION: defaults to 'discrete-v1' when unset", () => {
+test("SCHEDULER_POLICY_VERSION: always returns 'discrete-v2' when unset", () => {
   withEnv({ SCHEDULER_POLICY_VERSION: undefined }, () => {
-    assert.equal(getSchedulerPolicyVersion(), "discrete-v1");
-    assert.equal(isSchedulerPolicyV2(), false);
-  });
-});
-
-test("SCHEDULER_POLICY_VERSION: 'discrete-v1' when set to 'discrete-v1'", () => {
-  withEnv({ SCHEDULER_POLICY_VERSION: "discrete-v1" }, () => {
-    assert.equal(getSchedulerPolicyVersion(), "discrete-v1");
-    assert.equal(isSchedulerPolicyV2(), false);
-  });
-});
-
-test("SCHEDULER_POLICY_VERSION: 'discrete-v2' when set to 'discrete-v2'", () => {
-  withEnv({ SCHEDULER_POLICY_VERSION: "discrete-v2" }, () => {
     assert.equal(getSchedulerPolicyVersion(), "discrete-v2");
     assert.equal(isSchedulerPolicyV2(), true);
   });
 });
 
-test("SCHEDULER_POLICY_VERSION: defaults to 'discrete-v1' for unknown values", () => {
+test("SCHEDULER_POLICY_VERSION: always returns 'discrete-v2' even when set to 'discrete-v1'", () => {
+  withEnv({ SCHEDULER_POLICY_VERSION: "discrete-v1" }, () => {
+    assert.equal(getSchedulerPolicyVersion(), "discrete-v2");
+    assert.equal(isSchedulerPolicyV2(), true);
+  });
+});
+
+test("SCHEDULER_POLICY_VERSION: always returns 'discrete-v2' for unknown values", () => {
   withEnv({ SCHEDULER_POLICY_VERSION: "unknown" }, () => {
-    assert.equal(getSchedulerPolicyVersion(), "discrete-v1");
-    assert.equal(isSchedulerPolicyV2(), false);
-  });
-});
-
-// ─── CARD_REPAIR_V1_ENABLED ──────────────────────────────────────────────
-
-test("CARD_REPAIR_V1_ENABLED: defaults to false when unset", () => {
-  withEnv({ CARD_REPAIR_V1_ENABLED: undefined }, () => {
-    assert.equal(isCardRepairEnabled(), false);
-  });
-});
-
-test("CARD_REPAIR_V1_ENABLED: true when set to 'true'", () => {
-  withEnv({ CARD_REPAIR_V1_ENABLED: "true" }, () => {
-    assert.equal(isCardRepairEnabled(), true);
-  });
-});
-
-test("CARD_REPAIR_V1_ENABLED: false when set to 'false'", () => {
-  withEnv({ CARD_REPAIR_V1_ENABLED: "false" }, () => {
-    assert.equal(isCardRepairEnabled(), false);
+    assert.equal(getSchedulerPolicyVersion(), "discrete-v2");
+    assert.equal(isSchedulerPolicyV2(), true);
   });
 });
 
@@ -156,14 +128,12 @@ test("Default rollout: all v0.6 flags default off (fail-closed)", () => {
       AI_QUESTION_V1_ENABLED: undefined,
       RUBRIC_EVALUATION_V1_ENABLED: undefined,
       SCHEDULER_POLICY_VERSION: undefined,
-      CARD_REPAIR_V1_ENABLED: undefined,
       FSRS_SHADOW_ENABLED: undefined,
     },
     () => {
       assert.equal(isAIQuestionEnabled(), false);
       assert.equal(isRubricEvaluationEnabled(), false);
-      assert.equal(isSchedulerPolicyV2(), false);
-      assert.equal(isCardRepairEnabled(), false);
+      assert.equal(isSchedulerPolicyV2(), true);
       assert.equal(isFSRSShadowEnabled(), false);
     },
   );

@@ -591,8 +591,4 @@ export type FSRSPromotionStatus = "shadow_only";
  * 回放 Gate 后才能转正（feature-flagged 正式接管）。**Agent 上线不自动授权转正**：
  * agentOnline 参数被显式忽略，返回值恒为 "shadow_only"。
  */
-export function resolveFSRSPromotionStatus(agentOnline: boolean): FSRSPromotionStatus {
-  // Agent 在线状态不影响 FSRS 转正：转正只由独立 Gate 判定（§9）。
-  void agentOnline;
-  return "shadow_only";
-}
+export function resolveFSRSPromotionStatus(): FSRSPromotionStatus { return "shadow_only"; }

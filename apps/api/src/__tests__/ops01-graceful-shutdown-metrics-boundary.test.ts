@@ -20,7 +20,6 @@ import { createGracefulShutdown } from "../lib/graceful-shutdown.ts";
 import {
   registry,
   httpRequestsTotal,
-  jobTerminalTotal,
   statusToClass,
   normalizeRouteTemplate,
   categorizeError,
@@ -300,21 +299,13 @@ describe("OPS-01 DoD: SLO 必需指标暴露", () => {
     assert.match(text, /ailearn_readiness_status/, "应暴露 readiness 状态");
   });
 
-  it("Job 指标全部在 registry 中", async () => {
+  it("Job/Provider 指标在 API registry 中不再注册（由 worker 侧维护）", async () => {
     const text = await getMetricsText();
-    assert.match(text, /ailearn_job_queue_depth/, "应暴露 Job 队列深度");
-    assert.match(text, /ailearn_job_oldest_pending_age_seconds/, "应暴露最老 pending job 年龄");
-    assert.match(text, /ailearn_job_terminal_total/, "应暴露 Job 终态计数");
-    assert.match(text, /ailearn_job_retries_total/, "应暴露 Job 重试计数");
-    assert.match(text, /ailearn_job_lease_lost_total/, "应暴露 Job lease 丢失计数");
-    assert.match(text, /ailearn_job_duration_seconds/, "应暴露 Job 运行时长");
-  });
-
-  it("Provider 指标全部在 registry 中", async () => {
-    const text = await getMetricsText();
-    assert.match(text, /ailearn_provider_calls_total/, "应暴露 Provider 调用计数");
-    assert.match(text, /ailearn_provider_call_duration_seconds/, "应暴露 Provider 调用延迟");
-    assert.match(text, /ailearn_provider_errors_total/, "应暴露 Provider 错误计数");
+    // Job/Provider 指标由 workers/ai-worker 侧维护，API registry 不再暴露
+    assert.doesNotMatch(text, /ailearn_job_queue_depth/);
+    assert.doesNotMatch(text, /ailearn_job_terminal_total/);
+    assert.doesNotMatch(text, /ailearn_provider_calls_total/);
+    assert.doesNotMatch(text, /ailearn_db_last_successful_backup_timestamp/);
   });
 
   it("Database 指标全部在 registry 中", async () => {
@@ -323,7 +314,6 @@ describe("OPS-01 DoD: SLO 必需指标暴露", () => {
     assert.match(text, /ailearn_db_pool_active_connections/, "应暴露连接池活跃连接数");
     assert.match(text, /ailearn_db_transaction_failures_total/, "应暴露事务失败计数");
     assert.match(text, /ailearn_db_rls_denied_total/, "应暴露 RLS 拒绝计数");
-    assert.match(text, /ailearn_db_last_successful_backup_timestamp/, "应暴露最近成功备份时间戳");
   });
 
   it("Funnel 指标在 registry 中", async () => {
@@ -440,7 +430,6 @@ describe("OPS-01 DoD: 指标隐私边界", () => {
   });
 
   it("指标文本不包含 lease token 原始值", async () => {
-    jobTerminalTotal.inc({ type: "execute_card_agent_turn", status: "succeeded" });
     const text = await getMetricsText();
     assert.doesNotMatch(text, /lease_token/i, "不应包含 lease_token 字段名");
     assert.doesNotMatch(
@@ -508,30 +497,6 @@ describe("OPS-01 DoD: 指标隐私边界", () => {
     assert.ok(
       httpCounterSection.includes('labelNames: ["method", "route", "status_class"]'),
       "httpRequestsTotal label 应为 method/route/status_class",
-    );
-  });
-
-  it("Job 终态指标 label 只使用 type/status", () => {
-    const content = readFile("lib/metrics.ts");
-    const jobCounterSection = content.substring(
-      content.indexOf('name: "ailearn_job_terminal_total"'),
-      content.indexOf('registers: [registry],', content.indexOf('name: "ailearn_job_terminal_total"')) + 30,
-    );
-    assert.ok(
-      jobCounterSection.includes('labelNames: ["type", "status"]'),
-      "jobTerminalTotal label 应为 type/status",
-    );
-  });
-
-  it("Provider 调用指标 label 只使用 operation/status", () => {
-    const content = readFile("lib/metrics.ts");
-    const providerCounterSection = content.substring(
-      content.indexOf('name: "ailearn_provider_calls_total"'),
-      content.indexOf('registers: [registry],', content.indexOf('name: "ailearn_provider_calls_total"')) + 30,
-    );
-    assert.ok(
-      providerCounterSection.includes('labelNames: ["operation", "status"]'),
-      "providerCallsTotal label 应为 operation/status",
     );
   });
 

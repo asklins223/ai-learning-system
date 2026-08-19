@@ -86,7 +86,6 @@ class AsrManager {
         // 去掉内部 requestId 字段，保持下游（renderer 严格 schema）校验不变。
         const { requestId: _droppedRequestId, ...payload } =
           (message ?? {}) as { requestId?: number } & Record<string, unknown>;
-        void _droppedRequestId;
         pending.resolve(payload);
       });
       child.on("exit", () => {

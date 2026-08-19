@@ -37,8 +37,8 @@
  *   Artifact，不会自动创建共享边（assertSceneConnectionDoesNotPublishEdge）。
  */
 
-import { createHash } from "node:crypto";
-import { CapabilityFacet } from "@ailearn/shared";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { CapabilityFacet, DomainError } from "@ailearn/shared";
 import { stableStringify } from "./canonical-events.ts";
 
 // ─── 共享知识真值平面 ───────────────────────────────────────────────────────
@@ -126,10 +126,6 @@ export interface SharedTruthPlane {
   edges: Record<string, SharedTruthEdgeState>;
   /** 重放 hash：sha256(nodes, edges, eventTrace) */
   hash: string;
-}
-
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
 }
 
 function publishEventFingerprint(event: SharedPublishEvent): string {
@@ -1056,11 +1052,8 @@ export function assertSceneConnectionDoesNotPublishEdge(
 
 // ─── 错误 ───────────────────────────────────────────────────────────────────
 
-export class StarMapProjectionError extends Error {
-  readonly code: string;
+export class StarMapProjectionError extends DomainError {
   constructor(message: string, code: string) {
-    super(message);
-    this.name = "StarMapProjectionError";
-    this.code = code;
+    super({ name: "StarMapProjectionError", code, message, statusCode: 500 });
   }
 }

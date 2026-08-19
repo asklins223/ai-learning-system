@@ -354,8 +354,7 @@ async function canUpdateVersionInPlace(
     .where(eq(noteVersions.id, versionId))
     .for("update");
   if (versionRows.length === 0) return false;
-  // V1 退役：旧版学习卡 learningCards（V1 表）已删除。原先这里还检查是否有
-  // active/superseded 的 V1 卡引用该版本以决定不可原地更新；V2 卡片通过
+    // active/superseded 的 V1 卡引用该版本以决定不可原地更新；V2 卡片通过
   // objectiveId 关联、不直接引用 note_version，此处仅保留 sealed 版本保护。
   return !versionRows[0].sealedAt;
 }

@@ -26,8 +26,8 @@
  * `import { EpisodeTrustDecision, ReducerResult, ... } from "@ailearn/shared"`。
  */
 
-import { createHash } from "node:crypto";
-import { RubricVerdict, TrustClass } from "@ailearn/shared";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError, RubricVerdict, TrustClass } from "@ailearn/shared";
 
 // ─── 本地契约类型（收口迁移至 @ailearn/shared/learning-trust-contracts）────
 
@@ -100,16 +100,6 @@ function stableStringify(value: unknown): string {
     pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
   }
   return `{${pairs.join(",")}}`;
-}
-
-function sha256Hex(data: string): string {
-  // 注意：不写 createHash 链式方法调用——SEC-01 静态扫描
-  // （sec01-cross-workspace-isolation.test.ts）会把链式 update 调用误判为 DB 写操作；
-  // 本模块是纯函数，无任何 DB 访问。
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(data, "utf8");
-  return hash.digest("hex");
 }
 
 function sortIds(ids: readonly string[]): string[] {
@@ -263,14 +253,12 @@ export const REDUCER_REASON = {
   INVARIANT_VIOLATION: "reducer_invariant_violation",
 } as const;
 
-export class ReducerError extends Error {
-  readonly code: "empty_rubric" | "invalid_verdict" | "invalid_weight" | "no_required_item";
+export class ReducerError extends DomainError {
+  declare readonly code: "empty_rubric" | "invalid_verdict" | "invalid_weight" | "no_required_item";
   constructor(
     code: "empty_rubric" | "invalid_verdict" | "invalid_weight" | "no_required_item",
   ) {
-    super(code);
-    this.name = "ReducerError";
-    this.code = code;
+    super({ name: "ReducerError", code, message: code, statusCode: 500 });
   }
 }
 

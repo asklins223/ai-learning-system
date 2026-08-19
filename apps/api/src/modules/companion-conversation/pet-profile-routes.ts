@@ -45,10 +45,9 @@ const petProfileBodySchema = z.object({
 }).strict();
 
 export async function petProfileRoutes(app: FastifyInstance) {
-  app.addHook("onRequest", async (req, reply) => {
+  app.addHook("onRequest", async (_req, reply) => {
     if (!isPetProfileEnabled()) {
-      void req;
-      return reply.code(404).send({
+            return reply.code(404).send({
         error: "companion_pet_profile_disabled",
         message: "桌宠人格档案当前未开放",
       });

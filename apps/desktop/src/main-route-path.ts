@@ -16,14 +16,12 @@ export function currentMainRoute(route: AllowedMainRouteV1): string {
     case "review":
       return "/review";
     case "card":
-      // V2：旧 /cards/:id 详情页已退役，学习卡详情在 /learning-cards/:cardId。
-      return `/learning-cards/${encodeURIComponent(route.cardId)}`;
+            return `/learning-cards/${encodeURIComponent(route.cardId)}`;
     case "star_map":
       return route.keyPointId
         ? `/graph?targetNodeId=${encodeURIComponent(route.keyPointId)}`
         : "/graph";
     case "learning_session":
-      // V1 卡片 companion session 已退役：回到 V2 学习卡页。
-      return `/learning-cards/${encodeURIComponent(route.cardId)}`;
+            return `/learning-cards/${encodeURIComponent(route.cardId)}`;
   }
 }

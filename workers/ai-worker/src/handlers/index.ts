@@ -1,6 +1,3 @@
-// V1 evaluate_validation handler and all V1 learning card logic removed.
-// This file previously contained the runEvaluateValidation handler which
-// depended on the deleted learning_cards / card_key_points tables.
 // Remaining handlers (parse_source, companion_*) live in their own files.
 
 export interface JobPayload {

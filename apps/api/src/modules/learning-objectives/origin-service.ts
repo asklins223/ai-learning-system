@@ -11,6 +11,7 @@
 import { and, eq, asc } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
+import { DomainError } from "@ailearn/shared";
 import {
   learningObjectiveOriginsV2,
   learningObjectiveRevisionsV2,
@@ -34,25 +35,24 @@ export interface OriginWriteInput {
   sourceSnapshotId?: string | null;
   evidenceSnapshotIds?: string[];
   importBatchRef?: string | null;
-  legacyCardId?: string | null;
-  legacyKeyPointId?: string | null;
   integrity?: "verified" | "legacy_unreviewed";
   provenance?: Record<string, unknown>;
 }
 
-export class OriginValidationError extends Error {
+export class OriginValidationError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "OriginValidationError";
+    super({ name: "OriginValidationError", code: "origin_validation_error", message, statusCode: 500 });
   }
 }
 
-export class ObjectiveRevisionNotFoundError extends Error {
+export class ObjectiveRevisionNotFoundError extends DomainError {
   constructor(objectiveRevisionId: string, workspaceId: string) {
-    super(
-      "objective revision " + objectiveRevisionId + " does not exist in workspace " + workspaceId,
-    );
-    this.name = "ObjectiveRevisionNotFoundError";
+    super({
+      name: "ObjectiveRevisionNotFoundError",
+      code: "objective_revision_not_found",
+      message: "objective revision " + objectiveRevisionId + " does not exist in workspace " + workspaceId,
+      statusCode: 404,
+    });
   }
 }
 
@@ -78,13 +78,8 @@ function buildRow(
     }
     wireInput.importBatchRef = input.importBatchRef;
   }
-  if (input.kind === "legacy_migrated") {
-    if (!input.legacyKeyPointId) {
-      throw new OriginValidationError("legacy_migrated origin requires legacyKeyPointId");
-    }
-    wireInput.legacyCardId = input.legacyCardId ?? null;
-    wireInput.legacyKeyPointId = input.legacyKeyPointId;
-  }
+  // legacy_migrated kind 只从读取路径（rowToWire）处理已有 DB 行；
+  // 写入路径不再支持创建新的 legacy_migrated origin。
   const wire = objectiveOriginV3Schema.parse(wireInput);
   return {
     wire,
@@ -99,8 +94,6 @@ function buildRow(
       sourceSnapshotId: wire.sourceSnapshotId,
       evidenceSnapshotIds: wire.evidenceSnapshotIds,
       importBatchRef: wire.kind === "imported" ? wire.importBatchRef : null,
-      legacyCardId: wire.kind === "legacy_migrated" ? wire.legacyCardId : null,
-      legacyKeyPointId: wire.kind === "legacy_migrated" ? wire.legacyKeyPointId : null,
       integrity: wire.integrity,
       provenance: (input.provenance ?? {}) as never,
     },
@@ -305,8 +298,6 @@ export async function copyOriginsToRevision(
       sourceSnapshotId: wire.sourceSnapshotId,
       evidenceSnapshotIds: wire.evidenceSnapshotIds,
       importBatchRef: wire.kind === "imported" ? wire.importBatchRef : null,
-      legacyCardId: wire.kind === "legacy_migrated" ? wire.legacyCardId : null,
-      legacyKeyPointId: wire.kind === "legacy_migrated" ? wire.legacyKeyPointId : null,
       integrity: wire.integrity,
     });
     if (created) copied += 1;

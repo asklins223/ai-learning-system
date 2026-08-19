@@ -61,8 +61,6 @@ export interface MemoryItemV2 {
 }
 
 /** 兼容旧名：现有调用方仍可用 MemoryItemV1 指代扩展后的 V2 形状。 */
-export type MemoryItemV1 = MemoryItemV2;
-
 /** 简单冲突检测：与新记忆相似度 > 0.85 的活跃记忆归入同一 conflict_group。 */
 async function markMemoryConflictIfSimilar(
   executor: ApiTransaction,

@@ -20,7 +20,7 @@
  * validation/review 权威表；本模块不写掌握/schedule 直接真值。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import { like } from "drizzle-orm";
 import { validationEvents, reviewAttempts } from "../../db/schema/index.ts";
 import type { ApiTransaction } from "../../db/client.ts";
@@ -483,10 +483,6 @@ export function canonicalCompatibilityCheck(
 }
 
 // ─── 工具 ───────────────────────────────────────────────────────────────
-
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
-}
 
 function firstString(obj: Record<string, unknown>, keys: string[]): string | undefined {
   for (const key of keys) {

@@ -80,29 +80,9 @@ export function normalizeWorkspaceAIPolicy(value: unknown): WorkspaceAIPolicy {
 }
 
 /**
- * N-011: 检查工作区是否已签署 AI 同意。
- * mock provider 豁免 — 不需要同意即可使用。
- * 其他 provider 需要已签署同意（aiConsentVersion 非空且 aiConsentAt 非空）。
- *
- * @deprecated 使用 resolveAIGovernanceContext 替代。该函数会独立查询 workspaces 表，
- * 与 resolveAIGovernanceContext 中的 workspace 查询重复。调用方应先调用
- * resolveAIGovernanceContext 获取 consentOk 字段，避免冗余 DB 查询。
- */
-export async function checkAIConsent(workspaceId: string, providerName: string): Promise<boolean> {
-  // mock provider 不需要 AI 同意，始终放行
-  if (providerName.toLowerCase() === "mock") return true;
-  const ws = await db.query.workspaces.findFirst({
-    where: eq(schema.workspaces.id, workspaceId),
-  });
-  if (!ws) return false;
-  // 其他 provider 需要已签署同意
-  return ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
-}
-
-/**
- * 一次性解析 AI 调用所需的全部治理上下文：provider 选择 + consent + policy。
- * 这消除了 checkAIConsent + enforcePrivacyGovernance + resolveProviderSelection
- * 中对 workspaces 表的重复查询（原先最多查 3 次，现在只查 1 次）。
+ * N-011: 一次性解析 AI 调用所需的全部治理上下文：provider 选择 + consent + policy。
+ * This eliminates the redundant workspaces table queries that the
+ * previously separate consent/policy/provider resolution steps required.
  *
  * v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
  * 不再查 personal BYOK 或 workspace.aiProvider。每个 capability 直接从
@@ -225,12 +205,11 @@ export function resolveProviderConfigForName(providerName: string): import("./ai
 
 export async function resolveAIGovernanceContext(
   workspaceId: string,
-  userId: string | null,
+  _userId: string | null,
 ): Promise<AIGovernanceContext> {
   // v0.6 单一配置源重构：不再查 personal BYOK，平台解析完全收敛到
   // config/ai-platforms.json。仍查 workspaces 获取 policy/consent。
-  void userId; // userId no longer used for BYOK lookup
-  const ws = await db.query.workspaces.findFirst({
+    const ws = await db.query.workspaces.findFirst({
     where: eq(schema.workspaces.id, workspaceId),
   });
 
@@ -487,33 +466,6 @@ export function sanitizePIIInObject<T>(obj: T): { data: T; detectedTypes: string
   }
 
   return { data: sanitizeValue(obj) as T, detectedTypes: Array.from(allDetectedTypes) };
-}
-
-/**
- * N-011: 执行完整的隐私治理检查。
- * 返回通过/拒绝结果，以及脱敏后的数据（如果需要脱敏）。
- *
- * BUG-60 修复：标记为 @deprecated。此函数内部会独立查询 workspaces 表
- * 获取 AI policy，产生冗余 DB 查询。调用方应先调用 resolveAIGovernanceContext
- * 获取 policy，再使用 enforcePrivacyGovernanceWithPolicy 执行检查，
- * 避免重复查询。
- *
- * @deprecated 使用 enforcePrivacyGovernanceWithPolicy 替代，配合 resolveAIGovernanceContext。
- */
-/** @deprecated 使用 enforcePrivacyGovernanceWithPolicy 替代 */
-export async function enforcePrivacyGovernance(
-  workspaceId: string,
-  dataCategories: string[],
-  data: Record<string, unknown>,
-  providerName: string,
-): Promise<{
-  allowed: boolean;
-  reason?: string;
-  sanitizedData: Record<string, unknown>;
-  piiDetectedTypes: string[];
-}> {
-  const policy = await getWorkspaceAIPolicy(workspaceId);
-  return enforcePrivacyGovernanceWithPolicy(policy, workspaceId, dataCategories, data, providerName);
 }
 
 /**

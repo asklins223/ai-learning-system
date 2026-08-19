@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, setToken, type CurrentUser } from "@/lib/api";
+import { api, clearLegacyTokenStorage, type CurrentUser } from "@/lib/api";
 import { Icon } from "@/components/ui/icons";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
@@ -105,7 +105,7 @@ export function WorkspaceManagement({ currentUser }: { currentUser: CurrentUser 
       const result = await api.leaveWorkspace({ workspaceId: leaveTarget.workspaceId });
       setLeaveTarget(null);
       if (result.switchedToPersonalWorkspace) {
-        setToken(result.token);
+        clearLegacyTokenStorage();
         // 退出后自动切换回个人工作区，同样需要硬刷新。
         window.location.hash = "workspaces";
         window.location.reload();
@@ -124,8 +124,8 @@ export function WorkspaceManagement({ currentUser }: { currentUser: CurrentUser 
     setSwitchingId(workspaceId);
     setError(null);
     try {
-      const result = await api.switchWorkspace(workspaceId);
-      setToken(result.token);
+      await api.switchWorkspace(workspaceId);
+      clearLegacyTokenStorage();
       // 工作区是整个客户端数据树的租户边界。必须硬刷新，避免保留旧工作区的
       // client state / request cache 后又把写操作发送到新工作区。
       // 使用 reload() 而非 assign()，因为用户已在 /settings 页面，

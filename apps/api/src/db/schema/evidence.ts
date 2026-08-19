@@ -20,15 +20,13 @@ export const evidences = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
-    // V1 keyPointId reference removed
-    blockId: uuid("block_id").references(() => noteBlocks.id, { onDelete: "set null" }),
+        blockId: uuid("block_id").references(() => noteBlocks.id, { onDelete: "set null" }),
     blockOrdinal: integer("block_ordinal"),
     quoteText: text("quote_text").notNull(),
     alignment: evidenceAlignmentEnum("alignment").notNull().default("unaligned"),
     alignmentScore: integer("alignment_score").notNull().default(0), // store 0-100
     alignmentMethod: text("alignment_method").notNull().default("fuzzy"), // embedding | fuzzy | exact | manual
-    // V1 evidenceSpanId reference removed
-    sourceKind: text("source_kind"),
+        sourceKind: text("source_kind"),
     charStart: integer("char_start"),
     charEnd: integer("char_end"),
     sourceHash: text("source_hash"),
@@ -39,8 +37,7 @@ export const evidences = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // V1 keyPointIdx removed
-    blockIdx: index("evidences_block_idx").on(t.blockId),
+        blockIdx: index("evidences_block_idx").on(t.blockId),
     workspaceIdx: index("evidences_workspace_idx").on(t.workspaceId),
     // V1 evidenceSpanIdx and imageEvidenceIdx removed
 
@@ -79,8 +76,7 @@ export const validationQuestions = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
-    // V1 card/keyPoint references removed
-    noteVersionId: uuid("note_version_id"),
+        noteVersionId: uuid("note_version_id"),
     questionType: text("question_type").notNull(), // explain | example | apply
     question: text("question").notNull(),
     createdBy: uuid("created_by").notNull().references(() => users.id),
@@ -117,8 +113,7 @@ export const validationEvents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    // V1 card/keyPoint references removed
-    artifactId: uuid("artifact_id").references(() => aiArtifacts.id, { onDelete: "set null" }),
+        artifactId: uuid("artifact_id").references(() => aiArtifacts.id, { onDelete: "set null" }),
     question: text("question").notNull(),
     questionType: text("question_type").notNull(), // explain | example | apply
     userAnswer: text("user_answer").notNull(),

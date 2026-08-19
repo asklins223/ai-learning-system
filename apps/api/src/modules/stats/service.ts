@@ -9,10 +9,7 @@ export interface StatsOverview {
   noteCount: number;
   cardCount: number;
   activeCardCount: number;
-  misunderstandingCount: number;
-  unclearCount: number;
   evidenceCount: number;
-  pendingEvidenceCount: number;
   pendingReviewCount: number;
   hardEvidenceCount: number;
   /** R#6-5：降级标志——true 表示 activeCardCount 超过 STATS_ACTIVE_CARDS_MAX，
@@ -107,10 +104,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
       noteCount,
       cardCount,
       activeCardCount: 0,
-      misunderstandingCount: 0,
-      unclearCount: 0,
       evidenceCount: 0,
-      pendingEvidenceCount: 0,
       pendingReviewCount: 0,
       hardEvidenceCount: 0,
       // R#6-5：无活跃卡 → 无降级。
@@ -120,8 +114,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     };
   }
 
-  // V2-only stats: since V1 tables removed, only count V2 objective evidence bindings.
-  const capped = activeCardCount > STATS_ACTIVE_CARDS_MAX;
+    const capped = activeCardCount > STATS_ACTIVE_CARDS_MAX;
 
   // V2 学习卡绑定的 evidence 计数
   const v2BindingRows = v2ActiveCardCount > 0
@@ -173,11 +166,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
     noteCount,
     cardCount,
     activeCardCount,
-    // V1 validation 统计已移除（V1 validation_events.cardId 不再可用）
-    misunderstandingCount: 0,
-    unclearCount: 0,
-    evidenceCount: v2HardEvidenceCount,
-    pendingEvidenceCount: 0,
+        evidenceCount: v2HardEvidenceCount,
     pendingReviewCount,
     hardEvidenceCount: v2HardEvidenceCount,
     capped,

@@ -47,7 +47,7 @@ import { backfillPresentationHistory } from "./run-service.ts";
 import { insertLearningMetricEvent } from "../observability/learning-metrics.ts";
 import { learningMetricEvents } from "../../db/schema/learning-metrics.ts";
 import type { CanonicalLearningEventEnvelopeV1, LearningRunResultV1, LearningRunReturnTargetV1, SchedulingAuthorizationV1 } from "@ailearn/shared";
-import { sha256Hex } from "./run-planner.ts";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import {
   CriticOutputError,
   CriticUnavailableError,
@@ -853,8 +853,7 @@ async function finishStructuredAssessment(
     .from(learningRuns)
     .where(eq(learningRuns.id, command.runId))
     .limit(1))[0];
-  // V1 keyPointId 列已退役：从 origin JSONB 取 objective alias。
-  const keyPointId = originObjectiveId(runRow?.origin);
+    const keyPointId = originObjectiveId(runRow?.origin);
   const practiceEventId = `practice:${sha256Hex(`${command.runId}:structured`).slice(0, 24)}`;
   await tx.insert(practiceTrailEventOutbox).values({
     practiceEventId,
@@ -1096,8 +1095,7 @@ async function processCommitCommand(
   const at = new Date();
   const authorization = contract.schedulingAuthorization as SchedulingAuthorizationV1;
   const isV2Run = Boolean(contract.snapshotHash);
-  // V1 keyPointId 列已退役：objective 身份从 run.origin 取（§29.4 alias）。
-  const objectiveId = originObjectiveId(run.origin);
+    const objectiveId = originObjectiveId(run.origin);
   // facet_evidence（partial 结算）按同一授权路径消费/创建 schedule——
   // §6.4：partial 允许写 facet，调度授权不因部分覆盖而作废。
   const scheduleImpact = isCanonicalEvidence
@@ -1159,8 +1157,7 @@ async function processCommitCommand(
     workspaceId: command.workspaceId,
     userId: command.userId,
     runId: command.runId,
-    // V1 keyPointId 列已退役；objective 身份经 runId+snapshot 关联。
-    envelope: envelope as never,
+        envelope: envelope as never,
     status: "pending",
     createdAt: at,
   });
@@ -1315,8 +1312,7 @@ async function finishSandboxCommit(
     .from(learningRuns)
     .where(eq(learningRuns.id, command.runId))
     .limit(1);
-  // V1 keyPointId 列已退役：从 origin JSONB 取 objective alias。
-  const keyPointId = originObjectiveId(runRows[0]?.origin);
+    const keyPointId = originObjectiveId(runRows[0]?.origin);
   await tx.insert(practiceTrailEventOutbox).values({
     practiceEventId,
     workspaceId: command.workspaceId,

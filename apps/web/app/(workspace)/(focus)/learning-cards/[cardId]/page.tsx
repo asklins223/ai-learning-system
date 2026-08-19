@@ -112,12 +112,7 @@ export default function LearningObjectiveDetailPage(): JSX.Element {
           if (cancelled) return;
           setLoad({
             status: "error",
-            message:
-              resolution.status === "forbidden"
-                ? "这是一个隐藏的兼容引用，请从学习目标库进入。"
-                : resolution.status === "ambiguous"
-                  ? "这张旧卡包含多个学习目标，请从学习目标库选择。"
-                  : "目标不存在或已迁移，请从学习目标库重新进入。",
+            message: "目标不存在或已迁移，请从学习目标库重新进入。",
           });
           return;
         }

@@ -77,8 +77,7 @@ export const validationSubmissions = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    // V1 card/keyPoint references removed
-    questionId: uuid("question_id"), // nullable until ready/answer_saved
+        questionId: uuid("question_id"), // nullable until ready/answer_saved
     context: text("context").notNull(), // initial_validation | review
     reviewAttemptId: uuid("review_attempt_id"), // review context only
     inputScheduleId: uuid("input_schedule_id"), // review context only
@@ -108,8 +107,7 @@ export const validationSubmissions = pgTable(
     ),
     reviewAttemptIdx: index("val_submissions_review_attempt_idx").on(t.reviewAttemptId),
     statusIdx: index("val_submissions_status_idx").on(t.workspaceId, t.userId, t.status),
-    // V1 keyPoint-based unique index removed
-  }),
+      }),
 );
 
 // ─── §6.4 validation_submission_jobs ──────────────────────────────────────

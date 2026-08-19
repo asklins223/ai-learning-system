@@ -17,19 +17,16 @@
  * - 0 掌握/schedule 写入（评估与 Commit 属后续步骤）。
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError } from "@ailearn/shared";
 import { sql } from "drizzle-orm";
 
 // ─── 错误 ────────────────────────────────────────────────────────────────
 
-export class AnswerSubmissionError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
+export class AnswerSubmissionError extends DomainError {
   constructor(code: string, message: string, statusCode = 400) {
-    super(message);
-    this.name = "AnswerSubmissionError";
-    this.code = code;
-    this.statusCode = statusCode;
+    super({ name: "AnswerSubmissionError", code, message, statusCode });
   }
 }
 
@@ -37,18 +34,12 @@ export class AnswerSubmissionError extends Error {
 
 /** 回答内容确定性 hash（§13.2：内容 hash 以服务端计算为准） */
 export function computeAnswerContentHash(text: string): string {
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(`answer-v1:${text}`);
-  return `sha256:${hash.digest("hex")}`;
+  return `sha256:${sha256Hex(`answer-v1:${text}`)}`;
 }
 
 /** probe 确定性 hash（security_review MEDIUM 修复：纯 hex 与 session-service sha256Hex 完全一致） */
 export function frozenProbeHashForKey(keyPointId: string, contentExposureKey: string): string {
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(`probe:${keyPointId}:0:${contentExposureKey}`);
-  return hash.digest("hex");
+  return sha256Hex(`probe:${keyPointId}:0:${contentExposureKey}`);
 }
 
 // ─── 输入/输出类型 ───────────────────────────────────────────────────────

@@ -579,7 +579,7 @@ describe("deriveOfficialDecision（PREPARE 冻结）", () => {
 
 describe("FSRS 转正（§9）", () => {
   it("Agent 上线不自动授权 FSRS 转正：恒为 shadow_only", () => {
-    assert.equal(resolveFSRSPromotionStatus(true), "shadow_only");
-    assert.equal(resolveFSRSPromotionStatus(false), "shadow_only");
+    assert.equal(resolveFSRSPromotionStatus(), "shadow_only");
+    assert.equal(resolveFSRSPromotionStatus(), "shadow_only");
   });
 });

@@ -42,13 +42,12 @@ export interface OpenAiCompatibleAsrResult {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-export class OpenAiCompatibleError extends Error {
-  readonly code: string;
+import { DomainError } from "@ailearn/shared";
+
+export class OpenAiCompatibleError extends DomainError {
   readonly status?: number;
   constructor(code: string, message: string, status?: number) {
-    super(message);
-    this.name = "OpenAiCompatibleError";
-    this.code = code;
+    super({ name: "OpenAiCompatibleError", code, message, statusCode: status });
     this.status = status;
   }
 }

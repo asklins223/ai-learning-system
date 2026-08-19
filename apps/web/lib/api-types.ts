@@ -814,10 +814,7 @@ export interface StatsOverview {
   noteCount: number;
   cardCount: number;
   activeCardCount: number;
-  misunderstandingCount: number;
-  unclearCount: number;
   evidenceCount: number;
-  pendingEvidenceCount: number;
   pendingReviewCount: number;
   hardEvidenceCount: number;
 }

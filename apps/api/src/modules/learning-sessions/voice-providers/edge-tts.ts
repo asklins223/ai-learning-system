@@ -12,6 +12,8 @@
  *   容器内 server.py 合成 zh-CN-XiaoxiaoNeural → audio/mpeg mp3 字节。
  */
 
+import { DomainError } from "@ailearn/shared";
+
 export interface EdgeTtsProviderOptions {
   /** 容器地址（缺省 http://edge-tts:8080） */
   baseUrl?: string;
@@ -39,13 +41,10 @@ const DEFAULT_BASE_URL = "http://edge-tts:8080";
 const DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-export class EdgeTtsError extends Error {
-  readonly code: string;
+export class EdgeTtsError extends DomainError {
   readonly status?: number;
   constructor(code: string, message: string, status?: number) {
-    super(message);
-    this.name = "EdgeTtsError";
-    this.code = code;
+    super({ name: "EdgeTtsError", code, message, statusCode: status });
     this.status = status;
   }
 }
@@ -93,8 +92,7 @@ export async function edgeTtsSynthesize(
   } catch (err) {
     // 不把 err.message / EDGE_TTS_BASE_URL / docker 配置提示透出（security_review MEDIUM
     // 延续：内部配置不进入客户端可见 message；排查细节应进服务端日志，不进响应体）。
-    void err;
-    throw new EdgeTtsError(
+        throw new EdgeTtsError(
       "NETWORK_ERROR",
       "语音合成服务暂时不可达（edge-tts 网络错误）",
     );
@@ -164,8 +162,7 @@ export async function edgeTtsSynthesizeStream(
       signal: controller.signal,
     });
   } catch (err) {
-    void err;
-    throw new EdgeTtsError(
+        throw new EdgeTtsError(
       "NETWORK_ERROR",
       "语音合成服务暂时不可达（edge-tts 网络错误）",
     );

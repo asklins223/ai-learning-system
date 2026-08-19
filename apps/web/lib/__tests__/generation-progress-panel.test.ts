@@ -115,7 +115,6 @@ describe("生成工作台：废弃字段红线", () => {
   it("不读取旧计数器或 raw payload", () => {
     assert.ok(!overlaySource.includes("oldCompleted"));
     assert.ok(!overlaySource.includes("oldTotal"));
-    assert.ok(!overlaySource.includes("deprecatedProgress"));
-    assert.ok(!overlaySource.includes("safePayload"));
+        assert.ok(!overlaySource.includes("safePayload"));
   });
 });

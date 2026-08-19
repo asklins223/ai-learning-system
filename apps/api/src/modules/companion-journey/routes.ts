@@ -35,10 +35,9 @@ function isCompanionJourneyV2Enabled(): boolean {
 const journeyParamsSchema = z.object({ journeyId: z.string().uuid() });
 
 export async function companionJourneyRoutes(app: FastifyInstance) {
-  app.addHook("onRequest", async (req, reply) => {
+  app.addHook("onRequest", async (_req, reply) => {
     if (!isCompanionJourneyV2Enabled()) {
-      void req;
-      return reply.code(404).send({
+            return reply.code(404).send({
         error: "companion_journey_v2_disabled",
         message: "新手旅程当前未开放",
       });

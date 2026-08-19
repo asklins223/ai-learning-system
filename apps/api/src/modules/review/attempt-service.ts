@@ -22,7 +22,7 @@ import {
 } from "../../db/schema/evidence.ts";
 import { validationActionCommands } from "../../db/schema/index.ts";
 import { learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
-import { ReviewStatus } from "@ailearn/shared";
+import { DomainError, ReviewStatus } from "@ailearn/shared";
 import {
   REVIEW_ATTEMPT_LATER_REASON,
   type ReviewAttemptStartInput,
@@ -50,15 +50,10 @@ export type ReviewAttemptErrorCode =
   | "key_point_not_found"
   | "idempotency_key_reused";
 
-export class ReviewAttemptError extends Error {
-  readonly code: ReviewAttemptErrorCode;
-  readonly statusCode: number;
+export class ReviewAttemptError extends DomainError {
 
   constructor(code: ReviewAttemptErrorCode) {
-    super(code);
-    this.name = "ReviewAttemptError";
-    this.code = code;
-    this.statusCode = code === "schedule_not_found"
+    const statusCode = code === "schedule_not_found"
       || code === "attempt_not_found"
       || code === "card_not_found"
       || code === "key_point_not_found"
@@ -70,6 +65,7 @@ export class ReviewAttemptError extends Error {
           || code === "idempotency_key_reused"
         ? 409
         : 410;
+    super({ name: "ReviewAttemptError", code, message: code, statusCode });
   }
 }
 

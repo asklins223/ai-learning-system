@@ -6,15 +6,8 @@
  * database, HTTP, provider, or user-content side effects.
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "./content-hash.ts";
 import { TrustClass } from "./learning-session-contracts.ts";
-
-function sha256Hex(data: string): string {
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(data, "utf8");
-  return hash.digest("hex");
-}
 
 export function computeAssessmentInputHash(value: string): string {
   return sha256Hex(value);

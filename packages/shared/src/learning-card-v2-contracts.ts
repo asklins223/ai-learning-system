@@ -390,24 +390,4 @@ export function parseLearningCardRevealV2(
   return learningCardRevealV2Schema.parse(input);
 }
 
-export function parseExposureV2(input: unknown): ExposureV2 {
-  return exposureV2Schema.parse(input);
-}
 
-export function parseObjectiveEquivalenceReportV2(
-  input: unknown,
-): ObjectiveEquivalenceReportV2 {
-  return objectiveEquivalenceReportV2Schema.parse(input);
-}
-
-export function parseObjectiveEquivalenceBindingV2(
-  input: unknown,
-): ObjectiveEquivalenceBindingV2 {
-  return objectiveEquivalenceBindingV2Schema.parse(input);
-}
-
-export function parseInitialValidationReminderV2(
-  input: unknown,
-): InitialValidationReminderV2 {
-  return initialValidationReminderV2Schema.parse(input);
-}

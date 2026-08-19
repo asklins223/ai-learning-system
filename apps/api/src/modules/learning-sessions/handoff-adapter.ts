@@ -20,7 +20,8 @@
  *   已退役（migration 0176）；key_point_id 现为 learning_objectives_v2.objective_id 的别名。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError } from "@ailearn/shared";
 import {
   parsePublishedLearningAsset,
   validateForbiddenFields,
@@ -208,10 +209,6 @@ function normalizeForFingerprint(text: string): string {
   return text.trim().replace(/\s+/g, " ");
 }
 
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
-}
-
 /** 代码单元比较：避免 localeCompare 的 ICU 归类把不同 id 判为相等，保证排序幂等可复现 */
 function compareIds(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -350,12 +347,8 @@ export function runHandoffIntegrationGate(params: {
 // ─── 错误类型 ─────────────────────────────────────────────────────────────
 
 /** handoff adapter 的 fail-closed 错误 */
-export class HandoffAdapterError extends Error {
-  readonly code: string;
-
+export class HandoffAdapterError extends DomainError {
   constructor(message: string, code: string) {
-    super(message);
-    this.name = "HandoffAdapterError";
-    this.code = code;
+    super({ name: "HandoffAdapterError", code, message, statusCode: 500 });
   }
 }

@@ -17,7 +17,7 @@
 
 import { sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 
 export interface ShadowEnvelopeMapping {
   legacyKind: "validation_point_assessment" | "review_attempt";
@@ -41,10 +41,6 @@ export interface ShadowReconciliationReport {
   unMappedEnvelopes: number;
   /** 对账通过：无冲突（同一 logical commit 不会被双路径发布）。 */
   reconciled: boolean;
-}
-
-function sha256Hex(input: string): string {
-  return createHash("sha256").update(input).digest("hex");
 }
 
 /** §16.2 确定性映射：canonicalEventId = hash(legacy kind + factId + legacy commit identity)。 */

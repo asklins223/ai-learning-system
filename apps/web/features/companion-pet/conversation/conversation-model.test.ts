@@ -69,22 +69,19 @@ test("formatRelativeTime covers 刚刚/分钟/小时/天/日期 buckets", () => 
   assert.equal(formatRelativeTime(new Date(now - 5_000).toISOString()), "刚刚");
   assert.equal(formatRelativeTime(new Date(now - 3 * 60_000).toISOString()), "3 分钟前");
   assert.equal(formatRelativeTime(new Date(now - 2 * 3_600_000).toISOString()), "2 小时前");
+  // 1 天前 → relativeTime 返回 "昨天"
+  assert.equal(formatRelativeTime(new Date(now - 1 * 86_400_000).toISOString()), "昨天");
   assert.equal(formatRelativeTime(new Date(now - 3 * 86_400_000).toISOString()), "3 天前");
-  const oldDate = new Date(now - 30 * 86_400_000);
-  // 日期桶按本地时区格式化（实现用 getFullYear/getMonth/getDate）；
-  // 断言也按本地日期计算，避免 UTC/本地跨时区差一天导致偶发失败。
-  const pad = (value: number) => String(value).padStart(2, "0");
-  assert.equal(
-    formatRelativeTime(oldDate.toISOString()),
-    `${oldDate.getFullYear()}-${pad(oldDate.getMonth() + 1)}-${pad(oldDate.getDate())}`,
-  );
+  // ≥7 天走 toLocaleDateString("zh-CN", { month: "short", day: "numeric" }) → "M月D日"
+  assert.match(formatRelativeTime(new Date(now - 30 * 86_400_000).toISOString()), /^\d{1,2}月\d{1,2}日$/);
   assert.equal(formatRelativeTime(null), "");
   assert.equal(formatRelativeTime("not-a-date"), "");
 });
 
 test("conversationSubtitle prefers lastMessageAt over createdAt", () => {
   const base: Conversation = { id: "c1", title: "会话", createdAt: new Date(Date.now() - 86_400_000).toISOString(), lastMessageAt: null };
-  assert.equal(conversationSubtitle(base), "1 天前");
+  // 1 天前 → relativeTime 返回 "昨天"
+  assert.equal(conversationSubtitle(base), "昨天");
   assert.equal(
     conversationSubtitle({ ...base, lastMessageAt: new Date(Date.now() - 60_000).toISOString() }),
     "1 分钟前",

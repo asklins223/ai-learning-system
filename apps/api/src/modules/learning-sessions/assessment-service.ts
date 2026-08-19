@@ -17,6 +17,7 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
+import { DomainError } from "@ailearn/shared";
 import { computeAssessmentReportHash, computeAssessmentInputHash, computeFailClosedAssessmentDecisionHash } from "@ailearn/shared/learning-assessment";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession } from "../identity/middleware.ts";
@@ -32,14 +33,9 @@ import {
 
 // ─── 错误 ────────────────────────────────────────────────────────────────
 
-export class AssessmentServiceError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
+export class AssessmentServiceError extends DomainError {
   constructor(code: string, message: string, statusCode = 400) {
-    super(message);
-    this.name = "AssessmentServiceError";
-    this.code = code;
-    this.statusCode = statusCode;
+    super({ name: "AssessmentServiceError", code, message, statusCode });
   }
 }
 
@@ -110,15 +106,12 @@ export interface AssessmentRepository {
  * 所有 item 都标记 not_assessable。
  */
 export function deterministicRubricVerdict(
-  answerText: string,
+  _answerText: string,
   rubricTargets: unknown[],
 ): RubricSessionItemInput[] {
-  const normalizedAnswer = answerText.replace(/\s+/g, "").toLowerCase();
-  return (rubricTargets as Array<{ itemId?: string; evidenceHash?: string; facet?: string }>).map(
+  return (rubricTargets as Array<{ itemId?: string; facet?: string }>).map(
     (target, index) => {
       const itemId = target.itemId ?? `rubric-${index}`;
-      void normalizedAnswer;
-      void target.evidenceHash;
       return {
         rubricItemId: itemId,
         verdict: "not_assessable",

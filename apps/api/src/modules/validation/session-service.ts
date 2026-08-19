@@ -139,67 +139,6 @@ async function requireConsumableLearningCard(
 }
 
 
-// V2 helper: resolve objectiveId and cardId from submission context
-async function resolveObjAndCard(
-  tx: ApiTransaction,
-  workspaceId: string,
-  context: string | undefined,
-  inputObjectiveId: string | undefined,
-  inputScheduleId: string | undefined,
-): Promise<{ objectiveId: string; cardId: string }> {
-  let objectiveId: string | undefined;
-  let cardId: string | undefined;
-
-  if (context === "review" && inputScheduleId) {
-    const schedule = await tx.query.reviewSchedules.findFirst({
-      where: and(
-        eq(reviewSchedules.id, inputScheduleId),
-        eq(reviewSchedules.workspaceId, workspaceId),
-      ),
-    });
-    if (schedule?.subjectType === "objective" && schedule.subjectId) {
-      objectiveId = schedule.subjectId;
-    } else if (schedule?.subjectType === "card" && schedule.subjectId) {
-      cardId = schedule.subjectId;
-    }
-  }
-
-  if (!objectiveId && inputObjectiveId) {
-    objectiveId = inputObjectiveId;
-  }
-
-  if (objectiveId && !cardId) {
-    const v2Card = await tx.query.learningCardsV2.findFirst({
-      where: and(
-        eq(learningCardsV2.objectiveId, objectiveId),
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.lifecycle, "active"),
-      ),
-    });
-    cardId = v2Card?.cardId;
-  }
-
-  if (cardId && !objectiveId) {
-    const v2Card = await tx.query.learningCardsV2.findFirst({
-      where: and(
-        eq(learningCardsV2.cardId, cardId),
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.lifecycle, "active"),
-      ),
-    });
-    objectiveId = v2Card?.objectiveId;
-  }
-
-  if (!objectiveId || !cardId) {
-    throw new SessionError("no_objective");
-  }
-
-  return { objectiveId, cardId };
-}
-
-
-void resolveObjAndCard;
-
 // ─── Result types ────────────────────────────────────────────────────────
 
 export interface StartSessionResult {
@@ -1495,11 +1434,7 @@ export async function revealSource(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (false) { // V2: resolvedObjectiveId
-        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
-      }
-
-      const [submission] = await tx
+            const [submission] = await tx
         .select()
         .from(validationSubmissions)
         .where(
@@ -1650,11 +1585,7 @@ export async function submitAnswer(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (false) { // V2: resolvedObjectiveId
-        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
-      }
-
-      const [submission] = await tx
+            const [submission] = await tx
         .select()
         .from(validationSubmissions)
         .where(
@@ -1735,23 +1666,7 @@ export async function submitAnswer(
       // This catches cross-submission exposures (e.g., another tab/device revealed source).
       let promotedAssistanceLevel = submission.assistanceLevel;
       let promotedAssistanceSnapshotExposedAt = submission.assistanceSnapshotExposedAt;
-      if (false) { // V2: exposure check skipped
-        const existingExposure = await tx.query.validationAssistanceExposures.findFirst({
-          where: and(
-            eq(validationAssistanceExposures.workspaceId, workspaceId),
-            eq(validationAssistanceExposures.userId, userId),
-            eq(validationAssistanceExposures.exposureFingerprint, "" as string),
-          ),
-          orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
-        });
-        if (existingExposure && !isUnassistedEligible((existingExposure as any).unassistedEligibleAfter ?? new Date(), now)) {
-          // Exposure exists and cooldown hasn't elapsed — promote to source_viewed
-          promotedAssistanceLevel = AssistanceLevel.SOURCE_VIEWED;
-          promotedAssistanceSnapshotExposedAt = now;
-        }
-      }
-
-      const answerHash = hashAnswer(input.answer);
+            const answerHash = hashAnswer(input.answer);
       const newRevision = submission.draftRevision + 1;
 
       // Lock answer and transition to evaluation_pending
@@ -1891,11 +1806,7 @@ export async function unableToAnswer(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (false) { // V2: resolvedObjectiveId
-        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
-      }
-
-      const [submission] = await tx
+            const [submission] = await tx
         .select()
         .from(validationSubmissions)
         .where(
@@ -1968,39 +1879,14 @@ export async function unableToAnswer(
       // 比较永远相等（vacuous）；evaluate-rubric 在 worker 事务里做了实时
       // 重算，unable 路径此前没有等价物——用户改写笔记/降级证据后仍可通过
       // unable 写入 understanding event 和真实 pending schedule。
-      if (false) { // V2: resolvedObjectiveId
-        const liveFingerprint = await computeSourceFingerprintFromDb(
-          tx, workspaceId, userId, "" as string, "" as string,
-        );
-        if (liveFingerprint !== submission.sourceFingerprint) {
-          await markSubmissionStaleTx(tx, submission, workspaceId, userId, "unable", "source_changed", now);
-          return staleTxError("question_expired", "source changed since question was bound");
-        }
-      }
-
-      // Re-read exposure fingerprint aggregation (计划 §7.4:
+            // Re-read exposure fingerprint aggregation (计划 §7.4:
       // "unable 与 submit 使用相同锁和幂等边界" — same exposure re-read requirement)
       // This catches cross-submission exposures (e.g., another tab/device revealed source).
       let promotedAssistanceLevel = submission.assistanceLevel;
       let promotedAssistanceSnapshotExposedAt = submission.assistanceSnapshotExposedAt;
       // PERF-37 修复：将 existingExposure 提升到 if 块外部，以便后续复用，避免重复查询
       let existingExposure: typeof validationAssistanceExposures.$inferSelect | null = null;
-      if (false) { // V2: exposure check skipped
-        existingExposure = (await tx.query.validationAssistanceExposures.findFirst({
-          where: and(
-            eq(validationAssistanceExposures.workspaceId, workspaceId),
-            eq(validationAssistanceExposures.userId, userId),
-            eq(validationAssistanceExposures.exposureFingerprint, "" as string),
-          ),
-          orderBy: sql`${validationAssistanceExposures.unassistedEligibleAfter} DESC`,
-        })) ?? null;
-        if (existingExposure && !isUnassistedEligible((existingExposure as any).unassistedEligibleAfter ?? new Date(), now)) {
-          promotedAssistanceLevel = AssistanceLevel.SOURCE_VIEWED;
-          promotedAssistanceSnapshotExposedAt = now;
-        }
-      }
-
-      // Lock answer timestamp and freeze assistance snapshot
+            // Lock answer timestamp and freeze assistance snapshot
       await tx
         .update(validationSubmissions)
         .set({
@@ -2446,11 +2332,7 @@ export async function revealResult(
         ),
       });
       if (!preRead) throw new SessionError("not_found");
-      if (false) { // V2: resolvedObjectiveId
-        await acquireLearningUnitLock(tx, workspaceId, userId, "" as string);
-      }
-
-      const [submission] = await tx
+            const [submission] = await tx
         .select()
         .from(validationSubmissions)
         .where(and(
@@ -2472,48 +2354,7 @@ export async function revealResult(
       if (!submission.validationEventId) throw new SessionError("not_found", "no validation event");
 
       // Record post-result exposure
-      if (false) { // V2: resolvedObjectiveId
-        const now = new Date();
-        const exposureFingerprint = await computeExposureFingerprintFromDb(
-          tx, workspaceId, userId, "" as string, "" as string,
-        );
-
-        const cooldownEnd = computeUnassistedEligibleAfter(now, ASSISTANCE_COOLDOWN_HOURS);
-
-        // Atomic upsert (计划 §6.4.2: "单调 upsert") — use onConflictDoUpdate
-        // to handle concurrent exposure creation from different submissions.
-        // Also fix: previously revealResult did not update lastOriginSubmissionId
-        // on existing exposure rows, inconsistent with revealSource.
-        await tx
-          .insert(validationAssistanceExposures)
-          .values({
-            workspaceId,
-            userId,
-            exposureFingerprint,
-            lastExposureKind: ExposureKind.POST_RESULT_FEEDBACK,
-            firstExposedAt: now,
-            lastExposedAt: now,
-            unassistedEligibleAfter: cooldownEnd,
-            lastOriginSubmissionId: submissionId,
-          })
-          .onConflictDoUpdate({
-            target: [
-              validationAssistanceExposures.workspaceId,
-              validationAssistanceExposures.userId,
-              validationAssistanceExposures.exposureFingerprint,
-              validationAssistanceExposures.exposureFingerprint,
-            ],
-            set: {
-              lastExposureKind: ExposureKind.POST_RESULT_FEEDBACK,
-              lastExposedAt: now,
-              unassistedEligibleAfter: cooldownEnd,
-              lastOriginSubmissionId: submissionId,
-              updatedAt: now,
-            },
-          });
-      }
-
-      // Load validation event with feedback
+            // Load validation event with feedback
       const ve = await tx.query.validationEvents.findFirst({
         where: and(
           eq(validationEvents.id, submission.validationEventId),

@@ -9,7 +9,8 @@
  * 定制题面（§7.8 禁止拼接答案正文）。P2 只提供 text/voice 两类 interaction。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+export { sha256Hex };
 import type {
   PrivateTaskSolutionV1,
   TaskInteractionV1,
@@ -24,10 +25,6 @@ import type {
   LearningTargetSnapshotV2,
   TaskIntentV1,
 } from "@ailearn/shared";
-
-export function sha256Hex(input: string): string {
-  return createHash("sha256").update(input).digest("hex");
-}
 
 /**
  * §16.4 V2 planner 目标：只从 frozen snapshot 消费。public 题面用
@@ -510,17 +507,13 @@ export function rubricTargetIdsOf(solution: PrivateTaskSolutionV1): string[] {
 }
 
 export function buildVariant(
-  runId: string,
-  taskId: string,
+  _runId: string,
+  _taskId: string,
   family: "text" | "voice",
   _estimatedActiveSeconds: number,
-  target: RunPlannerTargetInput,
+  _target: RunPlannerTargetInput,
   task: PlannedTaskInput,
 ): PlannedVariant {
-  void runId;
-  void taskId;
-  void target;
-  void task;
   const interaction: PlannedVariant["interaction"] = family === "text"
     ? { kind: "text_response", maxChars: 2000 }
     : { kind: "voice_teachback", maxSeconds: 120 };

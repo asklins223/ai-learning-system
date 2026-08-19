@@ -27,17 +27,6 @@ export function isCardGenerationV2Enabled(): boolean {
   return process.env.CARD_GENERATION_V2_ENABLED === "true";
 }
 
-/**
- * C8：V1 旧 writer 停写开关（方案 20 §26）。
- * V2 启用（CARD_GENERATION_V2_ENABLED=true）时 V1 生成默认**拒绝**
- * （fail closed，防双 writer / 旧 schema 反写，C39）；显式
- * CARD_GENERATION_V1_WRITER_ENABLED=true 可保留 V1（legacy 租户 /
- * 回滚 drill / 观察期过渡）。
- */
-export function isCardGenerationV1WriterEnabled(): boolean {
-  return process.env.CARD_GENERATION_V1_WRITER_ENABLED === "true";
-}
-
 export function learningSessionRolloutDisabledReason(): string {
   if (!isLearningSessionV2InternalEnabled()) {
     return "学习伴星重构路径当前仅供内部验证";

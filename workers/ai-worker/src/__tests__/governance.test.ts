@@ -6,8 +6,8 @@
  * - detectAndSanitizePII
  * - sanitizePIIInObject
  *
-* 注意：checkAIConsent / getWorkspaceAIPolicy /
-* enforcePrivacyGovernance / logAICall 依赖数据库，此处不测试。
+ * 注意：getWorkspaceAIPolicy /
+ * enforcePrivacyGovernanceWithPolicy / logAICall 依赖数据库，此处不测试。
  */
 
 import assert from "node:assert/strict";

@@ -547,9 +547,7 @@ test("learningRunStartCandidate：V2 字段可选，向后兼容", () => {
   assert.equal(companionLearningContextV1Schema.safeParse(ctx).success, true);
   // 无 V2 字段时同样通过（向后兼容）
   const { objectiveId: _o, originV2: _v2, ...legacyOnly } = ctx.learningRunStartCandidate!;
-  void _o;
-  void _v2;
-  assert.equal(companionLearningContextV1Schema.safeParse({
+      assert.equal(companionLearningContextV1Schema.safeParse({
     ...ctx,
     learningRunStartCandidate: legacyOnly,
   }).success, true);

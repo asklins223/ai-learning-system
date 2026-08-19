@@ -5,7 +5,7 @@
  * text/event-stream，Last-Event-ID 重放（断线后从最后收到的 sequence 续订）。
  */
 
-import { API_URL, getToken } from "@/lib/api";
+import { API_URL } from "@/lib/api";
 
 export interface LearningRunStreamEvent {
   sequence: number;
@@ -65,9 +65,7 @@ export async function subscribeLearningRunEvents(
   const query = options.lastEventId && options.lastEventId > 0
     ? `?lastEventId=${options.lastEventId}`
     : "";
-  const token = getToken();
   const headers: Record<string, string> = { Accept: "text/event-stream" };
-  if (token) headers.Authorization = `Bearer ${token}`;
 
   // 同源订阅（next rewrite）。dev 下 rewrite 对 SSE 缓冲时流不实时——
   // useLearningRun 的 2s 快照轮询兜底（SSE 仅作加速，失败静默）。

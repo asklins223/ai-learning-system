@@ -1,4 +1,4 @@
-import { createRequire } from "node:module";
+import { sha256Hex } from "./content-hash.ts";
 
 /**
  * 方案 20（learning-card-v2）§9.5 Hash Canonicalization V2。
@@ -21,22 +21,11 @@ import { createRequire } from "node:module";
  * undefined —— 与 content-hash.ts 同一约定）。
  */
 
-const nodeRequire =
-  typeof createRequire === "function" ? createRequire(import.meta.url) : null;
-
 export const HASH_CANONICAL_V2_DOMAIN = "ailearn-hash-canonical-v2";
 export const HASH_CANONICAL_V2_VERSION = 1;
 
 /** hash domain 白名单：字母数字与 `-._/`，防止调用方拼接造成域混淆。 */
 const DOMAIN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9\-._/]*$/;
-
-function sha256Hex(value: string): string {
-  if (!nodeRequire) {
-    throw new Error("node:crypto unavailable in this environment");
-  }
-  const { createHash } = nodeRequire("node:crypto");
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
 
 /** UTF-8 字节序比较（object key 排序；对合法 Unicode 与 code point 序一致）。 */
 function compareUtf8(a: string, b: string): number {

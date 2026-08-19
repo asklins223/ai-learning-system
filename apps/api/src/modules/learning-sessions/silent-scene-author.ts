@@ -15,7 +15,7 @@
  * SilentProofScene/TapSelectPlaceLayer 直接消费）。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 
 export interface SilentSceneDataV1 {
   ordering: {
@@ -41,10 +41,6 @@ export function splitClaimIntoFragments(claim: string): string[] {
     .map((part) => part.replace(/[,，、]/, " ").trim())
     .filter((part) => part.length >= 2)
     .slice(0, ORDERING_ITEMS_MAX);
-}
-
-function sha256Hex(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
 }
 
 /**

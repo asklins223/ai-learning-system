@@ -6,13 +6,13 @@
 #   - Job 完成率：99% (1% 死信可接受)
 #   - 最老 pending job：5 分钟
 #   - Provider 错误率：< 5%
-#   - 备份新鲜度：24 小时内
 #
 # 告警级别：
 #   - warning：需要关注但非紧急
 #   - critical：需要立即响应
 #
 # 所有规则使用 `ailearn_` 前缀，避免与其他服务冲突。
+# Job/Provider 指标由 workers/ai-worker 维护，告警规则指定 job="ailearn-worker"。
 
 groups:
   # ─── HTTP 服务健康 ───────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ groups:
     rules:
       # Pending 队列堆积超过 100
       - alert: AILearnJobQueueBacklog
-        expr: ailearn_job_queue_depth{status="pending"} > 100
+        expr: ailearn_job_queue_depth{job="ailearn-worker",status="pending"} > 100
         for: 5m
         labels:
           severity: warning
@@ -96,7 +96,7 @@ groups:
 
       # 最老 pending job 超过 5 分钟
       - alert: AILearnStalePendingJob
-        expr: ailearn_job_oldest_pending_age_seconds > 300
+        expr: ailearn_job_oldest_pending_age_seconds{job="ailearn-worker"} > 300
         for: 2m
         labels:
           severity: critical
@@ -110,9 +110,9 @@ groups:
       - alert: AILearnHighJobDeadRate
         expr: |
           (
-            rate(ailearn_job_terminal_total{status="dead"}[10m])
+            rate(ailearn_job_terminal_total{job="ailearn-worker",status="dead"}[10m])
             /
-            rate(ailearn_job_terminal_total[10m])
+            rate(ailearn_job_terminal_total{job="ailearn-worker"}[10m])
           ) > 0.01
         for: 10m
         labels:
@@ -125,7 +125,7 @@ groups:
 
       # Job lease 丢失
       - alert: AILearnJobLeaseLost
-        expr: rate(ailearn_job_lease_lost_total[5m]) > 0
+        expr: rate(ailearn_job_lease_lost_total{job="ailearn-worker"}[5m]) > 0
         for: 1m
         labels:
           severity: warning
@@ -143,9 +143,9 @@ groups:
       - alert: AILearnHighProviderErrorRate
         expr: |
           (
-            rate(ailearn_provider_errors_total[5m])
+            rate(ailearn_provider_errors_total{job="ailearn-worker"}[5m])
             /
-            rate(ailearn_provider_calls_total[5m])
+            rate(ailearn_provider_calls_total{job="ailearn-worker"}[5m])
           ) > 0.05
         for: 5m
         labels:
@@ -159,7 +159,7 @@ groups:
       # Provider 调用超时（p95 超过 30 秒）
       - alert: AILearnProviderHighLatency
         expr: |
-          histogram_quantile(0.95, rate(ailearn_provider_call_duration_seconds_bucket[5m])) > 30
+          histogram_quantile(0.95, rate(ailearn_provider_call_duration_seconds_bucket{job="ailearn-worker"}[5m])) > 30
         for: 5m
         labels:
           severity: warning
@@ -171,7 +171,7 @@ groups:
 
       # Provider schema failure（结构化错误）
       - alert: AILearnProviderSchemaFailure
-        expr: rate(ailearn_provider_errors_total{error_category="schema_failure"}[5m]) > 0
+        expr: rate(ailearn_provider_errors_total{job="ailearn-worker",error_category="schema_failure"}[5m]) > 0
         for: 2m
         labels:
           severity: warning
@@ -183,7 +183,7 @@ groups:
 
       # Provider 配额不足
       - alert: AILearnProviderQuotaExceeded
-        expr: rate(ailearn_provider_errors_total{error_category="quota_exceeded"}[5m]) > 0
+        expr: rate(ailearn_provider_errors_total{job="ailearn-worker",error_category="quota_exceeded"}[5m]) > 0
         for: 1m
         labels:
           severity: critical
@@ -222,19 +222,19 @@ groups:
           runbook: "docs/operations.md#alerts"
 
       # 备份过期（超过 24 小时无成功备份）
+      # ARCH-2026-08：dbLastSuccessfulBackupTimestamp 指标已从 API registry 移除
+      #（无生产写点），改为依赖 backup job 的 up 状态检测备份可用性。
       - alert: AILearnBackupStale
         expr: |
           (up{job="ailearn-backup"} == 0)
           or absent(up{job="ailearn-backup"})
-          or absent(ailearn_db_last_successful_backup_timestamp{job="ailearn-backup"})
-          or ((time() - ailearn_db_last_successful_backup_timestamp{job="ailearn-backup"}) > 86400)
         for: 1m
         labels:
           severity: critical
           team: platform
         annotations:
-          summary: "数据库备份过期"
-          description: "距离上次成功备份已超过 {{ $value | humanizeDuration }}，超过 SLO 目标 24 小时。"
+          summary: "数据库备份服务不可用"
+          description: "备份服务不可达，需检查 backup job 是否正常运行。"
           runbook: "docs/operations.md#alerts"
 
   # ─── Alpha 漏斗监控 ─────────────────────────────────────────────────────────

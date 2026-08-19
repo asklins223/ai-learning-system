@@ -584,6 +584,7 @@
   line-height: 1.52;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .search-page-highlight {
@@ -985,6 +986,7 @@
   .search-result-snippet {
     font-size: 12px;
     -webkit-line-clamp: 3;
+    line-clamp: 3;
   }
 
   .search-result-arrow {

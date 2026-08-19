@@ -43,11 +43,10 @@ const inboxStreamQuerySchema = z.object({
 });
 
 export async function proactiveInboxRoutes(app: FastifyInstance) {
-  app.addHook("onRequest", async (req, reply) => {
+  app.addHook("onRequest", async (_req, reply) => {
     // capability 门控（与 companion-journey routes 同开关）：off 时 404 fail closed。
     if (!isCompanionJourneyV2Enabled()) {
-      void req;
-      return reply.code(404).send({
+            return reply.code(404).send({
         error: "companion_journey_v2_disabled",
         message: "新手旅程当前未开放",
       });

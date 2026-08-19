@@ -31,7 +31,8 @@
  *   引用；评估/commit 由 03-3/后续任务实现。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError } from "@ailearn/shared";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   pgTable,
@@ -635,10 +636,6 @@ function stableStringify(value: unknown): string {
 /** stableStringify 的公开别名（index.ts re-export 时与 canonical-events 的
  *  stableStringify 无命名冲突）。 */
 export const stableStringifyPlan = stableStringify;
-
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
-}
 
 function normalizeForHash(text: string): string {
   return text.trim().replace(/\s+/g, " ");
@@ -2254,9 +2251,8 @@ export type SessionServiceErrorCode =
   | "invalid_loop_action";
 
 /** Session 服务错误（路由层按 statusCode 映射 HTTP） */
-export class SessionServiceError extends Error {
-  readonly code: SessionServiceErrorCode;
-  readonly statusCode: number;
+export class SessionServiceError extends DomainError {
+  declare readonly code: SessionServiceErrorCode;
   readonly recoveryData?: Readonly<Record<string, string>>;
 
   constructor(
@@ -2265,10 +2261,7 @@ export class SessionServiceError extends Error {
     message: string,
     recoveryData?: Readonly<Record<string, string>>,
   ) {
-    super(message);
-    this.name = "SessionServiceError";
-    this.code = code;
-    this.statusCode = statusCode;
+    super({ name: "SessionServiceError", code, message, statusCode });
     this.recoveryData = recoveryData;
   }
 }

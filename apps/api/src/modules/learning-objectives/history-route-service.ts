@@ -3,8 +3,8 @@
  *
  * - history：只返回 revision/lifecycle/可信公开摘要（publicSummary/conceptLabel），
  *   不泄漏 private assessment/rubric（§13.2）。
- * - route resolver：旧 card/keyPoint URL 确定性解析——mapped / gone / forbidden
- *   （§21.4；V1 卡 0176 退役后无 ambiguous），绝不返回模糊 V2 404；解析结果幂等落
+ * - route resolver：旧 card/keyPoint URL 确定性解析——mapped / gone
+ *   （§21.4），绝不返回模糊 V2 404；解析结果幂等落
  *   legacy_route_mappings_v2。
  */
 import { and, eq, desc, lt, sql } from "drizzle-orm";
@@ -101,8 +101,8 @@ export async function readObjectiveHistoryV3(
 export type LegacyRouteResolutionStatus =
   | "mapped"
   | "gone"
-  | "ambiguous"
-  | "forbidden";
+  
+  ;
 
 export interface LegacyRouteResolutionV3 {
   legacyKind: "card" | "key_point";

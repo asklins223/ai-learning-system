@@ -23,7 +23,7 @@
  * 在本模块本地声明并注明「收口迁移至 @ailearn/shared/episode-commit-contracts」。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import { TrustClass } from "@ailearn/shared";
 import {
   RubricSessionResult,
@@ -475,15 +475,6 @@ export function mapReducerToUnderstandingEffect(result: RubricSessionResult): st
     case RubricSessionResult.NOT_ASSESSABLE:
       return "unchanged";
   }
-}
-
-// ─── 确定性 hash 原语（与 trust-service 同模式，非链式调用）────────────────
-
-function sha256Hex(data: string): string {
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(data, "utf8");
-  return hash.digest("hex");
 }
 
 // ─── commitKey（幂等键）───────────────────────────────────────────────────

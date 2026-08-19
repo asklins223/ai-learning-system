@@ -119,14 +119,6 @@ test("P7 纵切：canonical Commit 物化 change set + projection ready + delta 
     }
 
     // 3) projection current_target：checkpoint-aware + personal facts。
-    const projectionRows = await withWorkspaceTransaction(scope, async (tx) => {
-      const envelopeRows = await tx.execute(
-        (await import("drizzle-orm")).sql`SELECT 1`,
-      );
-      void envelopeRows;
-      return null;
-    });
-    void projectionRows;
     // 直接查 checkpoint 表（projection 端点需 HTTP；此处验证数据底座）。
     const checkpointRows = await sql`
       SELECT token, last_canonical_event_id FROM understanding_projection_checkpoints

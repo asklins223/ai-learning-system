@@ -20,6 +20,7 @@
 
 import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { DomainError } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import { createPgVerticalSliceRepository } from "./vertical-slice-repo-pg.ts";
 import { createPgCommitExecutor } from "./commit-executor-pg.ts";
@@ -50,12 +51,9 @@ export interface CommitOutboxJob {
   leaseExpiresAt: Date | null;
 }
 
-export class CommitOutboxError extends Error {
-  readonly code: string;
+export class CommitOutboxError extends DomainError {
   constructor(code: string, message: string) {
-    super(message);
-    this.name = "CommitOutboxError";
-    this.code = code;
+    super({ name: "CommitOutboxError", code, message, statusCode: 500 });
   }
 }
 

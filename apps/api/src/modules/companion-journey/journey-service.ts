@@ -8,6 +8,7 @@
 
 import { and, eq, inArray, ne } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
+import { DomainError } from "@ailearn/shared";
 import {
   companionAccountInvitations,
   companionJourneyPendingEvents,
@@ -34,12 +35,9 @@ export interface JourneyScope {
   userId: string;
 }
 
-export class JourneyServiceError extends Error {
-  readonly code: string;
+export class JourneyServiceError extends DomainError {
   constructor(code: string, message: string) {
-    super(message);
-    this.name = "JourneyServiceError";
-    this.code = code;
+    super({ name: "JourneyServiceError", code, message, statusCode: 500 });
   }
 }
 

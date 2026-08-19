@@ -19,7 +19,6 @@
  * - 本模块不写第二套真相：掌握/schedule/outcome 真值仍落现有权威域。
  */
 
-import { createHash } from "node:crypto";
 import {
   appendCanonicalEvent,
   replayProjection,
@@ -28,6 +27,7 @@ import {
   type ProjectionSnapshot,
   type WorkspaceUserScope,
 } from "./canonical-events.ts";
+import { DomainError } from "@ailearn/shared";
 import type {
   ArtifactModality,
   ArtifactStatus,
@@ -68,13 +68,9 @@ export const ARTIFACT_STATE_TRANSITIONS: Readonly<Record<ArtifactStatus, readonl
   redacted: [],
 };
 
-export class RedactionServiceError extends Error {
-  readonly code: string;
-
+export class RedactionServiceError extends DomainError {
   constructor(message: string, code: string) {
-    super(message);
-    this.name = "RedactionServiceError";
-    this.code = code;
+    super({ name: "RedactionServiceError", code, message, statusCode: 500 });
   }
 }
 
@@ -605,10 +601,4 @@ export function deletionImpacts(scope: DeletionScope): readonly string[] {
   ];
 }
 
-// ─── 工具 ────────────────────────────────────────────────────────────────
 
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
-}
-
-export { sha256Hex };

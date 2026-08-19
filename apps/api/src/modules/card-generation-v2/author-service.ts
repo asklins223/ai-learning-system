@@ -33,6 +33,7 @@ import {
   computeRubricHashV2,
 } from "@ailearn/shared/card-generation-v2-hashing";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
+import { DomainError } from "@ailearn/shared";
 
 // ─── Authoring Provider 接口 ─────────────────────────────────────────────
 
@@ -265,11 +266,8 @@ function mapKnowledgeFormToTransformation(form: KnowledgeFormV2): TeachingTransf
 
 // ─── Errors ──────────────────────────────────────────────────────────────
 
-export class AuthorValidationError extends Error {
-  readonly code: string;
+export class AuthorValidationError extends DomainError {
   constructor(code: string, message: string) {
-    super(message);
-    this.name = "AuthorValidationError";
-    this.code = code;
+    super({ name: "AuthorValidationError", code, message, statusCode: 500 });
   }
 }

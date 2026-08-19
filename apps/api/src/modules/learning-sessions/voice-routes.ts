@@ -315,14 +315,6 @@ export async function voiceRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "MISSING_AUDIO_FILE", code: "MISSING_AUDIO_FILE", message: "缺少 file 字段（音频）" });
     }
     const fields = part.fields as Record<string, unknown> | undefined;
-    // 正式学习 branch 兼容历史请求：只有 Companion branch 采用严格字段合同。
-    let language = "zh-CN";
-    try {
-      const values = multipartFieldValues(fields, "language");
-      if (values.length === 1 && typeof values[0] === "string") language = values[0];
-    } catch {
-      // 字段解析异常——用缺省 language
-    }
     // review nit：mimetype 校验（拒绝非音频，防伪装上传）
     const mimetype = part.mimetype ?? "";
     if (mimetype !== "" && !/^(audio|application\/octet-stream)/.test(mimetype)) {
@@ -359,9 +351,6 @@ export async function voiceRoutes(app: FastifyInstance) {
     if (!audioMagicMatchesDeclaration(audio, filename, mimetype || "audio/mpeg")) {
       return reply.code(415).send({ error: "UNSUPPORTED_MEDIA_TYPE", code: "UNSUPPORTED_MEDIA_TYPE", message: "音频格式或 magic bytes 不匹配" });
     }
-    // language 为日志元数据（SenseVoice 自动检测语言，无需传给 provider）
-    void language;
-
     // P3：purpose=companion_dialogue → §11.2 Companion 分支（ffprobe duration 实测 +
     // pending voice artifact + §11.2 响应）；缺省 learning_session 走既有朗读路径。
     let purpose = "learning_session";

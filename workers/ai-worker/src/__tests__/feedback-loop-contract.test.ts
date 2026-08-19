@@ -15,7 +15,6 @@ import assert from "node:assert/strict";
 import { test, beforeEach, afterEach } from "node:test";
 import {
   isFeedbackCollectionEnabled,
-  isFeedbackRegenerationEnabled,
 } from "@ailearn/shared";
 
 // ─── Feature flag 契约 ───────────────────────────────────────────────────
@@ -25,7 +24,6 @@ const ENV_BACKUP: Record<string, string | undefined> = {};
 beforeEach(() => {
   for (const key of [
     "GENERATION_FEEDBACK_COLLECTION_ENABLED",
-    "FEEDBACK_REGENERATION_ENABLED",
   ]) {
     ENV_BACKUP[key] = process.env[key];
     delete process.env[key];
@@ -49,23 +47,6 @@ test("E2 Phase 1: isFeedbackCollectionEnabled 默认关闭", () => {
 test("E2 Phase 1: 设为 true 时开启采集", () => {
   process.env.GENERATION_FEEDBACK_COLLECTION_ENABLED = "true";
   assert.equal(isFeedbackCollectionEnabled(), true);
-});
-
-test("E2 Phase 2: isFeedbackRegenerationEnabled 默认关闭", () => {
-  assert.equal(isFeedbackRegenerationEnabled(), false);
-});
-
-test("E2 Phase 2: 设为 true 时开启反馈注入", () => {
-  process.env.FEEDBACK_REGENERATION_ENABLED = "true";
-  assert.equal(isFeedbackRegenerationEnabled(), true);
-});
-
-test("E2 Phase 2: 可以在 Phase 1 关闭时独立开启（但不应有数据）", () => {
-  // Phase 2 可以独立 flag 控制——即使 Phase 1 关闭，Phase 2 flag 也能设为 true
-  // 但实际使用时应有 Phase 1 的数据支撑
-  process.env.FEEDBACK_REGENERATION_ENABLED = "true";
-  assert.equal(isFeedbackRegenerationEnabled(), true);
-  assert.equal(isFeedbackCollectionEnabled(), false);
 });
 
 // ─── 反馈摘要格式契约 ─────────────────────────────────────────────────────

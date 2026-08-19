@@ -17,7 +17,8 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { parseBody } from "../../lib/validate.ts";
@@ -113,7 +114,7 @@ const tutorEndBodySchema = z.object({
 const tutorDetourIdParamsSchema = z.object({ id: z.string().uuid(), detourId: z.string().uuid() });
 
 function tutorNonceHash(nonce: string): string {
-  return createHash("sha256").update(`tutor-action:${nonce}`).digest("hex");
+  return sha256Hex(`tutor-action:${nonce}`);
 }
 
 function tutorErrorStatus(code: TutorDetourError["code"]): number {

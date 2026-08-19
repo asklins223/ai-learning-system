@@ -26,8 +26,7 @@ export const jobs = pgTable(
     repairState: text("repair_state").notNull().default("none"),
     // CHECK (0..1) enforced at DB level via migration.
     repairAttemptCount: integer("repair_attempt_count").notNull().default(0),
-    // V1 generation run reference removed
-    stage: text("stage"),
+        stage: text("stage"),
     priority: integer("priority").notNull().default(50),
     resourceClass: text("resource_class").notNull().default("maintenance"),
     idempotencyKey: text("idempotency_key"),

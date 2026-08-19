@@ -10,16 +10,12 @@
  * 绝不产 canonical/schedule。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import type { RelationEdgeKindV1 } from "@ailearn/shared";
 import type {
   CanonicalAnswerV2,
   ObjectiveRelationV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
-
-export function sha256Hex(input: string): string {
-  return createHash("sha256").update(input).digest("hex");
-}
 
 export interface StructuredTargetInput {
   keyPointId: string;

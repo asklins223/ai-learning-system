@@ -41,8 +41,9 @@ test("relativeTime 跨天不串缓存", () => {
   assert.notEqual(o1, o2);
 });
 
-test("relativeTime 非法输入回退（不抛错）", () => {
-  // Invalid Date → toLocaleDateString 返回 "Invalid Date" 的本地化变体，
-  // 与修复前行为一致（不抛错）。
-  assert.doesNotThrow(() => relativeTime("not-a-date"));
+test("relativeTime 非法输入回退返回空串", () => {
+  // null/undefined/无效日期 → 空串（不抛错）
+  assert.equal(relativeTime(null), "");
+  assert.equal(relativeTime(undefined), "");
+  assert.equal(relativeTime("not-a-date"), "");
 });

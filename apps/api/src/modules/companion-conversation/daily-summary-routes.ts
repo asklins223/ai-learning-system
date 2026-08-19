@@ -23,10 +23,9 @@ function isDailySummaryEnabled(): boolean {
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 export async function dailySummaryRoutes(app: FastifyInstance) {
-  app.addHook("onRequest", async (req, reply) => {
+  app.addHook("onRequest", async (_req, reply) => {
     if (!isDailySummaryEnabled()) {
-      void req;
-      return reply.code(404).send({
+            return reply.code(404).send({
         error: "companion_daily_summary_disabled",
         message: "桌宠日记当前未开放",
       });

@@ -215,7 +215,6 @@ export function answerCompletenessGate(
 ): QualityIssue[] {
   const issues: QualityIssue[] = [];
   const answerUnitIds = collectAnswerUnitIds(candidate.objective.canonicalAnswer);
-  const answerText = extractAnswerText(candidate.objective.canonicalAnswer).trim();
 
   for (const unit of candidate.objective.rubric.units) {
     if (!unit.required) continue;
@@ -239,7 +238,6 @@ export function answerCompletenessGate(
       });
     }
   }
-  void answerText;
   return issues;
 }
 

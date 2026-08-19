@@ -5,6 +5,8 @@
  * 不变，单独可测。
  */
 
+import { relativeTime } from "../../../lib/format";
+
 export type Conversation = {
   id: string;
   title: string;
@@ -63,27 +65,8 @@ export function seqFromEventId(id: string): number {
   return match ? Number(match[1]) : 0;
 }
 
-/**
- * 相对时间：1 分钟内「刚刚」，1 小时内「x 分钟前」，24 小时内「x 小时前」，
- * 7 天内「x 天前」，更早显示日期。null/无效输入返回空串（列表项不展示）。
- */
-export function formatRelativeTime(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const time = new Date(iso).getTime();
-  if (!Number.isFinite(time)) return "";
-  const elapsedMs = Date.now() - time;
-  if (elapsedMs < 0) return "刚刚";
-  const minutes = Math.floor(elapsedMs / 60_000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} 天前`;
-  const date = new Date(time);
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
+/** 会话列表项相对时间，委托 @/lib/format 的 relativeTime（null/无效返回空串）。 */
+export const formatRelativeTime = relativeTime;
 
 /** 会话列表项副标题：优先最后消息时间，回退创建时间。 */
 export function conversationSubtitle(conversation: Conversation): string {

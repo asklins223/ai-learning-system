@@ -9,11 +9,6 @@ import type {
 
 // ─── v0.6: Provider Usage Tracking (计划 §6.6, §10.5) ───────────────────
 
-// R2: DEFAULT_CONTEXT_WINDOW_TOKENS moved to provider-constants.ts to break
-// circular dependency (ai-provider.ts → providers/*.ts → ai-provider.ts).
-// Re-exported here for backward compatibility.
-export { DEFAULT_CONTEXT_WINDOW_TOKENS } from "./provider-constants.ts";
-
 
 /**
  * Token usage returned by an AI provider after a call.
@@ -298,11 +293,10 @@ export interface EmbeddingProviderLike {
  * @param cachedGovCtx Optional governance context with pre-resolved embedding config.
  */
 export async function createEmbeddingProvider(
-  userId?: string,
+  _userId?: string,
   cachedGovCtx?: { embeddingProviderName: string | null; embeddingProviderConfig: AIProviderRuntimeConfig | null } | null,
 ): Promise<EmbeddingProviderLike | null> {
-  void userId; // No longer used for BYOK lookup
-  // 1. Use cached governance context if available (avoids redundant DB query)
+    // 1. Use cached governance context if available (avoids redundant DB query)
   if (cachedGovCtx?.embeddingProviderName && cachedGovCtx?.embeddingProviderConfig) {
     const providerId = cachedGovCtx.embeddingProviderName === "qwen" ? "dashscope" : cachedGovCtx.embeddingProviderName;
     const impl = createCapabilityProvider(providerId, "embedding", {

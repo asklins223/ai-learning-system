@@ -87,10 +87,9 @@ const correctMemoryBodySchema = z.object({
 });
 
 export async function memoryRoutes(app: FastifyInstance) {
-  app.addHook("onRequest", async (req, reply) => {
+  app.addHook("onRequest", async (_req, reply) => {
     if (!isMemoryContextEnabled()) {
-      void req;
-      return reply.code(404).send({
+            return reply.code(404).send({
         error: "companion_memory_context_disabled",
         message: "桌宠记忆与上下文当前未开放",
       });

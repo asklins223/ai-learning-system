@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "@/components/ThemeProvider";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
-import { ApiError, api, setToken } from "@/lib/api";
+import { ApiError, api, clearLegacyTokenStorage } from "@/lib/api";
 import { AvatarUploader } from "@/components/account/AvatarUploader";
 import { Icon } from "@/components/ui/icons";
 
@@ -160,13 +160,13 @@ function RegisterPageContent() {
     if (!validate()) return;
     setLoading(true);
     try {
-      const result = await api.register({
+      await api.register({
         email: email.trim(),
         password,
         displayName: displayName.trim() || undefined,
         inviteToken: inviteToken.trim() || undefined,
       });
-      setToken(result.token);
+      clearLegacyTokenStorage();
 
       // 注册成功后，如果有待上传的头像文件，此时已有 session，执行上传
       if (pendingAvatarFile) {

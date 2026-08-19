@@ -14,7 +14,6 @@
     "test:companion-dialogue:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-dialogue-postgres.integration.ts"
   },
   "dependencies": {
-    "@ailearn/db": "file:../../packages/db",
     "@ailearn/shared": "file:../../packages/shared",
     "@aws-sdk/client-s3": "^3.1090.0",
     "drizzle-orm": "^0.45.2",

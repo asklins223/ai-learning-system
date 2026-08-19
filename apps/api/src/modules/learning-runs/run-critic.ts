@@ -236,7 +236,6 @@ export function createOpenAICompatibleCritic(env: {
 }
 
 // ─── V2：frozen snapshot 驱动的 Critic 输入（§16.6）──────────────────────
-// 禁止再回查 V1 card_key_points.claim/quoteText；全部参照来自 frozen snapshot。
 // (V1 表已退役，key_point_id 现为 learning_objectives_v2.objective_id 的别名。)
 
 /**

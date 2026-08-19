@@ -3,19 +3,15 @@
  */
 
 import { LearningRunErrorCode } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 
 export type LearningRunErrorCodeValue = LearningRunErrorCode;
 
-export class LearningRunServiceError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
+export class LearningRunServiceError extends DomainError {
   readonly recoveryData?: Record<string, unknown>;
 
   constructor(code: string, message: string, statusCode: number, recoveryData?: Record<string, unknown>) {
-    super(message);
-    this.name = "LearningRunServiceError";
-    this.code = code;
-    this.statusCode = statusCode;
+    super({ name: "LearningRunServiceError", code, message, statusCode });
     this.recoveryData = recoveryData;
   }
 }

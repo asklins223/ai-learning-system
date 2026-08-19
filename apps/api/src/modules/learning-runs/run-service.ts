@@ -1696,8 +1696,7 @@ export async function deleteDraft(
   tx: ApiTransaction,
   input: RunScope & { runId: string; taskId: string },
 ): Promise<void> {
-  const run = await loadRun(tx, input, input.runId);
-  void run;
+  await loadRun(tx, input, input.runId);
   await tx.delete(learningTaskDrafts).where(and(
     eq(learningTaskDrafts.taskId, input.taskId),
     eq(learningTaskDrafts.workspaceId, input.workspaceId),
@@ -1710,8 +1709,7 @@ export async function getDraft(
   tx: ApiTransaction,
   input: RunScope & { runId: string; taskId: string },
 ): Promise<unknown | null> {
-  const run = await loadRun(tx, input, input.runId);
-  void run;
+  await loadRun(tx, input, input.runId);
   const rows = await tx
     .select()
     .from(learningTaskDrafts)

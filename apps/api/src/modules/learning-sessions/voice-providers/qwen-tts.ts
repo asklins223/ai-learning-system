@@ -17,6 +17,7 @@
 
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
+import { DomainError } from "@ailearn/shared";
 
 export interface QwenTtsOptions {
   /** 业务空间 ID（北京地域 WS URL 前缀，如 llm-55ujpy2wafojbdp8） */
@@ -51,12 +52,9 @@ export interface QwenTtsStreamResult {
   contentType: string;
 }
 
-export class QwenTtsError extends Error {
-  readonly code: string;
+export class QwenTtsError extends DomainError {
   constructor(code: string, message: string) {
-    super(message);
-    this.name = "QwenTtsError";
-    this.code = code;
+    super({ name: "QwenTtsError", code, message, statusCode: 500 });
   }
 }
 

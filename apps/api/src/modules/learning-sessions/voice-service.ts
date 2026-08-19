@@ -40,7 +40,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { TrustClass } from "@ailearn/shared";
+import { DomainError, TrustClass } from "@ailearn/shared";
 import type { FrozenProbeRef } from "@ailearn/shared";
 
 // ─── 类型（与 packages/shared voice-artifact-contracts.ts 同步的本地声明，
@@ -202,13 +202,11 @@ export type VoiceServiceErrorCode =
   | "ARTIFACT_LOCKED"
   | "VOICE_CONFIRM_MISMATCH";
 
-export class VoiceServiceError extends Error {
-  readonly code: VoiceServiceErrorCode;
+export class VoiceServiceError extends DomainError {
+  declare readonly code: VoiceServiceErrorCode;
 
   constructor(message: string, code: VoiceServiceErrorCode) {
-    super(message);
-    this.name = "VoiceServiceError";
-    this.code = code;
+    super({ name: "VoiceServiceError", code, message, statusCode: 500 });
   }
 }
 

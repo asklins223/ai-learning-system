@@ -40,40 +40,6 @@ function readSource(relPath: string): string {
   return fs.readFileSync(relPath, "utf-8");
 }
 
-// ─── Mutation function names that must use withWorkspaceTransaction ──────
-// These lists document the expected mutation surface area and are used
-// for human-readable reference. The actual assertions check source-level
-// patterns rather than iterating these arrays.
-
-// Documented mutation surface area — referenced via void to suppress TS6133
-// while keeping the documentation visible for human readers.
-const SESSION_MUTATIONS = [
-  "startValidationSession",
-  "getValidationSession",
-  "saveDraft",
-  "revealSource",
-  "revealResult",
-  "submitAnswer",
-  "unableToAnswer",
-  "retryQuestion",
-  "retryEvaluation",
-  "abandonSession",
-  "saveQualitySignal",
-] as const;
-
-const REVIEW_MUTATIONS = [
-  "startReviewAttempt",
-  "submitReviewAnswer",
-  "unableReviewAnswer",
-  "abandonReviewAttempt",
-  "laterReviewAttempt",
-  "revealReviewResult",
-] as const;
-
-// Reference documentation arrays to satisfy noUnusedLocals
-void SESSION_MUTATIONS;
-void REVIEW_MUTATIONS;
-
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe("v0.6 Fixed Lock Ordering Contract (计划 §8.7, §13.2)", () => {

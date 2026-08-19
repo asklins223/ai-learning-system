@@ -64,10 +64,9 @@ const renewBodySchema = z.object({
 });
 
 export async function companionBridgeRoutes(app: FastifyInstance) {
-  app.addHook("onRequest", async (req, reply) => {
+  app.addHook("onRequest", async (_req, reply) => {
     if (!isCompanionBridgeV2Enabled()) {
-      void req;
-      return reply.code(404).send({
+            return reply.code(404).send({
         error: "companion_bridge_v2_disabled",
         message: "伴星上下文桥当前未开放",
       });

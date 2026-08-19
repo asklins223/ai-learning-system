@@ -150,89 +150,10 @@ export const readinessStatus = new Gauge({
   registers: [registry],
 });
 
-// ─── Job 指标 ───────────────────────────────────────────────────────────
-// DEPRECATED（PERF-B7）：以下 Job/Provider 维度的 9 个指标在 API 进程内
-// 无任何生产写点（全库 grep 命中仅本文件定义 + ops01 测试），实际由
-// `workers/ai-worker/src/lib/metrics.ts` 维护同义指标（Job 队列深度/终态/
-// 重试/租约丢失/时长、Provider 调用量/延迟/错误）。保留定义是为了兼容
-// ops01 测试对定义存在性与 label 契约的断言，不再新增 API 侧写点。
-
-/** Job 队列深度 gauge（按 status 分桶） */
-export const jobQueueDepth = new Gauge({
-  name: "ailearn_job_queue_depth",
-  help: "Number of jobs in queue by status",
-  labelNames: ["status"] as const,
-  registers: [registry],
-});
-
-/** 最老 pending job 的等待秒数 gauge */
-export const jobOldestPendingAgeSeconds = new Gauge({
-  name: "ailearn_job_oldest_pending_age_seconds",
-  help: "Age of the oldest pending job in seconds",
-  registers: [registry],
-});
-
-/** Job 终态计数器（succeeded/dead） */
-export const jobTerminalTotal = new Counter({
-  name: "ailearn_job_terminal_total",
-  help: "Total jobs that reached a terminal state",
-  labelNames: ["type", "status"] as const,
-  registers: [registry],
-});
-
-/** Job 重试计数器 */
-export const jobRetriesTotal = new Counter({
-  name: "ailearn_job_retries_total",
-  help: "Total job retries by type",
-  labelNames: ["type"] as const,
-  registers: [registry],
-});
-
-/** Job lease 丢失计数器 */
-export const jobLeaseLostTotal = new Counter({
-  name: "ailearn_job_lease_lost_total",
-  help: "Total jobs where the lease was lost or reaped",
-  labelNames: ["type"] as const,
-  registers: [registry],
-});
-
-/** Job 运行时长直方图（秒） */
-export const jobDurationSeconds = new Histogram({
-  name: "ailearn_job_duration_seconds",
-  help: "Job execution duration in seconds by type",
-  labelNames: ["type"] as const,
-  buckets: [0.5, 1, 2.5, 5, 10, 15, 30, 60, 90, 120],
-  registers: [registry],
-});
-
-// ─── Provider 指标 ──────────────────────────────────────────────────────
-// DEPRECATED（PERF-B7）：见上方 Job 指标说明，这些 Provider 维度指标由
-// ai-worker 侧维护，API 进程内无生产写点，保留定义以兼容 ops01 测试。
-
-/** Provider 调用计数器 */
-export const providerCallsTotal = new Counter({
-  name: "ailearn_provider_calls_total",
-  help: "Total AI provider calls by operation and status",
-  labelNames: ["operation", "status"] as const,
-  registers: [registry],
-});
-
-/** Provider 调用延迟直方图（秒） */
-export const providerCallDurationSeconds = new Histogram({
-  name: "ailearn_provider_call_duration_seconds",
-  help: "AI provider call duration in seconds by operation",
-  labelNames: ["operation"] as const,
-  buckets: [0.5, 1, 2.5, 5, 10, 15, 30, 60, 90],
-  registers: [registry],
-});
-
-/** Provider 错误计数器（按错误分类） */
-export const providerErrorsTotal = new Counter({
-  name: "ailearn_provider_errors_total",
-  help: "Total AI provider errors by operation and error category",
-  labelNames: ["operation", "error_category"] as const,
-  registers: [registry],
-});
+// ─── Job/Provider 指标 ──────────────────────────────────────────────────
+// Job/Provider 维度指标在 API 进程内无生产写点，由 workers/ai-worker 侧
+// 维护同义指标（队列深度/终态/重试/租约丢失/时长、调用量/延迟/错误）。
+// 不在 API registry 注册以避免死指标。
 
 // ─── Database 指标 ──────────────────────────────────────────────────────
 
@@ -261,15 +182,6 @@ export const dbTransactionFailuresTotal = new Counter({
 export const dbRlsDeniedTotal = new Counter({
   name: "ailearn_db_rls_denied_total",
   help: "Total RLS policy denials",
-  registers: [registry],
-});
-
-/** 最近成功备份时间戳 gauge（Unix epoch 秒） */
-// DEPRECATED（PERF-B7）：目前无生产备份写点，指标输出恒为 0；保留定义以兼容
-// ops01/metrics 测试对指标名的断言。
-export const dbLastSuccessfulBackupTimestamp = new Gauge({
-  name: "ailearn_db_last_successful_backup_timestamp",
-  help: "Unix timestamp of the last verified successful backup",
   registers: [registry],
 });
 

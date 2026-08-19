@@ -41,6 +41,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { ApiTransaction } from "../../db/client.ts";
 import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError } from "@ailearn/shared";
 
 // ─── 表定义（与迁移 0077 一致；apps/api schema 镜像树未同步新表，同 02-3 模式）──
 
@@ -717,12 +718,10 @@ export type ExposureGuardErrorCode =
   | "stale_revision";
 
 /** exposure guard 的 fail-closed 错误（风格同 LegacyAdapterError） */
-export class ExposureGuardError extends Error {
-  readonly code: ExposureGuardErrorCode;
+export class ExposureGuardError extends DomainError {
+  declare readonly code: ExposureGuardErrorCode;
 
   constructor(message: string, code: ExposureGuardErrorCode) {
-    super(message);
-    this.name = "ExposureGuardError";
-    this.code = code;
+    super({ name: "ExposureGuardError", code, message, statusCode: 500 });
   }
 }

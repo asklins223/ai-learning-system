@@ -130,7 +130,7 @@ export function enumerateCandidateTargetUnits(
 export function assembleCandidateEvidenceBindingPlanV2(
   input: AssembleBindingPlanInput,
 ): AssembleBindingPlanResult {
-  const { workspaceId, candidate, groundingReport, evidenceManifest, eligibilityVector } = input;
+  const { candidate, groundingReport, evidenceManifest, eligibilityVector } = input;
   const report = groundingReport;
 
   // ── 校验 candidate revision 与 report 对齐 ──
@@ -313,9 +313,6 @@ export function assembleCandidateEvidenceBindingPlanV2(
           `evidence snapshot ${snapId} belongs to a different source snapshot`,
         );
       }
-      // workspace 校验：sealed manifest 本身按 workspace 约束，且快照均属本 manifest。
-      void workspaceId;
-
       bindings.push({
         targetUnit: req.targetUnit,
         evidenceSnapshotId: snap.evidenceSnapshotId,

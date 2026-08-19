@@ -58,29 +58,6 @@ const V06_NEW_TABLES = [
   "schedulingShadowDecisions",
   "validationQualitySignals",
 ];
-
-const V06_NEW_TABLE_IDENTIFIERS = [
-  "validation_question_rubric_items",
-  "validation_submissions",
-  "validation_submission_jobs",
-  "validation_action_commands",
-  "validation_assistance_exposures",
-  "validation_point_assessments",
-  "scheduling_shadow_decisions",
-  "validation_quality_signals",
-];
-void V06_NEW_TABLE_IDENTIFIERS;
-
-const V06_EXISTING_TABLE_EXTENSIONS = [
-  { table: "validationQuestions", fields: ["user_id", "artifact_id", "generation_job_id", "generator_kind", "status", "rubric_version", "source_fingerprint", "superseded_at", "stale_reason", "last_used_at", "use_count"] },
-  { table: "validationEvents", fields: ["submission_id", "note_version_id", "rubric_version", "reducer_version", "source_fingerprint", "source_status"] },
-  { table: "reviewAttempts", fields: ["evaluation_artifact_id", "evaluation_status", "assistance_level", "evidence_revealed_at", "policy_version", "source_fingerprint"] },
-  { table: "reviewSchedules", fields: ["key_point_id", "generation", "policy_version", "reason_code", "supersedes_schedule_id"] },
-  { table: "aiArtifacts", fields: ["parent_artifact_id"] },
-  { table: "jobs", fields: ["repair_state", "repair_attempt_count"] },
-];
-void V06_EXISTING_TABLE_EXTENSIONS;
-
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 test("v0.6 导出：exportWorkspace 导出所有 v0.6 新表数据", () => {

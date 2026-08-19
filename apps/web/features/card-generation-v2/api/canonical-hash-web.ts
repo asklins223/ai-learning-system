@@ -14,6 +14,8 @@ const HASH_CANONICAL_V2_DOMAIN = "ailearn-hash-canonical-v2";
 const HASH_CANONICAL_V2_VERSION = 1;
 const DOMAIN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9\-._/]*$/;
 
+import { sha256Hex } from "./sha256.ts";
+
 /** UTF-8 字节序比较（object key 排序；对合法 Unicode 与 code point 序一致）。 */
 function compareUtf8(a: string, b: string): number {
   const len = Math.min(a.length, b.length);
@@ -58,14 +60,6 @@ export function canonicalizeV2Web(value: unknown): unknown {
     return out;
   }
   throw new Error(`hash canonicalization V2: unsupported value type ${typeof value}`);
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const data = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 /** 版本化 canonical hash（与服务端 hashCanonicalV2 一致）。 */

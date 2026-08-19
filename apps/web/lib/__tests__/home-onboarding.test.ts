@@ -3,18 +3,18 @@ import { describe, it } from "node:test";
 import { resolveHomeOnboardingVisibility } from "../home-onboarding";
 
 describe("home onboarding visibility", () => {
-  it("shows first-use guidance only in an empty workspace owned by the user", () => {
+  it("always returns false after Journey V2 cutover", () => {
     assert.deepEqual(
       resolveHomeOnboardingVisibility({
         accountLoading: false,
         isPersonalWorkspace: true,
         isEmptyWorkspace: true,
       }),
-      { showOnboarding: true, isFirstUse: true },
+      { showOnboarding: false, isFirstUse: false },
     );
   });
 
-  it("does not show the legacy milestone projection in an active workspace", () => {
+  it("does not show onboarding in an active workspace", () => {
     assert.deepEqual(
       resolveHomeOnboardingVisibility({
         accountLoading: false,
@@ -25,7 +25,7 @@ describe("home onboarding visibility", () => {
     );
   });
 
-  it("never shows guidance in another user's workspace", () => {
+  it("does not show onboarding in another user's workspace", () => {
     assert.deepEqual(
       resolveHomeOnboardingVisibility({
         accountLoading: false,
@@ -36,7 +36,7 @@ describe("home onboarding visibility", () => {
     );
   });
 
-  it("does not flash guidance while identity is loading", () => {
+  it("does not flash onboarding while identity is loading", () => {
     assert.deepEqual(
       resolveHomeOnboardingVisibility({
         accountLoading: true,

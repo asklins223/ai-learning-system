@@ -23,7 +23,7 @@
  * 不建立第二套真相。
  */
 
-import { TrustClass } from "@ailearn/shared";
+import { DomainError, TrustClass } from "@ailearn/shared";
 import {
   RubricSessionResult,
   type AuthorizedAction,
@@ -619,14 +619,11 @@ export type OnCommitApplied = (ctx: {
 
 // ─── 编排（voice / silent 两条主路径）──────────────────────────────────────
 
-export class VerticalSliceError extends Error {
-  readonly code: string;
+export class VerticalSliceError extends DomainError {
   readonly httpStatus: number;
 
   constructor(code: string, httpStatus: number, message: string) {
-    super(message);
-    this.name = "VerticalSliceError";
-    this.code = code;
+    super({ name: "VerticalSliceError", code, message, statusCode: httpStatus });
     this.httpStatus = httpStatus;
   }
 }

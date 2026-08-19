@@ -1116,40 +1116,6 @@ export const CARD_GENERATION_EVENT_CONSUMERS_V2 = [
 
 // ─── 严格 parse helpers（unknown field fail closed）──────────────────────
 
-export function parseCreateCardGenerationRunRequestV2(
-  input: unknown,
-): CreateCardGenerationRunRequestV2 {
-  return createCardGenerationRunRequestV2Schema.parse(input);
-}
-
-export function parseGenerationSemanticSpecV2(
-  input: unknown,
-): GenerationSemanticSpecV2 {
-  return generationSemanticSpecV2Schema.parse(input);
-}
-
-export function parseGenerationInputSnapshotV2(
-  input: unknown,
-): GenerationInputSnapshotV2 {
-  return generationInputSnapshotV2Schema.parse(input);
-}
-
-export function parseCardPlanV2(input: unknown): CardPlanV2 {
-  return cardPlanV2Schema.parse(input);
-}
-
-export function parseLearningCardCandidateRevisionV2(
-  input: unknown,
-): LearningCardCandidateRevisionV2 {
-  return learningCardCandidateRevisionV2Schema.parse(input);
-}
-
-export function parseCandidateActionCommandV2(
-  input: unknown,
-): CandidateActionCommandV2 {
-  return candidateActionCommandV2Schema.parse(input);
-}
-
 export function parseActivateCardCandidatesRequestV2(
   input: unknown,
 ): ActivateCardCandidatesRequestV2 {

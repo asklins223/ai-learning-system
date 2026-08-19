@@ -31,7 +31,8 @@
  * schema 校验改用 shared zod schema 的 safeParse。
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
+import { normalizeText as fingerprintNormalize } from "@ailearn/shared/fingerprint";
 import { CapabilityFacet, TrustClass } from "@ailearn/shared";
 
 // ─── 本地契约类型（与 packages/shared/src/scene-contracts.ts 同型）────────
@@ -340,13 +341,6 @@ function stableStringify(value: unknown): string {
     pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
   }
   return `{${pairs.join(",")}}`;
-}
-
-function sha256Hex(data: string): string {
-  const hash = createHash("sha256");
-  const update = hash.update.bind(hash);
-  update(data, "utf8");
-  return hash.digest("hex");
 }
 
 /** 计算 public payload 的确定性 hash（仅覆盖 public 字段）。 */
@@ -740,14 +734,12 @@ export function checkAllowlistedIds(
 
 // ─── 4. 答案泄漏检测 ──────────────────────────────────────────────────────
 
+/** 安全归一化：先剥离零宽字符（防答案泄漏子串比对被绕过），再委托 fingerprint 的标准归一化。 */
 function normalizeText(text: string): string {
-  // 剥离零宽字符（ZERO WIDTH SPACE / JOINER / NON-JOINER / BOM 等）后统一化，
+  // 剥离零宽字符（ZERO WIDTH SPACE / JOINER / NON-JOINER / BOM 等），
   // 防答案泄漏子串比对被零宽字符绕过（security_review LOW #4 修复）。
-  return text
-    .replace(/[\u200b-\u200d\ufeff\u2060\u00ad]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
+  const stripped = text.replace(/[\u200b-\u200d\ufeff\u2060\u00ad]/g, "");
+  return fingerprintNormalize(stripped);
 }
 
 /** public token 文本不得覆盖正确答案 / expected target 文本。 */

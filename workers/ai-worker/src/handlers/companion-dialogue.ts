@@ -16,7 +16,8 @@
  * run 已非 active → 快速返回，不重复花钱（首个 delta 前 crash 可安全重试）。
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
@@ -245,7 +246,7 @@ const GROUNDED_TUTOR_COMPANION_PROMPT = [
 // 2026-08-11：grounded-tutor 分支的审计元数据——此前成功路径无条件记录
 // companion-persona-v1 的 version/hash，实际用 grounded-tutor prompt 时归属失真。
 const GROUNDED_TUTOR_PROMPT_ID = "companion-grounded-tutor-v1";
-const groundedTutorPromptSha256 = createHash("sha256").update(GROUNDED_TUTOR_COMPANION_PROMPT).digest("hex");
+const groundedTutorPromptSha256 = sha256Hex(GROUNDED_TUTOR_COMPANION_PROMPT);
 
 function parsePageContext(value: unknown): Record<string, unknown> | null {
   const parsed = typeof value === "string"

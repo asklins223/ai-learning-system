@@ -131,10 +131,9 @@ function runRateLimited(
 export async function learningRunRoutes(app: FastifyInstance) {
   // learning_run_v1 capability 门控：Card/Review/Player/submission/consumer
   // 同一次切换原子开启（§22.2）。未开启时本插件内全部端点 404 fail closed。
-  app.addHook("onRequest", async (req, reply) => {
+  app.addHook("onRequest", async (_req, reply) => {
     if (!isLearningRunV1Enabled()) {
-      void req;
-      return reply.code(404).send({
+            return reply.code(404).send({
         error: "learning_run_v1_disabled",
         message: "统一学习运行当前未开放",
       });

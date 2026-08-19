@@ -105,8 +105,7 @@ const ROUTE_PATTERNS: RoutePattern[] = [
     ownsFocusHeader: true,
     session: true,
   },
-  { variant: "focus", test: (p) => /^\/card-sets\/[^/]+$/.test(p), page: "card-set-detail", ownsFocusHeader: true },
-  { variant: "focus", test: (p) => /^\/notes\/[^/]+$/.test(p), page: "note-editor", ownsFocusHeader: true },
+    { variant: "focus", test: (p) => /^\/notes\/[^/]+$/.test(p), page: "note-editor", ownsFocusHeader: true },
   { variant: "focus", test: (p) => /^\/sources\/[^/]+$/.test(p), page: "source-detail", ownsFocusHeader: true },
 ];
 

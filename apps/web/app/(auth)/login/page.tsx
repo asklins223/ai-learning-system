@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTheme } from "@/components/ThemeProvider";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
-import { api, setToken } from "@/lib/api";
+import { api, clearLegacyTokenStorage } from "@/lib/api";
 
 type FieldErrors = {
   email?: string;
@@ -152,7 +152,7 @@ export default function LoginPage() {
       await api.login(email.trim(), password, remember);
       // The API now sets an HttpOnly session cookie. Clear any pre-migration
       // bearer token without persisting the new response token.
-      setToken(null);
+      clearLegacyTokenStorage();
       router.replace("/");
     } catch (caught: unknown) {
       setError(getLoginErrorMessage(caught));
