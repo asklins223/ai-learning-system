@@ -29,6 +29,7 @@ function surfaceFixture(): Record<string, unknown> {
     version: 3,
     objectiveId: OBJ,
     surfaceRevision: 7,
+    lifecycleEpoch: 1,
     content: {
       conceptLabel: "受激辐射与增益介质",
       publicSummary: "理解受激辐射如何产生光放大。",

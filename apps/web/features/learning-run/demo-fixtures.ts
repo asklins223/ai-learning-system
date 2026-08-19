@@ -398,7 +398,9 @@ const RESULT_FRAMES = (
     "七种结果语义逐一检查；只有 Commit 成功的结果可以显示调度变化。",
     {
       phase: "completed",
-      activeTask: null,
+      // not_assessable 保留 activeTask（VOICE_TASK）以便渲染「换成两三句话」替代按钮；
+      // 其余结果 activeTask 设为 null（本轮已结算）。
+      activeTask: outcome === "not_assessable" ? VOICE_TASK : null,
       progressLabel: "本轮已结算",
       result: resultFor(outcome),
     },

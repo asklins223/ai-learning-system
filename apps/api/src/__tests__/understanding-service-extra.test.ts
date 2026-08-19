@@ -4,6 +4,7 @@ import { db } from "../db/client.ts";
 import { reviewSchedules, understandingEvents } from "../db/schema/evidence.ts";
 import {
   learningObjectiveEvidenceBindingsV2,
+  learningObjectiveRevisionsV2,
 } from "../db/schema/card-generation-v2.ts";
 import {
   getUnderstandingStates,
@@ -42,6 +43,8 @@ type StateDbFixture = {
   bindings?: any[];
   // review_schedules 聚合行（subjectType='card' + subjectId=objectiveId）
   cardReviews?: any[];
+  // learningObjectiveRevisionsV2 行（{ objectiveId, conceptLabel }）
+  revisions?: any[];
 };
 
 function installStateDb(fixture: StateDbFixture): void {
@@ -57,6 +60,9 @@ function installStateDb(fixture: StateDbFixture): void {
       }
       if (table === learningObjectiveEvidenceBindingsV2) {
         return { where: async () => fixture.bindings ?? [] };
+      }
+      if (table === learningObjectiveRevisionsV2) {
+        return { where: async () => fixture.revisions ?? [] };
       }
       if (table === reviewSchedules) {
         return {
@@ -115,6 +121,15 @@ describe("understanding state aggregation", () => {
         { objectiveId: "obj-reviewed", currentObjectiveRevisionId: "rev-reviewed" },
         { objectiveId: "obj-seen", currentObjectiveRevisionId: "rev-seen" },
         { objectiveId: "obj-unknown", currentObjectiveRevisionId: null },
+      ],
+      // revisions 返回 conceptLabel 用于标题回退链
+      revisions: [
+        { objectiveId: "obj-misunderstood", conceptLabel: "Misunderstood" },
+        { objectiveId: "obj-due", conceptLabel: "Due" },
+        { objectiveId: "obj-unseen", conceptLabel: null },
+        { objectiveId: "obj-validated", conceptLabel: "Validated" },
+        { objectiveId: "obj-reviewed", conceptLabel: "Reviewed" },
+        { objectiveId: "obj-seen", conceptLabel: "Seen" },
       ],
       // events 按 subjectId = objectiveId 聚合（V2：objective 承担旧 keyPointId 角色）
       events: [
@@ -183,13 +198,13 @@ describe("understanding state aggregation", () => {
     assert.equal(byId.get("card-misunderstood")?.misunderstandingCount, 2);
     assert.equal(byId.get("card-misunderstood")?.hardEvidenceCount, 2);
     assert.equal(byId.get("card-misunderstood")?.softEvidenceCount, 1);
-    // coverage 按全部有 revision 的 objective 数归一化（3 bindings / 6 revisions）。
-    assert.equal(byId.get("card-misunderstood")?.evidenceCoverage, 0.5);
+    // coverage 按该 objective 自身的 binding 总数计算（Math.min(1, 3) = 1）
+    assert.equal(byId.get("card-misunderstood")?.evidenceCoverage, 1);
     assert.equal(byId.get("card-due")?.state, "due_review");
     assert.equal(byId.get("card-due")?.hardEvidenceCount, 0);
     assert.equal(byId.get("card-due")?.softEvidenceCount, 1);
     assert.equal(byId.get("card-unseen")?.state, "unseen");
-    assert.equal(byId.get("card-unseen")?.title, "（未命名学习卡）");
+    assert.equal(byId.get("card-unseen")?.title, "（未命名学习目标）");
     assert.equal(byId.get("card-validated")?.state, "preliminary_understood");
     assert.equal(byId.get("card-reviewed")?.state, "reviewed");
     assert.equal(byId.get("card-seen")?.state, "seen");
@@ -212,6 +227,9 @@ describe("understanding state aggregation", () => {
       objectives: [
         { objectiveId: "obj-soft", currentObjectiveRevisionId: "rev-soft" },
         { objectiveId: "obj-unknown", currentObjectiveRevisionId: null },
+      ],
+      revisions: [
+        { objectiveId: "obj-soft", conceptLabel: "Soft" },
       ],
     });
 

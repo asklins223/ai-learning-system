@@ -18,7 +18,8 @@ export function middleware(request: NextRequest) {
   // product shell while iterating, and let its layout 404 in production.
   if (
     process.env.NODE_ENV !== "production" &&
-    request.nextUrl.pathname === "/home-redesign"
+    request.nextUrl.pathname === "/home-redesign" ||
+    request.nextUrl.pathname.startsWith("/home-redesign/")
   ) {
     return NextResponse.next();
   }

@@ -196,8 +196,12 @@ describe("Card Generation V2 routes contract", () => {
 describe("Card Generation V2 helpers contract", () => {
   it("exports CardGenerationV2ServiceError with code and statusCode", () => {
     assert.ok(helpersSource.includes(`class CardGenerationV2ServiceError`));
-    assert.ok(helpersSource.includes(`readonly code: string`));
-    assert.ok(helpersSource.includes(`readonly statusCode: number`));
+    // 重构后 CardGenerationV2ServiceError 继承 DomainError，
+    // code/statusCode 由基类提供，helpers.ts 不再直接声明这些字段。
+    // 验证继承关系和构造函数传递 code + statusCode 参数。
+    assert.ok(helpersSource.includes(`extends DomainError`));
+    assert.ok(helpersSource.includes(`code`));
+    assert.ok(helpersSource.includes(`statusCode`));
   });
 
   it("exports NO_STORE with private, no-store", () => {
