@@ -5,7 +5,7 @@
  * - PREPARE 从激活的 LearningObjectiveV2 + LearningCardV2 冻结完整
  *   LearningTargetSnapshotV2（全部 §16.1 字段）；
  * - 正式链路（planner/structured/critic/commit）只消费 frozen snapshot，
- *   不再直接读取 V1 card_key_points.claim/quoteText（V1 表已退役）；
+ *   不再直接读取 card_key_points.claim/quoteText（表已删除）；
  * - keyPointId 只作为 Objective ID alias。
  *
  * 职责：
@@ -57,6 +57,7 @@ import type {
   EvidenceSupportStrengthV2,
 } from "@ailearn/shared/card-quality-v2-contracts";
 import type { KnowledgeFormV2, TaskIntentV1 } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 
 /** rubricHash 计算前剔除自引用字段（§11.3/§15.6）。 */
 function stripRubricHash(rubric: ObjectiveRubricV2): Omit<ObjectiveRubricV2, "rubricHash"> {
@@ -725,11 +726,8 @@ export async function prepareCardContentEpoch(
 
 // ─── Error ───────────────────────────────────────────────────────────────
 
-export class TargetSnapshotError extends Error {
-  readonly code: string;
+export class TargetSnapshotError extends DomainError {
   constructor(code: string, message: string) {
-    super(message);
-    this.name = "TargetSnapshotError";
-    this.code = code;
+    super({ name: "TargetSnapshotError", code, message, statusCode: 500 });
   }
 }

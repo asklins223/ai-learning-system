@@ -114,9 +114,9 @@ export interface LegacyRouteResolutionV3 {
 }
 
 /**
- * 解析旧 URL（§21.4，V1 卡退役后简化版）：
+ * 解析旧 URL（§21.4，简化版）：
  * - keyPointId：本身就是 objectiveId（alias 规则）→ mapped；
- * - legacy card：V1 卡已退役 → 仅 V2 card 可 mapped，其余 gone；
+ * - legacy card：旧卡已退役 → 仅 V2 card 可 mapped，其余 gone；
  *   （alias/hidden 兼容行已随 0176 清空，不再需要 forbidden 分支）
  * 结果幂等落 legacy_route_mappings_v2（ON CONFLICT DO NOTHING 后读取既有行）。
  */
@@ -177,7 +177,7 @@ export async function resolveLegacyRouteV3(
         note: "V2 card → objective",
       };
     } else {
-      // V1 卡已退役（0176 清空）：旧 card 深链一律 gone
+      // 旧卡已退役（0176 清空）：旧 card 深链一律 gone
       resolution = {
         legacyKind,
         legacyId,

@@ -1,3 +1,5 @@
+import { DomainError } from "./domain-error.ts";
+
 /**
  * discrete-v2: 统一离散调度策略 (计划 §10.6)
  *
@@ -62,12 +64,11 @@ export type DiscreteV2ErrorCode =
   | "invalid_outcome"
   | "invalid_time";
 
-export class DiscreteV2PolicyError extends Error {
+export class DiscreteV2PolicyError extends DomainError {
   readonly code: DiscreteV2ErrorCode;
 
   constructor(code: DiscreteV2ErrorCode) {
-    super(code);
-    this.name = "DiscreteV2PolicyError";
+    super({ name: "DiscreteV2PolicyError", code, message: code, statusCode: 400 });
     this.code = code;
   }
 }

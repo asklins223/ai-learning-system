@@ -34,6 +34,7 @@ import {
   type CostDimension,
   type CostSample,
 } from "../observability/metrics-schema.ts";
+import { DomainError } from "@ailearn/shared";
 
 // ─── 1. 档位模型（§18.2 第 3/5 步）─────────────────────────────────────────
 
@@ -391,11 +392,10 @@ export const FROZEN_CANARY_GATES: Record<CanaryTier, CanaryGateThresholds> = {
 };
 
 /** 注入门槛低于冻结值 → 抛错（门槛冻结，不允许调低；09-2 同款 fail closed 模式）。 */
-export class CanaryStageError extends Error {
+export class CanaryStageError extends DomainError {
   readonly code = "CANARY_STAGE_GATE_FROZEN" as const;
   constructor(message: string) {
-    super(message);
-    this.name = "CanaryStageError";
+    super({ name: "CanaryStageError", code: "CANARY_STAGE_GATE_FROZEN", message, statusCode: 400 });
   }
 }
 

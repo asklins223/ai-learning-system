@@ -26,7 +26,7 @@
  *   视为未达标；release qualification 的严格口径见 release-qualification.ts。
  */
 
-import { CapabilityFacet, SceneMode } from "@ailearn/shared";
+import { CapabilityFacet, DomainError, SceneMode } from "@ailearn/shared";
 import {
   CAPABILITY_FACETS,
   GOLD_VERDICTS,
@@ -220,10 +220,9 @@ export interface GoldRoundsReport {
 
 // ─── 错误与校验 ────────────────────────────────────────────────────────────
 
-export class GoldRoundsError extends Error {
+export class GoldRoundsError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "GoldRoundsError";
+    super({ name: "GoldRoundsError", code: "gold_rounds_error", message, statusCode: 400 });
   }
 }
 

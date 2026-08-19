@@ -162,7 +162,6 @@ describe("relation-governance: 独立 support check", () => {
   });
 
   it("引用完整 ≠ 语义支撑通过：direct 但无 semantic support 报告 → 不算 direct", () => {
-    const verdict = supportCheck(propose(), { support: "direct" });
     // semanticSupportReportHash 为 null 时 helper 置 null（非 direct）
     const verdictNoReport = runIndependentSupportCheck({
       candidate: propose().candidate,
@@ -175,7 +174,6 @@ describe("relation-governance: 独立 support check", () => {
     });
     assert.equal(verdictNoReport.supported, false);
     assert.equal(verdictNoReport.level, "partial");
-    void verdict;
   });
 
   it("存在 contradicting 证据 → unsupported（fail closed）", () => {

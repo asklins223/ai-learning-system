@@ -637,7 +637,7 @@ async function gatherCriticInput(
     : [];
   if (rubricTargetIds.length === 0) throw new CriticOutputError("no rubric targets");
 
-  // V1 的 cardKeyPoints/claim/quote 读取已随旧栈退役：非 V2（无 frozen
+  // cardKeyPoints/claim/quote 读取已退役：非 V2（无 frozen
   // snapshot）的 run 一律 fail closed（不猜题面，方案 20 §16）。
   const snapshot = contractRows[0]?.snapshotHash
     ? await loadFrozenTargetSnapshotV2(tx, command.workspaceId, command.runId)
@@ -1395,7 +1395,7 @@ async function applyDemonstratedSchedule(
   if (disposition === "facet_evidence") {
     return { kind: "none", reasonCode: "facet_only" };
   }
-  // 证据存在性：V1 的 cardKeyPoints.quote 读取已退役。可走到 Commit 的
+  // 证据存在性：cardKeyPoints.quote 读取已退役。可走到 Commit 的
   // canonical run 必然已通过 V2 evidence closure 复验（revalidateV2CommitEpochs
   // 要求全部 usable，fail closed），故 hard evidence 恒成立（P2 保守口径）。
   const hasHardEvidence = true;

@@ -14,9 +14,9 @@ import {
   clampTimeBudget,
   computeRunContractHash,
   planRun,
-  sha256Hex,
   type RunPlannerTargetInput,
 } from "./run-planner.ts";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import {
   buildRunPublicView,
   buildSchedulePolicySummary,

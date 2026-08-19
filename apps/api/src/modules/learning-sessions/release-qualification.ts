@@ -28,6 +28,7 @@
  * - gold-rounds.ts 的固定对抗集答案泄漏检查。
  */
 
+import { DomainError } from "@ailearn/shared";
 import {
   CAPABILITY_FACETS,
   GOLD_VERDICTS,
@@ -291,10 +292,9 @@ export interface ReleaseQualificationReport {
 
 // ─── 错误与校验 ────────────────────────────────────────────────────────────
 
-export class ReleaseQualificationError extends Error {
+export class ReleaseQualificationError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "ReleaseQualificationError";
+    super({ name: "ReleaseQualificationError", code: "release_qualification_error", message, statusCode: 400 });
   }
 }
 

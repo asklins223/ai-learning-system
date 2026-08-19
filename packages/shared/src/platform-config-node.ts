@@ -228,7 +228,8 @@ export function resolveSystemPlatform(cap: Capability): ResolvedPlatform | null 
 }
 
 /**
- * Legacy env var resolution (backward compatibility when no config file exists).
+ * Legacy env var resolution — used when no config file exists (e.g. CI environments
+ * that set `AI_PROVIDER_CARD: mock` without an ai-platforms.json).
  * Maps capabilities to provider names via AI_PROVIDER_* env vars.
  */
 

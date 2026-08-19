@@ -31,7 +31,7 @@
  *   引用；评估/commit 由 03-3/后续任务实现。
  */
 
-import { sha256Hex } from "@ailearn/shared/content-hash";
+import { sha256Hex, stableStringify } from "@ailearn/shared/content-hash";
 import { DomainError } from "@ailearn/shared";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
@@ -616,22 +616,7 @@ export function buildBudgetEnvelope(input: {
 
 /** 稳定化 JSON 序列化：对象键排序（递归）、数组保序、undefined 属性跳过。
  *  （canonical-events.ts 亦导出同名 stableStringify，本模块以别名导出避免歧义） */
-function stableStringify(value: unknown): string {
-  if (value === null || value === undefined || typeof value !== "object") {
-    return JSON.stringify(value ?? null);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const pairs: string[] = [];
-  for (const key of Object.keys(obj).sort()) {
-    const v = obj[key];
-    if (v === undefined) continue;
-    pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
-  }
-  return `{${pairs.join(",")}}`;
-}
+// stableStringify imported from @ailearn/shared/content-hash
 
 /** stableStringify 的公开别名（index.ts re-export 时与 canonical-events 的
  *  stableStringify 无命名冲突）。 */

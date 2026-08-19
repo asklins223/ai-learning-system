@@ -10,7 +10,6 @@
  */
 
 import { sha256Hex } from "@ailearn/shared/content-hash";
-export { sha256Hex };
 import type {
   PrivateTaskSolutionV1,
   TaskInteractionV1,

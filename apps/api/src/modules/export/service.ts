@@ -239,7 +239,7 @@ async function checkExportSize(tx: RestoreTx, workspaceId: string): Promise<void
   // F14（round-4）：size 防护覆盖面原只覆盖 notes/note_blocks/evidences 3 个小表，
   // 却导出 ~25 表。扩展覆盖另 4 个 append-only/易膨胀大表（validationEvents、
   // sourceSegments、reviewAttempts、aiArtifacts），它们可能远大于预检的 3 表。
-  // V1 退役：原 cardKeyPoints 计数项随 V1 表删除，一并移除。
+  // cardKeyPoints 计数项已随表删除一并移除。
   const [sourceSegmentCount, reviewAttemptCount, aiArtifactCount] = await Promise.all([
     tx.select({ cnt: count() })
       .from(sourceSegments)
@@ -435,7 +435,7 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
           )).orderBy(asc(sourceSegments.sourceId), asc(sourceSegments.ordinal), asc(sourceSegments.id)).limit(EXPORT_BATCH),
         cursorFrom: (last) => ({ sourceId: last.sourceId, ordinal: last.ordinal, id: last.id }),
       }),
-      // V1 退役：旧版学习卡表 learningCards / cardKeyPoints（V1 表）已删除，
+      // 旧版学习卡表 learningCards / cardKeyPoints 已删除，
       // 不再导出。V2 卡片导出见下方 learningCardsV2 / objectivesV2 等分块加载。
       // 原 asc(cardId, ordinal) + id 上界 cursor（cardKeyPoints）cursorType 一并移除。
       // 原 desc(createdAt) + id 下界 cursor（learningCards）一并移除。
@@ -1007,7 +1007,7 @@ export async function restoreWorkspace(
         }
       }
     }
-    // validation_events 引用完整性（V1 退役：cardId / keyPointId 列已删除，仅校验 questionId）
+    // validation_events 引用完整性（cardId / keyPointId 列已删除，仅校验 questionId）
     if (Array.isArray(data.validationEvents)) {
       for (const v of data.validationEvents as Record<string, unknown>[]) {
         if (v.questionId && !questionIds.has(v.questionId as string)) {
@@ -1015,11 +1015,9 @@ export async function restoreWorkspace(
         }
       }
     }
+    // validation_questions 的 cardId 列已删除，不再需要校验
     if (Array.isArray(data.validationQuestions)) {
-      for (const q of data.validationQuestions as Record<string, unknown>[]) {
-        // V1 退役: validation_questions 的 cardId 列已删除，不再校验
-        void q;
-      }
+      // 仅检查 questionId 引用完整性（已在上面的 questionIds 集合构建中覆盖）
     }
     if (Array.isArray(data.reviewAttempts)) {
       for (const a of data.reviewAttempts as Record<string, unknown>[]) {
@@ -1062,7 +1060,7 @@ export async function restoreWorkspace(
 
     if (Array.isArray(data.validationSubmissions)) {
       for (const s of data.validationSubmissions as Record<string, unknown>[]) {
-        // V1 退役: validation_submissions 的 cardId / keyPointId 列已删除
+        // cardId / keyPointId 列已删除
         if (s.questionId && !questionIds.has(s.questionId as string)) {
           refErrors.push(`validation_submission references missing question ${s.questionId}`);
         }
@@ -1341,7 +1339,7 @@ export async function restoreWorkspace(
       );
 
       // 8. 恢复 ai_artifacts（PERF-40 修复：批量 INSERT）
-      // V1 learning_cards 已退役；validation_events 复合 FK 已改指 learning_objectives_v2。
+      // validation_events 复合 FK 已改指 learning_objectives_v2。
       counts.aiArtifacts = await restoreTable(
         tx, aiArtifacts, data.aiArtifacts,
         (art) => ({
@@ -1359,9 +1357,9 @@ export async function restoreWorkspace(
         }),
       );
 
-// V1 退役：learning_cards / card_key_points（V1 表）已删除，不再恢复。
+// learning_cards / card_key_points 已删除，不再恢复。
 // V2 卡片数据（learning_cards_v2 / objectives_v2）在下方单独恢复。
-// migration 0176 已清空 V1 表并改指 FK。
+// migration 0176 已清空旧表并改指 FK。
 
       // 恢复 evidences（PERF-40 修复：批量 INSERT）
       counts.evidences = await restoreTable(

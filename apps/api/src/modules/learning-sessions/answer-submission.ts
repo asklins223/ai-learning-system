@@ -236,7 +236,7 @@ export interface AnswerSubmissionTx {
 
 /**
  * PG 实现：用原生 SQL 写 learning_response_artifacts + 锁 learning_episodes。
- * 不依赖 drizzle 表强类型（learningResponseArtifacts 在 packages/db，
+ * 不依赖 drizzle 表强类型（learningResponseArtifacts 在 apps/api/src/db/schema，
  * 此处经 tx.execute 原生 SQL 避免跨包表引用）。
  */
 export function createPgAnswerSubmissionRepository(

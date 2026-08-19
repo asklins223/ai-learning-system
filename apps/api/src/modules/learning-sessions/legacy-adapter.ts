@@ -21,6 +21,7 @@
  */
 
 import { sha256Hex } from "@ailearn/shared/content-hash";
+import { DomainError } from "@ailearn/shared";
 import { like } from "drizzle-orm";
 import { validationEvents, reviewAttempts } from "../../db/schema/index.ts";
 import type { ApiTransaction } from "../../db/client.ts";
@@ -511,12 +512,11 @@ function firstNumber(obj: Record<string, unknown>, keys: string[]): number | und
 // ─── 错误类型 ───────────────────────────────────────────────────────────
 
 /** legacy adapter 的 fail-closed 错误（风格同 HandoffAdapterError） */
-export class LegacyAdapterError extends Error {
+export class LegacyAdapterError extends DomainError {
   readonly code: string;
 
   constructor(message: string, code: string) {
-    super(message);
-    this.name = "LegacyAdapterError";
+    super({ name: "LegacyAdapterError", code, message, statusCode: 500 });
     this.code = code;
   }
 }

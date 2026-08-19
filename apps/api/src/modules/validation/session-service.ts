@@ -54,6 +54,7 @@ import {
   JobStatus,
 } from "@ailearn/shared";
 import { reduceRubric, toReviewOutcome, calculateSchedule, RUBRIC_REDUCER_VERSION, computeFSRSShadowDecision, isFSRSShadowEnabled, type FSRSShadowInput, type RubricItemInput } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 import { computeExposureFingerprint, isUnassistedEligible } from "@ailearn/shared/fingerprint";
 import { computeSourceFingerprint } from "@ailearn/shared/fingerprint";
 import { computeUnassistedEligibleAfter } from "@ailearn/shared/fingerprint";
@@ -103,15 +104,12 @@ export type SessionErrorCode =
   | "not_yet_due"
   | "submission_locked";
 
-export class SessionError extends Error {
+export class SessionError extends DomainError {
   readonly code: SessionErrorCode;
   readonly statusCode: number;
 
   constructor(code: SessionErrorCode, message?: string) {
-    super(message ?? code);
-    this.name = "SessionError";
-    this.code = code;
-    this.statusCode =
+    const statusCode =
       code === "not_found" || code === "card_not_found"
         ? 404
         : code === "no_hard_evidence" || code === "assistance_cooldown" || code === "unsafe_question" || code === "question_expired"
@@ -119,6 +117,9 @@ export class SessionError extends Error {
           : code === "no_objective" || code === "stale_card"
             ? 409
             : 409;
+    super({ name: "SessionError", code, message: message ?? code, statusCode });
+    this.code = code;
+    this.statusCode = statusCode;
   }
 }
 

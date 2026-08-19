@@ -4,6 +4,7 @@ import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "../../db/schema/note.ts";
 import { searchDocuments } from "../../db/schema/search.ts";
 import { logger } from "../../lib/logger.ts";
+import { DomainError } from "@ailearn/shared";
 
 /**
  * PERF-10: Chunked select helper for large IN arrays.
@@ -288,11 +289,10 @@ export async function ensureImageAssetsForBlocks<T extends { type: string; conte
  * 乐观并发冲突：客户端提交的 baseVersionId 与服务端 currentVersionId 不一致。
  * 路由层捕获后返回 409，提示客户端重新拉取最新版本再编辑。
  */
-export class RevisionConflictError extends Error {
+export class RevisionConflictError extends DomainError {
   currentVersionId: string | null;
   constructor(currentVersionId: string | null) {
-    super("note version conflict");
-    this.name = "RevisionConflictError";
+    super({ name: "RevisionConflictError", code: "note_version_conflict", message: "note version conflict", statusCode: 409 });
     this.currentVersionId = currentVersionId;
   }
 }
@@ -301,10 +301,9 @@ export class RevisionConflictError extends Error {
  * P2-3: 尝试恢复一篇未被软删除的笔记时抛出。
  * 路由层捕获后返回 409 而非 404，区分「笔记不存在」和「笔记未删除」。
  */
-export class NoteNotDeletedError extends Error {
+export class NoteNotDeletedError extends DomainError {
   constructor() {
-    super("note is not deleted");
-    this.name = "NoteNotDeletedError";
+    super({ name: "NoteNotDeletedError", code: "note_not_deleted", message: "note is not deleted", statusCode: 409 });
   }
 }
 
@@ -990,8 +989,7 @@ export async function updateNote(
           resultBlocks = inPlaceBlocks as NoteBlock[];
         } else {
           // 无法原地更新（版本被 sealed 或缺失），降级为创建新版本。
-          // V1 退役说明：原先在「有 V1 卡引用版本」时也会降级，V2 已不再
-          // 通过 note_version 直接引用卡片，故仅剩 sealed 保护触发此分支。
+          // note_version 不再直接引用卡片，仅 sealed 保护触发此分支。
           const latest = await tx.query.noteVersions.findFirst({
             where: eq(noteVersions.noteId, noteId),
             orderBy: (v, { desc: desc1 }) => [desc1(v.versionNo)],
@@ -1184,9 +1182,8 @@ export async function deleteNote(
     .set({ deletedAt, updatedAt: deletedAt })
     .where(eq(notes.id, noteId));
 
-  // V1 退役：旧版学习卡（learningCards / cardKeyPoints，V1 表）与以其 cardId
-  // 为 subjectId 的 review_schedules 计划已随 V1 表删除，此处不再归档 V1 卡片 /
-  // 取消 V1 卡片复习计划 / 清理 V1 卡片搜索索引。V2 卡片经 objectiveId 关联，
+  // 旧版学习卡表已删除，此处不再归档卡片 /
+  // 取消卡片复习计划 / 清理卡片搜索索引。V2 卡片经 objectiveId 关联，
   // 其生命周期不在 note 模块管理。
 
   // 清理搜索索引 — 软删除后笔记不应出现在搜索结果中
@@ -1226,9 +1223,8 @@ export async function restoreDeletedNote(
       .set({ deletedAt: null, updatedAt: new Date() })
       .where(eq(notes.id, noteId));
 
-    // V1 退役：旧版学习卡（learningCards / cardKeyPoints，V1 表）与以其 cardId
-    // 为 subjectId 的 review_schedules 计划已随 V1 表删除，此处不再恢复被
-    // deleteNote 归档的 V1 卡片及其复习计划。V2 卡片经 objectiveId 关联，其
+    // 旧版学习卡表已删除，此处不再恢复被
+    // deleteNote 归档的卡片及其复习计划。V2 卡片经 objectiveId 关联，其
     // 生命周期不在 note 模块管理。
 
     // 返回恢复后的完整数据
@@ -1266,8 +1262,7 @@ export async function restoreDeletedNote(
     });
   }
 
-  // V1 退役：原「重建被恢复 V1 卡片的搜索索引」逻辑（cardKeyPoints / 卡片
-  // 搜索文档）已随 V1 表删除；V2 卡片搜索索引由 card 模块自行维护。
+  // 卡片搜索索引由 card 模块自行维护。
 
   return result;
 }
@@ -1317,10 +1312,9 @@ export async function physicalDeleteNote(
       .where(eq(noteVersions.noteId, noteId));
     const versionIds = versionRows.map((v) => v.id);
 
-    // V1 退役：原物理删除的级联清理（steps 2-13：learning_cards /
-    // cardKeyPoints / evidences / validation_events / 以 cardId 为 subjectId 的
-    // review_schedules / understanding_events / ai_artifacts / jobs）全部服务于
-    // 已删除的 V1 卡片表，无 V2 等价物，已整体移除。V2 卡片/客观对象的清理由
+    // 原物理删除的级联清理（learning_cards / cardKeyPoints / evidences /
+    // validation_events / review_schedules / understanding_events / ai_artifacts /
+    // jobs）全部服务于已删除的卡片表，无 V2 等价物，已整体移除。V2 卡片/客观对象的清理由
     // 各自模块负责。以下仅保留 note 自身的级联（image asset 收集与 note 删除）。
 
     // 收集图片资产与旧版 Markdown object key。Typed asset 可能被同一
@@ -1435,7 +1429,7 @@ export async function physicalDeleteNote(
 
   const cleanupIds = await collectAndDeleteCascade(executor);
 
-  // 清理搜索索引（仅 note；V1 卡片/evidence 搜索文档已随 V1 卡片级联退役移除）
+  // 清理搜索索引（仅 note；卡片/evidence 搜索文档已随卡片级联移除）
   await deleteSearchDocuments(executor, workspaceId, [
     { objectType: "note", objectId: noteId },
   ]);

@@ -25,10 +25,9 @@ import { randomUUID } from "node:crypto";
 
 const ADMIN_URL = process.env.DATABASE_URL_MIGRATOR
   ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
-const WORKER_URL = process.env.DATABASE_URL_WORKER
-  ?? "postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn";
 // 测试体以 ailearn_worker 角色执行 pollV2Outbox（RLS NOBYPASSRLS 验证）。
-void WORKER_URL;
+// WORKER_URL 由 pollV2Outbox 内部通过 process.env.DATABASE_URL_WORKER 读取。
+process.env.DATABASE_URL_WORKER ??= "postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn";
 
 process.env.DATABASE_URL_API ??= ADMIN_URL;
 

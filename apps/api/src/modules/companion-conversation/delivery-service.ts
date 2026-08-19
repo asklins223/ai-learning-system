@@ -11,18 +11,16 @@ import type { ApiTransaction } from "../../db/client.ts";
 import { assistantDeliveries } from "../../db/schema/assistant-deliveries.ts";
 import { COMPANION_INBOX_NOTIFY_CHANNEL } from "./companion-notify.ts";
 import type { AssistantDeliveryV2 } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 
 export interface DeliveryScope {
   workspaceId: string;
   userId: string;
 }
 
-export class DeliveryServiceError extends Error {
-  readonly code: string;
+export class DeliveryServiceError extends DomainError {
   constructor(code: string, message: string) {
-    super(message);
-    this.name = "DeliveryServiceError";
-    this.code = code;
+    super({ name: "DeliveryServiceError", code, message, statusCode: 500 });
   }
 }
 

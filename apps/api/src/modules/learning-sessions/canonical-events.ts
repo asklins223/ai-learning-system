@@ -1035,7 +1035,7 @@ export function pgCanonicalFactReader(tx: ApiTransaction): CanonicalFactReader {
           scheduleId: reviewSchedules.id,
           subjectType: reviewSchedules.subjectType,
           subjectId: reviewSchedules.subjectId,
-          keyPointId: reviewSchedules.subjectId, // V2: card 型 subjectId = objectiveId（V1 keyPointId 已退役）
+          keyPointId: reviewSchedules.subjectId, // V2: card 型 subjectId = objectiveId
           status: reviewSchedules.status,
           nextReviewAt: reviewSchedules.nextReviewAt,
           intervalDays: reviewSchedules.intervalDays,

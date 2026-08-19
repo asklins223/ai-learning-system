@@ -19,6 +19,7 @@ import {
   type RubricVerdict as RubricVerdictType,
   type ValidationOutcome as ValidationOutcomeType,
 } from "./enums.ts";
+import { DomainError } from "./domain-error.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -55,12 +56,11 @@ const VERDICTS = new Set<string>(Object.values(RubricVerdict));
 
 // ─── Validation ───────────────────────────────────────────────────────────
 
-export class RubricReducerError extends Error {
+export class RubricReducerError extends DomainError {
   readonly code: "empty_rubric" | "invalid_verdict" | "invalid_weight" | "no_required_item";
 
   constructor(code: "empty_rubric" | "invalid_verdict" | "invalid_weight" | "no_required_item") {
-    super(code);
-    this.name = "RubricReducerError";
+    super({ name: "RubricReducerError", code, message: code, statusCode: 400 });
     this.code = code;
   }
 }

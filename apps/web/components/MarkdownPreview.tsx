@@ -441,7 +441,7 @@ function tokenize(src: string): Token[] {
 }
 
 export const MarkdownPreview = React.memo(function MarkdownPreview({ source, demoteHeadings = false, allowRemoteImages = true }: Props) {
-  const [katexReady, bumpKatexReady] = useReducer((value: number) => value + 1, 0);
+  const [, bumpKatexReady] = useReducer((value: number) => value + 1, 0);
   useEffect(() => {
     let cancelled = false;
     // F4：按需加载 KaTeX，完成后 re-render 补渲公式。
@@ -456,7 +456,6 @@ export const MarkdownPreview = React.memo(function MarkdownPreview({ source, dem
     // 仅首次挂载需要；katexReady 变化只为触发重渲。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  void katexReady;
   const tokens = useMemo(() => tokenize(source), [source]);
   const containerRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);

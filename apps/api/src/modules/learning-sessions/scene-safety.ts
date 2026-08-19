@@ -31,7 +31,7 @@
  * schema 校验改用 shared zod schema 的 safeParse。
  */
 
-import { sha256Hex } from "@ailearn/shared/content-hash";
+import { sha256Hex, stableStringify } from "@ailearn/shared/content-hash";
 import { normalizeText as fingerprintNormalize } from "@ailearn/shared/fingerprint";
 import { CapabilityFacet, TrustClass } from "@ailearn/shared";
 
@@ -326,22 +326,7 @@ export interface PrivateEpisodeContractLite {
 
 // ─── 确定性哈希原语（trust-service 同款，SEC-01 静态扫描兼容）─────────────
 
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value ?? null);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const pairs: string[] = [];
-  for (const key of Object.keys(obj).sort()) {
-    const v = obj[key];
-    if (v === undefined) continue;
-    pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
-  }
-  return `{${pairs.join(",")}}`;
-}
+// stableStringify imported from @ailearn/shared/content-hash
 
 /** 计算 public payload 的确定性 hash（仅覆盖 public 字段）。 */
 export function computePublicPayloadHash(scene: LearningScene): string {

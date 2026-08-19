@@ -173,7 +173,6 @@ export const validationAssistanceExposures = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    // V1 keyPoint reference removed
     exposureFingerprint: text("exposure_fingerprint").notNull(),
     lastExposureKind: text("last_exposure_kind").notNull(), // pre_submit_source | post_result_feedback
     firstExposedAt: timestamp("first_exposed_at", { withTimezone: true }).notNull(),
@@ -233,7 +232,6 @@ export const schedulingShadowDecisions = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    // V1 keyPoint reference removed
     sourceType: text("source_type").notNull(), // validation_event | review_attempt
     sourceId: uuid("source_id").notNull(),
     algorithm: text("algorithm").notNull(), // fsrs

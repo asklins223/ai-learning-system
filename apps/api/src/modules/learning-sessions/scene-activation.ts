@@ -25,7 +25,7 @@
  * COMMIT/repository 接入，本模块只提供端口契约与内存实现。
  */
 
-import { sha256Hex } from "@ailearn/shared/content-hash";
+import { sha256Hex, stableStringify } from "@ailearn/shared/content-hash";
 import { DomainError, TrustClass } from "@ailearn/shared";
 import {
   computeDisclosureProfileHash,
@@ -232,22 +232,7 @@ export type SceneActivationVerdict =
 
 // ─── 确定性哈希（SEC-01 静态扫描兼容，trust-service 同款）────────────────
 
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value ?? null);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const pairs: string[] = [];
-  for (const key of Object.keys(obj).sort()) {
-    const v = obj[key];
-    if (v === undefined) continue;
-    pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
-  }
-  return `{${pairs.join(",")}}`;
-}
+// stableStringify imported from @ailearn/shared/content-hash
 
 /** 计算 activation nonce（exactly-once；同冻结输入恒等）。 */
 export function computeActivationNonce(input: {

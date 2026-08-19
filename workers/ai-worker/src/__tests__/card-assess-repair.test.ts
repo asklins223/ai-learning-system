@@ -7,14 +7,13 @@
  * - schema_unparseable is terminal (hardFailure)
  * - zero valid key points triggers insufficient_valid_key_points
  * - coverage_too_low triggers on > 50% loss
- * - backward compatibility: sanitizeCardOutput returns same as assessCardOutput.sanitized
+ * - assessCardOutput.sanitized returns the sanitized output
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   assessCardOutput,
-  sanitizeCardOutput,
   CARD_ASSESSOR_VERSION,
 } from "../lib/card-quality.ts";
 import type { LearningCardOutput } from "@ailearn/shared";
@@ -168,14 +167,13 @@ test("assessCardOutput: schema_invalid_bounded when > 10 key_points", () => {
   assert.equal(schemaIssue!.severity, "hard");
 });
 
-// ─── backward compatibility ────────────────────────────────────────────────
+// ─── sanitized output consistency ───────────────────────────────────────────
 
-test("sanitizeCardOutput: returns same as assessCardOutput.sanitized", () => {
+test("assessCardOutput: .sanitized returns the sanitized output", () => {
   const output = makeOutput([
     { claim: "分布式系统在网络分区时只能在一致性和可用性之间二选一", quote_text: QUOTE_A },
     { claim: "React 16.8 引入的 Hooks 机制使无状态函数组件也能管理内部状态和副作用", quote_text: QUOTE_B },
   ]);
-  const sanitized = sanitizeCardOutput(output);
   const assessed = assessCardOutput(output);
-  assert.deepEqual(sanitized, assessed.sanitized);
+  assert.ok(assessed.sanitized.key_points.length > 0);
 });

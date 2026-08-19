@@ -222,12 +222,12 @@ export function registerPetIpc(context: PetIpcContext): () => void {
     logger.info({ channel: PET_IPC_CHANNELS.hidePet }, "pet ipc: pet hidden");
   });
 
-  ipcMain.on(PET_IPC_CHANNELS.legacyOpenExternal, (event, url: unknown) => {
+  ipcMain.on(PET_IPC_CHANNELS.openExternal, (event, url: unknown) => {
     if (!isTrustedSender(event, senderId("main"), context.origin, "main")) return;
     // 2026-08-11：仅信任 https 协议（不校验 host——如启用建议加白名单/确认 UI）
     if (typeof url === "string" && /^https:\/\//i.test(url)) context.openExternal(url);
   });
-  handle(PET_IPC_CHANNELS.legacyGetVersion, (event) => {
+  handle(PET_IPC_CHANNELS.getVersion, (event) => {
     requireRole(event, "main");
     // 2026-08-11 修复：返回应用版本而非 Electron 内核版本（此前 UI 显示
     // "Electron 33.x" 且与 main.ts:660 的 v${app.getVersion()} 自相矛盾）。
@@ -236,6 +236,6 @@ export function registerPetIpc(context: PetIpcContext): () => void {
 
   return () => {
     for (const channel of handlers) ipcMain.removeHandler(channel);
-    ipcMain.removeAllListeners(PET_IPC_CHANNELS.legacyOpenExternal);
+    ipcMain.removeAllListeners(PET_IPC_CHANNELS.openExternal);
   };
 }

@@ -24,6 +24,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { DomainError } from "@ailearn/shared";
 
 // ─── 1. 版本化 context/action contract ────────────────────────────────────
 
@@ -158,13 +159,12 @@ export const ShellActionErrorCode = {
 export type ShellActionErrorCode =
   (typeof ShellActionErrorCode)[keyof typeof ShellActionErrorCode];
 
-export class ShellActionError extends Error {
+export class ShellActionError extends DomainError {
   readonly code: ShellActionErrorCode;
   readonly statusCode: number;
 
   constructor(code: ShellActionErrorCode, statusCode: number, message: string) {
-    super(message);
-    this.name = "ShellActionError";
+    super({ name: "ShellActionError", code, message, statusCode });
     this.code = code;
     this.statusCode = statusCode;
   }

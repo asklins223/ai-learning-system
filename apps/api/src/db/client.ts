@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { DomainError } from "@ailearn/shared";
 import * as schema from "./schema/index.ts";
 
 // v0.4: the API must use its own database role in production.  The shared
@@ -53,10 +54,9 @@ export interface NormalizedWorkspaceTransactionContext {
   userId: string;
 }
 
-export class WorkspaceTransactionContextError extends Error {
+export class WorkspaceTransactionContextError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "WorkspaceTransactionContextError";
+    super({ name: "WorkspaceTransactionContextError", code: "workspace_transaction_context_error", message, statusCode: 500 });
   }
 }
 
@@ -235,12 +235,11 @@ export function closeDatabase(): Promise<void> {
   return closePromise;
 }
 
-export class AdvisoryLockUnavailableError extends Error {
+export class AdvisoryLockUnavailableError extends DomainError {
   readonly statusCode = 409;
 
   constructor(message = "operation already in progress") {
-    super(message);
-    this.name = "AdvisoryLockUnavailableError";
+    super({ name: "AdvisoryLockUnavailableError", code: "advisory_lock_unavailable", message, statusCode: 409 });
   }
 }
 

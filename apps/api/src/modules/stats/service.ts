@@ -68,7 +68,7 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
   const activeCardCount = v2ActiveCardCount;
 
   // Plan 23 CS-04：Objective 口径（hidden alias=0；与 Dashboard 对账）
-  // V2：review_schedules 无 key_point_id 列（V1 退役）。
+  // V2：review_schedules 无 key_point_id 列。
   // 按 §29.4 alias 规则：subjectType='card' + subjectId=objectiveId。
   const now = new Date();
   const [activeObjectiveRows, objectiveDueRows] = await Promise.all([

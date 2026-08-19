@@ -42,6 +42,7 @@ import {
   type GoldPassedProof,
   type StructuredProofEligibilityReport,
 } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 // 2026-08-12（契约收口）：类型/单量单一来源迁移到 @ailearn/shared
 // （silent-proof-profile-contracts.ts）；本文件保留 re-export 兼容既有消费者。
 export {
@@ -207,18 +208,18 @@ export interface BuildEligibilityReportInput {
   goldCertificationHash: string;
 }
 
-export class EligibilityReportError extends Error {
+export class EligibilityReportError extends DomainError {
   readonly code: "profile_not_found" | "report_schema_invariant_violation";
   constructor(
     code: "profile_not_found" | "report_schema_invariant_violation",
     profileId: string,
   ) {
-    super(
-      code === "profile_not_found"
-        ? `profile_not_found:${profileId}`
-        : "report_schema_invariant_violation",
-    );
-    this.name = "EligibilityReportError";
+    super({
+      name: "EligibilityReportError",
+      code,
+      message: code === "profile_not_found" ? `profile_not_found:${profileId}` : "report_schema_invariant_violation",
+      statusCode: 400,
+    });
     this.code = code;
   }
 }

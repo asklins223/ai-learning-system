@@ -21,6 +21,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { DomainError } from "@ailearn/shared";
 import { and, asc, eq, gt, lte, sql } from "drizzle-orm";
 import {
   boolean,
@@ -150,15 +151,9 @@ const INVALID_ONBOARDING_VERSION = "INVALID_ONBOARDING_VERSION" as const;
 type OnboardingRow = typeof userCompanionOnboarding.$inferSelect;
 type AccountRow = typeof userCompanionAccountState.$inferSelect;
 
-export class CompanionStateError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
-
+export class CompanionStateError extends DomainError {
   constructor(code: string, statusCode: number, message: string) {
-    super(message);
-    this.name = "CompanionStateError";
-    this.code = code;
-    this.statusCode = statusCode;
+    super({ name: "CompanionStateError", code, message, statusCode });
   }
 }
 

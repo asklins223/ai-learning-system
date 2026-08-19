@@ -424,6 +424,7 @@ describe("enter_practice_mode atomic switch", () => {
     const repo = new InMemoryFrontRepo();
     repo.state = "let_me_try";
     // 缺少 userActionNonce（Agent 代点路径没有确认 nonce）→ 拒绝且无副作用。
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { userActionNonce: _ignored, ...withoutNonce } = baseInput();
     await expectPresenceError(
       enterPracticeMode(makeDeps(repo), withoutNonce as EnterPracticeModeInput),
@@ -431,7 +432,6 @@ describe("enter_practice_mode atomic switch", () => {
     );
     assert.deepEqual(repo.operations, []);
     assert.equal(repo.tutorOpened, false);
-    void _ignored;
   });
 
   it("非法 nonce（未签发）与重复 nonce（已消费）均拒绝且无副作用", async () => {

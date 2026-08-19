@@ -20,7 +20,7 @@ export interface SearchResult {
   matchCount?: number;
 }
 
-// V1 卡片/卡片集/evidence 已完全退役，reindex 不再投影这些类型。
+// 卡片/卡片集/evidence 已完全退役，reindex 不再投影这些类型。
 // 残留的旧投影文档在 reindex 时被清理（见 ghost cleanup SQL）。
 // consumableSearchDocumentPredicate 已移除——所有通过路由层验证的类型都是合法的。
 
@@ -170,7 +170,7 @@ export async function search(
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
 
   // N-012: 使用 DISTINCT ON 在 SQL 层聚合去重
-  // V1 evidence 类型已退役，所有类型按自身 ID 去重
+  // evidence 类型已退役，所有类型按自身 ID 去重
   const dedupKey = sql`object_type || ':' || object_id`;
 
   // The page read and the (cached) total are independent reads; run them in

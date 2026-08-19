@@ -595,7 +595,7 @@ if (rcMode) {
             "Container scanning not configured",
           ),
     },
-    // AIQ: placeholder — pending V2 RC gate CLI implementation
+    // AIQ: placeholder — V1 supervisor-rc-gate has been removed; V2 RC gate not yet implemented
     aiQuality: {
       status: "not_run",
       datasetVersion: null,

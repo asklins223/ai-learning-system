@@ -17,6 +17,7 @@
 import { z } from "zod";
 import { postJsonToPublicEndpoint } from "@ailearn/shared/public-json-http";
 import type { LearningTargetSnapshotV2 } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 
 // ─── 合同 ────────────────────────────────────────────────────────────────
 
@@ -45,17 +46,15 @@ export interface RubricVerdictOutput {
   confidence: number;
 }
 
-export class CriticUnavailableError extends Error {
+export class CriticUnavailableError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "CriticUnavailableError";
+    super({ name: "CriticUnavailableError", code: "critic_unavailable", message, statusCode: 503 });
   }
 }
 
-export class CriticOutputError extends Error {
+export class CriticOutputError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "CriticOutputError";
+    super({ name: "CriticOutputError", code: "critic_output_error", message, statusCode: 502 });
   }
 }
 
@@ -236,7 +235,7 @@ export function createOpenAICompatibleCritic(env: {
 }
 
 // ─── V2：frozen snapshot 驱动的 Critic 输入（§16.6）──────────────────────
-// (V1 表已退役，key_point_id 现为 learning_objectives_v2.objective_id 的别名。)
+// key_point_id 现为 learning_objectives_v2.objective_id 的别名。
 
 /**
  * §16.6 V2 critic 输入：从 frozen snapshot 派生，snapshotHash 纳入闭包。

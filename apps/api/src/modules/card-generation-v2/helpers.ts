@@ -14,16 +14,11 @@ import {
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { noteVersions } from "../../db/schema/note.ts";
 import { isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import { DomainError } from "@ailearn/shared";
 
-export class CardGenerationV2ServiceError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
-
+export class CardGenerationV2ServiceError extends DomainError {
   constructor(code: string, statusCode: number, message: string) {
-    super(message);
-    this.name = "CardGenerationV2ServiceError";
-    this.code = code;
-    this.statusCode = statusCode;
+    super({ name: "CardGenerationV2ServiceError", code, message, statusCode });
   }
 }
 

@@ -322,7 +322,7 @@ async function readGroundedTutorContext(
   }>;
   const valid = evidenceRows.filter(() => {
     // V2: all evidence snapshots that are bound are considered "hard" —
-    // the alignment/effective_override concept is V1 and was removed.
+    // the alignment/effective_override concept was removed.
     return true;
   });
   if (valid.length === 0) return null;

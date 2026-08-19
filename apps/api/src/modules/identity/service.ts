@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { DomainError } from "@ailearn/shared";
 import bcrypt from "bcryptjs";
 import { and, eq, isNull, lt, or, gte, inArray, desc, count, sql, ne } from "drizzle-orm";
 import { db } from "../../db/client.ts";
@@ -467,11 +468,10 @@ export type JoinWorkspaceErrorCode =
   | "workspace_limit_reached"
   | "already_member";
 
-export class JoinWorkspaceError extends Error {
+export class JoinWorkspaceError extends DomainError {
   readonly code: JoinWorkspaceErrorCode;
   constructor(code: JoinWorkspaceErrorCode) {
-    super(code);
-    this.name = "JoinWorkspaceError";
+    super({ name: "JoinWorkspaceError", code, message: code, statusCode: 400 });
     this.code = code;
   }
 }

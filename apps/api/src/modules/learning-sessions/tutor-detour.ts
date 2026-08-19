@@ -22,6 +22,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { DomainError } from "@ailearn/shared";
 import {
   DEFAULT_LEARNING_FOREGROUND_STATE,
   resolveKnowledgeHelpGate,
@@ -74,11 +75,10 @@ export type TutorDetourErrorCode =
   | "episode_not_found"
   | "turn_limit_reached";
 
-export class TutorDetourError extends Error {
+export class TutorDetourError extends DomainError {
   readonly code: TutorDetourErrorCode;
   constructor(code: TutorDetourErrorCode, message: string) {
-    super(message);
-    this.name = "TutorDetourError";
+    super({ name: "TutorDetourError", code, message, statusCode: 400 });
     this.code = code;
   }
 }

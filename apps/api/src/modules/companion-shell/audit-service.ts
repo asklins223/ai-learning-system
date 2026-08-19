@@ -20,6 +20,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { DomainError } from "@ailearn/shared";
 import { and, eq, lt, gt, or, isNull, sql } from "drizzle-orm";
 import {
   integer,
@@ -151,15 +152,9 @@ export const COMPANION_AUDIT_POLICY_VERSION = "companion-audit-v1";
 /** content-free tombstone 的不可逆 key 前缀（SHA-256 截断，保持唯一索引合法）。 */
 const LEDGER_TOMBSTONE_KEY_PREFIX = "ledger_tombstone_";
 
-export class CompanionAuditError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
-
+export class CompanionAuditError extends DomainError {
   constructor(code: string, statusCode: number, message: string) {
-    super(message);
-    this.name = "CompanionAuditError";
-    this.code = code;
-    this.statusCode = statusCode;
+    super({ name: "CompanionAuditError", code, message, statusCode });
   }
 }
 

@@ -40,14 +40,14 @@ import type {
   ObjectiveOriginV3,
   ObjectiveListItemV3,
 } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 import { listOriginsByObjective, rowToWire } from "./origin-service.ts";
 import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
 import { surfaceQueryDurationSeconds } from "../../lib/metrics.ts";
 
-export class ObjectiveNotFoundError extends Error {
+export class ObjectiveNotFoundError extends DomainError {
   constructor(objectiveId: string, workspaceId: string) {
-    super("objective " + objectiveId + " not found in workspace " + workspaceId);
-    this.name = "ObjectiveNotFoundError";
+    super({ name: "ObjectiveNotFoundError", code: "objective_not_found", message: "objective " + objectiveId + " not found in workspace " + workspaceId, statusCode: 404 });
   }
 }
 
@@ -104,7 +104,7 @@ async function loadActiveRun(
   ctx: SurfaceContext,
   objectiveId: string,
 ): Promise<LearningObjectiveSurfaceV3["personal"]["activeRun"]> {
-  // V2：learningRuns 没有 keyPointId 列（V1 退役），origin JSONB 中的
+  // V2：learningRuns 没有 keyPointId 列，origin JSONB 中的
   // keyPointId = objectiveId（方案 20 §29.4 alias 规则）。
   const rows = await tx
     .select({ runId: learningRuns.id, phase: learningRuns.phase })

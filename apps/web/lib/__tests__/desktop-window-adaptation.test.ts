@@ -84,10 +84,10 @@ describe("desktop window adaptation contract", () => {
       /@media \(min-width: 960px\) and \(min-height: 620px\)/,
     );
     // QUAL-43/40/68 重构后，AppShell 用路由表标记 ownsFocusHeader 取代
-    // isCardSetDetailPage 布尔变量；视口锁定的卡组详情页应自带 Focus 头，
+    // isCardSetDetailPage 布尔变量；视口锁定的卡详情页应自带 Focus 头，
     // 由 shell 不叠加 TopBar，避免撑出文档溢出。
     assert.ok(
-      appShellSource.includes('page: "card-set-detail", ownsFocusHeader: true'),
+      appShellSource.includes('page: "card-detail", ownsFocusHeader: true'),
     );
     assert.ok(appShellSource.includes("!hasOwnedFocusHeader && <TopBar />"));
     assert.match(

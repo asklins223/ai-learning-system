@@ -50,7 +50,7 @@ export interface UnderstandingState {
  * 3. 按 objective 聚合 understanding_events → 理解状态（seen/validated/misunderstood/reviewed）
  * 4. 关联 card 信息（标题、证据覆盖率、上次验证时间）与 objective 维度复习计划
  *
- * V2 迁移说明：V1 的 learningCards/cardKeyPoints 与 validationEvents.cardId 连接已退役。
+ * V2 迁移说明：learningCards/cardKeyPoints 与 validationEvents.cardId 连接已退役。
  * - 枚举 active V2 卡，external subjectId = learningCardsV2.cardId
  * - 事件/状态按 objectiveId（= 旧 keyPointId 别名）从 understandingEvents 直接聚合
  * - 复习计划按 subjectType='card' + subjectId=objectiveId（objective 维度）

@@ -21,12 +21,12 @@ import type { GenerationOverlayProps } from "../../components/note-editor/Genera
 
 // 类型契约（编译期验证）：GenerationOverlay 不应暴露原始载荷 prop——
 // 红线破坏时（props 出现 safePayload/rawPayload/payload 键）OverlayRawKey
-// 非 never，_assertNoRawPayload 类型变 never，`= true` 赋值编译失败。
+// 非 never，AssertNoRawPayloadKey 变 never，赋值 `= true` 编译失败。
 // 注意不能写 `undefined as never`（never 可赋给任意类型，断言会永远通过）。
 type OverlayRawKey = Extract<keyof GenerationOverlayProps, "safePayload" | "rawPayload" | "payload">;
 type AssertNoRawPayloadKey = OverlayRawKey extends never ? true : never;
 const _assertNoRawPayloadKey: AssertNoRawPayloadKey = true;
-void _assertNoRawPayloadKey;
+export { _assertNoRawPayloadKey };
 
 const noteEditorDir = resolve(
   (import.meta.dirname ?? __dirname),

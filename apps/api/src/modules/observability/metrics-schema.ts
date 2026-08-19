@@ -18,10 +18,13 @@
  *   hidden/off 后新增成本 0、取消确认后新增调用 0、Tutor 不借用 formal 预算、
  *   重试放大系数上限、p95 成本上限。
  *
+
  * 观察 vs 硬 Gate 分离：`checkCoerciveAuthorization` 对任何非 hard-gate 指标授权
  * 强迫优化手段（隐藏跳过 / 增加弹窗 / streak / 任务债务 / 自动续题 / 伴侣催促）
  * 一律判违规；`assertObservationOnlyMetric` 对 observe-only 指标 fail closed。
  */
+
+import { DomainError } from "@ailearn/shared";
 
 // ─── 1. 分类与枚举 ────────────────────────────────────────────────────────
 
@@ -267,10 +270,9 @@ export function assertObservationOnlyMetric(metricId: string): void {
 }
 
 /** Schema 校验错误（fail closed）。 */
-export class MetricSchemaError extends Error {
+export class MetricSchemaError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "MetricSchemaError";
+    super({ name: "MetricSchemaError", code: "metric_schema_error", message, statusCode: 500 });
   }
 }
 

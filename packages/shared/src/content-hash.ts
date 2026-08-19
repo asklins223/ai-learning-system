@@ -80,3 +80,26 @@ export function computeVoiceContentHash(transcript: string): string {
 export function computeTextContentHash(text: string): string {
   return `sha256:${sha256Hex(`text-or-mixed-v1:${text}`)}`;
 }
+
+/**
+ * 稳定化 JSON 序列化：对象键按字典序排序（递归）、数组保持顺序、
+ * 值为 undefined 的属性跳过。使同一契约的键序差异不改变序列化结果。
+ *
+ * 与 canonicalJsonV1 不同：不强制 safe-integer 约束，适用于一般用途。
+ */
+export function stableStringify(value: unknown): string {
+  if (value === null || value === undefined || typeof value !== "object") {
+    return JSON.stringify(value ?? null);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const pairs: string[] = [];
+  for (const key of Object.keys(obj).sort()) {
+    const v = obj[key];
+    if (v === undefined) continue;
+    pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
+  }
+  return `{${pairs.join(",")}}`;
+}

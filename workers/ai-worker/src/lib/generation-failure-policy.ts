@@ -1,6 +1,6 @@
 import { isNonRetryableError, AgentOutputError } from "./non-retryable-errors.ts";
 
-// V1 agent 相关类已删除，保留类型兼容
+// agent 相关类已删除，保留类型兼容
 export class BudgetExhaustedError extends Error {
   constructor() {
     super("budget exhausted");

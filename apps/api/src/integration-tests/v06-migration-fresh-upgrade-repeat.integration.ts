@@ -340,11 +340,6 @@ test("v0.6 migration: repeat migration is idempotent — re-running 0040-0043 pr
 // learning_cards_v2 / learning_objectives_v2 instead. The FK constraints
 // being tested (card_generation_runs_result_card_fk etc.) are V1-specific.
 
-// legacy_unrubriced marking test: removed in V2 cleanup.
-// This test inserted into V1 learning_cards / card_key_points tables,
-// which are cleared by migration 0176. The legacy_unrubriced marking is
-// a V1-only migration concern.
-
 // backup/restore test: removed in V2 cleanup.
 // This test inserted into V1 learning_cards / card_key_points / evidences
 // tables which are cleared by migration 0176. V2 evidence uses

@@ -10,7 +10,7 @@
  */
 
 import { eq } from "drizzle-orm";
-import { safeErrorMessage, resolveLegacyProviderConfig } from "@ailearn/shared";
+import { safeErrorMessage, resolveLegacyProviderConfig, DomainError } from "@ailearn/shared";
 import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import type { AITaskType } from "@ailearn/shared/task-router";
 import { getCapabilityForTask, getTaskComplexity } from "@ailearn/shared/task-router";
@@ -26,12 +26,11 @@ import { logger } from "./logger.ts";
  * web app offer the correct recovery action without exposing provider or
  * user content in `jobs.last_error`.
  */
-export class AIConsentRequiredError extends Error {
+export class AIConsentRequiredError extends DomainError {
   readonly code = "ai_consent_required";
 
   constructor() {
-    super("AI consent not signed for this workspace");
-    this.name = "AIConsentRequiredError";
+    super({ name: "AIConsentRequiredError", code: "ai_consent_required", message: "AI consent not signed for this workspace", statusCode: 403 });
   }
 }
 

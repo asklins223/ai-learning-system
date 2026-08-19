@@ -61,12 +61,12 @@ import {
   buildDeterministicHint,
   clampTimeBudget,
   rubricTargetIdsOf,
-  sha256Hex,
   type PlannerOptions,
   type PlannedTaskInput,
   type PlannerV2Target,
   type RunPlannerTargetInput,
 } from "./run-planner.ts";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 import {
   freezeTargetSnapshotV2,
   prepareCardContentEpoch,
@@ -173,7 +173,6 @@ async function planFollowupTask(
   at: Date,
 ): Promise<{ taskId: string }> {
   // V2：从该 run 已冻结的 LearningTargetSnapshotV2 取 canonical 目标。
-  // V1 的 live cardKeyPoints/claim 读取已随旧栈退役（方案 20 §16）。
   const snapshot = await loadFrozenTargetSnapshotV2(tx, scope.workspaceId, run.id);
   if (!snapshot) {
     throw new LearningRunServiceError("target_snapshot_missing", "该 run 缺少冻结的 target snapshot", 409);
@@ -366,8 +365,8 @@ async function recentPresentedPayloadHashes(
   tx: ApiTransaction,
   scope: { workspaceId: string; userId: string; keyPointId: string },
 ): Promise<Set<string>> {
-  // V1 的 presentation_history.key_point_id 列已退役；经 runId 关联到
-  // learning_runs.origin（V2 run 的 origin 携带 keyPointId=objectiveId alias）
+  // presentation_history.key_point_id 列已退役；经 runId 关联到
+  // learning_runs.origin（origin 携带 keyPointId=objectiveId alias）
   // 保持 objective 维度去重（surface-service 同款惯例，方案 20 §16/§29.4）。
   const objectiveId = scope.keyPointId;
   const rows = await tx
@@ -387,8 +386,7 @@ async function recentPresentedPayloadHashes(
 }
 
 /**
- * V1 兼容薄壳（方案 20 §16.3）：V1 origin 的 keyPointId 即 objectiveId alias。
- * 所有旧卡表（cardKeyPoints/learningCards/claim/quote）读取已随 V1 退役，
+ * 创建 run（方案 20 §16.3）：origin 的 keyPointId 即 objectiveId alias。
  * 创建统一走 createRunV2（frozen target snapshot）。
  */
 export async function createRun(
@@ -412,8 +410,7 @@ export async function createRun(
   return getRunPublicView(tx, { workspaceId, userId, runId: result.runId });
 }
 
-/** V1 origin → originV2 映射：V1 keyPointId 即 objectiveId（V1 卡入口退役后
- * 由旧客户端携带，alias 语义见方案 20 §5.2/§29.4）。 */
+/** origin → originV2 映射：keyPointId 即 objectiveId（alias 语义见方案 20 §5.2/§29.4）。 */
 function mapV1OriginToV2(origin: CreateLearningRunRequestV1["origin"]): LearningRunOriginV2 {
   switch (origin.kind) {
     case "card":
@@ -454,9 +451,8 @@ function mapV1OriginToV2(origin: CreateLearningRunRequestV1["origin"]): Learning
 
 /**
  * V2 run 的 keyPointId 语义：作为 Objective ID alias（§16.3/§29.4）。
- * V1 的 cardKeyPoints 别名表已退役；objective 的有效性由
- * freezeTargetSnapshotV2 统一 fail-closed 校验（workspace-scoped active
- * Objective），此处仅保留 alias 语义返回。
+ * objective 的有效性由 freezeTargetSnapshotV2 统一 fail-closed 校验
+ * （workspace-scoped active Objective），此处仅保留 alias 语义返回。
  */
 async function resolveV2ObjectiveKeyPoint(
   _tx: ApiTransaction,
@@ -620,7 +616,7 @@ export async function createRunV2(
           kind: originV2.kind === "review" ? "review" : originV2.kind === "star_map" ? "star_map" : originV2.kind === "today" ? "today" : "onboarding",
           objectiveId,
         } as never,
-    // V1 keyPointId 列已退役；目标身份经 origin JSONB（keyPointId=objectiveId alias）。
+    // 目标身份经 origin JSONB（keyPointId=objectiveId alias）。
     targetFingerprint: "",
     goal: request.goal,
     createdAt: createdAt0,
@@ -734,7 +730,7 @@ export async function createRunV2(
     runId,
     workspaceId,
     userId,
-    // V1 keyPointId 列已退役；objective 身份经 snapshotId→snapshot 关联。
+    // objective 身份经 snapshotId→snapshot 关联。
     targetFingerprint: frozen.snapshot.target.semanticTargetFingerprint,
     runtimeEpoch,
     timeBudgetSeconds,
@@ -856,7 +852,7 @@ export async function createRunV2(
   await tx.insert(learningTaskPresentationHistory).values({
     workspaceId,
     userId,
-    // V1 keyPointId 列已退役：目标是经 runId 关联到 run.origin 判别。
+    // 目标是经 runId 关联到 run.origin 判别。
     intent: task.intent,
     publicPayloadHash: primaryVariant.publicPayloadHash,
     interactionFamily: primaryVariant.interaction.kind,
@@ -927,7 +923,7 @@ export async function getRunPublicView(
       assistantSessionId: runRow.assistantSessionId,
       origin: runRow.origin as never,
       returnTarget: runRow.returnTarget as never,
-      // V1 keyPointId 列已退役：从 origin JSONB 取 objective alias（§29.4）。
+      // 从 origin JSONB 取 objective alias（§29.4）。
       keyPointId: originObjectiveId(runRow.origin),
       targetFingerprint: runRow.targetFingerprint,
       goal: runRow.goal as never,

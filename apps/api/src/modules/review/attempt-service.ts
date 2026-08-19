@@ -203,7 +203,7 @@ async function findAttemptByIdempotencyKey(
 /**
  * Check whether the target objective has hard (demonstrated) evidence.
  *
- * V2 migration: the V1 `evidences.keyPointId` column was removed, so hard
+ * V2 migration: the `evidences.keyPointId` column was removed, so hard
  * evidence can no longer be resolved per key point. Reviews now target
  * objectives (`subjectId = objectiveId`); an objective counts as having hard
  * evidence when it has a revision (mirrors resolveObjectiveEvidence in

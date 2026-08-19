@@ -204,14 +204,12 @@ test("v0.6 导出：validation_submissions 包含 user_answer（敏感业务数�
 test("v0.6 导出：restoreWorkspace 恢复 v0.6 新表依赖顺序正确", () => {
   const source = readExportService();
 
-  // Find the restore section and verify dependency order
-  // rubric_items depends on questions, submissions depend on users/cards/key_points
+  // rubric_items should be restored before submissions (rubric_items depend on questions)
   const rubricItemsPos = source.indexOf("validationQuestionRubricItems");
   const submissionsPos = source.indexOf("validationSubmissions");
-  void rubricItemsPos;
-  void submissionsPos;
+  assert.ok(rubricItemsPos >= 0, "validationQuestionRubricItems should appear in restore");
+  assert.ok(submissionsPos >= 0, "validationSubmissions should appear in restore");
 
-  // rubric_items should be restored before submissions (rubric_items depend on questions)
   // Actually, submissions depend on questions and rubric_items are separate
   // The plan says: rubric_items → submissions → submission_jobs, action_commands,
   //                assistance_exposures → point_assessments, shadow_decisions, quality_signals

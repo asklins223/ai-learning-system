@@ -9,6 +9,7 @@
  * completed(real_first_loop)；其余事件类型入 pending 不推进（骨架预留）。
  */
 
+import { DomainError } from "@ailearn/shared";
 import type { CompanionJourneyStepV2, CompanionJourneyV2 } from "@ailearn/shared";
 
 export interface JourneyReducerState {
@@ -191,10 +192,9 @@ export type JourneyActionCommand =
   | { kind: "retry" }
   | { kind: "switch_branch"; branch: CompanionJourneyV2["branch"] };
 
-export class JourneyActionError extends Error {
+export class JourneyActionError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "JourneyActionError";
+    super({ name: "JourneyActionError", code: "journey_action_error", message, statusCode: 400 });
   }
 }
 

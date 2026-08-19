@@ -56,14 +56,14 @@ export interface PublishedCardInput {
   cardSetId: string | null;
 }
 
-/** learning_objectives_v2 行的只读 canonical 字段（V1 card_key_points 退役后由 objective 派生） */
+/** learning_objectives_v2 行的只读 canonical 字段（由 objective 派生） */
 export interface PublishedKeyPointInput {
   id: string;
   claim: string;
 }
 
 /** evidence 行的只读 canonical 字段（仅用于 exactEvidenceRefs 与 fingerprint）
- *  V1 evidences 表已退役；数据来自 evidence_snapshots_v2 + bindings。 */
+ *  evidences 表已退役；数据来自 evidence_snapshots_v2 + bindings。 */
 export interface PublishedEvidenceInput {
   id: string;
   keyPointId: string;

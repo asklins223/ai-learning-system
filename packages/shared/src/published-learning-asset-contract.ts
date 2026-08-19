@@ -14,6 +14,8 @@
  */
 
 import { createRequire } from "node:module";
+import { stableStringify } from "./content-hash.ts";
+import { DomainError } from "./domain-error.ts";
 
 // 2026-08-13（web 客户端打包修复）：node:crypto 惰性获取——客户端
 // bundle（IgnorePlugin 置空 node: 模块）顶层 createRequire 为 undefined，
@@ -93,26 +95,10 @@ export function validateForbiddenFields(
 // ─── contract hash（集成 Gate 第一项）────────────────────────────────────
 
 /**
- * 稳定化 JSON 序列化：对象键按字典序排序（递归）、数组保持顺序、
- * 值为 undefined 的属性跳过。使同一契约的键序差异不改变 hash。
+ * 稳定化 JSON 序列化（从 @ailearn/shared/content-hash 统一实现）。
+ * 保留导出名以兼容测试断言。
  */
-export function stableStringifyPublishedAsset(value: unknown): string {
-  if (value === null || value === undefined || typeof value !== "object") {
-    // 与 JSON.stringify 一致：数组元素中的 undefined 序列化为 null
-    return JSON.stringify(value ?? null);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => stableStringifyPublishedAsset(v)).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const pairs: string[] = [];
-  for (const key of Object.keys(obj).sort()) {
-    const v = obj[key];
-    if (v === undefined) continue;
-    pairs.push(`${JSON.stringify(key)}:${stableStringifyPublishedAsset(v)}`);
-  }
-  return `{${pairs.join(",")}}`;
-}
+export const stableStringifyPublishedAsset = stableStringify;
 
 /** contract hash：稳定化序列化 → SHA-256 hex（00-3 §6.5 集成 Gate 第一项） */
 export function hashPublishedLearningAsset(
@@ -151,12 +137,11 @@ export function parsePublishedLearningAsset(
 }
 
 /** 契约/负向校验错误（fail closed 的统一错误类型） */
-export class PublishedLearningAssetContractError extends Error {
+export class PublishedLearningAssetContractError extends DomainError {
   readonly code: string;
 
   constructor(message: string, code: string) {
-    super(message);
-    this.name = "PublishedLearningAssetContractError";
+    super({ name: "PublishedLearningAssetContractError", code, message, statusCode: 400 });
     this.code = code;
   }
 }

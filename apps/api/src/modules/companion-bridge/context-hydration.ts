@@ -17,6 +17,7 @@ import type {
   MainPageContextInputV2,
 } from "@ailearn/shared";
 import { computeContextRevisionV2 } from "@ailearn/shared/companion-bridge-revision";
+import { DomainError } from "@ailearn/shared";
 
 export { computeContextRevisionV2 };
 
@@ -68,7 +69,7 @@ export function entityLookupKey(ref: EntityRefV2): { table: string; id: string }
   switch (ref.kind) {
     case "source": return { table: "sources", id: ref.sourceId };
     case "note": return { table: "notes", id: ref.noteId };
-    // V1 卡/卡组/要点表已随旧栈退役：card→V2 卡表；key_point→objective（alias）；
+    // 卡/卡组/要点表已随旧栈退役：card→V2 卡表；key_point→objective（alias）；
     // card_set 无 V2 等价物 → 不支持（fail soft，不查询已删表）。
         case "card": return { table: "learning_cards_v2", id: ref.cardId };
     case "key_point": return { table: "learning_objectives_v2", id: ref.keyPointId };
@@ -84,9 +85,8 @@ export function entityLookupKey(ref: EntityRefV2): { table: string; id: string }
   }
 }
 
-export class ContextHydrationError extends Error {
+export class ContextHydrationError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "ContextHydrationError";
+    super({ name: "ContextHydrationError", code: "context_hydration_error", message, statusCode: 500 });
   }
 }

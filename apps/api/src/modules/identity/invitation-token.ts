@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { DomainError } from "@ailearn/shared";
 
 export const INVITATION_TOKEN_ENTROPY_BYTES = 32;
 export const INVITATION_TOKEN_LENGTH = 43;
@@ -18,12 +19,16 @@ export interface InvitationTokenStorage {
   tokenHint: string;
 }
 
-export class InvitationTokenError extends Error {
+export class InvitationTokenError extends DomainError {
   readonly code: InvitationTokenErrorCode;
 
   constructor(code: InvitationTokenErrorCode) {
-    super(code === "generation_failed" ? "invitation token generation failed" : "invalid invitation token");
-    this.name = "InvitationTokenError";
+    super({
+      name: "InvitationTokenError",
+      code,
+      message: code === "generation_failed" ? "invitation token generation failed" : "invalid invitation token",
+      statusCode: 400,
+    });
     this.code = code;
   }
 }

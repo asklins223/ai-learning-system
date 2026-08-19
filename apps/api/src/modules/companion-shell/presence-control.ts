@@ -25,6 +25,8 @@
  * 包裹（任一步抛错整体回滚，Tutor 权限绝不先于 assistance/exposure 记录开放）。
  */
 
+import { DomainError } from "@ailearn/shared";
+
 // ─── 1. 三档存在感（§5.5）──────────────────────────────────────────────────
 
 export type CompanionPresenceLevel = "quiet" | "moderate" | "active";
@@ -404,11 +406,10 @@ export const PresenceControlErrorCode = {
 export type PresenceControlErrorCode =
   (typeof PresenceControlErrorCode)[keyof typeof PresenceControlErrorCode];
 
-export class PresenceControlError extends Error {
+export class PresenceControlError extends DomainError {
   readonly code: PresenceControlErrorCode;
   constructor(code: PresenceControlErrorCode, message: string) {
-    super(message);
-    this.name = "PresenceControlError";
+    super({ name: "PresenceControlError", code, message, statusCode: 400 });
     this.code = code;
   }
 }

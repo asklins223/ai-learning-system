@@ -399,24 +399,6 @@ export function assessCardOutput(
   };
 }
 
-// ─── sanitizeCardOutput (backward-compatible wrapper) ──────────────────────
-
-/**
- * 对 AI 输出的学习卡进行后处理清洗。
- *
- * 这是 sanitizeCardOutput 的向后兼容包装，调用 assessCardOutput 并只返回 sanitized。
- * v0.6 新代码应直接使用 assessCardOutput 获取结构化质量报告。
- *
- * @param output - AI 模型输出的学习卡
- * @param sourceBlocks - 可选，原文 blocks 的内容数组。传入时会验证 quote_text 是否在原文中存在。
- */
-export function sanitizeCardOutput(
-  output: LearningCardOutput,
-  sourceBlocks?: string[],
-): LearningCardOutput {
-  return assessCardOutput(output, sourceBlocks).sanitized;
-}
-
 // ─── progressiveFallback (internal) ───────────────────────────────────────
 
 /**

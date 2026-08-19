@@ -15,6 +15,7 @@ import type { ApiTransaction } from "../../db/client.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { createJob } from "../job/service.ts";
 import { type CompanionGroundedTutorGrantV1,  } from "@ailearn/shared";
+import { DomainError } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
@@ -107,14 +108,13 @@ export const companionStreamEvents = pgTable("companion_stream_events", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
-export class CompanionConversationError extends Error {
+export class CompanionConversationError extends DomainError {
   constructor(
     public readonly code: CompanionPublicErrorCodeV1,
     public readonly statusCode: number,
     message: string,
   ) {
-    super(message);
-    this.name = "CompanionConversationError";
+    super({ name: "CompanionConversationError", code, message, statusCode });
   }
 }
 

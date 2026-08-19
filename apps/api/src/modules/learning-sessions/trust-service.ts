@@ -26,7 +26,7 @@
  * `import { EpisodeTrustDecision, ReducerResult, ... } from "@ailearn/shared"`。
  */
 
-import { sha256Hex } from "@ailearn/shared/content-hash";
+import { sha256Hex, stableStringify } from "@ailearn/shared/content-hash";
 import { DomainError, RubricVerdict, TrustClass } from "@ailearn/shared";
 
 // ─── 本地契约类型（收口迁移至 @ailearn/shared/learning-trust-contracts）────
@@ -85,22 +85,7 @@ export interface EpisodeTrustDecision {
 // ─── 确定性哈希原语（与 session-service/canonical-events 同模式）───────────
 
 /** 稳定化 JSON 序列化：对象键排序（递归）、数组保序、undefined 属性跳过。 */
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value ?? null);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const pairs: string[] = [];
-  for (const key of Object.keys(obj).sort()) {
-    const v = obj[key];
-    if (v === undefined) continue;
-    pairs.push(`${JSON.stringify(key)}:${stableStringify(v)}`);
-  }
-  return `{${pairs.join(",")}}`;
-}
+// stableStringify imported from @ailearn/shared/content-hash
 
 function sortIds(ids: readonly string[]): string[] {
   return [...ids].sort((a, b) => a.localeCompare(b));

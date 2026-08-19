@@ -27,6 +27,8 @@
  * 的 FP，二者均为分层报告的独立计数。
  */
 
+import { DomainError } from "@ailearn/shared";
+
 export const REPORT_VERSION = "qualification-report-v1" as const;
 
 export const QUALIFICATION_SET_KINDS = ["development"] as const;
@@ -247,10 +249,9 @@ export interface QualificationReport {
 
 // ─── 错误与校验───────────────────────────────────────────────────────────
 
-export class QualificationReportError extends Error {
+export class QualificationReportError extends DomainError {
   constructor(message: string) {
-    super(message);
-    this.name = "QualificationReportError";
+    super({ name: "QualificationReportError", code: "qualification_report_error", message, statusCode: 400 });
   }
 }
 

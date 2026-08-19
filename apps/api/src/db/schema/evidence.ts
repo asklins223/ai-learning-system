@@ -39,8 +39,6 @@ export const evidences = pgTable(
   (t) => ({
         blockIdx: index("evidences_block_idx").on(t.blockId),
     workspaceIdx: index("evidences_workspace_idx").on(t.workspaceId),
-    // V1 evidenceSpanIdx and imageEvidenceIdx removed
-
     idWorkspaceUnique: uniqueIndex("evidences_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
 
@@ -87,7 +85,7 @@ export const validationQuestions = pgTable(
     artifactId: uuid("artifact_id").references(() => aiArtifacts.id, { onDelete: "set null" }),
     generationJobId: uuid("generation_job_id"),
     generatorKind: text("generator_kind").notNull().default("ai"), // ai | deterministic
-    status: text("status").notNull().default("active"), // active | stale | superseded | expired | legacy_unrubriced
+    status: text("status").notNull().default("active"), // active | stale | superseded | expired
     rubricVersion: text("rubric_version"),
     sourceFingerprint: text("source_fingerprint"),
     supersededAt: timestamp("superseded_at", { withTimezone: true }),
@@ -97,7 +95,6 @@ export const validationQuestions = pgTable(
   },
   (t) => ({
     workspaceIdx: index("validation_questions_workspace_idx").on(t.workspaceId),
-    // V1 card/keyPoint-based indexes removed
     userIdx: index("validation_questions_user_idx").on(t.userId, t.status),
     idWorkspaceUnique: uniqueIndex("validation_questions_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
@@ -136,7 +133,6 @@ export const validationEvents = pgTable(
     userIdx: index("validation_events_user_idx").on(t.userId, t.createdAt),
     workspaceCreatedIdx: index("validation_events_workspace_created_idx")
       .on(t.workspaceId, sql`${t.createdAt} desc`),
-    // V1 card/keyPoint-based indexes removed
     jobUniqueIdx: uniqueIndex("validation_events_job_unique_idx")
       .on(t.jobId)
       .where(sql`${t.jobId} IS NOT NULL`),

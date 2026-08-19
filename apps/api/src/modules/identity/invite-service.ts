@@ -1,4 +1,5 @@
 import { and, eq, isNull, or, gte, desc, sql, inArray } from "drizzle-orm";
+import { DomainError } from "@ailearn/shared";
 import { db, withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import {
   inviteCodes,
@@ -60,11 +61,10 @@ export type ConsumeInviteErrorCode =
   | "email_exists"
   | "concurrent_consumption";
 
-export class ConsumeInviteError extends Error {
+export class ConsumeInviteError extends DomainError {
   readonly code: ConsumeInviteErrorCode;
   constructor(code: ConsumeInviteErrorCode) {
-    super(code);
-    this.name = "ConsumeInviteError";
+    super({ name: "ConsumeInviteError", code, message: code, statusCode: 400 });
     this.code = code;
   }
 }

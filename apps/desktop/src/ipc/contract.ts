@@ -18,8 +18,8 @@ export const PET_IPC_CHANNELS = {
   hidePet: "pet:hide",
   windowStateChanged: "pet:window-state-changed",
   lifecycleEvent: "pet:lifecycle-event",
-  legacyOpenExternal: "desktop:open-external",
-  legacyGetVersion: "desktop:get-version",
+  openExternal: "desktop:open-external",
+  getVersion: "desktop:get-version",
   // 2026-08-12：设置页（main window）桌宠开关
   desktopGetPetMode: "desktop:get-pet-mode",
   desktopSetPetMode: "desktop:set-pet-mode",

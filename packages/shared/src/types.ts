@@ -43,17 +43,3 @@ export interface SanitizedQuestion {
   };
 }
 
-/**
- * v0.6 Question Safety Report (计划 §10.2)
- * 每条 active question 都绑定确定性 safety report。
- */
-export interface QuestionSafetyReport {
-  /** 是否通过安全门禁 */
-  passed: boolean;
-  /** 命中的 reason codes */
-  reasonCodes: string[];
-  /** 评估器版本 */
-  assessorVersion: string;
-  /** 检查时间戳 */
-  assessedAt: string;
-}

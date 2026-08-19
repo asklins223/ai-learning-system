@@ -1,3 +1,5 @@
+import { DomainError } from "@ailearn/shared";
+
 export const REVIEW_INTERVAL_TIERS = Object.freeze([1, 3, 7, 14, 30, 60] as const);
 
 export const REVIEW_LATER_DELAY_HOURS = 12;
@@ -59,12 +61,11 @@ export interface ReviewSchedulingDecision {
   understandingEffect: ReviewUnderstandingEffect;
 }
 
-export class ReviewSchedulingPolicyError extends Error {
+export class ReviewSchedulingPolicyError extends DomainError {
   readonly code: ReviewSchedulingPolicyErrorCode;
 
   constructor(code: ReviewSchedulingPolicyErrorCode) {
-    super(code);
-    this.name = "ReviewSchedulingPolicyError";
+    super({ name: "ReviewSchedulingPolicyError", code, message: code, statusCode: 400 });
     this.code = code;
   }
 }

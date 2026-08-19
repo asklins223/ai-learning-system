@@ -325,7 +325,6 @@ async function main() {
   await app.register(learningDashboardRoutes);
   await app.register(understandingTopologyV3Routes);
   await app.register(jobRoutes);
-  // V1 evidence routes removed - V2 flows via card-generation-v2
     await app.register(validationSessionRoutes);
   await app.register(reviewRoutes);
   await app.register(sourceRoutes);

@@ -101,7 +101,7 @@ export async function buildTopologySnapshotV3(
   );
 
   // personal overlay（TP-06）：active run + review per objective
-  // V2：learningRuns 没有 keyPointId 列（V1 退役），run.origin JSONB 中的
+  // V2：learningRuns 没有 keyPointId 列，run.origin JSONB 中的
   // keyPointId = objectiveId（方案 20 §29.4 alias 规则）；经 origin JSON 路径取。
   // 安全修复：不在 SQL 中用 sql.raw 拼接 objectiveIds（SQL 注入风险）。
   // 改为按 workspace/user/phase 查活跃 runs，在内存中按 objectiveId 过滤。

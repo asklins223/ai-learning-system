@@ -348,7 +348,7 @@ export async function tick(): Promise<void> {
   //   evaluate_validation — 输入维度锁（cardId+keyPointId+userId+question+userAnswer），
   //                         防止相同输入的不同 job 并发写入重复 validation_events
   // AI 模型调用是网络 IO，并行处理可让多个 job 的模型调用同时进行。
-  // V1 evaluate_validation handler removed — no longer dispatched.
+  // evaluate_validation handler removed — no longer dispatched.
   const available = QUEUE_CONCURRENCY - inflight.size;
   if (available <= 0) return;
 

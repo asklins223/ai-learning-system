@@ -14,6 +14,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { DomainError } from "@ailearn/shared";
 import type {
   CommitGuardSnapshot,
   CommitLockStep,
@@ -43,10 +44,9 @@ export interface WorkspaceUserScope {
   userId: string;
 }
 
-export class CommitPortNotImplementedError extends Error {
+export class CommitPortNotImplementedError extends DomainError {
   constructor(method: string) {
-    super(`${method} 尚未接入生产写端口（诚实 fail closed，不假写）`);
-    this.name = "CommitPortNotImplementedError";
+    super({ name: "CommitPortNotImplementedError", code: "commit_port_not_implemented", message: `${method} 尚未接入生产写端口（诚实 fail closed，不假写）`, statusCode: 500 });
   }
 }
 

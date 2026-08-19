@@ -6,26 +6,14 @@
  * database, HTTP, provider, or user-content side effects.
  */
 
-import { sha256Hex } from "./content-hash.ts";
+import { sha256Hex, stableStringify } from "./content-hash.ts";
 import { TrustClass } from "./learning-session-contracts.ts";
 
 export function computeAssessmentInputHash(value: string): string {
   return sha256Hex(value);
 }
 
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value ?? null);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  }
-  const object = value as Record<string, unknown>;
-  return `{${Object.keys(object).sort().flatMap((key) => {
-    const item = object[key];
-    return item === undefined ? [] : [`${JSON.stringify(key)}:${stableStringify(item)}`];
-  }).join(",")}}`;
-}
+// stableStringify imported from ./content-hash.ts
 
 /** Same deterministic trust decision hash used by the API assessment path. */
 export function computeFailClosedAssessmentDecisionHash(input: {

@@ -146,7 +146,6 @@ export const learningRuns = pgTable(
     workspaceUserPhaseIdx: index("learning_runs_workspace_user_phase_idx").on(
       t.workspaceId, t.userId, t.phase,
     ),
-    // V1 keyPointIdx removed
     activeTaskIdx: index("learning_runs_active_task_idx").on(t.activeTaskId),
     // 0133：E17 backfill 幂等（legacyEpisodeId 部分唯一）。
     legacyEpisodeUnique: uniqueIndex("learning_runs_legacy_episode_unique_idx")
@@ -514,7 +513,6 @@ export const learningTaskPresentationHistory = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // V1 keyPointIdx indexes removed
     intentIdx: index("learning_task_pres_hist_intent_idx").on(
       t.workspaceId, t.userId, t.intent, t.presentedAt,
     ),
@@ -681,11 +679,9 @@ export const keyPointPrerequisites = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
-        // V1 prerequisiteKeyPoint reference removed (cardKeyPoints table deleted)
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // V1 keyPoint indexes removed
     workspaceIdx: index("key_point_prerequisites_workspace_idx").on(t.workspaceId),
   }),
 );
