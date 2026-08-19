@@ -30,7 +30,6 @@
  * validation/review 域；本模块只承载 learning-unit 的 exposure 生命周期。
  */
 
-import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import {
   pgTable,
@@ -41,6 +40,7 @@ import {
   timestamp,
 } from "drizzle-orm/pg-core";
 import type { ApiTransaction } from "../../db/client.ts";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 
 // ─── 表定义（与迁移 0077 一致；apps/api schema 镜像树未同步新表，同 02-3 模式）──
 
@@ -709,12 +709,6 @@ function rowToState(row: {
     exposureCount: row.exposureCount,
     revision: row.revision,
   };
-}
-
-// ─── 工具 / 错误 ─────────────────────────────────────────────────────────
-
-function sha256Hex(data: string): string {
-  return createHash("sha256").update(data, "utf8").digest("hex");
 }
 
 export type ExposureGuardErrorCode =

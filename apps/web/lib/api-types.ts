@@ -790,25 +790,16 @@ export interface SearchResult {
   indexedAt: string;
   href: string;
   matchCount: number;
-  cardSetId?: string;
-  scope?: string;
-  ordinal?: number;
 }
 
 export interface SearchDriftResult {
   expected: {
     note: number;
     source: number;
-    cardSet: number;
-    card: number;
-    evidence: number;
   };
   actual: {
     note: number;
     source: number;
-    cardSet: number;
-    card: number;
-    evidence: number;
   };
   ghosts: { objectType: string; objectId: string }[];
   missing: { objectType: string; objectId: string }[];

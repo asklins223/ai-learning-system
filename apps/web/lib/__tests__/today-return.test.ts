@@ -9,8 +9,8 @@ import {
 describe("today return navigation", () => {
   it("builds a canonical daily trace target", () => {
     assert.equal(
-      buildTodayReturnTarget("  attention mechanism  ", "card"),
-      "/today?q=attention+mechanism&type=card",
+      buildTodayReturnTarget("  attention mechanism  ", "note"),
+      "/today?q=attention+mechanism&type=note",
     );
     assert.equal(buildTodayReturnTarget("", "all"), "/today");
   });
@@ -32,11 +32,11 @@ describe("today return navigation", () => {
     assert.ok(withTodayReturnTarget("/notes/note-1", target));
   });
 
-  it("decorates only note, card, and source detail destinations", () => {
-    const returnTo = "/today?q=softmax&type=card";
+  it("decorates only note, learning-card, and source detail destinations", () => {
+    const returnTo = "/today?q=softmax&type=note";
     assert.equal(
-      withTodayReturnTarget("/cards/card-1", returnTo),
-      "/cards/card-1?returnTo=%2Ftoday%3Fq%3Dsoftmax%26type%3Dcard",
+      withTodayReturnTarget("/learning-cards/card-1", returnTo),
+      "/learning-cards/card-1?returnTo=%2Ftoday%3Fq%3Dsoftmax%26type%3Dnote",
     );
     assert.equal(
       withTodayReturnTarget("/notes/note-1", "/today"),
@@ -47,6 +47,6 @@ describe("today return navigation", () => {
       "/sources/source-1?returnTo=%2Ftoday%3Ftype%3Dsource",
     );
     assert.equal(withTodayReturnTarget("/settings", returnTo), null);
-    assert.equal(withTodayReturnTarget("https://evil.example/cards/1", returnTo), null);
+    assert.equal(withTodayReturnTarget("https://evil.example/learning-cards/1", returnTo), null);
   });
 });

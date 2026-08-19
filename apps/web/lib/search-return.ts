@@ -2,8 +2,8 @@ const SEARCH_RETURN_BASE = "https://search-return.local";
 const SEARCH_SCROLL_KEY = "ailearn:search-return:v1";
 const SEARCH_SCROLL_TTL = 30 * 60 * 1000;
 
-const SEARCH_TYPES = new Set(["note", "card", "source", "evidence"]);
-const SEARCH_DESTINATION = /^\/(?:notes|cards|sources)\/[^/?#]+$/;
+const SEARCH_TYPES = new Set(["note", "source", "objective"]);
+const SEARCH_DESTINATION = /^\/(?:notes|sources|learning-cards|learning-objectives)\/[^/?#]+$/;
 
 export type SearchReturnRecord = {
   returnTo: string;

@@ -6,7 +6,8 @@
  * 服务端解码后判断 checkpoint 是否覆盖某个 canonical/practice event。
  */
 
-import { createHmac, createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
+import { sha256Hex } from "@ailearn/shared/content-hash";
 
 export interface CheckpointWatermark {
   workspaceId: string;
@@ -26,10 +27,6 @@ export function watermarkBehind(a: CheckpointWatermark, b: CheckpointWatermark |
     return a.lastPracticeEventId === null || a.capturedAt < b.capturedAt;
   }
   return false;
-}
-
-function sha256Hex(input: string): string {
-  return createHash("sha256").update(input).digest("hex");
 }
 
 function signingKey(): string {

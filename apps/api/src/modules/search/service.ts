@@ -17,23 +17,12 @@ export interface SearchResult {
   snippet: string;
   indexedAt: string;
   href: string;
-  /** 当 evidence 被按 card 聚合时，表示该 card 下有多少条 evidence 命中 */
   matchCount?: number;
-  cardSetId?: string | null;
-  scope?: "overview" | "section" | null;
-  ordinal?: number | null;
 }
 
-/**
- * PERF-06 优化：提取为模块级 SQL 片段以便 PostgreSQL planner 缓存执行计划。
- *
- * 语义等价规则（V1 卡片/V1 卡片集已下线，reindex 不再投影 card/card_set/evidence）：
- * - card / card_set / evidence 类型不再可消费（V1 卡片搜索已删除）
- * - 其余类型（note / source / objective 等）始终通过
- */
-const consumableSearchDocumentPredicate = sql<boolean>`(
-  search_document.object_type NOT IN ('card', 'card_set', 'evidence')
-)`;
+// V1 卡片/卡片集/evidence 已完全退役，reindex 不再投影这些类型。
+// 残留的旧投影文档在 reindex 时被清理（见 ghost cleanup SQL）。
+// consumableSearchDocumentPredicate 已移除——所有通过路由层验证的类型都是合法的。
 
 // ─── PERF-B2 修复：search count 短 TTL 缓存 ───────────────────────────────
 // count 用 DISTINCT ON 对 workspace 全量命中做去重计数，无法利用 LIMIT，
@@ -131,13 +120,7 @@ async function getSearchTotal(
 
   const rows = await executor.execute<{ count: string }>(sql`
     SELECT count(*) as count FROM (
-      SELECT DISTINCT ON (
-        CASE
-          WHEN object_type = 'evidence' AND metadata->>'cardId' IS NOT NULL
-          THEN 'evidence-card:' || (metadata->>'cardId')
-          ELSE object_type || ':' || object_id
-        END
-      )
+      SELECT DISTINCT ON (object_type || ':' || object_id)
         1
       FROM search_documents AS search_document
       WHERE workspace_id = ${workspaceId}
@@ -146,7 +129,6 @@ async function getSearchTotal(
           OR title ILIKE '%' || ${searchEscapedQuery(query)} || '%' ESCAPE '\\'
         )
         AND (${type}::text IS NULL OR object_type = ${type})
-        AND ${consumableSearchDocumentPredicate}
     ) as distinct_entities
   `);
   const total = Number(rows[0]?.count ?? 0);
@@ -188,14 +170,8 @@ export async function search(
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
 
   // N-012: 使用 DISTINCT ON 在 SQL 层聚合去重
-  // evidence 按 cardId 聚合，其他类型按自身 ID 去重
-  const dedupKey = sql`
-    CASE
-      WHEN object_type = 'evidence' AND metadata->>'cardId' IS NOT NULL
-      THEN 'evidence-card:' || (metadata->>'cardId')
-      ELSE object_type || ':' || object_id
-    END
-  `;
+  // V1 evidence 类型已退役，所有类型按自身 ID 去重
+  const dedupKey = sql`object_type || ':' || object_id`;
 
   // The page read and the (cached) total are independent reads; run them in
   // parallel. total 由 getSearchTotal 走短 TTL 缓存，命中时零 DB 往返。
@@ -219,13 +195,6 @@ export async function search(
             OR title ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
           )
           AND (${type}::text IS NULL OR object_type = ${type})
-          AND ${consumableSearchDocumentPredicate}
-      ),
-      evidence_counts AS (
-        SELECT metadata->>'cardId' as card_id, count(*) as match_count
-        FROM matching
-        WHERE object_type = 'evidence' AND metadata->>'cardId' IS NOT NULL
-        GROUP BY metadata->>'cardId'
       ),
       deduplicated AS (
         SELECT DISTINCT ON (dedup_key)
@@ -234,11 +203,8 @@ export async function search(
         ORDER BY dedup_key, indexed_at DESC
       )
       SELECT d.object_type, d.object_id, d.title, d.body, d.indexed_at, d.metadata,
-        COALESCE(ec.match_count, 1)::text as match_count
+        '1'::text as match_count
       FROM deduplicated d
-      LEFT JOIN evidence_counts ec
-        ON d.object_type = 'evidence'
-        AND d.metadata->>'cardId' = ec.card_id
       ORDER BY d.indexed_at DESC, d.dedup_key ASC
       LIMIT ${limit}
       OFFSET ${offset}
@@ -270,13 +236,7 @@ export async function search(
       ? snippet.replace(highlightRe, (match) => `«${match}»`)
       : snippet;
 
-    // Plan 23 CS-02：cardSetId/scope/ordinal 是 V1 card/card_set 的遗留字段，
-    // 已不再产生新投影。为保持 SearchResult 接口兼容性（前端可能读取），仍输出 null。
-
     // 生成 href
-    // Plan 23 CS-02：card / card_set / evidence 已退役（consumableSearchDocumentPredicate
-    // 排除），不再生成指向 /cards 或 /card-sets 的 V1 路由。遗留文档（reindex 前的
-    // 投影）会被 consumable predicate 过滤；此处移除 dead code 防止误路由。
     let href = "";
     switch (row.object_type) {
       case "note":
@@ -286,10 +246,8 @@ export async function search(
         href = `/sources/${row.object_id}`;
         break;
       case "objective":
-        // Plan 23 CS-03：Objective 命中直达目标档案（web 端 /learning-objectives/[id] 重定向到详情）
         href = `/learning-objectives/${row.object_id}`;
         break;
-      // card / card_set / evidence：V1 已下线，不生成 href（consumable predicate 已排除）。
       default:
         href = "";
     }
@@ -302,11 +260,6 @@ export async function search(
       indexedAt: row.indexed_at instanceof Date ? row.indexed_at.toISOString() : row.indexed_at,
       href,
       matchCount: Number(row.match_count) || 1,
-      // Plan 23 CS-02：cardSetId/scope/ordinal 是 V1 card/card_set 遗留字段，
-      // 永远为 null（不再产生新投影）；保留输出以维持接口兼容。
-      cardSetId: null,
-      scope: null,
-      ordinal: null,
     };
   });
 
@@ -326,9 +279,6 @@ export interface SearchReindexResult {
   indexed: {
     note: number;
     source: number;
-    cardSet: number;
-    card: number;
-    evidence: number;
     /** Plan 23 CS-03：Objective 文档（conceptLabel/publicSummary/来源；不含答案/rubric）。 */
     objective: number;
   };
@@ -351,7 +301,7 @@ export async function reindexWorkspaceSearch(
   workspaceId: string,
 ): Promise<SearchReindexResult & { errors: number }> {
   let deletedCount = 0;
-  let indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 };
+  let indexed = { note: 0, source: 0, objective: 0 };
   let errors = 0;
   const projectionStartedAt = new Date();
 
@@ -621,9 +571,6 @@ export async function reindexWorkspaceSearch(
     indexed = {
       note: noteData.length,
       source: sourceData.length,
-      cardSet: 0,
-      card: 0,
-      evidence: 0,
       objective: objectiveData.length,
     };
 
@@ -657,7 +604,7 @@ export async function reindexWorkspaceSearch(
     // A rolled-back rebuild changed neither the old index nor the reported
     // counters. The old code leaked pre-rollback counts as if work succeeded.
     deletedCount = 0;
-    indexed = { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 };
+    indexed = { note: 0, source: 0, objective: 0 };
     logger.error({ err, workspaceId }, "reindex transaction failed — old index preserved");
     errors = 1;
   }
@@ -680,17 +627,11 @@ export interface SearchDriftResult {
   expected: {
     note: number;
     source: number;
-    cardSet: number;
-    card: number;
-    evidence: number;
   };
   /** 搜索索引实际对象数 */
   actual: {
     note: number;
     source: number;
-    cardSet: number;
-    card: number;
-    evidence: number;
   };
   /** 幽灵文档 ID（索引中有但业务表中不存在） */
   ghosts: { objectType: string; objectId: string }[];
@@ -706,7 +647,7 @@ export interface SearchDriftResult {
    *  属既定截断而非漂移；auto-fix 据此避免反复重索引。
    *  evidence 记录的是证据索引读是否命中行数上限：该侧被截断时，超出窗口的证据 id
    *  不报 missing（可能是索引中存在但未进入确定读窗口，属既定截断而非漂移）。 */
-  capped: Record<"note" | "source" | "cardSet" | "card" | "evidence", boolean>;
+  capped: Record<"note" | "source", boolean>;
 }
 
 export async function detectSearchDrift(
@@ -760,13 +701,9 @@ export async function detectSearchDrift(
   //  - ghost 对"索引有而业务读窗口无"的实体不再报告（超线实体可能仍合法存在于业务表中，
   //    只是未进入当前确定窗口，把它们当 ghost 会误报），并记告警。
   // 这样 auto-fix 只在真实漂移时触发，截断场景不反复重索引。
-  const capped: Record<"note" | "source" | "cardSet" | "card" | "evidence", boolean> = {
+  const capped: Record<"note" | "source", boolean> = {
     note: noteRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
     source: sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
-    // V1 卡片/卡片集/其 evidence 已下线，无漂移检测。
-    cardSet: false,
-    card: false,
-    evidence: false,
   };
 
   // Process notes drift
@@ -854,16 +791,10 @@ export async function detectSearchDrift(
   const expected = {
     note: noteIds.size,
     source: sourceIds.size,
-    cardSet: 0,
-    card: 0,
-    evidence: 0,
   };
   const actual = {
     note: indexedNotes.length,
     source: indexedSources.length,
-    cardSet: 0,
-    card: 0,
-    evidence: 0,
   };
 
   return {

@@ -9,16 +9,16 @@ import {
 describe("search return navigation", () => {
   it("builds a canonical search target", () => {
     assert.equal(
-      buildSearchReturnTarget("  attention mechanism  ", "card"),
-      "/search?q=attention+mechanism&type=card",
+      buildSearchReturnTarget("  attention mechanism  ", "note"),
+      "/search?q=attention+mechanism&type=note",
     );
     assert.equal(buildSearchReturnTarget("smoke", "all"), "/search?q=smoke");
   });
 
   it("accepts only canonical search return targets", () => {
     assert.equal(
-      sanitizeSearchReturnTarget("/search?q=softmax&type=evidence&ignored=1"),
-      "/search?q=softmax&type=evidence",
+      sanitizeSearchReturnTarget("/search?q=softmax&type=source&ignored=1"),
+      "/search?q=softmax&type=source",
     );
     assert.equal(sanitizeSearchReturnTarget("/search?type=note"), null);
     assert.equal(sanitizeSearchReturnTarget("/notes?q=softmax"), null);
@@ -27,11 +27,11 @@ describe("search return navigation", () => {
   });
 
   it("keeps long Chinese and emoji queries navigable after URL encoding", () => {
-    const chineseTarget = buildSearchReturnTarget("中".repeat(200), "card");
+    const chineseTarget = buildSearchReturnTarget("中".repeat(200), "objective");
     const emojiTarget = buildSearchReturnTarget("😀".repeat(100), "note");
     assert.equal(sanitizeSearchReturnTarget(chineseTarget), chineseTarget);
     assert.equal(sanitizeSearchReturnTarget(emojiTarget), emojiTarget);
-    assert.ok(withSearchReturnTarget("/cards/card-1", chineseTarget));
+    assert.ok(withSearchReturnTarget("/learning-cards/card-1", chineseTarget));
     assert.ok(withSearchReturnTarget("/notes/note-1", emojiTarget));
   });
 

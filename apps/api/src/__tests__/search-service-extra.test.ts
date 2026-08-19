@@ -76,8 +76,7 @@ describe("search service", () => {
       .map((statement) => new PgDialect().sqlToQuery(statement as SQL).sql)
       .join("\n");
     assert.match(compiledSql, /FROM search_documents AS search_document/);
-    // V2: 只消费 non-V1 类型——card/card_set/evidence 均被排除，objective 通过。
-    assert.match(compiledSql, /search_document\.object_type NOT IN \('card', 'card_set', 'evidence'\)/);
+    // V1 枚举值已移除，路由层不再接受 card/card_set/evidence 类型。
     assert.equal(result.total, 9);
     assert.equal(result.nextCursor, 4);
     assert.deepEqual(result.items.map((item) => item.href), [
@@ -201,7 +200,7 @@ describe("search projection rebuild", () => {
 
     assert.deepEqual(result, {
       deleted: 2,
-      indexed: { note: 1, source: 2, cardSet: 0, card: 0, evidence: 0, objective: 1 },
+      indexed: { note: 1, source: 2, objective: 1 },
       errors: 0,
       capped: false,
     });
@@ -250,7 +249,7 @@ describe("search projection rebuild", () => {
 
     assert.deepEqual(result, {
       deleted: 0,
-      indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 },
+      indexed: { note: 0, source: 0, objective: 0 },
       errors: 0,
       capped: false,
     });
@@ -277,7 +276,7 @@ describe("search projection rebuild", () => {
 
     assert.deepEqual(result, {
       deleted: 0,
-      indexed: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0, objective: 0 },
+      indexed: { note: 0, source: 0, objective: 0 },
       errors: 1,
       capped: false,
     });
@@ -332,20 +331,8 @@ describe("search projection drift", () => {
 
     assert.equal(indexedQuery, 2);
     // V2：drift 只对比 note / source（card/card_set/evidence 已下线）。
-    assert.deepEqual(result.expected, {
-      note: 2,
-      source: 2,
-      cardSet: 0,
-      card: 0,
-      evidence: 0,
-    });
-    assert.deepEqual(result.actual, {
-      note: 2,
-      source: 2,
-      cardSet: 0,
-      card: 0,
-      evidence: 0,
-    });
+    assert.deepEqual(result.expected, { note: 2, source: 2 });
+    assert.deepEqual(result.actual, { note: 2, source: 2 });
     assert.deepEqual(result.ghosts, [
       { objectType: "note", objectId: "note-ghost" },
       { objectType: "source", objectId: "source-ghost" },
@@ -394,14 +381,14 @@ describe("search projection drift", () => {
     assert.equal(indexedQuery, 2);
     assert.equal(forbiddenQueries, 0);
     assert.deepEqual(result, {
-      expected: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
-      actual: { note: 0, source: 0, cardSet: 0, card: 0, evidence: 0 },
+      expected: { note: 0, source: 0 },
+      actual: { note: 0, source: 0 },
       ghosts: [],
       missing: [],
       staleTitles: [],
       staleBodies: [],
       hasDrift: false,
-      capped: { note: false, source: false, cardSet: false, card: false, evidence: false },
+      capped: { note: false, source: false },
     });
   });
 });

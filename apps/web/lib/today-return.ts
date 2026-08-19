@@ -1,14 +1,14 @@
 const TODAY_RETURN_BASE = "https://today-return.local";
-const TODAY_TYPES = new Set(["all", "note", "card", "source", "review", "job"]);
-const TODAY_DETAIL_DESTINATION = /^\/(?:notes|cards|sources)\/[A-Za-z0-9_-]+$/;
+const TODAY_TYPES = new Set(["all", "note", "source", "review", "job", "objective"]);
+const TODAY_DETAIL_DESTINATION = /^\/(?:notes|sources|learning-cards|learning-objectives)\/[A-Za-z0-9_-]+$/;
 
 export type TodayReturnType =
   | "all"
   | "note"
-  | "card"
   | "source"
   | "review"
-  | "job";
+  | "job"
+  | "objective";
 
 /**
  * Builds the only shape that may be used as a return target for the daily trace.

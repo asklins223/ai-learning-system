@@ -8,7 +8,8 @@ import { parseQuery } from "../../lib/pagination.ts";
 const searchQuerySchema = z.object({
   q: z.string().optional(),
   // Plan 23 CS-03：objective 类型（conceptLabel/说明/来源可搜；answer/rubric 不进索引）
-  type: z.enum(["note", "card_set", "card", "source", "evidence", "objective"]).optional(),
+  // V1 枚举值 card_set/card/evidence 已退役，不再作为合法搜索类型。
+  type: z.enum(["note", "source", "objective"]).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
   // PERF: 深度 OFFSET 在 DISTINCT ON + ILIKE 上会退化为深扫描。把翻页上限
   // 从 100k 大幅降到 1000（50 条/页 × 20 页），超过即终止翻页并返回 nextCursor=null，
