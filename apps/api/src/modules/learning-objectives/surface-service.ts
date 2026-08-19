@@ -42,6 +42,8 @@ import type {
   LearningObjectiveSurfaceV3,
   ObjectiveOriginV3,
   ObjectiveListItemV3,
+  KnowledgeFormV2,
+  ObjectiveSurfaceLifecycleV3,
 } from "@ailearn/shared";
 import { DomainError } from "@ailearn/shared";
 import { listOriginsByObjective, rowToWire } from "./origin-service.ts";
@@ -433,8 +435,8 @@ async function assembleObjectiveSurfaceV3Inner(
     content: {
       conceptLabel: revision?.conceptLabel ?? null,
       publicSummary: revision?.publicSummary ?? "",
-      knowledgeForm: (revision?.knowledgeForm ?? "fact") as never,
-      lifecycle: objective.lifecycle as never,
+      knowledgeForm: (revision?.knowledgeForm ?? "fact") as KnowledgeFormV2,
+      lifecycle: objective.lifecycle as ObjectiveSurfaceLifecycleV3,
       freshness,
       presentation: {
         cardId: card?.cardId ?? null,
@@ -456,7 +458,7 @@ async function assembleObjectiveSurfaceV3Inner(
       lastCanonicalAt,
     },
     lifecycle: {
-      status: objective.lifecycle as never,
+      status: objective.lifecycle as ObjectiveSurfaceLifecycleV3,
       successorObjectiveId,
     },
     primaryAction,
@@ -672,10 +674,10 @@ async function batchAssembleObjectiveSurfacesV3(
   }
 
   // 7. 批量查 all runs（通过 origin->>'keyPointId' JSON 路径查询）
-  // 安全修复：不在 SQL 中用 sql.raw 拼接 objectiveIds（SQL 注入风险）。
-  // Bug 修复：原先只查 active-phase runs，导致 practiceTrailCount/lastCanonicalAt
-  // 对已完成 run 的 objective 始终为 0/null。改为查 all runs，在内存中同时提取
-  // activeRun 和 allRunIds（与 detail assembler 的行为对齐）。
+  // 性能修复：原先查该用户全量 runs 再在内存中过滤，当用户有大量历史
+  // runs 时会严重退化。改为在 SQL 层用 origin->>'keyPointId' = ANY(...)
+  // 限定到目标 objectiveIds，只查相关 runs。
+  // 安全：objectiveIds 作为 Drizzle sql 参数绑定（非 sql.raw 拼接），无注入风险。
   const objectiveIdSet = new Set(objectiveIds);
   const allRunRows = objectiveIds.length > 0
     ? await tx
@@ -689,6 +691,7 @@ async function batchAssembleObjectiveSurfacesV3(
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
+          sql`${learningRuns.origin}->>'keyPointId' = ANY(${objectiveIds}::text[])`,
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];
@@ -954,8 +957,8 @@ async function batchAssembleObjectiveSurfacesV3(
       content: {
         conceptLabel: revision?.conceptLabel ?? null,
         publicSummary: revision?.publicSummary ?? "",
-        knowledgeForm: (revision?.knowledgeForm ?? "fact") as never,
-        lifecycle: lifecycle as never,
+        knowledgeForm: (revision?.knowledgeForm ?? "fact") as KnowledgeFormV2,
+        lifecycle: lifecycle as ObjectiveSurfaceLifecycleV3,
         freshness,
         presentation: {
           cardId: card?.cardId ?? null,
@@ -977,7 +980,7 @@ async function batchAssembleObjectiveSurfacesV3(
         lastCanonicalAt,
       },
       lifecycle: {
-        status: lifecycle as never,
+        status: lifecycle as ObjectiveSurfaceLifecycleV3,
         successorObjectiveId,
       },
       primaryAction,
@@ -1001,15 +1004,26 @@ export function toObjectiveListItemV3(surface: LearningObjectiveSurfaceV3): Obje
     freshness: surface.content.freshness,
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,
     personalState: {
-      state: surface.personal.activeRun
-        ? "learning"
-        : surface.personal.review?.status === "due"
-          ? "due_review"
-          : surface.personal.initialValidation?.status === "ready"
-            ? "unvalidated"
-            : surface.content.lifecycle === "archived"
-              ? "archived"
-              : "stable",
+      // 与 topology-repository buildTopologySnapshotV3 的 state 映射保持一致。
+      // 优先级：archived > superseded > activeRun > review due > scheduled
+      // > source_outdated > stable(has canonical) > unvalidated(ready)。
+      // 修复：引入 lastCanonicalAt 区分 stable（已稳定理解）与 unvalidated（等待首次验证），
+      // 与 topology-repository 的 lastCanonicalEventId ? "stable" : "unvalidated" 对齐。
+      state: surface.content.lifecycle === "archived"
+        ? "archived"
+        : surface.content.lifecycle === "superseded"
+          ? "superseded"
+          : surface.personal.activeRun
+            ? "learning"
+            : surface.personal.review?.status === "due"
+              ? "due_review"
+              : surface.personal.review?.status === "scheduled"
+                ? "scheduled"
+                : surface.content.freshness === "source_outdated"
+                  ? "outdated"
+                  : surface.personal.lastCanonicalAt
+                    ? "stable"
+                    : "unvalidated",
       activeRunId: surface.personal.activeRun?.runId ?? null,
     },
     primaryAction: surface.primaryAction,

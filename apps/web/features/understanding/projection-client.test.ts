@@ -87,18 +87,19 @@ function makePage(payload: Record<string, unknown>) {
 }
 
 test("mergeProjectionPages：跨页节点按 nodeRef 去重、边按 edgeId 去重", () => {
-  const kp1 = PAGE_NODE({ kind: "key_point", keyPointId: "k1" });
-  const kp2 = PAGE_NODE({ kind: "key_point", keyPointId: "k2" });
-  const card = PAGE_NODE({ kind: "card", cardId: "c1" });
-  const edge1 = { edgeId: "e1", from: { kind: "card", cardId: "c1" }, to: { kind: "key_point", keyPointId: "k1" }, kind: "contains", provenanceHash: "h1" };
-  const edge2 = { edgeId: "e2", from: { kind: "card", cardId: "c1" }, to: { kind: "key_point", keyPointId: "k2" }, kind: "contains", provenanceHash: "h2" };
+  // Plan 23 §24.2：V3 节点只允许 source/note/objective/evidence（无 card/key_point）。
+  const obj1 = PAGE_NODE({ kind: "objective", objectiveId: "o1" });
+  const obj2 = PAGE_NODE({ kind: "objective", objectiveId: "o2" });
+  const note = PAGE_NODE({ kind: "note", noteId: "n1" });
+  const edge1 = { edgeId: "e1", from: { kind: "note", id: "n1" }, to: { kind: "objective", id: "o1" }, kind: "sourced_from" };
+  const edge2 = { edgeId: "e2", from: { kind: "note", id: "n1" }, to: { kind: "objective", id: "o2" }, kind: "sourced_from" };
   const merged = mergeProjectionPages([
-    makePage({ nodes: [card, kp1], edges: [edge1] }),
-    makePage({ nodes: [kp2, kp1], edges: [edge2, edge1] }),
+    makePage({ nodes: [note, obj1], edges: [edge1] }),
+    makePage({ nodes: [obj2, obj1], edges: [edge2, edge1] }),
   ]) as { nodes: unknown[]; edges: unknown[]; slice: { continuationToken: unknown }; checkpoint: { token: string } };
 
   assert.ok(merged, "合并结果非空");
-  assert.equal(merged.nodes.length, 3, "节点去重（card/kp1/kp2）");
+  assert.equal(merged.nodes.length, 3, "节点去重（note/obj1/obj2）");
   assert.equal(merged.edges.length, 2, "边去重（e1/e2）");
   assert.equal(merged.checkpoint.token, "ck-1");
   assert.equal(merged.slice.continuationToken, null, "合并后 continuation 收敛为 null");

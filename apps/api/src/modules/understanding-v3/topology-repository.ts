@@ -32,6 +32,7 @@ import type {
   UnderstandingNodeProjectionV3,
   UnderstandingEdgeProjectionV3,
   UnderstandingTopologySnapshotV3,
+  ObjectiveSurfaceLifecycleV3,
 } from "@ailearn/shared";
 
 export interface TopologyContext {
@@ -104,10 +105,10 @@ export async function buildTopologySnapshotV3(
   // personal overlay（TP-06）：active run + review per objective
   // V2：learningRuns 没有 keyPointId 列，run.origin JSONB 中的
   // keyPointId = objectiveId（方案 20 §29.4 alias 规则）；经 origin JSON 路径取。
-  // 安全修复：不在 SQL 中用 sql.raw 拼接 objectiveIds（SQL 注入风险）。
-  // Bug 修复：原先只查 active-phase runs，导致 practiceTrailCount/lastCanonicalEventId
-  // 对已完成 run 的 objective 始终为 0/null。改为查 all runs，在内存中同时提取
-  // activeRun 映射和 allRunIds/runIdToObjective（与 surface-service 对齐）。
+  // 性能修复：原先查该用户全量 runs 再在内存中过滤，当用户有大量历史
+  // runs 时会严重退化。改为在 SQL 层用 origin->>'keyPointId' = ANY(...)
+  // 限定到目标 objectiveIds，只查相关 runs。
+  // 安全：objectiveIds 作为 Drizzle sql 参数绑定，无注入风险。
   const objectiveIdSet = new Set(objectiveIds);
   const allRunRows = objectiveIds.length > 0
     ? await tx
@@ -116,12 +117,14 @@ export async function buildTopologySnapshotV3(
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
+          sql`${learningRuns.origin}->>'keyPointId' = ANY(${objectiveIds}::text[])`,
         ))
+        .orderBy(desc(learningRuns.createdAt))
     : [];
   const runByObjective = new Map<string, { runId: string; phase: string }>();
   const allRunIds: string[] = [];
   const runIdToObjective = new Map<string, string>();
-  for (const run of allRunRows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())) {
+  for (const run of allRunRows) {
     const objectiveId = ((run.origin as Record<string, unknown> | null)?.keyPointId) as string | undefined;
     if (objectiveId && objectiveIdSet.has(objectiveId)) {
       allRunIds.push(run.runId);
@@ -170,11 +173,16 @@ export async function buildTopologySnapshotV3(
   const evidenceSnapshotIds = [
     ...new Set(originRows.flatMap((o) => (o.evidenceSnapshotIds ?? []) as string[])),
   ];
+  // 安全修复：evidenceSnapshotsV2 查询必须加 workspaceId 条件（§20.3 RLS）。
+  // 原先只按 evidenceSnapshotId IN(...) 查询，缺少 workspace 隔离。
   const evidenceRows = evidenceSnapshotIds.length > 0
     ? await tx
         .select({ evidenceSnapshotId: evidenceSnapshotsV2.evidenceSnapshotId, supportDescription: evidenceSnapshotsV2.supportDescription, sourceContentHash: evidenceSnapshotsV2.sourceContentHash })
         .from(evidenceSnapshotsV2)
-        .where(inArray(evidenceSnapshotsV2.evidenceSnapshotId, evidenceSnapshotIds))
+        .where(and(
+          eq(evidenceSnapshotsV2.workspaceId, ctx.workspaceId),
+          inArray(evidenceSnapshotsV2.evidenceSnapshotId, evidenceSnapshotIds),
+        ))
     : [];
   const evidenceById = new Map(evidenceRows.map((e) => [e.evidenceSnapshotId, e]));
   for (const evidence of evidenceRows) {
@@ -357,7 +365,9 @@ export async function buildTopologySnapshotV3(
     if (origins.length === 0) {
       freshness = "legacy_unreviewed";
     } else {
-      const noteOrigins = origins.filter((o) => o.noteId);
+      // 修复：与 surface-service computeFreshness 对齐——只检查 originKind === "note"
+      // 的 origin，避免 legacy_migrated 类型 origin 的 noteId 被误纳入版本比较。
+      const noteOrigins = origins.filter((o) => o.originKind === "note" && o.noteId);
       const outdated = noteOrigins.some((o) => {
         const currentVersion = o.noteId ? noteCurrentVersionById.get(o.noteId) : undefined;
         return currentVersion !== null
@@ -431,18 +441,27 @@ export async function buildTopologySnapshotV3(
       label: revision?.conceptLabel ?? revision?.publicSummary.slice(0, 40) ?? "未命名目标",
       publicSummary: revision?.publicSummary ?? "",
       activeCardId: cardId,
-      lifecycle: objective.lifecycle as "active" | "archived" | "superseded",
+      lifecycle: objective.lifecycle as ObjectiveSurfaceLifecycleV3,
       freshness,
       personal: {
-        state: activeRun
-          ? "learning"
-          : reviewDue
-            ? "due_review"
-            : schedule
-              ? "scheduled"
-              : objective.lifecycle === "archived"
-                ? "archived"
-                : "unvalidated",
+        // 与 surface-service toObjectiveListItemV3 的 state 映射保持一致。
+        // 优先级：archived > superseded > activeRun > review due > scheduled
+        // > source_outdated > stable/unvalidated（有 canonical → stable）。
+        state: objective.lifecycle === "archived"
+          ? "archived"
+          : objective.lifecycle === "superseded"
+            ? "superseded"
+            : activeRun
+              ? "learning"
+              : reviewDue
+                ? "due_review"
+                : schedule
+                  ? "scheduled"
+                  : freshness === "source_outdated"
+                    ? "outdated"
+                    : lastCanonicalEventId
+                      ? "stable"
+                      : "unvalidated",
         activeRunId: activeRun?.runId ?? null,
         activeScheduleId: schedule?.scheduleId ?? null,
         nextReviewAt: schedule?.nextReviewAt.toISOString() ?? null,

@@ -173,6 +173,8 @@ export const objectivePersonalStateV3Schema = z.enum([
   "due_review",
   "scheduled",
   "archived",
+  "superseded",
+  "outdated",
 ]);
 export type ObjectivePersonalStateV3 = z.infer<
   typeof objectivePersonalStateV3Schema

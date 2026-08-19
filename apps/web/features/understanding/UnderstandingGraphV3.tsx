@@ -47,12 +47,23 @@ function nodeLabel(node: UnderstandingNodeProjectionV3): string {
 }
 
 function chipStateOf(node: ObjectiveNodeProjectionV3): ObjectiveChipState {
+  // 优先使用 lifecycle 终态
   if (node.lifecycle === "archived") return "archived";
-  if (node.personal.activeRunId) return "run";
-  if (node.personal.state === "due_review") return "due";
-  if (node.personal.state === "scheduled") return "scheduled";
-  if (node.freshness === "source_outdated") return "outdated";
-  return "ready";
+  if (node.lifecycle === "superseded") return "superseded";
+  // 服务端已综合所有状态计算了 personal.state 和 primaryAction（§7.5）；
+  // 直接映射，不自行推断。
+  switch (node.personal.primaryAction.kind) {
+    case "resume_run": return "run";
+    case "create_review_run": return "due";
+    case "wait_for_initial_validation": return "ready";
+    case "practice_only": return "stable";
+    case "view_successor": return "superseded";
+    case "refresh": return "outdated";
+    case "none": return "archived";
+    case "create_run":
+      return node.personal.lastCanonicalEventId ? "stable" : "ready";
+    default: return "ready";
+  }
 }
 
 interface LayoutNode {

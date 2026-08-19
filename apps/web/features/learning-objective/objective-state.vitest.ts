@@ -46,29 +46,48 @@ function surface(over: Record<string, unknown> = {}): any {
 
 describe("objectiveChipStateFromList", () => {
   it("archived lifecycle 优先", () => {
-    expect(objectiveChipStateFromList(listItem({ lifecycle: "archived", primaryAction: { kind: "resume_run", runId: RUN, objectiveId: OBJ } }))).toBe("archived");
+    expect(objectiveChipStateFromList(listItem({ lifecycle: "archived", personalState: { state: "archived", activeRunId: null }, primaryAction: { kind: "resume_run", runId: RUN, objectiveId: OBJ } }))).toBe("archived");
   });
   it("resume_run → run（优先于 due）", () => {
-    expect(objectiveChipStateFromList(listItem({ primaryAction: { kind: "create_review_run", objectiveId: OBJ, scheduleId: OBJ, generation: 1 } }))).toBe("due");
-    expect(objectiveChipStateFromList(listItem({ primaryAction: { kind: "resume_run", runId: RUN, objectiveId: OBJ } }))).toBe("run");
+    expect(objectiveChipStateFromList(listItem({ personalState: { state: "due_review", activeRunId: null }, primaryAction: { kind: "create_review_run", objectiveId: OBJ, scheduleId: OBJ, generation: 1 } }))).toBe("due");
+    expect(objectiveChipStateFromList(listItem({ personalState: { state: "learning", activeRunId: RUN }, primaryAction: { kind: "resume_run", runId: RUN, objectiveId: OBJ } }))).toBe("run");
   });
   it("source_outdated → outdated", () => {
-    expect(objectiveChipStateFromList(listItem({ freshness: "source_outdated" }))).toBe("outdated");
+    expect(objectiveChipStateFromList(listItem({ freshness: "source_outdated", personalState: { state: "outdated", activeRunId: null } }))).toBe("outdated");
   });
-  it("默认 → ready", () => {
-    expect(objectiveChipStateFromList(listItem())).toBe("ready");
+  it("默认 → stable（服务端已算好 stable state）", () => {
+    expect(objectiveChipStateFromList(listItem())).toBe("stable");
   });
 });
 
 describe("objectiveChipStateFromSurface", () => {
-  it("activeRun → run；review due → due；scheduled → scheduled", () => {
-    expect(objectiveChipStateFromSurface(surface({ personal: { initialValidation: null, activeRun: { runId: RUN, phase: "active" }, review: null, practiceTrailCount: 0, lastCanonicalAt: null } }))).toBe("run");
-    expect(objectiveChipStateFromSurface(surface({ personal: { initialValidation: null, activeRun: null, review: { status: "due", scheduleId: OBJ, generation: 1, dueAt: "2026-08-16T00:00:00.000Z" }, practiceTrailCount: 0, lastCanonicalAt: null } }))).toBe("due");
-    expect(objectiveChipStateFromSurface(surface({ personal: { initialValidation: null, activeRun: null, review: { status: "scheduled", scheduleId: OBJ, generation: 1, dueAt: "2026-08-20T00:00:00.000Z" }, practiceTrailCount: 0, lastCanonicalAt: null } }))).toBe("scheduled");
+  it("primaryAction resume_run → run；create_review_run → due", () => {
+    expect(objectiveChipStateFromSurface(surface({ primaryAction: { kind: "resume_run", runId: RUN, objectiveId: OBJ } }))).toBe("run");
+    expect(objectiveChipStateFromSurface(surface({ primaryAction: { kind: "create_review_run", objectiveId: OBJ, scheduleId: OBJ, generation: 1 } }))).toBe("due");
   });
-  it("archived / outdated 正确映射", () => {
+  it("primaryAction wait_for_initial_validation → ready", () => {
+    expect(objectiveChipStateFromSurface(surface({ primaryAction: { kind: "wait_for_initial_validation", reminderId: OBJ, qualificationNotBefore: "2026-08-16T00:00:00.000Z" } }))).toBe("ready");
+  });
+  it("primaryAction practice_only → stable", () => {
+    expect(objectiveChipStateFromSurface(surface({ primaryAction: { kind: "practice_only", objectiveId: OBJ, cardId: null, reasonCodes: ["exposed"] } }))).toBe("stable");
+  });
+  it("primaryAction refresh → outdated；none → archived", () => {
+    expect(objectiveChipStateFromSurface(surface({ primaryAction: { kind: "refresh" } }))).toBe("outdated");
+    expect(objectiveChipStateFromSurface(surface({ primaryAction: { kind: "none" } }))).toBe("archived");
+  });
+  it("create_run：有 lastCanonicalAt → stable；无 → ready", () => {
+    expect(objectiveChipStateFromSurface(surface({
+      primaryAction: { kind: "create_run", origin: "home", objectiveId: OBJ, cardId: null, goal: "x" },
+      personal: { initialValidation: null, activeRun: null, review: null, practiceTrailCount: 1, lastCanonicalAt: "2026-08-16T00:00:00.000Z" },
+    }))).toBe("stable");
+    expect(objectiveChipStateFromSurface(surface({
+      primaryAction: { kind: "create_run", origin: "home", objectiveId: OBJ, cardId: null, goal: "x" },
+      personal: { initialValidation: null, activeRun: null, review: null, practiceTrailCount: 0, lastCanonicalAt: null },
+    }))).toBe("ready");
+  });
+  it("lifecycle archived/superseded 优先于 primaryAction", () => {
     expect(objectiveChipStateFromSurface(surface({ content: { lifecycle: "archived" } }))).toBe("archived");
-    expect(objectiveChipStateFromSurface(surface({ content: { freshness: "source_outdated" } }))).toBe("outdated");
+    expect(objectiveChipStateFromSurface(surface({ content: { lifecycle: "superseded" } }))).toBe("superseded");
   });
 });
 

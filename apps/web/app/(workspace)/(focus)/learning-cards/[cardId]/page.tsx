@@ -23,7 +23,8 @@ import type {
   LearningObjectivePrimaryActionV3,
 } from "@ailearn/shared";
 import { learningObjectiveApi, type ObjectiveHistoryPage } from "@/lib/learning-objective-api";
-import { ObjectiveStatusChip, type ObjectiveChipState } from "@/features/learning-objective/ObjectiveStatusChip";
+import { ObjectiveStatusChip } from "@/features/learning-objective/ObjectiveStatusChip";
+import { objectiveChipStateFromSurface } from "@/features/learning-objective/objective-state";
 import { ObjectiveSourceLine } from "@/features/learning-objective/ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "@/features/learning-objective/ObjectivePrimaryAction";
 import { ObjectiveSkeleton, ObjectiveError } from "@/features/learning-objective/ObjectiveStatePrimitives";
@@ -33,13 +34,9 @@ type LoadState =
   | { status: "error"; message: string }
   | { status: "ready" };
 
-function chipStateOf(surface: LearningObjectiveSurfaceV3): ObjectiveChipState {
-  if (surface.content.lifecycle === "archived") return "archived";
-  if (surface.personal.activeRun) return "run";
-  if (surface.personal.review?.status === "due") return "due";
-  if (surface.personal.review?.status === "scheduled") return "scheduled";
-  if (surface.content.freshness === "source_outdated") return "outdated";
-  return "ready";
+/** 直接使用 objective-state 中的统一映射，不在页面本地重复推断逻辑（§7.5）。 */
+function chipStateOf(surface: LearningObjectiveSurfaceV3): ReturnType<typeof objectiveChipStateFromSurface> {
+  return objectiveChipStateFromSurface(surface);
 }
 
 function actionHref(action: LearningObjectivePrimaryActionV3, returnTo: string): string | null {

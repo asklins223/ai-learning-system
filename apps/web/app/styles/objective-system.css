@@ -92,6 +92,21 @@
   border-color: color-mix(in srgb, var(--objective-danger), transparent 45%);
   color: var(--objective-danger);
 }
+.objective-chip[data-state="scheduled"] {
+  border-color: color-mix(in srgb, var(--objective-muted), transparent 45%);
+  color: var(--objective-muted);
+}
+/* stable：已稳定理解（有 canonical 学习记录）；使用 primary 色的沉稳变体 */
+.objective-chip[data-state="stable"] {
+  border-color: color-mix(in srgb, var(--objective-primary), transparent 30%);
+  color: var(--objective-primary);
+  background: color-mix(in srgb, var(--objective-primary), transparent 88%);
+}
+.objective-chip[data-state="superseded"] {
+  border-color: color-mix(in srgb, var(--objective-danger), transparent 60%);
+  color: var(--objective-danger);
+  opacity: 0.75;
+}
 .objective-chip[data-state="archived"] {
   opacity: 0.6;
 }
