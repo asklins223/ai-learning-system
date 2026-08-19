@@ -48,7 +48,11 @@ export function deriveReviewAvailability(
 export interface ReviewWithCard {
   review: typeof reviewSchedules.$inferSelect;
   card: { id: string; title: string };
-  objective: { id: string; publicSummary: string; cue: string } | null;
+  /**
+   * Plan 23 CS-02：Review 展示通过 Objective Surface 读取 conceptLabel/publicSummary。
+   * 不再回查 live claim/quoteText/cue（§10.3）。
+   */
+  objective: { id: string; conceptLabel: string | null; publicSummary: string } | null;
   blockContent: string | null;
   reviewReason: ReviewReason;
   isV2: boolean;
@@ -290,11 +294,12 @@ export async function listReviews(
     out.push({
       review: r,
       card: { id: v2Card.id, title: v2Card.title },
+      // Plan 23 CS-02：使用 conceptLabel/publicSummary（Objective Surface 口径）
       objective: displayObjectiveId
         ? {
             id: displayObjectiveId,
-            publicSummary: display?.claim ?? "",
-            cue: display?.quoteText ?? "",
+            conceptLabel: display?.conceptLabel ?? null,
+            publicSummary: display?.publicSummary ?? "",
           }
         : null,
       blockContent: null,
@@ -311,13 +316,22 @@ export async function listReviews(
   };
 }
 
+/**
+ * Plan 23 CS-02：Review 展示内容通过 Objective Surface 读取。
+ *
+ * §10.3 要求：Review 展示内容通过 objectiveId 读取 Objective Surface，
+ * 不再回查 live claim/summary/cue。
+ *
+ * 返回 conceptLabel（稳定概念标签）和 publicSummary（公开说明），
+ * 不再使用 legacy claim/quoteText 字段名。
+ */
 async function resolveV2Display(
   queryDb: any,
   workspaceId: string,
   objectiveIdArray: string[],
   sanitized: boolean,
-): Promise<Map<string, { claim: string; quoteText: string }>> {
-  const v2Display = new Map<string, { claim: string; quoteText: string }>();
+): Promise<Map<string, { conceptLabel: string | null; publicSummary: string }>> {
+  const v2Display = new Map<string, { conceptLabel: string | null; publicSummary: string }>();
   if (sanitized || objectiveIdArray.length === 0) return v2Display;
   const v2ObjRows = await queryDb
     .select({
@@ -332,10 +346,12 @@ async function resolveV2Display(
   const v2RevIds = v2ObjRows
     .map((r: { currentObjectiveRevisionId: string | null }) => r.currentObjectiveRevisionId)
     .filter((id: string | null): id is string => Boolean(id));
+  // Plan 23 CS-02：读取 conceptLabel + publicSummary（Objective Surface 口径）
   const v2RevRows = v2RevIds.length > 0
     ? await queryDb
         .select({
           objectiveRevisionId: learningObjectiveRevisionsV2.objectiveRevisionId,
+          conceptLabel: learningObjectiveRevisionsV2.conceptLabel,
           publicSummary: learningObjectiveRevisionsV2.publicSummary,
         })
         .from(learningObjectiveRevisionsV2)
@@ -344,32 +360,16 @@ async function resolveV2Display(
           inArray(learningObjectiveRevisionsV2.objectiveRevisionId, v2RevIds),
         ))
     : [];
-  const v2ObjIds = v2ObjRows.map((r: { objectiveId: string }) => r.objectiveId);
-  const v2CardRows = v2ObjIds.length > 0
-    ? await queryDb
-        .select({ objectiveId: learningCardsV2.objectiveId, front: learningCardsV2.front })
-        .from(learningCardsV2)
-        .where(and(
-          eq(learningCardsV2.workspaceId, workspaceId),
-          inArray(learningCardsV2.objectiveId, v2ObjIds),
-          eq(learningCardsV2.lifecycle, "active"),
-        ))
-    : [];
-  const v2SummaryByRev = new Map<string, string>(
-    v2RevRows.map((r: { objectiveRevisionId: string; publicSummary: string }) => [String(r.objectiveRevisionId), String(r.publicSummary)]),
-  );
-  const v2CueByObj = new Map<string, string>(
-    v2CardRows.map((r: { objectiveId: string; front: unknown }) => [String(r.objectiveId), String((r.front as { cue?: string })?.cue ?? "")]),
+  const v2LabelByRev = new Map<string, { conceptLabel: string | null; publicSummary: string }>(
+    v2RevRows.map((r: { objectiveRevisionId: string; conceptLabel: string | null; publicSummary: string }) =>
+      [String(r.objectiveRevisionId), { conceptLabel: r.conceptLabel, publicSummary: String(r.publicSummary) }]),
   );
   for (const o of v2ObjRows) {
-    const summary = o.currentObjectiveRevisionId
-      ? v2SummaryByRev.get(String(o.currentObjectiveRevisionId))
+    const surface = o.currentObjectiveRevisionId
+      ? v2LabelByRev.get(String(o.currentObjectiveRevisionId))
       : undefined;
-    if (summary !== undefined) {
-      v2Display.set(String(o.objectiveId), {
-        claim: summary,
-        quoteText: v2CueByObj.get(String(o.objectiveId)) ?? "",
-      });
+    if (surface !== undefined) {
+      v2Display.set(String(o.objectiveId), surface);
     }
   }
   return v2Display;
@@ -422,18 +422,33 @@ export async function listSanitizedReviews(
         eq(validationAssistanceExposures.userId, userId),
       ),
     });
+    // N+1 修复：批量收集所有 inputScheduleId，一次查询所有关联 schedules。
+    const inputScheduleIds = exposures
+      .map((e) => e.inputScheduleId)
+      .filter((id): id is string => Boolean(id));
+    const schedByObjective = new Map<string, string>();
+    if (inputScheduleIds.length > 0) {
+      const linkedSchedules = await queryDb.query.reviewSchedules.findMany({
+        where: and(
+          eq(reviewSchedules.workspaceId, workspaceId),
+          inArray(reviewSchedules.id, inputScheduleIds),
+          eq(reviewSchedules.subjectType, "objective"),
+          inArray(reviewSchedules.subjectId, objectiveIds),
+        ),
+      });
+      for (const sched of linkedSchedules) {
+        if (sched.subjectId) {
+          schedByObjective.set(sched.id, sched.subjectId);
+        }
+      }
+    }
     for (const exposure of exposures) {
       if (exposure.inputScheduleId) {
-        const sched = await queryDb.query.reviewSchedules.findFirst({
-          where: and(
-            eq(reviewSchedules.id, exposure.inputScheduleId),
-            eq(reviewSchedules.workspaceId, workspaceId),
-          ),
-        });
-        if (sched?.subjectType === "objective" && sched.subjectId) {
-          const current = eligibleByObjective.get(sched.subjectId);
+        const objectiveIdForSched = schedByObjective.get(exposure.inputScheduleId);
+        if (objectiveIdForSched) {
+          const current = eligibleByObjective.get(objectiveIdForSched);
           if (!current || exposure.unassistedEligibleAfter > current) {
-            eligibleByObjective.set(sched.subjectId, exposure.unassistedEligibleAfter);
+            eligibleByObjective.set(objectiveIdForSched, exposure.unassistedEligibleAfter);
           }
         }
       }
@@ -585,18 +600,28 @@ export async function getSanitizedReviewMeta(
         eq(validationAssistanceExposures.userId, userId),
       ),
     });
+    // N+1 修复：批量收集所有 inputScheduleId，一次查询所有关联 schedules。
+    const inputScheduleIds = exposures
+      .map((e) => e.inputScheduleId)
+      .filter((id): id is string => Boolean(id));
+    const matchingScheduleIds = new Set<string>();
+    if (inputScheduleIds.length > 0) {
+      const linkedSchedules = await queryDb.query.reviewSchedules.findMany({
+        where: and(
+          eq(reviewSchedules.workspaceId, workspaceId),
+          inArray(reviewSchedules.id, inputScheduleIds),
+          eq(reviewSchedules.subjectType, "objective"),
+          eq(reviewSchedules.subjectId, objectiveId),
+        ),
+      });
+      for (const sched of linkedSchedules) {
+        matchingScheduleIds.add(sched.id);
+      }
+    }
     for (const exp of exposures) {
-      if (exp.inputScheduleId) {
-        const sched = await queryDb.query.reviewSchedules.findFirst({
-          where: and(
-            eq(reviewSchedules.id, exp.inputScheduleId),
-            eq(reviewSchedules.workspaceId, workspaceId),
-          ),
-        });
-        if (sched?.subjectType === "objective" && sched.subjectId === objectiveId) {
-          if (!exposureDate || exp.unassistedEligibleAfter > exposureDate) {
-            exposureDate = exp.unassistedEligibleAfter;
-          }
+      if (exp.inputScheduleId && matchingScheduleIds.has(exp.inputScheduleId)) {
+        if (!exposureDate || exp.unassistedEligibleAfter > exposureDate) {
+          exposureDate = exp.unassistedEligibleAfter;
         }
       }
     }

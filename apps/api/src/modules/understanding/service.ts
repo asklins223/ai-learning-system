@@ -4,6 +4,7 @@ import {
   learningCardsV2,
   learningObjectivesV2,
   learningObjectiveEvidenceBindingsV2,
+  learningObjectiveRevisionsV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { reviewSchedules, understandingEvents } from "../../db/schema/evidence.ts";
 
@@ -108,6 +109,26 @@ export async function getUnderstandingStates(
   }
   const objectiveRevisionIds = Array.from(
     new Set(objRows.map((o) => o.currentObjectiveRevisionId).filter((id): id is string => Boolean(id))),
+  );
+
+  // 2.1 批量查 objective revisions（获取 conceptLabel 用于标题；方案 23 §12.3）
+  const revisionRows = objectiveRevisionIds.length > 0
+    ? await chunkedInArraySelect(
+        (chunk) => tx
+          .select({
+            objectiveId: learningObjectiveRevisionsV2.objectiveId,
+            conceptLabel: learningObjectiveRevisionsV2.conceptLabel,
+          })
+          .from(learningObjectiveRevisionsV2)
+          .where(and(
+            eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+            inArray(learningObjectiveRevisionsV2.objectiveRevisionId, chunk),
+          )),
+        objectiveRevisionIds,
+      )
+    : [];
+  const revisionByObjective = new Map(
+    revisionRows.map((r) => [r.objectiveId, r]),
   );
 
   // 3. 按 objective 聚合 understanding_events。
@@ -268,16 +289,20 @@ export async function getUnderstandingStates(
     // QUAL-26 优化：如果指定了 state 过滤且不匹配，跳过此卡片
     if (stateFilter && state !== stateFilter) continue;
 
-    // 证据覆盖率：根据该 objective 的 evidence binding 计数。
-    // 有硬证据 binding 的 objective 视为 fully covered；否则按比例/0。
+    // 证据覆盖率：根据该 objective 自身的 evidence binding 计数。
+    // 修复：原先分母用了 objectiveRevisionIds.length（全 workspace revision 总数），
+    // 导致覆盖率被严重稀释。改为以该 objective 自身的 binding 总数为覆盖率，
+    // 上限 1.0（至少 1 条 binding 即 fully covered）。
     const totalBindings = evStats.hard + evStats.soft;
     const evidenceCoverage = totalBindings > 0
-      ? Math.round((evStats.hard + evStats.soft) / Math.max(1, objectiveRevisionIds.length) * 100) / 100
+      ? Math.min(1, totalBindings)
       : 0;
 
-    // V2 标题：publicSummary（回退 front.cue，再回退占位符）
-    const title = card.publicSummary?.trim()
-      || (card.front as { cue?: string } | null)?.cue?.trim()
+    // 方案 23 §12.4/§4.3：front.cue 只能作为 preferredPracticeSeed，
+    // 不得作为系统主标题。标题回退链：conceptLabel → publicSummary → 占位符。
+    const revisionRow = revisionByObjective.get(objectiveId);
+    const title = revisionRow?.conceptLabel?.trim()
+      || card.publicSummary?.trim()
       || "（未命名学习卡）";
 
     results.push({
