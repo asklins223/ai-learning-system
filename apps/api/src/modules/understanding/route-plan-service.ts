@@ -108,7 +108,9 @@ export async function createUnderstandingRoutePlan(
     .filter((r) => r.subjectId !== null)
     .map((r, index) => ({
       ordinal: index + 1,
-      nodeRef: { kind: "key_point", keyPointId: r.subjectId! },
+      // Plan 23 TP-16：Route Plan 切到 objectiveId，不再输出 key_point 双身份。
+      // subjectId 实际就是 objectiveId（方案 20 §29.4 alias 规则）。
+      nodeRef: { kind: "objective", objectiveId: r.subjectId! },
       incomingEdgeIds: [],
       reasonCode: "review_due",
     }));

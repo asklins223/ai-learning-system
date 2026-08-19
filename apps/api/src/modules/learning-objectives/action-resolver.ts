@@ -7,6 +7,7 @@
  *   3. activeRun 存在（可恢复）→ resume_run；
  *   4. review due（携带精确 scheduleId/generation）→ create_review_run；
  *   5. initial validation ready → create_run（origin 由入口提供）；
+ *   5.5. initial validation deferred → wait_for_initial_validation（§7.5）；
  *   6. practice_only（Reveal 后等）→ practice_only；
  *   7. 其余 → create_run 或 none。
  */
@@ -26,6 +27,8 @@ export interface ActionResolverInputV3 {
   activeRun: { runId: string } | null;
   reviewDue: { scheduleId: string; generation: number } | null;
   initialReady: { reminderId: string; qualificationNotBefore: string } | null;
+  /** initial validation 存在但 deferred（未到资格时间）→ wait_for_initial_validation。 */
+  initialDeferred: { reminderId: string; qualificationNotBefore: string } | null;
   /** Reveal/Exposure 后由服务端决定（§7.4）；客户端不得自判。 */
   practiceOnly: boolean;
   practiceReasonCodes: string[];
@@ -75,6 +78,14 @@ export function resolvePrimaryActionV3(
       objectiveId,
       cardId: input.cardId,
       goal: input.goal,
+    };
+  }
+  // §7.5：initial validation deferred → wait_for_initial_validation（前端不得用本地时间推断）
+  if (input.initialDeferred) {
+    return {
+      kind: "wait_for_initial_validation",
+      reminderId: input.initialDeferred.reminderId,
+      qualificationNotBefore: input.initialDeferred.qualificationNotBefore,
     };
   }
   if (input.practiceOnly) {

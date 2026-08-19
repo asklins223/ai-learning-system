@@ -1,7 +1,7 @@
 /**
  * Plan 23 W2-15/W2-16：Primary Action 解析器单元测试。
  * 优先级：superseded > archived/blocked > resume > review due > initial ready
- * > practice_only > create_run > refresh/none。
+ * > initial deferred > practice_only > create_run > refresh/none。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -24,6 +24,7 @@ function base(over: Partial<ActionResolverInputV3> = {}): ActionResolverInputV3 
     activeRun: null,
     reviewDue: null,
     initialReady: null,
+    initialDeferred: null,
     practiceOnly: false,
     practiceReasonCodes: [],
     origin: "card",
@@ -76,6 +77,17 @@ test("initial ready → create_run（origin/goal 来自入口）", () => {
     objectiveId: OBJ,
     cardId: CARD,
     goal: "首次验证",
+  });
+});
+
+test("initial deferred → wait_for_initial_validation（§7.5）", () => {
+  const action = resolvePrimaryActionV3(
+    base({ initialDeferred: { reminderId: REMINDER, qualificationNotBefore: "2026-08-16T00:00:00.000Z" } }),
+  );
+  assert.deepEqual(action, {
+    kind: "wait_for_initial_validation",
+    reminderId: REMINDER,
+    qualificationNotBefore: "2026-08-16T00:00:00.000Z",
   });
 });
 

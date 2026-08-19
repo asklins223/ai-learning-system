@@ -2,10 +2,22 @@
 
 > 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复）**
 > 日期：2026-08-16
-> 版本：v0.6
+> 版本：v0.8
 > 关联：[21-real-desktop-pet-memory-context-design.md](./21-real-desktop-pet-memory-context-design.md)
 >
 > 修订记录：
+> - v0.8（2026-08-19）：第五轮代码审查发现并修复 1 个问题：
+>   1. `proactive-hook.ts` 个性化主动提醒文案生成缺少"同一提醒类型 24h 内最多个性化
+>      1 次"的频率限制（§11.5），每次 Run 完成后只要 `COMPANION_PROACTIVE_PERSONALIZED_V1`
+>      开启且有 topMemories 就会调 LLM 生成个性化文案，未检查 24h 内是否已个性化过。
+>      已添加 24h 频率限制检查：在调用 LLM 前查询最近 24h 是否已有个性化文案
+>      （payload_ref->>'text' 不等于模板文案），若有则跳过本次个性化，保留模板文案。
+> - v0.7（2026-08-19）：第四轮代码审查发现并修复 1 个问题：
+>   1. `companion-memory-vector.ts` keyword fallback 检索缺少 `scope` 过滤条件（§9.2.2），
+>      向量检索有 `(m.scope = 'workspace' OR m.scope = ${currentScope})` 但 keyword
+>      fallback 没有，导致降级检索时可能返回不匹配 scope 的记忆。已为 keyword
+>      fallback 添加 `currentScope` 参数及对应 scope 过滤条件，并确保所有降级路径
+>      正确传递 `currentScope`。
 > - v0.6（2026-08-18）：第三轮代码审查发现并修复 1 个问题：
 >   1. `companion-memory-extractor.ts` 候选记忆置信度过滤使用 `>= 0.6`，
 >      与 PRD §9.1 "只有置信度 > 0.6 才生成候选"不一致（边界值 0.6
@@ -1960,19 +1972,35 @@ GET    /companion/daily?date=YYYY-MM-DD
 |---|---|---|---|---|
 | 6 | `companion-memory-extractor.ts` | 候选记忆置信度过滤使用 `>= 0.6`（大于等于），与 PRD §9.1 "只有置信度 > 0.6 才生成候选"不一致——置信度恰好为 0.6 时 PRD 要求不生成候选，但代码会生成 | §9.1 "只有置信度 > 0.6 才生成候选" | 修正为严格大于 `> 0.6` |
 
+## 22. 第四轮代码审查修复（v0.7 补充）
+
+2026-08-19 对方案全链路代码进行第四轮审查，发现并修复以下 1 个问题：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 7 | `companion-memory-vector.ts` | keyword fallback 检索（`retrieveCompanionMemoriesKeyword`）缺少 `scope` 过滤条件——向量检索有 `(m.scope = 'workspace' OR m.scope = ${currentScope})` 但 keyword fallback 没有，导致降级检索时可能返回 `scope=global` 或不匹配当前任务 scope 的记忆 | §9.2.2 检索 SQL 包含 `(m.scope = 'workspace' OR m.scope = ${currentScope})` | 为 keyword fallback 添加 `currentScope` 参数及 `(scope = 'workspace' OR scope = ${currentScope})` 过滤条件；所有降级路径（`retrieveCompanionMemoriesVector` 降级 + `retrieveCompanionMemories` 统一入口降级）均正确传递 `currentScope` |
+
+## 23. 第五轮代码审查修复（v0.8 补充）
+
+2026-08-19 对方案全链路代码进行第五轮审查，发现并修复以下 1 个问题：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 8 | `proactive-hook.ts` | 个性化主动提醒文案生成缺少"同一提醒类型 24h 内最多个性化 1 次"的频率限制——每次 Run 完成后只要 `COMPANION_PROACTIVE_PERSONALIZED_V1` 开启且有 topMemories 就会调 LLM 生成个性化文案，未检查 24h 内是否已个性化过，可能导致高频 LLM 调用和用户频繁收到个性化文案 | §11.5 "同一提醒类型 24h 内最多个性化 1 次" | 在调用 LLM 生成个性化文案前，先查询最近 24h 是否已有个性化文案（payload_ref->>'text' 不等于模板文案"刚才的学习已完成，要继续吗？"），若已有则跳过本次个性化，保留模板文案；频率检查失败时 fail-open（最多多一次个性化文案） |
+
 ### 19.1 审查通过项
 
 以下实现经审查与 PRD 一致，无问题：
 
-- **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致，降级策略正确。
+- **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致，降级策略正确，scope 过滤在向量与 keyword fallback 两条路径均生效（v0.7 修复）。
 - **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1），memoryRefs ≤3 条、每条 ≤80 字（§14.5），memory_usage_log 记录正确。
 - **记忆提取器**（`companion-memory-extractor.ts`）：候选最多 3 条、置信度 >0.6 过滤（v0.6 修正：从 `>=0.6` 改为严格 `>0.6`）、失败静默不阻塞对话（§9.1）。
 - **会话摘要器**（`companion-summarizer.ts`）：幂等写入、episodic 候选记忆生成、maxTokens 1000（§9.5）。
 - **桌宠日记**（`companion-daily-summary.ts`）：确定性模板 `buildSummaryText`、幂等写入、候选记忆写入（§15.4/§15.5）。
 - **记忆星图**（`memory-star-map.ts`）：只读 overlay、限制 500 节点（§14.4）。
-- **主动提醒个性化**（`proactive-hook.ts`/`proactive-generator.ts`）：Policy Gate 流程、2s 超时、模板回退（§9.7/§11.5）。
+- **主动提醒个性化**（`proactive-hook.ts`/`proactive-generator.ts`）：Policy Gate 流程、2s 超时、模板回退（§9.7/§11.5）、24h 个性化频率限制（v0.8 修复）。
 - **记忆衰减维护**（`companion-memory-maintenance.ts`）：SECURITY DEFINER 函数、每日一次（§10.6）。
-- **Embedding 重建**（`companion-memory-embedding.ts`）：批量 200 条、状态机正确（§13.8）。
+- **Embedding 重建**（`companion-memory-embedding.ts`）：批 量 200 条、状态机正确（§13.8）。
 - **数据库迁移**（`0170`）：表结构、RLS、索引、约束与 PRD 一致。
 - **Shared schema**：`assistant.final` 的 `memoryRefs` 可选字段、`memory_candidate` delivery kind 均已扩展（§16.3/§16.2）。
 - **Worker 注册**：`companion_memory_extract`/`companion_summarizer`/`companion_memory_embedding_rebuild`/`companion_daily_summary` 均已注册；`tickCompanionDailySummaryScheduler`/`tickCompanionMemoryMaintenance` 均在主循环中调用。

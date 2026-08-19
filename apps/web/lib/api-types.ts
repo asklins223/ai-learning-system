@@ -7,7 +7,7 @@
  * 包含：
  * - 用户与认证类型：CurrentUser, AuthResponse, AIPrivacySettings 等
  * - 笔记类型：NoteHeader, Block, NoteVersion, NoteDetail
- * - 卡片类型：LearningCardRecord, CardListItem
+ * - 卡片类型：CardStatus, CardScope, LearningCardSchema（V2 由 card-generation-v2-contracts 提供）
  * - 证据类型：EvidenceRow, EvidenceAlignment
  * - 验证类型：ValidationEvent, StartSessionResult, RevealResultData 等
  * - 复习类型：ReviewWithCard, ReviewAttemptStartResult 等
@@ -128,37 +128,9 @@ export interface LearningCardSchema {
   };
 }
 
-
-export interface LearningCardRecord {
-  id: string;
-  noteVersionId: string;
-  workspaceId: string;
-  status: CardStatus;
-  schemaJson: LearningCardSchema;
-  artifactId: string | null;
-  createdAt: string;
-  /** M5 card-set metadata. Optional while older card responses are still supported. */
-  cardSetId?: string | null;
-  generationRunId?: string | null;
-  scope?: CardScope | null;
-  scopeKey?: string | null;
-  ordinal?: number | null;
-}
-
-
-/** /cards 列表行（listCards 返回含聚合统计）。 */
-export interface CardListItem extends LearningCardRecord {
-  // B6: 聚合统计字段
-  evidenceHardCount?: number;
-  evidenceSoftCount?: number;
-  evidenceTotalCount?: number;
-  validationCount?: number;
-  reviewStatus?: string | null;
-  nextReviewAt?: string | null;
-  /** V2 卡标记：链接到 /learning-cards/:id，而非 legacy /cards/:id。 */
-  isV2?: boolean;
-  objectiveId?: string;
-}
+// Plan 23 RL-17：LearningCardRecord 和 CardListItem 已删除。
+// 正式消费者走 Objective Surface（@ailearn/shared LearningObjectiveSurfaceV3）。
+// Card V2 的 PublicLearningCardV2 类型由 card-generation-v2-contracts 提供。
 // ─── 证据类型 ────────────────────────────────────────────────────────
 
 export type EvidenceAlignment = "aligned" | "soft" | "unaligned" | "stale_alignment";
@@ -817,6 +789,11 @@ export interface StatsOverview {
   evidenceCount: number;
   pendingReviewCount: number;
   hardEvidenceCount: number;
+  /** R#6-5：降级标志——true 表示 activeCardCount 超过上限。 */
+  capped?: boolean;
+  /** Plan 23 CS-04：Objective 口径（与 /v2/learning-dashboard 对账；hidden alias=0）。 */
+  activeObjectiveCount?: number;
+  objectiveReviewDueCount?: number;
 }
 
 // ─── 笔记版本摘要 ────────────────────────────────────────────────────

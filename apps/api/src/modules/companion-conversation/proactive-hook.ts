@@ -129,31 +129,61 @@ export async function flushDeferredProactiveMemoryCandidates(
 
   // 22 方案 §9.7/§11.5：个性化主动文案异步生成 + 2s 超时 + 回退模板。
   // delivery 已在事务内以模板文案入队；此处异步生成成功后更新 text 字段。
+  // §11.5：同一提醒类型 24h 内最多个性化 1 次——通过检查最近 24h 是否已有
+  // 个性化文案覆盖（payload_ref->>'text' 不等于模板文案）来控制频率。
   if (defer.topMemories && defer.topMemories.length > 0) {
     try {
-      const personalizedText = await generatePersonalizedProactiveText({
-        runId: defer.runId,
-        topMemories: defer.topMemories,
-        outcome: defer.outcome,
-        keyPointClaim: defer.keyPointClaim,
-      });
-      if (personalizedText) {
-        // 在独立事务中更新已入队 delivery 的 text 字段。
-        const { withWorkspaceTransaction } = await import("../../db/client.ts");
-        const { sql } = await import("drizzle-orm");
-        await withWorkspaceTransaction(defer.scope, async (tx) => {
-          await tx.execute(sql`
-            UPDATE assistant_deliveries
-            SET payload_ref = jsonb_set(
-              payload_ref,
-              '{text}',
-              ${JSON.stringify(personalizedText)}::jsonb
-            )
+      const { withWorkspaceTransaction } = await import("../../db/client.ts");
+      const { sql } = await import("drizzle-orm");
+      // §11.5 频率限制：检查最近 24h 是否已有个性化文案（text 被覆盖过）。
+      let alreadyPersonalized = false;
+      try {
+        const personalizedCheck = await withWorkspaceTransaction(defer.scope, async (tx) => {
+          const rows = await tx.execute<{ n: string }>(sql`
+            SELECT count(*)::int AS n FROM assistant_deliveries
             WHERE workspace_id = ${defer.scope.workspaceId}
               AND user_id = ${defer.scope.userId}
-              AND dedupe_key = ${`run.completed:${defer.runId}`}
+              AND kind = 'system_event'
+              AND created_at > now() - interval '24 hours'
+              AND payload_ref->>'text' IS NOT NULL
+              AND payload_ref->>'text' <> '刚才的学习已完成，要继续吗？'
           `);
+          return Number((Array.isArray(rows) ? rows : [])[0]?.n ?? 0);
         });
+        alreadyPersonalized = personalizedCheck > 0;
+      } catch {
+        // 频率检查失败不阻塞个性化生成（fail-open，最多多一次个性化文案）。
+      }
+      if (alreadyPersonalized) {
+        // 24h 内已个性化过，跳过本次个性化，保留模板文案。
+        const { logger } = await import("../../lib/logger.ts");
+        logger.info(
+          { runId: defer.runId },
+          "personalized proactive text skipped: 24h limit reached",
+        );
+      } else {
+        const personalizedText = await generatePersonalizedProactiveText({
+          runId: defer.runId,
+          topMemories: defer.topMemories,
+          outcome: defer.outcome,
+          keyPointClaim: defer.keyPointClaim,
+        });
+        if (personalizedText) {
+          // 在独立事务中更新已入队 delivery 的 text 字段。
+          await withWorkspaceTransaction(defer.scope, async (tx) => {
+            await tx.execute(sql`
+              UPDATE assistant_deliveries
+              SET payload_ref = jsonb_set(
+                payload_ref,
+                '{text}',
+                ${JSON.stringify(personalizedText)}::jsonb
+              )
+              WHERE workspace_id = ${defer.scope.workspaceId}
+                AND user_id = ${defer.scope.userId}
+                AND dedupe_key = ${`run.completed:${defer.runId}`}
+            `);
+          });
+        }
       }
     } catch (err) {
       // 个性化文案生成失败不阻塞已入队的模板文案。

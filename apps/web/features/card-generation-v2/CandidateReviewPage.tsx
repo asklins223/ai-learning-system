@@ -202,7 +202,7 @@ export function CandidateReviewPage({
         );
       },
     };
-  }, [effectiveV2, runId, plan, run?.reviewDraftRevision]);
+  }, [effectiveV2, runId, plan]);
 
   const onReveal = useCallback(
     async (candidate: CandidateReviewItemV2): Promise<CandidateRevealContentV2> => {

@@ -23,6 +23,7 @@ import {
   evidenceSnapshotsV2,
   learningCardsV2,
   initialValidationRemindersV2,
+  learningExposuresV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
@@ -104,22 +105,31 @@ export async function buildTopologySnapshotV3(
   // V2：learningRuns 没有 keyPointId 列，run.origin JSONB 中的
   // keyPointId = objectiveId（方案 20 §29.4 alias 规则）；经 origin JSON 路径取。
   // 安全修复：不在 SQL 中用 sql.raw 拼接 objectiveIds（SQL 注入风险）。
-  // 改为按 workspace/user/phase 查活跃 runs，在内存中按 objectiveId 过滤。
+  // Bug 修复：原先只查 active-phase runs，导致 practiceTrailCount/lastCanonicalEventId
+  // 对已完成 run 的 objective 始终为 0/null。改为查 all runs，在内存中同时提取
+  // activeRun 映射和 allRunIds/runIdToObjective（与 surface-service 对齐）。
   const objectiveIdSet = new Set(objectiveIds);
-  const runRows = objectiveIds.length > 0
+  const allRunRows = objectiveIds.length > 0
     ? await tx
         .select({ runId: learningRuns.id, phase: learningRuns.phase, origin: learningRuns.origin, createdAt: learningRuns.createdAt })
         .from(learningRuns)
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
-          inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
         ))
     : [];
   const runByObjective = new Map<string, { runId: string; phase: string }>();
-  for (const run of runRows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
+  const allRunIds: string[] = [];
+  const runIdToObjective = new Map<string, string>();
+  for (const run of allRunRows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())) {
     const objectiveId = ((run.origin as Record<string, unknown> | null)?.keyPointId) as string | undefined;
-    if (objectiveId && objectiveIdSet.has(objectiveId)) runByObjective.set(objectiveId, { runId: run.runId, phase: run.phase });
+    if (objectiveId && objectiveIdSet.has(objectiveId)) {
+      allRunIds.push(run.runId);
+      runIdToObjective.set(run.runId, objectiveId);
+      if ((ACTIVE_RUN_PHASES as readonly string[]).includes(run.phase) && !runByObjective.has(objectiveId)) {
+        runByObjective.set(objectiveId, { runId: run.runId, phase: run.phase });
+      }
+    }
   }
   const scheduleRows = objectiveIds.length > 0
     ? await tx
@@ -224,7 +234,7 @@ export async function buildTopologySnapshotV3(
   }
 
   // 批量查 canonical events + practice trail counts（通过 runId 间接关联）
-  const allRunIds = runRows.map((r) => r.runId);
+  // allRunIds 和 runIdToObjective 已在 step 7 中构建。
   const lastCanonicalByObjective = new Map<string, string>();
   const practiceCountByObjective = new Map<string, number>();
 
@@ -259,16 +269,6 @@ export async function buildTopologySnapshotV3(
         .groupBy(practiceTrailEventOutbox.runId),
     ]);
 
-    // runId → objectiveId 映射
-    const runIdToObjective = new Map<string, string>();
-    for (const run of runRows) {
-      const origin = run.origin as Record<string, unknown> | null;
-      const keyPointId = origin?.keyPointId as string | undefined;
-      if (keyPointId) {
-        runIdToObjective.set(run.runId, keyPointId);
-      }
-    }
-
     for (const row of canonicalRows) {
       const objId = runIdToObjective.get(row.runId);
       if (objId && !lastCanonicalByObjective.has(objId)) {
@@ -282,6 +282,22 @@ export async function buildTopologySnapshotV3(
       }
     }
   }
+
+  // 批量查 exposure（practiceOnly 判定；§7.4 Reveal 语义）
+  const REVEAL_EXPOSURE_KINDS = ["answer_reveal", "evidence_reveal", "answer_editor_view"] as const;
+  const exposureRows = objectiveIds.length > 0
+    ? await tx
+        .select({ objectiveId: learningExposuresV2.objectiveId })
+        .from(learningExposuresV2)
+        .where(and(
+          eq(learningExposuresV2.workspaceId, ctx.workspaceId),
+          eq(learningExposuresV2.userId, ctx.userId),
+          inArray(learningExposuresV2.objectiveId, objectiveIds),
+          inArray(learningExposuresV2.exposureKind, [...REVEAL_EXPOSURE_KINDS]),
+        ))
+        .groupBy(learningExposuresV2.objectiveId)
+    : [];
+  const exposedObjectives = new Set(exposureRows.map((r) => r.objectiveId));
 
   // 批量查 lineage（superseded → successor）
   const successorRevisionIds: string[] = [];
@@ -372,11 +388,17 @@ export async function buildTopologySnapshotV3(
     // initial validation
     const ivRow = ivByObjective.get(objective.objectiveId);
     let initialReady: { reminderId: string; qualificationNotBefore: string } | null = null;
+    let initialDeferred: { reminderId: string; qualificationNotBefore: string } | null = null;
     if (ivRow) {
       const notBefore = ivRow.qualificationNotBefore;
       const ready = ivRow.status === "ready" || (ivRow.status === "pending" && notBefore.getTime() <= now.getTime());
       if (ready) {
         initialReady = {
+          reminderId: ivRow.reminderId,
+          qualificationNotBefore: notBefore.toISOString(),
+        };
+      } else {
+        initialDeferred = {
           reminderId: ivRow.reminderId,
           qualificationNotBefore: notBefore.toISOString(),
         };
@@ -396,8 +418,9 @@ export async function buildTopologySnapshotV3(
       activeRun: activeRun ? { runId: activeRun.runId } : null,
       reviewDue: reviewDue ? { scheduleId: schedule!.scheduleId, generation: schedule!.generation } : null,
       initialReady,
-      practiceOnly: false,
-      practiceReasonCodes: [],
+      initialDeferred,
+      practiceOnly: exposedObjectives.has(objective.objectiveId),
+      practiceReasonCodes: exposedObjectives.has(objective.objectiveId) ? ["exposed"] : [],
       origin: "graph",
       goal: "继续学习",
     };

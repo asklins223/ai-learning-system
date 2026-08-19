@@ -44,8 +44,6 @@ export {
   type CardStatus,
   type CardScope,
   type LearningCardSchema,
-  type LearningCardRecord,
-  type CardListItem,
   type EvidenceAlignment,
   type EvidenceRow,
   type JobType,
@@ -119,7 +117,6 @@ import type {
   NoteHeader,
   Block,
   NoteDetail,
-  CardListItem,
   CardGenerationRunAccepted,
   CardGenerationRunView,
   AgentEventPage,
@@ -177,7 +174,6 @@ import type {
   PutLearningTaskDraftRequestV1,
   SubmitTaskArtifactReceiptV1,
   SubmitTaskArtifactV1,
-  PublicLearningCardV2,
 } from "@ailearn/shared";
 
 // R-012: 浏览器端默认使用同源 /api（由 next.config.mjs rewrite 代理到 API 服务器），
@@ -1055,19 +1051,9 @@ isAutosave?: boolean;
     requestBlob(`/export/notes/${id}`),
   exportWorkspace: () => requestBlob("/export/workspace"),
 
-  /* cards */
-  listCards: (params?: { cursor?: string; limit?: number }) => {
-    const qs = buildQueryString(params);
-    return request<{ items: CardListItem[]; nextCursor: string | null; total: number }>(`/cards${qs}`);
-  },
-  listLearningCardsV2: (params?: { cursor?: string; limit?: number }) => {
-    const qs = buildQueryString(params);
-    return request<{ items: PublicLearningCardV2[]; nextCursor: string | null }>(`/v2/cards${qs}`);
-  },
-  // PERF: 单请求获取卡片在完整列表中的分页位置（index/prev/next）——
-  // 替代前端逐页串行翻页，降低详情页首访延迟。
-  getCardPosition: (id: string) =>
-    request<{ index: number; total: number; previousId: string | null; nextId: string | null; nextReviewAt: string | null }>(`/cards/${id}/position`),
+  // Plan 23 RL-17：legacy listCards / listLearningCardsV2 / getCardPosition 已删除。
+  // 正式消费者全部走 learningObjectiveApi（/v2/learning-objectives）。
+  // Card V2 的 PublicLearningCardV2 读取由 card-generation-v2/api-client 负责。
   createCardGenerationRun: (body: { noteVersionId: string; idempotencyKey: string; force?: boolean; feedbackSummary?: string }) =>
     request<CardGenerationRunAccepted>("/card-generation-runs", {
       method: "POST",

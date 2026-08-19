@@ -1140,7 +1140,7 @@ export function NoteEditor({
       setV2ProgressOpen(true);
       saveV2RunState(noteId, { status: "progress", runId: result.runId });
     }
-  }, [requireConsent, generateCardV2]);
+  }, [noteId, requireConsent, generateCardV2]);
 
   // V2 后台轮询：关闭弹窗后继续取任务状态，plan 就绪后按钮/弹窗自动切换。
   useEffect(() => {
@@ -1208,7 +1208,7 @@ export function NoteEditor({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [v2Run, handleV2Ready]);
+  }, [noteId, v2Run, handleV2Ready]);
 
   const generatedIsCurrent = generatedVersionId === currentVersionId && !dirty;
   const generationNeedsAttention = generationRun?.status === "needs_attention";

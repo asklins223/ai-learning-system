@@ -15,6 +15,8 @@
  * Bug 3 修复：原先逐条调用 assembleObjectiveSurfaceV3 导致 N+1，改为批量加载。
  * Bug 7 修复：practiceTrailCount / lastCanonicalAt 从 outbox 读取（不再硬编码）。
  * Bug 8 修复：successorObjectiveId 从 lineage 表读取（不再硬编码 null）。
+ * Bug 9 修复：practiceOnly 从 learning_exposures_v2 读取曝光状态（不再硬编码 false）。
+ * Bug 10 修复：detail assembler 中 loadActiveRun 与 runIdRows 查询合并（消除重复查询）。
  *
  * 注意：API 端 schema 中 V1 keyPointId 已移除：
  * - learning_runs 没有 keyPointId 列，origin JSONB 中的 keyPointId = objectiveId（alias 规则）
@@ -31,6 +33,7 @@ import {
   initialValidationRemindersV2,
   learningObjectiveLineageV2,
   learningObjectiveOriginsV2,
+  learningExposuresV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
 import { notes } from "../../db/schema/note.ts";
@@ -43,7 +46,7 @@ import type {
 import { DomainError } from "@ailearn/shared";
 import { listOriginsByObjective, rowToWire } from "./origin-service.ts";
 import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
-import { surfaceQueryDurationSeconds } from "../../lib/metrics.ts";
+import { surfaceQueryDurationSeconds, surfaceSlowQueryTotal } from "../../lib/metrics.ts";
 
 export class ObjectiveNotFoundError extends DomainError {
   constructor(objectiveId: string, workspaceId: string) {
@@ -99,28 +102,6 @@ async function loadInitialValidation(
   };
 }
 
-async function loadActiveRun(
-  tx: ApiTransaction,
-  ctx: SurfaceContext,
-  objectiveId: string,
-): Promise<LearningObjectiveSurfaceV3["personal"]["activeRun"]> {
-  // V2：learningRuns 没有 keyPointId 列，origin JSONB 中的
-  // keyPointId = objectiveId（方案 20 §29.4 alias 规则）。
-  const rows = await tx
-    .select({ runId: learningRuns.id, phase: learningRuns.phase })
-    .from(learningRuns)
-    .where(and(
-      eq(learningRuns.workspaceId, ctx.workspaceId),
-      eq(learningRuns.userId, ctx.userId),
-      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
-      inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
-    ))
-    .orderBy(desc(learningRuns.createdAt))
-    .limit(1);
-  const row = rows[0];
-  return row ? { runId: row.runId, phase: row.phase } : null;
-}
-
 async function loadReview(
   tx: ApiTransaction,
   ctx: SurfaceContext,
@@ -147,6 +128,48 @@ async function loadReview(
     scheduleId: row.id,
     generation: row.generation,
     dueAt: row.nextReviewAt.toISOString(),
+  };
+}
+
+// ─── exposure / practiceOnly 判定（§7.4 Reveal 语义）─────────────────────
+
+/** §15.2 受控 Reveal exposure kinds（§16.2 只受控 Reveal 污染）。 */
+const REVEAL_EXPOSURE_KINDS = ["answer_reveal", "evidence_reveal", "answer_editor_view"] as const;
+
+interface ExposureInfo {
+  practiceOnly: boolean;
+  reasonCodes: string[];
+}
+
+/**
+ * Bug 9 修复：从 learning_exposures_v2 读取曝光状态判定 practiceOnly。
+ *
+ * §7.4 Reveal 语义：用户"查看参考内容"后，服务端先持久化 Exposure 到
+ * learning_exposures_v2（exposureKind = 'answer_reveal' 等），然后返回答案。
+ * 如果存在受控 Reveal exposure 记录，则 practiceOnly = true，
+ * 主行动从 "开始首次验证" 变为 "带着参考内容练一下"（practice_only）。
+ *
+ * 客户端不得自行决定 Trust（§7.4 第 5 条）。
+ */
+async function loadExposureInfo(
+  tx: ApiTransaction,
+  ctx: SurfaceContext,
+  objectiveId: string,
+): Promise<ExposureInfo> {
+  const rows = await tx
+    .select({ exposureKind: learningExposuresV2.exposureKind })
+    .from(learningExposuresV2)
+    .where(and(
+      eq(learningExposuresV2.workspaceId, ctx.workspaceId),
+      eq(learningExposuresV2.userId, ctx.userId),
+      eq(learningExposuresV2.objectiveId, objectiveId),
+      inArray(learningExposuresV2.exposureKind, [...REVEAL_EXPOSURE_KINDS]),
+    ))
+    .limit(1);
+  const hasRevealExposure = rows.length > 0;
+  return {
+    practiceOnly: hasRevealExposure,
+    reasonCodes: hasRevealExposure ? ["exposed"] : [],
   };
 }
 
@@ -187,7 +210,12 @@ async function computeFreshness(
 function withSurfaceTimer<T>(queryType: "detail" | "list", fn: () => Promise<T>): Promise<T> {
   const start = Date.now();
   return fn().finally(() => {
-    surfaceQueryDurationSeconds.observe({ query_type: queryType }, (Date.now() - start) / 1000);
+    const elapsedSec = (Date.now() - start) / 1000;
+    surfaceQueryDurationSeconds.observe({ query_type: queryType }, elapsedSec);
+    // RL-09 P0：超过 1s 阈值记慢查询告警
+    if (elapsedSec > 1) {
+      surfaceSlowQueryTotal.inc({ query_type: queryType });
+    }
   });
 }
 
@@ -274,10 +302,33 @@ async function assembleObjectiveSurfaceV3Inner(
 
   const freshness = await computeFreshness(tx, ctx, origins);
 
-  const [initialValidation, activeRun, review] = await Promise.all([
+  // Bug 10 修复：loadActiveRun 查询的活跃 run 是 runIdRows 的子集。
+  // 合并为一次查询：先查该 objective 的所有 runs（含 phase + origin），
+  // 在内存中同时提取 activeRun 和 runId 列表。
+  const allRunRows = await tx
+    .select({
+      runId: learningRuns.id,
+      phase: learningRuns.phase,
+      createdAt: learningRuns.createdAt,
+    })
+    .from(learningRuns)
+    .where(and(
+      eq(learningRuns.workspaceId, ctx.workspaceId),
+      eq(learningRuns.userId, ctx.userId),
+      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
+    ))
+    .orderBy(desc(learningRuns.createdAt));
+  const runIds = allRunRows.map((r) => r.runId);
+  const activeRunRow = allRunRows.find((r) =>
+    (ACTIVE_RUN_PHASES as readonly string[]).includes(r.phase));
+  const activeRun = activeRunRow
+    ? { runId: activeRunRow.runId, phase: activeRunRow.phase }
+    : null;
+
+  const [initialValidation, review, exposureInfo] = await Promise.all([
     loadInitialValidation(tx, ctx, objectiveId),
-    loadActiveRun(tx, ctx, objectiveId),
     loadReview(tx, ctx, objectiveId),
+    loadExposureInfo(tx, ctx, objectiveId),
   ]);
 
   // Bug 8 修复：从 lineage 表读取 successor 信息（superseded → view_successor）
@@ -320,19 +371,9 @@ async function assembleObjectiveSurfaceV3Inner(
 
   // Bug 7 修复：从 outbox 读取 practice trail 和 last canonical
   // outbox 没有 keyPointId 列，通过 runId 间接关联。
+  // Bug 10 修复：runIds 已从上面的合并查询获得，不再重复查询。
   let practiceTrailCount = 0;
   let lastCanonicalAt: string | null = null;
-
-  // 先找到该 objective 的所有 runId
-  const runIdRows = await tx
-    .select({ runId: learningRuns.id })
-    .from(learningRuns)
-    .where(and(
-      eq(learningRuns.workspaceId, ctx.workspaceId),
-      eq(learningRuns.userId, ctx.userId),
-      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
-    ));
-  const runIds = runIdRows.map((r) => r.runId);
 
   if (runIds.length > 0) {
     const [canonicalRows, practiceRows] = await Promise.all([
@@ -375,8 +416,11 @@ async function assembleObjectiveSurfaceV3Inner(
     initialReady: initialValidation?.status === "ready"
       ? { reminderId: initialValidation.reminderId, qualificationNotBefore: initialValidation.qualificationNotBefore ?? new Date(0).toISOString() }
       : null,
-    practiceOnly: false,
-    practiceReasonCodes: [],
+    initialDeferred: initialValidation?.status === "deferred"
+      ? { reminderId: initialValidation.reminderId, qualificationNotBefore: initialValidation.qualificationNotBefore ?? new Date(0).toISOString() }
+      : null,
+    practiceOnly: exposureInfo.practiceOnly,
+    practiceReasonCodes: exposureInfo.reasonCodes,
     origin: ctx.origin ?? "home",
     goal: ctx.goal ?? "继续学习",
   };
@@ -627,11 +671,13 @@ async function batchAssembleObjectiveSurfacesV3(
     }
   }
 
-  // 7. 批量查 active runs（通过 origin->>'keyPointId' JSON 路径查询）
+  // 7. 批量查 all runs（通过 origin->>'keyPointId' JSON 路径查询）
   // 安全修复：不在 SQL 中用 sql.raw 拼接 objectiveIds（SQL 注入风险）。
-  // 改为按 workspace/user/phase 查活跃 runs，在内存中按 objectiveId 过滤。
+  // Bug 修复：原先只查 active-phase runs，导致 practiceTrailCount/lastCanonicalAt
+  // 对已完成 run 的 objective 始终为 0/null。改为查 all runs，在内存中同时提取
+  // activeRun 和 allRunIds（与 detail assembler 的行为对齐）。
   const objectiveIdSet = new Set(objectiveIds);
-  const runRows = objectiveIds.length > 0
+  const allRunRows = objectiveIds.length > 0
     ? await tx
         .select({
           runId: learningRuns.id,
@@ -643,16 +689,23 @@ async function batchAssembleObjectiveSurfacesV3(
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
-          inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];
+  // 从 all runs 中同时提取 activeRun 映射和 allRunIds 列表
   const runByObjective = new Map<string, { runId: string; phase: string }>();
-  for (const run of runRows) {
+  const allRunIds: string[] = [];
+  const runIdToObjective = new Map<string, string>();
+  for (const run of allRunRows) {
     const origin = run.origin as Record<string, unknown> | null;
     const keyPointId = origin?.keyPointId as string | undefined;
-    if (keyPointId && objectiveIdSet.has(keyPointId) && !runByObjective.has(keyPointId)) {
-      runByObjective.set(keyPointId, { runId: run.runId, phase: run.phase });
+    if (keyPointId && objectiveIdSet.has(keyPointId)) {
+      allRunIds.push(run.runId);
+      runIdToObjective.set(run.runId, keyPointId);
+      // activeRun = 第一个匹配的 active-phase run（allRunRows 已按 createdAt DESC 排序）
+      if ((ACTIVE_RUN_PHASES as readonly string[]).includes(run.phase) && !runByObjective.has(keyPointId)) {
+        runByObjective.set(keyPointId, { runId: run.runId, phase: run.phase });
+      }
     }
   }
 
@@ -678,7 +731,7 @@ async function batchAssembleObjectiveSurfacesV3(
   }
 
   // 9. 批量查 canonical events + practice trail counts（通过 runId 间接关联）
-  const allRunIds = runRows.map((r) => r.runId);
+  // allRunIds 和 runIdToObjective 已在 step 7 中构建。
   const lastCanonicalByObjective = new Map<string, string>();
   const practiceCountByObjective = new Map<string, number>();
 
@@ -711,16 +764,6 @@ async function batchAssembleObjectiveSurfacesV3(
         ))
         .groupBy(practiceTrailEventOutbox.runId),
     ]);
-
-    // runId → objectiveId 映射
-    const runIdToObjective = new Map<string, string>();
-    for (const run of runRows) {
-      const origin = run.origin as Record<string, unknown> | null;
-      const keyPointId = origin?.keyPointId as string | undefined;
-      if (keyPointId) {
-        runIdToObjective.set(run.runId, keyPointId);
-      }
-    }
 
     for (const row of canonicalRows) {
       const objId = runIdToObjective.get(row.runId);
@@ -780,6 +823,21 @@ async function batchAssembleObjectiveSurfacesV3(
         ))
     : [];
   const cardByObjectiveForSuccessor = new Map(successorCardRows.map((c) => [c.objectiveId, c.cardId]));
+
+  // 10.5 批量查 exposure（practiceOnly 判定；§7.4 Reveal 语义）
+  const exposureRows = objectiveIds.length > 0
+    ? await tx
+        .select({ objectiveId: learningExposuresV2.objectiveId })
+        .from(learningExposuresV2)
+        .where(and(
+          eq(learningExposuresV2.workspaceId, ctx.workspaceId),
+          eq(learningExposuresV2.userId, ctx.userId),
+          inArray(learningExposuresV2.objectiveId, objectiveIds),
+          inArray(learningExposuresV2.exposureKind, [...REVEAL_EXPOSURE_KINDS]),
+        ))
+        .groupBy(learningExposuresV2.objectiveId)
+    : [];
+  const exposedObjectives = new Set(exposureRows.map((r) => r.objectiveId));
 
   // 11. 装配 Surface（内存组装，不再查 DB）
   const now = new Date();
@@ -879,8 +937,11 @@ async function batchAssembleObjectiveSurfacesV3(
       initialReady: initialValidation?.status === "ready"
         ? { reminderId: initialValidation.reminderId, qualificationNotBefore: initialValidation.qualificationNotBefore ?? new Date(0).toISOString() }
         : null,
-      practiceOnly: false,
-      practiceReasonCodes: [],
+      initialDeferred: initialValidation?.status === "deferred"
+        ? { reminderId: initialValidation.reminderId, qualificationNotBefore: initialValidation.qualificationNotBefore ?? new Date(0).toISOString() }
+        : null,
+      practiceOnly: exposedObjectives.has(objectiveId),
+      practiceReasonCodes: exposedObjectives.has(objectiveId) ? ["exposed"] : [],
       origin: ctx.origin ?? "home",
       goal: ctx.goal ?? "继续学习",
     };

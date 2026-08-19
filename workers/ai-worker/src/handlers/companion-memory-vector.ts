@@ -57,12 +57,14 @@ function mapMemoryRow(row: Record<string, unknown>): RetrievedMemory {
   };
 }
 
-/** 关键词降级检索：不依赖 embedding provider，只过滤 active/confirmed。 */
+/** 关键词降级检索：不依赖 embedding provider，只过滤 active/confirmed。
+ *  §9.2.2：scope 过滤与向量检索一致——只返回 workspace 或当前 scope 的记忆。 */
 export async function retrieveCompanionMemoriesKeyword(
   tx: Executor,
   scope: { workspaceId: string; userId: string },
   query: string,
   topK = 8,
+  currentScope = "workspace",
 ): Promise<MemoryRetrievalResult> {
   const startedAt = performance.now();
   const result = await tx.execute(sql`
@@ -73,6 +75,7 @@ export async function retrieveCompanionMemoriesKeyword(
       AND deleted_at IS NULL
       AND candidate = false
       AND archived_at IS NULL
+      AND (scope = 'workspace' OR scope = ${currentScope})
       AND (content ILIKE ${`%${query}%`} OR kind ILIKE ${`%${query}%`})
     ORDER BY pinned DESC, importance DESC, updated_at DESC
     LIMIT ${topK}
@@ -93,7 +96,7 @@ export async function retrieveCompanionMemoriesVector(
   const startedAt = performance.now();
   const vector = await provider.embed(query.slice(0, 1000));
   if (!vector || vector.length === 0) {
-    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK);
+    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
   const queryVec = JSON.stringify(vector);
   try {
@@ -137,7 +140,7 @@ export async function retrieveCompanionMemoriesVector(
   } catch (error) {
     // pgvector 查询失败（扩展/索引/类型问题）不阻塞对话，降级 keyword。
     console.warn("companion memory vector retrieval failed, falling back to keyword", error);
-    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK);
+    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
 }
 
@@ -154,8 +157,9 @@ export async function retrieveCompanionMemories(
   } = {},
 ): Promise<MemoryRetrievalResult> {
   const topK = opts.topK ?? 8;
+  const currentScope = opts.currentScope ?? "workspace";
   if (!isMemoryVectorEnabled() || !opts.provider) {
-    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK);
+    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
   try {
     return await retrieveCompanionMemoriesVector(
@@ -164,10 +168,10 @@ export async function retrieveCompanionMemories(
       query,
       opts.provider,
       topK,
-      opts.currentScope ?? "workspace",
+      currentScope,
     );
   } catch (error) {
     console.warn("companion memory retrieval failed, using keyword fallback", error);
-    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK);
+    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
 }

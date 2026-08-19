@@ -240,6 +240,50 @@ export const dashboardBuildDurationSeconds = new Histogram({
   registers: [registry],
 });
 
+/**
+ * Surface 慢查询计数器（RL-09 P0）。
+ * 当 surface 装配耗时超过 1s 阈值时递增；label query_type 区分 detail/list。
+ */
+export const surfaceSlowQueryTotal = new Counter({
+  name: "ailearn_surface_slow_query_total",
+  help: "Surface assembly queries exceeding 1s threshold",
+  labelNames: ["query_type"] as const,
+  registers: [registry],
+});
+
+/**
+ * Surface 一致性不匹配计数器（RL-10 P0）。
+ * 当 Home/Cards/Search/Graph 之间的 active objective 数量不一致且无 reason code 时递增。
+ */
+export const surfaceConsistencyMismatchTotal = new Counter({
+  name: "ailearn_surface_consistency_mismatch_total",
+  help: "Cross-surface active objective count mismatch without reason code",
+  labelNames: ["surface_pair"] as const,
+  registers: [registry],
+});
+
+/**
+ * Surface revision 不匹配计数器（RL-10 P0）。
+ * 当消费者读到过期 surfaceRevision（late Reveal response 等）被拒绝时递增。
+ */
+export const surfaceRevisionMismatchTotal = new Counter({
+  name: "ailearn_surface_revision_mismatch_total",
+  help: "Surface revision mismatch detected and rejected (stale read or late response)",
+  labelNames: ["consumer"] as const,
+  registers: [registry],
+});
+
+/**
+ * Topology 失效事件计数器（RL-10 P0）。
+ * 当 origin/revision/lifecycle/commit 事件触发 topology invalidation 时递增。
+ */
+export const topologyInvalidationEventsTotal = new Counter({
+  name: "ailearn_topology_invalidation_events_total",
+  help: "Topology invalidation events triggered by shared/personal plane changes",
+  labelNames: ["event_kind"] as const,
+  registers: [registry],
+});
+
 // ─── 方案 22：Companion Memory 可观测性（§9.9）──────────────────────────
 
 /**
