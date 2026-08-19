@@ -353,9 +353,10 @@ export function buildCompanionPersonaMessages(input: {
     examples: { text: string }[];
   } | null;
 }): ChatMessage[] {
-  // 记忆不截断内容：截断后的残缺记忆会产生误导，不如不放。
-  // 条数控制在检索阶段（Context Orchestrator topK=8）和此处上限完成。
+  // §9.4：Semantic Memory 每条 ≤200 字，总预算 ≤1000 字符。
+  // 写入端已统一限制 ≤200 字；此处为防御性上限，防止历史残留或手动写入的超长内容。
   const MEMORY_MAX_COUNT = 30;
+  const MEMORY_CONTENT_MAX = 200;
 
   const boundedRecent = input.recentMessages
     .slice(0, 20)
@@ -370,7 +371,7 @@ export function buildCompanionPersonaMessages(input: {
   // 使用 <memory_data> 边界标记，并在 system prompt 中明确声明。
   const activeMemories = (input.activeMemories ?? [])
     .slice(0, MEMORY_MAX_COUNT)
-    .map((m) => ({ kind: m.kind, content: m.content }));
+    .map((m) => ({ kind: m.kind, content: m.content.slice(0, MEMORY_CONTENT_MAX) }));
 
   // §9.3 将记忆格式化为 <memory_data> 边界块，明确标注为数据而非指令。
   const memoryDataBlock = activeMemories.length > 0

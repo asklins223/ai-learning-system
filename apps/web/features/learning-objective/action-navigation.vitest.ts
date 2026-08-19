@@ -45,12 +45,20 @@ describe("objectiveActionHref", () => {
     expect(href).toContain("objectiveId=" + OBJ);
   });
 
-  it("view_successor → successor 详情路由", () => {
+  it("view_successor → successor 详情路由（有 cardId 时用 cardId）", () => {
     const href = objectiveActionHref(
       { kind: "view_successor", successorObjectiveId: OBJ, successorCardId: SUCCESSOR },
       "/",
     );
     expect(href).toBe("/learning-cards/" + SUCCESSOR);
+  });
+
+  it("view_successor → successor 详情路由（cardId 为 null 时用 objectiveId 走 route resolution）", () => {
+    const href = objectiveActionHref(
+      { kind: "view_successor", successorObjectiveId: OBJ, successorCardId: null },
+      "/",
+    );
+    expect(href).toBe("/learning-cards/" + OBJ);
   });
 
   it("practice_only → 详情页 practice 参数（不携带 submit 语义）", () => {

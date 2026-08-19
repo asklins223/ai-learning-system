@@ -52,6 +52,34 @@ export async function runCompanionDailySummary(job: JobPayload): Promise<void> {
   }
   await assertJobLease(job);
 
+  try {
+    await runCompanionDailySummaryInner(job, date, timezone, userId);
+  } catch (err) {
+    // §15.4.4：失败时写入 failed 行，页面据此显示失败态。
+    // 后续重试成功时 ON CONFLICT DO UPDATE 会覆盖为 generated。
+    // 写入失败不应影响 job 重试流程，静默降级。
+    try {
+      await withJobTransaction(job, async (tx) => {
+        await tx.execute(sql`
+          INSERT INTO companion_daily_summaries
+            (workspace_id, user_id, date, timezone, facts, highlights, summary, status, revision, generated_at, created_at, updated_at)
+          VALUES
+            (${job.workspaceId}, ${userId}, ${date}, ${timezone},
+             '{}'::jsonb, '[]'::jsonb, '', 'failed', 1, now(), now(), now())
+          ON CONFLICT (workspace_id, user_id, date)
+          DO UPDATE SET status = 'failed', updated_at = now()
+        `);
+      });
+    } catch {
+      // 写 failed 行也失败了，不影响 job 重试
+    }
+    throw err;
+  }
+
+  logger.info({ jobId: job.id, date, timezone }, "companion daily summary generated");
+}
+
+async function runCompanionDailySummaryInner(job: JobPayload, date: string, timezone: string, userId: string): Promise<void> {
   const facts = await withJobTransaction(job, async (tx) => {
     const rows = await tx.execute<Record<string, unknown>>(sql`
       WITH day AS (
@@ -131,8 +159,11 @@ export async function runCompanionDailySummary(job: JobPayload): Promise<void> {
     }));
   });
 
-  const summary = buildSummaryText(date, facts);
-  const memoryContent = `${date} 桌宠日记：${summary}`.slice(0, 2000);
+  // §15.4.3：摘要长度 ≤ 500 字。当前确定性模板生成文本很短不会超限，
+  // 但未来启用 LLM 润色时需要此防御性截断，确保写入 DB 的 summary 不超过 500 字。
+  const summary = buildSummaryText(date, facts).slice(0, 500);
+  // §9.4：写入端即限制 ≤200 字，确保读取注入时不需截断、不丢失信息。
+  const memoryContent = `${date} 桌宠日记：${summary}`.slice(0, 200);
 
   await withJobTransaction(job, async (tx) => {
     await tx.execute(sql`
@@ -160,6 +191,4 @@ export async function runCompanionDailySummary(job: JobPayload): Promise<void> {
       DO NOTHING
     `);
   });
-
-  logger.info({ jobId: job.id, date, timezone }, "companion daily summary generated");
 }

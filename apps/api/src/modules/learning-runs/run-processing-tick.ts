@@ -22,7 +22,7 @@
  * 进程内存构造）。
  */
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql, desc } from "drizzle-orm";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import {
   canonicalLearningEventOutbox,
@@ -39,6 +39,7 @@ import {
   evidenceEligibilityStatesV2,
   initialValidationRemindersV2,
   learningObjectivesV2,
+  learningObjectiveRevisionsV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
 import { calculateReviewSchedule } from "../review/scheduling-policy.ts";
@@ -1292,7 +1293,24 @@ async function processCommitCommand(
       runId: command.runId,
       outcome: result.outcome,
       trustOutcome: result.outcome,
-      keyPointClaim: (contract as { claim?: string }).claim ?? "",
+      // Plan 23 CS-05：Pet/Companion 不再用 claim/summary 拼标题。
+      // 从 Objective revision 查 conceptLabel 作为学习目标标签。
+      keyPointClaim: await (async () => {
+        try {
+          const revRows = await tx
+            .select({ conceptLabel: learningObjectiveRevisionsV2.conceptLabel })
+            .from(learningObjectiveRevisionsV2)
+            .where(and(
+              eq(learningObjectiveRevisionsV2.workspaceId, command.workspaceId),
+              eq(learningObjectiveRevisionsV2.objectiveId, objectiveId),
+            ))
+            .orderBy(desc(learningObjectiveRevisionsV2.revision))
+            .limit(1);
+          return revRows[0]?.conceptLabel ?? "";
+        } catch {
+          return "";
+        }
+      })(),
       scheduleImpact: result.scheduleImpact.kind,
     },
     at,

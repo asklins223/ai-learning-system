@@ -26,6 +26,7 @@ function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): Learn
     version: 3,
     objectiveId: OBJ_ID,
     surfaceRevision: 1,
+    lifecycleEpoch: 1,
     content: {
       conceptLabel: "测试概念",
       publicSummary: "公开摘要",
@@ -66,6 +67,7 @@ function makeListItem(overrides: Partial<ObjectiveListItemV3> = {}): ObjectiveLi
     lifecycle: surface.content.lifecycle,
     freshness: surface.content.freshness,
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,
+    createdAt: surface.createdAt,
     personalState: { state: "unvalidated" as const, activeRunId: null },
     primaryAction: surface.primaryAction,
     ...overrides,
@@ -151,7 +153,7 @@ describe("RL-17: 删除 dead adapters 与旧 UI 分支", () => {
       { kind: "create_review_run", objectiveId: OBJ_ID, scheduleId: "66666666-6666-4666-8666-666666666666", generation: 1 },
       { kind: "practice_only", objectiveId: OBJ_ID, cardId: null, reasonCodes: ["exposed"] },
       { kind: "wait_for_initial_validation", reminderId: "77777777-7777-4777-8777-777777777777", qualificationNotBefore: "2026-08-18T00:00:00.000Z" },
-      { kind: "view_successor", successorObjectiveId: "88888888-8888-4888-8888-888888888888", successorCardId: "99999999-9999-4999-8999-999999999999" },
+      { kind: "view_successor", successorObjectiveId: "88888888-8888-4888-8888-888888888888", successorCardId: null },
       { kind: "refresh" },
       { kind: "none" },
     ];

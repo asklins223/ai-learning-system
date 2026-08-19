@@ -43,6 +43,13 @@ export function objectiveChipStateFromList(item: ObjectiveListItemV3): Objective
  * 优先使用服务端已计算的 primaryAction.kind（§7.5 原则：前端不自行推断 action），
  * 因为 primaryAction 已经由 action-resolver 综合了 lifecycle、activeRun、review、
  * initial validation、practiceOnly 等全部服务端状态。
+ *
+ * 修复：practice_only 映射从 stable 改为 due——用户已 Reveal 但尚未通过正式验证，
+ * 应提示练习而非表示已稳定（§7.4：Reveal 后主行动变为 practice_only，需练习）。
+ * 修复：primaryAction=none 不再硬编码为 archived——lifecycle=active 且无可用行动时
+ * 可能是 missing_origin 修复中，应映射为 ready 而非 archived。
+ * 与 list 版本保持一致：统一用 personalState 语义，避免两个函数对同一状态
+ * 产生不同 chip 颜色（§36.2：状态不只靠颜色区分，但同一状态不应有不同颜色）。
  */
 export function objectiveChipStateFromSurface(surface: LearningObjectiveSurfaceV3): ObjectiveChipState {
   // lifecycle 优先级最高（archived/superseded 是终态）
@@ -53,10 +60,13 @@ export function objectiveChipStateFromSurface(surface: LearningObjectiveSurfaceV
     case "resume_run": return "run";
     case "create_review_run": return "due";
     case "wait_for_initial_validation": return "ready";
-    case "practice_only": return "stable";
+    case "practice_only": return "due";
     case "view_successor": return "superseded";
     case "refresh": return "outdated";
-    case "none": return "archived";
+    case "none":
+      // lifecycle=active + action=none 可能是 missing_origin 修复中；
+      // 不应误显为 archived（只有 lifecycle=archived 才是 archived）。
+      return surface.content.freshness === "source_outdated" ? "outdated" : "ready";
     case "create_run":
       // create_run 可能是首次验证或继续已稳定目标；
       // 有 canonical 记录 → stable，否则 → ready
@@ -83,6 +93,9 @@ export function filterObjectiveItems(
 ): ObjectiveListItemV3[] {
   const q = query.searchText.trim().toLowerCase();
   const matched = items.filter((item) => {
+    // §36.5 状态矩阵：all 默认隐藏 archived（需显式筛选才可见）。
+    if (query.filter === "all" && item.lifecycle === "archived") return false;
+    if (query.filter === "all" && item.lifecycle === "superseded") return false;
     if (query.filter === "active" && item.lifecycle !== "active") return false;
     if (query.filter === "archived" && item.lifecycle !== "archived") return false;
     if (query.filter === "due" && item.primaryAction.kind !== "create_review_run") return false;
@@ -110,10 +123,10 @@ export function filterObjectiveItems(
     }
   };
   if (query.sort === "newest") {
-    return [...matched].sort((a, b) => b.objectiveId.localeCompare(a.objectiveId));
+    return [...matched].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   if (query.sort === "oldest") {
-    return [...matched].sort((a, b) => a.objectiveId.localeCompare(b.objectiveId));
+    return [...matched].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
   return [...matched].sort((a, b) => actionRank(a) - actionRank(b));
 }

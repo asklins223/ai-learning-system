@@ -49,7 +49,9 @@ function mapMemoryRow(row: Record<string, unknown>): RetrievedMemory {
   return {
     memoryId: String(row.id ?? row.memory_id ?? ""),
     kind: String(row.kind ?? ""),
-    content: String(row.content ?? "").slice(0, 500),
+    // §9.4：写入端已统一限制 ≤200 字（extractor/summarizer/daily-summary）。
+    // 此处保留 slice 作为防御性上限，防止历史残留数据或手动写入的超长内容进入 prompt。
+    content: String(row.content ?? "").slice(0, 200),
     importance: Number(row.importance ?? 0.5),
     pinned: Boolean(row.pinned),
     lastUsedAt: row.last_used_at ? String(row.last_used_at) : null,

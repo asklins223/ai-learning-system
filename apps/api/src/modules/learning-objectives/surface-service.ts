@@ -186,12 +186,18 @@ async function computeFreshness(
   if (noteOrigins.length === 0) {
     return origins.length === 0 ? "legacy_unreviewed" : "fresh";
   }
-  const noteIds = [...new Set(noteOrigins.map((o) => (o.kind === "note" ? o.noteId : null)).filter(Boolean))];
+  const noteIds = [
+    ...new Set(
+      noteOrigins
+        .map((o) => (o.kind === "note" ? o.noteId : null))
+        .filter((id): id is string => id !== null),
+    ),
+  ];
   if (noteIds.length === 0) return "fresh";
   const noteRows = await tx
     .select({ id: notes.id, currentVersionId: notes.currentVersionId })
     .from(notes)
-    .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds as string[])));
+    .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds)));
   const currentByNote = new Map(noteRows.map((n) => [n.id, n.currentVersionId]));
   // 修复：origin.noteVersionId 为 null 时（手动迁移/早期数据），
   // 无法做版本比较，不应误判为 source_outdated。只有当 origin 有明确
@@ -279,7 +285,8 @@ async function assembleObjectiveSurfaceV3Inner(
     ...new Set(
       origins
         .filter((o) => o.kind === "note" && o.noteId)
-        .map((o) => (o.kind === "note" ? o.noteId : null)),
+        .map((o) => (o.kind === "note" ? o.noteId : null))
+        .filter((id): id is string => id !== null),
     ),
   ];
   let primaryNote: LearningObjectiveSurfaceV3["sources"]["primaryNote"] = null;
@@ -287,7 +294,7 @@ async function assembleObjectiveSurfaceV3Inner(
     const noteRows = await tx
       .select({ id: notes.id, title: notes.title, currentVersionId: notes.currentVersionId })
       .from(notes)
-      .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds as string[])));
+      .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds)));
     const primaryOrigin = origins.find((o) => o.kind === "note" && o.supportGrade === "primary")
       ?? origins.find((o) => o.kind === "note");
     if (primaryOrigin && primaryOrigin.kind === "note") {
@@ -432,6 +439,7 @@ async function assembleObjectiveSurfaceV3Inner(
     version: 3,
     objectiveId,
     surfaceRevision: objective.surfaceRevision,
+    lifecycleEpoch: objective.lifecycleEpoch,
     content: {
       conceptLabel: revision?.conceptLabel ?? null,
       publicSummary: revision?.publicSummary ?? "",
@@ -520,25 +528,36 @@ async function listObjectiveSurfacesV3Inner(
     }
   }
 
+  // 修复：list 查询和 count 查询并行执行，减少总延迟，
+  // 同时在同一事务 snapshot 下保证一致性（PostgreSQL 事务内多次读看到同一 snapshot）。
   const where = and(
     eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
     eq(learningObjectivesV2.lifecycle, lifecycle),
     cursorCondition ?? undefined,
   );
-  const rows = await tx
-    .select({
-      objectiveId: learningObjectivesV2.objectiveId,
-      id: learningObjectivesV2.id,
-      createdAt: learningObjectivesV2.createdAt,
-      currentObjectiveRevisionId: learningObjectivesV2.currentObjectiveRevisionId,
-      lifecycleEpoch: learningObjectivesV2.lifecycleEpoch,
-      surfaceRevision: learningObjectivesV2.surfaceRevision,
-      updatedAt: learningObjectivesV2.updatedAt,
-    })
-    .from(learningObjectivesV2)
-    .where(where)
-    .orderBy(desc(learningObjectivesV2.createdAt), desc(learningObjectivesV2.id))
-    .limit(limit + 1);
+  const [rows, countRows] = await Promise.all([
+    tx
+      .select({
+        objectiveId: learningObjectivesV2.objectiveId,
+        id: learningObjectivesV2.id,
+        createdAt: learningObjectivesV2.createdAt,
+        currentObjectiveRevisionId: learningObjectivesV2.currentObjectiveRevisionId,
+        lifecycleEpoch: learningObjectivesV2.lifecycleEpoch,
+        surfaceRevision: learningObjectivesV2.surfaceRevision,
+        updatedAt: learningObjectivesV2.updatedAt,
+      })
+      .from(learningObjectivesV2)
+      .where(where)
+      .orderBy(desc(learningObjectivesV2.createdAt), desc(learningObjectivesV2.id))
+      .limit(limit + 1),
+    tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(learningObjectivesV2)
+      .where(and(
+        eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+        eq(learningObjectivesV2.lifecycle, lifecycle),
+      )),
+  ]);
   const pageRows = rows.slice(0, limit);
   const objectiveIds = pageRows.map((r) => r.objectiveId);
 
@@ -546,13 +565,6 @@ async function listObjectiveSurfacesV3Inner(
     ? await batchAssembleObjectiveSurfacesV3(tx, ctx, objectiveIds, pageRows)
     : [];
 
-  const countRows = await tx
-    .select({ n: sql<number>`count(*)::int` })
-    .from(learningObjectivesV2)
-    .where(and(
-      eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
-      eq(learningObjectivesV2.lifecycle, lifecycle),
-    ));
   const total = Number(countRows[0]?.n ?? 0);
   const nextCursor =
     rows.length > limit && pageRows.length > 0
@@ -954,6 +966,7 @@ async function batchAssembleObjectiveSurfacesV3(
       version: 3,
       objectiveId,
       surfaceRevision: objRow.surfaceRevision,
+      lifecycleEpoch: fullObjective?.lifecycleEpoch ?? 1,
       content: {
         conceptLabel: revision?.conceptLabel ?? null,
         publicSummary: revision?.publicSummary ?? "",
@@ -1003,6 +1016,7 @@ export function toObjectiveListItemV3(surface: LearningObjectiveSurfaceV3): Obje
     lifecycle: surface.content.lifecycle,
     freshness: surface.content.freshness,
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,
+    createdAt: surface.createdAt,
     personalState: {
       // 与 topology-repository buildTopologySnapshotV3 的 state 映射保持一致。
       // 优先级：archived > superseded > activeRun > review due > scheduled

@@ -248,6 +248,16 @@ BEGIN
     ALTER FUNCTION public.ailearn_purge_tutor_nonces_ttl(integer, integer)
       OWNER TO ailearn_migrator;
   END IF;
+  -- 0171/0172：方案 22 桌宠日记/记忆维护 SECURITY DEFINER 函数，owner 收敛到
+  -- ailearn_migrator（BYPASSRLS 语义依赖；search_path 需对齐 pg_catalog, public）。
+  IF to_regprocedure('public.ailearn_enqueue_companion_daily_summaries()') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_enqueue_companion_daily_summaries()
+      OWNER TO ailearn_migrator;
+  END IF;
+  IF to_regprocedure('public.ailearn_run_companion_memory_maintenance()') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_run_companion_memory_maintenance()
+      OWNER TO ailearn_migrator;
+  END IF;
 END
 $$;
 
@@ -668,6 +678,51 @@ BEGIN
   END IF;
   IF to_regprocedure('public.vector(vector,integer,boolean)') IS NOT NULL THEN
     GRANT EXECUTE ON FUNCTION public.vector(vector, integer, boolean)
+      TO ailearn_worker;
+  END IF;
+
+  -- 0171/0172/0174：方案 22 桌宠日记/记忆维护 SECURITY DEFINER 函数。
+  -- roles.sql 的 REVOKE ALL ON ALL FUNCTIONS 会清掉迁移中的 GRANT EXECUTE，
+  -- 必须在此重新授予，否则 worker 每分钟 tick 报 permission denied。
+  IF to_regprocedure('public.ailearn_enqueue_companion_daily_summaries()') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.ailearn_enqueue_companion_daily_summaries()
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_run_companion_memory_maintenance()') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.ailearn_run_companion_memory_maintenance()
+      TO ailearn_worker;
+  END IF;
+
+  -- 0174：pgvector 距离函数（记忆向量检索由 worker 执行；api 检索也需调用）。
+  -- vector 和 halfvec 签名均需授权。
+  IF to_regprocedure('public.cosine_distance(vector,vector)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.cosine_distance(vector, vector)
+      TO ailearn_worker;
+    GRANT EXECUTE ON FUNCTION public.cosine_distance(vector, vector)
+      TO ailearn_api;
+  END IF;
+  IF to_regprocedure('public.l2_distance(vector,vector)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.l2_distance(vector, vector)
+      TO ailearn_worker;
+    GRANT EXECUTE ON FUNCTION public.l2_distance(vector, vector)
+      TO ailearn_api;
+  END IF;
+  IF to_regprocedure('public.inner_product(vector,vector)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.inner_product(vector, vector)
+      TO ailearn_worker;
+    GRANT EXECUTE ON FUNCTION public.inner_product(vector, vector)
+      TO ailearn_api;
+  END IF;
+  IF to_regprocedure('public.cosine_distance(halfvec,halfvec)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.cosine_distance(halfvec, halfvec)
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.l2_distance(halfvec,halfvec)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.l2_distance(halfvec, halfvec)
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.inner_product(halfvec,halfvec)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.inner_product(halfvec, halfvec)
       TO ailearn_worker;
   END IF;
 
@@ -1113,7 +1168,24 @@ BEGIN
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.vector_in(cstring,oid,integer)')
     AND p.oid IS DISTINCT FROM
-      to_regprocedure('public.vector(vector,integer,boolean)');
+      to_regprocedure('public.vector(vector,integer,boolean)')
+    -- 0171/0172/0174：方案 22 桌宠日记/记忆维护 + pgvector 距离函数。
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_enqueue_companion_daily_summaries()')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_run_companion_memory_maintenance()')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.cosine_distance(vector,vector)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.l2_distance(vector,vector)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.inner_product(vector,vector)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.cosine_distance(halfvec,halfvec)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.l2_distance(halfvec,halfvec)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.inner_product(halfvec,halfvec)');
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'Worker has unexpected function EXECUTE privileges: %', mismatch;
   END IF;
@@ -1131,7 +1203,14 @@ BEGIN
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_purge_processed_outbox_ttl(integer,integer)')
     AND p.oid IS DISTINCT FROM
-      to_regprocedure('public.ailearn_purge_tutor_nonces_ttl(integer,integer)');
+      to_regprocedure('public.ailearn_purge_tutor_nonces_ttl(integer,integer)')
+    -- 0174：pgvector 距离函数（api 也需调用记忆向量检索）。
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.cosine_distance(vector,vector)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.l2_distance(vector,vector)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.inner_product(vector,vector)');
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'API has unexpected function EXECUTE privileges: %', mismatch;
   END IF;

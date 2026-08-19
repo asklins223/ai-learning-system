@@ -22,6 +22,7 @@ import { ObjectiveStatusChip } from "./ObjectiveStatusChip";
 import { objectiveChipStateFromList, filterObjectiveItems, type LibraryFilter, type LibrarySort } from "./objective-state";
 import { ObjectiveSourceLine } from "./ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "./ObjectivePrimaryAction";
+import { objectiveActionHref } from "./action-navigation";
 import { ObjectiveSkeleton, ObjectiveError, ObjectiveEmpty } from "./ObjectiveStatePrimitives";
 
 const FILTERS: ReadonlyArray<{ key: LibraryFilter; label: string }> = [
@@ -40,44 +41,12 @@ const SORTS: ReadonlyArray<{ key: LibrarySort; label: string }> = [
 ];
 
 // 状态映射由 objective-state.ts 统一提供（FE-18/FE-27 可测试）。
-
+// 导航路由：view_objective 走详情页路由（通过 route resolution 解析 objectiveId）。
+// 方案 §6.2：列表项标题默认执行 view_objective；行动按钮执行 start_or_resume_learning。
 function itemHref(item: ObjectiveListItemV3): string {
-  return "/learning-objectives/" + item.objectiveId;
-}
-
-function actionHref(action: LearningObjectivePrimaryActionV3): string | null {
-  switch (action.kind) {
-    case "create_run": {
-      const params = new URLSearchParams({
-        origin: "card_v2",
-        cardId: action.cardId ?? action.objectiveId,
-        objectiveId: action.objectiveId,
-        goal: action.goal,
-        returnTo: "/cards",
-      });
-      return "/learning-runs/new?" + params.toString();
-    }
-    case "resume_run":
-      return "/learning-runs/" + action.runId + "?returnTo=" + encodeURIComponent("/cards");
-    case "create_review_run": {
-      const params = new URLSearchParams({
-        origin: "review_v2",
-        scheduleId: action.scheduleId,
-        objectiveId: action.objectiveId,
-        generation: String(action.generation),
-        returnTo: "/cards",
-      });
-      return "/learning-runs/new?" + params.toString();
-    }
-    case "practice_only":
-      return "/learning-cards/" + (action.cardId ?? action.objectiveId) + "?practice=1";
-    case "view_successor":
-      return "/learning-cards/" + action.successorCardId;
-    case "wait_for_initial_validation":
-    case "refresh":
-    case "none":
-      return null;
-  }
+  // 详情页路由 /learning-cards/:cardId 支持 route resolution（legacy cardId / V2 cardId / objectiveId 均可解析）。
+  // 卡库列表项可能没有 cardId（如 missing origin），此时用 objectiveId 作为路由参数。
+  return "/learning-cards/" + item.objectiveId;
 }
 
 export function ObjectiveLibrary(): JSX.Element {
@@ -138,7 +107,7 @@ export function ObjectiveLibrary(): JSX.Element {
       void load();
       return;
     }
-    const href = actionHref(action);
+    const href = objectiveActionHref(action, "/cards");
     if (href) router.push(href);
   };
 

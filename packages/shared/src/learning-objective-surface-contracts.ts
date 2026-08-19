@@ -134,7 +134,9 @@ export const learningObjectivePrimaryActionV3Schema = z.discriminatedUnion("kind
   z.strictObject({
     kind: z.literal("view_successor"),
     successorObjectiveId: z.string().uuid(),
-    successorCardId: z.string().uuid(),
+    // successor 可能还没有 active Card（如刚 supersede 但尚未生成新卡），
+    // 此时前端通过 objectiveId 路由解析（§6.2 route resolution）。
+    successorCardId: z.string().uuid().nullable(),
   }),
   z.strictObject({ kind: z.literal("refresh") }),
   z.strictObject({ kind: z.literal("none") }),
@@ -184,6 +186,8 @@ export const learningObjectiveSurfaceV3Schema = z.strictObject({
   version: z.literal(3),
   objectiveId: z.string().uuid(),
   surfaceRevision: z.number().int().min(0),
+  /** Objective lifecycle epoch（§7.5 OCC；用于 archive/supersede 乐观并发校验）。 */
+  lifecycleEpoch: z.number().int().min(1),
   content: z.strictObject({
     conceptLabel: z.string().min(1).max(200).nullable(),
     publicSummary: z.string().min(1).max(1500),
@@ -256,6 +260,8 @@ export const objectiveListItemV3Schema = z.strictObject({
   lifecycle: objectiveSurfaceLifecycleV3Schema,
   freshness: objectiveSurfaceFreshnessV3Schema,
   primaryNoteTitle: z.string().min(1).max(500).nullable(),
+  /** 创建时间（ISO 8601）；用于前端 newest/oldest 排序，与服务端 cursor 排序一致。 */
+  createdAt: z.string().datetime({ offset: true }),
   personalState: z.strictObject({
     state: objectivePersonalStateV3Schema,
     activeRunId: z.string().uuid().nullable(),
@@ -282,6 +288,7 @@ export const learningDashboardModeV2Schema = z.enum([
   "objectives_ready",
   "run_in_progress",
   "review_due",
+  "empty_after_filter",
   "degraded",
 ]);
 export type LearningDashboardModeV2 = z.infer<

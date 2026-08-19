@@ -130,6 +130,9 @@ export async function upsertMemory(
   },
   now: Date = new Date(),
 ): Promise<MemoryItemV2> {
+  // §9.4/§25：写入端统一限制 ≤200 字。upsertMemory 是所有写入路径的统一入口，
+  // 在此做防御性截断，确保无论调用方是否已截断，写入数据库的内容都不超过 200 字。
+  const content = input.content.slice(0, 200);
   if (input.sourceEventId) {
     const existing = await executor
       .select()
@@ -145,7 +148,7 @@ export async function upsertMemory(
     if (existing[0]) {
       await executor.update(assistantMemoryItems)
         .set({
-          content: input.content,
+          content,
           importance: input.importance ?? existing[0].importance,
           confidence: input.confidence ?? existing[0].confidence,
           scope: input.scope ?? existing[0].scope,
@@ -163,7 +166,7 @@ export async function upsertMemory(
         .from(assistantMemoryItems)
         .where(eq(assistantMemoryItems.id, existing[0].id))
         .limit(1);
-      await markMemoryConflictIfSimilar(executor, scope, updated[0].id, input.content);
+      await markMemoryConflictIfSimilar(executor, scope, updated[0].id, content);
       return toContract(updated[0]);
     }
   }
@@ -171,7 +174,7 @@ export async function upsertMemory(
     workspaceId: scope.workspaceId,
     userId: scope.userId,
     kind: input.kind,
-    content: input.content,
+    content,
     sourceEventId: input.sourceEventId ?? null,
     sourceSessionId: input.sourceSessionId ?? null,
     userStated: input.userStated ?? false,
@@ -186,7 +189,7 @@ export async function upsertMemory(
     createdAt: now,
     updatedAt: now,
   }).returning();
-  await markMemoryConflictIfSimilar(executor, scope, inserted[0].id, input.content);
+  await markMemoryConflictIfSimilar(executor, scope, inserted[0].id, content);
   return toContract(inserted[0]);
 }
 
@@ -430,7 +433,7 @@ export async function resolveMemoryConflict(
   return true;
 }
 
-/** 单条记忆读取（含 deleted；§18 工具网关 revision CAS 用）。 */
+/** 单条记忆读取（不含已删除；§18 工具网关 revision CAS 用）。 */
 export async function getMemory(
   executor: ApiTransaction,
   scope: MemoryScope,

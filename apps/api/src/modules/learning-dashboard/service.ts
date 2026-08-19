@@ -117,13 +117,32 @@ export async function buildLearningDashboardV2(
   }
 
   // ── mode（同一 cutoff）────────────────────────────────────────────────
+  // §9.3 状态优先级：degraded > first_use > empty_after_filter >
+  // notes_without_objectives > run_in_progress > review_due > objectives_ready
   let mode: LearningDashboardV2["mode"];
   if (degraded) {
     mode = "degraded";
   } else if (counts.notes === 0 && counts.activeObjectives === 0) {
+    // 无 Note 且无 active Objective → first_use
     mode = "first_use";
   } else if (counts.activeObjectives === 0) {
-    mode = "notes_without_objectives";
+    // 有 Note 但无 active Objective：需要区分两种情况：
+    // - notes_without_objectives：从未生成过 Objective（无 archived/superseded）
+    // - empty_after_filter：所有 Objective 已归档或不可用（§9.3）
+    try {
+      const totalObjectives = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(learningObjectivesV2)
+        .where(and(
+          eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+          inArray(learningObjectivesV2.lifecycle, ["archived", "superseded"]),
+        ));
+      const hasArchivedObjectives = Number(totalObjectives[0]?.n ?? 0) > 0;
+      mode = hasArchivedObjectives ? "empty_after_filter" : "notes_without_objectives";
+    } catch {
+      // 查询失败时降级为 notes_without_objectives（更安全的默认值）
+      mode = "notes_without_objectives";
+    }
   } else if (counts.activeRuns > 0) {
     mode = "run_in_progress";
   } else if (counts.reviewsDue > 0) {

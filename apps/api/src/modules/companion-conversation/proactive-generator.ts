@@ -17,13 +17,15 @@ export const memoryCandidateOutputSchema = z
   .object({
     learningContext: z
       .object({
-        content: z.string().min(2).max(400),
+        // §9.4/§25：写入端统一限制 ≤200 字。
+        content: z.string().min(2).max(200),
         needsFollowup: z.boolean(),
       })
       .strict(),
     interactionNote: z
       .object({
-        content: z.string().min(2).max(400),
+        // §9.4/§25：写入端统一限制 ≤200 字。
+        content: z.string().min(2).max(200),
       })
       .strict()
       .optional(),
@@ -39,6 +41,7 @@ export interface GeneratedMemoryCandidates {
 export async function generateMemoryCandidates(input: {
   outcome: string;
   trustOutcome: string;
+  /** Plan 23 CS-05：从 Objective revision conceptLabel 取，不再用 legacy claim。 */
   keyPointClaim: string;
   scheduleImpact: string;
 }): Promise<GeneratedMemoryCandidates | null> {
@@ -49,11 +52,11 @@ export async function generateMemoryCandidates(input: {
 
   const prompt = [
     "你是学习伴星的记忆整理器。根据一次三分钟巩固的结果，输出 JSON：",
-    `{"learningContext":{"content":"一句话学习洞察（用户掌握或缺口，中文，不含答案正文）","needsFollowup":true},"interactionNote":{"content":"值得后续提醒的交互备注（无则省略整个字段）"}}`,
+    `{"learningContext":{"content":"一句话学习洞察（用户掌握或缺口，中文，不含答案正文，不超过 200 字）","needsFollowup":true},"interactionNote":{"content":"值得后续提醒的交互备注（无则省略整个字段，不超过 200 字）"}}`,
     "输入：",
     `outcome=${input.outcome}`,
     `trustOutcome=${input.trustOutcome}`,
-    `keyPointClaim=${input.keyPointClaim.slice(0, 200)}`,
+    `objectiveLabel=${input.keyPointClaim.slice(0, 200)}`,
     `scheduleImpact=${input.scheduleImpact}`,
     "只输出 JSON。",
   ].join("\n");

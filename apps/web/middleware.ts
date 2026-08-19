@@ -14,6 +14,14 @@ import type { NextRequest } from "next/server";
  * matcher 排除：登录/注册、静态资源、_next 内部、API 与 favicon。
  */
 export function middleware(request: NextRequest) {
+  // The design lab is a local-only surface. Keep it outside the authenticated
+  // product shell while iterating, and let its layout 404 in production.
+  if (
+    process.env.NODE_ENV !== "production" &&
+    request.nextUrl.pathname === "/home-redesign"
+  ) {
+    return NextResponse.next();
+  }
   const session = request.cookies.get("ailearn_session");
   if (!session?.value) {
     const url = new URL("/login", request.url);

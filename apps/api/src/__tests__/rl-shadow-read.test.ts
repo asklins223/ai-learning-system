@@ -28,6 +28,7 @@ function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): Learn
     version: 3,
     objectiveId: OBJ_ID,
     surfaceRevision: 1,
+    lifecycleEpoch: 1,
     content: {
       conceptLabel: "测试概念",
       publicSummary: "这是一个公开摘要",
@@ -77,6 +78,7 @@ function makeListItem(overrides: Partial<ObjectiveListItemV3> = {}): ObjectiveLi
     lifecycle: surface.content.lifecycle,
     freshness: surface.content.freshness,
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,
+    createdAt: surface.createdAt,
     personalState: { state: "unvalidated" as const, activeRunId: null },
     primaryAction: surface.primaryAction,
     ...overrides,

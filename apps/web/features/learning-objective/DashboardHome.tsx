@@ -24,42 +24,8 @@ import { ObjectiveStatusChip } from "./ObjectiveStatusChip";
 import { objectiveChipStateFromSurface } from "./objective-state";
 import { ObjectiveSourceLine } from "./ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "./ObjectivePrimaryAction";
+import { objectiveActionHref } from "./action-navigation";
 import { ObjectiveSkeleton, ObjectiveError, ObjectiveEmpty } from "./ObjectiveStatePrimitives";
-
-function actionHref(action: LearningObjectivePrimaryActionV3, returnTo: string): string | null {
-  switch (action.kind) {
-    case "create_run": {
-      const params = new URLSearchParams({
-        origin: "card_v2",
-        cardId: action.cardId ?? action.objectiveId,
-        objectiveId: action.objectiveId,
-        goal: action.goal,
-        returnTo,
-      });
-      return "/learning-runs/new?" + params.toString();
-    }
-    case "resume_run":
-      return "/learning-runs/" + action.runId + "?returnTo=" + encodeURIComponent(returnTo);
-    case "create_review_run": {
-      const params = new URLSearchParams({
-        origin: "review_v2",
-        scheduleId: action.scheduleId,
-        objectiveId: action.objectiveId,
-        generation: String(action.generation),
-        returnTo,
-      });
-      return "/learning-runs/new?" + params.toString();
-    }
-    case "practice_only":
-      return "/learning-cards/" + (action.cardId ?? action.objectiveId) + "?practice=1";
-    case "view_successor":
-      return "/learning-cards/" + action.successorCardId;
-    case "wait_for_initial_validation":
-    case "refresh":
-    case "none":
-      return null;
-  }
-}
 
 function chipStateFor(dashboard: LearningDashboardV2, objectiveId: string): ReturnType<typeof objectiveChipStateFromSurface> {
   const surface = dashboard.queue.find((q) => q.objective.objectiveId === objectiveId)?.objective
@@ -123,12 +89,23 @@ export function DashboardHome(props: {
     );
   }
 
+  // §9.3 empty_after_filter：所有 Objective 已归档或不可用。
+  // 不是 first_use（有 Note 或历史 Objective），但当前无任何可行动目标。
+  if (mode === "empty_after_filter") {
+    return (
+      <ObjectiveEmpty
+        message="当前没有可继续的学习目标"
+        hint="所有目标可能已归档或等待来源更新。可在学习目标库查看归档目标，或从笔记重新生成。"
+      />
+    );
+  }
+
   const execute = (action: LearningObjectivePrimaryActionV3) => {
     if (action.kind === "refresh") {
       void load();
       return;
     }
-    const href = actionHref(action, returnTo);
+    const href = objectiveActionHref(action, returnTo);
     if (href) router.push(href);
   };
 
@@ -288,9 +265,11 @@ export function DashboardHome(props: {
 }
 
 function objectiveDetailHref(objective: {
+  objectiveId: string;
   content: { presentation: { cardId: string | null } };
 }): string {
-  return objective.content.presentation.cardId
-    ? "/learning-cards/" + objective.content.presentation.cardId
-    : "/cards";
+  // 优先使用 cardId（如果有 active Card），否则用 objectiveId（route resolution 同样可解析）。
+  // 不再在 cardId 为 null 时 fallback 到 /cards（用户应能进入详情页查看 missing origin 等）。
+  const id = objective.content.presentation.cardId ?? objective.objectiveId;
+  return "/learning-cards/" + id;
 }

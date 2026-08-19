@@ -229,7 +229,8 @@ async function generatePersonalizedProactiveText(input: {
     "文案不超过 80 字。",
     "",
     `学习结果：${input.outcome}`,
-    `知识点：${input.keyPointClaim.slice(0, 200)}`,
+    // Plan 23 CS-05：keyPointClaim 实际传入的是 Objective conceptLabel（不再用 legacy claim）。
+    `学习目标：${input.keyPointClaim.slice(0, 200)}`,
     "",
     "用户记忆：",
     memoryBlock,

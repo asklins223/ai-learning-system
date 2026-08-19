@@ -37,6 +37,11 @@ type Executor = { execute(query: unknown): Promise<unknown> };
 
 const MEMORY_REF_MAX = 3;
 const MEMORY_REF_CONTENT_MAX = 80;
+// §9.4：Semantic Memory 每条 ≤200 字，总预算 ≤1000 字符。
+// 写入端（extractor/summarizer/daily-summary）已统一限制 ≤200 字；
+// 此处保留作为防御性上限，防止历史残留或手动写入的超长内容进入 prompt。
+const MEMORY_CONTENT_MAX = 200;
+const MEMORY_BUDGET_MAX = 1000;
 
 /**
  * 检索并组装上下文。
@@ -85,34 +90,43 @@ export async function assembleCompanionContext(
     },
   );
 
-  // 记忆不截断内容：截断后的残缺记忆会产生误导，不如完整放入或不放。
-  // 条数由检索阶段 topK=8 控制，此处不再做字符预算过滤。
+  // §9.4：Semantic Memory 每条 ≤200 字，总预算 ≤1000 字符。
+  // 检索阶段已在 mapMemoryRow 中截断到 200 字；此处按总预算截断条数。
   const items: ContextMemoryItem[] = result.items.map((item) => ({
     memoryId: item.memoryId,
     kind: item.kind,
-    content: item.content,
+    content: item.content.slice(0, MEMORY_CONTENT_MAX),
     importance: item.importance,
     pinned: item.pinned,
     lastUsedAt: item.lastUsedAt,
     userConfirmed: item.userConfirmed,
   }));
 
-  const activeMemories = items.map((item) => ({
+  // §9.4：按总预算 ≤1000 字符截断——超出时按排序（已是相关度排序）截断条数。
+  let budgetUsed = 0;
+  const budgetedItems: typeof items = [];
+  for (const item of items) {
+    if (budgetUsed + item.content.length > MEMORY_BUDGET_MAX) break;
+    budgetedItems.push(item);
+    budgetUsed += item.content.length;
+  }
+
+  const activeMemories = budgetedItems.map((item) => ({
     kind: item.kind,
     content: item.content,
   }));
   // memoryRefs 仅用于 UI 展示"我记得你说过"（§14.5：≤3 条，每条 ≤80 字），
-  // 不影响注入 prompt 的完整记忆内容。
-  const memoryRefs = items.slice(0, MEMORY_REF_MAX).map((item) => ({
+  // 不影响注入 prompt 的完整记忆内容。仅从实际使用的记忆中取前 3 条。
+  const memoryRefs = budgetedItems.slice(0, MEMORY_REF_MAX).map((item) => ({
     memoryId: item.memoryId,
     kind: item.kind,
     content: item.content.slice(0, MEMORY_REF_CONTENT_MAX),
   }));
 
   // 记录检索日志 + 更新 last_used_at（幂等，失败不阻断对话）。
-  if (items.length > 0) {
+  if (budgetedItems.length > 0) {
     try {
-      const ids = items.map((item) => item.memoryId);
+      const ids = budgetedItems.map((item) => item.memoryId);
       // R29/R32：drizzle+postgres-js 数组参数序列化不可靠，使用显式 uuid[] 字面量。
       const idsLiteral = `{${ids.join(",")}}`;
       await tx.execute(sql`
@@ -137,7 +151,7 @@ export async function assembleCompanionContext(
   // §9.9：记录检索模式与使用记忆数指标（失败不阻断对话）。
   try {
     companionMemoryRetrievalModeTotal.labels(result.mode).inc();
-    companionMemoryUsedCount.observe(items.length);
+    companionMemoryUsedCount.observe(budgetedItems.length);
   } catch {
     // metrics 记录失败不影响对话。
   }
@@ -146,7 +160,7 @@ export async function assembleCompanionContext(
   logger.debug(
     {
       runId: input.runId,
-      memoryIds: items.map((item) => item.memoryId),
+      memoryIds: budgetedItems.map((item) => item.memoryId),
       retrievalLatencyMs: result.latencyMs,
       retrievalMode: result.mode,
       contextBudgetUsed: activeMemories.reduce((sum, m) => sum + m.content.length, 0),
@@ -158,6 +172,6 @@ export async function assembleCompanionContext(
     activeMemories,
     memoryRefs,
     retrievalMode: result.mode,
-    usedMemoryIds: items.map((item) => item.memoryId),
+    usedMemoryIds: budgetedItems.map((item) => item.memoryId),
   };
 }

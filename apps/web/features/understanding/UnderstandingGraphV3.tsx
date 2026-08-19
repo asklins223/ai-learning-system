@@ -52,14 +52,21 @@ function chipStateOf(node: ObjectiveNodeProjectionV3): ObjectiveChipState {
   if (node.lifecycle === "superseded") return "superseded";
   // 服务端已综合所有状态计算了 personal.state 和 primaryAction（§7.5）；
   // 直接映射，不自行推断。
+  // 与 objective-state.ts 的 objectiveChipStateFromSurface 保持一致，
+  // 避免同一状态在不同页面产生不同 chip 颜色（§36.2）。
   switch (node.personal.primaryAction.kind) {
     case "resume_run": return "run";
     case "create_review_run": return "due";
     case "wait_for_initial_validation": return "ready";
-    case "practice_only": return "stable";
+    // practice_only：用户已 Reveal 但尚未通过正式验证，应提示练习（due），
+    // 不是 stable（§7.4：Reveal 后主行动变为 practice_only，需练习）。
+    case "practice_only": return "due";
     case "view_successor": return "superseded";
     case "refresh": return "outdated";
-    case "none": return "archived";
+    // none：lifecycle=active 且无可用行动时可能是 missing_origin 修复中，
+    // 不应误显为 archived（只有 lifecycle=archived 才是 archived）。
+    case "none":
+      return "ready";
     case "create_run":
       return node.personal.lastCanonicalEventId ? "stable" : "ready";
     default: return "ready";
@@ -293,7 +300,9 @@ function ObjectiveSidePanel(props: {
   onAction: (action: ObjectiveNodeProjectionV3["personal"]["primaryAction"]) => void;
 }): JSX.Element {
   const { node } = props;
-  const detailHref = "/learning-objectives/" + node.nodeRef.objectiveId;
+  // 详情页路由 /learning-cards/:cardId 支持 route resolution（objectiveId 可解析）。
+  // 不使用 /learning-objectives/ 路径（该路由不存在）。
+  const detailHref = "/learning-cards/" + node.nodeRef.objectiveId;
   return (
     <div className="graph-v3-sidepanel-body">
       <header>

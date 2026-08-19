@@ -2,10 +2,52 @@
 
 > 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复）**
 > 日期：2026-08-16
-> 版本：v0.8
+> 版本：v1.3
 > 关联：[21-real-desktop-pet-memory-context-design.md](./21-real-desktop-pet-memory-context-design.md)
 >
 > 修订记录：
+> - v1.3（2026-08-19）：第十轮代码审查发现并修复 1 处防御性缺失：
+>   1. `companion-daily-summary.ts` 的 `summary` 字段写入 `companion_daily_summaries`
+>      表时缺少 PRD §15.4.3 要求的"摘要长度 ≤ 500 字"限制。当前确定性模板
+>      `buildSummaryText` 生成的文本很短不会超限，但未来启用 LLM 润色时缺少
+>      防御性截断可能导致超长 summary 写入数据库。已新增 `.slice(0, 500)` 截断。
+> - v1.2（2026-08-19）：第九轮代码审查发现并修复 1 个实质性 bug + 1 处注释不一致：
+>   1. `companion-memory-extractor.ts` 读取用户消息的 SQL 使用 `WHERE id = ${runId}`
+>      查询 `companion_messages` 表，但 `runId` 是 `companion_turn_runs` 的 ID 而非
+>      `companion_messages` 的 ID——查询结果始终为空，导致记忆提取器永远拿不到用户
+>      消息正文（`userText` 始终为空），LLM 只能从 assistant 回复中推断记忆，提取
+>      质量严重下降。已修正为先从 `companion_turn_runs` 获取 `user_message_id` 和
+>      `conversation_id`，再用 `user_message_id` 查询 `companion_messages`。
+>      同时修正历史消息查询中的 `AND id <> ${runId}` 为
+>      `AND id <> ${run.user_message_id}`，排除条件同样应使用消息 ID 而非 run ID。
+>   2. `memory-service.ts` `getMemory` 注释写"含 deleted"但实际 WHERE 条件包含
+>      `isNull(deletedAt)` 排除了已删除记忆，注释与代码不一致。已修正注释为
+>      "不含已删除"，与代码实际行为一致。
+> - v1.1（2026-08-19）：第八轮代码审查发现并修复 3 处写入端字符限制遗漏：
+>   1. `memory-routes.ts` `createMemoryBodySchema` 的 `content.max(2000)` 已修正为 `max(200)`，
+>      与 §9.4/§25 写入端统一 200 字限制一致（用户手动新增记忆路径）；
+>   2. `memory-routes.ts` `correctMemoryBodySchema` 的 `content.max(2000)` 已修正为 `max(200)`，
+>      同上（用户纠正记忆路径）；
+>   3. `proactive-generator.ts` `memoryCandidateOutputSchema` 的 `content.max(400)` 已修正为 `max(200)`，
+>      prompt 增加"不超过 200 字"要求（Run 结算后 LLM 生成记忆候选路径）；
+>   4. `memory-service.ts` `upsertMemory` 新增写入端防御性截断 `content.slice(0, 200)`，
+>      作为所有写入路径的统一入口确保无论调用方是否已截断，写入 DB 的内容都不超过 200 字。
+> - v1.0（2026-08-19）：第七轮文档一致性审查发现并修复 4 处 PRD 内部遗留的旧描述：
+>   1. §9.2.3 `embedding_pending=true` 已修正为 `embedding_status='pending'`，
+>      与实际代码 `embedding_status` 字段一致；
+>   2. §9.10 Zod 示例 `content.max(2000)` 已修正为 `max(200)`，
+>      与 §9.4/§25 写入端统一 200 字限制一致；
+>   3. §10.8 错误处理表"写入时截断到 2000 字"已修正为"写入时统一限制 ≤200 字"，
+>      与 §9.4/§25 v1.0 修复一致；
+>   4. §14.2 容量表"单条记忆内容 2000 字"已修正为"200 字"，
+>      与 §9.4/§25 写入端统一限制一致。
+> - v0.9（2026-08-19）：第六轮代码审查发现并修复 1 个问题：
+>   1. `companion-memory-vector.ts` / `companion-context-orchestrator.ts` / `companion-dialogue.ts`
+>      记忆内容注入 prompt 时缺少 §9.4 要求的字符预算截断——检索阶段 `mapMemoryRow`
+>      截断到 500 字符（应为 200），Orchestrator 和 dialogue 均注释"记忆不截断内容"
+>      完全跳过截断，与 §9.4 "Semantic Memory 每条 ≤200 字，总预算 ≤1000 字符"不一致。
+>      已修正：检索阶段截断到 200 字，Orchestrator 按总预算 ≤1000 字符截断条数，
+>      dialogue 层防御性截断到 200 字。
 > - v0.8（2026-08-19）：第五轮代码审查发现并修复 1 个问题：
 >   1. `proactive-hook.ts` 个性化主动提醒文案生成缺少"同一提醒类型 24h 内最多个性化
 >      1 次"的频率限制（§11.5），每次 Run 完成后只要 `COMPANION_PROACTIVE_PERSONALIZED_V1`
@@ -742,7 +784,7 @@ LIMIT ${topK}
 - 模型升级后，通过后台任务对增量记忆重建 embedding。
 - embedding provider 不可用时：
   - 检索自动降级为 keyword + importance 排序；
-  - 新记忆暂时不生成 embedding，标记 `embedding_pending=true`；
+  - 新记忆暂时不生成 embedding，标记 `embedding_status='pending'`；
   - 不阻塞对话。
 
 ### 9.3 提示词注入防护
@@ -775,6 +817,15 @@ LIMIT ${topK}
 | System Guardrails | 600 | 固定安全规则 |
 
 总预算约 4600 字符，超出时按“重要性/相关度”截断，并确保 Persona 和 Guardrails 不被截断。
+
+**写入端统一限制（v1.0 修复）**：所有记忆写入路径（extractor / summarizer / daily-summary）
+在写入时即限制每条内容 ≤200 字，确保读取注入时不需截断、不丢失信息：
+- `companion-memory-extractor.ts`：schema `content.max(200)`，prompt 明确要求 ≤200 字
+- `companion-summarizer.ts`：episodic 记忆内容 `.slice(0, 200)`
+- `companion-daily-summary.ts`：daily summary 记忆内容 `.slice(0, 200)`
+
+读取端（`mapMemoryRow` / orchestrator / dialogue）保留 200 字截断作为防御性上限，
+防止历史残留数据或手动写入的超长内容进入 prompt。
 
 ### 9.5 摘要任务队列与幂等
 
@@ -853,7 +904,7 @@ const memoryItemV2Schema = z.object({
   version: z.literal(2),
   memoryItemId: z.string().uuid(),
   kind: z.enum(["preference", "goal", "learning_context", "interaction_note", "episodic"]),
-  content: z.string().min(1).max(2000),
+  content: z.string().min(1).max(200),  // §9.4/§25：写入端统一限制 ≤200 字
   importance: z.number().min(0).max(1),
   confidence: z.number().min(0).max(1),
   scope: z.enum(["global", "workspace", "task"]),
@@ -1113,7 +1164,7 @@ const memoryItemV2Schema = z.object({
 | 摘要模型失败 | 任务重试 3 次，仍失败则保留原始对话，不阻塞 |
 | 记忆在生成中被删除 | 以生成开始时快照为准，结束后失效即可 |
 | 并发确认/删除 | 使用 `updated_at` CAS，409 提示刷新 |
-| 记忆内容超长 | 写入时截断到 2000 字，检索时再截断到 200 字 |
+| 记忆内容超长 | 写入时统一限制 ≤200 字（§9.4/§25 v1.0 修复），检索端防御性截断到 200 字 |
 | 自定义人格含脚本 | 前端清理 HTML/脚本，服务端 strict schema 拒绝非法字段 |
 | Prompt 超预算 | 按优先级截断，Persona 和 Guardrails 不截断 |
 
@@ -1550,7 +1601,7 @@ GET    /companion/memory?cursor=&limit=   // 分页游标
 | 单用户 candidate 记忆 | 500 条 |
 | 单日记忆提取候选 | 30 条 |
 | 单日摘要任务 | 20 个 |
-| 单条记忆内容 | 2000 字 |
+| 单条记忆内容 | 200 字（§9.4/§25 v1.0 修复） |
 | 单次向量检索 Top K | 8 |
 | 单次提取模型调用 | maxTokens 800 |
 | 单次摘要模型调用 | maxTokens 1000 |
@@ -1988,12 +2039,20 @@ GET    /companion/daily?date=YYYY-MM-DD
 |---|---|---|---|---|
 | 8 | `proactive-hook.ts` | 个性化主动提醒文案生成缺少"同一提醒类型 24h 内最多个性化 1 次"的频率限制——每次 Run 完成后只要 `COMPANION_PROACTIVE_PERSONALIZED_V1` 开启且有 topMemories 就会调 LLM 生成个性化文案，未检查 24h 内是否已个性化过，可能导致高频 LLM 调用和用户频繁收到个性化文案 | §11.5 "同一提醒类型 24h 内最多个性化 1 次" | 在调用 LLM 生成个性化文案前，先查询最近 24h 是否已有个性化文案（payload_ref->>'text' 不等于模板文案"刚才的学习已完成，要继续吗？"），若已有则跳过本次个性化，保留模板文案；频率检查失败时 fail-open（最多多一次个性化文案） |
 
+## 24. 第六轮代码审查修复（v0.9 补充）
+
+2026-08-19 对方案全链路代码进行第六轮审查，发现并修复以下 1 个问题：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 9 | `companion-memory-vector.ts` / `companion-context-orchestrator.ts` / `companion-dialogue.ts` | 记忆内容注入 prompt 时缺少字符预算截断——检索阶段 `mapMemoryRow` 截断到 500 字符（PRD 要求 200），Orchestrator 注释"记忆不截断内容"完全跳过截断，`buildCompanionPersonaMessages` 也不截断，导致注入 prompt 的 Semantic Memory 可能超过 §9.4 规定的每条 ≤200 字 + 总预算 ≤1000 字符上限 | §9.4 "Semantic Memory 每条 ≤200 字"、"总预算约 4600 字符，超出时按重要性/相关度截断" | 三层修正：(1) `mapMemoryRow` 截断从 500→200 字；(2) Orchestrator 新增 `MEMORY_CONTENT_MAX=200` + `MEMORY_BUDGET_MAX=1000`，按总预算截断条数，`memoryRefs`/`usedMemoryIds`/日志均使用预算后条目；(3) `buildCompanionPersonaMessages` 防御性截断 `content.slice(0, 200)` |
+
 ### 19.1 审查通过项
 
 以下实现经审查与 PRD 一致，无问题：
 
 - **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致，降级策略正确，scope 过滤在向量与 keyword fallback 两条路径均生效（v0.7 修复）。
-- **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1），memoryRefs ≤3 条、每条 ≤80 字（§14.5），memory_usage_log 记录正确。
+- **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1），memoryRefs ≤3 条、每条 ≤80 字（§14.5），memory_usage_log 记录正确，字符预算截断每条 ≤200 字 + 总预算 ≤1000 字符（v0.9 修复）。
 - **记忆提取器**（`companion-memory-extractor.ts`）：候选最多 3 条、置信度 >0.6 过滤（v0.6 修正：从 `>=0.6` 改为严格 `>0.6`）、失败静默不阻塞对话（§9.1）。
 - **会话摘要器**（`companion-summarizer.ts`）：幂等写入、episodic 候选记忆生成、maxTokens 1000（§9.5）。
 - **桌宠日记**（`companion-daily-summary.ts`）：确定性模板 `buildSummaryText`、幂等写入、候选记忆写入（§15.4/§15.5）。
@@ -2010,3 +2069,139 @@ GET    /companion/daily?date=YYYY-MM-DD
 | 偏差 | PRD 描述 | 实际实现 | 原因 |
 |---|---|---|---|
 | 冲突检测用 trigram 而非 embedding cosine | §10.7 "用 embedding 与现有 active 记忆计算 cosine" | `memory-service.ts` 用 `similarity()`（pg_trgm） | 候选记忆创建时 `embedding_status = none`，尚未生成 embedding，无法用 cosine 检测；trigram 作为初步冲突检测是合理降级，后续可在 embedding 生成后补充 cosine 检测 |
+
+## 25. 写入端统一字符限制（v1.0 修复）
+
+2026-08-19 修复记忆内容截断问题：此前写入端允许 2000 字但读取端截断到 200 字，导致超长记忆在注入 prompt 时丢失后半段信息。改为在写入端即统一限制 ≤200 字，确保读取注入时不需截断、不丢失信息。
+
+| # | 文件 | 问题 | 修复 |
+|---|---|---|---|
+| 10 | `companion-memory-extractor.ts` | schema `content.max(2000)` + prompt 无字数要求，LLM 可能生成超长记忆 | schema 改为 `max(200)`，prompt 增加"每条记忆内容不超过 200 字，只保留核心信息" |
+| 11 | `companion-summarizer.ts` | episodic 记忆内容 `summary.title + keyEvents.join("；")` 无长度限制 | 提取为 `episodicContent` 变量，`.slice(0, 200)` |
+| 12 | `companion-daily-summary.ts` | daily summary 记忆内容 `.slice(0, 2000)` | 改为 `.slice(0, 200)` |
+
+读取端（`mapMemoryRow` / orchestrator / `buildCompanionPersonaMessages`）保留 200 字截断作为防御性上限，防止历史残留数据或手动写入的超长内容进入 prompt。
+
+## 26. 第七轮文档一致性审查（v1.0 补充）
+
+2026-08-19 对方案全链路代码进行第七轮审查，代码实现与 PRD 核心条款一致，未发现新的代码问题。但发现 PRD 文档内部存在 4 处遗留的旧描述，与 §9.4/§25 的 v1.0 写入端统一 200 字限制不一致，已全部修正：
+
+| # | 位置 | 旧描述 | 修正后 | 原因 |
+|---|---|---|---|---|
+| 13 | §9.2.3 | `embedding_pending=true` | `embedding_status='pending'` | 实际代码使用 `embedding_status` 字段（`none`/`pending`/`ready`/`failed`），非 boolean `embedding_pending` |
+| 14 | §9.10 | `content: z.string().min(1).max(2000)` | `content: z.string().min(1).max(200)` | §9.4/§25 已将写入端限制改为 200 字 |
+| 15 | §10.8 | "写入时截断到 2000 字，检索时再截断到 200 字" | "写入时统一限制 ≤200 字" | §9.4/§25 v1.0 修复已改为写入端 200 字 |
+| 16 | §14.2 | "单条记忆内容 2000 字" | "单条记忆内容 200 字" | §9.4/§25 已将写入端限制改为 200 字 |
+
+### 26.1 审查通过项（代码实现确认无误）
+
+以下实现经第七轮审查与 PRD 一致，无问题：
+
+- **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致；keyword fallback scope 过滤正确（v0.7 修复）；`mapMemoryRow` 截断到 200 字（v0.9 修复）。
+- **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1）；memoryRefs ≤3 条、每条 ≤80 字（§14.5）；总预算 ≤1000 字符截断（v0.9 修复）；`memory_usage_log` + `last_used_at` 记录正确。
+- **记忆提取器**（`companion-memory-extractor.ts`）：候选最多 3 条、置信度 >0.6 过滤（v0.6 修正）；写入端 `content.max(200)`（v1.0 修复）；prompt 包含 200 字要求；失败静默不阻塞对话（§9.1）。
+- **会话摘要器**（`companion-summarizer.ts`）：幂等写入；episodic 记忆内容 `.slice(0, 200)`（v1.0 修复）；`maxTokens: 1000`（§9.5）。
+- **桌宠日记**（`companion-daily-summary.ts`）：确定性模板 `buildSummaryText`；幂等写入；daily summary 记忆内容 `.slice(0, 200)`（v1.0 修复）。
+- **对话 handler**（`companion-dialogue.ts`）：read 阶段不再直接取 30 条记忆（v0.4 修复）；Orchestrator 接入正确；`buildCompanionPersonaMessages` 防御性截断到 200 字（v0.9 修复）；`assistant.final` 携带 `memoryRefs`（§16.3）。
+- **人格档案路由**（`pet-profile-routes.ts`）：revision CAS 校验在同一事务内（v0.5 修复）；`boundaries` 强类型字段（§12.2）。
+- **主动提醒个性化**（`proactive-hook.ts`）：Policy Gate 流程完整；2s 超时 + 模板回退；24h 个性化频率限制（v0.8 修复）。
+- **桌宠日记路由**（`daily-summary-routes.ts`）：flag 门控只受 `COMPANION_DAILY_SUMMARY_V1` 控制（v0.4 修复）；只读 GET 接口（§16.6）。
+- **记忆管理服务**（`memory-service.ts`）：`listMemories`/`exportMemories` 排序 `DESC`（v0.4 修复）；`upsertMemory` 写入端防御性截断 `content.slice(0, 200)`（v1.1 修复）。
+
+## 27. 第八轮代码审查修复（v1.1 补充）
+
+2026-08-19 对方案全链路代码进行第八轮审查，发现 3 处写入端字符限制遗漏——此前 §9.4/§25 的 v1.0 修复覆盖了 extractor/summarizer/daily-summary 三个写入路径，但遗漏了 API 路由层和 proactive-generator 路径，且 `upsertMemory` 作为所有写入路径的统一入口缺少防御性截断：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 17 | `memory-routes.ts` | `createMemoryBodySchema` 的 `content.max(2000)` 允许用户手动新增记忆时提交 2000 字内容，与 §9.4/§25"写入端统一限制 ≤200 字"不一致——超长记忆在注入 prompt 时会被读取端截断到 200 字，导致后半段信息丢失 | §9.4/§25 "写入端统一限制 ≤200 字" | `content.max(2000)` → `max(200)` |
+| 18 | `memory-routes.ts` | `correctMemoryBodySchema` 的 `content.max(2000)` 允许用户纠正记忆时提交 2000 字内容，同上 | §9.4/§25 "写入端统一限制 ≤200 字" | `content.max(2000)` → `max(200)` |
+| 19 | `proactive-generator.ts` | `memoryCandidateOutputSchema` 的 `content.max(400)` 允许 LLM 生成 400 字记忆候选，生成后通过 `upsertMemory` 写入 DB 不被截断，与 §9.4/§25 不一致——且 prompt 未包含字数要求，LLM 可能生成超长内容 | §9.4/§25 "写入端统一限制 ≤200 字" | `content.max(400)` → `max(200)`，prompt 增加"不超过 200 字"要求 |
+| 20 | `memory-service.ts` | `upsertMemory` 作为所有写入路径的统一入口（API 路由/extractor/summarizer/daily-summary/proactive-generator 均通过此函数写入），缺少写入端 content 截断——虽然各调用方理论上已各自限制，但 `upsertMemory` 本身不做截断意味着任何遗漏限制的调用方都会写入超长内容 | §9.4/§25 "写入端统一限制 ≤200 字" | 新增 `const content = input.content.slice(0, 200)` 防御性截断，所有写入分支（update/insert）及冲突检测均使用截断后的 `content` |
+
+### 27.1 审查通过项（代码实现确认无误）
+
+以下实现经第八轮审查与 PRD 一致，无问题（延续 §26.1 确认）：
+
+- **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致；keyword fallback scope 过滤正确（v0.7 修复）；`mapMemoryRow` 截断到 200 字（v0.9 修复）。
+- **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1）；memoryRefs ≤3 条、每条 ≤80 字（§14.5）；总预算 ≤1000 字符截断（v0.9 修复）；`memory_usage_log` + `last_used_at` 记录正确。
+- **记忆提取器**（`companion-memory-extractor.ts`）：候选最多 3 条、置信度 >0.6 过滤（v0.6 修正）；写入端 `content.max(200)`（v1.0 修复）；prompt 包含 200 字要求；失败静默不阻塞对话（§9.1）。
+- **会话摘要器**（`companion-summarizer.ts`）：幂等写入；episodic 记忆内容 `.slice(0, 200)`（v1.0 修复）；`maxTokens: 1000`（§9.5）。
+- **桌宠日记**（`companion-daily-summary.ts`）：确定性模板 `buildSummaryText`；幂等写入；daily summary 记忆内容 `.slice(0, 200)`（v1.0 修复）。
+- **对话 handler**（`companion-dialogue.ts`）：read 阶段不再直接取 30 条记忆（v0.4 修复）；Orchestrator 接入正确；`buildCompanionPersonaMessages` 防御性截断到 200 字（v0.9 修复）；`assistant.final` 携带 `memoryRefs`（§16.3）。
+- **人格档案路由**（`pet-profile-routes.ts`）：revision CAS 校验在同一事务内（v0.5 修复）；`boundaries` 强类型字段（§12.2）。
+- **主动提醒个性化**（`proactive-hook.ts`）：Policy Gate 流程完整；2s 超时 + 模板回退；24h 个性化频率限制（v0.8 修复）。
+- **桌宠日记路由**（`daily-summary-routes.ts`）：flag 门控只受 `COMPANION_DAILY_SUMMARY_V1` 控制（v0.4 修复）；只读 GET 接口（§16.6）。
+- **Embedding 重建**（`companion-memory-embedding.ts`）：批量 200 条、状态机正确（§13.8）。
+- **Shared schema**：`assistant.final` 的 `memoryRefs` 可选字段 `max(3)` + 每条 `max(80)`（§14.5）；`memory_candidate` delivery kind 已扩展（§16.2）；`assistantMemoryKindV1Schema` 包含 `episodic`（§16.1）。
+- **Worker 注册**：`companion_memory_extract`/`companion_summarizer`/`companion_memory_embedding_rebuild`/`companion_daily_summary` 均已注册；`tickCompanionDailySummaryScheduler`/`tickCompanionMemoryMaintenance` 均在主循环中调用。
+- **数据库迁移**（`0170`）：表结构、RLS、索引、约束与 PRD 一致。
+
+### 27.2 已知偏差（不修复，记录原因）
+
+延续 §19.2，无新增偏差。
+
+## 28. 第九轮代码审查修复（v1.2 补充）
+
+2026-08-19 对方案全链路代码进行第九轮审查，发现并修复 1 个实质性 bug + 1 处注释不一致：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 21 | `companion-memory-extractor.ts` | 读取用户消息的 SQL 使用 `WHERE id = ${runId}` 查询 `companion_messages` 表，但 `runId` 是 `companion_turn_runs` 的 ID 而非 `companion_messages` 的 ID——查询结果始终为空，导致记忆提取器永远拿不到用户消息正文（`userText` 始终为空字符串），LLM 只能从 assistant 回复中单方面推断记忆，提取质量严重下降。同时历史消息查询中的 `AND id <> ${runId}` 同样使用了 run ID 而非消息 ID 作为排除条件 | §9.1 "输入：本次 user message" | 先从 `companion_turn_runs` 获取 `user_message_id` 和 `conversation_id`，再用 `user_message_id` 查询 `companion_messages` 获取用户消息；历史消息排除条件改为 `AND id <> ${run.user_message_id}` |
+| 22 | `memory-service.ts` | `getMemory` 函数注释写"含 deleted"（含已删除记忆），但实际 WHERE 条件包含 `isNull(deletedAt)` 排除了已删除记忆，注释与代码行为不一致 | §13.1 代码注释 | 注释修正为"不含已删除"，与代码实际行为一致 |
+
+### 28.1 审查通过项（代码实现确认无误）
+
+以下实现经第九轮审查与 PRD 一致，无问题（延续 §27.1 确认）：
+
+- **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致；keyword fallback scope 过滤正确（v0.7 修复）；`mapMemoryRow` 截断到 200 字（v0.9 修复）。
+- **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1）；memoryRefs ≤3 条、每条 ≤80 字（§14.5）；总预算 ≤1000 字符截断（v0.9 修复）；`memory_usage_log` + `last_used_at` 记录正确。
+- **记忆提取器**（`companion-memory-extractor.ts`）：候选最多 3 条、置信度 >0.6 过滤（v0.6 修正）；写入端 `content.max(200)`（v1.0 修复）；prompt 包含 200 字要求；失败静默不阻塞对话（§9.1）。**v1.2 修复了 user message 读取 SQL 的 ID 错误。**
+- **会话摘要器**（`companion-summarizer.ts`）：幂等写入；episodic 记忆内容 `.slice(0, 200)`（v1.0 修复）；`maxTokens: 1000`（§9.5）。
+- **桌宠日记**（`companion-daily-summary.ts`）：确定性模板 `buildSummaryText`；幂等写入；daily summary 记忆内容 `.slice(0, 200)`（v1.0 修复）。
+- **对话 handler**（`companion-dialogue.ts`）：read 阶段不再直接取 30 条记忆（v0.4 修复）；Orchestrator 接入正确；`buildCompanionPersonaMessages` 防御性截断到 200 字（v0.9 修复）；`assistant.final` 携带 `memoryRefs`（§16.3）。
+- **人格档案路由**（`pet-profile-routes.ts`）：revision CAS 校验在同一事务内（v0.5 修复）；`boundaries` 强类型字段（§12.2）。
+- **主动提醒个性化**（`proactive-hook.ts`）：Policy Gate 流程完整；2s 超时 + 模板回退；24h 个性化频率限制（v0.8 修复）。
+- **桌宠日记路由**（`daily-summary-routes.ts`）：flag 门控只受 `COMPANION_DAILY_SUMMARY_V1` 控制（v0.4 修复）；只读 GET 接口（§16.6）。
+- **记忆管理服务**（`memory-service.ts`）：`listMemories`/`exportMemories` 排序 `DESC`（v0.4 修复）；`upsertMemory` 写入端防御性截断 `content.slice(0, 200)`（v1.1 修复）。
+- **Embedding 重建**（`companion-memory-embedding.ts`）：批量 200 条、状态机正确（§13.8）。
+- **Shared schema**：`assistant.final` 的 `memoryRefs` 可选字段 `max(3)` + 每条 `max(80)`（§14.5）；`memory_candidate` delivery kind 已扩展（§16.2）；`assistantMemoryKindV1Schema` 包含 `episodic`（§16.1）。
+- **Worker 注册**：`companion_memory_extract`/`companion_summarizer`/`companion_memory_embedding_rebuild`/`companion_daily_summary` 均已注册；`tickCompanionDailySummaryScheduler`/`tickCompanionMemoryMaintenance` 均在主循环中调用。
+- **数据库迁移**（`0170`）：表结构、RLS、索引、约束与 PRD 一致。
+
+### 28.2 已知偏差（不修复，记录原因）
+
+延续 §19.2/§27.2，无新增偏差。
+
+## 29. 第十轮代码审查修复（v1.3 补充）
+
+2026-08-19 对方案全链路代码进行第十轮审查，发现并修复 1 处防御性缺失：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 23 | `companion-daily-summary.ts` | `summary` 字段写入 `companion_daily_summaries` 表时缺少长度限制。PRD §15.4.3 明确要求"摘要长度 ≤ 500 字"，但 `buildSummaryText` 返回值直接写入 DB 未做截断。当前确定性模板生成的文本很短不会超限，但未来启用 LLM 润色时（§17 记录"首期使用确定性模板，LLM 润色默认不启用"），缺少防御性截断可能导致超长 summary 写入 | §15.4.3 "摘要长度 ≤ 500 字" | 新增 `.slice(0, 500)` 截断，确保写入 DB 的 summary 不超过 500 字 |
+
+### 29.1 审查通过项（代码实现确认无误）
+
+以下实现经第十轮审查与 PRD 一致，无问题（延续 §28.1 确认）：
+
+- **向量检索**（`companion-memory-vector.ts`）：排序公式与 §9.2.2/§12.5 一致；keyword fallback scope 过滤正确（v0.7 修复）；`mapMemoryRow` 截断到 200 字（v0.9 修复）。
+- **Context Orchestrator**（`companion-context-orchestrator.ts`）：grounded_tutor 分支不注入记忆（§11.1）；memoryRefs ≤3 条、每条 ≤80 字（§14.5）；总预算 ≤1000 字符截断（v0.9 修复）；`memory_usage_log` + `last_used_at` 记录正确。
+- **记忆提取器**（`companion-memory-extractor.ts`）：候选最多 3 条、置信度 >0.6 过滤（v0.6 修正）；写入端 `content.max(200)`（v1.0 修复）；prompt 包含 200 字要求；失败静默不阻塞对话（§9.1）。v1.2 修复了 user message 读取 SQL 的 ID 错误。
+- **会话摘要器**（`companion-summarizer.ts`）：幂等写入；episodic 记忆内容 `.slice(0, 200)`（v1.0 修复）；`maxTokens: 1000`（§9.5）。
+- **桌宠日记**（`companion-daily-summary.ts`）：确定性模板 `buildSummaryText`；幂等写入；daily summary 记忆内容 `.slice(0, 200)`（v1.0 修复）；summary 字段 `.slice(0, 500)`（v1.3 修复）。
+- **对话 handler**（`companion-dialogue.ts`）：read 阶段不再直接取 30 条记忆（v0.4 修复）；Orchestrator 接入正确；`buildCompanionPersonaMessages` 防御性截断到 200 字（v0.9 修复）；`assistant.final` 携带 `memoryRefs`（§16.3）。
+- **人格档案路由**（`pet-profile-routes.ts`）：revision CAS 校验在同一事务内（v0.5 修复）；`boundaries` 强类型字段（§12.2）。
+- **主动提醒个性化**（`proactive-hook.ts`/`proactive-generator.ts`）：Policy Gate 流程完整；2s 超时 + 模板回退；24h 个性化频率限制（v0.8 修复）；`memoryCandidateOutputSchema` 的 `content.max(200)`（v1.1 修复）。
+- **桌宠日记路由**（`daily-summary-routes.ts`）：flag 门控只受 `COMPANION_DAILY_SUMMARY_V1` 控制（v0.4 修复）；只读 GET 接口（§16.6）。
+- **记忆管理服务**（`memory-service.ts`）：`listMemories`/`exportMemories` 排序 `DESC`（v0.4 修复）；`upsertMemory` 写入端防御性截断 `content.slice(0, 200)`（v1.1 修复）；`getMemory` 注释与代码一致（v1.2 修复）。
+- **记忆管理路由**（`memory-routes.ts`）：`createMemoryBodySchema` 和 `correctMemoryBodySchema` 的 `content.max(200)`（v1.1 修复）。
+- **Embedding 重建**（`companion-memory-embedding.ts`）：批量 200 条、状态机正确（§13.8）。
+- **Shared schema**：`assistant.final` 的 `memoryRefs` 可选字段 `max(3)` + 每条 `max(80)`（§14.5）；`memory_candidate` delivery kind 已扩展（§16.2）；`assistantMemoryKindV1Schema` 包含 `episodic`（§16.1）。
+- **Worker 注册**：`companion_memory_extract`/`companion_summarizer`/`companion_memory_embedding_rebuild`/`companion_daily_summary` 均已注册；`tickCompanionDailySummaryScheduler`/`tickCompanionMemoryMaintenance` 均在主循环中调用。
+- **数据库迁移**（`0170`）：表结构、RLS、索引、约束与 PRD 一致。
+
+### 29.2 已知偏差（不修复，记录原因）
+
+延续 §19.2/§27.2/§28.2，无新增偏差。
+

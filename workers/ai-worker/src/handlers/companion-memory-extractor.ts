@@ -24,7 +24,8 @@ import type { JobPayload } from "./index.ts";
 
 const memoryExtractCandidateSchema = z.object({
   kind: z.enum(["preference", "goal", "learning_context", "interaction_note", "episodic"]),
-  content: z.string().min(1).max(2000),
+  // §9.4：写入端即限制 ≤200 字，确保读取注入时不需截断、不丢失信息。
+  content: z.string().min(1).max(200),
   importance: z.number().min(0).max(1),
   confidence: z.number().min(0).max(1),
   scope: z.enum(["global", "workspace", "task"]).default("workspace"),
@@ -39,6 +40,7 @@ export const memoryExtractOutputSchema = z.object({
 const EXTRACT_PROMPT = [
   "你是桌宠的记忆整理器。根据对话判断是否有值得长期记住的信息。",
   "只提取用户明确表达或高置信推断的信息。",
+  "每条记忆内容不超过 200 字，只保留核心信息，不要赘述。",
   "输出严格 JSON，不要输出其他内容。",
   "候选最多 3 条。",
 ].join("\n");
@@ -106,10 +108,19 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
   const provider = createProvider(textRes.providerName, textRes.providerConfig);
 
   // 使用独立 RLS 事务读取本轮消息（避免在 provider 调用期间持有事务）。
+  // runId 是 companion_turn_runs 的 ID，需通过它获取 user_message_id 和
+  // conversation_id，再关联查询 companion_messages。
   const context = await withJobTransaction(job, async (tx) => {
+    const runRows = await tx.execute<{ user_message_id: string; conversation_id: string }>(sql`
+      SELECT user_message_id, conversation_id FROM companion_turn_runs
+      WHERE id = ${runId}
+    `);
+    const run = runRows[0];
+    if (!run) return { userText: "", assistantText: "", recent: [] };
+
     const userRows = await tx.execute<{ blocks: unknown }>(sql`
       SELECT blocks FROM companion_messages
-      WHERE id = ${runId}
+      WHERE id = ${run.user_message_id}
     `);
     const userBlocks = userRows[0]?.blocks;
     const userText = Array.isArray(userBlocks)
@@ -134,8 +145,8 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
 
     const historyRows = await tx.execute<{ role: string; blocks: unknown }>(sql`
       SELECT role, blocks FROM companion_messages
-      WHERE conversation_id = (SELECT conversation_id FROM companion_turn_runs WHERE id = ${runId})
-        AND id <> ${runId}
+      WHERE conversation_id = ${run.conversation_id}
+        AND id <> ${run.user_message_id}
       ORDER BY seq DESC LIMIT 8
     `);
     const recent = historyRows

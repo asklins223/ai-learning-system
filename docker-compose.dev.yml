@@ -326,8 +326,6 @@ services:
       - ./workers/ai-worker/src:/app/src
       - ./packages/shared/src:/tmp/shared/src
       - ./packages/shared/package.json:/tmp/shared/package.json:ro
-      - ./packages/db/src:/tmp/db/src
-      - ./packages/db/package.json:/tmp/db/package.json:ro
       - ./apps/api/src:/apps/api/src
       # 2026-08-15（worker 崩溃修复）：worker 直接 import apps/api 的 schema
       #（schema/index.ts export * 转发）。三要素缺一不可：

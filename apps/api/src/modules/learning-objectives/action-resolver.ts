@@ -47,7 +47,7 @@ export function resolvePrimaryActionV3(
       return {
         kind: "view_successor",
         successorObjectiveId: input.successorObjectiveId,
-        successorCardId: input.successorCardId ?? input.successorObjectiveId,
+        successorCardId: input.successorCardId ?? null,
       };
     }
     return { kind: "none" };

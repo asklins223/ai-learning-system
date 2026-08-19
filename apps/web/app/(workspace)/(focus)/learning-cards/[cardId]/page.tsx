@@ -27,6 +27,7 @@ import { ObjectiveStatusChip } from "@/features/learning-objective/ObjectiveStat
 import { objectiveChipStateFromSurface } from "@/features/learning-objective/objective-state";
 import { ObjectiveSourceLine } from "@/features/learning-objective/ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "@/features/learning-objective/ObjectivePrimaryAction";
+import { objectiveActionHref } from "@/features/learning-objective/action-navigation";
 import { ObjectiveSkeleton, ObjectiveError } from "@/features/learning-objective/ObjectiveStatePrimitives";
 
 type LoadState =
@@ -40,38 +41,7 @@ function chipStateOf(surface: LearningObjectiveSurfaceV3): ReturnType<typeof obj
 }
 
 function actionHref(action: LearningObjectivePrimaryActionV3, returnTo: string): string | null {
-  switch (action.kind) {
-    case "create_run": {
-      const params = new URLSearchParams({
-        origin: "card_v2",
-        cardId: action.cardId ?? action.objectiveId,
-        objectiveId: action.objectiveId,
-        goal: action.goal,
-        returnTo,
-      });
-      return "/learning-runs/new?" + params.toString();
-    }
-    case "resume_run":
-      return "/learning-runs/" + action.runId + "?returnTo=" + encodeURIComponent(returnTo);
-    case "create_review_run": {
-      const params = new URLSearchParams({
-        origin: "review_v2",
-        scheduleId: action.scheduleId,
-        objectiveId: action.objectiveId,
-        generation: String(action.generation),
-        returnTo,
-      });
-      return "/learning-runs/new?" + params.toString();
-    }
-    case "practice_only":
-      return "/learning-cards/" + (action.cardId ?? action.objectiveId) + "?practice=1";
-    case "view_successor":
-      return "/learning-cards/" + action.successorCardId;
-    case "wait_for_initial_validation":
-    case "refresh":
-    case "none":
-      return null;
-  }
+  return objectiveActionHref(action, returnTo);
 }
 
 export default function LearningObjectiveDetailPage(): JSX.Element {
@@ -204,12 +174,14 @@ export default function LearningObjectiveDetailPage(): JSX.Element {
         setNotice("没有可归档的公开呈现。");
         return;
       }
+      // §7.5 OCC：expectedObjectiveLifecycleEpoch 由服务端 Surface 返回，
+      // 不在客户端硬编码。Surface 合同已携带 lifecycleEpoch 字段。
       await client.archiveCardV2(
         {
           cardId,
           expectedPublicationRevision: revealParams.publicationRevision,
           expectedPublicPayloadHash: revealParams.publicPayloadHash,
-          expectedObjectiveLifecycleEpoch: 1,
+          expectedObjectiveLifecycleEpoch: surface.lifecycleEpoch,
         },
         "archive-" + cardId + "-" + Date.now(),
       );

@@ -34,7 +34,9 @@ export function objectiveActionHref(
     case "practice_only":
       return "/learning-cards/" + (action.cardId ?? action.objectiveId) + "?practice=1";
     case "view_successor":
-      return "/learning-cards/" + action.successorCardId;
+      // successorCardId 可能为 null（successor 尚无 active Card），
+      // 此时用 successorObjectiveId 通过 route resolution 解析。
+      return "/learning-cards/" + (action.successorCardId ?? action.successorObjectiveId);
     case "wait_for_initial_validation":
     case "refresh":
     case "none":

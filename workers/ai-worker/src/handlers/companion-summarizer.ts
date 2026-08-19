@@ -136,14 +136,15 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
       DO UPDATE SET summary = EXCLUDED.summary, updated_at = now()
     `);
 
-    // 生成 episodic 候选记忆。
+    // 生成 episodic 候选记忆。§9.4：写入端即限制 ≤200 字，确保读取注入时不需截断。
+    const episodicContent = (summary.title + "：" + summary.keyEvents.slice(0, 3).join("；")).slice(0, 200);
     await tx.execute(sql`
       INSERT INTO assistant_memory_items
         (workspace_id, user_id, kind, content, source_event_id, user_stated, user_confirmed,
          candidate, importance, confidence, scope, source_type, embedding_status, created_at, updated_at)
       VALUES
         (${job.workspaceId}, ${userId}, 'episodic',
-         ${summary.title + "：" + summary.keyEvents.slice(0, 3).join("；")},
+         ${episodicContent},
          ${`summary:${conversationId}:${sourceRunId ?? "conversation"}`},
          false, false, true, 0.4, 0.7, 'workspace', 'summary', 'pending', now(), now())
       ON CONFLICT (workspace_id, user_id, kind, source_event_id)

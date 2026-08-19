@@ -26,6 +26,7 @@ function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): Learn
     version: 3,
     objectiveId: OBJ_ID,
     surfaceRevision: 1,
+    lifecycleEpoch: 1,
     content: {
       conceptLabel: "测试概念",
       publicSummary: "公开摘要",
@@ -109,6 +110,7 @@ describe("RL-06: 纯 V2 workspace 全链路", () => {
       lifecycle: "active",
       freshness: "fresh",
       primaryNoteTitle: "来源笔记",
+      createdAt: "2026-08-18T00:00:00.000Z",
       personalState: { state: "unvalidated", activeRunId: null },
       primaryAction: { kind: "create_run", origin: "home", objectiveId: OBJ_ID, cardId: CARD_ID, goal: "首次验证" },
     };

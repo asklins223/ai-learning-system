@@ -70,7 +70,8 @@ const listQuerySchema = z.object({
 
 const createMemoryBodySchema = z.object({
   kind: memoryKindSchema,
-  content: z.string().min(1).max(2000),
+  // §9.4/§25：写入端统一限制 ≤200 字。
+  content: z.string().min(1).max(200),
   sourceEventId: z.string().min(1).max(240).optional(),
   sourceSessionId: z.string().uuid().optional(),
   importance: z.number().min(0).max(1).optional(),
@@ -82,7 +83,8 @@ const createMemoryBodySchema = z.object({
 });
 
 const correctMemoryBodySchema = z.object({
-  content: z.string().min(1).max(2000),
+  // §9.4/§25：写入端统一限制 ≤200 字。
+  content: z.string().min(1).max(200),
   reason: z.string().min(1).max(500).optional(),
 });
 
