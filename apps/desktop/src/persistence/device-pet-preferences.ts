@@ -149,7 +149,6 @@ function schedulePreferencesWrite(file: string, temp: string, content: string): 
     existing.timer = setTimeout(() => {
       void flushPreferencesWrite(existing);
     }, WRITE_DEBOUNCE_MS);
-    existing.timer.unref?.();
     return new Promise<void>((resolve, reject) => {
       existing.resolvers.push(resolve);
       existing.rejecters.push(reject);
@@ -165,7 +164,6 @@ function schedulePreferencesWrite(file: string, temp: string, content: string): 
     resolvers: [],
     rejecters: [],
   };
-  pending.timer.unref?.();
   pendingPreferencesWrites.set(file, pending);
   return new Promise<void>((resolve, reject) => {
     pending.resolvers.push(resolve);

@@ -5,9 +5,11 @@ import { companionBootstrapResponseV1Schema } from "@ailearn/shared";
 
 test("bootstrap features fail-closed：无阶段开关时能力关闭", () => {
   const saved = process.env.COMPANION_DIALOGUE_V1_ENABLED;
+  const actionSaved = process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED;
   const live2dSaved = process.env.COMPANION_LIVE2D_V1_ENABLED;
   const petSaved = process.env.COMPANION_PET_V1_ENABLED;
   delete process.env.COMPANION_DIALOGUE_V1_ENABLED;
+  delete process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED;
   delete process.env.COMPANION_LIVE2D_V1_ENABLED;
   delete process.env.COMPANION_PET_V1_ENABLED;
   const f = getCompanionBootstrapFeatures();
@@ -20,6 +22,7 @@ test("bootstrap features fail-closed：无阶段开关时能力关闭", () => {
   assert.equal(f.learningActions, false);
   assert.equal(f.streamingVoice, false);
   if (saved !== undefined) process.env.COMPANION_DIALOGUE_V1_ENABLED = saved;
+  if (actionSaved !== undefined) process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED = actionSaved;
   if (live2dSaved !== undefined) process.env.COMPANION_LIVE2D_V1_ENABLED = live2dSaved;
   if (petSaved !== undefined) process.env.COMPANION_PET_V1_ENABLED = petSaved;
   else delete process.env.COMPANION_PET_V1_ENABLED;
@@ -45,6 +48,7 @@ test("bootstrap features：显式开启 textConversation", () => {
   const saved = process.env.COMPANION_DIALOGUE_V1_ENABLED;
   const actionSaved = process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED;
   process.env.COMPANION_DIALOGUE_V1_ENABLED = "true";
+  process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED = "false";
   assert.equal(getCompanionBootstrapFeatures().textConversation, true);
   assert.equal(getCompanionBootstrapFeatures().learningActions, false);
   process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED = "true";

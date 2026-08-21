@@ -78,7 +78,6 @@ export interface GenerationPollingControls {
  */
 export function useGenerationPolling(ctx: GenerationPollingContext): GenerationPollingControls {
   const {
-    noteVersionId,
     generationRunStorageKey,
     mountedRef,
     generationRunRef,
@@ -164,7 +163,8 @@ export function useGenerationPolling(ctx: GenerationPollingContext): GenerationP
           }
         }
       } catch {
-        // Fall through to the server-side latest lookup.
+        // No local run is recoverable; V2 does not expose a legacy
+        // note-version latest-run endpoint.
       }
 
       try {
@@ -176,10 +176,6 @@ export function useGenerationPolling(ctx: GenerationPollingContext): GenerationP
             if (!(error instanceof ApiError && error.status === 404)) throw error;
             forgetGenerationRun();
           }
-        }
-        if (!recoveredRun) {
-          const latest = await api.getLatestCardGenerationRun(noteVersionId, controller.signal);
-          recoveredRun = latest.run;
         }
         if (cancelled || !mountedRef.current) return;
         if (recoveredRun) {
@@ -206,7 +202,7 @@ export function useGenerationPolling(ctx: GenerationPollingContext): GenerationP
     };
   }, [
     applyGenerationRun, forgetGenerationRun, generationRunStorageKey,
-    noteVersionId, pollGenerationRun, mountedRef, generationRunRef,
+    pollGenerationRun, mountedRef, generationRunRef,
     setGenerationRunRecoveryResolved,
   ]);
 

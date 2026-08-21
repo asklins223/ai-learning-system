@@ -18,6 +18,7 @@ import {
   devCredentials,
   loginViaUI,
   TEST_CARD_ID,
+  TEST_OBJECTIVE_ID,
 } from "./helpers.ts";
 
 const CREDENTIALS = devCredentials();
@@ -31,9 +32,9 @@ test.describe("文档 16 学习闭环（learning_run_v1 双侧同开）", () => 
     skipIfNoServer();
     await loginViaUI(page, CREDENTIALS!.email, CREDENTIALS!.password);
 
-    // 1. Card 页：flag 开启后 CTA 为 live 文案（真实切流信号）。
-    await page.goto(`/cards/${TEST_CARD_ID}`, { waitUntil: "domcontentloaded" });
-    const liveCta = page.getByRole("button", { name: /开始三分钟巩固/ });
+    // 1. V2 Objective 详情页：主行动由服务端 typed action 决定。
+    await page.goto(`/learning-cards/${TEST_CARD_ID}`, { waitUntil: "domcontentloaded" });
+    const liveCta = page.getByRole("button", { name: /开始验证/ });
     await expect(liveCta.first()).toBeVisible({ timeout: 30_000 });
 
     // 2. CTA → /learning-runs/new（稳定幂等键）→ redirect 到 runId。
@@ -62,7 +63,10 @@ test.describe("文档 16 学习闭环（learning_run_v1 双侧同开）", () => 
     test.skip(!CAN_RUN, "E2E_BASE_URL/E2E_DEV_* 未配置");
     skipIfNoServer();
     await loginViaUI(page, CREDENTIALS!.email, CREDENTIALS!.password);
-    await page.goto("/learning-runs/new", { waitUntil: "domcontentloaded" });
+    await page.goto(
+      `/learning-runs/new?origin=card_v2&cardId=${TEST_CARD_ID}&objectiveId=${TEST_OBJECTIVE_ID}&goal=stabilize&returnTo=%2Fcards`,
+      { waitUntil: "domcontentloaded" },
+    );
     // new 页会立即创建并 redirect（幂等键稳定）；404 则停留 new 无 redirect。
     await expect(page).toHaveURL(/\/learning-runs\//, { timeout: 30_000 });
   });

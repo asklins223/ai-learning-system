@@ -28,7 +28,7 @@ test.describe("伴星记忆（§10.3）", () => {
     await page.goto("/companion/memory", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { name: "伴星记忆" })).toBeVisible({ timeout: 30_000 });
     // 空态或已有记忆列表（二选一，均合法）。
-    const empty = page.getByText("还没有保存的记忆");
+    const empty = page.getByText(/还没有(?:保存|匹配)的记忆/);
     const list = page.locator(".companion-memory-list li");
     await expect(empty.or(list.first())).toBeVisible({ timeout: 30_000 });
 

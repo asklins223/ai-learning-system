@@ -5,10 +5,8 @@
  * - 1 test user (e2e-test@ailearn.local)
  * - 1 personal workspace
  * - 1 note with content (3 blocks, each with a quote)
- * - 1 active card with 3 key points
- * - 3 evidence records (one per key point, all "aligned")
- * - 1 pending review schedule (for review queue E2E)
- * - 1 active validation question (for card validation E2E)
+ * - 1 active V2 learning card with a canonical objective
+ *   (the old V1 card/key-point tables were removed in the refactor)
  *
  * The seeded card uses a fixed UUID (00000000-0000-0000-0000-000000000001)
  * so E2E test specs can navigate to it directly.
@@ -32,14 +30,23 @@ import {
   workspaceMembers,
 } from "../db/schema/identity.ts";
 import { notes, noteVersions, noteBlocks } from "../db/schema/note.ts";
+import {
+  learningCardsV2,
+  learningCardPublicationRevisionsV2,
+  learningCardRevisionsV2,
+  learningObjectiveRevisionsV2,
+  learningObjectivesV2,
+} from "../db/schema/card-generation-v2.ts";
 
 // ─── Configuration ────────────────────────────────────────────────────────
 
 const E2E_USER_EMAIL = process.env.E2E_TEST_USER_EMAIL || "e2e-test@ailearn.local";
 const E2E_USER_PASSWORD = process.env.E2E_TEST_USER_PASSWORD || "e2e_test_password_2026";
 
-// V1 退役：原固定 E2E 卡 UUID（E2E_CARD_ID / E2E_REVIEW_SCHEDULE_ID）随 V1
-// learningCards 数据播种一并移除，V2 卡片/复习场景需要另定标识符。
+// Stable V2 identifiers used by the browser suite. The objective id is the
+// post-refactor alias for the old keyPointId.
+const E2E_CARD_ID = "00000000-0000-0000-0000-000000000001";
+const E2E_OBJECTIVE_ID = "00000000-0000-0000-0000-000000000002";
 
 // ─── Main ──────────────────────────────────────────────────────────────────
 
@@ -154,14 +161,129 @@ async function main() {
   }
   console.log(`  ✓ Note: ${noteId} (${blockIds.length} blocks)`);
 
-  // V1 退役（E2E seed）：原步骤 4-7 播种 V1 学习卡数据（learningCards /
-  // cardKeyPoints / evidences-by-keyPointId / review_schedules-by-keyPointId /
-  // validation_questions-by-cardId）。V1 表及其 keyPointId/cardId 列均已删除，
-  // 这些旧 V1 卡数据已无意义，故整段移除；基于 V2（learning_cards_v2 /
-  // objectives_v2）的 E2E 卡数据播种需另行设计。
+  // ── 4. Create the current V2 Objective + Card fixture ────────────────
+  // No evidence binding is needed for this smoke fixture: the V2 target
+  // snapshot adapter intentionally supports an empty evidence closure.
+  const existingCard = await db.query.learningCardsV2.findFirst({
+    where: (card, { and, eq }) => and(
+      eq(card.workspaceId, workspaceId),
+      eq(card.cardId, E2E_CARD_ID),
+    ),
+  });
+
+  if (!existingCard) {
+    const objectiveRevisionId = randomUUID();
+    const answerUnitId = "earth-orbit-answer";
+    const rubricUnitId = "earth-orbit-rubric";
+    const evidenceRefId = randomUUID();
+    const canonicalAnswer = {
+      kind: "text" as const,
+      unit: {
+        unitId: answerUnitId,
+        text: "The Earth orbits the Sun in approximately 365 days, completing one revolution.",
+      },
+    };
+    const scoringRubric = {
+      version: 2 as const,
+      units: [{
+        rubricUnitId,
+        facet: "recall" as const,
+        criterion: "States that one Earth revolution around the Sun takes approximately 365 days.",
+        required: true,
+        answerUnitIds: [answerUnitId],
+        evidenceRefIds: [evidenceRefId],
+      }],
+      passingPolicy: {
+        requireAllRequiredUnits: true as const,
+        allowContradiction: false as const,
+      },
+      rubricHash: "f".repeat(64),
+    };
+    const objectiveFingerprint = "f".repeat(64);
+    const objectiveRevisionHash = "e".repeat(64);
+    const privatePayloadHash = "d".repeat(64);
+    const presentationHash = "c".repeat(64);
+    const publicPayloadHash = "b".repeat(64);
+    const revealPayloadHash = "a".repeat(64);
+    const front = {
+      cue: "地球公转",
+      context: "太阳系中的周期运动",
+      prompt: "请解释地球绕太阳公转一周大约需要多久，以及这段时间代表什么。",
+    };
+
+    await db.insert(learningObjectivesV2).values({
+      workspaceId,
+      objectiveId: E2E_OBJECTIVE_ID,
+      semanticIdentityClassId: "e2e:earth-orbit",
+      semanticIdentityPolicyVersion: "sem-id-v1",
+      semanticTargetFingerprint: objectiveFingerprint,
+      lifecycle: "active",
+      lifecycleEpoch: 1,
+      currentObjectiveRevisionId: objectiveRevisionId,
+      currentRevision: 1,
+    });
+    await db.insert(learningObjectiveRevisionsV2).values({
+      workspaceId,
+      objectiveRevisionId,
+      objectiveId: E2E_OBJECTIVE_ID,
+      revision: 1,
+      objectiveStatement: "Earth's orbital period",
+      publicSummary: "Earth's orbital period",
+      knowledgeForm: "definition",
+      preferredIntents: ["recall"],
+      canonicalAnswer,
+      learningSupport: {
+        explanation: "The Earth takes approximately 365 days to complete one orbit around the Sun.",
+      },
+      scoringRubric,
+      relations: [],
+      evidenceBindings: [],
+      semanticTargetFingerprint: objectiveFingerprint,
+      targetRevisionHash: objectiveRevisionHash,
+      privatePayloadHash,
+    });
+    await db.insert(learningCardsV2).values({
+      workspaceId,
+      cardId: E2E_CARD_ID,
+      objectiveId: E2E_OBJECTIVE_ID,
+      noteVersionId,
+      cardRevision: 1,
+      currentPublicationRevision: 1,
+      lifecycle: "active",
+      front,
+      publicSummary: "Earth's orbital period",
+      knowledgeForm: "definition",
+      strategy: "recall",
+      sourceLabel: "E2E Test Note — Key Science Concepts",
+      presentationHash,
+    });
+    await db.insert(learningCardRevisionsV2).values({
+      workspaceId,
+      cardRevisionId: randomUUID(),
+      cardId: E2E_CARD_ID,
+      revision: 1,
+      front,
+      strategy: "recall",
+      presentationHash,
+    });
+    await db.insert(learningCardPublicationRevisionsV2).values({
+      workspaceId,
+      cardId: E2E_CARD_ID,
+      publicationRevision: 1,
+      cardRevision: 1,
+      objectiveId: E2E_OBJECTIVE_ID,
+      objectiveRevision: 1,
+      lifecycleAtPublication: "active",
+      publicPayloadHash,
+      revealPayloadHash,
+    });
+    console.log(`  ✓ V2 Card: ${E2E_CARD_ID} (objective ${E2E_OBJECTIVE_ID})`);
+  } else {
+    console.log(`  ✓ V2 Card already exists: ${E2E_CARD_ID}`);
+  }
 
   // ── Summary ───────────────────────────────────────────────────────────
-  console.log("\n✅ E2E seed data complete (V1 卡数据已退役):");
+  console.log("\n✅ E2E seed data complete (current V2 fixture):");
   console.log(`   User:       ${E2E_USER_EMAIL}`);
   console.log(`   Workspace:  ${workspaceId}`);
   console.log(`   Note:       ${noteId}`);

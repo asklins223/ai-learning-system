@@ -82,6 +82,7 @@ import {
   computeCandidateEvidenceSetHashV2,
   computeCandidateRevisionHashV2,
   computeCardPlanHashV2,
+  computeRubricHashV2,
 } from "@ailearn/shared/card-generation-v2-hashing";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { computePedagogyReportHash } from "../card-generation-v2/providers.ts";import {
@@ -953,9 +954,23 @@ async function critiqueAndFinalizeCandidates(
     existingObjectives: ExistingObjectiveRef[];
     providers: Awaited<ReturnType<typeof buildProvidersForRun>> | null;
     useLLM: boolean;
+    /** Recheck must never create an unbounded chain of authored revisions. */
+    allowBoundedRepair?: boolean;
   },
 ): Promise<void> {
-  const { runId, workspaceId, run, plan, candidates, sealed, sourceContent, existingObjectives, providers, useLLM } = input;
+  const {
+    runId,
+    workspaceId,
+    run,
+    plan,
+    candidates,
+    sealed,
+    sourceContent,
+    existingObjectives,
+    providers,
+    useLLM,
+    allowBoundedRepair = true,
+  } = input;
 
     // 12. Per-candidate critics + assembler + deterministic gates
     const qualityReports: QualityReportV2[] = [];
@@ -1151,7 +1166,7 @@ async function critiqueAndFinalizeCandidates(
       const keepSet = new Set(pc.filter((p) => p.verdict === "keep").map((p) => p.candidateId));
       const rewriteSet = new Set(pc.filter((p) => p.verdict === "rewrite").map((p) => p.candidateId));
       // bounded repair：每个失败候选最多 repair 一次
-      if (useLLM && providers && rewriteSet.size > 0 && !repaired) {
+      if (allowBoundedRepair && useLLM && providers && rewriteSet.size > 0 && !repaired) {
         const repairedRevisions: LearningCardCandidateRevisionV2[] = [];
         for (const c of afterRepair) {
           if (rewriteSet.has(c.candidateId)) {
@@ -1172,6 +1187,29 @@ async function critiqueAndFinalizeCandidates(
           // 保持 authored 状态，由候选审核页的 recheck 流程重新走质量门禁。
           // keep 候选照常 review_ready。
           afterRepair = afterRepair.filter((c) => !rewriteSet.has(c.candidateId));
+
+          // 生成主流程也必须真正触发这条 recheck 流程。此前这里只写入
+          // authored revision，却没有 enqueue recheck job，导致候选审核页
+          // 永远展示“重新检查中”，并且启用按钮一直被锁住。
+          for (const repairedCandidate of repairedRevisions) {
+            await tx.execute(sql`
+              INSERT INTO public.card_generation_run_outbox_v2
+                (id, workspace_id, run_id, job_type, payload, status)
+              VALUES (
+                ${randomUUID()}, ${workspaceId}, ${runId},
+                'card_generation_recheck_candidate',
+                ${JSON.stringify({
+                  runId,
+                  workspaceId,
+                  candidateId: repairedCandidate.candidateId,
+                  candidateRevisionId: repairedCandidate.candidateRevisionId,
+                  revision: repairedCandidate.revision,
+                  reason: 'bounded_repair',
+                })}::jsonb,
+                'pending'
+              )
+            `);
+          }
         }
       }
       afterRepair = afterRepair.filter((c) => keepSet.has(c.candidateId) || rewriteSet.has(c.candidateId));
@@ -1496,6 +1534,7 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob): Promise<voi
       existingObjectives: ctx.existingObjectives,
       providers,
       useLLM,
+      allowBoundedRepair: false,
     });
     await insertEvent(tx, workspaceId, runId, "card_candidate.regenerated", {
       candidateId: candidate.candidateId,
@@ -1741,6 +1780,30 @@ async function processRecheckCandidateJob(job: PendingOutboxJob): Promise<void> 
       providers,
       useLLM,
     });
+    // 单个候选复核失败不应让同一 run 中其它仍可启用的最新候选
+    // 一并进入 needs_attention；用户仍应能保留并启用通过门禁的候选。
+    // 只有没有任何最新 passed 候选时，才维持 fail-closed 的 needs_attention。
+    const usableLatest = (await tx.execute(sql`
+      SELECT COUNT(*)::int AS count
+      FROM (
+        SELECT DISTINCT ON (candidate_id)
+          quality_state, review_decision, publish_state
+        FROM public.card_generation_candidates_v2
+        WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+        ORDER BY candidate_id, revision DESC
+      ) latest
+      WHERE latest.quality_state = 'passed'
+        AND latest.review_decision IN ('undecided', 'keep')
+        AND latest.publish_state = 'unpublished'
+    `)) as Array<{ count: number | string }>;
+    if (Number(usableLatest[0]?.count ?? 0) > 0) {
+      await tx.execute(sql`
+        UPDATE public.card_generation_runs_v2
+        SET status = 'review_ready', updated_at = now()
+        WHERE id = ${runId} AND workspace_id = ${workspaceId}
+          AND status = 'needs_attention'
+      `);
+    }
     await insertEvent(tx, workspaceId, runId, "card_candidate.recheck_completed", {
       candidateId: candidate.candidateId,
       candidateRevisionId: candidate.candidateRevisionId,
@@ -1792,7 +1855,38 @@ async function boundedRepairCandidate(
       revision: input.candidate.revision,
       revisionHash: input.candidate.candidateRevisionHash,
     }],
-    objective: providerOutput.objective,
+    // bounded repair 仍然基于同一份 sealed source。部分模型会在重写时
+    // 忽略 evidenceRefIds；不能让“改写题面”把原本有效的证据闭包丢掉，
+    // 否则后续 recheck 必然被 no_evidence_reference hard gate 拒绝。
+    objective: (() => {
+      const originalUnits = new Map(
+        input.candidate.objective.rubric.units.map((unit) => [unit.rubricUnitId, unit]),
+      );
+      const rubricWithoutHash = {
+        ...providerOutput.objective.rubric,
+        units: providerOutput.objective.rubric.units.map((unit, index) => {
+          const original = originalUnits.get(unit.rubricUnitId)
+            ?? input.candidate.objective.rubric.units[index];
+          return {
+            ...unit,
+            evidenceRefIds: unit.evidenceRefIds.length > 0
+              ? unit.evidenceRefIds
+              : original?.evidenceRefIds ?? [],
+          };
+        }),
+      };
+      const evidenceRefIds = providerOutput.objective.evidenceRefIds.length > 0
+        ? providerOutput.objective.evidenceRefIds
+        : input.candidate.objective.evidenceRefIds;
+      return {
+        ...providerOutput.objective,
+        evidenceRefIds,
+        rubric: {
+          ...rubricWithoutHash,
+          rubricHash: computeRubricHashV2(rubricWithoutHash),
+        },
+      };
+    })(),
     presentation: providerOutput.presentation,
     evidenceSetHash: input.sealed.evidenceSetHash,
   };

@@ -66,20 +66,29 @@ describe("AI endpoint resolution", () => {
 
 describe("public endpoint address policy", () => {
   it("blocks private, loopback, link-local, documentation, and mapped addresses", () => {
-    for (const address of [
-      "0.0.0.0",
-      "10.0.0.1",
-      "127.0.0.1",
-      "169.254.1.1",
-      "172.16.0.1",
-      "192.168.0.1",
-      "203.0.113.10",
-      "::1",
-      "fc00::1",
-      "fe80::1",
-      "::ffff:127.0.0.1",
-    ]) {
-      assert.equal(isNonPublicAIEndpointAddress(address), true, address);
+    const previous = process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS;
+    try {
+      // This contract asserts the default fail-closed policy regardless of a
+      // developer's local Docker/VPN compatibility override.
+      delete process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS;
+      for (const address of [
+        "0.0.0.0",
+        "10.0.0.1",
+        "127.0.0.1",
+        "169.254.1.1",
+        "172.16.0.1",
+        "192.168.0.1",
+        "203.0.113.10",
+        "::1",
+        "fc00::1",
+        "fe80::1",
+        "::ffff:127.0.0.1",
+      ]) {
+        assert.equal(isNonPublicAIEndpointAddress(address), true, address);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS;
+      else process.env.AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS = previous;
     }
   });
 

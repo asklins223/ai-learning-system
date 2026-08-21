@@ -27,7 +27,6 @@ import { resolve, join } from "node:path";
 
 const PACKAGES = [
   { path: "packages/shared", testDir: "src" },
-  { path: "packages/db", testDir: "src" },
   { path: "packages/ai-quality", testDir: "src" },
   { path: "apps/api", testDir: "src" },
   { path: "apps/web", testDir: "lib" },

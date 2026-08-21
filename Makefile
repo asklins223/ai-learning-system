@@ -138,7 +138,6 @@ verify: version-check
 	node .github/scripts/verify-budget-contract.mjs
 	node .github/scripts/verify-deploy-readiness.mjs
 	cd packages/shared && npm run typecheck && npm test
-	cd packages/db && npm run typecheck && npm test
 	cd packages/ai-quality && npm run typecheck && npm test && npm run pr-gate
 	cd apps/api && npm run typecheck && npm test
 	cd apps/web && npm run typecheck && npm run lint && npm test

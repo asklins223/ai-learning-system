@@ -11,11 +11,14 @@ export interface Live2DGateInput {
   live2dEnabled: boolean;
   reducedMotion: boolean;
   animationOff: boolean;
+  /** Deployment-owned vendor files are optional in the repository build. */
+  vendorAssetsAvailable?: boolean;
 }
 
 /** 是否加载 Live2D 驱动。reducedMotion/animationOff 完全绕过。 */
 export function shouldLoadLive2D(input: Live2DGateInput): boolean {
   if (!input.live2dEnabled) return false;
+  if (input.vendorAssetsAvailable === false) return false;
   if (input.reducedMotion) return false;
   if (input.animationOff) return false;
   return true;

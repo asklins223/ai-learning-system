@@ -73,8 +73,13 @@ export default function LearningObjectiveDetailPage(): JSX.Element {
     cancelledRef.current = false;
     async function boot() {
       try {
-        // FE-19：cardId → objectiveId（V2 card 与 legacy 均可确定性解析）
-        const resolution = await learningObjectiveApi.resolveLegacyRoute("card", cardId);
+        // FE-19：V2 cardId 与 objectiveId 都能进入同一档案页。卡库列表
+        // 只有 objectiveId，因此 card resolver 失败后再走 objective alias
+        // resolver；已退役旧 card 仍会得到 gone，不会被误映射。
+        const cardResolution = await learningObjectiveApi.resolveLegacyRoute("card", cardId);
+        const resolution = cardResolution.status === "mapped"
+          ? cardResolution
+          : await learningObjectiveApi.resolveLegacyRoute("key_point", cardId);
         if (resolution.status !== "mapped" || !resolution.objectiveId) {
           if (cancelled) return;
           setLoad({

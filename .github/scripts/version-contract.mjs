@@ -17,7 +17,6 @@ export const PACKAGE_ROOTS = [
   "apps/api",
   "apps/web",
   "workers/ai-worker",
-  "packages/db",
   "packages/shared",
 ];
 

@@ -75,8 +75,21 @@ export function isNonPublicAIEndpointAddress(ip: string): boolean {
   const ipv6 = parseIpv6(normalized);
   if (!ipv6) return true;
   const first = ipv6[0];
+  // Loopback (::1)
   if (ipv6.slice(0, 7).every((part) => part === 0) && ipv6[7] <= 1) return true;
-  if ((first & 0xffc0) === 0xfe80 || (first & 0xfe00) === 0xfc00 || (first & 0xff00) === 0xff00) return true;
+  // Link-local (fe80::/10), Unique Local Address (fc00::/7), Multicast (ff00::/8)
+  // When AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS is true, also allow Clash/VPN
+  // fake-IP IPv6 addresses (fdfe:dcba:9876::/64 pattern used by Clash).
+  if ((first & 0xffc0) === 0xfe80) return true;
+  if ((first & 0xff00) === 0xff00) return true;
+  if ((first & 0xfe00) === 0xfc00) {
+    // ULA range (fc00::/7). Clash fake-IP uses fdfe:dcba:9876::/64.
+    // When Docker Desktop synthetic DNS is allowed, skip ULA addresses
+    // instead of rejecting the entire hostname.
+    if (allowsDockerDesktopSyntheticDns()) return false;
+    return true;
+  }
+  // Only globally routed unicast space (2000::/3) is eligible.
   if ((first & 0xe000) !== 0x2000) return true;
   const second = ipv6[1];
   const third = ipv6[2];
@@ -97,12 +110,26 @@ async function resolvePublicAddress(hostname: string): Promise<PinnedAddress> {
     if (isNonPublicAIEndpointAddress(clean)) throw new Error("AI endpoint resolved to a non-public address");
     return { address: clean, family };
   }
+  // G-007: DNS 解析 hostname，检查 A/AAAA 记录。
+  // 策略（与 parse-source.ts U5 修复一致）：过滤掉私有/内网地址，
+  // 只从公网地址中选择。如果全部地址都是私有/内网，仍然拒绝。
+  // CDN 域名 DNS 可能返回混合公网/内网地址（如负载均衡器内部地址），
+  // 旧策略"任何一个私有就拒绝整个 hostname"会误杀合法 CDN 域名。
   const addresses = await dnsLookup(clean, { all: true, verbatim: true });
   if (addresses.length === 0) throw new Error("AI endpoint hostname has no address");
-  if (addresses.some((entry) => isNonPublicAIEndpointAddress(entry.address))) {
-    throw new Error("AI endpoint resolved to a non-public address");
+
+  const publicAddresses = addresses.filter(
+    (entry) => !isNonPublicAIEndpointAddress(entry.address),
+  );
+
+  if (publicAddresses.length === 0) {
+    const blockedIps = addresses.map((a) => a.address).join(", ");
+    throw new Error(
+      `AI endpoint resolved to a non-public address — all resolved addresses are private: ${blockedIps}`,
+    );
   }
-  const selected = addresses[0];
+
+  const selected = publicAddresses[0];
   if (selected.family !== 4 && selected.family !== 6) {
     throw new Error("AI endpoint has an unsupported address family");
   }

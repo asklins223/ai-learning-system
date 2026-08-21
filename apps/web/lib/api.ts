@@ -617,7 +617,13 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   // F#7（第六轮 🟠1）：GET 增加通用 in-flight 去重（scope-null 也生效）。
   const wsScope = currentWorkspaceCacheScope();
   const cacheKey = `${method} ${path} |ws=${wsScope ?? "anon"}`;
-  const getCacheUsable = method === "GET" && requestCacheEnabled && wsScope !== null;
+  // 动态快照可通过 RequestInit.cache 明确退出通用 GET 缓存；学习运行等
+  // 后台异步结算资源必须使用 no-store，否则 30s TTL 会把 committing 旧帧
+  // 当成最新结果，前端永远看不到 worker 随后写入的 completed/result。
+  const getCacheUsable = method === "GET"
+    && requestCacheEnabled
+    && wsScope !== null
+    && init.cache !== "no-store";
   if (getCacheUsable) {
     const hit = requestGetCache.get(cacheKey);
     if (hit && Date.now() - hit.at < REQUEST_CACHE_TTL_MS) {
@@ -1093,12 +1099,6 @@ isAutosave?: boolean;
     request<CardGenerationRunView>(`/card-generation-runs/${id}/retry`, {
       method: "POST",
     }),
-  getLatestCardGenerationRun: (noteVersionId: string, signal?: AbortSignal) =>
-    request<{ run: CardGenerationRunView | null }>(
-      `/note-versions/${noteVersionId}/card-generation-latest`,
-      { signal },
-    ),
-
   /* sources (V0.3) */
   listSources: (params?: { status?: SourceStatus; cursor?: string; limit?: number }) => {
     const qs = buildQueryString(params);
@@ -1641,7 +1641,10 @@ return body;
       body: JSON.stringify(input),
     }),
   getLearningRun: (runId: string, signal?: AbortSignal) =>
-    request<LearningRunPublicV1>(`/learning-runs/${encodeURIComponent(runId)}`, { signal }),
+    request<LearningRunPublicV1>(`/learning-runs/${encodeURIComponent(runId)}`, {
+      signal,
+      cache: "no-store",
+    }),
   submitLearningRunArtifact: (
     runId: string,
     taskId: string,

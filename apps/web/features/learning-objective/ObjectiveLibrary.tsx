@@ -44,8 +44,9 @@ const SORTS: ReadonlyArray<{ key: LibrarySort; label: string }> = [
 // 导航路由：view_objective 走详情页路由（通过 route resolution 解析 objectiveId）。
 // 方案 §6.2：列表项标题默认执行 view_objective；行动按钮执行 start_or_resume_learning。
 function itemHref(item: ObjectiveListItemV3): string {
-  // 详情页路由 /learning-cards/:cardId 支持 route resolution（legacy cardId / V2 cardId / objectiveId 均可解析）。
-  // 卡库列表项可能没有 cardId（如 missing origin），此时用 objectiveId 作为路由参数。
+  // 详情页路由 /learning-cards/:cardId 支持 route resolution（V2 cardId
+  // 和 objectiveId 均可解析）。列表契约只携带 objectiveId，因此稳定地
+  // 使用 objectiveId，不再拼接已经退役的 /cards/:id。
   return "/learning-cards/" + item.objectiveId;
 }
 

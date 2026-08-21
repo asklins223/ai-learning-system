@@ -36,7 +36,6 @@ const baselineDir = join(repoRoot, "outputs", "coverage-baselines");
 const coverageDir = join(repoRoot, "outputs", "coverage");
 const expectedCoveragePackages = [
   "packages/shared",
-  "packages/db",
   "packages/ai-quality",
   "apps/api",
   "apps/web",

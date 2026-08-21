@@ -12,16 +12,18 @@
  * 校验结构 + 文件 hash）。
  */
 
+const LIVE2D_VENDOR_SCRIPT_PATHS = [
+  "/live2d-dev/vendor/pixi.min.js",
+  "/live2d-dev/vendor/live2dcubismcore.min.js",
+  "/live2d-dev/vendor/cubism4.min.js",
+] as const;
+
 export const COMPANION_LIVE2D_MANIFEST = {
   modelId: "companion-live2d-mao-pro-v1",
   displayName: "Mao PRO (P4 current model)",
   manifestUrl: "/images/companion/pet/live2d-v1/manifest.json",
   modelUrl: "/images/companion/pet/live2d-v1/mao-pro/runtime/mao_pro.model3.json",
-  vendorScripts: [
-    "/live2d-dev/vendor/pixi.min.js",
-    "/live2d-dev/vendor/live2dcubismcore.min.js",
-    "/live2d-dev/vendor/cubism4.min.js",
-  ],
+  vendorScripts: LIVE2D_VENDOR_SCRIPT_PATHS,
   license: {
     name: "Live2D Free Material License Agreement and Terms of Use",
     termsUrl: "https://www.live2d.com/en/download/sample-data/",

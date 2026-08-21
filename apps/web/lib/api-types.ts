@@ -203,7 +203,8 @@ export interface JobRow {
  *
  * V1 `getCardGenerationStatus` API 已删除；此类型仅作为 `notes/[id]` 页面
  * 向 NoteEditor 传递初始生成状态的内部接口。V2 run recovery 由
- * `useGenerationPolling` 通过 `getCardGenerationRun` / `getLatestCardGenerationRun` 接管。
+ * `useGenerationPolling` 通过 `getCardGenerationRun` 接管；刷新恢复只使用本地
+ * run id，避免重新引入已退役的 note-version latest-run 端点。
  */
 export interface CardGenerationStatus {
   /** `checking` is a frontend-only recovery state used while card status is unavailable. */
@@ -613,7 +614,9 @@ export interface ReviewWithCard {
 export interface SanitizedReviewItem {
   reviewId: string;
   cardId: string;
-  keyPointId: string | null;
+  /** V2 canonical objective target; legacy callers may still provide keyPointId. */
+  objectiveId?: string | null;
+  keyPointId?: string | null;
   status: string;
   nextReviewAt: string;
   intervalDays: number;
@@ -621,6 +624,9 @@ export interface SanitizedReviewItem {
   generation: number;
   reviewReason: ReviewReason;
   isV2?: boolean;
+  unassistedEligibleAt?: string | null;
+  effectiveStartAt?: string;
+  blockedReason?: string | null;
 }
 
 /**
@@ -630,7 +636,8 @@ export interface SanitizedReviewItem {
 export interface SanitizedReviewMeta {
   scheduleId: string;
   cardId: string;
-  keyPointId: string | null;
+  objectiveId?: string | null;
+  keyPointId?: string | null;
   status: string;
   nextReviewAt: string;
   intervalDays: number;

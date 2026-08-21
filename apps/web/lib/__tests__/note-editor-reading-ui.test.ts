@@ -121,7 +121,8 @@ describe("NoteEditor reading and generation UI contract", () => {
     assert.ok(allSources.includes('aria-modal={active ? "true" : "false"}'));
     assert.ok(allSources.includes("api.createCardGenerationRun"));
     assert.ok(allSources.includes("api.getCardGenerationRun"));
-    assert.ok(allSources.includes("api.getLatestCardGenerationRun"));
+    assert.ok(useGenerationPollingSource.includes("V2 does not expose a legacy"));
+    assert.ok(!useGenerationPollingSource.includes("api.getLatestCardGenerationRun"));
     assert.ok(allSources.includes("api.cancelCardGenerationRun"));
     assert.ok(allSources.includes("accepted.canContinueEditing"));
     assert.ok(allSources.includes("endSession();"));
@@ -130,7 +131,9 @@ describe("NoteEditor reading and generation UI contract", () => {
     assert.ok(allSources.includes("generationRun?.sourceSnapshot.versionNo"));
     assert.ok(allSources.includes("GenerationPhaseRail"));
     assert.ok(allSources.includes("uploadingCount") && allSources.includes("generationLockedRef.current"));
-    assert.ok(notePageSource.includes('state: "checking"'));
+    // A note without a persisted V2 run must remain actionable; the deleted
+    // V1 status endpoint must not leave the editor in a permanent checking state.
+    assert.ok(notePageSource.includes('state: "idle"'));
     assert.ok(!editorSource.includes("生成完成前已暂停编辑"));
     assert.ok(!editorSource.includes('aria-busy="true"'));
     assert.match(editorStyles, /\.ne-generation-overlay\s*\{/);

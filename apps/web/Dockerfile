@@ -11,6 +11,12 @@ FROM base AS deps
 COPY apps/web/package.json apps/web/package-lock.json ./
 COPY packages/shared /packages/shared
 COPY packages/shared/package.json packages/shared/package-lock.json /tmp/shared/
+# npm's container resolver cannot materialize the repository-external
+# `file:../../packages/shared` link from this image layout. The shared package
+# is copied and linked explicitly in the runtime stages below, so omit only
+# that local package from the dependency install while keeping all registry
+# dependencies locked and reproducible.
+RUN node -e 'const fs=require("node:fs"); const pkg=JSON.parse(fs.readFileSync("package.json","utf8")); delete pkg.dependencies["@ailearn/shared"]; fs.writeFileSync("package.json", JSON.stringify(pkg)); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); delete lock.packages[""]?.dependencies?.["@ailearn/shared"]; delete lock.packages["node_modules/@ailearn/shared"]; delete lock.packages["../../packages/shared"]; fs.writeFileSync("package-lock.json", JSON.stringify(lock));'
 RUN npm config set registry https://registry.npmmirror.com \
  && npm ci --install-links --no-audit --no-fund \
  && npm ci --no-audit --no-fund --prefix /tmp/shared --registry=https://registry.npmmirror.com

@@ -10,6 +10,9 @@ RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.ustc.edu.cn|g' /etc/apk/repositorie
 FROM base AS deps
 COPY packages/shared /packages/shared
 COPY workers/ai-worker/package.json workers/ai-worker/package-lock.json workers/ai-worker/.npmrc ./
+# Keep the local shared source out of npm's dependency tree; the dev/prod
+# stages mount/copy it and expose it through the package link explicitly.
+RUN node -e 'const fs=require("node:fs"); const pkg=JSON.parse(fs.readFileSync("package.json","utf8")); delete pkg.dependencies["@ailearn/shared"]; fs.writeFileSync("package.json", JSON.stringify(pkg)); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); delete lock.packages[""]?.dependencies?.["@ailearn/shared"]; delete lock.packages["node_modules/@ailearn/shared"]; delete lock.packages["../../packages/shared"]; fs.writeFileSync("package-lock.json", JSON.stringify(lock));'
 RUN npm config set registry https://registry.npmmirror.com \
  && npm ci --install-links --no-audit --no-fund
 

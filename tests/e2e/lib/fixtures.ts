@@ -100,31 +100,32 @@ export async function loginViaUI(
     await page.locator("#password").fill(password);
     await page.getByRole("button", { name: /进入工作区|sign in|登录/i }).click();
 
-    // Login uses client-side router.replace("/"), so waitForURL can race.
-    // We race the dashboard heading against the error alert to provide
-    // a clear diagnostic when login fails instead of just timing out.
-    // Timeout is 45s to accommodate slower API responses when multiple
-    // parallel test workers log in simultaneously.
-    const successLocator = page.getByRole("heading", { name: /今日学习|今日变化/ });
-    const errorAlert = page.locator(".login-form-error");
+    // The V2 workspace shell can use different dashboard copy. The stable
+    // login contract is leaving /login and observing the cookie-backed auth
+    // endpoint, so do not couple this fixture to one dashboard heading.
+    const success = await page.waitForURL(
+      (url) => new URL(url).pathname !== "/login",
+      { timeout: 45_000, waitUntil: "domcontentloaded" },
+    ).then(() => true).catch(() => false);
 
-    const result = await Promise.race([
-      expect(successLocator).toBeVisible({ timeout: 45_000 }).then(() => "success"),
-      expect(errorAlert).toBeVisible({ timeout: 45_000 }).then(() => "error"),
-    ]).catch(() => "timeout" as const);
-
-    if (result === "success") {
-      // The heading renders before the dashboard Promise.all has settled.
-      // Wait for both loading surfaces to disappear so a test navigation
-      // cannot abort a legitimate home-data request and create a false pass.
-      await expect(
-        page.locator(
-          ".learning-home-focus--loading, .learning-home-card-grid[aria-busy='true']",
-        ),
-      ).toHaveCount(0, { timeout: 45_000 });
-      await page.waitForLoadState("networkidle");
+    if (success) {
+      await expect.poll(
+        async () => page.evaluate(async () => {
+          const response = await fetch("/api/auth/me", {
+            credentials: "include",
+            cache: "no-store",
+          });
+          return response.ok;
+        }),
+        { timeout: 45_000 },
+      ).toBe(true);
       return;
     }
+
+    const errorAlert = page.locator(".login-form-error");
+    const result = (await errorAlert.isVisible().catch(() => false))
+      ? "error"
+      : "timeout";
 
     // If login failed with a transient error, retry once after a short delay.
     // Common transient errors: "登录服务暂时不可用，请稍后重试。"

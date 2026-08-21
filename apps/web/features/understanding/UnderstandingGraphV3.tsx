@@ -302,7 +302,7 @@ function ObjectiveSidePanel(props: {
   const { node } = props;
   // 详情页路由 /learning-cards/:cardId 支持 route resolution（objectiveId 可解析）。
   // 不使用 /learning-objectives/ 路径（该路由不存在）。
-  const detailHref = "/learning-cards/" + node.nodeRef.objectiveId;
+  const detailHref = "/learning-cards/" + (node.activeCardId ?? node.nodeRef.objectiveId);
   return (
     <div className="graph-v3-sidepanel-body">
       <header>

@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { probeAudioDurationMs } from "./ffprobe.ts";
+
+const hasAudioToolchain = ["ffmpeg", "ffprobe"].every((command) =>
+  spawnSync(command, ["-version"], { stdio: "ignore" }).status === 0,
+);
 
 /** 用宿主 ffmpeg 生成真实音频（mp3 有帧填充最小时长 ~216ms；wav 时长精确）。 */
 function makeAudio(format: "mp3" | "wav", durationSeconds: number): Buffer {
@@ -14,7 +18,9 @@ function makeAudio(format: "mp3" | "wav", durationSeconds: number): Buffer {
   return execFileSync("ffmpeg", args);
 }
 
-test("ffprobe：合法时长（0.5s → ~500ms，200..60000 内）", async () => {
+test("ffprobe：合法时长（0.5s → ~500ms，200..60000 内）", {
+  skip: hasAudioToolchain ? false : "requires the ffmpeg/ffprobe toolchain provided by the API container",
+}, async () => {
   const result = await probeAudioDurationMs(makeAudio("mp3", 0.5));
   assert.equal(result.ok, true);
   if (result.ok) {
@@ -22,7 +28,9 @@ test("ffprobe：合法时长（0.5s → ~500ms，200..60000 内）", async () =>
   }
 });
 
-test("ffprobe：过短（0.1s wav → 100ms < 200ms → too_short）", async () => {
+test("ffprobe：过短（0.1s wav → 100ms < 200ms → too_short）", {
+  skip: hasAudioToolchain ? false : "requires the ffmpeg/ffprobe toolchain provided by the API container",
+}, async () => {
   const result = await probeAudioDurationMs(makeAudio("wav", 0.1));
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, "too_short");

@@ -62,10 +62,10 @@ describe("version contract", () => {
   it("detects and repairs package, lockfile, and README drift", () => {
     const root = createFixture();
     const version = loadVersionSource(root);
-    assert.equal(inspectVersionCopies(root, version).length, 16);
+    assert.equal(inspectVersionCopies(root, version).length, 13);
 
     const changed = syncVersionCopies(root, version);
-    assert.equal(changed.length, 11);
+    assert.equal(changed.length, 9);
     assert.deepEqual(inspectVersionCopies(root, version), []);
     assert.match(readFileSync(join(root, "README.md"), "utf8"), /version-v0\.5\.0-blue/);
   });

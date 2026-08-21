@@ -1,5 +1,35 @@
 [
   {
+    "testName": "ffprobe：合法时长（0.5s → ~500ms，200..60000 内）",
+    "package": "apps/api",
+    "type": "skip",
+    "issue": "#ffmpeg-host-toolchain",
+    "owner": "ailearn-dev",
+    "approver": "owner",
+    "expiresAt": "2026-08-30",
+    "reason": "宿主机单元测试没有 ffmpeg/ffprobe 时跳过；API 容器验证覆盖真实音频工具链"
+  },
+  {
+    "testName": "ffprobe：过短（0.1s wav → 100ms < 200ms → too_short）",
+    "package": "apps/api",
+    "type": "skip",
+    "issue": "#ffmpeg-host-toolchain",
+    "owner": "ailearn-dev",
+    "approver": "owner",
+    "expiresAt": "2026-08-30",
+    "reason": "宿主机单元测试没有 ffmpeg/ffprobe 时跳过；API 容器验证覆盖真实音频工具链"
+  },
+  {
+    "testName": "真 LLM 生成（.env 配置后真实调用 DashScope）",
+    "package": "apps/api",
+    "type": "skip",
+    "issue": "#companion-llm-integration",
+    "owner": "ailearn-dev",
+    "approver": "owner",
+    "expiresAt": "2026-08-30",
+    "reason": "CI/本地无 critic provider 凭据时跳过；带 .env provider 凭据的伴星集成回归单独运行"
+  },
+  {
     "testName": "CommitPort：commit_key 幂等（set 后 get 一致，真实 DB）",
     "package": "apps/api",
     "type": "skip",

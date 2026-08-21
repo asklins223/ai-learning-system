@@ -21,7 +21,7 @@ import { DomainError } from "./domain-error.ts";
 // bundle（IgnorePlugin 置空 node: 模块）顶层 createRequire 为 undefined，
 // nodeRequire 为 null；这些函数仅服务端调用，客户端不触发。
 const nodeRequire = typeof createRequire === "function"
-  ? createRequire(import.meta.url)
+  ? createRequire(typeof __filename === "string" ? __filename : `${process.cwd()}/package.json`)
   : null;
 
 import { z } from "zod";

@@ -15,6 +15,7 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 export const TEST_CARD_ID = "00000000-0000-0000-0000-000000000001";
+export const TEST_OBJECTIVE_ID = "00000000-0000-0000-0000-000000000002";
 export const TEST_REVIEW_ID = "00000000-0000-0000-0000-000000000001";
 
 /** E2E_BASE_URL 未设置时跳过当前测试（本地无服务场景）。 */
@@ -36,11 +37,46 @@ export function devCredentials(): { email: string; password: string } | null {
  */
 export async function loginViaUI(page: Page, email: string, password: string): Promise<void> {
   await page.goto("/login", { waitUntil: "domcontentloaded" });
+  // A persisted session can redirect /login to the workspace before the
+  // login form mounts. Treat that as a valid login instead of racing a second
+  // navigation against the first redirect.
+  await page.waitForLoadState("load").catch(() => undefined);
+  if (new URL(page.url()).pathname !== "/login") {
+    await expect.poll(
+      async () => page.evaluate(async () => {
+        const response = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
+        return response.ok;
+      }),
+      { timeout: 45_000 },
+    ).toBe(true);
+    return;
+  }
   await expect(page.locator("#email")).toBeVisible({ timeout: 45_000 });
   await page.locator("#email").fill(email);
   await page.locator("#password").fill(password);
   await page.getByRole("button", { name: /进入工作区|sign in|登录/i }).click();
-  await expect(page).not.toHaveURL(/\/login/, { timeout: 45_000 });
+  // The login action can commit a redirect before the assertion observes it.
+  // Waiting for the navigation itself avoids a mobile-only race where the
+  // following test navigation interrupts the still-pending /login transition.
+  await page.waitForURL(
+    (url) => new URL(url).pathname !== "/login",
+    { timeout: 45_000, waitUntil: "domcontentloaded" },
+  );
+  await page.waitForLoadState("domcontentloaded");
+  // Mobile browsers can commit the router transition before the new session
+  // is observable by the next middleware request. Verify the cookie-backed
+  // API surface before the test navigates to its target page.
+  await expect.poll(
+    async () => page.evaluate(async () => {
+      const response = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
+      return response.ok;
+    }),
+    { timeout: 45_000 },
+  ).toBe(true);
+  // The auth cookie can be observable before the redirect target's load event
+  // finishes. Wait for that event so the caller's first page.goto cannot
+  // interrupt the in-flight workspace navigation.
+  await page.waitForLoadState("load").catch(() => undefined);
 }
 
 /**

@@ -83,12 +83,12 @@ export default function NotePage() {
     setNotFound(false);
     Promise.all([api.getNote(params.id), api.getMe()])
       .then(([result, currentUser]) => {
-        // V1 getCardGenerationStatus endpoint has been deleted;
-        // default to "checking" so V2 run recovery (useGenerationPolling) takes over.
+        // V1 getCardGenerationStatus endpoint has been deleted. V2 run recovery
+        // is handled by NoteEditor/useGenerationPolling when a persisted run
+        // exists; a note with no persisted run must remain actionable.
         const generation: CardGenerationStatus = {
-          state: "checking",
+          state: "idle",
           generatedVersionId: null,
-          message: "正在确认学习卡任务状态…",
         };
         return { result, currentUser, generation };
       })

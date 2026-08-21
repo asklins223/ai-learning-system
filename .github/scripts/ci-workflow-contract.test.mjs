@@ -30,17 +30,10 @@ describe("CI workflow contract", () => {
     );
   });
 
-  it("installs the database package before repository-wide test gates", () => {
+  it("does not reference the removed database mirror package", () => {
     const unitTests = jobBlock("unit-tests");
-    const installDatabase = unitTests.search(
-      /- name: Install database package\n\s+working-directory: packages\/db\n\s+run: npm ci --no-audit --no-fund/,
-    );
-    const skipTodoGate = unitTests.indexOf("node .github/scripts/skip-todo-gate.mjs");
-    const coverageGate = unitTests.indexOf("node .github/scripts/coverage-gate.mjs");
-
-    assert.ok(installDatabase >= 0, "Unit Tests must install packages/db");
-    assert.ok(installDatabase < skipTodoGate, "packages/db must be installed before skip/todo tests");
-    assert.ok(installDatabase < coverageGate, "packages/db must be installed before coverage tests");
+    assert.doesNotMatch(unitTests, /packages\/db/);
+    assert.doesNotMatch(coverageGate, /packages\/db/);
   });
 
   it("runs the SEC-01 verification script from the repository root", () => {

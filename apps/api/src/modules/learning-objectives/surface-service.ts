@@ -535,6 +535,15 @@ async function listObjectiveSurfacesV3Inner(
     eq(learningObjectivesV2.lifecycle, lifecycle),
     cursorCondition ?? undefined,
   );
+  // 列表项必须和详情页共享同一个不变量：currentObjectiveRevisionId
+  // 必须指向当前 workspace、当前 objective 的真实 revision。历史清理或
+  // 旧 seed 可能留下孤儿 projection；如果把它们列出，用户点击后只会
+  // 得到“目标不存在”，形成一个产品层面的死链接。
+  const validCurrentRevision = and(
+    eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
+    eq(learningObjectiveRevisionsV2.objectiveId, learningObjectivesV2.objectiveId),
+    eq(learningObjectiveRevisionsV2.objectiveRevisionId, learningObjectivesV2.currentObjectiveRevisionId),
+  );
   const [rows, countRows] = await Promise.all([
     tx
       .select({
@@ -547,12 +556,14 @@ async function listObjectiveSurfacesV3Inner(
         updatedAt: learningObjectivesV2.updatedAt,
       })
       .from(learningObjectivesV2)
+      .innerJoin(learningObjectiveRevisionsV2, validCurrentRevision)
       .where(where)
       .orderBy(desc(learningObjectivesV2.createdAt), desc(learningObjectivesV2.id))
       .limit(limit + 1),
     tx
       .select({ n: sql<number>`count(*)::int` })
       .from(learningObjectivesV2)
+      .innerJoin(learningObjectiveRevisionsV2, validCurrentRevision)
       .where(and(
         eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
         eq(learningObjectivesV2.lifecycle, lifecycle),
@@ -703,7 +714,9 @@ async function batchAssembleObjectiveSurfacesV3(
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
-          sql`${learningRuns.origin}->>'keyPointId' = ANY(${objectiveIds}::text[])`,
+          // Keep each objective id as a bound scalar. Interpolating the JS
+          // array directly into ANY(...::text[]) breaks with postgres-js.
+          sql`${learningRuns.origin}->>'keyPointId' IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];

@@ -117,7 +117,10 @@ export async function buildTopologySnapshotV3(
         .where(and(
           eq(learningRuns.workspaceId, ctx.workspaceId),
           eq(learningRuns.userId, ctx.userId),
-          sql`${learningRuns.origin}->>'keyPointId' = ANY(${objectiveIds}::text[])`,
+          // Build a bound scalar list rather than interpolating a JS array into
+          // a PostgreSQL cast; postgres-js serializes the latter as a malformed
+          // array literal for the single-objective case.
+          sql`${learningRuns.origin}->>'keyPointId' IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];

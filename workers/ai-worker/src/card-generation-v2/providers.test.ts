@@ -42,6 +42,12 @@ function makeRuntime(provider: AIProvider): CardGenerationProviderRuntime {
   return new CardGenerationProviderRuntime({ provider, stageRuntimes: stageRuntimes() } as CardGenerationProviderConfig);
 }
 
+function abortAfter(ms: number): AbortSignal {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new Error(`test timeout after ${ms}ms`)), ms);
+  return controller.signal;
+}
+
 test("chatJson passes the external AbortSignal through to chatCompletion", async () => {
   let seenSignal: AbortSignal | undefined;
   const provider = hangingProvider({ onSignal: (s) => (seenSignal = s) });
@@ -68,7 +74,7 @@ test("chatJson truly aborts a hanging provider via its per-call timeout signal",
   const runtime = makeRuntime(provider);
 
   // 单调用预算默认 75s 太长——用传入的 AbortSignal.timeout 控制观测成本。
-  const budget = AbortSignal.timeout(50);
+  const budget = abortAfter(50);
   const pending = runtime.chatJson("test", "sys", "user", budget);
   const err = await pending.then(
     () => null,
@@ -122,7 +128,7 @@ test("chatJson → OpenAICompatibleProvider → real HTTP requester: abort propa
   } as CardGenerationProviderConfig);
 
   // 单调用预算用极短的 AbortSignal.timeout 触发真实 abort（等效 75s 超时的快速路径）。
-  const budget = AbortSignal.timeout(30);
+  const budget = abortAfter(30);
   const err = await runtime.chatJson("grounding", "sys", "user", budget).then(
     () => null,
     (e: unknown) => e,

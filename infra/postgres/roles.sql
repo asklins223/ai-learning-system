@@ -341,7 +341,15 @@ BEGIN
     'companion_turn_runs',
     'companion_stream_events',
     'companion_action_proposals',
-    'companion_action_runs'
+    'companion_action_runs',
+    -- 0170/0173：桌宠人格与长期记忆上下文。
+    'pet_profiles',
+    'assistant_memory_items',
+    'assistant_memory_embeddings',
+    'memory_links',
+    'conversation_summaries',
+    'memory_usage_log',
+    'companion_daily_summaries'
   ]
   LOOP
     IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
@@ -441,6 +449,28 @@ BEGIN
   END IF;
   IF to_regclass('public.companion_action_runs') IS NOT NULL THEN
     GRANT UPDATE ON TABLE public.companion_action_runs TO ailearn_worker;
+  END IF;
+
+  -- 0173：companion_dialogue read/write phase 需要读取人格并维护记忆
+  -- 投影；这些授权必须与上面的 worker 白名单一起由 bootstrap 重建。
+  FOREACH table_name IN ARRAY ARRAY[
+    'assistant_memory_items',
+    'assistant_memory_embeddings',
+    'memory_links',
+    'conversation_summaries',
+    'memory_usage_log',
+    'companion_daily_summaries'
+  ]
+  LOOP
+    IF to_regclass(format('public.%I', table_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO ailearn_worker',
+        table_name
+      );
+    END IF;
+  END LOOP;
+  IF to_regclass('public.pet_profiles') IS NOT NULL THEN
+    GRANT SELECT ON TABLE public.pet_profiles TO ailearn_worker;
   END IF;
 
   FOREACH table_name IN ARRAY ARRAY[
@@ -965,6 +995,14 @@ BEGIN
       ('companion_stream_events', true, true, true, false),
       ('companion_action_proposals', true, false, true, false),
       ('companion_action_runs', true, false, true, false),
+      -- 0170/0173：桌宠人格与长期记忆上下文。
+      ('pet_profiles', true, false, false, false),
+      ('assistant_memory_items', true, true, true, true),
+      ('assistant_memory_embeddings', true, true, true, true),
+      ('memory_links', true, true, true, true),
+      ('conversation_summaries', true, true, true, true),
+      ('memory_usage_log', true, true, true, true),
+      ('companion_daily_summaries', true, true, true, true),
       ('understanding_events', false, true, false, false),
       ('ai_audit_log', false, true, false, false),
       -- 方案 20 V2（迁移 0135/0138；与 grant 授权镜像一致）

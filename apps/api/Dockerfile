@@ -17,6 +17,10 @@ FROM base AS deps
 COPY apps/api/package.json apps/api/package-lock.json ./
 COPY packages/shared /packages/shared
 COPY packages/shared/package.json packages/shared/package-lock.json /tmp/shared/
+# The shared workspace is linked explicitly after dependency installation;
+# omit the repository-external local link here so npm ci remains deterministic
+# inside the container as well as on the host.
+RUN node -e 'const fs=require("node:fs"); const pkg=JSON.parse(fs.readFileSync("package.json","utf8")); delete pkg.dependencies["@ailearn/shared"]; fs.writeFileSync("package.json", JSON.stringify(pkg)); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); delete lock.packages[""]?.dependencies?.["@ailearn/shared"]; delete lock.packages["node_modules/@ailearn/shared"]; delete lock.packages["../../packages/shared"]; fs.writeFileSync("package-lock.json", JSON.stringify(lock));'
 RUN npm config set registry https://registry.npmmirror.com \
  && npm ci --install-links --no-audit --no-fund \
  && npm ci --no-audit --no-fund --prefix /tmp/shared --registry=https://registry.npmmirror.com

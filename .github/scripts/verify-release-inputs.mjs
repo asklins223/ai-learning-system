@@ -27,8 +27,6 @@ const requiredFiles = [
   "workers/ai-worker/Dockerfile",
   "workers/ai-worker/package.json",
   "workers/ai-worker/package-lock.json",
-  "packages/db/package.json",
-  "packages/db/package-lock.json",
   "packages/shared/package.json",
   "packages/shared/package-lock.json",
   "README.md",

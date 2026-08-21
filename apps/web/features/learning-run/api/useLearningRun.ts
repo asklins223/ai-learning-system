@@ -91,6 +91,12 @@ export function snapshotEqualSurface(
   return true;
 }
 
+/** 只有最终结果已经落地，completed 才能停止状态同步。 */
+function isTerminalSnapshotReady(run: LearningRunPublicV1): boolean {
+  if (run.phase === "completed") return run.result !== null;
+  return ["ended", "skipped", "cancelled", "stale"].includes(run.phase);
+}
+
 /** result 字段的结构化值比较（结算数据有界、低频，递归比较安全且简单）。 */
 function resultStableEqual(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
@@ -138,6 +144,10 @@ export function useLearningRun(): LearningRunHook {
   // 快照轮询：SSE 仅作加速（直连跨域受限时静默失败），评估/提交等低频
   // 状态由轮询兜底——同源 rewrite 对 SSE 缓冲时仍能实时看到结算。
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 提交结算的短周期重试：action 可能先返回 committing，随后由 worker 异步
+  // 写入 result。这个 timer 独立于普通轮询，避免 action/SSE/visibility 竞态
+  // 把“正在确认最终学习记录”卡在中间快照。
+  const commitRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 卸载守卫 + 断线重连定时器句柄（卸载后必须停止，否则重建永不被关闭的 SSE）。
   const mountedRef = useRef(true);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -173,6 +183,20 @@ export function useLearningRun(): LearningRunHook {
     leaseStartedAtRef.current = null;
   }, []);
 
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
+  const stopCommitRefresh = useCallback(() => {
+    if (commitRefreshTimerRef.current) {
+      clearTimeout(commitRefreshTimerRef.current);
+      commitRefreshTimerRef.current = null;
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     // 卸载守卫：组件卸载后不再拉取快照（轮询/SSE 已停止，仅"正在飞的
     // 这一次"in-flight GET 会命中——守卫其 resolve 后 setState）。
@@ -188,9 +212,19 @@ export function useLearningRun(): LearningRunHook {
       // 浅等守卫（F#7-1）：CAS 字段与播放器表面字段未变时复用前引用，
       // 避免静态区间每 2s 全量重渲。
       if (snapshotEqualSurface(snapshotRef.current, next)) return;
+      // refresh 由 interval/SSE 驱动时，下一次 tick 不能等 React effect 才看见
+      // 新阶段；尤其 action 刚返回 committing 时，旧 ref 会让 visibility gate
+      // 把结算轮询误判为普通 active 状态。
+      snapshotRef.current = next;
       setSnapshot(next);
       setStatus("ready");
       setError(null);
+      if (isTerminalSnapshotReady(next)) {
+        stopStream();
+        stopPolling();
+        stopLease();
+        stopCommitRefresh();
+      }
     })();
     refreshInFlightRef.current = p;
     try {
@@ -198,39 +232,68 @@ export function useLearningRun(): LearningRunHook {
     } finally {
       refreshInFlightRef.current = null;
     }
-  }, []);
-
-  const stopPolling = useCallback(() => {
-    if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-  }, []);
+  }, [stopCommitRefresh, stopLease, stopPolling, stopStream]);
 
   const startPolling = useCallback(() => {
     stopPolling();
     // F7：页面隐藏（切标签/后台）时跳过轮询，镜像 useGenerationPolling.ts，
-    // 避免后台标签页每 2s 持续 GET。
+    // 避免后台标签页每 2s 持续 GET；但 committing/结果未落地时必须继续
+    // 同步，否则桌面窗口切换或自动化浏览器的可见性变化会把最终结果卡住。
     pollTimerRef.current = setInterval(() => {
-      if (document.visibilityState === "hidden") return;
+      const current = snapshotRef.current;
+      const awaitingResult = current
+        && (current.phase === "committing" || (current.phase === "completed" && current.result === null));
+      if (document.visibilityState === "hidden" && !awaitingResult) return;
       void refresh().catch(() => {});
     }, POLL_INTERVAL_MS);
   }, [refresh, stopPolling]);
+
+  const scheduleCommitRefresh = useCallback((attempt = 0) => {
+    stopCommitRefresh();
+    const current = snapshotRef.current;
+    const awaitingResult = current
+      && (current.phase === "committing" || (current.phase === "completed" && current.result === null));
+    if (!awaitingResult || attempt >= 15 || !mountedRef.current) return;
+
+    commitRefreshTimerRef.current = setTimeout(() => {
+      commitRefreshTimerRef.current = null;
+      void refresh().catch(() => {}).finally(() => {
+        if (!mountedRef.current) return;
+        const latest = snapshotRef.current;
+        if (!latest || isTerminalSnapshotReady(latest)) return;
+        scheduleCommitRefresh(attempt + 1);
+      });
+    }, POLL_INTERVAL_MS);
+  }, [refresh, stopCommitRefresh]);
+
+  // 结算过渡态是异步的：服务端可能先返回 completed/committing 的中间
+  // 快照，再稍后写入 result。只要结果尚未落地，就由状态本身重新确保
+  // fallback poll 存在，避免 action/SSE 的竞态把最终结果留在旧画面。
+  useEffect(() => {
+    const current = snapshot;
+    const awaitingResult = current
+      && (current.phase === "committing" || (current.phase === "completed" && current.result === null));
+    if (awaitingResult) startPolling();
+  }, [snapshot, startPolling]);
 
   const applySnapshot = useCallback((next: LearningRunPublicV1) => {
     // 浅等守卫（F#7-1）：与 applySnapshot 共用同一表面比较，CAS 字段未变即
     // 复用当前引用，避免 dispatchAction/create 返回的同值快照触发无谓重渲。
     if (snapshotEqualSurface(snapshotRef.current, next)) return;
+    // 这是事件回调而非 render：先更新 imperative ref，保证 action 返回的
+    // committing 快照立即驱动结算重试，不依赖下一轮 React effect。
+    snapshotRef.current = next;
     setSnapshot(next);
     setStatus("ready");
     setError(null);
-    if (next.phase === "completed" || next.phase === "ended" || next.phase === "skipped" || next.phase === "cancelled" || next.phase === "stale") {
+    if (isTerminalSnapshotReady(next)) {
       // 终态：停止流、轮询与续租。
       stopStream();
       stopPolling();
       stopLease();
+      stopCommitRefresh();
     }
-  }, [stopStream, stopPolling, stopLease]);
+  }, [stopCommitRefresh, stopStream, stopPolling, stopLease]);
 
   const startStream = useCallback((runId: string, initialCursor: number) => {
     stopStream();
@@ -323,7 +386,7 @@ export function useLearningRun(): LearningRunHook {
       if (!mountedRef.current) return;
       applySnapshot(next);
       startStream(runId, next.eventCursor);
-      startPolling();
+      if (!isTerminalSnapshotReady(next)) startPolling();
       if (next.phase === "active") startLease(runId);
     } catch (err) {
       if (!mountedRef.current) return;
@@ -351,7 +414,7 @@ export function useLearningRun(): LearningRunHook {
     if (!mountedRef.current) return created;
     applySnapshot(created);
     startStream(created.runId, created.eventCursor);
-    startPolling();
+    if (!isTerminalSnapshotReady(created)) startPolling();
     if (created.phase === "active") startLease(created.runId);
     return created;
   }, [applySnapshot, startStream, startPolling, startLease]);
@@ -400,13 +463,20 @@ export function useLearningRun(): LearningRunHook {
         return;
       }
       applySnapshot(response.snapshot);
+      // checkpoint/commit action may return an intermediate snapshot. Restart
+      // the low-frequency fallback here even if an earlier terminal-looking
+      // snapshot stopped it before the async result was fully materialized.
+      if (!isTerminalSnapshotReady(response.snapshot)) {
+        startPolling();
+        scheduleCommitRefresh();
+      }
     } catch (err) {
       // 409 stale：自动重读最新快照（CAS 冲突后让用户在新 revision 上重试）。
       await refresh().catch(() => {});
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "操作失败");
     }
-  }, [refresh, applySnapshot]);
+  }, [refresh, applySnapshot, startPolling, scheduleCommitRefresh]);
 
   const submit = useCallback(async (
     taskId: string,
@@ -459,12 +529,13 @@ export function useLearningRun(): LearningRunHook {
       stopStream();
       stopPolling();
       stopLease();
+      stopCommitRefresh();
       if (sseRefreshDebounceRef.current !== null) {
         clearTimeout(sseRefreshDebounceRef.current);
         sseRefreshDebounceRef.current = null;
       }
     };
-  }, [stopStream, stopPolling, stopLease]);
+  }, [stopCommitRefresh, stopStream, stopPolling, stopLease]);
 
   return {
     snapshot,

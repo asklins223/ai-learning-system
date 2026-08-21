@@ -2,9 +2,10 @@ import { createRequire } from "node:module";
 
 // 2026-08-13（web 客户端打包修复）：node:crypto 惰性获取——客户端
 // bundle（IgnorePlugin 置空 node: 模块）顶层 createRequire 为 undefined，
-// nodeRequire 为 null；这些函数仅服务端调用，客户端不触发。
+// nodeRequire 为 null；这些函数仅服务端调用，客户端不触发。CJS 桌面
+// bundle 没有可用的 import.meta.url，因此用当前文件路径作为 require 基准。
 const nodeRequire = typeof createRequire === "function"
-  ? createRequire(import.meta.url)
+  ? createRequire(typeof __filename === "string" ? __filename : `${process.cwd()}/package.json`)
   : null;
 
 /**

@@ -159,6 +159,10 @@ export async function listReviews(
   for (const r of reviews) {
     if (r.subjectType === "card" && r.subjectId) {
       cardIdSet.add(r.subjectId);
+      // V2 review schedules keep subjectType="card" for compatibility, but
+      // subjectId is the objectiveId (the canonical V2 alias). Resolve both
+      // interpretations before assembling the public review item.
+      objectiveIdSet.add(r.subjectId);
     }
     if (r.subjectType === "objective" && r.subjectId) {
       objectiveIdSet.add(r.subjectId);
@@ -255,7 +259,14 @@ export async function listReviews(
       cardId = validationToCardId.get(r.subjectId) ?? null;
       if (!cardId) continue;
     } else if (r.subjectType === "card") {
-      cardId = r.subjectId;
+      const aliasedCardId = objectiveToCardId.get(r.subjectId);
+      if (aliasedCardId && !v2CardByCardId.has(r.subjectId)) {
+        objectiveId = r.subjectId;
+        cardId = aliasedCardId;
+        isV2Card = true;
+      } else {
+        cardId = r.subjectId;
+      }
     } else if (r.subjectType === "objective") {
       objectiveId = r.subjectId;
       const resolvedCardId = objectiveToCardId.get(r.subjectId);
@@ -509,7 +520,31 @@ export async function getSanitizedReviewMeta(
   let isV2Card = false;
 
   if (schedule.subjectType === "card") {
-    cardId = schedule.subjectId;
+    const directCard = await queryDb.query.learningCardsV2.findFirst({
+      where: and(
+        eq(learningCardsV2.workspaceId, workspaceId),
+        eq(learningCardsV2.cardId, schedule.subjectId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ),
+      columns: { cardId: true },
+    });
+    if (directCard) {
+      cardId = directCard.cardId;
+    } else {
+      const aliasedCard = await queryDb.query.learningCardsV2.findFirst({
+        where: and(
+          eq(learningCardsV2.workspaceId, workspaceId),
+          eq(learningCardsV2.objectiveId, schedule.subjectId),
+          eq(learningCardsV2.lifecycle, "active"),
+        ),
+        columns: { cardId: true },
+      });
+      if (aliasedCard) {
+        objectiveId = schedule.subjectId;
+        cardId = aliasedCard.cardId;
+        isV2Card = true;
+      }
+    }
   } else if (schedule.subjectType === "validation") {
     const validationEventId = schedule.validationEventId ?? schedule.subjectId;
     const ve = await queryDb.query.validationEvents.findFirst({

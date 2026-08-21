@@ -64,7 +64,6 @@ jobs:
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
-            packages/db/package-lock.json
             packages/shared/package-lock.json
             packages/ai-quality/package-lock.json
 
@@ -73,10 +72,6 @@ jobs:
 
       - name: Install shared
         working-directory: packages/shared
-        run: npm ci --no-audit --no-fund
-
-      - name: Install db
-        working-directory: packages/db
         run: npm ci --no-audit --no-fund
 
       - name: Install ai-quality
@@ -106,10 +101,6 @@ jobs:
 
       - name: TypeCheck shared contracts
         working-directory: packages/shared
-        run: npm run typecheck
-
-      - name: TypeCheck database package
-        working-directory: packages/db
         run: npm run typecheck
 
       - name: TypeCheck ai-quality package
@@ -167,10 +158,6 @@ jobs:
         working-directory: packages/shared
         run: npm audit --omit=dev --audit-level=high
 
-      - name: Audit database package production deps
-        working-directory: packages/db
-        run: npm audit --omit=dev --audit-level=high
-
   build:
     name: Build (API / Web / Worker)
     runs-on: ubuntu-latest
@@ -188,15 +175,10 @@ jobs:
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
-            packages/db/package-lock.json
             packages/shared/package-lock.json
 
       - name: Install shared
         working-directory: packages/shared
-        run: npm ci --no-audit --no-fund
-
-      - name: Install db
-        working-directory: packages/db
         run: npm ci --no-audit --no-fund
 
       - name: Install API
@@ -286,7 +268,6 @@ jobs:
             apps/api/package-lock.json
             apps/web/package-lock.json
             workers/ai-worker/package-lock.json
-            packages/db/package-lock.json
             packages/shared/package-lock.json
 
       - name: Prepare raw Node test evidence
@@ -307,10 +288,6 @@ jobs:
       # imports such as zod resolve from packages/shared/node_modules.
       - name: Install shared
         working-directory: packages/shared
-        run: npm ci --no-audit --no-fund
-
-      - name: Install database package
-        working-directory: packages/db
         run: npm ci --no-audit --no-fund
 
       - name: Install ai-quality
@@ -469,7 +446,6 @@ jobs:
           cache-dependency-path: |
             apps/api/package-lock.json
             workers/ai-worker/package-lock.json
-            packages/db/package-lock.json
             packages/shared/package-lock.json
 
       - name: Prepare raw PostgreSQL test evidence
@@ -486,10 +462,6 @@ jobs:
 
       - name: Install shared
         working-directory: packages/shared
-        run: npm ci --no-audit --no-fund
-
-      - name: Install database package
-        working-directory: packages/db
         run: npm ci --no-audit --no-fund
 
       - name: Install API

@@ -184,7 +184,12 @@ export function PetCharacterCanvas({
     };
 
     setMode("loading");
-    if (shouldLoadLive2D({ live2dEnabled, reducedMotion, animationOff })) {
+    if (shouldLoadLive2D({
+      live2dEnabled,
+      reducedMotion,
+      animationOff,
+      vendorAssetsAvailable: COMPANION_LIVE2D_MANIFEST.vendorScripts.length > 0,
+    })) {
       mountLive2d();
     } else {
       setMode("sprite-loading");

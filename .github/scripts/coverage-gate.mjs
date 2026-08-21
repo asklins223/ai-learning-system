@@ -49,12 +49,6 @@ const PACKAGES = [
     sourceIncludes: ["src/**/*.ts", "src/**/*.tsx"],
   },
   {
-    path: "packages/db",
-    testDir: "src",
-    sourceDirs: ["src"],
-    sourceIncludes: ["src/**/*.ts", "src/**/*.tsx"],
-  },
-  {
     path: "packages/ai-quality",
     testDir: "src",
     sourceDirs: ["src"],
