@@ -52,6 +52,7 @@ beforeEach(() => {
     objective: {
       objectiveStatement: "共识的定义",
       publicSummary: "共识定义",
+      conceptLabel: "测试概念标题",
       knowledgeForm: "definition",
       preferredTaskIntents: ["recall"],
       canonicalAnswer,

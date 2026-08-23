@@ -42,6 +42,7 @@ function makeCandidate(overrides: { objectiveStatement?: string; prompt?: string
     objective: {
       objectiveStatement: objStatement,
       publicSummary: "summary",
+      conceptLabel: "测试概念标题",
       knowledgeForm: "definition",
       preferredTaskIntents: ["recall"],
       canonicalAnswer: {

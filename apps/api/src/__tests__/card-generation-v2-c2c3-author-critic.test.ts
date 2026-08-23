@@ -87,6 +87,7 @@ function makeMockCandidate(
     objective: {
       objectiveStatement: "定义：分布式共识是指多个节点对某个值达成一致的协议。",
       publicSummary: "分布式共识定义",
+      conceptLabel: "测试概念标题",
       knowledgeForm: "definition",
       preferredTaskIntents: ["recall"],
       canonicalAnswer: {
