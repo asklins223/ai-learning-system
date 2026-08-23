@@ -1,8 +1,13 @@
 # 真桌宠记忆与上下文设计方案
 
-> 状态：**Proposed — 待 Owner 评审**
+> 状态：**Superseded — 已由 [22-real-desktop-pet-memory-context-prd-tdd.md](./22-real-desktop-pet-memory-context-prd-tdd.md) 取代并实施**
 > 日期：2026-08-16
 > 目标：让桌宠不只是“聊天机器人”，而是真正记得用户、理解当前任务、有稳定人格、会主动帮忙的桌面 AI 助手。
+>
+> 注（2026-08-19）：本方案的全部决策已经过 Owner 确认并落地为 22 号 PRD/TDD
+> （状态 Implemented）。实施细节、字段命名与本文有出入处（如 `summary_of`
+> 未采用、`source_type` 增加 `confirmed/summary/legacy` 枚举等）一律以 22 号
+> 文档及其后续修订为准；本文保留作为设计背景阅读材料，不再单独维护。
 
 ---
 

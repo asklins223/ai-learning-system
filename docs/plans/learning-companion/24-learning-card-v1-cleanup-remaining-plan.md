@@ -2,13 +2,13 @@
 
 > 副标题：集成测试 rebase、legacy sessions 深清理、前端死代码与 V1 工具退役
 >
-> 状态：**Proposed — 待 Owner 评审后执行**
+> 状态：**Executed（五个阶段已全部执行完毕，执行记录见 §9.1）**
 >
 > 文档类型：技术实施设计（TDD）
 >
-> 版本：0.1
+> 版本：0.2（执行状态回写）
 >
-> 日期：2026-08-18
+> 日期：2026-08-18（2026-08-19 回写执行状态）
 >
 > 前置：[`16-unified-learning-run-micro-journey-live2d-system-companion.md`](./16-unified-learning-run-micro-journey-live2d-system-companion.md) 与 [`20-learning-card-v2-value-first-generation-and-learning-target-rebase.md`](./20-learning-card-v2-value-first-generation-and-learning-target-rebase.md) 视为已冻结；本文只做 V1 残留的清除，不再引入新产品语义。
 
@@ -225,6 +225,91 @@
 | 又发生"被外部进程 reset 工作区" | 本方案全程文件级编辑、无 git 写操作；每阶段结束把改动清单固化到本文件 §9 |
 
 ## 9. 执行顺序与依赖
+
+### 9.1 执行记录（2026-08-19 回写）
+
+五阶段已全部执行（git: `7021471b` 第一波、`5aadb04f` 第二波 checkpoint，及后续
+`7bbef3fd` / `75d16c80` 冗余审计清理）。逐项核对结果：
+
+| 阶段 | 状态 | 核对证据 |
+| --- | --- | --- |
+| A 集成测试 rebase | ✅ 完成 | 全仓 `card_key_points` 引用仅剩 8 个文件的**注释**（rls-policies 断言 V1 表不存在、v06-migration 重放历史说明等合法引用），无真实 V1 夹具残留 |
+| B legacy sessions 深清理 | ✅ 完成 | 三处裸 SQL 已清；`star-map-projections.ts` lineageToEdgeKind 现为 `learning_cards_v2.objective_id → contains` 且 default throw fail-closed |
+| C migration 链核对 | ✅ 完成（按 D-C1 方案 a） | 22 个历史迁移保留原样；0176/0177 清表后终态干净；v06-migration-fresh-upgrade-repeat 断言已更新为 V2 终态。空库全量 replay 建议在下次本地 PG 环境就绪时补跑一次收尾确认 |
+| D web 死 API 客户端 | ✅ 完成 | 死方法已删；`CardGenerationStatus` 为 api-types.ts 中有注释的内部接口类型（notes 页初始状态 + V2 run recovery），属有意保留；useGenerationPolling/useGenerationActivity 按"精简为 V2 需要"选项改造为走 getCardGenerationRun |
+| E 工具与杂项 | ✅ 完成 | ai-quality supervisor-v1 目录与 cli gate 已删；repro-*.ts 3 个脚本已删；shared GenerationDensity 契约已删；business-ai-ops.ts 已按要求加"V1 评估辅助仅测试用"头注 |
+
+遗留动作：§7 验收矩阵中"集成测试在真实 PG 全绿"需本机 PG 环境实际跑一轮作为最终签收。
+
+### 9.2 签收核查与修正（2026-08-23）
+
+对 §9.1 执行记录做独立核查（含实库验证），修正两处与事实不符的表述，并完成
+此前遗留的"真实 PG 全绿"签收：
+
+**§9.1 表述修正**：
+
+| 项 | §9.1 原表述 | 核查事实（2026-08-23） |
+| --- | --- | --- |
+| C 阶段 | "0176 已把 V1 表删掉……终态干净" | **不准确**。0176 仅 `DELETE FROM` 清数据 + FK 改指 + DROP 6 张兼容边车表；`learning_cards / card_key_points / learning_card_sets / evidences / benchmark_* / note_evidence_spans / provisional_candidates` 至今以**孤儿空表**留存（实库 152 表 vs schema 132 定义）。且部分存活代码依赖这些表未删：invite-service 读 `evidences`、content-topology-w1 测试断言 `learning_cards.compatibility_role` 列、star-map-projections 的 `evidences.key_point_id` 血缘 case。补 DROP 迁移前必须先解除这批依赖 |
+| A 阶段计数 | "引用仅剩 8 个文件的注释" | 实测含该字符串的文件为 17 个（绝大多数确为注释，结论方向正确、计数不准） |
+
+**集成测试真实 PG 全绿签收（本次完成）**。首轮实跑暴露三层问题并全部修复：
+
+1. **不可变触发器 vs 测试夹具**：0135 起的 V2 追加-only 触发器无条件拒绝
+   UPDATE/DELETE，共享 fixture 的清理必然失败——这是此前"集成测试全绿"无法
+   达成的直接原因。修复：迁移 `0180_immutable_trigger_test_bypass` 为三个守卫
+   函数增加事务级 GUC `app.allow_history_mutation='on'` 受控旁路（生产代码永不
+   设置）；fixture 清理事务内显式开启。另修 fixture 引用已 DROP 表
+   （card_generation_cutover_events）与缺失 companion_conversations/jobs/
+   onboarding_states 清理的问题。
+2. **手工魔法工作区依赖**：dashboard / parity / topology-v3 / leakage /
+   reconcile / history-route / origin-backfill / surface / search 九个套件依赖
+   方案 23 附录 A.2 的手工工作区 `4f825f38-…`（0176 清库已抹除）。修复：新增
+   自播种助手 `helpers/pure-v2-workspace-fixture.ts`，九个套件全部改为运行时
+   自建夹具，可在任何干净 PG 独立运行。
+3. **语义漂移断言**（大重构后无人能跑测试导致过期）：
+   - E08 text+hint 期望 practice_completed → 按方案 16 冻结的 fail-closed 对齐
+     为 not_assessable checkpoint；
+   - structured / understanding-projection 两套件期望 structured_bundle 双 part
+     → planV2Run 只产单 part 结构题且需显式结构 canonical answer（fixture 增
+     `canonicalAnswerJson` 覆盖项），提交/结算断言全部实证对齐；
+   - repair 纵切在 V2 无生成入口 → skip 并注明复活条件。
+
+**顺带修复的真实缺陷**：
+
+- `ailearn_claim_commit_outbox` PL/pgSQL 列引用歧义（42702，0109 起即坏）→
+  迁移 `0181_fix_claim_commit_outbox_ambiguity` 加表前缀消除；该函数属已停用
+  V1 commit 链路（LEARNING_RUN_V1 门控），修复后可安全重放。
+- note-version-restore 夹具清理顺序：密封版本受三层触发器保护，改为先删 notes
+  走级联（depth>1 放行路径）。
+
+**当前集成测试矩阵**（2026-08-23 实跑）：V1 清理相关全部绿（learning-runs 8/8、
+origin-contract 3/3、objective 系 9 文件全绿、topology-v3/dashboard/projection 全绿）。
+
+### 9.3 第二轮：companion / 安全基建套件修复（2026-08-23 续）
+
+首轮签收后继续修复了其余预存失败套件，其中挖出 **4 个真实产品缺陷**：
+
+| # | 缺陷 | 修复 |
+| --- | --- | --- |
+| R1 | **companion 导出必失败**：footer 行经会更新哈希的 emitLine 写出，而 recordsSha256 已先 digest——每次导出抛 ERR_CRYPTO_HASH_FINALIZED；且 manifest 行未纳入哈希（违背自述覆盖范围） | footer 直写 onLine；manifest 改走 emitLine |
+| R2 | **sandbox 调度语义丢失**：resolveV2Scheduling 把 onboarding sandbox 一律记为 not_authorized（V1 语义为 sandbox） | 按历史语义补回 |
+| R3 | **桥接实体校验查错列**：verifyEntityRefs 按 id 校验，但 EntityRef 携带业务键（learning_cards_v2.card_id / learning_objectives_v2.objective_id）——桌宠页面上下文引用任何 V2 卡/目标必被误判不存在 | 按表映射查找列 |
+| R4 | **0174 侵占 0039 托管命名空间**：新策略沿用 sec01_v1_ 前缀，触发 0039 目录守卫"清单外策略即拒绝" | 迁移 0182 将该策略改名脱离保留前缀（逻辑不变） |
+
+测试侧对齐：action-bridge 六用例从已退役的 learning_sessions 种子切到 V2 候选
+（learning_run_start/resume + 同步建 Run 的 succeeded 语义）；context-grants 的
+episodes 夹具补 key_point_id（NOT NULL）；rls-policies 重放改为临时解除清单内表
+RLS 后精确恢复（0039 守卫按设计拒绝在激活态重放），断言改为"重放不得改变激活
+集合"；validation_events/questions 夹具补 legacy 卡 FK；共享 fixture 清理抽为
+cleanupWorkspaceTables（含循环外键解除与旁路）。
+
+**最终矩阵（49/49 全绿）**：全部集成套件实库通过。运行前提：各套件需自身环境
+变量指向已迁移库（CONTENT_HASH / NOTE_VERSION_RESTORE / RATE_LIMIT /
+REVIEW_ATTEMPT / SEC02_TEST_DATABASE_URL 等）；g009 需 migrator 角色；
+v06-migration 需指向链已应用的库（其 fresh 重放语义已被 V2 移除，现仅验证
+0040-0043 幂等段）。skip 项：demonstrated 需真实 Critic 凭据；repair 纵切待 V2
+生成器；commit-outbox 全链需退役链路夹具（claim 函数本身已经 0181 修复并探针验证）。
 
 ```
 A（集成测试，需 PG）  ← 依赖：A1 fixture 助手

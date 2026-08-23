@@ -1,11 +1,29 @@
 # 真桌宠记忆与上下文：产品需求设计 + 实施落地细节
 
-> 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复）**
+> 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复 + 第十一轮端到端行为修复 + 第十二轮遗留修复）**
 > 日期：2026-08-16
-> 版本：v1.3
+> 版本：v1.5
 > 关联：[21-real-desktop-pet-memory-context-design.md](./21-real-desktop-pet-memory-context-design.md)
 >
 > 修订记录：
+> - v1.5（2026-08-23）：第十二轮遗留修复——keyword fallback 排序键去 updated_at
+>   污染（#32）、EXISTS 探测补 scope 过滤（#33）、familiarity 衰减多副本
+>   advisory lock 守卫（#34），详见 §31。
+> - v1.4（2026-08-19）：独立端到端审查（区别于前几轮的文档一致性比对）发现
+>   并修复 5 处行为级缺陷 + 3 项未实施承诺，详见新增 §29：
+>   1. keyword fallback 整段 ILIKE 永不匹配 → 关键词提取 + ILIKE ANY；
+>   2. scope 死维度（currentScope 硬编码 workspace、global 永不召回）
+>      → SQL 纳入 global + orchestrator 按 pageKind 推导 task scope（§9.2.2 同步修订）；
+>   3. 无 ready embedding 时向量路径返回空集不降级 → EXISTS 探测后降级 keyword；
+>   4. 人格 revision CAS 前端未携带 revision（v0.5 只修了服务端）→ web 端接通；
+>   5. familiarity/interaction_count/last_active_at 从未被更新（§10.5 未实施）
+>      → 对话终态 +0.01、确认记忆 +0.03、每日衰减 -0.05（迁移 0178 补 worker 写授权）；
+>   6. COMPANION_MEMORY_STAR_MAP_V1 flag 未接线 → star-map 路由补 fail-closed 门控；
+>   7. memory_candidate delivery 未携带内容摘要（§16.2）→ payloadRef 增加 contentPreview；
+>   8. 气泡"纠正"使用原生 window.prompt（违背 §14.1 且不可样式化）→ 气泡内联编辑。
+>   同时确认两项设计裁决并回写本文：episodic 经统一记忆检索进入上下文，
+>   `conversation_summaries` 定位为存储/审计层（不再描述为独立 Episodic Top K 通道，
+>   见 §29.4）；预算体系明确 MEMORY_BUDGET_MAX=1000 字符优先于 topK=8。
 > - v1.3（2026-08-19）：第十轮代码审查发现并修复 1 处防御性缺失：
 >   1. `companion-daily-summary.ts` 的 `summary` 字段写入 `companion_daily_summaries`
 >      表时缺少 PRD §15.4.3 要求的"摘要长度 ≤ 500 字"限制。当前确定性模板
@@ -760,7 +778,7 @@ WHERE m.workspace_id = ${workspaceId}
   AND m.deleted_at IS NULL
   AND m.candidate = false
   AND m.archived_at IS NULL
-  AND (m.scope = 'workspace' OR m.scope = ${currentScope})
+  AND (m.scope = 'workspace' OR m.scope = 'global' OR m.scope = ${currentScope})
 ORDER BY
   (1 - (e.embedding <=> ${queryEmbedding}))
   * (0.4 + 0.6 * m.importance)
@@ -2205,3 +2223,120 @@ GET    /companion/daily?date=YYYY-MM-DD
 
 延续 §19.2/§27.2/§28.2，无新增偏差。
 
+
+## 30. 第十一轮端到端行为审查与修复（v1.4 补充）
+
+2026-08-19 进行了一轮**独立端到端行为审查**（区别于此前以"文档↔代码文本比对"为主的
+各轮）：不再核对文档措辞，而是沿"写入→检索→注入→回传→确认"的真实数据流逐环节验证
+行为是否成立。本轮证明：前几轮全部通过的"字符截断一致性"类修复均属实，但存在若干
+**端到端行为断裂**是文本比对永远发现不了的。共修复 5 处行为缺陷 + 落地 3 项未实施承诺：
+
+| # | 文件 | 问题 | PRD 条款 | 修复 |
+|---|---|---|---|---|
+| 24 | `companion-memory-vector.ts` | keyword fallback 把 ≤1000 字符的整段查询（userText+近4条消息）塞进 `content ILIKE '%<全文>%'`——content 上限 200 字，模式比字段还长，几乎永不匹配；embedding 故障时记忆召回≈0，降级形同虚设 | §2.4.3 "降级为关键词 + 规则排序" | 新增 `extractQueryKeywords`：拉丁/数字子串 ≥2 字整体保留；Han 连续段 ≤4 字整留、>4 字切重叠 bigram（中文无词边界，整段既匹配不到也粒度过粗——复审修订）；去重封顶 12 个。SQL 改为 `ILIKE ANY(text[])` 多关键词匹配；无可用关键词时回退 pinned/importance/updated_at 规则排序保证仍有召回 |
+| 25 | `companion-context-orchestrator.ts` + 检索 SQL | scope 死维度：orchestrator 硬编码 `currentScope="workspace"`，且 SQL 只匹配 `'workspace' OR currentScope`——extractor 允许产出的 `global`/`task` 记忆永远召回不到 | §9.2.2 / §6.2 | 两处检索 SQL 增加 `OR scope='global'`（§9.2.2 已同步修订）；orchestrator 新增 `deriveMemoryScope(pageContext)`：pageKind ∈ {card, learning_run, review} → `task`，否则 `workspace`；dialogue 调用点传入 pageContext |
+| 26 | `companion-memory-vector.ts` | provider 可用但用户尚无任何 ready embedding 时（新确认记忆 pending→ready 窗口、embedding 任务积压），向量查询正常返回空集且 mode=vector 不降级——"有记忆但召不回" | §9.2.3 "无 ready embedding 时降级" | 向量空结果时 EXISTS 探测该用户是否存在 ready embedding：不存在 → 降级 keyword；存在但相似度不足 → 保持空集（真正无相关记忆） |
+| 27 | `apps/web/lib/api.ts` + `companion/pet-profile/page.tsx` | 人格 revision CAS 前端从未携带 revision（v0.5 只修了服务端 TOCTOU），服务端 `revision !== undefined` 恒 false，CAS 形同虚设 | §12.1.3 | api client 入参增加可选 `revision`；页面保存读取时 revision、保存后更新为响应 revision；409 时提示"已在其他设备被修改"并自动 reload 最新版本 |
+| 28 | 迁移 `0178_worker_pet_profile_relationship.sql` + `companion-dialogue.ts` + `memory-routes.ts` + `companion-memory-maintenance.ts` | §10.5 关系状态模型完全未实施：familiarity/interaction_count/last_active_at 列自 0170 建好后从未被任何代码更新，永远是初始值；且 worker 对 pet_profiles 只有 SELECT 权限 | §10.5 | 三条更新链路落地：对话终态 interaction_count+1 / familiarity+0.01（≤1）/ 刷新 last_active_at（独立事务、失败静默）；确认记忆 familiarity+0.03（API 独立事务、失败静默）；每日维护 tick 对 >14 天未互动 familiarity-0.05（下限 0）。迁移 0178 幂等补齐 worker INSERT/UPDATE 授权 |
+| 29 | `memory-routes.ts` | `/companion/memory/star-map` 无 feature flag 门控（§9.8 承诺的 `COMPANION_MEMORY_STAR_MAP_V1` 在代码中零引用），fail-open | §9.8 | 路由补 `COMPANION_MEMORY_STAR_MAP_V1=true` 门控，关闭时 404 fail-closed（`.env.example` 该 flag 原已存在，本次接线） |
+| 30 | shared `companion-bridge-contracts.ts` + extractor + `delivery-client.ts` | memory_candidate delivery 未携带候选内容摘要（§16.2 要求 ≤80 字摘要），气泡只能显示通用文案"伴星记住了一条新信息" | §16.2 | payloadRef `memory_item` 变体增加可选 `contentPreview`（TS 类型 + zod strict schema 同步扩展，向后兼容）；extractor 写入 `candidate.content.slice(0,80)`；气泡优先展示"伴星记住了：<preview>。对吗？" |
+| 31 | `DeliveryBubble.tsx` + `delivery-bubble.css` | 气泡"纠正"使用原生 `window.prompt`——违背 §14.1 设计、无法样式化、阻塞主线程、读屏不友好 | §14.1 / §14.6 | 改为气泡内联编辑：点击"纠正"展开 textarea（≤200 字、自动聚焦、Escape 取消、⌘/Ctrl+Enter 提交），有 contentPreview 时展示"原记忆"并预填占位 |
+
+### 30.1 本轮设计裁决（回写正文）
+
+1. **Episodic Memory 通道裁决**：§2.3.1/§3.4 描述的"Orchestrator 单独获取 Episodic Top K"
+   独立通道**不实施**。实际语义为：summarizer 生成的情景摘要在写入
+   `conversation_summaries` 的同时生成 `kind=episodic` 候选记忆，经用户确认后作为普通
+   记忆参与统一向量/keyword 检索进入上下文。理由：Owner 决策#2 已定"情景摘要默认候选、
+   确认后才生效"，而候选不进上下文是硬边界——因此未确认摘要本就不允许注入；确认后的
+   episodic 与其他记忆走同一检索管线即可，单独通道只会造成双重注入与预算复杂化。
+   `conversation_summaries` 定位调整为**存储/审计层**（原始摘要 JSON 留档、未来管理页
+   展示的数据源），不再是上下文装配的输入。本文 §2.3.1 第 4 条、§3.4 流程第 2 步据此修订理解。
+2. **预算数值裁决**：topK=8 × 200 字/条 = 1600 字符 > MEMORY_BUDGET_MAX=1000，
+   二者并存时预算先触顶，实际注入约 5 条。维持现状：预算优先于条数上限（代码注释已声明），
+   topK=8 仅作为检索单次取回上限。§14.2 容量表相应理解为"检索取回 ≤8 条，注入按预算截断"。
+
+### 30.2 验证记录
+
+- workers/ai-worker：`tsc --noEmit` 0 错误；`companion-memory-vector.test.ts`
+  （含新增关键词提取/text[] 序列化/ILIKE ANY 生成/global scope/零召回窗口降级 7 个用例）
+  + `companion-context-orchestrator.test.ts`（新增 deriveMemoryScope 3 个用例）
+  + 全部 companion-* 单测通过（vector 17 + orchestrator 3 + extractor/summarizer/
+  daily-summary/dialogue/router 合计 59/59，含复审后 bigram 用例）；
+- apps/api：`tsc --noEmit` 0 错误；companion-conversation 单测 22 pass / 1 skip（原有）；
+- packages/shared：`tsc --noEmit` 0 错误；bridge contracts 测试 7/7 通过（payloadRef
+  扩展向后兼容）；
+- apps/web：`tsc --noEmit` 0 错误；单测套件 529/529 通过。
+
+### 30.3 已知遗留（记录，不在本轮处理）
+
+- `last_used_at` 反馈回路：检索命中刷新 last_used_at，freshness 又按其加权，
+  存在"富者愈富"倾向。属排序策略权衡而非缺陷，如需调整建议 freshness 改锚
+  confirmed_at 或对 last_used_at 加权设衰减上限，需 Owner 决策后另行实施。
+- §11.3 气泡互斥：核实 `PetDeliveryLayer` 已通过单槽 inbox + journeyVisible/suppressed/
+  voiceBusy 三重抑制实现"同一时刻一个 cue"，判定满足；文字 turn 流式期间不额外挂起
+  记忆确认卡（气泡位于桌宠窗口、不遮挡主窗口输入），如有需要后续再收紧。
+
+### 30.4 第二次复审记录（对 §30 修复自身的审查）
+
+§30 修复落地后立即进行了一轮针对性复审，发现并修复 **2 个修复自身引入/遗漏的问题**：
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| R1 | 迁移 `0178` 未登记进 drizzle journal（`meta/_journal.json`）——迁移 runner 走 `readMigrationFiles({ migrationsFolder })`，只应用 journal 中登记的条目，0178 将被**静默跳过**，worker 关系状态写授权永远不生效 | 首轮修复只创建了 SQL 文件，沿用了"手写迁移文件即可"的错误假设，未核对 0170-0177 均有 journal 条目 | 在 `_journal.json` 追加 idx=178 / tag=`0178_worker_pet_profile_relationship` / breakpoints=true 条目，与既有手写迁移登记方式一致 |
+| R2 | `extractQueryKeywords` 首版把整段中文（无词边界）当作单个关键词——"今天我们聊聊光合作用吧"产出 token 为整串（截断 30 字），作为 ILIKE 子串仍然匹配不到记忆"这周掌握光合作用"，**中文场景下降级检索依旧近乎失效** | 首版策略照搬拉丁分词思路，未处理 CJK 无空格分词的特性 | Han 连续段 >4 字改为滑窗重叠 bigram（如上句产出含"光合"/"作用"），≤4 字整段保留；混排 token（"DNA复制过程"）拆出拉丁子串与 Han 段分别处理；封顶提升到 12；补提取用例锁定行为 |
+| R3 | bigram 按位置顺序枚举 + 总量封顶，**长句语义重心在句尾时被截断**："我上周说过这周想重点突破有机化学"（16 字 → 15 个 bigram > 12 上限）顺序截断后恰好丢掉"有机"/"化学"，最需要召回的关键词反而缺席 | 头轮 R2 只解决了"粒度过粗"，未考虑封顶截断点与中文句法（宾语居尾）的相互作用 | 超预算时改为**头尾采样**：保前半 + 后半 bigram（head=ceil(n/2)），上例现含"这周…突破…有机/化学"；新增回归用例断言长句必须保留句尾关键词 |
+
+复审其余确认项（无需改动）：
+
+- dialogue familiarity bump 位于终态事务之后的独立事务 + 内层 try/catch，
+  不会触发 `markCompanionRunFailed`，权限缺失时安全跳过；
+- `ApiError.status` 为 public 字段，web 端 409 分支类型与行为正确；
+- keyword 数组字面量经转义且关键词字符集限定字母/数字/Han，无 ILIKE 通配符注入面；
+- EXISTS 探测 JOIN active 条件与主查询一致，无越权/多查路径；
+- memory_item payloadRef 全仓唯一生产方为 extractor，contentPreview ≤80 与 zod 一致；
+- eslint 对全部改动 web 文件 0 warning。
+
+复审后回归：worker tsc 0 错误、companion-* 单测通过；web tsc 0 错误、改动文件
+eslint 通过。
+
+### 30.5 第三次复审记录（运行时行为验证 + 全量回归）
+
+第三轮复审换角度执行：不再只读代码，而是**实际运行**改动函数验证输出、并跑全量
+worker 单测套件（758 个用例）确认零回归。
+
+| # | 发现 | 处置 |
+|---|---|---|
+| R4 | 运行时采样发现 R3 同类问题残留：`extractQueryKeywords("我上周说过这周想重点突破有机化学")` 实际输出不含"有机"/"化学"（R2 的 bigram 在文档声称修复但未做真实输入验证） | 即为 §30.4 R3 的头尾采样修复来源；本轮以 node 直跑函数输出作为验证手段，此后对纯函数类修复一律附运行时样例 |
+
+其余验证结果（全部通过，无需改动）：
+
+- `extractQueryKeywords` 六组真实输入运行时输出符合设计（长句 bigram / 混排拆分 /
+  空 / 纯标点 / 封顶）；空查询 → 无关键词 → SQL 不带 ILIKE 过滤走规则排序；
+- keyword fallback 生成的 `ILIKE ANY($n::text[])` 与 EXISTS 探测 SQL 为标准 PG 语法，
+  参数化数组字面量模式与本文件既有 `${idsLiteral}::uuid[]` 用法一致；本地无 PG 容器，
+  语法级最终确认留待集成测试跑批（§30.2 遗留项一致）；
+- 全量 worker 单测 **758/758** 通过（含全部 companion 用例），无跨模块回归。
+
+复审后回归（第三轮终态）：worker tsc 0 错误 + **758/758**；web tsc 0 错误 +
+529/529；shared 合同 32/32；api tsc 0 错误。
+
+## 31. 第十二轮遗留修复（v1.5 补充）
+
+2026-08-23 对 §30.3 自认遗留 + 独立审查新发现的三项问题完成修复：
+
+| # | 文件 | 问题 | 处置 |
+|---|---|---|---|
+| 32 | `companion-context-orchestrator.ts` | keyword fallback 排序键依赖被召回行为污染的 `updated_at`：orchestrator 的使用回传 UPDATE 同时刷新 `updated_at=now()`，导致"每被召回一次就在降级检索中永久置顶"，比 §30.3 自认的 last_used_at 回路更强 | 使用回传 UPDATE 改为只更新 `last_used_at`；`updated_at` 保持内容修改时间戳语义（keyword 排序键不再被召回行为污染） |
+| 33 | `companion-memory-vector.ts` | 零召回窗口 EXISTS 探测未带 scope 过滤：用户若只有其他 scope 的 ready embedding 会误判"有 ready"而不降级 | 探测子查询补 `(scope='workspace' OR scope='global' OR currentScope)`，与主检索一致；新增回归用例 |
+| 34 | `companion-memory-maintenance.ts` | familiarity 衰减 tick 用进程内节流，多 worker 副本各持计时器时衰减速率按副本数放大（-0.05×N/日） | 两步骤各自以事务级 `pg_try_advisory_xact_lock(hashtextextended('companion_memory_maintenance',0))` 取锁：非阻塞、随事务自动释放、拿不到锁的副本静默跳过；进程内 24h 节流保留为第一道闸 |
+
+验证：companion-context-orchestrator / companion-memory-vector 单测通过（含新增
+EXISTS scope 用例）；worker tsc 0 错误。
+
+### 31.1 审查新发现但本轮不处置（登记）
+
+- extractor LLM prompt 不产 scope 字段，task/global 记忆实际只能经 API 手动创建
+  （§30 #25 的生产者侧近乎惰性）——需 Owner 决策是否让 extractor 参与 scope 标注。
+- 记忆页 pinned 之后无取消固定操作 → 已由 web 批次补齐 unpin 端点与按钮（超出本
+  PRD 范围的实现补齐，见 memory-routes POST /companion/memory/:id/unpin）。

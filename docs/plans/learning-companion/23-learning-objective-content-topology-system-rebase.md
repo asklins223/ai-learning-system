@@ -2,13 +2,54 @@
 
 > 副标题：让学习卡重新成为可追溯的知识目标，让三分钟旅程成为唯一正式作答场，让首页与星图围绕同一事实工作
 >
-> 状态：**Proposed — 待 Owner 评审后冻结**
+> 状态：**Implemented（核心链路已实施；WBS 任务以简化形式落地，剩余 DoD 见 §0.1）**
 >
 > 文档类型：问题复盘 + 产品需求文档（PRD）+ 技术实施设计（TDD）
 >
-> 版本：0.2（细粒度实施 WBS + 前端视觉 Demo）
+> 版本：0.3（实施状态回写）
 >
-> 日期：2026-08-16
+> 日期：2026-08-16（2026-08-19 回写实施状态）
+>
+> ### 0.1 实施状态回写（2026-08-19）
+>
+> 本方案评审期间即已开工，并已完成核心链路实施（git: `5145b143` 及后续
+> `ffa6cba1` / `43283ed4` / `19e33d4e` 等修复提交）。实际落地与本文 WBS 的对应关系：
+>
+> - **已实施**：迁移 `0175_learning_objective_content_topology.sql`
+>   （origins 表 + concept_label + compatibility_role + legacy_route_mappings_v2 +
+>   surface_revision）；`learning-objectives` / `learning-dashboard` /
+>   `understanding-v3` 三个 API 模块及路由注册；首页 DashboardHome +
+>   LearningDashboardV2；卡库 ObjectiveLibrary（单一 Objective list，不再合并旧
+>   DTO）；详情页 Objective 化且无本地作答 renderer；UnderstandingGraphV3；
+>   parity / leakage / reconcile / immutability / origin-backfill / search /
+>   topology-v3 / dashboard 等 11 个集成测试；§36 objective 视觉 token 落地
+>   （objective-system.css 等 6 个样式文件）。
+> - **以简化形式落地**：RL 系列中的 shadow read 演练、ETag 分层缓存、topology
+>   deltas 端点等多人团队/上线期纪律未按原样建设——项目未上线、单人开发，
+>   以集成测试对账替代 shadow diff 清零流程。
+> - **未实施 / 待决**：§27 DoD 中依赖真实浏览器视觉 QA 的条目（320px/读屏/
+>   reduced-motion 验收矩阵）尚未系统性执行；legacy 物理清理保持冻结（符合 §21.1）。
+>
+
+>
+> ### 0.2 审查修复补充（2026-08-23）
+>
+> 独立审查发现并已修复的三项（详见方案 24 文档 §9.2 的签收记录）：
+>
+> 1. **缓存体系实际无效**：dashboardRevision 哈希混入每次请求重新生成的
+>    `snapshotAt` → 304 分支永不可达；topologyRevision 用节点/边计数、
+>    checkpointToken 用 `Date.now()`。已改为确定性内容哈希，Cache-Control 调整为
+>    `private, no-cache` 使协商缓存生效。
+> 2. **首页双事实源**：右侧"今日队列"仍拉 legacy `listSanitizedReviews` +
+>    `listJobs`。已收口到 Dashboard 单一聚合（primaryFocus + queue 驱动，
+>    typed action 渲染）。
+> 3. **集成测试依赖手工魔法工作区** `4f825f38-…`（0176 清库后失效）：九个套件
+>    已改为自播种夹具（helpers/pure-v2-workspace-fixture.ts），全部实跑转绿。
+>
+> 另：LearningRun 公开合同的 origin/returnTarget 形状漂移（V2 存储原样返回、
+> resume_run 主行动失效）属方案 16/20 域，修复与回归锁定见 learning-run-origin-contract
+> 集成测试与 run-view/run-service 内注释；graph V3 使用全局 `--color-*` token
+> （非 §36 objective token）确认为有意的设计修订。
 >
 > 强制前置：
 > - [`16-unified-learning-run-micro-journey-live2d-system-companion.md`](./16-unified-learning-run-micro-journey-live2d-system-companion.md) 视为**已经实施并冻结的 LearningRun / Trust / Commit / Schedule 底座**；
