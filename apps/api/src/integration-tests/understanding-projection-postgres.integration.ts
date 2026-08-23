@@ -15,7 +15,6 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import type { StructuredPartAnswerV1 } from "@ailearn/shared";
 import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
@@ -45,6 +44,15 @@ async function seed() {
     objectiveStatement: "遗忘曲线表明复习间隔决定长期记忆",
     publicSummary: "遗忘曲线",
     front: { cue: "遗忘曲线", prompt: "什么是遗忘曲线？" },
+    // planV2Run 结构化规划需要显式结构（2026-08-23 对齐）：mapping 答案 →
+    // ordering 单 part 任务；structured_bundle 双 part 仅存在于已退役 V1 planner。
+    canonicalAnswerJson: JSON.stringify({
+      kind: "mapping",
+      pairs: [
+        { unitId: "u-interval", left: "复习间隔", right: "长期记忆保持" },
+        { unitId: "u-recall", left: "主动回忆", right: "优于重复阅读" },
+      ],
+    }),
   });
   return {
     workspaceId: fixture.workspaceId,
@@ -151,28 +159,16 @@ test("P7 practice 纵切：practice trail 物化 change set（kind=practice_only
         },
       }),
     );
-    // stabilize 偏好生成 structured_bundle（ordering + relation 两个 part，
-    // §5.3）——交互类型为 bundle，需按 part 契约提交。
-    const bundle = run.activeTask!.activeVariant.interaction as unknown as {
-      kind: "structured_bundle";
-      parts: Array<{
-        partId: string;
-        interaction: { kind: "ordering" | "relation_canvas"; publicTokenIds?: string[]; publicNodeIds?: string[] };
-      }>;
+    // V2 planner 产单 ordering 任务（bundle 已退役）；提交正确顺序。
+    const ordering = run.activeTask!.activeVariant.interaction as unknown as {
+      kind: "ordering";
+      publicTokenIds?: string[];
+      publicTokenLabels?: Record<string, string>;
     };
-    assert.equal(bundle.kind, "structured_bundle");
-    const orderingPart = bundle.parts.find((p) => p.interaction.kind === "ordering");
-    const relationPart = bundle.parts.find((p) => p.interaction.kind === "relation_canvas");
-    assert.ok(orderingPart, "bundle 含 ordering part");
-    assert.ok(relationPart, "bundle 含 relation part");
-    const partAnswers: [StructuredPartAnswerV1, StructuredPartAnswerV1] = [
-      {
-        kind: "ordering",
-        partId: orderingPart.partId,
-        orderedTokenIds: [...(orderingPart.interaction.publicTokenIds ?? [])],
-      },
-      { kind: "relation", partId: relationPart.partId, edges: [] },
-    ];
+    assert.equal(ordering.kind, "ordering");
+    const labels = ordering.publicTokenLabels ?? {};
+    const byLabel = (label: string) => Object.entries(labels).find(([, v]) => v === label)?.[0] ?? "";
+    const correctOrder = [byLabel("复习间隔"), byLabel("主动回忆")];
     await withWorkspaceTransaction(scope, async (tx) =>
       submitArtifact(tx, {
         ...scope,
@@ -185,7 +181,7 @@ test("P7 practice 纵切：practice trail 物化 change set（kind=practice_only
           runRevision: run.revision,
           taskRevision: run.activeTask!.revision,
           inputSchemaHash: run.activeTask!.activeVariant.inputSchemaHash,
-          payload: { kind: "structured_bundle", partAnswers, interactionRefs: [] },
+          payload: { kind: "ordering", orderedTokenIds: correctOrder, interactionRefs: [] },
           idempotencyKey: "pj-p-submit-1",
         },
       }),

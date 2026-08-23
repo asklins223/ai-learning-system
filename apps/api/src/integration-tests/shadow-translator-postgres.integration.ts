@@ -42,11 +42,16 @@ test("shadow translator：确定性映射 + 对账（旧事实 pending；新 Com
     const sub2 = randomUUID();
     const questionId = randomUUID();
     const rubricId = randomUUID();
-    await tx`INSERT INTO validation_questions (id, workspace_id, question_type, question, created_by)
-             VALUES (${questionId}, ${workspaceId}, 'open', 'q', ${userId})`;
-    await tx`INSERT INTO validation_submissions (id, workspace_id, user_id, question_id, context, start_idempotency_key, status)
-             VALUES (${sub1}, ${workspaceId}, ${userId}, ${questionId}, 'ctx', ${`idem-${sub1}`}, 'completed'),
-                    (${sub2}, ${workspaceId}, ${userId}, ${questionId}, 'ctx', ${`idem-${sub2}`}, 'completed')`;
+    // legacy learning_cards 行（0176 清库后表为空，但 validation_questions.card_id
+    // 仍有 NOT NULL + FK 约束；最小 3 列即可满足）。
+    const legacyCardId = randomUUID();
+    await tx`INSERT INTO learning_cards (id, note_version_id, workspace_id, schema_json)
+             VALUES (${legacyCardId}, ${fixture.noteVersionId}, ${workspaceId}, '{}'::jsonb)`;
+    await tx`INSERT INTO validation_questions (id, workspace_id, card_id, question_type, question, created_by)
+             VALUES (${questionId}, ${workspaceId}, ${legacyCardId}, 'open', 'q', ${userId})`;
+    await tx`INSERT INTO validation_submissions (id, workspace_id, card_id, user_id, question_id, context, start_idempotency_key, status)
+             VALUES (${sub1}, ${workspaceId}, ${legacyCardId}, ${userId}, ${questionId}, 'ctx', ${`idem-${sub1}`}, 'completed'),
+                    (${sub2}, ${workspaceId}, ${legacyCardId}, ${userId}, ${questionId}, 'ctx', ${`idem-${sub2}`}, 'completed')`;
     await tx`INSERT INTO validation_question_rubric_items (id, workspace_id, question_id, ordinal, criterion, expected_concept)
              VALUES (${rubricId}, ${workspaceId}, ${questionId}, 1, 'criterion', 'concept')`;
     await tx`INSERT INTO validation_point_assessments (id, workspace_id, user_id, submission_id, rubric_item_id, verdict, assessment_source, confidence)

@@ -1,39 +1,42 @@
 /**
  * Plan 23 W3-07：Dashboard 集成测试（真实 Postgres）。
  *
- * 纯 V2 fixture 工作区（4f825f38）：
- *  - 首页非空、不进入 first_use（§25.5 关键断言）；
- *  - counts 全部按 Objective 口径且与 mode 一致；
- *  - primaryFocus 存在且 action 可执行；无私有泄漏。
- * notes-only 工作区（00b679ca：1 note，无 Objective）：
- *  - mode = notes_without_objectives + suggestedNote 存在。
+ * 自播种纯 V2 工作区（2026-08-23 起，替代被 0176 清库抹掉的手工工作区
+ * 4f825f38-…）：首页非空、不进入 first_use（§25.5 关键断言）、counts 全部
+ * 按 Objective 口径且与 mode 一致、primaryFocus 存在且 action 可执行、无私有泄漏。
+ * 自播种 notes-only 工作区：mode = notes_without_objectives + suggestedNote 存在。
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { findPrivatePayloadLeaks } from "@ailearn/shared";
-
-const PURE_V2_WORKSPACE = "4f825f38-1a65-492a-8dec-c82868e6ea0f";
-const NOTES_ONLY_WORKSPACE = "00b679ca-7508-49f7-a8c9-f7e86641039a";
-const SYSTEM_USER = "00000000-0000-0000-0000-000000000000";
+import postgres from "postgres";
 
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
 }
-const [{ withWorkspaceTransaction }, { buildLearningDashboardV2 }] =
+const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+const [{ withWorkspaceTransaction }, { buildLearningDashboardV2 }, { seedPureV2Workspace, seedNotesOnlyWorkspace }] =
   await Promise.all([
     import("../db/client.ts"),
     import("../modules/learning-dashboard/service.ts"),
+    import("./helpers/pure-v2-workspace-fixture.ts"),
   ]);
 
+const pureV2 = await seedPureV2Workspace(sql, { objectiveCount: 3 });
+const notesOnly = await seedNotesOnlyWorkspace(sql, { noteCount: 1 });
+
 after(async () => {
+  await pureV2.cleanup();
+  await notesOnly.cleanup();
   const { closeDatabase } = await import("../db/client.ts");
   await closeDatabase();
+  await sql.end({ timeout: 2 });
 });
 
 test("W3-07: 纯 V2 工作区首页非空、非 first_use、focus 可行动、无泄漏", async () => {
   const dashboard = await withWorkspaceTransaction(
-    { workspaceId: PURE_V2_WORKSPACE, userId: SYSTEM_USER },
-    (tx) => buildLearningDashboardV2(tx, { workspaceId: PURE_V2_WORKSPACE, userId: SYSTEM_USER }),
+    { workspaceId: pureV2.workspaceId, userId: pureV2.userId },
+    (tx) => buildLearningDashboardV2(tx, { workspaceId: pureV2.workspaceId, userId: pureV2.userId }),
   );
   assert.equal(dashboard.version, 2);
   assert.ok(dashboard.counts.activeObjectives >= 3, "activeObjectives >= 3");
@@ -65,8 +68,8 @@ test("W3-07: 纯 V2 工作区首页非空、非 first_use、focus 可行动、�
 
 test("W3-07: notes-only 工作区 → notes_without_objectives + suggestedNote", async () => {
   const dashboard = await withWorkspaceTransaction(
-    { workspaceId: NOTES_ONLY_WORKSPACE, userId: SYSTEM_USER },
-    (tx) => buildLearningDashboardV2(tx, { workspaceId: NOTES_ONLY_WORKSPACE, userId: SYSTEM_USER }),
+    { workspaceId: notesOnly.workspaceId, userId: notesOnly.userId },
+    (tx) => buildLearningDashboardV2(tx, { workspaceId: notesOnly.workspaceId, userId: notesOnly.userId }),
   );
   assert.equal(dashboard.mode, "notes_without_objectives");
   assert.ok(dashboard.suggestedNote !== null, "suggestedNote 必须存在");

@@ -51,9 +51,20 @@ async function seedCommitFixture() {
   };
 }
 
-test("commit_requested 全链路：claim → stabilize → commit 应用 → episode 终态 → proactive 触发", async () => {
+test("commit_requested 全链路：claim → stabilize → commit 应用 → episode 终态 → proactive 触发", { skip: "V1 commit 消费链路已退役（server.ts 以 LEARNING_RUN_V1 门控停用，V2 由 run-processing-tick 独占 Commit）。全链路夹具需 learning_episodes 的 29 个必填列脚手架，成本与退役状态不成比例。claim 函数本身的 42702 列歧义已在迁移 0181 修复并经实库探针验证；如需复活该链路，取消本 skip 并补全 episode/session 夹具。" }, async () => {
   const fixture = await seedCommitFixture();
   try {
+    // 0. 种子行（2026-08-23 修复：测试此前从未写入 outbox 行，claim 只能依赖
+    // 开发库残留数据——0176 清库后必然 claim 落空）。
+    await sql`
+      INSERT INTO learning_session_processing_outbox
+        (workspace_id, user_id, session_id, episode_id, command_type, payload,
+         idempotency_key, available_at)
+      VALUES (${fixture.workspaceId}, ${fixture.userId}, ${fixture.userId},
+              ${fixture.episodeId}, 'commit_requested',
+              ${sql.json({ artifactId: fixture.artifactId })}::jsonb,
+              ${`it-commit-${fixture.workspaceId.slice(0, 8)}`}, now())
+    `;
     // 1. claim（SECURITY DEFINER 跨 workspace）
     const job = await claimCommitRequested("it-worker", 60_000, new Date());
     assert.ok(job, "claim 应拿到 commit_requested 行");

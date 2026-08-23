@@ -12,16 +12,19 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { findPrivatePayloadLeaks } from "@ailearn/shared";
 import { learningObjectivesV2 } from "../db/schema/card-generation-v2.ts";
-
-const PURE_V2_WORKSPACE = "4f825f38-1a65-492a-8dec-c82868e6ea0f";
-const SYSTEM_USER = "00000000-0000-0000-0000-000000000000";
 
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
 }
+// 自播种纯 V2 工作区（替代被 0176 清库抹掉的手工工作区 4f825f38-…）。
+const pgSql = (await import("postgres")).default(process.env.DATABASE_URL, { max: 1 });
+const { seedPureV2Workspace } = await import("./helpers/pure-v2-workspace-fixture.ts");
+const pureV2 = await seedPureV2Workspace(pgSql, { objectiveCount: 3 });
+const PURE_V2_WORKSPACE = pureV2.workspaceId;
+const SYSTEM_USER = pureV2.userId;
 const [{ withWorkspaceTransaction }, { buildLearningDashboardV2 }, { listObjectiveSurfacesV3 }, { buildTopologySnapshotV3 }] =
   await Promise.all([
     import("../db/client.ts"),
@@ -31,6 +34,8 @@ const [{ withWorkspaceTransaction }, { buildLearningDashboardV2 }, { listObjecti
   ]);
 
 after(async () => {
+  await pureV2.cleanup();
+  await pgSql.end({ timeout: 2 });
   const { closeDatabase } = await import("../db/client.ts");
   await closeDatabase();
 });
@@ -40,19 +45,21 @@ test("RL-01: Home/Cards/Graph 的 active Objective 数量完全一致", async ()
   const [dashboard, listPage, topology, objectiveCount] = await withWorkspaceTransaction(
     ctx,
     async (tx) => {
-      const [d, l, t] = await Promise.all([
-        buildLearningDashboardV2(tx, ctx),
-        listObjectiveSurfacesV3(tx, ctx, { limit: 100 }),
-        buildTopologySnapshotV3(tx, ctx),
-      ]);
-      const countRows = await tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(learningObjectivesV2)
-        .where(and(
-          eq(learningObjectivesV2.workspaceId, PURE_V2_WORKSPACE),
-          eq(learningObjectivesV2.lifecycle, "active"),
-        ));
-      return [d, l, t, Number(countRows[0].n)] as const;
+      // 注意：postgres.js 的事务连接不允许多条查询流并发交错（会导致
+      // drizzle 构建器状态损坏 → orderSelectedFields 无限递归），必须顺序执行。
+      const d = await buildLearningDashboardV2(tx, ctx);
+      const l = await listObjectiveSurfacesV3(tx, ctx, { limit: 100 });
+      const t = await buildTopologySnapshotV3(tx, ctx);
+      // 独立对账计数：走 postgres-js 客户端而非本文件的 drizzle `sql` 标签
+      // （tsx 模块图下该文件静态解析到的 drizzle 实例与 db/client 的不一致，
+      // 其 SQL 对象传入事务会触发 getSQL 缺失/orderSelectedFields 无限递归，
+      // 2026-08-23 审查；服务内部与同文件普通列查询不受影响）。
+      const cntRows = await pgSql`
+        SELECT count(*)::int AS n FROM learning_objectives_v2
+        WHERE workspace_id = ${PURE_V2_WORKSPACE} AND lifecycle = 'active'
+      `;
+      const objectiveCountN = Number(cntRows[0]?.n ?? 0);
+      return [d, l, t, objectiveCountN] as const;
     },
   );
 

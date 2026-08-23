@@ -12,7 +12,8 @@ import { randomUUID } from "node:crypto";
 import { companionGroundedTutorGrantV1Schema } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { addV2ObjectiveToWorkspace, cleanupWorkspaceTables } from "./helpers/v2-card-fixture.ts";
+import { withWorkspaceTransaction } from "../db/client.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
 const sql = postgres(CONN, { max: 2 });
@@ -30,6 +31,7 @@ after(async () => {
 const { resolveCompanionLearningContext, getCompanionLearningSessionContext } = await import(
   "../modules/companion-conversation/learning-action-bridge.ts"
 );
+const { createRunV2 } = await import("../modules/learning-runs/run-service.ts");
 const { closeDatabase } = await import("../db/client.ts");
 
 async function seedBase(): Promise<{ workspaceId: string; userId: string; cleanup: () => Promise<void> }> {
@@ -42,26 +44,7 @@ async function seedBase(): Promise<{ workspaceId: string; userId: string; cleanu
     await tx`INSERT INTO workspaces (id, name, owner_id) VALUES (${ws}, ${"w" + ws.slice(0, 8)}, ${uid})`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${ws}, ${uid}, 'owner')`;
   });
-  const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
-      await tx`SELECT set_config('app.user_id', ${uid}, true)`;
-      await tx`DELETE FROM learning_episodes WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM learning_sessions WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_messages WHERE action_ref IS NOT NULL AND workspace_id = ${ws}`;
-      await tx`UPDATE companion_action_proposals SET action_run_id = NULL WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM learning_episodes WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM learning_sessions WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM note_versions WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM notes WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_conversations WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM workspace_members WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM workspaces WHERE id = ${ws}`;
-      await tx`DELETE FROM users WHERE id = ${uid}`;
-    });
-  };
+  const cleanup = () => cleanupWorkspaceTables(sql, ws, uid);
   return { workspaceId: ws, userId: uid, cleanup };
 }
 
@@ -81,24 +64,31 @@ test("P5 §6.7：无 learning 数据 → resume/start 候选 null（disabled）+
   }
 });
 
-test("P5 §6.7：有 active learning_session → resume 候选非 null（payload sha256 合法）", async () => {
+test("P5 §6.7：有进行中 learning run → learning_run_resume 候选非 null（payload sha256 合法）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
+  // 2026-08-23 对齐：桥接已切 V2（Plan 23 CS-05/CS-06）——候选从
+  // learning_objectives_v2 派生，learning_sessions 旧路径已退役。
+  const obj = await addV2ObjectiveToWorkspace(sql, workspaceId, userId, {
+    objectiveStatement: "resume 候选测试目标",
+    publicSummary: "resume",
+    front: { cue: "resume", prompt: "什么是 resume？" },
+  });
   try {
-    const sessionId = randomUUID();
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`INSERT INTO learning_sessions
-               (id, workspace_id, user_id, origin, origin_ref, intent, status)
-               VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card',
-                       ${{ cardId: randomUUID() } as never}, 'resume', 'active')`;
-    });
+    await withWorkspaceTransaction(
+      { workspaceId, userId },
+      async (tx) =>
+        createRunV2(tx, { workspaceId, userId, request: {
+          originV2: { kind: "card", cardId: obj.cardId, objectiveId: obj.objectiveId },
+          goal: "stabilize",
+          idempotencyKey: `p5-resume-${workspaceId.slice(0, 8)}`,
+        } }),
+    );
     const ctx = await resolveCompanionLearningContext({ workspaceId, userId });
-    assert.ok(ctx.resumeCandidate, "resume 候选应存在");
-    if (ctx.resumeCandidate) {
-      assert.equal(ctx.resumeCandidate.candidateId, "resume_current");
-      assert.match(ctx.resumeCandidate.payloadSha256, /^[a-f0-9]{64}$/);
-      assert.ok(ctx.resumeCandidate.title.length >= 1);
+    assert.ok(ctx.learningRunResumeCandidate, "learning_run_resume 候选应存在");
+    if (ctx.learningRunResumeCandidate) {
+      assert.equal(ctx.learningRunResumeCandidate.candidateId, "learning_run_resume");
+      assert.match(ctx.learningRunResumeCandidate.payloadSha256, /^[a-f0-9]{64}$/);
+      assert.ok(ctx.learningRunResumeCandidate.title.length >= 1);
     }
   } finally {
     await cleanup();
@@ -107,29 +97,26 @@ test("P5 §6.7：有 active learning_session → resume 候选非 null（payload
 
 test("P5 §6.7：menu proposal create 原子（双消息 + proposal pending + action.proposed）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
+  // 2026-08-23 对齐：候选从 V2 objective 派生（learning_run_start）。
+  await addV2ObjectiveToWorkspace(sql, workspaceId, userId, {
+    objectiveStatement: "menu proposal 测试目标",
+    publicSummary: "menu",
+    front: { cue: "menu", prompt: "什么是 menu？" },
+  });
   try {
-    const sessionId = randomUUID();
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`INSERT INTO learning_sessions
-               (id, workspace_id, user_id, origin, origin_ref, intent, status)
-               VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card',
-                       ${{ cardId: randomUUID() } as never}, 'resume', 'active')`;
-    });
     const { createCompanionMenuProposal } = await import(
       "../modules/companion-conversation/learning-action-bridge.ts"
     );
     const ctx = await resolveCompanionLearningContext({ workspaceId, userId });
-    assert.ok(ctx.resumeCandidate, "resume 候选存在");
+    assert.ok(ctx.learningRunStartCandidate, "learning_run_start 候选存在");
     const result = await createCompanionMenuProposal({
       workspaceId, userId,
       body: {
         version: 1,
         clientMessageId: randomUUID(),
-        candidateId: "resume_current",
+        candidateId: "learning_run_start",
         expectedContextRevision: ctx.contextRevision,
-        expectedPayloadSha256: ctx.resumeCandidate!.payloadSha256,
+        expectedPayloadSha256: ctx.learningRunStartCandidate!.payloadSha256,
         sourceSurface: "pet",
       },
       idempotencyKey: randomUUID(),
@@ -165,9 +152,9 @@ test("P5 §6.7：menu proposal create 原子（双消息 + proposal pending + ac
       createCompanionMenuProposal({
         workspaceId, userId,
         body: {
-          version: 1, clientMessageId: randomUUID(), candidateId: "resume_current",
+          version: 1, clientMessageId: randomUUID(), candidateId: "learning_run_start",
           expectedContextRevision: "f".repeat(64),
-          expectedPayloadSha256: ctx.resumeCandidate!.payloadSha256,
+          expectedPayloadSha256: ctx.learningRunStartCandidate!.payloadSha256,
           sourceSurface: "pet",
         },
         idempotencyKey: randomUUID(),
@@ -260,16 +247,15 @@ test("P5 §6.6：reject 原子零副作用；confirm 纯导航同步 succeeded +
   }
 });
 
-test("P5 §6.6：confirm session 动作 → 202 accepted + action run + companion_action job", async () => {
+test("P5 §6.6：confirm learning_run_start 动作 → 同步建 Run succeeded（resultRef=runId）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
+  // 2026-08-23 对齐：V2 候选（learning_run_start），不再种 learning_sessions。
+  const obj = await addV2ObjectiveToWorkspace(sql, workspaceId, userId, {
+    objectiveStatement: "confirm 动作测试目标",
+    publicSummary: "confirm",
+    front: { cue: "confirm", prompt: "什么是 confirm？" },
+  });
   try {
-    const sessionId = randomUUID();
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`INSERT INTO learning_sessions (id, workspace_id, user_id, origin, origin_ref, intent, status)
-               VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card', ${{ cardId: randomUUID() } as never}, 'resume', 'active')`;
-    });
     const { createCompanionMenuProposal, decideCompanionProposal } = await import(
       "../modules/companion-conversation/learning-action-bridge.ts"
     );
@@ -277,9 +263,9 @@ test("P5 §6.6：confirm session 动作 → 202 accepted + action run + companio
     const created = await createCompanionMenuProposal({
       workspaceId, userId,
       body: {
-        version: 1, clientMessageId: randomUUID(), candidateId: "resume_current",
+        version: 1, clientMessageId: randomUUID(), candidateId: "learning_run_start",
         expectedContextRevision: ctx.contextRevision,
-        expectedPayloadSha256: ctx.resumeCandidate!.payloadSha256,
+        expectedPayloadSha256: ctx.learningRunStartCandidate!.payloadSha256,
         sourceSurface: "pet",
       },
       idempotencyKey: randomUUID(),
@@ -287,22 +273,21 @@ test("P5 §6.6：confirm session 动作 → 202 accepted + action run + companio
     const decided = await decideCompanionProposal({
       workspaceId, userId, proposalId: created.proposal.proposalId,
       decision: "confirm", idempotencyKey: randomUUID(),
-    }) as { status: string; actionRunId: string | null };
-    assert.equal(decided.status, "accepted");
-    assert.ok(decided.actionRunId);
-    const runs = await sql.begin(async (tx) => {
+    }) as { status: string; actionRunId: string | null; resultRef?: string };
+    assert.equal(decided.status, "succeeded");
+    assert.equal(decided.actionRunId, null, "V2 同步路径无异步 action run");;
+    // 2026-08-23 实证对齐：V2 learning_run_start 的 confirm 同步创建
+    // LearningRun（succeeded + resultRef=runId），不再走异步 action run/job。
+    assert.equal(decided.status, "succeeded");
+    const resultRef = (decided as { resultRef?: string }).resultRef;
+    assert.ok(resultRef, "resultRef 应携带新 LearningRun id");
+    const newRuns = await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      return tx`SELECT status FROM companion_action_runs WHERE id = ${decided.actionRunId}`;
+      return tx`SELECT phase, origin->>'objectiveId' AS objective_id FROM learning_runs WHERE id = ${resultRef}`;
     });
-    assert.equal(runs[0].status, "accepted");
-    const jobs = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      return tx`SELECT type FROM jobs WHERE payload->>'actionRunId' = ${decided.actionRunId}`;
-    });
-    assert.ok(jobs.length >= 1, "companion_action job 已创建");
-    assert.equal(jobs[0].type, "companion_action");
+    assert.equal(newRuns[0]?.phase, "active", "同步创建的 run 应已 active");
+    assert.equal(newRuns[0]?.objective_id, obj.objectiveId);
   } finally {
     await cleanup();
   }
@@ -310,14 +295,14 @@ test("P5 §6.6：confirm session 动作 → 202 accepted + action run + companio
 
 test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
-  // 使用 V2 fixture 创建 objective + card（替代旧 learning_cards + card_key_points）
-  const v2Fixture = await seedV2Fixture(sql, {
+  // 使用 V2 objective（挂到 seedBase 同一工作区；替代旧 learning_cards + card_key_points）
+  const obj = await addV2ObjectiveToWorkspace(sql, workspaceId, userId, {
     objectiveStatement: "context-grant 测试",
     publicSummary: "grant",
     front: { cue: "grant", prompt: "什么是 grant？" },
   });
-  const cardId = v2Fixture.cardId;
-  const kpId = v2Fixture.objectiveId;
+  const cardId = obj.cardId;
+  const kpId = obj.objectiveId;
   try {
     const sessionId = randomUUID();
     const episodeId = randomUUID();
@@ -327,7 +312,7 @@ test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）"
       await tx`INSERT INTO learning_sessions (id, workspace_id, user_id, origin, origin_ref, intent, status)
                VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card', ${{ cardId } as never}, 'resume', 'active')`;
       await tx`INSERT INTO learning_episodes
-               (id, session_id, workspace_id, user_id, origin, origin_ref, intent,
+               (id, session_id, workspace_id, user_id, key_point_id, origin, origin_ref, intent,
                 formal_eligibility_kind, formal_plan, scheduling_decision, episode_target_fingerprint,
                 content_exposure_key, rubric_targets, max_turns,
                 assistance_policy_version, rubric_policy_version, scene_policy_version,
@@ -335,7 +320,7 @@ test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）"
                 provider_policy_version, commit_policy_version, provider_config_id, model_id,
                 capability_snapshot_hash, runtime_epoch_snapshot, episode_epoch,
                 budget_envelope_ref, budget_envelope_hash, plan_hash, status, processing_phase)
-               VALUES (${episodeId}, ${sessionId}, ${workspaceId}, ${userId}, 'card',
+               VALUES (${episodeId}, ${sessionId}, ${workspaceId}, ${userId}, ${kpId}, 'card',
                        ${{ cardId, keyPointId: kpId } as never}, 'resume', 'formal',
                        ${{ plan: "p" } as never}, ${{ decision: "d" } as never},
                        'fp', 'cek', ${[] as never}, 1,
@@ -366,7 +351,6 @@ test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）"
     const ttlMs = new Date(typedGrant.expiresAt).getTime() - Date.now();
     assert.ok(ttlMs <= 5 * 60_000 && ttlMs > 4 * 60_000, "5min TTL");
   } finally {
-    await v2Fixture.cleanup();
     await cleanup();
   }
 });

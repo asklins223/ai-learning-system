@@ -148,9 +148,11 @@ async function cleanupWorkspace(
   noteId: string,
 ) {
   await tx`DELETE FROM search_documents WHERE workspace_id = ${workspaceId}`;
+  // 密封版本受三层触发器保护（blocks 不可变 / 版本字段不可改 / 不可直接删除），
+  // 唯一放行路径是 depth>1 的级联删除：先删 notes，让版本与 blocks 级联清理。
+  await tx`DELETE FROM notes WHERE id = ${noteId}`;
   await tx`DELETE FROM note_blocks WHERE workspace_id = ${workspaceId}`;
   await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
-  await tx`DELETE FROM notes WHERE id = ${noteId}`;
   await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
   await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
   await tx`DELETE FROM users WHERE id = ${userId}`;

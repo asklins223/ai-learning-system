@@ -67,6 +67,10 @@ export interface V2FixtureOptions {
   strategy?: string;
   /** 可可选：指定 cue/prompt 的 front（默认自动生成）。 */
   front?: { cue: string; prompt: string };
+  /** 可选：覆盖 objective revision 的 canonicalAnswer JSON（默认 text 单元）。
+   *  structured 规划（planV2Run）需要显式结构（mapping/ordered_steps）或
+   *  非空 relations 才会产出结构化任务，否则回退 text。 */
+  canonicalAnswerJson?: string;
 }
 
 export interface V2FixtureSeeded {
@@ -116,6 +120,83 @@ const DEFAULT_SCORING_RUBRIC = JSON.stringify({ units: [], passingPolicy: {} });
  * 在无 binding 时返回空数组，不 fail）。
  * 不创建 card_content_capability_state（readCardContentEpoch 默认返回 1）。
  */
+// ─── 公共清理（按 workspace 全量清除；含不可变触发器受控旁路）─────────
+
+/**
+ * 按 workspace_id 清除全部相关业务数据（供各集成测试的 cleanup 复用）。
+ * 事务级开启迁移 0180 的不可变触发器旁路，可安全删除追加-only 表。
+ */
+export async function cleanupWorkspaceTables(
+  sql: postgres.Sql,
+  workspaceId: string,
+  userId: string,
+): Promise<void> {
+  await sql.begin(async (tx) => {
+    // 不可变触发器受控旁路（迁移 0180）：仅本清理事务内放行对 V2 追加-only 表的 DELETE。
+    await tx`SELECT set_config('app.allow_history_mutation', 'on', true)`;
+    await tx`DELETE FROM learning_target_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_card_publication_revisions_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_card_revisions_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_cards_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_objective_evidence_bindings_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_objective_revisions_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_objective_origins_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM legacy_route_mappings_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_objectives_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM evidence_eligibility_states_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM evidence_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_exposures_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM initial_validation_reminders_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM card_domain_events_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM card_exposure_ledger_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM review_schedules WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_run_events WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_run_action_ledger WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_run_idempotency WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM canonical_learning_event_outbox WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM practice_trail_event_outbox WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_run_processing_outbox WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_session_processing_outbox WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_outbox_events WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM understanding_change_sets WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_assessments WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_artifacts WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_task_drafts WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_task_private_solutions WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_task_safety_reports WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_task_disclosure_profiles WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_task_variants WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_tasks WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_run_private_contracts WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_episodes WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_sessions WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_runs WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM note_blocks WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM card_generation_post_activation_consumptions WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM card_content_capability_state WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM assistant_deliveries WHERE workspace_id = ${workspaceId}`;
+    // companion_messages.action_ref ↔ companion_action_proposals.source_message_id
+    // 构成循环外键：先解除消息侧引用，再按 runs → proposals → messages 顺序删。
+    await tx`UPDATE companion_messages SET action_ref = NULL WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM companion_messages WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM companion_stream_events WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM companion_messages WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM companion_turn_runs WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM companion_conversations WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM jobs WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM onboarding_states WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM search_documents WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM sessions WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
+    await tx`DELETE FROM users WHERE id = ${userId}`;
+  });
+}
+
 export async function seedV2Fixture(
   sql: postgres.Sql,
   opts: V2FixtureOptions = {},
@@ -133,6 +214,7 @@ export async function seedV2Fixture(
   const knowledgeForm = opts.knowledgeForm ?? "definition";
   const strategy = opts.strategy ?? "recall";
   const front = opts.front ?? { cue: "复利", prompt: "什么是复利效应？" };
+  const canonicalAnswerJson = opts.canonicalAnswerJson ?? DEFAULT_CANONICAL_ANSWER;
 
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
@@ -168,7 +250,7 @@ export async function seedV2Fixture(
        evidence_bindings, semantic_target_fingerprint, target_revision_hash, private_payload_hash)
       VALUES (gen_random_uuid(), ${workspaceId}, ${objectiveRevisionId}, ${objectiveId}, 1,
               ${objectiveStatement}, ${publicSummary}, ${knowledgeForm}, ARRAY['recall'],
-              ${DEFAULT_CANONICAL_ANSWER}::jsonb,
+              ${canonicalAnswerJson}::jsonb,
               ${DEFAULT_LEARNING_SUPPORT}::jsonb,
               ${DEFAULT_SCORING_RUBRIC}::jsonb,
               '[]'::jsonb, '[]'::jsonb, ${SHA256_HEX}, ${TARGET_REVISION_HASH}, ${PRIVATE_PAYLOAD_HASH})`;
@@ -193,53 +275,7 @@ export async function seedV2Fixture(
   // 7. Session token（供 HTTP Bearer 测试用）
   const token = await createSessionToken(sql, userId, workspaceId);
 
-  const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      // 按依赖逆序删除
-      await tx`DELETE FROM learning_target_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_card_publication_revisions_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_card_revisions_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_cards_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_objective_evidence_bindings_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_objective_revisions_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_objectives_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM evidence_eligibility_states_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM evidence_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_exposures_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM initial_validation_reminders_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_domain_events_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_exposure_ledger_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM review_schedules WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_events WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_action_ledger WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_idempotency WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM canonical_learning_event_outbox WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM practice_trail_event_outbox WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_processing_outbox WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_assessments WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_artifacts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_drafts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_private_solutions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_safety_reports WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_disclosure_profiles WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_task_variants WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_tasks WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_private_contracts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_runs WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM note_blocks WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_generation_post_activation_consumptions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_generation_cutover_events WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_content_capability_state WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM sessions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
-      await tx`DELETE FROM users WHERE id = ${userId}`;
-    });
-  };
+  const cleanup = () => cleanupWorkspaceTables(sql, workspaceId, userId);
 
   return {
     workspaceId,
@@ -285,6 +321,7 @@ export async function addV2ObjectiveToWorkspace(
   const knowledgeForm = opts.knowledgeForm ?? "definition";
   const strategy = opts.strategy ?? "recall";
   const front = opts.front ?? { cue: "复利", prompt: "什么是复利效应？" };
+  const canonicalAnswerJson = opts.canonicalAnswerJson ?? DEFAULT_CANONICAL_ANSWER;
 
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
@@ -309,7 +346,7 @@ export async function addV2ObjectiveToWorkspace(
        evidence_bindings, semantic_target_fingerprint, target_revision_hash, private_payload_hash)
       VALUES (gen_random_uuid(), ${workspaceId}, ${objectiveRevisionId}, ${objectiveId}, 1,
               ${objectiveStatement}, ${publicSummary}, ${knowledgeForm}, ARRAY['recall'],
-              ${DEFAULT_CANONICAL_ANSWER}::jsonb,
+              ${canonicalAnswerJson}::jsonb,
               ${DEFAULT_LEARNING_SUPPORT}::jsonb,
               ${DEFAULT_SCORING_RUBRIC}::jsonb,
               '[]'::jsonb, '[]'::jsonb, ${SHA256_HEX}, ${TARGET_REVISION_HASH}, ${PRIVATE_PAYLOAD_HASH})`;
@@ -368,6 +405,7 @@ export async function seedV2ObjectiveOnly(
   const objectiveStatement = opts.objectiveStatement ?? "理解复利效应";
   const publicSummary = opts.publicSummary ?? "复利效应";
   const knowledgeForm = opts.knowledgeForm ?? "definition";
+  const canonicalAnswerJson = opts.canonicalAnswerJson ?? DEFAULT_CANONICAL_ANSWER;
 
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
@@ -399,39 +437,13 @@ export async function seedV2ObjectiveOnly(
        evidence_bindings, semantic_target_fingerprint, target_revision_hash, private_payload_hash)
       VALUES (gen_random_uuid(), ${workspaceId}, ${objectiveRevisionId}, ${objectiveId}, 1,
               ${objectiveStatement}, ${publicSummary}, ${knowledgeForm}, ARRAY['recall'],
-              ${DEFAULT_CANONICAL_ANSWER}::jsonb,
+              ${canonicalAnswerJson}::jsonb,
               ${DEFAULT_LEARNING_SUPPORT}::jsonb,
               ${DEFAULT_SCORING_RUBRIC}::jsonb,
               '[]'::jsonb, '[]'::jsonb, ${SHA256_HEX}, ${TARGET_REVISION_HASH}, ${PRIVATE_PAYLOAD_HASH})`;
   });
 
-  const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`DELETE FROM learning_target_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_objective_evidence_bindings_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_objective_revisions_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_objectives_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM evidence_eligibility_states_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM evidence_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_exposures_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM initial_validation_reminders_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM card_domain_events_v2 WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM review_schedules WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_events WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_idempotency WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_run_private_contracts WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM learning_runs WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM note_blocks WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM sessions WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
-      await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
-      await tx`DELETE FROM users WHERE id = ${userId}`;
-    });
-  };
+  const cleanup = () => cleanupWorkspaceTables(sql, workspaceId, userId);
 
   return {
     workspaceId,

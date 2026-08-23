@@ -269,7 +269,7 @@ test("P2 fail closed：text 提交 + Critic 未配置 → not_assessable checkpo
   }
 });
 
-test("E08：请求提示后提交 → practice_completed（0 canonical/0 schedule，不依赖 Critic）", async () => {
+test("E08：请求提示后提交 text → Critic 未配置 fail closed → not_assessable checkpoint（0 canonical/0 schedule）", async () => {
   const seeded = await seed();
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
@@ -326,9 +326,18 @@ test("E08：请求提示后提交 → practice_completed（0 canonical/0 schedul
     const afterRun = await withWorkspaceTransaction(scope, async (tx) =>
       getRunPublicView(tx, { ...scope, runId: run.runId }),
     );
-    assert.equal(afterRun.phase, "completed");
-    assert.equal(afterRun.result?.outcome, "practice_completed");
-    assert.deepEqual(afterRun.result?.scheduleImpact, { kind: "none", reasonCode: "practice_only" });
+    // 2026-08-23 语义对齐（审查发现）：text 提交在 submitArtifact 一律入队
+    // assessment_critic（run-service.ts:2090 无 hint 旁路），Critic 未配置时按
+    // 方案 16 冻结的 "Assessment fail closed" 结算为 not_assessable checkpoint
+    // （绝不猜"掌握"）。本测试原期望 text+hint 走确定性 practice_completed，
+    // 与现行合同不符——确定性 practice 路径仅存在于 structured 提交。
+    // 不变量保持不变：0 canonical / 0 schedule / 不产生掌握证据。
+    assert.equal(afterRun.phase, "checkpoint");
+    assert.deepEqual(afterRun.checkpoint, {
+      kind: "not_assessable",
+      allowedFollowupIds: ["supplement:1"],
+    });
+    assert.equal(afterRun.result, null, "not_assessable 不产生 result");
     const envelopeCount = await sql`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
     `;

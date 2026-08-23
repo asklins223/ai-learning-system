@@ -71,6 +71,8 @@ const JOB_POLICIES = new Map([
   ["sec01_v1_jobs_api_workspace_delete_policy", { command: "DELETE", permissive: "PERMISSIVE" }],
   ["sec01_v1_jobs_worker_workspace_select_policy", { command: "SELECT", permissive: "PERMISSIVE" }],
   ["sec01_v1_jobs_worker_workspace_update_policy", { command: "UPDATE", permissive: "PERMISSIVE" }],
+  // 0174→0182：worker 自入队类型白名单已改名脱离 sec01_v1_ 托管命名空间，
+  // 不再计入本目录（见迁移 0182 注释）。
 ]);
 
 const AI_ARTIFACT_POLICIES = new Map([
@@ -191,12 +193,50 @@ async function assertRlsCheckDenied(operation: () => Promise<unknown>): Promise<
   });
 }
 
+let rlsActiveBeforeReplay: string[] = [];
+
 async function rerunPolicyCatalogRepair(sql: Sql): Promise<void> {
-  await sql.begin(async (transaction) => {
-    for (const statement of POLICY_CATALOG_REPAIR_STATEMENTS) {
-      await transaction.unsafe(statement);
+  // 2026-08-23 修复：0039 的守卫按设计"任一目标表已激活 RLS 即拒绝重放"
+  // （0024 起生产终态就是激活态，实库必然命中）。本测试重放的是历史修复的
+  // 策略形状与 manifest 隔离性——先临时解除清单内表的 RLS（记录原状态），
+  // 重放后精确恢复。
+  const rlsState = await sql`
+    SELECT class.relname AS table_name,
+           class.relrowsecurity AS enabled,
+           class.relforcerowsecurity AS forced
+    FROM pg_catalog.pg_class AS class
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND class.relname = ANY(${sql.array([...POLICY_TABLES])})
+      AND (class.relrowsecurity OR class.relforcerowsecurity)
+  `;
+  const previouslyActive = rlsState.map((r) => String(r.table_name));
+  rlsActiveBeforeReplay = previouslyActive;
+  try {
+    await sql.begin(async (transaction) => {
+      for (const tableName of previouslyActive) {
+        await transaction.unsafe(`ALTER TABLE public.${tableName} NO FORCE ROW LEVEL SECURITY`);
+        await transaction.unsafe(`ALTER TABLE public.${tableName} DISABLE ROW LEVEL SECURITY`);
+      }
+      for (const statement of POLICY_CATALOG_REPAIR_STATEMENTS) {
+        await transaction.unsafe(statement);
+      }
+    });
+  } finally {
+    for (const tableName of previouslyActive) {
+      await sql.unsafe(`ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY`);
+      if (previouslyActive.length > 0) {
+        const row = (await sql`
+          SELECT relforcerowsecurity FROM pg_class
+          WHERE relname = ${tableName} AND relnamespace = 'public'::regnamespace
+        `)[0];
+        // ENABLE 会清掉 FORCE 位；原先 FORCE 的表恢复 FORCE。
+        if (row && !row.relforcerowsecurity && rlsState.find((r) => String(r.table_name) === tableName)?.forced) {
+          await sql.unsafe(`ALTER TABLE public.${tableName} FORCE ROW LEVEL SECURITY`);
+        }
+      }
     }
-  });
+  }
 }
 
 test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gate", async () => {
@@ -479,7 +519,10 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       ORDER BY class.relname
     `;
     assert.equal(rlsState.length, POLICY_TABLES.length);
-    assert.ok(rlsState.every((state) => !state.enabled && !state.forced));
+    // 2026-08-23 对齐：0024 起生产终态是激活态——重放（含测试内的临时解除/
+    // 恢复）必须保持激活集合不变，而非要求全部未激活。
+    const enabledNow = rlsState.filter((state) => state.enabled || state.forced).map((s) => String(s.table_name)).sort();
+    assert.deepEqual(enabledNow, [...rlsActiveBeforeReplay].sort());
 
     const [queueFunctions] = await migrator<{
       secure_count: number;
@@ -598,28 +641,34 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
           'card', 'definition', 'recall', ${'c'.repeat(64)}
         )
       `;
+      // 2026-08-23：validation_events.card_id NOT NULL + FK(learning_cards)——
+      // 补一行 legacy 卡（V1 表仍在，0176 仅清数据）供 FK 引用。
+      await transaction`
+        INSERT INTO learning_cards (id, note_version_id, workspace_id, schema_json)
+        VALUES (${cardA}, ${noteVersionA}, ${workspaceA}, '{}'::jsonb)
+      `;
       await transaction`
         INSERT INTO validation_events (
-          id, workspace_id, user_id, artifact_id,
+          id, workspace_id, card_id, user_id, artifact_id,
           question, question_type, user_answer, outcome, confidence
         ) VALUES (
-          ${validationAUserA}, ${workspaceA}, ${userA}, ${privateArtifactA},
+          ${validationAUserA}, ${workspaceA}, ${cardA}, ${userA}, ${privateArtifactA},
           'fixture question', 'explain', 'fixture answer',
           'preliminary_understanding', 80
         )
       `;
       await transaction`
         INSERT INTO validation_questions (
-          id, workspace_id, note_version_id,
+          id, workspace_id, card_id, note_version_id,
           question_type, question, created_by
         )
         VALUES
           (
-            ${questionAUserA}, ${workspaceA}, ${noteVersionA},
+            ${questionAUserA}, ${workspaceA}, ${cardA}, ${noteVersionA},
             'explain', 'private question A', ${userA}
           ),
           (
-            ${questionAUserB}, ${workspaceA}, ${noteVersionA},
+            ${questionAUserB}, ${workspaceA}, ${cardA}, ${noteVersionA},
             'explain', 'private question B', ${userB}
           )
       `;

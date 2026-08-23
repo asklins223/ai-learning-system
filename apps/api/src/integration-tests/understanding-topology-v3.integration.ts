@@ -15,12 +15,15 @@ import { findPrivatePayloadLeaks, assertNoCardOrKeyPointNode } from "@ailearn/sh
 import { learningObjectivesV2 } from "../db/schema/card-generation-v2.ts";
 import { learningObjectiveOriginsV2 } from "../db/schema/card-generation-v2.ts";
 
-const FIXTURE_WORKSPACE = "4f825f38-1a65-492a-8dec-c82868e6ea0f";
-const SYSTEM_USER = "00000000-0000-0000-0000-000000000000";
-
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
 }
+// 自播种纯 V2 工作区（替代被 0176 清库抹掉的手工工作区 4f825f38-…）。
+const sql = (await import("postgres")).default(process.env.DATABASE_URL, { max: 1 });
+const { seedPureV2Workspace } = await import("./helpers/pure-v2-workspace-fixture.ts");
+const pureV2 = await seedPureV2Workspace(sql, { objectiveCount: 3 });
+const FIXTURE_WORKSPACE = pureV2.workspaceId;
+const SYSTEM_USER = pureV2.userId;
 const [{ withWorkspaceTransaction }, { buildTopologySnapshotV3 }, { executeObjectiveOriginBackfill }] =
   await Promise.all([
     import("../db/client.ts"),
@@ -29,6 +32,8 @@ const [{ withWorkspaceTransaction }, { buildTopologySnapshotV3 }, { executeObjec
   ]);
 
 after(async () => {
+  await pureV2.cleanup();
+  await sql.end({ timeout: 2 });
   const { closeDatabase } = await import("../db/client.ts");
   await closeDatabase();
 });
