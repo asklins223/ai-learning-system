@@ -82,6 +82,11 @@ export const mineNavItems: NavItem[] = [
     href: "/companion/daily",
   },
   {
+    icon: Icon.Sparkle2,
+    label: "伴星人格",
+    href: "/companion/pet-profile",
+  },
+  {
     icon: Icon.StarMap,
     label: "记忆星图",
     href: "/companion/memory/star-map",
@@ -121,6 +126,7 @@ export function getCurrentPageLabel(pathname: string | null): string {
   if (pathname === "/cards" || pathname.startsWith("/cards/")) return "学习目标库";
   if (pathname.startsWith("/notes/")) return "笔记编辑";
   if (pathname.startsWith("/sources/")) return "来源阅读";
+  if (pathname === "/learning-room") return "理解书房";
   return "理解引擎";
 }
 
@@ -157,7 +163,13 @@ export const mobileBottomNavItems: NavItem[] = [
 export function isNavActive(href: string, pathname: string | null): boolean {
   if (!pathname) return false;
   if (href === "/") return pathname === "/";
-  if (pathname === href) return true;
-  // 前缀匹配：pathname 必须以 href + "/" 开头（子路由），或精确等于 href。
-  return pathname.startsWith(href + "/");
+  if (pathname !== href && !pathname.startsWith(href + "/")) return false;
+  // 前缀包含关系：若存在更长的导航项也匹配当前路径（如 /companion/memory
+  // 与 /companion/memory/star-map），让更长的路径独占高亮，避免双高亮。
+  const longerMatchExists = allSidebarNavItems.some((candidate) => {
+    if (candidate.href === href) return false;
+    if (!candidate.href.startsWith(href + "/")) return false;
+    return pathname === candidate.href || pathname.startsWith(candidate.href + "/");
+  });
+  return !longerMatchExists;
 }

@@ -24,6 +24,11 @@ import { ObjectiveSourceLine } from "./ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "./ObjectivePrimaryAction";
 import { objectiveActionHref } from "./action-navigation";
 import { ObjectiveSkeleton, ObjectiveError, ObjectiveEmpty } from "./ObjectiveStatePrimitives";
+import {
+  objectiveDisplayTitle,
+  objectiveDistinctSummary,
+  knowledgeFormLabel,
+} from "./labels";
 
 const FILTERS: ReadonlyArray<{ key: LibraryFilter; label: string }> = [
   { key: "all", label: "全部" },
@@ -189,32 +194,35 @@ export function ObjectiveLibrary(): JSX.Element {
         )
       ) : (
         <ul className="objective-library-list">
-          {visible.map((item) => (
-            <li key={item.objectiveId} className="objective-library-row">
-              <div className="objective-library-row-main">
-                <div className="objective-library-row-topline">
-                  <ObjectiveStatusChip state={objectiveChipStateFromList(item)} />
-                  <span className="objective-library-row-form">{item.knowledgeForm}</span>
+          {visible.map((item) => {
+            const summary = objectiveDistinctSummary(item, 120);
+            return (
+              <li key={item.objectiveId} className="objective-library-row">
+                <div className="objective-library-row-main">
+                  <div className="objective-library-row-topline">
+                    <ObjectiveStatusChip state={objectiveChipStateFromList(item)} />
+                    <span className="objective-library-row-form">{knowledgeFormLabel(item.knowledgeForm)}</span>
+                  </div>
+                  <h3>
+                    <Link href={itemHref(item)}>
+                      {objectiveDisplayTitle(item)}
+                    </Link>
+                  </h3>
+                  {summary && <p>{summary}</p>}
+                  <ObjectiveSourceLine
+                    noteTitle={item.primaryNoteTitle}
+                    freshness={item.freshness}
+                  />
                 </div>
-                <h3>
-                  <Link href={itemHref(item)}>
-                    {item.conceptLabel ?? item.publicSummary.slice(0, 40)}
-                  </Link>
-                </h3>
-                <p>{item.publicSummary.slice(0, 120)}</p>
-                <ObjectiveSourceLine
-                  noteTitle={item.primaryNoteTitle}
-                  freshness={item.freshness}
-                />
-              </div>
-              <div className="objective-library-row-action">
-                <ObjectivePrimaryAction
-                  action={item.primaryAction}
-                  onExecute={execute}
-                />
-              </div>
-            </li>
-          ))}
+                <div className="objective-library-row-action">
+                  <ObjectivePrimaryAction
+                    action={item.primaryAction}
+                    onExecute={execute}
+                  />
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
 

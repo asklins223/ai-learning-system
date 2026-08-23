@@ -1,17 +1,17 @@
 /* Journey V2 桌宠首邀与推进卡片（文档 16 §8.1/§10.1）。
- * 克制表面：角色旁小卡片；不抢焦点、不自动导航；只使用语义 token。 */
+ * 克制表面：角色旁小卡片；不抢焦点、不自动导航；只使用语义 token（随主题翻转）。 */
 
 .pet-journey-live-card {
   position: absolute;
   left: calc(100% + 14px);
   top: 24px;
   width: min(300px, calc(100vw - 120px));
-  background: var(--surface-1, #ffffff);
-  color: var(--text-1, #1a1d21);
-  border: 1px solid var(--border-1, rgba(0, 0, 0, 0.12));
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
   border-radius: 14px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
-  padding: 14px 16px;
+  box-shadow: var(--shadow-panel);
+  padding: 14px var(--space-4);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -36,7 +36,7 @@
   margin: 0;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-2, #5a5f66);
+  color: var(--color-text-secondary);
   letter-spacing: 0.02em;
 }
 
@@ -44,7 +44,7 @@
   margin: 0;
   font-size: 13px;
   line-height: 1.55;
-  color: var(--text-2, #5a5f66);
+  color: var(--color-text-secondary);
 }
 
 .pet-journey-live-choices {
@@ -55,9 +55,9 @@
 
 .pet-journey-live-action {
   appearance: none;
-  border: 1px solid var(--border-1, rgba(0, 0, 0, 0.2));
-  background: var(--surface-2, #f5f6f8);
-  color: var(--text-1, #1a1d21);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
   border-radius: 10px;
   padding: 9px 12px;
   font-size: 13px;
@@ -67,7 +67,7 @@
 }
 
 .pet-journey-live-action:hover:not(:disabled) {
-  border-color: var(--accent-1, #3b6fe0);
+  border-color: var(--color-action);
 }
 
 .pet-journey-live-action:disabled {
@@ -88,14 +88,14 @@
   background: none;
   padding: 2px 0;
   font-size: 12px;
-  color: var(--text-3, #8a8f96);
+  color: var(--color-text-tertiary);
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .pet-journey-live-link:hover:not(:disabled) {
-  color: var(--accent-1, #3b6fe0);
+  color: var(--color-action-text);
 }
 
 .pet-journey-live-link:disabled {

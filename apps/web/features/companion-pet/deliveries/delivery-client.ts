@@ -291,8 +291,18 @@ export function deliverySummary(delivery: AssistantDeliveryV2): { title: string;
         : undefined;
       return { title: "伴星提醒", body: text ?? "伴星想提醒你一件事。" };
     }
-    case "memory_candidate":
-      return { title: "记忆待确认", body: "伴星记住了一条新信息，等待你确认。" };
+    case "memory_candidate": {
+      // §16.2：优先展示候选内容摘要（≤80 字）；老 delivery 无该字段时回退通用文案。
+      const preview = delivery.payloadRef.kind === "memory_item"
+        ? delivery.payloadRef.contentPreview
+        : undefined;
+      return {
+        title: "记忆待确认",
+        body: preview
+          ? `伴星记住了：${preview}。对吗？`
+          : "伴星记住了一条新信息，等待你确认。",
+      };
+    }
     default:
       return { title: "伴星消息", body: "有一条新的消息。" };
   }

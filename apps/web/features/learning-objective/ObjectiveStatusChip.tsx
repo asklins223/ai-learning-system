@@ -28,6 +28,11 @@ const LABELS: Record<ObjectiveChipState, string> = {
   superseded: "已由新版替代",
 };
 
+/** chip 状态 → 中文（供非 chip 场景复用同一份文案，如首页今日队列）。 */
+export function objectiveChipStateLabel(state: ObjectiveChipState): string {
+  return LABELS[state];
+}
+
 export function ObjectiveStatusChip(props: {
   state: ObjectiveChipState;
   extra?: string;

@@ -371,6 +371,14 @@
   display: flex;
 }
 
+/* Plan 23 FE-07 跟进修复：Dashboard V2 内容渲染在 desk 左列时撑满主列，
+   避免左列空白、工具卡掉底的断裂布局。 */
+.learning-home-primary > .dashboard-home {
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+}
+
 .learning-home-tools {
   display: flex;
   flex-direction: column;

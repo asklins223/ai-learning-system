@@ -878,6 +878,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+  unpinCompanionMemory: (memoryId: string) =>
+    request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/unpin`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   archiveCompanionMemory: (memoryId: string) =>
     request<unknown>(`/companion/memory/${encodeURIComponent(memoryId)}/archive`, {
       method: "POST",
@@ -955,6 +960,8 @@ export const api = {
     examples: { text: string }[];
     activeness: "quiet" | "moderate" | "active";
     boundaries: { allowPlayful?: boolean; allowNudgeLearning?: boolean; allowVoiceTags?: boolean; catchphrase?: string | null };
+    /** §12.1.3 revision CAS 乐观锁：携带读取时的 revision，冲突返回 409 PROFILE_CAS_CONFLICT。 */
+    revision?: number;
   }) =>
     request<{ version: 1; profile: unknown }>("/companion/pet-profile", {
       method: "PATCH",

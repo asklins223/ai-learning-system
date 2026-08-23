@@ -29,6 +29,13 @@ import { ObjectiveSourceLine } from "@/features/learning-objective/ObjectiveSour
 import { ObjectivePrimaryAction } from "@/features/learning-objective/ObjectivePrimaryAction";
 import { objectiveActionHref } from "@/features/learning-objective/action-navigation";
 import { ObjectiveSkeleton, ObjectiveError } from "@/features/learning-objective/ObjectiveStatePrimitives";
+import {
+  knowledgeFormLabel,
+  originKindLabel,
+  revisionClassLabel,
+  objectiveDisplayTitle,
+  objectiveDistinctSummary,
+} from "@/features/learning-objective/labels";
 
 type LoadState =
   | { status: "loading" }
@@ -237,7 +244,7 @@ export default function LearningObjectiveDetailPage(): JSX.Element {
       <header className="objective-detail-header objective-surface">
         <div className="objective-detail-header-topline">
           <ObjectiveStatusChip state={chipStateOf(surface)} />
-          <span className="objective-detail-form">{surface.content.knowledgeForm}</span>
+          <span className="objective-detail-form">{knowledgeFormLabel(surface.content.knowledgeForm)}</span>
           <span className="objective-detail-freshness">
             {surface.content.freshness === "source_outdated"
               ? "来源待更新"
@@ -246,8 +253,12 @@ export default function LearningObjectiveDetailPage(): JSX.Element {
                 : "来源已核验"}
           </span>
         </div>
-        <h1>{surface.content.conceptLabel ?? surface.content.publicSummary.slice(0, 40)}</h1>
-        <p className="objective-detail-summary">{surface.content.publicSummary}</p>
+        <h1>{objectiveDisplayTitle(surface.content)}</h1>
+        {/* conceptLabel 为空时标题即 publicSummary，同句不重复展示 */}
+        {(() => {
+          const summary = objectiveDistinctSummary(surface.content);
+          return summary ? <p className="objective-detail-summary">{summary}</p> : null;
+        })()}
         <div className="objective-detail-action">
           <ObjectivePrimaryAction action={surface.primaryAction} onExecute={execute} disabled={busy} />
         </div>
@@ -271,7 +282,7 @@ export default function LearningObjectiveDetailPage(): JSX.Element {
             <ul className="objective-detail-origins">
               {surface.sources.origins.map((origin) => (
                 <li key={origin.originId}>
-                  <span className="objective-detail-origin-kind">{origin.kind}</span>
+                  <span className="objective-detail-origin-kind">{originKindLabel(origin.kind)}</span>
                   <span>{origin.integrity === "legacy_unreviewed" ? "来源未核验" : "已核验"}</span>
                   {origin.kind === "note" && origin.noteId && (
                     <Link href={"/notes/" + origin.noteId}>打开笔记</Link>
@@ -342,7 +353,7 @@ export default function LearningObjectiveDetailPage(): JSX.Element {
             {history.items.map((item) => (
               <li key={item.objectiveRevisionId}>
                 <span className="objective-detail-history-rev">v{item.revision}</span>
-                <span>{item.revisionClass}</span>
+                <span>{revisionClassLabel(item.revisionClass)}</span>
                 <span className="objective-detail-history-summary">{item.publicSummary.slice(0, 60)}</span>
               </li>
             ))}

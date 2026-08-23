@@ -3,17 +3,18 @@
 /**
  * 真桌宠记忆管理（22-real-desktop-pet-memory-context-prd-tdd.md §10.2.2）。
  *
- * - 搜索/类型/状态筛选；
+ * - 搜索（300ms 防抖）/类型/状态筛选；
  * - candidate → 确认 / 拒绝 / 忽略；
- * - active → 固定 / 归档 / 删除；
+ * - active → 固定 / 取消固定 / 归档 / 删除；
  * - archived → 恢复 / 删除；
- * - 一键清空（二次确认由浏览器 confirm 保证）。
+ * - 一键清空（ConfirmDialog 二次确认）。
  */
 
 import "../conversations/conversation-page.css";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Icon } from "@/components/ui/icons";
 import Link from "next/link";
 
@@ -76,16 +77,26 @@ function MemoryStatusBadge({ item }: { item: MemoryItem }) {
   return <span className="memory-badge is-active">活跃记忆</span>;
 }
 
+type MemoryActionKind =
+  | "confirm"
+  | "reject"
+  | "delete"
+  | "pin"
+  | "unpin"
+  | "archive"
+  | "restore"
+  | "dismiss";
+
 function MemoryActions({
   item,
   onChanged,
 }: {
   item: MemoryItem;
-  onChanged: (id: string, kind: "confirm" | "reject" | "delete" | "pin" | "archive" | "restore" | "dismiss") => void;
+  onChanged: (id: string, kind: MemoryActionKind) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const act = useCallback(async (kind: "confirm" | "reject" | "delete" | "pin" | "archive" | "restore" | "dismiss") => {
+  const act = useCallback(async (kind: MemoryActionKind) => {
     setBusy(true);
     setError(null);
     try {
@@ -93,6 +104,7 @@ function MemoryActions({
       else if (kind === "reject") await api.rejectCompanionMemory(item.memoryItemId);
       else if (kind === "delete") await api.deleteCompanionMemory(item.memoryItemId);
       else if (kind === "pin") await api.pinCompanionMemory(item.memoryItemId);
+      else if (kind === "unpin") await api.unpinCompanionMemory(item.memoryItemId);
       else if (kind === "archive") await api.archiveCompanionMemory(item.memoryItemId);
       else if (kind === "restore") await api.restoreCompanionMemory(item.memoryItemId);
       else if (kind === "dismiss") await api.dismissCompanionMemory(item.memoryItemId);
@@ -129,7 +141,11 @@ function MemoryActions({
         </>
       ) : (
         <>
-          {!item.pinned && (
+          {item.pinned ? (
+            <button type="button" disabled={busy} onClick={() => void act("unpin")}>
+              取消固定
+            </button>
+          ) : (
             <button type="button" disabled={busy} onClick={() => void act("pin")}>
               固定
             </button>
@@ -162,9 +178,16 @@ export default function CompanionMemoryPage() {
   const [conflicts, setConflicts] = useState<MemoryItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
+  // 300ms 防抖：搜索词稳定后才触发 reload，避免每次击键都请求列表 + 冲突两个接口。
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [kind, setKind] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [showCandidates, setShowCandidates] = useState(true);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => setDebouncedQ(q), 300);
+    return () => window.clearTimeout(handle);
+  }, [q]);
 
   const reload = useCallback(() => {
     setError(null);
@@ -172,7 +195,7 @@ export default function CompanionMemoryPage() {
       api.listCompanionMemories({
         includeCandidates: showCandidates,
         includeArchived: showArchived,
-        q: q || undefined,
+        q: debouncedQ || undefined,
         kind: (kind || undefined) as MemoryItem["kind"] | undefined,
       }),
       api.listCompanionMemoryConflicts(),
@@ -182,7 +205,7 @@ export default function CompanionMemoryPage() {
     }).catch((caught) => {
       setError(caught instanceof Error ? caught.message : "暂时无法读取记忆");
     });
-  }, [q, kind, showArchived, showCandidates]);
+  }, [debouncedQ, kind, showArchived, showCandidates]);
 
   const handleResolveConflict = useCallback(async (keepId: string, removeId: string) => {
     setError(null);
@@ -196,7 +219,7 @@ export default function CompanionMemoryPage() {
   }, []);
 
   // 单项操作后仅局部 mutate 列表，不整表 reload。
-  const handleMemoryChanged = useCallback((id: string, action: "confirm" | "reject" | "delete" | "pin" | "archive" | "restore" | "dismiss") => {
+  const handleMemoryChanged = useCallback((id: string, action: MemoryActionKind) => {
     setItems((current) => {
       if (!current) return current;
       if (action === "confirm") {
@@ -206,9 +229,9 @@ export default function CompanionMemoryPage() {
             : item,
         );
       }
-      if (action === "pin") {
+      if (action === "pin" || action === "unpin") {
         return current.map((item) =>
-          item.memoryItemId === id ? { ...item, pinned: true } : item,
+          item.memoryItemId === id ? { ...item, pinned: action === "pin" } : item,
         );
       }
       if (action === "archive") {
@@ -255,14 +278,26 @@ export default function CompanionMemoryPage() {
     });
   }, []);
 
+  // 一键清空：ConfirmDialog 二次确认（替代原生 window.confirm）。
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
   const handleClearAll = useCallback(() => {
-    if (!window.confirm("确定清空全部桌宠记忆？该操作不会影响学习事实与对话历史。")) return;
+    setConfirmClearOpen(true);
+  }, []);
+
+  const confirmClearAll = useCallback(async () => {
+    setClearing(true);
     setError(null);
-    void api.clearCompanionMemories().then(() => {
+    try {
+      await api.clearCompanionMemories();
       setItems([]);
-    }).catch((caught) => {
+      setConfirmClearOpen(false);
+    } catch (caught) {
       setError(caught instanceof Error ? caught.message : "清空失败");
-    });
+    } finally {
+      setClearing(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -272,7 +307,7 @@ export default function CompanionMemoryPage() {
   return (
     <main className="companion-memory-page">
       <header className="companion-memory-head">
-        <span className="companion-memory-eyebrow"><i aria-hidden="true" /> COMPANION MEMORY</span>
+        <span className="companion-memory-eyebrow"><i aria-hidden="true" /> AI 伴星</span>
         <h1>伴星记忆</h1>
         <p>
           伴星长期记住的目标、偏好与情境。候选记忆默认不参与主动介入；
@@ -394,6 +429,19 @@ export default function CompanionMemoryPage() {
           ))}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={confirmClearOpen}
+        title="清空全部桌宠记忆？"
+        message="将删除伴星保存的全部记忆（含候选）。该操作不会影响已提交的学习事实与对话历史。"
+        confirmLabel="清空"
+        variant="danger"
+        loading={clearing}
+        onConfirm={() => void confirmClearAll()}
+        onCancel={() => {
+          if (!clearing) setConfirmClearOpen(false);
+        }}
+      />
     </main>
   );
 }

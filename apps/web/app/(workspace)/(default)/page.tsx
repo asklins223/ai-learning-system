@@ -5,35 +5,35 @@ import "@/app/styles/workspace-headers.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, JobRow, SanitizedReviewItem } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useCurrentUser } from "@/lib/use-current-user";
 import { useMainPageContext } from "@/features/companion-bridge/useMainPageContext";
 import { resolveHomeOnboardingVisibility } from "@/lib/home-onboarding";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Icon } from "@/components/ui/icons";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
-import { statusMap } from "@/lib/status-map";
 // Plan 23 FE-07：首页主内容切到 /v2/learning-dashboard（Objective Surface）。
 // Bug 2 修复：移除 legacy card 拉取逻辑（listCards/mergeLearningCardsV2），
 // isEmptyWorkspace 由 dashboard mode === 'first_use' 判定，不再依赖 card count。
+// 方案 23 收口：右侧"今日队列"也由 getDashboard() 单一事实源驱动，移除
+// legacy listSanitizedReviews/listJobs 并行调用（与 counts.reviewsDue 可能矛盾）。
 import "@/app/styles/home-dashboard.css";
 import { DashboardHome } from "@/features/learning-objective/DashboardHome";
 import { learningObjectiveApi } from "@/lib/learning-objective-api";
+import { objectiveActionHref } from "@/features/learning-objective/action-navigation";
+import {
+  objectiveDisplayTitle,
+  reasonCodeLabels,
+} from "@/features/learning-objective/labels";
+import { objectiveChipStateFromSurface } from "@/features/learning-objective/objective-state";
+import { objectiveChipStateLabel } from "@/features/learning-objective/ObjectiveStatusChip";
+import { OBJECTIVE_ACTION_LABELS } from "@/features/learning-objective/ObjectivePrimaryAction";
 import type { LearningDashboardV2 } from "@ailearn/shared";
 
 type CaptureMessageType = "success" | "error";
 
-/** 首页统一入口：到期复习也走 LearningRun（方案 16 三分钟微旅程）。 */
-function homeLearningRunHref(review: SanitizedReviewItem) {
-  const params = new URLSearchParams({
-    origin: review.isV2 ? "review_v2" : "review",
-    scheduleId: review.reviewId,
-    cardId: review.cardId,
-    returnTo: "/",
-  });
-  if (review.keyPointId) params.set("keyPointId", review.keyPointId);
-  return `/learning-runs/new?${params.toString()}`;
-}
+/** Dashboard queue/primaryFocus 共享的条目形状（objective + reasonCodes + action）。 */
+type DashboardQueueEntry = LearningDashboardV2["queue"][number];
 
 export default function HomePage() {
   const { currentUser, loading: accountLoading } = useCurrentUser();
@@ -53,13 +53,10 @@ export default function HomePage() {
   const isPersonalWorkspace = Boolean(currentUser?.isPersonal);
   const router = useRouter();
   const [todayLabel, setTodayLabel] = useState("今天");
-  // Bug 2 修复：移除 legacy stats/cards/notes state，改用 dashboard 判定 isEmptyWorkspace
-  const [dashboardMode, setDashboardMode] = useState<LearningDashboardV2["mode"] | null>(null);
-  const [reviews, setReviews] = useState<SanitizedReviewItem[] | null>(null);
-  const [homeReviewTotal, setHomeReviewTotal] = useState<number | null>(null);
-  const [reviewsError, setReviewsError] = useState<string | null>(null);
-  const [jobs, setJobs] = useState<JobRow[] | null>(null);
-  const [jobsError, setJobsError] = useState<string | null>(null);
+  // Bug 2 修复：移除 legacy stats/cards/notes state；方案 23 收口后整个页面
+  // （mode 判定 + 今日队列）都由 /v2/learning-dashboard 单一响应驱动。
+  const [dashboard, setDashboard] = useState<LearningDashboardV2 | null>(null);
+  const [dashboardError, setDashboardError] = useState(false);
 
   const [captureText, setCaptureText] = useState("");
   const [captureBusy, setCaptureBusy] = useState(false);
@@ -82,40 +79,21 @@ export default function HomePage() {
   const loadHomeData = useCallback(async () => {
     const requestId = ++homeRequestRef.current;
     setHomeRefreshing(true);
-    // Bug 2 修复：移除 legacy stats/cards/notes API 调用；dashboard mode 由
-    // DashboardHome 的 /v2/learning-dashboard 请求驱动；这里只拉队列数据。
+    // Bug 2 修复：移除 legacy stats/cards/notes API 调用；方案 23 收口：
+    // 只拉 getDashboard()（mode + 今日队列同源），失败时保留旧数据并置错误态。
     await api.getMe().catch(() => null);
     if (requestId !== homeRequestRef.current) return;
-    const [dashboardResult, reviewsResult, jobsResult] =
-      await Promise.allSettled([
-        learningObjectiveApi.getDashboard(),
-        api.listSanitizedReviews({ status: "pending", limit: 3 }),
-        api.listJobs({ limit: 50 }),
-      ] as const);
-
-    if (requestId !== homeRequestRef.current) return;
-
-    if (dashboardResult.status === "fulfilled") {
-      setDashboardMode(dashboardResult.value.mode);
-    } else {
-      setDashboardMode(null);
+    try {
+      const data = await learningObjectiveApi.getDashboard();
+      if (requestId !== homeRequestRef.current) return;
+      setDashboard(data);
+      setDashboardError(false);
+    } catch {
+      if (requestId !== homeRequestRef.current) return;
+      setDashboardError(true);
+    } finally {
+      if (requestId === homeRequestRef.current) setHomeRefreshing(false);
     }
-
-    if (reviewsResult.status === "fulfilled") {
-      setReviews(reviewsResult.value.items);
-      setHomeReviewTotal(reviewsResult.value.total);
-      setReviewsError(null);
-    } else {
-      setReviewsError("到期复习");
-    }
-
-    if (jobsResult.status === "fulfilled") {
-      setJobs(jobsResult.value.items);
-      setJobsError(null);
-    } else {
-      setJobsError("运行任务");
-    }
-    setHomeRefreshing(false);
   }, []);
 
   useEffect(() => {
@@ -184,19 +162,9 @@ export default function HomePage() {
       setCaptureMsgType("success");
       setCaptureText("");
 
-      void Promise.allSettled([api.listJobs({ limit: 50 }), learningObjectiveApi.getDashboard()]).then(
-        ([jobsResult, dashboardResult]) => {
-          if (jobsResult.status === "fulfilled") {
-            setJobs(jobsResult.value.items);
-            setJobsError(null);
-          } else {
-            setJobsError("运行任务");
-          }
-          if (dashboardResult.status === "fulfilled") {
-            setDashboardMode(dashboardResult.value.mode);
-          }
-        },
-      );
+      // 方案 23 收口：捕获后只需刷新 Dashboard 单一事实源
+      // （counts/mode/suggestedNote 均由它派生），不再单独拉 jobs。
+      void loadHomeData();
     } catch {
       setCaptureMsg("材料暂时没有添加成功，输入内容已保留，请检查网络后重试。");
       setCaptureMsgType("error");
@@ -207,36 +175,32 @@ export default function HomePage() {
       captureBusyRef.current = false;
       setCaptureBusy(false);
     }
-  }, [captureText, isOwner]);
+  }, [captureText, isOwner, loadHomeData]);
 
-  const pendingReviews = reviews ?? [];
-  const pendingReviewCount = homeReviewTotal ?? pendingReviews.length;
-  const activeJobs = jobs?.filter((job) => job.status === "pending" || job.status === "running") ?? [];
   // Plan 23 FE-07：概览计数/今日重点由 DashboardHome（/v2/learning-dashboard）提供，
   // 移除依赖 schemaJson.title/summary 的 legacy 派生（§2.2/§2.3）。
-  const queueLoading =
-    (reviews === null && !reviewsError) ||
-    (jobs === null && !jobsError);
-
-  const visibleReviews = pendingReviews.slice(0, 3);
-  const visibleJobs = activeJobs.slice(0, Math.max(0, Math.min(3, 4 - visibleReviews.length)));
+  // 今日队列：primaryFocus 在前（服务端最优先项；旧列表的首条复习即它，
+  // 不含它会出现"计数 > 0 但队列为空"的矛盾），queue 随后（不重复 primary）。
+  const queueEntries = useMemo<DashboardQueueEntry[]>(() => {
+    if (!dashboard) return [];
+    return dashboard.primaryFocus
+      ? [dashboard.primaryFocus, ...dashboard.queue]
+      : [...dashboard.queue];
+  }, [dashboard]);
+  const visibleQueueEntries = queueEntries.slice(0, 4);
+  // 队列总数用 Dashboard counts（reviewsDue + activeRuns）；jobs 数量无对应
+  // 字段，不再单独展示。溢出提示取 counts 与实际条目数的较大者。
+  const queueCount = dashboard ? dashboard.counts.reviewsDue + dashboard.counts.activeRuns : 0;
   const hiddenQueueCount = Math.max(
     0,
-    pendingReviewCount + activeJobs.length - visibleReviews.length - visibleJobs.length,
+    Math.max(queueCount, queueEntries.length) - visibleQueueEntries.length,
   );
-  const queueCount = pendingReviewCount + activeJobs.length;
-  const errorList = [reviewsError, jobsError].filter(Boolean);
+  const queueLoading = dashboard === null && !dashboardError;
+  const queueUnavailable = dashboardError && dashboard === null;
+  const errorList = dashboardError ? ["今日队列"] : [];
   // Bug 2 修复：isEmptyWorkspace 由 dashboard mode === 'first_use' 判定，
-  // 不再依赖 legacy card count / stats。
-  const isEmptyWorkspace =
-    dashboardMode === "first_use" ||
-    (dashboardMode === null &&
-     reviews !== null &&
-     jobs !== null &&
-     !reviewsError &&
-     !jobsError &&
-     pendingReviewCount === 0 &&
-     jobs.length === 0);
+  // 不再依赖 legacy card count / stats / reviews+jobs 兜底推导。
+  const isEmptyWorkspace = dashboard?.mode === "first_use";
   // 首页首次使用面（isFirstUse 由空个人工作区判定；onboarding 大卡已随
   // §21.3 删除，桌宠 + Journey 承担新用户引导）。
   const isFirstUse = resolveHomeOnboardingVisibility({
@@ -286,13 +250,6 @@ export default function HomePage() {
       </header>
 
       <div className="learning-home-content">
-        {!isFirstUse && (
-        <DashboardHome
-          isOwner={isOwner}
-          onOpenCapture={openCapture}
-        />
-        )}
-
         {errorList.length > 0 && (
           <div className="learning-home-alert" role="alert">
             <Icon.Warn />
@@ -310,6 +267,12 @@ export default function HomePage() {
 
         <div className="learning-home-desk">
           <div className="learning-home-primary">
+            {!isFirstUse && (
+              <DashboardHome
+                isOwner={isOwner}
+                onOpenCapture={openCapture}
+              />
+            )}
             {isFirstUse && (
               <section
                 className="learning-home-starter-intro"
@@ -447,57 +410,69 @@ export default function HomePage() {
               <div className="learning-home-queue-body">
                 {queueLoading ? (
                   <Skeleton lines={3} />
-                ) : reviewsError && jobsError ? (
+                ) : queueUnavailable ? (
                   <div className="learning-home-queue-state" data-tone="error">
                     <Icon.Warn />
                     <div><strong>队列暂不可用</strong><span>稍后重新打开页面即可重试</span></div>
                   </div>
-                ) : queueCount === 0 ? (
+                ) : visibleQueueEntries.length === 0 ? (
                   <div className="learning-home-queue-state">
                     <Icon.Check />
                     <div><strong>今天没有必须处理的事项</strong><span>可以专注推进左侧的学习卡</span></div>
                   </div>
                 ) : (
                   <div className="learning-home-queue-list">
-                    {visibleReviews.map((review) => {
-                      const reason = statusMap.reviewReason(review.reviewReason);
-                      return (
-                        <Link
-                          key={review.reviewId}
-                          href={homeLearningRunHref(review)}
-                          className="learning-home-queue-item"
-                          data-kind="review"
-                          aria-label={`开始三分钟验证：${reason.label}`}
-                        >
-                          <span className="learning-home-queue-item-icon" aria-hidden="true"><Icon.Review /></span>
+                    {visibleQueueEntries.map((entry) => {
+                      // typed action → 路由（单一实现 objectiveActionHref）；
+                      // 禁止由 label 文本推断跳转（§7.5/§29.1）。
+                      const href = objectiveActionHref(entry.action, "/");
+                      const actionLabel = OBJECTIVE_ACTION_LABELS[entry.action.kind];
+                      const title = objectiveDisplayTitle(entry.objective.content);
+                      const stateLabel = objectiveChipStateLabel(
+                        objectiveChipStateFromSurface(entry.objective),
+                      );
+                      const isReviewKind = entry.action.kind === "create_review_run";
+                      const itemBody = (
+                        <>
+                          <span className="learning-home-queue-item-icon" aria-hidden="true">
+                            {isReviewKind ? <Icon.Review /> : <Icon.Bolt />}
+                          </span>
                           <span className="learning-home-queue-item-copy">
-                            <strong>三分钟内证明一个要点</strong>
+                            <strong>{actionLabel || stateLabel}</strong>
                             <small>
-                              {reason.label} · 间隔 {review.intervalDays} 天 · 可换方式
+                              {reasonCodeLabels(entry.reasonCodes)} · {stateLabel}
                             </small>
                           </span>
-                          <Icon.ChevronRight className="learning-home-queue-chevron" />
-                        </Link>
+                          {href ? (
+                            <Icon.ChevronRight className="learning-home-queue-chevron" />
+                          ) : (
+                            <span className="learning-home-job-pulse" aria-hidden="true" />
+                          )}
+                        </>
                       );
-                    })}
-                    {visibleJobs.map((job) => {
-                      const status = statusMap.jobStatus(job.status);
-                      return (
-                        <div key={job.id} className="learning-home-queue-item" data-kind="job">
-                          <span className="learning-home-queue-item-icon" aria-hidden="true"><Icon.Bolt /></span>
-                          <span className="learning-home-queue-item-copy">
-                            <strong>{jobLabel(job.type)}</strong>
-                            <small>{status.label}</small>
-                          </span>
-                          <span className="learning-home-job-pulse" aria-hidden="true" />
+                      return href ? (
+                        <Link
+                          key={entry.objective.objectiveId}
+                          href={href}
+                          className="learning-home-queue-item"
+                          data-kind={isReviewKind ? "review" : "job"}
+                          aria-label={`${actionLabel}：${title}`}
+                        >
+                          {itemBody}
+                        </Link>
+                      ) : (
+                        <div
+                          key={entry.objective.objectiveId}
+                          className="learning-home-queue-item"
+                          data-kind={isReviewKind ? "review" : "job"}
+                          aria-label={`${actionLabel || stateLabel}：${title}`}
+                        >
+                          {itemBody}
                         </div>
                       );
                     })}
                     {hiddenQueueCount > 0 && (
                       <p className="learning-home-queue-more">还有 {hiddenQueueCount} 项未展示</p>
-                    )}
-                    {(reviewsError || jobsError) && (
-                      <p className="learning-home-queue-more" data-tone="error">部分队列数据暂不可用</p>
                     )}
                   </div>
                 )}
@@ -510,14 +485,4 @@ export default function HomePage() {
       </div>
     </div>
   );
-}
-
-function jobLabel(type: string): string {
-  switch (type) {
-    case "execute_card_agent_turn": return "生成学习卡";
-    case "evaluate_validation": return "评估验证";
-    case "align_evidence": return "证据对齐";
-    case "parse_source": return "解析来源";
-    default: return type;
-  }
 }

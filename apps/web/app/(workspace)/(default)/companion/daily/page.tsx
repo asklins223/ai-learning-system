@@ -124,12 +124,12 @@ export default function CompanionDailyPage() {
         <nav className="pet-note-nav" aria-label="日期切换">
           <button
             type="button"
-            className="pet-note-nav-btn"
+            className="pet-note-nav-btn is-prev"
             onClick={goPrev}
             disabled={loading}
             aria-label="前一天"
           >
-            <Icon.Chevron style={{ transform: "rotate(180deg)" }} />
+            <Icon.Chevron />
             <span>前一天</span>
           </button>
 
@@ -219,7 +219,7 @@ export default function CompanionDailyPage() {
             <header className="pet-note-head">
               <div className="pet-note-avatar" aria-hidden="true">🐾</div>
               <div className="pet-note-head-text">
-                <span className="pet-note-eyebrow">COMPANION DAILY</span>
+                <span className="pet-note-eyebrow">AI 伴星</span>
                 <h1>{data.date}</h1>
                 <p className="pet-note-date-label">桌宠写给你的一页小记</p>
               </div>

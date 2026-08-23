@@ -6,7 +6,8 @@
 import type { JSX } from "react";
 import type { LearningObjectivePrimaryActionV3 } from "@ailearn/shared";
 
-const KIND_LABEL: Record<LearningObjectivePrimaryActionV3["kind"], string> = {
+/** typed action kind → 中文标签（唯一实现；页面复用，禁止由 label 反推跳转）。 */
+export const OBJECTIVE_ACTION_LABELS: Record<LearningObjectivePrimaryActionV3["kind"], string> = {
   create_run: "开始验证",
   resume_run: "继续本次巩固",
   create_review_run: "开始复习",
@@ -25,7 +26,7 @@ export function ObjectivePrimaryAction(props: {
 }): JSX.Element | null {
   const { action } = props;
   if (action.kind === "none") return null;
-  const label = KIND_LABEL[action.kind];
+  const label = OBJECTIVE_ACTION_LABELS[action.kind];
   return (
     <button
       type="button"

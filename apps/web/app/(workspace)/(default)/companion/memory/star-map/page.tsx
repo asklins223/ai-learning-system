@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import "../../conversations/conversation-page.css";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { Icon } from "@/components/ui/icons";
 
 interface MemoryStarMapNode {
@@ -27,15 +27,36 @@ const KIND_LABEL: Record<string, string> = {
   episodic: "情景摘要",
 };
 
+/** 关联实体类型 → 中文。entity_type 由记忆提取器自由生成，未知值 fail-visible。 */
+const ENTITY_TYPE_LABEL: Record<string, string> = {
+  learning_card: "学习卡",
+  card: "学习卡",
+  note: "笔记",
+  source: "来源",
+  objective: "学习目标",
+};
+
+function entityLinkText(entityType: string, entityId: string): string {
+  return `${ENTITY_TYPE_LABEL[entityType] ?? entityType} · ${entityId.slice(0, 8)}`;
+}
+
 export default function MemoryStarMapPage() {
   const [nodes, setNodes] = useState<MemoryStarMapNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // capability flag（COMPANION_MEMORY_STAR_MAP_V1）关闭时 API 返回 404：
+  // 这是“功能未开放”而非故障，渲染引导空状态而不是裸错误。
+  const [notAvailable, setNotAvailable] = useState(false);
 
   const reload = useCallback(() => {
     setError(null);
     void api.getCompanionMemoryStarMap().then((result) => {
+      setNotAvailable(false);
       setNodes((result.nodes as MemoryStarMapNode[]) ?? []);
     }).catch((caught) => {
+      if (caught instanceof ApiError && caught.status === 404) {
+        setNotAvailable(true);
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "暂时无法读取记忆星图");
     });
   }, []);
@@ -47,9 +68,9 @@ export default function MemoryStarMapPage() {
   return (
     <main className="memory-star-map-page">
       <header>
-        <span className="companion-memory-eyebrow"><i aria-hidden="true" /> MEMORY STAR MAP</span>
+        <span className="companion-memory-eyebrow"><i aria-hidden="true" /> AI 伴星</span>
         <h1>记忆星图</h1>
-        <p>记忆节点挂在 card / keyPoint / note / source / learning_run 等实体上。</p>
+        <p>每条记忆都挂在学习卡、笔记、来源与学习记录上，可以追溯出处。</p>
       </header>
 
       <nav className="memory-star-map-links-nav" aria-label="快捷入口">
@@ -67,7 +88,19 @@ export default function MemoryStarMapPage() {
         </Link>
       </nav>
       {error && <p className="memory-star-map-error" role="alert">{error}</p>}
-      {!nodes && !error ? (
+      {notAvailable && !error ? (
+        <section className="memory-star-map-empty" role="status">
+          <Icon.StarMap aria-hidden="true" />
+          <strong>记忆星图暂未开放</strong>
+          <p>
+            记忆星图正在逐步放开。你仍可以在记忆管理页查看、确认与整理
+            伴星记住的全部内容。
+          </p>
+          <Link href="/companion/memory" className="memory-star-map-empty-link">
+            前往记忆管理
+          </Link>
+        </section>
+      ) : !nodes && !error ? (
         <p className="memory-star-map-loading" role="status">正在读取…</p>
       ) : nodes && nodes.length === 0 ? (
         <p className="memory-star-map-empty">还没有可展示的记忆节点。</p>
@@ -82,8 +115,8 @@ export default function MemoryStarMapPage() {
                 <ul className="memory-star-map-links">
                   {node.entityLinks.map((link, index) => (
                     <li key={`${link.entityType}:${link.entityId}:${index}`}>
-                      {link.entityType} · {link.entityId.slice(0, 8)}
-                      {link.orphaned ? "（孤儿）" : ""}
+                      {entityLinkText(link.entityType, link.entityId)}
+                      {link.orphaned ? "（引用已失效）" : ""}
                     </li>
                   ))}
                 </ul>

@@ -26,6 +26,11 @@ import { ObjectiveSourceLine } from "./ObjectiveSourceLine";
 import { ObjectivePrimaryAction } from "./ObjectivePrimaryAction";
 import { objectiveActionHref } from "./action-navigation";
 import { ObjectiveSkeleton, ObjectiveError, ObjectiveEmpty } from "./ObjectiveStatePrimitives";
+import {
+  objectiveDisplayTitle,
+  objectiveDistinctSummary,
+  reasonCodeLabels,
+} from "./labels";
 
 function chipStateFor(dashboard: LearningDashboardV2, objectiveId: string): ReturnType<typeof objectiveChipStateFromSurface> {
   const surface = dashboard.queue.find((q) => q.objective.objectiveId === objectiveId)?.objective
@@ -176,10 +181,14 @@ export function DashboardHome(props: {
             <div className="dashboard-home-focus-copy">
               <h2 id="dashboard-home-focus-title">
                 <Link href={objectiveDetailHref(primaryFocus.objective)}>
-                  {primaryFocus.objective.content.conceptLabel ?? primaryFocus.objective.content.publicSummary.slice(0, 40)}
+                  {objectiveDisplayTitle(primaryFocus.objective.content)}
                 </Link>
               </h2>
-              <p>{primaryFocus.objective.content.publicSummary}</p>
+              {/* conceptLabel 为空时标题即 publicSummary，同句不重复展示 */}
+              {(() => {
+                const summary = objectiveDistinctSummary(primaryFocus.objective.content);
+                return summary ? <p>{summary}</p> : null;
+              })()}
             </div>
             <ObjectivePrimaryAction
               action={primaryFocus.action}
@@ -197,7 +206,7 @@ export function DashboardHome(props: {
                   : undefined
               }
             />
-            <span className="dashboard-home-focus-reason">{primaryFocus.reasonCodes.join(" · ")}</span>
+            <span className="dashboard-home-focus-reason">{reasonCodeLabels(primaryFocus.reasonCodes)}</span>
           </div>
         </section>
       )}
@@ -212,7 +221,7 @@ export function DashboardHome(props: {
               <li key={entry.objective.objectiveId} className="dashboard-home-queue-item">
                 <div>
                   <Link href={objectiveDetailHref(entry.objective)}>
-                    {entry.objective.content.conceptLabel ?? entry.objective.content.publicSummary.slice(0, 40)}
+                    {objectiveDisplayTitle(entry.objective.content)}
                   </Link>
                   <ObjectiveSourceLine
                     noteTitle={entry.objective.sources.primaryNote?.title ?? null}
@@ -236,19 +245,22 @@ export function DashboardHome(props: {
             <Link href="/cards" className="dashboard-home-section-link">查看全部</Link>
           </header>
           <div className="dashboard-home-card-grid">
-            {recentObjectives.map((objective) => (
-              <Link key={objective.objectiveId} href={objectiveDetailHref(objective)} className="dashboard-home-card">
-                <div className="dashboard-home-card-topline">
-                  <ObjectiveStatusChip state={chipStateFor(dashboard, objective.objectiveId)} />
-                </div>
-                <h4>{objective.content.conceptLabel ?? objective.content.publicSummary.slice(0, 40)}</h4>
-                <p>{objective.content.publicSummary.slice(0, 80)}</p>
-                <ObjectiveSourceLine
-                  noteTitle={objective.sources.primaryNote?.title ?? null}
-                  freshness={objective.content.freshness}
-                />
-              </Link>
-            ))}
+            {recentObjectives.map((objective) => {
+              const summary = objectiveDistinctSummary(objective.content, 80);
+              return (
+                <Link key={objective.objectiveId} href={objectiveDetailHref(objective)} className="dashboard-home-card">
+                  <div className="dashboard-home-card-topline">
+                    <ObjectiveStatusChip state={chipStateFor(dashboard, objective.objectiveId)} />
+                  </div>
+                  <h4>{objectiveDisplayTitle(objective.content)}</h4>
+                  {summary && <p>{summary}</p>}
+                  <ObjectiveSourceLine
+                    noteTitle={objective.sources.primaryNote?.title ?? null}
+                    freshness={objective.content.freshness}
+                  />
+                </Link>
+              );
+            })}
           </div>
         </section>
       )}

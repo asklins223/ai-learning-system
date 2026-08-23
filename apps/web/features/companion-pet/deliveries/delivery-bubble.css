@@ -1,19 +1,20 @@
-/* Durable delivery 展示气泡（文档 16 §14.3）。克制表面：一条消息 + 两个动作。 */
+/* Durable delivery 展示气泡（文档 16 §14.3）。克制表面：一条消息 + 两个动作。
+ * 颜色全部来自 tokens.css 语义 token，随日/夜主题翻转。 */
 
 .pet-delivery-bubble {
   position: absolute;
   left: calc(100% + 14px);
   top: 24px;
   width: min(280px, calc(100vw - 120px));
-  background: var(--surface-1, #ffffff);
-  color: var(--text-1, #1a1d21);
-  border: 1px solid var(--border-1, rgba(0, 0, 0, 0.12));
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
   border-radius: 14px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-panel);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   z-index: 41;
   box-sizing: border-box;
   pointer-events: auto;
@@ -30,12 +31,12 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-2, #5a5f66);
+  color: var(--color-text-secondary);
 }
 
 .pet-delivery-actions {
   display: flex;
-  gap: 12px;
+  gap: var(--space-3);
   align-items: center;
   padding-top: 2px;
 }
@@ -43,17 +44,18 @@
 .pet-delivery-action {
   appearance: none;
   border: 0;
-  background: var(--accent-1, #3b6fe0);
-  color: #ffffff;
-  border-radius: 8px;
+  background: var(--color-action);
+  color: var(--color-on-action);
+  border-radius: var(--radius-sm);
   padding: 6px 12px;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
 }
 
 .pet-delivery-action:hover {
-  filter: brightness(1.05);
+  background: var(--color-action-hover);
 }
 
 .pet-delivery-link {
@@ -62,7 +64,7 @@
   background: none;
   padding: 2px 0;
   font-size: 12px;
-  color: var(--text-3, #8a8f96);
+  color: var(--color-text-tertiary);
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -71,7 +73,49 @@
 .pet-delivery-error {
   margin: 0;
   font-size: 12px;
-  color: var(--color-danger-text, #a33a2d);
+  color: var(--color-danger-text);
+}
+
+/* §14.1 记忆纠正：气泡内联编辑（替代原生 window.prompt）。 */
+.pet-delivery-correct {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pet-delivery-correct-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.pet-delivery-correct-original {
+  margin: 0;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.pet-delivery-correct-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 56px;
+  padding: 6px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.pet-delivery-correct-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
 }
 
 @media (max-width: 480px) {
@@ -90,15 +134,16 @@
   bottom: 96px;
   transform: translateX(-50%);
   max-width: 260px;
-  padding: 8px 14px;
-  border-radius: 12px;
-  background: rgba(20, 24, 34, 0.92);
-  color: #f4f5f7;
+  padding: var(--space-2) 14px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
   font-size: 13px;
   line-height: 1.5;
   z-index: 40;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
-  animation: pet-delta-notice-in 180ms ease-out;
+  box-shadow: var(--shadow-panel);
+  animation: pet-delta-notice-in var(--motion-base) var(--ease-standard);
 }
 
 @keyframes pet-delta-notice-in {

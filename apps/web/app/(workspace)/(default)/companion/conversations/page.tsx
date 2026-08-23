@@ -1,8 +1,9 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Icon } from "@/components/ui/icons";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { CompanionHistoryArchive } from "@/features/companion-history/CompanionHistoryArchive";
 import { COMPANION_HISTORY_FIXTURES } from "@/features/companion-history/history-fixtures";
 import {
@@ -75,6 +76,20 @@ function ProductionCompanionHistory({
     (message) => adaptProductionHistoryMessage(message as CompanionHistoryMessageInput),
   ), [messages]);
 
+  // 删除确认：ConfirmDialog 二次确认（替代原生 window.confirm）。
+  // Hooks 必须在 early return 之前调用。
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const confirmDelete = useCallback(async () => {
+    setDeleting(true);
+    try {
+      await deleteSelected();
+      setConfirmDeleteOpen(false);
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleteSelected]);
+
   if (loading) return <HistoryLoading />;
 
   // P8（文档 16 §10.4/§21.3）：导出/删除/召回接线（服务端端点已存在）。
@@ -84,9 +99,7 @@ function ProductionCompanionHistory({
   };
   const handleDelete = () => {
     if (!selectedId) return;
-    const confirmed = window.confirm("删除后将清除该对话的正文与索引，并保留最小审计留痕。已提交的学习事实不会改变。确定删除？");
-    if (!confirmed) return;
-    void deleteSelected();
+    setConfirmDeleteOpen(true);
   };
   const handleRecallPet = () => {
     // 仅 Electron Main 窗口存在 desktopAPI（浏览器 fail closed）。
@@ -94,28 +107,42 @@ function ProductionCompanionHistory({
   };
 
   return (
-    <CompanionHistoryArchive
-      conversations={conversations}
-      selectedId={selectedId}
-      entries={entries}
-      entriesLoading={messagesLoading}
-      onSelect={selectConversation}
-      source="production"
-      error={error}
-      limitationNote={enabled === false
-        ? "当前账户尚未开启文字历史读取；桌面伴星的其他能力不受影响。"
-        : "读取范围：最多 50 段活跃对话；每段最近 100 条，更早记录按需分页读取。"}
-      historyPage={{
-        loadedCount: entries.length,
-        // P8：真实 cursor 分页已接线（服务端 beforeSeq keyset + hasMore）。
-        hasEarlier: olderAvailable,
-        loading: olderLoading,
-        onLoadEarlier: () => void loadOlderMessages(),
-      }}
-      onExport={handleExport}
-      onDelete={handleDelete}
-      onRecallPet={handleRecallPet}
-    />
+    <>
+      <CompanionHistoryArchive
+        conversations={conversations}
+        selectedId={selectedId}
+        entries={entries}
+        entriesLoading={messagesLoading}
+        onSelect={selectConversation}
+        source="production"
+        error={error}
+        limitationNote={enabled === false
+          ? "当前账户尚未开启文字历史读取；桌面伴星的其他能力不受影响。"
+          : "读取范围：最多 50 段活跃对话；每段最近 100 条，更早记录按需分页读取。"}
+        historyPage={{
+          loadedCount: entries.length,
+          // P8：真实 cursor 分页已接线（服务端 beforeSeq keyset + hasMore）。
+          hasEarlier: olderAvailable,
+          loading: olderLoading,
+          onLoadEarlier: () => void loadOlderMessages(),
+        }}
+        onExport={handleExport}
+        onDelete={handleDelete}
+        onRecallPet={handleRecallPet}
+      />
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        title="删除这段对话？"
+        message="删除后将清除该对话的正文与索引，并保留最小审计留痕。已提交的学习事实不会改变。"
+        confirmLabel="删除"
+        variant="danger"
+        loading={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!deleting) setConfirmDeleteOpen(false);
+        }}
+      />
+    </>
   );
 }
 
