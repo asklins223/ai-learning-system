@@ -44,6 +44,8 @@ import {
   learningObjectivesV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
+import { companionSandboxNamespaces } from "../../db/schema/companion-sandbox.ts";
+import { understandingProjectionCheckpoints } from "../../db/schema/understanding-projection.ts";
 import type {
   CreateLearningRunRequestV1,
   LearningRunActionV1,
@@ -87,7 +89,7 @@ import {
   staleTaskRevision,
   variantNotAuthorized,
 } from "./run-errors.ts";
-import { buildRunPublicView } from "./run-view.ts";
+import { buildRunPublicView, deriveReturnTargetV1 } from "./run-view.ts";
 import { decryptDraftPayload, encryptDraftPayload, isDraftEncryptionAvailable } from "./run-draft-crypto.ts";
 
 // ─── 服务接口（路由层注入）───────────────────────────────────────────────
@@ -365,10 +367,9 @@ async function recentPresentedPayloadHashes(
   tx: ApiTransaction,
   scope: { workspaceId: string; userId: string; keyPointId: string },
 ): Promise<Set<string>> {
-  // presentation_history.key_point_id 列已退役；经 runId 关联到
-  // learning_runs.origin（origin 携带 keyPointId=objectiveId alias）
-  // 保持 objective 维度去重（surface-service 同款惯例，方案 20 §16/§29.4）。
-  const objectiveId = scope.keyPointId;
+  // 目标身份经 origin JSONB 的 alias 字段取（方案 20 §29.4）。注意存储的
+  // V2 形状只有 objectiveId（strictObject，无 keyPointId），rebase 前的
+  // 历史行才带 keyPointId——查询必须 coalesce 兼容两种形状。
   const rows = await tx
     .select({ publicPayloadHash: learningTaskPresentationHistory.publicPayloadHash })
     .from(learningTaskPresentationHistory)
@@ -376,7 +377,7 @@ async function recentPresentedPayloadHashes(
     .where(and(
       eq(learningTaskPresentationHistory.workspaceId, scope.workspaceId),
       eq(learningTaskPresentationHistory.userId, scope.userId),
-      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
+      sql`coalesce(${learningRuns.origin}->>'keyPointId', ${learningRuns.origin}->>'objectiveId') = ${scope.keyPointId}`,
       gte(learningTaskPresentationHistory.presentedAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)),
     ))
     // 热路径：只取最近一批用于展示去重（presentation-dedup 只需近端历史）。
@@ -444,6 +445,79 @@ function mapV1OriginToV2(origin: CreateLearningRunRequestV1["origin"]): Learning
         objectiveId: origin.keyPointId,
         ...(origin.sandboxNamespaceId ? { sandboxNamespaceId: origin.sandboxNamespaceId } : {}),
       };
+  }
+}
+
+/**
+ * V2 origin 特有 fail-closed 校验（§16.4 sandbox 隔离 + P7 投影基线新鲜度）。
+ *
+ * 2026-08-23 补回：V1 createRun 在 resolveOriginTarget 内校验 onboarding
+ * sandbox namespace 的存在性/归属/过期，以及 star_map baseline checkpoint 的
+ * 签名、作用域与 watermark 新鲜度；V2 rebase 时该函数被整体退役，两项校验
+ * 一并丢失（过期 namespace / 伪造基线可静默创建 Run）。语义与历史实现一致：
+ * 校验失败一律 contextStale（409）。
+ */
+async function validateV2OriginExtras(
+  tx: ApiTransaction,
+  scope: RunScope,
+  originV2: LearningRunOriginV2,
+): Promise<void> {
+  if (originV2.kind === "onboarding" && originV2.sampleMode === "sandbox") {
+    // 沙箱教学空间：必须存在、属于当前 workspace/user、active 且未过期。
+    if (!originV2.sandboxNamespaceId) throw contextStale("沙箱教学空间参数缺失");
+    const nsRows = await tx
+      .select({
+        id: companionSandboxNamespaces.id,
+        status: companionSandboxNamespaces.status,
+        expiresAt: companionSandboxNamespaces.expiresAt,
+      })
+      .from(companionSandboxNamespaces)
+      .where(and(
+        eq(companionSandboxNamespaces.id, originV2.sandboxNamespaceId),
+        eq(companionSandboxNamespaces.workspaceId, scope.workspaceId),
+        eq(companionSandboxNamespaces.userId, scope.userId),
+      ))
+      .limit(1);
+    const ns = nsRows[0];
+    if (!ns || ns.status !== "active" || ns.expiresAt.getTime() < Date.now()) {
+      throw contextStale("沙箱教学空间不存在或已过期");
+    }
+    return;
+  }
+  if (originV2.kind === "star_map") {
+    // 投影基线：签名可解析、作用域匹配且不落后于最新投影 → 才允许基于星图启动。
+    const { parseCheckpointToken, watermarkBehind } = await import("../understanding/projection-checkpoint.ts");
+    const baseline = parseCheckpointToken(originV2.baselineCheckpoint.token);
+    if (!baseline
+      || baseline.workspaceId !== scope.workspaceId
+      || baseline.userId !== scope.userId) {
+      throw contextStale("投影基线 checkpoint 无效或作用域不符");
+    }
+    const latestRows = await tx
+      .select({
+        canonical: understandingProjectionCheckpoints.lastCanonicalEventId,
+        practice: understandingProjectionCheckpoints.lastPracticeEventId,
+        capturedAt: understandingProjectionCheckpoints.capturedAt,
+      })
+      .from(understandingProjectionCheckpoints)
+      .where(and(
+        eq(understandingProjectionCheckpoints.workspaceId, scope.workspaceId),
+        eq(understandingProjectionCheckpoints.userId, scope.userId),
+      ))
+      .orderBy(desc(understandingProjectionCheckpoints.capturedAt))
+      .limit(1);
+    const latest = latestRows[0]
+      ? {
+          workspaceId: scope.workspaceId,
+          userId: scope.userId,
+          lastCanonicalEventId: latestRows[0].canonical,
+          lastPracticeEventId: latestRows[0].practice,
+          capturedAt: latestRows[0].capturedAt.toISOString(),
+        }
+      : null;
+    if (watermarkBehind(baseline, latest)) {
+      throw contextStale("投影基线已过期（星图有新的变化）");
+    }
   }
 }
 
@@ -542,6 +616,11 @@ async function resolveV2Scheduling(
       schedulerPolicyId: "review-schedule-v1",
     };
   }
+  // today / onboarding：无调度效果（2026-08-23 补回 V1 语义：onboarding
+  // sandbox 模式 reasonCode=sandbox，其余 not_authorized——V2 rebase 时丢失）。
+  if (origin.kind === "onboarding" && origin.sampleMode === "sandbox") {
+    return { kind: "no_effect", reasonCode: "sandbox" };
+  }
   return { kind: "no_effect", reasonCode: "not_authorized" };
 }
 
@@ -595,6 +674,9 @@ export async function createRunV2(
   const objectiveId = originV2.objectiveId;
   // resolveV2ObjectiveKeyPoint 校验迁移期 stable keyPointId alias（§29.4）
   await resolveV2ObjectiveKeyPoint(tx, { workspaceId, userId }, objectiveId);
+  // origin 特有 fail-closed 校验（2026-08-23 补回：V2 rebase 时随 resolveOriginTarget
+  // 一并丢失——sandbox namespace 过期/伪造投影基线此前可静默通过）。
+  await validateV2OriginExtras(tx, { workspaceId, userId }, originV2);
   const cardContentEpoch = await prepareCardContentEpoch(tx, workspaceId);
   const runId = crypto.randomUUID();
 
@@ -607,15 +689,10 @@ export async function createRunV2(
     workspaceId,
     userId,
     origin: originV2 as never,
-    // 2026-08-16（实机验证修复）：V2 card run 的 returnTarget 必须带 cardId
-    // （此前只有 objectiveId，前端返回时拼出 /cards/undefined → "这张学习卡
-    // 暂时打不开"）。objectiveId 标记 V2 卡，前端据此回 V2 详情页。
-    returnTarget: originV2.kind === "card"
-      ? { kind: "card", cardId: originV2.cardId, keyPointId: objectiveId, objectiveId }
-      : {
-          kind: originV2.kind === "review" ? "review" : originV2.kind === "star_map" ? "star_map" : originV2.kind === "today" ? "today" : "onboarding",
-          objectiveId,
-        } as never,
+    // returnTarget 一律由 origin 确定性推导出完整 V1 合同形状（含 keyPointId/
+    // scheduleId/lens/filter/destination），修复此前非 card 分支缺字段的漂移
+    // （2026-08-22 审查：review/onboarding/star_map 存储值缺 V1 合同字段）。
+    returnTarget: deriveReturnTargetV1(originV2),
     // 目标身份经 origin JSONB（keyPointId=objectiveId alias）。
     targetFingerprint: "",
     goal: request.goal,
@@ -921,8 +998,8 @@ export async function getRunPublicView(
       workspaceId: runRow.workspaceId,
       userId: runRow.userId,
       assistantSessionId: runRow.assistantSessionId,
-      origin: runRow.origin as never,
-      returnTarget: runRow.returnTarget as never,
+      origin: runRow.origin,
+      returnTarget: runRow.returnTarget,
       // 从 origin JSONB 取 objective alias（§29.4）。
       keyPointId: originObjectiveId(runRow.origin),
       targetFingerprint: runRow.targetFingerprint,

@@ -11,7 +11,13 @@
  * - activeCardId 从 learningCardsV2 读取（不再硬编码 null）。
  * - successorObjectiveId / successorCardId 从 lineage 表读取（superseded 场景）。
  * - initialValidation 从 initialValidationRemindersV2 读取（用于 action 解析）。
+ * - topologyRevision / checkpointToken 改为拓扑内容的确定性 sha256 指纹
+ *   （排序后的节点标识 + 边标识；TP-07 缓存语义修复）。旧实现
+ *   "v3-{nodes.length}-{edges.length}" 在数量不变、内容变化时不失效，
+ *   checkpointToken "v3-{Date.now()}" 每次请求必变、无法比较。消费方只有
+ *   routes.ts 的 ETag/If-None-Match 协商，依赖"内容变 → revision 变"。
  */
+import { createHash } from "node:crypto";
 import { and, eq, inArray, isNull, sql, desc } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { notes, sources } from "../../db/schema/note.ts";
@@ -103,11 +109,11 @@ export async function buildTopologySnapshotV3(
   );
 
   // personal overlay（TP-06）：active run + review per objective
-  // V2：learningRuns 没有 keyPointId 列，run.origin JSONB 中的
-  // keyPointId = objectiveId（方案 20 §29.4 alias 规则）；经 origin JSON 路径取。
+  // learningRuns 没有 keyPointId 列；目标 alias 经 origin JSONB coalesce
+  // (keyPointId, objectiveId) 取——存储的 V2 形状只有 objectiveId（方案 20 §29.4），
+  // rebase 前 V1 历史行才带 keyPointId。
   // 性能修复：原先查该用户全量 runs 再在内存中过滤，当用户有大量历史
-  // runs 时会严重退化。改为在 SQL 层用 origin->>'keyPointId' = ANY(...)
-  // 限定到目标 objectiveIds，只查相关 runs。
+  // runs 时会严重退化。改为在 SQL 层限定到目标 objectiveIds，只查相关 runs。
   // 安全：objectiveIds 作为 Drizzle sql 参数绑定，无注入风险。
   const objectiveIdSet = new Set(objectiveIds);
   const allRunRows = objectiveIds.length > 0
@@ -120,7 +126,9 @@ export async function buildTopologySnapshotV3(
           // Build a bound scalar list rather than interpolating a JS array into
           // a PostgreSQL cast; postgres-js serializes the latter as a malformed
           // array literal for the single-objective case.
-          sql`${learningRuns.origin}->>'keyPointId' IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
+          // 目标 alias 兼容两种存储形状：V2 现行行只有 objectiveId（strictObject），
+          // rebase 前 V1 历史行带 keyPointId（方案 20 §29.4）。coalesce 双兼容。
+          sql`coalesce(${learningRuns.origin}->>'keyPointId', ${learningRuns.origin}->>'objectiveId') IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];
@@ -128,7 +136,8 @@ export async function buildTopologySnapshotV3(
   const allRunIds: string[] = [];
   const runIdToObjective = new Map<string, string>();
   for (const run of allRunRows) {
-    const objectiveId = ((run.origin as Record<string, unknown> | null)?.keyPointId) as string | undefined;
+    // 与 SQL coalesce 对应：alias 取 keyPointId ?? objectiveId（双形状兼容）。
+    const objectiveId = (((run.origin as Record<string, unknown> | null)?.keyPointId) ?? ((run.origin as Record<string, unknown> | null)?.objectiveId)) as string | undefined;
     if (objectiveId && objectiveIdSet.has(objectiveId)) {
       allRunIds.push(run.runId);
       runIdToObjective.set(run.runId, objectiveId);
@@ -558,11 +567,16 @@ export async function buildTopologySnapshotV3(
   }
 
   // ── TP-07：integrity + pagination（单页全量；continuationToken 预留）────
+  // revision/token 由拓扑内容确定性派生（见 computeTopologyRevisionV3）：
+  // 同一拓扑内容 → 同一 revision/token；节点增删或 lifecycle/freshness 迁移、
+  // 边增删都会改变哈希。checkpointToken 是同一哈希的确定性派生，不再使用
+  // Date.now()（每次请求必变，令 token 不可比较）。
+  const revisionHash = computeTopologyRevisionV3(nodes, edges);
   return {
     version: 3,
     workspaceId: ctx.workspaceId,
-    topologyRevision: "v3-" + nodes.length + "-" + edges.length,
-    checkpointToken: "v3-" + Date.now(),
+    topologyRevision: "v3-" + revisionHash,
+    checkpointToken: "ckpt-v3-" + revisionHash,
     nodes,
     edges,
     continuationToken: null,
@@ -571,4 +585,44 @@ export async function buildTopologySnapshotV3(
       missingOriginObjectiveIds,
     },
   };
+}
+
+/**
+ * 拓扑内容指纹：对排序后的节点标识（nodeRef kind+id+lifecycle/freshness）
+ * 与边标识（两端点+kind）序列化做 sha256，取前 24 位十六进制。
+ *
+ * 排序是必需的：节点/边来自多条无 ORDER BY 的查询，行返回顺序不稳定，
+ * 排序后同一拓扑内容在任何请求下都产生同一哈希（ETag 304 可达的前提）。
+ * 刻意不纳入 label/summary 等展示文本与 edgeId/reasonCodes：指纹只反映
+ * 拓扑结构（节点集合 + 状态 + 边集合）。
+ */
+function computeTopologyRevisionV3(
+  nodes: readonly UnderstandingNodeProjectionV3[],
+  edges: readonly UnderstandingEdgeProjectionV3[],
+): string {
+  const lines = [
+    ...nodes.map(topologyNodeIdentity),
+    ...edges.map(topologyEdgeIdentity),
+  ].sort();
+  return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 24);
+}
+
+/** 节点标识：nodeRef kind+id + lifecycle/freshness（仅 objective/note 携带）。 */
+function topologyNodeIdentity(node: UnderstandingNodeProjectionV3): string {
+  // 合同为 z.union（普通联合、非 discriminated union）：嵌套属性 switch 只能
+  // 收窄 nodeRef，收窄不了外层 node；lifecycle/freshness 用 in 守卫提取。
+  const ref = node.nodeRef;
+  const lifecycle = "lifecycle" in node ? node.lifecycle : "";
+  const freshness = "freshness" in node ? node.freshness : "";
+  const id =
+    ref.kind === "source" ? ref.sourceId
+      : ref.kind === "note" ? ref.noteId
+        : ref.kind === "objective" ? ref.objectiveId
+          : ref.evidenceSnapshotId;
+  return `${ref.kind}|${id}|${lifecycle}|${freshness}`;
+}
+
+/** 边标识：from 端点 + kind + to 端点。 */
+function topologyEdgeIdentity(edge: UnderstandingEdgeProjectionV3): string {
+  return `${edge.from.kind}:${edge.from.id}|${edge.kind}|${edge.to.kind}:${edge.to.id}`;
 }

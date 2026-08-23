@@ -177,7 +177,8 @@ export type AssistantDeliveryPayloadRefV2 =
   | { kind: "action_result"; actionRunId: string }
   | { kind: "proactive_cue"; cueId: string; text?: string }
   | { kind: "system_event"; systemEventId: string; text?: string }
-  | { kind: "memory_item"; memoryItemId: string };
+  /** §16.2：contentPreview 为候选内容摘要 ≤80 字，仅 UI 展示；老 delivery 无该字段。 */
+  | { kind: "memory_item"; memoryItemId: string; contentPreview?: string };
 
 export type AssistantDeliveryV2 = {
   version: 2;
@@ -417,7 +418,7 @@ export const assistantDeliveryV2Schema = z.strictObject({
     z.strictObject({ kind: z.literal("action_result"), actionRunId: z.string().uuid() }),
     z.strictObject({ kind: z.literal("proactive_cue"), cueId: z.string().uuid(), text: z.string().min(1).max(240).optional() }),
     z.strictObject({ kind: z.literal("system_event"), systemEventId: z.string().min(1), text: z.string().min(1).max(240).optional() }),
-    z.strictObject({ kind: z.literal("memory_item"), memoryItemId: z.string().uuid() }),
+    z.strictObject({ kind: z.literal("memory_item"), memoryItemId: z.string().uuid(), contentPreview: z.string().min(1).max(80).optional() }),
   ]),
   displayLease: z
     .strictObject({

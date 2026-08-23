@@ -7,6 +7,7 @@
  * POST   /companion/memory/:id/confirm        — 确认候选
  * POST   /companion/memory/:id/reject         — 拒绝候选（soft delete）
  * POST   /companion/memory/:id/pin            — 固定
+ * POST   /companion/memory/:id/unpin          — 取消固定（pin 为置 true，非 toggle）
  * POST   /companion/memory/:id/archive        — 归档
  * POST   /companion/memory/:id/restore        — 恢复
  * POST   /companion/memory/:id/dismiss        — 忽略（30 天不弹）
@@ -38,6 +39,7 @@ import {
   pinMemory,
   resolveMemoryConflict,
   restoreMemory,
+  unpinMemory,
   upsertMemory,
   type MemoryKindV2,
   type MemoryScopeV2,
@@ -102,6 +104,14 @@ export async function memoryRoutes(app: FastifyInstance) {
     "/companion/memory/star-map",
     { preHandler: [requireSession] },
     async (req, reply) => {
+      // §9.8：记忆星图独立 feature flag（2026-08-19 补齐——此前路由无门控，
+      // 与"每个能力独立开关、fail-closed"的约定不符）。
+      if (process.env.COMPANION_MEMORY_STAR_MAP_V1 !== "true") {
+        return reply.code(404).send({
+          error: "companion_memory_star_map_disabled",
+          message: "记忆星图当前未开放",
+        });
+      }
       const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
       const result = await withWorkspaceTransaction(scope, (tx) => getMemoryStarMap(tx, scope));
       return reply.header("Cache-Control", "no-store").send(result);
@@ -277,6 +287,19 @@ export async function memoryRoutes(app: FastifyInstance) {
           // embedding 重建入队失败不阻断主请求
         }
       }
+      // §10.5 关系状态：每次确认记忆 familiarity +0.03（上限 1）。
+      // 独立事务 + 失败静默：关系状态是弱事实，不影响确认主链路。
+      try {
+        await withWorkspaceTransaction(scope, async (tx) => {
+          await tx.execute(sql`
+            UPDATE pet_profiles
+            SET familiarity = LEAST(familiarity + 0.03, 1), updated_at = now()
+            WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+          `);
+        });
+      } catch {
+        // 无人格档案行 / 权限缺失时静默跳过
+      }
       return reply.header("Cache-Control", "no-store").send(item);
     },
   );
@@ -313,6 +336,24 @@ export async function memoryRoutes(app: FastifyInstance) {
       const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
       const item = await withWorkspaceTransaction(scope, (tx) =>
         pinMemory(tx, scope, params.data.id),
+      );
+      if (!item) {
+        return reply.code(404).send({ error: "memory_not_found", message: "记忆不存在" });
+      }
+      return reply.header("Cache-Control", "no-store").send(item);
+    },
+  );
+
+  // pin 端点只置 pinned=true（非 toggle）；取消固定走独立 unpin 端点。
+  app.post<{ Params: { id: string } }>(
+    "/companion/memory/:id/unpin",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = memoryParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("memoryId 非法");
+      const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
+      const item = await withWorkspaceTransaction(scope, (tx) =>
+        unpinMemory(tx, scope, params.data.id),
       );
       if (!item) {
         return reply.code(404).send({ error: "memory_not_found", message: "记忆不存在" });

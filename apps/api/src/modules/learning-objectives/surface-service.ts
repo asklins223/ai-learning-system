@@ -19,10 +19,11 @@
  * Bug 10 修复：detail assembler 中 loadActiveRun 与 runIdRows 查询合并（消除重复查询）。
  *
  * 注意：API 端 schema 中 V1 keyPointId 已移除：
- * - learning_runs 没有 keyPointId 列，origin JSONB 中的 keyPointId = objectiveId（alias 规则）
+ * - learning_runs 没有 keyPointId 列，目标 alias 经 origin JSONB 取：V2 现行行只有
+ *   objectiveId（strictObject），rebase 前 V1 历史行带 keyPointId；查询一律 coalesce 双兼容
  * - review_schedules 没有 keyPointId 列，用 subjectType='card' + subjectId=objectiveId
  * - canonical_learning_event_outbox / practice_trail_event_outbox 没有 keyPointId 列，
- *   通过 runId 间接关联（run.origin->>'keyPointId' = objectiveId）
+ *   通过 runId 间接关联（origin alias coalesce 查询，同上）
  */
 import { and, eq, asc, inArray, sql, desc } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
@@ -324,7 +325,8 @@ async function assembleObjectiveSurfaceV3Inner(
     .where(and(
       eq(learningRuns.workspaceId, ctx.workspaceId),
       eq(learningRuns.userId, ctx.userId),
-      sql`${learningRuns.origin}->>'keyPointId' = ${objectiveId}`,
+      // alias 双形状兼容（V2 行 objectiveId / V1 历史行 keyPointId），与批量路径一致。
+      sql`coalesce(${learningRuns.origin}->>'keyPointId', ${learningRuns.origin}->>'objectiveId') = ${objectiveId}`,
     ))
     .orderBy(desc(learningRuns.createdAt));
   const runIds = allRunRows.map((r) => r.runId);
@@ -696,10 +698,10 @@ async function batchAssembleObjectiveSurfacesV3(
     }
   }
 
-  // 7. 批量查 all runs（通过 origin->>'keyPointId' JSON 路径查询）
+  // 7. 批量查 all runs（经 origin JSONB alias coalesce 路径查询）
   // 性能修复：原先查该用户全量 runs 再在内存中过滤，当用户有大量历史
-  // runs 时会严重退化。改为在 SQL 层用 origin->>'keyPointId' = ANY(...)
-  // 限定到目标 objectiveIds，只查相关 runs。
+  // runs 时会严重退化。改为在 SQL 层用 coalesce(keyPointId, objectiveId)
+  // IN (...) 限定到目标 objectiveIds，只查相关 runs。
   // 安全：objectiveIds 作为 Drizzle sql 参数绑定（非 sql.raw 拼接），无注入风险。
   const objectiveIdSet = new Set(objectiveIds);
   const allRunRows = objectiveIds.length > 0
@@ -716,7 +718,9 @@ async function batchAssembleObjectiveSurfacesV3(
           eq(learningRuns.userId, ctx.userId),
           // Keep each objective id as a bound scalar. Interpolating the JS
           // array directly into ANY(...::text[]) breaks with postgres-js.
-          sql`${learningRuns.origin}->>'keyPointId' IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
+          // 目标 alias 兼容两种存储形状：V2 现行行只有 objectiveId（strictObject），
+          // rebase 前 V1 历史行带 keyPointId（方案 20 §29.4）。coalesce 双兼容。
+          sql`coalesce(${learningRuns.origin}->>'keyPointId', ${learningRuns.origin}->>'objectiveId') IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];
@@ -726,7 +730,8 @@ async function batchAssembleObjectiveSurfacesV3(
   const runIdToObjective = new Map<string, string>();
   for (const run of allRunRows) {
     const origin = run.origin as Record<string, unknown> | null;
-    const keyPointId = origin?.keyPointId as string | undefined;
+    // 与 SQL coalesce 对应：alias 取 keyPointId ?? objectiveId（双形状兼容）。
+    const keyPointId = ((origin?.keyPointId ?? origin?.objectiveId) as string | undefined);
     if (keyPointId && objectiveIdSet.has(keyPointId)) {
       allRunIds.push(run.runId);
       runIdToObjective.set(run.runId, keyPointId);

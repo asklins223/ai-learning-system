@@ -266,6 +266,25 @@ export async function pinMemory(
   return updated[0] ? toContract(updated[0]) : null;
 }
 
+/** 取消固定：恢复参与正常衰减与排序（与 pinMemory 对偶；pin 非.toggle）。 */
+export async function unpinMemory(
+  executor: ApiTransaction,
+  scope: MemoryScope,
+  memoryItemId: string,
+  now: Date = new Date(),
+): Promise<MemoryItemV2 | null> {
+  const updated = await executor.update(assistantMemoryItems)
+    .set({ pinned: false, updatedAt: now })
+    .where(and(
+      eq(assistantMemoryItems.id, memoryItemId),
+      eq(assistantMemoryItems.workspaceId, scope.workspaceId),
+      eq(assistantMemoryItems.userId, scope.userId),
+      isNull(assistantMemoryItems.deletedAt),
+    ))
+    .returning();
+  return updated[0] ? toContract(updated[0]) : null;
+}
+
 /** 归档：不参与检索，可恢复。 */
 export async function archiveMemory(
   executor: ApiTransaction,

@@ -472,6 +472,9 @@ export async function freezeTargetSnapshotV2(
     objectiveRevision: revision.revision,
     objectiveStatement: revision.objectiveStatement,
     publicSummary: revision.publicSummary,
+    // 迁移期存量 revision 的 concept_label 可能为 NULL（回填前）；快照 hash 为
+    // 写入时全新计算，与 revision 行上历史存值不存在比对关系，缺省按空串参与。
+    conceptLabel: revision.conceptLabel ?? "",
     knowledgeForm,
     canonicalAnswerHash,
     learningSupportHash,

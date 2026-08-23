@@ -584,6 +584,10 @@ export const learningObjectiveDraftV2Schema = z
   .strictObject({
     objectiveStatement: z.string().min(1).max(2000),
     publicSummary: z.string().min(1).max(1500),
+    // Plan 23 W1-05：概念级知识标题（名词短语；不把 cue/prompt/完整命题当标题）。
+    // 2026-08-22 修复：此前合同缺此字段导致 revision.concept_label 永远为 NULL，
+    // 前端标题回退 publicSummary 造成"标题=摘要"。空值只允许迁移期存量记录。
+    conceptLabel: z.string().min(1).max(200),
     knowledgeForm: knowledgeFormV2Schema,
     preferredTaskIntents: z.array(taskIntentSchema).min(1).max(6),
     canonicalAnswer: canonicalAnswerV2Schema,

@@ -298,6 +298,8 @@ const modelObjectiveDraftSchema = z
   .strictObject({
     objectiveStatement: z.string().min(1).max(2000),
     publicSummary: z.string().min(1).max(1500),
+    // Plan 23 W1-05：概念级标题（2026-08-22 修复 concept_label 恒 NULL）。
+    conceptLabel: z.string().min(1).max(200),
     knowledgeForm: z.enum([
       "fact", "definition", "relationship", "comparison", "sequence",
       "procedure", "causal_model", "boundary", "application_rule",

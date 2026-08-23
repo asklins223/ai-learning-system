@@ -260,7 +260,13 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
       const memoryId = memoryRows[0]?.id;
       if (memoryId) {
         const dedupeKey = `memory-candidate:${sourceEventId}`;
-        const payloadRef = JSON.stringify({ kind: "memory_item", memoryItemId: memoryId });
+        // §16.2：delivery 携带候选内容摘要（≤80 字），气泡确认卡可直接展示，
+        // 无需二次查询；老 delivery 无该字段时前端回退通用文案。
+        const payloadRef = JSON.stringify({
+          kind: "memory_item",
+          memoryItemId: memoryId,
+          contentPreview: candidate.content.slice(0, 80),
+        });
         await tx.execute(sql`
           INSERT INTO assistant_deliveries
             (assistant_session_id, workspace_id, user_id, inbox_sequence, dedupe_key, state, kind, payload_ref, expires_at)

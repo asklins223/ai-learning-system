@@ -41,6 +41,9 @@ export function computeTargetRevisionHashV2(input: {
   objectiveRevision: number;
   objectiveStatement: string;
   publicSummary: string;
+  // Plan 23 W1-05：概念级标题参与 target revision hash（2026-08-22 补）。
+  // 历史快照不含该输入：hash 每次写入时重算，不存在跨版本比对问题。
+  conceptLabel: string;
   knowledgeForm: string;
   canonicalAnswerHash: string;
   learningSupportHash: string;

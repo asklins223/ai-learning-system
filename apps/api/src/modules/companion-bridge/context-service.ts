@@ -190,10 +190,16 @@ async function verifyEntityRefs(
     // 用 ARRAY[$1,$2,...] 展开（而非 `ANY(${array})`）：postgres.js 对**单元素** JS 数组
     // 会折叠为标量字符串参数（报“malformed array literal”），ARRAY[...] 逐参绑定恒稳定；
     // 每个 id 走独立绑定位（无注入风险）。
+    // 2026-08-23 修复：V2 表的业务键与代理主键分离（learning_cards_v2.card_id /
+    // learning_objectives_v2.objective_id），EntityRef 携带的是业务键——按表选择
+    // 查找列，其余表仍用 id。
+    const idColumn = table === "learning_cards_v2" ? "card_id"
+      : table === "learning_objectives_v2" ? "objective_id"
+      : "id";
     const idList = sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `);
     const rows = await tx.execute(sql`
-      SELECT id FROM ${sql.raw(table)}
-      WHERE workspace_id = ${scope.workspaceId} AND id = ANY(ARRAY[${idList}])
+      SELECT ${sql.raw(idColumn)} AS id FROM ${sql.raw(table)}
+      WHERE workspace_id = ${scope.workspaceId} AND ${sql.raw(idColumn)} = ANY(ARRAY[${idList}])
     `);
     const found = new Set(
       (rows as unknown as Array<Record<string, unknown>>).map((r) => String(r.id)),

@@ -100,6 +100,9 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
 - **原子性（硬要求）**：objectiveStatement 只描述规划目标这一个核心目标；禁止用
   "以及/分别/同时/和"把多个独立目标拼接进 statement 或 front.prompt——那是质量
   门禁会拒绝的（objective_not_atomic）。规划目标若有多个子点，只保留核心一个。
+- conceptLabel 是这条知识的**概念级标题**：一个简短的名词短语（≤40 字），用于
+  首页/列表/星图展示。禁止把 front 的 cue/prompt、完整命题句或"理解：xxx"式
+  前缀当标题；标题应指向概念本身（如"牛顿第二定律的适用条件"）。
 - front 必须在给出 cue/prompt 时不泄漏 canonical answer 的关键结论或数值。
 - 必须明确输出 transformationKind（retrieval_definition / mechanism_reconstruction
   / structured_comparison / procedure_reconstruction / boundary_discrimination /
@@ -122,6 +125,7 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   "objective": {
     "objectiveStatement": "...",
     "publicSummary": "...",
+    "conceptLabel": "概念级标题（名词短语，≤40字）",
     "knowledgeForm": "...",
     "preferredTaskIntents": ["recall"],
     "canonicalAnswer": {

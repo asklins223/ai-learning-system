@@ -34,6 +34,7 @@ import {
 } from "@ailearn/shared/card-generation-v2-hashing";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { DomainError } from "@ailearn/shared";
+import { deriveConceptLabel } from "./concept-label.ts";
 
 // ─── Authoring Provider 接口 ─────────────────────────────────────────────
 
@@ -196,6 +197,10 @@ export class DeterministicAuthoringProvider implements AuthoringProvider {
     const objective: LearningObjectiveDraftV2 = {
       objectiveStatement: planObjective.objectiveStatement,
       publicSummary: planObjective.objectiveStatement.slice(0, 200),
+      // W1-05：确定性 fallback 用派生标题（仅测试/precheck 路径，发布前仍过 Critic）。
+      conceptLabel: deriveConceptLabel({
+        objectiveStatement: planObjective.objectiveStatement,
+      }),
       knowledgeForm: planObjective.knowledgeForm,
       preferredTaskIntents: ["recall"],
       canonicalAnswer,

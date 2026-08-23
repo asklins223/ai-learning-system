@@ -101,7 +101,7 @@ export async function exportCompanionDataStream(
         hasher.update(`${line}\n`);
         await onLine(line);
       };
-      await onLine(JSON.stringify({
+      await emitLine(JSON.stringify({
         version: 1,
         kind: "manifest",
         format: "companion-export-ndjson-v1",
@@ -390,7 +390,11 @@ export async function exportCompanionDataStream(
       }
 
       const recordsSha256 = hasher.digest("hex");
-      await emitLine(JSON.stringify({
+      // footer 不参与 recordsSha256（覆盖范围至 footer 前一行为止），且 hasher
+      // 已终结——必须直写 onLine，不能走会 update 哈希的 emitLine（2026-08-23
+      // 修复：此前经 emitLine 写 footer 触发 ERR_CRYPTO_HASH_FINALIZED，
+      // 导出必失败）。
+      await onLine(JSON.stringify({
         version: 1,
         kind: "footer",
         counts,

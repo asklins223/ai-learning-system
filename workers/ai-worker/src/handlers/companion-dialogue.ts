@@ -727,6 +727,8 @@ export async function runCompanionDialogue(
             provider: embeddingProvider,
             runId: read.runId,
             groundedTutorContext: read.groundedTutorContext,
+            // §9.2.2：按页面类型推导 currentScope（card/learning_run/review → task）。
+            pageContext: read.pageContext,
           },
         ),
       );
@@ -1103,6 +1105,26 @@ export async function runCompanionDialogue(
         );
       },
     );
+    // §10.5 关系状态：对话成功完成一次 turn，familiarity +0.01（上限 1）、
+    // interaction_count +1、刷新 last_active_at。独立事务 + 失败静默：
+    // 关系状态是弱事实，绝不影响对话主链路（迁移 0178 前该 UPDATE 无权限也安全跳过）。
+    try {
+      await withWorkerWorkspaceTransaction(
+        { workspaceId: ctx.workspaceId, userId: read.userId },
+        async (tx) => {
+          await tx.execute(sql`
+            UPDATE pet_profiles
+            SET familiarity = LEAST(familiarity + 0.01, 1),
+                interaction_count = interaction_count + 1,
+                last_active_at = now(),
+                updated_at = now()
+            WHERE workspace_id = ${ctx.workspaceId} AND user_id = ${read.userId}
+          `);
+        },
+      );
+    } catch (err) {
+      logger.debug({ runId: read.runId, err }, "companion relationship bump skipped");
+    }
   } catch (err) {
     // 写阶段失败：终态事务回滚，但前面已落库的 delta 仍然存在；显式
     // 投影 failed/error，避免 job retry/dead-letter 后 run 永久停在 running。

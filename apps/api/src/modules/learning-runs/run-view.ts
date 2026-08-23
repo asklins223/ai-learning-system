@@ -19,15 +19,131 @@ import type {
   TaskIntentV1,
   TaskPurposeV1,
   TrustClassV1,
+  UnderstandingGraphFilterV1,
+  UnderstandingLensV1,
 } from "@ailearn/shared";
+import { learningRunPublicSchema } from "@ailearn/shared";
+
+function readString(source: unknown, key: string): string | undefined {
+  if (!source || typeof source !== "object") return undefined;
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * 存储的 run origin（jsonb）→ 公开合同 LearningRunOriginV1。
+ *
+ * 合同漂移修复（2026-08-22 审查）：createRunV2 写入的是 V2 形状
+ * （objectiveId，无 keyPointId，方案 20 §29.4 alias），而公开响应承诺的是
+ * LearningRunOriginV1（keyPointId）。此处统一归一：keyPointId 取
+ * keyPointId ?? objectiveId（rebase 前的 V1 历史行带 keyPointId，
+ * 现行 V2 行只有 objectiveId），其余字段按 kind 透传。
+ */
+export function normalizeOriginToV1(origin: unknown): LearningRunOriginV1 {
+  if (!origin || typeof origin !== "object") {
+    throw new Error("run origin 缺失或形状非法");
+  }
+  const o = origin as Record<string, unknown>;
+  const keyPointId = readString(o, "keyPointId") ?? readString(o, "objectiveId");
+  if (!keyPointId) throw new Error("run origin 缺少目标 alias（keyPointId/objectiveId）");
+  switch (o.kind) {
+    case "card":
+      return { kind: "card", cardId: readString(o, "cardId") ?? "", keyPointId };
+    case "review":
+      return {
+        kind: "review",
+        scheduleId: readString(o, "scheduleId") ?? "",
+        keyPointId,
+        scheduleGeneration: typeof o.scheduleGeneration === "number" ? o.scheduleGeneration : 1,
+      };
+    case "star_map":
+      return {
+        kind: "star_map",
+        keyPointId,
+        lens: o.lens as UnderstandingLensV1,
+        filter: o.filter as UnderstandingGraphFilterV1,
+        ...(readString(o, "routePlanId") ? { routePlanId: readString(o, "routePlanId") } : {}),
+        baselineCheckpoint: o.baselineCheckpoint as ProjectionCheckpointV1,
+      };
+    case "today":
+      return {
+        kind: "today",
+        ...(readString(o, "recommendationId") ? { recommendationId: readString(o, "recommendationId") } : {}),
+        keyPointId,
+      };
+    case "onboarding":
+      return {
+        kind: "onboarding",
+        sampleMode: o.sampleMode === "sandbox" ? "sandbox" : "own_content",
+        keyPointId,
+        ...(readString(o, "sandboxNamespaceId") ? { sandboxNamespaceId: readString(o, "sandboxNamespaceId") } : {}),
+      };
+    default:
+      throw new Error(`run origin kind 非法: ${String(o.kind)}`);
+  }
+}
+
+/**
+ * 由 origin 推导公开合同 LearningRunReturnTargetV1。
+ *
+ * 修复历史漂移：createRunV2 此前对非 card origin 写入 `{kind, objectiveId}`，
+ * 缺 V1 合同要求的 keyPointId/destination/lens/filter 等字段。现一律从
+ * origin 确定性推导（单一事实源，杜绝再漂移）；storedReturnTarget 仅作为
+ * lens/filter 等透传字段的兜底来源（兼容极端残缺行）。
+ * onboarding destination 无历史消费者，约定：own_content→card、sandbox→today。
+ */
+export function deriveReturnTargetV1(origin: unknown, storedReturnTarget?: unknown): LearningRunReturnTargetV1 {
+  const o = (origin && typeof origin === "object" ? origin : {}) as Record<string, unknown>;
+  const stored = (storedReturnTarget && typeof storedReturnTarget === "object" ? storedReturnTarget : {}) as Record<string, unknown>;
+  const keyPointId = readString(o, "keyPointId") ?? readString(o, "objectiveId") ?? "";
+  switch (o.kind) {
+    case "card": {
+      const cardId = readString(o, "cardId") ?? readString(stored, "cardId") ?? "";
+      return {
+        kind: "card",
+        cardId,
+        keyPointId,
+        ...(readString(o, "objectiveId") ? { objectiveId: readString(o, "objectiveId") } : {}),
+      };
+    }
+    case "review":
+      return {
+        kind: "review",
+        scheduleId: readString(o, "scheduleId"),
+        keyPointId,
+      };
+    case "star_map":
+      return {
+        kind: "star_map",
+        keyPointId,
+        lens: (o.lens ?? stored.lens) as UnderstandingLensV1,
+        filter: (o.filter ?? stored.filter) as UnderstandingGraphFilterV1,
+        ...(readString(o, "routePlanId") || readString(stored, "routePlanId")
+          ? { routePlanId: readString(o, "routePlanId") ?? readString(stored, "routePlanId") }
+          : {}),
+      };
+    case "today":
+      return { kind: "today" };
+    case "onboarding":
+      return {
+        kind: "onboarding",
+        destination: o.sampleMode === "sandbox" ? "today" : "card",
+      };
+    default:
+      // origin 形状非法时退回存储值（由 learningRunPublicSchema 校验兜底拦截）。
+      return stored as LearningRunReturnTargetV1;
+  }
+}
 
 export interface RunRow {
   id: string;
   workspaceId: string;
   userId: string;
   assistantSessionId: string | null;
-  origin: LearningRunOriginV1;
-  returnTarget: LearningRunReturnTargetV1;
+  /** 存储原值：rebase 前 V1 形状（keyPointId）或现行 V2 形状（objectiveId）。公开值经 normalizeOriginToV1 归一。 */
+  origin: unknown;
+  /** 存储原值，仅作为 deriveReturnTargetV1 的透传字段兜底来源；公开值一律由 origin 推导。 */
+  returnTarget: unknown;
   keyPointId: string;
   targetFingerprint: string;
   goal: LearningRunPublicV1["goal"];
@@ -122,6 +238,9 @@ export function buildSchedulePolicySummary(schedulingAuthorization: unknown): Le
 
 export function buildRunPublicView(input: RunViewInput): LearningRunPublicV1 {
   const { run, tasks, variants, assessment, baselineCheckpoint } = input;
+  // 公开 origin 一律归一为 V1 合同形状（存储可能是 rebase 前的 V1 形状或现行 V2 形状）。
+  const publicOrigin = normalizeOriginToV1(run.origin);
+  const publicReturnTarget = deriveReturnTargetV1(run.origin, run.returnTarget);
 
   // 预索引：taskId → active variant，避免每个 task 线性扫描 variants。
   const activeVariantByTaskId = new Map<string, typeof variants[number]>();
@@ -197,14 +316,14 @@ export function buildRunPublicView(input: RunViewInput): LearningRunPublicV1 {
       }
     : null;
 
-  return {
+  const view: LearningRunPublicV1 = {
     version: 1,
     runId: run.id,
     workspaceId: run.workspaceId,
     userId: run.userId,
     assistantSessionId: run.assistantSessionId,
-    origin: run.origin,
-    returnTarget: run.returnTarget,
+    origin: publicOrigin,
+    returnTarget: publicReturnTarget,
     target: { kind: "key_point", keyPointId: run.keyPointId, fingerprint: run.targetFingerprint },
     projectionBaselineCheckpoint: baselineCheckpoint,
     goal: run.goal,
@@ -226,6 +345,9 @@ export function buildRunPublicView(input: RunViewInput): LearningRunPublicV1 {
     eventCursor: run.eventCursor,
     result: run.result,
   };
+  // 头注释承诺的合同防线（2026-08-22 接线）：公开视图必须严格满足 V1 合同，
+  // 形状漂移（如 origin/returnTarget 带 V2 字段）在此 fail-loud 而非静默出网。
+  return learningRunPublicSchema.parse(view) as LearningRunPublicV1;
 }
 
 function variantFamily(interaction: TaskInteractionV1): "voice" | "text" | "structured" {

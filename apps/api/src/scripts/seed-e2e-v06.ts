@@ -229,6 +229,7 @@ async function main() {
       revision: 1,
       objectiveStatement: "Earth's orbital period",
       publicSummary: "Earth's orbital period",
+      conceptLabel: "地球公转周期",
       knowledgeForm: "definition",
       preferredIntents: ["recall"],
       canonicalAnswer,

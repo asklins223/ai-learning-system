@@ -731,6 +731,9 @@ async function createOrUpdateObjectiveAndCard(
   const objectiveDraft = candidate.objectiveDraft as {
     objectiveStatement: string;
     publicSummary: string;
+    // Plan 23 W1-05：概念级标题。新候选必填；迁移期遗留候选可能缺失（→ NULL，
+    // 由 concept-label-backfill-cli 回填），不得因此阻断激活。
+    conceptLabel?: string | null;
     knowledgeForm: string;
     canonicalAnswer: unknown;
     learningSupport: {
@@ -837,6 +840,7 @@ async function createOrUpdateObjectiveAndCard(
         objectiveRevision: 1,
         objectiveStatement: objectiveDraft.objectiveStatement,
         publicSummary: objectiveDraft.publicSummary,
+        conceptLabel: objectiveDraft.conceptLabel ?? "",
         knowledgeForm: objectiveDraft.knowledgeForm,
         canonicalAnswerHash,
         learningSupportHash,
@@ -874,6 +878,7 @@ async function createOrUpdateObjectiveAndCard(
         revision: 1,
         objectiveStatement: objectiveDraft.objectiveStatement,
         publicSummary: objectiveDraft.publicSummary,
+        conceptLabel: objectiveDraft.conceptLabel ?? null,
         knowledgeForm: objectiveDraft.knowledgeForm,
         preferredIntents: objectiveDraft.preferredTaskIntents ?? [],
         canonicalAnswer: objectiveDraft.canonicalAnswer,
@@ -1253,6 +1258,7 @@ async function createOrUpdateObjectiveAndCard(
         objectiveRevision: newRevision,
         objectiveStatement: objectiveDraft.objectiveStatement,
         publicSummary: objectiveDraft.publicSummary,
+        conceptLabel: objectiveDraft.conceptLabel ?? "",
         knowledgeForm: objectiveDraft.knowledgeForm,
         canonicalAnswerHash,
         learningSupportHash,
@@ -1275,6 +1281,7 @@ async function createOrUpdateObjectiveAndCard(
         revision: newRevision,
         objectiveStatement: objectiveDraft.objectiveStatement,
         publicSummary: objectiveDraft.publicSummary,
+        conceptLabel: objectiveDraft.conceptLabel ?? null,
         knowledgeForm: objectiveDraft.knowledgeForm,
         preferredIntents: objectiveDraft.preferredTaskIntents ?? [],
         canonicalAnswer: objectiveDraft.canonicalAnswer,

@@ -43,6 +43,39 @@ const MEMORY_REF_CONTENT_MAX = 80;
 const MEMORY_CONTENT_MAX = 200;
 const MEMORY_BUDGET_MAX = 1000;
 
+/** 学习任务类页面 → 记忆检索使用 task scope；其余页面用 workspace。 */
+const TASK_SCOPE_PAGE_KINDS = new Set(["card", "learning_run", "review"]);
+
+/**
+ * 从 Bridge page context 推导记忆检索的 currentScope（§9.2.2）。
+ *
+ * 修复（2026-08-19 审查）：此前硬编码 currentScope='workspace'，导致 extractor
+ * 允许写入的 scope='task' 记忆永远召回不到、scope 维度形同虚设。现按页面类型
+ * 推导：学习卡/学习运行/复习页 → 'task'，其余 → 'workspace'。
+ * （scope='global' 的记忆在 SQL 中始终参与召回，无需在此传递。）
+ */
+export function deriveMemoryScope(pageContext: unknown): "workspace" | "task" {
+  if (pageContext == null) return "workspace";
+  let parsed: unknown = pageContext;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return "workspace";
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "workspace";
+  const container = parsed as { context?: unknown };
+  const context = (
+    container.context && typeof container.context === "object" && !Array.isArray(container.context)
+      ? container.context
+      : parsed
+  ) as { pageKind?: unknown };
+  return typeof context.pageKind === "string" && TASK_SCOPE_PAGE_KINDS.has(context.pageKind)
+    ? "task"
+    : "workspace";
+}
+
 /**
  * 检索并组装上下文。
  *
@@ -60,6 +93,8 @@ export async function assembleCompanionContext(
     provider?: EmbeddingProviderLike | null;
     runId: string;
     groundedTutorContext?: unknown;
+    /** Bridge page context（对象或 JSON 字符串），用于推导 currentScope。 */
+    pageContext?: unknown;
   },
 ): Promise<ContextAssemblyResult> {
   // 正式学习 grounded_tutor 不注入记忆/人格（§11.1）。
@@ -86,7 +121,7 @@ export async function assembleCompanionContext(
     {
       topK: 8,
       provider: input.provider ?? null,
-      currentScope: "workspace",
+      currentScope: deriveMemoryScope(input.pageContext),
     },
   );
 
@@ -129,9 +164,13 @@ export async function assembleCompanionContext(
       const ids = budgetedItems.map((item) => item.memoryId);
       // R29/R32：drizzle+postgres-js 数组参数序列化不可靠，使用显式 uuid[] 字面量。
       const idsLiteral = `{${ids.join(",")}}`;
+      // 只更新 last_used_at，绝不 bump updated_at：updated_at 是内容修改时间戳，
+      // keyword fallback 的排序键为 pinned DESC, importance DESC, updated_at DESC
+      // （companion-memory-vector.ts retrieveCompanionMemoriesKeyword）。若在召回时
+      // 刷新 updated_at，每被召回一次该记忆就在降级检索中永久置顶，排序与内容新旧脱钩。
       await tx.execute(sql`
         UPDATE assistant_memory_items
-        SET last_used_at = now(), updated_at = now()
+        SET last_used_at = now()
         WHERE workspace_id = ${scope.workspaceId}
           AND user_id = ${scope.userId}
           AND id = ANY(${idsLiteral}::uuid[])

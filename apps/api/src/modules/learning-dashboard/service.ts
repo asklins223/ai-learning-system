@@ -7,7 +7,8 @@
  * - primaryFocus 优先级：resume > review due > first validation > practice 建议
  *   （W3-03 规则表）；
  * - 部分依赖失败 → 显式 degraded mode，不伪装空工作区（§19.2）；
- * - Dashboard revision 由 surface revisions 派生，供 ETag 失效。
+ * - Dashboard revision 只由稳定内容（counts/mode/degradation + 各 section 的
+ *   objectiveId+surfaceRevision 标识）派生，排除 snapshotAt，供 ETag 304 协商。
  */
 import { and, eq, lt, inArray, sql, desc, isNull } from "drizzle-orm";
 import { createHash } from "node:crypto";
@@ -165,7 +166,6 @@ export async function buildLearningDashboardV2(
   let queue: LearningDashboardV2["queue"] = [];
   let recentObjectives: LearningDashboardV2["recentObjectives"] = [];
   let suggestedNote: LearningDashboardV2["suggestedNote"] = null;
-  let surfaceRevisionSum = 0;
 
   if (counts.activeObjectives > 0) {
     try {
@@ -199,7 +199,6 @@ export async function buildLearningDashboardV2(
         .filter((s) => s.objectiveId !== primary?.surface.objectiveId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, RECENT_LIMIT);
-      surfaceRevisionSum = page.items.reduce((acc, s) => acc + s.surfaceRevision, 0);
     } catch (err) {
       degraded = degraded ?? { unavailableSections: [], retryable: true };
       degraded.unavailableSections.push("focus");
@@ -226,8 +225,35 @@ export async function buildLearningDashboardV2(
     }
   }
 
+  // dashboardRevision：只对稳定内容做哈希，排除 snapshotAt。snapshotAt 每次
+  // 请求都重新生成，混入哈希会让 ETag 每次必变，routes.ts 的
+  // If-None-Match → 304 分支永不可达。稳定内容 = counts + mode + degradation
+  // + primaryFocus/queue/recent 的 objectiveId+surfaceRevision 标识 +
+  // suggestedNote 的 noteId+noteVersionId。
+  const stableIdentity = {
+    counts,
+    mode,
+    degradation: degraded,
+    primaryFocus: primaryFocus
+      ? {
+          objectiveId: primaryFocus.objective.objectiveId,
+          surfaceRevision: primaryFocus.objective.surfaceRevision,
+        }
+      : null,
+    queue: queue.map((entry) => ({
+      objectiveId: entry.objective.objectiveId,
+      surfaceRevision: entry.objective.surfaceRevision,
+    })),
+    recent: recentObjectives.map((objective) => ({
+      objectiveId: objective.objectiveId,
+      surfaceRevision: objective.surfaceRevision,
+    })),
+    suggestedNote: suggestedNote
+      ? { noteId: suggestedNote.noteId, noteVersionId: suggestedNote.noteVersionId }
+      : null,
+  };
   const dashboardRevision = createHash("sha256")
-    .update(JSON.stringify({ counts, surfaceRevisionSum, snapshotAt }))
+    .update(JSON.stringify(stableIdentity))
     .digest("hex")
     .slice(0, 24);
 

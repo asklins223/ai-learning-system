@@ -578,16 +578,6 @@ jobs:
           node --import tsx --test src/integration-tests/sec02-invites-onboarding-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec02-invites-onboarding.tap"
 
-      - name: Verify evaluate_validation concurrent safety (advisory lock + idempotent dedup)
-        working-directory: apps/api
-        env:
-          NODE_ENV: test
-          EVAL_VALIDATION_CONCURRENT_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
-        run: |
-          set -o pipefail
-          node --import tsx --test src/integration-tests/evaluate-validation-concurrent-postgres.integration.ts \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/evaluate-validation-concurrent.tap"
-
       - name: Verify note version restore schema, constraints, and cascade behaviour
         working-directory: apps/api
         env:

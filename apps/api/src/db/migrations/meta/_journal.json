@@ -1247,6 +1247,41 @@
       "when": 1787241600000,
       "tag": "0177_retire_legacy_learning_run_keypoint_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 178,
+      "version": "7",
+      "when": 1787241600001,
+      "tag": "0178_worker_pet_profile_relationship",
+      "breakpoints": true
+    },
+    {
+      "idx": 179,
+      "version": "7",
+      "when": 1787241600002,
+      "tag": "0179_concept_label_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 180,
+      "version": "7",
+      "when": 1787241600003,
+      "tag": "0180_immutable_trigger_test_bypass",
+      "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1787241600004,
+      "tag": "0181_fix_claim_commit_outbox_ambiguity",
+      "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1787241600005,
+      "tag": "0182_rename_worker_jobs_policy_out_of_sec01_namespace",
+      "breakpoints": true
     }
   ]
 }

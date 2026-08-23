@@ -1,7 +1,8 @@
 /**
  * Plan 23 W3-06：Dashboard route + ETag。
- * GET /v2/learning-dashboard —— private/no-store 语义（user-scoped personal state）；
- * 支持 If-None-Match → 304。
+ * GET /v2/learning-dashboard —— private 缓存语义（user-scoped personal state）；
+ * Cache-Control 用 `private, no-cache`：仍强制每次与服务器协商（发条件请求），
+ * 但允许 If-None-Match → 304 复用；no-store 会禁用条件请求，使 ETag 形同虚设。
  */
 import type { FastifyInstance } from "fastify";
 import { requireSession } from "../identity/middleware.ts";
@@ -21,7 +22,9 @@ export async function learningDashboardRoutes(app: FastifyInstance) {
       return reply.code(304).send();
     }
     reply.header("etag", etag);
-    reply.header("cache-control", "private, no-store");
+    // no-cache（而非 no-store）：每次协商，但 304 可达；dashboardRevision
+    // 只哈希稳定内容（见 service.ts），内容不变时返回 304。
+    reply.header("cache-control", "private, no-cache");
     return dashboard;
   });
 }

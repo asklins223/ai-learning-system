@@ -70,7 +70,9 @@ const trustProxy = !trustProxyValue || normalizedTrustProxyValue === "false"
   : normalizedTrustProxyValue === "true"
     ? true
     : /^\d+$/.test(trustProxyValue)
-      ? Number(trustProxyValue)
+      // 数值跳数分支：运行时行为不变；新版 @types/fastify 将 trustProxy 收窄为
+      // string | boolean | string[]，此处仅做类型桥接。
+      ? Number(trustProxyValue) as unknown as boolean
       : trustProxyValue.split(",").map((value) => value.trim()).filter(Boolean);
 
 const app = Fastify({
