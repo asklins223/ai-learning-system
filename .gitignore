@@ -60,3 +60,11 @@ reasonix.toml
 
 # External reference projects (not part of the codebase)
 /Whispera-main/
+
+# —— 本地设计资产与工具状态（体积大，不入库）——
+/.impeccable/
+# 设计文档与参考资产整目录：3D 模型（3d-reference）、动效视频（motion）、
+# 静态图（static）及设计 spec 文档——体积大且属本地重构工作稿
+/docs/design/
+# 运行时 3D 模型目录（当前已跟踪的历史版本不受影响；新增文件不再入库）
+/apps/web/public/assets/3d/
