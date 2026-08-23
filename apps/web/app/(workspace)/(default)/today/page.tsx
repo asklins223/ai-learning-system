@@ -1215,7 +1215,7 @@ export default function TodayPage() {
             {dailyPreview?.status === "generated" ? <Icon.Sparkle /> : <Icon.Review />}
           </div>
           <div className="today-companion-daily-copy">
-            <span className="today-companion-daily-eyebrow">COMPANION DAILY</span>
+            <span className="today-companion-daily-eyebrow">AI 伴星</span>
             <h2 id="today-companion-daily-title">桌宠日记</h2>
             {dailyPreview?.status === "generated" && dailyPreview.summary ? (
               <p className="today-companion-daily-preview">{dailyPreview.summary}</p>
@@ -1447,7 +1447,7 @@ export default function TodayPage() {
               <div className="today-context-heading">
                 <span className="today-context-icon"><Icon.Review /></span>
                 <div>
-                  <span>{LEARNING_RUN_UI_PREVIEW ? "3-MINUTE RUN" : "NEXT MOVE"}</span>
+                  <span>{LEARNING_RUN_UI_PREVIEW ? "三分钟练习" : "下一步"}</span>
                   <h2 id="today-context-title">
                     {LEARNING_RUN_UI_PREVIEW ? "下一次微旅程" : "当前到期复习"}
                   </h2>
@@ -1499,7 +1499,7 @@ export default function TodayPage() {
               <div className="today-context-heading">
                 <span className="today-context-icon"><Icon.Refresh /></span>
                 <div>
-                  <span>LIVE CONTEXT</span>
+                  <span>实时上下文</span>
                   <h2 id="today-context-title">仍在处理</h2>
                 </div>
                 <strong>{runningActivities.length}</strong>
@@ -1530,7 +1530,7 @@ export default function TodayPage() {
               <div className="today-context-heading">
                 <span className="today-context-icon"><Icon.Target /></span>
                 <div>
-                  <span>OPTIONAL PRACTICE</span>
+                  <span>可选练习</span>
                   <h2 id="today-practice-title">巩固一个要点</h2>
                 </div>
               </div>

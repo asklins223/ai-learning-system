@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "geometry": "shared-rounded-plane",
+  "faces": [
+    "front",
+    "back"
+  ],
+  "content": "DOM"
+}

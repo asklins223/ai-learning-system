@@ -118,7 +118,7 @@ export function LearningCardV2Showcase() {
     <section className="learning-card-showcase" aria-label="Active Learning Card V2 双轴状态预览">
       <header className="learning-card-showcase__header">
         <div>
-          <p>ORTHOGONAL STATE MATRIX</p>
+          <p>状态矩阵预览</p>
           <h2>卡型 × 学习状态</h2>
           <span>每个组合都是合成预览 · 待 V2 后端；不是生产数据。</span>
         </div>

@@ -169,7 +169,7 @@ export const CompanionHistoryArchive = memo(function CompanionHistoryArchive({
 
       <header className="history-archive__masthead">
         <div className="history-archive__identity">
-          <span className="history-archive__eyebrow">COMPANION RECORD</span>
+          <span className="history-archive__eyebrow">伴星记录</span>
           <h1 id="companion-history-title">伴星交互档案</h1>
           <p>当前已载入的对话、主动介入和系统行动按发生顺序呈现；读取范围以每段记录顶部的边界说明为准。</p>
         </div>

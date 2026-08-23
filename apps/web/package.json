@@ -17,14 +17,19 @@
     "@ailearn/shared": "file:../../packages/shared",
     "@milkdown/kit": "^7.21.3",
     "@milkdown/react": "^7.21.3",
+    "@types/three": "^0.185.4",
     "katex": "^0.18.1",
     "next": "^15.5.21",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "sherpa-onnx": "^1.13.4"
+    "sherpa-onnx": "^1.13.4",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
+    "@gltf-transform/cli": "^4.4.2",
+    "@gltf-transform/extensions": "^4.4.2",
+    "@gltf-transform/functions": "^4.4.2",
     "@playwright/test": "^1.62.0",
     "@testing-library/react": "^16.3.2",
     "@types/katex": "^0.16.8",
@@ -35,6 +40,7 @@
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.1.0",
     "jsdom": "^26.1.0",
+    "meshoptimizer": "^1.2.0",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.19",
     "tsx": "^4.19.2",

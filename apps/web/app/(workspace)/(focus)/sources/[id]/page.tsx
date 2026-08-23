@@ -153,7 +153,7 @@ function SourceDetailHeader({
       </div>
 
       <div className="source-detail-header-context" aria-hidden="true">
-        <small>SOURCE READER</small>
+        <small>来源阅读</small>
         <span>{title}</span>
       </div>
 
@@ -530,7 +530,7 @@ export default function SourceDetailPage() {
             <span className="source-detail-state-icon" aria-hidden="true">
               <Icon.Warn />
             </span>
-            <p className="source-detail-state-kicker">SOURCE UNAVAILABLE</p>
+            <p className="source-detail-state-kicker">来源不可用</p>
             <h1>未找到这份来源</h1>
             <p>它可能已经被彻底清理，或者当前链接已经失效。</p>
             <Link
@@ -561,7 +561,7 @@ export default function SourceDetailPage() {
             <span className="source-detail-state-icon" aria-hidden="true">
               <Icon.Warn />
             </span>
-            <p className="source-detail-state-kicker">CONNECTION INTERRUPTED</p>
+            <p className="source-detail-state-kicker">连接中断</p>
             <h1>来源暂时无法读取</h1>
             <p>{loadError}</p>
             <div className="source-detail-state-actions">
@@ -629,7 +629,7 @@ export default function SourceDetailPage() {
   const statusCopy =
     detailMode === "processing"
       ? {
-          kicker: "PROCESSING SOURCE",
+          kicker: "正在处理资料",
           title: source.status === "draft" ? "资料正在等待解析" : "正在整理这份资料",
           description:
             source.status === "draft"
@@ -638,20 +638,20 @@ export default function SourceDetailPage() {
         }
       : detailMode === "failed"
         ? {
-            kicker: "PARSING NEEDS ATTENTION",
+            kicker: "解析需要关注",
             title: "这份资料暂时无法解析",
             description:
               "系统没有生成可阅读片段。你仍可以打开原始来源，或将这条资料归档后重新收录。",
           }
         : detailMode === "archived"
           ? {
-              kicker: "ARCHIVED SOURCE",
+              kicker: "资料已归档",
               title: "这份资料已归档",
               description:
                 "来源已经退出当前资料库；既有笔记不会受影响，历史信息仍保留在这里。",
             }
           : {
-              kicker: "SOURCE SAVED",
+              kicker: "资料已保存",
               title: originUrl ? "链接已保存，但没有正文片段" : "资料已保存，但没有可读片段",
               description: originUrl
                 ? "当前链接没有生成可引用正文，因此暂时不能创建笔记。你仍可以打开原网页查看。"
@@ -839,7 +839,7 @@ export default function SourceDetailPage() {
             <article className="source-reader-paper">
               <header className="source-reader-toolbar">
                 <div>
-                  <span>DOCUMENT READER</span>
+                  <span>原文阅读</span>
                   <h2>资料正文</h2>
                 </div>
                 {rawContent && (
@@ -963,7 +963,7 @@ export default function SourceDetailPage() {
                     <Icon.Folder />
                   </span>
                   <div>
-                    <small>SOURCE PROFILE</small>
+                    <small>归档信息</small>
                     <h2>资料档案</h2>
                   </div>
                 </header>
@@ -1011,7 +1011,7 @@ export default function SourceDetailPage() {
               <section className="source-detail-notes-panel">
                 <header>
                   <div>
-                    <small>LEARNING OUTPUT</small>
+                    <small>学习产出</small>
                     <h2>关联笔记</h2>
                   </div>
                   {!relatedNotesLoading && !relatedNotesError && (

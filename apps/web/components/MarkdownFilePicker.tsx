@@ -226,7 +226,7 @@ export function MarkdownFilePicker({
         <div className="markdown-file-selection">
           <div className="markdown-file-selection-heading">
             <div>
-              <span>SELECTED FILES</span>
+              <span>本地导入</span>
               <strong>已选择文件</strong>
             </div>
             <small aria-live="polite">

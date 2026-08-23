@@ -909,7 +909,7 @@ export default function NotesIndex() {
                 )}
               </span>
               <span className="notes-eyebrow">
-                {hasQuery || hasFilter ? "NO MATCHES" : "EMPTY LIBRARY"}
+                {hasQuery || hasFilter ? "没有匹配" : "还没有笔记"}
               </span>
               <h3 className="notes-empty-title">
                 {hasQuery

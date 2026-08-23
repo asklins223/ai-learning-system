@@ -447,7 +447,7 @@ export default function BenchmarkPage() {
         <div className="bench-layout">
           <aside className="bench-sidebar" aria-label="测评运行信息">
             <section className="bench-info-card">
-              <span className="bench-info-eyebrow">RUN PROFILE</span>
+              <span className="bench-info-eyebrow">基准配置</span>
               <h2>运行档案</h2>
               <dl className="bench-info-list">
                 <div><dt>内置样本</dt><dd>{initialLoading ? "—" : sampleCount ?? "未知"}</dd></div>
@@ -465,7 +465,7 @@ export default function BenchmarkPage() {
 
             {!report && (
               <section className="bench-info-card">
-                <span className="bench-info-eyebrow">PROTOCOL</span>
+                <span className="bench-info-eyebrow">评测协议</span>
                 <h2>测评边界</h2>
                 <ul className="bench-protocol-list">
                   <li><Icon.Card /><span><strong>生成学习卡</strong><small>验证结论提取</small></span></li>
@@ -477,7 +477,7 @@ export default function BenchmarkPage() {
 
             {report && (
               <nav className="bench-sample-nav" aria-label="报告样本目录">
-                <span className="bench-info-eyebrow">SAMPLE INDEX</span>
+                <span className="bench-info-eyebrow">样本索引</span>
                 <h2>样本目录</h2>
                 <div>
                   {report.results.map((note, index) => (
@@ -504,7 +504,7 @@ export default function BenchmarkPage() {
               <div className="bench-running-card" aria-live="polite">
                 <span className="bench-running-orbit" aria-hidden="true"><Icon.Bolt /></span>
                 <div>
-                  <span>BENCHMARK IN PROGRESS</span>
+                  <span>基准测评进行中</span>
                   <h2>正在运行完整链路</h2>
                   <p>这是同步长任务，当前接口不提供虚假百分比。页面会在报告真正完成后自动切换。</p>
                   <div className="bench-running-line"><i /></div>
@@ -528,7 +528,7 @@ export default function BenchmarkPage() {
             {phase === "idle" && !report && !initialLoading && (
               <div className="bench-launch-card">
                 <div className="bench-launch-mark" aria-hidden="true"><Icon.Target /></div>
-                <span className="bench-info-eyebrow">READY TO EVALUATE</span>
+                <span className="bench-info-eyebrow">准备就绪</span>
                 <h2>从真实链路开始，而不是从漂亮数字开始</h2>
                 <p>运行会创建 {sampleCount ?? "全部"} 篇内置样本，经过学习卡生成与证据对齐，再进入人工复核。</p>
                 <div className="bench-launch-flow" aria-label="测评执行流程">
@@ -564,12 +564,12 @@ export default function BenchmarkPage() {
 
                 <section className="bench-report-overview" aria-labelledby="bench-report-overview-title">
                   <div className="bench-report-heading">
-                    <span>REPORT OVERVIEW</span>
+                    <span>报告概览</span>
                     <h2 id="bench-report-overview-title">指标与退出判定</h2>
                     <p>{new Date(report.timestamp).toLocaleString("zh-CN")} · {report.totalNotes} 篇样本 · {report.totalKeyPoints} 条结论</p>
                   </div>
                   <div className={`bench-verdict ${verified && report.metrics.hardCitationPrecision !== null ? (report.metrics.hardCitationPrecision >= BENCHMARK_QUALITY_THRESHOLDS.hardCitationPrecision ? "is-pass" : "is-fail") : "is-pending"}`}>
-                    <span>{failedNotes > 0 ? "RUN INCOMPLETE" : verified ? "V0.4 EXIT CRITERIA" : "WAITING FOR HUMAN REVIEW"}</span>
+                    <span>{failedNotes > 0 ? "运行未完成" : verified ? "退出判定" : "等待复核"}</span>
                     <strong>
                       {failedNotes > 0
                         ? "运行不完整"
@@ -579,14 +579,14 @@ export default function BenchmarkPage() {
                           ? "达到退出标准"
                           : "尚未达到标准"}
                     </strong>
-                    <small>硬引用 Precision {report.metrics.hardCitationPrecision === null ? "尚未计算" : `${formatMetric(report.metrics.hardCitationPrecision)}%`} / 标准 90%</small>
+                    <small>硬引用准确率 {report.metrics.hardCitationPrecision === null ? "尚未计算" : `${formatMetric(report.metrics.hardCitationPrecision)}%`} / 标准 90%</small>
                   </div>
                 </section>
 
                 <div className="bench-metrics">
-                  <MetricCard label="硬引用准确率" code="HARD CITATION PRECISION" value={report.metrics.hardCitationPrecision} threshold={BENCHMARK_QUALITY_THRESHOLDS.hardCitationPrecision} primary verified={verified} />
-                  <MetricCard label="关键结论硬证据覆盖" code="KEY POINT COVERAGE" value={report.metrics.keyPointHardCoverage} threshold={BENCHMARK_QUALITY_THRESHOLDS.keyPointHardCoverage} verified={verified} />
-                  <MetricCard label="期望位置硬证据覆盖" code="EXPECTED BLOCK COVERAGE" value={report.metrics.validationExpectedPointsHardCoverage} threshold={BENCHMARK_QUALITY_THRESHOLDS.expectedBlockHardCoverage} verified={verified} />
+                  <MetricCard label="硬引用准确率" code="硬引用准确率" value={report.metrics.hardCitationPrecision} threshold={BENCHMARK_QUALITY_THRESHOLDS.hardCitationPrecision} primary verified={verified} />
+                  <MetricCard label="关键结论硬证据覆盖" code="关键结论覆盖" value={report.metrics.keyPointHardCoverage} threshold={BENCHMARK_QUALITY_THRESHOLDS.keyPointHardCoverage} verified={verified} />
+                  <MetricCard label="期望位置硬证据覆盖" code="期望位置覆盖" value={report.metrics.validationExpectedPointsHardCoverage} threshold={BENCHMARK_QUALITY_THRESHOLDS.expectedBlockHardCoverage} verified={verified} />
                 </div>
 
                 {failedNotes > 0 && (
@@ -606,7 +606,7 @@ export default function BenchmarkPage() {
                 {(phase === "reviewing" || phase === "submittingLabels") && (
                   <section className="bench-review-progress" aria-label="人工复核进度">
                     <div>
-                      <span>HUMAN REVIEW</span>
+                      <span>人工复核</span>
                       <h2>人工复核进度</h2>
                       <p>每条结论必须明确选择“准确”或“不准确”，未操作不会被当成错误。</p>
                     </div>

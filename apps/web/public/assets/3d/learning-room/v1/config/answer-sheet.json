@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "geometry": "shared-page-plane",
+  "content": "DOM",
+  "safeArea": {
+    "x": 0.08,
+    "y": 0.08,
+    "width": 0.84,
+    "height": 0.84
+  }
+}
