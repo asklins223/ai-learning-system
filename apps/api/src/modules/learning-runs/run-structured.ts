@@ -101,16 +101,18 @@ export function generateRelationTask(input: StructuredTargetInput): RelationPayl
   // 确定性正确边：quote 支撑 claim（evidence 语义）。
   const requiredEdges = [{ fromNodeId: quoteNodeId, toNodeId: claimNodeId, edgeKind: "supports" as const }];
   const rubricTargetId = `rubric:relation:${sha256Hex(`${input.claim}|${input.quote}`).slice(0, 12)}`;
+  const publicNodeLabels: Record<string, string> = {};
+  const claimLabel = input.claim.trim().slice(0, 60);
+  const quoteLabel = input.quote.trim().slice(0, 60);
+  if (claimLabel) publicNodeLabels[claimNodeId] = claimLabel;
+  if (quoteLabel) publicNodeLabels[quoteNodeId] = quoteLabel;
   return {
     interaction: {
       kind: "relation_canvas",
       publicNodeIds: [claimNodeId, quoteNodeId],
       allowedEdgeKinds,
     },
-    publicNodeLabels: {
-      [claimNodeId]: input.claim.slice(0, 60),
-      [quoteNodeId]: input.quote.slice(0, 60),
-    },
+    publicNodeLabels,
     solution: {
       kind: "relation",
       requiredEdges,

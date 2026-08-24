@@ -54,7 +54,7 @@ interface MockTxConfig {
   onboardingStatesFindFirst?: any;
   onboardingStatesFindFirstQueue?: any[];
 workspacesFindFirst?: any;
-evidencesFindFirst?: any;
+evidenceSnapshotsV2FindFirst?: any;
 }
 
 function createMockTx(config: MockTxConfig): any {
@@ -118,8 +118,8 @@ function createMockTx(config: MockTxConfig): any {
 findFirst: async () => config.workspacesFindFirst ?? undefined,
 findMany: async () => [],
 },
-evidences: {
-        findFirst: async () => config.evidencesFindFirst ?? undefined,
+evidenceSnapshotsV2: {
+        findFirst: async () => config.evidenceSnapshotsV2FindFirst ?? undefined,
         findMany: async () => [],
       },
     },
@@ -673,7 +673,7 @@ describe("invite-service markOnboardingStep (DB mock)", () => {
           version: "v1", steps: {}, status: "pending",
         },
       ]],
-      evidencesFindFirst: undefined, // evidence not found
+      evidenceSnapshotsV2FindFirst: undefined, // evidence not found
     });
 
     const result = await markOnboardingStep(WS_ID, USER_ID, "evidence_review", true, "ev-missing");
@@ -697,7 +697,7 @@ describe("invite-service markOnboardingStep (DB mock)", () => {
         [], // firstCard select
         [], // firstValidation select
       ],
-      evidencesFindFirst: { id: "ev-1", workspaceId: WS_ID },
+      evidenceSnapshotsV2FindFirst: { id: "ev-1", workspaceId: WS_ID },
     });
 
     const result = await markOnboardingStep(WS_ID, USER_ID, "evidence_review", true, "ev-1");
@@ -720,7 +720,7 @@ selectResult: [
         [{ id: "card-1" }],   // firstCard select
         [{ id: "val-1" }],    // firstValidation select
       ],
-      evidencesFindFirst: { id: "ev-1", workspaceId: WS_ID },
+      evidenceSnapshotsV2FindFirst: { id: "ev-1", workspaceId: WS_ID },
     });
 
     const result = await markOnboardingStep(WS_ID, USER_ID, "evidence_review", true, "ev-1");

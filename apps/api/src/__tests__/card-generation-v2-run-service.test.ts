@@ -99,7 +99,7 @@ function makeBaseRun(status = "review_ready") {
     currentPlanVersion: 1,
     reviewDraftRevision: 1,
     semanticSpec: {},
-    inputSnapshot: {},
+    inputSnapshot: { rawRequest: makeBaseRequest() },
     errorCode: null,
     errorMessage: null,
     supersedesRunId: null,
@@ -140,6 +140,60 @@ describe("createGenerationRunV2", () => {
 
     assert.equal(result.runId, RUN_ID);
     assert.equal(result.status, "no_cards_recommended");
+  });
+
+  it("rejects a modified payload for an existing idempotency key", async () => {
+    const existingRun = makeBaseRun("planning");
+    setupTx({
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [existingRun],
+          }),
+        }),
+      }),
+    });
+
+    await assert.rejects(
+      () => createGenerationRunV2(
+        { workspaceId: WORKSPACE_ID, userId: USER_ID },
+        NOTE_VERSION_ID,
+        { ...makeBaseRequest(), learningGoal: "apply" },
+        "test-key-001",
+      ),
+      (err: CardGenerationV2ServiceError) => {
+        assert.equal(err.code, "idempotency_conflict");
+        assert.equal(err.statusCode, 409);
+        return true;
+      },
+    );
+  });
+
+  it("re-checks the idempotency key after the workspace lock", async () => {
+    const existingRun = makeBaseRun("planning");
+    let lookupCount = 0;
+    setupTx({
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => {
+              lookupCount += 1;
+              return lookupCount === 1 ? [] : [existingRun];
+            },
+          }),
+        }),
+      }),
+    });
+
+    const result = await createGenerationRunV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      NOTE_VERSION_ID,
+      makeBaseRequest(),
+      "test-key-001",
+    );
+
+    assert.deepEqual(result, { runId: RUN_ID, status: "planning" });
+    assert.equal(lookupCount, 2);
   });
 
   it("throws note_version_not_found when version does not exist", async () => {
@@ -439,7 +493,9 @@ describe("closeGenerationRunV2", () => {
         set: (set: Record<string, unknown>) => {
           updates.push({ table, ...set });
           return {
-            where: () => {},
+            where: () => ({
+              returning: async () => [{ id: RUN_ID, reviewDraftRevision: 2 }],
+            }),
           };
         },
       }),

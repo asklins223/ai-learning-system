@@ -239,7 +239,7 @@ export function mapCompanionSseEvent(args: {
         typeof v.ordinal !== "number" ||
         !Number.isInteger(v.ordinal) ||
         v.ordinal < 1 ||
-        v.ordinal > 20 ||
+        v.ordinal > 200 ||
         typeof v.segmentId !== "string" ||
         !/^[a-f0-9]{64}$/.test(v.segmentId) ||
         typeof v.text !== "string" ||

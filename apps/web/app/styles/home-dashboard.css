@@ -206,3 +206,103 @@
   .dashboard-home-focus-body .objective-primary-action { width: 100%; }
   .dashboard-home-queue-item { flex-direction: column; align-items: stretch; }
 }
+
+/* ════ 2026-08-23 工艺升级层：对齐 today/sources 既成语言 ════ */
+
+/* 概览与建议区：纸面纹理 */
+.dashboard-home-overview,
+.dashboard-home-suggest {
+  background: var(--objective-paper-background);
+  background-size: var(--objective-paper-background-size);
+}
+
+/* 今日重点主卡：纸边堆叠阴影 + 角落装饰环 */
+.dashboard-home-focus {
+  position: relative;
+  overflow: hidden;
+  background: var(--objective-paper-background);
+  background-size: var(--objective-paper-background-size);
+  box-shadow:
+    0 5px 0 -1px var(--color-paper-deep),
+    0 6px 0 -1px var(--color-border),
+    var(--shadow-paper);
+}
+.dashboard-home-focus::before {
+  position: absolute;
+  top: -74px;
+  right: 24px;
+  z-index: -1;
+  width: 252px;
+  height: 252px;
+  border: 1px solid color-mix(in srgb, var(--color-highlight) 19%, transparent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 28px color-mix(in srgb, var(--color-highlight-soft) 18%, transparent);
+  content: "";
+}
+
+/* 排版：衬线重点标题、mono 微标签、tabular 数字 */
+.dashboard-home-focus-tag {
+  color: var(--color-warning-text);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 790;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.dashboard-home-focus-copy h2 {
+  font-family: var(--font-editorial);
+  font-size: clamp(1.45rem, 2.6vw, 1.8rem);
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+.dashboard-home-fact dd {
+  font-family: var(--font-editorial);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.dashboard-home-fact dt,
+.dashboard-home-fact span,
+.dashboard-home-focus-reason {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 交互反馈：卡片/队列条目 hover 抬升 */
+.dashboard-home-card,
+.dashboard-home-queue-item {
+  transition:
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.dashboard-home-card:hover {
+  border-color: color-mix(in srgb, var(--color-action) 40%, var(--objective-border));
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-control);
+}
+.dashboard-home-card:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 3px;
+}
+.dashboard-home-queue-item {
+  background: var(--objective-surface-muted);
+  border-style: dashed;
+}
+.dashboard-home-queue-item:hover {
+  border-color: color-mix(in srgb, var(--color-action) 34%, var(--objective-border));
+  transform: translateY(-1px);
+}
+.dashboard-home-queue-item a:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.dashboard-home-recent .dashboard-home-section-link:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.dashboard-home-degraded button:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}

@@ -563,12 +563,15 @@ test("taskInteractionSchema：structured_bundle 长度 1–2", () => {
     kind: "ordering",
     partId: "p1",
     publicTokenIds: ["a", "b"],
+    publicTokenLabels: { a: "第一步", b: "第二步" },
     partTrustCeiling: "facet_eligible",
     qualificationProfileHash: null,
   };
   const one = taskInteractionSchema.parse({ kind: "structured_bundle", parts: [part] });
   assert.ok(one.kind === "structured_bundle");
   assert.equal(one.parts.length, 1);
+  assert.equal(one.parts[0].kind, "ordering");
+  assert.equal(one.parts[0].publicTokenLabels?.a, "第一步");
   const two = taskInteractionSchema.parse({
     kind: "structured_bundle",
     parts: [part, { ...part, partId: "p2" }],
@@ -581,6 +584,13 @@ test("taskInteractionSchema：structured_bundle 长度 1–2", () => {
   );
   assert.equal(
     taskInteractionSchema.safeParse({ kind: "structured_bundle", parts: [] }).success,
+    false,
+  );
+  assert.equal(
+    taskInteractionSchema.safeParse({
+      kind: "structured_bundle",
+      parts: [{ ...part, labels: { a: "不属于公开合同" } }],
+    }).success,
     false,
   );
 });

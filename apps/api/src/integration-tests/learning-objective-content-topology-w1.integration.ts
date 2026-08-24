@@ -3,7 +3,7 @@
  *
  * 验证迁移 0175：
  *  1. learning_objective_origins_v2 / legacy_route_mappings_v2 存在且 FORCE RLS；
- *  2. concept_label / compatibility_role / surface_revision / surface_updated_at 列存在；
+ *  2. concept_label / surface_revision / surface_updated_at 列存在；
  *  3. Origin RLS：跨 workspace 读写拒绝；本 workspace 读写通过（事务内 set_config）；
  *  4. Origin kind 条件约束：note 缺 note_version_id 拒绝、manual 带 note 拒绝；
  *  5. 同一 objective revision + note version 重复绑定被唯一索引拒绝；
@@ -52,20 +52,18 @@ test("W1-01/07/04: 0175 新表存在且 FORCE RLS", async () => {
   }
 });
 
-test("W1-05/06/08: 列存在（concept_label / compatibility_role / surface_revision / surface_updated_at）", async () => {
+test("W1-05/06/08: 列存在（concept_label / surface_revision / surface_updated_at）", async () => {
   const sql = mustConnect();
   try {
     const rows = await sql`
       SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = 'public' AND (
         (table_name = 'learning_objective_revisions_v2' AND column_name = 'concept_label')
-        OR (table_name = 'learning_cards' AND column_name = 'compatibility_role')
         OR (table_name = 'learning_objectives_v2' AND column_name IN ('surface_revision','surface_updated_at'))
       )
     `;
     const key = rows.map((r) => r.table_name + "." + r.column_name).sort();
     assert.deepEqual(key, [
-      "learning_cards.compatibility_role",
       "learning_objective_revisions_v2.concept_label",
       "learning_objectives_v2.surface_revision",
       "learning_objectives_v2.surface_updated_at",

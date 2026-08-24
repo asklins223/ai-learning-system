@@ -1633,14 +1633,16 @@ P2 默认：
 ```ts
 {
   capability: "text_generation",
-  temperature: 0.6,
-  maxTokens: 600,
+  temperature: 0.9,
+  maxTokens: 700,
   responseFormat: "text",
-  promptVersion: "companion-persona-v1"
+  promptVersion: "companion-persona-v4"
 }
 ```
 
 Provider 特定参数仍由 platform config/adapter 控制。运行时不得硬编码某个模型名称。
+
+> **修订（2026-08-24，AI 设计审查 §4.2）**：本节原钉 v1/0.6/600。实际演进：persona 经 v2（音频适配）→ v3（桌宠风格）→ **v4**（prompt 减负——移出语音标签全表、内嵌 few-shot 示例；标签改由 worker 确定性语气层在 TTS 文本上注入，见 `workers/ai-worker/src/lib/companion-tone.ts`）；temperature 现为 0.9、maxTokens 700。§9.1 的 v1 为历史首版；当前生效 prompt id 以 `companion_turn_runs.prompt_version` 实际写入为准。
 
 ---
 

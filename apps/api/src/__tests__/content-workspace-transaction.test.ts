@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const MODULE_CONTRACTS = [
-  { name: "note", handlers: 9, services: 9 },
+  // Desktop NOTE-READ/NOTE-SAVE V2 adds two strict projection handlers while
+  // reusing the existing note service surface.
+  { name: "note", handlers: 11, services: 9 },
   { name: "source", handlers: 8, services: 8 },
   // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务
   { name: "search", handlers: 4, services: 4 },

@@ -10,7 +10,8 @@ import {
 import { sessions } from "../../db/schema/session.ts";
 import { onboardingStates } from "../../db/schema/identity.ts";
 import { notes, sources } from "../../db/schema/note.ts";
-import { evidences, validationEvents } from "../../db/schema/evidence.ts";
+import { validationEvents } from "../../db/schema/evidence.ts";
+import { evidenceSnapshotsV2 } from "../../db/schema/card-generation-v2.ts";
 import {
   learningCardsV2,
   learningObjectiveOriginsV2,
@@ -749,10 +750,11 @@ export async function markOnboardingStep(
       const state = rows[0];
       if (!state) return { ok: false as const, error: "not_found" as UpdateStepError };
 
-      const evidence = await tx.query.evidences.findFirst({
+      // V1 evidences 表已随 0183 退役；evidence_review 步骤改查 V2 证据快照。
+      const evidence = await tx.query.evidenceSnapshotsV2.findFirst({
         where: and(
-          eq(evidences.id, evidenceId),
-          eq(evidences.workspaceId, workspaceId),
+          eq(evidenceSnapshotsV2.id, evidenceId),
+          eq(evidenceSnapshotsV2.workspaceId, workspaceId),
         ),
       });
       if (!evidence) {

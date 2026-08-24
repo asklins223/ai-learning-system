@@ -369,7 +369,7 @@ ALTER TABLE assistant_memory_items
 - **上下文预算失控**：统一 Orchestrator + 上限 + 监控 token 使用。
 - **人格不稳定**：人格档案冻结 + 风格校验 + 可重置。
 - **隐私风险**：默认不跨用户、soft delete、审计。
-- **回滚**：所有新表/字段可迁移回滚；Prompt 版本继续使用 persona-v3 作为基础，新增记忆块可独立开关。
+- **回滚**：所有新表/字段可迁移回滚；Prompt 版本以冻结版本链为基础（撰写时为 persona-v3，2026-08-24 起切 **persona-v4**——标签全表移出、few-shot 内嵌，见 `packages/shared/src/companion-persona.ts` 头注），新增记忆块可独立开关。
 
 ---
 

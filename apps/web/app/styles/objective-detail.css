@@ -202,3 +202,109 @@
   .objective-detail-header { padding: 22px; }
   .objective-detail-header h1 { font-size: 1.5rem; }
 }
+
+
+/* ════ 2026-08-23 工艺升级层：对齐 today/sources 既成语言 ════ */
+
+/* 头部档案卡：纸纹 + 堆叠阴影 */
+.objective-detail-header {
+  position: relative;
+  overflow: hidden;
+  background: var(--objective-paper-background);
+  background-size: var(--objective-paper-background-size);
+  box-shadow:
+    0 5px 0 -1px var(--color-paper-deep),
+    0 6px 0 -1px var(--color-border),
+    var(--shadow-paper);
+}
+.objective-detail-header::before {
+  position: absolute;
+  top: -74px;
+  right: 24px;
+  z-index: -1;
+  width: 252px;
+  height: 252px;
+  border: 1px solid color-mix(in srgb, var(--color-highlight) 19%, transparent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 28px color-mix(in srgb, var(--color-highlight-soft) 18%, transparent);
+  content: "";
+}
+
+/* 排版：衬线大标题、阅读测宽、tabular 数字 */
+.objective-detail-header h1 {
+  font-family: var(--font-editorial);
+  font-size: clamp(1.6rem, 3vw, 2.05rem);
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+.objective-detail-summary {
+  max-inline-size: 68ch;
+}
+.objective-detail-state dd,
+.objective-detail-state dt {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 面板纸面化 */
+.objective-detail-panel {
+  background: var(--objective-paper-background);
+  background-size: var(--objective-paper-background-size);
+}
+.objective-detail-state div {
+  background: var(--objective-surface-muted);
+}
+
+/* 历史 → 时间线形态（节点点 + 连线，配方同 today 活动流） */
+.objective-detail-history li {
+  position: relative;
+  padding-block: 8px;
+  padding-inline-start: 22px;
+  border-block-end: 0;
+}
+.objective-detail-history li::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 14px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-evidence);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-evidence) 16%, transparent);
+}
+.objective-detail-history li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 24px;
+  bottom: -10px;
+  width: 2px;
+  background: color-mix(in srgb, var(--color-evidence) 18%, transparent);
+}
+.objective-detail-history-rev {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--color-evidence) 26%, transparent);
+  border-radius: var(--radius-pill);
+  color: var(--color-evidence-text);
+  background: var(--objective-surface-muted);
+}
+
+/* 练习预览/参考内容块纸面化 */
+.objective-detail-preview,
+.objective-detail-reveal {
+  background: var(--objective-surface-muted);
+}
+.objective-detail-preview {
+  border-inline-start: 2px solid var(--color-border-strong);
+}
+
+/* 焦点环补全 */
+.objective-detail-back:focus-visible,
+.objective-detail-tools a:focus-visible,
+.objective-detail-origins a:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 3px;
+}

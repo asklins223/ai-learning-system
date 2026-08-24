@@ -77,6 +77,47 @@ describe("applyPatch", () => {
     const result = applyPatch({ obj: { x: 1, y: 2 } }, { obj: { x: 99 } });
     assert.deepEqual(result, { obj: { x: 99 } });
   });
+
+  it("field-merges learningSupport patches and preserves untouched support fields", () => {
+    const result = applyPatch(
+      {
+        learningSupport: {
+          explanation: "old explanation",
+          boundary: "keep this boundary",
+          misconception: "keep this misconception",
+        },
+      },
+      { learningSupport: { explanation: "new explanation" } },
+    );
+
+    assert.deepEqual(result, {
+      learningSupport: {
+        explanation: "new explanation",
+        boundary: "keep this boundary",
+        misconception: "keep this misconception",
+      },
+    });
+  });
+
+  it("allows a learningSupport field to be cleared without deleting its siblings", () => {
+    const result = applyPatch(
+      {
+        learningSupport: {
+          explanation: "explanation",
+          boundary: "remove me",
+          workedExample: "keep this example",
+        },
+      },
+      { learningSupport: { boundary: null } },
+    );
+
+    assert.deepEqual(result, {
+      learningSupport: {
+        explanation: "explanation",
+        workedExample: "keep this example",
+      },
+    });
+  });
 });
 
 describe("CardGenerationV2ServiceError", () => {
@@ -102,8 +143,8 @@ describe("serializeRunPublic", () => {
       id: RUN_ID,
       workspaceId: WORKSPACE_ID,
       userId: USER_ID,
-      noteId: "note-1",
-      noteVersionId: "ver-1",
+      noteId: "00000000-0000-4000-8000-000000000006",
+      noteVersionId: "00000000-0000-4000-8000-000000000007",
       idempotencyKey: "idem-1",
       status: "review_ready",
       cardContentEpoch: 1,

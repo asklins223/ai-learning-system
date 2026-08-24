@@ -2154,7 +2154,6 @@ height: 40px;
   .note-detail-state-topbar,
   .note-detail-loading-topbar,
   .validation-focus-header,
-  .universe-top-hud,
   .workspace-route-loading
 ) {
   -webkit-app-region: drag;
@@ -2173,7 +2172,6 @@ height: 40px;
   .note-detail-state-topbar,
   .note-detail-loading-topbar,
   .validation-focus-header,
-  .universe-top-hud,
   .workspace-route-loading
 ) :is(a, button, input, textarea, select, summary, [role="button"], [contenteditable="true"]) {
   -webkit-app-region: no-drag;

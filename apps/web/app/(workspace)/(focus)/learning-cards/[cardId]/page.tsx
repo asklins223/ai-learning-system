@@ -11,7 +11,6 @@
  */
 "use client";
 
-import "@/app/styles/card-detail.css";
 import "@/app/styles/objective-system.css";
 import "@/app/styles/objective-detail.css";
 import Link from "next/link";

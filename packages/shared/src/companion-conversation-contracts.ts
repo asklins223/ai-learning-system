@@ -924,7 +924,10 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
     actionRunId: z.string().uuid(), code: z.string().min(1).max(80), recoverable: z.boolean(),
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("voice.segment.ready"), payload: z.object({
-    segmentId: z.string().regex(/^[a-f0-9]{64}$/), ordinal: z.number().int().min(1).max(20),
+    segmentId: z.string().regex(/^[a-f0-9]{64}$/),
+    // 2026-08-24：ordinal 上限 20 → 200——与 worker 切段上限 TTS_MAX_SEGMENTS
+    // 对齐；此前长回复第 21 段起被合同/客户端静默丢弃（文字显示、音频缺失）。
+    ordinal: z.number().int().min(1).max(200),
     text: z.string().min(1).max(160), textSha256: z.string().regex(/^[a-f0-9]{64}$/),
     // 15b 二期：段级情感（段内最后一个控制类标签，如 excited/laughing；无则省略）——live2d 协同预留
     emotion: z.string().min(1).max(64).optional(),
@@ -957,7 +960,8 @@ export const companionTtsRequestV1Schema = z.object({
   conversationId: z.string().uuid(),
   runId: z.string().uuid(),
   generation: z.number().int().positive(),
-  ordinal: z.number().int().min(1).max(20),
+  // 2026-08-24：与 voice.segment.ready 的 ordinal 上限同步（20 → 200）。
+  ordinal: z.number().int().min(1).max(200),
   segmentId: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 

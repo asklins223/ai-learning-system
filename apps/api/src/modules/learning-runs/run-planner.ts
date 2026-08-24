@@ -12,6 +12,7 @@
 import { sha256Hex } from "@ailearn/shared/content-hash";
 import type {
   PrivateTaskSolutionV1,
+  StructuredPartPublicV1,
   TaskInteractionV1,
 } from "@ailearn/shared";
 import { generateStructuredBundleTask, generateStructuredTask, generateStructuredFromSnapshot, type StructuredBundlePayload, type StructuredTargetInput, type StructuredTaskPayload } from "./run-structured.ts";
@@ -460,18 +461,50 @@ function buildStructuredInteraction(
 ): TaskInteractionV1 {
   if ((structured as { interaction: { kind: string } }).interaction.kind === "structured_bundle") {
     const payload = structured as unknown as {
-      interaction: { kind: "structured_bundle"; parts: Array<{ partId: string; interaction: TaskInteractionV1; partTrustCeiling: "practice_only"; qualificationProfileHash: null }> };
+      interaction: { kind: "structured_bundle"; parts: Array<{ partId: string; interaction: StructuredBundlePayload["interaction"]["parts"][number]["interaction"]; partTrustCeiling: "practice_only"; qualificationProfileHash: null }> };
       labels: Record<string, Record<string, string>>;
     };
-    // 运行时附加 labels（与单 part 的 publicTokenLabels 同一做法；§12.3 只
-    // 序列化 ids，renderer 文本由附加字段承载）。
+
+    const parts: StructuredPartPublicV1[] = payload.interaction.parts.map((part) => {
+      const labels = payload.labels[part.partId] ?? {};
+      const base = {
+        partId: part.partId,
+        partTrustCeiling: part.partTrustCeiling,
+        qualificationProfileHash: part.qualificationProfileHash,
+      } as const;
+      switch (part.interaction.kind) {
+        case "ordering":
+          return {
+            ...base,
+            kind: "ordering",
+            publicTokenIds: part.interaction.publicTokenIds,
+            publicTokenLabels: labels,
+          };
+        case "relation_canvas":
+          return {
+            ...base,
+            kind: "relation",
+            publicNodeIds: part.interaction.publicNodeIds,
+            allowedEdgeKinds: part.interaction.allowedEdgeKinds,
+            publicNodeLabels: labels,
+          };
+        case "repair":
+          return {
+            ...base,
+            kind: "repair",
+            publicElementIds: part.interaction.publicElementIds,
+            allowedOperationKinds: part.interaction.allowedOperationKinds,
+            replacementOptionIds: part.interaction.replacementOptionIds,
+            publicElementLabels: labels,
+            replacementOptionLabels: labels,
+          };
+      }
+    });
+
     return {
       kind: "structured_bundle",
-      parts: payload.interaction.parts.map((part) => ({
-        ...part,
-        labels: payload.labels[part.partId] ?? {},
-      })),
-    } as unknown as TaskInteractionV1;
+      parts: parts as [StructuredPartPublicV1] | [StructuredPartPublicV1, StructuredPartPublicV1],
+    };
   }
   if (structured.interaction.kind === "ordering") {
     const payload = structured as Extract<StructuredTaskPayload, { interaction: { kind: "ordering" } }>;

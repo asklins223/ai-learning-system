@@ -141,6 +141,7 @@ export type StructuredPartPublicV1 =
       kind: "ordering";
       partId: string;
       publicTokenIds: string[];
+      publicTokenLabels?: Record<string, string>;
       partTrustCeiling: "facet_eligible" | "practice_only";
       qualificationProfileHash: string | null;
     }
@@ -149,6 +150,7 @@ export type StructuredPartPublicV1 =
       partId: string;
       publicNodeIds: string[];
       allowedEdgeKinds: RelationEdgeKindV1[];
+      publicNodeLabels?: Record<string, string>;
       partTrustCeiling: "facet_eligible" | "practice_only";
       qualificationProfileHash: string | null;
     }
@@ -158,6 +160,8 @@ export type StructuredPartPublicV1 =
       publicElementIds: string[];
       allowedOperationKinds: Array<"move" | "replace" | "remove" | "insert">;
       replacementOptionIds: string[];
+      publicElementLabels?: Record<string, string>;
+      replacementOptionLabels?: Record<string, string>;
       partTrustCeiling: "facet_eligible" | "practice_only";
       qualificationProfileHash: string | null;
     }
@@ -978,12 +982,14 @@ export const structuredPartPublicSchema = z.discriminatedUnion("kind", [
   structuredPartBase.extend({
     kind: z.literal("ordering"),
     publicTokenIds: z.array(z.string().min(1)).min(2),
+    publicTokenLabels: z.record(z.string(), z.string().min(1).max(200)).optional(),
     partTrustCeiling: z.enum(["facet_eligible", "practice_only"]),
   }),
   structuredPartBase.extend({
     kind: z.literal("relation"),
     publicNodeIds: z.array(z.string().min(1)).min(2),
     allowedEdgeKinds: z.array(relationEdgeKindSchema).min(1),
+    publicNodeLabels: z.record(z.string(), z.string().min(1).max(200)).optional(),
     partTrustCeiling: z.enum(["facet_eligible", "practice_only"]),
   }),
   structuredPartBase.extend({
@@ -991,6 +997,8 @@ export const structuredPartPublicSchema = z.discriminatedUnion("kind", [
     publicElementIds: z.array(z.string().min(1)).min(1),
     allowedOperationKinds: z.array(repairOperationKindSchema).min(1),
     replacementOptionIds: z.array(z.string().min(1)),
+    publicElementLabels: z.record(z.string(), z.string().min(1).max(500)).optional(),
+    replacementOptionLabels: z.record(z.string(), z.string().min(1).max(200)).optional(),
     partTrustCeiling: z.enum(["facet_eligible", "practice_only"]),
   }),
   structuredPartBase.extend({
@@ -1347,55 +1355,58 @@ export const learningRunOutcomeSchema = z.enum([
   "declared_unable",
 ]);
 
+export const learningRunScheduleImpactSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("none"),
+    reasonCode: z.enum([
+      "not_authorized",
+      "facet_only",
+      "record_only",
+      "practice_only",
+      "diagnostic_only",
+      "sandbox",
+      "not_assessable",
+      "skipped",
+      "ended",
+      "stale",
+    ]),
+  }),
+  z.strictObject({
+    kind: z.literal("created"),
+    dueAt: z.string().min(1),
+    policyReason: z.enum(["demonstrated", "declared_unable"]),
+  }),
+  z.strictObject({
+    kind: z.literal("rescheduled"),
+    dueAt: z.string().min(1),
+    consumedScheduleId: z.string().uuid(),
+    policyReason: z.enum(["demonstrated", "declared_unable"]),
+  }),
+]);
+
 export const projectionSourceChangeSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("canonical"), canonicalEventId: z.string().min(1) }),
   z.strictObject({ kind: z.literal("practice_only"), practiceEventId: z.string().min(1) }),
   z.strictObject({ kind: z.literal("none") }),
 ]);
 
+export const learningRunProjectionSchema = z
+  .object({
+    baselineCheckpoint: projectionCheckpointSchema,
+    sourceChange: projectionSourceChangeSchema,
+    // §15.5 一次性显影：结果页返回星图时携带（只作显影注释，客户端不解析）。
+    changeSetId: z.string().min(1).optional(),
+  })
+  .strict();
+
 export const learningRunResultSchema = z
   .object({
     outcome: learningRunOutcomeSchema,
     demonstratedFacets: z.array(taskIntentSchema),
     gapFacets: z.array(taskIntentSchema),
-    scheduleImpact: z.discriminatedUnion("kind", [
-      z.strictObject({
-        kind: z.literal("none"),
-        reasonCode: z.enum([
-          "not_authorized",
-          "facet_only",
-          "record_only",
-          "practice_only",
-          "diagnostic_only",
-          "sandbox",
-          "not_assessable",
-          "skipped",
-          "ended",
-          "stale",
-        ]),
-      }),
-      z.strictObject({
-        kind: z.literal("created"),
-        dueAt: z.string().min(1),
-        policyReason: z.enum(["demonstrated", "declared_unable"]),
-      }),
-      z.strictObject({
-        kind: z.literal("rescheduled"),
-        dueAt: z.string().min(1),
-        consumedScheduleId: z.string().uuid(),
-        policyReason: z.enum(["demonstrated", "declared_unable"]),
-      }),
-    ]),
+    scheduleImpact: learningRunScheduleImpactSchema,
     returnTarget: learningRunReturnTargetSchema,
-    projection: z
-      .object({
-        baselineCheckpoint: projectionCheckpointSchema,
-        sourceChange: projectionSourceChangeSchema,
-        // §15.5 一次性显影：结果页返回星图时携带（只作显影注释，客户端不解析）。
-        changeSetId: z.string().min(1).optional(),
-      })
-      .strict()
-      .optional(),
+    projection: learningRunProjectionSchema.optional(),
   })
   .strict();
 
@@ -1568,6 +1579,32 @@ export const putLearningTaskDraftRequestSchema = baseVersionSchema
     payload: learningDraftPayloadSchema.nullable(),
     rendererState: learningRendererDraftStateSchema,
     idempotencyKey: z.string().min(1).max(200),
+  })
+  .strict();
+
+export const learningTaskDraftSchema = baseVersionSchema
+  .extend({
+    runId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    variantId: z.string().min(1),
+    taskRevision: z.number().int().min(1),
+    draftRevision: z.number().int().min(0),
+    payload: learningDraftPayloadSchema.nullable(),
+    rendererState: learningRendererDraftStateSchema,
+    savedAt: z.string().datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const learningTaskDraftWriteReceiptSchema = baseVersionSchema
+  .extend({
+    runId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    variantId: z.string().min(1),
+    taskRevision: z.number().int().min(1),
+    draftRevision: z.number().int().min(0),
+    savedAt: z.string().datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();
 
@@ -1931,6 +1968,8 @@ export type LearningTaskPublic = z.infer<typeof learningTaskPublicSchema>;
 export type LearningTaskSummary = z.infer<typeof learningTaskSummarySchema>;
 export type LearningRunFailure = z.infer<typeof learningRunFailureSchema>;
 export type PutLearningTaskDraftRequest = z.infer<typeof putLearningTaskDraftRequestSchema>;
+export type LearningTaskDraft = z.infer<typeof learningTaskDraftSchema>;
+export type LearningTaskDraftWriteReceipt = z.infer<typeof learningTaskDraftWriteReceiptSchema>;
 export type LearningDraftPayload = z.infer<typeof learningDraftPayloadSchema>;
 export type LearningRendererDraftState = z.infer<typeof learningRendererDraftStateSchema>;
 export type CanonicalLearningEventEnvelope = z.infer<typeof canonicalLearningEventEnvelopeSchema>;

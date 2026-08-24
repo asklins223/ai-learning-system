@@ -82,3 +82,41 @@ test("companion-persona-v3 canonical bytes 与 hash 固定", () => {
   assert.ok(COMPANION_PERSONA_V3.includes("[giggles]咯咯笑"), "语音标签表");
   assert.ok(COMPANION_PERSONA_V3.endsWith("。"), "末行后无换行");
 });
+
+import {
+  COMPANION_PERSONA_V4,
+  COMPANION_PERSONA_V4_PROMPT_ID,
+  COMPANION_PERSONA_V4_SHA256,
+} from "./companion-persona.ts";
+
+// 2026-08-24：companion-persona-v4 canonical bytes 与 hash 固定（prompt 减负重构）。
+// 核心变化：移出 30 条语音标签全表（改由确定性语气层注入）+ 内嵌 few-shot 示例。
+test("companion-persona-v4 canonical bytes 与 hash 固定", () => {
+  const bytes = Buffer.from(COMPANION_PERSONA_V4, "utf8");
+  assert.equal(bytes.length, 3225, "canonical bytes 必须是 3225");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  assert.equal(hash, COMPANION_PERSONA_V4_SHA256, "SHA-256 必须匹配合同固定值");
+  assert.equal(hash, "2a45f9706f05257726d3357c9db6e2d47230cf1aa19d0feb0f95fdbcfdf6d6a6");
+  assert.equal(COMPANION_PERSONA_V4_PROMPT_ID, "companion-persona-v4");
+  // V3 风格硬约束全部保留
+  assert.ok(COMPANION_PERSONA_V4.includes("有来有回"), "有来有回");
+  assert.ok(COMPANION_PERSONA_V4.includes("小宠物"), "小宠物风格");
+  assert.ok(COMPANION_PERSONA_V4.includes("把球抛回去"), "延续对话");
+  assert.ok(COMPANION_PERSONA_V4.includes("50 字以内"), "短句约束");
+  assert.ok(COMPANION_PERSONA_V4.includes("嗯嗯"), "口语回应词");
+  assert.ok(COMPANION_PERSONA_V4.includes("不要每句都堆"), "不堆砌");
+  assert.ok(COMPANION_PERSONA_V4.endsWith("。"), "末行后无换行");
+  // 安全约束保留
+  assert.ok(COMPANION_PERSONA_V4.includes("不要编造"), "不编造");
+  assert.ok(COMPANION_PERSONA_V4.includes("不要反复解释或道歉"), "不道歉链");
+  assert.ok(COMPANION_PERSONA_V4.includes("不要用 markdown"), "无 markdown 约束");
+  assert.ok(COMPANION_PERSONA_V4.includes("扮演恋爱伴侣"), "关系边界");
+  assert.ok(COMPANION_PERSONA_V4.includes("API key"), "隐私边界");
+  // 减负核心：不再携带标签全表
+  assert.ok(!COMPANION_PERSONA_V4.includes("[sad]悲伤"), "已移出语音标签全表");
+  assert.ok(!COMPANION_PERSONA_V4.includes("[asmr]轻柔耳语"), "已移出语音标签全表（2）");
+  // 新增：few-shot 示例 + 方括号禁令
+  assert.ok(COMPANION_PERSONA_V4.includes("下面是几段对话示例"), "内嵌 few-shot");
+  assert.ok(COMPANION_PERSONA_V4.includes("F=ma"), "示例内容存在");
+  assert.ok(COMPANION_PERSONA_V4.includes("不要输出 [方括号] 形式的任何标记"), "未知标签防御的 prompt 侧声明");
+});

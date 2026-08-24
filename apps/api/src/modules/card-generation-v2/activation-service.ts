@@ -178,12 +178,40 @@ function targetUnitIdOf(unit: { kind: string; [k: string]: unknown }): string | 
   }
 }
 
+const ACTIVATION_REQUEST_DOMAIN = "card-activation-v2/request";
+
+function computeActivationRequestHash(body: ActivateCardCandidatesRequestV2): string {
+  return hashCanonicalV2(ACTIVATION_REQUEST_DOMAIN, {
+    runId: body.runId,
+    planRevisionId: body.planRevisionId,
+    selectedCandidates: body.selectedCandidates.map((sc) => ({
+      candidateRevisionId: sc.candidateRevisionId,
+      candidateId: sc.candidateId,
+      revision: sc.revision,
+      revisionHash: sc.revisionHash,
+      intent: sc.intent,
+    })),
+    existingLifecycleActions: body.existingLifecycleActions,
+    clientReviewHash: body.clientReviewHash,
+  });
+}
+
 export async function activateCardCandidatesV2(
   ctx: RunContext,
   body: ActivateCardCandidatesRequestV2,
   idempotencyKey: string,
 ): Promise<CardActivationReceiptV2> {
+  const requestHash = computeActivationRequestHash(body);
   return withWorkspaceTransaction(ctx, async (tx) => {
+    // CARD-GEN-ACTIVATION-01：在任何激活副作用前按 workspace+domain key
+    // 加事务锁。overlap loser 会在 winner 提交后读取 receipt，而不会触发
+    // 第二次 objective/card 写入或撞唯一约束。
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`v2-activation:${ctx.workspaceId}:${idempotencyKey}`}, 0)
+      )
+    `);
+
     // 1. 幂等检查
     const existingReceipt = await tx.select().from(cardActivationReceiptsV2)
       .where(and(
@@ -194,6 +222,13 @@ export async function activateCardCandidatesV2(
 
     if (existingReceipt.length > 0) {
       const row = existingReceipt[0];
+      if (row.userId !== ctx.userId || row.requestHash !== requestHash) {
+        throw new CardGenerationV2ServiceError(
+          "idempotency_conflict",
+          409,
+          "幂等键已用于不同的 activation 请求",
+        );
+      }
       const receipt: CardActivationReceiptV2 = {
         version: 2,
         receiptId: row.receiptId,
@@ -455,20 +490,6 @@ export async function activateCardCandidatesV2(
     }
 
     // 9. 计算 requestHash
-    const requestHash = hashCanonicalV2("card-activation-v2/request", {
-      runId: body.runId,
-      planRevisionId: body.planRevisionId,
-      selectedCandidates: body.selectedCandidates.map((sc: typeof body.selectedCandidates[number]) => ({
-        candidateRevisionId: sc.candidateRevisionId,
-        candidateId: sc.candidateId,
-        revision: sc.revision,
-        revisionHash: sc.revisionHash,
-        intent: sc.intent,
-      })),
-      existingLifecycleActions: body.existingLifecycleActions,
-      clientReviewHash: body.clientReviewHash,
-    });
-
     // 10. 生成 receiptId
     const receiptId = randomUUID();
     const finalResponseHash = hashCanonicalV2("card-activation-v2/response", {

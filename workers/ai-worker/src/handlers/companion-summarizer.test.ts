@@ -23,3 +23,19 @@ test("summarizer schema: 合法摘要通过，缺字段拒绝", () => {
   const bad = conversationSummaryOutputSchema.safeParse({ topics: [] });
   assert.equal(bad.success, false);
 });
+
+test("summarizer prompt: 要求只输出 JSON（json_object 模式配套）", () => {
+  const messages = buildSummarizerMessages("用户：你好");
+  assert.match(messages[0].content, /只输出 JSON/);
+});
+
+// 2026-08-24：summarizer 复用 memory-extractor 的容错解析——
+// ```json fence 包裹与前后赘述不再丢摘要。
+import { parseMemoryExtractJson } from "./companion-memory-extractor.ts";
+
+test("summarizer 解析链: fence 包裹的摘要 JSON 可容错解析", () => {
+  const raw = '```json\n{"title":"测试","topics":[],"userGoals":[],"keyEvents":[],"userPreferences":[],"followUps":[],"emotionalState":"neutral"}\n```';
+  const parsed = conversationSummaryOutputSchema.parse(parseMemoryExtractJson(raw));
+  assert.equal(parsed.title, "测试");
+});
+

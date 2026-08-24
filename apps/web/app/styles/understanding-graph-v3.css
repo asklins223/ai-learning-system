@@ -1,9 +1,10 @@
 /* Plan 23 TP-11..TP-17：Understanding Graph V3（objective-native）
  *
- * 2026-08-22 视觉重构：与 /notes、/sources、/today 同一设计语言——
- * 只使用全局 --color-* / --radius-* / --shadow-* token（tokens.css 是唯一事实来源），
- * 节点是「纸面卡片」：暖白纸面 + 1px 暖边框 + 类型色左标，标题两行截断。
- * Night 主题由 token 自动适配，无需单独覆盖。
+ * 2026-08-23 视觉修订（Owner 指示恢复星空宇宙）：画布回归「深空星图」——
+ * 恒定深空底 + 星云 + 星尘漂移，节点为发光星盘暗卡，连线为星座线；
+ * 工具栏 / 图例 / 详情侧栏 / 空态保留全局纸面语言，构成舱内外层次。
+ * 数据合同与 DOM 结构不变（节点仍是可键盘操作的真实按钮，SVG 连线纯装饰）。
+ * 深空配色常量见文末 --g3s-* 说明。
  */
 
 .graph-v3 {
@@ -388,7 +389,7 @@
 .graph-v3-sidepanel-state div {
   padding: 8px 11px;
   border-radius: var(--radius-sm);
-  background: var(--color-surface-muted);
+  background: var(--color-surface-soft);
   border: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
 }
 .graph-v3-sidepanel-state dt { color: var(--color-text-tertiary); font-size: 0.72rem; }
@@ -466,5 +467,146 @@
   .graph-v3-edge,
   .graph-v3-node {
     transition: none;
+  }
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   深空皮肤（2026-08-23，Owner 指示恢复星空宇宙视觉）
+   
+   理解星图回归「星空仪器」隐喻：画布为恒定深空（不随日夜主题翻转，
+   与 DESIGN.md 为星图登记的深海军蓝专属配色一致），节点是悬浮其上的
+   「星盘」暗卡，连线是星座线；工具栏/侧栏/空态仍用全局纸面语言，
+   形成「舱内仪表 × 舷窗外星空」的层次。
+   
+   本文件内的 --g3s-* 常量取自夜间主题同名 token 的色值——因为星空
+   昼夜恒定，不能随 data-theme 翻转；改动夜景色板时需同步此处。
+   ════════════════════════════════════════════════════════════════ */
+
+.graph-v3 {
+  --g3s-void-top: #0d1930;
+  --g3s-void-bottom: #060b16;
+  --g3s-star: rgba(214, 230, 250, 0.85);
+  --g3s-star-dim: rgba(196, 216, 240, 0.42);
+  --g3s-nebula-cyan: rgba(47, 116, 177, 0.2);
+  --g3s-nebula-gold: rgba(216, 143, 59, 0.13);
+  /* 星盘上的可读文字 */
+  --g3s-text: #eaf2fb;
+  --g3s-text-muted: rgba(203, 220, 240, 0.62);
+  /* 类型星光色（= 夜间 running / highlight / action / evidence） */
+  --g3s-source: #62c7d1;
+  --g3s-note: #f3b842;
+  --g3s-objective: #58bc8c;
+  --g3s-evidence: #6eaef3;
+}
+
+/* ── 画布：深空渐变 + 双星云 + 三层星尘 ── */
+
+.graph-v3-viewport {
+  border-color: #1d3050;
+  background:
+    radial-gradient(1.1px 1.1px at 17% 22%, var(--g3s-star) 55%, transparent 56%),
+    radial-gradient(1px 1px at 64% 8%, var(--g3s-star-dim) 55%, transparent 56%),
+    radial-gradient(1.4px 1.4px at 83% 34%, var(--g3s-star) 55%, transparent 56%),
+    radial-gradient(0.9px 0.9px at 38% 52%, var(--g3s-star-dim) 55%, transparent 56%),
+    radial-gradient(1.2px 1.2px at 8% 76%, var(--g3s-star) 55%, transparent 56%),
+    radial-gradient(1px 1px at 52% 84%, var(--g3s-star-dim) 55%, transparent 56%),
+    radial-gradient(0.8px 0.8px at 91% 68%, var(--g3s-star-dim) 55%, transparent 56%),
+    radial-gradient(520px at 12% -8%, var(--g3s-nebula-cyan), transparent 70%),
+    radial-gradient(470px at 90% 110%, var(--g3s-nebula-gold), transparent 70%),
+    linear-gradient(180deg, var(--g3s-void-top), var(--g3s-void-bottom));
+  background-size: 210px 190px, 210px 190px, 260px 230px, 150px 150px,
+    240px 210px, 180px 160px, 300px 270px, auto, auto, auto;
+}
+
+/* 星尘缓漂（唯一的画布动效；reduced-motion 关停） */
+@keyframes g3s-drift {
+  from { background-position: 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0; }
+  to   { background-position: -21px -13px, 15px 9px, -26px -8px, 11px 17px,
+         -18px 12px, 22px -11px, -13px -16px, 0 0, 0 0, 0 0; }
+}
+.graph-v3-viewport {
+  animation: g3s-drift 120s linear infinite alternate;
+}
+
+/* ── 泳道题头与计数：星图注记 ── */
+
+.graph-v3-lane-header {
+  color: var(--g3s-text-muted);
+  letter-spacing: 0.12em;
+}
+.graph-v3-lane-header[data-kind="source"] i { background: var(--g3s-source); box-shadow: 0 0 8px color-mix(in srgb, var(--g3s-source) 65%, transparent); }
+.graph-v3-lane-header[data-kind="note"] i { background: var(--g3s-note); box-shadow: 0 0 8px color-mix(in srgb, var(--g3s-note) 65%, transparent); }
+.graph-v3-lane-header[data-kind="objective"] i { background: var(--g3s-objective); box-shadow: 0 0 8px color-mix(in srgb, var(--g3s-objective) 65%, transparent); }
+.graph-v3-lane-header[data-kind="evidence"] i { background: var(--g3s-evidence); box-shadow: 0 0 8px color-mix(in srgb, var(--g3s-evidence) 65%, transparent); }
+.graph-v3-lane-header b {
+  background: rgba(13, 25, 48, 0.78);
+  border-color: rgba(126, 158, 199, 0.34);
+  color: var(--g3s-text-muted);
+}
+
+/* ── 连线：星座线 ── */
+
+.graph-v3-edge {
+  stroke: rgba(154, 178, 205, 0.44);
+}
+.graph-v3-edge--sourced_from { stroke: color-mix(in srgb, var(--g3s-note) 74%, transparent); }
+.graph-v3-edge--contains_note { stroke: color-mix(in srgb, var(--g3s-source) 70%, transparent); }
+.graph-v3-edge--supported_by { stroke: color-mix(in srgb, var(--g3s-evidence) 72%, transparent); }
+.graph-v3-edge--relates_to { stroke: rgba(154, 178, 205, 0.4); }
+.graph-v3-edge--supersedes { stroke: color-mix(in srgb, #f07b68 74%, transparent); }
+.graph-v3-edge.is-linked { stroke-width: 2.4; }
+
+/* ── 节点：悬浮星盘 ── */
+
+.graph-v3-node {
+  border: 1px solid color-mix(in srgb, var(--kind-accent, #9ab2cd) 26%, rgba(126, 158, 199, 0.3));
+  background:
+    linear-gradient(180deg, rgba(19, 33, 60, 0.92), rgba(11, 20, 39, 0.94));
+  color: var(--g3s-text);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 10px 26px rgba(2, 5, 12, 0.55);
+}
+.graph-v3-node--source { --kind-accent: var(--g3s-source); }
+.graph-v3-node--note { --kind-accent: var(--g3s-note); }
+.graph-v3-node--objective { --kind-accent: var(--g3s-objective); }
+.graph-v3-node--evidence { --kind-accent: var(--g3s-evidence); }
+.graph-v3-node::before {
+  background: var(--kind-accent, rgba(154, 178, 205, 0.7));
+  box-shadow: 0 0 9px color-mix(in srgb, var(--kind-accent, rgba(154, 178, 205, 0.7)) 70%, transparent);
+}
+.graph-v3-node:hover {
+  border-color: color-mix(in srgb, var(--kind-accent, #9ab2cd) 55%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--kind-accent, #9ab2cd) 32%, transparent),
+    0 0 18px color-mix(in srgb, var(--kind-accent, #9ab2cd) 26%, transparent),
+    0 12px 30px rgba(2, 5, 12, 0.6);
+  transform: translateY(-1px);
+}
+.graph-v3-node:focus-visible {
+  outline: 3px solid #8fc1f6;
+  outline-offset: 2px;
+}
+.graph-v3-node.is-selected {
+  border-color: color-mix(in srgb, var(--kind-accent) 66%, transparent);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--kind-accent) 42%, transparent),
+    0 0 24px color-mix(in srgb, var(--kind-accent) 30%, transparent),
+    0 12px 30px rgba(2, 5, 12, 0.6);
+}
+.graph-v3-node-title {
+  color: var(--g3s-text);
+}
+.graph-v3-node-kind {
+  color: var(--g3s-text-muted);
+}
+.graph-v3-node-meta {
+  color: var(--g3s-text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .graph-v3-viewport {
+    animation: none;
   }
 }

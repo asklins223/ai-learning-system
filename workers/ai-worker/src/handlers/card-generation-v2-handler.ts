@@ -1779,6 +1779,12 @@ async function processRecheckCandidateJob(job: PendingOutboxJob): Promise<void> 
       existingObjectives: ctx.existingObjectives,
       providers,
       useLLM,
+      // The initial generation already consumed the single bounded repair
+      // budget. A recheck must only rerun the gates for this immutable
+      // authored revision; allowing another repair here creates an unbounded
+      // recheck → authored-revision chain when the critic keeps returning
+      // `rewrite`.
+      allowBoundedRepair: false,
     });
     // 单个候选复核失败不应让同一 run 中其它仍可启用的最新候选
     // 一并进入 needs_attention；用户仍应能保留并启用通过门禁的候选。

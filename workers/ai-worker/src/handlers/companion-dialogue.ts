@@ -29,7 +29,7 @@ import {
 } from "../lib/governance.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
-import { COMPANION_PERSONA_V3, COMPANION_PERSONA_V3_PROMPT_ID, COMPANION_PERSONA_V3_SHA256, classifyCompanionReplyEmotion, type ChatMessage,  } from "@ailearn/shared";
+import { COMPANION_PERSONA_V4, COMPANION_PERSONA_V4_PROMPT_ID, COMPANION_PERSONA_V4_SHA256, classifyCompanionReplyEmotion, type ChatMessage,  } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
@@ -43,6 +43,7 @@ import {
   type RouterDecisionV1,
 } from "./companion-dialogue-router.ts";
 import { splitCompanionTtsSegmentsIncremental, companionSegmentId, stripVoiceExpressionTags, extractVoiceEmotion, TTS_FIRST_SEGMENT_MIN_CHARS } from "../lib/tts-segments.ts";
+import { applyDeterministicToneToSegments, createStreamToneInjector, resolveReplyToneEmotion } from "../lib/companion-tone.ts";
 import { assembleCompanionContext, type ContextAssemblyResult } from "./companion-context-orchestrator.ts";
 
 export interface CompanionDialogueHandlerContext {
@@ -60,9 +61,12 @@ export const COMPANION_HARD_MAX_CHARS = 20_000;
  *  2026-08-12+（15a 新反馈）：temperature 0.6 → 0.9（陪伴对话像真人、更随性，
  *  正确性其次）。
  *  2026-08-16（桌宠聊天风格优化）：temperature 0.9 → 1.0、maxTokens 600 → 700，
- *  让回复更活泼、更“有来有回”，同时保留足够长度说一句轻快的小尾巴。 */
+ *  让回复更活泼、更"有来有回"，同时保留足够长度说一句轻快的小尾巴。
+ *  2026-08-24（AI 设计审查 §4.2）：temperature 1.0 → 0.9——V4 人格 prompt 已
+ *  通过 few-shot 示例承载风格（移出标签全表），不再需要高温度补随机性；
+ *  高温度 + 高约束是小模型顾此失彼的主因。 */
 const COMPANION_PROVIDER_OPTIONS = {
-  temperature: 1.0,
+  temperature: 0.9,
   maxTokens: 700,
   responseFormat: "text" as const,
   // 2026-08-13（全链路诊断）：移除 disableThinking——flash 模型关思考后
@@ -407,7 +411,7 @@ export function buildCompanionPersonaMessages(input: {
     ? GROUNDED_TUTOR_COMPANION_PROMPT
     : input.petProfile
       ? [
-          COMPANION_PERSONA_V3,
+          COMPANION_PERSONA_V4,
           ...(activeMemories.length > 0 ? [MEMORY_SAFETY_GUARD] : []),
           "",
           `当前人格：${input.petProfile.name}`,
@@ -419,7 +423,7 @@ export function buildCompanionPersonaMessages(input: {
           ...(memoryDataBlock ? ["", memoryDataBlock] : []),
         ].join("\n")
       : [
-          COMPANION_PERSONA_V3,
+          COMPANION_PERSONA_V4,
           ...(activeMemories.length > 0 ? [MEMORY_SAFETY_GUARD] : []),
           ...(memoryDataBlock ? ["", memoryDataBlock] : []),
         ].join("\n");
@@ -454,8 +458,10 @@ export function validateCompanionOutput(
     return { ok: false, reason: "output_too_long" };
   }
   // 模型不得输出内部 route/reason/cue/provider/prompt/tool 参数（§9.2）。
+  // 2026-08-24（AI 设计审查）：prompt id 检测从 v1 字面量放宽为全版本模式——
+  // 切到 V4 后模型回显 "companion-persona-v4" 同样是内部信息泄露。
   const leakPattern =
-    /(companion-persona-v1|character\.cue|"cue"|reason\s*id|tool\s*param|promptVersion|"route"\s*:)/i;
+    /(companion-persona-v\d+|character\.cue|"cue"|reason\s*id|tool\s*param|promptVersion|"route"\s*:)/i;
   if (leakPattern.test(trimmed)) return { ok: false, reason: "internal_token_leak" };
   // 15c：对话场景剥离 markdown（标题/加粗/列表等 → 纯文本，适配音频对话）。
   // 15b 二期：再剥离情感/富语言标签（双文本管线——入库与展示零标签，
@@ -849,6 +855,8 @@ export async function runCompanionDialogue(
     });
     if (!streamed) return; // 已 cancel/supersede，无输出
     assistantText = streamed.content;
+    // 2026-08-24：流式路径的幻觉标签清洗已在 delta 管线内完成（见下方
+    // createStreamToneInjector），语气注入在切段时逐段应用。
     ttsRawText = streamed.content;
   } else {
     // 回退：非流式 chatCompletion + 分批写 delta（保持既有 fence/幂等语义）
@@ -875,6 +883,9 @@ export async function runCompanionDialogue(
       throw new Error(`companion output validation failed: ${validatedFallback.reason}`);
     }
     assistantText = validatedFallback.text;
+    // 2026-08-24（AI 设计审查 §4.2）：确定性语气层——模型不再输出标签
+    // （V4 已禁止方括号标记）。切段后逐段注入句首控制标签（情绪按全文判）
+    // 并净化幻觉标签；展示/入库文本不受影响（已剥全部标签）。
     ttsRawText = rawText;
     let batched: boolean;
     try {
@@ -909,7 +920,13 @@ export async function runCompanionDialogue(
       { rest: "", sentCount: 0, sentChars: 0 },
       true,
     );
-    for (const seg of inc.segments) {
+    // 2026-08-24：确定性语气层——全文判情绪，逐段注标签 + 净化幻觉标签。
+    // 注入会改变段文本，textSha256 重算后再派生 segmentId。
+    const toned = applyDeterministicToneToSegments(
+      inc.segments.map((seg) => ({ ordinal: seg.ordinal, text: seg.text, textSha256: seg.textSha256 })),
+      resolveReplyToneEmotion(ttsRawText ?? assistantText),
+    );
+    for (const seg of toned) {
       const ok = await emitCompanionTtsSegment({
         workspaceId: ctx.workspaceId,
         userId: read.userId,
@@ -1072,8 +1089,8 @@ export async function runCompanionDialogue(
               assistant_message_id = ${assistantMessageId},
               provider_id = ${provider.id},
               model_id = ${provider.modelId},
-              prompt_version = ${read.groundedTutorContext ? GROUNDED_TUTOR_PROMPT_ID : COMPANION_PERSONA_V3_PROMPT_ID},
-              prompt_hash = ${read.groundedTutorContext ? groundedTutorPromptSha256 : COMPANION_PERSONA_V3_SHA256},
+              prompt_version = ${read.groundedTutorContext ? GROUNDED_TUTOR_PROMPT_ID : COMPANION_PERSONA_V4_PROMPT_ID},
+              prompt_hash = ${read.groundedTutorContext ? groundedTutorPromptSha256 : COMPANION_PERSONA_V4_SHA256},
               finished_at = now()
           WHERE id = ${read.runId}
         `);
@@ -1326,17 +1343,30 @@ async function runStreamingDialogue(args: StreamDialogueArgs): Promise<{ content
   let streamHasDeltas = false;
   let cancelDetected = false;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  // 2026-08-24（AI 设计审查 §4.2，二轮重构）：流式注入器只负责逐 delta 清洗
+  // 幻觉标签；语气注入上移到切段后的 emitSegments（逐段注入 + 全文情绪判定）。
+  const toneInjector = createStreamToneInjector((d) => { buffer += d; });
   // 15b：字幕般流式 TTS——delta 写库后增量切段（完整句立即成段下发）
   const voiceEnabled = isCompanionVoiceDialogueEnabled();
   let ttsState: import("../lib/tts-segments.ts").IncrementalTtsState = { rest: "", sentCount: 0, sentChars: 0 };
+  // 累计的原始流式文本（注入器只清洗 sink 入参，不改 delta）——供逐段
+  // 语气注入做全文情绪判定；幻觉标签由 resolveReplyToneEmotion 内部剥离。
+  let streamedRawSoFar = "";
   /**
    * 15b：把切出的段发 voice.segment.ready。PERF：整个批次在单个 workspace 事务内
    * 完成——fence 校验一次、next_event_seq 一次递增 N、多行 INSERT 一次、
    * NOTIFY 一次（原实现每段一个独立事务 = N 次 DB round-trip）。fence 拒绝即停
    * （与逐段语义一致：run 已终态时不再写后续段）。
    */
-  const emitSegments = async (segs: import("../lib/tts-segments.ts").CompanionTtsSegment[]): Promise<boolean> => {
-    if (segs.length === 0) return true;
+  const emitSegments = async (rawSegs: import("../lib/tts-segments.ts").CompanionTtsSegment[]): Promise<boolean> => {
+    if (rawSegs.length === 0) return true;
+    // 2026-08-24（二轮重构）：确定性语气层统一在段下发前应用——全文
+    // （streamedRawSoFar）判情绪，逐段注句首控制标签 + 净化幻觉标签；
+    // 注入改变段文本，textSha256 重算后再派生 segmentId。
+    const segs = applyDeterministicToneToSegments(
+      rawSegs.map((seg) => ({ ordinal: seg.ordinal, text: seg.text, textSha256: seg.textSha256 })),
+      resolveReplyToneEmotion(streamedRawSoFar),
+    );
     return withWorkerWorkspaceTransaction(
       { workspaceId: ctx.workspaceId, userId: read.userId },
       async (tx) => {
@@ -1503,13 +1533,15 @@ async function runStreamingDialogue(args: StreamDialogueArgs): Promise<{ content
       COMPANION_PROVIDER_OPTIONS,
       localAbort.signal,
       (delta) => {
-        buffer += delta;
+        toneInjector.push(delta);
+        streamedRawSoFar += delta;
         if (buffer.length >= STREAM_FLUSH_CHARS) requestFlush();
         resetIdle();
       },
     );
     clearInterval(flushTimer);
     if (idleTimer) clearTimeout(idleTimer);
+    toneInjector.flush();
     await flush(); // 收尾剩余 buffer；等待任何在途写入完成
     if (cancelDetected) return null;
     // 15b：final flush——未完成句强制成段（最后一个 voice.segment.ready 在

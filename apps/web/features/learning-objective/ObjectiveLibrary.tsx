@@ -197,7 +197,7 @@ export function ObjectiveLibrary(): JSX.Element {
           {visible.map((item) => {
             const summary = objectiveDistinctSummary(item, 120);
             return (
-              <li key={item.objectiveId} className="objective-library-row">
+              <li key={item.objectiveId} className="objective-library-row" data-state={objectiveChipStateFromList(item)}>
                 <div className="objective-library-row-main">
                   <div className="objective-library-row-topline">
                     <ObjectiveStatusChip state={objectiveChipStateFromList(item)} />

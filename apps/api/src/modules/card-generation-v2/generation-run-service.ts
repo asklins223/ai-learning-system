@@ -3,7 +3,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { and, eq, desc, sql } from "drizzle-orm";
+import { and, eq, desc, inArray, sql } from "drizzle-orm";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import {
   cardGenerationRunsV2,
@@ -19,6 +19,7 @@ import {
 } from "./evidence-seal-service.ts";
 import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
 import {
+  createCardGenerationRunRequestV2Schema,
   type CreateCardGenerationRunRequestV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import {
@@ -44,6 +45,35 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : fallback;
 }
 
+const GENERATION_START_IDEMPOTENCY_DOMAIN = "card-generation-v2/idempotency-request";
+
+/**
+ * §17.1 / CARD-GEN-START-01：同一幂等键只有在 request payload 完全一致时才可 replay。
+ * 老数据缺少 rawRequest 时按冲突处理，避免把未知 payload 当成安全 replay。
+ */
+function assertGenerationStartReplay(
+  existing: typeof cardGenerationRunsV2.$inferSelect,
+  requestHash: string,
+): { runId: string; status: string } {
+  const snapshot = existing.inputSnapshot;
+  const rawRequest =
+    typeof snapshot === "object" && snapshot !== null && "rawRequest" in snapshot
+      ? snapshot.rawRequest
+      : undefined;
+  const parsed = createCardGenerationRunRequestV2Schema.safeParse(rawRequest);
+  if (
+    !parsed.success ||
+    hashCanonicalV2(GENERATION_START_IDEMPOTENCY_DOMAIN, parsed.data) !== requestHash
+  ) {
+    throw new CardGenerationV2ServiceError(
+      "idempotency_conflict",
+      409,
+      "幂等键已用于不同的生成请求",
+    );
+  }
+  return { runId: existing.id, status: existing.status };
+}
+
 export async function createGenerationRunV2(
   ctx: RunContext,
   noteVersionId: string,
@@ -51,6 +81,7 @@ export async function createGenerationRunV2(
   idempotencyKey: string,
 ): Promise<{ runId: string; status: string }> {
   return withWorkspaceTransaction(ctx, async (tx) => {
+    const requestHash = hashCanonicalV2(GENERATION_START_IDEMPOTENCY_DOMAIN, body);
     const existing = await tx
       .select()
       .from(cardGenerationRunsV2)
@@ -60,7 +91,7 @@ export async function createGenerationRunV2(
       ))
       .limit(1);
     if (existing.length > 0) {
-      return { runId: existing[0].id, status: existing[0].status };
+      return assertGenerationStartReplay(existing[0], requestHash);
     }
 
     // R34/§22.6：workspace 维度生成并发与速率限制（abuse/resource 防护）。
@@ -70,6 +101,23 @@ export async function createGenerationRunV2(
         hashtextextended(${`v2-generation-quota:${ctx.workspaceId}`}, 0)
       )
     `);
+
+    // The first lookup is only an optimistic fast path. A concurrent request
+    // may have committed while this transaction waited for the workspace lock;
+    // re-check before quota work/insert so the unique idempotency key converges
+    // to a strict replay instead of surfacing a unique-violation 500.
+    const lockedExisting = await tx
+      .select()
+      .from(cardGenerationRunsV2)
+      .where(and(
+        eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
+        eq(cardGenerationRunsV2.idempotencyKey, idempotencyKey),
+      ))
+      .limit(1);
+    if (lockedExisting.length > 0) {
+      return assertGenerationStartReplay(lockedExisting[0], requestHash);
+    }
+
     const inFlightLimit = parsePositiveIntEnv("CARD_GENERATION_V2_MAX_INFLIGHT_RUNS", 3);
     const dailyLimit = parsePositiveIntEnv("CARD_GENERATION_V2_DAILY_RUN_LIMIT", 50);
     const inFlightRows = await tx.execute(sql`
@@ -151,16 +199,53 @@ export async function createGenerationRunV2(
         targetPolicyVersion: "target-v1",
         cardContractVersion: "learning-card-v2" as const,
         targetSnapshotVersion: "learning-target-snapshot-v2" as const,
-        stageRuntimes: [{
-          stage: "planner" as const,
-          providerId: "system",
-          modelSnapshot: "v1",
-          deploymentId: "local",
-          capabilityFingerprint: "basic",
-          promptVersion: "v1",
-          sampling: { temperature: 0 },
-          outputSchemaVersion: "v2",
-        }],
+        // 2026-08-24：补全四阶段 stageRuntimes——worker 端 sampling(stage) 已按
+        // 裸阶段名匹配（providers.ts），此前只种 planner 时 author/critic 三阶段
+        // 的 per-run 采样配置会被静默忽略。promptVersion 与 workers
+        // card-generation-v2/prompts.ts 的 CARD_GENERATION_V2_PROMPT_VERSION
+        // bump 同步；本数组参与 semanticSpecHash，是审计闭包的一部分。
+        stageRuntimes: [
+          {
+            stage: "planner" as const,
+            providerId: "system",
+            modelSnapshot: "v1",
+            deploymentId: "local",
+            capabilityFingerprint: "basic",
+            promptVersion: "v2",
+            sampling: { temperature: 0 },
+            outputSchemaVersion: "v2",
+          },
+          {
+            stage: "author" as const,
+            providerId: "system",
+            modelSnapshot: "v1",
+            deploymentId: "local",
+            capabilityFingerprint: "basic",
+            promptVersion: "v2",
+            sampling: { temperature: 0 },
+            outputSchemaVersion: "v2",
+          },
+          {
+            stage: "grounding_critic" as const,
+            providerId: "system",
+            modelSnapshot: "v1",
+            deploymentId: "local",
+            capabilityFingerprint: "basic",
+            promptVersion: "v2",
+            sampling: { temperature: 0 },
+            outputSchemaVersion: "v2",
+          },
+          {
+            stage: "pedagogy_critic" as const,
+            providerId: "system",
+            modelSnapshot: "v1",
+            deploymentId: "local",
+            capabilityFingerprint: "basic",
+            promptVersion: "v2",
+            sampling: { temperature: 0 },
+            outputSchemaVersion: "v2",
+          },
+        ],
       },
       governancePolicyVersion: "gov-v1",
     };
@@ -289,6 +374,31 @@ export async function getGenerationRunV2(ctx: RunContext, runId: string) {
   });
 }
 
+const ACTIVE_GENERATION_RUN_STATUSES = [
+  "queued",
+  "source_sealing",
+  "planning",
+  "authoring",
+  "checking",
+  "review_ready",
+  "needs_attention",
+  "activating",
+] as const;
+
+/** Owner-only recovery query for Room/Desk; terminal runs are not resumable. */
+export async function listActiveGenerationRunsV2(ctx: RunContext) {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const rows = await tx.select().from(cardGenerationRunsV2)
+      .where(and(
+        eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
+        inArray(cardGenerationRunsV2.status, [...ACTIVE_GENERATION_RUN_STATUSES]),
+      ))
+      .orderBy(desc(cardGenerationRunsV2.updatedAt))
+      .limit(20);
+    return Promise.all(rows.map((row) => serializeRunPublic(row, tx)));
+  });
+}
+
 export async function getGenerationRunPlanV2(ctx: RunContext, runId: string) {
   return withWorkspaceTransaction(ctx, async (tx) => {
     const runRows = await tx.select().from(cardGenerationRunsV2)
@@ -307,6 +417,10 @@ export async function getGenerationRunPlanV2(ctx: RunContext, runId: string) {
 
     const p = planRows[0];
     return {
+      version: 2 as const,
+      runId: p.runId,
+      inputSnapshotHash: p.inputSnapshotHash,
+      cardContentEpoch: p.cardContentEpoch,
       planRevisionId: p.planRevisionId,
       planVersion: p.planVersion,
       previousPlanRevisionId: p.previousPlanRevisionId,
@@ -388,7 +502,7 @@ export async function closeGenerationRunV2(ctx: RunContext, runId: string, expec
         eq(cardGenerationCandidatesV2.reviewDecision, "undecided"),
       ));
 
-    await tx.update(cardGenerationRunsV2)
+    const closedRows = await tx.update(cardGenerationRunsV2)
       .set({
         status: "closed_without_activation",
         reviewDraftRevision: run.reviewDraftRevision + 1,
@@ -399,11 +513,20 @@ export async function closeGenerationRunV2(ctx: RunContext, runId: string, expec
         eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
         // CAS：确保并发 close 不覆盖彼此（方案 20 §17.1）
         eq(cardGenerationRunsV2.reviewDraftRevision, expectedReviewDraftRevision),
-      ));
+      ))
+      .returning({ id: cardGenerationRunsV2.id, reviewDraftRevision: cardGenerationRunsV2.reviewDraftRevision });
+
+    if (closedRows.length === 0) {
+      throw new CardGenerationV2ServiceError("stale_review_draft", 409, "审核草稿已变更，请刷新");
+    }
 
     await insertEvent(tx, ctx.workspaceId, runId, "card_generation.closed_without_activation", {});
 
-    return { runId, status: "closed_without_activation" };
+    return {
+      runId,
+      status: "closed_without_activation",
+      reviewDraftRevision: closedRows[0].reviewDraftRevision,
+    };
   });
 }
 

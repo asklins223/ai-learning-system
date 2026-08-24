@@ -1,11 +1,20 @@
 # 真桌宠记忆与上下文：产品需求设计 + 实施落地细节
 
-> 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复 + 第十一轮端到端行为修复 + 第十二轮遗留修复）**
+> 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复 + 端到端行为修复与三轮遗留修复）**
 > 日期：2026-08-16
-> 版本：v1.5
+> 文档版本：v1.6
 > 关联：[21-real-desktop-pet-memory-context-design.md](./21-real-desktop-pet-memory-context-design.md)
 >
 > 修订记录：
+> - v1.6（2026-08-23）：实施核查回写——(a) §3.1 模块划分与实际布局对齐
+>   （API 侧文件实际位于 modules/companion-conversation/，proactive 两件在 API 进程内、
+>   其余为 worker handlers；前端无 features/companion-memory/ 目录，实际为 app router
+>   页面 + features/companion-pet/deliveries/DeliveryBubble）；(b) §2.6/§3.6.3/§11.4 的
+>   "理解星图叠加记忆图层"尚未实施——当前 /companion/memory/star-map 为独立只读列表页，
+>   与 /graph 零集成，页面注释已声明 Canvas 叠加为后续工作；(c) 补记：memory /
+>   pet-profile 门控含 COMPANION_JOURNEY_V2 旁路（有意保留），与 §9.8 字面独立
+>   fail-closed 表述的差异以此为准；(d) 记忆管理页补上"手动新增记忆"入口（PRD
+>   §2.2.2 来源5 落地），服务端 POST /companion/memory 与客户端方法此前已是死代码。
 > - v1.5（2026-08-23）：第十二轮遗留修复——keyword fallback 排序键去 updated_at
 >   污染（#32）、EXISTS 探测补 scope 过滤（#33）、familiarity 衰减多副本
 >   advisory lock 守卫（#34），详见 §31。
@@ -345,6 +354,8 @@ score = cosine_similarity
 
 #### 2.6.1 产品形态
 
+> **v1.6 现状注记**：本节描述的“理解星图叠加记忆图层”尚未实施；当前实现为独立只读列表页 `/companion/memory/star-map`，与 /graph 零集成（见 §4.4 与头部修订记录）。
+
 在理解星图中增加“记忆层”：
 
 - 记忆节点挂在相关实体上（card / keyPoint / note / source / learning_run）。
@@ -375,27 +386,29 @@ score = cosine_similarity
 ### 3.1 模块划分
 
 ```text
-apps/api/src/modules/companion-memory/
-  memory-service.ts          // 现有服务，扩展
-  memory-vector.ts           // embedding + pgvector 检索
-  memory-summarizer.ts       // 会话摘要生成
-  memory-conflict.ts         // 冲突检测
-  pet-profile-service.ts     // 人格档案
-  memory-routes.ts           // API 扩展
-  memory-star-map.ts         // 星图查询
-  daily-summary-routes.ts    // 桌宠日记只读 API
-  daily-summary-generator.ts // 定时生成器
-  daily-summary-scheduler.ts // 01:00 调度 tick
+# 实际布局（v1.6 回写；原规划路径与实物不符，见头部修订记录）
+apps/api/src/modules/companion-conversation/
+  memory-service.ts          // 记忆 CRUD/状态机/冲突检测（冲突逻辑内联于此）
+  memory-vector.ts           // （规划于 API 侧，实为 worker 侧检索模块）
+  memory-routes.ts           // 记忆/人格/星图/导出清空等全部路由
+  pet-profile-service.ts + pet-profile-routes.ts
+  daily-summary-routes.ts
+  proactive-hook.ts + proactive-generator.ts  // Run 完成钩子在 API 进程内触发
 
 workers/ai-worker/src/handlers/
-  companion-dialogue.ts      // 接入 Context Orchestrator
-  companion-summarizer.ts    // 摘要 worker（可选）
+  companion-dialogue.ts            // Context Orchestrator 装配
+  companion-context-orchestrator.ts
+  companion-memory-vector.ts       // 向量/keyword 检索（自 API 规划位迁入）
+  companion-memory-extractor.ts
+  companion-summarizer.ts
+  companion-daily-summary.ts + companion-daily-summary-scheduler.ts
 
-apps/web/features/companion-memory/
-  MemoryManagementPage.tsx   // 现有页面增强
-  PetProfileSettings.tsx     // 人格设置
-  MemoryStarMapLayer.tsx     // 星图记忆层
-  MemoryConfirmCard.tsx      // 气泡内确认卡
+apps/web/app/(workspace)/(default)/companion/
+  memory/page.tsx                  // 管理页（搜索/筛选/固定/归档/导出/清空/手动新增）
+  memory/star-map/page.tsx         // 记忆星图（独立只读列表页；Canvas 叠加未实施）
+  pet-profile/page.tsx             // 人格设置
+  daily/page.tsx                   // 桌宠日记（只读）
+features/companion-pet/deliveries/DeliveryBubble.tsx   // 气泡确认卡（确认/纠正/忽略）
 ```
 
 ### 3.2 数据模型

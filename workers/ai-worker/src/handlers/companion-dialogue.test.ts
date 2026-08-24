@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COMPANION_PERSONA_V3, COMPANION_PERSONA_V3_PROMPT_ID,  } from "@ailearn/shared";
+import { COMPANION_PERSONA_V4, COMPANION_PERSONA_V4_PROMPT_ID,  } from "@ailearn/shared";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import {
   buildCompanionPersonaMessages,
@@ -22,7 +22,7 @@ test("persona messages：system 固定 prompt + 结构化 user content", () => {
   });
   assert.equal(messages.length, 2);
   assert.equal(messages[0].role, "system");
-  assert.equal(messages[0].content, COMPANION_PERSONA_V3);
+  assert.equal(messages[0].content, COMPANION_PERSONA_V4);
   assert.equal(messages[1].role, "user");
   const parsed = JSON.parse(messages[1].content as string);
   assert.equal(parsed.version, 1);
@@ -87,7 +87,7 @@ test("petProfile 注入 system prompt（22 人格档案生效）", () => {
   assert.match(system, /当前人格：冷静学霸/);
   assert.match(system, /说话风格：理性、简洁、高效/);
   assert.match(system, /建议先做第 3 题/);
-  assert.notEqual(system, COMPANION_PERSONA_V3);
+  assert.notEqual(system, COMPANION_PERSONA_V4);
 });
 
 test("persona 输入边界：recent ≤20 条、12k/2k/4k 截断", () => {
@@ -140,6 +140,8 @@ test("validateCompanionOutput：空/超长/内部 token 泄露拒绝", () => {
   assert.equal(validateCompanionOutput('{"cue": "wave"}').ok, false);
   assert.equal(validateCompanionOutput("reason id: xyz").ok, false);
   assert.equal(validateCompanionOutput("companion-persona-v1 泄露").ok, false);
+  // 2026-08-24：prompt id 全版本模式——切到 V4 后回显 v4 同样拒绝
+  assert.equal(validateCompanionOutput("companion-persona-v4 泄露").ok, false);
 });
 
 test("validateCompanionOutput：剥离情感/富语言标签（双文本管线——入库零标签）", () => {
@@ -178,7 +180,7 @@ test("buildFinalCuePayload：确定性常量（thinking/error）不被误改", (
 });
 
 test("prompt id 常量与 shared 一致", () => {
-  assert.equal(COMPANION_PERSONA_V3_PROMPT_ID, "companion-persona-v3");
+  assert.equal(COMPANION_PERSONA_V4_PROMPT_ID, "companion-persona-v4");
 });
 
 test("15c：validateCompanionOutput 剥离 markdown（标题/加粗/列表/链接）", () => {

@@ -179,7 +179,9 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const result = await runWithAbortBudget(
-        (signal) => provider.chatCompletion(messages, { temperature: 0.2, maxTokens: 800, responseFormat: "text" }, signal),
+        // 2026-08-24（AI 设计审查 §4.2）：responseFormat "text" → "json_object"，
+        // provider 层先保证 JSON 合法性，容错解析退为二道防线。
+        (signal) => provider.chatCompletion(messages, { temperature: 0.2, maxTokens: 800, responseFormat: "json_object" }, signal),
         job.signal,
         resolveProviderCallTimeout("companion_dialogue"),
         (lateError) => logger.warn({ jobId: job.id, err: lateError }, "memory extract provider settled late"),

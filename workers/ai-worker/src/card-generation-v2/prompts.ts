@@ -11,9 +11,15 @@
  *   以及边际价值理由；
  * - Grounding/Pedagogy 只输出结构化 verdict，不要求 chain-of-thought（§12.4）；
  * - 每个阶段 prompt 版本化（PROMPT_VERSION），便于 RC/hash 闭包审计。
+ *
+ * 2026-08-24（AI 设计审查 §4.2）：v1 → v2 —— planner/author 增补紧凑 few-shot
+ * 输出示例（此前零示例是格式违规的主要来源；critic 两阶段的输出骨架已内嵌
+ * 完整 JSON 模板，不另加示例）。示例为示意数据，禁止模型复述到产出中。
+ * bump 时必须同步 apps/api generation-run-service 的 stageRuntimes promptVersion
+ * 种子（semanticSpecHash 审计闭包）。
  */
 
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v1";
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v2";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -56,6 +62,34 @@ export const buildPlannerSystemPrompt = (): string => `
     }
   ]
 }
+
+示例（示意数据，禁止复述到产出中）：笔记讲"牛顿第二定律：F=ma，适用于惯性参考系，加速度与合外力方向相同"时——
+{
+  "atoms": [
+    {
+      "atomId": "atom-1",
+      "proposition": "牛顿第二定律的公式表述（力、质量与加速度的关系）",
+      "evidenceRefIds": ["<从可用证据ID列表中选择>"],
+      "sourceSectionKeys": ["s1"],
+      "importanceBps": 9000,
+      "learnabilityBps": 8500,
+      "confidenceBps": 9000,
+      "knowledgeFormHint": "relationship"
+    },
+    {
+      "atomId": "atom-2",
+      "proposition": "牛顿第二定律的适用条件（惯性参考系）",
+      "evidenceRefIds": ["<从可用证据ID列表中选择>"],
+      "sourceSectionKeys": ["s1"],
+      "importanceBps": 7000,
+      "learnabilityBps": 7500,
+      "confidenceBps": 8000,
+      "knowledgeFormHint": "boundary"
+    }
+  ]
+}
+注意示例如何把"公式表述"与"适用条件"拆成两条独立 atom（原子性），且没有把
+"方向相同"这类零碎事实单独成卡。
 `;
 
 export const buildPlannerUserPrompt = (input: {
@@ -100,7 +134,8 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
 - **原子性（硬要求）**：objectiveStatement 只描述规划目标这一个核心目标；禁止用
   "以及/分别/同时/和"把多个独立目标拼接进 statement 或 front.prompt——那是质量
   门禁会拒绝的（objective_not_atomic）。规划目标若有多个子点，只保留核心一个。
-- conceptLabel 是这条知识的**概念级标题**：一个简短的名词短语（≤40 字），用于
+- conceptLabel 是这条知识的**概念级标题**：一个简短的名词短语（建议 ≤40 字，
+  合同硬上限 200 字；越短越利于首页/列表/星图展示），用于
   首页/列表/星图展示。禁止把 front 的 cue/prompt、完整命题句或"理解：xxx"式
   前缀当标题；标题应指向概念本身（如"牛顿第二定律的适用条件"）。
 - front 必须在给出 cue/prompt 时不泄漏 canonical answer 的关键结论或数值。
@@ -125,7 +160,7 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   "objective": {
     "objectiveStatement": "...",
     "publicSummary": "...",
-    "conceptLabel": "概念级标题（名词短语，≤40字）",
+    "conceptLabel": "概念级标题（名词短语，建议≤40字）",
     "knowledgeForm": "...",
     "preferredTaskIntents": ["recall"],
     "canonicalAnswer": {
@@ -155,6 +190,42 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   },
   "marginalValueRationale": "用 2-3 句话说明为何这项比重读原文更值得练习"
 }
+
+示例（示意数据，禁止复述到产出中；展示单答案 text 形态）：
+规划目标是"牛顿第二定律的公式表述"时——
+{
+  "objective": {
+    "objectiveStatement": "复述牛顿第二定律的公式表达式",
+    "publicSummary": "F=ma 公式表述",
+    "conceptLabel": "牛顿第二定律",
+    "knowledgeForm": "relationship",
+    "preferredTaskIntents": ["recall"],
+    "canonicalAnswer": {
+      "kind": "text",
+      "unit": { "unitId": "ans-1", "text": "F=ma" }
+    },
+    "learningSupport": { "explanation": "由 F=ma 可知，合外力一定时质量越大加速度越小。", "boundary": "", "misconception": "", "workedExample": "" },
+    "rubric": {
+      "version": 2,
+      "units": [{ "rubricUnitId": "rubric-1", "facet": "recall", "criterion": "准确答出 F=ma", "required": true, "answerUnitIds": ["ans-1"], "evidenceRefIds": [] }],
+      "passingPolicy": { "requireAllRequiredUnits": true, "allowContradiction": false }
+    },
+    "relations": [],
+    "difficulty": "introductory",
+    "evidenceRefIds": ["<从可用证据ID列表中选择>"]
+  },
+  "presentation": {
+    "strategy": "recall",
+    "transformationKind": "retrieval_definition",
+    "front": { "cue": "牛顿第二定律", "prompt": "它的公式表达式是什么？" },
+    "estimatedReviewSeconds": 40
+  },
+  "marginalValueRationale": "公式是力学推理的基本工具，主动回忆比重读更能巩固符号-含义绑定。"
+}
+注意：conceptLabel 是名词短语而非句子；front.cue 不含 "F=ma"（不泄题）；
+canonicalAnswer 用单对象 unit 而非数组；explanation 必须非空且严格基于证据
+（无证据支撑的边界/误区/例题字段输出空字符串）；evidenceRefIds 一律从用户
+消息给出的可用证据 ID 列表中选择，示例中的写法仅为占位。
 `;
 
 export const buildAuthorUserPrompt = (input: {

@@ -161,6 +161,14 @@ services:
       <<: *dev-database
       NODE_ENV: development
       PORT: 4000
+      # Explicitly distinguish the container's internal listener from the
+      # host's loopback-only published port.
+      API_BIND_ADDRESS: ${API_INTERNAL_BIND_ADDRESS:-0.0.0.0}
+      AILEARN_CONTAINER_MODE: "true"
+      AILEARN_ALLOW_CONTAINER_WILDCARD: "true"
+      AILEARN_DESKTOP_PAIRING_KEY_ID: ${AILEARN_DESKTOP_PAIRING_KEY_ID:-dev-desktop-key}
+      AILEARN_DESKTOP_PAIRING_SECRET: ${AILEARN_DESKTOP_PAIRING_SECRET:-}
+      AILEARN_DOMAIN_SCHEMA_REVISION: ${AILEARN_DOMAIN_SCHEMA_REVISION:-domain-dev-v1}
       CORS_ORIGIN: http://localhost:3000
       TRUST_PROXY: loopback,linklocal,uniquelocal
       # Dev-only explicit grant signing secret（compose 显式配置，非代码回退）：
@@ -339,6 +347,12 @@ services:
       #    /packages/shared 与 shared 自带 zod/ts-fsrs 需可见。
       - ./apps/api/package.json:/apps/api/package.json:ro
       - ./apps/api/node_modules:/apps/api/node_modules
+      # pnpm's host-side file: workspace link can otherwise resolve to the
+      # copied package under /apps/api/node_modules/.pnpm, whose dependency
+      # directory does not contain ts-fsrs. Mount the canonical shared source
+      # at the exact API package path so worker imports of apps/api modules
+      # resolve the same runtime dependency tree as the worker entrypoint.
+      - ./packages/shared:/apps/api/node_modules/@ailearn/shared
       - ./packages/shared:/packages/shared
       - ./packages/shared/node_modules:/packages/shared/node_modules
       - ./config:/app/config:ro

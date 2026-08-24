@@ -40,6 +40,7 @@ import { dailySummaryRoutes } from "./modules/companion-conversation/daily-summa
 import { deliveryTimelineRoutes } from "./modules/companion-conversation/timeline-routes.ts";
 import { voiceRoutes } from "./modules/learning-sessions/voice-routes.ts";
 import { assessmentRoutes } from "./modules/learning-sessions/assessment-service.ts";
+import { desktopTrustRoutes, resolveApiBindHost } from "./modules/desktop-trust/routes.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
 import { purgeSoftDeletedNotes } from "./modules/note/maintenance.ts";
 import { runLearningTtlMaintenance } from "./modules/learning-sessions/ttl-maintenance.ts";
@@ -314,6 +315,7 @@ async function main() {
   setReleaseInfo(releaseVersion, releaseCommit, releaseMigrations);
 
   await app.register(authRoutes);
+  await app.register(desktopTrustRoutes);
   await app.register(noteRoutes);
   // §21.5：Card Generation V2 是原子 capability bundle，默认 fail-closed。
   if (isCardGenerationV2Enabled()) {
@@ -369,7 +371,7 @@ async function main() {
   await app.register(assessmentRoutes);
 
   const PORT = Number(process.env.PORT ?? 4000);
-  const HOST = "0.0.0.0";
+  const HOST = resolveApiBindHost();
 
   try {
     await app.listen({ port: PORT, host: HOST });

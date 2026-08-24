@@ -147,9 +147,11 @@ test("标签剥离：不误伤正文普通方括号（[重要] 原样保留）",
   assert.equal(out, "[重要] 这道题 [b] 不是标签");
 });
 
-test("标签剥离：未知标签原样保留（防误删模型自造标签）", () => {
-  const out = stripVoiceExpressionTags("[happy] 自定义标签不剥离 [excited]ok");
-  assert.equal(out, "[happy] 自定义标签不剥离 ok");
+// 2026-08-24 行为变更（AI 设计审查 §4.2）：模型自造的 ASCII 标签形态 token
+// 现在一并剥离（此前会漏进 TTS 被当普通文字朗读）；中文正文方括号不受影响。
+test("标签剥离：模型自造标签剥离，正文方括号保留", () => {
+  const out = stripVoiceExpressionTags("[happy] 自定义标签会剥离 [excited]ok [重要]保留");
+  assert.equal(out, " 自定义标签会剥离 ok [重要]保留");
 });
 
 test("标签剥离：无标签文本原样返回", () => {
@@ -221,4 +223,20 @@ test("首段提前：只对首段生效，后续段仍等完整句", () => {
   );
   assert.equal(r2.segments.length, 0, "第二段无完整句不切");
   assert.equal(r2.next.rest, "第二句还没说完");
+});
+
+// 2026-08-24（三轮自查）：首段同样受单段 160 字符合同上限约束——此前
+// 整个首刷批次（可达 256+ 字符）无上限成段，web 客户端会按 >160 静默丢音频。
+test("首段提前：超长批次截到 160 上限，超出部分留 rest 不丢失", () => {
+  const big = "a".repeat(300);
+  const r = splitCompanionTtsSegmentsIncremental(
+    big,
+    { rest: "", sentCount: 0, sentChars: 0 },
+    false,
+    { firstSegmentMinChars: 14 },
+  );
+  assert.equal(r.segments.length, 1);
+  assert.ok(r.segments[0].text.length <= 160, "首段不超合同上限");
+  assert.equal(r.next.rest.length, 300 - 160, "超出部分留在 rest 继续正常切句");
+  assert.equal(r.segments[0].text + r.next.rest, big, "文本无丢失");
 });

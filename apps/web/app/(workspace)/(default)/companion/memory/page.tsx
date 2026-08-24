@@ -304,6 +304,33 @@ export default function CompanionMemoryPage() {
     reload();
   }, [reload]);
 
+  // 手动新增记忆（PRD §2.2.2 来源5 / §13.1）：服务端默认 userStated+candidate=false，
+  // 即直接成为 active 记忆并触发 embedding。
+  const [newKind, setNewKind] = useState<MemoryItem["kind"]>("preference");
+  const [newContent, setNewContent] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const handleCreate = useCallback(async () => {
+    const content = newContent.trim();
+    if (!content) return;
+    setCreating(true);
+    setError(null);
+    try {
+      await api.createCompanionMemory({
+        kind: newKind,
+        content,
+        sourceType: "user_stated",
+        candidate: false,
+      });
+      setNewContent("");
+      reload();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "新增失败");
+    } finally {
+      setCreating(false);
+    }
+  }, [newContent, newKind, reload]);
+
   return (
     <main className="companion-memory-page">
       <header className="companion-memory-head">
@@ -329,6 +356,30 @@ export default function CompanionMemoryPage() {
           <span>对话历史</span>
         </Link>
       </nav>
+
+      <section className="companion-memory-create" aria-label="手动新增记忆">
+        <select value={newKind} onChange={(e) => setNewKind(e.target.value as MemoryItem["kind"])} aria-label="新记忆类型">
+          {KIND_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <input
+          value={newContent}
+          maxLength={200}
+          onChange={(e) => setNewContent(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void handleCreate();
+            }
+          }}
+          placeholder="手动记一条，例如：这周想重点突破有机化学"
+          aria-label="新记忆内容"
+        />
+        <button type="button" disabled={creating || !newContent.trim()} onClick={() => void handleCreate()}>
+          {creating ? "添加中…" : "添加记忆"}
+        </button>
+      </section>
 
       <section className="companion-memory-toolbar" aria-label="记忆筛选">
         <input

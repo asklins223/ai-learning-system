@@ -25,8 +25,11 @@ import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import {
   createLearningRunRequestSchema,
+  learningTaskDraftSchema,
+  learningTaskDraftWriteReceiptSchema,
   learningRunActionRequestSchema,
   putLearningTaskDraftRequestSchema,
+  submitTaskArtifactReceiptSchema,
   submitTaskArtifactSchema,
 } from "@ailearn/shared";
 import {
@@ -37,12 +40,15 @@ import {
   getDraft,
   getEventsAfter,
   getResultPayload,
+  getResultPayloadV2,
   getReturnContract,
+  getReturnContractV2,
+  getLearningRunPublicSnapshotV2,
+  getLearningRunPublicSnapshotV2FromView,
   getRunPublicView,
-  putDraft,
   recordActivityLease,
+  putDraft,
   submitArtifact,
-  type CreateLearningRunV2Request,
 } from "./run-service.ts";
 import {
   createLearningRunV2RequestSchema,
@@ -53,6 +59,17 @@ import { companionRateLimit } from "../companion-conversation/companion-rate-lim
 // 方案 16 §20：学习漏斗埋点（服务端权威写入，尽力而为）。
 import { recordLearningMetric, recordLearningMetrics, type LearningMetricEventV1, type LearningMetricScope } from "../observability/learning-metrics.ts";
 import { isLearningRunV1Enabled } from "../../config/learning-companion-flags.ts";
+import {
+  learningRunActionRequestV2Schema,
+  learningRunActionResponseV2Schema,
+  learningRunPublicSnapshotV2Schema,
+  putLearningTaskDraftRequestV2Schema,
+  learningTaskDraftV2Schema,
+  learningTaskDraftWriteReceiptV2Schema,
+  recordLearningRunActivityLeaseRequestV2Schema,
+  submitTaskArtifactV2Schema,
+  submitTaskArtifactReceiptV2Schema,
+} from "@ailearn/shared";
 
 // PERF-A#10：fire-and-forget 学习埋点加背压——有界在途/排队，溢出即丢弃
 // （与 recordLearningMetric 的静默尽力而为语义一致），避免高流量下无界堆积
@@ -98,6 +115,57 @@ const activityLeaseBodySchema = z.object({
   startedAt: z.string().min(1),
   endedAt: z.string().min(1),
 });
+
+type V2Snapshot = z.infer<typeof learningRunPublicSnapshotV2Schema>;
+
+// The V2 draft adapter persists the original runRevision inside the V1
+// service ledger. Keep that bridge schema API-internal: the public/shared V1
+// receipt remains strict and cannot silently grow V2 fields.
+const learningTaskDraftWriteReceiptV1AdapterSchema = learningTaskDraftWriteReceiptSchema.extend({
+  runRevision: z.number().int().min(1).optional(),
+});
+
+function requireV2SnapshotBinding(snapshot: V2Snapshot, snapshotId: string): void {
+  if (snapshot.snapshotId !== snapshotId || snapshot.runId.length === 0) {
+    throw new LearningRunServiceError("context_stale", "V2 snapshot binding 已失效", 409);
+  }
+}
+
+function parseV1Adapter<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new LearningRunServiceError("unsupported_contract", `${label} 不是 canonical V1 内部形状`, 409);
+  return parsed.data;
+}
+
+function isV2ActionAllowed(
+  snapshot: V2Snapshot,
+  action: z.infer<typeof learningRunActionRequestV2Schema>["action"],
+): boolean {
+  return snapshot.allowedActions.some((allowed) => {
+    switch (allowed.kind) {
+      case "pause":
+      case "resume":
+      case "skip_run":
+      case "finish_current_evidence":
+      case "finish_without_commit":
+      case "retry_prepare":
+      case "retry_commit":
+        return action.kind === allowed.kind;
+      case "switch_variant":
+        return action.kind === "switch_variant" && action.alternativeId === allowed.alternativeId;
+      case "request_hint":
+        return action.kind === "request_hint" && action.level === allowed.level;
+      case "skip_task":
+        return action.kind === "skip_task" && action.taskId === allowed.taskId;
+      case "activate_followup":
+        return action.kind === "activate_followup" && action.followupId === allowed.followupId;
+      case "retry_assessment":
+        return action.kind === "retry_assessment" && action.assessmentId === allowed.assessmentId;
+      case "end":
+        return action.kind === "end" && action.abandonLockedEvidence === allowed.abandonLockedEvidence;
+    }
+  });
+}
 
 // 运维护栏（2026-08-15 审计）：learning-runs 写端点此前无限流——高频
 // create/submit 会持续排满评估任务队列。与 companion 限流同模式（内存
@@ -151,24 +219,23 @@ export async function learningRunRoutes(app: FastifyInstance) {
     const raw = req.body as Record<string, unknown>;
     if (raw && typeof raw === "object" && "originV2" in raw && (raw as { originV2?: unknown }).originV2 !== undefined) {
       const body = parseBody(app, createLearningRunV2RequestSchema, req.body);
-      const req2 = body as CreateLearningRunV2Request;
+      const req2 = body;
       try {
-        const result = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          createRunV2(tx, {
+        const snapshot = await withWorkspaceTransaction(scopeOf(req), async (tx) => {
+          const result = await createRunV2(tx, {
             workspaceId: req.session.workspaceId,
             userId: req.session.userId,
             request: req2,
-          }),
-        );
-        // §16.1/§16.3：V2 只下发 LearningRunTargetPublicV2 投影（绝不含
-        // canonicalAnswer/scoringRubric/evidence/planningExposure）。
-        return reply.code(201).header("Cache-Control", "no-store").send({
-          version: 2,
-          runId: result.runId,
-          snapshotId: result.snapshotId,
-          target: result.frozen.publicTarget,
-          publishedTargetEligibility: result.frozen.snapshot.publishedTargetEligibility,
+          });
+          return getLearningRunPublicSnapshotV2(tx, {
+            workspaceId: req.session.workspaceId,
+            userId: req.session.userId,
+            runId: result.runId,
+          });
         });
+        // §16.1/§16.3：V2 创建与后续 GET 使用同一 public snapshot 形状；
+        // canonicalAnswer/scoringRubric/evidence/planningExposure 不出 server。
+        return reply.code(201).header("Cache-Control", "no-store").send(snapshot);
       } catch (err) {
         if (err instanceof LearningRunServiceError) {
           return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
@@ -220,6 +287,295 @@ export async function learningRunRoutes(app: FastifyInstance) {
     }
   });
 
+  // ─── Explicit V2 wire endpoints ───────────────────────────────────────
+  // V1 endpoints above remain for compatibility, but the desktop client never
+  // consumes them. V2 requires the origin/snapshot/return-target binding.
+  app.get<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = runParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
+      try {
+        const snapshot = await withWorkspaceTransaction(scopeOf(req), (tx) =>
+          getLearningRunPublicSnapshotV2(tx, {
+            workspaceId: req.session.workspaceId,
+            userId: req.session.userId,
+            runId: params.data.runId,
+          }),
+        );
+        return reply
+          .header("ETag", `"${snapshot.runRevision}"`)
+          .header("Cache-Control", "no-store")
+          .send(snapshot);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) {
+          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.get<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/result/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = runParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
+      try {
+        const result = await withWorkspaceTransaction(scopeOf(req), (tx) =>
+          getResultPayloadV2(tx, {
+            workspaceId: req.session.workspaceId,
+            userId: req.session.userId,
+            runId: params.data.runId,
+          }),
+        );
+        return reply.code(result.httpStatus).header("Cache-Control", "no-store").send(result);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) {
+          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.get<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/return-contract/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = runParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
+      try {
+        const contract = await withWorkspaceTransaction(scopeOf(req), (tx) =>
+          getReturnContractV2(tx, {
+            workspaceId: req.session.workspaceId,
+            userId: req.session.userId,
+            runId: params.data.runId,
+          }),
+        );
+        return reply.header("Cache-Control", "no-store").send(contract);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) {
+          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.put<{ Params: { runId: string; taskId: string } }>(
+    "/learning-runs/:runId/tasks/:taskId/draft/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      if (runRateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:run:draft`, RUN_WRITE_LIMITS.draftPerMinute, 60_000)) return;
+      const params = taskDraftParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("run/task id 非法");
+      const body = parseBody(app, putLearningTaskDraftRequestV2Schema, req.body);
+      try {
+        const receipt = await withWorkspaceTransaction(scopeOf(req), async (tx) => {
+          const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scopeOf(req), runId: params.data.runId });
+          requireV2SnapshotBinding(snapshot, body.snapshotId);
+          const raw = await putDraft(tx, {
+            ...scopeOf(req),
+            runId: params.data.runId,
+            taskId: params.data.taskId,
+            variantId: body.variantId,
+            variantRevision: body.variantRevision,
+            taskRevision: body.taskRevision,
+            expectedDraftRevision: body.expectedDraftRevision,
+            payload: body.payload,
+            rendererState: body.rendererState,
+            idempotencyKey: body.idempotencyKey,
+            requestContext: { version: 2, snapshotId: body.snapshotId },
+            assertDraftAllowed: () => {
+              if (snapshot.activeTask?.taskId !== params.data.taskId) {
+                throw new LearningRunServiceError("task_not_active", "该任务不是当前任务", 409);
+              }
+            },
+          });
+          const parsed = parseV1Adapter(learningTaskDraftWriteReceiptV1AdapterSchema, raw, "draft receipt");
+          return learningTaskDraftWriteReceiptV2Schema.parse({
+            version: 2,
+            runId: parsed.runId,
+            snapshotId: snapshot.snapshotId,
+            taskId: parsed.taskId,
+            variantId: parsed.variantId,
+            // Keep the revision from the original ledger receipt on exact
+            // replay. Falling back to the current snapshot only covers old
+            // V2 ledger rows created before this metadata was persisted.
+            runRevision: parsed.runRevision ?? snapshot.runRevision,
+            taskRevision: parsed.taskRevision,
+            draftRevision: parsed.draftRevision,
+            savedAt: parsed.savedAt,
+            expiresAt: parsed.expiresAt,
+          });
+        });
+        return reply.header("Cache-Control", "no-store").send(receipt);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
+        throw err;
+      }
+    },
+  );
+
+  app.get<{ Params: { runId: string; taskId: string } }>(
+    "/learning-runs/:runId/tasks/:taskId/draft/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = taskDraftParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("run/task id 非法");
+      try {
+        const draft = await withWorkspaceTransaction(scopeOf(req), async (tx) => {
+          const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scopeOf(req), runId: params.data.runId });
+          const raw = await getDraft(tx, { ...scopeOf(req), runId: params.data.runId, taskId: params.data.taskId });
+          if (raw === null) return null;
+          const parsed = parseV1Adapter(learningTaskDraftSchema, raw, "draft");
+          if (parsed.runId !== params.data.runId || parsed.taskId !== params.data.taskId) {
+            throw new LearningRunServiceError("unsupported_contract", "draft scope 与 route 不一致", 409);
+          }
+          return learningTaskDraftV2Schema.parse({ ...parsed, version: 2, snapshotId: snapshot.snapshotId });
+        });
+        if (draft === null) return reply.code(404).send({ error: "draft_not_found", message: "没有已保存的草稿" });
+        return reply.header("Cache-Control", "no-store").send(draft);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+        throw err;
+      }
+    },
+  );
+
+  app.post<{ Params: { runId: string; taskId: string } }>(
+    "/learning-runs/:runId/tasks/:taskId/submissions/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      if (runRateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:run:submit`, RUN_WRITE_LIMITS.submitPerMinute, 60_000)) return;
+      const params = taskDraftParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("run/task id 非法");
+      const body = parseBody(app, submitTaskArtifactV2Schema, req.body);
+      try {
+        const receipt = await withWorkspaceTransaction(scopeOf(req), async (tx) => {
+          const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scopeOf(req), runId: params.data.runId });
+          requireV2SnapshotBinding(snapshot, body.snapshotId);
+          const raw = await submitArtifact(tx, {
+            ...scopeOf(req),
+            runId: params.data.runId,
+            taskId: params.data.taskId,
+            request: {
+              version: 1,
+              variantId: body.variantId,
+              variantRevision: body.variantRevision,
+              runRevision: body.runRevision,
+              taskRevision: body.taskRevision,
+              inputSchemaHash: body.inputSchemaHash,
+              payload: body.payload,
+              ...(body.baseArtifactId ? { baseArtifactId: body.baseArtifactId } : {}),
+              ...(body.baseRevision !== undefined ? { baseRevision: body.baseRevision } : {}),
+              idempotencyKey: body.idempotencyKey,
+            },
+            requestContext: { version: 2, snapshotId: body.snapshotId },
+          });
+          const parsed = parseV1Adapter(submitTaskArtifactReceiptSchema, raw, "artifact receipt");
+          return submitTaskArtifactReceiptV2Schema.parse({ ...parsed, version: 2, snapshotId: snapshot.snapshotId });
+        });
+        enqueueLearningMetric(
+          { workspaceId: req.session.workspaceId, userId: req.session.userId },
+          { eventType: "artifact_locked", runId: params.data.runId, taskId: params.data.taskId },
+        );
+        return reply.code(202).header("Cache-Control", "no-store").send(receipt);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
+        throw err;
+      }
+    },
+  );
+
+  app.post<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/actions/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      if (runRateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:run:action`, RUN_WRITE_LIMITS.actionPerMinute, 60_000)) return;
+      const params = runParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
+      const body = parseBody(app, learningRunActionRequestV2Schema, req.body);
+      try {
+        const response = await withWorkspaceTransaction(scopeOf(req), async (tx) => {
+          const before = await getLearningRunPublicSnapshotV2(tx, { ...scopeOf(req), runId: params.data.runId });
+          requireV2SnapshotBinding(before, body.snapshotId);
+          const result = await applyAction(tx, {
+            ...scopeOf(req),
+            runId: params.data.runId,
+            runRevision: body.runRevision,
+            runtimeEpoch: body.runtimeEpoch,
+            taskRevision: body.taskRevision,
+            action: body.action,
+            idempotencyKey: body.idempotencyKey,
+            requestContext: { version: 2, snapshotId: body.snapshotId },
+            assertActionAllowed: () => {
+              if (!isV2ActionAllowed(before, body.action)) {
+                throw new LearningRunServiceError("action_not_allowed", "该 action 不在服务端签发的允许集合中", 409);
+              }
+            },
+          });
+          const snapshot = await getLearningRunPublicSnapshotV2FromView(
+            tx,
+            { ...scopeOf(req), runId: params.data.runId },
+            result.snapshot,
+          );
+          const actionResult = result.hint
+            ? { kind: "hint_revealed" as const, ...result.hint, resultingTrustCeiling: "practice_only" as const }
+            : result.previousVariantId !== undefined
+              ? { kind: "variant_switched" as const, previousVariantId: result.previousVariantId, activeVariantId: result.activeVariantId ?? "" }
+              : { kind: "state_changed" as const };
+          return learningRunActionResponseV2Schema.parse({
+            version: 2,
+            runId: snapshot.runId,
+            snapshotId: snapshot.snapshotId,
+            originV2: snapshot.originV2,
+            acceptedActionId: result.acceptedActionId,
+            actionResult,
+            snapshot,
+          });
+        });
+        return reply.header("Cache-Control", "no-store").send(response);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
+        throw err;
+      }
+    },
+  );
+
+  app.post<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/activity-lease/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = runParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
+      const body = parseBody(app, recordLearningRunActivityLeaseRequestV2Schema, req.body);
+      try {
+        await withWorkspaceTransaction(scopeOf(req), async (tx) => {
+          const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scopeOf(req), runId: params.data.runId });
+          requireV2SnapshotBinding(snapshot, body.snapshotId);
+          if (snapshot.runRevision !== body.runRevision || snapshot.runtimeEpoch !== body.runtimeEpoch) {
+            throw new LearningRunServiceError("context_stale", "activity lease 的 run revision/epoch 已过期", 409);
+          }
+          await recordActivityLease(tx, {
+            ...scopeOf(req),
+            runId: params.data.runId,
+            deviceSessionId: body.deviceSessionId,
+            startedAt: body.startedAt,
+            endedAt: body.endedAt,
+          });
+        });
+        return reply.code(204).header("Cache-Control", "no-store").send();
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
+        throw err;
+      }
+    },
+  );
+
   // GET /learning-runs/:runId — 公共快照；ETag=revision。
   app.get<{ Params: { runId: string } }>(
     "/learning-runs/:runId",
@@ -242,13 +598,37 @@ export async function learningRunRoutes(app: FastifyInstance) {
   );
 
   // GET /learning-runs/:runId/events — SSE；Last-Event-ID = 最后收到的 sequence。
-  app.get<{ Params: { runId: string }; Querystring: { lastEventId?: string } }>(
+  app.get<{ Params: { runId: string }; Querystring: { lastEventId?: string; snapshotId?: string } }>(
     "/learning-runs/:runId/events",
     { preHandler: [requireSession] },
     async (req, reply) => {
       const params = runParamsSchema.safeParse(req.params);
       if (!params.success) throw app.httpErrors.badRequest("runId 非法");
-      const afterSequence = Number(req.query?.lastEventId ?? 0);
+      const scope = scopeOf(req);
+      const snapshotId = req.query?.snapshotId;
+      if (snapshotId !== undefined) {
+        const parsedSnapshotId = z.string().uuid().safeParse(snapshotId);
+        if (!parsedSnapshotId.success) throw app.httpErrors.badRequest("snapshotId 非法");
+        try {
+          // V2 callers must prove the same public snapshot before the stream
+          // is hijacked. No snapshotId keeps the explicit V1 compatibility
+          // stream available, but it can never be used by the V2 gateway.
+          await withWorkspaceTransaction(scope, async (tx) => {
+            const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scope, runId: params.data.runId });
+            requireV2SnapshotBinding(snapshot, parsedSnapshotId.data);
+          });
+        } catch (err) {
+          if (err instanceof LearningRunServiceError) {
+            return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+          }
+          throw err;
+        }
+      }
+      // Browser EventSource traditionally uses Last-Event-ID; query remains
+      // supported for existing clients and deterministic integration probes.
+      const headerLastEventId = req.headers["last-event-id"];
+      const lastEventId = Array.isArray(headerLastEventId) ? headerLastEventId[0] : headerLastEventId;
+      const afterSequence = Number(req.query?.lastEventId ?? lastEventId ?? 0);
       if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
         throw app.httpErrors.badRequest("lastEventId 非法");
       }
@@ -272,7 +652,6 @@ export async function learningRunRoutes(app: FastifyInstance) {
         req.log.error({ err, runId: params.data.runId }, "sse: writeHead failed");
         return reply;
       }
-      const scope = scopeOf(req);
       let closed = false;
       let cursor = afterSequence;
       // socket 级错误（EPIPE/ECONNRESET）必须吞掉：未处理会冒泡为

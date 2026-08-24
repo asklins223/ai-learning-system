@@ -91,7 +91,7 @@ export async function handleCandidateActionV2(
       throw new CardGenerationV2ServiceError("stale_review_draft", 409, "审核草稿已变更，请刷新");
     }
 
-    return result;
+    return { ...result, reviewDraftRevision: newRev };
   });
 }
 
@@ -681,12 +681,17 @@ function assertReviewable(candidate: typeof cardGenerationCandidatesV2.$inferSel
 
 function buildObjectivePatch(patch: import("@ailearn/shared/card-generation-v2-contracts").CandidateEditablePatchV2): Record<string, unknown> {
   const result: Record<string, unknown> = {};
+  const learningSupport: Record<string, unknown> = {};
   if (patch.objectiveStatement !== undefined) result.objectiveStatement = patch.objectiveStatement;
   if (patch.canonicalAnswer !== undefined) result.canonicalAnswer = patch.canonicalAnswer;
-  if (patch.explanation !== undefined) result.explanation = patch.explanation;
-  if (patch.boundary !== undefined) result.boundary = patch.boundary;
-  if (patch.misconception !== undefined) result.misconception = patch.misconception;
-  if (patch.workedExample !== undefined) result.workedExample = patch.workedExample;
+  // learningSupport is nested in the objective draft. Keeping these fields at
+  // the top level makes the edit appear successful while reveal/activation
+  // continue reading the old support content.
+  if (patch.explanation !== undefined) learningSupport.explanation = patch.explanation;
+  if (patch.boundary !== undefined) learningSupport.boundary = patch.boundary;
+  if (patch.misconception !== undefined) learningSupport.misconception = patch.misconception;
+  if (patch.workedExample !== undefined) learningSupport.workedExample = patch.workedExample;
+  if (Object.keys(learningSupport).length > 0) result.learningSupport = learningSupport;
   if (patch.knowledgeForm !== undefined) result.knowledgeForm = patch.knowledgeForm;
   if (patch.evidenceRefIds !== undefined) result.evidenceRefIds = patch.evidenceRefIds;
   return result;

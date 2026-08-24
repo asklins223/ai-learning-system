@@ -1282,6 +1282,20 @@
       "when": 1787241600005,
       "tag": "0182_rename_worker_jobs_policy_out_of_sec01_namespace",
       "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1787241600006,
+      "tag": "0183_drop_legacy_card_v1_orphan_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 184,
+      "version": "7",
+      "when": 1787241600007,
+      "tag": "0184_card_generation_post_activation_worker_grant",
+      "breakpoints": true
     }
   ]
 }

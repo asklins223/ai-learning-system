@@ -3,6 +3,7 @@
  * 不显示兜底“来源笔记”（§36/§13.3）。
  */
 import type { JSX } from "react";
+import { Icon } from "@/components/ui/icons";
 
 export function ObjectiveSourceLine(props: {
   noteTitle: string | null;
@@ -25,11 +26,11 @@ export function ObjectiveSourceLine(props: {
       aria-label={props.noteTitle ? "来源笔记：" + props.noteTitle : freshnessLabel}
       disabled={!props.onClickNote}
     >
-      <span aria-hidden="true">📎</span>
+      <Icon.Folder aria-hidden="true" />
       {props.noteTitle ? (
-        <span>{props.noteTitle}</span>
+        <span className="objective-source-line-note">{props.noteTitle}</span>
       ) : (
-        <span className="objective-muted">{freshnessLabel}</span>
+        <span className="objective-source-line-freshness">{freshnessLabel}</span>
       )}
     </button>
   );

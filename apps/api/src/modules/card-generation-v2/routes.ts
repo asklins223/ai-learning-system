@@ -28,11 +28,8 @@ import {
   candidateActionCommandV2Schema,
   revealCandidateRequestV2Schema,
   activateCardCandidatesRequestV2Schema,
-  type CreateCardGenerationRunRequestV2,
-  type CandidateActionCommandV2,
-  type RevealCandidateRequestV2,
-  type ActivateCardCandidatesRequestV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardGenerationExposureEligibilityV1Schema } from "@ailearn/shared/card-generation-desktop-contracts";
 import {
   revealCardRequestV2Schema,
   archiveCardRequestV2Schema,
@@ -52,13 +49,14 @@ import {
 import {
   createGenerationRunV2,
   getGenerationRunV2,
+  listActiveGenerationRunsV2,
   getGenerationRunPlanV2,
   getGenerationRunCandidatesV2,
   getGenerationRunEventsV2,
   closeGenerationRunV2,
   cancelGenerationRunV2,
 } from "./generation-run-service.ts";
-import { revealCandidateV2 } from "./reveal-service.ts";
+import { getCandidateExposureEligibilityV2, revealCandidateV2 } from "./reveal-service.ts";
 import { handleCandidateActionV2 } from "./candidate-review-service.ts";
 import { activateCardCandidatesV2 } from "./activation-service.ts";
 import {
@@ -66,9 +64,25 @@ import {
   NO_STORE,
   type RunContext,
 } from "./helpers.ts";
+import {
+  parseCandidateRevealV2,
+  parseCardActivationReceiptV2,
+  parseCardGenerationPlanV2,
+  parseCardGenerationRunServerViewV2,
+  projectCardGenerationCandidatesV1,
+  projectCardGenerationActiveSummaryListV1,
+  projectCardGenerationCancelResultV1,
+  projectCardGenerationCloseResultV1,
+  projectCardGenerationJobAcceptedV1,
+  projectCardGenerationReviewResultV1,
+} from "./desktop-projection.ts";
 
 const eventsQuerySchema = z.object({
   after: z.coerce.number().int().min(0).optional().default(0),
+});
+
+const candidateExposureQuerySchema = z.object({
+  revision: z.coerce.number().int().min(1),
 });
 
 // /v2/cards 列表分页：cursor 为十进制 offset 字符串（保持简单、可 clamp）。
@@ -107,18 +121,30 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
   // ─── POST /v2/card-generation-runs ─ 创建生成运行 ──────────────────────
   app.post("/v2/card-generation-runs", { preHandler: [requireOwner] }, async (req, reply) => {
     reply.headers(NO_STORE);
-    const body = parseBody(app, createCardGenerationRunRequestV2Schema, req.body) as CreateCardGenerationRunRequestV2;
+    const body = parseBody(app, createCardGenerationRunRequestV2Schema, req.body);
     const idempotencyKey = requireIdempotencyKey(req);
     try {
       const result = await createGenerationRunV2(context(req), body.noteVersionId, body, idempotencyKey);
-      return reply.code(202).send(result);
+      return reply.code(202).send(projectCardGenerationJobAcceptedV1(result));
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // ─── GET /v2/card-generation-runs/active ─ Owner Room/Desk recovery ─────
+  // Must precede the :runId route so the literal path is never parsed as UUID.
+  app.get("/v2/card-generation-runs/active", { preHandler: [requireOwner] }, async (req, reply) => {
+    reply.headers(NO_STORE);
+    try {
+      const runs = await listActiveGenerationRunsV2(context(req));
+      return projectCardGenerationActiveSummaryListV1(runs);
     } catch (error) {
       return sendServiceError(reply, error);
     }
   });
 
   // ─── GET /v2/card-generation-runs/:runId ─ 获取运行详情 ─────────────────
-  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId", async (req, reply) => {
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId", { preHandler: [requireOwner] }, async (req, reply) => {
     reply.headers(NO_STORE);
     if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
       return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
@@ -126,14 +152,14 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
     try {
       const run = await getGenerationRunV2(context(req), req.params.runId);
       if (!run) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
-      return run;
+      return parseCardGenerationRunServerViewV2(run);
     } catch (error) {
       return sendServiceError(reply, error);
     }
   });
 
   // ─── GET /v2/card-generation-runs/:runId/plan ─ 获取计划 ───────────────
-  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/plan", async (req, reply) => {
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/plan", { preHandler: [requireOwner] }, async (req, reply) => {
     reply.headers(NO_STORE);
     if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
       return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
@@ -141,14 +167,14 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
     try {
       const plan = await getGenerationRunPlanV2(context(req), req.params.runId);
       if (!plan) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
-      return plan;
+      return parseCardGenerationPlanV2(plan);
     } catch (error) {
       return sendServiceError(reply, error);
     }
   });
 
   // ─── GET /v2/card-generation-runs/:runId/candidates ─ 获取候选列表 ──────
-  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/candidates", async (req, reply) => {
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/candidates", { preHandler: [requireOwner] }, async (req, reply) => {
     reply.headers(NO_STORE);
     if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
       return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
@@ -156,14 +182,45 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
     try {
       const candidates = await getGenerationRunCandidatesV2(context(req), req.params.runId);
       if (!candidates) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
-      return { candidates };
+      return projectCardGenerationCandidatesV1(req.params.runId, candidates);
     } catch (error) {
       return sendServiceError(reply, error);
     }
   });
 
+  // ─── GET .../:candidateId/exposure ─ activation preflight ─────────────
+  // Exact candidate revision + current user only; answer/evidence never cross
+  // this projection boundary.
+  app.get<{ Params: { runId: string; candidateId: string } }>(
+    "/v2/card-generation-runs/:runId/candidates/:candidateId/exposure",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success ||
+          !uuidParamSchema.safeParse({ id: req.params.candidateId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 ID 格式" });
+      }
+      const query = candidateExposureQuerySchema.safeParse(req.query);
+      if (!query.success) {
+        return reply.code(400).send({ error: "invalid_request", message: "缺少有效 candidate revision" });
+      }
+      try {
+        const projection = await getCandidateExposureEligibilityV2(
+          context(req),
+          req.params.runId,
+          req.params.candidateId,
+          query.data.revision,
+        );
+        if (!projection) return reply.code(404).send({ error: "candidate_not_found", message: "候选不存在" });
+        return cardGenerationExposureEligibilityV1Schema.parse(projection);
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
   // ─── GET /v2/card-generation-runs/:runId/events ─ 获取事件流 ────────────
-  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/events", async (req, reply) => {
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/events", { preHandler: [requireOwner] }, async (req, reply) => {
     reply.headers(NO_STORE);
     if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
       return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
@@ -178,18 +235,27 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
   });
 
   // ─── GET /v2/card-generation-runs/:runId/events/stream ─ SSE 实时事件流 ─
-  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/events/stream", async (req, reply) => {
+  app.get<{ Params: { runId: string } }>("/v2/card-generation-runs/:runId/events/stream", { preHandler: [requireOwner] }, async (req, reply) => {
     if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
       return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+    }
+    const lastEventId = req.headers["last-event-id"];
+    const afterSequence = lastEventId === undefined
+      ? 0
+      : typeof lastEventId === "string" && /^\d+$/.test(lastEventId)
+        ? Number(lastEventId)
+        : Number.NaN;
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      return reply.code(400).send({ error: "invalid_last_event_id", message: "无效的 Last-Event-ID" });
     }
     // SSE headers
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-store",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     });
-    let lastSeq = 0;
+    let lastSeq = afterSequence;
     const runId = req.params.runId;
     const ctx = context(req);
     // Send initial comment
@@ -248,7 +314,7 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       try {
         const result = await cancelGenerationRunV2(context(req), req.params.runId);
         if (!result) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
-        return result;
+        return projectCardGenerationCancelResultV1(result);
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -270,7 +336,7 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       try {
         const result = await closeGenerationRunV2(context(req), req.params.runId, body.expectedReviewDraftRevision);
         if (!result) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
-        return result;
+        return projectCardGenerationCloseResultV1(result);
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -286,7 +352,7 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
         return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
       }
-      const command = parseBody(app, candidateActionCommandV2Schema, req.body) as CandidateActionCommandV2;
+      const command = parseBody(app, candidateActionCommandV2Schema, req.body);
       // 确保 URL 中的 runId 与 body 中的 runId 一致
       if (command.runId !== req.params.runId) {
         return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
@@ -294,8 +360,11 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       const idempotencyKey = requireIdempotencyKey(req);
       try {
         const result = await handleCandidateActionV2(context(req), command, idempotencyKey);
-        return result;
+        return projectCardGenerationReviewResultV1(result);
       } catch (error) {
+        if (error instanceof CardGenerationV2ServiceError) {
+          req.log.warn({ code: error.code, runId: req.params.runId }, "card-generation candidate action rejected");
+        }
         return sendServiceError(reply, error);
       }
     },
@@ -304,13 +373,14 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
   // ─── POST /v2/card-generation-runs/:runId/candidates/:candidateId/reveal ─ 揭示答案 ─
   app.post<{ Params: { runId: string; candidateId: string } }>(
     "/v2/card-generation-runs/:runId/candidates/:candidateId/reveal",
+    { preHandler: [requireOwner] },
     async (req, reply) => {
       reply.headers(NO_STORE);
       if (!uuidParamSchema.safeParse({ id: req.params.runId }).success ||
           !uuidParamSchema.safeParse({ id: req.params.candidateId }).success) {
         return reply.code(400).send({ error: "invalid_id", message: "无效的 ID 格式" });
       }
-      const body = parseBody(app, revealCandidateRequestV2Schema, req.body) as RevealCandidateRequestV2;
+      const body = parseBody(app, revealCandidateRequestV2Schema, req.body);
       // 确保 URL 中的 candidateId 与 body 中的一致
       if (body.candidateId !== req.params.candidateId) {
         return reply.code(400).send({ error: "candidate_id_mismatch", message: "URL 中的 candidateId 与请求体不一致" });
@@ -325,7 +395,7 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
           body.expectedCandidateRevisionHash,
           idempotencyKey,
         );
-        return reveal;
+        return parseCandidateRevealV2(reveal);
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -341,7 +411,7 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
         return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
       }
-      const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body) as ActivateCardCandidatesRequestV2;
+      const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body);
       // 确保 URL 中的 runId 与 body 中的一致
       if (body.runId !== req.params.runId) {
         return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
@@ -349,7 +419,7 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       const idempotencyKey = requireIdempotencyKey(req);
       try {
         const receipt = await activateCardCandidatesV2(context(req), body, idempotencyKey);
-        return reply.code(200).send(receipt);
+        return reply.code(200).send(parseCardActivationReceiptV2(receipt));
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -365,14 +435,14 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
         return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
       }
-      const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body) as ActivateCardCandidatesRequestV2;
+      const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body);
       if (body.runId !== req.params.runId) {
         return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
       }
       const idempotencyKey = requireIdempotencyKey(req);
       try {
         const receipt = await activateCardCandidatesV2(context(req), body, idempotencyKey);
-        return reply.code(200).send(receipt);
+        return reply.code(200).send(parseCardActivationReceiptV2(receipt));
       } catch (error) {
         return sendServiceError(reply, error);
       }

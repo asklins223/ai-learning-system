@@ -13,8 +13,9 @@ import {
 } from "../../db/schema/card-generation-v2.ts";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { noteVersions } from "../../db/schema/note.ts";
-import { isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardGenerationRunStatusV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { DomainError } from "@ailearn/shared";
+import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
 
 export class CardGenerationV2ServiceError extends DomainError {
   constructor(code: string, statusCode: number, message: string) {
@@ -128,6 +129,14 @@ export async function serializeRunPublic(row: typeof cardGenerationRunsV2.$infer
     currentPlanVersion: row.currentPlanVersion,
     reviewDraftRevision: row.reviewDraftRevision,
     sourceOutdated,
+    recovery: projectCardGenerationRecoveryV1({
+      runId: row.id,
+      noteId: row.noteId,
+      noteVersionId: row.noteVersionId,
+      status: cardGenerationRunStatusV2Schema.parse(row.status),
+      sourceOutdated,
+      error: row.errorCode ? { code: row.errorCode, message: row.errorMessage } : null,
+    }),
     error: row.errorCode ? { code: row.errorCode, message: row.errorMessage } : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -333,6 +342,22 @@ export function applyPatch(
     if (value === undefined) continue;
     if (value === null) {
       delete result[key];
+    } else if (
+      key === "learningSupport" &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ) {
+      // Candidate edits expose learning-support fields as a flat patch, but
+      // the draft stores them in this nested object. Merge only the supplied
+      // fields so editing one explanation does not erase boundary/misconception
+      // or future support fields.
+      const current = result[key];
+      result[key] = applyPatch(
+        current !== null && typeof current === "object" && !Array.isArray(current)
+          ? current as Record<string, unknown>
+          : {},
+        value as Record<string, unknown>,
+      );
     } else {
       result[key] = value;
     }

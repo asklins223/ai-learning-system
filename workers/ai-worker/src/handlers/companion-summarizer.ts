@@ -21,6 +21,7 @@ import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import { companionSummaryTotal } from "../lib/metrics.ts";
+import { parseMemoryExtractJson } from "./companion-memory-extractor.ts";
 import type { JobPayload } from "./index.ts";
 
 export const conversationSummaryOutputSchema = z.object({
@@ -90,7 +91,9 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
   let raw: string;
   try {
     const result = await runWithAbortBudget(
-      (signal) => provider.chatCompletion(messages, { temperature: 0.2, maxTokens: 1000, responseFormat: "text" }, signal),
+      // 2026-08-24（AI 设计审查 §4.2）：responseFormat "text" → "json_object"——
+      // 输出本就是结构化 JSON，让 provider 层开启 json 模式降低格式走样率。
+      (signal) => provider.chatCompletion(messages, { temperature: 0.2, maxTokens: 1000, responseFormat: "json_object" }, signal),
       job.signal,
       resolveProviderCallTimeout("companion_dialogue"),
       (lateError) => logger.warn({ jobId: job.id, err: lateError }, "summarizer provider settled late"),
@@ -109,7 +112,9 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
 
   let summary: z.infer<typeof conversationSummaryOutputSchema>;
   try {
-    summary = conversationSummaryOutputSchema.parse(JSON.parse(raw));
+    // 2026-08-24：裸 JSON.parse → 容错解析（剥 fence/提取平衡片段）——与
+    // memory-extractor 同款兜底，tokenrhythm 类网关偶发的 ```json 包裹不再丢摘要。
+    summary = conversationSummaryOutputSchema.parse(parseMemoryExtractJson(raw));
   } catch (err) {
     logger.warn({ jobId: job.id, conversationId, err }, "summarizer invalid output; skipping");
     // §9.9：记录摘要失败指标（输出校验失败）

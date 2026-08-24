@@ -44,6 +44,15 @@ export * from "./card-generation-v2-contracts.ts";
 export * from "./learning-card-v2-contracts.ts";
 // 2026-08-14：方案 20 LearningTargetSnapshotV2 合同（§16 Target Rebase）。
 export * from "./learning-target-v2-contracts.ts";
+// Golden Slice Member V2 outer wire: public snapshot/result/return adapters.
+export * from "./learning-run-v2-contracts.ts";
+export * from "./review-queue-v2-contracts.ts";
+export * from "./formal-assessment-guard-contracts.ts";
+export * from "./room-projection-contracts.ts";
+export * from "./note-projection-contracts.ts";
+export * from "./note-save-contracts.ts";
+export * from "./card-generation-desktop-contracts.ts";
+export * from "./quality-evidence-contracts.ts";
 export * from "./voice-artifact-contracts.ts";
 export * from "./learning-trust-contracts.ts";
 export * from "./scene-contracts.ts";
@@ -86,6 +95,10 @@ export type {
 } from "./silent-proof-profile-contracts.ts";
 export * from "./capability-bundle.ts";
 export * from "./desktop-pet-contracts.ts";
+// Electron desktop boundary contracts are also available through the explicit
+// subpath; exporting the same browser-safe module here keeps type-only tooling
+// convenient without importing any server-only dependency.
+export * from "./desktop-ipc-contracts.ts";
 export * from "./companion-asr-contracts.ts";
 export * from "./companion-character-contracts.ts";
 export * from "./companion-emotion-classifier.ts";

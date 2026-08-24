@@ -119,6 +119,21 @@ export async function loginViaUI(
         }),
         { timeout: 45_000 },
       ).toBe(true);
+      // The login redirect can win the race with the server-side workspace
+      // selection. Owner-only V2 routes must not turn that short window into
+      // a misleading 403 in API journey tests.
+      await expect.poll(
+        async () => page.evaluate(async () => {
+          const response = await fetch("/api/auth/me", {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!response.ok) return null;
+          const body = await response.json() as { workspaceId?: unknown };
+          return typeof body.workspaceId === "string" && body.workspaceId.length > 0 ? body.workspaceId : null;
+        }),
+        { timeout: 45_000 },
+      ).not.toBeNull();
       return;
     }
 

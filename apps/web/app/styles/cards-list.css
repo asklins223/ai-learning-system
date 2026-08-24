@@ -121,26 +121,6 @@
 
 .cards-page .cards-action-primary,
 .cards-page .cards-action-secondary,
-.cards-objective-action {
-  display: inline-flex;
-  min-height: 42px;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 16px;
-  border-radius: 11px;
-  font-family: var(--font-ui);
-  font-size: 12.5px;
-  font-weight: 740;
-  line-height: 1;
-  text-decoration: none;
-  white-space: nowrap;
-  transition:
-    background var(--motion-fast) var(--ease-standard),
-    border-color var(--motion-fast) var(--ease-standard),
-    color var(--motion-fast) var(--ease-standard),
-    transform var(--motion-fast) var(--ease-standard);
-}
 
 .cards-page .cards-action-primary {
   border: 1px solid var(--color-action);
@@ -172,10 +152,6 @@
 
 .cards-page .cards-action-primary svg,
 .cards-page .cards-action-secondary svg,
-.cards-objective-action svg {
-  width: 16px;
-  height: 16px;
-}
 
 .cards-page .cards-action-primary:disabled,
 .cards-page .cards-action-secondary:disabled {
@@ -556,243 +532,34 @@
   white-space: nowrap;
 }
 
-.cards-objective-list,
-.cards-objective-skeletons {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
 
-.cards-objective {
-  --objective-accent: var(--color-text-secondary);
-  --objective-soft: var(--color-surface-soft);
 
-  position: relative;
-  display: grid;
-  min-width: 0;
-  grid-template-columns: 46px minmax(0, 1fr) minmax(225px, 270px);
-  gap: 17px;
-  padding: 18px 18px 17px 16px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 17px;
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--objective-soft) 58%, transparent), transparent 22%),
-    var(--color-paper);
-  box-shadow: var(--shadow-control);
-  transition:
-    border-color var(--motion-base) var(--ease-standard),
-    box-shadow var(--motion-base) var(--ease-standard),
-    transform var(--motion-base) var(--ease-standard);
-}
 
-.cards-objective::before {
-  position: absolute;
-  top: 17px;
-  bottom: 17px;
-  left: 0;
-  width: 3px;
-  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
-  background: var(--objective-accent);
-  content: "";
-}
 
-.cards-objective[data-state="partial"] {
-  --objective-accent: var(--color-danger);
-  --objective-soft: var(--color-danger-soft);
-}
 
-.cards-objective[data-state="due"] {
-  --objective-accent: var(--color-warning);
-  --objective-soft: var(--color-warning-soft);
-}
 
-.cards-objective[data-state="validate"] {
-  --objective-accent: var(--color-evidence);
-  --objective-soft: var(--color-evidence-soft);
-}
 
-.cards-objective[data-state="scheduled"] {
-  --objective-accent: var(--color-warning);
-  --objective-soft: var(--color-warning-soft);
-}
 
-.cards-objective[data-state="practiced"] {
-  --objective-accent: var(--color-success);
-  --objective-soft: var(--color-success-soft);
-}
 
-.cards-objective:hover {
-  border-color: color-mix(in srgb, var(--objective-accent) 38%, var(--color-border-strong));
-  box-shadow: var(--shadow-panel);
-  transform: translateY(-1px);
-}
 
-.cards-objective-marker {
-  display: inline-grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--objective-accent) 24%, var(--color-border));
-  border-radius: 13px;
-  background: color-mix(in srgb, var(--objective-soft) 74%, var(--color-paper));
-  color: color-mix(in srgb, var(--objective-accent) 76%, var(--color-text));
-}
 
-.cards-objective-marker svg {
-  width: 19px;
-  height: 19px;
-}
 
-.cards-objective-main {
-  min-width: 0;
-}
 
-.cards-objective-topline {
-  display: flex;
-  min-height: 21px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
 
-.cards-objective-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: color-mix(in srgb, var(--objective-accent) 75%, var(--color-text));
-  font-size: 10px;
-  font-weight: 760;
-  letter-spacing: 0.04em;
-}
 
-.cards-objective-status > span {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--objective-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--objective-soft) 84%, transparent);
-}
 
-.cards-objective-topline time {
-  color: var(--color-text-secondary);
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  white-space: nowrap;
-}
 
-.cards-objective h3 {
-  margin: 4px 0 0;
-  font-family: var(--font-editorial);
-  font-size: clamp(20px, 1.7vw, 24px);
-  font-weight: 590;
-  letter-spacing: -0.022em;
-  line-height: 1.25;
-  overflow-wrap: anywhere;
-}
 
-.cards-objective h3 a {
-  color: var(--color-text);
-  text-decoration: none;
-}
 
-.cards-objective h3 a:hover {
-  color: color-mix(in srgb, var(--objective-accent) 60%, var(--color-text));
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--objective-accent) 40%, transparent);
-  text-underline-offset: 4px;
-}
 
-.cards-objective-source {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-  margin-top: 7px;
-  color: var(--color-text-secondary);
-  font-size: 10.5px;
-}
 
-.cards-objective-source svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
-  color: var(--color-warning-text);
-}
 
-.cards-objective-source > span {
-  max-width: min(42ch, 65%);
-  overflow: hidden;
-  color: var(--color-text);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.cards-objective-source i {
-  width: 3px;
-  height: 3px;
-  flex: 0 0 3px;
-  border-radius: 50%;
-  background: var(--color-text-secondary);
-  opacity: 0.5;
-}
 
-.cards-objective-source small {
-  overflow: hidden;
-  font-size: inherit;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.cards-objective-warning {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  width: fit-content;
-  margin: 10px 0 0;
-  padding: 7px 9px;
-  border: 1px solid color-mix(in srgb, var(--color-danger) 22%, var(--color-border));
-  border-radius: 9px;
-  background: var(--color-danger-soft);
-  color: var(--color-danger-text);
-  font-size: 10px;
-  font-weight: 650;
-  line-height: 1.4;
-}
 
-.cards-objective-warning svg {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-  margin-top: 1px;
-}
 
-.cards-objective-progress {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin: 15px 0 0;
-  padding: 0;
-  list-style: none;
-}
 
-.cards-objective-progress li {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.cards-objective-progress li:not(:last-child)::after {
-  position: absolute;
-  top: 15px;
-  right: -4px;
-  width: 8px;
-  height: 1px;
-  background: var(--color-divider);
-  content: "";
-}
 
 .cards-progress-dot {
   display: inline-grid;
@@ -811,111 +578,21 @@
   height: 14px;
 }
 
-.cards-objective-progress li[data-stage="complete"] .cards-progress-dot {
-  border-color: color-mix(in srgb, var(--color-success) 24%, var(--color-border));
-  background: var(--color-success-soft);
-  color: var(--color-success-text);
-}
 
-.cards-objective-progress li[data-stage="current"] .cards-progress-dot {
-  border-color: color-mix(in srgb, var(--objective-accent) 30%, var(--color-border));
-  background: color-mix(in srgb, var(--objective-soft) 74%, var(--color-paper));
-  color: color-mix(in srgb, var(--objective-accent) 74%, var(--color-text));
-}
 
-.cards-objective-progress li > span:last-child {
-  min-width: 0;
-}
 
-.cards-objective-progress strong,
-.cards-objective-progress small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.cards-objective-progress strong {
-  color: var(--color-text);
-  font-size: 10px;
-  font-weight: 710;
-}
 
-.cards-objective-progress small {
-  margin-top: 2px;
-  color: var(--color-text-secondary);
-  font-size: 9px;
-}
 
-.cards-objective-next {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  justify-content: center;
-  padding-left: 18px;
-  border-left: 1px solid var(--color-divider);
-}
 
-.cards-objective-next > span {
-  color: var(--color-text-secondary);
-  font-size: 9.5px;
-  font-weight: 750;
-  letter-spacing: 0.07em;
-}
 
-.cards-objective-next p {
-  display: -webkit-box;
-  margin: 6px 0 11px;
-  overflow: hidden;
-  color: var(--color-text-secondary);
-  font-size: 10.5px;
-  line-height: 1.5;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
 
-.cards-objective-action {
-  width: 100%;
-  min-height: 40px;
-  border: 1px solid color-mix(in srgb, var(--objective-accent) 38%, var(--color-border));
-  background: color-mix(in srgb, var(--objective-soft) 72%, var(--color-paper));
-  color: color-mix(in srgb, var(--objective-accent) 74%, var(--color-text));
-}
 
-.cards-objective-action:hover {
-  border-color: var(--objective-accent);
-  background: color-mix(in srgb, var(--objective-soft) 92%, var(--color-paper));
-  color: color-mix(in srgb, var(--objective-accent) 78%, var(--color-text));
-  transform: translateY(-1px);
-}
 
-.cards-objective-action svg {
-  transition: transform var(--motion-fast) var(--ease-standard);
-}
 
-.cards-objective-action:hover svg {
-  transform: translateX(2px);
-}
 
 /* Loading */
-.cards-objective-skeleton {
-  display: grid;
-  min-height: 174px;
-  grid-template-columns: 46px minmax(0, 1fr) minmax(225px, 270px);
-  gap: 17px;
-  padding: 18px 18px 17px 16px;
-  border: 1px solid var(--color-border);
-  border-radius: 17px;
-  background: var(--color-paper);
-  box-shadow: var(--shadow-control);
-}
 
-.cards-objective-skeleton span {
-  display: block;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--color-border) 60%, var(--color-paper-muted));
-  animation: cards-skeleton-breathe 1.5s ease-in-out infinite;
-}
 
 .cards-skeleton-marker {
   width: 42px;
@@ -927,11 +604,6 @@
   height: 12px;
 }
 
-.cards-objective-skeleton .cards-skeleton-title {
-  width: min(64%, 420px);
-  height: 24px;
-  margin-top: 11px;
-}
 
 .cards-skeleton-source {
   width: min(42%, 270px);
@@ -1197,35 +869,10 @@
     gap: 17px;
   }
 
-  .cards-objective,
-  .cards-objective-skeleton {
-    grid-template-columns: 46px minmax(0, 1fr);
-  }
 
-  .cards-objective-next {
-    grid-column: 2;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 0 0;
-    border-top: 1px solid var(--color-divider);
-    border-left: 0;
-  }
 
-  .cards-objective-next > span {
-    display: none;
-  }
 
-  .cards-objective-next p {
-    margin: 0;
-    -webkit-line-clamp: 1;
-  }
 
-  .cards-objective-action {
-    width: auto;
-    min-width: 155px;
-  }
 
   .cards-skeleton-action {
     display: none !important;
@@ -1419,49 +1066,18 @@
     text-overflow: ellipsis;
   }
 
-  .cards-objective-list,
-  .cards-objective-skeletons {
-    gap: 9px;
-  }
 
-  .cards-objective,
-  .cards-objective-skeleton {
-    grid-template-columns: 39px minmax(0, 1fr);
-    gap: 12px;
-    padding: 15px 14px 14px 13px;
-    border-radius: 15px;
-  }
 
-  .cards-objective::before {
-    top: 15px;
-    bottom: 15px;
-  }
 
-  .cards-objective-marker,
   .cards-skeleton-marker {
     width: 38px;
     height: 38px;
     border-radius: 11px;
   }
 
-  .cards-objective-topline time {
-    font-size: 8.5px;
-  }
 
-  .cards-objective h3 {
-    margin-top: 5px;
-    font-size: 20px;
-  }
 
-  .cards-objective-source {
-    gap: 6px;
-    font-size: 9.5px;
-  }
 
-  .cards-objective-progress {
-    gap: 4px;
-    margin-top: 13px;
-  }
 
   .cards-progress-dot {
     width: 27px;
@@ -1475,34 +1091,11 @@
     height: 12px;
   }
 
-  .cards-objective-progress strong {
-    font-size: 9px;
-  }
 
-  .cards-objective-progress small {
-    font-size: 8px;
-  }
 
-  .cards-objective-progress li:not(:last-child)::after {
-    top: 13px;
-  }
 
-  .cards-objective-next {
-    grid-column: 1 / -1;
-    grid-template-columns: minmax(0, 1fr) auto;
-    padding-top: 12px;
-  }
 
-  .cards-objective-next p {
-    font-size: 9.5px;
-  }
 
-  .cards-objective-action {
-    min-width: 138px;
-    min-height: 40px;
-    padding: 0 12px;
-    font-size: 11px;
-  }
 
   .cards-state-wrap {
     min-height: 260px;
@@ -1540,34 +1133,10 @@
     display: none;
   }
 
-  .cards-objective-progress {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 7px;
-  }
 
-  .cards-objective-progress li:not(:last-child)::after {
-    top: 27px;
-    right: auto;
-    bottom: -7px;
-    left: 13px;
-    width: 1px;
-    height: 7px;
-  }
 
-  .cards-objective-next {
-    display: flex;
-    align-items: stretch;
-    gap: 9px;
-  }
 
-  .cards-objective-next p {
-    display: block;
-    margin: 0;
-  }
 
-  .cards-objective-action {
-    width: 100%;
-  }
 }
 
 .cards-page a:focus-visible,
@@ -1587,23 +1156,14 @@
 .cards-page button:active:not(:disabled),
 .cards-page .cards-action-primary:active,
 .cards-page .cards-action-secondary:active,
-.cards-objective-action:active {
-  transform: translateY(0) scale(0.985);
-}
 
 @media (prefers-reduced-motion: reduce) {
-  .cards-objective,
   .cards-page .cards-action-primary,
   .cards-page .cards-action-secondary,
-  .cards-objective-action,
-  .cards-objective-action svg,
   .cards-search-control {
     transition: none;
   }
 
-  .cards-objective-skeleton span {
-    animation: none;
-  }
 }
 
 /* UI contract base layer (learning objective library) */
@@ -1634,39 +1194,11 @@
   gap: 6px;
 }
 
-.cards-objective-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
 
-.cards-objective-row {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-}
 
-.cards-objective-state {
-  flex: 0 0 auto;
-}
 
-.cards-objective-body {
-  flex: 1 1 auto;
-  min-width: 0;
-}
 
-.cards-objective-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 
-.cards-objective-primary-action,
-.cards-objective-secondary-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
 
 .cards-load-more {
   display: inline-flex;

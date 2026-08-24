@@ -9,8 +9,9 @@
  * - PedagogyCriticProvider   → critic-service（§12.3 合同）
  *
  * 采样参数（temperature 等）从 `GenerationSemanticSpecV2.policies.stageRuntimes`
- * 中对应 stage 读取。错误分类：retryable（provider 5xx/429/408/超时/网络）；
- * non-retryable（schema/协议 parse 失败、契约不匹配）。绝不以失败伪装 0 卡。
+ * 中对应 stage 读取。错误分类：retryable（provider 5xx/429/408/超时/网络/
+ * schema 违规/输出形状违规——含 malformed JSON 与顶层数组/标量）；non-retryable
+ * （HTTP 400/401/403/404/422 与配置类错误）。绝不以失败伪装 0 卡。
  */
 
 import { randomUUID } from "node:crypto";
@@ -133,7 +134,13 @@ export class CardGenerationProviderRuntime {
   }
 
   private sampling(stage: string): { temperature: number; model?: string } {
-    const snap = this.stageRuntimes.find((r) => r.stage === stage);
+    // 2026-08-24（AI 设计审查）：chatJson 传入的是完整 prompt-version 字符串
+    // （"card-generation-v2/v2/planner"），而 stageRuntimes[].stage 是裸阶段名
+    // （"planner" 等）——此前精确相等匹配永不命中，所有阶段静默回退 temperature 0。
+    // 取末段与契约 stage 枚举对齐，使 per-run semantic_spec 的采样配置真正生效。
+    const bareStage = stage.includes("/") ? (stage.split("/").pop() as string) : stage;
+    const normalized = bareStage === "grounding" ? "grounding_critic" : bareStage === "pedagogy" ? "pedagogy_critic" : bareStage;
+    const snap = this.stageRuntimes.find((r) => r.stage === normalized);
     return {
       temperature: snap?.sampling.temperature ?? 0,
       model: snap?.modelSnapshot && snap.modelSnapshot !== "v1"
@@ -203,8 +210,11 @@ export class CardGenerationProviderRuntime {
           elapsedMs,
           contentHead: result.content.slice(0, 500),
         }, "[v2-llm] chatJson result is not a JSON object");
+        // 2026-08-24（AI 设计审查）：模型偶发输出顶层数组/标量——与"malformed
+        // JSON"同属随机的输出完整性问题，重试可恢复，不应一击致命（此前
+        // non-retryable 直接 failed 整个 run，浪费 6 次重试预算中的 5 次）。
         throw new CardGenerationProviderError(
-          "non-retryable",
+          "retryable",
           `${stage}: provider result is not a JSON object: ${result.content.slice(0, 200)}`,
         );
       }

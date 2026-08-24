@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { listReviews, listSanitizedReviews, getSanitizedReviewMeta } from "./service.ts";
+import { listReviews, listSanitizedReviews, getSanitizedReviewMeta, projectReviewQueueV2, ReviewQueueProjectionError } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { parseQuery } from "../../lib/pagination.ts";
 import {
@@ -49,6 +49,36 @@ function sendReviewAttemptError(reply: FastifyReply, error: unknown): boolean {
 
 export async function reviewRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
+
+  // Member V2 queue: only the strict sanitized identity/startability projection
+  // is available to the desktop client. Legacy /reviews remains compatibility-only.
+  app.get<{ Querystring: { cursor?: string; limit?: string } }>(
+    "/reviews/v2/queue",
+    async (req, reply) => {
+      const rawLimit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+      const cursor = req.query.cursor === undefined ? 0 : Number(req.query.cursor);
+      if (!Number.isSafeInteger(rawLimit) || rawLimit < 1 || rawLimit > 100 || !Number.isSafeInteger(cursor) || cursor < 0 || cursor > 10_000) {
+        return reply.code(400).send({ error: "validation", message: "分页参数非法" });
+      }
+      try {
+        const sanitized = await withWorkspaceTransaction(
+          { workspaceId: req.session.workspaceId, userId: req.session.userId },
+          (tx) => listSanitizedReviews(req.session.workspaceId, {
+            status: "pending",
+            limit: rawLimit,
+            offset: cursor,
+          }, req.session.userId, tx),
+        );
+        const queue = projectReviewQueueV2(sanitized);
+        return reply.header("Cache-Control", "private, no-store").send(queue);
+      } catch (error) {
+        if (error instanceof ReviewQueueProjectionError) {
+          return reply.code(error.statusCode).send({ error: error.code, message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
 
   // GET /reviews                — 默认只返回到期的 pending（今日复习队列）
   // GET /reviews?status=pending — 同上

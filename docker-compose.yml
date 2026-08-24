@@ -195,6 +195,14 @@ services:
       DATABASE_URL_API: ${DATABASE_URL_API:?Set DATABASE_URL_API in .env before starting the production stack}
       NODE_ENV: production
       PORT: 4000
+      # The container may listen on all interfaces internally, but the host
+      # publish below remains loopback-only by default.
+      API_BIND_ADDRESS: ${API_INTERNAL_BIND_ADDRESS:-0.0.0.0}
+      AILEARN_CONTAINER_MODE: "true"
+      AILEARN_ALLOW_CONTAINER_WILDCARD: "true"
+      AILEARN_DESKTOP_PAIRING_KEY_ID: ${AILEARN_DESKTOP_PAIRING_KEY_ID:-}
+      AILEARN_DESKTOP_PAIRING_SECRET: ${AILEARN_DESKTOP_PAIRING_SECRET:-}
+      AILEARN_DOMAIN_SCHEMA_REVISION: ${AILEARN_DOMAIN_SCHEMA_REVISION:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}

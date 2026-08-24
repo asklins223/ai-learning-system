@@ -89,6 +89,82 @@ test("classifyProviderError treats an abort/timeout as retryable", () => {
   assert.equal(abort.kind, "retryable");
 });
 
+// 2026-08-24（AI 设计审查 §4.2）：模型输出顶层数组/标量（合法 JSON 但非对象）
+// 与 malformed JSON 同属随机的输出完整性问题——必须可重试。此前此形态被
+// 判 non-retryable，一击致命浪费其余重试预算。
+function fixedContentProvider(content: string): AIProvider {
+  return {
+    id: "test",
+    modelId: "test-model",
+    visionModelId: "test-vision",
+    promptVersion: "v1",
+    async chatCompletion(): Promise<ChatResult> {
+      return { content, usage: {} };
+    },
+  };
+}
+
+test("chatJson：顶层数组/标量 JSON 输出归类为 retryable（不再一击致命）", async () => {
+  const runtime = makeRuntime(fixedContentProvider('[1,2,3]'));
+  const err = await runtime.chatJson("planner", "sys", "user").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof CardGenerationProviderError);
+  assert.equal(err.kind, "retryable");
+
+  const runtime2 = makeRuntime(fixedContentProvider('"just a string"'));
+  const err2 = await runtime2.chatJson("planner", "sys", "user").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err2 instanceof CardGenerationProviderError);
+  assert.equal(err2.kind, "retryable");
+});
+
+test("sampling：完整 prompt-version 字符串映射到契约裸阶段名（含 critic 归一化）", async () => {
+  // stageRuntimes 种子用裸阶段名；此前 chatJson 传 "card-generation-v2/vX/planner"
+  // 精确匹配永不命中，per-run 采样配置被静默忽略（全部回退 temperature 0）。
+  const snap = (stage: string): GenerationStageRuntimeSnapshotV2 => ({
+    stage: stage as GenerationStageRuntimeSnapshotV2["stage"],
+    providerId: "system",
+    modelSnapshot: "probe-model",
+    deploymentId: "local",
+    capabilityFingerprint: "basic",
+    promptVersion: "v2",
+    sampling: { temperature: 0.3 },
+    outputSchemaVersion: "v2",
+  });
+  const cases = [
+    "card-generation-v2/v2/planner",
+    "card-generation-v2/v2/author",
+    "card-generation-v2/v2/grounding",
+    "card-generation-v2/v2/pedagogy",
+  ];
+  for (const stageArg of cases) {
+    let seenModel: string | undefined;
+    let seenTemperature: number | undefined;
+    const observing: AIProvider = {
+      id: "test",
+      modelId: "fallback-model",
+      visionModelId: "test-vision",
+      promptVersion: "v1",
+      async chatCompletion(_m: ChatMessage[], options: ChatOptions): Promise<ChatResult> {
+        seenModel = options.model;
+        seenTemperature = options.temperature;
+        return { content: "{}", usage: {} };
+      },
+    };
+    const rt = new CardGenerationProviderRuntime({
+      provider: observing,
+      stageRuntimes: [snap("planner"), snap("author"), snap("grounding_critic"), snap("pedagogy_critic")],
+    } as CardGenerationProviderConfig);
+    await rt.chatJson(stageArg, "sys", "user");
+    assert.equal(seenModel, "probe-model", `${stageArg} 应命中对应 stageRuntimes 条目`);
+    assert.equal(seenTemperature, 0.3, `${stageArg} 应采用条目的采样温度`);
+  }
+});
+
 // round-7 🟡5：真实 HTTP abort 契约闭合测试。
 // 生产路径 `postJsonToPublicEndpoint` 位于 @ailearn/shared（`https.request({signal})`），
 // V2 provider 经可注入的 `PublicJsonRequester` 发起真实 HTTP 调用。此用例用一个

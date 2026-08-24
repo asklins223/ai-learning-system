@@ -261,7 +261,10 @@ export async function voiceRoutes(app: FastifyInstance) {
           segmentId: parsed.data.segmentId,
         },
         synthesize: (text, voice) =>
-          edgeTtsSynthesize(text, voice, { baseUrl: process.env.EDGE_TTS_BASE_URL }),
+          // 2026-08-24（AI 设计审查三轮）：情感/富语言标签是 qwen-audio 专属能力
+          // ——与上方流式分支（:206）对齐，edge-tts 合成前必须剥离；否则确定性
+          // 语气层注入的 [excited] 等控制标签会被当普通文字朗读出来。
+          edgeTtsSynthesize(stripVoiceExpressionTags(text), voice, { baseUrl: process.env.EDGE_TTS_BASE_URL }),
       });
       if (result.statusCode !== 200) {
         return reply.code(result.statusCode).send(result.error);

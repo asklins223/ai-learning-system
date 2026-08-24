@@ -22,7 +22,7 @@ import {
   buildSchedulePolicySummary,
   type RunViewInput,
 } from "./run-view.ts";
-import { learningRunPublicSchema } from "@ailearn/shared";
+import { learningRunPublicSchema, taskInteractionSchema } from "@ailearn/shared";
 
 const target: RunPlannerTargetInput = {
   keyPointId: "11111111-1111-4111-8111-111111111111",
@@ -328,4 +328,25 @@ test("§7.7 qualification：无记录 → practice；facet 审批记录 → face
   });
   assert.equal(qualified.tasks[0].purpose, "facet");
   assert.equal(qualified.tasks[0].templateTrustCeiling, "facet_eligible");
+});
+
+test("structured_bundle planner：公开 part 映射为 strict schema 并保留 labels", () => {
+  const plan = planRun(target, { ...baseOptions(), responsePreference: "structured" });
+  const interaction = taskInteractionSchema.parse(plan.primaryVariant.interaction);
+  assert.equal(interaction.kind, "structured_bundle");
+  assert.equal(interaction.parts.length, 2);
+
+  const ordering = interaction.parts[0];
+  assert.equal(ordering.kind, "ordering");
+  if (ordering.kind !== "ordering") throw new Error("expected ordering part");
+  assert.ok(ordering.publicTokenLabels);
+  assert.ok(ordering.publicTokenIds.every((id) => ordering.publicTokenLabels?.[id]));
+
+  const relation = interaction.parts[1];
+  assert.equal(relation.kind, "relation");
+  if (relation.kind !== "relation") throw new Error("expected relation part");
+  assert.ok(relation.publicNodeLabels);
+  assert.ok(Object.values(relation.publicNodeLabels).every((label) => label.length > 0));
+  assert.equal(relation.publicNodeLabels["node:quote"], undefined);
+  assert.ok(!("labels" in relation));
 });

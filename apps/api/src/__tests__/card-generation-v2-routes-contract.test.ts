@@ -48,8 +48,20 @@ describe("Card Generation V2 routes contract", () => {
       assert.ok(routesSource.includes(`"/v2/card-generation-runs/:runId/candidates"`));
     });
 
+    it("registers exact candidate exposure eligibility projection", () => {
+      assert.ok(routesSource.includes(`"/v2/card-generation-runs/:runId/candidates/:candidateId/exposure"`));
+      assert.ok(routesSource.includes("cardGenerationExposureEligibilityV1Schema"));
+      assert.ok(routesSource.includes("candidateExposureQuerySchema"));
+    });
+
     it("registers GET /v2/card-generation-runs/:runId/events", () => {
       assert.ok(routesSource.includes(`"/v2/card-generation-runs/:runId/events"`));
+    });
+
+    it("resumes Card Generation SSE from a validated Last-Event-ID", () => {
+      assert.ok(routesSource.includes(`req.headers["last-event-id"]`));
+      assert.ok(routesSource.includes("invalid_last_event_id"));
+      assert.ok(routesSource.includes("let lastSeq = afterSequence"));
     });
 
     it("registers POST /v2/card-generation-runs/:runId/cancel with requireOwner", () => {

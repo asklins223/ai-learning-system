@@ -35,6 +35,7 @@ coverage/
 scripts/*.py
 scripts/*.js
 scripts/*.mjs
+!scripts/q0-doc-check.mjs
 apps/web/preview-ui.mjs
 
 # Documentation artifacts (keep source, ignore generated)

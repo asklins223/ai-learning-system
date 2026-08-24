@@ -216,7 +216,7 @@ describe("star-map-projections: 重放同 hash", () => {
       sharedPublish(2, "note", "note-1", { parentType: "source", parentEntityId: "src-1", fkName: "notes.source_id" }),
       sharedPublish(3, "card", "card-1", { parentType: "note", parentEntityId: "note-1", fkName: "note_versions.note_id" }),
       sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "learning_cards_v2.objective_id" }),
-      sharedPublish(5, "evidence", "ev-1", { parentType: "key_point", parentEntityId: "kp-1", fkName: "evidences.key_point_id" }),
+      sharedPublish(5, "note", "note-2", { parentType: "source", parentEntityId: "src-1", fkName: "notes.source_id" }),
     ];
     const a = replaySharedPlane(events);
     const b = replaySharedPlane(events.map((e) => ({ ...e })));
@@ -226,7 +226,7 @@ describe("star-map-projections: 重放同 hash", () => {
     // 四条 FK 血缘边全部生成
     assert.equal(Object.keys(a.edges).length, 4);
     const kinds = Object.values(a.edges).map((e) => e.kind).sort();
-    assert.deepEqual(kinds, ["contains", "derived_from", "generated_from", "supported_by"]);
+    assert.deepEqual(kinds, ["contains", "derived_from", "derived_from", "generated_from"]);
     for (const edge of Object.values(a.edges)) {
       assert.equal(edge.provenance, "foreign_key");
     }
@@ -337,7 +337,7 @@ describe("star-map-projections: 四透镜", () => {
     sharedPublish(3, "card", "card-1", { parentType: "note", parentEntityId: "note-1", fkName: "note_versions.note_id" }),
     sharedPublish(4, "key_point", "kp-1", { parentType: "card", parentEntityId: "card-1", fkName: "learning_cards_v2.objective_id" }),
     sharedPublish(5, "key_point", "kp-2", { parentType: "card", parentEntityId: "card-1", fkName: "learning_cards_v2.objective_id" }),
-    sharedPublish(6, "evidence", "ev-1", { parentType: "key_point", parentEntityId: "kp-1", fkName: "evidences.key_point_id" }),
+    sharedPublish(6, "note", "note-2", { parentType: "source", parentEntityId: "src-1", fkName: "notes.source_id" }),
   ];
   const shared = replaySharedPlane(sharedEvents);
   const personal = replayPersonalPlane([validationEvent(1, "kp-1")]);

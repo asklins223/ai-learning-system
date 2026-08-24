@@ -7,7 +7,7 @@
  *   Source/Note/Card/Key Point/Evidence 与**确定性血缘**。唯一变化来源是
 *   canonical Publish 事件（节点发布/版本/fingerprint）与现有外键血缘
 *   （source←notes.sourceId、note←note_versions.noteId←cards.noteVersionId、
-*   key_point←evidences.keyPointId）。
+*   key_point←证据绑定（V2 evidence bindings）。
  *   `replaySharedPlane` 是纯函数：相同 Publish 事件流 → 相同节点/边/hash。
  *   血缘边全部标记 provenance="foreign_key"，公测关系透镜只展示这类边
  *   （§10.2 关系透镜；§10.1 不把 relation hints 画成共享语义边）。
@@ -55,7 +55,7 @@ export type SharedTruthEdgeKind =
   | "derived_from" // source → note（notes.source_id）
   | "generated_from" // note → card（cards.note_version_id → note_versions.note_id)
   | "contains" // card → key_point/objective（learning_cards_v2.objective_id）
-  | "supported_by"; // key_point → evidence（evidences.key_point_id）
+  | "supported_by"; // key_point → evidence（V2 evidence binding）
 
 /** 现有外键血缘（§10.1：唯一变化来源之一）。 */
 export interface ForeignKeyLineage {
@@ -64,7 +64,7 @@ parentType: SharedPlaneNodeType;
 /** 父实体 id */
 parentEntityId: string;
 /** 外键名（确定性溯源：notes.source_id / note_versions.note_id /
-*  evidences.key_point_id） */
+*  V2 evidence binding） */
 fkName: string;
 }
 
@@ -153,8 +153,6 @@ case "note_versions.note_id":
 return "generated_from";
 case "learning_cards_v2.objective_id":
 return "contains";
-case "evidences.key_point_id":
-return "supported_by";
 default:
 throw new StarMapProjectionError(
 `未知血缘外键 ${lineage.fkName}，不允许构建共享边`,

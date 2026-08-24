@@ -27,6 +27,7 @@ import {
   RateLimiter,
   type RateLimitStore,
 } from "./rate-limit.ts";
+import { buildDesktopCapabilityProjection } from "./capability-projection.ts";
 
 export const loginSchema = z.object({
   email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
@@ -267,6 +268,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     const role = membershipRole === "owner" || workspace?.ownerId === userId
       ? "owner"
       : membershipRole ?? "member";
+    const isPersonal = workspace?.ownerId === userId;
     return {
       userId,
       workspaceId,
@@ -275,11 +277,18 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       displayName: user.displayName ?? null,
       avatarUrl: user.avatarUrl ?? null,
       workspaceName: workspace?.name ?? "个人工作区",
-      workspaceType: workspace?.workspaceType ?? "personal",
-      // ADR-0009 §3.6: isPersonal 基于 ownerId === userId，而非 personalWorkspaceId
-      isPersonal: workspace?.ownerId === userId,
+      // ADR-0009 §3.6: membership perspective determines whether this is
+      // the user's personal workspace; a member of another user's personal
+      // workspace receives the collaborative projection.
+      workspaceType: isPersonal ? "personal" : "collaborative",
+      isPersonal,
       personalWorkspaceId: user.personalWorkspaceId,
     };
+  });
+
+  app.get("/auth/capabilities/v1", { preHandler: [requireSession] }, async (req) => {
+    const role = req.session.membershipRole === "owner" ? "owner" : "member";
+    return buildDesktopCapabilityProjection(role);
   });
 
   // PROFILE-01: 更新当前用户档案（昵称/头像）

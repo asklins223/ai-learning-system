@@ -103,9 +103,18 @@ export function splitCompanionTtsSegmentsIncremental(
 
   // 15b 二期（问题2 修复）：首段提前——从未发过段且缓冲达到最小长度时，
   // 不要求完整句直接切出首段（声音尽早开始，与流式文字感官同步）。
+  // 2026-08-24（三轮自查）：首段同样受单段 160 字符合同上限约束（web 客户端
+  // 按 >160 静默丢音频）——此前整个首刷批次（可达 256+ 字符）无上限成段；
+  // 超出部分留在 rest，随下一次调用继续正常切句，文本不丢失。
   const firstMin = opts?.firstSegmentMinChars ?? 0;
-  if (!isFinal && state.sentCount === 0 && firstMin > 0 && combined.length >= firstMin) {
-    const segText = combined.trim();
+  if (
+    !isFinal && state.sentCount === 0 && firstMin > 0
+    // 三轮审查 nit：提前分支同样受总字数配额约束（生产调用方均用默认大配额，
+    // 此为防御性守卫；自定义小配额的调用方不再被首段绕过）。
+    && combined.length >= firstMin && combined.length <= maxTotalChars
+  ) {
+    const segText = combined.trim().slice(0, maxSegmentChars);
+    const restText = combined.trim().slice(maxSegmentChars);
     if (segText.length > 0) {
       const textSha256 = createHash("sha256").update(segText, "utf8").digest("hex");
       return {
@@ -117,7 +126,7 @@ export function splitCompanionTtsSegmentsIncremental(
             .update(`1:${textSha256}`, "utf8")
             .digest("hex"),
         }],
-        next: { rest: "", sentCount: 1, sentChars: segText.length },
+        next: { rest: restText, sentCount: 1, sentChars: segText.length },
       };
     }
   }

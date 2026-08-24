@@ -53,7 +53,6 @@ describe("desktop window adaptation contract", () => {
       ".source-detail-header",
       ".note-workbench .ne-topbar",
       ".validation-focus-header",
-      ".universe-top-hud",
     ]) {
       assert.ok(layoutStyles.includes(header), `${header} must join desktop chrome`);
     }

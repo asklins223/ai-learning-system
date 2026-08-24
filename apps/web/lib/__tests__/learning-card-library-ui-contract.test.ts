@@ -14,6 +14,11 @@ const librarySource = readFileSync(
   "utf8",
 );
 const cssSource = readFileSync(
+  resolve(WEB_ROOT, "app/styles/objective-library.css"),
+  "utf8",
+);
+// 页面壳层样式（PageHeader/工具栏容器）仍由 cards-list.css 提供。
+const pageCssSource = readFileSync(
   resolve(WEB_ROOT, "app/styles/cards-list.css"),
   "utf8",
 );
@@ -54,35 +59,31 @@ describe("learning objective library UI contract", () => {
   });
 
   it("provides responsive objective rows and reduced-motion treatment", () => {
-    assert.ok(cssSource.includes("@container cards-library-page (max-width: 1050px)"));
     assert.ok(cssSource.includes("@media (max-width: 719px)"));
-    assert.ok(cssSource.includes("@media (max-width: 440px)"));
     assert.ok(cssSource.includes("@media (prefers-reduced-motion: reduce)"));
+    assert.ok(pageCssSource.includes("@container cards-library-page (max-width: 1050px)"));
+    assert.ok(pageCssSource.includes(":focus-visible"));
     assert.ok(cssSource.includes(":focus-visible"));
   });
 
   it("ships the base visual layer for every card-first surface", () => {
     const requiredBaseSelectors = [
-      ".cards-library-toolbar {",
-      ".cards-search-box {",
-      ".cards-filter-chip {",
-      ".cards-sort-control {",
-      ".cards-objective-list {",
-      ".cards-objective-row {",
-      ".cards-objective-state {",
-      ".cards-objective-body {",
-      ".cards-objective-actions {",
-      ".cards-objective-primary-action,",
-      ".cards-objective-skeletons {",
-      ".cards-load-more {",
+      ".objective-library-row {",
+      ".objective-library-row-action {",
+      ".objective-library-row-topline {",
+      ".objective-library-search input {",
+      ".objective-library-menu-trigger {",
+      ".objective-library-menu-popover {",
+      ".objective-library-count {",
+      ".objective-library-pagination {",
     ];
     for (const selector of requiredBaseSelectors) {
       assert.ok(cssSource.includes(selector), `missing base style: ${selector}`);
     }
-    assert.match(cssSource, /\.cards-objective-list\s*\{[^}]*list-style:\s*none/s);
-    assert.match(cssSource, /\.cards-objective-row\s*\{[^}]*display:\s*flex/s);
-    assert.match(cssSource, /\.cards-library-toolbar\s*\{[^}]*display:\s*flex/s);
-    assert.match(cssSource, /\.cards-filter-chip\.is-active\s*\{/);
+    assert.match(cssSource, /\.objective-library-list\s*\{[^}]*list-style:\s*none/s);
+    assert.match(cssSource, /\.objective-library-row\s*\{[^}]*display:\s*flex/s);
+    // 左缘状态色条按 data-state 换色（不只靠 chip 颜色）。
+    assert.match(cssSource, /\.objective-library-row\[data-state="due"]\s*::before/);
     assert.ok(pageSource.includes('className="workspace-page-header"'));
   });
 });

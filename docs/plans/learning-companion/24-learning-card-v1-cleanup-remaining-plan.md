@@ -321,6 +321,28 @@ E（工具/契约/杂项）   ← 独立，可随时做（工作量最小，建�
 
 建议实际执行顺序：**E → D → A → B → C**（先清工作量小、风险低的，最后做最重的集成测试与 migration 决策）。
 
+### 9.4 孤儿表物理退役收尾（2026-08-23）
+
+§9.2 登记的"V1 孤儿空表未 DROP"遗留已完成：
+
+1. **依赖解除**：
+   - `invite-service.ts` 的 evidence_review 步骤改查 `evidence_snapshots_v2`
+     （V1 evidences 已被 0176 清空，原检查对新数据恒失败，实为潜在缺陷）；
+   - `star-map-projections.ts` 移除 `evidences.key_point_id` 血缘 case，
+     未知 FK 维持 default throw fail-closed；单测夹具与边种类断言同步更新；
+   - W1 集成测试不再断言 `learning_cards.compatibility_role` 列。
+2. **迁移 0183**：DROP 11 张死表——原名单 8 张 + 实库依赖排查新增的 3 张空表
+   （card_generation_candidate_evidence / card_generation_source_bundle_members /
+   note_evidence_embeddings）。首版在实库被依赖网拦下：存活表上仍挂着 12 条指向
+   V1 表的残留外键（card_generation_runs×3、evidence_overrides×2、
+   validation_events×2、validation_questions×2、validation_submissions×1、
+   review_attempts×1、validation_question_rubric_items×1），终版改为先逐条显式
+   DROP CONSTRAINT 再按依赖序 DROP 表（等价 CASCADE 但可审计）。已登记 drizzle
+   journal；实库重放通过，public 表数 152→141。validation_events 系列表仍被
+   onboarding/review/sec02 使用，仅摘除外键、不退役本体。
+3. **验证**：api tsc 0 新增错误；star-map 单测通过；`src/__tests__` 静态
+   套件 1488/1488。集成测试需在真实 PG 重放 0183 后签收。
+
 ---
 
 ## 10. 需要 Owner 确认的决策点汇总

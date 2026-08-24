@@ -10,7 +10,7 @@ import {
   learningObjectiveRevisionsV2,
   learningCardsV2,
 } from "../../db/schema/card-generation-v2.ts";
-import { ReviewStatus } from "@ailearn/shared";
+import { ReviewStatus, reviewQueueV2Schema, type ReviewQueueV2 } from "@ailearn/shared";
 import { reviewScheduleTargetsConsumableCardPredicate } from "./consumer-eligibility.ts";
 
 export type ReviewReason =
@@ -84,6 +84,61 @@ export interface SanitizedReviewMeta {
   unassistedEligibleAt: string | null;
   effectiveStartAt: string;
   blockedReason: ReviewBlockedReason;
+}
+
+export class ReviewQueueProjectionError extends Error {
+  readonly code = "unsupported_contract" as const;
+  readonly statusCode = 409 as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewQueueProjectionError";
+  }
+}
+
+/**
+ * Convert the existing sanitized server query to the Member V2 wire shape.
+ * Legacy rows are rejected instead of being silently guessed into an origin.
+ */
+export function projectReviewQueueV2(
+  result: { items: SanitizedReviewItem[]; nextCursor: number | null },
+  now = new Date(),
+): ReviewQueueV2 {
+  const items = result.items.map((item) => {
+    if (
+      item.isV2 !== true
+      || !item.objectiveId
+      || !Number.isInteger(item.generation)
+      || item.generation < 1
+    ) {
+      throw new ReviewQueueProjectionError("Review item 缺少可证明的 V2 schedule/objective identity");
+    }
+    const dueAt = new Date(item.nextReviewAt);
+    const effectiveStartAt = new Date(item.effectiveStartAt);
+    if (!Number.isFinite(dueAt.getTime()) || !Number.isFinite(effectiveStartAt.getTime())) {
+      throw new ReviewQueueProjectionError("Review item availability 不是有效时间");
+    }
+    const startability = effectiveStartAt.getTime() <= now.getTime()
+      ? { kind: "ready" as const }
+      : {
+          kind: "blocked" as const,
+          reason: item.blockedReason === "assistance_cooldown" ? "cooldown" as const : "not_due" as const,
+        };
+    return {
+      version: 2 as const,
+      reviewId: item.reviewId,
+      scheduleId: item.reviewId,
+      objectiveId: item.objectiveId,
+      scheduleGeneration: item.generation,
+      dueAt: item.nextReviewAt,
+      startability,
+    };
+  });
+  return reviewQueueV2Schema.parse({
+    version: 2,
+    items,
+    nextCursor: result.nextCursor === null ? null : String(result.nextCursor),
+  });
 }
 
 export async function listReviews(

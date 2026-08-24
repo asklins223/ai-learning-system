@@ -23,6 +23,11 @@ export async function understandingTopologyV3Routes(app: FastifyInstance) {
       return reply.code(304).send();
     }
     reply.header("etag", etag);
+    // no-cache（而非 no-store）：每次协商，304 可达；topologyRevision 是
+    // 确定性内容哈希（见 topology-repository.ts），内容不变时返回 304。
+    // 与 learning-dashboard/routes.ts 同一策略；缺此头时协商缓存依赖
+    // 客户端启发式刷新，304 不可靠。
+    reply.header("cache-control", "private, no-cache");
     return snapshot;
   });
 

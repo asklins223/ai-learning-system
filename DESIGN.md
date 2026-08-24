@@ -3,6 +3,8 @@ name: 理解书房 V1
 description: 温暖纸感的纯 2D 学习空间，把有生命的房间总览与安静、可访问的任务面连接起来。
 ---
 
+<!-- q0-doc-metadata: status=CURRENT_DESIGN_TRUTH; version=V1; date=2026-08-23; implementation-freeze=active -->
+
 # Design System: 理解书房 V1
 
 ## Overview

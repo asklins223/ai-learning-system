@@ -220,6 +220,22 @@ function makeRequest(overrides: Record<string, unknown> = {}): ActivateCardCandi
   } as ActivateCardCandidatesRequestV2;
 }
 
+function computeTestActivationRequestHash(body: ActivateCardCandidatesRequestV2): string {
+  return hashCanonicalV2("card-activation-v2/request", {
+    runId: body.runId,
+    planRevisionId: body.planRevisionId,
+    selectedCandidates: body.selectedCandidates.map((sc) => ({
+      candidateRevisionId: sc.candidateRevisionId,
+      candidateId: sc.candidateId,
+      revision: sc.revision,
+      revisionHash: sc.revisionHash,
+      intent: sc.intent,
+    })),
+    existingLifecycleActions: body.existingLifecycleActions,
+    clientReviewHash: body.clientReviewHash,
+  });
+}
+
 function setupTx(impl: Record<string, unknown>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tx: any = {
@@ -392,13 +408,14 @@ function makePublicationRevision(overrides: Record<string, unknown> = {}) {
 
 describe("activateCardCandidatesV2 — idempotency", () => {
   it("returns existing receipt on idempotency replay", async () => {
+    const request = makeRequest();
     const existingReceipt = {
       workspaceId: WORKSPACE_ID,
       userId: USER_ID,
       runId: RUN_ID,
       receiptId: "00000000-0000-4000-8000-000000000010",
       idempotencyKey: "activate-key-001",
-      requestHash: "a".repeat(64),
+      requestHash: computeTestActivationRequestHash(request),
       mappings: [{
         candidateRevisionId: CANDIDATE_REVISION_ID,
         candidateEvidenceBindingPlanId: "00000000-0000-4000-8000-000000000011",
@@ -418,11 +435,42 @@ describe("activateCardCandidatesV2 — idempotency", () => {
 
     const result = await activateCardCandidatesV2(
       { workspaceId: WORKSPACE_ID, userId: USER_ID },
-      makeRequest(),
+      request,
       "activate-key-001",
     );
 
     assert.equal(result.receiptId, "00000000-0000-4000-8000-000000000010");
+  });
+
+  it("rejects a modified payload for an existing idempotency key", async () => {
+    const request = makeRequest();
+    const existingReceipt = {
+      workspaceId: WORKSPACE_ID,
+      userId: USER_ID,
+      runId: RUN_ID,
+      receiptId: "00000000-0000-4000-8000-000000000010",
+      idempotencyKey: "activate-key-001",
+      requestHash: computeTestActivationRequestHash(request),
+      mappings: [],
+      lifecycleResults: [],
+      responseHash: "c".repeat(64),
+      committedAt: new Date("2026-01-01T00:00:00Z"),
+    };
+
+    setupActivationTx({ existingReceipt });
+
+    await assert.rejects(
+      () => activateCardCandidatesV2(
+        { workspaceId: WORKSPACE_ID, userId: USER_ID },
+        { ...request, clientReviewHash: "9".repeat(64) },
+        "activate-key-001",
+      ),
+      (err: CardGenerationV2ServiceError) => {
+        assert.equal(err.code, "idempotency_conflict");
+        assert.equal(err.statusCode, 409);
+        return true;
+      },
+    );
   });
 });
 

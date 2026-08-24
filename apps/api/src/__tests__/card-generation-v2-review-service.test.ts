@@ -430,6 +430,94 @@ describe("handleCandidateActionV2 — edit", () => {
     );
     assert.equal(presentation?.front?.prompt, "Edited prompt");
   });
+
+  it("stores edited learning support under the nested objective path and preserves siblings", async () => {
+    const { insertCalls } = setupStandardTx({
+      candidate: {
+        objectiveDraft: {
+          ...makeCandidate().objectiveDraft,
+          learningSupport: {
+            explanation: "Original explanation",
+            boundary: "Original boundary",
+            misconception: "Original misconception",
+            workedExample: "Original example",
+          },
+        },
+      },
+    });
+
+    await handleCandidateActionV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      makeCommand({
+        type: "edit",
+        candidateId: CANDIDATE_ID,
+        expectedRevision: 1,
+        expectedRevisionHash: CANDIDATE_REVISION_HASH,
+        patch: {
+          explanation: "Edited explanation",
+        },
+      }),
+      "edit-learning-support-001",
+    );
+
+    const candidateInsert = insertCalls.find((i) =>
+      i.values.candidateRevisionId !== undefined && i.values.candidateRevisionId !== "crev-1",
+    );
+    assert.ok(candidateInsert, "should have inserted new candidate revision");
+    const objective = candidateInsert!.values.objectiveDraft as {
+      explanation?: string;
+      learningSupport?: Record<string, unknown>;
+    };
+    assert.equal(objective.explanation, undefined, "support content must not be written at the draft root");
+    assert.deepEqual(objective.learningSupport, {
+      explanation: "Edited explanation",
+      boundary: "Original boundary",
+      misconception: "Original misconception",
+      workedExample: "Original example",
+    });
+  });
+
+  it("applies the same nested learning support patch to merged candidates", async () => {
+    const source = makeCandidate({
+      objectiveDraft: {
+        ...makeCandidate().objectiveDraft,
+        learningSupport: {
+          explanation: "Original explanation",
+          boundary: "Original boundary",
+        },
+      },
+    });
+    const { insertCalls } = setupStandardTx({ candidates: [source] });
+
+    await handleCandidateActionV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      makeCommand({
+        type: "merge",
+        candidateIds: [CANDIDATE_ID],
+        expectedRevisions: [
+          { candidateId: CANDIDATE_ID, revision: 1, hash: CANDIDATE_REVISION_HASH },
+        ],
+        mergedDraft: {
+          explanation: "Merged explanation",
+        },
+      }),
+      "merge-learning-support-001",
+    );
+
+    const mergedInsert = insertCalls.find((i) =>
+      i.values.candidateRevisionId !== undefined && i.values.candidateRevisionId !== "crev-1",
+    );
+    assert.ok(mergedInsert, "should have inserted merged candidate revision");
+    const objective = mergedInsert!.values.objectiveDraft as {
+      explanation?: string;
+      learningSupport?: Record<string, unknown>;
+    };
+    assert.equal(objective.explanation, undefined, "merged support content must not be written at the draft root");
+    assert.deepEqual(objective.learningSupport, {
+      explanation: "Merged explanation",
+      boundary: "Original boundary",
+    });
+  });
 });
 
 describe("handleCandidateActionV2 — guards", () => {

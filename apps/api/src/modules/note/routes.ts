@@ -20,6 +20,8 @@ import { parseBody } from "../../lib/validate.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
 import { deleteObject } from "../../lib/object-storage.ts";
 import { logger } from "../../lib/logger.ts";
+import { projectNoteDetailV1, projectNoteSaveReceiptV1 } from "./note-projection.ts";
+import { noteSaveRequestV1Schema } from "@ailearn/shared/note-save-contracts";
 
 export async function noteRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
@@ -40,6 +42,69 @@ export async function noteRoutes(app: FastifyInstance) {
       }),
     );
     return result;
+  });
+
+  // Desktop NOTE-READ-PROJECTION-01: the legacy route remains available to
+  // the web client, while the desktop adapter consumes this strict public DTO.
+  app.get<{ Params: { id: string } }>("/v2/notes/:id", async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => getNoteWithVersion(
+        transaction,
+        req.params.id,
+        req.session.workspaceId,
+      ),
+    );
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+    const role = req.session.membershipRole === "owner" ? "owner" : "member";
+    const projection = projectNoteDetailV1(result, role);
+    reply.header("Cache-Control", "private, no-store");
+    reply.header("ETag", `"${projection.revision}"`);
+    return projection;
+  });
+
+  app.patch<{ Params: { id: string } }>("/v2/notes/:id", { preHandler: [requireOwner] }, async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const body = parseBody(app, noteSaveRequestV1Schema, req.body);
+    try {
+      const result = await withWorkspaceTransaction(
+        { workspaceId: req.session.workspaceId, userId: req.session.userId },
+        (transaction) => updateNote(
+          transaction,
+          req.params.id,
+          req.session.workspaceId,
+          req.session.userId,
+          {
+            ...(body.title !== undefined ? { title: body.title } : {}),
+            ...(body.blocks !== undefined ? { blocks: body.blocks } : {}),
+            baseVersionId: body.baseVersionId,
+            isAutosave: body.isAutosave,
+          },
+        ),
+      );
+      if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+      const receipt = projectNoteSaveReceiptV1(result, body.baseVersionId, body.isAutosave);
+      reply.header("Cache-Control", "private, no-store");
+      return receipt;
+    } catch (err) {
+      if (err instanceof RevisionConflictError) {
+        return reply.code(409).send({
+          error: "revision_conflict",
+          currentVersionId: err.currentVersionId,
+          message: "笔记已被改动，请刷新后重试",
+        });
+      }
+      if (err && typeof err === "object" && "code" in err && err.code === "23505") {
+        return reply.code(409).send({
+          error: "revision_conflict",
+          message: "版本冲突，请刷新后重试",
+        });
+      }
+      throw err;
+    }
   });
 
   // RBAC: 笔记增删改仅 owner 可执行，member 只读

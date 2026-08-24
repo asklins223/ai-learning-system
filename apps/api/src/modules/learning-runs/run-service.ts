@@ -41,19 +41,40 @@ import {
 } from "../../db/schema/learning-runs.ts";
 import {
   evidenceEligibilityStatesV2,
+  learningCardsV2,
   learningObjectivesV2,
 } from "../../db/schema/card-generation-v2.ts";
 import { reviewSchedules } from "../../db/schema/evidence.ts";
+import { validationAssistanceExposures } from "../../db/schema/validation-v2.ts";
 import { companionSandboxNamespaces } from "../../db/schema/companion-sandbox.ts";
 import { understandingProjectionCheckpoints } from "../../db/schema/understanding-projection.ts";
 import type {
   CreateLearningRunRequestV1,
+  GetLearningRunResultResponseV2,
   LearningRunActionV1,
+  LearningRunOriginV2,
+  LearningRunPublicSnapshotV2,
   LearningRunPublicV1,
+  LearningRunTargetPublicV2,
+  LearningRunReturnContractV2,
   LearningRunResultV1,
+  LearningRunResultV2,
   LearningRunReturnContractV1,
+  LearningRunReturnTargetV2,
   SchedulingAuthorizationV1,
   SubmitTaskArtifactV1,
+} from "@ailearn/shared";
+import {
+  getLearningRunResultResponseV2Schema,
+  learningRunOriginV2Schema,
+  learningRunPublicSnapshotV2Schema,
+  learningRunResultSchema,
+  learningRunResultV2Schema,
+  learningRunPhaseV2Schema,
+  learningRunReturnContractSchema,
+  learningRunReturnContractV2Schema,
+  learningRunReturnTargetV2Schema,
+  learningRunTargetPublicV2Schema,
 } from "@ailearn/shared";
 import {
   computeRunContractHash,
@@ -74,9 +95,9 @@ import {
   prepareCardContentEpoch,
   loadFrozenTargetSnapshotV2,
   buildLearningRunTargetPublicV2,
+  TargetSnapshotError,
   type FrozenTargetSnapshotV2,
 } from "../card-generation-v2/target-snapshot-adapter.ts";
-import type { LearningRunOriginV2 } from "@ailearn/shared";
 import {
   artifactAlreadyLocked,
   contextStale,
@@ -91,6 +112,7 @@ import {
 } from "./run-errors.ts";
 import { buildRunPublicView, deriveReturnTargetV1 } from "./run-view.ts";
 import { decryptDraftPayload, encryptDraftPayload, isDraftEncryptionAvailable } from "./run-draft-crypto.ts";
+import { buildLearningRunAllowedActionsV2 } from "./run-action-availability.ts";
 
 // ─── 服务接口（路由层注入）───────────────────────────────────────────────
 
@@ -123,6 +145,8 @@ export interface ActionInput extends RunScope {
   taskRevision?: number;
   action: LearningRunActionV1;
   idempotencyKey: string;
+  requestContext?: { version: 2; snapshotId: string };
+  assertActionAllowed?: () => void;
 }
 
 export interface DraftInput extends RunScope {
@@ -135,12 +159,15 @@ export interface DraftInput extends RunScope {
   payload: unknown | null;
   rendererState: unknown;
   idempotencyKey: string;
+  requestContext?: { version: 2; snapshotId: string };
+  assertDraftAllowed?: () => void;
 }
 
 export interface SubmitInput extends RunScope {
   runId: string;
   taskId: string;
   request: SubmitTaskArtifactV1;
+  requestContext?: { version: 2; snapshotId: string };
 }
 
 // ─── 权限与读取 ──────────────────────────────────────────────────────────
@@ -562,7 +589,8 @@ async function resolveV2Scheduling(
         eq(reviewSchedules.status, "pending"),
       ))
       .orderBy(desc(reviewSchedules.generation))
-      .limit(1);
+      .limit(1)
+      .for("update");
     return rows[0] ?? null;
   };
 
@@ -573,6 +601,7 @@ async function resolveV2Scheduling(
         subjectId: reviewSchedules.subjectId,
         generation: reviewSchedules.generation,
         status: reviewSchedules.status,
+        nextReviewAt: reviewSchedules.nextReviewAt,
       })
       .from(reviewSchedules)
       .where(and(
@@ -580,12 +609,46 @@ async function resolveV2Scheduling(
         eq(reviewSchedules.workspaceId, scope.workspaceId),
         eq(reviewSchedules.userId, scope.userId),
       ))
-      .limit(1);
+      .limit(1)
+      // Freeze the authorization row with the V2 PREPARE transaction. The
+      // schedule is still consumed only by canonical Commit/result, but a
+      // concurrent consumer cannot change status/generation after this
+      // authorization has been read.
+      .for("update");
     const sched = rows[0];
     if (!sched || sched.subjectId !== objectiveId || sched.generation !== origin.scheduleGeneration) {
       throw scheduleGenerationChanged();
     }
     if (sched.status !== "pending") throw scheduleGenerationChanged();
+    const now = new Date();
+    if (sched.nextReviewAt.getTime() > now.getTime()) {
+      throw new LearningRunServiceError(
+        "review_not_due",
+        "该复习尚未到开始时间",
+        409,
+        { blockedReason: "not_due", effectiveStartAt: sched.nextReviewAt.toISOString() },
+      );
+    }
+    const exposureRows = await tx
+      .select({ unassistedEligibleAfter: validationAssistanceExposures.unassistedEligibleAfter })
+      .from(validationAssistanceExposures)
+      .where(and(
+        eq(validationAssistanceExposures.workspaceId, scope.workspaceId),
+        eq(validationAssistanceExposures.userId, scope.userId),
+        eq(validationAssistanceExposures.inputScheduleId, origin.scheduleId),
+      ));
+    const cooldownUntil = exposureRows.reduce<Date | null>(
+      (latest, row) => !latest || row.unassistedEligibleAfter > latest ? row.unassistedEligibleAfter : latest,
+      null,
+    );
+    if (cooldownUntil && cooldownUntil.getTime() > now.getTime()) {
+      throw new LearningRunServiceError(
+        "review_assistance_cooldown",
+        "该复习仍处于辅助暴露冷却期",
+        409,
+        { blockedReason: "cooldown", effectiveStartAt: cooldownUntil.toISOString() },
+      );
+    }
     return {
       kind: "consume_pending",
       scheduleId: origin.scheduleId,
@@ -653,6 +716,11 @@ export async function createRunV2(
     requestedTimeBudgetSeconds: request.requestedTimeBudgetSeconds ?? null,
     responsePreference: request.responsePreference ?? null,
   }));
+  // The idempotency row has a foreign key to the run, so it cannot be claimed
+  // before a run exists with a normal INSERT. Serialize the canonical key at
+  // the transaction level instead; the loser waits for the winner to commit,
+  // then observes the ledger row before any PREPARE side effect.
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`${workspaceId}:${userId}:${request.idempotencyKey}`}, 0))`);
   const idemRows = await tx
     .select({ runId: learningRunIdempotency.runId, clientRequestId: learningRunIdempotency.clientRequestId })
     .from(learningRunIdempotency)
@@ -701,13 +769,25 @@ export async function createRunV2(
   });
 
   // PREPARE 内部起算：freeze snapshot（读 exact revisions，不读 live claim）。
-  const frozen = await freezeTargetSnapshotV2(tx, {
-    workspaceId,
-    userId,
-    runId,
-    objectiveId,
-    cardContentEpoch,
-  });
+  let frozen: FrozenTargetSnapshotV2;
+  try {
+    frozen = await freezeTargetSnapshotV2(tx, {
+      workspaceId,
+      userId,
+      runId,
+      objectiveId,
+      cardContentEpoch,
+    });
+  } catch (error) {
+    // A caller-supplied objective that is missing, inactive, or no longer has
+    // a complete public target is an origin/context drift, not an internal
+    // server error. Keep the boundary typed and fail closed without exposing
+    // target-snapshot internals or leaving a visible skeleton run behind.
+    if (error instanceof TargetSnapshotError) {
+      throw contextStale("学习目标已变化或当前不可用，请刷新复习队列");
+    }
+    throw error;
+  }
 
   const schedulingAuthorization = await resolveV2Scheduling(
     tx,
@@ -1063,6 +1143,325 @@ export async function getRunPublicView(
   return view;
 }
 
+type V2RunContext = {
+  run: Awaited<ReturnType<typeof loadRun>>;
+  originV2: LearningRunOriginV2;
+  returnTargetV2: LearningRunReturnTargetV2;
+  snapshotId: string;
+  target: LearningRunTargetPublicV2;
+  publishedTargetEligibility: "eligible" | "practice_only" | "blocked";
+};
+
+function unsupportedV2Contract(message: string): LearningRunServiceError {
+  return new LearningRunServiceError("unsupported_contract", message, 409);
+}
+
+function deriveReturnTargetV2(origin: LearningRunOriginV2): LearningRunReturnTargetV2 {
+  switch (origin.kind) {
+    case "card":
+      return { kind: "card", cardId: origin.cardId, objectiveId: origin.objectiveId };
+    case "review":
+      return {
+        kind: "review",
+        scheduleId: origin.scheduleId,
+        objectiveId: origin.objectiveId,
+      };
+    case "star_map":
+      return {
+        kind: "star_map",
+        objectiveId: origin.objectiveId,
+        lens: origin.lens,
+        filter: origin.filter,
+        ...(origin.routePlanId ? { routePlanId: origin.routePlanId } : {}),
+      };
+    case "today":
+      return {
+        kind: "today",
+      };
+    case "onboarding":
+      return {
+        kind: "onboarding",
+        destination: origin.sampleMode === "sandbox" ? "today" : "card",
+      };
+  }
+}
+
+type V2ReturnTargetAvailability = {
+  reason: "return_target_deleted" | "permission_revoked";
+  fallbackTargetV2: LearningRunReturnTargetV2 | null;
+} | null;
+
+/**
+ * Resolve only server-proven return destinations. A terminal run may outlive
+ * its review schedule/card, so return must not blindly replay the frozen
+ * origin as a navigable destination. A review target may fall back to the
+ * same active objective's card; otherwise the V2 contract stays unavailable.
+ */
+async function resolveV2ReturnTargetAvailability(
+  tx: ApiTransaction,
+  input: RunScope,
+  context: V2RunContext,
+): Promise<V2ReturnTargetAvailability> {
+  const target = context.returnTargetV2;
+  if (target.kind === "today" || target.kind === "onboarding" || target.kind === "star_map") {
+    return null;
+  }
+
+  const objectiveRows = await tx
+    .select({ objectiveId: learningObjectivesV2.objectiveId })
+    .from(learningObjectivesV2)
+    .where(and(
+      eq(learningObjectivesV2.workspaceId, input.workspaceId),
+      eq(learningObjectivesV2.objectiveId, target.objectiveId),
+      eq(learningObjectivesV2.lifecycle, "active"),
+    ))
+    .limit(1);
+  const activeObjective = objectiveRows[0];
+  const activeCardRows = activeObjective
+    ? await tx
+      .select({ cardId: learningCardsV2.cardId })
+      .from(learningCardsV2)
+      .where(and(
+        eq(learningCardsV2.workspaceId, input.workspaceId),
+        eq(learningCardsV2.objectiveId, target.objectiveId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ))
+      .limit(1)
+    : [];
+  const activeCard = activeCardRows[0];
+
+  if (target.kind === "card") {
+    if (activeCard?.cardId === target.cardId) return null;
+    return { reason: "return_target_deleted", fallbackTargetV2: null };
+  }
+
+  const scheduleRows = await tx
+    .select({ id: reviewSchedules.id })
+    .from(reviewSchedules)
+    .where(and(
+      eq(reviewSchedules.id, target.scheduleId),
+      eq(reviewSchedules.workspaceId, input.workspaceId),
+      eq(reviewSchedules.userId, input.userId),
+      eq(reviewSchedules.subjectType, "card"),
+      eq(reviewSchedules.subjectId, target.objectiveId),
+    ))
+    .limit(1);
+  if (scheduleRows[0]) return null;
+  if (activeCard) {
+    return {
+      reason: "return_target_deleted",
+      fallbackTargetV2: {
+        kind: "card",
+        cardId: activeCard.cardId,
+        objectiveId: target.objectiveId,
+      },
+    };
+  }
+  return { reason: "return_target_deleted", fallbackTargetV2: null };
+}
+
+function projectLearningRunPublicSnapshotV2(
+  context: V2RunContext,
+  view: LearningRunPublicV1,
+): LearningRunPublicSnapshotV2 {
+  return learningRunPublicSnapshotV2Schema.parse({
+    version: 2,
+    runId: context.run.id,
+    snapshotId: context.snapshotId,
+    originV2: context.originV2,
+    target: context.target,
+    returnTargetV2: context.returnTargetV2,
+    phase: learningRunPhaseV2Schema.parse(view.phase),
+    runRevision: view.revision,
+    runtimeEpoch: view.runtimeEpoch,
+    activeSecondsUsed: view.activeSecondsUsed,
+    activeTask: view.activeTask,
+    allowedActions: buildLearningRunAllowedActionsV2(view),
+    publishedTargetEligibility: context.publishedTargetEligibility,
+  });
+}
+
+async function loadV2RunContext(
+  tx: ApiTransaction,
+  input: RunScope & { runId: string },
+): Promise<V2RunContext> {
+  const run = await loadRun(tx, input, input.runId);
+  const contractRows = await tx
+    .select({ snapshotId: learningRunPrivateContracts.snapshotId })
+    .from(learningRunPrivateContracts)
+    .where(and(
+      eq(learningRunPrivateContracts.runId, run.id),
+      eq(learningRunPrivateContracts.workspaceId, input.workspaceId),
+      eq(learningRunPrivateContracts.userId, input.userId),
+    ))
+    .limit(1);
+  const snapshotId = contractRows[0]?.snapshotId;
+  if (!snapshotId) throw unsupportedV2Contract("该 run 没有 V2 snapshot binding");
+
+  const originParsed = learningRunOriginV2Schema.safeParse(run.origin);
+  if (!originParsed.success) throw unsupportedV2Contract("该 run 不是严格 V2 origin");
+  const snapshot = await loadFrozenTargetSnapshotV2(tx, input.workspaceId, run.id);
+  if (!snapshot || snapshot.snapshotId !== snapshotId || snapshot.runId !== run.id || snapshot.userId !== input.userId) {
+    throw unsupportedV2Contract("V2 snapshot binding 不完整");
+  }
+  const target = learningRunTargetPublicV2Schema.parse(buildLearningRunTargetPublicV2(snapshot));
+  const returnTargetV2 = learningRunReturnTargetV2Schema.parse(deriveReturnTargetV2(originParsed.data));
+  return {
+    run,
+    originV2: originParsed.data,
+    returnTargetV2,
+    snapshotId,
+    target,
+    publishedTargetEligibility: snapshot.publishedTargetEligibility,
+  };
+}
+
+/** Strict V2 public snapshot; server-private target fields never leave this adapter. */
+export async function getLearningRunPublicSnapshotV2(
+  tx: ApiTransaction,
+  input: RunScope & { runId: string },
+): Promise<LearningRunPublicSnapshotV2> {
+  const context = await loadV2RunContext(tx, input);
+  const view = await getRunPublicView(tx, input);
+  return projectLearningRunPublicSnapshotV2(context, view);
+}
+
+/**
+ * Projects the exact V1 view stored in the action ledger into the public V2
+ * response. This keeps an idempotent replay tied to the original response
+ * snapshot instead of silently replacing it with the run's current state.
+ */
+export async function getLearningRunPublicSnapshotV2FromView(
+  tx: ApiTransaction,
+  input: RunScope & { runId: string },
+  view: LearningRunPublicV1,
+): Promise<LearningRunPublicSnapshotV2> {
+  const context = await loadV2RunContext(tx, input);
+  return projectLearningRunPublicSnapshotV2(context, view);
+}
+
+function projectLearningRunResultV2(
+  context: V2RunContext,
+  rawResult: unknown,
+): LearningRunResultV2 {
+  const parsed = learningRunResultSchema.safeParse(rawResult);
+  if (!parsed.success) throw unsupportedV2Contract("V2 result 的 nested result 不是 canonical 结果");
+  return learningRunResultV2Schema.parse({
+    version: 2,
+    runId: context.run.id,
+    snapshotId: context.snapshotId,
+    originV2: context.originV2,
+    outcome: parsed.data.outcome,
+    demonstratedFacets: parsed.data.demonstratedFacets,
+    gapFacets: parsed.data.gapFacets,
+    scheduleImpact: parsed.data.scheduleImpact,
+    returnTargetV2: context.returnTargetV2,
+    ...(parsed.data.projection ? { projection: parsed.data.projection } : {}),
+  });
+}
+
+export async function getResultPayloadV2(
+  tx: ApiTransaction,
+  input: RunScope & { runId: string },
+): Promise<GetLearningRunResultResponseV2> {
+  const context = await loadV2RunContext(tx, input);
+  const base = {
+    version: 2 as const,
+    runId: context.run.id,
+    snapshotId: context.snapshotId,
+    originV2: context.originV2,
+    returnTargetV2: context.returnTargetV2,
+  };
+  if (context.run.result) {
+    return getLearningRunResultResponseV2Schema.parse({
+      ...base,
+      status: "learning_result",
+      httpStatus: 200,
+      result: projectLearningRunResultV2(context, context.run.result),
+    });
+  }
+  if (context.run.phase === "ended" || context.run.phase === "cancelled" || context.run.phase === "stale") {
+    return getLearningRunResultResponseV2Schema.parse({
+      ...base,
+      status: "terminal_without_result",
+      httpStatus: 200,
+      phase: context.run.phase,
+      reasonCode: context.run.terminalReasonCode ?? "user_ended",
+    });
+  }
+  return getLearningRunResultResponseV2Schema.parse({
+    ...base,
+    status: "pending",
+    httpStatus: 202,
+    phase: learningRunPhaseV2Schema.parse(context.run.phase),
+    runRevision: context.run.revision,
+  });
+}
+
+export async function getReturnContractV2(
+  tx: ApiTransaction,
+  input: RunScope & { runId: string },
+): Promise<LearningRunReturnContractV2> {
+  const context = await loadV2RunContext(tx, input);
+  const legacyContract = learningRunReturnContractSchema.safeParse(await getReturnContract(tx, input));
+  if (!legacyContract.success) throw unsupportedV2Contract("V1 return contract 无法安全读取");
+  const base = {
+    version: 2 as const,
+    runId: context.run.id,
+    snapshotId: context.snapshotId,
+    originV2: context.originV2,
+    returnTargetV2: context.returnTargetV2,
+  };
+  if (legacyContract.data.status !== "run_active" && legacyContract.data.status !== "unavailable") {
+    const availability = await resolveV2ReturnTargetAvailability(tx, input, context);
+    if (availability) {
+      return learningRunReturnContractV2Schema.parse({
+        ...base,
+        status: "unavailable",
+        reason: availability.reason,
+        fallbackTargetV2: availability.fallbackTargetV2,
+      });
+    }
+  }
+  switch (legacyContract.data.status) {
+    case "run_active":
+      return learningRunReturnContractV2Schema.parse({
+        ...base,
+        status: "run_active",
+        runPhase: legacyContract.data.runPhase,
+      });
+    case "no_projection_change":
+      return learningRunReturnContractV2Schema.parse({
+        ...base,
+        status: "no_projection_change",
+        sourceChange: { kind: "none" },
+      });
+    case "projection_pending":
+      return learningRunReturnContractV2Schema.parse({
+        ...base,
+        status: "projection_pending",
+        sourceChange: legacyContract.data.sourceChange,
+        currentCheckpoint: legacyContract.data.currentCheckpoint,
+        retryAfterMs: legacyContract.data.retryAfterMs,
+      });
+    case "ready":
+      return learningRunReturnContractV2Schema.parse({
+        ...base,
+        status: "ready",
+        sourceChange: legacyContract.data.sourceChange,
+        targetCheckpoint: legacyContract.data.targetCheckpoint,
+        changeSetId: legacyContract.data.changeSetId,
+      });
+    case "unavailable":
+      return learningRunReturnContractV2Schema.parse({
+        ...base,
+        status: "unavailable",
+        reason: legacyContract.data.reason,
+        fallbackTargetV2: legacyContract.data.fallbackTarget ? context.returnTargetV2 : null,
+      });
+  }
+}
+
 function activeVariantIdFor(
   variants: Array<{ id: string; taskId: string; status: string }>,
   taskId: string,
@@ -1078,11 +1477,25 @@ export async function applyAction(
   input: ActionInput,
   now: () => Date = () => new Date(),
 ): Promise<{ acceptedActionId: string; actionResult: "state_changed" | "hint_revealed" | "variant_switched"; hint?: { hintId: string; level: 1 | 2 | 3; text: string; exposureEventId: string }; previousVariantId?: string; activeVariantId?: string; snapshot: LearningRunPublicV1 }> {
-  const run = await loadRun(tx, input, input.runId, true);
-  if (run.runtimeEpoch !== input.runtimeEpoch) throw new LearningRunServiceError("epoch_mismatch", "运行纪元不匹配", 409);
-  if (run.revision !== input.runRevision) throw staleRunRevision(run.revision, input.runRevision);
   const at = now();
-  const requestHash = sha256Hex(JSON.stringify(input.action));
+  const requestHash = sha256Hex(JSON.stringify({
+    version: input.requestContext?.version ?? 1,
+    ...(input.requestContext?.snapshotId ? { snapshotId: input.requestContext.snapshotId } : {}),
+    runId: input.runId,
+    runRevision: input.runRevision,
+    taskRevision: input.taskRevision ?? null,
+    runtimeEpoch: input.runtimeEpoch,
+    action: input.action,
+  }));
+
+  // V2 action 首次请求也必须在幂等边界串行化：两个相同 key 的
+  // overlap 请求不能同时 miss ledger 后各自执行副作用，再由唯一索引
+  // 把 loser 变成裸 23505/500。锁释放后 loser 会读取 winner 的 receipt。
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`v2-action:${input.workspaceId}:${input.userId}:${input.runId}:${input.idempotencyKey}`}, 0)
+    )
+  `);
 
   // 幂等账本
   const ledgerRows = await tx
@@ -1120,6 +1533,17 @@ export async function applyAction(
     }
     throw new LearningRunServiceError("action_in_progress", "该操作正在处理", 409);
   }
+
+  // V2 route authorization runs after exact replay lookup. This preserves
+  // response-loss recovery even when the current phase no longer advertises
+  // the original action.
+  input.assertActionAllowed?.();
+
+  // Exact replay is resolved before current epoch/revision checks. A lost
+  // response must be safely recoverable after the run has advanced.
+  const run = await loadRun(tx, input, input.runId, true);
+  if (run.runtimeEpoch !== input.runtimeEpoch) throw new LearningRunServiceError("epoch_mismatch", "运行纪元不匹配", 409);
+  if (run.revision !== input.runRevision) throw staleRunRevision(run.revision, input.runRevision);
 
   const writeLedger = (requestHash: string, snapshot: Record<string, unknown>, _actionResult: string, acceptedActionId: string) =>
     tx.insert(learningRunActionLedger).values({
@@ -1686,6 +2110,38 @@ export async function putDraft(
   input: DraftInput,
   now: () => Date = () => new Date(),
 ): Promise<unknown> {
+  const draftRequestHash = sha256Hex(JSON.stringify({
+    version: input.requestContext?.version ?? 1,
+    ...(input.requestContext?.snapshotId ? { snapshotId: input.requestContext.snapshotId } : {}),
+    runId: input.runId,
+    taskId: input.taskId,
+    variantId: input.variantId,
+    variantRevision: input.variantRevision,
+    taskRevision: input.taskRevision,
+    expectedDraftRevision: input.expectedDraftRevision,
+    payload: input.payload,
+    rendererState: input.rendererState,
+  }));
+  const existingLedger = await tx
+    .select({
+      responseStatus: learningRunActionLedger.responseStatus,
+      responseSnapshot: learningRunActionLedger.responseSnapshot,
+      requestHash: learningRunActionLedger.requestHash,
+    })
+    .from(learningRunActionLedger)
+    .where(and(
+      eq(learningRunActionLedger.runId, input.runId),
+      eq(learningRunActionLedger.idempotencyKey, input.idempotencyKey),
+    ))
+    .limit(1);
+  if (existingLedger[0]) {
+    if (existingLedger[0].requestHash !== draftRequestHash) throw idempotencyConflict();
+    if (existingLedger[0].responseStatus === "success" && existingLedger[0].responseSnapshot) {
+      return existingLedger[0].responseSnapshot;
+    }
+    throw new LearningRunServiceError("draft_in_progress", "草稿保存正在处理", 409);
+  }
+  input.assertDraftAllowed?.();
   const run = await loadRun(tx, input, input.runId);
   if (!["active", "paused"].includes(run.phase)) throw invalidPhase(run.phase, "active");
   if (run.activeTaskId !== input.taskId) throw new LearningRunServiceError("task_not_active", "该任务不是当前任务", 409);
@@ -1753,16 +2209,35 @@ export async function putDraft(
       updatedAt: at,
     });
   }
-  return {
+  const receipt = {
     version: 1,
     runId: run.id,
     taskId: input.taskId,
     variantId: input.variantId,
+    // V1 callers keep the historical receipt shape. V2 callers need this
+    // internal metadata persisted in the idempotency ledger; the route
+    // adapter promotes it to the strict V2 receipt and therefore preserves
+    // the original runRevision on response-loss replay.
+    ...(input.requestContext?.version === 2 ? { runRevision: run.revision } : {}),
     taskRevision: input.taskRevision,
     draftRevision,
     savedAt: at.toISOString(),
     expiresAt: expiresAt.toISOString(),
   };
+  await tx.insert(learningRunActionLedger).values({
+    runId: run.id,
+    workspaceId: input.workspaceId,
+    userId: input.userId,
+    actionKind: "draft",
+    idempotencyKey: input.idempotencyKey,
+    requestHash: draftRequestHash,
+    responseStatus: "success",
+    responseSnapshot: receipt,
+    acceptedActionId: crypto.randomUUID(),
+    createdAt: at,
+    updatedAt: at,
+  });
+  return receipt;
 }
 
 export async function deleteDraft(
@@ -1920,11 +2395,18 @@ export async function submitArtifact(
   // 内容 → idempotency_conflict。必须先于 phase/revision 校验——提交成功后
   // run 已进入 assessing，重放必须仍然安全返回原回执。
   const submissionRequestHash = sha256Hex(JSON.stringify({
+    version: input.requestContext?.version ?? 1,
+    ...(input.requestContext?.snapshotId ? { snapshotId: input.requestContext.snapshotId } : {}),
+    runId: input.runId,
+    taskId: input.taskId,
     variantId: input.request.variantId,
     variantRevision: input.request.variantRevision,
+    runRevision: input.request.runRevision,
     taskRevision: input.request.taskRevision,
     inputSchemaHash: input.request.inputSchemaHash,
     payload: input.request.payload,
+    baseArtifactId: input.request.baseArtifactId ?? null,
+    baseRevision: input.request.baseRevision ?? null,
   }));
   const ledgerRows = await tx
     .select({

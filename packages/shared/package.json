@@ -76,6 +76,11 @@
       "import": "./src/desktop-pet-contracts.ts",
       "default": "./src/desktop-pet-contracts.ts"
     },
+    "./desktop-ipc-contracts": {
+      "types": "./src/desktop-ipc-contracts.ts",
+      "import": "./src/desktop-ipc-contracts.ts",
+      "default": "./src/desktop-ipc-contracts.ts"
+    },
     "./fingerprint": {
       "types": "./src/fingerprint.ts",
       "import": "./src/fingerprint.ts",
@@ -96,10 +101,55 @@
       "import": "./src/learning-card-v2-contracts.ts",
       "default": "./src/learning-card-v2-contracts.ts"
     },
+    "./learning-run-contracts": {
+      "types": "./src/learning-run-contracts.ts",
+      "import": "./src/learning-run-contracts.ts",
+      "default": "./src/learning-run-contracts.ts"
+    },
     "./learning-target-v2-contracts": {
       "types": "./src/learning-target-v2-contracts.ts",
       "import": "./src/learning-target-v2-contracts.ts",
       "default": "./src/learning-target-v2-contracts.ts"
+    },
+    "./learning-run-v2-contracts": {
+      "types": "./src/learning-run-v2-contracts.ts",
+      "import": "./src/learning-run-v2-contracts.ts",
+      "default": "./src/learning-run-v2-contracts.ts"
+    },
+    "./review-queue-v2-contracts": {
+      "types": "./src/review-queue-v2-contracts.ts",
+      "import": "./src/review-queue-v2-contracts.ts",
+      "default": "./src/review-queue-v2-contracts.ts"
+    },
+    "./formal-assessment-guard-contracts": {
+      "types": "./src/formal-assessment-guard-contracts.ts",
+      "import": "./src/formal-assessment-guard-contracts.ts",
+      "default": "./src/formal-assessment-guard-contracts.ts"
+    },
+    "./room-projection-contracts": {
+      "types": "./src/room-projection-contracts.ts",
+      "import": "./src/room-projection-contracts.ts",
+      "default": "./src/room-projection-contracts.ts"
+    },
+    "./note-projection-contracts": {
+      "types": "./src/note-projection-contracts.ts",
+      "import": "./src/note-projection-contracts.ts",
+      "default": "./src/note-projection-contracts.ts"
+    },
+    "./note-save-contracts": {
+      "types": "./src/note-save-contracts.ts",
+      "import": "./src/note-save-contracts.ts",
+      "default": "./src/note-save-contracts.ts"
+    },
+    "./card-generation-desktop-contracts": {
+      "types": "./src/card-generation-desktop-contracts.ts",
+      "import": "./src/card-generation-desktop-contracts.ts",
+      "default": "./src/card-generation-desktop-contracts.ts"
+    },
+    "./quality-evidence-contracts": {
+      "types": "./src/quality-evidence-contracts.ts",
+      "import": "./src/quality-evidence-contracts.ts",
+      "default": "./src/quality-evidence-contracts.ts"
     },
     "./markdown-parser": {
       "types": "./src/markdown-parser.ts",

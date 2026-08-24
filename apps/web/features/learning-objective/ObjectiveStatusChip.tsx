@@ -41,7 +41,7 @@ export function ObjectiveStatusChip(props: {
   const label = props.extra ?? LABELS[props.state];
   return (
     <span className={"objective-chip" + (props.className ? " " + props.className : "")} data-state={props.state}>
-      <span aria-hidden="true">●</span>
+      <span className="objective-chip-dot" aria-hidden="true" />
       {label}
     </span>
   );

@@ -18,6 +18,18 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
+import Fastify from "fastify";
+import type { FastifyInstance } from "fastify";
+import {
+  getLearningRunResultResponseV2Schema,
+  learningRunActionResponseV2Schema,
+  learningRunPublicSnapshotV2Schema,
+  learningRunReturnContractV2Schema,
+  learningTaskDraftV2Schema,
+  learningTaskDraftWriteReceiptV2Schema,
+  reviewQueueV2Schema,
+  submitTaskArtifactReceiptV2Schema,
+} from "@ailearn/shared";
 import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
@@ -28,9 +40,22 @@ const sql = postgres(CONN, { max: 2 });
 // Critic 未配置：确保 fail closed 分支可复现。
 delete process.env.ASSESSMENT_CRITIC_URL;
 delete process.env.ASSESSMENT_CRITIC_KEY;
+process.env.LEARNING_RUN_V1 ??= "true";
+process.env.LEARNING_DRAFT_ENC_KEY ??= "a".repeat(64);
 
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
-const { createRun, submitArtifact, getRunPublicView, getResultPayload, applyAction, getEventsAfter } = await import(
+const {
+  createRun,
+  createRunV2,
+  submitArtifact,
+  getRunPublicView,
+  getLearningRunPublicSnapshotV2,
+  getResultPayload,
+  getResultPayloadV2,
+  getReturnContractV2,
+  applyAction,
+  getEventsAfter,
+} = await import(
   "../modules/learning-runs/run-service.ts"
 );
 const { runLearningRunProcessingTick } = await import(
@@ -48,6 +73,7 @@ interface Seeded {
   cardId: string;
   /** V2 objectiveId（V1 keyPointId alias；createRun V1 薄壳映射二者一致）。 */
   keyPointId: string;
+  token: string;
   cleanup: () => Promise<void>;
 }
 
@@ -62,8 +88,20 @@ async function seed(): Promise<Seeded> {
     userId: fixture.userId,
     cardId: fixture.cardId,
     keyPointId: fixture.objectiveId,
+    token: fixture.token,
     cleanup: fixture.cleanup,
   };
+}
+
+async function buildLearningRunApp(): Promise<FastifyInstance> {
+  const app = Fastify({ logger: false });
+  const sensible = (await import("@fastify/sensible")).default;
+  await app.register(sensible);
+  const { learningRunRoutes } = await import("../modules/learning-runs/run-routes.ts");
+  const { reviewRoutes } = await import("../modules/review/routes.ts");
+  await app.register(reviewRoutes);
+  await app.register(learningRunRoutes);
+  return app;
 }
 
 test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit → schedule+envelope", async () => {
@@ -614,6 +652,951 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
     `;
     assert.equal(envelopeCount[0].n, 1);
   } finally {
+    await seeded.cleanup();
+  }
+});
+
+test("REVIEW-QUEUE-PROJECTION-01：真实 V2 queue identity 与 direct startability preconditions", async () => {
+  const seeded = await seed();
+  const app = await buildLearningRunApp();
+  try {
+    const auth = { authorization: `Bearer ${seeded.token}` };
+    const dueScheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${dueScheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 minute', 1, 12, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+
+    const queueResponse = await app.inject({ method: "GET", url: "/reviews/v2/queue?limit=10", headers: auth });
+    assert.equal(queueResponse.statusCode, 200, queueResponse.body);
+    const queue = reviewQueueV2Schema.parse(queueResponse.json());
+    const queued = queue.items.find((item) => item.scheduleId === dueScheduleId);
+    assert.ok(queued, "due V2 schedule must be visible in strict queue");
+    assert.equal(queued.reviewId, dueScheduleId);
+    assert.equal(queued.objectiveId, seeded.keyPointId);
+    assert.equal(queued.scheduleGeneration, 12);
+    assert.deepEqual(queued.startability, { kind: "ready" });
+
+    const startResponse = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: {
+        version: 2,
+        originV2: {
+          kind: "review",
+          scheduleId: queued.scheduleId,
+          objectiveId: queued.objectiveId,
+          scheduleGeneration: queued.scheduleGeneration,
+        },
+        goal: "stabilize",
+        responsePreference: "text",
+        idempotencyKey: `review-queue-start-${randomUUID()}`,
+      },
+    });
+    assert.equal(startResponse.statusCode, 201, startResponse.body);
+    const started = learningRunPublicSnapshotV2Schema.parse(startResponse.json());
+    assert.deepEqual(started.originV2, {
+      kind: "review",
+      scheduleId: dueScheduleId,
+      objectiveId: seeded.keyPointId,
+      scheduleGeneration: 12,
+    });
+
+    const wrongObjectiveStart = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: {
+        version: 2,
+        originV2: { kind: "review", scheduleId: dueScheduleId, objectiveId: randomUUID(), scheduleGeneration: 12 },
+        goal: "stabilize",
+        idempotencyKey: `review-queue-wrong-objective-${randomUUID()}`,
+      },
+    });
+    assert.equal(wrongObjectiveStart.statusCode, 409, wrongObjectiveStart.body);
+    assert.equal(wrongObjectiveStart.json().error, "context_stale");
+
+    const staleGenerationStart = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: {
+        version: 2,
+        originV2: { kind: "review", scheduleId: dueScheduleId, objectiveId: seeded.keyPointId, scheduleGeneration: 999 },
+        goal: "stabilize",
+        idempotencyKey: `review-queue-stale-generation-${randomUUID()}`,
+      },
+    });
+    assert.equal(staleGenerationStart.statusCode, 409, staleGenerationStart.body);
+    assert.equal(staleGenerationStart.json().error, "schedule_generation_changed");
+
+    const futureScheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${futureScheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() + interval '1 hour', 1, 13, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+    const futureStart = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: {
+        version: 2,
+        originV2: { kind: "review", scheduleId: futureScheduleId, objectiveId: seeded.keyPointId, scheduleGeneration: 13 },
+        goal: "stabilize",
+        idempotencyKey: `review-queue-future-${randomUUID()}`,
+      },
+    });
+    assert.equal(futureStart.statusCode, 409, futureStart.body);
+    assert.equal(futureStart.json().error, "review_not_due");
+    assert.equal(futureStart.json().blockedReason, "not_due");
+
+    const cooldownScheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${cooldownScheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 minute', 1, 14, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+    await sql`
+      INSERT INTO validation_assistance_exposures (id, workspace_id, user_id, key_point_id, exposure_fingerprint, last_exposure_kind, first_exposed_at, last_exposed_at, unassisted_eligible_after, input_schedule_id, created_at, updated_at)
+      VALUES (${randomUUID()}, ${seeded.workspaceId}, ${seeded.userId}, ${seeded.keyPointId}, ${`review-cooldown-${randomUUID()}`}, 'pre_submit_source', now(), now(), now() + interval '1 hour', ${cooldownScheduleId}, now(), now())
+    `;
+    const cooldownStart = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: {
+        version: 2,
+        originV2: { kind: "review", scheduleId: cooldownScheduleId, objectiveId: seeded.keyPointId, scheduleGeneration: 14 },
+        goal: "stabilize",
+        idempotencyKey: `review-queue-cooldown-${randomUUID()}`,
+      },
+    });
+    assert.equal(cooldownStart.statusCode, 409, cooldownStart.body);
+    assert.equal(cooldownStart.json().error, "review_assistance_cooldown");
+    assert.equal(cooldownStart.json().blockedReason, "cooldown");
+
+    const runCount = await sql`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`;
+    assert.equal(runCount[0].n, 1, "blocked direct starts must not create additional runs");
+  } finally {
+    await app.close();
+    await seeded.cleanup();
+  }
+});
+
+test("GS-01B：V2 review origin → public snapshot/result/return 全链绑定且 start 幂等", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const scheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 9, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+
+    const request = {
+      version: 2 as const,
+      originV2: {
+        kind: "review" as const,
+        scheduleId,
+        objectiveId: seeded.keyPointId,
+        scheduleGeneration: 9,
+      },
+      goal: "stabilize" as const,
+      requestedTimeBudgetSeconds: 120,
+      responsePreference: "text" as const,
+      idempotencyKey: "gs01b-v2-start-1",
+    };
+
+    const first = await withWorkspaceTransaction(scope, (tx) =>
+      createRunV2(tx, { ...scope, request }),
+    );
+    const snapshot = await withWorkspaceTransaction(scope, (tx) =>
+      getLearningRunPublicSnapshotV2(tx, { ...scope, runId: first.runId }),
+    );
+
+    assert.equal(snapshot.version, 2);
+    assert.equal(snapshot.runId, first.runId);
+    assert.equal(snapshot.snapshotId, first.snapshotId);
+    assert.deepEqual(snapshot.originV2, request.originV2);
+    assert.deepEqual(snapshot.returnTargetV2, {
+      kind: "review",
+      scheduleId,
+      objectiveId: seeded.keyPointId,
+    });
+    assert.equal(snapshot.target.objectiveId, seeded.keyPointId);
+    assert.equal("canonicalAnswer" in snapshot.target, false);
+    assert.equal("scoringRubric" in snapshot.target, false);
+
+    const replay = await withWorkspaceTransaction(scope, (tx) =>
+      createRunV2(tx, { ...scope, request }),
+    );
+    assert.equal(replay.runId, first.runId, "exact V2 start replay must return the same run");
+    assert.equal(replay.snapshotId, first.snapshotId, "exact replay must retain snapshot binding");
+
+    await assert.rejects(
+      () => withWorkspaceTransaction(scope, (tx) => createRunV2(tx, {
+        ...scope,
+        request: { ...request, goal: "clarify" },
+      })),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "idempotency_conflict",
+    );
+
+    await assert.rejects(
+      () => withWorkspaceTransaction(scope, (tx) => createRunV2(tx, {
+        ...scope,
+        request: {
+          ...request,
+          originV2: { ...request.originV2, objectiveId: randomUUID() },
+        },
+      })),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "idempotency_conflict",
+      "same idempotency key must conflict when the V2 objective binding changes",
+    );
+
+    await assert.rejects(
+      () => withWorkspaceTransaction(scope, (tx) => createRunV2(tx, {
+        ...scope,
+        request: {
+          ...request,
+          originV2: { ...request.originV2, scheduleGeneration: request.originV2.scheduleGeneration + 1 },
+        },
+      })),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "idempotency_conflict",
+      "same idempotency key must conflict when the V2 schedule generation changes",
+    );
+
+    const result = await withWorkspaceTransaction(scope, (tx) =>
+      getResultPayloadV2(tx, { ...scope, runId: first.runId }),
+    );
+    assert.equal(result.status, "pending");
+    assert.equal(result.runId, first.runId);
+    assert.deepEqual(result.originV2, request.originV2);
+    assert.deepEqual(result.returnTargetV2, snapshot.returnTargetV2);
+
+    const returnContract = await withWorkspaceTransaction(scope, (tx) =>
+      getReturnContractV2(tx, { ...scope, runId: first.runId }),
+    );
+    assert.equal(returnContract.status, "run_active");
+    assert.equal(returnContract.runId, first.runId);
+    assert.equal(returnContract.snapshotId, first.snapshotId);
+    assert.deepEqual(returnContract.originV2, request.originV2);
+    assert.deepEqual(returnContract.returnTargetV2, snapshot.returnTargetV2);
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+test("RUN-V2-START-IDEMPOTENCY-01：同 key 并发 V2 start 只产生一个 run", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const scheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 15, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+    const request = {
+      version: 2 as const,
+      originV2: {
+        kind: "review" as const,
+        scheduleId,
+        objectiveId: seeded.keyPointId,
+        scheduleGeneration: 15,
+      },
+      goal: "stabilize" as const,
+      requestedTimeBudgetSeconds: 120,
+      responsePreference: "text" as const,
+      idempotencyKey: `run-v2-overlap-${randomUUID()}`,
+    };
+
+    const results = await Promise.all([
+      withWorkspaceTransaction(scope, (tx) => createRunV2(tx, { ...scope, request })),
+      withWorkspaceTransaction(scope, (tx) => createRunV2(tx, { ...scope, request })),
+    ]);
+    assert.equal(results[0].runId, results[1].runId);
+    assert.equal(results[0].snapshotId, results[1].snapshotId);
+
+    const runCount = await sql`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`;
+    const ledgerCount = await sql`
+      SELECT count(*)::int AS n FROM learning_run_idempotency
+      WHERE workspace_id = ${seeded.workspaceId} AND user_id = ${seeded.userId} AND idempotency_key = ${request.idempotencyKey}
+    `;
+    assert.equal(runCount[0].n, 1, "overlap loser must not create a second run");
+    assert.equal(ledgerCount[0].n, 1, "overlap must leave one idempotency ledger row");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+test("RUN-V2-WIRE-01：HTTP V2 draft/submit receipt → response-loss replay → worker result/return", async () => {
+  const seeded = await seed();
+  const app = await buildLearningRunApp();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const auth = { authorization: `Bearer ${seeded.token}` };
+    const scheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 10, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+
+    const startBody = {
+      version: 2 as const,
+      originV2: {
+        kind: "review" as const,
+        scheduleId,
+        objectiveId: seeded.keyPointId,
+        scheduleGeneration: 10,
+      },
+      goal: "stabilize" as const,
+      requestedTimeBudgetSeconds: 120,
+      responsePreference: "text" as const,
+      idempotencyKey: `run-v2-wire-start-${randomUUID()}`,
+    };
+    const startResponse = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: startBody,
+    });
+    assert.equal(startResponse.statusCode, 201, startResponse.body);
+    const startSnapshot = learningRunPublicSnapshotV2Schema.parse(startResponse.json());
+    assert.deepEqual(startSnapshot.originV2, startBody.originV2);
+    assert.equal(startSnapshot.returnTargetV2.kind, "review");
+    assert.equal(startSnapshot.returnTargetV2.scheduleId, scheduleId);
+    assert.ok(startSnapshot.activeTask, "V2 start must expose an active task");
+
+    // Simulate a lost 201 response: replaying the exact HTTP command must
+    // recover the same run/snapshot rather than creating an orphan run.
+    const startReplayResponse = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: startBody,
+    });
+    assert.equal(startReplayResponse.statusCode, 201, startReplayResponse.body);
+    const startReplaySnapshot = learningRunPublicSnapshotV2Schema.parse(startReplayResponse.json());
+    assert.equal(startReplaySnapshot.runId, startSnapshot.runId);
+    assert.equal(startReplaySnapshot.snapshotId, startSnapshot.snapshotId);
+    assert.deepEqual(startReplaySnapshot.originV2, startSnapshot.originV2);
+
+    const task = startSnapshot.activeTask;
+    const variant = task.activeVariant;
+    assert.equal(variant.interaction.kind, "text_response");
+
+    // GET resync must be the same strict snapshot identity as the start response.
+    const getResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${startSnapshot.runId}/v2`,
+      headers: auth,
+    });
+    assert.equal(getResponse.statusCode, 200, getResponse.body);
+    const resyncedSnapshot = learningRunPublicSnapshotV2Schema.parse(getResponse.json());
+    assert.equal(resyncedSnapshot.runId, startSnapshot.runId);
+    assert.equal(resyncedSnapshot.snapshotId, startSnapshot.snapshotId);
+    assert.deepEqual(resyncedSnapshot.originV2, startSnapshot.originV2);
+
+    const staleStream = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${startSnapshot.runId}/events?snapshotId=${randomUUID()}`,
+      headers: auth,
+    });
+    assert.equal(staleStream.statusCode, 409, staleStream.body);
+    assert.equal(staleStream.json().error, "context_stale");
+
+    const draftBody = {
+      version: 2 as const,
+      snapshotId: startSnapshot.snapshotId,
+      variantId: variant.variantId,
+      variantRevision: variant.revision,
+      taskRevision: task.revision,
+      expectedDraftRevision: null,
+      payload: { kind: "text" as const, text: "先保存一份跨设备草稿。" },
+      rendererState: { kind: "text" as const, selectionStart: 0, selectionEnd: 10 },
+      idempotencyKey: `run-v2-wire-draft-${randomUUID()}`,
+    };
+    const draftResponse = await app.inject({
+      method: "PUT",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${task.taskId}/draft/v2`,
+      headers: auth,
+      payload: draftBody,
+    });
+    assert.equal(draftResponse.statusCode, 200, draftResponse.body);
+    const draftReceipt = learningTaskDraftWriteReceiptV2Schema.parse(draftResponse.json());
+    assert.equal(draftReceipt.runId, startSnapshot.runId);
+    assert.equal(draftReceipt.snapshotId, startSnapshot.snapshotId);
+    assert.equal(draftReceipt.taskId, task.taskId);
+    assert.equal(draftReceipt.variantId, variant.variantId);
+    assert.equal(draftReceipt.runRevision, startSnapshot.runRevision);
+
+    const draftResyncResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${task.taskId}/draft/v2`,
+      headers: auth,
+    });
+    assert.equal(draftResyncResponse.statusCode, 200, draftResyncResponse.body);
+    const draftResync = learningTaskDraftV2Schema.parse(draftResyncResponse.json());
+    assert.equal(draftResync.snapshotId, startSnapshot.snapshotId);
+    assert.deepEqual(draftResync.payload, draftBody.payload);
+    assert.deepEqual(draftResync.rendererState, draftBody.rendererState);
+
+    const submitBody = {
+      version: 2 as const,
+      snapshotId: startSnapshot.snapshotId,
+      variantId: variant.variantId,
+      variantRevision: variant.revision,
+      runRevision: startSnapshot.runRevision,
+      taskRevision: task.revision,
+      inputSchemaHash: variant.inputSchemaHash,
+      payload: { kind: "declared_unable" as const, reasonCode: "cannot_recall" as const },
+      idempotencyKey: `run-v2-wire-submit-${randomUUID()}`,
+    };
+    const submitResponse = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${task.taskId}/submissions/v2`,
+      headers: auth,
+      payload: submitBody,
+    });
+    assert.equal(submitResponse.statusCode, 202, submitResponse.body);
+    const submitReceipt = submitTaskArtifactReceiptV2Schema.parse(submitResponse.json());
+    assert.equal(submitReceipt.runId, startSnapshot.runId);
+    assert.equal(submitReceipt.snapshotId, startSnapshot.snapshotId);
+    assert.equal(submitReceipt.taskId, task.taskId);
+    assert.equal(submitReceipt.artifactStatus, "locked");
+    assert.equal(submitReceipt.assessment.status, "queued");
+
+    // A lost 202 response is recovered by exact replay, even after the run
+    // has advanced to assessing. The receipt must remain byte-for-byte stable.
+    const submitReplayResponse = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${task.taskId}/submissions/v2`,
+      headers: auth,
+      payload: submitBody,
+    });
+    assert.equal(submitReplayResponse.statusCode, 202, submitReplayResponse.body);
+    assert.deepEqual(submitTaskArtifactReceiptV2Schema.parse(submitReplayResponse.json()), submitReceipt);
+
+    // The draft ledger also has to replay its original runRevision after the
+    // submit transition changed the current run revision.
+    const draftReplayAfterSubmit = await app.inject({
+      method: "PUT",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${task.taskId}/draft/v2`,
+      headers: auth,
+      payload: draftBody,
+    });
+    assert.equal(draftReplayAfterSubmit.statusCode, 200, draftReplayAfterSubmit.body);
+    assert.deepEqual(learningTaskDraftWriteReceiptV2Schema.parse(draftReplayAfterSubmit.json()), draftReceipt);
+
+    const draftConflict = await app.inject({
+      method: "PUT",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${task.taskId}/draft/v2`,
+      headers: auth,
+      payload: { ...draftBody, payload: { kind: "text", text: "同 key 的不同草稿必须冲突。" } },
+    });
+    assert.equal(draftConflict.statusCode, 409, draftConflict.body);
+    assert.equal(draftConflict.json().error, "idempotency_conflict");
+
+    const submitRevisionConflict = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${task.taskId}/submissions/v2`,
+      headers: auth,
+      payload: { ...submitBody, runRevision: submitBody.runRevision + 1 },
+    });
+    assert.equal(submitRevisionConflict.statusCode, 409, submitRevisionConflict.body);
+    assert.equal(submitRevisionConflict.json().error, "idempotency_conflict");
+
+    const submitTaskConflict = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${startSnapshot.runId}/tasks/${randomUUID()}/submissions/v2`,
+      headers: auth,
+      payload: submitBody,
+    });
+    assert.equal(submitTaskConflict.statusCode, 409, submitTaskConflict.body);
+    assert.equal(submitTaskConflict.json().error, "idempotency_conflict");
+
+    let finalResult: ReturnType<typeof getLearningRunResultResponseV2Schema.parse> | null = null;
+    for (let round = 0; round < 8; round += 1) {
+      const tickResult = await runLearningRunProcessingTick(`run-v2-wire-worker:${randomUUID()}`, 10);
+      assert.equal(tickResult.failed, 0, `tick failed=${tickResult.failed}`);
+      const resultResponse = await app.inject({
+        method: "GET",
+        url: `/learning-runs/${startSnapshot.runId}/result/v2`,
+        headers: auth,
+      });
+      assert.ok([200, 202].includes(resultResponse.statusCode), resultResponse.body);
+      finalResult = getLearningRunResultResponseV2Schema.parse(resultResponse.json());
+      if (finalResult.status === "learning_result") break;
+    }
+    assert.ok(finalResult, "worker must produce a V2 result response");
+    assert.equal(finalResult.status, "learning_result");
+    assert.equal(finalResult.runId, startSnapshot.runId);
+    assert.equal(finalResult.snapshotId, startSnapshot.snapshotId);
+    assert.deepEqual(finalResult.originV2, startSnapshot.originV2);
+    assert.deepEqual(finalResult.result.returnTargetV2, startSnapshot.returnTargetV2);
+
+    const returnResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${startSnapshot.runId}/return-contract/v2`,
+      headers: auth,
+    });
+    assert.equal(returnResponse.statusCode, 200, returnResponse.body);
+    const returnContract = learningRunReturnContractV2Schema.parse(returnResponse.json());
+    assert.equal(returnContract.runId, startSnapshot.runId);
+    assert.equal(returnContract.snapshotId, startSnapshot.snapshotId);
+    assert.deepEqual(returnContract.originV2, startSnapshot.originV2);
+    assert.deepEqual(returnContract.returnTargetV2, startSnapshot.returnTargetV2);
+    assert.notEqual(returnContract.status, "run_active");
+
+    // The SSE/resync source is still cursor-based, but it is read from this
+    // same V2 run scope; the desktop gateway only forwards the resulting
+    // sequence as a safe notification and re-queries /v2.
+    const events = await withWorkspaceTransaction(scope, (tx) =>
+      getEventsAfter(tx, { ...scope, runId: startSnapshot.runId, afterSequence: 0 }),
+    );
+    assert.ok(events.length > 0);
+    assert.ok(events.every((event) => event.sequence > 0));
+    assert.ok(events.some((event) => event.eventType === "learning_artifact.locked"));
+  } finally {
+    await app.close();
+    await seeded.cleanup();
+  }
+});
+
+test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss exact replay", async () => {
+  const seeded = await seed();
+  const otherSeeded = await seed();
+  const app = await buildLearningRunApp();
+  try {
+    const auth = { authorization: `Bearer ${seeded.token}` };
+    const scheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 11, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+
+    const startResponse = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: {
+        version: 2,
+        originV2: { kind: "review", scheduleId, objectiveId: seeded.keyPointId, scheduleGeneration: 11 },
+        goal: "stabilize",
+        requestedTimeBudgetSeconds: 120,
+        responsePreference: "text",
+        idempotencyKey: `run-v2-action-start-${randomUUID()}`,
+      },
+    });
+    assert.equal(startResponse.statusCode, 201, startResponse.body);
+    const before = learningRunPublicSnapshotV2Schema.parse(startResponse.json());
+    assert.ok(before.allowedActions.some((action) => action.kind === "pause"));
+    assert.equal(before.phase, "active");
+
+    const leaseBody = {
+      version: 2 as const,
+      snapshotId: before.snapshotId,
+      runRevision: before.runRevision,
+      runtimeEpoch: before.runtimeEpoch,
+      deviceSessionId: "device-v2-action-test",
+      startedAt: new Date(Date.now() - 5_000).toISOString(),
+      endedAt: new Date().toISOString(),
+    };
+    const leaseResponse = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/activity-lease/v2`,
+      headers: auth,
+      payload: leaseBody,
+    });
+    assert.equal(leaseResponse.statusCode, 204, leaseResponse.body);
+    const leaseReplay = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/activity-lease/v2`,
+      headers: auth,
+      payload: leaseBody,
+    });
+    assert.equal(leaseReplay.statusCode, 204, leaseReplay.body);
+    const leaseCount = await sql`
+      SELECT count(*)::int AS n FROM learning_activity_leases
+      WHERE run_id = ${before.runId} AND device_session_id = ${leaseBody.deviceSessionId}
+    `;
+    assert.equal(leaseCount[0].n, 1, "duplicate lease replay must not double-write the lease row");
+    const afterLeaseResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/v2`,
+      headers: auth,
+    });
+    assert.equal(afterLeaseResponse.statusCode, 200, afterLeaseResponse.body);
+    const afterLease = learningRunPublicSnapshotV2Schema.parse(afterLeaseResponse.json());
+    assert.ok(afterLease.activeSecondsUsed > before.activeSecondsUsed, "V2 snapshot must expose the server-credited active time");
+
+    const malformedAction = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: before.snapshotId,
+        runRevision: before.runRevision,
+        runtimeEpoch: before.runtimeEpoch,
+        action: { kind: "unknown_action" },
+        idempotencyKey: `run-v2-action-malformed-${randomUUID()}`,
+      },
+    });
+    assert.equal(malformedAction.statusCode, 400, malformedAction.body);
+
+    const forgedParameters = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: before.snapshotId,
+        runRevision: before.runRevision,
+        runtimeEpoch: before.runtimeEpoch,
+        action: { kind: "pause", unexpected: true },
+        idempotencyKey: `run-v2-action-forged-parameter-${randomUUID()}`,
+      },
+    });
+    assert.equal(forgedParameters.statusCode, 400, forgedParameters.body);
+
+    const staleSnapshot = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: randomUUID(),
+        runRevision: before.runRevision,
+        runtimeEpoch: before.runtimeEpoch,
+        action: { kind: "pause" },
+        idempotencyKey: `run-v2-action-stale-snapshot-${randomUUID()}`,
+      },
+    });
+    assert.equal(staleSnapshot.statusCode, 409, staleSnapshot.body);
+    assert.equal(staleSnapshot.json().error, "context_stale");
+
+    const staleRevision = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: before.snapshotId,
+        runRevision: before.runRevision + 1,
+        runtimeEpoch: before.runtimeEpoch,
+        action: { kind: "pause" },
+        idempotencyKey: `run-v2-action-stale-revision-${randomUUID()}`,
+      },
+    });
+    assert.equal(staleRevision.statusCode, 409, staleRevision.body);
+    assert.equal(staleRevision.json().error, "stale_run_revision");
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: { authorization: `Bearer ${otherSeeded.token}` },
+      payload: {
+        version: 2,
+        snapshotId: before.snapshotId,
+        runRevision: before.runRevision,
+        runtimeEpoch: before.runtimeEpoch,
+        action: { kind: "pause" },
+        idempotencyKey: `run-v2-action-cross-workspace-${randomUUID()}`,
+      },
+    });
+    assert.equal(unauthorized.statusCode, 404, unauthorized.body);
+    assert.equal(unauthorized.json().error, "run_not_found");
+
+    const forbidden = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: before.snapshotId,
+        runRevision: before.runRevision,
+        runtimeEpoch: before.runtimeEpoch,
+        action: { kind: "resume" },
+        idempotencyKey: `run-v2-action-forbidden-${randomUUID()}`,
+      },
+    });
+    assert.equal(forbidden.statusCode, 409, forbidden.body);
+    assert.equal(forbidden.json().error, "action_not_allowed");
+
+    const actionBody = {
+      version: 2 as const,
+      snapshotId: before.snapshotId,
+      runRevision: before.runRevision,
+      runtimeEpoch: before.runtimeEpoch,
+      action: { kind: "pause" as const },
+      idempotencyKey: `run-v2-action-pause-${randomUUID()}`,
+    };
+    // 首次 action 也必须抵抗真实 HTTP overlap：winner 只产生一次状态
+    // 变更，loser 等待 advisory lock 后读取同一 ledger receipt。
+    const [actionResponse, overlapActionResponse] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: `/learning-runs/${before.runId}/actions/v2`,
+        headers: auth,
+        payload: actionBody,
+      }),
+      app.inject({
+        method: "POST",
+        url: `/learning-runs/${before.runId}/actions/v2`,
+        headers: auth,
+        payload: actionBody,
+      }),
+    ]);
+    assert.equal(actionResponse.statusCode, 200, actionResponse.body);
+    const actionReceipt = learningRunActionResponseV2Schema.parse(actionResponse.json());
+    assert.equal(overlapActionResponse.statusCode, 200, overlapActionResponse.body);
+    assert.deepEqual(learningRunActionResponseV2Schema.parse(overlapActionResponse.json()), actionReceipt);
+    assert.equal(actionReceipt.runId, before.runId);
+    assert.equal(actionReceipt.snapshotId, before.snapshotId);
+    assert.deepEqual(actionReceipt.originV2, before.originV2);
+    assert.equal(actionReceipt.actionResult.kind, "state_changed");
+    assert.equal(actionReceipt.snapshot.phase, "paused");
+    assert.equal(actionReceipt.snapshot.runRevision, before.runRevision + 1);
+    const actionLedgerRows = await sql`
+      SELECT count(*)::int AS n FROM learning_run_action_ledger
+      WHERE run_id = ${before.runId} AND idempotency_key = ${actionBody.idempotencyKey}
+    `;
+    assert.equal(actionLedgerRows[0].n, 1, "overlap must claim one action ledger row");
+
+    // The next public snapshot must re-project the exact paused action set:
+    // resume/end are available, while pause is no longer server-authorized.
+    const pausedGetResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/v2`,
+      headers: auth,
+    });
+    assert.equal(pausedGetResponse.statusCode, 200, pausedGetResponse.body);
+    const paused = learningRunPublicSnapshotV2Schema.parse(pausedGetResponse.json());
+    assert.equal(paused.phase, "paused");
+    assert.equal(paused.runRevision, before.runRevision + 1);
+    assert.ok(paused.allowedActions.some((action) => action.kind === "resume"));
+    assert.ok(paused.allowedActions.some((action) => action.kind === "end" && !action.abandonLockedEvidence));
+    assert.equal(paused.allowedActions.some((action) => action.kind === "pause"), false);
+
+    const pausedPauseAttempt = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: paused.snapshotId,
+        runRevision: paused.runRevision,
+        runtimeEpoch: paused.runtimeEpoch,
+        action: { kind: "pause" },
+        idempotencyKey: `run-v2-action-paused-pause-${randomUUID()}`,
+      },
+    });
+    assert.equal(pausedPauseAttempt.statusCode, 409, pausedPauseAttempt.body);
+    assert.equal(pausedPauseAttempt.json().error, "action_not_allowed");
+
+    // Exact replay occurs after the phase/revision changed. The ledger lookup
+    // must precede action availability and stale checks, returning the exact
+    // original V2 response rather than a new paused/resume projection.
+    const replayResponse = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: actionBody,
+    });
+    assert.equal(replayResponse.statusCode, 200, replayResponse.body);
+    assert.deepEqual(learningRunActionResponseV2Schema.parse(replayResponse.json()), actionReceipt);
+
+    const changedEpoch = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: { ...actionBody, runtimeEpoch: actionBody.runtimeEpoch + 1 },
+    });
+    assert.equal(changedEpoch.statusCode, 409, changedEpoch.body);
+    assert.equal(changedEpoch.json().error, "idempotency_conflict");
+
+    const changedAction = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: { ...actionBody, action: { kind: "end", abandonLockedEvidence: false } },
+    });
+    assert.equal(changedAction.statusCode, 409, changedAction.body);
+    assert.equal(changedAction.json().error, "idempotency_conflict");
+
+    const endResponse = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/actions/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: paused.snapshotId,
+        runRevision: paused.runRevision,
+        runtimeEpoch: paused.runtimeEpoch,
+        action: { kind: "end", abandonLockedEvidence: false },
+        idempotencyKey: `run-v2-action-end-${randomUUID()}`,
+      },
+    });
+    assert.equal(endResponse.statusCode, 200, endResponse.body);
+    const endReceipt = learningRunActionResponseV2Schema.parse(endResponse.json());
+    assert.equal(endReceipt.snapshot.phase, "ended");
+    assert.deepEqual(endReceipt.snapshot.allowedActions, []);
+
+    const terminalResultResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/result/v2`,
+      headers: auth,
+    });
+    assert.equal(terminalResultResponse.statusCode, 200, terminalResultResponse.body);
+    const terminalResult = getLearningRunResultResponseV2Schema.parse(terminalResultResponse.json());
+    assert.equal(terminalResult.status, "terminal_without_result");
+    assert.equal(terminalResult.phase, "ended");
+
+    const terminalReturnResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/return-contract/v2`,
+      headers: auth,
+    });
+    assert.equal(terminalReturnResponse.statusCode, 200, terminalReturnResponse.body);
+    const terminalReturn = learningRunReturnContractV2Schema.parse(terminalReturnResponse.json());
+    assert.equal(terminalReturn.status, "no_projection_change");
+
+    // A terminal review run must not keep emitting a deleted schedule as if
+    // it were navigable. The API may provide only the still-active card as a
+    // server-proven fallback; the resolver must not invent another route.
+    await sql`DELETE FROM review_schedules WHERE id = ${scheduleId}`;
+    const deletedTargetReturnResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/return-contract/v2`,
+      headers: auth,
+    });
+    assert.equal(deletedTargetReturnResponse.statusCode, 200, deletedTargetReturnResponse.body);
+    const deletedTargetReturn = learningRunReturnContractV2Schema.parse(deletedTargetReturnResponse.json());
+    assert.deepEqual(deletedTargetReturn, {
+      version: 2,
+      runId: before.runId,
+      snapshotId: before.snapshotId,
+      originV2: before.originV2,
+      returnTargetV2: before.returnTargetV2,
+      status: "unavailable",
+      reason: "return_target_deleted",
+      fallbackTargetV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+    });
+
+    await sql`UPDATE learning_cards_v2 SET lifecycle = 'archived' WHERE workspace_id = ${seeded.workspaceId} AND card_id = ${seeded.cardId}`;
+    const noFallbackReturnResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/return-contract/v2`,
+      headers: auth,
+    });
+    assert.equal(noFallbackReturnResponse.statusCode, 200, noFallbackReturnResponse.body);
+    const noFallbackReturn = learningRunReturnContractV2Schema.parse(noFallbackReturnResponse.json());
+    assert.equal(noFallbackReturn.status, "unavailable");
+    assert.equal(noFallbackReturn.reason, "return_target_deleted");
+    assert.equal(noFallbackReturn.fallbackTargetV2, null);
+
+    const crossWorkspaceReturnResponse = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/return-contract/v2`,
+      headers: { authorization: `Bearer ${otherSeeded.token}` },
+    });
+    assert.equal(crossWorkspaceReturnResponse.statusCode, 404, crossWorkspaceReturnResponse.body);
+    assert.equal(crossWorkspaceReturnResponse.json().error, "run_not_found");
+  } finally {
+    await app.close();
+    await seeded.cleanup();
+    await otherSeeded.cleanup();
+  }
+});
+
+test("RUN-V2-ACTION-AVAILABILITY-01：direct API 覆盖 full phase/checkpoint/recoverable-error projection", async () => {
+  const seeded = await seed();
+  const app = await buildLearningRunApp();
+  try {
+    const auth = { authorization: `Bearer ${seeded.token}` };
+    const scheduleId = randomUUID();
+    await sql`
+      INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
+      VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 12, 'discrete-v2', 'initial_validation', now(), now())
+    `;
+    const startResponse = await app.inject({
+      method: "POST",
+      url: "/learning-runs",
+      headers: auth,
+      payload: {
+        version: 2,
+        originV2: { kind: "review", scheduleId, objectiveId: seeded.keyPointId, scheduleGeneration: 12 },
+        goal: "stabilize",
+        requestedTimeBudgetSeconds: 120,
+        responsePreference: "text",
+        idempotencyKey: `run-v2-action-matrix-${randomUUID()}`,
+      },
+    });
+    assert.equal(startResponse.statusCode, 201, startResponse.body);
+    const initial = learningRunPublicSnapshotV2Schema.parse(startResponse.json());
+    let revision = initial.runRevision;
+    const readSnapshot = async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/learning-runs/${initial.runId}/v2`,
+        headers: auth,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return learningRunPublicSnapshotV2Schema.parse(response.json());
+    };
+    const mutateRun = async (phase: string, extra = "") => {
+      revision += 1;
+      await sql.unsafe(
+        `UPDATE learning_runs SET phase = $1, revision = $2, checkpoint = NULL, failure = NULL WHERE id = $3`,
+        [phase, revision, initial.runId],
+      );
+      if (extra) await sql.unsafe(extra, [initial.runId]);
+    };
+
+    await mutateRun("preparing");
+    assert.deepEqual((await readSnapshot()).allowedActions, [
+      { version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true },
+    ]);
+
+    await mutateRun("paused");
+    assert.deepEqual((await readSnapshot()).allowedActions, [
+      { version: 2, kind: "resume" },
+      { version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true },
+    ]);
+
+    await mutateRun("assessing");
+    assert.deepEqual((await readSnapshot()).allowedActions, [
+      { version: 2, kind: "end", abandonLockedEvidence: true, confirmationRequired: true },
+    ]);
+
+    await mutateRun("committing");
+    assert.deepEqual((await readSnapshot()).allowedActions, [
+      { version: 2, kind: "end", abandonLockedEvidence: true, confirmationRequired: true },
+    ]);
+
+    await mutateRun("checkpoint", "UPDATE learning_runs SET checkpoint = '{\"kind\":\"partial\",\"allowedFollowupIds\":[\"supplement:1\"]}'::jsonb WHERE id = $1");
+    assert.deepEqual((await readSnapshot()).allowedActions, [
+      { version: 2, kind: "finish_current_evidence" },
+      { version: 2, kind: "activate_followup", followupId: "supplement:1" },
+      { version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true },
+    ]);
+
+    await mutateRun("checkpoint", "UPDATE learning_runs SET checkpoint = '{\"kind\":\"not_assessable\",\"allowedFollowupIds\":[]}'::jsonb WHERE id = $1");
+    assert.deepEqual((await readSnapshot()).allowedActions, [
+      { version: 2, kind: "finish_without_commit" },
+      { version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true },
+    ]);
+
+    await mutateRun("recoverable_error", "UPDATE learning_runs SET failure = '{\"stage\":\"prepare\",\"code\":\"planner_unavailable\",\"retryable\":true}'::jsonb WHERE id = $1");
+    assert.deepEqual((await readSnapshot()).allowedActions, [
+      { version: 2, kind: "retry_prepare" },
+      { version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true },
+    ]);
+
+    await mutateRun("ended", "UPDATE learning_runs SET active_task_id = NULL, terminal_reason_code = 'user_ended' WHERE id = $1");
+    assert.deepEqual((await readSnapshot()).allowedActions, []);
+  } finally {
+    await app.close();
     await seeded.cleanup();
   }
 });

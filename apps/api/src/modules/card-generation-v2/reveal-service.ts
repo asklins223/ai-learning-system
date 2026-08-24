@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
@@ -25,6 +25,56 @@ import {
   type RunContext,
 } from "./helpers.ts";
 
+/**
+ * CARD-GEN-EXPOSURE-PROJECTION-01：读取 current user + exact candidate
+ * revision 的公开 exposure/eligibility 状态。答案和 evidence 绝不进入此 DTO。
+ */
+export async function getCandidateExposureEligibilityV2(
+  ctx: RunContext,
+  runId: string,
+  candidateId: string,
+  revision: number,
+) {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const candidateRows = await tx.select().from(cardGenerationCandidatesV2)
+      .where(and(
+        eq(cardGenerationCandidatesV2.runId, runId),
+        eq(cardGenerationCandidatesV2.candidateId, candidateId),
+        eq(cardGenerationCandidatesV2.revision, revision),
+        eq(cardGenerationCandidatesV2.workspaceId, ctx.workspaceId),
+      ))
+      .limit(1);
+    if (candidateRows.length === 0) return null;
+
+    const candidate = candidateRows[0];
+    const exposures = await tx.select().from(cardExposureLedgerV2)
+      .where(and(
+        eq(cardExposureLedgerV2.workspaceId, ctx.workspaceId),
+        eq(cardExposureLedgerV2.userId, ctx.userId),
+        eq(cardExposureLedgerV2.subjectKind, "candidate"),
+        eq(cardExposureLedgerV2.subjectCandidateId, candidateId),
+        eq(cardExposureLedgerV2.subjectCandidateRevision, revision),
+        inArray(cardExposureLedgerV2.exposureKind, ["answer_reveal", "evidence_reveal", "answer_editor_view"]),
+      ))
+      .orderBy(desc(cardExposureLedgerV2.exposedAt), desc(cardExposureLedgerV2.id))
+      .limit(1);
+    const lastExposure = exposures[0];
+    const exposed = Boolean(lastExposure);
+    return {
+      version: 1 as const,
+      runId,
+      candidateId,
+      candidateRevisionId: candidate.candidateRevisionId,
+      revision,
+      exposureStatus: exposed ? "exposed" as const : "not_exposed" as const,
+      initialValidationPolicyEffect: exposed
+        ? "wait_for_initial_validation" as const
+        : "eligible" as const,
+      lastExposedAt: lastExposure?.exposedAt.toISOString() ?? null,
+    };
+  });
+}
+
 export async function revealCandidateV2(
   ctx: RunContext,
   runId: string,
@@ -34,7 +84,17 @@ export async function revealCandidateV2(
   idempotencyKey: string,
 ): Promise<CandidateRevealV2> {
   return withWorkspaceTransaction(ctx, async (tx) => {
-    // Idempotency: same key returns same exposure
+    // CARD-GEN-CANDIDATE-COMMANDS-01：同一 domain key 串行化，
+    // 让 overlap loser 在 winner 提交后读取同一 exposure，而不是撞唯一约束。
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`v2-reveal:${ctx.workspaceId}:${ctx.userId}:${idempotencyKey}`}, 0)
+      )
+    `);
+
+    // Idempotency: same key returns the same exposure only for the exact
+    // candidate/revision request. A reused key with changed routing or
+    // revision is a conflict, never a second exposure.
     const existing = await tx.select().from(cardExposureLedgerV2)
       .where(and(
         eq(cardExposureLedgerV2.workspaceId, ctx.workspaceId),
@@ -45,6 +105,16 @@ export async function revealCandidateV2(
 
     if (existing.length > 0) {
       const exp = existing[0];
+      if (
+        exp.subjectCandidateId !== candidateId ||
+        exp.subjectCandidateRevision !== expectedRevision
+      ) {
+        throw new CardGenerationV2ServiceError(
+          "idempotency_conflict",
+          409,
+          "幂等键已用于不同的 reveal 请求",
+        );
+      }
       // 修复：幂等查询后应用 subjectCandidateId + subjectCandidateRevision 来定位候选
       // subjectCandidateId 存的是 candidateId（不是 candidateRevisionId）
       // subjectCandidateRevision 存的是 revision 号
@@ -57,6 +127,13 @@ export async function revealCandidateV2(
         .limit(1);
       if (candidates.length === 0) {
         throw new CardGenerationV2ServiceError("candidate_not_found", 404, "候选不存在");
+      }
+      if (candidates[0].runId !== runId || candidates[0].candidateRevisionHash !== expectedRevisionHash) {
+        throw new CardGenerationV2ServiceError(
+          "idempotency_conflict",
+          409,
+          "幂等键已用于不同的 reveal 请求",
+        );
       }
       return await buildCandidateReveal(tx, ctx.workspaceId, candidates[0], exp.exposureId, exp.exposedAt.toISOString());
     }

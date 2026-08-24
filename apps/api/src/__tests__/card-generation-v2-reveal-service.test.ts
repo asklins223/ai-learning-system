@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import { db } from "../db/client.ts";
-import { revealCandidateV2 } from "../modules/card-generation-v2/reveal-service.ts";
+import { getCandidateExposureEligibilityV2, revealCandidateV2 } from "../modules/card-generation-v2/reveal-service.ts";
 import { CardGenerationV2ServiceError } from "../modules/card-generation-v2/helpers.ts";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
@@ -170,6 +170,40 @@ describe("revealCandidateV2", () => {
     assert.equal(result.candidateId, CANDIDATE_ID);
   });
 
+  it("rejects a modified candidate request for an existing idempotency key", async () => {
+    const exposure = makeExposureRow();
+    const candidate = makeCandidateRow();
+    let selectCallCount = 0;
+
+    setupTx({
+      select: () => ({
+        from: () => {
+          selectCallCount++;
+          if (selectCallCount === 1) {
+            return { where: () => makeWhereResult([exposure]) };
+          }
+          return { where: () => makeWhereResult([candidate]) };
+        },
+      }),
+    });
+
+    await assert.rejects(
+      () => revealCandidateV2(
+        { workspaceId: WORKSPACE_ID, userId: USER_ID },
+        RUN_ID,
+        CANDIDATE_ID,
+        1,
+        "1".repeat(64),
+        "reveal-key-001",
+      ),
+      (err: CardGenerationV2ServiceError) => {
+        assert.equal(err.code, "idempotency_conflict");
+        assert.equal(err.statusCode, 409);
+        return true;
+      },
+    );
+  });
+
   it("throws candidate_not_found when no matching candidate", async () => {
     setupTx({
       select: () => ({
@@ -299,5 +333,47 @@ describe("revealCandidateV2", () => {
     assert.deepEqual(result.evidencePreviews, []);
     // exposedAt is ISO string
     assert.ok(typeof result.exposedAt === "string");
+  });
+});
+
+describe("getCandidateExposureEligibilityV2", () => {
+  it("returns current-user exact-revision exposure state without private content", async () => {
+    const candidate = makeCandidateRow();
+    const exposure = makeExposureRow();
+    let selectCallCount = 0;
+    setupTx({
+      select: () => ({
+        from: () => {
+          selectCallCount++;
+          return {
+            where: () => {
+              const rows = selectCallCount === 1 ? [candidate] : [exposure];
+              const result = makeWhereResult(rows);
+              result.orderBy = () => result;
+              return result;
+            },
+          };
+        },
+      }),
+    });
+
+    const result = await getCandidateExposureEligibilityV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      RUN_ID,
+      CANDIDATE_ID,
+      1,
+    );
+
+    assert.deepEqual(result, {
+      version: 1,
+      runId: RUN_ID,
+      candidateId: CANDIDATE_ID,
+      candidateRevisionId: CANDIDATE_REVISION_ID,
+      revision: 1,
+      exposureStatus: "exposed",
+      initialValidationPolicyEffect: "wait_for_initial_validation",
+      lastExposedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.equal("canonicalAnswer" in (result ?? {}), false);
   });
 });

@@ -415,10 +415,18 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
       const objectiveIds: string[] = [];
       const noteIds: string[] = [];
       for (let i = 0; i < config.noteCount; i++) {
-        const quoteText = `Supporting quote for card ${i + 1}`;
-        const blockContent = `Seed content ${i + 1} for testing. ${quoteText}`;
+        // Keep the seeded note semantically rich enough for the real planner
+        // provider to extract at least one atom. A one-line placeholder makes
+        // the provider correctly return an empty atom set, which is useful for
+        // an empty-state test but cannot exercise the First Golden activation
+        // path.
+        const noteContentBlocks = [
+          { type: "heading", content: "什么是贝叶斯定理" },
+          { type: "paragraph", content: "贝叶斯定理描述了基于先验概率和条件概率计算后验概率的方法。" },
+          { type: "paragraph", content: "公式为 P(A|B) = P(B|A) * P(A) / P(B)。" },
+        ];
         const contentJson = JSON.stringify({
-          blocks: [{ type: "paragraph", text: blockContent }],
+          blocks: noteContentBlocks,
         });
         const [note] = await tx`
           INSERT INTO notes (id, workspace_id, title, source_id, created_by)
@@ -446,6 +454,17 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           )
           RETURNING id
         `;
+
+        // Card Generation V2 reads the normalized source boundary, not only
+        // the note version JSON projection. Keep the seed faithful to the
+        // production note write path so packaged smoke exercises real source
+        // sealing and planner extraction.
+        for (const [ordinal, block] of noteContentBlocks.entries()) {
+          await tx`
+            INSERT INTO note_blocks (id, version_id, workspace_id, ordinal, type, content)
+            VALUES (${randomUUID()}, ${noteVersion.id}, ${workspace.id}, ${ordinal}, ${block.type}, ${block.content})
+          `;
+        }
 
         // 更新笔记的 current_version_id 指向刚创建的版本
         await tx`
@@ -512,6 +531,16 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
           VALUES (gen_random_uuid(), ${workspace.id}, ${cardId}, 1, 1, ${objectiveId}, 1, 'active',
                   ${PUBLIC_PAYLOAD_HASH}, ${REVEAL_PAYLOAD_HASH})
         `;
+        // V2 content topology: preserve the real note/version lineage so the
+        // desktop RoomProjection can expose the shared Note read surface to
+        // both Owner and Member sessions.
+        await tx`
+          INSERT INTO learning_objective_origins_v2
+            (id, workspace_id, origin_id, objective_id, objective_revision_id, origin_kind,
+             note_id, note_version_id, integrity, provenance)
+          VALUES (gen_random_uuid(), ${workspace.id}, gen_random_uuid(), ${objectiveId}, ${objectiveRevisionId}, 'note',
+                  ${note.id}, ${noteVersion.id}, 'verified', '{"source":"e2e-seed"}'::jsonb)
+        `;
         cardIds.push(cardId);
         objectiveIds.push(objectiveId);
       }
@@ -566,29 +595,33 @@ async function seed(args: SeedArgs): Promise<SeedOutput> {
         WHERE id = ${isolatedNote.id}
       `;
 
-      // 6. 创建到期复习计划（owner），用于 review attempt E2E 旅程
+      // 6. 创建到期复习计划（owner + member），用于 First Golden 的
+      // Owner/Member packaged LearningRun 旅程。复习计划是 user-scoped，
+      // 只给 owner 会让 Member 合法地看到空队列，无法覆盖只读成员路径。
       // V2 schema: review_schedules.key_point_id now references
       // learning_objectives_v2.objective_id (V2 alias for key_point_id).
       const scheduleCount = cardIds.length;
-      for (let i = 0; i < scheduleCount; i++) {
-        await tx`
-          INSERT INTO review_schedules (
-            id, workspace_id, user_id, subject_type, subject_id, key_point_id,
-            status, next_review_at, interval_days, generation
-          )
-          VALUES (
-            ${randomUUID()},
-            ${workspace.id},
-            ${owner.id},
-            'card',
-            ${cardIds[i]},
-            ${objectiveIds[i]},
-            'pending',
-            NOW(),
-            1,
-            1
-          )
-        `;
+      for (const scheduleUser of [owner, member]) {
+        for (let i = 0; i < scheduleCount; i++) {
+          await tx`
+            INSERT INTO review_schedules (
+              id, workspace_id, user_id, subject_type, subject_id, key_point_id,
+              status, next_review_at, interval_days, generation
+            )
+            VALUES (
+              ${randomUUID()},
+              ${workspace.id},
+              ${scheduleUser.id},
+              'card',
+              ${objectiveIds[i]},
+              ${objectiveIds[i]},
+              'pending',
+              NOW(),
+              1,
+              1
+            )
+          `;
+        }
       }
 
       // 7. 创建 onboarding 状态：owner 已完成，member 待完成
@@ -810,7 +843,11 @@ async function cleanup(runId: string): Promise<void> {
             WHERE name IN (${workspaceName}, ${isolatedWorkspaceName})
           `;
 
-      // 先清理工作区相关数据（cascade 会处理大部分，但显式删除更安全）
+      // 先清理工作区相关数据（cascade 会处理大部分，但显式删除更安全）。
+      // V2 card rows hold a RESTRICT FK to note_versions, while publication
+      // and objective revision rows are append-only under normal application
+      // traffic. Cleanup is the explicit maintenance path, so enable the
+      // transaction-local migration 0180 bypass before deleting them.
       if (workspaces.length > 0) {
         const wsIds = workspaces.map((w) => w.id);
         // personal_workspace_id points back to workspaces without ON DELETE
@@ -821,6 +858,40 @@ async function cleanup(runId: string): Promise<void> {
           SET personal_workspace_id = NULL
           WHERE personal_workspace_id = ANY(${wsIds})
         `;
+        await tx`SELECT set_config('app.allow_history_mutation', 'on', true)`;
+        await tx`DELETE FROM learning_target_snapshots_v2 WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_run_events WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_run_action_ledger WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_run_idempotency WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM canonical_learning_event_outbox WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM practice_trail_event_outbox WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_run_processing_outbox WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_session_processing_outbox WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_outbox_events WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_assessments WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_artifacts WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_task_drafts WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_task_private_solutions WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_task_safety_reports WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_task_disclosure_profiles WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_task_variants WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_tasks WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_run_private_contracts WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_episodes WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_sessions WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_runs WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_card_publication_revisions_v2 WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_cards_v2 WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_objective_origins_v2 WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_objective_revisions_v2 WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM learning_objectives_v2 WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM search_documents WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM review_schedules WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM onboarding_states WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM note_versions WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM notes WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM sources WHERE workspace_id = ANY(${wsIds})`;
+        await tx`DELETE FROM companion_account_invitations WHERE user_id = ANY(${userIds})`;
         // 删除顺序：先删成员关系，再删工作区（cascade 处理其余）
         await tx`DELETE FROM workspace_members WHERE workspace_id = ANY(${wsIds})`;
         await tx`DELETE FROM workspaces WHERE id = ANY(${wsIds})`;

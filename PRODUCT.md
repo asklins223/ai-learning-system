@@ -1,10 +1,11 @@
 # Product
 
 <!-- impeccable:product-schema 1 -->
+<!-- q0-doc-metadata: status=CURRENT_PRODUCT_TRUTH; version=V1; date=2026-08-23; implementation-freeze=active -->
 
 ## Platform
 
-desktop（macOS / Windows / Linux）；不再提供浏览器端产品
+adaptive（Electron desktop UI，覆盖 macOS / Windows / Linux）；不再提供浏览器端产品
 
 ## Stack
 

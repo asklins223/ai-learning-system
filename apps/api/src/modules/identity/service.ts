@@ -157,7 +157,7 @@ export async function loginWithPassword(
       workspaceId: m.workspaceId,
       workspaceName: ws?.name ?? "未命名工作区",
       role: m.role,
-      workspaceType: ws?.workspaceType ?? "personal",
+      workspaceType: isPersonal ? "personal" : "collaborative",
       isPersonal,
       leftAt: m.leftAt,
     };
@@ -449,7 +449,7 @@ export async function listUserWorkspaces(userId: string): Promise<WorkspaceInfo[
       workspaceId: m.workspaceId,
       workspaceName: ws?.name ?? "未命名工作区",
       role: m.role,
-      workspaceType: ws?.workspaceType ?? "personal",
+      workspaceType: isPersonal ? "personal" : "collaborative",
       isPersonal,
       leftAt: m.leftAt,
     };
