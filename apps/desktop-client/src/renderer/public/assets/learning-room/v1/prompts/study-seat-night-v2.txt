@@ -1,0 +1,7 @@
+Use case: lighting-weather
+Asset type: matching production night backplate for a 2D desktop application
+Input image: Image 1 is the edit target and exact geometry reference.
+Primary request: Change only the time of day and illumination from warm daylight to a calm late-evening study scene.
+Lighting/mood: deep indigo-blue sky beyond the window with a small amount of natural moonlight; the brass desk lamp is switched on and casts one warm, believable pool of amber light across the right half and center of the desk; notebook and card box remain legible; quiet focused nighttime atmosphere, not horror-dark.
+Color palette: deep navy window light, warm brass amber lamp pool, honey oak with cooler shadows, muted sage.
+Constraints: preserve the exact camera, crop, perspective, architecture, positions, proportions, and identity of every object in Image 1. Change only environmental lighting, shadows, sky, reflections, and the lamp's on-state. No new objects, no removed objects, no people, no character, no orb, no UI, no text, no logo, no watermark. Avoid overall black overlay; retain local contrast and material detail.

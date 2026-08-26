@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "defaultMode": "2d",
+  "storageKey": "learning-room.view-mode",
+  "presets": [
+    "room-overview",
+    "desk-focus",
+    "notebook-top",
+    "card-top",
+    "shelf-close",
+    "window-graph",
+    "review-desk"
+  ],
+  "fallback": {
+    "webgl2Failure": "2d",
+    "assetFailure": "2d",
+    "timeoutMs": 5000,
+    "contextLossRecoveryMs": 3000,
+    "lowQualityFps": 24
+  },
+  "sequence": [
+    "dom_actions",
+    "room_light",
+    "lamp_on",
+    "companion_or_fallback",
+    "wait_for_user",
+    "camera_room_to_desk",
+    "notebook_open",
+    "editable_note"
+  ],
+  "preserveFields": [
+    "url",
+    "domainObject",
+    "draft",
+    "selectedObject",
+    "focus",
+    "aiTask",
+    "learningRunId",
+    "completedSteps"
+  ]
+}

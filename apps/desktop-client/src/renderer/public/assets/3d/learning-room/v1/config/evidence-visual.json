@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "objects": [
+    "evidence-note",
+    "source-label",
+    "citation-clip"
+  ],
+  "content": "DOM"
+}

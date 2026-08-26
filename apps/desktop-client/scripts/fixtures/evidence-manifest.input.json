@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "suiteRevision": "qg-01-v1",
+  "environment": {
+    "schemaVersion": 1,
+    "gitCommit": "0000000000000",
+    "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "electronVersion": "43.4.1",
+    "chromiumVersion": "capture-runtime",
+    "nodeVersion": "22.23.2",
+    "os": "macos",
+    "osVersion": "fixture",
+    "arch": "arm64",
+    "viewport": { "width": 1440, "height": 810 },
+    "deviceScaleFactor": 2,
+    "zoomFactor": 1,
+    "locale": "zh-CN",
+    "timezone": "Asia/Shanghai",
+    "theme": "day",
+    "motionMode": "off",
+    "mediaMode": "poster-only",
+    "fontManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "assetManifestSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "seedRevision": "capture-fixture-v1",
+    "apiBuildRevision": "unconfigured",
+    "domainSchemaRevision": "desktop-ipc-m2-2026-08-23"
+  },
+  "gates": [
+    {
+      "id": "EVIDENCE-INFRA-01",
+      "status": "advisory_passed",
+      "evidenceFiles": [
+        {
+          "path": "apps/desktop-client/scripts/fixtures/evidence-fixture.svg",
+          "sha256": "auto"
+        }
+      ]
+    }
+  ],
+  "visualBaselines": ["apps/desktop-client/scripts/fixtures/evidence-fixture.svg"],
+  "knownIssues": [],
+  "redactionsApplied": ["fixture contains no secrets, tokens, cookies, or user content"]
+}

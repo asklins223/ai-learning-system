@@ -1,0 +1,1406 @@
+{
+  "schemaVersion": 1,
+  "revision": 2,
+  "reviewOnly": true,
+  "assetBase": "/assets/3d/learning-room/v1/",
+  "coordinateSystem": {
+    "unit": "meters",
+    "up": "+Y",
+    "forward": "+Z",
+    "handedness": "right-handed"
+  },
+  "entries": [
+    {
+      "id": "P0-ROOM-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/room-shell-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 230580,
+          "sha256": "c41fec5493b26f6218e6c53317026f1f0f337ec6609e6c0d38f8162cedb2ffc5",
+          "loadGroup": "critical",
+          "preload": true
+        },
+        {
+          "path": "models/p0/room-shell-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 36596,
+          "sha256": "218b0b6086f91726801b6959c84a22f47973118f730be63d6e7ea6328645de2a",
+          "loadGroup": "critical",
+          "preload": false
+        },
+        {
+          "path": "models/p0/room-shell-lod2.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 4860,
+          "sha256": "8741e6ba266c58ee9952809c483f3b9b29ba471fbfd03fd68e1358c3d7d063bf",
+          "loadGroup": "critical",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-ROOM-SHELL-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-ROOM-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-DESK-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/desk-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 143404,
+          "sha256": "5595daff539a04de1aff978e3b41180f4b72b586d9386b0464e72a2c30b78686",
+          "loadGroup": "scene",
+          "preload": true
+        },
+        {
+          "path": "models/p0/desk-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 138592,
+          "sha256": "d4db8b1558272e63bd544073c0b787eda41bbede4c69af0632c3bc6491f5881e",
+          "loadGroup": "scene",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-DESK-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-DESK-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-LAMP-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/lamp-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 194040,
+          "sha256": "a26a228ec0bd967cd2197f1051e07ae275c3fb94a813ba1133c7c0b1e474ad09",
+          "loadGroup": "scene",
+          "preload": true
+        },
+        {
+          "path": "models/p0/lamp-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 191828,
+          "sha256": "1cf89f2b28905c0ffb91f5499732dc6950fa7cd3079064c97576b1d52ea4998c",
+          "loadGroup": "scene",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-LAMP-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-THEME-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-WINDOW-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/window-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 223304,
+          "sha256": "fcdd3758c03b53f9d911448bbae5eb1870c0b0069adb6756616e217f8e2f29b6",
+          "loadGroup": "scene",
+          "preload": false
+        },
+        {
+          "path": "models/p0/window-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 212948,
+          "sha256": "cb3b02db01b227d9cf880193d4b23979ae7b217b24c32656a76d63cd251d2c47",
+          "loadGroup": "scene",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-WINDOW-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-ROOM-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-SHELF-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/bookshelf-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 132712,
+          "sha256": "3d09997b7bfc79076665577c98356a259bd11c8c3b4083eb4bb8847387a62967",
+          "loadGroup": "scene",
+          "preload": false
+        },
+        {
+          "path": "models/p0/bookshelf-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 119136,
+          "sha256": "47a96ab99a1370c850b4302b401f87d259bdee96d3e29fa38f4e3832d277968b",
+          "loadGroup": "scene",
+          "preload": false
+        },
+        {
+          "path": "models/p0/bookshelf-lod2.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 118280,
+          "sha256": "7e7156cfeaf21722457e20a1de7c13cf47c18fd63a3445d3542be3d560dbe8b7",
+          "loadGroup": "scene",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-SHELF-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-SHELF-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-NOTEBOOK-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/notebook-looseleaf-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 13834252,
+          "sha256": "3893c73c1c62d6b5401f14f4a58ac31ee3bb52d13cbcd2c277adf1f8b3ade2fa",
+          "loadGroup": "workflow",
+          "preload": false
+        },
+        {
+          "path": "models/p0/notebook-looseleaf-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 7851628,
+          "sha256": "77de980a162d08748948f31ea5271d05cf1c0f08fedeb5f2b4075c0f3b46a2c5",
+          "loadGroup": "workflow",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-NOTEBOOK-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-NOTE-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-ORB-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/companion-orb-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 212188,
+          "sha256": "dbc22b1c8b5c87bca736a51e6fa8c9f42351c32e898bac69aa765ca058a37482",
+          "loadGroup": "character",
+          "preload": false
+        },
+        {
+          "path": "models/p0/companion-orb-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 184756,
+          "sha256": "5d23702c84bbab3c7a6632d272f1af347883e6d41051e73b102cbf3a6e0216af",
+          "loadGroup": "character",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-ORB-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-ORB-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-HUMANOID-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/companion-humanoid-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 1424280,
+          "sha256": "b48d2d0bc757e6e180c793fedfbe8639223a39ed54a8bf5c0dc747fbaa28d9ca",
+          "loadGroup": "character",
+          "preload": false
+        },
+        {
+          "path": "models/p0/companion-humanoid-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 1410340,
+          "sha256": "e296cb00a35f5e91bd16e0eb0a6ad7cd7e786be89937a68acc1d7c4bce7b5636",
+          "loadGroup": "character",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-HUMANOID-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-ORB-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-CARD-BOX-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/card-box-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 173376,
+          "sha256": "489e3116f1c7058eccc21b3595b6cffad0f27601790f3480649f6c7c46eea485",
+          "loadGroup": "workflow",
+          "preload": false
+        },
+        {
+          "path": "models/p0/card-box-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 146428,
+          "sha256": "08d1dc2eeac91804a4d8d531b30a5f2a388d2764b0622045d9c15b2ec4f3c0a8",
+          "loadGroup": "workflow",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-CARD-BOX-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-CARD-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-CALENDAR-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/review-calendar-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 210916,
+          "sha256": "85c93c279249bf7a378a3c07bf25764f352128e414855ca392ec5ec2be160bac",
+          "loadGroup": "workflow",
+          "preload": false
+        },
+        {
+          "path": "models/p0/review-calendar-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 199888,
+          "sha256": "9d1ce6da0880c99603da66fb2e13b34fa0d9c6bdb737ce5388fd54d0cf6ad8f7",
+          "loadGroup": "workflow",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-CALENDAR-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-REVIEW-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-REVIEW-TRAY-01",
+      "kind": "model",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p0/review-tray-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 143164,
+          "sha256": "829d8e9f521f73ef2eb72834a4b3d9284a4673e186f62b8659c53c25df533723",
+          "loadGroup": "workflow",
+          "preload": false
+        },
+        {
+          "path": "models/p0/review-tray-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 129404,
+          "sha256": "9d0fa6e2f6ab0179e028fc169afd9a55b4cb485de740b52e9820f5a4ada2f928",
+          "loadGroup": "workflow",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-REVIEW-TRAY-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-REVIEW-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P4-DRAWER-01",
+      "kind": "model",
+      "priority": "P4",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "models/p4/drawer-capture-lod0.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 551768,
+          "sha256": "374c3a00076f74409dc921b8f79c84e63c34166bc7e87060bbc321ff9742a8ed",
+          "loadGroup": "optional",
+          "preload": false
+        },
+        {
+          "path": "models/p4/drawer-capture-lod1.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 545880,
+          "sha256": "0b869282b65379dd43ad877e02ce8203fcc42eb3793661334254b855871716e6",
+          "loadGroup": "optional",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-DRAWER-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-DRAWER-01",
+      "extensionsRequired": [
+        "EXT_meshopt_compression"
+      ],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-HUMANOID-ANIM-01",
+      "kind": "animation",
+      "priority": "P0",
+      "owner": "3D",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "animations/p0/companion-humanoid-core.glb",
+          "mimeType": "model/gltf-binary",
+          "bytes": 126688,
+          "sha256": "74cc5c9cec35409f4f93f4ce7a8aa910736a44ffd63e306cb773ef0a4924cd21",
+          "loadGroup": "character",
+          "preload": false
+        }
+      ],
+      "references": [
+        "REF-HUMANOID-01"
+      ],
+      "dependencies": [
+        "P0-HUMANOID-01"
+      ],
+      "fallback": "FB-ORB-01",
+      "animations": [
+        {
+          "name": "humanoid_idle",
+          "loop": true,
+          "durationMs": 1000
+        }
+      ],
+      "extensionsRequired": [],
+      "license": "Owner-provided/generated asset; release license review pending"
+    },
+    {
+      "id": "P0-STICKY-01",
+      "kind": "texture",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "textures/p0/sticky-note-base.webp",
+          "mimeType": "image/webp",
+          "bytes": 52996,
+          "sha256": "5c1cbc66b33755c8fadf1881d46fc22d14fa6c3f0d27d946fa325cb6867083d7",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1024,
+          "height": 1024,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE"
+        }
+      ],
+      "sourceIds": [
+        "STATIC-PAPER-05"
+      ],
+      "dependencies": [],
+      "fallback": "FB-STATUS-01",
+      "extensionsRequired": [],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "P0-NOTE-PAGES-01",
+      "kind": "texture",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "textures/p0/notebook-pages.webp",
+          "mimeType": "image/webp",
+          "bytes": 40606,
+          "sha256": "8a9f3c0dcd987521b7dace9bd3b57933499194dba159ed54d4e9704aed6273a6",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1024,
+          "height": 1024,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE"
+        }
+      ],
+      "sourceIds": [
+        "STATIC-PAPER-02",
+        "STATIC-PAPER-03"
+      ],
+      "dependencies": [],
+      "fallback": "FB-NOTE-01",
+      "extensionsRequired": [],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "P0-CARD-01",
+      "kind": "texture",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "textures/p0/learning-card-base.webp",
+          "mimeType": "image/webp",
+          "bytes": 62920,
+          "sha256": "3cb98f5adac8a091859528b77da433b6da0930cdc6543157ddff135a4c3dcb2c",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1024,
+          "height": 1024,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE"
+        }
+      ],
+      "sourceIds": [
+        "STATIC-PAPER-04"
+      ],
+      "dependencies": [],
+      "fallback": "FB-CARD-01",
+      "extensionsRequired": [],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "P0-ANSWER-01",
+      "kind": "texture",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "textures/p0/answer-sheet-base.webp",
+          "mimeType": "image/webp",
+          "bytes": 45854,
+          "sha256": "2eee0e557cf9595b5b65753f0d5dc3e862d016437a6253d3103cdb548bebb280",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1024,
+          "height": 1024,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE"
+        }
+      ],
+      "sourceIds": [
+        "STATIC-PAPER-03"
+      ],
+      "dependencies": [],
+      "fallback": "FB-VERIFY-01",
+      "extensionsRequired": [],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "P0-SOURCE-FOLDER-01",
+      "kind": "texture",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "textures/p0/source-folder-base.webp",
+          "mimeType": "image/webp",
+          "bytes": 65286,
+          "sha256": "58cc0f9d7f47364e73daccfa3af11c8b853f739a4967c45c90b9753c242e043b",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1024,
+          "height": 1024,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE"
+        }
+      ],
+      "sourceIds": [
+        "STATIC-PAPER-01"
+      ],
+      "dependencies": [],
+      "fallback": "FB-SOURCE-01",
+      "extensionsRequired": [],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "P0-SCENE-01",
+      "kind": "config",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "config/scene-p0.json",
+          "mimeType": "application/json",
+          "bytes": 2636,
+          "sha256": "593798cba46a1fcd601f8f6174ea0fa6c372a96638be6a4a0d23067d4873504e",
+          "loadGroup": "critical",
+          "preload": true
+        }
+      ],
+      "references": [],
+      "dependencies": [
+        "P0-ROOM-01",
+        "P0-DESK-01",
+        "P0-LAMP-01",
+        "P0-WINDOW-01",
+        "P0-SHELF-01",
+        "P0-ORB-01"
+      ],
+      "fallback": "FB-ROOM-01",
+      "extensionsRequired": [],
+      "license": "Project-owned configuration"
+    },
+    {
+      "id": "P0-FLOW-01",
+      "kind": "config",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "config/flow-p0.json",
+          "mimeType": "application/json",
+          "bytes": 752,
+          "sha256": "dc8470880ec0682b0ef88d9ce33d73e2bc3c5e839d313e2aa72175a09394fb45",
+          "loadGroup": "critical",
+          "preload": true
+        }
+      ],
+      "references": [],
+      "dependencies": [
+        "P0-NOTEBOOK-01",
+        "P0-CARD-01",
+        "P0-ANSWER-01"
+      ],
+      "fallback": "FB-ROOM-01",
+      "extensionsRequired": [],
+      "license": "Project-owned configuration"
+    },
+    {
+      "id": "FB-ROOM-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/room-day.webp",
+          "mimeType": "image/webp",
+          "bytes": 39498,
+          "sha256": "457eeacb83a8e9830db0b461e7c15fc37a1a5c0daad74103f2d820ac95dfca5a",
+          "loadGroup": "critical",
+          "preload": true,
+          "width": 1672,
+          "height": 941,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "themePair": "room-day-night",
+          "registrationAnchors": [
+            {
+              "name": "top_left",
+              "u": 0.08,
+              "v": 0.08
+            },
+            {
+              "name": "top_right",
+              "u": 0.92,
+              "v": 0.08
+            },
+            {
+              "name": "bottom_left",
+              "u": 0.08,
+              "v": 0.92
+            },
+            {
+              "name": "bottom_right",
+              "u": 0.92,
+              "v": 0.92
+            },
+            {
+              "name": "window_left",
+              "u": 0.24,
+              "v": 0.38
+            },
+            {
+              "name": "window_right",
+              "u": 0.76,
+              "v": 0.38
+            },
+            {
+              "name": "horizon_left",
+              "u": 0.24,
+              "v": 0.58
+            },
+            {
+              "name": "horizon_right",
+              "u": 0.76,
+              "v": 0.58
+            }
+          ]
+        },
+        {
+          "path": "fallback/room-night.webp",
+          "mimeType": "image/webp",
+          "bytes": 21230,
+          "sha256": "35e7475cbd8fca52e0ac4dd967b9f91cdfdea0009ff3fb2d02b480e507772cf8",
+          "loadGroup": "critical",
+          "preload": true,
+          "width": 1672,
+          "height": 941,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "themePair": "room-day-night",
+          "registrationAnchors": [
+            {
+              "name": "top_left",
+              "u": 0.08,
+              "v": 0.08
+            },
+            {
+              "name": "top_right",
+              "u": 0.92,
+              "v": 0.08
+            },
+            {
+              "name": "bottom_left",
+              "u": 0.08,
+              "v": 0.92
+            },
+            {
+              "name": "bottom_right",
+              "u": 0.92,
+              "v": 0.92
+            },
+            {
+              "name": "window_left",
+              "u": 0.24,
+              "v": 0.38
+            },
+            {
+              "name": "window_right",
+              "u": 0.76,
+              "v": 0.38
+            },
+            {
+              "name": "horizon_left",
+              "u": 0.24,
+              "v": 0.58
+            },
+            {
+              "name": "horizon_right",
+              "u": 0.76,
+              "v": 0.58
+            }
+          ]
+        }
+      ],
+      "sourceIds": [
+        "STATIC-ROOM-01",
+        "STATIC-ROOM-02"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/",
+        "/today"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-DESK-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/desk.webp",
+          "mimeType": "image/webp",
+          "bytes": 70146,
+          "sha256": "82ad6de006b5ef126480d2639510c15297d8f04a3c0684208b942e024d151c0a",
+          "loadGroup": "scene",
+          "preload": false,
+          "width": 1672,
+          "height": 941,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-DESK-02"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/today"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-NOTE-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/notebook.webp",
+          "mimeType": "image/webp",
+          "bytes": 19208,
+          "sha256": "28e0e565d1bb9a5914eabc35c236e6fdac41278190d04019a37b7e93b875892b",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1448,
+          "height": 1086,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-NOTE-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/notes/[id]"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-CARD-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/card-box.webp",
+          "mimeType": "image/webp",
+          "bytes": 44396,
+          "sha256": "4c8bd38f1989675b203f0d3676a39b163452e69d1f30582b01a7261e9d826a8a",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1254,
+          "height": 1254,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-CARD-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/cards",
+        "/learning-cards/[cardId]"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-VERIFY-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/answer-sheet.webp",
+          "mimeType": "image/webp",
+          "bytes": 18096,
+          "sha256": "e550f91836430c2c7585ead426a6a978f8ac1654c99d367b42f5d6575de3606d",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1086,
+          "height": 1448,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-VERIFY-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/learning-runs/new"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-REVIEW-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/review-calendar.webp",
+          "mimeType": "image/webp",
+          "bytes": 46456,
+          "sha256": "ca7d441ebaf418e4c5e9457aa00c243bd761442ef083eb5d66167dc3eb3dbee3",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1254,
+          "height": 1254,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-REVIEW-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/review"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-SHELF-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/shelf.webp",
+          "mimeType": "image/webp",
+          "bytes": 30926,
+          "sha256": "4f7aa61d5b1fab30a7c2003e36bae6793fc0545c03dfeb63089b13383f46c1bf",
+          "loadGroup": "scene",
+          "preload": false,
+          "width": 1448,
+          "height": 1086,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-SHELF-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/notes",
+        "/sources"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-SOURCE-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/source-folder.webp",
+          "mimeType": "image/webp",
+          "bytes": 55612,
+          "sha256": "4a061356285ba90f604eb6b041afcb20f0b23a162cbf920d08ad8775a948334f",
+          "loadGroup": "workflow",
+          "preload": false,
+          "width": 1254,
+          "height": 1254,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-SOURCE-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/sources",
+        "/sources/[id]"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-GRAPH-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/window-graph-night.webp",
+          "mimeType": "image/webp",
+          "bytes": 17926,
+          "sha256": "8f299446077889505a20f7d58d9b3605b1064e764ab7bbcdc89eeec6673eef67",
+          "loadGroup": "scene",
+          "preload": false,
+          "width": 1672,
+          "height": 941,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-WINDOW-02"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/graph"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-ORB-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/companion-orb.webp",
+          "mimeType": "image/webp",
+          "bytes": 203050,
+          "sha256": "331108156d357315ba00170bcf261b494d2582da5ad8c489c3411fb0585f6d27",
+          "loadGroup": "character",
+          "preload": false,
+          "width": 1254,
+          "height": 1254,
+          "colorSpace": "srgb",
+          "alphaMode": "BLEND",
+          "safeArea": {
+            "x": 0.06,
+            "y": 0.06,
+            "width": 0.88,
+            "height": 0.88
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-PET-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "companion"
+      ],
+      "license": "Project-generated derivative from project-owned visual source"
+    },
+    {
+      "id": "FB-ROOM-FURNISHED-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/room-furnished-day.webp",
+          "mimeType": "image/webp",
+          "bytes": 938424,
+          "sha256": "8c500ded18bc85f7850fdabfe1e1f29910caa1d30e1e315029a8b3c36827dc45",
+          "loadGroup": "critical",
+          "preload": true,
+          "width": 3344,
+          "height": 1882,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "themePair": "room-furnished-user-day-night",
+          "registrationStatus": "IN_REVIEW"
+        },
+        {
+          "path": "fallback/room-furnished-night.webp",
+          "mimeType": "image/webp",
+          "bytes": 699554,
+          "sha256": "39fcb05cf7844b14260c5df1b72a3de2dafb247b27950b1c069f71dfa45a261c",
+          "loadGroup": "critical",
+          "preload": true,
+          "width": 3344,
+          "height": 1882,
+          "colorSpace": "srgb",
+          "alphaMode": "OPAQUE",
+          "safeArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "themePair": "room-furnished-user-day-night",
+          "registrationStatus": "IN_REVIEW"
+        }
+      ],
+      "sourceIds": [
+        "STATIC-ROOM-FURNISHED-DAY-USER-2X-01",
+        "STATIC-ROOM-FURNISHED-NIGHT-USER-2X-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "/"
+      ],
+      "license": "User-provided upscaled visual sources; authorship and release-rights review pending"
+    },
+    {
+      "id": "FB-COMPANION-ROOM-SPRITE-01",
+      "kind": "fallback",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [
+        {
+          "path": "fallback/companion-orb-room.webp",
+          "mimeType": "image/webp",
+          "bytes": 143948,
+          "sha256": "7b648d5f2f6d7e15e6894af7abe0127f9801c86d7c03d3c6c3ec52f63073703c",
+          "loadGroup": "critical",
+          "preload": true,
+          "width": 1328,
+          "height": 1184,
+          "colorSpace": "srgb",
+          "alphaMode": "BLEND",
+          "safeArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          },
+          "cropAnchor": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ],
+      "sourceIds": [
+        "STATIC-COMPANION-ROOM-SPRITE-01"
+      ],
+      "dependencies": [],
+      "routes": [
+        "companion"
+      ],
+      "license": "OpenAI image_gen derivative of a design reference; upstream source and release-rights review pending"
+    },
+    {
+      "id": "FB-DRAWER-01",
+      "kind": "behavior",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [],
+      "behavior": {
+        "actions": [
+          "quick_capture",
+          "archive",
+          "history",
+          "recent"
+        ],
+        "routes": [
+          "/",
+          "/notes?view=archive",
+          "/notes/[id]?panel=history",
+          "/notes?filter=recent"
+        ],
+        "preserveFields": [
+          "url",
+          "domainObject",
+          "draft",
+          "selectedObject",
+          "focus",
+          "aiTask",
+          "learningRunId",
+          "completedSteps"
+        ],
+        "accessibleDescription": "DOM path remains authoritative when the visual layer is unavailable."
+      },
+      "license": "Project-owned behavior contract"
+    },
+    {
+      "id": "FB-THEME-01",
+      "kind": "behavior",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [],
+      "behavior": {
+        "actions": [
+          "set_day",
+          "set_night"
+        ],
+        "routes": [
+          "/",
+          "/today"
+        ],
+        "preserveFields": [
+          "url",
+          "domainObject",
+          "draft",
+          "selectedObject",
+          "focus",
+          "aiTask",
+          "learningRunId",
+          "completedSteps"
+        ],
+        "accessibleDescription": "DOM path remains authoritative when the visual layer is unavailable."
+      },
+      "license": "Project-owned behavior contract"
+    },
+    {
+      "id": "FB-STATUS-01",
+      "kind": "behavior",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [],
+      "behavior": {
+        "actions": [
+          "render_status"
+        ],
+        "routes": [
+          "/",
+          "/today"
+        ],
+        "preserveFields": [
+          "url",
+          "domainObject",
+          "draft",
+          "selectedObject",
+          "focus",
+          "aiTask",
+          "learningRunId",
+          "completedSteps"
+        ],
+        "accessibleDescription": "DOM path remains authoritative when the visual layer is unavailable."
+      },
+      "license": "Project-owned behavior contract"
+    },
+    {
+      "id": "FB-HIDE-01",
+      "kind": "behavior",
+      "priority": "P0",
+      "owner": "FE",
+      "status": "IN_REVIEW",
+      "files": [],
+      "behavior": {
+        "actions": [
+          "hide_decorative_asset"
+        ],
+        "routes": [
+          "*"
+        ],
+        "preserveFields": [
+          "url",
+          "domainObject",
+          "draft",
+          "selectedObject",
+          "focus",
+          "aiTask",
+          "learningRunId",
+          "completedSteps"
+        ],
+        "accessibleDescription": "DOM path remains authoritative when the visual layer is unavailable."
+      },
+      "license": "Project-owned behavior contract"
+    }
+  ],
+  "acceptance": {
+    "state": "IN_REVIEW",
+    "blockers": [
+      "KTX2 encoder not installed; WebP review textures are used",
+      "P0 model geometry and animation QA pending",
+      "Electron/offline smoke test pending",
+      "User-provided furnished room sources and companion sprite require authorship and release-rights review",
+      "Furnished room WebP files exceed the current fallback single-file and first-scene transfer budgets"
+    ]
+  }
+}

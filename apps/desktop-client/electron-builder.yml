@@ -1,0 +1,41 @@
+appId: com.asklins.ailearn
+productName: AI Learn
+copyright: Copyright © 2026 AI Learn
+
+directories:
+  output: release
+
+files:
+  - out/**/*
+  # Defense in depth: production renderer builds already omit these archives.
+  # Keep the package boundary explicit if an externally supplied out/ is used.
+  - '!out/renderer/assets/3d{,/**/*}'
+  - '!out/renderer/assets/companion/live2d-v1{,/**/*}'
+  - '!out/renderer/assets/companion/vendor{,/**/*}'
+  - package.json
+
+asar: true
+compression: maximum
+
+mac:
+  category: public.app-category.education
+  target:
+    - dmg
+    - zip
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+linux:
+  category: Education
+  target:
+    - AppImage
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}

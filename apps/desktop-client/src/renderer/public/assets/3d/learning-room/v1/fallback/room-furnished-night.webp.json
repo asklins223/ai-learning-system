@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "asset": {
+    "path": "fallback/room-furnished-night.webp",
+    "mimeType": "image/webp",
+    "bytes": 699554,
+    "sha256": "39fcb05cf7844b14260c5df1b72a3de2dafb247b27950b1c069f71dfa45a261c",
+    "width": 3344,
+    "height": 1882,
+    "colorSpace": "sRGB",
+    "alphaMode": "OPAQUE"
+  },
+  "provenance": {
+    "kind": "encoded runtime derivative",
+    "prompt": null,
+    "promptStatus": "NOT_APPLICABLE: the master is a user-provided upscaled source, not an ImageGen output.",
+    "source": {
+      "path": "docs/design/assets/static/room-furnished-night-user-2x-v1.png",
+      "mimeType": "image/png",
+      "bytes": 7761717,
+      "sha256": "7f4ee13ac31b3ec52e541b3a5e40ad6208cfdc292eedc356d6bd550799d6ba29",
+      "width": 3344,
+      "height": 1882,
+      "sidecar": "docs/design/assets/static/room-furnished-night-user-2x-v1.png.json",
+      "origin": "user-provided upscale.media export copied byte-for-byte into the repository"
+    },
+    "encoder": {
+      "name": "sharp",
+      "version": "0.35.3",
+      "libvipsVersion": "8.18.3",
+      "libwebpVersion": "1.6.0",
+      "operation": "sharp(input).webp(options).toFile(output)",
+      "options": {
+        "quality": 95,
+        "effort": 6,
+        "smartSubsample": true
+      }
+    },
+    "encodedAt": "2026-08-21T10:11:07+08:00",
+    "timestampSource": "output file modification time",
+    "reproducibility": {
+      "status": "BYTE_IDENTICAL",
+      "verifiedAt": "2026-08-21",
+      "note": "Re-encoding the recorded PNG with the recorded sharp options produced the exact runtime byte count and SHA-256."
+    }
+  },
+  "review": {
+    "reviewOnly": true,
+    "status": "IN_REVIEW",
+    "sourceProvenance": "PARTIAL",
+    "releaseApproval": false,
+    "note": "This runtime derivative inherits the user-provided master's unresolved upstream authorship and release-rights review."
+  }
+}

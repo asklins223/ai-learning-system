@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "asset": {
+    "path": "fallback/companion-orb-room.webp",
+    "mimeType": "image/webp",
+    "bytes": 143948,
+    "sha256": "7b648d5f2f6d7e15e6894af7abe0127f9801c86d7c03d3c6c3ec52f63073703c",
+    "width": 1328,
+    "height": 1184,
+    "colorSpace": "sRGB",
+    "alphaMode": "BLEND"
+  },
+  "provenance": {
+    "kind": "encoded runtime derivative",
+    "source": {
+      "path": "docs/design/assets/static/companion-orb-room-sprite-v1.png",
+      "mimeType": "image/png",
+      "bytes": 1464265,
+      "sha256": "7dd037e2d7c214d57421be03fe042d50546a40718e49473b2a5adb8f0c8e39b9",
+      "width": 1328,
+      "height": 1184,
+      "sidecar": "docs/design/assets/static/companion-orb-room-sprite-v1.png.json"
+    },
+    "upstream": {
+      "tool": {
+        "name": "OpenAI image_gen",
+        "operation": "image edit / background extraction",
+        "version": "not exposed by the tool"
+      },
+      "input": {
+        "role": "Image 1",
+        "path": "docs/design/assets/3d-reference/room-overview-v1.png",
+        "bytes": 1788796,
+        "sha256": "239ca877c6b51db2fe11e66aaef420517bea9617fca1859f9bdf6f0d9d0bcfeb"
+      },
+      "prompt": "Use case: background-extraction\nAsset type: transparent animated companion sprite for a desktop hybrid 3D learning-room scene\nInput image: Image 1 is the source and exact subject reference.\nPrimary request: isolate only the small glowing blue-white round companion character and its small dark circular pedestal from the desktop near the brass lamp.\nComposition/framing: preserve the companion's exact front three-quarter appearance, proportions, face, soft cyan glow, tiny sparkles, and pedestal. Center the isolated subject with tight but safe transparent padding.\nStyle/medium: preserve the same warm hand-painted 3D illustration rendering as the source.\nConstraints: genuinely transparent background with alpha; no desk, lamp, notebook, paper, room, shadow rectangle, text, watermark, extra character, or new ornament. Preserve soft semi-transparent outer glow without a white or dark halo."
+    },
+    "encoder": {
+      "name": "sharp",
+      "version": "0.35.3",
+      "libvipsVersion": "8.18.3",
+      "libwebpVersion": "1.6.0",
+      "operation": "sharp(input).webp(options).toFile(output)",
+      "options": {
+        "quality": 90,
+        "alphaQuality": 100,
+        "effort": 4,
+        "smartSubsample": true
+      }
+    },
+    "encodedAt": "2026-08-21T08:37:19+08:00",
+    "timestampSource": "output file modification time",
+    "reproducibility": {
+      "status": "BYTE_IDENTICAL",
+      "verifiedAt": "2026-08-21",
+      "note": "Re-encoding the recorded PNG with the recorded sharp options produced the exact runtime byte count and SHA-256."
+    }
+  },
+  "review": {
+    "reviewOnly": true,
+    "status": "IN_REVIEW",
+    "sourceProvenance": "INCOMPLETE",
+    "releaseApproval": false,
+    "note": "This encoded derivative inherits the source asset's unresolved authorship and release-license review."
+  }
+}

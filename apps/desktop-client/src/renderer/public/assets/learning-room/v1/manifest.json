@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "id": "ailearn-learning-room-v1",
+  "canonicalMode": "2d",
+  "reviewStatus": "changes-required-study-review-samples-v5",
+  "basePath": "/assets/learning-room/v1",
+  "posters": {
+    "day": {
+      "id": "STATIC-ROOM-FURNISHED-DAY-01",
+      "path": "posters/room-day.webp",
+      "width": 3344,
+      "height": 1882,
+      "sha256": "8c500ded18bc85f7850fdabfe1e1f29910caa1d30e1e315029a8b3c36827dc45"
+    },
+    "night": {
+      "id": "STATIC-ROOM-FURNISHED-NIGHT-01",
+      "path": "posters/room-night.webp",
+      "width": 3344,
+      "height": 1882,
+      "sha256": "39fcb05cf7844b14260c5df1b72a3de2dafb247b27950b1c069f71dfa45a261c"
+    }
+  },
+  "seatPosters": {
+    "day": {
+      "id": "STATIC-STUDY-SEAT-DAY-02",
+      "path": "posters/study-seat-day-v2.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "69e2642de42b9cf62cca3e6b2318e1abea9017ef5da1af92bf275a8edd3f7fad"
+    },
+    "night": {
+      "id": "STATIC-STUDY-SEAT-NIGHT-02",
+      "path": "posters/study-seat-night-v2.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "8b5102a81f189ccf45a18bbd39a67eeb57800d2e8fc6336bc0a26feef89679c1"
+    }
+  },
+  "reviewPosters": {
+    "day": {
+      "id": "STATIC-REVIEW-SEAT-DAY-01",
+      "path": "posters/review-seat-day-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "0ce8a05edfcf968838e83c1ba73201b97b0808277e404bdb2354cfcdbd7424f5"
+    },
+    "night": {
+      "id": "STATIC-REVIEW-SEAT-NIGHT-01",
+      "path": "posters/review-seat-night-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "9534c2dc35fe782e7ae2b200a540720236618e023ef2d807c35a6dc5c2c5257f"
+    }
+  },
+  "window": {
+    "mask": "masks/window-glass-mask-v1.svg",
+    "registration": {
+      "left": 0.693,
+      "top": 0.047,
+      "width": 0.147,
+      "height": 0.408
+    },
+    "day": {
+      "id": "MOTION-WINDOW-DAY-02",
+      "path": "motion/window-day-vertical-fit-v1.mp4",
+      "sourcePath": "motion/window-day-loop-v2.mp4",
+      "mimeType": "video/mp4",
+      "codec": "avc1",
+      "width": 462,
+      "height": 720,
+      "durationMs": 10042,
+      "fps": 24,
+      "loop": true,
+      "hasEmbeddedAudio": true,
+      "runtimeMuted": true,
+      "sha256": "f121dfd3e4901ab1e1671032bf80f8d7fa589e05264ae53bf1dd1d417311466c",
+      "derivation": {
+        "sourceWidth": 1280,
+        "sourceHeight": 720,
+        "crop": { "left": 640, "top": 0, "width": 462, "height": 720 },
+        "perspective": { "topLeftY": 32, "topRightY": 0, "bottomLeftY": 716, "bottomRightY": 720 }
+      },
+      "reviewStatus": "approved"
+    },
+    "night": {
+      "id": "MOTION-WINDOW-NIGHT-02",
+      "path": "motion/window-night-vertical-fit-v1.mp4",
+      "sourcePath": "motion/window-night-loop-v2.mp4",
+      "mimeType": "video/mp4",
+      "codec": "avc1",
+      "width": 462,
+      "height": 720,
+      "durationMs": 10042,
+      "fps": 24,
+      "loop": true,
+      "hasEmbeddedAudio": true,
+      "runtimeMuted": true,
+      "sha256": "257972a3cca222ca91828b6ff680d08a3a2cebe2bd7a0c251b0394a8f7f09d24",
+      "derivation": {
+        "sourceWidth": 1280,
+        "sourceHeight": 720,
+        "crop": { "left": 640, "top": 0, "width": 462, "height": 720 },
+        "perspective": { "topLeftY": 32, "topRightY": 0, "bottomLeftY": 716, "bottomRightY": 720 }
+      },
+      "reviewStatus": "approved"
+    }
+  },
+  "onboarding": {
+    "id": "MOTION-ONBOARDING-FIRST-ENTRY-01",
+    "path": "motion/onboarding-first-entry-v1.mp4",
+    "mimeType": "video/mp4",
+    "width": 1920,
+    "height": 1080,
+    "durationMs": 8042,
+    "hasEmbeddedAudio": true,
+    "sha256": "47d4cb81965814ea9bd3e236f030671616ff919390c2dbf619658e659c5d79a8",
+    "caption": "欢迎来到理解书房。点击桌上的研究册，写下第一个想真正弄懂的问题吧。",
+    "reviewStatus": "approved"
+  },
+  "companion": {
+    "id": "STATIC-COMPANION-ORB-01",
+    "path": "objects/companion-orb.webp",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "331108156d357315ba00170bcf261b494d2582da5ad8c489c3411fb0585f6d27"
+  },
+  "graph": {
+    "poster": "graph/graph-entry-background-v1.avif",
+    "motionImplementation": "code"
+  },
+  "validation": {
+    "motionImplementation": "code"
+  },
+  "sound": {
+    "ambientDay": null,
+    "ambientNight": null,
+    "onboardingVoice": "audio/onboarding-first-entry-zh-CN-v1.m4a",
+    "onboardingCaptions": "captions/onboarding-first-entry-zh-CN-v1.vtt"
+  },
+  "objects": {
+    "desk": "objects/desk.webp",
+    "notebook": "objects/notebook.webp",
+    "cardBox": "objects/card-box.webp",
+    "reviewCalendar": "objects/review-calendar.webp",
+    "answerSheet": "objects/answer-sheet.webp",
+    "shelf": "objects/shelf.webp",
+    "sourceFolder": "objects/source-folder.webp",
+    "sceneCardStack": "objects/scene-card-stack-v2.png",
+    "studyOpenNotebook": "objects/study-open-notebook-v1.png"
+  },
+  "textures": {
+    "notebook": "textures/notebook-pages.webp",
+    "card": "textures/learning-card.webp",
+    "answer": "textures/answer-sheet.webp",
+    "stickyNote": "textures/sticky-note.webp",
+    "sourceFolder": "textures/source-folder.webp",
+    "scenePaperFibres": "textures/scene-paper-fibres-v2.png"
+  }
+}

@@ -1,0 +1,9 @@
+Use case: stylized-concept
+Asset type: production 2D desktop application scene backplate, widescreen 16:9
+Input image: Image 1 is the current learning-room artwork and palette reference; preserve its mature hand-painted warm wood / soft watercolor rendering language, but do NOT preserve its room-overview camera.
+Primary request: Recompose the same learning room from the learner's seated first-person eye-level viewpoint, as if the viewer is already sitting in the chair at the desk. The desk fills the bottom 34% in convincing perspective. Directly ahead is a large wooden window and softly sunlit landscape. A brass articulated desk lamp stands on the right side of the desk and must be visually distinct enough to receive a transparent HTML interaction hotspot. An open notebook rests near center-left, a small wooden review card box and a few learning cards rest on the left, a pencil cup and ceramic mug add quiet realism. Leave a clean, believable desk area just left of the lamp for an interactive AI companion overlay.
+Composition/framing: fixed camera, immersive seated view, 16:9 landscape; foreground desk edge visible; window is the main depth anchor; small side shelf glimpses only at far edges; no chair visible; do not present the whole room.
+Lighting/mood: calm late-afternoon daylight, soft volumetric sun, warm but clear, enough contrast for overlaid UI without a dark screen-wide tint.
+Color palette: honey oak, warm ivory plaster, sage green, muted teal-blue sky, restrained brass.
+Materials/textures: real wood grain, matte paper, aged brass, soft linen curtain, subtle painterly texture.
+Constraints: background art only; no people, no character, no orb, no Live2D figure, no interface panels, no cards used as UI, no text, no logos, no watermark. Keep all physical objects grounded in one coherent perspective. Avoid top-down view, isometric view, empty wooden tabletop, room overview, dashboard aesthetic, heavy vignette, screen-wide mask.

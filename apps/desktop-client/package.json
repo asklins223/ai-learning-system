@@ -1,0 +1,47 @@
+{
+  "name": "ailearn-desktop-client",
+  "version": "0.1.0",
+  "description": "AI Learn immersive desktop study room",
+  "private": true,
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false",
+    "test": "vitest run --passWithNoTests",
+    "capture": "node scripts/capture-scene.mjs",
+    "capture:review-layout": "npm run build && node scripts/capture-review-layout.mjs",
+    "capture:evidence": "npm run build && node scripts/capture-evidence.mjs",
+    "evidence:manifest": "node --experimental-strip-types scripts/evidence-manifest.ts --input scripts/fixtures/evidence-manifest.input.json --output .impeccable/evidence/manifest.json --root ../..",
+    "package:smoke": "node scripts/smoke-packaged.mjs",
+    "package:evidence": "npm run package:smoke && node scripts/package-evidence.mjs",
+    "preview": "electron-vite preview",
+    "dist": "npm run typecheck && npm run test && npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@ailearn/shared": "file:../../packages/shared",
+    "@fontsource-variable/noto-sans-sc": "^5.3.0",
+    "@fontsource-variable/noto-serif-sc": "^5.3.0",
+    "@gsap/react": "^2.1.2",
+    "gsap": "^3.15.0",
+    "lucide-react": "^1.33.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^3.23.8",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "dotenv": "^16.4.7",
+    "electron": "43.4.1",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.11"
+  }
+}

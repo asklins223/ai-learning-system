@@ -1,0 +1,440 @@
+.desktop-access-gate {
+  position: absolute;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  min-width: 0;
+  min-height: 100%;
+  align-content: center;
+  justify-items: center;
+  padding: max(78px, 9vh) clamp(16px, 5vw, 72px) clamp(28px, 6vh, 64px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  color: #3f3027;
+  background:
+    linear-gradient(90deg, rgba(91, 66, 46, 0.04) 1px, transparent 1px) 0 0 / 72px 72px,
+    linear-gradient(rgba(91, 66, 46, 0.035) 1px, transparent 1px) 0 0 / 72px 72px,
+    url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 430px 430px repeat,
+    #d8c8ae;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  isolation: isolate;
+}
+
+.desktop-access-gate::before,
+.desktop-access-gate::after {
+  position: fixed;
+  z-index: -2;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+}
+
+.desktop-access-gate__drag-region {
+  position: fixed;
+  z-index: 4;
+  top: 0;
+  right: 82px;
+  left: 74px;
+  height: 42px;
+  -webkit-app-region: drag;
+}
+
+.desktop-access-gate::before {
+  background:
+    linear-gradient(
+      90deg,
+      transparent calc(50% - 340px),
+      rgba(108, 75, 48, 0.11) calc(50% - 340px),
+      rgba(108, 75, 48, 0.11) calc(50% - 339px),
+      transparent calc(50% - 339px),
+      transparent calc(50% + 339px),
+      rgba(108, 75, 48, 0.11) calc(50% + 339px),
+      rgba(108, 75, 48, 0.11) calc(50% + 340px),
+      transparent calc(50% + 340px)
+    );
+}
+
+.desktop-access-gate::after {
+  z-index: -1;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255, 249, 230, 0.64), transparent 44%),
+    linear-gradient(180deg, rgba(72, 50, 35, 0.08), transparent 24%, transparent 72%, rgba(72, 50, 35, 0.12));
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate {
+  background:
+    linear-gradient(90deg, rgba(224, 203, 172, 0.035) 1px, transparent 1px) 0 0 / 72px 72px,
+    linear-gradient(rgba(224, 203, 172, 0.03) 1px, transparent 1px) 0 0 / 72px 72px,
+    url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 430px 430px repeat,
+    #28221d;
+  background-blend-mode: normal, normal, multiply, normal;
+}
+
+.desktop-access-gate__panel {
+  position: relative;
+  display: grid;
+  width: min(100%, 590px);
+  min-width: 0;
+  gap: 22px;
+  padding: clamp(24px, 4vw, 42px);
+  overflow: visible;
+  border: 1px solid rgba(95, 68, 45, 0.34);
+  border-radius: 10px 24px 10px 12px;
+  background:
+    linear-gradient(112deg, rgba(255, 252, 241, 0.84), rgba(232, 211, 174, 0.38)),
+    url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 430px 430px repeat,
+    #f4e5c9;
+  box-shadow: 0 24px 70px rgba(24, 15, 10, 0.34), 0 8px 20px rgba(24, 15, 10, 0.2);
+}
+
+.desktop-access-gate__panel::after {
+  position: absolute;
+  top: -1px;
+  right: clamp(24px, 5vw, 52px);
+  width: 88px;
+  height: 4px;
+  content: "";
+  border-radius: 0 0 999px 999px;
+  background: #9f4423;
+  opacity: 0.78;
+  pointer-events: none;
+}
+
+.desktop-access-gate__heading {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  max-width: 68ch;
+  min-width: 0;
+  gap: 9px;
+}
+
+.desktop-access-gate__heading h1 {
+  max-width: 18ch;
+  margin: 0;
+  color: #38271d;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: clamp(25px, 4vw, 38px);
+  line-height: 1.24;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+.desktop-access-gate__heading h1:focus {
+  outline: 0;
+}
+
+.desktop-access-gate__heading p {
+  max-width: 62ch;
+  margin: 0;
+  color: #674f3d;
+  font-size: 14px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.desktop-access-gate__loading,
+.desktop-access-gate__notice {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 15px;
+  color: #4d5f43;
+  font-size: 14px;
+  font-weight: 700;
+  border: 1px solid rgba(80, 100, 68, 0.28);
+  border-radius: 8px;
+  background: rgba(230, 239, 216, 0.58);
+}
+
+.desktop-access-gate__loading svg {
+  flex: 0 0 auto;
+  animation: desktop-gate-spin 900ms linear infinite;
+}
+
+.desktop-access-gate[data-tone="danger"] .desktop-access-gate__notice {
+  color: #7b351f;
+  border-color: rgba(148, 62, 31, 0.28);
+  background: rgba(255, 237, 207, 0.68);
+}
+
+.desktop-access-gate__form {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: 0;
+  gap: 15px;
+}
+
+.desktop-access-gate__form label {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  color: #4b392d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.desktop-access-gate__form label small {
+  color: #786453;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.desktop-access-gate__form input {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  padding: 10px 12px;
+  color: #35271f;
+  font-size: 16px;
+  border: 1px solid rgba(78, 54, 36, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 253, 247, 0.74);
+  caret-color: #9f4423;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.desktop-access-gate__form input:hover {
+  background: rgba(255, 253, 247, 0.94);
+}
+
+.desktop-access-gate__form input:focus {
+  border-color: #667b57;
+  outline: 0;
+  box-shadow: 0 0 0 3px rgba(102, 123, 87, 0.18);
+}
+
+.desktop-access-gate__form-error {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  padding: 11px 13px;
+  color: #7b351f;
+  font-size: 13px;
+  line-height: 1.6;
+  border: 1px solid rgba(148, 62, 31, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 237, 207, 0.68);
+  overflow-wrap: anywhere;
+}
+
+.desktop-access-gate__primary,
+.desktop-access-gate__text-action,
+.desktop-access-gate__workspace-list button {
+  position: relative;
+  z-index: 1;
+  font: inherit;
+  cursor: pointer;
+}
+
+.desktop-access-gate__primary {
+  display: inline-flex;
+  min-height: 46px;
+  width: fit-content;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 17px;
+  color: #fff9ef;
+  font-size: 14px;
+  font-weight: 750;
+  border: 1px solid #84351c;
+  border-radius: 8px;
+  background: #9f4423;
+  box-shadow: 0 8px 18px rgba(103, 42, 20, 0.24);
+  transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.desktop-access-gate__primary:hover:not(:disabled) {
+  background: #87371d;
+  box-shadow: 0 10px 22px rgba(103, 42, 20, 0.3);
+  transform: translateY(-1px);
+}
+
+.desktop-access-gate__primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.desktop-access-gate__text-action {
+  display: inline-flex;
+  min-height: 44px;
+  width: fit-content;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 4px;
+  color: #7c351f;
+  font-size: 13px;
+  font-weight: 700;
+  border: 0;
+  background: transparent;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.desktop-access-gate__text-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.desktop-access-gate__workspace-list {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+}
+
+.desktop-access-gate__workspace-list button {
+  display: grid;
+  min-width: 0;
+  min-height: 66px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 13px;
+  color: #403027;
+  text-align: start;
+  border: 1px solid rgba(78, 54, 36, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 253, 247, 0.56);
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+
+.desktop-access-gate__workspace-list button:hover:not(:disabled) {
+  border-color: rgba(102, 123, 87, 0.58);
+  background: rgba(238, 243, 226, 0.78);
+  transform: translateY(-1px);
+}
+
+.desktop-access-gate__workspace-list button > svg:first-child {
+  color: #607251;
+}
+
+.desktop-access-gate__workspace-list button span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.desktop-access-gate__workspace-list strong,
+.desktop-access-gate__workspace-list small {
+  overflow-wrap: anywhere;
+}
+
+.desktop-access-gate__workspace-list strong {
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: 15px;
+}
+
+.desktop-access-gate__workspace-list small {
+  color: #715d4c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.desktop-access-gate__empty {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding: 16px;
+  color: #4f3d30;
+  border: 1px solid rgba(78, 54, 36, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 253, 247, 0.48);
+}
+
+.desktop-access-gate__empty svg {
+  color: #607251;
+}
+
+.desktop-access-gate__empty p {
+  max-width: 60ch;
+  margin: 0;
+  color: #6d5847;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.desktop-access-gate button:focus-visible,
+.desktop-access-gate input:focus-visible {
+  outline: 3px solid #2f7882;
+  outline-offset: 3px;
+}
+
+@keyframes desktop-gate-spin {
+  to { transform: rotate(1turn); }
+}
+
+@media (max-width: 720px), (max-height: 660px) {
+  .desktop-access-gate {
+    align-content: start;
+    padding: 68px 14px 24px;
+  }
+
+  .desktop-access-gate__panel {
+    width: 100%;
+    gap: 18px;
+    padding: clamp(20px, 5vw, 30px);
+    border-radius: 8px 18px 8px 9px;
+  }
+
+  .desktop-access-gate__heading h1 {
+    max-width: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .desktop-access-gate {
+    padding-inline: 10px;
+  }
+
+  .desktop-access-gate__panel {
+    padding: 20px 17px;
+  }
+
+  .desktop-access-gate__panel::after {
+    right: 20px;
+    opacity: 0.65;
+  }
+
+  .desktop-access-gate__heading h1 {
+    font-size: clamp(23px, 8vw, 30px);
+  }
+
+  .desktop-access-gate__heading p {
+    font-size: 13px;
+  }
+
+  .desktop-access-gate__primary,
+  .desktop-access-gate__text-action {
+    width: 100%;
+  }
+
+  .desktop-access-gate__workspace-list button {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .desktop-access-gate__workspace-list button > svg:last-child {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-access-gate__loading svg {
+    animation: none;
+  }
+
+  .desktop-access-gate__primary,
+  .desktop-access-gate__workspace-list button,
+  .desktop-access-gate__form input {
+    transition-duration: 1ms;
+  }
+}

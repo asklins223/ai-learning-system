@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000">
+  <defs>
+    <filter id="plant-edge-feather" x="-8%" y="-8%" width="116%" height="116%">
+      <feGaussianBlur stdDeviation="7" />
+    </filter>
+    <mask id="glass-with-plant-cutout" maskUnits="userSpaceOnUse" x="0" y="0" width="1000" height="1000">
+      <path
+        fill="white"
+        d="M48 74 452 68 452 468 48 464ZM548 48 955 18 955 468 548 468ZM48 536 452 538 452 930 48 920ZM548 538 955 536 955 925 548 930Z"
+      />
+      <g fill="black" filter="url(#plant-edge-feather)">
+        <path d="M815 852c-22-20-38-43-45-62 25 8 44 24 52 48 10-22 24-39 42-52-6 28-21 52-49 66Z" />
+        <path d="M808 879c-34-15-72-28-121-48 39-12 91 1 124 30Z" />
+        <path d="M826 875c27-31 65-54 111-58-30 34-71 58-109 69Z" />
+        <path d="M801 929c-45-17-96-20-146-39 35-33 90-34 129-5 12 10 20 24 17 44Z" />
+        <path d="M833 932c39-35 92-70 167-69-25 43-88 72-157 78Z" />
+        <path d="M803 924c-16-28-39-47-68-61 39-1 68 20 81 51Z" />
+        <path d="M835 924c13-30 36-49 70-60-14 35-37 58-70 70Z" />
+        <path d="M794 944c12-37 13-85 19-138l25-4c-3 54-1 103 13 142Z" />
+        <ellipse cx="827" cy="954" rx="117" ry="34" />
+      </g>
+    </mask>
+  </defs>
+  <rect width="1000" height="1000" fill="white" mask="url(#glass-with-plant-cutout)" />
+</svg>
