@@ -2,6 +2,8 @@
 
 <!-- date=2026-08-23; scope=card-generation-v2 / understanding-validation / companion / scheduling / ai-quality; 基于当前 v1.0 分支代码实读 -->
 <!-- 修订 2026-08-24：§4.2 所列提示词薄弱问题已修复（persona v4 + 确定性语气层 + 卡生成 few-shot/v2 版本 bump + json_object 迁移），详见 §4.2 内嵌【2026-08-24 修复记录】。§4.1/4.3-4.6 未动。 -->
+<!-- 修订 2026-08-24（第二批）：§4.4 工程分层债务与 §4.5 启发式误判面已修复——V2 纯逻辑五模块下沉 shared 消除反向依赖、companion-dialogue 巨型文件拆分、中文启发式按认识论分工重构（语义裁决归 Critic + 软信号量化门禁），详见各节内嵌【2026-08-24 修复记录】；反向依赖三批续修后清零（schema 已下沉 shared，drizzle-kit/CI 同步切换）。§4.1/4.3/4.6 未动。 -->
+<!-- 修订 2026-08-25：实施质量审计（五维深审 × 对抗复核 × 313 测试实跑）。修复 3 项 major——① failV2OutboxJob 可重试分支 run 回写 SQL 引用不存在的 attempts 列必抛 42703（run 卡死 planning）；② Pedagogy Critic 冻结 issue code 全链路无人消费、无 fail-closed 兜底；③ worker prod 镜像构建自 schema 下沉后即损坏（缺 @ailearn/shared 链接）。另修 9 项 minor（错误分类识别领域错误、soft 信号审计与 Critic 输入、编辑路径泄题旧硬门对齐、情绪分类器间隔否定、prompt 版本双源契约测试、schema 壳内容校验、拆分重复实现/导出缺失等），详见各节内嵌【2026-08-25 实施审计】记录。 -->
 
 > **这份文档是什么**：对本仓库所有 AI 相关技术设计的一次客观体检——哪些地方做得好、哪些地方有风险，以及为什么。
 >
@@ -158,6 +160,8 @@ AI 产品的另一大坑是让模型决定"要不要打扰用户"——模型没
 > 1. **标签清单过载 + 高温度 + 零示例**：新增冻结版 `companion-persona-v4`（`packages/shared/src/companion-persona.ts`，SHA-256 钉死）——移出约 500 字符的 30 条语音标签全表，内嵌 3 轮风格 few-shot 示例；temperature 1.0 → 0.9。语音标签改由**确定性语气层**（`workers/ai-worker/src/lib/companion-tone.ts`）在 TTS 段文本上逐段注入：本地情绪分类器按全文判情绪，每条 voice.segment.ready 句首注入单个受控控制类标签（长度感知——注入会顶破 160 字符合同上限的满段跳过注入），模型不再背清单也不再输出任何方括号标记。配套堵了未知标签穿透洞（`stripVoiceExpressionTags` 现在同时剥离模型自造的 ASCII 标签形态 token，含 `[sadly]` 类已知标签变形词；中文正文 `[重要]`、CEFR 级别 `[B2]` 不受影响）；流式管线逐 delta 清洗并对未闭合 "[" 片段短暂扣留，防跨 delta 拆分的幻觉标签漏进展示文本。泄露检测正则放宽为 `companion-persona-v\d+` 全版本。
 > 2. **零 few-shot 的 JSON 阶段 + 解析失败不可重试**：卡生成 planner/author 补紧凑 few-shot 输出示例，prompt 版本 bump 至 `card-generation-v2/v2` 并同步 api 侧 stageRuntimes 种子（审计哈希闭包）；「格式解析失败不可重试」经复核已于 2026-08-16 修复（zod 违规可重试 ×6），本次补齐最后一个残留——顶层数组/标量的合法非对象 JSON 从 non-retryable 改为 retryable；顺带修复 sampling 阶段名错配（完整 prompt-version 字符串匹配不上裸阶段名枚举导致 per-run 温度配置被静默忽略）。summarizer/memory-extractor 从手写抽取 + `responseFormat:'text'` 迁移到 `json_object` 模式 + 容错解析双保险。原生 json_schema structured output 经评估暂不引入：zod 3.25 可经 `zod/v4` 导出 schema，但仓库三个传输层（worker provider、apps/api 两处裸 fetch）需同步改造，且部分 OpenAI 兼容网关不支持该参数（400 会落入不可重试分类），留待供应商链路收敛后处理。
 > 3. **阈值未量化（§4.5 关联）**：本轮未动，仍是后续待办。
+>
+> **【2026-08-25 实施审计补充】** 本节已落地部分的后续加固：(a) 流式展示管线按 2000 字符分块剥离标签时，已知控制类标签若恰跨块边界会以碎片漏进展示文本——flush 切块边界现回退到尾部未闭合 "[" 之前（与注入器扣留策略同款）；(b) 情绪分类器的否定判定原只看紧邻前一字符（「不开心」能拦、「没有进步」漏网误判 happy 注入 [excited]）——改为 3 字符窗口内否定词检测并补间隔否定回归用例；(c) stageRuntimes promptVersion 种子与 worker 实际 prompt 版本之间原先无任何自动校验（bump 失同步会让 semanticSpecHash 静默失真）——新增 `card-generation-v2-prompt-version-sync` 契约测试钉住两侧一致。
 
 ### 4.3 质量评估「有门禁、没雷达」
 
@@ -173,6 +177,16 @@ AI 产品的另一大坑是让模型决定"要不要打扰用户"——模型没
 - **巨型文件**：companion-dialogue.ts 单文件 1607 行，路由分类、TTS 切分、事件落库挤在一起，改动风险和阅读成本都在上升。
 - **双代并行**：V1/V2 卡片系统并存、旧 Web 与新桌面客户端并存，迁移期的维护面不小（PRODUCT.md 自己也承认了这一点）。
 
+> **【2026-08-24 修复记录】** 前两条已修复（v1.0 分支）；「双代并行」是产品迁移期的既定状态，不在本轮处理范围。
+>
+> 1. **反向依赖（2026-08-24 第二批续修，现已清零至 schema 层）**：
+>    - 第一批：五个纯逻辑模块（planner-service / author-service / critic-service / deterministic-gates + concept-label）下沉 shared，providers.ts 的类型导入全部改子路径；
+>    - 第二批：evidence-seal 与 binding-plan-assembler 按「纯逻辑下沉、IO 壳留 api」拆分——seal 的 scope 过滤/hash/seal 计划构建（`planEvidenceSnapshotsV2`）与 binding plan 的组装/校验/hash 全部下沉 shared；api 保留两批 INSERT 的 IO 壳。新增 shared 领域错误 `CardGenerationPipelineErrorV2`，api 的 `CardGenerationV2ServiceError` 改为继承它——既有 `instanceof` 错误边界与 code/statusCode 消费完全兼容。binding plan 持久化在 worker 侧以 raw SQL 实现（与 api 落同一张表同一列闭包）；`insertEvent` 同样改为 worker 本地实现（语义同 api helpers）。
+>    - 第三批：drizzle schema 整体下沉（25 个文件 → `packages/shared/src/db-schema/`）——schema 目录本就自包含（仅依赖 drizzle-orm 与 @ailearn/shared 的 type），api 侧 81 处导入经 re-export 壳零改动，worker 的 db.ts / schema/index.ts 改走 `@ailearn/shared/db-schema` 子路径。**worker 对 apps/api 的反向路径依赖清零。** 配套：drizzle-kit schema 路径指向新位置（`check` 通过、迁移目录零漂移）；CI verify-schema-mirror 校验 canonical 目录 + api 壳同步；统一 drizzle-orm 物理实例（pnpm 多实例会让跨包表类型不兼容——worker tsconfig 的 drizzle paths 钉在单一实例上，这是后续往 shared 加 DB 相关代码时的已知约束）。三个源码文本断言测试（读 schema 文件做字符串检查）的读取路径改指 canonical 位置。
+>    - **2026-08-25 复查修正（两处实错）**：① worker 侧 binding plan 落库 SQL 的表名误写为 `card_candidate_evidence_binding_plans_v2`——真实表名无 `card_` 前缀（drizzle schema/迁移文件双确认），LLM 模式运行时会直接报表不存在，已修正并注明表名以 shared db-schema 为准；② 错误边界的 instanceof 方向反了：shared 纯逻辑抛父类 `CardGenerationPipelineErrorV2` 实例，routes.ts 检查的是子类 `CardGenerationV2ServiceError`——父类实例过不了子类检查，选区越界等纯逻辑错误会穿透成 500（改动前是能被接住的 4xx）。两处边界已改查基类；`name` 字段保持 "CardGenerationV2ServiceError" 不变，按 name 分类的日志/监控行为不受影响。至此 **worker 生产源码**对 apps/api 的反向导入清零（db.ts / schema/index.ts 两处 drizzle schema 导入也已改走 shared 子路径）；src/integration-tests 因端到端验证需要仍显式引用 apps/api（约 50 处，Dockerfile COPY 显式供给），属有意设计而非反向依赖——上文「清零」均指生产源码口径。
+>    - **2026-08-25 实施审计补充（第三批配套的三处缺口，均已修复）**：(a) prod 镜像构建自 schema 下沉后即损坏——deps 阶段删除脚本剔除 @ailearn/shared、prod 无包链接，tsc 报 TS2307 约 437 处；已在 Dockerfile 补链接并更新过期注释。CI 的 production-compose 任务本有镜像构建步骤，未拦截是因为 v1.0 分支推送后 CI 从未运行。(b) verify-schema-mirror 原先只比对文件名集合，壳内容回潮成第二定义源时 CI 放行——现已逐壳断言纯 re-export 并检测孤儿文件。(c) worker 错误分类原先不认识 `CardGenerationPipelineErrorV2`，确定性 4xx 领域错误会走 job 级重试重放 planner+author 的 LLM 调用（token 双花）——isNonRetryableErrorLike 已补基类 instanceof 分支。
+> 2. **巨型文件**：companion-dialogue.ts 自 1639 行拆为编排层 + 三个职责模块：`companion-dialogue-content.ts`（输出校验/markdown 剥离/delta 分块/persona 组装/确定性 cue——纯函数）、`companion-dialogue-store.ts`（事件写入/run failed 投影/grounded-tutor DB 读取/记忆任务入队/feature flags）、`companion-dialogue-streaming.ts`(真流式与批量回退管线/provider 采样参数/失败分类)。主文件只保留 run 编排主流程（约 760 行），对外导出符号不变，既有测试无需改动。
+
 ### 4.5 中文启发式规则的误判面
 
 确定性校验里有两处依赖中文表面特征：
@@ -181,6 +195,14 @@ AI 产品的另一大坑是让模型决定"要不要打扰用户"——模型没
 - 判泄题用的是"取答案前 200 字符做子串匹配"+ 字符集重合度 > 0.7 的阈值。
 
 作为软信号可以接受，且语义层的误判确实由 LLM 评审补位了。但要意识到：**这些阈值的假阳/假阴率从未被量化过**——没有一批"已知应该过/应拦截"的中文样本集来测这两个启发式的准确率。长期要么补量化，要么换成语义判定。
+
+> **【2026-08-24 修复记录】** 本节按「补量化 + 换成语义判定」双路径修复（v1.0 分支）：
+>
+> 1. **建立人工标注夹具集 + 度量工具**：`packages/ai-quality/src/card-generation-v2/heuristic-metrics.ts` 新增两组中文标注样本（原子性 18 条：12 应放行 + 6 应拦截；泄题 10 条：3 泄题 + 5 干净 + 2 边缘），经 `heuristic-adapters.ts` 直接驱动仓库内**真实 gate 实现**，输出混淆矩阵/假阳率/假阴率；`heuristic-metrics.test.ts` 钉住指标形成回归门禁。
+> 2. **首轮量化的实测发现（印证了审查的担忧）**：原子性连词规则在自然表述上 **8/12 假阳**（"分别写出 F、m、a 的单位""质量以及能量的守恒定律""同时性是相对论的核心概念"等全被误杀）；泄题硬规则因答案结尾句号等标点差异 **3/3 全部漏检**。
+> 3. **认识论分工重构（最终方案）**：先尝试过「按标注集收紧正则」（结构性信号 + 12 字滑窗，样本上 0 FP/0 FN），但那组样本是按规则缺陷反向挑选的——**残余假阳不可归零，因为"是否拼接多目标/是否改写式泄题"本质是语义判断，正则只能逼近不能判定**。最终改为：atomicity 整体与改写式泄题的子串匹配**降级为 soft 风险信号**；确定性 hard 只保留语言无关的机械事实（front 逐字照抄：压缩标点后 ≥12 连续字符同一）；语义 hard 裁决归 Pedagogy Critic 的冻结 issue code（`multiple_learning_objectives` / `front_leaks_answer`），其 prompt 增补中文判定基准并 bump 至 `card-generation-v2/v3`（api stageRuntimes 种子同步）。关键收益：此前确定性 hard 在 Critic 调用**之前**就杀死候选（worker handler `fatalPre` 门），假阳连被语义层纠偏的机会都没有——降级后疑似候选终于能进入 Critic 评审。量化门禁转为钉住软信号的查准率下限（≥5/6）与误报率上限（≤25%）。
+> 5. **2026-08-25 实施审计补记**：(a) 逐字照抄 hard 除「≥12 连续字符」外还有一个保守分支——答案压缩后不足 12 字符时退化为**整段包含检测（≥8 字才判）**：短答案完整出现在正面同样构成泄题，方向偏保守、保留（`deterministic-gates.ts` frontContainsVerbatimFragment）。(b) api 侧卡片编辑入口 `updateCardPresentationV2` 曾残留旧版「答案前 50 字符子串包含即 409」硬门，与本次降级决定不一致，已改为与管线同款的逐字照抄判定。(c) Pedagogy Critic 冻结 issue code 原先只做 zod 校验即丢弃（hard 裁决完全依赖模型自选 verdict 字符串、无一致性兜底）——已在 provider 层与 shared 层各加 verdict↔hardIssues fail-closed 归一化（keep+hardIssues 强制降为 drop；setIssues 非空把 pass 压为 fail），并把 hardIssues 写入质量报告与 pedagogy_failed 事件 payload，冻结 code 可审计。
+> 4. 附带发现并修复一个测试基建隐患：pnpm 对 `file:` 依赖的 package.json 是独立副本且此前一次恢复操作破坏了硬链接——api 的单测曾一度在跑 shared 的旧代码（旧断言因此"通过"）。已重建副本同步；后续往 shared 加导出项需重跑 `pnpm install` 或手动同步各 app 的 store 副本。
 
 ### 4.6 评估阈值与真实流量的断层
 
@@ -199,7 +221,7 @@ AI 产品的另一大坑是让模型决定"要不要打扰用户"——模型没
 | 评测体系 | ★★★☆☆ | 离线门禁优秀，线上质量监控完全缺位 |
 | 模型策略 | ★★☆☆☆ | 单一供应商、无 fallback、模型余量紧 |
 | Prompt 工程 | ★★★☆☆ | 治理条款完善，但脆弱、零示例、未用原生结构化输出 |
-| 代码组织 | ★★★☆☆ | 分层越界与大文件问题存在但尚可控 |
+| 代码组织 | ★★★★☆ | V2 纯逻辑层已下沉 shared、巨型文件已拆分；DB 耦合服务反向依赖与双代并行仍在 |
 
 ---
 

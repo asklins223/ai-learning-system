@@ -70,13 +70,13 @@ COPY --from=deps /app/node_modules /app/node_modules
 COPY workers/ai-worker/package.json /app/workers/ai-worker/package.json
 COPY workers/ai-worker/tsconfig.json /app/workers/ai-worker/tsconfig.json
 COPY workers/ai-worker/src /app/workers/ai-worker/src
-# 第五轮审计 W#1：worker 的 src/schema 与 src/db 及 card-generation-v2 服务函数
-# import ../../../../apps/api/...（tsconfig rootDir=../..，include=src）。prod
-# 阶段必须自包含——依赖唯一的 apps/api bind-mount 在镜像构建时不可用。完整 COPY
-# apps/api/src（覆盖 schema re-export + 服务模块的类型/运行时依赖），并把独立安装
-# 的 drizzle-orm 放到 tsconfig paths 映射目标 apps/api/node_modules/drizzle-orm，
-# 使 `tsc --noEmit` 与 esbuild 都能解析（apps/api 其余 node_modules 依赖
-# pino/postgres/zod/prom-client/@ailearn/shared 均来自 worker 自己的 /app/node_modules）。
+# 2026-08-25 更新：schema 已下沉 packages/shared（worker 经 @ailearn/shared/db-schema
+# 消费），生产源码对 apps/api 的反向导入已清零。prod 阶段仍 COPY apps/api/src 仅因
+# src/integration-tests 的五层相对导入被 tsconfig include=src/** 收进编译单元
+# （端到端验证的有意设计）。独立安装的 drizzle-orm 放在 tsconfig paths 映射目标
+# apps/api/node_modules/drizzle-orm，使 `tsc --noEmit` 与 esbuild 都能解析（apps/api
+# 其余 node_modules 依赖 pino/postgres/zod/prom-client/@ailearn/shared 均来自 worker
+# 自己的 /app/node_modules——@ailearn/shared 由下方显式链接提供）。
 COPY apps/api/src /app/apps/api/src
 # apps/api/package.json：NodeNext 用就近 package.json 的 "type" 判断 .ts 模块格式。
 # 缺失时 TS 回退把 apps/api/src 的 schema 视为 CommonJS，为其合成 .default 导出，
@@ -88,6 +88,11 @@ COPY --from=v2_drizzle /drizzle/node_modules/drizzle-orm /app/apps/api/node_modu
 # include=src/** 会 type-check 它们；镜像内须存在对应源，使 `../../../../packages/shared`
 # 从 /app/workers/ai-worker/... 正常解析到 /app/packages/shared（与仓库根布局一致）。
 COPY packages/shared /app/packages/shared
+# 2026-08-25（AI 设计审计修复）：prod 构建自 schema 下沉 shared 后即损坏——deps 阶段
+# 的删除脚本把 @ailearn/shared 从依赖树剔除，prod 阶段又没有 dev 阶段（L60-62）的
+# 包链接，tsc 解析全部 @ailearn/shared/* 导入报 TS2307。此处补上与 dev 对齐的链接。
+RUN mkdir -p /app/node_modules/@ailearn \
+ && ln -s /app/packages/shared /app/node_modules/@ailearn/shared
 # 镜像内 drizzle-orm 单一身份：把 worker 自己 npm ci 装出的 /app/node_modules/
 # drizzle-orm（真实目录副本）替换为指向 apps/api 实例的符号链接——与宿主仓库 round-4
 # 修复一致（workers/ai-worker/node_modules/drizzle-orm -> ../../../apps/api/...）。

@@ -64,6 +64,11 @@ import {
   NO_STORE,
   type RunContext,
 } from "./helpers.ts";
+// 2026-08-24（§4.4 第二批复查）：shared 纯逻辑层抛的是父类
+// CardGenerationPipelineErrorV2（如 filterBlocksBySourceScope 的选区越界），
+// 错误边界必须检查父类才能同时接住 IO 壳（ServiceError 子类）与纯逻辑层
+// （PipelineError 本类）的领域错误——instanceof 子类会漏掉父类实例。
+import { CardGenerationPipelineErrorV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   parseCandidateRevealV2,
   parseCardActivationReceiptV2,
@@ -109,7 +114,8 @@ function requireIdempotencyKey(req: { headers: Record<string, string | string[] 
 }
 
 function sendServiceError(reply: FastifyReply, error: unknown) {
-  if (error instanceof CardGenerationV2ServiceError) {
+  // 检查基类：子类（api IO 壳）与父类（shared 纯逻辑）实例都会命中。
+  if (error instanceof CardGenerationPipelineErrorV2) {
     return reply.code(error.statusCode).send({ error: error.code, message: error.message });
   }
   throw error;
@@ -362,7 +368,7 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
         const result = await handleCandidateActionV2(context(req), command, idempotencyKey);
         return projectCardGenerationReviewResultV1(result);
       } catch (error) {
-        if (error instanceof CardGenerationV2ServiceError) {
+        if (error instanceof CardGenerationPipelineErrorV2) {
           req.log.warn({ code: error.code, runId: req.params.runId }, "card-generation candidate action rejected");
         }
         return sendServiceError(reply, error);

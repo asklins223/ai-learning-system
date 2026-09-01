@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
+import './load-capture-env.mjs'
 
 const appRoot = resolve(import.meta.dirname, '..')
 const workspaceRoot = resolve(appRoot, '../..')

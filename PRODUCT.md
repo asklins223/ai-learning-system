@@ -5,7 +5,9 @@
 
 ## Platform
 
-adaptive（Electron desktop UI，覆盖 macOS / Windows / Linux）；不再提供浏览器端产品
+adaptive
+
+Electron desktop UI，覆盖 macOS / Windows / Linux；不再提供浏览器端产品。
 
 ## Stack
 

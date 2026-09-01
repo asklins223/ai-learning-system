@@ -8,10 +8,12 @@ import { RunRecoveryNotice } from "./components/RunRecoveryNotice";
 import { CompanionPresence } from "./components/companion/CompanionPresence";
 import { DesktopAccessGate } from "./components/DesktopAccessGate";
 import { useRoomStore } from "./app/room-store";
+import { resolveSceneMotionMode } from "./scene/scene-motion";
 
 function isTypingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
-  return target.matches("input, textarea, [contenteditable='true']") || Boolean(target.closest("[contenteditable='true']"));
+  const typingSelector = "input, textarea, select, [contenteditable='true'], [role='textbox'], [role='combobox'], [role='listbox']";
+  return target.matches(typingSelector) || Boolean(target.closest(typingSelector));
 }
 
 function RoomExperience() {
@@ -19,9 +21,7 @@ function RoomExperience() {
   const surface = useRoomStore((state) => state.surface);
   const invoke = useRoomStore((state) => state.invoke);
   const setInputFocused = useRoomStore((state) => state.setInputFocused);
-  const onboardingSeen = useRoomStore((state) => state.onboardingSeen);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
-  const openOnboarding = useRoomStore((state) => state.openOnboarding);
   const companionOpen = useRoomStore((state) => state.companionOpen);
   const closeCompanion = useRoomStore((state) => state.closeCompanion);
 
@@ -37,13 +37,9 @@ function RoomExperience() {
   }, [setInputFocused]);
 
   useEffect(() => {
-    if (onboardingSeen || onboardingOpen) return;
-    const timer = window.setTimeout(openOnboarding, 550);
-    return () => window.clearTimeout(timer);
-  }, [onboardingOpen, onboardingSeen, openOnboarding]);
-
-  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (onboardingOpen) return;
       if (event.key === "Escape") {
         event.preventDefault();
         if (companionOpen) {
@@ -70,11 +66,11 @@ function RoomExperience() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeCompanion, companionOpen, invoke, surface]);
+  }, [closeCompanion, companionOpen, invoke, onboardingOpen, surface]);
 
   return (
     <>
-      <a className="skip-link" href="#main-content">跳到主要内容</a>
+      <a className="skip-link" href="#main-content" aria-hidden={onboardingOpen || undefined} inert={onboardingOpen || undefined}>跳到主要内容</a>
       <div
         className="scene-stage"
         role="region"
@@ -85,7 +81,7 @@ function RoomExperience() {
       <CompanionPresence />
       <RunRecoveryNotice />
       <ImmersiveIsland />
-      <main id="main-content">
+      <main id="main-content" inert={onboardingOpen || undefined}>
         <h1 className="sr-only">理解书房</h1>
         <ActionRail />
         <TaskSurface />
@@ -97,9 +93,12 @@ function RoomExperience() {
 
 export function App() {
   const theme = useRoomStore((state) => state.theme);
-  const motionMode = useRoomStore((state) => state.motionMode);
+  const motionPreference = useRoomStore((state) => state.motionMode);
+  const reducedMotion = useRoomStore((state) => state.reducedMotion);
+  const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
   const surface = useRoomStore((state) => state.surface);
   const viewPreset = useRoomStore((state) => state.viewPreset);
+  const scenePhase = useRoomStore((state) => state.scenePhase);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const resetWorkspaceScope = useRoomStore((state) => state.resetWorkspaceScope);
   const setReducedMotion = useRoomStore((state) => state.setReducedMotion);
@@ -136,9 +135,11 @@ export function App() {
       data-surface-open={Boolean(surface)}
       data-onboarding-open={onboardingOpen}
       data-view-preset={viewPreset}
+      data-scene-phase={scenePhase}
+      data-scene-renderer="dom-2.5d"
       data-motion-mode={motionMode}
     >
-      <DesktopAccessGate onWorkspaceBoundaryReset={resetWorkspaceScope}>
+      <DesktopAccessGate theme={theme} motionMode={motionMode} onWorkspaceBoundaryReset={resetWorkspaceScope}>
         <RoomExperience />
       </DesktopAccessGate>
     </div>

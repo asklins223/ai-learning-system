@@ -62,7 +62,22 @@ const REPLY_EMOTION_RULES: readonly EmotionRule[] = [
   },
 ];
 
-const NEGATION_PREFIX = /(不|没|别|无|莫|非)$/u;
+// 否定词集合：命中词前 2-3 字符窗口内出现任一否定词即视为被否定。
+// 2026-08-25（AI 设计审计修复）：原实现只看紧邻前一字符（"不开心"能拦，
+// "没有进步"/"不那么棒"这类间隔否定漏网误判 happy）。窗口取 2 是
+// "不/没/别…" + 1 字衬字（如"没有进步"的"有"、"不太棒"的"太"）的
+// 常见间隔；再宽会开始吞并合法并列（"不好不坏的进步"）。
+const NEGATION_WORDS = ["不", "没", "别", "无", "莫", "非", "未", "毫无", "毫不"] as const;
+
+function isNegatedKeyword(text: string, index: number): boolean {
+  if (index <= 0) return false;
+  const window = text.slice(Math.max(0, index - 3), index);
+  return NEGATION_WORDS.some((w) => {
+    const at = window.lastIndexOf(w);
+    // 否定词必须落在紧贴关键词的 2 字符窗口内（允许隔 1 个衬字）。
+    return at >= 0 && (window.length - at - w.length) <= 1;
+  });
+}
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -82,13 +97,6 @@ const REPLY_EMOTION_RULES_COMPILED: Array<{
   baseIntensity: rule.baseIntensity,
   regex: new RegExp(rule.keywords.map(escapeRegExp).join("|"), "g"),
 }));
-
-/** 判断命中词是否被否定前缀抵消（如「不开心」「没关系」不触发 happy）。 */
-function isNegatedKeyword(text: string, index: number): boolean {
-  if (index <= 0) return false;
-  const prefix = text.slice(Math.max(0, index - 2), index);
-  return NEGATION_PREFIX.test(prefix);
-}
 
 const NEUTRAL_INTENSITY = 0.3;
 

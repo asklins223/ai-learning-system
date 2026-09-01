@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { _electron as electron } from '@playwright/test'
+import './load-capture-env.mjs'
 
 const appRoot = resolve(import.meta.dirname, '..')
 const workspaceRoot = resolve(appRoot, '../..')
@@ -770,7 +771,7 @@ async function runOwnerJourney(window) {
   await window.getByTestId('action-continue').click()
   await waitForStudyObjectSurface(window, 'Packaged Owner Study')
   await window.getByRole('button', { name: '进入研究册' }).click()
-  await window.locator('.notebook-surface').waitFor({ state: 'visible', timeout: 15_000 })
+  await window.locator('.notebook-editor-workbench').waitFor({ state: 'visible', timeout: 15_000 })
   await window.waitForFunction(
     () => Boolean(document.querySelector('.notebook-readonly, textarea[aria-label="真实笔记内容"]')) || Boolean(document.querySelector('.notebook-state--error')),
     undefined,
@@ -799,7 +800,7 @@ async function runOwnerJourney(window) {
       const returnToNote = window.getByRole('button', { name: '回研究册' })
       if (await returnToNote.count() === 0) break
       await returnToNote.click()
-      await window.locator('.notebook-surface').waitFor({ state: 'visible', timeout: 15_000 })
+      await window.locator('.notebook-editor-workbench').waitFor({ state: 'visible', timeout: 15_000 })
       await startCardGeneration()
     }
     lastKeepAttempt = null
@@ -1013,7 +1014,7 @@ async function runMemberJourney(window) {
   const notebookButton = window.getByRole('button', { name: '进入研究册' })
   await notebookButton.waitFor({ state: 'visible', timeout: 15_000 })
   await notebookButton.click()
-  await window.locator('.notebook-surface').waitFor({ state: 'visible', timeout: 15_000 })
+  await window.locator('.notebook-editor-workbench').waitFor({ state: 'visible', timeout: 15_000 })
   await window.waitForFunction(
     () => Boolean(document.querySelector('.notebook-readonly')) || Boolean(document.querySelector('.notebook-state--error')),
     undefined,

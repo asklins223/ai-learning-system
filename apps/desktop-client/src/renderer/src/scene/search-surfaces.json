@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "coordinateSpace": {
+    "id": "room-1672x941",
+    "width": 1672,
+    "height": 941,
+    "fitMode": "cover"
+  },
+  "compactMediaQuery": "(max-width: 900px), (max-height: 660px)",
+  "assetRevision": "search-reference-counter-v1+search-catalog-v3+dom-ink-only-v1+transparent-foreground-v1",
+  "assetHashes": {
+    "day": "02f6964cef3d4efb051f0a4d5e5b30ed808a8921c52d7f1dc26192257041f3d9",
+    "foreground.day": "b7b36f509b118803d3be139a5f33c2b974fd83716a448779f2e779b421436401",
+    "night": "e80ddd93c9f138b20e01b1948e88e0453b67b4712cb817ca435c18fe55c50eb6",
+    "foreground.night": "52d52211fdf47fd26cbe1a6713ccee45fbf2334d193a3372e160aa057808079c"
+  },
+  "calibrationRevision": "search-v5-dom-ink-only-2026-08-27",
+  "catalogBounds": {
+    "x": 0,
+    "y": 0,
+    "width": 1672,
+    "height": 941
+  },
+  "surfaces": {
+    "queryLedger": {
+      "id": "search.catalog.query-ledger",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 570,
+        "y": 150,
+        "width": 540,
+        "height": 224
+      },
+      "quad": [
+        [576, 154],
+        [1089, 153],
+        [1105, 365],
+        [571, 370]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.1, "right": 0.055, "bottom": 0.1, "left": 0.055 }
+    },
+    "upperShelf": {
+      "id": "search.catalog.upper-shelf",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 556,
+        "y": 434,
+        "width": 566,
+        "height": 94
+      },
+      "quad": [
+        [560, 438],
+        [1116, 438],
+        [1114, 523],
+        [560, 523]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.08, "right": 0.012, "bottom": 0.08, "left": 0.012 }
+    },
+    "lowerShelf": {
+      "id": "search.catalog.lower-shelf",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 556,
+        "y": 555,
+        "width": 566,
+        "height": 225
+      },
+      "quad": [
+        [560, 564],
+        [1115, 563],
+        [1113, 776],
+        [559, 778]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.03, "right": 0.012, "bottom": 0.03, "left": 0.012 }
+    },
+    "boundarySlip": {
+      "id": "search.catalog.boundary-slip",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 524,
+        "y": 70,
+        "width": 88,
+        "height": 43
+      },
+      "quad": [
+        [530, 76],
+        [607, 75],
+        [607, 108],
+        [529, 109]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.12, "right": 0.08, "bottom": 0.12, "left": 0.08 }
+    }
+  }
+}

@@ -31,6 +31,137 @@
       "import": "./src/card-quality-v2-contracts.ts",
       "default": "./src/card-quality-v2-contracts.ts"
     },
+    "./db-schema": {
+      "types": "./src/db-schema/index.ts",
+      "import": "./src/db-schema/index.ts",
+      "default": "./src/db-schema/index.ts"
+    },
+    "./db-schema/ai": {
+      "types": "./src/db-schema/ai.ts",
+      "import": "./src/db-schema/ai.ts",
+      "default": "./src/db-schema/ai.ts"
+    },
+    "./db-schema/assistant-deliveries": {
+      "types": "./src/db-schema/assistant-deliveries.ts",
+      "import": "./src/db-schema/assistant-deliveries.ts",
+      "default": "./src/db-schema/assistant-deliveries.ts"
+    },
+    "./db-schema/assistant-memory": {
+      "types": "./src/db-schema/assistant-memory.ts",
+      "import": "./src/db-schema/assistant-memory.ts",
+      "default": "./src/db-schema/assistant-memory.ts"
+    },
+    "./db-schema/card-generation-v2": {
+      "types": "./src/db-schema/card-generation-v2.ts",
+      "import": "./src/db-schema/card-generation-v2.ts",
+      "default": "./src/db-schema/card-generation-v2.ts"
+    },
+    "./db-schema/companion": {
+      "types": "./src/db-schema/companion.ts",
+      "import": "./src/db-schema/companion.ts",
+      "default": "./src/db-schema/companion.ts"
+    },
+    "./db-schema/companion-bridge": {
+      "types": "./src/db-schema/companion-bridge.ts",
+      "import": "./src/db-schema/companion-bridge.ts",
+      "default": "./src/db-schema/companion-bridge.ts"
+    },
+    "./db-schema/companion-conversations": {
+      "types": "./src/db-schema/companion-conversations.ts",
+      "import": "./src/db-schema/companion-conversations.ts",
+      "default": "./src/db-schema/companion-conversations.ts"
+    },
+    "./db-schema/companion-journey": {
+      "types": "./src/db-schema/companion-journey.ts",
+      "import": "./src/db-schema/companion-journey.ts",
+      "default": "./src/db-schema/companion-journey.ts"
+    },
+    "./db-schema/companion-memory": {
+      "types": "./src/db-schema/companion-memory.ts",
+      "import": "./src/db-schema/companion-memory.ts",
+      "default": "./src/db-schema/companion-memory.ts"
+    },
+    "./db-schema/companion-sandbox": {
+      "types": "./src/db-schema/companion-sandbox.ts",
+      "import": "./src/db-schema/companion-sandbox.ts",
+      "default": "./src/db-schema/companion-sandbox.ts"
+    },
+    "./db-schema/enums": {
+      "types": "./src/db-schema/enums.ts",
+      "import": "./src/db-schema/enums.ts",
+      "default": "./src/db-schema/enums.ts"
+    },
+    "./db-schema/evidence": {
+      "types": "./src/db-schema/evidence.ts",
+      "import": "./src/db-schema/evidence.ts",
+      "default": "./src/db-schema/evidence.ts"
+    },
+    "./db-schema/identity": {
+      "types": "./src/db-schema/identity.ts",
+      "import": "./src/db-schema/identity.ts",
+      "default": "./src/db-schema/identity.ts"
+    },
+    "./db-schema/job": {
+      "types": "./src/db-schema/job.ts",
+      "import": "./src/db-schema/job.ts",
+      "default": "./src/db-schema/job.ts"
+    },
+    "./db-schema/learning-exposure": {
+      "types": "./src/db-schema/learning-exposure.ts",
+      "import": "./src/db-schema/learning-exposure.ts",
+      "default": "./src/db-schema/learning-exposure.ts"
+    },
+    "./db-schema/learning-metrics": {
+      "types": "./src/db-schema/learning-metrics.ts",
+      "import": "./src/db-schema/learning-metrics.ts",
+      "default": "./src/db-schema/learning-metrics.ts"
+    },
+    "./db-schema/learning-runs": {
+      "types": "./src/db-schema/learning-runs.ts",
+      "import": "./src/db-schema/learning-runs.ts",
+      "default": "./src/db-schema/learning-runs.ts"
+    },
+    "./db-schema/learning-sessions": {
+      "types": "./src/db-schema/learning-sessions.ts",
+      "import": "./src/db-schema/learning-sessions.ts",
+      "default": "./src/db-schema/learning-sessions.ts"
+    },
+    "./db-schema/note": {
+      "types": "./src/db-schema/note.ts",
+      "import": "./src/db-schema/note.ts",
+      "default": "./src/db-schema/note.ts"
+    },
+    "./db-schema/outbox": {
+      "types": "./src/db-schema/outbox.ts",
+      "import": "./src/db-schema/outbox.ts",
+      "default": "./src/db-schema/outbox.ts"
+    },
+    "./db-schema/search": {
+      "types": "./src/db-schema/search.ts",
+      "import": "./src/db-schema/search.ts",
+      "default": "./src/db-schema/search.ts"
+    },
+    "./db-schema/session": {
+      "types": "./src/db-schema/session.ts",
+      "import": "./src/db-schema/session.ts",
+      "default": "./src/db-schema/session.ts"
+    },
+    "./db-schema/understanding-projection": {
+      "types": "./src/db-schema/understanding-projection.ts",
+      "import": "./src/db-schema/understanding-projection.ts",
+      "default": "./src/db-schema/understanding-projection.ts"
+    },
+    "./db-schema/validation-v2": {
+      "types": "./src/db-schema/validation-v2.ts",
+      "import": "./src/db-schema/validation-v2.ts",
+      "default": "./src/db-schema/validation-v2.ts"
+    },
+
+    "./card-generation-v2-pipeline": {
+      "types": "./src/card-generation-v2-pipeline/index.ts",
+      "import": "./src/card-generation-v2-pipeline/index.ts",
+      "default": "./src/card-generation-v2-pipeline/index.ts"
+    },
     "./companion-asr-contracts": {
       "types": "./src/companion-asr-contracts.ts",
       "import": "./src/companion-asr-contracts.ts",
@@ -193,6 +324,7 @@
     }
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
     "ts-fsrs": "4.6.0",
     "zod": "^3.23.8"
   },

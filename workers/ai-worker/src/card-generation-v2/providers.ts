@@ -29,19 +29,19 @@ import type {
   ExtractedKnowledgeAtom,
   AtomExtractionProvider,
   SourceBlockInput,
-} from "../../../../apps/api/src/modules/card-generation-v2/planner-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import type {
   AuthoringProvider,
   AuthoringProviderInput,
   AuthoringProviderOutput,
-} from "../../../../apps/api/src/modules/card-generation-v2/author-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import type {
   GroundingCriticProvider,
   GroundingCriticInput,
   PedagogyCriticProvider,
   PedagogyCriticInput,
   ExistingObjectiveSummary,
-} from "../../../../apps/api/src/modules/card-generation-v2/critic-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   parseGroundingCriticReportV2,
   parsePedagogyCriticReportV2,
@@ -537,6 +537,7 @@ export class PedagogyCriticLLMProvider implements PedagogyCriticProvider {
         presentation: c.presentation,
       })),
       existingObjectives: input.existingObjectives,
+      softPrecheckIssues: input.softPrecheckIssues,
       generationRequest: {},
     });
     const raw = await this.runtime.chatJson(PEDAGOGY_PROMPT_VERSION, buildPedagogySystemPrompt(), user);
@@ -661,15 +662,40 @@ function finalizePedagogyReport(raw: Record<string, unknown>): PedagogyCriticRep
     }, "[v2-pedagogy] report parse failed");
     throw parseError("pedagogy", err);
   }
-  const { reportHash: _, ...withoutHash } = parsed;
-  const computed = computePedagogyReportHash(withoutHash);
+  const { reportHash: _drop, ...withoutHash } = parsed;
+  // 2026-08-25（AI 设计审计修复）：verdict↔hardIssues 一致性归一——与
+  // finalizeGroundingReport 对称。弱基座模型可能返回自相矛盾的
+  // {verdict:"keep", hardIssues:["front_leaks_answer"]}；方案 20 §12.3 规定
+  // hard failure 不可被 soft verdict 覆盖。带 non-empty hardIssues 的候选
+  // 强制降为 drop；集合级 setIssues 非空时整体 pass 压为 fail。归一化在
+  // reportHash 计算之前完成，哈希始终绑定归一化后的内容。
+  const perCandidate = parsed.perCandidate.map((p) =>
+    p.hardIssues.length > 0 && p.verdict === "keep"
+      ? { ...p, verdict: "drop" as const }
+      : p,
+  );
+  const verdict = parsed.setIssues.length > 0 && parsed.verdict === "pass"
+    ? ("fail" as const)
+    : parsed.verdict;
+  const normalized = { ...withoutHash, perCandidate, verdict };
+  if (verdict !== parsed.verdict || perCandidate.some((p, i) => p !== parsed.perCandidate[i])) {
+    logger.warn({
+      stage: "pedagogy",
+      modelVerdict: parsed.verdict,
+      normalizedVerdict: verdict,
+      demoted: parsed.perCandidate
+        .map((p) => ({ id: p.candidateId, v: p.verdict, hard: p.hardIssues }))
+        .filter((p, i) => perCandidate[i].verdict !== p.v),
+    }, "[v2-pedagogy] verdict/hardIssues inconsistency normalized");
+  }
+  const computed = computePedagogyReportHash(normalized);
   logger.info({
     stage: "pedagogy",
-    verdict: parsed.verdict,
-    perCandidate: (parsed as unknown as { perCandidate?: Array<{ candidateId: string; verdict: string }> }).perCandidate?.map((p) => `${p.candidateId}:${p.verdict}`),
+    verdict,
+    perCandidate: perCandidate.map((p) => `${p.candidateId}:${p.verdict}`),
     recommendedFinalCount: parsed.recommendedFinalCount,
   }, "[v2-pedagogy] report parsed");
-  return { ...parsed, reportHash: computed };
+  return { ...normalized, reportHash: computed };
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────

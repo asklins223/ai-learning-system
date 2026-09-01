@@ -204,6 +204,8 @@ export async function createGenerationRunV2(
         // 的 per-run 采样配置会被静默忽略。promptVersion 与 workers
         // card-generation-v2/prompts.ts 的 CARD_GENERATION_V2_PROMPT_VERSION
         // bump 同步；本数组参与 semanticSpecHash，是审计闭包的一部分。
+        // 2026-08-24（§4.5）：v3 —— pedagogy 增补中文语义裁决基准（atomicity/
+        // 改写式泄题自确定性 gate 降级 soft 后由 Critic 承担 hard 判定）。
         stageRuntimes: [
           {
             stage: "planner" as const,
@@ -211,7 +213,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v2",
+            promptVersion: "v3",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -221,7 +223,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v2",
+            promptVersion: "v3",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -231,7 +233,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v2",
+            promptVersion: "v3",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -241,7 +243,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v2",
+            promptVersion: "v3",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },

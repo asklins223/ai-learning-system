@@ -3,6 +3,7 @@ import { GripVertical, MessageCircle, Orbit, RotateCcw, Sparkles, X } from "luci
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import { useRoomStore, type CompanionPosition } from "../../app/room-store";
+import { resolveSceneMotionMode } from "../../scene/scene-motion";
 import { WindowLive2D, type WindowLive2DStatus } from "./WindowLive2D";
 
 gsap.registerPlugin(useGSAP);
@@ -103,7 +104,9 @@ function durationFor(mode: "full" | "lite" | "off", full: number) {
 export function CompanionPresence() {
   const surface = useRoomStore((state) => state.surface);
   const theme = useRoomStore((state) => state.theme);
-  const motionMode = useRoomStore((state) => state.motionMode);
+  const motionPreference = useRoomStore((state) => state.motionMode);
+  const reducedMotion = useRoomStore((state) => state.reducedMotion);
+  const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const companionOpen = useRoomStore((state) => state.companionOpen);
   const companionForm = useRoomStore((state) => state.companionForm);
@@ -134,7 +137,14 @@ export function CompanionPresence() {
   const sceneKey = surface ?? "room";
   const copy = SCENE_COPY[sceneKey];
   const formalAssessmentSilent = surface === "validation" && companionMoment !== "confirm";
-  const presenceHidden = onboardingOpen || formalAssessmentSilent;
+  // Task surfaces own the reading and action field. Keep the companion
+  // available only for the explicit validation-confirm moment; otherwise its
+  // visual presence can bleed through projected task content and compete with
+  // the user's focus.
+  const taskSurfaceQuiet = Boolean(surface) && !(
+    surface === "validation" && companionMoment === "confirm"
+  );
+  const presenceHidden = onboardingOpen || formalAssessmentSilent || taskSurfaceQuiet;
 
   useEffect(() => {
     // Position is deliberately not part of the persisted room slice. Every
@@ -335,6 +345,7 @@ export function CompanionPresence() {
       data-live2d-available={LIVE2D_RUNTIME_ALLOWED}
       data-surface={sceneKey}
       data-formal-silent={formalAssessmentSilent || undefined}
+      data-task-surface-quiet={taskSurfaceQuiet || undefined}
       aria-hidden={presenceHidden || undefined}
     >
       <div ref={anchorRef} className="companion-scene-anchor">

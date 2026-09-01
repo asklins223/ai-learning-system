@@ -36,6 +36,13 @@ test("否定前缀抵消：不开心/没通过 不触发 happy", () => {
   assert.equal(classifyCompanionReplyEmotion("这次没通过。").emotion, "neutral");
 });
 
+test("否定前缀抵消（2026-08-25 回归）：间隔否定不误判 happy", () => {
+  // "没有进步"、"不太棒"、"未达成"——否定词与关键词之间至多隔一个衬字。
+  assert.equal(classifyCompanionReplyEmotion("这学期没有进步。").emotion, "neutral");
+  assert.equal(classifyCompanionReplyEmotion("成绩并不太棒。").emotion, "neutral");
+  assert.equal(classifyCompanionReplyEmotion("这次任务并未达成。").emotion, "neutral");
+});
+
 test("未命中回落 neutral/0.30（03 合同 §5.2 兜底值）", () => {
   const r = classifyCompanionReplyEmotion("今天的复习安排就是这样。");
   assert.deepEqual(r, { emotion: "neutral", intensity: 0.3, matched: [] });

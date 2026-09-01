@@ -327,7 +327,12 @@ export async function updateCardPresentationV2(
       throw new CardGenerationV2ServiceError("stale_presentation", 409, "卡片版本已更新，请刷新");
     }
 
-    // leakage gate：presentation-only 变更仍必须重跑（§15.4/§17.6）
+    // leakage gate：presentation-only 变更仍必须重跑（§15.4/§17.6）。
+    // 2026-08-25（AI 设计审计修复，§4.5 认识论分工对齐）：此前这里是改写式
+    // 泄题的旧硬门（答案前 50 字符子串包含即 409），与生成管线的降级决定
+    // 不一致——「正面是否以改写方式泄露答案」是语义判断，正则子串匹配的
+    // 残余假阳不可归零。现只保留与 frontLeakageGate 同款的逐字照抄机械判定
+    // （压缩标点后 ≥12 连续字符同一）；改写式风险由候选审核页人工把关。
     const currentFront = (card.front ?? {}) as { cue?: string; context?: string; prompt?: string };
     const front = {
       cue: patch.front?.cue ?? currentFront.cue ?? "",
@@ -336,9 +341,15 @@ export async function updateCardPresentationV2(
     };
     const answerText = extractAnswerText(revision.canonicalAnswer);
     if (answerText && front.prompt) {
-      const promptLower = front.prompt.toLowerCase();
-      if (answerText.length > 20 && promptLower.includes(answerText.slice(0, 50).toLowerCase())) {
-        throw new CardGenerationV2ServiceError("front_leaks_answer", 409, "正面提示语包含答案内容，请修改");
+      const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}=]+/gu, "");
+      const compactFront = compact(`${front.cue} ${front.prompt}`);
+      const compactUnit = compact(answerText);
+      const leaksVerbatim = compactUnit.length >= 12
+        ? Array.from({ length: compactUnit.length - 11 }, (_, i) => i)
+            .some((i) => compactFront.includes(compactUnit.slice(i, i + 12)))
+        : compactUnit.length >= 8 && compactFront.includes(compactUnit);
+      if (leaksVerbatim) {
+        throw new CardGenerationV2ServiceError("front_leaks_answer", 409, "正面内容逐字照抄了答案，请修改");
       }
     }
 

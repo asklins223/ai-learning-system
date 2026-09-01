@@ -13,6 +13,7 @@ const phaseCopy = {
 export function SceneStatus() {
   const phase = useRoomStore((state) => state.phase);
   const mediaMessage = useRoomStore((state) => state.mediaMessage);
+  const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const loading = phase === "booting" || phase === "media-loading";
   const failed = phase === "media-fallback";
   const statusKey = `${phase}:${mediaMessage ?? ""}`;
@@ -33,6 +34,8 @@ export function SceneStatus() {
       role={failed ? "alert" : "status"}
       aria-live={failed ? "assertive" : "polite"}
       aria-atomic="true"
+      aria-hidden={onboardingOpen || undefined}
+      inert={onboardingOpen || undefined}
     >
       {loading ? <LoaderCircle className="scene-status__spinner" size={14} aria-hidden="true" /> : failed ? <AlertTriangle size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
       <span className="scene-status__copy"><strong>{title}</strong><small>{mediaMessage || phaseCopy[phase]}</small></span>

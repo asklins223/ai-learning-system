@@ -4,10 +4,28 @@
 >
 > 文档类型：审计报告 + 修复方案
 >
-> 版本：0.4
+> 版本：0.5
 >
 > 日期：2026-08-23（审计）/ 2026-08-24（复核回写）/ 2026-08-24（二次复核）/
-> 2026-08-24（三轮对抗验证与域补扫）
+> 2026-08-24（三轮对抗验证与域补扫）/ 2026-08-25（四轮对抗验证与方案裁决）
+>
+> 修订 v0.5（2026-08-25 四轮）：约 45 个独立代理分五路工作——(1) 32 条登记项
+> （A1-A7/D1-D5/N5-N24）逐条以当前工作树重验并专审方案本身；(2) 协调审查三视角
+> （同文件归批/语义冲突/验收经济性）；(3) 盲区补扫（desktop 深审、shared 合同
+> 对账、在途 diff 审计；understanding-v3/review 域经主会话抽查无 P2 以上发现，
+> 拓扑为实时投影无缓存失联）。结论：**32 条无一被推翻**（29 完全属实、3 部分属实
+> ——A-2/D-4/N-24 均为定性范围修正而非机制否定）；**方案级硬伤 12 处**（D-2/D-3/
+> D-4/N-6/N-7/N-10/N-12/N-15/N-16/N-17/N-21/N-24 判 flawed，照原案实施会失败或
+> 自毁，修正案见各条「四轮验证 08-25」就地标注；A-2 另有定位失效——台账所指
+> workers 路径不存在）；**同区域新缺陷 7 处**随条目登记（最重要：在途未提交改动
+> 已把 structured_bundle 内嵌 relation part 激活为必现断链——服务端已发 "relation"
+> 而 web 仍检查 "relation_canvas"，推翻「bundle 可用」前提；其余见各条标注）。
+> 盲区补扫新发现 R4-N25…N28（desktop，§12）与 R4-N40…N44（shared 合同，§12）
+> 及 R4-N50（0183 删表遗留三条活代码断链，含设置页导出按钮必炸，P2）。协调审查
+> 发现 §8 批次表与自身捆绑警告矛盾（N-5 排一批 N-15 留三批）、0171 函数重写被拆
+> 三批将致三次整函数替换、N-21…N-24 完全缺席批次表——修正见 §8 末「第四轮批次
+> 修正」。本轮逐条重验边界：B1-B4/C1-C8 未再逐条重验（二三轮已深验且标注新鲜），
+> 其组合效应由协调审查覆盖。
 >
 > 修订 v0.4（2026-08-24 三轮）：(1) **对抗验证**——§10 的 15 条待验新发现逐条
 > 以反驳立场再验，15 条全部成立无一推翻；其中 N-7 错误码机制修正（400 合同拒绝
@@ -151,6 +169,23 @@
   否则未来重构仍可能无声回退。另注：当前 web 编辑表单实际只提交
   objectiveStatement+front.prompt，四字段的即时爆炸半径有限，但合同级开放
   （candidateEditablePatchV2Schema），P1 维持。
+- **四轮验证 08-25【修复实现逐点确认；余项测试的方案判 flawed 两处】**：修复
+  实现与下游一致性全部复核成立（applyPatch 现 :336-366；门禁 deterministic-gates.ts:
+  115-118 同样校验嵌套值；单测 helpers 23/23、review-service 19/19 实跑通过；实库
+  18 候选行全部嵌套形态无污染数据）。**「补四步 e2e」原案两坑**：(1) 「recheck 通过」
+  被设为硬前提不可靠——确定性模式 grounding 合同 verdict=pass 要求 evidenceManifest
+  非空（handler:1939-1943），C15/C16 现状只断言 [passed,failed]；(2) 新建独立测试文件
+  违反本目录约束——worker outbox claim 全局、集成测试必须单文件串行（e2e-subset 文件头
+  :42-47 明示）。**修正案**：不新建文件，直接扩展现有 C15 用例（其 patch 已含
+  explanation 编辑）追加三段断言——edit 后 SELECT objective_draft 断言
+  #>>'{learningSupport,explanation}' 为新值且顶层键 IS NULL；recheck 后按本文件既有
+  forceCandidatesPassed 代设惯例置 passed 再以 revision 2 的 candidateRevisionHash 调
+  revealCandidateV2 断言返回新值；keep+activate 后查 learning_objective_revisions_v2.
+  learning_support 为新值。估值上调至 0.5d（原 0.25d 未含激活前置装配）。定级建议：
+  bug 本体已修，残余为回归锁缺失，排期权重降 P3，但在 N-20 表单扩展前落地是低成本
+  防线。附带发现（范围外登记）：learning_objective_revisions_v2 有 97/103 行
+  learning_support 是双编码字符串（v2-card-fixture.ts:102 的 JSON.stringify 种子写法），
+  不影响运行时但值得清理。
 
 ### A-2【P1】关系题（relation_canvas）渲染断裂，用户看到空白
 
@@ -204,6 +239,27 @@
   同构化需同时约束 relations 路径取单边子集或拒绝；③ 一致性测试落地建议把
   TaskRenderer 改为导出 kind↔组件注册表对象再 switch，跨包断言无需解析源码。
   当前工作树无任何止血动作。
+- **四轮验证 08-25【部分属实；三处方案级修正，并发现 bundle 断链已被在途改动
+  激活为必现】**：(1) **位置失效**——台账所指 workers/ai-worker/src/handlers/
+  run-planner.ts 文件不存在；实际顶层透传点在 apps/api/src/modules/learning-runs/
+  run-planner.ts:516-522、bundle part 映射在同文件 :483-490。(2) **【新发现·必现】
+  工作树未提交改动已重写 bundle 分支（run-planner.ts:462-508）：内嵌 relation part
+  现映射为 kind "relation"+publicNodeLabels，而 web StructuredBundleTask.tsx:45/:98/
+  :114 仍检查 "relation_canvas"→relationPart=null→:133 早退渲染「这道组合题缺少完整
+  结构」——structured_bundle 在当前工作树整体不可作答**，推翻「断裂仅独立变体、
+  bundle 可用」前提；服务端正向 shared 合同收敛已在进行中（配套 run-planner.test.ts:
+  333-352），web 是唯一缺口（desktop 两处实现均正确）。(3) 「comparison 天然可玩」
+  失真——节点数=comparison.rows.length，rows≥3 即产 3+ 节点。**修正案（四步）**：
+  ① 服务端止血走现成 null 惯例而非新回退代码——两个 relation 生成器在「节点≠2 或
+  requiredEdges≠1」时返回 null，planV2Run 既有 structured=null→text 分支自动接管；
+  ② 同批补 web 最小对齐：TaskRenderer 加 case "relation_canvas"→RelationTask +
+  StructuredBundleTask.tsx 与 web contracts.ts 把 part kind 字面量改 "relation"；
+  ③ 一致性测试按原案：TaskRenderer 导出 kind↔组件注册表对象再 switch，断言键集 ⊇
+  taskInteractionSchema 与 structuredPartPublicSchema 两个 discriminatedUnion 判别值
+  全集；④ 长期收敛裁决：维持 wire 顶层 relation_canvas（shared 合同与桌面端已定型，
+  反向改名需迁移合同且破坏 desktop），方向定为「前端补齐合同形状」。降 P2 成立且
+  不应再低：入口双重休眠+逃生通道存在+桌面免疫，但 API 合同开放且本区域正被在途
+  改动活跃触碰，修复必须先于任何 repair 入口接线。
 
 ### A-3【P2】关系题节点显示原始哈希串
 
@@ -228,6 +284,19 @@
   复用现成的 `flattenAnswerUnits`（run-critic.ts:268 已实现并导出）把 unitId 映射
   到单元文本截断作标签；前端兜底改「概念 N」时对齐桌面既有 indexedPublicLabel
   惯例保持双端一致。
+- **四轮验证 08-25【属实；方案四点补强，并发现同路径更重缺陷——kind 词表错位】**：
+  **【新发现·建议独立登记 P2】实库候选 draft 证实 relations 数据的 kind 词表与评估侧
+  错位（kind:"supports" 不在 worker 评估词表）——只修标签会交付一道带中文标签但
+  永远判错的题；relations 变体从「不可读」恶化为「必错且不可判」，不应被本条的
+  标签修复掩盖**。修法：确定性门禁（deterministic-gates）新增 relation kind 白名单
+  校验（fail-closed）+ relationKindToEdge 补全映射或对未知 kind 整条丢弃。原案四点
+  补强：(a) flattenAnswerUnits 映射后 trim+slice(0,60)，空串回退「概念 N」（服务端
+  兜底，避免违反 publicNodeLabels 合同 z.string().min(1)）；(b) miss 策略按模块头部
+  「不伪造」惯例 fail-closed：端点不在映射中的边整条剔除，剩余节点<2 或边数=0 返回
+  null 回退开放回答——unitId 引用只有 LLM 提示词约束、无服务端校验，miss 是真实
+  可能；(c) 双端名词统一需显式决定：桌面实参是「节点」不是「概念」，要么双端都改
+  「概念 N」（desktop 改三处调用实参）要么都「节点 N」，勿各说各话；(d) 实施顺序
+  维持 A-2 止血在前。P2 维持。
 
 ### A-4【P2】repair 目标语义错位：想修错反而拿不到修复题
 
@@ -260,6 +329,21 @@
   无 repair 生成入口）；(d) 短期案里 repair 继续映射 structured 应是有意识决定
   ——若认为 ordering/relation 不足以承载修复语义，短期更如实的做法是映射回
   adaptive（开放回答 repair 角度池本含「找出哪里不牢靠」等三角度）。
+- **四轮验证 08-25【属实；方案裁决：短期案定死 adaptive 分支；发现同区域
+  retry_prepare 新缺陷】**：(1) 短期两选项中「继续 structured+UI 注明」实质更劣——
+  ordering 题只是乱序切句与薄弱点无关、relations 会触发 A-2/A-3 缺陷、还要写注记；
+  **直接裁决为删除 new/page.tsx:151 与 :186 两处三元映射**，goal=repair 落入默认
+  adaptive——GOAL_PROMPT_ANGLES.repair 三角度真实承载修复语义，零新增代码且切断
+  A-2 空 relation 变体唯一触发链。(2) 正式案维持确定性生成是对的（LLM 方案会在
+  createRunV2 同事务引入分钟级调用复刻 A-6 反模式），但输入预期下调：
+  contradictionRules 全仓无生产者、历史弱项无查询管道，第一版实际只能依赖 optional
+  的 misconception。(3) **【新发现】retry_prepare（run-service.ts:1872）从 run.origin
+  读 responsePreference 但存储侧从不写入——structured run 在 recoverable_error 重试时
+  静默变 adaptive**；采 adaptive 短期案可使其无害化，但必须显式登记否则未来恢复
+  structured 映射时变成隐性坑。(4) GOAL_INTENT 错位只在正式案落地时才改
+  （TaskIntent.REPAIR），短期 adaptive 下 explain+repair 角度池自洽、勿顺手改。
+  P2 维持可辩护：入口休眠支持降 P3，但修复成本极低+与 A-2 叠加白屏链+合同公开，
+  整批处理合理。
 
 ### A-5【P2】preferredStrategies 是死字段，用户偏好无效
 
@@ -284,6 +368,21 @@
   无效**——有效修法须同时把偏好传入 buildAuthorUserPrompt（或在 executeAuthor 加
   偏好感知的确定性映射/回退），且 planner+author 两条 prompt 都纳入单测断言
   （原案只要求断言一处）。
+- **四轮验证 08-25【属实；方案判 acceptable 但「双 prompt 注入」修正为「仅 author
+  user prompt」】**：planner 半边没有落点且有反作用——planner 输出合同
+  （ExtractedKnowledgeAtom/PlannedObjectiveV2）不存在 strategy 字段，偏好塞给
+  planner 只能间接扭曲 knowledgeFormHint，而 knowledgeForm 另有独立语义，属负收益。
+  **修正案**：(1) AuthoringProviderInput 增加 preferredStrategies?: CardStrategyV2[]，
+  handler 从 semanticSpec.semanticRequest 取值透传（processCardGenerationPlan 与
+  loadV2RunInputs 复用路径同改）；(2) buildAuthorUserPrompt 增加固定措辞段（软偏好
+  声明），**不改 buildAuthorSystemPrompt、不 bump PROMPT_VERSION**——author system
+  prompt 是版本化审计闭包（头部注释明示 bump 必须同步 apps/api stageRuntimes.
+  promptVersion 种子参与 semanticSpecHash），落 user prompt 零审计闭包联动；
+  (3) 单测 node:test 直接断言 buildAuthorUserPrompt 含/不含偏好（纯函数现成可测）；
+  (4) 可选顺手项：providers.ts:540 把 semanticRequest 传给 pedagogy 的既有数据槽
+  （该插槽已内置但被硬编码 {}）；(5) UI 文案与桌面硬编码均无需改动。P2 维持：实库
+  6 个 run 中 3 个带真实偏好、103 张已发布卡全部 recall——损害真实；富交互渲染器
+  进入默认流后此字段成为产品级杠杆，未修应升 P1。
 
 ### A-6【P2】长事务行锁横跨分钟级 LLM 管道 + 重试重放已付费阶段
 
@@ -312,6 +411,17 @@
   定义；(3) 更便宜的止血存在——grounding 单阶段进程内限次重试即可消除大部分
   token 双花，可作不等状态机的过渡措施。outbox 已有 lease_token+status CAS 范式
   可复用于最终提交 CAS，与库内惯例契合。
+- **四轮验证 08-25【属实；方案 acceptable——三层修正：止血升格必做、状态机
+  claim 步骤有约束坑、工时改 2-3 天】**：(1) **「V2 当前未激活、实时风险低」的降级
+  前提已被推翻**（flag 三处均 true 且容器生效；实库 7 次 attempt 的失败 job 佐证重试
+  回路运转）——grounding 进程内限次重试从「可先做」升格为近期必做，同时把 handler:
+  133/:656 等处已失实的「V2 未激活」注释改为如实描述；(2) 两阶段方案 claim 步骤写
+  status='processing' 但 runs 表 CHECK 约束不含该值且无 claimed_by 列——照案直施违反
+  约束，须补迁移扩 cg_v2_status_chk 或复用现有状态+新 lease 列；(3) 工时按修正清单
+  改 2-3 天而非 1 天（含幂等 upsert、中间态读方契约、续租实现；入口实为四条算上
+  bounded_repair→recheck）。分层实施维持：先止血（小时级）后两阶段，单人开发不必
+  跳步。读方契约结论：候选提前可见本身可接受（isCandidateReviewReadyV2 已挡激活），
+  只需前端把 quality_state=authored/checking 渲染为进行中。
 
 ### A-7【P2】激活信任 draft 内 rubricHash 不复算
 
@@ -333,6 +443,21 @@
   家族一致。实施注意：两处都要改（建议提一个事务内共享助手）；指标可复用现存
   `ailearn_surface_revision_mismatch_total` 计数器。「十几行改动」估计准确，
   无更简替代（废弃存储哈希反而牵动 candidateRevisionHash 闭包）。
+- **四轮验证 08-25【属实；方案 acceptable——一处类比勘误 + 一处自毁路径封堵】**：
+  (1) 类比勘误：target-snapshot-adapter.ts:464 是「只复算不比对」（snapshot hash 本是
+  写入时全新计算），比对式先例应引 author-service.ts:112-120；(2) **唯一真实自毁
+  路径在实现口径：复算输入必须整对象剥 rubricHash（含 version 字段）参与，不能照抄
+  activation-service:766 的窄类型断言挑字段——否则口径错位造成 100% 假阳性、
+  fail-closed 变成全线拒绝激活的事故**。修正案：packages/shared/src/card-generation-
+  v2-hashing.ts 导出唯一 stripRubricHashV2（参数 ObjectiveRubricV2 强制整对象剥法）+
+  verifyObjectiveRubricHashV2；activation 内提纯助手对四组件统一重算+比对（两路径
+  共用）；(3) 指标不复用 surface_revision_mismatch_total（其 help 文本明示 stale
+  read 场景，复用会误归因监控告警）——新增专用计数器
+  ailearn_candidate_component_hash_mismatch_total{component="rubric"} 或至少加独立
+  consumer 标签；(4) 无需算法版本号：算法单代未变（2026-08-15 引入）、序列化器 v1
+  冻结、18/18 存量全匹配、V1 已清退——加版本属过度设计。顺手项：target-snapshot-
+  adapter.ts:63 与 author-service.ts:237 两份私有 stripRubricHash 收敛到 shared 单一
+  实现。P2 维持。
 
 ---
 
@@ -635,6 +760,16 @@ revision CAS 前后端、人格注入 prompt——均确认真实工作。人格
   精确前景：**第一个打开桌宠全局开关的用户会在当天 01:00 触发全站调度失败**
   （该用户及之后所有用户的日记入队每分钟抛 42P01 被 warn 吞掉）。热修紧迫度不变：
   该开关就是 companion 设置页的一个普通选项，触达只是时间问题。
+- **四轮验证 08-25【属实；方案并入 0185 单次函数重写（N-14）】**：0171 文件与
+  实库函数体逐字一致、代码零漂移。实库数据侧已重建（108 用户/工作区严格 1:1、
+  account_state 0 行），多 ws 支撑事实不可复现但结构性证据充分。方案修正三点：
+  (1) 内层标量 SELECT…LIMIT 1 改 `FOR v_workspace_id IN SELECT workspace_id FROM
+  workspace_members WHERE user_id=v_user_id AND left_at IS NULL LOOP`，循环体原样
+  保留（贴近现有 plpgsql 风格）；(2) :81 的 learning_cards 必须换成
+  learning_cards_v2 而非仅删除——写侧统计已用 v2，只删不换会把报错退化成无声漏判；
+  (3) :115 v_inserted 在 ON CONFLICT 分支仍自增，重写时用 GET DIAGNOSTICS 取真实
+  计数。与 C-2/C-3/C-6/N-11(库侧) 合并为单条 0185 migration 一次重写（§8 批次修正）；
+  「活跃 workspace」定义为 left_at IS NULL 即可（workspaces 表无软删列）。
 
 ### C-4【P2】`COMPANION_JOURNEY_V2` 不在 .env.example
 
@@ -803,6 +938,24 @@ Commit（epoch 复验）→ schedule 恰一 successor → 返回刷新：闭环�
   (1) 测试现状为零覆盖（useLearningRun.test.ts 只测纯函数；TextResponseTask 只测
   锁定成功路径），409/断网交互测试必须补；(2) 重试按钮复用原提交键即可，注意
   解锁瞬间的单飞防双发；(3) 文案「草稿已保存」基本准确（800ms 防抖落服务端草稿）。
+- **四轮验证 08-25【属实；方案 acceptable——四处修正，两处原案指令有害】**：
+  (1) **「重试复用原提交键」是有害指令**：失败尝试根本没写幂等账本（账本插入在成功
+  事务内 run-service.ts:2708），复用无去重收益；而「提交实际成功但响应丢失」场景下
+  复用旧键+用户已编辑内容会命中 idempotency_conflict 409（:2405），再被 conflict 分支
+  误报为「其他设备更新」——修复自身制造新困惑。**保持现状每次尝试新建 randomUUID**
+  （useLearningRun.ts:487），双发防护改在 hook 内 single-flight（仿 refreshInFlightRef
+  先例 :157/:208）；(2) **「submitError state 变化作复位信号」在连续同类失败下自锁**：
+  同一错误字符串两度 set 不产生 state 变化、复位 effect 不触发——被修的 bug 在修法里
+  复发。改为单调递增 submitFailureTick 计数（catch 中同时 setError 与 tick++，每次
+  尝试开始清空文案）；(3) 穿透实现：ActiveTaskView 给 TaskRenderer 加可选 number prop，
+  经 sharedProps 一行下发，各 renderer 复位 effect 依赖改 [task, submitFailureTick]
+  （bundle 在 :74-78 分支同加）；勿用 remount-key（丢 selectedTokens/焦点）；(4) 文案
+  改「提交失败，请重试，你的作答还在本题上」——「草稿已保存」承诺过强（末次击键
+  <800ms 防抖未落/PUT 在途/失败后 pending 无重试触发器三个窗口下均为假话）。conflict
+  识别用 ApiError.status===409 一刀切 + refresh()，不逐 code 特判（artifact_already_
+  locked 实为好消息——答案已在库，统一 refresh 后界面自然翻到 assessing）。测试：
+  renderHook + vi.mock 覆盖 409→refresh 被调、断网→通用文案、连续同错两次→第二次仍
+  复位；TextResponse 与 StructuredBundle 各补一条 tick 解锁用例。P1 维持。
 
 ### D-2【P1】commit 冲突 fail-closed 误入不可自愈死局
 
@@ -839,6 +992,24 @@ Commit（epoch 复验）→ schedule 恰一 successor → 返回刷新：闭环�
   刷新；(3) **顺带补 end-from-recoverable_error 的白名单缺口**（否则修复前用户连
   手动脱困都不可能）；(4) 验收测试覆盖「注入 epoch 漂移→retry 必败→终态 stale」
   与「并发用户 end 后结算不再翻转终态」（即 D-3 用例）。
+- **四轮验证 08-25【属实；方案判 flawed——两处照案实施会自毁，五点修正】**：
+  (1) **致命执行坑：terminalReasonCode='commit_conflict_stale' 必须同步扩展共享契约
+  三处闭联集**（LearningRunTerminalReasonCodeV1 类型 learning-run-contracts.ts:303、
+  V1 zod terminal_without_result reasonCode 枚举 :1700、V2 zod
+  learning-run-v2-contracts.ts:262）——漏改则终态 run 的 result 端点直接 500
+  （run-service.ts:1376 严格 parse）；(2) **分流形态不能按 CriticOutputError 类型
+  判定**：gatherCriticInput 在评估路径同样抛它（:625/:628/:646），会误伤 assessment
+  阶段错误；本库惯例是 DomainError 子类 + instanceof（同文件 :235/:397 先例），应新建
+  CommitEpochConflictError 仅由 revalidateV2CommitEpochs 五个 throw 点抛出；(3) 「追加
+  领域事件」落点应为复用 appendRunEvent 写 'learning_run.stale'（DB CHECK 已放行，
+  tick:1579-1610 既有函数）——选 ended 会造成 phase='stale' 却发 ended 事件的混合表述；
+  (4) end 白名单语义裁决：把 'recoverable_error' 加入 run-service.ts:1651 数组即视为
+  普通 user_ended（非 abandon）——recoverable_error 下迟到写入已被 tick:352/:1022 的
+  phase 门静默挡掉，无需 epoch 前移；(5) 严重度措辞修正：「完全被困」高估——run 页内
+  确无出口，但无活跃 run 唯一约束、入口可自由重建，可弃页脱困（代价是丢会话进度）；
+  P1 维持，理由应表述为「不可自愈死局+误导性重试+永久僵尸 run」。另注：今日提交
+  fd6a96e 重构了 run-routes/run-action-availability 但均未触及死局。验收补一条：
+  「stale 后 GET result 返回 terminal_without_result 且 zod parse 通过」防契约回归。
 
 ### D-3【P2】失败结算 UPDATE 仅按 id，可与用户 end 竞态翻转终态
 
@@ -855,6 +1026,25 @@ Commit（epoch 复验）→ schedule 恰一 successor → 返回刷新：闭环�
   并产生 result——危害较轻但同型），宜与失败写点一并加 phase 白名单条件统一
   防线。0 行放弃分支应有 stderr 日志观测竞态频率；测试覆盖并发 end×结算两序。
   与 D-2 合并实施合理。
+- **四轮验证 08-25【属实；方案判 flawed——范围不足且正解是加锁而非逐点 WHERE】**：
+  (1) **「两处」远低估：同文件共 9 处同型裸写**——尤其 critic 回写事务（:537）零
+  phase 校验且窗口横跨整个 HTTP 调用，用户正在等待评估、end(abandon) 是该相位广告的
+  一级动作，可达性远高于 :1245；遗漏它修复形同虚设；(2) **成功结算路径的正解不是
+  「最终 UPDATE 加白名单」而是三处门读点统一加锁**——:348、:537、:1019 的 run SELECT
+  追加 .for("update") 各一行。理由：① 符合本库既有惯例（§13.2.1 注释明言写路径用
+  Run row lock；F15·②/F16·② 前轮刚用同手法修同类竞态，:2918 还写着「结算/commit
+  保持热行写锁」——tick 是漏网的旁路）；② 锁把整个结算事务对用户 end 原子化，
+  下游 8 处裸写一次性全部安全，无需逐点 WHERE+行数判定+中止副作用链；③ 死锁安全
+  （end 与 tick 都以 run 行为首个锁，后续 evidence 锁已有稳定排序）。注意 :1245 的
+  schedule/canonical/投影副作用全部发生在 UPDATE 之前——仅在写点加 WHERE 且不查行数，
+  ended run 仍会产出完整调度副作用，防线必须前移到门读点。(3) 白名单具体值裁决：
+  失败结算 WHERE phase IN ('assessing','committing')（该写点在新事务无前置读可升级
+  锁）；0 行判定必须 .returning({id}).length（drizzle update 0 行不抛错），且 0 行时
+  连带跳过 appendRunEvent('learning_run.recoverable_error') 防向 ended run 写误导事件；
+  mark processed 仍执行终结命令行。(4) 「retry_commit 静默 no-op」表述修正：错误翻转后
+  实为无限复败循环（epoch 漂移场景）、retry_assessment 与 end 为 409——结论不变但验收
+  测试应断言循环。定级：不应降级——critic 回写路径窗口达数十秒+三条出路全失效，与
+  D-2 合并按 P1 批次实施恰当。
 
 ### D-4【P2】`generation ?? 0` 兜底掩盖上游数据缺失
 
@@ -881,6 +1071,22 @@ Commit（epoch 复验）→ schedule 恰一 successor → 返回刷新：闭环�
   /reviews/v2/queue 已实现完全相同的严格投影，让 web review 页迁移到该端点即可
   自然消灭两处兜底，无需为 legacy 端点发明新错误码；若保留原案则错误码方案可
   接受但需补测试（当前该异常路径零测试）。
+- **四轮验证 08-25【部分属实；方案判 flawed——三个候选方案全部推翻，正解是最小
+  删除】**：(1) **「迁 /reviews/v2/queue」低估成本**：v2 合同缺 intervalDays/reviewReason/
+  cardId/total 与数字分页语义，页面三处直接渲染依赖这些字段；且 projectReviewQueueV2
+  是批量致命投影（单行违规→整个队列 409），正是二次复核自己警告的模式；(2) 原案
+  SCHEDULE_GENERATION_MISSING 同样批量致命且目标路径不可达，补测试收益为零；
+  (3) **「当前写入路径全部 ≥1」前提也不成立**：attempt-service.ts:516 与 validation/
+  session-service.ts:2158 两处 insert 均缺 generation 字段（前者无调用方、后者被谓词
+  过滤，不影响近 P3 定级但拆出独立条目）。**修正案（三步最小方案）**：① 直接删除两处
+  `?? 0`（列 NOT NULL 且 drizzle 类型为 number，删除后输出逐字节不变——零行为变化、
+  零测试负担，「消灭误导性代码」与「改动风险」的最优点）；② 不迁移页面、不加错误码
+  （均为不可达路径上的过度工程）；③ attempt-service.ts:516 后继插入缺 generation 另立
+  独立小条目（显式携带 schedule.generation+1，与 run-processing-tick.ts:1516 惯例一致，
+  attempts UI 接线前落地——否则每次完成复习都铸造一条能入队的 gen-0 行，同时触发 web
+  死胡同与桌面 v2 队列 409）；4 条存量 gen-0 种子行走正常数据清理。定级维持近 P3。
+  另注协调审查联动：若采迁移路线会与 D-5 的「web=V1」文档裁决冲突制造新失真——本
+  修正案同时消除该冲突。
 
 ### D-5【P2】V2 wire 合同漂移：/v2 端点全套无人消费
 
@@ -909,6 +1115,19 @@ Commit（epoch 复验）→ schedule 恰一 successor → 返回刷新：闭环�
   方案细节勘误：「事件流切 /v2」不存在对应端点——SSE 只有单一 events 路由，
   V2 绑定靠 snapshotId 查询参数而非独立 /v2 路由。定级降为「文档如实化」项，
   不再是缺陷级 P2。
+- **四轮验证 08-25【属实；文档裁决维持——但落笔内容须修正四处，照抄会制造新
+  失真】**：(1) 「七个 /v2 端点」计数误导：learning-run 家族恰为 7，但整库桌面消费面
+  约 18 条路由/24 调用点，落文档须写真实清单；(2) **「web=V1 兼容客户端」定性不准**：
+  web 实为混合态（V2 create + V1 学习运行执行线 + 多个 /v2 只读端点），照抄进 16 号
+  会制造第二个假合同叙事；(3) **「SSE 只有单一 events 路由」以偏概全**：仅对
+  learning-run 成立；card-generation 存在独立 V2 SSE 流（routes.ts:238），不可写成
+  全称判断；(4) 台账漏掉一个真实双向沉默残留：web lib/api.ts 五个 legacy 卡生成方法
+  指向已删除路由族（见 §12 R4-N40），应随裁决一并登记。最小四条文档清单：(i) 双客户端
+  裁决+真实端点清单+两条维护规则（returnTargetV2/fallbackTargetV2 不得删除、V1
+  learning-run 端点保留至 web 迁移决策）；(ii) 修正 SSE 记载分域表述；(iii) 登记 web 五个
+  僵尸方法为死合同（首选就地注释 deprecated 待清理而非硬删——card-generation-partial-
+  ui-contract.test.ts:64-66 等测试锚定其存在，硬删破测试）；(iv) 可选一句话记录两端
+  传输信任模型差异（desktop 有显式 resync_first 重同步语义，web 靠浏览器轮询自愈）。
 
 ### D-6【P2】hint 曝光按 run 全局查询，污染后续任务快照哈希
 
@@ -1084,6 +1303,57 @@ N-18 pet_profile CAS 谓词、N-19 23505 转 stale。
 - 二次复核增补：N-5 类「测试 mock 掉真实约束」的漏检模式要针对性补测
   （delivery INSERT 走真实 schema 校验）；N-6/N-7 的失败面各补一条交互测试。
 
+### 第四轮批次修正（2026-08-25，协调审查三视角 + 逐条验证）
+
+三视角一致裁决：**三批「死局→卫生→结构」骨架正确不需重排，但四处必须调整，
+建议在第一批前设 hotfix 组容纳以下三组捆绑**：
+
+1. **N-15 上移第一批与 N-5 同批同部署**——台账自己的捆绑警告与 §8 排期自相矛盾；
+   CHECK 放宽合入即把被遮蔽的 23514 变成真实 23505 竞态。N-15 的 API 侧取号统一
+   则顺延至第二批与 N-10 合流（影子行是第四个取号写入方，须消费共享片段勿自写）。
+2. **0171 函数重写收敛为单次 migration（0185）一次吸收五条函数侧改动**：
+   C-2 窗口放宽、C-3 user 过滤、C-6 先探测后扫描+GET DIAGNOSTICS 计数、
+   N-11 库侧 EXCEPTION WHEN invalid_parameter_value CONTINUE、N-14 多 workspace
+   循环（learning_cards 子句换 learning_cards_v2）。分散三批=三次整函数替换，
+   每次都有从过期文件文本出发丢前批子句的风险。配套一份专用调度函数集成测试
+   文件；**C-2 的跨小时幂等回归测试以「函数加 p_now timestamptz DEFAULT now()
+   参数」为前提——now() 不可注入则该测试按字面写不出来**。工时改记 1-1.5d
+   （原 C-2 标 0.5h 严重低估）。TS 侧 companion-daily-summary 计数过滤（C-3 第二
+   落点）同 PR。
+3. **N-21/N-22/N-23 补登批次**：N-22 一行修直接改进在途 diff 随其提交；N-21 补入
+   hotfix 组（P1 且锚定已接 CI 的 sec02 集成测试边际成本极低）；N-23 按 §11 四轮
+   修正案并入 N-21 同 PR（收敛 membership 单源+0028 式不变量迁移）；N-24 归第三批
+   扩 rls-policies 集成测试（P0 三件套可先行）。
+4. **测试基建预备批（约 0.5d，插在第一批前）**：第一批 8 项中至少 6 项的验收要求
+   以当前基建无法落地——SQL 函数 harness、web 组件测试 CI 接线（test:component 未进
+   ci.yml）、fetch/timer mock 工具、真交错 helper。不预建则验收整体空转（现有 60 个
+   集成测试仅约 10 个进 CI 的前车之鉴）。第一批总估上调至 3.5-4.5 天。
+
+组内实施顺序硬约束（协调审查 conflicts 提炼）：
+
+- **D-2/D-3(批1) → N-13(批2)**：批 1 先落守卫式 run 更新助手（或按 D-3 四轮修正案
+  的门读点 .for("update") 惯例），N-13 只延伸同一助手到 Critic 回写段，禁止第二种
+  守卫写法；三个 UPDATE 白名单（失败结算/成功结算/stale 写点）一次提交原子落地，
+  D-2 新增 stale 写点出生即带 phase 谓词+runtimeEpoch CAS。
+- **A-2 → A-3/A-4 严格顺序**（§8 已排对，写成硬约束）；A-4 PR 必须同提交更新
+  kind↔renderer 注册表与一致性测试；D-7 开工前显式冻结 kind 枚举。**A-5 以 A-2
+  注册表测试为前置门**——偏好注入不得导出未注册渲染形态（否则上游接线扩大下游
+  白屏暴露面）。
+- **C-1(批1) 与 C-5+N-8(批2) 串行施工**：三条都重写 hookProactiveOnRunCompleted
+  相邻管线，PR 内固化链序契约——Policy 判定 → 抑制表检查 → consentOk(fail-closed)
+  → 入队 → 异步个性化。
+- **N-9+C-1+N-10 出一份 delivery 状态生命周期规格再动码**：状态矩阵（谁能写/
+  迁移哪些终态、suppressed 与 snoozed 是否参与 TTL、影子行 dedupe_key/expires_at
+  口径、清扫谓词显式排除 acted/dismissed/expired/suppressed 全部终态）作为 migration
+  注释固化；B-2 能力矩阵教义先裁再实现（读取面纳入 EXTRACTOR vs 入队收紧两案方向
+  相反不可并行）。
+- **C-4 对账固化为 CI 断言**（grep 服务端引用 ⊆ example+compose 清单三方比对）——
+  flag 清单已两次漂移，人工对账必再漂移，全场最便宜的防复发测试。
+- **B-1 闸门注意 summarizer 是独立写入方**：episodic 候选插入点显式接入同一闸门
+  并纳入 N-5 式真实 schema 测试（批次表原文无对应代码动作，恐漏修）。
+- **N-17 重算 job 用独立幂等键命名空间**（daily-summary-regen:*，见 §10 四轮标注；
+  若采同步重算修正案则本条不适用）。
+
 ---
 
 ## 9. 修复状态追踪
@@ -1097,6 +1367,17 @@ N-18 pet_profile CAS 谓词、N-19 23505 转 stale。
 | N-1…N-4 | 新发现（一轮复核） | Open（并入 C-4/A-5/A-2/D-1 追踪，见 §5 新发现表） | — |
 | N-5…N-20 | 新发现（二轮盲区补扫，§10） | Open；三轮对抗验证 15 条全部成立（N-7 错误码机制修正、N-11/N-14 升 P2、N-19 触发面修正、N-15 捆绑警告） | — |
 | N-21…N-24 | 新发现（三轮 identity/note 域补扫，§11） | Open（P1×1：removeMember 可驱逐属主致账号死锁，已亲核；N-22 为在途 diff 回归，已亲核） | — |
+| R4-N25…N28/R4-N40…N44/R4-N50 | 新发现（四轮盲区补扫，§12） | Open（P1×1 desktop 无登录界面、P2×3 卡生成 web 死链族、R4-N50 三条 evidences 断链路径） | — |
+
+> **四轮结论汇总（2026-08-25）**：32 条登记项逐条以当前工作树重验并专审方案——
+> 无一被推翻（29 属实、A-2/D-4/N-24 部分属实为定性范围修正）；**12 条方案判 flawed**
+> （D-2/D-3/D-4/A-2 定位失效/N-6/N-7/N-10/N-12/N-15/N-16/N-17/N-21/N-24，照原案
+> 实施会失败或自毁，均已就地给出修正案）；A-1 修复实现确认、余项测试方案修正；
+> N-22 一行修获评本轮唯一 optimal。新缺陷 7 处随条目登记（最重要：在途改动激活
+> bundle 内嵌 relation 必现断链、关系 kind 词表错位致变体必错、retry_prepare 偏好
+> 丢失、attempt-service 后继插入缺 generation）；盲区新发现 10 处登记于 §12
+> （desktop P1×1/P3×3、shared 合同 P2×2/P3×2、0183 删表断链 P2×1/P3×1）。
+> 协调审查：批次表四处调整+hotfix 组+测试基建预备批，见 §8 第四轮批次修正。
 
 > **复核结论汇总（2026-08-24，一轮）**：27 条登记问题逐条沿真实数据流验证——25 条
 > 完全属实、2 条比登记更重（C-4 另缺 `COMPANION_BRIDGE_V2`；A-5 有真实用户 UI）、
@@ -1144,6 +1425,19 @@ N-18 pet_profile CAS 谓词、N-19 23505 转 stale。
   测试未覆盖真实约束是漏检根因。
 - **修法**：新 migration 放宽 CHECK 纳入 memory_candidate（shared 合同早已含该
   枚举）；并补一条走真实 schema 的 delivery INSERT 测试防回归。
+- **四轮验证 08-25【属实；方案 acceptable——四点落地补注】**：实库探针复现（约束
+  窄版、INSERT 报 23514）、消费方就绪面核实（shared 枚举/timeline 白名单/web 展示
+  分支均已含 memory_candidate）。(1) migration 写法循 0126:9-14 与 0170:33-38 的
+  DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT 两语句惯例，单事务直重建——**勿引入
+  NOT VALID**（本库无此前例，徒增 VALIDATE 步骤）；新编号 0185 并在 meta/_journal.json
+  追加条目。(2) 「真实 schema INSERT 测试」防复制漂移：最优是把 extractor 的 delivery
+  INSERT 抽成导出函数供 handler 与测试共用；最低限度逐字复制并在注释标明同步义务。
+  全链路测试受阻点：provider 在 handler 内部 createProvider 不可注入，端到端断言候选
+  入库需 stub 手段——落 worker 侧 integration-tests（DATABASE_URL_API 约定已有先例）。
+  (3) **发布顺序硬约束：放宽 CHECK 后旧构建 web 客户端对该 kind 走 fatal_parse 断流
+  重连**（delivery-client.ts:227-233 safeParse 失败即 onError）——含 memory_candidate
+  处理的 web 构建须随/先于 migration 上线。(4) 与 N-15 同批（捆绑警告四轮重申成立：
+  advisory 锁与行锁互不互斥、CHECK 放宽即激活）。
 
 **N-6【P1】Web V2 生成失败永久卡死：轮询不识别 needs_attention 且 localStorage 封死入口**
 
@@ -1170,6 +1464,24 @@ N-18 pet_profile CAS 谓词、N-19 23505 转 stale。
   已有三份手抄状态列表，应改为从 shared 的状态枚举派生「非成功终态」，否则下次
   新增状态再漏；(3) 重试入口要新造幂等键并处置旧 run，建议进度弹窗补 cancelRun
   手动逃生口——任何未知终态都不应封死入口。
+- **四轮验证 08-25【属实；方案判 flawed——逃生口自毁 + 漏掉 deck-gate 形态】**：
+  (1) **方案第 4 条（cancelRun 逃生口）自毁**：服务端状态机不允许取消 needs_attention
+  （generation-run-service.ts:541-544 仅允许 queued/source_sealing/planning/authoring/
+  review_ready，对其抛 409 invalid_state）——必须先扩 cancellable 集合（或新增显式
+  abandon 动作），否则逃生按钮点了就报错；扩展后 cancelled 是已有合法写入方、语义自洽。
+  并发限额只统计五个活跃态（:123-127），旧 needs_attention run 不阻塞新建 run，
+  「新幂等键重试」路线可行。(2) **方案第 2 条漏掉 deck-gate 形态**：实库现存一例
+  needs_attention（a6ba8589）由 deck-gate 路径产生——handler:1324 不写 error_code/
+  message，读 run.error 得 null，UI 须按 error==null 渲染通用失败文案；且此形态常带
+  可用候选（worker recheck 已有 promotion 回 review_ready 的通路 handler:1805-1812），
+  失败面应区分「有候选可去审核」与「彻底失败可重建」两支，勿一刀切当失败。(3) 方案
+  第 3 条定性不准：CandidateReviewPage 只加终态数组不会得到空白页而是继续无限轮询
+  ——退出条件的 !planResult 分支无条件短路，须重构条件顺序（先判 run 终态再判 plan）。
+  (4) 派生集合落点：packages/shared 已导出成功终态 Set（contracts.ts:140）且 web 已
+  import @ailearn/shared——落 deriveNonTerminalStatuses() 派生函数+单测锁死，三处消费
+  同批切换；注意派生会把 stale 也算进失败面但 stale 当前无写入方且语义是来源过期，
+  提示文案应区分。desktop 端无同病（CardGenerationSurface 把 needs_attention 归入
+  reviewStageStatuses 渲染 recovery 投影）。P1 维持。
 
 **N-7【P1】候选审核 reject/undo_reject/merge 提交空 expectedRevisionHash，服务端恒 409，三个审核动作在 Web 上永不生效**
 
@@ -1190,6 +1502,19 @@ N-18 pet_profile CAS 谓词、N-19 23505 转 stale。
   目标候选 revision 对不上会先撞 404 candidate_not_found；须扩展本地请求类型
   携带逐候选 {revision,revisionHash} 或在 page 层反查组装。若补回归测试勿断言
   409。
+- **四轮验证 08-25【属实；方案判 flawed——merge 半边按方案实施后依旧不可用，
+  且须配套修 adapters 否则引入新回归】**：(1) **merge 是服务端功能缺失而非传输层
+  缺陷**：生产 Web 的合并面板因服务端不下发 semanticGroupId 而根本无法选中目标——
+  「扩展本地请求类型携带逐候选 hash」只能让请求形状合法，修完后 merge 仍不可触发；
+  merge 应从本条剥离另立条目（需 public view + shared 合同新增 mergeEligibility/
+  semanticGroupId 下发，可能还要 worker/planner 侧语义分组数据源）。(2) **必须配套
+  修 adapters.toCandidateReviewItem**：在 isReviewReady 兜底之前插入 reviewDecision===
+  "reject"/"merged"→"rejected" 分支——否则 reject 修活后首次 refresh 出现幽灵
+  rechecking 状态、隐藏撤销入口并禁用整个 run 的启用 dock，比现状更糟。(3) 错误链
+  精确化：同 revision 时先撞 409 stale_revision、404 只在 revision 错开时出现（空 hash
+  实际先死于 400，两种都到不了）。(4) 工作量口径修正：~0.5d 预算内可修活的只有
+  reject/undo 两动作+适配器配套；测试照 journey spec :162 模式传真实 hash 走成功路径，
+  合同拒绝路径断言 400。P1 维持（web 失去剔除劣质候选能力；desktop 有这些能力）。
 
 #### P2
 
@@ -1211,6 +1536,17 @@ proactive-hook 与 proactive-generator 直接读 CRITIC/DASHSCOPE 配置发外�
   fail-open catch 风格；api 侧无 resolveAIGovernanceContext 等价物，直接读
   workspaces 的 consent 字段，勿造第二套判定标准。同链的 Critic 调用与 PII 脱敏
   是否同批补齐需一并决策，否则治理面依旧裂缝。
+- **四轮验证 08-25【属实；方案 acceptable——三处实施精确化】**：(1) 「直接读
+  consent 字段」若实施为复用 checkAIConsent 会带入 systemUsesExternalAI 的 mock
+  豁免（identity/service.ts:1037-1039）——该豁免与 CRITIC/DASHSCOPE env 直连配置源
+  不对齐（系统 capability 全 mock 但 CRITIC_URL 已配时 checkAIConsent 会误判为无外发），
+  worker 内应直接读 workspaces 策略字段而非复用 api 侧 helper；(2) generator 分支的
+  掐断必须显式 return null：现有 :400 短路条件因 keyPointClaim 恒非空而失效，若实施者
+  只在个性化 flag 分支内加门，学习元数据外发照旧；(3) 「入队后撤销同意不复检」无需
+  做双重复检设计——enqueue 与 egress 在同一 tick 内毫秒~秒级先后，撤销竞窗可忽略；
+  (4) **同链 Critic 外发应倾向同批接入**：run-critic.ts:148 把用户作答原文送进 prompt
+  （隐私面大于记忆块），tick 已有现成 failClosedNotAssessable 通道（:237-240），成本极低；
+  PII 脱敏则不应捆绑（全仓零生产调用方，捆绑会把卫生修复膨胀成治理体系重构）。
 
 **N-9【P2】assistant_deliveries 无 TTL 清理且 listInbox 不过滤 expires_at**
 全库无任何代码写 state='expired'；ttl-maintenance 清理的是另一张表；
@@ -1228,6 +1564,15 @@ assistant_deliveries 只增不删。用户离线一天回来，SSE 重推已过�
   (state,expires_at) 索引恰好服务该谓词——当初规划了没做；(3) snoozed 行策略要
   与 N-10 一并决定（ackDelivery snoozed 只延租约不改行级 expires_at，修完 N-10
   会立刻在这里再爆一次）。
+- **四轮验证 08-25【属实；方案 acceptable——两处补强】**：(1) **漏了
+  claimDisplayLease 的行级过期校验**——SSE 过滤+周期迁移只堵投递主路径，直连
+  /deliveries/:id/lease（曾收到过 deliveryId 的设备）或迁移窗口内仍可认领并展示过期
+  行，机制清单自己指出的加重事实没有对应修复项；(2) 「只在 SSE 泵过滤」偏绕：给
+  listInbox 加 includeExpired 参数（默认 false、timeline 显式传 true）比在泵里复制
+  过滤逻辑更简单且泵代码零改动——且状态迁移只消除「弹出」症状，cursor=0 重放的
+  带宽成本仍在，参数过滤才是协议层完整解（两者互补双保险）；(3) 选状态迁移意味着表
+  仍无限增长（timeline 历史保留的代价），应注明后续可加终态行二级保留期（如 90 天后
+  删除）；(4) 迁移函数谓词须排除租约未过期的 displayed 行且不碰 snoozed（N-10 未决）。
 
 **N-10【P2】气泡「稍后提醒」实发 transition=dismissed，提醒永不再现**
 PetDeliveryLayer onSnooze 调 inbox.dismiss(30)；客户端 finishCurrent 仅 snoozed
@@ -1243,6 +1588,22 @@ delivery 进入 dismissed 终态永不复现。22 号 PRD §10.2 snooze 承诺�
   客户端按分钟数分流、服务端到期以**新 inbox_sequence 插影子行**（原行已被游标
   消费，改 state 无用）、ack 的 snoozed 分支改为清空租约（现把冲突窗口横跨整个
   小憩期会阻塞其他设备 claim）。
+- **四轮验证 08-25【属实；方案判 flawed——第 3 点「清空租约」自毁，影子行设计
+  欠定四点】**：(1) **「ack snoozed 清空租约」反自毁**：listInbox 无 state 过滤 +
+  客户端跳过清单缺 snoozed + claimDisplayLease 无 state 门，三条件叠加下清空租约反而
+  打开小憩期双弹窗（其他设备重放弹出原文案 + 到期影子行再弹一次）；现行「租约延续
+  至 snoozedUntil」正是跨设备抑制机制，应保留。(2) 影子行幂等键欠定：表没有
+  source_event_id，只能借 dedupe_key 唯一索引——按原行 id 单次派生在「同一提醒被再次
+  稍后」时撞唯一索引整事务回滚，必须链式代数派生（origKey:snooze:N）；到期时间继续
+  埋在 display_lease JSONB 内会让扫描器做 JSONB 谓词且无法建高效索引，应加真实列。
+  (3) sweeper 事务边界：影子行插入与原行置终态必须同事务并对原行 FOR UPDATE CAS
+  （state='snoozed' 谓词），否则与 claim/ack 行锁竞争留下「设备 B 已弹出原文+影子行
+  再投」窄窗口。(4) 驱动归属：表 FORCE RLS 须 SECURITY DEFINER；pg_cron 未装，复用
+  worker 分钟 tick 先例，建议与 N-9 维护函数合并为同一函数/tick 防第三套定时器。
+  与 N-9 的联动裁决（协调审查）：影子行用新 dedupe_key 并按唤醒时刻重算 TTL；清扫
+  谓词跳过已占位行；proactive-hook 的 24h 频算与冷却查询（:311-323）无 state 过滤，
+  suppressed/snoozed 行都会计入 dailyShownTotal——用户抑制越多反而越压制其余类提醒，
+  频算过滤需一并修。
 
 **N-11【P2，三轮升级】quietHours 时区不校验且解析失败 fail-open，与注释宣称的 fail-closed 相反**
 shared 合同对 timezone 仅限长度；非法 IANA 时区使 Intl.DateTimeFormat 抛
@@ -1258,6 +1619,19 @@ PATCH 时校验时区合法性拒收 + 解析失败按 fail-closed 处理。
   存量清洗；0171 重写时内层包 EXCEPTION CONTINUE 或先 JOIN pg_timezone_names 过滤
   （把全站停摆降级为单用户跳过）。只改入口防不住未来新写入方，只改函数则静默
   时段 fail-open 与注释撒谎仍在。
+- **四轮验证 08-25【属实；方案 acceptable——备选方案被实库证伪，手段定死】**：
+  (1) **「JOIN pg_timezone_names 过滤」被实库证伪**：视图不含 '+08'/'Z'/'GMT+8' 等
+  PG 与 Intl 均接受的写法（会误杀合法偏移输入），却含 Intl 拒收的 'Factory'/
+  'localtime'（过滤后仍与 JS 层语义不一致）——统一选嵌套 EXCEPTION WHEN
+  invalid_parameter_value CONTINUE；(2) 入口校验只加在 companionAccountPatchSchema
+  （写路径，:265 已有 superRefine 可挂）；若同时给读合同 :227 加校验，存量坏数据未
+  清洗前 GET 响应解析失败引入新坑；(3) **「解析失败按 fail-closed 处理」应反驳**：
+  把 catch 改成返回 true 会把任意时钟串解析失败变成永久抑制全部主动提醒且无任何
+  信号——比 fail-open 更糟；正确组合是上游 PATCH 拒收非法时区 + catch 保持放行但补
+  warn 日志 + 修正撒谎注释；(4) 存量清洗范围勘误：pet_profiles 无 timezone 列
+  （实库 \d 核对 16 列）；实库 user_companion_account_state 当前 0 行——清洗迁移
+  紧迫度为零，运行时容错+入口校验即足够；(5) 后果精确化：坏时区导致的是每分钟 tick
+  整体报错回滚——连排在坏桶之前的好桶用户插入也被回滚，不止「部分用户漏发」。
 
 **N-12【P2】账号状态首写分支丢弃 interventionLevel/quietHours**
 companion-shell service 首次 INSERT user_companion_account_state 的 values 缺这两个
@@ -1270,6 +1644,19 @@ companion-shell service 首次 INSERT user_companion_account_state 的 values �
   重设为止**。修法坑：drizzle 里 `?? undefined` 才回落 DB 默认、null 是显式写
   NULL；根治建议合并为单条 INSERT..ON CONFLICT DO UPDATE upsert（消灭双分支
   手工字段清单这一漂移温床），并补「patch 全字段经首写分支往返不丢」回归测试。
+- **四轮验证 08-25【属实；方案判 flawed——upsert 根治前提不成立，改双分支内
+  修】**：(1) **「根治=合并 upsert」前提不成立**：通知/epoch 依赖旧行状态（true→false
+  迁移检测）、首写 revision===0 门禁需先知行是否存在——二者都强制保留 SELECT FOR
+  UPDATE 预读，预读在场时 upsert 的原子性收益归零，只剩把三套不同语义挤进一条
+  ON CONFLICT；且本库生产代码无 CAS 式 upsert 先例。(2) **真正的并发缺口是「FOR UPDATE
+  锁不住不存在的行→并发首写第二个撞 23505 变 500」**：在两分支结构下用同文件
+  onboarding :363-371 的 isUniqueViolation 捕获+重读即可修复，不需要改语句形态。
+  (3) 后果描述部分失准：「客户端按旧 payload 重试 409、损失固化到手动刷新重设为止」
+  对实际出货的 web 设置页不成立——页面以 PATCH 响应回显（page.tsx:441-445），用户看到
+  的是开关立即弹回、点第二次即成功；该描述仅适用于不回显的裸 API 调用方（desktop
+  gateway 直连）。(4) 缺字段实锤、?? undefined/null 语义警告、「patch 全字段经首写
+  分支往返不丢」回归测试要求均成立并保留；回归测试落点用现成的
+  companion-delete-e2e-postgres.integration.ts:129 首写调用扩展断言，无需新建骨架。
 
 **N-13【P2】Critic 回写第三段事务不复验 phase/runtimeEpoch，abandon 的 run 被迟到评估复活**
 评估链路分三段事务，第三段 finishCriticAssessmentWrite 重新 SELECT 后直接按
@@ -1291,6 +1678,17 @@ Commit——用户明确放弃的一次学习反而在后台推进复习计划�
   副作用解耦（保住「报告留档」语义）；revision 改 SQL 侧原子自增；补「claim 后
   end 再回写」顺序的真交错测试。定级维持高位：污染的是学习事实账本（SRS 推进/
   掌握投影）而非瞬态计数，且「等评估不耐烦点结束」是现实用户行为序列。
+- **四轮验证 08-25【属实；方案 acceptable——漏了第二个无守卫写入点 + 实施前置
+  缺口】**：(1) **tick catch 结算路径（run-processing-tick.ts:131-161）同样零守卫**——
+  迟到回写抛错时同样篡改已 ended 的 run，且 retry_assessment 可借此把放弃的 run 翻回
+  assessing 重跑整链，比原条目的复活路径更隐蔽，必须同批加守卫（与 D-3 四轮修正案
+  合并：门读点 .for("update") 统一防线）；(2) **实施前置缺口：CriticAssessmentContext
+  缺 runtimeEpoch 字段（:431-438）——CAS 谓词没有现成比较值，需先改 prepareCritic-
+  Assessment 透传**；(3) 第三段语句顺序隐患：appendRunEvent（:535）在 run 复验之前
+  执行，应先复验后写事件防 abandon 场景下向已结束 run 写 completed 事件；(4) revision
+  SQL 侧原子自增定位正确但收益有限（CAS 命中时 stale revision 不可能生效），价值仅
+  在防未来新分支忘带谓词，作为纵深防御保留即可；(5) 与 D-2/D-3 的助手约定联动见
+  §8 批次修正。P2 维持恰当。
 
 #### P3
 
@@ -1319,6 +1717,21 @@ extractor 自己用，与其他写入方（deliver/companion-action 的 FOR UPDA
   不动取号逻辑会无声激活本竞态**，两者必须同批修；修法注意空分区 FOR UPDATE
   锁不到行的边界（delivery-service 今天就带此坑），建议行锁+advisory 锁双保险，
   并把 API 侧三处手抄取号抽成同一份 SQL 片段。
+- **四轮验证 08-25【属实；方案判 flawed，改「advisory 为主」单一封装】**：碰撞
+  矩阵逐键核实无翻案（全库 xact 锁均 hashtextextended(互异字面串,0)，'delivery:'
+  全仓唯一使用者即 extractor；64 位碰撞 ~2^-64 可忽略），缺口精确收敛为「advisory
+  vs 行锁两族互不相交」。方案三处修正：(1) **「API 侧三处手抄取号」目标错位**——
+  API 已是 delivery-service.deliver() 单一收口零手抄，真实重复是 worker 包内两个
+  handler（companion-action.ts:50-56 行锁取号且无 advisory 锁）；共享片段应落在
+  workers/ai-worker 包内（跨包引 API 被 companion-action.ts:29 注释明确禁止）；
+  (2) 「行锁+advisory 双保险」表述误导——空分区下行锁失效（:85 的 ?? 0 兜底即
+  证据），advisory 是唯一承重锁；(3) 方案未指定统一键口径。**修正案**：以 extractor
+  现有键为准做「advisory 为主」单一封装免数据迁移——delivery-service.deliver() 与
+  companion-action.deliverActionInbox() 取号前各加一行
+  `SELECT pg_advisory_xact_lock(hashtextextended('delivery:' || ws || ':' || user, 0))`
+  （与 extractor :240 逐字同键）；锁+MAX+1 抽成 workers/ai-worker/src/lib 内共享小
+  助手；三处既有 FOR UPDATE/MAX 代码保留不动（零成本纵深）；insertEventsBatched
+  完全不动。单分区单键、每事务一把锁、天然无死锁环、空分区边界自动消解。
 
 **N-16【P3】embedding 模型漂移无检测**：检索 join 不比对 model_revision/
 embedding_profile_version 与当前 provider；重建只扫 pending/none，无「模型版本
@@ -1332,6 +1745,20 @@ embedding_profile_version 与当前 provider；重建只扫 pending/none，无�
   会造成召回黑洞）；profile_version 口径应含 provider+model+dimensions；异维迁移
   需改列型全量重建，与同维重嵌分开处理。潜伏缺陷（flag 默认关、实库 embeddings
   0 行）；向量检索转正生产时应升 P2。
+- **四轮验证 08-25【属实；方案判 flawed——字面实施主目标必然落空】**：**致命缺口：
+  「worker 每次处理时比对行上 profile_version」只作用于扫描集
+  （embedding_status IN ('pending','none')），而换模型后旧向量行状态是 ready、永不
+  进入扫描集**——按方案字面实施，模型漂移检测一次都不会发生。修正案：(a) 扫描谓词
+  改为 `embedding_status IN ('pending','none') OR (embedding_status='ready' AND
+  embedding_profile_version IS DISTINCT FROM ${provider.embeddingModelId})`——右侧值
+  在 companion-memory-embedding.ts:24 已先于扫描解析完成、稳定可得；成功路径 :75-81
+  现有 UPDATE 已回写新版本，仍零新增查询；(b) 预扫描比对口径只能是 provider+model
+  字符串，dimensions 从口径移除（embed() 返回前不可知；异维本就归独立迁移路径）；
+  (c) 异维迁移已实测极简：TRUNCATE 派生表 + 单条 `ALTER TYPE vector(N)`（pg16 自动
+  重建 HNSW 索引，实库 BEGIN/ROLLBACK 探针验证）+ items 全部置 pending 让 worker
+  回填——无需建表/双写/回填工具；(d) 升 P2 触发写成可检查条件：生产部署配置出现
+  COMPANION_MEMORY_VECTOR_V1=true 或 feature-flag-inventory.md 该 flag 默认翻 true，
+  且 assistant_memory_embeddings 行数>0，二者同时满足即升 P2。P3 维持。
 
 **N-17【P3】硬删对话不清除日记 highlights 中的消息原文摘录副本**：highlights 存
 最近 8 条消息原文各 ≤160 字且无 TTL；deleteCompanionConversation 级联删除清单不含
@@ -1344,6 +1771,21 @@ daily_summaries。§12 hard delete 预期内容彻底消失，次日日记页仍
   修正：不能把 daily_summaries 加进对话级联按日期整行删——日记是当天全部活动的
   聚合，会连带毁掉其他合法来源；正确做法是删后重算（生成器确定性幂等，直接投递
   job 而非复用调度函数）或产品拍板改读取时实时派生。
+- **四轮验证 08-25【属实；方案判 flawed，重算案有自毁陷阱，改同步重算】**：
+  **裁决性事实：highlights 条目无 id 标记**（companion-daily-summary.ts:156-159 只构
+  造 {role,text} 二字段），redact 外科手术式剔除不可行。**「直接投递 job」按字面
+  实施会自毁**：jobs 幂等键唯一索引 (workspace_id, idempotency_key) + ON CONFLICT
+  DO NOTHING，而 jobs 行永久驻留（全库无 purge 函数，dev 库 9 行全部 succeeded 永久
+  留存）——同日期同键投递被静默吸收，重算永不执行。**修正案（首选）**：删除事务内
+  同步重算——deleteCompanionConversation 先读出被删消息覆盖的本地日期集合，对每个
+  日期复用生成器的两条窗口 SQL + buildSummaryText（生成器 :46-56 从 payload 取日期，
+  全部时间窗为参数插值而非硬编码「昨天」，可对任意历史日期重跑）直接 UPDATE
+  companion_daily_summaries 的 facts/highlights/summary——原子生效、无 job 机制、
+  彻底绕开幂等键吸收陷阱、删除完成时页面即一致。若坚持异步 job：type 保持白名单内
+  的 'companion_daily_summary'，但幂等键必须换新命名空间（如
+  daily-summary:redact:<ws>:<user>:<date>:<uuid>）。边界注明：重算只刷新日记行，
+  不刷新已落库的 assistant_memory_items（其内容仅 facts 计数不含原文，敏感度低）；
+  若选实时派生案需处理 status='failed' 行的空 highlights 语义矛盾。P3 维持。
 
 **N-18【P3】pet_profile CAS 防护对并发无效**：路由事务内校验 revision 后调用的
 upsertPetProfile，其 UPDATE WHERE 仅含 (workspace,user) 不含 revision 谓词——
@@ -1357,6 +1799,18 @@ READ COMMITTED 下两端并发编辑都通过校验先后覆盖，revision 各�
   自增改 SQL 侧 pet_profiles.revision+1；插入路径并发首存撞唯一索引现被 catch
   兜成 500，顺手处理。附带：body.revision 在 zod 里 optional 的无条件覆盖逃生门
   是否保留需写进注释。
+- **四轮验证 08-25【属实；方案 acceptable，三处修正】**：(1) **致命缺口：路由
+  :98-100 裸 catch 会把类型化冲突错误兜成 500**——不收窄它（仅对未知异常兜底、
+  类型化冲突重抛穿透到既有 409 分支），整个修复静默退化为「把静默丢失换成 500」
+  的原样重现；(2) 「谓词必须用客户端期望值、误用 existing.revision」定性过重——
+  路由预检已保证二者相等，且本库 companion-shell casUpdateOnboarding 先例
+  （service.ts:247-278）用的正是刚读值+0 行抛 409 STALE_REVISION；真正的硬要求只有
+  一条：0 行更新必须显式转 409（.returning({id}).length 判定）；(3) 并发首存不必
+  ON CONFLICT 重试——循 note/routes.ts:100-105 先例捕约束名
+  pet_profiles_workspace_user_unique 的 23505 转 409 即可（注意 N-19 四轮标注：
+  本库栈上要经 err.cause 取 pg 错误、字段是 constraint_name）。zod optional 必须
+  保留（web page.tsx:136 首存依赖「无已有档案不带 revision」，是产品需求而非调试
+  后门）。该函数现有测试覆盖为零，修复应附并发回归测试。
 
 **N-19【P3，触发面修正】候选动作事件序号分配在 reviewDraftRevision CAS 之前，并发撞唯一索引返 500**
 insertEvent 用 SELECT MAX+1 分配序号先于 CAS 执行，两并发请求读到相同 MAX 时后
@@ -1372,6 +1826,22 @@ insertEvent 用 SELECT MAX+1 分配序号先于 CAS 执行，两并发请求读�
   CAS 之后」（CAS 成功即单赢家天然串行化）；若选捕 23505 必须匹配约束名而非裸
   错误码（同事务家族还有其他唯一索引，误标会误导前端刷新逻辑）；worker 侧
   insertEventsBatched 共享同一 MAX+1 但有 run 行锁庇护，勿顺手「统一」丢锁。
+- **四轮验证 08-25【属实；方案两处修正——首选方案覆盖不全、备选实现形态在本库
+  栈上是死代码】**：(1) 「移到 CAS 之后」只覆盖 handleCandidateActionV2 一处，
+  reveal-service.ts:181（无任何 CAS）、activation、createRun/closeRun 的同表写入
+  仍是裸 MAX+1，同一条 500 换条路照样发生；(2) **备选「捕 23505 匹配约束名」按
+  台账写法（err.constraint 直查）在本库栈上永不命中**——drizzle 0.45 包
+  DrizzleQueryError、postgres-js 字段名是 constraint_name 不是 constraint，照抄
+  等于修了个寂寞。**修正案（收拢到唯一咽喉）**：修复放进 helpers.ts:194-216 的
+  insertEvent 内部——捕获 23505 且约束名匹配
+  （`const pg = (err as any)?.cause ?? err; pg?.code === "23505" &&
+  pg?.constraint_name === "cge_v2_ws_run_seq_idx"`），命中后重读 MAX 重试插入 ≤2 次
+  （READ COMMITTED 下新语句新快照；23505 不毒化 Postgres 事务，语句级失败后事务仍
+  可用）。一处改动覆盖全部调用方、无需逐文件搬序、不动 worker。附带收益：移序案
+  在 API-vs-worker 场景下 CAS 会阻塞在 worker 行锁上、worker 不 bump revision 故等
+  锁后反而成功——但既然收口 insertEvent 则无需此考量。频率侧写上调：每次
+  edit/merge/regenerate 都开 worker recheck 事务，窗口内跨候选动作近乎必撞而非偶发
+  （后果良性维持 P3）。
 
 **N-20【P3】web 编辑表单当前只暴露 objectiveStatement+front.prompt**：A-1 合同级
 开放的四支持字段编辑（explanation/boundary/misconception/workedExample）尚无 UI
@@ -1381,6 +1851,18 @@ insertEvent 用 SELECT MAX+1 分配序号先于 CAS 执行，两并发请求读�
   白改。真正的障碍不是缺四个输入框：explanation/workedExample 属 reveal 后内容，
   编辑器打开时前端未必持有明文（防泄题设计），补 UI 需后端提供不经 reveal 的字段
   回读通道；且合同 nullable 不对称（explanation 无 null 分支，「清空」做不了）。
+- **四轮验证 08-25【属实；范围记录维持不需行动；「explanation 无 null 分支」实为
+  承重设计而非疏漏】**：draft 架构（contracts.ts:595）与 reveal 架构（:1058）均强制
+  explanation 非空 min(1)——放开会直接炸激活/揭示链路 schema 解析。未来补 UI 的
+  五条设计约束：(1) 复用曝光台账不变式——凡返回答案承载字段的读接口必须同事务写
+  exposure 行（现成的 writeAnswerEditorViewExposure candidate-review-service.ts:640-664
+  可直接复用），不新增免记账读取路径；(2) 生命周期门控——仅限 assertReviewable 同款
+  守卫（passed+undecided+unpublished）；(3) 版本钉死——回读携带 expectedRevision/
+  Hash 且后续 edit 提交同一哈希防 TOCTOU；(4) 通道只能是独立 GET 路由，严禁借
+  SSE/事件流下发（BLOCKED_EVENT_PAYLOAD_KEYS fail-closed 白名单保持原样）；(5)
+  UI 上 explanation 只允许改写不允许清空，boundary/misconception/workedExample 才
+  提供清除按钮。另注：A-1 四轮标注确认 applyPatch 已支持 null 删键（helpers.ts:343-
+  344），机制性障碍只剩合同一层。
 
 ---
 
@@ -1408,6 +1890,22 @@ insertEvent 用 SELECT MAX+1 分配序号先于 CAS 执行，两并发请求读�
 - **修法方向**：removeMember 增加目标为 workspaces.ownerId 时拒绝；
   ownerCount 加 `left_at IS NULL` 过滤；驱逐属主场景补 personalWorkspaceId/
   恢复通道语义。三条都要改，只堵一条仍有变体。
+- **四轮验证 08-25【属实；方案判 flawed——第三条「恢复通道」是空集范围蔓延】**：
+  全链亲核成立（headline 变体不依赖缺陷 (1)：U1 邀请 U2 为 co-owner 后两行活跃
+  owner 即可驱逐属主；web InviteMemberSettings.tsx:36 真实提供「所有者」选项，
+  属受支持路径而非误用）。修正案收敛为两条核心修改+一条可选加固：
+  (a) removeMember 目标查询 JOIN workspaces 一并取 ownerId（事务内已有 FOR UPDATE
+  锁成员行，同一 SELECT 加列零额外往返），target=ownerId 拒绝并新增错误码
+  workspace_owner_not_removable——须同步 RemoveMemberError 联合类型、routes.ts:556-
+  560 statusMap 与 sec02-dod-coverage.test.ts:150-159 映射完备性测试；
+  (b) ownerCount 加 isNull(leftAt)，与 listMembers 的 ADR-0009 过滤惯例对齐；
+  (c) 可选：joinWorkspaceByInviteToken 重加入分支对 userId===workspaces.ownerId
+  强制 role='owner'（一行守卫恢复「属主恒有 owner 成员行」不变量）。**丢弃原第三条
+  「恢复通道」**——(a) 落地后属主不可再被驱逐，恢复通道无从需要；本库全部运行时建
+  站路径均产生个人工作区，「属主永不可移除」是最简且完备的封闭。P1 维持：账号级
+  永久锁死+个人数据易主，触发前置（签发 owner 邀请）是产品合同明确支持的一步流程。
+  测试盲区实锤：invite-service-db-extra.test.ts 五用例无一覆盖驱逐属主/left_at 虚高/
+  登录死锁链。
 
 **N-22【P2，在途回归】onboarding evidence_review 主键错配：该步骤经 API 永远失败**
 
@@ -1422,6 +1920,16 @@ insertEvent 用 SELECT MAX+1 分配序号先于 CAS 执行，两并发请求读�
   该步卡死即 onboarding 永远到不了 completed。当前 web/desktop 尚无活跃调用方
   （潜伏断裂），但按合同接入即稳定复现。
 - **修法**：一行改为 `eq(evidenceSnapshotsV2.evidenceSnapshotId, evidenceId)`。
+- **四轮验证 08-25【属实；方案评为 optimal（本轮唯一满分方案）】**：一行修与全仓
+  读点惯例（业务键+workspaceId，命中 es_v2_ws_snapshot_idx）一致，唯一约束保证语义
+  等价；两 UUID 永不相同实锤（evidence-seal-service.ts:212-225 各自独立 randomUUID）；
+  暴露面三处抽查证实只出 evidence_snapshot_id。唯一增量：因单测 mock 忽略 where
+  子句对本类 bug 免疫（invite-service-db-extra.test.ts:122 实证），应在
+  sec02-invites-onboarding-postgres.integration.ts 补一条真库集成测试——INSERT 一行
+  （随机 id 与另一 UUID 作 evidence_snapshot_id），以业务键调 markOnboardingStep 断言
+  ok:true、以内部 id 断言 409，锁定「API 只收业务键」合同语义；并在该行加注释写明
+  evidenceId 语义为「暴露面返回的 evidence_snapshot_id」防回改。附带观察：相较 HEAD
+  （查已物理删除的 V1 表必 500），本回归把故障降为 409，方向改善但功能仍断。
 
 **N-23【P3】新端点角色判定与 requireOwner 的 OR 语义分裂**
 
@@ -1431,6 +1939,20 @@ insertEvent 用 SELECT MAX+1 分配序号先于 CAS 执行，两并发请求读�
   覆写）时：桌面端能力矩阵显示只读、卡片生成不可用，但直连 API 写入成功——
   fail-closed 方向（不会提权），但两端权限展示互相矛盾。修法：capability/投影
   判定统一走 isWorkspaceOwner 同款 OR 语义。
+- **四轮验证 08-25【属实；方案判 flawed——方向反转：收敛 membership 单源而非
+  扩散 OR】**：「扩散 OR」把 workspaces.ownerId 这个第二真相源永久固化进两个新
+  消费点，且 /auth/me（routes.ts:268 用 OR）与 capabilities（:290 纯 membership）
+  已经互相矛盾、login 原样上报 m.role 又是第三套口径——按 OR 扩散永远追不平。
+  **关键事实：会话层已是 membership 单一来源**（decodeToken 强制要求活跃 membership
+  行，OR 第二分支仅在「成员行存在但被降级」这一病态态可达），而该病态态的唯一制造
+  流就是 N-21 的 removeMember 缺陷链。**修正案**：(a) 先落地 N-21 修复；(b) 一条
+  0028 式不变量迁移——对所有缺活跃 owner 行的工作区 INSERT...ON CONFLICT DO UPDATE
+  SET role='owner', left_at=NULL（0028:67-70 有现成模板）+ 迁移末校验不命中即 RAISE
+  （0028:118-136 同款）；(c) 创建路径已全部合规无需改动（registerWithoutInvite/
+  consumeInvite/seed/export restore 四处均插 owner 成员行）；(d) 之后删除
+  middleware.ts:51 的 OR 分支与 routes.ts:268 双查，capability 与 notes 投影保持现状
+  即自动正确——净删代码、消灭整类语义分裂。若拒绝动 requireOwner 语义则原方案可用
+  且无自毁风险，仅为次优。P3 维持；并入 N-21 修复批次一并实施。
 
 **N-24【P3，结构性风险】租户隔离完全依赖应用层 WHERE：业务表 RLS 处于禁用扩展模式**
 
@@ -1440,3 +1962,133 @@ insertEvent 用 SELECT MAX+1 分配序号先于 CAS 执行，两并发请求读�
   具体漏点，但这是整个隔离模型的单一前提：任何一处新增查询漏掉谓词即成跨租户
   泄漏且无数据库层兜底（understanding-v3 曾犯过此错有先例注释）。建议将 RLS
   重启用作为独立跟踪项而非口头约定。
+- **四轮验证 08-25【部分属实——定性以偏概全；方案判 flawed，改四阶段路线图】**：
+  **实库复核：public 141 张表中 117 张（83%）RLS 已启用**（多数 FORCE），仅 0027
+  名单的 24 张存量表关闭（其中 19 张仍带可用策略）——「业务表 RLS 处于禁用扩展
+  模式」标题会让读者误判全库裸奔；「新表半边」早已由 0111 起新表迁移自发完成。
+  且机器化约束已存在两道（roles.sql:1266-1293 fail-closed 门禁已改为只拦「有 RLS
+  无 policy」；rls-policies-postgres.integration.ts 已有 8 张表的临时 FORCE 零泄漏
+  预演），缺的不是「跟踪项」而是把存量纳入。**修正案（四阶段）**：
+  P0 立即零风险三件套：(i) rls-policies 集成测试的 TEMPORARILY_ENFORCED_TABLES 从
+  8 张扩到全部有完整 policy 目录的 legacy 表，今天就能拿到全量预演证据；(ii) 加目录级
+  CI 守卫：凡新建表必须 relrowsecurity+t 且有 policy，例外白名单显式且只许收缩；
+  (iii) docker-compose.dev.yml 的 DATABASE_URL_API 从超级用户 ailearn 切到 ailearn_api
+  （roles.sql:37-68 角色模型已就绪）——dev 以超级用户连接时任何启用都测不出效果，
+  这是最大实施阻塞。P1 机械 flip 批：对访问已收口在 withWorkspaceTransaction 内且
+  sec01_v1 policy 目录完整的约 15 表照 0131 模板 ENABLE+FORCE（每批附空/满上下文对照
+  断言）。P2 单独设计批：users/sessions（无 workspace_id 列、登录发生在上下文建立前，
+  机械 flip 即断认证）、workspace_members（RESTRICTIVE tenant_guard 与「按 user_id 反查
+  membership」鸡生蛋问题需 secdef 或策略自引用分支）、jobs。P3：auth_rate_limits 等
+  无租户列表永久豁免文档化。全程无需改 SECURITY DEFINER 函数（roles.sql:1147-1176
+  已强制其 owner=migrator+BYPASSRLS，FORCE 对其透明）；0024→0027 血泪史证明此改动
+  贸然实施必断 auth/queue，严禁跳过 P0 直接 flip。P3 维持；多租户托管上线前升 P2。
+
+---
+
+## 12. 四轮盲区补扫新发现（2026-08-25）
+
+第四轮三路补扫（desktop 深审 / shared 合同对账 / 在途 diff 审计；understanding-v3
+与 review 域经主会话抽查无 P2 以上发现——拓扑为实时投影无缓存失联问题）。全部
+发现均附 file:line 证据，desktop 与 shared 两路经独立代理深扫，R4-N50 由主会话
+沿调用链亲核（路由注册→service→web UI 入口逐级确认）。
+
+### desktop 深审（R4-N25…N28）
+
+**R4-N25【P1】桌面端没有任何登录/注册界面：未认证态下全部功能面只报 auth_required**
+preload 暴露 auth.login/register/reauthenticate IPC 且主进程 gateway 登录链路完整
+实现（desktop-gateway.ts:252/:399-415），但 renderer 全域零调用（grep 证实）；各数据
+面读会话失败仅渲染 auth_required 文案（TaskSurface.tsx:139-141），主进程导航栈初始的
+gate(auth.login) 路由从未有对应渲染分支。**后果：未认证打开桌面端，恢复通知/继续学习/
+复习队列/笔记等所有数据面停在错误态无补救按钮，整条学习链路对真实用户不可达。**
+修法：补齐 gate 登录/注册渲染面（复用已实现的 authLogin/authRegister IPC）；若属分阶段
+交付需在出厂说明明确过渡口径。
+
+**R4-N26【P3】StudyPreview 对 home/today/graph 来源伪造 cardId=objectiveId，返回合同
+永久 unavailable**：dashboard 的 create_run 动作在 origin 为 home/today/graph 时 cardId
+契约上可为 null（learning-objective-surface-contracts.ts:106-111），TaskSurface.tsx:
+177-194 用 `cardId ?? objectiveId` 伪造成 card origin 发起 PREPARE；createRunV2 只校验
+objective 不核对 cardId 归属即直存 origin——run 结束后 deriveReturnTargetV2 继承伪
+cardId 与真实活跃卡 UUID 必失配。修法：服务端 PREPARE 时校验 origin.cardId 归属并拒绝，
+或服务端为 today/graph 原生 origin 补齐调度与返回目标语义。
+
+**R4-N27【P3】reviewCardGeneration 成功后复读校验过严**：gateway.reviewCardGeneration
+在审核 POST 成功后要求 refreshed.reviewDraftRevision 严格等于响应值
+（desktop-gateway.ts:749-752）——web 端在两步之间又提交一次审核时复读值更大即抛
+unsupported_contract，已落库的动作被报成「合同版本不受支持」。修法：放宽为 >= 即成功
+（单调推进即可证明本动作落账）。
+
+**R4-N28【P3】SSE watcher 无客户端侧活性检测**：两个 SSE watcher 的 reader.read() 循环
+无空闲超时、不把服务端 15s 心跳用作活性信号（desktop-gateway.ts:951-968/:1021-1038）
+——休眠恢复/切网后 socket 被静默丢弃时 read() 挂起至 TCP 超时，游标停摆数分钟。
+修法：空闲看门狗（N 个心跳周期无字节即 abort 带 Last-Event-ID 重连）+ focus 时主动
+重读快照对齐游标。
+
+### shared 合同对账（R4-N40…N44）
+
+对账方法与明确放弃项见工作流 journal（desktop IPC fail-closed 死面、良性死枚举、
+legacy 兼容形参均按登记标准放弃）；zod 版本四包一致（3.25.76）、无 strict/coercion
+分叉。
+
+**R4-N40【P2】web 卡生成 V1 客户端全链指向已删除端点 + V2 失败分支静默无反馈**：
+commit e145dd9 已删除 apps/api/src/modules/card-generation 全模块，但 web lib/api.ts:
+1071-1106 五个方法仍指向 /card-generation-runs 非 v2 路由；useGenerationActions/
+useGenerationPolling 在 NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED≠true 时走此路径；
+且 web flag 开而 API flag 未开时 createRun 404 被 isV2UnavailableError 拦截返回
+{ok:false}，submitV2Settings 只处理 ok 分支不设任何提示。**后果：默认或 flag 失配部署下
+「生成学习卡」入口整体不可用且弹窗关闭后无任何错误提示。** 修法：删五个 V1 方法与
+api-types 手抄状态机（改从 shared 枚举派生）；unavailable 分支补用户可见提示；部署文档
+明确两 flag 必须同开。（D-5 四轮标注的「僵尸方法」即此条。）
+
+**R4-N41【P2】Pedagogy Critic「值得成卡数为零」成功终态双端漏接**：handler:1304-1311
+置 run=no_cards_recommended 直接 return 不写 plan 行（INSERT 仅 :807 主流程）；
+NoteEditor 终态数组不含该值→plan 404 被当「未就绪」1.5s 永续轮询；CandidateReviewPage
+虽列入 terminal 但 :143 判据使 plan=null 照样无限轮询。同 N-6 根因的新增成功终态增量
+（LLM 可合法输出 no_cards verdict，prompts.ts:366 明示）。修法：worker 在该分支补写一条
+no_cards_recommended plan 行（或 API 对该终态合成 plan 视图）；终态判定并入 N-6 的
+派生函数方案。
+
+**R4-N42【P3】零卡结果文案映射使用已退役原因码词表**：shared NoCardReasonCodeValuesV2
+七值是唯一产出词表（planner-service.ts:396-430 且经 contracts:425 强校验下发），web
+adapters.ts:142-154 的 reasonLabels 却全是另一套退役五词（covered_by_existing/
+todo_or_context 等），两集合交集为空——零卡页原因标签渲染英文原串、解释恒为泛化兜底。
+修法：adapters 改用 shared 枚举作 key 建中文映射+「七码各有文案」单测防再漂移。
+
+**R4-N43【P3】web internal 基准测试页消费整套已物理删除的 /benchmark/* API**：
+e145dd9 删服务端模块、0176 DROP 表，页面仍经 api.runBenchmark 等五方法请求——全部操作
+404，质量回归闭环工具整体不可用且无下线说明。修法：删页面与方法；若能力要保留则随 V2
+质量体系重建；至少先挂「已下线」守卫。
+
+**R4-N44【P3】生成设置的 learningGoal/detailThreshold 零确定性消费（A-5 同型扩展）**：
+GenerationControls 一级 UI 收集「学习目标（记忆/理解/应用/应试）」「详略度（简洁/平衡/
+深入）」写入请求，pipeline 六文件与 worker prompts/providers 结构化读取为零（逐文件
+grep -c 计数 0），唯一去向是 semanticRequest 整体 JSON.stringify——比 A-5 更显眼的
+无效承诺入口。修法与 A-5 同批二选一：结构化注入 planner/author prompt 或从 UI 与合同
+移除。
+
+### 在途 diff 审计（R4-N50，主会话亲核）
+
+**R4-N50【P2】0183 删除 evidences 表遗留三条活代码断链**：0183:52 `DROP TABLE IF
+EXISTS "evidences"`（实库 to_regclass 返回 NULL），但 drizzle schema 定义仍在
+（schema/evidence.ts:18）且三条活路径仍在查询：
+
+1. **工作区导出全链（设置页有活跃按钮）**：export/service.ts:233 预检计数、:445 分块
+   导出、:1365 恢复路径均查 evidences——settings/page.tsx:845 的 handleExportWorkspace
+   是真实 UI 入口，点击即 relation does not exist 500。
+2. **validation 会话启动**：session-service.ts:482（objectiveHasHardEvidence，被 :913
+   startValidationSession 调用）与 :2408——POST /cards/:cardId/validation-sessions/start
+   已注册（session-routes.ts:120）、lib/api.ts:1257 有客户端方法；当前 web 无组件调用
+   （潜伏），但 API 合同开放。
+3. **companion-bridge 注水白名单**：context-service.ts:36 HYDRATABLE_TABLES 含
+   "evidences"、context-hydration.ts:76 EntityRef kind=evidence 映射该表——bridge 按
+   合同收到 evidence 引用即断链。
+
+修法：导出/恢复路径删除 evidences 分支（V1 数据已随表清退，恢复旧备份时跳过该节即可）；
+validation 的硬证据检查改查 evidence_snapshots_v2 或显式移除该校验；bridge 白名单移除
+"evidences" 并让 context-hydration 对 evidence 引用返回明确的 unsupported 错误而非
+SQL 异常。教训与 N-22 同源：0183 删表的引用面清理只做了编译可达性（schema 文件保留
+使 tsc 全绿），没做运行时可达性 sweep——建议未来删表迁移附一条「grep 表名于 modules/
+全量」清单进 PR 描述。
+
+> **边界说明**：本轮 understanding-v3/review 域抽查未覆盖 SRS 到期算法正确性与
+> review OCC 全分支（时间所限），仅确认无缓存失联类结构性问题；如需完整覆盖可在
+> 下轮以独立 lane 补扫。

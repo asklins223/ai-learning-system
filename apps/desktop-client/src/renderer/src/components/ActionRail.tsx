@@ -3,6 +3,7 @@ import { BookOpenText, CalendarCheck2, Search } from "lucide-react";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import { useRoomStore } from "../app/room-store";
+import { resolveSceneMotionMode } from "../scene/scene-motion";
 
 gsap.registerPlugin(useGSAP);
 
@@ -37,7 +38,9 @@ export function ActionRail() {
   const invoke = useRoomStore((state) => state.invoke);
   const surface = useRoomStore((state) => state.surface);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
-  const motionMode = useRoomStore((state) => state.motionMode);
+  const motionPreference = useRoomStore((state) => state.motionMode);
+  const reducedMotion = useRoomStore((state) => state.reducedMotion);
+  const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
   const modifier = window.ailearnDesktop?.platform === "darwin" ? "⌘" : "Ctrl";
   const recessed = Boolean(surface) || onboardingOpen;
   const railRef = useRef<HTMLElement>(null);

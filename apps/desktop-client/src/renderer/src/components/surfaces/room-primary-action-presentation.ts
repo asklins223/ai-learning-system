@@ -31,7 +31,7 @@ export function studyActionDescription(action: RoomPrimaryActionV1["action"]): s
   switch (action.kind) {
     case "create_run": return action.goal;
     case "create_review_run": return "服务端已确认这个目标进入到期复习队列。";
-    case "resume_run": return `恢复服务端已保存的 ${action.runId.slice(0, 8)} 运行。`;
+    case "resume_run": return "恢复服务端已保存的学习进度。";
     case "practice_only": return "服务端要求先进行练习；桌面不会自行推断或修改目标状态。";
     case "wait_for_initial_validation": return `资格时间：${new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(action.qualificationNotBefore))}`;
     case "view_successor": return "当前目标已经被服务端标记为后继目标。";

@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "coordinateSpace": {
+    "id": "room-1672x941",
+    "width": 1672,
+    "height": 941,
+    "fitMode": "cover"
+  },
+  "compactMediaQuery": "(max-width: 900px), (max-height: 660px)",
+  "assetRevision": "study-seat-v2+study-open-notebook-v1+notebook-editor-v1",
+  "assetHashes": {
+    "day": "69e2642de42b9cf62cca3e6b2318e1abea9017ef5da1af92bf275a8edd3f7fad",
+    "night": "8b5102a81f189ccf45a18bbd39a67eeb57800d2e8fc6336bc0a26feef89679c1",
+    "notebook": "96aaeddb4f5883b8da5c34f8180c63fb9f3c6e6242a50e7047453c3738461d5e",
+    "paperFibres": "2ccc53a8e70d1bd3de655cf29b0bf3c1be672d43f2e9e21199ed05aad83365db"
+  },
+  "calibrationRevision": "notebook-v1-phase1d-2026-08-26",
+  "notebookBounds": {
+    "x": 84,
+    "y": 129,
+    "width": 1300,
+    "height": 866.667
+  },
+  "surfaces": {
+    "editorPage": {
+      "id": "notebook.editor.left-page",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 128.9,
+        "y": 189.1,
+        "width": 592.2,
+        "height": 751.9
+      },
+      "quad": [
+        [181.3, 189.1],
+        [716, 207.7],
+        [721.1, 940],
+        [128.9, 915.2]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.105, "right": 0.09, "bottom": 0.105, "left": 0.12 }
+    },
+    "actionPage": {
+      "id": "notebook.editor.right-page",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 747.5,
+        "y": 188.2,
+        "width": 580.6,
+        "height": 752.8
+      },
+      "quad": [
+        [749.1, 206.9],
+        [1271.3, 188.2],
+        [1328.1, 914.4],
+        [747.5, 940]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.11, "right": 0.12, "bottom": 0.11, "left": 0.115 }
+    },
+    "sourceSlip": {
+      "id": "notebook.editor.source-slip",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 913,
+        "y": 322,
+        "width": 326,
+        "height": 166
+      },
+      "quad": [
+        [922, 322],
+        [1239, 334],
+        [1230, 488],
+        [913, 476]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.12, "right": 0.075, "bottom": 0.12, "left": 0.075 }
+    }
+  }
+}

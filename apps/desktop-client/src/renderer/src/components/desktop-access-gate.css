@@ -1,21 +1,27 @@
 .desktop-access-gate {
+  --gate-paper: #f4e5c9;
+  --gate-ink: #24160f;
+  --gate-ink-soft: #4d3426;
+  --gate-line: rgba(78, 54, 36, 0.3);
+  --gate-field: rgba(255, 252, 241, 0.4);
+  --gate-action: #9f4423;
+  --gate-action-hover: #83351d;
+  --gate-focus: #8f3518;
   position: absolute;
   z-index: 80;
   inset: 0;
   display: grid;
+  grid-template-columns: minmax(360px, 500px) minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
+  gap: clamp(42px, 8vw, 132px);
   min-width: 0;
   min-height: 100%;
-  align-content: center;
-  justify-items: center;
-  padding: max(78px, 9vh) clamp(16px, 5vw, 72px) clamp(28px, 6vh, 64px);
+  padding: max(58px, 8vh) clamp(32px, 8vw, 120px) clamp(30px, 5vh, 48px);
   overflow-x: hidden;
   overflow-y: auto;
-  color: #3f3027;
-  background:
-    linear-gradient(90deg, rgba(91, 66, 46, 0.04) 1px, transparent 1px) 0 0 / 72px 72px,
-    linear-gradient(rgba(91, 66, 46, 0.035) 1px, transparent 1px) 0 0 / 72px 72px,
-    url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 430px 430px repeat,
-    #d8c8ae;
+  color: var(--gate-ink);
+  background: transparent;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   isolation: isolate;
@@ -24,10 +30,23 @@
 .desktop-access-gate::before,
 .desktop-access-gate::after {
   position: fixed;
-  z-index: -2;
+  z-index: -3;
   inset: 0;
   content: "";
   pointer-events: none;
+}
+
+.desktop-access-gate::before {
+  z-index: -3;
+  background: var(--desktop-gate-entry-poster, url("/assets/learning-room/v1/posters/login-entry/entry-door-closed-day-v1.png")) center / cover no-repeat;
+  filter: saturate(0.94) contrast(1.01) brightness(0.96);
+}
+
+.desktop-access-gate::after {
+  z-index: -2;
+  background:
+    linear-gradient(90deg, rgba(29, 17, 10, 0.12) 0%, rgba(29, 17, 10, 0.04) 42%, rgba(29, 17, 10, 0.14) 100%),
+    linear-gradient(180deg, rgba(16, 10, 6, 0.08), transparent 25%, transparent 72%, rgba(16, 10, 6, 0.18));
 }
 
 .desktop-access-gate__drag-region {
@@ -40,65 +59,50 @@
   -webkit-app-region: drag;
 }
 
-.desktop-access-gate::before {
-  background:
-    linear-gradient(
-      90deg,
-      transparent calc(50% - 340px),
-      rgba(108, 75, 48, 0.11) calc(50% - 340px),
-      rgba(108, 75, 48, 0.11) calc(50% - 339px),
-      transparent calc(50% - 339px),
-      transparent calc(50% + 339px),
-      rgba(108, 75, 48, 0.11) calc(50% + 339px),
-      rgba(108, 75, 48, 0.11) calc(50% + 340px),
-      transparent calc(50% + 340px)
-    );
-}
-
-.desktop-access-gate::after {
-  z-index: -1;
-  background:
-    radial-gradient(circle at 50% 42%, rgba(255, 249, 230, 0.64), transparent 44%),
-    linear-gradient(180deg, rgba(72, 50, 35, 0.08), transparent 24%, transparent 72%, rgba(72, 50, 35, 0.12));
-}
-
-.desktop-app[data-theme="night"] .desktop-access-gate {
-  background:
-    linear-gradient(90deg, rgba(224, 203, 172, 0.035) 1px, transparent 1px) 0 0 / 72px 72px,
-    linear-gradient(rgba(224, 203, 172, 0.03) 1px, transparent 1px) 0 0 / 72px 72px,
-    url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 430px 430px repeat,
-    #28221d;
-  background-blend-mode: normal, normal, multiply, normal;
-}
-
 .desktop-access-gate__panel {
   position: relative;
+  z-index: 2;
   display: grid;
-  width: min(100%, 590px);
+  grid-column: 1;
+  width: min(100%, 500px);
   min-width: 0;
-  gap: 22px;
-  padding: clamp(24px, 4vw, 42px);
+  justify-self: start;
+  align-self: center;
+  top: 0;
+  margin-top: 0;
+  gap: 24px;
+  padding: 22px 0 0;
   overflow: visible;
-  border: 1px solid rgba(95, 68, 45, 0.34);
-  border-radius: 10px 24px 10px 12px;
-  background:
-    linear-gradient(112deg, rgba(255, 252, 241, 0.84), rgba(232, 211, 174, 0.38)),
-    url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 430px 430px repeat,
-    #f4e5c9;
-  box-shadow: 0 24px 70px rgba(24, 15, 10, 0.34), 0 8px 20px rgba(24, 15, 10, 0.2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  animation: desktop-gate-panel-in 540ms cubic-bezier(0.22, 1, 0.36, 1) 60ms both;
+}
+
+.desktop-access-gate__panel::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 58px;
+  height: 2px;
+  content: "";
+  border-radius: 0;
+  background: var(--gate-action);
+  box-shadow: 0 1px 6px rgba(125, 51, 26, 0.18);
+  opacity: 0.86;
+  pointer-events: none;
 }
 
 .desktop-access-gate__panel::after {
-  position: absolute;
-  top: -1px;
-  right: clamp(24px, 5vw, 52px);
-  width: 88px;
-  height: 4px;
-  content: "";
-  border-radius: 0 0 999px 999px;
-  background: #9f4423;
-  opacity: 0.78;
-  pointer-events: none;
+  display: none;
+}
+
+/* Keep the credential block on the clear upper wall. The panel itself stays
+   transparent; this offset only prevents the password rule from landing on
+   the horizontal dado rail in the entry poster. */
+.desktop-access-gate:has(.desktop-access-gate__form) .desktop-access-gate__panel {
+  top: clamp(-176px, -19vh, -92px);
 }
 
 .desktop-access-gate__heading {
@@ -107,19 +111,25 @@
   display: grid;
   max-width: 68ch;
   min-width: 0;
-  gap: 9px;
+  gap: 10px;
+  padding: 0 0 18px;
+  border-bottom: 1px solid rgba(78, 54, 36, 0.3);
+  background: transparent;
 }
 
 .desktop-access-gate__heading h1 {
-  max-width: 18ch;
+  max-width: 17ch;
   margin: 0;
-  color: #38271d;
+  color: var(--gate-ink);
   font-family: "Noto Serif SC Variable", "Songti SC", serif;
-  font-size: clamp(25px, 4vw, 38px);
-  line-height: 1.24;
-  letter-spacing: -0.025em;
+  font-size: clamp(25px, 2.7vw, 36px);
+  font-weight: 700;
+  line-height: 1.22;
+  letter-spacing: -0.04em;
   text-wrap: balance;
   overflow-wrap: anywhere;
+  -webkit-text-stroke: 0.42px rgba(248, 231, 202, 0.56);
+  text-shadow: 0 1px 0 rgba(248, 231, 202, 0.94), 0 0 4px rgba(248, 231, 202, 0.78), 0 2px 4px rgba(51, 29, 17, 0.52);
 }
 
 .desktop-access-gate__heading h1:focus {
@@ -129,10 +139,12 @@
 .desktop-access-gate__heading p {
   max-width: 62ch;
   margin: 0;
-  color: #674f3d;
-  font-size: 14px;
+  color: #392318;
+  font-size: 15px;
+  font-weight: 650;
   line-height: 1.75;
   overflow-wrap: anywhere;
+  text-shadow: 0 1px 0 rgba(248, 231, 202, 0.9), 0 0 4px rgba(248, 231, 202, 0.72), 0 2px 3px rgba(51, 29, 17, 0.46);
 }
 
 .desktop-access-gate__loading,
@@ -143,13 +155,14 @@
   min-width: 0;
   align-items: center;
   gap: 10px;
-  padding: 13px 15px;
-  color: #4d5f43;
-  font-size: 14px;
+  padding: 13px 14px;
+  color: #4c6343;
+  font-size: 13px;
   font-weight: 700;
-  border: 1px solid rgba(80, 100, 68, 0.28);
-  border-radius: 8px;
-  background: rgba(230, 239, 216, 0.58);
+  line-height: 1.55;
+  border-top: 1px solid rgba(80, 100, 68, 0.34);
+  border-bottom: 1px solid rgba(80, 100, 68, 0.2);
+  background: transparent;
 }
 
 .desktop-access-gate__loading svg {
@@ -159,8 +172,9 @@
 
 .desktop-access-gate[data-tone="danger"] .desktop-access-gate__notice {
   color: #7b351f;
-  border-color: rgba(148, 62, 31, 0.28);
-  background: rgba(255, 237, 207, 0.68);
+  border-top-color: rgba(148, 62, 31, 0.42);
+  border-bottom-color: rgba(148, 62, 31, 0.22);
+  background: transparent;
 }
 
 .desktop-access-gate__form {
@@ -168,20 +182,22 @@
   z-index: 1;
   display: grid;
   min-width: 0;
-  gap: 15px;
+  gap: 18px;
 }
 
 .desktop-access-gate__form label {
   display: grid;
   min-width: 0;
   gap: 7px;
-  color: #4b392d;
-  font-size: 13px;
-  font-weight: 700;
+  color: #24160f;
+  font-size: 14px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 0 rgba(248, 231, 202, 0.9), 0 0 4px rgba(248, 231, 202, 0.72), 0 2px 3px rgba(51, 29, 17, 0.46);
 }
 
 .desktop-access-gate__form label small {
-  color: #786453;
+  color: #513122;
   font-size: 12px;
   font-weight: 500;
 }
@@ -190,37 +206,46 @@
   width: 100%;
   min-width: 0;
   min-height: 46px;
-  padding: 10px 12px;
-  color: #35271f;
+  padding: 10px 2px;
+  color: #24160f;
   font-size: 16px;
-  border: 1px solid rgba(78, 54, 36, 0.3);
-  border-radius: 8px;
-  background: rgba(255, 253, 247, 0.74);
-  caret-color: #9f4423;
-  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+  font-weight: 600;
+  border: 0;
+  border-bottom: 2px solid var(--gate-line);
+  border-radius: 0;
+  background: transparent;
+  caret-color: var(--gate-action);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.desktop-access-gate__form input::placeholder {
+  color: #4a2c1d;
+  opacity: 0.92;
+  text-shadow: 0 1px 0 rgba(248, 231, 202, 0.9), 0 0 4px rgba(248, 231, 202, 0.72), 0 2px 3px rgba(51, 29, 17, 0.42);
 }
 
 .desktop-access-gate__form input:hover {
-  background: rgba(255, 253, 247, 0.94);
+  border-bottom-color: rgba(78, 54, 36, 0.58);
 }
 
 .desktop-access-gate__form input:focus {
-  border-color: #667b57;
+  border-bottom: 2px solid var(--gate-action);
   outline: 0;
-  box-shadow: 0 0 0 3px rgba(102, 123, 87, 0.18);
+  background: transparent;
+  box-shadow: 0 3px 0 -2px rgba(159, 68, 35, 0.3);
 }
 
 .desktop-access-gate__form-error {
   position: relative;
   z-index: 1;
   margin: 0;
-  padding: 11px 13px;
+  padding: 11px 0;
   color: #7b351f;
   font-size: 13px;
   line-height: 1.6;
-  border: 1px solid rgba(148, 62, 31, 0.28);
-  border-radius: 8px;
-  background: rgba(255, 237, 207, 0.68);
+  border-top: 1px solid rgba(148, 62, 31, 0.42);
+  border-bottom: 1px solid rgba(148, 62, 31, 0.22);
+  background: transparent;
   overflow-wrap: anywhere;
 }
 
@@ -235,25 +260,26 @@
 
 .desktop-access-gate__primary {
   display: inline-flex;
-  min-height: 46px;
   width: fit-content;
+  min-width: 168px;
+  min-height: 50px;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 17px;
+  padding: 11px 17px;
   color: #fff9ef;
   font-size: 14px;
   font-weight: 750;
   border: 1px solid #84351c;
-  border-radius: 8px;
-  background: #9f4423;
-  box-shadow: 0 8px 18px rgba(103, 42, 20, 0.24);
+  border-radius: 4px 12px 4px 4px;
+  background: var(--gate-action);
+  box-shadow: 0 10px 22px rgba(103, 42, 20, 0.27), 0 2px 5px rgba(103, 42, 20, 0.16);
   transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
 
 .desktop-access-gate__primary:hover:not(:disabled) {
-  background: #87371d;
-  box-shadow: 0 10px 22px rgba(103, 42, 20, 0.3);
+  background: var(--gate-action-hover);
+  box-shadow: 0 12px 26px rgba(103, 42, 20, 0.33), 0 3px 7px rgba(103, 42, 20, 0.18);
   transform: translateY(-1px);
 }
 
@@ -263,19 +289,23 @@
 
 .desktop-access-gate__text-action {
   display: inline-flex;
+  /* Mode switching is a primary recovery path, even though it is visually
+     quiet. Keep its hit area consistent across desktop and compact layouts. */
   min-height: 44px;
   width: fit-content;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  padding: 7px 4px;
-  color: #7c351f;
-  font-size: 13px;
+  justify-self: center;
+  padding: 5px 4px;
+  color: #7a2e19;
+  font-size: 14px;
   font-weight: 700;
   border: 0;
   background: transparent;
   text-decoration-thickness: 1px;
   text-underline-offset: 4px;
+  text-shadow: 0 1px 0 rgba(248, 231, 202, 0.66), 0 0 3px rgba(248, 231, 202, 0.5), 0 1px 1px rgba(51, 29, 17, 0.3);
 }
 
 .desktop-access-gate__text-action:hover:not(:disabled) {
@@ -297,18 +327,18 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: 11px 13px;
+  padding: 12px 0;
   color: #403027;
   text-align: start;
-  border: 1px solid rgba(78, 54, 36, 0.24);
-  border-radius: 8px;
-  background: rgba(255, 253, 247, 0.56);
-  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+  border: 0;
+  border-bottom: 1px solid rgba(78, 54, 36, 0.24);
+  border-radius: 0;
+  background: transparent;
+  transition: border-color 160ms ease, color 160ms ease, transform 160ms ease;
 }
 
 .desktop-access-gate__workspace-list button:hover:not(:disabled) {
-  border-color: rgba(102, 123, 87, 0.58);
-  background: rgba(238, 243, 226, 0.78);
+  border-bottom-color: rgba(102, 123, 87, 0.72);
   transform: translateY(-1px);
 }
 
@@ -344,11 +374,11 @@
   display: grid;
   justify-items: start;
   gap: 8px;
-  padding: 16px;
+  padding: 12px 0;
   color: #4f3d30;
-  border: 1px solid rgba(78, 54, 36, 0.22);
-  border-radius: 8px;
-  background: rgba(255, 253, 247, 0.48);
+  border-top: 1px solid rgba(78, 54, 36, 0.22);
+  border-bottom: 1px solid rgba(78, 54, 36, 0.16);
+  background: transparent;
 }
 
 .desktop-access-gate__empty svg {
@@ -365,29 +395,211 @@
 
 .desktop-access-gate button:focus-visible,
 .desktop-access-gate input:focus-visible {
-  outline: 3px solid #2f7882;
+  outline: 3px solid var(--gate-focus);
   outline-offset: 3px;
 }
 
-@keyframes desktop-gate-spin {
-  to { transform: rotate(1turn); }
+.desktop-app[data-theme="night"] .desktop-access-gate {
+  --gate-paper: #302722;
+  --gate-ink: #f1dfc5;
+  --gate-ink-soft: #c9b89e;
+  --gate-line: rgba(244, 223, 192, 0.28);
+  --gate-field: rgba(58, 45, 37, 0.64);
+  --gate-action: #d66e3d;
+  --gate-action-hover: #ee8b52;
+  --gate-focus: #83d8e7;
 }
 
-@media (max-width: 720px), (max-height: 660px) {
+.desktop-app[data-theme="night"] .desktop-access-gate::before {
+  background-image: var(--desktop-gate-entry-poster, url("/assets/learning-room/v1/posters/login-entry/entry-door-closed-night-v1.png"));
+  filter: saturate(0.9) contrast(1.01) brightness(0.9);
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate::after {
+  background:
+    linear-gradient(90deg, rgba(5, 8, 14, 0.16) 0%, rgba(5, 8, 14, 0.06) 42%, rgba(5, 8, 14, 0.18) 100%),
+    linear-gradient(180deg, rgba(3, 5, 9, 0.12), transparent 22%, transparent 70%, rgba(3, 5, 9, 0.3));
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__panel {
+  border-color: rgba(244, 223, 192, 0.2);
+  background: transparent;
+  box-shadow: none;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__heading {
+  border-bottom-color: rgba(244, 223, 192, 0.28);
+  background: transparent;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__heading h1,
+.desktop-app[data-theme="night"] .desktop-access-gate__heading p,
+.desktop-app[data-theme="night"] .desktop-access-gate__form label,
+.desktop-app[data-theme="night"] .desktop-access-gate__form label small,
+.desktop-app[data-theme="night"] .desktop-access-gate__text-action {
+  text-shadow: 0 1px 1px rgba(5, 8, 14, 0.58), 0 0 2px rgba(5, 8, 14, 0.34);
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__form label,
+.desktop-app[data-theme="night"] .desktop-access-gate__workspace-list button,
+.desktop-app[data-theme="night"] .desktop-access-gate__empty {
+  color: #eadbc5;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__heading p,
+.desktop-app[data-theme="night"] .desktop-access-gate__form label small,
+.desktop-app[data-theme="night"] .desktop-access-gate__workspace-list small,
+.desktop-app[data-theme="night"] .desktop-access-gate__empty p {
+  color: #c9b89e;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__form input {
+  color: #f1dfc5;
+  border-bottom: 2px solid rgba(244, 223, 192, 0.42);
+  background: transparent;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__form input::placeholder {
+  color: #eadbc5;
+  opacity: 0.8;
+  text-shadow: 0 1px 1px rgba(5, 8, 14, 0.58), 0 0 2px rgba(5, 8, 14, 0.34);
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__form input:hover,
+.desktop-app[data-theme="night"] .desktop-access-gate__form input:focus {
+  background: transparent;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__workspace-list button,
+.desktop-app[data-theme="night"] .desktop-access-gate__empty {
+  border-bottom-color: rgba(244, 223, 192, 0.24);
+  background: transparent;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__workspace-list button:hover:not(:disabled) {
+  border-bottom-color: rgba(131, 216, 231, 0.72);
+  background: transparent;
+}
+
+.desktop-app[data-theme="night"] .desktop-access-gate__form-error,
+.desktop-app[data-theme="night"] .desktop-access-gate[data-tone="danger"] .desktop-access-gate__notice {
+  color: #ffb995;
+  border-top-color: rgba(255, 143, 104, 0.46);
+  border-bottom-color: rgba(255, 143, 104, 0.26);
+  background: transparent;
+}
+
+.desktop-door-transition {
+  position: absolute;
+  z-index: 90;
+  inset: 0;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.desktop-access-gate__room-content {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+}
+
+/* The Pixi door owns the entire visual handoff. Keep the already-mounted
+   Room alive for data subscriptions, but remove its pixels and tab stops
+   until the transition has completed so the portal cannot double-expose it. */
+.desktop-access-gate__room-content[data-door-entry-phase="opening"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.desktop-door-transition canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.desktop-door-transition[data-transition-theme="night"] {
+  background: transparent;
+}
+
+@media (max-width: 900px) {
   .desktop-access-gate {
-    align-content: start;
-    padding: 68px 14px 24px;
+    gap: clamp(28px, 5vw, 58px);
+    padding-inline: clamp(24px, 5vw, 60px);
   }
 
   .desktop-access-gate__panel {
+    width: min(100%, 470px);
+  }
+}
+
+@media (max-width: 760px), (max-height: 620px) {
+  .desktop-access-gate {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: 0;
+    padding: 50px 18px 14px;
+  }
+
+  .desktop-access-gate__panel {
+    grid-column: 1;
     width: 100%;
-    gap: 18px;
-    padding: clamp(20px, 5vw, 30px);
-    border-radius: 8px 18px 8px 9px;
+    max-width: 540px;
+    justify-self: center;
+    align-self: start;
+    margin-top: 0;
+    top: 0;
+    gap: 14px;
+    padding: 14px 0 0;
+  }
+
+  .desktop-access-gate:has(.desktop-access-gate__form) .desktop-access-gate__panel {
+    top: 0;
+  }
+
+  .desktop-access-gate__heading {
+    gap: 6px;
+    padding-bottom: 12px;
   }
 
   .desktop-access-gate__heading h1 {
     max-width: none;
+    font-size: clamp(24px, 4vw, 30px);
+    line-height: 1.2;
+  }
+
+  .desktop-access-gate__heading p {
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  .desktop-access-gate__form {
+    gap: 12px;
+  }
+
+  .desktop-access-gate__form label {
+    gap: 4px;
+    font-size: 11px;
+  }
+
+  .desktop-access-gate__form input {
+    min-height: 44px;
+    padding: 8px 2px;
+    font-size: 15px;
+  }
+
+  .desktop-access-gate__primary {
+    min-width: 152px;
+    min-height: 44px;
+    padding: 9px 14px;
+    font-size: 13px;
+  }
+
+  .desktop-access-gate__text-action {
+    min-height: 44px;
+    font-size: 12px;
   }
 }
 
@@ -397,10 +609,12 @@
   }
 
   .desktop-access-gate__panel {
-    padding: 20px 17px;
+    padding: 23px 17px 28px;
+    margin-top: 0;
+    top: 0;
   }
 
-  .desktop-access-gate__panel::after {
+  .desktop-access-gate__panel::before {
     right: 20px;
     opacity: 0.65;
   }
@@ -413,11 +627,6 @@
     font-size: 13px;
   }
 
-  .desktop-access-gate__primary,
-  .desktop-access-gate__text-action {
-    width: 100%;
-  }
-
   .desktop-access-gate__workspace-list button {
     grid-template-columns: auto minmax(0, 1fr);
   }
@@ -428,6 +637,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .desktop-access-gate__panel {
+    animation: none;
+  }
+
   .desktop-access-gate__loading svg {
     animation: none;
   }
@@ -437,4 +650,18 @@
   .desktop-access-gate__form input {
     transition-duration: 1ms;
   }
+}
+
+@keyframes desktop-gate-panel-in {
+  from {
+    transform: translate3d(-18px, 12px, 0) rotate(-0.25deg);
+  }
+
+  to {
+    transform: translate3d(0, 0, 0) rotate(0);
+  }
+}
+
+@keyframes desktop-gate-spin {
+  to { transform: rotate(1turn); }
 }

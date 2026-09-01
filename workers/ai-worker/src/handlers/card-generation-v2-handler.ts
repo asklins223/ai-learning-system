@@ -22,8 +22,9 @@
  * 否则使用确定性 provider（测试/离线模式）。确定性 provider 永不得在生产默认
  * 路径发布（§10.5）。
  *
- * worker 通过 raw SQL 访问 V2 表（V2 schema 在 apps/api 中定义，worker 不直接
- * import V2 drizzle schema）+ 复用 apps/api 的纯逻辑 service 函数。
+ * worker 通过 raw SQL 访问 V2 表（V2 drizzle schema 已下沉
+ * @ailearn/shared/db-schema，canonical 定义在 packages/shared；表名以该
+ * schema 为准）。纯逻辑层经 @ailearn/shared/card-generation-v2-pipeline 消费。
  */
 
 import { randomUUID } from "node:crypto";
@@ -45,12 +46,12 @@ import {
   executePlanner,
   type AtomExtractionProvider,
   type ExistingObjectiveRef,
-} from "../../../../apps/api/src/modules/card-generation-v2/planner-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   executeAuthor,
   DeterministicAuthoringProvider,
   type AuthoringProvider,
-} from "../../../../apps/api/src/modules/card-generation-v2/author-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   runGroundingCritic,
   runPedagogyCritic,
@@ -62,22 +63,23 @@ import {
   type PedagogyCriticInput,
   type QualityReportV2,
   type QualityIssue,
-} from "../../../../apps/api/src/modules/card-generation-v2/critic-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import type {
   PedagogyCriticReportV2,
   PedagogyIssueCodeV2,
 } from "@ailearn/shared/card-quality-v2-contracts";
 import {
   runCandidateDeterministicGatesV2,
-} from "../../../../apps/api/src/modules/card-generation-v2/deterministic-gates.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   filterBlocksBySourceScope,
   type SealedEvidenceEntryV2,
-} from "../../../../apps/api/src/modules/card-generation-v2/evidence-seal-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
+import { CardGenerationPipelineErrorV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import {
-  persistCandidateEvidenceBindingPlanV2,
+  assembleCandidateEvidenceBindingPlanV2,
   type AssemblerEvidenceManifest,
-} from "../../../../apps/api/src/modules/card-generation-v2/binding-plan-assembler.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   computeCandidateEvidenceSetHashV2,
   computeCandidateRevisionHashV2,
@@ -85,9 +87,7 @@ import {
   computeRubricHashV2,
 } from "@ailearn/shared/card-generation-v2-hashing";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
-import { computePedagogyReportHash } from "../card-generation-v2/providers.ts";import {
-  insertEvent,
-} from "../../../../apps/api/src/modules/card-generation-v2/helpers.ts";
+import { computePedagogyReportHash } from "../card-generation-v2/providers.ts";
 import {
   generationSemanticSpecV2Schema,
   generationInputSnapshotV2Schema,
@@ -219,6 +219,13 @@ export async function completeV2OutboxJob(jobId: string, leaseToken: string): Pr
  * 2026-08-16（实机验证修复）：outbox 终态 failed 时同步把 run 置为
  * `needs_attention` 并写 error（此前 run 永远卡 planning，用户端只见
  * "生成中"永不结束）。retryable 重试中不动 run（仍 planning/processing）。
+ *
+ * 2026-08-25（AI 设计审计修复）：retryable 分支原先的第二条 run UPDATE 在
+ * CASE 里引用了 runs 表上不存在的 `attempts` 列（该列只在 outbox 表），
+ * PostgreSQL 解析期必抛 42703——run 回写是死代码且每次可重试失败都污染
+ * poll 日志。现改为第一条 UPDATE `RETURNING status`，以 outbox 行的实际
+ * 终态决定是否同步 run：status='failed'（重试耗尽或达上限）才置
+ * needs_attention，语义与非重试分支及文档声明完全一致。
  */
 export async function failV2OutboxJob(
   jobId: string,
@@ -235,19 +242,10 @@ export async function failV2OutboxJob(
           started_at = NULL, lease_token = NULL, lease_expires_at = NULL
       WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
     `);
-    if (runId && workspaceId) {
-      await db.execute(sql`
-        UPDATE public.card_generation_runs_v2
-        SET status = 'needs_attention', error_code = 'generation_failed', error_message = ${error},
-            updated_at = now()
-        WHERE id = ${runId} AND workspace_id = ${workspaceId}
-          AND status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
-                             'closed_without_activation', 'failed', 'cancelled', 'stale')
-      `);
-    }
+    await markRunNeedsAttention(runId, workspaceId, error);
     return;
   }
-  await db.execute(sql`
+  const updated = await db.execute<{ status: string }>(sql`
     UPDATE public.card_generation_run_outbox_v2
     SET status = CASE
       WHEN attempts >= 6 THEN 'failed'
@@ -257,28 +255,28 @@ export async function failV2OutboxJob(
     last_error = ${error},
     started_at = NULL, lease_token = NULL, lease_expires_at = NULL
     WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
+    RETURNING status
   `);
-  if (runId && workspaceId) {
-    await db.execute(sql`
-      UPDATE public.card_generation_runs_v2
-      SET status = CASE
-        WHEN attempts + 1 >= 6 THEN 'needs_attention'
-        ELSE status
-      END,
-      error_code = CASE
-        WHEN attempts + 1 >= 6 THEN 'generation_failed'
-        ELSE error_code
-      END,
-      error_message = CASE
-        WHEN attempts + 1 >= 6 THEN ${error}
-        ELSE error_message
-      END,
-      updated_at = now()
-      WHERE id = ${runId} AND workspace_id = ${workspaceId}
-        AND status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
-                           'closed_without_activation', 'failed', 'cancelled', 'stale')
-    `);
+  if (updated[0]?.status === "failed") {
+    await markRunNeedsAttention(runId, workspaceId, error);
   }
+}
+
+/** outbox 行到达终态 failed 后把仍处中间态的 run 置为 needs_attention 并写 error。 */
+async function markRunNeedsAttention(
+  runId: string | null | undefined,
+  workspaceId: string | null | undefined,
+  error: string,
+): Promise<void> {
+  if (!runId || !workspaceId) return;
+  await db.execute(sql`
+    UPDATE public.card_generation_runs_v2
+    SET status = 'needs_attention', error_code = 'generation_failed', error_message = ${error},
+        updated_at = now()
+    WHERE id = ${runId} AND workspace_id = ${workspaceId}
+      AND status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
+                         'closed_without_activation', 'failed', 'cancelled', 'stale')
+  `);
 }
 
 /**
@@ -338,6 +336,12 @@ function isNonRetryableErrorLike(error: unknown): boolean {
       if (e.retryable === false) return true;
     }
   }
+  // 2026-08-25（AI 设计审计修复）：shared 纯逻辑抛的领域错误（seal/binding
+  // plan 的确定性校验失败，全部为 4xx）是确定性结论，重试只会原样复现——且
+  // 每次重试都重放 planner+author 的 LLM 调用（token 双花）。worker 与
+  // packages/shared 之间只有单一物理副本，instanceof 判定可靠；api 子类
+  // （CardGenerationV2ServiceError）继承本基类，同样被覆盖。
+  if (error instanceof CardGenerationPipelineErrorV2) return true;
   return false;
 }
 
@@ -976,6 +980,9 @@ async function critiqueAndFinalizeCandidates(
     const qualityReports: QualityReportV2[] = [];
     const groundingContractReports: Record<string, Awaited<ReturnType<typeof runGroundingCritic>>> = {};
     const bindingPlanHashesByRevision: Record<string, string> = {};
+    // 2026-08-25（AI 设计审计修复）：per-candidate soft precheck 信号（供
+    // Pedagogy Critic 输入参考与审计）。
+    const softSignalsByCandidate: Record<string, QualityIssue[]> = {};
     const passedCandidates: LearningCardCandidateRevisionV2[] = [];
     // 批量写：候选状态更新与 grounding 事件在循环内累积，循环后一次性 flush
     const candidateStatusUpdates: Array<{
@@ -995,6 +1002,13 @@ async function critiqueAndFinalizeCandidates(
       const pedagogyPre = deterministicPedagogyPrecheck(candidate, sourceContent);
       const allPre = [...precheckGating, ...groundingPre, ...pedagogyPre];
       const fatalPre = allPre.filter((i) => i.severity === "hard");
+      // 2026-08-25（AI 设计审计修复，§4.5 兑现注释承诺）：soft 信号不再算完
+      // 即弃——随 grounding 事件落审计面（排查误杀/漏检可取证），并注入
+      // Pedagogy Critic 的 per-candidate 输入作为风险参考。
+      const softPre = allPre.filter((i) => i.severity === "soft");
+      if (softPre.length > 0) {
+        softSignalsByCandidate[candidate.candidateId] = softPre;
+      }
 
       // 12.2 独立 Grounding + Assembler Binding Plan
       let qualityReport: QualityReportV2;
@@ -1010,13 +1024,23 @@ async function critiqueAndFinalizeCandidates(
             : await runDeterministicGroundingContract(candidate, sealed.evidenceManifest);
 
           if (groundingContract.verdict === "pass") {
-            const binding = await persistCandidateEvidenceBindingPlanV2(tx, {
+            // 2026-08-24（§4.4 第二批）：plan 组装走 shared 纯逻辑层；
+            // 持久化（INSERT binding plan 行）由下方 worker 本地 IO 实现——
+            // 与 api 的 persistCandidateEvidenceBindingPlanV2 落同一张表、
+            // 同样的列闭包（R32：完整 bindings 条目）。
+            const binding = assembleCandidateEvidenceBindingPlanV2({
               runId,
               workspaceId,
               candidate,
               groundingReport: groundingContract,
               evidenceManifest: sealed.evidenceManifest,
               eligibilityVector: sealed.eligibility,
+            });
+            await insertBindingPlanRow(tx, {
+              runId,
+              workspaceId,
+              candidate,
+              result: binding,
             });
             bindingPlanHash = binding.bindingPlanHash;
             groundingContractReports[candidate.candidateRevisionId] = groundingContract;
@@ -1100,7 +1124,11 @@ async function critiqueAndFinalizeCandidates(
       groundingEvents.push(groundingPassed
         ? {
             eventType: "card_candidate.grounding_passed",
-            payload: { candidateId: candidate.candidateId, bindingPlanHash },
+            payload: {
+              candidateId: candidate.candidateId,
+              bindingPlanHash,
+              ...(softPre.length > 0 ? { softPrecheckIssues: softPre } : {}),
+            },
           }
         : {
             eventType: "card_candidate.grounding_failed",
@@ -1138,6 +1166,7 @@ async function critiqueAndFinalizeCandidates(
             candidates: readyCandidates,
             candidateEvidenceBindingPlanHashes: readyCandidates.map((c) => bindingPlanHashesByRevision[c.candidateRevisionId] ?? ""),
             existingObjectives: existingObjectives.map((o) => ({ objectiveId: o.objectiveId, objectiveStatement: o.objectiveStatement, publicSummary: o.publicSummary })),
+            softPrecheckIssues: softSignalsByCandidate,
             plan: { planRevisionId: plan.planRevisionId, planVersion: plan.planVersion, planHash: plan.planHash },
             inputHash: run.input_snapshot_hash,
           },
@@ -1238,6 +1267,13 @@ async function critiqueAndFinalizeCandidates(
       const pc = pedagogyReport?.perCandidate.find((p) => p.candidateId === c.candidateId);
       const pedagogyPassed = pc?.verdict === "keep"
         || (pc?.verdict === "rewrite" && repaired);
+      // 2026-08-25（AI 设计审计修复）：冻结 issue code 落入质量报告（此前
+      // 硬编码空数组，语义裁决结果零审计痕迹）。
+      const issues: QualityIssue[] = (pc?.hardIssues ?? []).map((code) => ({
+        code,
+        severity: "hard" as const,
+        detail: "pedagogy critic frozen issue code (per-candidate)",
+      }));
       return {
         reportId: randomUUID(),
         reportType: "pedagogy" as const,
@@ -1245,8 +1281,8 @@ async function critiqueAndFinalizeCandidates(
         candidateRevisionHash: c.candidateRevisionHash,
         inputHash: run.input_snapshot_hash,
         version: 2,
-        reportHash: simplifiedReportHash({ reportType: "pedagogy", candidateRevisionId: c.candidateRevisionId, inputHash: run.input_snapshot_hash, issues: [], verdict: pedagogyPassed ? "passed" : "failed", gateVersion: "v2" }),
-        issues: [],
+        reportHash: simplifiedReportHash({ reportType: "pedagogy", candidateRevisionId: c.candidateRevisionId, inputHash: run.input_snapshot_hash, issues, verdict: pedagogyPassed ? "passed" : "failed", gateVersion: "v2" }),
+        issues,
         verdict: (pedagogyPassed ? "passed" : "failed") as "passed" | "failed",
         gateVersion: "v2",
       };
@@ -1276,7 +1312,8 @@ async function critiqueAndFinalizeCandidates(
       `);
     }
 
-    // 15b. R35/§17.7：per-candidate pedagogy 事件（此前缺失生产者，批量写）
+    // 15b. R35/§17.7：per-candidate pedagogy 事件（此前缺失生产者，批量写）。
+    // 2026-08-25（AI 设计审计修复）：payload 携带冻结 issue code，语义裁决可审计。
     const pedagogyEvents = afterRepair.map((c) => {
       const pc = pedagogyReport?.perCandidate.find((p) => p.candidateId === c.candidateId);
       const pedagogyPassed = pc?.verdict === "keep"
@@ -1289,6 +1326,7 @@ async function critiqueAndFinalizeCandidates(
           candidateId: c.candidateId,
           candidateRevisionId: c.candidateRevisionId,
           verdict: pc?.verdict ?? "unknown",
+          ...(pc && pc.hardIssues.length > 0 ? { hardIssues: pc.hardIssues } : {}),
         },
       };
     });
@@ -2014,6 +2052,51 @@ class DeterministicPedagogyProvider implements PedagogyCriticProvider {
 function stripReportHash(report: { reportHash: string }) {
   const { reportHash: _, ...rest } = report;
   return rest;
+}
+
+/**
+ * 持久化 binding plan 行到 `candidate_evidence_binding_plans_v2`
+ * （2026-08-24 §4.4 第二批：plan 组装在 shared 纯逻辑层，本函数是 worker
+ * 侧 IO——与 apps/api persistCandidateEvidenceBindingPlanV2 落同一张表、
+ * 同样的列闭包（R32：完整 bindings 条目），仅以 raw SQL 表达。
+ * 注意：表/列名以 packages/shared db-schema 的 drizzle 定义为准
+ * （candidate_evidence_binding_plans_v2，无 card_ 前缀）。）
+ */
+async function insertBindingPlanRow(
+  tx: WorkerTransaction,
+  args: {
+    runId: string;
+    workspaceId: string;
+    candidate: LearningCardCandidateRevisionV2;
+    result: ReturnType<typeof assembleCandidateEvidenceBindingPlanV2>;
+  },
+): Promise<void> {
+  const { runId, workspaceId, candidate, result } = args;
+  await tx.execute(sql`
+    INSERT INTO public.candidate_evidence_binding_plans_v2
+      (id, workspace_id, binding_plan_id, run_id,
+       candidate_revision_id, candidate_revision_hash,
+       plan_revision_id, plan_version, plan_hash,
+       target_unit_bindings, binding_plan_hash, evidence_eligibility_vector_hash)
+    VALUES (
+      gen_random_uuid(), ${workspaceId}, ${result.bindingPlanId}, ${runId},
+      ${candidate.candidateRevisionId}, ${candidate.candidateRevisionHash},
+      ${candidate.planRevisionId}, ${candidate.planVersion}, ${candidate.planHash},
+      ${JSON.stringify(result.plan.bindings)}::jsonb, ${result.bindingPlanHash},
+      ${result.evidenceEligibilityVectorHash}
+    )
+  `);
+}
+
+/** 单条 V2 运行事件写入（一次 MAX + 一次 INSERT；语义同 api helpers.insertEvent）。 */
+async function insertEvent(
+  tx: WorkerTransaction,
+  workspaceId: string,
+  runId: string,
+  eventType: string,
+  payload: Record<string, unknown> = {},
+): Promise<void> {
+  await insertEventsBatched(tx, workspaceId, runId, [{ eventType, payload }]);
 }
 
 /**

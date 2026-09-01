@@ -238,7 +238,10 @@ describe("C3: Grounding Critic Precheck", () => {
 });
 
 describe("C3: Pedagogy Critic Precheck", () => {
-  test("detects front leaking answer", () => {
+  // 2026-08-24（AI 设计审查 §4.5 认识论分工）：改写式/照抄式泄题的子串匹配
+  // 从 hard 降级为 soft 风险信号（surface_paraphrase_only）——语义裁决归
+  // Pedagogy Critic 的冻结 code front_leaks_answer。
+  test("flags front leaking answer as soft risk signal", () => {
     const candidate = makeMockCandidate({
       presentation: {
         ...makeMockCandidate().presentation,
@@ -249,7 +252,7 @@ describe("C3: Pedagogy Critic Precheck", () => {
       },
     });
     const issues = deterministicPedagogyPrecheck(candidate, "source");
-    assert.ok(issues.some((i) => i.code === "front_leaks_answer"));
+    assert.ok(issues.some((i) => i.code === "surface_paraphrase_only" && i.severity === "soft"));
   });
 
   test("detects cue identical to objective statement", () => {

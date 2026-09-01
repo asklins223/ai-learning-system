@@ -126,6 +126,9 @@ button:disabled {
   isolation: isolate;
   overflow: hidden;
   background: #211915;
+  --scene-camera-scale: 1;
+  --scene-camera-x-percent: 0%;
+  --scene-camera-y-percent: 0%;
 }
 
 .desktop-app[data-theme="night"] {
@@ -165,15 +168,59 @@ button:disabled {
   background: linear-gradient(180deg, #6f5137, #3a271d);
 }
 
-.room-reference-frame {
+/* The guide is a true modal scene layer, including when replayed over a
+   task surface. Its child overlay cannot escape this stacking context alone. */
+.desktop-app[data-onboarding-open="true"] .scene-stage {
+  z-index: 60;
+}
+
+.scene-reference-frame {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: max(100%, calc(100vh * 1.776833));
-  height: max(100%, calc(100vw / 1.776833));
+  width: max(100%, calc(100vh * var(--scene-world-aspect, 1.776833)));
+  height: max(100%, calc(100vw / var(--scene-world-aspect, 1.776833)));
+  transform: translate(-50%, -50%);
+}
+
+.scene-reference-frame[data-scene-fit="contain"] {
+  width: min(100%, calc(100vh * var(--scene-world-aspect, 1.776833)));
+  height: min(100%, calc(100vw / var(--scene-world-aspect, 1.776833)));
+}
+
+.room-reference-frame {
   overflow: hidden;
   background: #b68a59;
-  transform: translate(-50%, -50%);
+}
+
+/* The first real room renderer slice owns only the poster-backed D0 base.
+   DOM remains the canonical interaction and fallback layer above it. */
+.room-pixi-canvas {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 160ms ease-out;
+}
+
+.room-pixi-canvas > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+.room-pixi-canvas[data-scene-renderer-state="ready"][data-scene-renderer-active="true"] {
+  opacity: 1;
+}
+
+.room-reference-frame[data-scene-room-canvas-active="true"] :is(.room-backplate--home-day, .room-backplate--home-night) {
+  opacity: 0 !important;
 }
 
 .room-camera-rig,
@@ -181,14 +228,52 @@ button:disabled {
   position: absolute;
   inset: 0;
   transform-origin: 50% 50%;
+  transform-style: preserve-3d;
 }
 
 .room-camera-rig {
-  will-change: transform;
+  transform: translate(var(--scene-camera-x-percent, 0%), var(--scene-camera-y-percent, 0%)) scale(var(--scene-camera-scale, 1));
+  will-change: auto;
 }
 
 .room-depth-layer {
   inset: -8px;
+}
+
+/* The room remains poster-first, but its visual-only layers now share one
+   coordinate space and can move at registered depth rates. DOM hotspots stay
+   in the D4 band so the visual and semantic anchors travel together. */
+.scene-depth-band {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  will-change: auto;
+}
+
+.scene-depth-band--d0 { z-index: 0; }
+.scene-depth-band--d1 { z-index: 2; }
+.scene-depth-band--d2 { z-index: 3; }
+.scene-depth-band--d3 { z-index: 5; }
+.scene-depth-band--d4 { z-index: 7; }
+.scene-depth-band--d5 { z-index: 8; }
+.scene-depth-band--d6 { z-index: 9; }
+
+.room-scene-foreground {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background:
+    linear-gradient(90deg, rgba(34, 22, 15, 0.075), transparent 13%, transparent 86%, rgba(34, 22, 15, 0.08)),
+    linear-gradient(0deg, rgba(34, 22, 15, 0.11), transparent 16%);
+  mix-blend-mode: multiply;
+  opacity: 0.7;
+}
+
+.desktop-app[data-surface-open="true"] .room-scene-foreground,
+.desktop-app[data-scene-phase="focusing"] .room-scene-foreground,
+.desktop-app[data-scene-phase="returning"] .room-scene-foreground {
+  opacity: 0.34;
 }
 
 .room-backplate {
@@ -208,7 +293,9 @@ button:disabled {
 
 .room-backplate--home-night,
 .room-backplate--seat-day,
-.room-backplate--seat-night {
+.room-backplate--seat-night,
+.room-backplate--search-day,
+.room-backplate--search-night {
   opacity: 0;
 }
 
@@ -344,7 +431,7 @@ button:disabled {
   top: 18px;
   right: 18px;
   display: flex;
-  width: min(238px, calc(100vw - 36px));
+  width: min(286px, calc(100vw - 36px));
   max-width: calc(100vw - 36px);
   height: 48px;
   flex-direction: row-reverse;
@@ -422,8 +509,8 @@ button:disabled {
 }
 
 .island-trigger {
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   color: #fff8ee;
   border: 1px solid rgba(255, 244, 226, 0.2);
   background: rgba(25, 23, 22, 0.82);
@@ -541,7 +628,7 @@ button:disabled {
   z-index: 50;
   inset: 0;
   overflow: hidden;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .onboarding-video {
@@ -688,7 +775,7 @@ button:disabled {
   background: rgba(43, 31, 22, 0.55);
   box-shadow: 0 8px 18px rgba(35, 21, 13, 0.22), 0 0 0 7px rgba(255, 247, 230, 0.08);
   backdrop-filter: blur(8px);
-  transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
+  transition: background-color 150ms ease-out, box-shadow 150ms ease-out, transform 100ms ease-out;
 }
 
 .hotspot__label {
@@ -719,6 +806,16 @@ button:disabled {
 .hotspot__label--always {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+.hotspot:active .hotspot__pin {
+  background: rgba(125, 57, 30, 0.92);
+  box-shadow: 0 4px 10px rgba(35, 21, 13, 0.24), 0 0 0 6px rgba(255, 239, 207, 0.1);
+  transform: translateY(2px) scale(0.96);
+}
+
+.hotspot:active .hotspot__label {
+  transform: translateX(-50%) translateY(2px);
 }
 
 .action-rail {
@@ -855,8 +952,8 @@ button:disabled {
 }
 
 /* Task artifacts own their fields, evidence, and primary actions. The
- * companion remains visible where the safe anchor allows, but must never
- * intercept a task control while an L2 surface is open. */
+ * component semantically hides the companion while an L2 surface is open;
+ * this lower stacking context remains a defensive transition-frame guard. */
 .desktop-app[data-surface-open="true"] .companion-presence {
   z-index: 19;
 }
@@ -945,6 +1042,7 @@ button:disabled {
 
 .companion-whisper__close {
   position: absolute;
+  z-index: 4;
   top: 10px;
   right: 10px;
   display: grid;
@@ -1061,7 +1159,7 @@ button:disabled {
 .task-artifact {
   color: var(--ink);
   pointer-events: auto;
-  will-change: transform, opacity;
+  will-change: auto;
 }
 
 .task-surface__header {
@@ -1202,6 +1300,20 @@ button:disabled {
   min-height: 44px;
 }
 
+/* Scene controls share the paper beneath them; only the primary action gets
+   a filled treatment. Secondary actions remain ink and border until engaged. */
+:is(.study-workbench, .review-workbench, .notebook-editor-workbench) .surface-secondary {
+  background: transparent;
+}
+
+:is(.study-workbench, .review-workbench, .notebook-editor-workbench) .surface-secondary:hover:not(:disabled) {
+  background: rgba(101, 126, 88, 0.08);
+}
+
+:is(.study-workbench, .review-workbench, .notebook-editor-workbench) .surface-secondary:focus-visible {
+  background: transparent;
+}
+
 .study-workbench,
 .review-workbench {
   position: absolute;
@@ -1215,16 +1327,25 @@ button:disabled {
   top: 20%;
   left: clamp(34px, 4.6vw, 68px);
   border-color: rgba(145, 160, 121, 0.48);
+  pointer-events: auto;
+}
+
+.study-reference-frame {
+  overflow: visible;
+  pointer-events: none;
+  transform: translate(-50%, -50%) translate(var(--scene-camera-x-percent, 0%), var(--scene-camera-y-percent, 0%)) scale(var(--scene-camera-scale, 1));
+  transform-origin: 50% 50%;
 }
 
 .study-notebook {
   position: absolute;
-  bottom: clamp(-64px, -6vh, -34px);
-  left: clamp(32px, 5vw, 78px);
-  width: min(78vw, 1120px);
-  aspect-ratio: 3 / 2;
+  z-index: 2;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
   color: #3d3026;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .study-notebook__object,
@@ -1236,34 +1357,98 @@ button:disabled {
   height: 100%;
   object-fit: contain;
   filter: drop-shadow(0 24px 35px rgba(30, 17, 10, 0.28));
+  transition: opacity 160ms ease-out;
   pointer-events: none;
   user-select: none;
 }
 
+/* The Study blank base can be promoted from the poster image to a real Pixi
+   Canvas without moving the DOM Surface quads above it. The image remains the
+   canonical first paint and failure path; the Canvas is visual-only. */
+.study-notebook__canvas {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  opacity: 0;
+  filter: drop-shadow(0 24px 35px rgba(30, 17, 10, 0.28));
+  transition: opacity 160ms ease-out;
+  pointer-events: none;
+  user-select: none;
+}
+
+.study-notebook__canvas > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+.study-notebook[data-scene-canvas-state="ready"][data-scene-canvas-active="true"] .study-notebook__canvas {
+  opacity: 1;
+}
+
+.study-notebook[data-scene-canvas-state="ready"][data-scene-canvas-active="true"] .study-notebook__object {
+  opacity: 0;
+}
+
+.study-notebook__surface {
+  position: absolute;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  display: block;
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
+  min-width: 0;
+  pointer-events: auto;
+  transform: var(--scene-surface-projection, none);
+  transform-origin: 0 0;
+}
+
+.study-notebook__surface--reading { z-index: 1; }
+.study-notebook__surface--next { z-index: 2; }
+
 .study-notebook__page {
   position: absolute;
-  z-index: 2;
-  top: 9.5%;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  clip-path: var(--scene-surface-clip);
+  pointer-events: auto;
+}
+
+.study-notebook__ink {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
   display: flex;
-  height: 78%;
   min-width: 0;
   flex-direction: column;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--scene-content-top) var(--scene-content-right) var(--scene-content-bottom) var(--scene-content-left);
+  color: #49382c;
+  font-synthesis: none;
+  user-select: text;
   scrollbar-width: thin;
+  scrollbar-color: rgba(101, 117, 83, 0.45) transparent;
 }
 
-.study-notebook__page--reading {
-  left: 7.5%;
-  width: 39%;
-  padding: 7% 4.2% 5.5% 5.4%;
+.study-notebook__ink::-webkit-scrollbar { width: 6px; }
+.study-notebook__ink::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(101, 117, 83, 0.45); }
+
+.study-notebook__ink--reading {
+  padding-top: max(var(--scene-content-top), 86px);
 }
 
-.study-notebook__page--next {
-  left: 52.5%;
-  width: 39.5%;
+.study-notebook__ink--next {
   justify-content: center;
-  gap: clamp(18px, 2.5vw, 32px);
-  padding: 7% 5.6% 6% 4.5%;
+  gap: clamp(18px, 2.2vw, 30px);
 }
 
 .study-objective h2 {
@@ -1282,7 +1467,7 @@ button:disabled {
   padding: 4px 0 4px 15px;
   color: #5b493b;
   font-family: "Noto Serif SC Variable", "Songti SC", serif;
-  font-size: clamp(12px, 1.05vw, 15px);
+  font-size: clamp(14px, 1.05vw, 15px);
   line-height: 1.85;
   border-inline-start: 2px solid rgba(91, 113, 78, 0.56);
 }
@@ -1304,38 +1489,132 @@ button:disabled {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 11px;
   align-items: start;
+  min-width: 0;
+  max-width: 100%;
   color: #40523d;
 }
 
+.study-next-action > div { min-width: 0; }
 .study-next-action > svg { margin-top: 3px; }
 .study-next-action h3 { margin: 0; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: clamp(19px, 1.7vw, 26px); line-height: 1.4; }
-.study-next-action p { margin: 7px 0 0; color: #675445; font-size: 11px; line-height: 1.75; }
+.study-next-action p {
+  max-width: 100%;
+  margin: 7px 0 0;
+  color: #675445;
+  font-size: 11px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
 .study-next-action__unavailable { margin: -8px 0 0 29px; color: #86452d; font-size: 10px; line-height: 1.6; }
 
 .study-notebook__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .study-notebook__actions .surface-primary { box-shadow: 0 7px 12px rgba(112, 46, 23, 0.16); }
 
 .study-source-slip {
-  position: absolute;
   z-index: 4;
-  bottom: 9%;
-  left: 31%;
-  display: grid;
-  width: 24%;
-  min-height: 58px;
-  align-content: center;
-  gap: 3px;
-  padding: 10px 14px;
-  color: #3f513a;
+  pointer-events: none;
+  transition: opacity 160ms ease-out;
+}
+
+.study-source-slip--empty { opacity: 0; }
+
+.study-source-slip__plane {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
   border: 1px solid rgba(70, 90, 60, 0.2);
   border-radius: 3px 9px 3px 3px;
   background: rgba(202, 211, 171, 0.96);
   box-shadow: 0 8px 14px rgba(48, 36, 23, 0.14);
-  transform: rotate(-1.4deg);
+  clip-path: var(--scene-surface-clip);
+}
+
+.study-source-slip__ink {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 3px;
+  padding: 8px 16px;
+  color: #3f513a;
+  mix-blend-mode: multiply;
+  font-synthesis: none;
 }
 
 .study-source-slip span { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; }
 .study-source-slip strong { overflow: hidden; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+.study-notebook__material,
+.study-source-slip__material {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: block;
+  opacity: 0.28;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.study-notebook__material--left {
+  background:
+    linear-gradient(90deg, rgba(89, 57, 34, 0.045), transparent 55%, rgba(69, 39, 22, 0.22)),
+    linear-gradient(177deg, rgba(255, 252, 236, 0.05), rgba(79, 48, 28, 0.08));
+}
+
+.study-notebook__material--right {
+  background:
+    linear-gradient(90deg, rgba(67, 39, 23, 0.24), transparent 24%, rgba(92, 61, 38, 0.045)),
+    linear-gradient(183deg, rgba(255, 251, 233, 0.04), rgba(76, 45, 27, 0.09));
+}
+
+.study-source-slip__material {
+  opacity: 0.24;
+  background:
+    linear-gradient(176deg, rgba(255, 252, 224, 0.12), transparent 38%, rgba(61, 74, 51, 0.14)),
+    linear-gradient(90deg, rgba(57, 72, 49, 0.05), transparent 72%);
+}
+
+.study-notebook__spine {
+  position: absolute;
+  z-index: 3;
+  top: 4.8%;
+  left: 49.5%;
+  display: block;
+  width: 5.2%;
+  height: 92.8%;
+  opacity: 0.62;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(55, 31, 18, 0.08) 25%,
+    rgba(48, 27, 17, 0.27) 49%,
+    rgba(255, 246, 220, 0.11) 69%,
+    transparent
+  );
+  filter: blur(0.55px);
+  mix-blend-mode: multiply;
+  pointer-events: none;
+  transform: rotate(0.18deg);
+}
+
+.study-objective,
+.study-notebook blockquote,
+.study-objective__status,
+.study-next-action,
+.study-next-action__unavailable {
+  mix-blend-mode: multiply;
+}
+
+.study-notebook ::selection {
+  color: #2f241b;
+  background: rgba(160, 181, 126, 0.42);
+}
 
 .study-boundary { justify-content: center; gap: 10px; }
 .study-boundary > svg { color: #526a4e; }
@@ -2168,6 +2447,8 @@ button:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .scene-status,
+  .run-recovery-notice,
   .skip-link,
   .immersive-island::before,
   .island-panel,
@@ -2176,9 +2457,22 @@ button:disabled {
   .hotspot__pin,
   .hotspot__label,
   .rail-action,
-  .shelf-book {
+  .shelf-book,
+    .scene-depth-band,
+    .room-scene-foreground,
+    .study-notebook__canvas,
+    .study-notebook__object {
     transition-duration: 1ms !important;
+    animation: none !important;
+    will-change: auto;
   }
+}
+
+.desktop-app[data-motion-mode="off"] .scene-status,
+.desktop-app[data-motion-mode="off"] .run-recovery-notice,
+.desktop-app[data-motion-mode="off"] .run-spinner,
+.desktop-app[data-motion-mode="off"] .run-phase__dot {
+  animation: none !important;
 }
 
 /* First Golden: server-proved LearningRun recovery, never a local resume guess. */
@@ -3575,7 +3869,13 @@ button:disabled {
   }
 
   .study-notebook__page--next { justify-content: start; gap: 18px; }
-  .study-objective h2 { font-size: clamp(24px, 7vw, 36px); }
+  .study-objective h2 {
+    max-width: 100%;
+    font-size: clamp(22px, 5.2vw, 30px);
+    line-height: 1.32;
+    overflow-wrap: anywhere;
+    text-wrap: balance;
+  }
   .study-source-slip { min-height: 58px; padding: 12px 15px; }
 
   .desktop-app[data-surface-open="true"] .companion-presence[data-surface="study"] { display: none; }
@@ -3587,9 +3887,17 @@ button:disabled {
 }
 
 @media (max-width: 720px) {
+  .immersive-island {
+    top: 10px;
+    right: 10px;
+    width: min(286px, calc(100vw - 20px));
+    max-width: calc(100vw - 20px);
+  }
+
   .companion-whisper {
-    right: -18%;
-    bottom: 76%;
+    z-index: 3;
+    right: 9%;
+    bottom: -36px;
     width: min(292px, calc(100vw - 28px));
     grid-template-columns: 1fr;
     border-radius: 22px;
@@ -3605,18 +3913,7 @@ button:disabled {
   .companion-whisper__settings { grid-column: 1; }
 }
 
-@media (max-width: 1180px) and (min-height: 661px) {
-  .study-notebook { left: 24px; width: min(82vw, 980px); }
-}
-
-@media (max-width: 900px) and (min-width: 721px) and (min-height: 661px) {
-  .study-notebook { left: 18px; width: 88vw; }
-  .study-workbench__bookmark { left: 18px; }
-  .study-notebook__page--reading { padding-top: 5%; }
-  .study-notebook__page--next { padding-top: 5%; }
-}
-
-@media (max-width: 720px), (max-height: 660px) {
+@media (max-width: 900px), (max-height: 660px) {
   .task-surface--study {
     overflow-x: hidden;
     overflow-y: auto;
@@ -3650,10 +3947,21 @@ button:disabled {
     margin: 0 0 12px;
   }
 
+  .study-reference-frame {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    transform: none;
+  }
+
   .study-notebook {
     position: relative;
     inset: auto;
     width: min(100%, 780px);
+    height: auto;
     aspect-ratio: auto;
     margin: 0 auto;
   }
@@ -3673,7 +3981,20 @@ button:disabled {
     box-shadow: 0 18px 35px rgba(35, 21, 13, 0.24);
   }
 
-  .study-notebook__object { display: none; }
+  .study-notebook__object,
+  .study-notebook__canvas { display: none; }
+
+  .study-notebook__surface {
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    transform: none !important;
+  }
+
+  .study-notebook__surface--reading { grid-area: reading; }
+  .study-notebook__surface--next { grid-area: next; }
 
   .study-notebook__page {
     position: relative;
@@ -3682,17 +4003,30 @@ button:disabled {
     height: auto;
     min-height: 0;
     overflow: visible;
+    padding: 0;
+    border: 1px solid rgba(83, 58, 38, 0.14);
+    border-radius: 7px 13px 7px 7px;
+    background: rgba(255, 253, 246, 0.76);
+    clip-path: none;
   }
 
-  .study-notebook__page--reading {
-    grid-area: reading;
+  .study-notebook__ink {
+    position: relative;
+    inset: auto;
+    min-height: 0;
+    overflow: visible;
     padding: clamp(28px, 7vw, 46px);
   }
+
+  .study-notebook__ink--reading { padding-top: clamp(28px, 7vw, 46px); }
 
   .study-notebook__page--next {
-    grid-area: next;
-    padding: clamp(28px, 7vw, 46px);
     border-top: 1px solid rgba(83, 58, 38, 0.16);
+  }
+
+  .study-notebook__ink--next {
+    justify-content: flex-start;
+    gap: 18px;
   }
 
   .study-source-slip {
@@ -3700,11 +4034,31 @@ button:disabled {
     inset: auto;
     grid-area: source;
     width: auto;
+    height: auto;
     min-height: 64px;
     margin: 0 clamp(28px, 7vw, 46px) 10px;
+    padding: 0;
   }
 
-  .study-objective h2 { font-size: clamp(25px, 7vw, 34px); }
+  .study-source-slip--empty { display: none; }
+
+  .study-source-slip__plane {
+    position: relative;
+    inset: auto;
+    min-height: 64px;
+    clip-path: none;
+  }
+
+  .study-source-slip__ink { padding: 12px 15px; }
+  .study-notebook__spine { display: none; }
+
+  .study-objective h2 {
+    max-width: 100%;
+    font-size: clamp(22px, 5.2vw, 30px);
+    line-height: 1.32;
+    overflow-wrap: anywhere;
+    text-wrap: balance;
+  }
   .study-notebook blockquote { font-size: 13px; }
 
 }
@@ -3737,6 +4091,11 @@ button:disabled {
   padding: clamp(210px, 31vh, 252px) 0 clamp(46px, 6vh, 60px);
   pointer-events: none;
   perspective: none;
+}
+
+.review-reference-frame {
+  transform: translate(-50%, -50%) translate(var(--scene-camera-x-percent, 0%), var(--scene-camera-y-percent, 0%)) scale(var(--scene-camera-scale, 1));
+  transform-origin: 50% 50%;
 }
 
 .review-ledger {
@@ -4082,6 +4441,10 @@ button:disabled {
   inset: 0;
 }
 
+.room-reference-frame[data-view-preset="search"] .room-depth-layer {
+  inset: 0;
+}
+
 .desktop-app[data-surface-open="true"] .companion-presence[data-surface="review"] {
   display: none;
 }
@@ -4108,15 +4471,6 @@ button:disabled {
   color: #46372b;
   pointer-events: none;
   perspective: none;
-}
-
-.review-reference-frame {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: max(100%, calc(100vh * 1.776833));
-  height: max(100%, calc(100vw / 1.776833));
-  transform: translate(-50%, -50%);
 }
 
 .review-scene__return {
@@ -4222,28 +4576,66 @@ button:disabled {
   font-weight: 700;
   border: 1px solid rgba(135, 59, 40, 0.28);
   border-radius: 4px;
-  background: rgba(255, 248, 235, 0.48);
+  background: transparent;
   cursor: pointer;
+}
+
+.review-scene__partial-error button:hover:not(:disabled) {
+  background: rgba(166, 75, 43, 0.065);
 }
 
 .review-tape {
   position: absolute;
   z-index: 4;
-  top: 45.7%;
-  left: 61.3%;
-  display: grid;
-  width: 17.5%;
-  height: 35.1%;
-  grid-template-rows: 32px minmax(0, 1fr) 34px;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  display: block;
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
   color: #4b3728;
   font-family: "Noto Sans SC Variable", "PingFang SC", sans-serif;
   pointer-events: auto;
-  /* The paper widens at the roller and fans left as it drops.  Register the
-     whole content plane first; row-level angles below follow the ruled lines
-     instead of leaving a flat rectangular UI on top of the paper. */
-  transform: perspective(1400px) rotateY(-2.2deg) rotateX(0.35deg) skewX(-1.8deg) rotate(0.7deg);
-  transform-origin: 54% 100%;
   clip-path: none;
+}
+
+.review-tape__surface {
+  position: absolute;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  display: block;
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
+  min-width: 0;
+  pointer-events: auto;
+  transform: var(--scene-surface-projection, none);
+  transform-origin: 0 0;
+}
+
+.review-tape__surface--header,
+.review-tape__surface--footer {
+  z-index: 2;
+}
+
+.review-tape__surface--body {
+  z-index: 1;
+}
+
+.review-tape__plane {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  clip-path: var(--scene-surface-clip);
+}
+
+.review-tape__ink {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .review-tape__header {
@@ -4254,8 +4646,6 @@ button:disabled {
   gap: 5px;
   padding: 0 14px 3px 32px;
   border-bottom: 1px solid rgba(93, 63, 39, 0.16);
-  transform: rotate(0.35deg) translateX(-1px);
-  transform-origin: 54% 100%;
 }
 
 .review-tape__header > span {
@@ -4325,8 +4715,6 @@ button:disabled {
   height: 1px;
   content: "";
   background: rgba(92, 64, 42, 0.14);
-  transform: translateX(var(--review-tape-row-shift, 0px)) rotate(var(--review-tape-row-angle, 0deg)) skewX(var(--review-tape-row-skew, -1deg)) scaleX(var(--review-tape-row-scale, 1));
-  transform-origin: 0 50%;
 }
 
 .review-tape__row {
@@ -4345,16 +4733,7 @@ button:disabled {
   background: transparent;
   cursor: pointer;
   font-synthesis: none;
-  transform: translateX(var(--review-tape-row-shift, 0px)) rotate(var(--review-tape-row-angle, 0deg)) skewX(var(--review-tape-row-skew, -1deg)) scaleX(var(--review-tape-row-scale, 1));
-  transform-origin: 0 50%;
 }
-
-.review-tape__item:nth-child(1) { --review-tape-row-angle: 0.8deg; --review-tape-row-skew: -0.9deg; --review-tape-row-scale: 0.99; --review-tape-row-shift: 0px; }
-.review-tape__item:nth-child(2) { --review-tape-row-angle: 1.25deg; --review-tape-row-skew: -1deg; --review-tape-row-scale: 0.975; --review-tape-row-shift: -5px; }
-.review-tape__item:nth-child(3) { --review-tape-row-angle: 1.7deg; --review-tape-row-skew: -1.1deg; --review-tape-row-scale: 0.96; --review-tape-row-shift: -10px; }
-.review-tape__item:nth-child(4) { --review-tape-row-angle: 2.15deg; --review-tape-row-skew: -1.2deg; --review-tape-row-scale: 0.945; --review-tape-row-shift: -15px; }
-.review-tape__item:nth-child(5) { --review-tape-row-angle: 2.6deg; --review-tape-row-skew: -1.3deg; --review-tape-row-scale: 0.93; --review-tape-row-shift: -20px; }
-.review-tape__item:nth-child(6) { --review-tape-row-angle: 3.05deg; --review-tape-row-skew: -1.4deg; --review-tape-row-scale: 0.915; --review-tape-row-shift: -25px; }
 
 .review-tape__row:hover {
   background: rgba(101, 126, 88, 0.07);
@@ -4366,7 +4745,8 @@ button:disabled {
 }
 
 .review-tape__row--return-target {
-  box-shadow: inset 3px 0 0 rgba(166, 75, 43, 0.42);
+  background: rgba(166, 75, 43, 0.065);
+  box-shadow: inset 0 0 0 1px rgba(166, 75, 43, 0.24);
 }
 
 .review-tape__row:focus-visible,
@@ -4425,7 +4805,6 @@ button:disabled {
 }
 
 .review-tape__footer {
-  position: relative;
   display: flex;
   min-width: 0;
   align-items: center;
@@ -4434,8 +4813,6 @@ button:disabled {
   color: #86654f;
   font-size: 11px;
   text-align: center;
-  transform: translateX(-8px) rotate(2.8deg) skewX(-1.2deg);
-  transform-origin: 0 50%;
 }
 
 .review-tape__footer button {
@@ -4462,8 +4839,35 @@ button:disabled {
   display: block;
   width: max-content;
   max-width: 100%;
-  transform: rotate(-0.4deg);
-  transform-origin: 0 50%;
+}
+
+.review-tape__material {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: block;
+  opacity: 0.24;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.review-tape__material--header {
+  background:
+    linear-gradient(180deg, rgba(69, 42, 25, 0.15), transparent 42%, rgba(255, 248, 225, 0.04)),
+    linear-gradient(90deg, rgba(67, 40, 24, 0.08), transparent 24%, rgba(93, 58, 34, 0.06));
+}
+
+.review-tape__material--body {
+  background:
+    linear-gradient(90deg, rgba(62, 38, 24, 0.07), transparent 19%, transparent 73%, rgba(83, 49, 28, 0.08)),
+    linear-gradient(176deg, rgba(255, 249, 227, 0.035), rgba(73, 44, 27, 0.08));
+}
+
+.review-tape__material--footer {
+  opacity: 0.3;
+  background:
+    linear-gradient(180deg, rgba(72, 43, 25, 0.08), transparent 28%, rgba(67, 39, 23, 0.18)),
+    linear-gradient(90deg, rgba(68, 41, 25, 0.06), transparent 58%, rgba(255, 248, 225, 0.05));
 }
 
 .review-tape__header,
@@ -4475,50 +4879,58 @@ button:disabled {
 .review-notebook {
   position: absolute;
   z-index: 4;
-  top: 73.3%;
-  left: 18.7%;
-  width: 35.5%;
-  height: 16.5%;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
   color: #453429;
   pointer-events: none;
   will-change: transform, opacity;
 }
 
+.review-notebook__surface {
+  position: absolute;
+  z-index: 1;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  display: block;
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
+  min-width: 0;
+  pointer-events: auto;
+  font-synthesis: none;
+  transform: var(--scene-surface-projection, none);
+  transform-origin: 0 0;
+}
+
+.review-notebook__surface--left {
+  z-index: 1;
+}
+
+.review-notebook__surface--right {
+  z-index: 2;
+}
+
 .review-notebook__page {
   position: absolute;
-  top: 0;
+  inset: 0;
   display: block;
+  width: 100%;
   height: 100%;
   min-width: 0;
   overflow: hidden;
   pointer-events: auto;
-  font-synthesis: none;
-  transform: none;
+  clip-path: var(--scene-surface-clip);
 }
 
-.review-notebook__page--left {
-  left: 4.2%;
-  width: 46.2%;
-  padding: 0;
-  clip-path: polygon(4% 0, 100% 0, 96% 100%, 0 100%);
-  /* The desktop hook replaces this fallback with a four-corner page
-     homography.  Keeping the CSS fallback flat prevents a second rotate/skew
-     stack from fighting the measured quad while the page is being resized. */
-  transform: none;
-  transform-origin: 0 0;
-}
-
+.review-notebook__page--left,
 .review-notebook__page--right {
-  left: 54.3%;
-  width: 39.6%;
   padding: 0;
-  clip-path: polygon(7% 0, 100% 0, 94% 100%, 0 100%);
-  transform: perspective(780px) rotateY(6deg) rotateX(1.4deg) skewX(1.6deg) skewY(1.4deg) rotate(1.2deg);
-  transform-origin: 4% 54%;
 }
 
 .review-notebook__ink {
   position: absolute;
+  z-index: 1;
   inset: 0;
   display: flex;
   min-width: 0;
@@ -4526,7 +4938,6 @@ button:disabled {
   box-sizing: border-box;
   pointer-events: auto;
   transform-origin: 50% 100%;
-  will-change: transform;
 }
 
 .review-notebook__ink > :not(.review-notebook__action) {
@@ -4598,8 +5009,411 @@ button:disabled {
 .review-notebook__ink--right {
   inset: 0 4% 0 2%;
   padding: 5.5% 7% 10% 7.5%;
-  transform: rotate(0.45deg) skewX(0.6deg) skewY(0.5deg) scale(0.99);
-  transform-origin: 95% 54%;
+  transform: none;
+}
+
+.review-notebook__material {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: block;
+  opacity: 0.32;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.review-notebook__material--left {
+  background:
+    linear-gradient(90deg, rgba(88, 57, 35, 0.035) 0%, transparent 48%, rgba(77, 45, 27, 0.18) 100%),
+    linear-gradient(178deg, rgba(255, 250, 229, 0.03), rgba(77, 46, 27, 0.08));
+}
+
+.review-notebook__material--right {
+  background:
+    linear-gradient(90deg, rgba(66, 39, 24, 0.2) 0%, transparent 28%, rgba(86, 55, 33, 0.04) 100%),
+    linear-gradient(182deg, rgba(255, 250, 229, 0.035), rgba(74, 43, 26, 0.075));
+}
+
+.review-notebook__spine {
+  position: absolute;
+  z-index: 3;
+  top: -5%;
+  left: 49.25%;
+  display: block;
+  width: 6.6%;
+  height: 111%;
+  opacity: 0.58;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(55, 31, 19, 0.06) 24%,
+    rgba(49, 28, 18, 0.24) 47%,
+    rgba(255, 245, 218, 0.1) 68%,
+    transparent 100%
+  );
+  filter: blur(0.45px);
+  mix-blend-mode: multiply;
+  pointer-events: none;
+  transform: rotate(0.35deg);
+  transform-origin: 50% 50%;
+}
+
+[data-theme="night"] .review-notebook__material {
+  opacity: 0.4;
+}
+
+[data-theme="night"] .review-tape__material {
+  opacity: 0.34;
+}
+
+html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-surface-base]) {
+  opacity: 0 !important;
+}
+
+.scene-reference-frame[data-surface-calibration-ink="false"] [data-scene-surface-layer="ink"] {
+  opacity: 0 !important;
+}
+
+.scene-reference-frame[data-surface-calibration-material="false"] [data-scene-surface-layer="material"] {
+  opacity: 0 !important;
+}
+
+.scene-reference-frame[data-surface-calibration-occluder="false"] [data-scene-surface-layer="occluder"] {
+  opacity: 0 !important;
+}
+
+html[data-surface-calibration-motion="off"] .scene-reference-frame[data-surface-calibration="true"] *,
+html[data-surface-calibration-motion="off"] .scene-reference-frame[data-surface-calibration="true"] *::before,
+html[data-surface-calibration-motion="off"] .scene-reference-frame[data-surface-calibration="true"] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+
+.surface-calibrator,
+.surface-calibrator__geometry {
+  position: absolute;
+  z-index: 50;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.surface-calibrator__geometry {
+  z-index: 0;
+  overflow: visible;
+}
+
+.surface-calibrator__quad,
+.surface-calibrator__clip,
+.surface-calibrator__centerline,
+.surface-calibrator__baseline {
+  fill: rgba(255, 165, 81, 0.035);
+  stroke: rgba(255, 213, 163, 0.38);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.surface-calibrator__quad--selected {
+  fill: rgba(211, 96, 45, 0.13);
+  stroke: #ffb56f;
+  stroke-width: 1.5;
+}
+
+.surface-calibrator__clip {
+  fill: none;
+  stroke: #f4df88;
+  stroke-dasharray: 5 4;
+}
+
+.surface-calibrator__centerline {
+  fill: none;
+  stroke: rgba(133, 211, 190, 0.8);
+  stroke-dasharray: 3 4;
+}
+
+.surface-calibrator__baseline {
+  fill: none;
+  stroke: rgba(255, 171, 102, 0.92);
+}
+
+.surface-calibrator__handle {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  color: #fff6e9;
+  font: 760 9px/1 "Noto Sans SC Variable", "PingFang SC", sans-serif;
+  border: 1px solid rgba(255, 244, 225, 0.9);
+  border-radius: 50%;
+  background: #a94e2f;
+  box-shadow: 0 3px 9px rgba(35, 20, 12, 0.42);
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  transform: translate(-50%, -50%);
+}
+
+.surface-calibrator__handle:hover,
+.surface-calibrator__handle--active,
+.surface-calibrator__handle:focus-visible {
+  color: #3b281d;
+  outline: 2px solid rgba(255, 224, 178, 0.94);
+  outline-offset: 2px;
+  background: #ffd29d;
+}
+
+.surface-calibrator__handle:active {
+  cursor: grabbing;
+}
+
+.surface-calibrator__launcher {
+  position: absolute;
+  z-index: 48;
+  top: 2.4%;
+  right: 2.2%;
+  min-height: 34px;
+  padding: 0 11px;
+  color: #fff2df;
+  font: 690 11px/1 "Noto Sans SC Variable", "PingFang SC", sans-serif;
+  border: 1px solid rgba(255, 235, 204, 0.28);
+  border-radius: 4px;
+  background: rgba(54, 37, 28, 0.9);
+  box-shadow: 0 6px 18px rgba(30, 18, 12, 0.24);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.surface-calibrator__launcher:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.surface-calibrator__launcher:focus-visible,
+.surface-calibrator__panel button:focus-visible,
+.surface-calibrator__panel select:focus-visible,
+.surface-calibrator__panel input:focus-visible {
+  outline: 2px solid #ffc17f;
+  outline-offset: 2px;
+}
+
+.surface-calibrator__panel {
+  position: absolute;
+  z-index: 3;
+  top: 2.4%;
+  right: 2.2%;
+  width: min(308px, 32vw);
+  max-height: 94%;
+  padding: 14px;
+  overflow: auto;
+  color: #f7ead8;
+  color-scheme: dark;
+  font-family: "Noto Sans SC Variable", "PingFang SC", sans-serif;
+  border: 1px solid rgba(255, 232, 200, 0.27);
+  border-radius: 6px;
+  background: rgba(48, 33, 25, 0.97);
+  box-shadow: 0 16px 38px rgba(28, 16, 10, 0.42);
+  pointer-events: auto;
+}
+
+.surface-calibrator__panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid rgba(255, 231, 197, 0.16);
+}
+
+.surface-calibrator__panel-header div {
+  display: grid;
+  gap: 3px;
+}
+
+.surface-calibrator__panel-header strong {
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: 17px;
+}
+
+.surface-calibrator__panel-header span {
+  color: #cdb9a1;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.surface-calibrator__panel button,
+.surface-calibrator__panel select {
+  min-height: 32px;
+  color: #f8ead5;
+  font: 650 11px/1.2 "Noto Sans SC Variable", "PingFang SC", sans-serif;
+  border: 1px solid rgba(255, 229, 193, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 245, 228, 0.06);
+}
+
+.surface-calibrator__panel button {
+  padding: 0 9px;
+  cursor: pointer;
+}
+
+.surface-calibrator__panel button:hover:not(:disabled) {
+  background: rgba(255, 239, 214, 0.12);
+}
+
+.surface-calibrator__panel button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.surface-calibrator__field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: #d5c1aa;
+  font-size: 10px;
+}
+
+.surface-calibrator__field select {
+  width: 100%;
+  padding: 0 8px;
+}
+
+.surface-calibrator__modes {
+  display: grid;
+  margin: 12px 0 0;
+  padding: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  border: 0;
+}
+
+.surface-calibrator__modes legend {
+  grid-column: 1 / -1;
+  margin-bottom: 1px;
+  padding: 0;
+  color: #d5c1aa;
+  font-size: 10px;
+}
+
+.surface-calibrator__modes label {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  color: #d9c8b2;
+  font-size: 9px;
+}
+
+.surface-calibrator__modes select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 5px;
+  font-size: 9px;
+}
+
+.surface-calibrator__mode-note {
+  margin: 9px 0 0;
+  color: #bfae99;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.surface-calibrator__layers {
+  display: grid;
+  margin: 12px 0 0;
+  padding: 0;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  border: 0;
+}
+
+.surface-calibrator__layers legend {
+  margin-bottom: 6px;
+  padding: 0;
+  color: #d5c1aa;
+  font-size: 10px;
+}
+
+.surface-calibrator__layers label {
+  display: grid;
+  min-height: 30px;
+  place-items: center;
+  gap: 3px;
+  color: #ead9c2;
+  font-size: 9px;
+  border: 1px solid rgba(255, 232, 200, 0.13);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.surface-calibrator__layers input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #c8663e;
+}
+
+.surface-calibrator__coordinates {
+  display: grid;
+  margin-top: 12px;
+  gap: 4px;
+}
+
+.surface-calibrator__coordinates p {
+  display: grid;
+  min-height: 25px;
+  margin: 0;
+  padding: 0 7px;
+  grid-template-columns: 30px 1fr 1fr;
+  align-items: center;
+  color: #d9c8b2;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid rgba(255, 232, 200, 0.09);
+}
+
+.surface-calibrator__coordinates p[data-active="true"] {
+  color: #ffd29d;
+  background: rgba(200, 102, 62, 0.13);
+}
+
+.surface-calibrator__coordinates strong {
+  color: #f3e2cd;
+}
+
+.surface-calibrator__validation,
+.surface-calibrator__copy-status {
+  margin: 10px 0 0;
+  color: #cfbea9;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.surface-calibrator__validation--error {
+  color: #ffb29a;
+}
+
+.surface-calibrator__actions {
+  display: grid;
+  margin-top: 11px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.surface-calibrator__actions .surface-calibrator__apply {
+  grid-column: 1 / -1;
+  color: #fff3e4;
+  border-color: rgba(220, 115, 70, 0.58);
+  background: rgba(184, 82, 48, 0.48);
+}
+
+.surface-calibrator__actions .surface-calibrator__copy {
+  color: #fff3e4;
+  border-color: rgba(220, 115, 70, 0.58);
+  background: rgba(184, 82, 48, 0.48);
 }
 
 .review-notebook__sequence {
@@ -4771,6 +5585,11 @@ button:disabled {
   color: #4b392d;
 }
 
+.review-scene-state > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .review-scene-state > svg {
   color: #55704f;
 }
@@ -4796,8 +5615,11 @@ button:disabled {
 
 .review-scene-state .surface-primary {
   min-height: 44px;
+  min-width: 0;
+  max-width: 100%;
   padding-inline: 11px;
   font-size: 12px;
+  white-space: normal;
 }
 
 .review-scene-state__lines {
@@ -4852,8 +5674,6 @@ button:disabled {
   }
   .review-scene__heading { left: 12.7%; width: 22.6%; }
   .review-scene__heading h2 { font-size: clamp(34px, 3.4vw, 43px); }
-  .review-tape { left: 61.1%; width: 17.8%; }
-  .review-notebook { left: 18.5%; width: 36%; }
 }
 
 @media (max-width: 900px), (max-height: 660px) {
@@ -4916,8 +5736,12 @@ button:disabled {
   }
 
   .review-scene__return {
+    position: sticky;
+    top: 12px;
+    left: auto;
     justify-self: start;
-    margin-bottom: 2px;
+    margin: 0 0 12px;
+    z-index: 8;
   }
 
   .review-scene__heading {
@@ -4957,13 +5781,51 @@ button:disabled {
     border-bottom: 1px solid rgba(91, 64, 42, 0.18);
   }
 
+  .review-tape__surface {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: auto;
+    height: auto;
+    transform: none;
+  }
+
+  .review-tape__surface--header {
+    grid-row: 1;
+    min-height: 44px;
+  }
+
+  .review-tape__surface--body {
+    grid-row: 2;
+    min-height: 336px;
+  }
+
+  .review-tape__surface--footer {
+    grid-row: 3;
+    min-height: 44px;
+  }
+
+  .review-tape__plane,
+  .review-tape__ink {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    clip-path: none;
+  }
+
+  .review-tape__material {
+    display: none;
+  }
+
   .review-tape__header {
-    padding-inline: 8px 2px;
+    padding: 0 2px 0 8px;
   }
 
   .review-tape__navigation button {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
 
   .review-tape__row {
@@ -5001,17 +5863,25 @@ button:disabled {
     pointer-events: auto;
   }
 
-  .review-notebook__page {
+  .review-notebook__surface {
     position: relative;
     top: auto;
     left: auto;
     width: auto;
     height: auto;
     min-height: 220px;
+    transform: none;
+  }
+
+  .review-notebook__page {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: 100%;
+    min-height: 220px;
     padding: 20px;
     overflow: visible;
     clip-path: none;
-    transform: none;
   }
 
   .review-notebook__ink,
@@ -5034,6 +5904,11 @@ button:disabled {
   }
 
   .review-notebook__curved-copy {
+    display: none;
+  }
+
+  .review-notebook__material,
+  .review-notebook__spine {
     display: none;
   }
 
@@ -5062,8 +5937,8 @@ button:disabled {
     left: 0;
   }
 
-  .review-notebook__page--left,
-  .review-notebook__page--right {
+  .review-notebook__surface--left,
+  .review-notebook__surface--right {
     left: auto;
     width: auto;
     transform: none;
@@ -5095,6 +5970,18 @@ button:disabled {
   .review-scene-state {
     min-height: 200px;
     padding: 22px 12px;
+  }
+
+  .review-scene-state--error {
+    align-content: start;
+    align-items: start;
+    padding-top: 14px;
+  }
+
+  .review-scene-state--loading {
+    align-content: start;
+    align-items: start;
+    padding-top: 14px;
   }
 
   .review-scene__return-status {
@@ -5133,6 +6020,10 @@ button:disabled {
     padding: 20px 8px;
   }
 
+  .review-notebook__surface {
+    min-height: 0;
+  }
+
   .review-notebook__page--right {
     border-top: 1px solid rgba(91, 64, 42, 0.17);
     border-left: 0;
@@ -5152,5 +6043,2260 @@ button:disabled {
   .review-tape__window,
   .review-notebook {
     will-change: auto;
+  }
+}
+
+/* Phase 1D: the editable Notebook keeps semantic form controls in DOM while
+   three registered world surfaces provide page projection and material depth. */
+.notebook-editor-workbench {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  color: #3d3026;
+  pointer-events: none;
+  perspective: 1200px;
+}
+
+.notebook-editor__bookmark {
+  top: 20%;
+  left: clamp(34px, 4.6vw, 68px);
+  border-color: rgba(145, 160, 121, 0.48);
+  pointer-events: auto;
+}
+
+.notebook-editor-reference-frame {
+  overflow: visible;
+  pointer-events: none;
+  transform: translate(-50%, -50%) translate(var(--scene-camera-x-percent, 0%), var(--scene-camera-y-percent, 0%)) scale(var(--scene-camera-scale, 1));
+  transform-origin: 50% 50%;
+}
+
+.notebook-editor {
+  position: absolute;
+  z-index: 2;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
+  pointer-events: none;
+}
+
+.notebook-editor__object {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 25px 36px rgba(30, 17, 10, 0.3));
+  pointer-events: none;
+  user-select: none;
+}
+
+.notebook-editor__surface {
+  position: absolute;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  display: block;
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
+  min-width: 0;
+  pointer-events: auto;
+  transform: var(--scene-surface-projection, none);
+  transform-origin: 0 0;
+}
+
+.notebook-editor__surface--editor { z-index: 1; }
+.notebook-editor__surface--actions { z-index: 2; }
+
+.notebook-editor__page {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: transparent;
+  clip-path: var(--scene-surface-clip);
+}
+
+.notebook-editor__ink {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  padding:
+    var(--scene-content-top)
+    var(--scene-content-right)
+    var(--scene-content-bottom)
+    var(--scene-content-left);
+  color: #3d3026;
+  mix-blend-mode: multiply;
+  pointer-events: auto;
+}
+
+.notebook-editor__ink--editor { gap: 9px; }
+.notebook-editor__ink--actions { gap: 10px; }
+
+.notebook-editor__page-heading,
+.notebook-editor__action-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(83, 64, 48, 0.2);
+}
+
+.notebook-editor__page-heading strong {
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: clamp(19px, 1.5vw, 24px);
+  letter-spacing: -0.02em;
+}
+
+.notebook-editor__page-heading span,
+.notebook-editor__action-heading span {
+  color: #79624e;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.notebook-editor__action-heading {
+  align-items: center;
+  padding-top: 2px;
+}
+
+.notebook-editor__action-heading strong {
+  color: #52674c;
+  font-size: 11px;
+}
+
+.notebook-editor-workbench .notebook-title-field {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  grid-column: auto;
+  grid-row: auto;
+}
+
+.notebook-editor-workbench .notebook-title-field span {
+  color: #79624e;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.notebook-editor-workbench .notebook-title-field input {
+  min-width: 0;
+  padding: 4px 2px 6px;
+  color: #352920;
+  font: 700 clamp(15px, 1.18vw, 18px)/1.35 "Noto Serif SC Variable", "Songti SC", serif;
+  border: 0;
+  border-bottom: 1px solid rgba(82, 63, 47, 0.2);
+  border-radius: 0;
+  background: transparent;
+}
+
+.notebook-editor-workbench textarea,
+.notebook-editor-workbench .notebook-readonly {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 4px 3px;
+  overflow: auto;
+  color: #3d2e24;
+  font: 400 clamp(13px, 1.02vw, 16px)/1.72 "Noto Serif SC Variable", "Songti SC", serif;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  scrollbar-color: rgba(100, 78, 59, 0.38) transparent;
+  user-select: text;
+}
+
+.notebook-editor-workbench textarea {
+  resize: none;
+  caret-color: #9b4024;
+}
+
+.notebook-editor-workbench .notebook-readonly {
+  display: block;
+  grid-column: auto;
+  grid-row: auto;
+}
+
+.notebook-editor-workbench .notebook-readonly p {
+  margin: 0 0 12px;
+}
+
+.notebook-editor-workbench .notebook-title-field input:focus,
+.notebook-editor-workbench textarea:focus {
+  outline: 2px solid rgba(83, 108, 73, 0.72);
+  outline-offset: 3px;
+}
+
+.notebook-editor-workbench .selection-preview {
+  display: flex;
+  min-width: 0;
+  min-height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding-top: 7px;
+  overflow: hidden;
+  color: #745f4d;
+  font-size: 9px;
+  border-top: 1px solid rgba(83, 64, 48, 0.16);
+}
+
+.notebook-editor-workbench .selection-preview q {
+  min-width: 0;
+  overflow: hidden;
+  color: #453429;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notebook-editor__source-space {
+  min-height: clamp(142px, 18vh, 174px);
+  flex: 0 0 auto;
+}
+
+.notebook-editor__generation-scope {
+  margin: 0;
+  color: #685544;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.notebook-editor-workbench .notebook-actions {
+  display: grid;
+  margin-top: auto;
+  grid-column: auto;
+  grid-template-columns: 1fr;
+  gap: 7px;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.notebook-editor-workbench .notebook-actions button {
+  width: 100%;
+  min-height: 44px;
+  padding-inline: 11px;
+  font-size: 11px;
+}
+
+.notebook-editor-workbench .notebook-capability-note,
+.notebook-editor-workbench .notebook-inline-error {
+  margin: 0;
+  grid-column: auto;
+  color: #745f4d;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.notebook-editor-workbench .notebook-inline-error { color: #8d3b24; }
+
+.notebook-editor-workbench .notebook-state,
+.notebook-editor__side-state {
+  display: grid;
+  min-height: 100%;
+  flex: 1 1 auto;
+  place-items: center;
+  align-content: center;
+  gap: 9px;
+  grid-column: auto;
+  grid-row: auto;
+  text-align: center;
+}
+
+.notebook-editor-workbench .notebook-state > svg { color: #52674c; }
+.notebook-editor-workbench .notebook-state strong,
+.notebook-editor__side-state strong {
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: 18px;
+}
+
+.notebook-editor-workbench .notebook-state p,
+.notebook-editor__side-state span {
+  max-width: 31em;
+  margin: 0;
+  color: #6c5847;
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.notebook-editor__side-state .surface-action-pair {
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.notebook-editor__material,
+.notebook-editor__source-material {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: block;
+  opacity: 0.26;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.notebook-editor__material--left {
+  background:
+    linear-gradient(90deg, rgba(89, 57, 34, 0.04), transparent 57%, rgba(69, 39, 22, 0.2)),
+    linear-gradient(177deg, rgba(255, 252, 236, 0.04), rgba(79, 48, 28, 0.07));
+}
+
+.notebook-editor__material--right {
+  background:
+    linear-gradient(90deg, rgba(67, 39, 23, 0.22), transparent 25%, rgba(92, 61, 38, 0.04)),
+    linear-gradient(183deg, rgba(255, 251, 233, 0.04), rgba(76, 45, 27, 0.08));
+}
+
+.notebook-editor__source-slip {
+  z-index: 3;
+}
+
+.notebook-editor__source-slip--empty {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.notebook-editor__source-plane {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border: 1px solid rgba(91, 86, 49, 0.25);
+  border-radius: 3px 8px 3px 4px;
+  background:
+    linear-gradient(106deg, rgba(246, 237, 176, 0.96), rgba(211, 207, 145, 0.94)),
+    url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 260px 260px repeat;
+  box-shadow: 0 9px 16px rgba(45, 31, 19, 0.14);
+  clip-path: var(--scene-surface-clip);
+}
+
+.notebook-editor-workbench .note-provenance-slip {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 5px;
+  padding:
+    var(--scene-content-top)
+    var(--scene-content-right)
+    var(--scene-content-bottom)
+    var(--scene-content-left);
+  grid-column: auto;
+  grid-row: auto;
+  align-self: auto;
+  color: #44513d;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  mix-blend-mode: multiply;
+}
+
+.notebook-editor-workbench .note-provenance-slip strong { font-size: 11px; }
+.notebook-editor-workbench .note-provenance-slip p,
+.notebook-editor-workbench .note-provenance-slip small {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #56604b;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.notebook-editor__source-material {
+  opacity: 0.22;
+  background: linear-gradient(178deg, rgba(255, 251, 217, 0.08), transparent 42%, rgba(65, 73, 52, 0.16));
+}
+
+.notebook-editor__spine {
+  position: absolute;
+  z-index: 4;
+  top: 4.8%;
+  left: 49.5%;
+  display: block;
+  width: 5.2%;
+  height: 92.8%;
+  opacity: 0.62;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(55, 31, 18, 0.08) 25%,
+    rgba(48, 27, 17, 0.27) 49%,
+    rgba(255, 246, 220, 0.11) 69%,
+    transparent
+  );
+  filter: blur(0.55px);
+  mix-blend-mode: multiply;
+  pointer-events: none;
+  transform: rotate(0.18deg);
+}
+
+.notebook-editor-workbench ::selection {
+  color: #2f241b;
+  background: rgba(158, 181, 124, 0.46);
+}
+
+.notebook-editor__provenance {
+  pointer-events: none;
+}
+
+.notebook-navigation-blocker {
+  position: absolute;
+  z-index: 8;
+  inset: 6%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(47, 34, 25, 0.28);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+}
+
+.notebook-navigation-blocker__dialog {
+  width: min(430px, 100%);
+  padding: 24px;
+  color: #3d3026;
+  border: 1px solid rgba(115, 81, 49, 0.32);
+  border-radius: 18px;
+  background: rgba(255, 250, 237, 0.94);
+  box-shadow: 0 18px 34px rgba(44, 28, 17, 0.22);
+}
+
+.notebook-navigation-blocker__dialog strong {
+  display: block;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: 18px;
+}
+
+.notebook-navigation-blocker__dialog p {
+  margin: 9px 0 18px;
+  color: #6d5744;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.notebook-navigation-blocker__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 560px) {
+  .notebook-navigation-blocker {
+    inset: 10px;
+    padding: 14px;
+  }
+
+  .notebook-navigation-blocker__dialog {
+    padding: 18px;
+  }
+
+  .notebook-navigation-blocker__actions {
+    flex-direction: column-reverse;
+  }
+
+  .notebook-navigation-blocker__actions button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 900px), (max-height: 660px) {
+  .task-surface--notebook {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    pointer-events: auto;
+  }
+
+  .task-surface--notebook .task-surface__spatial-layer {
+    position: relative;
+    inset: auto;
+    min-height: 100%;
+    pointer-events: auto;
+    perspective: none;
+  }
+
+  .notebook-editor-workbench {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    min-height: 100%;
+    padding: 58px 18px 88px;
+    pointer-events: auto;
+    perspective: none;
+  }
+
+  .notebook-editor__bookmark {
+    position: sticky;
+    top: 12px;
+    left: auto;
+    display: flex;
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+    margin: 0 0 12px;
+    /* The compact surface scrolls beneath this control. Keep the sticky
+       chrome opaque so paper ink never ghosts through the return action. */
+    background: #33241b;
+  }
+
+  .notebook-editor__bookmark span {
+    display: none;
+  }
+
+  .notebook-editor-reference-frame {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    transform: none;
+  }
+
+  .notebook-editor {
+    position: relative;
+    inset: auto;
+    display: grid;
+    width: min(100%, 780px);
+    height: auto;
+    margin: 0 auto;
+    overflow: hidden;
+    grid-template-areas:
+      "editor"
+      "source"
+      "actions";
+    border: 1px solid rgba(76, 50, 31, 0.32);
+    border-radius: 8px 15px 8px 8px;
+    background:
+      linear-gradient(105deg, rgba(255, 252, 241, 0.97), rgba(231, 214, 182, 0.95)),
+      url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 390px 390px repeat;
+    box-shadow: 0 18px 35px rgba(35, 21, 13, 0.24);
+  }
+
+  .notebook-editor__object { display: none; }
+
+  .notebook-editor__surface {
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    transform: none !important;
+  }
+
+  .notebook-editor__surface--editor { grid-area: editor; }
+  .notebook-editor__surface--actions { grid-area: actions; }
+
+  .notebook-editor__page {
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    border: 0;
+    background: rgba(255, 253, 246, 0.54);
+    clip-path: none;
+  }
+
+  .notebook-editor__page--actions {
+    border-top: 1px solid rgba(83, 58, 38, 0.16);
+  }
+
+  .notebook-editor__ink {
+    position: relative;
+    inset: auto;
+    min-height: 0;
+    overflow: visible;
+    padding: clamp(26px, 7vw, 44px);
+  }
+
+  .notebook-editor-workbench textarea,
+  .notebook-editor-workbench .notebook-readonly {
+    min-height: min(42vh, 360px);
+  }
+
+  .notebook-editor__source-space { display: none; }
+
+  .notebook-editor__source-slip {
+    position: relative;
+    inset: auto;
+    grid-area: source;
+    width: auto;
+    height: auto;
+    min-height: 92px;
+    margin: 0 clamp(26px, 7vw, 44px) 12px;
+    transform: none !important;
+  }
+
+  .notebook-editor__source-slip--empty { display: none; }
+
+  .notebook-editor__source-plane {
+    position: relative;
+    inset: auto;
+    min-height: 92px;
+    clip-path: none;
+  }
+
+  .notebook-editor-workbench .note-provenance-slip {
+    padding: 14px 16px;
+  }
+
+  .notebook-editor-workbench .note-provenance-slip p,
+  .notebook-editor-workbench .note-provenance-slip small {
+    font-size: 10px;
+  }
+
+  .notebook-editor__spine { display: none; }
+
+  .notebook-editor-workbench .notebook-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .notebook-editor__provenance {
+    position: relative;
+    bottom: auto;
+    left: auto;
+    max-width: 780px;
+    margin: 14px auto 0;
+    color: rgba(255, 249, 238, 0.86);
+  }
+
+  .desktop-app[data-surface-open="true"] .companion-presence[data-surface="notebook"] {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .notebook-editor-workbench { padding-inline: 10px; }
+
+  .notebook-editor__bookmark { margin-left: auto; }
+
+  .notebook-editor__ink { padding: 24px 18px; }
+
+  .notebook-editor-workbench .notebook-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .notebook-editor__source-slip {
+    margin-inline: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notebook-editor {
+    will-change: auto;
+  }
+}
+
+/* Search owns a separate archive-room backplate. The poster is the scene
+   base; query, result, error and source-boundary truth remain DOM ink. */
+.task-surface--search {
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.task-surface--search .task-surface__spatial-layer {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  pointer-events: auto;
+  perspective: none;
+}
+
+.search-catalog-workbench {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  color: #3d3026;
+  pointer-events: none;
+  perspective: 1200px;
+}
+
+.search-catalog__return {
+  top: clamp(28px, 6vh, 54px);
+  left: clamp(30px, 3.8vw, 58px);
+  border-color: rgba(158, 170, 126, 0.46);
+  pointer-events: auto;
+}
+
+.search-catalog-reference-frame {
+  overflow: visible;
+  pointer-events: none;
+  transform: translate(-50%, -50%) translate(var(--scene-camera-x-percent, 0%), var(--scene-camera-y-percent, 0%)) scale(var(--scene-camera-scale, 1));
+  transform-origin: 50% 50%;
+}
+
+.search-catalog__foreground {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  will-change: auto;
+  transition: opacity 120ms ease-out;
+}
+
+.search-catalog-workbench--foreground-ready .search-catalog__foreground {
+  opacity: 1;
+}
+
+/* D6 foreground motion is deliberately narrower than the room-wide parallax
+   budget. The transparent edge layer may move; the DOM ink and controls stay
+   on their registered Surface quads. */
+.search-catalog-workbench[data-search-foreground-motion="active"] .search-catalog__foreground {
+  will-change: transform;
+}
+
+.search-catalog-workbench--foreground-ready .search-catalog__occluder {
+  display: none;
+}
+
+.task-surface--search[data-motion-mode="off"] .search-catalog__foreground {
+  transition: none;
+}
+
+.search-catalog {
+  position: absolute;
+  z-index: 2;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
+  isolation: isolate;
+  pointer-events: none;
+}
+
+.search-catalog__surface {
+  position: absolute;
+  top: var(--scene-rect-top);
+  left: var(--scene-rect-left);
+  display: block;
+  width: var(--scene-rect-width);
+  height: var(--scene-rect-height);
+  min-width: 0;
+  pointer-events: auto;
+  transform: var(--scene-surface-projection, none);
+  transform-origin: 0 0;
+}
+
+.search-catalog__surface--query { z-index: 2; }
+.search-catalog__surface--upper,
+.search-catalog__surface--lower { z-index: 1; }
+.search-catalog__surface--boundary { z-index: 3; }
+
+.search-catalog__plane,
+.search-catalog__boundary-plane {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  clip-path: var(--scene-surface-clip);
+}
+
+.search-catalog__plane--query {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.search-catalog__plane--shelf {
+  background: transparent;
+  box-shadow: none;
+}
+
+.search-catalog__ink {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  padding:
+    var(--scene-content-top)
+    var(--scene-content-right)
+    var(--scene-content-bottom)
+    var(--scene-content-left);
+  pointer-events: auto;
+}
+
+.search-catalog__ink--query {
+  display: grid;
+  grid-template-rows: auto minmax(42px, 1fr);
+  gap: 8px;
+  color: #3b2d24;
+  mix-blend-mode: multiply;
+}
+
+.search-catalog__heading {
+  display: flex;
+  min-width: 0;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.search-catalog__heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.search-catalog__heading h2 {
+  margin: 0;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: clamp(19px, 1.55vw, 25px);
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+}
+
+.search-catalog__heading p,
+.search-catalog__heading > span {
+  margin: 0;
+  color: #705947;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.search-catalog__heading > span {
+  flex: 0 0 auto;
+  padding-bottom: 1px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.search-catalog-workbench .search-field {
+  display: grid;
+  min-width: 0;
+  min-height: 44px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  color: #695241;
+  border: 1px solid rgba(75, 50, 32, 0.26);
+  border-radius: 3px 7px 3px 3px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.search-catalog-workbench .search-field:focus-within {
+  border-color: rgba(133, 62, 32, 0.68);
+  box-shadow: 0 0 0 2px rgba(143, 53, 24, 0.18);
+}
+
+.search-catalog-workbench .search-field input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: #342820;
+  font: 600 13px/1.4 "Noto Sans SC Variable", "PingFang SC", sans-serif;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  caret-color: #9a3e20;
+}
+
+.search-catalog-workbench .search-field input::placeholder { color: #806b59; opacity: 0.86; }
+.search-catalog-workbench .search-field kbd { color: #705b49; font: 700 9px/1 "Noto Sans SC Variable", sans-serif; opacity: 0.72; }
+
+.search-catalog__ink--shelf {
+  display: block;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+.search-shelf__items {
+  position: absolute;
+  inset: var(--scene-content-top) var(--scene-content-right) var(--scene-content-bottom) var(--scene-content-left);
+  display: grid;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  align-content: stretch;
+  column-gap: 46px;
+  row-gap: 13px;
+  padding: 1px 2px 3px;
+  overflow: hidden;
+  scrollbar-color: rgba(92, 67, 47, 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.search-catalog__surface--lower .search-shelf__items {
+  row-gap: 37px;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
+.search-catalog__surface--upper .search-shelf__items {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.search-index-card {
+  display: grid;
+  min-width: 0;
+  min-height: 44px;
+  grid-template-columns: 23px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  color: #3e3027;
+  text-align: left;
+  border: 1px solid rgba(73, 48, 30, 0.14);
+  border-radius: 2px 6px 3px 2px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  transform: translate3d(0, 0, 0);
+  transform-origin: 50% 100%;
+  transition: transform 150ms ease-out, border-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.search-index-card:hover:not(:disabled),
+.search-index-card:focus-visible:not(:disabled) {
+  border-color: rgba(91, 55, 31, 0.38);
+  background: transparent;
+  box-shadow: 0 6px 12px rgba(47, 29, 17, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transform: translate3d(0, -2px, 0);
+}
+
+.search-index-card:active:not(:disabled) {
+  background: transparent;
+  box-shadow: 0 2px 5px rgba(47, 29, 17, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transform: translate3d(0, 1px, 0) scale(0.992);
+  transition-duration: 90ms;
+}
+
+.search-index-card:focus-visible {
+  outline: 2px solid rgba(195, 218, 151, 0.92);
+  outline-offset: 2px;
+}
+
+.search-index-card:disabled {
+  color: #584a3e;
+  cursor: default;
+  opacity: 0.84;
+}
+
+.task-surface--search[data-motion-mode="lite"] .search-index-card {
+  transition-duration: 110ms;
+}
+
+.task-surface--search[data-motion-mode="off"] .search-index-card {
+  transition: none;
+}
+
+.search-index-card__mark {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  color: #fff8e8;
+  border-radius: 2px 6px 2px 2px;
+  background: #64745b;
+  place-items: center;
+}
+
+.search-index-card--1 .search-index-card__mark { background: #9a6240; }
+.search-index-card--2 .search-index-card__mark { background: #60747f; }
+.search-index-card--3 .search-index-card__mark { background: #8a724c; }
+
+.search-index-card__copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.search-index-card__copy strong,
+.search-index-card__copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-index-card__copy strong { font: 650 11px/1.3 "Noto Sans SC Variable", sans-serif; }
+.search-index-card__copy small { color: #75604e; font-size: 8px; line-height: 1.3; }
+.search-index-card__action { color: #846048; }
+
+.search-shelf__state {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
+  gap: 3px 10px;
+  padding: 5px 10px;
+  color: #4a392e;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.search-shelf__state > svg { grid-row: 1 / span 2; color: #67765c; }
+.search-shelf__state strong { font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 13px; }
+.search-shelf__state span { color: #725c4a; font-size: 9px; line-height: 1.45; }
+.search-shelf__state .surface-primary { grid-column: 2; justify-self: start; min-height: 30px; margin-top: 3px; padding-inline: 12px; font-size: 9px; }
+.search-shelf__state--error > svg { color: #9a492c; }
+.search-shelf__quiet { display: block; min-height: 100%; }
+
+.search-catalog__boundary-plane {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.search-catalog__boundary-plane p {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: flex;
+  margin: 0;
+  align-items: center;
+  padding:
+    var(--scene-content-top)
+    var(--scene-content-right)
+    var(--scene-content-bottom)
+    var(--scene-content-left);
+  overflow: hidden;
+  color: #555b3f;
+  font-size: 8px;
+  font-weight: 650;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  mix-blend-mode: multiply;
+}
+
+.search-catalog__occluder {
+  position: absolute;
+  z-index: 3;
+  right: -1%;
+  bottom: -1%;
+  left: -1%;
+  display: block;
+  border-top: 1px solid rgba(255, 211, 144, 0.34);
+  background:
+    linear-gradient(180deg, rgba(255, 214, 153, 0.22), rgba(126, 72, 36, 0.2) 28%, rgba(46, 26, 17, 0.68) 72%, rgba(25, 15, 11, 0.48)),
+    linear-gradient(90deg, rgba(37, 20, 13, 0.56), rgba(168, 95, 44, 0.18) 48%, rgba(32, 18, 12, 0.62));
+  box-shadow: 0 -2px 5px rgba(35, 19, 12, 0.28), 0 2px 3px rgba(27, 15, 10, 0.24);
+  opacity: 0.82;
+  pointer-events: none;
+}
+
+.search-catalog__occluder--query {
+  right: 0;
+  bottom: -1%;
+  left: 0;
+  height: clamp(3px, 2.5%, 6px);
+  border-top-color: rgba(111, 78, 45, 0.24);
+  background: linear-gradient(180deg, rgba(255, 253, 240, 0.42), rgba(130, 88, 49, 0.16));
+  box-shadow: 0 -1px 3px rgba(47, 27, 16, 0.16);
+  opacity: 0.58;
+}
+
+.search-catalog__occluder--shelf {
+  height: clamp(10px, 15%, 24px);
+  border-radius: 1px 2px 2px 1px;
+}
+
+.search-index-card__motion {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  min-height: 0;
+  transform-origin: 50% 100%;
+}
+
+.search-index-card__motion[data-search-card-state="inserting"] {
+  z-index: 2;
+}
+
+.search-index-card__motion .search-index-card {
+  width: 100%;
+  height: 100%;
+}
+
+.search-catalog-workbench ::selection {
+  color: #2f241b;
+  background: rgba(161, 181, 124, 0.48);
+}
+
+@media (max-width: 900px), (max-height: 660px) {
+  .task-surface--search {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    pointer-events: auto;
+    scrollbar-gutter: stable;
+  }
+
+  .task-surface--search .task-surface__spatial-layer {
+    position: relative;
+    inset: auto;
+    min-height: 100%;
+    pointer-events: auto;
+    perspective: none;
+  }
+
+  .search-catalog-workbench {
+    position: relative;
+    inset: auto;
+    min-height: 100%;
+    padding: 58px 18px 88px;
+    pointer-events: auto;
+    perspective: none;
+  }
+
+  .search-catalog__return {
+    position: sticky;
+    top: 12px;
+    left: auto;
+    width: fit-content;
+    margin: 0 0 12px;
+    pointer-events: auto;
+  }
+
+  .search-catalog-reference-frame {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    transform: none;
+  }
+
+  .search-catalog {
+    position: relative;
+    inset: auto;
+    display: grid;
+    width: min(100%, 780px);
+    height: auto;
+    min-height: 0;
+    margin: 0 auto;
+    padding: 18px;
+    grid-template-areas:
+      "query"
+      "upper"
+      "lower"
+      "boundary";
+    gap: 12px;
+    border: 1px solid rgba(83, 57, 37, 0.28);
+    border-radius: 4px 16px 5px 4px;
+    background:
+      linear-gradient(105deg, rgba(255, 252, 241, 0.96), rgba(228, 210, 176, 0.94)),
+      url("/assets/learning-room/v1/textures/source-folder.webp") center / 410px 410px repeat;
+    box-shadow: 0 18px 35px rgba(35, 21, 13, 0.24);
+    pointer-events: auto;
+  }
+
+  .search-catalog__surface {
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    transform: none !important;
+  }
+
+  .search-catalog__surface--query { grid-area: query; }
+  .search-catalog__surface--upper { grid-area: upper; }
+  .search-catalog__surface--lower { grid-area: lower; }
+  .search-catalog__surface--boundary { grid-area: boundary; }
+
+  .search-catalog__plane,
+  .search-catalog__boundary-plane {
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    clip-path: none;
+  }
+
+  .search-catalog__plane--query { min-height: 154px; }
+  .search-catalog__plane--shelf { min-height: 112px; background: transparent; }
+  .search-catalog__boundary-plane { min-height: 54px; }
+
+  .search-catalog__occluder { display: none; }
+
+  .search-catalog__foreground { display: none; }
+
+  .search-catalog__ink {
+    position: relative;
+    inset: auto;
+    min-height: 0;
+    padding: clamp(20px, 5vw, 34px);
+  }
+
+  .search-catalog__ink--shelf { overflow: visible; padding-block: 18px; }
+
+  .search-shelf__items {
+    position: relative;
+    inset: auto;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .search-catalog__ink--shelf { height: auto; }
+
+  .search-shelf__state { min-height: 108px; }
+
+  .search-catalog__boundary-plane p {
+    position: relative;
+    inset: auto;
+    min-height: 54px;
+    padding: 14px 16px;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .desktop-app[data-surface-open="true"] .companion-presence[data-surface="search"] {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .search-catalog-workbench { padding-inline: 10px; }
+  .search-catalog { padding: 12px; }
+  .search-catalog__ink { padding-inline: 18px; }
+  .search-catalog__heading { align-items: start; flex-direction: column; gap: 3px; }
+  .search-shelf__items { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search-catalog {
+    will-change: auto;
+  }
+
+  .search-catalog__foreground {
+    transition: none;
+  }
+
+  .search-index-card {
+    transition: none;
+  }
+}
+
+/* V1 material pass: Card Generation and LearningRun use one authored paper
+   object as their physical base. The DOM owns ink, controls, and scrolling;
+   it must not paint a second pale application panel over the room. */
+:is(.card-generation-surface, .run-player) {
+  display: block;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:is(.card-generation-surface, .run-player)::before {
+  position: absolute;
+  z-index: 0;
+  inset: -3% -4% -5%;
+  width: auto;
+  height: auto;
+  content: "";
+  background: url("/assets/learning-room/v1/objects/scene-card-stack-v2.png") center / 100% 100% no-repeat;
+  opacity: 0.96;
+  transform: none;
+  pointer-events: none;
+}
+
+.card-generation-surface__content,
+.run-player__content {
+  position: absolute;
+  z-index: 1;
+  inset: 14% 10% 21%;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  color: var(--ink);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(101, 117, 83, 0.45) transparent;
+  transform: rotate(-6deg);
+  transform-origin: 50% 50%;
+}
+
+.card-generation-surface__content::-webkit-scrollbar,
+.run-player__content::-webkit-scrollbar { width: 6px; }
+
+.card-generation-surface__content::-webkit-scrollbar-thumb,
+.run-player__content::-webkit-scrollbar-thumb {
+  border: 0;
+  border-radius: 999px;
+  background: rgba(101, 117, 83, 0.45);
+}
+
+.card-generation-surface__content > *,
+.run-player__content > * {
+  position: relative;
+  z-index: 1;
+}
+
+.card-generation-surface__content .card-generation-state,
+.run-player__content .run-processing,
+.run-player__content .run-result {
+  min-height: 100%;
+}
+
+.run-player--loading,
+.run-player--error {
+  display: grid;
+  place-content: center;
+  gap: 9px;
+  padding: 15% 12%;
+  text-align: center;
+}
+
+.run-player--loading > *,
+.run-player--error > * {
+  position: relative;
+  z-index: 1;
+}
+
+.card-generation-intro,
+.card-generation-recovery,
+.card-generation-candidate,
+.card-generation-candidate--selected,
+.card-generation-empty,
+.card-generation-receipt,
+.run-player__target,
+.run-order-list li,
+.run-relation-list li,
+.run-choice-option,
+.run-choice-option--selected,
+.run-bundle-part,
+.run-result__columns > div,
+.run-blocker,
+.run-hint,
+.run-resync,
+.run-confirmation {
+  background: transparent;
+  box-shadow: none;
+}
+
+.card-generation-intro,
+.card-generation-recovery,
+.card-generation-empty,
+.card-generation-receipt {
+  padding-inline: 0;
+  border-inline: 0;
+  border-radius: 0;
+  border-block-color: rgba(83, 64, 48, 0.2);
+}
+
+.card-generation-candidate {
+  padding-inline: 0;
+  border-inline: 0;
+  border-radius: 0;
+  border-block-color: rgba(83, 64, 48, 0.2);
+}
+
+.card-generation-candidate--selected { border-block-color: rgba(99, 121, 84, 0.55); }
+
+.card-generation-candidate h3,
+.card-generation-candidate > p,
+.card-generation-candidate__summary strong,
+.run-task-heading h1,
+.run-task-heading p,
+.run-player__target p {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.run-player__target {
+  padding-inline: 10px 0;
+  border-inline-start-color: rgba(91, 113, 78, 0.56);
+}
+
+.run-text-editor textarea {
+  padding-inline: 2px;
+  border: 0;
+  border-bottom: 1px solid rgba(83, 64, 48, 0.28);
+  border-radius: 0;
+  background: transparent;
+}
+
+.run-order-list li,
+.run-relation-list li,
+.run-choice-option,
+.run-bundle-part {
+  border-inline: 0;
+  border-radius: 0;
+  border-block-color: rgba(83, 64, 48, 0.18);
+}
+
+.run-icon-button {
+  border-color: rgba(83, 64, 48, 0.24);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.run-icon-button:hover:not(:disabled) { background: rgba(101, 126, 88, 0.08); }
+
+@media (max-width: 900px) {
+  .card-generation-surface,
+  .run-player { left: 7%; width: 72vw; }
+}
+
+@media (max-width: 720px) {
+  .card-generation-surface,
+  .run-player {
+    bottom: 4%;
+    left: 4%;
+    width: 82vw;
+    height: min(67vh, 620px);
+  }
+
+  .card-generation-surface__content,
+  .run-player__content {
+    inset: 14% 10% 21%;
+  }
+}
+
+/* The legacy surface bundle contains a higher-specificity :is() fallback.
+   Scope the final material authority to the scene so that fallback paper
+   cannot reappear when a task surface is mounted. */
+.task-surface .card-generation-surface,
+.task-surface .run-player {
+  background: transparent;
+  background-image: none;
+}
+
+.task-surface .card-generation-surface::before,
+.task-surface .run-player::before {
+  position: absolute;
+  z-index: 0;
+  inset: -3% -4% -5%;
+  width: auto;
+  height: auto;
+  content: "";
+  background: url("/assets/learning-room/v1/objects/scene-card-stack-v2.png") center / 100% 100% no-repeat;
+  opacity: 0.96;
+  transform: none;
+  pointer-events: none;
+}
+
+.task-surface .card-generation-surface > .card-generation-surface__content,
+.task-surface .run-player > .run-player__content {
+  position: absolute;
+  z-index: 1;
+  inset: 14% 10% 21%;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  transform: rotate(-6deg);
+  transform-origin: 50% 50%;
+}
+
+/* V1 material pass: the remaining task routes use the same authored paper
+   object. Keep the DOM as ink and controls so no pale application panel
+   floats above the scene. */
+.task-surface .card-editor.objective-detail,
+.task-surface .run-entry-block {
+  display: grid;
+  isolation: isolate;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+.task-surface .card-editor.objective-detail::before,
+.task-surface .run-entry-block::before {
+  position: absolute;
+  z-index: 0;
+  inset: -3% -4% -5%;
+  width: auto;
+  height: auto;
+  content: "";
+  background: url("/assets/learning-room/v1/objects/scene-card-stack-v2.png") center / 100% 100% no-repeat;
+  opacity: 0.96;
+  pointer-events: none;
+}
+
+.task-surface .card-editor.objective-detail > *,
+.task-surface .run-entry-block > * {
+  position: relative;
+  z-index: 1;
+}
+
+.task-surface .objective-detail blockquote,
+.task-surface .objective-detail__facts,
+.task-surface .objective-detail__state,
+.task-surface .run-entry-block__mark {
+  background: transparent;
+  box-shadow: none;
+}
+
+.task-surface .objective-detail blockquote {
+  border-inline-start-color: rgba(101, 117, 83, 0.58);
+}
+
+.task-surface .run-entry-block__mark {
+  border-color: rgba(101, 117, 83, 0.38);
+}
+
+@media (max-width: 900px), (max-height: 660px) {
+  .task-surface .card-editor.objective-detail {
+    left: 10%;
+    width: 65vw;
+  }
+
+  .task-surface .run-entry-block {
+    left: 10%;
+    width: 65vw;
+  }
+}
+
+@media (max-width: 720px) {
+  .task-surface .card-editor.objective-detail,
+  .task-surface .run-entry-block {
+    left: 4%;
+    width: 79vw;
+    min-height: 0;
+    padding: 22px;
+  }
+}
+
+@media (max-width: 900px), (max-height: 660px) {
+  /* The compact notebook keeps one authored fallback sheet; its page layers
+     must stay transparent so the sheet is not rendered as nested cards. */
+  .notebook-editor__page {
+    background: transparent;
+  }
+}
+
+/* Align the legacy route ink with the same rotated top sheet used by the
+   Card Generation and LearningRun surfaces. The authored asset owns paper;
+   these wrappers own only readable content and controls. */
+.task-surface .card-editor.objective-detail,
+.task-surface .run-entry-block {
+  display: block;
+  height: min(56vh, 520px);
+  min-height: 350px;
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+}
+
+.task-surface .card-editor.objective-detail > .objective-detail__content,
+.task-surface .run-entry-block > .run-entry-block__content {
+  position: absolute;
+  z-index: 1;
+  inset: 14% 10% 21%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  color: var(--ink);
+  scrollbar-color: rgba(101, 117, 83, 0.45) transparent;
+  scrollbar-width: thin;
+  transform: rotate(-6deg);
+  transform-origin: 50% 50%;
+}
+
+.task-surface .card-editor.objective-detail > .objective-detail__content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 0.72fr);
+  align-content: start;
+  gap: 17px;
+}
+
+.task-surface .run-entry-block > .run-entry-block__content {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 9px;
+  text-align: center;
+}
+
+.task-surface .objective-detail__content::-webkit-scrollbar,
+.task-surface .run-entry-block__content::-webkit-scrollbar { width: 6px; }
+
+.task-surface .objective-detail__content::-webkit-scrollbar-thumb,
+.task-surface .run-entry-block__content::-webkit-scrollbar-thumb {
+  border: 0;
+  border-radius: 999px;
+  background: rgba(101, 117, 83, 0.45);
+}
+
+@media (max-width: 720px) {
+  .task-surface .card-editor.objective-detail,
+  .task-surface .run-entry-block {
+    height: 61vh;
+  }
+
+  .task-surface .card-editor.objective-detail > .objective-detail__content {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* UI audit pass: the room is the backdrop and the authored object is the
+   surface. Route DOM contributes ink, controls and state only; it must not
+   rebuild a second translucent application panel over the artwork. */
+.task-surface .task-surface__header {
+  width: min(520px, calc(100vw - 168px));
+  min-height: 0;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 0 0 11px 14px;
+  border: 0;
+  border-inline-start: 2px solid rgba(233, 183, 119, 0.82);
+  border-radius: 0;
+  color: #fff8ec;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.task-surface .task-surface__header::after {
+  right: 0;
+  bottom: 0;
+  left: 14px;
+  background: linear-gradient(90deg, rgba(255, 235, 200, 0.42), transparent 82%);
+}
+
+.task-surface .task-surface__header > div,
+.task-surface .task-surface__header-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.task-surface .task-surface__header h2 {
+  max-width: 100%;
+  color: #fff8ec;
+  font-size: clamp(19px, 1.55vw, 25px);
+  line-height: 1.22;
+  overflow-wrap: anywhere;
+  text-shadow: 0 2px 9px rgba(24, 13, 7, 0.78);
+}
+
+.task-surface .task-surface__header p {
+  max-width: 100%;
+  margin-top: 3px;
+  color: rgba(255, 242, 222, 0.78);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 6px rgba(24, 13, 7, 0.7);
+}
+
+.task-surface .task-surface__header-kicker,
+.task-surface .task-surface__paper-stack {
+  display: none;
+}
+
+.task-surface .task-surface__header .surface-close {
+  min-height: 44px;
+  margin-top: 0;
+  color: #fff4e4;
+  border-color: rgba(255, 239, 215, 0.28);
+  background: rgba(31, 25, 21, 0.66);
+  box-shadow: 0 8px 18px rgba(25, 15, 10, 0.2);
+  backdrop-filter: blur(8px) saturate(1.05);
+}
+
+.task-surface .task-surface__header .surface-close:hover {
+  background: rgba(52, 36, 27, 0.82);
+}
+
+/* Keep the rotated card stack's front sheet as the single readable canvas.
+   Extra right/bottom room compensates for the -6deg ink rotation and the
+   transparent padding baked into the source PNG. */
+.task-surface .card-generation-surface > .card-generation-surface__content,
+.task-surface .run-player > .run-player__content {
+  padding: 0 2px 0 1px;
+  overflow: auto;
+}
+
+/* Card Generation can contain several candidates. Keep the next candidate
+   behind the front sheet until the user scrolls; otherwise its ink appears on
+   the physical back sheets even though the scroll container is still usable. */
+.task-surface .card-generation-surface > .card-generation-surface__content {
+  inset: 15% 14% 34% 12%;
+}
+
+.task-surface .run-player > .run-player__content {
+  inset: 15% 14% 27% 12%;
+}
+
+.task-surface .card-generation-surface__content > *,
+.task-surface .run-player__content > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.task-surface .card-generation-meta {
+  min-width: 0;
+  gap: 6px;
+}
+
+.task-surface .card-generation-meta small {
+  max-width: 48%;
+  text-align: end;
+}
+
+.task-surface .card-generation-candidate {
+  min-width: 0;
+  padding-block: 11px 12px;
+}
+
+.task-surface .card-generation-candidate__actions {
+  align-items: flex-start;
+}
+
+.task-surface .card-generation-footer {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.task-surface .run-task-heading {
+  gap: 6px;
+}
+
+.task-surface .run-task-heading h1 {
+  max-width: 100%;
+  font-size: clamp(19px, 1.75vw, 27px);
+  line-height: 1.42;
+  letter-spacing: -0.02em;
+}
+
+.task-surface .run-task-heading p,
+.task-surface .run-player__target p {
+  max-width: 100%;
+}
+
+.task-surface .run-icon-button {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+}
+
+.task-surface .run-action-link {
+  min-height: 40px;
+}
+
+.task-surface .run-player__content,
+.task-surface .card-generation-surface__content {
+  scroll-padding-block: 8px;
+}
+
+/* Card Generation keeps its recovery and candidate ink in the scroll root,
+   while the route-level action stays in a separate paper edge. This avoids a
+   sticky footer covering a long recovery explanation or candidate actions. */
+.task-surface .card-generation-surface__action-edge {
+  position: absolute;
+  z-index: 3;
+  right: 14%;
+  bottom: 14%;
+  left: 12%;
+  pointer-events: auto;
+  transform: rotate(-6deg);
+  transform-origin: 50% 50%;
+}
+
+.task-surface .card-generation-surface__action-edge .card-generation-footer {
+  min-height: 48px;
+  margin: 0;
+  padding: 7px 2px 4px;
+  background: transparent;
+}
+
+.task-surface .card-generation-surface__action-edge .card-generation-footer > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Card Generation keeps every recovery, review and footer command on the
+   same compact touch contract. The paper can stay dense, but its real DOM
+   controls must remain reachable at the narrowest supported width. */
+.task-surface--card-generation .card-generation-recovery .surface-action-pair > :is(.surface-primary, .surface-secondary, .text-action),
+.task-surface--card-generation .card-generation-candidate__actions > :is(.surface-primary, .surface-secondary),
+.task-surface--card-generation .card-generation-surface__action-edge .card-generation-footer .surface-action-pair > :is(.surface-primary, .surface-secondary, .text-action) {
+  min-height: 44px;
+}
+
+.task-surface .card-generation-surface__content {
+  padding-bottom: 78px;
+}
+
+/* LearningRun keeps its primary commit affordance in a stable edge inside
+   the authored paper, while the editor and action history remain in the
+   ordinary DOM scroll root. */
+.task-surface .run-player__action-edge {
+  position: absolute;
+  z-index: 3;
+  right: 14%;
+  bottom: 14%;
+  left: 12%;
+  display: grid;
+  gap: 2px;
+  pointer-events: auto;
+  transform: rotate(-6deg);
+  transform-origin: 50% 50%;
+}
+
+.task-surface .run-player__action-edge .run-submit-row {
+  min-height: 48px;
+  margin-top: 0;
+  padding: 7px 2px 4px;
+  background: transparent;
+}
+
+.task-surface .run-player__action-edge .run-submit-row > :is(.surface-primary, .text-action) {
+  min-height: 44px;
+}
+
+.task-surface .run-player__action-edge .run-draft-status {
+  padding: 0 2px 3px;
+  margin: 0;
+  background: transparent;
+}
+
+.task-surface .run-player__content {
+  padding-bottom: 68px;
+}
+
+/* Objective and validation share the same physical sheet, but their ink has
+   different density. A smaller facts rail keeps long Chinese titles inside
+   the front card instead of crossing into the stacked sheets. */
+.task-surface .card-editor.objective-detail > .objective-detail__content {
+  inset: 15% 14% 25% 12%;
+  grid-template-columns: minmax(0, 1fr) minmax(145px, 0.6fr);
+  gap: 20px;
+  padding: 0 2px 0 1px;
+}
+
+.task-surface .objective-detail__main h3 {
+  max-width: 100%;
+  font-size: clamp(21px, 2vw, 31px);
+  line-height: 1.36;
+  overflow-wrap: anywhere;
+}
+
+.task-surface .objective-detail__summary {
+  max-width: 100%;
+  font-size: 12px;
+}
+
+.task-surface .objective-detail__facts {
+  padding-left: 14px;
+}
+
+.task-surface .run-entry-block > .run-entry-block__content {
+  inset: 18% 14% 25% 12%;
+  padding: 0 2px;
+}
+
+/* The empty review state belongs to the illustrated scroll on the right. It
+   must never land on the open-book foreground just because the queue is empty. */
+@media (min-width: 901px) and (min-height: 661px) {
+  .task-surface--review .review-scene__boundary {
+    top: 46%;
+    left: 60.4%;
+    width: 18%;
+    height: 34%;
+    min-height: 0;
+  }
+
+  .task-surface--review .review-scene-state {
+    display: grid;
+    height: 100%;
+    min-height: 0;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-content: center;
+    gap: 7px 9px;
+    padding: 10% 8%;
+  }
+
+  .task-surface--review .review-scene-state h3 {
+    font-size: clamp(15px, 1.15vw, 20px);
+  }
+
+  .task-surface--review .review-scene-state p {
+    font-size: 10px;
+    line-height: 1.55;
+  }
+
+  .task-surface--review .review-scene-state .surface-primary,
+  .task-surface--review .review-scene-state__lines {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .task-surface--review .review-scene-state .surface-primary {
+    min-height: 40px;
+    padding-inline: 9px;
+    font-size: 10px;
+  }
+}
+
+/* Source labels are ink on the authored notebook, not another pale card. */
+.task-surface :is(.study-source-slip__plane, .notebook-editor__source-plane) {
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none;
+}
+
+.task-surface .note-provenance-slip {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.task-surface .study-source-slip__ink,
+.task-surface .notebook-editor-workbench .note-provenance-slip {
+  text-shadow: 0 1px 2px rgba(50, 37, 25, 0.14);
+}
+
+/* The notebook title is printed on the page; keep the return control on the
+   room wall so it never competes with the first line of notebook ink. */
+@media (min-width: 901px) and (min-height: 661px) {
+  .task-surface--study .study-workbench__bookmark {
+    top: clamp(28px, 6.4vh, 54px);
+  }
+
+  .task-surface--notebook .notebook-editor__bookmark {
+    top: clamp(28px, 6.4vh, 54px);
+  }
+}
+
+/* Compact mode keeps one authored fallback sheet; section wrappers remain
+   transparent so zoomed or narrow windows do not produce nested paper cards. */
+@media (max-width: 900px), (max-height: 660px) {
+  .task-surface :is(.study-notebook__page, .notebook-editor__page) {
+    border: 0;
+    border-radius: 0;
+    background: transparent !important;
+  }
+
+  .task-surface :is(.study-source-slip__plane, .notebook-editor__source-plane) {
+    border: 0;
+    background: transparent !important;
+    box-shadow: none;
+  }
+
+  /* Compact task surfaces scroll beneath their return affordance. Use the
+     same small opaque chrome on every sticky surface so long ink remains
+     readable and the action does not become a second content panel. */
+  .task-surface :is(.study-workbench__bookmark, .review-scene__return, .search-catalog__return) {
+    display: flex;
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+    background: #33241b;
+  }
+
+  .task-surface :is(.study-workbench__bookmark, .review-scene__return, .search-catalog__return) span {
+    display: none;
+  }
+
+  .task-surface :is(.study-workbench__bookmark, .review-scene__return, .search-catalog__return):hover {
+    background: #4d3122;
+  }
+}
+
+@media (max-width: 560px) {
+  .task-surface :is(.study-workbench__bookmark, .search-catalog__return) {
+    margin-left: auto;
+  }
+
+  .task-surface .review-scene__return {
+    justify-self: end;
+    margin-left: auto;
+  }
+}
+
+/* The home recovery notice is persistent context, not a second hero panel. */
+@media (min-width: 901px) {
+  .run-recovery-stack {
+    width: min(540px, calc(100vw - 36px));
+  }
+
+  .run-recovery-notice {
+    padding: 6px 8px;
+  }
+
+  .run-recovery-notice__copy strong { font-size: 12px; }
+  .run-recovery-notice__copy p { font-size: 10px; }
+}
+
+/* Keep small icon controls reachable without changing their visual weight. */
+.island-button {
+  width: 44px;
+  height: 44px;
+}
+
+.review-tape__navigation button {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+.review-tape__footer button {
+  min-width: 40px;
+  min-height: 44px;
+}
+
+.review-scene__partial-error button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+@media (max-width: 720px) {
+  .task-surface .task-surface__header {
+    width: calc(100vw - 100px);
+    padding-left: 12px;
+  }
+
+  .task-surface .task-surface__header p { display: none; }
+
+  .task-surface .card-generation-surface > .card-generation-surface__content,
+  .task-surface .run-player > .run-player__content,
+  .task-surface .card-editor.objective-detail > .objective-detail__content {
+    inset: 15% 12% 24% 11%;
+  }
+
+  .task-surface .run-entry-block > .run-entry-block__content {
+    inset: 18% 12% 24% 11%;
+  }
+
+  .task-surface .card-generation-meta small {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 900px), (max-height: 660px) {
+  /* Compact LearningRun is a readable flow surface. The 2.5D paper stack is
+     intentionally replaced by a flat paper fallback so the action edge can
+     follow the editor without covering the prompt or relying on coordinates
+     that only work at the desktop aspect ratio. */
+  .task-surface--validation {
+    overflow-x: hidden;
+    overflow-y: auto;
+    pointer-events: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scroll-padding-block: 18px 28px;
+  }
+
+  .task-surface--validation .task-surface__spatial-layer {
+    position: relative;
+    inset: auto;
+    min-height: 100%;
+    padding: 62px clamp(12px, 4vw, 28px) 86px;
+    pointer-events: auto;
+    perspective: none;
+  }
+
+  .task-surface--validation .task-surface__header {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: 100%;
+    min-height: 0;
+    margin: 0 auto 14px;
+  }
+
+  .task-surface--validation :is(.run-player, .run-entry-block) {
+    position: relative;
+    inset: auto;
+    width: min(100%, 780px);
+    height: auto;
+    min-height: 0;
+    margin: 0 auto;
+    padding: 22px clamp(16px, 4vw, 28px) 24px;
+    overflow: visible;
+    border: 1px solid rgba(85, 57, 36, 0.3);
+    border-radius: 12px 22px 12px 12px;
+    background:
+      linear-gradient(105deg, rgba(255, 252, 241, 0.96), rgba(231, 214, 182, 0.94)),
+      url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 390px 390px repeat;
+    box-shadow: 0 18px 35px rgba(35, 21, 13, 0.24);
+    transform: none !important;
+  }
+
+  .task-surface--validation :is(.run-player, .run-entry-block)::before {
+    display: none;
+  }
+
+  .task-surface--validation .run-player > .run-player__content,
+  .task-surface--validation .run-entry-block > .run-entry-block__content {
+    position: relative !important;
+    inset: auto !important;
+    width: 100%;
+    min-height: 0;
+    max-height: none;
+    overflow: visible !important;
+    padding: 0;
+    transform: none !important;
+  }
+
+  .task-surface--validation .run-player__action-edge {
+    position: relative;
+    inset: auto;
+    display: grid;
+    gap: 2px;
+    margin-top: 16px;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .task-surface--validation .run-player__action-edge .run-submit-row {
+    min-height: 0;
+    padding: 0;
+    background: transparent;
+  }
+
+  .task-surface--validation .run-player__action-edge .run-draft-status {
+    padding: 0;
+    background: transparent;
+  }
+
+  .task-surface--validation .run-player--loading,
+  .task-surface--validation .run-player--error {
+    display: grid;
+    min-height: 260px;
+    place-content: center;
+    padding: 34px 22px;
+  }
+
+  .task-surface--validation .run-entry-block {
+    display: grid;
+    min-height: 260px;
+    place-items: center;
+    align-content: center;
+    text-align: center;
+  }
+}
+
+@media (max-width: 900px), (max-height: 660px) {
+  /* Card Generation uses the same single-scroll fallback as LearningRun.
+     Recovery copy and candidate actions can expand with server data; keeping
+     them in normal flow prevents the paper rotation from turning a narrow
+     window into an overlapping action stack. */
+  .task-surface--card-generation {
+    overflow-x: hidden;
+    overflow-y: auto;
+    pointer-events: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scroll-padding-block: 18px 28px;
+  }
+
+  .task-surface--card-generation .task-surface__spatial-layer {
+    position: relative;
+    inset: auto;
+    min-height: 100%;
+    padding: 62px clamp(12px, 4vw, 28px) 86px;
+    pointer-events: auto;
+    perspective: none;
+  }
+
+  .task-surface--card-generation .task-surface__header {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: 100%;
+    min-height: 0;
+    margin: 0 auto 14px;
+  }
+
+  .task-surface--card-generation .card-generation-surface {
+    position: relative;
+    inset: auto;
+    width: min(100%, 780px);
+    height: auto;
+    min-height: 0;
+    margin: 0 auto;
+    padding: 22px clamp(16px, 4vw, 28px) 24px;
+    overflow: visible;
+    border: 1px solid rgba(85, 57, 36, 0.3);
+    border-radius: 12px 22px 12px 12px;
+    background:
+      linear-gradient(105deg, rgba(255, 252, 241, 0.96), rgba(231, 214, 182, 0.94)),
+      url("/assets/learning-room/v1/textures/scene-paper-fibres-v2.png") center / 390px 390px repeat;
+    box-shadow: 0 18px 35px rgba(35, 21, 13, 0.24);
+    transform: none !important;
+  }
+
+  .task-surface--card-generation .card-generation-surface::before {
+    display: none;
+  }
+
+  .task-surface--card-generation .card-generation-surface > .card-generation-surface__content {
+    position: relative !important;
+    inset: auto !important;
+    width: 100%;
+    min-height: 0;
+    max-height: none;
+    overflow: visible !important;
+    padding: 0;
+    transform: none !important;
+  }
+
+  .task-surface--card-generation .card-generation-surface__action-edge {
+    position: relative;
+    inset: auto;
+    margin-top: 16px;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .task-surface--card-generation .card-generation-surface__action-edge .card-generation-footer {
+    display: flex;
+    min-height: 0;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+    padding: 0;
+  }
+
+  .task-surface--card-generation .card-generation-footer .surface-action-pair {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .task-surface--card-generation .card-generation-state {
+    min-height: 260px;
+  }
+
+  .task-surface--card-generation .card-generation-meta small {
+    max-width: 100%;
+  }
+
+  .task-surface--card-generation > .task-surface__spatial-layer > .prototype-note {
+    position: relative;
+    inset: auto;
+    max-width: 100%;
+    margin: 16px auto 0;
   }
 }

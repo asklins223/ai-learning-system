@@ -1,25 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import { CircleHelp, Gauge, House, Moon, Orbit, Sun, Volume2, VolumeX } from "lucide-react";
 import { useRoomStore } from "../app/room-store";
+import { resolveSceneMotionMode } from "../scene/scene-motion";
 
 export function ImmersiveIsland() {
   const invoke = useRoomStore((state) => state.invoke);
   const destination = useRoomStore((state) => state.destination);
   const theme = useRoomStore((state) => state.theme);
-  const motionMode = useRoomStore((state) => state.motionMode);
+  const motionPreference = useRoomStore((state) => state.motionMode);
+  const reducedMotion = useRoomStore((state) => state.reducedMotion);
+  const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
   const surface = useRoomStore((state) => state.surface);
   const toggleTheme = useRoomStore((state) => state.toggleTheme);
   const cycleMotionMode = useRoomStore((state) => state.cycleMotionMode);
   const masterMuted = useRoomStore((state) => state.masterMuted);
   const toggleMasterMuted = useRoomStore((state) => state.toggleMasterMuted);
   const openOnboarding = useRoomStore((state) => state.openOnboarding);
+  const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const [expanded, setExpanded] = useState(false);
   const rootRef = useRef<HTMLElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (surface) setExpanded(false);
-  }, [surface]);
+    if (surface || onboardingOpen) setExpanded(false);
+  }, [onboardingOpen, surface]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -47,6 +51,7 @@ export function ImmersiveIsland() {
         ref={rootRef}
         className={`immersive-island${expanded ? " immersive-island--expanded" : ""}`}
         aria-label="房间控制"
+        inert={onboardingOpen || undefined}
         onKeyDown={(event) => {
           if (event.key !== "Escape" || !expanded) return;
           event.preventDefault();

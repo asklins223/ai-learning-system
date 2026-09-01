@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -45,6 +46,9 @@ import {
   establishRequiredRuntimeSubscription,
   type RequiredRuntimeSubscription,
 } from "../app/runtime-gate-subscription";
+import { mediaAssetUrl, useLearningRoomManifest } from "../media/learning-room-manifest";
+import type { SceneMotionMode } from "../scene/scene-motion";
+import { DoorOpeningTransition, type DoorTheme } from "./DoorOpeningTransition";
 import "./desktop-access-gate.css";
 
 type RetryAction = "bootstrap" | "connect" | "reload" | null;
@@ -64,6 +68,8 @@ type GateView =
   | { phase: "reauth"; session: ReauthenticationDesktopSession | ReadyDesktopSession | null }
   | { phase: "workspace"; session: AuthenticatedDesktopSession; workspaces: WorkspaceSummaryV1[] }
   | { phase: "ready"; runtime: RuntimeSnapshotV1; session: ReadyDesktopSession };
+
+type DoorEntryPhase = "closed" | "opening" | "open";
 
 const initialView: GateView = {
   phase: "loading",
@@ -119,14 +125,19 @@ function GateFrame({
   title,
   detail,
   tone = "default",
+  entryPosterUrl,
   children,
 }: {
   title: string;
   detail: string;
   tone?: "default" | "danger";
+  entryPosterUrl: string | null;
   children?: ReactNode;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const style = entryPosterUrl
+    ? ({ "--desktop-gate-entry-poster": `url("${entryPosterUrl}")` } as CSSProperties)
+    : undefined;
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => headingRef.current?.focus({ preventScroll: true }));
@@ -134,7 +145,13 @@ function GateFrame({
   }, [title]);
 
   return (
-    <main id="main-content" className="desktop-access-gate" data-tone={tone}>
+    <main
+      id="main-content"
+      className="desktop-access-gate"
+      data-tone={tone}
+      data-gate-asset-source={entryPosterUrl ? "manifest" : "fallback"}
+      style={style}
+    >
       <div className="desktop-access-gate__drag-region" aria-hidden="true" />
       <section className="desktop-access-gate__panel" aria-labelledby="desktop-gate-title" aria-describedby="desktop-gate-detail">
         <div className="desktop-access-gate__heading">
@@ -150,9 +167,13 @@ function GateFrame({
 export function DesktopAccessGate({
   children,
   onWorkspaceBoundaryReset,
+  theme = "day",
+  motionMode = "full",
 }: {
   children: ReactNode;
   onWorkspaceBoundaryReset?: () => void;
+  theme?: DoorTheme;
+  motionMode?: SceneMotionMode;
 }) {
   const [view, setView] = useState<GateView>(initialView);
   const [refreshRevision, setRefreshRevision] = useState(0);
@@ -162,6 +183,11 @@ export function DesktopAccessGate({
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [inviteToken, setInviteToken] = useState("");
+  const [doorEntryPhase, setDoorEntryPhase] = useState<DoorEntryPhase>("closed");
+  const { manifest: roomManifest, error: roomManifestError } = useLearningRoomManifest();
+  const gateEntryPosterUrl = roomManifest
+    ? mediaAssetUrl(roomManifest, roomManifest.entryPosters.closed[theme].path)
+    : null;
   const generationRef = useRef(0);
   const forceConnectionRef = useRef(false);
   const connectionFlightRef = useRef<Promise<unknown> | null>(null);
@@ -169,6 +195,24 @@ export function DesktopAccessGate({
   const lastTrustedSessionRef = useRef<ReadyDesktopSession | null>(null);
   const viewPhaseRef = useRef<GateView["phase"]>(initialView.phase);
   viewPhaseRef.current = view.phase;
+
+  const beginDoorEntry = useCallback(() => {
+    const canAnimate = motionMode !== "off" && Boolean(roomManifest) && !roomManifestError;
+    setDoorEntryPhase(canAnimate ? "opening" : "open");
+  }, [motionMode, roomManifest, roomManifestError]);
+
+  const completeDoorEntry = useCallback(() => {
+    setDoorEntryPhase("open");
+    window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event("ailearn:desktop-room-entry-complete"));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (view.phase !== "ready" && doorEntryPhase === "open") {
+      setDoorEntryPhase("closed");
+    }
+  }, [doorEntryPhase, view.phase]);
 
   const requestBootstrap = useCallback((forceConnection = false) => {
     generationRef.current += 1;
@@ -471,6 +515,7 @@ export function DesktopAccessGate({
           });
       unwrapGatewayResult(response);
       setPassword("");
+      beginDoorEntry();
       requestBootstrap();
     } catch (error) {
       const policy = gateErrorPolicy(error, view.mode === "login" ? "无法登录" : "无法创建账号");
@@ -494,6 +539,7 @@ export function DesktopAccessGate({
       const response = await api.auth.reauthenticate({ meta: createRequestMeta(), password });
       unwrapGatewayResult(response);
       setPassword("");
+      beginDoorEntry();
       requestBootstrap();
     } catch (error) {
       const policy = gateErrorPolicy(error, "无法重新验证身份");
@@ -518,6 +564,7 @@ export function DesktopAccessGate({
         workspaceId,
       });
       unwrapGatewayResult(response);
+      beginDoorEntry();
       requestBootstrap();
     } catch (error) {
       const policy = gateErrorPolicy(error, "无法切换工作区");
@@ -531,11 +578,36 @@ export function DesktopAccessGate({
     }
   };
 
-  if (view.phase === "ready") return <>{children}</>;
+  if (view.phase === "ready") {
+    if (doorEntryPhase === "opening") {
+      return <>
+        <div
+          className="desktop-access-gate__room-content"
+          data-door-entry-phase={doorEntryPhase}
+          aria-hidden="true"
+          inert
+        >
+          {children}
+        </div>
+        <DoorOpeningTransition
+          theme={theme}
+          motionMode={motionMode}
+          manifest={roomManifest}
+          manifestError={roomManifestError}
+          onComplete={completeDoorEntry}
+        />
+      </>;
+    }
+    return (
+      <div className="desktop-access-gate__room-content" data-door-entry-phase={doorEntryPhase}>
+        {children}
+      </div>
+    );
+  }
 
   if (view.phase === "loading") {
     return (
-      <GateFrame title={view.title} detail={view.detail}>
+      <GateFrame title={view.title} detail={view.detail} entryPosterUrl={gateEntryPosterUrl}>
         <div className="desktop-access-gate__loading" role="status" aria-live="polite">
           <LoaderCircle size={24} aria-hidden="true" />
           <span>正在安全检查</span>
@@ -547,7 +619,7 @@ export function DesktopAccessGate({
   if (view.phase === "blocked") {
     const retryAt = retryTimeLabel(view.retryAfter);
     return (
-      <GateFrame title={view.title} detail={view.detail} tone="danger">
+      <GateFrame title={view.title} detail={view.detail} tone="danger" entryPosterUrl={gateEntryPosterUrl}>
         <div className="desktop-access-gate__notice" role="alert">
           <ShieldAlert size={21} aria-hidden="true" />
           <span>{retryAt ? `服务建议在 ${retryAt} 后重新检查。` : "当前没有经过验证的工作区内容可显示。"}</span>
@@ -570,8 +642,9 @@ export function DesktopAccessGate({
     const registering = view.mode === "register";
     return (
       <GateFrame
-        title={registering ? "创建学习账号" : "登录后进入理解书房"}
-        detail={registering ? "账号建立成功后，再由服务端确认你的工作区。" : "登录只通过主进程安全桥接提交，渲染层不会保存密码。"}
+        title={registering ? "创建学习账号" : "推门进入理解书房"}
+        detail={registering ? "账号建立成功后，再由服务端确认你的工作区。" : "验证后开门；登录经主进程提交，渲染层不存密码。"}
+        entryPosterUrl={gateEntryPosterUrl}
       >
         <form className="desktop-access-gate__form" onSubmit={handleAuthSubmit}>
           {registering ? (
@@ -582,11 +655,11 @@ export function DesktopAccessGate({
           ) : null}
           <label>
             <span>邮箱</span>
-            <input type="email" autoComplete="email" maxLength={320} required value={email} onChange={(event) => setEmail(event.target.value)} />
+            <input type="email" autoComplete="email" maxLength={320} required value={email} placeholder="name@example.com" onChange={(event) => setEmail(event.target.value)} />
           </label>
           <label>
             <span>密码</span>
-            <input type="password" autoComplete={registering ? "new-password" : "current-password"} maxLength={200} required value={password} onChange={(event) => setPassword(event.target.value)} />
+            <input type="password" autoComplete={registering ? "new-password" : "current-password"} maxLength={200} required value={password} placeholder="输入密码" onChange={(event) => setPassword(event.target.value)} />
           </label>
           {registering ? (
             <label>
@@ -620,7 +693,7 @@ export function DesktopAccessGate({
   if (view.phase === "reauth") {
     const accountLabel = view.session?.user?.displayName ?? view.session?.user?.email ?? "当前账号";
     return (
-      <GateFrame title="请重新验证身份" detail={`${accountLabel} 的会话需要再次确认，验证完成前工作区保持关闭。`}>
+      <GateFrame title="请重新验证身份" detail={`${accountLabel} 的会话需要再次确认，验证完成前工作区保持关闭。`} entryPosterUrl={gateEntryPosterUrl}>
         <form className="desktop-access-gate__form" onSubmit={handleReauthenticate}>
           <label>
             <span>当前密码</span>
@@ -640,6 +713,7 @@ export function DesktopAccessGate({
     <GateFrame
       title="选择要进入的工作区"
       detail={`已验证 ${view.session.user?.email ?? "当前账号"}；选择后，所有学习数据都会绑定到新的工作区版本。`}
+      entryPosterUrl={gateEntryPosterUrl}
     >
       {view.workspaces.length ? (
         <div className="desktop-access-gate__workspace-list" aria-label="可用工作区">

@@ -208,10 +208,14 @@ describe("Card Generation V2 routes contract", () => {
 describe("Card Generation V2 helpers contract", () => {
   it("exports CardGenerationV2ServiceError with code and statusCode", () => {
     assert.ok(helpersSource.includes(`class CardGenerationV2ServiceError`));
-    // 重构后 CardGenerationV2ServiceError 继承 DomainError，
-    // code/statusCode 由基类提供，helpers.ts 不再直接声明这些字段。
-    // 验证继承关系和构造函数传递 code + statusCode 参数。
-    assert.ok(helpersSource.includes(`extends DomainError`));
+    // 2026-08-24（§4.4 第二批）：CardGenerationV2ServiceError 继承 shared 纯逻辑层
+    // 的 CardGenerationPipelineErrorV2（后者继承 DomainError）——下沉的 seal/
+    // binding-plan 纯函数抛 shared 类，instanceof 边界不受影响。code/statusCode
+    // 由基类提供；验证继承链与构造参数传递。
+    assert.ok(
+      helpersSource.includes(`extends CardGenerationPipelineErrorV2`)
+        || helpersSource.includes(`extends DomainError`),
+    );
     assert.ok(helpersSource.includes(`code`));
     assert.ok(helpersSource.includes(`statusCode`));
   });

@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "coordinateSpace": {
+    "id": "room-1672x941",
+    "width": 1672,
+    "height": 941,
+    "fitMode": "cover"
+  },
+  "compactMediaQuery": "(max-width: 900px), (max-height: 660px)",
+  "assetRevision": "review-seat-v1",
+  "assetHashes": {
+    "day": "0ce8a05edfcf968838e83c1ba73201b97b0808277e404bdb2354cfcdbd7424f5",
+    "night": "9534c2dc35fe782e7ae2b200a540720236618e023ef2d807c35a6dc5c2c5257f"
+  },
+  "calibrationRevision": "review-v5-phase1b-2026-08-26",
+  "tapeBounds": {
+    "x": 1024.936,
+    "y": 430.037,
+    "width": 292.6,
+    "height": 330.291
+  },
+  "notebookBounds": {
+    "x": 312.664,
+    "y": 689.753,
+    "width": 593.56,
+    "height": 155.265
+  },
+  "surfaces": {
+    "tapeHeader": {
+      "id": "review.tape.header",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 1024.936,
+        "y": 430.037,
+        "width": 292.6,
+        "height": 32
+      },
+      "quad": [
+        [1039.623, 428.949],
+        [1331.405, 431.654],
+        [1329.816, 463.704],
+        [1038.02, 460.743]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0, "right": 0.04785, "bottom": 0.09375, "left": 0.109365 }
+    },
+    "tapeBody": {
+      "id": "review.tape.body",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 1024.936,
+        "y": 462.037,
+        "width": 292.6,
+        "height": 264.291
+      },
+      "quad": [
+        [1039.61, 461.721],
+        [1328.37, 466.939],
+        [1266.53, 741.483],
+        [1000.884, 724.202]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0, "right": 0.061517, "bottom": 0, "left": 0.109365 }
+    },
+    "tapeFooter": {
+      "id": "review.tape.footer",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 1024.936,
+        "y": 726.328,
+        "width": 292.6,
+        "height": 34
+      },
+      "quad": [
+        [1020.561, 724.521],
+        [1311.524, 742.155],
+        [1307.66, 776.165],
+        [1016.715, 758.257]
+      ],
+      "clipPolygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "contentInsets": { "top": 0.058824, "right": 0.18, "bottom": 0, "left": 0.13 }
+    },
+    "notebookLeft": {
+      "id": "review.notebook.left-page",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 337.594,
+        "y": 689.753,
+        "width": 274.225,
+        "height": 155.265
+      },
+      "quad": [
+        [337.594, 689.753],
+        [611.818, 673.45],
+        [611.818, 837.255],
+        [337.594, 832.597]
+      ],
+      "clipPolygon": [[0.04, 0], [1, 0], [0.96, 1], [0, 1]],
+      "contentInsets": { "top": 0, "right": 0.03, "bottom": 0, "left": 0.04 }
+    },
+    "notebookRight": {
+      "id": "review.notebook.right-page",
+      "strategy": "homography",
+      "sourceRect": {
+        "x": 634.967,
+        "y": 689.753,
+        "width": 235.05,
+        "height": 155.265
+      },
+      "quad": [
+        [634.226, 689.521],
+        [861.204, 702.388],
+        [863.625, 852.974],
+        [635.655, 844.76]
+      ],
+      "clipPolygon": [[0.07, 0], [1, 0], [0.94, 1], [0, 1]],
+      "contentInsets": { "top": 0.055, "right": 0.11, "bottom": 0.1, "left": 0.095 }
+    }
+  }
+}

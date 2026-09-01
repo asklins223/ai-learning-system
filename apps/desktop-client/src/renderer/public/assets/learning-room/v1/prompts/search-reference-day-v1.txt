@@ -1,0 +1,17 @@
+Create a high-fidelity 16:9 desktop application scene concept, 2048×1152 if supported.
+
+SCENE STRUCTURE — OPTION A, FRONTAL REFERENCE ARCHIVE:
+A completely different room and camera location from the reference study desk. The viewer has entered a dedicated library reference/archive room. Build a full-bleed, self-contained 2.5D hand-painted environment: a symmetrical floor-to-ceiling archive wall made of warm walnut shelving, shallow card-catalog drawers, cubbyholes, and book spines. In the center is a built-in librarian reference counter / wall-mounted catalogue station, not a freestanding shelf pasted over another room. It must feel architecturally connected to the room.
+
+INTERACTIVE PHYSICAL SURFACES:
+- Upper center: one broad, slightly tilted cream catalogue ledger panel, large enough to host a title and search field as real DOM later. It is blank paper integrated into a wooden frame, with visible paper grain and edge shadow.
+- Mid and lower shelf rows: six blank cream index-card trays or pull-out catalogue slips, each large enough to host one search result later, arranged as a coherent 2-column grid but physically embedded in separate cubbies.
+- Small upper-right brass count plate and a small upper-left back tab, both blank.
+- Add wooden shelf lips and drawer edges in front of parts of the paper surfaces so future foreground occluder layers can make DOM feel inside the scene.
+Keep these surfaces visually quiet and uncluttered; absolutely no text or symbols on them.
+
+STYLE:
+Use the supplied references only for the mature warm hand-painted visual language: soft watercolor/gouache texture, warm walnut, ivory plaster, muted sage and teal accents, cinematic morning light, believable material depth, gentle ambient dust. Do NOT reuse the study desk composition, desk lamp, central window, notebook, tabletop, or the exact existing shelf silhouette. This is a new archive room.
+
+COMPOSITION:
+Fixed orthographic-like camera with restrained perspective, carefully designed negative space, production-ready game scene backplate. UI-safe contrast. No people, no character, no floating orb, no translucent glass UI, no modern web cards, no readable text, no logos, no watermark. The image must be a clean scene asset, not a screenshot mockup.

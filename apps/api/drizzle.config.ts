@@ -7,7 +7,9 @@ if (process.env.NODE_ENV === "production" && !migratorUrl) {
 }
 
 export default defineConfig({
-  schema: "./src/db/schema/index.ts",
+  // 2026-08-24（AI 设计审查 §4.4 第三批）：schema 单一事实来源下沉至
+  // packages/shared/src/db-schema（api 与 worker 平级消费）。
+  schema: "../../packages/shared/src/db-schema/index.ts",
   out: "./src/db/migrations",
   dialect: "postgresql",
   dbCredentials: {

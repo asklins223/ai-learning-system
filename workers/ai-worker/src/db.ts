@@ -2,7 +2,9 @@ import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import { AsyncLocalStorage } from "node:async_hooks";
-import * as schema from "../../../apps/api/src/db/schema/index.ts";
+// 2026-08-24（AI 设计审查 §4.4 第三批）：drizzle schema 单一事实来源下沉至
+// packages/shared，worker 与 api 平级消费（反向路径依赖清零）。
+import * as schema from "@ailearn/shared/db-schema";
 
 const DEFAULT_DATABASE_URL = "postgres://ailearn:ailearn_dev@postgres:5432/ailearn";
 

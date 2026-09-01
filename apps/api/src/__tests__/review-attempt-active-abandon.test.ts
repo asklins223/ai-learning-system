@@ -23,7 +23,7 @@ const ROUTES_SOURCE = readFileSync(
 );
 
 const SCHEMA_SOURCE = readFileSync(
-  new URL("../db/schema/evidence.ts", import.meta.url),
+  new URL("../../../../packages/shared/src/db-schema/evidence.ts", import.meta.url),
   "utf8",
 );
 
@@ -33,7 +33,7 @@ const MIGRATION_SOURCE = readFileSync(
 );
 
 const SHARED_SCHEMA_SOURCE = readFileSync(
-  new URL("../db/schema/evidence.ts", import.meta.url),
+  new URL("../../../../packages/shared/src/db-schema/evidence.ts", import.meta.url),
   "utf8",
 );
 

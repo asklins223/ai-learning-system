@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "packId": "learning-room-v1-production-raster-candidate",
+  "revision": 1,
+  "coordinateSpace": "room-1672x941",
+  "world": {
+    "width": 1672,
+    "height": 941
+  },
+  "sourceRoot": ".",
+  "layers": [
+    {
+      "assetId": "CANDIDATE-ROOM-PLANT-FOREGROUND-DAY-01",
+      "sourceAssetId": "GENERATED-ROOM-PLANT-FOREGROUND-DAY-01",
+      "sourcePath": ".impeccable/review/room-layer-production-sources-v1/room-plant-foreground-day-v1.png",
+      "outputPath": "layers/day/d6-room-plant-foreground-day-v1.png",
+      "theme": "day",
+      "depth": "D6",
+      "order": 0,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 1672,
+        "height": 941
+      },
+      "registration": {
+        "position": [0, 0],
+        "size": {
+          "width": 1672,
+          "height": 941
+        },
+        "anchor": [0, 0]
+      },
+      "alphaMode": "straight-rgba",
+      "generationMethod": "built-in-imagegen + ffmpeg-colorkey-alpha",
+      "promptPath": "apps/desktop-client/scripts/fixtures/prompts/room-plant-foreground-day-v1.md",
+      "reviewStatus": "CHANGES_REQUIRED",
+      "releaseApproval": false,
+      "reviewNotes": "Day candidate is isolated and RGBA, but its scale/silhouette require visual approval against the canonical scene."
+    },
+    {
+      "assetId": "CANDIDATE-ROOM-PLANT-FOREGROUND-NIGHT-01",
+      "sourceAssetId": "GENERATED-ROOM-PLANT-FOREGROUND-NIGHT-01",
+      "sourcePath": ".impeccable/review/room-layer-production-sources-v1/room-plant-foreground-night-v1.png",
+      "outputPath": "layers/night/d6-room-plant-foreground-night-v1.png",
+      "theme": "night",
+      "depth": "D6",
+      "order": 0,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 1672,
+        "height": 941
+      },
+      "registration": {
+        "position": [0, 0],
+        "size": {
+          "width": 1672,
+          "height": 941
+        },
+        "anchor": [0, 0]
+      },
+      "alphaMode": "straight-rgba",
+      "generationMethod": "built-in-imagegen + ffmpeg-colorkey-alpha",
+      "promptPath": "apps/desktop-client/scripts/fixtures/prompts/room-plant-foreground-night-v1.md",
+      "reviewStatus": "CHANGES_REQUIRED",
+      "releaseApproval": false,
+      "reviewNotes": "Night candidate is isolated and aligned as a review candidate; final visual approval is required before release."
+    }
+  ]
+}

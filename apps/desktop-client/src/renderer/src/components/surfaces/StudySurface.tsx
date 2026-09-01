@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, BookOpenText, RotateCcw, Sparkles } from "lucide-react";
 import type { RoomPrimaryActionV1, RoomProjectionV1 } from "@ailearn/shared/room-projection-contracts";
 import { useRoomStore } from "../../app/room-store";
@@ -17,54 +17,99 @@ import {
   studyStatusLabel,
 } from "./room-primary-action-presentation";
 import { learningRunOriginForRoomAction } from "./study-run-origin";
+import { StudyNotebookCanvas } from "../StudyNotebookCanvas";
+import { mediaAssetUrl, useLearningRoomManifest } from "../../media/learning-room-manifest";
+import { SceneReferenceFrame } from "../../scene/SceneReferenceFrame";
+import { SurfaceCalibrator } from "../../scene/SurfaceCalibrator";
+import {
+  STUDY_NOTEBOOK_STYLE,
+  STUDY_SURFACE_REGISTRY,
+  STUDY_SURFACE_STYLES,
+} from "../../scene/scene-surfaces";
+import {
+  useSceneSurfaceProjections,
+  type SceneSurfaceProjectionTarget,
+  type SceneSurfaceQuadOverrides,
+} from "../../scene/useSceneSurfaceProjection";
+import {
+  useSceneSurfaceInputRuntime,
+  writeSceneInputDiagnostics,
+  type SceneSurfacePointerResolution,
+} from "../../scene/scene-input-runtime";
+import { resolveSceneMotionMode } from "../../scene/scene-motion";
 
 type AvailableRoomAction = Extract<RoomPrimaryActionV1, { availability: "available" }>;
 type StudyBoundaryTone = "loading" | "empty" | "error";
+const STUDY_CALIBRATION_SURFACES = Object.freeze(Object.values(STUDY_SURFACE_REGISTRY.surfaces));
 
-function StudyBoundary({
+function StudyBoundaryReading({
   heading,
   message,
-  tone,
-  onRetry,
 }: {
   readonly heading: string;
   readonly message: string;
+}) {
+  return (
+    <>
+      <BookOpenText size={25} aria-hidden="true" />
+      <h2 id="study-surface-title">{heading}</h2>
+      <p>{message}</p>
+    </>
+  );
+}
+
+function StudyBoundaryRecovery({
+  tone,
+  onRetry,
+}: {
   readonly tone: StudyBoundaryTone;
   readonly onRetry?: () => void;
 }) {
-  const role = tone === "error" ? "alert" : "status";
-
+  if (tone === "loading") {
+    return <div className="study-boundary__lines" aria-hidden="true"><span /><span /><span /></div>;
+  }
   return (
     <>
-      <article className="study-notebook__page study-notebook__page--reading study-boundary" role={role}>
-        <BookOpenText size={25} aria-hidden="true" />
-        <h2 id="study-surface-title">{heading}</h2>
-        <p>{message}</p>
-      </article>
-      <section className="study-notebook__page study-notebook__page--next study-boundary__recovery" aria-label="恢复操作">
-        {tone === "loading" ? (
-          <div className="study-boundary__lines" aria-hidden="true"><span /><span /><span /></div>
-        ) : (
-          <>
-            <p>{tone === "empty" ? "重新读取后，这一页只会出现服务端确认的下一步。" : "先恢复可信数据，再继续学习或验证。"}</p>
-            <button type="button" className="surface-primary" onClick={onRetry}>
-              <RotateCcw size={16} aria-hidden="true" />重新读取主焦点
-            </button>
-          </>
-        )}
-      </section>
+      <p>{tone === "empty" ? "重新读取后，这一页只会出现服务端确认的下一步。" : "先恢复可信数据，再继续学习或验证。"}</p>
+      <button type="button" className="surface-primary" onClick={onRetry}>
+        <RotateCcw size={16} aria-hidden="true" />重新读取主焦点
+      </button>
     </>
   );
 }
 
 export function StudySurface() {
   const invoke = useRoomStore((state) => state.invoke);
+  const theme = useRoomStore((state) => state.theme);
+  const motionPreference = useRoomStore((state) => state.motionMode);
+  const reducedMotion = useRoomStore((state) => state.reducedMotion);
+  const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
+  const scenePhase = useRoomStore((state) => state.scenePhase);
+  const windowState = useRoomStore((state) => state.windowState);
+  const setTheme = useRoomStore((state) => state.setTheme);
   const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
   const epochRef = useRef<number | undefined>(undefined);
+  const studyReferenceFrameRef = useRef<HTMLDivElement>(null);
+  const leftPageSurfaceRef = useRef<HTMLDivElement>(null);
+  const rightPageSurfaceRef = useRef<HTMLDivElement>(null);
+  const sourceSlipSurfaceRef = useRef<HTMLElement>(null);
   const [projection, setProjection] = useState<RoomProjectionV1 | null>(null);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const [surfaceQuadOverrides, setSurfaceQuadOverrides] = useState<SceneSurfaceQuadOverrides | undefined>();
+  const [studyCanvasReady, setStudyCanvasReady] = useState(false);
+  const { manifest } = useLearningRoomManifest();
+  const studyProjectionTargets = useMemo<readonly SceneSurfaceProjectionTarget[]>(() => [
+    { ref: leftPageSurfaceRef, surface: STUDY_SURFACE_REGISTRY.surfaces.notebookLeft },
+    { ref: rightPageSurfaceRef, surface: STUDY_SURFACE_REGISTRY.surfaces.notebookRight },
+    { ref: sourceSlipSurfaceRef, surface: STUDY_SURFACE_REGISTRY.surfaces.sourceSlip },
+  ], []);
+  const observeStudySurfaceInput = useCallback((input: SceneSurfacePointerResolution) => {
+    const frame = studyReferenceFrameRef.current;
+    if (!frame) return;
+    writeSceneInputDiagnostics(frame, input);
+  }, []);
 
   const loadProjection = useCallback(async () => {
     if (!window.ailearn) throw new Error("桌面端 API 不可用，无法读取真实学习目标。");
@@ -154,6 +199,24 @@ export function StudySurface() {
   const missingStartIdentity = action?.availability === "available"
     && action.action.kind === "create_run"
     && !action.action.cardId;
+  const hasReadyContent = Boolean(!boundary && objective && action);
+  const notebookAssetPath = manifest?.objects.studyOpenNotebook ?? null;
+  const notebookAssetUrl = manifest && notebookAssetPath ? mediaAssetUrl(manifest, notebookAssetPath) : null;
+
+  useSceneSurfaceProjections(studyProjectionTargets, {
+    active: true,
+    compactMediaQuery: STUDY_SURFACE_REGISTRY.compactMediaQuery,
+    quadOverrides: surfaceQuadOverrides,
+  });
+
+  useSceneSurfaceInputRuntime({
+    active: import.meta.env.DEV,
+    compactMediaQuery: STUDY_SURFACE_REGISTRY.compactMediaQuery,
+    referenceFrameRef: studyReferenceFrameRef,
+    targets: studyProjectionTargets,
+    quadOverrides: surfaceQuadOverrides,
+    onInput: observeStudySurfaceInput,
+  });
 
   return (
     <section
@@ -161,58 +224,141 @@ export function StudySurface() {
       aria-labelledby="study-surface-title"
     >
       <SurfaceReturnControl className="study-workbench__bookmark" />
-      <div className="study-notebook">
-        <img
-          className="study-notebook__object"
-          src="/assets/learning-room/v1/objects/study-open-notebook-v1.png"
-          alt=""
-          aria-hidden="true"
-          draggable="false"
-        />
-        {boundary ? (
-          <StudyBoundary {...boundary} onRetry={boundary.tone === "loading" ? undefined : reload} />
-        ) : objective && action ? (
-          <>
-            <article className="study-notebook__page study-notebook__page--reading">
-              <header className="study-objective">
-                <h2 id="study-surface-title">{title}</h2>
-              </header>
-              <blockquote>{objective.content.publicSummary}</blockquote>
-              <footer className="study-objective__status">
-                <strong>{studyStatusLabel(objective)}</strong>
-                <span>内容版本 {objective.surfaceRevision}</span>
-              </footer>
-            </article>
-            <section className="study-notebook__page study-notebook__page--next" aria-labelledby="study-next-action-title">
-              <div className="study-next-action">
-                <Sparkles size={18} aria-hidden="true" />
-                <div>
-                  <h3 id="study-next-action-title">{studyActionLabel(action.action)}</h3>
-                  <p>{studyActionDescription(action.action)}</p>
-                </div>
-              </div>
-              {roomActionReasonLabel(action) ? <p className="study-next-action__unavailable">{roomActionReasonLabel(action)}</p> : null}
-              {missingStartIdentity ? <p className="study-next-action__unavailable">服务端尚未提供可验证的学习卡身份，本次学习保持关闭。</p> : null}
-              <div className="study-notebook__actions">
-                <button className="surface-primary" type="button" disabled={action.availability !== "available" || missingStartIdentity || starting} onClick={() => void startPrimaryAction()}>
-                  {starting ? "正在准备…" : studyActionLabel(action.action)}<ArrowRight size={17} aria-hidden="true" />
-                </button>
-                {objective.sources.primaryNote ? (
-                  <button className="surface-secondary" type="button" onClick={() => invoke("open-notebook")}>
-                    <BookOpenText size={17} aria-hidden="true" />进入研究册
-                  </button>
-                ) : reviewDueCount > 0 ? (
-                  <button className="surface-secondary" type="button" onClick={() => invoke("review")}>打开今日复习队列</button>
+      <SceneReferenceFrame
+        ref={studyReferenceFrameRef}
+        className="study-reference-frame"
+        data-scene-input-runtime={import.meta.env.DEV ? "observer" : "disabled"}
+      >
+        <div
+          className="study-notebook"
+          style={STUDY_NOTEBOOK_STYLE}
+          data-scene-canvas-state={studyCanvasReady ? "ready" : "fallback"}
+          data-scene-canvas-renderer={studyCanvasReady ? "pixi-study-notebook-base" : "poster"}
+          data-scene-canvas-active={studyCanvasReady && scenePhase === "task" ? "true" : "false"}
+        >
+          <StudyNotebookCanvas
+            assetUrl={notebookAssetUrl}
+            compactMediaQuery={STUDY_SURFACE_REGISTRY.compactMediaQuery}
+            motionMode={motionMode}
+            scenePhase={scenePhase}
+            windowState={windowState}
+            onReady={setStudyCanvasReady}
+          />
+          <img
+            className="study-notebook__object"
+            src={notebookAssetUrl ?? "/assets/learning-room/v1/objects/study-open-notebook-v1.png"}
+            data-scene-surface-base="true"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
+
+          <div
+            ref={leftPageSurfaceRef}
+            className="study-notebook__surface study-notebook__surface--reading"
+            style={STUDY_SURFACE_STYLES.notebookLeft}
+            data-scene-surface={STUDY_SURFACE_REGISTRY.surfaces.notebookLeft.id}
+          >
+            <article
+              className="study-notebook__page study-notebook__page--reading"
+              role={boundary?.tone === "error" ? "alert" : boundary ? "status" : undefined}
+            >
+              <div
+                className={`study-notebook__ink study-notebook__ink--reading${boundary ? " study-boundary" : ""}`}
+                data-scene-surface-layer="ink"
+              >
+                {boundary ? (
+                  <StudyBoundaryReading heading={boundary.heading} message={boundary.message} />
+                ) : objective && action ? (
+                  <>
+                    <header className="study-objective">
+                      <h2 id="study-surface-title">{title}</h2>
+                    </header>
+                    <blockquote>{objective.content.publicSummary}</blockquote>
+                    <footer className="study-objective__status">
+                      <strong>{studyStatusLabel(objective)}</strong>
+                      <span>内容版本 {objective.surfaceRevision}</span>
+                    </footer>
+                  </>
                 ) : null}
               </div>
+              <span className="study-notebook__material study-notebook__material--left" data-scene-surface-layer="material" aria-hidden="true" />
+            </article>
+          </div>
+
+          <div
+            ref={rightPageSurfaceRef}
+            className="study-notebook__surface study-notebook__surface--next"
+            style={STUDY_SURFACE_STYLES.notebookRight}
+            data-scene-surface={STUDY_SURFACE_REGISTRY.surfaces.notebookRight.id}
+          >
+            <section className="study-notebook__page study-notebook__page--next" aria-labelledby={boundary ? undefined : "study-next-action-title"}>
+              <div
+                className={`study-notebook__ink study-notebook__ink--next${boundary ? " study-boundary__recovery" : ""}`}
+                data-scene-surface-layer="ink"
+              >
+                {boundary ? (
+                  <StudyBoundaryRecovery {...boundary} onRetry={boundary.tone === "loading" ? undefined : reload} />
+                ) : objective && action ? (
+                  <>
+                    <div className="study-next-action">
+                      <Sparkles size={18} aria-hidden="true" />
+                      <div>
+                        <h3 id="study-next-action-title">{studyActionLabel(action.action)}</h3>
+                        <p>{studyActionDescription(action.action)}</p>
+                      </div>
+                    </div>
+                    {roomActionReasonLabel(action) ? <p className="study-next-action__unavailable">{roomActionReasonLabel(action)}</p> : null}
+                    {missingStartIdentity ? <p className="study-next-action__unavailable">服务端尚未提供可验证的学习卡身份，本次学习保持关闭。</p> : null}
+                    <div className="study-notebook__actions">
+                      <button className="surface-primary" type="button" disabled={action.availability !== "available" || missingStartIdentity || starting} onClick={() => void startPrimaryAction()}>
+                        {starting ? "正在准备…" : studyActionLabel(action.action)}<ArrowRight size={17} aria-hidden="true" />
+                      </button>
+                      {objective.sources.primaryNote ? (
+                        <button className="surface-secondary" type="button" onClick={() => invoke("open-notebook")}>
+                          <BookOpenText size={17} aria-hidden="true" />进入研究册
+                        </button>
+                      ) : reviewDueCount > 0 ? (
+                        <button className="surface-secondary" type="button" onClick={() => invoke("review")}>打开今日复习队列</button>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+              <span className="study-notebook__material study-notebook__material--right" data-scene-surface-layer="material" aria-hidden="true" />
             </section>
-            <aside className="study-source-slip" aria-label="学习目标来源">
-              <span>来源</span>
-              <strong>{sourceLabel}</strong>
-            </aside>
-          </>
+          </div>
+
+          <aside
+            ref={sourceSlipSurfaceRef}
+            className={`study-source-slip study-notebook__surface${hasReadyContent ? "" : " study-source-slip--empty"}`}
+            style={STUDY_SURFACE_STYLES.sourceSlip}
+            data-scene-surface={STUDY_SURFACE_REGISTRY.surfaces.sourceSlip.id}
+            aria-label={hasReadyContent ? "学习目标来源" : undefined}
+            aria-hidden={hasReadyContent ? undefined : "true"}
+          >
+            <div className="study-source-slip__plane">
+              <div className="study-source-slip__ink" data-scene-surface-layer="ink">
+                {hasReadyContent ? <><span>来源</span><strong>{sourceLabel}</strong></> : null}
+              </div>
+              <span className="study-source-slip__material" data-scene-surface-layer="material" aria-hidden="true" />
+            </div>
+          </aside>
+
+          <span className="study-notebook__spine" data-scene-surface-layer="occluder" aria-hidden="true" />
+        </div>
+
+        {import.meta.env.DEV ? (
+          <SurfaceCalibrator
+            referenceFrameRef={studyReferenceFrameRef}
+            registry={STUDY_SURFACE_REGISTRY}
+            surfaces={STUDY_CALIBRATION_SURFACES}
+            theme={theme}
+            onThemeChange={setTheme}
+            onQuadOverridesChange={setSurfaceQuadOverrides}
+          />
         ) : null}
-      </div>
+      </SceneReferenceFrame>
     </section>
   );
 }

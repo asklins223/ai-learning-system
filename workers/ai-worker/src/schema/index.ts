@@ -1,8 +1,8 @@
 /**
  * Worker 端共享的 drizzle schema。
  *
- * 统一从 apps/api 的 schema 导出（与 worker/src/db.ts 保持一致）——
- * packages/db 镜像包已移除，单一来源为 apps/api/src/db/schema。
- * queue/测试等 import 本模块的文件生成 SQL 的表定义与 db.ts 相同。
+ * 2026-08-24（AI 设计审查 §4.4 第三批）：单一事实来源为
+ * packages/shared/src/db-schema——worker 与 api 平级消费，本路径保留兼容
+ * re-export（queue/测试等既有导入不变）。
  */
-export * from "../../../../apps/api/src/db/schema/index.ts";
+export * from "@ailearn/shared/db-schema";

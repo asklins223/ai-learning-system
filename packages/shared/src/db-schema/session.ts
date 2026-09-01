@@ -1,0 +1,27 @@
+import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
+
+/**
+ * Session 表：持久化登录态，替代内存 Map。
+ * - token 作为主键，查询 O(1)。
+ * - expiresAt 用于过期清理；decodeToken 时一并校验。
+ * - V0 单实例足够；未来多实例天然共享（Postgres）。
+ */
+export const sessions = pgTable(
+  "sessions",
+  {
+    token: text("token").primaryKey(),
+    userId: uuid("user_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    // 2026-08-12（schema 完整性审计）：0001:9 sessions_user_idx 此前未声明
+    userIdx: index("sessions_user_idx").on(t.userId),
+
+    workspaceUserIdx: index("sessions_workspace_user_idx").on(t.workspaceId, t.userId),
+    // 2026-08-12（generate 对齐）：0159 定义单列 (expires_at) 索引，支撑过期清理
+    // （ailearn_purge_expired_sessions / 会话扫描），避免全表扫。
+    expiresAtIdx: index("sessions_expires_at_idx").on(t.expiresAt),
+  }),
+);

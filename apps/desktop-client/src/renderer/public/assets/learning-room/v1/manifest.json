@@ -36,6 +36,72 @@
       "sha256": "8b5102a81f189ccf45a18bbd39a67eeb57800d2e8fc6336bc0a26feef89679c1"
     }
   },
+  "entryPosters": {
+    "closed": {
+      "day": {
+        "id": "STATIC-LOGIN-ENTRY-CLOSED-DAY-01",
+        "path": "posters/login-entry/entry-door-closed-day-v1.png",
+        "width": 1672,
+        "height": 941,
+        "sha256": "4fe60dd1a1310ef4d01e57c2aed9622288fd65783b8efd3443318c064b9badf2"
+      },
+      "night": {
+        "id": "STATIC-LOGIN-ENTRY-CLOSED-NIGHT-01",
+        "path": "posters/login-entry/entry-door-closed-night-v1.png",
+        "width": 1672,
+        "height": 941,
+        "sha256": "f56ccfafabef4a9ce3d4c5a0687a513aff684bcaf96ccb7af657fc44d67f5a72"
+      }
+    },
+    "open": {
+      "day": {
+        "id": "STATIC-LOGIN-ENTRY-OPEN-DAY-01",
+        "path": "posters/login-entry/entry-door-open-day-v1.png",
+        "width": 1672,
+        "height": 941,
+        "sha256": "499df910110ca097769dd522b847035323ccd4012d9db57fa64bc66480ce94d1"
+      },
+      "night": {
+        "id": "STATIC-LOGIN-ENTRY-OPEN-NIGHT-01",
+        "path": "posters/login-entry/entry-door-open-night-v1.png",
+        "width": 1672,
+        "height": 941,
+        "sha256": "3252cd203be1e23f4e91a3802dc45bdbeb18d54a57c247039e4aa633c5741372"
+      }
+    }
+  },
+  "searchPosters": {
+    "day": {
+      "id": "STATIC-SEARCH-REFERENCE-DAY-01",
+      "path": "posters/search-reference-day-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "02f6964cef3d4efb051f0a4d5e5b30ed808a8921c52d7f1dc26192257041f3d9"
+    },
+    "night": {
+      "id": "STATIC-SEARCH-REFERENCE-NIGHT-01",
+      "path": "posters/search-reference-night-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "e80ddd93c9f138b20e01b1948e88e0453b67b4712cb817ca435c18fe55c50eb6"
+    }
+  },
+  "searchForeground": {
+    "day": {
+      "id": "STATIC-SEARCH-FOREGROUND-DAY-01",
+      "path": "foreground/search-foreground-day-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "b7b36f509b118803d3be139a5f33c2b974fd83716a448779f2e779b421436401"
+    },
+    "night": {
+      "id": "STATIC-SEARCH-FOREGROUND-NIGHT-01",
+      "path": "foreground/search-foreground-night-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "52d52211fdf47fd26cbe1a6713ccee45fbf2334d193a3372e160aa057808079c"
+    }
+  },
   "reviewPosters": {
     "day": {
       "id": "STATIC-REVIEW-SEAT-DAY-01",
@@ -138,6 +204,8 @@
     "onboardingCaptions": "captions/onboarding-first-entry-zh-CN-v1.vtt"
   },
   "objects": {
+    "loginDoorSlabDay": "objects/login-entry/door-slab-day-v2.png",
+    "loginDoorSlabNight": "objects/login-entry/door-slab-night-v2.png",
     "desk": "objects/desk.webp",
     "notebook": "objects/notebook.webp",
     "cardBox": "objects/card-box.webp",
@@ -155,5 +223,6 @@
     "stickyNote": "textures/sticky-note.webp",
     "sourceFolder": "textures/source-folder.webp",
     "scenePaperFibres": "textures/scene-paper-fibres-v2.png"
-  }
+  },
+  "roomLayers": []
 }

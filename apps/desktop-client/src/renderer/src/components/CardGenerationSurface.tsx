@@ -313,82 +313,88 @@ export function CardGenerationSurface() {
     <>
       <GenerationPanelHeader />
       <div className="card-generation-surface task-artifact task-artifact--card-generation">
-        {loading ? (
-          <div className="card-generation-state" role="status"><LoaderCircle className="run-spinner" size={26} aria-hidden="true" /><strong>正在读取生成任务…</strong><p>只从服务端同步 run 和公开候选，不在本机推断结果。</p></div>
-        ) : null}
-        {!loading && failure ? (
-          <div className="card-generation-state card-generation-state--error" role="alert">
-            <CircleAlert size={26} aria-hidden="true" /><strong>无法确认这条生成任务</strong><p>{failure}</p>
-            <button type="button" className="surface-primary" onClick={() => void load(true)}><RefreshCw size={15} aria-hidden="true" />重新同步</button>
-          </div>
-        ) : null}
-        {!loading && !failure && !run ? (
-          <div className="card-generation-state"><Sparkles size={26} aria-hidden="true" /><strong>还没有可恢复的生成任务</strong><p>请从已同步的真实笔记提交整篇笔记生成请求。</p></div>
-        ) : null}
+        <div className="card-generation-surface__content">
+          {loading ? (
+            <div className="card-generation-state" role="status"><LoaderCircle className="run-spinner" size={26} aria-hidden="true" /><strong>正在读取生成任务…</strong><p>只从服务端同步 run 和公开候选，不在本机推断结果。</p></div>
+          ) : null}
+          {!loading && failure ? (
+            <div className="card-generation-state card-generation-state--error" role="alert">
+              <CircleAlert size={26} aria-hidden="true" /><strong>无法确认这条生成任务</strong><p>{failure}</p>
+              <button type="button" className="surface-primary" onClick={() => void load(true)}><RefreshCw size={15} aria-hidden="true" />重新同步</button>
+            </div>
+          ) : null}
+          {!loading && !failure && !run ? (
+            <div className="card-generation-state"><Sparkles size={26} aria-hidden="true" /><strong>还没有可恢复的生成任务</strong><p>请从已同步的真实笔记提交整篇笔记生成请求。</p></div>
+          ) : null}
+          {!loading && !failure && run ? (
+            <>
+              <div className="card-generation-meta">
+                <span><i className="run-phase__dot" aria-hidden="true" />{statusLabel(run.status)}</span>
+                <small>服务端任务 · 审核版本 {run.reviewDraftRevision}</small>
+                <button type="button" className="run-icon-button" onClick={() => void load(true)} aria-label="重新读取生成任务"><RefreshCw size={15} aria-hidden="true" /></button>
+              </div>
+              <div className="card-generation-intro">
+                <div><span>整篇笔记</span><strong>{run.sourceOutdated ? "来源版本已经变化" : "来源版本已封存"}</strong></div>
+                <p>{run.sourceOutdated ? "这次生成基于旧版本；请回研究册重新同步后再决定是否继续。" : "候选只展示公开问题与目标。答案、评分依据和证据闭包仍由服务端控制。"}</p>
+              </div>
+              {run.recovery ? <div className="card-generation-recovery" role="status">
+                <strong>{recoveryReasonLabel(run.recovery.publicReasonCode)}</strong>
+                <p>{run.recovery.retryability === "resync_required" ? "先重新读取服务端状态；桌面不会重试同一生成任务，也不会把失败当成成功。" : "后续动作只使用服务端明确签发的恢复合同。"}</p>
+                <div className="surface-action-pair">
+                  {run.recovery.allowedActions.map((action) => {
+                    if (action.kind === "refresh_status") {
+                      return <button key={action.kind} type="button" className="surface-secondary" disabled={busyAction !== null} onClick={() => void load(true)}><RefreshCw size={14} aria-hidden="true" />重新检查</button>;
+                    }
+                    if (action.kind === "return_note" || action.kind === "open_latest_note") {
+                      return <button key={action.kind} type="button" className="surface-primary" onClick={() => { setActiveNoteRef(action.sourceRef); invoke("open-notebook"); }}><ArrowLeft size={14} aria-hidden="true" />返回笔记</button>;
+                    }
+                    return null;
+                  })}
+                </div>
+              </div> : null}
+              {run.status === "no_cards_recommended" ? <div className="card-generation-empty"><Check size={22} aria-hidden="true" /><strong>服务端没有推荐可复习候选</strong><p>这是一种有效终态，不需要在本机补造学习卡。</p></div> : null}
+              {!reviewStageStatuses.has(run.status) && !run.recovery ? <div className="card-generation-state card-generation-state--inline" role="status"><LoaderCircle className="run-spinner" size={20} aria-hidden="true" /><strong>{statusLabel(run.status)}</strong><p>生成服务仍在处理；收到事件后会重新读取。</p></div> : null}
+              {reviewStageStatuses.has(run.status) && candidates.length > 0 ? (
+                <div className="card-generation-list" aria-label="服务端公开学习卡候选">
+                  {candidates.map((candidate) => {
+                    // The API accepts candidate actions only after the run-level
+                    // state reaches review_ready. A needs_attention run may
+                    // already contain one passed candidate while another bounded
+                    // repair is still in flight; keep the public candidate
+                    // context visible, but fail closed on review/activation
+                    // controls until the run-level contract is ready.
+                    const reviewReady = run.status === "review_ready";
+                    const canSelect = reviewReady && isActivatableCandidate(candidate);
+                    const selected = selectedIds.has(candidate.candidateId);
+                    return (
+                      <article className={`card-generation-candidate${selected ? " card-generation-candidate--selected" : ""}`} key={candidate.candidateRevisionId}>
+                        <div className="card-generation-candidate__topline">
+                          <span>{candidate.recommendation.recommended ? "服务端推荐" : "可审核候选"}</span>
+                          <small>{candidate.strategy} · 约 {candidate.estimatedReviewSeconds} 秒</small>
+                        </div>
+                        <h3>{candidate.objective.statement}</h3>
+                        <p>{candidate.front.prompt}</p>
+                        <div className="card-generation-candidate__summary"><strong>{candidate.objective.publicSummary}</strong><span>{candidate.objective.knowledgeForm}</span></div>
+                        <div className="card-generation-candidate__actions">
+                          {canSelect ? <label className="card-generation-select"><input type="checkbox" checked={selected} onChange={() => toggleSelection(candidate)} />选择激活</label> : <span className="card-generation-decision">{candidateDecisionLabel(candidate)}</span>}
+                          {reviewReady && candidate.reviewDecision === "undecided" && candidate.isReviewReady && candidate.candidateEvidenceBindingPlanHash !== null ? <>
+                            <button type="button" className="surface-secondary" disabled={busyAction !== null} onClick={() => void review(candidate, "reject")}><X size={14} aria-hidden="true" />拒绝</button>
+                            <button type="button" className="surface-primary" disabled={busyAction !== null} onClick={() => void review(candidate, "keep")}><Check size={14} aria-hidden="true" />保留</button>
+                          </> : null}
+                          {busyAction?.startsWith(`${candidate.candidateId}:`) ? <small role="status">正在提交…</small> : null}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {run.status === "review_ready" && candidates.length === 0 ? <div className="card-generation-empty"><CircleAlert size={22} aria-hidden="true" /><strong>服务端没有返回可审核候选</strong><p>这不是本机的空数据；请重新同步或等待服务端状态变化。</p></div> : null}
+              {receipt ? <div className="card-generation-receipt" role="status"><Check size={18} aria-hidden="true" /><span><strong>服务端激活回执已确认</strong><small>已返回 {receipt.mappings.length} 个目标映射</small></span></div> : null}
+            </>
+          ) : null}
+        </div>
         {!loading && !failure && run ? (
-          <>
-            <div className="card-generation-meta">
-              <span><i className="run-phase__dot" aria-hidden="true" />{statusLabel(run.status)}</span>
-              <small>run {run.runId.slice(0, 8)} · 审核版本 {run.reviewDraftRevision}</small>
-              <button type="button" className="run-icon-button" onClick={() => void load(true)} aria-label="重新读取生成任务"><RefreshCw size={15} aria-hidden="true" /></button>
-            </div>
-            <div className="card-generation-intro">
-              <div><span>整篇笔记</span><strong>{run.sourceOutdated ? "来源版本已经变化" : "来源版本已封存"}</strong></div>
-              <p>{run.sourceOutdated ? "这次生成基于旧版本；请回研究册重新同步后再决定是否继续。" : "候选只展示公开问题与目标。答案、评分依据和证据闭包仍由服务端控制。"}</p>
-            </div>
-            {run.recovery ? <div className="card-generation-recovery" role="status">
-              <strong>{recoveryReasonLabel(run.recovery.publicReasonCode)}</strong>
-              <p>{run.recovery.retryability === "resync_required" ? "先重新读取服务端状态；桌面不会重试同一生成任务，也不会把失败当成成功。" : "后续动作只使用服务端明确签发的恢复合同。"}</p>
-              <div className="surface-action-pair">
-                {run.recovery.allowedActions.map((action) => {
-                  if (action.kind === "refresh_status") {
-                    return <button key={action.kind} type="button" className="surface-secondary" disabled={busyAction !== null} onClick={() => void load(true)}><RefreshCw size={14} aria-hidden="true" />重新检查</button>;
-                  }
-                  if (action.kind === "return_note" || action.kind === "open_latest_note") {
-                    return <button key={action.kind} type="button" className="surface-primary" onClick={() => { setActiveNoteRef(action.sourceRef); invoke("open-notebook"); }}><ArrowLeft size={14} aria-hidden="true" />返回笔记</button>;
-                  }
-                  return null;
-                })}
-              </div>
-            </div> : null}
-            {run.status === "no_cards_recommended" ? <div className="card-generation-empty"><Check size={22} aria-hidden="true" /><strong>服务端没有推荐可复习候选</strong><p>这是一种有效终态，不需要在本机补造学习卡。</p></div> : null}
-            {!reviewStageStatuses.has(run.status) && !run.recovery ? <div className="card-generation-state card-generation-state--inline" role="status"><LoaderCircle className="run-spinner" size={20} aria-hidden="true" /><strong>{statusLabel(run.status)}</strong><p>生成服务仍在处理；收到事件后会重新读取。</p></div> : null}
-            {reviewStageStatuses.has(run.status) && candidates.length > 0 ? (
-              <div className="card-generation-list" aria-label="服务端公开学习卡候选">
-                {candidates.map((candidate) => {
-                  // The API accepts candidate actions only after the run-level
-                  // state reaches review_ready. A needs_attention run may
-                  // already contain one passed candidate while another bounded
-                  // repair is still in flight; keep the public candidate
-                  // context visible, but fail closed on review/activation
-                  // controls until the run-level contract is ready.
-                  const reviewReady = run.status === "review_ready";
-                  const canSelect = reviewReady && isActivatableCandidate(candidate);
-                  const selected = selectedIds.has(candidate.candidateId);
-                  return (
-                    <article className={`card-generation-candidate${selected ? " card-generation-candidate--selected" : ""}`} key={candidate.candidateRevisionId}>
-                      <div className="card-generation-candidate__topline">
-                        <span>{candidate.recommendation.recommended ? "服务端推荐" : "可审核候选"}</span>
-                        <small>{candidate.strategy} · 约 {candidate.estimatedReviewSeconds} 秒</small>
-                      </div>
-                      <h3>{candidate.objective.statement}</h3>
-                      <p>{candidate.front.prompt}</p>
-                      <div className="card-generation-candidate__summary"><strong>{candidate.objective.publicSummary}</strong><span>{candidate.objective.knowledgeForm}</span></div>
-                      <div className="card-generation-candidate__actions">
-                        {canSelect ? <label className="card-generation-select"><input type="checkbox" checked={selected} onChange={() => toggleSelection(candidate)} />选择激活</label> : <span className="card-generation-decision">{candidateDecisionLabel(candidate)}</span>}
-                        {reviewReady && candidate.reviewDecision === "undecided" && candidate.isReviewReady && candidate.candidateEvidenceBindingPlanHash !== null ? <>
-                          <button type="button" className="surface-secondary" disabled={busyAction !== null} onClick={() => void review(candidate, "reject")}><X size={14} aria-hidden="true" />拒绝</button>
-                          <button type="button" className="surface-primary" disabled={busyAction !== null} onClick={() => void review(candidate, "keep")}><Check size={14} aria-hidden="true" />保留</button>
-                        </> : null}
-                        {busyAction?.startsWith(`${candidate.candidateId}:`) ? <small role="status">正在提交…</small> : null}
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            ) : null}
-            {run.status === "review_ready" && candidates.length === 0 ? <div className="card-generation-empty"><CircleAlert size={22} aria-hidden="true" /><strong>服务端没有返回可审核候选</strong><p>这不是本机的空数据；请重新同步或等待服务端状态变化。</p></div> : null}
-            {receipt ? <div className="card-generation-receipt" role="status"><Check size={18} aria-hidden="true" /><span><strong>服务端激活回执已确认</strong><small>receipt {receipt.receiptId.slice(0, 8)} · {receipt.mappings.length} 个目标映射已返回</small></span></div> : null}
+          <div className="card-generation-surface__action-edge">
             <div className="card-generation-footer">
               <span>{selectedCount > 0 ? `已选择 ${selectedCount} 个候选` : "先用服务端回执确认审核决定"}</span>
               <div className="surface-action-pair">
@@ -398,7 +404,7 @@ export function CardGenerationSurface() {
                 <button type="button" className="text-action" onClick={() => invoke("open-notebook")}>回研究册</button>
               </div>
             </div>
-          </>
+          </div>
         ) : null}
       </div>
       <p className="prototype-note task-artifact task-artifact--provenance">此面板只消费服务端 run、候选、审核结果和激活回执；答案 reveal 仍遵守曝光生命周期。</p>

@@ -7,6 +7,11 @@ import {
   staticAssetPathSchema,
   type LearningRoomManifestV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
+import {
+  ROOM_SCENE_ANCHOR_IDS,
+  SCENE_DEPTH_CHILD_ORDER_MAX,
+} from "../scene/scene-depth";
+import { isRoomSceneLayerRegistrationWithinWorld } from "../scene/scene-geometry";
 
 export type ThemeMedia = {
   id: string;
@@ -35,6 +40,49 @@ type SourceMedia = ThemeMedia & {
 };
 
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const roomSceneLayerManifestSchema = z.strictObject({
+  assetId: nonEmptyStringSchema,
+  path: staticAssetPathSchema,
+  theme: z.enum(["day", "night"]),
+  depth: z.enum(["D1", "D2", "D3", "D4", "D5", "D6"]),
+  /** Ascending order within the same theme and depth band; larger is nearer. */
+  order: z.number().int().min(0).max(SCENE_DEPTH_CHILD_ORDER_MAX),
+  /** `null` means the layer is static in its depth band rather than anchor-bound. */
+  anchorId: z.enum(ROOM_SCENE_ANCHOR_IDS).nullable(),
+  sourceSize: z.strictObject({
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+  }),
+  registration: z.strictObject({
+    position: z.tuple([z.number().finite(), z.number().finite()]),
+    size: z.strictObject({
+      width: z.number().finite().positive(),
+      height: z.number().finite().positive(),
+    }),
+    anchor: z.tuple([
+      z.number().finite().min(0).max(1),
+      z.number().finite().min(0).max(1),
+    ]),
+  }),
+  alphaMode: z.enum(["straight-rgba", "premultiplied-rgba", "blend", "opaque-rgb"]),
+  reviewStatus: nonEmptyStringSchema,
+  releaseApproval: z.boolean(),
+}).superRefine((layer, context) => {
+  if (!isRoomSceneLayerRegistrationWithinWorld(
+    layer.registration.position,
+    layer.registration.size,
+    layer.registration.anchor,
+  )) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["registration"],
+      message: "Room layer registration must stay within the canonical room world.",
+    });
+  }
+});
+
+export type RoomSceneLayerManifestEntry = z.infer<typeof roomSceneLayerManifestSchema>;
+
 const sourceMediaSchema = z
   .strictObject({
     id: nonEmptyStringSchema,
@@ -79,6 +127,12 @@ const sourceManifestSchema = z.strictObject({
   basePath: z.literal(LEARNING_ROOM_ASSET_BASE_PATH),
   posters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
   seatPosters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
+  entryPosters: z.strictObject({
+    closed: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
+    open: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
+  }),
+  searchPosters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
+  searchForeground: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
   reviewPosters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
   window: z.strictObject({
     mask: staticAssetPathSchema,
@@ -108,6 +162,30 @@ const sourceManifestSchema = z.strictObject({
   }),
   objects: z.record(nonEmptyStringSchema, staticAssetPathSchema),
   textures: z.record(nonEmptyStringSchema, staticAssetPathSchema),
+  roomLayers: z.array(roomSceneLayerManifestSchema).max(64).default([]),
+}).superRefine((value, context) => {
+  const seenAssetIds = new Set<string>();
+  const seenLayerPlacements = new Set<string>();
+  value.roomLayers.forEach((layer, index) => {
+    if (seenAssetIds.has(layer.assetId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["roomLayers", index, "assetId"],
+        message: "duplicate Room layer asset id",
+      });
+    }
+    seenAssetIds.add(layer.assetId);
+
+    const placementKey = JSON.stringify([layer.theme, layer.depth, layer.order]);
+    if (seenLayerPlacements.has(placementKey)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["roomLayers", index, "order"],
+        message: "duplicate Room layer order within theme and depth band",
+      });
+    }
+    seenLayerPlacements.add(placementKey);
+  });
 });
 
 export type LearningRoomManifestSource = z.infer<typeof sourceManifestSchema>;
@@ -115,7 +193,14 @@ export type LearningRoomManifest = LearningRoomManifestSource & {
   readonly normalized: LearningRoomManifestV1;
 };
 
+export type DoorEntryAssetUrls = Readonly<{
+  closed: string;
+  home: string;
+}>;
+
 const MANIFEST_PATH = `${LEARNING_ROOM_ASSET_BASE_PATH}/manifest.json`;
+let manifestCache: LearningRoomManifest | null = null;
+let manifestPromise: Promise<LearningRoomManifest> | null = null;
 
 function addAsset(assets: Record<string, string>, key: string, path: string): void {
   if (assets[key] !== undefined) throw new Error(`重复媒体资产键：${key}`);
@@ -130,6 +215,14 @@ export function normalizeLearningRoomManifest(
   addAsset(assets, "posters.night", source.posters.night.path);
   addAsset(assets, "seatPosters.day", source.seatPosters.day.path);
   addAsset(assets, "seatPosters.night", source.seatPosters.night.path);
+  addAsset(assets, "entryPosters.closed.day", source.entryPosters.closed.day.path);
+  addAsset(assets, "entryPosters.closed.night", source.entryPosters.closed.night.path);
+  addAsset(assets, "entryPosters.open.day", source.entryPosters.open.day.path);
+  addAsset(assets, "entryPosters.open.night", source.entryPosters.open.night.path);
+  addAsset(assets, "searchPosters.day", source.searchPosters.day.path);
+  addAsset(assets, "searchPosters.night", source.searchPosters.night.path);
+  addAsset(assets, "searchForeground.day", source.searchForeground.day.path);
+  addAsset(assets, "searchForeground.night", source.searchForeground.night.path);
   addAsset(assets, "reviewPosters.day", source.reviewPosters.day.path);
   addAsset(assets, "reviewPosters.night", source.reviewPosters.night.path);
   addAsset(assets, "window.mask", source.window.mask);
@@ -144,6 +237,7 @@ export function normalizeLearningRoomManifest(
   if (source.sound.onboardingCaptions) addAsset(assets, "sound.onboardingCaptions", source.sound.onboardingCaptions);
   for (const [key, path] of Object.entries(source.objects)) addAsset(assets, `objects.${key}`, path);
   for (const [key, path] of Object.entries(source.textures)) addAsset(assets, `textures.${key}`, path);
+  source.roomLayers.forEach((layer, index) => addAsset(assets, `roomLayers.${index}`, layer.path));
 
   return learningRoomManifestSchema.parse({
     version: 1,
@@ -168,23 +262,50 @@ export function mediaAssetUrl(manifest: LearningRoomManifest, path: string): str
   return `${LEARNING_ROOM_ASSET_BASE_PATH}/${safePath}`;
 }
 
+export function resolveDoorEntryAssetUrls(
+  manifest: LearningRoomManifest,
+  theme: "day" | "night",
+): DoorEntryAssetUrls {
+  return {
+    closed: mediaAssetUrl(manifest, manifest.entryPosters.closed[theme].path),
+    home: mediaAssetUrl(manifest, manifest.posters[theme].path),
+  };
+}
+
+function loadLearningRoomManifest(): Promise<LearningRoomManifest> {
+  if (manifestCache) return Promise.resolve(manifestCache);
+  if (!manifestPromise) {
+    manifestPromise = fetch(MANIFEST_PATH)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`媒体清单请求失败（${response.status}）`);
+        const value: unknown = await response.json();
+        const parsed = parseLearningRoomManifest(value);
+        manifestCache = parsed;
+        return parsed;
+      })
+      .finally(() => {
+        manifestPromise = null;
+      });
+  }
+  return manifestPromise;
+}
+
 export function useLearningRoomManifest() {
   const [manifest, setManifest] = useState<LearningRoomManifest | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void fetch(MANIFEST_PATH, { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`媒体清单请求失败（${response.status}）`);
-        const value: unknown = await response.json();
-        setManifest(parseLearningRoomManifest(value));
+    let active = true;
+    void loadLearningRoomManifest()
+      .then((value) => {
+        if (active) setManifest(value);
       })
       .catch((reason: unknown) => {
-        if (controller.signal.aborted) return;
-        setError(reason instanceof Error ? reason.message : "媒体清单未能载入");
+        if (active) setError(reason instanceof Error ? reason.message : "媒体清单未能载入");
       });
-    return () => controller.abort();
+    return () => {
+      active = false;
+    };
   }, []);
 
   return { manifest, error };

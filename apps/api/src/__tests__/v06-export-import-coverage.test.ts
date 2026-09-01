@@ -311,7 +311,7 @@ test("v0.6 删除：validation_submissions 有 ON DELETE CASCADE 关联 user", (
   // Here we verify the schema definition includes CASCADE
   const schemaPath = join(
     WORKSPACE_ROOT,
-    "apps/api/src/db/schema/validation-v2.ts",
+    "packages/shared/src/db-schema/validation-v2.ts",
   );
   if (!existsSync(schemaPath)) return;
 
@@ -325,7 +325,7 @@ test("v0.6 删除：validation_submissions 有 ON DELETE CASCADE 关联 user", (
 test("v0.6 删除：validation_assistance_exposures 有 ON DELETE CASCADE 关联 user 和 key_point", () => {
   const schemaPath = join(
     WORKSPACE_ROOT,
-    "apps/api/src/db/schema/validation-v2.ts",
+    "packages/shared/src/db-schema/validation-v2.ts",
   );
   if (!existsSync(schemaPath)) return;
 

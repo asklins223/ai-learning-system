@@ -1,24 +1,8 @@
-export * from "./enums.ts";
-export * from "./identity.ts";
-export * from "./session.ts";
-export * from "./note.ts";
-export * from "./evidence.ts";
-export * from "./ai.ts";
-export * from "./job.ts";
-export * from "./search.ts";
-export * from "./validation-v2.ts";
-export * from "./card-generation-v2.ts";
-export * from "./learning-sessions.ts";
-export * from "./learning-runs.ts";
-export * from "./companion-bridge.ts";
-export * from "./companion-journey.ts";
-export * from "./understanding-projection.ts";
-export * from "./companion-sandbox.ts";
-export * from "./assistant-deliveries.ts";
-export * from "./assistant-memory.ts";
-export * from "./companion-memory.ts";
-export * from "./companion.ts";
-export * from "./companion-conversations.ts";
-export * from "./learning-exposure.ts";
-export * from "./outbox.ts";
-export * from "./learning-metrics.ts";
+/**
+ * 兼容 re-export（2026-08-24 AI 设计审查 §4.4 第三批）。
+ *
+ * Drizzle schema 单一事实来源已下沉至 packages/shared/src/db-schema/
+ * （api 与 worker 平级消费）。新代码请直接引用 @ailearn/shared/db-schema；
+ * 本路径仅为既有 81 处 api 内部导入保留。
+ */
+export * from "@ailearn/shared/db-schema";

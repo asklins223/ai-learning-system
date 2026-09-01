@@ -13,6 +13,7 @@ import {
   type ViewPresetId,
   type WindowState,
 } from "./room-machine";
+import { scenePhaseForIntent, type SceneMotionPhase } from "../scene/scene-motion";
 
 export type CompanionForm = "orb" | "live2d";
 export type CompanionMoment = "idle" | "lamp" | "ambient" | "confirm";
@@ -25,6 +26,7 @@ type RoomStore = {
   destination: RoomDestination;
   viewPreset: ViewPresetId;
   surface: RoomSurface;
+  scenePhase: SceneMotionPhase;
   theme: RoomTheme;
   motionMode: MotionMode;
   motionPreferenceExplicit: boolean;
@@ -50,11 +52,13 @@ type RoomStore = {
   invoke: (intent: RoomIntent) => void;
   closeSurface: () => void;
   toggleTheme: () => void;
+  setTheme: (theme: RoomTheme) => void;
   cycleMotionMode: () => void;
   setPhase: (phase: PresentationPhase, message?: string | null) => void;
   setReducedMotion: (reduced: boolean) => void;
   setWindowState: (windowState: WindowState) => void;
   setInputFocused: (inputFocused: boolean) => void;
+  setScenePhase: (scenePhase: SceneMotionPhase) => void;
   setActiveRunId: (runId: string | null) => void;
   setActiveCardGenerationRunId: (runId: string | null) => void;
   setActiveNoteRef: (ref: NoteTargetRef | null) => void;
@@ -76,6 +80,7 @@ export const useRoomStore = create<RoomStore>()(
   persist(
     (set, get) => ({
       ...initialViewState,
+      scenePhase: "idle",
       theme: "day",
       motionMode: "full",
       motionPreferenceExplicit: false,
@@ -99,6 +104,7 @@ export const useRoomStore = create<RoomStore>()(
       navigationGuard: null,
       resetWorkspaceScope: () => set({
         ...initialViewState,
+        scenePhase: "idle",
         phase: "booting",
         mediaMessage: null,
         inputFocused: false,
@@ -115,13 +121,18 @@ export const useRoomStore = create<RoomStore>()(
       }),
       invoke: (intent) => {
         const state = get();
-        if (state.activeRunId && state.navigationGuard) {
+        if (state.navigationGuard) {
           state.navigationGuard(intent);
           return;
         }
         const next = resolveRoomIntent(intent);
+        const sameRoute = next.destination === state.destination
+          && next.viewPreset === state.viewPreset
+          && next.surface === state.surface;
+        if (sameRoute) return;
         set({
           ...next,
+          scenePhase: scenePhaseForIntent(intent, state.surface),
           activeNoteRef: intent === "open-notebook" ? get().activeNoteRef : null,
           activeReviewTarget: intent === "review" ? get().activeReviewTarget : null,
           inputFocused: false,
@@ -131,12 +142,19 @@ export const useRoomStore = create<RoomStore>()(
           companionMoment: "idle",
         });
       },
-      closeSurface: () => set({ ...initialViewState, activeNoteRef: null, activeReviewTarget: null, inputFocused: false }),
+      closeSurface: () => set((state) => ({
+        ...initialViewState,
+        scenePhase: state.surface ? "returning" : "idle",
+        activeNoteRef: null,
+        activeReviewTarget: null,
+        inputFocused: false,
+      })),
       toggleTheme: () => set((state) => ({
         theme: state.theme === "day" ? "night" : "day",
         companionOpen: true,
         companionMoment: "lamp",
       })),
+      setTheme: (theme) => set({ theme }),
       cycleMotionMode: () =>
         set((state) => ({
           motionMode: nextMotionMode(state.motionMode),
@@ -151,6 +169,7 @@ export const useRoomStore = create<RoomStore>()(
         })),
       setWindowState: (windowState) => set({ windowState }),
       setInputFocused: (inputFocused) => set({ inputFocused }),
+      setScenePhase: (scenePhase) => set({ scenePhase }),
       setActiveRunId: (activeRunId) => set({ activeRunId }),
       setActiveCardGenerationRunId: (activeCardGenerationRunId) => set({ activeCardGenerationRunId }),
       setActiveNoteRef: (activeNoteRef) => set({ activeNoteRef }),

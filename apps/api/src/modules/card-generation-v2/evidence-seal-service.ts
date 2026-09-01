@@ -1,173 +1,49 @@
 /**
- * 方案 20 R4：Evidence Seal（§14.1/§14.3/§10.1 step 1-2）。
+ * 方案 20 R4：Evidence Seal IO 壳（§14.1/§14.3/§10.1 step 1-2）。
  *
- * 在 source_sealing 事务内，把冻结的 note blocks 按 `sourceScope`
- * （whole_note / section / selection 的 blockRanges+offset）过滤后固化为
- * 不可变 `evidence_snapshots_v2` 行，并为每个 snapshot 写入
- * `evidence_eligibility_states_v2`（status=usable、eligibilityEpoch=1、
- * stateHash），同时返回证据 manifest。
- *
- * 硬约束（§14.3/§14.4）：
- * - evidenceSnapshotHash 用 `computeEvidenceSnapshotHashV2`
- *   （`@ailearn/shared/card-generation-v2-hashing`，域 "evidence-snapshot-v2"）；
- * - 正文封装在不可变 protectedQuoteRef（本实现为 `evidence://<snapshotId>`）——
- *   正文不内嵌尚不存在的 semantic support report，避免 hash 环；
- * - 全表强制 workspace scope，禁止只凭 UUID 跨租户读取；
- * - seal 在 Author 之前完成，保证 source-only 单向闭包。
+ * 2026-08-24（AI 设计审查 §4.4 第二批）：纯逻辑（类型/sourceScope 过滤/hash/
+ * seal 计划构建）已下沉至 packages/shared 的 card-generation-v2-pipeline
+ * （evidence-seal-core.ts），worker 经子路径平级消费，消除反向依赖。本文件
+ * 只保留 DB 写入：把 shared 计算出的 snapshot/eligibility 行在
+ * source_sealing 事务内落库（幂等：onConflictDoNothing）。
  */
 
-import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   evidenceSnapshotsV2,
   evidenceEligibilityStatesV2,
 } from "../../db/schema/card-generation-v2.ts";
 import {
-  computeEvidenceSnapshotHashV2,
-} from "@ailearn/shared/card-generation-v2-hashing";
-import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
-import type { SourceScopeV2 } from "@ailearn/shared/card-generation-v2-contracts";
-import { CardGenerationV2ServiceError } from "./helpers.ts";
+  filterBlocksBySourceScope,
+  computeSealedEvidenceSnapshotHashV2,
+  planEvidenceSnapshotsV2,
+  type EvidenceSealBlock,
+  type SealedEvidenceEntryV2,
+  type EvidenceSealManifestV2,
+  type SealEvidenceInput,
+} from "@ailearn/shared/card-generation-v2-pipeline";
 
-// ─── Manifest 类型 ───────────────────────────────────────────────────────
+export type {
+  EvidenceSealBlock,
+  SealedEvidenceEntryV2,
+  EvidenceSealManifestV2,
+  SealEvidenceInput,
+};
+export {
+  filterBlocksBySourceScope,
+  computeSealedEvidenceSnapshotHashV2,
+};
 
-export interface EvidenceSealBlock {
-  blockId: string;
-  type: string;
-  content: string;
-  ordinal: number;
-}
-
-export interface SealedEvidenceEntryV2 {
-  evidenceSnapshotId: string;
-  evidenceSnapshotHash: string;
-  sourceSnapshotId: string;
-  blockId: string;
-  startOffset: number;
-  endOffset: number;
-  quoteHash: string;
-  blockContentHash: string;
-  /** R29：从 note_blocks 按 [startOffset, endOffset) 切出的真实证据文本（Grounding prompt 用）。 */
-  content?: string;
-}
-
-export interface EvidenceSealManifestV2 {
-  workspaceId: string;
-  sourceSnapshotId: string;
-  noteId: string;
-  noteVersionId: string;
-  sourceScope: SourceScopeV2;
-  evidence: SealedEvidenceEntryV2[];
-}
-
-export interface SealEvidenceInput {
-  workspaceId: string;
-  runId: string;
-  noteId: string;
-  noteVersionId: string;
-  sourceSnapshotId: string;
-  sourceScope: SourceScopeV2;
-  blocks: EvidenceSealBlock[];
-}
-
+/** seal 结果：manifest + sourceContentHash（与 generation-run 闭包一致）。 */
 export interface SealEvidenceResultV2 {
   manifest: EvidenceSealManifestV2;
-  /** sourceContentHash（对全部 blocks 内容），与 generation-run 闭包一致。 */
   sourceContentHash: string;
-}
-
-/**
- * 计算单个文本证据快照的 hash（§14.3 evidenceSnapshotHash）。
- */
-export function computeSealedEvidenceSnapshotHashV2(input: {
-  workspaceId: string;
-  sourceSnapshotId: string;
-  noteId: string;
-  blockId: string;
-  startOffset: number;
-  endOffset: number;
-  protectedQuoteRef: string;
-  quoteHash: string;
-  blockContentHash: string;
-  sourceContentHash: string;
-}): string {
-  return computeEvidenceSnapshotHashV2({
-    kind: "text",
-    workspaceId: input.workspaceId,
-    sourceSnapshotId: input.sourceSnapshotId,
-    noteId: input.noteId,
-    blockId: input.blockId,
-    startOffset: input.startOffset,
-    endOffset: input.endOffset,
-    protectedContentHash: input.quoteHash,
-    sourceContentHash: input.sourceContentHash,
-    blockContentHash: input.blockContentHash,
-    modality: "text",
-  });
-}
-
-/**
- * 依据 sourceScope 过滤 blocks，返回 (block, startOffset, endOffset, slice) 元组。
- * - whole_note：所有文本 block，全跨 0..content.length
- * - section：所有文本 block，全跨（section 到 block 的解析为 R5 范围；本实现
- *   对 section 先按全 note 处理并在 manifest 中保留 sectionKey 供后续细化）
- * - selection：仅 blockRanges 中命中的 block，按给定 [startOffset, endOffset) 切片
- *
- * 选区请求的 endOffset 不得超过 block 内容长度（fail closed）。
- */
-export function filterBlocksBySourceScope(
-  blocks: EvidenceSealBlock[],
-  sourceScope: SourceScopeV2,
-): Array<{ block: EvidenceSealBlock; startOffset: number; endOffset: number; slice: string }> {
-  const ordered = [...blocks].sort((a, b) => a.ordinal - b.ordinal);
-  const result: Array<{ block: EvidenceSealBlock; startOffset: number; endOffset: number; slice: string }> = [];
-
-  switch (sourceScope.kind) {
-    case "whole_note":
-    case "section": {
-      for (const block of ordered) {
-        // 只封接近纯文本的 block 类型；image/code 走 region evidence（R5）。
-        if (!isSealableTextType(block.type)) continue;
-        result.push({
-          block,
-          startOffset: 0,
-          endOffset: block.content.length,
-          slice: block.content,
-        });
-      }
-      return result;
-    }
-    case "selection": {
-      const byId = new Map(ordered.map((b) => [b.blockId, b]));
-      for (const range of sourceScope.blockRanges) {
-        const block = byId.get(range.blockId);
-        if (!block) continue;
-        if (range.endOffset > block.content.length) {
-          throw new CardGenerationV2ServiceError(
-            "evidence_range_exceeds_block",
-            400,
-            `selection endOffset ${range.endOffset} exceeds block ${range.blockId} content length ${block.content.length}`,
-          );
-        }
-        result.push({
-          block,
-          startOffset: range.startOffset,
-          endOffset: range.endOffset,
-          slice: block.content.slice(range.startOffset, range.endOffset),
-        });
-      }
-      return result;
-    }
-  }
-}
-
-function isSealableTextType(type: string): boolean {
-  return !["image", "code"].includes(type.toLowerCase());
 }
 
 /**
  * §10.1 step 1-2：在 source_sealing 事务内 seal evidence snapshots + eligibility。
  *
+ * 纯逻辑计算在 shared 的 planEvidenceSnapshotsV2；本壳只负责两批 INSERT。
  * 幂等策略：对同一 (workspaceId, evidenceSnapshotId) 已存在则跳过（重复 seal
  * 不产生重复 eligibility）；范围内任一 block 生成一条 snapshot。
  */
@@ -175,106 +51,28 @@ export async function sealEvidenceSnapshotsV2(
   tx: ApiTransaction,
   input: SealEvidenceInput,
 ): Promise<SealEvidenceResultV2> {
-  const { workspaceId, noteId, noteVersionId, sourceSnapshotId, sourceScope, blocks } = input;
+  const plan = planEvidenceSnapshotsV2(input);
+  const { noteVersionId, sourceScope } = input;
 
-  const sourceContent = blocks.map((b) => b.content).join("\n");
-  const sourceContentHash = hashCanonicalV2("card-generation-v2/source-content", {
-    blockContents: sourceContent,
-  });
-
-  const spans = filterBlocksBySourceScope(blocks, sourceScope);
-  const evidence: SealedEvidenceEntryV2[] = [];
-  const snapshotValues: Array<typeof evidenceSnapshotsV2.$inferInsert> = [];
-  const eligibilityValues: Array<typeof evidenceEligibilityStatesV2.$inferInsert> = [];
-
-  for (const span of spans) {
-    const blockContentHash = hashCanonicalV2("block", { content: span.block.content });
-    const quote = span.slice;
-    const quoteHash = hashCanonicalV2("evidence-quote", { quote });
-    const protectedQuoteRef = `evidence://snapshot/${randomUUID()}`;
-
-    const evidenceSnapshotId = randomUUID();
-    const evidenceSnapshotHash = computeSealedEvidenceSnapshotHashV2({
-      workspaceId,
-      sourceSnapshotId,
-      noteId,
-      blockId: span.block.blockId,
-      startOffset: span.startOffset,
-      endOffset: span.endOffset,
-      protectedQuoteRef,
-      quoteHash,
-      blockContentHash,
-      sourceContentHash,
-    });
-
-    snapshotValues.push({
-      id: randomUUID(),
-      workspaceId,
-      evidenceSnapshotId,
-      evidenceSnapshotHash,
-      sourceSnapshotId,
-      noteId,
-      blockId: span.block.blockId,
-      startOffset: span.startOffset,
-      endOffset: span.endOffset,
-      protectedQuoteRef,
-      quoteHash,
-      blockContentHash,
-      sourceContentHash,
-      modality: "text",
-      supportDescription: null,
-    });
-
-    // §14.1: eligibility epoch 单调；初始 status=usable、eligibilityEpoch=1
-    const stateHash = hashCanonicalV2("evidence-eligibility-state", {
-      evidenceSnapshotId,
-      workspaceId,
-      eligibilityEpoch: 1,
-      status: "usable",
-    });
-    eligibilityValues.push({
-      id: randomUUID(),
-      workspaceId,
-      eligibilityId: randomUUID(),
-      evidenceSnapshotId,
-      status: "usable",
-      eligibilityEpoch: 1,
-      eligibilityVectorHash: stateHash,
-      restrictedReason: null,
-      restrictedAt: null,
-    });
-
-    evidence.push({
-      evidenceSnapshotId,
-      evidenceSnapshotHash,
-      sourceSnapshotId,
-      blockId: span.block.blockId,
-      startOffset: span.startOffset,
-      endOffset: span.endOffset,
-      quoteHash,
-      blockContentHash,
-    });
+  if (plan.snapshotRows.length > 0) {
+    await tx.insert(evidenceSnapshotsV2).values(plan.snapshotRows).onConflictDoNothing();
   }
-
-  if (snapshotValues.length > 0) {
-    await tx.insert(evidenceSnapshotsV2).values(snapshotValues).onConflictDoNothing();
-  }
-  if (eligibilityValues.length > 0) {
-    await tx.insert(evidenceEligibilityStatesV2).values(eligibilityValues).onConflictDoNothing();
+  if (plan.eligibilityRows.length > 0) {
+    await tx.insert(evidenceEligibilityStatesV2).values(plan.eligibilityRows).onConflictDoNothing();
   }
 
   const manifest: EvidenceSealManifestV2 = {
-    workspaceId,
-    sourceSnapshotId,
-    noteId,
+    workspaceId: input.workspaceId,
+    sourceSnapshotId: input.sourceSnapshotId,
+    noteId: input.noteId,
     noteVersionId,
     sourceScope,
-    evidence,
+    evidence: plan.manifestEvidence,
   };
 
   // runId 仅用于日志/审计记录；不需要写 run 表（manifest 可由
   // evidence_snapshots_v2 按 sourceSnapshotId 重算）。
   void input.runId;
 
-  return { manifest, sourceContentHash };
+  return { manifest, sourceContentHash: plan.sourceContentHash };
 }

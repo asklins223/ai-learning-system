@@ -43,6 +43,7 @@ import {
   unwrapGatewayResult,
 } from "../app/desktop-client";
 import { useRoomStore } from "../app/room-store";
+import { resolveSceneMotionMode } from "../scene/scene-motion";
 import { reviewTargetFromReturnContract } from "./review-focus";
 import { resultPollDelayMs } from "./result-polling";
 import { indexedPublicLabel } from "./learning-run-labels";
@@ -553,7 +554,9 @@ function InteractionEditor({
 export function LearningRunPlayer({ runId, onExit }: PlayerProps) {
   const setActiveReviewTarget = useRoomStore((state) => state.setActiveReviewTarget);
   const setCompanionMoment = useRoomStore((state) => state.setCompanionMoment);
-  const motionMode = useRoomStore((state) => state.motionMode);
+  const motionPreference = useRoomStore((state) => state.motionMode);
+  const reducedMotion = useRoomStore((state) => state.reducedMotion);
+  const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
   const [snapshot, setSnapshot] = useState<LearningRunPublicSnapshotV2 | null>(null);
   const [editor, setEditor] = useState<ArtifactPayload | null>(null);
   const [draftRevision, setDraftRevision] = useState(0);
@@ -1360,27 +1363,28 @@ export function LearningRunPlayer({ runId, onExit }: PlayerProps) {
 
   return (
     <div className="run-player task-artifact" data-phase={snapshot.phase}>
-      <div className="run-player__meta">
-        <span className="run-phase"><span className="run-phase__dot" aria-hidden="true" />{phaseLabels[snapshot.phase]}</span>
-        <span><Clock3 size={14} aria-hidden="true" />服务端已计入 {snapshot.activeSecondsUsed} 秒</span>
-      </div>
-      <div className="run-player__target">
-        <span>当前学习目标</span>
-        <p>{snapshot.target.publicSummary}</p>
-      </div>
-
-      {recovery ? (
-        <div className="run-resync" role="alert">
-          <h2 ref={recoveryHeadingRef} tabIndex={-1}>{recoveryHeading}</h2>
-          <span>{recoveryDescription}</span>
-          <button type="button" className="surface-secondary" disabled={resyncing} onClick={() => void resyncLearningRun(recovery)}>
-            {resyncing ? <LoaderCircle className="run-spinner" size={15} aria-hidden="true" /> : <RotateCcw size={15} aria-hidden="true" />}
-            {resyncing ? "正在同步…" : "同步当前状态"}
-          </button>
+      <div className="run-player__content">
+        <div className="run-player__meta">
+          <span className="run-phase"><span className="run-phase__dot" aria-hidden="true" />{phaseLabels[snapshot.phase]}</span>
+          <span><Clock3 size={14} aria-hidden="true" />服务端已计入 {snapshot.activeSecondsUsed} 秒</span>
         </div>
-      ) : null}
+        <div className="run-player__target">
+          <span>当前学习目标</span>
+          <p>{snapshot.target.publicSummary}</p>
+        </div>
 
-      {result ? (
+        {recovery ? (
+          <div className="run-resync" role="alert">
+            <h2 ref={recoveryHeadingRef} tabIndex={-1}>{recoveryHeading}</h2>
+            <span>{recoveryDescription}</span>
+            <button type="button" className="surface-secondary" disabled={resyncing} onClick={() => void resyncLearningRun(recovery)}>
+              {resyncing ? <LoaderCircle className="run-spinner" size={15} aria-hidden="true" /> : <RotateCcw size={15} aria-hidden="true" />}
+              {resyncing ? "正在同步…" : "同步当前状态"}
+            </button>
+          </div>
+        ) : null}
+
+        {result ? (
         <div className={`run-result${demonstratedResult ? "" : " run-result--neutral"}`} role="status" aria-live="polite" tabIndex={-1}>
           {resultAcknowledgementMotion ? (
             <div ref={resultMotionRef} className="run-result__ink-bloom" aria-hidden="true">
@@ -1449,13 +1453,6 @@ export function LearningRunPlayer({ runId, onExit }: PlayerProps) {
           <InteractionEditor task={activeTask} value={editor ?? emptyEditor(activeTask)} onChange={updateEditor} />
           {hint ? <div className="run-hint" role="status"><Lightbulb size={16} aria-hidden="true" /><span>{hint}</span></div> : null}
           {failure ? <p className="run-inline-error" role="alert">{failure.message}</p> : null}
-          <div className="run-submit-row">
-            <button type="button" className="surface-primary" disabled={pendingAction !== null || submitting || resyncing || recovery !== null || snapshot.phase !== "active" || !editor || (editor.kind !== "declared_unable" && !payloadIsReady(editor))} onClick={() => editor && submit(editor)}>
-              {submitting ? <LoaderCircle className="run-spinner" size={16} aria-hidden="true" /> : <ArrowRight size={16} aria-hidden="true" />}提交这次证据
-            </button>
-            {canSubmitUnable ? <button type="button" className="text-action" disabled={pendingAction !== null || submitting || resyncing || recovery !== null} onClick={() => submit({ kind: "declared_unable", reasonCode: "cannot_recall" })}>我暂时不会</button> : null}
-          </div>
-          {draftStatus ? <p className="run-draft-status" role="status">{draftStatus}</p> : null}
         </>
       ) : (
         <div className="run-processing" role="status">
@@ -1465,18 +1462,30 @@ export function LearningRunPlayer({ runId, onExit }: PlayerProps) {
         </div>
       )}
 
-      <div className="run-action-bar" aria-label="LearningRun 操作">
-        {alternativeActions.map((action) => <button type="button" key={`${action.kind}-${action.alternativeId}`} className="run-action-link" disabled={pendingAction !== null || actionBusy || resyncing || recovery !== null} onClick={() => void dispatchAction(action)}><RotateCcw size={14} aria-hidden="true" />换方式</button>)}
-        {snapshot.allowedActions.filter((action) => ["pause", "resume", "request_hint", "activate_followup", "finish_current_evidence", "finish_without_commit", "retry_prepare", "retry_assessment", "retry_commit"].includes(action.kind)).map((action) => <button type="button" key={`${action.kind}-${"level" in action ? action.level : ""}`} className="run-action-link" disabled={pendingAction !== null || actionBusy || resyncing || recovery !== null} onClick={() => void dispatchAction(action)}>{action.kind === "pause" ? <Pause size={14} aria-hidden="true" /> : action.kind === "resume" ? <Play size={14} aria-hidden="true" /> : action.kind === "request_hint" ? <Lightbulb size={14} aria-hidden="true" /> : null}{actionLabel(action)}</button>)}
-        {snapshot.allowedActions.filter((action) => ["skip_task", "skip_run", "end"].includes(action.kind)).map((action) => <button type="button" key={`${action.kind}-${"taskId" in action ? action.taskId : ""}`} className="run-action-link run-action-link--quiet" disabled={pendingAction !== null || actionBusy || resyncing || recovery !== null} onClick={() => void dispatchAction(action)}>{action.kind === "end" ? <ArrowLeft size={14} aria-hidden="true" /> : <SkipForward size={14} aria-hidden="true" />}{actionLabel(action)}</button>)}
-      </div>
+        <div className="run-action-bar" aria-label="LearningRun 操作">
+          {alternativeActions.map((action) => <button type="button" key={`${action.kind}-${action.alternativeId}`} className="run-action-link" disabled={pendingAction !== null || actionBusy || resyncing || recovery !== null} onClick={() => void dispatchAction(action)}><RotateCcw size={14} aria-hidden="true" />换方式</button>)}
+          {snapshot.allowedActions.filter((action) => ["pause", "resume", "request_hint", "activate_followup", "finish_current_evidence", "finish_without_commit", "retry_prepare", "retry_assessment", "retry_commit"].includes(action.kind)).map((action) => <button type="button" key={`${action.kind}-${"level" in action ? action.level : ""}`} className="run-action-link" disabled={pendingAction !== null || actionBusy || resyncing || recovery !== null} onClick={() => void dispatchAction(action)}>{action.kind === "pause" ? <Pause size={14} aria-hidden="true" /> : action.kind === "resume" ? <Play size={14} aria-hidden="true" /> : action.kind === "request_hint" ? <Lightbulb size={14} aria-hidden="true" /> : null}{actionLabel(action)}</button>)}
+          {snapshot.allowedActions.filter((action) => ["skip_task", "skip_run", "end"].includes(action.kind)).map((action) => <button type="button" key={`${action.kind}-${"taskId" in action ? action.taskId : ""}`} className="run-action-link run-action-link--quiet" disabled={pendingAction !== null || actionBusy || resyncing || recovery !== null} onClick={() => void dispatchAction(action)}>{action.kind === "end" ? <ArrowLeft size={14} aria-hidden="true" /> : <SkipForward size={14} aria-hidden="true" />}{actionLabel(action)}</button>)}
+        </div>
 
-      {pendingAction ? (
-        <div className="run-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="learning-run-confirmation-title" onKeyDown={handleConfirmationKeyDown}>
-          <h2 id="learning-run-confirmation-title" ref={confirmationHeadingRef} tabIndex={-1}>确认这项学习旅程操作</h2>
-          <p>确定要{actionLabel(pendingAction)}吗？当前已输入内容会按服务端合同处理。</p>
-          <button type="button" className="surface-primary" disabled={resyncing} onClick={() => void confirmPendingAction()}>确认</button>
-          <button type="button" className="surface-secondary" onClick={closeConfirmation}>取消</button>
+        {pendingAction ? (
+          <div className="run-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="learning-run-confirmation-title" onKeyDown={handleConfirmationKeyDown}>
+            <h2 id="learning-run-confirmation-title" ref={confirmationHeadingRef} tabIndex={-1}>确认这项学习旅程操作</h2>
+            <p>确定要{actionLabel(pendingAction)}吗？当前已输入内容会按服务端合同处理。</p>
+            <button type="button" className="surface-primary" disabled={resyncing} onClick={() => void confirmPendingAction()}>确认</button>
+            <button type="button" className="surface-secondary" onClick={closeConfirmation}>取消</button>
+          </div>
+        ) : null}
+      </div>
+      {activeTask && snapshot.phase === "active" ? (
+        <div className="run-player__action-edge">
+          <div className="run-submit-row">
+            <button type="button" className="surface-primary" disabled={pendingAction !== null || submitting || resyncing || recovery !== null || !editor || (editor.kind !== "declared_unable" && !payloadIsReady(editor))} onClick={() => editor && submit(editor)}>
+              {submitting ? <LoaderCircle className="run-spinner" size={16} aria-hidden="true" /> : <ArrowRight size={16} aria-hidden="true" />}提交这次证据
+            </button>
+            {canSubmitUnable ? <button type="button" className="text-action" disabled={pendingAction !== null || submitting || resyncing || recovery !== null} onClick={() => submit({ kind: "declared_unable", reasonCode: "cannot_recall" })}>我暂时不会</button> : null}
+          </div>
+          {draftStatus ? <p className="run-draft-status" role="status">{draftStatus}</p> : null}
         </div>
       ) : null}
     </div>

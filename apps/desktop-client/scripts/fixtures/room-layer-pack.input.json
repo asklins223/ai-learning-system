@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "packId": "learning-room-v1-independent-layer-candidate",
+  "revision": 1,
+  "coordinateSpace": "room-1672x941",
+  "world": {
+    "width": 1672,
+    "height": 941
+  },
+  "sourceRoot": ".",
+  "layers": [
+    {
+      "assetId": "CANDIDATE-ROOM-SEARCH-FOREGROUND-DAY-01",
+      "sourceAssetId": "STATIC-SEARCH-FOREGROUND-DAY-01",
+      "sourcePath": "apps/desktop-client/src/renderer/public/assets/learning-room/v1/foreground/search-foreground-day-v1.png",
+      "outputPath": "layers/day/d6-search-foreground-day-v1.png",
+      "theme": "day",
+      "depth": "D6",
+      "order": 0,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 1672,
+        "height": 941
+      },
+      "registration": {
+        "position": [
+          0,
+          0
+        ],
+        "size": {
+          "width": 1672,
+          "height": 941
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "reviewStatus": "CHANGES_REQUIRED",
+      "releaseApproval": false
+    },
+    {
+      "assetId": "CANDIDATE-ROOM-SEARCH-FOREGROUND-NIGHT-01",
+      "sourceAssetId": "STATIC-SEARCH-FOREGROUND-NIGHT-01",
+      "sourcePath": "apps/desktop-client/src/renderer/public/assets/learning-room/v1/foreground/search-foreground-night-v1.png",
+      "outputPath": "layers/night/d6-search-foreground-night-v1.png",
+      "theme": "night",
+      "depth": "D6",
+      "order": 0,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 1672,
+        "height": 941
+      },
+      "registration": {
+        "position": [
+          0,
+          0
+        ],
+        "size": {
+          "width": 1672,
+          "height": 941
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "reviewStatus": "CHANGES_REQUIRED",
+      "releaseApproval": false
+    }
+  ]
+}

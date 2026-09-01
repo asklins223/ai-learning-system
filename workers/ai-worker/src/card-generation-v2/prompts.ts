@@ -17,9 +17,15 @@
  * 完整 JSON 模板，不另加示例）。示例为示意数据，禁止模型复述到产出中。
  * bump 时必须同步 apps/api generation-run-service 的 stageRuntimes promptVersion
  * 种子（semanticSpecHash 审计闭包）。
+ *
+ * 2026-08-24（AI 设计审查 §4.5 认识论分工）：v2 → v3 —— 确定性 gate 的
+ * objective atomicity 与改写式泄题降级为 soft 风险信号后，Pedagogy Critic
+ * 成为 multiple_learning_objectives / front_leaks_answer 的唯一 hard 裁决者；
+ * pedagogy system prompt 增补中文判定基准（正例/反例边界），避免 Critic 把
+ * 并列名词短语/术语/列举指令误判为拼接。
  */
 
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v2";
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v3";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -348,6 +354,14 @@ goal_mismatch
 - 没有实际回忆要求、正面泄漏答案、只是原文表面换词、一卡多独立目标、跨卡语义
   重复、明显可合并、无法判分、超过 CardPlan、复习成本高于边际收益、与 learning
   goal 不匹配 —— 都是 hard issue；
+- 中文判定基准（2026-08-24 §4.5 认识论分工，确定性 gate 只报 soft 风险信号，
+  你是这两类的唯一 hard 裁决者）：
+  * multiple_learning_objectives：statement 用连词（以及/同时/分别/和）拼接了
+    两个**各自可独立成卡的语义单元**才判——并列名词短语（"力和运动的关系"）、
+    同一主题的两个侧面（"导数以及微分的几何意义"）、术语内含连词（"同时性"）、
+    列举指令（"分别写出 F、m、a 的单位"）都是单一目标，不得判；
+  * front_leaks_answer：正面以**改写/换词/近义复述**方式给出答案核心结论才判
+    （逐字照抄已由确定性 gate 拦截）；比喻式提问、指向性提问不含结论的不判。
 - 不要求 chain-of-thought，只输出结构化 verdict；
 - 必须读取 candidateEvidenceBindingPlanHashes（每个候选的证据绑定计划 hash）；
 - verdict：pass / repair / fail / no_cards。只有确认整个集合都不值得成卡时才给
@@ -382,6 +396,8 @@ export const buildPedagogyUserPrompt = (input: {
   candidates: Array<{ candidateId: string; candidateRevisionHash: string; objective: unknown; presentation: unknown }>;
   existingObjectives: Array<{ objectiveStatement: string; publicSummary: string }>;
   generationRequest: unknown;
+  /** 确定性 precheck 的 soft 风险信号（candidateId → issues）；仅作参考，非结论。 */
+  softPrecheckIssues?: Record<string, Array<{ code: string; detail: string }>>;
 }): string => `
 run：${input.runId}，plan：${input.planRevisionId} v${input.planVersion}（${input.planHash}）
 inputHash：${input.inputHash}
@@ -393,6 +409,9 @@ ${input.candidates.map((c, i) => (
   `bindingPlanHash: ${input.candidateEvidenceBindingPlanHashes[i]}\n` +
   `objective: ${JSON.stringify(c.objective)}\n` +
   `presentation: ${JSON.stringify(c.presentation)}\n` +
+  (input.softPrecheckIssues?.[c.candidateId]?.length
+    ? `deterministicSoftSignals（机械启发式的表面特征提示，仅供参考，可能误报；语义裁决由你做出）: ${JSON.stringify(input.softPrecheckIssues[c.candidateId])}\n`
+    : "") +
   `</data>`
 )).join("\n")}
 
