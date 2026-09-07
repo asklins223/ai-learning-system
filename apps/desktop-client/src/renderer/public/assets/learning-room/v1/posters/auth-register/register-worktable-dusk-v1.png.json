@@ -1,0 +1,22 @@
+{
+  "assetId": "STATIC-AUTH-REGISTER-DUSK-01",
+  "sourceType": "generated-derivative",
+  "generator": "OpenAI built-in image generation (gpt-image-2)",
+  "generatedAt": "2026-09-02",
+  "operator": "Codex (OpenAI)",
+  "intendedUse": "Desktop registration Gate day-to-night transition backplate",
+  "parentAssetId": "STATIC-AUTH-REGISTER-DAY-01",
+  "sourcePath": "posters/auth-register/register-worktable-dusk-v1.png",
+  "runtimePath": "posters/auth-register/register-worktable-dusk-v1.png",
+  "dimensions": { "width": 1672, "height": 941 },
+  "mimeType": "image/png",
+  "colorSpace": "sRGB",
+  "alphaMode": "opaque-rgb",
+  "bytes": 1990328,
+  "sha256": "202e88a8b92406f6851a5894b56a15d035a9ea260cdf8cbec69101258e0e9e86",
+  "c2pa": "embedded OpenAI Media Service assertion",
+  "reviewStatus": "CHANGES_REQUIRED",
+  "reviewOnly": true,
+  "releaseApproval": false,
+  "prompt": "Use case: lighting-weather. Asset type: full-bleed desktop registration transition backdrop, no text. Input image: the supplied image is the edit target. Primary request: create the exact same registration worktable composition at a luminous late-golden-hour / early blue-hour midpoint between the supplied high-key day scene and a calm night scene. Composition and invariants: preserve the camera crop, perspective, left window frame, every leaf shadow, plant, brass lamp, books, blank folio, paper tray, desk, shelves, vase, and the almost object-free right 44% wall exactly. Do not add, remove, move, resize, or redesign anything. Lighting: the intense white daytime sun has softened into a sophisticated warm-peach blue-hour ambience. Keep the right wall readable and warm enough for dark semantic registration content; keep the desk legible. The brass lamp remains off with only a subtle warm metal reflection. This must feel like an authentic change of time of day, not a grey page-wide dimmer or uniform overlay. Style: preserve the same luminous gouache illustration, soft paper texture, pale oak, calm sage books, and refined desktop application backdrop quality. Constraints: no people, no text, no UI, no card, no logo, no watermark, no heavy vignette, no murky brown/olive cast, no fog, no obvious overlay."
+}

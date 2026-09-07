@@ -63,7 +63,7 @@ reasonix.toml
 /Whispera-main/
 
 # —— 本地设计资产与工具状态（体积大，不入库）——
-/.impeccable/
+**/.impeccable/
 # 设计文档与参考资产整目录：3D 模型（3d-reference）、动效视频（motion）、
 # 静态图（static）及设计 spec 文档——体积大且属本地重构工作稿
 /docs/design/

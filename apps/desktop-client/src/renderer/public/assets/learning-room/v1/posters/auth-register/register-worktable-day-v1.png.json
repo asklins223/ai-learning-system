@@ -1,0 +1,13 @@
+{
+  "assetId": "STATIC-AUTH-REGISTER-DAY-01",
+  "sourceType": "generated",
+  "generator": "OpenAI built-in image generation",
+  "generatedAt": "2026-09-01",
+  "intendedUse": "Desktop registration Gate day backplate",
+  "dimensions": { "width": 1672, "height": 941 },
+  "sha256": "d1bb7c5ca7e93f653b45fdb47a8626eec1403e4ac75ce27b223a15cac7eb580f",
+  "reviewStatus": "CHANGES_REQUIRED",
+  "reviewOnly": true,
+  "releaseApproval": false,
+  "prompt": "Use the bright login alcove only as a visual-world reference and create a completely new registration scene: on the left, a pale-oak library cabinet and writing counter prepared with blank cards, an open blank folio, sage books, a small sprout and brass lamp; reserve the right 44% as an almost object-free warm ivory or pale-sage plaster wall for dark semantic registration DOM; luminous high-key mid-morning gouache illustration; no people, text, UI, card, panel, door, logo or watermark."
+}

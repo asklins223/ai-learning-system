@@ -59,7 +59,7 @@ export function inspectDesktopContract(contract: DesktopContractSnapshotV1): Con
     return {
       kind: "blocked",
       reason: "contract_version",
-      detail: "桌面桥接合同版本与当前客户端不一致。",
+      detail: "当前客户端版本与本机服务不兼容，请更新客户端或联系管理员。",
     };
   }
 
@@ -68,7 +68,7 @@ export function inspectDesktopContract(contract: DesktopContractSnapshotV1): Con
     return {
       kind: "blocked",
       reason: "namespace",
-      detail: `桌面合同缺少 ${missingNamespace} 命名空间，已停止进入工作区。`,
+      detail: "当前客户端缺少必要功能，请重新安装或联系管理员。",
     };
   }
 
@@ -76,7 +76,7 @@ export function inspectDesktopContract(contract: DesktopContractSnapshotV1): Con
     return {
       kind: "blocked",
       reason: "route",
-      detail: "当前桌面合同没有开放理解书房入口。",
+      detail: "当前版本尚未开放学习空间入口，请更新客户端或联系管理员。",
     };
   }
 
@@ -94,42 +94,42 @@ export function decideRuntimeGate(connection: ApiConnectionStateV1): RuntimeGate
         kind: "blocked",
         connection,
         title: "学习服务暂时不可用",
-        detail: "桌面端无法确认真实身份与工作区；恢复连接前不会进入理解书房。",
+        detail: "暂时连接不上学习服务，请检查网络后重试。",
         retry: "safe_retry",
       };
     case "not_configured":
       return {
         kind: "blocked",
         connection,
-        title: "桌面服务尚未配置",
-        detail: "请完成桌面服务地址与本机配对配置，然后重新启动客户端。",
+        title: "应用尚未完成连接设置",
+        detail: "请联系管理员完成配置后，重新打开应用。",
         retry: "user_action",
       };
     case "configuration_error": {
       const reason = connection.reason === "pairing_secret_missing"
-        ? "缺少本机配对密钥。"
+        ? "应用缺少连接凭据。"
         : connection.reason === "pairing_secret_invalid"
-          ? "本机配对密钥无效。"
-          : "桌面服务部署配置无效。";
+          ? "应用的连接凭据无效。"
+          : "学习服务配置有误。";
       return {
         kind: "blocked",
         connection,
-        title: "桌面服务配置不可用",
-        detail: `${reason} 修复配置并重新启动后才能读取真实学习数据。`,
+        title: "无法连接学习服务",
+        detail: `${reason} 请联系管理员修复后重新打开应用。`,
         retry: "user_action",
       };
     }
     case "api_untrusted": {
       const reason = connection.reason === "wrong_service"
-        ? "目标地址不是受信任的 AI Learn 服务。"
+        ? "当前地址不是可用的学习服务。"
         : connection.reason === "wrong_key" || connection.reason === "bad_hmac"
-          ? "本机服务没有通过配对签名校验。"
-          : "服务合同与当前桌面客户端不兼容。";
+          ? "应用无法验证学习服务的身份。"
+          : "学习服务版本与当前客户端不兼容。";
       return {
         kind: "blocked",
         connection,
-        title: "无法信任当前学习服务",
-        detail: `${reason} 为保护工作区数据，客户端已停止连接。`,
+        title: "无法建立安全连接",
+        detail: `${reason} 为保护你的数据，连接已停止。请联系管理员处理。`,
         retry: "user_action",
       };
     }
@@ -150,28 +150,28 @@ export function decideSessionGate(session: SessionContextV1): SessionGateDecisio
       return {
         kind: "blocked",
         reason: "api_unavailable",
-        detail: "身份服务暂时不可用，旧的登录信息不能作为进入工作区的依据。",
+        detail: "暂时无法确认登录状态，请检查网络后重试。",
       };
     case "api_untrusted":
       return {
         kind: "blocked",
         reason: "api_untrusted",
-        detail: "身份响应来自未受信任的服务，客户端已停止进入工作区。",
+        detail: "无法安全确认登录状态。为保护你的数据，应用已停止连接。",
       };
     case "authenticated": {
       const authenticated = session as AuthenticatedDesktopSession;
       if (!authenticated.workspace) return { kind: "workspace_required", session: authenticated };
       if (!authenticated.membership) {
-        return { kind: "resync", detail: "当前工作区缺少成员身份，必须重新同步会话。" };
+        return { kind: "resync", detail: "你的学习空间信息不完整，请重新同步。" };
       }
       if (authenticated.workspace.workspaceEpoch !== authenticated.workspaceEpoch) {
-        return { kind: "resync", detail: "工作区版本已经变化，必须重新同步会话。" };
+        return { kind: "resync", detail: "学习空间已更新，请同步最新状态。" };
       }
       if (authenticated.membership.role !== authenticated.workspace.role) {
-        return { kind: "resync", detail: "工作区角色与成员身份不一致，必须重新同步会话。" };
+        return { kind: "resync", detail: "账号权限已更新，请同步最新状态。" };
       }
       if (authenticated.capabilities && authenticated.capabilities.workspaceEpoch !== authenticated.workspaceEpoch) {
-        return { kind: "resync", detail: "能力投影属于旧工作区，必须重新同步会话。" };
+        return { kind: "resync", detail: "学习空间权限已更新，请同步最新状态。" };
       }
       return { kind: "ready", session: authenticated as ReadyDesktopSession };
     }
@@ -186,11 +186,11 @@ export function decideBootstrapGatewayFailure(error: unknown): BootstrapGatewayF
   return { kind: "blocked" };
 }
 
-export function gateErrorPolicy(error: unknown, title = "无法确认桌面状态"): GateErrorPolicy {
+export function gateErrorPolicy(error: unknown, title = "暂时无法继续"): GateErrorPolicy {
   if (!(error instanceof RendererGatewayError)) {
     return {
       title,
-      detail: "桌面端没有收到可验证的响应。为保护工作区数据，当前保持关闭状态。",
+      detail: "暂时没有收到服务响应，请稍后重试。连接恢复前，我们不会打开你的学习数据。",
       retry: "never",
     };
   }
@@ -198,7 +198,7 @@ export function gateErrorPolicy(error: unknown, title = "无法确认桌面状�
   const detail = error.code === "invalid_credentials"
     ? "邮箱或密码不正确，请检查后重新提交。"
     : error.code === "validation" || error.code === "invalid_request"
-      ? "提交内容没有通过校验，请检查输入后重新提交。"
+      ? "请检查填写内容后再试。"
       : gatewayErrorMessage(error);
 
   return {

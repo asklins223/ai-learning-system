@@ -1,0 +1,13 @@
+{
+  "assetId": "STATIC-AUTH-REGISTER-NIGHT-01",
+  "sourceType": "generated-derivative",
+  "generator": "OpenAI built-in image generation",
+  "generatedAt": "2026-09-01",
+  "intendedUse": "Desktop registration Gate night backplate",
+  "dimensions": { "width": 1672, "height": 941 },
+  "sha256": "b5f74b53c4884d06d10a422f03cd77383fb5ebbc14b7be98592e173377a2f338",
+  "reviewStatus": "CHANGES_REQUIRED",
+  "reviewOnly": true,
+  "releaseApproval": false,
+  "prompt": "Convert the exact registration worktable day scene into a luminous blue-hour counterpart while preserving every object, geometry, crop and the empty right-side form zone; use cool moonlit ambience and a localized warm brass-lamp pool over the blank cards and folio; make the right wall a clean deep blue-sage field with readable midtones; no people, text, UI, card, panel, door, logo or watermark."
+}

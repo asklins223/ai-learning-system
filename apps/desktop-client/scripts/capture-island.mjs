@@ -50,7 +50,7 @@ async function enterOwnerRoom(window) {
 
   await window.locator('.desktop-access-gate input[type="email"]').fill(process.env.OWNER_EMAIL)
   await window.locator('.desktop-access-gate input[type="password"]').fill(process.env.OWNER_PASSWORD)
-  await window.getByRole('button', { name: '登录并继续' }).click()
+  await window.getByRole('button', { name: '登录', exact: true }).click()
 
   const deadline = Date.now() + 30_000
   let workspaceChosen = false

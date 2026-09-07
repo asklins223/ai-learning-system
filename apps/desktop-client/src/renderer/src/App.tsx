@@ -139,7 +139,11 @@ export function App() {
       data-scene-renderer="dom-2.5d"
       data-motion-mode={motionMode}
     >
-      <DesktopAccessGate theme={theme} motionMode={motionMode} onWorkspaceBoundaryReset={resetWorkspaceScope}>
+      <DesktopAccessGate
+        theme={theme}
+        motionMode={motionMode}
+        onWorkspaceBoundaryReset={resetWorkspaceScope}
+      >
         <RoomExperience />
       </DesktopAccessGate>
     </div>

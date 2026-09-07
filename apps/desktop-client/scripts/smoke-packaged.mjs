@@ -340,7 +340,7 @@ async function authenticateThroughAccessGate(window, { email, password, expected
   if (await window.locator('.action-rail').count() === 0) {
     await window.locator('.desktop-access-gate input[type="email"]').fill(email)
     await window.locator('.desktop-access-gate input[type="password"]').fill(password)
-    await window.getByRole('button', { name: '登录并继续' }).click()
+    await window.getByRole('button', { name: '登录', exact: true }).click()
   }
 
   const deadline = Date.now() + 30_000

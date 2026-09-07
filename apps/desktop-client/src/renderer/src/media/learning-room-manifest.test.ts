@@ -26,8 +26,18 @@ describe("learning-room manifest boundary", () => {
     expect(manifest.reviewPosters.night.id).toBe("STATIC-REVIEW-SEAT-NIGHT-01");
     expect(manifest.entryPosters.closed.day.id).toBe("STATIC-LOGIN-ENTRY-CLOSED-DAY-01");
     expect(manifest.entryPosters.open.night.id).toBe("STATIC-LOGIN-ENTRY-OPEN-NIGHT-01");
+    expect(manifest.authPosters.day.id).toBe("STATIC-AUTH-ALCOVE-DAY-01");
+    expect(manifest.authPosters.dusk.id).toBe("STATIC-AUTH-ALCOVE-DUSK-01");
+    expect(manifest.registerPosters.night.id).toBe("STATIC-AUTH-REGISTER-NIGHT-01");
+    expect(manifest.registerPosters.dusk.id).toBe("STATIC-AUTH-REGISTER-DUSK-01");
     expect(manifest.normalized.assets["entryPosters.closed.day"]).toBe("posters/login-entry/entry-door-closed-day-v1.png");
     expect(manifest.normalized.assets["entryPosters.open.night"]).toBe("posters/login-entry/entry-door-open-night-v1.png");
+    expect(manifest.normalized.assets["authPosters.day"]).toBe("posters/auth-alcove/auth-alcove-day-v1.png");
+    expect(manifest.normalized.assets["authPosters.dusk"]).toBe("posters/auth-alcove/auth-alcove-dusk-v1.png");
+    expect(manifest.normalized.assets["authPosters.night"]).toBe("posters/auth-alcove/auth-alcove-night-v1.png");
+    expect(manifest.normalized.assets["registerPosters.day"]).toBe("posters/auth-register/register-worktable-day-v1.png");
+    expect(manifest.normalized.assets["registerPosters.dusk"]).toBe("posters/auth-register/register-worktable-dusk-v1.png");
+    expect(manifest.normalized.assets["registerPosters.night"]).toBe("posters/auth-register/register-worktable-night-v1.png");
     expect(manifest.normalized.assets["objects.loginDoorSlabDay"]).toBe("objects/login-entry/door-slab-day-v2.png");
     expect(manifest.normalized.assets["objects.loginDoorSlabNight"]).toBe("objects/login-entry/door-slab-night-v2.png");
     expect(manifest.searchPosters.day.id).toBe("STATIC-SEARCH-REFERENCE-DAY-01");

@@ -1,0 +1,13 @@
+{
+  "assetId": "STATIC-AUTH-ALCOVE-DAY-01",
+  "sourceType": "generated-derivative",
+  "generator": "OpenAI built-in image generation",
+  "generatedAt": "2026-09-01",
+  "intendedUse": "Desktop Auth Gate day backplate",
+  "dimensions": { "width": 1671, "height": 941 },
+  "sha256": "ea608c87739ec2e61c651c53c08e28e1675265b6c82c32b303874e4889a00cf8",
+  "reviewStatus": "CHANGES_REQUIRED",
+  "reviewOnly": true,
+  "releaseApproval": false,
+  "prompt": "Edit the exact reading-alcove composition into a distinctly brighter, fresher day scene while preserving the camera, geometry, desk, lamp, books, notebook, curtain and empty left-side layout zone; use luminous late-morning light, pale warm ivory plaster, airy cream and soft sage, cleaner pale oak, a brighter sky and fresh foliage; remove muddy olive-brown, heavy darkness, black vignette, sepia gloom and underexposure; keep the left 42% calm, light and low-detail for dark semantic DOM; no people, text, UI, card, panel, logo or watermark."
+}

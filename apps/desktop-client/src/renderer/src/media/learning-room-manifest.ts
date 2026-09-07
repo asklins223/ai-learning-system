@@ -131,6 +131,8 @@ const sourceManifestSchema = z.strictObject({
     closed: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
     open: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
   }),
+  authPosters: z.strictObject({ day: sourceMediaSchema, dusk: sourceMediaSchema, night: sourceMediaSchema }),
+  registerPosters: z.strictObject({ day: sourceMediaSchema, dusk: sourceMediaSchema, night: sourceMediaSchema }),
   searchPosters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
   searchForeground: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
   reviewPosters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
@@ -219,6 +221,12 @@ export function normalizeLearningRoomManifest(
   addAsset(assets, "entryPosters.closed.night", source.entryPosters.closed.night.path);
   addAsset(assets, "entryPosters.open.day", source.entryPosters.open.day.path);
   addAsset(assets, "entryPosters.open.night", source.entryPosters.open.night.path);
+  addAsset(assets, "authPosters.day", source.authPosters.day.path);
+  addAsset(assets, "authPosters.dusk", source.authPosters.dusk.path);
+  addAsset(assets, "authPosters.night", source.authPosters.night.path);
+  addAsset(assets, "registerPosters.day", source.registerPosters.day.path);
+  addAsset(assets, "registerPosters.dusk", source.registerPosters.dusk.path);
+  addAsset(assets, "registerPosters.night", source.registerPosters.night.path);
   addAsset(assets, "searchPosters.day", source.searchPosters.day.path);
   addAsset(assets, "searchPosters.night", source.searchPosters.night.path);
   addAsset(assets, "searchForeground.day", source.searchForeground.day.path);

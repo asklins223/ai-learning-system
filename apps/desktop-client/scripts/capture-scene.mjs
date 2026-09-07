@@ -7,6 +7,7 @@ import './load-capture-env.mjs'
 
 const appRoot = resolve(import.meta.dirname, '..')
 const reviewRoot = resolve(appRoot, '../../.impeccable/review')
+const lampFrameCaptureStorageKey = 'ailearn:auth-lamp-frame-capture'
 await mkdir(reviewRoot, { recursive: true })
 
 const errors = []
@@ -134,6 +135,604 @@ async function readGateBoundary(window) {
   })
 }
 
+async function selectAuthScene(window, scene) {
+  const control = window.locator('.desktop-access-gate__lamp-control')
+  if (await control.getAttribute('aria-expanded') !== 'true') await control.click()
+  const menu = window.locator('#desktop-gate-time-menu')
+  await menu.waitFor({ state: 'visible', timeout: 8_000 })
+  await menu.locator(`[data-scene-choice="${scene}"]`).click()
+  await window.waitForFunction(
+    ({ expectedScene, expectedMode }) => {
+      const gate = document.querySelector('.desktop-access-gate')
+      const switcher = document.querySelector('.desktop-access-gate__lamp-switch')
+      const ambient = document.querySelector('.desktop-access-gate__ambient-canvas')
+      return gate?.getAttribute('data-gate-time-mode') === expectedMode
+        && (expectedScene === null || gate.getAttribute('data-gate-scene') === expectedScene)
+        && switcher?.getAttribute('data-transition-direction') === 'idle'
+        && ambient?.getAttribute('data-auth-ambient-effect') === 'idle'
+    },
+    { expectedScene: scene === 'system' ? null : scene, expectedMode: scene },
+    { timeout: 8_000 },
+  )
+}
+
+async function captureDuskChoice(window, { expectedBackdropAsset, screenshotPrefix }) {
+  const control = window.locator('.desktop-access-gate__lamp-control')
+  await control.click()
+  await window.locator('#desktop-gate-time-menu [data-scene-choice="dusk"]').click()
+  await window.waitForFunction(
+    () => document.querySelector('.desktop-access-gate__lamp-switch')?.getAttribute('data-transition-direction') === 'to-dusk',
+    undefined,
+    { timeout: 8_000 },
+  )
+  await window.screenshot({ path: resolve(reviewRoot, `${screenshotPrefix}-00-start.png`) })
+  await window.waitForTimeout(110)
+  await window.screenshot({ path: resolve(reviewRoot, `${screenshotPrefix}-01-midpoint.png`) })
+  await window.waitForFunction(
+    () => {
+      const gate = document.querySelector('.desktop-access-gate')
+      const duskScene = gate?.querySelector('.desktop-access-gate__backdrop-layer--dusk')
+      return gate?.getAttribute('data-gate-scene') === 'dusk'
+        && gate.getAttribute('data-gate-time-mode') === 'dusk'
+        && document.querySelector('.desktop-access-gate__lamp-switch')?.getAttribute('data-transition-direction') === 'idle'
+        && document.querySelector('.desktop-access-gate__ambient-canvas')?.getAttribute('data-auth-ambient-effect') === 'idle'
+        && duskScene instanceof HTMLElement
+        && Number.parseFloat(getComputedStyle(duskScene).opacity) > 0.99
+    },
+    undefined,
+    { timeout: 8_000 },
+  )
+  const result = await window.evaluate(() => {
+    const gate = document.querySelector('.desktop-access-gate')
+    const duskScene = gate?.querySelector('.desktop-access-gate__backdrop-layer--dusk')
+    return {
+      scene: gate?.getAttribute('data-gate-scene') ?? null,
+      mode: gate?.getAttribute('data-gate-time-mode') ?? null,
+      visualTheme: gate?.getAttribute('data-gate-visual-theme') ?? null,
+      duskBackdrop: duskScene instanceof HTMLElement ? getComputedStyle(duskScene).backgroundImage : null,
+      duskOpacity: duskScene instanceof HTMLElement ? Number.parseFloat(getComputedStyle(duskScene).opacity) : null,
+    }
+  })
+  if (
+    result.scene !== 'dusk'
+    || result.mode !== 'dusk'
+    || result.visualTheme !== 'dusk'
+    || !result.duskBackdrop?.includes(expectedBackdropAsset)
+    || result.duskOpacity === null
+    || result.duskOpacity < 0.99
+  ) {
+    throw new Error(`DesktopAccessGate dusk choice drifted: ${JSON.stringify(result)}`)
+  }
+  await writeFile(resolve(reviewRoot, `${screenshotPrefix}.json`), `${JSON.stringify(result, null, 2)}\n`, 'utf8')
+  await window.screenshot({ path: resolve(reviewRoot, `${screenshotPrefix}-02-settled.png`) })
+}
+
+async function capturePersistentAmbient(window) {
+  // This is deliberately under a second: a decorative layer that only
+  // changes in a long screenshot comparison still reads as frozen to a person
+  // resting on the sign-in screen.
+  const ambientFrameWindowMs = 900
+  await window.waitForFunction(
+    () => {
+      const ambient = document.querySelector('.desktop-access-gate__ambient-canvas')
+      return ambient?.getAttribute('data-auth-ambient-state') === 'settled'
+        && ambient.getAttribute('data-auth-ambient-motion') === 'persistent'
+    },
+    undefined,
+    { timeout: 8_000 },
+  )
+  const firstPath = resolve(reviewRoot, 'desktop-access-gate-ambient-persistent-00.png')
+  const secondPath = resolve(reviewRoot, 'desktop-access-gate-ambient-persistent-01.png')
+  const first = await window.screenshot({ path: firstPath })
+  await window.waitForTimeout(ambientFrameWindowMs)
+  const second = await window.screenshot({ path: secondPath })
+  const ambientCrop = await window.evaluate(() => ({
+    x: Math.floor(window.innerWidth * 0.46),
+    y: 0,
+    width: Math.ceil(window.innerWidth * 0.54),
+    height: window.innerHeight,
+  }))
+  const input = window.locator('.desktop-access-gate input').first()
+  await input.focus()
+  await window.waitForFunction(
+    () => document.querySelector('.desktop-access-gate__ambient-canvas')?.getAttribute('data-auth-ambient-state') === 'quiet',
+    undefined,
+    { timeout: 8_000 },
+  )
+  const quietFirst = await window.screenshot({
+    path: resolve(reviewRoot, 'desktop-access-gate-ambient-quiet-00.png'),
+    clip: ambientCrop,
+  })
+  await window.waitForTimeout(ambientFrameWindowMs)
+  const quietSecond = await window.screenshot({
+    path: resolve(reviewRoot, 'desktop-access-gate-ambient-quiet-01.png'),
+    clip: ambientCrop,
+  })
+  await input.evaluate((element) => (element instanceof HTMLElement ? element.blur() : undefined))
+  await window.waitForFunction(
+    () => document.querySelector('.desktop-access-gate__ambient-canvas')?.getAttribute('data-auth-ambient-motion') === 'persistent',
+    undefined,
+    { timeout: 8_000 },
+  )
+  const result = await window.evaluate(() => {
+    const ambient = document.querySelector('.desktop-access-gate__ambient-canvas')
+    return {
+      state: ambient?.getAttribute('data-auth-ambient-state') ?? null,
+      motion: ambient?.getAttribute('data-auth-ambient-motion') ?? null,
+    }
+  })
+  if (
+    result.state !== 'settled'
+    || result.motion !== 'persistent'
+    || Buffer.compare(first, second) === 0
+    || Buffer.compare(quietFirst, quietSecond) === 0
+  ) {
+    throw new Error(`DesktopAccessGate ambient did not remain visibly alive: ${JSON.stringify(result)}`)
+  }
+  await writeFile(
+    resolve(reviewRoot, 'desktop-access-gate-ambient-persistent.json'),
+    `${JSON.stringify({ ...result, sampleWindowMs: ambientFrameWindowMs, framesDiffer: true, inputFocusFramesDiffer: true }, null, 2)}\n`,
+    'utf8',
+  )
+}
+
+async function captureLampTransition(window, {
+  label,
+  direction,
+  expectedTheme,
+  expectedBackdropAsset,
+  screenshotPrefix,
+}) {
+  const control = window.locator('.desktop-access-gate__lamp-control')
+  const firstPhase = direction === 'to-night' ? 'dimming' : 'brightening'
+  const focalPhase = direction === 'to-night' ? 'lamp-on' : 'lamp-off'
+  const readTransition = () => window.evaluate(() => {
+    const app = document.querySelector('.desktop-app')
+    const gate = document.querySelector('.desktop-access-gate')
+    const switcher = gate?.querySelector('.desktop-access-gate__lamp-switch')
+    const dayScene = gate?.querySelector('.desktop-access-gate__backdrop-layer--day')
+    const duskScene = gate?.querySelector('.desktop-access-gate__backdrop-layer--dusk')
+    const nightScene = gate?.querySelector('.desktop-access-gate__backdrop-layer--night')
+    const dayScrim = gate?.querySelector('.desktop-access-gate__backdrop-scrim--day')
+    const nightScrim = gate?.querySelector('.desktop-access-gate__backdrop-scrim--night')
+    const lampLabel = gate?.querySelector('.desktop-access-gate__lamp-control-label')
+    const ambient = gate?.querySelector('.desktop-access-gate__ambient-canvas')
+    const opacity = (element) => element instanceof HTMLElement ? Number.parseFloat(getComputedStyle(element).opacity) : null
+    const numberAttribute = (element, name) => {
+      const value = element?.getAttribute(name)
+      return value === null || value === undefined ? null : Number.parseFloat(value)
+    }
+    return {
+      capturedAt: Math.round(performance.now()),
+      theme: app?.getAttribute('data-theme') ?? null,
+      gateScene: gate?.getAttribute('data-gate-scene') ?? null,
+      gateVisualTheme: gate?.getAttribute('data-gate-visual-theme') ?? null,
+      gateTimeMode: gate?.getAttribute('data-gate-time-mode') ?? null,
+      direction: switcher?.getAttribute('data-transition-direction') ?? null,
+      phase: switcher?.getAttribute('data-transition-phase') ?? null,
+      controlDisabled: gate?.querySelector('.desktop-access-gate__lamp-control') instanceof HTMLButtonElement
+        ? gate.querySelector('.desktop-access-gate__lamp-control').disabled
+        : null,
+      daySceneOpacity: opacity(dayScene),
+      duskSceneOpacity: opacity(duskScene),
+      nightSceneOpacity: opacity(nightScene),
+      dayScrimOpacity: opacity(dayScrim),
+      nightScrimOpacity: opacity(nightScrim),
+      lampLabelOpacity: opacity(lampLabel),
+      daySceneBackdrop: dayScene instanceof HTMLElement ? getComputedStyle(dayScene).backgroundImage : null,
+      duskSceneBackdrop: duskScene instanceof HTMLElement ? getComputedStyle(duskScene).backgroundImage : null,
+      nightSceneBackdrop: nightScene instanceof HTMLElement ? getComputedStyle(nightScene).backgroundImage : null,
+      ambientEffect: ambient?.getAttribute('data-auth-ambient-effect') ?? null,
+      ambientEffectProgress: numberAttribute(ambient, 'data-auth-ambient-effect-progress'),
+      ambientEffectIntensity: numberAttribute(ambient, 'data-auth-ambient-effect-intensity'),
+      hasSyntheticLightLayers: Boolean(
+        gate?.querySelector('.desktop-access-gate__theme-veil, .desktop-access-gate__lamp-pool, .desktop-access-gate__scene-shade'),
+      ),
+      hasFrameCaptureController: typeof window.__ailearnAuthLampCapture?.seek === 'function',
+      hasAmbientFrameCaptureController: typeof window.__ailearnAuthAmbientCapture?.seek === 'function',
+    }
+  })
+
+  await window.evaluate((storageKey) => window.localStorage.setItem(storageKey, 'paused'), lampFrameCaptureStorageKey)
+  await control.click()
+  await window.locator('#desktop-gate-time-menu').waitFor({ state: 'visible', timeout: 8_000 })
+  await window.locator(`#desktop-gate-time-menu [data-scene-choice="${direction.slice(3)}"]`).click()
+  await window.waitForFunction(
+    ({ expectedDirection, expectedPhase }) => {
+      const switcher = document.querySelector('.desktop-access-gate__lamp-switch')
+      return switcher?.getAttribute('data-transition-direction') === expectedDirection
+        && switcher.getAttribute('data-transition-phase') === expectedPhase
+    },
+    { expectedDirection: direction, expectedPhase: firstPhase },
+    { timeout: 8_000 },
+  ).catch(async () => {
+    throw new Error(`${label} did not enter ${firstPhase}: ${JSON.stringify(await readTransition())}`)
+  })
+  await window.waitForFunction(
+    () => typeof window.__ailearnAuthAmbientCapture?.seek === 'function',
+    undefined,
+    { timeout: 8_000 },
+  ).catch(async () => {
+    throw new Error(`${label} did not arm the Pixi lamp effect: ${JSON.stringify(await readTransition())}`)
+  })
+  const firstFrame = await readTransition()
+  if (
+    !firstFrame.controlDisabled
+    || firstFrame.hasSyntheticLightLayers
+    || !firstFrame.hasFrameCaptureController
+    || !firstFrame.hasAmbientFrameCaptureController
+    || firstFrame.ambientEffect !== direction
+  ) {
+    throw new Error(`${label} did not enter the clean ${firstPhase} transition: ${JSON.stringify(firstFrame)}`)
+  }
+
+  const timing = await window.evaluate(() => {
+    const controller = window.__ailearnAuthLampCapture
+    if (!controller) throw new Error('Lamp frame capture controller is unavailable')
+    return controller.timing()
+  })
+  const focalAt = timing.labels[focalPhase]
+  const settleAt = timing.labels.settling
+  if (
+    !Number.isFinite(focalAt)
+    || !Number.isFinite(settleAt)
+    || !Number.isFinite(timing.duration)
+    || timing.duration < 0.32
+    || timing.duration > 0.55
+  ) {
+    throw new Error(`${label} exposed incomplete frame timing: ${JSON.stringify(timing)}`)
+  }
+  const samplePlan = [
+    ['00-click', 0],
+    ['01-response', timing.duration * 0.12],
+    ['02-crossfade-start', timing.duration * 0.28],
+    ['03-before-handoff', Math.max(0, focalAt - 0.012)],
+    ['04-theme-handoff', focalAt + 0.012],
+    ['05-crossfade-midpoint', timing.duration * 0.58],
+    ['06-resolving', timing.duration * 0.75],
+    ['07-near-target', timing.duration * 0.9],
+    ['08-pre-settle', Math.max(0, timing.duration - 0.018)],
+  ]
+  const samples = []
+  let focalFrame = null
+  try {
+    for (const [name, time] of samplePlan) {
+      await window.evaluate((nextTime) => {
+        const lampController = window.__ailearnAuthLampCapture
+        const ambientController = window.__ailearnAuthAmbientCapture
+        if (!lampController || !ambientController) throw new Error('Lamp effect frame capture controllers are unavailable')
+        lampController.seek(nextTime)
+        ambientController.seek(nextTime)
+      }, time)
+      await window.waitForTimeout(90)
+      const frame = await readTransition()
+      await window.screenshot({ path: resolve(reviewRoot, `${screenshotPrefix}-${name}.png`) })
+      samples.push({ name, time, frame })
+      if (!focalFrame && frame.direction === direction && frame.phase === focalPhase) {
+        focalFrame = frame
+        await window.screenshot({ path: resolve(reviewRoot, `${screenshotPrefix}-${focalPhase}.png`) })
+      }
+    }
+  } finally {
+    await window.evaluate((storageKey) => {
+      const lampController = window.__ailearnAuthLampCapture
+      const ambientController = window.__ailearnAuthAmbientCapture
+      window.localStorage.removeItem(storageKey)
+      lampController?.finish()
+      ambientController?.finish()
+    }, lampFrameCaptureStorageKey)
+  }
+
+  if (!focalFrame) {
+    throw new Error(`${label} never reached its ${focalPhase} cue in the sampled transition: ${JSON.stringify(samples)}`)
+  }
+
+  const sourceOpacityKey = direction === 'to-night' ? 'daySceneOpacity' : 'nightSceneOpacity'
+  const targetOpacityKey = direction === 'to-night' ? 'nightSceneOpacity' : 'daySceneOpacity'
+  const hasSourceToDuskCrossfade = samples.some(({ frame }) => (
+    frame[sourceOpacityKey] !== null
+      && frame.duskSceneOpacity !== null
+      && frame[sourceOpacityKey] > 0.02
+      && frame.duskSceneOpacity > 0.02
+  ))
+  const hasDuskToTargetCrossfade = samples.some(({ frame }) => (
+    frame[targetOpacityKey] !== null
+      && frame.duskSceneOpacity !== null
+      && frame[targetOpacityKey] > 0.02
+      && frame.duskSceneOpacity > 0.02
+  ))
+  const hasContinuousSceneOpacity = samples.every(({ frame }) => {
+    if (frame.daySceneOpacity === null || frame.duskSceneOpacity === null || frame.nightSceneOpacity === null) return false
+    const totalOpacity = frame.daySceneOpacity + frame.duskSceneOpacity + frame.nightSceneOpacity
+    return totalOpacity >= 0.94 && totalOpacity <= 1.06
+  })
+  const beforeHandoffFrame = samples.find(({ name }) => name === '03-before-handoff')?.frame
+  const afterHandoffFrame = samples.find(({ name }) => name === '04-theme-handoff')?.frame
+  const sourceTheme = direction === 'to-night' ? 'day' : 'night'
+  const hasVisibleLampEffect = samples.some(({ name, frame }) => (
+    name !== '00-click'
+      && frame.ambientEffect === direction
+      && (frame.ambientEffectIntensity ?? 0) > 0.05
+      && (frame.ambientEffectProgress ?? 0) > 0
+  ))
+  if (
+    !hasSourceToDuskCrossfade
+    || !hasDuskToTargetCrossfade
+    || !hasContinuousSceneOpacity
+    || !hasVisibleLampEffect
+    || samples.some(({ frame }) => frame.hasSyntheticLightLayers)
+    || samples.some(({ name, frame }) => name !== '00-click' && (frame.lampLabelOpacity ?? 1) > 0.03)
+    || beforeHandoffFrame?.gateVisualTheme !== sourceTheme
+    || afterHandoffFrame?.gateVisualTheme !== expectedTheme
+  ) {
+    throw new Error(`${label} did not preserve a continuous three-scene transition: ${JSON.stringify({ beforeHandoffFrame, afterHandoffFrame, samples })}`)
+  }
+
+  await window.waitForFunction(
+    ({ expectedDirection, expectedTheme }) => {
+      const gate = document.querySelector('.desktop-access-gate')
+      const switcher = document.querySelector('.desktop-access-gate__lamp-switch')
+      return gate?.getAttribute('data-gate-visual-theme') === expectedTheme
+        && gate.getAttribute('data-gate-scene') === expectedDirection.slice(3)
+        && switcher?.getAttribute('data-transition-direction') === 'idle'
+        && switcher.getAttribute('data-transition-phase') === 'idle'
+        && document.querySelector('.desktop-access-gate__ambient-canvas')?.getAttribute('data-auth-ambient-effect') === 'idle'
+    },
+    { expectedDirection: direction, expectedTheme },
+    { timeout: 8_000 },
+  )
+  const settledFrame = await readTransition()
+  const activeBackdrop = expectedTheme === 'night' ? settledFrame.nightSceneBackdrop : settledFrame.daySceneBackdrop
+  const inactiveOpacity = expectedTheme === 'night' ? settledFrame.daySceneOpacity : settledFrame.nightSceneOpacity
+  if (
+    settledFrame.controlDisabled
+    || !activeBackdrop?.includes(expectedBackdropAsset)
+    || inactiveOpacity === null
+    || inactiveOpacity > 0.01
+    || settledFrame.duskSceneOpacity === null
+    || settledFrame.duskSceneOpacity > 0.01
+  ) {
+    throw new Error(`${label} did not settle into the expected scene: ${JSON.stringify(settledFrame)}`)
+  }
+  await writeFile(
+    resolve(reviewRoot, `${screenshotPrefix}-transition.json`),
+    `${JSON.stringify({ direction, firstFrame, focalFrame, samples, settledFrame }, null, 2)}\n`,
+    'utf8',
+  )
+  return settledFrame
+}
+
+async function captureRegistrationGate(window) {
+  await window.getByRole('button', { name: '还没有账号？注册' }).click()
+  const registerGate = window.locator('.desktop-access-gate[data-gate-variant="register"]')
+  await registerGate.waitFor({ state: 'visible', timeout: 8_000 })
+  await window.waitForFunction(
+    () => getComputedStyle(document.querySelector('.desktop-access-gate__backdrop-layer--day')).backgroundImage.includes('register-worktable-day-v1.png'),
+    undefined,
+    { timeout: 8_000 },
+  )
+  await window.waitForFunction(
+    () => document.querySelector('.desktop-access-gate__ambient-canvas')?.getAttribute('data-auth-ambient-state') === 'settled',
+    undefined,
+    { timeout: 8_000 },
+  )
+  await settleSurface(window)
+
+  const readLayout = () => window.evaluate(() => {
+    const gate = document.querySelector('.desktop-access-gate')
+    const panel = gate?.querySelector('.desktop-access-gate__panel')
+    const heading = gate?.querySelector('.desktop-access-gate__heading h1')
+    const ambient = gate?.querySelector('.desktop-access-gate__ambient-canvas')
+    const ambientCanvas = ambient?.querySelector('canvas')
+    const lampControl = gate?.querySelector('.desktop-access-gate__lamp-control')
+    const inputs = [...(gate?.querySelectorAll('input') ?? [])]
+    const controls = [...(gate?.querySelectorAll('input, button') ?? [])]
+    const rect = (element) => {
+      if (!(element instanceof HTMLElement)) return null
+      const bounds = element.getBoundingClientRect()
+      return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, width: bounds.width, height: bounds.height }
+    }
+    const textRects = (element) => {
+      if (!(element instanceof HTMLElement)) return []
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+      const lines = []
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (!node.textContent?.trim()) continue
+        const range = document.createRange()
+        range.selectNodeContents(node)
+        lines.push(...[...range.getClientRects()].map((bounds) => ({
+          top: bounds.top,
+          bottom: bounds.bottom,
+          left: bounds.left,
+          right: bounds.right,
+          width: bounds.width,
+          height: bounds.height,
+        })))
+      }
+      return lines
+    }
+    return {
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      variant: gate?.getAttribute('data-gate-variant') ?? null,
+      motionState: gate?.getAttribute('data-gate-motion-state') ?? null,
+      backdrop: getComputedStyle(gate?.querySelector('.desktop-access-gate__backdrop-layer--day') ?? document.body).backgroundImage,
+      ambientState: ambient?.getAttribute('data-auth-ambient-state') ?? null,
+      ambientMotion: ambient?.getAttribute('data-auth-ambient-motion') ?? null,
+      ambientCanvasCount: ambient?.querySelectorAll('canvas').length ?? 0,
+      ambientCanvasPointerEvents: ambientCanvas instanceof HTMLElement ? getComputedStyle(ambientCanvas).pointerEvents : null,
+      ambientCanvasAriaHidden: ambientCanvas?.getAttribute('aria-hidden') ?? null,
+      lampControl: rect(lampControl),
+      lampControlLabel: lampControl?.getAttribute('aria-label') ?? null,
+      lampControlDisabled: lampControl instanceof HTMLButtonElement ? lampControl.disabled : null,
+      gate: rect(gate),
+      panel: rect(panel),
+      heading: rect(heading),
+      headingTextRects: textRects(heading),
+      headingClientWidth: heading instanceof HTMLElement ? heading.clientWidth : 0,
+      headingScrollWidth: heading instanceof HTMLElement ? heading.scrollWidth : 0,
+      inputs: inputs.map(rect),
+      controls: controls.map(rect),
+      gateClientHeight: gate instanceof HTMLElement ? gate.clientHeight : 0,
+      gateClientWidth: gate instanceof HTMLElement ? gate.clientWidth : 0,
+      gateScrollHeight: gate instanceof HTMLElement ? gate.scrollHeight : 0,
+      gateScrollWidth: gate instanceof HTMLElement ? gate.scrollWidth : 0,
+      gateOverflowY: gate instanceof HTMLElement ? getComputedStyle(gate).overflowY : null,
+    }
+  })
+
+  const desktop = await readLayout()
+  if (
+    desktop.variant !== 'register'
+    || desktop.motionState !== 'settled'
+    || !desktop.backdrop.includes('register-worktable-day-v1.png')
+    || desktop.ambientState !== 'settled'
+    || desktop.ambientMotion !== 'persistent'
+    || desktop.ambientCanvasCount !== 1
+    || desktop.ambientCanvasPointerEvents !== 'none'
+    || desktop.ambientCanvasAriaHidden !== 'true'
+    || !desktop.lampControl
+    || desktop.lampControlDisabled
+    || desktop.lampControlLabel !== '调整书房时间'
+    || !desktop.panel
+    || !desktop.heading
+    || desktop.headingScrollWidth > desktop.headingClientWidth + 1
+    || desktop.headingTextRects.some((line) => line.left < desktop.heading.left - 1 || line.right > desktop.heading.right + 1)
+    || desktop.inputs.length !== 4
+    || desktop.gateOverflowY !== 'auto'
+    || desktop.gateScrollWidth > desktop.gateClientWidth + 1
+    || desktop.panel.left < -1
+    || desktop.panel.right > desktop.viewport.width + 1
+    || desktop.controls.some((control) => !control || control.height < 44 || control.left < -1 || control.right > desktop.viewport.width + 1)
+  ) {
+    throw new Error(`Desktop registration Gate layout drifted: ${JSON.stringify(desktop)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'desktop-access-gate-register-layout.json'), `${JSON.stringify(desktop, null, 2)}\n`, 'utf8')
+  await window.screenshot({ path: resolve(reviewRoot, 'desktop-access-gate-register.png') })
+
+  await setSize(1024, 700)
+  await settleSurface(window)
+  const minimumDesktop = await readLayout()
+  if (
+    minimumDesktop.viewport.width !== 1024
+    || minimumDesktop.viewport.height !== 700
+    || !minimumDesktop.panel
+    || !minimumDesktop.heading
+    || minimumDesktop.headingScrollWidth > minimumDesktop.headingClientWidth + 1
+    || minimumDesktop.headingTextRects.some((line) => line.left < minimumDesktop.heading.left - 1 || line.right > minimumDesktop.heading.right + 1)
+    || minimumDesktop.ambientState !== 'settled'
+    || minimumDesktop.ambientMotion !== 'persistent'
+    || minimumDesktop.ambientCanvasCount !== 1
+    || !minimumDesktop.lampControl
+    || minimumDesktop.lampControlDisabled
+    || minimumDesktop.gateScrollWidth > minimumDesktop.gateClientWidth + 1
+    || minimumDesktop.panel.left < -1
+    || minimumDesktop.panel.right > minimumDesktop.viewport.width + 1
+    || minimumDesktop.controls.some((control) => !control || control.height < 44 || control.left < -1 || control.right > minimumDesktop.viewport.width + 1)
+  ) {
+    throw new Error(`Desktop registration Gate 1024x700 layout drifted: ${JSON.stringify(minimumDesktop)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'desktop-access-gate-register-1024x700.json'), `${JSON.stringify(minimumDesktop, null, 2)}\n`, 'utf8')
+  await window.screenshot({ path: resolve(reviewRoot, 'desktop-access-gate-register-1024x700.png') })
+  await setSize(1440, 810)
+  await settleSurface(window)
+
+  await captureLampTransition(window, {
+    label: 'Desktop registration Gate day-to-night lamp transition',
+    direction: 'to-night',
+    expectedTheme: 'night',
+    expectedBackdropAsset: 'register-worktable-night-v1.png',
+    screenshotPrefix: 'desktop-access-gate-register-to-night',
+  })
+  await window.screenshot({ path: resolve(reviewRoot, 'desktop-access-gate-register-night.png') })
+  await captureLampTransition(window, {
+    label: 'Desktop registration Gate night-to-day lamp transition',
+    direction: 'to-day',
+    expectedTheme: 'day',
+    expectedBackdropAsset: 'register-worktable-day-v1.png',
+    screenshotPrefix: 'desktop-access-gate-register-to-day',
+  })
+
+  await setZoomFactor(2)
+  await window.waitForTimeout(250)
+  await registerGate.locator('button').last().scrollIntoViewIfNeeded()
+  const zoom200 = await readLayout()
+  const finalControl = zoom200.controls.at(-1)
+  if (
+    zoom200.viewport.width !== 720
+    || !zoom200.panel
+    || !finalControl
+    || zoom200.gateOverflowY !== 'auto'
+    || zoom200.gateScrollWidth > zoom200.gateClientWidth + 1
+    || zoom200.ambientState !== 'disabled'
+    || zoom200.ambientCanvasCount !== 0
+    || zoom200.panel.left < -1
+    || zoom200.panel.right > zoom200.viewport.width + 1
+    || finalControl.top < -1
+    || finalControl.bottom > zoom200.viewport.height + 1
+  ) {
+    throw new Error(`Desktop registration Gate 200% reflow drifted: ${JSON.stringify(zoom200)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'desktop-access-gate-register-zoom-200.json'), `${JSON.stringify(zoom200, null, 2)}\n`, 'utf8')
+  const zoomImage = await electronApp.evaluate(async ({ BrowserWindow }) => {
+    const target = BrowserWindow.getAllWindows()[0]
+    if (!target) throw new Error('Desktop registration Gate capture window disappeared')
+    return (await target.webContents.capturePage()).toPNG().toString('base64')
+  })
+  await writeFile(resolve(reviewRoot, 'desktop-access-gate-register-zoom-200.png'), Buffer.from(zoomImage, 'base64'))
+
+  await setSize(640, 810, true)
+  await window.waitForTimeout(250)
+  await registerGate.evaluate((element) => {
+    if (element instanceof HTMLElement) element.scrollTop = 0
+  })
+  await window.waitForTimeout(120)
+  const compact = await readLayout()
+  if (
+    compact.viewport.width !== 320
+    || !compact.panel
+    || !compact.heading
+    || compact.inputs.length !== 4
+    || compact.gateOverflowY !== 'auto'
+    || compact.gateScrollWidth > compact.gateClientWidth + 1
+    || compact.ambientState !== 'disabled'
+    || compact.ambientCanvasCount !== 0
+    || compact.headingScrollWidth > compact.headingClientWidth + 1
+    || compact.headingTextRects.some((line) => line.left < compact.heading.left - 1 || line.right > compact.heading.right + 1)
+    || compact.panel.left < -1
+    || compact.panel.right > compact.viewport.width + 1
+    || compact.inputs.some((input) => !input || input.height < 44 || input.left < -1 || input.right > compact.viewport.width + 1)
+  ) {
+    throw new Error(`Desktop registration Gate 320 CSS px reflow drifted: ${JSON.stringify(compact)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'desktop-access-gate-register-320-css-px.json'), `${JSON.stringify(compact, null, 2)}\n`, 'utf8')
+  await window.screenshot({ path: resolve(reviewRoot, 'desktop-access-gate-register-320-css-px.png') })
+
+  await setZoomFactor(1)
+  await setSize(1440, 810)
+  await window.waitForTimeout(250)
+  await registerGate.evaluate((element) => {
+    if (element instanceof HTMLElement) element.scrollTop = 0
+  })
+  await window.waitForFunction(
+    () => document.querySelector('.desktop-access-gate__ambient-canvas')?.getAttribute('data-auth-ambient-state') === 'settled',
+    undefined,
+    { timeout: 8_000 },
+  )
+  await registerGate.locator('input').first().focus()
+  await window.waitForFunction(
+    () => document.querySelector('.desktop-access-gate__ambient-canvas')?.getAttribute('data-auth-ambient-state') === 'quiet',
+    undefined,
+    { timeout: 2_000 },
+  )
+  await writeFile(resolve(reviewRoot, 'desktop-access-gate-register-input-pauses-ambient.json'), `${JSON.stringify({
+    ambientState: await registerGate.locator('.desktop-access-gate__ambient-canvas').getAttribute('data-auth-ambient-state'),
+    activeElement: await window.evaluate(() => document.activeElement?.tagName ?? null),
+  }, null, 2)}\n`, 'utf8')
+  await window.getByRole('button', { name: '已有账号？登录' }).click()
+  await window.locator('.desktop-access-gate[data-gate-variant="default"]').waitFor({ state: 'visible', timeout: 8_000 })
+  await settleSurface(window)
+}
+
 async function enterOwnerRoomThroughGate(window) {
   if (process.env.CAPTURE_DOOR_TRANSITION === '1') {
     await window.evaluate(() => {
@@ -159,7 +758,7 @@ async function enterOwnerRoomThroughGate(window) {
   if (await window.locator('.action-rail').count() === 0) {
     await window.locator('.desktop-access-gate input[type="email"]').fill(process.env.OWNER_EMAIL)
     await window.locator('.desktop-access-gate input[type="password"]').fill(process.env.OWNER_PASSWORD)
-    await window.getByRole('button', { name: '登录并继续' }).click()
+    await window.getByRole('button', { name: '登录', exact: true }).click()
   }
 
   const deadline = Date.now() + 30_000
@@ -297,6 +896,31 @@ try {
       undefined,
       { timeout: 20_000 },
     ).catch(() => undefined)
+    await settleSurface(window)
+    await window.locator('.desktop-access-gate__lamp-control').click()
+    const timeControl = await window.evaluate(() => {
+      const gate = document.querySelector('.desktop-access-gate')
+      const menu = document.querySelector('#desktop-gate-time-menu')
+      const choices = [...(menu?.querySelectorAll('[data-scene-choice]') ?? [])]
+      return {
+        initialMode: gate?.getAttribute('data-gate-time-mode') ?? null,
+        menuOpen: menu instanceof HTMLElement && getComputedStyle(menu).display !== 'none',
+        choices: choices.map((choice) => choice.getAttribute('data-scene-choice')),
+        systemCopy: menu?.querySelector('[data-scene-choice="system"]')?.textContent?.replace(/\s+/g, ' ').trim() ?? null,
+      }
+    })
+    if (
+      timeControl.initialMode !== 'system'
+      || !timeControl.menuOpen
+      || JSON.stringify(timeControl.choices) !== JSON.stringify(['system', 'day', 'dusk', 'night'])
+      || !timeControl.systemCopy?.includes('跟随现在')
+    ) {
+      throw new Error(`DesktopAccessGate time control drifted: ${JSON.stringify(timeControl)}`)
+    }
+    await writeFile(resolve(reviewRoot, 'desktop-access-gate-time-control.json'), `${JSON.stringify(timeControl, null, 2)}\n`, 'utf8')
+    await window.screenshot({ path: resolve(reviewRoot, 'desktop-access-gate-time-control.png') })
+    await selectAuthScene(window, 'day')
+    await capturePersistentAmbient(window)
     const gateBoundary = await readGateBoundary(window)
     if (!gateBoundary.present || gateBoundary.hasRoomDom || gateBoundary.hasOnboarding || gateBoundary.hasActionRail) {
       throw new Error(`Anonymous capture did not stop at the fail-closed DesktopAccessGate: ${JSON.stringify(gateBoundary)}`)
@@ -304,6 +928,7 @@ try {
     const gateDesktop = await window.evaluate(() => {
       const gate = document.querySelector('.desktop-access-gate')
       const controls = [...(gate?.querySelectorAll('input, .desktop-access-gate__primary, .desktop-access-gate__text-action, .desktop-access-gate__workspace-list button') ?? [])]
+      const lampControl = gate?.querySelector('.desktop-access-gate__lamp-control')
       const rect = (element) => {
         if (!(element instanceof HTMLElement)) return null
         const bounds = element.getBoundingClientRect()
@@ -326,6 +951,9 @@ try {
           ? { top: gateBounds.top, bottom: gateBounds.bottom, left: gateBounds.left, right: gateBounds.right, width: gateBounds.width, height: gateBounds.height }
           : null,
         controls: controls.map(rect),
+        lampControl: rect(lampControl),
+        lampControlLabel: lampControl?.getAttribute('aria-label') ?? null,
+        lampControlDisabled: lampControl instanceof HTMLButtonElement ? lampControl.disabled : null,
         gateClientHeight: gate instanceof HTMLElement ? gate.clientHeight : 0,
         gateClientWidth: gate instanceof HTMLElement ? gate.clientWidth : 0,
         gateScrollHeight: gate instanceof HTMLElement ? gate.scrollHeight : 0,
@@ -347,6 +975,9 @@ try {
       !gateDesktop.gate
       || gateDesktop.gateOverflowY !== 'auto'
       || gateDesktop.gateScrollWidth > gateDesktop.gateClientWidth + 1
+      || !gateDesktop.lampControl
+      || gateDesktop.lampControlDisabled
+      || gateDesktop.lampControlLabel !== '调整书房时间'
       || gateDesktop.controls.some((control) => !control || control.height < 44 || control.left < -1 || control.right > gateDesktop.viewport.width + 1)
     ) {
       throw new Error(`DesktopAccessGate desktop action contract drifted: ${JSON.stringify(gateDesktop)}`)
@@ -355,11 +986,33 @@ try {
     await writeCaptureRuntime(window, 'fail_closed_gate', gateBoundary)
     await window.screenshot({ path: resolve(reviewRoot, 'desktop-access-gate.png') })
     await window.screenshot({ path: resolve(reviewRoot, 'desktop.png') })
+    await captureDuskChoice(window, {
+      expectedBackdropAsset: 'auth-alcove-dusk-v1.png',
+      screenshotPrefix: 'desktop-access-gate-to-dusk',
+    })
+    await selectAuthScene(window, 'day')
+    await captureLampTransition(window, {
+      label: 'Desktop login Gate day-to-night lamp transition',
+      direction: 'to-night',
+      expectedTheme: 'night',
+      expectedBackdropAsset: 'auth-alcove-night-v1.png',
+      screenshotPrefix: 'desktop-access-gate-to-night',
+    })
+    await window.screenshot({ path: resolve(reviewRoot, 'desktop-access-gate-night.png') })
+    await captureLampTransition(window, {
+      label: 'Desktop login Gate night-to-day lamp transition',
+      direction: 'to-day',
+      expectedTheme: 'day',
+      expectedBackdropAsset: 'auth-alcove-day-v1.png',
+      screenshotPrefix: 'desktop-access-gate-to-day',
+    })
+    await captureRegistrationGate(window)
     await electronApp.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.webContents.setZoomFactor(2)
     })
     await window.waitForTimeout(250)
     await window.locator('.desktop-access-gate__panel').scrollIntoViewIfNeeded()
+    await window.locator('.desktop-access-gate__panel button:last-of-type, .desktop-access-gate__notice, .desktop-access-gate__loading').last().scrollIntoViewIfNeeded()
     const zoom200 = await window.evaluate(() => {
       const gate = document.querySelector('.desktop-access-gate')
       const panel = document.querySelector('.desktop-access-gate__panel')

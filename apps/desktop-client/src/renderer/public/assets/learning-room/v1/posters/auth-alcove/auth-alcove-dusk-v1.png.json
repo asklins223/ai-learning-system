@@ -1,0 +1,22 @@
+{
+  "assetId": "STATIC-AUTH-ALCOVE-DUSK-01",
+  "sourceType": "generated-derivative",
+  "generator": "OpenAI built-in image generation (gpt-image-2)",
+  "generatedAt": "2026-09-02",
+  "operator": "Codex (OpenAI)",
+  "intendedUse": "Desktop Auth Gate day-to-night transition backplate",
+  "parentAssetId": "STATIC-AUTH-ALCOVE-DAY-01",
+  "sourcePath": "posters/auth-alcove/auth-alcove-dusk-v1.png",
+  "runtimePath": "posters/auth-alcove/auth-alcove-dusk-v1.png",
+  "dimensions": { "width": 1671, "height": 941 },
+  "mimeType": "image/png",
+  "colorSpace": "sRGB",
+  "alphaMode": "opaque-rgb",
+  "bytes": 2029392,
+  "sha256": "7ad70da7c0b36492b9732b59784554e75f972a1b5022cc2e5562a3f5c2068537",
+  "c2pa": "embedded OpenAI Media Service assertion",
+  "reviewStatus": "CHANGES_REQUIRED",
+  "reviewOnly": true,
+  "releaseApproval": false,
+  "prompt": "Use case: lighting-weather. Asset type: full-bleed desktop login transition backdrop, no text. Input image: the supplied image is the edit target. Primary request: create the exact same reading-alcove composition at a luminous late-golden-hour / early blue-hour midpoint between the supplied bright day scene and a calm night scene. Composition and invariants: preserve the camera crop, perspective, every window mullion, curtain fold, book, plant, notebook, chair, lamp, desk edge, empty left 42% plaster wall, and all object positions exactly. Do not add, remove, move, resize, or redesign anything. Lighting: remove the harsh late-morning sunlight; make the leafy view a soft muted sage-blue twilight, with a gentle peach-gold remnant in the sky. The brass desk lamp is still off, but carries a very subtle warm metal reflection; keep the desk readable. The left plaster stays calm warm ivory with enough midtone for dark semantic login content. This must feel like a real change of time of day, not a grey full-screen dimmer or a uniform overlay. Style: retain the original refined luminous gouache illustration, soft paper texture, clean pale oak, and high-end desktop application backdrop quality. Constraints: no people, no text, no UI, no card, no logos, no watermark, no vignette, no heavy brown/olive muddiness, no fog, no obvious overlay."
+}

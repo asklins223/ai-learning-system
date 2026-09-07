@@ -70,6 +70,58 @@
       }
     }
   },
+  "authPosters": {
+    "day": {
+      "id": "STATIC-AUTH-ALCOVE-DAY-01",
+      "path": "posters/auth-alcove/auth-alcove-day-v1.png",
+      "width": 1671,
+      "height": 941,
+      "sha256": "ea608c87739ec2e61c651c53c08e28e1675265b6c82c32b303874e4889a00cf8",
+      "reviewStatus": "CHANGES_REQUIRED"
+    },
+    "dusk": {
+      "id": "STATIC-AUTH-ALCOVE-DUSK-01",
+      "path": "posters/auth-alcove/auth-alcove-dusk-v1.png",
+      "width": 1671,
+      "height": 941,
+      "sha256": "7ad70da7c0b36492b9732b59784554e75f972a1b5022cc2e5562a3f5c2068537",
+      "reviewStatus": "CHANGES_REQUIRED"
+    },
+    "night": {
+      "id": "STATIC-AUTH-ALCOVE-NIGHT-01",
+      "path": "posters/auth-alcove/auth-alcove-night-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "b5b2e18dd3780b580941e8547a42676901bd2dfb7a279c1ee19668641dc08fa8",
+      "reviewStatus": "CHANGES_REQUIRED"
+    }
+  },
+  "registerPosters": {
+    "day": {
+      "id": "STATIC-AUTH-REGISTER-DAY-01",
+      "path": "posters/auth-register/register-worktable-day-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "d1bb7c5ca7e93f653b45fdb47a8626eec1403e4ac75ce27b223a15cac7eb580f",
+      "reviewStatus": "CHANGES_REQUIRED"
+    },
+    "dusk": {
+      "id": "STATIC-AUTH-REGISTER-DUSK-01",
+      "path": "posters/auth-register/register-worktable-dusk-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "202e88a8b92406f6851a5894b56a15d035a9ea260cdf8cbec69101258e0e9e86",
+      "reviewStatus": "CHANGES_REQUIRED"
+    },
+    "night": {
+      "id": "STATIC-AUTH-REGISTER-NIGHT-01",
+      "path": "posters/auth-register/register-worktable-night-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "b5f74b53c4884d06d10a422f03cd77383fb5ebbc14b7be98592e173377a2f338",
+      "reviewStatus": "CHANGES_REQUIRED"
+    }
+  },
   "searchPosters": {
     "day": {
       "id": "STATIC-SEARCH-REFERENCE-DAY-01",
