@@ -1,7 +1,0 @@
-# environment
-os: Darwin arm64
-macos: 26.5.2
-node: v22.16.0
-shell: bash
-arch: arm64
-head: c73f9eabfd4c80e157dfca56db95eab655372dd7

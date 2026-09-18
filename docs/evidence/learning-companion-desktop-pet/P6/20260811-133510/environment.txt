@@ -1,6 +1,0 @@
-uname: Darwin asklinsdeMac-mini-2.local 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:26:22 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T8132 arm64
-v22.16.0
-git version 2.50.1 (Apple Git-155)
----HEAD---
-c73f9ea feat(learning): CommitPort PG 核心幂等子集——commit_key 唯一索引兜底
-8dc5871 fix(voice): review nit——language 取 part.fields.value（multipart 字段对象）

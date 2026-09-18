@@ -1,3 +1,0 @@
-worker-1    | ReferenceError: char is not defined
-edge-tts-1  | BrokenPipeError: [Errno 32] Broken pipe
-worker-1    | ReferenceError: char is not defined

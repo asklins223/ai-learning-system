@@ -1,7 +1,0 @@
-NAME                     IMAGE                                                                     COMMAND                  SERVICE    CREATED        STATUS                  PORTS
-ailearn-dev-api-1        sha256:88ffa898c3c1bef60dba0f9189dcaf1580c617fb261eb989bbb72566f1dc9169   "docker-entrypoint.s…"   api        18 hours ago   Up 18 hours (healthy)   127.0.0.1:4000->4000/tcp
-ailearn-dev-edge-tts-1   ailearn-dev-edge-tts                                                      "python /app/server.…"   edge-tts   18 hours ago   Up 18 hours (healthy)   8080/tcp
-ailearn-dev-minio-1      minio/minio:RELEASE.2024-12-18T13-15-44Z                                  "/usr/bin/docker-ent…"   minio      4 days ago     Up 19 hours (healthy)   127.0.0.1:9000-9001->9000-9001/tcp
-ailearn-dev-postgres-1   pgvector/pgvector:pg16                                                    "docker-entrypoint.s…"   postgres   4 days ago     Up 19 hours (healthy)   127.0.0.1:5432->5432/tcp
-ailearn-dev-web-1        ailearn-dev-web                                                           "docker-entrypoint.s…"   web        13 hours ago   Up 13 hours             0.0.0.0:3000->3000/tcp
-ailearn-dev-worker-1     ailearn-dev-worker                                                        "docker-entrypoint.s…"   worker     18 hours ago   Up 18 hours             
