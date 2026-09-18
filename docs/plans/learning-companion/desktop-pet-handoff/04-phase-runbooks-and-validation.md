@@ -507,7 +507,7 @@ tests/e2e/**companion**
 
 1. 先落 strict shared Zod contracts、错误码和 SSE discriminated union；
 2. 写 conversation foundation migration：一次创建 03 合同 §7.1–§7.6 六张表、Drizzle schema、索引、约束、RLS、grants 与 migration integration test；voice provenance 表在 P2 保持无写路径；
-3. 实现无副作用 `/companion/bootstrap` 与 repository，所有 user/workspace 查询走 transaction-local RLS context；
+3. 桌面端只接入当前已签发的 home projection / room profile 合同，所有 user/workspace 查询走 transaction-local RLS context；
 4. 实现原子 turn create、idempotency 和 durable event append；
 5. 扩展既有 job type，payload 只传 opaque ID；
 6. 在 Worker 通过既有 provider registry/`text_generation` 调用 streaming adapter；

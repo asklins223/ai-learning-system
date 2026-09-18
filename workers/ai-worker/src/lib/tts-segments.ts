@@ -18,7 +18,6 @@ import { createHash } from "node:crypto";
 export const TTS_MAX_SEGMENTS = 200;
 export const TTS_MAX_TOTAL_CHARS = 20_000;
 export const TTS_MAX_SEGMENT_CHARS = 160;
-export const TTS_MIN_SEGMENT_CHARS = 8;
 /** 15b 二期（问题2 修复）：首段提前触发的最小字符数——流式文字生成中，
  *  缓冲达到该长度即切出首段（不要求完整句），让 TTS 合成尽早开始，声音
  *  与文字感官同步（"字幕般"）；后续段仍按完整句切，朗读连贯性不受影响。 */
@@ -287,11 +286,5 @@ export function companionSegmentId(
 // 双文本管线：LLM 输出可嵌入标签（仅 qwen 朗读文本保留），展示/入库文本
 // 必须剥离（stripVoiceExpressionTags）；段级情感由 extractVoiceEmotion
 // 解析（最后一个控制类标签 → emotion，供 live2d 协同，见 15 方案待办）。
-// 2026-08-13（引擎兼容）：实现迁移至 packages/shared/voice-expression-tags
-// （api edge 分支净化也需使用），此处 re-export 保持 worker 内部引用不变。
-export {
-  VOICE_EMOTION_TAGS,
-  VOICE_RICH_TAGS,
-  stripVoiceExpressionTags,
-  extractVoiceEmotion,
-} from "@ailearn/shared/voice-expression-tags";
+// 2026-08-13（引擎兼容）：实现位于 packages/shared/voice-expression-tags
+// （api edge 分支净化也需使用），调用方直接从 @ailearn/shared/voice-expression-tags 导入。

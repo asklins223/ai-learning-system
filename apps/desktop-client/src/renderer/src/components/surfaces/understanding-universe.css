@@ -1,0 +1,2210 @@
+/* Ported from the mature Web Understanding Universe, then re-themed onto the
+   app's own visual world: the sky keeps the spec'd deep navy (DESIGN.md:
+   “理解星图使用深海军蓝背景 #172a3d”) while every plate, dock and label uses
+   the night-paper palette (--ink #eadbc5, warm lines, physical shadows) so the
+   star map reads as a page of the same study, not a cold glass dashboard. */
+.hud-surface .universe-page {
+  --color-text: #eadbc5;
+  --color-paper: #eadbc5;
+  --color-canvas-deep: #0e1b2a;
+  /* 浅青 / 暖金 / 陶红 — the state triad DESIGN.md reserves for the star map. */
+  --color-evidence: #93cfc9;
+  --color-evidence-soft: #1c3a3c;
+  --color-warning: #e8b563;
+  --color-highlight: #ffe3a6;
+  --color-running: #7ec8bd;
+  --color-danger: #d96d4f;
+  --color-success: #94ba79;
+  --color-text-tertiary: #9a8a75;
+  --color-action: #ef8b4c;
+  --color-on-action: #fff7e8;
+  --universe-void: #172a3d;
+  --universe-void-deep: #0e1b2a;
+  --universe-panel: #2b251d;
+  --universe-glass: rgba(38, 32, 25, 0.9);
+  --universe-glass-strong: rgba(38, 32, 25, 0.97);
+  --universe-surface: rgba(38, 32, 25, 0.93);
+  --universe-surface-raised: #383126;
+  --universe-ink: #eadbc5;
+  --universe-muted: rgba(234, 219, 197, 0.86);
+  --universe-faint: rgba(234, 219, 197, 0.66);
+  /* Orbits, evidence tracks, cluster envelopes and cluster rings all read from
+     these. They were so faint the map looked like grey wireframe. */
+  --universe-line: rgba(244, 223, 192, 0.24);
+  --universe-line-strong: rgba(244, 223, 192, 0.42);
+  --universe-hairline: rgba(244, 223, 192, 0.14);
+  --universe-shadow: rgba(8, 5, 2, 0.6);
+  --radius-pill: 999px;
+  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
+  --font-ui: "Noto Sans SC Variable", "Noto Sans SC", "PingFang SC", sans-serif;
+  --font-editorial: "Noto Serif SC", "Songti SC", serif;
+  --z-header: 50;
+  /* Tokens the Web app owned globally and the desktop shell does not declare.
+     Without them the ported declarations below are invalid and silently drop
+     (no transitions, no focus ring, no mono numerals). */
+  --motion-fast: 120ms;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --color-focus-ring: #83d8e7;
+  --color-action-hover: color-mix(in srgb, var(--color-action) 78%, #ffffff);
+  --universe-accent: var(--color-warning);
+  /* The desktop shell has no mobile bottom bar. */
+  --mobile-nav-inset: 0px;
+}
+
+/* The star map owns the whole window (hud-pages.css removes the .content
+   frame on page 19). The shell rail, the heading chip, the return pill and the
+   room-control island keep floating above the sky, so every plate is placed on
+   one grid instead of floating at its own coordinates:
+
+   ┌ rail ─┬──────────── sky ────────────────────────────────────┬─ island ─┐
+   │       │ [intro card]              search + state filter     │          │  ← top row
+   │       │ [return pill]                                       │          │
+   │       │                                                     │          │
+   │       │                    graph                            │          │
+   │       │                                                     │          │
+   │       │ [seat] layer dock        …              legend      │          │  ← upper row
+   │       │ [seat]                …        zoom + fit + reset   │          │  ← lower row
+   └───────┴─────────────────────────────────────────────────────┴──────────┘
+
+   Below 1280px the top row shares the return pill's baseline instead, because
+   the strip between the intro card and the island is too narrow to hold the
+   search plate there. The plates that remain in the bottom grid share one left
+   edge, one right edge and a common bottom baseline per row; the two rows keep
+   one deliberate gap. */
+.hud-surface.page-19 .universe-page {
+  --universe-shell-left: 96px;
+  /* The shell's room-control island ends 25px from the window edge; the star
+     map used to stop at 68px, which both mis-centred its own search field and
+     left its right column 43px inside the island it sits under. */
+  --universe-shell-right: 22px;
+  /* The shell parks the return pill at top:100px when the companion holds the
+     left seat, so below the wide breakpoint the top row shares that baseline
+     instead of floating 24px above it. From 1280px up the row moves onto the
+     intro card's own top edge — see that block. */
+  --universe-shell-top: 100px;
+  /* The intro card owns the left of the band above this baseline and the
+     shell's room-control island owns the right, so the top row is only free to
+     centre in what is left between them. */
+  --universe-top-lane-left: 230px;
+  /* The companion keeps her seat on the left of page 19, so the bottom plates
+     step past her by this much. The compact breakpoint keeps its own, smaller
+     seat width — see the 760px block. */
+  --universe-seat-gutter: 340px;
+  /* Bottom instrument grid: one baseline for the lower row, one for the upper,
+     and one gap between them. Row heights are 54px (the tallest plate), so the
+     upper row sits exactly 64px above the lower one. */
+  --universe-bar-bottom: max(22px, env(safe-area-inset-bottom));
+  --universe-bar-step: 64px;
+  --universe-bar-left: calc(var(--universe-shell-left) + var(--universe-seat-gutter));
+}
+
+.hud-surface .universe-page .universe-canvas-root {
+  touch-action: none;
+}
+
+/* When the companion holds the left seat, hud-pages.css moves the shell's
+   return pill from the bottom-left corner up under the heading chip, at
+   left:96px. The chip's own box starts at 103px (its 3px cream border), so the
+   two plates in the top-left column disagreed by 7px. Match the chip. */
+.hud-surface.page-19.comp-left .return-home {
+  left: 103px;
+}
+
+.universe-page {
+  --universe-motion-feedback: 90ms;
+  --universe-motion-panel: 150ms;
+  /* Below 1 the canvas sky lets the shell's observatory plate (the same
+     background the companion center uses) glow through. Keep it high: the plate
+     is a lit room with a photographed seascape in it, so at 0.78 the horizon,
+     the reef and the lighthouse were plainly legible under the star field —
+     a photograph competing with the map, which is what read as "out of focus".
+     0.9 leaves the plate as a warm glow with no legible structure, and puts the
+     field back on the design's own 深海军蓝 #172a3d. */
+  --universe-sky-alpha: 0.9;
+  --universe-space-top: var(--universe-void);
+  --universe-space-bottom: var(--universe-void-deep);
+  --universe-nebula-a: color-mix(in srgb, var(--color-evidence) 7%, transparent);
+  /* Two nebulae, and only two: the sky used to stack six soft radial gradients
+     (two here, two on `.universe-page`, two on `.universe-atmosphere`) at six
+     different centres. Measured on the bare canvas, that put the low-frequency
+     peak 30 luminance levels above the field median — a bright, directionless
+     dome over the whole map, which is what read as fog. One cool glow anchored
+     where the room's own light falls, plus a barely-there warm counterweight,
+     holds the sky at ~13 levels and reads as depth instead of haze. */
+  /* Kept low: a warm gold tint over the navy lifts red and green together and
+     collapses the sky's blue chroma, which is what read as "washed out grey". */
+  --universe-nebula-b: color-mix(in srgb, var(--color-warning) 4%, transparent);
+  /* The halo painted behind each knowledge cluster reads from these. It is the
+     same three colours as the sky, but a different job: the halo is local to
+     the graph, already scaled by its own draw alpha, and is what makes a
+     weakly-connected component look like a galaxy. Keep it at full strength
+     even when the sky nebulae are damped down. */
+  --universe-envelope-a: color-mix(in srgb, var(--color-evidence) 18%, transparent);
+  --universe-envelope-b: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  /* Star dust is drawn in bulk, so a warm cream tint desaturates the whole sky.
+     Cool, pale point light keeps the field blue. */
+  --universe-dust: #cfe2f2;
+  --universe-label: var(--universe-ink);
+  --universe-label-muted: var(--universe-muted);
+  --universe-label-backdrop: color-mix(in srgb, var(--universe-void-deep) 94%, transparent);
+  --universe-edge: color-mix(in srgb, var(--color-evidence) 84%, transparent);
+  --universe-edge-glow: var(--color-evidence);
+  --universe-source: var(--color-warning);
+  --universe-note: var(--color-running);
+  --universe-card: var(--color-highlight);
+  --universe-key-point: var(--color-evidence);
+  --universe-orbit: var(--universe-line-strong);
+  --universe-evidence-track: var(--universe-line);
+  --universe-selected: var(--color-highlight);
+  --universe-state-misunderstood: var(--color-danger);
+  --universe-state-due: var(--color-warning);
+  --universe-state-understood: var(--color-running);
+  --universe-state-reviewed: var(--color-success);
+  --universe-state-seen: var(--color-evidence);
+  --universe-state-unseen: var(--color-text-tertiary);
+
+  position: relative;
+  isolation: isolate;
+  contain: layout paint style;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  /* No opaque base here: the night gradient is painted by the canvas at
+     --universe-sky-alpha, and the shell's observatory room plate shows
+     through beneath it. This layer paints nothing of its own — the two
+     radial tints that used to sit here duplicated the canvas nebulae at
+     (18%,10%) and (86%,78%), adding two more soft glows to the pile. */
+  background: none;
+  color: var(--universe-ink);
+  font-family: var(--font-ui);
+}
+
+.universe-atmosphere {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  contain: strict;
+  overflow: hidden;
+  /* One job only: frame the map. The two tints that used to live here were a
+     third and fourth copy of the canvas nebulae; the star field needs edges,
+     not more glow. */
+  background: none;
+  pointer-events: none;
+}
+
+.universe-atmosphere::after {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 44%, color-mix(in srgb, var(--universe-void-deep) 58%, transparent) 100%);
+  content: "";
+}
+
+/* ── Compact floating HUD ──────────────────────────────────────── */
+
+.universe-top-hud {
+  position: absolute;
+  z-index: 50;
+  top: var(--universe-shell-top, max(20px, env(safe-area-inset-top)));
+  right: var(--universe-shell-right, max(22px, env(safe-area-inset-right)));
+  /* The shell parks its own return pill at left:103px on this page, on the same
+     baseline the top row uses below the wide breakpoint, so the row starts
+     right of that pill rather than under it. */
+  left: var(--universe-top-lane-left, 230px);
+  display: flex;
+  /* One row carries the search plate and the state filter; the pair is centred
+     as a unit. When the row cannot hold both, the filter wraps to a second
+     centred line under the search instead of squeezing either plate.
+
+     The desktop shell already prints the page title and its own return pill in
+     the top-left corner, so the universe HUD keeps only these two plates and
+     leaves that corner to the shell. */
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.universe-top-hud > * {
+  pointer-events: auto;
+}
+
+.universe-search-shell {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  width: min(500px, 100%);
+  min-width: 0;
+  height: 48px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--universe-line);
+  border-radius: 4px 18px 4px 4px;
+  padding: 0 16px;
+  background: var(--universe-surface);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--universe-ink) 5%, transparent),
+    0 14px 40px color-mix(in srgb, var(--universe-shadow) 72%, transparent);
+  color: var(--universe-muted);
+  transition:
+    border-color var(--universe-motion-feedback) var(--ease-standard),
+    box-shadow var(--universe-motion-feedback) var(--ease-standard),
+    background var(--universe-motion-feedback) var(--ease-standard);
+}
+
+.universe-search-shell::after {
+  position: absolute;
+  right: 18px;
+  bottom: -1px;
+  left: 18px;
+  height: 1px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, transparent, var(--color-evidence) 28% 72%, transparent);
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: scaleX(0.18);
+  transition:
+    opacity var(--universe-motion-feedback) linear,
+    transform var(--universe-motion-panel) var(--ease-standard);
+}
+
+.universe-search-shell:focus-within {
+  border-color: color-mix(in srgb, var(--color-evidence) 62%, var(--universe-line-strong));
+  background: var(--universe-surface-raised);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--color-evidence) 13%, transparent),
+    0 18px 46px color-mix(in srgb, var(--universe-shadow) 82%, transparent);
+}
+
+.universe-page[data-searching="true"] .universe-search-shell {
+  border-color: color-mix(in srgb, var(--color-evidence) 68%, var(--universe-line-strong));
+  background: var(--universe-surface-raised);
+}
+
+.universe-page[data-searching="true"] .universe-search-shell::after {
+  opacity: 0.9;
+  transform: scaleX(1);
+}
+
+.universe-search-input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--universe-ink);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+}
+
+.universe-search-input::placeholder {
+  color: var(--universe-muted);
+}
+
+.universe-search-clear {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  color: var(--universe-faint);
+  cursor: pointer;
+  transition:
+    background var(--universe-motion-feedback) var(--ease-standard),
+    color var(--universe-motion-feedback) var(--ease-standard),
+    transform var(--universe-motion-feedback) var(--ease-standard);
+}
+
+.universe-search-clear:hover {
+  background: color-mix(in srgb, var(--universe-ink) 8%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-search-clear:active {
+  transform: scale(0.9);
+}
+
+.universe-search-results {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  left: 0;
+  z-index: 60;
+  max-height: min(48dvh, 380px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--universe-line-strong);
+  border-radius: 3px 14px 3px 3px;
+  padding: 7px;
+  background: var(--universe-surface-raised);
+  box-shadow: 0 24px 64px var(--universe-shadow);
+}
+
+.universe-search-result {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 16px;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  background: transparent;
+  color: var(--universe-muted);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--universe-motion-feedback) var(--ease-standard),
+    color var(--universe-motion-feedback) var(--ease-standard);
+}
+
+.universe-search-result:hover,
+.universe-search-result[aria-selected="true"] {
+  background: color-mix(in srgb, var(--color-evidence) 14%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-search-result:active {
+  background: color-mix(in srgb, var(--color-evidence) 20%, transparent);
+}
+
+.universe-search-result > :nth-child(2) {
+  min-width: 0;
+}
+
+.universe-search-result > :nth-child(2) > strong,
+.universe-search-result > :nth-child(2) > small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.universe-search-result > :nth-child(2) > strong {
+  color: var(--universe-ink);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.universe-search-result > :nth-child(2) > small,
+.universe-search-result > :last-child {
+  color: var(--universe-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.universe-search-orb {
+  display: block;
+  width: 12px;
+  height: 12px;
+  justify-self: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 24%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, currentColor 42%, transparent);
+}
+
+.universe-search-orb--source { color: var(--color-warning); }
+.universe-search-orb--note { color: var(--color-running); border-radius: 3px; }
+.universe-search-orb--card { color: var(--color-highlight); }
+.universe-search-orb--key_point { color: var(--color-evidence); transform: scale(0.78); }
+
+.universe-search-empty {
+  display: flex;
+  min-height: 86px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 9px;
+  padding: 16px;
+  color: var(--universe-faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Truncation notice under the capped result list. */
+.universe-search-more {
+  margin: 0;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--universe-hairline);
+  color: var(--universe-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* ── Floating plates ────────────────────────────────────────────── */
+
+.universe-layer-dock,
+.universe-legend {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--universe-line);
+  border-radius: 4px 16px 4px 4px;
+  padding: 5px;
+  background: var(--universe-surface);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--universe-ink) 4%, transparent),
+    0 12px 32px color-mix(in srgb, var(--universe-shadow) 72%, transparent);
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+/* ── Top row: search + state filter ───────────────────────────────
+   The state filter used to be the lower-left plate of the bottom grid, which
+   put the one control that decides *what the map is showing* at the opposite
+   corner from the search that decides what is highlighted. It now rides in the
+   top row, right of the search plate, and is drawn as a peer of it: same 48px
+   plate height, so the two share one baseline. */
+
+.universe-filter-dock {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 48px;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--universe-line);
+  border-radius: 18px 4px 4px 4px;
+  padding: 4px;
+  background: var(--universe-surface);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--universe-ink) 4%, transparent),
+    0 12px 32px color-mix(in srgb, var(--universe-shadow) 72%, transparent);
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+/* ── Bottom instrument grid ────────────────────────────────────────
+   Two plates in the wide grid: the layer dock keeps the left edge and the
+   camera controls keep the right, each on its own row. The legend joins the
+   layer dock's row. */
+
+.universe-layer-dock {
+  bottom: calc(var(--universe-bar-bottom, max(22px, env(safe-area-inset-bottom))) + var(--universe-bar-step, 64px));
+  left: var(--universe-bar-left, calc(var(--universe-shell-left, 96px) + 340px));
+}
+
+/* The layer dock already takes `--universe-bar-left` — the shell gutter plus the
+   companion's seat — so it steps past her at every width without another rule.
+   A `.comp-left` duplicate of exactly that computation used to sit here; it had
+   higher specificity than the phone band's own `left`, so below 640px the dock
+   collapsed against its right edge instead of spanning the page. */
+
+.universe-legend {
+  right: var(--universe-shell-right, max(22px, env(safe-area-inset-right)));
+  bottom: calc(var(--universe-bar-bottom, max(22px, env(safe-area-inset-bottom))) + var(--universe-bar-step, 64px));
+  gap: 12px;
+  /* Solid, like the other two docks: the legend floats over drawn star labels,
+     and a translucent plate turned that overlap into unreadable double text. */
+  border-color: var(--universe-line);
+  padding-right: 10px;
+  padding-left: 10px;
+  background: var(--universe-surface);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--universe-ink) 4%, transparent),
+    0 12px 32px color-mix(in srgb, var(--universe-shadow) 72%, transparent);
+  color: var(--universe-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: right var(--universe-motion-panel) var(--ease-standard);
+}
+
+.universe-filter {
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  min-width: 0;
+  height: 34px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 0 9px;
+  outline: 0;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: var(--universe-muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.universe-filter:hover {
+  background: color-mix(in srgb, var(--universe-ink) 7%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-filter:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.universe-filter.is-active,
+.universe-filter[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--color-evidence) 19%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-evidence) 18%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-filter > small {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--universe-ink) 7%, transparent);
+  color: var(--universe-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.universe-layer-toggle {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 0 11px;
+  background: transparent;
+  color: var(--universe-faint);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.universe-layer-toggle:hover {
+  background: color-mix(in srgb, var(--universe-ink) 7%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-layer-toggle:is(.is-active, [aria-pressed="true"]),
+.universe-layer-toggle:has(input:checked) {
+  border-color: color-mix(in srgb, var(--color-evidence) 28%, transparent);
+  background: color-mix(in srgb, var(--color-evidence) 14%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-layer-toggle > input {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin: 0;
+  accent-color: var(--color-evidence);
+}
+
+.universe-layer-toggle:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.universe-layer-readout {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  border-left: 1px solid var(--universe-line);
+  padding: 0 7px 0 10px;
+  color: var(--universe-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.universe-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.universe-legend > span > i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 35%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, currentColor 42%, transparent);
+}
+
+.universe-legend .is-source { color: var(--color-warning); }
+.universe-legend .is-note { color: var(--color-running); border-radius: 2px; }
+.universe-legend .is-card { color: var(--color-highlight); }
+.universe-legend .is-key-point { color: var(--color-evidence); transform: scale(0.75); }
+
+/* ── Canvas surface and its compact controls ───────────────────── */
+
+.universe-canvas-root {
+  position: absolute;
+  z-index: auto;
+  inset: 0;
+  contain: strict;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.universe-canvas-root,
+.universe-canvas-surface {
+  image-rendering: auto;
+}
+
+.universe-canvas-root.is-dragging {
+  cursor: grabbing;
+}
+
+.universe-canvas-surface {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: 0;
+}
+
+.universe-canvas-surface:focus-visible,
+.universe-canvas-root:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -3px;
+}
+
+.universe-canvas-tooltip {
+  position: absolute;
+  z-index: 16;
+  top: 0;
+  left: 0;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  width: max-content;
+  max-width: min(280px, calc(100% - 24px));
+  border: 1px solid var(--universe-line-strong);
+  border-radius: 12px;
+  padding: 9px 11px;
+  background: var(--universe-surface-raised);
+  box-shadow: 0 14px 38px var(--universe-shadow);
+  color: var(--universe-ink);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+
+.universe-canvas-tooltip-mark {
+  width: 9px;
+  height: 9px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 28%, transparent);
+  box-shadow: 0 0 9px currentColor;
+}
+
+.universe-canvas-tooltip-mark.is-source { color: var(--color-warning); }
+.universe-canvas-tooltip-mark.is-note { color: var(--color-running); border-radius: 2px; }
+.universe-canvas-tooltip-mark.is-card { color: var(--color-highlight); }
+.universe-canvas-tooltip-mark.is-key_point { color: var(--color-evidence); transform: scale(0.78); }
+
+.universe-canvas-tooltip-copy {
+  min-width: 0;
+}
+
+.universe-canvas-tooltip-copy > strong,
+.universe-canvas-tooltip-copy > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.universe-canvas-tooltip-copy > strong {
+  color: var(--universe-ink);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.universe-canvas-tooltip-copy > span {
+  color: var(--universe-faint);
+  font-size: 10.5px;
+}
+
+.universe-canvas-tooltip::after {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--universe-line-strong);
+  border-bottom: 1px solid var(--universe-line-strong);
+  background: var(--universe-panel);
+  content: "";
+  transform: translate(-50%, -4px) rotate(45deg);
+}
+
+.universe-canvas-a11y-summary,
+.universe-canvas-a11y-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.universe-canvas-controls {
+  position: absolute;
+  z-index: 19;
+  right: var(--universe-shell-right, max(22px, env(safe-area-inset-right)));
+  /* Shares the lower row's baseline with the filter dock, and therefore the
+     right edge with the top row and the legend above it. */
+  bottom: var(--universe-bar-bottom, max(22px, env(safe-area-inset-bottom)));
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--universe-line);
+  border-radius: 4px 14px 4px 4px;
+  background: var(--universe-surface);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--universe-ink) 4%, transparent),
+    0 10px 28px color-mix(in srgb, var(--universe-shadow) 72%, transparent);
+  transition: right var(--universe-motion-panel) var(--ease-standard);
+}
+
+.universe-canvas-control {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid var(--universe-line);
+  padding: 0;
+  background: transparent;
+  color: var(--universe-muted);
+  font-size: 16px;
+  cursor: pointer;
+  transition:
+    background var(--universe-motion-feedback) var(--ease-standard),
+    color var(--universe-motion-feedback) var(--ease-standard);
+}
+
+.universe-canvas-control:first-child {
+  border-left: 0;
+}
+
+/* A control that carries a two-character label rather than a zoom glyph: the
+   glyphs need 16px to read as symbols, the labels need the extra width so
+   `适配` and `复位` render at the same size. `复位` used to keep only the base
+   class, so its two characters were set at 16px in a 40px box while `适配`
+   beside it sat at 11px in 52px. */
+.universe-canvas-control-label {
+  width: 52px;
+  font-size: 11px;
+}
+
+.universe-canvas-control:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--universe-ink) 8%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-canvas-control:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.universe-canvas-readout {
+  display: grid;
+  min-width: 54px;
+  height: 40px;
+  place-items: center;
+  border-left: 1px solid var(--universe-line);
+  color: var(--universe-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.universe-page[data-detail-open="true"] .universe-canvas-controls {
+  right: 402px;
+}
+
+/* The drawer repeats the selected star's own legend entry, so the key steps
+   aside while it is open. */
+.universe-page[data-detail-open="true"] .universe-legend {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* With the legend gone the upper row's right slot is free, but the drawer
+   still narrows the row: `--universe-bar-left` puts the layer dock at 436px and
+   the drawer starts at 1054px, 50px short of the dock's natural 668px width.
+   The telemetry readout is global trivia — the drawer is showing one star's own
+   numbers — so it is the part that steps aside, and the dock keeps its slot. */
+.universe-page[data-detail-open="true"] .universe-layer-readout {
+  display: none;
+}
+
+/* ── The single substantial glass surface: selected object ────── */
+
+.universe-detail-scrim {
+  position: absolute;
+  z-index: 29;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--universe-motion-panel) var(--ease-standard),
+    visibility 0s linear var(--universe-motion-panel);
+}
+
+.universe-detail-panel {
+  position: absolute;
+  z-index: 30;
+  top: 84px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  width: min(370px, calc(100% - 32px));
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--universe-line-strong);
+  border-radius: 4px 22px 4px 4px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--universe-ink) 4%, transparent), transparent 24%),
+    var(--universe-surface-raised);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--universe-ink) 5%, transparent),
+    -12px 0 50px color-mix(in srgb, var(--universe-shadow) 64%, transparent),
+    0 24px 72px var(--universe-shadow);
+  color: var(--universe-ink);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate3d(16px, 0, 0);
+  transition:
+    opacity var(--universe-motion-feedback) linear,
+    transform var(--universe-motion-panel) var(--ease-standard),
+    visibility 0s linear var(--universe-motion-panel);
+  backface-visibility: hidden;
+  contain: layout paint;
+}
+
+.universe-detail-panel.is-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0);
+  transition-delay: 0s;
+}
+
+.universe-detail-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 60px;
+  border-bottom: 1px solid var(--universe-line);
+  padding: 10px 12px 10px 18px;
+  background: color-mix(in srgb, var(--universe-ink) 2.5%, transparent);
+}
+
+.universe-detail-head > div {
+  min-width: 0;
+}
+
+.universe-detail-head > div > small {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--universe-faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.universe-detail-head > button {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  color: var(--universe-faint);
+  cursor: pointer;
+  transition:
+    border-color var(--universe-motion-feedback) var(--ease-standard),
+    background var(--universe-motion-feedback) var(--ease-standard),
+    color var(--universe-motion-feedback) var(--ease-standard),
+    transform var(--universe-motion-feedback) var(--ease-standard);
+}
+
+.universe-detail-head > button:hover {
+  border-color: var(--universe-line);
+  background: color-mix(in srgb, var(--universe-ink) 7%, transparent);
+  color: var(--universe-ink);
+}
+
+.universe-detail-head > button:active {
+  transform: scale(0.92);
+}
+
+.universe-detail-body {
+  min-height: 0;
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px;
+  scrollbar-color: var(--universe-line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.universe-detail-body::-webkit-scrollbar,
+.universe-search-results::-webkit-scrollbar {
+  width: 6px;
+}
+
+.universe-detail-body::-webkit-scrollbar-thumb,
+.universe-search-results::-webkit-scrollbar-thumb {
+  border-radius: var(--radius-pill);
+  background: var(--universe-line-strong);
+}
+
+.universe-detail-type {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--color-highlight);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.universe-detail-type > i {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.universe-detail-type.is-source { color: var(--color-warning); }
+.universe-detail-type.is-note { color: var(--color-running); }
+.universe-detail-type.is-card { color: var(--color-highlight); }
+.universe-detail-type.is-key_point { color: var(--color-evidence); }
+
+.universe-detail-title {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--universe-ink);
+  font-family: var(--font-editorial);
+  font-size: clamp(24px, 2vw, 29px);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.28;
+}
+
+.universe-detail-description {
+  margin: 11px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--universe-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.universe-detail-timing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 12px;
+  color: var(--universe-faint);
+  font-size: 10.5px;
+}
+
+.universe-detail-timing > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.universe-detail-timing strong {
+  color: var(--universe-muted);
+  font-weight: 500;
+}
+
+.universe-detail-relations {
+  display: grid;
+  gap: 8px;
+  margin: 20px 0 0;
+  padding: 0;
+}
+
+.universe-detail-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--universe-muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+}
+
+.universe-detail-section-title > small {
+  color: var(--universe-faint);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.universe-detail-relations > div:last-child {
+  display: grid;
+  gap: 6px;
+}
+
+.universe-detail-relation {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) 14px;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--universe-hairline);
+  border-radius: 12px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--universe-ink) 3%, transparent);
+  color: var(--universe-muted);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+
+.universe-detail-relation:hover {
+  border-color: color-mix(in srgb, var(--color-evidence) 30%, transparent);
+  background: color-mix(in srgb, var(--color-evidence) 13%, transparent);
+  color: var(--universe-ink);
+  transform: translateX(2px);
+}
+
+.universe-detail-relation > i {
+  width: 7px;
+  height: 7px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 28%, transparent);
+  box-shadow: 0 0 7px currentColor;
+}
+
+.universe-detail-relation > i.is-source { color: var(--color-warning); }
+.universe-detail-relation > i.is-note { color: var(--color-running); border-radius: 2px; }
+.universe-detail-relation > i.is-card { color: var(--color-highlight); }
+.universe-detail-relation > i.is-key_point { color: var(--color-evidence); transform: scale(0.76); }
+
+.universe-detail-relation > span {
+  min-width: 0;
+}
+
+.universe-detail-relation > span > small,
+.universe-detail-relation > span > strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.universe-detail-relation > span > small,
+.universe-detail-relation > svg {
+  color: var(--universe-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.universe-detail-relation > span > strong {
+  margin-top: 2px;
+  color: var(--universe-ink);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.universe-detail-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  border-top: 1px solid var(--universe-line);
+  padding: 12px 14px 14px;
+  background: color-mix(in srgb, var(--universe-panel) 94%, transparent);
+}
+
+.universe-detail-actions > :is(button, a) {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 1;
+  border: 1px solid var(--universe-line-strong);
+  border-radius: 12px;
+  padding: 0 12px;
+  background: color-mix(in srgb, var(--universe-ink) 6%, transparent);
+  color: var(--universe-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    border-color var(--universe-motion-feedback) var(--ease-standard),
+    background var(--universe-motion-feedback) var(--ease-standard),
+    color var(--universe-motion-feedback) var(--ease-standard),
+    transform var(--universe-motion-feedback) var(--ease-standard);
+}
+
+.universe-detail-actions > a,
+.universe-detail-actions > :first-child:last-child {
+  border-color: var(--color-action);
+  background: var(--color-action);
+  color: var(--color-on-action);
+}
+
+.universe-detail-actions > :is(button, a):hover {
+  border-color: color-mix(in srgb, var(--color-highlight) 46%, var(--universe-line-strong));
+  color: var(--universe-ink);
+}
+
+.universe-detail-actions > a:hover,
+.universe-detail-actions > :first-child:last-child:hover {
+  border-color: var(--color-action-hover);
+  background: var(--color-action-hover);
+  color: var(--color-on-action);
+}
+
+.universe-detail-actions > :is(button, a):active {
+  transform: translateY(1px);
+}
+
+/* ── Loading, errors, empty graph and transient feedback ───────── */
+
+.universe-status-overlay {
+  position: absolute;
+  z-index: 28;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 84px 18px 76px;
+  pointer-events: none;
+}
+
+.universe-status-card {
+  display: grid;
+  width: min(380px, 100%);
+  justify-items: center;
+  gap: 10px;
+  border: 1px solid var(--universe-line-strong);
+  border-radius: 4px 20px 4px 4px;
+  padding: 26px;
+  background: var(--universe-surface-raised);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--universe-ink) 5%, transparent),
+    0 24px 72px var(--universe-shadow);
+  color: var(--universe-muted);
+  text-align: center;
+  pointer-events: auto;
+}
+
+.universe-status-card > :is(h2, h3, strong) {
+  margin: 0;
+  color: var(--universe-ink);
+  font-family: var(--font-editorial);
+  font-size: 21px;
+  font-weight: 500;
+}
+
+.universe-status-card > p {
+  max-width: 36ch;
+  margin: 0;
+  color: var(--universe-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.universe-status-orbit {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 1px solid var(--universe-line-strong);
+  border-top-color: var(--color-evidence);
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 16px color-mix(in srgb, var(--color-evidence) 16%, transparent),
+    0 0 22px color-mix(in srgb, var(--color-evidence) 18%, transparent);
+  color: var(--color-evidence);
+  animation: universe-status-orbit 1400ms linear infinite;
+}
+
+.universe-status-card[role="alert"] .universe-status-orbit {
+  border-color: color-mix(in srgb, var(--color-danger) 58%, var(--universe-line));
+  color: var(--color-danger);
+  animation: none;
+}
+
+.universe-status-card:not([aria-busy="true"]) .universe-status-orbit {
+  animation: none;
+}
+
+.universe-status-card > :is(button, a) {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--color-action);
+  border-radius: var(--radius-pill);
+  padding: 0 16px;
+  background: var(--color-action);
+  color: var(--color-on-action);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.universe-status-card > :is(button, a):hover {
+  border-color: var(--color-action-hover);
+  background: var(--color-action-hover);
+}
+
+@keyframes universe-status-orbit {
+  to { transform: rotate(1turn); }
+}
+
+
+.universe-data-note {
+  position: absolute;
+  z-index: 11;
+  /* Clears the whole top band rather than one row. From 1280px up the band is a
+     single line at 18px, so this top clears it by 30px and nothing else is in
+     the way down to the bottom shelf; the narrower bands stack the state filter
+     under the search and each one that makes the band taller moves this note
+     down with it.
+
+     Both offsets used to be band overrides with no base: above 1280px neither
+     was declared, so the note fell back to its static position — measured at
+     the very top of the page, y0, straight across the search plate's own line.
+
+     It starts at the companion's own gutter, not at the shell gutter, because
+     her box reaches up into this band at short heights (measured 152px from the
+     top at 960x540), and the shell gutter parked the note on top of her.
+     `--universe-bar-left` is the same seat gutter every bottom plate steps to,
+     and the max-width keeps the note inside the page from there. */
+  top: 96px;
+  left: var(--universe-bar-left, calc(var(--universe-shell-left, 22px) + 340px));
+  max-width: min(380px, calc(100% - var(--universe-bar-left, 340px) - 44px));
+  border-left: 2px solid var(--color-warning);
+  padding: 4px 0 4px 9px;
+  color: var(--universe-faint);
+  font-size: 10.5px;
+  line-height: 1.45;
+  text-shadow: 0 2px 14px var(--universe-shadow);
+}
+
+/* ── Shared focus contract ─────────────────────────────────────── */
+
+.universe-search-clear:focus-visible,
+.universe-search-result:focus-visible,
+.universe-filter:focus-visible,
+.universe-layer-toggle:focus-visible,
+.universe-canvas-control:focus-visible,
+.universe-detail-relation:focus-visible,
+.universe-detail-head > button:focus-visible,
+.universe-detail-actions > :is(button, a):focus-visible,
+.universe-status-card > :is(button, a):focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ── Wide: the top row joins the intro card's own top edge ────────
+   From here up, the strip between the intro card and the shell's room-control
+   island is wide enough for the search plate, so the row moves off the return
+   pill's baseline (100px) and onto the card's top edge (18px) — the two plates
+   then share the first line of the page instead of sitting on the second.
+
+   The lane left of the row is the card's, so the pair is centred in what
+   remains; the island needs its own reservation on the right. */
+
+@media (min-width: 1280px) {
+  .hud-surface.page-19 .universe-page {
+    --universe-shell-top: 18px;
+    --universe-top-lane-left: 440px;
+  }
+
+  .universe-top-hud {
+    right: calc(var(--universe-shell-right, 22px) + 302px);
+  }
+
+  /* The lane between the intro card and the island is 516px at 1280 and 676px
+     at 1440, so a 500px search plus the 297px four-chip strip never fitted on
+     one line: the strip wrapped under the search at every width below ~1620px,
+     which reads as a stack, not as "beside the search". The chips tighten to
+     10px, and the search starts from a 200px basis — flex-wrap decides the line
+     from the basis, not from the shrunk size, so a 500px basis is what wrapped
+     it in the first place.
+
+     `flex: 1 1 200px` plus a 500px cap: the pair shares one line from 1280px
+     up, the search takes whatever the strip leaves (209px at 1280) until it
+     reaches its full width, and the row stays centred rather than stretched
+     once it does. */
+  .universe-search-shell {
+    flex: 1 1 200px;
+    min-width: 200px;
+    max-width: 500px;
+  }
+
+  .universe-filter {
+    gap: 4px;
+    padding: 0 6px;
+    font-size: 10px;
+  }
+
+  /* The row now shares its line with the island, so it also has to give the
+     island back its width while the detail panel is open. */
+  .universe-page[data-detail-open="true"] .universe-top-hud {
+    right: calc(var(--universe-shell-right, 22px) + 302px + 384px);
+  }
+}
+
+/* ── Compact desktop rail ──────────────────────────────────────── */
+
+@media (min-width: 960px) and (max-width: 1279px) {
+  .universe-top-hud {
+    gap: 10px;
+    right: var(--universe-shell-right, 16px);
+  }
+
+  /* The bottom grid needs no local overrides here: it is driven by the page-19
+     tokens, which already resolve to the shell gutter and the companion's seat.
+     This block used to re-declare them from the old Web layout (filter dock at
+     the raw shell gutter, layer dock at bottom:70px), which would put the lower
+     row on top of the companion. */
+
+  /* At this width the centred search shell used to run underneath the 370px
+     detail panel. Give the top row back the panel's width while it is open so
+     the shell re-centres in what is left. */
+  .universe-page[data-detail-open="true"] .universe-top-hud {
+    right: calc(var(--universe-shell-right, 16px) + 384px);
+  }
+
+  /* At this width the top row can no longer hold the search and the state
+     filter side by side, so the band runs to 206px and the note clears it. */
+  .universe-data-note {
+    top: 222px;
+  }
+}
+
+/* ── The instrument grid gives up its flexible parts as the window narrows ──
+   The upper row needs the layer dock (668px) and the key (286px) side by side
+   in the strip right of the companion's seat, which costs ~1412px of window.
+   The native reference frame is 1672px wide, so the full row is the default;
+   narrower windows — 125% / 150% system zoom, or a window dragged small — drop
+   the two parts that carry least, in order. The telemetry readout goes first
+   because it only restates numbers the filter dock already shows; the key goes
+   second because a legend is the one thing a first-time visitor can still do
+   without. */
+
+@media (max-width: 1439px) {
+  .universe-layer-readout {
+    display: none;
+  }
+}
+
+@media (max-width: 1199px) {
+  .universe-legend {
+    display: none;
+  }
+}
+
+/* ── Tablet: HUD stacks, bottom plates step ───────────────────── */
+
+@media (min-width: 640px) and (max-width: 959px) {
+  .universe-top-hud {
+    top: var(--universe-shell-top, max(14px, env(safe-area-inset-top)));
+    right: var(--universe-shell-right, max(16px, env(safe-area-inset-right)));
+  }
+
+  /* Below 960px the bottom plates no longer fit side by side in the strip right
+     of the companion's seat, so this band stacks them. The stack keeps the same
+     discipline as the wide grid: one bottom baseline, a 10px gap between rows,
+     and a seat gutter sized to the smaller companion this width draws. Without
+     the narrower gutter the layer dock ran 26px past the right edge at 836px;
+     with the old 64 / 112 / 120px offsets the layer dock overlapped the zoom
+     controls by 2px and the key by 24px. */
+  .hud-surface.page-19 .universe-page {
+    --universe-seat-gutter: 250px;
+  }
+
+  /* Both keep the left / right edge the wide grid gives them — the layer dock
+     stays in the left column, the zoom controls in the right one — and only
+     step up onto their own row. */
+  .universe-canvas-controls {
+    bottom: 16px;
+  }
+
+  .universe-layer-dock {
+    bottom: 80px;
+  }
+
+  .universe-page[data-detail-open="true"] .universe-canvas-controls {
+    right: auto;
+    left: var(--universe-shell-left, 16px);
+  }
+
+  .universe-page[data-detail-open="true"] :is(.universe-layer-dock, .universe-legend) {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .universe-detail-panel {
+    top: 128px;
+    right: 14px;
+    bottom: 14px;
+    width: min(356px, calc(100% - 28px));
+  }
+
+  /* The top band stacks the filter under the search at this width too. */
+  .universe-data-note {
+    top: 222px;
+    left: var(--universe-shell-left, 16px);
+  }
+}
+
+/* ── Phone: search + state filter stacked, sheet above nav ─────── */
+
+@media (max-width: 639px) {
+  .universe-page {
+    height: 100dvh;
+  }
+
+  .universe-top-hud {
+    top: max(10px, env(safe-area-inset-top));
+    right: max(10px, env(safe-area-inset-right));
+    left: max(10px, env(safe-area-inset-left));
+    gap: 8px;
+  }
+
+  .universe-search-shell {
+    height: 44px;
+  }
+
+  .universe-search-results {
+    max-height: min(40dvh, 280px);
+  }
+
+  /* Both plates take the full row at this width, so the pair stacks: search,
+     then the state filter as a four-column strip under it. */
+  .universe-filter-dock {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-radius: 4px 16px 4px 4px;
+    gap: 3px;
+    padding: 4px;
+  }
+
+  .universe-filter {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, auto) auto;
+    justify-content: center;
+    height: 38px;
+    gap: 5px;
+    padding: 0 6px;
+    font-size: 10.5px;
+  }
+
+  .universe-filter > small {
+    min-width: 18px;
+    height: 18px;
+    font-size: 9px;
+  }
+
+  .universe-filter > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .universe-layer-dock {
+    right: 10px;
+    bottom: calc(var(--mobile-nav-inset) + 10px);
+    left: 10px;
+    max-width: calc(100% - 20px);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .universe-layer-dock::-webkit-scrollbar {
+    display: none;
+  }
+
+  .universe-layer-toggle,
+  .universe-layer-readout {
+    flex: 0 0 auto;
+    min-height: 42px;
+  }
+
+  .universe-layer-readout {
+    /* Only restates counts the filter strip above already shows, and the width
+       it costs is the difference between the layer dock scrolling and not. */
+    display: none;
+  }
+
+  .universe-legend {
+    display: none;
+  }
+
+  .universe-canvas-controls {
+    /* Clear of the stacked top band: 10px gutter + 44px search + 8px gap + 48px
+       filter strip. */
+    top: 126px;
+    right: 10px;
+    bottom: auto;
+    flex-direction: column;
+    border-radius: var(--radius-md);
+  }
+
+  .universe-canvas-control,
+  .universe-canvas-readout {
+    width: 42px;
+    min-width: 42px;
+    height: 42px;
+    border-top: 1px solid var(--universe-line);
+    border-left: 0;
+  }
+
+  .universe-canvas-control:first-child,
+  .universe-canvas-controls > :first-child {
+    border-top: 0;
+  }
+
+  .universe-canvas-readout {
+    font-size: 9px;
+  }
+
+  .universe-page[data-detail-open="true"] .universe-canvas-controls {
+    right: 10px;
+  }
+
+  .universe-detail-scrim {
+    z-index: 58;
+    bottom: var(--mobile-nav-inset);
+    background: color-mix(in srgb, var(--universe-void-deep) 68%, transparent);
+  }
+
+  .universe-page[data-detail-open="true"] .universe-detail-scrim {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+
+  .universe-detail-panel {
+    z-index: 60;
+    position: absolute;
+    top: auto;
+    right: 0;
+    bottom: var(--mobile-nav-inset);
+    left: 0;
+    width: 100%;
+    max-height: min(78dvh, calc(100dvh - var(--mobile-nav-inset) - 64px));
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 24px 24px 0 0;
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--universe-ink) 5%, transparent), transparent 22%),
+      var(--universe-surface-raised);
+    transform: translate3d(0, 22px, 0);
+  }
+
+  .universe-detail-panel:focus {
+    outline: none;
+  }
+
+  .universe-detail-panel.is-open {
+    transform: translate3d(0, 0, 0);
+  }
+
+  .universe-detail-body {
+    padding: 18px;
+  }
+
+  .universe-detail-metrics {
+    grid-template-columns: 70px minmax(0, 1fr);
+  }
+
+  .universe-detail-ring {
+    width: 58px;
+    height: 58px;
+  }
+
+  .universe-status-overlay {
+    padding: 88px 14px calc(var(--mobile-nav-inset) + 60px);
+  }
+
+  .universe-status-card {
+    padding: 20px;
+  }
+
+
+  .universe-data-note {
+    /* 10px gutter + 44px search + 8px gap + 48px filter strip. */
+    top: 126px;
+    left: 10px;
+    max-width: calc(100% - 72px);
+  }
+}
+
+@media (max-width: 374px) {
+  .universe-layer-toggle {
+    padding-right: 7px;
+    padding-left: 7px;
+    font-size: 10px;
+  }
+
+  .universe-filter {
+    font-size: 9.5px;
+  }
+}
+
+@media (min-width: 960px) and (max-height: 700px) {
+  /* The top row keeps the page's one baseline at every height. `top: 14px` was
+     the Web layout's "below the 60px TopBar" offset; in the desktop shell the
+     14px band belongs to the shell's own heading chip, and a 48px search plate
+     parked there landed on top of it and under the room-control island. */
+  .universe-detail-panel {
+    top: 74px;
+    bottom: 12px;
+  }
+
+  .universe-detail-body {
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+}
+
+@media (hover: none) {
+  .universe-detail-relation:hover {
+    transform: none;
+  }
+}
+
+/* Custom properties resolve per element, and the paper-plate block further down
+   re-declares these on each plate with a higher specificity than `.universe-page`
+   — so a query that only targets `.universe-page` is silently dead inside every
+   plate. Match the plate scope explicitly. */
+@media (prefers-contrast: more) {
+  .universe-page,
+  .hud-surface .universe-page :is(
+    .universe-search-shell, .universe-search-results, .universe-filter-dock,
+    .universe-layer-dock, .universe-legend, .universe-canvas-controls,
+    .universe-detail-panel, .universe-canvas-tooltip,
+    .universe-data-note, .universe-status-card
+  ) {
+    --universe-muted: color-mix(in srgb, var(--universe-ink) 86%, transparent);
+    --universe-faint: color-mix(in srgb, var(--universe-ink) 72%, transparent);
+    --universe-line: color-mix(in srgb, var(--universe-ink) 30%, transparent);
+    --universe-line-strong: color-mix(in srgb, var(--universe-ink) 48%, transparent);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .universe-page,
+  .hud-surface .universe-page :is(
+    .universe-search-shell, .universe-search-results, .universe-filter-dock,
+    .universe-layer-dock, .universe-legend, .universe-canvas-controls,
+    .universe-detail-panel, .universe-canvas-tooltip,
+    .universe-data-note, .universe-status-card
+  ) {
+    --universe-glass: var(--universe-panel);
+    --universe-glass-strong: var(--universe-panel);
+    --universe-surface: var(--universe-panel);
+    --universe-surface-raised: var(--universe-panel);
+  }
+
+  .universe-detail-scrim {
+    background: var(--universe-void-deep);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .universe-status-orbit {
+    animation: none;
+  }
+
+  .universe-detail-panel,
+  .universe-detail-scrim {
+    transition-duration: 0.01ms;
+  }
+
+  .universe-search-shell,
+  .universe-search-shell::after,
+  .universe-search-clear,
+  .universe-search-result,
+  .universe-layer-toggle,
+  .universe-detail-relation,
+  .universe-detail-head > button,
+  .universe-detail-actions > :is(button, a),
+  .universe-canvas-control,
+  .universe-canvas-controls,
+  .universe-legend {
+    transition-duration: 0.01ms;
+  }
+
+  .universe-detail-relation:hover {
+    transform: none;
+  }
+}
+
+
+/* ── Desktop compact window (shell keeps a 720×405 floor) ───────────────
+ * The Web breakpoints above assume the universe owns the whole screen. In the
+ * desktop shell the companion keeps her seat at every size, so the bottom
+ * docks move to her right, the wide telemetry readout steps aside and the
+ * legend gives up its corner instead of shrinking below legibility.
+ *
+ * Starts at 640px so the phone band below keeps its own bottom stack (the
+ * mobile nav bar owns the last 10px of the shelf there).
+ */
+
+@media (min-width: 640px) and (max-width: 760px) {
+  .universe-legend {
+    display: none;
+  }
+
+  .universe-layer-dock {
+    /* Back on the lower baseline now that the state filter has left the bottom
+       strip for the top row. */
+    right: calc(var(--universe-shell-right, 22px) + 58px);
+    bottom: 10px;
+    left: 10px;
+    max-width: none;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .universe-layer-dock::-webkit-scrollbar {
+    display: none;
+  }
+
+  .universe-layer-toggle {
+    flex: 0 0 auto;
+  }
+
+  .universe-layer-readout {
+    display: none;
+  }
+
+  /* This band stacks the state filter under the search, so the band ends at
+     in-page 214 and the note clears it at 222 like the rail band — the top band
+     is positioned in page coordinates, so the compact shell's 42px page inset
+     does not move it. (It used to ask for 272px, which put the note's line
+     straight on the layer dock: the dock starts at 271 here.)
+
+     It joins the top row's own lane rather than the shell gutter: the companion
+     holds the left seat at this width too, and her box ends at in-page 223, so
+     the shell gutter parked the note 127px into her. The right reserve is the
+     58px the camera strip and the layer dock already step past. */
+  .universe-data-note {
+    top: 222px;
+    left: var(--universe-top-lane-left, 230px);
+    max-width: calc(100% - var(--universe-top-lane-left, 230px) - 80px);
+  }
+
+  /* The top row has no room for the filter beside the search at this width, so
+     the plate takes the whole second line and its chips go edge to edge — the
+     same four-column strip the phone band draws. */
+  .universe-filter-dock {
+    display: grid;
+    width: 100%;
+    height: auto;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-radius: 4px 16px 4px 4px;
+    gap: 3px;
+    padding: 4px;
+  }
+
+  .universe-filter {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, auto) auto;
+    justify-content: center;
+    height: auto;
+    min-height: 42px;
+    gap: 5px;
+    padding: 0 6px;
+    font-size: 10.5px;
+  }
+
+  .universe-filter > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The companion stands in front of the sky on page 19; in the compact shell
+     her seat is narrower than the 340px desktop gutter, so the bottom docks
+     clear her at 250px instead.
+
+     The right strip is one column at every size: the zoom stack owns it, and
+     the strip's 58px (48px plate + 10px column gap) is what the layer dock
+     steps past so the two plates in the same strip keep one right edge per
+     column. Before this the rows ran to `right: 10px` while the top row used
+     the 22px gutter, and two plates in the same strip claimed two right
+     edges. */
+  .hud-surface.page-19.comp-left .universe-layer-dock {
+    left: 250px;
+    right: calc(var(--universe-shell-right, 22px) + 58px);
+  }
+
+  /* The zoom stack is the right column of the shelf in this band: it shares the
+     lower row's baseline with the layer dock. Its readout steps aside — it only
+     restates the zoom the map already draws, and the 42px it costs is what
+     keeps the stack inside its column at the 720px floor. */
+  .universe-canvas-controls {
+    top: auto;
+    right: var(--universe-shell-right, 22px);
+    bottom: 10px;
+    left: auto;
+    flex-direction: column;
+    border-radius: var(--radius-md);
+  }
+
+  .universe-canvas-control {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    border-top: 1px solid var(--universe-line);
+    border-left: 0;
+  }
+
+  .universe-canvas-control:first-child {
+    border-top: 0;
+  }
+
+  .universe-canvas-readout {
+    display: none;
+  }
+
+  /* Overrides the tablet band's "move the stack to the left gutter while the
+     panel is open" rule, which would otherwise pair a left edge with the right
+     edge above and stretch the column across the page. */
+  .universe-page[data-detail-open="true"] .universe-canvas-controls {
+    right: var(--universe-shell-right, 22px);
+    left: auto;
+  }
+
+  .universe-detail-panel {
+    top: 66px;
+    right: 10px;
+    bottom: 10px;
+    width: min(340px, calc(100% - 20px));
+  }
+}
+
+/* ── The shell's floor: 720x405 ──────────────────────────────────
+   At the shell's minimum height the page box is 335px tall. The two-line top
+   band ends at in-page 214 and the bottom shelf starts at 271, which leaves a
+   57px strip — and the camera stack is a 166px column. Pinned to the shelf it
+   reached up to 159 and painted straight over the state filter's own line
+   (measured 46x55px at 720x405, which only appeared once the filter moved up
+   here). Turning the column into a row in that strip is what keeps every
+   control at its 40px target and the four-up filter strip at its full width:
+   shrinking the controls or the strip's chips to fit the column's height was
+   the alternative, and both cost more than the camera stack's shape. */
+
+@media (min-width: 640px) and (max-width: 760px) and (max-height: 460px) {
+  .universe-canvas-controls {
+    top: 222px;
+    right: var(--universe-shell-right, 22px);
+    bottom: auto;
+    flex-direction: row;
+  }
+
+  /* Dividers turn with the stack. `:first-child` is the zoom-in button — the
+     readout that follows it is the hidden one. */
+  .universe-canvas-control {
+    border-top: 0;
+    border-left: 1px solid var(--universe-line);
+  }
+
+  .universe-canvas-control:first-child {
+    border-left: 0;
+  }
+
+  .universe-data-note {
+    /* Shares the strip with the camera row: four 40px controls, their three
+       dividers and the 12px gap between the two plates. */
+    max-width: calc(100% - var(--universe-top-lane-left, 230px) - 22px - 178px);
+  }
+}
+
+/* ==========================================================================
+   Animal-Crossing HUD plates — V3.1 mockup contract (hud-pages.css)
+   The floating star-map plates join the same plate family as the shell HUD:
+   cream paper, thick cream borders, organic asymmetric radii, warm shadows.
+   These are visual-only overrides appended last; every layout rule above
+   (positions, flex, responsive grids) stays authoritative.
+   ========================================================================== */
+
+.hud-surface .universe-search-shell,
+.hud-surface .universe-search-results,
+.hud-surface .universe-filter-dock,
+.hud-surface .universe-layer-dock,
+.hud-surface .universe-legend,
+.hud-surface .universe-canvas-controls,
+.hud-surface .universe-detail-panel,
+.hud-surface .universe-canvas-tooltip,
+.hud-surface .universe-toast,
+.hud-surface .universe-data-note,
+.hud-surface .universe-status-card,
+.hud-surface .universe-action {
+  /* Re-theme every descendant that reads --universe-* / --color-* onto
+     warm paper, so inner rules (relations, timing, scrollbar, dots) adapt
+     without being redeclared. Canvas colors are read from .universe-page
+     and are unaffected. */
+  /* Declaring the variable is not enough: `color` was already computed on the
+     ancestor from the cream ink, so the plate text inherited light-on-light.
+     State the property here too, resolved against this element's own ink. */
+  color: var(--universe-ink);
+  --universe-ink: #30231a;
+  --universe-muted: rgba(48, 35, 26, 0.84);
+  --universe-faint: rgba(48, 35, 26, 0.72);
+  --universe-line: rgba(73, 47, 29, 0.24);
+  --universe-line-strong: rgba(66, 41, 25, 0.42);
+  --universe-hairline: rgba(73, 47, 29, 0.14);
+  --universe-panel: #fff9e8;
+  --universe-surface: #fff9e8;
+  --universe-surface-raised: #fff9e8;
+  --universe-shadow: rgba(43, 27, 17, 0.24);
+  /* State hues darkened for cream paper (canvas keeps the night triad). */
+  --color-highlight: #a85432;
+  --color-warning: #9c7426;
+  --color-running: #2f6b6d;
+  --color-evidence: #3f7d84;
+  --color-danger: #b34a32;
+  --color-success: #5d7a52;
+  /* Warm rust focus on paper (DESIGN.md day focus rule). */
+  --color-focus-ring: #8f3518;
+  --universe-ac-shadow: 0 12px 28px rgba(43, 27, 17, 0.22), 0 3px 8px rgba(43, 27, 17, 0.14);
+  --universe-ac-plate: #fff9e8;
+  --universe-ac-plate-deep: #fff2cf;
+  --universe-ac-border: rgba(255, 252, 235, 0.78);
+  --universe-ac-border-strong: rgba(255, 252, 235, 0.9);
+}
+
+/* --- search shell --------------------------------------------------------- */
+
+.hud-surface .universe-search-shell {
+  border: 3px solid var(--universe-ac-border-strong);
+  border-radius: 19px 24px 17px 21px;
+  background: var(--universe-ac-plate);
+  box-shadow: var(--universe-ac-shadow);
+  color: var(--universe-muted);
+}
+
+.hud-surface .universe-search-shell:focus-within {
+  border-color: var(--universe-ac-border-strong);
+  background: #fffdf4;
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--color-focus-ring) 20%, transparent),
+    var(--universe-ac-shadow);
+}
+
+.hud-surface .universe-search-shell::after {
+  /* The neon glow underline belongs to the old glass look. */
+  display: none;
+}
+
+.hud-surface .universe-search-results {
+  border: 3px solid var(--universe-ac-border-strong);
+  border-radius: 21px 26px 18px 24px;
+  background: var(--universe-ac-plate);
+  box-shadow: var(--universe-ac-shadow);
+}
+
+.hud-surface .universe-search-result {
+  border-radius: 13px 16px 12px 15px;
+}
+
+.hud-surface .universe-search-result:hover {
+  background: rgba(73, 47, 29, 0.07);
+  color: var(--universe-ink);
+}
+
+.hud-surface .universe-search-result[aria-selected="true"] {
+  background: #f3d678;
+  color: #49372a;
+  box-shadow: 0 4px 10px rgba(0, 12, 24, 0.2);
+}
+
+
+
+/* --- docks (filter / layer / legend) --------------------------------------- */
+
+.hud-surface .universe-filter-dock,
+.hud-surface .universe-layer-dock,
+.hud-surface .universe-legend {
+  border: 3px solid var(--universe-ac-border);
+  border-radius: 23px 29px 20px 27px / 27px 21px 29px 22px;
+  background: var(--universe-ac-plate);
+  box-shadow: var(--universe-ac-shadow);
+}
+
+.hud-surface .universe-filter,
+.hud-surface .universe-layer-toggle {
+  border-radius: 14px 18px 13px 16px;
+  font-weight: 500;
+}
+
+.hud-surface .universe-filter:hover,
+.hud-surface .universe-layer-toggle:hover {
+  background: rgba(73, 47, 29, 0.07);
+  color: var(--universe-ink);
+}
+
+.hud-surface .universe-filter.is-active,
+.hud-surface .universe-filter[aria-pressed="true"] {
+  background: #f3d678;
+  box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15), 0 4px 10px rgba(0, 12, 24, 0.2);
+  color: #49372a;
+}
+
+.hud-surface .universe-filter > small {
+  background: rgba(73, 47, 29, 0.08);
+}
+
+.hud-surface .universe-layer-readout {
+  border-left: 1px solid var(--universe-line);
+}
+
+/* Legend / orb dots keep the canvas night triad via currentColor; on cream
+   they need a paper ring to stay crisp. */
+.hud-surface .universe-legend > span > i,
+.hud-surface .universe-search-orb,
+.hud-surface .universe-canvas-tooltip-mark,
+.hud-surface .universe-filter > i {
+  box-shadow:
+    0 0 0 1.5px rgba(255, 252, 235, 0.9),
+    0 0 0 2.5px rgba(48, 35, 26, 0.28);
+}
+
+/* --- canvas controls -------------------------------------------------------- */
+
+.hud-surface .universe-canvas-controls {
+  border: 3px solid var(--universe-ac-border);
+  border-radius: 19px 24px 17px 21px;
+  background: var(--universe-ac-plate);
+  box-shadow: var(--universe-ac-shadow);
+}
+
+.hud-surface .universe-canvas-control:hover:not(:disabled) {
+  background: rgba(73, 47, 29, 0.07);
+  color: var(--universe-ink);
+}
+
+/* --- detail panel ------------------------------------------------------------ */
+
+.hud-surface .universe-detail-panel {
+  border: 4px solid var(--universe-ac-border-strong);
+  border-radius: 27px 34px 24px 31px;
+  background:
+    radial-gradient(circle at 20% 0, rgba(255, 255, 255, 0.62), transparent 34%),
+    var(--universe-ac-plate);
+  box-shadow: 0 14px 30px rgba(45, 28, 17, 0.24), 0 3px 9px rgba(45, 28, 17, 0.13);
+}
+
+.hud-surface .universe-detail-actions {
+  border-top: 1px solid var(--universe-line);
+  background: var(--universe-ac-plate-deep);
+}
+
+/* --- tooltip / toast / status ------------------------------------------------ */
+
+.hud-surface .universe-canvas-tooltip {
+  border: 3px solid var(--universe-ac-border-strong);
+  border-radius: 16px 20px 14px 18px;
+  background: var(--universe-ac-plate);
+  box-shadow: var(--universe-ac-shadow);
+}
+
+.hud-surface .universe-data-note {
+  border: 3px solid var(--universe-ac-border-strong);
+  border-radius: 19px 24px 17px 21px;
+  background: var(--universe-ac-plate);
+  box-shadow: var(--universe-ac-shadow);
+}
+
+.hud-surface .universe-status-card {
+  border: 4px solid var(--universe-ac-border-strong);
+  border-radius: 27px 34px 24px 31px;
+  background: var(--universe-ac-plate);
+  box-shadow: 0 14px 30px rgba(45, 28, 17, 0.24), 0 3px 9px rgba(45, 28, 17, 0.13);
+}

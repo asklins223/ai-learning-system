@@ -8,6 +8,7 @@ import {
   cardGenerationExposureEligibilityV1Schema,
   cardGenerationCandidateV1Schema,
   desktopCreateCardGenerationRunRequestV2Schema,
+  isCardGenerationReviewOpen,
 } from "./card-generation-desktop-contracts.ts";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
@@ -129,8 +130,7 @@ test("exposure eligibility is strict and exposes only public policy state", () =
   }));
 });
 
-test("failed candidates may omit an activation binding plan without becoming a server error", () => {
-  const candidate = cardGenerationCandidateV1Schema.parse({
+test("failed candidates may omit an activation binding plan without becoming a server error", () => {  const candidate = cardGenerationCandidateV1Schema.parse({
     version: 1,
     candidateId: "44444444-4444-4444-8444-444444444444",
     candidateRevisionId: "55555555-5555-4555-8555-555555555555",
@@ -155,4 +155,32 @@ test("failed candidates may omit an activation binding plan without becoming a s
   });
   assert.equal(candidate.candidateEvidenceBindingPlanHash, null);
   assert.equal(candidate.isReviewReady, false);
+});
+
+/**
+ * needs_attention 的 run 常常仍持有通过门禁、未发布的候选：worker 在 deck gate
+ * 失败时明确保留它们，并要求「用户仍应能保留并启用通过门禁的候选」。API 的
+ * review / activate / close 与桌面审核页共用这一个谓词 —— 它一旦退回只认
+ * review_ready，审核页就会拿着候选却一个按钮都不给，任务卡死。
+ */
+test("review stays open for needs_attention runs as well as review_ready", () => {
+  assert.equal(isCardGenerationReviewOpen("review_ready"), true);
+  assert.equal(isCardGenerationReviewOpen("needs_attention"), true);
+  for (const status of [
+    "queued",
+    "source_sealing",
+    "planning",
+    "authoring",
+    "checking",
+    "activating",
+    "activated",
+    "closed_without_activation",
+    "no_cards_recommended",
+    "cancelled",
+    "failed",
+    "stale",
+    "not_a_status",
+  ]) {
+    assert.equal(isCardGenerationReviewOpen(status), false, `${status} must not open the review`);
+  }
 });

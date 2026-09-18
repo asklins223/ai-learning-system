@@ -1,0 +1,800 @@
+/*
+ * Page 14 「今日学习」专属样式（2026-09-18 设计重构）。
+ *
+ * 页面结构：日期行 → 判断条 → 待处理分诊 / 今天的操作 / 伴星栏。
+ * 全部作用域限定在 `.hud-surface .day-route[data-page="today-log"]` 下，选择器
+ * 特异度高于 hud-surface.css 里为旧"三张票"布局写的同名单类规则（本文件在
+ * main.tsx 的 import 链里早于 hud-pages.css 求值，靠特异度取胜，不靠加载顺序）。
+ *
+ * 视觉语言沿用 V3.1 HUD 纸面系统：奶油纸、不规则圆角、暖棕墨色、衬线标题。
+ * 本页在纸面系统内再收一层自己的 token（--log-*），改配色只动这一处。
+ */
+
+/* ---------- 本页设计 token ---------- */
+
+.hud-surface .day-route[data-page="today-log"]{
+  /* 文字：按纸面底色（#f1e3c8 日间 / #fff2cf 夜间）验过对比度。
+     最浅的一档 --log-meta(#6b5646) 在 #f1e3c8 上是 5.4:1，--log-alarm-meta
+     在异常卡的 #f6e0cd 上是 6.2:1，两家都过 WCAG AA（需要 4.5:1）。 */
+  --log-ink:#33251a;
+  --log-body:#4a3728;
+  --log-meta:#6b5646;
+  --log-time:#63503f;
+  --log-rule:rgba(155,121,84,.26);
+  --log-rule-solid:#c9ad86;
+  --log-hover:rgba(255,252,238,.72);
+  --log-focus:#b85a31;
+  --log-card:#fffaea;
+  /* 全站既有的强缓出曲线（styles.css 的 status-island / 侧栏展开同款） */
+  --log-ease:cubic-bezier(.22,1,.36,1);
+
+  /* 异常：陶土纸 + 奶油厚描边，与页面的暖纸同族但更"烫"一档 */
+  --log-alarm-bg:#f6e0cd;
+  --log-alarm-ink:#7a3b2c;
+  --log-alarm-meta:#6b4a3a;
+  --log-alarm-icon-bg:#f0d3c4;
+  --log-alarm-icon-ink:#8a4433;
+
+  /* 不规则圆角（Cut-Corner Rule）：整页只用这一组，避免每个卡片随手取值 */
+  --log-r-sm:10px 14px 10px 13px;
+  --log-r-md:12px 17px 11px 15px;
+
+  display:grid;
+  /* 判断条横跨整幅（它是页面的定调带），正文才分主栏与伴星栏 */
+  grid-template-columns:minmax(0,1fr) 252px;
+  grid-template-rows:auto auto minmax(0,1fr);
+  column-gap:30px;
+  row-gap:15px;
+  padding:22px 30px 20px;
+}
+
+/* ---------- 日期行 ----------
+   外壳 chip 已经是这一页的标题，页内不再放第二个大标题；这一行只交代"哪一天"。 */
+
+.hud-surface .day-route[data-page="today-log"] > .day-head{
+  grid-column:1/-1;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+}
+.hud-surface .day-route[data-page="today-log"] .day-head__date{
+  display:flex;
+  align-items:baseline;
+  gap:10px;
+  min-width:0;
+  margin:0;
+  font:600 12px/1.4 "Noto Serif SC","Songti SC",serif;
+  color:var(--log-ink);
+}
+.hud-surface .day-route[data-page="today-log"] .day-head__date time{
+  font-variant-numeric:tabular-nums;
+}
+.hud-surface .day-route[data-page="today-log"] .day-head__date span{
+  font:600 10.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.08em;
+  color:var(--log-meta);
+}
+.hud-surface .day-route[data-page="today-log"] .day-head__refresh{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  min-height:30px;
+  padding:0 12px;
+  font-size:10px;
+  flex:none;
+}
+
+/* ---------- 判断条：今天记录了几件 / 几件待处理 / 从几点到几点 ----------
+   数字先说话（> 判断句 > 分解句），动作只在真有事务待处理时出现。
+   数字与判断句分开放，是为了避免同一屏把同一个数说两遍。 */
+
+.hud-surface .day-route[data-page="today-log"] > .day-verdict{
+  grid-column:1/-1;
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:12px 22px;
+  padding:13px 18px;
+  border:2px solid rgba(255,252,235,.8);
+  border-radius:var(--log-r-md);
+  background:linear-gradient(180deg,rgba(255,250,232,.94),rgba(255,246,220,.76));
+  box-shadow:0 7px 18px rgba(45,28,17,.09);
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metrics{
+  display:flex;
+  align-items:flex-start;
+  margin:0;
+  flex:none;
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric{
+  min-width:78px;
+  padding:0 18px;
+  border-right:1px dashed var(--log-rule);
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric:first-child{
+  padding-left:2px;
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric:last-child{
+  border-right:0;
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric dt{
+  font-size:10px;
+  line-height:1.4;
+  letter-spacing:.1em;
+  color:var(--log-meta);
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric dd{
+  margin:3px 0 0;
+  font:700 25px/1.05 "Noto Serif SC","Songti SC",serif;
+  font-variant-numeric:tabular-nums;
+  color:var(--log-ink);
+}
+/* 待处理是唯一要读者动手的那一枚，给它这一页唯一的警示色 */
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric[data-alarm] dd{
+  color:#a4402b;
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric[data-metric="span"]{
+  min-width:0;
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__metric[data-metric="span"] dd{
+  font:600 15px/1.75 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:-.01em;
+  color:var(--log-body);
+  white-space:nowrap;
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-verdict__copy{
+  flex:1 1 200px;
+  min-width:0;
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__copy b{
+  display:block;
+  font:650 14px/1.45 "Noto Serif SC","Songti SC",serif;
+  color:var(--log-ink);
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__copy span{
+  display:block;
+  margin-top:3px;
+  overflow:hidden;
+  font-size:11px;
+  line-height:1.5;
+  color:var(--log-meta);
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.hud-surface .day-route[data-page="today-log"] .day-verdict__act{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  min-height:32px;
+  padding:0 14px;
+  font-size:10.5px;
+  flex:none;
+}
+
+/* ---------- 小节标题：一条标题 + 一行计数 + 一条通到右缘的细线 ---------- */
+
+.hud-surface .day-route[data-page="today-log"] .day-section-head{
+  display:flex;
+  align-items:baseline;
+  gap:10px;
+  margin:0 0 9px;
+}
+.hud-surface .day-route[data-page="today-log"] .day-section-head b{
+  flex:none;
+  font:650 13.5px/1.4 "Noto Serif SC","Songti SC",serif;
+  letter-spacing:.01em;
+  color:var(--log-ink);
+}
+.hud-surface .day-route[data-page="today-log"] .day-section-head span{
+  flex:none;
+  font-size:10.5px;
+  line-height:1.5;
+  color:var(--log-meta);
+}
+.hud-surface .day-route[data-page="today-log"] .day-section-head:after{
+  content:"";
+  flex:1;
+  align-self:center;
+  height:1px;
+  background:var(--log-rule);
+}
+
+/* ---------- 主滚动区：分诊 + 操作日志 ---------- */
+
+.hud-surface .day-route[data-page="today-log"] > .day-route__state{
+  grid-column:1/-1;
+  grid-row:2/-1;
+  /* hud-surface.css 给这张状态纸写的是 absolute（旧三票布局的坐标），
+     在本文档流网格里必须收回成 static，否则它会脱出网格、无视页头与右栏。 */
+  position:static;
+  display:grid;
+  min-height:0;
+}
+.hud-surface .day-route[data-page="today-log"] > .day-route__state .pinboard{
+  height:100%;
+}
+
+.hud-surface .day-route[data-page="today-log"] > .day-log{
+  grid-column:1;
+  grid-row:3;
+  display:flex;
+  flex-direction:column;
+  gap:20px;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding-right:6px;
+  /* 「处理这 N 件」靠它平滑滚到分诊区；reduced-motion 下在文末退回 auto */
+  scroll-behavior:smooth;
+}
+/* 可聚焦的滚动容器：键盘读者要能滚它，聚焦时给出明确反馈 */
+.hud-surface .day-route[data-page="today-log"] > .day-log:focus-visible{
+  outline:2px solid var(--log-focus);
+  outline-offset:2px;
+  border-radius:8px;
+}
+
+/* ---------- 待处理分诊 ---------- */
+
+.hud-surface .day-route[data-page="today-log"] .day-triage{
+  display:flex;
+  flex-direction:column;
+  flex:none;
+}
+
+/* 多数组共用的处置语：说一次，取代卡片里逐行复读同一句话 */
+.hud-surface .day-route[data-page="today-log"] .day-triage__step{
+  margin:0 0 9px;
+  padding:7px 12px;
+  border-radius:var(--log-r-sm);
+  background:rgba(138,68,51,.07);
+  font-size:11px;
+  line-height:1.55;
+  color:var(--log-alarm-ink);
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-triage__list{
+  list-style:none;
+  margin:0;
+  padding:0;
+  display:grid;
+  gap:8px;
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-anomaly{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  gap:12px;
+  align-items:center;
+  padding:11px 13px 11px 11px;
+  border:2px solid rgba(255,252,235,.78);
+  border-radius:var(--log-r-md);
+  background:var(--log-alarm-bg);
+  box-shadow:0 5px 13px rgba(45,28,17,.10);
+  transition:transform 160ms var(--log-ease),box-shadow 160ms ease;
+}
+.hud-surface .day-route[data-page="today-log"] .day-anomaly:active{
+  transform:translateY(0);
+  box-shadow:0 3px 9px rgba(45,28,17,.14);
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-anomaly__icon{
+  display:grid;
+  place-items:center;
+  width:26px;
+  height:26px;
+  border-radius:9px;
+  background:var(--log-alarm-icon-bg);
+  color:var(--log-alarm-icon-ink);
+  box-shadow:inset 0 0 0 1px rgba(138,68,51,.20);
+  flex:none;
+}
+/* 只有"还在等"的事务转轮；"已经坏了"的静置警标。
+   判定由渲染层算好写在 data-phase 上，CSS 不重复状态知识。 */
+.hud-surface .day-route[data-page="today-log"] .day-anomaly[data-phase="inflight"] .day-anomaly__icon svg{
+  animation:day-log-spin 1.6s linear infinite;
+}
+@keyframes day-log-spin{
+  to{transform:rotate(360deg)}
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-anomaly__main{
+  min-width:0;
+}
+/*
+ * 标题允许两行。
+ *
+ * 异常标题常常就是笔记正文（"《间隔重复是一种学习策略，通过在不同时间间隔复习
+ * 材料来增强长期记忆。核心原理是记忆痕迹衰减与强化…"），单行 nowrap + ellipsis
+ * 会把它截成半句 —— 一行读不出所以然的字比两行读得懂的更占地方。
+ */
+.hud-surface .day-route[data-page="today-log"] .day-anomaly__title{
+  display:-webkit-box;
+  overflow:hidden;
+  -webkit-box-orient:vertical;
+  -webkit-line-clamp:2;
+  font:650 13px/1.5 "Noto Serif SC","Songti SC",serif;
+  color:var(--log-alarm-ink);
+}
+.hud-surface .day-route[data-page="today-log"] .day-anomaly__meta{
+  display:flex;
+  align-items:baseline;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:5px;
+  font-size:10.5px;
+  line-height:1.5;
+  color:var(--log-alarm-meta);
+}
+/* 处置语被提到组头之后，多数卡片这一行是空的：不留一段空白撑高卡片 */
+.hud-surface .day-route[data-page="today-log"] .day-anomaly__meta:empty{
+  display:none;
+}
+/* 同一件事重复了多少次 —— 藏在 ×N 里就等于假装只发生了一次。
+   归并后的组按体量排序，最厚的一摞排最前，所以这一枚会出现在第一行。 */
+.hud-surface .day-route[data-page="today-log"] .day-anomaly__count{
+  display:inline-flex;
+  padding:2px 8px;
+  border:1px solid rgba(138,68,51,.24);
+  border-radius:999px;
+  background:rgba(138,68,51,.16);
+  font:700 11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--log-alarm-ink);
+  flex:none;
+}
+.hud-surface .day-route[data-page="today-log"] .day-anomaly__stuck{
+  font-style:italic;
+}
+
+/* 展开器：显式动作，读者知道自己在要什么 */
+.hud-surface .day-route[data-page="today-log"] .day-triage__more{
+  align-self:flex-start;
+  margin-top:10px;
+  padding:6px 14px;
+  border:1px dashed var(--log-rule-solid);
+  border-radius:999px;
+  background:transparent;
+  font-size:10.5px;
+  line-height:1.5;
+  color:var(--log-body);
+  cursor:pointer;
+  transition:background-color 140ms ease;
+}
+.hud-surface .day-route[data-page="today-log"] .day-triage__more:hover{
+  background:var(--log-hover);
+}
+
+/* ---------- 今天的操作（主叙事） ---------- */
+
+.hud-surface .day-route[data-page="today-log"] .day-stream{
+  display:flex;
+  flex-direction:column;
+  flex:none;
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-log__stream{
+  list-style:none;
+  margin:0;
+  padding:0;
+  display:grid;
+  gap:2px;
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-log__entry{
+  position:relative;
+  display:grid;
+  grid-template-columns:48px 26px minmax(0,1fr) auto;
+  gap:11px;
+  align-items:center;
+  padding:8px 10px 8px 4px;
+  border-radius:var(--log-r-sm);
+  transition:background-color 140ms ease;
+}
+.hud-surface .day-route[data-page="today-log"] .day-log__entry:active{
+  background:rgba(255,250,232,.92);
+}
+
+/*
+ * 时间线：一条贯穿整列的竖轨，节点用不透明底色把它"压"在下面。
+ *
+ * 旧实现把线挂在节点的 :after 上（top:26px;bottom:-5px），算出来的高度只有
+ * 5px，而相邻节点的间距约 40px —— 实测覆盖率 13%，视觉上是一截截断开的短线头。
+ * 改成"整行铺轨 + 节点遮罩"后，行高怎么变都不会再断。
+ */
+.hud-surface .day-route[data-page="today-log"] .day-log__entry:before{
+  content:"";
+  position:absolute;
+  /* 48px 时间列 + 11px 间距 + 26px 节点的一半 - 线宽的一半 */
+  left:71px;
+  top:0;
+  /* 跨过 grid 的 2px 行间距，保证上下两根轨首尾相接 */
+  bottom:-2px;
+  width:2px;
+  border-radius:2px;
+  background:var(--log-rule);
+}
+.hud-surface .day-route[data-page="today-log"] .day-log__entry:first-child:before{
+  top:50%;
+}
+.hud-surface .day-route[data-page="today-log"] .day-log__entry:last-child:before{
+  bottom:50%;
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-log__time{
+  font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-variant-numeric:tabular-nums;
+  letter-spacing:.02em;
+  color:var(--log-time);
+  text-align:right;
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-log__node{
+  position:relative;
+  /* 盖在竖轨上面，用不透明底把轨"切断"成节点之间的连线 */
+  z-index:1;
+  display:grid;
+  place-items:center;
+  width:26px;
+  height:26px;
+  border-radius:9px;
+  background:var(--log-card);
+  box-shadow:inset 0 0 0 1px rgba(73,47,29,.16),0 2px 5px rgba(45,28,17,.10);
+  flex:none;
+}
+
+.hud-surface .day-route[data-page="today-log"] .day-log__body{
+  min-width:0;
+}
+.hud-surface .day-route[data-page="today-log"] .day-log__body b{
+  display:block;
+  overflow:hidden;
+  font:650 13.5px/1.5 "Noto Serif SC","Songti SC",serif;
+  color:var(--log-body);
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.hud-surface .day-route[data-page="today-log"] .day-log__body small{
+  display:block;
+  margin-top:2px;
+  overflow:hidden;
+  font-size:11px;
+  line-height:1.55;
+  color:var(--log-meta);
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+/* 行内"查看"按钮：比全站按钮紧凑一档，不与正文抢视觉 */
+.hud-surface .day-route[data-page="today-log"] .day-jump{
+  min-height:28px;
+  padding:0 12px;
+  font-size:10px;
+  flex:none;
+}
+
+/* ---------- 空的一天的出口 ----------
+   真实数据里更常见的是"只有异常、没有正向操作"，旧版这一支只给一句散文描述、
+   一个按钮都没有（而整天空那一支却有按钮）。两处共用这一块。 */
+
+.hud-surface .day-route[data-page="today-log"] .day-stream__empty{
+  display:flex;
+  flex-direction:column;
+  align-items:flex-start;
+  padding:20px 22px;
+  border:2px dashed var(--log-rule-solid);
+  border-radius:var(--log-r-md);
+  background:rgba(255,250,235,.5);
+}
+.hud-surface .day-route[data-page="today-log"] .day-stream__empty b{
+  font:650 13.5px/1.5 "Noto Serif SC","Songti SC",serif;
+  color:var(--log-body);
+}
+.hud-surface .day-route[data-page="today-log"] .day-stream__empty p{
+  margin:5px 0 0;
+  font-size:11px;
+  line-height:1.6;
+  color:var(--log-meta);
+}
+.hud-surface .day-route[data-page="today-log"] .day-stream__empty .actions{
+  margin-top:13px;
+}
+
+/* ---------- 截断 / 说明 ---------- */
+
+.hud-surface .day-route[data-page="today-log"] .day-log__note{
+  flex:none;
+  margin:10px 0 0;
+  padding:10px 2px 2px;
+  border-top:1px dashed var(--log-rule-solid);
+  font-size:11px;
+  line-height:1.6;
+  color:var(--log-meta);
+  text-align:center;
+}
+
+/* ---------- 伴星栏 ---------- */
+
+.hud-surface .day-route[data-page="today-log"] > .day-rail{
+  position:relative;
+  grid-column:2;
+  grid-row:3;
+  display:flex;
+  flex-direction:column;
+  align-items:flex-start;
+  min-height:0;
+  overflow-y:auto;
+  padding:2px 0 2px 24px;
+}
+/* 分隔线用会淡出的细线，不用整条实边：伴星栏只有一张卡，实边会把下方空出来的
+   纸面读成一个空盒子。淡出到 76% 处收尾，读起来是"这一列到此为止"。 */
+.hud-surface .day-route[data-page="today-log"] > .day-rail:before{
+  content:"";
+  position:absolute;
+  left:0;
+  top:2px;
+  bottom:0;
+  width:1px;
+  background:linear-gradient(180deg,var(--log-rule-solid) 0,var(--log-rule-solid) 30%,transparent 76%);
+}
+/* .tag 是 butter 底色，纸面也是暖色：给标签补一圈纸边，边界才读得出来 */
+.hud-surface .day-route[data-page="today-log"] .day-rail > .tag{
+  flex:none;
+  margin-bottom:10px;
+  box-shadow:inset 0 0 0 1px rgba(73,47,29,.24);
+}
+.hud-surface .day-route[data-page="today-log"] .day-rail__card{
+  width:100%;
+  padding:14px 15px 15px;
+  border:2px solid rgba(255,252,235,.78);
+  border-radius:var(--log-r-md);
+  background:linear-gradient(180deg,rgba(255,250,232,.9),rgba(255,246,220,.66));
+  box-shadow:0 5px 14px rgba(45,28,17,.08);
+}
+.hud-surface .day-route[data-page="today-log"] .day-rail__card b{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font:650 13px/1.5 "Noto Serif SC","Songti SC",serif;
+  color:var(--log-ink);
+}
+.hud-surface .day-route[data-page="today-log"] .day-rail__card p{
+  margin:7px 0 0;
+  font-size:11px;
+  line-height:1.6;
+  color:var(--log-body);
+}
+.hud-surface .day-route[data-page="today-log"] .day-rail__why{
+  color:var(--log-meta);
+}
+.hud-surface .day-route[data-page="today-log"] .day-rail__card .button{
+  margin-top:12px;
+  min-height:32px;
+  font-size:10.5px;
+}
+
+/* ---------- 滚动条与焦点 ---------- */
+
+.hud-surface .day-route[data-page="today-log"] .day-log::-webkit-scrollbar,
+.hud-surface .day-route[data-page="today-log"] .day-rail::-webkit-scrollbar{
+  width:9px;
+}
+.hud-surface .day-route[data-page="today-log"] .day-log::-webkit-scrollbar-thumb,
+.hud-surface .day-route[data-page="today-log"] .day-rail::-webkit-scrollbar-thumb{
+  background:rgba(155,121,84,.34);
+  background-clip:content-box;
+  border:2px solid transparent;
+  border-radius:8px;
+}
+.hud-surface .day-route[data-page="today-log"] .day-log::-webkit-scrollbar-thumb:hover,
+.hud-surface .day-route[data-page="today-log"] .day-rail::-webkit-scrollbar-thumb:hover{
+  background:rgba(155,121,84,.5);
+  background-clip:content-box;
+}
+.hud-surface .day-route[data-page="today-log"] .day-log::-webkit-scrollbar-track,
+.hud-surface .day-route[data-page="today-log"] .day-rail::-webkit-scrollbar-track{
+  background:transparent;
+}
+.hud-surface .day-route[data-page="today-log"] button:focus-visible{
+  outline:2px solid var(--log-focus);
+  outline-offset:2px;
+}
+
+/* 只给读屏的文本 */
+.hud-surface .day-route[data-page="today-log"] .sr-only{
+  position:absolute;
+  width:1px;
+  height:1px;
+  margin:-1px;
+  padding:0;
+  overflow:hidden;
+  clip:rect(0 0 0 0);
+  clip-path:inset(50%);
+  white-space:nowrap;
+  border:0;
+}
+
+/* ---------- 动效 ----------
+   数据到位后列表"落回原位"：每条错开 35ms（上限 8 条），位移只有 5px。
+   这类入场只发生一次（React 用稳定 key，静默刷新不会重挂已存在的行），属于
+   "别让加载态到内容态的切换显得跳" —— 不是为了好看而让读者在读的东西乱动。 */
+
+@keyframes day-enter{
+  from{opacity:0;transform:translateY(5px)}
+  to{opacity:1;transform:none}
+}
+.hud-surface .day-route[data-page="today-log"] .day-enter{
+  /* 用 backwards 而不是 both：填满的动画会盖住 .day-anomaly 的 hover 位移，
+     而这两处恰好都要 transform。 */
+  animation:day-enter 220ms var(--log-ease) backwards;
+}
+
+/* 指针设备才给 hover 位移：触屏点一下会留下假 hover */
+@media (hover:hover) and (pointer:fine){
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly:hover{
+    transform:translateY(-1px);
+    box-shadow:0 9px 18px rgba(45,28,17,.15);
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-log__entry:hover{
+    background:var(--log-hover);
+  }
+}
+
+/* ---------- 中档窗：先收伴星栏，判断条自己换行 ---------- */
+
+@media(max-width:1180px){
+  .hud-surface .day-route[data-page="today-log"]{
+    grid-template-columns:minmax(0,1fr) 210px;
+    column-gap:22px;
+    padding:18px 22px 16px;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__metric{
+    min-width:66px;
+    padding:0 14px;
+  }
+}
+
+/* ---------- 窄窗：HUD 缩微断点 ----------
+   字号下限刻意比全站缩微档高一档：6px 在任何缩放下都读不了，
+   这一页宁可比别的页面稍大，也不要一屏认不出的小字。 */
+
+@media(max-width:760px){
+  .hud-surface .day-route[data-page="today-log"]{
+    grid-template-columns:minmax(0,1fr);
+    /* 单列时不再玩"内层滚动"：判断条多吃一行后，1fr 那格只剩不到 190px，
+       分诊第三张卡被裁在滚动区里。改成整页一排到底，读者用页面自己的滚动条。 */
+    grid-template-rows:none;
+    /* 光靠 none 不够：定高网格里的 auto 行会被压缩（实测 log 只剩 189px），
+       要 max-content 才会真正溢出，交给 .day-route 自己的 overflow:auto 去滚。 */
+    grid-auto-rows:max-content;
+    align-content:start;
+    height:100%;
+    column-gap:0;
+    row-gap:10px;
+    padding:12px 15px;
+  }
+  .hud-surface .day-route[data-page="today-log"] > .day-log{
+    grid-column:1;
+    grid-row:auto;
+    gap:14px;
+    overflow:visible;
+    padding-right:0;
+  }
+  .hud-surface .day-route[data-page="today-log"] > .day-route__state{
+    grid-column:1;
+    grid-row:auto;
+  }
+  .hud-surface .day-route[data-page="today-log"] > .day-rail{
+    grid-column:1;
+    grid-row:auto;
+    margin-top:4px;
+    padding:10px 0 0;
+    border-top:1px solid var(--log-rule-solid);
+  }
+  /* 页面自己滚了，分隔线挂在 rail 的 border-top 上，伪线不再需要 */
+  .hud-surface .day-route[data-page="today-log"] > .day-rail:before{
+    display:none;
+  }
+
+  .hud-surface .day-route[data-page="today-log"] .day-verdict{
+    gap:8px 14px;
+    padding:9px 11px;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__metric{
+    min-width:0;
+    padding:0 11px;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__metric dt{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__metric dd{font-size:18px}
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__metric[data-metric="span"] dd{font-size:11px}
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__copy b{font-size:11px}
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__copy span{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-verdict__act{
+    min-height:22px;
+    padding:0 9px;
+    font-size:9px;
+  }
+
+  .hud-surface .day-route[data-page="today-log"] .day-section-head b{font-size:11px}
+  .hud-surface .day-route[data-page="today-log"] .day-section-head span{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-triage__step{font-size:9px;padding:5px 9px}
+  .hud-surface .day-route[data-page="today-log"] .day-triage__more{font-size:9px;padding:4px 10px}
+  .hud-surface .day-route[data-page="today-log"] .day-head__date{font-size:10.5px}
+  .hud-surface .day-route[data-page="today-log"] .day-head__date span{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-head__refresh{
+    min-height:20px;
+    padding:0 8px;
+    font-size:9px;
+  }
+
+  .hud-surface .day-route[data-page="today-log"] .day-log__entry{
+    grid-template-columns:36px 20px minmax(0,1fr) auto;
+    gap:7px;
+    padding:5px 6px 5px 2px;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-log__entry:before{
+    left:53px;
+    width:1.5px;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-log__time{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-log__node{width:20px;height:20px;border-radius:7px}
+  .hud-surface .day-route[data-page="today-log"] .day-log__node svg{width:10px;height:10px}
+  .hud-surface .day-route[data-page="today-log"] .day-log__body b{font-size:10px}
+  .hud-surface .day-route[data-page="today-log"] .day-log__body small{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-jump{
+    min-height:20px;
+    padding:0 8px;
+    border-radius:10px 12px 9px 11px;
+    font-size:9px;
+  }
+
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly{
+    gap:7px;
+    padding:6px 9px;
+    border-radius:8px 11px 8px 10px;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly__icon{width:18px;height:18px;border-radius:6px}
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly__icon svg{width:10px;height:10px}
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly__title{font-size:10px}
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly__meta{font-size:9px;gap:6px}
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly__count{padding:1px 6px;font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-log__note{font-size:9px}
+
+  .hud-surface .day-route[data-page="today-log"] .day-stream__empty{padding:12px 13px}
+  .hud-surface .day-route[data-page="today-log"] .day-stream__empty b{font-size:10px}
+  .hud-surface .day-route[data-page="today-log"] .day-stream__empty p{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-rail__card{padding:9px 10px 10px}
+  .hud-surface .day-route[data-page="today-log"] .day-rail__card b{font-size:10.5px}
+  .hud-surface .day-route[data-page="today-log"] .day-rail__card p{font-size:9px}
+  .hud-surface .day-route[data-page="today-log"] .day-rail__card .button{min-height:22px;font-size:9px}
+}
+
+/* ---------- 动效偏好 ---------- */
+
+@media(prefers-reduced-motion:reduce){
+  .hud-surface .day-route[data-page="today-log"] > .day-log{
+    scroll-behavior:auto;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly,
+  .hud-surface .day-route[data-page="today-log"] .day-log__entry,
+  .hud-surface .day-route[data-page="today-log"] .day-triage__more{
+    transition:none;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly:hover,
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly:active{
+    transform:none;
+  }
+  /* 保留"内容出现了"这件事，去掉位移 */
+  .hud-surface .day-route[data-page="today-log"] .day-enter{
+    animation:day-enter-flat 160ms ease backwards;
+  }
+  .hud-surface .day-route[data-page="today-log"] .day-anomaly[data-phase="inflight"] .day-anomaly__icon svg{
+    animation:none;
+  }
+}
+@keyframes day-enter-flat{
+  from{opacity:0}
+  to{opacity:1}
+}

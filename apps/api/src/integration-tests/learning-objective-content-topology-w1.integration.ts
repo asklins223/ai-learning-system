@@ -2,12 +2,12 @@
  * Plan 23 W1-01..W1-08 集成测试（真实 Postgres）。
  *
  * 验证迁移 0175：
- *  1. learning_objective_origins_v2 / legacy_route_mappings_v2 存在且 FORCE RLS；
+ *  1. learning_objective_origins_v2 存在且 FORCE RLS；
  *  2. concept_label / surface_revision / surface_updated_at 列存在；
  *  3. Origin RLS：跨 workspace 读写拒绝；本 workspace 读写通过（事务内 set_config）；
  *  4. Origin kind 条件约束：note 缺 note_version_id 拒绝、manual 带 note 拒绝；
  *  5. 同一 objective revision + note version 重复绑定被唯一索引拒绝；
- *  6. route mapping mapped 必须带 objective / status 枚举。
+ *  6. 同一 objective revision + note version 重复绑定被唯一索引拒绝。
  *
  * 环境：DATABASE_URL_API_RLS（默认 ailearn_api，非 superuser——dev 的 ailearn 是
  * superuser，无条件绕过 RLS 即使 FORCE RLS 也不生效）。无 DB fail closed。
@@ -34,19 +34,19 @@ test("W1-01/07/04: 0175 新表存在且 FORCE RLS", async () => {
     const rows = await sql`
       SELECT c.relname AS table_name, c.relrowsecurity AS rls, c.relforcerowsecurity AS force_rls
       FROM pg_class c
-      WHERE c.relname IN ('learning_objective_origins_v2','legacy_route_mappings_v2')
+      WHERE c.relname IN ('learning_objective_origins_v2')
       ORDER BY 1
     `;
-    assert.equal(rows.length, 2, "新表缺失");
+    assert.equal(rows.length, 1, "新表缺失");
     for (const row of rows) {
       assert.equal(row.rls, true, row.table_name + " 未 ENABLE RLS");
       assert.equal(row.force_rls, true, row.table_name + " 未 FORCE RLS");
     }
     const policies = await sql`
       SELECT tablename, policyname FROM pg_policies
-      WHERE schemaname = 'public' AND tablename IN ('learning_objective_origins_v2','legacy_route_mappings_v2')
+      WHERE schemaname = 'public' AND tablename IN ('learning_objective_origins_v2')
     `;
-    assert.equal(policies.length, 2, "每张新表至少一个 policy");
+    assert.equal(policies.length, 1, "每张新表至少一个 policy");
   } finally {
     await sql.end();
   }
@@ -206,45 +206,6 @@ test("W1-03: 同一 objective revision + note version 重复绑定被唯一索�
     );
   } finally {
     await sql`DELETE FROM learning_objective_origins_v2 WHERE workspace_id = ${ws}`.catch(() => {});
-    await sql.end();
-  }
-});
-
-test("W1-07: route mapping 约束（mapped 必须带 objective；status 枚举）", async () => {
-  const sql = mustConnect();
-  const ws = randomUUID();
-  try {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
-      await tx`
-        INSERT INTO legacy_route_mappings_v2 (workspace_id, mapping_id, legacy_kind, legacy_id, status, objective_id)
-        VALUES (${ws}, ${randomUUID()}, 'card', ${randomUUID()}, 'mapped', ${randomUUID()})
-      `;
-    });
-    // mapped 缺 objective → 拒绝
-    await assert.rejects(
-      sql.begin(async (tx) => {
-        await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
-        await tx`
-          INSERT INTO legacy_route_mappings_v2 (workspace_id, mapping_id, legacy_kind, legacy_id, status)
-          VALUES (${ws}, ${randomUUID()}, 'key_point', ${randomUUID()}, 'mapped')
-        `;
-      }),
-      /lrm_v2_mapped_chk/,
-    );
-    // 非法 status → 拒绝
-    await assert.rejects(
-      sql.begin(async (tx) => {
-        await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
-        await tx`
-          INSERT INTO legacy_route_mappings_v2 (workspace_id, mapping_id, legacy_kind, legacy_id, status)
-          VALUES (${ws}, ${randomUUID()}, 'card', ${randomUUID()}, 'weird')
-        `;
-      }),
-      /lrm_v2_status_chk/,
-    );
-  } finally {
-    await sql`DELETE FROM legacy_route_mappings_v2 WHERE workspace_id = ${ws}`.catch(() => {});
     await sql.end();
   }
 });

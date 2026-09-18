@@ -1,16 +1,19 @@
 import { and, asc, desc, eq, ne, sql, count, inArray, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { sources, sourceSegments, notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
+import { sources, sourceSegments, notes, noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
 import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
-import { jobs } from "../../db/schema/job.ts";
-import { searchDocuments } from "../../db/schema/search.ts";
+import { jobs } from "@ailearn/shared/db-schema/job";
+import { searchDocuments } from "@ailearn/shared/db-schema/search";
 import {
   SourceStatus,
   JobStatus,
   JobType,
   MAX_PENDING_JOBS_PER_WORKSPACE,
 } from "@ailearn/shared";
-import { segmentsToBlocks, type ParsedSegment } from "../../lib/markdown-parser.ts";
+import { segmentsToBlocks, type ParsedSegment } from "@ailearn/shared/markdown-parser";
+// 稳定 P1（2026-09-15 审计）：parse_source 的 payload 走共享精确契约——漏字段/
+// 拼错字段在编译期报错，而不是运行期变成一条可重试的 "missing sourceId" 失败。
+import type { ParseSourceJobPayload } from "@ailearn/shared/job-payload-contracts";
 import type { SourceCreateInput, SourceUpdateInput } from "./schema.ts";
 import { logger } from "../../lib/logger.ts";
 import { encodeCursor, decodeCursor } from "../../lib/pagination.ts";
@@ -149,14 +152,18 @@ export async function createSource(
       entityId: row.id,
     });
 
-    // 同一事务内创建 parse_source job
+    // 同一事务内创建 parse_source job。
+    // payload 由共享契约约束（ParseSourceJobPayload）：字段名/类型与 worker 侧的
+    // readParseSourceJobPayload 同源。历史字段 userId 已删除——worker 从不读它
+    // （actor 归属走 jobs.requested_by），jobs 查询接口本来就把它脱敏掉（R-006）。
+    const parseSourcePayload: ParseSourceJobPayload = isUrlWithoutContent
+      ? { sourceId: row.id, fetchUrlContent: true }
+      : { sourceId: row.id };
     await tx.insert(jobs).values({
       type: JobType.PARSE_SOURCE,
       workspaceId,
       requestedBy: userId,
-      payload: isUrlWithoutContent
-        ? { sourceId: row.id, fetchUrlContent: true, userId }
-        : { sourceId: row.id, userId },
+      payload: parseSourcePayload,
       status: JobStatus.PENDING,
       priority: 70,
       resourceClass: "card_foreground",
@@ -182,7 +189,9 @@ export async function listSources(
   if (opts?.status) {
     where = and(eq(sources.workspaceId, workspaceId), eq(sources.status, opts.status as SourceStatus));
   }
-  // R-019: 使用 cursor 分页，基于 (createdAt, id) 复合排序
+  // R-019: 使用 cursor 分页。排序键是 (updatedAt, id)：索引页每一行展示的是
+  // updatedAt，按 createdAt 排会让「刚更新但很久前采集」的材料沉到列表末尾，
+  // 与行内时间自相矛盾（2026-09-16 来源库复查）。
   const conditions = [where];
   if (opts?.cursor) {
     const decoded = decodeCursor(opts.cursor);
@@ -190,7 +199,7 @@ export async function listSources(
       const cursorTs = decoded.timestamp;
       const cursorId = decoded.id;
       conditions.push(
-        sql`(${sources.createdAt}, ${sources.id}) < (${cursorTs}::timestamptz, ${cursorId}::uuid)`,
+        sql`(${sources.updatedAt}, ${sources.id}) < (${cursorTs}::timestamptz, ${cursorId}::uuid)`,
       );
     }
   }
@@ -201,13 +210,13 @@ export async function listSources(
   // fails closed before any count query issues.
   const sourceRows = await executor.query.sources.findMany({
     where: and(...conditions),
-    orderBy: [desc(sources.createdAt), desc(sources.id)],
+    orderBy: [desc(sources.updatedAt), desc(sources.id)],
     limit: limit + 1,
-    // PERF-B11 修复：列表排除大 jsonb metadata（rawContent 可达数百 KB，
-    // 见 listSourceStatuses 注释），仅详情接口返回。
+    // PERF-B11 修复：列表排除大 jsonb metadata（rawContent 可达数百 KB），
+    // 仅详情接口返回。
     columns: { metadata: false },
     extras: {
-      cursorTimestamp: sql<string>`to_char(${sources.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_timestamp"),
+      cursorTimestamp: sql<string>`to_char(${sources.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_timestamp"),
     },
   });
   const hasMore = sourceRows.length > limit;
@@ -246,31 +255,12 @@ export async function listSources(
     noteCount: noteCountMap.get(s.id) ?? 0,
   }));
 
-  // R-019: 使用最后一条记录的 (createdAt, id) 作为下一页 cursor
+  // R-019: 使用最后一条记录的 (updatedAt, id) 作为下一页 cursor
   const lastItem = itemsWithCursor[itemsWithCursor.length - 1];
   const nextCursor = hasMore && lastItem
     ? encodeCursor(lastItem.cursorTimestamp, lastItem.id)
     : null;
   return { items: itemsWithCounts, nextCursor, total };
-}
-
-export async function listSourceStatuses(
-  executor: ApiTransaction,
-  workspaceId: string,
-  ids: string[],
-) {
-  if (ids.length === 0) return [];
-  // Polling must not retransmit metadata.rawContent (potentially hundreds of
-  // kilobytes) every few seconds. Include archived rows so another tab's
-  // archive action can make the polling client remove the stale entry.
-  return executor
-    .select({
-      id: sources.id,
-      status: sources.status,
-      updatedAt: sources.updatedAt,
-    })
-    .from(sources)
-    .where(and(eq(sources.workspaceId, workspaceId), inArray(sources.id, ids)));
 }
 
 export async function getSource(
@@ -388,6 +378,9 @@ export function detectSourceType(content: string, url?: string): "text" | "markd
 
 /**
  * §2.7: 查询从此来源创建的笔记列表。
+ *
+ * `items` 只返回最近 50 篇，`total` 是该来源的真实总数——详情页要能说
+ * 「共 N 篇，这里列出最近 M 篇」，而不是把一页的长度当成来源的规模。
  */
 export async function listNotesBySource(
   executor: ApiTransaction,
@@ -399,21 +392,32 @@ export async function listNotesBySource(
   });
   if (!source) return null;
 
-  const noteRows = await executor
-    .select({
-      id: notes.id,
-      title: notes.title,
-      titleSource: notes.titleSource,
-      createdAt: notes.createdAt,
-      updatedAt: notes.updatedAt,
-      currentVersionId: notes.currentVersionId,
-    })
-    .from(notes)
-    .where(and(eq(notes.sourceId, sourceId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)))
-    .orderBy(desc(notes.updatedAt))
-    .limit(50);
+  const where = and(
+    eq(notes.sourceId, sourceId),
+    eq(notes.workspaceId, workspaceId),
+    isNull(notes.deletedAt),
+  );
+  const [noteRows, countRows] = await Promise.all([
+    executor
+      .select({
+        id: notes.id,
+        title: notes.title,
+        titleSource: notes.titleSource,
+        createdAt: notes.createdAt,
+        updatedAt: notes.updatedAt,
+        currentVersionId: notes.currentVersionId,
+      })
+      .from(notes)
+      .where(where)
+      .orderBy(desc(notes.updatedAt))
+      .limit(50),
+    executor
+      .select({ count: sql<number>`count(*)::int` })
+      .from(notes)
+      .where(where),
+  ]);
 
-  return noteRows;
+  return { items: noteRows, total: countRows[0]?.count ?? 0 };
 }
 
 /**

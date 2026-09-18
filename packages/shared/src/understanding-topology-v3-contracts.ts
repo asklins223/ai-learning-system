@@ -67,7 +67,17 @@ export const noteNodeProjectionV3Schema = z.strictObject({
   }),
   label: z.string().min(1).max(500),
   currentVersionId: z.string().uuid(),
-  freshness: z.enum(["current", "source_outdated", "archived"]),
+  /**
+   * 该笔记是否由某个来源收录而来（即 `notes.source_id` 非空）。
+   *
+   * 此处曾是 `freshness: "current" | "source_outdated" | "archived"`，但仓库
+   * 从未计算过它：`topology-repository` 直接写死字面量 `"current"`。三个值里
+   * `archived` 不可达（note 查询已过滤 `deleted_at IS NULL`），`source_outdated`
+   * 也没有计算依据——数据模型没有「来源内容修订号」，只有 objective origin 才做
+   * 「这条笔记出现新版本」的比较。恒为常量的字段在焦点卡上等于对用户说一句假话，
+   * 因此收窄为服务端真正持有的事实。
+   */
+  hasSource: z.boolean(),
 });
 
 export const objectiveNodeProjectionV3Schema = z.strictObject({

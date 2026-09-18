@@ -18,9 +18,8 @@
  * Bug 9 修复：practiceOnly 从 learning_exposures_v2 读取曝光状态（不再硬编码 false）。
  * Bug 10 修复：detail assembler 中 loadActiveRun 与 runIdRows 查询合并（消除重复查询）。
  *
- * 注意：API 端 schema 中 V1 keyPointId 已移除：
- * - learning_runs 没有 keyPointId 列，目标 alias 经 origin JSONB 取：V2 现行行只有
- *   objectiveId（strictObject），rebase 前 V1 历史行带 keyPointId；查询一律 coalesce 双兼容
+ * 注意：API 端 schema 中 keyPointId 已移除：
+ * - learning_runs 没有 keyPointId 列，严格 V2 origin 直接携带 objectiveId
  * - review_schedules 没有 keyPointId 列，用 subjectType='card' + subjectId=objectiveId
  * - canonical_learning_event_outbox / practice_trail_event_outbox 没有 keyPointId 列，
  *   通过 runId 间接关联（origin alias coalesce 查询，同上）
@@ -35,14 +34,15 @@ import {
   learningObjectiveLineageV2,
   learningObjectiveOriginsV2,
   learningExposuresV2,
-} from "../../db/schema/card-generation-v2.ts";
-import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
-import { notes } from "../../db/schema/note.ts";
-import { reviewSchedules } from "../../db/schema/evidence.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
+import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "@ailearn/shared/db-schema/learning-runs";
+import { notes } from "@ailearn/shared/db-schema/note";
+import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import type {
   LearningObjectiveSurfaceV3,
   ObjectiveOriginV3,
   ObjectiveListItemV3,
+  ObjectivePersonalStateV3,
   KnowledgeFormV2,
   ObjectiveSurfaceLifecycleV3,
 } from "@ailearn/shared";
@@ -60,9 +60,25 @@ export class ObjectiveNotFoundError extends DomainError {
 export interface SurfaceContext {
   workspaceId: string;
   userId: string;
-  /** create_run 场景入口（默认 home）。 */
-  origin?: "card" | "home" | "today" | "review" | "graph" | "onboarding" | "pet";
-  goal?: string;
+}
+
+type ObjectivePersonalStateInput = {
+  readonly lifecycle: ObjectiveSurfaceLifecycleV3;
+  readonly freshness: LearningObjectiveSurfaceV3["content"]["freshness"];
+  readonly activeRun: LearningObjectiveSurfaceV3["personal"]["activeRun"];
+  readonly review: LearningObjectiveSurfaceV3["personal"]["review"];
+  readonly lastCanonicalAt: string | null;
+};
+
+/** One server-owned precedence table for every Objective projection. */
+function resolveObjectivePersonalState(input: ObjectivePersonalStateInput): ObjectivePersonalStateV3 {
+  if (input.lifecycle === "archived") return "archived";
+  if (input.lifecycle === "superseded") return "superseded";
+  if (input.activeRun) return "learning";
+  if (input.review?.status === "due") return "due_review";
+  if (input.review?.status === "scheduled") return "scheduled";
+  if (input.freshness === "source_outdated") return "outdated";
+  return input.lastCanonicalAt ? "stable" : "unvalidated";
 }
 
 const ACTIVE_RUN_PHASES = [
@@ -325,8 +341,7 @@ async function assembleObjectiveSurfaceV3Inner(
     .where(and(
       eq(learningRuns.workspaceId, ctx.workspaceId),
       eq(learningRuns.userId, ctx.userId),
-      // alias 双形状兼容（V2 行 objectiveId / V1 历史行 keyPointId），与批量路径一致。
-      sql`coalesce(${learningRuns.origin}->>'keyPointId', ${learningRuns.origin}->>'objectiveId') = ${objectiveId}`,
+      sql`${learningRuns.origin}->>'objectiveId' = ${objectiveId}`,
     ))
     .orderBy(desc(learningRuns.createdAt));
   const runIds = allRunRows.map((r) => r.runId);
@@ -432,10 +447,18 @@ async function assembleObjectiveSurfaceV3Inner(
       : null,
     practiceOnly: exposureInfo.practiceOnly,
     practiceReasonCodes: exposureInfo.reasonCodes,
-    origin: ctx.origin ?? "home",
-    goal: ctx.goal ?? "继续学习",
   };
   const primaryAction = resolvePrimaryActionV3(actionInput);
+  const personalState = {
+    state: resolveObjectivePersonalState({
+      lifecycle: objective.lifecycle as ObjectiveSurfaceLifecycleV3,
+      freshness,
+      activeRun,
+      review,
+      lastCanonicalAt,
+    }),
+    activeRunId: activeRun?.runId ?? null,
+  };
 
   return {
     version: 3,
@@ -471,6 +494,7 @@ async function assembleObjectiveSurfaceV3Inner(
       status: objective.lifecycle as ObjectiveSurfaceLifecycleV3,
       successorObjectiveId,
     },
+    personalState,
     primaryAction,
     createdAt: objective.createdAt.toISOString(),
     updatedAt: objective.updatedAt.toISOString(),
@@ -698,9 +722,9 @@ async function batchAssembleObjectiveSurfacesV3(
     }
   }
 
-  // 7. 批量查 all runs（经 origin JSONB alias coalesce 路径查询）
+  // 7. 批量查 all runs（按 origin.objectiveId 查询）
   // 性能修复：原先查该用户全量 runs 再在内存中过滤，当用户有大量历史
-  // runs 时会严重退化。改为在 SQL 层用 coalesce(keyPointId, objectiveId)
+  // runs 时会严重退化。按严格 V2 origin 的 objectiveId 直接筛选。
   // IN (...) 限定到目标 objectiveIds，只查相关 runs。
   // 安全：objectiveIds 作为 Drizzle sql 参数绑定（非 sql.raw 拼接），无注入风险。
   const objectiveIdSet = new Set(objectiveIds);
@@ -718,9 +742,7 @@ async function batchAssembleObjectiveSurfacesV3(
           eq(learningRuns.userId, ctx.userId),
           // Keep each objective id as a bound scalar. Interpolating the JS
           // array directly into ANY(...::text[]) breaks with postgres-js.
-          // 目标 alias 兼容两种存储形状：V2 现行行只有 objectiveId（strictObject），
-          // rebase 前 V1 历史行带 keyPointId（方案 20 §29.4）。coalesce 双兼容。
-          sql`coalesce(${learningRuns.origin}->>'keyPointId', ${learningRuns.origin}->>'objectiveId') IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
+          sql`${learningRuns.origin}->>'objectiveId' IN (${sql.join(objectiveIds.map((id) => sql`${id}`), sql`, `)})`,
         ))
         .orderBy(desc(learningRuns.createdAt))
     : [];
@@ -730,14 +752,13 @@ async function batchAssembleObjectiveSurfacesV3(
   const runIdToObjective = new Map<string, string>();
   for (const run of allRunRows) {
     const origin = run.origin as Record<string, unknown> | null;
-    // 与 SQL coalesce 对应：alias 取 keyPointId ?? objectiveId（双形状兼容）。
-    const keyPointId = ((origin?.keyPointId ?? origin?.objectiveId) as string | undefined);
-    if (keyPointId && objectiveIdSet.has(keyPointId)) {
+    const originObjectiveId = origin?.objectiveId as string | undefined;
+    if (originObjectiveId && objectiveIdSet.has(originObjectiveId)) {
       allRunIds.push(run.runId);
-      runIdToObjective.set(run.runId, keyPointId);
+      runIdToObjective.set(run.runId, originObjectiveId);
       // activeRun = 第一个匹配的 active-phase run（allRunRows 已按 createdAt DESC 排序）
-      if ((ACTIVE_RUN_PHASES as readonly string[]).includes(run.phase) && !runByObjective.has(keyPointId)) {
-        runByObjective.set(keyPointId, { runId: run.runId, phase: run.phase });
+      if ((ACTIVE_RUN_PHASES as readonly string[]).includes(run.phase) && !runByObjective.has(originObjectiveId)) {
+        runByObjective.set(originObjectiveId, { runId: run.runId, phase: run.phase });
       }
     }
   }
@@ -975,10 +996,18 @@ async function batchAssembleObjectiveSurfacesV3(
         : null,
       practiceOnly: exposedObjectives.has(objectiveId),
       practiceReasonCodes: exposedObjectives.has(objectiveId) ? ["exposed"] : [],
-      origin: ctx.origin ?? "home",
-      goal: ctx.goal ?? "继续学习",
     };
     const primaryAction = resolvePrimaryActionV3(actionInput);
+    const personalState = {
+      state: resolveObjectivePersonalState({
+        lifecycle: lifecycle as ObjectiveSurfaceLifecycleV3,
+        freshness,
+        activeRun,
+        review,
+        lastCanonicalAt,
+      }),
+      activeRunId: activeRun?.runId ?? null,
+    };
 
     results.push({
       version: 3,
@@ -1014,6 +1043,7 @@ async function batchAssembleObjectiveSurfacesV3(
         status: lifecycle as ObjectiveSurfaceLifecycleV3,
         successorObjectiveId,
       },
+      personalState,
       primaryAction,
       createdAt: objRow.createdAt.toISOString(),
       updatedAt: objRow.updatedAt.toISOString(),
@@ -1035,29 +1065,7 @@ export function toObjectiveListItemV3(surface: LearningObjectiveSurfaceV3): Obje
     freshness: surface.content.freshness,
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,
     createdAt: surface.createdAt,
-    personalState: {
-      // 与 topology-repository buildTopologySnapshotV3 的 state 映射保持一致。
-      // 优先级：archived > superseded > activeRun > review due > scheduled
-      // > source_outdated > stable(has canonical) > unvalidated(ready)。
-      // 修复：引入 lastCanonicalAt 区分 stable（已稳定理解）与 unvalidated（等待首次验证），
-      // 与 topology-repository 的 lastCanonicalEventId ? "stable" : "unvalidated" 对齐。
-      state: surface.content.lifecycle === "archived"
-        ? "archived"
-        : surface.content.lifecycle === "superseded"
-          ? "superseded"
-          : surface.personal.activeRun
-            ? "learning"
-            : surface.personal.review?.status === "due"
-              ? "due_review"
-              : surface.personal.review?.status === "scheduled"
-                ? "scheduled"
-                : surface.content.freshness === "source_outdated"
-                  ? "outdated"
-                  : surface.personal.lastCanonicalAt
-                    ? "stable"
-                    : "unvalidated",
-      activeRunId: surface.personal.activeRun?.runId ?? null,
-    },
+    personalState: surface.personalState,
     primaryAction: surface.primaryAction,
   };
 }

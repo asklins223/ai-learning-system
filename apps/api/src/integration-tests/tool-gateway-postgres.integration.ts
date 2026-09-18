@@ -5,14 +5,14 @@
  * pause_learning_run（真实暂停）、request_hint_level（exposure-first）、
  * switch_task_variant（变体切换）、defer_review（展示层，不动 official
  * dueAt）、plan_understanding_route（真实 RoutePlan）、focus_graph_node
- * （导航 succeeded + route）、记忆 propose/confirm（revision CAS）。
+ * （导航 succeeded + route）、记忆候选 confirm/reject（revision CAS）。
  */
 
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 // 测试专用 checkpoint 密钥（同 AUTH_SURFACE_MANIFEST_SECRET 模式；模块级
 // 读取发生在 import 时，必须在动态 import 前设置）。
@@ -32,7 +32,7 @@ const { createCompanionToolProposal, decideCompanionProposal } = await import(
 );
 const { closeDatabase } = await import("../db/client.ts");
 const { withWorkspaceTransaction } = await import("../db/client.ts");
-const { createRun } = await import("../modules/learning-runs/run-service.ts");
+const { upsertMemory } = await import("../modules/companion-conversation/memory-service.ts");
 const { issueCheckpointToken } = await import("../modules/understanding/projection-checkpoint.ts");
 const { CompanionConversationError } = await import("../modules/companion-conversation/turn-service.ts");
 
@@ -62,14 +62,12 @@ async function seedBase() : Promise<Seeded> {
 async function createActiveRun(seeded: Seeded) {
   const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
   const run = await withWorkspaceTransaction(scope, async (tx) =>
-    createRun(tx, {
+    createLearningRunForTest(tx, {
       ...scope,
       request: {
-        version: 1,
-        origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+        originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
         goal: "stabilize",
         requestedTimeBudgetSeconds: 120,
-        clientRequestId: randomUUID(),
         idempotencyKey: randomUUID(),
       },
     }),
@@ -81,7 +79,7 @@ async function createActiveRun(seeded: Seeded) {
 async function createToolProposal(
   seeded: Seeded,
   payload: { kind: string; [key: string]: unknown },
-  opts: { title?: string; idempotencyKey?: string; clientMessageId?: string; sourceSurface?: "pet" | "main" | "web_fallback" } = {},
+  opts: { title?: string; idempotencyKey?: string; clientMessageId?: string; sourceSurface?: "pet" | "main" } = {},
 ): Promise<{
   proposalId: string;
   conversationId: string;
@@ -199,7 +197,7 @@ test("§18.1：main 发起 proposal → inbox 投递 proposal；confirm → 投�
       { sourceSurface: "main" },
     );
 
-    // main/web_fallback 发起的 proposal 需要推送到 pet inbox。
+    // main 发起的 proposal 需要推送到 pet inbox。
     const proposalDeliveries = await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
@@ -222,7 +220,7 @@ test("§18.1：main 发起 proposal → inbox 投递 proposal；confirm → 投�
     });
     assert.equal(actionDeliveries.length, 1, "action_result delivery 已投递");
     assert.equal(actionDeliveries[0].kind, "action_result");
-    assert.equal(actionDeliveries[0].payload_ref.actionRunId, proposal.proposalId);
+    assert.equal(actionDeliveries[0].payload_ref.proposalId, proposal.proposalId);
   } finally {
     await seeded.cleanup();
   }
@@ -247,7 +245,7 @@ test("§18.1：focus_graph_node——confirm 导航同步 succeeded + route", as
           AND dedupe_key = ${`action_result:${proposal.proposalId}`}`;
     });
     assert.equal(actionDeliveries.length, 1, "pet 发起 confirm 也会投递 action_result");
-    assert.equal(actionDeliveries[0].payload_ref.actionRunId, proposal.proposalId);
+    assert.equal(actionDeliveries[0].payload_ref.proposalId, proposal.proposalId);
   } finally {
     await seeded.cleanup();
   }
@@ -356,9 +354,9 @@ test("§18.1：defer_review——只写展示层，不改 official dueAt；gener
       await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
       await tx`INSERT INTO review_schedules
-               (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, key_point_id)
+               (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation)
                VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.cardId},
-                       'pending', now() + interval '2 days', 1, 0, ${seeded.keyPointId})`;
+                       'pending', now() + interval '2 days', 1, 0)`;
     });
     const deferredUntil = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
     const proposal = await createToolProposal(seeded, {
@@ -440,18 +438,23 @@ test("§18.1：plan_understanding_route——confirm 创建真实 RoutePlan + re
   }
 });
 
-test("§18.1：记忆 propose/confirm——revision CAS；stale revision 409", async () => {
+test("§18.1：记忆候选 confirm/reject——revision CAS；stale revision 409", async () => {
   const seeded = await seedBase();
   try {
-    const proposal = await createToolProposal(seeded, {
-      kind: "propose_memory_candidate",
-      memoryKind: "preference",
-      value: "喜欢在安静时段学习",
-      sourceMessageId: randomUUID(),
-    });
-    const result = await confirmProposal(seeded, proposal.proposalId, proposal.payloadSha256);
-    assert.equal(result.status, "succeeded");
-    const memoryId = result.resultRef!;
+    // 候选记忆由已落地的写入路径产生（worker memory-extractor 与本测试使用的是
+    // 同一个 upsertMemory 入口）。propose_memory_candidate proposal 已删除：它要求
+    // 调用方提供由服务端在创建事务内生成的 sourceMessageId，任何 producer 都无法
+    // 满足，因此不再作为候选记忆的来源。
+    const memory = await withWorkspaceTransaction(
+      { workspaceId: seeded.workspaceId, userId: seeded.userId },
+      (tx) => upsertMemory(tx, { workspaceId: seeded.workspaceId, userId: seeded.userId }, {
+        kind: "preference",
+        content: "喜欢在安静时段学习",
+        sourceEventId: `memory-extract:${randomUUID()}:0`,
+        candidate: true,
+      }),
+    );
+    const memoryId = memory.memoryItemId;
     const rows = await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;

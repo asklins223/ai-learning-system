@@ -9,7 +9,7 @@
  * - userText 按 run.user_message_id 归属：当前 turn 是 voice_transcript（kind≠'text'）
  *   时也能取到本 run 的用户文本，而不是上一轮 text 消息（回归 2026-08-11 修复）。
  *
- * provider 使用 mock（测试环境不配 SILICONFLOW/TOKENRHYTHM key 时自动回退），
+ * provider 使用 mock（测试环境显式不配置外部平台），
  * 验证的是 DB 编排与 fence，不验证 LLM 内容。
  */
 
@@ -19,12 +19,10 @@ import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
-// 与 companion-action 集成测试一致：worker db.ts 读 DATABASE_URL，
+// worker db.ts 读 DATABASE_URL，
 // 确保 host 侧运行也指向同一数据库，避免回退到 Docker-only hostname `postgres`。
 process.env.DATABASE_URL ??= CONN;
 // 强制 mock provider：集成测试验证 DB 编排，不产生外部模型调用或费用。
-process.env.AI_PROVIDER_CARD = "mock";
-delete process.env.SILICONFLOW_API_KEY;
 delete process.env.TOKENRHYTHM_API_KEY;
 process.env.COMPANION_DIALOGUE_V1_ENABLED = "true";
 

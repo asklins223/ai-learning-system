@@ -1,364 +1,499 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, BookOpenText, RotateCcw, Sparkles } from "lucide-react";
-import type { RoomPrimaryActionV1, RoomProjectionV1 } from "@ailearn/shared/room-projection-contracts";
+import { useMemo, useRef, useState } from "react";
+import type { Ref } from "react";
+import {
+  BookOpen,
+  Compass,
+  FileText,
+  Layers,
+  LoaderCircle,
+  MousePointerClick,
+  RefreshCw,
+  Route,
+  Settings2,
+  Sparkles,
+  TriangleAlert,
+} from "lucide-react";
+import type { ActivityTargetV1, TodayActivityV1 } from "@ailearn/shared/activity-surface-contracts";
 import { useRoomStore } from "../../app/room-store";
+import type { RoomIntent } from "../../app/room-machine";
+import { createRequestMeta, unwrapGatewayResult } from "../../app/desktop-client";
+import { HudPage } from "../hud/HudPage";
+import { useHudPage } from "../hud/use-hud-page";
+import { SurfaceDataState, useDayAnchor, useSurfaceProjection } from "./surface-data";
 import {
-  createCommandId,
-  createRequestMeta,
-  gatewayErrorMessage,
-  RendererGatewayError,
-  unwrapGatewayResult,
-} from "../../app/desktop-client";
-import { SurfaceReturnControl } from "./SurfaceReturnControl";
-import {
-  roomActionReasonLabel,
-  studyActionDescription,
-  studyActionLabel,
-  studyStatusLabel,
-} from "./room-primary-action-presentation";
-import { learningRunOriginForRoomAction } from "./study-run-origin";
-import { StudyNotebookCanvas } from "../StudyNotebookCanvas";
-import { mediaAssetUrl, useLearningRoomManifest } from "../../media/learning-room-manifest";
-import { SceneReferenceFrame } from "../../scene/SceneReferenceFrame";
-import { SurfaceCalibrator } from "../../scene/SurfaceCalibrator";
-import {
-  STUDY_NOTEBOOK_STYLE,
-  STUDY_SURFACE_REGISTRY,
-  STUDY_SURFACE_STYLES,
-} from "../../scene/scene-surfaces";
-import {
-  useSceneSurfaceProjections,
-  type SceneSurfaceProjectionTarget,
-  type SceneSurfaceQuadOverrides,
-} from "../../scene/useSceneSurfaceProjection";
-import {
-  useSceneSurfaceInputRuntime,
-  writeSceneInputDiagnostics,
-  type SceneSurfacePointerResolution,
-} from "../../scene/scene-input-runtime";
-import { resolveSceneMotionMode } from "../../scene/scene-motion";
+  anomalyStep,
+  buildTodayAnomalyGroups,
+  buildTodayLogRows,
+  buildTodayVerdict,
+  sharedAnomalyStep,
+  sortAnomalyGroups,
+  todayAnomalyTruncationNote,
+  todayLogTruncationNote,
+  type TodayAnomalyGroup,
+  type TodayLogRow,
+  type TodayVerdict,
+} from "./today-log";
+import "./study-surface.css";
 
-type AvailableRoomAction = Extract<RoomPrimaryActionV1, { availability: "available" }>;
-type StudyBoundaryTone = "loading" | "empty" | "error";
-const STUDY_CALIBRATION_SURFACES = Object.freeze(Object.values(STUDY_SURFACE_REGISTRY.surfaces));
+/**
+ * Page 14 「今日学习」（2026-09-18 设计重构）。
+ *
+ * 上一版把这一页从"三张票的推荐位"改成了操作日志流 —— 方向是对的，但把日志
+ * 流塞进了一个为老布局调过的壳里，于是留下三类问题（本次重构的输入）：
+ *
+ * 1. **信息层级倒置**：页面第一屏是一堵异常卡，×10（同一份笔记失败了 10 次）
+ *    这个最带信息量的数字被压在 9.5px 的徽标里；而"今天到底做了几件事"只能
+ *    去右栏找，右栏又和左栏说同一句话。
+ * 2. **可读性损耗**：异常标题直接是笔记正文，`nowrap + ellipsis` 把它截成半句
+ *    （"核心原理是记忆痕迹衰减与强化，每…"）；三张卡的第二行逐字相同；两条
+ *    居中的小灰字道歉堆在页底。
+ * 3. **交互断头**：只有异常、没有正向操作时（正是真实数据的常态）空态只给一句
+ *    散文描述，没有任何出口 —— 而"整天都空"那一支却给了按钮，两条路径不一致。
+ *
+ * 重构后的层级（一屏之内先给判断，再给待办，最后才是流水）：
+ * - **判断条**：今天记录了几件 / 几件待处理 / 从几点到几点 —— 数字先说话；
+ * - **需要处理**：同一件事归并成"一摞"，最厚的一摞排最前，共用的处置语提到
+ *   组头只说一次，超出预览条数就折叠；
+ * - **今天的操作**：主叙事，时间线；空了就就地给真实出口；
+ * - **伴星栏**：只讲它独有的那件事（伴星日记读的就是这条日志背后的同一批表）。
+ */
+function dayWindowFromAnchor(nowMs: number): { from: string; to: string } {
+  const midnight = new Date(nowMs);
+  midnight.setHours(0, 0, 0, 0);
+  // 不用 `+86_400_000`：跨夏令时的那天会偏出一小时。交给 Date 自己算次日午夜。
+  const nextMidnight = new Date(midnight.getFullYear(), midnight.getMonth(), midnight.getDate() + 1);
+  return { from: midnight.toISOString(), to: nextMidnight.toISOString() };
+}
 
-function StudyBoundaryReading({
-  heading,
-  message,
+function todayDateLabel(nowMs: number): string {
+  const now = new Date(nowMs);
+  return `${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日`;
+}
+
+function todayWeekdayLabel(nowMs: number): string {
+  return new Intl.DateTimeFormat("zh-CN", { weekday: "long" }).format(new Date(nowMs));
+}
+
+/** `day` 是页面自己查询的窗口锚点，用本地日历日 —— 不信服务端那条会差一天的字段。 */
+function dayIso(nowMs: number): string {
+  const now = new Date(nowMs);
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const date = `${now.getDate()}`.padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${date}`;
+}
+
+/** 每类事件一枚 lucide 图标 + 一味纸面色，整页图标语言保持同一套线性笔画。 */
+const KIND_ICONS: Readonly<Record<TodayLogRow["kind"], typeof FileText>> = {
+  note: FileText,
+  source: BookOpen,
+  objective: Compass,
+  learning_run: Route,
+  card_generation: Layers,
+  job: Settings2,
+  page: MousePointerClick,
+};
+
+const KIND_ICON_COLORS: Readonly<Record<TodayLogRow["kind"], string>> = {
+  note: "#3b6a8f",
+  source: "#55704f",
+  objective: "#b05c33",
+  learning_run: "#3f7d8a",
+  card_generation: "#9a7a2e",
+  job: "#6f5b4b",
+  page: "#8a7969",
+};
+
+/** 分诊预览条数：超过这个数就折叠 —— 一堵 12 行的墙不是分诊，是罚站。 */
+const TRIAGE_PREVIEW = 3;
+
+/** 列表入场：每条错开 35ms，最多错开 8 条（再长就一起进来，不然末尾要等半秒）。 */
+const ENTER_STAGGER_MS = 35;
+const ENTER_STAGGER_CAP = 8;
+
+function enterDelay(index: number): { animationDelay: string } {
+  return { animationDelay: `${Math.min(index, ENTER_STAGGER_CAP) * ENTER_STAGGER_MS}ms` };
+}
+
+/** 空一天的出口：两条路径（整天空 / 只有异常）共用同一组动作，不再一边有按钮一边没有。 */
+const START_ACTIONS: readonly { readonly label: string; readonly intent: RoomIntent }[] = [
+  { label: "写笔记", intent: "open-notebook" },
+  { label: "收录来源", intent: "open-sources" },
+  { label: "理解目标", intent: "open-objectives" },
+];
+
+/** 单条日志/异常的跳转按钮：target 为空时不给按钮，不给读者一条死路。 */
+function EntryJump({
+  target,
+  label,
+  action,
+  onOpen,
 }: {
-  readonly heading: string;
-  readonly message: string;
+  readonly target: ActivityTargetV1 | null;
+  readonly label: string;
+  readonly action: string;
+  readonly onOpen: (target: ActivityTargetV1) => void;
 }) {
+  if (!target) return null;
   return (
-    <>
-      <BookOpenText size={25} aria-hidden="true" />
-      <h2 id="study-surface-title">{heading}</h2>
-      <p>{message}</p>
-    </>
+    <button type="button" className="button day-jump" onClick={() => onOpen(target)} aria-label={`${action} ${label}`}>
+      {action}
+    </button>
   );
 }
 
-function StudyBoundaryRecovery({
-  tone,
-  onRetry,
-}: {
-  readonly tone: StudyBoundaryTone;
-  readonly onRetry?: () => void;
-}) {
-  if (tone === "loading") {
-    return <div className="study-boundary__lines" aria-hidden="true"><span /><span /><span /></div>;
-  }
+/**
+ * 今日判断条：这一页第一眼要回答"今天怎么样"。
+ *
+ * 数字与判断分开放 —— 数字进 `<dl>`（一眼可读），判断句里不再重复同一个数。
+ * 有一件待处理才给动作；"处理这 N 件"会把读者送到下面的分诊区。
+ */
+function DayVerdict({ verdict, onTriage }: { readonly verdict: TodayVerdict; readonly onTriage: () => void }) {
   return (
-    <>
-      <p>{tone === "empty" ? "重新读取后，这一页只会出现服务端确认的下一步。" : "先恢复可信数据，再继续学习或验证。"}</p>
-      <button type="button" className="surface-primary" onClick={onRetry}>
-        <RotateCcw size={16} aria-hidden="true" />重新读取主焦点
-      </button>
-    </>
+    <div className="day-verdict" data-pending={verdict.pending > 0 || undefined}>
+      {verdict.metrics.length > 0 ? (
+        <dl className="day-verdict__metrics">
+          {verdict.metrics.map((metric) => (
+            <div className="day-verdict__metric" key={metric.key} data-metric={metric.key} data-alarm={metric.alarm || undefined}>
+              <dt>{metric.label}</dt>
+              <dd>{metric.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+
+      <div className="day-verdict__copy">
+        <b>{verdict.headline}</b>
+        <span>{verdict.detail}</span>
+      </div>
+
+      {verdict.pending > 0 ? (
+        <button type="button" className="button day-verdict__act" onClick={onTriage}>
+          <TriangleAlert size={13} strokeWidth={2.2} aria-hidden="true" />
+          处理这 {verdict.pending} 件
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 待处理事务分诊。
+ *
+ * 与上一版的三点差别，都针对实机数据里真实发生的事：
+ * - 组按**体量**排序（最厚的一摞在前），因为处理一次的收益最大；
+ * - 多数组共用的处置语提到组头说一次，卡片里不再逐行复读同一句话；
+ * - 超过 3 类折叠，展开是显式动作，读者知道自己在要什么。
+ */
+function AnomalyTriage({
+  groups,
+  total,
+  sharedStep,
+  note,
+  onOpen,
+  anchorRef,
+}: {
+  readonly groups: readonly TodayAnomalyGroup[];
+  readonly total: number;
+  readonly sharedStep: string | null;
+  readonly note: string | null;
+  readonly onOpen: (target: ActivityTargetV1) => void;
+  readonly anchorRef: Ref<HTMLElement>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const overflow = groups.length - TRIAGE_PREVIEW;
+  const collapsed = overflow > 0 && !expanded;
+  const visible = collapsed ? groups.slice(0, TRIAGE_PREVIEW) : groups;
+
+  return (
+    <section className="day-triage" aria-label="待处理的事务" ref={anchorRef}>
+      <p className="day-section-head">
+        {/* 「待处理」与判断条那一枚数字同一套词：读者不必在两处之间做同义转换 */}
+        <b>待处理</b>
+        <span>{total} 件{groups.length < total ? ` · 归并为 ${groups.length} 类` : ""}</span>
+      </p>
+
+      {sharedStep ? <p className="day-triage__step">{sharedStep}</p> : null}
+
+      <ul className="day-triage__list">
+        {visible.map((group, index) => {
+          const step = anomalyStep(group);
+          return (
+            <li
+              className="day-anomaly day-enter"
+              key={group.id}
+              data-phase={group.phase}
+              style={enterDelay(index)}
+            >
+              <span className="day-anomaly__icon" aria-hidden="true">
+                {group.phase === "inflight" ? (
+                  <LoaderCircle size={13} strokeWidth={2.2} />
+                ) : (
+                  <TriangleAlert size={13} strokeWidth={2.2} />
+                )}
+              </span>
+
+              <div className="day-anomaly__main">
+                <b className="day-anomaly__title">{group.title}</b>
+                <span className="day-anomaly__meta">
+                  {group.count > 1 ? (
+                    // 只写 ×10 会被读成"10 张卡"；写清是同一件事被记了 10 条。
+                    <span className="day-anomaly__count" title={`同一件事记了 ${group.count} 条`}>
+                      同一件事 ×{group.count}
+                    </span>
+                  ) : null}
+                  {/* 处置语与组头相同就不再复读；不同才在这里说这一组自己的话。 */}
+                  {step === sharedStep ? null : <span className="day-anomaly__step">{step}</span>}
+                  {group.target ? null : (
+                    <span className="day-anomaly__stuck">服务端没能定位到现场，只能在这里看</span>
+                  )}
+                </span>
+              </div>
+
+              <EntryJump target={group.target} label={group.title} action="去处理" onOpen={onOpen} />
+            </li>
+          );
+        })}
+      </ul>
+
+      {overflow > 0 ? (
+        <button
+          type="button"
+          className="day-triage__more"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+        >
+          {expanded ? "只留最厚的三类" : `还有 ${overflow} 类待处理`}
+        </button>
+      ) : null}
+
+      {note ? <p className="day-log__note">{note}</p> : null}
+    </section>
+  );
+}
+
+/** 今天的操作：主叙事。空了就地给出口，不把读者丢在一条断头路上。 */
+function LogStream({
+  rows,
+  note,
+  onOpen,
+  onPick,
+}: {
+  readonly rows: readonly TodayLogRow[];
+  readonly note: string | null;
+  readonly onOpen: (target: ActivityTargetV1) => void;
+  readonly onPick: (intent: RoomIntent) => void;
+}) {
+  return (
+    <section className="day-stream" aria-label="今天的操作">
+      <p className="day-section-head">
+        <b>今天的操作</b>
+        <span>{rows.length > 0 ? `${rows.length} 条 · 按时间倒序` : "还没有记录"}</span>
+      </p>
+
+      {rows.length > 0 ? (
+        <>
+          <ol className="day-log__stream" aria-label="今日操作日志">
+            {rows.map((row, index) => {
+              const Icon = KIND_ICONS[row.kind];
+              return (
+                <li
+                  className="day-log__entry day-enter"
+                  key={row.id}
+                  data-kind={row.kind}
+                  style={enterDelay(index)}
+                >
+                  <time className="day-log__time" dateTime={row.at}>{row.time}</time>
+                  <span
+                    className="day-log__node"
+                    aria-hidden="true"
+                    style={{ color: KIND_ICON_COLORS[row.kind] }}
+                  >
+                    <Icon size={13} strokeWidth={2.2} />
+                  </span>
+                  <div className="day-log__body">
+                    <b>
+                      <span className="sr-only">{row.kindLabel} · </span>
+                      {row.action} · {row.title}
+                    </b>
+                    {row.detail ? <small>{row.detail}</small> : null}
+                  </div>
+                  <EntryJump
+                    target={row.target}
+                    label={`${row.action} ${row.title}`}
+                    action="查看"
+                    onOpen={onOpen}
+                  />
+                </li>
+              );
+            })}
+          </ol>
+          {note ? <p className="day-log__note">{note}</p> : null}
+        </>
+      ) : (
+        <div className="day-stream__empty">
+          <b>今天还没有正向操作</b>
+          <p>从下面任意一件事开始，做过的事都会按时间排在这里。</p>
+          <div className="actions">
+            {START_ACTIONS.map((action) => (
+              <button key={action.intent} type="button" className="button" onClick={() => onPick(action.intent)}>
+                {action.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * 伴星栏。
+ *
+ * 上一版这里是"今日概要"，内容是左栏底部那句话的复述（"今天还没有留下记录"），
+ * 252px 的栏里 60% 是空的。删掉复述之后，这一栏只剩它真正独有的东西：伴星日记
+ * 的入口，以及它和这条日志的关系（读的是同一批权威表）。
+ */
+function CompanionRail({ onOpen }: { readonly onOpen: () => void }) {
+  return (
+    <aside className="day-rail" aria-label="伴星">
+      <span className="tag">伴星</span>
+      <div className="day-rail__card">
+        <b>
+          <Sparkles size={13} strokeWidth={2.2} aria-hidden="true" />
+          伴星日记
+        </b>
+        <p>伴星每天凌晨 1 点，把昨天的学习与对话整理成一篇日记。</p>
+        <p className="day-rail__why">它读的正是这一页背后的同一批记录。</p>
+        <button type="button" className="button" onClick={onOpen}>打开伴星</button>
+      </div>
+    </aside>
   );
 }
 
 export function StudySurface() {
   const invoke = useRoomStore((state) => state.invoke);
-  const theme = useRoomStore((state) => state.theme);
-  const motionPreference = useRoomStore((state) => state.motionMode);
-  const reducedMotion = useRoomStore((state) => state.reducedMotion);
-  const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
-  const scenePhase = useRoomStore((state) => state.scenePhase);
-  const windowState = useRoomStore((state) => state.windowState);
-  const setTheme = useRoomStore((state) => state.setTheme);
-  const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
-  const epochRef = useRef<number | undefined>(undefined);
-  const studyReferenceFrameRef = useRef<HTMLDivElement>(null);
-  const leftPageSurfaceRef = useRef<HTMLDivElement>(null);
-  const rightPageSurfaceRef = useRef<HTMLDivElement>(null);
-  const sourceSlipSurfaceRef = useRef<HTMLElement>(null);
-  const [projection, setProjection] = useState<RoomProjectionV1 | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [starting, setStarting] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
-  const [surfaceQuadOverrides, setSurfaceQuadOverrides] = useState<SceneSurfaceQuadOverrides | undefined>();
-  const [studyCanvasReady, setStudyCanvasReady] = useState(false);
-  const { manifest } = useLearningRoomManifest();
-  const studyProjectionTargets = useMemo<readonly SceneSurfaceProjectionTarget[]>(() => [
-    { ref: leftPageSurfaceRef, surface: STUDY_SURFACE_REGISTRY.surfaces.notebookLeft },
-    { ref: rightPageSurfaceRef, surface: STUDY_SURFACE_REGISTRY.surfaces.notebookRight },
-    { ref: sourceSlipSurfaceRef, surface: STUDY_SURFACE_REGISTRY.surfaces.sourceSlip },
-  ], []);
-  const observeStudySurfaceInput = useCallback((input: SceneSurfacePointerResolution) => {
-    const frame = studyReferenceFrameRef.current;
-    if (!frame) return;
-    writeSceneInputDiagnostics(frame, input);
-  }, []);
+  const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
+  const setActiveNoteRef = useRoomStore((state) => state.setActiveNoteRef);
+  const setActiveCardGenerationRunId = useRoomStore((state) => state.setActiveCardGenerationRunId);
+  const setActiveSourceId = useRoomStore((state) => state.setActiveSourceId);
+  useHudPage("today");
 
-  const loadProjection = useCallback(async () => {
-    if (!window.ailearn) throw new Error("桌面端 API 不可用，无法读取真实学习目标。");
-    const sessionResponse = await window.ailearn.auth.getState({ meta: createRequestMeta(epochRef.current) });
-    if (sessionResponse.workspaceEpoch) epochRef.current = sessionResponse.workspaceEpoch;
-    const session = unwrapGatewayResult(sessionResponse);
-    if (session.status !== "authenticated" || !session.workspace) {
-      throw new RendererGatewayError({ code: "auth_required", safeMessageKey: "error.auth_required", retry: "user_action" });
-    }
-    const projectionResponse = await window.ailearn.room.getProjection({ meta: createRequestMeta(session.workspaceEpoch) });
-    if (projectionResponse.workspaceEpoch) epochRef.current = projectionResponse.workspaceEpoch;
-    setProjection(unwrapGatewayResult(projectionResponse));
-    setFailure(null);
-  }, []);
+  // 日锚点先于数据读取确定：窗口是"读者的今天"，刷新焦点时页面会自己跟上
+  // 跨午夜的变化（useDayAnchor 在可见性恢复/跨天时重锚）。
+  const nowMs = useDayAnchor();
+  const dayWindow = useMemo(() => dayWindowFromAnchor(nowMs), [nowMs]);
 
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    void loadProjection()
-      .catch((error) => active && setFailure(gatewayErrorMessage(error)))
-      .finally(() => active && setLoading(false));
-    return () => { active = false; };
-  }, [loadProjection]);
+  const { data, loading, failure, reload } = useSurfaceProjection<TodayActivityV1>(async ({ workspaceEpoch }) => {
+    const meta = createRequestMeta(workspaceEpoch);
+    const result = await window.ailearn.activity.getToday({ meta, from: dayWindow.from, to: dayWindow.to });
+    return unwrapGatewayResult(result);
+  }, [dayWindow.from, dayWindow.to], { refreshOnFocus: true });
 
-  const reload = () => {
-    setLoading(true);
-    setFailure(null);
-    void loadProjection()
-      .catch((error) => setFailure(gatewayErrorMessage(error)))
-      .finally(() => setLoading(false));
-  };
+  const rows: readonly TodayLogRow[] = useMemo(() => (data ? buildTodayLogRows(data.events) : []), [data]);
+  const groups: readonly TodayAnomalyGroup[] = useMemo(
+    () => (data ? sortAnomalyGroups(buildTodayAnomalyGroups(data.anomalies)) : []),
+    [data],
+  );
+  const verdict = useMemo(() => (data ? buildTodayVerdict(data) : null), [data]);
+  const sharedStep = useMemo(() => sharedAnomalyStep(groups), [groups]);
+  const logNote = useMemo(() => (data ? todayLogTruncationNote(data) : null), [data]);
+  const anomalyNote = useMemo(() => (data ? todayAnomalyTruncationNote(data) : null), [data]);
 
-  const focus = projection?.primaryFocus.state === "data" ? projection.primaryFocus.data : null;
-  const objective = focus?.objective ?? null;
-  const action = focus?.action ?? null;
-  const title = objective?.content.conceptLabel ?? objective?.sources.primaryNote?.title ?? "继续学习";
-  const sourceLabel = objective?.content.sourceLabel ?? objective?.sources.primaryNote?.title ?? "来源标签未公开";
-  const reviewDueCount = projection?.sanitizedReviewSummary.state === "data" ? projection.sanitizedReviewSummary.data.dueCount : 0;
+  const triageRef = useRef<HTMLElement>(null);
+  // 滚动交给容器的 `scroll-behavior`（CSS 里在 reduced-motion 下退回 auto），
+  // 这样"要不要平滑"只在一处决定，不在 JS 里再抄一遍动效偏好。
+  const scrollToTriage = () => triageRef.current?.scrollIntoView({ block: "start" });
 
-  const startPrimaryAction = async () => {
-    if (!action || action.availability !== "available" || !window.ailearn || starting) return;
-    const typedAction: AvailableRoomAction["action"] = action.action;
-    setStarting(true);
-    setFailure(null);
-    try {
-      if (typedAction.kind === "resume_run") {
-        setActiveRunId(typedAction.runId);
-        invoke("validate");
+  const openTarget = (target: ActivityTargetV1) => {
+    switch (target.kind) {
+      case "review":
+        invoke("review");
         return;
-      }
-      if (typedAction.kind !== "create_run" && typedAction.kind !== "create_review_run") return;
-      const originV2 = learningRunOriginForRoomAction(typedAction);
-      if (!originV2) throw new Error(typedAction.kind === "create_run"
-        ? "服务端没有提供可验证的学习卡身份，未启动学习运行。"
-        : "服务端返回的复习版本不可用，未启动学习运行。");
-      const response = await window.ailearn.learningRun.start({
-        meta: createRequestMeta(epochRef.current),
-        commandId: createCommandId(typedAction.kind === "create_review_run" ? "start-focus-review" : "start-focus-run"),
-        request: {
-          version: 2,
-          originV2,
-          goal: "stabilize",
-          requestedTimeBudgetSeconds: 180,
-          responsePreference: "adaptive",
-        },
-      });
-      if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
-      const snapshot = unwrapGatewayResult(response);
-      setActiveRunId(snapshot.runId);
-      invoke("validate");
-    } catch (error) {
-      setFailure(gatewayErrorMessage(error));
-    } finally {
-      setStarting(false);
+      case "objective":
+        setActiveObjectiveId(target.id);
+        invoke("open-objective");
+        return;
+      case "note":
+        setActiveNoteRef({ noteId: target.id, noteVersionId: target.noteVersionId });
+        invoke("open-notebook");
+        return;
+      case "card_generation":
+        setActiveCardGenerationRunId(target.id);
+        invoke("open-card-generation");
+        return;
+      case "source":
+        setActiveSourceId(target.id);
+        invoke("open-source");
+        return;
     }
   };
 
-  const boundary = loading
-    ? { heading: "正在读取真实学习目标…", message: "正在确认身份、工作区与当前主焦点。", tone: "loading" as const }
-    : failure
-      ? { heading: "当前学习目标暂时不可用", message: failure, tone: "error" as const }
-      : projection?.primaryFocus.state === "empty"
-        ? { heading: "还没有可继续的学习目标", message: "服务端暂时没有提供主焦点；这里不会用本机样本填满空白页。", tone: "empty" as const }
-        : projection?.primaryFocus.state === "error"
-          ? { heading: "主焦点读取未完成", message: "服务端主焦点暂时不可用，请稍后重新读取。", tone: "error" as const }
-          : null;
-  const missingStartIdentity = action?.availability === "available"
-    && action.action.kind === "create_run"
-    && !action.action.cardId;
-  const hasReadyContent = Boolean(!boundary && objective && action);
-  const notebookAssetPath = manifest?.objects.studyOpenNotebook ?? null;
-  const notebookAssetUrl = manifest && notebookAssetPath ? mediaAssetUrl(manifest, notebookAssetPath) : null;
-
-  useSceneSurfaceProjections(studyProjectionTargets, {
-    active: true,
-    compactMediaQuery: STUDY_SURFACE_REGISTRY.compactMediaQuery,
-    quadOverrides: surfaceQuadOverrides,
-  });
-
-  useSceneSurfaceInputRuntime({
-    active: import.meta.env.DEV,
-    compactMediaQuery: STUDY_SURFACE_REGISTRY.compactMediaQuery,
-    referenceFrameRef: studyReferenceFrameRef,
-    targets: studyProjectionTargets,
-    quadOverrides: surfaceQuadOverrides,
-    onInput: observeStudySurfaceInput,
-  });
+  const reading = loading || Boolean(failure);
 
   return (
-    <section
-      className={`study-object-surface study-workbench task-artifact${boundary ? ` study-workbench--${boundary.tone}` : " study-workbench--ready"}`}
-      aria-labelledby="study-surface-title"
-    >
-      <SurfaceReturnControl className="study-workbench__bookmark" />
-      <SceneReferenceFrame
-        ref={studyReferenceFrameRef}
-        className="study-reference-frame"
-        data-scene-input-runtime={import.meta.env.DEV ? "observer" : "disabled"}
-      >
-        <div
-          className="study-notebook"
-          style={STUDY_NOTEBOOK_STYLE}
-          data-scene-canvas-state={studyCanvasReady ? "ready" : "fallback"}
-          data-scene-canvas-renderer={studyCanvasReady ? "pixi-study-notebook-base" : "poster"}
-          data-scene-canvas-active={studyCanvasReady && scenePhase === "task" ? "true" : "false"}
-        >
-          <StudyNotebookCanvas
-            assetUrl={notebookAssetUrl}
-            compactMediaQuery={STUDY_SURFACE_REGISTRY.compactMediaQuery}
-            motionMode={motionMode}
-            scenePhase={scenePhase}
-            windowState={windowState}
-            onReady={setStudyCanvasReady}
-          />
-          <img
-            className="study-notebook__object"
-            src={notebookAssetUrl ?? "/assets/learning-room/v1/objects/study-open-notebook-v1.png"}
-            data-scene-surface-base="true"
-            alt=""
-            aria-hidden="true"
-            draggable="false"
-          />
-
-          <div
-            ref={leftPageSurfaceRef}
-            className="study-notebook__surface study-notebook__surface--reading"
-            style={STUDY_SURFACE_STYLES.notebookLeft}
-            data-scene-surface={STUDY_SURFACE_REGISTRY.surfaces.notebookLeft.id}
-          >
-            <article
-              className="study-notebook__page study-notebook__page--reading"
-              role={boundary?.tone === "error" ? "alert" : boundary ? "status" : undefined}
+    <HudPage page="today">
+      {/* 外壳 chip 已经是这一页的标题（今日学习 + 副标题），页内再放一个大标题
+          只会把同一句话说两遍；这里换成一枚日期行，它才是这一页独有的东西。 */}
+      <section className="day-route" data-page="today-log" aria-label="今日学习">
+        <div className="day-head">
+          <p className="day-head__date">
+            <time dateTime={dayIso(nowMs)}>{todayDateLabel(nowMs)}</time>
+            <span>{todayWeekdayLabel(nowMs)}</span>
+          </p>
+          {reading ? null : (
+            <button
+              type="button"
+              className="button day-head__refresh"
+              onClick={() => void reload({ silent: true })}
+              disabled={loading}
+              aria-label="重新读取今天的操作日志"
             >
-              <div
-                className={`study-notebook__ink study-notebook__ink--reading${boundary ? " study-boundary" : ""}`}
-                data-scene-surface-layer="ink"
-              >
-                {boundary ? (
-                  <StudyBoundaryReading heading={boundary.heading} message={boundary.message} />
-                ) : objective && action ? (
-                  <>
-                    <header className="study-objective">
-                      <h2 id="study-surface-title">{title}</h2>
-                    </header>
-                    <blockquote>{objective.content.publicSummary}</blockquote>
-                    <footer className="study-objective__status">
-                      <strong>{studyStatusLabel(objective)}</strong>
-                      <span>内容版本 {objective.surfaceRevision}</span>
-                    </footer>
-                  </>
-                ) : null}
-              </div>
-              <span className="study-notebook__material study-notebook__material--left" data-scene-surface-layer="material" aria-hidden="true" />
-            </article>
-          </div>
-
-          <div
-            ref={rightPageSurfaceRef}
-            className="study-notebook__surface study-notebook__surface--next"
-            style={STUDY_SURFACE_STYLES.notebookRight}
-            data-scene-surface={STUDY_SURFACE_REGISTRY.surfaces.notebookRight.id}
-          >
-            <section className="study-notebook__page study-notebook__page--next" aria-labelledby={boundary ? undefined : "study-next-action-title"}>
-              <div
-                className={`study-notebook__ink study-notebook__ink--next${boundary ? " study-boundary__recovery" : ""}`}
-                data-scene-surface-layer="ink"
-              >
-                {boundary ? (
-                  <StudyBoundaryRecovery {...boundary} onRetry={boundary.tone === "loading" ? undefined : reload} />
-                ) : objective && action ? (
-                  <>
-                    <div className="study-next-action">
-                      <Sparkles size={18} aria-hidden="true" />
-                      <div>
-                        <h3 id="study-next-action-title">{studyActionLabel(action.action)}</h3>
-                        <p>{studyActionDescription(action.action)}</p>
-                      </div>
-                    </div>
-                    {roomActionReasonLabel(action) ? <p className="study-next-action__unavailable">{roomActionReasonLabel(action)}</p> : null}
-                    {missingStartIdentity ? <p className="study-next-action__unavailable">服务端尚未提供可验证的学习卡身份，本次学习保持关闭。</p> : null}
-                    <div className="study-notebook__actions">
-                      <button className="surface-primary" type="button" disabled={action.availability !== "available" || missingStartIdentity || starting} onClick={() => void startPrimaryAction()}>
-                        {starting ? "正在准备…" : studyActionLabel(action.action)}<ArrowRight size={17} aria-hidden="true" />
-                      </button>
-                      {objective.sources.primaryNote ? (
-                        <button className="surface-secondary" type="button" onClick={() => invoke("open-notebook")}>
-                          <BookOpenText size={17} aria-hidden="true" />进入研究册
-                        </button>
-                      ) : reviewDueCount > 0 ? (
-                        <button className="surface-secondary" type="button" onClick={() => invoke("review")}>打开今日复习队列</button>
-                      ) : null}
-                    </div>
-                  </>
-                ) : null}
-              </div>
-              <span className="study-notebook__material study-notebook__material--right" data-scene-surface-layer="material" aria-hidden="true" />
-            </section>
-          </div>
-
-          <aside
-            ref={sourceSlipSurfaceRef}
-            className={`study-source-slip study-notebook__surface${hasReadyContent ? "" : " study-source-slip--empty"}`}
-            style={STUDY_SURFACE_STYLES.sourceSlip}
-            data-scene-surface={STUDY_SURFACE_REGISTRY.surfaces.sourceSlip.id}
-            aria-label={hasReadyContent ? "学习目标来源" : undefined}
-            aria-hidden={hasReadyContent ? undefined : "true"}
-          >
-            <div className="study-source-slip__plane">
-              <div className="study-source-slip__ink" data-scene-surface-layer="ink">
-                {hasReadyContent ? <><span>来源</span><strong>{sourceLabel}</strong></> : null}
-              </div>
-              <span className="study-source-slip__material" data-scene-surface-layer="material" aria-hidden="true" />
-            </div>
-          </aside>
-
-          <span className="study-notebook__spine" data-scene-surface-layer="occluder" aria-hidden="true" />
+              <RefreshCw size={13} strokeWidth={2.2} aria-hidden="true" />
+              刷新
+            </button>
+          )}
         </div>
 
-        {import.meta.env.DEV ? (
-          <SurfaceCalibrator
-            referenceFrameRef={studyReferenceFrameRef}
-            registry={STUDY_SURFACE_REGISTRY}
-            surfaces={STUDY_CALIBRATION_SURFACES}
-            theme={theme}
-            onThemeChange={setTheme}
-            onQuadOverridesChange={setSurfaceQuadOverrides}
-          />
+        {reading ? (
+          <div className="day-route__state">
+            {loading ? (
+              <SurfaceDataState
+                kind="loading"
+                message="正在读取今天的操作日志"
+                detail="日志由服务端从笔记、来源、理解目标与学习旅程的权威记录投影而来。"
+              />
+            ) : (
+              <SurfaceDataState
+                kind="error"
+                message="今天的操作日志暂时不可用"
+                detail={failure ?? ""}
+                onRetry={() => void reload()}
+              />
+            )}
+          </div>
+        ) : verdict ? (
+          <>
+            <DayVerdict verdict={verdict} onTriage={scrollToTriage} />
+
+            <div className="day-log" tabIndex={0} role="group" aria-label="今日操作日志与待处理事务">
+              {groups.length > 0 ? (
+                <AnomalyTriage
+                  groups={groups}
+                  total={data?.anomalies.length ?? groups.length}
+                  sharedStep={sharedStep}
+                  note={anomalyNote}
+                  onOpen={openTarget}
+                  anchorRef={triageRef}
+                />
+              ) : null}
+
+              <LogStream rows={rows} note={logNote} onOpen={openTarget} onPick={invoke} />
+            </div>
+
+            <CompanionRail onOpen={() => invoke("open-companion-center")} />
+          </>
         ) : null}
-      </SceneReferenceFrame>
-    </section>
+      </section>
+    </HudPage>
   );
 }

@@ -79,7 +79,7 @@ const createMemoryBodySchema = z.object({
   importance: z.number().min(0).max(1).optional(),
   confidence: z.number().min(0).max(1).optional(),
   scope: z.enum(["global", "workspace", "task"]).optional(),
-  sourceType: z.enum(["user_stated", "model_inferred", "confirmed", "summary", "legacy"]).optional(),
+  sourceType: z.enum(["user_stated", "model_inferred", "confirmed", "summary"]).optional(),
   userStated: z.boolean().optional(),
   candidate: z.boolean().optional(),
 });

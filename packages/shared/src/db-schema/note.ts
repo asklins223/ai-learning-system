@@ -19,10 +19,10 @@ export const sources = pgTable(
   },
   (t) => ({
     workspaceIdx: index("sources_workspace_idx").on(t.workspaceId),
-    // 2026-08-12（generate 对齐）：0153 定义 (workspace_id, updated_at DESC)，
-    // 支撑 listSources 按 updated_at DESC + id 排序走索引，避免 workspace 分区内 Sort。
+    // 0153 的 (workspace_id, updated_at DESC) 只服务过 created_at 排序的旧查询；
+    // 0225 补齐游标分页真正需要的三列，listSources 按 updated_at DESC + id 走索引。
     workspaceUpdatedIdx: index("sources_workspace_updated_idx")
-      .on(t.workspaceId, sql`${t.updatedAt} desc`),
+      .on(t.workspaceId, sql`${t.updatedAt} desc`, t.id),
 
     idWorkspaceUnique: uniqueIndex("sources_id_workspace_unique").on(t.id, t.workspaceId),}),
 );
@@ -58,8 +58,6 @@ export const notes = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     // CONC-03: 软删除标记，NULL 表示未删除。30 天后由定时任务物理删除。
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
-    cardGenerationEpoch: integer("card_generation_epoch").notNull().default(0),
-    latestGenerationRunId: uuid("latest_generation_run_id"),
   },
   (t) => ({
     workspaceIdx: index("notes_workspace_idx").on(t.workspaceId),

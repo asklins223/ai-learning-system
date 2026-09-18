@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SQL } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
 import {
   HandlerTimeoutError,
   runWithAbortTimeout,
@@ -15,32 +13,26 @@ import {
   logAICall,
   normalizeWorkspaceAIPolicy,
 } from "../lib/governance.ts";
-import { DashScopeProvider } from "../lib/providers/dashscope.ts";
-import { evaluateValidationViaChat } from "../lib/business-ai-ops.ts";
 import {
   assertWorkerWorkspaceTransactionContextCompatible,
   normalizeWorkerWorkspaceTransactionContext,
   resolveWorkerDatabaseUrl,
   WorkerWorkspaceTransactionContextError,
 } from "../db.ts";
-import { retryBackoffMs } from "../lib/job-retry.ts";
 import {
   claimJobs,
-  createDrizzleQueueJobUpdater,
   markJobFailed,
-  markJobSucceeded,
   reapStaleJobs,
   type ClaimedJob,
   type QueueJobUpdate,
   type QueueJobUpdater,
+  type JobUpdateResult,
   type QueueSqlExecutor,
-  type QueueTransactionRunner,
 } from "../queue.ts";
-import * as schema from "../schema/index.ts";
 
 const claimedJobFixture: ClaimedJob = {
   id: "11111111-1111-1111-1111-111111111111",
-  type: "execute_card_agent_turn",
+  type: "parse_source",
   payload: { noteVersionId: "note-1" },
   workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -67,7 +59,7 @@ test("queue claim maps database rows to trusted worker jobs", async () => {
     },
     {
       id: "job-2",
-      type: "execute_card_agent_turn",
+      type: "parse_source",
       payload: null,
       workspace_id: "workspace-2",
       requested_by: null,
@@ -88,7 +80,7 @@ test("queue claim maps database rows to trusted worker jobs", async () => {
     },
     {
       id: "job-2",
-      type: "execute_card_agent_turn",
+      type: "parse_source",
       payload: {},
       workspaceId: "workspace-2",
       requestedBy: null,
@@ -113,80 +105,16 @@ test("queue reaper summarizes pending and dead results", async () => {
   });
 });
 
-test("successful queue updates are fenced by workspace, running state, and lease token", async () => {
-  let context: unknown;
-  let values: unknown;
-  let predicate: SQL | undefined;
-  let returnedRows = [{ id: claimedJobFixture.id }];
-  const transaction = {
-    update: (table: unknown) => {
-      assert.equal(table, schema.jobs);
-      return {
-        set: (nextValues: unknown) => {
-          values = nextValues;
-          return {
-            where: (nextPredicate: SQL) => {
-              predicate = nextPredicate;
-              return {
-                returning: () => Promise.resolve(returnedRows),
-              };
-            },
-          };
-        },
-      };
-    },
-  };
-  const runTransaction: QueueTransactionRunner = async (nextContext, operation) => {
-    context = nextContext;
-    return operation(transaction as never);
-  };
-  const updateJob = createDrizzleQueueJobUpdater(runTransaction);
-  const finishedAt = new Date("2026-07-18T12:00:00.000Z");
-
-  assert.equal(await markJobSucceeded(claimedJobFixture, updateJob, () => finishedAt), true);
-  assert.deepEqual(context, {
-    workspaceId: claimedJobFixture.workspaceId,
-    userId: claimedJobFixture.requestedBy,
-  });
-  assert.deepEqual(values, {
-    status: "succeeded",
-    finishedAt,
-    leaseToken: null,
-  });
-
-  assert.ok(predicate);
-  const query = new PgDialect().sqlToQuery(predicate);
-  assert.match(query.sql, /"jobs"\."id" = \$1/);
-  assert.match(query.sql, /"jobs"\."workspace_id" = \$2/);
-  assert.match(query.sql, /"jobs"\."status" = \$3/);
-  assert.match(query.sql, /"jobs"\."lease_token" = \$4/);
-  assert.deepEqual(query.params, [
-    claimedJobFixture.id,
-    claimedJobFixture.workspaceId,
-    "running",
-    claimedJobFixture.leaseToken,
-  ]);
-
-  // A reaped/re-claimed job changes the lease, so the fenced UPDATE returns no
-  // row and the adapter reports that the success transition was not applied.
-  returnedRows = [];
-  assert.equal(await markJobSucceeded(claimedJobFixture, updateJob, () => finishedAt), false);
-});
-
 test("failed jobs below the attempt limit return to pending with backoff", async () => {
   const updates: QueueJobUpdate[] = [];
   const updateJob: QueueJobUpdater = async (update) => {
     updates.push(update);
-    return true;
+    return { updated: true, status: "pending", attempts: 1, backoffMs: 2_000 } satisfies JobUpdateResult;
   };
-  const epochMs = Date.parse("2026-07-18T12:00:00.000Z");
-
   const transition = await markJobFailed(
     claimedJobFixture,
     "provider unavailable",
     updateJob,
-    () => new Date(epochMs),
-    () => epochMs,
   );
 
   assert.deepEqual(transition, {
@@ -208,12 +136,10 @@ test("failed jobs below the attempt limit return to pending with backoff", async
     },
     values: {
       status: "pending",
-      attempts: 1,
       lastError: "operational_error:provider:Error",
       startedAt: null,
       leaseToken: null,
       finishedAt: null,
-      scheduledAt: new Date(epochMs + 2_000),
     },
   }]);
 });
@@ -222,7 +148,7 @@ test("queue persistence redacts SQL parameters and answer content", async () => 
   let update: QueueJobUpdate | undefined;
   const updateJob: QueueJobUpdater = async (nextUpdate) => {
     update = nextUpdate;
-    return true;
+    return { updated: true, status: "pending", attempts: 1, backoffMs: 2_000 };
   };
   const secret = "用户答案：不应进入 last_error";
 
@@ -242,17 +168,14 @@ test("failed jobs at the attempt limit become dead without retry delay", async (
   let update: QueueJobUpdate | undefined;
   const updateJob: QueueJobUpdater = async (nextUpdate) => {
     update = nextUpdate;
-    return true;
+    return { updated: true, status: "dead", attempts: 3, backoffMs: 0 };
   };
-  const epochMs = Date.parse("2026-07-18T12:00:00.000Z");
   const exhaustedJob = { ...claimedJobFixture, attempts: 2 };
 
   const transition = await markJobFailed(
     exhaustedJob,
     "model deadline exceeded",
     updateJob,
-    () => new Date(epochMs),
-    () => epochMs,
   );
 
   assert.deepEqual(transition, {
@@ -261,10 +184,10 @@ test("failed jobs at the attempt limit become dead without retry delay", async (
     attempts: 3,
     backoffMs: 0,
   });
-  assert.equal(update?.values.status, "dead");
-  assert.equal(update?.values.attempts, 3);
-  assert.deepEqual(update?.values.finishedAt, new Date(epochMs));
-  assert.deepEqual(update?.values.scheduledAt, new Date(epochMs));
+  assert.equal(update?.values.status, "pending");
+  assert.equal(update?.values.attempts, undefined);
+  assert.equal(update?.values.finishedAt, null);
+  assert.equal(update?.values.scheduledAt, undefined);
   assert.equal(update?.fence.leaseToken, exhaustedJob.leaseToken);
 });
 
@@ -311,12 +234,6 @@ test("worker transaction context validates UUIDs and forbids nested context chan
   );
 });
 
-test("retry backoff starts at two seconds and doubles per previous failure", () => {
-  assert.deepEqual([0, 1, 2].map(retryBackoffMs), [2_000, 4_000, 8_000]);
-  assert.throws(() => retryBackoffMs(-1), RangeError);
-  assert.throws(() => retryBackoffMs(0.5), RangeError);
-});
-
 test("timeout aborts the provider signal and fences late handler work", async () => {
   let observedSignal: AbortSignal | undefined;
   let lateSideEffect = false;
@@ -357,64 +274,6 @@ test("an aborted lease fails closed before a transaction can commit", () => {
   );
 });
 
-test("DashScope forwards the worker AbortSignal to the HTTP request", async () => {
-  let requestSignal: AbortSignal | undefined;
-  const request: typeof globalThis.fetch = async (_input, init) => {
-    requestSignal = init?.signal ?? undefined;
-    await new Promise<never>((_, reject) => {
-      requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
-    });
-    throw new Error("request should have been aborted");
-  };
-  const provider = new DashScopeProvider({ apiKey: "test-key", request });
-  const controller = new AbortController();
-  const pending = evaluateValidationViaChat(
-    provider,
-    { question: "Q", questionType: "t", claim: "C", quote: "R", userAnswer: "A" },
-    controller.signal,
-  );
-  controller.abort(new Error("cancelled"));
-  await assert.rejects(pending, /cancelled/);
-  assert.equal(requestSignal, controller.signal);
-});
-
-test("DashScope compatible HTTP path preserves the generation request contract", async () => {
-  let requestedUrl = "";
-  let requestBody: Record<string, unknown> | undefined;
-  const request: typeof globalThis.fetch = async (input, init) => {
-    requestedUrl = String(input);
-    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return new Response(JSON.stringify({
-      choices: [{
-        message: {
-          content: JSON.stringify({
-            outcome: "preliminary_understanding",
-            confidence: 0.85,
-            feedback: "Good",
-            covered_points: [],
-            missing_points: [],
-            misunderstandings: [],
-            evidence_refs: [],
-          }),
-        },
-      }],
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
-  };
-  const provider = new DashScopeProvider({
-    apiKey: "test-key",
-    basePath: "https://dashscope.invalid/api/v1/",
-    request,
-  });
-
-  await evaluateValidationViaChat(provider, {
-    question: "Q", questionType: "t", claim: "C", quote: "R", userAnswer: "A",
-  });
-
-  assert.equal(requestedUrl, "https://dashscope.invalid/compatible-mode/v1/chat/completions");
-  assert.equal(requestBody?.model, "qwen-plus");
-  assert.deepEqual(requestBody?.response_format, { type: "json_object" });
-});
-
 test("auditLogging policy disables writes without changing attribution", async () => {
   const writes: unknown[] = [];
   const params = {
@@ -423,7 +282,7 @@ test("auditLogging policy disables writes without changing attribution", async (
     jobId: "job-1",
     provider: "mock",
     modelId: "mock-v1",
-      operation: "execute_card_agent_turn",
+      operation: "companion_agent",
   };
 
   const disabled = await logAICall(params, {

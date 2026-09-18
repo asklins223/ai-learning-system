@@ -8,12 +8,14 @@ import {
   type ReactNode,
 } from "react";
 import gsap from "gsap";
+import { CustomEase } from "gsap/CustomEase";
 import { useGSAP } from "@gsap/react";
 import {
   ArrowLeft,
   ArrowRight,
-  Building2,
   Clock3,
+  Eye,
+  EyeOff,
   KeyRound,
   LampDesk,
   LockKeyhole,
@@ -33,7 +35,6 @@ import {
 import type {
   AILearnDesktopApiM2,
   RuntimeSnapshotV1,
-  SessionContextV1,
   WorkspaceSummaryV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
 import {
@@ -61,7 +62,10 @@ import {
 } from "../app/runtime-gate-subscription";
 import { mediaAssetUrl, useLearningRoomManifest } from "../media/learning-room-manifest";
 import { sceneMotionDuration, type SceneMotionMode } from "../scene/scene-motion";
+import { HudFirstSpaceScene } from "./hud/HudFirstSpace";
+import { requestSpaceMenu, requestSpaceMenuRefresh } from "./hud/space-menu-events";
 import { AuthAmbientCanvas, type AuthAmbientLampCue } from "./AuthAmbientCanvas";
+import { MIN_PASSWORD_LENGTH, validateAuthForm } from "./auth-form-validation";
 import {
   AUTH_SCENE_OPTIONS,
   authSceneLabel,
@@ -71,10 +75,11 @@ import {
   type AuthScenePreference,
   type AuthSceneTime,
 } from "./auth-scene-time";
-import { DoorOpeningTransition, type DoorTheme } from "./DoorOpeningTransition";
 import "./desktop-access-gate.css";
 
-gsap.registerPlugin(useGSAP);
+gsap.registerPlugin(useGSAP, CustomEase);
+
+const gateSurfaceEase = CustomEase.create("ailearn-gate-surface", "0.16,1,0.3,1");
 
 type RetryAction = "bootstrap" | "connect" | "reload" | null;
 
@@ -87,20 +92,43 @@ type BlockedView = {
 };
 
 type GateView =
-  | { phase: "loading"; title: string; detail: string }
+  | { phase: "loading"; title: string; detail: string; stage?: string }
   | BlockedView
-  | { phase: "auth"; mode: "login" | "register" }
+  | { phase: "auth"; mode: "login" | "register"; serviceNotice?: string }
   | { phase: "reauth"; session: ReauthenticationDesktopSession | ReadyDesktopSession | null }
-  | { phase: "workspace"; session: AuthenticatedDesktopSession; workspaces: WorkspaceSummaryV1[] }
-  | { phase: "ready"; runtime: RuntimeSnapshotV1; session: ReadyDesktopSession };
-
-type DoorEntryPhase = "closed" | "opening" | "open";
+  | {
+      phase: "workspace";
+      session: AuthenticatedDesktopSession;
+      workspaces: WorkspaceSummaryV1[];
+      notice?: string;
+    }
+  | {
+      phase: "ready";
+      runtime: RuntimeSnapshotV1;
+      session: ReadyDesktopSession;
+      /** An invite that failed to redeem during sign-in; the space menu reports it. */
+      spaceNotice?: string;
+    };
 
 const initialView: GateView = {
   phase: "loading",
   title: "正在准备应用",
   detail: "请稍候，我们正在检查连接和登录状态。",
+  stage: "正在启动本地组件",
 };
+
+/** Short, concrete labels for the spinner row of each start-up step. */
+const GATE_STAGES = {
+  refresh: "正在同步最新状态",
+  reconnect: "正在重新连接学习服务",
+  connect: "正在建立安全连接",
+  trust: "正在验证本机服务身份",
+  restoring: "正在校验已保存的登录凭据",
+  checking: "正在向学习服务确认会话",
+  resume: "正在恢复上次登录",
+  switchWorkspace: "正在切换当前空间",
+  loadWorkspaces: "正在读取可用的学习空间",
+} as const;
 
 function desktopApi(): AILearnDesktopApiM2 | null {
   const value = (window as unknown as { ailearn?: AILearnDesktopApiM2 }).ailearn;
@@ -139,6 +167,10 @@ function blockedFromError(error: unknown, title: string): BlockedView {
   };
 }
 
+function isConfigurationBoundary(connection: RuntimeSnapshotV1["apiConnection"]): boolean {
+  return connection.kind === "not_configured" || connection.kind === "configuration_error";
+}
+
 function retryTimeLabel(value?: string): string | null {
   if (!value) return null;
   const date = new Date(value);
@@ -146,9 +178,24 @@ function retryTimeLabel(value?: string): string | null {
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
+/**
+ * Hands one gate outcome to the room. A failed invite redemption happens during
+ * bootstrap, before the room exists, but its surface — the learning-space menu —
+ * lives in the room control pill. Rendering this beside the room children lets
+ * the request fire once the pill is actually mounted.
+ */
+function SpaceMenuRequest({ notice }: { readonly notice: string }) {
+  useEffect(() => {
+    requestSpaceMenu(notice);
+  }, [notice]);
+  return null;
+}
+
 type LampTransitionDirection = `to-${AuthSceneTime}`;
 type LampTransitionPhase = "idle" | "dimming" | "lamp-on" | "brightening" | "lamp-off" | "settling";
-type GateBackdropUrls = Record<DoorTheme, string | null> & { dusk: string | null };
+/** Room lighting the gate renders against; owned by the gate itself. */
+type GateTheme = "day" | "night";
+type GateBackdropUrls = Record<GateTheme, string | null> & { dusk: string | null };
 type LampFrameCaptureController = {
   seek: (time: number) => void;
   finish: () => void;
@@ -427,7 +474,7 @@ function AuthLampControl({
 
   const isNight = scene === "night";
   const actionLabel = "调整书房时间";
-  const systemDescription = `现在 ${systemTimeLabel} · ${authSceneLabel(systemScene)}`;
+  const systemDescription = `${systemTimeLabel} · ${authSceneLabel(systemScene)}`;
 
   return (
     <div
@@ -467,6 +514,7 @@ function AuthLampControl({
             className="desktop-access-gate__time-option desktop-access-gate__time-option--system"
             data-scene-choice="system"
             data-selected={preference === "system"}
+            aria-pressed={preference === "system"}
             onClick={() => handlePreferenceSelect("system")}
           >
             <Clock3 size={14} aria-hidden="true" />
@@ -481,6 +529,7 @@ function AuthLampControl({
                 className="desktop-access-gate__time-option"
                 data-scene-choice={option.scene}
                 data-selected={preference === option.scene}
+                aria-pressed={preference === option.scene}
                 onClick={() => handlePreferenceSelect(option.scene)}
               >
                 <SceneTimeIcon scene={option.scene} />
@@ -554,7 +603,19 @@ function GateFrame({
     const panel = frame.querySelector<HTMLElement>(".desktop-access-gate__panel");
     if (!panel) return undefined;
 
+    const brand = panel.querySelector<HTMLElement>(".desktop-access-gate__brand");
+    const heading = panel.querySelector<HTMLElement>(".desktop-access-gate__heading");
     const fields = [...frame.querySelectorAll<HTMLElement>(".desktop-access-gate__fields > label")];
+    const form = panel.querySelector<HTMLElement>(".desktop-access-gate__form");
+    const formSupport = form
+      ? [...form.children].filter((element) => !element.matches(".desktop-access-gate__fields")) as HTMLElement[]
+      : [];
+    const directContent = [...panel.children]
+      .filter((element) => !element.matches(".desktop-access-gate__brand, .desktop-access-gate__heading, .desktop-access-gate__form")) as HTMLElement[];
+    const supportingNodes = [...formSupport, ...directContent];
+    const animatedNodes = [brand, heading, ...fields, ...supportingNodes].filter(
+      (element): element is HTMLElement => element instanceof HTMLElement,
+    );
     const compact = window.matchMedia("(max-width: 760px), (max-height: 620px)").matches;
     const effectiveMode = compact && motionMode === "full" ? "lite" : motionMode;
     const duration = sceneMotionDuration(effectiveMode, "surfaceEnter");
@@ -562,45 +623,55 @@ function GateFrame({
     frame.dataset.gateMotionState = duration > 0 ? "running" : "settled";
 
     if (duration <= 0) {
-      gsap.set([panel, ...fields], { clearProps: "transform,opacity,visibility,willChange" });
+      gsap.set([panel, ...animatedNodes], { clearProps: "transform,opacity,visibility,willChange" });
       return undefined;
     }
 
+    // The entrance animates `opacity`, never `autoAlpha`: `autoAlpha` would set
+    // `visibility: hidden`, and for the length of the stagger the inputs and the
+    // submit button would drop out of the tab order and out of the accessibility
+    // tree. They stay focusable and announced while they fade in.
     gsap.set(panel, { willChange: "transform,opacity" });
-    gsap.set(fields, { willChange: "transform,opacity" });
+    gsap.set(animatedNodes, { opacity: 0, y: 7, willChange: "transform,opacity" });
     const timeline = gsap.timeline({
-      defaults: { ease: "power3.out" },
+      defaults: { ease: gateSurfaceEase },
       onComplete: () => {
         frame.dataset.gateMotionState = "settled";
       },
     });
     timeline.fromTo(
       panel,
-      { autoAlpha: 0.78, x: direction * (effectiveMode === "lite" ? 8 : 16) },
       {
-        autoAlpha: 1,
+        opacity: 0,
+        x: direction * (effectiveMode === "lite" ? 7 : 12),
+        scale: effectiveMode === "lite" ? 0.998 : 0.994,
+      },
+      {
+        opacity: 1,
         x: 0,
+        scale: 1,
         duration,
         clearProps: "transform,opacity,visibility,willChange",
       },
       0,
     );
-    if (fields.length > 0) {
-      timeline.fromTo(
-        fields,
-        { autoAlpha: 0, x: direction * (effectiveMode === "lite" ? 4 : 10) },
-        {
-          autoAlpha: 1,
-          x: 0,
-          duration: Math.max(duration * 0.72, 0.14),
-          stagger: Math.min(duration * 0.09, 0.045),
-          clearProps: "transform,opacity,visibility,willChange",
-        },
-        Math.min(duration * 0.17, 0.08),
-      );
-    }
+    const reveal = (targets: HTMLElement[], startAt: number, revealDuration: number, stagger = 0) => {
+      if (targets.length === 0) return;
+      timeline.to(targets, {
+        opacity: 1,
+        y: 0,
+        duration: revealDuration,
+        stagger,
+        clearProps: "transform,opacity,visibility,willChange",
+      }, startAt);
+    };
+    reveal(brand ? [brand] : [], Math.min(duration * 0.08, 0.04), Math.min(duration * 0.5, 0.23));
+    reveal(heading ? [heading] : [], Math.min(duration * 0.14, 0.065), Math.min(duration * 0.52, 0.24));
+    reveal(fields, Math.min(duration * 0.2, 0.09), Math.min(duration * 0.5, 0.23), Math.min(duration * 0.03, 0.014));
+    reveal(supportingNodes, Math.min(duration * 0.3, 0.14), Math.min(duration * 0.46, 0.21), Math.min(duration * 0.025, 0.012));
 
     return () => {
+      timeline.kill();
       frame.dataset.gateMotionState = "settled";
     };
   }, {
@@ -655,12 +726,10 @@ function GateFrame({
 export function DesktopAccessGate({
   children,
   onWorkspaceBoundaryReset,
-  theme = "day",
   motionMode = "full",
 }: {
   children: ReactNode;
   onWorkspaceBoundaryReset?: () => void;
-  theme?: DoorTheme;
   motionMode?: SceneMotionMode;
 }) {
   const [view, setView] = useState<GateView>(initialView);
@@ -669,12 +738,17 @@ export function DesktopAccessGate({
   const [formFailure, setFormFailure] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [inviteToken, setInviteToken] = useState("");
-  const [doorEntryPhase, setDoorEntryPhase] = useState<DoorEntryPhase>("closed");
+  const [inviteEntryOpen, setInviteEntryOpen] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [keepSignedIn, setKeepSignedIn] = useState(true);
+  const [credentialPersistence, setCredentialPersistence] = useState<"safe_storage" | "memory">("memory");
+  const [roomRevealed, setRoomRevealed] = useState(false);
   const [scenePreference, setScenePreference] = useState<AuthScenePreference>("system");
   const [systemNow, setSystemNow] = useState(() => new Date());
-  const { manifest: roomManifest, error: roomManifestError } = useLearningRoomManifest();
+  const { manifest: roomManifest } = useLearningRoomManifest();
   const gateBackdropUrls: GateBackdropUrls = {
     day: roomManifest ? mediaAssetUrl(roomManifest, roomManifest.authPosters.day.path) : null,
     dusk: roomManifest ? mediaAssetUrl(roomManifest, roomManifest.authPosters.dusk.path) : null,
@@ -690,6 +764,9 @@ export function DesktopAccessGate({
   const connectionFlightRef = useRef<Promise<unknown> | null>(null);
   const readyBoundaryRef = useRef<string | null>(null);
   const lastTrustedSessionRef = useRef<ReadyDesktopSession | null>(null);
+  // Set when an invite redemption fails right after login: the next bootstrap
+  // resolves into the workspace phase so the failure has a surface to land on.
+  const pendingWorkspaceNoticeRef = useRef<string | null>(null);
   const viewPhaseRef = useRef<GateView["phase"]>(initialView.phase);
   const systemScene = resolveAuthSceneFromDate(systemNow);
   const requestedScene = resolveAuthScene(scenePreference, systemNow);
@@ -718,26 +795,18 @@ export function DesktopAccessGate({
     };
   }, [scenePreference]);
 
-  const beginDoorEntry = useCallback(() => {
-    // The Auth Gate now owns a distinct window-side alcove. A door animation
-    // would jump to an unrelated environment before Room becomes available,
-    // so the optional legacy threshold transition remains dormant here and the
-    // verified Room receives a short CSS reveal instead.
-    setDoorEntryPhase("open");
-  }, []);
-
-  const completeDoorEntry = useCallback(() => {
-    setDoorEntryPhase("open");
-    window.requestAnimationFrame(() => {
-      window.dispatchEvent(new Event("ailearn:desktop-room-entry-complete"));
-    });
+  const beginRoomReveal = useCallback(() => {
+    // The gate owns a distinct window-side alcove, so entering the Room is a
+    // short CSS reveal rather than a threshold animation through an unrelated
+    // environment.
+    setRoomRevealed(true);
   }, []);
 
   useEffect(() => {
-    if (view.phase !== "ready" && doorEntryPhase === "open") {
-      setDoorEntryPhase("closed");
+    if (view.phase !== "ready" && roomRevealed) {
+      setRoomRevealed(false);
     }
-  }, [doorEntryPhase, view.phase]);
+  }, [roomRevealed, view.phase]);
 
   const requestBootstrap = useCallback((forceConnection = false) => {
     generationRef.current += 1;
@@ -747,8 +816,15 @@ export function DesktopAccessGate({
       phase: "loading",
       title: forceConnection ? "正在重新连接" : "正在刷新状态",
       detail: "连接恢复后会自动继续。",
+      stage: forceConnection ? GATE_STAGES.reconnect : GATE_STAGES.refresh,
     });
     setRefreshRevision((revision) => revision + 1);
+  }, []);
+
+  const takeWorkspaceNotice = useCallback((): { notice?: string } => {
+    const notice = pendingWorkspaceNoticeRef.current;
+    pendingWorkspaceNoticeRef.current = null;
+    return notice ? { notice } : {};
   }, []);
 
   const invalidateReadyGate = useCallback((code?: GateInvalidationCode) => {
@@ -830,15 +906,18 @@ export function DesktopAccessGate({
                 onWorkspaceBoundaryReset?.();
                 readyBoundaryRef.current = null;
                 generationRef.current += 1;
-                setView({
-                  phase: "blocked",
-                  title: decision.title,
-                  detail: decision.detail,
-                  retryAction: decision.retry === "safe_retry" ? "connect" : null,
-                  ...(decision.connection.kind === "api_unavailable" && decision.connection.retryAfter
-                    ? { retryAfter: decision.connection.retryAfter }
-                    : {}),
-                });
+                setFormFailure(null);
+                setView(isConfigurationBoundary(decision.connection)
+                  ? { phase: "auth", mode: "login", serviceNotice: decision.detail }
+                  : {
+                      phase: "blocked",
+                      title: decision.title,
+                      detail: decision.detail,
+                      retryAction: decision.retry === "safe_retry" ? "connect" : null,
+                      ...(decision.connection.kind === "api_unavailable" && decision.connection.retryAfter
+                        ? { retryAfter: decision.connection.retryAfter }
+                        : {}),
+                    });
                 return;
               }
             }
@@ -852,12 +931,17 @@ export function DesktopAccessGate({
         } catch (error) {
           if (!isCurrent()) return;
           const blocked = blockedFromError(error, "应用状态暂时无法更新");
-          apply({ ...blocked, retryAction: blocked.retryAction ?? "bootstrap" });
+          if (error instanceof RendererGatewayError && error.code === "configuration_error") {
+            apply({ phase: "auth", mode: "login", serviceNotice: blocked.detail });
+          } else {
+            apply({ ...blocked, retryAction: blocked.retryAction ?? "bootstrap" });
+          }
           return;
         }
 
         let runtime = unwrapGatewayResult(await api.runtime.getSnapshot({ meta: createRequestMeta() }));
         if (!isCurrent()) return;
+        setCredentialPersistence(runtime.sessionCredential.persistence);
         let runtimeDecision = decideRuntimeGate(runtime.apiConnection);
         const forceConnection = forceConnectionRef.current;
         forceConnectionRef.current = false;
@@ -867,11 +951,13 @@ export function DesktopAccessGate({
             phase: "loading",
             title: "正在连接学习服务",
             detail: "连接成功后会继续检查登录状态。",
+            stage: GATE_STAGES.connect,
           });
           await connectOnce(api);
           if (!isCurrent()) return;
           runtime = unwrapGatewayResult(await api.runtime.getSnapshot({ meta: createRequestMeta() }));
           runtimeDecision = decideRuntimeGate(runtime.apiConnection);
+          setCredentialPersistence(runtime.sessionCredential.persistence);
         }
 
         if (runtimeDecision.kind === "connect") {
@@ -879,12 +965,17 @@ export function DesktopAccessGate({
             phase: "loading",
             title: "正在建立安全连接",
             detail: "完成后会自动继续。",
+            stage: GATE_STAGES.trust,
           });
           waitTimer = window.setTimeout(() => requestBootstrap(), 650);
           return;
         }
 
         if (runtimeDecision.kind === "blocked") {
+          if (isConfigurationBoundary(runtimeDecision.connection)) {
+            apply({ phase: "auth", mode: "login", serviceNotice: runtimeDecision.detail });
+            return;
+          }
           apply({
             phase: "blocked",
             title: runtimeDecision.title,
@@ -897,10 +988,16 @@ export function DesktopAccessGate({
           return;
         }
 
+        // A credential left by a previous launch is the difference between
+        // "resuming your session" and "asking whether you are signed in".
+        const resumingStoredSession = runtime.sessionCredential.stored;
         apply({
           phase: "loading",
-          title: "正在检查登录状态",
-          detail: "请稍候，完成后会自动继续。",
+          title: resumingStoredSession ? "正在恢复上次登录" : "正在检查登录状态",
+          detail: resumingStoredSession
+            ? "已找到上次的登录状态，正在向学习服务确认。"
+            : "请稍候，完成后会自动继续。",
+          stage: resumingStoredSession ? GATE_STAGES.restoring : GATE_STAGES.checking,
         });
         const session = unwrapGatewayResult(await api.auth.getState({ meta: createRequestMeta() }));
         if (!isCurrent()) return;
@@ -912,6 +1009,7 @@ export function DesktopAccessGate({
               phase: "loading",
               title: sessionDecision.reason === "restoring" ? "正在恢复登录" : "正在切换学习空间",
               detail: "完成后会自动继续。",
+              stage: sessionDecision.reason === "restoring" ? GATE_STAGES.resume : GATE_STAGES.switchWorkspace,
             });
             waitTimer = window.setTimeout(() => requestBootstrap(), 700);
             return;
@@ -942,15 +1040,29 @@ export function DesktopAccessGate({
               phase: "loading",
               title: "正在加载学习空间",
               detail: "加载完成后，选择你要使用的空间。",
+              stage: GATE_STAGES.loadWorkspaces,
             });
             const response = await api.workspace.list({ meta: createRequestMeta(sessionDecision.session.workspaceEpoch) });
             const workspaces = unwrapGatewayResult(response).workspaces;
-            apply({ phase: "workspace", session: sessionDecision.session, workspaces });
+            apply({ phase: "workspace", session: sessionDecision.session, workspaces, ...takeWorkspaceNotice() });
             return;
           }
-          case "ready":
-            apply({ phase: "ready", runtime, session: sessionDecision.session });
+          case "ready": {
+            // `/auth/me` always resolves an active workspace, so a ready session
+            // already has a space to work in. More than one space no longer
+            // gates the room — switching happens in the room control's
+            // learning-space menu (mockup 04B), which lists `workspace.list` for
+            // itself. The one outcome that still needs a surface is an invite
+            // that failed to redeem during sign-in: the menu owns joining, so it
+            // opens for that message instead of a gate panel.
+            apply({
+              phase: "ready",
+              runtime,
+              session: sessionDecision.session,
+              ...takeWorkspaceNotice(),
+            });
             return;
+          }
         }
       } catch (error) {
         if (!isCurrent()) return;
@@ -964,6 +1076,10 @@ export function DesktopAccessGate({
             return;
           case "resync":
           case "blocked":
+            if (error instanceof RendererGatewayError && error.code === "configuration_error") {
+              apply({ phase: "auth", mode: "login", serviceNotice: gateErrorPolicy(error).detail });
+              return;
+            }
             apply(blockedFromError(error, "暂时无法打开学习空间"));
             return;
         }
@@ -975,7 +1091,7 @@ export function DesktopAccessGate({
       if (waitTimer !== undefined) window.clearTimeout(waitTimer);
       runtimeSubscription?.close();
     };
-  }, [connectOnce, invalidateReadyGate, onWorkspaceBoundaryReset, refreshRevision, requestBootstrap]);
+  }, [connectOnce, invalidateReadyGate, onWorkspaceBoundaryReset, refreshRevision, requestBootstrap, takeWorkspaceNotice]);
 
   useEffect(() => {
     if (view.phase !== "ready") return;
@@ -993,9 +1109,20 @@ export function DesktopAccessGate({
         });
         if (!active) return;
         subscriptionId = unwrapGatewayResult(response).subscriptionId;
-        stopEvents = api.subscriptions.onEvent(subscriptionId, () => requestBootstrap());
+        stopEvents = api.subscriptions.onEvent(subscriptionId, () => {
+          // The learning-space menu owns `workspace.list`; a workspace event is
+          // the one signal that the list may have changed under it. Refresh it
+          // before the bootstrap re-verifies the session.
+          requestSpaceMenuRefresh();
+          requestBootstrap();
+        });
       } catch (error) {
-        if (active) setView(blockedFromError(error, "学习空间暂时无法更新"));
+        if (!active) return;
+        if (error instanceof RendererGatewayError && error.code === "configuration_error") {
+          setView({ phase: "auth", mode: "login", serviceNotice: gateErrorPolicy(error).detail });
+        } else {
+          setView(blockedFromError(error, "学习空间暂时无法更新"));
+        }
       }
     };
 
@@ -1025,26 +1152,48 @@ export function DesktopAccessGate({
     event.preventDefault();
     const api = desktopApi();
     if (!api || view.phase !== "auth") return;
+    const localFailure = validateAuthForm({ mode: view.mode, email, password, confirmPassword });
+    if (localFailure) {
+      setFormFailure(localFailure);
+      return;
+    }
+    const registering = view.mode === "register";
+    const pendingInvite = inviteToken.trim();
     setFormBusy(true);
     setFormFailure(null);
     try {
-      const response = view.mode === "login"
-        ? await api.auth.login({ meta: createRequestMeta(), email, password, remember: false })
-        : await api.auth.register({
+      const response = registering
+        ? await api.auth.register({
             meta: createRequestMeta(),
             email,
             password,
-            remember: false,
+            remember: keepSignedIn,
             ...(displayName.trim() ? { displayName: displayName.trim() } : {}),
-            ...(inviteToken.trim() ? { inviteToken: inviteToken.trim() } : {}),
-          });
+            ...(pendingInvite ? { inviteToken: pendingInvite } : {}),
+          })
+        : await api.auth.login({ meta: createRequestMeta(), email, password, remember: keepSignedIn });
       unwrapGatewayResult(response);
       setPassword("");
-      beginDoorEntry();
+      setConfirmPassword("");
+      if (!registering && pendingInvite) {
+        // The invite is redeemed only once the session exists. A failure here
+        // must not strand the user: they stay signed in and the workspace phase
+        // reports what happened to the code.
+        try {
+          unwrapGatewayResult(await api.auth.joinWorkspace({ meta: createRequestMeta(), inviteToken: pendingInvite }));
+          setInviteToken("");
+        } catch (error) {
+          pendingWorkspaceNoticeRef.current = gateErrorPolicy(error, "登录成功，但邀请码没有生效").detail;
+        }
+      }
+      beginRoomReveal();
       requestBootstrap();
     } catch (error) {
-      const policy = gateErrorPolicy(error, view.mode === "login" ? "无法登录" : "无法创建账号");
-      if (error instanceof RendererGatewayError && ["api_unavailable", "network_timeout", "api_untrusted", "configuration_error", "unsupported_contract"].includes(error.code)) {
+      const policy = gateErrorPolicy(error, registering ? "无法创建账号" : "无法登录");
+      if (error instanceof RendererGatewayError && error.code === "configuration_error") {
+        setFormFailure(policy.detail);
+        setView({ phase: "auth", mode: view.mode, serviceNotice: policy.detail });
+      } else if (error instanceof RendererGatewayError && ["api_unavailable", "network_timeout", "api_untrusted", "unsupported_contract"].includes(error.code)) {
         setView(blockedFromError(error, policy.title));
       } else {
         setFormFailure(policy.detail);
@@ -1058,17 +1207,23 @@ export function DesktopAccessGate({
     event.preventDefault();
     const api = desktopApi();
     if (!api || view.phase !== "reauth") return;
+    if (!password) {
+      setFormFailure("请输入当前密码。");
+      return;
+    }
     setFormBusy(true);
     setFormFailure(null);
     try {
       const response = await api.auth.reauthenticate({ meta: createRequestMeta(), password });
       unwrapGatewayResult(response);
       setPassword("");
-      beginDoorEntry();
+      beginRoomReveal();
       requestBootstrap();
     } catch (error) {
       const policy = gateErrorPolicy(error, "无法重新验证身份");
-      if (error instanceof RendererGatewayError && ["api_unavailable", "network_timeout", "api_untrusted", "configuration_error", "unsupported_contract"].includes(error.code)) {
+      if (error instanceof RendererGatewayError && error.code === "configuration_error") {
+        setFormFailure(policy.detail);
+      } else if (error instanceof RendererGatewayError && ["api_unavailable", "network_timeout", "api_untrusted", "unsupported_contract"].includes(error.code)) {
         setView(blockedFromError(error, policy.title));
       } else {
         setFormFailure(policy.detail);
@@ -1078,53 +1233,10 @@ export function DesktopAccessGate({
     }
   };
 
-  const handleWorkspaceSwitch = async (workspaceId: string) => {
-    const api = desktopApi();
-    if (!api || view.phase !== "workspace") return;
-    setFormBusy(true);
-    setFormFailure(null);
-    try {
-      const response = await api.workspace.switch({
-        meta: createRequestMeta(view.session.workspaceEpoch),
-        workspaceId,
-      });
-      unwrapGatewayResult(response);
-      beginDoorEntry();
-      requestBootstrap();
-    } catch (error) {
-      const policy = gateErrorPolicy(error, "无法切换工作区");
-      if (policy.retry === "resync_first") {
-        requestBootstrap();
-      } else {
-        setFormFailure(policy.detail);
-      }
-    } finally {
-      setFormBusy(false);
-    }
-  };
-
   if (view.phase === "ready") {
-    if (doorEntryPhase === "opening") {
-      return <>
-        <div
-          className="desktop-access-gate__room-content"
-          data-door-entry-phase={doorEntryPhase}
-          aria-hidden="true"
-          inert
-        >
-          {children}
-        </div>
-        <DoorOpeningTransition
-          theme={theme}
-          motionMode={motionMode}
-          manifest={roomManifest}
-          manifestError={roomManifestError}
-          onComplete={completeDoorEntry}
-        />
-      </>;
-    }
     return (
-      <div className="desktop-access-gate__room-content" data-door-entry-phase={doorEntryPhase}>
+      <div className="desktop-access-gate__room-content" data-room-revealed={roomRevealed}>
+        {view.spaceNotice ? <SpaceMenuRequest notice={view.spaceNotice} /> : null}
         {children}
       </div>
     );
@@ -1135,7 +1247,7 @@ export function DesktopAccessGate({
       <GateFrame title={view.title} detail={view.detail} motionMode={motionMode} backdropUrls={gateBackdropUrls} {...gateSceneProps}>
         <div className="desktop-access-gate__loading" role="status" aria-live="polite">
           <LoaderCircle size={24} aria-hidden="true" />
-          <span>正在检查，请稍候</span>
+          <span>{view.stage ?? "正在与学习服务确认"}</span>
         </div>
       </GateFrame>
     );
@@ -1182,9 +1294,60 @@ export function DesktopAccessGate({
         <form
           className={`desktop-access-gate__form${registering ? " desktop-access-gate__form--register" : ""}`}
           aria-busy={formBusy}
+          noValidate
           onSubmit={handleAuthSubmit}
         >
           <div className={`desktop-access-gate__fields${registering ? " desktop-access-gate__fields--register" : ""}`}>
+          <label className={registering ? "desktop-access-gate__field--wide" : undefined}>
+            <span className="desktop-access-gate__field-label">邮箱</span>
+            <span className="desktop-access-gate__field-control">
+              <Mail size={18} aria-hidden="true" />
+              <input type="email" autoComplete="email" maxLength={320} required value={email} placeholder="name@example.com" onChange={(event) => { setEmail(event.target.value); setFormFailure(null); }} />
+            </span>
+          </label>
+          <label>
+            <span className="desktop-access-gate__field-label">
+              密码 {registering ? <small>至少 {MIN_PASSWORD_LENGTH} 位</small> : null}
+            </span>
+            <span className="desktop-access-gate__field-control desktop-access-gate__field-control--with-action">
+              <LockKeyhole size={18} aria-hidden="true" />
+              <input
+                type={passwordVisible ? "text" : "password"}
+                autoComplete={registering ? "new-password" : "current-password"}
+                maxLength={200}
+                required
+                value={password}
+                placeholder={registering ? `至少 ${MIN_PASSWORD_LENGTH} 位` : "输入密码"}
+                onChange={(event) => { setPassword(event.target.value); setFormFailure(null); }}
+              />
+              <button
+                className="desktop-access-gate__reveal"
+                type="button"
+                aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
+                aria-pressed={passwordVisible}
+                onClick={() => setPasswordVisible((visible) => !visible)}
+              >
+                {passwordVisible ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
+              </button>
+            </span>
+          </label>
+          {registering ? (
+            <label>
+              <span className="desktop-access-gate__field-label">确认密码</span>
+              <span className="desktop-access-gate__field-control">
+                <LockKeyhole size={18} aria-hidden="true" />
+                <input
+                  type={passwordVisible ? "text" : "password"}
+                  autoComplete="new-password"
+                  maxLength={200}
+                  required
+                  value={confirmPassword}
+                  placeholder="再输入一次"
+                  onChange={(event) => { setConfirmPassword(event.target.value); setFormFailure(null); }}
+                />
+              </span>
+            </label>
+          ) : null}
           {registering ? (
             <label>
               <span className="desktop-access-gate__field-label">昵称 <small>选填</small></span>
@@ -1194,49 +1357,81 @@ export function DesktopAccessGate({
               </span>
             </label>
           ) : null}
-          <label>
-            <span className="desktop-access-gate__field-label">邮箱</span>
-            <span className="desktop-access-gate__field-control">
-              <Mail size={18} aria-hidden="true" />
-              <input type="email" autoComplete="email" maxLength={320} required value={email} placeholder="name@example.com" onChange={(event) => setEmail(event.target.value)} />
-            </span>
-          </label>
-          <label>
-            <span className="desktop-access-gate__field-label">密码</span>
-            <span className="desktop-access-gate__field-control">
-              <LockKeyhole size={18} aria-hidden="true" />
-              <input type="password" autoComplete={registering ? "new-password" : "current-password"} maxLength={200} required value={password} placeholder="输入密码" onChange={(event) => setPassword(event.target.value)} />
-            </span>
-          </label>
-          {registering ? (
+          {registering || inviteEntryOpen ? (
             <label>
-              <span className="desktop-access-gate__field-label">邀请码 <small>选填</small></span>
+              <span className="desktop-access-gate__field-label">
+                邀请码 <small>{registering ? "选填 · 加入协作空间" : "选填 · 登录后自动加入"}</small>
+              </span>
               <span className="desktop-access-gate__field-control">
                 <Ticket size={18} aria-hidden="true" />
-                <input type="password" autoComplete="off" maxLength={200} value={inviteToken} placeholder="有邀请码就填在这里" onChange={(event) => setInviteToken(event.target.value)} />
+                <input
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={200}
+                  value={inviteToken}
+                  placeholder="粘贴邀请码"
+                  onChange={(event) => { setInviteToken(event.target.value); setFormFailure(null); }}
+                />
               </span>
             </label>
           ) : null}
           </div>
-          {formFailure ? <p className="desktop-access-gate__form-error" role="alert">{formFailure}</p> : null}
+          {(formFailure ?? view.serviceNotice) ? <p className="desktop-access-gate__form-error" role="alert">{formFailure ?? view.serviceNotice}</p> : null}
+          {credentialPersistence === "safe_storage" ? (
+            <label className="desktop-access-gate__keep-signed-in">
+              <input
+                type="checkbox"
+                checked={keepSignedIn}
+                disabled={formBusy}
+                onChange={(event) => setKeepSignedIn(event.target.checked)}
+              />
+              <span>保持登录，下次打开不用重新输入</span>
+            </label>
+          ) : null}
           <p className="desktop-access-gate__trust-note">
             <ShieldCheck size={16} aria-hidden="true" />
-            <span>{registering ? "创建成功后，继续选择你要使用的学习空间。" : "密码会安全提交，页面不会保存。"}</span>
+            <span>
+              {credentialPersistence === "safe_storage"
+                ? "登录凭据由系统钥匙串加密保存，密码本身不会写入磁盘。"
+                : "密码会安全提交；这台设备无法加密保存登录状态，关闭应用后需要重新登录。"}
+            </span>
           </p>
           <button className="desktop-access-gate__primary" type="submit" disabled={formBusy}>
             {formBusy
               ? <LoaderCircle className="desktop-access-gate__button-spinner" size={17} aria-hidden="true" />
               : registering ? <UserPlus size={17} aria-hidden="true" /> : <LogIn size={17} aria-hidden="true" />}
             {formBusy ? registering ? "正在创建账号…" : "正在登录…" : registering ? "创建账号" : "登录"}
-            {!formBusy ? <ArrowRight size={16} aria-hidden="true" /> : null}
+            {!formBusy ? <ArrowRight className="desktop-access-gate__primary-arrow" size={16} aria-hidden="true" /> : null}
           </button>
+          {!registering ? (
+            <button
+              className="desktop-access-gate__text-action desktop-access-gate__text-action--quiet"
+              type="button"
+              disabled={formBusy}
+              aria-expanded={inviteEntryOpen}
+              onClick={() => {
+                setFormFailure(null);
+                setInviteEntryOpen((open) => {
+                  if (open) setInviteToken("");
+                  return !open;
+                });
+              }}
+            >
+              <Ticket size={15} aria-hidden="true" />
+              {inviteEntryOpen ? "取消填写邀请码" : "有邀请码？加入协作空间"}
+            </button>
+          ) : null}
           <button
-            className="desktop-access-gate__text-action"
+            className="desktop-access-gate__text-action desktop-access-gate__text-action--mode"
             type="button"
             disabled={formBusy}
             onClick={() => {
               setFormFailure(null);
               setPassword("");
+              setConfirmPassword("");
+              setInviteToken("");
+              setInviteEntryOpen(false);
               setView({ phase: "auth", mode: registering ? "login" : "register" });
             }}
           >
@@ -1265,7 +1460,7 @@ export function DesktopAccessGate({
             <ShieldCheck size={16} aria-hidden="true" />
             <span>确认通过后，会继续打开你的学习空间。</span>
           </p>
-          <button className="desktop-access-gate__primary" type="submit" disabled={formBusy}>
+          <button className="desktop-access-gate__primary" type="submit" data-busy={formBusy} disabled={formBusy}>
             {formBusy
               ? <LoaderCircle className="desktop-access-gate__button-spinner" size={17} aria-hidden="true" />
               : <KeyRound size={17} aria-hidden="true" />}
@@ -1276,43 +1471,19 @@ export function DesktopAccessGate({
     );
   }
 
+  // `workspace_required` is the one-time choice every other phase leaves alone:
+  // the account is signed in but no space is bound, so the client still reads
+  // nothing about any of them. The mockup folds that choice into the home page
+  // (04A), which is what `HudFirstSpaceScene` restores.
   return (
-    <GateFrame
-      title="选择学习空间"
-      detail={`你已登录为 ${view.session.user?.email ?? "当前账号"}。请选择本次要使用的空间。`}
-      motionMode={motionMode}
-      backdropUrls={gateBackdropUrls}
-      {...gateSceneProps}
-    >
-      {view.workspaces.length ? (
-        <div className="desktop-access-gate__workspace-list" aria-label="可用工作区">
-          {view.workspaces.map((workspace) => (
-            <button
-              key={workspace.workspaceId}
-              type="button"
-              disabled={formBusy}
-              onClick={() => void handleWorkspaceSwitch(workspace.workspaceId)}
-            >
-              <Building2 size={20} aria-hidden="true" />
-              <span>
-                <strong>{workspace.name}</strong>
-                <small>{workspace.isPersonal ? "个人工作区" : "协作工作区"} · {workspace.role === "owner" ? "所有者" : "成员"}</small>
-              </span>
-              <ArrowRight size={17} aria-hidden="true" />
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="desktop-access-gate__empty" role="status">
-          <Building2 size={24} aria-hidden="true" />
-          <strong>暂时没有可用的学习空间</strong>
-          <p>请联系管理员为你的账号开通后再试。</p>
-        </div>
-      )}
-      {formFailure ? <p className="desktop-access-gate__form-error" role="alert">{formFailure}</p> : null}
-      <button className="desktop-access-gate__text-action" type="button" disabled={formBusy} onClick={() => requestBootstrap()}>
-        <RefreshCw size={15} aria-hidden="true" />重新加载
-      </button>
-    </GateFrame>
+    <HudFirstSpaceScene
+      session={view.session}
+      workspaces={view.workspaces}
+      notice={view.notice}
+      onCommitted={() => {
+        beginRoomReveal();
+        requestBootstrap();
+      }}
+    />
   );
 }

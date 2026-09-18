@@ -1,5 +1,14 @@
 # Learning room V1 asset provenance
 
+## Home V2 lighthouse study (2026-09-15)
+
+- Stable fallback posters: `posters/home-v2/lighthouse/lighthouse-{day,dusk,night}-poster-v1.png`. All three use the approved 1672 × 941 lighthouse geometry; dusk and night are lighting references, never independent layouts.
+- Production layers: `layers/home-v2/lighthouse/`. D0 is the clean room plate, D1 is a cropped water texture, D2 contains three window-structure crops, D3 contains desk/shelf/rest furniture groups, D4 contains the telescope plus two independently masked page pieces, and D6 contains only two cropped bottom-corner occluders. D5 remains the independent Live2D and semantic-feedback layer.
+- Clean plates and the telescope were produced with OpenAI ImageGen from the owner-approved room geometry. The project-local sources live in `.impeccable/review/home-v2-lighthouse-layer-sources-v1`; no third-party reference image was supplied.
+- `scripts/extract-room-scene-assets.mjs` applies the shared time-template specification at `scripts/fixtures/lighthouse-home-scene-assets.input.json`. It performs coordinate-preserving FFmpeg crops, scaling, RGBA conversion, and polygon masks. `scripts/sync-room-scene-manifest.mjs` records registrations and hashes.
+- License: project-generated original visual for this product; internal product use is permitted. Every runtime layer records its exact pixel size, world registration, SHA-256, source poster, prompt record, review status, and release approval.
+- Stable frames contain no particles, bloom, lens flares, floating light points, text, character, or UI. The complete derivation contract is stored at `prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md`.
+
 This runtime bundle contains reviewed copies, mechanical derivatives, and generated scene backplates. Where a generated source has a complete prompt record, it is preserved in PNG metadata and as an adjacent text file under `prompts/`.
 
 ## Study object-level repair candidate and rejected Review history
@@ -26,7 +35,7 @@ This runtime bundle contains reviewed copies, mechanical derivatives, and genera
 - `posters/study-seat-night-v2.png` is a lighting edit of the day composition, preserving its camera and object geometry while switching to indigo window light and a localized warm lamp pool. Its source was resized by one pixel in width with macOS ImageIO so both runtime themes share a 1672×941 registration. SHA-256: `8b5102a81f189ccf45a18bbd39a67eeb57800d2e8fc6336bc0a26feef89679c1`.
 - Authoritative prompts are embedded under the `impeccable:prompt` PNG text key and duplicated verbatim at `prompts/study-seat-day-v2.txt` and `prompts/study-seat-night-v2.txt`.
 - `room-day.webp` and `room-night.webp` remain the homepage scene truth. Seat V2 is selected for concrete study, review, graph, card, or validation scenes; Search selects its own reference-archive scene instead of inheriting the study seat.
-- The registered window videos remain approved only for the homepage overview camera. They are never mounted over Seat V2, so the closer scene cannot inherit the legacy registration seam.
+- The registered window-video assets remain archived for provenance, but the homepage no longer mounts them. The canonical room poster supplies the complete window view without a registration seam or independent pointer parallax.
 
 ## Search reference archive scene A
 
@@ -45,9 +54,11 @@ This runtime bundle contains reviewed copies, mechanical derivatives, and genera
 
 ## Canonical room imagery
 
+- `foreground/home-foreground-leaves-v1.png` is a 1672×941 transparent RGBA near-camera foliage layer generated through the OpenAI built-in `image_gen` workflow on 2026-09-08 using `posters/room-day.webp` only as the style, palette and lighting reference. It contains no UI, text, person or business content. Runtime placement keeps it in D6, outside the functional desk center, with a low-amplitude GSAP sway and a static reduced-motion frame. SHA-256: `7f42ffaf3f2f660caee03338f691b94cc4e95fbb93ce6cb2082a8a5f84a50d82`. The complete prompt is stored at `prompts/home-foreground-leaves-v1.txt`.
+
 - `posters/room-day.webp` is an unchanged copy of `assets/3d/learning-room/v1/fallback/room-furnished-day.webp`, derived from `docs/design/assets/static/room-furnished-day-user-2x-v1.png`.
 - `posters/room-night.webp` is an unchanged copy of `assets/3d/learning-room/v1/fallback/room-furnished-night.webp`, derived from `docs/design/assets/static/room-furnished-night-user-2x-v1.png`.
-- `objects/companion-orb.webp` is an unchanged copy of the abstract, faceless `assets/3d/learning-room/v1/fallback/companion-orb.webp`, derived from `docs/design/assets/static/companion-orb-flat-fallback-v1.png`.
+- `objects/companion-orb.webp` **was removed on 2026-09-16** together with its `manifest.json` `companion` entry. Per the Owner decision the companion has a single form (in-window Live2D) and a load failure hides the character behind a dismissible notice, so no static substitute is shipped. Its historical source was `assets/3d/learning-room/v1/fallback/companion-orb.webp`, derived from `docs/design/assets/static/companion-orb-flat-fallback-v1.png`; the archived 3D pack still carries those files as frozen evidence.
 
 The complete source PNG sidecars in `docs/design/assets/static/` remain the authority for generation prompts, source identifiers, hashes, and review state. The historical `assets/3d/` tree is a local migration/reference archive only and is excluded from fresh renderer output and packages; it is not a packaged provenance authority. The two `_recovered/` sidecars above explicitly remain incomplete and blocked.
 
@@ -60,9 +71,9 @@ The complete source PNG sidecars in `docs/design/assets/static/` remain the auth
 ## Package containment
 
 - Production renderer builds use an explicit filtered public-asset emitter instead of Vite's blanket public-directory copy. The complete `assets/3d/` migration archive is excluded.
-- `assets/companion/live2d-v1/` and its `assets/companion/vendor/` runtime are excluded because the reviewed model record does not authorize redistribution. The legal abstract orb remains available at `objects/companion-orb.webp`; package containment must prove that fallback is present.
-- Packaged smoke fails closed unless `app.asar` is newer than both source and renderer build output, embeds a byte-identical V1 manifest, contains every manifest asset, excludes both archive families, and contains none of the four rejected motion files.
-- A 2026-08-25 isolated electron-builder `--dir` preflight (outside `release/`) verified this boundary against a fresh `app.asar`: source, out, and packaged manifests were byte-identical with SHA-256 `5e93f5234b587ef20ce413b8b89085c9f3467e8bd620ceb658548e93d6037936`; all 30 manifest assets and the legal orb were present; rejected media, `assets/3d/`, Live2D, and its vendor runtime were absent. The same temporary package passed anonymous offline cold-start and online Auth Gate smoke without mounting Room, ActionRail, or Onboarding. This is containment and anonymous Gate evidence only, not release approval, an authenticated journey, or a signed canonical package.
+- `assets/companion/live2d-v1/` and its `assets/companion/vendor/` runtime are now enabled for the Owner-approved local desktop build. The original Live2D terms still restrict redistribution, so installers containing these files must remain private unless a separate release review clears them. The abstract orb is **no longer shipped** (removed 2026-09-16 by the same decision); the only companion form is the in-window Live2D model, and a load failure hides it instead of falling back.
+- Packaged smoke fails closed unless `app.asar` is newer than both source and renderer build output, embeds a byte-identical V1 manifest, contains every manifest asset, includes the owner-approved Live2D runtime, **contains no orb asset** (`assets/learning-room/v1/objects/companion-orb.webp` must be absent since 2026-09-16), excludes the reference-only `assets/3d/` archive, and contains none of the four rejected motion files.
+- A 2026-08-25 isolated electron-builder `--dir` preflight (outside `release/`) verified this boundary against a fresh `app.asar`: source, out, and packaged manifests were byte-identical with SHA-256 `5e93f5234b587ef20ce413b8b89085c9f3467e8bd620ceb658548e93d6037936`; every manifest asset listed at that time and the then-legal orb were present (that preflight predates the 2026-09-16 orb removal and is kept as historical evidence only); rejected media, `assets/3d/`, Live2D, and its vendor runtime were absent. The same temporary package passed anonymous offline cold-start and online Auth Gate smoke without mounting Room, ActionRail, or Onboarding. This is containment and anonymous Gate evidence only, not release approval, an authenticated journey, or a signed canonical package.
 
 ## Motion and graph media
 
@@ -97,3 +108,7 @@ Both were encoded locally with FFmpeg 9.0.1 / libx264 using `-preset slow -crf 1
 ## Code-native asset
 
 - `masks/window-glass-mask-v1.svg` is an implementation-authored vector mask based on the frozen window registration in `docs/design/2d-learning-room-motion-design.md`. Its softly feathered plant-leaf silhouette is an internal alpha cutout of the lower-right pane. This avoids the previous even-odd compound path behavior that made the part of the plant below the glass into an additional video-visible island, while preserving moving scenery in the natural gaps between leaves. It contains no generated raster content. SHA-256: `d791cc5c024e9cd2ada16ead616a08596546629f05185b1e6d5beaeb1ae5f592`.
+
+## Generated foreground asset
+
+- `foreground/home-foreground-leaves-v1.png` was generated on 2026-09-08 with the built-in ImageGen tool, using the canonical room poster only as a style, palette, lighting, and brushwork reference. It is a 1672×941 RGBA near-camera pothos layer used in D6; CSS clips the generated canvas to its authored upper-left region so no low-alpha pixels can tint the rest of the room. The exact generation prompt is stored at `prompts/home-foreground-leaves-v1.txt`. SHA-256: `7f42ffaf3f2f660caee03338f691b94cc4e95fbb93ce6cb2082a8a5f84a50d82`.

@@ -4,6 +4,7 @@ import {
   DESKTOP_IPC_CONTRACT_VERSION,
   apiConnectionStateSchema,
   capabilityProjectionSchema,
+  clipboardReadLinksResultSchema,
   commandReceiptSchema,
   deploymentConfigSchema,
   desktopContractSnapshotSchema,
@@ -12,6 +13,7 @@ import {
   desktopRecordLearningRunActivityLeaseRequestV2Schema,
   desktopRouteKindM2Values,
   desktopTrustChallengeRequestSchema,
+  extractCandidateLinks,
   gatewayEventSchema,
   gatewayEventPayloadM2Schema,
   gatewayResultSchema,
@@ -299,4 +301,29 @@ test("asset and trust challenge scalars fail closed", () => {
     data: { kind: "snapshot_invalidated", scope: "workspace" },
   }));
   assert.notEqual(WORKSPACE_ID, USER_ID);
+});
+
+test("extractCandidateLinks 只收 http(s) 链接并归一化去重", () => {
+  assert.deepEqual(
+    extractCandidateLinks("看看这个 https://example.com/a?p=1，正文。"),
+    ["https://example.com/a?p=1"],
+  );
+  // 尾巴标点与右括号剥掉，重复只留一个，数量封顶。
+  assert.deepEqual(
+    extractCandidateLinks("(https://a.test/1，https://a.test/1) https://b.test/2! https://c.test/3 https://d.test/4"),
+    ["https://a.test/1", "https://b.test/2", "https://c.test/3"],
+  );
+  // 非目标协议与带账密的一律不要。
+  assert.deepEqual(extractCandidateLinks("ftp://a.test/x file:///etc/passwd example.com"), []);
+  assert.deepEqual(extractCandidateLinks("https://user:pass@a.test/x"), []);
+  assert.deepEqual(extractCandidateLinks("只是普通密码 Abc123!@#"), []);
+  assert.deepEqual(extractCandidateLinks(""), []);
+});
+
+test("clipboardReadLinksResultSchema 拒绝超长与超量", () => {
+  assert.equal(clipboardReadLinksResultSchema.safeParse({ urls: [] }).success, true);
+  assert.equal(
+    clipboardReadLinksResultSchema.safeParse({ urls: ["https://a.test/1", "https://b.test/2", "https://c.test/3", "https://d.test/4"] }).success,
+    false,
+  );
 });

@@ -4,7 +4,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isNonRetryableError, AgentOutputError } from "../lib/non-retryable-errors.ts";
+import { isNonRetryableError, AgentOutputError, CompanionAgentBudgetExceededError } from "../lib/non-retryable-errors.ts";
+import { JobPayloadContractError } from "@ailearn/shared/job-payload-contracts";
+import { JobType } from "@ailearn/shared";
+import { safeErrorMessage } from "@ailearn/shared";
 
 test("detects AgentOutputError (output_truncated) as non-retryable", () => {
   const error = new AgentOutputError(
@@ -12,6 +15,17 @@ test("detects AgentOutputError (output_truncated) as non-retryable", () => {
     'agent output truncated at finish_reason="length" (toolCalls=1, malformed=1)',
   );
   assert.equal(isNonRetryableError(error), true);
+});
+
+test("detects CompanionAgentBudgetExceededError as non-retryable (预算跨重投累计)", () => {
+  assert.equal(
+    isNonRetryableError(new CompanionAgentBudgetExceededError("companion agent tool budget exceeded")),
+    true,
+  );
+  assert.equal(
+    isNonRetryableError(new CompanionAgentBudgetExceededError("companion agent deadline exceeded")),
+    true,
+  );
 });
 
 test("detects AgentOutputError (arguments_malformed) as non-retryable", () => {
@@ -37,8 +51,9 @@ test("detects invalid API key auth error", () => {
   assert.equal(isNonRetryableError(new Error("Invalid API key")), true);
 });
 
-test("detects DASHSCOPE_API_KEY is required config error", () => {
-  assert.equal(isNonRetryableError(new Error("DASHSCOPE_API_KEY is required for DashScopeProvider")), true);
+test("detects provider config errors (missing API key / provider not configured)", () => {
+  assert.equal(isNonRetryableError(new Error("DASHSCOPE_API_KEY is required")), true);
+  assert.equal(isNonRetryableError(new Error("provider dashscope is not configured for agent_turn")), true);
 });
 
 test("detects unauthorized error", () => {
@@ -75,6 +90,25 @@ test("does NOT flag 5xx server errors as non-retryable", () => {
 
 test("does NOT flag 429 rate limit as non-retryable", () => {
   assert.equal(isNonRetryableError(new Error("dashscope 429: Too Many Requests")), false);
+});
+
+// 稳定 P1（2026-09-15 审计）：作业 payload 与作业类型契约不符是确定性失败——
+// 重试不会让缺失字段出现，只会空转三次租约。必须直接 dead。
+test("flags job payload contract violations as non-retryable", () => {
+  const violation = new JobPayloadContractError(
+    JobType.PARSE_SOURCE,
+    "payload.sourceId must be a non-empty string",
+  );
+  assert.equal(isNonRetryableError(violation), true);
+  // 结构化 code 会经 safeErrorMessage 落到 last_error（`...:job_payload_contract_error`），
+  // API 侧据此把失败原因呈现给用户——不是靠解析自然语言消息。
+  assert.equal(violation.code, "job_payload_contract_error");
+  assert.match(safeErrorMessage(violation), /:job_payload_contract_error$/);
+  // 反向 1：普通"缺字段"业务错误不得被误判（否则会把可重试错误打死）。
+  assert.equal(isNonRetryableError(new Error("missing sourceId in payload")), false);
+  // 反向 2：文本分类器不认识这条消息（识别靠类型，不靠文案）——记录该边界，
+  // 以免日后有人以为"改文案就能改变重试行为"。
+  assert.equal(isNonRetryableError(violation.message), false);
 });
 
 test("handles string error messages", () => {

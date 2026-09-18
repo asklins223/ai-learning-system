@@ -19,6 +19,20 @@ in `WindowLive2D` creates an always-on-top or out-of-window desktop-pet surface.
 The model manifest records `redistributionAllowed=false`. Do not publish or
 redistribute this asset package without a fresh license review.
 
+## Seethrough model
+
+- Source artifact: user-provided `seethrough_output.psd2live`, exported with
+  PSD2Live 0.7.1 on 2026-09-15.
+- Runtime entry point: `live2d-v2/seethrough/seethrough_output.model3.json`.
+- The export includes `Idle`, `Blink`, `Nod`, and `Shake` motions; PSD2Live was
+  extended with independent `ParamArmL`, `ParamArmR`, `ParamLegL`, and
+  `ParamLegR` rigs for the four limb meshes. The project adds fitted `Think`,
+  `Happy`, `Surprised`, and `Sleepy` motion clips, plus generated hair/eye
+  physics and `ParamMouthOpenY` lip sync.
+- The manifest intentionally keeps this model development-only with
+  `commercialReleaseAllowed=false` and `redistributionAllowed=false` until
+  ownership and redistribution rights are confirmed.
+
 ## Browser runtime
 
 - `vendor/pixi.min.js`: PixiJS 6.5.10 (MIT)
@@ -28,3 +42,18 @@ redistribute this asset package without a fresh license review.
 
 The vendor source note is retained as `vendor/README.md`. Keep the three
 runtime files aligned with the SHA-256 hashes in the model manifest.
+
+## Removed assets (2026-09-16 Owner decision)
+
+- `live2d-v1/mao-pro/mao-half-idle-v1.png` was deleted together with the orb
+  fallback. Per the 2026-09-16 decision the companion has a single form
+  (in-window Live2D); when the model cannot load the companion is hidden and a
+  dismissible notice is shown instead, so no substitute image is rendered. The
+  file was not referenced by any manifest hash list.
+- The 2.5D room-pack orb (`assets/learning-room/v1/objects/companion-orb.webp`)
+  and its `manifest.json` `companion` entry were removed in the same change.
+- The archived 3D learning-room pack under `assets/3d/learning-room/v1/**`
+  still contains its own orb files and manifest entries; that pack is frozen
+  historical evidence for a path V1 no longer uses and was intentionally left
+  untouched.
+

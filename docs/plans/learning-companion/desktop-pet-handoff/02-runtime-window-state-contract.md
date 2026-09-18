@@ -478,7 +478,7 @@ ailearn-companion-runtime-v1
 2. 创建 Main Window；首次运行或无已知认证状态时正常显示登录/应用；
 3. 读取 device-local `petModeEnabled`，若为 true，创建 **hidden Pet Window**；
 4. Pet Window 加载最小 `/companion/pet?surface=electron`；
-5. P0–P1 Pet renderer 通过同源 `/api/me/companion` 验证 cookie 与 `globalEnabled`，只显示技术图形/fixture；P2 起改用 03 合同的单次 `/api/companion/bootstrap`，在一个 authenticated request 中取得当前 `userId/workspaceId`、account `epoch` 与 feature projection；任一失败都不渲染个性化正文；
+5. 当前 desktop-client 通过受信任的 desktop gateway 获取 workspace projection；Live2D 资源由 renderer 内置 manifest 校验后加载，任一认证、workspace 或资源校验失败都不渲染未确认的个性化正文；
 6. 验证成功且本机未 temporary hidden 才通知 main `pet:bootstrap-ready`；
 7. Main 使用 `showInactive()` 显示 Pet；
 8. 401/403 时 Pet 保持隐藏并请求显示 Main 登录页；

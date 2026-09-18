@@ -32,7 +32,6 @@ const PACKAGES = [
   { path: "packages/shared", testDir: "src" },
   { path: "packages/ai-quality", testDir: "src" },
   { path: "apps/api", testDir: "src" },
-  { path: "apps/web", testDir: "lib" },
   { path: "workers/ai-worker", testDir: "src" },
 ];
 
@@ -72,40 +71,13 @@ function loadCIResults() {
   const results = {};
   if (!runnerTemp) return results;
 
-  // Load E2E results from Playwright's JUnit artifact.
-  const e2eResultsPath = join(runnerTemp, "playwright-results", "junit.xml");
-  if (existsSync(e2eResultsPath)) {
-    try {
-      const xml = readFileSync(e2eResultsPath, "utf8");
-      const rootTag = xml.match(/<testsuites\b([^>]*)>/)?.[1];
-      if (!rootTag) throw new Error("missing <testsuites> summary");
-      const attr = (name) => Number(rootTag.match(new RegExp(`\\b${name}="(\\d+)"`))?.[1] ?? 0);
-      const total = attr("tests");
-      const failed = attr("failures") + attr("errors");
-      const skipped = attr("skipped");
-      const passed = total - failed - skipped;
-      if (total <= 0 || passed < 0) throw new Error("invalid JUnit counts");
-      results.e2e = {
-        passed,
-        failed,
-        skipped,
-        total,
-        status: failed === 0 && skipped === 0 ? "passed" : "failed",
-        evidence: [`ci://run/${process.env.GITHUB_RUN_ID || "local"}/e2e`],
-      };
-    } catch (err) {
-      console.log(`[release-manifest] E2E 结果解析失败: ${err.message}`);
-    }
-  }
-
   // Load Trivy scan results (containerScan)
   const scanResultsDir = join(runnerTemp, "release-evidence", "scan-results");
   const trivyApiPath = join(scanResultsDir, "trivy-scan-api.txt");
   const trivyWorkerPath = join(scanResultsDir, "trivy-scan-worker.txt");
-  const trivyWebPath = join(scanResultsDir, "trivy-scan-web.txt");
   const containerScans = [];
 
-  for (const [path, name] of [[trivyApiPath, "api"], [trivyWorkerPath, "worker"], [trivyWebPath, "web"]]) {
+  for (const [path, name] of [[trivyApiPath, "api"], [trivyWorkerPath, "worker"]]) {
     if (existsSync(path)) {
       try {
         const content = readFileSync(path, "utf8");
@@ -133,10 +105,9 @@ function loadCIResults() {
   // Load npm audit results (dependencyScan)
   const npmAuditApiPath = join(scanResultsDir, "npm-audit-api.txt");
   const npmAuditWorkerPath = join(scanResultsDir, "npm-audit-worker.txt");
-  const npmAuditWebPath = join(scanResultsDir, "npm-audit-web.txt");
   const dependencyScans = [];
 
-  for (const [path, name] of [[npmAuditApiPath, "api"], [npmAuditWorkerPath, "worker"], [npmAuditWebPath, "web"]]) {
+  for (const [path, name] of [[npmAuditApiPath, "api"], [npmAuditWorkerPath, "worker"]]) {
     if (existsSync(path)) {
       try {
         const content = readFileSync(path, "utf8");
@@ -173,7 +144,6 @@ function loadUnitTestEvidence() {
     ["packages/shared", "shared.tap"],
     ["packages/ai-quality", "ai-quality.tap"],
     ["apps/api", "api.tap"],
-    ["apps/web", "web.tap"],
     ["workers/ai-worker", "worker.tap"],
   ]);
   const summaries = [];
@@ -285,7 +255,6 @@ function getMigrationInfo() {
       journalDigest: null,
       latestMigration: "unknown",
       migrationCount: 0,
-      count: 0, // backward compat for dev manifest
     };
   }
 
@@ -299,7 +268,6 @@ function getMigrationInfo() {
       journalDigest: null,
       latestMigration: "none",
       migrationCount: 0,
-      count: 0,
     };
   }
 
@@ -319,7 +287,6 @@ function getMigrationInfo() {
     journalDigest,
     latestMigration: latestName,
     migrationCount: files.length,
-    count: files.length, // backward compat for dev manifest
   };
 }
 
@@ -427,7 +394,6 @@ if (existsSync(coverageSummaryPath)) {
 const buildDigests = {};
 const buildPaths = [
   { key: "api", path: "apps/api/dist/server.cjs" },
-  { key: "web", path: "apps/web/.next/BUILD_ID" },
 ];
 
 for (const { key, path } of buildPaths) {
@@ -454,10 +420,9 @@ for (const { key, path } of buildPaths) {
  * @returns {Record<string, any>} — manifest.images 对象
  */
 function makeImageSection(imageDigests) {
-  const imageNames = ["api", "web", "worker"];
+  const imageNames = ["api", "worker"];
   const defaultRepositories = {
     api: "ghcr.io/asklins223/ailearn/api",
-    web: "ghcr.io/asklins223/ailearn/web",
     worker: "ghcr.io/asklins223/ailearn/worker",
   };
   const images = {};
@@ -544,17 +509,6 @@ if (rcMode) {
         [`ci://run/${process.env.GITHUB_RUN_ID || "local"}/integration`],
         process.env.GITHUB_RUN_ID ? "fresh-migrations job passed" : "Integration evidence unavailable locally",
       ),
-      e2e: ciResults.e2e
-        ? makeGate(
-            ciResults.e2e.status,
-            ciResults.e2e.evidence,
-            `${ciResults.e2e.passed}/${ciResults.e2e.total} pass${ciResults.e2e.failed > 0 ? `, ${ciResults.e2e.failed} fail` : ""}`,
-          )
-        : makeGate(
-            "not_applicable",
-            [`ci://run/${process.env.GITHUB_RUN_ID || "local"}/e2e`],
-            "E2E tests run separately via Playwright job",
-          ),
       coverage: makeGate(
         coverageSummary
           && coverageSummary.failed === 0
@@ -595,7 +549,8 @@ if (rcMode) {
             "Container scanning not configured",
           ),
     },
-    // AIQ: placeholder — V1 supervisor-rc-gate has been removed; V2 RC gate not yet implemented
+    // AIQ remains a placeholder until the release evidence job injects the
+    // provider-backed quality result.
     aiQuality: {
       status: "not_run",
       datasetVersion: null,
@@ -666,7 +621,7 @@ if (rcMode) {
   }
   if (rcManifest.aiQuality.status !== "passed") {
     console.log("[release-manifest] 注意: aiQuality 为占位符，");
-    console.log("[release-manifest]       等待 V2 RC gate CLI 实现后填充。");
+    console.log("[release-manifest]       等待 AIQ release evidence job 填充。");
   }
   process.exit(0);
 }
@@ -719,7 +674,6 @@ if (checkMode) {
     { name: "覆盖率报告存在", passed: coverageSummary !== null },
     { name: "覆盖率全部通过", passed: coverageSummary?.failed === 0 },
     { name: "API 构建产物存在", passed: !!buildDigests.api },
-    { name: "Web 构建产物存在", passed: !!buildDigests.web },
     { name: "Journal digest 已计算", passed: !!migrationInfo.journalDigest },
   ];
 

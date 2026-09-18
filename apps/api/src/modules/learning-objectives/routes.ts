@@ -5,10 +5,10 @@
  * GET /v2/learning-objectives/:objectiveId —— Surface 详情
  *
  * 全部 requireSession；读取包在 withWorkspaceTransaction（RLS FORCE）。
- * 404/410 语义：找不到 objective → 404 objective_not_found（不返回模糊 V2 404，
- * §21.4 的 route resolver 负责旧 URL 的确定性迁移）。
+ * 404 语义：找不到 objective → 404 objective_not_found。
  */
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import {
@@ -17,16 +17,25 @@ import {
   toObjectiveListItemV3,
   ObjectiveNotFoundError,
 } from "./surface-service.ts";
-import {
-  readObjectiveHistoryV3,
-  resolveLegacyRouteV3,
-} from "./history-route-service.ts";
+import { readObjectiveHistoryV3 } from "./history-route-service.ts";
 
-interface ListQuery {
-  lifecycle?: string;
-  cursor?: string;
-  limit?: string;
-}
+/**
+ * 2026-09 后端审查修复：`?limit=abc` 此前经 Number() 变成 NaN，下游
+ * Math.min(Math.max(NaN,1),100) 仍是 NaN，drizzle 对非数值 limit 不渲染 LIMIT
+ * → 全 workspace 扫描，且 rows.slice(0, NaN) = [] 返回一个「成功但永远翻不动」
+ * 的空页；`?cursor=abc` 则直达 int4 转换报错 22P02 → 500。
+ * 统一用 zod 校验，非法输入 400；clamp 作为纵深防御保留在 service 内。
+ */
+const listQuerySchema = z.object({
+  lifecycle: z.enum(["active", "archived", "superseded"]).optional(),
+  cursor: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+const historyQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  cursor: z.coerce.number().int().min(0).optional(),
+});
 
 interface Params {
   objectiveId: string;
@@ -35,12 +44,13 @@ interface Params {
 export async function learningObjectiveRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
 
-  app.get("/v2/learning-objectives", async (req) => {
-    const query = req.query as ListQuery;
-    const lifecycle =
-      query.lifecycle === "active" || query.lifecycle === "archived" || query.lifecycle === "superseded"
-        ? query.lifecycle
-        : undefined;
+  app.get("/v2/learning-objectives", async (req, reply) => {
+    const parsed = listQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid_query", message: "查询参数非法" });
+    }
+    const query = parsed.data;
+    const lifecycle = query.lifecycle;
     return withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       async (tx) => {
@@ -48,7 +58,7 @@ export async function learningObjectiveRoutes(app: FastifyInstance) {
         const page = await listObjectiveSurfacesV3(tx, ctx, {
           lifecycle,
           cursor: query.cursor,
-          limit: Number(query.limit ?? 20),
+          limit: query.limit ?? 20,
         });
         return {
           version: 3,
@@ -77,33 +87,17 @@ export async function learningObjectiveRoutes(app: FastifyInstance) {
   });
 
   // W2-23：目标历史（公开摘要；无 private assessment）
-  app.get("/v2/learning-objectives/:objectiveId/history", async (req) => {
+  app.get("/v2/learning-objectives/:objectiveId/history", async (req, reply) => {
     const { objectiveId } = req.params as Params;
-    const query = req.query as { limit?: string; cursor?: string };
+    const parsed = historyQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid_query", message: "查询参数非法" });
+    }
     const ctx = { workspaceId: req.session.workspaceId, userId: req.session.userId };
     return withWorkspaceTransaction(ctx, (tx) =>
       readObjectiveHistoryV3(tx, ctx.workspaceId, objectiveId, {
-        limit: Number(query.limit ?? 20),
-        cursor: query.cursor ? Number(query.cursor) : undefined,
-      }),
-    );
-  });
-
-  // W2-24：旧 URL 确定性解析（mapped/gone/ambiguous/forbidden；不返回模糊 404）
-  app.get("/v2/route-resolution", async (req) => {
-    const query = req.query as { legacyKind?: string; legacyId?: string };
-    if (query.legacyKind !== "card" && query.legacyKind !== "key_point") {
-      return { error: "invalid_legacy_kind" };
-    }
-    const legacyId = query.legacyId;
-    if (!legacyId) {
-      return { error: "missing_legacy_id" };
-    }
-    const ctx = { workspaceId: req.session.workspaceId, userId: req.session.userId };
-    return withWorkspaceTransaction(ctx, (tx) =>
-      resolveLegacyRouteV3(tx, ctx.workspaceId, {
-        legacyKind: query.legacyKind as "card" | "key_point",
-        legacyId,
+        limit: parsed.data.limit ?? 20,
+        cursor: parsed.data.cursor,
       }),
     );
   });

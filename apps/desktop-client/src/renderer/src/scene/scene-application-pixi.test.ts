@@ -29,6 +29,7 @@ function createFakeCanvas(): FakeCanvas {
     dataset: {},
     tabIndex: 0,
     style: { pointerEvents: "" },
+    remove: vi.fn(),
     setAttribute: vi.fn(),
     addEventListener: vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
       listeners.set(type, listener);
@@ -163,7 +164,7 @@ describe("scene Pixi Application adapter", () => {
     scene.destroy();
   });
 
-  it("forwards context loss, keeps pointer rendering explicit, and destroys once", async () => {
+  it("forwards context loss, fails closed immediately, and destroys once", async () => {
     const fake = createFakeApplication();
     const host = createHost();
     const onContextLost = vi.fn();
@@ -182,7 +183,10 @@ describe("scene Pixi Application adapter", () => {
       frameBounds,
       enabled: true,
       pointerType: "mouse",
-    })).toBe(true);
+    })).toBe(false);
+    expect(fake.destroy).toHaveBeenCalledOnce();
+    expect(scene.rendererHost.root.destroyed).toBe(true);
+    expect(fake.canvas.canvas.remove).toHaveBeenCalledOnce();
     const renderCountBeforeDestroy = fake.render.mock.calls.length;
 
     scene.destroy();
@@ -198,20 +202,10 @@ describe("scene Pixi Application adapter", () => {
     })).toBe(false);
   });
 
-  it("contains callback, resize, and render failures while failing closed", async () => {
+  it("contains resize and render failures while failing closed", async () => {
     const fake = createFakeApplication();
     const host = createHost();
-    const onContextLost = vi.fn(() => {
-      throw new Error("context callback failed");
-    });
-    const scene = await createScenePixiApplication(createOptions(fake, host, {
-      onContextLost,
-    }));
-    const contextEvent = { preventDefault: vi.fn() } as unknown as Event;
-
-    expect(() => fake.canvas.dispatch("webglcontextlost", contextEvent)).not.toThrow();
-    expect(contextEvent.preventDefault).toHaveBeenCalledOnce();
-    expect(onContextLost).toHaveBeenCalledOnce();
+    const scene = await createScenePixiApplication(createOptions(fake, host));
 
     expect(scene.updateViewport({
       viewport,
@@ -249,6 +243,29 @@ describe("scene Pixi Application adapter", () => {
     expect(scene.rendererHost.cameraRoot.visible).toBe(false);
 
     scene.destroy();
+  });
+
+  it("contains a throwing context-loss callback and still tears down", async () => {
+    const fake = createFakeApplication();
+    const host = createHost();
+    const onContextLost = vi.fn(() => {
+      throw new Error("context callback failed");
+    });
+    const scene = await createScenePixiApplication(createOptions(fake, host, {
+      onContextLost,
+    }));
+    const contextEvent = { preventDefault: vi.fn() } as unknown as Event;
+
+    expect(() => fake.canvas.dispatch("webglcontextlost", contextEvent)).not.toThrow();
+    expect(contextEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(onContextLost).toHaveBeenCalledOnce();
+    expect(fake.destroy).toHaveBeenCalledOnce();
+    expect(scene.rendererHost.root.destroyed).toBe(true);
+    expect(scene.updateViewport({
+      viewport,
+      frameBounds,
+      cameraPreset: SCENE_CAMERA_PRESETS.study,
+    })).toBe(false);
   });
 
   it("can own a non-interactive pointer bridge and render its coalesced updates", async () => {

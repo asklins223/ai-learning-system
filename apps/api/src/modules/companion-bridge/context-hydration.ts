@@ -22,7 +22,6 @@ import { DomainError } from "@ailearn/shared";
 export { computeContextRevisionV2 };
 
 export const CONTEXT_LEASE_SECONDS = 30;
-export const CONTEXT_RENEW_WINDOW_SECONDS = 10;
 
 export interface HydratedContextInput {
   contextId: string;
@@ -69,11 +68,11 @@ export function entityLookupKey(ref: EntityRefV2): { table: string; id: string }
   switch (ref.kind) {
     case "source": return { table: "sources", id: ref.sourceId };
     case "note": return { table: "notes", id: ref.noteId };
-    // 卡/卡组/要点表已随旧栈退役：card→V2 卡表；key_point→objective（alias）；
-    // card_set 无 V2 等价物 → 不支持（fail soft，不查询已删表）。
-        case "card": return { table: "learning_cards_v2", id: ref.cardId };
+    case "card": return { table: "learning_cards_v2", id: ref.cardId };
     case "key_point": return { table: "learning_objectives_v2", id: ref.keyPointId };
-    case "evidence": return { table: "evidences", id: ref.evidenceId };
+    // V1 evidences was retired in migration 0183. The public evidence id is
+    // the stable V2 evidence_snapshot_id, not the storage surrogate `id`.
+    case "evidence": return { table: "evidence_snapshots_v2", id: ref.evidenceId };
     case "review_schedule": return { table: "review_schedules", id: ref.scheduleId };
     case "learning_run": return { table: "learning_runs", id: ref.runId };
     case "learning_task": return { table: "learning_tasks", id: ref.taskId };
@@ -86,7 +85,11 @@ export function entityLookupKey(ref: EntityRefV2): { table: string; id: string }
 }
 
 export class ContextHydrationError extends DomainError {
-  constructor(message: string) {
-    super({ name: "ContextHydrationError", code: "context_hydration_error", message, statusCode: 500 });
+  constructor(
+    message: string,
+    code = "context_hydration_error",
+    statusCode = 500,
+  ) {
+    super({ name: "ContextHydrationError", code, message, statusCode });
   }
 }

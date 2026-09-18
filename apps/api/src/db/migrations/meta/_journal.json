@@ -1296,6 +1296,300 @@
       "when": 1787241600007,
       "tag": "0184_card_generation_post_activation_worker_grant",
       "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1787241600008,
+      "tag": "0185_companion_room_profiles",
+      "breakpoints": true
+    },
+    {
+      "idx": 186,
+      "version": "7",
+      "when": 1787241600009,
+      "tag": "0186_companion_journey_resumable_lookup",
+      "breakpoints": true
+    },
+    {
+      "idx": 187,
+      "version": "7",
+      "when": 1787241600010,
+      "tag": "0187_drop_retired_learning_session_processing_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1787241600011,
+      "tag": "0188_drop_retired_validation_submission_chain",
+      "breakpoints": true
+    },
+    {
+      "idx": 189,
+      "version": "7",
+      "when": 1787241600012,
+      "tag": "0189_drop_retired_learning_outbox_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 190,
+      "version": "7",
+      "when": 1789144620064,
+      "tag": "0190_drop_retired_v1_evidence_overrides",
+      "breakpoints": true
+    },
+    {
+      "idx": 191,
+      "version": "7",
+      "when": 1789144620065,
+      "tag": "0191_drop_retired_review_attempt_evidence_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1789144620066,
+      "tag": "0192_drop_retired_review_key_point_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 193,
+      "version": "7",
+      "when": 1789144620067,
+      "tag": "0193_drop_retired_learning_run_legacy_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 194,
+      "version": "7",
+      "when": 1789144620068,
+      "tag": "0194_drop_retired_key_point_prerequisites",
+      "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1789144620069,
+      "tag": "0195_drop_retired_v2_compat_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 196,
+      "version": "7",
+      "when": 1789144620070,
+      "tag": "0196_drop_retired_v1_generation_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1789144620071,
+      "tag": "0197_drop_retired_generation_queue_helpers",
+      "breakpoints": true
+    },
+    {
+      "idx": 198,
+      "version": "7",
+      "when": 1789144620072,
+      "tag": "0198_fix_companion_daily_summary_activity",
+      "breakpoints": true
+    },
+    {
+      "idx": 199,
+      "version": "7",
+      "when": 1789144620073,
+      "tag": "0199_drop_retired_generate_card_job_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 200,
+      "version": "7",
+      "when": 1789144620074,
+      "tag": "0200_drop_retired_job_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 201,
+      "version": "7",
+      "when": 1789144620075,
+      "tag": "0201_drop_retired_note_generation_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 202,
+      "version": "7",
+      "when": 1789144620076,
+      "tag": "0202_drop_retired_learning_session_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 203,
+      "version": "7",
+      "when": 1789144620077,
+      "tag": "0203_remove_companion_action_run_compat",
+      "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1789144620078,
+      "tag": "0204_drop_legacy_route_mapping",
+      "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1789144620079,
+      "tag": "0205_remove_legacy_objective_origins",
+      "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1789144620080,
+      "tag": "0206_enforce_v2_target_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1789144620180,
+      "tag": "0207_remove_legacy_companion_memory_and_invitation_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 208,
+      "version": "7",
+      "when": 1789144620181,
+      "tag": "0208_drop_retired_validation_review_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1789144620182,
+      "tag": "0209_remove_retired_artifact_types",
+      "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1789144620183,
+      "tag": "0210_drop_retired_validation_outcome_enum",
+      "breakpoints": true
+    },
+    {
+      "idx": 211,
+      "version": "7",
+      "when": 1789144620184,
+      "tag": "0211_drop_unused_learning_exposure_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 212,
+      "version": "7",
+      "when": 1789144620185,
+      "tag": "0212_companion_memory_maintenance_once_per_day",
+      "breakpoints": true
+    },
+    {
+      "idx": 213,
+      "version": "7",
+      "when": 1789144620186,
+      "tag": "0213_companion_agent_v1",
+      "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1789144620187,
+      "tag": "0214_fix_job_insert_notify_retired_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1789144620188,
+      "tag": "0215_companion_agent_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 216,
+      "version": "7",
+      "when": 1789144620189,
+      "tag": "0216_companion_agent_elapsed_budget",
+      "breakpoints": true
+    },
+    {
+      "idx": 217,
+      "version": "7",
+      "when": 1789144620190,
+      "tag": "0217_companion_proposal_expiry_scheduler",
+      "breakpoints": true
+    },
+    {
+      "idx": 218,
+      "version": "7",
+      "when": 1789144620191,
+      "tag": "0218_companion_agent_reasoning_handles",
+      "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1789144620192,
+      "tag": "0219_fix_unsafe_rls_context_casts",
+      "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1789144620193,
+      "tag": "0220_v2_outbox_retry_backoff",
+      "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
+      "when": 1789144620194,
+      "tag": "0221_reap_preserve_last_error",
+      "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1789144620195,
+      "tag": "0222_learning_runs_origin_objective_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 223,
+      "version": "7",
+      "when": 1789144620196,
+      "tag": "0223_companion_memory_embedding_ws_user_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1789144620197,
+      "tag": "0224_assistant_deliveries_kind_check",
+      "breakpoints": true
+    },
+    {
+      "idx": 225,
+      "version": "7",
+      "when": 1789144620198,
+      "tag": "0225_sources_updated_cursor_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 226,
+      "version": "7",
+      "when": 1789144620199,
+      "tag": "0226_card_generation_outbox_notify",
+      "breakpoints": true
     }
   ]
 }

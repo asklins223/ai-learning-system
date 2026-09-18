@@ -10,7 +10,9 @@ import { test } from "node:test";
 import {
   canonicalizeEmail,
   generateDefaultWorkspaceName,
+  SESSION_ABSOLUTE_MAX_MS,
   SESSION_TTL_MS,
+  nextSessionExpiry,
   RECOVERED_PASSWORD_SENTINEL,
   hashPassword,
   type SessionContext,
@@ -90,9 +92,91 @@ test("generateDefaultWorkspaceName 超长 email 本地部分被截断", () => {
 
 // ─── 常量验证 ────────────────────────────────────────────────────────────
 
-test("SESSION_TTL_MS 是 7 天的毫秒数", () => {
-  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-  assert.equal(SESSION_TTL_MS, sevenDaysMs);
+test("SESSION_TTL_MS 是 30 天滑动窗口", () => {
+  assert.equal(SESSION_TTL_MS, 30 * 24 * 60 * 60 * 1000);
+});
+
+// ─── 滑动续期策略 ────────────────────────────────────────────────────────
+
+const DAY = 24 * 60 * 60 * 1000;
+
+function sessionAge(days: number) {
+  const now = new Date("2026-09-15T00:00:00.000Z");
+  const createdAt = new Date(now.getTime() - days * DAY);
+  return { createdAt, expiresAt: new Date(createdAt.getTime() + SESSION_TTL_MS), now };
+}
+
+test("刚签发的会话不触发续期写入", () => {
+  assert.equal(nextSessionExpiry(sessionAge(1)), null);
+});
+
+test("剩余寿命过半之前不写库", () => {
+  assert.equal(nextSessionExpiry(sessionAge(10)), null);
+});
+
+test("剩余寿命不足一半时滑动到整窗口", () => {
+  const { createdAt, expiresAt, now } = sessionAge(20);
+  const renewed = nextSessionExpiry({ createdAt, expiresAt, now });
+  assert.ok(renewed);
+  assert.equal(renewed.getTime(), now.getTime() + SESSION_TTL_MS);
+});
+
+test("续期不得越过绝对上限", () => {
+  const now = new Date("2026-09-15T00:00:00.000Z");
+  // 175 天前创建：窗口早已滑到上限之外，只能续到 createdAt + 180 天。
+  const createdAt = new Date(now.getTime() - 175 * DAY);
+  const expiresAt = new Date(now.getTime() + 1 * DAY);
+  const renewed = nextSessionExpiry({ createdAt, expiresAt, now });
+  assert.ok(renewed);
+  assert.equal(renewed.getTime(), createdAt.getTime() + SESSION_ABSOLUTE_MAX_MS);
+  assert.ok(renewed.getTime() < now.getTime() + SESSION_TTL_MS);
+});
+
+test("到达绝对上限后不再续期", () => {
+  const now = new Date("2026-09-15T00:00:00.000Z");
+  const createdAt = new Date(now.getTime() - 181 * DAY);
+  assert.equal(nextSessionExpiry({ createdAt, expiresAt: new Date(now.getTime() + 1 * DAY), now }), null);
+});
+
+test("每周打开一次的用户可以一直用到绝对上限才重新登录", () => {
+  // 这是对用户可见承诺的固化：30 天窗口 + 180 天绝对上限，活跃用户约半年免登录。
+  const start = new Date("2026-01-01T00:00:00.000Z");
+  let expiresAt = new Date(start.getTime() + SESSION_TTL_MS);
+  let lastUsableDay = -1;
+  for (let day = 0; day <= 400; day += 7) {
+    const now = new Date(start.getTime() + day * DAY);
+    if (expiresAt.getTime() <= now.getTime()) break;
+    lastUsableDay = day;
+    const renewed = nextSessionExpiry({ createdAt: start, expiresAt, now });
+    if (renewed) expiresAt = renewed;
+  }
+  assert.equal(lastUsableDay, 175);
+  assert.ok(expiresAt.getTime() <= start.getTime() + SESSION_ABSOLUTE_MAX_MS);
+});
+
+test("间隔 25 天再打开仍在窗口内，并续满一整窗", () => {
+  const start = new Date("2026-01-01T00:00:00.000Z");
+  const expiresAt = new Date(start.getTime() + SESSION_TTL_MS);
+  const now = new Date(start.getTime() + 25 * DAY);
+  assert.ok(expiresAt.getTime() > now.getTime(), "25 天后会话仍应有效");
+  const renewed = nextSessionExpiry({ createdAt: start, expiresAt, now });
+  assert.ok(renewed);
+  assert.equal(renewed.getTime(), now.getTime() + SESSION_TTL_MS);
+});
+
+test("超过一整个窗口未打开就会被登出", () => {
+  const start = new Date("2026-01-01T00:00:00.000Z");
+  const expiresAt = new Date(start.getTime() + SESSION_TTL_MS);
+  const now = new Date(start.getTime() + 31 * DAY);
+  assert.ok(expiresAt.getTime() <= now.getTime());
+  assert.equal(nextSessionExpiry({ createdAt: start, expiresAt, now }), null);
+});
+
+test("已过期或恰好到期的会话不会被续活", () => {
+  const now = new Date("2026-09-15T00:00:00.000Z");
+  const createdAt = new Date(now.getTime() - 20 * DAY);
+  assert.equal(nextSessionExpiry({ createdAt, expiresAt: new Date(now.getTime()), now }), null);
+  assert.equal(nextSessionExpiry({ createdAt, expiresAt: new Date(now.getTime() - DAY), now }), null);
 });
 
 test("RECOVERED_PASSWORD_SENTINEL 是非空字符串", () => {

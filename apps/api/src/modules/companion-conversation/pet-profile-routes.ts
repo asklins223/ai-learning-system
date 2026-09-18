@@ -19,6 +19,7 @@ import {
   PET_PERSONA_PRESETS,
   resetPetProfile,
   upsertPetProfile,
+  PetProfileCasConflictError,
   type PetPersonaPreset,
 } from "./pet-profile-service.ts";
 
@@ -87,7 +88,7 @@ export async function petProfileRoutes(app: FastifyInstance) {
       let profile: Awaited<ReturnType<typeof upsertPetProfile>> | null = null;
       try {
         profile = await withWorkspaceTransaction(scope, async (tx) => {
-          const existing = await getPetProfile(tx, scope);
+          const existing = await getPetProfile(tx, scope, { forUpdate: true });
           if (existing && body.data.revision !== undefined && body.data.revision !== existing.revision) {
             casConflict = true;
             conflictRevision = existing.revision;
@@ -95,7 +96,16 @@ export async function petProfileRoutes(app: FastifyInstance) {
           }
           return upsertPetProfile(tx, scope, body.data);
         });
-      } catch {
+      } catch (err) {
+        // 行锁 + `AND revision = expected` 兜底：并发 PATCH 的败者在这里拿到 409，
+        // 而不是 500（2026-09 后端审查修复）。
+        if (err instanceof PetProfileCasConflictError) {
+          return reply.code(409).send({
+            error: "PROFILE_CAS_CONFLICT",
+            message: "人格档案已被修改，请刷新后重试",
+            currentRevision: err.currentRevision,
+          });
+        }
         throw app.httpErrors.internalServerError("pet profile upsert failed");
       }
       if (casConflict) {

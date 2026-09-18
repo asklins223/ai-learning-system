@@ -1,8 +1,7 @@
 /**
  * V2 Card Fixture 助手——集成测试统一造数工具。
  *
- * 替代旧 V1 夹具模式（INSERT INTO card_key_points / learning_cards /
- * learning_card_sets），改为创建纯 V2 数据：
+ * 集成测试统一创建纯 V2 数据：
  * - learning_objectives_v2 + learning_objective_revisions_v2
  * - learning_cards_v2 + learning_card_publication_revisions_v2
  * - （可选）evidence_snapshots_v2 + evidence_eligibility_states_v2 +
@@ -12,7 +11,7 @@
  *   const seeded = await seedV2Fixture(sql, { /* options *\/ });
  *   // seeded = { workspaceId, userId, noteId, noteVersionId,
  *   //            objectiveId, objectiveRevisionId, cardId, cleanup }
- *   // 之后 createRun / createRunV2 可直接使用 objectiveId（V1 keyPointId alias）
+ *   // 之后 createRunV2 可直接使用 objectiveId
  *
  * 设计原则（方案 24 §2.3）：
  * - 幂等（按客观存在的 objectiveId 复用）；
@@ -24,6 +23,22 @@
 
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import type postgres from "postgres";
+import type { ApiTransaction } from "../../db/client.ts";
+import type { CreateRunV2Input } from "../../modules/learning-runs/run-service.ts";
+
+/** Create a current V2 run and return the internal snapshot used by DB tests. */
+export async function createLearningRunForTest(
+  tx: ApiTransaction,
+  input: CreateRunV2Input,
+) {
+  const { createRunV2, getRunPublicView } = await import("../../modules/learning-runs/run-service.ts");
+  const result = await createRunV2(tx, input);
+  return getRunPublicView(tx, {
+    workspaceId: input.workspaceId,
+    userId: input.userId,
+    runId: result.runId,
+  });
+}
 
 // ─── Session token 生成（与 identity/service.ts 一致）─────────────────
 
@@ -100,7 +115,22 @@ const DEFAULT_CANONICAL_ANSWER = JSON.stringify({
   unit: { unitId: "u1", text: "复利效应是本金产生利息后加入本金继续生息的现象" },
 });
 const DEFAULT_LEARNING_SUPPORT = JSON.stringify({ explanation: "利息加入本金继续生息" });
-const DEFAULT_SCORING_RUBRIC = JSON.stringify({ units: [], passingPolicy: {} });
+const DEFAULT_SCORING_RUBRIC = JSON.stringify({
+  version: 2,
+  units: [{
+    rubricUnitId: "fixture-rubric-u1",
+    facet: "recall",
+    criterion: "能准确回忆并说明目标知识点",
+    required: true,
+    answerUnitIds: ["u1"],
+    evidenceRefIds: ["00000000-0000-4000-8000-000000000001"],
+  }],
+  passingPolicy: {
+    requireAllRequiredUnits: true,
+    allowContradiction: false,
+  },
+  rubricHash: "9".repeat(64),
+});
 // DEFAULT_FRONT removed: front is constructed inline from opts or defaults.
 
 // ─── 主函数 ──────────────────────────────────────────────────────────
@@ -125,6 +155,11 @@ const DEFAULT_SCORING_RUBRIC = JSON.stringify({ units: [], passingPolicy: {} });
 /**
  * 按 workspace_id 清除全部相关业务数据（供各集成测试的 cleanup 复用）。
  * 事务级开启迁移 0180 的不可变触发器旁路，可安全删除追加-only 表。
+ *
+ * 必须同时设置 RLS 会话上下文：这些表对 ailearn_api 全部启用 RLS，缺少
+ * app.workspace_id 时 DELETE 会静默删除 0 行（策略表达式为 NULL → 不可见），
+ * 于是残留数据在跨套件运行中累积，并在删除父表（note_versions 等）时以
+ * 外键冲突的形式爆出来。userId 之前只用于签名、从未使用。
  */
 export async function cleanupWorkspaceTables(
   sql: postgres.Sql,
@@ -132,6 +167,8 @@ export async function cleanupWorkspaceTables(
   userId: string,
 ): Promise<void> {
   await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
     // 不可变触发器受控旁路（迁移 0180）：仅本清理事务内放行对 V2 追加-only 表的 DELETE。
     await tx`SELECT set_config('app.allow_history_mutation', 'on', true)`;
     await tx`DELETE FROM learning_target_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
@@ -141,7 +178,6 @@ export async function cleanupWorkspaceTables(
     await tx`DELETE FROM learning_objective_evidence_bindings_v2 WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_objective_revisions_v2 WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_objective_origins_v2 WHERE workspace_id = ${workspaceId}`;
-    await tx`DELETE FROM legacy_route_mappings_v2 WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_objectives_v2 WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM evidence_eligibility_states_v2 WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM evidence_snapshots_v2 WHERE workspace_id = ${workspaceId}`;
@@ -156,8 +192,6 @@ export async function cleanupWorkspaceTables(
     await tx`DELETE FROM canonical_learning_event_outbox WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM practice_trail_event_outbox WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_run_processing_outbox WHERE workspace_id = ${workspaceId}`;
-    await tx`DELETE FROM learning_session_processing_outbox WHERE workspace_id = ${workspaceId}`;
-    await tx`DELETE FROM learning_outbox_events WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM understanding_change_sets WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_assessments WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_artifacts WHERE workspace_id = ${workspaceId}`;
@@ -168,8 +202,6 @@ export async function cleanupWorkspaceTables(
     await tx`DELETE FROM learning_task_variants WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_tasks WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_run_private_contracts WHERE workspace_id = ${workspaceId}`;
-    await tx`DELETE FROM learning_episodes WHERE workspace_id = ${workspaceId}`;
-    await tx`DELETE FROM learning_sessions WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM learning_runs WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM note_blocks WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
@@ -178,9 +210,8 @@ export async function cleanupWorkspaceTables(
     await tx`DELETE FROM card_content_capability_state WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM assistant_deliveries WHERE workspace_id = ${workspaceId}`;
     // companion_messages.action_ref ↔ companion_action_proposals.source_message_id
-    // 构成循环外键：先解除消息侧引用，再按 runs → proposals → messages 顺序删。
+    // 构成循环外键：先解除消息侧引用，再删 proposals → messages。
     await tx`UPDATE companion_messages SET action_ref = NULL WHERE workspace_id = ${workspaceId}`;
-    await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM companion_messages WHERE workspace_id = ${workspaceId}`;
     await tx`DELETE FROM companion_stream_events WHERE workspace_id = ${workspaceId}`;
@@ -229,8 +260,8 @@ export async function seedV2Fixture(
       VALUES (${workspaceId}, ${userId}, 'owner')`;
 
     // 2. note + note_version
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId}, 1)`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId})`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1,
         ${tx.json({ blocks: [{ type: "paragraph", content: objectiveStatement }] })},
@@ -327,8 +358,8 @@ export async function addV2ObjectiveToWorkspace(
     await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
     await tx`SELECT set_config('app.user_id', ${userId}, true)`;
 
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId}, 1)`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId})`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1,
         ${tx.json({ blocks: [{ type: "paragraph", content: objectiveStatement }] })},
@@ -418,8 +449,8 @@ export async function seedV2ObjectiveOnly(
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${workspaceId}, ${userId}, 'owner')`;
 
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId}, 1)`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId})`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1,
         ${tx.json({ blocks: [{ type: "paragraph", content: objectiveStatement }] })},

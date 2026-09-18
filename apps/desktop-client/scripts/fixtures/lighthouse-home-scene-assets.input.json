@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": ".impeccable/review/home-v2-lighthouse-layer-sources-v1",
+  "outputRoot": "apps/desktop-client/src/renderer/public/assets/learning-room/v1/layers/home-v2/lighthouse",
+  "manifest": {
+    "path": "apps/desktop-client/src/renderer/public/assets/learning-room/v1/manifest.json",
+    "runtimeAssetPrefix": "layers/home-v2/lighthouse",
+    "posterPrefix": "posters/home-v2/lighthouse",
+    "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+    "license": "project-owned-ai-derived",
+    "reviewStatus": "approved",
+    "releaseApproval": true
+  },
+  "timeSources": {
+    "day": { "clean": "lighthouse-day-clean.png", "detail": "lighthouse-day-detail.png", "telescope": "lighthouse-telescope.png" },
+    "dusk": { "clean": "lighthouse-dusk-clean.png", "detail": "lighthouse-dusk-detail.png", "telescope": "lighthouse-telescope.png" },
+    "night": { "clean": "lighthouse-night-clean.png", "detail": "lighthouse-night-detail.png", "telescope": "lighthouse-telescope.png" }
+  },
+  "layerTemplates": [
+    {
+      "id": "lighthouse-{time}-d0",
+      "assetId": "HOME-LIGHTHOUSE-D0-{TIME}",
+      "depth": "D0",
+      "order": 0,
+      "registration": { "position": [0, 0], "size": { "width": 1672, "height": 941 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-d0-v1.png",
+      "sourceSize": { "width": 1672, "height": 941 }
+    },
+    {
+      "id": "lighthouse-{time}-water",
+      "assetId": "HOME-LIGHTHOUSE-WATER-{TIME}",
+      "depth": "D1",
+      "order": 10,
+      "registration": { "position": [520, 235], "size": { "width": 620, "height": 70 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-water-v1.png",
+      "crop": { "x": 700, "y": 242, "width": 256, "height": 64 }
+    },
+    {
+      "id": "lighthouse-{time}-window-sill",
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-SILL-{TIME}",
+      "depth": "D2",
+      "order": 30,
+      "registration": { "position": [475, 300], "size": { "width": 685, "height": 82 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-window-sill-v1.png",
+      "crop": { "x": 475, "y": 300, "width": 685, "height": 82 }
+    },
+    {
+      "id": "lighthouse-{time}-window-left",
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-LEFT-{TIME}",
+      "depth": "D2",
+      "order": 10,
+      "registration": { "position": [452, 0], "size": { "width": 112, "height": 330 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-window-left-v1.png",
+      "crop": { "x": 452, "y": 0, "width": 112, "height": 330 }
+    },
+    {
+      "id": "lighthouse-{time}-window-right",
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-RIGHT-{TIME}",
+      "depth": "D2",
+      "order": 20,
+      "registration": { "position": [1105, 0], "size": { "width": 90, "height": 330 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-window-right-v1.png",
+      "crop": { "x": 1105, "y": 0, "width": 90, "height": 330 }
+    },
+    {
+      "id": "lighthouse-{time}-desk",
+      "assetId": "HOME-LIGHTHOUSE-DESK-{TIME}",
+      "depth": "D3",
+      "order": 10,
+      "registration": { "position": [0, 277], "size": { "width": 440, "height": 322 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-desk-v1.png",
+      "crop": { "x": 0, "y": 277, "width": 440, "height": 322 }
+    },
+    {
+      "id": "lighthouse-{time}-shelf",
+      "assetId": "HOME-LIGHTHOUSE-SHELF-{TIME}",
+      "depth": "D3",
+      "order": 20,
+      "registration": { "position": [1187, 52], "size": { "width": 394, "height": 500 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-shelf-v1.png",
+      "crop": { "x": 1187, "y": 52, "width": 394, "height": 500 }
+    },
+    {
+      "id": "lighthouse-{time}-rest",
+      "assetId": "HOME-LIGHTHOUSE-REST-{TIME}",
+      "depth": "D3",
+      "order": 30,
+      "registration": { "position": [1345, 530], "size": { "width": 327, "height": 411 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-rest-v1.png",
+      "crop": { "x": 1345, "y": 530, "width": 327, "height": 411 }
+    },
+    {
+      "id": "lighthouse-{time}-telescope",
+      "assetId": "HOME-LIGHTHOUSE-TELESCOPE-{TIME}",
+      "depth": "D4",
+      "order": 10,
+      "registration": { "position": [710, 302], "size": { "width": 160, "height": 133 }, "anchor": [0.5, 0.58] },
+      "sourceKey": "telescope",
+      "output": "lighthouse-{time}-telescope-v1.png",
+      "sourceSize": { "width": 1376, "height": 1143 },
+      "outputSize": { "width": 160, "height": 133 }
+    },
+    {
+      "id": "lighthouse-{time}-desk-page",
+      "assetId": "HOME-LIGHTHOUSE-DESK-PAGE-{TIME}",
+      "depth": "D4",
+      "order": 20,
+      "registration": { "position": [120, 340], "size": { "width": 112, "height": 48 }, "anchor": [0, 0] },
+      "sourceKey": "detail",
+      "output": "lighthouse-{time}-desk-page-v1.png",
+      "crop": { "x": 120, "y": 340, "width": 112, "height": 48 },
+      "maskPolygons": [[[4, 17], [88, 8], [106, 25], [17, 39]]]
+    },
+    {
+      "id": "lighthouse-{time}-catalog-page",
+      "assetId": "HOME-LIGHTHOUSE-CATALOG-PAGE-{TIME}",
+      "depth": "D4",
+      "order": 30,
+      "registration": { "position": [1430, 379], "size": { "width": 220, "height": 145 }, "anchor": [0.5, 0.75] },
+      "sourceKey": "detail",
+      "output": "lighthouse-{time}-catalog-page-v1.png",
+      "crop": { "x": 1320, "y": 270, "width": 220, "height": 145 },
+      "maskPolygons": [[[28, 18], [112, 40], [202, 12], [182, 118], [102, 104], [18, 120]]]
+    },
+    {
+      "id": "lighthouse-{time}-foreground-left",
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-LEFT-{TIME}",
+      "depth": "D6",
+      "order": 10,
+      "registration": { "position": [0, 385], "size": { "width": 105, "height": 250 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-foreground-left-v1.png",
+      "crop": { "x": 0, "y": 385, "width": 105, "height": 250 },
+      "maskPolygons": [[[0, 24], [68, 24], [104, 69], [104, 198], [54, 249], [0, 249]]]
+    },
+    {
+      "id": "lighthouse-{time}-foreground-right",
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-RIGHT-{TIME}",
+      "depth": "D6",
+      "order": 20,
+      "registration": { "position": [1160, 600], "size": { "width": 512, "height": 341 }, "anchor": [0, 0] },
+      "sourceKey": "clean",
+      "output": "lighthouse-{time}-foreground-right-v1.png",
+      "crop": { "x": 1160, "y": 600, "width": 512, "height": 341 },
+      "maskPolygons": [
+        [[66, 28], [255, 32], [287, 112], [261, 267], [84, 267], [54, 120]],
+        [[218, 0], [511, 0], [511, 340], [184, 340], [190, 194]]
+      ]
+    }
+  ]
+}

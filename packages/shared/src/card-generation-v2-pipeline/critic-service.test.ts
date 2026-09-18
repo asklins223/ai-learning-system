@@ -12,8 +12,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { runPedagogyCritic, type PedagogyCriticInput } from "./critic-service.ts";
-import type { PedagogyCriticReportV2 } from "../card-quality-v2-contracts.ts";
+import {
+  runGroundingCritic,
+  runPedagogyCritic,
+  type GroundingCriticProvider,
+  type PedagogyCriticInput,
+} from "./critic-service.ts";
+import type { GroundingCriticReportV2, PedagogyCriticReportV2 } from "../card-quality-v2-contracts.ts";
 import type { LearningCardCandidateRevisionV2 } from "../card-generation-v2-contracts.ts";
 
 function makeCandidate(): LearningCardCandidateRevisionV2 {
@@ -149,5 +154,91 @@ describe("runPedagogyCritic fail-closed normalization (2026-08-25)", () => {
       const report = await runPedagogyCritic(makeInput(), provider);
       assert.equal(report.verdict, verdict);
     }
+  });
+});
+
+// ─── 2026-09-15（管线评审 H2）：runGroundingCritic 结构化交叉校验 ──────────
+//
+// 背景：此前 runGroundingCritic 只检查顶层 verdict 与 hardIssues，模型返回
+// 自相矛盾的 {verdict:"pass", answerUnits:[contradicted]} 会被原样放行，
+// 被矛盾证据否决的候选照常进入 binding plan。现在 answer/relation/rubric 逐项
+// verdict 与 explanation 支撑失败一律压为 fail（可选支撑字段的 insufficient
+// 按 §12.2 不阻断）。
+
+function makeGroundingReport(overrides: Partial<GroundingCriticReportV2>): GroundingCriticReportV2 {
+  const candidateRevisionId = randomUUID();
+  return {
+    version: 2,
+    reportId: randomUUID(),
+    candidateRevisionId,
+    candidateRevisionHash: "b".repeat(64),
+    evidenceSetHash: "c".repeat(64),
+    evidenceEligibilityVectorHash: "d".repeat(64),
+    inputHash: "d".repeat(64),
+    verdict: "pass",
+    answerUnits: [{ answerUnitId: "ans-1", verdict: "entailed", evidenceSnapshotIds: [] }],
+    learningSupport: [],
+    relationSupport: [],
+    rubricSupport: [{ rubricUnitId: "rubric-1", verdict: "supported", evidenceSnapshotIds: [] }],
+    hardIssues: [],
+    criticVersion: "card-grounding-critic/v1",
+    reportHash: "a".repeat(64),
+    ...overrides,
+  } as GroundingCriticReportV2;
+}
+
+function groundingProvider(report: GroundingCriticReportV2): GroundingCriticProvider {
+  return { evaluate: async () => report };
+}
+
+describe("runGroundingCritic：verdict↔结构化明细 fail-closed 归一化", () => {
+  test("pass + answerUnit contradicted → fail", async () => {
+    const report = await runGroundingCritic(
+      { candidate: makeCandidate() },
+      groundingProvider(makeGroundingReport({
+        answerUnits: [{ answerUnitId: "ans-1", verdict: "contradicted", evidenceSnapshotIds: [] }],
+      })),
+    );
+    assert.equal(report.verdict, "fail");
+  });
+
+  test("pass + rubric unsupported → fail", async () => {
+    const report = await runGroundingCritic(
+      { candidate: makeCandidate() },
+      groundingProvider(makeGroundingReport({
+        rubricSupport: [{ rubricUnitId: "rubric-1", verdict: "unsupported", evidenceSnapshotIds: [] }],
+      })),
+    );
+    assert.equal(report.verdict, "fail");
+  });
+
+  test("pass + explanation 证据不足 → fail", async () => {
+    const report = await runGroundingCritic(
+      { candidate: makeCandidate() },
+      groundingProvider(makeGroundingReport({
+        learningSupport: [{ field: "explanation", verdict: "insufficient", evidenceSnapshotIds: [] }],
+      })),
+    );
+    assert.equal(report.verdict, "fail");
+  });
+
+  test("pass + 可选支撑字段仅 insufficient → 保持 pass（§12.2 不阻断）", async () => {
+    const report = await runGroundingCritic(
+      { candidate: makeCandidate() },
+      groundingProvider(makeGroundingReport({
+        learningSupport: [{ field: "boundary", verdict: "insufficient", evidenceSnapshotIds: [] }],
+      })),
+    );
+    assert.equal(report.verdict, "pass");
+  });
+
+  test("pass + 可选支撑字段被矛盾 → fail", async () => {
+    const report = await runGroundingCritic(
+      { candidate: makeCandidate() },
+      groundingProvider(makeGroundingReport({
+        learningSupport: [{ field: "workedExample", verdict: "contradicted", evidenceSnapshotIds: [] }],
+      })),
+    );
+    assert.equal(report.verdict, "fail");
   });
 });

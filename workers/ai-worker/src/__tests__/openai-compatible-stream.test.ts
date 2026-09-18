@@ -7,12 +7,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  adaptFetchToPublicJsonRequester,
   OpenAICompatibleProvider,
 } from "../lib/providers/openai-compatible.ts";
-import type { PublicStreamingRequester } from "@ailearn/shared/public-json-http";
+import type { PublicJsonRequester, PublicStreamingRequester } from "@ailearn/shared/public-json-http";
 import { MockProvider } from "../lib/providers/mock.ts";
-import { ProviderRequestError } from "../lib/generation-failure-policy.ts";
+import { ProviderRequestError } from "../lib/provider-request-error.ts";
+
+/** 测试专用：把 globalThis.fetch（被 withFetchMock 替换）包成非流式 requester。 */
+function fetchJsonRequester(): PublicJsonRequester {
+  return async (url, headers, body, signal) => {
+    const response = await globalThis.fetch(url, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const text = await response.text();
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      body: text ? JSON.parse(text) : null,
+    };
+  };
+}
 
 function fetchStreamingRequester(): PublicStreamingRequester {
   return async (url, headers, body, signal) => {
@@ -142,7 +159,7 @@ test("chatCompletion：responseFormat=text 在非流式 fallback 也不强制 JS
       headers: { "Content-Type": "application/json" },
     });
   }, async () => {
-    const result = await makeProvider(adaptFetchToPublicJsonRequester(globalThis.fetch))
+    const result = await makeProvider(fetchJsonRequester())
       .chatCompletion(CHAT_MESSAGES, { responseFormat: "text" });
     assert.equal(result.content, "非流式文本");
   });

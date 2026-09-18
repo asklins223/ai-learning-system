@@ -23,6 +23,7 @@ const snapshot = (overrides: Record<string, unknown> = {}) => learningRunPublicS
   runRevision: 1,
   runtimeEpoch: 1,
   activeSecondsUsed: 0,
+  timeBudgetSeconds: 180,
   activeTask: null,
   allowedActions: [{ version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true }],
   publishedTargetEligibility: "eligible",

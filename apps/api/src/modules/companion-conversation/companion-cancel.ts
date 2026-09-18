@@ -2,10 +2,10 @@
  * P2 companion cancel（03 §8.2 / §6.5）。
  *
  * POST /companion/runs/:id/cancel：
- * - 仅 active（accepted/running/cancel_requested）run 可取消；终态 run 幂等返回 200；
+ * - 仅 active（accepted/running/waiting_for_confirmation/cancel_requested）run 可取消；终态 run 幂等返回 200；
  * - 原子：run → cancelled（finished_at）+ turn.cancelled event（reason=user）+
  *   该 run 全部 event expires 改终态+24h + NOTIFY；
- * - Worker 侧 fence（只认 accepted/running）保证 cancel 后迟到 delta/final 零写入。
+ * - Worker 侧 fence 保证 cancel 后迟到 delta/final 零写入。
  */
 
 import { eq, and, inArray, sql } from "drizzle-orm";
@@ -99,7 +99,7 @@ export async function cancelCompanionRun(args: {
         })
         .where(and(
           eq(companionTurnRuns.id, args.runId),
-          inArray(companionTurnRuns.status, ["accepted", "running", "cancel_requested"]),
+          inArray(companionTurnRuns.status, ["accepted", "running", "waiting_for_confirmation", "cancel_requested"]),
         ))
         .returning({ id: companionTurnRuns.id });
       if (!updated[0]) {
@@ -122,6 +122,20 @@ export async function cancelCompanionRun(args: {
           },
         };
       }
+
+      // A cancelled Agent run must invalidate its frozen proposal and audit
+      // row. A later confirm therefore cannot resurrect or execute the action.
+      await tx.execute(sql`
+        UPDATE companion_agent_tool_calls
+        SET status = 'expired', result_safe_summary = '运行已取消', updated_at = now()
+        WHERE run_id = ${run.id}
+          AND status IN ('requested', 'executing', 'waiting_confirmation')
+      `);
+      await tx.execute(sql`
+        UPDATE companion_action_proposals
+        SET status = 'expired', updated_at = now()
+        WHERE agent_run_id = ${run.id} AND status = 'pending'
+      `);
 
       // turn.cancelled event（reason=user，§5.2）
       const counters = await tx

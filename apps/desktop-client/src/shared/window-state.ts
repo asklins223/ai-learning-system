@@ -8,6 +8,15 @@ export interface WindowStateSnapshot {
   readonly revision: number
 }
 
+export function resolveWindowState(input: {
+  readonly minimized: boolean
+  readonly visible: boolean
+  readonly focused: boolean
+}): AILearnWindowState {
+  if (input.minimized) return 'minimized'
+  return input.visible && input.focused ? 'visible' : 'hidden'
+}
+
 export function isWindowStateSnapshot(value: unknown): value is WindowStateSnapshot {
   if (typeof value !== 'object' || value === null) return false
 

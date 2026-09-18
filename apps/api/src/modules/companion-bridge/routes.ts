@@ -32,6 +32,19 @@ function isCompanionBridgeV2Enabled(): boolean {
   return process.env.COMPANION_BRIDGE_V2 === "true";
 }
 
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object"
+    && err !== null
+    && (err as { code?: unknown }).code === "23505";
+}
+
+function sendPublishConflict(
+  reply: { code(statusCode: number): { send(body: unknown): unknown } },
+  message: string,
+) {
+  return reply.code(409).send({ error: "context_conflict", message });
+}
+
 /** §6.10 限流 helper：达限写 429 并返回 false，调用方立即 return（与其余
  * companion 路由同模式）。key 按 (workspace,user) 聚合。 */
 function bridgeRateLimited(
@@ -66,7 +79,7 @@ const renewBodySchema = z.object({
 export async function companionBridgeRoutes(app: FastifyInstance) {
   app.addHook("onRequest", async (_req, reply) => {
     if (!isCompanionBridgeV2Enabled()) {
-            return reply.code(404).send({
+      return reply.code(404).send({
         error: "companion_bridge_v2_disabled",
         message: "伴星上下文桥当前未开放",
       });
@@ -99,7 +112,15 @@ export async function companionBridgeRoutes(app: FastifyInstance) {
       return reply.code(201).header("Cache-Control", "no-store").send(snapshot);
     } catch (err) {
       if (err instanceof ContextHydrationError) {
+        if (err.code === "context_conflict") {
+          return sendPublishConflict(reply, err.message);
+        }
         return reply.code(409).send({ error: "context_stale", message: err.message });
+      }
+      // 防御跨租户/历史脏数据造成的主键碰撞：即使 RLS 让 preflight 看不到
+      // 冲突行，也不能把可预期的重复 publish 变成 500。
+      if (isUniqueViolation(err)) {
+        return sendPublishConflict(reply, "页面上下文已存在或冲突");
       }
       throw err;
     }

@@ -11,11 +11,11 @@ const nodeRequire = typeof createRequire === "function"
 /**
  * 内容哈希单一来源（阶段 04 收口，security_review HIGH #2 修复）
  *
- * 音频/文本 content hash 的权威实现：voice-service（生产填充）与
- * assessment-critic（完整性重建校验）必须引用同一实现，避免格式断裂
+ * 音频/文本 content hash 的权威实现必须由当前语音 artifact 路径复用，
+ * 避免格式断裂
  * （如裸 SHA-256 vs `sha256:` 前缀 + 域分隔），否则音频替换 / replay
- * 防护会短路或误伤。格式约定：`sha256:<64 hex>`（见 voice-artifact-contracts.ts
- * 的 SHA256_HASH_PATTERN）。
+ * 防护会短路或误伤。语音 transcript 与 text_or_mixed 的格式约定为
+ * `sha256:<64 hex>`。
  */
 
 /** 裸 SHA-256 hex（内部工具；对外一律使用带前缀的 computeVoiceContentHash 等） */

@@ -10,8 +10,8 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { learningObjectiveOriginsV2 } from "../db/schema/card-generation-v2.ts";
-import { learningRuns } from "../db/schema/learning-runs.ts";
+import { learningObjectiveOriginsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { learningRuns } from "@ailearn/shared/db-schema/learning-runs";
 
 const FIXTURE_WORKSPACE = "4f825f38-1a65-492a-8dec-c82868e6ea0f";
 const SYSTEM_USER = "00000000-0000-0000-0000-000000000000";

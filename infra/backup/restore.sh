@@ -365,7 +365,7 @@ fi
 log "  恢复后迁移末端: $RESTORED_MIGRATION"
 
 # 验证核心表计数
-CORE_TABLES=("users" "workspaces" "notes" "note_versions" "learning_cards" "sources" "review_schedules")
+CORE_TABLES=("users" "workspaces" "notes" "note_versions" "sources" "review_schedules" "learning_objectives_v2" "learning_cards_v2")
 for table in "${CORE_TABLES[@]}"; do
   COUNT=$(PGPASSWORD="${PGPASSWORD:-}" psql \
     -h "$TARGET_HOST" -p "$TARGET_PORT" -U "$TARGET_USER" -d "$TARGET_DB" \

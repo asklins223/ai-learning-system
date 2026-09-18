@@ -27,8 +27,6 @@ function base(over: Partial<ActionResolverInputV3> = {}): ActionResolverInputV3 
     initialDeferred: null,
     practiceOnly: false,
     practiceReasonCodes: [],
-    origin: "card",
-    goal: "首次验证",
     ...over,
   };
 }
@@ -62,21 +60,32 @@ test("review due 优先于 initial ready，携带精确 scheduleId/generation", 
   assert.deepEqual(action, {
     kind: "create_review_run",
     objectiveId: OBJ,
-    scheduleId: SCHED,
-    generation: 3,
+    label: "开始到期复习",
+    start: {
+      version: 2,
+      originV2: { kind: "review", scheduleId: SCHED, objectiveId: OBJ, scheduleGeneration: 3 },
+      goal: "stabilize",
+      requestedTimeBudgetSeconds: 180,
+      responsePreference: "adaptive",
+    },
   });
 });
 
-test("initial ready → create_run（origin/goal 来自入口）", () => {
+test("initial ready → create_run（启动参数由服务端完整下发）", () => {
   const action = resolvePrimaryActionV3(
-    base({ initialReady: { reminderId: REMINDER, qualificationNotBefore: "2026-08-16T00:00:00.000Z" }, origin: "graph" }),
+    base({ initialReady: { reminderId: REMINDER, qualificationNotBefore: "2026-08-16T00:00:00.000Z" } }),
   );
   assert.deepEqual(action, {
     kind: "create_run",
-    origin: "graph",
     objectiveId: OBJ,
-    cardId: CARD,
-    goal: "首次验证",
+    label: "开始首次验证",
+    start: {
+      version: 2,
+      originV2: { kind: "card", cardId: CARD, objectiveId: OBJ },
+      goal: "stabilize",
+      requestedTimeBudgetSeconds: 180,
+      responsePreference: "adaptive",
+    },
   });
 });
 
@@ -111,8 +120,6 @@ test("active 但无 Card 且无个人状态 → refresh（修复入口）", () =
   assert.equal(action.kind, "refresh");
 });
 
-test("非法 origin 被 schema 拒绝（不产生 label 猜测）", () => {
-  assert.throws(() =>
-    resolvePrimaryActionV3(base({ initialReady: { reminderId: REMINDER, qualificationNotBefore: "2026-08-16T00:00:00.000Z" }, origin: "guess" as never })),
-  );
+test("generation=0 的 review 不会生成不可执行启动参数", () => {
+  assert.deepEqual(resolvePrimaryActionV3(base({ reviewDue: { scheduleId: SCHED, generation: 0 } })), { kind: "refresh" });
 });

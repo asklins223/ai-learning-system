@@ -24,7 +24,7 @@ import { test } from "node:test";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres, { type Sql } from "postgres";
 import { type ApiTransaction } from "../db/client.ts";
-import * as schema from "../db/schema/index.ts";
+import * as schema from "@ailearn/shared/db-schema";
 import {
   restoreNoteVersion,
   updateNote,
@@ -425,6 +425,73 @@ test("canUpdateVersionInPlace: sealed version blocks in-place update", async () 
         SELECT content FROM note_blocks WHERE version_id = ${v2Id} ORDER BY ordinal LIMIT 1
       `;
       assert.equal(v2Block.content, "v2 content", "v2 content should be unchanged");
+    } finally {
+      await cleanupWorkspace(tx, workspaceId, userId, noteId);
+    }
+  });
+});
+
+/**
+ * 回归（2026-09-18）：改动**既有块的自动保存**整条链路。
+ *
+ * `updateVersionInPlace` 用一条 `UPDATE ... FROM (unnest(...))` 把同一顺序号上
+ * 内容发生变化的块批量写回。这段 SQL 曾把列类型写进 unnest 的列定义列表
+ * （`AS ord(id uuid, type text, ...)`），而 PostgreSQL 不接受「多参数 unnest() +
+ * 列定义列表」，直接抛
+ *   UNNEST() with multiple arguments cannot have a column definition list
+ * → 每次「改已有段落」的自动保存都是 500（生产日志 8/9 次 PATCH 全 500）。
+ *
+ * 上面那条 sealed 用例走的是「降级新建版本」分支，**永远碰不到这段 UPDATE**，
+ * 所以旧写法一路漏到线上。本用例专门钉住原地更新分支。
+ */
+test("autosave in place: editing an existing block writes back without a new version", async () => {
+  await withTestSql(async (tx) => {
+    const { workspaceId, userId, noteId, v2Id } = await seedWorkspaceNoteWithTwoVersions(tx);
+
+    try {
+      // v2 未密封 → 允许原地更新，且顺序号 0 的块内容确实变了 → 命中批量 UPDATE。
+      const result = await withServiceTransaction((serviceTx) =>
+        updateNote(serviceTx, noteId, workspaceId, userId, {
+          blocks: [
+            { type: "paragraph", content: "autosaved edit" },
+            { type: "paragraph", content: "second block" },
+          ],
+          baseVersionId: v2Id,
+          isAutosave: true,
+        })
+      );
+
+      assert.ok(result, "in-place autosave should return a result");
+      assert.equal(result!.version.id, v2Id, "in-place autosave must not create a new version");
+      assert.equal(result!.version.versionNo, 2, "in-place autosave keeps version 2");
+
+      const blocks = await tx<{ ordinal: number; content: string }[]>`
+        SELECT ordinal, content FROM note_blocks WHERE version_id = ${v2Id} ORDER BY ordinal
+      `;
+      // postgres-js 返回的行不是普通对象，直接 deepEqual 会因为原型不同而假失败。
+      assert.deepEqual(
+        blocks.map((block) => ({ ordinal: block.ordinal, content: block.content })),
+        [
+          { ordinal: 0, content: "autosaved edit" },
+          { ordinal: 1, content: "second block" },
+        ],
+        "changed block is rewritten and the new block is inserted",
+      );
+
+      const versionCount = await tx<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM note_versions WHERE note_id = ${noteId}
+      `;
+      assert.equal(versionCount[0].count, 2, "in-place autosave adds no version row");
+
+      // 版本快照与块表必须一致：原地更新的语义是二者同步改写。
+      const [versionRow] = await tx<{ content_json: { blocks: Array<{ content: string }> } }[]>`
+        SELECT content_json FROM note_versions WHERE id = ${v2Id}
+      `;
+      assert.deepEqual(
+        versionRow.content_json.blocks.map((block) => block.content),
+        ["autosaved edit", "second block"],
+        "content_json follows the in-place block rewrite",
+      );
     } finally {
       await cleanupWorkspace(tx, workspaceId, userId, noteId);
     }

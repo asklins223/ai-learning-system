@@ -8,10 +8,14 @@
  * 未配置时 fail closed 到 not_assessable checkpoint（0 canonical/schedule）。
  *
  * V1 夹具已退役：seed() 使用 V2 fixture 助手创建 learning_objectives_v2 +
- * learning_cards_v2，createRun 的 V1 薄壳将 keyPointId 映射为 objectiveId。
+ * learning_cards_v2，createRunV2 直接使用 objectiveId。
  *
- * 运行：DATABASE_URL_API="postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn"
+ * 运行：DATABASE_URL_API="postgres://ailearn_api:ailearn_dev@127.0.0.1:5432/ailearn"
  *   node --import tsx --test --test-concurrency=1 src/integration-tests/learning-runs-postgres.integration.ts
+ *
+ * 角色：请使用受限的 ailearn_api（与 CI/生产一致，NOBYPASSRLS）。本文件的裸
+ * SQL 校验统一经 scoped() 带 workspace/user 上下文，因此在受限角色下同样成立；
+ * 用超级用户跑会绕过 RLS，让"恰好 1 行"类断言失去隔离意义。
  */
 
 import { after, test } from "node:test";
@@ -30,7 +34,7 @@ import {
   reviewQueueV2Schema,
   submitTaskArtifactReceiptV2Schema,
 } from "@ailearn/shared";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 // db client 读取 DATABASE_URL_API；未设置时与 CONN 同源（本地 dev 默认）。
@@ -40,12 +44,11 @@ const sql = postgres(CONN, { max: 2 });
 // Critic 未配置：确保 fail closed 分支可复现。
 delete process.env.ASSESSMENT_CRITIC_URL;
 delete process.env.ASSESSMENT_CRITIC_KEY;
-process.env.LEARNING_RUN_V1 ??= "true";
+process.env.LEARNING_RUN_ENABLED ??= "true";
 process.env.LEARNING_DRAFT_ENC_KEY ??= "a".repeat(64);
 
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
 const {
-  createRun,
   createRunV2,
   submitArtifact,
   getRunPublicView,
@@ -55,12 +58,35 @@ const {
   getReturnContractV2,
   applyAction,
   getEventsAfter,
+  putDraft,
 } = await import(
   "../modules/learning-runs/run-service.ts"
 );
 const { runLearningRunProcessingTick } = await import(
   "../modules/learning-runs/run-processing-tick.ts"
 );
+
+/**
+ * 裸 SQL 校验必须带 workspace/user 上下文。
+ *
+ * 本文件校验的目标表全部是 FORCE RLS（canonical_learning_event_outbox、
+ * learning_artifacts、learning_runs、learning_run_idempotency、
+ * learning_activity_leases、learning_task_variants、learning_tasks、
+ * learning_cards_v2、learning_run_action_ledger…）。受限角色（ailearn_api）
+ * 在无上下文的事务里读/写这些表会命中 0 行，使"恰好 1 行/0 schedule"这类断言
+ * 假失败；超级用户则绕过 RLS 让同样的断言假通过。两者都不反映产品行为，因此
+ * 校验统一走 scoped()，与运行时读取走同一套 RLS 上下文。
+ */
+function scoped<T>(
+  scope: { workspaceId: string; userId: string },
+  fn: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${scope.userId}, true)`;
+    return fn(tx);
+  }) as Promise<T>;
+}
 
 after(async () => {
   await sql.end({ timeout: 2 });
@@ -71,7 +97,7 @@ interface Seeded {
   workspaceId: string;
   userId: string;
   cardId: string;
-  /** V2 objectiveId（V1 keyPointId alias；createRun V1 薄壳映射二者一致）。 */
+  /** V2 objectiveId（V1 keyPointId alias；createRunV2 V1 薄壳映射二者一致）。 */
   keyPointId: string;
   token: string;
   cleanup: () => Promise<void>;
@@ -111,14 +137,12 @@ test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit 
 
     // 1) 创建 Run（card origin）。
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
           requestedTimeBudgetSeconds: 120,
-          clientRequestId: "it-1",
           idempotencyKey: "it-create-1",
         },
       }),
@@ -140,14 +164,12 @@ test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit 
 
     // 2) 幂等重放创建：同 key 同 runId。
     const replayed = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
           requestedTimeBudgetSeconds: 120,
-          clientRequestId: "it-1",
           idempotencyKey: "it-create-1",
         },
       }),
@@ -215,13 +237,17 @@ test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit 
     assert.equal(schedRows.length, 1);
     assert.equal(schedRows[0].generation, 1);
     assert.equal(schedRows[0].interval_days, 1);
-    assert.equal(schedRows[0].reason_code, "canonical_unable");
+    // reason_code 来自**调度策略域**（DiscreteV2ReasonCode）：declared_unable 经
+    // calculateDiscreteV2Schedule({outcome:"unable"}) → "unable_reset"。
+    // "canonical_unable" 是 canonical envelope 的 fact.kind（下面单独断言），
+    // 不是 schedule 的 reason code —— 两个域不能混用。
+    assert.equal(schedRows[0].reason_code, "unable_reset");
 
     // 6) 恰好一个 canonical envelope（unique commitId/canonicalEventId）。
-    const envelopeRows = await sql`
+    const envelopeRows = await scoped(scope, (tx) => tx`
       SELECT envelope FROM canonical_learning_event_outbox
       WHERE workspace_id = ${seeded.workspaceId} AND run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeRows.length, 1);
     const envelope = envelopeRows[0].envelope as { fact?: { kind?: string } };
     assert.equal(envelope.fact?.kind, "canonical_unable");
@@ -235,10 +261,10 @@ test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit 
     // 8) 重复 tick：0 副作用（outbox 已 processed，envelope 仍恰好一个）。
     const tick2 = await runLearningRunProcessingTick(`it-worker:${randomUUID()}`, 10);
     assert.ok(tick2.failed === 0);
-    const envelopeRows2 = await sql`
+    const envelopeRows2 = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox
       WHERE workspace_id = ${seeded.workspaceId} AND run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeRows2[0].n, 1);
   } finally {
     await seeded.cleanup();
@@ -250,13 +276,11 @@ test("P2 fail closed：text 提交 + Critic 未配置 → not_assessable checkpo
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "it-2",
           idempotencyKey: "it-create-2",
         },
       }),
@@ -293,9 +317,9 @@ test("P2 fail closed：text 提交 + Critic 未配置 → not_assessable checkpo
     assert.ok(afterRun.activeAssessment?.reportHash, "fail-closed 报告必须有 hash");
 
     // 0 canonical / 0 schedule 副作用。
-    const envelopeCount = await sql`
+    const envelopeCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeCount[0].n, 0);
     const schedCount = await sql`
       SELECT count(*)::int AS n FROM review_schedules
@@ -312,13 +336,11 @@ test("E08：请求提示后提交 text → Critic 未配置 fail closed → not_
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "e08-1",
           idempotencyKey: "e08-create-1",
         },
       }),
@@ -376,9 +398,9 @@ test("E08：请求提示后提交 text → Critic 未配置 fail closed → not_
       allowedFollowupIds: ["supplement:1"],
     });
     assert.equal(afterRun.result, null, "not_assessable 不产生 result");
-    const envelopeCount = await sql`
+    const envelopeCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeCount[0].n, 0, "E08 提示暴露 0 canonical");
     const schedCount = await sql`
       SELECT count(*)::int AS n FROM review_schedules WHERE workspace_id = ${seeded.workspaceId}
@@ -394,13 +416,11 @@ test("E09：assessing 阶段 end(abandon) → epoch 前移 → 迟到评估无�
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "e09-1",
           idempotencyKey: "e09-create-1",
         },
       }),
@@ -448,9 +468,9 @@ test("E09：assessing 阶段 end(abandon) → epoch 前移 → 迟到评估无�
     );
     assert.equal(afterRun.phase, "ended");
     assert.equal(afterRun.result, null, "迟到评估无结果");
-    const envelopeCount = await sql`
+    const envelopeCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeCount[0].n, 0, "E09 迟到 Commit 0 canonical");
   } finally {
     await seeded.cleanup();
@@ -462,13 +482,11 @@ test("P2 幂等：submission 同 idempotencyKey 重放返回同一 receipt，不
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "clarify",
-          clientRequestId: "it-3",
           idempotencyKey: "it-create-3",
         },
       }),
@@ -500,10 +518,10 @@ test("P2 幂等：submission 同 idempotencyKey 重放返回同一 receipt，不
     };
     const second = await withWorkspaceTransaction(scope, async (tx) => submitArtifact(tx, input)) as typeof first;
     assert.equal(first.artifactId, second.artifactId, "重放必须返回同一 artifact");
-    const artifactCount = await sql`
+    const artifactCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM learning_artifacts
       WHERE workspace_id = ${seeded.workspaceId} AND task_id = ${taskId} AND status = 'locked'
-    `;
+    `);
     assert.equal(artifactCount[0].n, 1, "重复提交不得重复锁定");
   } finally {
     await seeded.cleanup();
@@ -515,25 +533,23 @@ test("P4 followup：partial checkpoint → activate_followup 激活补充任务 
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "p4-followup-1",
           idempotencyKey: "p4-followup-create-1",
         },
       }),
     );
     // 构造 partial checkpoint（critic 判定 partial 后 tick 会这样写；此处
     // 直接验证 followup 状态机动作本身）。
-    await sql`
+    await scoped(scope, (tx) => tx`
       UPDATE learning_runs
       SET phase = 'checkpoint',
           checkpoint = '{"kind":"partial","allowedFollowupIds":["supplement:1"]}'::jsonb
       WHERE id = ${run.runId}
-    `;
+    `);
 
     // 未授权 followupId → 409 followup_not_authorized。
     await assert.rejects(
@@ -557,21 +573,21 @@ test("P4 followup：partial checkpoint → activate_followup 激活补充任务 
       action: { kind: "activate_followup", followupId: "supplement:1" },
       idempotencyKey: "p4-followup-ok",
     }));
-    const taskRows = await sql`
+    const taskRows = await scoped(scope, (tx) => tx`
       SELECT id, intent, status FROM learning_tasks
       WHERE run_id = ${run.runId} ORDER BY sequence
-    `;
+    `);
     assert.equal(taskRows.length, 2, "核心 + 补充两个 task");
     assert.equal(taskRows[1].intent, "repair");
     assert.equal(taskRows[1].status, "active");
-    const variantRows = await sql`
+    const variantRows = await scoped(scope, (tx) => tx`
       SELECT purpose, template_trust_ceiling FROM learning_task_variants
       WHERE task_id = ${taskRows[1].id}
-    `;
+    `);
     assert.equal(variantRows.length, 1);
     assert.equal(variantRows[0].purpose, "practice");
     assert.equal(variantRows[0].template_trust_ceiling, "practice_only");
-    const runRows = await sql`SELECT phase, active_task_id FROM learning_runs WHERE id = ${run.runId}`;
+    const runRows = await scoped(scope, (tx) => tx`SELECT phase, active_task_id FROM learning_runs WHERE id = ${run.runId}`);
     assert.equal(runRows[0].phase, "active");
     assert.equal(runRows[0].active_task_id, taskRows[1].id);
   } finally {
@@ -592,13 +608,11 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
 
     // 1) review origin 创建（consume_pending 授权 + generation 校验）。
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "review", scheduleId, keyPointId: seeded.keyPointId, scheduleGeneration: 7 },
+          originV2: { kind: "review", scheduleId, objectiveId: seeded.keyPointId, scheduleGeneration: 7 },
           goal: "stabilize",
-          clientRequestId: "e04-1",
           idempotencyKey: "e04-create-1",
         },
       }),
@@ -647,9 +661,9 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
     assert.equal(successors.length, 1, "恰好一个 successor");
 
     // 4) 恰好一个 canonical envelope。
-    const envelopeCount = await sql`
+    const envelopeCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeCount[0].n, 1);
   } finally {
     await seeded.cleanup();
@@ -658,6 +672,7 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
 
 test("REVIEW-QUEUE-PROJECTION-01：真实 V2 queue identity 与 direct startability preconditions", async () => {
   const seeded = await seed();
+  const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
   const app = await buildLearningRunApp();
   try {
     const auth = { authorization: `Bearer ${seeded.token}` };
@@ -756,10 +771,18 @@ test("REVIEW-QUEUE-PROJECTION-01：真实 V2 queue identity 与 direct startabil
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${cooldownScheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 minute', 1, 14, 'discrete-v2', 'initial_validation', now(), now())
     `;
-    await sql`
-      INSERT INTO validation_assistance_exposures (id, workspace_id, user_id, key_point_id, exposure_fingerprint, last_exposure_kind, first_exposed_at, last_exposed_at, unassisted_eligible_after, input_schedule_id, created_at, updated_at)
-      VALUES (${randomUUID()}, ${seeded.workspaceId}, ${seeded.userId}, ${seeded.keyPointId}, ${`review-cooldown-${randomUUID()}`}, 'pre_submit_source', now(), now(), now() + interval '1 hour', ${cooldownScheduleId}, now(), now())
-    `;
+    // validation_assistance_exposures 是**启用 RLS 的用户私有表**（策略要求
+    // user_id = app.user_id），裸 INSERT 必须在带会话上下文的事务中执行，否则
+    // WITH CHECK 求值为 NULL 直接 42501。这里模拟"该用户此前已被提示过"以命中
+    // cooldown 分支，写入本身是合法的用户自有行。
+    await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
+      await tx`
+        INSERT INTO validation_assistance_exposures (id, workspace_id, user_id, key_point_id, exposure_fingerprint, last_exposure_kind, first_exposed_at, last_exposed_at, unassisted_eligible_after, input_schedule_id, created_at, updated_at)
+        VALUES (${randomUUID()}, ${seeded.workspaceId}, ${seeded.userId}, ${seeded.keyPointId}, ${`review-cooldown-${randomUUID()}`}, 'pre_submit_source', now(), now(), now() + interval '1 hour', ${cooldownScheduleId}, now(), now())
+      `;
+    });
     const cooldownStart = await app.inject({
       method: "POST",
       url: "/learning-runs",
@@ -775,7 +798,7 @@ test("REVIEW-QUEUE-PROJECTION-01：真实 V2 queue identity 与 direct startabil
     assert.equal(cooldownStart.json().error, "review_assistance_cooldown");
     assert.equal(cooldownStart.json().blockedReason, "cooldown");
 
-    const runCount = await sql`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`;
+    const runCount = await scoped(scope, (tx) => tx`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`);
     assert.equal(runCount[0].n, 1, "blocked direct starts must not create additional runs");
   } finally {
     await app.close();
@@ -916,11 +939,11 @@ test("RUN-V2-START-IDEMPOTENCY-01：同 key 并发 V2 start 只产生一个 run"
     assert.equal(results[0].runId, results[1].runId);
     assert.equal(results[0].snapshotId, results[1].snapshotId);
 
-    const runCount = await sql`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`;
-    const ledgerCount = await sql`
+    const runCount = await scoped(scope, (tx) => tx`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`);
+    const ledgerCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM learning_run_idempotency
       WHERE workspace_id = ${seeded.workspaceId} AND user_id = ${seeded.userId} AND idempotency_key = ${request.idempotencyKey}
-    `;
+    `);
     assert.equal(runCount[0].n, 1, "overlap loser must not create a second run");
     assert.equal(ledgerCount[0].n, 1, "overlap must leave one idempotency ledger row");
   } finally {
@@ -1165,6 +1188,7 @@ test("RUN-V2-WIRE-01：HTTP V2 draft/submit receipt → response-loss replay →
 test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss exact replay", async () => {
   const seeded = await seed();
   const otherSeeded = await seed();
+  const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
   const app = await buildLearningRunApp();
   try {
     const auth = { authorization: `Bearer ${seeded.token}` };
@@ -1215,10 +1239,10 @@ test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss ex
       payload: leaseBody,
     });
     assert.equal(leaseReplay.statusCode, 204, leaseReplay.body);
-    const leaseCount = await sql`
+    const leaseCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM learning_activity_leases
       WHERE run_id = ${before.runId} AND device_session_id = ${leaseBody.deviceSessionId}
-    `;
+    `);
     assert.equal(leaseCount[0].n, 1, "duplicate lease replay must not double-write the lease row");
     const afterLeaseResponse = await app.inject({
       method: "GET",
@@ -1357,10 +1381,10 @@ test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss ex
     assert.equal(actionReceipt.actionResult.kind, "state_changed");
     assert.equal(actionReceipt.snapshot.phase, "paused");
     assert.equal(actionReceipt.snapshot.runRevision, before.runRevision + 1);
-    const actionLedgerRows = await sql`
+    const actionLedgerRows = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM learning_run_action_ledger
       WHERE run_id = ${before.runId} AND idempotency_key = ${actionBody.idempotencyKey}
-    `;
+    `);
     assert.equal(actionLedgerRows[0].n, 1, "overlap must claim one action ledger row");
 
     // The next public snapshot must re-project the exact paused action set:
@@ -1483,7 +1507,7 @@ test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss ex
       fallbackTargetV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
     });
 
-    await sql`UPDATE learning_cards_v2 SET lifecycle = 'archived' WHERE workspace_id = ${seeded.workspaceId} AND card_id = ${seeded.cardId}`;
+    await scoped(scope, (tx) => tx`UPDATE learning_cards_v2 SET lifecycle = 'archived' WHERE workspace_id = ${seeded.workspaceId} AND card_id = ${seeded.cardId}`);
     const noFallbackReturnResponse = await app.inject({
       method: "GET",
       url: `/learning-runs/${before.runId}/return-contract/v2`,
@@ -1511,6 +1535,7 @@ test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss ex
 
 test("RUN-V2-ACTION-AVAILABILITY-01：direct API 覆盖 full phase/checkpoint/recoverable-error projection", async () => {
   const seeded = await seed();
+  const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
   const app = await buildLearningRunApp();
   try {
     const auth = { authorization: `Bearer ${seeded.token}` };
@@ -1546,11 +1571,13 @@ test("RUN-V2-ACTION-AVAILABILITY-01：direct API 覆盖 full phase/checkpoint/re
     };
     const mutateRun = async (phase: string, extra = "") => {
       revision += 1;
-      await sql.unsafe(
+      // 直接改 phase 也必须在 workspace 上下文里执行：learning_runs 是 FORCE RLS，
+      // 无上下文的 UPDATE 会静默匹配 0 行，让后面的 allowedActions 断言读到旧快照。
+      await scoped(scope, (tx) => tx.unsafe(
         `UPDATE learning_runs SET phase = $1, revision = $2, checkpoint = NULL, failure = NULL WHERE id = $3`,
         [phase, revision, initial.runId],
-      );
-      if (extra) await sql.unsafe(extra, [initial.runId]);
+      ));
+      if (extra) await scoped(scope, (tx) => tx.unsafe(extra, [initial.runId]));
     };
 
     await mutateRun("preparing");
@@ -1606,14 +1633,12 @@ test("§8.5/§20.2 恢复：SSE Last-Event-ID 重放——getEventsAfter 只返�
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
           requestedTimeBudgetSeconds: 120,
-          clientRequestId: randomUUID(),
           idempotencyKey: randomUUID(),
         },
       }),
@@ -1652,6 +1677,541 @@ test("§8.5/§20.2 恢复：SSE Last-Event-ID 重放——getEventsAfter 只返�
     assert.ok(full.length > replayed.length, "全量重放包含历史事件");
     assert.ok(full.some((e) => e.eventType === "learning_run.created"));
     assert.ok(full.some((e) => e.eventType === "learning_task.presented"));
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+/**
+ * 2026-08-24 审查 H1/H4：recoverable_error(stage=assessment) 的恢复链路必须
+ * 端到端可用——tick 失败路径会把 assessment 收尾为 failed（或留下 queued/
+ * running），retry_assessment 必须能重新入队（此前只认 failed → 恒 409），
+ * 且 end 必须被状态机接受（此前 availability 宣告可用但 applyAction 拒绝）。
+ */
+test("RECOVERY-01：recoverable_error(assessment) → retry_assessment 可重复重试 + end 可放弃", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const run = await withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          idempotencyKey: `recovery01-create-${randomUUID()}`,
+        },
+      }),
+    );
+    const taskId = run.activeTaskId!;
+    const variant = run.activeTask!.activeVariant;
+    const receipt = await withWorkspaceTransaction(scope, async (tx) =>
+      submitArtifact(tx, {
+        ...scope,
+        runId: run.runId,
+        taskId,
+        request: {
+          version: 1,
+          variantId: variant.variantId,
+          variantRevision: variant.revision,
+          runRevision: run.revision,
+          taskRevision: run.activeTask!.revision,
+          inputSchemaHash: variant.inputSchemaHash,
+          payload: { kind: "text", text: "因为间隔复习可以对抗遗忘曲线。" },
+          idempotencyKey: `recovery01-submit-${randomUUID()}`,
+        },
+      }),
+    ) as { assessment: { assessmentId: string } };
+    const assessmentId = receipt.assessment.assessmentId;
+
+    const readSnapshot = () => withWorkspaceTransaction(scope, async (tx) =>
+      getLearningRunPublicSnapshotV2(tx, { ...scope, runId: run.runId }));
+    const readView = () => withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }));
+
+    // 模拟 tick 失败路径的收尾：run → recoverable_error(stage=assessment)，
+    // assessment 停在 running（Critic 写回事务回滚时的真实状态）。
+    const failAssessmentStage = async (assessmentStatus: "running" | "queued" | "failed") => {
+      const view = await readView();
+      await scoped(scope, (tx) => tx`
+        UPDATE learning_runs
+        SET phase = 'recoverable_error',
+            failure = '{"stage":"assessment","code":"assessment_timeout","retryable":true}'::jsonb,
+            revision = ${view.revision + 1}
+        WHERE id = ${run.runId}
+      `);
+      await scoped(scope, (tx) => tx`
+        UPDATE learning_assessments SET status = ${assessmentStatus} WHERE id = ${assessmentId}
+      `);
+    };
+
+    await failAssessmentStage("running");
+    const failedSnapshot = await readSnapshot();
+    // H1：投影必须给出 retry_assessment（带着真实可重试的 assessmentId）。
+    assert.deepEqual(
+      failedSnapshot.allowedActions.filter((a) => a.kind === "retry_assessment"),
+      [{ version: 2, kind: "retry_assessment", assessmentId }],
+    );
+    // H4：recoverable_error 的 end 必须真实可用（下方验证状态机接受）。
+    assert.ok(failedSnapshot.allowedActions.some((a) => a.kind === "end"));
+
+    // 第一次重试：running → queued → outbox(assessment_requested)。
+    const firstRetry = await withWorkspaceTransaction(scope, async (tx) =>
+      applyAction(tx, {
+        ...scope,
+        runId: run.runId,
+        runRevision: failedSnapshot.runRevision,
+        runtimeEpoch: failedSnapshot.runtimeEpoch,
+        action: { kind: "retry_assessment", assessmentId },
+        idempotencyKey: `recovery01-retry-1-${randomUUID()}`,
+      }));
+    assert.equal(firstRetry.snapshot.phase, "assessing");
+    assert.equal(firstRetry.snapshot.activeAssessment?.status, "queued");
+
+    // 第二次重试（同一 assessment，run.revision 已前进）：不得撞 outbox
+    // (workspace, run, idempotency_key) 唯一索引（否则裸 23505/500）。
+    await failAssessmentStage("failed");
+    const failedAgain = await readSnapshot();
+    const secondRetry = await withWorkspaceTransaction(scope, async (tx) =>
+      applyAction(tx, {
+        ...scope,
+        runId: run.runId,
+        runRevision: failedAgain.runRevision,
+        runtimeEpoch: failedAgain.runtimeEpoch,
+        action: { kind: "retry_assessment", assessmentId },
+        idempotencyKey: `recovery01-retry-2-${randomUUID()}`,
+      }));
+    assert.equal(secondRetry.snapshot.phase, "assessing");
+    const outboxRows = await scoped(scope, (tx) => tx`
+      SELECT idempotency_key FROM learning_run_processing_outbox
+      WHERE run_id = ${run.runId} AND idempotency_key LIKE 'assessment:retry:%'
+      ORDER BY created_at
+    `);
+    assert.equal(outboxRows.length, 2, "两次重试各产生一条可领取命令");
+    assert.equal(new Set(outboxRows.map((r) => r.idempotency_key)).size, 2, "两次重试的 scope key 必须不同");
+
+    // H4：recoverable_error → end（abandonLockedEvidence:false）必须被接受，
+    // 且 epoch 前移、未终态 assessment 收尾为 failed。
+    await failAssessmentStage("running");
+    const beforeEnd = await readSnapshot();
+    const ended = await withWorkspaceTransaction(scope, async (tx) =>
+      applyAction(tx, {
+        ...scope,
+        runId: run.runId,
+        runRevision: beforeEnd.runRevision,
+        runtimeEpoch: beforeEnd.runtimeEpoch,
+        action: { kind: "end", abandonLockedEvidence: false },
+        idempotencyKey: `recovery01-end-${randomUUID()}`,
+      }));
+    assert.equal(ended.snapshot.phase, "ended");
+    assert.ok(ended.snapshot.runtimeEpoch > beforeEnd.runtimeEpoch, "end 必须前移 epoch 作废在途写回");
+    const assessmentRows = await scoped(scope, (tx) => tx`
+      SELECT status FROM learning_assessments WHERE id = ${assessmentId}
+    `);
+    assert.equal(assessmentRows[0].status, "failed", "放弃后不得留下 running/queued 评估");
+    assert.deepEqual((await readSnapshot()).allowedActions, [], "终态 run 无可用 action");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+/**
+ * 2026-08-24 审查 H2/H3：Commit 门禁拒绝必须收尾（不得裸 return 把 run 永久
+ * 留在 committing），且结算必须绑定「命令指向的那一条 assessment」——即使 run
+ * 内存在更新的 completed assessment（followup 之后的第二个评估）。
+ */
+test("COMMIT-GUARD-01：结算绑定 command.assessmentId；门禁拒绝落到 checkpoint 而非卡死 committing", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const run = await withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          idempotencyKey: `commit-guard-create-${randomUUID()}`,
+        },
+      }),
+    );
+    const task1 = run.activeTaskId!;
+    const variant1 = run.activeTask!.activeVariant;
+    const receipt1 = await withWorkspaceTransaction(scope, async (tx) =>
+      submitArtifact(tx, {
+        ...scope,
+        runId: run.runId,
+        taskId: task1,
+        request: {
+          version: 1,
+          variantId: variant1.variantId,
+          variantRevision: variant1.revision,
+          runRevision: run.revision,
+          taskRevision: run.activeTask!.revision,
+          inputSchemaHash: variant1.inputSchemaHash,
+          payload: { kind: "text", text: "间隔复习对抗遗忘曲线。" },
+          idempotencyKey: `commit-guard-submit-1-${randomUUID()}`,
+        },
+      }),
+    ) as { artifactId: string; assessment: { assessmentId: string } };
+    const assessment1 = receipt1.assessment.assessmentId;
+
+    // 本测试手动构造 committing 前状态：不再需要待处理的 assessment 命令。
+    await scoped(scope, (tx) => tx`
+      DELETE FROM learning_run_processing_outbox WHERE run_id = ${run.runId}
+    `);
+    // assessment1：本次要结算的评估（facet_eligible，较旧）。
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_assessments
+      SET status = 'completed', trust_class = 'facet_eligible', report_hash = 'report-a1',
+          rubric_results = '[{"rubricItemId":"r1","facet":"explain","verdict":"partial","userFacingReason":"部分覆盖"}]'::jsonb
+      WHERE id = ${assessment1}
+    `);
+
+    // 通过真实 followup 链路产生第二个（更新的）completed assessment（practice_only）：
+    // A1 已是 completed，A2 之后才出现——正是 H3 描述的弱引用场景。
+    const partialRevision = (await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }))).revision;
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_runs
+      SET phase = 'checkpoint',
+          checkpoint = '{"kind":"partial","allowedFollowupIds":["supplement:1"]}'::jsonb,
+          revision = ${partialRevision + 1}
+      WHERE id = ${run.runId}
+    `);
+    const afterFollowup = await withWorkspaceTransaction(scope, async (tx) =>
+      applyAction(tx, {
+        ...scope,
+        runId: run.runId,
+        runRevision: partialRevision + 1,
+        runtimeEpoch: 0,
+        action: { kind: "activate_followup", followupId: "supplement:1" },
+        idempotencyKey: `commit-guard-followup-${randomUUID()}`,
+      }));
+    const task2 = afterFollowup.snapshot.activeTaskId!;
+    const variant2 = afterFollowup.snapshot.activeTask!.activeVariant;
+    const receipt2 = await withWorkspaceTransaction(scope, async (tx) =>
+      submitArtifact(tx, {
+        ...scope,
+        runId: run.runId,
+        taskId: task2,
+        request: {
+          version: 1,
+          variantId: variant2.variantId,
+          variantRevision: variant2.revision,
+          runRevision: afterFollowup.snapshot.revision,
+          taskRevision: afterFollowup.snapshot.activeTask!.revision,
+          inputSchemaHash: variant2.inputSchemaHash,
+          payload: { kind: "text", text: "补充说明间隔复习的机制。" },
+          idempotencyKey: `commit-guard-submit-2-${randomUUID()}`,
+        },
+      }),
+    ) as { assessment: { assessmentId: string } };
+    const assessment2 = receipt2.assessment.assessmentId;
+    await scoped(scope, (tx) => tx`
+      DELETE FROM learning_run_processing_outbox WHERE run_id = ${run.runId}
+    `);
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_assessments
+      SET status = 'completed', trust_class = 'practice_only', report_hash = 'report-a2',
+          rubric_results = '[]'::jsonb, created_at = now() + interval '1 second'
+      WHERE id = ${assessment2}
+    `);
+
+    // 把 run 放回「task1 的 facet Commit 正在结算」：activeTaskId=task1 + phase=committing。
+    const committingRevision = (await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }))).revision;
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_runs
+      SET phase = 'committing', active_task_id = ${task1}, failure = NULL, revision = ${committingRevision + 1}
+      WHERE id = ${run.runId}
+    `);
+    await scoped(scope, (tx) => tx`
+      INSERT INTO learning_run_processing_outbox
+        (run_id, task_id, artifact_id, workspace_id, user_id, command_type, payload, idempotency_key, available_at, created_at, updated_at)
+      VALUES (
+        ${run.runId}, ${task1}, ${receipt1.artifactId}, ${seeded.workspaceId}, ${seeded.userId},
+        'commit_requested',
+        ${sql.json({ assessmentId: assessment1, disposition: "facet_evidence", runtimeEpoch: 0 })},
+        'commit:test:assessment-binding', now(), now(), now()
+      )
+    `);
+
+    const tick = await runLearningRunProcessingTick(`commit-guard-worker:${randomUUID()}`, 10);
+    assert.equal(tick.failed, 0, `tick failed=${tick.failed}`);
+
+    const after = await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }));
+    // H3：结算用了 command.assessmentId（facet_eligible A1）→ partial canonical；
+    // 若取了更新的 A2（practice_only），会被 trust 门禁拒绝（旧代码：永久 committing）。
+    assert.equal(after.phase, "completed", `phase=${after.phase}`);
+    assert.equal(after.result?.outcome, "partial");
+    const envelopeRows = await scoped(scope, (tx) => tx`
+      SELECT envelope FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
+    `);
+    assert.equal(envelopeRows.length, 1, "facet Commit 恰好一个 canonical envelope");
+    const envelope = envelopeRows[0].envelope as { assessments: Array<{ assessmentId: string }> };
+    assert.equal(envelope.assessments[0].assessmentId, assessment1, "envelope 必须引用命令的 assessment");
+    // facet_evidence 0 schedule（§13.6）。
+    const schedCount = await sql`
+      SELECT count(*)::int AS n FROM review_schedules
+      WHERE workspace_id = ${seeded.workspaceId} AND subject_id = ${seeded.keyPointId}
+    `;
+    assert.equal(schedCount[0].n, 0);
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+/**
+ * 2026-08-24 审查 H2：trustClass 门禁拒绝（与 ceiling 门禁对称）必须把 run
+ * 从 committing 收尾到 checkpoint(not_assessable)，而不是留在 committing。
+ */
+test("COMMIT-GUARD-02：trustClass 门禁拒绝 → checkpoint(not_assessable) 而非永久 committing", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const run = await withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          idempotencyKey: `commit-guard2-create-${randomUUID()}`,
+        },
+      }),
+    );
+    const taskId = run.activeTaskId!;
+    const variant = run.activeTask!.activeVariant;
+    const receipt = await withWorkspaceTransaction(scope, async (tx) =>
+      submitArtifact(tx, {
+        ...scope,
+        runId: run.runId,
+        taskId,
+        request: {
+          version: 1,
+          variantId: variant.variantId,
+          variantRevision: variant.revision,
+          runRevision: run.revision,
+          taskRevision: run.activeTask!.revision,
+          inputSchemaHash: variant.inputSchemaHash,
+          payload: { kind: "text", text: "间隔复习对抗遗忘曲线。" },
+          idempotencyKey: `commit-guard2-submit-${randomUUID()}`,
+        },
+      }),
+    ) as { artifactId: string; assessment: { assessmentId: string } };
+    await scoped(scope, (tx) => tx`
+      DELETE FROM learning_run_processing_outbox WHERE run_id = ${run.runId}
+    `);
+    // practice_only 的评估 + facet_evidence 命令：trust 门禁必须拒绝。
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_assessments
+      SET status = 'completed', trust_class = 'practice_only', report_hash = 'report-practice',
+          rubric_results = '[]'::jsonb
+      WHERE id = ${receipt.assessment.assessmentId}
+    `);
+    const revision = (await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }))).revision;
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_runs SET phase = 'committing', revision = ${revision + 1} WHERE id = ${run.runId}
+    `);
+    await scoped(scope, (tx) => tx`
+      INSERT INTO learning_run_processing_outbox
+        (run_id, task_id, artifact_id, workspace_id, user_id, command_type, payload, idempotency_key, available_at, created_at, updated_at)
+      VALUES (
+        ${run.runId}, ${taskId}, ${receipt.artifactId}, ${seeded.workspaceId}, ${seeded.userId},
+        'commit_requested',
+        ${sql.json({ assessmentId: receipt.assessment.assessmentId, disposition: "facet_evidence", runtimeEpoch: 0 })},
+        'commit:test:trust-gate', now(), now(), now()
+      )
+    `);
+    const tick = await runLearningRunProcessingTick(`commit-guard2-worker:${randomUUID()}`, 10);
+    assert.equal(tick.failed, 0, `tick failed=${tick.failed}`);
+    const after = await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }));
+    assert.equal(after.phase, "checkpoint", `phase=${after.phase}`);
+    assert.equal(after.checkpoint?.kind, "not_assessable");
+    assert.equal(after.result, null);
+    const envelopeRows = await scoped(scope, (tx) => tx`
+      SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
+    `);
+    assert.equal(envelopeRows[0].n, 0, "门禁拒绝 0 canonical");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+/**
+ * 2026-08-24 审查 H1/M6：真实 tick 失败路径——assessment 行必须收尾为 failed
+ * （否则 retry_assessment 与状态机脱节），且事件 payload 不得携带内部错误
+ * 文本（Postgres 驱动细节经 SSE 直达客户端）。
+ */
+test("RECOVERY-02：tick 失败路径收尾 assessment=failed，事件不泄露内部错误", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const run = await withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          idempotencyKey: `recovery02-create-${randomUUID()}`,
+        },
+      }),
+    );
+    const taskId = run.activeTaskId!;
+    const variant = run.activeTask!.activeVariant;
+    const receipt = await withWorkspaceTransaction(scope, async (tx) =>
+      submitArtifact(tx, {
+        ...scope,
+        runId: run.runId,
+        taskId,
+        request: {
+          version: 1,
+          variantId: variant.variantId,
+          variantRevision: variant.revision,
+          runRevision: run.revision,
+          taskRevision: run.activeTask!.revision,
+          inputSchemaHash: variant.inputSchemaHash,
+          payload: { kind: "declared_unable", reasonCode: "cannot_recall" },
+          idempotencyKey: `recovery02-submit-${randomUUID()}`,
+        },
+      }),
+    ) as { artifactId: string; assessment: { assessmentId: string } };
+    // 预占 declared_unable 结算要写的 outbox scope key → tick 处理该 assessment
+    // 时在事务内撞唯一索引（真实 DB 冲突类错误），走 recoverable_error 失败路径。
+    await scoped(scope, (tx) => tx`
+      INSERT INTO learning_run_processing_outbox
+        (run_id, task_id, artifact_id, workspace_id, user_id, command_type, payload, idempotency_key, available_at, created_at, updated_at)
+      VALUES (
+        ${run.runId}, ${taskId}, ${receipt.artifactId}, ${seeded.workspaceId}, ${seeded.userId},
+        'commit_requested',
+        ${sql.json({ assessmentId: receipt.assessment.assessmentId, disposition: "unable_evidence", runtimeEpoch: 0 })},
+        ${`commit:${receipt.assessment.assessmentId}`},
+        now() + interval '1 hour', now(), now()
+      )
+    `);
+
+    const tick = await runLearningRunProcessingTick(`recovery02-worker:${randomUUID()}`, 10);
+    assert.ok(tick.failed >= 1, `tick 必须记录失败（failed=${tick.failed}）`);
+
+    const after = await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }));
+    assert.equal(after.phase, "recoverable_error");
+    assert.equal(after.failure?.stage, "assessment");
+    // H1：assessment 不得停在 queued/running。
+    const assessmentRows = await scoped(scope, (tx) => tx`
+      SELECT status FROM learning_assessments WHERE id = ${receipt.assessment.assessmentId}
+    `);
+    assert.equal(assessmentRows[0].status, "failed");
+
+    // M6：事件 payload 只带稳定 stage/code，绝不含 err.message（驱动细节/约束名）。
+    const eventRows = await scoped(scope, (tx) => tx`
+      SELECT payload FROM learning_run_events
+      WHERE run_id = ${run.runId} AND event_type = 'learning_run.recoverable_error'
+    `);
+    assert.equal(eventRows.length, 1);
+    const payload = eventRows[0].payload as Record<string, unknown>;
+    assert.deepEqual(Object.keys(payload).sort(), ["code", "stage"]);
+    assert.equal(payload.stage, "assessment");
+    assert.ok(!("message" in payload), "不得把内部错误文本写进事件账本");
+
+    // 端到端：该 run 此时确实可重试（投影 = 状态机）。
+    const snapshot = await withWorkspaceTransaction(scope, async (tx) =>
+      getLearningRunPublicSnapshotV2(tx, { ...scope, runId: run.runId }));
+    assert.deepEqual(
+      snapshot.allowedActions.filter((a) => a.kind === "retry_assessment"),
+      [{ version: 2, kind: "retry_assessment", assessmentId: receipt.assessment.assessmentId }],
+    );
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+/**
+ * 2026-08-24 审查 M1：draft 幂等边界此前未串行化——同 key 并发 PUT 会同时
+ * miss ledger 后各自写入，loser 撞 learning_run_action_ledger 唯一索引 →
+ * 裸 23505/500。修后并发请求必须都拿到同一 receipt。
+ */
+test("DRAFT-IDEMPOTENCY-RACE：同 key 并发 draft PUT 幂等返回（无裸 23505）", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const run = await withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          idempotencyKey: `draft-race-create-${randomUUID()}`,
+        },
+      }),
+    );
+    const taskId = run.activeTaskId!;
+    const variant = run.activeTask!.activeVariant;
+    const idempotencyKey = `draft-race-${randomUUID()}`;
+    const draftInput = {
+      ...scope,
+      runId: run.runId,
+      taskId,
+      variantId: variant.variantId,
+      variantRevision: variant.revision,
+      taskRevision: run.activeTask!.revision,
+      expectedDraftRevision: null,
+      payload: { kind: "text", text: "草稿正文" },
+      rendererState: {},
+      idempotencyKey,
+    };
+    const [first, second] = await Promise.all([
+      withWorkspaceTransaction(scope, (tx) => putDraft(tx, draftInput)),
+      withWorkspaceTransaction(scope, (tx) => putDraft(tx, draftInput)),
+    ]);
+    assert.deepEqual(first, second, "并发同 key 必须返回同一 receipt");
+    const ledgerRows = await scoped(scope, (tx) => tx`
+      SELECT count(*)::int AS n FROM learning_run_action_ledger
+      WHERE run_id = ${run.runId} AND idempotency_key = ${idempotencyKey}
+    `);
+    assert.equal(ledgerRows[0].n, 1, "账本恰好一行");
+    const draftRows = await scoped(scope, (tx) => tx`
+      SELECT draft_revision FROM learning_task_drafts WHERE task_id = ${taskId}
+    `);
+    assert.equal(draftRows.length, 1, "草稿恰好一行");
+    assert.equal(draftRows[0].draft_revision, 1, "并发请求不得写两次草稿版本");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+/**
+ * 2026-08-24 审查 M2：同目标并发 PREPARE（不同幂等 key）此前都会 miss
+ * disclosure profile 存在性检查 → 双双 INSERT → loser 撞
+ * (workspace_id, profile_hash) 唯一索引，整个创建事务 500。
+ */
+test("PREPARE-DISCLOSURE-RACE：同目标并发 PREPARE 都成功（disclosure 幂等复用）", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const create = (suffix: string) => withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          responsePreference: "text",
+          idempotencyKey: `prepare-race-${suffix}-${randomUUID()}`,
+        },
+      }));
+    const [first, second] = await Promise.all([create("a"), create("b")]);
+    assert.notEqual(first.runId, second.runId);
+    assert.equal(first.phase, "active");
+    assert.equal(second.phase, "active");
+    // 同一 workspace 内同 hash 的 disclosure profile 只允许一行（幂等复用）。
+    const dupRows = await scoped(scope, (tx) => tx`
+      SELECT profile_hash, count(*)::int AS n
+      FROM learning_task_disclosure_profiles
+      WHERE workspace_id = ${seeded.workspaceId}
+      GROUP BY profile_hash HAVING count(*) > 1
+    `);
+    assert.equal(dupRows.length, 0, "不得出现重复 profile_hash 行");
   } finally {
     await seeded.cleanup();
   }

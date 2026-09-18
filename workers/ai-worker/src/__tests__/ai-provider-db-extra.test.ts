@@ -82,29 +82,16 @@ function setupDbMock() {
 }
 
 describe("ai-provider resolveProviderSelection (DB mock)", () => {
-  it("无配置文件时回退到环境变量", async () => {
+  it("无配置文件时使用 mock", async () => {
     setupDbMock();
-    const oldEnv = process.env.AI_PROVIDER_CARD;
-    process.env.AI_PROVIDER_CARD = "mock";
-    try {
-      const result = await resolveProviderSelection(WS_ID, USER_ID);
-      assert.equal(result.providerName, "mock");
-    } finally {
-      if (oldEnv === undefined) delete process.env.AI_PROVIDER_CARD;
-      else process.env.AI_PROVIDER_CARD = oldEnv;
-    }
+    const result = await resolveProviderSelection(WS_ID, USER_ID);
+    assert.equal(result.providerName, "mock");
   });
 
-  it("无环境变量时默认为 mock", async () => {
-    const oldEnv = process.env.AI_PROVIDER_CARD;
-    delete process.env.AI_PROVIDER_CARD;
-    try {
-      setupDbMock();
-      const result = await resolveProviderSelection(undefined, undefined);
-      assert.equal(result.providerName, "mock");
-    } finally {
-      if (oldEnv !== undefined) process.env.AI_PROVIDER_CARD = oldEnv;
-    }
+  it("无配置文件时使用 mock", async () => {
+    setupDbMock();
+    const result = await resolveProviderSelection(undefined, undefined);
+    assert.equal(result.providerName, "mock");
   });
 
   it("有配置文件时使用平台配置", async () => {

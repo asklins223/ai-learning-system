@@ -11,13 +11,15 @@
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
+import { readJobPayloadString } from "@ailearn/shared";
 import { createProvider } from "../lib/ai-provider.ts";
 import {
   AIConsentRequiredError,
+  createGovernedProvider,
   resolveAIGovernanceContext,
   resolveProviderForTask,
 } from "../lib/governance.ts";
-import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
+import { assertJobLease, lockJobLease, withJobTransaction } from "../lib/job-lease.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import { companionSummaryTotal } from "../lib/metrics.ts";
@@ -53,15 +55,26 @@ export function buildSummarizerMessages(conversationText: string): Array<{ role:
 }
 
 export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
-  const conversationId = job.payload.conversationId as string | undefined;
-  const userId = job.payload.userId as string | undefined;
+  // 设计 P1-8（2026-09-15 审计）：字段名走共享契约（@ailearn/shared 的
+  // companion-memory-job-payload），改名由编译器兜住。
+  const conversationId = readJobPayloadString(job.payload, "conversationId");
+  const userId = readJobPayloadString(job.payload, "userId");
   if (!conversationId || !userId) throw new Error("companion_summarizer payload 缺 conversationId/userId");
   await assertJobLease(job);
 
   const govCtx = await resolveAIGovernanceContext(job.workspaceId, userId);
   if (!govCtx.consentOk) throw new AIConsentRequiredError();
-  const textRes = resolveProviderForTask(govCtx, "companion_dialogue");
-  const provider = createProvider(textRes.providerName, textRes.providerConfig);
+  const textRes = resolveProviderForTask(govCtx, "companion_agent");
+  const provider = createGovernedProvider(
+    createProvider(textRes.providerName, textRes.providerConfig),
+    govCtx,
+    job.workspaceId,
+    // AI P0-8（2026-09-15 审计）：接上 ai_audit_log 的唯一写入口（此前零调用）。
+    // ai_audit_log.user_id 是 NOT NULL，故 payload 未带可信 actor 时不写审计行。
+    userId
+      ? { userId, operation: "companion_summarizer", jobId: job.id }
+      : undefined,
+  );
 
   const conversationText = await withJobTransaction(job, async (tx) => {
     const rows = await tx.execute<{ role: string; blocks: unknown }>(sql`
@@ -95,7 +108,7 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
       // 输出本就是结构化 JSON，让 provider 层开启 json 模式降低格式走样率。
       (signal) => provider.chatCompletion(messages, { temperature: 0.2, maxTokens: 1000, responseFormat: "json_object" }, signal),
       job.signal,
-      resolveProviderCallTimeout("companion_dialogue"),
+      resolveProviderCallTimeout("companion_agent"),
       (lateError) => logger.warn({ jobId: job.id, err: lateError }, "summarizer provider settled late"),
     );
     raw = result.content;
@@ -130,6 +143,11 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
   const idempotencyKey = `summary:${conversationId}:${sourceRunId ?? "conversation"}`;
 
   await withJobTransaction(job, async (tx) => {
+    // 稳定 P1-1（2026-09-15 审计）：提交前重新校验并续租租约（TOCTOU 围栏）。
+    // 入口的 assertJobLease 只挡"开始时已失效"，挡不住"LLM 调用期间被 reap"——
+    // 过期后另一个 worker 会重领同一 job 并重复写入/重复计费。与 parse-source
+    // 的每次提交前 lockJobLease 对齐。
+    await lockJobLease(tx, job);
     // conversation_summaries 幂等写入（唯一约束兜底）。
     await tx.execute(sql`
       INSERT INTO conversation_summaries

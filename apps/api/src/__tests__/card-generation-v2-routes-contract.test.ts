@@ -72,6 +72,16 @@ describe("Card Generation V2 routes contract", () => {
       assert.ok(routesSource.includes(`"/v2/card-generation-runs/:runId/close"`));
     });
 
+    // 2026-09-18：唯一候选被 critic 否决的 run 需要用户可见的就地重试入口
+    // （此前只能回笔记重开一次全新生成，重付 planner + 全部 critic 的 token）。
+    it("registers POST /v2/card-generation-runs/:runId/retry with requireOwner", () => {
+      assert.ok(routesSource.includes(`"/v2/card-generation-runs/:runId/retry"`));
+      const postIdx = routesSource.indexOf('app.post', routesSource.indexOf('":runId/retry"'));
+      assert.ok(postIdx >= 0);
+      const nearby = routesSource.slice(postIdx, postIdx + 260);
+      assert.ok(nearby.includes("preHandler: [requireOwner]"), "retry route must require the owner role");
+    });
+
     it("registers POST /v2/card-generation-runs/:runId/candidate-actions with requireOwner", () => {
       // Find the route definition (not the comment) — look for the app.post line
       const postIdx = routesSource.indexOf('app.post', routesSource.indexOf('candidate-actions'));
@@ -87,10 +97,6 @@ describe("Card Generation V2 routes contract", () => {
 
     it("registers POST /v2/card-generation-runs/:runId/activate with requireOwner", () => {
       assert.ok(routesSource.includes(`"/v2/card-generation-runs/:runId/activate"`));
-    });
-
-    it("registers §17.1 activations plural alias", () => {
-      assert.ok(routesSource.includes(`"/v2/card-generation-runs/:runId/activations"`));
     });
 
     it("registers POST /v2/cards/:cardId/reveal (§17.6)", () => {

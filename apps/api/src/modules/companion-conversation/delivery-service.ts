@@ -8,9 +8,9 @@
 
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { assistantDeliveries } from "../../db/schema/assistant-deliveries.ts";
+import { assistantDeliveries } from "@ailearn/shared/db-schema/assistant-deliveries";
 import { COMPANION_INBOX_NOTIFY_CHANNEL } from "./companion-notify.ts";
-import type { AssistantDeliveryV2 } from "@ailearn/shared";
+import type { AssistantDeliveryKindV2, AssistantDeliveryV2 } from "@ailearn/shared";
 import { DomainError } from "@ailearn/shared";
 
 export interface DeliveryScope {
@@ -58,6 +58,15 @@ export async function deliver(
   },
   now: Date = new Date(),
 ): Promise<AssistantDeliveryV2> {
+  // max(inbox_sequence)+1 不能只锁“当前最大行”：分区为空时没有行可锁，
+  // 且两个并发事务在同一个 max 上都可能先读后写。按 workspace+user 加事务级
+  // advisory lock，把 dedupe 检查和序号分配放进同一临界区，避免 23505 与游标跳号。
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`companion-inbox:${scope.workspaceId}:${scope.userId}`}, 0)
+    )
+  `);
+
   // dedupe：同 key 已入队 → 返回既有行。
   const existing = await tx
     .select()
@@ -70,7 +79,7 @@ export async function deliver(
     .limit(1);
   if (existing[0]) return toContract(existing[0]);
 
-  // inboxSequence：分区内 max + 1（行锁序列）。
+  // inboxSequence：分区内 max + 1；advisory lock 已覆盖空分区和并发写。
   const maxRows = await tx
     .select({ inboxSequence: assistantDeliveries.inboxSequence })
     .from(assistantDeliveries)
@@ -211,7 +220,7 @@ export async function ackDelivery(
 export async function listInbox(
   tx: ApiTransaction,
   scope: DeliveryScope,
-  input: { afterSequence: number; limit: number; kind?: "message" | "proposal" | "action_result" | "proactive_cue" | "system_event" | "memory_candidate" },
+  input: { afterSequence: number; limit: number; kind?: AssistantDeliveryKindV2 },
 ): Promise<AssistantDeliveryV2[]> {
   const rows = await tx
     .select()

@@ -90,7 +90,7 @@ export const inviteCodes = pgTable(
 /**
  * Server-side onboarding state per (workspace, user, version).
  * Steps are business-fact driven: ai_consent, first_content,
- * first_note, first_card, evidence_review, first_validation.
+ * first_note, first_card, evidence_review.
  */
 export const onboardingStates = pgTable(
   "onboarding_states",
@@ -144,7 +144,7 @@ export const aiAuditLog = pgTable(
     jobId: uuid("job_id"),
     provider: text("provider").notNull(),
     modelId: text("model_id").notNull(),
-    operation: text("operation").notNull(), // execute_card_agent_turn | evaluate_validation | parse_source | align_evidence | generate_validation_question
+    operation: text("operation").notNull(), // active worker operation name
     dataCategories: text("data_categories").array().notNull().default([]), // note_content | user_answer | question | claim | quote
     dataSizeBytes: integer("data_size_bytes"),
     costTokens: integer("cost_tokens"),

@@ -89,8 +89,8 @@ async function seedNote(
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'v2-e2e-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
@@ -139,8 +139,8 @@ before(async () => {
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, 'V2 E2E note', ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, 'V2 E2E note', ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
   });
 });
 
@@ -212,10 +212,15 @@ test("C03：临时待办 → no_cards_recommended 成功终态，0 Candidate/Car
 });
 
 test("C22：同一 Idempotency-Key 重放 → 同 run，不产生重复 outbox/run", async () => {
-  const { versionId } = await seedNote("幂等", OSI_CONTENT);
+  const { versionId } = await seedNote("C22", OSI_CONTENT);
   const key = `c22-key-${randomUUID()}`;
-  const first = await createRun(versionId, `c22-${randomUUID()}`, key);
-  const second = await createRun(versionId, `c22-${randomUUID()}`, key);
+  // §17.1：幂等重放的定义是"同一 key **且同一 payload**"。payload 里含
+  // clientRequestId，所以两次调用必须用**同一个** clientRequestId；用两个不同的
+  // clientRequestId 是"另一个请求复用同一把 key"，服务端会正确地判
+  // `idempotency_conflict`（那是契约在生效，不是幂等失效）。
+  const clientRequestId = `c22-${randomUUID()}`;
+  const first = await createRun(versionId, clientRequestId, key);
+  const second = await createRun(versionId, clientRequestId, key);
   assert.equal(first.runId, second.runId, "C22 same idempotency key must return same run");
 
   const runCount = await admin`
@@ -1241,9 +1246,8 @@ test("C5：LearningRun PREPARE 冻结 LearningTargetSnapshotV2（真实 DB + 幂
   const mapping = receipt.mappings[0];
   assert.ok(mapping.cardId && mapping.objectiveId, "C5 activation must produce card+objective");
 
-  // V1 legacy 桥接数据（learning_cards + card_key_points）已不需要——
-  // 迁移 0176 后 key_point_id FK 直接引用 learning_objectives_v2(objective_id)，
-  // V2 createRunV2 直接使用 objectiveId，无需 card_key_points alias 行。
+  // 历史卡片桥接数据已不需要；
+  // V2 createRunV2 直接使用 objectiveId。
 
   // PREPARE：冻结 LearningTargetSnapshotV2
   const { createRunV2 } = await import(
@@ -1311,7 +1315,8 @@ test("C5：LearningRun PREPARE 冻结 LearningTargetSnapshotV2（真实 DB + 幂
   // PREPARE 不创建 Schedule（§29.4：activation 与 PREPARE 均不伪造排程）
   const schedules = await admin`
     SELECT count(*)::int AS n FROM review_schedules
-    WHERE workspace_id = ${WORKSPACE_ID} AND key_point_id = ${mapping.objectiveId}`;
+    WHERE workspace_id = ${WORKSPACE_ID}
+      AND subject_type = 'card' AND subject_id = ${mapping.objectiveId}`;
   assert.equal(schedules[0].n, 0, "C5 PREPARE must not create a schedule (trusted Commit 才创建)");
 
   // C19-lite：reveal 后 PREPARE → 同一 cue 近期暴露 → Trust 降级 practice_only

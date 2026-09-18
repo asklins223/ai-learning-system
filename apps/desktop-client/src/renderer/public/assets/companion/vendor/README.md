@@ -1,6 +1,6 @@
 # Live2D web runtime
 
-These browser runtime files are required by the Mao PRO model:
+These browser runtime files are required by the bundled Live2D models:
 
 - `pixi.min.js`: PixiJS 6.5.10
 - `cubism4.min.js`: `pixi-live2d-display` 0.4.0

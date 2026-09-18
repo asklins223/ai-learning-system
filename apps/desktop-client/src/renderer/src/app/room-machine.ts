@@ -7,7 +7,14 @@ export type ViewPresetId =
   | "graph"
   | "validation"
   | "card"
-  | "card-generation";
+  | "card-generation"
+  | "source-library"
+  | "source-detail"
+  | "note-library"
+  | "objective-library"
+  | "objective-detail"
+  | "companion-center"
+  | "settings";
 
 export type RoomDestination =
   | "room"
@@ -18,7 +25,14 @@ export type RoomDestination =
   | "graph"
   | "validation"
   | "card"
-  | "card-generation";
+  | "card-generation"
+  | "source-library"
+  | "source-detail"
+  | "note-library"
+  | "objective-library"
+  | "objective-detail"
+  | "companion-center"
+  | "settings";
 
 export type RoomSurface = Exclude<RoomDestination, "room"> | null;
 export type RoomTheme = "day" | "night";
@@ -40,7 +54,14 @@ export type RoomIntent =
   | "graph"
   | "validate"
   | "open-card"
-  | "open-card-generation";
+  | "open-card-generation"
+  | "open-sources"
+  | "open-source"
+  | "open-notes"
+  | "open-objectives"
+  | "open-objective"
+  | "open-companion-center"
+  | "open-settings";
 
 export type RoomViewState = {
   destination: RoomDestination;
@@ -72,6 +93,20 @@ export function resolveRoomIntent(intent: RoomIntent): RoomViewState {
       return { destination: "card", viewPreset: "card", surface: "card" };
     case "open-card-generation":
       return { destination: "card-generation", viewPreset: "card-generation", surface: "card-generation" };
+    case "open-sources":
+      return { destination: "source-library", viewPreset: "source-library", surface: "source-library" };
+    case "open-source":
+      return { destination: "source-detail", viewPreset: "source-detail", surface: "source-detail" };
+    case "open-notes":
+      return { destination: "note-library", viewPreset: "note-library", surface: "note-library" };
+    case "open-objectives":
+      return { destination: "objective-library", viewPreset: "objective-library", surface: "objective-library" };
+    case "open-objective":
+      return { destination: "objective-detail", viewPreset: "objective-detail", surface: "objective-detail" };
+    case "open-companion-center":
+      return { destination: "companion-center", viewPreset: "companion-center", surface: "companion-center" };
+    case "open-settings":
+      return { destination: "settings", viewPreset: "settings", surface: "settings" };
     case "home":
     default:
       return initialViewState;

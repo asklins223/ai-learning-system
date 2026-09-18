@@ -3,7 +3,7 @@ import { artifactStatusEnum, artifactTypeEnum } from "./enums.ts";
 
 /**
  * AI 派生物统一存储（对齐产品文档 §5.5）。
- * 所有 AI 生成结果（学习卡 / 验证反馈 / 标签建议等）都落这张表，
+ * 当前 AI 生成结果（学习卡、摘要和解释等）统一落这张表，
  * 记录输入来源、模型、prompt 版本、状态和成本，保证可追溯、可重算、可失效。
  */
 export const aiArtifacts = pgTable(
@@ -13,7 +13,7 @@ export const aiArtifacts = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     type: artifactTypeEnum("type").notNull(),
     inputRefs: jsonb("input_refs")
-      .$type<{ noteId?: string; noteVersionId?: string; cardId?: string; keyPointId?: string; validationEventId?: string; userId?: string }>()
+      .$type<{ noteId?: string; noteVersionId?: string; cardId?: string; keyPointId?: string; userId?: string }>()
       .notNull(),
     output: jsonb("output").$type<unknown>().notNull(),
     modelId: text("model_id").notNull(),

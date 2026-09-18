@@ -134,23 +134,14 @@ const TARGET_USER_ID = "00000000-0000-0000-0000-000000000003";
 
 let originalTransaction: typeof db.transaction;
 let originalInsert: typeof db.insert;
-let originalEvidenceOverridesFindMany: any;
-
 before(() => {
   originalTransaction = db.transaction;
   originalInsert = db.insert;
-  // Save original query methods that we'll mock
-  if (db.query?.evidenceOverrides?.findMany) {
-    originalEvidenceOverridesFindMany = db.query.evidenceOverrides.findMany;
-  }
 });
 
 after(() => {
   db.transaction = originalTransaction;
   db.insert = originalInsert;
-  if (originalEvidenceOverridesFindMany && db.query?.evidenceOverrides) {
-    db.query.evidenceOverrides.findMany = originalEvidenceOverridesFindMany;
-  }
 });
 
 function setupDbMock(config: MockTxConfig) {
@@ -165,10 +156,6 @@ function setupDbMock(config: MockTxConfig) {
     }),
   })) as typeof db.insert;
 
-  // Mock getUserOverrideMap's direct db.query.evidenceOverrides.findMany
-  if (db.query?.evidenceOverrides) {
-    (db.query.evidenceOverrides as any).findMany = async () => [];
-  }
 }
 
 // ─── createInvite ───────────────────────────────────────────────────────
@@ -572,7 +559,6 @@ describe("invite-service getOnboardingState (DB mock)", () => {
 //   tx.select().from(sources).where().limit(1) → [] (first_content=false)
     //   tx.select().from(notes).where().limit(1) → [] (first_note=false)
     //   tx.select().from(learningCards).innerJoin().where().limit(1) → [] (first_card=false)
-    //   tx.select().from(validationEvents).where().limit(1) → [] (first_validation=false)
     // storedSteps.evidence_review is undefined → false
     setupDbMock({
       workspaceId: WS_ID,
@@ -585,7 +571,6 @@ describe("invite-service getOnboardingState (DB mock)", () => {
         [], // firstContent select (sources)
         [], // firstNote select (notes)
         [], // firstCard select
-        [], // firstValidation select
       ],
     });
 
@@ -600,7 +585,6 @@ describe("invite-service getOnboardingState (DB mock)", () => {
       first_note: false,
       first_card: false,
       evidence_review: false,
-      first_validation: false,
     });
   });
 
@@ -695,9 +679,8 @@ describe("invite-service markOnboardingStep (DB mock)", () => {
         [], // firstContent select (sources)
         [], // firstNote select (notes)
         [], // firstCard select
-        [], // firstValidation select
       ],
-      evidenceSnapshotsV2FindFirst: { id: "ev-1", workspaceId: WS_ID },
+      evidenceSnapshotsV2FindFirst: { evidenceSnapshotId: "ev-1", workspaceId: WS_ID },
     });
 
     const result = await markOnboardingStep(WS_ID, USER_ID, "evidence_review", true, "ev-1");
@@ -718,9 +701,8 @@ selectResult: [
         [{ id: "source-1" }], // firstContent select (sources)
         [{ id: "note-1" }],   // firstNote select (notes)
         [{ id: "card-1" }],   // firstCard select
-        [{ id: "val-1" }],    // firstValidation select
       ],
-      evidenceSnapshotsV2FindFirst: { id: "ev-1", workspaceId: WS_ID },
+      evidenceSnapshotsV2FindFirst: { evidenceSnapshotId: "ev-1", workspaceId: WS_ID },
     });
 
     const result = await markOnboardingStep(WS_ID, USER_ID, "evidence_review", true, "ev-1");
@@ -745,7 +727,6 @@ describe("invite-service ensureOnboardingState (DB mock)", () => {
         [], // firstContent select (sources)
         [], // firstNote select (notes)
         [], // firstCard select
-        [], // firstValidation select
       ],
       insertReturning: [[]], // won't be used since existing is found
     });
@@ -771,7 +752,6 @@ describe("invite-service ensureOnboardingState (DB mock)", () => {
         [], // firstContent select (sources)
         [], // firstNote select (notes)
         [], // firstCard select
-        [], // firstValidation select
       ],
       insertReturning: [[]],
     });

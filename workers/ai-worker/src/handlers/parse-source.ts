@@ -11,15 +11,18 @@ import {
 } from "node:zlib";
 import { logger } from "../lib/logger.ts";
 import { db } from "../db.ts";
-import * as schema from "../schema/index.ts";
+import * as schema from "@ailearn/shared/db-schema";
 import { SourceStatus } from "@ailearn/shared";
+// 稳定 P1（2026-09-15 审计）：parse_source payload 的精确契约 + fail-closed 读取器
+// （与 API 生产端 source/service.ts 同源），替代此前的 `as string | undefined` 弱读。
+import { readParseSourceJobPayload } from "@ailearn/shared/job-payload-contracts";
 import { isStorageConfigured, uploadSourceImage } from "../lib/object-storage.ts";
 import {
   parseContent,
   segmentsToBlocks,
   extractTitleFromBlocks,
   type ParsedBlock,
-} from "../lib/markdown-parser.ts";
+} from "@ailearn/shared/markdown-parser";
 import {
   assertJobLease,
   isJobLeaseActive,
@@ -340,14 +343,14 @@ export function createPinnedLookup(pinned: PinnedAddress): LookupFunction {
  */
 export function decompressBuffer(compressed: Buffer, encoding: string): Buffer {
   if (encoding === "gzip" || encoding === "x-gzip") {
-    return gunzipSync(compressed);
+    return gunzipSync(compressed, { maxOutputLength: FETCH_MAX_BYTES });
   }
   if (encoding === "br") {
-    return brotliDecompressSync(compressed);
+    return brotliDecompressSync(compressed, { maxOutputLength: FETCH_MAX_BYTES });
   }
   if (encoding === "deflate") {
     try {
-      return inflateSync(compressed);
+      return inflateSync(compressed, { maxOutputLength: FETCH_MAX_BYTES });
     } catch (err) {
       // 很多服务器把 raw deflate（无 zlib header）误标为 deflate。
       // inflateSync 期望 zlib wrapper，遇到 raw deflate 会抛 Z_DATA_ERROR，
@@ -356,7 +359,7 @@ export function decompressBuffer(compressed: Buffer, encoding: string): Buffer {
       // err.message 是人类可读描述（如 "incorrect header check"），不含 Z_DATA_ERROR。
       const errCode = (err as NodeJS.ErrnoException).code;
       if (err instanceof Error && (errCode === "Z_DATA_ERROR" || /Z_DATA_ERROR/.test(err.message))) {
-        return inflateRawSync(compressed);
+        return inflateRawSync(compressed, { maxOutputLength: FETCH_MAX_BYTES });
       }
       throw err;
     }
@@ -511,37 +514,56 @@ async function requestPinnedUrl(
  * 先收集所有匹配区间的边界，再做单次重建，避免逐个匹配时反复
  * slice 拼接整个字符串导致 O(n^2)。
  */
-function removeElementsByClass(html: string, tagName: string, classPattern: string): string {
-  const openRe = new RegExp(`<${tagName}[^>]*class="[^"]*\\b${classPattern}\\b[^"]*"[^>]*>`, "gi");
+function removeElementsByClass(
+  html: string,
+  tagName: string,
+  classPattern: string,
+  signal?: AbortSignal,
+): string {
   const tagRe = new RegExp(`</?${tagName}\\b[^>]*>`, "gi");
-  // 收集所有要移除的 [start, end) 区间
+  // Single-pass stack walk.  The former implementation restarted tagRe from
+  // every matching opening tag, so deeply nested/repetitive markup could make
+  // one class removal quadratic before the next class was even inspected.
+  const stack: Array<{ start: number; matched: boolean }> = [];
   const ranges: Array<[number, number]> = [];
-  let cursor = 0;
   let match: RegExpExecArray | null;
-  openRe.lastIndex = 0;
-  while ((match = openRe.exec(html)) !== null) {
-    // 跳过已被之前区间覆盖的起始位置（避免处理嵌套中的内层匹配）
-    if (match.index < cursor) continue;
-    const startIdx = match.index;
-    let depth = 1;
-    let idx = startIdx + match[0].length;
-    tagRe.lastIndex = idx;
-    let tagMatch: RegExpExecArray | null;
-    while (depth > 0 && (tagMatch = tagRe.exec(html)) !== null) {
-      depth += tagMatch[0].startsWith("</") ? -1 : 1;
-      idx = tagRe.lastIndex;
+  while ((match = tagRe.exec(html)) !== null) {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("HTML extraction aborted");
     }
-    if (depth !== 0) break; // 未配平，停止
-    ranges.push([startIdx, idx]);
-    cursor = idx;
-    openRe.lastIndex = idx;
+    const tag = match[0];
+    if (tag.startsWith("</")) {
+      const entry = stack.pop();
+      if (entry?.matched) ranges.push([entry.start, tagRe.lastIndex]);
+      continue;
+    }
+    if (/\/\s*>$/.test(tag)) continue;
+    const classMatch = tag.match(/\bclass\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    const classValue = classMatch?.[1] ?? classMatch?.[2] ?? "";
+    stack.push({
+      start: match.index,
+      matched: classValue.split(/\s+/).includes(classPattern),
+    });
   }
   if (ranges.length === 0) return html;
+
+  // Nested matching containers produce overlapping ranges.  Merge them so a
+  // single outer removal is emitted and the rebuild never duplicates gaps.
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of ranges) {
+    const previous = merged[merged.length - 1];
+    if (previous && start <= previous[1]) {
+      previous[1] = Math.max(previous[1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
 
   // 单次重建：按区间拼接保留片段
   const parts: string[] = [];
   let pos = 0;
-  for (const [start, end] of ranges) {
+  for (const [start, end] of merged) {
     if (start > pos) parts.push(html.slice(pos, start));
     parts.push(" ");
     pos = end;
@@ -568,6 +590,57 @@ const CONTENT_CLASS_PATTERNS = [
   "ql-editor",             // Quill 编辑器
   "read-content",          // Readability
 ];
+
+interface ContentClassRange {
+  patternIndex: number;
+  start: number;
+  end: number;
+}
+
+/**
+ * Find all content containers in one tag pass.  The old implementation ran a
+ * full tag scan for every matching opening tag, which becomes O(n²) on pages
+ * with many nested containers.  This stack walk is linear and checks the
+ * request abort signal between tags so a pathological document is bounded.
+ */
+function collectContentClassRanges(
+  html: string,
+  patterns: readonly string[],
+  signal?: AbortSignal,
+): ContentClassRange[] {
+  const tagRe = /<(\/)?(div|section|article)\b[^>]*>/gi;
+  const stack: Array<{ tagName: string; contentStart: number; patternIndex: number }> = [];
+  const ranges: ContentClassRange[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = tagRe.exec(html)) !== null) {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("HTML extraction aborted");
+    }
+    const closing = Boolean(match[1]);
+    const tagName = match[2]!.toLowerCase();
+    const tag = match[0];
+    if (closing) {
+      let closeIndex = stack.length - 1;
+      while (closeIndex >= 0 && stack[closeIndex]!.tagName !== tagName) closeIndex -= 1;
+      if (closeIndex < 0) continue;
+      for (let i = stack.length - 1; i >= closeIndex; i -= 1) {
+        const entry = stack[i]!;
+        if (entry.patternIndex >= 0) {
+          ranges.push({ patternIndex: entry.patternIndex, start: entry.contentStart, end: match.index });
+        }
+      }
+      stack.length = closeIndex;
+      continue;
+    }
+    if (/\/\s*>$/.test(tag)) continue;
+    const classMatch = tag.match(/\bclass\s*=\s*(["'])(.*?)\1/i);
+    const classTokens = classMatch?.[2]?.split(/\s+/).filter(Boolean) ?? [];
+    const patternIndex = patterns.findIndex((pattern) => classTokens.includes(pattern));
+    stack.push({ tagName, contentStart: tagRe.lastIndex, patternIndex });
+  }
+  return ranges.sort((a, b) => a.start - b.start || a.end - b.end);
+}
 
 /**
  * 常见噪声元素 class 模式，提取前移除以减少干扰。
@@ -671,7 +744,7 @@ function imgReplacement(src: string, alt: string, baseUrl?: string): string {
  * - 保留 <img> alt 文本（数学公式等以图片形式展示）
  * - 更激进的空白行压缩
  */
-function extractTextFromHtml(html: string, baseUrl?: string): string {
+function extractTextFromHtml(html: string, baseUrl?: string, signal?: AbortSignal): string {
   // Step 1: 预清理 — 移除 script/style/noscript
   let cleaned = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -685,14 +758,14 @@ function extractTextFromHtml(html: string, baseUrl?: string): string {
 
   // Step 2: 移除噪声元素（按 class 模式）
   for (const noise of NOISE_CLASS_PATTERNS) {
-    cleaned = removeElementsByClass(cleaned, "div", noise);
+    cleaned = removeElementsByClass(cleaned, "div", noise, signal);
   }
 
   // Step 2b: 移除代码块 UI 元素（工具栏、行号、复制按钮、提示通知等）
   // 这些元素同时包含 div 和 span 标签，需要分别处理
   for (const noise of CODE_NOISE_CLASS_PATTERNS) {
-    cleaned = removeElementsByClass(cleaned, "div", noise);
-    cleaned = removeElementsByClass(cleaned, "span", noise);
+    cleaned = removeElementsByClass(cleaned, "div", noise, signal);
+    cleaned = removeElementsByClass(cleaned, "span", noise, signal);
   }
 
   // Step 3: 处理 <img> 标签
@@ -728,41 +801,20 @@ function extractTextFromHtml(html: string, baseUrl?: string): string {
   // 4b: <main> 标签
   const mainMatch = cleaned.match(/<main[\s\S]*?<\/main>/i);
 
-  // 4c: 按 class 模式提取正文容器
-  // 使用深度计数找到匹配的闭合标签，正确处理嵌套 div
+  // 4c: 按 class 模式提取正文容器。单次栈扫描，避免每个 class/open tag
+  // 再次从头扫描整份 HTML。
   let classContent: string | null = null;
-  for (const cls of CONTENT_CLASS_PATTERNS) {
-    const openRe = new RegExp(
-      `<(div|section|article)[^>]*class="[^"]*\\b${cls}\\b[^"]*"[^>]*>`,
-      "gi",
-    );
-    const openTags = [...cleaned.matchAll(openRe)];
-    if (openTags.length > 0) {
-      const parts: string[] = [];
-      for (const tag of openTags) {
-        const tagName = tag[1];
-        const contentStart = tag.index + tag[0].length;
-        // 深度计数找到匹配的闭合标签
-        let depth = 1;
-        let idx = contentStart;
-        const tagRe = new RegExp(`</?${tagName}\\b[^>]*>`, "gi");
-        tagRe.lastIndex = idx;
-        let tagMatch: RegExpExecArray | null;
-        while (depth > 0 && (tagMatch = tagRe.exec(cleaned)) !== null) {
-          depth += tagMatch[0].startsWith("</") ? -1 : 1;
-          idx = tagRe.lastIndex;
-        }
-        if (depth === 0) {
-          parts.push(cleaned.slice(contentStart, idx - tagMatch![0].length));
-        }
-      }
-      if (parts.length > 0) {
-        const joined = parts.join("\n\n");
-        const previewText = joined.replace(/<[^>]+>/g, "").trim();
-        if (previewText.length >= 200) {
-          classContent = joined;
-          break;
-        }
+  const classRanges = collectContentClassRanges(cleaned, CONTENT_CLASS_PATTERNS, signal);
+  for (let patternIndex = 0; patternIndex < CONTENT_CLASS_PATTERNS.length; patternIndex += 1) {
+    const parts = classRanges
+      .filter((range) => range.patternIndex === patternIndex)
+      .map((range) => cleaned.slice(range.start, range.end));
+    if (parts.length > 0) {
+      const joined = parts.join("\n\n");
+      const previewText = joined.replace(/<[^>]+>/g, "").trim();
+      if (previewText.length >= 200) {
+        classContent = joined;
+        break;
       }
     }
   }
@@ -957,7 +1009,7 @@ export async function fetchUrlContentOnce(
       // 后者会剥离所有 HTML 标签，剥离后无法再提取 <title>。
       if (res.contentType.toLowerCase().includes("text/html")) {
         const title = extractHtmlTitle(rawText);
-        const text = extractTextFromHtml(rawText, currentUrl);
+        const text = extractTextFromHtml(rawText, currentUrl, ac.signal);
         return { text, title };
       }
       return { text: rawText, title: null };
@@ -1331,8 +1383,13 @@ export async function fetchAndUploadSourceImages(
  * - url：R-014 已实现 HTTP 抓取，会获取 URL 正文并分段
  */
 export async function runParseSource(job: JobPayload) {
-  const sourceId = job.payload.sourceId as string | undefined;
-  if (!sourceId) throw new Error("missing sourceId in payload");
+  // payload 契约校验（fail closed）：缺失/类型不对抛 JobPayloadContractError，
+  // 该错误在 isNonRetryableError 中被归类为**不可重试**——坏载荷不会因为重试而变好，
+  // 重试只会空转三次租约再把同一条错误往后推。此前是普通 Error + 真值判断，
+  // 既可重试又对 "sourceId 是数字" 这类脏数据毫无防备。
+  // 注意：解构出的布尔**不能**叫 fetchUrlContent——本文件导出的抓取函数同名，
+  // 会在 runParseSource 作用域内把它遮蔽掉（tsc 立刻报 "Type Boolean has no call signatures"）。
+  const { sourceId, fetchUrlContent: fetchUrlContentFlag } = readParseSourceJobPayload(job.payload);
   await assertJobLease(job);
   logger.info({ sourceId }, "running parse_source");
 
@@ -1387,7 +1444,6 @@ export async function runParseSource(job: JobPayload) {
       throw new Error("source metadata.url must be a string");
     }
     let rawContent = metadata.rawContent ?? "";
-    const fetchUrlContentFlag = job.payload.fetchUrlContent === true;
     const url = metadata.url ?? processingSource.origin ?? "";
 
     // R-014: 如果标记了 fetchUrlContent，执行 HTTP 抓取

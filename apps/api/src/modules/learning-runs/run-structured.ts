@@ -265,13 +265,32 @@ export function assessStructuredPayload(
     if (!Array.isArray(edges) || edges.length === 0) {
       return { verdict: "not_assessable", userFacingReason: "没有提交关系" };
     }
-    const matched = required.filter((r) =>
-      edges.some((e) => e.fromNodeId === r.fromNodeId && e.toNodeId === r.toNodeId && e.edgeKind === r.edgeKind),
-    ).length;
-    if (matched === required.length && required.length > 0) {
+    const edgeKey = (e: { fromNodeId: string; toNodeId: string; edgeKind: string }) =>
+      `${e.fromNodeId}|${e.toNodeId}|${e.edgeKind}`;
+    const requiredKeys = new Set(required.map(edgeKey));
+    const submittedKeys = new Set(edges.map(edgeKey));
+    const matched = [...requiredKeys].filter((key) => submittedKeys.has(key)).length;
+    // M9（2026-08-24 审查）：反穷举。此前只统计 required 命中、不罚多余边，
+    // 而本题只有 2 个节点 × 6 种 edge kind = 12 种组合（提交上限 16 条），
+    // 全量提交必然 covered。covered 要求提交集合恰好等于 required（与 ordering
+    // 的等长要求同姿态）：多余边、重复边一律不算正确。
+    const invalid = edges.filter((e) => !requiredKeys.has(edgeKey(e))).length;
+    const duplicated = edges.length - submittedKeys.size;
+    const exact = requiredKeys.size > 0
+      && matched === requiredKeys.size
+      && invalid === 0
+      && duplicated === 0
+      && edges.length === requiredKeys.size;
+    if (exact) {
       return { verdict: "covered", userFacingReason: "关系判断正确" };
     }
-    return { verdict: matched > 0 ? "partial" : "missing", userFacingReason: `${matched}/${required.length} 条关系正确` };
+    const noise = invalid + duplicated;
+    return {
+      verdict: matched > 0 ? "partial" : "missing",
+      userFacingReason: noise > 0
+        ? `${matched}/${requiredKeys.size} 条关系正确，另有 ${noise} 条多余或重复`
+        : `${matched}/${requiredKeys.size} 条关系正确`,
+    };
   }
   if (kind === "repair") {
     const operations = (payload.operations ?? []) as Array<{ op: string; elementId: string; replacementOptionId?: string }>;

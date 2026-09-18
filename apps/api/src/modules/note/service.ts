@@ -1,8 +1,8 @@
 import { and, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { type ApiTransaction } from "../../db/client.ts";
-import { notes, noteVersions, noteBlocks, noteImageAssets } from "../../db/schema/note.ts";
-import { searchDocuments } from "../../db/schema/search.ts";
+import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
+import { searchDocuments } from "@ailearn/shared/db-schema/search";
 import { logger } from "../../lib/logger.ts";
 import { DomainError } from "@ailearn/shared";
 
@@ -51,7 +51,14 @@ import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
 import { downloadAndValidateImageAsset } from "../../lib/image-asset.ts";
 import { isStorageConfigured } from "../../lib/object-storage.ts";
 import { hookJourneyEntityCreated } from "../companion-journey/journey-hook.ts";
-import type { NoteCreateInput, NoteUpdateInput, NoteBlock } from "./schema.ts";
+import type { NoteCreateInput, NoteBlock } from "./schema.ts";
+
+type NoteUpdateInput = {
+  title?: string;
+  blocks?: Array<{ type: NoteBlock["type"]; content: string }>;
+  baseVersionId: string;
+  isAutosave: boolean;
+};
 
 /**
  * Compute a stable MD5 hash of note content blocks for deduplication.
@@ -332,7 +339,7 @@ export function deriveNoteTitle(blocks: NoteBlock[] | Array<{ type: NoteBlock["t
  * 检查版本是否可被原地更新（无活跃或已替代的学习卡引用）。
  *
  * 使用 SELECT ... FOR UPDATE 锁定 note_versions 行，确保检查与后续
- * updateVersionInPlace 之间不会有并发 INSERT learning_cards。
+ * updateVersionInPlace 之间不会有并发插入历史卡片引用。
  * PostgreSQL 外键插入会获取 FOR KEY SHARE 锁，与 FOR UPDATE 冲突，
  * 因此 AI worker 的卡片插入会阻塞直到本事务提交。
  *
@@ -438,6 +445,15 @@ async function updateVersionInPlace(
     // and avoids N serial DB round-trips. `ordinal`/`versionId`/`sourceRef` are
     // unchanged (they equal the existing row values in `patch`), so they are
     // deliberately not rewritten.
+    // ⚠️ `AS ord(...)` 只能是**裸列名列表**，绝不能写成带类型的列定义列表
+    // （`AS ord(id uuid, type text, ...)`）。PostgreSQL 不允许「多参数 unnest()
+    // + 列定义列表」，会直接抛
+    //   `UNNEST() with multiple arguments cannot have a column definition list`
+    // （PG 16.15 实测同样如此）。此前那版带类型的写法让**每一次改动既有块的
+    // 自动保存**都变成 500 —— 而这条路只在“顺序号已存在的块内容变了”时才走到，
+    // 因此表现为“平时能存、一改旧段落就挂”。
+    // 列类型由下面 ARRAY[...] 里的元素 cast 决定（uuid[]/text[]/text[]/uuid[]），
+    // 不依赖这里的标注；`ord.id`/`ord.image_asset_id` 实测解析为 uuid。
     const ids = sql.join(toUpdate.map((u) => sql`${u.id}::uuid`), sql`, `);
     const types = sql.join(toUpdate.map((u) => sql`${u.patch.type}::text`), sql`, `);
     const contents = sql.join(toUpdate.map((u) => sql`${u.patch.content}::text`), sql`, `);
@@ -454,7 +470,7 @@ async function updateVersionInPlace(
           ARRAY[${types}],
           ARRAY[${contents}],
           ARRAY[${imageIds}]
-        ) AS ord(id uuid, type text, content text, image_asset_id uuid)
+        ) AS ord(id, type, content, image_asset_id)
       ) AS u
       WHERE note_blocks.id = u.id
     `);
@@ -802,10 +818,7 @@ export async function updateNote(
     if (!note) return null;
 
     // R-008: 乐观并发控制 — 标题或正文更新时 baseVersionId 必须匹配。
-    if (
-      input.baseVersionId &&
-      input.baseVersionId !== note.currentVersionId
-    ) {
+    if (input.baseVersionId !== note.currentVersionId) {
       throw new RevisionConflictError(note.currentVersionId);
     }
 
@@ -835,13 +848,11 @@ export async function updateNote(
 
     // 标题单独修改时，精确克隆当前正文为一个新版本。currentVersionId 同时
     // 是客户端 OCC 令牌；如果只改 notes.title，多标签页会持有同一令牌并
-    // 静默覆盖。仅对带 baseVersionId 的新协议请求推进版本，保留 service
-    // 对旧内部调用的兼容性（HTTP schema 已强制 mutation 必须携带 base）。
+    // 标题更新同样推进版本，避免多标签页使用同一 OCC 令牌时静默覆盖。
     if (
       !Array.isArray(input.blocks) &&
       manualTitleChanged &&
-      note.currentVersionId &&
-      input.baseVersionId
+      note.currentVersionId
     ) {
       const currentVersion = await tx.query.noteVersions.findFirst({
         where: eq(noteVersions.id, note.currentVersionId),
@@ -1046,10 +1057,16 @@ export async function updateNote(
         }
       } else {
         // 3. 显式保存或无法原地更新：创建新版本
-        const latest = await tx.query.noteVersions.findFirst({
-          where: eq(noteVersions.noteId, noteId),
-          orderBy: (v, { desc: desc1 }) => [desc1(v.versionNo)],
-        });
+        //
+        // AI-perf #14（2026-09-15 审计）：此前用 `findFirst` 且**无列投影**，为了拿
+        // 一个 versionNo 会把最新版本的整份 `content_json`（整篇文档的 blocks）
+        // 读回应用层——每次显式保存都白搬一次全文。改为只投影 versionNo + LIMIT 1。
+        const [latest] = await tx
+          .select({ versionNo: noteVersions.versionNo })
+          .from(noteVersions)
+          .where(eq(noteVersions.noteId, noteId))
+          .orderBy(desc(noteVersions.versionNo))
+          .limit(1);
         const nextVersionNo = (latest?.versionNo ?? 0) + 1;
         const [newVersion] = await tx
           .insert(noteVersions)
@@ -1312,10 +1329,8 @@ export async function physicalDeleteNote(
       .where(eq(noteVersions.noteId, noteId));
     const versionIds = versionRows.map((v) => v.id);
 
-    // 原物理删除的级联清理（learning_cards / cardKeyPoints / evidences /
-    // validation_events / review_schedules / understanding_events / ai_artifacts /
-    // jobs）全部服务于已删除的卡片表，无 V2 等价物，已整体移除。V2 卡片/客观对象的清理由
-    // 各自模块负责。以下仅保留 note 自身的级联（image asset 收集与 note 删除）。
+    // 原物理删除的历史卡片级联清理已整体移除。V2 卡片/客观对象的清理由各自模块负责。
+    // 以下仅保留 note 自身的级联（image asset 收集与 note 删除）。
 
     // 收集图片资产与旧版 Markdown object key。Typed asset 可能被同一
     // workspace 的其他笔记版本复用，必须在级联删除后重新检查引用，
@@ -1414,7 +1429,18 @@ export async function physicalDeleteNote(
         ));
     }
     const knownAssetObjectKeys = new Set(candidateAssets.map((asset) => asset.objectKey));
-    const unmanagedLegacyKeys = legacyImageObjectKeys.filter((key) => !knownAssetObjectKeys.has(key));
+    // SEC 修复（2026-09 后端审查）：legacy markdown 图片键来自**客户端可控**的
+    // 笔记正文（extractObjectKeyFromMarkdownImage 取 /api/uploads/ 之后的任意串），
+    // 且 deleteObject 无命名空间校验。此前任何能被命名的桶内对象（例如
+    // `avatars/<victimId>/<uuid>.png`）都会进 unmanagedLegacyKeys，随后在
+    // DELETE /notes/:id/permanent 与 6h 清理任务中被真实删除（跨租户破坏性写）。
+    // 这里把 legacy 键收窄到本 workspace 的 notes/sources 命名空间。
+    const workspaceKeyPrefixes = [`${workspaceId}/notes/`, `${workspaceId}/sources/`];
+    const unmanagedLegacyKeys = legacyImageObjectKeys.filter(
+      (key) => !knownAssetObjectKeys.has(key)
+        && !key.includes("..")
+        && workspaceKeyPrefixes.some((prefix) => key.startsWith(prefix)),
+    );
     const imageObjectKeys = [...new Set([
       ...unmanagedLegacyKeys,
       ...orphanAssets.flatMap((asset) => [

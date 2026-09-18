@@ -4,17 +4,16 @@
  * 同一 RLS transaction：lock conversation → 校验 owner/workspace →
  * 幂等（key hash / clientMessageId）→ active run 规则（supersedesGeneration）→
  * 分配 seq/generation → 插入 user message → auto title → 插入 turn run →
- * 插入 companion_dialogue job → 更新 counters → 写 turn.accepted event。
+ * 插入 companion_agent job → 更新 counters → 写 turn.accepted event。
  * 任一步失败全部回滚，返回 202。
  */
 
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { bigint, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import type { ApiTransaction } from "../../db/client.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { createJob } from "../job/service.ts";
-import { type CompanionGroundedTutorGrantV1,  } from "@ailearn/shared";
+import { type CompanionGroundedTutorGrantV1 } from "@ailearn/shared";
 import { DomainError } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
@@ -26,87 +25,25 @@ import {
 } from "@ailearn/shared";
 import { resolveAuthSurfaceManifestSecret } from "../companion-shell/auth-surface.ts";
 import { getCompanionAccountEpoch } from "./companion-account-epoch.ts";
+import { reclaimExpiredCompanionProposals, invalidateSupersededRunProposals } from "./companion-proposal-expiry.ts";
 import {
-  contextRevisionForCompanionLearningSession,
-  loadCompanionLearningSessionContext,
-} from "./learning-session-context.ts";
+  contextRevisionForCompanionLearningRun,
+  isCompanionLearningRunTutorEligible,
+  loadCompanionLearningRunContext,
+} from "./learning-run-context.ts";
+import {
+  companionConversations,
+  companionMessages,
+  companionStreamEvents,
+  companionTurnRuns,
+} from "@ailearn/shared/db-schema/companion-conversations";
 
-// api 模块现有模式：表定义位于模块内（与 packages/db schema 列对齐，迁移 0088）。
-export const companionConversations = pgTable("companion_conversations", {
-  id: uuid("id").primaryKey(),
-  workspaceId: uuid("workspace_id").notNull(),
-  userId: uuid("user_id").notNull(),
-  kind: text("kind").notNull(),
-  title: text("title").notNull(),
-  titleSource: text("title_source").notNull(),
-  status: text("status").notNull(),
-  nextMessageSeq: bigint("next_message_seq", { mode: "number" }).notNull(),
-  nextEventSeq: bigint("next_event_seq", { mode: "number" }).notNull(),
-  nextGeneration: integer("next_generation").notNull(),
-  summaryText: text("summary_text"),
-  summaryVersion: integer("summary_version").notNull(),
-  lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-export const companionMessages = pgTable("companion_messages", {
-  id: uuid("id").primaryKey(),
-  workspaceId: uuid("workspace_id").notNull(),
-  userId: uuid("user_id").notNull(),
-  conversationId: uuid("conversation_id").notNull(),
-  seq: bigint("seq", { mode: "number" }).notNull(),
-  role: text("role").notNull(),
-  kind: text("kind").notNull(),
-  blocks: jsonb("blocks").notNull(),
-  runId: uuid("run_id"),
-  clientMessageId: uuid("client_message_id"),
-  contentSha256: text("content_sha256").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  editedAt: timestamp("edited_at", { withTimezone: true }),
-});
-
-export const companionTurnRuns = pgTable("companion_turn_runs", {
-  id: uuid("id").primaryKey(),
-  workspaceId: uuid("workspace_id").notNull(),
-  userId: uuid("user_id").notNull(),
-  conversationId: uuid("conversation_id").notNull(),
-  userMessageId: uuid("user_message_id").notNull(),
-  assistantMessageId: uuid("assistant_message_id"),
-  jobId: uuid("job_id"),
-  generation: integer("generation").notNull(),
-  status: text("status").notNull(),
-  idempotencyKeyHash: text("idempotency_key_hash").notNull(),
-  requestBodyHash: text("request_body_hash").notNull(),
-  // 迁移 0107（L11）：run 创建时冻结的账号世代。
-  accountEpoch: integer("account_epoch").notNull().default(0),
-  providerId: text("provider_id"),
-  modelId: text("model_id"),
-  promptVersion: text("prompt_version"),
-  pageContext: jsonb("page_context"),
-  contextGrantId: uuid("context_grant_id"),
-  lastEventSeq: bigint("last_event_seq", { mode: "number" }).notNull().default(0),
-  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
-  errorCode: text("error_code"),
-  startedAt: timestamp("started_at", { withTimezone: true }),
-  finishedAt: timestamp("finished_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-export const companionStreamEvents = pgTable("companion_stream_events", {
-  conversationId: uuid("conversation_id").notNull(),
-  seq: bigint("seq", { mode: "number" }).notNull(),
-  workspaceId: uuid("workspace_id").notNull(),
-  userId: uuid("user_id").notNull(),
-  runId: uuid("run_id"),
-  generation: integer("generation").notNull(),
-  accountEpoch: integer("account_epoch").notNull(),
-  type: text("type").notNull(),
-  payload: jsonb("payload").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-});
+export {
+  companionConversations,
+  companionMessages,
+  companionStreamEvents,
+  companionTurnRuns,
+};
 
 export class CompanionConversationError extends DomainError {
   constructor(
@@ -144,15 +81,14 @@ function sanitizeContext(request: CreateCompanionTurnRequestV1): unknown {
       return { version: 1, context: { ...base, cardId: ctx.cardId, keyPointId: ctx.keyPointId ?? null } };
     case "star_map":
       return { version: 1, context: { ...base, keyPointId: ctx.keyPointId ?? null } };
-    case "learning_session":
+    case "learning_run":
       return {
         version: 1,
         context: {
           ...base,
-          sessionId: ctx.sessionId,
-          episodeId: ctx.episodeId,
-          cardId: ctx.cardId,
-          keyPointId: ctx.keyPointId,
+          runId: ctx.runId,
+          snapshotId: ctx.snapshotId,
+          taskId: ctx.taskId,
           requestedCapability: ctx.requestedCapability,
           groundedTutorGrant: ctx.groundedTutorGrant === null
             ? null
@@ -194,27 +130,19 @@ function verifyGrantSignature(grant: CompanionGroundedTutorGrantV1): void {
   }
 }
 
-/** 在 turn 原子事务内重查 session/page 关系，并以 unique grant id 消费。 */
+/** 在 turn 原子事务内重查 LearningRun 页面关系，并以 unique grant id 消费。 */
 async function validateGroundedTutorGrant(
   tx: ApiTransaction,
   request: CreateCompanionTurnRequestV1,
   scope: { workspaceId: string; userId: string },
 ): Promise<string | null> {
   const context = request.context;
-  if (!context || context.pageKind !== "learning_session") return null;
+  if (!context || context.pageKind !== "learning_run") return null;
   if (context.requestedCapability === "none") return null;
   const grant = context.groundedTutorGrant;
   if (grant === null) rejectGroundedTutorGrant("grounded tutor grant missing");
 
-  if (
-    grant.userId !== scope.userId
-    || grant.workspaceId !== scope.workspaceId
-    || grant.sessionId !== context.sessionId
-    || grant.episodeId !== context.episodeId
-    || grant.cardId !== context.cardId
-    || grant.keyPointId !== context.keyPointId
-    || grant.contextRevision !== context.contextRevision
-  ) {
+  if (grant.userId !== scope.userId || grant.workspaceId !== scope.workspaceId || grant.contextRevision !== context.contextRevision) {
     rejectGroundedTutorGrant("grounded tutor grant scope or context mismatch");
   }
   const now = Date.now();
@@ -236,21 +164,27 @@ async function validateGroundedTutorGrant(
   `);
   if (consumed[0]) rejectGroundedTutorGrant("grounded tutor grant already consumed");
 
-  const current = await loadCompanionLearningSessionContext(tx, {
+  if (
+    grant.pageKind !== "learning_run"
+    || grant.runId !== context.runId
+    || grant.snapshotId !== context.snapshotId
+    || grant.taskId !== context.taskId
+  ) {
+    rejectGroundedTutorGrant("grounded tutor grant scope or context mismatch");
+  }
+  const current = await loadCompanionLearningRunContext(tx, {
     workspaceId: scope.workspaceId,
     userId: scope.userId,
-    sessionId: context.sessionId,
-    episodeId: context.episodeId,
+    runId: context.runId,
   });
-  if (!current) rejectGroundedTutorGrant("learning session context not found");
+  if (!current) rejectGroundedTutorGrant("learning run context not found");
   if (
-    current.sessionStatus !== "active"
-    || current.episodeStatus !== "active"
-    || !["scene_ready", "awaiting_response"].includes(current.processingPhase)
-    || current.answerLocked
-    || contextRevisionForCompanionLearningSession(current) !== context.contextRevision
+    !isCompanionLearningRunTutorEligible(current)
+    || current.snapshotId !== context.snapshotId
+    || current.taskId !== context.taskId
+    || contextRevisionForCompanionLearningRun(current) !== context.contextRevision
   ) {
-    rejectGroundedTutorGrant("learning session context is stale or no longer eligible");
+    rejectGroundedTutorGrant("learning run context is stale or no longer eligible");
   }
   return grant.grantId;
 }
@@ -329,6 +263,16 @@ export async function createCompanionTurn(args: {
       throw new CompanionConversationError("FORBIDDEN", 403, "conversation scope mismatch");
     }
 
+    // Agent 方案 §5：确认过期后必须先把挂起的 run 置为终态，再判 active run。
+    // 顺序不能反——等待确认的 run 仍是 active（partial unique index 覆盖
+    // waiting_for_confirmation），先判 active 会让用户在 5min 确认 TTL 过后
+    // 永远收到 409 RUN_ALREADY_ACTIVE：既不能确认、也不能继续对话。
+    await reclaimExpiredCompanionProposals(tx, {
+      workspaceId: args.workspaceId,
+      userId: args.userId,
+      conversationId: args.conversationId,
+    });
+
     // 幂等：同 key 或同 clientMessageId + 同 body hash → 返回原 run
     const existingByKey = await tx
       .select()
@@ -402,7 +346,7 @@ export async function createCompanionTurn(args: {
       .from(companionTurnRuns)
       .where(and(
         eq(companionTurnRuns.conversationId, args.conversationId),
-        sql`${companionTurnRuns.status} IN ('accepted', 'running', 'cancel_requested')`,
+        sql`${companionTurnRuns.status} IN ('accepted', 'running', 'waiting_for_confirmation', 'cancel_requested')`,
       ))
       .limit(1);
     const activeRun = activeRows[0] ?? null;
@@ -416,6 +360,11 @@ export async function createCompanionTurn(args: {
         .update(companionTurnRuns)
         .set({ status: "superseded", updatedAt: new Date() })
         .where(eq(companionTurnRuns.id, activeRun.id));
+      // 被取代的 run 可能停在 waiting_for_confirmation 并带一个可确认的 Agent
+      // proposal。不作废它，用户之后点确认会通过 epoch/active 校验真正执行副作用，
+      // 而 continuation 阶段因 run 已非 waiting 而放弃 → 动作生效却无人回填结果。
+      // 与 cancel 一致先行作废（proposal → expired、工具调用 → expired）。
+      await invalidateSupersededRunProposals(tx, { runId: activeRun.id });
       supersededRunId = activeRun.id;
     } else if (request.supersedesGeneration !== undefined) {
       const latestRun = await tx
@@ -556,7 +505,7 @@ export async function createCompanionTurn(args: {
     const job = await createJob({
       workspaceId: args.workspaceId,
       requestedBy: args.userId,
-      type: "companion_dialogue",
+      type: "companion_agent",
       dedupe: { payloadField: "runId", value: runId },
       // runbook 6.4 步骤 5：payload 只传 opaque ID；worker 从 DB 读
       // conversation/user/generation/page_context（RLS context 内）。

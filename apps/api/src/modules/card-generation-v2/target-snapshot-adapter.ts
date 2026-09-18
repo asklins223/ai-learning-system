@@ -6,7 +6,7 @@
  *   LearningTargetSnapshotV2（全部 §16.1 字段）；
  * - 正式链路（planner/structured/critic/commit）只消费 frozen snapshot，
  *   不再直接读取 card_key_points.claim/quoteText（表已删除）；
- * - keyPointId 只作为 Objective ID alias。
+ * - run/objective identity is carried by the V2 snapshot contract.
  *
  * 职责：
  * 1. freezeTargetSnapshotV2：workspace-scoped query active Objective + current
@@ -30,7 +30,7 @@ import {
   evidenceEligibilityStatesV2,
   learningExposuresV2,
   cardContentCapabilityStateV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import type {
   LearningTargetSnapshotV2,
   LearningRunTargetPublicV2,
@@ -621,7 +621,8 @@ export async function freezeTargetSnapshotV2(
 
 /**
  * 从 run 加载已冻结的 TargetSnapshot（重建 §16.1 对象）。
- * 返回 null 表示该 run 是 V1 run（无 V2 snapshot）；调用方据此走 legacy 分支。
+ * run 没有 snapshot 行时返回 null；已有 snapshot 但缺少完整 target 时直接
+ * fail closed，不再从 scalar 列拼装不完整目标。
  */
 export async function loadFrozenTargetSnapshotV2(
   tx: ApiTransaction,
@@ -639,27 +640,10 @@ export async function loadFrozenTargetSnapshotV2(
   const row = rows[0];
   if (!row) return null;
 
-  // 优先用 0139 target jsonb 无损重建；缺列（旧行）回退拼装 scalar。
-  if (row.target) {
-    const target = row.target as LearningTargetSnapshotV2["target"];
-    return {
-      version: 2,
-      snapshotId: row.snapshotId,
-      workspaceId: row.workspaceId,
-      userId: row.userId as string,
-      runId: row.runId,
-      cardContentEpoch: row.cardContentEpoch,
-      objectiveLifecycleEpoch: row.objectiveLifecycleEpoch,
-      target,
-      planningExposure: (row.planningExposure as LearningTargetSnapshotV2["planningExposure"]),
-      lifecycleAtPrepare: (row.lifecycleAtPrepare as "active") ?? "active",
-      publishedTargetEligibility: (row.publishedTargetEligibility as LearningTargetSnapshotV2["publishedTargetEligibility"]),
-      preparedAt: row.preparedAt ? row.preparedAt.toISOString() : row.frozenAt.toISOString(),
-      snapshotHash: row.snapshotHash,
-    };
+  if (!row.target) {
+    throw new TargetSnapshotError("snapshot_incomplete", "Frozen target snapshot has no target payload");
   }
-
-  // 回退：从 scalar 列拼装（无需 objectiveStatement 的消费者场景）。
+  const target = row.target as LearningTargetSnapshotV2["target"];
   return {
     version: 2,
     snapshotId: row.snapshotId,
@@ -668,28 +652,7 @@ export async function loadFrozenTargetSnapshotV2(
     runId: row.runId,
     cardContentEpoch: row.cardContentEpoch,
     objectiveLifecycleEpoch: row.objectiveLifecycleEpoch,
-    target: {
-      objectiveId: row.objectiveId,
-      objectiveRevision: row.objectiveRevision,
-      cardId: row.cardId as string,
-      publicationRevision: row.publicationRevision as number,
-      cardRevision: row.cardRevision as number,
-      publicPayloadHash: row.publicPayloadHash as string,
-      revealPayloadHash: row.revealPayloadHash as string,
-      objectiveStatement: "",
-      publicSummary: "",
-      knowledgeForm: "concept" as KnowledgeFormV2,
-      preferredIntents: row.preferredIntents as TaskIntentV1[],
-      canonicalAnswer: row.canonicalAnswer as unknown as CanonicalAnswerV2,
-      learningSupport: undefined as unknown as LearningTargetSnapshotV2["target"]["learningSupport"],
-      scoringRubric: row.scoringRubric as unknown as ObjectiveRubricV2,
-      relations: (row.relations ?? []) as ObjectiveRelationV2[],
-      evidence: (row.evidenceBindings ?? []) as LearningTargetSnapshotV2["target"]["evidence"],
-      evidenceBindingSetHash: row.evidenceBindingSetHash as string,
-      evidenceEligibilityVectorHash: row.evidenceEligibilityVectorHash as string,
-      semanticTargetFingerprint: row.semanticTargetFingerprint,
-      targetRevisionHash: row.targetRevisionHash,
-    },
+    target,
     planningExposure: (row.planningExposure as LearningTargetSnapshotV2["planningExposure"]),
     lifecycleAtPrepare: (row.lifecycleAtPrepare as "active") ?? "active",
     publishedTargetEligibility: (row.publishedTargetEligibility as LearningTargetSnapshotV2["publishedTargetEligibility"]),

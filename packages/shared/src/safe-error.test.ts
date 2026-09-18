@@ -9,7 +9,7 @@ import {
 test("operational errors redact SQL, parameters, stacks, and user content", () => {
   const secret = "用户答案：光合作用会产生氧气";
   const error = Object.assign(
-    new Error(`Failed query: insert into validation_submissions params: ${secret}`),
+    new Error(`Failed query: insert into learning_assessments params: ${secret}`),
     {
       name: "DrizzleQueryError",
       code: "23505",

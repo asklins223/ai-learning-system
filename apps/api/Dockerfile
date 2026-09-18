@@ -15,28 +15,26 @@ RUN apk add --no-cache ffmpeg
 # F-027: 使用 npm ci + lockfile 确保可复现构建
 FROM base AS deps
 COPY apps/api/package.json apps/api/package-lock.json ./
-COPY packages/shared /packages/shared
-COPY packages/shared/package.json packages/shared/package-lock.json /tmp/shared/
 # The shared workspace is linked explicitly after dependency installation;
 # omit the repository-external local link here so npm ci remains deterministic
 # inside the container as well as on the host.
 RUN node -e 'const fs=require("node:fs"); const pkg=JSON.parse(fs.readFileSync("package.json","utf8")); delete pkg.dependencies["@ailearn/shared"]; fs.writeFileSync("package.json", JSON.stringify(pkg)); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); delete lock.packages[""]?.dependencies?.["@ailearn/shared"]; delete lock.packages["node_modules/@ailearn/shared"]; delete lock.packages["../../packages/shared"]; fs.writeFileSync("package-lock.json", JSON.stringify(lock));'
 RUN npm config set registry https://registry.npmmirror.com \
- && npm ci --install-links --no-audit --no-fund \
- && npm ci --no-audit --no-fund --prefix /tmp/shared --registry=https://registry.npmmirror.com
+ && npm ci --install-links --no-audit --no-fund
 
 FROM base AS dev
-ENV NODE_ENV=development PATH=/app/node_modules/.bin:$PATH
+ENV NODE_ENV=development \
+    NODE_OPTIONS=--preserve-symlinks \
+    PATH=/app/node_modules/.bin:$PATH
 COPY --from=deps /app/node_modules /app/node_modules
-COPY --from=deps /tmp/shared /tmp/shared
-COPY packages/shared /tmp/shared
+COPY packages/shared /app/packages/shared
 COPY apps/api/package.json ./package.json
 COPY apps/api/tsconfig.json ./tsconfig.json
 COPY apps/api/drizzle.config.ts ./drizzle.config.ts
 COPY apps/api/src ./src
 RUN mkdir -p node_modules/@ailearn \
  && rm -rf node_modules/@ailearn/shared \
- && ln -s /tmp/shared node_modules/@ailearn/shared
+ && ln -s /app/packages/shared node_modules/@ailearn/shared
 EXPOSE 4000
 CMD ["npm", "run", "dev"]
 
@@ -44,15 +42,14 @@ CMD ["npm", "run", "dev"]
 FROM base AS prod
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules /app/node_modules
-COPY --from=deps /tmp/shared /tmp/shared
-COPY packages/shared /tmp/shared
+COPY packages/shared /app/packages/shared
 COPY apps/api/package.json ./package.json
 COPY apps/api/tsconfig.json ./tsconfig.json
 COPY apps/api/drizzle.config.ts ./drizzle.config.ts
 COPY apps/api/src ./src
 RUN mkdir -p node_modules/@ailearn \
  && rm -rf node_modules/@ailearn/shared \
- && ln -s /tmp/shared node_modules/@ailearn/shared \
+ && ln -s /app/packages/shared node_modules/@ailearn/shared \
  && npm run typecheck \
  && npm run build
 # F-027: 以非 root 用户运行

@@ -5,8 +5,7 @@
  * 功能：
  *   1. 对每个包运行测试，捕获 TAP 输出中的 skipped/todo 计数
  *   2. 检查是否有未在 allowlist 中的 skip/todo
- *   3. 拒绝 Playwright 中 `|| true` / `&& false` 这类恒真空断言
- *   4. allowlist 条目包含：测试名、Issue、Owner、批准人、到期日
+ *   3. allowlist 条目包含：测试名、Issue、Owner、批准人、到期日
  *
  * 用法：
  *   node .github/scripts/skip-todo-gate.mjs                    # 运行所有包
@@ -29,10 +28,8 @@ const PACKAGES = [
   { path: "packages/shared", testDir: "src" },
   { path: "packages/ai-quality", testDir: "src" },
   { path: "apps/api", testDir: "src" },
-  { path: "apps/web", testDir: "lib" },
   { path: "workers/ai-worker", testDir: "src" },
 ];
-const E2E_PACKAGE = "tests/e2e";
 
 // ─── allowlist ─────────────────────────────────────────────────────────
 
@@ -105,7 +102,7 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-const selectablePackages = [...PACKAGES.map((pkg) => pkg.path), E2E_PACKAGE];
+const selectablePackages = PACKAGES.map((pkg) => pkg.path);
 if (targetPackage && !selectablePackages.includes(targetPackage)) {
   console.error(
     `[skip-todo] 未知包: ${targetPackage}；可选值: ${selectablePackages.join(", ")}`,
@@ -156,45 +153,6 @@ function parseSkipTodo(output) {
     unparsedSkippedCount: Math.max(0, skippedCount - skipped.length),
     unparsedTodoCount: Math.max(0, todoCount - todo.length),
   };
-}
-
-/**
- * Playwright 不输出 TAP，且条件式 test.skip 会让必测旅程静默变绿。
- * 因此对 spec 源码做一个窄范围静态门禁；如确有平台级例外，仍须通过
- * 同一 allowlist（package=tests/e2e）记录 owner、approver 与到期日。
- */
-function parsePlaywrightSkipTodo(source, file) {
-  const skipped = [];
-  const todo = [];
-  const vacuous = [];
-
-  for (const [index, rawLine] of source.split("\n").entries()) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("//") || line.startsWith("*")) continue;
-
-    if (/\|\|\s*true\b|&&\s*false\b/.test(line)) {
-      vacuous.push({
-        name: `${file}:${index + 1}`,
-        reason: line,
-      });
-    }
-
-    const call = line.match(
-      /\b(?:test\.describe\.(skip|fixme)|test\.(skip|fixme|todo))\s*\(/,
-    );
-    if (!call) continue;
-
-    const kind = call[1] ?? call[2];
-    const title = line.match(/["'`]([^"'`]+)["'`]/)?.[1] ?? kind;
-    const item = {
-      name: `${file}:${index + 1} ${title}`,
-      reason: line,
-    };
-    if (kind === "skip") skipped.push(item);
-    else todo.push(item);
-  }
-
-  return { skipped, todo, vacuous };
 }
 
 /**
@@ -356,87 +314,6 @@ for (const pkg of packagesToRun) {
   });
 }
 
-// Playwright Must journeys: reject source-level skip/fixme/todo unless an
-// explicit, non-expired allowlist entry exists.
-if (!targetPackage || targetPackage === E2E_PACKAGE) {
-  console.log(`[skip-todo] 扫描 ${E2E_PACKAGE} Playwright spec...`);
-  const cwd = join(repoRoot, E2E_PACKAGE);
-  const specFileList = execSync("find tests -name '*.spec.ts' | sort", {
-    cwd,
-    encoding: "utf8",
-  }).trim();
-  const skipped = [];
-  const todo = [];
-  const vacuous = [];
-
-  for (const file of specFileList ? specFileList.split("\n") : []) {
-    const parsed = parsePlaywrightSkipTodo(
-      readFileSync(join(cwd, file), "utf8"),
-      file,
-    );
-    skipped.push(...parsed.skipped);
-    todo.push(...parsed.todo);
-    vacuous.push(...parsed.vacuous);
-  }
-
-  const violations = [];
-  if (!specFileList) {
-    violations.push({
-      type: "test-discovery",
-      testName: E2E_PACKAGE,
-      reason: "未发现 Playwright spec",
-      allowlistStatus: "E2E 测试发现为空不可豁免",
-    });
-  }
-  for (const [type, items] of [["skip", skipped], ["todo", todo]]) {
-    for (const item of items) {
-      const check = checkAllowlist(item, E2E_PACKAGE, type);
-      if (!check.allowed) {
-        violations.push({
-          type,
-          testName: item.name,
-          reason: item.reason,
-          allowlistStatus: check.reason,
-        });
-      }
-    }
-  }
-  for (const item of vacuous) {
-    violations.push({
-      type: "vacuous",
-      testName: item.name,
-      reason: item.reason,
-      allowlistStatus: "恒真空断言不允许进入门禁测试",
-    });
-  }
-
-  if (violations.length > 0) {
-    allPassed = false;
-    for (const violation of violations) {
-      console.error(
-        `[skip-todo] VIOLATION: ${E2E_PACKAGE} ${violation.type}: `
-          + `"${violation.testName}" — ${violation.allowlistStatus}`,
-      );
-    }
-  }
-
-  console.log(
-    `[skip-todo] ${E2E_PACKAGE}: ${skipped.length} skipped, ${todo.length} todo, `
-      + `${vacuous.length} vacuous`,
-  );
-  results.push({
-    package: E2E_PACKAGE,
-    skippedCount: skipped.length,
-    todoCount: todo.length,
-    vacuousCount: vacuous.length,
-    skipped,
-    todo,
-    vacuous,
-    violations,
-    passed: violations.length === 0,
-  });
-}
-
 // ─── 汇总报告 ───────────────────────────────────────────────────────────
 
 const summary = {
@@ -446,7 +323,7 @@ const summary = {
   allowlistErrors,
   totalSkipped: results.reduce((sum, r) => sum + r.skippedCount, 0),
   totalTodo: results.reduce((sum, r) => sum + r.todoCount, 0),
-  totalVacuous: results.reduce((sum, r) => sum + (r.vacuousCount ?? 0), 0),
+  totalVacuous: 0,
   totalViolations: results.reduce((sum, r) => sum + r.violations.length, 0),
   results,
 };

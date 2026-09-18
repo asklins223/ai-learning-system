@@ -178,7 +178,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "execute_card_agent_turn",
+      operation: "companion_agent",
     };
     const result = await logAICall(params);
     assert.equal(result, true);
@@ -193,7 +193,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "execute_card_agent_turn",
+      operation: "companion_agent",
     };
     const result = await logAICall(params);
     assert.equal(result, false);
@@ -206,7 +206,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "mock",
       modelId: "mock-model",
-      operation: "execute_card_agent_turn",
+      operation: "companion_agent",
     };
     let written = false;
     const result = await logAICall(params, {
@@ -227,7 +227,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "execute_card_agent_turn",
+      operation: "companion_agent",
     };
     const result = await logAICall(params);
     assert.equal(result, false);
@@ -239,7 +239,7 @@ describe("governance logAICall (DB mock)", () => {
       userId: USER_ID,
       provider: "dashscope",
       modelId: "qwen-turbo",
-      operation: "execute_card_agent_turn",
+      operation: "companion_agent",
     };
     const result = await logAICall(params, {
       getPolicy: async () => ({ sendToExternal: true, piiDetection: true, auditLogging: true }),

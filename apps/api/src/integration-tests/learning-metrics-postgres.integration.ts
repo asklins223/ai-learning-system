@@ -4,7 +4,7 @@
  * 覆盖：
  * - POST /learning-runs → run_created + task_presented 自动落库（funnel 维度：
  *   origin/goal/intent/interaction/purpose/trustClass 授权上限）；
- * - POST submissions → artifact_locked 自动落库；
+ * - POST submissions/v2 → artifact_locked 自动落库；
  * - GET /metrics/learning-events 只读查询 + RLS 隔离（另一 user 不可见）；
  * - recordLearningMetric 尽力而为（独立事务不破坏主链路）+ run_result 幂等。
  */
@@ -17,8 +17,8 @@ import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
-// learning_run_v1 capability 门控：测试进程显式开启（动态 import 前设置）。
-process.env.LEARNING_RUN_V1 ??= "true";
+// LearningRun capability gate: enable it for this integration test.
+process.env.LEARNING_RUN_ENABLED ??= "true";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
 const sql = postgres(CONN, { max: 2 });
@@ -40,7 +40,7 @@ interface Seeded {
   workspaceId: string;
   userId: string;
   cardId: string;
-  keyPointId: string;
+  objectiveId: string;
   cleanup: () => Promise<void>;
 }
 
@@ -54,7 +54,7 @@ async function seedBase() : Promise<Seeded> {
     workspaceId: fixture.workspaceId,
     userId: fixture.userId,
     cardId: fixture.cardId,
-    keyPointId: fixture.objectiveId,
+    objectiveId: fixture.objectiveId,
     token: fixture.token,
     cleanup: fixture.cleanup,
   };
@@ -81,11 +81,13 @@ test("§20：POST /learning-runs → run_created + task_presented 自动落库�
       url: "/learning-runs",
       headers: auth,
       payload: {
-        version: 1,
-        origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+        version: 2,
+        originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.objectiveId },
         goal: "stabilize",
         requestedTimeBudgetSeconds: 120,
-        clientRequestId: randomUUID(),
+        // V2 请求不接受 clientRequestId（createLearningRunV2RequestSchema 是
+        // strictObject，且它只属于 V1）；V2 的 client_request_id 由 service 内部按
+        // 请求指纹计算。带上它会被 400 拒绝。
         idempotencyKey: randomUUID(),
       },
     });
@@ -123,15 +125,23 @@ test("§20：submissions → artifact_locked + GET /metrics/learning-events 只�
       url: "/learning-runs",
       headers: auth,
       payload: {
-        version: 1,
-        origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+        version: 2,
+        originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.objectiveId },
         goal: "stabilize",
         requestedTimeBudgetSeconds: 120,
-        clientRequestId: randomUUID(),
+        // V2 请求不接受 clientRequestId（createLearningRunV2RequestSchema 是
+        // strictObject，且它只属于 V1）；V2 的 client_request_id 由 service 内部按
+        // 请求指纹计算。带上它会被 400 拒绝。
         idempotencyKey: randomUUID(),
       },
     });
-    const run = create.json() as { runId: string; activeTask: { taskId: string; revision: number; activeVariant: { variantId: string; revision: number; inputSchemaHash: string } } };
+    assert.equal(create.statusCode, 201, create.body);
+    const run = create.json() as {
+      runId: string;
+      runRevision: number;
+      snapshotId: string;
+      activeTask: { taskId: string; revision: number; activeVariant: { variantId: string; revision: number; inputSchemaHash: string } };
+    };
     const taskId = run.activeTask.taskId;
     const variantId = run.activeTask.activeVariant.variantId;
     const variantRevision = run.activeTask.activeVariant.revision;
@@ -140,13 +150,14 @@ test("§20：submissions → artifact_locked + GET /metrics/learning-events 只�
 
     const submit = await app.inject({
       method: "POST",
-      url: `/learning-runs/${run.runId}/tasks/${taskId}/submissions`,
+      url: `/learning-runs/${run.runId}/tasks/${taskId}/submissions/v2`,
       headers: auth,
       payload: {
-        version: 1,
+        version: 2,
+        snapshotId: run.snapshotId,
         variantId,
         variantRevision,
-        runRevision: 1,
+        runRevision: run.runRevision,
         taskRevision,
         inputSchemaHash,
         idempotencyKey: randomUUID(),

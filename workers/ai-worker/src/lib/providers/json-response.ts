@@ -120,36 +120,15 @@ export function readUsage(value: unknown): {
 // ─── Shared JSON Extraction (QUAL-18: unified parseModelJson / safeParseJson) ──
 
 /**
- * Tolerant JSON extraction from model output.
- *
- * Even with response_format: { type: "json_object" } some models may
- * occasionally wrap output in ```json fences or prefix prose. We strip
- * fences and find the first balanced JSON object as a fallback.
- *
- * QUAL-18: Previously duplicated as `parseModelJson` in openai-compatible.ts
- * and `safeParseJson` in dashscope.ts with identical logic but different
- * variable names. Now unified here.
+ * 从 `start`（必须指向 `{`）开始找匹配的闭合 `}` 下标；找不到返回 -1。
+ * 正确处理字符串字面量与转义。
  */
-export function extractJsonFromText(raw: string): unknown {
-  const stripped = raw
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
-  try {
-    return JSON.parse(stripped);
-  } catch {
-    // fall through to bracket-matching
-  }
-  const start = stripped.indexOf("{");
-  if (start === -1) {
-    throw new Error("model returned no JSON object");
-  }
+function findBalancedObjectEnd(text: string, start: number): number {
   let depth = 0;
   let inStr = false;
   let escaped = false;
-  for (let i = start; i < stripped.length; i++) {
-    const ch = stripped[i];
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
     if (inStr) {
       if (escaped) {
         escaped = false;
@@ -166,12 +145,91 @@ export function extractJsonFromText(raw: string): unknown {
       depth++;
     } else if (ch === "}") {
       depth--;
-      if (depth === 0) {
-        return JSON.parse(stripped.slice(start, i + 1));
-      }
+      if (depth === 0) return i;
     }
   }
-  throw new Error("model returned malformed JSON");
+  return -1;
+}
+
+/** 收集文本中所有**顶层**平衡的 JSON 对象（按出现顺序，已成功解析的）。 */
+function collectBalancedJsonObjects(text: string): unknown[] {
+  const parsed: unknown[] = [];
+  let index = 0;
+  while (index < text.length) {
+    const start = text.indexOf("{", index);
+    if (start === -1) break;
+    const end = findBalancedObjectEnd(text, start);
+    if (end === -1) {
+      index = start + 1;
+      continue;
+    }
+    try {
+      parsed.push(JSON.parse(text.slice(start, end + 1)));
+    } catch {
+      // 该块不是合法 JSON（例如示例被截断）——继续尝试后续块。
+    }
+    index = end + 1;
+  }
+  return parsed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Tolerant JSON extraction from model output.
+ *
+ * Even with response_format: { type: "json_object" } some models may
+ * occasionally wrap output in ```json fences or prefix prose. We strip
+ * fences and find the first balanced JSON object as a fallback.
+ *
+ * QUAL-18: Previously duplicated as `parseModelJson` in openai-compatible.ts
+ * and `safeParseJson` in dashscope.ts with identical logic but different
+ * variable names. Now unified here.
+ *
+ * 2026-09-15（管线评审 L3）：此前括号匹配**只从第一个 `{` 开始**——模型在 JSON
+ * 前输出含 `{` 的说明文本（如示例片段）时会截取到错误对象，随后 schema 校验
+ * 失败并被判 retryable，白烧一轮重试。现在：
+ * - 收集所有顶层平衡对象；
+ * - 传入 `requiredKeys`（调用方知道期望键，如 planner 的 `atoms`）时，优先
+ *   返回包含全部期望键的对象；无完全匹配时取命中键数最多者（并列取更靠后
+ *   的对象——模型通常先给示例、后给正式答案）；
+ * - 未传 `requiredKeys` 时保持原有语义（返回第一个平衡对象），不影响其它调用方。
+ */
+export function extractJsonFromText(raw: string, requiredKeys?: readonly string[]): unknown {
+  const stripped = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  try {
+    return JSON.parse(stripped);
+  } catch {
+    // fall through to bracket-matching
+  }
+  const candidates = collectBalancedJsonObjects(stripped);
+  if (candidates.length === 0) {
+    if (!stripped.includes("{")) {
+      throw new Error("model returned no JSON object");
+    }
+    throw new Error("model returned malformed JSON");
+  }
+  if (requiredKeys && requiredKeys.length > 0) {
+    let best: Record<string, unknown> | null = null;
+    let bestScore = -1;
+    for (const candidate of candidates) {
+      if (!isRecord(candidate)) continue;
+      const score = requiredKeys.filter((key) => key in candidate).length;
+      // `>=`：并列时取更靠后的对象（示例在前、正式答案在后）。
+      if (score >= bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    if (best) return best;
+  }
+  return candidates[0];
 }
 
 // ─── Shared Agent Turn Tool Calls Parsing (QUAL-19 / BUG-09) ────────────────
@@ -196,8 +254,8 @@ export interface ParsedToolCall {
 /**
  * Parse tool calls from an OpenAI-compatible chat completion response body.
  *
- * QUAL-19: Previously duplicated in OpenAICompatibleProvider and
- * DashScopeProvider with identical logic. Now unified.
+ * QUAL-19: Previously duplicated across OpenAI-compatible provider variants
+ * with identical logic. Now unified.
  *
  * BUG-09 fix: The JSON mode fallback (parsing `content` as
  * `structured_action_v1`) is only attempted when no native tool_calls are
@@ -261,10 +319,30 @@ export function parseAgentTurnToolCalls(
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed.toolCalls)) {
         for (const call of parsed.toolCalls) {
+          // 与 native tool_calls 路径同等的健壮性：arguments 可能是 JSON 字符串
+          // （OpenAI 风格）或已解析对象。字符串解析失败必须标记 argumentsMalformed，
+          // 否则字符串会被当作对象传给 zod 校验，报出误导性的 schema 错误；
+          // 由 provider 层升级为确定性的 arguments_malformed 失败。
+          const rawArgs = call.arguments ?? {};
+          let args: Record<string, unknown> = {};
+          let argumentsMalformed = false;
+          let rawArguments: string | undefined;
+          if (typeof rawArgs === "string") {
+            rawArguments = rawArgs;
+            try {
+              args = JSON.parse(rawArgs) as Record<string, unknown>;
+            } catch {
+              argumentsMalformed = true;
+            }
+          } else {
+            args = rawArgs as Record<string, unknown>;
+          }
           toolCalls.push({
             id: String(call.id ?? ""),
             name: String(call.name ?? ""),
-            arguments: (call.arguments ?? {}) as Record<string, unknown>,
+            arguments: args,
+            argumentsMalformed,
+            rawArguments,
           });
         }
       }
@@ -291,8 +369,8 @@ export function parseAgentTurnToolCalls(
 /**
  * 构建 executeAgentTurn 的 OpenAI-compatible messages 数组。
  *
- * PERF-09: 此前 OpenAICompatibleProvider 和 DashScopeProvider 的
- * executeAgentTurn 中各自内联了完全相同的 messages 构建逻辑
+ * PERF-09: 此前各 OpenAI-compatible provider 变体的 executeAgentTurn 中
+ * 各自内联了完全相同的 messages 构建逻辑
  * （systemPrompt + 历史消息 + tool_call_id 映射）。
  * 现统一提取到此处，消除代码重复。
  *
@@ -309,6 +387,7 @@ export function buildAgentTurnMessages(
       | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } }
     >;
     toolCallId?: string;
+    toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
   }>,
 ): Array<{
   role: "system" | "user" | "assistant" | "tool";
@@ -317,6 +396,7 @@ export function buildAgentTurnMessages(
     | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } }
   >;
   tool_call_id?: string;
+  tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
 }> {
   return [
     { role: "system", content: systemPrompt },
@@ -324,7 +404,13 @@ export function buildAgentTurnMessages(
       role: m.role,
       content: m.content,
       ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+      ...(m.toolCalls ? {
+        tool_calls: m.toolCalls.map((call) => ({
+          id: call.id,
+          type: "function" as const,
+          function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+        })),
+      } : {}),
     })),
   ];
 }
-

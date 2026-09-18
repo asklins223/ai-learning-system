@@ -1,6 +1,18 @@
 import type { LearningRunAllowedActionV2, LearningRunPublicV1 } from "@ailearn/shared";
 
 /**
+ * retry_assessment 可重新入队的 assessment 状态：tick 的失败路径把它收尾为
+ * failed；prepare 事务整体回滚时退回 queued；Critic 写回事务回滚时停在
+ * running。三者在状态下都允许重新排队（processAssessmentCommand 只处理
+ * queued，重试即先回到 queued）。
+ */
+const RETRYABLE_ASSESSMENT_STATUSES: ReadonlyArray<NonNullable<LearningRunPublicV1["activeAssessment"]>["status"]> = [
+  "queued",
+  "running",
+  "failed",
+];
+
+/**
  * Project only server-authorized action templates. The renderer must consume
  * this exact union; it must never infer an action from phase or local state.
  */
@@ -37,10 +49,19 @@ export function buildLearningRunAllowedActionsV2(view: LearningRunPublicV1): Lea
     actions.push({ version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true });
   } else if (view.phase === "recoverable_error") {
     if (view.failure?.stage === "prepare") actions.push({ version: 2, kind: "retry_prepare" });
-    if (view.failure?.stage === "assessment" && view.activeAssessment) {
+    // H1（2026-08-24 审查）：只有「确实可重试」的 assessment 才宣告
+    // retry_assessment——completed/not_assessable 的评估重试必然 409，投影与
+    // 状态机必须一致（tick 失败路径会把 queued/running 收尾为 failed）。
+    if (
+      view.failure?.stage === "assessment"
+      && view.activeAssessment
+      && RETRYABLE_ASSESSMENT_STATUSES.includes(view.activeAssessment.status)
+    ) {
       actions.push({ version: 2, kind: "retry_assessment", assessmentId: view.activeAssessment.assessmentId });
     }
     if (view.failure?.stage === "commit") actions.push({ version: 2, kind: "retry_commit" });
+    // H4（2026-08-24 审查）：recoverable_error 的 end 必须被 applyAction 接受
+    // （阶段无在锁证据，无需 abandonLockedEvidence）。
     actions.push({ version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true });
   } else if (view.phase === "assessing" || view.phase === "committing") {
     actions.push({ version: 2, kind: "end", abandonLockedEvidence: true, confirmationRequired: true });

@@ -1,10 +1,16 @@
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { sql } from "drizzle-orm";
-import { AsyncLocalStorage } from "node:async_hooks";
-// 2026-08-24（AI 设计审查 §4.4 第三批）：drizzle schema 单一事实来源下沉至
-// packages/shared，worker 与 api 平级消费（反向路径依赖清零）。
 import * as schema from "@ailearn/shared/db-schema";
+// 稳定 P0-4（2026-09-15 审计）：事务内 workspace/user 上下文（UUID 校验、
+// 嵌套兼容性断言、set_config 回读校验、AsyncLocalStorage）的唯一实现已下沉到
+// packages/shared/src/workspace-transaction.ts，与 API 共用——此前两侧各有一份
+// 逐字拷贝，且 NULL vs 空串的 set_config 坑只在 worker 侧被修过。
+import {
+  WorkspaceTransactionScope,
+  type ActiveWorkspaceTransaction,
+  type WorkspaceScopeContext,
+} from "@ailearn/shared/workspace-transaction";
+import { parseQueueConcurrency } from "./lib/worker-concurrency.ts";
 
 const DEFAULT_DATABASE_URL = "postgres://ailearn:ailearn_dev@postgres:5432/ailearn";
 
@@ -24,29 +30,43 @@ const connectionString = resolveWorkerDatabaseUrl();
 // to ~4 concurrent queries via Promise.all fan-out (version+blocks+governance
 // reads) plus lifecycle queries (claim/reap/metrics) running alongside handlers.
 //   pool = clamp(QUEUE_CONCURRENCY * 4, 15, 64)
-// QUEUE_CONCURRENCY parsing mirrors queue.ts (default 3, clamp [1,16]) so the
-// two constants never drift. Default concurrency 3 → 3×4=12 → min floor 15.
-function resolveWorkerConcurrency(input: string | undefined): number {
-  const raw = Number(input ?? 3);
-  const parsed = Number.isFinite(raw) ? raw : 3;
-  return Math.max(1, Math.min(16, parsed));
-}
-const workerConcurrency = resolveWorkerConcurrency(process.env.QUEUE_CONCURRENCY);
+// 设计 P1-13（2026-09-15 审计）：并发解析改用 lib/worker-concurrency.ts 的
+// **同一实现**（此前本文件与 queue.ts 各有一份逐字拷贝，注释却声称"永不漂移"）。
+// 本文件不能 import queue.ts（queue 依赖本文件，会成环），故解析逻辑独立成模块。
+// Default concurrency 3 → 3×4=12 → min floor 15.
+const workerConcurrency = parseQueueConcurrency(process.env.QUEUE_CONCURRENCY);
 const poolMax = Math.max(15, Math.min(64, workerConcurrency * 4));
-const queryClient = postgres(connectionString, { max: poolMax });
+
+/**
+ * 语句超时（稳定 P0-5，2026-09-15 审计）：此前 worker 池没有任何
+ * statement_timeout（实测 `SHOW statement_timeout` = 0）。终态转换
+ * （ailearn_finish_job / ailearn_fail_job）走的是普通 `await`、没有 signal，
+ * 一条挂起的语句会让该 job 的 promise 永不 settle → `inflight` 槽不释放 →
+ * `available <= 0` → worker 永久停止 claim，而 /metrics 仍返回 200、编排器
+ * 不会重启。给出确定上界（默认 60s，须小于 120s 租约，使语句先报错再由
+ * 租约/reaper 兜底，而不是静默占槽）。
+ *
+ * 只设 statement_timeout，**刻意不设** idle_in_transaction_session_timeout：
+ * V2 管道（H4）在事务内做 LLM HTTP 调用，事务此时 idle-in-transaction，
+ * 设短了会掐断整条管道。
+ */
+export function resolveWorkerStatementTimeoutMs(
+  raw: string | undefined = process.env.WORKER_STATEMENT_TIMEOUT_MS,
+): number {
+  const parsed = Number(raw ?? 60_000);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 60_000;
+}
+
+const queryClient = postgres(connectionString, {
+  max: poolMax,
+  connection: { statement_timeout: resolveWorkerStatementTimeoutMs() },
+});
 export const db = drizzle(queryClient, { schema });
 
 export type WorkerTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-export interface WorkerWorkspaceTransactionContext {
-  workspaceId: string;
-  userId: string | null;
-}
-
-export interface NormalizedWorkerWorkspaceTransactionContext {
-  workspaceId: string;
-  userId: string | null;
-}
+export type WorkerWorkspaceTransactionContext = WorkspaceScopeContext<string | null>;
+export type NormalizedWorkerWorkspaceTransactionContext = WorkspaceScopeContext<string | null>;
 
 export class WorkerWorkspaceTransactionContextError extends Error {
   constructor(message: string) {
@@ -55,87 +75,42 @@ export class WorkerWorkspaceTransactionContextError extends Error {
   }
 }
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const workerScope = new WorkspaceTransactionScope<string | null, WorkerTransaction>({
+  label: "worker workspace",
+  // worker 处理系统票（reaper、归档、伴星后台任务）时没有 actor，userId 允许 null。
+  allowNullUserId: true,
+  createError: (message) => new WorkerWorkspaceTransactionContextError(message),
+});
 
-function normalizeContextUuid(value: string, field: "workspaceId" | "userId"): string {
-  const normalized = value.trim().toLowerCase();
-  if (!UUID_PATTERN.test(normalized)) {
-    throw new WorkerWorkspaceTransactionContextError(`${field} must be a UUID`);
-  }
-  return normalized;
-}
+type ActiveWorkerWorkspaceTransaction = ActiveWorkspaceTransaction<
+  string | null,
+  WorkerTransaction
+>;
 
 export function normalizeWorkerWorkspaceTransactionContext(
   context: WorkerWorkspaceTransactionContext,
 ): NormalizedWorkerWorkspaceTransactionContext {
-  if (!context || typeof context !== "object") {
-    throw new WorkerWorkspaceTransactionContextError("worker workspace transaction context is required");
-  }
-  if (typeof context.workspaceId !== "string") {
-    throw new WorkerWorkspaceTransactionContextError("workspaceId must be a UUID");
-  }
-  if (context.userId !== null && typeof context.userId !== "string") {
-    throw new WorkerWorkspaceTransactionContextError("userId must be a UUID or null");
-  }
-  return {
-    workspaceId: normalizeContextUuid(context.workspaceId, "workspaceId"),
-    userId: context.userId === null ? null : normalizeContextUuid(context.userId, "userId"),
-  };
+  return workerScope.normalize(context);
 }
 
 export function assertWorkerWorkspaceTransactionContextCompatible(
   active: NormalizedWorkerWorkspaceTransactionContext,
   requested: NormalizedWorkerWorkspaceTransactionContext,
 ): void {
-  if (active.workspaceId !== requested.workspaceId || active.userId !== requested.userId) {
-    throw new WorkerWorkspaceTransactionContextError(
-      "nested worker database work cannot change workspace or user context",
-    );
-  }
+  workerScope.assertCompatible(active, requested);
 }
 
-type ActiveWorkerWorkspaceTransaction = {
-  context: NormalizedWorkerWorkspaceTransactionContext;
-  transaction: WorkerTransaction;
-  open: boolean;
-};
-
-const workerWorkspaceTransactionStorage =
-  new AsyncLocalStorage<ActiveWorkerWorkspaceTransaction>();
-
+/**
+ * `userId === null` 必须设 NULL 而非空串：RLS 策略中 `user_id = ''::uuid`
+ * 是计划期常量转换，空串会直接抛 "invalid input syntax for type uuid: """，
+ * 与 OR 短路无关（0138 审查修复后验证到的真实故障）。该不变量现在由
+ * packages/shared/src/workspace-transaction.ts 统一实现。
+ */
 export async function setWorkerTransactionContext(
   transaction: WorkerTransaction,
   context: WorkerWorkspaceTransactionContext,
 ): Promise<NormalizedWorkerWorkspaceTransactionContext> {
-  const normalized = normalizeWorkerWorkspaceTransactionContext(context);
-  const active = workerWorkspaceTransactionStorage.getStore();
-  if (active) {
-    if (!active.open) {
-      throw new WorkerWorkspaceTransactionContextError(
-        "worker workspace transaction is no longer active",
-      );
-    }
-    assertWorkerWorkspaceTransactionContextCompatible(active.context, normalized);
-  }
-
-  // userId 为 null 时必须设 NULL 而非空串：RLS 策略中 `user_id = ''::uuid`
-  // 是计划期常量转换，空串会直接抛 "invalid input syntax for type uuid: """，
-  // 与 OR 短路无关（0138 审查修复后验证到的真实故障）。
-  const rows = await transaction.execute<{ workspace_id: string; user_id: string | null }>(sql`
-    SELECT
-      pg_catalog.set_config('app.workspace_id', ${normalized.workspaceId}, true) AS workspace_id,
-      pg_catalog.set_config('app.user_id', ${normalized.userId ?? null}, true) AS user_id
-  `);
-  const applied = rows[0];
-  if (
-    applied?.workspace_id?.toLowerCase() !== normalized.workspaceId
-    || (applied?.user_id ?? "").toLowerCase() !== (normalized.userId ?? "")
-  ) {
-    throw new WorkerWorkspaceTransactionContextError(
-      "database rejected worker workspace transaction context",
-    );
-  }
-  return normalized;
+  return workerScope.applyContext(transaction, context);
 }
 
 export async function withWorkerWorkspaceTransaction<T>(
@@ -143,25 +118,20 @@ export async function withWorkerWorkspaceTransaction<T>(
   operation: (transaction: WorkerTransaction) => Promise<T>,
 ): Promise<T> {
   const normalized = normalizeWorkerWorkspaceTransactionContext(context);
-  const active = workerWorkspaceTransactionStorage.getStore();
+  const active = workerScope.requireActive(normalized);
   if (active) {
-    if (!active.open) {
-      throw new WorkerWorkspaceTransactionContextError(
-        "worker workspace transaction is no longer active",
-      );
-    }
-    assertWorkerWorkspaceTransactionContextCompatible(active.context, normalized);
     return operation(active.transaction);
   }
 
   return db.transaction(async (transaction) => {
     await setWorkerTransactionContext(transaction, normalized);
-    const scopedTransaction = { context: normalized, transaction, open: true };
+    const scopedTransaction: ActiveWorkerWorkspaceTransaction = {
+      context: normalized,
+      transaction,
+      open: true,
+    };
     try {
-      return await workerWorkspaceTransactionStorage.run(
-        scopedTransaction,
-        () => operation(transaction),
-      );
+      return await workerScope.run(scopedTransaction, () => operation(transaction));
     } finally {
       scopedTransaction.open = false;
     }

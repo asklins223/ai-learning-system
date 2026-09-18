@@ -19,10 +19,6 @@ import { db, setApiTransactionContext } from "../../db/client.ts";
 import { logCompanionAudit } from "../companion-shell/audit-service.ts";
 import { logger } from "../../lib/logger.ts";
 
-export type ExportCompanionResult =
-  | { ok: true; ndjson: string[] }
-  | { ok: false; statusCode: number; code: string; message: string };
-
 /** 流式导出结果：不含 ndjson 数组——行由 onLine 回调在产生时立即写出。 */
 export type ExportCompanionStreamResult =
   | { ok: true; statusCode?: never; code?: never; message?: never }
@@ -47,12 +43,11 @@ function recordsKeysetWhere(cursor: RecordsCursor, table: string) {
 
 /**
  * 流式导出（round-5 修复）：每一行 NDJSON 在装载后立即交给 onLine 写出，不再
- * 把整份输出累积进内存数组再返回。峰值内存被约束为「一页原始行 + 已写出行累
- * 计 SHA-256 摘要」（footer 仍最后一行，recordsSha256 语义与旧实现一致）。
+ * 把整份输出累积进内存数组再返回。峰值内存被约束为「一页原始行 + 增量
+ * SHA-256 状态」（footer 仍最后一行，recordsSha256 语义与旧实现一致）。
  * 返回 { ok:true } 表示全部写出成功；{ ok:false } 携带错误状态（错误发生在任何
  * 行写出前，故调用方无需回滚已写出内容）。
  *
- * 兼容旧 API 的 exportCompanionData 保留为薄封装（供测试/内部直接调用累积数组）。
  */
 export async function exportCompanionDataStream(
   args: { workspaceId: string; userId: string },
@@ -93,7 +88,6 @@ export async function exportCompanionDataStream(
         voiceProvenance: 0,
         proactiveDeliveries: 0,
         actionProposals: 0,
-        actionRuns: 0,
       };
       const hasher = createHash("sha256");
       const emitLine = async (line: string): Promise<void> => {
@@ -247,7 +241,7 @@ export async function exportCompanionDataStream(
       }
       counts.messages = messageCount;
 
-      // proactive deliveries / action proposals / action runs（§12 六类 record 契约）：
+      // proactive deliveries / action proposals（§12 record 契约）：
       // keyset 分页循环装载（见 recordsKeysetWhere），避免全量单查询。
       {
         let cursor: RecordsCursor = null;
@@ -344,51 +338,6 @@ export async function exportCompanionDataStream(
         }
         counts.actionProposals = recordCount;
       }
-      {
-        let cursor: RecordsCursor = null;
-        let recordCount = 0;
-        for (;;) {
-          const page = (await tx.execute(sql`
-            SELECT id, conversation_id AS "conversationId", proposal_id AS "proposalId",
-                   status, created_at AS "createdAt"
-            FROM companion_action_runs
-            WHERE workspace_id = ${args.workspaceId} AND user_id = ${args.userId}
-              AND ${recordsKeysetWhere(cursor, "companion_action_runs")}
-            ORDER BY conversation_id, created_at, id
-            LIMIT ${PAGE_SIZE}
-          `)) as unknown as Array<Record<string, unknown>>;
-          if (page.length === 0) break;
-          for (const run of page) {
-            await emitLine(JSON.stringify({
-              version: 1,
-              kind: "action_run",
-              value: {
-                id: String(run.id),
-                conversationId: run.conversationId ? String(run.conversationId) : null,
-                proposalId: run.proposalId ? String(run.proposalId) : null,
-                status: String(run.status ?? ""),
-                createdAt: run.createdAt instanceof Date
-                  ? run.createdAt.toISOString()
-                  : new Date(String(run.createdAt ?? "")).toISOString(),
-              },
-            }));
-            recordCount += 1;
-          }
-          // N#7-11: 行数上限，超限截断 + 告警。
-          if (recordCount >= COMPANION_EXPORT_MAX_ROWS) {
-            logger.warn(
-              { workspaceId: args.workspaceId, userId: args.userId, type: "actionRuns", limit: COMPANION_EXPORT_MAX_ROWS },
-              "companion export 达到 action_runs 行数上限，导出被截断",
-            );
-            break;
-          }
-          if (page.length < PAGE_SIZE) break;
-          const last = page[page.length - 1] as { conversationId: string; createdAt: Date; id: string };
-          cursor = { conversationId: String(last.conversationId), createdAt: last.createdAt, id: String(last.id) };
-        }
-        counts.actionRuns = recordCount;
-      }
-
       const recordsSha256 = hasher.digest("hex");
       // footer 不参与 recordsSha256（覆盖范围至 footer 前一行为止），且 hasher
       // 已终结——必须直写 onLine，不能走会 update 哈希的 emitLine（2026-08-23
@@ -416,21 +365,4 @@ export async function exportCompanionDataStream(
     }).catch(() => undefined);
   }
   return result;
-}
-
-/**
- * 兼容旧 API：把流式导出的每一行累积进 ndjson 数组一次性返回。生产路由应使用
- * exportCompanionDataStream 直接流式写出，避免整份输出驻留内存；本封装供集成
- * 测试与内部调用保持既有契约。
- */
-export async function exportCompanionData(args: {
-  workspaceId: string;
-  userId: string;
-}): Promise<ExportCompanionResult> {
-  const ndjson: string[] = [];
-  const result = await exportCompanionDataStream(args, (line) => {
-    ndjson.push(line);
-  });
-  if (!result.ok) return result;
-  return { ok: true, ndjson };
 }

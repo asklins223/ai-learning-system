@@ -10,15 +10,22 @@
  * user/workspace 的 companion_messages 正文（blocks 的 text 字段）；
  * 已删除对话物理清除，不会命中；结果按 createdAt 倒序，limit 默认 20。
  *
- * 无写权限（requireSession 即可）；不创建任何会话。
+ * 只读（不创建、不修改任何会话），但仍属 dialogue 能力面：两条路由都要求
+ * COMPANION_DIALOGUE_V1_ENABLED，关闭时 404 fail closed，与同模块
+ * conversations 列表/详情一致。
  */
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { companionConversations, companionMessages } from "../../db/schema/companion-conversations.ts";
+import { companionConversations, companionMessages } from "@ailearn/shared/db-schema/companion-conversations";
 import { and, desc, eq, sql } from "drizzle-orm";
+// 这两条路由读取的是伴星会话正文（session/current 解析 journey/inbox 会话，
+// history/search 全文检索 companion_messages），与 conversations 列表/详情同属
+// dialogue 能力面。此前只挂 requireSession，导致 COMPANION_DIALOGUE_V1_ENABLED
+// 关闭时仍可读到会话内容——与同模块其余路由的能力边界不一致。
+import { requireCompanionDialogue } from "./routes.ts";
 
 const historySearchQuerySchema = z.object({
   q: z.string().min(1).max(120),
@@ -42,7 +49,7 @@ export interface AssistantSessionResolutionV1 {
 export async function assistantSessionRoutes(app: FastifyInstance) {
   app.get(
     "/companion/session/current",
-    { preHandler: [requireSession] },
+    { preHandler: [requireSession, requireCompanionDialogue] },
     async (req) => {
       const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
       const session = await withWorkspaceTransaction(scope, async (tx) => {
@@ -94,7 +101,7 @@ export async function assistantSessionRoutes(app: FastifyInstance) {
   // GET /companion/history/search — §10.4 全文搜索（redacted/已删内容不命中）。
   app.get<{ Querystring: Record<string, string | undefined> }>(
     "/companion/history/search",
-    { preHandler: [requireSession] },
+    { preHandler: [requireSession, requireCompanionDialogue] },
     async (req, reply) => {
       const query = historySearchQuerySchema.safeParse(req.query ?? {});
       if (!query.success) {

@@ -12,7 +12,7 @@ import type { ApiTransaction } from "../../db/client.ts";
 import {
   evidenceSnapshotsV2,
   evidenceEligibilityStatesV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   filterBlocksBySourceScope,
   computeSealedEvidenceSnapshotHashV2,

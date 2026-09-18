@@ -81,6 +81,7 @@ export function resolveCompanionCursor(args: {
 
 interface StreamEventRow {
   conversation_id: string;
+  workspace_id: string;
   seq: string;
   run_id: string | null;
   generation: number;
@@ -98,6 +99,10 @@ export function formatCompanionSse(event: StreamEventRow): string {
       version: 1,
       eventId: `${event.conversation_id}:${event.seq}`,
       seq: Number(event.seq),
+      // workspaceId is required by companionStreamEventBaseShapeV1 — omitting it
+      // made every SSE frame fail the shared (strict) event contract, so no
+      // client could validate a frame against the wire truth in §5.1.
+      workspaceId: event.workspace_id,
       conversationId: event.conversation_id,
       runId: event.run_id,
       generation: event.generation,
@@ -114,7 +119,8 @@ export function formatCompanionSse(event: StreamEventRow): string {
 // ─── SSE 处理器 ───────────────────────────────────────────────────────────
 
 export interface CompanionEventStreamWriter {
-  write(chunk: string): void;
+  /** 返回 false 表示 socket 背压/已关闭；void 仅兼容不暴露写状态的测试 writer。 */
+  write(chunk: string): boolean | void;
   onAbort(cb: () => void): void;
   close(): void;
 }
@@ -130,6 +136,8 @@ export type CompanionEventStreamResult =
 export interface CompanionEventStreamHandle {
   /** 路由在 writeHead 后调用：flush replay 并启动 live（NOTIFY + poll + heartbeat）。 */
   start(): void;
+  /** 路由在无法建立响应头时调用，确保连接槽位和监听器被释放。 */
+  close(): void;
 }
 
 async function loadCompanionEvents(
@@ -142,6 +150,7 @@ async function loadCompanionEvents(
     const rows = await tx
       .select({
         conversation_id: companionStreamEvents.conversationId,
+        workspace_id: companionStreamEvents.workspaceId,
         seq: companionStreamEvents.seq,
         run_id: companionStreamEvents.runId,
         generation: companionStreamEvents.generation,
@@ -251,6 +260,35 @@ export async function openCompanionEventStream(args: {
     return { statusCode: 429, error: { code: "TOO_MANY_CONNECTIONS", message: "SSE connection limit reached" } };
   }
 
+  // 在任何数据库 await 之前就注册断开回调。客户端可能在 cursor 校验或
+  // replay 查询期间断开；若等到查询完成后才监听，单进程 3/10 槽位会泄漏。
+  let aborted = false;
+  let streamReady = false;
+  let slotReleased = false;
+  let closed = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let unsubscribe: (() => void) | null = null;
+  const releaseSlotOnce = (): void => {
+    if (slotReleased) return;
+    slotReleased = true;
+    releaseCompanionSlot(args.conversationId, args.userId);
+  };
+  const dispose = (): void => {
+    if (closed) return;
+    closed = true;
+    if (pollTimer) clearInterval(pollTimer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    unsubscribe?.();
+    releaseSlotOnce();
+    args.writer.close();
+  };
+  args.writer.onAbort(() => {
+    aborted = true;
+    if (streamReady) dispose();
+    else releaseSlotOnce();
+  });
+
   const validated = await validateCompanionCursor(
     args.conversationId,
     args.workspaceId,
@@ -263,10 +301,16 @@ export async function openCompanionEventStream(args: {
       { err: err instanceof Error ? err.message : String(err), conversationId: args.conversationId },
       "companion SSE cursor validation failed",
     );
-    releaseCompanionSlot(args.conversationId, args.userId);
+    releaseSlotOnce();
     return { ok: false as const, statusCode: 500 as const, code: "INTERNAL_ERROR", message: "cursor validation failed" };
   });
   if (!validated.ok) {
+    // 2026-09 后端审查修复（P1）：400/404/409 早退同样必须释放 slot。此前只有
+    // 抛异常路径与 replay 失败路径释放，断开监听又在 DB await 之后才注册——
+    // 每个 INVALID_CURSOR/NOT_FOUND/CURSOR_EXPIRED 请求都会永久占用一个
+    // per-conversation(3)/per-user(10) 名额（内存计数无 TTL），409 又正是客户端
+    // TTL 过期的常规恢复路径 → 数次重连后该用户被 429 锁死到进程重启。
+    releaseSlotOnce();
     return { statusCode: validated.statusCode, error: { code: validated.code, message: validated.message } };
   }
 
@@ -275,12 +319,16 @@ export async function openCompanionEventStream(args: {
   try {
     replay = await loadCompanionEvents(args.conversationId, args.workspaceId, args.userId, resolved.after);
   } catch {
-    releaseCompanionSlot(args.conversationId, args.userId);
+    releaseSlotOnce();
     return { statusCode: 500, error: { code: "INTERNAL_ERROR", message: "replay failed" } };
   }
 
+  if (aborted) {
+    releaseSlotOnce();
+    return { statusCode: 500, error: { code: "INTERNAL_ERROR", message: "stream aborted" } };
+  }
+
   let started = false;
-  let closed = false;
   let cursor = resolved.after;
   let pumping = false;
   // F10（round-5 审计）：live 阶段 TTL 清理仍可能删除窗口中间的 stream_event 行。
@@ -290,24 +338,8 @@ export async function openCompanionEventStream(args: {
   // 中途缺口会命中窗口计数校验返回 CURSOR_EXPIRED → 客户端走 snapshot 恢复
   // （即既有 §7.4 的缺口降级路径）。保持简单：不在此处自行重建，交给重连校验闭环。
   let gapDetected = false;
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  let unsubscribe: (() => void) | null = null;
-
-  // 释放必须幂等且无论 start() 是否被调用都会执行：路由在 hijack() 后、本
-  // 函数返回前若连接断开（或 start 从未被调用），slot 必须释放，否则
-  // 3/10 连接限制被半开连接永久占用（无 TTL 兜底）。
-  const dispose = (): void => {
-    if (closed) return;
-    closed = true;
-    if (pollTimer) clearInterval(pollTimer);
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    unsubscribe?.();
-    releaseCompanionSlot(args.conversationId, args.userId);
-    args.writer.close();
-  };
-  // 在返回 handle 前注册：连接在任何时刻 close 都会走 dispose。
-  args.writer.onAbort(dispose);
+  // 后续 start/live 阶段的同一个断开回调会切换到 dispose()，保证释放幂等。
+  streamReady = true;
 
   async function pump(): Promise<void> {
     if (pumping || closed || gapDetected) return;
@@ -337,7 +369,11 @@ export async function openCompanionEventStream(args: {
         }
         // 连续窗口才推流并推进 cursor。
         for (const event of events) {
-          args.writer.write(formatCompanionSse(event));
+          if (args.writer.write(formatCompanionSse(event)) === false) {
+            // 不推进 cursor；客户端重连时从上一条确认过的事件继续，允许重复但不丢失。
+            dispose();
+            return;
+          }
           cursor = Number(event.seq);
         }
       }
@@ -359,7 +395,10 @@ export async function openCompanionEventStream(args: {
       started = true;
       // flush replay（内存数据，无 DB 交互）
       for (const event of replay) {
-        args.writer.write(formatCompanionSse(event));
+        if (args.writer.write(formatCompanionSse(event)) === false) {
+          dispose();
+          return;
+        }
         cursor = Number(event.seq);
       }
       replay = [];
@@ -374,9 +413,10 @@ export async function openCompanionEventStream(args: {
         if (!closed) void pump();
       }, 2_500);
       heartbeatTimer = setInterval(() => {
-        if (!closed) args.writer.write(`: heartbeat ${Date.now()}\n\n`);
+        if (!closed && args.writer.write(`: heartbeat ${Date.now()}\n\n`) === false) dispose();
       }, 15_000);
     },
+    close: dispose,
   };
 
   return { statusCode: 200, stream: handle };

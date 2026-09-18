@@ -16,12 +16,13 @@ import {
   cardGenerationPlansV2,
   cardGenerationRunOutboxV2,
   cardCandidateFeedbackV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   candidateActionTouchesAnswerV2,
   type CandidateActionCommandV2,
   type CandidateActionV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
+import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
   computeCandidateRevisionHashV2,
@@ -110,7 +111,11 @@ async function loadRunForReview(tx: ApiTransaction, workspaceId: string, runId: 
 }
 
 function validateRunForReview(run: RunRow, command: CandidateActionCommandV2) {
-  if (run.status !== "review_ready") {
+  // 审核开放态由共享谓词定义：review_ready 与 needs_attention 都算。deck gate
+  // 失败会把 run 落到 needs_attention，但通过各自门禁的候选仍然保留给用户决定
+  // （quality_state=passed / publish_state=unpublished / 未决），worker 明确要求
+  // 「用户仍应能保留并启用通过门禁的候选」。真正的门在候选身上，见 getCandidateForAction。
+  if (!isCardGenerationReviewOpen(run.status)) {
     throw new CardGenerationV2ServiceError("invalid_state", 409, "只有 review_ready 状态的运行可以操作候选");
   }
   if (run.cardContentEpoch !== command.expectedCardContentEpoch) {

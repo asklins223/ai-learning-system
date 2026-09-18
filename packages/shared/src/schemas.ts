@@ -5,7 +5,6 @@ import {
   CardStatus,
   EvidenceAlignment,
   ReviewStatus,
-  ValidationOutcome,
 } from "./enums.ts";
 
 export const learningCardKeyPointSchema = z.object({
@@ -171,13 +170,6 @@ export const cardStatusSchema = z.enum([
   CardStatus.ARCHIVED,
 ]);
 
-export const validationOutcomeSchema = z.enum([
-  ValidationOutcome.PRELIMINARY_UNDERSTANDING,
-  ValidationOutcome.UNCLEAR_EXPRESSION,
-  ValidationOutcome.MISUNDERSTANDING,
-  ValidationOutcome.UNKNOWN,
-]);
-
 export const artifactStatusSchema = z.enum([
   ArtifactStatus.PENDING,
   ArtifactStatus.READY,
@@ -193,10 +185,6 @@ export const artifactTypeSchema = z.enum([
   ArtifactType.CODE_EXPLANATION,
   ArtifactType.PITFALL,
   ArtifactType.QUESTION,
-  ArtifactType.VALIDATION_FEEDBACK,
-  ArtifactType.VALIDATION_QUESTION,
-  ArtifactType.RUBRIC_EVALUATION,
-  ArtifactType.DETERMINISTIC_QUESTION,
 ]);
 
 export const reviewStatusSchema = z.enum([
@@ -207,156 +195,3 @@ export const reviewStatusSchema = z.enum([
   ReviewStatus.SUPERSEDED,
   ReviewStatus.CANCELLED,
 ]);
-
-/**
- * 验证判定的 AI 输出契约（对齐产品文档 §5.8）。
- * worker 调 evaluateValidation 后必须通过此 schema 校验才写入。
- */
-export const evaluateValidationOutputSchema = z.object({
-  thinking: z.string().max(2000).optional(),
-  outcome: validationOutcomeSchema,
-  confidence: z.number().min(0).max(1),
-  feedback: z.string().min(1).max(2000),
-  covered_points: z.array(z.string().min(1).max(200)).max(20).default([]),
-  missing_points: z.array(z.string().min(1).max(200)).max(20).default([]),
-  misunderstandings: z.array(z.string().min(1).max(200)).max(20).default([]),
-  evidence_refs: z.array(z.string().min(1).max(100)).max(20).default([]),
-});
-
-export type EvaluateValidationOutput = z.infer<typeof evaluateValidationOutputSchema>;
-
-// ─── v0.6: Question Provider Contract (计划 §7.1) ──────────────────────────
-
-/**
- * v0.6 AI 验证题目生成输出契约。
- *
- * AI 生成题目时必须返回此结构，Worker 持久化前用此 schema 做完整校验。
- *
- * 约束：
- * - question 不得直接泄露 claim 结论、quote 或 expected concept
- * - evidenceRefId 必须来自服务端输入 allowlist
- * - rubricItems 为 2～5 个，key 唯一、权重合法、required 至少一个
- * - 输出不含 chain-of-thought
- */
-export const generateValidationQuestionOutputSchema = z.object({
-  questionType: z.enum(["explain", "example", "apply"]),
-  question: z.string().min(1).max(500),
-  rubricItems: z
-    .array(
-      z.object({
-        key: z.string().min(1).max(100),
-        criterion: z.string().min(1).max(500),
-        expectedConcept: z.string().min(1).max(500),
-        weight: z.union([z.literal(1), z.literal(2), z.literal(3)]),
-        required: z.boolean(),
-        evidenceRefId: z.string().min(1).max(100),
-      }),
-    )
-    .min(2)
-    .max(5),
-}).strict().superRefine((output, ctx) => {
-  const seenKeys = new Set<string>();
-  output.rubricItems.forEach((item, index) => {
-    if (seenKeys.has(item.key)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "rubric item keys must be unique",
-        path: ["rubricItems", index, "key"],
-      });
-    }
-    seenKeys.add(item.key);
-  });
-
-  if (!output.rubricItems.some((item) => item.required)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "at least one rubric item must be required",
-      path: ["rubricItems"],
-    });
-  }
-});
-
-export type GenerateValidationQuestionOutput = z.infer<
-  typeof generateValidationQuestionOutputSchema
->;
-
-/**
- * v0.6 Question 生成 Provider 输入。
- * 由 Worker 在调用前组装，evidenceRefs 使用 opaque ID。
- */
-export interface GenerateValidationQuestionInput {
-  /** Key point claim（断言），不直接暴露给 AI 作为题面 */
-  claim: string;
-  /** 原文引用片段 */
-  quote: string;
-  /** 服务端提供的 opaque evidence 引用列表 */
-  evidenceRefs: Array<{
-    /** Opaque ID，AI 输出时引用此 ID */
-    refId: string;
-    /** 该证据的引用文本 */
-    quoteText: string;
-    /** 该证据的对齐状态 */
-    alignment: string;
-  }>;
-  /** 题型偏好（可选），AI 可自主选择 */
-  preferredType?: "explain" | "example" | "apply";
-}
-
-// ─── v0.6: Evaluation Provider Contract (计划 §7.2) ────────────────────────
-
-/**
- * v0.6 逐点 rubric 评估输出契约。
- *
- * 模型不再返回总体 outcome，只返回每个 rubric item 的逐项评估。
- * 总体 outcome 由确定性 reducer 从 assessments 重算。
- *
- * 约束：
- * - 输入 item 与输出 result 一一对应
- * - 没有未知、重复或遗漏 ID
- * - answerExcerpt 是 user answer 的真实子串
- * - rationale 只解释可观察判断，不保存隐藏推理
- * - feedback 不声称 rubric/evidence 之外的事实
- */
-export const evaluateRubricOutputSchema = z.object({
-  itemResults: z
-    .array(
-      z.object({
-        rubricItemId: z.string().min(1).max(100),
-        verdict: z.enum([
-          "covered",
-          "partial",
-          "missing",
-          "contradicted",
-          "not_assessable",
-        ]),
-        confidence: z.number().min(0).max(1),
-        rationale: z.string().min(1).max(500),
-        answerExcerpt: z.string().max(500).optional(),
-      }),
-    )
-    .min(1)
-    .max(10),
-  feedback: z.string().min(1).max(1000),
-}).strict();
-
-export type EvaluateRubricOutput = z.infer<typeof evaluateRubricOutputSchema>;
-
-/**
- * v0.6 Evaluation Provider 输入。
- * Worker 只发送净化后的数据，不发送 userId 或敏感信息。
- */
-export interface EvaluateRubricInput {
-  /** 题目正文 */
-  question: string;
-  /** 题型 */
-  questionType: string;
-  /** 用户回答 */
-  userAnswer: string;
-  /** Rubric items（不含 expected_concept 的敏感字段） */
-  rubricItems: Array<{
-    rubricItemId: string;
-    criterion: string;
-    weight: number;
-    required: boolean;
-  }>;
-}

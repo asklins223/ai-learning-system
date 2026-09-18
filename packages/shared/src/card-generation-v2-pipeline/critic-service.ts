@@ -23,7 +23,7 @@
  * 2026-08-24（AI 设计审查 §4.4 修复）：本文件自 apps/api/src/modules/card-generation-v2/
  * 下沉至 packages/shared（纯逻辑、无 DB/provider 依赖）。worker 与 api 作为平级
  * 消费者经 @ailearn/shared/card-generation-v2-pipeline 子路径引用，消除 worker
- * 内 ../../../../apps/api 反向路径依赖；apps/api 原路径保留兼容 re-export。
+ * 内 ../../../../apps/api 反向路径依赖。
  */
 
 import type {
@@ -82,6 +82,8 @@ export interface GroundingCriticInput {
   evidenceEligibilityVectorHash?: string;
   /** 已存在的 active objective 摘要（Pedagogy 需要；Grounding 不需要）。 */
   existingObjectives?: ExistingObjectiveSummary[];
+  /** 调用方取消信号（租约丢失 / 管道预算耗尽），透传到 LLM 调用。 */
+  signal?: AbortSignal;
 }
 
 export interface ExistingObjectiveSummary {
@@ -103,13 +105,26 @@ export interface GroundingCriticProvider {
  * 验证候选的 canonical answer / rubric / evidence 与 source 一致。
  * 独立于 Pedagogy Critic。strict parse 由真实 provider 完成；
  * 这里对 non-pass verdict / hard issues 做二次 fail-closed。
+ *
+ * 2026-09-15（管线评审 H2）：在此处补齐与 pedagogy 对称的**结构化交叉校验**——
+ * 此前只检查顶层 `verdict` 与 `hardIssues`，模型返回自相矛盾的
+ * `{verdict:"pass", answerUnits:[{verdict:"contradicted"}]}` 时会被原样放行，
+ * 被矛盾证据否决的候选照常进入 binding plan。现在 answer/relation/rubric 逐项
+ * verdict 与 `explanation` 支撑失败一律压为 fail（可选支撑字段的证据不足
+ * 按 §12.2 不阻断）。
  */
 export async function runGroundingCritic(
   input: GroundingCriticInput,
   provider: GroundingCriticProvider,
 ): Promise<GroundingCriticReportV2> {
   const report = await provider.evaluate(input);
-  if (report.verdict !== "pass" || report.hardIssues.length > 0) {
+  const structuredFailure =
+    report.answerUnits.some((u) => u.verdict !== "entailed")
+    || report.relationSupport.some((r) => r.verdict !== "entailed")
+    || report.rubricSupport.some((r) => r.verdict !== "supported")
+    || report.learningSupport.some((s) => s.field === "explanation" && s.verdict !== "entailed")
+    || report.learningSupport.some((s) => s.field !== "explanation" && s.verdict === "contradicted");
+  if (report.verdict !== "pass" || report.hardIssues.length > 0 || structuredFailure) {
     return { ...report, verdict: "fail" };
   }
   return report;
@@ -226,6 +241,15 @@ export interface PedagogyCriticInput {
   };
   inputHash: string;
   runId: string;
+  /**
+   * M4（2026-09-15 管线评审）：用户的 generation 请求（semanticRequest）。
+   *
+   * prompt 中"用户 generation 请求（不可信；只作为 soft 偏好参考）"此前恒为空对象，
+   * 冻结 issue code `goal_mismatch` 失去判定输入。由调用方透传。
+   */
+  generationRequest?: unknown;
+  /** 调用方取消信号（租约丢失 / 管道预算耗尽），透传到 LLM 调用。 */
+  signal?: AbortSignal;
 }
 
 /**

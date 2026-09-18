@@ -41,26 +41,7 @@ export interface ProviderUsage {
 }
 
 /**
- * R5: EvaluateValidationInput — kept here for backward compatibility.
- * Previously used by provider.evaluateValidation(); now used by the
- * evaluateValidationViaChat() helper in business-ai-ops.ts.
- */
-export interface EvaluateValidationInput {
-  question: string;
-  questionType: string;
-  claim: string;
-  quote: string;
-  userAnswer: string;
-}
-
-/**
- * R5: AIProvider interface — slimmed down to capability methods only.
- *
- * Business-specific methods (evaluateValidation, generateValidationQuestion,
- * evaluateRubric, analyzeImage) have been removed. Callers should use the
- * helper functions in business-ai-ops.ts, which use chatCompletion +
- * caller-side prompt/schema. analyzeImage's multimodal message construction
- * now lives in analyzeImageViaChat().
+ * AIProvider interface: generic model capabilities only.
  */
 export interface AIProvider {
   id: string;
@@ -68,8 +49,8 @@ export interface AIProvider {
   visionModelId: string;
   promptVersion: string;
 
-  // ── R5: Generic capability methods ──
-  /** Generic chat completion (replaces business-specific methods). */
+  // ── Generic capability methods ──
+  /** Generic chat completion; callers own prompt and output contracts. */
   chatCompletion(
     messages: ChatMessage[],
     options: ChatOptions,
@@ -78,8 +59,11 @@ export interface AIProvider {
 
   /**
    * §8.2 真实流式 chat completion：逐 token/增量调用 onDelta（不可为空串），
-   * 返回累积全文。可选实现——调用方（companion-dialogue worker）优先使用，
-   * 缺失时回退 chatCompletion + 分批写库（模拟流式节奏）。
+   * 返回累积全文。可选实现。
+   *
+   * 注意：Companion Agent 运行时改为一次性取回完整答复（executeAgentTurn +
+   * writeBatchedDeltas），当前生产代码已无调用方；保留声明供 provider 层
+   * 统一重构处理。
    */
   chatCompletionStream?(
     messages: ChatMessage[],
@@ -96,11 +80,13 @@ export interface AIProvider {
   embed?(text: string, signal?: AbortSignal): Promise<number[] | null>;
 }
 
-import { MockProvider } from "./providers/mock.ts";
-import { DashScopeProvider } from "./providers/dashscope.ts";
-import { OpenAICompatibleProvider } from "./providers/openai-compatible.ts";
-import { SiliconFlowProvider } from "./providers/siliconflow.ts";
-import { createCapabilityProvider, hasFactory } from "./provider-factory.ts";
+// Import provider modules for their factory registrations.
+import "./providers/mock.ts";
+import "./providers/dashscope.ts";
+import "./providers/openai-compatible.ts";
+import "./providers/siliconflow.ts";
+import "./providers/opencode-go.ts";
+import { createCapabilityProvider } from "./provider-factory.ts";
 import type { ProviderRuntimeConfig as SharedRuntimeConfig } from "@ailearn/shared";
 import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import type { PlatformOptions } from "@ailearn/shared";
@@ -122,10 +108,9 @@ export interface AIProviderSelection {
 /**
  * N-011: 根据 provider 名称创建 AIProvider 实例。
  *
- * R2: 委托到 provider 注册表（createCapabilityProvider），
- * 回退到旧 if-else 链（向后兼容，含 qwen 别名）。
+ * R2: 只通过 provider 注册表创建实例；provider 配置由治理上下文提供。
  *
- * @param providerName provider 标识（mock | dashscope | qwen | openai_compatible | siliconflow）
+ * @param providerName provider 标识（mock | dashscope | openai_compatible | siliconflow | opencode_go）
  */
 export function createProvider(
   providerName: string,
@@ -135,7 +120,7 @@ export function createProvider(
 
   // §2.3 缺 key 判定 fail-fast：非 mock provider 收到含 ${VAR} 字面文本的 apiKey 时，
   // 说明 config/ai-platforms.json 引用了未设置的 env var。立即报错而非等到请求期 401。
-  // （resolveSystemPlatform 已对同一场景返回 null → mock 回退，此处是防御性二次检查。）
+  // （resolveSystemPlatform 已将同一场景视为不可用，此处阻止未解析占位符进入 provider。）
   if (id !== "mock" && config.apiKey && config.apiKey.includes("${")) {
     // 不回显 apiKey 内容（即使其形式为未解析的 ${VAR} 占位符，也可能
     // 泄露配置细节到错误/日志）。
@@ -145,63 +130,11 @@ export function createProvider(
     );
   }
 
-  // R2: Try the factory registry first (for providers in PROVIDER_METADATA)
-  // Use "agent_turn" as the default capability — the factory creates the same
-  // provider instance for all capabilities in R2.
-  if (id !== "qwen" && hasFactory(id, "agent_turn")) {
-    const impl = createCapabilityProvider(id, "agent_turn", config as SharedRuntimeConfig);
-    if (impl) {
-      return impl as unknown as AIProvider;
-    }
+  const impl = createCapabilityProvider(id, "agent_turn", config as SharedRuntimeConfig);
+  if (!impl) {
+    throw new Error(`provider ${id} is not configured for agent_turn`);
   }
-
-  // Backward-compatible fallback (also handles qwen alias and edge cases)
-  if (id === "mock") return new MockProvider();
-  if (id === "dashscope" || id === "qwen") {
-    return new DashScopeProvider({
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-      ...(config.baseUrl ? { basePath: config.baseUrl } : {}),
-      ...(config.model ? { model: config.model } : {}),
-      ...(config.visionModel ? { visionModel: config.visionModel } : {}),
-    });
-  }
-  if (id === "openai_compatible") {
-    const apiKey = config.apiKey ?? process.env.OPENAI_COMPAT_API_KEY;
-    const baseUrl = config.baseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
-    const model = config.model ?? process.env.OPENAI_COMPAT_MODEL;
-    const visionModel = config.visionModel ?? process.env.OPENAI_COMPAT_VISION_MODEL;
-    if (!apiKey || !baseUrl || !model) {
-      throw new Error(
-        "OpenAI-compatible provider requires apiKey, baseUrl, and model"
-        + " (configure in config/ai-platforms.json or set OPENAI_COMPAT_API_KEY, OPENAI_COMPAT_BASE_URL, OPENAI_COMPAT_MODEL)",
-      );
-    }
-    return new OpenAICompatibleProvider({
-      apiKey,
-      baseUrl,
-      model,
-      ...(visionModel ? { visionModel } : {}),
-      ...(config.options ? { platformOptions: config.options } : {}),
-    });
-  }
-  if (id === "siliconflow") {
-    // SiliconFlow 只提供 embedding + rerank 能力（BAAI/bge-m3）。
-    // 文本生成仍由主 provider（AI_PROVIDER_AGENT_TURN）承担，因此 createProvider
-    // 仅在确实配置了 SILICONFLOW_API_KEY 时返回实例；缺 key 时抛错。
-    const apiKey = config.apiKey ?? process.env.SILICONFLOW_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "SiliconFlow provider requires SILICONFLOW_API_KEY"
-        + " (set SILICONFLOW_API_KEY or configure config/ai-platforms.json)",
-      );
-    }
-    return new SiliconFlowProvider({
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-      ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
-      ...(config.model ? { embeddingModel: config.model } : {}),
-    }) as unknown as AIProvider;
-  }
-  throw new Error(`provider ${id} not implemented in worker (supported: mock, dashscope, openai_compatible, siliconflow)`);
+  return impl as unknown as AIProvider;
 }
 
 /**
@@ -214,11 +147,8 @@ export function createProvider(
  * avoid a redundant workspace query and ensure provider selection is based
  * on the same workspace snapshot as the governance check.
  *
- * ARCH-06 fix: This function now delegates to `resolveAIGovernanceContext`
- * when no `cachedContext` is provided, eliminating the dual code path that
- * previously queried the workspaces table independently. All production
- * callers should prefer `resolveAIGovernanceContext` directly; this function
- * is retained for backward compatibility (mainly tests).
+ * ARCH-06: This function delegates to `resolveAIGovernanceContext` when no
+ * cached context is provided, keeping provider selection on one config path.
  */
 export async function resolveProviderSelection(
   workspaceId?: string,
@@ -244,7 +174,6 @@ export async function resolveProviderSelection(
   }
 
   // Use platform config file to resolve system-level provider + config.
-  // Falls back to legacy env var resolution if no config file exists.
   const platform = resolveSystemPlatform("agent_turn");
   if (platform) {
     return {
@@ -287,18 +216,14 @@ export interface EmbeddingProviderLike {
  *   2. System-level embedding platform from config/ai-platforms.json
  *   3. Returns null — callers should fall back to the main provider's embed()
  *
- * Note: `qwen` is mapped to `dashscope` since it's not in PROVIDER_METADATA.
- *
- * @param userId Kept for API compatibility but no longer used (platform config is system-level).
  * @param cachedGovCtx Optional governance context with pre-resolved embedding config.
  */
 export async function createEmbeddingProvider(
-  _userId?: string,
   cachedGovCtx?: { embeddingProviderName: string | null; embeddingProviderConfig: AIProviderRuntimeConfig | null } | null,
 ): Promise<EmbeddingProviderLike | null> {
     // 1. Use cached governance context if available (avoids redundant DB query)
   if (cachedGovCtx?.embeddingProviderName && cachedGovCtx?.embeddingProviderConfig) {
-    const providerId = cachedGovCtx.embeddingProviderName === "qwen" ? "dashscope" : cachedGovCtx.embeddingProviderName;
+    const providerId = cachedGovCtx.embeddingProviderName;
     const impl = createCapabilityProvider(providerId, "embedding", {
       apiKey: cachedGovCtx.embeddingProviderConfig.apiKey,
       baseUrl: cachedGovCtx.embeddingProviderConfig.baseUrl,
@@ -311,11 +236,11 @@ export async function createEmbeddingProvider(
     }
   }
 
-  // 2. System-level config from platform config file (or legacy env vars)
+  // 2. System-level config from the platform config file
   const platform = resolveSystemPlatform("embedding");
   if (!platform) return null;
 
-  const providerId = platform.type === "qwen" ? "dashscope" : platform.type;
+  const providerId = platform.type;
   const impl = createCapabilityProvider(providerId, "embedding", {
     apiKey: platform.apiKey,
     baseUrl: platform.baseUrl,

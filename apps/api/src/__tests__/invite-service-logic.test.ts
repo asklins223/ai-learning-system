@@ -252,15 +252,14 @@ describe("invite-service: ConsumeInviteError 错误码完整性", () => {
 // ─── ONBOARDING_STEPS 完成检测逻辑 ──────────────────────────────────────
 
 describe("invite-service: ONBOARDING_STEPS 完成检测逻辑", () => {
-  it("包含 6 个步骤且顺序正确", () => {
-    assert.equal(ONBOARDING_STEPS.length, 6);
+  it("包含 5 个步骤且顺序正确", () => {
+    assert.equal(ONBOARDING_STEPS.length, 5);
     assert.deepEqual([...ONBOARDING_STEPS], [
       "ai_consent",
       "first_content",
       "first_note",
       "first_card",
       "evidence_review",
-      "first_validation",
     ]);
   });
 

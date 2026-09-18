@@ -14,14 +14,33 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
 const sql = postgres(CONN, { max: 2 });
 
+/**
+ * 裸 SQL 校验必须带 workspace/user 上下文。
+ *
+ * 目标表 learning_task_private_solutions / canonical_learning_event_outbox /
+ * practice_trail_event_outbox 都是 FORCE RLS：受限角色（ailearn_api）在无上下文
+ * 事务里查询会命中 0 行，让"从 private solution 读正确答案"取到空数组而假失败；
+ * 超级用户则绕过 RLS 让它失去隔离意义。
+ */
+function scoped<T>(
+  scope: { workspaceId: string; userId: string },
+  fn: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${scope.userId}, true)`;
+    return fn(tx);
+  }) as Promise<T>;
+}
+
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
-const { createRun, submitArtifact, getRunPublicView } = await import(
+const { submitArtifact, getRunPublicView } = await import(
   "../modules/learning-runs/run-service.ts"
 );
 const { runLearningRunProcessingTick, closeStructuredSolutionSql } = await import(
@@ -76,14 +95,12 @@ test("P4 纵切：structured 创建 → ordering 提交 → 确定性评估 → 
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
           responsePreference: "structured",
-          clientRequestId: "p4-1",
           idempotencyKey: "p4-create-1",
         },
       }),
@@ -99,10 +116,16 @@ test("P4 纵切：structured 创建 → ordering 提交 → 确定性评估 → 
     assert.equal(ordering.kind, "ordering");
     assert.ok((ordering.publicTokenIds ?? []).length >= 2, "ordering tokens present");
     assert.ok(ordering.publicTokenLabels && Object.keys(ordering.publicTokenLabels).length >= 2, "labels present");
-    // V2 planner 的 task purpose/ceiling 由 publishedTargetEligibility 决定
-    // （usable → formal/mastery_eligible），交互族 qualification 不再降级 task。
-    assert.equal(run.activeTask?.activeVariant.purpose, "formal");
-    assert.equal(run.activeTask?.activeVariant.templateTrustCeiling, "mastery_eligible");
+    // V2 planner：结构题目前只验证一个可机械比对的答案结构，不能逐一证明冻结
+    // rubric 的全部 required 能力，因此**有意**降级为 practice（run-planner.ts:
+    // structuredPracticeOnly → purpose=practice / ceiling=practice_only），不得
+    // 以一次结构题通过换取 canonical/schedule。本文件其余断言（outcome=
+    // practice_completed、0 canonical、0 schedule）与此一致。
+    assert.equal(run.activeTask?.activeVariant.purpose, "practice");
+    assert.equal(run.activeTask?.activeVariant.templateTrustCeiling, "practice_only");
+    // schedulePolicySummary 描述的是**调度授权**（本 run 由 usable 目标授权
+    // create_initial），与 task purpose 是两个层次：实际结算仍按 practice 走
+    // scheduleImpact={kind:"none",reasonCode:"practice_only"}（见下方断言）。
     assert.equal(run.schedulePolicySummary.kind, "create_on_canonical_outcome");
     // V2 planner 结构化分支不保证 text standby（与 V1 双 variant 不同），
     // 只断言 alternatives 列表存在。
@@ -152,18 +175,18 @@ test("P4 纵切：structured 创建 → ordering 提交 → 确定性评估 → 
     assert.deepEqual(afterRun.result?.scheduleImpact, { kind: "none", reasonCode: "practice_only" });
 
     // 0 canonical envelope / 0 schedule。
-    const envelopeCount = await sql`
+    const envelopeCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeCount[0].n, 0);
     const schedCount = await sql`
       SELECT count(*)::int AS n FROM review_schedules WHERE workspace_id = ${seeded.workspaceId}
     `;
     assert.equal(schedCount[0].n, 0);
     // 恰好一个 practice trail event（§16.2 runId+scope 唯一）。
-    const trailRows = await sql`
+    const trailRows = await scoped(scope, (tx) => tx`
       SELECT event, scope FROM practice_trail_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(trailRows.length, 1);
     assert.equal(trailRows[0].scope, "official_user");
 
@@ -177,14 +200,12 @@ test("P4 fail closed：ordering 非法 payload（token 不属于题目）400 拒
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
           responsePreference: "structured",
-          clientRequestId: "p4-2",
           idempotencyKey: "p4-create-2",
         },
       }),
@@ -230,14 +251,12 @@ test("P4 relation 纵切：comparison 快照 → relation 主 Variant → 正确
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "transfer",
           responsePreference: "structured",
-          clientRequestId: "p4-rel-1",
           idempotencyKey: "p4-rel-create-1",
         },
       }),
@@ -251,15 +270,16 @@ test("P4 relation 纵切：comparison 快照 → relation 主 Variant → 正确
     assert.equal(relation.kind, "relation_canvas");
     assert.equal(relation.publicNodeIds.length, 2);
     assert.ok(relation.publicNodeLabels && Object.keys(relation.publicNodeLabels).length >= 2, "node labels present");
-    // V2 planner：purpose/ceiling 由 publishedTargetEligibility 决定（同 test 1）。
-    assert.equal(run.activeTask?.activeVariant.purpose, "formal");
-    assert.equal(run.activeTask?.activeVariant.templateTrustCeiling, "mastery_eligible");
+    // V2 planner：结构题走 practice 路径（同 test 1，见 run-planner.ts 的
+    // structuredPracticeOnly 失败关闭规则）。
+    assert.equal(run.activeTask?.activeVariant.purpose, "practice");
+    assert.equal(run.activeTask?.activeVariant.templateTrustCeiling, "practice_only");
 
     // 正确边从 private solution 的 requiredEdges 确定性读取后提交。
-    const solutionRows = await sql`
+    const solutionRows = await scoped(scope, (tx) => tx`
       SELECT s.solution FROM learning_task_private_solutions s
       WHERE s.variant_id = ${run.activeTask!.activeVariant.variantId} LIMIT 1
-    `;
+    `);
     const requiredEdges = (solutionRows[0]?.solution as { requiredEdges?: unknown[] }).requiredEdges ?? [];
     assert.equal(requiredEdges.length, 1);
     const edge = requiredEdges[0] as { fromNodeId: string; toNodeId: string; edgeKind: string };
@@ -296,9 +316,9 @@ test("P4 relation 纵切：comparison 快照 → relation 主 Variant → 正确
     // 确定性 structured 结算实证对齐：practice_completed（0 canonical / 0 schedule）。
     assert.equal(afterRun.result?.outcome, "practice_completed");
     assert.deepEqual(afterRun.result?.scheduleImpact, { kind: "none", reasonCode: "practice_only" });
-    const envelopeRows = await sql`
+    const envelopeRows = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeRows[0].n, 0);
     const schedCount = await sql`
       SELECT count(*)::int AS n FROM review_schedules WHERE workspace_id = ${seeded.workspaceId}
@@ -314,14 +334,12 @@ test("P4 repair 纵切：repair 偏好 → repair 主 Variant → 正确操作 �
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "repair",
           responsePreference: "structured",
-          clientRequestId: "p4-rep-1",
           idempotencyKey: "p4-rep-create-1",
         },
       }),
@@ -339,10 +357,10 @@ test("P4 repair 纵切：repair 偏好 → repair 主 Variant → 正确操作 �
     assert.equal(run.activeTask?.activeVariant.purpose, "facet");
     assert.equal(run.activeTask?.activeVariant.templateTrustCeiling, "facet_eligible");
 
-    const solutionRows = await sql`
+    const solutionRows = await scoped(scope, (tx) => tx`
       SELECT s.solution FROM learning_task_private_solutions s
       WHERE s.variant_id = ${run.activeTask!.activeVariant.variantId} LIMIT 1
-    `;
+    `);
     const signatures = (solutionRows[0]?.solution as { acceptedOperationSignatures?: string[] }).acceptedOperationSignatures ?? [];
     assert.equal(signatures.length, 1);
     const signature = signatures[0];
@@ -387,9 +405,9 @@ test("P4 repair 纵切：repair 偏好 → repair 主 Variant → 正确操作 �
     assert.equal(afterRun.result?.outcome, "partial");
     assert.deepEqual(afterRun.result?.gapFacets, []);
     assert.deepEqual(afterRun.result?.scheduleImpact, { kind: "none", reasonCode: "facet_only" });
-    const envelopeRows = await sql`
+    const envelopeRows = await scoped(scope, (tx) => tx`
       SELECT envelope FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(envelopeRows.length, 1, "facet observation envelope 恰好一个");
     assert.equal(
       (envelopeRows[0].envelope as { fact: { disposition: string } }).fact.disposition,

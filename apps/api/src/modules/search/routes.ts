@@ -2,29 +2,29 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireSession, requireOwner } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { detectSearchDrift, reindexWorkspaceSearch, search, autoFixSearchDrift } from "./service.ts";
+import { detectSearchDrift, decodeSearchCursor, reindexWorkspaceSearch, search, autoFixSearchDrift } from "./service.ts";
 import { parseQuery } from "../../lib/pagination.ts";
 
 const searchQuerySchema = z.object({
   q: z.string().optional(),
   // Plan 23 CS-03：objective 类型（conceptLabel/说明/来源可搜；answer/rubric 不进索引）
-  // 枚举值 card_set/card/evidence 已退役，不再作为合法搜索类型。
   type: z.enum(["note", "source", "objective"]).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
-  // PERF: 深度 OFFSET 在 DISTINCT ON + ILIKE 上会退化为深扫描。把翻页上限
-  // 从 100k 大幅降到 1000（50 条/页 × 20 页），超过即终止翻页并返回 nextCursor=null，
-  // 防止单次请求把整个匹配集做 DISTINCT ON 后深 OFFSET。
-  offset: z.coerce.number().int().min(0).max(1000).optional(),
+  // keyset 游标（见 service.ts 的 SearchCursor）：上一页最后一行的排序键。
+  // 不透明；解不开就 400，绝不悄悄回退到第一页。
+  cursor: z.string().min(1).max(512).optional(),
 });
 
 export async function searchRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
 
-  // GET /search?q=...&type=...&limit=...&offset=...
+  // GET /search?q=...&type=...&limit=...&cursor=...
   // R-022: 统一 Zod 校验
   app.get("/search", async (req) => {
     const q = parseQuery(app, searchQuerySchema, req.query);
     const normalizedQuery = q.q?.trim();
+    const cursor = q.cursor ? decodeSearchCursor(q.cursor) : null;
+    if (q.cursor && !cursor) throw app.httpErrors.badRequest("invalid search cursor");
     return withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       async (transaction) => {
@@ -32,7 +32,7 @@ export async function searchRoutes(app: FastifyInstance) {
         return search(transaction, req.session.workspaceId, normalizedQuery, {
           type: q.type,
           limit: q.limit,
-          offset: q.offset,
+          cursor: cursor ?? undefined,
         });
       },
     );

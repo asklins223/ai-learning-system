@@ -28,7 +28,7 @@ export const assistantDeliveries = pgTable(
     inboxSequence: integer("inbox_sequence").notNull(),
     dedupeKey: text("dedupe_key").notNull(),
     state: text("state").notNull().default("queued"),
-    kind: text("kind").notNull(), // message | proposal | action_result | proactive_cue | system_event
+    kind: text("kind").notNull(), // message | proposal | action_result | system_event | memory_candidate
     payloadRef: jsonb("payload_ref").notNull(),
     displayLease: jsonb("display_lease"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

@@ -43,3 +43,58 @@ test("non-recovery run states do not receive a recovery projection", () => {
   });
   assert.equal(projection, null);
 });
+
+/**
+ * 就地重试的签发条件（2026-09-18 补齐产品缺口）。
+ *
+ * 背景：唯一候选被 critic 否决时 run 会终态化为 needs_attention 且没有候选可审核，
+ * 此前恢复契约只给"回笔记重开一次全新生成"，用户必须重付 planner + 全部 critic 的
+ * token。现在服务端在**确有可重试理由**时签发 retry_generation。
+ *
+ * 这组用例锁住的是"何时**不**签发"——宁可少给一个按钮，也不能给一个注定失败或
+ * 把服务端问题伪装成用户可操作项的按钮。
+ */
+test("质量门禁失败 + 来源新鲜 → 签发就地重试", () => {
+  const recovery = projectCardGenerationRecoveryV1(input("needs_attention", {
+    error: { code: "quality_gate_failed", message: "all candidates failed quality gates" },
+  }));
+  assert.equal(recovery?.retryability, "retry_in_place");
+  assert.deepEqual(
+    recovery?.allowedActions.map((action) => action.kind),
+    ["refresh_status", "return_note", "retry_generation"],
+  );
+  const retry = recovery?.allowedActions.find((action) => action.kind === "retry_generation");
+  assert.equal(retry && "runId" in retry ? retry.runId : null, RUN_ID);
+});
+
+test("provider/配置类失败不签发重试（重跑只会原样再失败一次）", () => {
+  for (const code of ["generation_failed", "provider_timeout", "credential_missing"]) {
+    const recovery = projectCardGenerationRecoveryV1(input("needs_attention", {
+      error: { code, message: "hidden" },
+    }));
+    assert.equal(recovery?.retryability, "resync_required", `code=${code} must not be retryable in place`);
+    assert.equal(
+      recovery?.allowedActions.some((action) => action.kind === "retry_generation"),
+      false,
+      `code=${code} must not offer retry_generation`,
+    );
+  }
+});
+
+test("来源已过期时不签发重试（对着过期来源重跑只会再失败）", () => {
+  const recovery = projectCardGenerationRecoveryV1(input("needs_attention", {
+    sourceOutdated: true,
+    error: { code: "quality_gate_failed", message: "hidden" },
+  }));
+  assert.notEqual(recovery?.retryability, "retry_in_place");
+  assert.equal(recovery?.allowedActions.some((action) => action.kind === "retry_generation"), false);
+});
+
+test("failed / stale 状态不签发就地重试（只有 needs_attention 可重试）", () => {
+  for (const status of ["failed", "stale"] as const) {
+    const recovery = projectCardGenerationRecoveryV1(input(status, {
+      error: { code: "quality_gate_failed", message: "hidden" },
+    }));
+    assert.equal(recovery?.allowedActions.some((action) => action.kind === "retry_generation"), false, `status=${status}`);
+  }
+});

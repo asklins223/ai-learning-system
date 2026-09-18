@@ -31,6 +31,7 @@
         "anchor": [0, 0]
       },
       "alphaMode": "straight-rgba",
+      "license": "project-owned-ai-generated",
       "generationMethod": "built-in-imagegen + ffmpeg-colorkey-alpha",
       "promptPath": "apps/desktop-client/scripts/fixtures/prompts/room-plant-foreground-day-v1.md",
       "reviewStatus": "CHANGES_REQUIRED",
@@ -59,6 +60,7 @@
         "anchor": [0, 0]
       },
       "alphaMode": "straight-rgba",
+      "license": "project-owned-ai-generated",
       "generationMethod": "built-in-imagegen + ffmpeg-colorkey-alpha",
       "promptPath": "apps/desktop-client/scripts/fixtures/prompts/room-plant-foreground-night-v1.md",
       "reviewStatus": "CHANGES_REQUIRED",

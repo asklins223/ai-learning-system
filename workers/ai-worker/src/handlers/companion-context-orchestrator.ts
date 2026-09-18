@@ -77,6 +77,24 @@ export function deriveMemoryScope(pageContext: unknown): "workspace" | "task" {
 }
 
 /**
+ * 检索查询文本（向量检索与 keyword fallback 共用同一份）。
+ *
+ * 导出给编排层：查询向量必须在 RLS 事务之外计算，而事务内外的查询文本
+ * 必须逐字一致，否则"事务外算向量"会静默改变召回语义。
+ */
+export function buildCompanionMemoryQuery(input: {
+  userText: string;
+  recentMessages: { role: "user" | "assistant"; text: string }[];
+}): string {
+  const recentText = input.recentMessages
+    .slice(-4)
+    .map((m) => m.text)
+    .join(" ")
+    .slice(0, 500);
+  return `${input.userText} ${recentText}`.trim().slice(0, 1000);
+}
+
+/**
  * 检索并组装上下文。
  *
  * @param tx 已处于 workspace/user RLS 上下文的 worker 事务
@@ -95,6 +113,11 @@ export async function assembleCompanionContext(
     groundedTutorContext?: unknown;
     /** Bridge page context（对象或 JSON 字符串），用于推导 currentScope。 */
     pageContext?: unknown;
+    /**
+     * 事务外预计算的查询向量（见 buildCompanionMemoryQuery）：
+     * `undefined` = 未预计算（由检索层内部计算），`null` = 已失败 → 直接 keyword。
+     */
+    queryEmbedding?: number[] | null;
   },
 ): Promise<ContextAssemblyResult> {
   // 正式学习 grounded_tutor 不注入记忆/人格（§11.1）。
@@ -107,12 +130,7 @@ export async function assembleCompanionContext(
     };
   }
 
-  const recentText = input.recentMessages
-    .slice(-4)
-    .map((m) => m.text)
-    .join(" ")
-    .slice(0, 500);
-  const query = `${input.userText} ${recentText}`.trim().slice(0, 1000);
+  const query = buildCompanionMemoryQuery(input);
 
   const result = await retrieveCompanionMemories(
     tx,
@@ -122,6 +140,7 @@ export async function assembleCompanionContext(
       topK: 8,
       provider: input.provider ?? null,
       currentScope: deriveMemoryScope(input.pageContext),
+      precomputedEmbedding: input.queryEmbedding,
     },
   );
 
@@ -183,7 +202,9 @@ export async function assembleCompanionContext(
            ${idsLiteral}::uuid[], ${result.mode}, ${result.latencyMs})
       `);
     } catch (error) {
-      console.warn("companion memory usage log write failed", error);
+      // 结构化日志（err 走 safeErrorSerializer 脱敏）：console.warn 直接打印
+      // 原始 error 会把 postgres 驱动的 message/绑定值带进日志。
+      logger.warn({ err: error, runId: input.runId }, "companion memory usage log write failed");
     }
   }
 

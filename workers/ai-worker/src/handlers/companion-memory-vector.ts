@@ -8,6 +8,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { logger } from "../lib/logger.ts";
 
 export interface RetrievedMemory {
   memoryId: string;
@@ -43,6 +44,16 @@ function rowsOf<T>(result: unknown): T[] {
 
 function isMemoryVectorEnabled(): boolean {
   return process.env.COMPANION_MEMORY_VECTOR_V1 === "true";
+}
+
+/**
+ * 向量检索开关。
+ *
+ * 导出给编排层：调用方需要据此决定"是否值得在事务外先算查询向量"
+ * （embedding 是外部 HTTP 调用，不能发生在 RLS 事务内）。
+ */
+export function isCompanionMemoryVectorEnabled(): boolean {
+  return isMemoryVectorEnabled();
 }
 
 /**
@@ -162,9 +173,14 @@ export async function retrieveCompanionMemoriesVector(
   provider: EmbeddingProviderLike,
   topK = 8,
   currentScope = "workspace",
+  /**
+   * 事务外预计算的查询向量。缺省时本函数自行调用 provider.embed——
+   * 那是外部 HTTP 往返，调用方若已持有 RLS 事务必须改用预计算值。
+   */
+  precomputedEmbedding?: number[] | null,
 ): Promise<MemoryRetrievalResult> {
   const startedAt = performance.now();
-  const vector = await provider.embed(query.slice(0, 1000));
+  const vector = precomputedEmbedding ?? await provider.embed(query.slice(0, 1000));
   if (!vector || vector.length === 0) {
     return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
@@ -190,6 +206,13 @@ export async function retrieveCompanionMemoriesVector(
         AND m.archived_at IS NULL
         AND m.embedding_status = 'ready'
         AND (m.scope = 'workspace' OR m.scope = 'global' OR m.scope = ${currentScope})
+        -- AI P1（2026-09-15 审计）：只比较**同一向量空间**的向量。此前不校验
+        -- e.model_revision，换过 embedding 模型（如 bge-m3 1024 维 → 别的 1536 维
+        -- 模型，或同维不同模型）后，旧向量会与新查询向量一起参与 <=> 计算——维度
+        -- 不同时直接抛错、同维不同模型时余弦相似度毫无意义（静默给出错误召回）。
+        -- 以查询向量所属模型为基准过滤，未重建的记忆不再参与相似度（其
+        -- embedding_status 仍可在重建任务中被重算）。
+        AND e.model_revision = ${provider.embeddingModelId}
       ORDER BY
         (1 - (e.embedding <=> ${queryVec}::vector))
         * (0.4 + 0.6 * m.importance)
@@ -214,6 +237,9 @@ export async function retrieveCompanionMemoriesVector(
       // 修复（2026-08-22 审查）：探测条件必须与主检索查询一致（含 scope 过滤）。
       // 此前缺 scope 条件——用户若只有其他 scope 的 ready embedding（如 task 页
       // 只写过 workspace 记忆），会误判"有 ready"而不降级 keyword，零召回窗口仍在。
+      // AI P1（2026-09-15 审计）：同样必须带 model_revision 过滤，否则换过
+      // embedding 模型的用户会被判成"有 ready"（其实全属旧向量空间、主查询已排除），
+      // 于是既不召回也不降级 keyword —— 正是上面这条注释警告过的零召回窗口。
       const hasReady = await tx.execute(sql`
         SELECT EXISTS (
           SELECT 1
@@ -226,6 +252,7 @@ export async function retrieveCompanionMemoriesVector(
             AND m.archived_at IS NULL
             AND m.embedding_status = 'ready'
             AND (m.scope = 'workspace' OR m.scope = 'global' OR m.scope = ${currentScope})
+            AND e.model_revision = ${provider.embeddingModelId}
         ) AS has_ready
       `);
       const hasReadyRow = rowsOf<{ has_ready: boolean }>(hasReady)[0];
@@ -236,7 +263,7 @@ export async function retrieveCompanionMemoriesVector(
     return { items, mode: "vector", latencyMs: Math.round(performance.now() - startedAt) };
   } catch (error) {
     // pgvector 查询失败（扩展/索引/类型问题）不阻塞对话，降级 keyword。
-    console.warn("companion memory vector retrieval failed, falling back to keyword", error);
+    logger.warn({ err: error }, "companion memory vector retrieval failed, falling back to keyword");
     return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
 }
@@ -251,11 +278,20 @@ export async function retrieveCompanionMemories(
     provider?: EmbeddingProviderLike | null;
     currentScope?: string;
     signal?: AbortSignal;
+    /**
+     * 事务外预计算的查询向量：
+     * - `undefined`：调用方未预计算，本函数内部调用 provider.embed（不占事务）；
+     * - `null`：已尝试且失败——直接降级 keyword，绝不在事务内重试外部调用。
+     */
+    precomputedEmbedding?: number[] | null;
   } = {},
 ): Promise<MemoryRetrievalResult> {
   const topK = opts.topK ?? 8;
   const currentScope = opts.currentScope ?? "workspace";
   if (!isMemoryVectorEnabled() || !opts.provider) {
+    return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
+  }
+  if (opts.precomputedEmbedding === null) {
     return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
   try {
@@ -266,9 +302,10 @@ export async function retrieveCompanionMemories(
       opts.provider,
       topK,
       currentScope,
+      opts.precomputedEmbedding,
     );
   } catch (error) {
-    console.warn("companion memory retrieval failed, using keyword fallback", error);
+    logger.warn({ err: error }, "companion memory retrieval failed, using keyword fallback");
     return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
   }
 }

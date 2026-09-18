@@ -15,14 +15,33 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
 const sql = postgres(CONN, { max: 2 });
 
+/**
+ * 裸 SQL 校验必须带 workspace/user 上下文。
+ *
+ * 本文件校验的目标表全部是 FORCE RLS（companion_conversations、
+ * companion_messages、assistant_memory_items、learning_runs、
+ * learning_run_events）。受限角色（ailearn_api）在无上下文事务里查询会命中
+ * 0 行，让"物理清除后为 0 行"这类断言假通过，而"审计留痕保留 1 行"假失败；
+ * 超级用户则绕过 RLS 让前者同样失去分辨力。校验统一走 scoped()。
+ */
+function scoped<T>(
+  scope: { workspaceId: string; userId: string },
+  fn: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${scope.userId}, true)`;
+    return fn(tx);
+  }) as Promise<T>;
+}
+
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
-const { createRun } = await import("../modules/learning-runs/run-service.ts");
 const { runLearningRunProcessingTick, closeStructuredSolutionSql } = await import(
   "../modules/learning-runs/run-processing-tick.ts"
 );
@@ -83,24 +102,24 @@ test("E15：删除对话与记忆——正文物理清除、审计留痕、学�
       deleteCompanionConversation({ ...scope, conversationId }),
     );
     assert.ok(result.statusCode === 200 || result.statusCode === 204);
-    const msgRows = await sql`
+    const msgRows = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM companion_messages WHERE conversation_id = ${conversationId}
-    `;
+    `);
     assert.equal(msgRows[0].n, 0, "消息正文物理清除");
-    const convRows = await sql`SELECT count(*)::int AS n FROM companion_conversations WHERE id = ${conversationId}`;
+    const convRows = await scoped(scope, (tx) => tx`SELECT count(*)::int AS n FROM companion_conversations WHERE id = ${conversationId}`);
     assert.equal(convRows[0].n, 0, "会话物理清除");
 
     // 删除记忆 → 列表为空；审计 tombstone（deleted_at）保留。
     await withWorkspaceTransaction(scope, (tx) => deleteMemory(tx, scope, memoriesBefore[0].memoryItemId));
     const memoriesAfter = await withWorkspaceTransaction(scope, (tx) => listMemories(tx, scope, {}));
     assert.equal(memoriesAfter.length, 0, "删除后记忆不可见");
-    const tombstoneRows = await sql`
+    const tombstoneRows = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM assistant_memory_items WHERE id = ${memoriesBefore[0].memoryItemId} AND deleted_at IS NOT NULL
-    `;
+    `);
     assert.equal(tombstoneRows[0].n, 1, "最小审计留痕保留");
 
     // canonical 学习事实不受影响（本测试无 run；断言同 workspace 无残留关联行）。
-    const runRows = await sql`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`;
+    const runRows = await scoped(scope, (tx) => tx`SELECT count(*)::int AS n FROM learning_runs WHERE workspace_id = ${seeded.workspaceId}`);
     assert.equal(runRows[0].n, 0);
   } finally {
     await seeded.cleanup();
@@ -112,13 +131,11 @@ test("E16：global off 不取消 active LearningRun——Run 独立完成（0 ca
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "e16-1",
           idempotencyKey: "e16-create-1",
         },
       }),
@@ -130,7 +147,7 @@ test("E16：global off 不取消 active LearningRun——Run 独立完成（0 ca
       revision: 0,
       globalEnabled: false,
     });
-    const runAfter = await sql`SELECT phase FROM learning_runs WHERE id = ${run.runId}`;
+    const runAfter = await scoped(scope, (tx) => tx`SELECT phase FROM learning_runs WHERE id = ${run.runId}`);
     assert.equal(runAfter[0].phase, "active", "global off 不取消 Run");
 
     // Run 继续独立完成（declared_unable 确定性结算）。
@@ -155,12 +172,12 @@ test("E16：global off 不取消 active LearningRun——Run 独立完成（0 ca
     for (let round = 0; round < 6; round += 1) {
       await runLearningRunProcessingTick(`e16-worker:${randomUUID()}`, 10);
     }
-    const settled = await sql`SELECT phase FROM learning_runs WHERE id = ${run.runId}`;
+    const settled = await scoped(scope, (tx) => tx`SELECT phase FROM learning_runs WHERE id = ${run.runId}`);
     assert.equal(settled[0].phase, "completed", "Run 在 global off 下独立完成");
-    const cancelledEvents = await sql`
+    const cancelledEvents = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM learning_run_events
       WHERE run_id = ${run.runId} AND event_type = 'learning_run.cancelled'
-    `;
+    `);
     assert.equal(cancelledEvents[0].n, 0, "global off 绝不产生 cancelled");
   } finally {
     await seeded.cleanup();

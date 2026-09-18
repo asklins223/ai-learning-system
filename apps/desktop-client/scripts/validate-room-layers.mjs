@@ -20,8 +20,8 @@ const ROOM_LAYER_ALPHA_MODES = new Set([
   "blend",
   "opaque-rgb",
 ]);
-const ROOM_LAYER_THEMES = new Set(["day", "night"]);
-const ROOM_LAYER_DEPTHS = new Set(["D1", "D2", "D3", "D4", "D5", "D6"]);
+const ROOM_LAYER_THEMES = new Set(["day", "dusk", "night"]);
+const ROOM_LAYER_DEPTHS = new Set(["D0", "D1", "D2", "D3", "D4", "D5", "D6"]);
 const ROOM_LAYER_ORDER_MAX = 63;
 const ROOM_LAYER_ANCHOR_IDS = new Set([
   "room.notebook",
@@ -35,6 +35,7 @@ const ROOM_SCENE_WORLD = Object.freeze({ width: 1672, height: 941 });
 const ROOM_LAYER_REGISTRATION_BLEED = 2;
 const SUPPORTED_EXTENSIONS = new Set([".png", ".webp"]);
 const SAFE_ASSET_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -314,6 +315,11 @@ function validateEntryMetadata(entry) {
     pushReason(reasons, "registration-out-of-bounds");
   }
   if (!ROOM_LAYER_ALPHA_MODES.has(entry.alphaMode)) pushReason(reasons, "invalid-metadata");
+  if (typeof entry.sha256 !== "string" || !SHA256.test(entry.sha256)) pushReason(reasons, "invalid-metadata");
+  if (!isSafeAssetPath(entry.sourcePath)) pushReason(reasons, "invalid-metadata");
+  if (entry.promptPath !== undefined && !isSafeAssetPath(entry.promptPath)) pushReason(reasons, "invalid-metadata");
+  if (entry.matteSourcePath !== undefined && !isSafeAssetPath(entry.matteSourcePath)) pushReason(reasons, "invalid-metadata");
+  if (!isNonEmptyString(entry.license)) pushReason(reasons, "invalid-metadata");
   if (!isNonEmptyString(entry.reviewStatus)) pushReason(reasons, "invalid-metadata");
   if (typeof entry.releaseApproval !== "boolean") pushReason(reasons, "invalid-metadata");
   return reasons;
@@ -397,13 +403,16 @@ function preflightEntry(entry, index, runtimeRoot, seenAssetIds, seenLayerPlacem
         if (entry.alphaMode !== "opaque-rgb" && !inspected.hasAlphaChannel) {
           pushReason(reasons, "alpha-channel-missing");
         }
+        if (typeof entry.sha256 === "string" && SHA256.test(entry.sha256) && entry.sha256 !== imageInfo.sha256) {
+          pushReason(reasons, "asset-sha256-mismatch");
+        }
       }
     } catch {
       pushReason(reasons, "asset-read-failed");
     }
   }
 
-  if (entry.alphaMode === "opaque-rgb") pushReason(reasons, "opaque-layer");
+  if (entry.alphaMode === "opaque-rgb" && entry.depth !== "D0") pushReason(reasons, "opaque-layer");
   if (isNonEmptyString(entry.reviewStatus) && entry.reviewStatus.trim().toLowerCase() !== "approved") {
     pushReason(reasons, "review-not-approved");
   }
@@ -489,7 +498,7 @@ export function preflightRoomLayerOutput(
 
     let sourceSha256 = sourceRecord?.image?.sha256 ?? null;
     let outputSha256 = outputRecord.image?.sha256 ?? null;
-    if (sourceRecord?.status === "eligible" && outputRecord.status === "eligible") {
+    if (sourceRecord?.image && outputRecord.image) {
       try {
         const sourceBytes = readFileSync(resolve(sourceRoot, manifest.roomLayers[index].path));
         const outputBytes = readFileSync(resolve(outputRoot, manifest.roomLayers[index].path));

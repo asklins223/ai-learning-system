@@ -5,11 +5,13 @@ import {
   splitCompanionTtsSegments,
   splitCompanionTtsSegmentsIncremental,
   companionSegmentId,
-  stripVoiceExpressionTags,
-  extractVoiceEmotion,
   TTS_MAX_SEGMENTS,
   TTS_MAX_TOTAL_CHARS,
 } from "./tts-segments.ts";
+import {
+  stripVoiceExpressionTags,
+  extractVoiceEmotion,
+} from "@ailearn/shared/voice-expression-tags";
 
 test("净化：去掉 markdown/URL/代码块，保留中文", () => {
   const p = purifyVoiceText("好的，`x` 继续 [链接](https://a.b/c) 学习。```code``` 我们继续。");

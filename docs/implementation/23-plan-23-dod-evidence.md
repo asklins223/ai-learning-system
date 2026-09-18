@@ -30,7 +30,7 @@
 | 7 | 所有旧 route 有明确迁移行为 | /v2/route-resolution（mapped/gone/ambiguous/forbidden）+ history-route 测试（V2 card mapped、未知 gone） |
 | 8 | 历史 Run/Schedule/event/hash 未重写 | RL-04：backfill+reconcile+清理全流程 learning_runs 快照 sha256 字节级不变 |
 | 9 | consumer audit 正式消费者全部 done | audit 模块随兼容层整体退役（并行 commit 3c9723f）；一致性由 parity 测试接替 |
-| 10 | capability rollback 不破坏 in-flight Run | capability bundle 默认 OFF；Rollback-drill 图已含 learning_objective_system_v3；rl-cutover-readiness.test.ts（RL-13/14 验证：rollback 后 commitKillSwitch=false、epoch 不变、atomicOffClosure 只含自身） |
+| 10 | capability rollback 不破坏 in-flight Run | 预上线清理已删除未接入运行时的 rollback-drill/cutover 演练副本；当前 in-flight Run 的安全边界由 `run-processing-tick.ts` 的 workspace/user 行锁 + runtimeEpoch CAS 负责，相关竞态测试覆盖迟到 commit |
 
 ## 三、质量 DoD（§27.3）
 
@@ -55,8 +55,8 @@
 | RL-10 | 一致性指标与 P0 告警落地 | done | metrics.ts 新增 surfaceConsistencyMismatchTotal/surfaceRevisionMismatchTotal/topologyInvalidationEventsTotal/dashboardEmptyWithActiveObjectivesTotal；Dashboard service 集成 P0 告警逻辑 |
 | RL-11 | capability shadow read | done | rl-shadow-read.test.ts（OFF/ON 状态 Surface 合同一致、列表计数一致） |
 | RL-12 | shadow 差异清零与签字 | done | rl-shadow-read.test.ts（findPrivatePayloadLeaks=0、注入 canonicalAnswer 被检测） |
-| RL-13 | 原子切流演练 | done | rl-cutover-readiness.test.ts（Should flag 独立、不进入 Must 反向闭包、ON 时消费者读 Objective Surface） |
-| RL-14 | rollback 演练 | done | rl-cutover-readiness.test.ts（关闭不级联其他 Should、commitKillSwitch=false、epoch 不变、atomicOffClosure 只含自身） |
+| RL-13 | 原子切流演练 | retired prelaunch | 未接入 API/Worker 运行时的 rollout 演练副本已删除；Objective V3 当前直接使用 shared capability contract |
+| RL-14 | rollback 演练 | retired prelaunch | 未接入 API/Worker 运行时的 rollback 副本已删除；真实 LearningRun 竞态由 runtimeEpoch CAS 测试覆盖 |
 | RL-15 | 正式切流与观测窗口 | done | rl-legacy-cleanup.test.ts（bundle 永久 enabled、Surface 合同不变、零私有泄漏） |
 | RL-16 | legacy 正式可见性归零 | done | rl-legacy-cleanup.test.ts（strictObject 拒绝 legacy alias 字段、archived 不进入 active 列表） |
 | RL-17 | 删除 dead adapters 与旧 UI 分支 | done | rl-legacy-cleanup.test.ts（Surface 不含 cardSetId/summary/claim/keyPointId、列表项不含 CardSet 组视图字段、primaryAction typed union 穷尽） |
@@ -68,9 +68,8 @@
 - 单测 9/9（action-resolver）
 - Web vitest 12/12（action-navigation 6 + objective-state 6）
 - shared contract 测试 508+（含泄漏/版本冻结）
-- Wave 5 RL 测试 4 文件：
+- Wave 5 RL 测试 3 文件：
   - rl-surface-e2e.test.ts（RL-06/07/08 场景验证，12 用例）
   - rl-shadow-read.test.ts（RL-11/12 shadow read 差异检测，5 用例）
-  - rl-cutover-readiness.test.ts（RL-13/14 切流与 rollback 演练，7 用例）
   - rl-legacy-cleanup.test.ts（RL-15/16/17 legacy 清理验证，8 用例）
 - 脚本：objective-inventory（只读）、legacy-field-scan、verify-objective-fixtures、origin-backfill-cli

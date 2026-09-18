@@ -18,7 +18,7 @@ import {
   cardGenerationRunsV2,
   cardGenerationEventsV2,
   cardGenerationRunOutboxV2,
-} from "../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   createGenerationRunV2,
   getGenerationRunV2,

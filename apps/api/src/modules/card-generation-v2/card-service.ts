@@ -30,9 +30,9 @@ import {
   initialValidationRemindersV2,
   learningObjectiveEvidenceBindingsV2,
   evidenceSnapshotsV2,
-} from "../../db/schema/card-generation-v2.ts";
-import { noteVersions, noteBlocks } from "../../db/schema/note.ts";
-import { reviewSchedules } from "../../db/schema/evidence.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
+import { noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
+import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import {
   parseLearningCardRevealV2,
   parsePublicLearningCardV2,
@@ -669,18 +669,17 @@ export async function readPublicCardV2(
  * 供 `/cards` 页与 V2 Active Card 入口使用；不含任何 answer/rubric。
  *
  * 分页：limit 默认 100（clamp 1–100），offset 由 cursor（数字字符串）给出。
- * 返回 `{ items, nextCursor }`，nextCursor 为 null 表示已到末尾；
- * 向后兼容——不传参数时按分页返回，避免一次性物化全部 active 卡。
+ * 返回 `{ items, nextCursor }`，nextCursor 为 null 表示已到末尾。
  */
 export async function listActiveCardsV2(
   ctx: RunContext,
-  opts?: { limit?: number; cursor?: string },
+  opts: { limit?: number; cursor?: string },
 ): Promise<{ items: PublicLearningCardV2[]; nextCursor: string | null }> {
   return withWorkspaceTransaction(ctx, async (tx) => {
-    const limit = clampLimit(opts?.limit, 100);
+    const limit = clampLimit(opts.limit, 100);
     // cursor 为 offset 的十进制字符串；非法值回退到第一页。
     let offset = 0;
-    if (opts?.cursor != null && /^\d+$/.test(opts.cursor)) {
+    if (opts.cursor != null && /^\d+$/.test(opts.cursor)) {
       offset = clampOffset(Number(opts.cursor));
     }
     // 多取一行用于探测是否还有下一页。

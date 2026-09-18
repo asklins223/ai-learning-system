@@ -2571,7 +2571,7 @@ generation
 | `GET` | `/card-generation-runs/:runId/candidates` | 获取审核列表，不含未 reveal 答案 |
 | `POST` | `/card-generation-runs/:runId/candidates/:candidateId/reveal` | 记录 exposure 后返回该 revision 背面 |
 | `POST` | `/card-generation-runs/:runId/candidate-actions` | keep/reject/edit/merge；幂等 |
-| `POST` | `/card-generation-runs/:runId/activations` | 原子激活已保留 revisions |
+| `POST` | `/card-generation-runs/:runId/activate` | 原子激活已保留 revisions |
 | `POST` | `/card-generation-runs/:runId/close` | 用户拒绝全部或暂不启用；无 canonical side effects |
 | `POST` | `/card-generation-runs/:runId/cancel` | 取消尚未激活的 Run |
 

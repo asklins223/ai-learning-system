@@ -13,7 +13,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
@@ -27,7 +27,7 @@ const {
   listMemories,
 } = await import("../modules/companion-conversation/memory-service.ts");
 const { deliver } = await import("../modules/companion-conversation/delivery-service.ts");
-const { createRun, submitArtifact } = await import(
+const { submitArtifact } = await import(
   "../modules/learning-runs/run-service.ts"
 );
 const { runLearningRunProcessingTick, closeStructuredSolutionSql } = await import(
@@ -144,13 +144,11 @@ test("E15：记忆删除不影响 canonical 事实；对话删除保留 inbox �
 
     // 记忆 + canonical 事实（declared_unable Run 结算）并存。
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "e15-1",
           idempotencyKey: "e15-create-1",
         },
       }),
@@ -250,13 +248,11 @@ test("P8 Orchestrator：Run 结算触发 proactive deliver（Policy allowed + de
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "mm-run-1",
           idempotencyKey: "mm-run-create-1",
         },
       }),

@@ -6,6 +6,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { readJobPayloadString } from "@ailearn/shared";
 import { logger } from "../lib/logger.ts";
 import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
 import type { JobPayload } from "./index.ts";
@@ -44,9 +45,11 @@ export function buildSummaryText(date: string, facts: DailyFacts): string {
 }
 
 export async function runCompanionDailySummary(job: JobPayload): Promise<void> {
-  const date = job.payload.date as string | undefined;
-  const timezone = job.payload.timezone as string | undefined;
-  const userId = job.payload.userId as string | undefined;
+  // 设计 P1-8（2026-09-15 审计）：字段名与读取走共享契约（@ailearn/shared 的
+  // companion-memory-job-payload），改名时编译器会在所有调用点报错。
+  const date = readJobPayloadString(job.payload, "date");
+  const timezone = readJobPayloadString(job.payload, "timezone");
+  const userId = readJobPayloadString(job.payload, "userId");
   if (!date || !timezone || !userId) {
     throw new Error("companion_daily_summary payload 缺 date/timezone/userId");
   }

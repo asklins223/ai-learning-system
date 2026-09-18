@@ -7,6 +7,7 @@
  */
 
 import type { ApiTransaction } from "../../db/client.ts";
+import { resolveAssessmentCriticConfig } from "../../lib/assessment-critic-config.ts";
 import { sql } from "drizzle-orm";
 import { evaluateProactivePolicy } from "./proactive-policy.ts";
 import { deliver } from "./delivery-service.ts";
@@ -211,10 +212,11 @@ async function generatePersonalizedProactiveText(input: {
   outcome: string;
   keyPointClaim: string;
 }): Promise<string | null> {
-  const url = process.env.ASSESSMENT_CRITIC_URL?.trim();
-  const key = process.env.ASSESSMENT_CRITIC_KEY?.trim() ?? process.env.DASHSCOPE_API_KEY?.trim();
-  if (!url || !key) return null;
-  const model = process.env.ASSESSMENT_CRITIC_MODEL?.trim() ?? "qwen-plus";
+  // 设计 P0-2（2026-09-15 审计）：收敛到单一解析点（见 lib/assessment-critic-config.ts）。
+  // 此前 `?? DASHSCOPE_API_KEY` 在 compose 注入空串时不回退，导致个性化被静默关闭。
+  const config = resolveAssessmentCriticConfig();
+  if (!config) return null;
+  const { url, key, model } = config;
 
   const memoryBlock = input.topMemories
     .slice(0, 3)
@@ -285,7 +287,7 @@ export async function hookProactiveOnRunCompleted(
   // P8 最小：读取账户真实偏好（介入强度 + 静默时段，方案 16 §10.2/§10.3）；
   // DND/offline 读取账户 presence。四组只读查询相互独立——并行发出，
   // 避免在结算路径上串行 4 个 DB 往返（PERF round-5）。
-  const { userCompanionAccountState } = await import("../../db/schema/companion.ts");
+  const { userCompanionAccountState } = await import("@ailearn/shared/db-schema/companion");
   const { eq } = await import("drizzle-orm");
   const [accountRows, pageRows, shownRows, lastRows] = await Promise.all([
     tx
@@ -311,14 +313,14 @@ export async function hookProactiveOnRunCompleted(
     tx.execute<{ n: string }>(sql`
       SELECT count(*)::int AS n FROM assistant_deliveries
       WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-        AND kind IN ('proactive_cue', 'system_event')
+        AND kind = 'system_event'
         AND created_at > now() - interval '24 hours'
     `),
     // 最近一次展示时间。
     tx.execute<{ created_at: Date }>(sql`
       SELECT created_at FROM assistant_deliveries
       WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-        AND kind IN ('proactive_cue', 'system_event')
+        AND kind = 'system_event'
       ORDER BY created_at DESC LIMIT 1
     `),
   ]);

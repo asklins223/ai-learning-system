@@ -16,9 +16,8 @@
  *   policyVersion」）；`CapabilityConfigV1` 为单 config revision 原子发布的
  *   契约（01-7 §7），zod strict。
  *
- * 依赖说明：bundle 图是**确定性**的（数组顺序即固定遍历顺序），部署核心
- * （capability-deployment.ts）在其上做闭包 / 校验 / 原子发布，禁止在本文件
- * 之外扩展依赖边。
+ * 依赖说明：bundle 图是**确定性**的（数组顺序即固定遍历顺序），当前 API/UI
+ * 只把它作为能力合同与投影输入；禁止在本文件之外扩展依赖边。
  *
  * zod schema 风格与 packages/shared/src/schemas.ts 保持一致（z.object +
  * .strict + z.infer）。
@@ -35,7 +34,7 @@ export const MUST_BUNDLE_CAPABILITY_IDS = [
   "trusted_multimodal_core",
   "global_companion_shell",
   "companion_onboarding_v1",
-  "learning_session_companion",
+  "learning_run_companion",
   "multimodal_voice",
   "structured_proof_v1",
   "journey_routes",
@@ -122,7 +121,7 @@ export interface CapabilityDependencyEdge {
  * 完整依赖图（Must + Should + 内部原子）：
  * - 非法组合（§18.1 / 01-7 §5）由该图推导：
  *   - onboarding 开而 global shell 关（companion_onboarding_v1 requires shell）；
- *   - Session Companion 开而 trusted core 关（learning_session_companion requires core）；
+ *   - LearningRun Companion 开而 trusted core 关（learning_run_companion requires core）；
  *   - Scene 开而 Critic/commit 关（scene requires critic, commit）；
  *   - map 开而 projection 关（map requires projection）；
  *   - Tutor 开而 Grounded Answer Critic 关（current_target_tutor requires GAC）。
@@ -133,7 +132,7 @@ export const CAPABILITY_DEPENDENCY_EDGES: readonly CapabilityDependencyEdge[] = 
   { capability: "global_companion_shell", requires: [] },
   { capability: "companion_onboarding_v1", requires: ["global_companion_shell"] },
   {
-    capability: "learning_session_companion",
+    capability: "learning_run_companion",
     requires: ["global_companion_shell", "trusted_multimodal_core"],
   },
   { capability: "multimodal_voice", requires: ["trusted_multimodal_core"] },
@@ -142,7 +141,7 @@ export const CAPABILITY_DEPENDENCY_EDGES: readonly CapabilityDependencyEdge[] = 
   { capability: "understanding_universe_v2", requires: ["trusted_multimodal_core", "projection"] },
   {
     capability: "current_target_tutor",
-    requires: ["learning_session_companion", "trusted_multimodal_core", "grounded_answer_critic"],
+    requires: ["learning_run_companion", "trusted_multimodal_core", "grounded_answer_critic"],
   },
   { capability: "learning_question_markers", requires: [] },
   { capability: "semantic_relationships", requires: [] },
@@ -163,9 +162,9 @@ export const CAPABILITY_DEPENDENCY_EDGES: readonly CapabilityDependencyEdge[] = 
 /**
  * Must bundle 依赖图（只含 Must 之间的边，用于 01-7 §6 根关闭闭包）：
  * 反向依赖闭包在该图上计算，保证与冻结记录逐字节一致——
- * `global_companion_shell off → companion_onboarding_v1 → learning_session_companion
+ * `global_companion_shell off → companion_onboarding_v1 → learning_run_companion
  * → current_target_tutor`；
- * `trusted_multimodal_core off → learning_session_companion → multimodal_voice →
+ * `trusted_multimodal_core off → learning_run_companion → multimodal_voice →
  * structured_proof_v1 → journey_routes → understanding_universe_v2 →
  * current_target_tutor`。
  * Should flags 独立（01-7 §4），不出现在任何 Must 关闭闭包内。
@@ -175,7 +174,7 @@ export const MUST_BUNDLE_DEPENDENCY_EDGES: readonly CapabilityDependencyEdge[] =
   { capability: "global_companion_shell", requires: [] },
   { capability: "companion_onboarding_v1", requires: ["global_companion_shell"] },
   {
-    capability: "learning_session_companion",
+    capability: "learning_run_companion",
     requires: ["global_companion_shell", "trusted_multimodal_core"],
   },
   { capability: "multimodal_voice", requires: ["trusted_multimodal_core"] },
@@ -184,7 +183,7 @@ export const MUST_BUNDLE_DEPENDENCY_EDGES: readonly CapabilityDependencyEdge[] =
   { capability: "understanding_universe_v2", requires: ["trusted_multimodal_core"] },
   {
     capability: "current_target_tutor",
-    requires: ["learning_session_companion", "trusted_multimodal_core"],
+    requires: ["learning_run_companion", "trusted_multimodal_core"],
   },
 ];
 

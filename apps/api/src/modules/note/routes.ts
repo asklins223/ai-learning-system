@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { noteCreateSchema, noteUpdateSchema } from "./schema.ts";
+import { noteCreateSchema } from "./schema.ts";
 import {
   createNote,
   getNoteWithVersion,
@@ -44,8 +44,8 @@ export async function noteRoutes(app: FastifyInstance) {
     return result;
   });
 
-  // Desktop NOTE-READ-PROJECTION-01: the legacy route remains available to
-  // the web client, while the desktop adapter consumes this strict public DTO.
+  // Desktop NOTE-READ-PROJECTION-01: the desktop adapter consumes this strict
+  // public DTO.
   app.get<{ Params: { id: string } }>("/v2/notes/:id", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
@@ -124,58 +124,6 @@ export async function noteRoutes(app: FastifyInstance) {
       version: result?.version,
       blocks: result?.blocks,
     };
-  });
-
-  app.get<{ Params: { id: string } }>("/notes/:id", async (req, reply) => {
-    // R-022: UUID 路径参数校验
-    const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
-    const result = await withWorkspaceTransaction(
-      { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => getNoteWithVersion(
-        transaction,
-        req.params.id,
-        req.session.workspaceId,
-      ),
-    );
-    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-    return result;
-  });
-
-  app.patch<{ Params: { id: string } }>("/notes/:id", { preHandler: [requireOwner] }, async (req, reply) => {
-    const params = uuidParamSchema.safeParse(req.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
-    const body = parseBody(app, noteUpdateSchema, req.body);
-    try {
-      const result = await withWorkspaceTransaction(
-        { workspaceId: req.session.workspaceId, userId: req.session.userId },
-        (transaction) => updateNote(
-          transaction,
-          req.params.id,
-          req.session.workspaceId,
-          req.session.userId,
-          body,
-        ),
-      );
-      if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      return result;
-    } catch (err) {
-      if (err instanceof RevisionConflictError) {
-        return reply.code(409).send({
-          error: "revision_conflict",
-          currentVersionId: err.currentVersionId,
-          message: "笔记已被改动，请刷新后重试",
-        });
-      }
-      // R-008: 捕获唯一约束冲突（并发版本号碰撞），返回 409 而非 500
-      if (err && typeof err === "object" && "code" in err && err.code === "23505") {
-        return reply.code(409).send({
-          error: "revision_conflict",
-          message: "版本冲突，请刷新后重试",
-        });
-      }
-      throw err;
-    }
   });
 
   // DELETE /notes/:id — 删除笔记（CONC-03: 软删除，设置 deleted_at）

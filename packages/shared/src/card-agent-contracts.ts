@@ -10,7 +10,6 @@
  * - providerUsageSchema / ProviderUsage
  * - agentTurnRequestSchema / AgentTurnRequest
  * - agentTurnResultSchema / AgentTurnResult
- * - isRunErrorRetryable（被 run-retryable.test.ts 引用）
  *
  * 已删除（V1 死代码，无外部引用）：
  * - 版本常量（SUPERVISOR_AGENT_ENGINE_MODE 等）
@@ -42,6 +41,7 @@ import { z } from "zod";
  * - deck_composer: 可选专家，提出 canonical merge/importance/grouping
  * - grounding_critic: 强制、只读、独立角色，逐 claim 输出支撑判定
  * - repairer: 最多创建一次，只能根据 Critic hard issues 提交 typed patch
+ * - companion_agent: 伴星可调用受控工具的通用 Agent loop
  */
 export const AgentRole = {
   GENERATION_SUPERVISOR: "generation_supervisor",
@@ -51,83 +51,11 @@ export const AgentRole = {
   DECK_COMPOSER: "deck_composer",
   GROUNDING_CRITIC: "grounding_critic",
   REPAIRER: "repairer",
+  COMPANION_AGENT: "companion_agent",
 } as const;
 export type AgentRole = (typeof AgentRole)[keyof typeof AgentRole];
 
-// ─── 2. Run 可重试性（needs_attention 恢复语义） ──────────────────────
-
-/**
- * needs_attention run 的 errorCode 中，哪些明确"重试无意义"。
- *
- * 分类依据（2026-08-06）：
- * - 预算/资源类：预算按 run 累计且不可重置，重试必然再次失败
- * - 快照漂移类：provider fingerprint 是 run 创建时冻结的，重试不会改变
- * - 确定性门禁类：VERIFY/PUBLISH 是确定性阶段，不重新调用模型（G5），
- *   同一 draft 重跑校验/发布结果必然相同
- * - 配置/产品类：mock 阻止、prepare 确定性失败
- *
- * 瞬时故障（provider 5xx/超时/worker 崩溃/lease 丢失）**不在**此集合，
- * 这些场景下 `/retry` 是正解的恢复手段。
- */
-export const NON_RETRYABLE_RUN_ERROR_CODES: ReadonlySet<string> = new Set([
-  // 预算/资源耗尽
-  "budget_exhausted",
-  "budget_exhausted_during_pagination",
-  // 快照漂移
-  "provider_fingerprint_mismatch",
-  // 配置/产品阻止
-  "mock_provider_blocked_in_production",
-  "prepare_failed",
-  // 确定性门禁：VERIFY
-  "no_draft_for_verify",
-  "no_quality_report",
-  "verify_failed",
-  "coverage_insufficient",
-  "critic_check_failed",
-  "quality_report_missing",
-  "candidate_check_failed",
-  "evidence_check_failed",
-  "empty_result",
-  "pending_candidate",
-  "partial_verdict",
-  "unsupported_verdict",
-  "contradicted_verdict",
-  "auto_verified_blocked",
-  "survival_coverage_incomplete",
-  // 确定性门禁：PUBLISH
-  "publish_failed",
-  "stale_epoch",
-  "draft_hash_mismatch",
-  "unaligned_evidence",
-  "empty_verdicts",
-  "run_not_found",
-  "run_not_active",
-  "blocked_verdict",
-  // 其它明确不可恢复
-  "superseded_by_manual_kill",
-]);
-
-/** 命中即不可重试的错误码前缀（含历史/兜底拼接的 code）。 */
-export const NON_RETRYABLE_RUN_ERROR_PREFIXES: readonly string[] = [
-  "verify_failed:", // verify 兜底拼接 code
-  "publish_failed:", // publish 兜底拼接 code
-  "预算耗尽", // 历史 BudgetExhaustedError 的中文 message
-];
-
-/**
- * 判断 needs_attention run 是否值得通过 `/retry` 恢复。
- * 未知 errorCode 默认可重试（检查点已存在，重试是安全的恢复尝试）。
- */
-export function isRunErrorRetryable(errorCode: string | null | undefined): boolean {
-  if (!errorCode) return true;
-  if (NON_RETRYABLE_RUN_ERROR_CODES.has(errorCode)) return false;
-  for (const prefix of NON_RETRYABLE_RUN_ERROR_PREFIXES) {
-    if (errorCode.startsWith(prefix)) return false;
-  }
-  return true;
-}
-
-// ─── 3. Provider Capability ────────────────────────────────────────────
+// ─── 2. Provider Capability ────────────────────────────────────────────
 
 /** Provider 工具支持模式 */
 export const ProviderToolMode = {
@@ -170,7 +98,7 @@ export const providerUsageSchema = z.object({
   /**
    * B2（计划 §2.5）：prompt cache 命中的 token 数。
    * provider 返回 cache 命中时记录，用于成本观测。
-   * 向后兼容：旧 provider 不返回此字段时为 undefined。
+   * Provider 未提供 cache 统计时保持 undefined。
    */
   cacheHitTokens: z.number().int().nullable().optional(),
   /**
@@ -180,6 +108,27 @@ export const providerUsageSchema = z.object({
   cacheMissTokens: z.number().int().nullable().optional(),
 }).strict();
 export type ProviderUsage = z.infer<typeof providerUsageSchema>;
+
+/**
+ * Provider 不透明 reasoning 句柄（多轮工具循环回放用）。
+ *
+ * 背景：部分模型在思考模式下要求把上一轮的 reasoning 原样回传，否则工具循环
+ * 第二步直接 400。实测 deepseek-v4.1-flash：
+ * 「The reasoning_text in the thinking mode must be passed back to the API」；
+ * 而 muse-spark-1.3-contributor 不要求回传、但**接受**回传（实测缺 `summary`
+ * 字段会 400 `missing required field 'summary'`）。
+ *
+ * 契约约束：
+ * - **provider 私有**：只有产出它的 provider 能解释其字段；调用方只做原样透传
+ *   （以及按需持久化），不得解析或改写。
+ * - **剥离明文思维链**：provider 必须去掉明文思考内容（Responses API 的
+ *   `content[].reasoning_text`）后再返回。实测剥离后仍满足 muse-spark 与
+ *   deepseek 的上游校验，因此模型内部推理不需要随事件或数据库落盘。
+ * - **调用方不得把句柄写入日志或事件 payload**（它仍是模型侧数据）。
+ * - 形状为不透明记录（而非固定字段），因为不同 provider/协议的句柄字段不同。
+ */
+export const providerReasoningHandleSchema = z.record(z.unknown());
+export type ProviderReasoningHandle = z.infer<typeof providerReasoningHandleSchema>;
 
 /** Agent turn 请求 */
 export const agentTurnRequestSchema = z.object({
@@ -192,14 +141,14 @@ export const agentTurnRequestSchema = z.object({
     AgentRole.DECK_COMPOSER,
     AgentRole.GROUNDING_CRITIC,
     AgentRole.REPAIRER,
+    AgentRole.COMPANION_AGENT,
   ]),
   /** 系统策略 prompt（不含用户数据） */
   systemPrompt: z.string(),
   /** 上下文消息（从 ledger/event/task results 重建） */
   messages: z.array(z.object({
     role: z.enum(["system", "user", "assistant", "tool"]),
-    // E3（计划 §2.10）：支持 multimodal content（text + image_url）
-    // 向后兼容：string content 仍然可用
+    // E3（计划 §2.10）：支持纯文本或 multimodal content（text + image_url）。
     content: z.union([
       z.string(),
       z.array(z.union([
@@ -218,6 +167,17 @@ export const agentTurnRequestSchema = z.object({
     ]),
     /** 工具调用 ID（用于 tool role 消息） */
     toolCallId: z.string().optional(),
+    /** assistant 消息的工具调用（用于确认后恢复同一次 Agent run） */
+    toolCalls: z.array(z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      arguments: z.record(z.unknown()),
+    }).strict()).max(4).optional(),
+    /**
+     * 该 assistant 消息对应的 reasoning 句柄（由 provider 产出，见
+     * providerReasoningHandleSchema）。工具循环回放时原样带回给同一 provider。
+     */
+    reasoning: z.array(providerReasoningHandleSchema).max(4).optional(),
   })),
   /** 工具 schema（按 role allowlist） */
   tools: z.array(z.object({
@@ -250,6 +210,14 @@ export const agentTurnResultSchema = z.object({
   })).default([]),
   /** 完成原因：stop | tool_calls | length | content_filter | error */
   finishReason: z.string(),
+  /**
+   * 本次 assistant 输出的 reasoning 句柄（provider 不透明）。
+   *
+   * 调用方必须在下一轮请求的对应 assistant 消息上原样带回（`messages[].reasoning`），
+   * 否则需要 reasoning 回传的模型（deepseek 思考模式）会在工具循环第二步 400。
+   * 无需 reasoning 的模型（muse-spark）带不带都能工作。
+   */
+  reasoning: z.array(providerReasoningHandleSchema).max(4).optional(),
   /** 本次调用的 token 用量 */
   usage: providerUsageSchema.nullable(),
   /** Provider 请求 ID（用于追踪） */

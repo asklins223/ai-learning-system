@@ -5,8 +5,6 @@
 import { LearningRunErrorCode } from "@ailearn/shared";
 import { DomainError } from "@ailearn/shared";
 
-export type LearningRunErrorCodeValue = LearningRunErrorCode;
-
 export class LearningRunServiceError extends DomainError {
   readonly recoveryData?: Record<string, unknown>;
 
@@ -32,10 +30,6 @@ export function staleTaskRevision(current: number, expected: number): LearningRu
     409,
     { current, expected },
   );
-}
-
-export function epochMismatch(): LearningRunServiceError {
-  return new LearningRunServiceError(LearningRunErrorCode.EPOCH_MISMATCH, "运行纪元不匹配", 409);
 }
 
 export function invalidPhase(phase: string, expected: string): LearningRunServiceError {
@@ -76,10 +70,6 @@ export function contextStale(message = "学习目标已变化，请重新开始"
 
 export function runNotFound(): LearningRunServiceError {
   return new LearningRunServiceError("run_not_found", "学习运行不存在", 404);
-}
-
-export function permissionDenied(): LearningRunServiceError {
-  return new LearningRunServiceError(LearningRunErrorCode.PERMISSION_DENIED, "无权访问该运行", 403);
 }
 
 export function idempotencyConflict(): LearningRunServiceError {

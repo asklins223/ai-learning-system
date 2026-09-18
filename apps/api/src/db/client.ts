@@ -1,9 +1,23 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { DomainError } from "@ailearn/shared";
-import * as schema from "./schema/index.ts";
+import * as schema from "@ailearn/shared/db-schema";
+// 稳定 P0-4（2026-09-15 审计）：事务内 workspace/user 上下文（UUID 校验、
+// 嵌套兼容性断言、set_config 回读校验、AsyncLocalStorage）的唯一实现已下沉到
+// packages/shared/src/workspace-transaction.ts，与 worker 共用。此处只保留
+// API 侧的角色差异（必须带已认证 actor）与连接策略（隔离级别、慢事务日志）。
+import {
+  WorkspaceTransactionScope,
+  type ActiveWorkspaceTransaction,
+  type WorkspaceScopeContext,
+} from "@ailearn/shared/workspace-transaction";
+// 设计 P1-15（2026-09-15 审计）：指标此前经 `import("../lib/metrics.ts").then(...)`
+// 异步自增——关停窗口内到达的失败会被丢掉（增量永远记不上），且 `.catch(()=>{})`
+// 连丢都看不见。metrics.ts 只依赖 prom-client 与 @ailearn/shared，无循环风险，
+// 改为静态导入同步自增。
+import { dbTransactionFailuresTotal } from "../lib/metrics.ts";
+import { logger } from "../lib/logger.ts";
 
 // v0.4: the API must use its own database role in production.  The shared
 // DATABASE_URL remains a development/test compatibility path only.
@@ -23,10 +37,34 @@ function resolveConnectionString(): string {
 
 const connectionString = resolveConnectionString();
 
+/**
+ * 语句超时（稳定 P0-5 / P1-6，2026-09-15 审计）：此前 API 侧所有连接池都没有
+ * statement_timeout（实测 `SHOW statement_timeout` = 0，即无限制）。一条挂起的
+ * 语句（锁等待、半开连接）会**永久**占住一个池连接；API 单池只有 25 个连接，
+ * 且后台 tick 与请求共用同一池。给出确定上界。
+ *
+ * 只设 statement_timeout，**刻意不设** idle_in_transaction_session_timeout：
+ * V2 制卡管道会在事务内做分钟级 LLM HTTP 调用（见 card-generation-v2-handler.ts
+ * 的 H4 说明），事务在调用期间处于 idle-in-transaction 状态，设短了会把整条
+ * 管道掐断。
+ *
+ * 该值也是 run-processing-tick 的 private-solution 池（P1-2）共用的唯一解析点，
+ * 避免第二处 env 解析漂移。
+ */
+export function resolveApiStatementTimeoutMs(
+  raw: string | undefined = process.env.API_STATEMENT_TIMEOUT_MS,
+): number {
+  const parsed = Number(raw ?? 60_000);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 60_000;
+}
+
 // PERF-WN: 单 postgres 池承载常规请求 + SSE 轮询 + 后台任务；max=10 在大量
 // 长连接轮询/并发请求时成为瓶颈（配合 inbox/companion SSE 连接上限使用）。
 // 提到 25 摊薄峰值排队，仍受 DB 端 max_connections 约束。
-const queryClient = postgres(connectionString, { max: 25 });
+const queryClient = postgres(connectionString, {
+  max: 25,
+  connection: { statement_timeout: resolveApiStatementTimeoutMs() },
+});
 let closePromise: Promise<void> | null = null;
 
 export const db = drizzle(queryClient, { schema });
@@ -36,31 +74,21 @@ export const db = drizzle(queryClient, { schema });
 const originalTransaction = db.transaction.bind(db);
 db.transaction = ((...args: Parameters<typeof originalTransaction>) =>
   originalTransaction(...args).catch((error: unknown) => {
-    import("../lib/metrics.ts").then(({ dbTransactionFailuresTotal }) => {
-      dbTransactionFailuresTotal.inc();
-    }).catch(() => {});
+    // 同步自增（原先经动态 import 异步自增，关停窗口会丢计数）。
+    dbTransactionFailuresTotal.inc();
     throw error;
   })) as typeof originalTransaction;
 
 export type ApiTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-export interface WorkspaceTransactionContext {
-  workspaceId: string;
-  userId: string;
-}
-
-export interface NormalizedWorkspaceTransactionContext {
-  workspaceId: string;
-  userId: string;
-}
+export type WorkspaceTransactionContext = WorkspaceScopeContext<string>;
+export type NormalizedWorkspaceTransactionContext = WorkspaceScopeContext<string>;
 
 export class WorkspaceTransactionContextError extends DomainError {
   constructor(message: string) {
     super({ name: "WorkspaceTransactionContextError", code: "workspace_transaction_context_error", message, statusCode: 500 });
   }
 }
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * 无具体 actor 的工作区级操作使用固定的系统身份（nil UUID）。
@@ -69,31 +97,20 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  */
 export const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 
-function normalizeContextUuid(value: string, field: "workspaceId" | "userId"): string {
-  const normalized = value.trim().toLowerCase();
-  if (!UUID_PATTERN.test(normalized)) {
-    throw new WorkspaceTransactionContextError(`${field} must be a UUID`);
-  }
-  return normalized;
-}
+const apiScope = new WorkspaceTransactionScope<string, ApiTransaction>({
+  label: "workspace",
+  // API 业务工作总是有已认证 actor；无 actor 的系统工作属于受控函数或 Worker。
+  allowNullUserId: false,
+  createError: (message) => new WorkspaceTransactionContextError(message),
+});
+
+type ActiveApiWorkspaceTransaction = ActiveWorkspaceTransaction<string, ApiTransaction>;
 
 /** Pure validation used by both the runtime helper and unit tests. */
 export function normalizeWorkspaceTransactionContext(
   context: WorkspaceTransactionContext,
 ): NormalizedWorkspaceTransactionContext {
-  if (!context || typeof context !== "object") {
-    throw new WorkspaceTransactionContextError("workspace transaction context is required");
-  }
-  if (typeof context.workspaceId !== "string") {
-    throw new WorkspaceTransactionContextError("workspaceId must be a UUID");
-  }
-  if (typeof context.userId !== "string") {
-    throw new WorkspaceTransactionContextError("userId must be a UUID");
-  }
-  return {
-    workspaceId: normalizeContextUuid(context.workspaceId, "workspaceId"),
-    userId: normalizeContextUuid(context.userId, "userId"),
-  };
+  return apiScope.normalize(context);
 }
 
 /** Nested work may reuse one transaction, but it may never change its tenant or actor. */
@@ -101,20 +118,8 @@ export function assertWorkspaceTransactionContextCompatible(
   active: NormalizedWorkspaceTransactionContext,
   requested: NormalizedWorkspaceTransactionContext,
 ): void {
-  if (active.workspaceId !== requested.workspaceId || active.userId !== requested.userId) {
-    throw new WorkspaceTransactionContextError(
-      "nested database work cannot change workspace or user context",
-    );
-  }
+  apiScope.assertCompatible(active, requested);
 }
-
-type ActiveWorkspaceTransaction = {
-  context: NormalizedWorkspaceTransactionContext;
-  transaction: ApiTransaction;
-  open: boolean;
-};
-
-const workspaceTransactionStorage = new AsyncLocalStorage<ActiveWorkspaceTransaction>();
 
 /**
  * Set both custom settings transaction-locally and verify PostgreSQL returned
@@ -125,28 +130,7 @@ export async function setApiTransactionContext(
   transaction: ApiTransaction,
   context: WorkspaceTransactionContext,
 ): Promise<NormalizedWorkspaceTransactionContext> {
-  const normalized = normalizeWorkspaceTransactionContext(context);
-  const active = workspaceTransactionStorage.getStore();
-  if (active) {
-    if (!active.open) {
-      throw new WorkspaceTransactionContextError("workspace transaction is no longer active");
-    }
-    assertWorkspaceTransactionContextCompatible(active.context, normalized);
-  }
-
-  const rows = await transaction.execute<{ workspace_id: string; user_id: string }>(sql`
-    SELECT
-      pg_catalog.set_config('app.workspace_id', ${normalized.workspaceId}, true) AS workspace_id,
-      pg_catalog.set_config('app.user_id', ${normalized.userId}, true) AS user_id
-  `);
-  const applied = rows[0];
-  if (
-    applied?.workspace_id?.toLowerCase() !== normalized.workspaceId
-    || applied?.user_id?.toLowerCase() !== normalized.userId
-  ) {
-    throw new WorkspaceTransactionContextError("database rejected workspace transaction context");
-  }
-  return normalized;
+  return apiScope.applyContext(transaction, context);
 }
 
 /**
@@ -156,14 +140,14 @@ export async function setApiTransactionContext(
  *
  * ─── QUAL-58/SEC-26 修复完成 ───────────────────────────────────────────
  * `withWorkspaceTransaction` 现已在所有需要 workspace 隔离的 API 模块中使用
- * （note、card、evidence、job、export、validation、stats、understanding、
+ * （note、card、evidence、job、export、stats、understanding、
  * review、benchmark 等）。
  *
  * 已完成的统一工作：
  *   1. benchmark/service.ts 的 3 处 db.transaction 已转为 withWorkspaceTransaction
  *   2. stats/service.ts 的裸 db 查询已包裹在 withWorkspaceTransaction 内
  *   3. understanding/service.ts 的裸 db 查询已包裹在 withWorkspaceTransaction 内
- *   4. validation/service.ts 的裸 db 查询已包裹在 withWorkspaceTransaction 内
+ *   4. 所有模块的裸 db 查询都必须包裹在 withWorkspaceTransaction 内
  *   5. review/service.ts 的 tx ?? db 回退模式已改为 withWorkspaceTransaction 包裹
  *
  * 保留直接使用 `db` 的场景（有意为之）：
@@ -179,12 +163,8 @@ export async function withWorkspaceTransaction<T>(
   options?: { isolationLevel?: "repeatable read" | "read committed" | "serializable" },
 ): Promise<T> {
   const normalized = normalizeWorkspaceTransactionContext(context);
-  const active = workspaceTransactionStorage.getStore();
+  const active: ActiveApiWorkspaceTransaction | undefined = apiScope.requireActive(normalized);
   if (active) {
-    if (!active.open) {
-      throw new WorkspaceTransactionContextError("workspace transaction is no longer active");
-    }
-    assertWorkspaceTransactionContextCompatible(active.context, normalized);
     if (options?.isolationLevel) {
       throw new WorkspaceTransactionContextError(
         "cannot change isolation level inside an already-open workspace transaction",
@@ -199,32 +179,35 @@ export async function withWorkspaceTransaction<T>(
       await transaction.execute(sql`SET TRANSACTION ISOLATION LEVEL ${sql.raw(options.isolationLevel.toUpperCase())}`);
     }
     await setApiTransactionContext(transaction, normalized);
-    const scopedTransaction = { context: normalized, transaction, open: true };
+    const scopedTransaction: ActiveApiWorkspaceTransaction = {
+      context: normalized,
+      transaction,
+      open: true,
+    };
     // 2026-08-14（16-remaining-issues #2）：慢响应可观测性——记录事务耗时，
     // 定位"DB 侧无慢查询但 API 偶发 20-207s"的连接池/事件循环排队。
     const startedAt = performance.now();
     try {
-      return await workspaceTransactionStorage.run(
+      return await apiScope.run(
         scopedTransaction,
         () => operation(transaction),
       );
     } finally {
       scopedTransaction.open = false;
       const elapsedMs = performance.now() - startedAt;
+      // 设计 P1-15（2026-09-15 审计）：此前经动态 import 异步记日志——关停窗口
+      // （正是慢事务/卡死最需要证据的时刻）会丢掉这些行。logger.ts 只依赖 pino 与
+      // @ailearn/shared，无循环风险，改为静态导入同步落日志。
       if (elapsedMs >= 5000) {
-        import("../lib/logger.ts").then(({ logger }) => {
-          logger.error(
-            { elapsedMs, context: normalized, poolMax: queryClient.options.max },
-            "workspace transaction slow (>5s)",
-          );
-        }).catch(() => {});
+        logger.error(
+          { elapsedMs, context: normalized, poolMax: queryClient.options.max },
+          "workspace transaction slow (>5s)",
+        );
       } else if (elapsedMs >= 1000) {
-        import("../lib/logger.ts").then(({ logger }) => {
-          logger.warn(
-            { elapsedMs, context: normalized },
-            "workspace transaction slow (>1s)",
-          );
-        }).catch(() => {});
+        logger.warn(
+          { elapsedMs, context: normalized },
+          "workspace transaction slow (>1s)",
+        );
       }
     }
   });
@@ -233,45 +216,6 @@ export async function withWorkspaceTransaction<T>(
 export function closeDatabase(): Promise<void> {
   closePromise ??= queryClient.end({ timeout: 5 });
   return closePromise;
-}
-
-export class AdvisoryLockUnavailableError extends DomainError {
-  readonly statusCode = 409;
-
-  constructor(message = "operation already in progress") {
-    super({ name: "AdvisoryLockUnavailableError", code: "advisory_lock_unavailable", message, statusCode: 409 });
-  }
-}
-
-/**
- * Hold a PostgreSQL session advisory lock across a long-running operation
- * without keeping a database transaction open. The reserved connection is
- * always released, and PostgreSQL also drops the lock if the process exits.
- */
-export async function withSessionAdvisoryLock<T>(
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const connection = await queryClient.reserve();
-  let acquired = false;
-  try {
-    const rows = await connection<{ acquired: boolean }[]>`
-      SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS acquired
-    `;
-    acquired = rows[0]?.acquired === true;
-    if (!acquired) throw new AdvisoryLockUnavailableError();
-    return await operation();
-  } finally {
-    try {
-      if (acquired) {
-        await connection`
-          SELECT pg_advisory_unlock(hashtextextended(${key}, 0))
-        `;
-      }
-    } finally {
-      connection.release();
-    }
-  }
 }
 
 export { schema };

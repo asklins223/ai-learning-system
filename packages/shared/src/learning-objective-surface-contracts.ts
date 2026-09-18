@@ -15,6 +15,7 @@
 import { z } from "zod";
 import { knowledgeFormV2Schema } from "./card-generation-v2-contracts.ts";
 import { objectiveRevisionClassV2Schema } from "./learning-card-v2-contracts.ts";
+import { learningRunOriginV2Schema } from "./learning-target-v2-contracts.ts";
 
 // ─── W1-09: ObjectiveOriginV3 ───────────────────────────────────────────
 
@@ -22,7 +23,6 @@ export const objectiveOriginKindV3Schema = z.enum([
   "note",
   "manual",
   "imported",
-  "legacy_migrated",
 ]);
 export type ObjectiveOriginKindV3 = z.infer<typeof objectiveOriginKindV3Schema>;
 
@@ -66,48 +66,30 @@ const importedOriginV3Schema = z.strictObject({
   supportGrade: objectiveOriginSupportGradeV3Schema.default("primary"),
 });
 
-const legacyMigratedOriginV3Schema = z.strictObject({
-  originId: z.string().uuid(),
-  kind: z.literal("legacy_migrated"),
-  noteId: z.string().uuid().nullable(),
-  noteVersionId: z.string().uuid().nullable(),
-  sourceSnapshotId: z.string().uuid().nullable(),
-  evidenceSnapshotIds: z.array(z.string().uuid()).max(50).default([]),
-  legacyCardId: z.string().uuid().nullable(),
-  legacyKeyPointId: z.string().uuid(),
-  integrity: z.enum(["verified", "legacy_unreviewed"]),
-  supportGrade: objectiveOriginSupportGradeV3Schema.default("primary"),
-});
-
 export const objectiveOriginV3Schema = z.discriminatedUnion("kind", [
   noteOriginV3Schema,
   manualOriginV3Schema,
   importedOriginV3Schema,
-  legacyMigratedOriginV3Schema,
 ]);
 export type ObjectiveOriginV3 = z.infer<typeof objectiveOriginV3Schema>;
 
 // ─── W1-10: LearningObjectivePrimaryActionV3 ─────────────────────────────
 // 前端不得根据 label 或本地时间推断 action（§7.5/§29.1）。action 只携带安全参数。
 
-export const objectiveRunOriginV3Schema = z.enum([
-  "card",
-  "home",
-  "today",
-  "review",
-  "graph",
-  "onboarding",
-  "pet",
-]);
-export type ObjectiveRunOriginV3 = z.infer<typeof objectiveRunOriginV3Schema>;
+const objectiveRunStartV3Schema = z.strictObject({
+  version: z.literal(2),
+  originV2: learningRunOriginV2Schema,
+  goal: z.enum(["stabilize", "clarify", "repair", "transfer", "explore"]),
+  requestedTimeBudgetSeconds: z.number().int().min(30).max(180),
+  responsePreference: z.enum(["adaptive", "voice", "text", "structured"]),
+});
 
 export const learningObjectivePrimaryActionV3Schema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("create_run"),
-    origin: objectiveRunOriginV3Schema,
     objectiveId: z.string().uuid(),
-    cardId: z.string().uuid().nullable(),
-    goal: z.string().min(1).max(200),
+    label: z.string().min(1).max(80),
+    start: objectiveRunStartV3Schema,
   }),
   z.strictObject({
     kind: z.literal("resume_run"),
@@ -117,14 +99,15 @@ export const learningObjectivePrimaryActionV3Schema = z.discriminatedUnion("kind
   z.strictObject({
     kind: z.literal("create_review_run"),
     objectiveId: z.string().uuid(),
-    scheduleId: z.string().uuid(),
-    generation: z.number().int().min(0),
+    label: z.string().min(1).max(80),
+    start: objectiveRunStartV3Schema,
   }),
   z.strictObject({
     kind: z.literal("practice_only"),
     objectiveId: z.string().uuid(),
-    cardId: z.string().uuid().nullable(),
     reasonCodes: z.array(z.string().min(1)).min(1).max(10),
+    label: z.string().min(1).max(80),
+    start: objectiveRunStartV3Schema,
   }),
   z.strictObject({
     kind: z.literal("wait_for_initial_validation"),
@@ -240,6 +223,14 @@ export const learningObjectiveSurfaceV3Schema = z.strictObject({
   lifecycle: z.strictObject({
     status: objectiveSurfaceLifecycleV3Schema,
     successorObjectiveId: z.string().uuid().nullable(),
+  }),
+  /**
+   * 服务端唯一裁决的个人状态。列表、详情、RoomProjection 必须直接展示该值，
+   * 不得在各客户端按各自优先级重新推导。
+   */
+  personalState: z.strictObject({
+    state: objectivePersonalStateV3Schema,
+    activeRunId: z.string().uuid().nullable(),
   }),
   primaryAction: learningObjectivePrimaryActionV3Schema,
   createdAt: z.string().datetime({ offset: true }),

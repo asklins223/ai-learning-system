@@ -18,11 +18,19 @@
     "outDir": "dist",
     "baseUrl": ".",
     "paths": {
+      "@ailearn/shared": [
+        "../../packages/shared/src/index.ts"
+      ],
+      "@ailearn/shared/*": [
+        "../../packages/shared/src/*.ts",
+        "../../packages/shared/src/*/index.ts"
+      ],
       "drizzle-orm": [
-        "../../apps/api/node_modules/drizzle-orm"
+        "./node_modules/drizzle-orm/index.d.ts"
       ],
       "drizzle-orm/*": [
-        "../../apps/api/node_modules/drizzle-orm/*"
+        "./node_modules/drizzle-orm/*/index.d.ts",
+        "./node_modules/drizzle-orm/*.d.ts"
       ]
     }
   },

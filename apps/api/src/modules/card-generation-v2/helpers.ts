@@ -10,15 +10,14 @@ import {
   cardGenerationCandidatesV2,
   cardGenerationEventsV2,
   cardDomainEventsV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
-import { noteVersions } from "../../db/schema/note.ts";
+import { noteVersions } from "@ailearn/shared/db-schema/note";
 import { cardGenerationRunStatusV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
 // 2026-08-24（AI 设计审查 §4.4 第二批）：ServiceError 继承 shared 纯逻辑层的
-// CardGenerationPipelineErrorV2——下沉后的 seal/binding-plan 纯函数抛的是
-// shared 类，继承关系保证既有 instanceof 检查（routes.ts 的错误边界）与
-// code/statusCode 消费完全兼容。
+// CardGenerationPipelineErrorV2——seal/binding-plan 纯函数抛出 shared 类，
+// API 错误边界通过同一继承链识别 code/statusCode。
 import { CardGenerationPipelineErrorV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 export { CardGenerationPipelineErrorV2 };
 

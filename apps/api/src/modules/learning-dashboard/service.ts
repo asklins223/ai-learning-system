@@ -10,14 +10,15 @@
  * - Dashboard revision 只由稳定内容（counts/mode/degradation + 各 section 的
  *   objectiveId+surfaceRevision 标识）派生，排除 snapshotAt，供 ETag 304 协商。
  */
-import { and, eq, lt, inArray, sql, desc, isNull } from "drizzle-orm";
+import { and, eq, lt, inArray, sql, desc, isNull, or, lte } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
-import { learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
-import { learningRuns } from "../../db/schema/learning-runs.ts";
-import { reviewSchedules } from "../../db/schema/evidence.ts";
-import { notes } from "../../db/schema/note.ts";
+import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { learningRuns } from "@ailearn/shared/db-schema/learning-runs";
+import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
+import { notes } from "@ailearn/shared/db-schema/note";
 import type { LearningDashboardV2 } from "@ailearn/shared";
+import { reviewScheduleTargetsConsumableCardPredicate } from "../review/consumer-eligibility.ts";
 import {
   assembleObjectiveSurfaceV3,
   listObjectiveSurfacesV3,
@@ -27,7 +28,6 @@ import { resolvePrimaryActionV3 } from "../learning-objectives/action-resolver.t
 import {
   dashboardBuildDurationSeconds,
   dashboardEmptyWithActiveObjectivesTotal,
-  objectivesWithoutOriginGauge,
 } from "../../lib/metrics.ts";
 
 const ACTIVE_RUN_PHASES = [
@@ -90,6 +90,14 @@ export async function buildLearningDashboardV2(
           eq(reviewSchedules.userId, ctx.userId),
           eq(reviewSchedules.status, "pending"),
           lt(reviewSchedules.nextReviewAt, now),
+          // 与 Member V2 到期队列同一条口径（review/service.ts）：延后期内的卡
+          // 不算「到期」，指向不可消费卡的排期也不算——否则页 14 的数字和页 15
+          // 的队列对不上。
+          or(
+            isNull(reviewSchedules.userDeferredUntil),
+            lte(reviewSchedules.userDeferredUntil, now),
+          ),
+          reviewScheduleTargetsConsumableCardPredicate(),
         )),
       tx
         .select({ n: sql<number>`count(*)::int` })
@@ -153,7 +161,6 @@ export async function buildLearningDashboardV2(
   }
 
   // ── RL-09/RL-10 metrics（post-mode）────────────────────────────────
-  objectivesWithoutOriginGauge.set(counts.needsRepair);
   if (
     (mode === "first_use" || mode === "notes_without_objectives") &&
     counts.activeObjectives > 0

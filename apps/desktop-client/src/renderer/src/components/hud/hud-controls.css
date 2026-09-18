@@ -1,0 +1,288 @@
+/*
+ * The settings centre's drawn controls.
+ *
+ * `hud-pages.css` is generated from the mockup and must stay untouched, so the
+ * objects the mockup only ever showed as static samples — the switch, the
+ * segmented plate, the ledger dropdown, the slider — are completed here. Every
+ * rule is scoped to `.hud-surface` and inherits the HUD tokens, so night and the
+ * compact viewport follow without a second set of styles.
+ */
+
+/* ── Switch ──────────────────────────────────────────────────────────────── */
+
+.hud-surface .switch {
+  position: relative;
+  flex: none;
+  transition: background-color 180ms var(--hud-ease-out), box-shadow 180ms ease;
+}
+.hud-surface .switch:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 2px; }
+.hud-surface .switch:disabled { opacity: 0.5; cursor: not-allowed; }
+.hud-surface .switch:hover:not(:disabled):not(.on) { background: #c0ac8c; }
+.hud-surface .switch:hover:not(:disabled).on { background: #6c8569; }
+/* The confirmation tick is a child element the component remounts per toggle,
+   not an `aria-checked` pseudo-element: keyed off the checked state it replayed
+   whenever an already-on switch mounted. */
+.hud-surface .switch__settle {
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+  border: 2px solid rgba(120, 145, 119, 0.42);
+  animation: hud-switch-settle 320ms var(--hud-ease-out) both;
+  pointer-events: none;
+}
+
+@keyframes hud-switch-settle {
+  from { opacity: 0.9; transform: scale(0.86); }
+  to { opacity: 0; transform: scale(1.12); }
+}
+
+/* ── Segmented choice ────────────────────────────────────────────────────── */
+
+.hud-surface .hud-segmented {
+  position: relative;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  flex: none;
+  min-width: 148px;
+  padding: 3px;
+  border: 2px solid rgba(96, 72, 51, 0.16);
+  border-radius: 15px 18px 14px 17px;
+  background: rgba(255, 255, 255, 0.38);
+}
+.hud-surface .hud-segmented--compact { min-width: 118px; }
+
+.hud-surface .hud-segmented__plate {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / var(--hud-seg-count));
+  border-radius: 12px 15px 11px 14px;
+  background: var(--hud-butter);
+  box-shadow: 0 4px 9px rgba(61, 40, 24, 0.2);
+  transform: translateX(calc(var(--hud-seg-index) * 100%));
+  transition: transform 260ms var(--hud-ease-out);
+}
+.hud-surface .hud-segmented[data-settled="false"] .hud-segmented__plate { transition: none; }
+
+.hud-surface .hud-segmented button {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 9px;
+  color: var(--hud-soft);
+  border: 0;
+  border-radius: 12px 15px 11px 14px;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 180ms ease;
+}
+.hud-surface .hud-segmented button.is-active { color: #43301f; }
+.hud-surface .hud-segmented button svg { width: 13px; height: 13px; flex: none; }
+.hud-surface .hud-segmented button:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 1px; }
+.hud-surface .hud-segmented button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .hud-segmented__plate { transition: none; }
+  .hud-surface .switch__settle { animation: none; opacity: 0; }
+}
+
+/* ── Ledger picker ───────────────────────────────────────────────────────── */
+
+.hud-surface .hud-picker { position: relative; flex: none; }
+
+.hud-surface .hud-picker__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  min-width: 124px;
+  max-width: 260px;
+  cursor: pointer;
+}
+.hud-surface .hud-picker__trigger:disabled { opacity: 0.55; cursor: not-allowed; }
+/* The trigger is a control like the switch and the slider, so it wears the same
+   focus ring instead of the browser default. */
+.hud-surface .hud-picker__trigger:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 2px; }
+
+/* The chip-shaped trigger: the mockup's `.tag` in a command row, still opening
+   the same drawn list. */
+.hud-surface .hud-picker__trigger--tag {
+  min-width: 0;
+  max-width: none;
+  gap: 5px;
+  cursor: pointer;
+}
+.hud-surface .hud-picker__trigger--tag .hud-picker__chevron { opacity: 0.62; }
+.hud-surface .hud-picker[data-open="true"] .hud-picker__trigger {
+  border-color: rgba(96, 72, 51, 0.48);
+  background: rgba(255, 255, 255, 0.66);
+}
+.hud-surface .hud-picker__value {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.hud-surface .hud-picker__chevron { flex: none; opacity: 0.72; transition: transform 220ms var(--hud-ease-out); }
+.hud-surface .hud-picker[data-open="true"] .hud-picker__chevron { transform: rotate(180deg); }
+
+.hud-surface .hud-picker__menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  /* The list sizes to its longest entry and never falls below a readable width,
+     which matters for the chip-shaped trigger where 100% would be a few glyphs
+     wide and every label would break one character per line. */
+  width: max-content;
+  min-width: max(100%, 178px);
+  max-width: 320px;
+  max-height: 232px;
+  margin: 0;
+  padding: 5px;
+  overflow: auto;
+  list-style: none;
+  border: 4px solid rgba(255, 252, 235, 0.82);
+  border-radius: 20px 24px 18px 22px;
+  background: var(--hud-cream);
+  box-shadow: 0 15px 30px rgba(45, 28, 17, 0.26), 0 3px 8px rgba(45, 28, 17, 0.14);
+  animation: hud-picker-open 150ms var(--hud-ease-out) both;
+  /* Grows out of the trigger it belongs to, not out of its own centre. */
+  transform-origin: top center;
+  scrollbar-color: rgba(79, 57, 39, 0.42) transparent;
+  scrollbar-width: thin;
+}
+.hud-surface .hud-picker[data-align="end"] .hud-picker__menu { right: 0; }
+.hud-surface .hud-picker[data-align="start"] .hud-picker__menu { left: 0; }
+.hud-surface .hud-picker__menu--up { top: auto; bottom: calc(100% + 6px); transform-origin: bottom center; }
+.hud-surface .hud-picker__menu:focus { outline: none; }
+.hud-surface .hud-picker__menu:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 2px; }
+/* The menu leaves the way it arrived; the component keeps it mounted for the
+   length of this animation, then unmounts it. */
+.hud-surface .hud-picker__menu[data-closing="true"] {
+  animation: hud-picker-close 130ms var(--hud-ease-out) both;
+  pointer-events: none;
+}
+
+@keyframes hud-picker-open {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes hud-picker-close {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(-4px) scale(0.985); }
+}
+
+.hud-surface .hud-picker__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 13px 16px 12px 15px;
+  color: var(--hud-ink);
+  font-size: 11px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+.hud-surface .hud-picker__option > span { min-width: 0; }
+.hud-surface .hud-picker__option b { font-weight: inherit; white-space: nowrap; }
+.hud-surface .hud-picker__option small { display: block; margin-top: 3px; color: var(--hud-soft); font-size: 9px; }
+.hud-surface .hud-picker__option.is-active { background: rgba(232, 216, 181, 0.6); }
+.hud-surface .hud-picker__option.is-selected { background: var(--hud-butter); font-weight: 700; }
+.hud-surface .hud-picker__option svg { flex: none; color: #5f7a5d; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .hud-picker__menu { animation: none; }
+  .hud-surface .hud-picker__menu[data-closing="true"] { animation: none; }
+  .hud-surface .hud-picker__chevron { transition: none; }
+}
+
+/* ── Drawn slider ────────────────────────────────────────────────────────── */
+
+.hud-surface .hud-slider { display: grid; gap: 9px; margin-top: 4px; }
+
+.hud-surface .hud-slider__track {
+  position: relative;
+  height: 26px;
+  cursor: pointer;
+  touch-action: none;
+}
+.hud-surface .hud-slider__track:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 3px; border-radius: 12px; }
+
+.hud-surface .hud-slider__groove,
+.hud-surface .hud-slider__fill {
+  position: absolute;
+  top: 50%;
+  height: 8px;
+  border-radius: 6px;
+  transform: translateY(-50%);
+}
+.hud-surface .hud-slider__groove {
+  left: 0;
+  right: 0;
+  background: rgba(96, 72, 51, 0.18);
+  box-shadow: inset 0 1px 3px rgba(69, 47, 31, 0.22);
+}
+/* `scale` instead of `width`: dragging writes a composited property, so the
+   fill never triggers layout on the way. */
+.hud-surface .hud-slider__fill {
+  left: 0;
+  width: 100%;
+  transform-origin: left center;
+  scale: var(--hud-slider-ratio, 0) 1;
+  background: linear-gradient(90deg, #9cb894, #7e9b7c);
+}
+
+.hud-surface .hud-slider__thumb {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  border: 2px solid rgba(255, 252, 235, 0.86);
+  border-radius: 50%;
+  background: var(--hud-cream);
+  box-shadow: 0 3px 7px rgba(55, 36, 23, 0.3);
+  /* The position rides in `translate` (set inline), the hover affordance in
+     `scale`, so the two never overwrite each other. */
+  translate: 0 -50%;
+  scale: 1;
+  transition: scale 140ms var(--hud-ease-out);
+}
+.hud-surface .hud-slider__track:hover .hud-slider__thumb,
+.hud-surface .hud-slider__track:focus-visible .hud-slider__thumb { scale: 1.08; }
+
+.hud-surface .hud-slider__readout { display: flex; align-items: baseline; gap: 8px; }
+.hud-surface .hud-slider__readout b { font: 680 15px/1 "Noto Serif SC", "Songti SC", serif; color: #4c664f; }
+.hud-surface .hud-slider__readout span { color: var(--hud-soft); font-size: 9px; }
+
+/* ── Ledger field ────────────────────────────────────────────────────────── */
+
+.hud-surface .hud-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.hud-surface .hud-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 11px;
+  color: var(--hud-ink);
+  border: 2px solid rgba(96, 72, 51, 0.2);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.44);
+  font: 11px/1.5 "Noto Sans SC Variable", "Noto Sans SC", system-ui, sans-serif;
+  outline: 0;
+}
+.hud-surface .hud-field input::placeholder { color: rgba(112, 93, 77, 0.66); }
+.hud-surface .hud-field input:focus { border-color: rgba(96, 72, 51, 0.48); background: rgba(255, 255, 255, 0.7); }
+.hud-surface .hud-field input:disabled { opacity: 0.55; }

@@ -1,10 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { requireSession } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
-import { safeSseWrite } from "../../lib/safe-sse-write.ts";
-import { getCompanionBootstrap } from "./bootstrap-service.ts";
+import { safeSseWrite, safeWriteWithBackpressure } from "../../lib/safe-sse-write.ts";
 import { CompanionConversationError, createCompanionTurn, createCompanionConversation } from "./turn-service.ts";
-import { createCompanionContextGrantRequestV1Schema, createMenuProposalRequestV1Schema, createToolProposalRequestV1Schema, proposalDecisionRequestV1Schema } from "@ailearn/shared";
+import { createCompanionLearningRunContextGrantRequestV1Schema, createMenuProposalRequestV1Schema, createToolProposalRequestV1Schema, proposalDecisionRequestV1Schema } from "@ailearn/shared";
 import { cancelCompanionRun } from "./companion-cancel.ts";
 import { openCompanionEventStream } from "./companion-events.ts";
 import {
@@ -15,11 +14,11 @@ import {
   deleteCompanionConversation,
 } from "./companion-conversations-service.ts";
 import {
-  createCompanionContextGrant,
+  createCompanionLearningRunContextGrant,
   createCompanionMenuProposal,
   createCompanionToolProposal,
   decideCompanionProposal,
-  getCompanionLearningSessionContext,
+  getCompanionLearningRunContext,
   getCompanionProposalSnapshot,
   resolveCompanionLearningContext,
 } from "./learning-action-bridge.ts";
@@ -61,8 +60,11 @@ function parsePaginationInt(raw: string | undefined, fallback: number): number {
  * Conversation APIs must fail closed at the HTTP boundary. Checking the flag
  * only in the worker allowed disabled clients to create durable conversations
  * and turns which could never run.
+ *
+ * 导出仅为单测直接覆盖这条边界契约（routes.test.ts）；运行时只由下面的
+ * preHandler 注册使用。
  */
-async function requireCompanionDialogue(_req: FastifyRequest, reply: FastifyReply) {
+export async function requireCompanionDialogue(_req: FastifyRequest, reply: FastifyReply) {
   if (process.env.COMPANION_DIALOGUE_V1_ENABLED === "true") return;
   return reply.code(404).send({
     version: 1,
@@ -76,11 +78,8 @@ export async function companionConversationRoutes(app: FastifyInstance) {
   // P5 §6.7 POST /companion/menu-proposals：菜单 proposal create（原子）。
   app.post(
     "/companion/menu-proposals",
-    { preHandler: [requireSession] },
+    { preHandler: [requireSession, requireCompanionDialogue] },
     async (req, reply) => {
-      if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
-        return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
-      }
       const session = req.session!;
       const idempotencyKey = req.headers["idempotency-key"];
       if (typeof idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
@@ -113,11 +112,8 @@ export async function companionConversationRoutes(app: FastifyInstance) {
   // 入口（payload 全量校验 → 原子 proposal；确认后由 decision 同步执行）。
   app.post(
     "/companion/tool-proposals",
-    { preHandler: [requireSession] },
+    { preHandler: [requireSession, requireCompanionDialogue] },
     async (req, reply) => {
-      if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
-        return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
-      }
       const session = req.session!;
       const idempotencyKey = req.headers["idempotency-key"];
       if (typeof idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
@@ -149,11 +145,8 @@ export async function companionConversationRoutes(app: FastifyInstance) {
   // GET /companion/proposals/:id — §6.6 durable proposal/action snapshot.
   app.get<{ Params: { id: string } }>(
     "/companion/proposals/:id",
-    { preHandler: [requireSession] },
+    { preHandler: [requireSession, requireCompanionDialogue] },
     async (req, reply) => {
-      if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
-        return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
-      }
       try {
         if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:read`, COMPANION_RATE_LIMITS.readQueriesPerMinute.limit, COMPANION_RATE_LIMITS.readQueriesPerMinute.windowMs)) return;
         const result = await getCompanionProposalSnapshot({
@@ -174,11 +167,8 @@ export async function companionConversationRoutes(app: FastifyInstance) {
   // P5 §6.6 POST /companion/proposals/:id/decision（confirm/reject 原子消费）。
   app.post<{ Params: { id: string } }>(
     "/companion/proposals/:id/decision",
-    { preHandler: [requireSession] },
+    { preHandler: [requireSession, requireCompanionDialogue] },
     async (req, reply) => {
-      if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
-        return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
-      }
       const session = req.session!;
       const idempotencyKey = req.headers["idempotency-key"];
       if (typeof idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
@@ -211,56 +201,42 @@ export async function companionConversationRoutes(app: FastifyInstance) {
     },
   );
 
-  // P5 §6.7 POST /learning-sessions/:id/companion-context-grants（grounded grant HMAC/5min TTL）。
-  // Keep the companion-scoped alias for clients that already shipped against the
-  // earlier handoff draft, but prefer the path-scoped endpoint so the session
-  // relationship is explicit at the HTTP boundary.
-  const contextGrantHandler = async (req: FastifyRequest, reply: FastifyReply) => {
-    if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
-      return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
-    }
-    const session = req.session!;
-    const params = (req.params ?? {}) as { sessionId?: string };
-    const parsed = createCompanionContextGrantRequestV1Schema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return reply.code(400).send({ version: 1, error: "INVALID_REQUEST", message: "grant body invalid", recoverable: false, requestId: req.id });
-    }
-    try {
-      const result = await createCompanionContextGrant({
-        workspaceId: session.workspaceId,
-        userId: session.userId,
-        sessionId: params.sessionId,
-        body: parsed.data,
-      });
-      return reply.header("cache-control", "no-store").code(200).send(result);
-    } catch (err) {
-      if (err instanceof CompanionConversationError) {
-        return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: false, requestId: req.id });
-      }
-      throw err;
-    }
-  };
-  app.post(
-    "/learning-sessions/:sessionId/companion-context-grants",
-    { preHandler: [requireSession] },
-    contextGrantHandler,
-  );
-
-  // GET /learning-sessions/:sessionId/companion-context — page adapter 的
-  // 权威 revision；不含 grant，不写数据，不调用模型。
-  app.get<{ Params: { sessionId: string }; Querystring: { episodeId?: string } }>(
-    "/learning-sessions/:sessionId/companion-context",
-    { preHandler: [requireSession] },
+  // LearningRun 是当前正式学习页面；授权携带 frozen snapshot + active task，
+  // 使 worker 永远不会把旧 Session 的可变上下文混进新的 Run。
+  app.post<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/companion-context-grants",
+    { preHandler: [requireSession, requireCompanionDialogue] },
     async (req, reply) => {
-      if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
-        return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
+      const parsed = createCompanionLearningRunContextGrantRequestV1Schema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send({ version: 1, error: "INVALID_REQUEST", message: "grant body invalid", recoverable: false, requestId: req.id });
       }
       try {
-        const result = await getCompanionLearningSessionContext({
+        const result = await createCompanionLearningRunContextGrant({
           workspaceId: req.session.workspaceId,
           userId: req.session.userId,
-          sessionId: req.params.sessionId,
-          episodeId: req.query.episodeId,
+          runId: req.params.runId,
+          body: parsed.data,
+        });
+        return reply.header("cache-control", "no-store").code(200).send(result);
+      } catch (err) {
+        if (err instanceof CompanionConversationError) {
+          return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: false, requestId: req.id });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.get<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/companion-context",
+    { preHandler: [requireSession, requireCompanionDialogue] },
+    async (req, reply) => {
+      try {
+        const result = await getCompanionLearningRunContext({
+          workspaceId: req.session.workspaceId,
+          userId: req.session.userId,
+          runId: req.params.runId,
         });
         return reply.code(result.statusCode).header("cache-control", "no-store").send(result.body);
       } catch (err) {
@@ -271,17 +247,8 @@ export async function companionConversationRoutes(app: FastifyInstance) {
       }
     },
   );
-  app.post(
-    "/companion/context-grants",
-    { preHandler: [requireSession] },
-    contextGrantHandler,
-  );
-
   // P5 §6.7 GET /companion/learning-context：只读 menu context（零写入/零模型调用）。
-  app.get("/companion/learning-context", { preHandler: [requireSession] }, async (req, reply) => {
-    if (process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED !== "true") {
-      return reply.code(404).send({ version: 1, error: "NOT_FOUND", message: "not found", recoverable: false, requestId: req.id });
-    }
+  app.get("/companion/learning-context", { preHandler: [requireSession, requireCompanionDialogue] }, async (req, reply) => {
     const session = req.session!;
     if (!rateLimited(reply, req.id, `${session.workspaceId}:${session.userId}:learning-context`, COMPANION_RATE_LIMITS.learningContextPerMinute.limit, COMPANION_RATE_LIMITS.learningContextPerMinute.windowMs)) return;
     const context = await resolveCompanionLearningContext({
@@ -290,21 +257,6 @@ export async function companionConversationRoutes(app: FastifyInstance) {
     });
     return reply.send(context);
   });
-
-  // GET /companion/bootstrap — 03 §6.0。无副作用：当前 scope 的 account 状态 +
-  // 服务端能力投影；响应禁止缓存（每次会话进入都必须重新评估 capability）。
-  app.get(
-    "/companion/bootstrap",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:read`, COMPANION_RATE_LIMITS.readQueriesPerMinute.limit, COMPANION_RATE_LIMITS.readQueriesPerMinute.windowMs)) return;
-      const { body } = await getCompanionBootstrap(
-        req.session.userId,
-        req.session.workspaceId,
-      );
-      return body;
-    },
-  );
 
   // POST /companion/conversations — 03 §6.1 创建 dialogue（client 不能创建 inbox）。
   app.post(
@@ -407,13 +359,13 @@ export async function companionConversationRoutes(app: FastifyInstance) {
         lastEventId,
         writer: {
           write: (chunk) => {
-            safeSseWrite(reply.raw, chunk);
+            return safeSseWrite(reply.raw, chunk);
           },
           onAbort: (cb) => {
             req.raw.on("close", cb);
           },
           close: () => {
-            if (!reply.raw.writableEnded) reply.raw.end();
+            if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
           },
         },
       });
@@ -427,14 +379,27 @@ export async function companionConversationRoutes(app: FastifyInstance) {
         });
       }
       reply.hijack();
-      reply.raw.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-store, no-transform",
-        "X-Accel-Buffering": "no",
-        "Connection": "keep-alive",
-      });
+      if (reply.raw.writableEnded || reply.raw.destroyed) {
+        result.stream.close();
+        return reply;
+      }
+      try {
+        reply.raw.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-store, no-transform",
+          "X-Accel-Buffering": "no",
+          "Connection": "keep-alive",
+        });
+      } catch (err) {
+        result.stream.close();
+        req.log.warn({ err, conversationId: req.params.id }, "companion SSE writeHead failed");
+        return reply;
+      }
       // §5.3：retry 指令属于 SSE 事件流本身，不在 HTTP 头（规范要求）。
-      safeSseWrite(reply.raw, "retry: 1500\n\n");
+      if (!safeSseWrite(reply.raw, "retry: 1500\n\n")) {
+        result.stream.close();
+        return reply;
+      }
       result.stream.start();
       return reply;
     },
@@ -626,27 +591,37 @@ export async function companionExportRoutes(app: FastifyInstance) {
       // 都发生在首行 manifest 写出之前，此时尚未 hijack/发响应头，可按原契约返回
       // 错误 JSON。
       let started = false;
-      const result = await exportCompanionDataStream({
-        workspaceId: req.session.workspaceId,
-        userId: req.session.userId,
-      }, (line) => {
-        if (!started) {
-          started = true;
-          reply.hijack();
-          reply.raw.writeHead(200, {
-            "Content-Type": "application/x-ndjson; charset=utf-8",
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "Content-Disposition": 'attachment; filename="companion-export-v1.ndjson"',
-          });
+      let result;
+      try {
+        result = await exportCompanionDataStream({
+          workspaceId: req.session.workspaceId,
+          userId: req.session.userId,
+        }, async (line) => {
+          if (!started) {
+            started = true;
+            reply.hijack();
+            reply.raw.writeHead(200, {
+              "Content-Type": "application/x-ndjson; charset=utf-8",
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+              "Content-Disposition": 'attachment; filename="companion-export-v1.ndjson"',
+            });
+          }
+          // NDJSON 没有 SSE cursor；命中 high-water mark 时等待 drain，避免
+          // 生成无 footer 的半截导出，也避免继续把数据堆进 Node 缓冲区。
+          if (!await safeWriteWithBackpressure(reply.raw, `${line}\n`)) {
+            const err = new Error("companion export stream closed");
+            (err as Error & { code?: string }).code = "EXPORT_STREAM_CLOSED";
+            throw err;
+          }
+        });
+      } catch (err) {
+        if (started || (err && typeof err === "object" && "code" in err && err.code === "EXPORT_STREAM_CLOSED")) {
+          if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.destroy();
+          return reply;
         }
-        // 流式写出失败即中止导出（safeSseWrite 返回 false）。
-        if (!safeSseWrite(reply.raw, `${line}\n`)) {
-          const err = new Error("companion export stream closed");
-          (err as Error & { code?: string }).code = "EXPORT_STREAM_CLOSED";
-          throw err;
-        }
-      });
+        throw err;
+      }
       if (!result.ok) {
         // 错误只可能发生在首行写出前（active-turn 检查），此时未 hijack。
         return reply.code(result.statusCode).send({

@@ -50,7 +50,6 @@ const MILESTONE_STEPS: Record<string, CompanionJourneyStepV2> = {
   "note.created": "first_note",
   "card.created": "first_card",
   "evidence.created": "first_evidence",
-  "card_set.created": "first_card",
 };
 
 /**
@@ -241,7 +240,7 @@ export function applyJourneyAction(
       if (state.status !== "active") throw new JourneyActionError("journey not active");
       // §10.1：只在 choose_start 或尚未创建分支专属对象时允许。
       const hasBranchObjects = Boolean(
-        state.refs.sourceId ?? state.refs.noteId ?? state.refs.cardSetId ?? state.refs.runId,
+        state.refs.sourceId ?? state.refs.noteId ?? state.refs.runId,
       );
       if (state.currentStep !== "choose_start" && hasBranchObjects) {
         throw new JourneyActionError("branch_locked");

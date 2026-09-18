@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.ts";
-import { searchDocuments } from "../db/schema/search.ts";
+import { searchDocuments } from "@ailearn/shared/db-schema/search";
 import { logger } from "./logger.ts";
 
 /**
@@ -77,7 +77,7 @@ export async function upsertSearchDocument(
  */
 export async function deleteSearchDocument(
   workspaceId: string,
-  objectType: string,
+  objectType: "note" | "source",
   objectId: string,
   database: SearchDatabase = db,
 ): Promise<void> {

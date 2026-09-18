@@ -10,8 +10,6 @@ files:
   # Defense in depth: production renderer builds already omit these archives.
   # Keep the package boundary explicit if an externally supplied out/ is used.
   - '!out/renderer/assets/3d{,/**/*}'
-  - '!out/renderer/assets/companion/live2d-v1{,/**/*}'
-  - '!out/renderer/assets/companion/vendor{,/**/*}'
   - package.json
 
 asar: true

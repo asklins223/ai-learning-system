@@ -18,7 +18,44 @@ import { randomUUID } from "node:crypto";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
+// 跨 user 隔离断言必须用**不绕过 RLS** 的角色（超级用户会让隔离断言变成假通过），
+// 因此默认值保持受限的 ailearn_api，而不是回落到主连接。需要指向别的库时用
+// DATABASE_URL_API_RLS 显式覆盖（角色仍须是 NOBYPASSRLS 的受限角色）。
+//
+// 默认值由 CONN 派生 host/port/database：写死 "/ailearn" 会让套件在指向别的库
+// （CI/测试库）时探针连到**另一个数据库**，于是"跨 user 读被拒"因读不到任何行
+// 而假通过、"本人可读"却失败。角色与密码仍取受限的 ailearn_api。
+function deriveRestrictedApiUrl(main: string): string {
+  try {
+    const url = new URL(main);
+    url.username = "ailearn_api";
+    url.password = process.env.API_PASSWORD ?? "ailearn_dev";
+    return url.toString();
+  } catch {
+    return "postgres://ailearn_api:ailearn_dev@127.0.0.1:5432/ailearn";
+  }
+}
+const API_RLS_CONN = process.env.DATABASE_URL_API_RLS ?? deriveRestrictedApiUrl(CONN);
 const sql = postgres(CONN, { max: 2 });
+
+/**
+ * 裸 SQL 夹具/校验必须带 workspace/user 上下文。
+ *
+ * companion_conversations / companion_journeys / companion_journey_pending_events /
+ * companion_account_invitations 都是 FORCE RLS：受限角色（ailearn_api）在无上下文
+ * 事务里读或写会命中 0 行——校验读会取到 undefined 而假失败，夹具 UPDATE 会静默
+ * 失效让后续 CAS 恒 stale。超级用户则绕过 RLS 掩盖同一问题。
+ */
+function scoped<T>(
+  scope: { workspaceId: string; userId: string },
+  fn: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${scope.userId}, true)`;
+    return fn(tx);
+  }) as Promise<T>;
+}
 
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
 const {
@@ -37,17 +74,13 @@ after(async () => {
 async function seed() {
   const workspaceId = randomUUID();
   const userId = randomUUID();
-  await sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+  await scoped({ workspaceId, userId }, async (tx) => {
     await tx`INSERT INTO users (id, email, password_hash, role) VALUES (${userId}, ${`jv-it-${userId.slice(0, 8)}@example.test`}, 'h', 'owner')`;
     await tx`INSERT INTO workspaces (id, name, owner_id) VALUES (${workspaceId}, 'jv-ws', ${userId})`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${workspaceId}, ${userId}, 'owner')`;
   });
   const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+    await scoped({ workspaceId, userId }, async (tx) => {
       await tx`DELETE FROM companion_journey_pending_events WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_journeys WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_account_invitations WHERE user_id = ${userId}`;
@@ -68,7 +101,7 @@ test("P6 纵切：invitation CAS → start_journey → 事件推进完成 → �
     const now = new Date();
 
     // 1) bootstrap：桌宠首邀卡出现即视为已 offer（文档 16 §8.1.1——
-    // 首邀卡渲染即发送邀请；不再停留在 not_offered 死态）。
+    // 首邀卡渲染即发送邀请，初始状态就是 offered。
     const boot1 = await withWorkspaceTransaction(scope, (tx) => bootstrapJourney(tx, scope, now));
     assert.equal(boot1.invitation.status, "offered");
     assert.equal(boot1.invitation.revision, 1);
@@ -178,7 +211,12 @@ test("P6 里程碑：乱序不越级 + drain 补进（source→note→card→evi
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const now = new Date();
     const boot0 = await withWorkspaceTransaction(scope, (tx) => bootstrapJourney(tx, scope, now));
-    await sql`UPDATE companion_account_invitations SET status='offered', offered_at=now(), revision=${boot0.invitation.revision + 1} WHERE user_id=${seeded.userId}`;
+    // companion_account_invitations 是 FORCE RLS 的用户私有表（策略要求
+    // user_id = app.user_id）。裸 SQL 无会话上下文时 USING 求值为 NULL → 0 行，
+    // 邀请 revision 不会推进，随后的 CAS 必然 stale_revision。
+    await scoped(scope, (tx) => tx`UPDATE companion_account_invitations
+               SET status='offered', offered_at=now(), revision=${boot0.invitation.revision + 1}
+               WHERE user_id=${seeded.userId}`);
     await withWorkspaceTransaction(scope, (tx) =>
       applyInvitationAction(tx, scope, {
         expectedRevision: boot0.invitation.revision + 1,
@@ -190,9 +228,9 @@ test("P6 里程碑：乱序不越级 + drain 补进（source→note→card→evi
     const journeyId = boot.journey!.journeyId;
     // AssistantSession bootstrap：journey 绑定 kind='journey' 会话。
     assert.ok(boot.journey!.assistantSessionId, "assistant session created");
-    const sessionRows = await sql`
+    const sessionRows = await scoped(scope, (tx) => tx`
       SELECT kind FROM companion_conversations WHERE id = ${boot.journey!.assistantSessionId}
-    `;
+    `);
     assert.equal(sessionRows[0]?.kind, "journey");
 
     // 乱序事件：note 先到（缺少 source）→ 不越级，保持 pending。
@@ -206,9 +244,9 @@ test("P6 里程碑：乱序不越级 + drain 补进（source→note→card→evi
     );
     const afterNote = await withWorkspaceTransaction(scope, (tx) => bootstrapJourney(tx, scope, now));
     assert.equal(afterNote.journey!.currentStep, "boundary_intro", "乱序事件不越级");
-    const pendingRows = await sql`
+    const pendingRows = await scoped(scope, (tx) => tx`
       SELECT status FROM companion_journey_pending_events WHERE journey_id = ${journeyId} AND domain_event_id = 'note.created:n1'
-    `;
+    `);
     assert.equal(pendingRows[0]?.status, "pending", "乱序事件保持 pending 等前置");
 
     // source 到达 → drain 顺序推进 source 与 note。
@@ -256,7 +294,12 @@ test("P6 RLS：跨 user 读 journey 被拒（app.user_id 上下文收口）", as
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const now = new Date();
     const boot0 = await withWorkspaceTransaction(scope, (tx) => bootstrapJourney(tx, scope, now));
-    await sql`UPDATE companion_account_invitations SET status='offered', offered_at=now(), revision=${boot0.invitation.revision + 1} WHERE user_id=${seeded.userId}`;
+    // companion_account_invitations 是 FORCE RLS 的用户私有表（策略要求
+    // user_id = app.user_id）。裸 SQL 无会话上下文时 USING 求值为 NULL → 0 行，
+    // 邀请 revision 不会推进，随后的 CAS 必然 stale_revision。
+    await scoped(scope, (tx) => tx`UPDATE companion_account_invitations
+               SET status='offered', offered_at=now(), revision=${boot0.invitation.revision + 1}
+               WHERE user_id=${seeded.userId}`);
     await withWorkspaceTransaction(scope, (tx) =>
       applyInvitationAction(tx, scope, {
         expectedRevision: boot0.invitation.revision + 1,
@@ -269,7 +312,17 @@ test("P6 RLS：跨 user 读 journey 被拒（app.user_id 上下文收口）", as
 
     // 另一个 user 以正确 workspace 上下文读该 journey → RLS 拒（0 行）。
     // 用 ailearn_api 角色连接（NOBYPASSRLS，owner 会绕过 RLS）。
-    const apiSql = postgres("postgres://ailearn_api:ailearn_dev@127.0.0.1:5432/ailearn", { max: 1 });
+    const apiSql = postgres(API_RLS_CONN, { max: 1 });
+    // 探针连接必须与套件主连接同库、且角色不绕过 RLS。否则下面的负向断言会因
+    // "探针连到别的库 → 谁都读不到"而假通过，或"角色是超级用户 → 谁都读得到"
+    // 而假失败。这里显式失败，避免隔离断言退化成静默无效。
+    const [probeIdentity] = await apiSql<{ db: string; bypass: boolean }[]>`
+      SELECT current_database() AS db,
+             COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false) AS bypass
+    `;
+    const [mainIdentity] = await sql<{ db: string }[]>`SELECT current_database() AS db`;
+    assert.equal(probeIdentity.db, mainIdentity.db, "RLS 探针必须与套件连接到同一个数据库");
+    assert.equal(probeIdentity.bypass, false, "RLS 探针角色不得 BYPASSRLS");
     const otherUser = randomUUID();
     await sql`INSERT INTO users (id, email, password_hash, role) VALUES (${otherUser}, ${`jv-other-${otherUser.slice(0, 8)}@example.test`}, 'h', 'owner')`;
     try {
@@ -302,7 +355,12 @@ test("P6 skip：终态 skip 不伪造里程碑；branch_locked 拒绝切换", as
     const now = new Date();
     // ensure invitation 行存在，再置为 offered（revision+1）。
     const boot0 = await withWorkspaceTransaction(scope, (tx) => bootstrapJourney(tx, scope, now));
-    await sql`UPDATE companion_account_invitations SET status='offered', offered_at=now(), revision=${boot0.invitation.revision + 1} WHERE user_id=${seeded.userId}`;
+    // companion_account_invitations 是 FORCE RLS 的用户私有表（策略要求
+    // user_id = app.user_id）。裸 SQL 无会话上下文时 USING 求值为 NULL → 0 行，
+    // 邀请 revision 不会推进，随后的 CAS 必然 stale_revision。
+    await scoped(scope, (tx) => tx`UPDATE companion_account_invitations
+               SET status='offered', offered_at=now(), revision=${boot0.invitation.revision + 1}
+               WHERE user_id=${seeded.userId}`);
     await withWorkspaceTransaction(scope, (tx) =>
       applyInvitationAction(tx, scope, {
         expectedRevision: boot0.invitation.revision + 1,

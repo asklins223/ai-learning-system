@@ -20,14 +20,14 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
 const sql = postgres(CONN, { max: 2 });
 
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
-const { createRun, submitArtifact, getRunPublicView } = await import(
+const { submitArtifact, getRunPublicView } = await import(
   "../modules/learning-runs/run-service.ts"
 );
 const { runLearningRunProcessingTick } = await import(
@@ -65,13 +65,11 @@ test("P2 Gate：text 正确答案 + 真实 Critic → mastery 结算 + canonical
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "demo-1",
           idempotencyKey: "demo-create-1",
         },
       }),

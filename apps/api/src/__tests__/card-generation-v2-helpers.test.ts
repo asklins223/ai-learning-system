@@ -25,7 +25,7 @@ import {
 import {
   cardGenerationRunsV2,
   cardGenerationCandidatesV2,
-} from "../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const USER_ID = "00000000-0000-4000-8000-000000000002";

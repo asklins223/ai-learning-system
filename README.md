@@ -3,7 +3,7 @@
 # 理解引擎
 
 [![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](https://github.com/asklins223/ai-learning-system)
-[![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
+[![Electron](https://img.shields.io/badge/Electron-43-47848F?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify)](https://fastify.dev/)
@@ -32,16 +32,14 @@
 - AI 学习卡生成与证据对齐
 - 理解验证、复习计划和学习记录
 - 全文搜索、来源追踪和理解关系图
-- 用户级模型配置：Mock、DashScope、OpenAI-compatible
-- 模型连接测试：校验接口、Key、模型权限和响应协议
-- API Key 服务端加密保存，页面只显示末四位
+- 工作区级 AI 使用同意与数据外发策略
 - HttpOnly Cookie、CSRF、登录限流和最小权限数据库角色
 
 ## 技术栈
 
 | 模块 | 技术 |
 | --- | --- |
-| Web | Next.js 15、React 19、TypeScript |
+| 桌面客户端 | Electron 43、Vite 7、React 19、TypeScript |
 | API | Fastify 5、Drizzle ORM、Zod |
 | Worker | Node.js、TypeScript、独立后台任务进程 |
 | 数据库 | PostgreSQL 16 |
@@ -63,7 +61,7 @@
 ```bash
 git clone https://github.com/asklins223/ai-learning-system.git
 cd ai-learning-system
-make dev
+make up
 ```
 
 首次构建需要下载镜像和依赖，通常需要几分钟。数据库迁移会自动执行。
@@ -83,38 +81,20 @@ make seed-demo
 
 该账号仅用于本机开发，生产环境不会自动创建演示账号。
 
-### 3. 打开应用
+### 3. 启动桌面客户端
 
-| 地址 | 用途 |
-| --- | --- |
-| http://localhost:3000 | Web 应用 |
-| http://localhost:4000/health | API 存活检查 |
-| http://localhost:4000/ready | API 就绪检查 |
-
-## 配置个人 AI 模型
-
-登录后进入“个人中心 → 模型 API”，可以选择：
-
-- `系统默认`：使用系统统一维护的模型，不需要个人 API Key。
-- `阿里云百炼 / DashScope`：填写官方 HTTPS Base URL、模型 ID 和 API Key。
-- `OpenAI-compatible`：填写兼容 `chat/completions` 协议的 HTTPS 接口、模型 ID 和 API Key。
-
-推荐的 DashScope Base URL：
-
-```text
-https://dashscope.aliyuncs.com/compatible-mode/v1
+```bash
+make desktop-client-dev
 ```
 
-保存前可以点击“测试连接”。系统会发送一个固定的最小请求，用于验证：
+API 检查地址：
 
-- 接口是否可以访问
-- API Key 是否有效
-- 当前账号是否有模型权限或可用额度
-- 模型 ID 和接口协议是否匹配
+- `http://localhost:4000/health`：存活检查
+- `http://localhost:4000/ready`：就绪检查
 
-连接测试不会使用学习内容，也不会保存或返回模型生成正文。个人 API Key 使用 AES-256-GCM 加密后写入数据库；后续读取只返回末四位提示。
+## AI 数据治理
 
-用户级配置不会绕过工作区的数据治理策略。调用外部模型前，工作区仍需允许向外部服务发送数据。
+外部模型调用由 Worker 的平台配置与工作区同意策略共同控制。调用学习内容前，工作区必须明确允许数据外发；桌面客户端不提供个人模型或供应商配置界面。
 
 ## 生产部署
 
@@ -164,7 +144,7 @@ AUTH_COOKIE_SECURE=false
 
 ```bash
 docker compose -f docker-compose.yml config --quiet
-docker compose -f docker-compose.yml build api worker web
+docker compose -f docker-compose.yml build api worker
 ```
 
 生产环境使用三个独立数据库角色：
@@ -180,7 +160,6 @@ docker compose -f docker-compose.yml build api worker web
 | 命令 | 说明 |
 | --- | --- |
 | `make up` | 启动开发环境（源码挂载、热重载） |
-| `make dev` | 同 `make up`（别名） |
 | `make seed-demo` | 创建本地演示账号 |
 | `make logs` | 查看日志 |
 | `make down` | 停止并保留数据 |
@@ -190,12 +169,13 @@ docker compose -f docker-compose.yml build api worker web
 | `make storage` | 启动开发环境及 MinIO |
 | `make clean-init` | 清除已退出的初始化容器 |
 | `make shell-api` | 进入 API 容器 shell |
-| `make shell-web` | 进入 Web 容器 shell |
 | `make shell-worker` | 进入 Worker 容器 shell |
+| `make desktop-client-dev` | 启动桌面客户端开发模式 |
+| `make desktop-client-dist` | 构建桌面客户端安装包 |
 
-开发数据库使用固定 external 卷 `ailearn-dev_dev_postgres_data`。`make up` 会在首次启动时自动创建该卷；`make down`、删除容器以及 `docker compose down -v` 都不会删除它。旧的 `make reset` / `make reset-dev` 已停用并会拒绝执行；确实需要清空数据库时，先完成备份，再使用表格中的带确认值命令。显式执行 `docker volume rm`、带命名卷清理能力的 `docker volume prune`，或在 Docker Desktop 中直接删除该卷，仍会永久删除数据。
+开发数据库使用固定 external 卷 `ailearn-dev_dev_postgres_data`。`make up` 会在首次启动时自动创建该卷；`make down`、删除容器以及 `docker compose down -v` 都不会删除它。确实需要清空数据库时，先完成备份，再使用表格中的带确认值命令。
 
-`up`、`dev`、`storage`、`storage-dev` 会在启动前清除上一轮的一次性初始化容器，并在启动后等待本轮 `role-bootstrap`、`migrate`（以及存储模式下的 `minio-init`）执行完毕。本轮容器会以 `Exited` 状态保留，便于 Docker Desktop 的整组 Start 重新执行初始化；下次启动时再清除。`seed-*` 命令使用 `run --rm`，执行后容器自动删除。
+`up`、`storage` 会在启动前清除上一轮的一次性初始化容器，并在启动后等待本轮 `role-bootstrap`、`migrate`（以及存储模式下的 `minio-init`）执行完毕。本轮容器会以 `Exited` 状态保留，便于 Docker Desktop 的整组 Start 重新执行初始化；下次启动时再清除。`seed-demo` 使用 `run --rm`，执行后容器自动删除。
 
 ## 测试
 
@@ -203,19 +183,18 @@ docker compose -f docker-compose.yml build api worker web
 
 ```bash
 (cd packages/shared && npm ci && npm test && npm run typecheck)
-(cd packages/db && npm ci && npm run typecheck)
 (cd apps/api && npm ci && npm test && npm run typecheck)
-(cd apps/web && npm ci && npm test && npm run typecheck)
 (cd workers/ai-worker && npm ci && npm test && npm run typecheck)
+(cd apps/desktop-client && npm ci && npm test && npm run typecheck)
 ```
 
 GitHub Actions 还会执行：
 
 - ESLint 和生产依赖安全审计
 - 全新数据库迁移、重复迁移和旧版本升级迁移
-- API、Web、Worker 生产构建
+- API、Worker 生产构建；桌面客户端独立构建
 - 非 root Docker 镜像检查
-- 完整生产 Compose 启动和服务健康检查
+- 完整生产 Compose 启动和 API/Worker 健康检查
 - Worker 实际任务消费
 - PostgreSQL 备份与恢复演练
 
@@ -225,7 +204,7 @@ GitHub Actions 还会执行：
 .
 ├── apps/
 │   ├── api/                  # Fastify API、认证、业务模块和数据库迁移
-│   └── web/                  # Next.js Web 应用
+│   └── desktop-client/       # Electron 桌面客户端
 ├── workers/
 │   └── ai-worker/            # AI 生成、来源解析和后台任务
 ├── packages/
@@ -257,11 +236,11 @@ GitHub Actions 还会执行：
 
 ### 端口被占用
 
-通过 `API_PORT`、`WEB_PORT` 修改映射端口。开发环境还会使用宿主机 `5432` 端口。
+通过 `API_PORT` 修改 API 映射端口。开发环境还会使用宿主机 `5432` 端口。
 
 ### 查看服务状态
 
 ```bash
 docker compose -f docker-compose.dev.yml ps
-docker compose -f docker-compose.dev.yml logs -f api worker web
+docker compose -f docker-compose.dev.yml logs -f api worker
 ```

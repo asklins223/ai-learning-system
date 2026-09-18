@@ -1,6 +1,4 @@
-/**
- * Tests for handler-timeout-config.ts — per-job-type timeout resolution.
- */
+/** Tests for the active worker handler timeout resolution. */
 
 import assert from "node:assert/strict";
 import { test, beforeEach, afterEach } from "node:test";
@@ -12,12 +10,8 @@ import {
 
 const ENV_KEYS = [
   "WORKER_MODEL_TIMEOUT_MS",
-  "WORKER_TIMEOUT_EVALUATE_VALIDATION_MS",
-  "WORKER_TIMEOUT_ALIGN_EVIDENCE_MS",
   "WORKER_TIMEOUT_PARSE_SOURCE_MS",
-  "WORKER_TIMEOUT_GENERATE_VALIDATION_QUESTION_MS",
   "WORKER_PROVIDER_TIMEOUT_MS",
-  "WORKER_PROVIDER_TIMEOUT_GENERATE_VALIDATION_QUESTION_MS",
 ];
 
 const savedEnv: Record<string, string | undefined> = {};
@@ -36,79 +30,43 @@ afterEach(() => {
   }
 });
 
-test("resolveHandlerTimeout returns built-in defaults per job type", () => {
-  assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
-  assert.equal(resolveHandlerTimeout("generate_validation_question"), 90_000);
-  assert.equal(resolveHandlerTimeout("align_evidence"), 30_000);
+test("resolveHandlerTimeout returns active built-in defaults", () => {
   assert.equal(resolveHandlerTimeout("parse_source"), 60_000);
-  assert.equal(resolveHandlerTimeout("execute_card_agent_turn"), 110_000);
+  assert.equal(resolveHandlerTimeout("companion_agent"), 110_000);
 });
 
-test("resolveHandlerTimeout falls back to global default for unknown job types", () => {
+test("resolveHandlerTimeout falls back to global default for unknown types", () => {
   assert.equal(resolveHandlerTimeout("unknown_type"), 90_000);
 });
 
-test("resolveHandlerTimeout respects per-type env override", () => {
-  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "120000";
-  assert.equal(resolveHandlerTimeout("evaluate_validation"), 110_000); // clamped to lease - 10s
+test("resolveHandlerTimeout respects a per-type override", () => {
+  process.env.WORKER_TIMEOUT_PARSE_SOURCE_MS = "120000";
+  assert.equal(resolveHandlerTimeout("parse_source"), 110_000);
 });
 
-test("resolveHandlerTimeout respects global env override for unknown types", () => {
+test("resolveHandlerTimeout respects the global override", () => {
   process.env.WORKER_MODEL_TIMEOUT_MS = "60000";
   assert.equal(resolveHandlerTimeout("unknown_type"), 60_000);
 });
 
-test("resolveHandlerTimeout per-type env overrides global env", () => {
-  process.env.WORKER_MODEL_TIMEOUT_MS = "30000";
-  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "60000";
-  assert.equal(resolveHandlerTimeout("evaluate_validation"), 60_000);
-  assert.equal(resolveHandlerTimeout("align_evidence"), 30_000); // uses built-in default
-});
-
-test("resolveHandlerTimeout clamps to lease safety margin", () => {
-  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "999999";
-  const resolved = resolveHandlerTimeout("evaluate_validation");
-  assert.equal(resolved, RESOLVED_TIMEOUT_INFO.maxAllowedTimeoutMs);
-  assert.ok(resolved < RESOLVED_TIMEOUT_INFO.leaseTimeoutMs, "timeout must be < lease timeout");
-});
-
 test("resolveHandlerTimeout ignores invalid env values", () => {
-  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "not-a-number";
-  assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
-
-  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "-5";
-  assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
-
-  process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS = "0";
-  assert.equal(resolveHandlerTimeout("evaluate_validation"), 90_000);
+  process.env.WORKER_TIMEOUT_PARSE_SOURCE_MS = "not-a-number";
+  assert.equal(resolveHandlerTimeout("parse_source"), 60_000);
+  process.env.WORKER_TIMEOUT_PARSE_SOURCE_MS = "-5";
+  assert.equal(resolveHandlerTimeout("parse_source"), 60_000);
 });
 
-test("lease safety margin is 10 seconds below lease timeout", () => {
+test("lease safety margin remains below the lease timeout", () => {
   assert.equal(
     RESOLVED_TIMEOUT_INFO.maxAllowedTimeoutMs,
     RESOLVED_TIMEOUT_INFO.leaseTimeoutMs - 10_000,
   );
 });
 
-test("provider budget leaves post-call time for v0.6 fallback", () => {
-  // 75s default is clamped by handler(90s) - 15s margin, so both align at 75s.
-  assert.equal(resolveProviderCallTimeout("generate_validation_question"), 75_000);
+test("provider budget leaves time for persistence", () => {
+  assert.equal(resolveProviderCallTimeout("parse_source"), 45_000);
   assert.equal(
-    resolveHandlerTimeout("generate_validation_question")
-      - resolveProviderCallTimeout("generate_validation_question"),
+    resolveHandlerTimeout("parse_source") - resolveProviderCallTimeout("parse_source"),
     15_000,
   );
-});
-
-test("provider budget is clamped below a shortened handler timeout", () => {
-  process.env.WORKER_TIMEOUT_GENERATE_VALIDATION_QUESTION_MS = "20000";
-  process.env.WORKER_PROVIDER_TIMEOUT_GENERATE_VALIDATION_QUESTION_MS = "19000";
-  assert.equal(resolveProviderCallTimeout("generate_validation_question"), 5_000);
-});
-
-test("per-type provider budget overrides global provider budget", () => {
-  process.env.WORKER_PROVIDER_TIMEOUT_MS = "45000";
-  process.env.WORKER_PROVIDER_TIMEOUT_GENERATE_VALIDATION_QUESTION_MS = "30000";
-  assert.equal(resolveProviderCallTimeout("generate_validation_question"), 30_000);
-  assert.equal(resolveProviderCallTimeout("evaluate_validation"), 45_000);
 });

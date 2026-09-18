@@ -209,15 +209,14 @@ describe("SEC-02 DoD: ADR-0009 软退出机制", () => {
 // ─── 4. Owner 与 member 两条 onboarding 分支 ──────────────────────────────
 
 describe("SEC-02 DoD: Onboarding 分支与状态转换", () => {
-  it("ONBOARDING_STEPS 包含 6 个步骤", () => {
-    assert.equal(ONBOARDING_STEPS.length, 6);
+  it("ONBOARDING_STEPS 包含 5 个步骤", () => {
+    assert.equal(ONBOARDING_STEPS.length, 5);
     assert.deepEqual([...ONBOARDING_STEPS], [
       "ai_consent",
       "first_content",
       "first_note",
       "first_card",
       "evidence_review",
-      "first_validation",
     ]);
   });
 
@@ -255,7 +254,7 @@ describe("SEC-02 DoD: Onboarding 分支与状态转换", () => {
       steps[step] = true;
     }
     // 取消一个步骤
-    steps["first_validation"] = false;
+    steps["first_card"] = false;
     const allComplete = ONBOARDING_STEPS.every((s) => steps[s]);
     const status = allComplete ? "completed" : "in_progress";
     assert.equal(status, "in_progress", "取消步骤后应回退到 in_progress");
@@ -280,7 +279,7 @@ describe("SEC-02 DoD: Onboarding 分支与状态转换", () => {
 
   it("无效步骤名称被拒绝", () => {
     // markOnboardingStep 在 step 不在 ONBOARDING_STEPS 中时返回 invalid_step
-    const invalidSteps = ["invalid_step", "", "AI_CONSENT", "first_validation "];
+    const invalidSteps = ["invalid_step", "", "AI_CONSENT", "first_card "];
     for (const invalid of invalidSteps) {
       const isValid = ONBOARDING_STEPS.includes(invalid as any);
       assert.equal(isValid, false, `"${invalid}" 应被拒绝`);

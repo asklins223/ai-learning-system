@@ -217,6 +217,12 @@ export async function headObject(
  * Used for note deletion cleanup and old avatar cleanup.
  */
 export async function deleteObject(objectKey: string): Promise<void> {
+  // SEC 修复（2026-09 后端审查）：与 getObject/headObject 同款路径遍历防御。
+  // 此前 deleteObject 无任何校验，而调用方（note 级联清理）的键可能来自客户端
+  // 笔记正文，纵深防御必须在此处也拦住 `..`。
+  if (objectKey.includes("..")) {
+    throw new Error(`invalid object key: path traversal detected in "${objectKey}"`);
+  }
   const command = new DeleteObjectCommand({
     Bucket: getBucket(),
     Key: objectKey,

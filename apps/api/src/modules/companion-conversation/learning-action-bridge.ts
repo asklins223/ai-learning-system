@@ -1,18 +1,18 @@
 /**
  * P5 §6.7：Learning menu context adapter（只读）。
  *
-* GET /companion/learning-context：只调用 Learning Session/service 的只读
-* public adapter（learning_sessions/learning_episodes/learning_objectives_v2 查询），
+ * GET /companion/learning-context：只调用 LearningRun/Objective Surface 的只读
+ * public adapter，
  * 零 canonical write、零 conversation write、零模型调用。
- * - resumeCandidate：最近 active learning_session（null → 菜单项 disabled）；
- * - startCandidate：最近 episode 对应的 key point/card（null → disabled）；
+ * - learningRunResumeCandidate：最近 active LearningRun（null → disabled）；
+ * - learningRunStartCandidate：最近可创建的 LearningRun（null → disabled）；
  * - contextRevision：候选快照的 canonical JSON sha256（稳定 revision）；
  * - payloadSha256：候选 payload 的 canonical JSON sha256（proposal create 时精确匹配）。
  * 所有文本字段净化（控制字符/空白压缩）后再截断到合同上限。
  */
 
 import { sql } from "drizzle-orm";
-import { companionGroundedTutorGrantV1Schema, companionLearningSessionContextV1Schema, companionProposalSnapshotV1Schema, proposedLearningActionPayloadV1Schema, } from "@ailearn/shared";
+import { companionGroundedTutorGrantV1Schema, companionLearningRunContextV1Schema, companionProposalSnapshotV1Schema, proposedLearningActionPayloadV1Schema, } from "@ailearn/shared";
 import { sha256Utf8V1, canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import type { CompanionLearningContextV1, LearningRunOriginV2 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
@@ -25,22 +25,23 @@ import { deliver } from "./delivery-service.ts";
 import { resolveAuthSurfaceManifestSecret } from "../companion-shell/auth-surface.ts";
 import { getCompanionAccountEpoch } from "./companion-account-epoch.ts";
 import {
-  buildCompanionLearningSessionContext,
-  contextRevisionForCompanionLearningSession,
-  loadCompanionLearningSessionContext,
-} from "./learning-session-context.ts";
-// 方案 16 §18：LearningRun 工具在 decision 事务内同步执行（与 start_session
-// 的 PREPARE 同模式；confirm 后 proposal 直接 succeeded + resultRef=runId）。
-import { applyAction, createRun, createRunV2, getRunPublicView, type CreateLearningRunV2Request } from "../learning-runs/run-service.ts";
+  buildCompanionLearningRunContext,
+  contextRevisionForCompanionLearningRun,
+  isCompanionLearningRunTutorEligible,
+  loadCompanionLearningRunContext,
+} from "./learning-run-context.ts";
+// LearningRun 工具在 decision 事务内同步执行；confirm 后 proposal 直接
+// succeeded + resultRef=runId。
+import { applyAction, createRunV2, getRunPublicView, type CreateLearningRunV2Request } from "../learning-runs/run-service.ts";
 import { LearningRunServiceError } from "../learning-runs/run-errors.ts";
 // 方案 16 §18.1：工具网关第二批执行单元（确定性、同事务）。
 import { createUnderstandingRoutePlan } from "../understanding/route-plan-service.ts";
 import { deferReviewSchedule } from "../review/review-defer-service.ts";
+import { createJob } from "../job/service.ts";
 import {
   confirmMemory,
   deleteMemory,
   getMemory,
-  upsertMemory,
 } from "./memory-service.ts";
 
 function sanitizeText(value: string, max: number): string {
@@ -54,31 +55,21 @@ function sanitizeText(value: string, max: number): string {
 /**
  * resolveCompanionLearningContextInTransaction 的内部返回：除公开候选外，附带
  * 已查出、供 proposal create 无重复查询地构造 payload 的最小引用 id。
- * resumeCandidate/startCandidate 的合同不携带这些 id，故在内部透传。
+ * LearningRun 候选的合同已经携带创建/恢复所需的最小引用。
  */
-interface ResolvedCompanionContextInternal extends CompanionLearningContextV1 {
-  resumeSessionId: string | null;
-  startCardId: string | null;
-  startKeyPointId: string | null;
-  // Plan 23 CS-05/CS-06：V2 候选透传字段（用于 payload construction）。
-  resumeObjectiveId: string | null;
-  startObjectiveId: string | null;
-  startOriginV2: LearningRunOriginV2 | null;
-}
+type ResolvedCompanionContextInternal = CompanionLearningContextV1;
 
 function toPublicContext(ctx: ResolvedCompanionContextInternal): CompanionLearningContextV1 {
   return {
     version: ctx.version,
     contextRevision: ctx.contextRevision,
-    resumeCandidate: ctx.resumeCandidate,
-    startCandidate: ctx.startCandidate,
     learningRunResumeCandidate: ctx.learningRunResumeCandidate,
     learningRunStartCandidate: ctx.learningRunStartCandidate,
   };
 }
 
 /**
- * Plan 23 CS-05/CS-06：兼容 V2 run 请求的 originV2 类型守卫。
+ * Plan 23 CS-05/CS-06：V2 run 请求的 originV2 类型守卫。
  * pet 不自建 origin 对象；以下仅作 narrow，保证下游 createRunV2 类型安全。
  */
 function isLearningRunOriginV2(value: unknown): value is LearningRunOriginV2 {
@@ -105,32 +96,26 @@ function buildStartPayloadV2(
   };
 } | null {
   const objectiveId = surface.objectiveId;
-  const cardId = surface.content.presentation.cardId;
-  let originV2: LearningRunOriginV2;
   switch (surface.primaryAction.kind) {
     case "create_run": {
-      const cardRef = cardId ?? surface.objectiveId; // fallback to objectiveId
-      originV2 = { kind: "card", cardId: cardRef, objectiveId };
-      break;
+      return {
+        request: {
+          ...surface.primaryAction.start,
+          idempotencyKey: `pet-menu-v2:${objectiveId}`,
+        },
+      };
     }
     case "create_review_run": {
-      const review = surface.personal.review;
-      if (!review) return null;
-      originV2 = {
-        kind: "review",
-        scheduleId: review.scheduleId,
-        objectiveId,
-        scheduleGeneration: review.generation,
+      return {
+        request: {
+          ...surface.primaryAction.start,
+          idempotencyKey: `pet-menu-v2:${objectiveId}`,
+        },
       };
-      break;
     }
     case "resume_run": {
       // resume 语义走 resume_learning_run；create 入口仍需一个 create 语义。
-      // pet 菜单在 resume 存在时展示 resume 而非 start；此处 fallback 到 card origin
-      // 只是为了候选构建的完整性；实际上 resume 分支会被优先使用。
-      const cardRef = cardId ?? surface.objectiveId;
-      originV2 = { kind: "card", cardId: cardRef, objectiveId };
-      break;
+      return null;
     }
     case "view_successor":
       // view_successor 不是可"创建 run"的 action；菜单不展示。
@@ -143,16 +128,7 @@ function buildStartPayloadV2(
     default:
       return null;
   }
-  const goal = "stabilize" as const;
-  const idempotencyKey = `pet-menu-v2:${objectiveId}`;
-  return {
-    request: {
-      originV2,
-      goal,
-      idempotencyKey,
-      requestedTimeBudgetSeconds: 180,
-    },
-  };
+  return null;
 }
 
 
@@ -167,15 +143,10 @@ async function resolveCompanionLearningContextInTransaction(
   // creation must validate the read-only context and perform all writes under
   // the same RLS snapshot; opening a nested transaction here would leave a
   // race between validation and insertion.
-// Plan 23 CS-05/CS-06：优先使用 learning_objectives_v2 派生候选；
-// learning_episodes 路径仅在没有 active Objective 时回退
-//（过渡期兼容；RL-17 退场后整个 legacy 分支可被移除）。
-// V1 card_key_points 表已退役（migration 0176），key_point_id 现为 objective_id 别名。
+  // 当前候选只从 Objective Surface 派生，不能从已删除的 Session/Episode 表回退。
   const surfaceCtx: SurfaceContext = {
     workspaceId: args.workspaceId,
     userId: args.userId,
-    origin: "pet",
-    goal: "stabilize",
   };
   const objectiveLimit = 5;
   const { items: objectives } = await listObjectiveSurfacesV3(tx, surfaceCtx, {
@@ -199,16 +170,13 @@ async function resolveCompanionLearningContextInTransaction(
   const sorted = [...objectives].sort((a, b) => rank(a.primaryAction.kind) - rank(b.primaryAction.kind));
 
   // resume：带 activeRun 的第一个 Objective（typed resume_run）。
-  let resumeCandidate: CompanionLearningContextV1["resumeCandidate"] = null;
   let learningRunResumeCandidate: CompanionLearningContextV1["learningRunResumeCandidate"] = null;
-  let resumeObjectiveId: string | null = null;
   const resumeObjective = sorted.find((s) => s.personal.activeRun);
   if (resumeObjective) {
     const runId = resumeObjective.personal.activeRun!.runId;
     const label = resumeObjective.content.conceptLabel;
     const title = sanitizeText(label ?? "", 80) || "继续本次巩固";
     const summaryPreview = resumeObjective.content.publicSummary.split("\n")[0] ?? "";
-    resumeObjectiveId = resumeObjective.objectiveId;
     const payload = { kind: "resume_learning_run", runId };
     learningRunResumeCandidate = {
       candidateId: "learning_run_resume",
@@ -221,10 +189,7 @@ async function resolveCompanionLearningContextInTransaction(
   }
 
   // start：可执行的第一个 Objective（typed create_run / create_review_run）。
-  let startCandidate: CompanionLearningContextV1["startCandidate"] = null;
   let learningRunStartCandidate: CompanionLearningContextV1["learningRunStartCandidate"] = null;
-  let startObjectiveIdValue: string | null = null;
-  let startOriginV2Value: LearningRunOriginV2 | null = null;
   const actionableObjective = sorted.find((s) => {
     const k = s.primaryAction.kind;
     return k === "create_run" || k === "create_review_run" || k === "resume_run";
@@ -233,23 +198,13 @@ async function resolveCompanionLearningContextInTransaction(
     const label = actionableObjective.content.conceptLabel;
     const claimText = label ?? "";
     const payloadV2 = buildStartPayloadV2(actionableObjective);
-    startObjectiveIdValue = actionableObjective.objectiveId;
-    if (payloadV2 && isLearningRunOriginV2(payloadV2.request.originV2)) {
-      startOriginV2Value = payloadV2.request.originV2;
-    }
-    // 统一走 V2 候选：V2 payload 已内嵌 originV2；同时保留 legacy V1 payload
-    // 字段（cardId / keyPointId 仍然兼容，供未升级客户端继续使用）。
-    const v1CardId = actionableObjective.content.presentation.cardId ?? actionableObjective.objectiveId;
-    const v1KeyPointId = actionableObjective.objectiveId;
-    // V2 优先：payloadSha256 从 V2 派生；后向兼容 V1 时仍按 V1 形状填充候选。
     const v2Payload = payloadV2 ? {
       kind: "start_learning_run_v2" as const,
       request: payloadV2.request,
     } : null;
-    learningRunStartCandidate = {
+    if (v2Payload && isLearningRunOriginV2(v2Payload.request.originV2)) {
+      learningRunStartCandidate = {
       candidateId: "learning_run_start",
-      cardId: v1CardId,
-      keyPointId: v1KeyPointId,
       title: sanitizeText(claimText, 80)
         || (actionableObjective.primaryAction.kind === "create_review_run" ? "开始复习" : "开始验证"),
       targetSummary: sanitizeText(actionableObjective.content.publicSummary.split("\n")[0]
@@ -259,31 +214,19 @@ async function resolveCompanionLearningContextInTransaction(
         : "创建一次学习运行，完成后按真实结果安排复习",
       payloadSha256: sha256Utf8V1(canonicalJsonV1(v2Payload)),
       objectiveId: actionableObjective.objectiveId,
-      ...(payloadV2 ? { originV2: payloadV2.request.originV2 } : {}),
-    };
+      originV2: v2Payload.request.originV2,
+      };
+    }
   }
 
-  // V1 过渡回退已移除（card_key_points/learning_sessions 旧表已随旧栈退役，
-  // 无 active Objective 时即为空上下文，不构造 V1 候选）。
-
   const contextRevision = sha256Utf8V1(
-    canonicalJsonV1({ resumeCandidate, startCandidate, learningRunResumeCandidate, learningRunStartCandidate }),
+    canonicalJsonV1({ learningRunResumeCandidate, learningRunStartCandidate }),
   );
   return {
     version: 1,
     contextRevision,
-    resumeCandidate,
-    startCandidate,
     learningRunResumeCandidate,
     learningRunStartCandidate,
-    // PERF-WN：透传已查出的引用 id，避免 proposal create 侧重复 SELECT。
-    resumeSessionId: null, // V2 无 episode 概念
-    startCardId: learningRunStartCandidate?.cardId ?? null,
-    startKeyPointId: learningRunStartCandidate?.keyPointId ?? null,
-    // Plan 23 CS-05/CS-06：V2 透传字段
-    resumeObjectiveId,
-    startObjectiveId: startObjectiveIdValue,
-    startOriginV2: startOriginV2Value,
   };
 }
 
@@ -302,11 +245,7 @@ export async function resolveCompanionLearningContext(args: {
 import { randomUUID } from "node:crypto";
 import { canonicalJsonV1 as canonicalJson, sha256Utf8V1 as sha256 } from "@ailearn/shared/content-hash";
 import { CompanionConversationError } from "./turn-service.ts";
-import {
-  createPgSessionRepository,
-  createSession,
-  SessionServiceError,
-} from "../learning-sessions/session-service.ts";
+import { reclaimExpiredCompanionProposals } from "./companion-proposal-expiry.ts";
 
 const PROPOSAL_TTL_MINUTES = 5; // §6.7：resume/start 默认 5min（纯导航 10min）
 
@@ -314,10 +253,10 @@ function menuProposalRequestHash(body: {
   version: 1;
   conversationId?: string;
   clientMessageId: string;
-  candidateId: "resume_current" | "start_short" | "learning_run_resume" | "learning_run_start";
+  candidateId: "learning_run_resume" | "learning_run_start";
   expectedContextRevision: string;
   expectedPayloadSha256: string;
-  sourceSurface: "pet" | "main" | "web_fallback";
+  sourceSurface: "pet" | "main";
 }): string {
   return sha256(canonicalJson({
     version: body.version,
@@ -344,10 +283,10 @@ export async function createCompanionMenuProposal(args: {
     version: 1;
     conversationId?: string;
     clientMessageId: string;
-    candidateId: "resume_current" | "start_short" | "learning_run_resume" | "learning_run_start";
+    candidateId: "learning_run_resume" | "learning_run_start";
     expectedContextRevision: string;
     expectedPayloadSha256: string;
-    sourceSurface: "pet" | "main" | "web_fallback";
+    sourceSurface: "pet" | "main";
   };
   idempotencyKey: string;
 }): Promise<unknown> {
@@ -368,20 +307,15 @@ export async function createCompanionMenuProposal(args: {
           "CONTEXT_STALE", 409, "context revision mismatch",
         );
       }
-      const candidate =
-        args.body.candidateId === "resume_current"
-          ? context.resumeCandidate
-          : args.body.candidateId === "learning_run_resume"
-            ? context.learningRunResumeCandidate
-            : args.body.candidateId === "learning_run_start"
-              ? context.learningRunStartCandidate
-              : context.startCandidate;
+      const candidate = args.body.candidateId === "learning_run_resume"
+        ? context.learningRunResumeCandidate
+        : context.learningRunStartCandidate;
       if (!candidate) {
         // 2026-08-12+（15a-E）：细分 code——前端据此显示"当前没有进行中的学习/
         // 没有可开始的学习"（此前 ACTION_STALE 无法区分）。
         throw new CompanionConversationError(
-          args.body.candidateId === "resume_current" || args.body.candidateId === "learning_run_resume"
-            ? "NO_ACTIVE_SESSION"
+          args.body.candidateId === "learning_run_resume"
+            ? "NO_ACTIVE_RUN"
             : "NO_CANDIDATE", 409, "candidate unavailable",
         );
       }
@@ -390,71 +324,28 @@ export async function createCompanionMenuProposal(args: {
           "ACTION_STALE", 409, "payload hash mismatch",
         );
       }
-      // 服务端重新构造候选 payload（引用来自只读查询），并精确验证其 sha256
-      // 与候选 payloadSha256/expected 一致（§6.7：payload 完全由服务端构造）。
-      // PERF-WN: 复用 context 解析时已查出的引用 id，不再为构造 payload 重复
-      // SELECT learning_sessions/learning_runs/card_key_points/learning_episodes。
+      // 服务端重新构造候选 payload，并精确验证其 sha256。
       let payload: { kind: string; [k: string]: unknown };
-      if (args.body.candidateId === "resume_current") {
-        if (!context.resumeSessionId) {
-          throw new CompanionConversationError("NO_ACTIVE_SESSION", 409, "active learning session disappeared");
-        }
-        payload = { kind: "resume_session", sessionId: context.resumeSessionId };
-      } else if (args.body.candidateId === "learning_run_resume") {
+      if (args.body.candidateId === "learning_run_resume") {
         const runId = context.learningRunResumeCandidate?.runId;
         if (!runId) {
-          throw new CompanionConversationError("NO_ACTIVE_SESSION", 409, "active learning run disappeared");
+          throw new CompanionConversationError("NO_ACTIVE_RUN", 409, "active learning run disappeared");
         }
         payload = { kind: "resume_learning_run", runId };
-      } else if (args.body.candidateId === "learning_run_start") {
-        const start = context.learningRunStartCandidate;
-        if (!start) {
-          throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
-        }
-        // Plan 23 CS-06：V2 候选（有 objectiveId）使用 V2 payload；
-        // legacy V1 候选（无 objectiveId）沿用 V1 payload。
-        if (start.objectiveId && start.originV2) {
-          const idempotencyKey = `pet-menu-v2:${start.objectiveId}`;
-          payload = {
-            kind: "start_learning_run_v2",
-            request: {
-              originV2: start.originV2,
-              goal: "stabilize",
-              idempotencyKey,
-              requestedTimeBudgetSeconds: 180,
-            },
-          };
-        } else {
-          const cardId = start.cardId;
-          const keyPointId = start.keyPointId;
-          if (!cardId || !keyPointId) {
-            throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
-          }
-          const idempotencyKey = `pet-menu:${keyPointId}`;
-          payload = {
-            kind: "start_learning_run",
-            request: {
-              version: 1,
-              origin: {
-                kind: "card",
-                cardId,
-                keyPointId,
-              },
-              goal: "stabilize",
-              clientRequestId: idempotencyKey,
-              idempotencyKey,
-            },
-          };
-        }
       } else {
-        if (!context.startCardId || !context.startKeyPointId) {
+        const start = context.learningRunStartCandidate;
+        if (!start || !start.objectiveId || !start.originV2) {
           throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
         }
+        const idempotencyKey = `pet-menu-v2:${start.objectiveId}`;
         payload = {
-          kind: "start_session",
-          origin: "now",
-          cardId: context.startCardId,
-          keyPointId: context.startKeyPointId,
+          kind: "start_learning_run_v2",
+          request: {
+            originV2: start.originV2,
+            goal: "stabilize",
+            idempotencyKey,
+            requestedTimeBudgetSeconds: 180,
+          },
         };
       }
       const payloadHash = sha256(canonicalJson(payload));
@@ -477,7 +368,7 @@ export async function createCompanionMenuProposal(args: {
         targetSummary: candidate.targetSummary,
         impactSummary: candidate.impactSummary,
         userText:
-          args.body.candidateId === "resume_current"
+          args.body.candidateId === "learning_run_resume"
             ? `请继续当前学习：${candidate.targetSummary}`
             : `请开始一小段学习：${candidate.targetSummary}`,
         sourceSurface: args.body.sourceSurface,
@@ -509,7 +400,7 @@ async function createCompanionProposalInTransaction(
     targetSummary: string;
     impactSummary: string;
     userText: string;
-    sourceSurface: "pet" | "main" | "web_fallback";
+    sourceSurface: "pet" | "main";
   },
 ): Promise<unknown> {
   // L11：事件携带当前账号世代（global off 后旧 action 事件被客户端拒绝）。
@@ -530,7 +421,9 @@ async function createCompanionProposalInTransaction(
         impact_summary: string;
         status: string;
         decision: string | null;
-        action_run_id: string | null;
+        result_ref: string | null;
+        result_route: unknown;
+        result_safe_summary: string | null;
         expires_at: Date;
         decided_at: Date | null;
         created_at: Date;
@@ -542,7 +435,8 @@ async function createCompanionProposalInTransaction(
         SELECT p.id, p.conversation_id, p.source_message_id, p.payload,
                p.source_generation, p.context_grant_id, p.payload_sha256,
                p.title, p.target_summary, p.impact_summary, p.status, p.decision,
-               p.action_run_id, p.expires_at, p.decided_at, p.created_at, p.updated_at,
+               p.result_ref, p.result_route, p.result_safe_summary,
+               p.expires_at, p.decided_at, p.created_at, p.updated_at,
                p.request_body_sha256,
                assistant.id AS assistant_message_id,
                event.seq AS event_cursor
@@ -587,7 +481,9 @@ async function createCompanionProposalInTransaction(
             requiresConfirmation: true,
             status: row.status,
             decision: row.decision,
-            actionRunId: row.action_run_id,
+            resultRef: row.result_ref,
+            route: row.result_route,
+            safeSummary: row.result_safe_summary,
             expiresAt: new Date(row.expires_at).toISOString(),
             decidedAt: row.decided_at ? new Date(row.decided_at).toISOString() : null,
             createdAt: new Date(row.created_at).toISOString(),
@@ -609,36 +505,24 @@ async function createCompanionProposalInTransaction(
         if (conv[0].kind !== "dialogue" || conv[0].status !== "active") {
           throw new CompanionConversationError("FORBIDDEN", 403, "conversation is not an active dialogue");
         }
+        // §8.5：先原子回收过期 pending（TTL 5min → expired + action.expired 事件
+        // + 挂起 run/工具调用终结）。必须在 active run 校验**之前**执行：Agent run
+        // 在等待确认期间保持 waiting_for_confirmation（仍属 active），先判 active
+        // 会让回收永不触发——过期后该 conversation 的新 turn / 新 proposal 一律被
+        // 409 拒死，用户既无法确认也无法继续对话。
+        await reclaimExpiredCompanionProposals(tx, {
+          workspaceId: args.workspaceId,
+          userId: args.userId,
+          conversationId,
+        });
         const active = await tx.execute<{ id: string }>(sql`
           SELECT id FROM companion_turn_runs
-          WHERE conversation_id = ${conversationId} AND status IN ('accepted', 'running', 'cancel_requested')
+          WHERE conversation_id = ${conversationId} AND status IN ('accepted', 'running', 'waiting_for_confirmation', 'cancel_requested')
           LIMIT 1
         `);
         if (active[0]) {
           throw new CompanionConversationError("RUN_ALREADY_ACTIVE", 409, "active dialogue run");
         }
-        // §8.5：先原子回收过期 pending（TTL 5min → expired + action.expired
-        // 事件），否则过期 proposal 会永久阻塞新 proposal 创建（恒 409）。
-        const expired = await tx.execute<{
-          id: string; conversation_id: string; source_message_id: string;
-          source_generation: number; payload: unknown; payload_sha256: string;
-          title: string; target_summary: string; impact_summary: string;
-          status: string; decision: string | null; expires_at: Date;
-          decided_at: Date | null; created_at: Date; updated_at: Date;
-        }>(sql`
-          UPDATE companion_action_proposals
-          SET status = 'expired', updated_at = now()
-          WHERE conversation_id = ${conversationId} AND status = 'pending'
-            AND expires_at < now()
-          RETURNING id, conversation_id, source_message_id, source_generation,
-                    payload, payload_sha256, title, target_summary, impact_summary,
-                    status, decision, expires_at, decided_at, created_at, updated_at
-        `);
-        // 轻微·18（round-4）：批量 append expired 事件。原逐行 appendActionExpiredEvent
-        // （每行 getCompanionAccountEpoch + counter UPDATE RETURNING + INSERT = 3×N RTT）。
-        // 因 expired 行均属同一 conversation/同一 user，account_epoch 共享、seq 由单次
-        // counter UPDATE +N 后本地递推、INSERT 用多行 VALUES——降为 3 次 RTT（有界）。
-        await appendActionExpiredEventsBatch(tx, args.workspaceId, args.userId, conversationId, expired);
         const pending = await tx.execute<{ id: string }>(sql`
           SELECT id FROM companion_action_proposals
           WHERE conversation_id = ${conversationId} AND status = 'pending'
@@ -743,12 +627,13 @@ async function createCompanionProposalInTransaction(
         INSERT INTO companion_action_proposals
           (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
            payload, payload_sha256, title, target_summary, impact_summary, status,
-           idempotency_key_hash, request_body_sha256, expires_at)
+           idempotency_key_hash, request_body_sha256, expires_at, origin)
         VALUES
           (${proposalId}, ${args.workspaceId}, ${args.userId}, ${conversationId}, ${userMessageId}, ${sourceGeneration},
            ${JSON.stringify(args.payload)}, ${args.payloadSha256},
            ${args.title}, ${args.targetSummary}, ${args.impactSummary}, 'pending',
-           ${keyHash}, ${args.requestBodyHash}, now() + make_interval(mins => ${PROPOSAL_TTL_MINUTES}))
+           ${keyHash}, ${args.requestBodyHash}, now() + make_interval(mins => ${PROPOSAL_TTL_MINUTES}),
+           'menu')
         RETURNING expires_at, created_at, updated_at
       `);
       const proposalTimes = insertedProposal[0];
@@ -781,7 +666,7 @@ async function createCompanionProposalInTransaction(
            now() + interval '24 hours')
       `);
             // 方案 16 §14.3：proposal 创建后入 inbox（pet 自身发起的 proposal 已有
-      // 本地确认卡，避免重复展示；main/web_fallback 发起的需要推送给 pet）。
+      // 本地确认卡，避免重复展示；main 发起的需要推送给 pet）。
       if (args.sourceSurface !== "pet") {
         await deliver(
           tx,
@@ -817,7 +702,6 @@ async function createCompanionProposalInTransaction(
           requiresConfirmation: true,
           status: "pending",
           decision: null,
-          actionRunId: null,
           expiresAt: new Date(proposalTimes.expires_at).toISOString(),
           decidedAt: null,
           createdAt: new Date(proposalTimes.created_at).toISOString(),
@@ -838,7 +722,7 @@ function toolProposalRequestHash(body: {
   title: string;
   targetSummary: string;
   impactSummary: string;
-  sourceSurface: "pet" | "main" | "web_fallback";
+  sourceSurface: "pet" | "main";
 }): string {
   return sha256(canonicalJson({
     version: body.version,
@@ -869,7 +753,7 @@ export async function createCompanionToolProposal(args: {
     title: string;
     targetSummary: string;
     impactSummary: string;
-    sourceSurface: "pet" | "main" | "web_fallback";
+    sourceSurface: "pet" | "main";
   };
   idempotencyKey: string;
 }): Promise<unknown> {
@@ -921,8 +805,7 @@ export async function createCompanionToolProposal(args: {
 
 // ─── P5 §6.6 Proposal decision（confirm/reject 原子消费） ───────────────
 
-import { createJob } from "../job/service.ts";
-import { JobType, type LearningRunActionV1, type UnderstandingRoutePlanRequestV1 } from "@ailearn/shared";
+import { type LearningRunActionV1, type UnderstandingRoutePlanRequestV1 } from "@ailearn/shared";
 
 // §18.1 导航工具（纯导航同步 succeeded）；业务工具在下方分支同步执行。
 const NAVIGATION_KINDS = new Set([
@@ -935,10 +818,45 @@ const NAVIGATION_KINDS = new Set([
 ]);
 
 /**
+ * §5（Agent 方案）：确认窗口过期后的补偿回收。
+ *
+ * decideCompanionProposal 在事务内发现 TTL 已过时抛出 ACTION_EXPIRED，事务整体
+ * 回滚——挂起的 run 仍是 waiting_for_confirmation，该 conversation 之后所有 turn
+ * 都会被 409 RUN_ALREADY_ACTIVE 拒死。这里在独立事务中提交回收（proposal →
+ * expired、工具调用 → expired、run → failed），再原样抛出原始 409 给调用方。
+ */
+async function releaseExpiredProposalForDecision(args: {
+  workspaceId: string;
+  userId: string;
+  proposalId: string;
+}): Promise<void> {
+  const conversationId = await withWorkspaceTransaction(
+    { workspaceId: args.workspaceId, userId: args.userId },
+    async (tx) => {
+      const rows = await tx.execute<{ conversation_id: string }>(sql`
+        SELECT conversation_id FROM companion_action_proposals
+        WHERE id = ${args.proposalId}
+        LIMIT 1
+      `);
+      return rows[0]?.conversation_id ?? null;
+    },
+  );
+  if (!conversationId) return;
+  await withWorkspaceTransaction(
+    { workspaceId: args.workspaceId, userId: args.userId },
+    (tx) => reclaimExpiredCompanionProposals(tx, {
+      workspaceId: args.workspaceId,
+      userId: args.userId,
+      conversationId,
+    }),
+  );
+}
+
+/**
  * §6.6：POST /companion/proposals/:id/decision。
  * - reject：原子写 decision，零业务副作用，返回 200 rejected；
  * - confirm：校验 pending/TTL/无 active run/幂等；纯导航同步 succeeded（200）；
- *   session/tutor 原子创建 action run + companion_action job（202 accepted）；
+ *   当前 LearningRun/记忆/路线工具均在同一事务内完成；
  * - 同 key 同 decision 返回同一结果；异参 409；已被消费返回当前状态；
  * - router 只生成 proposal，不执行任何 Learning 副作用（执行在 worker）。
  */
@@ -948,19 +866,26 @@ export async function decideCompanionProposal(args: {
   proposalId: string;
   decision: "confirm" | "reject";
   idempotencyKey: string;
-  expectedPayloadSha256?: string;
+  expectedPayloadSha256: string;
 }): Promise<unknown> {
-  return withWorkspaceTransaction(
+  const result = await withWorkspaceTransaction(
     { workspaceId: args.workspaceId, userId: args.userId },
     async (tx) => {
       const rows = await tx.execute<{
         id: string; conversation_id: string; status: string; decision: string | null;
         decision_key_hash: string | null; expires_at: Date;
         payload: { kind: string; [key: string]: unknown } | string;
-        payload_sha256: string; action_run_id: string | null;
+        payload_sha256: string;
+        result_ref: string | null;
+        result_route: unknown;
+        result_safe_summary: string | null;
+        origin: string | null;
+        agent_run_id: string | null;
+        agent_tool_call_id: string | null;
       }>(sql`
         SELECT id, conversation_id, status, decision, decision_key_hash, expires_at, payload,
-               payload_sha256, action_run_id
+               payload_sha256, result_ref, result_route, result_safe_summary,
+               origin, agent_run_id, agent_tool_call_id
         FROM companion_action_proposals
         WHERE id = ${args.proposalId}
         FOR UPDATE
@@ -995,19 +920,7 @@ export async function decideCompanionProposal(args: {
       // 已决定：同 key 幂等返回当前状态；异参冲突
       if (proposal.decision) {
         if (proposal.decision_key_hash === keyHash) {
-          const action = proposal.action_run_id
-            ? (await tx.execute<{
-                result_ref: string | null;
-                route: unknown;
-                safe_summary: string | null;
-              }>(sql`
-                SELECT result_ref, route, safe_summary
-                FROM companion_action_runs
-                WHERE id = ${proposal.action_run_id}
-                LIMIT 1
-              `))[0] ?? null
-            : null;
-          return snapshotFor({ ...proposal, payload: proposalPayload }, action);
+          return snapshotFor({ ...proposal, payload: proposalPayload });
         }
         throw new CompanionConversationError(
           "IDEMPOTENCY_CONFLICT", 409, "proposal already decided with different key",
@@ -1029,8 +942,8 @@ export async function decideCompanionProposal(args: {
               decision_key_hash = ${keyHash}, updated_at = now()
           WHERE id = ${proposal.id}
         `);
-        await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "rejected", null);
-        return { version: 1, proposalId: proposal.id, status: "rejected", actionRunId: null, resultRef: null, route: null, safeSummary: null };
+        await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "rejected");
+        return { version: 1, proposalId: proposal.id, status: "rejected", resultRef: null, route: null, safeSummary: null };
       }
 
       // confirm：conversation 无 active dialogue run
@@ -1044,22 +957,47 @@ export async function decideCompanionProposal(args: {
           "PAYLOAD_HASH_MISMATCH", 409, "proposal payload hash does not match frozen value",
         );
       }
-      if (
-        args.expectedPayloadSha256 !== undefined &&
-        args.expectedPayloadSha256 !== proposal.payload_sha256
-      ) {
+      if (args.expectedPayloadSha256 !== proposal.payload_sha256) {
         throw new CompanionConversationError(
           "PAYLOAD_HASH_MISMATCH", 409, "expected payload hash does not match proposal",
         );
+      }
+      if (proposal.origin === "agent_tool" && proposal.agent_run_id) {
+        const epochRows = await tx.execute<{
+          run_account_epoch: number;
+          account_epoch: number;
+          global_enabled: boolean;
+        }>(sql`
+          SELECT r.account_epoch AS run_account_epoch,
+                 COALESCE(s.epoch, 0) AS account_epoch,
+                 COALESCE(s.global_enabled, true) AS global_enabled
+          FROM companion_turn_runs r
+          LEFT JOIN user_companion_account_state s ON s.user_id = r.user_id
+          WHERE r.id = ${proposal.agent_run_id}
+          LIMIT 1
+        `);
+        const epoch = epochRows[0];
+        if (!epoch || !epoch.global_enabled || Number(epoch.run_account_epoch) !== Number(epoch.account_epoch)) {
+          throw new CompanionConversationError("ACTION_STALE", 409, "agent run is no longer current");
+        }
       }
       await tx.execute(sql`
         SELECT id FROM companion_conversations
         WHERE id = ${proposal.conversation_id}
         FOR UPDATE
       `);
+      // 显式 ::uuid 转型：菜单/路由 proposal 的 agent_run_id 为 NULL，而裸参数出现在
+      // `$n IS NULL` 中时 PostgreSQL 无法从该表达式推断类型（另一处 `id <> $n` 是
+      // **另一个**占位符，不能替它定型），于是报 42P18 could not determine data type
+      // of parameter $2——非 Agent proposal 的 confirm 因此必然 500。
       const active = await tx.execute<{ id: string }>(sql`
         SELECT id FROM companion_turn_runs
-        WHERE conversation_id = ${proposal.conversation_id} AND status IN ('accepted', 'running')
+        WHERE conversation_id = ${proposal.conversation_id} AND status IN ('accepted', 'running', 'waiting_for_confirmation')
+          AND (
+            ${proposal.agent_run_id}::uuid IS NULL
+            OR id <> ${proposal.agent_run_id}::uuid
+            OR status <> 'waiting_for_confirmation'
+          )
         LIMIT 1
       `);
       if (active[0]) {
@@ -1077,41 +1015,25 @@ export async function decideCompanionProposal(args: {
           WHERE id = ${proposal.id}
         `);
         // The synchronous response is the completion proof for navigation.
-        // Do not emit action.completed here: the wire event requires a real
-        // actionRunId, while navigation intentionally creates no action run.
-        await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted", null);
+        await tx.execute(sql`
+          UPDATE companion_action_proposals
+          SET result_route = ${JSON.stringify(route?.route ?? null)},
+              result_safe_summary = ${route?.safeSummary ?? "打开页面"}
+          WHERE id = ${proposal.id}
+        `);
+        await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted");
         await deliverActionResultForProposal(tx, args.workspaceId, args.userId, proposal.id);
         return {
-          version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
+          version: 1, proposalId: proposal.id, status: "succeeded",
           resultRef: null, route: route?.route ?? null, safeSummary: route?.safeSummary ?? "打开页面",
         };
       }
 
-      // 方案 16 §18 / Plan 23 CS-06：LearningRun 工具（同步执行，事务内完成）。
-      if (kind === "start_learning_run" || kind === "start_learning_run_v2" || kind === "resume_learning_run") {
+      // LearningRun 工具（同步执行，事务内完成）。
+      if (kind === "start_learning_run_v2" || kind === "resume_learning_run") {
         let runId: string;
         let safeSummary: string;
-        if (kind === "start_learning_run") {
-          const request = proposalPayload.request as Record<string, unknown> | undefined;
-          if (!request || typeof request !== "object") {
-            throw new CompanionConversationError("ACTION_STALE", 409, "learning run payload is stale");
-          }
-          try {
-            const run = await createRun(tx, {
-              workspaceId: args.workspaceId,
-              userId: args.userId,
-              request: request as never,
-            });
-            runId = run.runId;
-            safeSummary = "学习运行已创建";
-          } catch (error) {
-            if (error instanceof LearningRunServiceError) {
-              throw new CompanionConversationError("ACTION_STALE", 409, "learning run could not be prepared");
-            }
-            throw error;
-          }
-        } else if (kind === "start_learning_run_v2") {
-          // Plan 23 CS-06：V2 PREPARE 路径（originV2 → createRunV2）。
+        if (kind === "start_learning_run_v2") {
           const request = proposalPayload.request as CreateLearningRunV2Request | undefined;
           if (!request || typeof request !== "object" || !("originV2" in request)) {
             throw new CompanionConversationError("ACTION_STALE", 409, "learning run v2 payload is stale");
@@ -1156,10 +1078,10 @@ export async function decideCompanionProposal(args: {
               decision_key_hash = ${keyHash}, updated_at = now()
           WHERE id = ${proposal.id}
         `);
-        await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted", null);
+        await appendDecisionEvent(tx, args.workspaceId, args.userId, proposal, "accepted");
         await deliverActionResultForProposal(tx, args.workspaceId, args.userId, proposal.id);
         return {
-          version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
+          version: 1, proposalId: proposal.id, status: "succeeded",
           resultRef: runId, route: null, safeSummary,
         };
       }
@@ -1262,21 +1184,10 @@ export async function decideCompanionProposal(args: {
       }
 
       // ── §18.1：记忆工具（确定性 API 同事务执行；revision = updatedAt epoch ms） ──
-      if (kind === "propose_memory_candidate") {
-        const payload = proposalPayload as unknown as {
-          memoryKind: "preference" | "goal" | "learning_context" | "interaction_note" | "episodic";
-          value: string;
-        };
-        const item = await upsertMemory(tx, { workspaceId: args.workspaceId, userId: args.userId }, {
-          kind: payload.memoryKind,
-          content: payload.value,
-          sourceEventId: undefined,
-          sourceSessionId: undefined,
-          userStated: false,
-          candidate: true,
-        });
-        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, item.memoryItemId, null, "已记录记忆候选");
-      }
+      // propose_memory_candidate 分支已删除：契约要求调用方提供 sourceMessageId，
+      // 而该 id 由本服务在 proposal 创建事务内生成，任何 producer 都无法满足 ⇒ 该
+      // kind 不可实现。候选记忆由 worker memory-extractor + delivery 气泡产生，用户
+      // 经下面的 confirm_or_reject_memory 确认或拒绝。
       if (kind === "confirm_or_reject_memory" || kind === "delete_assistant_memory") {
         const payload = proposalPayload as unknown as {
           memoryId: string;
@@ -1304,70 +1215,95 @@ export async function decideCompanionProposal(args: {
         return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, memoryId, null, "记忆已删除");
       }
 
-      // start_session must go through the canonical Learning Session PREPARE
-      // path before the asynchronous action run is created. The old worker
-      // placeholder only inserted a container row, which produced a session
-      // with no Episode and could never be opened as a real learning route.
-      if (kind === "start_session") {
-        const origin = proposalPayload.origin;
-        const keyPointId = proposalPayload.keyPointId;
-        if (
-          (origin !== "card" && origin !== "review" && origin !== "star_map" && origin !== "now")
-          || typeof keyPointId !== "string"
-        ) {
-          throw new CompanionConversationError("ACTION_STALE", 409, "start session payload is stale");
-        }
-        try {
-          await createSession(
-            {
-              workspaceId: args.workspaceId,
-              userId: args.userId,
-              origin,
-              entry: { kind: "key_point", keyPointId },
-              intent: "stabilize",
-              preferredKeyPointId: keyPointId,
-            },
-            createPgSessionRepository(tx),
-          );
-        } catch (error) {
-          if (error instanceof SessionServiceError) {
-            throw new CompanionConversationError("ACTION_STALE", 409, "learning session could not be prepared");
-          }
-          throw error;
-        }
+      throw new CompanionConversationError(
+        "ACTION_STALE", 409, "unsupported companion action",
+      );
+    },
+  ).catch(async (error: unknown) => {
+    // The decision transaction rolled back because the confirmation TTL already
+    // elapsed. Release the parked agent run in a committed transaction so the
+    // conversation can accept the next turn, then surface the original 409.
+    if (error instanceof CompanionConversationError && error.code === "ACTION_EXPIRED") {
+      await releaseExpiredProposalForDecision(args);
+    }
+    throw error;
+  });
+
+  // Agent proposals are not terminal chat actions. Once the decision is
+  // committed, enqueue the original run with the proposal id so the worker
+  // can feed the frozen decision back into the same bounded loop. The
+  // run-status fence makes retries and late duplicate decisions harmless.
+  const continuation = await withWorkspaceTransaction(
+    { workspaceId: args.workspaceId, userId: args.userId },
+    async (tx) => {
+      const rows = await tx.execute<{
+        origin: string | null;
+        agent_run_id: string | null;
+        agent_tool_call_id: string | null;
+        status: string;
+        decision: string | null;
+        run_status: string | null;
+        waiting_proposal_id: string | null;
+      }>(sql`
+        SELECT p.origin, p.agent_run_id, p.agent_tool_call_id, p.status, p.decision,
+               r.status AS run_status, r.waiting_proposal_id
+        FROM companion_action_proposals p
+        LEFT JOIN companion_turn_runs r ON r.id = p.agent_run_id
+        WHERE p.id = ${args.proposalId}
+        LIMIT 1
+      `);
+      const row = rows[0];
+      if (!row || row.origin !== "agent_tool" || !row.agent_run_id || !row.agent_tool_call_id || !row.decision) {
+        return null;
       }
-
-      // session/tutor：原子创建 action run + companion_action job（202 accepted）
-      const actionRunId = randomUUID();
+      const body = result as { status?: string; resultRef?: unknown; safeSummary?: unknown; route?: unknown };
+      const safeSummary = typeof body.safeSummary === "string"
+        ? body.safeSummary
+        : row.decision === "reject" ? "用户拒绝了这次操作" : "操作已完成";
       await tx.execute(sql`
-        INSERT INTO companion_action_runs
-          (id, workspace_id, user_id, conversation_id, proposal_id, status)
-        VALUES (${actionRunId}, ${args.workspaceId}, ${args.userId},
-                ${proposal.conversation_id}, ${proposal.id}, 'accepted')
+        UPDATE companion_agent_tool_calls
+        SET status = ${row.decision === "confirm" ? "succeeded" : "failed"},
+            result_ref = ${typeof body.resultRef === "string" ? body.resultRef : null},
+            result_safe_summary = ${safeSummary},
+            updated_at = now()
+        WHERE run_id = ${row.agent_run_id} AND tool_call_id = ${row.agent_tool_call_id}
       `);
-      await tx.execute(sql`
-        UPDATE companion_action_proposals
-        SET status = 'accepted', decision = 'confirm', decided_at = now(),
-            decision_key_hash = ${keyHash}, action_run_id = ${actionRunId}, updated_at = now()
-        WHERE id = ${proposal.id}
-      `);
-      await appendDecisionAndActionStartedEvents(tx, args.workspaceId, args.userId, proposal, "accepted", actionRunId);
-
-      // job 创建（payload 只传 opaque actionRunId——执行在 worker，见 P5-5）
-      await createJob({
-        type: JobType.COMPANION_ACTION,
-        workspaceId: args.workspaceId,
-        requestedBy: args.userId,
-        payload: { actionRunId },
-        dedupe: { payloadField: "actionRunId", value: actionRunId },
-      });
-
+      if (row.run_status !== "waiting_for_confirmation" || row.waiting_proposal_id !== args.proposalId) {
+        return null;
+      }
       return {
-        version: 1, proposalId: proposal.id, status: "accepted",
-        actionRunId, resultRef: null, route: null, safeSummary: null,
+        runId: row.agent_run_id,
+        proposalId: args.proposalId,
       };
     },
   );
+  if (continuation) {
+    await createJob({
+      type: "companion_agent",
+      workspaceId: args.workspaceId,
+      requestedBy: args.userId,
+      payload: { runId: continuation.runId, proposalId: continuation.proposalId },
+      // Dedupe on proposalId, never on runId: the ORIGINAL turn job also carries
+      // `{ runId }` and no proposalId. While that job is still pending (lease
+      // reaped, or a fail→retry backoff) or still running (the window between
+      // the proposal commit and the job's success update), a runId-keyed dedupe
+      // returns THAT job instead of creating the continuation — the confirmed
+      // decision is never injected, or no job exists at all while the run has
+      // already been flipped back to 'accepted', wedging the conversation.
+      dedupe: { payloadField: "proposalId", value: continuation.proposalId },
+    });
+    await withWorkspaceTransaction(
+      { workspaceId: args.workspaceId, userId: args.userId },
+      (tx) => tx.execute(sql`
+        UPDATE companion_turn_runs
+        SET status = 'accepted', waiting_proposal_id = NULL, updated_at = now()
+        WHERE id = ${continuation.runId}
+          AND status = 'waiting_for_confirmation'
+          AND waiting_proposal_id = ${continuation.proposalId}
+      `),
+    );
+  }
+  return result;
 }
 
 export function snapshotFor(
@@ -1375,26 +1311,23 @@ export function snapshotFor(
     id: string;
     status: string;
     decision: string | null;
-    action_run_id: string | null;
+    result_ref: string | null;
+    result_route: unknown;
+    result_safe_summary: string | null;
     payload: { kind: string; [key: string]: unknown };
   },
-  action?: {
-    result_ref: string | null;
-    route: unknown;
-    safe_summary: string | null;
-  } | null,
 ): unknown {
-  const actionRoute = action?.route == null
+  const resultRoute = proposal.result_route == null
     ? null
-    : typeof action.route === "string"
+    : typeof proposal.result_route === "string"
       ? (() => {
           try {
-            return JSON.parse(action.route) as Record<string, unknown>;
+            return JSON.parse(proposal.result_route) as Record<string, unknown>;
           } catch {
             return null;
           }
         })()
-      : action.route;
+      : proposal.result_route;
   const route = proposal.status === "succeeded"
     ? navigationRouteFor(proposal.payload.kind, proposal.payload)
     : null;
@@ -1402,14 +1335,13 @@ export function snapshotFor(
     version: 1,
     proposalId: proposal.id,
     status: proposal.status === "accepted" ? "executing" : proposal.status,
-    actionRunId: proposal.action_run_id,
-    resultRef: action?.result_ref ?? null,
-    route: actionRoute ?? route?.route ?? null,
-    safeSummary: action?.safe_summary ?? route?.safeSummary ?? null,
+    resultRef: proposal.result_ref,
+    route: resultRoute ?? route?.route ?? null,
+    safeSummary: proposal.result_safe_summary ?? route?.safeSummary ?? null,
   };
 }
 
-/** §6.6 reload/cursor-expired recovery: proposal + current action run only. */
+/** §6.6 reload/cursor-expired recovery for a synchronous proposal. */
 export async function getCompanionProposalSnapshot(args: {
   workspaceId: string;
   userId: string;
@@ -1431,30 +1363,20 @@ export async function getCompanionProposalSnapshot(args: {
         impact_summary: string;
         status: string;
         decision: "confirm" | "reject" | null;
-        action_run_id: string | null;
+        result_ref: string | null;
+        result_route: unknown;
+        result_safe_summary: string | null;
         expires_at: Date;
         decided_at: Date | null;
         created_at: Date;
         updated_at: Date;
-        action_id: string | null;
-        action_status: string | null;
-        result_message_id: string | null;
-        result_ref: string | null;
-        route: unknown;
-        safe_summary: string | null;
-        error_code: string | null;
-        action_created_at: Date | null;
-        action_updated_at: Date | null;
       }>(sql`
         SELECT p.id, p.conversation_id, p.source_message_id, p.source_generation,
                p.context_grant_id, p.payload, p.payload_sha256, p.title,
                p.target_summary, p.impact_summary, p.status, p.decision,
-               p.action_run_id, p.expires_at, p.decided_at, p.created_at, p.updated_at,
-               r.id AS action_id, r.status AS action_status, r.result_message_id,
-               r.result_ref, r.route, r.safe_summary, r.error_code,
-               r.created_at AS action_created_at, r.updated_at AS action_updated_at
+               p.result_ref, p.result_route, p.result_safe_summary,
+               p.expires_at, p.decided_at, p.created_at, p.updated_at
         FROM companion_action_proposals p
-        LEFT JOIN companion_action_runs r ON r.id = p.action_run_id
         WHERE p.id = ${args.proposalId}
         LIMIT 1
       `);
@@ -1488,25 +1410,11 @@ export async function getCompanionProposalSnapshot(args: {
             requiresConfirmation: true,
             status: row.status,
             decision: row.decision,
-            actionRunId: row.action_run_id,
             expiresAt: new Date(row.expires_at).toISOString(),
             decidedAt: row.decided_at ? new Date(row.decided_at).toISOString() : null,
             createdAt: new Date(row.created_at).toISOString(),
             updatedAt: new Date(row.updated_at).toISOString(),
           },
-          actionRun: row.action_id ? {
-            version: 1,
-            actionRunId: row.action_id,
-            proposalId: row.id,
-            status: row.action_status,
-            resultMessageId: row.result_message_id,
-            resultRef: row.result_ref,
-            route: row.route == null ? null : parseObject(row.route, "action route"),
-            safeSummary: row.safe_summary,
-            errorCode: row.error_code,
-            createdAt: new Date(row.action_created_at!).toISOString(),
-            updatedAt: new Date(row.action_updated_at!).toISOString(),
-          } : null,
         });
         return { statusCode: 200 as const, body };
       } catch (error) {
@@ -1517,7 +1425,7 @@ export async function getCompanionProposalSnapshot(args: {
   );
 }
 
-/** §18 同步工具成功收尾：proposal → succeeded + decision 事件（不建 actionRun）。 */
+/** §18 同步工具成功收尾：proposal → succeeded + decision 事件。 */
 /** 同步工具成功收尾后向 pet inbox 投递 action_result（§14.3）。 */
 async function deliverActionResultForProposal(
   tx: ApiTransaction,
@@ -1531,7 +1439,7 @@ async function deliverActionResultForProposal(
     {
       assistantSessionId: null,
       kind: "action_result",
-      payloadRef: { kind: "action_result", actionRunId: proposalId },
+      payloadRef: { kind: "action_result", proposalId },
       dedupeKey: `action_result:${proposalId}`,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     },
@@ -1551,13 +1459,15 @@ async function succeedSyncProposal(
   await tx.execute(sql`
     UPDATE companion_action_proposals
     SET status = 'succeeded', decision = 'confirm', decided_at = now(),
-        decision_key_hash = ${keyHash}, updated_at = now()
+        decision_key_hash = ${keyHash}, result_ref = ${resultRef},
+        result_route = ${JSON.stringify(route ?? null)},
+        result_safe_summary = ${safeSummary}, updated_at = now()
     WHERE id = ${proposal.id}
   `);
-  await appendDecisionEvent(tx, workspaceId, userId, proposal, "accepted", null);
+  await appendDecisionEvent(tx, workspaceId, userId, proposal, "accepted");
   await deliverActionResultForProposal(tx, workspaceId, userId, proposal.id);
   return {
-    version: 1, proposalId: proposal.id, status: "succeeded", actionRunId: null,
+    version: 1, proposalId: proposal.id, status: "succeeded",
     resultRef, route: route ?? null, safeSummary,
   };
 }
@@ -1596,7 +1506,6 @@ async function appendDecisionEvent(
   userId: string,
   proposal: { id: string; conversation_id: string },
   status: string,
-  actionRunId: string | null,
 ): Promise<void> {
   // L11：事件携带当前账号世代（global off 后旧 action 事件被客户端拒绝）。
   const accountEpoch = await getCompanionAccountEpoch(tx, userId);
@@ -1609,7 +1518,6 @@ async function appendDecisionEvent(
     proposalId: proposal.id,
     decision: status === "accepted" ? "confirm" : "reject",
     status,
-    actionRunId,
   };
   await tx.execute(sql`
     INSERT INTO companion_stream_events
@@ -1619,91 +1527,6 @@ async function appendDecisionEvent(
             'action.decision',
             ${JSON.stringify(decisionPayload)},
             now() + interval '24 hours')
-  `);
-}
-
-/**
- * PERF（api-learning #11）：把 confirm 路径上背靠背的 appendDecisionEvent +
- * appendActionStartedEvent（各 3 次 RTT：account_epoch + counter UPDATE + INSERT，
- * 共 6 次）合并为一次批量写入：account_epoch 只取一次、counter 一次 +2、两行
- * VALUES 单 INSERT。seq/字段与逐调用 appendDecisionEvent/appendActionStartedEvent
- * 完全一致（decision 在前取 baseSeq，started 在后取 baseSeq+1）。
- */
-async function appendDecisionAndActionStartedEvents(
-  tx: { execute(q: unknown): Promise<unknown[] | unknown> },
-  workspaceId: string,
-  userId: string,
-  proposal: { id: string; conversation_id: string },
-  status: string,
-  actionRunId: string,
-): Promise<void> {
-  // L11：事件携带当前账号世代（global off 后旧 action 事件被客户端拒绝）。
-  const accountEpoch = await getCompanionAccountEpoch(tx, userId);
-  const counters = await tx.execute(sql`
-    UPDATE companion_conversations SET next_event_seq = next_event_seq + 2
-    WHERE id = ${proposal.conversation_id} RETURNING next_event_seq
-  `);
-  const baseSeq = Number((counters as Array<{ next_event_seq: string }>)[0].next_event_seq) - 2;
-  const decisionPayload = {
-    proposalId: proposal.id,
-    decision: status === "accepted" ? "confirm" : "reject",
-    status,
-    actionRunId,
-  };
-  const startedPayload = { proposalId: proposal.id, actionRunId };
-  const tuples = [
-    sql`(${proposal.conversation_id}, ${baseSeq}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
-         'action.decision', ${JSON.stringify(decisionPayload)}, now() + interval '24 hours')`,
-    sql`(${proposal.conversation_id}, ${baseSeq + 1}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
-         'action.started', ${JSON.stringify(startedPayload)}, now() + interval '24 hours')`,
-  ];
-  await tx.execute(sql`
-    INSERT INTO companion_stream_events
-      (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch,
-       type, payload, expires_at)
-    VALUES ${sql.join(tuples, sql`, `)}
-  `);
-}
-
-type ExpiredProposalRow = {
-  id: string; conversation_id: string;
-  source_message_id: string; source_generation: number; payload: unknown;
-  payload_sha256: string; title: string; target_summary: string; impact_summary: string;
-  status: string; decision: string | null; expires_at: Date;
-  decided_at: Date | null; created_at: Date; updated_at: Date;
-};
-
-/**
- * 轻微·18（round-4）：批量写入同 conversation 的 N 个 action.expired 事件。
- * account_epoch 共享（同 user），seq 由单次 counter UPDATE +N 后本地递推，
- * INSERT 用多行 VALUES。与逐行 appendActionExpiredEvent 语义/字段完全一致。
- */
-async function appendActionExpiredEventsBatch(
-  tx: { execute(q: unknown): Promise<unknown[] | unknown> },
-  workspaceId: string,
-  userId: string,
-  conversationId: string,
-  expired: ExpiredProposalRow[],
-): Promise<void> {
-  if (expired.length === 0) return;
-  const accountEpoch = await getCompanionAccountEpoch(tx, userId);
-  const counters = await tx.execute(sql`
-    UPDATE companion_conversations SET next_event_seq = next_event_seq + ${expired.length}
-    WHERE id = ${conversationId} RETURNING next_event_seq
-  `);
-  const baseSeq = Number((counters as Array<{ next_event_seq: string }>)[0].next_event_seq) - expired.length;
-  // 多行 VALUES：用 sql.join 逐 tuple 参数化组装（每 tuple 的 uuid 字段经 ::uuid 绑定，
-  // 键/值均受控，无注入；conversation_id 来自已校验的 expired 行）。
-  const tuples = expired.map((row, i) =>
-    sql`(${conversationId}, ${baseSeq + i}, ${workspaceId}, ${userId}, NULL, 0, ${accountEpoch},
-         'action.expired', ${JSON.stringify({ proposalId: row.id })},
-         now() + interval '24 hours')`,
-  );
-  await tx.execute(sql`
-    INSERT INTO companion_stream_events
-      (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch,
-       type, payload, expires_at)
-    VALUES ${sql.join(tuples, sql`, `)}
   `);
 }
 
@@ -1724,105 +1547,85 @@ function grantHmacSecret(): string {
   );
 }
 
-/** Learning Session page adapter：只读返回当前 public context revision。 */
-export async function getCompanionLearningSessionContext(args: {
+/** LearningRun 页面适配器：仅返回仍可安全进入 Grounded Tutor 的当前 task。 */
+export async function getCompanionLearningRunContext(args: {
   workspaceId: string;
   userId: string;
-  sessionId: string;
-  episodeId?: string;
+  runId: string;
 }): Promise<{ statusCode: 200; body: unknown }> {
   return withWorkspaceTransaction(
     { workspaceId: args.workspaceId, userId: args.userId },
     async (tx) => {
-      const row = await loadCompanionLearningSessionContext(tx, args);
-      if (!row) throw new CompanionConversationError("NOT_FOUND", 404, "learning session context not found");
-      const body = companionLearningSessionContextV1Schema.parse(
-        buildCompanionLearningSessionContext(row),
-      );
-      return { statusCode: 200 as const, body };
+      const row = await loadCompanionLearningRunContext(tx, args);
+      if (!row) throw new CompanionConversationError("NOT_FOUND", 404, "learning run context not found");
+      if (!isCompanionLearningRunTutorEligible(row)) {
+        throw new CompanionConversationError("ACTION_STALE", 409, "learning run context is no longer eligible");
+      }
+      return {
+        statusCode: 200 as const,
+        body: companionLearningRunContextV1Schema.parse(buildCompanionLearningRunContext(row)),
+      };
     },
   );
 }
 
 /**
- * §6.7：POST /companion/context-grants。
- * - pageInstanceId → episode → session 解引用（RLS 内）；
- * - permissionSnapshot 从 contextRevision 派生（bounded）；
- * - signature = domain-separated HMAC-SHA256（`companion-grant-v1|` + canonical payload）；
- * - TTL 5min；grant/signature 不入 job/日志/export（只返回给调用方与 proposal contextGrantId）。
+ * LearningRun 专用的一次性授权。签名绑定 snapshotId 与 active task，随后由
+ * turn create 在同一 RLS 事务内重新读取并消费，避免旧页面对已切换任务续用。
  */
-export async function createCompanionContextGrant(args: {
+export async function createCompanionLearningRunContextGrant(args: {
   workspaceId: string;
   userId: string;
-  sessionId?: string;
-  body: { version: 1; pageInstanceId: string; episodeId: string; contextRevision: string };
+  runId: string;
+  body: { version: 1; pageInstanceId: string; taskId: string; contextRevision: string };
 }): Promise<unknown> {
   return withWorkspaceTransaction(
     { workspaceId: args.workspaceId, userId: args.userId },
     async (tx) => {
-      const episode = await loadCompanionLearningSessionContext(tx, {
-        workspaceId: args.workspaceId,
-        userId: args.userId,
-        sessionId: args.sessionId,
-        episodeId: args.body.episodeId,
-      });
-      if (!episode) throw new CompanionConversationError("NOT_FOUND", 404, "episode not found");
-      if (args.sessionId && episode.sessionId !== args.sessionId) {
-        throw new CompanionConversationError("FORBIDDEN", 403, "episode does not belong to session");
-      }
-      const contextRevision = contextRevisionForCompanionLearningSession(episode);
+      const run = await loadCompanionLearningRunContext(tx, args);
+      if (!run) throw new CompanionConversationError("NOT_FOUND", 404, "learning run not found");
+      const contextRevision = contextRevisionForCompanionLearningRun(run);
       if (contextRevision !== args.body.contextRevision) {
-        throw new CompanionConversationError("CONTEXT_STALE", 409, "learning session context revision mismatch");
+        throw new CompanionConversationError("CONTEXT_STALE", 409, "learning run context revision mismatch");
       }
-      if (
-        episode.sessionStatus !== "active" ||
-        episode.episodeStatus !== "active" ||
-        !["scene_ready", "awaiting_response"].includes(episode.processingPhase) ||
-        episode.answerLocked
-      ) {
-        throw new CompanionConversationError(
-          "ACTION_STALE", 409, "learning session context is no longer eligible",
-        );
+      const taskId = run.taskId;
+      if (!isCompanionLearningRunTutorEligible(run) || taskId === null || taskId !== args.body.taskId) {
+        throw new CompanionConversationError("ACTION_STALE", 409, "learning run context is no longer eligible");
       }
+
       const grantId = grantRandomUUID();
       const issuedAt = new Date();
       const expiresAt = new Date(issuedAt.getTime() + GRANT_TTL_MINUTES * 60_000);
       const permissionSnapshot = {
         pageInstanceId: args.body.pageInstanceId,
-        pageKind: "learning_session" as const,
+        pageKind: "learning_run" as const,
         capability: "grounded_tutor" as const,
-        sessionId: episode.sessionId,
-        episodeId: args.body.episodeId,
-        cardId: episode.cardId,
-        keyPointId: episode.keyPointId,
+        runId: run.runId,
+        snapshotId: run.snapshotId,
+        taskId,
         contextRevision: args.body.contextRevision,
       };
       const permissionSnapshotHash = sha256(canonicalJson(permissionSnapshot));
-      const domain = "companion-grounded-tutor-grant-v1:";
       const grantPayload = {
         version: 1 as const,
         grantId,
         userId: args.userId,
         workspaceId: args.workspaceId,
         pageInstanceId: args.body.pageInstanceId,
-        pageKind: "learning_session" as const,
+        pageKind: "learning_run" as const,
         capability: "grounded_tutor" as const,
-        sessionId: episode.sessionId,
-        episodeId: args.body.episodeId,
-        cardId: episode.cardId,
-        keyPointId: episode.keyPointId,
+        runId: run.runId,
+        snapshotId: run.snapshotId,
+        taskId,
         contextRevision: args.body.contextRevision,
         permissionSnapshotHash,
         issuedAt: issuedAt.toISOString(),
         expiresAt: expiresAt.toISOString(),
       };
       const signature = createHmac("sha256", grantHmacSecret())
-        .update(domain + canonicalJson(grantPayload))
+        .update(`companion-grounded-tutor-grant-v1:${canonicalJson(grantPayload)}`)
         .digest("hex");
-      return companionGroundedTutorGrantV1Schema.parse({
-        ...grantPayload,
-        signature,
-      });
+      return companionGroundedTutorGrantV1Schema.parse({ ...grantPayload, signature });
     },
   );
 }

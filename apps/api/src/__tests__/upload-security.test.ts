@@ -226,12 +226,6 @@ describe("安全测试：avatarUrl 路径探测", () => {
     assert.equal(result.success, true);
   });
 
-  it("外部 HTTPS URL → 通过（向后兼容）", () => {
-    const url = "https://example.com/avatar.png";
-    const result = avatarUrlSchema.safeParse(url);
-    assert.equal(result.success, true);
-  });
-
   it("任意 / 开头路径（/admin）→ 拒绝", () => {
     const url = "/admin/users";
     const result = avatarUrlSchema.safeParse(url);

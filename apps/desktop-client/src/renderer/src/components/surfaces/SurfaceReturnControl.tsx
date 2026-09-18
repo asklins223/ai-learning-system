@@ -16,7 +16,7 @@ export function SurfaceReturnControl({ className, label = "返回书房", disabl
       type="button"
       disabled={disabled}
       onClick={() => invoke("home")}
-      aria-label="关闭任务面并返回书房"
+      aria-label="关闭任务面并返回房间"
       data-surface-initial-focus="true"
     >
       <ArrowLeft size={17} aria-hidden="true" />

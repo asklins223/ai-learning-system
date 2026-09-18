@@ -12,8 +12,7 @@
  * - Server-private 类型（§12.6）：只存服务端表，公共 API 账号无 SELECT 路径；
  *   类型在此统一声明（存储形状的唯一定义），但 schema 仅用于服务端入库校验。
  *
- * 与旧 learning-session-contracts.ts 的关系：后者是旧 Session/Episode 语言，
- * 仅作为内部演进细节保留；产品消费者只使用本文件的 LearningRun 语言。
+ * 本文件是现行 LearningRun 语言的唯一来源；旧 Session/Episode 合同已删除。
  */
 
 import { z } from "zod";
@@ -61,6 +60,16 @@ export const TaskPurpose = {
   PRACTICE: "practice",
 } as const;
 export type TaskPurposeV1 = (typeof TaskPurpose)[keyof typeof TaskPurpose];
+
+export const CapabilityFacet = {
+  RECALL: "recall",
+  EXPLAIN: "explain",
+  APPLY: "apply",
+  BOUNDARY: "boundary",
+  PROCEDURE: "procedure",
+  RELATE: "relate",
+} as const;
+export type CapabilityFacet = (typeof CapabilityFacet)[keyof typeof CapabilityFacet];
 
 export const TrustClass = {
   MASTERY_ELIGIBLE: "mastery_eligible",
@@ -119,15 +128,6 @@ export type TaskInteractionV1 =
       replacementOptionLabels?: Record<string, string>;
     }
   | {
-      kind: "scenario";
-      steps: Array<{ stepId: string; publicOptionIds: string[] }>;
-    }
-  | {
-      kind: "choice_with_rationale";
-      publicOptionIds: string[];
-      rationaleModes: Array<"voice" | "text">;
-    }
-  | {
       kind: "structured_bundle";
       parts: [StructuredPartPublicV1] | [StructuredPartPublicV1, StructuredPartPublicV1];
     };
@@ -163,21 +163,6 @@ export type StructuredPartPublicV1 =
       publicElementLabels?: Record<string, string>;
       replacementOptionLabels?: Record<string, string>;
       partTrustCeiling: "facet_eligible" | "practice_only";
-      qualificationProfileHash: string | null;
-    }
-  | {
-      kind: "scenario";
-      partId: string;
-      steps: Array<{ stepId: string; publicOptionIds: string[] }>;
-      partTrustCeiling: "diagnostic_only" | "practice_only";
-      qualificationProfileHash: string | null;
-    }
-  | {
-      kind: "choice";
-      partId: string;
-      publicOptionIds: string[];
-      rationaleModes: Array<"voice" | "text">;
-      partTrustCeiling: "diagnostic_only" | "practice_only";
       qualificationProfileHash: string | null;
     };
 
@@ -368,10 +353,6 @@ export type LearningRunPublicV1 = {
 
 // ─── §12.3 Artifact 通用提交 ─────────────────────────────────────────────
 
-export type RationaleAnswerV1 =
-  | { kind: "text"; text: string }
-  | { kind: "voice"; confirmedTranscript: string; voiceArtifactRef?: string };
-
 export type RepairOperationV1 =
   | { op: "move"; elementId: string; toIndex: number }
   | { op: "replace"; elementId: string; replacementOptionId: string }
@@ -385,18 +366,7 @@ export type StructuredPartAnswerV1 =
       partId: string;
       edges: Array<{ fromNodeId: string; toNodeId: string; edgeKind: RelationEdgeKindV1 }>;
     }
-  | { kind: "repair"; partId: string; operations: RepairOperationV1[] }
-  | {
-      kind: "scenario";
-      partId: string;
-      decisions: Array<{ stepId: string; optionId: string; rationale?: RationaleAnswerV1 }>;
-    }
-  | {
-      kind: "choice";
-      partId: string;
-      selectedOptionIds: string[];
-      rationale?: RationaleAnswerV1;
-    };
+  | { kind: "repair"; partId: string; operations: RepairOperationV1[] };
 
 export type ArtifactPayloadV1 =
   | {
@@ -420,11 +390,6 @@ export type ArtifactPayloadV1 =
       operations: RepairOperationV1[];
       interactionRefs: string[];
     }
-  | {
-      kind: "scenario";
-      decisions: Array<{ stepId: string; optionId: string; rationale?: RationaleAnswerV1 }>;
-    }
-  | { kind: "choice"; selectedOptionIds: string[]; rationale?: RationaleAnswerV1 }
   | {
       kind: "structured_bundle";
       partAnswers: [StructuredPartAnswerV1] | [StructuredPartAnswerV1, StructuredPartAnswerV1];
@@ -555,16 +520,6 @@ export type PrivateTaskSolutionV1 =
       kind: "repair";
       acceptedOperationSignatures: string[];
       rubricTargetIds: string[];
-    }
-  | {
-      kind: "scenario";
-      acceptedDecisionPaths: string[];
-      rubricTargetIds: string[];
-    }
-  | {
-      kind: "choice";
-      acceptedOptionSets: string[][];
-      rationaleRubricTargetIds: string[];
     }
   | {
       kind: "structured_bundle";
@@ -829,8 +784,6 @@ export type InteractionQualificationV1 = {
     | "ordering"
     | "relation"
     | "repair"
-    | "scenario"
-    | "choice_with_rationale"
     | "structured_bundle";
   locale: string;
   datasetVersion: string;
@@ -1001,26 +954,6 @@ export const structuredPartPublicSchema = z.discriminatedUnion("kind", [
     replacementOptionLabels: z.record(z.string(), z.string().min(1).max(200)).optional(),
     partTrustCeiling: z.enum(["facet_eligible", "practice_only"]),
   }),
-  structuredPartBase.extend({
-    kind: z.literal("scenario"),
-    steps: z
-      .array(
-        z
-          .object({
-            stepId: z.string().min(1),
-            publicOptionIds: z.array(z.string().min(1)).min(1),
-          })
-          .strict(),
-      )
-      .min(1),
-    partTrustCeiling: z.enum(["diagnostic_only", "practice_only"]),
-  }),
-  structuredPartBase.extend({
-    kind: z.literal("choice"),
-    publicOptionIds: z.array(z.string().min(1)).min(1),
-    rationaleModes: z.array(z.enum(["voice", "text"])),
-    partTrustCeiling: z.enum(["diagnostic_only", "practice_only"]),
-  }),
 ]);
 
 // ─── task interaction ────────────────────────────────────────────────────
@@ -1037,7 +970,7 @@ export const taskInteractionSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("ordering"),
     publicTokenIds: z.array(z.string().min(1)).min(2),
-    // P4 展示层：token id → 文本（乱序片段，非答案承载；可选向后兼容）。
+    // P4 展示层：token id → 文本（乱序片段，非答案承载；可选展示字段）。
     publicTokenLabels: z.record(z.string(), z.string().min(1).max(200)).optional(),
   }),
   z.strictObject({
@@ -1053,24 +986,6 @@ export const taskInteractionSchema = z.discriminatedUnion("kind", [
     replacementOptionIds: z.array(z.string().min(1)),
     publicElementLabels: z.record(z.string(), z.string().min(1).max(500)).optional(),
     replacementOptionLabels: z.record(z.string(), z.string().min(1).max(200)).optional(),
-  }),
-  z.strictObject({
-    kind: z.literal("scenario"),
-    steps: z
-      .array(
-        z
-          .object({
-            stepId: z.string().min(1),
-            publicOptionIds: z.array(z.string().min(1)).min(1),
-          })
-          .strict(),
-      )
-      .min(1),
-  }),
-  z.strictObject({
-    kind: z.literal("choice_with_rationale"),
-    publicOptionIds: z.array(z.string().min(1)).min(1),
-    rationaleModes: z.array(z.enum(["voice", "text"])),
   }),
   z.strictObject({
     kind: z.literal("structured_bundle"),
@@ -1127,17 +1042,6 @@ export const learningTaskPublicSchema = baseVersionSchema
 
 // ─── artifact payload / submission ───────────────────────────────────────
 
-export const rationaleAnswerSchema = z.discriminatedUnion("kind", [
-  z.strictObject({ kind: z.literal("text"), text: z.string().min(1).max(20_000) }),
-  z.strictObject({
-    kind: z.literal("voice"),
-    confirmedTranscript: z.string().min(1).max(20_000),
-    voiceArtifactRef: z.string().min(1).optional(),
-    // §7.5：手工修改/重录必须标记 correction method（不冒充原样确认的逐字稿）。
-    correctionMethod: z.enum(["none", "re_recorded", "manual_text_edit"]).optional(),
-  }),
-]);
-
 export const repairOperationSchema = z.discriminatedUnion("op", [
   z.strictObject({ op: z.literal("move"), elementId: z.string().min(1), toIndex: z.number().int().min(0) }),
   z.strictObject({
@@ -1179,27 +1083,6 @@ export const structuredPartAnswerSchema = z.discriminatedUnion("kind", [
     partId: z.string().min(1),
     operations: z.array(repairOperationSchema).min(1),
   }),
-  z.strictObject({
-    kind: z.literal("scenario"),
-    partId: z.string().min(1),
-    decisions: z
-      .array(
-        z
-          .object({
-            stepId: z.string().min(1),
-            optionId: z.string().min(1),
-            rationale: rationaleAnswerSchema.optional(),
-          })
-          .strict(),
-      )
-      .min(1),
-  }),
-  z.strictObject({
-    kind: z.literal("choice"),
-    partId: z.string().min(1),
-    selectedOptionIds: z.array(z.string().min(1)).min(1),
-    rationale: rationaleAnswerSchema.optional(),
-  }),
 ]);
 
 export const artifactPayloadSchema = z.discriminatedUnion("kind", [
@@ -1235,25 +1118,6 @@ export const artifactPayloadSchema = z.discriminatedUnion("kind", [
     kind: z.literal("repair"),
     operations: z.array(repairOperationSchema).min(1),
     interactionRefs: z.array(z.string().min(1)),
-  }),
-  z.strictObject({
-    kind: z.literal("scenario"),
-    decisions: z
-      .array(
-        z
-          .object({
-            stepId: z.string().min(1),
-            optionId: z.string().min(1),
-            rationale: rationaleAnswerSchema.optional(),
-          })
-          .strict(),
-      )
-      .min(1),
-  }),
-  z.strictObject({
-    kind: z.literal("choice"),
-    selectedOptionIds: z.array(z.string().min(1)).min(1),
-    rationale: rationaleAnswerSchema.optional(),
   }),
   z.strictObject({
     kind: z.literal("structured_bundle"),
@@ -1541,24 +1405,6 @@ export const learningDraftPayloadSchema = z.discriminatedUnion("kind", [
     kind: z.literal("repair"),
     operations: z.array(repairOperationSchema),
     interactionRefs: z.array(z.string().min(1)),
-  }),
-  z.strictObject({
-    kind: z.literal("scenario"),
-    decisions: z
-      .array(
-        z
-          .object({
-            stepId: z.string().min(1),
-            optionId: z.string().min(1),
-            rationale: rationaleAnswerSchema.optional(),
-          })
-          .strict(),
-      ),
-  }),
-  z.strictObject({
-    kind: z.literal("choice"),
-    selectedOptionIds: z.array(z.string().min(1)),
-    rationale: rationaleAnswerSchema.optional(),
   }),
   z.strictObject({
     kind: z.literal("structured_bundle"),

@@ -40,15 +40,14 @@ describe("invite-service: ConsumeInviteError", () => {
 });
 
 describe("invite-service: ONBOARDING_STEPS", () => {
-  it("contains exactly 6 steps in expected order", () => {
-    assert.equal(ONBOARDING_STEPS.length, 6);
+  it("contains exactly 5 steps in expected order", () => {
+    assert.equal(ONBOARDING_STEPS.length, 5);
     assert.deepEqual([...ONBOARDING_STEPS], [
       "ai_consent",
       "first_content",
       "first_note",
       "first_card",
       "evidence_review",
-      "first_validation",
     ]);
   });
 

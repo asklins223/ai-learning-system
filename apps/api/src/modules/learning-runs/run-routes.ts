@@ -3,15 +3,7 @@
  *
  * 端点（全部 requireSession；RLS 上下文由 withWorkspaceTransaction 设置）：
  * - POST   /learning-runs                                 创建并 PREPARE Run
- * - GET    /learning-runs/:runId                          公共快照（ETag=revision）
  * - GET    /learning-runs/:runId/events                   SSE（Last-Event-ID 重放）
- * - PUT    /learning-runs/:runId/tasks/:taskId/draft      CAS 保存草稿
- * - DELETE /learning-runs/:runId/tasks/:taskId/draft      删除草稿
- * - POST   /learning-runs/:runId/tasks/:taskId/submissions 原子锁定 + 排队评估
- * - POST   /learning-runs/:runId/actions                  严格 action union
- * - GET    /learning-runs/:runId/result                   学习结算 / 202
- * - GET    /learning-runs/:runId/return-contract          返回持久语义
- * - POST   /learning-runs/:runId/activity-lease           §13.3 active time 续租
  *
  * 响应纪律（§13.1）：Action response 一律 Cache-Control: no-store；
  * Return Contract 一律 no-store；public snapshot 用 ETag/revision。
@@ -24,41 +16,30 @@ import { parseBody } from "../../lib/validate.ts";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import {
-  createLearningRunRequestSchema,
   learningTaskDraftSchema,
   learningTaskDraftWriteReceiptSchema,
-  learningRunActionRequestSchema,
-  putLearningTaskDraftRequestSchema,
   submitTaskArtifactReceiptSchema,
-  submitTaskArtifactSchema,
 } from "@ailearn/shared";
 import {
   applyAction,
-  createRun,
   createRunV2,
-  deleteDraft,
   getDraft,
   getEventsAfter,
-  getResultPayload,
   getResultPayloadV2,
-  getReturnContract,
   getReturnContractV2,
   getLearningRunPublicSnapshotV2,
   getLearningRunPublicSnapshotV2FromView,
-  getRunPublicView,
   recordActivityLease,
   putDraft,
   submitArtifact,
 } from "./run-service.ts";
-import {
-  createLearningRunV2RequestSchema,
-} from "@ailearn/shared";
+import { createLearningRunV2RequestSchema } from "@ailearn/shared";
 import { LearningRunServiceError } from "./run-errors.ts";
 import { safeSseWrite } from "../../lib/safe-sse-write.ts";
 import { companionRateLimit } from "../companion-conversation/companion-rate-limit.ts";
 // 方案 16 §20：学习漏斗埋点（服务端权威写入，尽力而为）。
-import { recordLearningMetric, recordLearningMetrics, type LearningMetricEventV1, type LearningMetricScope } from "../observability/learning-metrics.ts";
-import { isLearningRunV1Enabled } from "../../config/learning-companion-flags.ts";
+import { recordLearningMetric, insertLearningMetricEvent, type LearningMetricEventV1, type LearningMetricScope } from "../observability/learning-metrics.ts";
+import { isLearningRunEnabled } from "../../config/learning-companion-flags.ts";
 import {
   learningRunActionRequestV2Schema,
   learningRunActionResponseV2Schema,
@@ -110,18 +91,12 @@ function enqueueLearningMetric(
 
 const runParamsSchema = z.object({ runId: z.string().uuid() });
 const taskDraftParamsSchema = z.object({ runId: z.string().uuid(), taskId: z.string().uuid() });
-const activityLeaseBodySchema = z.object({
-  deviceSessionId: z.string().min(1).max(200),
-  startedAt: z.string().min(1),
-  endedAt: z.string().min(1),
-});
 
 type V2Snapshot = z.infer<typeof learningRunPublicSnapshotV2Schema>;
 
-// The V2 draft adapter persists the original runRevision inside the V1
-// service ledger. Keep that bridge schema API-internal: the public/shared V1
-// receipt remains strict and cannot silently grow V2 fields.
-const learningTaskDraftWriteReceiptV1AdapterSchema = learningTaskDraftWriteReceiptSchema.extend({
+// The service ledger receipt carries the original runRevision; the public
+// receipt stays strict and exposes the current V2 wire shape only.
+const learningTaskDraftWriteReceiptServiceSchema = learningTaskDraftWriteReceiptSchema.extend({
   runRevision: z.number().int().min(1).optional(),
 });
 
@@ -131,9 +106,9 @@ function requireV2SnapshotBinding(snapshot: V2Snapshot, snapshotId: string): voi
   }
 }
 
-function parseV1Adapter<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+function parseServiceValue<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
   const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new LearningRunServiceError("unsupported_contract", `${label} 不是 canonical V1 内部形状`, 409);
+  if (!parsed.success) throw new LearningRunServiceError("unsupported_contract", `${label} 不是 canonical service 形状`, 409);
   return parsed.data;
 }
 
@@ -175,6 +150,9 @@ const RUN_WRITE_LIMITS = {
   submitPerMinute: 60,
   actionPerMinute: 120,
   draftPerMinute: 120,
+  // M8（2026-08-24 审查）：activity-lease 每次调用都拿 run 行锁 + 两条 DELETE，
+  // 客户端正常节奏是每 15s 一次；此前无限流，高频调用可放大锁竞争与 DB 消耗。
+  leasePerMinute: 60,
 } as const;
 
 function runRateLimited(
@@ -197,12 +175,12 @@ function runRateLimited(
 }
 
 export async function learningRunRoutes(app: FastifyInstance) {
-  // learning_run_v1 capability 门控：Card/Review/Player/submission/consumer
-  // 同一次切换原子开启（§22.2）。未开启时本插件内全部端点 404 fail closed。
+  // LearningRun capability 门控：同一次切换原子开启（§22.2）。
+  // 未开启时全部端点 404 fail closed。
   app.addHook("onRequest", async (_req, reply) => {
-    if (!isLearningRunV1Enabled()) {
-            return reply.code(404).send({
-        error: "learning_run_v1_disabled",
+    if (!isLearningRunEnabled()) {
+      return reply.code(404).send({
+        error: "learning_run_disabled",
         message: "统一学习运行当前未开放",
       });
     }
@@ -215,70 +193,48 @@ export async function learningRunRoutes(app: FastifyInstance) {
   // POST /learning-runs — PREPARE：origin 解析 → 调度授权 → 确定性规划 → 原子写入。
   app.post("/learning-runs", { preHandler: [requireSession] }, async (req, reply) => {
     if (runRateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:run:create`, RUN_WRITE_LIMITS.createPerMinute, 60_000)) return;
-    // §16.3：请求体带 originV2 → V2 PREPARE 路径；否则 V1 origin 路径。
-    const raw = req.body as Record<string, unknown>;
-    if (raw && typeof raw === "object" && "originV2" in raw && (raw as { originV2?: unknown }).originV2 !== undefined) {
-      const body = parseBody(app, createLearningRunV2RequestSchema, req.body);
-      const req2 = body;
-      try {
-        const snapshot = await withWorkspaceTransaction(scopeOf(req), async (tx) => {
-          const result = await createRunV2(tx, {
-            workspaceId: req.session.workspaceId,
-            userId: req.session.userId,
-            request: req2,
-          });
-          return getLearningRunPublicSnapshotV2(tx, {
-            workspaceId: req.session.workspaceId,
-            userId: req.session.userId,
-            runId: result.runId,
-          });
-        });
-        // §16.1/§16.3：V2 创建与后续 GET 使用同一 public snapshot 形状；
-        // canonicalAnswer/scoringRubric/evidence/planningExposure 不出 server。
-        return reply.code(201).header("Cache-Control", "no-store").send(snapshot);
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
-        }
-        throw err;
-      }
-    }
-    const body = parseBody(app, createLearningRunRequestSchema, req.body);
+    const body = parseBody(app, createLearningRunV2RequestSchema, req.body);
     try {
-      const run = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-        createRun(tx, { workspaceId: req.session.workspaceId, userId: req.session.userId, request: body }),
-      );
-      // 方案 16 §20：funnel 第一层（origin×goal）+ 任务呈现（intent×interaction×
-      // purpose×trustClass 授权上限；非 active task 无 variant 信息，留空）。
-      // R8（round-3 审计）：原来每个任务逐条 recordLearningMetric（每事件 1 事务 +
-      // 1 RTT）；现在收集为数组、单事务批量写入（尽力而为，失败静默不阻塞主链路）。
-      const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
-      const activeTaskId = run.activeTask?.taskId ?? null;
-      const metricEvents = [
-        {
-          eventType: "run_created" as const,
-          runId: run.runId,
-          origin: run.origin,
-          goal: run.goal,
-        },
-        ...run.taskSummaries.map((task) => ({
-          eventType: "task_presented" as const,
-          runId: run.runId,
-          taskId: task.taskId,
-          intent: task.intent,
-          interactionKind: task.taskId === activeTaskId && run.activeTask
-            ? run.activeTask.activeVariant.interaction.kind
-            : undefined,
-          variantPurpose: task.taskId === activeTaskId && run.activeTask
-            ? run.activeTask.activeVariant.purpose
-            : undefined,
-          trustClass: task.taskId === activeTaskId && run.activeTask
-            ? run.activeTask.activeVariant.templateTrustCeiling
-            : undefined,
-        })),
-      ];
-      await recordLearningMetrics(scope, metricEvents);
-      return reply.code(201).header("Cache-Control", "no-store").send(run);
+      const snapshot = await withWorkspaceTransaction(scopeOf(req), async (tx) => {
+        const result = await createRunV2(tx, {
+          workspaceId: req.session.workspaceId,
+          userId: req.session.userId,
+          request: body,
+        });
+        const created = await getLearningRunPublicSnapshotV2(tx, {
+          workspaceId: req.session.workspaceId,
+          userId: req.session.userId,
+          runId: result.runId,
+        });
+        // §20 / 16.2 G2：run-routes create 必须写入 funnel 第一层两类事件
+        // （run_created = origin×goal；task_presented = intent×interaction.kind×
+        // variant.purpose×templateTrustCeiling）。此前只声明了事件类型却从未发射，
+        // funnel 第一层恒为空。这里在**创建事务内**写入（insertLearningMetricEvent
+        // 即为此提供）：201 返回即代表事件已持久化，避免 fire-and-forget 队列与断言/
+        // dashboard 竞争；每个 run 恒定两行，不构成 §20 背压顾虑。
+        await insertLearningMetricEvent(tx, scopeOf(req), {
+          eventType: "run_created",
+          runId: created.runId,
+          origin: body.originV2,
+          goal: body.goal,
+          activeSecondsUsed: body.requestedTimeBudgetSeconds,
+        });
+        if (created.activeTask) {
+          await insertLearningMetricEvent(tx, scopeOf(req), {
+            eventType: "task_presented",
+            runId: created.runId,
+            taskId: created.activeTask.taskId,
+            intent: created.activeTask.intent,
+            interactionKind: created.activeTask.activeVariant.interaction.kind,
+            variantPurpose: created.activeTask.activeVariant.purpose,
+            trustClass: created.activeTask.activeVariant.templateTrustCeiling,
+          });
+        }
+        return created;
+      });
+      // §16.1/§16.3：创建与后续 GET 使用同一 public snapshot 形状；
+      // canonicalAnswer/scoringRubric/evidence/planningExposure 不出 server。
+      return reply.code(201).header("Cache-Control", "no-store").send(snapshot);
     } catch (err) {
       if (err instanceof LearningRunServiceError) {
         return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
@@ -288,8 +244,6 @@ export async function learningRunRoutes(app: FastifyInstance) {
   });
 
   // ─── Explicit V2 wire endpoints ───────────────────────────────────────
-  // V1 endpoints above remain for compatibility, but the desktop client never
-  // consumes them. V2 requires the origin/snapshot/return-target binding.
   app.get<{ Params: { runId: string } }>(
     "/learning-runs/:runId/v2",
     { preHandler: [requireSession] },
@@ -304,8 +258,15 @@ export async function learningRunRoutes(app: FastifyInstance) {
             runId: params.data.runId,
           }),
         );
+        // L8（2026-08-24 审查）：ETag 必须可协商——此前只发不校验
+        // If-None-Match，每次全量 200（头形同虚设）。runRevision 是公开快照的
+        // 稳定版本号，未变即 304（与 projection-routes 的 ETag 写法一致）。
+        const etag = `"${snapshot.runRevision}"`;
+        if (req.headers["if-none-match"] === etag) {
+          return reply.code(304).header("ETag", etag).header("Cache-Control", "no-store").send();
+        }
         return reply
-          .header("ETag", `"${snapshot.runRevision}"`)
+          .header("ETag", etag)
           .header("Cache-Control", "no-store")
           .send(snapshot);
       } catch (err) {
@@ -395,7 +356,7 @@ export async function learningRunRoutes(app: FastifyInstance) {
               }
             },
           });
-          const parsed = parseV1Adapter(learningTaskDraftWriteReceiptV1AdapterSchema, raw, "draft receipt");
+          const parsed = parseServiceValue(learningTaskDraftWriteReceiptServiceSchema, raw, "draft receipt");
           return learningTaskDraftWriteReceiptV2Schema.parse({
             version: 2,
             runId: parsed.runId,
@@ -431,7 +392,7 @@ export async function learningRunRoutes(app: FastifyInstance) {
           const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scopeOf(req), runId: params.data.runId });
           const raw = await getDraft(tx, { ...scopeOf(req), runId: params.data.runId, taskId: params.data.taskId });
           if (raw === null) return null;
-          const parsed = parseV1Adapter(learningTaskDraftSchema, raw, "draft");
+          const parsed = parseServiceValue(learningTaskDraftSchema, raw, "draft");
           if (parsed.runId !== params.data.runId || parsed.taskId !== params.data.taskId) {
             throw new LearningRunServiceError("unsupported_contract", "draft scope 与 route 不一致", 409);
           }
@@ -476,7 +437,7 @@ export async function learningRunRoutes(app: FastifyInstance) {
             },
             requestContext: { version: 2, snapshotId: body.snapshotId },
           });
-          const parsed = parseV1Adapter(submitTaskArtifactReceiptSchema, raw, "artifact receipt");
+          const parsed = parseServiceValue(submitTaskArtifactReceiptSchema, raw, "artifact receipt");
           return submitTaskArtifactReceiptV2Schema.parse({ ...parsed, version: 2, snapshotId: snapshot.snapshotId });
         });
         enqueueLearningMetric(
@@ -550,6 +511,7 @@ export async function learningRunRoutes(app: FastifyInstance) {
     "/learning-runs/:runId/activity-lease/v2",
     { preHandler: [requireSession] },
     async (req, reply) => {
+      if (runRateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:run:lease`, RUN_WRITE_LIMITS.leasePerMinute, 60_000)) return;
       const params = runParamsSchema.safeParse(req.params);
       if (!params.success) throw app.httpErrors.badRequest("runId 非法");
       const body = parseBody(app, recordLearningRunActivityLeaseRequestV2Schema, req.body);
@@ -576,27 +538,6 @@ export async function learningRunRoutes(app: FastifyInstance) {
     },
   );
 
-  // GET /learning-runs/:runId — 公共快照；ETag=revision。
-  app.get<{ Params: { runId: string } }>(
-    "/learning-runs/:runId",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      const params = runParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
-      try {
-        const view = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          getRunPublicView(tx, { workspaceId: req.session.workspaceId, userId: req.session.userId, runId: params.data.runId }),
-        );
-        return reply.header("ETag", `"${view.revision}"`).send(view);
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
-        }
-        throw err;
-      }
-    },
-  );
-
   // GET /learning-runs/:runId/events — SSE；Last-Event-ID = 最后收到的 sequence。
   app.get<{ Params: { runId: string }; Querystring: { lastEventId?: string; snapshotId?: string } }>(
     "/learning-runs/:runId/events",
@@ -605,24 +546,18 @@ export async function learningRunRoutes(app: FastifyInstance) {
       const params = runParamsSchema.safeParse(req.params);
       if (!params.success) throw app.httpErrors.badRequest("runId 非法");
       const scope = scopeOf(req);
-      const snapshotId = req.query?.snapshotId;
-      if (snapshotId !== undefined) {
-        const parsedSnapshotId = z.string().uuid().safeParse(snapshotId);
-        if (!parsedSnapshotId.success) throw app.httpErrors.badRequest("snapshotId 非法");
-        try {
-          // V2 callers must prove the same public snapshot before the stream
-          // is hijacked. No snapshotId keeps the explicit V1 compatibility
-          // stream available, but it can never be used by the V2 gateway.
-          await withWorkspaceTransaction(scope, async (tx) => {
-            const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scope, runId: params.data.runId });
-            requireV2SnapshotBinding(snapshot, parsedSnapshotId.data);
-          });
-        } catch (err) {
-          if (err instanceof LearningRunServiceError) {
-            return reply.code(err.statusCode).send({ error: err.code, message: err.message });
-          }
-          throw err;
+      const parsedSnapshotId = z.string().uuid().safeParse(req.query?.snapshotId);
+      if (!parsedSnapshotId.success) throw app.httpErrors.badRequest("snapshotId 非法");
+      try {
+        await withWorkspaceTransaction(scope, async (tx) => {
+          const snapshot = await getLearningRunPublicSnapshotV2(tx, { ...scope, runId: params.data.runId });
+          requireV2SnapshotBinding(snapshot, parsedSnapshotId.data);
+        });
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) {
+          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
         }
+        throw err;
       }
       // Browser EventSource traditionally uses Last-Event-ID; query remains
       // supported for existing clients and deterministic integration probes.
@@ -657,7 +592,7 @@ export async function learningRunRoutes(app: FastifyInstance) {
       // socket 级错误（EPIPE/ECONNRESET）必须吞掉：未处理会冒泡为
       // unhandled error 并可能在 fastify 错误链产生 500。
       reply.raw.on("error", (err) => {
-        closed = true;
+        stopStream();
         req.log.warn({ err, runId: params.data.runId }, "sse: socket error");
       });
       // PERF-A#9：in-flight guard——DB poll 慢于 3s 时跳过本次 tick，防止
@@ -669,10 +604,18 @@ export async function learningRunRoutes(app: FastifyInstance) {
       const SSE_EVENTS_BATCH = 200; // 对齐 run-service.getEventsAfter 的 LIMIT 值
       const SSE_DRAIN_ROUNDS = 5;   // 单 tick 最多续读轮次，限制突发 drain 的峰值
       let interval: ReturnType<typeof setInterval> | null = null;
+      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+      const stopStream = (): void => {
+        if (closed) return;
+        closed = true;
+        if (interval) clearInterval(interval);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
+      };
       const schedulePoll = () => {
         if (interval) clearInterval(interval);
         interval = setInterval(pollEvents, pollIntervalMs);
-        interval.unref();
+        interval?.unref();
       };
       const pollEvents = async () => {
         if (closed || polling) return;
@@ -688,12 +631,21 @@ export async function learningRunRoutes(app: FastifyInstance) {
               getEventsAfter(tx, { ...scope, runId: params.data.runId, afterSequence: cursor }),
             );
             for (const event of events) {
-              cursor = event.sequence;
-              emittedAny = true;
               if (!closed) {
-                safeSseWrite(reply.raw, `id: ${event.sequence}\nevent: ${event.eventType}\ndata: ${JSON.stringify(event.payload)}\n\n`);
+                const accepted = safeSseWrite(
+                  reply.raw,
+                  `id: ${event.sequence}\nevent: ${event.eventType}\ndata: ${JSON.stringify(event.payload)}\n\n`,
+                );
+                if (!accepted) {
+                  // 不推进 cursor；客户端重连时从上一条确认过的事件继续，允许重复但不丢失。
+                  stopStream();
+                  break;
+                }
+                cursor = event.sequence;
+                emittedAny = true;
               }
             }
+            if (closed) break;
             if (events.length < SSE_EVENTS_BATCH) break;
           }
           // 空闲退避：无事件时逐步拉长轮询间隔（上限 30s），有事件立即恢复 3s。
@@ -707,283 +659,27 @@ export async function learningRunRoutes(app: FastifyInstance) {
             schedulePoll();
           }
         } catch (err) {
-          if (interval) clearInterval(interval);
-          if (!closed && !reply.raw.writableEnded) reply.raw.end();
+          stopStream();
           req.log.warn({ err }, "learning-run events stream error");
         } finally {
           polling = false;
         }
       };
       interval = setInterval(pollEvents, pollIntervalMs);
-      interval.unref();
+      interval?.unref();
       // PERF-B6 修复：加 15s heartbeat comment，防止 idle 长连接被代理空闲超时切断
       //（对齐 companion-events.ts 的保活写法）。
-      const heartbeatTimer = setInterval(() => {
+      heartbeatTimer = setInterval(() => {
         if (!closed) {
-          safeSseWrite(reply.raw, `: heartbeat ${Date.now()}\n\n`);
+          if (!safeSseWrite(reply.raw, `: heartbeat ${Date.now()}\n\n`)) stopStream();
         }
       }, 15_000);
-      heartbeatTimer.unref();
+      heartbeatTimer?.unref();
       reply.raw.on("close", () => {
-        closed = true;
-        if (interval) clearInterval(interval);
-        clearInterval(heartbeatTimer);
+        stopStream();
       });
       return reply;
     },
   );
 
-  // PUT /learning-runs/:runId/tasks/:taskId/draft — CAS/If-Match。
-  app.put<{ Params: { runId: string; taskId: string } }>(
-    "/learning-runs/:runId/tasks/:taskId/draft",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      const params = taskDraftParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("run/task id 非法");
-      const body = parseBody(app, putLearningTaskDraftRequestSchema, req.body);
-      try {
-        const draft = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          putDraft(tx, {
-            workspaceId: req.session.workspaceId,
-            userId: req.session.userId,
-            runId: params.data.runId,
-            taskId: params.data.taskId,
-            variantId: body.variantId,
-            variantRevision: body.variantRevision,
-            taskRevision: body.taskRevision,
-            expectedDraftRevision: body.expectedDraftRevision,
-            payload: body.payload,
-            rendererState: body.rendererState,
-            idempotencyKey: body.idempotencyKey,
-          }),
-        );
-        return reply.code(200).header("Cache-Control", "no-store").send(draft);
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // GET /learning-runs/:runId/tasks/:taskId/draft — 跨设备恢复（解密返回）。
-  app.get<{ Params: { runId: string; taskId: string } }>(
-    "/learning-runs/:runId/tasks/:taskId/draft",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      const params = taskDraftParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("run/task id 非法");
-      try {
-        const draft = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          getDraft(tx, { workspaceId: req.session.workspaceId, userId: req.session.userId, runId: params.data.runId, taskId: params.data.taskId }),
-        );
-        if (draft === null) {
-          return reply.code(404).send({ error: "draft_not_found", message: "没有已保存的草稿" });
-        }
-        return reply.header("Cache-Control", "no-store").send(draft);
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // DELETE /learning-runs/:runId/tasks/:taskId/draft
-  app.delete<{ Params: { runId: string; taskId: string } }>(
-    "/learning-runs/:runId/tasks/:taskId/draft",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      const params = taskDraftParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("run/task id 非法");
-      try {
-        await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          deleteDraft(tx, { workspaceId: req.session.workspaceId, userId: req.session.userId, runId: params.data.runId, taskId: params.data.taskId }),
-        );
-        return reply.code(204).send();
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // POST /learning-runs/:runId/tasks/:taskId/submissions — 原子锁定 + 排队评估。
-  app.post<{ Params: { runId: string; taskId: string } }>(
-    "/learning-runs/:runId/tasks/:taskId/submissions",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      if (runRateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:run:submit`, RUN_WRITE_LIMITS.submitPerMinute, 60_000)) return;
-      const params = taskDraftParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("run/task id 非法");
-      const body = parseBody(app, submitTaskArtifactSchema, req.body);
-      try {
-        const receipt = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          submitArtifact(tx, {
-            workspaceId: req.session.workspaceId,
-            userId: req.session.userId,
-            runId: params.data.runId,
-            taskId: params.data.taskId,
-            request: body,
-          }),
-        );
-        // 方案 16 §20：task_presented → artifact_locked 转化（receipt 不含 variant
-        // purpose；变体维度以 task_presented 的授权上限为准）。
-        // F7（round-4）：此热路径每次请求只发 1 条事件（无“同请求多处埋点”可合并），
-        // 故不再 await 阻塞 response（原在 reply.send 前加一个独立事务 RTT + 占用
-        // 连接池 slot）。改为 fire-and-forget：recordLearningMetric 内部已 try/catch
-        // 静默失败，void 不会产生 unhandled rejection，语义与 run-create 的尽力而为一致。
-        // PERF-A#10：经有界队列（在途/排队上限 + 溢出丢弃）加背压，防高流量堆积。
-        enqueueLearningMetric(
-          { workspaceId: req.session.workspaceId, userId: req.session.userId },
-          {
-            eventType: "artifact_locked",
-            runId: params.data.runId,
-            taskId: params.data.taskId,
-          },
-        );
-        return reply.code(202).header("Cache-Control", "no-store").send(receipt);
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // POST /learning-runs/:runId/actions — 严格 action union。
-  app.post<{ Params: { runId: string } }>(
-    "/learning-runs/:runId/actions",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      if (runRateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:run:action`, RUN_WRITE_LIMITS.actionPerMinute, 60_000)) return;
-      const params = runParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
-      const body = parseBody(app, learningRunActionRequestSchema, req.body);
-      try {
-        const result = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          applyAction(tx, {
-            workspaceId: req.session.workspaceId,
-            userId: req.session.userId,
-            runId: params.data.runId,
-            runRevision: body.runRevision,
-            runtimeEpoch: body.runtimeEpoch,
-            taskRevision: body.taskRevision,
-            action: body.action,
-            idempotencyKey: body.idempotencyKey,
-          }),
-        );
-        // 方案 16 §20：行为 funnel（hint 曝光/变体切换/skip/pause 等）。
-        const actionKind = result.hint
-          ? "hint_revealed"
-          : result.previousVariantId !== undefined
-            ? "variant_switched"
-            : body.action.kind;
-        // F7（round-4）：同 artifact_locked，每次请求仅 1 条事件，改 fire-and-forget
-        // 释放 response 前的连接池 slot（recordLearningMetric 内部静默吞错，void 安全）。
-        // PERF-A#10：经有界队列（在途/排队上限 + 溢出丢弃）加背压，防高流量堆积。
-        enqueueLearningMetric(
-          { workspaceId: req.session.workspaceId, userId: req.session.userId },
-          {
-            eventType: "action",
-            runId: params.data.runId,
-            taskId: result.snapshot.activeTask?.taskId ?? undefined,
-            actionKind,
-            variantPurpose: result.hint ? `hint_level_${result.hint.level}` : undefined,
-          },
-        );
-        return reply.code(200).header("Cache-Control", "no-store").send({
-          version: 1,
-          acceptedActionId: result.acceptedActionId,
-          actionResult: result.hint
-            ? { kind: "hint_revealed", ...result.hint, resultingTrustCeiling: "practice_only" }
-            : result.previousVariantId !== undefined
-              ? { kind: "variant_switched", previousVariantId: result.previousVariantId, activeVariantId: result.activeVariantId }
-              : { kind: "state_changed" },
-          snapshot: result.snapshot,
-        });
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // GET /learning-runs/:runId/result — 学习结算 / 202。
-  app.get<{ Params: { runId: string } }>(
-    "/learning-runs/:runId/result",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      const params = runParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
-      try {
-        const result = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          getResultPayload(tx, { workspaceId: req.session.workspaceId, userId: req.session.userId, runId: params.data.runId }),
-        );
-        return reply.code(result.httpStatus).header("Cache-Control", "no-store").send(result);
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // GET /learning-runs/:runId/return-contract — 返回持久语义。
-  app.get<{ Params: { runId: string } }>(
-    "/learning-runs/:runId/return-contract",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      const params = runParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
-      try {
-        const contract = await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          getReturnContract(tx, { workspaceId: req.session.workspaceId, userId: req.session.userId, runId: params.data.runId }),
-        );
-        return reply.header("Cache-Control", "no-store").send(contract);
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // POST /learning-runs/:runId/activity-lease — §13.3 每 15 秒续租。
-  app.post<{ Params: { runId: string } }>(
-    "/learning-runs/:runId/activity-lease",
-    { preHandler: [requireSession] },
-    async (req, reply) => {
-      const params = runParamsSchema.safeParse(req.params);
-      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
-      const body = parseBody(app, activityLeaseBodySchema, req.body);
-      try {
-        await withWorkspaceTransaction(scopeOf(req), async (tx) =>
-          recordActivityLease(tx, {
-            workspaceId: req.session.workspaceId,
-            userId: req.session.userId,
-            runId: params.data.runId,
-            deviceSessionId: body.deviceSessionId,
-            startedAt: body.startedAt,
-            endedAt: body.endedAt,
-          }),
-        );
-        return reply.code(204).header("Cache-Control", "no-store").send();
-      } catch (err) {
-        if (err instanceof LearningRunServiceError) {
-          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
-        }
-        throw err;
-      }
-    },
-  );
 }

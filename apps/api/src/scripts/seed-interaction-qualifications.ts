@@ -4,9 +4,11 @@
  * 按 V1 首发上限表标注已审批 ceiling：
  * - open_text / open_voice → mastery_eligible（intent-specific rubric Gold 通过）；
  * - ordering / relation / repair → facet_eligible（各 family 独立 qualification 通过）；
- * - scenario / choice_with_rationale → diagnostic_only（V1 不升 formal）；
  * - structured_bundle → 不标注（缺 bundleQualificationId 批准，恒 practice——
  *   §12.6：包含未批准 part 的 bundle 绝不能绕过 §7.7 上限）。
+ *
+ * scenario / choice_with_rationale 已从公共合同删除（planner 永不生成），
+ * 不再播种对应 qualification。
  *
  * 指标为标注批次统计值（datasetVersion/rubricSetHash/仲裁版本固定；holdout
  * 重跑 Gate 通过后不得降低 ceiling，只能提升或保持）。
@@ -29,7 +31,7 @@ const ADJUDICATION_VERSION = "adjudication-v1";
 
 interface QualificationSeed {
   qualificationId: string;
-  family: "open_text" | "open_voice" | "ordering" | "relation" | "repair" | "scenario" | "choice_with_rationale";
+  family: "open_text" | "open_voice" | "ordering" | "relation" | "repair";
   sampleSize: number;
   adversarialSampleSize: number;
   annotatorCount: number;
@@ -89,24 +91,6 @@ const SEEDS: QualificationSeed[] = [
     annotatorCount: 2,
     approvedCeiling: "facet_eligible",
     metrics: { falseUpgradeRate: 0, falseDowngradeRate: 0.011, abstainRate: 0.02, interRaterAgreement: 0.85 },
-  },
-  {
-    qualificationId: "qual-scenario-diagnostic-2026-08",
-    family: "scenario",
-    sampleSize: 100,
-    adversarialSampleSize: 25,
-    annotatorCount: 2,
-    approvedCeiling: "diagnostic_only",
-    metrics: { falseUpgradeRate: 0, falseDowngradeRate: 0.005, abstainRate: 0.01, interRaterAgreement: 0.9 },
-  },
-  {
-    qualificationId: "qual-choice-rationale-diagnostic-2026-08",
-    family: "choice_with_rationale",
-    sampleSize: 100,
-    adversarialSampleSize: 25,
-    annotatorCount: 2,
-    approvedCeiling: "diagnostic_only",
-    metrics: { falseUpgradeRate: 0, falseDowngradeRate: 0.005, abstainRate: 0.012, interRaterAgreement: 0.9 },
   },
 ];
 

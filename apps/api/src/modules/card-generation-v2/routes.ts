@@ -50,11 +50,13 @@ import {
   createGenerationRunV2,
   getGenerationRunV2,
   listActiveGenerationRunsV2,
+  getLatestGenerationRunForNoteV2,
   getGenerationRunPlanV2,
   getGenerationRunCandidatesV2,
   getGenerationRunEventsV2,
   closeGenerationRunV2,
   cancelGenerationRunV2,
+  retryGenerationRunV2,
 } from "./generation-run-service.ts";
 import { getCandidateExposureEligibilityV2, revealCandidateV2 } from "./reveal-service.ts";
 import { handleCandidateActionV2 } from "./candidate-review-service.ts";
@@ -64,6 +66,7 @@ import {
   NO_STORE,
   type RunContext,
 } from "./helpers.ts";
+import { safeSseWrite } from "../../lib/safe-sse-write.ts";
 // 2026-08-24（§4.4 第二批复查）：shared 纯逻辑层抛的是父类
 // CardGenerationPipelineErrorV2（如 filterBlocksBySourceScope 的选区越界），
 // 错误边界必须检查父类才能同时接住 IO 壳（ServiceError 子类）与纯逻辑层
@@ -77,6 +80,7 @@ import {
   projectCardGenerationCandidatesV1,
   projectCardGenerationActiveSummaryListV1,
   projectCardGenerationCancelResultV1,
+  projectCardGenerationRetryResultV1,
   projectCardGenerationCloseResultV1,
   projectCardGenerationJobAcceptedV1,
   projectCardGenerationReviewResultV1,
@@ -144,6 +148,22 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
     try {
       const runs = await listActiveGenerationRunsV2(context(req));
       return projectCardGenerationActiveSummaryListV1(runs);
+    } catch (error) {
+      return sendServiceError(reply, error);
+    }
+  });
+
+  // ─── GET /v2/notes/:noteId/card-generation-runs/latest ─ 最近一次生成 ───
+  // 笔记页用它给"按反馈重新生成"找到要回应的那次运行；没有记录时 404。
+  app.get<{ Params: { noteId: string } }>("/v2/notes/:noteId/card-generation-runs/latest", { preHandler: [requireOwner] }, async (req, reply) => {
+    reply.headers(NO_STORE);
+    if (!uuidParamSchema.safeParse({ id: req.params.noteId }).success) {
+      return reply.code(400).send({ error: "invalid_id", message: "无效的 noteId 格式" });
+    }
+    try {
+      const run = await getLatestGenerationRunForNoteV2(context(req), req.params.noteId);
+      if (!run) return reply.code(404).send({ error: "run_not_found", message: "这篇笔记还没有生成记录" });
+      return parseCardGenerationRunServerViewV2(run);
     } catch (error) {
       return sendServiceError(reply, error);
     }
@@ -254,58 +274,82 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       return reply.code(400).send({ error: "invalid_last_event_id", message: "无效的 Last-Event-ID" });
     }
+    reply.hijack();
+    if (reply.raw.writableEnded || reply.raw.destroyed) return reply;
     // SSE headers
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-store",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    });
+    try {
+      reply.raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+    } catch (error) {
+      req.log.warn({ error, runId: req.params.runId }, "card generation SSE writeHead failed");
+      if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
+      return reply;
+    }
     let lastSeq = afterSequence;
     const runId = req.params.runId;
     const ctx = context(req);
-    // Send initial comment
-    reply.raw.write(`: connected\n\n`);
     let closed = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    const stopStream = (): void => {
+      if (closed) return;
+      closed = true;
+      if (interval) clearInterval(interval);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
+    };
+    // Send initial comment
+    if (!safeSseWrite(reply.raw, ": connected\n\n")) {
+      stopStream();
+      return reply;
+    }
     // B6（round-3 审计）：socket 级错误（EPIPE/ECONNRESET）必须吞掉——未处理会
     // 冒泡为 unhandled error 并可能在 fastify 错误链产生 500（对齐 run-routes.ts）。
     reply.raw.on("error", (err) => {
-      closed = true;
+      stopStream();
       req.log.warn({ err, runId }, "sse: socket error");
     });
     // Poll for new events
-    const interval = setInterval(async () => {
+    interval = setInterval(async () => {
       try {
         const events = await getGenerationRunEventsV2(ctx, runId, lastSeq);
         for (const e of events) {
           // B6：轮询写也要受 writableEnded 守卫（原只查 closed）——断开竞态窗口下
           // 向已结束的 socket 写可能触发 EPIPE unhandled。
           if (closed || reply.raw.writableEnded) return;
-          reply.raw.write(`id: ${e.eventSeq}\n`);
-          reply.raw.write(`event: ${e.eventType}\n`);
-          reply.raw.write(`data: ${JSON.stringify(e)}\n\n`);
+          const accepted = safeSseWrite(
+            reply.raw,
+            `id: ${e.eventSeq}\nevent: ${e.eventType}\ndata: ${JSON.stringify(e)}\n\n`,
+          );
+          if (!accepted) {
+            // 不推进 lastSeq；客户端重连时从上一条确认过的事件继续。
+            stopStream();
+            return;
+          }
           lastSeq = e.eventSeq;
         }
       } catch {
         // Silently skip errors, client will reconnect
       }
     }, 2000);
-    interval.unref();
+    interval?.unref();
     // PERF-B6/N4 修复：加 15s heartbeat comment，防止 idle 长连接被代理空闲超时
     // 端到端切断（对齐 companion-events.ts 的保活写法）。
-    const heartbeatTimer = setInterval(() => {
+    heartbeatTimer = setInterval(() => {
       if (!closed && !reply.raw.writableEnded) {
-        reply.raw.write(`: heartbeat ${Date.now()}\n\n`);
+        if (!safeSseWrite(reply.raw, `: heartbeat ${Date.now()}\n\n`)) stopStream();
       }
     }, 15_000);
-    heartbeatTimer.unref();
+    heartbeatTimer?.unref();
     // Clean up on disconnect
     req.raw.on("close", () => {
-      closed = true;
-      clearInterval(interval);
-      clearInterval(heartbeatTimer);
-      if (!reply.raw.writableEnded) reply.raw.end();
+      stopStream();
     });
+    return reply;
   });
 
   // ─── POST /v2/card-generation-runs/:runId/cancel ─ 取消运行 ────────────
@@ -343,6 +387,30 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
         const result = await closeGenerationRunV2(context(req), req.params.runId, body.expectedReviewDraftRevision);
         if (!result) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
         return projectCardGenerationCloseResultV1(result);
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  // ─── POST /v2/card-generation-runs/:runId/retry ─ 就地重试 ──────────────
+  // 唯一候选被 critic 否决的 run 会终态化为 needs_attention，且没有候选可审核。
+  // 此前用户只能回笔记重开一次全新生成（重付 planner + 全部 critic 的 token）；
+  // 这个端点在**同一条 run** 上派发一次重规划，复用已封存的来源与输入快照。
+  // 守卫在 service 内独立校验（状态 / 失败码 / 来源新鲜度 / 在飞行任务），
+  // 与恢复投影是否签发该动作无关——投影只是 UI 提示，不构成授权。
+  app.post<{ Params: { runId: string } }>(
+    "/v2/card-generation-runs/:runId/retry",
+    { preHandler: [requireOwner] },
+    async (req, reply) => {
+      reply.headers(NO_STORE);
+      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
+        return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
+      }
+      try {
+        const result = await retryGenerationRunV2(context(req), req.params.runId);
+        if (!result) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
+        return projectCardGenerationRetryResultV1(result);
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -419,29 +487,6 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       }
       const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body);
       // 确保 URL 中的 runId 与 body 中的一致
-      if (body.runId !== req.params.runId) {
-        return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
-      }
-      const idempotencyKey = requireIdempotencyKey(req);
-      try {
-        const receipt = await activateCardCandidatesV2(context(req), body, idempotencyKey);
-        return reply.code(200).send(parseCardActivationReceiptV2(receipt));
-      } catch (error) {
-        return sendServiceError(reply, error);
-      }
-    },
-  );
-
-  // ─── POST /v2/card-generation-runs/:runId/activations ─ §17.1 复数别名 ──
-  app.post<{ Params: { runId: string } }>(
-    "/v2/card-generation-runs/:runId/activations",
-    { preHandler: [requireOwner] },
-    async (req, reply) => {
-      reply.headers(NO_STORE);
-      if (!uuidParamSchema.safeParse({ id: req.params.runId }).success) {
-        return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
-      }
-      const body = parseBody(app, activateCardCandidatesRequestV2Schema, req.body);
       if (body.runId !== req.params.runId) {
         return reply.code(400).send({ error: "run_id_mismatch", message: "URL 中的 runId 与请求体不一致" });
       }

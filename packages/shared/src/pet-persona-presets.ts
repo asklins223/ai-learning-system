@@ -3,7 +3,7 @@
  *
  * PRD §11.9 建议在 packages/shared/src/pet-persona-presets.ts 固化 5 套 JSON seed，
  * 作为 api 与 worker 共享的唯一来源。此前预设直接写死在 pet-profile-service.ts
- * 内部，本文件将其提升到 shared 包，pet-profile-service.ts 改为 re-export。
+ * 内部，本文件是 shared 包中的 canonical persona preset 定义。
  *
  * 每套预设包含：presetId、name、personalityTags、speakingStyle、examples、
  * activeness、boundaries——与 PetPersonaPreset 接口一致。

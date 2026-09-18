@@ -65,7 +65,7 @@ export interface RcGateInputV2 {
 }
 
 export interface RcGateResultV2 {
-  contentGates: Record<string, { actual: number; threshold: number; passed: boolean }>;
+  contentGates: Record<string, { actual: number; threshold: number; passed: boolean; applicable?: boolean }>;
   hardGates: Record<string, { actual: number; threshold: number; passed: boolean }>;
   microBucketPassed: boolean;
   /**
@@ -115,19 +115,36 @@ export function evaluateRcGateV2(input: RcGateInputV2): RcGateResultV2 {
   };
 
   // 零卡 precision/recall
+  //
+  // 2026-09-18（评测可读性修复）：此前用 `length || 1` 兜底分母，池子里没有零卡
+  // fixture 时得到 0/1=0.000 并打印 ❌ —— 这是 **0/0 产生的假失败**，会让人误以为
+  // "零卡行为坏了"（本轮 v18 验证就踩过：那次抽样恰好在 validation/holdout 里没有
+  // 零卡样本，报告却给出 0.000 FAIL）。没有可判定的样本时标记 applicable=false：
+  // 不计入 overallPassed，打印 N/A。
   const zeroCardFixtureSet = new Set(input.zeroCardFixtureIds);
   const truePositive = input.zeroCardPredictedIds.filter((id) => zeroCardFixtureSet.has(id)).length;
+  const hasZeroGold = input.zeroCardFixtureIds.length > 0;
+  const hasZeroPrediction = input.zeroCardPredictedIds.length > 0;
+  // precision 需要"有预测"才有定义；recall 需要"有 gold 零卡"才有定义。
+  const precisionApplicable = hasZeroPrediction;
+  const recallApplicable = hasZeroGold;
   const predicted = input.zeroCardPredictedIds.length || 1;
   const gold = input.zeroCardFixtureIds.length || 1;
   content.zeroCardPrecision = {
-    actual: truePositive / predicted,
+    actual: precisionApplicable ? truePositive / predicted : 0,
     threshold: CONTENT_QUALITY_GATES_V2.zeroCardPrecision,
-    passed: truePositive / predicted >= CONTENT_QUALITY_GATES_V2.zeroCardPrecision,
+    passed: precisionApplicable
+      ? truePositive / predicted >= CONTENT_QUALITY_GATES_V2.zeroCardPrecision
+      : true,
+    applicable: precisionApplicable,
   };
   content.zeroCardRecall = {
-    actual: truePositive / gold,
+    actual: recallApplicable ? truePositive / gold : 0,
     threshold: CONTENT_QUALITY_GATES_V2.zeroCardRecall,
-    passed: truePositive / gold >= CONTENT_QUALITY_GATES_V2.zeroCardRecall,
+    passed: recallApplicable
+      ? truePositive / gold >= CONTENT_QUALITY_GATES_V2.zeroCardRecall
+      : true,
+    applicable: recallApplicable,
   };
 
   const hard: RcGateResultV2["hardGates"] = {};

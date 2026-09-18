@@ -1,5 +1,5 @@
 /**
- * P5 §9 固定测试：0092 companion_action_bridge 迁移 + RLS。
+ * P5 §9 固定测试：companion_action_bridge 迁移 + RLS。
  * - 表结构/唯一索引（single pending per conversation、decision key 幂等）；
  * - turn_runs 的 frozen router decision 字段；
  * - RLS：ailearn_worker 非 superuser 无 context 零行（FORCE RLS）；
@@ -16,15 +16,14 @@ const sql = postgres(CONN, { max: 2 });
 
 after(() => sql.end({ timeout: 2 }));
 
-test("0092：action 表/索引/run 字段存在", async () => {
+test("action proposal 表/索引与 turn router 字段存在", async () => {
   const cols = await sql`
     SELECT table_name, column_name
     FROM information_schema.columns
     WHERE table_schema = 'public'
-      AND table_name IN ('companion_action_proposals', 'companion_action_runs')
+      AND table_name = 'companion_action_proposals'
     ORDER BY table_name, ordinal_position`;
   const proposalCols = cols.filter((c) => c.table_name === "companion_action_proposals").map((c) => c.column_name);
-  const runCols = cols.filter((c) => c.table_name === "companion_action_runs").map((c) => c.column_name);
   for (const c of [
     "id", "workspace_id", "user_id", "conversation_id", "payload", "payload_sha256",
     "status", "decision", "decision_key_hash", "idempotency_key_hash", "expires_at",
@@ -32,10 +31,6 @@ test("0092：action 表/索引/run 字段存在", async () => {
   ]) {
     assert.ok(proposalCols.includes(c), `proposals 缺列 ${c}`);
   }
-  for (const c of ["id", "proposal_id", "status", "result_ref", "route", "safe_summary", "job_id"]) {
-    assert.ok(runCols.includes(c), `runs 缺列 ${c}`);
-  }
-
   const singlePending = await sql`
     SELECT indexdef FROM pg_indexes
     WHERE tablename = 'companion_action_proposals'
@@ -116,8 +111,6 @@ test("0092：proposals 单一 pending（同 conversation 第二条 pending 冲�
     await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
       await tx`SELECT set_config('app.user_id', ${uid}, true)`;
-      await tx`UPDATE companion_action_proposals SET action_run_id = NULL WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_messages WHERE conversation_id = ${cid}`;
       await tx`DELETE FROM companion_conversations WHERE id = ${cid}`;

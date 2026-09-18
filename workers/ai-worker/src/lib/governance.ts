@@ -6,16 +6,16 @@
  * 2. sendToExternal 门禁 — sendToExternal=false 时拒绝向外部 provider 发送数据
  * 3. PII 检测 — 发送前检测和脱敏 PII（邮箱、手机号、身份证号等）
  * 4. 审计日志 — 每次 AI 调用写入 ai_audit_log 表，支持隐私追溯
- * 5. Provider 选择 — 个人配置优先，其次 workspace，最后回退到全局环境变量
+ * 5. Provider 选择 — 统一读取 config/ai-platforms.json
  */
 
 import { eq } from "drizzle-orm";
-import { safeErrorMessage, resolveLegacyProviderConfig, DomainError } from "@ailearn/shared";
+import { safeErrorMessage, DomainError, AI_CONSENT_REQUIRED_CODE } from "@ailearn/shared";
 import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import type { AITaskType } from "@ailearn/shared/task-router";
 import { getCapabilityForTask, getTaskComplexity } from "@ailearn/shared/task-router";
 import { db } from "../db.ts";
-import * as schema from "../schema/index.ts";
+import * as schema from "@ailearn/shared/db-schema";
 import { logger } from "./logger.ts";
 
 /**
@@ -27,11 +27,51 @@ import { logger } from "./logger.ts";
  * user content in `jobs.last_error`.
  */
 export class AIConsentRequiredError extends DomainError {
-  readonly code = "ai_consent_required";
+  // 设计 P1-15（2026-09-15 审计）：机器码取共享常量，与 API 侧分类器同源，
+  // 避免两侧各自写字符串字面量导致改名后分类静默失效。
+  readonly code = AI_CONSENT_REQUIRED_CODE;
 
   constructor() {
-    super({ name: "AIConsentRequiredError", code: "ai_consent_required", message: "AI consent not signed for this workspace", statusCode: 403 });
+    super({ name: "AIConsentRequiredError", code: AI_CONSENT_REQUIRED_CODE, message: "AI consent not signed for this workspace", statusCode: 403 });
   }
+}
+
+/** A workspace policy rejected the data before it reached a provider. */
+export class AIDataPolicyDeniedError extends DomainError {
+  readonly code = "ai_data_policy_denied";
+
+  constructor(reason: string) {
+    super({ name: "AIDataPolicyDeniedError", code: "ai_data_policy_denied", message: reason, statusCode: 403 });
+  }
+}
+
+/**
+ * AI P0-1（2026-09-15 审计）：`AI_REQUIRE_CONFIGURED_PROVIDER=true` 时，系统级
+ * provider 未配置（会回退 mock）视为**配置错误**而非可降级状态——mock 会产出固定
+ * 假文本并可能作为学习记录落库。不可重试：重试不会让缺失的 key 出现。
+ */
+export class AIProviderNotConfiguredError extends DomainError {
+  readonly code = "ai_provider_not_configured";
+
+  constructor(capability: string) {
+    super({
+      name: "AIProviderNotConfiguredError",
+      code: "ai_provider_not_configured",
+      message: `AI provider for capability "${capability}" is not configured (mock fallback refused)`,
+      statusCode: 503,
+    });
+  }
+}
+
+/**
+ * 是否要求"必须解析到真实 provider"（拒绝 mock 回退）。
+ *
+ * 默认 false（保持既有行为：dev/桌面/离线可继续用 mock）；生产 compose 显式设为 true。
+ */
+export function isConfiguredProviderRequired(
+  raw: string | undefined = process.env.AI_REQUIRE_CONFIGURED_PROVIDER,
+): boolean {
+  return raw === "true";
 }
 
 export interface WorkspaceAIPolicy {
@@ -92,8 +132,7 @@ export interface AIGovernanceContext {
   providerConfig: import("./ai-provider.ts").AIProviderRuntimeConfig;
   /** 独立的文本生成（轻量任务）provider 配置。
    * 当系统配置中 text_generation 映射到不同于 agent_turn 的平台时,
-   * 此字段持有该平台配置,用于 evaluate_validation / generate_question /
-   * evaluate_rubric 等低复杂度任务,以便使用更便宜的模型。
+   * 此字段持有该平台配置,用于低复杂度文本生成任务,以便使用更便宜的模型。
    * 当未单独配置时为 null,回退到 providerName/providerConfig。 */
   textProviderName: string | null;
   textProviderConfig: import("./ai-provider.ts").AIProviderRuntimeConfig | null;
@@ -179,36 +218,13 @@ export function resolveProviderForTask(
   return { providerName: ctx.providerName, providerConfig: ctx.providerConfig };
 }
 
-/**
- * 为指定 provider 名称解析连接配置（config/ai-platforms.json 类型匹配 → legacy env 回退）。
- *
- * 供 agent run/prepare 阶段的 providerSnapshot 对账使用：
- * 当冻结的 snapshot 名与当前治理上下文 provider 不一致时，按 snapshot 名重新解析配置，
- * 避免用治理上下文中另一个 provider 的 config 配 snapshot 名（跨 provider 混配）。
- *
- * v0.6 单一配置源重构：workspace pin 分支已删除，仅保留系统平台 + legacy env 回退。
- */
-export function resolveProviderConfigForName(providerName: string): import("./ai-provider.ts").AIProviderRuntimeConfig {
-  const platform = resolveSystemPlatform("agent_turn");
-  if (platform && platform.type.toLowerCase() === providerName.toLowerCase()) {
-    return {
-      apiKey: platform.apiKey,
-      baseUrl: platform.baseUrl,
-      model: platform.model,
-      visionModel: platform.visionModel,
-      options: platform.options,
-    };
-  }
-  return resolveLegacyProviderConfig(providerName) ?? {};
-}
-
 export async function resolveAIGovernanceContext(
   workspaceId: string,
   _userId: string | null,
 ): Promise<AIGovernanceContext> {
   // v0.6 单一配置源重构：不再查 personal BYOK，平台解析完全收敛到
   // config/ai-platforms.json。仍查 workspaces 获取 policy/consent。
-    const ws = await db.query.workspaces.findFirst({
+  const ws = await db.query.workspaces.findFirst({
     where: eq(schema.workspaces.id, workspaceId),
   });
 
@@ -226,17 +242,32 @@ export async function resolveAIGovernanceContext(
       options: agentPlatform.options,
     };
   } else {
-    providerName = (process.env.AI_PROVIDER_CARD ?? "mock").toLowerCase();
+    providerName = "mock";
     // §2.3 mock 静默回退告警：系统平台未配置（apiKey 缺失/含未解析 ${VAR}）。
     // 若不告警，生产链路会照常运行但产出固定假文本，用户与日志无法区分。
     logger.warn(
       {
         workspaceId,
         capability: "agent_turn",
-        fallback: providerName,
+        provider: providerName,
       },
-      "agent_turn 平台未配置，回退到默认 provider（mock 输出为固定假文本）",
+      "agent_turn 平台未配置，使用 mock provider（输出为固定假文本）",
     );
+    // AI P0-1（2026-09-15 审计）：mock 产出固定假文本（"我在这里，准备好陪你学习了。"）
+    // 与空工具调用，而伴星链路（dialogue/extractor/summarizer）只查 consent、不拒 mock
+    // ——假文本会作为"记忆/回复"落库（V2 制卡路径是 fail-closed 的，伴星不是）。
+    //
+    // 这里用一个**显式**开关而不是 NODE_ENV 推断：桌面端/离线场景可能以 production
+    // 模式运行且**故意**不配 AI，按 NODE_ENV 一刀切会把那些场景直接打死。生产 compose
+    // 显式打开该开关 → 未配置就 fail-closed（抛不可重试错误，用户看到"AI 未配置"），
+    // 而不是把编造内容写进学习记录。
+    if (isConfiguredProviderRequired()) {
+      logger.error(
+        { workspaceId, capability: "agent_turn" },
+        "AI_REQUIRE_CONFIGURED_PROVIDER=true 且 agent_turn 平台未配置：fail-closed（拒绝 mock 回退）",
+      );
+      throw new AIProviderNotConfiguredError("agent_turn");
+    }
   }
 
   // vision — 独立系统级视觉平台（未配置时回退到主 provider）
@@ -520,6 +551,215 @@ export function enforcePrivacyGovernanceWithPolicy(
   }
 
   return { allowed: true, sanitizedData, piiDetectedTypes };
+}
+
+function containsImageContent(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => containsImageContent(item, depth + 1));
+  const record = value as Record<string, unknown>;
+  if (record.type === "image" || "image_url" in record || "imageUrl" in record) return true;
+  return Object.values(record).some((item) => containsImageContent(item, depth + 1));
+}
+
+function governedPayload(
+  context: Pick<AIGovernanceContext, "consentOk" | "policy">,
+  workspaceId: string,
+  providerName: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!context.consentOk && providerName.toLowerCase() !== "mock") {
+    throw new AIConsentRequiredError();
+  }
+  const categories = ["text_content"];
+  if (containsImageContent(payload)) categories.push("image_content");
+  const result = enforcePrivacyGovernanceWithPolicy(
+    context.policy,
+    workspaceId,
+    categories,
+    payload,
+    providerName,
+  );
+  if (!result.allowed) throw new AIDataPolicyDeniedError(result.reason ?? "AI data policy denied the request");
+  return result.sanitizedData;
+}
+
+/**
+ * Enforce workspace governance at the provider boundary.  Handlers may still
+ * resolve consent earlier for better UX, but every actual external call goes
+ * through this wrapper so policy flags cannot become decorative metadata.
+ *
+ * AI P0-12（2026-09-15 审计）核对结论：审计认为"只包 chat/stream/agent/embed，
+ * 漏了 rerank → 一旦接线就绕过 consent/PII 门"。实际**不可达**，原因有二：
+ *   1. 各 provider 是 class，方法在**原型**上；`{ ...provider }` 只复制自有可枚举
+ *      属性（如 embeddingModelId），原型方法不会被带过来——所以经治理包装后的实例
+ *      上根本没有 rerank 方法，调不到（embed/chatCompletion 是显式赋值才存在的）。
+ *   2. rerank 在 config/ai-platforms.json 里没有能力映射，也没有任何
+ *      createCapabilityProvider(…, "rerank") 调用点。
+ * 因此这里**不**为不可达路径新增包装（AGENTS.md：不为没有调用点的能力新增抽象）。
+ * 若将来真的接线 rerank，必须同时：把该方法显式包装进治理 + 在 config 中登记映射。
+ * 特别注意：**不要把 provider 方法改成箭头函数实例字段**，那会让 rerank 随
+ * `...provider` 一起泄漏出去，从而真的绕过治理门。
+ */
+/**
+ * 审计上下文（AI P0-8，2026-09-15 审计）。
+ *
+ * `logAICall` 是 `ai_audit_log` 的**唯一**写入口，而全仓零生产调用——也就是
+ * 默认开启的 `policy.auditLogging`（DEFAULT_AI_DATA_POLICY.auditLogging = true）
+ * 实际上从未落过一行：成本（cost_tokens）与合规审计完全空转。
+ * 治理包装器是天然接线点：每次经治理边界的真实外发调用后异步写一条审计行。
+ * 只记元数据（provider/model/operation/token 数/耗时/状态），**绝不记内容**——
+ * 与 identity/service.ts 同名函数的隐私测试口径一致。
+ */
+export interface GovernedProviderAuditContext {
+  userId: string;
+  /** 能力/操作名前缀（如 "companion_agent"），与方法名合成 operation 落库。 */
+  operation: string;
+  jobId?: string | null;
+}
+
+export function createGovernedProvider(
+  provider: import("./ai-provider.ts").AIProvider,
+  context: Pick<AIGovernanceContext, "consentOk" | "policy">,
+  workspaceId: string,
+  audit?: GovernedProviderAuditContext,
+): import("./ai-provider.ts").AIProvider {
+  /**
+   * 记录一次外发调用（fire-and-forget）。logAICall 内部捕获全部异常并返回 false，
+   * 因此不会产生未处理拒绝，也不会阻塞主流程；policy.auditLogging=false 时它会
+   * 自行跳过（不多写库）。
+   */
+  const recordCall = (
+    method: string,
+    startedAt: number,
+    outcome: {
+      costTokens?: number | null;
+      status?: string;
+      errorMessage?: string | null;
+      dataSizeBytes?: number | null;
+    } = {},
+  ): void => {
+    if (!audit) return;
+    void logAICall(
+      {
+        workspaceId,
+        userId: audit.userId,
+        jobId: audit.jobId ?? null,
+        provider: provider.id,
+        modelId: provider.modelId,
+        operation: `${audit.operation}:${method}`,
+        costTokens: outcome.costTokens ?? null,
+        durationMs: Math.round(performance.now() - startedAt),
+        status: outcome.status ?? "success",
+        errorMessage: outcome.errorMessage ?? null,
+        dataSizeBytes: outcome.dataSizeBytes ?? null,
+      },
+      { policy: context.policy },
+    );
+  };
+
+  const governed: import("./ai-provider.ts").AIProvider = {
+    ...provider,
+    chatCompletion: async (messages, options, signal) => {
+      const data = governedPayload(context, workspaceId, provider.id, { messages });
+      const startedAt = performance.now();
+      try {
+        const result = await provider.chatCompletion(data.messages as typeof messages, options, signal);
+        recordCall("chat_completion", startedAt, {
+          costTokens: result.usage?.totalTokens ?? null,
+        });
+        return result;
+      } catch (err) {
+        recordCall("chat_completion", startedAt, {
+          status: "error",
+          errorMessage: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    },
+  };
+  if (provider.chatCompletionStream) {
+    governed.chatCompletionStream = async (messages, options, signal, onDelta) => {
+      const data = governedPayload(context, workspaceId, provider.id, { messages });
+      const startedAt = performance.now();
+      try {
+        const result = await provider.chatCompletionStream!(
+          data.messages as typeof messages,
+          options,
+          signal,
+          onDelta,
+        );
+        // 流式接口的返回类型只有 { content }（无 usage）——AI#9 已确认这是接口缺口；
+        // 这里如实记 null，不伪造 token 数。
+        recordCall("chat_completion_stream", startedAt, { costTokens: null });
+        return result;
+      } catch (err) {
+        recordCall("chat_completion_stream", startedAt, {
+          status: "error",
+          errorMessage: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    };
+  }
+  if (provider.executeAgentTurn) {
+    governed.executeAgentTurn = async (request, signal) => {
+      const data = governedPayload(context, workspaceId, provider.id, { request });
+      const startedAt = performance.now();
+      try {
+        const result = await provider.executeAgentTurn!(data.request as typeof request, signal);
+        recordCall("execute_agent_turn", startedAt, {
+          costTokens: result.usage?.totalTokens ?? null,
+        });
+        return result;
+      } catch (err) {
+        recordCall("execute_agent_turn", startedAt, {
+          status: "error",
+          errorMessage: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    };
+  }
+  if (provider.embed) {
+    governed.embed = async (text, signal) => {
+      const data = governedPayload(context, workspaceId, provider.id, { text });
+      const startedAt = performance.now();
+      try {
+        const result = await provider.embed!(String(data.text ?? ""), signal);
+        recordCall("embed", startedAt, { dataSizeBytes: String(data.text ?? "").length });
+        return result;
+      } catch (err) {
+        recordCall("embed", startedAt, {
+          status: "error",
+          errorMessage: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    };
+  }
+  // Provider implementations are class methods; spreading the instance keeps
+  // the function but changes its receiver to the wrapper. Preserve the
+  // original receiver for capability snapshots that read private provider
+  // configuration (for example contextWindowTokens).
+  if (provider.getCapabilities) {
+    governed.getCapabilities = provider.getCapabilities.bind(provider);
+  }
+  return governed;
+}
+
+/** Same boundary for the standalone embedding provider used by memory search. */
+export function createGovernedEmbeddingProvider(
+  provider: import("./ai-provider.ts").EmbeddingProviderLike,
+  context: Pick<AIGovernanceContext, "consentOk" | "policy">,
+  workspaceId: string,
+): import("./ai-provider.ts").EmbeddingProviderLike {
+  return {
+    ...provider,
+    embed: async (text, signal) => {
+      const data = governedPayload(context, workspaceId, provider.id, { text });
+      return provider.embed(String(data.text ?? ""), signal);
+    },
+  };
 }
 
 export interface AICallAuditParams {

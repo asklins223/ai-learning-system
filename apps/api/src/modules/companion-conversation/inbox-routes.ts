@@ -106,6 +106,17 @@ export async function proactiveInboxRoutes(app: FastifyInstance) {
       // PERF: in-flight guard——上一次轮询事务未结束时跳过本 tick，避免 DB 拥塞
       // 下同连接并发事务叠加放大负载。
       let pumping = false;
+      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+      let unsubscribeInbox: (() => void) | null = null;
+      const stopStream = (): void => {
+        if (closed) return;
+        closed = true;
+        if (interval) clearInterval(interval);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        unsubscribeInbox?.();
+        releaseSlot();
+        if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
+      };
       // PERF: NOTIFY 是即时唤醒主路径（deliver() 随事务 NOTIFY inbox 通道），
       // durable poll 仅作兜底（防通知丢失/重启间隙）。为减少 idle 长连接每
       // 3s 全量开事务的背景负载：NOTIFY 唤醒时立即 pump，durable poll 放宽为
@@ -121,23 +132,26 @@ export async function proactiveInboxRoutes(app: FastifyInstance) {
             listInbox(tx, scope, { afterSequence: cursor, limit: 50 }),
           );
           for (const delivery of deliveries) {
-            cursor = delivery.inboxSequence;
-            if (!closed) {
-              safeSseWrite(
-                reply.raw,
-                `id: ${delivery.inboxSequence}\nevent: assistant.delivery\ndata: ${JSON.stringify(delivery)}\n\n`,
-              );
+            if (closed) break;
+            const accepted = safeSseWrite(
+              reply.raw,
+              `id: ${delivery.inboxSequence}\nevent: assistant.delivery\ndata: ${JSON.stringify(delivery)}\n\n`,
+            );
+            if (!accepted) {
+              // 不推进 cursor；客户端用 Last-Event-ID 重连时会从该条重新拉取。
+              stopStream();
+              break;
             }
+            cursor = delivery.inboxSequence;
           }
         } catch (err) {
-          if (interval) clearInterval(interval);
-          if (!closed && !reply.raw.writableEnded) reply.raw.end();
+          stopStream();
           req.log.warn({ err }, "proactive inbox stream error");
         } finally {
           pumping = false;
         }
       };
-      const unsubscribeInbox = subscribeCompanionInboxEvents(scope.userId, () => {
+      unsubscribeInbox = subscribeCompanionInboxEvents(scope.userId, () => {
         if (!closed) void pump();
       });
       // durable fallback 轮询：NOTIFY 已在提交时即时唤醒，这里仅兜底错过通知/
@@ -150,9 +164,9 @@ export async function proactiveInboxRoutes(app: FastifyInstance) {
       }, 10_000);
       // PERF-B6 修复：加 15s heartbeat comment，防止 idle 长连接被代理/负载
       // 均衡空闲超时端到端切断（对齐 companion-events.ts 的保活写法）。
-      const heartbeatTimer = setInterval(() => {
+      heartbeatTimer = setInterval(() => {
         if (!closed) {
-          safeSseWrite(reply.raw, `: heartbeat ${Date.now()}\n\n`);
+          if (!safeSseWrite(reply.raw, `: heartbeat ${Date.now()}\n\n`)) stopStream();
         }
       }, 15_000);
       heartbeatTimer.unref();
@@ -160,17 +174,11 @@ export async function proactiveInboxRoutes(app: FastifyInstance) {
       // 连接打开即做首次拉取（避免依赖首个 NOTIFY/等待轮询）。
       void pump();
       reply.raw.on("close", () => {
-        closed = true;
-        clearInterval(interval);
-        clearInterval(heartbeatTimer);
-        unsubscribeInbox();
-        releaseSlot();
+        stopStream();
       });
       reply.raw.on("error", (err) => {
-        closed = true;
-        unsubscribeInbox();
+        stopStream();
         req.log.warn({ err }, "inbox sse: socket error");
-        releaseSlot();
       });
       return reply;
     },

@@ -36,7 +36,7 @@ describe("GS-01B V2 route roster", () => {
   it("keeps the standard start command on strict V2 dispatch", () => {
     assert.match(apiRoutesSource, /app\.post\("\/learning-runs"/);
     assert.match(apiRoutesSource, /createLearningRunV2RequestSchema/);
-    assert.match(apiRoutesSource, /if \(raw && typeof raw === "object" && "originV2" in raw/);
+    assert.match(apiRoutesSource, /parseBody\(app, createLearningRunV2RequestSchema, req\.body\)/);
     assert.match(apiRoutesSource, /learningRunPublicSnapshotV2Schema/);
     assert.match(gatewaySource, /this\.request\("\/learning-runs", \{ method: "POST"/);
     assert.match(gatewaySource, /learningRunPublicSnapshotV2Schema\.safeParse/);

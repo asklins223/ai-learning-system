@@ -84,8 +84,8 @@ export async function seedNotesOnlyWorkspace(
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${workspaceId}, ${userId}, 'owner')`;
     for (let i = 0; i < noteCount; i += 1) {
-      await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-        VALUES (${noteIds[i]}, ${workspaceId}, ${`notes-only-${i}`}, ${userId}, 1)`;
+      await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+        VALUES (${noteIds[i]}, ${workspaceId}, ${`notes-only-${i}`}, ${userId})`;
       await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
         VALUES (${versionIds[i]}, ${noteIds[i]}, ${workspaceId}, 1,
           ${tx.json({ blocks: [{ type: "paragraph", content: "只有笔记没有目标" }] })},

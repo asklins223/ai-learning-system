@@ -1,7 +1,7 @@
 /**
- * P5 §9 固定测试：companion action 表 RLS。
+ * P5 §9 固定测试：companion action proposal RLS。
  * - FORCE RLS：ailearn_worker（非 superuser）无 context 时对
- *   companion_action_proposals/runs 零行；
+ *   companion_action_proposals 零行；
  * - context 正确时仅见自己 workspace/user 的行；
  * - ailearn（superuser）无 context 可见全部（RLS 不拦截 superuser）。
  */
@@ -11,18 +11,20 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
+// worker 连接必须与 API 连接指向同一个库：此前硬编码 dev 库，跑在专用测试库时
+// 会出现"数据写测试库、断言读 dev 库"的静默错配（本文件两处 worker 连接都受影响）。
+const WORKER_CONN = process.env.DATABASE_URL_WORKER
+  ?? "postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn";
 const sql = postgres(CONN, { max: 2 });
 
 after(() => sql.end({ timeout: 2 }));
 
-test("P5 §6.6/§6.7：action 表 FORCE RLS（worker 无 context 零行，superuser 可见）", async () => {
-  // 无 context（worker 非 superuser）：proposals/runs 零行
-  const worker = postgres("postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn", { max: 1 });
+test("P5 §6.6/§6.7：action proposal FORCE RLS（worker 无 context 零行，superuser 可见）", async () => {
+  // 无 context（worker 非 superuser）：proposal 零行
+  const worker = postgres(WORKER_CONN, { max: 1 });
   try {
     const p = await worker`SELECT count(*)::int AS c FROM companion_action_proposals`;
-    const r = await worker`SELECT count(*)::int AS c FROM companion_action_runs`;
     assert.equal(p[0].c, 0, "worker 无 context 对 proposals 零行（FORCE RLS）");
-    assert.equal(r[0].c, 0, "worker 无 context 对 runs 零行（FORCE RLS）");
   } finally {
     await worker.end({ timeout: 2 });
   }
@@ -55,11 +57,9 @@ test("P5 §6.6/§6.7：worker 有 context 时只读自己 workspace/user 的行"
                      ${{ kind: "open_review" } as never}, ${"a".repeat(64)},
                      '复习', '目标', '影响', 'pending', ${"b".repeat(64)},
                      now() + interval '30 minutes')`;
-    await tx`INSERT INTO companion_action_runs (id, workspace_id, user_id, conversation_id, proposal_id, status)
-             VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', ${ws}, ${uid}, ${cid}, ${pid}, 'accepted')`;
   });
   try {
-    const worker = postgres("postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn", { max: 1 });
+    const worker = postgres(WORKER_CONN, { max: 1 });
     try {
       // 错误 context：零行（事务内 set_config is_local=true 生效）
       await worker.begin(async (tx) => {
@@ -82,8 +82,6 @@ test("P5 §6.6/§6.7：worker 有 context 时只读自己 workspace/user 的行"
     await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
       await tx`SELECT set_config('app.user_id', ${uid}, true)`;
-      await tx`UPDATE companion_action_proposals SET action_run_id = NULL WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_messages WHERE conversation_id = ${cid}`;
       await tx`DELETE FROM companion_conversations WHERE id = ${cid}`;

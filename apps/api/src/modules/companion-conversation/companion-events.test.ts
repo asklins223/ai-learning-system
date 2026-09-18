@@ -44,6 +44,7 @@ test("cursor 解析：after 与 Last-Event-ID 并存取较大者（§5.3）", ()
 test("SSE 格式化：id/event/data 与 envelope 字段", () => {
   const row = {
     conversation_id: CONVERSATION_ID,
+    workspace_id: "123e4567-e89b-12d3-a456-4266141740aa",
     seq: "3",
     run_id: "123e4567-e89b-12d3-a456-426614174001",
     generation: 2,
@@ -60,5 +61,8 @@ test("SSE 格式化：id/event/data 与 envelope 字段", () => {
   assert.equal(parsed.runId, row.run_id);
   assert.equal(parsed.generation, 2);
   assert.equal(parsed.type, "assistant.delta");
+  // companionStreamEventBaseShapeV1 要求 workspaceId；缺字段会让整帧无法通过
+  // 共享（strict）事件合同校验。
+  assert.equal(parsed.workspaceId, row.workspace_id);
   assert.deepEqual(parsed.payload, { appendFrom: 0, textDelta: "你" });
 });

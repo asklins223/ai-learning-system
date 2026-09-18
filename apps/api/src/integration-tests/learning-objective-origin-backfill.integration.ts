@@ -9,8 +9,8 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { eq, sql } from "drizzle-orm";
-import { learningObjectivesV2 } from "../db/schema/card-generation-v2.ts";
-import { learningObjectiveOriginsV2 } from "../db/schema/card-generation-v2.ts";
+import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { learningObjectiveOriginsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";

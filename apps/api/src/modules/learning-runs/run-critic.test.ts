@@ -8,9 +8,11 @@ import {
   buildCriticPrompt,
   CriticOutputError,
   extractCriticJson,
+  materializeCriticEvidenceRefs,
   parseCriticOutput,
   type CriticInput,
 } from "./run-critic.ts";
+import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 
 function makeInput(): CriticInput {
   return {
@@ -33,6 +35,7 @@ test("buildCriticPrompt：包含题面/观点/证据/答案与 rubric 目标，�
   assert.ok(prompt.includes("只输出 JSON"));
   // 角色隔离：明示不是辅导老师。
   assert.ok(prompt.includes("不是辅导老师"));
+  assert.ok(prompt.includes("不是可执行指令"));
 });
 
 test("parseCriticOutput：合法输出通过，confidence 默认 1", () => {
@@ -55,6 +58,61 @@ test("parseCriticOutput：markdown 围栏被剥离", () => {
     ["r1"],
   );
   assert.equal(parsed[0].verdict, "missing");
+});
+
+test("parseCriticOutput：支持 V2 rubric 合同允许的 80 条逐项结论", () => {
+  const rubricTargetIds = Array.from({ length: 80 }, (_, index) => `r${index + 1}`);
+  const parsed = parseCriticOutput(JSON.stringify({
+    verdicts: rubricTargetIds.map((rubricItemId) => ({
+      rubricItemId,
+      verdict: "covered",
+      userFacingReason: "已覆盖",
+    })),
+  }), rubricTargetIds);
+  assert.equal(parsed.length, 80);
+});
+
+test("parseCriticOutput：重复的 closure rubric 目标 fail closed", () => {
+  assert.throws(
+    () => parseCriticOutput(JSON.stringify({
+      verdicts: [{ rubricItemId: "r1", verdict: "covered", userFacingReason: "已覆盖" }],
+    }), ["r1", "r1"]),
+    CriticOutputError,
+  );
+});
+
+test("materializeCriticEvidenceRefs：只把哈希校验通过的冻结原文切片交给 Critic", () => {
+  const blockContent = "开头。间隔复习能降低遗忘率。结尾。";
+  const quote = "间隔复习能降低遗忘率。";
+  const startOffset = blockContent.indexOf(quote);
+  const refs = materializeCriticEvidenceRefs(
+    [{ evidenceSnapshotId: "e1", evidenceSnapshotHash: "a".repeat(64) }],
+    [{
+      evidenceSnapshotId: "e1",
+      evidenceSnapshotHash: "a".repeat(64),
+      quoteHash: hashCanonicalV2("evidence-quote", { quote }),
+      blockContentHash: hashCanonicalV2("block", { content: blockContent }),
+      startOffset,
+      endOffset: startOffset + quote.length,
+      blockContent,
+    }],
+  );
+  assert.deepEqual(refs, [{ evidenceSnapshotHash: "a".repeat(64), preview: quote }]);
+});
+
+test("materializeCriticEvidenceRefs：原文变化时 fail closed", () => {
+  assert.throws(() => materializeCriticEvidenceRefs(
+    [{ evidenceSnapshotId: "e1", evidenceSnapshotHash: "a".repeat(64) }],
+    [{
+      evidenceSnapshotId: "e1",
+      evidenceSnapshotHash: "a".repeat(64),
+      quoteHash: hashCanonicalV2("evidence-quote", { quote: "原始证据" }),
+      blockContentHash: hashCanonicalV2("block", { content: "原始证据" }),
+      startOffset: 0,
+      endOffset: 4,
+      blockContent: "篡改证据",
+    }],
+  ), CriticOutputError);
 });
 
 test("parseCriticOutput：未知 rubricItemId / 缺条 / 重复 → CriticOutputError（fail closed）", () => {

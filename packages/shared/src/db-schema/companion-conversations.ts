@@ -1,8 +1,7 @@
 /**
  * P2 companion conversation foundation（03 合同 §7.1–§7.6）。
  *
- * 六张表全部 workspace+user RLS（policy 匹配 app.workspace_id + app.user_id）；
- * companion_voice_artifacts 在 P2 保持空表且无写路径（P3 启用 provenance）。
+ * 六张表全部 workspace+user RLS（policy 匹配 app.workspace_id + app.user_id）。
  */
 
 import {
@@ -21,7 +20,16 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { users, workspaces } from "./identity.ts";
-import type { CompanionMessageV1, CompanionStreamEventV1 } from "@ailearn/shared";
+import type {
+  CompanionAgentMode,
+  CompanionAgentRiskClass,
+  CompanionAgentStepKind,
+  CompanionAgentStepStatus,
+  CompanionAgentToolStatus,
+  CompanionMessageV1,
+  CompanionStreamEventV1,
+  ProviderReasoningHandle,
+} from "@ailearn/shared";
 
 // ─── 7.1 companion_conversations ──────────────────────────────────────────
 
@@ -108,7 +116,7 @@ export const companionTurnRuns = pgTable(
     assistantMessageId: uuid("assistant_message_id").references(() => companionMessages.id),
     jobId: uuid("job_id"),
     generation: integer("generation").notNull(),
-    status: text("status").$type<"accepted" | "running" | "succeeded" | "cancel_requested" | "cancelled" | "failed" | "superseded">().notNull(),
+    status: text("status").$type<"accepted" | "running" | "waiting_for_confirmation" | "succeeded" | "cancel_requested" | "cancelled" | "failed" | "superseded">().notNull(),
     idempotencyKeyHash: text("idempotency_key_hash").notNull(),
     requestBodyHash: text("request_body_hash").notNull(),
     // 迁移 0107 新增（L11）：run 创建时冻结的账号世代
@@ -133,6 +141,19 @@ export const companionTurnRuns = pgTable(
     routerPromptHash: char("router_prompt_hash", { length: 64 }),
     routerContextRevision: char("router_context_revision", { length: 64 }),
     routerPayloadHash: char("router_payload_hash", { length: 64 }),
+    // Companion Agent v1 frozen runtime state.
+    agentMode: text("agent_mode").$type<CompanionAgentMode>().notNull().default("hybrid"),
+    activeSkillId: text("active_skill_id"),
+    activeSkillVersion: text("active_skill_version"),
+    permissionLevel: text("permission_level").$type<"read_only" | "guided" | "full">(),
+    permissionSnapshot: jsonb("permission_snapshot"),
+    budgetSnapshot: jsonb("budget_snapshot"),
+    stepCount: integer("step_count").notNull().default(0),
+    toolCallCount: integer("tool_call_count").notNull().default(0),
+    /** 已消耗的 Agent 执行毫秒数（跨确认续跑累计，不含等待用户确认的时间）。 */
+    agentElapsedMs: integer("agent_elapsed_ms").notNull().default(0),
+    waitingProposalId: uuid("waiting_proposal_id"),
+    providerCapabilityFingerprint: text("provider_capability_fingerprint"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -141,7 +162,7 @@ export const companionTurnRuns = pgTable(
     idempotencyUnique: uniqueIndex("companion_turn_runs_idempotency_unique").on(t.conversationId, t.idempotencyKeyHash),
     activeUnique: uniqueIndex("companion_turn_runs_active_unique")
       .on(t.conversationId)
-      .where(sql`status IN ('accepted', 'running', 'cancel_requested')`),
+      .where(sql`status IN ('accepted', 'running', 'waiting_for_confirmation', 'cancel_requested')`),
     jobIdUnique: uniqueIndex("companion_turn_runs_job_id_unique")
       .on(t.jobId)
       .where(sql`job_id IS NOT NULL`),
@@ -174,7 +195,69 @@ export const companionStreamEvents = pgTable(
   }),
 );
 
-// ─── 7.5 companion_voice_artifacts（P2 无写路径） ─────────────────────────
+// ─── 7.4a Companion Agent audit ledger ───────────────────────────────────
+
+export const companionAgentSteps = pgTable(
+  "companion_agent_steps",
+  {
+    id: uuid("id").primaryKey(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    conversationId: uuid("conversation_id").notNull().references(() => companionConversations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull().references(() => companionTurnRuns.id, { onDelete: "cascade" }),
+    stepNo: integer("step_no").notNull(),
+    kind: text("kind").$type<CompanionAgentStepKind>().notNull(),
+    status: text("status").$type<CompanionAgentStepStatus>().notNull(),
+    skillId: text("skill_id"),
+    requestHash: char("request_hash", { length: 64 }),
+    resultHash: char("result_hash", { length: 64 }),
+    errorCode: text("error_code"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runStepUnique: uniqueIndex("companion_agent_steps_run_step_unique").on(t.runId, t.stepNo),
+    workspaceRunIdx: index("companion_agent_steps_workspace_run_idx").on(t.workspaceId, t.userId, t.runId, t.stepNo),
+  }),
+);
+
+export const companionAgentToolCalls = pgTable(
+  "companion_agent_tool_calls",
+  {
+    id: uuid("id").primaryKey(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    conversationId: uuid("conversation_id").notNull().references(() => companionConversations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull().references(() => companionTurnRuns.id, { onDelete: "cascade" }),
+    stepId: uuid("step_id").notNull().references(() => companionAgentSteps.id, { onDelete: "cascade" }),
+    toolCallId: text("tool_call_id").notNull(),
+    name: text("name").notNull(),
+    toolVersion: text("tool_version").notNull(),
+    skillId: text("skill_id").notNull(),
+    arguments: jsonb("arguments").notNull(),
+    argumentsSha256: char("arguments_sha256", { length: 64 }).notNull(),
+    riskClass: text("risk_class").$type<CompanionAgentRiskClass>().notNull(),
+    status: text("status").$type<CompanionAgentToolStatus>().notNull(),
+    proposalId: uuid("proposal_id"),
+    resultRef: text("result_ref"),
+    resultSafeSummary: text("result_safe_summary"),
+    /**
+     * 该工具调用轮次的 provider 不透明 reasoning 句柄（见 0218 迁移）。
+     * 用于用户确认后的冷启动续跑回放；已剥离明文思维链，NULL = 无句柄。
+     */
+    reasoningHandles: jsonb("reasoning_handles").$type<ProviderReasoningHandle[]>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runToolCallUnique: uniqueIndex("companion_agent_tool_calls_run_call_unique").on(t.runId, t.toolCallId),
+    workspaceRunIdx: index("companion_agent_tool_calls_workspace_run_idx").on(t.workspaceId, t.userId, t.runId, t.createdAt),
+    proposalIdx: index("companion_agent_tool_calls_proposal_idx").on(t.proposalId),
+  }),
+);
+
+// ─── 7.5 companion_voice_artifacts ───────────────────────────────────────
 
 export const companionVoiceArtifacts = pgTable(
   "companion_voice_artifacts",
@@ -234,9 +317,9 @@ export const companionProactiveDeliveries = pgTable(
   }),
 );
 
-// ─── 7.7 companion_action_proposals / companion_action_runs（迁移 0092/0095/0096） ──
-// P5 typed action bridge（§6.6–§6.8）。FK（source_message_id / action_run_id /
-// proposal_id / result_message_id）由手写迁移维护，此处仅镜像列集合与类型，
+// ─── 7.7 companion_action_proposals（迁移 0092/0095/0096） ──────────────
+// P5 typed action bridge（§6.6–§6.8）。FK（source_message_id）
+// 由手写迁移维护，此处仅镜像列集合与类型，
 // 保证 drizzle-kit generate 不会把已存在表当新表重复生成。
 
 export const companionActionProposals = pgTable(
@@ -257,11 +340,18 @@ export const companionActionProposals = pgTable(
     status: text("status").$type<"pending" | "rejected" | "accepted" | "executing" | "succeeded" | "failed" | "expired">().notNull(),
     decision: text("decision").$type<"confirm" | "reject">(),
     decisionKeyHash: char("decision_key_hash", { length: 64 }),
+    resultRef: text("result_ref"),
+    resultRoute: jsonb("result_route"),
+    resultSafeSummary: text("result_safe_summary"),
     idempotencyKeyHash: char("idempotency_key_hash", { length: 64 }).notNull(),
     // 迁移 0096 新增：confirm 请求体 sha256（幂等去重）。
     requestBodySha256: char("request_body_sha256", { length: 64 }),
-    // 迁移 0095 新增：决策后创建的 action run。
-    actionRunId: uuid("action_run_id"),
+    origin: text("origin").$type<"menu" | "agent_tool">(),
+    agentRunId: uuid("agent_run_id"),
+    agentToolCallId: text("agent_tool_call_id"),
+    agentSkillId: text("agent_skill_id"),
+    agentToolVersion: text("agent_tool_version"),
+    riskClass: text("risk_class").$type<CompanionAgentRiskClass>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -275,38 +365,7 @@ export const companionActionProposals = pgTable(
       .on(t.decisionKeyHash)
       .where(sql`decision_key_hash IS NOT NULL`),
     workspaceIdx: index("companion_action_proposals_workspace_idx").on(t.workspaceId, t.userId),
-    runIdx: index("companion_action_proposals_run_idx")
-      .on(t.actionRunId)
-      .where(sql`action_run_id IS NOT NULL`),
     // 2026-08-12（generate 对齐）：0106 定义单列 (conversation_id)
     conversationIdx: index("companion_action_proposals_conversation_idx").on(t.conversationId),
-  }),
-);
-
-export const companionActionRuns = pgTable(
-  "companion_action_runs",
-  {
-    id: uuid("id").primaryKey(),
-    workspaceId: uuid("workspace_id").notNull(),
-    userId: uuid("user_id").notNull(),
-    conversationId: uuid("conversation_id").notNull().references(() => companionConversations.id, { onDelete: "cascade" }),
-    proposalId: uuid("proposal_id").notNull(),
-    jobId: uuid("job_id"),
-    status: text("status").$type<"accepted" | "running" | "succeeded" | "failed" | "cancelled">().notNull(),
-    resultMessageId: uuid("result_message_id"),
-    resultRef: text("result_ref"),
-    route: jsonb("route"),
-    safeSummary: text("safe_summary"),
-    errorCode: text("error_code"),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    finishedAt: timestamp("finished_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => ({
-    proposalUnique: uniqueIndex("companion_action_runs_proposal_idx").on(t.proposalId),
-    workspaceIdx: index("companion_action_runs_workspace_idx").on(t.workspaceId, t.userId),
-    // 迁移 0106 新增：DELETE conversation 前按 conversation 查 active run。
-    conversationIdx: index("companion_action_runs_conversation_idx").on(t.conversationId),
   }),
 );

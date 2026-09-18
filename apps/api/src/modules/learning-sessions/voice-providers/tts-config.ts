@@ -13,6 +13,7 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { AIPlatformConfig, TtsEngineSettings } from "@ailearn/shared";
 
 export interface QwenTtsConfig {
   workspaceId: string;
@@ -23,7 +24,6 @@ export interface QwenTtsConfig {
   /** 指令控制（高质量声音描述，≤100 字符；qwen-audio-3.0-tts-flash 系统音色支持任意指令） */
   instruction: string;
 }
-
 export interface TtsEngineConfig {
   engine: "qwen" | "edge";
   qwen: QwenTtsConfig;
@@ -53,20 +53,23 @@ let cached: TtsEngineConfig | null = null;
 
 export function loadTtsEngineConfig(): TtsEngineConfig {
   if (cached) return cached;
-  let parsed: { tts?: unknown } | null = null;
+  // 设计 P1-7（2026-09-15 审计）：`tts` 节点此前不在共享契约内，这里只能自行 cast。
+  // 现在它已是 AIPlatformConfig 的一部分（见 packages/shared/src/platform-config.ts
+  // 的 TtsEngineSettings），读取按契约类型进行，字段改名由编译器兜住。
+  //
+  // 读取路径保持不变（3 个候选路径探测：dev 容器 /app、宿主 apps/api 的 ../..、
+  // 以及 cwd）—— 它比共享加载器的单路径更适合本进程的两种运行方式。
+  // 字段优先级（见 TtsEngineSettings 文档）：配置文件 > 环境变量 > 内置默认值。
+  let parsed: Pick<AIPlatformConfig, "tts"> | null = null;
   for (const path of CANDIDATE_PATHS) {
     try {
-      parsed = JSON.parse(readFileSync(path, "utf8")) as { tts?: unknown };
+      parsed = JSON.parse(readFileSync(path, "utf8")) as Pick<AIPlatformConfig, "tts">;
       if (parsed?.tts) break;
     } catch {
       // 路径不存在/解析失败 → 下一个
     }
   }
-  const tts = (parsed?.tts ?? {}) as {
-    engine?: string;
-    qwen?: Partial<QwenTtsConfig>;
-    edge?: { voice?: string; rate?: string };
-  };
+  const tts: TtsEngineSettings = parsed?.tts ?? {};
   cached = {
     engine: tts.engine === "edge" ? "edge" : DEFAULTS.engine,
     qwen: {
@@ -83,9 +86,4 @@ export function loadTtsEngineConfig(): TtsEngineConfig {
     },
   };
   return cached;
-}
-
-/** 测试用：清缓存（改配置后重新读取）。 */
-export function resetTtsEngineConfigCache(): void {
-  cached = null;
 }

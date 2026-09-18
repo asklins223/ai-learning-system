@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -39,6 +40,7 @@ function webpVp8xHeader({ width, height, alpha = true }) {
 }
 
 function layer(overrides = {}) {
+  const sha256 = createHash("sha256").update(pngHeader({ width: 12, height: 8 })).digest("hex");
   return {
     assetId: "STATIC-ROOM-DAY-D6-01",
     path: "foreground/room-day.png",
@@ -53,6 +55,10 @@ function layer(overrides = {}) {
       anchor: [0, 0],
     },
     alphaMode: "straight-rgba",
+    sha256,
+    sourcePath: "posters/source.png",
+    promptPath: "prompts/layer.txt",
+    license: "test-only",
     reviewStatus: "approved",
     releaseApproval: true,
     ...overrides,
@@ -135,7 +141,7 @@ describe("Room layer static preflight", () => {
 
       expect(result.ok).toBe(false);
       expect(result.blocked).toBe(3);
-      expect(result.records[0].reasons).toEqual(["alpha-channel-missing"]);
+      expect(result.records[0].reasons).toEqual(["alpha-channel-missing", "asset-sha256-mismatch"]);
       expect(result.records[1].reasons).toEqual(["asset-missing"]);
       expect(result.records[2].reasons).toEqual(["review-not-approved", "release-not-approved"]);
     } finally {

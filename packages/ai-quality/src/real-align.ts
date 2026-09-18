@@ -1,7 +1,7 @@
 /**
  * AIQ-01 RC 门禁真实证据对齐函数
  *
- * 这是 ai-worker `alignQuote` 的同构实现，用于 RC 门禁中真实 Provider
+ * 这是独立的真实 Provider
  * 输出的证据对齐。与 `mockAlignEvidence` 的区别：
  *
  * - mockAlignEvidence 使用简单 `includes` 检查，只适合 Mock 输出（quote
@@ -9,8 +9,7 @@
  * - realAlignEvidence 使用 trigram Jaccard 相似度 + 滑动窗口，能处理
  *   真实模型输出中的轻微措辞差异
  *
- * 算法与 `workers/ai-worker/src/lib/align.ts` 中的 `alignQuote` 完全一致，
- * 保持同构以避免 RC 门禁和生产 Worker 评分不一致。
+ * 算法保持与生产卡片质量评分一致，避免 RC 门禁和 Worker 评分不一致。
  *
  * 不直接导入 ai-worker 包是为了避免 ai-quality 对 worker 的硬依赖；
  * ai-quality 是质量门禁包，应保持独立可测。
@@ -19,7 +18,7 @@
 import { getDatasetSample } from "./dataset.ts";
 import type { AlignmentResult, ModelCardOutput } from "./types.ts";
 
-// ─── 内部工具函数（与 align.ts 同构）───────────────────────────────
+// ─── 内部工具函数 ─────────────────────────────────────────────────
 
 function normalize(s: string): string {
   return s.replace(/\s+/g, "").toLowerCase();

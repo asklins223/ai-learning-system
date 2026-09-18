@@ -54,7 +54,7 @@ services:
     networks:
       - ailearn_net
 
-  # One-shot bucket bootstrap (profile: storage).  `make storage-dev` waits
+  # One-shot bucket bootstrap (profile: storage).  `make storage` waits
   # for it to exit and removes the container immediately afterwards.
   minio-init:
     image: minio/mc:RELEASE.2024-11-21T17-21-54Z
@@ -97,7 +97,7 @@ services:
       - ailearn_net
 
   # One-shot (restart: "no"): runs on every `make dev` to apply pending
-  # migrations, then is auto-removed by `make clean-init-dev`.
+  # migrations, then is auto-removed by `make clean-init`.
   migrate:
     build:
       context: .
@@ -114,10 +114,7 @@ services:
       NODE_ENV: development
     volumes:
       - ./apps/api/src:/app/src
-      - ./packages/shared/src:/tmp/shared/src
-      # Keep package exports in sync with the hot-mounted shared sources.
-      # Dependency changes still require rebuilding the image.
-      - ./packages/shared/package.json:/tmp/shared/package.json:ro
+      - ./packages/shared:/app/packages/shared
     command: ["npm", "run", "db:migrate"]
     networks:
       - ailearn_net
@@ -140,8 +137,7 @@ services:
       SEED_DEMO_DATA: "true"
     volumes:
       - ./apps/api/src:/app/src
-      - ./packages/shared/src:/tmp/shared/src
-      - ./packages/shared/package.json:/tmp/shared/package.json:ro
+      - ./packages/shared:/app/packages/shared
     command: ["npm", "run", "db:seed"]
     networks:
       - ailearn_net
@@ -169,8 +165,8 @@ services:
       AILEARN_DESKTOP_PAIRING_KEY_ID: ${AILEARN_DESKTOP_PAIRING_KEY_ID:-dev-desktop-key}
       AILEARN_DESKTOP_PAIRING_SECRET: ${AILEARN_DESKTOP_PAIRING_SECRET:-}
       AILEARN_DOMAIN_SCHEMA_REVISION: ${AILEARN_DOMAIN_SCHEMA_REVISION:-domain-dev-v1}
-      CORS_ORIGIN: http://localhost:3000
-      TRUST_PROXY: loopback,linklocal,uniquelocal
+      # 开发栈默认不信任透传的 X-Forwarded-For；需要真实前置代理时显式设置。
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       # Dev-only explicit grant signing secret（compose 显式配置，非代码回退）：
       # 未配置 AUTH_SURFACE_MANIFEST_SECRET 时 companion grant 签发 fail-closed 503。
       AUTH_SURFACE_MANIFEST_SECRET: ailearn-dev-auth-surface-secret
@@ -178,20 +174,15 @@ services:
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       # Dev 栈放宽登录限流（E2E 多 spec 连续登录）；生产 compose 保持默认 5 次。
       AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-100}
-      # The standalone dev stack deliberately exercises the v0.6 scheduling
-      # and shadow paths. Production remains fail-closed unless explicitly set.
-      SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v2}
-      FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-true}
-      # P4 current Mao PRO model: explicit dev opt-in for Live2D capability.
-      COMPANION_LIVE2D_V1_ENABLED: ${COMPANION_LIVE2D_V1_ENABLED:-true}
-      # The development stack runs the approved P2/P3/P5 vertical slices by
-      # default. Production remains fail-closed in docker-compose.yml and
-      # must opt in explicitly with deployment-owned environment variables.
-      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-true}
+      # The development stack runs the approved companion vertical slices by
+      # default. Production remains fail-closed in docker-compose.yml and must
+      # opt in explicitly with deployment-owned environment variables.
+      # Each service declares exactly the capability flags it reads; the
+      # api/worker parity and dev/prod defaults are enforced by
+      # .github/scripts/verify-companion-capability-config.mjs (make verify).
       COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-true}
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-true}
       COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
-      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-true}
       # AI platform config — all provider/capability config in one JSON file.
       AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
@@ -199,6 +190,16 @@ services:
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      # 2026-09-18：capabilities.agent_turn（card_generation 经 task-router 映射到它）
+      # 已从 opencode-go 切到 **tokenrhythm**（opencode-go 套餐用量耗尽，实测 HTTP 429）。
+      # 学习卡生成四阶段与离线评测脚本都走这个 capability，因此 TOKENRHYTHM_API_KEY
+      # 是当前生成链路的必需项。换 provider 时必须同步这一行与 config/ai-platforms.json。
+      #
+      # 2026-09-17：opencode-go 的 key 此前未在 compose 透传（同类事故参见
+      # docker-compose.yml 的 Assessment Critic 注释——compose 只传显式列出的变量），
+      # 容器内解析为空 → 平台不可用 → 回退 mock → CARD_GENERATION_V2_LLM=true 时
+      # fail-closed，学习卡生成永远失败。保留该 key 以便切回时无需再改 compose。
+      OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
       # 方案 16：LearningRun 独立 Assessment Critic（OpenAI-compatible；未配置 fail closed）。
       ASSESSMENT_CRITIC_URL: ${ASSESSMENT_CRITIC_URL:-}
       ASSESSMENT_CRITIC_KEY: ${ASSESSMENT_CRITIC_KEY:-}
@@ -213,29 +214,22 @@ services:
       # Force polling so tsx watch actually picks up source changes.
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "1000"
-      # Dev-only internal verification: expose the real Session/Tutor routes,
-      # while canonical mastery/schedule writes remain fail-closed.
-      LEARNING_SESSION_V2_INTERNAL: ${LEARNING_SESSION_V2_INTERNAL:-true}
-      LEARNING_SESSION_CANONICAL_COMMIT_ENABLED: ${LEARNING_SESSION_CANONICAL_COMMIT_ENABLED:-false}
       # 文档 16：LearningRun 统一底座与 Journey V2（与本地 node 直跑同一套 env 契约）。
-      LEARNING_RUN_V1: ${LEARNING_RUN_V1:-true}
+      LEARNING_RUN_ENABLED: ${LEARNING_RUN_ENABLED:-true}
       COMPANION_JOURNEY_V2: ${COMPANION_JOURNEY_V2:-true}
       COMPANION_BRIDGE_V2: ${COMPANION_BRIDGE_V2:-true}
-      # 方案 20：V2 价值优先生成（dev 默认开启；V1 writer 保留以便回退/对照）。
+      # 方案 20：V2 价值优先生成（dev 默认开启）。
+      # CARD_GENERATION_V2_LLM 只由 worker 读取，因此只声明在 worker 服务。
       CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-true}
-      CARD_GENERATION_V2_LLM: ${CARD_GENERATION_V2_LLM:-true}
-      CARD_GENERATION_V1_WRITER_ENABLED: ${CARD_GENERATION_V1_WRITER_ENABLED:-true}
       # 方案 16 伴星/记忆/总结/画像/主动个性化（dev 默认开启）。
+      # COMPANION_MEMORY_EXTRACTOR_V1 只由 worker 读取，因此只声明在 worker 服务。
       COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-true}
-      COMPANION_MEMORY_EXTRACTOR_V1: ${COMPANION_MEMORY_EXTRACTOR_V1:-true}
       COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-true}
       COMPANION_PET_PROFILE_V1: ${COMPANION_PET_PROFILE_V1:-true}
       COMPANION_PROACTIVE_PERSONALIZED_V1: ${COMPANION_PROACTIVE_PERSONALIZED_V1:-true}
       COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-true}
       COMPANION_MEMORY_STAR_MAP_V1: ${COMPANION_MEMORY_STAR_MAP_V1:-true}
-      # 方案 16/20 trusted Commit 评估与 outbox worker（dev 默认开启）。
-      LEARNING_SESSION_ASSESSMENT_CRITIC_ENABLED: ${LEARNING_SESSION_ASSESSMENT_CRITIC_ENABLED:-true}
-      LEARNING_SESSION_ASSESSMENT_OUTBOX_WORKER_ENABLED: ${LEARNING_SESSION_ASSESSMENT_OUTBOX_WORKER_ENABLED:-true}
+      # 方案 16/20 trusted Commit 评估（dev 默认开启）。
       LEARNING_DRAFT_ENC_KEY: ${LEARNING_DRAFT_ENC_KEY:-}
       PROJECTION_CHECKPOINT_SECRET: ${PROJECTION_CHECKPOINT_SECRET:-}
       # Image upload: MinIO/S3 storage endpoint and credentials.
@@ -253,8 +247,7 @@ services:
       retries: 12
     volumes:
       - ./apps/api/src:/app/src
-      - ./packages/shared/src:/tmp/shared/src
-      - ./packages/shared/package.json:/tmp/shared/package.json:ro
+      - ./packages/shared:/app/packages/shared
       - ./config:/app/config:ro
     networks:
       - ailearn_net
@@ -280,40 +273,38 @@ services:
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
-      # 方案 16：LearningRun 独立 Assessment Critic（OpenAI-compatible；未配置 fail closed）。
-      ASSESSMENT_CRITIC_URL: ${ASSESSMENT_CRITIC_URL:-}
-      ASSESSMENT_CRITIC_KEY: ${ASSESSMENT_CRITIC_KEY:-}
-      ASSESSMENT_CRITIC_MODEL: ${ASSESSMENT_CRITIC_MODEL:-qwen-plus}
+      # 2026-09-18：capabilities.agent_turn（card_generation 经 task-router 映射到它）
+      # 已从 opencode-go 切到 **tokenrhythm**（opencode-go 套餐用量耗尽，实测 HTTP 429）。
+      # 学习卡生成四阶段与离线评测脚本都走这个 capability，因此 TOKENRHYTHM_API_KEY
+      # 是当前生成链路的必需项。换 provider 时必须同步这一行与 config/ai-platforms.json。
+      #
+      # 2026-09-17：opencode-go 的 key 此前未在 compose 透传（同类事故参见
+      # docker-compose.yml 的 Assessment Critic 注释——compose 只传显式列出的变量），
+      # 容器内解析为空 → 平台不可用 → 回退 mock → CARD_GENERATION_V2_LLM=true 时
+      # fail-closed，学习卡生成永远失败。保留该 key 以便切回时无需再改 compose。
+      OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-true}
-      API_INTERNAL_URL: http://api:4000
       # Keep worker-side execution authorization aligned with the API
       # bootstrap/routes; otherwise the API accepts a turn that the worker
-      # immediately rejects as feature-disabled.
-      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-true}
+      # immediately rejects as feature-disabled. Only the companion flags the
+      # worker actually reads are declared here.
       COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-true}
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-true}
-      COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
-      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-true}
-      # 方案 20：V2 价值优先生成（dev 默认开启）。
-      CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-true}
+      # 方案 20：V2 价值优先生成的四个阶段 LLM 模式只在 worker 侧生效。
       CARD_GENERATION_V2_LLM: ${CARD_GENERATION_V2_LLM:-true}
-      # 方案 16 伴星记忆/总结/画像/主动个性化（dev 默认开启）。
+      # 2026-09-17：author/grounding 逐候选调用的**阶段内并发上限**（此前硬串行：
+      # 墙钟 = N × 单次 provider 延迟）。默认 12：服务端卡上限 20，取 12 让实测
+      # 规模（N≈5）一波跑完；实测 6 并发无限流。调大可能触发 provider 429。
+      V2_STAGE_CONCURRENCY: ${V2_STAGE_CONCURRENCY:-12}
+      # 2026-09-17：投机 pedagogy（与 grounding 波并发，集合未变则复用）。
+      # 关掉即为"grounding 完成后再调 pedagogy"的确定性调度。
+      V2_SPECULATIVE_PEDAGOGY: ${V2_SPECULATIVE_PEDAGOGY:-1}
+      # 方案 16 伴星记忆抽取/向量/总结/日记（dev 默认开启）。
       COMPANION_MEMORY_EXTRACTOR_V1: ${COMPANION_MEMORY_EXTRACTOR_V1:-true}
       COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-true}
       COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-true}
       COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-true}
-      COMPANION_PET_PROFILE_V1: ${COMPANION_PET_PROFILE_V1:-true}
-      COMPANION_PROACTIVE_PERSONALIZED_V1: ${COMPANION_PROACTIVE_PERSONALIZED_V1:-true}
-      COMPANION_MEMORY_STAR_MAP_V1: ${COMPANION_MEMORY_STAR_MAP_V1:-true}
-      # 方案 16/20 trusted Commit 评估与 outbox worker（dev 默认开启）。
-      LEARNING_SESSION_ASSESSMENT_CRITIC_ENABLED: ${LEARNING_SESSION_ASSESSMENT_CRITIC_ENABLED:-true}
-      LEARNING_SESSION_ASSESSMENT_OUTBOX_WORKER_ENABLED: ${LEARNING_SESSION_ASSESSMENT_OUTBOX_WORKER_ENABLED:-true}
-      # Explicit development opt-ins for v0.6 worker write paths.
-      AI_QUESTION_V1_ENABLED: ${AI_QUESTION_V1_ENABLED:-true}
-      RUBRIC_EVALUATION_V1_ENABLED: ${RUBRIC_EVALUATION_V1_ENABLED:-true}
-      CARD_REPAIR_V1_ENABLED: ${CARD_REPAIR_V1_ENABLED:-true}
-      SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v2}
-      FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-true}
+      # 方案 16/20 trusted Commit 评估（dev 默认开启）。
       # Source image upload: MinIO/S3 storage for embedded images
       STORAGE_ENDPOINT: http://minio:9000
       S3_BUCKET: ${S3_BUCKET:-ailearn-workspaces}
@@ -324,92 +315,23 @@ services:
       WORKER_PROVIDER_TIMEOUT_MS: ${WORKER_PROVIDER_TIMEOUT_MS:-75000}
       # V2 生成调试：失败时打印 author/planner 原始输出与 parse issues（溯源用）。
       V2_E2E_DEBUG_ERRORS: ${V2_E2E_DEBUG_ERRORS:-1}
-      WORKER_TIMEOUT_EVALUATE_VALIDATION_MS: ${WORKER_TIMEOUT_EVALUATE_VALIDATION_MS:-}
-      WORKER_TIMEOUT_ALIGN_EVIDENCE_MS: ${WORKER_TIMEOUT_ALIGN_EVIDENCE_MS:-}
       WORKER_TIMEOUT_PARSE_SOURCE_MS: ${WORKER_TIMEOUT_PARSE_SOURCE_MS:-}
+      WORKER_METRICS_PORT: ${WORKER_METRICS_PORT:-9100}
       # macOS Docker: same polling fix as the api service.
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "1000"
+    ports:
+      - "${WORKER_METRICS_BIND_ADDRESS:-127.0.0.1}:${WORKER_METRICS_PORT:-9100}:${WORKER_METRICS_PORT:-9100}"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const port=process.env.WORKER_METRICS_PORT || '9100'; fetch('http://127.0.0.1:'+port+'/metrics').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
     volumes:
       - ./workers/ai-worker/src:/app/src
-      - ./packages/shared/src:/tmp/shared/src
-      - ./packages/shared/package.json:/tmp/shared/package.json:ro
-      - ./apps/api/src:/apps/api/src
-      # 2026-08-15（worker 崩溃修复）：worker 直接 import apps/api 的 schema
-      #（schema/index.ts export * 转发）。三要素缺一不可：
-      # 1) /apps/api/package.json（"type": "module"）——此前只挂 src，Node/tsx
-      #    把 api 的 .ts 当 CJS 转译，esbuild CJS 的 export * 转发链全部丢失
-      #    （schema 命名空间为空 → plan-repository 找不到 cardGenerationPlans
-      #    → SyntaxError，worker 22h 全任务失败）；
-      # 2) /apps/api/node_modules——schema 文件裸 import drizzle 按文件位置
-      #    向上解析（此前依赖 tsx 入口前缀缓存的非标准行为）；
-      # 3) @ailearn/shared 是 symlink（--preserve-symlinks），其目标
-      #    /packages/shared 与 shared 自带 zod/ts-fsrs 需可见。
-      - ./apps/api/package.json:/apps/api/package.json:ro
-      - ./apps/api/node_modules:/apps/api/node_modules
-      # pnpm's host-side file: workspace link can otherwise resolve to the
-      # copied package under /apps/api/node_modules/.pnpm, whose dependency
-      # directory does not contain ts-fsrs. Mount the canonical shared source
-      # at the exact API package path so worker imports of apps/api modules
-      # resolve the same runtime dependency tree as the worker entrypoint.
-      - ./packages/shared:/apps/api/node_modules/@ailearn/shared
-      - ./packages/shared:/packages/shared
-      - ./packages/shared/node_modules:/packages/shared/node_modules
+      - ./packages/shared:/app/packages/shared
       - ./config:/app/config:ro
-    networks:
-      - ailearn_net
-
-  web:
-    build:
-      context: .
-      dockerfile: apps/web/Dockerfile
-      target: dev
-    restart: unless-stopped
-    depends_on:
-      api:
-        condition: service_healthy
-    environment:
-      NODE_ENV: development
-      INTERNAL_API_URL: http://api:4000
-      # Client flags are build/runtime explicit in dev; helpers remain
-      # fail-closed when these variables are absent elsewhere.
-      NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: ${NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED:-true}
-      NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: ${NEXT_PUBLIC_AI_QUESTION_V1_ENABLED:-true}
-      NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: ${NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED:-true}
-      NEXT_PUBLIC_COMPANION_PET_ENABLED: ${NEXT_PUBLIC_COMPANION_PET_ENABLED:-true}
-      NEXT_PUBLIC_COMPANION_V2_INTERNAL: ${NEXT_PUBLIC_COMPANION_V2_INTERNAL:-true}
-      NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: ${NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED:-true}
-      # 文档 16：LearningRun/Journey V2/星图行动面（与本地 next dev 同一套 env 契约）。
-      NEXT_PUBLIC_LEARNING_RUN_V1: ${NEXT_PUBLIC_LEARNING_RUN_V1:-true}
-      NEXT_PUBLIC_STAR_MAP_ACTION_V1: ${NEXT_PUBLIC_STAR_MAP_ACTION_V1:-true}
-      NEXT_PUBLIC_COMPANION_JOURNEY_V2: ${NEXT_PUBLIC_COMPANION_JOURNEY_V2:-true}
-      # 方案 20：V2 学习卡生成（dev 默认开启）。
-      NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED: ${NEXT_PUBLIC_CARD_GENERATION_V2_ENABLED:-true}
-      # 方案 16：全局伴星壳 / 复习语音入口（dev 默认开启）。
-      NEXT_PUBLIC_COMPANION_SHELL_ENABLED: ${NEXT_PUBLIC_COMPANION_SHELL_ENABLED:-true}
-      NEXT_PUBLIC_REVIEW_VOICE_ENTRY_ENABLED: ${NEXT_PUBLIC_REVIEW_VOICE_ENTRY_ENABLED:-true}
-      # Agent 活动流控制台（可选增强，fail-closed：默认关）
-      NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: ${NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED:-false}
-    ports:
-      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
-    volumes:
-      - ./apps/web/public:/app/public:ro
-      - ./apps/web/app:/app/app
-      - ./apps/web/components:/app/components
-      - ./apps/web/features:/app/features
-      - ./apps/web/lib:/app/lib
-      # 2026-08-11：middleware.ts 是根级文件，dev 卷只挂子目录——不挂载则
-      # 容器内无 middleware，服务端鉴权不生效。
-      - ./apps/web/middleware.ts:/app/middleware.ts
-      - ./packages/shared/src:/tmp/shared/src
-      - ./packages/shared/package.json:/tmp/shared/package.json:ro
-    # 2026-08-12（构建面审计 P2-3）：web 服务健康检查（此前无 readiness 信号）
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/login"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
     networks:
       - ailearn_net
 

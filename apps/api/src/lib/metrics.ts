@@ -67,17 +67,6 @@ export const JOB_TYPES = Object.values(_JobType) as readonly string[];
 export const JOB_STATUSES = ["pending", "running", "succeeded", "failed", "dead"] as const;
 
 /**
- * Provider operation allowlist。
- * BUG-74 修复：补充 v0.6 新增的 provider 操作类型。
- */
-export const PROVIDER_OPERATIONS = [
-  "align_evidence",
-  "evaluate_validation",
-  "generate_validation_question",
-  "execute_card_agent_turn",
-] as const;
-
-/**
  * 错误分类 allowlist — 自由文本错误必须先归类。
  */
 export const ERROR_CATEGORIES = [
@@ -103,9 +92,6 @@ export const FUNNEL_EVENTS = [
   "onboarding_step",
   "onboarding_completed",
   "card_generation_terminal",
-  "validation_submitted",
-  "validation_terminal",
-  "review_attempt_terminal",
   "job_claimed",
   "job_retried",
   "job_dead",
@@ -220,16 +206,6 @@ export const dashboardEmptyWithActiveObjectivesTotal = new Counter({
 });
 
 /**
- * Origin 缺失（needsRepair > 0）的 workspace 数量 Gauge（RL-09 P0）。
- * 跟踪待修复（missing origin）objective 数量；非零数分钟级需告警。
- */
-export const objectivesWithoutOriginGauge = new Gauge({
-  name: "ailearn_objectives_without_origin_total",
-  help: "Active learning_objectives_v2 rows missing any origin row (learning_objective_origins_v2)",
-  registers: [registry],
-});
-
-/**
  * Dashboard 装配耗时直方图（RL-09 P0）。
  * 含 counts + listObjectiveSurfacesV3 全流程；慢请求（>1s）需告警。
  */
@@ -248,39 +224,6 @@ export const surfaceSlowQueryTotal = new Counter({
   name: "ailearn_surface_slow_query_total",
   help: "Surface assembly queries exceeding 1s threshold",
   labelNames: ["query_type"] as const,
-  registers: [registry],
-});
-
-/**
- * Surface 一致性不匹配计数器（RL-10 P0）。
- * 当 Home/Cards/Search/Graph 之间的 active objective 数量不一致且无 reason code 时递增。
- */
-export const surfaceConsistencyMismatchTotal = new Counter({
-  name: "ailearn_surface_consistency_mismatch_total",
-  help: "Cross-surface active objective count mismatch without reason code",
-  labelNames: ["surface_pair"] as const,
-  registers: [registry],
-});
-
-/**
- * Surface revision 不匹配计数器（RL-10 P0）。
- * 当消费者读到过期 surfaceRevision（late Reveal response 等）被拒绝时递增。
- */
-export const surfaceRevisionMismatchTotal = new Counter({
-  name: "ailearn_surface_revision_mismatch_total",
-  help: "Surface revision mismatch detected and rejected (stale read or late response)",
-  labelNames: ["consumer"] as const,
-  registers: [registry],
-});
-
-/**
- * Topology 失效事件计数器（RL-10 P0）。
- * 当 origin/revision/lifecycle/commit 事件触发 topology invalidation 时递增。
- */
-export const topologyInvalidationEventsTotal = new Counter({
-  name: "ailearn_topology_invalidation_events_total",
-  help: "Topology invalidation events triggered by shared/personal plane changes",
-  labelNames: ["event_kind"] as const,
   registers: [registry],
 });
 

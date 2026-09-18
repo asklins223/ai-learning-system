@@ -37,35 +37,10 @@ export const CRITICAL_MODULE_GROUPS = Object.freeze([
       "workers/ai-worker/src/handlers/index.ts",
       "workers/ai-worker/src/index.ts",
       "workers/ai-worker/src/lib/job-lease.ts",
-      "workers/ai-worker/src/lib/job-retry.ts",
       "workers/ai-worker/src/queue.ts",
     ]),
     prefixes: Object.freeze(["apps/api/src/modules/job/"]),
     threshold: Object.freeze({ lines: 65, branches: 55 }),
-  }),
-  Object.freeze({
-    id: "evidence",
-    label: "evidence",
-    files: Object.freeze([
-      "apps/api/src/lib/evidence.ts",
-      "workers/ai-worker/src/handlers/index.ts",
-      "workers/ai-worker/src/lib/align.ts",
-    ]),
-    prefixes: Object.freeze(["apps/api/src/modules/evidence/"]),
-    threshold: Object.freeze({ lines: 85, branches: 70 }),
-  }),
-  Object.freeze({
-    id: "validation-review",
-    label: "validation + review",
-    files: Object.freeze([
-      "packages/shared/src/review-attempt.ts",
-      "workers/ai-worker/src/handlers/index.ts",
-    ]),
-    prefixes: Object.freeze([
-      "apps/api/src/modules/validation/",
-      "apps/api/src/modules/review/",
-    ]),
-    threshold: Object.freeze({ lines: 35, branches: 65 }),
   }),
   Object.freeze({
     id: "import-export",

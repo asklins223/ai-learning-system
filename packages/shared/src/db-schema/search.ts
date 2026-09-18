@@ -11,7 +11,7 @@ export const searchDocuments = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
-    objectType: text("object_type").notNull(), // note | card | source | evidence
+    objectType: text("object_type").notNull(), // note | source | objective
     objectId: uuid("object_id").notNull(),
     title: text("title"),
     body: text("body"),

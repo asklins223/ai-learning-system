@@ -3,7 +3,7 @@
  *
  * 自 companion-dialogue.ts 拆出：
  * - ReadContext：read 阶段冻结的上下文结构；
- * - insertStreamEvent / emitCompanionTtsSegment：事件写入（独立事务 + fence）；
+ * - insertStreamEvent / emitCompanionTtsSegments：事件写入（独立事务 + fence）；
  * - markCompanionRunFailed：run failed + error event（fence：仅 active 可写终态）;
  * - readGroundedTutorContext / parsePageContext 的 DB 侧使用、
  *   enqueueCompanionMemoryJobs：终态事务内异步入队记忆任务；
@@ -18,6 +18,10 @@ import { withWorkerWorkspaceTransaction } from "../db.ts";
 // 复制出的双份 parsePageContext（两份漂移会让编排层与 DB 层对同一
 // page_context 得出不同判定）。content→store 无依赖边，不构成循环。
 import { parsePageContext } from "./companion-dialogue-content.ts";
+import {
+  materializeGroundedTutorEvidence,
+  type GroundedTutorEvidenceRow,
+} from "./companion-grounded-evidence.ts";
 
 /** 与 turn-service 对齐的硬限额（03 §6.10）。 */
 export interface CompanionDialogueHandlerContext {
@@ -80,13 +84,24 @@ export async function insertStreamEvent(
   `);
 }
 
+export interface CompanionTtsSegmentEvent {
+  segmentId: string;
+  ordinal: number;
+  text: string;
+  textSha256: string;
+  /** 15b 二期：段级情感（段内最后一个控制类标签，无则省略）——live2d 协同预留 */
+  emotion?: string;
+}
+
 /**
- * 15b（字幕般流式 TTS）：发送一条 voice.segment.ready——独立事务
- * （fence 校验 + seq + NOTIFY），与 delta flush 同构。段事件在 final 之前
- * 逐个下发，前端边收段边送 TTS 引擎 → 音频边回边播。
+ * 15b（字幕般流式 TTS）：下发 voice.segment.ready——每事务一批
+ * （fence 校验一次 + 连续 seq 分配 + 多行 INSERT + 批尾 NOTIFY）。
+ *
+ * 段事件在 final 之前按 ordinal 顺序下发，前端按批收到后送 TTS 引擎排队合成。
+ * 一段一个事务在 200 段上限下是 200 个事务（每事务 5 条语句），批量后降到 1/4。
  * 返回 false 表示 run 已终态（fence 拒绝），调用方应停止后续段。
  */
-export async function emitCompanionTtsSegment(args: {
+export async function emitCompanionTtsSegments(args: {
   workspaceId: string;
   userId: string;
   runId: string;
@@ -94,54 +109,57 @@ export async function emitCompanionTtsSegment(args: {
   accountEpoch: number;
   conversationId: string;
   expiresAt: string;
-  segmentId: string;
-  ordinal: number;
-  text: string;
-  textSha256: string;
-  /** 15b 二期：段级情感（段内最后一个控制类标签，无则省略）——live2d 协同预留 */
-  emotion?: string;
+  segments: CompanionTtsSegmentEvent[];
   notifyCompanionEvent: (tx: { execute(q: unknown): Promise<unknown> }, seq: number) => Promise<void>;
 }): Promise<boolean> {
-  return withWorkerWorkspaceTransaction(
-    { workspaceId: args.workspaceId, userId: args.userId },
-    async (tx) => {
-      const alive = await tx.execute<{ id: string }>(sql`
-        UPDATE companion_turn_runs
-        SET status = 'running', updated_at = now()
-        WHERE id = ${args.runId} AND status IN ('accepted', 'running')
-          AND generation = ${args.generation}
-        RETURNING id
-      `);
-      if (!alive[0]) return false;
-      const counters = await tx.execute<{ next_event_seq: string }>(sql`
-        UPDATE companion_conversations
-        SET next_event_seq = next_event_seq + 1
-        WHERE id = ${args.conversationId}
-        RETURNING next_event_seq
-      `);
-      const seq = Number(counters[0].next_event_seq) - 1;
-      await insertStreamEvent(tx, {
-        conversationId: args.conversationId,
-        workspaceId: args.workspaceId,
-        userId: args.userId,
-        runId: args.runId,
-        generation: args.generation,
-        accountEpoch: args.accountEpoch,
-        seq,
-        type: "voice.segment.ready",
-        payload: {
-          segmentId: args.segmentId,
-          ordinal: args.ordinal,
-          text: args.text,
-          textSha256: args.textSha256,
-          ...(args.emotion ? { emotion: args.emotion } : {}),
-        },
-        expiresAt: args.expiresAt,
-      });
-      await args.notifyCompanionEvent(tx, seq);
-      return true;
-    },
-  );
+  const SEGMENTS_PER_TX = 4;
+  for (let i = 0; i < args.segments.length; i += SEGMENTS_PER_TX) {
+    const batch = args.segments.slice(i, i + SEGMENTS_PER_TX);
+    const written = await withWorkerWorkspaceTransaction(
+      { workspaceId: args.workspaceId, userId: args.userId },
+      async (tx) => {
+        const alive = await tx.execute<{ id: string }>(sql`
+          UPDATE companion_turn_runs
+          SET status = 'running', updated_at = now()
+          WHERE id = ${args.runId} AND status IN ('accepted', 'running')
+            AND generation = ${args.generation}
+          RETURNING id
+        `);
+        if (!alive[0]) return false;
+        const counters = await tx.execute<{ next_event_seq: string }>(sql`
+          UPDATE companion_conversations
+          SET next_event_seq = next_event_seq + ${batch.length}
+          WHERE id = ${args.conversationId}
+          RETURNING next_event_seq
+        `);
+        const nextEventSeq = counters[0]?.next_event_seq;
+        if (nextEventSeq === undefined) {
+          throw new Error("conversation event counter update returned no row");
+        }
+        const endSeq = Number(nextEventSeq) - 1;
+        const startSeq = endSeq - batch.length + 1;
+        await tx.execute(sql`
+          INSERT INTO companion_stream_events
+            (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch, type, payload, expires_at)
+          VALUES ${sql.join(batch.map((segment, j) => sql`(
+            ${args.conversationId}, ${startSeq + j}, ${args.workspaceId}, ${args.userId},
+            ${args.runId}, ${args.generation}, ${args.accountEpoch}, 'voice.segment.ready',
+            ${JSON.stringify({
+              segmentId: segment.segmentId,
+              ordinal: segment.ordinal,
+              text: segment.text,
+              textSha256: segment.textSha256,
+              ...(segment.emotion ? { emotion: segment.emotion } : {}),
+            })}, ${args.expiresAt}
+          )`), sql`, `)}
+        `);
+        await args.notifyCompanionEvent(tx, endSeq);
+        return true;
+      },
+    );
+    if (!written) return false;
+  }
+  return true;
 }
 
 // V2: read grounded tutor context from learning_objectives_v2 +
@@ -155,69 +173,125 @@ export async function readGroundedTutorContext(
   scope: { workspaceId: string; userId: string },
 ): Promise<import("./companion-dialogue-content.ts").GroundedTutorContext | null> {
   const context = parsePageContextForStore(pageContext);
-  if (context?.pageKind !== "learning_session" || context.requestedCapability !== "grounded_tutor") {
+  if (context?.requestedCapability !== "grounded_tutor") {
     return null;
   }
-  const sessionId = typeof context.sessionId === "string" ? context.sessionId : null;
-  const episodeId = typeof context.episodeId === "string" ? context.episodeId : null;
-  const cardId = typeof context.cardId === "string" ? context.cardId : null;
-  const keyPointId = typeof context.keyPointId === "string" ? context.keyPointId : null;
-  if (!sessionId || !episodeId || !cardId || !keyPointId) return null;
+  if (context.pageKind === "learning_run") {
+    return readGroundedTutorContextForLearningRun(tx, context, scope);
+  }
+  return null;
+}
 
-  // V2: claim from learning_objective_revisions_v2.objective_statement
-  const claimRows = await tx.execute(sql`
-    SELECT rev.objective_statement AS claim
-    FROM learning_episodes ep
-    JOIN learning_objectives_v2 o ON o.objective_id = ep.key_point_id
-    JOIN learning_objective_revisions_v2 rev ON rev.objective_revision_id = o.current_objective_revision_id
-    WHERE ep.id = ${episodeId}
-      AND ep.session_id = ${sessionId}
-      AND ep.workspace_id = ${scope.workspaceId}
-      AND ep.user_id = ${scope.userId}
-      AND o.workspace_id = ${scope.workspaceId}
+/**
+ * 新 LearningRun 只读取 PREPARE 冻结的 target/evidence closure。即使
+ * Objective 在 Run 期间更新，也不会把新 claim 或新证据带进已授权的 Tutor。
+ */
+async function readGroundedTutorContextForLearningRun(
+  tx: { execute(query: unknown): Promise<unknown> },
+  context: Record<string, unknown>,
+  scope: { workspaceId: string; userId: string },
+): Promise<import("./companion-dialogue-content.ts").GroundedTutorContext | null> {
+  const runId = typeof context.runId === "string" ? context.runId : null;
+  const snapshotId = typeof context.snapshotId === "string" ? context.snapshotId : null;
+  const taskId = typeof context.taskId === "string" ? context.taskId : null;
+  if (!runId || !snapshotId || !taskId) return null;
+
+  const frozenRows = await tx.execute(sql`
+    SELECT s.target, s.evidence_bindings
+    FROM learning_runs r
+    JOIN learning_run_private_contracts c
+      ON c.run_id = r.id
+      AND c.workspace_id = ${scope.workspaceId}
+      AND c.user_id = ${scope.userId}
+      AND c.snapshot_id = ${snapshotId}
+    JOIN learning_target_snapshots_v2 s
+      ON s.run_id = r.id
+      AND s.snapshot_id = c.snapshot_id
+      AND s.workspace_id = ${scope.workspaceId}
+      AND s.user_id = ${scope.userId}
+    JOIN learning_tasks t
+      ON t.id = r.active_task_id
+      AND t.id = ${taskId}
+      AND t.run_id = r.id
+      AND t.workspace_id = ${scope.workspaceId}
+      AND t.user_id = ${scope.userId}
+      AND t.status = 'active'
+    WHERE r.id = ${runId}
+      AND r.workspace_id = ${scope.workspaceId}
+      AND r.user_id = ${scope.userId}
+      AND r.phase = 'active'
+      AND s.published_target_eligibility IN ('eligible', 'practice_only')
     LIMIT 1
-  `) as Array<{ claim: string | null }>;
-  const claim = claimRows[0]?.claim?.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  `) as Array<{ target: unknown; evidence_bindings: unknown }>;
+  const frozen = frozenRows[0];
+  if (!frozen || !frozen.target || typeof frozen.target !== "object" || !Array.isArray(frozen.evidence_bindings)) {
+    return null;
+  }
+
+  const claimValue = (frozen.target as { objectiveStatement?: unknown }).objectiveStatement;
+  const claim = typeof claimValue === "string"
+    ? claimValue.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()
+    : "";
   if (!claim) return null;
 
-  // V2: evidence from evidence_snapshots_v2 joined via
-  // learning_objective_evidence_bindings_v2 (bound to objective revision).
-  // block_content from note_blocks (still exists in V2 schema).
+  const allExpectedById = new Map<string, string>();
+  const expectedById = new Map<string, string>();
+  for (const raw of frozen.evidence_bindings) {
+    if (!raw || typeof raw !== "object") return null;
+    const binding = raw as { evidenceSnapshotId?: unknown; evidenceSnapshotHash?: unknown };
+    if (
+      typeof binding.evidenceSnapshotId !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(binding.evidenceSnapshotId)
+      || typeof binding.evidenceSnapshotHash !== "string"
+      || !/^[0-9a-f]{64}$/i.test(binding.evidenceSnapshotHash)
+    ) {
+      return null;
+    }
+    const previous = allExpectedById.get(binding.evidenceSnapshotId);
+    if (previous && previous !== binding.evidenceSnapshotHash) return null;
+    allExpectedById.set(binding.evidenceSnapshotId, binding.evidenceSnapshotHash);
+    // 模型上下文最多容纳五条 sealed quote。Snapshot 的 binding
+    // 顺序本身冻结，故取前五个不同 evidence 仍是确定性、可审计的子闭包。
+    if (expectedById.size < 5 || expectedById.has(binding.evidenceSnapshotId)) {
+      expectedById.set(binding.evidenceSnapshotId, binding.evidenceSnapshotHash);
+    }
+  }
+  if (expectedById.size === 0) return null;
+
+  // IDs 已按 UUID schema 校验；显式 uuid[] 可避免 postgres-js 对数组 bind 的
+  // 参数歧义；只取 usable 的 sealed evidence。
+  const idsLiteral = `{${[...expectedById.keys()].join(",")}}`;
   const evidenceRows = await tx.execute(sql`
-    SELECT es.protected_quote_ref AS quote_text,
-           nb.content AS block_content,
-           es.support_description
-    FROM learning_episodes ep
-    JOIN learning_objectives_v2 o ON o.objective_id = ep.key_point_id
-    JOIN learning_objective_revisions_v2 rev ON rev.objective_revision_id = o.current_objective_revision_id
-    JOIN learning_objective_evidence_bindings_v2 b ON b.objective_revision_id = rev.objective_revision_id
-    JOIN evidence_snapshots_v2 es ON es.evidence_snapshot_id = b.evidence_snapshot_id
-    LEFT JOIN note_blocks nb ON nb.id = es.block_id AND nb.workspace_id = es.workspace_id
-    WHERE ep.id = ${episodeId}
-      AND ep.session_id = ${sessionId}
-      AND ep.workspace_id = ${scope.workspaceId}
-      AND ep.user_id = ${scope.userId}
-      AND o.workspace_id = ${scope.workspaceId}
-      AND es.workspace_id = ${scope.workspaceId}
+    SELECT DISTINCT es.evidence_snapshot_id,
+           es.evidence_snapshot_hash,
+           es.quote_hash,
+           es.block_content_hash,
+           es.start_offset,
+           es.end_offset,
+           es.created_at,
+           nb.content AS block_content
+    FROM evidence_snapshots_v2 es
+    JOIN evidence_eligibility_states_v2 ees
+      ON ees.workspace_id = es.workspace_id
+      AND ees.evidence_snapshot_id = es.evidence_snapshot_id
+      AND ees.status = 'usable'
+    JOIN note_blocks nb ON nb.id = es.block_id AND nb.workspace_id = es.workspace_id
+    WHERE es.workspace_id = ${scope.workspaceId}
+      AND es.evidence_snapshot_id = ANY(${idsLiteral}::uuid[])
     ORDER BY es.created_at DESC
-    LIMIT 8
-  `) as Array<{
-    quote_text: string | null;
-    block_content: string | null;
-    support_description: string | null;
-  }>;
-  const valid = evidenceRows.filter(() => {
-    // V2: all evidence snapshots that are bound are considered "hard" —
-    // the alignment/effective_override concept was removed.
-    return true;
-  });
-  if (valid.length === 0) return null;
-  const evidence = valid
-    .map((row) => row.block_content?.trim() || row.quote_text?.trim() || row.support_description?.trim() || "")
-    .filter((value) => value.length > 0)
-    .slice(0, 5)
-    .map((value) => value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").slice(0, 1_200));
-  return evidence.length > 0 ? { claim: claim.slice(0, 800), evidence } : null;
+    LIMIT 5
+  `) as GroundedTutorEvidenceRow[];
+  if (evidenceRows.length !== expectedById.size) return null;
+  const rowsWithExpected = evidenceRows.map((row) => ({
+    ...row,
+    expected_evidence_snapshot_hash: expectedById.get(row.evidence_snapshot_id),
+  }));
+  try {
+    const evidence = materializeGroundedTutorEvidence(rowsWithExpected);
+    return evidence.length > 0 ? { claim: claim.slice(0, 800), evidence } : null;
+  } catch {
+    return null;
+  }
 }
 
 function parsePageContextForStore(value: unknown): Record<string, unknown> | null {
@@ -299,9 +373,11 @@ export async function markCompanionRunFailed(
       async (tx) => {
         // fence：只有 run 仍 active 才标记 failed（已被 cancel/supersede → 不写 error event，
         // turn.cancelled 已由 cancel 路径负责）。
+        // waiting_proposal_id 一并清空：终态 run 不得残留挂起确认指针。
         const claimed = await tx.execute<{ id: string }>(sql`
           UPDATE companion_turn_runs
-          SET status = 'failed', error_code = ${code}, finished_at = now()
+          SET status = 'failed', error_code = ${code}, finished_at = now(),
+              waiting_proposal_id = NULL
           WHERE id = ${read.runId} AND status IN ('accepted', 'running')
           RETURNING id
         `);

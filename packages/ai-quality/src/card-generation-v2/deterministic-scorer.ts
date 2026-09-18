@@ -48,8 +48,105 @@ export interface DeterministicScoreV2 {
   passed: boolean;
 }
 
-function normalize(s: string): string {
+/** 匹配用的归一化（去空白 + 小写）。导出以便评测侧复用同一实现，避免判据漂移。 */
+export function normalizeForMatch(s: string): string {
   return s.toLowerCase().replace(/\s+/g, "");
+}
+const normalize = normalizeForMatch;
+
+/** 归一化后的候选视图（匹配用的最小字段集）。 */
+export interface NormCandidateView {
+  id: string;
+  objectiveStatement: string;
+  publicSummary: string;
+  frontPrompt: string;
+  frontCue: string;
+}
+
+/**
+ * "gold 目标是否被某张卡覆盖"的匹配判据（2026-09-17 修复词面假阴性）。
+ *
+ * 旧判据只认"**前 10 字**子串"：候选 statement/summary 含 gold 描述前 10 字，
+ * 或 gold 描述含候选 statement 前 10 字。它对**改写**几乎必然漏判，实测：
+ *
+ *   gold  : 按存放位置说明 Cookie 与 Session 的区别及配合方式
+ *   生成  : 说出Cookie与Session存储位置的区别      ← 语义完全正确，共享 14 字子串
+ *   旧判据: 未命中（gold 以"按存放位置说明"开头、候选以"说出"开头，前 10 字都不含对方）
+ *
+ * 且旧判据**不对称**：检查了 statement→desc，却没检查 summary→desc。
+ *
+ * 新判据（任一命中即算覆盖，三个方向都查）：
+ *   a. 前缀规则（保留，向后兼容既有基线）：任一侧的前 10 字出现在另一侧；
+ *   b. **共享长片段**：两侧存在 ≥ `SHARED_SUBSTRING_MIN` 个归一化字符的公共子串
+ *      —— 中文里 8 字连续重合是强信号（"cookie与session"这类术语/短语）；
+ *   c. **字符二元组 Dice 相似度** ≥ `DICE_THRESHOLD`：容忍语序不同但用词重叠的改写。
+ *
+ * 阈值校准依据：对 dev 语料上 24 个真实生成的 fixture-run 逐对计算，已知正确的
+ * 覆盖对共享子串 ≥8 字或 Dice ≥0.45；而互不相关的目标对 Dice 均 <0.2。
+ * 取 8 / 0.35 留出安全边界——**宁可漏判也不误判**（误判会把"漏卡"粉饰成达标）。
+ */
+export const SHARED_SUBSTRING_MIN = 8;
+export const DICE_THRESHOLD = 0.35;
+
+/** 两串的最长公共子串长度（评测规模下 O(n·m) 可接受；n,m 为短句）。 */
+export function longestCommonSubstringLength(a: string, b: string): number {
+  if (a.length === 0 || b.length === 0) return 0;
+  let best = 0;
+  let previous = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = new Array<number>(b.length + 1).fill(0);
+    for (let j = 1; j <= b.length; j += 1) {
+      if (a[i - 1] === b[j - 1]) {
+        current[j] = previous[j - 1] + 1;
+        if (current[j] > best) best = current[j];
+      }
+    }
+    previous = current;
+  }
+  return best;
+}
+
+/** 字符二元组 Dice 系数（0..1）。 */
+export function bigramDice(a: string, b: string): number {
+  if (a.length < 2 || b.length < 2) return a === b ? 1 : 0;
+  const grams = (s: string): Map<string, number> => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < s.length - 1; i += 1) {
+      const gram = s.slice(i, i + 2);
+      map.set(gram, (map.get(gram) ?? 0) + 1);
+    }
+    return map;
+  };
+  const ga = grams(a);
+  const gb = grams(b);
+  let overlap = 0;
+  for (const [gram, count] of ga) {
+    const other = gb.get(gram);
+    if (other) overlap += Math.min(count, other);
+  }
+  const total = (a.length - 1) + (b.length - 1);
+  return total === 0 ? 0 : (2 * overlap) / total;
+}
+
+/**
+ * 单个 gold 目标描述是否被候选集覆盖。三个方向（statement / summary 对 desc）都查。
+ */
+export function hitObjectiveDescription(
+  description: string,
+  candidates: NormCandidateView[],
+): boolean {
+  const nDesc = normalize(description);
+  const nDescPrefix = nDesc.slice(0, 10);
+  const matches = (field: string): boolean => {
+    if (field.length === 0) return false;
+    // a. 前缀规则（保留旧行为，避免既有基线整体位移）
+    if (field.includes(nDescPrefix) || nDesc.includes(field.slice(0, 10))) return true;
+    // b. 共享长片段
+    if (longestCommonSubstringLength(nDesc, field) >= SHARED_SUBSTRING_MIN) return true;
+    // c. 二元组 Dice
+    return bigramDice(nDesc, field) >= DICE_THRESHOLD;
+  };
+  return candidates.some((c) => matches(c.objectiveStatement) || matches(c.publicSummary));
 }
 
 /**
@@ -81,15 +178,7 @@ export function scoreFixtureDeterministic(
   // 2) critical/important recall（目标描述匹配 objectiveStatement 或 publicSummary）
   const critical = fixture.requiredLearningObjectives.filter((o) => o.priority === "critical");
   const important = fixture.requiredLearningObjectives.filter((o) => o.priority === "important");
-  const hitObjective = (description: string): boolean => {
-    const nDesc = normalize(description);
-    const nDescPrefix = nDesc.slice(0, 10);
-    return normCandidates.some((c) =>
-      c.objectiveStatement.includes(nDescPrefix)
-      || c.publicSummary.includes(nDescPrefix)
-      || nDesc.includes(c.objectiveStatement.slice(0, 10)),
-    );
-  };
+  const hitObjective = (description: string): boolean => hitObjectiveDescription(description, normCandidates);
   const criticalRecall = critical.length === 0 ? 1 : critical.filter((o) => hitObjective(o.description)).length / critical.length;
   const importantRecall = important.length === 0 ? 1 : important.filter((o) => hitObjective(o.description)).length / important.length;
 

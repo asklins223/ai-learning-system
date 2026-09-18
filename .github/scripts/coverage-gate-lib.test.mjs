@@ -28,9 +28,6 @@ const criticalFiles = [
   "workers/ai-worker/src/index.ts",
   "workers/ai-worker/src/lib/job-lease.ts",
   "workers/ai-worker/src/handlers/index.ts",
-  "apps/api/src/modules/evidence/service.ts",
-  "apps/api/src/modules/validation/service.ts",
-  "apps/api/src/modules/review/attempt-service.ts",
   "apps/api/src/modules/import/routes.ts",
   "apps/api/src/modules/export/service.ts",
 ].map((file) => coveredFile(file));
@@ -65,8 +62,6 @@ test("repository and every explicit critical group are evaluated independently",
       { id: "identity", status: "pass", fileCount: 1 },
       { id: "tenant", status: "pass", fileCount: 1 },
       { id: "job-lease", status: "pass", fileCount: 4 },
-      { id: "evidence", status: "pass", fileCount: 2 },
-      { id: "validation-review", status: "pass", fileCount: 3 },
       { id: "import-export", status: "pass", fileCount: 2 },
     ],
   );

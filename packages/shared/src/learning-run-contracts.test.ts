@@ -23,7 +23,6 @@ import {
   submitTaskArtifactReceiptSchema,
   learningTaskPublicSchema,
   taskInteractionSchema,
-  structuredPartPublicSchema,
 } from "./learning-run-contracts.ts";
 
 const uuid = () => crypto.randomUUID();
@@ -590,30 +589,6 @@ test("taskInteractionSchema：structured_bundle 长度 1–2", () => {
     taskInteractionSchema.safeParse({
       kind: "structured_bundle",
       parts: [{ ...part, labels: { a: "不属于公开合同" } }],
-    }).success,
-    false,
-  );
-});
-
-test("structuredPartPublicSchema：scenario/choice ceiling 不能超过 diagnostic", () => {
-  assert.equal(
-    structuredPartPublicSchema.safeParse({
-      kind: "scenario",
-      partId: "p",
-      steps: [{ stepId: "s1", publicOptionIds: ["o1", "o2"] }],
-      partTrustCeiling: "facet_eligible",
-      qualificationProfileHash: null,
-    }).success,
-    false,
-  );
-  assert.equal(
-    structuredPartPublicSchema.safeParse({
-      kind: "choice",
-      partId: "p",
-      publicOptionIds: ["o1", "o2"],
-      rationaleModes: ["text"],
-      partTrustCeiling: "mastery_eligible",
-      qualificationProfileHash: null,
     }).success,
     false,
   );

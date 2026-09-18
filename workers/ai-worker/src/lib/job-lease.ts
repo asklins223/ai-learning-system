@@ -4,7 +4,7 @@ import {
   withWorkerWorkspaceTransaction,
   type WorkerTransaction,
 } from "../db.ts";
-import * as schema from "../schema/index.ts";
+import * as schema from "@ailearn/shared/db-schema";
 
 export interface JobLeaseContext {
   id: string;

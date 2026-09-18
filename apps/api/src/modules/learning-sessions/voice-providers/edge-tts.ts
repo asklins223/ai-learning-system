@@ -5,7 +5,7 @@
  * 暴露 OpenAI 协议端点 POST /v1/audio/speech；本 provider 经
  * EDGE_TTS_BASE_URL（默认 http://edge-tts:8080）调用容器。
  *
- * 兼容性：与 openai-compatible-tts 共享相同请求形状（OpenAI 协议），
+ * 请求形状遵循 openai-compatible-tts 使用的 OpenAI 协议，
  * 因此 API 侧可无缝在 edge-tts 容器与自定义 OpenAI 协议 TTS 服务间切换。
  *
  * 真实请求验证（2026-08-08）：
@@ -41,6 +41,94 @@ const DEFAULT_BASE_URL = "http://edge-tts:8080";
 const DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * edge-tts 并发闸（AI P2，2026-09-15 审计）。
+ *
+ * edge 路径此前**没有任何并发限制**：三个调用点（voice-routes 的流式 / 伴星 /
+ * 普通朗读）可以无限并发打到容器内的 edge-tts 服务。当前客户端按 ordinal 串行
+ * 请求，所以问题尚未暴露——但服务端不该依赖客户端的良好行为。
+ *
+ * 选择"有界并发"（默认 4）而非 qwen 那样的**按用户串行**：edge-tts 是无状态
+ * HTTP 服务（不像 qwen 需要复用 WS 连接、也没有每用户单连接的约束），按用户
+ * 串行只会无谓拉长多段合成的总时长。两者共享同一个"有界总量"的思路，只是
+ * 键的粒度不同（qwen 另有一层按用户串行，见 qwen-tts.ts）。
+ * 可用 `EDGE_TTS_MAX_CONCURRENCY` 调整；非法值回退 4。
+ *
+ * 名额与**流式响应的生命周期**绑定（见 bindSlotToStream）：流式合成的容器侧工作发生在
+ * 消费期间，不能在函数返回时就释放。
+ */
+const DEFAULT_MAX_CONCURRENCY = 4;
+
+export function resolveEdgeTtsMaxConcurrency(
+  raw: string | undefined = process.env.EDGE_TTS_MAX_CONCURRENCY,
+): number {
+  const parsed = Number(raw ?? DEFAULT_MAX_CONCURRENCY);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_CONCURRENCY;
+}
+
+let activeEdgeTtsRequests = 0;
+const edgeTtsWaiters: Array<() => void> = [];
+
+async function acquireEdgeTtsSlot(): Promise<void> {
+  if (activeEdgeTtsRequests < resolveEdgeTtsMaxConcurrency()) {
+    activeEdgeTtsRequests += 1;
+    return;
+  }
+  // 无可用名额：挂起；releaseEdgeTtsSlot 会把名额**直接移交**过来（计数不变）。
+  await new Promise<void>((resolveWaiter) => edgeTtsWaiters.push(resolveWaiter));
+}
+
+function releaseEdgeTtsSlot(): void {
+  const next = edgeTtsWaiters.shift();
+  if (next) {
+    next(); // 名额移交，占用数不变
+    return;
+  }
+  activeEdgeTtsRequests = Math.max(0, activeEdgeTtsRequests - 1);
+}
+
+/** 测试钩子：当前占用中的请求数。 */
+export function edgeTtsActiveRequestCount(): number {
+  return activeEdgeTtsRequests;
+}
+
+/** 测试钩子：清空等待队列与占用计数（避免用例之间互相影响）。 */
+export function resetEdgeTtsGateForTests(): void {
+  edgeTtsWaiters.length = 0;
+  activeEdgeTtsRequests = 0;
+}
+
+/** 把流的名额释放绑定到流结束 / 出错 / 被取消。 */
+function bindSlotToStream(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  let released = false;
+  const releaseOnce = () => {
+    if (released) return;
+    released = true;
+    releaseEdgeTtsSlot();
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          releaseOnce();
+          controller.close();
+          return;
+        }
+        if (value) controller.enqueue(value);
+      } catch (err) {
+        releaseOnce();
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      releaseOnce();
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+}
+
 export class EdgeTtsError extends DomainError {
   readonly status?: number;
   constructor(code: string, message: string, status?: number) {
@@ -55,7 +143,27 @@ export class EdgeTtsError extends DomainError {
  * @param voice edge-tts voice id（如 zh-CN-XiaoxiaoNeural）
  * @param options 配置
  */
+/**
+ * 合成一段语音（受并发闸约束；实现见 edgeTtsSynthesizeUngated）。
+ *
+ * @param text 待合成文本
+ * @param voice edge-tts voice id（如 zh-CN-XiaoxiaoNeural）
+ * @param options 配置
+ */
 export async function edgeTtsSynthesize(
+  text: string,
+  voice: string,
+  options: EdgeTtsProviderOptions = {},
+): Promise<EdgeTtsSynthesizeResult> {
+  await acquireEdgeTtsSlot();
+  try {
+    return await edgeTtsSynthesizeUngated(text, voice, options);
+  } finally {
+    releaseEdgeTtsSlot();
+  }
+}
+
+async function edgeTtsSynthesizeUngated(
   text: string,
   voice: string,
   options: EdgeTtsProviderOptions = {},
@@ -130,6 +238,23 @@ export interface EdgeTtsStreamResult {
  * 头到达后不再整体 abort（长句流式）。
  */
 export async function edgeTtsSynthesizeStream(
+  text: string,
+  voice: string,
+  options: EdgeTtsProviderOptions = {},
+): Promise<EdgeTtsStreamResult> {
+  await acquireEdgeTtsSlot();
+  let slotTransferred = false;
+  try {
+    const result = await edgeTtsSynthesizeStreamUngated(text, voice, options);
+    // 名额随流走：流结束/出错/被取消时才释放。
+    slotTransferred = true;
+    return { ...result, stream: bindSlotToStream(result.stream) };
+  } finally {
+    if (!slotTransferred) releaseEdgeTtsSlot();
+  }
+}
+
+async function edgeTtsSynthesizeStreamUngated(
   text: string,
   voice: string,
   options: EdgeTtsProviderOptions = {},

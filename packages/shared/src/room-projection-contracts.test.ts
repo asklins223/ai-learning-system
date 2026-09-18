@@ -33,6 +33,14 @@ test("RoomProjectionV1 is strict and preserves independent section state", () =>
   assert.throws(() => roomProjectionV1Schema.parse({ ...projection, privateAnswer: "never" }));
   assert.throws(() => roomProjectionV1Schema.parse({
     ...projection,
+    librarySummary: { state: "data", data: { notes: 0, activeObjectives: 0, needsRepair: 0 } },
+  }));
+  assert.throws(() => roomProjectionV1Schema.parse({
+    ...projection,
     sectionStates: { ...projection.sectionStates, queueSummary: { state: "data" as const } },
+  }));
+  assert.throws(() => roomProjectionV1Schema.parse({
+    ...projection,
+    sectionStates: { ...projection.sectionStates, suggestedNoteSummary: { state: "empty" as const } },
   }));
 });

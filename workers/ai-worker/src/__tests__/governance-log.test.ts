@@ -72,7 +72,7 @@ test("logAICall: 可选字段使用默认值", async () => {
       userId: "user-1",
       provider: "dashscope",
       modelId: "qwen-plus",
-      operation: "evaluate_validation",
+      operation: "companion_agent",
     },
     {
       getPolicy: async () => ({

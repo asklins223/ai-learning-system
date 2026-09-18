@@ -5,14 +5,8 @@
  * `/v1/rerank` 是独立格式（model/query/documents/top_n）。
  *
  * 本 Provider 只实现 embedding 和 rerank 两种能力，不实现文本生成：
- * 文本/视觉主 provider 仍由 AI_PROVIDER_AGENT_TURN 决定（如 openai_compatible）。
+ * 文本/视觉主 provider 由 agent_turn capability 配置决定。
  * 这符合设计文档 §7.4 的 "Embedding Provider 与生成 Provider 分开配置"。
- *
- * 环境变量：
- *   SILICONFLOW_API_KEY             必需
- *   SILICONFLOW_BASE_URL            默认 https://api.siliconflow.cn/v1
- *   SILICONFLOW_EMBEDDING_MODEL     默认 BAAI/bge-m3
- *   SILICONFLOW_RERANK_MODEL        默认 BAAI/bge-reranker-v2-m3
  *
  * 降级契约：embed() 失败返回 null（上游 HybridSearchEngine 自动降级到 lexical/sequential），
  * rerank() 失败抛出或返回空结果，由 reranker.ts 服务层降级到原序。
@@ -59,21 +53,17 @@ export class SiliconFlowProvider implements EmbeddingProviderLike {
   private readonly request: PublicJsonRequester;
 
   constructor(options: SiliconFlowProviderOptions = {}) {
-    const apiKey = options.apiKey ?? process.env.SILICONFLOW_API_KEY;
+    const apiKey = options.apiKey;
     if (!apiKey) {
       throw new Error("SILICONFLOW_API_KEY is required for SiliconFlowProvider");
     }
     this.apiKey = apiKey;
     this.embeddingModelId = options.embeddingModel
-      ?? process.env.SILICONFLOW_EMBEDDING_MODEL
       ?? "BAAI/bge-m3";
     this.rerankModelId = options.rerankModel
-      ?? process.env.SILICONFLOW_RERANK_MODEL
       ?? "BAAI/bge-reranker-v2-m3";
     this.baseUrl = normalizeBaseUrl(
-      options.baseUrl
-        ?? process.env.SILICONFLOW_BASE_URL
-        ?? "https://api.siliconflow.cn/v1",
+      options.baseUrl ?? "https://api.siliconflow.cn/v1",
     );
     this.request = options.request ?? postJsonToPublicEndpoint;
   }
@@ -81,6 +71,23 @@ export class SiliconFlowProvider implements EmbeddingProviderLike {
   /** 生成文本 embedding 向量。失败返回 null 触发上游降级。 */
   async embed(text: string, signal?: AbortSignal): Promise<number[] | null> {
     try {
+      // 保守字符上限：CJK 约 1 token ≈ 1.5 chars，1500 chars ≈ 1000-1500 tokens，
+      // 安全落在 bge-m3 的 8192 token 上限内。
+      //
+      // 2026-09-15（管线评审 L4）：截断此前完全静默——长文本尾部语义丢失且无
+      // 任何观测痕迹（检索召回下降无法归因）。现在超限即告警（只记长度，
+      // 不记文本内容）。
+      const EMBED_MAX_CHARS = 1500;
+      if (text.length > EMBED_MAX_CHARS) {
+        logger.warn(
+          {
+            model: this.embeddingModelId,
+            textLength: text.length,
+            limit: EMBED_MAX_CHARS,
+          },
+          "SiliconFlow embedding input truncated (尾部语义丢失；如需完整语义请先分块)",
+        );
+      }
       const response = await this.request(
         `${this.baseUrl}/embeddings`,
         {
@@ -90,9 +97,7 @@ export class SiliconFlowProvider implements EmbeddingProviderLike {
         },
         {
           model: this.embeddingModelId,
-          // 保守字符上限：CJK 约 1 token ≈ 1.5 chars，1500 chars ≈ 1000-1500 tokens，
-          // 安全落在 bge-m3 的 8192 token 上限内。
-          input: [text.slice(0, 1500)],
+          input: [text.slice(0, EMBED_MAX_CHARS)],
           encoding_format: "float",
         },
         signal,
@@ -171,7 +176,7 @@ import { registerFactory } from "../provider-factory.ts";
 import type { CapabilityImpl } from "@ailearn/shared";
 
 registerFactory("siliconflow", "embedding", (config) => {
-  const apiKey = config.apiKey ?? process.env.SILICONFLOW_API_KEY;
+  const apiKey = config.apiKey;
   if (!apiKey) return null;
   return new SiliconFlowProvider({
     apiKey,
@@ -181,7 +186,7 @@ registerFactory("siliconflow", "embedding", (config) => {
 });
 
 registerFactory("siliconflow", "rerank", (config) => {
-  const apiKey = config.apiKey ?? process.env.SILICONFLOW_API_KEY;
+  const apiKey = config.apiKey;
   if (!apiKey) return null;
   return new SiliconFlowProvider({
     apiKey,

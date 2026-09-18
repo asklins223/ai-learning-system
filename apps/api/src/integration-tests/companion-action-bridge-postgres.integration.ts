@@ -1,7 +1,7 @@
 /**
  * P5 §6.7 固定测试：learning menu context adapter（只读）。
  * - 无 learning 数据 → resume/start 候选 null（菜单项 disabled）+ revision 稳定；
- * - 有 active learning_session → resume 候选非 null（payload sha256 合法）；
+ * - 有 active learning run → resume 候选非 null（payload sha256 合法）；
  * - 同数据两次调用 contextRevision 相同（稳定 revision）。
  */
 
@@ -28,7 +28,7 @@ after(async () => {
   await closeDatabase();
 });
 
-const { resolveCompanionLearningContext, getCompanionLearningSessionContext } = await import(
+const { resolveCompanionLearningContext, createCompanionLearningRunContextGrant, getCompanionLearningRunContext } = await import(
   "../modules/companion-conversation/learning-action-bridge.ts"
 );
 const { createRunV2 } = await import("../modules/learning-runs/run-service.ts");
@@ -54,8 +54,8 @@ test("P5 §6.7：无 learning 数据 → resume/start 候选 null（disabled）+
     const ctx = await resolveCompanionLearningContext({ workspaceId, userId });
     assert.equal(ctx.version, 1);
     assert.match(ctx.contextRevision, /^[a-f0-9]{64}$/);
-    assert.equal(ctx.resumeCandidate, null);
-    assert.equal(ctx.startCandidate, null);
+    assert.equal(ctx.learningRunResumeCandidate, null);
+    assert.equal(ctx.learningRunStartCandidate, null);
     // 同数据两次调用 revision 相同（稳定）
     const ctx2 = await resolveCompanionLearningContext({ workspaceId, userId });
     assert.equal(ctx2.contextRevision, ctx.contextRevision);
@@ -67,7 +67,7 @@ test("P5 §6.7：无 learning 数据 → resume/start 候选 null（disabled）+
 test("P5 §6.7：有进行中 learning run → learning_run_resume 候选非 null（payload sha256 合法）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
   // 2026-08-23 对齐：桥接已切 V2（Plan 23 CS-05/CS-06）——候选从
-  // learning_objectives_v2 派生，learning_sessions 旧路径已退役。
+  // learning_objectives_v2 派生当前 LearningRun 候选。
   const obj = await addV2ObjectiveToWorkspace(sql, workspaceId, userId, {
     objectiveStatement: "resume 候选测试目标",
     publicSummary: "resume",
@@ -166,9 +166,15 @@ test("P5 §6.7：menu proposal create 原子（双消息 + proposal pending + ac
   }
 });
 
-async function seedOpenReviewProposal(ws: string, uid: string, cid: string): Promise<{ proposalId: string; conversationId: string; cleanup: () => Promise<void> }> {
+async function seedOpenReviewProposal(ws: string, uid: string, cid: string): Promise<{
+  proposalId: string;
+  conversationId: string;
+  payloadSha256: string;
+  cleanup: () => Promise<void>;
+}> {
   const proposalId = randomUUID();
   const userMsg = randomUUID();
+  const payloadSha256 = sha256Utf8V1(canonicalJsonV1({ kind: "open_review" }));
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
     await tx`SELECT set_config('app.user_id', ${uid}, true)`;
@@ -183,7 +189,7 @@ async function seedOpenReviewProposal(ws: string, uid: string, cid: string): Pro
               idempotency_key_hash, expires_at)
              VALUES (${proposalId}, ${ws}, ${uid}, ${cid}, ${userMsg}, 1,
                      ${{ kind: "open_review" } as never},
-                     ${sha256Utf8V1(canonicalJsonV1({ kind: "open_review" }))},
+                     ${payloadSha256},
                      '复习', '今日复习', '打开复习页', 'pending', ${"b".repeat(64)},
                      now() + interval '30 minutes')`;
   });
@@ -192,14 +198,11 @@ async function seedOpenReviewProposal(ws: string, uid: string, cid: string): Pro
       await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
       await tx`SELECT set_config('app.user_id', ${uid}, true)`;
       await tx`DELETE FROM companion_messages WHERE action_ref IS NOT NULL AND workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${ws}`;
-      await tx`UPDATE companion_action_proposals SET action_run_id = NULL WHERE workspace_id = ${ws}`;
-      await tx`DELETE FROM companion_action_runs WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_action_proposals WHERE workspace_id = ${ws}`;
       await tx`DELETE FROM companion_conversations WHERE workspace_id = ${ws}`;
     });
   };
-  return { proposalId, conversationId: cid, cleanup };
+  return { proposalId, conversationId: cid, payloadSha256, cleanup };
 }
 
 test("P5 §6.6：reject 原子零副作用；confirm 纯导航同步 succeeded + action.decision", async () => {
@@ -212,7 +215,8 @@ test("P5 §6.6：reject 原子零副作用；confirm 纯导航同步 succeeded +
     );
     // reject → 200 rejected + decision 落库
     const rejected = await decideCompanionProposal({
-      workspaceId, userId, proposalId: s1.proposalId, decision: "reject", idempotencyKey: randomUUID(),
+      workspaceId, userId, proposalId: s1.proposalId, decision: "reject",
+      expectedPayloadSha256: s1.payloadSha256, idempotencyKey: randomUUID(),
     }) as { status: string };
     assert.equal(rejected.status, "rejected");
     const row = await sql.begin(async (tx) => {
@@ -225,11 +229,11 @@ test("P5 §6.6：reject 原子零副作用；confirm 纯导航同步 succeeded +
     await s1.cleanup();
 
     // confirm 纯导航（open_review）→ 200 succeeded + action.decision event。
-    // §6.6/合同 1018：纯导航不创建 action run（action.completed 要求
-    // actionRunId 非空），同步 succeeded response 本身就是完成证明。
+    // 同步 succeeded response 本身就是完成证明。
     const s2 = await seedOpenReviewProposal(workspaceId, userId, cid);
     const confirmed = await decideCompanionProposal({
-      workspaceId, userId, proposalId: s2.proposalId, decision: "confirm", idempotencyKey: randomUUID(),
+      workspaceId, userId, proposalId: s2.proposalId, decision: "confirm",
+      expectedPayloadSha256: s2.payloadSha256, idempotencyKey: randomUUID(),
     }) as { status: string; route: { kind: string } | null };
     assert.equal(confirmed.status, "succeeded");
     // route.kind 是 AllowedMainRouteV1 枚举（"review"），不是 proposal kind。
@@ -237,10 +241,9 @@ test("P5 §6.6：reject 原子零副作用；confirm 纯导航同步 succeeded +
     const events = await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      return tx`SELECT type, payload FROM companion_stream_events WHERE conversation_id = ${cid} AND type IN ('action.decision', 'action.completed') ORDER BY seq`;
+      return tx`SELECT type, payload FROM companion_stream_events WHERE conversation_id = ${cid} AND type = 'action.decision' ORDER BY seq`;
     });
     assert.ok(events.some((e) => e.type === "action.decision"), "action.decision event");
-    assert.equal(events.some((e) => e.type === "action.completed"), false, "纯导航不得伪造 action.completed（无 action run）");
     await s2.cleanup();
   } finally {
     await baseCleanup();
@@ -249,7 +252,7 @@ test("P5 §6.6：reject 原子零副作用；confirm 纯导航同步 succeeded +
 
 test("P5 §6.6：confirm learning_run_start 动作 → 同步建 Run succeeded（resultRef=runId）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
-  // 2026-08-23 对齐：V2 候选（learning_run_start），不再种 learning_sessions。
+  // V2 候选（learning_run_start）不需要预置旧过程表。
   const obj = await addV2ObjectiveToWorkspace(sql, workspaceId, userId, {
     objectiveStatement: "confirm 动作测试目标",
     publicSummary: "confirm",
@@ -272,12 +275,13 @@ test("P5 §6.6：confirm learning_run_start 动作 → 同步建 Run succeeded�
     }) as { proposal: { proposalId: string } };
     const decided = await decideCompanionProposal({
       workspaceId, userId, proposalId: created.proposal.proposalId,
-      decision: "confirm", idempotencyKey: randomUUID(),
-    }) as { status: string; actionRunId: string | null; resultRef?: string };
+      decision: "confirm",
+      expectedPayloadSha256: ctx.learningRunStartCandidate!.payloadSha256,
+      idempotencyKey: randomUUID(),
+    }) as { status: string; resultRef?: string };
     assert.equal(decided.status, "succeeded");
-    assert.equal(decided.actionRunId, null, "V2 同步路径无异步 action run");;
     // 2026-08-23 实证对齐：V2 learning_run_start 的 confirm 同步创建
-    // LearningRun（succeeded + resultRef=runId），不再走异步 action run/job。
+    // LearningRun（succeeded + resultRef=runId）在同一事务内完成。
     assert.equal(decided.status, "succeeded");
     const resultRef = (decided as { resultRef?: string }).resultRef;
     assert.ok(resultRef, "resultRef 应携带新 LearningRun id");
@@ -293,60 +297,46 @@ test("P5 §6.6：confirm learning_run_start 动作 → 同步建 Run succeeded�
   }
 });
 
-test("P5 §6.7：context-grants 签发（HMAC + 5min TTL + episode 解引用）", async () => {
+test("P5 §6.7：LearningRun context grant 签发（HMAC + 5min TTL）", async () => {
   const { workspaceId, userId, cleanup } = await seedBase();
-  // 使用 V2 objective（挂到 seedBase 同一工作区；替代旧 learning_cards + card_key_points）
   const obj = await addV2ObjectiveToWorkspace(sql, workspaceId, userId, {
     objectiveStatement: "context-grant 测试",
     publicSummary: "grant",
     front: { cue: "grant", prompt: "什么是 grant？" },
   });
-  const cardId = obj.cardId;
-  const kpId = obj.objectiveId;
   try {
-    const sessionId = randomUUID();
-    const episodeId = randomUUID();
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`INSERT INTO learning_sessions (id, workspace_id, user_id, origin, origin_ref, intent, status)
-               VALUES (${sessionId}, ${workspaceId}, ${userId}, 'card', ${{ cardId } as never}, 'resume', 'active')`;
-      await tx`INSERT INTO learning_episodes
-               (id, session_id, workspace_id, user_id, key_point_id, origin, origin_ref, intent,
-                formal_eligibility_kind, formal_plan, scheduling_decision, episode_target_fingerprint,
-                content_exposure_key, rubric_targets, max_turns,
-                assistance_policy_version, rubric_policy_version, scene_policy_version,
-                assessment_policy_version, mastery_policy_version, scheduler_policy_version,
-                provider_policy_version, commit_policy_version, provider_config_id, model_id,
-                capability_snapshot_hash, runtime_epoch_snapshot, episode_epoch,
-                budget_envelope_ref, budget_envelope_hash, plan_hash, status, processing_phase)
-               VALUES (${episodeId}, ${sessionId}, ${workspaceId}, ${userId}, ${kpId}, 'card',
-                       ${{ cardId, keyPointId: kpId } as never}, 'resume', 'formal',
-                       ${{ plan: "p" } as never}, ${{ decision: "d" } as never},
-                       'fp', 'cek', ${[] as never}, 1,
-                       '1', '1', '1', '1', '1', '1', '1', '1', 'pc', 'm',
-                       ${"0".repeat(64)}, 0, 0,
-                       'ref', ${"1".repeat(64)}, ${"2".repeat(64)}, 'active', 'awaiting_response')`;
-    });
-    const { createCompanionContextGrant } = await import(
-      "../modules/companion-conversation/learning-action-bridge.ts"
+    const run = await withWorkspaceTransaction(
+      { workspaceId, userId },
+      async (tx) => createRunV2(tx, {
+        workspaceId,
+        userId,
+        request: {
+          originV2: { kind: "card", cardId: obj.cardId, objectiveId: obj.objectiveId },
+          goal: "stabilize",
+          idempotencyKey: `grant-${workspaceId.slice(0, 8)}`,
+        },
+      }),
     );
-    const pageContext = await getCompanionLearningSessionContext({ workspaceId, userId, sessionId, episodeId });
-    const grant = await createCompanionContextGrant({
-      workspaceId, userId,
-      sessionId,
+    const pageContext = await getCompanionLearningRunContext({ workspaceId, userId, runId: run.runId });
+    const context = pageContext.body as { contextRevision: string; taskId: string };
+    const grant = await createCompanionLearningRunContextGrant({
+      workspaceId,
+      userId,
+      runId: run.runId,
       body: {
         version: 1,
         pageInstanceId: randomUUID(),
-        episodeId,
-        contextRevision: (pageContext.body as { contextRevision: string }).contextRevision,
+        taskId: context.taskId,
+        contextRevision: context.contextRevision,
       },
     });
     const parsedGrant = companionGroundedTutorGrantV1Schema.safeParse(grant);
     assert.equal(parsedGrant.success, true, "grant 必须符合共享合同");
-    const typedGrant = grant as { grantId: string; sessionId: string; expiresAt: string; signature: string; version: number };
+    const typedGrant = grant as { runId: string; snapshotId: string; taskId: string; expiresAt: string; signature: string; version: number };
     assert.equal(typedGrant.version, 1);
-    assert.equal(typedGrant.sessionId, sessionId, "episode 解引用到 session");
+    assert.equal(typedGrant.runId, run.runId);
+    assert.equal(typedGrant.taskId, context.taskId);
+    assert.ok(typedGrant.snapshotId);
     assert.match(typedGrant.signature, /^[a-f0-9]{64}$/, "HMAC-SHA256 签名");
     const ttlMs = new Date(typedGrant.expiresAt).getTime() - Date.now();
     assert.ok(ttlMs <= 5 * 60_000 && ttlMs > 4 * 60_000, "5min TTL");

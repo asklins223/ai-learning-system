@@ -99,6 +99,35 @@ test("assessStructuredPayload：relation 匹配/错误", () => {
   );
 });
 
+test("assessStructuredPayload：relation 不得靠穷举全部组合作弊", () => {
+  const task = generateRelationTask(target);
+  const nodes = task.interaction.publicNodeIds;
+  // 2 节点 × 6 种 edge kind = 12 种组合，提交上限 16 —— 全量提交必然包含 required。
+  const exhaustive = nodes.flatMap((from) =>
+    nodes.filter((to) => to !== from).flatMap((to) =>
+      task.interaction.allowedEdgeKinds.map((edgeKind) => ({ fromNodeId: from, toNodeId: to, edgeKind }))));
+  const required = task.solution.requiredEdges[0];
+  assert.ok(
+    exhaustive.some((e) => e.fromNodeId === required.fromNodeId && e.toNodeId === required.toNodeId && e.edgeKind === required.edgeKind),
+    "穷举集合必须覆盖 required（前提校验）",
+  );
+  assert.equal(assessStructuredPayload("relation", { edges: exhaustive }, task.solution).verdict, "partial");
+  // 正确边 + 一条多余边：不得判 covered。
+  assert.equal(
+    assessStructuredPayload("relation", {
+      edges: [...task.solution.requiredEdges, { fromNodeId: "node:claim", toNodeId: "node:quote", edgeKind: "precedes" }],
+    }, task.solution).verdict,
+    "partial",
+  );
+  // 重复提交同一条正确边同样不算正确。
+  assert.equal(
+    assessStructuredPayload("relation", {
+      edges: [required, { ...required }],
+    }, task.solution).verdict,
+    "partial",
+  );
+});
+
 test("assessStructuredPayload：repair 签名匹配/错误", () => {
   const task = generateRepairTask(target);
   const accepted = task.solution.acceptedOperationSignatures[0];

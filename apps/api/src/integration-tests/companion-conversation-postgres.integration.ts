@@ -28,10 +28,18 @@ import {
   deleteCompanionConversation,
 } from "../modules/companion-conversation/companion-conversations-service.ts";
 import { openCompanionEventStream } from "../modules/companion-conversation/companion-events.ts";
-import { exportCompanionData } from "../modules/companion-conversation/companion-export.ts";
+import { exportCompanionDataStream } from "../modules/companion-conversation/companion-export.ts";
 import { transcribeCompanionDialogueAudio } from "../modules/learning-sessions/companion-voice-service.ts";
 import { execFileSync } from "node:child_process";
 import { closeDatabase } from "../db/client.ts";
+
+async function collectCompanionExport(args: { workspaceId: string; userId: string }) {
+  const ndjson: string[] = [];
+  const result = await exportCompanionDataStream(args, (line) => {
+    ndjson.push(line);
+  });
+  return result.ok ? { ok: true as const, ndjson } : result;
+}
 
 test.after(async () => {
   // postgres-js 的 end() 在 Node 21+ 下 socket close 偶发不 resolve；用 race 限时兜底。
@@ -135,7 +143,7 @@ test("P2 原子 turn create：user message + run + turn.accepted event + job + c
     assert.equal(Number(rows.conv[0].next_event_seq), 2);
     assert.equal(Number(rows.conv[0].next_generation), 2);
     assert.equal(rows.conv[0].title_source, "auto", "首条消息应生成 auto title");
-    assert.equal(rows.job[0].type, "companion_dialogue");
+    assert.equal(rows.job[0].type, "companion_agent");
   } finally {
     await cleanup();
   }
@@ -294,7 +302,7 @@ test("P2 SSE：replay turn.accepted + after 推进 + INVALID_CURSOR/CURSOR_EXPIR
       workspaceId, userId, conversationId,
       afterRaw: "0", lastEventId: null,
       writer: {
-        write: (c) => chunks.push(c),
+        write: (c) => { chunks.push(c); return true; },
         onAbort: (cb: () => void) => { abortRef.fn = cb; },
         close: () => { closed = true; },
       },
@@ -359,7 +367,7 @@ test("P2 SSE：连接限制——同 conversation 第 4 条连接 429", async ()
     assert.equal(r1.statusCode, 200);
     assert.equal(r2.statusCode, 200);
     assert.equal(r3.statusCode, 200);
-    // start() 才会注册 onAbort（释放 slot 的回调）
+    // openCompanionEventStream() 在首个 DB await 前就注册 onAbort（释放 slot 的回调）
     for (const r of [r1, r2, r3]) if ("stream" in r) r.stream.start();
     const r4 = await openOne();
     assert.equal(r4.statusCode, 429);
@@ -614,7 +622,7 @@ test("P2 §12：export NDJSON（manifest 首行/footer 末行/hash/counts + acti
       await tx`UPDATE companion_turn_runs SET status = 'succeeded' WHERE id = ${runId}`;
     });
 
-    const result = await exportCompanionData({ workspaceId, userId });
+    const result = await collectCompanionExport({ workspaceId, userId });
     assert.equal(result.ok, true);
     if (!result.ok) return;
     const lines = result.ndjson;
@@ -628,7 +636,6 @@ test("P2 §12：export NDJSON（manifest 首行/footer 末行/hash/counts + acti
     assert.ok(last.counts.conversations >= 1);
     assert.ok(last.counts.messages >= 1);
     assert.equal(last.counts.actionProposals, 0);
-    assert.equal(last.counts.actionRuns, 0);
 
     // recordsSha256：manifest 至 footer 前一行止的原始 bytes（每行含 LF）
     const { createHash } = await import("node:crypto");
@@ -656,7 +663,7 @@ test("P2 §12：export 有 active turn → 409 RUN_ALREADY_ACTIVE", async () => 
       body: turnBody(randomUUID()),
     });
     assert.equal(created.statusCode, 202);
-    const result = await exportCompanionData({ workspaceId, userId });
+    const result = await collectCompanionExport({ workspaceId, userId });
     assert.equal(result.ok, false);
     if (!result.ok) {
       assert.equal(result.statusCode, 409);
@@ -667,17 +674,11 @@ test("P2 §12：export 有 active turn → 409 RUN_ALREADY_ACTIVE", async () => 
   }
 });
 
-
-
-
-
-test("P2 §14：dialogue flag off 时 P1 路径不受影响（fixture 回退开关 + shell 正常）", () => {
-  // bootstrap fail-closed 单测已覆盖 textConversation=false；此处验证 flag 开关语义：
-  // textConversationEnabled=false → PetRuntimeProvider 走 fixture（web 侧测试锁定），
-  // companion-shell（P1）不依赖该 flag。
-  assert.equal(process.env.COMPANION_DIALOGUE_V1_ENABLED === "true", false, "dev 未显式开启时默认关闭");
-});
-
+// 原 "dialogue flag off 时 P1 路径不受影响" 用例只断言环境变量不等于 "true"
+// （同义反复：不碰 preHandler，也不碰任何产品行为），且在本仓库
+// docker-compose.dev.yml 默认开启该 flag 的机器上必然失败。已由
+// modules/companion-conversation/routes.test.ts 取代——那里直接覆盖
+// requireCompanionDialogue 的 404 fail-closed 契约。
 function makeTestAudio(durationSeconds: number): Buffer {
   return execFileSync("ffmpeg", [
     "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
@@ -983,7 +984,7 @@ test("P3 §11.3：Companion TTS 合成（strict ref 重读 event）", async () =
   }
 });
 
-test("H1 回归：DELETE 带 P5 proposal/action run 的 conversation 不触发 FK violation（0092 source/result_message_id 无 CASCADE，必须先删 proposals/runs 再删 messages）", async () => {
+test("H1 回归：DELETE 带 P5 proposal 的 conversation 不触发 FK violation", async () => {
   const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
   const messageId = randomUUID();
   const proposalId = randomUUID();
@@ -1000,8 +1001,8 @@ test("H1 回归：DELETE 带 P5 proposal/action run 的 conversation 不触发 F
          payload, payload_sha256, title, target_summary, impact_summary, status,
          decision_key_hash, idempotency_key_hash, expires_at)
         VALUES (${proposalId}, ${workspaceId}, ${userId}, ${conversationId}, ${messageId}, 0,
-                ${{ kind: "resume_session", sessionId: randomUUID() } as never},
-                ${"b".repeat(64)}, '继续学习', '继续当前学习', '恢复会话', 'pending',
+                ${{ kind: "open_review" } as never},
+                ${"b".repeat(64)}, '打开复习', '今日复习', '打开复习页', 'pending',
                 ${randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "")},
                 ${randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "")},
                 now() + interval '30 minutes')`;
@@ -1037,74 +1038,6 @@ test("H1 回归：DELETE 带 P5 proposal/action run 的 conversation 不触发 F
   }
 });
 
-test("P2 §12：delete 有 active action run（accepted）→ 409 RUN_ALREADY_ACTIVE 且零删除", async () => {
-  const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
-  const messageId = randomUUID();
-  const proposalId = randomUUID();
-  const actionRunId = randomUUID();
-  try {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`INSERT INTO companion_messages
-        (id, workspace_id, user_id, conversation_id, seq, role, kind, blocks, content_sha256)
-        VALUES (${messageId}, ${workspaceId}, ${userId}, ${conversationId}, 1, 'user', 'action',
-                ${JSON.stringify([{ type: "text", text: "请继续当前学习" }])}, ${"a".repeat(64)})`;
-      await tx`INSERT INTO companion_action_proposals
-        (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
-         payload, payload_sha256, title, target_summary, impact_summary, status,
-         decision_key_hash, idempotency_key_hash, expires_at)
-        VALUES (${proposalId}, ${workspaceId}, ${userId}, ${conversationId}, ${messageId}, 0,
-                ${{ kind: "resume_session", sessionId: randomUUID() } as never},
-                ${"b".repeat(64)}, '继续学习', '继续当前学习', '恢复会话', 'accepted',
-                ${randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "")},
-                ${randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "")},
-                now() + interval '30 minutes')`;
-      await tx`INSERT INTO companion_action_runs
-        (id, workspace_id, user_id, conversation_id, proposal_id, status)
-        VALUES (${actionRunId}, ${workspaceId}, ${userId}, ${conversationId}, ${proposalId}, 'accepted')`;
-    });
-
-    // 正在执行的学习动作存在时，DELETE 必须 409 且零删除——
-    // 否则 action 回执与 durable result 会被级联清除。
-    await assert.rejects(
-      deleteCompanionConversation({ workspaceId, userId, conversationId }),
-      (err: { code?: string }) => err.code === "RUN_ALREADY_ACTIVE",
-    );
-
-    const rows = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      const conv = await tx`SELECT count(*)::int AS n FROM companion_conversations WHERE id = ${conversationId}`;
-      const runs = await tx`SELECT count(*)::int AS n FROM companion_action_runs WHERE id = ${actionRunId}`;
-      const props = await tx`SELECT count(*)::int AS n FROM companion_action_proposals WHERE id = ${proposalId}`;
-      const msgs = await tx`SELECT count(*)::int AS n FROM companion_messages WHERE id = ${messageId}`;
-      return { conv: conv[0].n, runs: runs[0].n, props: props[0].n, msgs: msgs[0].n };
-    });
-    assert.equal(rows.conv, 1, "conversation 未被删除");
-    assert.equal(rows.runs, 1, "action run 未被删除");
-    assert.equal(rows.props, 1, "proposal 未被删除");
-    assert.equal(rows.msgs, 1, "message 未被删除");
-
-    // action run 结束后（succeeded）DELETE 恢复正常
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`UPDATE companion_action_runs SET status = 'succeeded' WHERE id = ${actionRunId}`;
-    });
-    const deleted = await deleteCompanionConversation({ workspaceId, userId, conversationId });
-    assert.equal(deleted.statusCode, 204, "action run 结束后可正常删除");
-  } finally {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`DELETE FROM companion_action_runs WHERE conversation_id = ${conversationId}`;
-      await tx`DELETE FROM companion_action_proposals WHERE conversation_id = ${conversationId}`;
-      await tx`DELETE FROM companion_messages WHERE conversation_id = ${conversationId}`;
-    });
-    await cleanup();
-  }
-});
-
 test("H2 回归：GET conversation snapshot 不再因 SET TRANSACTION 顺序抛错（withWorkspaceTransaction 在事务首条语句前设置 isolation）", async () => {
   const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
   try {
@@ -1121,5 +1054,3 @@ test("H2 回归：GET conversation snapshot 不再因 SET TRANSACTION 顺序抛�
     await cleanup();
   }
 });
-
-

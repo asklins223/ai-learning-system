@@ -26,7 +26,7 @@
  * 2026-08-24（AI 设计审查 §4.4 修复）：本文件自 apps/api/src/modules/card-generation-v2/
  * 下沉至 packages/shared（纯逻辑、无 DB/provider 依赖）。worker 与 api 作为平级
  * 消费者经 @ailearn/shared/card-generation-v2-pipeline 子路径引用，消除 worker
- * 内 ../../../../apps/api 反向路径依赖；apps/api 原路径保留兼容 re-export。
+ * 该模块是 card-generation-v2 pipeline 的 canonical planner 实现。
  */
 
 import { randomUUID } from "node:crypto";
@@ -48,6 +48,16 @@ import {
 
 /** §8.5: 服务端 hard cap，任何 Planner 输出不得超过此值。 */
 export const SERVER_POLICY_MAX_CARDS = 20;
+
+/**
+ * micro-note 的卡数上限（§8.6：micro-note → **1–2 张**，"禁止逐句拆卡"）。
+ *
+ * 2026-09-17（质量校准）：此前为 3，与 §8.6 的 1–2 不符；实测 26–46 字的极短笔记
+ * 被拆成 3 张互相泄题、单张无法判分的碎片卡（gold corpus 对这类笔记标注为恰好 1 张）。
+ * 该值同时是 planner 的目标预算与 deck gate 的 count 上限，因此在 planner 侧就被
+ * 截断（超出部分记 `omit_over_budget`），不会走到 deck gate 硬失败。
+ */
+export const MICRO_NOTE_MAX_CARDS = 2;
 
 /** §10.2: micro-note 判定阈值 */
 export const MICRO_NOTE_CHAR_THRESHOLD = 500;
@@ -110,6 +120,25 @@ export function extractAtomsDeterministic(blocks: SourceBlockInput[]): Extracted
 }
 
 /**
+ * 模型增强 Atom 提取的调用上下文（可选）。
+ *
+ * 2026-09-15（管线评审 M3）：此前 extractAtoms 只拿到 blocks + semanticSpec，
+ * provider 无法把"可用证据 ID 清单"（planner system prompt 明确要求模型从该列表
+ * 选择 evidenceRefIds）与"已有 active objectives"（规划期去重）交给模型——prompt
+ * 指令与实现互相矛盾（provider 只能硬编码 evidenceRefIds: []、existingObjectives: []），
+ * 去重退化为事后字符串近似匹配。
+ *
+ * `signal`：调用方的取消信号（租约丢失 / 管道预算耗尽），透传到 LLM 调用。
+ */
+export interface AtomExtractionContext {
+  /** sealed evidence 清单（ID + quote hash），供模型引用。 */
+  evidenceList?: Array<{ evidenceSnapshotId: string; quoteHash?: string | null }>;
+  /** 已有 active objectives（规划期避免重复成卡）。 */
+  existingObjectives?: Array<{ objectiveId: string; objectiveStatement: string; publicSummary: string }>;
+  signal?: AbortSignal;
+}
+
+/**
  * 模型增强 Atom 提取接口。
  * 调用方注入 provider 调用，本模块不直接实现。
  */
@@ -117,7 +146,34 @@ export interface AtomExtractionProvider {
   extractAtoms(
     blocks: SourceBlockInput[],
     semanticSpec: GenerationSemanticSpecV2,
-  ): Promise<ExtractedKnowledgeAtom[]>;
+    context?: AtomExtractionContext,
+  ): Promise<AtomExtractionOutput>;
+}
+
+/**
+ * 模型侧 Atom 提取结果。
+ *
+ * 2026-09-18（零卡链路合同缺口修复）：此前接口只返回 `ExtractedKnowledgeAtom[]`，
+ * 于是"这条笔记不值得制卡"这个**合法结论无处表达**——模型只能返回空数组，而空数组
+ * 与"模型输出坏了"不可区分（provider 此前一律判协议错误并重试，重试耗尽即 failed）。
+ * 结果：**零卡终态在真实 LLM 链路里根本无法到达**，而 prompt 却明确要求模型对
+ * 玩笑/待办/无来源断言/矛盾内容"输出 0 个原子"。评测里 12 条零卡 fixture 全部走成
+ * `needs_attention`（实测 22 次 planner 调用、0 次成功终态）。
+ *
+ * 为什么还需要 `noAtomsReasonCode`：零卡是成功的终态，但**理由**必须正确——
+ * 合同要求 `reasonCodes` 落在冻结枚举内，且不同类别的期望码不同（待办/日程类
+ * 期望 `source_is_temporary_or_operational`，玩笑/感想类期望 `no_learnable_objective`）。
+ * 而确定性侧 `determineNoCardReasons` 只在 `allAtoms.length === 0` 时给出
+ * `no_learnable_objective`，**永远推不出** `source_is_temporary_or_operational`
+ * ——"为什么不成卡"只有模型知道，所以必须由模型显式声明。
+ */
+export interface AtomExtractionOutput {
+  atoms: ExtractedKnowledgeAtom[];
+  /**
+   * 当 `atoms` 为空时，模型给出的"本条笔记不值得制卡"的**理由码**。
+   * 省略 / 非法值 + 空数组 → 视为协议错误（fail-closed：不把"输出坏了"伪装成 0 卡）。
+   */
+  noAtomsReasonCode?: NoCardReasonCodeV2;
 }
 
 // ─── Planner 核心逻辑 ────────────────────────────────────────────────────
@@ -140,6 +196,13 @@ export interface PlannerInput {
   clientHardMaxCards?: number;
   /** 注入的模型提取器（可选；不注入则只用确定性提取） */
   extractionProvider?: AtomExtractionProvider;
+  /**
+   * sealed evidence 清单（ID + quote hash）。M3：透传给提取器，使 planner 的
+   * system prompt 里"evidenceRefIds 从可用证据 ID 列表中选择"真正可满足。
+   */
+  evidenceList?: Array<{ evidenceSnapshotId: string; quoteHash?: string | null }>;
+  /** 调用方取消信号（租约丢失 / 管道预算耗尽），透传到 LLM 调用。 */
+  signal?: AbortSignal;
 }
 
 export interface ExistingObjectiveRef {
@@ -167,8 +230,16 @@ export interface PlannerResult {
 export async function executePlanner(input: PlannerInput): Promise<PlannerResult> {
   // Step 1: Extract atoms
   let atoms: ExtractedKnowledgeAtom[];
+  /** 模型显式声明的"无原子"理由（仅当模型返回空原子集时有值）。 */
+  let modelNoAtomsReasonCode: NoCardReasonCodeV2 | undefined;
   if (input.extractionProvider) {
-    atoms = await input.extractionProvider.extractAtoms(input.blocks, input.semanticSpec);
+    const extracted = await input.extractionProvider.extractAtoms(input.blocks, input.semanticSpec, {
+      evidenceList: input.evidenceList,
+      existingObjectives: input.existingObjectives,
+      signal: input.signal,
+    });
+    atoms = extracted.atoms;
+    modelNoAtomsReasonCode = extracted.noAtomsReasonCode;
   } else {
     atoms = extractAtomsDeterministic(input.blocks);
   }
@@ -180,7 +251,8 @@ export async function executePlanner(input: PlannerInput): Promise<PlannerResult
 
   // Step 3: Dedup against existing objectives + in-note duplicates
   const atomDecisions: AtomDecisionV2[] = [];
-  const objectivesToCreate: ExtractedKnowledgeAtom[] = [];
+  /** 通过去重、**尚未**受预算约束的候选目标池（authoring 顺序 = 原子顺序）。 */
+  const objectivePool: ExtractedKnowledgeAtom[] = [];
   // C04（§28）：篇内重复段落/句子只保留一个目标——规范化（去空白）后相同即判重复，
   // 后续副本记 omit_duplicate，避免"重复两次相同段落 → 卡数翻倍"。
   const seenPropositions = new Set<string>();
@@ -201,13 +273,7 @@ export async function executePlanner(input: PlannerInput): Promise<PlannerResult
       continue;
     }
     seenPropositions.add(normalized);
-    const objectiveLocalId = `obj-${atom.atomId}`;
-    objectivesToCreate.push(atom);
-    atomDecisions.push({
-      atomId: atom.atomId,
-      decision: "create_objective",
-      objectiveLocalId,
-    });
+    objectivePool.push(atom);
   }
 
   // Mark filtered atoms as omitted
@@ -229,17 +295,48 @@ export async function executePlanner(input: PlannerInput): Promise<PlannerResult
   const maxCards = computeActivationHardMax(
     input.clientHardMaxCards,
     isMicroNote,
-    objectivesToCreate.length,
+    objectivePool.length,
   );
+
+  // §8.5 预算约束（2026-09-17 修复合同违约）：
+  // `cardPlanV2Schema.superRefine` 要求 `recommendedCardCount ≤ activationHardMax`，
+  // 而 `activationHardMax` 含 micro-note 上限与服务端/客户端上限，**可能小于**候选
+  // 目标池大小。此前直接把整池写成 objectives + recommendedCardCount，产出的 plan
+  // 违反自身 schema（handler 持久化时不复校验），author 又按"整池"出卡，最终 deck
+  // gate 以 `count_out_of_plan` **硬失败**：内容全部通过 grounding+pedagogy 也交付
+  // 不了，run 进 needs_attention（dev 实测 micro-bound-get-vs-post 即此路径）。
+  // 现在在 planner 内就按预算截断（预算内择优：保留 authoring 顺序 = 原子顺序），
+  // 被截断的原子显式记账 omit_over_budget，审计上能回答"为什么这个知识点没成卡"。
+  const budgetedAtoms = objectivePool.slice(0, Math.max(0, maxCards));
+  const budgetedAtomIds = new Set(budgetedAtoms.map((atom) => atom.atomId));
+  for (const atom of objectivePool) {
+    if (budgetedAtomIds.has(atom.atomId)) continue;
+    atomDecisions.push({ atomId: atom.atomId, decision: "omit_over_budget" });
+  }
+  const objectivesToCreate = budgetedAtoms;
+  for (const atom of objectivesToCreate) {
+    atomDecisions.push({
+      atomId: atom.atomId,
+      decision: "create_objective",
+      objectiveLocalId: `obj-${atom.atomId}`,
+    });
+  }
 
   let result: CardPlanV2["result"];
 
   if (objectivesToCreate.length === 0) {
     // §8.3: no_cards_recommended
-    const reasonCodes = determineNoCardReasons(
-      learnableAtoms, atoms, input.existingObjectives,
-      input.unsupportedSourceBlocks,
-    );
+    //
+    // 2026-09-18：模型显式声明的理由码优先。确定性 `determineNoCardReasons` 只会
+    // 推出"无可学目标"这一种理由（`source_is_temporary_or_operational` 等它推不出来），
+    // 而合同要求零卡理由落在冻结枚举内且与内容类别相符（待办/日程 vs 玩笑/感想）。
+    // 模型给出的码已由 provider 侧按枚举校验过，因此这里只做去重与上限收口。
+    const reasonCodes = modelNoAtomsReasonCode
+      ? [modelNoAtomsReasonCode]
+      : determineNoCardReasons(
+        learnableAtoms, atoms, input.existingObjectives,
+        input.unsupportedSourceBlocks,
+      );
     result = {
       kind: "no_cards_recommended",
       reasonCodes,
@@ -386,7 +483,7 @@ function computeActivationHardMax(
   // §8.5: server policy cap always applies
   const serverCap = SERVER_POLICY_MAX_CARDS;
   // micro-note: cap at 3
-  const microCap = isMicroNote ? 3 : serverCap;
+  const microCap = isMicroNote ? MICRO_NOTE_MAX_CARDS : serverCap;
   // client cap
   const clientCap = clientHardMax ?? serverCap;
   // Final: min of all caps, but at least 0

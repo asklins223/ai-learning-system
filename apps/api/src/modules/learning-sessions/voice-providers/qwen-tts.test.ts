@@ -1,142 +1,39 @@
-// 15b 二期：qwen TTS 连接复用（单槽位 IDLE 池）测试。
+// 15b 二期：qwen TTS 连接复用（按连接身份分槽的 IDLE 池）测试。
 // 覆盖：正常合成（run-task 参数含 voice/instruction）、task-finished 后连接
 // 复用（不新建连接、新 task_id）、task-failed 不归还（下次新建）、流 cancel
 // 发 cancel 指令并在 task-finished 后复用。
 //
 // 注意：node:test 顶层 test 默认并发执行，而连接池是模块级共享状态——
 // 四个场景必须串行，故合并为单个 test 内顺序执行（每场景前 resetState）。
+// Mock WebSocket 与公共夹具见 qwen-tts-test-doubles.ts（与本文件、以及
+// qwen-tts-user-queue.test.ts 共用同一份替身，避免协议改动时两处漂移）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { qwenTtsSynthesizeStream, QwenTtsError } from "./qwen-tts.ts";
 import {
-  qwenTtsSynthesizeStream,
-  QwenTtsError,
-  resetQwenConnectionPool,
-} from "./qwen-tts.ts";
+  MockWebSocket,
+  QWEN_TEST_BASE_OPTS,
+  launchQwenTask,
+  pumpStream,
+  resetQwenTestState,
+  serveTaskBody,
+} from "./qwen-tts-test-doubles.ts";
 
-// ─── Mock WebSocket（最小 EventEmitter + 状态） ──────────────────────────
+const BASE_OPTS = QWEN_TEST_BASE_OPTS;
 
-class MockWebSocket {
-  static instances: MockWebSocket[] = [];
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static CLOSED = 3;
-
-  url: string;
-  headers: Record<string, string>;
-  readyState = MockWebSocket.CONNECTING;
-  sent: unknown[] = [];
-  closed = false;
-  private listeners = new Map<string, ((...args: unknown[]) => void)[]>();
-
-  constructor(url: string, opts?: { headers?: Record<string, string> }) {
-    this.url = url;
-    this.headers = opts?.headers ?? {};
-    MockWebSocket.instances.push(this);
-  }
-
-  on(ev: string, fn: (...args: unknown[]) => void): void {
-    const list = this.listeners.get(ev) ?? [];
-    list.push(fn);
-    this.listeners.set(ev, list);
-  }
-
-  removeAllListeners(): void {
-    this.listeners.clear();
-  }
-
-  send(data: unknown): void {
-    this.sent.push(typeof data === "string" ? JSON.parse(data) : data);
-  }
-
-  close(): void {
-    this.closed = true;
-    this.readyState = MockWebSocket.CLOSED;
-    this.emit("close");
-  }
-
-  emit(ev: string, ...args: unknown[]): void {
-    for (const fn of this.listeners.get(ev) ?? []) fn(...args);
-  }
-
-  open(): void {
-    this.readyState = MockWebSocket.OPEN;
-    this.emit("open");
-  }
-
-  serverEvent(event: string, extra: Record<string, unknown> = {}): void {
-    this.emit("message", Buffer.from(JSON.stringify({
-      header: { event, ...extra },
-      payload: {},
-    })));
-  }
-
-  audioFrame(): void {
-    this.emit("message", Buffer.from([1, 2, 3, 4]), true);
-  }
-
-  sentActions(): string[] {
-    return this.sent.map((m) => (m as { header?: { action?: string } }).header?.action ?? "");
-  }
-
-  runTaskIds(): string[] {
-    return this.sent
-      .filter((m) => (m as { header?: { action?: string } }).header?.action === "run-task")
-      .map((m) => (m as { header?: { task_id?: string } }).header?.task_id ?? "");
-  }
-
-  continueTaskText(): string {
-    const msg = this.sent.find((m) => (m as { header?: { action?: string } }).header?.action === "continue-task");
-    return (msg as { payload?: { input?: { text?: string } } })?.payload?.input?.text ?? "";
-  }
-}
-
-const BASE_OPTS = {
-  workspaceId: "llm-test-workspace",
-  apiKey: "sk-test",
-  voice: "longanlingxi",
-  instruction: "可爱的年轻女性声音",
-  WebSocketImpl: MockWebSocket as unknown as typeof import("ws").default,
-};
-
-async function pump(stream: ReadableStream<Uint8Array>): Promise<Uint8Array[]> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  return chunks;
-}
-
-/**
- * 统一启动模式：先发起合成，再 open 连接；让出事件循环（listener 注册在
- * 微任务中完成）后返回。避免"await 挂起等 task-started / 消息发给旧 listener"
- * 两类时序问题。
- */
-async function startTask(
+function startTask(
   text: string,
   opts: typeof BASE_OPTS = BASE_OPTS,
 ): Promise<{ ws: MockWebSocket; result: Promise<Awaited<ReturnType<typeof qwenTtsSynthesizeStream>>> }> {
-  const pending = qwenTtsSynthesizeStream(text, opts);
-  const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
-  if (ws.readyState !== MockWebSocket.OPEN) {
-    ws.open(); // 新建连接才需要 open；复用连接已 OPEN
-  }
-  await new Promise((r) => setImmediate(r)); // listener 注册完成
-  return { ws, result: pending };
+  return launchQwenTask(() => qwenTtsSynthesizeStream(text, opts));
 }
 
-/** 服务端完成一次任务：task-started → 音频 → task-finished。 */
-function serveTaskBody(ws: MockWebSocket): void {
-  ws.serverEvent("task-started");
-  ws.audioFrame();
-  ws.serverEvent("task-finished");
+function pump(stream: ReadableStream<Uint8Array>): Promise<Uint8Array[]> {
+  return pumpStream(stream);
 }
 
 function resetState(): void {
-  MockWebSocket.instances = [];
-  resetQwenConnectionPool();
+  resetQwenTestState();
 }
 
 // ─── 场景 1：正常合成 ────────────────────────────────────────────────────

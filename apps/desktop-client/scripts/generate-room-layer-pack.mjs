@@ -35,8 +35,8 @@ const ROOM_LAYER_ALPHA_MODES = new Set([
   "blend",
   "opaque-rgb",
 ]);
-const ROOM_LAYER_THEMES = new Set(["day", "night"]);
-const ROOM_LAYER_DEPTHS = new Set(["D1", "D2", "D3", "D4", "D5", "D6"]);
+const ROOM_LAYER_THEMES = new Set(["day", "dusk", "night"]);
+const ROOM_LAYER_DEPTHS = new Set(["D0", "D1", "D2", "D3", "D4", "D5", "D6"]);
 const ROOM_LAYER_ANCHOR_IDS = new Set([
   "room.notebook",
   "room.review",
@@ -235,8 +235,8 @@ async function validateLayer(
   const sourcePath = isNonEmptyString(layer.sourcePath) ? normalizePath(layer.sourcePath) : "";
   addError(errors, !isSafeSourcePath(sourcePath), `${prefix}.sourcePath must be relative and cannot traverse outside sourceRoot`);
 
-  addError(errors, !ROOM_LAYER_THEMES.has(layer.theme), `${prefix}.theme must be day or night`);
-  addError(errors, !ROOM_LAYER_DEPTHS.has(layer.depth), `${prefix}.depth must be D1 through D6`);
+  addError(errors, !ROOM_LAYER_THEMES.has(layer.theme), `${prefix}.theme must be day, dusk, or night`);
+  addError(errors, !ROOM_LAYER_DEPTHS.has(layer.depth), `${prefix}.depth must be D0 through D6`);
   addError(
     errors,
     !Number.isInteger(layer.order) || layer.order < 0 || layer.order > ROOM_LAYER_ORDER_MAX,
@@ -263,7 +263,8 @@ async function validateLayer(
   );
   addError(errors, !isValidRegistration(layer.registration), `${prefix}.registration is missing or outside the canonical world`);
   addError(errors, !ROOM_LAYER_ALPHA_MODES.has(layer.alphaMode), `${prefix}.alphaMode is unsupported`);
-  addError(errors, layer.alphaMode === "opaque-rgb", `${prefix}.alphaMode must preserve transparency for an independent room layer`);
+  addError(errors, layer.alphaMode === "opaque-rgb" && layer.depth !== "D0", `${prefix}.alphaMode must preserve transparency outside D0`);
+  addError(errors, !isNonEmptyString(layer.license), `${prefix}.license is required`);
   addError(errors, !isNonEmptyString(layer.reviewStatus), `${prefix}.reviewStatus is required`);
   addError(errors, typeof layer.releaseApproval !== "boolean", `${prefix}.releaseApproval must be boolean`);
   if (layer.sourceAssetId !== undefined) addError(errors, !isSafeId(layer.sourceAssetId), `${prefix}.sourceAssetId is invalid`);
@@ -332,7 +333,7 @@ async function validateLayer(
       || inspected.height !== layer.sourceSize.height,
     `${prefix}.sourceSize does not match the raster header`,
   );
-  addError(errors, !inspected.hasAlphaChannel, `${prefix}.sourcePath has no alpha channel`);
+  addError(errors, !inspected.hasAlphaChannel && layer.depth !== "D0", `${prefix}.sourcePath has no alpha channel outside D0`);
 
   return {
     ...layer,
@@ -347,6 +348,7 @@ async function validateLayer(
     promptPath,
     promptAbsolute,
     generationMethod: isNonEmptyString(generationMethod) ? generationMethod.trim() : null,
+    license: isNonEmptyString(layer.license) ? layer.license.trim() : "",
   };
 }
 
@@ -452,6 +454,10 @@ function makeRoomLayerManifest(validated) {
       sourceSize: layer.sourceSize,
       registration: layer.registration,
       alphaMode: layer.alphaMode,
+      sha256: layer.sourceSha256,
+      sourcePath: layer.sourcePath,
+      ...(layer.promptPath ? { promptPath: layer.promptPath } : {}),
+      license: layer.license,
       reviewStatus: layer.reviewStatus,
       releaseApproval: layer.releaseApproval,
     })),

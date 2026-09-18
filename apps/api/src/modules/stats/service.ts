@@ -1,8 +1,8 @@
 import { and, eq, count, isNull, lt } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
-import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "../../db/schema/card-generation-v2.ts";
-import { reviewSchedules } from "../../db/schema/evidence.ts";
-import { notes } from "../../db/schema/note.ts";
+import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
+import { notes } from "@ailearn/shared/db-schema/note";
 import { ReviewStatus } from "@ailearn/shared";
 
 export interface StatsOverview {
@@ -22,7 +22,7 @@ export interface StatsOverview {
 
 /**
  * B1: 聚合统计 API — 一次性返回首页所需的全部统计数据，
- * 替代前端加载第一张卡的 validation/evidence 后只反映第一张卡的问题。
+ * 直接聚合工作区的 notes、cards、objectives 和 review 数据，避免前端只读取单个实体。
  *
  * QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 确保 RLS 上下文可用。
  */

@@ -15,15 +15,34 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
 process.env.PROJECTION_CHECKPOINT_SECRET ??= "projection-integration-test-secret-0123456789";
 const sql = postgres(CONN, { max: 2 });
 
+/**
+ * 裸 SQL 校验必须带 workspace/user 上下文。
+ *
+ * 目标表 understanding_change_sets / understanding_projection_checkpoints /
+ * canonical_learning_event_outbox / practice_trail_event_outbox 都是 FORCE RLS：
+ * 受限角色（ailearn_api）在无上下文事务里查询会命中 0 行，让"恰好物化 1 个
+ * change set / outbox published"假失败；超级用户则绕过 RLS 让它失去隔离意义。
+ */
+function scoped<T>(
+  scope: { workspaceId: string; userId: string },
+  fn: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${scope.userId}, true)`;
+    return fn(tx);
+  }) as Promise<T>;
+}
+
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
-const { createRun, submitArtifact, getReturnContract } = await import(
+const { submitArtifact, getReturnContract } = await import(
   "../modules/learning-runs/run-service.ts"
 );
 const { runLearningRunProcessingTick, closeStructuredSolutionSql } = await import(
@@ -68,13 +87,11 @@ test("P7 纵切：canonical Commit 物化 change set + projection ready + delta 
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
-          clientRequestId: "pj-1",
           idempotencyKey: "pj-create-1",
         },
       }),
@@ -103,15 +120,15 @@ test("P7 纵切：canonical Commit 物化 change set + projection ready + delta 
     }
 
     // 1) change set 物化 + outbox published。
-    const changeSetRows = await sql`
+    const changeSetRows = await scoped(scope, (tx) => tx`
       SELECT change_set_id, source_event_id, kind, to_checkpoint_token
       FROM understanding_change_sets WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(changeSetRows.length, 1);
     assert.equal(changeSetRows[0].kind, "canonical");
-    const outboxRows = await sql`
+    const outboxRows = await scoped(scope, (tx) => tx`
       SELECT status FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(outboxRows[0]?.status, "published");
 
     // 2) return-contract → ready（含 targetCheckpoint/changeSetId）。
@@ -128,10 +145,10 @@ test("P7 纵切：canonical Commit 物化 change set + projection ready + delta 
 
     // 3) projection current_target：checkpoint-aware + personal facts。
     // 直接查 checkpoint 表（projection 端点需 HTTP；此处验证数据底座）。
-    const checkpointRows = await sql`
+    const checkpointRows = await scoped(scope, (tx) => tx`
       SELECT token, last_canonical_event_id FROM understanding_projection_checkpoints
       WHERE workspace_id = ${seeded.workspaceId} ORDER BY captured_at DESC LIMIT 1
-    `;
+    `);
     assert.ok(checkpointRows[0]?.token, "checkpoint issued");
     assert.ok(checkpointRows[0]?.last_canonical_event_id, "watermark advanced");
 
@@ -147,14 +164,12 @@ test("P7 practice 纵切：practice trail 物化 change set（kind=practice_only
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId },
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
           goal: "stabilize",
           responsePreference: "structured",
-          clientRequestId: "pj-p-1",
           idempotencyKey: "pj-p-create-1",
         },
       }),
@@ -189,14 +204,14 @@ test("P7 practice 纵切：practice trail 物化 change set（kind=practice_only
     for (let round = 0; round < 6; round += 1) {
       await runLearningRunProcessingTick(`pj-worker:${randomUUID()}`, 10);
     }
-    const changeSetRows = await sql`
+    const changeSetRows = await scoped(scope, (tx) => tx`
       SELECT kind, source_event_id FROM understanding_change_sets WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(changeSetRows.length, 1);
     assert.equal(changeSetRows[0].kind, "practice_only");
-    const trailRows = await sql`
+    const trailRows = await scoped(scope, (tx) => tx`
       SELECT status FROM practice_trail_event_outbox WHERE run_id = ${run.runId}
-    `;
+    `);
     assert.equal(trailRows[0]?.status, "published");
     const contract = await withWorkspaceTransaction(scope, async (tx) =>
       getReturnContract(tx, { ...scope, runId: run.runId }),

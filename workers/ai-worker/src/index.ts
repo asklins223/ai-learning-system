@@ -1,29 +1,29 @@
-// A3（计划 §2.3）：显式配置 undici 连接池参数。
-// Node.js 20+ 内置 undici 默认池，但参数不可调。
-// 通过 setGlobalDispatcher 显式配置，使生产环境可通过环境变量调参。
-import { initHttpPool } from "./lib/http-pool.ts";
-initHttpPool();
-
 import { sql } from "drizzle-orm";
 import { logger } from "./lib/logger.ts";
 import postgres from "postgres";
-import { closeDatabase, db, resolveWorkerDatabaseUrl } from "./db.ts";
+import { closeDatabase, db, resolveWorkerStatementTimeoutMs, resolveWorkerDatabaseUrl } from "./db.ts";
 import { NOTIFY_CHANNEL } from "./lib/job-notify.ts";
 import { runParseSource } from "./handlers/parse-source.ts";
 import { runCompanionDialogue } from "./handlers/companion-dialogue.ts";
-import { runCompanionAction } from "./handlers/companion-action.ts";
 import { runCompanionMemoryExtract } from "./handlers/companion-memory-extractor.ts";
 import { runCompanionSummarizer } from "./handlers/companion-summarizer.ts";
 import { runCompanionMemoryEmbeddingRebuild } from "./handlers/companion-memory-embedding.ts";
 import { runCompanionDailySummary } from "./handlers/companion-daily-summary.ts";
 import { tickCompanionDailySummaryScheduler } from "./handlers/companion-daily-summary-scheduler.ts";
 import { tickCompanionMemoryMaintenance } from "./handlers/companion-memory-maintenance.ts";
-import { pollV2Outbox, V2_POLL_TICK_BUDGET_MS } from "./handlers/card-generation-v2-handler.ts";
+import { tickCompanionProposalExpiry } from "./handlers/companion-proposal-expiry-scheduler.ts";
+import {
+  getV2OutboxInflightCount,
+  pollV2Outbox,
+  V2_POLL_TICK_BUDGET_MS,
+  waitForV2OutboxDrain,
+} from "./handlers/card-generation-v2-handler.ts";
 
 import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
 import { resolveHandlerTimeout, RESOLVED_TIMEOUT_INFO } from "./lib/handler-timeout-config.ts";
 import { isNonRetryableError } from "./lib/non-retryable-errors.ts";
-import { safeErrorMessage, sanitizeOperationalError } from "@ailearn/shared";
+import { createPollWakeSignal } from "./lib/poll-wakeup.ts";
+import { readJobPayloadString, safeErrorMessage, sanitizeOperationalError } from "@ailearn/shared";
 import {
   claimJobs,
   markJobDead,
@@ -44,14 +44,14 @@ import {
   jobOldestPendingAgeSeconds,
   jobQueueDepth,
   JOB_STATUSES,
+  resolveMetricsPort,
   startMetricsServer,
 } from "./lib/metrics.ts";
 
 const HANDLERS = {
   parse_source: runParseSource,
-  // P2 companion：日常对话流式回复（03 §8.1；payload 只含 opaque runId）
-  companion_dialogue: runCompanionDialogue,
-  companion_action: runCompanionAction,
+  // Companion Agent：统一对话入口（payload 只含 opaque runId）
+  companion_agent: runCompanionDialogue,
   // 22 真桌宠记忆与上下文：日常提取 / 会话摘要 / embedding 重建
   companion_memory_extract: runCompanionMemoryExtract,
   companion_summarizer: runCompanionSummarizer,
@@ -61,18 +61,40 @@ const HANDLERS = {
 
 const POLL_MS = 500;
 const POLL_MAX_MS = 5_000; // QUAL-08: max backoff when queue is idle
+
+/**
+ * 终态转换（ailearn_finish_job / ailearn_fail_job / markUnknownJobFailed）的墙钟上界。
+ *
+ * 稳定 P0-5（2026-09-15 审计）：这些调用此前是裸 `await`，且连接池没有
+ * statement_timeout——一条挂起的语句（锁等待/半开连接）会让 processJob 的
+ * promise 永不 settle：`inflight.delete` 不执行 → `available <= 0` → worker
+ * 永久停止 claim，而 `/metrics` 仍返回 200、编排器不会重启，队列静默停摆。
+ *
+ * 现在 DB 侧 statement_timeout（db.ts，默认 60s）会先杀掉语句，所以正常情况下
+ * 拿到的是真实 DB 错误；这里 JS 侧的竞速是第二道保险（驱动/socket 层挂起，
+ * DB 超时覆盖不到），取 statement_timeout + 5s 余量。
+ */
+const TERMINAL_TRANSITION_TIMEOUT_MS = resolveWorkerStatementTimeoutMs() + 5_000;
 const QUEUE_METRICS_REFRESH_MS = 5_000;
 let lastQueueMetricsRefreshAt = 0;
+/**
+ * 孤儿 job 回收（reapStaleJobs）的节流间隔（稳定 P1-5，2026-09-15 审计）。
+ * 租约为 120s，30s 粒度足够；避免每个 tick（可低至 500ms）全表扫 jobs。
+ */
+const REAP_THROTTLE_MS = 30_000;
+let lastReapAt = 0;
 let currentPollMs = POLL_MS; // adaptive: grows when idle, resets on activity
 // F-010: 模型调用超时现在按 job 类型分别配置，见 handler-timeout-config.ts
 // 全局默认仍可通过 WORKER_MODEL_TIMEOUT_MS 环境变量覆盖。
 
 // F-010: 优雅关停标志
 let shuttingDown = false;
+const pollWake = createPollWakeSignal();
 export function setupGracefulShutdown() {
   const handler = () => {
     if (!shuttingDown) {
       shuttingDown = true;
+      pollWake.wake();
       logger.info("received shutdown signal, finishing current job…");
     }
   };
@@ -97,9 +119,25 @@ setupGracefulShutdown();
 // 处理单个 job 的完整生命周期（claim 后的执行 + 状态转换 + 指标记录）。
 // 从 tick() 提取为独立函数以支持 fire-and-forget 并行处理。
 export async function processJob(job: ClaimedJob): Promise<void> {
+  // 设计 P1-15（2026-09-15 审计）：payload 里携带的"发起该 job 的 API 请求 id"，
+  // 打进本 job 的关键日志，使 API 日志与 worker 日志可用同一 id 关联
+  // （此前跨进程排障只能靠猜）。旧 job/直连 job 没有该字段时为 undefined，
+  // 不影响既有日志结构。
+  const traceId = readJobPayloadString(job.payload, "traceId");
   const handler = HANDLERS[job.type as keyof typeof HANDLERS];
   if (!handler) {
-    const unknownUpdated = await markUnknownJobFailed(job);
+    // 稳定 P0-5（2026-09-15 审计）：终态转换加墙钟上界，避免挂起语句永久占槽。
+    const unknownUpdated = await runWithAbortTimeout(
+      () => markUnknownJobFailed(job),
+      TERMINAL_TRANSITION_TIMEOUT_MS,
+      (lateError) => logger.error(
+        { jobId: job.id, err: lateError },
+        "unknown-job transition settled after deadline (reaper will reconcile)",
+      ),
+    ).catch((err) => {
+      logger.error({ jobId: job.id, err }, "unknown-job transition failed or timed out");
+      return false;
+    });
     if (!unknownUpdated) {
       logger.warn({ jobId: job.id }, "unknown job lease was already reaped; status left unchanged");
     }
@@ -130,7 +168,28 @@ export async function processJob(job: ClaimedJob): Promise<void> {
 
     // G-001: 原子条件 UPDATE — 只有 status=running 且 lease_token 与 claim 时相同才提交 succeeded。
     // 如果 job 被 reaper 回收并重新 claim，lease_token 会不同，UPDATE 影响 0 行。
-    const successUpdated = await markJobSucceeded(job);
+    //
+    // 稳定 P0-5（2026-09-15 审计）：加墙钟上界。超时意味着**结果未知**，因此与
+    // lease 丢失同路处理——只记日志并交给 reaper 按租约回收，绝不把可能已成功的
+    // job 误判成失败（那会让上层重放整条已付费管道）。
+    let successUpdated: boolean;
+    try {
+      successUpdated = await runWithAbortTimeout(
+        () => markJobSucceeded(job),
+        TERMINAL_TRANSITION_TIMEOUT_MS,
+        (lateError) => logger.error(
+          { jobId: job.id, err: lateError },
+          "success transition settled after deadline (outcome unknown; reaper will reconcile)",
+        ),
+      );
+    } catch (terminalErr) {
+      jobLeaseLostTotal.labels(job.type).inc();
+      logger.error(
+        { jobId: job.id, err: terminalErr },
+        "job success transition failed or timed out — leaving status to lease reaper (no double state change)",
+      );
+      return;
+    }
     jobDurationSeconds.labels(job.type).observe((Date.now() - jobStart) / 1000);
     if (!successUpdated) {
       // OPS-01: lease 丢失 — job 被 reaper 回收并重新 claim
@@ -143,7 +202,7 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     }
     // OPS-01: 记录终态
     jobTerminalTotal.labels(job.type, "succeeded").inc();
-    logger.info({ jobId: job.id, type: job.type }, "job ok");
+    logger.info({ jobId: job.id, type: job.type, traceId }, "job ok");
   } catch (err) {
     const message = safeErrorMessage(err);
     const safeError = sanitizeOperationalError(err);
@@ -158,6 +217,7 @@ export async function processJob(job: ClaimedJob): Promise<void> {
         {
           jobId: job.id,
           type: job.type,
+          traceId,
           detail: err instanceof Error ? err.message : String(err),
           ...(err instanceof Error && err.cause
             ? { cause: err.cause instanceof Error ? err.cause.message : String(err.cause) }
@@ -171,11 +231,25 @@ export async function processJob(job: ClaimedJob): Promise<void> {
 
     // 非重试错误（欠费/鉴权/配置）直接标记 dead，不浪费重试次数。
     if (!autoRetry) {
-      const failure = await markJobDead(job, message);
+      // 稳定 P0-5：终态转换加墙钟上界；超时即结果未知，交给 reaper，不重试。
+      const failure = await runWithAbortTimeout(
+        () => markJobDead(job, message),
+        TERMINAL_TRANSITION_TIMEOUT_MS,
+        (lateError) => logger.error(
+          { jobId: job.id, err: lateError },
+          "dead transition settled after deadline (reaper will reconcile)",
+        ),
+      ).catch((terminalErr) => {
+        logger.error(
+          { jobId: job.id, err: terminalErr },
+          "dead transition failed or timed out — leaving status to lease reaper",
+        );
+        return { updated: false, status: "dead" as const, attempts: 0, backoffMs: 0 };
+      });
       if (!failure.updated) {
         jobLeaseLostTotal.labels(job.type).inc();
         logger.warn(
-          { jobId: job.id },
+          { jobId: job.id, traceId },
           "job was reaped during execution — skipping non-retryable dead update to avoid double-counting",
         );
         return;
@@ -185,6 +259,7 @@ export async function processJob(job: ClaimedJob): Promise<void> {
       logger.error(
         {
           jobId: job.id,
+          traceId,
           error: safeError,
           reason: "non-retryable",
           ...(process.env.NODE_ENV === "development"
@@ -197,12 +272,26 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     }
 
     // G-001: 失败时也使用原子条件 UPDATE，避免覆盖 reaper 的状态
-    const failure = await markJobFailed(job, message);
+    // 稳定 P0-5：同样加墙钟上界；超时即结果未知 → 交给 reaper 按租约回收。
+    const failure = await runWithAbortTimeout(
+      () => markJobFailed(job, message),
+      TERMINAL_TRANSITION_TIMEOUT_MS,
+      (lateError) => logger.error(
+        { jobId: job.id, err: lateError },
+        "failure transition settled after deadline (reaper will reconcile)",
+      ),
+    ).catch((terminalErr) => {
+      logger.error(
+        { jobId: job.id, err: terminalErr },
+        "failure transition failed or timed out — leaving status to lease reaper",
+      );
+      return { updated: false, status: "pending" as const, attempts: 0, backoffMs: 0 };
+    });
     if (!failure.updated) {
       // OPS-01: lease 丢失 — job 被 reaper 回收
       jobLeaseLostTotal.labels(job.type).inc();
       logger.warn(
-        { jobId: job.id },
+        { jobId: job.id, traceId },
         "job was reaped during execution — skipping failure update to avoid double-counting",
       );
       return;
@@ -217,6 +306,7 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     logger.error(
       {
         jobId: job.id,
+        traceId,
         error: safeError,
         attempts: failure.attempts,
         backoffMs: failure.backoffMs,
@@ -315,9 +405,20 @@ export async function tick(): Promise<void> {
 
   // PERF-05 修复：refreshQueueMetrics 和 reapStaleJobs 可以并行执行
   // 因为两者互不依赖，避免空闲队列的 tick 延迟叠加
+  //
+  // 稳定 P1-5（2026-09-15 审计）：refreshQueueMetrics 早已自节流（5s），但
+  // reapStaleJobs 此前**每个 tick 都全表扫**一遍 jobs（找 status='running' 且
+  // 过期的行）——空闲时也是纯浪费，且 tick 的 POLL_MS 可低到 500ms。
+  // 这里对齐 V2 outbox 的做法（V2_REAP_THROTTLE_MS）加 30s 节流：租约是 120s，
+  // 30s 的回收粒度足够及时；重试调度由 scheduled_at + claim 负责，不依赖 reap。
+  const nowMs = Date.now();
+  const shouldReap = nowMs - lastReapAt >= REAP_THROTTLE_MS;
+  if (shouldReap) lastReapAt = nowMs;
   const [, reaped] = await Promise.all([
-    refreshQueueMetrics(),
-    reapStaleJobs(),
+    refreshQueueMetrics(nowMs),
+    shouldReap
+      ? reapStaleJobs()
+      : Promise.resolve({ total: 0, pending: 0, dead: 0, ids: [] as string[] }),
   ]);
   if (reaped.total > 0) {
     logger.warn(
@@ -341,14 +442,13 @@ export async function tick(): Promise<void> {
   // 22 方案：桌宠日记每日 01:00 调度 + 记忆衰减维护（内部 throttle）。
   await tickCompanionDailySummaryScheduler();
   await tickCompanionMemoryMaintenance();
+  // Agent 方案 §5：过期/世代失效的确认兜底回收（内部 throttle）。
+  // 不放在 claim 之后——被锁死的 conversation 没有 job 可 claim，必须在每轮
+  // tick 都尝试终结，否则 run 会永久停在 waiting_for_confirmation。
+  await tickCompanionProposalExpiry();
 
   // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
-  // 各 handler 事务中的 advisory lock 保证并发安全：
-  //   align_evidence   — key point 级锁，不同 key point 可并行
-  //   evaluate_validation — 输入维度锁（cardId+keyPointId+userId+question+userAnswer），
-  //                         防止相同输入的不同 job 并发写入重复 validation_events
   // AI 模型调用是网络 IO，并行处理可让多个 job 的模型调用同时进行。
-  // evaluate_validation handler removed — no longer dispatched.
   const available = QUEUE_CONCURRENCY - inflight.size;
   if (available <= 0) return;
 
@@ -395,6 +495,7 @@ export async function tick(): Promise<void> {
   }
 
   // V2 Card Generation outbox poll (方案 20 C2)。
+  if (shuttingDown) return;
   // 第五轮审计 W#5：置于主队列 claim/分发**之后**——V2 串行 poll 不能再延迟主
   // 队列并发配额（available）的分配与 claim；先按配额拿到主队列 job 并分发，
   // 最后才 poll V2。round-7 🟡2 修复：主 tick 以 V2_POLL_TICK_BUDGET_MS（5s）调用
@@ -414,13 +515,19 @@ export async function tick(): Promise<void> {
 
 export async function main() {
   // OPS-01: 启动 Prometheus metrics HTTP 服务器（ADR-0006 §1）
-  const metricsPort = Number(process.env.WORKER_METRICS_PORT ?? 9100);
-  const metricsServer = startMetricsServer(metricsPort);
+  const metricsPort = resolveMetricsPort();
+  // 稳定 P1-4（2026-09-15 审计）：暴露 /ready 做真实依赖探测（DB 可达性）。
+  // 之前的健康检查只打 /metrics，DB 宕机或槽漏光时仍报健康，容器不会被重启。
+  const metricsServer = startMetricsServer(metricsPort, {
+    readyProbe: async () => {
+      await db.execute(sql`SELECT 1`);
+    },
+  });
   logger.info({ port: metricsPort }, "worker metrics server started");
 
   // P4-6 接线: LISTEN/NOTIFY 快速唤醒(轮询分级兜底保留,计划 §5.4)。
-  // Notify 到达 → 重置轮询间隔为快速档(≤POLL_MS 即再次 poll),
-  // 缩短空闲背退 2s→500ms 级唤醒延迟。失败仅警告,回退纯轮询。
+  // Notify 到达会直接打断当前 poll sleep，而不是只影响下一轮的间隔。
+  // 失败仅警告，回退纯轮询。
   let notifyConnection: ReturnType<typeof postgres> | undefined;
   try {
     if (process.env.WORKER_DISABLE_NOTIFY !== "1") {
@@ -430,6 +537,7 @@ export async function main() {
       // 建立超时 3s:连接挂起(如网络/权限)不能阻塞 worker 启动(shutdown 依赖进入主循环)
       const listenPromise = pgListen.listen(NOTIFY_CHANNEL, () => {
         currentPollMs = POLL_MS;
+        pollWake.wake();
         logger.debug({ channel: NOTIFY_CHANNEL }, "P4-6: job notify 唤醒,轮询加速");
       });
       await Promise.race([
@@ -456,8 +564,6 @@ export async function main() {
       defaultTimeouts: RESOLVED_TIMEOUT_INFO.defaultTimeouts,
       envOverrides: {
         global: process.env.WORKER_MODEL_TIMEOUT_MS,
-        evaluate_validation: process.env.WORKER_TIMEOUT_EVALUATE_VALIDATION_MS,
-        align_evidence: process.env.WORKER_TIMEOUT_ALIGN_EVIDENCE_MS,
         parse_source: process.env.WORKER_TIMEOUT_PARSE_SOURCE_MS,
       },
     },
@@ -477,10 +583,11 @@ export async function main() {
       }
       // F-010: 优雅关停 — 不再认领新作业，等待在途 job 完成后退出。
       if (shuttingDown) {
-        if (inflight.size > 0) {
+        if (inflight.size > 0 || getV2OutboxInflightCount() > 0) {
           logger.info(
             {
               inflight: inflight.size,
+              v2Inflight: getV2OutboxInflightCount(),
             },
             "shutdown signal received, waiting for in-flight jobs to finish…",
           );
@@ -490,24 +597,26 @@ export async function main() {
           // 到点后强制退出，遗留 job 由下一个 worker 启动时的 reapStaleJobs 回收。
           // 2026-08-11：非法值（NaN）时回退默认 45s——此前 NaN 经 Math.max(1000, NaN)
           // → NaN，setTimeout(NaN) 立即触发 → 优雅关停变即时强退。
-          const drainTimeoutMs = Math.max(
-            1_000,
-            Number.isFinite(Number(process.env.WORKER_DRAIN_TIMEOUT_MS ?? 45_000))
-              ? Number(process.env.WORKER_DRAIN_TIMEOUT_MS)
-              : 45_000,
-          );
+          const configuredDrainTimeoutMs = Number(process.env.WORKER_DRAIN_TIMEOUT_MS ?? 45_000);
+          const drainTimeoutMs = Number.isFinite(configuredDrainTimeoutMs)
+            ? Math.max(1_000, configuredDrainTimeoutMs)
+            : 45_000;
           const drainDeadline = new Promise<void>((resolve) => {
             const t = setTimeout(resolve, drainTimeoutMs);
             t.unref();
           });
           await Promise.race([
-            Promise.allSettled([...inflight]),
+            Promise.all([
+              Promise.allSettled([...inflight]),
+              waitForV2OutboxDrain(drainTimeoutMs),
+            ]),
             drainDeadline,
           ]);
-          if (inflight.size > 0) {
+          if (inflight.size > 0 || getV2OutboxInflightCount() > 0) {
             logger.warn(
               {
                 inflight: inflight.size,
+                v2Inflight: getV2OutboxInflightCount(),
                 drainTimeoutMs,
               },
               "drain timeout reached, exiting anyway (orphaned running jobs will be reaped by the next worker startup)",
@@ -517,7 +626,7 @@ export async function main() {
         logger.info("shutdown complete, exiting");
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, currentPollMs));
+      await pollWake.wait(currentPollMs);
     }
   } finally {
     if (notifyConnection) {

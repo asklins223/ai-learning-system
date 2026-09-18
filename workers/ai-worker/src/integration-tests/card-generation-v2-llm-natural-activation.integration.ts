@@ -8,7 +8,7 @@
  *
  *   真实四阶段 LLM 管道（planner/author/grounding/pedagogy 独立真实调用，
  *   平台 = config/ai-platforms.json capabilities.agent_turn，当前
- *   tokenrhythm/deepseek-v4-flash-0731）
+ *   opencode-go/muse-spark-1.3-contributor）
  *     → run: review_ready（自然态：候选 qs=passed、review_decision=undecided、
  *       binding plan 行由 assembler 真实落库，无任何 UPDATE 代设）
  *     → §13.1 eligibility 复验实证：撤销一条绑定证据 → 激活被 409
@@ -32,7 +32,7 @@
  * 说明：
  * - 本文件在模块顶层加载仓库根 .env（worker 不自动加载真实 provider key）并把
  *   CARD_GENERATION_V2_LLM 置为 "true"。
- * - 需要真实网络 + 配置平台可用（当前 tokenrhythm/deepseek-v4-flash-0731）。
+ * - 需要真实网络 + 配置平台可用（当前 opencode-go/muse-spark-1.3-contributor）。
  * - 整个 LLM 管道是分钟级（单 job 30min 租约，poll 超时同租约时长），
  *   等待终态上限 20 分钟；平台 503/空输出按 retryable 重试（attempts<3）。
  */
@@ -120,8 +120,8 @@ async function seedNote(title: string, content: string): Promise<{ versionId: st
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'v2-llm-e2e-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
@@ -600,9 +600,8 @@ test("LLM 自然态全用户旅程：真实四阶段 → review_ready → §13.1
 
     // ── 10. C5 自然态：PREPARE 冻结 LearningTargetSnapshotV2 ─────────────
     const firstMapping = receipt.mappings[0];
-    // V1 legacy 桥接数据（learning_cards + card_key_points）已不需要——
-    // 迁移 0176 后 key_point_id FK 直接引用 learning_objectives_v2(objective_id)，
-    // V2 createRunV2 直接使用 objectiveId，无需 card_key_points alias 行。
+    // 历史卡片桥接数据已不需要；
+    // V2 createRunV2 直接使用 objectiveId。
 
     const { createRunV2 } = await import(
       "../../../../apps/api/src/modules/learning-runs/run-service.ts"
@@ -664,7 +663,8 @@ test("LLM 自然态全用户旅程：真实四阶段 → review_ready → §13.1
     // PREPARE 不创建 Schedule（trusted Commit 才创建）
     const prepareSchedules = await admin`
       SELECT count(*)::int AS n FROM review_schedules
-      WHERE workspace_id = ${WORKSPACE_ID} AND key_point_id = ${firstMapping.objectiveId}`;
+      WHERE workspace_id = ${WORKSPACE_ID}
+        AND subject_type = 'card' AND subject_id = ${firstMapping.objectiveId}`;
     assert.equal(prepareSchedules[0].n, 0, "PREPARE 不得创建 schedule（trusted Commit 才创建）");
   },
 );

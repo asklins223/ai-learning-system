@@ -21,7 +21,7 @@ import {
   answerCompletenessGate,
   frontLeakageGate,
   evidenceSpanGate,
-} from "../modules/card-generation-v2/deterministic-gates.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import type { LearningCardCandidateRevisionV2 } from "@ailearn/shared/card-generation-v2-contracts";
 
 function makeCandidate(overrides: { objectiveStatement?: string; prompt?: string; answer?: string } = {}): LearningCardCandidateRevisionV2 {

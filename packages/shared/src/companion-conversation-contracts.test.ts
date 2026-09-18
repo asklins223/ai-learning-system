@@ -6,18 +6,14 @@ import {
   companionTurnRunV1Schema,
   companionPageContextV1Schema,
   companionPersistedPageContextV1Schema,
-  companionLearningSessionContextV1Schema,
+  companionLearningRunContextV1Schema,
   companionLearningContextV1Schema,
   companionStreamEventV1Schema,
   companionErrorV1Schema,
   createCompanionTurnResponseV1Schema,
-  companionActionIntentV1Schema,
-  companionActionClassifierInputV1Schema,
   proposedLearningActionPayloadV1Schema,
   proposalDecisionResponseV1Schema,
   companionMenuCandidateIdV1Schema,
-  COMPANION_ACTION_LEXEMES,
-  COMPANION_ACTION_ROUTER_V1_SHA256,
   COMPANION_P2_LIMITS,
   type CompanionStreamEventV1,
 } from "./companion-conversation-contracts.ts";
@@ -198,141 +194,75 @@ test("turn run: terminal 状态 phase 必须 null（superRefine 由 service 保�
   assert.equal(ok.success, true);
 });
 
-test("page context: grounded_tutor grant iff requestedCapability", () => {
+test("page context：LearningRun grounded_tutor grant iff requestedCapability", () => {
+  const runContext = {
+    pageKind: "learning_run",
+    sharing: "user_selected",
+    runId: UUID,
+    snapshotId: UUID2,
+    taskId: UUID,
+    requestedCapability: "grounded_tutor",
+    contextRevision: HASH,
+  } as const;
   const grant = {
     version: 1,
     grantId: UUID,
     userId: UUID,
     workspaceId: UUID,
     pageInstanceId: UUID,
-    pageKind: "learning_session",
+    pageKind: "learning_run",
     capability: "grounded_tutor",
-    sessionId: UUID,
-    episodeId: UUID,
-    cardId: UUID,
-    keyPointId: UUID,
+    runId: UUID,
+    snapshotId: UUID2,
+    taskId: UUID,
     contextRevision: HASH,
     permissionSnapshotHash: HASH,
     issuedAt: TIME,
     expiresAt: TIME,
     signature: HASH,
   };
-  const ok = companionPageContextV1Schema.safeParse({
-    pageKind: "learning_session",
-    sharing: "user_selected",
-    sessionId: UUID,
-    episodeId: UUID,
-    cardId: UUID,
-    keyPointId: UUID,
-    requestedCapability: "grounded_tutor",
-    contextRevision: HASH,
-    groundedTutorGrant: grant,
-  });
-  assert.equal(ok.success, true);
-  // 请求 grounded_tutor 但无 grant → 拒绝
-  const missing = companionPageContextV1Schema.safeParse({
-    pageKind: "learning_session",
-    sharing: "user_selected",
-    sessionId: UUID,
-    episodeId: UUID,
-    cardId: UUID,
-    keyPointId: UUID,
-    requestedCapability: "grounded_tutor",
-    contextRevision: HASH,
-    groundedTutorGrant: null,
-  });
-  assert.equal(missing.success, false);
-  // 不请求但带 grant → 拒绝
-  const extra = companionPageContextV1Schema.safeParse({
-    pageKind: "learning_session",
-    sharing: "user_selected",
-    sessionId: UUID,
-    episodeId: UUID,
-    cardId: UUID,
-    keyPointId: UUID,
+  assert.equal(companionPageContextV1Schema.safeParse({ ...runContext, groundedTutorGrant: grant }).success, true);
+  assert.equal(companionPageContextV1Schema.safeParse({ ...runContext, groundedTutorGrant: null }).success, false);
+  assert.equal(companionPageContextV1Schema.safeParse({
+    ...runContext,
     requestedCapability: "none",
-    contextRevision: HASH,
     groundedTutorGrant: grant,
-  });
-  assert.equal(extra.success, false);
+  }).success, false);
 });
 
-test("persisted page context：grounded grant 可恢复且仍受 capability 约束", () => {
-  const persisted = companionPersistedPageContextV1Schema.safeParse({
-    version: 1,
-    context: {
-      pageKind: "learning_session",
-      sharing: "user_selected",
-      sessionId: UUID,
-      episodeId: UUID2,
-      cardId: UUID,
-      keyPointId: UUID2,
-      requestedCapability: "grounded_tutor",
-      contextRevision: HASH,
-      groundedTutorGrant: {
-        grantId: UUID,
-        permissionSnapshotHash: HASH,
-        expiresAt: TIME,
-      },
-    },
-  });
-  assert.equal(persisted.success, true);
-  const invalid = companionPersistedPageContextV1Schema.safeParse({
-    version: 1,
-    context: {
-      pageKind: "learning_session",
-      sharing: "user_selected",
-      sessionId: UUID,
-      episodeId: UUID2,
-      cardId: UUID,
-      keyPointId: UUID2,
-      requestedCapability: "none",
-      contextRevision: HASH,
-      groundedTutorGrant: { grantId: UUID, permissionSnapshotHash: HASH, expiresAt: TIME },
-    },
-  });
-  assert.equal(invalid.success, false);
-});
-
-test("Learning Session page adapter contextRevision is deterministic and state-bound", () => {
-  const input = {
-    sessionId: UUID,
-    episodeId: UUID2,
-    cardId: UUID,
-    keyPointId: UUID2,
-    sessionStatus: "active",
-    episodeStatus: "active",
-    processingPhase: "awaiting_response",
-    episodeEpoch: 1,
-    planHash: HASH,
-    contentExposureKey: "exposure-v1",
-    sessionUpdatedAt: TIME,
-    episodeUpdatedAt: TIME,
-    answerLocked: false,
+test("persisted page context：LearningRun grant 可恢复且受 capability 约束", () => {
+  const context = {
+    pageKind: "learning_run",
+    sharing: "user_selected",
+    runId: UUID,
+    snapshotId: UUID2,
+    taskId: UUID,
+    requestedCapability: "grounded_tutor",
+    contextRevision: HASH,
+    groundedTutorGrant: { grantId: UUID, permissionSnapshotHash: HASH, expiresAt: TIME },
   };
-  // 2026-08-13：revision 计算已移至 api 侧（learning-session-context.ts），
-  // 此处验证底层 content-hash 的确定性与输入绑定（revision 语义不变）。
-  const revision = sha256Utf8V1(canonicalJsonV1(input));
-  const context = companionLearningSessionContextV1Schema.parse({
+  assert.equal(companionPersistedPageContextV1Schema.safeParse({ version: 1, context }).success, true);
+  assert.equal(companionPersistedPageContextV1Schema.safeParse({
     version: 1,
-    pageKind: "learning_session",
-    sharing: "page_registered",
-    sessionId: UUID,
-    episodeId: UUID2,
-    cardId: UUID,
-    keyPointId: UUID2,
-    requestedCapability: "none",
-    contextRevision: revision,
-    groundedTutorGrant: null,
-  });
-  assert.equal(context.contextRevision, revision);
-  assert.notEqual(
-    sha256Utf8V1(canonicalJsonV1({ ...input, answerLocked: true })),
-    revision,
-  );
+    context: { ...context, requestedCapability: "none", groundedTutorGrant: context.groundedTutorGrant },
+  }).success, false);
 });
 
-test("SSE: 全部 16 种事件类型可被 discriminated union 接受", () => {
+test("LearningRun page context revision input is deterministic and state-bound", () => {
+  const input = {
+    runId: UUID,
+    snapshotId: UUID2,
+    taskId: UUID,
+    phase: "active",
+    runRevision: 1,
+    runtimeEpoch: 1,
+  };
+  const revision = sha256Utf8V1(canonicalJsonV1(input));
+  assert.equal(revision, sha256Utf8V1(canonicalJsonV1(input)));
+  assert.notEqual(sha256Utf8V1(canonicalJsonV1({ ...input, runRevision: 2 })), revision);
+});
+
+test("SSE: union 中全部事件类型均可被接受（含 agent.skill/agent.tool）", () => {
   const cases: Record<string, Record<string, unknown>> = {
     "turn.accepted": { clientMessageId: UUID2, userMessageId: UUID, status: "accepted" },
     "assistant.status": { status: "thinking", safeLabel: "正在思考" },
@@ -355,20 +285,39 @@ test("SSE: 全部 16 种事件类型可被 discriminated union 接受", () => {
         status: "pending",
       },
     },
-    "action.decision": { proposalId: UUID, decision: "confirm", status: "accepted", actionRunId: UUID },
+    "action.decision": { proposalId: UUID, decision: "confirm", status: "accepted" },
     "action.expired": { proposalId: UUID },
-    "action.started": { proposalId: UUID, actionRunId: UUID },
-    "action.completed": { actionRunId: UUID, resultRef: null, route: null, safeSummary: "完成" },
-    "action.failed": { actionRunId: UUID, code: "E_TEST", recoverable: true },
     "voice.segment.ready": { segmentId: HASH, ordinal: 1, text: "你好", textSha256: HASH },
     "proactive.delivery": { deliveryId: UUID, messageId: UUID, expiresAt: TIME, contentPolicy: "content" },
     "proactive.delivery.updated": { deliveryId: UUID, status: "shown", contentClaimed: true },
     "turn.cancelled": { reason: "user" },
     error: { code: "PROVIDER_TIMEOUT", recoverable: true },
+    // Agent 方案 §6：Skill 选择与工具执行进度必须走同一 wire 合同。
+    "agent.skill": {
+      skill: { skillId: "learning-context", skillVersion: "1.0.0", name: "学习上下文", status: "selected" },
+    },
+    "agent.tool": {
+      tool: {
+        toolCallId: "call_1",
+        name: "companion_open_review",
+        toolVersion: "1.0.0",
+        riskClass: "read",
+        status: "succeeded",
+        safeLabel: "打开复习页面",
+        safeSummary: "已定位到复习页面",
+      },
+    },
   };
   for (const [type, payload] of Object.entries(cases)) {
     const result = companionStreamEventV1Schema.safeParse(baseEvent({ type, payload }));
     assert.equal(result.success, true, `type ${type} 应可接受`);
+  }
+  // 漂移护栏：union 新增事件类型时必须同步补用例——此前 agent.skill/agent.tool
+  // 已加入 union，但本用例漏掉，导致新增事件类型无人校验。
+  const covered = new Set(Object.keys(cases));
+  for (const option of companionStreamEventV1Schema.options) {
+    const literal = (option.shape.type as { value: string }).value;
+    assert.ok(covered.has(literal), `union 事件类型 ${literal} 缺少用例`);
   }
   // 未知 type 拒绝
   const unknown = companionStreamEventV1Schema.safeParse(
@@ -446,54 +395,6 @@ test("P2 客户端限额常量与合同一致", () => {
   assert.equal(COMPANION_P2_LIMITS.blocksPerMessage, 32);
 });
 
-test("P5 §9.4：action intent schema 冻结（strict、enum、confidence 0..1）", () => {
-  const ok = companionActionIntentV1Schema.safeParse({
-    version: 1,
-    intent: "start_short",
-    confidence: 0.95,
-  });
-  assert.equal(ok.success, true);
-  // 未知 intent / 多余字段 / confidence 越界全部拒绝
-  assert.equal(companionActionIntentV1Schema.safeParse({
-    version: 1, intent: "hack", confidence: 0.9,
-  }).success, false);
-  assert.equal(companionActionIntentV1Schema.safeParse({
-    version: 1, intent: "none", confidence: 0.9, extra: 1,
-  }).success, false);
-  assert.equal(companionActionIntentV1Schema.safeParse({
-    version: 1, intent: "none", confidence: 1.1,
-  }).success, false);
-});
-
-test("P5 §9.4：classifier input schema 冻结（userText 1..4000 + availableIntents strict）", () => {
-  const ok = companionActionClassifierInputV1Schema.safeParse({
-    version: 1,
-    userText: "帮我开始学习",
-    availableIntents: {
-      resume_current: true, start_short: true, open_review: true,
-      open_current_card: true, open_star_map: true, ask_grounded_tutor: false,
-    },
-  });
-  assert.equal(ok.success, true);
-  // 缺失字段 / 多余字段 / userText 超限拒绝
-  assert.equal(companionActionClassifierInputV1Schema.safeParse({
-    version: 1, userText: "x",
-  }).success, false);
-  assert.equal(companionActionClassifierInputV1Schema.safeParse({
-    version: 1,
-    userText: "x".repeat(4_001),
-    availableIntents: { resume_current: false, start_short: false, open_review: false, open_current_card: false, open_star_map: false, ask_grounded_tutor: false },
-  }).success, false);
-});
-
-test("P5 §9.4：bounded lexeme 冻结列表含中文与英文动作词", () => {
-  for (const lexeme of ["继续", "恢复", "开始", "打开", "进入", "回到", "带我去", "帮我开始", "帮我继续", "continue", "resume", "start", "open", "go to"]) {
-    assert.ok((COMPANION_ACTION_LEXEMES as readonly string[]).includes(lexeme), `missing lexeme: ${lexeme}`);
-  }
-  // 冻结 classifier prompt 的 SHA-256 与 03 §9.4 记录一致
-  assert.equal(COMPANION_ACTION_ROUTER_V1_SHA256, "99122a340328bbf248e3f3e434d27eebd6445226db6c2e0f1bb50543555b0dde");
-});
-
 
 
 // ─── Plan 23 CS-05/CS-06：V2 学习运行 payload 与候选扩展 ────────────────
@@ -510,31 +411,15 @@ test("proposedLearningActionPayload：accepts start_learning_run_v2（originV2 �
     },
   });
   assert.equal(v2.success, true);
-  // V1 路径仍兼容
-  const v1 = proposedLearningActionPayloadV1Schema.safeParse({
-    kind: "start_learning_run",
-    request: {
-      version: 1,
-      origin: { kind: "card", cardId, keyPointId: objectiveId },
-      goal: "stabilize",
-      clientRequestId: "pet-menu:" + objectiveId,
-      idempotencyKey: "pet-menu:" + objectiveId,
-    },
-  });
-  assert.equal(v1.success, true);
 });
 
-test("learningRunStartCandidate：V2 字段可选，向后兼容", () => {
+test("learningRunStartCandidate：V2 字段必须完整", () => {
   const ctx = {
     version: 1 as const,
     contextRevision: "a".repeat(64),
-    resumeCandidate: null,
-    startCandidate: null,
     learningRunResumeCandidate: null,
     learningRunStartCandidate: {
       candidateId: "learning_run_start" as const,
-      cardId: "223e4567-e89b-12d3-a456-426614174000",
-      keyPointId: "323e4567-e89b-12d3-a456-426614174000",
       title: "开始验证",
       targetSummary: "用三分钟了解光的折射",
       impactSummary: "创建一次学习运行",
@@ -545,35 +430,19 @@ test("learningRunStartCandidate：V2 字段可选，向后兼容", () => {
     },
   };
   assert.equal(companionLearningContextV1Schema.safeParse(ctx).success, true);
-  // 无 V2 字段时同样通过（向后兼容）
-  const { objectiveId: _o, originV2: _v2, ...legacyOnly } = ctx.learningRunStartCandidate!;
-      assert.equal(companionLearningContextV1Schema.safeParse({
+  const { objectiveId: _o, originV2: _v2, ...missingV2 } = ctx.learningRunStartCandidate!;
+  assert.equal(companionLearningContextV1Schema.safeParse({
     ...ctx,
-    learningRunStartCandidate: legacyOnly,
-  }).success, true);
+    learningRunStartCandidate: missingV2,
+  }).success, false);
 });
 
-
-
-test("proposedLearningActionPayload：accepts start_learning_run / resume_learning_run", () => {
-  const start = proposedLearningActionPayloadV1Schema.safeParse({
-    kind: "start_learning_run",
-    request: {
-      version: 1,
-      origin: { kind: "card", cardId: UUID, keyPointId: "223e4567-e89b-12d3-a456-426614174000" },
-      goal: "stabilize",
-      clientRequestId: "pet-menu:223e4567-e89b-12d3-a456-426614174000",
-      idempotencyKey: "pet-menu:223e4567-e89b-12d3-a456-426614174000",
-    },
-  });
-  assert.equal(start.success, true);
+test("proposedLearningActionPayload：accepts resume_learning_run", () => {
   const resume = proposedLearningActionPayloadV1Schema.safeParse({
     kind: "resume_learning_run",
     runId: "323e4567-e89b-12d3-a456-426614174000",
   });
   assert.equal(resume.success, true);
-  // 缺 request / 缺 runId 拒绝
-  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "start_learning_run" }).success, false);
   assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "resume_learning_run" }).success, false);
   // 未知 kind 拒绝
   assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "start_learning_loop" }).success, false);
@@ -582,7 +451,7 @@ test("proposedLearningActionPayload：accepts start_learning_run / resume_learni
 test("menu candidate id：learning_run_start / learning_run_resume 合法", () => {
   assert.equal(companionMenuCandidateIdV1Schema.safeParse("learning_run_start").success, true);
   assert.equal(companionMenuCandidateIdV1Schema.safeParse("learning_run_resume").success, true);
-  assert.equal(companionMenuCandidateIdV1Schema.safeParse("resume_current").success, true);
+  assert.equal(companionMenuCandidateIdV1Schema.safeParse("unknown_resume").success, false);
   assert.equal(companionMenuCandidateIdV1Schema.safeParse("unknown_kind").success, false);
 });
 
@@ -622,7 +491,6 @@ test("proposedLearningActionPayload：accepts §18 全部工具 kind", () => {
     { kind: "restore_graph_viewport", runId },
     { kind: "open_conversation_history" },
     { kind: "open_conversation_history", assistantSessionId: "923e4567-e89b-12d3-a456-426614174000" },
-    { kind: "propose_memory_candidate", memoryKind: "preference", value: "喜欢安静的环境", sourceMessageId: "a23e4567-e89b-12d3-a456-426614174000" },
     { kind: "confirm_or_reject_memory", memoryId, revision: 1720000000000, decision: "confirm" },
     { kind: "delete_assistant_memory", memoryId, revision: 1720000000000 },
   ];
@@ -652,18 +520,18 @@ test("proposedLearningActionPayload：§18 工具非法变体拒绝", () => {
   );
   assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "focus_graph_node" }).success, false);
   assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "confirm_or_reject_memory", memoryId: runId, revision: 1 }).success, false);
+  // 已删除的 kind 必须被拒绝（防止通过历史 payload 复活不可实现的动作）。
+  assert.equal(proposedLearningActionPayloadV1Schema.safeParse({ kind: "ask_grounded_tutor", runId, snapshotId: runId, taskId: runId, question: "?" }).success, false);
   assert.equal(
-    proposedLearningActionPayloadV1Schema.safeParse({ kind: "propose_memory_candidate", memoryKind: "preference", value: "" }).success,
+    proposedLearningActionPayloadV1Schema.safeParse({ kind: "propose_memory_candidate", memoryKind: "preference", value: "偏好", sourceMessageId: runId }).success,
     false,
   );
 });
 
-test("learning context：LearningRun 候选字段可解析；旧字段仍 required", () => {
+test("learning context：LearningRun 候选字段可解析且旧字段被拒绝", () => {
   const ok = companionLearningContextV1Schema.safeParse({
     version: 1,
     contextRevision: "a".repeat(64),
-    resumeCandidate: null,
-    startCandidate: null,
     learningRunResumeCandidate: {
       candidateId: "learning_run_resume",
       runId: "323e4567-e89b-12d3-a456-426614174000",
@@ -674,20 +542,68 @@ test("learning context：LearningRun 候选字段可解析；旧字段仍 requir
     },
     learningRunStartCandidate: {
       candidateId: "learning_run_start",
-      cardId: UUID,
-      keyPointId: "223e4567-e89b-12d3-a456-426614174000",
       title: "开始三分钟巩固",
       targetSummary: "用三分钟巩固：…",
       impactSummary: "创建一次三分钟学习运行",
       payloadSha256: "c".repeat(64),
+      objectiveId: UUID,
+      originV2: { kind: "card", cardId: UUID2, objectiveId: UUID },
     },
   });
   assert.equal(ok.success, true);
-  // 旧字段缺失仍拒绝（strict 向后兼容）
+  // 必填候选缺失仍拒绝
   assert.equal(companionLearningContextV1Schema.safeParse({
     version: 1,
     contextRevision: "a".repeat(64),
+    learningRunResumeCandidate: null,
+    learningRunStartCandidate: null,
+    legacyCandidate: null,
   }).success, false);
+});
+
+test("grounded tutor：LearningRun context 和 grant 必须绑定同一页面类型", () => {
+  const runId = "323e4567-e89b-12d3-a456-426614174000";
+  const snapshotId = "423e4567-e89b-12d3-a456-426614174000";
+  const taskId = "523e4567-e89b-12d3-a456-426614174000";
+  assert.equal(companionLearningRunContextV1Schema.safeParse({
+    version: 1,
+    pageKind: "learning_run",
+    sharing: "page_registered",
+    runId,
+    snapshotId,
+    taskId,
+    requestedCapability: "none",
+    contextRevision: HASH,
+    groundedTutorGrant: null,
+  }).success, true);
+
+  const runGrant = {
+    version: 1,
+    grantId: UUID,
+    userId: UUID2,
+    workspaceId: UUID,
+    pageInstanceId: UUID2,
+    pageKind: "learning_run",
+    capability: "grounded_tutor",
+    runId,
+    snapshotId,
+    taskId,
+    contextRevision: HASH,
+    permissionSnapshotHash: HASH,
+    issuedAt: TIME,
+    expiresAt: TIME,
+    signature: HASH,
+  };
+  assert.equal(companionPageContextV1Schema.safeParse({
+    pageKind: "learning_run",
+    sharing: "user_selected",
+    runId,
+    snapshotId,
+    taskId,
+    requestedCapability: "grounded_tutor",
+    contextRevision: HASH,
+    groundedTutorGrant: runGrant,
+  }).success, true);
 });
 
 test("proposalDecisionResponseV1Schema：route 接受 §18 V2 导航 kind（lens/restoreRun/assistantSessionId）", () => {
@@ -695,7 +611,6 @@ test("proposalDecisionResponseV1Schema：route 接受 §18 V2 导航 kind（lens
     version: 1,
     proposalId: "b23e4567-e89b-12d3-a456-426614174000",
     status: "succeeded",
-    actionRunId: null,
     resultRef: null,
     safeSummary: "聚焦知识节点",
   };

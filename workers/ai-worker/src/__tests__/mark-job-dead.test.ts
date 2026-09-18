@@ -14,7 +14,7 @@ import {
 
 const baseJob: ClaimedJob = {
   id: "22222222-2222-2222-2222-222222222222",
-  type: "execute_card_agent_turn",
+  type: "parse_source",
   payload: { noteVersionId: "nv-1" },
   workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -29,7 +29,12 @@ function createRecordingUpdater(shouldSucceed = true): {
   const updates: QueueJobUpdate[] = [];
   const updater: QueueJobUpdater = async (update) => {
     updates.push(update);
-    return shouldSucceed;
+    return {
+      updated: shouldSucceed,
+      status: "dead",
+      attempts: MAX_ATTEMPTS,
+      backoffMs: 0,
+    };
   };
   return { updater, updates };
 }

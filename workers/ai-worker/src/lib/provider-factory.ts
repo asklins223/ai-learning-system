@@ -31,6 +31,24 @@ export function registerFactory(
 }
 
 /**
+ * 每种能力**必须**在实例上暴露的方法名（形状校验用）。
+ *
+ * AI P0-2（2026-09-15 审计）：工厂以 `as unknown as CapabilityImpl` 强转返回实例，
+ * 编译期不校验形状。三个 provider 声明了 `vision` 且注册了 vision 工厂，但全仓
+ * **没有任何** provider 实现 `analyzeImage`（只有 provider-capabilities.ts 的接口
+ * 声明）——能力闸在 :51 只校验"元数据声明支持"，因此会放行一个"看起来是
+ * VisionCapability、一调用就 TypeError: analyzeImage is not a function"的对象。
+ * 在工厂出口做一次形状校验，把它变成明确的配置错误。
+ */
+const REQUIRED_CAPABILITY_METHOD: Partial<Record<Capability, string>> = {
+  text_generation: "chatCompletion",
+  vision: "analyzeImage",
+  agent_turn: "executeAgentTurn",
+  embedding: "embed",
+  rerank: "rerank",
+};
+
+/**
  * 按 (providerId, capability) 创建能力实例 — 仅 worker 可调用。
  *
  * 返回 null 的情况：
@@ -40,6 +58,7 @@ export function registerFactory(
  * 抛错的情况：
  * - providerId 在元数据中不存在
  * - providerId 声明了该 capability 但未注册工厂（配置错误）
+ * - 工厂返回的实例未实现该能力要求的方法（声明/实现不一致）
  */
 export function createCapabilityProvider(
   providerId: string,
@@ -51,13 +70,17 @@ export function createCapabilityProvider(
   if (!desc.capabilities.includes(capability)) return null;
   const factory = FACTORIES.get(`${providerId}:${capability}`);
   if (!factory) throw new Error(`provider ${providerId} 未注册 ${capability} 工厂`);
-  return factory(config);
-}
-
-/**
- * 检查某 provider 是否已注册某能力的工厂。
- * 主要用于测试和诊断。
- */
-export function hasFactory(providerId: string, capability: Capability): boolean {
-  return FACTORIES.has(`${providerId}:${capability}`);
+  const instance = factory(config);
+  if (!instance) return null;
+  const requiredMethod = REQUIRED_CAPABILITY_METHOD[capability];
+  if (
+    requiredMethod
+    && typeof (instance as unknown as Record<string, unknown>)[requiredMethod] !== "function"
+  ) {
+    throw new Error(
+      `provider ${providerId} 声明并注册了 ${capability}，但返回的实例未实现 ${requiredMethod}()`
+      + "（能力声明与实现不一致：实现该方法，或从 provider-registry 的 capabilities 中移除该能力）",
+    );
+  }
+  return instance;
 }

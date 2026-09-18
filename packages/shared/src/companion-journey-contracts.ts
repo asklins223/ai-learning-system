@@ -17,7 +17,6 @@ import { z } from "zod";
 // ─── 类型 ────────────────────────────────────────────────────────────────
 
 export const CompanionInvitationStatus = {
-  NOT_OFFERED: "not_offered",
   OFFERED: "offered",
   DEFERRED: "deferred",
   ACCEPTED: "accepted",
@@ -88,7 +87,6 @@ export type CompanionJourneyV2 = {
     sourceId?: string;
     generationJobId?: string;
     noteId?: string;
-    cardSetId?: string;
     cardId?: string;
     keyPointId?: string;
     runId?: string;
@@ -167,7 +165,7 @@ export const companionInvitationSchema = z
   .object({
     version: z.literal(2),
     userId: z.string().uuid(),
-    status: z.enum(["not_offered", "offered", "deferred", "accepted", "skipped"]),
+    status: z.enum(["offered", "deferred", "accepted", "skipped"]),
     offeredAt: z.string().nullable(),
     decidedAt: z.string().nullable(),
     deferredUntil: z.string().nullable(),
@@ -210,7 +208,6 @@ export const companionJourneySchema = z
         sourceId: z.string().uuid().optional(),
         generationJobId: z.string().uuid().optional(),
         noteId: z.string().uuid().optional(),
-        cardSetId: z.string().uuid().optional(),
         cardId: z.string().uuid().optional(),
         keyPointId: z.string().uuid().optional(),
         runId: z.string().uuid().optional(),

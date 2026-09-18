@@ -155,6 +155,9 @@ export async function createScenePixiApplication(
     } else {
       safeCall(() => app.stage.destroy({ children: true }));
     }
+    // `app.destroy()` can itself fail while WebGL is lost. Ensure the
+    // presentation canvas cannot survive as an invisible DOM/GPU leak.
+    safeCall(() => canvas?.remove());
   };
 
   try {
@@ -195,9 +198,15 @@ export async function createScenePixiApplication(
     options.host.appendChild(canvas);
 
     contextLostHandler = (event: Event) => {
+      if (destroyed) return;
       safeCall(() => event.preventDefault());
-      safeCall(() => options.onContextLost?.());
       clearRendererHost();
+      safeCall(() => options.onContextLost?.());
+      // Context loss is a terminal boundary for this adapter. The Room owns a
+      // deterministic DOM poster fallback and may construct a fresh
+      // Application later; allowing update()/render() to touch the lost
+      // renderer in the meantime would violate that fallback contract.
+      destroyApp();
     };
     canvas.addEventListener("webglcontextlost", contextLostHandler, { passive: false });
 

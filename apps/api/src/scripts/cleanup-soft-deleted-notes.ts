@@ -19,7 +19,7 @@
 
 import { and, asc, gt, lt, or, sql } from "drizzle-orm";
 import { db, closeDatabase } from "../db/client.ts";
-import { notes } from "../db/schema/note.ts";
+import { notes } from "@ailearn/shared/db-schema/note";
 import { physicalDeleteNote } from "../modules/note/service.ts";
 import { deleteObject } from "../lib/object-storage.ts";
 import { logger } from "../lib/logger.ts";

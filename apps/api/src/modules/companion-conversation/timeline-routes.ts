@@ -10,19 +10,17 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import type { AssistantDeliveryV2 } from "@ailearn/shared";
+import { ASSISTANT_DELIVERY_KIND_VALUES, type AssistantDeliveryV2 } from "@ailearn/shared";
 import { listInbox } from "./delivery-service.ts";
 
 function isCompanionJourneyV2Enabled(): boolean {
   return process.env.COMPANION_JOURNEY_V2 === "true";
 }
 
-const DELIVERY_KINDS = ["message", "proposal", "action_result", "proactive_cue", "system_event", "memory_candidate"] as const;
-
 const timelineQuerySchema = z.object({
   after: z.coerce.number().int().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
-  kind: z.enum(DELIVERY_KINDS).optional(),
+  kind: z.enum(ASSISTANT_DELIVERY_KIND_VALUES).optional(),
 });
 
 export async function deliveryTimelineRoutes(app: FastifyInstance) {

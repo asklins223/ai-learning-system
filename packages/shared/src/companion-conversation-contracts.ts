@@ -10,14 +10,15 @@
  */
 
 import { z } from "zod";
-import { allowedMainRouteV1Schema } from "./desktop-pet-contracts.ts";
 import { allowedMainRouteV2Schema } from "./companion-bridge-contracts.ts";
-import { companionAccountStateV1Schema } from "./companion-shell-contracts.ts";
 import {
   characterCueEmotionV1Schema,
   characterCueIntentV1Schema,
 } from "./companion-character-contracts.ts";
-import { createLearningRunRequestSchema } from "./learning-run-contracts.ts";
+import {
+  companionAgentSkillEventV1Schema,
+  companionAgentToolEventV1Schema,
+} from "./companion-agent-contracts.ts";
 import { createLearningRunV2RequestSchema } from "./learning-target-v2-contracts.ts";
 
 // ─── 基础 ────────────────────────────────────────────────────────────────
@@ -73,10 +74,6 @@ export const companionContentBlockV1Schema = z.discriminatedUnion("type", [
     type: z.literal("action_ref"),
     proposalId: z.string().uuid(),
   }).strict(),
-  z.object({
-    type: z.literal("result_ref"),
-    actionRunId: z.string().uuid(),
-  }).strict(),
 ]);
 
 export type CompanionContentBlockV1 = z.infer<typeof companionContentBlockV1Schema>;
@@ -114,6 +111,7 @@ export type CompanionMessageV1 = z.infer<typeof companionMessageV1Schema>;
 export const companionRunStatusV1Schema = z.enum([
   "accepted",
   "running",
+  "waiting_for_confirmation",
   "succeeded",
   "cancel_requested",
   "cancelled",
@@ -131,7 +129,7 @@ export const companionTurnRunV1Schema = z.object({
   assistantMessageId: z.string().uuid().nullable(),
   generation: z.number().int().positive(),
   status: companionRunStatusV1Schema,
-  phase: z.enum(["accepted", "thinking", "streaming", "acting"]).nullable(),
+  phase: z.enum(["accepted", "thinking", "streaming", "acting", "awaiting_confirmation"]).nullable(),
   previewText: z.string().max(20_000),
   previewTextSha256: companionHashV1Schema,
   lastEventSeq: z.number().int().nonnegative(),
@@ -163,32 +161,40 @@ export type CancelCompanionRunResponseV1 = z.infer<typeof cancelCompanionRunResp
 
 // ─── Page context（§4.1） — P2 提交的 bounded 页面上下文 ───────────────────
 
-export const companionGroundedTutorGrantPayloadV1Schema = z.object({
+/**
+ * LearningRun 是现行正式学习容器。它的 Tutor 授权必须同时绑定 Run、冻结
+ * target snapshot 和当前 task。
+ */
+const companionLearningRunGroundedTutorGrantPayloadV1Schema = z.object({
   version: z.literal(1),
   grantId: z.string().uuid(),
   userId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   pageInstanceId: z.string().uuid(),
-  pageKind: z.literal("learning_session"),
+  pageKind: z.literal("learning_run"),
   capability: z.literal("grounded_tutor"),
-  sessionId: z.string().uuid(),
-  episodeId: z.string().uuid(),
-  cardId: z.string().uuid(),
-  keyPointId: z.string().uuid(),
+  runId: z.string().uuid(),
+  snapshotId: z.string().uuid(),
+  taskId: z.string().uuid(),
   contextRevision: companionHashV1Schema,
   permissionSnapshotHash: companionHashV1Schema,
   issuedAt: z.string().datetime(),
   expiresAt: z.string().datetime(),
 }).strict();
 
+export const companionGroundedTutorGrantPayloadV1Schema = z.discriminatedUnion("pageKind", [
+  companionLearningRunGroundedTutorGrantPayloadV1Schema,
+]);
+
 export type CompanionGroundedTutorGrantPayloadV1 = z.infer<
   typeof companionGroundedTutorGrantPayloadV1Schema
 >;
 
-export const companionGroundedTutorGrantV1Schema =
-  companionGroundedTutorGrantPayloadV1Schema.extend({
+export const companionGroundedTutorGrantV1Schema = z.discriminatedUnion("pageKind", [
+  companionLearningRunGroundedTutorGrantPayloadV1Schema.extend({
     signature: companionHashV1Schema,
-  }).strict();
+  }).strict(),
+]);
 
 export type CompanionGroundedTutorGrantV1 = z.infer<
   typeof companionGroundedTutorGrantV1Schema
@@ -221,24 +227,30 @@ export const companionPageContextV1Schema = z.discriminatedUnion("pageKind", [
     contextRevision: companionHashV1Schema,
   }).strict(),
   z.object({
-    pageKind: z.literal("learning_session"),
+    pageKind: z.literal("learning_run"),
     sharing: z.enum(["page_registered", "user_selected"]),
-    sessionId: z.string().uuid(),
-    episodeId: z.string().uuid(),
-    cardId: z.string().uuid(),
-    keyPointId: z.string().uuid(),
+    runId: z.string().uuid(),
+    snapshotId: z.string().uuid(),
+    taskId: z.string().uuid(),
     requestedCapability: z.enum(["none", "grounded_tutor"]),
     contextRevision: companionHashV1Schema,
     groundedTutorGrant: companionGroundedTutorGrantV1Schema.nullable(),
   }).strict(),
 ]).superRefine((value, ctx) => {
-  if (value.pageKind !== "learning_session") return;
+  if (value.pageKind !== "learning_run") return;
   const required = value.requestedCapability === "grounded_tutor";
   if (required !== (value.groundedTutorGrant !== null)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["groundedTutorGrant"],
       message: "grant iff grounded_tutor",
+    });
+  }
+  if (value.groundedTutorGrant !== null && value.groundedTutorGrant.pageKind !== value.pageKind) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["groundedTutorGrant", "pageKind"],
+      message: "grounded tutor grant page kind mismatch",
     });
   }
 });
@@ -253,7 +265,7 @@ export const createCompanionTurnRequestV1Schema = z.object({
   inputKind: z.enum(["text", "voice_transcript"]),
   blocks: z.array(companionContentBlockV1Schema).length(1),
   voiceArtifactId: z.string().uuid().optional(),
-  sourceSurface: z.enum(["pet", "main", "web_fallback"]),
+  sourceSurface: z.enum(["pet", "main"]),
   supersedesGeneration: z.number().int().positive().optional(),
   context: companionPageContextV1Schema.optional(),
 }).strict().superRefine((value, ctx) => {
@@ -316,12 +328,11 @@ export const companionPersistedPageContextV1Schema = z.object({
       contextRevision: companionHashV1Schema,
     }).strict(),
     z.object({
-      pageKind: z.literal("learning_session"),
+      pageKind: z.literal("learning_run"),
       sharing: z.enum(["page_registered", "user_selected"]),
-      sessionId: z.string().uuid(),
-      episodeId: z.string().uuid(),
-      cardId: z.string().uuid(),
-      keyPointId: z.string().uuid(),
+      runId: z.string().uuid(),
+      snapshotId: z.string().uuid(),
+      taskId: z.string().uuid(),
       requestedCapability: z.enum(["none", "grounded_tutor"]),
       contextRevision: companionHashV1Schema,
       groundedTutorGrant: z.object({
@@ -332,7 +343,7 @@ export const companionPersistedPageContextV1Schema = z.object({
     }).strict(),
   ]),
 }).strict().superRefine((value, ctx) => {
-  if (value.context.pageKind !== "learning_session") return;
+  if (value.context.pageKind !== "learning_run") return;
   if ((value.context.requestedCapability === "grounded_tutor") !== (value.context.groundedTutorGrant !== null)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -355,7 +366,6 @@ export const companionConversationSnapshotV1Schema = z.object({
   // These P5 schemas are declared below; lazy references avoid a module-load
   // temporal-dead-zone while keeping the exported snapshot contract unified.
   pendingProposal: z.lazy(() => pendingLearningActionProposalV1Schema).nullable(),
-  activeActionRun: z.lazy(() => companionActionRunV1Schema).nullable(),
 }).strict();
 
 export type CompanionConversationSnapshotV1 = z.infer<
@@ -383,22 +393,6 @@ export const companionCharacterCueV1Schema = z.object({
 }).strict();
 
 export type CompanionCharacterCueV1 = z.infer<typeof companionCharacterCueV1Schema>;
-
-// ─── P5 Learning action（§4.5）— 供 SSE union 编译；P2/P3 不创建 proposal ──
-
-export const companionActionRunV1Schema = z.object({
-  version: z.literal(1),
-  actionRunId: z.string().uuid(),
-  proposalId: z.string().uuid(),
-  status: z.enum(["accepted", "running", "succeeded", "failed", "cancelled"]),
-  resultMessageId: z.string().uuid().nullable(),
-  resultRef: z.string().min(1).max(240).nullable(),
-  route: allowedMainRouteV1Schema.nullable(),
-  safeSummary: z.string().min(1).max(240).nullable(),
-  errorCode: z.string().min(1).max(80).nullable(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-}).strict();
 
 // ─── P5 §4.5 Learning action proposal（第一批冻结） ─────────────────────
 
@@ -440,28 +434,18 @@ export const deferReviewReasonCodeV1Schema = z.enum([
 ]);
 
 export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("resume_session"), sessionId: z.string().uuid() }).strict(),
-  z.object({
-    kind: z.literal("start_session"),
-    origin: z.enum(["card", "review", "star_map", "now"]),
-    cardId: z.string().uuid(),
-    keyPointId: z.string().uuid(),
-  }).strict(),
   z.object({ kind: z.literal("open_review") }).strict(),
   z.object({ kind: z.literal("open_card"), cardId: z.string().uuid() }).strict(),
   z.object({ kind: z.literal("open_star_map"), keyPointId: z.string().uuid().optional() }).strict(),
-  z.object({
-    kind: z.literal("ask_grounded_tutor"),
-    sessionId: z.string().uuid(),
-    episodeId: z.string().uuid(),
-    question: z.string().min(1).max(4_000),
-  }).strict(),
+  // 已删除两个无法实现的 kind（2026-09-16）：
+  // - ask_grounded_tutor：无 producer、无 decision 分支，确认必落 409；当前 target
+  //   Tutor 由 companion-context-grants + grounded evidence 流程交付。
+  // - propose_memory_candidate：契约要求 payload 携带 sourceMessageId，而该 id 由
+  //   服务端在 proposal 创建事务内生成（菜单路径 userMessageId、agent 路径
+  //   event.read.userMessageId），调用方无从提供 ⇒ 该 kind 不可满足。已落地的候选
+  //   记忆路径是 worker memory-extractor + delivery 气泡 + confirm_or_reject_memory。
   // 方案 16 §18：统一 LearningRun 工具（menu 候选直连 LearningRun API；
   // 同步执行，confirm 后 proposal 直接 succeeded + resultRef=runId）。
-  z.object({
-    kind: z.literal("start_learning_run"),
-    request: createLearningRunRequestSchema,
-  }).strict(),
   z.object({
     kind: z.literal("resume_learning_run"),
     runId: z.string().uuid(),
@@ -516,12 +500,6 @@ export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind"
     assistantSessionId: z.string().uuid().optional(),
   }).strict(),
   z.object({
-    kind: z.literal("propose_memory_candidate"),
-    memoryKind: assistantMemoryKindV1Schema,
-    value: z.string().min(1).max(4_000),
-    sourceMessageId: z.string().uuid(),
-  }).strict(),
-  z.object({
     // revision = 目标记忆 updatedAt 的 epoch millis（单调 CAS 令牌；
     // 记忆无独立 revision 列，见 assistant-memory 表）。
     kind: z.literal("confirm_or_reject_memory"),
@@ -551,7 +529,6 @@ export const companionActionProposalV1Schema = z.object({
   requiresConfirmation: z.literal(true),
   status: z.enum(["pending", "rejected", "accepted", "executing", "succeeded", "failed", "expired"]),
   decision: z.enum(["confirm", "reject"]).nullable(),
-  actionRunId: z.string().uuid().nullable(),
   expiresAt: z.string().datetime(),
   decidedAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
@@ -561,21 +538,17 @@ export const companionActionProposalV1Schema = z.object({
 export const pendingLearningActionProposalV1Schema = companionActionProposalV1Schema.extend({
   status: z.literal("pending"),
   decision: z.null(),
-  actionRunId: z.null(),
   decidedAt: z.null(),
 }).strict();
 
 export const companionProposalSnapshotV1Schema = z.object({
   version: z.literal(1),
   proposal: companionActionProposalV1Schema,
-  actionRun: companionActionRunV1Schema.nullable(),
 }).strict();
 
 export type CompanionProposalSnapshotV1 = z.infer<typeof companionProposalSnapshotV1Schema>;
 
 export const companionMenuCandidateIdV1Schema = z.enum([
-  "resume_current",
-  "start_short",
   "learning_run_resume",
   "learning_run_start",
 ]);
@@ -589,7 +562,7 @@ export const createMenuProposalRequestV1Schema = z.object({
   candidateId: companionMenuCandidateIdV1Schema,
   expectedContextRevision: z.string().regex(/^[a-f0-9]{64}$/),
   expectedPayloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  sourceSurface: z.enum(["pet", "main", "web_fallback"]),
+  sourceSurface: z.enum(["pet", "main"]),
 }).strict();
 
 // ── 方案 16 §18.1：通用工具 proposal 请求（Orchestrator 网关入口） ──
@@ -601,7 +574,7 @@ export const createToolProposalRequestV1Schema = z.object({
   title: z.string().min(1).max(80),
   targetSummary: z.string().min(1).max(160),
   impactSummary: z.string().min(1).max(240),
-  sourceSurface: z.enum(["pet", "main", "web_fallback"]),
+  sourceSurface: z.enum(["pet", "main"]),
 }).strict();
 export type CreateToolProposalRequestV1 = z.infer<typeof createToolProposalRequestV1Schema>;
 
@@ -622,16 +595,14 @@ export const proposalDecisionRequestV1Schema = z.object({
   proposalId: z.string().uuid(),
   decision: z.enum(["confirm", "reject"]),
   idempotencyKey: z.string().uuid(),
-  // §6.6：confirm 必须匹配 payload hash。可选以兼容旧调用方；提供时必须
-  // 与服务端冻结的 payload_sha256 精确一致，否则拒绝。
-  expectedPayloadSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  // §6.6：confirm 必须匹配服务端冻结的 payload hash。
+  expectedPayloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
 export const proposalDecisionResponseV1Schema = z.object({
   version: z.literal(1),
   proposalId: z.string().uuid(),
   status: z.enum(["rejected", "accepted", "executing", "succeeded", "failed"]),
-  actionRunId: z.string().uuid().nullable(),
   resultRef: z.string().min(1).max(240).nullable(),
   // 2026-08-15：服务端 navigationRouteFor 返回 V2 合同（§18 新导航 kind 的
   // lens/restoreRun/assistantSessionId 是 V1 strict 之外的新键）——decision
@@ -647,21 +618,6 @@ export type ProposalDecisionResponseV1 = z.infer<typeof proposalDecisionResponse
 export const companionLearningContextV1Schema = z.object({
   version: z.literal(1),
   contextRevision: z.string().regex(/^[a-f0-9]{64}$/),
-  resumeCandidate: z.object({
-    candidateId: z.literal("resume_current"),
-    title: z.string().min(1).max(80),
-    targetSummary: z.string().min(1).max(160),
-    impactSummary: z.string().min(1).max(240),
-    payloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  }).nullable(),
-  startCandidate: z.object({
-    candidateId: z.literal("start_short"),
-    title: z.string().min(1).max(80),
-    targetSummary: z.string().min(1).max(160),
-    impactSummary: z.string().min(1).max(240),
-    payloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  }).nullable(),
-  // 方案 16 §18：统一 LearningRun 菜单候选（learning_run_v1 生产入口）。
   learningRunResumeCandidate: z.object({
     candidateId: z.literal("learning_run_resume"),
     runId: z.string().uuid(),
@@ -672,15 +628,12 @@ export const companionLearningContextV1Schema = z.object({
   }).nullable(),
   learningRunStartCandidate: z.object({
     candidateId: z.literal("learning_run_start"),
-    cardId: z.string().uuid(),
-    keyPointId: z.string().uuid(),
     title: z.string().min(1).max(80),
     targetSummary: z.string().min(1).max(160),
     impactSummary: z.string().min(1).max(240),
     payloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
-    // Plan 23 CS-05/CS-06：V2 字段（可选；兼容 V1 客户端跳过）。
-    objectiveId: z.string().uuid().optional(),
-    originV2: createLearningRunV2RequestSchema.shape.originV2.optional(),
+    objectiveId: z.string().uuid(),
+    originV2: createLearningRunV2RequestSchema.shape.originV2,
   }).nullable(),
 }).strict();
 
@@ -688,104 +641,32 @@ export type CompanionLearningContextV1 = z.infer<typeof companionLearningContext
 
 // ─── P5 §6.7 Grounded tutor grant（HMAC 5min TTL） ──────────────────────
 
-export const createCompanionContextGrantRequestV1Schema = z.object({
+/** LearningRun Tutor grant 的一次性签发请求。 */
+export const createCompanionLearningRunContextGrantRequestV1Schema = z.object({
   version: z.literal(1),
   pageInstanceId: z.string().uuid(),
-  episodeId: z.string().uuid(),
+  taskId: z.string().uuid(),
   contextRevision: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
-/**
- * 当前 Learning Session 的只读 page adapter 快照。
- *
- * `contextRevision` 由服务端根据 session/episode/card/key point 的当前
- * public projection 计算；客户端只能回传它，不能自行构造授权内容。
- */
-export const companionLearningSessionContextV1Schema = z.object({
+/** 当前 LearningRun 的只读 Tutor 页面适配器快照。 */
+export const companionLearningRunContextV1Schema = z.object({
   version: z.literal(1),
-  pageKind: z.literal("learning_session"),
+  pageKind: z.literal("learning_run"),
   sharing: z.literal("page_registered"),
-  sessionId: z.string().uuid(),
-  episodeId: z.string().uuid(),
-  cardId: z.string().uuid(),
-  keyPointId: z.string().uuid(),
+  runId: z.string().uuid(),
+  snapshotId: z.string().uuid(),
+  taskId: z.string().uuid(),
   requestedCapability: z.literal("none"),
   contextRevision: companionHashV1Schema,
   groundedTutorGrant: z.null(),
 }).strict();
 
-export type CompanionLearningSessionContextV1 = z.infer<
-  typeof companionLearningSessionContextV1Schema
+export type CompanionLearningRunContextV1 = z.infer<
+  typeof companionLearningRunContextV1Schema
 >;
 
 
-
-// ─── P5 §6.7 Classifier 冻结（companion-action-router-v1，578 bytes） ───
-
-export const COMPANION_ACTION_ROUTER_V1_PROMPT =
-  "你是学习伴星的动作意图分类器。只判断用户是否明确请求一个可用动作，不回答问题，不生成任何 ID、参数、路线或解释。\n" +
-  "可选 intent 只有：none、resume_current、start_short、open_review、open_current_card、open_star_map、ask_grounded_tutor。\n" +
-  "如果用户只是在讨论、提问、假设、否定、引用别人、表达未来可能性，或请求不明确，选择 none。\n" +
-  "只有 availableIntents 中为 true 的动作才可选择；否则选择 none。\n" +
-  "输出必须严格符合给定 JSON schema，不得添加字段。";
-export const COMPANION_ACTION_ROUTER_V1_SHA256 =
-  "99122a340328bbf248e3f3e434d27eebd6445226db6c2e0f1bb50543555b0dde";
-
-// ─── P5 §9.4 Router 输出 schema（03 合同冻结；worker classifier 只输出
-//      intent/confidence，不输出 payload/ID/route）───────────────────────
-
-export const companionActionIntentV1Schema = z.object({
-  version: z.literal(1),
-  intent: z.enum([
-    "none",
-    "resume_current",
-    "start_short",
-    "open_review",
-    "open_current_card",
-    "open_star_map",
-    "ask_grounded_tutor",
-  ]),
-  confidence: z.number().min(0).max(1),
-}).strict();
-
-export type CompanionActionIntentV1 = z.infer<typeof companionActionIntentV1Schema>;
-
-/** §9.4 classifier 唯一 user message：原始 user text + availableIntents，不传 history。 */
-export const companionActionClassifierInputV1Schema = z.object({
-  version: z.literal(1),
-  userText: z.string().min(1).max(4_000),
-  availableIntents: z.object({
-    resume_current: z.boolean(),
-    start_short: z.boolean(),
-    open_review: z.boolean(),
-    open_current_card: z.boolean(),
-    open_star_map: z.boolean(),
-    ask_grounded_tutor: z.boolean(),
-  }).strict(),
-}).strict();
-
-export type CompanionActionClassifierInputV1 = z.infer<
-  typeof companionActionClassifierInputV1Schema
->;
-
-/** §9.4 预检：bounded action lexeme（NFC/trim/lowercase 后匹配）。 */
-export const COMPANION_ACTION_LEXEMES = [
-  "继续", "恢复", "开始", "打开", "进入", "回到", "带我去", "帮我开始", "帮我继续",
-  "continue", "resume", "start", "open", "go to",
-] as const;
-
-/** §9.4 参数固定：classifier 用 temperature 0 / maxTokens 80 / json。 */
-export const COMPANION_ACTION_ROUTER_OPTIONS = Object.freeze({
-  capability: "text_generation",
-  temperature: 0,
-  maxTokens: 80,
-  // 2026-08-12（契约收口）：统一为 ChatOptions 类型允许的字面值 "json_object"
-  // （wire 上即 response_format:{type:"json_object"}；文档 §9.4 的 "json" 是
-  // JSON 模式语义描述）。此前 worker 本地双份定义用 "json_object"、shared
-  // 用 "json"，两处注释互相矛盾——worker 已收口到本常量。
-  responseFormat: "json_object",
-  promptVersion: "companion-action-router-v1",
-} as const);
 
 // ─── P2 §5.2/§6.9 恢复块：错误码 + 16 事件 discriminated union + limits ──
 
@@ -816,7 +697,7 @@ export const companionPublicErrorCodeV1Schema = z.enum([
   "ACTION_STALE",
   // 2026-08-12+（15a-E）：学习快捷方式错误码细分——context 变化/无进行中会话/无候选
   "CONTEXT_STALE",
-  "NO_ACTIVE_SESSION",
+  "NO_ACTIVE_RUN",
   "NO_CANDIDATE",
   "PAYLOAD_HASH_MISMATCH",
   "INTERNAL_ERROR",
@@ -877,6 +758,8 @@ const actionProposedProposalV1Schema = z.object({
   targetSummary: z.string().min(1).max(160),
   impactSummary: z.string().min(1).max(240),
   status: z.enum(["pending", "rejected", "accepted", "executing", "succeeded", "failed", "expired"]),
+  origin: z.enum(["menu", "agent_tool"]).optional(),
+  agentToolCallId: z.string().max(200).optional(),
 }).strict();
 
 export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
@@ -885,6 +768,12 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("assistant.status"), payload: z.object({
     status: z.enum(["thinking", "acting"]), safeLabel: z.string().min(1).max(240),
+  }).strict() }).strict(),
+  z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("agent.skill"), payload: z.object({
+    skill: companionAgentSkillEventV1Schema,
+  }).strict() }).strict(),
+  z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("agent.tool"), payload: z.object({
+    tool: companionAgentToolEventV1Schema,
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("assistant.delta"), payload: z.object({
     appendFrom: z.number().int().nonnegative(), textDelta: z.string().min(1).max(2_000),
@@ -908,20 +797,10 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("action.decision"), payload: z.object({
     proposalId: z.string().uuid(), decision: z.enum(["confirm", "reject"]),
-    status: z.enum(["accepted", "rejected"]), actionRunId: z.string().uuid().nullable(),
+    status: z.enum(["accepted", "rejected"]),
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("action.expired"), payload: z.object({
     proposalId: z.string().uuid(),
-  }).strict() }).strict(),
-  z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("action.started"), payload: z.object({
-    proposalId: z.string().uuid(), actionRunId: z.string().uuid(),
-  }).strict() }).strict(),
-  z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("action.completed"), payload: z.object({
-    actionRunId: z.string().uuid(), resultRef: z.string().min(1).max(240).nullable(),
-    route: allowedMainRouteV1Schema.nullable(), safeSummary: z.string().min(1).max(240),
-  }).strict() }).strict(),
-  z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("action.failed"), payload: z.object({
-    actionRunId: z.string().uuid(), code: z.string().min(1).max(80), recoverable: z.boolean(),
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("voice.segment.ready"), payload: z.object({
     segmentId: z.string().regex(/^[a-f0-9]{64}$/),
@@ -950,7 +829,7 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
 
 export type CompanionStreamEventV1 = z.infer<typeof companionStreamEventV1Schema>;
 
-// ─── P2/P3 恢复：bootstrap + TTS request + 错误码 type ──────────────────
+// ─── P2/P3：TTS request + 错误码 type ────────────────────────────────────
 
 export type CompanionPublicErrorCodeV1 = z.infer<typeof companionPublicErrorCodeV1Schema>;
 
@@ -963,27 +842,6 @@ export const companionTtsRequestV1Schema = z.object({
   // 2026-08-24：与 voice.segment.ready 的 ordinal 上限同步（20 → 200）。
   ordinal: z.number().int().min(1).max(200),
   segmentId: z.string().regex(/^[a-f0-9]{64}$/),
-}).strict();
-
-export const companionBootstrapFeaturesV1Schema = z.object({
-  // §6.0：petSurface 是能力投影（boolean），不是恒 true 字面量。
-  petSurface: z.boolean(),
-  textConversation: z.boolean(),
-  voiceDialogue: z.boolean(),
-  live2d: z.boolean(),
-  learningActions: z.boolean(),
-  streamingVoice: z.boolean(),
-}).strict();
-
-export type CompanionBootstrapFeaturesV1 = z.infer<typeof companionBootstrapFeaturesV1Schema>;
-
-export const companionBootstrapResponseV1Schema = z.object({
-  version: z.literal(1),
-  userId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  account: companionAccountStateV1Schema,
-  features: companionBootstrapFeaturesV1Schema,
-  serverTime: z.string().datetime(),
 }).strict();
 
 // ─── P6 §13 流式 TTS 请求（句子级，每稳定句一条流） ─────────────────────

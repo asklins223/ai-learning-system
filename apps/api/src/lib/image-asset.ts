@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { db } from "../db/client.ts";
-import { noteImageAssets } from "../db/schema/note.ts";
+import { noteImageAssets } from "@ailearn/shared/db-schema/note";
 import { getObject } from "./object-storage.ts";
 import { validateImageMagicBytes, readImageDimensions } from "./file-validation.ts";
 import { logger } from "./logger.ts";

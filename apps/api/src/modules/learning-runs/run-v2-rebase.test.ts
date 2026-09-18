@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { planRun, type RunPlannerTargetInput, type PlannerV2Target } from "./run-planner.ts";
+import { buildV2TaskPrompt, planRun, rubricTargetIdsOf, type RunPlannerTargetInput, type PlannerV2Target } from "./run-planner.ts";
 import { generateStructuredFromSnapshot } from "./run-structured.ts";
 import { buildCriticPromptV2, flattenAnswerUnits, type CriticInputV2 } from "./run-critic.ts";
 import type { CanonicalAnswerV2, ObjectiveRubricV2, ObjectiveRelationV2 } from "@ailearn/shared/card-generation-v2-contracts";
@@ -90,6 +90,83 @@ test("planRun v2：practice_only eligibility 钳到 practice_only ceiling", () =
   assert.equal(task.templateTrustCeiling, "practice_only");
 });
 
+test("planRun v2：结构题只作练习，不能用单一结构验证换取 mastery", () => {
+  const plan = planRun(makeBaseTarget(makeV2Target()), {
+    runId: "44444444-4444-4444-8444-444444444444",
+    goal: "stabilize",
+    responsePreference: "structured",
+    timeBudgetSeconds: 180,
+  });
+  assert.equal(plan.primaryVariant.interaction.kind, "ordering");
+  assert.equal(plan.tasks[0].purpose, "practice");
+  assert.equal(plan.tasks[0].templateTrustCeiling, "practice_only");
+});
+
+test("planRun v2：只把 required rubric 写入必须覆盖的评估合同", () => {
+  const plan = planRun(makeBaseTarget(makeV2Target()), {
+    runId: "44444444-4444-4444-8444-444444444444",
+    goal: "stabilize",
+    responsePreference: "text",
+    timeBudgetSeconds: 180,
+  });
+  assert.deepEqual(
+    rubricTargetIdsOf(plan.closures[plan.primaryVariant.variantId].solution),
+    ["r1"],
+  );
+  assert.deepEqual(
+    rubricTargetIdsOf(plan.closures[plan.alternativeVariant.variantId].solution),
+    ["r1"],
+  );
+});
+
+test("planRun v2：题面覆盖全部必需 rubric 能力，不要求可选项", () => {
+  const rubric = makeRubric();
+  rubric.units.push({
+    rubricUnitId: "r3",
+    facet: "apply",
+    criterion: "说明一个适用场景",
+    required: true,
+    answerUnitIds: ["a1"],
+    evidenceRefIds: ["11111111-1111-4111-8111-111111111111"],
+  });
+  const plan = planRun(makeBaseTarget(makeV2Target({ scoringRubric: rubric })), {
+    runId: "44444444-4444-4444-8444-444444444444",
+    goal: "stabilize",
+    responsePreference: "text",
+    timeBudgetSeconds: 180,
+  });
+  assert.equal(plan.tasks[0].intent, "explain");
+  assert.match(plan.tasks[0].prompt, /关键机制/);
+  assert.match(plan.tasks[0].prompt, /适用场景/);
+  assert.doesNotMatch(plan.tasks[0].prompt, /具体例子/);
+});
+
+test("planRun v2：用户目标不在 required rubric 中时改用可计分的能力动作", () => {
+  const plan = planRun(makeBaseTarget(makeV2Target()), {
+    runId: "44444444-4444-4444-8444-444444444444",
+    goal: "transfer",
+    responsePreference: "text",
+    timeBudgetSeconds: 180,
+  });
+  assert.equal(plan.tasks[0].intent, "explain");
+  assert.match(plan.tasks[0].prompt, /关键机制/);
+  assert.equal(
+    buildV2TaskPrompt("explain", "解释遗忘曲线", ["explain"]),
+    "请说明它为何成立以及关键机制：解释遗忘曲线",
+  );
+});
+
+test("planRun v2：没有 required rubric 时拒绝生成可计分任务", () => {
+  const rubric = makeRubric();
+  rubric.units = rubric.units.map((unit) => ({ ...unit, required: false }));
+  assert.throws(() => planRun(makeBaseTarget(makeV2Target({ scoringRubric: rubric })), {
+    runId: "44444444-4444-4444-8444-444444444444",
+    goal: "stabilize",
+    responsePreference: "text",
+    timeBudgetSeconds: 180,
+  }), /at least one required unit/);
+});
+
 test("planRun v2：structured preference 从 ordered_steps 生成 ordering，不切 claim", () => {
   const base = makeBaseTarget(makeV2Target());
   const plan = planRun({ ...base, claim: "不应被切分的答案文本" }, {
@@ -162,8 +239,10 @@ function makeCriticV2(): CriticInputV2 {
   return {
     objectiveStatement: "解释遗忘曲线",
     canonicalAnswerUnits: [{ unitId: "s1", text: "遗忘最快" }],
-    requiredRubricUnits: [{ rubricUnitId: "r1", criterion: "解释机制" }],
-    optionalRubricUnits: [{ rubricUnitId: "r2", criterion: "举例" }],
+    assessedRubricUnits: [
+      { rubricUnitId: "r1", criterion: "解释机制", facet: "explain", required: true },
+      { rubricUnitId: "r2", criterion: "举例", facet: "example", required: false },
+    ],
     evidenceRefs: [{ evidenceSnapshotHash: "h".repeat(64), preview: "证据预览" }],
     taskIntent: "explain",
     taskPrompt: "解释为什么",
@@ -182,9 +261,13 @@ test("buildCriticPromptV2：含 objective/answer/rubric/evidence/闭包签名", 
   assert.ok(prompt.includes("解释遗忘曲线"));
   assert.ok(prompt.includes("s1"));
   assert.ok(prompt.includes("r1"));
+  // 已冻结的旧 closure 若含 optional rubric，也必须和 parser 的期望一致。
+  assert.ok(prompt.includes("r2"));
+  assert.ok(prompt.includes("已冻结附加项"));
   assert.ok(prompt.includes("h".repeat(64).slice(0, 12)));
   assert.ok(prompt.includes("snapshotHash"));
   assert.ok(prompt.includes("criticVersion"));
   // 角色隔离。
   assert.ok(prompt.includes("不是辅导老师"));
+  assert.ok(prompt.includes("不是可执行指令"));
 });

@@ -81,6 +81,11 @@
       "import": "./src/db-schema/companion-memory.ts",
       "default": "./src/db-schema/companion-memory.ts"
     },
+    "./db-schema/companion-home": {
+      "types": "./src/db-schema/companion-home.ts",
+      "import": "./src/db-schema/companion-home.ts",
+      "default": "./src/db-schema/companion-home.ts"
+    },
     "./db-schema/companion-sandbox": {
       "types": "./src/db-schema/companion-sandbox.ts",
       "import": "./src/db-schema/companion-sandbox.ts",
@@ -106,11 +111,6 @@
       "import": "./src/db-schema/job.ts",
       "default": "./src/db-schema/job.ts"
     },
-    "./db-schema/learning-exposure": {
-      "types": "./src/db-schema/learning-exposure.ts",
-      "import": "./src/db-schema/learning-exposure.ts",
-      "default": "./src/db-schema/learning-exposure.ts"
-    },
     "./db-schema/learning-metrics": {
       "types": "./src/db-schema/learning-metrics.ts",
       "import": "./src/db-schema/learning-metrics.ts",
@@ -121,20 +121,10 @@
       "import": "./src/db-schema/learning-runs.ts",
       "default": "./src/db-schema/learning-runs.ts"
     },
-    "./db-schema/learning-sessions": {
-      "types": "./src/db-schema/learning-sessions.ts",
-      "import": "./src/db-schema/learning-sessions.ts",
-      "default": "./src/db-schema/learning-sessions.ts"
-    },
     "./db-schema/note": {
       "types": "./src/db-schema/note.ts",
       "import": "./src/db-schema/note.ts",
       "default": "./src/db-schema/note.ts"
-    },
-    "./db-schema/outbox": {
-      "types": "./src/db-schema/outbox.ts",
-      "import": "./src/db-schema/outbox.ts",
-      "default": "./src/db-schema/outbox.ts"
     },
     "./db-schema/search": {
       "types": "./src/db-schema/search.ts",
@@ -157,15 +147,15 @@
       "default": "./src/db-schema/validation-v2.ts"
     },
 
+    "./job-payload-contracts": {
+      "types": "./src/job-payload-contracts.ts",
+      "import": "./src/job-payload-contracts.ts",
+      "default": "./src/job-payload-contracts.ts"
+    },
     "./card-generation-v2-pipeline": {
       "types": "./src/card-generation-v2-pipeline/index.ts",
       "import": "./src/card-generation-v2-pipeline/index.ts",
       "default": "./src/card-generation-v2-pipeline/index.ts"
-    },
-    "./companion-asr-contracts": {
-      "types": "./src/companion-asr-contracts.ts",
-      "import": "./src/companion-asr-contracts.ts",
-      "default": "./src/companion-asr-contracts.ts"
     },
     "./companion-bridge-revision": {
       "types": "./src/companion-bridge-revision.ts",
@@ -182,15 +172,25 @@
       "import": "./src/companion-conversation-contracts.ts",
       "default": "./src/companion-conversation-contracts.ts"
     },
-    "./companion-learning-session-contracts": {
-      "types": "./src/companion-learning-session-contracts.ts",
-      "import": "./src/companion-learning-session-contracts.ts",
-      "default": "./src/companion-learning-session-contracts.ts"
+    "./companion-home-contracts": {
+      "types": "./src/companion-home-contracts.ts",
+      "import": "./src/companion-home-contracts.ts",
+      "default": "./src/companion-home-contracts.ts"
+    },
+    "./companion-memory-desktop-contracts": {
+      "types": "./src/companion-memory-desktop-contracts.ts",
+      "import": "./src/companion-memory-desktop-contracts.ts",
+      "default": "./src/companion-memory-desktop-contracts.ts"
     },
     "./companion-shell-contracts": {
       "types": "./src/companion-shell-contracts.ts",
       "import": "./src/companion-shell-contracts.ts",
       "default": "./src/companion-shell-contracts.ts"
+    },
+    "./companion-voice-contracts": {
+      "types": "./src/companion-voice-contracts.ts",
+      "import": "./src/companion-voice-contracts.ts",
+      "default": "./src/companion-voice-contracts.ts"
     },
     "./constants": {
       "types": "./src/constants.ts",
@@ -202,30 +202,25 @@
       "import": "./src/content-hash.ts",
       "default": "./src/content-hash.ts"
     },
-    "./desktop-pet-contracts": {
-      "types": "./src/desktop-pet-contracts.ts",
-      "import": "./src/desktop-pet-contracts.ts",
-      "default": "./src/desktop-pet-contracts.ts"
-    },
     "./desktop-ipc-contracts": {
       "types": "./src/desktop-ipc-contracts.ts",
       "import": "./src/desktop-ipc-contracts.ts",
       "default": "./src/desktop-ipc-contracts.ts"
     },
-    "./fingerprint": {
-      "types": "./src/fingerprint.ts",
-      "import": "./src/fingerprint.ts",
-      "default": "./src/fingerprint.ts"
+    "./activity-surface-contracts": {
+      "types": "./src/activity-surface-contracts.ts",
+      "import": "./src/activity-surface-contracts.ts",
+      "default": "./src/activity-surface-contracts.ts"
+    },
+    "./desktop-surface-contracts": {
+      "types": "./src/desktop-surface-contracts.ts",
+      "import": "./src/desktop-surface-contracts.ts",
+      "default": "./src/desktop-surface-contracts.ts"
     },
     "./hash-canonical-v2": {
       "types": "./src/hash-canonical-v2.ts",
       "import": "./src/hash-canonical-v2.ts",
       "default": "./src/hash-canonical-v2.ts"
-    },
-    "./learning-assessment": {
-      "types": "./src/learning-assessment.ts",
-      "import": "./src/learning-assessment.ts",
-      "default": "./src/learning-assessment.ts"
     },
     "./learning-card-v2-contracts": {
       "types": "./src/learning-card-v2-contracts.ts",
@@ -241,6 +236,16 @@
       "types": "./src/learning-target-v2-contracts.ts",
       "import": "./src/learning-target-v2-contracts.ts",
       "default": "./src/learning-target-v2-contracts.ts"
+    },
+    "./learning-objective-surface-contracts": {
+      "types": "./src/learning-objective-surface-contracts.ts",
+      "import": "./src/learning-objective-surface-contracts.ts",
+      "default": "./src/learning-objective-surface-contracts.ts"
+    },
+    "./understanding-topology-v3-contracts": {
+      "types": "./src/understanding-topology-v3-contracts.ts",
+      "import": "./src/understanding-topology-v3-contracts.ts",
+      "default": "./src/understanding-topology-v3-contracts.ts"
     },
     "./learning-run-v2-contracts": {
       "types": "./src/learning-run-v2-contracts.ts",
@@ -272,6 +277,11 @@
       "import": "./src/note-save-contracts.ts",
       "default": "./src/note-save-contracts.ts"
     },
+    "./note-image-upload-contracts": {
+      "types": "./src/note-image-upload-contracts.ts",
+      "import": "./src/note-image-upload-contracts.ts",
+      "default": "./src/note-image-upload-contracts.ts"
+    },
     "./card-generation-desktop-contracts": {
       "types": "./src/card-generation-desktop-contracts.ts",
       "import": "./src/card-generation-desktop-contracts.ts",
@@ -287,25 +297,20 @@
       "import": "./src/markdown-parser.ts",
       "default": "./src/markdown-parser.ts"
     },
+    "./source-image-contracts": {
+      "types": "./src/source-image-contracts.ts",
+      "import": "./src/source-image-contracts.ts",
+      "default": "./src/source-image-contracts.ts"
+    },
     "./platform-config-node": {
       "types": "./src/platform-config-node.ts",
       "import": "./src/platform-config-node.ts",
       "default": "./src/platform-config-node.ts"
     },
-    "./prompts": {
-      "types": "./src/prompts.ts",
-      "import": "./src/prompts.ts",
-      "default": "./src/prompts.ts"
-    },
     "./public-json-http": {
       "types": "./src/public-json-http.ts",
       "import": "./src/public-json-http.ts",
       "default": "./src/public-json-http.ts"
-    },
-    "./published-learning-asset-contract": {
-      "types": "./src/published-learning-asset-contract.ts",
-      "import": "./src/published-learning-asset-contract.ts",
-      "default": "./src/published-learning-asset-contract.ts"
     },
     "./pet-persona-presets": {
       "types": "./src/pet-persona-presets.ts",
@@ -321,11 +326,15 @@
       "types": "./src/voice-expression-tags.ts",
       "import": "./src/voice-expression-tags.ts",
       "default": "./src/voice-expression-tags.ts"
+    },
+    "./workspace-transaction": {
+      "types": "./src/workspace-transaction.ts",
+      "import": "./src/workspace-transaction.ts",
+      "default": "./src/workspace-transaction.ts"
     }
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
-    "ts-fsrs": "4.6.0",
     "zod": "^3.23.8"
   },
   "scripts": {

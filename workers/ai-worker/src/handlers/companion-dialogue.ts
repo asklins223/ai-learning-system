@@ -1,5 +1,5 @@
 /**
- * P2 companion_dialogue Worker handler（03 合同 §8.1/§9，runbook 6.4 步骤 5-7）。
+ * companion_agent Worker handler（03 合同 §8.1/§9，runbook 6.4 步骤 5-7）。
  *
  * 2026-08-24（AI 设计审查 §4.4 拆分）：本文件自 1600+ 行巨型文件重构为编排层，
  * 职责拆分：
@@ -7,10 +7,10 @@
  *               delta 分块/persona 组装/确定性 cue——纯函数层）；
  * - store     → ./companion-dialogue-store.ts（事件写入/run failed 投影/
  *               grounded-tutor DB 读取/记忆任务入队/feature flags）；
- * - streaming → ./companion-dialogue-streaming.ts（真流式与批量回退管线、
+ * - delta 管线 → ./companion-dialogue-deltas.ts（批量 delta 写库、
  *               provider 采样参数、失败分类）。
- * 本文件只保留 run 编排：read → router → memory context → fence claim →
- * generate（流式/批量）→ TTS 段（非流式路径）→ 终态事务。
+ * 本文件只保留 run 编排：read → memory context → fence claim →
+ * bounded Agent loop → TTS 段 → 终态事务。
  *
  * 流程：
  * 1. 读 job payload 的 opaque runId（不携带任何 message 正文——runbook 步骤 5）；
@@ -32,31 +32,29 @@ import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
-import { createProvider, createEmbeddingProvider, type AIProvider } from "../lib/ai-provider.ts";
+import { createProvider, createEmbeddingProvider } from "../lib/ai-provider.ts";
 import {
   AIConsentRequiredError,
+  createGovernedEmbeddingProvider,
+  createGovernedProvider,
   resolveAIGovernanceContext,
   resolveProviderForTask,
 } from "../lib/governance.ts";
-import { runWithAbortBudget } from "../lib/handler-timeout.ts";
-import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import {
   COMPANION_PERSONA_V4_PROMPT_ID,
   COMPANION_PERSONA_V4_SHA256,
 } from "@ailearn/shared";
-import {
-  buildActionClassifierInput,
-  classifyDialogueAction,
-  constructActionProposalInWorker,
-  persistRouterDecision,
-  readStoredRouterIntent,
-  resolveAvailableIntentsInWorker,
-  shouldRunActionClassifier,
-  type RouterDecisionV1,
-} from "./companion-dialogue-router.ts";
-import { splitCompanionTtsSegmentsIncremental, companionSegmentId, extractVoiceEmotion } from "../lib/tts-segments.ts";
+import { runCompanionAgentLoop } from "./companion-agent-runtime.ts";
+import { CompanionAgentBudgetExceededError } from "../lib/non-retryable-errors.ts";
+import { splitCompanionTtsSegmentsIncremental, companionSegmentId } from "../lib/tts-segments.ts";
+import { extractVoiceEmotion } from "@ailearn/shared/voice-expression-tags";
 import { applyDeterministicToneToSegments, resolveReplyToneEmotion } from "../lib/companion-tone.ts";
-import { assembleCompanionContext, type ContextAssemblyResult } from "./companion-context-orchestrator.ts";
+import {
+  assembleCompanionContext,
+  buildCompanionMemoryQuery,
+  type ContextAssemblyResult,
+} from "./companion-context-orchestrator.ts";
+import { isCompanionMemoryVectorEnabled } from "./companion-memory-vector.ts";
 import {
   THINKING_CUE_PAYLOAD_V1,
   buildFinalCuePayload,
@@ -70,7 +68,7 @@ import {
   type CompanionDialogueHandlerContext,
   type ReadContext,
   insertStreamEvent,
-  emitCompanionTtsSegment,
+  emitCompanionTtsSegments,
   markCompanionRunFailed,
   readGroundedTutorContext,
   isActiveRun,
@@ -82,44 +80,32 @@ import {
   computeGroundedTutorPromptSha256,
 } from "./companion-dialogue-store.ts";
 import {
-  COMPANION_PROVIDER_OPTIONS,
-  categorizeProviderFailure,
   writeBatchedDeltas,
-  runStreamingDialogue,
-} from "./companion-dialogue-streaming.ts";
-
-export {
-  // 纯函数层（测试与外部消费沿用原导入路径）
-  buildCompanionPersonaMessages,
-  buildFinalCuePayload,
-  chunkTextIntoDeltas,
-} from "./companion-dialogue-content.ts";
-export {
-  COMPANION_HARD_MAX_CHARS,
-  DELTA_MAX_CODE_UNITS,
-  validateCompanionOutput,
-  stripCompanionMarkdown,
-  textOfCompanionBlocks,
-} from "./companion-dialogue-content.ts";
-export {
-  COMPANION_PROVIDER_OPTIONS,
-  categorizeProviderFailure,
-} from "./companion-dialogue-streaming.ts";
-// 兼容导出：旧版单文件公开导出的 interface（拆分时移入 store，此处保持
-// 原导入路径可用——文档 §4.4「对外导出符号不变」）。
-export type { CompanionDialogueHandlerContext } from "./companion-dialogue-store.ts";
+} from "./companion-dialogue-deltas.ts";
 
 const groundedTutorPromptSha256 = computeGroundedTutorPromptSha256(GROUNDED_TUTOR_COMPANION_PROMPT);
+
+/** LearningRun 是正式学习页，缺证据时必须 fail closed。 */
+export function isGroundedTutorRequestedPageContext(
+  pageContext: Record<string, unknown> | null,
+): boolean {
+  return pageContext?.pageKind === "learning_run"
+    && pageContext.requestedCapability === "grounded_tutor";
+}
 
 // ─── run 编排 ─────────────────────────────────────────────────────────────
 
 export async function runCompanionDialogue(
   ctx: CompanionDialogueHandlerContext,
 ): Promise<void> {
-  const payload = ctx.payload as { runId?: string };
+  // job 超时（runWithAbortTimeout）在进入 handler 前就已开始计时；Agent loop 用
+  // 这个起点把 run 预算夹在 handler abort 之内（见 runCompanionAgentLoop）。
+  const handlerStartedAtMs = Date.now();
+  const payload = ctx.payload as { runId?: string; proposalId?: string };
   const runId = payload.runId;
-  if (!runId) throw new Error("companion_dialogue payload 缺 runId");
-  if (ctx.signal.aborted) throw new Error("companion_dialogue aborted");
+  const continuationProposalId = typeof payload.proposalId === "string" ? payload.proposalId : undefined;
+  if (!runId) throw new Error("companion_agent payload 缺 runId");
+  if (ctx.signal.aborted) throw new Error("companion_agent aborted");
 
   // ── 阶段 1：读（RLS 事务） ────────────────────────────────────────────
   let read: ReadContext | null = null;
@@ -220,21 +206,19 @@ export async function runCompanionDialogue(
       },
     );
   } catch (err) {
-    logger.warn({ jobId: ctx.id, runId, err }, "companion_dialogue read phase failed");
+    logger.warn({ jobId: ctx.id, runId, err }, "companion_agent read phase failed");
     throw err;
   }
   if (!read) return; // run 已删/非本 workspace——job 成功无副作用
 
   const parsedPageContext = parsePageContext(read.pageContext);
-  if (parsedPageContext?.pageKind === "learning_session"
-    && parsedPageContext.requestedCapability === "grounded_tutor"
-    && !read.groundedTutorContext) {
+  if (isGroundedTutorRequestedPageContext(parsedPageContext) && !read.groundedTutorContext) {
     await markCompanionRunFailed(read, ctx.workspaceId, "ACTION_STALE", false, "grounded tutor evidence unavailable");
     throw new Error("grounded tutor evidence unavailable");
   }
 
   // ── 阶段 2：provider（非 active run → 不重复调用） ───────────────────
-  if (!isActiveRun(read.runStatus)) {
+  if (!isActiveRun(read.runStatus) && !(continuationProposalId && read.runStatus === "waiting_for_confirmation")) {
     logger.info({ runId, status: read.runStatus }, "companion run 非 active，跳过 provider");
     return;
   }
@@ -254,63 +238,16 @@ export async function runCompanionDialogue(
     );
     throw new AIConsentRequiredError();
   }
-  const textRes = resolveProviderForTask(govCtx, "companion_dialogue");
-  const provider = createProvider(textRes.providerName, textRes.providerConfig);
-
-  // ── P5 §9.4 Dialogue Router（classifier 在 persona generation 之前）──
-  // 三态：casual_chat / learning_question（lexeme 不命中或 classifier 判
-  // none → 走 persona 文字回复；grounded-tutor 分支承接 learning_question）
-  // 与 learning_action（lexeme 命中 + classifier confidence≥0.90 + available
-  // → 写 router 字段，供 API proposal 构造）。classifier 失败永远回落 none，
-  // 不影响正文回复；decision 只写一次（retry 复用，不重新分类）。
-  let routerDecision: RouterDecisionV1 | null = null;
-  try {
-    const groundedTutorRequested =
-      parsedPageContext?.pageKind === "learning_session"
-      && parsedPageContext.requestedCapability === "grounded_tutor";
-    const availableIntents = await resolveAvailableIntentsInWorker({
-      workspaceId: ctx.workspaceId,
-      userId: read.userId,
-      groundedTutorRequested,
-    });
-    if (shouldRunActionClassifier(read.userText, availableIntents)) {
-      const classifierInput = buildActionClassifierInput(read.userText, availableIntents);
-      routerDecision = await classifyDialogueAction(
-        provider,
-        classifierInput,
-        availableIntents,
-        ctx.signal,
-      );
-      const persisted = await persistRouterDecision({
-        runId: read.runId,
-        workspaceId: ctx.workspaceId,
-        userId: read.userId,
-        generation: read.generation,
-        decision: routerDecision,
-        contextRevision: null,
-        payloadHash: null,
-      });
-      if (!persisted) {
-        // §9.4 retry 复用：decision 已存在（上次 persist 后 crash/重试），
-        // 读回已冻结的 router_intent，不得用本次重新分类结果覆盖。
-        const stored = await readStoredRouterIntent({
-          runId: read.runId,
-          workspaceId: ctx.workspaceId,
-          userId: read.userId,
-          generation: read.generation,
-        });
-        if (stored) {
-          routerDecision = stored;
-        } else {
-          routerDecision = null;
-        }
-      }
-    }
-  } catch (err) {
-    // §9.4：classifier 内部异常不影响正文回复；仅记录，不 fail run。
-    logger.warn({ jobId: ctx.id, runId: read.runId, err }, "companion action router skipped");
-    routerDecision = null;
-  }
+  const textRes = resolveProviderForTask(govCtx, "companion_agent");
+  const provider = createGovernedProvider(
+    createProvider(textRes.providerName, textRes.providerConfig),
+    govCtx,
+    ctx.workspaceId,
+    // AI P0-8（2026-09-15 审计）：接上 ai_audit_log 的唯一写入口 logAICall——
+    // 此前全仓零生产调用，而 DEFAULT_AI_DATA_POLICY.auditLogging 默认为 true，
+    // 等于审计/成本记录完全空转。只写元数据，不写内容。
+    { userId: read.userId, operation: "companion_agent", jobId: ctx.id },
+  );
 
   // ── 22 方案：Context Orchestrator 检索长期记忆（非 grounded_tutor）──
   let memoryContext: ContextAssemblyResult = {
@@ -321,7 +258,31 @@ export async function runCompanionDialogue(
   };
   if (isCompanionMemoryContextEnabled() && !read.groundedTutorContext) {
     try {
-      const embeddingProvider = await createEmbeddingProvider(read.userId, govCtx);
+      const rawEmbeddingProvider = await createEmbeddingProvider(govCtx);
+      const embeddingProvider = rawEmbeddingProvider
+        ? createGovernedEmbeddingProvider(rawEmbeddingProvider, govCtx, ctx.workspaceId)
+        : null;
+      // embedding 是外部 HTTP 往返（常态数百 ms，超时可达数秒）。放在
+      // withWorkerWorkspaceTransaction 内会让 RLS 事务在整个往返期间独占连接，
+      // 高峰期把连接池反压到所有 job 类型。查询文本与向量先在事务外算好：
+      // null = 已尝试且失败 → 事务内直接降级 keyword（绝不在事务内重试外部调用）。
+      let queryEmbedding: number[] | null = null;
+      if (embeddingProvider && isCompanionMemoryVectorEnabled()) {
+        try {
+          queryEmbedding = await embeddingProvider.embed(
+            buildCompanionMemoryQuery({
+              userText: read.userText,
+              recentMessages: read.recentMessages,
+            }),
+          );
+        } catch (err) {
+          logger.warn(
+            { jobId: ctx.id, runId: read.runId, err },
+            "companion memory query embedding failed; using keyword fallback",
+          );
+          queryEmbedding = null;
+        }
+      }
       memoryContext = await withWorkerWorkspaceTransaction(
         { workspaceId: ctx.workspaceId, userId: read.userId },
         (tx) => assembleCompanionContext(
@@ -331,6 +292,7 @@ export async function runCompanionDialogue(
             userText: read.userText,
             recentMessages: read.recentMessages,
             provider: embeddingProvider,
+            queryEmbedding,
             runId: read.runId,
             groundedTutorContext: read.groundedTutorContext,
             // §9.2.2：按页面类型推导 currentScope（card/learning_run/review → task）。
@@ -366,9 +328,6 @@ export async function runCompanionDialogue(
 
   // ── 阶段 2a：fence claim + assistant.status（provider 调用前）─────────
   // 让客户端尽早进入 thinking；run 已被 cancel/supersede 时不调用 provider。
-  // §8.2：真流式——provider.chatCompletionStream 存在时 delta 边生成边写库
-  // （50ms/256-unit 节流 flush，独立事务 + fence + NOTIFY，cancel 中断
-  // provider）；缺失时回退 chatCompletion + 分批写（模拟流式节奏）。
   const expiresAt = new Date(Date.now() + 24 * 3_600_000).toISOString();
 
   const notifyCompanionEvent = async (tx: { execute(q: unknown): Promise<unknown> }, seq: number): Promise<void> => {
@@ -389,7 +348,11 @@ export async function runCompanionDialogue(
       const claimedRow = await tx.execute<{ id: string }>(sql`
         UPDATE companion_turn_runs
         SET status = 'running', started_at = COALESCE(started_at, now())
-        WHERE id = ${read.runId} AND status IN ('accepted', 'running')
+        WHERE id = ${read.runId}
+          AND (
+            status IN ('accepted', 'running')
+            OR (status = 'waiting_for_confirmation' AND waiting_proposal_id = ${continuationProposalId ?? null})
+          )
           AND generation = ${read.generation}
         RETURNING id
       `);
@@ -436,85 +399,67 @@ export async function runCompanionDialogue(
   );
   if (!claimed) return;
 
-  // ── 阶段 2b：真实流式（或回退分批） ───────────────────────────────────
+  // ── 阶段 2b：统一 Agent loop ─────────────────────────────────────────
+  // 普通闲聊由 provider 以空工具列表单步完成；带 Skill 的请求在运行时内
+  // 进行有限步工具循环。这里保留原有批量 delta/TTS/终态投影管线。
   let assistantText: string;
-  // 15b：是否走了真流式（delta 过程已增量发段；非流式需在 validate 后全量切段）
-  let streamedPath = false;
-  // 15b 二期：provider 原始输出（含情感/富语言标签）——非流式路径 validate
-  // 会剥离标签，TTS 切段必须用这份 raw（标签只活在朗读管道）。
   let ttsRawText: string | null = null;
-  if (typeof provider.chatCompletionStream === "function") {
-    streamedPath = true;
-    const streamed = await runStreamingDialogue({
-      provider: provider as AIProvider & { chatCompletionStream: NonNullable<AIProvider["chatCompletionStream"]> },
-      messages,
+  let agentResult;
+  try {
+    agentResult = await runCompanionAgentLoop({
+      ctx,
+      read,
+      provider,
+      baseMessages: messages,
+      expiresAt,
+      continuationProposalId,
+      handlerStartedAtMs,
+    });
+  } catch (err) {
+    // 预算耗尽（步数/工具数/执行时间）是确定性失败：标记 recoverable=false，
+    // 队列侧同时按不可重试处理，避免空转重投（见 isNonRetryableError）。
+    const budgetExceeded = err instanceof CompanionAgentBudgetExceededError;
+    await markCompanionRunFailed(
+      read,
+      ctx.workspaceId,
+      budgetExceeded ? "AGENT_BUDGET_EXCEEDED" : "INTERNAL_ERROR",
+      !budgetExceeded,
+      budgetExceeded ? "companion agent budget exceeded" : "companion agent execution failed",
+    );
+    throw err;
+  }
+  if (agentResult.status === "waiting_for_confirmation") return;
+  ttsRawText = agentResult.text;
+
+  // 信任边界：全文校验必须先于任何对外可见的写入。delta 是实时下发给客户端
+  // 并入库的内容，先写后验等于让泄露检测/长度限额沦为"事后门"——校验失败
+  // （internal_token_leak / output_too_long）不会撤回已投递的 delta。
+  // 校验失败在此终结：零 delta 落库，客户端只看到 error 事件。
+  const validated = validateCompanionOutput(agentResult.text);
+  if (!validated.ok) {
+    await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", false, validated.reason);
+    throw new Error(`companion output validation failed: ${validated.reason}`);
+  }
+  // delta 与终态 assistant message 使用同一份净化文本（markdown/标签剥离后），
+  // 否则客户端流式渲染的内容与 assistant.final 指向的消息不一致。
+  assistantText = validated.text;
+  try {
+    const batched = await writeBatchedDeltas({
+      assistantText,
       ctx,
       read,
       expiresAt,
       notifyCompanionEvent,
     });
-    if (!streamed) return; // 已 cancel/supersede，无输出
-    assistantText = streamed.content;
-    // 2026-08-24：流式路径的幻觉标签清洗已在 delta 管线内完成（见
-    // createStreamToneInjector），语气注入在切段时逐段应用。
-    ttsRawText = streamed.content;
-  } else {
-    // 回退：非流式 chatCompletion + 分批写 delta（保持既有 fence/幂等语义）
-    let rawText: string;
-    try {
-      const result = await runWithAbortBudget(
-        (signal) => provider.chatCompletion(messages, COMPANION_PROVIDER_OPTIONS, signal),
-        ctx.signal,
-        resolveProviderCallTimeout("companion_dialogue"),
-        (lateError) => logger.warn(
-          { jobId: ctx.id, err: lateError },
-          "companion provider settled after its call budget expired",
-        ),
-      );
-      rawText = result.content;
-    } catch (err) {
-      const code = categorizeProviderFailure(err);
-      await markCompanionRunFailed(read, ctx.workspaceId, code, true, "provider unavailable");
-      throw err;
-    }
-    const validatedFallback = validateCompanionOutput(rawText);
-    if (!validatedFallback.ok) {
-      await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", false, validatedFallback.reason);
-      throw new Error(`companion output validation failed: ${validatedFallback.reason}`);
-    }
-    assistantText = validatedFallback.text;
-    // 2026-08-24（AI 设计审查 §4.2）：确定性语气层——模型不再输出标签
-    // （V4 已禁止方括号标记）。切段后逐段注入句首控制标签（情绪按全文判）
-    // 并净化幻觉标签；展示/入库文本不受影响（已剥全部标签）。
-    ttsRawText = rawText;
-    let batched: boolean;
-    try {
-      batched = await writeBatchedDeltas({
-        assistantText,
-        ctx,
-        read,
-        expiresAt,
-        notifyCompanionEvent,
-      });
-    } catch (err) {
-      await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", true, "companion delta write failed");
-      throw err;
-    }
-    if (!batched) return; // 已 cancel
+    if (!batched) return;
+  } catch (err) {
+    await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", true, "companion delta write failed");
+    throw err;
   }
 
-  // 真流式路径的全文校验（生成完成后统一执行；失败保留已写 delta，fail closed）
-  const validated = validateCompanionOutput(assistantText);
-  if (!validated.ok) {
-    await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", false, validated.reason);
-    throw new Error(`companion output validation failed: ${validated.reason}`);
-  }
-  assistantText = validated.text;
-
-  // 15b（字幕般流式 TTS）：非流式路径没有 delta 过程——validate 后全量切段、
-  // 在终态事务前逐个下发（流式路径已在 delta 过程中增量发完，此处跳过）。
+  // 15b（字幕般流式 TTS）：validate 后全量切段、在终态事务前逐个下发。
   // 15b 二期：切段输入用 ttsRawText（含标签），assistantText 已剥离标签。
-  if (!streamedPath && isCompanionVoiceDialogueEnabled()) {
+  if (isCompanionVoiceDialogueEnabled()) {
     const inc = splitCompanionTtsSegmentsIncremental(
       ttsRawText ?? assistantText,
       { rest: "", sentCount: 0, sentChars: 0 },
@@ -526,40 +471,33 @@ export async function runCompanionDialogue(
       inc.segments.map((seg) => ({ ordinal: seg.ordinal, text: seg.text, textSha256: seg.textSha256 })),
       resolveReplyToneEmotion(ttsRawText ?? assistantText),
     );
-    for (const seg of toned) {
-      const ok = await emitCompanionTtsSegment({
-        workspaceId: ctx.workspaceId,
-        userId: read.userId,
-        runId: read.runId,
-        generation: read.generation,
-        accountEpoch: read.accountEpoch,
-        conversationId: read.conversationId,
-        expiresAt,
+    await emitCompanionTtsSegments({
+      workspaceId: ctx.workspaceId,
+      userId: read.userId,
+      runId: read.runId,
+      generation: read.generation,
+      accountEpoch: read.accountEpoch,
+      conversationId: read.conversationId,
+      expiresAt,
+      notifyCompanionEvent,
+      segments: toned.map((seg) => ({
         segmentId: companionSegmentId(read.runId, read.generation, seg.ordinal, seg.textSha256),
         ordinal: seg.ordinal,
         text: seg.text,
         textSha256: seg.textSha256,
         emotion: extractVoiceEmotion(seg.text) ?? undefined,
-        notifyCompanionEvent,
-      });
-      if (!ok) break;
-    }
+      })),
+    });
   }
 
   // ── 阶段 3c：终态事务（message + final + run succeeded） ──
   // 15b：TTS 段已在 delta 过程（流式）或 validate 后（非流式）逐个下发完毕，
   // 终态事务不再携带 segments——事件布局变为 final @ eventStart、cue @ +1、
-  // action.proposed @ +2。
+  // character.cue @ +1。
   const assistantMessageId = randomUUID();
   const blocks = [{ type: "text", text: assistantText }];
-  // contentSha256 在 proposal 路径下会随 action_ref 追加而更新（见下）。
-  let contentSha256 = sha256Utf8V1(canonicalJsonV1(blocks));
+  const contentSha256 = sha256Utf8V1(canonicalJsonV1(blocks));
   const textSha256 = sha256Utf8V1(assistantText);
-  // P5 §8.3 步骤 5：router 命中 action 时，final 事务同事务落 proposal +
-  // action.proposed 事件 + assistant message action_ref block。action.proposed
-  // 需要一个额外 event seq，故 eventCount 视命中情况 +1。
-  const routerAction = routerDecision && routerDecision.intent !== "none" ? routerDecision.intent : null;
-  const willPropose = routerAction === "resume_current" || routerAction === "start_short";
   try {
     await withWorkerWorkspaceTransaction(
       { workspaceId: ctx.workspaceId, userId: read.userId },
@@ -573,9 +511,9 @@ export async function runCompanionDialogue(
         `);
         if (!alive[0]) return;
 
-        // 事件布局：final @ eventStart，character.cue @ +1，action.proposed @ +2
+        // 事件布局：final @ eventStart，character.cue @ +1
         //（15b：TTS 段已前置于 delta 过程/validate 后，终态事务不再含 segments）。
-        const eventCount = 2 + (willPropose ? 1 : 0); // final + cue + action.proposed
+        const eventCount = 2; // final + cue
         const counters = await tx.execute<{ next_message_seq: string; next_event_seq: string }>(sql`
           UPDATE companion_conversations
           SET next_message_seq = next_message_seq + 1,
@@ -597,55 +535,6 @@ export async function runCompanionDialogue(
                   ${JSON.stringify(blocks)}, ${read.runId}, ${contentSha256})
         `);
 
-        // P5 §8.3 步骤 5：同事务构造 proposal（worker 侧，与 API 菜单路径同构）。
-        // action.proposed 事件 seq = eventStart + 2（final + cue 之后；15b 起
-        // 终态事务不含 segments）。
-        let proposedAction: Awaited<ReturnType<typeof constructActionProposalInWorker>> = null;
-        if (willPropose) {
-          proposedAction = await constructActionProposalInWorker({
-            workspaceId: ctx.workspaceId,
-            userId: read.userId,
-            conversationId: read.conversationId,
-            runId: read.runId,
-            generation: read.generation,
-            accountEpoch: read.accountEpoch,
-            userMessageId: read.userMessageId,
-            intent: routerAction as "resume_current" | "start_short",
-            eventSeq: eventStart + 2,
-            tx: tx as never,
-          });
-          if (proposedAction) {
-            // assistant message 加 action_ref block（§3.3：恰好一个 action_ref，
-            // kind='action'）；content_sha256 须与最终 blocks 一致。
-            const finalBlocks = [
-              ...blocks,
-              { type: "action_ref", proposalId: proposedAction.proposalId },
-            ];
-            contentSha256 = sha256Utf8V1(canonicalJsonV1(finalBlocks));
-            await tx.execute(sql`
-              UPDATE companion_messages
-              SET blocks = ${JSON.stringify(finalBlocks)},
-                  kind = 'action',
-                  content_sha256 = ${contentSha256}
-              WHERE id = ${assistantMessageId}
-            `);
-            // §9.4：proposal 构造成功后回填 router 审计字段（payload hash）。
-            await tx.execute(sql`
-              UPDATE companion_turn_runs
-              SET router_payload_hash = ${proposedAction.payloadSha256}
-              WHERE id = ${read.runId} AND generation = ${read.generation}
-            `);
-          } else {
-            // proposal 未插入（候选消失 / 已有 pending）：归还预留的
-            // action.proposed seq，避免 next_event_seq 空洞（§5.2 连续性）。
-            await tx.execute(sql`
-              UPDATE companion_conversations
-              SET next_event_seq = next_event_seq - 1
-              WHERE id = ${read.conversationId}
-            `);
-          }
-        }
-
         await tx.execute(sql`
           INSERT INTO companion_stream_events
             (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch, type, payload, expires_at)
@@ -664,7 +553,7 @@ export async function runCompanionDialogue(
         `);
 
         // §11.3 voice.segment.ready（15b：已在 delta 过程/validate 后逐个下发，
-        // 终态事务不再写段事件；此处仅保留 cue 与 action.proposed）。
+        // 终态事务不再写段事件；此处仅保留 cue）。
 
         // 终态回复情绪 cue：本地确定性分类器（soullink MessageReactionClassifier
         // 思路迁移）从全文分类 emotion；中性/空文本回落 explain/neutral/0.30。
@@ -683,10 +572,13 @@ export async function runCompanionDialogue(
         });
 
         // run 终态 + prompt 元数据（§9.1：promptVersion 与 hash 一起写入）
+        // waiting_proposal_id 必须一并清空：run 已终结，残留的挂起指针会让"仍在
+        // 等待确认"的判据在终态 run 上继续成立（续跑与回收扫描都会被它误导）。
         await tx.execute(sql`
           UPDATE companion_turn_runs
           SET status = 'succeeded',
               assistant_message_id = ${assistantMessageId},
+              waiting_proposal_id = NULL,
               provider_id = ${provider.id},
               model_id = ${provider.modelId},
               prompt_version = ${read.groundedTutorContext ? GROUNDED_TUTOR_PROMPT_ID : COMPANION_PERSONA_V4_PROMPT_ID},
@@ -712,9 +604,7 @@ export async function runCompanionDialogue(
         `);
 
         // §5.4 PostgreSQL wake-up（payload 只含 conversationId/maxSeq）。
-        // proposal 未插入时预留 seq 已归还，实际事件数 = eventCount - 1。
-        const insertedEventCount = eventCount - (willPropose && !proposedAction ? 1 : 0);
-        const maxSeq = eventStart + insertedEventCount - 1;
+        const maxSeq = eventStart + eventCount - 1;
         await notifyCompanionEvent(tx, maxSeq);
         logger.info(
           { runId: read.runId, messageId: assistantMessageId, seq: messageSeq },
@@ -745,18 +635,8 @@ export async function runCompanionDialogue(
   } catch (err) {
     // 写阶段失败：终态事务回滚，但前面已落库的 delta 仍然存在；显式
     // 投影 failed/error，避免 job retry/dead-letter 后 run 永久停在 running。
-    logger.warn({ jobId: ctx.id, runId, err }, "companion_dialogue write phase failed");
+    logger.warn({ jobId: ctx.id, runId, err }, "companion_agent write phase failed");
     await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", true, "companion response commit failed");
     throw err;
   }
 }
-
-// ─── 兼容导出（拆分前本文件的公共符号；实现已移至对应模块） ───────────────
-
-// 03 合同 §5.2 确定性 character.cue 来源（常量本体在 content 模块）。
-export {
-  THINKING_CUE_PAYLOAD_V1,
-  FINAL_DEFAULT_CUE_PAYLOAD_V1,
-  ERROR_CUE_PAYLOAD_V1,
-  type CharacterCueWirePayloadV1,
-} from "./companion-dialogue-content.ts";

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { DomainError } from "@ailearn/shared";
 import bcrypt from "bcryptjs";
 import { and, eq, isNull, lt, or, gte, inArray, desc, count, sql, ne } from "drizzle-orm";
@@ -10,8 +10,8 @@ import {
   workspaces,
   aiAuditLog,
   onboardingStates,
-} from "../../db/schema/identity.ts";
-import { sessions } from "../../db/schema/session.ts";
+} from "@ailearn/shared/db-schema/identity";
+import { sessions } from "@ailearn/shared/db-schema/session";
 import {
   hashInvitationToken as hashInvitationTokenLocal,
   isValidInvitationToken as isValidInvitationTokenLocal,
@@ -20,7 +20,42 @@ import { resolveSystemProviderForCapability } from "@ailearn/shared/task-router"
 import { deleteObject } from "../../lib/object-storage.ts";
 import { logger } from "../../lib/logger.ts";
 
-export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * 会话滑动窗口：一次续期后，凭据在这个时长内保持有效。
+ *
+ * 桌面端可以把凭据加密保存在本机，所以窗口长度直接决定"多久不打开应用会被登出"。
+ * 7 天对学习类应用过短（用户会间断几周），30 天是常见取值。
+ */
+export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * 绝对上限，从会话创建时刻起算。没有它，"滑动续期"就等于"永不失效"——
+ * 被窃取的 token 只要定期使用就能一直存活。到期后必须重新登录。
+ */
+export const SESSION_ABSOLUTE_MAX_MS = 180 * 24 * 60 * 60 * 1000;
+/**
+ * 只在剩余寿命不足窗口一半时才续期，避免活跃会话每个请求都写一次库。
+ * 按 30 天窗口算，单个会话最多约每 15 天写一次。
+ */
+export const SESSION_RENEW_WHEN_REMAINING_MS = SESSION_TTL_MS / 2;
+
+/**
+ * 决定一次会话使用是否应当延长过期时间。纯函数，便于离线测试。
+ *
+ * 返回 null 表示无需写库：要么剩余寿命还充裕，要么已经顶到绝对上限。
+ */
+export function nextSessionExpiry(input: {
+  readonly createdAt: Date;
+  readonly expiresAt: Date;
+  readonly now: Date;
+}): Date | null {
+  const { createdAt, expiresAt, now } = input;
+  // 续期永远不能复活一个已经到期的会话，即使调用方没有先做过期判断。
+  if (expiresAt.getTime() <= now.getTime()) return null;
+  if (expiresAt.getTime() - now.getTime() >= SESSION_RENEW_WHEN_REMAINING_MS) return null;
+  const ceiling = createdAt.getTime() + SESSION_ABSOLUTE_MAX_MS;
+  const renewed = Math.min(now.getTime() + SESSION_TTL_MS, ceiling);
+  return renewed > expiresAt.getTime() ? new Date(renewed) : null;
+}
 export const RECOVERED_PASSWORD_SENTINEL = "$RESET_REQUIRED$";
 const BCRYPT_COST = 10;
 // Keep unknown-account logins on the same expensive bcrypt path as known
@@ -40,40 +75,11 @@ export function canonicalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-/**
- * SEC-04 说明：legacy 密码哈希使用 SHA-256 + 静态前缀，无盐值。
- *
- * 这是 v0.5 遗留的密码存储方案，存在以下风险：
- * - 无盐值导致相同密码产生相同哈希，易受彩虹表攻击
- * - SHA-256 计算速度快，不利于抵抗暴力破解
- *
- * 缓解措施（已实施）：
- * - 新注册用户使用 bcrypt（带盐值+cost factor）存储密码
- * - 用户登录时自动检测 legacy 哈希并升级为 bcrypt
- *   （见 loginWithPassword 第 103-106 行）
- * - 未知邮箱也执行 bcrypt 比较以消除计时侧信道
- *
- * 残余风险：尚未再次登录的 legacy 用户仍使用无盐哈希。
- * 建议：在完成全量用户迁移后移除此函数。
- */
-function legacyHashPassword(plain: string): string {
-  return createHash("sha256").update(`ailearn:${plain}`).digest("hex");
-}
-
-function isLegacyHash(h: string): boolean {
-  return !h.startsWith("$2") && h.length === 64;
-}
-
 export function hashPassword(plain: string): Promise<string> {
   return bcrypt.hash(plain, BCRYPT_COST);
 }
 
 async function verifyPassword(plain: string, stored: string): Promise<boolean> {
-  if (isLegacyHash(stored)) {
-    const candidate = Buffer.from(legacyHashPassword(plain));
-    const expected = Buffer.from(stored);
-    return candidate.length === expected.length && timingSafeEqual(candidate, expected);
-  }
   return bcrypt.compare(plain, stored);
 }
 
@@ -119,8 +125,7 @@ export async function loginWithPassword(
   const normalizedEmail = canonicalizeEmail(email);
   // R4（round-3 审计）：不再用 lower(email) = ...（无表达式索引 → 每次登录 Seq Scan）。
   // canonicalizeEmail 已在注册/邀请路径将 email 小写存储，直接 eq(users.email, ...)
-  // 命中 users_email_idx 唯一索引。若某历史账号为大小写混合（仅影响一次性注册去重，
-  // 见 registerWithoutInvite 的 legacy 兜底），登录已按 canonical 小写查找同样命中。
+  // 命中 users_email_idx 唯一索引。
   const user = await db.query.users.findFirst({
     where: eq(users.email, normalizedEmail),
   });
@@ -129,10 +134,6 @@ export async function loginWithPassword(
     return null;
   }
   if (!(await verifyPassword(password, user.passwordHash))) return null;
-  if (isLegacyHash(user.passwordHash)) {
-    const newHash = await hashPassword(password);
-    await db.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, user.id));
-  }
   // ADR-0009: 查询所有活跃工作区（left_at IS NULL），排除已退出的
   const memberships = await db.query.workspaceMembers.findMany({
     where: and(
@@ -209,12 +210,7 @@ export async function registerWithoutInvite(
   let result: { userId: string; workspaceId: string } | null;
   try {
     result = await db.transaction(async (tx) => {
-      // 请求级去重：先走 eq 命中唯一索引；lower() 兜底仅用于检测历史混合大小写邮箱，
-      // 防止重复注册。该 lower() 仅在注册路径触发（非常热登录路径），故保留 legacy 兜底。
-      const exactUser = await tx.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
-      const existing = exactUser ?? await tx.query.users.findFirst({
-        where: sql`lower(${users.email}) = ${normalizedEmail}`,
-      });
+      const existing = await tx.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
       if (existing) return null;
 
       const [user] = await tx
@@ -279,6 +275,7 @@ export async function decodeToken(token: string): Promise<SessionContext | null>
     .select({
       userId: sessions.userId,
       workspaceId: sessions.workspaceId,
+      createdAt: sessions.createdAt,
       expiresAt: sessions.expiresAt,
       // join 命中与否的判据：workspaceMembers 行存在时 leftAt 有值（活跃=null）。
       memberLeftAt: workspaceMembers.leftAt,
@@ -309,6 +306,12 @@ export async function decodeToken(token: string): Promise<SessionContext | null>
   if (session.membershipRole === null || session.memberLeftAt !== null) {
     await db.delete(sessions).where(eq(sessions.token, tokenHash));
     return null;
+  }
+  // 滑动续期：桌面端把凭据存在本机，只要用户还在用就一直有效，直到绝对上限。
+  // 低频写入由 nextSessionExpiry 的阈值保证（见常量注释）。
+  const renewed = nextSessionExpiry({ createdAt: session.createdAt, expiresAt: session.expiresAt, now: new Date() });
+  if (renewed) {
+    await db.update(sessions).set({ expiresAt: renewed }).where(eq(sessions.token, tokenHash));
   }
   return { userId: session.userId, workspaceId: session.workspaceId, membershipRole: session.membershipRole ?? null };
 }
@@ -786,9 +789,13 @@ export async function updateUserProfile(
 
   // Clean up old avatar from object storage if it was a site-uploaded avatar
   // and the new avatar URL is different.
+  // SEC 修复（2026-09 后端审查）：必须确认旧对象键属于当前用户名下
+  // （avatars/{userId}/...）。此前只校验 "/api/uploads/avatars/" 前缀，而
+  // avatarUrlSchema 允许任意该前缀的路径——用户可把 avatarUrl 指向他人头像，
+  // 再修改/清空头像即删除他人存储对象。
   if (
     oldAvatarUrl &&
-    oldAvatarUrl.startsWith("/api/uploads/avatars/") &&
+    oldAvatarUrl.startsWith(`/api/uploads/avatars/${userId}/`) &&
     oldAvatarUrl !== updates.avatarUrl
   ) {
     const oldObjectKey = oldAvatarUrl.replace("/api/uploads/", "");
@@ -1019,25 +1026,6 @@ export async function logAICall(params: LogAICallParams): Promise<void> {
     status: params.status ?? "success",
     errorMessage: params.errorMessage ?? null,
   });
-}
-
-/**
- * N-011: 检查工作区是否已签署 AI 同意。
- * 未签署同意时，AI 调用应被阻止。
- *
- * v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
- * 不再读 workspace.aiProvider（列已删除）。任一 capability 解析为非 mock
- * 即要求已签署同意，与 worker anyExternalNonMock 组合判定一致。
- */
-export async function checkAIConsent(workspaceId: string): Promise<boolean> {
-  const ws = await db.query.workspaces.findFirst({
-    where: eq(workspaces.id, workspaceId),
-  });
-  if (!ws) return false;
-  // 任一 capability 解析为非 mock 即要求已签署同意
-  const anyExternalNonMock = systemUsesExternalAI();
-  if (!anyExternalNonMock) return true;
-  return ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
 }
 
 /**

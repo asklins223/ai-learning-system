@@ -151,13 +151,6 @@ describe("Migration 0135 — New V2 tables", () => {
     );
   });
 
-  it("creates legacy_target_snapshot_attachments_v2 table", () => {
-    assert.ok(
-      sql.includes("CREATE TABLE IF NOT EXISTS public.legacy_target_snapshot_attachments_v2"),
-      "must create legacy_target_snapshot_attachments_v2 table",
-    );
-  });
-
   it("creates candidate_evidence_binding_plans_v2 table", () => {
     assert.ok(
       sql.includes("CREATE TABLE IF NOT EXISTS public.candidate_evidence_binding_plans_v2"),

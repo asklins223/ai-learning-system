@@ -26,6 +26,24 @@ process.env.PROJECTION_CHECKPOINT_SECRET ??= "projection-pagination-secret-01234
 const sql = postgres(CONN, { max: 2 });
 const { closeDatabase } = await import("../db/client.ts");
 
+/**
+ * 裸 SQL 夹具/校验必须带 workspace/user 上下文。
+ *
+ * understanding_route_plans 是 FORCE RLS：受限角色（ailearn_api）在无上下文
+ * 事务里 UPDATE 会静默匹配 0 行，于是"过期路线必须 409"的断言读到未过期的
+ * 路线并返回 200（超级用户则绕过 RLS 掩盖同一问题）。
+ */
+function scoped<T>(
+  scope: { workspaceId: string; userId: string },
+  fn: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${scope.userId}, true)`;
+    return fn(tx);
+  }) as Promise<T>;
+}
+
 after(async () => {
   await closeDatabase();
   await sql.end({ timeout: 2 });
@@ -290,7 +308,7 @@ test("投影补全：route slice 完整返回全部 step 节点；过期路线 4
     assert.equal(bad.statusCode, 400);
 
     // 过期路线（expiresAt 置过去）→ 409 route_plan_stale。
-    await sql`UPDATE understanding_route_plans SET expires_at = now() - interval '1 minute' WHERE id = ${routePlanId}`;
+    await scoped(identity, (tx) => tx`UPDATE understanding_route_plans SET expires_at = now() - interval '1 minute' WHERE id = ${routePlanId}`);
     const stale = await app.inject({
       method: "GET",
       url: `/understanding/projection?routePlanId=${routePlanId}`,

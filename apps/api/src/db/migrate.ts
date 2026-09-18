@@ -1,9 +1,56 @@
 import postgres from "postgres";
-import { readMigrationFiles } from "drizzle-orm/migrator";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
+
+/**
+ * 迁移清单读取（本地实现，替代 drizzle-orm/migrator 的 readMigrationFiles）。
+ *
+ * 2026-09-15 修复（本工作树实测）：`import { readMigrationFiles } from
+ * "drizzle-orm/migrator"` 在 tsx 下被解析到 **migrator.d.ts**——该包的 exports map
+ * 把 `types` 条件排在 `default` 之前，tsx 取了 types，于是运行时模块为空：
+ *   SyntaxError: The requested module 'drizzle-orm/migrator' does not provide an
+ *   export named 'readMigrationFiles'
+ * 而 dev 与 prod compose 的 migrate 服务都用 `npm run db:migrate`
+ * （= `tsx src/db/migrate.ts`）→ **整条迁移管线在本工作树不可用**，任何新迁移
+ * （含 0221/0222）都无法应用。纯 node 运行正常，但脚本约定用 tsx。
+ *
+ * 因此改为自行读取 drizzle 的 journal 格式，去掉这个脆弱依赖：
+ *   - 迁移清单与顺序：meta/_journal.json 的 entries
+ *   - 单条 SQL：<tag>.sql，按 `--> statement-breakpoint` 切分（entry.breakpoints）
+ *   - hash：sha256(SQL 文件内容) —— 与 drizzle 记录进 __drizzle_migrations 的值一致
+ *     （已用「221 条已应用迁移的 hash 全部命中」验证过，故不会误判为待应用）
+ */
+interface LocalMigration {
+  sql: string[];
+  hash: string;
+  folderMillis: number;
+  path: string;
+}
+
+function readMigrationFilesLocal(migrationsFolder: string): LocalMigration[] {
+  const journalPath = resolve(migrationsFolder, "meta", "_journal.json");
+  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+    entries: Array<{ tag: string; when: number; breakpoints?: boolean }>;
+  };
+  return journal.entries.map((entry) => {
+    const filePath = resolve(migrationsFolder, `${entry.tag}.sql`);
+    const content = readFileSync(filePath, "utf8");
+    const statements = entry.breakpoints === false
+      ? [content]
+      : content.split("--> statement-breakpoint");
+    return {
+      // 去掉空白片段：`tx.unsafe("")` 会报 empty query。
+      sql: statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0),
+      hash: createHash("sha256").update(content).digest("hex"),
+      folderMillis: entry.when,
+      path: filePath,
+    };
+  });
+}
 
 function resolveConnectionString(): string {
   const roleUrl = process.env.DATABASE_URL_MIGRATOR?.trim();
@@ -43,7 +90,7 @@ async function main() {
   const sql = postgres(connectionString, { max: 1 });
 
   try {
-    const migrations = await readMigrationFiles({ migrationsFolder });
+    const migrations = readMigrationFilesLocal(migrationsFolder);
     await sql`CREATE SCHEMA IF NOT EXISTS drizzle`;
     await sql`
       CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (

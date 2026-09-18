@@ -23,7 +23,7 @@ import { hashCanonicalV2 } from "../hash-canonical-v2.ts";
 import type { SourceScopeV2 } from "../card-generation-v2-contracts.ts";
 import { DomainError } from "../domain-error.ts";
 
-// ─── 类型（api IO 壳经 re-export 兼容） ──────────────────────────────────
+// ─── 类型 ───────────────────────────────────────────────────────────────
 
 export interface EvidenceSealBlock {
   blockId: string;
@@ -285,7 +285,7 @@ export function planEvidenceSnapshotsV2(input: SealEvidenceInput): EvidenceSealP
   };
 }
 
-// ─── 领域错误（api 侧 ServiceError 继承本类保持 instanceof 兼容） ────────
+// ─── 领域错误（API service error 继承本类） ───────────────────────────────
 
 /**
  * V2 卡生成纯逻辑层的领域错误。api 的 `CardGenerationV2ServiceError`
@@ -299,4 +299,3 @@ export class CardGenerationPipelineErrorV2 extends DomainError {
     super({ name: "CardGenerationV2ServiceError", code, message, statusCode });
   }
 }
-

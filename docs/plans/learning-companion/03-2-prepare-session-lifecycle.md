@@ -11,9 +11,9 @@
 ## 1. 交付物
 
 - `apps/api/src/modules/learning-sessions/session-service.ts`：PREPARE（createSession）、
-  Session loop 状态机（sessionLoop / applySessionLoopAction）、多 Episode checkpoint
-  （continueSession / resolveCheckpoint）、cancel（cancelSession）、origin-aware
-  completion（endSession）、public view（buildSessionPublicView）。
+  多 Episode checkpoint（continueSession / resolveCheckpoint）、cancel
+  （cancelSession）、origin-aware completion（endSession）、public view
+  （buildSessionPublicView）。
 - `apps/api/src/modules/learning-sessions/session-routes.ts`：POST /learning-sessions、
   POST /learning-sessions/:id/continue、POST /learning-sessions/:id/end、
   GET /learning-sessions/:id、DELETE /learning-sessions/:id（preHandler requireSession）。
@@ -21,7 +21,7 @@
   origin / BudgetEnvelope / loop 状态机单测（node:test + assert，DB 走内存 repo）。
 - 本文件：决策记录。
 
-## 2. Session 生命周期状态机
+## 2. Session 生命周期与 phase projection
 
 `learning_sessions` 是用户可见航程容器（串联 1~5 个 Episode，无 route-level mastery
 或总体 schedule 副作用）；`learning_episodes` 是单 Key Point target 的 Episode
@@ -36,17 +36,15 @@ episode phase: prepared → session_agent → independent_assess → committed
                任意进行中 ──→ cancelled / stale
 ```
 
-- typed actions 白名单（`SessionLoopAction`）：`begin_session_agent`、
-  `lock_answer`、`commit_episode`、`cancel`、`mark_stale`、`end_session`；
-  checkpoint 动作 `confirm_continue_session` / `change_route` 走 `/continue`。
+- `phase` 只用于从已持久化 Episode 状态构建 public view；生命周期服务没有通用的
+  `sessionLoop` action API。
 - **phase 无 DB 落点**（迁移 0074 `learning_episodes.status` CHECK 约束只允许
   draft/active/completed/stale/cancelled）：`prepared` 语义的 Episode 落
   `status='active'`；`session_agent`/`independent_assess` 同样保持 `active`，
   `committed → completed`、`cancelled → cancelled`、`stale → stale`。进行中 phase
-  由 Session Supervisor 编排层持有，sessionLoop 接受显式 phase 并校验迁移合法性；
-  精确持久化（如 probe 表状态推断）由 03-3/03-6 完善。
+  由实际编排/评估链路持有，精确持久化（如 probe 表状态推断）由 03-3/03-6 完善。
 - **0 canonical write**：本任务只做 PREPARE 与生命周期状态，不写掌握/schedule/
-  Card 真值；评估与 COMMIT 在 03-3/后续任务。
+  Card 真值；评估与 COMMIT 不由生命周期壳直接伪造 completed 状态。
 
 ## 3. PREPARE 冻结项清单
 
@@ -145,13 +143,12 @@ sufficient    = availableUnits ≥ requiredTotal（不足 → 用户在作答前
 - 取消当前（active）与未开始（draft）Episode：只改状态为 `cancelled`（零副作用，
   不写掌握/schedule、不触发 outbox）；
 - **已 commit（completed）Episode 保留**；已终态（stale/cancelled）不动；
-- session → `cancelled`；`sessionLoop` 的 `cancel` 动作与 `cancelSession` 语义一致
-  （不允许 cancelled session 下残留孤儿未终态行）。
+- session → `cancelled`；`cancelSession` 不允许 cancelled session 下残留孤儿未终态行。
 
 ## 7. 验收标准
 
 1. `npm run typecheck --prefix apps/api` 通过；
-2. `npm test --prefix apps/api` 通过（1524 通过，含新增 session-service 30 例）；
+2. `npm test --prefix apps/api` 通过；
 3. 取消后当前与未开始 Episode 零副作用、已 commit Episode 保留（单测覆盖）；
 4. 预算不足在用户作答前阻断（BUDGET_INSUFFICIENT 单测覆盖）；
 5. PREPARE 不返回含答案评分合同（public view allowlist 单测覆盖）。

@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react";
+import { useHomeProjection } from "../app/home-projection";
 import { ArrowRight, CircleAlert, RotateCcw, Sparkles } from "lucide-react";
 import type { RoomProjectionV1 } from "@ailearn/shared/room-projection-contracts";
 import type { CardGenerationActiveSummaryV1 } from "@ailearn/shared/card-generation-desktop-contracts";
-import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../app/desktop-client";
 import { useRoomStore } from "../app/room-store";
 
 type ActiveRunItem = Extract<RoomProjectionV1["activeRunSummary"], { state: "data" }>["data"]["items"][number];
@@ -24,9 +23,9 @@ function activeGenerationFromProjection(projection: RoomProjectionV1): CardGener
 function recoverySectionErrorMessage(subject: string, reason: ActiveRunError["reason"]): string {
   switch (reason) {
     case "upstream_unavailable":
-      return `服务端的${subject}暂时不可用；不会把未知状态当成没有任务。`;
+      return `${subject}暂时无法读取，请稍后重试。`;
     case "unsupported_contract":
-      return `${subject}合同暂时无法确认，请重新读取服务端状态。`;
+      return `${subject}暂时无法读取，请重新尝试。`;
     case "permission_denied":
       return `当前身份没有查看这部分${subject}的权限。`;
     case "stale_workspace":
@@ -37,11 +36,11 @@ function recoverySectionErrorMessage(subject: string, reason: ActiveRunError["re
 }
 
 function activeGenerationErrorMessage(error: ActiveGenerationError): string {
-  return recoverySectionErrorMessage("学习卡恢复查询", error.reason);
+  return recoverySectionErrorMessage("待整理的学习卡", error.reason);
 }
 
 function activeRunErrorMessage(error: ActiveRunError): string {
-  return recoverySectionErrorMessage("LearningRun 恢复列表", error.reason);
+  return recoverySectionErrorMessage("未完成的学习", error.reason);
 }
 
 const phaseLabels: Record<string, string> = {
@@ -72,111 +71,20 @@ export function RunRecoveryNotice() {
   const invoke = useRoomStore((state) => state.invoke);
   const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
   const setActiveCardGenerationRunId = useRoomStore((state) => state.setActiveCardGenerationRunId);
-  const [runs, setRuns] = useState<ActiveRunItem[]>([]);
-  const [generation, setGeneration] = useState<CardGenerationActiveSummaryV1 | null>(null);
-  const [projectionFailure, setProjectionFailure] = useState<string | null>(null);
-  const [generationFailure, setGenerationFailure] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [runtimeRevision, setRuntimeRevision] = useState(0);
-
-  useEffect(() => {
-    if (surface || onboardingOpen || !window.ailearn) return;
-
-    let active = true;
-    let subscriptionId: string | null = null;
-    let unsubscribeEvent: (() => void) | undefined;
-    const subscribe = async () => {
-      try {
-        const response = await window.ailearn.subscriptions.subscribe({
-          meta: createRequestMeta(),
-          topic: { kind: "runtime" },
-        });
-        if (!active) return;
-        subscriptionId = unwrapGatewayResult(response).subscriptionId;
-        unsubscribeEvent = window.ailearn.subscriptions.onEvent(subscriptionId, (event) => {
-          if (event.data.kind === "snapshot_invalidated" || event.data.kind === "connection_changed") {
-            setRuntimeRevision((revision) => revision + 1);
-          }
-        });
-      } catch {
-        // The initial authenticated read remains authoritative; a later
-        // surface transition will retry the runtime subscription.
-      }
-    };
-
-    void subscribe();
-    return () => {
-      active = false;
-      unsubscribeEvent?.();
-      if (subscriptionId) {
-        void window.ailearn.subscriptions.unsubscribe({
-          meta: createRequestMeta(),
-          subscriptionId,
-        });
-      }
-    };
-  }, [onboardingOpen, surface]);
-
-  useEffect(() => {
-    if (surface || onboardingOpen || !window.ailearn) {
-      setRuns([]);
-      setGeneration(null);
-      setProjectionFailure(null);
-      setGenerationFailure(null);
-      setLoading(false);
-      return;
-    }
-
-    let active = true;
-    setLoading(true);
-    const load = async () => {
-      try {
-        const sessionResponse = await window.ailearn.auth.getState({ meta: createRequestMeta() });
-        const session = unwrapGatewayResult(sessionResponse);
-        if (session.status !== "authenticated" || !session.workspace) {
-          if (active) {
-            setRuns([]);
-            setGeneration(null);
-            setProjectionFailure(null);
-            setGenerationFailure(null);
-          }
-          return;
-        }
-        const projectionResponse = await window.ailearn.room.getProjection({
-          meta: createRequestMeta(session.workspaceEpoch),
-        });
-        if (active) {
-          const projection = unwrapGatewayResult(projectionResponse);
-          const nextRuns = activeRunsFromProjection(projection);
-          const nextGeneration = activeGenerationFromProjection(projection);
-          if (nextRuns !== undefined) setRuns(nextRuns);
-          if (nextGeneration !== undefined) setGeneration(nextGeneration);
-          setProjectionFailure(
-            projection.activeRunSummary.state === "error"
-              ? activeRunErrorMessage(projection.activeRunSummary)
-              : null,
-          );
-          setGenerationFailure(
-            projection.activeGenerationSummary.state === "error"
-              ? activeGenerationErrorMessage(projection.activeGenerationSummary)
-              : null,
-          );
-        }
-      } catch (error) {
-        // Preserve the last trusted recovery items. A failed projection read
-        // is not proof that no run exists, so surface the degraded state and
-        // let the user perform an explicit read-only retry.
-        if (active) setProjectionFailure(gatewayErrorMessage(error));
-      } finally {
-        if (active) setLoading(false);
-      }
-    };
-
-    void load();
-    return () => {
-      active = false;
-    };
-  }, [onboardingOpen, runtimeRevision, surface]);
+  const { projection, loading, failure, reload } = useHomeProjection();
+  const runs = projection ? activeRunsFromProjection(projection) ?? [] : [];
+  const generation = projection ? activeGenerationFromProjection(projection) : null;
+  const projectionFailure = failure ?? (projection?.activeRunSummary.state === "error" ? activeRunErrorMessage(projection.activeRunSummary) : null);
+  const generationFailure = projection?.activeGenerationSummary.state === "error" ? activeGenerationErrorMessage(projection.activeGenerationSummary) : null;
+  const objectives = [
+    ...(projection?.queueSummary.state === "data" ? projection.queueSummary.data.items : []),
+    ...(projection?.recentObjectiveSummary.state === "data" ? projection.recentObjectiveSummary.data.items : []),
+  ];
+  const runTitle = (run: ActiveRunItem, index: number) => {
+    const item = objectives.find((objective) => objective.objectiveId === run.objectiveId);
+    const focus = projection?.primaryFocus.state === "data" ? projection.primaryFocus.data.objective : null;
+    return item?.conceptLabel || (focus?.objectiveId === run.objectiveId ? focus.content.conceptLabel : null) || `未完成的学习 ${index + 1}`;
+  };
 
   const recoveryFailure = projectionFailure ?? generationFailure;
   // The compact companion panel and recovery notice are both persistent overlays.
@@ -196,7 +104,9 @@ export function RunRecoveryNotice() {
   };
 
   return (
-    <div className="run-recovery-stack">
+    <details className="home-recovery" key={recoveryFailure ? "error" : "ready"}>
+      <summary><RotateCcw size={15} aria-hidden="true" /><span>{recoveryFailure ? "恢复信息需要重新读取" : "继续未完成的学习"}</span><small>{runs.length + (generation ? 1 : 0) || "重试"}</small></summary>
+      <div className="run-recovery-stack">
       {recoveryFailure ? <aside className="run-recovery-notice run-recovery-notice--error" role="alert" aria-label="恢复状态暂时不可用">
         <span className="run-recovery-notice__mark" aria-hidden="true"><CircleAlert size={18} /></span>
         <div className="run-recovery-notice__copy">
@@ -204,7 +114,7 @@ export function RunRecoveryNotice() {
           <p>{recoveryFailure}</p>
         </div>
         <div className="run-recovery-notice__actions">
-          <button type="button" className="run-recovery-notice__primary" disabled={loading} onClick={() => setRuntimeRevision((revision) => revision + 1)}>
+          <button type="button" className="run-recovery-notice__primary" disabled={loading} onClick={reload}>
             <RotateCcw size={15} aria-hidden="true" />{loading ? "正在重新读取…" : "重新读取恢复状态"}
           </button>
         </div>
@@ -213,7 +123,7 @@ export function RunRecoveryNotice() {
         <span className="run-recovery-notice__mark" aria-hidden="true"><RotateCcw size={18} /></span>
         <div className="run-recovery-notice__copy">
           <strong>{runs.length === 1 ? "继续未完成的学习旅程" : `有 ${runs.length} 条进行中的学习`}</strong>
-          <p>{runs.length === 1 ? "服务端仍保留一条可恢复的 LearningRun；进入前会重新同步快照。" : "选择一条继续；每次进入都会重新读取服务端快照。"}</p>
+          <p>{runs.length === 1 ? "上次的进度还在，可以从停下的地方继续。" : "选一项，从上次停下的地方继续。"}</p>
         </div>
         <div className="run-recovery-notice__actions">
           {runs.length === 1 ? (
@@ -221,9 +131,9 @@ export function RunRecoveryNotice() {
               恢复学习旅程<ArrowRight size={15} aria-hidden="true" />
             </button>
           ) : (
-            runs.slice(0, 4).map((run, index) => (
+            runs.map((run, index) => (
               <button type="button" className="run-recovery-notice__secondary" key={run.runId} onClick={() => recover(run)}>
-                <span>恢复第 {index + 1} 条</span><small>{phaseLabel(run.phase)}</small><ArrowRight size={14} aria-hidden="true" />
+                <span>{runTitle(run, index)}</span><small>{phaseLabel(run.phase)}</small><ArrowRight size={14} aria-hidden="true" />
               </button>
             ))
           )}
@@ -233,7 +143,7 @@ export function RunRecoveryNotice() {
         <span className="run-recovery-notice__mark" aria-hidden="true"><Sparkles size={18} /></span>
         <div className="run-recovery-notice__copy">
           <strong>{generation.status === "needs_attention" || generation.status === "failed" || generation.status === "stale" ? "处理未完成的学习卡任务" : "继续未完成的学习卡整理"}</strong>
-          <p>服务端保留了一条 Owner Card Generation；进入后会重新读取 run、恢复合同和公开候选。</p>
+          <p>还有学习卡等待整理，回去看看它们。</p>
         </div>
         <div className="run-recovery-notice__actions">
           <button type="button" className="run-recovery-notice__primary" onClick={recoverGeneration}>
@@ -241,6 +151,7 @@ export function RunRecoveryNotice() {
           </button>
         </div>
       </aside> : null}
-    </div>
+      </div>
+    </details>
   );
 }

@@ -50,7 +50,24 @@ describe("learning-room manifest boundary", () => {
     expect(manifest.normalized.assets["searchForeground.night"]).toBe("foreground/search-foreground-night-v1.png");
     expect(manifest.normalized.assets["reviewPosters.day"]).toBe("posters/review-seat-day-v1.png");
     expect(manifest.normalized.assets["reviewPosters.night"]).toBe("posters/review-seat-night-v1.png");
-    expect(manifest.roomLayers).toEqual([]);
+    expect(manifest.roomLayers).toHaveLength(39);
+    expect(new Set(manifest.roomLayers.map((layer) => layer.theme))).toEqual(new Set(["day", "dusk", "night"]));
+    expect(new Set(manifest.roomLayers.filter((layer) => layer.theme === "day").map((layer) => layer.depth))).toEqual(
+      new Set(["D0", "D1", "D2", "D3", "D4", "D6"]),
+    );
+    expect(manifest.roomLayers.every((layer) => (
+      layer.sourceSize.width > 0
+      && layer.sourceSize.height > 0
+      && layer.sha256.length === 64
+      && layer.license.length > 0
+      && layer.releaseApproval
+    ))).toBe(true);
+    expect(manifest.normalized.assets["homeV2Posters.day"]).toBe(
+      "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+    );
+    expect(manifest.normalized.assets["homeV2Posters.dusk"]).toBe(
+      "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+    );
     expect(manifest.normalized.assets["window.mask"]).toBe("masks/window-glass-mask-v1.svg");
     expect(manifest.graph.motionImplementation).toBe("code");
     expect(manifest.validation.motionImplementation).toBe("code");
@@ -103,6 +120,10 @@ describe("learning-room manifest boundary", () => {
         anchor: [0, 0],
       },
       alphaMode: "straight-rgba",
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+      sourcePath: "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      promptPath: "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      license: "test-only",
       reviewStatus: "approved",
       releaseApproval: true,
     };
@@ -128,6 +149,10 @@ describe("learning-room manifest boundary", () => {
         anchor: [0, 0],
       },
       alphaMode: "straight-rgba",
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+      sourcePath: "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      promptPath: "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      license: "test-only",
       reviewStatus: "approved",
       releaseApproval: true,
     };
@@ -156,6 +181,10 @@ describe("learning-room manifest boundary", () => {
         anchor: [0, 0],
       },
       alphaMode: "straight-rgba",
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+      sourcePath: "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      promptPath: "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      license: "test-only",
       reviewStatus: "IN_REVIEW",
       releaseApproval: false,
     }];
@@ -181,6 +210,10 @@ describe("learning-room manifest boundary", () => {
         anchor: [0, 0],
       },
       alphaMode: "straight-rgba",
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+      sourcePath: "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      promptPath: "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      license: "test-only",
       reviewStatus: "IN_REVIEW",
       releaseApproval: false,
     }];
@@ -206,6 +239,10 @@ describe("learning-room manifest boundary", () => {
         anchor: [0, 0],
       },
       alphaMode: "straight-rgba",
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+      sourcePath: "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      promptPath: "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      license: "test-only",
       reviewStatus: "IN_REVIEW",
       releaseApproval: false,
     }];
@@ -239,6 +276,33 @@ describe("learning-room manifest boundary", () => {
     );
     expect(() => mediaAssetUrl(manifest, "https://example.com/asset.webp")).toThrow();
     expect(() => mediaAssetUrl(manifest, "unregistered.webp")).toThrow();
+  });
+
+  it("keeps every time variant on the same cropped geometry and below the texture budget", () => {
+    const manifest = parseLearningRoomManifest(sourceManifest);
+    const identity = (assetId: string) => assetId.replace(/-(DAY|DUSK|NIGHT)$/u, "");
+    const groups = new Map<string, typeof manifest.roomLayers>();
+    for (const layer of manifest.roomLayers) {
+      const key = identity(layer.assetId);
+      groups.set(key, [...(groups.get(key) ?? []), layer]);
+    }
+    for (const variants of groups.values()) {
+      expect(variants).toHaveLength(3);
+      expect(new Set(variants.map((layer) => JSON.stringify({
+        depth: layer.depth,
+        order: layer.order,
+        sourceSize: layer.sourceSize,
+        registration: layer.registration,
+      }))).size).toBe(1);
+    }
+    for (const time of ["day", "dusk", "night"] as const) {
+      const layers = manifest.roomLayers.filter((layer) => layer.theme === time);
+      expect(layers.filter((layer) => layer.depth === "D6")).toHaveLength(2);
+      expect(layers.every((layer) => layer.depth === "D0"
+        || layer.sourceSize.width * layer.sourceSize.height < 1672 * 941)).toBe(true);
+      const rgbaBytes = layers.reduce((sum, layer) => sum + layer.sourceSize.width * layer.sourceSize.height * 4, 0);
+      expect(rgbaBytes).toBeLessThanOrEqual(48 * 1024 * 1024);
+    }
   });
 
   it("resolves the door transition from canonical manifest records", () => {

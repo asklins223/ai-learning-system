@@ -1,7 +1,6 @@
 import type {
   AIProvider,
   ProviderUsage,
-  EvaluateValidationInput,
 } from "../ai-provider.ts";
 import { DEFAULT_CONTEXT_WINDOW_TOKENS } from "../provider-constants.ts";
 import type {
@@ -12,191 +11,9 @@ import type {
   ChatOptions,
   ChatResult,
   CapabilityImpl,
-  GenerateValidationQuestionInput,
-  EvaluateRubricInput,
   PlatformOptions,
 } from "@ailearn/shared";
-import type {
-  ImageInsightOutput,
-} from "@ailearn/shared";
-import {
-  EVAL_SYSTEM_PROMPT,
-  QUESTION_GENERATION_PROMPT,
-  RUBRIC_EVALUATION_PROMPT,
-  IMAGE_UNDERSTANDING_SYSTEM_PROMPT,
-} from "../prompts.ts";
 import { registerFactory } from "../provider-factory.ts";
-
-// ─── R5: Mock business logic (moved from removed provider methods) ──────
-
-/** Compute word-level overlap ratio between quote and userAnswer. */
-function computeOverlap(quote: string, userAnswer: string): number {
-  const quoteWords = new Set(quote.toLowerCase().split(/\s+/).filter((w) => w.length > 0));
-  if (quoteWords.size === 0) return 0;
-  const answerWords = userAnswer.toLowerCase().split(/\s+/).filter((w) => w.length > 0);
-  let hits = 0;
-  for (const w of answerWords) {
-    if (quoteWords.has(w)) hits++;
-  }
-  return hits / quoteWords.size;
-}
-
-/** R5: Mock evaluateValidation logic (moved from removed provider method). */
-function mockEvaluateValidation(input: EvaluateValidationInput) {
-  const overlap = computeOverlap(input.quote, input.userAnswer);
-  const claimTrunc = input.claim.slice(0, 40);
-  const quoteTrunc = input.quote.slice(0, 60);
-
-  if (overlap > 0.6) {
-    return {
-      outcome: "preliminary_understanding",
-      confidence: 0.9,
-      feedback: "回答与原文一致，理解到位。",
-      covered_points: [claimTrunc],
-      missing_points: [],
-      misunderstandings: [],
-      evidence_refs: [],
-    };
-  } else if (overlap > 0.3) {
-    return {
-      outcome: "unclear_expression",
-      confidence: 0.6,
-      feedback: "部分要点命中，但表述不够完整。",
-      covered_points: [],
-      missing_points: [claimTrunc],
-      misunderstandings: [],
-      evidence_refs: [],
-    };
-  } else if (overlap > 0.05) {
-    return {
-      outcome: "unclear_expression",
-      confidence: 0.4,
-      feedback: "与原文相关性较弱，需要进一步澄清。",
-      covered_points: [],
-      missing_points: [claimTrunc],
-      misunderstandings: [],
-      evidence_refs: [],
-    };
-  } else {
-    return {
-      outcome: "misunderstanding",
-      confidence: 0.7,
-      feedback: "未命中原文要点，回答与预期不符。",
-      covered_points: [],
-      missing_points: [],
-      misunderstandings: [claimTrunc],
-      evidence_refs: quoteTrunc ? [quoteTrunc] : [],
-    };
-  }
-}
-
-/** R5: Mock evaluateRubric logic (moved from removed provider method). */
-
-/**
- * Deterministic mock for the removed @ailearn/shared `generateDeterministicQuestion`.
- * Produces a schema-valid question for the QUESTION_GENERATION_PROMPT branch.
- */
-function mockGenerateDeterministicQuestion(
-  input: GenerateValidationQuestionInput,
-  seed: number,
-): {
-  questionType: "explain" | "example" | "apply";
-  question: string;
-  rubricItems: Array<{
-    key: string;
-    criterion: string;
-    expectedConcept: string;
-    weight: 1 | 2 | 3;
-    required: boolean;
-    evidenceRefId: string;
-  }>;
-} {
-  const types: Array<"explain" | "example" | "apply"> = ["explain", "example", "apply"];
-  const questionType = input.preferredType ?? types[seed % types.length];
-  const ref = input.evidenceRefs[seed % Math.max(1, input.evidenceRefs.length)];
-  const claim = input.claim.slice(0, 60);
-  return {
-    questionType,
-    question: `请${questionType === "explain" ? "解释" : questionType === "example" ? "举例说明" : "说明应用场景"}：“${claim}”。`,
-    rubricItems: [
-      {
-        key: `${questionType}_concept`,
-        criterion: "准确复述核心概念",
-        expectedConcept: input.claim,
-        weight: 2,
-        required: true,
-        evidenceRefId: ref?.refId ?? "ev",
-      },
-      {
-        key: `${questionType}_precision`,
-        criterion: "表述严谨，不引入来源外事实",
-        expectedConcept: "仅使用原文信息",
-        weight: 1,
-        required: false,
-        evidenceRefId: ref?.refId ?? "ev",
-      },
-    ],
-  };
-}
-
-/**
- * Compute character-level overlap ratio between criterion and userAnswer.
- * Uses character bigrams to handle CJK text that lacks whitespace word boundaries.
- */
-function computeCharOverlap(criterion: string, userAnswer: string): number {
-  const c = criterion.toLowerCase();
-  const a = userAnswer.toLowerCase();
-  if (c.length < 2) return a.includes(c) ? 1 : 0;
-  const bigrams = new Set<string>();
-  for (let i = 0; i < c.length - 1; i++) {
-    bigrams.add(c.slice(i, i + 2));
-  }
-  if (bigrams.size === 0) return 0;
-  let hits = 0;
-  for (let i = 0; i < a.length - 1; i++) {
-    if (bigrams.has(a.slice(i, i + 2))) hits++;
-  }
-  return Math.min(1, hits / bigrams.size);
-}
-
-function mockEvaluateRubric(input: EvaluateRubricInput) {
-  // Use character length for CJK text that lacks whitespace word boundaries.
-  const isShortAnswer = input.userAnswer.trim().length <= 1;
-
-  const itemResults = input.rubricItems.map((item) => {
-    const overlap = computeCharOverlap(item.criterion, input.userAnswer);
-
-    let verdict: "covered" | "partial" | "missing" | "contradicted" | "not_assessable";
-    let confidence: number;
-
-    if (isShortAnswer) {
-      verdict = "not_assessable";
-      confidence = 0.3;
-    } else if (overlap > 0.3) {
-      verdict = "covered";
-      confidence = 0.85;
-    } else if (overlap > 0.1) {
-      verdict = "partial";
-      confidence = 0.5;
-    } else {
-      verdict = "missing";
-      confidence = 0.7;
-    }
-
-    return {
-      rubricItemId: item.rubricItemId,
-      verdict,
-      confidence,
-      rationale: `Mock assessment based on overlap (${(overlap * 100).toFixed(0)}%).`,
-      answerExcerpt: input.userAnswer.slice(0, 100),
-    };
-  });
-
-  return {
-    itemResults,
-    feedback: "Mock rubric evaluation completed.",
-  };
-}
 
 // ARCH-05: contextWindowTokens 可通过 MOCK_CONTEXT_WINDOW_TOKENS 环境变量覆盖。
 
@@ -258,6 +75,33 @@ export class MockProvider implements AIProvider {
       name: string;
       arguments: Record<string, unknown>;
     }> = [];
+
+    if (role === "companion_agent") {
+      const toolResult = request.messages.find((message) => message.role === "tool");
+      const outputText = toolResult
+        ? `已读取伴星工具结果：${String(toolResult.content).slice(0, 400)}`
+        : request.tools.length > 0
+          ? "我先读取一下当前上下文。"
+          : "我在这里，准备好陪你学习了。";
+      if (!toolResult) {
+        const contextTool = request.tools.find((tool) => tool.name === "companion_read_context");
+        if (contextTool) {
+          toolCalls.push({
+            id: `call_companion_context_${Date.now()}`,
+            name: contextTool.name,
+            arguments: {},
+          });
+        }
+      }
+      const usage = this.estimateUsage(JSON.stringify(request), outputText);
+      return {
+        content: toolCalls.length > 0 ? null : outputText,
+        toolCalls,
+        finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        usage,
+        providerRequestId: `mock_companion_req_${Date.now()}`,
+      };
+    }
 
     // 根据 role 生成不同的 tool calls
     switch (role) {
@@ -383,19 +227,7 @@ fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
     };
   }
 
-  /**
-   * R5: TextGenerationCapability — mock chat completion.
-   *
-   * Detects the system prompt and returns an appropriate mock response:
-   * - EVAL_SYSTEM_PROMPT: overlap-based evaluateValidation mock
-   * - QUESTION_GENERATION_PROMPT: deterministic question generation
-   * - RUBRIC_EVALUATION_PROMPT: overlap-based evaluateRubric mock
-   * - Otherwise: generic mock response
-   *
-   * This simulates what a real API would return for each prompt type,
-   * allowing business helpers (evaluateValidationViaChat, etc.) to work
-   * with the MockProvider.
-   */
+  /** Generic mock chat completion for active worker capabilities. */
   async chatCompletion(
     messages: ChatMessage[],
     _options: ChatOptions,
@@ -403,48 +235,12 @@ fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
   ): Promise<ChatResult> {
     if (signal?.aborted) throw new Error("aborted before chatCompletion");
 
-    const systemContent = messages.find((m) => m.role === "system");
-    const systemPrompt = typeof systemContent?.content === "string"
-      ? systemContent.content
-      : "";
     const userMessage = messages.find((m) => m.role === "user");
     const userContent = typeof userMessage?.content === "string"
       ? userMessage.content
       : "";
 
-    let content: string;
-
-    // Use startsWith instead of === so the mock still recognizes the prompt
-    // type even if a caller appends extra context after the base prompt.
-    if (systemPrompt.startsWith(EVAL_SYSTEM_PROMPT)) {
-      content = JSON.stringify(mockEvaluateValidation(JSON.parse(userContent)));
-    } else if (systemPrompt.startsWith(QUESTION_GENERATION_PROMPT)) {
-      const input = JSON.parse(userContent) as GenerateValidationQuestionInput;
-      content = JSON.stringify(mockGenerateDeterministicQuestion(input, 0));
-    } else if (systemPrompt.startsWith(RUBRIC_EVALUATION_PROMPT)) {
-      content = JSON.stringify(mockEvaluateRubric(JSON.parse(userContent)));
-    } else if (systemPrompt.startsWith(IMAGE_UNDERSTANDING_SYSTEM_PROMPT)) {
-      // R5: analyzeImageViaChat builds a multimodal user message (text + image_url).
-      // Mock returns a decorative insight; the text part carries the image metadata.
-      const textPart = Array.isArray(userMessage?.content)
-        ? userMessage!.content.find((p) => p.type === "text")?.text ?? ""
-        : "";
-      const meta = JSON.parse(textPart || "{}") as { userDescription?: string };
-      const output: ImageInsightOutput = {
-        contentType: "decorative",
-        decorative: true,
-        caption: meta.userDescription?.trim().slice(0, 1_000)
-          || "Mock provider 已检查图片；未生成视觉事实。",
-        ocr: [],
-        facts: [],
-        promptInjectionDetected: false,
-        safetyFlags: ["mock_no_visual_inference"],
-        unresolvedReason: null,
-      };
-      content = JSON.stringify(output);
-    } else {
-      content = JSON.stringify({ status: "mock", message: "Mock chat completion response" });
-    }
+    const content = JSON.stringify({ status: "mock", message: "Mock chat completion response" });
 
     const usage = this.estimateUsage(userContent, content);
     return { content, usage };

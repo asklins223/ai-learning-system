@@ -20,6 +20,32 @@
       "sha256": "39fcb05cf7844b14260c5df1b72a3de2dafb247b27950b1c069f71dfa45a261c"
     }
   },
+  "homeV2Posters": {
+    "day": {
+      "id": "STATIC-HOME-V2-LIGHTHOUSE-DAY-01",
+      "path": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "6917d0c6ab5b03d06cc4a41cdff29d5cab44b2658c198855fe2d8e52de532c5c",
+      "reviewStatus": "approved"
+    },
+    "dusk": {
+      "id": "STATIC-HOME-V2-LIGHTHOUSE-DUSK-01",
+      "path": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "11ad284e60d0be4cd62483daebeb29c3e8924db0f4a12b34ad6ef238dae2145c",
+      "reviewStatus": "approved"
+    },
+    "night": {
+      "id": "STATIC-HOME-V2-LIGHTHOUSE-NIGHT-01",
+      "path": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "f6b83f26e7c67ba5f3cbcb8ad4993cb97c7f17d74d4d98beb9b502975b2c4e18",
+      "reviewStatus": "approved"
+    }
+  },
   "seatPosters": {
     "day": {
       "id": "STATIC-STUDY-SEAT-DAY-02",
@@ -195,8 +221,18 @@
       "derivation": {
         "sourceWidth": 1280,
         "sourceHeight": 720,
-        "crop": { "left": 640, "top": 0, "width": 462, "height": 720 },
-        "perspective": { "topLeftY": 32, "topRightY": 0, "bottomLeftY": 716, "bottomRightY": 720 }
+        "crop": {
+          "left": 640,
+          "top": 0,
+          "width": 462,
+          "height": 720
+        },
+        "perspective": {
+          "topLeftY": 32,
+          "topRightY": 0,
+          "bottomLeftY": 716,
+          "bottomRightY": 720
+        }
       },
       "reviewStatus": "approved"
     },
@@ -217,8 +253,18 @@
       "derivation": {
         "sourceWidth": 1280,
         "sourceHeight": 720,
-        "crop": { "left": 640, "top": 0, "width": 462, "height": 720 },
-        "perspective": { "topLeftY": 32, "topRightY": 0, "bottomLeftY": 716, "bottomRightY": 720 }
+        "crop": {
+          "left": 640,
+          "top": 0,
+          "width": 462,
+          "height": 720
+        },
+        "perspective": {
+          "topLeftY": 32,
+          "topRightY": 0,
+          "bottomLeftY": 716,
+          "bottomRightY": 720
+        }
       },
       "reviewStatus": "approved"
     }
@@ -234,13 +280,6 @@
     "sha256": "47d4cb81965814ea9bd3e236f030671616ff919390c2dbf619658e659c5d79a8",
     "caption": "欢迎来到理解书房。点击桌上的研究册，写下第一个想真正弄懂的问题吧。",
     "reviewStatus": "approved"
-  },
-  "companion": {
-    "id": "STATIC-COMPANION-ORB-01",
-    "path": "objects/companion-orb.webp",
-    "width": 1254,
-    "height": 1254,
-    "sha256": "331108156d357315ba00170bcf261b494d2582da5ad8c489c3411fb0585f6d27"
   },
   "graph": {
     "poster": "graph/graph-entry-background-v1.avif",
@@ -266,7 +305,8 @@
     "shelf": "objects/shelf.webp",
     "sourceFolder": "objects/source-folder.webp",
     "sceneCardStack": "objects/scene-card-stack-v2.png",
-    "studyOpenNotebook": "objects/study-open-notebook-v1.png"
+    "studyOpenNotebook": "objects/study-open-notebook-v1.png",
+    "homeForegroundLeaves": "foreground/home-foreground-leaves-v1.png"
   },
   "textures": {
     "notebook": "textures/notebook-pages.webp",
@@ -276,5 +316,1293 @@
     "sourceFolder": "textures/source-folder.webp",
     "scenePaperFibres": "textures/scene-paper-fibres-v2.png"
   },
-  "roomLayers": []
+  "roomLayers": [
+    {
+      "assetId": "HOME-LIGHTHOUSE-D0-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-d0-v1.png",
+      "theme": "day",
+      "depth": "D0",
+      "order": 0,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 1672,
+        "height": 941
+      },
+      "registration": {
+        "position": [
+          0,
+          0
+        ],
+        "size": {
+          "width": 1672,
+          "height": 941
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "c8b66e9bc83850bd028703bfdf9103bc7f51828169da5d90ac97eadd9951709d",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WATER-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-water-v1.png",
+      "theme": "day",
+      "depth": "D1",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 256,
+        "height": 64
+      },
+      "registration": {
+        "position": [
+          520,
+          235
+        ],
+        "size": {
+          "width": 620,
+          "height": 70
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "135d0f72263faea00447a99eab1cb54c2bc42d499e25b216cc921c42a43902b6",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-SILL-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-window-sill-v1.png",
+      "theme": "day",
+      "depth": "D2",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 685,
+        "height": 82
+      },
+      "registration": {
+        "position": [
+          475,
+          300
+        ],
+        "size": {
+          "width": 685,
+          "height": 82
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "272a3ce724ddfe24801a40c43dd3a1d55d394a43c5f7b7f6b59970ef4a8592a4",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-LEFT-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-window-left-v1.png",
+      "theme": "day",
+      "depth": "D2",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 112,
+        "height": 330
+      },
+      "registration": {
+        "position": [
+          452,
+          0
+        ],
+        "size": {
+          "width": 112,
+          "height": 330
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "99c406dfe5e09403228756619da848633e8d65a42e54f1006757bbed81ce4a91",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-RIGHT-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-window-right-v1.png",
+      "theme": "day",
+      "depth": "D2",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 90,
+        "height": 330
+      },
+      "registration": {
+        "position": [
+          1105,
+          0
+        ],
+        "size": {
+          "width": 90,
+          "height": 330
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "e8754b417ca1942bef1793889af2339c94f2f0783574e28454daa30ad15742ac",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-DESK-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-desk-v1.png",
+      "theme": "day",
+      "depth": "D3",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 440,
+        "height": 322
+      },
+      "registration": {
+        "position": [
+          0,
+          277
+        ],
+        "size": {
+          "width": 440,
+          "height": 322
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "83d7e551aeaf02124f5035db6ab1f667ec6fa48f583c98f8ef08e30acea3610b",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-SHELF-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-shelf-v1.png",
+      "theme": "day",
+      "depth": "D3",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 394,
+        "height": 500
+      },
+      "registration": {
+        "position": [
+          1187,
+          52
+        ],
+        "size": {
+          "width": 394,
+          "height": 500
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "314b33188137f204aff4aaeb7a0125a92255ac19946ead56cc2055a1f20d2fca",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-REST-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-rest-v1.png",
+      "theme": "day",
+      "depth": "D3",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 327,
+        "height": 411
+      },
+      "registration": {
+        "position": [
+          1345,
+          530
+        ],
+        "size": {
+          "width": 327,
+          "height": 411
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "63efc65647fa2e57e97e20f6da08a7cbe9529a1028241a45b6417b56acae62cb",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-TELESCOPE-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-telescope-v1.png",
+      "theme": "day",
+      "depth": "D4",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 160,
+        "height": 133
+      },
+      "registration": {
+        "position": [
+          710,
+          302
+        ],
+        "size": {
+          "width": 160,
+          "height": 133
+        },
+        "anchor": [
+          0.5,
+          0.58
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "43372f8826938e72c5013580358dc9e912a8abd6b7645cd3426c9c7630e6f262",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-DESK-PAGE-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-desk-page-v1.png",
+      "theme": "day",
+      "depth": "D4",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 112,
+        "height": 48
+      },
+      "registration": {
+        "position": [
+          120,
+          340
+        ],
+        "size": {
+          "width": 112,
+          "height": 48
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "2178d2aecb46f22b82fed98979ace8a758ce19efd2121c027c96f4bba160d022",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-CATALOG-PAGE-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-catalog-page-v1.png",
+      "theme": "day",
+      "depth": "D4",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 220,
+        "height": 145
+      },
+      "registration": {
+        "position": [
+          1430,
+          379
+        ],
+        "size": {
+          "width": 220,
+          "height": 145
+        },
+        "anchor": [
+          0.5,
+          0.75
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "3f4f6106af185de126ac7f8b54c33519703cbc1ced6bc366a5fe862d340acfe6",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-LEFT-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-foreground-left-v1.png",
+      "theme": "day",
+      "depth": "D6",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 105,
+        "height": 250
+      },
+      "registration": {
+        "position": [
+          0,
+          385
+        ],
+        "size": {
+          "width": 105,
+          "height": 250
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "965fb095c81130683b3c071eac658c49159552d0c5e68932299623a648744fbd",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-RIGHT-DAY",
+      "path": "layers/home-v2/lighthouse/lighthouse-day-foreground-right-v1.png",
+      "theme": "day",
+      "depth": "D6",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 512,
+        "height": 341
+      },
+      "registration": {
+        "position": [
+          1160,
+          600
+        ],
+        "size": {
+          "width": 512,
+          "height": 341
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "7f884151f4016e8c003f3691c55824fe011ca2119b9a0b88faf03ea93358858a",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-day-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-D0-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-d0-v1.png",
+      "theme": "dusk",
+      "depth": "D0",
+      "order": 0,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 1672,
+        "height": 941
+      },
+      "registration": {
+        "position": [
+          0,
+          0
+        ],
+        "size": {
+          "width": 1672,
+          "height": 941
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "628ea761aa96c6d96b8a7c23395676f9976984f6709f4766fe61e25586a4b5e8",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WATER-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-water-v1.png",
+      "theme": "dusk",
+      "depth": "D1",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 256,
+        "height": 64
+      },
+      "registration": {
+        "position": [
+          520,
+          235
+        ],
+        "size": {
+          "width": 620,
+          "height": 70
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "b97031933cb1cbcab5f69ae4648f88453277877387cbbc4e3f42a133377144bd",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-SILL-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-window-sill-v1.png",
+      "theme": "dusk",
+      "depth": "D2",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 685,
+        "height": 82
+      },
+      "registration": {
+        "position": [
+          475,
+          300
+        ],
+        "size": {
+          "width": 685,
+          "height": 82
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "84d2f8901454300626e932fa43cf597ac8bb2f2641041a3071816bb3970ea8ad",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-LEFT-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-window-left-v1.png",
+      "theme": "dusk",
+      "depth": "D2",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 112,
+        "height": 330
+      },
+      "registration": {
+        "position": [
+          452,
+          0
+        ],
+        "size": {
+          "width": 112,
+          "height": 330
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "757b05e892d7e2d07c400ae8c977a6cacc5184e61bd131f773a9a90a1abba500",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-RIGHT-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-window-right-v1.png",
+      "theme": "dusk",
+      "depth": "D2",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 90,
+        "height": 330
+      },
+      "registration": {
+        "position": [
+          1105,
+          0
+        ],
+        "size": {
+          "width": 90,
+          "height": 330
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "f21fc5caab391c9c5a748852567d2b292fde06d306115eaea53f6411990e26ba",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-DESK-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-desk-v1.png",
+      "theme": "dusk",
+      "depth": "D3",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 440,
+        "height": 322
+      },
+      "registration": {
+        "position": [
+          0,
+          277
+        ],
+        "size": {
+          "width": 440,
+          "height": 322
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "0abfe5e71ebac86fbe553e79b0ec99cdeab7f58ebd0097a30988a3829436ba2b",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-SHELF-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-shelf-v1.png",
+      "theme": "dusk",
+      "depth": "D3",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 394,
+        "height": 500
+      },
+      "registration": {
+        "position": [
+          1187,
+          52
+        ],
+        "size": {
+          "width": 394,
+          "height": 500
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "8d8e47b01698edd436071ba6b9c8e0f61860cbaa18a252da2ea3c89d94df6611",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-REST-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-rest-v1.png",
+      "theme": "dusk",
+      "depth": "D3",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 327,
+        "height": 411
+      },
+      "registration": {
+        "position": [
+          1345,
+          530
+        ],
+        "size": {
+          "width": 327,
+          "height": 411
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "51b106794ae41a2ba1dcd7ab51a760b76873d3248afd346cf3b454e652e3570e",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-TELESCOPE-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-telescope-v1.png",
+      "theme": "dusk",
+      "depth": "D4",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 160,
+        "height": 133
+      },
+      "registration": {
+        "position": [
+          710,
+          302
+        ],
+        "size": {
+          "width": 160,
+          "height": 133
+        },
+        "anchor": [
+          0.5,
+          0.58
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "43372f8826938e72c5013580358dc9e912a8abd6b7645cd3426c9c7630e6f262",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-DESK-PAGE-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-desk-page-v1.png",
+      "theme": "dusk",
+      "depth": "D4",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 112,
+        "height": 48
+      },
+      "registration": {
+        "position": [
+          120,
+          340
+        ],
+        "size": {
+          "width": 112,
+          "height": 48
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "a499fb6f5053ae428cdcb84144338b2f3e77c8673344e0453e68680b15c34b06",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-CATALOG-PAGE-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-catalog-page-v1.png",
+      "theme": "dusk",
+      "depth": "D4",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 220,
+        "height": 145
+      },
+      "registration": {
+        "position": [
+          1430,
+          379
+        ],
+        "size": {
+          "width": 220,
+          "height": 145
+        },
+        "anchor": [
+          0.5,
+          0.75
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "35431a5826b8e1c8d4daad660deb52602fe4c6120d218d23b6b015bc0004b508",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-LEFT-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-foreground-left-v1.png",
+      "theme": "dusk",
+      "depth": "D6",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 105,
+        "height": 250
+      },
+      "registration": {
+        "position": [
+          0,
+          385
+        ],
+        "size": {
+          "width": 105,
+          "height": 250
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "c95fc1a7f352e67f469e36c9726f2f617f036f526f9b15d786dac31d7956dc0f",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-RIGHT-DUSK",
+      "path": "layers/home-v2/lighthouse/lighthouse-dusk-foreground-right-v1.png",
+      "theme": "dusk",
+      "depth": "D6",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 512,
+        "height": 341
+      },
+      "registration": {
+        "position": [
+          1160,
+          600
+        ],
+        "size": {
+          "width": 512,
+          "height": 341
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "b90e1186a5d351dd5a277e4ce4492ce02c7e205eab7063c61f3720e667029d59",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-dusk-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-D0-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-d0-v1.png",
+      "theme": "night",
+      "depth": "D0",
+      "order": 0,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 1672,
+        "height": 941
+      },
+      "registration": {
+        "position": [
+          0,
+          0
+        ],
+        "size": {
+          "width": 1672,
+          "height": 941
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "da52adf07098d6b50b959d494bbc945c540e3bab04b0b2cce79d5f87cf6b3535",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WATER-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-water-v1.png",
+      "theme": "night",
+      "depth": "D1",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 256,
+        "height": 64
+      },
+      "registration": {
+        "position": [
+          520,
+          235
+        ],
+        "size": {
+          "width": 620,
+          "height": 70
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "1346e16689d30a63d1acb5efabfb77f8db4224b0ceaf6e0706d1459c0f817ff4",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-SILL-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-window-sill-v1.png",
+      "theme": "night",
+      "depth": "D2",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 685,
+        "height": 82
+      },
+      "registration": {
+        "position": [
+          475,
+          300
+        ],
+        "size": {
+          "width": 685,
+          "height": 82
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "1a1acc0844bbf4919942f6f592804e068d8caaf3ade5ae4526c56dae29a1981a",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-LEFT-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-window-left-v1.png",
+      "theme": "night",
+      "depth": "D2",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 112,
+        "height": 330
+      },
+      "registration": {
+        "position": [
+          452,
+          0
+        ],
+        "size": {
+          "width": 112,
+          "height": 330
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "ab4f9b17b1ef42361b7ccfb0f61dbca450eebffd6f2d58626320270b63f03c5e",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-WINDOW-RIGHT-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-window-right-v1.png",
+      "theme": "night",
+      "depth": "D2",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 90,
+        "height": 330
+      },
+      "registration": {
+        "position": [
+          1105,
+          0
+        ],
+        "size": {
+          "width": 90,
+          "height": 330
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "03336df694b42b8c07b33e8b1f561e04f08bb2f3a076ef1b5c5d36f8e5f79f57",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-DESK-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-desk-v1.png",
+      "theme": "night",
+      "depth": "D3",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 440,
+        "height": 322
+      },
+      "registration": {
+        "position": [
+          0,
+          277
+        ],
+        "size": {
+          "width": 440,
+          "height": 322
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "81594651e474371a9b4f1715b0867e6016a8bcac68b3f1a0210cdfcccca9af83",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-SHELF-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-shelf-v1.png",
+      "theme": "night",
+      "depth": "D3",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 394,
+        "height": 500
+      },
+      "registration": {
+        "position": [
+          1187,
+          52
+        ],
+        "size": {
+          "width": 394,
+          "height": 500
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "104fbb216fef52af71260353d4e3549ae5da02011c59b3ce8ce6a626c46a4e7f",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-REST-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-rest-v1.png",
+      "theme": "night",
+      "depth": "D3",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 327,
+        "height": 411
+      },
+      "registration": {
+        "position": [
+          1345,
+          530
+        ],
+        "size": {
+          "width": 327,
+          "height": 411
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "872cb04a30779372f7348a4a2b39d11690633d8858617bb7d67c0085db36131e",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-TELESCOPE-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-telescope-v1.png",
+      "theme": "night",
+      "depth": "D4",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 160,
+        "height": 133
+      },
+      "registration": {
+        "position": [
+          710,
+          302
+        ],
+        "size": {
+          "width": 160,
+          "height": 133
+        },
+        "anchor": [
+          0.5,
+          0.58
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "43372f8826938e72c5013580358dc9e912a8abd6b7645cd3426c9c7630e6f262",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-DESK-PAGE-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-desk-page-v1.png",
+      "theme": "night",
+      "depth": "D4",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 112,
+        "height": 48
+      },
+      "registration": {
+        "position": [
+          120,
+          340
+        ],
+        "size": {
+          "width": 112,
+          "height": 48
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "575193d7c4124e2ee536dc8ab56ccb7380f6c2c41533911d50078815c0c21743",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-CATALOG-PAGE-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-catalog-page-v1.png",
+      "theme": "night",
+      "depth": "D4",
+      "order": 30,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 220,
+        "height": 145
+      },
+      "registration": {
+        "position": [
+          1430,
+          379
+        ],
+        "size": {
+          "width": 220,
+          "height": 145
+        },
+        "anchor": [
+          0.5,
+          0.75
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "f67aaba1745a774828d2e29a9414d8d769a81bebb6509a0e2d176b77a11e89c5",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-LEFT-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-foreground-left-v1.png",
+      "theme": "night",
+      "depth": "D6",
+      "order": 10,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 105,
+        "height": 250
+      },
+      "registration": {
+        "position": [
+          0,
+          385
+        ],
+        "size": {
+          "width": 105,
+          "height": 250
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "40bb9b472edbdb16e8797deaf5e573cd2fc64f1a05667fd04778b85914454083",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    },
+    {
+      "assetId": "HOME-LIGHTHOUSE-FOREGROUND-RIGHT-NIGHT",
+      "path": "layers/home-v2/lighthouse/lighthouse-night-foreground-right-v1.png",
+      "theme": "night",
+      "depth": "D6",
+      "order": 20,
+      "anchorId": null,
+      "sourceSize": {
+        "width": 512,
+        "height": 341
+      },
+      "registration": {
+        "position": [
+          1160,
+          600
+        ],
+        "size": {
+          "width": 512,
+          "height": 341
+        },
+        "anchor": [
+          0,
+          0
+        ]
+      },
+      "alphaMode": "straight-rgba",
+      "sha256": "aade57a347eb3240626ec1fc8018ec9f24dd3093af2c555002ba9d3fa003066e",
+      "sourcePath": "posters/home-v2/lighthouse/lighthouse-night-poster-v1.png",
+      "promptPath": "prompts/home-v2/lighthouse/lighthouse-layer-pack-v1.md",
+      "license": "project-owned-ai-derived",
+      "reviewStatus": "approved",
+      "releaseApproval": true
+    }
+  ]
 }

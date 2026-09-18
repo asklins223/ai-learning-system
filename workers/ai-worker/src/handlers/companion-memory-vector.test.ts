@@ -190,6 +190,62 @@ test("vector 模式返回 pgvector 行并标记 mode=vector", async () => {
   assert.equal(result.items[0].pinned, true);
 });
 
+test("统一入口：事务外预计算的向量不再触发 provider.embed（外部调用不占事务）", async () => {
+  const previous = process.env.COMPANION_MEMORY_VECTOR_V1;
+  process.env.COMPANION_MEMORY_VECTOR_V1 = "true";
+  try {
+    let embedCalls = 0;
+    const provider: EmbeddingProviderLike = {
+      id: "mock",
+      embeddingModelId: "mock-v1",
+      embed: async () => {
+        embedCalls += 1;
+        return new Array(1024).fill(0.01);
+      },
+    };
+    const tx = fakeTx([ROW]);
+    const result = await retrieveCompanionMemories(
+      tx as never,
+      { workspaceId: "w", userId: "u" },
+      "光合",
+      { provider, precomputedEmbedding: new Array(1024).fill(0.02) },
+    );
+    assert.equal(result.mode, "vector");
+    assert.equal(embedCalls, 0, "预计算向量必须直接使用，不得在事务内再次 embed");
+  } finally {
+    if (previous === undefined) delete process.env.COMPANION_MEMORY_VECTOR_V1;
+    else process.env.COMPANION_MEMORY_VECTOR_V1 = previous;
+  }
+});
+
+test("统一入口：预计算失败（null）直接 keyword，绝不在事务内重试外部调用", async () => {
+  const previous = process.env.COMPANION_MEMORY_VECTOR_V1;
+  process.env.COMPANION_MEMORY_VECTOR_V1 = "true";
+  try {
+    let embedCalls = 0;
+    const provider: EmbeddingProviderLike = {
+      id: "mock",
+      embeddingModelId: "mock-v1",
+      embed: async () => {
+        embedCalls += 1;
+        return new Array(1024).fill(0.01);
+      },
+    };
+    const tx = fakeTx([ROW]);
+    const result = await retrieveCompanionMemories(
+      tx as never,
+      { workspaceId: "w", userId: "u" },
+      "光合",
+      { provider, precomputedEmbedding: null },
+    );
+    assert.equal(result.mode, "keyword_fallback");
+    assert.equal(embedCalls, 0);
+  } finally {
+    if (previous === undefined) delete process.env.COMPANION_MEMORY_VECTOR_V1;
+    else process.env.COMPANION_MEMORY_VECTOR_V1 = previous;
+  }
+});
+
 test("统一入口：未开启 flag 或没有 provider 时走 keyword", async () => {
   const previous = process.env.COMPANION_MEMORY_VECTOR_V1;
   process.env.COMPANION_MEMORY_VECTOR_V1 = "false";

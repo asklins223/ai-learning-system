@@ -33,6 +33,28 @@ const SAFE_ERROR_MESSAGE_PATTERN =
 const SAFE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const SAFE_CODE_PATTERN = /^[A-Za-z0-9_.-]{1,40}$/;
 
+/**
+ * 跨进程共享的错误码常量。
+ *
+ * 设计 P1-15（2026-09-15 审计）：`"ai_consent_required"` 此前在 worker 的错误类里
+ * 定义、又在 API 的分类器里以字符串字面量 + `endsWith` 重复一遍——改名不会让编译器
+ * 报错，只会让分类**静默失效**（用户再也看不到"去签署同意"的引导）。现在两侧引用
+ * 同一常量。
+ */
+export const AI_CONSENT_REQUIRED_CODE = "ai_consent_required";
+
+/**
+ * 解析已脱敏错误消息（{@link safeErrorMessage} 的产物）里的机器码。
+ *
+ * 与 `SAFE_ERROR_MESSAGE_PATTERN` **同源**：消费端不再自行 `endsWith(":code")`，
+ * 从而消除"格式是隐式契约、改格式静默失配"的问题。非该格式（含自由文本）返回 null。
+ */
+export function readSafeErrorCode(message: string | null | undefined): string | null {
+  if (typeof message !== "string" || message.length === 0) return null;
+  const match = SAFE_ERROR_MESSAGE_PATTERN.exec(message);
+  return match?.[3] ?? null;
+}
+
 function rawMessage(value: unknown): string {
   if (value instanceof Error) {
     const cause = "cause" in value ? rawMessage(value.cause) : "";

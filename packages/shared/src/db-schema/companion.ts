@@ -26,6 +26,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { users } from "./identity.ts";
+import type { CompanionAgentSettingsV1 } from "../companion-agent-contracts.ts";
 
 // ─── CompanionOnboardingStateV1 形状（02-3 冻结）───────────────────────────
 
@@ -124,6 +125,9 @@ export const userCompanionAccountState = pgTable(
     // 方案 16 §10.3：主动介入强度与静默时段（账号级跨设备；0140 迁移）。
     interventionLevel: text("intervention_level").$type<"quiet" | "moderate" | "active">().notNull().default("moderate"),
     quietHours: jsonb("quiet_hours").$type<{ startLocal: string; endLocal: string; timezone: string } | null>(),
+    // Companion Agent v1：账号级权限与内置 Skill 开关，沿用 revision CAS。
+    agentSettings: jsonb("agent_settings").$type<CompanionAgentSettingsV1>().notNull()
+      .default(sql`'{"version":1,"permissionLevel":"guided","enabledSkillIds":["learning-context","learning-tutor","learning-planner","companion-memory","companion-navigation"]}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

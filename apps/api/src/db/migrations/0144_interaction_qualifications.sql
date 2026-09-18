@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS public.interaction_qualifications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   qualification_id text NOT NULL,
   family text NOT NULL
-    CHECK (family IN ('open_text', 'open_voice', 'ordering', 'relation', 'repair', 'scenario', 'choice_with_rationale', 'structured_bundle')),
+    CHECK (family IN ('open_text', 'open_voice', 'ordering', 'relation', 'repair', 'structured_bundle')),
   locale text NOT NULL DEFAULT 'zh-CN',
   dataset_version text NOT NULL,
   rubric_set_hash text NOT NULL,

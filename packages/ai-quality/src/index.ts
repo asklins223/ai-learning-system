@@ -56,6 +56,3 @@ export type {
   PRGateResult,
   QualityConfigFingerprint,
 } from "./types.ts";
-
-// v0.6 trusted-mastery quality fixtures and prediction-based scorers.
-export * as v06 from "./v06/index.ts";

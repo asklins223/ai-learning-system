@@ -6,8 +6,8 @@
     "issue": "#ffmpeg-host-toolchain",
     "owner": "ailearn-dev",
     "approver": "owner",
-    "expiresAt": "2026-08-30",
-    "reason": "宿主机单元测试没有 ffmpeg/ffprobe 时跳过；API 容器验证覆盖真实音频工具链"
+    "expiresAt": "2026-09-29",
+    "reason": "缺少 ffmpeg/ffprobe 的开发机跳过；API 容器（Dockerfile 内置 ffmpeg）与 CI runner 均带该工具链"
   },
   {
     "testName": "ffprobe：过短（0.1s wav → 100ms < 200ms → too_short）",
@@ -16,8 +16,8 @@
     "issue": "#ffmpeg-host-toolchain",
     "owner": "ailearn-dev",
     "approver": "owner",
-    "expiresAt": "2026-08-30",
-    "reason": "宿主机单元测试没有 ffmpeg/ffprobe 时跳过；API 容器验证覆盖真实音频工具链"
+    "expiresAt": "2026-09-29",
+    "reason": "缺少 ffmpeg/ffprobe 的开发机跳过；API 容器（Dockerfile 内置 ffmpeg）与 CI runner 均带该工具链"
   },
   {
     "testName": "真 LLM 生成（.env 配置后真实调用 DashScope）",
@@ -26,87 +26,7 @@
     "issue": "#companion-llm-integration",
     "owner": "ailearn-dev",
     "approver": "owner",
-    "expiresAt": "2026-08-30",
+    "expiresAt": "2026-09-29",
     "reason": "CI/本地无 critic provider 凭据时跳过；带 .env provider 凭据的伴星集成回归单独运行"
-  },
-  {
-    "testName": "CommitPort：commit_key 幂等（set 后 get 一致，真实 DB）",
-    "package": "apps/api",
-    "type": "skip",
-    "issue": "#ql-integration-db",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-24",
-    "reason": "真实 DB 集成测试：npm test 无 DATABASE_URL_API 时跳过；在集成矩阵（test:companion-actions:postgres / 手动 DB 环境）单独运行"
-  },
-  {
-    "testName": "CommitPort：lockSteps 行锁可执行（FOR UPDATE 不抛错）",
-    "package": "apps/api",
-    "type": "skip",
-    "issue": "#ql-integration-db",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-24",
-    "reason": "真实 DB 集成测试：npm test 无 DATABASE_URL_API 时跳过；DB 环境单独运行"
-  },
-  {
-    "testName": "救火 2：learning 核心表在真实 Postgres 存在（迁移已应用）",
-    "package": "apps/api",
-    "type": "skip",
-    "issue": "#ql-integration-db",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-24",
-    "reason": "真实 DB 迁移状态诊断：npm test 无 DATABASE_URL_API 时跳过；DB 环境单独运行"
-  },
-  {
-    "testName": "救火 3：learning_assessment_reports 列对齐（INSERT 列全覆盖）",
-    "package": "apps/api",
-    "type": "skip",
-    "issue": "#ql-integration-db",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-24",
-    "reason": "真实 DB 集成测试：npm test 无 DATABASE_URL_API 时跳过；DB 环境单独运行"
-  },
-  {
-    "testName": "Card Generation V2 is not enabled (CARD_GENERATION_V2_ENABLED not set)",
-    "package": "tests/e2e",
-    "type": "skip",
-    "issue": "#card-v2-e2e-env",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-30",
-    "reason": "V2 生成 E2E 依赖 CARD_GENERATION_V2_ENABLED=true；未开启时按设计跳过"
-  },
-  {
-    "testName": "Desktop E2E requires DESKTOP_E2E=1",
-    "package": "tests/e2e",
-    "type": "skip",
-    "issue": "#desktop-e2e-env",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-30",
-    "reason": "桌面 Electron E2E 需要 DESKTOP_E2E=1 + ELECTRON_APP_PATH；默认环境跳过"
-  },
-  {
-    "testName": "Review Attempt lifecycle @pr (v0.5 UI 已废弃，待 v0.6 重写)",
-    "package": "tests/e2e",
-    "type": "skip",
-    "issue": "#review-v06-rewrite",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-30",
-    "reason": "v0.5 Review UI 已废弃，待 v0.6 重写后启用"
-  },
-  {
-    "testName": "review queue page loads and shows due reviews (v0.5 UI 已废弃)",
-    "package": "tests/e2e",
-    "type": "todo",
-    "issue": "#review-v06-rewrite",
-    "owner": "ailearn-dev",
-    "approver": "owner",
-    "expiresAt": "2026-08-30",
-    "reason": "v0.5 Review UI 已废弃，待 v0.6 重写后补测"
   }
 ]

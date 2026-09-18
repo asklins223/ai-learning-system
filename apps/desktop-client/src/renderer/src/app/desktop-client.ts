@@ -85,6 +85,20 @@ export function gatewayErrorMessage(error: unknown): string {
       return "这条学习内容已经不存在或不再对当前账号可见。";
     case "feature_disabled":
       return "这项学习能力当前未在本环境启用。";
+    // Auth-form outcomes. These read as account and invitation problems, not as
+    // learning-content problems, because that is the surface they appear on.
+    case "email_exists":
+      return "这个邮箱已经注册过，请直接登录；忘记密码请联系管理员。";
+    case "invite_invalid":
+      return "邀请码无效，请核对后重新输入，或向邀请你的人要一个新的。";
+    case "invite_expired":
+      return "邀请码已过期，请向邀请你的人要一个新的。";
+    case "invite_consumed":
+      return "这个邀请码已经被使用过了，请向邀请你的人要一个新的。";
+    case "workspace_limit":
+      return "你已经加入了可参与的工作区数量上限，无法再加入新的协作空间。";
+    case "already_member":
+      return "你的账号已经在这个协作空间里了，无需重复加入。";
     default:
       return "学习服务没有完成这次请求，请稍后重试。";
   }

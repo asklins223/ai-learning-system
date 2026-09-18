@@ -77,6 +77,22 @@ test("projects checkpoint and recoverable-error branches only from server proof"
   };
   assert.deepEqual(kinds(assessmentFailure), ["retry_assessment", "end"]);
 
+  // H1：tick 失败路径留下的三种未终态（queued/running/failed）都可重试。
+  for (const status of ["queued", "running", "failed"] as const) {
+    const retryable = baseView("recoverable_error");
+    retryable.failure = { stage: "assessment", code: "assessment_timeout", retryable: true };
+    retryable.activeAssessment = { ...assessmentFailure.activeAssessment!, status };
+    assert.deepEqual(kinds(retryable), ["retry_assessment", "end"], `status=${status} 应可重试`);
+  }
+
+  // completed/not_assessable 的评估不可重试：不得宣告一个必然 409 的入口。
+  for (const status of ["completed", "not_assessable"] as const) {
+    const notRetryable = baseView("recoverable_error");
+    notRetryable.failure = { stage: "assessment", code: "assessment_timeout", retryable: true };
+    notRetryable.activeAssessment = { ...assessmentFailure.activeAssessment!, status };
+    assert.deepEqual(kinds(notRetryable), ["end"], `status=${status} 不得宣告 retry_assessment`);
+  }
+
   const commitFailure = baseView("recoverable_error");
   commitFailure.failure = { stage: "commit", code: "scheduler_unavailable", retryable: true };
   assert.deepEqual(kinds(commitFailure), ["retry_commit", "end"]);

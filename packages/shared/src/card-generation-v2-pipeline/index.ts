@@ -18,6 +18,8 @@ export * from "./author-service.ts";
 export * from "./critic-service.ts";
 export * from "./deterministic-gates.ts";
 export * from "./concept-label.ts";
+// 2026-09-17（性能改造）：阶段内有界并发（author/grounding 由逐候选串行改为并发）。
+export * from "./concurrency.ts";
 // 2026-08-24（§4.4 第二批）：evidence seal 与 binding plan 的纯逻辑层。
 // DB 写入（snapshots/eligibility/binding plan 落库）在 apps/api 的 IO 壳。
 export * from "./evidence-seal-core.ts";

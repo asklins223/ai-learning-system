@@ -37,7 +37,7 @@ export interface ProviderDefaults {
  * 新增 provider 在 PROVIDER_METADATA 数组加一行 + 在 worker 侧注册工厂。
  */
 export interface ProviderDescriptor {
-  /** 唯一标识："mock" | "openai_compatible" | "dashscope" | "siliconflow" | ... */
+  /** 唯一标识："mock" | "openai_compatible" | "dashscope" | "siliconflow" | "opencode_go" | ... */
   id: string;
   /** 用户可见名称 */
   label: string;
@@ -47,7 +47,7 @@ export interface ProviderDescriptor {
   defaults: Partial<Record<Capability, ProviderDefaults>>;
   /** 域名校验规则（SSRF 防护）— 纯函数，无 worker 依赖 */
   validateBaseUrl?(baseUrl: string): string | Error;
-  /** URL 重写规则（如 DashScope 的 /api/v1 → /compatible-mode/v1）— 纯函数 */
+  /** Provider endpoint resolver — pure function */
   resolveEndpoint?(baseUrl: string): string;
   /** 额外请求参数（如 DashScope 的 enable_thinking: false）— 纯数据 */
   extraRequestParams?: Record<string, unknown>;
@@ -119,50 +119,35 @@ export const PROVIDER_METADATA: readonly ProviderDescriptor[] = [
       rerank: { model: "BAAI/bge-reranker-v2-m3" },
     },
   },
+  {
+    id: "opencode_go",
+    label: "OpenCode Go",
+    // 协议为 OpenAI Responses API（/responses），不是 chat/completions：
+    // OpenCode Go 的 muse-spark-*（含 muse-spark-1.3-contributor，1M 上下文）、
+    // grok-4.6、gpt-5.6-luna 只在 /responses 提供，走 /chat/completions 会稳定 500。
+    // 该端点的 chat/completions 系模型（deepseek-*、glm-*、kimi-* 等）请用
+    // openai_compatible 平台实例指向同一个 baseUrl。
+    // 端点校验与 URL 解析在 worker 侧工厂（providers/opencode-go.ts），与 dashscope 一致。
+    capabilities: ["agent_turn"],
+    defaults: {
+      agent_turn: {
+        baseUrl: "https://opencode.ai/zen/go/v1",
+        model: "muse-spark-1.3-contributor",
+      },
+    },
+  },
 ];
 
 // ── 纯查询函数（无副作用，两端可用）──
 
-/** 查询所有 provider 元数据 */
-export function getAllProviders(): ProviderDescriptor[] {
-  return [...PROVIDER_METADATA];
-}
-
-/** 查询所有支持某种能力的 provider */
-export function getProvidersByCapability(cap: Capability): ProviderDescriptor[] {
-  return PROVIDER_METADATA.filter((d) => d.capabilities.includes(cap));
-}
-
-/** 按 id 查询 provider 元数据 */
+/**
+ * 按 id 查询 provider 元数据。
+ *
+ * 2026-09-15 审计（设计 P1-9 / AGENTS.md 清理）：同文件里的
+ * `getAllProviders` / `getProvidersByCapability` / `getSupportedModelTypes`
+ * （及其私有表 `CAPABILITY_TO_MODEL_TYPE`）全仓零生产消费方，已删除；
+ * 保留的只此一个（能力声明与配置一致性检查在用）。
+ */
 export function getProviderById(id: string): ProviderDescriptor | undefined {
   return PROVIDER_METADATA.find((d) => d.id === id);
-}
-
-/**
- * Map capabilities to model types for platform configuration.
- *
- * Multiple capabilities can map to the same model type (e.g. both
- * text_generation and agent_turn use the "text" platform slot), and some
- * capabilities are not separately configured (e.g. rerank is internal).
- *
- * New capabilities should be added here when they become configurable.
- */
-const CAPABILITY_TO_MODEL_TYPE: Partial<Record<Capability, string>> = {
-  text_generation: "text",
-  agent_turn: "text",      // agent_turn shares the same platform slot as text
-  vision: "vision",
-  embedding: "embedding",
-  // rerank, speech_recognition, image_generation are not yet user-configurable
-};
-
-/** 查询所有支持的 modelType — 从元数据动态派生 */
-export function getSupportedModelTypes(): string[] {
-  const types = new Set<string>();
-  for (const d of PROVIDER_METADATA) {
-    for (const cap of d.capabilities) {
-      const modelType = CAPABILITY_TO_MODEL_TYPE[cap];
-      if (modelType) types.add(modelType);
-    }
-  }
-  return [...types];
 }

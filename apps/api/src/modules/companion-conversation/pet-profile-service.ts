@@ -7,7 +7,7 @@
 
 import { and, eq } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { petProfiles } from "../../db/schema/companion-memory.ts";
+import { petProfiles } from "@ailearn/shared/db-schema/companion-memory";
 // §11.9：预设 seed 固化在 shared 包，api/worker 共享同一来源。
 export {
   PET_PERSONA_PRESETS,
@@ -32,6 +32,18 @@ export interface PetProfileInput {
   examples: { text: string }[];
   activeness: PetProfileActiveness;
   boundaries: PetProfileBoundaries;
+  /** 客户端 base revision（乐观锁）；缺省表示不做 CAS。 */
+  revision?: number;
+}
+
+/** revision CAS 失败（并发写入赢得竞争）。route 层映射为 409。 */
+export class PetProfileCasConflictError extends Error {
+  readonly currentRevision: number;
+  constructor(currentRevision: number) {
+    super("pet profile revision conflict");
+    this.name = "PetProfileCasConflictError";
+    this.currentRevision = currentRevision;
+  }
 }
 
 export interface PetProfile extends PetProfileInput {
@@ -75,8 +87,9 @@ function toContract(row: typeof petProfiles.$inferSelect): PetProfile {
 export async function getPetProfile(
   executor: ApiTransaction,
   scope: PetProfileScope,
+  options?: { forUpdate?: boolean },
 ): Promise<PetProfile | null> {
-  const rows = await executor
+  const query = executor
     .select()
     .from(petProfiles)
     .where(and(
@@ -84,6 +97,10 @@ export async function getPetProfile(
       eq(petProfiles.userId, scope.userId),
     ))
     .limit(1);
+  // 并发修复（2026-09 后端审查）：CAS 需要行锁。此前 route 的 revision 校验
+  // 与 UPDATE 之间没有 FOR UPDATE，也没有 `AND revision = expected`，
+  // 两个并发 PATCH 会各自读到 revision R 并都写成 R+1（后者静默覆盖前者）。
+  const rows = options?.forUpdate ? await query.for("update").execute() : await query;
   return rows[0] ? toContract(rows[0]) : null;
 }
 
@@ -93,8 +110,10 @@ export async function upsertPetProfile(
   input: PetProfileInput,
   now: Date = new Date(),
 ): Promise<PetProfile> {
-  const existing = await getPetProfile(executor, scope);
+  // 行锁 + revision CAS：并发 PATCH 不再互相覆盖（route 层据此返回 409）。
+  const existing = await getPetProfile(executor, scope, { forUpdate: true });
   if (existing) {
+    const expectedRevision = input.revision ?? existing.revision;
     const updated = await executor.update(petProfiles)
       .set({
         presetId: input.presetId ?? null,
@@ -110,8 +129,12 @@ export async function upsertPetProfile(
       .where(and(
         eq(petProfiles.workspaceId, scope.workspaceId),
         eq(petProfiles.userId, scope.userId),
+        eq(petProfiles.revision, expectedRevision),
       ))
       .returning();
+    if (!updated[0]) {
+      throw new PetProfileCasConflictError(existing.revision);
+    }
     return toContract(updated[0]);
   }
   const inserted = await executor.insert(petProfiles).values({

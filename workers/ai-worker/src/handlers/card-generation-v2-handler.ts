@@ -32,6 +32,7 @@ import { sql } from "drizzle-orm";
 import { db, withWorkerWorkspaceTransaction, type WorkerTransaction } from "../db.ts";
 import { logger } from "../lib/logger.ts";
 import { runWithAbortTimeout } from "../lib/handler-timeout.ts";
+import type { CardGenerationUsageTotals } from "../card-generation-v2/providers.ts";
 
 function sanitizeOperationalError(error: unknown): string {
   if (error instanceof Error) return error.message.slice(0, 1000);
@@ -49,6 +50,8 @@ import {
 } from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   executeAuthor,
+  authorCandidateForObjective,
+  budgetedPlanObjectives,
   DeterministicAuthoringProvider,
   type AuthoringProvider,
 } from "@ailearn/shared/card-generation-v2-pipeline";
@@ -58,6 +61,7 @@ import {
   runDeterministicFinalGates,
   deterministicGroundingPrecheck,
   deterministicPedagogyPrecheck,
+  computeSemanticClustersV2,
   type GroundingCriticProvider,
   type PedagogyCriticProvider,
   type PedagogyCriticInput,
@@ -74,6 +78,9 @@ import {
 import {
   filterBlocksBySourceScope,
   type SealedEvidenceEntryV2,
+} from "@ailearn/shared/card-generation-v2-pipeline";
+import {
+  mapWithConcurrency,
 } from "@ailearn/shared/card-generation-v2-pipeline";
 import { CardGenerationPipelineErrorV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import {
@@ -117,23 +124,131 @@ interface PendingOutboxJob {
 /**
  * V2 outbox 租约时长（30 分钟）。
  *
- * 选择（方案 a，第四轮审计 #2/#25）：直接放大到「覆盖整个四阶段 LLM 管道」，
- * 而非保持 120s + 处理中续租。理由：
- * - V2 管道（planner→author→grounding→pedagogy）是分钟级的多轮模型调用，
- *   期间无任何 lease 心跳（worker 不在 tick 间隙对 processing 行做周期续租）。
- *   120s 一次性租约必然在慢速但**正常**的 job 跑完前过期，reaper 会用
- *   `lease_expires_at < now()` 把它误回收 → 并发重跑整管道 + 误计 attempts
- *   （正常慢被计为崩溃/超时，最终 attempts>=3 被误杀）。
- * - lease_expires_at 的真实用途是回收「崩溃/失联 worker 的孤儿 job」，而非
- *   惩罚仍在合法执行的长任务。reaper 依赖「到期即死」前提：只有租约时长足以
- *   覆盖最坏情况管道时长，reaper 才能把「租约过期」等同于「worker 失联」。
- * - 代价：崩溃后孤儿最长需 30min 才能被 reaper 回收（对比主队列的指数退避 + 
- *   started_at 双窗口）。主队列有退避 + handler 超时护栏，V2 两条都没有；
- *   在补上 handler 级超时（#26）之前，放大租约是唯一能同时避免「误杀正常 job」
- *   的简便手段。V2 当前未激活（CARD_GENERATION_V2_LLM != "true" 走确定性快路径），
- *   实时风险低；激活前应再评估「阶段间续租」或「接入 handler 超时」。
+ * 仍保留 30 分钟的宽窗口作为启动/连接故障的兜底，同时 processV2OutboxJob
+ * 会在管道执行期间周期续租。这样慢速但正常的 planner→author→grounding→pedagogy
+ * 不会被 reaper 误回收，worker 真正失联时仍可由 lease 过期触发回收。
+ * 120s 一次性租约在没有 heartbeat 时会在正常 job 跑完前过期，reaper 会把它
+ * 误回收并发重跑整管道；因此这里采用“长窗口 + heartbeat + token CAS”的组合。
+ * lease_expires_at 的真实用途是回收「崩溃/失联 worker 的孤儿 job」，而非惩罚
+ * 仍在合法执行的长任务；token CAS 防止过期后迟到的结果覆盖新 owner。
+ * 代价是 heartbeat 不可用时崩溃后的孤儿最长需 30min 才能被 reaper 回收；正常
+ * 路径则会持续续租。
+ *
+ * 2026-09-15（评审 M1）：租约窗口不再被当作"job 最长时长"的同义词——阶段级护栏
+ * 由 `V2_PIPELINE_BUDGET_MS`（默认 20min，严格小于本窗口）承担：预算到期会
+ * abort 在途 LLM 调用并把 job 终结为 failed（不重试），因此正常路径不可能撑满
+ * 30min 租约窗口。
  */
 export const V2_OUTBOX_LEASE_TIMEOUT_MS = 30 * 60_000;
+
+/**
+ * 单个 V2 job 的**墙钟预算**（阶段级护栏，评审 M1）。
+ *
+ * 20 卡上限时理论最坏 ≈ planner 1 + author ≤20 + grounding ≤20 + pedagogy 1 +
+ * bounded repair ≤20 ≈ 62 次调用 × 单调用 75s ≈ 77min，远超 30min 租约窗口；
+ * 此前没有任何阶段级预算，只能靠租约心跳兜底（心跳依赖 DB 可用，DB 故障时
+ * 租约静默流失）。本预算在到期时 abort 整个 job 的 LLM 调用并把 job 直接终结
+ * 为 failed（**不重试**——重试会把同样的钱再花一遍），run 落 needs_attention
+ * 并带可解释原因。
+ *
+ * 默认 20min：足够覆盖正常 20 卡管道，同时严格小于 30min 租约窗口。
+ * 可经 V2_PIPELINE_BUDGET_MS 覆盖。
+ */
+export const V2_PIPELINE_BUDGET_MS = (() => {
+  const raw = Number(process.env.V2_PIPELINE_BUDGET_MS ?? 20 * 60_000);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  logger.warn(
+    { raw: process.env.V2_PIPELINE_BUDGET_MS },
+    "V2_PIPELINE_BUDGET_MS 非法，回退 20min",
+  );
+  return 20 * 60_000;
+})();
+
+/**
+ * 租约续租（= 租约丢失探测）间隔。
+ *
+ * H5（2026-09-15 评审）：此前为 `lease/3 = 10min`——租约一旦被 reaper 回收，
+ * 最坏 10min 后才发现，期间每个在途/后续 LLM 调用都是纯损失（单调用最长 75s）。
+ * 收紧到 2min（仍远小于 30min 租约，留足抖动余量），把"租约已丢但仍在烧钱"
+ * 的窗口从分钟级降到 2min。每次续租只是一条 `UPDATE ... WHERE id AND lease_token`
+ * （走主键），开销可忽略。
+ */
+export const V2_LEASE_RENEWAL_INTERVAL_MS = (() => {
+  const raw = Number(process.env.V2_LEASE_RENEWAL_INTERVAL_MS ?? 120_000);
+  if (Number.isFinite(raw) && raw >= 5_000 && raw < V2_OUTBOX_LEASE_TIMEOUT_MS) return raw;
+  return 120_000;
+})();
+
+/**
+ * V2 outbox 的进程内并发上限。
+ *
+ * poll 是被主 worker tick 周期调用的；单次 poll 超时后，已经认领的管道仍会
+ * 在后台继续执行。因此只限制单次 claim 不够，必须把仍在运行的管道纳入全局
+ * inflight 计数，否则每个 tick 都能再认领一批，最终打满 DB/provider 连接池。
+ */
+export const V2_OUTBOX_MAX_CONCURRENCY = (() => {
+  const raw = Number(process.env.V2_OUTBOX_MAX_CONCURRENCY ?? 4);
+  if (Number.isInteger(raw) && raw > 0 && raw <= 64) return raw;
+  logger.warn(
+    { raw: process.env.V2_OUTBOX_MAX_CONCURRENCY },
+    "V2_OUTBOX_MAX_CONCURRENCY 非法，回退 4",
+  );
+  return 4;
+})();
+
+const v2Inflight = new Set<Promise<void>>();
+
+/**
+ * V2 管线**阶段内**并发上限（2026-09-17 极限延迟改造）。
+ *
+ * author 与 grounding 都是逐候选调用 provider：候选之间无数据依赖，串行时墙钟
+ * = N × 单次调用（dev 实测 N=5 时 12 次调用 93.1s ≈ 端到端 93.7s）。
+ * 改为有界并发后墙钟 = ceil(N / 本值) × 单次调用。
+ *
+ * 默认 12：**不惜成本换墙钟** —— 服务端卡上限 `SERVER_POLICY_MAX_CARDS` 是 20，
+ * 取 12 让绝大多数 run（实测 planner 产出 5 个目标）一波跑完；N>12 时才分批。
+ * 取值过大会把 provider 打满触发 429，反而因退避更慢；实测 6 并发无任何限流，
+ * 12 为在"一波跑完"与"provider 压力"之间的取值。可经 V2_STAGE_CONCURRENCY 覆盖
+ * （1–32）。
+ */
+/**
+ * 是否启用**投机 pedagogy**（与 grounding 波并发）。
+ *
+ * 2026-09-17：作为可关的开关保留，用于同窗口 A/B 对照——该改动的收益依赖
+ * "grounding/去重是否淘汰候选"（淘汰则投机报告作废、要多付一次调用），
+ * 必须在同一 provider 窗口内对照才能判断，不能靠跨窗口的绝对秒数。
+ */
+export const V2_SPECULATIVE_PEDAGOGY = process.env.V2_SPECULATIVE_PEDAGOGY !== "0";
+
+export const V2_STAGE_CONCURRENCY = (() => {
+  const raw = Number(process.env.V2_STAGE_CONCURRENCY ?? 12);
+  if (Number.isInteger(raw) && raw > 0 && raw <= 32) return raw;
+  logger.warn(
+    { raw: process.env.V2_STAGE_CONCURRENCY },
+    "V2_STAGE_CONCURRENCY 非法，回退 12",
+  );
+  return 12;
+})();
+
+export function getV2OutboxInflightCount(): number {
+  return v2Inflight.size;
+}
+
+/** 等待当前 worker 已认领的 V2 管道结束；返回是否在 deadline 内排空。 */
+export async function waitForV2OutboxDrain(timeoutMs: number): Promise<boolean> {
+  if (v2Inflight.size === 0) return true;
+
+  const pending = Promise.allSettled([...v2Inflight]).then(() => true);
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timeoutHandle = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+  });
+  try {
+    return await Promise.race([pending, timeout]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
 
 /**
  * V2 poll 的总超时上界（对齐租约窗口）。
@@ -174,10 +289,12 @@ export async function claimV2OutboxJobs(limit = 1): Promise<PendingOutboxJob[]> 
     SET status = 'processing', processed_at = now(),
         started_at = now(),
         lease_token = gen_random_uuid(),
-        lease_expires_at = now() + make_interval(secs => ${V2_OUTBOX_LEASE_TIMEOUT_MS / 1000})
+        lease_expires_at = now() + make_interval(secs => ${V2_OUTBOX_LEASE_TIMEOUT_MS / 1000}),
+        next_attempt_at = NULL
     WHERE id IN (
       SELECT id FROM public.card_generation_run_outbox_v2
       WHERE status = 'pending'
+        AND (next_attempt_at IS NULL OR next_attempt_at <= now())
       ORDER BY created_at
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
@@ -195,6 +312,40 @@ export async function claimV2OutboxJobs(limit = 1): Promise<PendingOutboxJob[]> 
 }
 
 /**
+ * 续租 V2 outbox job。返回 false 表示租约已被 reaper/其他 worker 接管；调用方
+ * 必须停止提交结果，不能把迟到的完成或失败写回他人的 lease。
+ */
+export async function renewV2OutboxLease(jobId: string, leaseToken: string): Promise<boolean> {
+  const rows = await db.execute<{ id: string }>(sql`
+    UPDATE public.card_generation_run_outbox_v2
+    SET lease_expires_at = now() + make_interval(secs => ${V2_OUTBOX_LEASE_TIMEOUT_MS / 1000})
+    WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
+      AND lease_expires_at > now()
+    RETURNING id
+  `);
+  return rows.length > 0;
+}
+
+/**
+ * Fence a V2 pipeline at the transaction boundary.  The lease update is part
+ * of the same transaction as the pipeline writes, so a reaper that won the
+ * token CAS makes the whole transaction roll back instead of leaving a late
+ * candidate/run mutation behind.
+ */
+async function fenceV2OutboxLease(tx: WorkerTransaction, job: PendingOutboxJob): Promise<void> {
+  const rows = await tx.execute<{ id: string }>(sql`
+    UPDATE public.card_generation_run_outbox_v2
+    SET lease_expires_at = now() + make_interval(secs => ${V2_OUTBOX_LEASE_TIMEOUT_MS / 1000})
+    WHERE id = ${job.id} AND status = 'processing' AND lease_token = ${job.leaseToken}
+      AND lease_expires_at > now()
+    RETURNING id
+  `);
+  if (rows.length === 0) {
+    throw new Error("V2 outbox lease lost before transaction commit");
+  }
+}
+
+/**
  * Mark outbox job as completed（status + lease 门闩）。
  * 仅当该行确系本次认领的 lease_token 且仍处于 processing 时才更新；否则
  * 表示租约已被 reaper 回收或移交给他人，迟到完成必须静默忽略。
@@ -205,6 +356,7 @@ export async function completeV2OutboxJob(jobId: string, leaseToken: string): Pr
     SET status = 'completed', processed_at = now(),
         started_at = NULL, lease_token = NULL, lease_expires_at = NULL
     WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
+      AND lease_expires_at > now()
   `);
 }
 
@@ -232,50 +384,66 @@ export async function failV2OutboxJob(
   leaseToken: string,
   error: string,
   retryable = true,
-  runId?: string | null,
-  workspaceId?: string | null,
 ): Promise<void> {
   if (!retryable) {
+    // Outbox 终态与 run 的 needs_attention 必须在同一 SQL 语句内完成。
+    // 若先成功释放 outbox lease、再单独 UPDATE run，第二步失败会留下
+    // “outbox=failed、run=planning/processing”的永久悬挂状态。
     await db.execute(sql`
-      UPDATE public.card_generation_run_outbox_v2
-      SET status = 'failed', attempts = attempts + 1, last_error = ${error},
-          started_at = NULL, lease_token = NULL, lease_expires_at = NULL
-      WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
+      WITH updated AS (
+        UPDATE public.card_generation_run_outbox_v2
+        SET status = 'failed', attempts = attempts + 1, last_error = ${error},
+            started_at = NULL, lease_token = NULL, lease_expires_at = NULL
+        WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
+          AND lease_expires_at > now()
+        RETURNING id, run_id, workspace_id
+      )
+      UPDATE public.card_generation_runs_v2 AS run
+      SET status = 'needs_attention', error_code = 'generation_failed', error_message = ${error},
+          updated_at = now()
+      FROM updated
+      WHERE updated.run_id = run.id
+        AND updated.workspace_id = run.workspace_id
+        AND run.status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
+                               'closed_without_activation', 'failed', 'cancelled', 'stale')
     `);
-    await markRunNeedsAttention(runId, workspaceId, error);
     return;
   }
-  const updated = await db.execute<{ status: string }>(sql`
-    UPDATE public.card_generation_run_outbox_v2
-    SET status = CASE
-      WHEN attempts >= 6 THEN 'failed'
-      ELSE 'pending'
-    END,
-    attempts = attempts + 1,
-    last_error = ${error},
-    started_at = NULL, lease_token = NULL, lease_expires_at = NULL
-    WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
-    RETURNING status
-  `);
-  if (updated[0]?.status === "failed") {
-    await markRunNeedsAttention(runId, workspaceId, error);
-  }
-}
-
-/** outbox 行到达终态 failed 后把仍处中间态的 run 置为 needs_attention 并写 error。 */
-async function markRunNeedsAttention(
-  runId: string | null | undefined,
-  workspaceId: string | null | undefined,
-  error: string,
-): Promise<void> {
-  if (!runId || !workspaceId) return;
+  // 与 reaper 保持同一语义：本次失败后 attempts + 1 达到 6 就终止，
+  // 不再让正常失败路径比崩溃回收路径多重试一次。
+  //
+  // 2026-09-15（管线评审 H1）：retryable 分支此前**无退避**——status 直接回
+  // pending，下一个 poll 立即重新认领并重放整条已付费的 LLM 管道（planner→
+  // author→grounding→pedagogy），429/5xx 时形成重试风暴。现在写入指数退避的
+  // 下次可认领时间：attempts=0..4 → 15s/30s/60s/120s/240s（封顶 300s）。
+  // 退避只改变排队时机，不改变 attempts 上限与 fail-closed 语义。
   await db.execute(sql`
-    UPDATE public.card_generation_runs_v2
+    WITH updated AS (
+      UPDATE public.card_generation_run_outbox_v2
+      SET status = CASE
+        WHEN attempts + 1 >= 6 THEN 'failed'
+        ELSE 'pending'
+      END,
+      attempts = attempts + 1,
+      next_attempt_at = CASE
+        WHEN attempts + 1 >= 6 THEN NULL
+        ELSE now() + make_interval(secs => LEAST(300, 15 * power(2, attempts))::int)
+      END,
+      last_error = ${error},
+      started_at = NULL, lease_token = NULL, lease_expires_at = NULL
+      WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
+        AND lease_expires_at > now()
+      RETURNING status, run_id, workspace_id
+    )
+    UPDATE public.card_generation_runs_v2 AS run
     SET status = 'needs_attention', error_code = 'generation_failed', error_message = ${error},
         updated_at = now()
-    WHERE id = ${runId} AND workspace_id = ${workspaceId}
-      AND status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
-                         'closed_without_activation', 'failed', 'cancelled', 'stale')
+    FROM updated
+    WHERE updated.status = 'failed'
+      AND updated.run_id = run.id
+      AND updated.workspace_id = run.workspace_id
+      AND run.status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
+                             'closed_without_activation', 'failed', 'cancelled', 'stale')
   `);
 }
 
@@ -283,11 +451,11 @@ async function markRunNeedsAttention(
  * Reap stale processing outbox jobs（孤儿回收）。
  * worker 崩溃/网络分区时 leasing job 永卡 processing，此函数把超期未更新的
  * processing 行收回复投。按 `lease_expires_at < now()` 判定过期（单窗口，租约
- * 到期即回收，与 claim 写入的 120s 租约及主队列 started_at 单窗口语义一致，
+ * 到期即回收，与 claim 写入的 30min 租约及主队列 started_at 单窗口语义一致，
  * 修复第三轮 W#2 的"双重减去"）。
  *
  * 回收语义对齐主队列 0105 `ailearn_reap_stale_jobs`（修复第三轮 W#1）：每次
- * 回收都 `attempts = attempts + 1`；回收后即达重试上限（attempts >= 3）的行
+ * 回收都 `attempts = attempts + 1`；回收后即达重试上限（attempts + 1 >= 6）的行
  * 转 `failed`（不再无限重投，崩溃路径也计入重试上限）；否则重置回 `pending`
  * 并清空租约三列（started_at / lease_token / lease_expires_at），供重新认领。
  *
@@ -299,41 +467,81 @@ async function markRunNeedsAttention(
  * 返回被回收（重置/转失败）的行数。
  */
 export async function reapStaleV2OutboxJobs(limit = 100): Promise<number> {
-  const rows = await db.execute(sql`
-    UPDATE public.card_generation_run_outbox_v2
-    SET status = CASE
-        WHEN attempts + 1 >= 6 THEN 'failed'
-        ELSE 'pending'
-      END,
-        attempts = attempts + 1,
-        started_at = NULL, lease_token = NULL, lease_expires_at = NULL,
-        processed_at = NULL
-    WHERE id IN (
-      SELECT id FROM public.card_generation_run_outbox_v2
-      WHERE status = 'processing'
-        AND lease_expires_at < now()
-      ORDER BY created_at
-      LIMIT ${limit}
-      FOR UPDATE SKIP LOCKED
+  const rows = await db.execute<{
+    id: string;
+    run_id: string;
+    workspace_id: string;
+    status: string;
+  }>(sql`
+    WITH reaped AS (
+      UPDATE public.card_generation_run_outbox_v2
+      SET status = CASE
+          WHEN attempts + 1 >= 6 THEN 'failed'
+          ELSE 'pending'
+        END,
+          attempts = attempts + 1,
+          -- H1（2026-09-15）：回收重投同样退避，避免崩溃恢复时多个孤儿 job
+          -- 在同一个 tick 被立即重领并同时重放整条 LLM 管道。
+          next_attempt_at = CASE
+            WHEN attempts + 1 >= 6 THEN NULL
+            ELSE now() + make_interval(secs => LEAST(300, 15 * power(2, attempts))::int)
+          END,
+          started_at = NULL, lease_token = NULL, lease_expires_at = NULL,
+          processed_at = NULL
+      WHERE id IN (
+        SELECT id FROM public.card_generation_run_outbox_v2
+        WHERE status = 'processing'
+          AND lease_expires_at < now()
+        ORDER BY created_at
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING id, run_id, workspace_id, status
+    ), marked AS (
+      UPDATE public.card_generation_runs_v2 AS run
+      SET status = 'needs_attention', error_code = 'generation_failed',
+          error_message = 'V2 outbox lease expired', updated_at = now()
+      FROM reaped
+      WHERE reaped.status = 'failed'
+        AND reaped.run_id = run.id
+        AND reaped.workspace_id = run.workspace_id
+        AND run.status NOT IN ('review_ready', 'no_cards_recommended', 'activating', 'activated',
+                               'closed_without_activation', 'failed', 'cancelled', 'stale')
     )
-    RETURNING id
+    SELECT id, run_id, workspace_id, status FROM reaped
   `);
   return rows.length;
 }
 
 // ─── V2 Generation Pipeline Handler ──────────────────────────────────────
 
-/** 判别错误是否可重试（provider 5xx/429/408/超时 → retryable；schema/协议 → non-retryable）。 */
-function isNonRetryableErrorLike(error: unknown): boolean {
+/**
+ * 判别错误是否不可重试（provider 5xx/429/408/超时 → retryable；
+ * schema/协议/配置 → non-retryable）。
+ *
+ * 2026-09-17（实机事故修复）：除类实例的 `kind` 字段外，**同时**识别裸 Error 上
+ * 的 `retryable` 布尔。事故形态是 `providers.ts` 的 mock/未配置 provider
+ * fail-closed 抛出的 `Error`，只设置了 `retryable = false`、没有 `kind`——
+ * 本函数此前只读 `kind`，于是这个显式标记为"不可重试"的配置错误被当成可重试：
+ * outbox 退避重试 6 次（15/30/60/120/240s，实测 7m45s 墙钟）、期间零 LLM 调用，
+ * 用户只看到长时间"生成中"然后 needs_attention。两种形状都必须被尊重，
+ * 否则"显式标注不可重试"这件事在读取侧形同虚设。
+ *
+ * 已导出供单测直接覆盖（此前是模块私有函数，分类错误无法被测试捕获）。
+ */
+export function isNonRetryableErrorLike(error: unknown): boolean {
   // 本地可分类错误（CardGenerationProviderErrorLike 携带 `retryable` 布尔）。
   if (error instanceof CardGenerationProviderErrorLike) return !error.retryable;
   // providers.ts（独立模块，避免循环依赖）抛出的 CardGenerationProviderError：
-  // 其 `kind` ∈ {"retryable","non-retryable"}；同时兼容旧式 `retryable === false`。
+  // 类实例走 `kind`；历史/裸 Error 形态走 `retryable`。两者都给出明确结论时
+  // 以 `kind` 为准（它是 canonical 形状）。
   if (typeof error === "object" && error !== null) {
-    const e = error as { name?: string; kind?: string; retryable?: boolean };
+    const e = error as { name?: string; kind?: string; retryable?: unknown };
     if (e.name === "CardGenerationProviderError") {
       if (e.kind === "non-retryable") return true;
+      if (e.kind === "retryable") return false;
       if (e.retryable === false) return true;
+      if (e.retryable === true) return false;
     }
   }
   // 2026-08-25（AI 设计审计修复）：shared 纯逻辑抛的领域错误（seal/binding
@@ -376,24 +584,76 @@ function simplifiedReportHash(fields: Record<string, unknown>): string {
 
 /**
  * 处理 V2 outbox job 的主入口。根据 jobType 分发到对应的处理函数。
+ *
+ * 2026-09-15（管线评审 H5/M1）：本函数持有一个 job 级的 AbortController——
+ * 1. 租约丢失（renew 失败 = 已被 reaper 回收或移交给他人）时立即 abort：
+ *    此前只置 `leaseLost` 标志，管道不做任何中途检查，已开始的 LLM 调用序列
+ *    照常跑完（单调用最长 75s），最后 fence CAS 抛错回滚事务——DB 副作用被保护，
+ *    但**全部 LLM 成本副作用已经损失**，且重投后新 owner 再跑一遍。现在 abort
+ *    会让后续每次 chatJson 立即失败、阶段边界立即退出（`isRetryableProviderError`
+ *    路径不再产生新调用），把不可回滚的成本损失压到最小。
+ * 2. 墙钟预算（`V2_PIPELINE_BUDGET_MS`）到期同样 abort，并把 job 直接终结为
+ *    failed（不重试：重试只会把同样的钱再花一遍），run → needs_attention。
+ *
+ * `signal` 会被透传到四个阶段的 provider 调用与逐候选循环。
  */
 export async function processV2OutboxJob(job: PendingOutboxJob): Promise<void> {
   logger.info({ jobId: job.id, runId: job.runId, jobType: job.jobType }, "V2 outbox job processing");
 
   let retryable = true;
+  let leaseLost = false;
+  let budgetExhausted = false;
+  const abortController = new AbortController();
+  const pipelineSignal = abortController.signal;
+  const budgetTimer = setTimeout(() => {
+    budgetExhausted = true;
+    logger.warn(
+      { jobId: job.id, runId: job.runId, budgetMs: V2_PIPELINE_BUDGET_MS },
+      "V2 pipeline wall-clock budget exhausted; aborting remaining LLM calls (terminal, no retry)",
+    );
+    abortController.abort(new Error(`V2 pipeline budget exhausted after ${V2_PIPELINE_BUDGET_MS}ms`));
+  }, V2_PIPELINE_BUDGET_MS);
+  budgetTimer.unref?.();
+
+  const leaseRenewal = async (): Promise<void> => {
+    try {
+      const renewed = await renewV2OutboxLease(job.id, job.leaseToken);
+      if (!renewed) {
+        leaseLost = true;
+        // H5：租约丢失 = 结果已被他人接管，继续执行只会烧钱。立即中止在途/后续调用。
+        abortController.abort(new Error("V2 outbox lease lost"));
+        logger.warn(
+          { jobId: job.id, runId: job.runId },
+          "V2 outbox lease was lost; aborting remaining LLM calls (late result suppressed)",
+        );
+      }
+    } catch (error) {
+      // 短暂 DB 故障不要立刻放弃；下一次 heartbeat 会重试。若租约实际过期，
+      // 最后的 complete/fail 仍由 status+lease_token CAS 拦截。
+      logger.warn(
+        { jobId: job.id, runId: job.runId, error: sanitizeOperationalError(error) },
+        "V2 outbox lease renewal failed",
+      );
+    }
+  };
+  const renewalTimer = setInterval(() => {
+    void leaseRenewal();
+  }, V2_LEASE_RENEWAL_INTERVAL_MS);
+  renewalTimer.unref?.();
+
   try {
     switch (job.jobType) {
       case "card_generation_plan":
-        await processCardGenerationPlan(job);
+        await processCardGenerationPlan(job, pipelineSignal);
         break;
       case "card_generation_regenerate_candidate":
-        await processRegenerateCandidateJob(job);
+        await processRegenerateCandidateJob(job, pipelineSignal);
         break;
       case "card_generation_replan_set":
-        await processReplanSetJob(job);
+        await processReplanSetJob(job, pipelineSignal);
         break;
       case "card_generation_recheck_candidate":
-        await processRecheckCandidateJob(job);
+        await processRecheckCandidateJob(job, pipelineSignal);
         break;
       case "card_v2_post_activation":
         // §17.5 step 17：outbox 异步投影消费——按 receiptId 幂等对账
@@ -406,17 +666,76 @@ export async function processV2OutboxJob(job: PendingOutboxJob): Promise<void> {
         // §17.1：未知 jobType → 失败（不得静默 complete）。
         throw new CardGenerationProviderErrorLike(false, `unknown V2 outbox job type: ${job.jobType}`);
     }
+
+    await leaseRenewal();
+    if (leaseLost) return;
     await completeV2OutboxJob(job.id, job.leaseToken);
   } catch (error) {
-    retryable = isRetryableProviderError(error);
+    if (leaseLost) return;
     const message = sanitizeOperationalError(error);
+    if (budgetExhausted) {
+      // M1：预算耗尽 = 确定性终止。重试会把同样的模型费用再花一遍，且必然
+      // 同样超时，因此 non-retryable 直接终结（run → needs_attention）。
+      logger.error(
+        { jobId: job.id, runId: job.runId, error: message, budgetMs: V2_PIPELINE_BUDGET_MS },
+        "V2 outbox job terminated: pipeline wall-clock budget exhausted",
+      );
+      await failV2OutboxJob(
+        job.id,
+        job.leaseToken,
+        `V2 pipeline wall-clock budget exhausted after ${V2_PIPELINE_BUDGET_MS}ms (terminal, not retried)`,
+        false,
+      );
+      return;
+    }
+    retryable = isRetryableProviderError(error);
+    if (pipelineSignal.aborted && retryable) {
+      // 调用方主动 abort（非预算）：不作为可重试失败回队列，直接按 non-retryable
+      // 终结，避免"被取消的管道"立刻重放一遍完整 LLM 序列。
+      retryable = false;
+    }
     if (process.env.V2_E2E_DEBUG_ERRORS === "1") {
       // eslint-disable-next-line no-console
       console.error("V2_JOB_DEBUG", job.jobType, job.runId, (error as Error)?.stack ?? String(error));
     }
     logger.error({ jobId: job.id, runId: job.runId, error: message, retryable }, "V2 outbox job failed");
-    await failV2OutboxJob(job.id, job.leaseToken, message, retryable, job.runId, job.workspaceId);
+    await failV2OutboxJob(job.id, job.leaseToken, message, retryable);
+  } finally {
+    clearInterval(renewalTimer);
+    clearTimeout(budgetTimer);
   }
+}
+
+/**
+ * 阶段边界的中止检查（H5/M1）：在开始下一批付费调用之前确认调用方仍在等结果。
+ *
+ * provider 侧也会在看到已 abort 的 signal 时立即失败；此处的显式检查保证
+ * **不再发起新的调用**（而不是发出后再中止），把成本损失压到最小。
+ */
+function throwIfPipelineAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  throw reason instanceof Error ? reason : new Error("V2 pipeline aborted by caller");
+}
+
+/**
+ * L1（2026-09-15 管线评审）：确定性 provider 只允许用于离线/测试路径。
+ *
+ * 生产环境里 V2 已启用但 `CARD_GENERATION_V2_LLM != "true"` 属于配置漂移：
+ * 确定性 grounding 契约只校验"候选引用的证据 ID 都在 manifest 内"，不校验内容
+ * 与证据的对应关系，会静默放行低质候选。此护栏与 `buildCardGenerationProviders`
+ * 的"LLM 模式解析到 mock 即 fail-fast"方向对称：生产必须显式配置 LLM，
+ * 或显式豁免离线模式（V2_ALLOW_DETERMINISTIC_PROVIDERS=1）。
+ */
+function assertDeterministicProvidersAllowed(useLLM: boolean): void {
+  if (useLLM) return;
+  if (process.env.NODE_ENV !== "production") return;
+  if (process.env.V2_ALLOW_DETERMINISTIC_PROVIDERS === "1") return;
+  throw new CardGenerationProviderErrorLike(
+    false,
+    "card-generation-v2 deterministic providers are not allowed in production: "
+    + "set CARD_GENERATION_V2_LLM=true (LLM pipeline) or V2_ALLOW_DETERMINISTIC_PROVIDERS=1 (explicit offline override)",
+  );
 }
 
 // ─── Post-Activation Projection Consumer（§17.5 step 17，R33）─────────────
@@ -441,30 +760,49 @@ export async function processV2OutboxJob(job: PendingOutboxJob): Promise<void> {
  * 验证，与主管线一致）。
  */
 async function processPostActivationProjection(job: PendingOutboxJob): Promise<void> {
-  // R33：payload 兼容两种落库形状——对象（drizzle insert）或 jsonb 字符串
-  //（直接 postgres-js + ::jsonb 双编码路径）；统一归一化后校验。
-  let rawPayload: unknown = job.payload;
-  if (typeof rawPayload === "string") {
+  // R33：payload 兼容两种落库形状——对象（drizzle insert）或 **jsonb 字符串**
+  // （直接 postgres-js + `::jsonb` 的双编码路径）。归一化必须在结构校验**之前**：
+  // 否则一次可正常消费的任务会被判成"结构错误"、以**非重试**失败固化下来
+  // （实测 R33 用例即此路径：期望的失败原因是"台账里找不到 receipt"，而不是
+  // "payload 不是对象"）。
+  let normalizedPayload: unknown = job.payload;
+  if (typeof normalizedPayload === "string") {
     try {
-      rawPayload = JSON.parse(rawPayload);
+      normalizedPayload = JSON.parse(normalizedPayload);
     } catch {
-      rawPayload = {};
+      normalizedPayload = null;
     }
   }
-  const payload = (rawPayload ?? {}) as { runId?: string; workspaceId?: string; receiptId?: string };
-  if (!payload.workspaceId || !payload.runId || !payload.receiptId) {
+  if (normalizedPayload === null || typeof normalizedPayload !== "object" || Array.isArray(normalizedPayload)) {
+    throw new CardGenerationProviderErrorLike(
+      false,
+      `card_v2_post_activation payload must be an object: ${JSON.stringify(job.payload)}`,
+    );
+  }
+  const rawPayload = normalizedPayload as Record<string, unknown>;
+  const runId = rawPayload.runId;
+  const workspaceId = rawPayload.workspaceId;
+  const receiptId = rawPayload.receiptId;
+  if (
+    typeof workspaceId !== "string"
+    || typeof runId !== "string"
+    || typeof receiptId !== "string"
+    || workspaceId.length === 0
+    || runId.length === 0
+    || receiptId.length === 0
+  ) {
     throw new CardGenerationProviderErrorLike(
       false,
       `card_v2_post_activation payload missing fields: ${JSON.stringify(job.payload)}`,
     );
   }
   await withWorkerWorkspaceTransaction(
-    { workspaceId: payload.workspaceId, userId: null },
+    { workspaceId, userId: null },
     async (tx) => {
       // 1. 幂等：台账已存在 → 已完成消费。
       const existing = await tx.execute(sql`
         SELECT id FROM public.card_generation_post_activation_consumptions
-        WHERE workspace_id = ${payload.workspaceId} AND receipt_id = ${payload.receiptId}
+        WHERE workspace_id = ${workspaceId} AND receipt_id = ${receiptId}
         LIMIT 1
       `);
       if (existing.length > 0) return;
@@ -472,13 +810,13 @@ async function processPostActivationProjection(job: PendingOutboxJob): Promise<v
       // 2. receipt 必须存在。
       const receiptRows = await tx.execute(sql`
         SELECT mappings FROM public.card_activation_receipts_v2
-        WHERE workspace_id = ${payload.workspaceId} AND receipt_id = ${payload.receiptId}
+        WHERE workspace_id = ${workspaceId} AND receipt_id = ${receiptId}
         LIMIT 1
       `);
       if (receiptRows.length === 0) {
         throw new CardGenerationProviderErrorLike(
           false,
-          `post-activation receipt not found: ${payload.receiptId}`,
+          `post-activation receipt not found: ${receiptId}`,
         );
       }
       const mappings = (receiptRows[0] as { mappings: unknown }).mappings as Array<{
@@ -492,7 +830,7 @@ async function processPostActivationProjection(job: PendingOutboxJob): Promise<v
         // 返 retryable 让 job 回 pending 限次重投，避免一次性 failed 固化瞬时不一致。
         throw new CardGenerationProviderErrorLike(
           true,
-          `post-activation receipt has no mappings (retryable): ${payload.receiptId}`,
+          `post-activation receipt has no mappings (retryable): ${receiptId}`,
         );
       }
       const cardIds = [...new Set(mappings.map((m) => m.cardId))];
@@ -505,7 +843,7 @@ async function processPostActivationProjection(job: PendingOutboxJob): Promise<v
       // 3. Card/Objective 存在性 + lifecycle 对账（shared topology）。
       const cardRows = await tx.execute(sql`
         SELECT card_id, lifecycle FROM public.learning_cards_v2
-        WHERE workspace_id = ${payload.workspaceId} AND card_id = ANY(${cardIdsLiteral}::uuid[])
+        WHERE workspace_id = ${workspaceId} AND card_id = ANY(${cardIdsLiteral}::uuid[])
       `);
       const cardById = new Map(
         cardRows.map((r) => {
@@ -531,7 +869,7 @@ async function processPostActivationProjection(job: PendingOutboxJob): Promise<v
 
       const objRows = await tx.execute(sql`
         SELECT objective_id, lifecycle FROM public.learning_objectives_v2
-        WHERE workspace_id = ${payload.workspaceId} AND objective_id = ANY(${objectiveIdsLiteral}::uuid[])
+        WHERE workspace_id = ${workspaceId} AND objective_id = ANY(${objectiveIdsLiteral}::uuid[])
       `);
       const objById = new Map(
         objRows.map((r) => {
@@ -558,20 +896,102 @@ async function processPostActivationProjection(job: PendingOutboxJob): Promise<v
         INSERT INTO public.card_generation_post_activation_consumptions
           (workspace_id, run_id, receipt_id, card_ids, objective_ids,
            reconciled_card_count, reconciled_objective_count, personal_projection_writes)
-        VALUES (${payload.workspaceId}, ${payload.runId}, ${payload.receiptId},
+        VALUES (${workspaceId}, ${runId}, ${receiptId},
                 ${cardIdsLiteral}::uuid[], ${objectiveIdsLiteral}::uuid[],
                 ${cardIds.length}, ${objectiveIds.length}, 0)
         ON CONFLICT (workspace_id, receipt_id) DO NOTHING
       `);
       logger.info(
-        { jobId: job.id, runId: job.runId, receiptId: payload.receiptId, cardCount: cardIds.length, objectiveCount: objectiveIds.length },
+        { jobId: job.id, runId: job.runId, receiptId, cardCount: cardIds.length, objectiveCount: objectiveIds.length },
         "V2 post-activation projection consumed (idempotent ledger written)",
       );
+      await fenceV2OutboxLease(tx, job);
     },
   );
 }
 
 // ─── Sealed Evidence Loader ──────────────────────────────────────────────
+
+/**
+ * 单条证据文本进入 prompt 的字符上限（评审 M7）。
+ *
+ * Grounding 阶段每个候选都会携带**全部**证据引文，token 成本为
+ * O(candidates × evidence)；不分块/不设上限时大笔记会直接顶穿模型上下文。
+ * 上限只作用于**prompt 呈现**，sealed 证据本身的哈希/偏移/闭包不受影响
+ * （quoteHash 仍来自完整切片）。
+ */
+export const V2_EVIDENCE_QUOTE_MAX_CHARS = (() => {
+  const raw = Number(process.env.V2_EVIDENCE_QUOTE_MAX_CHARS ?? 2_000);
+  return Number.isInteger(raw) && raw > 0 ? raw : 2_000;
+})();
+
+/**
+ * 每 job 全部证据文本的合计上限（评审 M7）：按 blockId 顺序累计，超出的引文
+ * 截断到剩余额度（额度耗尽则为空串），避免"证据数 × 单条上限"仍然爆炸。
+ */
+export const V2_EVIDENCE_TOTAL_MAX_CHARS = (() => {
+  const raw = Number(process.env.V2_EVIDENCE_TOTAL_MAX_CHARS ?? 40_000);
+  return Number.isInteger(raw) && raw > 0 ? raw : 40_000;
+})();
+
+/** 源文本（scoped note join）进入 author prompt 的字符上限（评审 M7）。 */
+export const V2_SOURCE_CONTENT_MAX_CHARS = (() => {
+  const raw = Number(process.env.V2_SOURCE_CONTENT_MAX_CHARS ?? 60_000);
+  return Number.isInteger(raw) && raw > 0 ? raw : 60_000;
+})();
+
+/**
+ * 源文本规模上限（M7）：超限时截断并显式告警（不静默）。
+ *
+ * 原注释自认"大笔记可达数十万字符"且"激活前须为源文本设规模上限或分块"——
+ * 本函数兑现该上限：单 job 的内存峰值与 prompt token 规模被钉住。
+ */
+export function capSourceContentForPrompts(
+  sourceContent: string,
+  workspaceId: string,
+): { content: string; truncated: boolean } {
+  if (sourceContent.length <= V2_SOURCE_CONTENT_MAX_CHARS) {
+    return { content: sourceContent, truncated: false };
+  }
+  logger.warn(
+    {
+      workspaceId,
+      sourceLength: sourceContent.length,
+      limit: V2_SOURCE_CONTENT_MAX_CHARS,
+    },
+    "V2 source content truncated for prompts (规模上限，防止 token/内存峰值)",
+  );
+  return { content: sourceContent.slice(0, V2_SOURCE_CONTENT_MAX_CHARS), truncated: true };
+}
+
+/** 证据文本规模上限（M7）：逐条 + 合计双上限，超限时告警。 */
+function capEvidenceTextForPrompts(
+  evidence: SealedEvidenceEntryV2[],
+  workspaceId: string,
+): void {
+  let remaining = V2_EVIDENCE_TOTAL_MAX_CHARS;
+  let truncated = 0;
+  for (const entry of evidence) {
+    const text = entry.content ?? "";
+    const perEntry = text.slice(0, V2_EVIDENCE_QUOTE_MAX_CHARS);
+    const allowed = Math.max(0, Math.min(perEntry.length, remaining));
+    if (allowed < text.length) truncated += 1;
+    entry.content = perEntry.slice(0, allowed);
+    remaining -= allowed;
+  }
+  if (truncated > 0) {
+    logger.warn(
+      {
+        workspaceId,
+        truncatedEntries: truncated,
+        totalEntries: evidence.length,
+        perEntryLimit: V2_EVIDENCE_QUOTE_MAX_CHARS,
+        totalLimit: V2_EVIDENCE_TOTAL_MAX_CHARS,
+      },
+      "V2 evidence text truncated for prompts (规模上限，防止 O(candidates × evidence) token 膨胀)",
+    );
+  }
+}
 
 async function loadSealedEvidence(tx: WorkerTransaction, workspaceId: string, sourceSnapshotId: string) {
   const snapshotRows = (await tx.execute(sql`
@@ -620,10 +1040,32 @@ async function loadSealedEvidence(tx: WorkerTransaction, workspaceId: string, so
     const byId = new Map(blockRows.map((b) => [String(b.id), String(b.content ?? "")]));
     for (const e of evidence) {
       const blockText = byId.get(e.blockId) ?? "";
+      // AI P0-11（2026-09-15 审计）：seal 时写入的 block_content_hash / quote_hash
+      // 此前从未被重算。note_blocks.content 在 autosave 中是**原地 UPDATE**
+      // （apps/api/src/modules/note/service.ts:452-467）——block id 不变、正文可变，
+      // 于是"seal 之后、worker 读取之前"编辑笔记，会让**新正文配上旧 hash** 进入
+      // 制卡管道：grounding 的 evidence 闭包与落库的 evidenceSetHash 都声称是旧内容。
+      // 伴星路径（companion-grounded-evidence.ts:44-49）与 learning-runs Critic
+      // （run-critic.ts:364-369）都会在这里 throw；本路径此前是唯一缺口。
+      // 非重试：笔记已改，重放同一 snapshot 不会自愈，必须重新 seal。
+      if (hashCanonicalV2("block", { content: blockText }) !== e.blockContentHash) {
+        throw new CardGenerationProviderErrorLike(
+          false,
+          `sealed evidence block changed since seal (evidenceSnapshotId=${e.evidenceSnapshotId}, blockId=${e.blockId}): note edited after seal`,
+        );
+      }
       const start = Math.max(0, Number(e.startOffset ?? 0));
       const end = Math.min(blockText.length, Number(e.endOffset ?? blockText.length));
-      e.content = blockText.slice(start, end);
+      const quote = blockText.slice(start, end);
+      if (e.quoteHash && hashCanonicalV2("evidence-quote", { quote }) !== e.quoteHash) {
+        throw new CardGenerationProviderErrorLike(
+          false,
+          `sealed evidence quote changed since seal (evidenceSnapshotId=${e.evidenceSnapshotId}, blockId=${e.blockId})`,
+        );
+      }
+      e.content = quote;
     }
+    capEvidenceTextForPrompts(evidence, workspaceId);
   }
 
   const evidenceManifest: AssemblerEvidenceManifest = {
@@ -642,10 +1084,15 @@ async function loadSealedEvidence(tx: WorkerTransaction, workspaceId: string, so
 
 /**
  * 执行完整的 V2 四阶段生成管道。
+ *
+ * `signal`：job 级取消信号（租约丢失 / 墙钟预算耗尽）——透传到四个阶段的
+ * LLM 调用与逐候选循环（H5/M1）。
  */
-async function processCardGenerationPlan(job: PendingOutboxJob): Promise<void> {
+async function processCardGenerationPlan(job: PendingOutboxJob, signal?: AbortSignal): Promise<void> {
   const { workspaceId, runId } = job;
   const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
+  // L1（评审）：确定性 provider 只能用于离线/测试路径（见 helper 说明）。
+  assertDeterministicProvidersAllowed(useLLM);
 
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     // 1. Load run（FOR UPDATE 行锁：防止同 run 的双 job 并发跑完整 LLM 管道，
@@ -657,8 +1104,10 @@ async function processCardGenerationPlan(job: PendingOutboxJob): Promise<void> {
     //    regenerate/replan/recheck job 需阻塞等待该锁至提交。这是"串行化同 run"的
     //    W2 本意；**不在此拆分事务**——若把 LLM 调用移到事务外，会重新引入 TOCTOU
     //    （双 worker 并发看同一 run.status → 双份计费/双写终态），需重构为状态机
-    //    门闩（如 run.status 乐观 CAS，或租约 token）方能豁免。V2 当前未激活
-    //    （无生产写入），风险低；激活前必须评估「把 LLM 调用移出事务 + 状态机门闩」。
+    //    门闩（如 run.status 乐观 CAS，或租约 token）方能豁免。
+    //    2026-09-15（管线评审 H4 部分缓解）：事务结构未变（见上），但新增了两条
+    //    硬边界——job 级墙钟预算（V2_PIPELINE_BUDGET_MS，到期 abort 并终结）与
+    //    租约丢失即时 abort（H5），使"分钟级长事务 + 行锁"的最坏占用有确定上界。
     //    ──────────────────────────────────────────────────────────────────────
 const runRows = await tx.execute(sql`
       SELECT id, workspace_id, note_id, note_version_id, status, card_content_epoch,
@@ -728,11 +1177,15 @@ const blockRows = (await tx.execute(sql`
     const unsupportedSourceBlocks = blockRows
       .filter((b) => ["image", "code", "diagram", "formula", "table"].includes(String(b.type ?? "").toLowerCase()))
       .map((b) => ({ blockId: b.id, type: b.type, content: b.content, ordinal: b.ordinal }));
-    // ── 激活前评估（第四轮审计 #5）：整份 scoped note 的 source text join 成单
+    // ── M7（2026-09-15 管线评审）：整份 scoped note 的 source text join 成单
     //    sourceContent 字符串，并随 sealed evidence 一起贯穿四阶段 LLM 输入/内存。
-    //    大笔记可达数十万字符。当前 V2 未激活（确定性快路径），单 job 内存可控；
-    //    激活前须为源文本设规模上限或分块，避免 LLM 输入 token 超限 / 内存峰值。
-    const sourceContent = scopedBlocks.map((b) => b.content).join("\n");
+    //    历史上大笔记可达数十万字符且无上限——现在经 capSourceContentForPrompts
+    //    设硬上限（超限截断 + 告警），把单 job 内存峰值与 prompt token 规模钉住；
+    //    sealed 证据的哈希/偏移闭包不受影响（证据文本另有逐条 + 合计双上限）。
+    const sourceContent = capSourceContentForPrompts(
+      scopedBlocks.map((b) => b.content).join("\n"),
+      workspaceId,
+    ).content;
 
     // 4a. R35/§10.2：显式管线路由（light/standard）——判定 + 事件 + 观测。
     //     路由不改变质量要求（Grounding/Pedagogy 仍独立成立），只决定编排标记。
@@ -784,6 +1237,8 @@ const existingObjRows = (await tx.execute(sql`
       : null;
 
     // 5. Execute Planner
+    //    H5/M1：阶段边界检查——租约已丢失或预算已耗尽时不再发起新的付费调用。
+    throwIfPipelineAborted(signal);
     const plannerResult = await executePlanner({
       runId,
       workspaceId,
@@ -794,6 +1249,13 @@ const existingObjRows = (await tx.execute(sql`
       existingObjectives,
       clientHardMaxCards: inputSnapshot?.rawRequest?.quantity?.hardMaxCards,
       extractionProvider: useLLM && providers ? providers.plannerExtraction : undefined,
+      // M3：把 sealed 证据清单与取消信号交给 planner（prompt 中"从可用证据 ID
+      // 列表选择 evidenceRefIds"此前无从满足，existingObjectives 也恒为空）。
+      evidenceList: sealed.evidenceManifest.evidence.map((e) => ({
+        evidenceSnapshotId: e.evidenceSnapshotId,
+        quoteHash: e.quoteHash ?? null,
+      })),
+      signal,
     });
 
     // 6. Persist plan
@@ -837,20 +1299,32 @@ const existingObjRows = (await tx.execute(sql`
     if (plan.result.kind === "no_cards_recommended") {
       await tx.execute(sql`
         UPDATE public.card_generation_runs_v2
-        SET status = 'no_cards_recommended', updated_at = now()
+        SET status = 'no_cards_recommended', error_code = NULL, error_message = NULL, updated_at = now()
         WHERE id = ${runId} AND workspace_id = ${workspaceId}
       `);
       await insertEvent(tx, workspaceId, runId, "card_generation.no_cards_recommended", {
         reasonCodes: plan.result.reasonCodes,
       });
+      await fenceV2OutboxLease(tx, job);
       return;
     }
 
-    // 8. Execute Author（budget = plan.activationHardMax，不得扩大）
+    // 8+12. 按候选**流水线**执行 author → grounding（极限延迟改造）。
+    //
+    // 此前是两段独立的并发波：等**全部** author 完成 → 再发起 grounding 波，
+    // 墙钟 = max(author_i) + max(grounding_i)——每个波的**最慢**一次调用被各付一次。
+    // 现在每个候选自己串成一条链（author_i → precheck → grounding_i），候选之间
+    // 并发：墙钟 = max(author_i + grounding_i) ≤ max(author_i) + max(grounding_i)。
+    // 调用次数、输入数据、候选顺序完全不变；单次延迟方差越大（实测 p50 7s /
+    // p90 12s / max 37s）收益越明显。
+    //
+    // 注意：本阶段**只做 provider 调用与纯计算，不碰 tx**——所有落库、事件、
+    // 顺序判定仍由下面的串行收尾阶段按计划顺序完成（事务内语句顺序与改造前一致）。
+    throwIfPipelineAborted(signal);
     const authoringProvider: AuthoringProvider = useLLM && providers
       ? providers.author
       : new DeterministicAuthoringProvider();
-    const authorResult = await executeAuthor({
+    const authorInput = {
       runId,
       workspaceId,
       plan,
@@ -861,7 +1335,119 @@ const existingObjRows = (await tx.execute(sql`
         evidenceSnapshotId: e.evidenceSnapshotId,
         quoteHash: e.quoteHash ?? null,
       })),
-    });
+      // M2：sealed manifest 的 evidenceSetHash 是 candidateRevisionHash 的闭包
+      // 输入——由调用方给出，author-service 不再使用 provider 自报值。
+      evidenceSetHash: sealed.evidenceSetHash,
+      signal,
+      providerConcurrency: V2_STAGE_CONCURRENCY,
+    };
+    const pipelineAbort = new AbortController();
+    const pipelineSignal = signal ? AbortSignal.any([signal, pipelineAbort.signal]) : pipelineAbort.signal;
+    // §8.5：作者预算 = plan.activationHardMax（**不得扩大**）。超出预算会让
+    // deck gate 以 count_out_of_plan 硬失败整条 run——内容通过两道 critic 也交付不了。
+    const planObjectives = budgetedPlanObjectives(plan);
+    /**
+     * 投机 pedagogy 的启动器：**最后一个候选 author 一完成**就发起集合级调用，
+     * 与仍在跑的 grounding 波并发（关键路径 4 阶段 → 3 阶段）。
+     *
+     * 时机：pedagogy 需要"全部候选"，所以只能在最后一个 author 返回后启动；
+     * 此时各候选的 grounding 还在进行，因此它天然与 grounding 波重叠。
+     * 占位 bindingPlanHash 用 candidateRevisionHash（形状合法的不透明标识，
+     * 模型只当下标对应的引用读），复用前会被替换为真实值（withBindingPlanHashes）。
+     */
+    /**
+     * 按下标（= 计划顺序）收集已 author 的候选。
+     *
+     * 必须按**计划顺序**而不是"author 完成顺序"：mapWithConcurrency 的完成顺序是
+     * 乱的，而最终牌堆（grounding 通过 ∧ 去重后）是计划顺序。投机 pedagogy 的复用
+     * 守卫要求逐位相同，用完成顺序会让守卫**每次都失败**（实测：pedagogy 被调用两次、
+     * 墙钟反而变慢）——守卫本身是对的，错的是喂给它的序列。
+     */
+    const authoredByIndex: Array<LearningCardCandidateRevisionV2 | undefined> =
+      new Array(planObjectives.length);
+    let authoredCount = 0;
+    /**
+     * 与正常路径**同源**的 per-candidate soft precheck 信号。
+     * 投机调用必须拿到与"收尾阶段重新计算"完全一致的输入（同一个纯函数、
+     * 同一份候选与 sourceContent），否则复用路径与重跑路径的 pedagogy 输入不等价。
+     */
+    const softSignalsForPedagogy: Record<string, QualityIssue[]> = {};
+    let speculativePedagogy: Promise<SpeculativePedagogy | null> | null = null;
+    const startSpeculativePedagogy = (
+      judged: LearningCardCandidateRevisionV2[],
+    ): Promise<SpeculativePedagogy | null> => {
+      if (judged.length === 0) return Promise.resolve(null);
+      logger.info({ runId, candidateCount: judged.length }, "[v2-pipeline] pedagogy started speculatively (overlapping grounding)");
+      return runPedagogyCritic(
+        {
+          runId,
+          candidate: judged[0],
+          candidates: judged,
+          // 占位：真实 binding plan hash 只有在 grounding 之后才存在；复用路径会替换。
+          candidateEvidenceBindingPlanHashes: judged.map((c) => c.candidateRevisionHash),
+          existingObjectives: existingObjectives.map((o) => ({ objectiveId: o.objectiveId, objectiveStatement: o.objectiveStatement, publicSummary: o.publicSummary })),
+          softPrecheckIssues: { ...softSignalsForPedagogy },
+          plan: { planRevisionId: plan.planRevisionId, planVersion: plan.planVersion, planHash: plan.planHash },
+          inputHash: run.input_snapshot_hash,
+          generationRequest: semanticSpec.semanticRequest,
+          signal: pipelineSignal,
+        },
+        useLLM && providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
+      ).then(
+        (report) => ({ report, judgedCandidateIds: judged.map((c) => c.candidateId) }),
+        (error) => {
+          // 投机失败不改变语义：交给收尾阶段按最终集合正常调用（届时同样的错误会
+          // 以原有路径抛出/分类）。这里只记录，避免 unhandled rejection。
+          logger.warn({ runId, err: String(error) }, "[v2-pipeline] speculative pedagogy failed; will run after grounding");
+          return null;
+        },
+      );
+    };
+    const candidatePipelines = await mapWithConcurrency(
+      planObjectives,
+      V2_STAGE_CONCURRENCY,
+      async (planObj, index): Promise<CandidateGroundingOutcome> => {
+        throwIfPipelineAborted(signal);
+        const candidate = await authorCandidateForObjective(authorInput, planObj);
+        // M2：evidenceSetHash 闭包断言（与改造前一致：不一致即闭包断裂，fail-closed）。
+        if (candidate.evidenceSetHash !== sealed.evidenceSetHash) {
+          throw new CardGenerationProviderErrorLike(
+            false,
+            `candidate evidence set hash closure mismatch: candidate=${candidate.evidenceSetHash} sealed=${sealed.evidenceSetHash}`,
+          );
+        }
+        // precheck 在 author 之后、grounding 之前算（纯计算）——这样"最后一个 author
+        // 完成"时，全部候选的 soft 信号都已就绪，投机 pedagogy 的输入才与正常路径等价。
+        const precheck = buildCandidatePrecheck(candidate, sourceContent, sealed.evidenceManifest);
+        if (precheck.softPre.length > 0) {
+          softSignalsForPedagogy[candidate.candidateId] = precheck.softPre;
+        }
+        authoredByIndex[index] = candidate;
+        authoredCount += 1;
+        if (V2_SPECULATIVE_PEDAGOGY && authoredCount === planObjectives.length && !speculativePedagogy) {
+          speculativePedagogy = startSpeculativePedagogy(
+            authoredByIndex.filter((c): c is LearningCardCandidateRevisionV2 => c !== undefined),
+          );
+        }
+        return callGroundingCritic({
+          precheck,
+          sealed,
+          existingObjectives,
+          providers,
+          useLLM,
+          stageSignal: pipelineSignal,
+          // 可重试错误：abort 其余在途链（不再为注定回滚的 job 付费），
+          // 错误本身按候选顺序在收尾阶段抛出（语义与串行版本一致）。
+          onRetryableError: (error) => pipelineAbort.abort(error),
+          signal,
+        });
+      },
+    );
+    const candidates = candidatePipelines.map((outcome) => outcome.candidate);
+    const precomputedPedagogy = speculativePedagogy ? await speculativePedagogy : null;
+    const precomputedGrounding = new Map(
+      candidatePipelines.map((outcome) => [outcome.candidate.candidateRevisionId, outcome] as const),
+    );
 
     // 9. Update run status to authoring
     await tx.execute(sql`
@@ -873,52 +1459,20 @@ const existingObjRows = (await tx.execute(sql`
     logger.info({
       runId,
       stage: "author",
-      candidateCount: authorResult.candidates.length,
-      candidateIds: authorResult.candidates.map((c) => c.candidateId),
+      candidateCount: candidates.length,
+      candidateIds: candidates.map((c) => c.candidateId),
+      usage: providers?.usageTotals(),
     }, "[v2-pipeline] author completed");
 
-    // 10. Persist candidates + set evidenceSetHash（基于 sealed manifest）
-    const candidates = authorResult.candidates.map((c) => ({
-      ...c,
-      evidenceSetHash: sealed.evidenceSetHash,
-    }));
-    if (candidates.length > 0) {
-      // 批量 INSERT 全部候选（多行 VALUES），避免每候选一次 round-trip
-      await tx.execute(sql`
-        INSERT INTO public.card_generation_candidates_v2
-          (id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
-           plan_revision_id, plan_version, plan_hash, card_content_epoch,
-           plan_objective_local_id, recommendation, derived_from,
-           objective_draft, presentation_draft, evidence_set_hash,
-           candidate_revision_hash, quality_state, review_decision, publish_state)
-        VALUES ${sql.join(candidates.map((candidate) => sql`(
-          ${randomUUID()}, ${workspaceId}, ${runId},
-          ${candidate.candidateId}, ${candidate.candidateRevisionId}, ${candidate.revision},
-          ${candidate.planRevisionId}, ${candidate.planVersion}, ${candidate.planHash},
-          ${candidate.cardContentEpoch}, ${candidate.planObjectiveLocalId},
-          ${JSON.stringify(candidate.recommendation)}::jsonb,
-          ${JSON.stringify(candidate.derivedFromCandidateRevisions)}::jsonb,
-          ${JSON.stringify(candidate.objective)}::jsonb,
-          ${JSON.stringify(candidate.presentation)}::jsonb,
-          ${candidate.evidenceSetHash},
-          ${candidate.candidateRevisionHash},
-          'authored', 'undecided', 'unpublished'
-        )`), sql`, `)}
-      `);
-      // 批量写入 authored 事件（一次 MAX + 一次多行 INSERT）
-      await insertEventsBatched(tx, workspaceId, runId, candidates.map((candidate) => ({
-        eventType: "card_candidate.authored",
-        payload: {
-          candidateId: candidate.candidateId,
-          candidateRevisionId: candidate.candidateRevisionId,
-        },
-      })));
-    }
+    // 10. Persist candidates（计划顺序；PipelinedAuthoring 已在上面完成闭包断言）。
+    // 批量 INSERT + 批量 authored 事件（M8：主管线与 replan 共用同一 helper，
+    // 避免两条路径的写放大/事件语义再次漂移）。
+    await insertAuthoredCandidatesBatched(tx, workspaceId, runId, candidates);
 
     // 11. Update run status to checking
     await tx.execute(sql`
       UPDATE public.card_generation_runs_v2
-      SET status = 'checking', updated_at = now()
+      SET status = 'checking', error_code = NULL, error_message = NULL, updated_at = now()
       WHERE id = ${runId} AND workspace_id = ${workspaceId}
     `);
 
@@ -934,11 +1488,205 @@ const existingObjRows = (await tx.execute(sql`
       existingObjectives,
       providers,
       useLLM,
+      signal,
+      // 按候选流水线预计算的 grounding 结果：跳过本函数内部的 provider 波，
+      // 直接进入串行收尾（写入顺序/事件/判定完全不变）。
+      precomputedGrounding,
+      // 与 grounding 波并发算出的投机 pedagogy（集合未变则直接复用，省一个阶段）。
+      precomputedPedagogy,
+      // M4：用户 generation 请求（semanticRequest）进入 Pedagogy Critic（`goal_mismatch` 判定输入）。
+      generationRequest: semanticSpec.semanticRequest,
     });
+    await fenceV2OutboxLease(tx, job);
+    // M5：本次 job 执行的 LLM 用量汇总（成本审计；此前 result.usage 被整体丢弃，
+    // 系统无法回答"一个 run 实际花了多少 token"）。
+    if (providers) {
+      logger.info({
+        runId,
+        usage: providers.usageTotals(),
+      }, "[v2-pipeline] job LLM usage summary");
+    }
   });
 }
 
 // ─── Critic + Assembler + Deck Gate（§12-16，可复用于 regenerate/replan）────
+
+/**
+ * §10.1 step 8 Global Selector / Merge / Dedup（M6 接线）。
+ *
+ * 对已通过 grounding 的候选做全集合语义聚类（`computeSemanticClustersV2`：
+ * 规范化 statement token 集 Jaccard + 共享证据），每个 duplicate/mergeable 簇
+ * 只保留 **authoring 顺序最前** 的一个成员（确定性；authoring 顺序 = 计划顺序），
+ * 其余作为冗余候选交给调用方标记落选。
+ *
+ * 为什么必须在这里做：deck gate 的语义重复检查是 deck 级 hard issue，直接命中
+ * 会让整个 run 进 needs_attention——同主题多篇笔记（CJK 单字 token 集下
+ * Jaccard ≥0.85 极易触顶）会持续"烧完整条管道再整体失败"。去重是 §10.1 契约里
+ * step 8 的职责，deck gate 只应作为 backstop。
+ */
+export function selectDistinctCandidatesV2(
+  candidates: LearningCardCandidateRevisionV2[],
+): {
+  kept: LearningCardCandidateRevisionV2[];
+  dropped: Array<{
+    candidate: LearningCardCandidateRevisionV2;
+    relation: "duplicate" | "mergeable";
+    keptCandidateId: string;
+    clusterId: string;
+  }>;
+} {
+  if (candidates.length < 2) return { kept: candidates, dropped: [] };
+  const clusters = computeSemanticClustersV2(candidates);
+  const droppedByCandidateId = new Map<string, {
+    relation: "duplicate" | "mergeable";
+    keptCandidateId: string;
+    clusterId: string;
+  }>();
+  for (const cluster of clusters) {
+    if (cluster.relation === "distinct" || cluster.candidateIds.length < 2) continue;
+    const memberSet = new Set(cluster.candidateIds);
+    const orderedMemberIds = candidates
+      .filter((c) => memberSet.has(c.candidateId))
+      .map((c) => c.candidateId);
+    const [keepId, ...redundantIds] = orderedMemberIds;
+    if (!keepId) continue;
+    for (const id of redundantIds) {
+      droppedByCandidateId.set(id, {
+        relation: cluster.relation,
+        keptCandidateId: keepId,
+        clusterId: cluster.clusterId,
+      });
+    }
+  }
+  if (droppedByCandidateId.size === 0) return { kept: candidates, dropped: [] };
+  const kept = candidates.filter((c) => !droppedByCandidateId.has(c.candidateId));
+  const dropped = candidates
+    .filter((c) => droppedByCandidateId.has(c.candidateId))
+    .map((c) => ({
+      candidate: c,
+      ...(droppedByCandidateId.get(c.candidateId) as {
+        relation: "duplicate" | "mergeable";
+        keptCandidateId: string;
+        clusterId: string;
+      }),
+    }));
+  return { kept, dropped };
+}
+
+/**
+ * 单候选 grounding 阶段的产物（provider 调用结果 + precheck 信号，**未落库**）。
+ *
+ * 2026-09-17（极限延迟改造）：把它显式建模，使"调用 provider"与"写 DB"彻底分离——
+ * 前者可以按候选流水线/并发进行，后者必须在事务内按原顺序串行收尾。
+ */
+export interface CandidateGroundingOutcome {
+  candidate: LearningCardCandidateRevisionV2;
+  fatalPre: QualityIssue[];
+  softPre: QualityIssue[];
+  contract: Awaited<ReturnType<typeof runGroundingCritic>> | null;
+  error: unknown;
+}
+
+/** 投机 pedagogy 的产物：报告 + 它实际评审过的候选序列（守卫用）。 */
+export interface SpeculativePedagogy {
+  report: PedagogyCriticReportV2;
+  /** 评审时的候选顺序（candidateId）；与最终牌堆序列逐位比较，不同则重跑。 */
+  judgedCandidateIds: string[];
+}
+
+/**
+ * 投机 pedagogy 的复用守卫：**逐位相同**（含顺序）才允许复用。
+ *
+ * 为什么必须严格到顺序：pedagogy 的 perCandidate 判定与 `candidateRevisionHashes` /
+ * `candidateEvidenceBindingPlanHashes` 数组**按下标对应**（prompt 明说），集合相同
+ * 但顺序不同会把 verdict 挂到错误候选上。任何差异一律重跑，宁可贵一次调用。
+ */
+export function isSameCandidateSequence(judged: readonly string[], finalIds: readonly string[]): boolean {
+  if (judged.length !== finalIds.length) return false;
+  return judged.every((id, index) => id === finalIds[index]);
+}
+
+/**
+ * 把服务端真实 binding plan hashes 写回报告并重算 reportHash。
+ *
+ * 投机调用发生在 grounding 之前，此时 hash 尚不存在，prompt 里用的是占位值；
+ * 复用路径必须替换为真实值——`candidateEvidenceBindingPlanHashes` 是报告的冻结
+ * 字段之一，reportHash 必须绑定替换后的内容，否则审计闭包与真实输入不一致。
+ */
+export function withBindingPlanHashes(
+  report: PedagogyCriticReportV2,
+  bindingPlanHashes: string[],
+): PedagogyCriticReportV2 {
+  const { reportHash: _ignored, ...withoutHash } = report;
+  const next = { ...withoutHash, candidateEvidenceBindingPlanHashes: bindingPlanHashes };
+  return { ...next, reportHash: computePedagogyReportHash(next) };
+}
+
+/** 12.1 deterministic precheck（纯计算，无 IO）。 */
+export function buildCandidatePrecheck(
+  candidate: LearningCardCandidateRevisionV2,
+  sourceContent: string,
+  evidenceManifest: unknown,
+): { candidate: LearningCardCandidateRevisionV2; fatalPre: QualityIssue[]; softPre: QualityIssue[] } {
+  const precheckGating = runCandidateDeterministicGatesV2({
+    candidate,
+    evidenceManifest: evidenceManifest as never,
+  });
+  const groundingPre = deterministicGroundingPrecheck(candidate, sourceContent);
+  const pedagogyPre = deterministicPedagogyPrecheck(candidate, sourceContent);
+  const allPre = [...precheckGating, ...groundingPre, ...pedagogyPre];
+  return {
+    candidate,
+    fatalPre: allPre.filter((i) => i.severity === "hard"),
+    // 2026-08-25（AI 设计审计修复，§4.5 兑现注释承诺）：soft 信号不再算完
+    // 即弃——随 grounding 事件落审计面（排查误杀/漏检可取证），并注入
+    // Pedagogy Critic 的 per-candidate 输入作为风险参考。
+    softPre: allPre.filter((i) => i.severity === "soft"),
+  };
+}
+
+/**
+ * 12.2 grounding provider 调用（**纯网络，无 tx**）。
+ *
+ * 抽成独立函数是为了让主管线能在候选 i 的 author 一返回就调用它（按候选流水线），
+ * 同时 regenerate/recheck/replan 路径继续用并发波调用——两条路径共用同一份错误
+ * 分类语义：可重试错误交给 `onRetryableError`（调用方 abort 其余在途调用）后原样
+ * 返回，非重试错误也原样返回，由串行收尾阶段统一裁决。
+ */
+export async function callGroundingCritic(args: {
+  precheck: { candidate: LearningCardCandidateRevisionV2; fatalPre: QualityIssue[]; softPre: QualityIssue[] };
+  sealed: Awaited<ReturnType<typeof loadSealedEvidence>>;
+  existingObjectives: ExistingObjectiveRef[];
+  providers: Awaited<ReturnType<typeof buildProvidersForRun>> | null;
+  useLLM: boolean;
+  stageSignal: AbortSignal;
+  onRetryableError: (error: unknown) => void;
+  signal?: AbortSignal;
+}): Promise<CandidateGroundingOutcome> {
+  const { precheck, sealed, existingObjectives, providers, useLLM, stageSignal } = args;
+  const { candidate, fatalPre, softPre } = precheck;
+  // H5/M1：每个候选（= 一组新的 grounding/critic 付费调用）开始前的取消检查。
+  throwIfPipelineAborted(args.signal);
+  // 有 fatal precheck 的候选不发起调用（确定性失败，无需付费）。
+  if (fatalPre.length > 0) {
+    return { candidate, fatalPre, softPre, contract: null, error: null };
+  }
+  try {
+    const contract = useLLM && providers
+      ? await runGroundingCritic(
+          { candidate, evidenceManifest: sealed.evidenceManifest as never, existingObjectives, signal: stageSignal },
+          providers.grounding,
+        )
+      : await runDeterministicGroundingContract(candidate, sealed.evidenceManifest);
+    return { candidate, fatalPre, softPre, contract, error: null };
+  } catch (error) {
+    if (isRetryableProviderError(error)) {
+      // 立即止损：其余在途/排队调用看到 abort 后不再发起新请求。
+      args.onRetryableError(error);
+    }
+    return { candidate, fatalPre, softPre, contract: null, error };
+  }
+}
 
 /**
  * 对候选集执行：确定性 precheck → 独立 Grounding + binding plan → 独立 Pedagogy
@@ -960,6 +1708,24 @@ async function critiqueAndFinalizeCandidates(
     useLLM: boolean;
     /** Recheck must never create an unbounded chain of authored revisions. */
     allowBoundedRepair?: boolean;
+    /** H5/M1：job 级取消信号（租约丢失 / 墙钟预算耗尽）。 */
+    signal?: AbortSignal;
+    /** M4：用户 generation 请求（semanticRequest），透传给 Pedagogy Critic。 */
+    generationRequest?: unknown;
+    /**
+     * 2026-09-17（极限延迟改造）：调用方**按候选流水线**预计算的 grounding 结果
+     * （candidateRevisionId → outcome）。提供时本函数跳过 provider 调用阶段，
+     * 直接进入串行收尾——主管线用它在候选 i 的 author 完成后立即发起候选 i 的
+     * grounding，从而把 `max(author)+max(grounding)` 压成 `max(author+grounding)`。
+     * 未提供时行为与改造前一致（函数内部并发调用）。
+     */
+    precomputedGrounding?: Map<string, CandidateGroundingOutcome>;
+    /**
+     * 2026-09-17（极限延迟改造）：主管线在最后一个候选 author 完成时就发起的
+     * **投机 pedagogy**（与 grounding 波并发）。仅在"被评审序列 === 最终牌堆序列"
+     * 时复用；否则按最终集合重跑（见本函数 §13 的守卫）。
+     */
+    precomputedPedagogy?: SpeculativePedagogy | null;
   },
 ): Promise<void> {
   const {
@@ -974,6 +1740,8 @@ async function critiqueAndFinalizeCandidates(
     providers,
     useLLM,
     allowBoundedRepair = true,
+    signal,
+    generationRequest,
   } = input;
 
     // 12. Per-candidate critics + assembler + deterministic gates
@@ -992,36 +1760,84 @@ async function critiqueAndFinalizeCandidates(
     }> = [];
     const groundingEvents: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
 
-    for (const candidate of candidates) {
-      // 12.1 deterministic precheck（补充信号）
-      const precheckGating = runCandidateDeterministicGatesV2({
-        candidate,
-        evidenceManifest: sealed.evidenceManifest as never,
-      });
-      const groundingPre = deterministicGroundingPrecheck(candidate, sourceContent);
-      const pedagogyPre = deterministicPedagogyPrecheck(candidate, sourceContent);
-      const allPre = [...precheckGating, ...groundingPre, ...pedagogyPre];
-      const fatalPre = allPre.filter((i) => i.severity === "hard");
-      // 2026-08-25（AI 设计审计修复，§4.5 兑现注释承诺）：soft 信号不再算完
-      // 即弃——随 grounding 事件落审计面（排查误杀/漏检可取证），并注入
-      // Pedagogy Critic 的 per-candidate 输入作为风险参考。
-      const softPre = allPre.filter((i) => i.severity === "soft");
-      if (softPre.length > 0) {
-        softSignalsByCandidate[candidate.candidateId] = softPre;
+    // 12.1 deterministic precheck（纯计算）：保持逐候选顺序计算，结果按下标留存。
+    const prechecks = candidates.map((candidate) => {
+      const precheck = buildCandidatePrecheck(candidate, sourceContent, sealed.evidenceManifest);
+      if (precheck.softPre.length > 0) {
+        softSignalsByCandidate[candidate.candidateId] = precheck.softPre;
       }
+      return precheck;
+    });
 
-      // 12.2 独立 Grounding + Assembler Binding Plan
+    // 12.2 独立 Grounding
+    //
+    // 2026-09-17（极限延迟改造）：provider 调用既可在此并发（本函数的默认路径，
+    // regenerate/recheck/replan 走这里），也可由调用方**按候选流水线**预计算后
+    // 传入（`precomputedGrounding`：主管线让候选 i 的 grounding 紧跟候选 i 的
+    // author，墙钟从 `max(author)+max(grounding)` 降到 `max(author+grounding)`）。
+    // 无论哪条路径，**所有 tx 写入、事件、顺序判定都在下面的串行收尾阶段**，
+    // 事务内语句顺序、事件顺序、binding plan 落库顺序与改造前逐字一致。
+    //
+    // 错误语义不变：
+    // - 可重试错误 → abort 本阶段其余在途/排队调用（不再为注定回滚的 job 付费），
+    //   并在收尾阶段按**候选顺序**抛出第一个，行为与串行版本一致；
+    // - 非重试错误 → 该候选合成 grounding_failed 质量报告（确定性质量裁决）。
+    const stageAbort = new AbortController();
+    const stageSignal = signal ? AbortSignal.any([signal, stageAbort.signal]) : stageAbort.signal;
+    const groundingOutcomes = input.precomputedGrounding
+      ? prechecks.map((precheck) => {
+          const precomputed = input.precomputedGrounding?.get(precheck.candidate.candidateRevisionId);
+          if (!precomputed) {
+            // 预计算结果必须覆盖每个候选：缺失意味着调用方与候选集不一致（编程错误），
+            // fail-closed 抛错而不是静默跳过 grounding。
+            throw new CardGenerationProviderErrorLike(
+              false,
+              `precomputed grounding outcome missing for candidate ${precheck.candidate.candidateRevisionId}`,
+            );
+          }
+          return precomputed;
+        })
+      : await mapWithConcurrency(
+          prechecks,
+          V2_STAGE_CONCURRENCY,
+          (precheck) => callGroundingCritic({
+            precheck,
+            sealed,
+            existingObjectives,
+            providers,
+            useLLM,
+            stageSignal,
+            onRetryableError: (error) => stageAbort.abort(error),
+            signal,
+          }),
+        );
+
+    // 12.3 串行收尾：DB 写入 / 事件 / 顺序判定（与改造前逐字一致）。
+    for (const outcome of groundingOutcomes) {
+      const { candidate, fatalPre, contract } = outcome;
+      const softPre = softSignalsByCandidate[candidate.candidateId] ?? [];
       let qualityReport: QualityReportV2;
       let bindingPlanHash: string | null = null;
 
-      if (fatalPre.length === 0) {
+      if (fatalPre.length > 0) {
+        qualityReport = {
+          reportId: randomUUID(),
+          reportType: "grounding",
+          candidateRevisionId: candidate.candidateRevisionId,
+          candidateRevisionHash: candidate.candidateRevisionHash,
+          inputHash: candidate.evidenceSetHash,
+          version: 2,
+          reportHash: simplifiedReportHash({ reportType: "grounding", candidateRevisionId: candidate.candidateRevisionId, inputHash: candidate.evidenceSetHash, issues: fatalPre, verdict: fatalPre.length ? "failed" : "passed", gateVersion: "deterministic-gate-v1" }),
+          issues: fatalPre,
+          verdict: fatalPre.length ? "failed" : "passed",
+          gateVersion: "deterministic-gate-v1",
+        };
+      } else {
         try {
-          const groundingContract = useLLM && providers
-            ? await runGroundingCritic(
-                { candidate, evidenceManifest: sealed.evidenceManifest as never, existingObjectives },
-                providers.grounding,
-              )
-            : await runDeterministicGroundingContract(candidate, sealed.evidenceManifest);
+          // 并发阶段捕获的错误在此重新抛出，交给下面的分类分支处理
+          // （与串行版本"调用抛错 → 同一 catch"完全等价）。
+          if (outcome.error) throw outcome.error;
+          const groundingContract = contract as Awaited<ReturnType<typeof runGroundingCritic>>;
 
           if (groundingContract.verdict === "pass") {
             // 2026-08-24（§4.4 第二批）：plan 组装走 shared 纯逻辑层；
@@ -1059,15 +1875,22 @@ async function critiqueAndFinalizeCandidates(
               { candidateId: candidate.candidateId, runId, err: String(err) },
               "grounding retryable failure — rethrowing for job-level retry",
             );
-            // ── 激活前评估（round-8 🟡3，保持现状）────────────────────────────
-            // 可重试返回后：processV2OutboxJob 走 retryable → failV2OutboxJob → 回
-            // pending → 整条管道（planner→author→grounding→pedagogy）重跑。DB 侧
-            // 因整条包在单个 withWorkerWorkspaceTransaction 中，事务回滚使
-            // plan/candidate/status 全部 UNDO，**DB 无半写**（防重复副作用仅覆盖 DB）。
-            // 但 LLM **成本**副作用不在其列：planner/author 此前的调用已真实出钱，重跑
-            // 时被全部重放 → 每重试一次=重放 once 已付费的前置阶段，token 双花/三花。
-            // 激活后 grounding 抖动会线性放大模型费用；建议考虑阶段级 checkpoint /
-            // 缓存 planner+author 结果，或 grounding 单阶段重试而非整管道。
+            // ── H1（2026-09-15 管线评审，已缓解）──────────────────────────────
+            // 语义未变：可重试错误向上抛，processV2OutboxJob 走 retryable →
+            // failV2OutboxJob → 回 pending（attempts < 6）重试；DB 侧因整条包在单个
+            // withWorkerWorkspaceTransaction 中，事务回滚使 plan/candidate/status
+            // 全部 UNDO（**DB 无半写**）。
+            // 代价（LLM 成本副作用不可回滚：重跑会重放已付费的 planner/author）
+            // 现在有三重收窄：
+            //   1. `CardGenerationProviderRuntime.chatJson` 在调用点内退避重试
+            //      （V2_PROVIDER_CALL_RETRIES，默认 2 次）——瞬时抖动不再升级为整
+            //      管道重放；
+            //   2. 单 job 的 LLM 调用预算（V2_MAX_LLM_CALLS_PER_JOB，默认 96）在
+            //      预算处截断重试风暴；
+            //   3. outbox 退避（15s→300s，migration 0220）避免密集重领。
+            // 2026-09-17（性能改造）：并发阶段已在首个可重试错误时 abort 其余
+            // 在途调用，本路径的"继续为注定回滚的 job 付费"进一步收窄。
+            // 长期正解仍是"阶段级 checkpoint / 把 LLM 调用移出事务"，未在本轮实施。
             // ─────────────────────────────────────────────────────────────────
             throw err;
           }
@@ -1086,19 +1909,6 @@ async function critiqueAndFinalizeCandidates(
             gateVersion: "v2",
           };
         }
-      } else {
-        qualityReport = {
-          reportId: randomUUID(),
-          reportType: "grounding",
-          candidateRevisionId: candidate.candidateRevisionId,
-          candidateRevisionHash: candidate.candidateRevisionHash,
-          inputHash: candidate.evidenceSetHash,
-          version: 2,
-          reportHash: simplifiedReportHash({ reportType: "grounding", candidateRevisionId: candidate.candidateRevisionId, inputHash: candidate.evidenceSetHash, issues: fatalPre, verdict: fatalPre.length ? "failed" : "passed", gateVersion: "deterministic-gate-v1" }),
-          issues: fatalPre,
-          verdict: fatalPre.length ? "failed" : "passed",
-          gateVersion: "deterministic-gate-v1",
-        };
       }
 
       qualityReports.push(qualityReport);
@@ -1156,23 +1966,111 @@ async function critiqueAndFinalizeCandidates(
       await insertEventsBatched(tx, workspaceId, runId, groundingEvents);
     }
 
+    // 12.4 Global Selector / Merge / Dedup（§10.1 step 8，M6 接线）
+    //
+    // 2026-09-15（管线评审 M6）：此前 §10.1 step 8 的"全局选择/合并/去重"从未接线
+    // （computeSemanticClustersV2 / mergeDuplicateCandidates 只被 deck gate 消费）——
+    // 语义重复的候选一路走到 step 12 的 deck gate，被判 deck 级 hard issue
+    // （semantic_duplicate / mergeable_fragmentation），整个 run 进 needs_attention：
+    // 20 张卡里只要任意两张 statement token Jaccard ≥0.85（CJK 单字 token 集在
+    // 同主题下极易触顶），刚烧完整条管道费用的 run 就整体失败。
+    //
+    // 现在按契约在 grounding 之后、Pedagogy Critic 之前完成去重选择：
+    // 每个 duplicate/mergeable 簇保留一个候选（保持 authoring 顺序 = 计划顺序），
+    // 其余标记 quality_state='failed' 并写可解释事件（它们确实未通过 §13.2 的
+    // deck 级去重裁决，revision 记录保持不可变、不删除）。deck gate 的语义聚类
+    // 检查保留为 backstop——去重后不应再有命中。
+    const { kept: dedupedCandidates, dropped: droppedDuplicates } = selectDistinctCandidatesV2(passedCandidates);
+    if (droppedDuplicates.length > 0) {
+      await tx.execute(sql`
+        UPDATE public.card_generation_candidates_v2
+        SET quality_state = 'failed', updated_at = now()
+        WHERE workspace_id = ${workspaceId}
+          AND candidate_revision_id IN (${sql.join(
+            droppedDuplicates.map((d) => sql`${d.candidate.candidateRevisionId}::uuid`),
+            sql`, `,
+          )})
+      `);
+      await insertEventsBatched(tx, workspaceId, runId, droppedDuplicates.map((d) => ({
+        eventType: "card_candidate.dropped_semantic_duplicate",
+        payload: {
+          candidateId: d.candidate.candidateId,
+          candidateRevisionId: d.candidate.candidateRevisionId,
+          relation: d.relation,
+          keptCandidateId: d.keptCandidateId,
+          clusterId: d.clusterId,
+        },
+      })));
+      logger.warn({
+        runId,
+        droppedCount: droppedDuplicates.length,
+        keptCount: dedupedCandidates.length,
+        dropped: droppedDuplicates.map((d) => `${d.candidate.candidateId}:${d.relation}->${d.keptCandidateId}`),
+      }, "[v2-pipeline] semantic dedup (step 8) dropped redundant candidates");
+    }
+
     // 13. 独立 Pedagogy Critic（set-level，输入含 bindingPlanHashes）
-    const readyCandidates = passedCandidates;
-    const pedagogyReport = readyCandidates.length > 0
-      ? await runPedagogyCritic(
-          {
-            runId,
-            candidate: readyCandidates[0],
-            candidates: readyCandidates,
-            candidateEvidenceBindingPlanHashes: readyCandidates.map((c) => bindingPlanHashesByRevision[c.candidateRevisionId] ?? ""),
-            existingObjectives: existingObjectives.map((o) => ({ objectiveId: o.objectiveId, objectiveStatement: o.objectiveStatement, publicSummary: o.publicSummary })),
-            softPrecheckIssues: softSignalsByCandidate,
-            plan: { planRevisionId: plan.planRevisionId, planVersion: plan.planVersion, planHash: plan.planHash },
-            inputHash: run.input_snapshot_hash,
-          },
-          useLLM && providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
-        )
-      : null;
+    //     去重后的集合进入 Critic —— set 级判定（重复/可合并）看到的是真实待评审集。
+    throwIfPipelineAborted(signal);
+    const readyCandidates = dedupedCandidates;
+    const readyIds = readyCandidates.map((c) => c.candidateId);
+    /**
+     * 2026-09-17（极限延迟改造）：pedagogy **投机复用**。
+     *
+     * pedagogy 是集合级调用，只依赖候选内容；它与 grounding 唯一的关联是
+     * `candidateEvidenceBindingPlanHashes`，而该字段只是 prompt 里的不透明标识
+     * （判定不读它），且报告里的值由服务端覆盖写入。因此主管线在**最后一个候选
+     * author 完成时**就用占位 hash 发起 pedagogy，与仍在跑的 grounding 波并发
+     * （关键路径 4 阶段 → 3 阶段）。
+     *
+     * 正确性由**严格集合相等**守卫：只有"被评审的候选序列"与"最终进入牌堆的候选
+     * 序列"逐位相同（含顺序）才复用；任何差异（grounding 淘汰、语义去重落选）都
+     * 退回按最终集合重跑一次 pedagogy。重跑是少数路径，代价 +1 次调用，换来常见
+     * 路径省下整整一个阶段。
+     */
+    const speculative = input.precomputedPedagogy ?? null;
+    const reuseSpeculative = speculative !== null
+      && readyCandidates.length > 0
+      && isSameCandidateSequence(speculative.judgedCandidateIds, readyIds);
+    const pedagogyReport = readyCandidates.length === 0
+      ? null
+      : reuseSpeculative && speculative
+        ? withBindingPlanHashes(
+            speculative.report,
+            readyCandidates.map((c) => bindingPlanHashesByRevision[c.candidateRevisionId] ?? ""),
+          )
+        : await runPedagogyCritic(
+            {
+              runId,
+              candidate: readyCandidates[0],
+              candidates: readyCandidates,
+              candidateEvidenceBindingPlanHashes: readyCandidates.map((c) => bindingPlanHashesByRevision[c.candidateRevisionId] ?? ""),
+              existingObjectives: existingObjectives.map((o) => ({ objectiveId: o.objectiveId, objectiveStatement: o.objectiveStatement, publicSummary: o.publicSummary })),
+              softPrecheckIssues: softSignalsByCandidate,
+              plan: { planRevisionId: plan.planRevisionId, planVersion: plan.planVersion, planHash: plan.planHash },
+              inputHash: run.input_snapshot_hash,
+              // M4：用户 generation 请求此前恒为空对象，`goal_mismatch` 无判定输入。
+              generationRequest,
+              signal,
+            },
+            useLLM && providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
+          );
+    if (speculative) {
+      logger.info(
+        {
+          runId,
+          reuseSpeculative,
+          judgedCount: speculative.judgedCandidateIds.length,
+          readyCount: readyIds.length,
+          // 诊断用：守卫失败时对比两个序列（各取前 8 位）。
+          judgedIds: speculative.judgedCandidateIds.map((id) => id.slice(0, 8)),
+          readyIds: readyIds.map((id) => id.slice(0, 8)),
+        },
+        reuseSpeculative
+          ? "[v2-pipeline] pedagogy reused speculative report (set unchanged; one stage saved)"
+          : "[v2-pipeline] pedagogy re-run (candidate set changed after grounding/dedup)",
+      );
+    }
 
     // 2026-08-16（实机验证，溯源日志）：pedagogy 集合级结果。
     if (pedagogyReport) {
@@ -1182,6 +2080,7 @@ async function critiqueAndFinalizeCandidates(
         verdict: pedagogyReport.verdict,
         perCandidate: pedagogyReport.perCandidate.map((p) => `${p.candidateId}:${p.verdict}`),
         readyCandidateCount: readyCandidates.length,
+        usage: providers?.usageTotals(),
       }, "[v2-pipeline] pedagogy completed");
     } else {
       logger.info({ runId, stage: "pedagogy", readyCandidateCount: readyCandidates.length }, "[v2-pipeline] pedagogy skipped (no ready candidates)");
@@ -1190,6 +2089,16 @@ async function critiqueAndFinalizeCandidates(
     // 13.1 依据 pedagogy 结论过滤候选
     let afterRepair = readyCandidates;
     let repaired = false;
+    /**
+     * 本次已投递的 recheck job 数。
+     *
+     * 2026-09-17（修假失败）：pedagogy 判 `rewrite` 的候选按设计移出牌堆、新 revision
+     * 交给 `card_generation_recheck_candidate` 重新过门禁。若主管线在 recheck 完成前
+     * 就把 run 终态化为 needs_attention，用户在 UI 上会先看到"需处理"（实测 22s 后
+     * 又被 recheck 翻回 review_ready）——这是**用户可见的假失败**。
+     * 现在有 pending recheck 时保持 `checking`（生成中），由 recheck 收口。
+     */
+    let pendingRecheckCount = 0;
     if (pedagogyReport) {
       const pc: Array<{ candidateId: string; verdict: string }> = pedagogyReport.perCandidate;
       const keepSet = new Set(pc.filter((p) => p.verdict === "keep").map((p) => p.candidateId));
@@ -1220,6 +2129,7 @@ async function critiqueAndFinalizeCandidates(
           // 生成主流程也必须真正触发这条 recheck 流程。此前这里只写入
           // authored revision，却没有 enqueue recheck job，导致候选审核页
           // 永远展示“重新检查中”，并且启用按钮一直被锁住。
+          pendingRecheckCount = repairedRevisions.length;
           for (const repairedCandidate of repairedRevisions) {
             await tx.execute(sql`
               INSERT INTO public.card_generation_run_outbox_v2
@@ -1345,7 +2255,7 @@ async function critiqueAndFinalizeCandidates(
       });
       await tx.execute(sql`
         UPDATE public.card_generation_runs_v2
-        SET status = 'no_cards_recommended', updated_at = now()
+        SET status = 'no_cards_recommended', error_code = NULL, error_message = NULL, updated_at = now()
         WHERE id = ${runId} AND workspace_id = ${workspaceId}
       `);
       return;
@@ -1357,9 +2267,26 @@ async function critiqueAndFinalizeCandidates(
         passed: finalGate.passed,
         issues: finalGate.gateReport.issues,
       });
+      if (survivors.length === 0 && pendingRecheckCount > 0) {
+        // 候选全部被判 rewrite、新 revision 正在复核：保持"生成中"，由 recheck 收口
+        // （避免用户看到 needs_attention 的假失败）。
+        await tx.execute(sql`
+          UPDATE public.card_generation_runs_v2
+          SET status = 'checking', error_code = NULL, error_message = NULL, updated_at = now()
+          WHERE id = ${runId} AND workspace_id = ${workspaceId}
+        `);
+        await insertEvent(tx, workspaceId, runId, "card_generation.awaiting_recheck", {
+          pendingRecheckCount,
+        });
+        return;
+      }
+      // 2026-09-18：把失败原因**落库到 run 行**（此前只写进事件流，run.error_code
+      // 为 null）。恢复投影需要据此判断"这次失败是否可就地重试"——用户端不是事件流
+      // 消费者，它只读 run 行；没有这个码，唯一候选被 critic 否决的 run 会被当成
+      // "服务端需要进一步处理"的黑盒，用户只能重开一次全新生成。
       await tx.execute(sql`
         UPDATE public.card_generation_runs_v2
-        SET status = 'needs_attention', updated_at = now()
+        SET status = 'needs_attention', error_code = 'quality_gate_failed', updated_at = now()
         WHERE id = ${runId} AND workspace_id = ${workspaceId}
       `);
       await insertEvent(tx, workspaceId, runId, "card_generation.needs_attention", {
@@ -1373,7 +2300,7 @@ async function critiqueAndFinalizeCandidates(
     // review_ready
     await tx.execute(sql`
       UPDATE public.card_generation_runs_v2
-      SET status = 'review_ready', updated_at = now()
+      SET status = 'review_ready', error_code = NULL, error_message = NULL, updated_at = now()
       WHERE id = ${runId} AND workspace_id = ${workspaceId}
     `);
     await insertEventsBatched(tx, workspaceId, runId, survivors.map((candidate) => ({
@@ -1441,11 +2368,12 @@ async function loadV2RunInputs(tx: WorkerTransaction, workspaceId: string, runId
   const unsupportedSourceBlocks = blockRows
     .filter((b) => ["image", "code", "diagram", "formula", "table"].includes(String(b.type ?? "").toLowerCase()))
     .map((b) => ({ blockId: b.id, type: b.type, content: b.content, ordinal: b.ordinal }));
-  // ── 激活前评估（第四轮审计 #5）：同 processCardGenerationPlan——整份 scoped
-  //    note 的 source text join 成 sourceContent，随 sealed evidence 贯穿
-  //    regenerate/replan/recheck 管道。未激活时确定性快路径，内存可控；
-  //    激活前须设源文本规模上限或分块。
-  const sourceContent = scopedBlocks.map((b) => b.content).join("\n");
+  // 同 processCardGenerationPlan（M7）：源文本规模硬上限（超限截断 + 告警），
+  // regenerate/replan/recheck 管道共用同一护栏，避免大笔记在重跑路径上再次膨胀。
+  const sourceContent = capSourceContentForPrompts(
+    scopedBlocks.map((b) => b.content).join("\n"),
+    workspaceId,
+  ).content;
 
   const existingObjRows = (await tx.execute(sql`
     SELECT lor.objective_id, lor.semantic_target_fingerprint,
@@ -1498,12 +2426,14 @@ async function loadV2RunInputs(tx: WorkerTransaction, workspaceId: string, runId
  * 重跑双 Critic + deck gate（复用 critiqueAndFinalizeCandidates）。
  * 旧 revision 只 supersede、不覆盖；重写失败 → run needs_attention（fail closed）。
  */
-async function processRegenerateCandidateJob(job: PendingOutboxJob): Promise<void> {
+async function processRegenerateCandidateJob(job: PendingOutboxJob, signal?: AbortSignal): Promise<void> {
   const { workspaceId, runId } = job;
   const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
+  assertDeterministicProvidersAllowed(useLLM);
   const payload = job.payload as { candidateRevisionId?: string; feedbackReasonCodes?: string[] };
 
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+    throwIfPipelineAborted(signal);
     const ctx = await loadV2RunInputs(tx, workspaceId, runId);
     const run = ctx.run;
     if (!["review_ready", "needs_attention"].includes(run.status as string)) {
@@ -1558,6 +2488,7 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob): Promise<voi
       sealed: ctx.sealed,
       authoringProvider: providers?.author ?? new DeterministicAuthoringProvider(),
       semanticSpecHash: run.semantic_spec_hash as string,
+      signal,
     });
 
     // §17.4：新 revision 完整重跑门禁（grounding + pedagogy + deck gate）
@@ -1573,6 +2504,8 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob): Promise<voi
       providers,
       useLLM,
       allowBoundedRepair: false,
+      signal,
+      generationRequest: ctx.semanticSpec.semanticRequest,
     });
     await insertEvent(tx, workspaceId, runId, "card_candidate.regenerated", {
       candidateId: candidate.candidateId,
@@ -1580,6 +2513,7 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob): Promise<voi
       newRevisionId: newRevision.candidateRevisionId,
       revision: newRevision.revision,
     });
+    await fenceV2OutboxLease(tx, job);
   });
 }
 
@@ -1588,23 +2522,33 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob): Promise<voi
  * previous_plan_revision_id=旧）→ 旧计划未激活候选 supersede → 全量重新 author
  * → 重跑双 Critic + deck gate。planHash 按新版本重算（§11.6 同一 canonical 规则）。
  */
-async function processReplanSetJob(job: PendingOutboxJob): Promise<void> {
+async function processReplanSetJob(job: PendingOutboxJob, signal?: AbortSignal): Promise<void> {
   const { workspaceId, runId } = job;
   const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
+  assertDeterministicProvidersAllowed(useLLM);
   const payload = job.payload as { feedbackReasonCodes?: string[] };
 
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+    throwIfPipelineAborted(signal);
     const ctx = await loadV2RunInputs(tx, workspaceId, runId);
     const run = ctx.run;
-    if (!["review_ready", "needs_attention"].includes(run.status as string)) {
+    // 2026-09-18：接受 `checking`。新增的**run 级就地重试**入口
+    // （apps/api `retryGenerationRunV2`）在派发本任务前就把 run 推进到工作态
+    // `checking`——目的是让用户点完立刻看到"又动起来了"，而不是继续停在
+    // 「需要处理」直到 worker 更新。若不接受该状态，任务会以非重试错误失败，
+    // 把一次本该成功的重试变成 generation_failed（实测踩到过）。
+    // 语义上 `checking` 本来就属于本任务的前置状态：主管线自己在这一步也是
+    // 把 run 置为 `checking` 再走 author/critic（与 recheck 任务同一口径）。
+    if (!["review_ready", "needs_attention", "checking"].includes(run.status as string)) {
       // jobType 状态门闩不合法：确定性业务违约，非重试
-      throw new CardGenerationProviderErrorLike(false, `replan requires review_ready/needs_attention run (got ${String(run.status)})`);
+      throw new CardGenerationProviderErrorLike(false, `replan requires review_ready/needs_attention/checking run (got ${String(run.status)})`);
     }
     const providers = useLLM
       ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec })
       : null;
 
     // 1. 重跑 planner（同输入；feedback 偏好为 soft，仅 LLM 模式消费）
+    throwIfPipelineAborted(signal);
     const plannerResult = await executePlanner({
       runId,
       workspaceId,
@@ -1615,6 +2559,11 @@ async function processReplanSetJob(job: PendingOutboxJob): Promise<void> {
       existingObjectives: ctx.existingObjectives,
       clientHardMaxCards: ctx.inputSnapshot?.rawRequest?.quantity?.hardMaxCards,
       extractionProvider: useLLM && providers ? providers.plannerExtraction : undefined,
+      evidenceList: ctx.sealed.evidenceManifest.evidence.map((e) => ({
+        evidenceSnapshotId: e.evidenceSnapshotId,
+        quoteHash: e.quoteHash ?? null,
+      })),
+      signal,
     });
     const prevPlanRows = (await tx.execute(sql`
       SELECT plan_revision_id FROM public.card_generation_plans_v2
@@ -1666,6 +2615,7 @@ async function processReplanSetJob(job: PendingOutboxJob): Promise<void> {
     `);
 
     // 5. 全量重新 author + 持久化候选
+    throwIfPipelineAborted(signal);
     const authorResult = await executeAuthor({
       runId,
       workspaceId,
@@ -1677,43 +2627,32 @@ async function processReplanSetJob(job: PendingOutboxJob): Promise<void> {
         evidenceSnapshotId: e.evidenceSnapshotId,
         quoteHash: e.quoteHash ?? null,
       })),
-    });
-    const candidates = authorResult.candidates.map((c) => ({
-      ...c,
+      // M2：同主管线——sealed manifest 的 evidenceSetHash 参与 revision hash 闭包。
       evidenceSetHash: ctx.sealed.evidenceSetHash,
-    }));
-    for (const candidate of candidates) {
-      await tx.execute(sql`
-        INSERT INTO public.card_generation_candidates_v2
-          (id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
-           plan_revision_id, plan_version, plan_hash, card_content_epoch,
-           plan_objective_local_id, recommendation, derived_from,
-           objective_draft, presentation_draft, evidence_set_hash,
-           candidate_revision_hash, quality_state, review_decision, publish_state)
-        VALUES (
-          ${randomUUID()}, ${workspaceId}, ${runId},
-          ${candidate.candidateId}, ${candidate.candidateRevisionId}, ${candidate.revision},
-          ${candidate.planRevisionId}, ${candidate.planVersion}, ${candidate.planHash},
-          ${candidate.cardContentEpoch}, ${candidate.planObjectiveLocalId},
-          ${JSON.stringify(candidate.recommendation)}::jsonb,
-          ${JSON.stringify(candidate.derivedFromCandidateRevisions)}::jsonb,
-          ${JSON.stringify(candidate.objective)}::jsonb,
-          ${JSON.stringify(candidate.presentation)}::jsonb,
-          ${candidate.evidenceSetHash},
-          ${candidate.candidateRevisionHash},
-          'authored', 'undecided', 'unpublished'
-        )
-      `);
-      await insertEvent(tx, workspaceId, runId, "card_candidate.authored", {
-        candidateId: candidate.candidateId,
-        candidateRevisionId: candidate.candidateRevisionId,
-      });
-    }
+      signal,
+      // 2026-09-17（性能改造）：与主管线一致，replan 的 author 也并发。
+      providerConcurrency: V2_STAGE_CONCURRENCY,
+    });
+    const candidates = authorResult.candidates.map((c) => {
+      if (c.evidenceSetHash !== ctx.sealed.evidenceSetHash) {
+        throw new CardGenerationProviderErrorLike(
+          false,
+          `candidate evidence set hash closure mismatch: candidate=${c.evidenceSetHash} sealed=${ctx.sealed.evidenceSetHash}`,
+        );
+      }
+      return c;
+    });
+    // M8（2026-09-15 管线评审）：此前 replan 逐候选 INSERT + 逐候选 insertEvent
+    // （每候选 2 次 SQL，且每次事件插入还带一次 MAX 往返——20 卡 ≈ 120 次
+    // round-trip），在已经很长的 run 行锁窗口内继续放大延迟。改为与主管线一致的
+    // 批量写（一次多行 INSERT + 一次 insertEventsBatched），并由共享 helper
+    // 保证两条路径不再漂移。
+    await insertAuthoredCandidatesBatched(tx, workspaceId, runId, candidates);
 
     // 6. checking → 重跑双 Critic + deck gate（§17.4 新计划必须完整过门禁）
     await tx.execute(sql`
       UPDATE public.card_generation_runs_v2
-      SET status = 'checking', updated_at = now()
+      SET status = 'checking', error_code = NULL, error_message = NULL, updated_at = now()
       WHERE id = ${runId} AND workspace_id = ${workspaceId}
     `);
     await critiqueAndFinalizeCandidates(tx, {
@@ -1727,12 +2666,15 @@ async function processReplanSetJob(job: PendingOutboxJob): Promise<void> {
       existingObjectives: ctx.existingObjectives,
       providers,
       useLLM,
+      signal,
+      generationRequest: ctx.semanticSpec.semanticRequest,
     });
     await insertEvent(tx, workspaceId, runId, "card_generation.replan_completed", {
       planVersion: plan.planVersion,
       previousPlanRevisionId: prevPlanRevisionId,
       feedbackReasonCodes: payload.feedbackReasonCodes ?? [],
     });
+    await fenceV2OutboxLease(tx, job);
   });
 }
 
@@ -1767,17 +2709,20 @@ function candidateRowToObject(
  * 对新 revision 完整重跑 grounding/pedagogy/deck gate；旧 revision 保持不可变。
  * 通过则 review_ready，失败则 needs_attention（fail closed，用户编辑无绕 Gate 权）。
  */
-async function processRecheckCandidateJob(job: PendingOutboxJob): Promise<void> {
+async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortSignal): Promise<void> {
   const { workspaceId, runId } = job;
   const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
+  assertDeterministicProvidersAllowed(useLLM);
   const payload = job.payload as { candidateRevisionId?: string; reason?: string };
 
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+    throwIfPipelineAborted(signal);
     const ctx = await loadV2RunInputs(tx, workspaceId, runId);
     const run = ctx.run;
-    if (!["review_ready", "needs_attention"].includes(run.status as string)) {
-      // jobType 状态门闩不合法：确定性业务违约，非重试
-      throw new CardGenerationProviderErrorLike(false, `recheck requires review_ready/needs_attention run (got ${String(run.status)})`);
+    if (!["review_ready", "needs_attention", "checking"].includes(run.status as string)) {
+      // jobType 状态门闩不合法：确定性业务违约，非重试。
+      // `checking` = 主管线在"候选被判 rewrite、等待复核"时保持的进行中状态。
+      throw new CardGenerationProviderErrorLike(false, `recheck requires review_ready/needs_attention/checking run (got ${String(run.status)})`);
     }
     const candidateRevisionId = payload.candidateRevisionId;
     if (!candidateRevisionId) throw new CardGenerationProviderErrorLike(false, "recheck job missing candidateRevisionId");
@@ -1823,6 +2768,8 @@ async function processRecheckCandidateJob(job: PendingOutboxJob): Promise<void> 
       // recheck → authored-revision chain when the critic keeps returning
       // `rewrite`.
       allowBoundedRepair: false,
+      signal,
+      generationRequest: ctx.semanticSpec.semanticRequest,
     });
     // 单个候选复核失败不应让同一 run 中其它仍可启用的最新候选
     // 一并进入 needs_attention；用户仍应能保留并启用通过门禁的候选。
@@ -1840,13 +2787,40 @@ async function processRecheckCandidateJob(job: PendingOutboxJob): Promise<void> 
         AND latest.review_decision IN ('undecided', 'keep')
         AND latest.publish_state = 'unpublished'
     `)) as Array<{ count: number | string }>;
+    /**
+     * 是否还有**其它**待复核 job（本次这个已处于 processing，按 id 排除）。
+     * 只有全部 recheck 都结束才允许离开 `checking`——否则两个 rewrite 候选会让
+     * 状态在 needs_attention / review_ready 之间来回翻。
+     */
+    const otherPending = (await tx.execute(sql`
+      SELECT COUNT(*)::int AS count
+      FROM public.card_generation_run_outbox_v2
+      WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+        AND job_type = 'card_generation_recheck_candidate'
+        AND status IN ('pending', 'processing')
+        AND id <> ${job.id}
+    `)) as Array<{ count: number | string }>;
+    const stillWaiting = Number(otherPending[0]?.count ?? 0) > 0;
     if (Number(usableLatest[0]?.count ?? 0) > 0) {
       await tx.execute(sql`
         UPDATE public.card_generation_runs_v2
-        SET status = 'review_ready', updated_at = now()
+        SET status = 'review_ready', error_code = NULL, error_message = NULL, updated_at = now()
         WHERE id = ${runId} AND workspace_id = ${workspaceId}
-          AND status = 'needs_attention'
+          AND status IN ('needs_attention', 'checking')
       `);
+    } else if (!stillWaiting) {
+      // 没有任何可用的最新候选，且所有复核都已结束 → fail-closed 收口为
+      // needs_attention（此前依赖主管线已置 needs_attention；现在主管线在待复核
+      // 期间保持 checking，必须在这里显式收口，否则 run 会永久停在 checking）。
+      await tx.execute(sql`
+        UPDATE public.card_generation_runs_v2
+        SET status = 'needs_attention', error_code = 'quality_gate_failed', updated_at = now()
+        WHERE id = ${runId} AND workspace_id = ${workspaceId}
+          AND status = 'checking'
+      `);
+      await insertEvent(tx, workspaceId, runId, "card_generation.needs_attention", {
+        reason: "all_candidates_failed_quality_gates",
+      });
     }
     await insertEvent(tx, workspaceId, runId, "card_candidate.recheck_completed", {
       candidateId: candidate.candidateId,
@@ -1854,6 +2828,7 @@ async function processRecheckCandidateJob(job: PendingOutboxJob): Promise<void> 
       revision: candidate.revision,
       reason: payload.reason ?? "edit",
     });
+    await fenceV2OutboxLease(tx, job);
   });
 }
 
@@ -1874,8 +2849,11 @@ async function boundedRepairCandidate(
     sealed: Awaited<ReturnType<typeof loadSealedEvidence>>;
     authoringProvider: AuthoringProvider;
     semanticSpecHash: string;
+    /** H5/M1：job 级取消信号（租约丢失 / 墙钟预算耗尽）。 */
+    signal?: AbortSignal;
   },
 ): Promise<LearningCardCandidateRevisionV2> {
+  throwIfPipelineAborted(input.signal);
   const authorInput = {
     planObjective: {
       objectiveLocalId: input.candidate.planObjectiveLocalId,
@@ -1885,6 +2863,8 @@ async function boundedRepairCandidate(
     sourceContent: input.sourceContent,
     semanticSpecHash: input.semanticSpecHash,
     planHash: input.plan.planHash,
+    evidenceSetHash: input.sealed.evidenceSetHash,
+    signal: input.signal,
   };
   const providerOutput = await input.authoringProvider.authorCandidate(authorInput);
 
@@ -2128,6 +3108,50 @@ async function insertEventsBatched(
   `);
 }
 
+/**
+ * 批量持久化刚 author 出来的候选（一次多行 INSERT + 一次批量事件）。
+ *
+ * M8（2026-09-15 管线评审）：主管线此前已批量化，replan 仍是逐候选 INSERT +
+ * 逐候选 insertEvent（每候选 2 次 SQL，事件插入还各带一次 MAX 往返）。两条路径
+ * 合并到本 helper，杜绝再次漂移。
+ */
+export async function insertAuthoredCandidatesBatched(
+  tx: WorkerTransaction,
+  workspaceId: string,
+  runId: string,
+  candidates: LearningCardCandidateRevisionV2[],
+): Promise<void> {
+  if (candidates.length === 0) return;
+  await tx.execute(sql`
+    INSERT INTO public.card_generation_candidates_v2
+      (id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
+       plan_revision_id, plan_version, plan_hash, card_content_epoch,
+       plan_objective_local_id, recommendation, derived_from,
+       objective_draft, presentation_draft, evidence_set_hash,
+       candidate_revision_hash, quality_state, review_decision, publish_state)
+    VALUES ${sql.join(candidates.map((candidate) => sql`(
+      ${randomUUID()}, ${workspaceId}, ${runId},
+      ${candidate.candidateId}, ${candidate.candidateRevisionId}, ${candidate.revision},
+      ${candidate.planRevisionId}, ${candidate.planVersion}, ${candidate.planHash},
+      ${candidate.cardContentEpoch}, ${candidate.planObjectiveLocalId},
+      ${JSON.stringify(candidate.recommendation)}::jsonb,
+      ${JSON.stringify(candidate.derivedFromCandidateRevisions)}::jsonb,
+      ${JSON.stringify(candidate.objective)}::jsonb,
+      ${JSON.stringify(candidate.presentation)}::jsonb,
+      ${candidate.evidenceSetHash},
+      ${candidate.candidateRevisionHash},
+      'authored', 'undecided', 'unpublished'
+    )`), sql`, `)}
+  `);
+  await insertEventsBatched(tx, workspaceId, runId, candidates.map((candidate) => ({
+    eventType: "card_candidate.authored",
+    payload: {
+      candidateId: candidate.candidateId,
+      candidateRevisionId: candidate.candidateRevisionId,
+    },
+  })));
+}
+
 // ─── Providers 构造（惰性，减小 worker 重边）─────────────────────────────
 
 async function buildProvidersForRun(input: {
@@ -2139,6 +3163,8 @@ async function buildProvidersForRun(input: {
   author: AuthoringProvider;
   grounding: GroundingCriticProvider;
   pedagogy: PedagogyCriticProvider;
+  /** M5：本次 job 执行的累计 token/调用用量（成本审计 + 熔断输入）。 */
+  usageTotals: () => CardGenerationUsageTotals;
 }> {
   const { buildCardGenerationProviders } = await import("../card-generation-v2/providers.ts");
   const providers = await buildCardGenerationProviders({
@@ -2162,7 +3188,7 @@ let lastV2ReapAt = 0;
  * 之前 index.ts `tick()` 对 `pollV2Outbox(1)` 同步 await，最坏被「单个 V2 job 的
  * 整个管道（planner→author→grounding→pedagogy，~8.75min）」阻塞，延迟**下一 tick**
  * 主队列的 claim/分发。修复：主 tick 以本小预算调用 poll，超时后 poll 立即返回
- * （运行中 job 继续后台跑，靠 30min 租约 + lease CAS + reaper 兜底，不丢副作用、
+ * （运行中 job 继续后台跑，靠 heartbeat、30min 租约 + lease CAS + reaper 兜底，不丢副作用、
  * 不重复计费），从而使主循环每次 tick 仅最多阻塞该预算时长即恢复。
  */
 export const V2_POLL_TICK_BUDGET_MS = 5_000;
@@ -2172,17 +3198,20 @@ export async function pollV2Outbox(limit = 1, awaitBudgetMs = V2_POLL_TIMEOUT_MS
   // 空闲时的扫描查询（V2_REAP_THROTTLE_MS）。reap 失败不阻断 claim。
   // 整体用 runWithAbortTimeout 包裹，使 poll 返回有上界（默认 V2_POLL_TIMEOUT_MS；
   // 主 tick 传更小的 V2_POLL_TICK_BUDGET_MS），防止卡死的 V2 LLM HTTP 调用冻结主
-  // tick（第四轮审计 #3/#26）。超时后底层任务继续后台运行，靠 30min 租约 + reaper
-  // 兜底。job 内每个 chatJson 调用本身还有 75s 单调用 abort。
-  // ── 激活前评估（round-8 🟠2，保持现状）─────────────────────────────────────
+  // tick（第四轮审计 #3/#26）。超时后底层任务继续后台运行，靠 heartbeat、30min
+  // 租约 + token CAS + reaper 兜底。job 内每个 chatJson 调用本身还有 75s 单调用 abort。
+  // ── H4（2026-09-15 管线评审，部分缓解 / 事务结构未变）──────────────────────
   // 上述 abort 只解耦"主 tick 的阻塞"，并不释放资源：abortable 内同一后台连续体
-  // 会把已认领 job 的 processV2OutboxJob 继续跑完（processV2OutboxJob 不接收 poll
-  // signal，仅 chatJson 各自 75s abort）。因此 5s 预算期间，一个 LLM 模式的慢 job
-  // 仍会长时间占用：DB 连接 + withWorkerWorkspaceTransaction 的长事务 + run 行
-  // FOR UPDATE 锁，最坏 ~8.75min（whole pipeline）。后续 tick 再 claim（limit=1）
-  // 其它 pending job 若属同一 run（如 replan 排在 plan 后）会排队等该 run 行锁；
-  // 多 run 高并发后台慢 job 叠加有连接池耗尽风险。V2 未激活无损；激活前需评估
-  // 「阶段间续租 / 把 LLM 移出事务 + 状态机 run.status 门闩」（代码 L595-601 亦自标）。
+  // 会把已认领 job 的 processV2OutboxJob 继续跑完（poll 的 abort 不复用为 job
+  // signal；job 有独立 signal：租约丢失 / 墙钟预算）。因此 5s 预算期间，一个 LLM
+  // 模式的慢 job 仍会长时间占用：DB 连接 + withWorkerWorkspaceTransaction 的长事务
+  // + run 行 FOR UPDATE 锁。后续 tick 再 claim（limit=1）其它 pending job 若属同一
+  // run（如 replan 排在 plan 后）会排队等该 run 行锁；多 run 高并发后台慢 job 叠加
+  // 有连接池耗尽风险。
+  // 本轮已加的硬边界：job 墙钟预算（V2_PIPELINE_BUDGET_MS，默认 20min < 30min
+  // 租约）到期即 abort 并终结 job（不重试）；租约丢失即时 abort（H5）；单 job LLM
+  // 调用预算封顶。仍**未**实施的长期正解：把 LLM 调用移出事务 + 状态机 run.status
+  // 门闩（消除长事务/行锁本身），见 processCardGenerationPlan 的 H4 说明。
   // ──────────────────────────────────────────────────────────────────────────
   return runWithAbortTimeout(
     async () => {
@@ -2195,10 +3224,34 @@ export async function pollV2Outbox(limit = 1, awaitBudgetMs = V2_POLL_TIMEOUT_MS
           logger.warn({ error: sanitizeOperationalError(error) }, "V2 outbox reap failed");
         }
       }
-      const jobs = await claimV2OutboxJobs(limit);
-      for (const job of jobs) {
-        await processV2OutboxJob(job);
+      const capacity = V2_OUTBOX_MAX_CONCURRENCY - v2Inflight.size;
+      if (capacity <= 0) {
+        logger.debug(
+          { inflight: v2Inflight.size, maxConcurrency: V2_OUTBOX_MAX_CONCURRENCY },
+          "V2 outbox concurrency cap reached",
+        );
+        return 0;
       }
+
+      const jobs = await claimV2OutboxJobs(Math.min(limit, capacity));
+      const running = jobs.map((job) => {
+        const promise = processV2OutboxJob(job);
+        v2Inflight.add(promise);
+        promise.then(
+          () => v2Inflight.delete(promise),
+          (error) => {
+            v2Inflight.delete(promise);
+            logger.error(
+              { jobId: job.id, runId: job.runId, error: sanitizeOperationalError(error) },
+              "V2 outbox job rejected unexpectedly",
+            );
+          },
+        );
+        return promise;
+      });
+      // 主 tick 可以因 awaitBudgetMs 超时而提前返回；此处的 promise 仍被
+      // v2Inflight 持有，后续 tick 不会越过并发上限继续 claim。
+      await Promise.allSettled(running);
       return jobs.length;
     },
     awaitBudgetMs,

@@ -12,7 +12,7 @@
  * 端点：GET /public/auth-surface-manifest（不鉴权，见 routes.ts）。
  */
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
 import {
   AuthSurfaceAction,
   authSurfaceManifestV1Schema,
@@ -107,20 +107,6 @@ function signPayload(payload: AuthSurfaceManifestPayload, secret: string): strin
   return createHmac("sha256", secret)
     .update(canonicalSerializeAuthSurfacePayload(payload))
     .digest("hex");
-}
-
-/** 校验 manifest 签名（constant-time 比对）；密钥不匹配时返回 false（fail closed）。 */
-export function verifyAuthSurfaceManifest(
-  manifest: AuthSurfaceManifestV1,
-  secret: string,
-): boolean {
-  const payload = authSurfaceManifestV1Schema.omit({ signature: true }).parse(
-    manifest,
-  );
-  const expected = signPayload(payload, secret);
-  const actual = Buffer.from(manifest.signature, "utf8");
-  const want = Buffer.from(expected, "utf8");
-  return actual.length === want.length && timingSafeEqual(actual, want);
 }
 
 let cachedInfo: AuthSurfaceManifestInfo | null = null;

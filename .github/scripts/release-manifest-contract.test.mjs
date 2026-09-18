@@ -15,7 +15,6 @@ const SCORER_COMMIT = "89abcdef0123456789abcdef0123456789abcdef";
 const digestValues = {
   journal: "sha256:9f3c42e9ae5f284a0d244ab6ea4239e76d62951065401173d6436454178f8873",
   api: "sha256:5d6f839ec08bc558fe618f9e517cbe8d6ecbe924bfbbe8c392f7329191c58e08",
-  web: "sha256:6a1ce32351feac8cf890f37f23fc61c16453fb4e9c617e8680b07268e48c59fa",
   worker: "sha256:7187746e3101d72d68b60dd0e92f1da09cc78e4ab770b3f99eccf29f7f12c6cb",
 };
 const context = {
@@ -64,14 +63,12 @@ function validManifest() {
     migration: { ...context.migration },
     images: {
       api: imageRecord("api", digestValues.api),
-      web: imageRecord("web", digestValues.web),
       worker: imageRecord("worker", digestValues.worker),
     },
     tests: {
       summary: { passed: 216, failed: 0, skipped: 0, todo: 0 },
       unit: gate("unit"),
       integration: gate("integration"),
-      e2e: gate("e2e"),
       coverage: gate("coverage"),
       dependencyScan: gate("dependency"),
       secretScan: gate("secret"),
@@ -174,7 +171,6 @@ describe("release manifest policy", () => {
 
   it("rejects incomplete test, AIQ, and approval gates", () => {
     const manifest = validManifest();
-    manifest.tests.e2e.status = "not_run";
     manifest.tests.summary.skipped = 1;
     manifest.aiQuality.runs = 1;
     manifest.aiQuality.sampleCount = 29;
@@ -188,7 +184,6 @@ describe("release manifest policy", () => {
     manifest.approvals.securityDataReviewer.approver = " REPOSITORY-OWNER ";
     const issues = validateReleaseManifest(manifest, context);
     for (const expected of [
-      "tests.e2e.status",
       "summary.skipped",
       "runs",
       "sampleCount",

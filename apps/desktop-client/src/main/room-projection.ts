@@ -72,21 +72,9 @@ function objectiveSummary(surface: LearningObjectiveSurfaceV3) {
     surfaceRevision: surface.surfaceRevision,
     conceptLabel: surface.content.conceptLabel,
     publicSummary: surface.content.publicSummary,
-    personalState: personalState(surface),
+    personalState: surface.personalState.state,
     primaryAction: surface.primaryAction,
   };
-}
-
-function personalState(surface: LearningObjectiveSurfaceV3): "unvalidated" | "learning" | "stable" | "fragile" | "needs_repair" | "due_review" | "scheduled" | "archived" | "superseded" | "outdated" {
-  if (surface.lifecycle.status === "archived") return "archived";
-  if (surface.lifecycle.status === "superseded") return "superseded";
-  if (surface.personal.review?.status === "due") return "due_review";
-  if (surface.personal.review?.status === "scheduled") return "scheduled";
-  if (surface.personal.activeRun) return "learning";
-  if (surface.personal.initialValidation && surface.personal.initialValidation.status !== "completed") return "unvalidated";
-  if (surface.content.freshness === "source_outdated") return "outdated";
-  if (surface.primaryAction.kind === "refresh") return "needs_repair";
-  return "stable";
 }
 
 function sectionState<T extends { state: string }>(section: T): { state: T["state"] } {

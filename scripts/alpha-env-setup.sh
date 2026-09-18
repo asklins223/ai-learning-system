@@ -161,7 +161,7 @@ cmd_up() {
   run_one_shot role-grants
 
   # Start application and monitoring services.
-  "${COMPOSE[@]}" up -d api worker web prometheus alertmanager
+  "${COMPOSE[@]}" up -d api worker prometheus alertmanager
 
   # Wait for API readiness
   log "等待 API 就绪..."
@@ -285,7 +285,6 @@ cmd_status() {
 
   echo ""
   log "端点："
-  echo "  Web:          http://localhost:3000"
   echo "  API:          http://localhost:4000"
   echo "  API metrics:  http://localhost:4000/metrics"
   echo "  Prometheus:   http://localhost:9090"

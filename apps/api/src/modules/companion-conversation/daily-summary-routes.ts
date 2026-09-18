@@ -13,7 +13,7 @@ import { z } from "zod";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { companionDailySummaries } from "../../db/schema/companion-memory.ts";
+import { companionDailySummaries } from "@ailearn/shared/db-schema/companion-memory";
 
 function isDailySummaryEnabled(): boolean {
   // §15.3：该 flag 独立于 COMPANION_JOURNEY_V2，默认关闭，.env 显式开启。

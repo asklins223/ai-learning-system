@@ -82,6 +82,8 @@ export const learningRunPublicSnapshotV2Schema = z
     runtimeEpoch: z.number().int().min(0),
     /** Server-authoritative active time; the renderer never derives or counts it locally. */
     activeSecondsUsed: z.number().int().min(0).max(180),
+    /** Frozen budget selected when the run was created; progress must use this value. */
+    timeBudgetSeconds: z.number().int().min(30).max(180),
     activeTask: learningTaskPublicSchema.nullable(),
     allowedActions: z.array(learningRunAllowedActionSchema).max(32),
     publishedTargetEligibility: z.enum(["eligible", "practice_only", "blocked"]),

@@ -4,9 +4,9 @@ import {
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
   learningObjectiveOriginsV2,
-} from "../../db/schema/card-generation-v2.ts";
-import { notes, noteBlocks, sources, sourceSegments } from "../../db/schema/note.ts";
-import { searchDocuments } from "../../db/schema/search.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
+import { notes, noteBlocks, sources, sourceSegments } from "@ailearn/shared/db-schema/note";
+import { searchDocuments } from "@ailearn/shared/db-schema/search";
 import { SourceStatus } from "@ailearn/shared";
 import { logger } from "../../lib/logger.ts";
 
@@ -19,10 +19,6 @@ export interface SearchResult {
   href: string;
   matchCount?: number;
 }
-
-// 卡片/卡片集/evidence 已完全退役，reindex 不再投影这些类型。
-// 残留的旧投影文档在 reindex 时被清理（见 ghost cleanup SQL）。
-// consumableSearchDocumentPredicate 已移除——所有通过路由层验证的类型都是合法的。
 
 // ─── PERF-B2 修复：search count 短 TTL 缓存 ───────────────────────────────
 // count 用 DISTINCT ON 对 workspace 全量命中做去重计数，无法利用 LIMIT，
@@ -43,7 +39,6 @@ const REINDEX_MAX_ROWS_PER_TABLE = 50_000;
 // 关键：两处顶层表读都用完全相同的确定排序 + 同一上限。于是 reindex 建立的索引与
 // drift 读取的业务表都覆盖同一确定子集（按 updatedAt DESC → 最近写入优先），
 // 超出截断线的实体两侧都不会读取 → 不再被误判为 missing。
-// V1 卡片/卡片集已下线，仅保留 notes/sources 两个业务域表。
 // DB 排序规则约定：notes/sources 均存在 (workspace_id, updated_at desc) 或等价索引。
 const reindexTopOrder: Record<string, any> = (() => {
   return {
@@ -148,30 +143,77 @@ function searchEscapedQuery(query: string): string {
 }
 
 /**
+ * 翻页游标。**keyset** 而不是 OFFSET：结果按 `indexed_at DESC, dedup_key ASC`
+ * 排序，而 `indexed_at` 在实体被编辑时会变，OFFSET 分页会让行在页之间移动，
+ * 造成静默漏行（重复行客户端能去重，漏行不能）。游标携带最后一行自己的排序键，
+ * 下一页从它之后继续，因此翻页期间写入不会挪动已经读过的位置。
+ *
+ * 同时带上页码：既用于深度上限（见 MAX_SEARCH_PAGES），也让「0 条结果」这种
+ * 情况天然不可能复现——没有行就没有可推进的排序键，`nextCursor` 直接为 null。
+ */
+export interface SearchCursor {
+  /** 本页是第几页（从 0 开始）。 */
+  readonly page: number;
+  /** 上一页最后一行的 `indexed_at`，ISO-8601 毫秒精度。 */
+  readonly indexedAt: string;
+  /** 上一页最后一行的 `object_type || ':' || object_id`。 */
+  readonly dedupKey: string;
+}
+
+/** 每页最多 50 条 × 40 页 ≈ 旧 OFFSET 上限 1000，超出即停止翻页。 */
+const MAX_SEARCH_PAGES = 40;
+
+export function encodeSearchCursor(cursor: SearchCursor): string {
+  return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
+}
+
+/** 解不开的游标一律返回 null，由路由层回 400，绝不猜一个默认页。 */
+export function decodeSearchCursor(value: string): SearchCursor | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (parsed?.v !== 1) return null;
+    if (typeof parsed.page !== "number" || !Number.isInteger(parsed.page) || parsed.page < 0) return null;
+    if (typeof parsed.indexedAt !== "string" || Number.isNaN(Date.parse(parsed.indexedAt))) return null;
+    if (typeof parsed.dedupKey !== "string" || parsed.dedupKey.length === 0) return null;
+    return { page: parsed.page, indexedAt: parsed.indexedAt, dedupKey: parsed.dedupKey };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 全文搜索（pg_trgm + ILIKE，中文友好）。
  * N-012: 在 SQL 层按最终展示实体聚合去重，再计算 total 和分页。
- * 同一张 card 下的多条 evidence 只返回一条，但记录 matchCount。
+ * 同一实体的多条索引记录只返回一条，但记录 matchCount。
  */
 export async function search(
   executor: ApiTransaction,
   workspaceId: string,
   query: string,
-  opts?: { type?: string; limit?: number; offset?: number },
-): Promise<{ items: SearchResult[]; total: number; nextCursor: number | null }> {
+  opts?: { type?: string; limit?: number; cursor?: SearchCursor },
+): Promise<{ items: SearchResult[]; total: number; nextCursor: string | null }> {
   const limit = Math.min(opts?.limit ?? 20, 50);
-  // PERF: 限制深度 OFFSET（与 routes.ts schema 一致），避免 DISTINCT ON + ILIKE
-  // 上对全部匹配文档做深 OFFSET 扫描。达到上限后由 nextCursor 逻辑自然结束翻页。
-  const MAX_SEARCH_OFFSET = 1000;
-  const offset = Math.min(Math.max(opts?.offset ?? 0, 0), MAX_SEARCH_OFFSET);
+  const cursor = opts?.cursor ?? null;
   const type = opts?.type ?? null;
   // ILIKE treats `%` and `_` as wildcards. Escape them so the public API keeps
   // literal keyword semantics and a query such as `%` cannot scan/return every
   // document in the workspace.
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
 
-  // N-012: 使用 DISTINCT ON 在 SQL 层聚合去重
-  // evidence 类型已退役，所有类型按自身 ID 去重
+  // N-012: 使用 DISTINCT ON 在 SQL 层聚合去重。
   const dedupKey = sql`object_type || ':' || object_id`;
+  // 排序键是 (indexed_at DESC, dedup_key ASC)，所以"在这一行之后"是
+  // indexed_at 更早，或同一毫秒内 dedup_key 更大。索引写入路径全部使用
+  // JS Date（毫秒精度），因此这里用 ISO 毫秒字符串回比是精确的。
+  const keyset = cursor
+    ? sql`AND (
+        search_document.indexed_at < ${cursor.indexedAt}::timestamptz
+        OR (
+          search_document.indexed_at = ${cursor.indexedAt}::timestamptz
+          AND ${dedupKey} > ${cursor.dedupKey}
+        )
+      )`
+    : sql``;
 
   // The page read and the (cached) total are independent reads; run them in
   // parallel. total 由 getSearchTotal 走短 TTL 缓存，命中时零 DB 往返。
@@ -181,9 +223,8 @@ export async function search(
       object_id: string;
       title: string | null;
       body: string | null;
-      indexed_at: string | Date;
+      indexed_at: string;
       metadata: Record<string, unknown> | null;
-      match_count: string;
     }>(sql`
       WITH matching AS (
         SELECT object_type, object_id, title, body, indexed_at, metadata,
@@ -195,6 +236,7 @@ export async function search(
             OR title ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
           )
           AND (${type}::text IS NULL OR object_type = ${type})
+          ${keyset}
       ),
       deduplicated AS (
         SELECT DISTINCT ON (dedup_key)
@@ -202,12 +244,14 @@ export async function search(
         FROM matching
         ORDER BY dedup_key, indexed_at DESC
       )
-      SELECT d.object_type, d.object_id, d.title, d.body, d.indexed_at, d.metadata,
-        '1'::text as match_count
+      SELECT d.object_type, d.object_id, d.title, d.body, d.metadata,
+        -- 原生 SQL 会把 timestamptz 作为驱动文本（形如 2026-08-22 07:22:05.46+00）返回，
+        -- 桌面契约的 isoTimestamp 只接受 ISO-8601。在 SQL 层直接产出 ISO 字符串，
+        -- 避免主进程把它判成 unsupported_contract 并触发整库重连。
+        to_char(d.indexed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as indexed_at
       FROM deduplicated d
       ORDER BY d.indexed_at DESC, d.dedup_key ASC
-      LIMIT ${limit}
-      OFFSET ${offset}
+      LIMIT ${limit + 1}
     `),
     getSearchTotal(executor, workspaceId, query, type),
   ]);
@@ -220,7 +264,18 @@ export async function search(
   const safeQuery = query.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&").replace(/[\x00-\x1F]/g, "");
   const highlightRe = safeQuery ? new RegExp(safeQuery, "gi") : null;
 
-  const items: SearchResult[] = rows.map((row) => {
+  // "匹配 N 处" reports real occurrences of the query in title + body. The
+  // previous projection hardcoded 1, which the desktop UI then printed verbatim
+  // for every row. ILIKE already matched at least one of the two fields, so a
+  // zero count can only come from a JS/SQL case-folding gap; floor it at 1.
+  const countOccurrences = (text: string): number =>
+    highlightRe ? (text.match(highlightRe) ?? []).length : 0;
+
+  // 多取一行只用于判断"还有下一页"，不进结果集。
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
+  const items: SearchResult[] = pageRows.map((row) => {
     const body = row.body ?? "";
     const idx = body.toLowerCase().indexOf(query.toLowerCase());
     let snippet = "";
@@ -257,16 +312,23 @@ export async function search(
       objectId: row.object_id,
       title: row.title,
       snippet: highlighted,
-      indexedAt: row.indexed_at instanceof Date ? row.indexed_at.toISOString() : row.indexed_at,
+      indexedAt: row.indexed_at,
       href,
-      matchCount: Number(row.match_count) || 1,
+      matchCount: Math.max(1, countOccurrences(row.title ?? "") + countOccurrences(body)),
     };
   });
 
-  const consumed = offset + items.length;
-  // 不超过深度 OFFSET 上限（MAX_SEARCH_OFFSET）时才提供下一页游标；
-  // 达到上限后返回 null 让前端停止翻页，避免深扫描。
-  const nextCursor = consumed < total && consumed <= MAX_SEARCH_OFFSET ? consumed : null;
+  const lastRow = pageRows[pageRows.length - 1];
+  const page = cursor?.page ?? 0;
+  // 没有行就没有下一页（空页不会复现同一个游标）；页数达到上限时收口，
+  // 前端据此提示"已到读取上限"。
+  const nextCursor = hasMore && lastRow && page + 1 < MAX_SEARCH_PAGES
+    ? encodeSearchCursor({
+        page: page + 1,
+        indexedAt: lastRow.indexed_at,
+        dedupKey: `${lastRow.object_type}:${lastRow.object_id}`,
+      })
+    : null;
   return {
     items,
     total,
@@ -293,8 +355,6 @@ export interface SearchReindexResult {
  * 如果任何 INSERT 失败，事务回滚，旧索引保留，不会留下空/半索引。
  *
  * 只索引当前可用对象：笔记、未归档来源，以及 V2 Objective（Plan 23 CS-03）。
- * V1 卡片 / 卡片集 / 其下 evidence（learning_card_sets / learning_cards /
- * cardKeyPoints / evidences.keyPointId）均已下线，不再投影。
  */
 export async function reindexWorkspaceSearch(
   executor: ApiTransaction,
@@ -492,8 +552,8 @@ export async function reindexWorkspaceSearch(
       deletedCount = deletedRows.length;
 
       // PERF: 逐实体类型流式批量插入，而非先物化整份 documents 数组再插入。
-      // 每类文档数组有界（顶层实体已受 REINDEX_MAX_ROWS_PER_TABLE 限制，
-      // evidence 也按同样上限截断），避免一次性把所有文档对象放入内存。
+      // 每类文档数组有界（顶层实体已受 REINDEX_MAX_ROWS_PER_TABLE 限制），
+      // 避免一次性把所有文档对象放入内存。
       const INSERT_BATCH_SIZE = 500;
       const insertBatch = async (docs: Array<typeof searchDocuments.$inferInsert>): Promise<void> => {
         for (let start = 0; start < docs.length; start += INSERT_BATCH_SIZE) {
@@ -596,8 +656,6 @@ export async function reindexWorkspaceSearch(
                   AND domain_source.status <> ${SourceStatus.ARCHIVED}
               )
             )
-            -- V1 卡片/卡片集/其 evidence 已下线：清除任何遗留的旧版投影文档。
-            OR search_document.object_type IN ('card', 'card_set', 'evidence')
           )
       `);
   } catch (err) {
@@ -645,8 +703,7 @@ export interface SearchDriftResult {
   hasDrift: boolean;
   /** N#8-1: 各顶层业务域表读是否命中行数上限（截断）。实体超过确定截断线时两侧都不会读取，
    *  属既定截断而非漂移；auto-fix 据此避免反复重索引。
-   *  evidence 记录的是证据索引读是否命中行数上限：该侧被截断时，超出窗口的证据 id
-   *  不报 missing（可能是索引中存在但未进入确定读窗口，属既定截断而非漂移）。 */
+   *  两侧命中读取上限时不报告窗口外的缺失，避免把既定截断误判为漂移。 */
   capped: Record<"note" | "source", boolean>;
 }
 
@@ -660,8 +717,6 @@ export async function detectSearchDrift(
 
   // PERF-07: Parallelize queries across entity types.
   // Previously 12 serial DB round-trips; now a small parallel batch.
-  // V1 卡片/卡片集/其 evidence 已下线，drift 只对比 note / source。
-
   // ── Batch 1: notes + sources 业务表与索引查询 ──
   const [noteRows, indexedNotes, sourceRows, indexedSources] = await Promise.all([
     // 1a. Notes business table (CONC-03: exclude soft-deleted)

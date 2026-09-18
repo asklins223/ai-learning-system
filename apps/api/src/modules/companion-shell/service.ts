@@ -24,24 +24,21 @@ import { randomBytes } from "node:crypto";
 import { DomainError } from "@ailearn/shared";
 import { and, asc, eq, gt, lte, sql } from "drizzle-orm";
 import {
-  boolean,
-  integer,
-  jsonb,
-  pgTable,
-  text,
-  timestamp,
-  uuid,
-} from "drizzle-orm/pg-core";
-import {
   withWorkspaceTransaction,
   type ApiTransaction,
 } from "../../db/client.ts";
 import { COMPANION_ACCOUNT_NOTIFY_CHANNEL } from "../companion-conversation/companion-notify.ts";
 import {
+  companionRuntimeFences,
+  type CompanionAnimationVoiceOff,
+  userCompanionAccountState,
+  userCompanionOnboarding,
+  userLearningPreferences as userLearningPreferencesTable,
+} from "@ailearn/shared/db-schema/companion";
+import {
   CompanionOnboardingErrorCode,
   type CompanionAccountPatch,
   type CompanionAccountStateV1,
-  type CompanionNotificationBoundary,
   type CompanionOnboardingActiveRun,
   type CompanionOnboardingDisposition,
   type CompanionOnboardingEntryMode,
@@ -49,79 +46,14 @@ import {
   type CompanionOnboardingOfferStatus,
   type CompanionOnboardingStateV1,
   type CompanionOverview,
-  type CompanionPresenceState,
-  type CompanionSuggestionPause,
-  type CompanionSuppression,
   type OnboardingTransitionResponse,
   type RuntimeFenceRequest,
   type RuntimeFenceResponse,
   type TransitionAction,
+  COMPANION_AGENT_DEFAULT_SKILL_IDS,
+  companionAgentSettingsV1Schema,
+  type CompanionAgentSettingsV1,
 } from "@ailearn/shared";
-
-// ─── 表定义（与迁移 0074/0075 一致）───────────────────────────────────
-// apps/api 的 db schema 镜像树（apps/api/src/db/schema/）尚未同步 companion.ts，
-// 因此在模块内声明读取用途的表对象；列名/类型须与
-// packages/db/src/schema/companion.ts 保持一致，待镜像树同步后可删除并改回统一导出。
-
-export interface CompanionAnimationVoiceOff {
-  animationOff: boolean;
-  voiceOff: boolean;
-}
-
-export const userCompanionOnboarding = pgTable(
-  "user_companion_onboarding",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id").notNull(),
-    onboardingVersion: text("onboarding_version").notNull(),
-    revision: integer("revision").notNull().default(0),
-    // 自动欢迎资格严格等于 offer_status = 'not_offered'；consumed 是单调终态。
-    offerStatus: text("offer_status")
-      .$type<CompanionOnboardingOfferStatus>().notNull().default("not_offered"),
-    offerDisposition: text("offer_disposition")
-      .$type<CompanionOnboardingDisposition>(),
-    activeRun: jsonb("active_run").$type<CompanionOnboardingActiveRun>(),
-    lastRun: jsonb("last_run").$type<CompanionOnboardingLastRun>(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-);
-
-export const userCompanionAccountState = pgTable(
-  "user_companion_account_state",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id").notNull(),
-    // account revision / epoch CAS；SSE/WebSocket epoch 撤销依赖 epoch 单调递增。
-    revision: integer("revision").notNull().default(0),
-    epoch: integer("epoch").notNull().default(0),
-    globalEnabled: boolean("global_enabled").notNull().default(true),
-    presence: jsonb("presence").$type<CompanionPresenceState>(),
-    suggestionPause: jsonb("suggestion_pause").$type<CompanionSuggestionPause>(),
-    suppression: jsonb("suppression").$type<CompanionSuppression>(),
-    animationVoiceOff: jsonb("animation_voice_off")
-      .$type<CompanionAnimationVoiceOff>(),
-    notificationBoundary: jsonb("notification_boundary")
-      .$type<CompanionNotificationBoundary>(),
-    // 方案 16 §10.3：主动介入强度与静默时段（0140 迁移）。
-    interventionLevel: text("intervention_level").$type<"quiet" | "moderate" | "active">().notNull().default("moderate"),
-    quietHours: jsonb("quiet_hours").$type<{ startLocal: string; endLocal: string; timezone: string } | null>(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-);
-
-export const companionRuntimeFences = pgTable(
-  "companion_runtime_fences",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id").notNull(),
-    deviceSessionId: text("device_session_id").notNull(),
-    surfaceEpoch: integer("surface_epoch").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  },
-);
 
 // ─── 常量与类型 ─────────────────────────────────────────────────────────
 
@@ -145,6 +77,7 @@ const RUNTIME_FENCE_MAX_PER_USER = 64;
 
 /** account revision 冲突（客户端 base revision 与服务端不一致）。 */
 export const ACCOUNT_STATE_STALE_REVISION = "ACCOUNT_STATE_STALE_REVISION" as const;
+export const INVALID_AGENT_SETTINGS = "INVALID_AGENT_SETTINGS" as const;
 /** 版本号非法（空串或超长）。 */
 const INVALID_ONBOARDING_VERSION = "INVALID_ONBOARDING_VERSION" as const;
 
@@ -210,6 +143,7 @@ function serializeOnboarding(row: OnboardingRow): CompanionOnboardingStateV1 {
 }
 
 function serializeAccount(row: AccountRow): CompanionAccountStateV1 {
+  const parsedAgentSettings = companionAgentSettingsV1Schema.safeParse(row.agentSettings);
   return {
     revision: row.revision,
     epoch: row.epoch,
@@ -223,6 +157,16 @@ function serializeAccount(row: AccountRow): CompanionAccountStateV1 {
     // 方案 16 §10.3：主动介入强度与静默时段。
     interventionLevel: row.interventionLevel,
     quietHours: row.quietHours ?? undefined,
+    agentSettings: parsedAgentSettings.success ? parsedAgentSettings.data : defaultAgentSettings(),
+  };
+}
+
+function defaultAgentSettings(): CompanionAgentSettingsV1 {
+  return {
+    version: 1,
+    permissionLevel: "guided",
+    // 默认开启当前内置 Skill 全集；空数组是用户主动关闭全部 Skill。
+    enabledSkillIds: [...COMPANION_AGENT_DEFAULT_SKILL_IDS],
   };
 }
 
@@ -233,7 +177,39 @@ function emptyAccountState(): CompanionAccountStateV1 {
     globalEnabled: true,
     interventionLevel: "moderate",
     quietHours: undefined,
+    agentSettings: defaultAgentSettings(),
   };
+}
+
+function validateAgentSettingsPatch(patch: CompanionAccountPatch): void {
+  if (!patch.enabledSkillIds) return;
+  const allowed = new Set(COMPANION_AGENT_DEFAULT_SKILL_IDS);
+  if (patch.enabledSkillIds.some((skillId) => !allowed.has(skillId))) {
+    throw new CompanionStateError(
+      INVALID_AGENT_SETTINGS,
+      400,
+      "enabledSkillIds contains an unknown built-in skill",
+    );
+  }
+}
+
+/**
+ * 组装并校验落库的 Agent 设置。
+ *
+ * worker 侧用 companionAgentSettingsV1Schema.safeParse 读取，解析失败会静默回落
+ * 到 DEFAULT_SETTINGS。写入侧若只做 allowlist 校验、不按同一 schema 收口，两处
+ * 一旦漂移（version、字段名、id 形态）用户的权限与 Skill 开关会被无声忽略——
+ * 所以写入前用同一 schema parse（抛错即 400，不落半合法数据）。
+ */
+function buildAgentSettings(input: {
+  permissionLevel: CompanionAgentSettingsV1["permissionLevel"];
+  enabledSkillIds: string[];
+}): CompanionAgentSettingsV1 {
+  return companionAgentSettingsV1Schema.parse({
+    version: 1,
+    permissionLevel: input.permissionLevel,
+    enabledSkillIds: input.enabledSkillIds,
+  });
 }
 
 // ─── Onboarding transition（CAS 状态机）───────────────────────────────────
@@ -648,6 +624,7 @@ export async function updateCompanionAccountState(
   workspaceId: string,
   patch: CompanionAccountPatch,
 ): Promise<CompanionAccountStateV1> {
+  validateAgentSettingsPatch(patch);
   return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     const existing = await tx
       .select()
@@ -678,6 +655,16 @@ export async function updateCompanionAccountState(
           suppression: patch.suppression ?? null,
           animationVoiceOff: mergeAnimationVoiceOff(null, patch),
           notificationBoundary: patch.notificationBoundary ?? null,
+          // 2026-09 后端审查修复：首访 insert 必须与下方 UPDATE 路径同构映射
+          // interventionLevel/quietHours。此前遗漏 → 客户端首次设置「介入强度 /
+          // 静默时段」拿到 200，但字段落 DB 默认值（moderate/null），且 revision
+          // 已推进到 1：客户端以 revision=0 重试只会得到 409，用户设置永久丢失。
+          interventionLevel: patch.interventionLevel ?? "moderate",
+          quietHours: patch.quietHours ?? null,
+          agentSettings: buildAgentSettings({
+            permissionLevel: patch.agentPermissionLevel ?? "guided",
+            enabledSkillIds: patch.enabledSkillIds ?? [...COMPANION_AGENT_DEFAULT_SKILL_IDS],
+          }),
           updatedAt: now,
         })
         .returning();
@@ -696,6 +683,10 @@ export async function updateCompanionAccountState(
     }
 
     const globalOffApplied = row.globalEnabled && patch.globalEnabled === false;
+    const parsedAgentSettings = companionAgentSettingsV1Schema.safeParse(row.agentSettings);
+    const currentAgentSettings = parsedAgentSettings.success
+      ? parsedAgentSettings.data
+      : defaultAgentSettings();
     const [updated] = await tx
       .update(userCompanionAccountState)
       .set({
@@ -712,9 +703,15 @@ export async function updateCompanionAccountState(
         // 方案 16 §10.3：主动介入强度与静默时段。
         interventionLevel: patch.interventionLevel ?? row.interventionLevel,
         quietHours: patch.quietHours !== undefined ? patch.quietHours : row.quietHours,
+        agentSettings: buildAgentSettings({
+          permissionLevel: patch.agentPermissionLevel ?? currentAgentSettings.permissionLevel,
+          enabledSkillIds: patch.enabledSkillIds ?? currentAgentSettings.enabledSkillIds,
+        }),
         revision: row.revision + 1,
-        // global off → account epoch 单调递增：所有 active device session 的
-        // surfaceEpoch 落后即视为撤销，迟到的 Companion 结果一律丢弃。
+        // global off → account epoch 递增（**边沿触发**：仅 on→off 跃迁，
+        // 见上方 globalOffApplied）。所有 active device session 的 surfaceEpoch
+        // 落后即视为撤销，迟到的 Companion 结果一律丢弃；已经是 off 时重复关闭
+        // 不递增、不重复广播（幂等），跨跃迁则继续单调递增。
         epoch: globalOffApplied ? row.epoch + 1 : row.epoch,
         updatedAt: now,
       })
@@ -733,17 +730,6 @@ export async function updateCompanionAccountState(
 
     if (globalOffApplied) await notifyGlobalOffBroadcast(tx, userId, updated.epoch);
     return serializeAccount(updated);
-  });
-}
-
-/**
- * 查询钩子：当前 account epoch。供设备侧校验 surfaceEpoch 是否过期
- * （账号 SSE 撤销与迟到结果丢弃）。
- */
-export async function getAccountEpoch(userId: string, workspaceId: string): Promise<number> {
-  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
-    const row = await fetchAccountRow(tx, userId);
-    return row?.epoch ?? 0;
   });
 }
 
@@ -940,17 +926,6 @@ export async function listActiveRuntimeFences(
 export type { RuntimeFenceRecord };
 
 // ─── 任务 14：作答模态偏好（设置 → 伴星，跨设备一致；Owner 决策 4）──────
-
-/** user_learning_preferences 表（迁移 0074；镜像树未同步，模块内声明）。 */
-const userLearningPreferencesTable = pgTable("user_learning_preferences", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id").notNull(),
-  workspaceId: uuid("workspace_id"),
-  explicitPreferences: jsonb("explicit_preferences").$type<Record<string, unknown>>(),
-  suggestedPreferences: jsonb("suggested_preferences").$type<Record<string, unknown>>(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
 
 /** 07-9 冻结键：default_input_priority（voice/touch_structure/text；any=未设置） */
 const ANSWER_MODE_PREFERENCE_KEY = "default_input_priority" as const;

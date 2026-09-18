@@ -13,7 +13,7 @@ import { describe, it } from "node:test";
 import {
   deriveConceptLabelFromStatement,
   deriveConceptLabel,
-} from "../modules/card-generation-v2/concept-label.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 
 describe("deriveConceptLabelFromStatement", () => {
   it("剥离开头动词前缀并取第一个分句", () => {

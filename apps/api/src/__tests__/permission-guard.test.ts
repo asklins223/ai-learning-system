@@ -261,7 +261,6 @@ describe("permission-guard: owner-only 路由守卫清单", () => {
     { file: "identity/routes.ts", routePattern: '"/members/:userId"', method: "DELETE" },
     // export routes
     { file: "export/routes.ts", routePattern: '"/export/workspace"', method: "GET" },
-    { file: "export/routes.ts", routePattern: '"/export/workspace/restore"', method: "POST" },
     // search routes
     { file: "search/routes.ts", routePattern: '"/search/drift"', method: "GET" },
     { file: "search/routes.ts", routePattern: '"/search/reindex"', method: "POST" },
@@ -295,8 +294,8 @@ describe("permission-guard: owner-only 路由守卫清单", () => {
     const content = readRouteFile("export/routes.ts");
     const preHandlerWithOwner = content.match(/preHandler:\s*\[requireOwner\]/g);
     assert.ok(
-      preHandlerWithOwner !== null && preHandlerWithOwner.length >= 2,
-      `export/routes.ts 应有 2 个路由使用 requireOwner，实际找到 ${preHandlerWithOwner?.length ?? 0}`,
+      preHandlerWithOwner !== null && preHandlerWithOwner.length >= 1,
+      `export/routes.ts 应有 owner-only 路由使用 requireOwner，实际找到 ${preHandlerWithOwner?.length ?? 0}`,
     );
   });
 

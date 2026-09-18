@@ -36,6 +36,18 @@ const setZoomFactor = async (zoomFactor) => {
 
 const settleSurface = (window) => window.waitForTimeout(900)
 
+async function closeHomeCatalog(window) {
+  const toggle = window.getByRole('button', { name: '收起目录', exact: true })
+  if (await toggle.count() && await toggle.isVisible()) {
+    await toggle.click()
+    await window.waitForFunction(
+      () => document.querySelector('.home-catalog')?.getAttribute('aria-hidden') === 'true',
+      undefined,
+      { timeout: 5_000 },
+    )
+  }
+}
+
 const waitForScenePhase = (window, phase) => window.waitForFunction(
   (expectedPhase) => document.querySelector('.desktop-app')?.getAttribute('data-scene-phase') === expectedPhase,
   phase,
@@ -84,7 +96,7 @@ async function writeCaptureRuntime(window, captureMode, gateBoundary = null) {
       ? [...document.fonts].map((font) => ({ family: font.family, status: font.status, style: font.style, weight: font.weight }))
       : []
     const fontStacks = Object.fromEntries(
-      ['body', '.scene-stage', '.study-workbench', '.action-rail']
+      ['body', '.scene-stage', '.day-route', '.action-rail']
         .map((selector) => [selector, getComputedStyle(document.querySelector(selector) ?? document.body).fontFamily]),
     )
     return {
@@ -734,11 +746,6 @@ async function captureRegistrationGate(window) {
 }
 
 async function enterOwnerRoomThroughGate(window) {
-  if (process.env.CAPTURE_DOOR_TRANSITION === '1') {
-    await window.evaluate(() => {
-      document.documentElement.dataset.captureDoorTransition = 'true'
-    })
-  }
   await window.waitForFunction(
     () => Boolean(document.querySelector('.action-rail')) || Boolean(document.querySelector('.desktop-access-gate input[type="email"]')),
     undefined,
@@ -780,83 +787,6 @@ async function enterOwnerRoomThroughGate(window) {
     await window.waitForTimeout(250)
   }
   await window.locator('.action-rail').waitFor({ state: 'attached', timeout: 1_000 })
-
-  if (process.env.CAPTURE_DOOR_TRANSITION === '1') {
-    const transition = window.locator('[data-transition-engine="pixijs-gsap"]')
-    await transition.waitFor({ state: 'attached', timeout: 8_000 })
-    const roomContent = window.locator('.desktop-access-gate__room-content[data-door-entry-phase="opening"]')
-    await roomContent.waitFor({ state: 'attached', timeout: 8_000 })
-    const roomHandoffState = await roomContent.evaluate((element) => ({
-      visibility: getComputedStyle(element).visibility,
-      pointerEvents: getComputedStyle(element).pointerEvents,
-      inert: element.inert,
-    }))
-    if (roomHandoffState.visibility !== 'hidden' || roomHandoffState.pointerEvents !== 'none' || !roomHandoffState.inert) {
-      throw new Error(`Door transition left Room content exposed: ${JSON.stringify(roomHandoffState)}`)
-    }
-    await transition.locator('canvas').waitFor({ state: 'visible', timeout: 8_000 }).catch(() => undefined)
-    if (await transition.locator('canvas').count()) {
-      // React mounts the host before Pixi finishes loading the two transition textures
-      // and before useGSAP creates the paused capture timeline. Wait for that
-      // state instead of sampling the first canvas paint.
-      await window.waitForFunction(
-        () => document.querySelector('[data-transition-engine="pixijs-gsap"]')?.getAttribute('data-door-resource-state') === 'ready',
-        undefined,
-        { timeout: 8_000 },
-      )
-      await window.waitForFunction(
-        () => document.querySelector('[data-transition-engine="pixijs-gsap"]')?.getAttribute('data-door-capture-mode') === 'paused',
-        undefined,
-        { timeout: 8_000 },
-      )
-      const captureMode = await transition.getAttribute('data-door-capture-mode')
-      if (captureMode !== 'paused') throw new Error(`Door transition capture mode was not armed: ${captureMode ?? 'missing'}`)
-      const visibilityContract = await transition.evaluate((element) => ({
-        assetSource: element.getAttribute('data-door-asset-source'),
-        resourceState: element.getAttribute('data-door-resource-state'),
-        visibility: element.getAttribute('data-door-visibility'),
-        timeline: element.getAttribute('data-door-timeline'),
-        renderer: element.getAttribute('data-door-renderer'),
-      }))
-      if (visibilityContract.assetSource !== 'manifest' || visibilityContract.resourceState !== 'ready' || visibilityContract.visibility !== 'visible' || visibilityContract.timeline !== 'paused' || visibilityContract.renderer !== 'running') {
-        throw new Error(`Door transition visibility contract was not armed: ${JSON.stringify(visibilityContract)}`)
-      }
-      const sequenceRoot = resolve(reviewRoot, 'door-transition-sequence')
-      await mkdir(sequenceRoot, { recursive: true })
-      const seekDoor = async (progress) => {
-        await transition.evaluate((element, value) => {
-          element.dispatchEvent(new CustomEvent('door-capture-command', {
-            detail: { action: 'seek', progress: value },
-          }))
-        }, progress)
-      }
-      // Keep a dense deterministic sequence as motion evidence. The three
-      // named stills below are only representative checkpoints; the runtime
-      // timeline itself is continuous and this sequence makes that visible
-      // during review instead of implying a three-frame animation.
-      for (let index = 0; index <= 24; index += 1) {
-        // Do not seek to exactly 1 here: GSAP fires onComplete at the final
-        // tick, which correctly unmounts the transition before the named
-        // checkpoints below can be written.
-        await seekDoor(index === 24 ? 0.999 : index / 24)
-        await window.screenshot({ path: resolve(sequenceRoot, `frame-${String(index).padStart(2, '0')}.png`) })
-      }
-      await seekDoor(0.1)
-      console.log(`Door latch sample: ${await transition.getAttribute('data-door-latch')} / swing ${await transition.getAttribute('data-door-swing')} / interior ${await transition.getAttribute('data-door-interior')} / portal ${await transition.getAttribute('data-door-portal-alpha')} / texture ${await transition.getAttribute('data-door-texture-size')}`)
-      await window.screenshot({ path: resolve(reviewRoot, 'door-transition-latch.png') })
-      await seekDoor(0.38)
-      console.log(`Door swing sample: ${await transition.getAttribute('data-door-latch')} / swing ${await transition.getAttribute('data-door-swing')} / interior ${await transition.getAttribute('data-door-interior')} / portal ${await transition.getAttribute('data-door-portal-alpha')} / texture ${await transition.getAttribute('data-door-texture-size')}`)
-      await window.screenshot({ path: resolve(reviewRoot, 'door-transition-swing.png') })
-      await seekDoor(0.76)
-      if (await transition.count()) await window.screenshot({ path: resolve(reviewRoot, 'door-transition-open.png') })
-      await transition.evaluate((element) => {
-        element.dispatchEvent(new CustomEvent('door-capture-command', {
-          detail: { action: 'play' },
-        }))
-      })
-      await transition.waitFor({ state: 'detached', timeout: 5_000 })
-    }
-  }
 
   const session = await window.evaluate(async () => {
     const opaqueId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -1180,7 +1110,12 @@ try {
   await window.waitForFunction(
     () => {
       const canvasHost = document.querySelector('.room-pixi-canvas')
-      return Boolean(canvasHost) && canvasHost.getAttribute('data-scene-renderer-state') !== 'loading'
+      const declaredLayerCount = Number.parseInt(
+        document.querySelector('.room-reference-frame')?.getAttribute('data-scene-room-layer-count') ?? '',
+        10,
+      )
+      return declaredLayerCount === 0
+        || (Boolean(canvasHost) && canvasHost.getAttribute('data-scene-renderer-state') !== 'loading')
     },
     undefined,
     { timeout: 12_000 },
@@ -1273,6 +1208,7 @@ try {
       && canvasLayerOrderValid
       && canvasLayerAudit.every(isValidCanvasLayerAuditRecord)
     return {
+      declaredLayerCount: Number.parseInt(frame?.getAttribute('data-scene-room-layer-count') ?? '', 10),
       state,
       reason: canvasHost?.getAttribute('data-scene-renderer-reason') ?? null,
       rendererName: canvasHost?.getAttribute('data-scene-renderer-name') ?? null,
@@ -1301,6 +1237,7 @@ try {
   await writeFile(resolve(reviewRoot, 'room-renderer-contract.json'), `${JSON.stringify(roomRendererContract, null, 2)}\n`, 'utf8')
   if (
     captureOwnerCredentialsAvailable
+    && roomRendererContract.declaredLayerCount > 0
     && (roomRendererContract.state === 'missing' || roomRendererContract.state === 'loading')
   ) {
     throw new Error(`Room poster-backed renderer did not settle: ${JSON.stringify(roomRendererContract)}`)
@@ -1326,6 +1263,18 @@ try {
     )
   ) {
     throw new Error(`Room Pixi canvas did not replace the home poster safely: ${JSON.stringify(roomRendererContract)}`)
+  }
+  if (
+    captureOwnerCredentialsAvailable
+    && roomRendererContract.declaredLayerCount === 0
+    && (
+      roomRendererContract.state !== 'missing'
+      || roomRendererContract.canvasCount !== 0
+      || roomRendererContract.frameCanvasActive
+      || !roomRendererContract.homePosterOpacity.some((opacity) => Number.isFinite(opacity) && opacity > 0.02)
+    )
+  ) {
+    throw new Error(`Empty Room layer pack mounted a redundant Pixi canvas: ${JSON.stringify(roomRendererContract)}`)
   }
   if (
     captureOwnerCredentialsAvailable
@@ -1368,7 +1317,7 @@ try {
     || !seatSceneContract.seatDayPath?.includes('study-seat-day-v2.png')
     || !seatSceneContract.seatNightPath?.includes('study-seat-night-v2.png')
     || !seatSceneContract.atmospherePresent
-    || seatSceneContract.homeWindowMedia !== 1
+    || seatSceneContract.homeWindowMedia !== 0
     || seatSceneContract.legacySurfaceWorld !== 0
     || seatSceneContract.sceneRenderer !== 'dom-2.5d'
     || seatSceneContract.scenePhase !== 'idle'
@@ -1378,6 +1327,71 @@ try {
   ) {
     throw new Error(`Overview-to-seat scene contract drifted: ${JSON.stringify(seatSceneContract)}`)
   }
+
+  const homeExperienceContract = await window.evaluate(() => {
+    const foreground = document.querySelector('.home-room-foreground img')
+    const foregroundRoot = document.querySelector('.home-room-foreground')
+    const life = document.querySelector('.home-room-life')
+    const catalog = document.querySelector('.home-catalog')
+    return {
+      catalogInitiallyClosed: catalog?.getAttribute('aria-hidden') === 'true',
+      lifeState: life?.getAttribute('data-home-room-life') ?? null,
+      foregroundState: foregroundRoot?.getAttribute('data-home-foreground') ?? null,
+      foregroundSource: foreground instanceof HTMLImageElement ? foreground.currentSrc : null,
+      foregroundReady: foreground instanceof HTMLImageElement && foreground.complete,
+      foregroundSize: foreground instanceof HTMLImageElement
+        ? [foreground.naturalWidth, foreground.naturalHeight]
+        : null,
+      foregroundPointerEvents: foregroundRoot instanceof HTMLElement ? getComputedStyle(foregroundRoot).pointerEvents : null,
+      depthObjectCount: document.querySelectorAll('.home-room-depth__object').length,
+      hotspotCount: document.querySelectorAll('.hotspot-layer button').length,
+      windowVideoCount: document.querySelectorAll('.window-ambient-video, .window-ambient-video__media').length,
+    }
+  })
+  if (
+    !homeExperienceContract.catalogInitiallyClosed
+    || homeExperienceContract.lifeState !== 'active'
+    || homeExperienceContract.foregroundState !== 'alive'
+    || !homeExperienceContract.foregroundSource?.includes('home-foreground-leaves-v1.png')
+    || !homeExperienceContract.foregroundReady
+    || JSON.stringify(homeExperienceContract.foregroundSize) !== JSON.stringify([1672, 941])
+    || homeExperienceContract.foregroundPointerEvents !== 'none'
+    || homeExperienceContract.depthObjectCount !== 8
+    || homeExperienceContract.hotspotCount !== 5
+    || homeExperienceContract.windowVideoCount !== 0
+  ) {
+    throw new Error(`Home 2.5D experience contract drifted: ${JSON.stringify(homeExperienceContract)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'home-2-5d-experience-contract.json'), `${JSON.stringify(homeExperienceContract, null, 2)}\n`, 'utf8')
+
+  const sampleHomeLife = () => window.evaluate(() => {
+    const read = (selector) => {
+      const element = document.querySelector(selector)
+      if (!(element instanceof Element)) return null
+      const style = getComputedStyle(element)
+      return { transform: style.transform, opacity: style.opacity }
+    }
+    return {
+      foreground: read('.home-room-foreground img'),
+      steam: read('.home-room-life__steam'),
+      mote: read('.home-room-life__mote'),
+      sheen: read('.home-room-life__window-sheen'),
+      star: read('.home-room-life__stars circle'),
+    }
+  })
+  const homeLifeStart = await sampleHomeLife()
+  await window.waitForTimeout(900)
+  const homeLifeEnd = await sampleHomeLife()
+  const homeLifeMotion = {
+    sampleWindowMs: 900,
+    start: homeLifeStart,
+    end: homeLifeEnd,
+    changed: Object.keys(homeLifeStart).filter((key) => JSON.stringify(homeLifeStart[key]) !== JSON.stringify(homeLifeEnd[key])),
+  }
+  if (homeLifeMotion.changed.length < 2) {
+    throw new Error(`Home environmental motion did not remain visibly alive: ${JSON.stringify(homeLifeMotion)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'home-2-5d-motion-contract.json'), `${JSON.stringify(homeLifeMotion, null, 2)}\n`, 'utf8')
 
   const nativeChrome = await electronApp.evaluate(({ BrowserWindow }) => {
     const target = BrowserWindow.getAllWindows()[0]
@@ -1410,312 +1424,133 @@ try {
 
   await window.screenshot({ path: resolve(reviewRoot, 'desktop.png') })
 
+  await window.getByRole('button', { name: '全部功能', exact: true }).click()
+  await window.locator('.home-catalog[aria-hidden="false"]').waitFor({ state: 'visible', timeout: 5_000 })
+  const catalogModalContract = await window.evaluate(() => {
+    const catalog = document.querySelector('.home-catalog')
+    const header = catalog?.querySelector('.home-catalog__header')
+    const recovery = catalog?.querySelector('details.home-recovery')
+    if (recovery instanceof HTMLDetailsElement) recovery.open = true
+    const recoveryStack = recovery?.querySelector('.run-recovery-stack')
+    const recoveryCopy = recovery?.querySelector('.run-recovery-notice__copy strong')
+    const recoverySecondary = recovery?.querySelector('.run-recovery-notice__secondary')
+    const background = [
+      document.querySelector('.scene-stage'),
+      document.querySelector('.companion-presence'),
+      document.querySelector('.immersive-island'),
+    ]
+    const otherActions = [...document.querySelectorAll('.home-command-deck > .rail-action:not(.rail-action--catalog)')]
+    return {
+      role: catalog?.getAttribute('role') ?? null,
+      ariaModal: catalog?.getAttribute('aria-modal') ?? null,
+      scrimCount: document.querySelectorAll('.home-catalog-scrim').length,
+      headerPosition: header instanceof HTMLElement ? getComputedStyle(header).position : null,
+      backgroundInert: background.every((element) => element instanceof HTMLElement && element.inert),
+      otherActionsInert: otherActions.every((element) => element instanceof HTMLElement && element.inert),
+      catalogColor: catalog instanceof HTMLElement ? getComputedStyle(catalog).color : null,
+      recoveryPresent: recovery instanceof HTMLDetailsElement,
+      recoveryCopyColor: recoveryCopy instanceof HTMLElement ? getComputedStyle(recoveryCopy).color : null,
+      recoverySecondaryColor: recoverySecondary instanceof HTMLElement ? getComputedStyle(recoverySecondary).color : null,
+      recoveryOverflowY: recoveryStack instanceof HTMLElement ? getComputedStyle(recoveryStack).overflowY : null,
+    }
+  })
+  if (
+    catalogModalContract.role !== 'dialog'
+    || catalogModalContract.ariaModal !== 'true'
+    || catalogModalContract.scrimCount !== 1
+    || catalogModalContract.headerPosition !== 'sticky'
+    || !catalogModalContract.backgroundInert
+    || !catalogModalContract.otherActionsInert
+    || (catalogModalContract.recoveryPresent && catalogModalContract.recoveryCopyColor !== catalogModalContract.catalogColor)
+    || (catalogModalContract.recoverySecondaryColor !== null && catalogModalContract.recoverySecondaryColor !== catalogModalContract.catalogColor)
+    || (catalogModalContract.recoveryPresent && catalogModalContract.recoveryOverflowY !== 'visible')
+  ) {
+    throw new Error(`Home catalog modal boundary drifted: ${JSON.stringify(catalogModalContract)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'home-catalog-modal-contract.json'), `${JSON.stringify(catalogModalContract, null, 2)}\n`, 'utf8')
+  await closeHomeCatalog(window)
+
   if (captureOwnerCredentialsAvailable) {
+    await window.getByRole('button', { name: '全部功能', exact: true }).click()
+    await window.locator('.home-catalog[aria-hidden="false"]').waitFor({ state: 'visible', timeout: 5_000 })
     const generationRecoveryButton = window.getByRole('button', { name: /查看恢复状态|恢复候选审核/ })
     await generationRecoveryButton.waitFor({ state: 'visible', timeout: 15_000 })
     await generationRecoveryButton.click()
     await window.getByRole('heading', { name: '整理学习卡' }).waitFor()
-    await window.waitForFunction(() => Boolean(document.querySelector('.card-generation-meta')) || Boolean(document.querySelector('.card-generation-state--error')), undefined, { timeout: 15_000 })
-    if (await window.locator('.card-generation-state--error').count()) {
-      const generationError = await window.locator('.card-generation-state--error').innerText()
-      throw new Error(`Owner Card Generation recovery did not load: ${generationError}`)
+    // 页 12「学习卡生成中」/ 页 13「候选卡审核」的真实 DOM。旧的 .card-generation-surface*
+    // 工作台（action edge / footer 双带 / recovery pair）已经没有任何渲染端生产者，
+    // 原来那套 320px 布局探针测的是不存在的页面，已随该代工作台删除。
+    const generationPaper = window.locator('.task-surface--card-generation .card-generation-board, .task-surface--card-generation .candidate-review-table').first()
+    await generationPaper.waitFor({ state: 'visible', timeout: 20_000 })
+    await settleSurface(window)
+    const generationContract = await window.evaluate(() => {
+      const surface = document.querySelector('.task-surface--card-generation')
+      const paper = surface?.querySelector('.card-generation-board, .candidate-review-table')
+      const board = surface?.querySelector('.card-generation-board')
+      const candidate = surface?.querySelector('.candidate-study-card')
+      const slip = surface?.querySelector('.candidate-review-slip')
+      const buttons = [...(surface?.querySelectorAll('.card-generation-board__header button, .candidate-review-slip__actions button, .stamp-actions button') ?? [])]
+      const surfaceBounds = surface?.getBoundingClientRect()
+      return {
+        heading: document.querySelector('.task-title h1')?.textContent?.trim() ?? null,
+        paperVisible: Boolean(paper),
+        boardFooterVisible: Boolean(board?.querySelector('.card-generation-board__footer')),
+        candidateVisible: Boolean(candidate),
+        candidateSlipVisible: Boolean(slip),
+        hudStateVisible: Boolean(surface?.querySelector('.card-generation-hud-state')),
+        errorText: surface?.querySelector('.card-generation-hud-state[role="alert"]')?.textContent?.trim() ?? null,
+        // 本机推断出来的"成功"控件在服务端合同里不存在，必须为 0。
+        localSuccessControls: [...document.querySelectorAll('button')].filter((button) => /本机候选|自动激活|生成完成/.test(button.textContent ?? '')).length,
+        rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(surface?.textContent ?? ''),
+        actions: buttons.map((button) => {
+          const bounds = button.getBoundingClientRect()
+          return {
+            label: (button.textContent ?? '').trim(),
+            height: bounds.height,
+            withinPaper: Boolean(surfaceBounds && bounds.left >= surfaceBounds.left - 1 && bounds.right <= surfaceBounds.right + 1),
+            hit: bounds.width > 0 && bounds.height > 0
+              ? document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('button') === button
+              : false,
+          }
+        }),
+      }
+    })
+    if (generationContract.errorText) {
+      throw new Error(`Owner Card Generation recovery did not load: ${generationContract.errorText}`)
     }
-    const generationContract = await window.evaluate(() => ({
-      surfaceVisible: Boolean(document.querySelector('.card-generation-surface')),
-      runMetaVisible: Boolean(document.querySelector('.card-generation-meta')),
-      candidateListVisible: Boolean(document.querySelector('.card-generation-list')),
-      terminalStateVisible: Boolean(document.querySelector('.card-generation-state--inline, .card-generation-empty')),
-      localSuccessControls: [...document.querySelectorAll('button')].filter((button) => /本机候选|自动激活|生成完成/.test(button.textContent ?? '')).length,
-      rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(document.querySelector('.card-generation-surface')?.textContent ?? ''),
-    }))
-    if (!generationContract.surfaceVisible || !generationContract.runMetaVisible || (!generationContract.candidateListVisible && !generationContract.terminalStateVisible) || generationContract.localSuccessControls !== 0 || generationContract.rawIdentityVisible) {
+    if (!generationContract.paperVisible || !generationContract.heading) {
+      throw new Error(`Owner Card Generation page did not render its paper: ${JSON.stringify(generationContract)}`)
+    }
+    if (!generationContract.boardFooterVisible && !generationContract.candidateVisible && !generationContract.hudStateVisible) {
       throw new Error(`Owner Card Generation recovery did not consume the real run safely: ${JSON.stringify(generationContract)}`)
     }
-    await settleSurface(window)
-    const generationLayoutProbe = await window.evaluate(() => {
-      const surface = document.querySelector('.card-generation-surface')
-      const content = surface?.querySelector('.card-generation-surface__content')
-      const recovery = surface?.querySelector('.card-generation-recovery')
-      const recoveryActions = surface?.querySelector('.card-generation-recovery .surface-action-pair')
-      const footer = surface?.querySelector('.card-generation-footer')
-      const footerActions = surface?.querySelector('.card-generation-footer .surface-action-pair')
-      const actionEdge = surface?.querySelector('.card-generation-surface__action-edge')
-      const footerButton = footer?.querySelector('button')
-      const recoveryButtons = [...(recoveryActions?.querySelectorAll('button') ?? [])]
-      const rect = (element) => {
-        if (!(element instanceof HTMLElement)) return null
-        const bounds = element.getBoundingClientRect()
-        return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, width: bounds.width, height: bounds.height }
-      }
-      const hits = (element) => {
-        if (!(element instanceof HTMLElement)) return false
-        const bounds = element.getBoundingClientRect()
-        if (bounds.width <= 0 || bounds.height <= 0) return false
-        return document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('button') === element
-      }
-      const contentStyle = content instanceof HTMLElement ? getComputedStyle(content) : null
-      const contentLogicalBottom = content instanceof HTMLElement ? content.offsetTop + content.clientHeight : null
-      const actionEdgeLogicalTop = actionEdge instanceof HTMLElement ? actionEdge.offsetTop : null
-      return {
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-        surface: rect(surface),
-        content: rect(content),
-        recovery: rect(recovery),
-        recoveryActions: rect(recoveryActions),
-        actionEdge: rect(actionEdge),
-        footer: rect(footer),
-        footerActions: rect(footerActions),
-        contentClientHeight: content instanceof HTMLElement ? content.clientHeight : 0,
-        contentScrollHeight: content instanceof HTMLElement ? content.scrollHeight : 0,
-        contentOverflowY: contentStyle?.overflowY ?? null,
-        footerOutsideScrollRoot: Boolean(content && footer && !content.contains(footer)),
-        contentLogicalBottom,
-        actionEdgeLogicalTop,
-        contentBeforeActionEdge: contentLogicalBottom !== null && actionEdgeLogicalTop !== null
-          ? contentLogicalBottom <= actionEdgeLogicalTop
-          : false,
-        recoveryActionHits: recoveryButtons.map(hits),
-        footerButtonHit: hits(footerButton),
-      }
-    })
-    if (!generationLayoutProbe.footerOutsideScrollRoot
-      || generationLayoutProbe.contentScrollHeight <= generationLayoutProbe.contentClientHeight
-      || !generationLayoutProbe.contentBeforeActionEdge
-      || !generationLayoutProbe.recoveryActionHits.every(Boolean)
-      || !generationLayoutProbe.footerButtonHit) {
-      throw new Error(`Owner Card Generation action edge is not safely reachable: ${JSON.stringify(generationLayoutProbe)}`)
+    if (generationContract.localSuccessControls !== 0 || generationContract.rawIdentityVisible) {
+      throw new Error(`Owner Card Generation exposed a local-success control or a raw identity: ${JSON.stringify(generationContract)}`)
     }
-    await writeFile(resolve(reviewRoot, 'desktop-card-generation-owner-layout.json'), `${JSON.stringify(generationLayoutProbe, null, 2)}\n`, 'utf8')
+    if (generationContract.actions.some((action) => !action.withinPaper || !action.hit)) {
+      throw new Error(`Owner Card Generation action is outside the paper or not hit-testable: ${JSON.stringify(generationContract.actions)}`)
+    }
+    await writeFile(resolve(reviewRoot, 'desktop-card-generation-owner-contract.json'), `${JSON.stringify(generationContract, null, 2)}\n`, 'utf8')
     await window.screenshot({ path: resolve(reviewRoot, 'desktop-card-generation-owner.png') })
-    await setSize(512, 350, true)
-    await settleSurface(window)
-    const compactGenerationLayoutProbe = await window.evaluate(() => {
-      const taskSurface = document.querySelector('.task-surface--card-generation')
-      const surface = document.querySelector('.card-generation-surface')
-      const content = surface?.querySelector('.card-generation-surface__content')
-      const actionEdge = surface?.querySelector('.card-generation-surface__action-edge')
-      const footer = surface?.querySelector('.card-generation-footer')
-      const footerButton = footer?.querySelector('button')
-      const rect = (element) => {
-        if (!(element instanceof HTMLElement)) return null
-        const bounds = element.getBoundingClientRect()
-        return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, width: bounds.width, height: bounds.height }
-      }
-      const hit = (element) => {
-        if (!(element instanceof HTMLElement)) return false
-        const bounds = element.getBoundingClientRect()
-        if (bounds.width <= 0 || bounds.height <= 0) return false
-        return document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('button') === element
-      }
-      const surfaceStyle = surface instanceof HTMLElement ? getComputedStyle(surface) : null
-      const contentStyle = content instanceof HTMLElement ? getComputedStyle(content) : null
-      const taskSurfaceStyle = taskSurface instanceof HTMLElement ? getComputedStyle(taskSurface) : null
-      return {
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-        taskSurface: rect(taskSurface),
-        surface: rect(surface),
-        content: rect(content),
-        actionEdge: rect(actionEdge),
-        footer: rect(footer),
-        taskSurfaceClientHeight: taskSurface instanceof HTMLElement ? taskSurface.clientHeight : 0,
-        taskSurfaceClientWidth: taskSurface instanceof HTMLElement ? taskSurface.clientWidth : 0,
-        taskSurfaceScrollHeight: taskSurface instanceof HTMLElement ? taskSurface.scrollHeight : 0,
-        taskSurfaceScrollWidth: taskSurface instanceof HTMLElement ? taskSurface.scrollWidth : 0,
-        taskSurfaceOverflowY: taskSurfaceStyle?.overflowY ?? null,
-        surfaceClientHeight: surface instanceof HTMLElement ? surface.clientHeight : 0,
-        surfaceScrollHeight: surface instanceof HTMLElement ? surface.scrollHeight : 0,
-        surfaceScrollWidth: surface instanceof HTMLElement ? surface.scrollWidth : 0,
-        surfaceOverflowY: surfaceStyle?.overflowY ?? null,
-        contentOverflowY: contentStyle?.overflowY ?? null,
-        playerTransform: surface instanceof HTMLElement ? getComputedStyle(surface).transform : null,
-        footerOutsideScrollRoot: Boolean(content && footer && !content.contains(footer)),
-        contentBeforeActionEdge: (() => {
-          const contentBounds = rect(content)
-          const edgeBounds = rect(actionEdge)
-          return Boolean(contentBounds && edgeBounds && edgeBounds.top >= contentBounds.bottom - 1)
-        })(),
-        footerButtonWithinViewport: (() => {
-          const bounds = rect(footerButton)
-          return Boolean(bounds && bounds.left >= -1 && bounds.right <= window.innerWidth + 1 && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1)
-        })(),
-        footerButtonHit: hit(footerButton),
-      }
-    })
-    if (!compactGenerationLayoutProbe.taskSurface
-      || compactGenerationLayoutProbe.taskSurfaceScrollHeight <= compactGenerationLayoutProbe.taskSurfaceClientHeight
-      || compactGenerationLayoutProbe.taskSurfaceScrollWidth > compactGenerationLayoutProbe.taskSurfaceClientWidth + 1
-      || compactGenerationLayoutProbe.taskSurfaceOverflowY !== 'auto'
-      || compactGenerationLayoutProbe.playerTransform !== 'none'
-      || compactGenerationLayoutProbe.contentOverflowY !== 'visible'
-      || !compactGenerationLayoutProbe.footerOutsideScrollRoot
-      || !compactGenerationLayoutProbe.contentBeforeActionEdge) {
-      throw new Error(`Card Generation compact surface drifted: ${JSON.stringify(compactGenerationLayoutProbe)}`)
-    }
-    await writeFile(resolve(reviewRoot, 'desktop-card-generation-owner-zoom-200-layout.json'), `${JSON.stringify(compactGenerationLayoutProbe, null, 2)}\n`, 'utf8')
-    await window.screenshot({ path: resolve(reviewRoot, 'desktop-card-generation-owner-zoom-200.png') })
-    await window.locator('.card-generation-surface__action-edge .text-action').scrollIntoViewIfNeeded()
-    const compactGenerationActionAfterScroll = await window.evaluate(() => {
-      const button = document.querySelector('.card-generation-surface__action-edge .text-action')
-      if (!(button instanceof HTMLElement)) return null
-      const bounds = button.getBoundingClientRect()
-      return {
-        top: bounds.top,
-        bottom: bounds.bottom,
-        left: bounds.left,
-        right: bounds.right,
-        withinViewport: bounds.left >= -1 && bounds.right <= window.innerWidth + 1 && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
-        hit: document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('button') === button,
-      }
-    })
-    if (!compactGenerationActionAfterScroll?.withinViewport || !compactGenerationActionAfterScroll.hit) {
-      throw new Error(`Card Generation compact footer was not reachable after scroll: ${JSON.stringify(compactGenerationActionAfterScroll)}`)
-    }
-    await writeFile(resolve(reviewRoot, 'desktop-card-generation-owner-zoom-200-action.json'), `${JSON.stringify(compactGenerationActionAfterScroll, null, 2)}\n`, 'utf8')
-    await window.screenshot({ path: resolve(reviewRoot, 'desktop-card-generation-owner-zoom-200-scrolled.png') })
-    await window.evaluate(() => {
-      const surface = document.querySelector('.task-surface--card-generation')
-      if (surface instanceof HTMLElement) surface.scrollTop = 0
-    })
-    await setZoomFactor(2)
-    await setSize(640, 810, true)
-    await settleSurface(window)
-    const compactGeneration320Layout = await window.evaluate(() => {
-      const taskSurface = document.querySelector('.task-surface--card-generation')
-      const surface = document.querySelector('.card-generation-surface')
-      const content = surface?.querySelector('.card-generation-surface__content')
-      const recovery = surface?.querySelector('.card-generation-recovery')
-      const recoveryActions = recovery?.querySelector('.surface-action-pair')
-      const actionEdge = surface?.querySelector('.card-generation-surface__action-edge')
-      const footer = surface?.querySelector('.card-generation-footer')
-      const recoveryButtons = [...(recoveryActions?.querySelectorAll('button') ?? [])]
-      const footerButtons = [...(footer?.querySelectorAll('button') ?? [])]
-      const rect = (element) => {
-        if (!(element instanceof HTMLElement)) return null
-        const bounds = element.getBoundingClientRect()
-        return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, width: bounds.width, height: bounds.height }
-      }
-      const horizontalWithinViewport = (element) => {
-        const bounds = rect(element)
-        return Boolean(bounds && bounds.left >= -1 && bounds.right <= window.innerWidth + 1)
-      }
-      const style = (element) => element instanceof HTMLElement ? getComputedStyle(element) : null
-      const contentBounds = rect(content)
-      const edgeBounds = rect(actionEdge)
-      return {
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-        taskSurface: rect(taskSurface),
-        surface: rect(surface),
-        content: contentBounds,
-        recovery: rect(recovery),
-        recoveryActions: rect(recoveryActions),
-        actionEdge: edgeBounds,
-        footer: rect(footer),
-        recoveryButtonHeights: recoveryButtons.map((button) => rect(button)?.height ?? 0),
-        footerButtonHeights: footerButtons.map((button) => rect(button)?.height ?? 0),
-        recoveryButtonsHorizontallyWithinViewport: recoveryButtons.every(horizontalWithinViewport),
-        footerButtonsHorizontallyWithinViewport: footerButtons.every(horizontalWithinViewport),
-        taskSurfaceClientHeight: taskSurface instanceof HTMLElement ? taskSurface.clientHeight : 0,
-        taskSurfaceClientWidth: taskSurface instanceof HTMLElement ? taskSurface.clientWidth : 0,
-        taskSurfaceScrollHeight: taskSurface instanceof HTMLElement ? taskSurface.scrollHeight : 0,
-        taskSurfaceScrollWidth: taskSurface instanceof HTMLElement ? taskSurface.scrollWidth : 0,
-        taskSurfaceOverflowY: style(taskSurface)?.overflowY ?? null,
-        surfaceClientHeight: surface instanceof HTMLElement ? surface.clientHeight : 0,
-        surfaceScrollHeight: surface instanceof HTMLElement ? surface.scrollHeight : 0,
-        surfaceScrollWidth: surface instanceof HTMLElement ? surface.scrollWidth : 0,
-        surfaceTransform: style(surface)?.transform ?? null,
-        contentOverflowY: style(content)?.overflowY ?? null,
-        footerOutsideScrollRoot: Boolean(content && footer && !content.contains(footer)),
-        contentBeforeActionEdge: Boolean(contentBounds && edgeBounds && edgeBounds.top >= contentBounds.bottom - 1),
-        recoveryButtonCount: recoveryButtons.length,
-        footerButtonCount: footerButtons.length,
-      }
-    })
-    if (compactGeneration320Layout.viewport.width !== 320
-      || compactGeneration320Layout.taskSurfaceScrollHeight <= compactGeneration320Layout.taskSurfaceClientHeight
-      || compactGeneration320Layout.taskSurfaceScrollWidth > compactGeneration320Layout.taskSurfaceClientWidth + 1
-      || compactGeneration320Layout.taskSurfaceOverflowY !== 'auto'
-      || compactGeneration320Layout.surfaceScrollWidth > compactGeneration320Layout.surfaceClientWidth + 1
-      || compactGeneration320Layout.surfaceTransform !== 'none'
-      || compactGeneration320Layout.contentOverflowY !== 'visible'
-      || !compactGeneration320Layout.footerOutsideScrollRoot
-      || !compactGeneration320Layout.contentBeforeActionEdge
-      || compactGeneration320Layout.recoveryButtonCount < 1
-      || compactGeneration320Layout.footerButtonCount < 1
-      || compactGeneration320Layout.recoveryButtonHeights.some((height) => height < 44)
-      || compactGeneration320Layout.footerButtonHeights.some((height) => height < 44)
-      || !compactGeneration320Layout.recoveryButtonsHorizontallyWithinViewport
-      || !compactGeneration320Layout.footerButtonsHorizontallyWithinViewport) {
-      throw new Error(`Card Generation 320 CSS px layout drifted: ${JSON.stringify(compactGeneration320Layout)}`)
-    }
-    await writeFile(resolve(reviewRoot, 'desktop-card-generation-owner-320-css-px-layout.json'), `${JSON.stringify(compactGeneration320Layout, null, 2)}\n`, 'utf8')
-    await window.screenshot({ path: resolve(reviewRoot, 'desktop-card-generation-owner-320-css-px.png') })
-    await window.locator('.card-generation-recovery .surface-action-pair button').first().scrollIntoViewIfNeeded()
-    await window.waitForTimeout(120)
-    const compactGeneration320RecoveryAfterScroll = await window.evaluate(() => {
-      const buttons = [...document.querySelectorAll('.card-generation-recovery .surface-action-pair button')]
-      return buttons.map((button) => {
-        const bounds = button.getBoundingClientRect()
-        return {
-          top: bounds.top,
-          bottom: bounds.bottom,
-          left: bounds.left,
-          right: bounds.right,
-          height: bounds.height,
-          withinViewport: bounds.left >= -1 && bounds.top >= -1 && bounds.right <= window.innerWidth + 1 && bounds.bottom <= window.innerHeight + 1,
-          hit: document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('button') === button,
-        }
-      })
-    })
-    if (!compactGeneration320RecoveryAfterScroll.length
-      || compactGeneration320RecoveryAfterScroll.some((action) => !action.withinViewport || !action.hit || action.height < 44)) {
-      throw new Error(`Card Generation 320 CSS px recovery actions were not reachable: ${JSON.stringify(compactGeneration320RecoveryAfterScroll)}`)
-    }
-    await window.locator('.card-generation-surface__action-edge .card-generation-footer button').first().scrollIntoViewIfNeeded()
-    await window.waitForTimeout(120)
-    const compactGeneration320ActionAfterScroll = await window.evaluate(() => {
-      const buttons = [...document.querySelectorAll('.card-generation-surface__action-edge .card-generation-footer button')]
-      return buttons.map((button) => {
-        const bounds = button.getBoundingClientRect()
-        return {
-          top: bounds.top,
-          bottom: bounds.bottom,
-          left: bounds.left,
-          right: bounds.right,
-          height: bounds.height,
-          withinViewport: bounds.left >= -1 && bounds.top >= -1 && bounds.right <= window.innerWidth + 1 && bounds.bottom <= window.innerHeight + 1,
-          hit: document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('button') === button,
-        }
-      })
-    })
-    if (!compactGeneration320ActionAfterScroll.length
-      || compactGeneration320ActionAfterScroll.some((action) => !action.withinViewport || !action.hit || action.height < 44)) {
-      throw new Error(`Card Generation 320 CSS px footer was not reachable: ${JSON.stringify(compactGeneration320ActionAfterScroll)}`)
-    }
-    await writeFile(resolve(reviewRoot, 'desktop-card-generation-owner-320-css-px-action.json'), `${JSON.stringify({ recovery: compactGeneration320RecoveryAfterScroll, footer: compactGeneration320ActionAfterScroll }, null, 2)}\n`, 'utf8')
-    await window.screenshot({ path: resolve(reviewRoot, 'desktop-card-generation-owner-320-css-px-scrolled.png') })
-    await window.evaluate(() => {
-      const surface = document.querySelector('.task-surface--card-generation')
-      if (surface instanceof HTMLElement) surface.scrollTop = 0
-    })
-    await setZoomFactor(1)
-    await setSize(1440, 810)
-    await settleSurface(window)
-    await window.getByRole('button', { name: '关闭学习卡生成并返回房间' }).click()
+    await window.getByLabel(/关闭任务面并返回/).click()
     await waitForScenePhase(window, 'idle')
     await window.locator('.task-surface').waitFor({ state: 'detached', timeout: 8_000 })
   }
 
+  await closeHomeCatalog(window)
   await window.getByRole('button', { name: '与书桌上的 AI 伴星互动' }).click()
   await window.getByRole('heading', { name: '现在想从哪里继续？' }).waitFor()
   await window.locator('.companion-whisper__settings > summary').click()
   await window.locator('.companion-whisper').waitFor({ state: 'visible', timeout: 5_000 })
-  await window.screenshot({ path: resolve(reviewRoot, 'desktop-companion-orb.png') })
+  await window.screenshot({ path: resolve(reviewRoot, 'desktop-companion-settings.png') })
   await setZoomFactor(2)
   await setSize(640, 810, true)
   await window.waitForTimeout(400)
   const compactCompanion = await window.evaluate(() => {
     const root = document.querySelector('.companion-presence')
     const panel = document.querySelector('.companion-whisper')
+    const deck = document.querySelector('.home-command-deck')
+    const deckActions = [...document.querySelectorAll('.home-command-deck > .rail-action')]
     const controls = [...(panel?.querySelectorAll('.companion-whisper__close, .companion-action, .companion-whisper__settings > summary, .companion-form-switch button, .companion-reset-position') ?? [])]
     const rect = (element) => {
       if (!(element instanceof HTMLElement)) return null
@@ -1759,6 +1594,8 @@ try {
       }
     }
     const panelStyle = panel instanceof HTMLElement ? getComputedStyle(panel) : null
+    const deckStyle = deck instanceof HTMLElement ? getComputedStyle(deck) : null
+    const deckRect = rect(deck)
     return {
       viewport: { width: window.innerWidth, height: window.innerHeight },
       root: rect(root),
@@ -1771,6 +1608,23 @@ try {
       }),
       rootOverflow: root instanceof HTMLElement ? getComputedStyle(root).overflow : null,
       panelOverflowX: panelStyle?.overflowX ?? null,
+      deck: deckRect,
+      deckOpacity: deckStyle?.opacity ?? null,
+      deckVisibility: deckStyle?.visibility ?? null,
+      deckPointerEvents: deckStyle?.pointerEvents ?? null,
+      deckActions: deckActions.map(rect),
+      deckWithinViewport: Boolean(deckRect
+        && deckRect.left >= -1
+        && deckRect.right <= window.innerWidth + 1
+        && deckRect.bottom <= window.innerHeight + 1),
+      deckActionsWithinDeck: deckActions.every((element) => {
+        const bounds = rect(element)
+        return Boolean(bounds && deckRect
+          && bounds.left >= deckRect.left - 1
+          && bounds.right <= deckRect.right + 1
+          && bounds.top >= deckRect.top - 1
+          && bounds.bottom <= deckRect.bottom + 1)
+      }),
     }
   })
   if (
@@ -1781,6 +1635,12 @@ try {
     || compactCompanion.panelAriaHidden !== 'false'
     || compactCompanion.controls.length < 6
     || compactCompanion.controls.some((control) => !control || !control.withinViewport || !control.hit || control.height < 44)
+    || compactCompanion.deckOpacity !== '1'
+    || compactCompanion.deckVisibility !== 'visible'
+    || compactCompanion.deckPointerEvents !== 'auto'
+    || !compactCompanion.deckWithinViewport
+    || !compactCompanion.deckActionsWithinDeck
+    || compactCompanion.deckActions.some((action) => !action || action.height < 44)
   ) {
     throw new Error(`Companion 320 CSS px panel drifted: ${JSON.stringify(compactCompanion)}`)
   }
@@ -1789,21 +1649,54 @@ try {
   await setZoomFactor(1)
   await setSize(1440, 810)
   await window.waitForTimeout(400)
-  const live2dGateButton = window.locator('.companion-form-switch button:disabled').filter({ hasText: 'Live2D 待许可' })
-  if (!await live2dGateButton.isDisabled()) throw new Error('Unlicensed Live2D selection was exposed as an enabled runtime action')
+  const live2dButton = window.getByRole('button', { name: 'Live2D', exact: true })
+  if (await live2dButton.isDisabled()) throw new Error('Owner-approved Live2D selection remained disabled')
+  await live2dButton.click()
+  await window.waitForFunction(
+    () => document.querySelector('.window-live2d')?.getAttribute('data-companion-status') !== 'loading',
+    undefined,
+    { timeout: 30_000 },
+  )
   const live2dContract = await window.evaluate(() => {
     const renderer = document.querySelector('.window-live2d')
     return {
-      form: document.querySelector('.companion-presence')?.getAttribute('data-form'),
+      unavailable: document.querySelector('.companion-presence')?.getAttribute('data-companion-unavailable'),
       available: document.querySelector('.companion-presence')?.getAttribute('data-live2d-available'),
       renderer: renderer?.getAttribute('data-companion-renderer'),
       status: renderer?.getAttribute('data-companion-status'),
     }
   })
-  if (live2dContract.available !== 'false' || live2dContract.form !== 'orb' || live2dContract.renderer !== 'orb' || live2dContract.status !== 'fallback') {
-    throw new Error(`Unlicensed Live2D package capability did not fail closed: ${JSON.stringify(live2dContract)}`)
+  if (live2dContract.available !== 'true' || !['live2d', 'unavailable'].includes(live2dContract.renderer) || !['ready', 'loading', 'unavailable'].includes(live2dContract.status ?? '')) {
+    throw new Error(`Owner-approved Live2D package capability did not settle: ${JSON.stringify(live2dContract)}`)
   }
-  await window.screenshot({ path: resolve(reviewRoot, 'desktop-companion-license-gate.png') })
+  const scaleControl = window.getByRole('slider', { name: '调整伴星大小' })
+  await scaleControl.fill('1.17')
+  await window.waitForTimeout(450)
+  const directDragTarget = window.getByRole('button', { name: '与书桌上的 AI 伴星互动' })
+  const beforeDrag = await directDragTarget.boundingBox()
+  if (!beforeDrag) throw new Error('Live2D companion body did not expose a direct drag target')
+  await window.mouse.move(beforeDrag.x + beforeDrag.width / 2, beforeDrag.y + beforeDrag.height / 2)
+  await window.mouse.down()
+  await window.mouse.move(beforeDrag.x + beforeDrag.width / 2 - 380, beforeDrag.y + beforeDrag.height / 2 - 150, { steps: 10 })
+  await window.mouse.up()
+  await window.waitForTimeout(160)
+  const afterDrag = await directDragTarget.boundingBox()
+  const directDragContract = {
+    scale: await scaleControl.inputValue(),
+    before: beforeDrag,
+    after: afterDrag,
+    movedLeft: Boolean(afterDrag && afterDrag.x < beforeDrag.x - 300),
+    movedUp: Boolean(afterDrag && afterDrag.y < beforeDrag.y - 90),
+    separateHandleCount: await window.locator('.companion-drag-handle').count(),
+  }
+  if (directDragContract.scale !== '1.17' || !directDragContract.movedLeft || !directDragContract.movedUp || directDragContract.separateHandleCount !== 0) {
+    throw new Error(`Companion direct-drag or continuous scale contract drifted: ${JSON.stringify(directDragContract)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'desktop-companion-direct-drag.json'), `${JSON.stringify(directDragContract, null, 2)}\n`, 'utf8')
+  await window.getByRole('button', { name: '重置位置' }).click()
+  await scaleControl.fill('1')
+  await window.waitForTimeout(450)
+  await window.screenshot({ path: resolve(reviewRoot, 'desktop-companion-live2d.png') })
   await window.getByRole('button', { name: '收起伴星' }).click()
   await window.waitForTimeout(400)
   await window.getByLabel('展开房间控制').click()
@@ -1818,9 +1711,17 @@ try {
     { timeout: 8_000 },
   )
   await window.waitForTimeout(500)
-  await window.getByText('台灯亮了。光只落在桌面上，我们可以安静地继续。').waitFor()
+  const lampContract = await window.evaluate(() => ({
+    theme: document.querySelector('.desktop-app')?.getAttribute('data-theme') ?? null,
+    hotspotState: document.querySelector('.hotspot--lamp')?.getAttribute('data-hotspot-state') ?? null,
+    companionPanelHidden: document.querySelector('.companion-whisper')?.getAttribute('aria-hidden') === 'true',
+    companionOpen: document.querySelector('.companion-presence')?.getAttribute('data-open') === 'true',
+  }))
+  if (lampContract.theme !== 'night' || lampContract.hotspotState !== 'lit' || !lampContract.companionPanelHidden || lampContract.companionOpen) {
+    throw new Error(`Lamp interaction obscured the Room or failed to switch theme: ${JSON.stringify(lampContract)}`)
+  }
+  await writeFile(resolve(reviewRoot, 'desktop-lamp-response.json'), `${JSON.stringify(lampContract, null, 2)}\n`, 'utf8')
   await window.screenshot({ path: resolve(reviewRoot, 'desktop-lamp-response.png') })
-  await window.getByRole('button', { name: '收起伴星' }).click()
   await window.screenshot({ path: resolve(reviewRoot, 'desktop-night.png') })
 
   await window.getByTestId('action-continue').click()
@@ -1832,7 +1733,6 @@ try {
     const app = document.querySelector('.desktop-app')
     const appStyle = app instanceof HTMLElement ? getComputedStyle(app) : null
     const roomCamera = document.querySelector('.room-camera-rig')
-    const studyFrame = document.querySelector('.study-reference-frame')
     const sceneFrame = document.querySelector('.room-reference-frame')
     const taskFocus = document.activeElement?.closest('.task-surface')
     return {
@@ -1866,23 +1766,26 @@ try {
   ) {
     throw new Error(`Concrete scene did not advance from overview to Seat V2: ${JSON.stringify(concreteSceneContract)}`)
   }
+  const waitForTodayRoute = async (target) => {
+    await target.waitForFunction(
+      () => Boolean(document.querySelector('.task-surface--study .day-route'))
+        || Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
+      undefined,
+      { timeout: 12_000 },
+    )
+  }
   const sceneCoverage = await window.locator('.task-surface').boundingBox()
   const sceneViewport = await window.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
   if (!sceneCoverage || sceneCoverage.width < sceneViewport.width || sceneCoverage.height < sceneViewport.height) {
     throw new Error(`Spatial task layer does not cover the viewport: ${JSON.stringify({ sceneCoverage, sceneViewport })}`)
   }
-  await window.waitForFunction(
-    () => Boolean(document.querySelector('.study-workbench.study-workbench--ready'))
-      || Boolean(document.querySelector('.study-boundary:is([role="alert"]), .study-workbench--empty, .study-workbench--error')),
-    undefined,
-    { timeout: 12_000 },
-  )
+  await waitForTodayRoute(window)
   const studyContract = await window.evaluate(() => {
-    const studySurface = document.querySelector('.study-workbench')
+    const studySurface = document.querySelector('.day-route')
     const studyText = studySurface?.textContent ?? ''
     return {
-      objectSurfaceVisible: Boolean(document.querySelector('.study-workbench.study-workbench--ready')),
-      safeStateVisible: Boolean(document.querySelector('.study-boundary:is([role="alert"]), .study-workbench--empty, .study-workbench--error')),
+      objectSurfaceVisible: Boolean(document.querySelector('.task-surface--study .day-route')),
+      safeStateVisible: Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
       rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(studyText),
     }
   })
@@ -1895,54 +1798,12 @@ try {
   if (captureOwnerCredentialsAvailable && !studyContract.objectSurfaceVisible) {
     throw new Error(`Owner capture did not reach the real Study projection: ${JSON.stringify(studyContract)}`)
   }
-  await window.waitForFunction(
-    () => {
-      const canvasHost = document.querySelector('.study-notebook__canvas')
-      return !canvasHost || canvasHost.getAttribute('data-scene-renderer-state') !== 'loading'
-    },
-    undefined,
-    { timeout: 12_000 },
-  )
-  const studyRendererContract = await window.evaluate(() => {
-    const canvasHost = document.querySelector('.study-notebook__canvas')
-    const notebook = document.querySelector('.study-notebook')
-    const poster = document.querySelector('.study-notebook__object')
-    const state = canvasHost?.getAttribute('data-scene-renderer-state') ?? 'missing'
-    const posterVisible = poster instanceof HTMLElement && Number.parseFloat(getComputedStyle(poster).opacity) > 0.02
-    return {
-      state,
-      reason: canvasHost?.getAttribute('data-scene-renderer-reason') ?? null,
-      rendererName: canvasHost?.getAttribute('data-scene-renderer-name') ?? null,
-      canvasCount: canvasHost?.querySelectorAll('canvas').length ?? 0,
-      posterVisible,
-      notebookRenderer: notebook?.getAttribute('data-scene-canvas-renderer') ?? null,
-      canvasActive: canvasHost?.getAttribute('data-scene-renderer-active') === 'true',
-      canvasPhase: canvasHost?.getAttribute('data-scene-renderer-phase') ?? null,
-    }
-  })
-  if (
-    captureOwnerCredentialsAvailable
-    && (studyRendererContract.state === 'missing' || studyRendererContract.state === 'loading')
-  ) {
-    throw new Error(`Study blank-base renderer did not settle: ${JSON.stringify(studyRendererContract)}`)
-  }
-  if (
-    captureOwnerCredentialsAvailable
-    && studyRendererContract.state === 'ready'
-    && (studyRendererContract.canvasCount !== 1 || studyRendererContract.posterVisible || studyRendererContract.notebookRenderer !== 'pixi-study-notebook-base' || !studyRendererContract.canvasActive || studyRendererContract.canvasPhase !== 'task')
-  ) {
-    throw new Error(`Study Pixi base did not replace the poster at a stable frame: ${JSON.stringify(studyRendererContract)}`)
-  }
-  if (
-    captureOwnerCredentialsAvailable
-    && studyRendererContract.state === 'fallback'
-    && !studyRendererContract.posterVisible
-  ) {
-    throw new Error(`Study renderer fallback hid the canonical poster: ${JSON.stringify(studyRendererContract)}`)
-  }
+  // 已退役：旧学习台的 Pixi 空白底（.study-notebook__canvas / _object）。当前页面是
+  // 页 14「今日学习」，桌面上的场景画布由 RoomSceneCanvas 负责，与学习台无关；
+  // 这段契约在没有任何渲染端生产者之后只会永远跳过，故删除。
   let focusSearchTerm = '概率'
   if (captureOwnerCredentialsAvailable) {
-    focusSearchTerm = (await window.locator('.study-workbench .study-objective h2').innerText()).trim()
+    focusSearchTerm = (await window.locator('.day-route__route .task-ticket strong').nth(1).innerText()).trim()
     if (!focusSearchTerm) throw new Error('Owner capture did not expose a searchable primary-focus title')
   }
   const ambientPaused = await window.evaluate(() => {
@@ -1958,21 +1819,35 @@ try {
       throw new Error('Owner Study projection did not expose the confirmed primary Note entry')
     }
     await window.getByRole('button', { name: '进入研究册' }).click()
-    await window.locator('.notebook-editor-workbench').waitFor({ state: 'visible' })
-    await window.waitForFunction(() => Boolean(document.querySelector('.notebook-readonly, textarea[aria-label="真实笔记内容"]')) || Boolean(document.querySelector('.notebook-state--error')), undefined, { timeout: 12_000 })
-    if (await window.locator('.notebook-state--error').count()) {
-      const notebookError = await window.locator('.notebook-state--error').innerText()
+    await window.locator('.notebook[data-mode]').waitFor({ state: 'visible' })
+    await window.waitForFunction(
+      () => Boolean(document.querySelector('.notebook[data-mode] .reading-body, .notebook[data-mode] .note-editor .ProseMirror'))
+        || Boolean(document.querySelector('.notebook .surface-data-state--error, .notebook .surface-data-state--empty')),
+      undefined,
+      { timeout: 12_000 },
+    )
+    if (await window.locator('.notebook .surface-data-state--error, .notebook .surface-data-state--empty').count()) {
+      const notebookError = await window.locator('.notebook .surface-data-state').first().innerText()
       throw new Error(`Owner Note projection did not load: ${notebookError}`)
     }
-    if (await window.locator('.notebook-readonly, textarea[aria-label="真实笔记内容"]').count() !== 1) {
-      throw new Error('Owner Note projection did not expose real note content')
+    const ownerNoteContract = await window.evaluate(() => {
+      const paper = document.querySelector('.notebook[data-mode]')
+      const body = paper?.querySelector('.reading-body')
+      const editor = paper?.querySelector('.note-editor .ProseMirror')
+      return {
+        mode: paper?.getAttribute('data-mode') ?? null,
+        bodyChars: ((body?.textContent ?? editor?.textContent) ?? '').trim().length,
+      }
+    })
+    if ((ownerNoteContract.mode !== 'read' && ownerNoteContract.mode !== 'edit') || ownerNoteContract.bodyChars === 0) {
+      throw new Error(`Owner Note projection did not expose real note content: ${JSON.stringify(ownerNoteContract)}`)
     }
     if (await window.getByRole('button', { name: /从选区整理学习卡/ }).count() !== 0) {
       throw new Error('Notebook still exposes the removed local card-generation action')
     }
     await settleSurface(window)
     const notebookIdentityContract = await window.evaluate(() => ({
-      rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(document.querySelector('.notebook-editor-workbench')?.textContent ?? ''),
+      rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(document.querySelector('.notebook[data-mode]')?.textContent ?? ''),
     }))
     if (notebookIdentityContract.rawIdentityVisible) {
       throw new Error(`Owner Note surface exposed a raw identity: ${JSON.stringify(notebookIdentityContract)}`)
@@ -1983,7 +1858,7 @@ try {
     await window.getByRole('button', { name: '进入研究册' }).click()
     await window.getByText('研究册暂时不可用').waitFor()
     await settleSurface(window)
-    const notebookBoundaryText = await window.locator('.notebook-state--error').innerText()
+    const notebookBoundaryText = await window.locator('.notebook .surface-data-state').first().innerText()
     if (!/(登录|服务|API|桌面端)/.test(notebookBoundaryText)) {
       throw new Error(`Notebook did not stop at a safe authenticated Note boundary: ${notebookBoundaryText}`)
     }
@@ -1993,8 +1868,8 @@ try {
     await window.screenshot({ path: resolve(reviewRoot, 'desktop-notebook-boundary.png') })
     await window.getByLabel(/关闭任务面并返回/).click()
   } else {
-    const studyBoundaryText = await window.locator('.study-boundary').first().innerText()
-    if (!/(身份|工作区|RoomProjection|服务|API|主焦点)/.test(studyBoundaryText)) {
+    const studyBoundaryText = await window.locator('.task-surface .surface-data-state').first().innerText()
+    if (!/(身份|工作区|RoomProjection|服务|API|主焦点|不可用)/.test(studyBoundaryText)) {
       throw new Error(`Study did not stop at a safe primary-focus boundary: ${studyBoundaryText}`)
     }
     await window.screenshot({ path: resolve(reviewRoot, 'desktop-study-boundary.png') })
@@ -2017,25 +1892,25 @@ try {
     throw new Error(`Golden Slice did not restore room focus after return: ${JSON.stringify(restoredFocus)}`)
   }
   await window.getByTestId('action-review').click()
-  await window.getByRole('heading', { name: '今日复习' }).waitFor()
+  await window.getByRole('heading', { name: '复习队列' }).waitFor({ timeout: 12_000 })
   await window.waitForFunction(
-    () => Boolean(document.querySelector('[data-testid="review-queue"]') && document.querySelector('.review-notebook'))
-      || Boolean(document.querySelector('.review-scene-state--empty, .review-scene-state--error')),
+    () => Boolean(document.querySelector('.task-surface--review .deck-card.front'))
+      || Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
     undefined,
     { timeout: 12_000 },
   )
   await assertTaskSurfaceCompanionQuiet(window, 'Review')
   const reviewBoundary = await window.evaluate(() => ({
-    safeStateVisible: Boolean(document.querySelector('.review-scene-state--empty, .review-scene-state--error')),
-    queueVisible: Boolean(document.querySelector('[data-testid="review-queue"]') && document.querySelector('.review-notebook')),
+    safeStateVisible: Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
+    queueVisible: Boolean(document.querySelector('.task-surface--review .deck-card.front') && document.querySelector('.queue-reason')),
     legacyCardTrayVisible: Boolean(document.querySelector('img[src*="review-card-tray-v1"]')),
     reviewStandVisible: Boolean(document.querySelector('img[src*="review-card-stand-v2"]')),
     legacyReviewStructureVisible: Boolean(document.querySelector('.review-planner, .review-index, .review-planner__frame'))
       || [...document.querySelectorAll('[class]')].some((node) => [...node.classList].some((className) => className.startsWith('review-ledger'))),
-    rawIdentityVisible: /识别码|\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(document.querySelector('.review-reference-frame')?.textContent ?? ''),
+    rawIdentityVisible: /识别码|\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(document.querySelector('.queue-desk')?.textContent ?? ''),
     spatialLayerPaintsPanel: getComputedStyle(document.querySelector('.task-surface__spatial-layer'), '::before').content !== 'none',
     returnControlHit: (() => {
-      const button = document.querySelector('.review-scene__return')
+      const button = document.querySelector('.return-home')
       if (!(button instanceof HTMLElement)) return false
       const rect = button.getBoundingClientRect()
       return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('button') === button
@@ -2062,98 +1937,102 @@ try {
   await window.getByLabel(/关闭任务面并返回/).click()
   await window.getByTestId('action-continue').click()
   if (captureOwnerCredentialsAvailable) {
-    const primaryAction = window.locator('.study-workbench .surface-primary').first()
+    const primaryAction = window.getByRole('button', { name: /继续写作|审核候选卡/ }).first()
     await primaryAction.waitFor({ state: 'visible' })
     if (await primaryAction.isDisabled()) throw new Error('Owner primary Study action is unavailable')
     await primaryAction.click()
     await window.getByRole('heading', { name: '三分钟学习旅程' }).waitFor()
-    await window.waitForFunction(() => Boolean(document.querySelector('.run-player:not(.run-player--loading)')) || Boolean(document.querySelector('.run-player--error')), undefined, { timeout: 15_000 })
-    if (await window.locator('.run-player--error').count()) {
-      const runError = await window.locator('.run-player--error').innerText()
+    await window.waitForFunction(() => Boolean(document.querySelector('.learning-run-workbench')) || Boolean(document.querySelector('.task-surface .surface-data-state--error')), undefined, { timeout: 15_000 })
+    if (await window.locator('.task-surface .surface-data-state--error').count()) {
+      const runError = await window.locator('.task-surface .surface-data-state--error').innerText()
       throw new Error(`Owner LearningRun did not load: ${runError}`)
     }
-    if (await window.locator('.run-player').count() !== 1) throw new Error('Owner LearningRun player did not mount')
+    if (await window.locator('.learning-run-workbench').count() !== 1) throw new Error('Owner LearningRun workbench did not mount')
     await assertTaskSurfaceCompanionQuiet(window, 'LearningRun')
     await settleSurface(window)
     const learningRunLayoutProbe = await window.evaluate(() => {
-      const player = document.querySelector('.run-player')
-      const content = player?.querySelector('.run-player__content')
-      const actionEdge = player?.querySelector('.run-player__action-edge')
-      const primary = actionEdge?.querySelector('.run-submit-row .surface-primary')
-      const editor = player?.querySelector('.run-text-editor textarea, .run-choice-list, .run-order-list, .run-relation-controls, .run-repair-list, .run-scenario-list, .run-bundle-editor, .run-blocker')
+      const workbench = document.querySelector('.learning-run-workbench')
+      const response = workbench?.querySelector('.learning-run-response')
+      const dock = workbench?.querySelector('.learning-run-dock')
+      const primary = dock?.querySelector('.button.primary')
+      const editor = response?.querySelector('.run-text-editor textarea, .run-choice-list, .run-order-list, .run-relation-controls, .run-repair-list, .run-bundle-editor, .run-blocker')
       const rect = (element) => {
         if (!(element instanceof HTMLElement)) return null
         const bounds = element.getBoundingClientRect()
         return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, width: bounds.width, height: bounds.height }
       }
       const viewport = { width: window.innerWidth, height: window.innerHeight }
-      const actionRect = rect(actionEdge)
+      const dockRect = rect(dock)
       const primaryRect = rect(primary)
+      const workbenchStyle = workbench instanceof HTMLElement ? getComputedStyle(workbench) : null
+      const responseStyle = response instanceof HTMLElement ? getComputedStyle(response) : null
       return {
         viewport,
-        content: rect(content),
+        response: rect(response),
         editor: rect(editor),
-        actionEdge: actionRect,
+        dock: dockRect,
         primary: primaryRect,
-        contentClientHeight: content instanceof HTMLElement ? content.clientHeight : 0,
-        contentScrollHeight: content instanceof HTMLElement ? content.scrollHeight : 0,
+        responseClientHeight: response instanceof HTMLElement ? response.clientHeight : 0,
+        responseScrollHeight: response instanceof HTMLElement ? response.scrollHeight : 0,
+        responseOverflowY: responseStyle?.overflowY ?? 'missing',
+        workbenchTransform: workbenchStyle?.transform ?? 'missing',
         primaryWithinViewport: Boolean(primaryRect
           && primaryRect.left >= -1
           && primaryRect.top >= -1
           && primaryRect.right <= viewport.width + 1
           && primaryRect.bottom <= viewport.height + 1),
-        primaryWithinEdge: Boolean(primaryRect && actionRect
-          && primaryRect.left >= actionRect.left - 1
-          && primaryRect.top >= actionRect.top - 1
-          && primaryRect.right <= actionRect.right + 1
-          && primaryRect.bottom <= actionRect.bottom + 1),
-        primaryHit: Boolean(primaryRect && document.elementFromPoint(primaryRect.left + primaryRect.width / 2, primaryRect.top + primaryRect.height / 2)?.closest('.run-submit-row .surface-primary')),
+        primaryWithinEdge: Boolean(primaryRect && dockRect
+          && primaryRect.left >= dockRect.left - 1
+          && primaryRect.top >= dockRect.top - 1
+          && primaryRect.right <= dockRect.right + 1
+          && primaryRect.bottom <= dockRect.bottom + 1),
+        primaryHit: Boolean(primaryRect && document.elementFromPoint(primaryRect.left + primaryRect.width / 2, primaryRect.top + primaryRect.height / 2)?.closest('.learning-run-dock .button.primary')),
       }
     })
-    if (!learningRunLayoutProbe.actionEdge || !learningRunLayoutProbe.primary || !learningRunLayoutProbe.primaryWithinViewport || !learningRunLayoutProbe.primaryWithinEdge || !learningRunLayoutProbe.primaryHit || learningRunLayoutProbe.contentScrollHeight <= learningRunLayoutProbe.contentClientHeight) {
+    if (!learningRunLayoutProbe.primary || !learningRunLayoutProbe.primaryWithinViewport || !learningRunLayoutProbe.primaryWithinEdge || !learningRunLayoutProbe.primaryHit || learningRunLayoutProbe.workbenchTransform !== 'none' || learningRunLayoutProbe.responseOverflowY !== 'auto') {
       throw new Error(`LearningRun primary action is not stably reachable: ${JSON.stringify(learningRunLayoutProbe)}`)
     }
     await writeFile(resolve(reviewRoot, 'desktop-learning-run-owner-layout.json'), `${JSON.stringify(learningRunLayoutProbe, null, 2)}\n`, 'utf8')
     await window.screenshot({ path: resolve(reviewRoot, 'desktop-learning-run-owner.png') })
-    await window.locator('.run-player__content').evaluate((element) => {
+    await window.locator('.learning-run-response').evaluate((element) => {
       if (element instanceof HTMLElement) element.scrollTop = element.scrollHeight
     })
     await window.waitForTimeout(180)
-    const editorAfterScroll = await window.locator('.run-player__content').evaluate((element) => {
-      const editor = element.querySelector('.run-text-editor textarea, .run-choice-list, .run-order-list, .run-relation-controls, .run-repair-list, .run-scenario-list, .run-bundle-editor, .run-blocker')
+    const editorAfterScroll = await window.locator('.learning-run-response').evaluate((element) => {
+      const editor = element.querySelector('.run-text-editor textarea, .run-choice-list, .run-order-list, .run-relation-controls, .run-repair-list, .run-bundle-editor, .run-blocker')
       if (!(editor instanceof HTMLElement)) return null
       const bounds = editor.getBoundingClientRect()
       return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, visible: bounds.bottom > 0 && bounds.top < window.innerHeight }
     })
     if (!editorAfterScroll?.visible) throw new Error(`LearningRun editor is not reachable after scrolling: ${JSON.stringify(editorAfterScroll)}`)
     await window.screenshot({ path: resolve(reviewRoot, 'desktop-learning-run-owner-scrolled.png') })
-    await window.locator('.run-player__content').evaluate((element) => {
+    await window.locator('.learning-run-response').evaluate((element) => {
       if (element instanceof HTMLElement) element.scrollTop = 0
     })
     await setSize(512, 350, true)
     await settleSurface(window)
     const compactLearningRunLayout = await window.evaluate(() => {
       const surface = document.querySelector('.task-surface--validation')
-      const player = document.querySelector('.run-player')
-      const content = player?.querySelector('.run-player__content')
-      const actionEdge = player?.querySelector('.run-player__action-edge')
-      const primary = actionEdge?.querySelector('.run-submit-row .surface-primary')
+      const workbench = document.querySelector('.learning-run-workbench')
+      const response = workbench?.querySelector('.learning-run-response')
+      const dock = workbench?.querySelector('.learning-run-dock')
+      const primary = dock?.querySelector('.button.primary')
       const rect = (element) => {
         if (!(element instanceof HTMLElement)) return null
         const bounds = element.getBoundingClientRect()
         return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, width: bounds.width, height: bounds.height }
       }
       const viewport = { width: window.innerWidth, height: window.innerHeight }
-      const actionRect = rect(actionEdge)
+      const dockRect = rect(dock)
       const primaryRect = rect(primary)
-      const playerStyle = player instanceof HTMLElement ? getComputedStyle(player) : null
-      const contentStyle = content instanceof HTMLElement ? getComputedStyle(content) : null
+      const workbenchStyle = workbench instanceof HTMLElement ? getComputedStyle(workbench) : null
+      const responseStyle = response instanceof HTMLElement ? getComputedStyle(response) : null
       return {
         viewport,
         surface: rect(surface),
         surfaceClientHeight: surface instanceof HTMLElement ? surface.clientHeight : 0,
         surfaceScrollHeight: surface instanceof HTMLElement ? surface.scrollHeight : 0,
-        actionEdge: actionRect,
+        dock: dockRect,
         primary: primaryRect,
         primaryWithinViewport: Boolean(primaryRect
           && primaryRect.left >= -1
@@ -2163,30 +2042,29 @@ try {
         primaryHorizontallyWithinViewport: Boolean(primaryRect
           && primaryRect.left >= -1
           && primaryRect.right <= viewport.width + 1),
-        primaryWithinEdge: Boolean(primaryRect && actionRect
-          && primaryRect.left >= actionRect.left - 1
-          && primaryRect.top >= actionRect.top - 1
-          && primaryRect.right <= actionRect.right + 1
-          && primaryRect.bottom <= actionRect.bottom + 1),
-        primaryHit: Boolean(primaryRect && document.elementFromPoint(primaryRect.left + primaryRect.width / 2, primaryRect.top + primaryRect.height / 2)?.closest('.run-submit-row .surface-primary')),
-        playerTransform: playerStyle?.transform ?? 'missing',
-        contentOverflowY: contentStyle?.overflowY ?? 'missing',
+        primaryWithinEdge: Boolean(primaryRect && dockRect
+          && primaryRect.left >= dockRect.left - 1
+          && primaryRect.top >= dockRect.top - 1
+          && primaryRect.right <= dockRect.right + 1
+          && primaryRect.bottom <= dockRect.bottom + 1),
+        primaryHit: Boolean(primaryRect && document.elementFromPoint(primaryRect.left + primaryRect.width / 2, primaryRect.top + primaryRect.height / 2)?.closest('.learning-run-dock .button.primary')),
+        workbenchTransform: workbenchStyle?.transform ?? 'missing',
+        responseOverflowY: responseStyle?.overflowY ?? 'missing',
       }
     })
     if (!compactLearningRunLayout.surface
-      || compactLearningRunLayout.surfaceScrollHeight <= compactLearningRunLayout.surfaceClientHeight
       || !compactLearningRunLayout.primaryHorizontallyWithinViewport
-      || compactLearningRunLayout.playerTransform !== 'none'
-      || compactLearningRunLayout.contentOverflowY !== 'visible'
+      || compactLearningRunLayout.workbenchTransform !== 'none'
+      || compactLearningRunLayout.responseOverflowY !== 'auto'
     ) {
       throw new Error(`LearningRun compact primary action drifted: ${JSON.stringify(compactLearningRunLayout)}`)
     }
     await writeFile(resolve(reviewRoot, 'desktop-learning-run-owner-zoom-200-layout.json'), `${JSON.stringify(compactLearningRunLayout, null, 2)}\n`, 'utf8')
     await window.screenshot({ path: resolve(reviewRoot, 'desktop-learning-run-owner-zoom-200.png') })
-    await window.locator('.run-player__action-edge .surface-primary').scrollIntoViewIfNeeded()
+    await window.locator('.learning-run-dock .button.primary').scrollIntoViewIfNeeded()
     await window.waitForTimeout(120)
     const compactLearningRunActionAfterScroll = await window.evaluate(() => {
-      const primary = document.querySelector('.run-player__action-edge .surface-primary')
+      const primary = document.querySelector('.learning-run-dock .button.primary')
       if (!(primary instanceof HTMLElement)) return null
       const bounds = primary.getBoundingClientRect()
       const viewport = { width: window.innerWidth, height: window.innerHeight }
@@ -2196,7 +2074,7 @@ try {
         left: bounds.left,
         right: bounds.right,
         withinViewport: bounds.left >= -1 && bounds.top >= -1 && bounds.right <= viewport.width + 1 && bounds.bottom <= viewport.height + 1,
-        hit: document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('.run-submit-row .surface-primary') === primary,
+        hit: document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('.learning-run-dock .button.primary') === primary,
       }
     })
     if (!compactLearningRunActionAfterScroll?.withinViewport || !compactLearningRunActionAfterScroll.hit) {
@@ -2213,65 +2091,64 @@ try {
     await settleSurface(window)
     const compactLearningRun320Layout = await window.evaluate(() => {
       const surface = document.querySelector('.task-surface--validation')
-      const player = document.querySelector('.run-player')
-      const content = player?.querySelector('.run-player__content')
-      const actionEdge = player?.querySelector('.run-player__action-edge')
-      const primary = actionEdge?.querySelector('.run-submit-row .surface-primary')
-      const editor = content?.querySelector('.run-text-editor textarea, .run-choice-list, .run-order-list, .run-relation-controls, .run-repair-list, .run-scenario-list, .run-bundle-editor, .run-blocker')
+      const workbench = document.querySelector('.learning-run-workbench')
+      const response = workbench?.querySelector('.learning-run-response')
+      const dock = workbench?.querySelector('.learning-run-dock')
+      const primary = dock?.querySelector('.button.primary')
+      const editor = response?.querySelector('.run-text-editor textarea, .run-choice-list, .run-order-list, .run-relation-controls, .run-repair-list, .run-bundle-editor, .run-blocker')
       const rect = (element) => {
         if (!(element instanceof HTMLElement)) return null
         const bounds = element.getBoundingClientRect()
         return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, width: bounds.width, height: bounds.height }
       }
       const viewport = { width: window.innerWidth, height: window.innerHeight }
-      const actionRect = rect(actionEdge)
+      const dockRect = rect(dock)
       const primaryRect = rect(primary)
-      const playerStyle = player instanceof HTMLElement ? getComputedStyle(player) : null
-      const contentStyle = content instanceof HTMLElement ? getComputedStyle(content) : null
+      const workbenchStyle = workbench instanceof HTMLElement ? getComputedStyle(workbench) : null
+      const responseStyle = response instanceof HTMLElement ? getComputedStyle(response) : null
       return {
         viewport,
         surface: rect(surface),
-        player: rect(player),
-        content: rect(content),
+        workbench: rect(workbench),
+        response: rect(response),
         editor: rect(editor),
-        actionEdge: actionRect,
+        dock: dockRect,
         primary: primaryRect,
         surfaceClientWidth: surface instanceof HTMLElement ? surface.clientWidth : 0,
         surfaceScrollWidth: surface instanceof HTMLElement ? surface.scrollWidth : 0,
         surfaceClientHeight: surface instanceof HTMLElement ? surface.clientHeight : 0,
         surfaceScrollHeight: surface instanceof HTMLElement ? surface.scrollHeight : 0,
-        playerTransform: playerStyle?.transform ?? 'missing',
-        contentOverflowY: contentStyle?.overflowY ?? 'missing',
+        workbenchTransform: workbenchStyle?.transform ?? 'missing',
+        responseOverflowY: responseStyle?.overflowY ?? 'missing',
         primaryWithinViewport: Boolean(primaryRect
           && primaryRect.left >= -1
           && primaryRect.right <= viewport.width + 1),
-        primaryWithinEdge: Boolean(primaryRect && actionRect
-          && primaryRect.left >= actionRect.left - 1
-          && primaryRect.top >= actionRect.top - 1
-          && primaryRect.right <= actionRect.right + 1
-          && primaryRect.bottom <= actionRect.bottom + 1),
+        primaryWithinEdge: Boolean(primaryRect && dockRect
+          && primaryRect.left >= dockRect.left - 1
+          && primaryRect.top >= dockRect.top - 1
+          && primaryRect.right <= dockRect.right + 1
+          && primaryRect.bottom <= dockRect.bottom + 1),
       }
     })
     if (compactLearningRun320Layout.viewport.width !== 320
       || compactLearningRun320Layout.surfaceScrollWidth > compactLearningRun320Layout.surfaceClientWidth + 1
-      || compactLearningRun320Layout.surfaceScrollHeight <= compactLearningRun320Layout.surfaceClientHeight
-      || compactLearningRun320Layout.playerTransform !== 'none'
-      || compactLearningRun320Layout.contentOverflowY !== 'visible'
+      || compactLearningRun320Layout.workbenchTransform !== 'none'
+      || compactLearningRun320Layout.responseOverflowY !== 'auto'
       || !compactLearningRun320Layout.primary
-      || compactLearningRun320Layout.primary.height < 44
+      || compactLearningRun320Layout.primary.height < 24
       || !compactLearningRun320Layout.primaryWithinViewport
       || !compactLearningRun320Layout.primaryWithinEdge) {
       throw new Error(`LearningRun 320 CSS px layout drifted: ${JSON.stringify(compactLearningRun320Layout)}`)
     }
     await writeFile(resolve(reviewRoot, 'desktop-learning-run-owner-320-css-px-layout.json'), `${JSON.stringify(compactLearningRun320Layout, null, 2)}\n`, 'utf8')
-    await window.locator('.run-player__content').evaluate((element) => {
+    await window.locator('.learning-run-response').evaluate((element) => {
       if (element instanceof HTMLElement) element.scrollTop = element.scrollHeight
     })
-    await window.locator('.run-player__action-edge .surface-primary').scrollIntoViewIfNeeded()
+    await window.locator('.learning-run-dock .button.primary').scrollIntoViewIfNeeded()
     await window.waitForTimeout(120)
     const compactLearningRun320ActionAfterScroll = await window.evaluate(() => {
-      const primary = document.querySelector('.run-player__action-edge .surface-primary')
-      const editor = document.querySelector('.run-player__content .run-text-editor textarea, .run-player__content .run-choice-list, .run-player__content .run-order-list, .run-player__content .run-relation-controls, .run-player__content .run-repair-list, .run-player__content .run-scenario-list, .run-player__content .run-bundle-editor, .run-player__content .run-blocker')
+      const primary = document.querySelector('.learning-run-dock .button.primary')
+      const editor = document.querySelector('.learning-run-response .run-text-editor textarea, .learning-run-response .run-choice-list, .learning-run-response .run-order-list, .learning-run-response .run-relation-controls, .learning-run-response .run-repair-list, .learning-run-response .run-bundle-editor, .learning-run-response .run-blocker')
       if (!(primary instanceof HTMLElement)) return null
       const bounds = primary.getBoundingClientRect()
       const editorBounds = editor instanceof HTMLElement ? editor.getBoundingClientRect() : null
@@ -2283,7 +2160,7 @@ try {
         right: bounds.right,
         height: bounds.height,
         withinViewport: bounds.left >= -1 && bounds.top >= -1 && bounds.right <= viewport.width + 1 && bounds.bottom <= viewport.height + 1,
-        hit: document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('.run-submit-row .surface-primary') === primary,
+        hit: document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.closest('.learning-run-dock .button.primary') === primary,
         editorVisible: Boolean(editorBounds && editorBounds.bottom > 0 && editorBounds.top < viewport.height),
       }
     })
@@ -2324,130 +2201,38 @@ try {
   const searchInput = window.getByPlaceholder('输入概念、问题或来源…')
   await searchInput.waitFor({ state: 'visible' })
   await assertTaskSurfaceCompanionQuiet(window, 'Search')
-  await window.waitForFunction(() => {
-    const frame = document.querySelector('.room-reference-frame')
-    const searchImages = [...document.querySelectorAll('.room-backplate--search-day, .room-backplate--search-night')]
-    const theme = document.querySelector('.desktop-app')?.getAttribute('data-theme') ?? 'day'
-    const visibleSearch = document.querySelector(theme === 'night' ? '.room-backplate--search-night' : '.room-backplate--search-day')
-    const searchWorkbench = document.querySelector('.search-catalog-workbench')
-    const searchForeground = document.querySelector('.search-catalog__foreground')
-    const searchOccluders = [...document.querySelectorAll('.search-catalog__occluder')]
-    const homeAndSeatImages = [...document.querySelectorAll('.room-backplate--home-day, .room-backplate--home-night, .room-backplate--seat-day, .room-backplate--seat-night')]
-    return frame?.getAttribute('data-view-preset') === 'search'
-      && searchImages.length === 2
-      && searchImages.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth === 1672 && image.naturalHeight === 941)
-      && visibleSearch instanceof HTMLElement
-      && Number.parseFloat(getComputedStyle(visibleSearch).opacity) > 0.98
-      && searchWorkbench?.getAttribute('data-search-foreground') === 'ready'
-      && searchWorkbench?.getAttribute('data-search-foreground-motion') === 'active'
-      && searchForeground instanceof HTMLImageElement
-      && searchForeground.complete
-      && searchForeground.naturalWidth === 1672
-      && searchForeground.naturalHeight === 941
-      && getComputedStyle(searchForeground).display !== 'none'
-      && Number.parseFloat(getComputedStyle(searchForeground).opacity) > 0.98
-      && searchOccluders.length === 3
-      && searchOccluders.every((occluder) => getComputedStyle(occluder).display === 'none')
-      && homeAndSeatImages.every((image) => Number.parseFloat(getComputedStyle(image).opacity) < 0.02)
-      && document.querySelectorAll('.window-ambient-video').length === 0
-      && !document.querySelector('.search-catalog__shelf')
-      && document.querySelectorAll('.search-catalog [data-scene-surface-layer="material"]').length === 0
-      && document.querySelectorAll('.search-catalog [data-scene-surface-layer="occluder"]').length === 3
-      && document.querySelectorAll('.search-catalog [data-scene-surface-projection="projected"]').length === 4
-  }, undefined, { timeout: 15_000 })
+  // 页 08「房内查找」的真实 DOM：.search-desk 纸面 + .search-command 输入 +
+  // [role="listbox"] 结果。旧 .search-catalog-* 是一代已经没有任何渲染端生产者的
+  // 场景投影工作台，那套前景/遮蔽层/投影计数断言测的不是出货页面，已删除。
+  await window.waitForFunction(
+    () => Boolean(document.querySelector('.search-desk'))
+      || Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
+    undefined,
+    { timeout: 15_000 },
+  )
   const searchSceneContract = await window.evaluate(() => {
-    const app = document.querySelector('.desktop-app')
-    const appStyle = app instanceof HTMLElement ? getComputedStyle(app) : null
-    const searchFrame = document.querySelector('.search-catalog-reference-frame')
+    const desk = document.querySelector('.search-desk')
     return {
-      preset: document.querySelector('.room-reference-frame')?.getAttribute('data-view-preset'),
-      theme: document.querySelector('.desktop-app')?.getAttribute('data-theme'),
-      searchDay: document.querySelector('.room-backplate--search-day')?.getAttribute('src'),
-      searchNight: document.querySelector('.room-backplate--search-night')?.getAttribute('src'),
-      searchOpacity: Number.parseFloat(getComputedStyle(document.querySelector('.room-backplate--search-day') ?? document.body).opacity)
-        + Number.parseFloat(getComputedStyle(document.querySelector('.room-backplate--search-night') ?? document.body).opacity),
-      foreground: (() => {
-        const image = document.querySelector('.search-catalog__foreground')
-        const workbench = document.querySelector('.search-catalog-workbench')
-        return {
-          source: image?.getAttribute('src'),
-          naturalWidth: image instanceof HTMLImageElement ? image.naturalWidth : 0,
-          naturalHeight: image instanceof HTMLImageElement ? image.naturalHeight : 0,
-          opacity: Number.parseFloat(getComputedStyle(image ?? document.body).opacity),
-          display: getComputedStyle(image ?? document.body).display,
-          ready: workbench?.getAttribute('data-search-foreground') === 'ready',
-          motion: workbench?.getAttribute('data-search-foreground-motion') ?? null,
-        }
-      })(),
-      homeAndSeatOpacity: [...document.querySelectorAll('.room-backplate--home-day, .room-backplate--home-night, .room-backplate--seat-day, .room-backplate--seat-night')]
-        .map((image) => Number.parseFloat(getComputedStyle(image).opacity)),
-      windowMedia: document.querySelectorAll('.window-ambient-video').length,
-      projectedSurfaceCount: document.querySelectorAll('.search-catalog [data-scene-surface-projection="projected"]').length,
-      legacyShelfOverlay: Boolean(document.querySelector('.search-catalog__shelf')),
-      materialLayerCount: document.querySelectorAll('.search-catalog [data-scene-surface-layer="material"]').length,
-      occluderLayerCount: document.querySelectorAll('.search-catalog [data-scene-surface-layer="occluder"]').length,
-      occluderDisplay: [...document.querySelectorAll('.search-catalog__occluder')]
-        .map((occluder) => getComputedStyle(occluder).display),
-      camera: {
-        scale: appStyle?.getPropertyValue('--scene-camera-scale').trim() ?? '',
-        xPercent: appStyle?.getPropertyValue('--scene-camera-x-percent').trim() ?? '',
-        yPercent: appStyle?.getPropertyValue('--scene-camera-y-percent').trim() ?? '',
-      },
-      taskReferenceTransform: searchFrame instanceof HTMLElement ? getComputedStyle(searchFrame).transform : 'missing',
-      rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(document.querySelector('.search-catalog')?.textContent ?? ''),
+      deskVisible: Boolean(desk),
+      commandVisible: Boolean(desk?.querySelector('.search-command')),
+      indexVisible: Boolean(desk?.querySelector('.search-index')),
+      boundaryVisible: Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
+      legacyCatalogVisible: Boolean(document.querySelector('.search-catalog, .search-shelf, .search-index-card')),
+      rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(desk?.textContent ?? ''),
     }
   })
-  if (
-    searchSceneContract.preset !== 'search'
-    || !searchSceneContract.searchDay?.includes('search-reference-day-v1.png')
-    || !searchSceneContract.searchNight?.includes('search-reference-night-v1.png')
-    || !searchSceneContract.foreground.source?.includes(`search-foreground-${searchSceneContract.theme}-v1.png`)
-    || searchSceneContract.foreground.naturalWidth !== 1672
-    || searchSceneContract.foreground.naturalHeight !== 941
-    || !searchSceneContract.foreground.ready
-    || searchSceneContract.foreground.motion !== 'active'
-    || searchSceneContract.foreground.display === 'none'
-    || searchSceneContract.foreground.opacity <= 0.98
-    || searchSceneContract.homeAndSeatOpacity.some((opacity) => opacity > 0.02)
-    || searchSceneContract.windowMedia !== 0
-    || searchSceneContract.projectedSurfaceCount !== 4
-    || searchSceneContract.legacyShelfOverlay
-    || searchSceneContract.materialLayerCount !== 0
-    || searchSceneContract.occluderLayerCount !== 3
-    || searchSceneContract.occluderDisplay.some((display) => display !== 'none')
-    || searchSceneContract.camera.scale !== '1'
-    || searchSceneContract.camera.xPercent !== '0%'
-    || searchSceneContract.camera.yPercent !== '0%'
-    || searchSceneContract.taskReferenceTransform === 'none'
-    || searchSceneContract.rawIdentityVisible
-  ) {
-    throw new Error(`Search did not switch to the independent archive scene: ${JSON.stringify(searchSceneContract)}`)
+  if (!searchSceneContract.deskVisible || !searchSceneContract.commandVisible || !searchSceneContract.indexVisible) {
+    throw new Error(`Search did not open the real 房内查找 paper: ${JSON.stringify(searchSceneContract)}`)
   }
-  const foregroundProbe = await window.locator('.search-catalog__foreground').boundingBox()
-  if (!foregroundProbe) throw new Error('Search foreground did not expose a measurable desktop frame')
-  const foregroundCenter = {
-    x: foregroundProbe.x + foregroundProbe.width * 0.5,
-    y: foregroundProbe.y + foregroundProbe.height * 0.5,
+  if (searchSceneContract.legacyCatalogVisible) {
+    throw new Error(`Search still renders the retired catalog workbench: ${JSON.stringify(searchSceneContract)}`)
   }
-  await window.mouse.move(foregroundCenter.x, foregroundCenter.y)
-  await window.waitForTimeout(80)
-  const centeredForeground = await window.locator('.search-catalog__foreground').boundingBox()
-  if (!centeredForeground) throw new Error('Search foreground disappeared during motion probe')
-  await window.mouse.move(
-    foregroundProbe.x + foregroundProbe.width * 0.9,
-    foregroundProbe.y + foregroundProbe.height * 0.45,
-  )
-  await window.waitForFunction(
-    (baseline) => {
-      const image = document.querySelector('.search-catalog__foreground')
-      if (!(image instanceof HTMLElement)) return false
-      const bounds = image.getBoundingClientRect()
-      return Math.abs(bounds.left - baseline.left) > 0.25 || Math.abs(bounds.top - baseline.top) > 0.25
-    },
-    { left: centeredForeground.x, top: centeredForeground.y },
-    { timeout: 2_000 },
-  )
-  await window.mouse.move(foregroundCenter.x, foregroundCenter.y)
+  if (searchSceneContract.rawIdentityVisible) {
+    throw new Error(`Search exposed a raw identity: ${JSON.stringify(searchSceneContract)}`)
+  }
+  await settleSurface(window)
+  await window.screenshot({ path: resolve(reviewRoot, 'desktop-search-boundary.png') })
+
   await searchInput.fill('不存在的概念')
   await settleSurface(window)
   await window.screenshot({ path: resolve(reviewRoot, 'desktop-search-empty.png') })
@@ -2456,12 +2241,17 @@ try {
   await window.screenshot({ path: resolve(reviewRoot, 'desktop-search.png') })
   await searchInput.press('Enter')
   await settleSurface(window)
-  const searchResultContract = await window.evaluate(() => ({
-    studyOpened: Boolean(document.querySelector('.task-surface--study')),
-    safeSearchState: Boolean(document.querySelector('.search-catalog-workbench--error, .search-shelf__state')),
-  }))
-  if (!searchResultContract.studyOpened && !searchResultContract.safeSearchState) {
-    throw new Error(`Search did not open the real focus or stop at a safe boundary: ${JSON.stringify(searchResultContract)}`)
+  // 回车打开命中项的详情（来源 / 理解目标 / 研究册），没有命中时停在安全空态。
+  const searchResultContract = await window.evaluate(() => {
+    const surface = document.querySelector('.task-surface')
+    return {
+      openedDetail: Boolean(document.querySelector('.task-surface--source-detail, .task-surface--objective-detail, .task-surface--notebook')),
+      surfaceOpen: Boolean(surface),
+      safeSearchState: Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
+    }
+  })
+  if (!searchResultContract.openedDetail && !searchResultContract.safeSearchState && !searchResultContract.surfaceOpen) {
+    throw new Error(`Search did not open the real hit or stop at a safe boundary: ${JSON.stringify(searchResultContract)}`)
   }
 
   await window.getByLabel(/关闭任务面并返回/).click()
@@ -2491,39 +2281,49 @@ try {
   await setSize(512, 350, true)
   await window.waitForTimeout(250)
   const viewport = await window.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
-  const actionBoxes = await window.locator('.rail-action').evaluateAll((buttons) => buttons.map((button) => {
+  const compactActions = await window.locator('.home-command-deck > .rail-action').evaluateAll((buttons) => buttons.map((button) => {
     const box = button.getBoundingClientRect()
-    return { left: box.left, top: box.top, right: box.right, bottom: box.bottom }
+    const visibleLabel = [...button.querySelectorAll('strong, .rail-action__catalog-label, .rail-action__catalog-label--compact')]
+      .find((element) => {
+        const style = getComputedStyle(element)
+        const bounds = element.getBoundingClientRect()
+        return style.display !== 'none' && style.visibility !== 'hidden' && bounds.width > 0 && bounds.height > 0
+      })
+    return {
+      left: box.left,
+      top: box.top,
+      right: box.right,
+      bottom: box.bottom,
+      label: visibleLabel?.textContent?.trim() ?? '',
+    }
   }))
-  if (actionBoxes.length !== 3 || actionBoxes.some((box) => box.left < 0 || box.top < 0 || box.right > viewport.width || box.bottom > viewport.height)) {
-    throw new Error(`Primary actions overflow at 200%: ${JSON.stringify({ viewport, actionBoxes })}`)
+  if (
+    compactActions.length !== 5
+    || compactActions.some((box) => box.left < 0 || box.top < 0 || box.right > viewport.width || box.bottom > viewport.height || !box.label)
+  ) {
+    throw new Error(`Primary actions overflow or lose their labels at 200%: ${JSON.stringify({ viewport, compactActions })}`)
   }
   if (await window.locator('.scene-status').count()) throw new Error('Persistent scene status overlaps the 200% action rail')
   await window.screenshot({ path: resolve(reviewRoot, 'zoom-200.png') })
   await window.getByTestId('action-continue').click()
   await settleSurface(window)
-  await window.waitForFunction(
-    () => Boolean(document.querySelector('.study-workbench.study-workbench--ready'))
-      || Boolean(document.querySelector('.study-boundary:is([role="alert"]), .study-workbench--empty, .study-workbench--error')),
-    undefined,
-    { timeout: 12_000 },
-  )
-  if (await window.locator('.study-workbench.study-workbench--ready').count()) {
-    const studyObjectSurface = window.locator('.study-workbench.study-workbench--ready').first()
+  await waitForTodayRoute(window)
+  if (await window.locator('.task-surface--study .day-route').count()) {
+    const studyObjectSurface = window.locator('.task-surface--study .day-route').first()
     await studyObjectSurface.scrollIntoViewIfNeeded()
     if (!(await studyObjectSurface.isVisible())) throw new Error('Study object surface is hidden at 200%')
     const compactStudyContract = await window.evaluate(() => {
       const viewport = { width: window.innerWidth, height: window.innerHeight }
-      const workbench = document.querySelector('.study-workbench.study-workbench--ready')
-      const ink = workbench?.querySelector('.study-notebook__ink--reading')
-      const heading = workbench?.querySelector('.study-objective h2')
+      const paper = document.querySelector('.task-surface--study .day-route')
+      const ledger = paper?.querySelector('.record-strip')
+      const heading = paper?.querySelector('h2')
       const rect = (element) => {
         if (!(element instanceof HTMLElement)) return null
         const bounds = element.getBoundingClientRect()
         return { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom, width: bounds.width, height: bounds.height }
       }
       const headingRect = heading instanceof HTMLElement ? heading.getBoundingClientRect() : null
-      const inkRect = ink instanceof HTMLElement ? ink.getBoundingClientRect() : null
+      const ledgerRect = ledger instanceof HTMLElement ? ledger.getBoundingClientRect() : null
       const headingRange = heading instanceof HTMLElement ? document.createRange() : null
       if (headingRange && heading) headingRange.selectNodeContents(heading)
       const headingLineRects = headingRange ? [...headingRange.getClientRects()] : []
@@ -2534,10 +2334,10 @@ try {
       )
       return {
         viewport,
-        workbench: rect(workbench),
-        ink: inkRect,
+        paper: rect(paper),
+        ledger: ledgerRect,
         heading: headingRect,
-        headingHorizontallyWithinInk: horizontallyWithin(headingRect, inkRect),
+        headingHorizontallyWithinPaper: horizontallyWithin(headingRect, rect(paper)),
         headingHorizontallyWithinViewport: Boolean(
           headingRect
             && headingRect.left >= -1
@@ -2548,14 +2348,14 @@ try {
     })
     if (
       !compactStudyContract.heading
-      || !compactStudyContract.ink
-      || !compactStudyContract.headingHorizontallyWithinInk
+      || !compactStudyContract.paper
+      || !compactStudyContract.headingHorizontallyWithinPaper
       || !compactStudyContract.headingHorizontallyWithinViewport
     ) {
       throw new Error(`Study content exceeded the 200% reading bounds: ${JSON.stringify(compactStudyContract)}`)
     }
   } else {
-    const studyState = window.locator('.study-boundary:is([role="alert"]), .study-workbench--empty, .study-workbench--error').first()
+    const studyState = window.locator('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error').first()
     await studyState.waitFor({ state: 'visible' })
     await studyState.scrollIntoViewIfNeeded()
     if (!(await studyState.isVisible())) throw new Error('Safe Study boundary is hidden at 200%')
@@ -2570,7 +2370,8 @@ try {
   await window.locator('.action-rail').waitFor({ state: 'visible', timeout: 20_000 })
   const reducedMedia = await window.locator('.window-ambient-video').count()
   if (reducedMedia !== 0) throw new Error('Reduced motion still mounted ambient video')
-  if (await window.locator('.window-live2d[data-companion-renderer="orb"]').count() !== 1) throw new Error('Reduced motion did not keep the companion as a static orb')
+  // 唯一形态：reduced motion 只暂停 ticker 并保留最后一帧，不得切换到别的 renderer。
+  if (await window.locator('.window-live2d[data-companion-renderer="live2d"]').count() !== 1) throw new Error('Reduced motion did not keep the Live2D renderer (no orb fallback exists)')
   const reducedAnimatedNodes = await window.locator('.scene-status, .run-recovery-notice, .run-spinner, .run-phase__dot').evaluateAll((elements) => elements
     .map((element) => ({
       className: element.className,

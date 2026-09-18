@@ -16,17 +16,16 @@ import type { ApiTransaction } from "../../db/client.ts";
 import {
   understandingChangeSets,
   understandingProjectionCheckpoints,
-} from "../../db/schema/understanding-projection.ts";
-import { canonicalLearningEventOutbox, practiceTrailEventOutbox } from "../../db/schema/learning-runs.ts";
+} from "@ailearn/shared/db-schema/understanding-projection";
+import { canonicalLearningEventOutbox, practiceTrailEventOutbox } from "@ailearn/shared/db-schema/learning-runs";
 import type { CanonicalLearningEventEnvelopeV1 } from "@ailearn/shared";
-import { issueCheckpointToken, parseCheckpointToken } from "./projection-checkpoint.ts";
+import { issueCheckpointToken } from "./projection-checkpoint.ts";
 import { sha256Hex } from "@ailearn/shared/content-hash";
 
 export interface ProjectionScope {
   workspaceId: string;
   userId: string;
 }
-
 /** 当前 watermark（最近 checkpoint；无历史 → null watermarks）。 */
 async function currentWatermark(
   executor: ApiTransaction,
@@ -178,38 +177,4 @@ export async function materializePracticeChangeSet(
       eq(practiceTrailEventOutbox.userId, scope.userId),
     ));
   return { changeSetId, toCheckpointToken: toToken };
-}
-
-/** checkpoint 是否覆盖某 canonical event（服务端解码判断，客户端不可自行比较）。 */
-export async function checkpointCoversCanonicalEvent(
-  executor: ApiTransaction,
-  scope: ProjectionScope,
-  token: string,
-  canonicalEventId: string,
-): Promise<boolean> {
-  const watermark = parseCheckpointToken(token);
-  if (!watermark) return false;
-  if (watermark.workspaceId !== scope.workspaceId || watermark.userId !== scope.userId) return false;
-  // 覆盖判断：该 event 的 outbox 行必须存在且其"序"不晚于 watermark 事件——
-  // 简化实现：watermark.canonical === eventId 直接覆盖；否则查 change_sets 中
-  // 该 event 的 toCheckpointToken 是否被 watermark 之后（按 created_at 序）。
-  if (watermark.lastCanonicalEventId === canonicalEventId) return true;
-  const rows = await executor
-    .select({ toCheckpointToken: understandingChangeSets.toCheckpointToken, createdAt: understandingChangeSets.createdAt })
-    .from(understandingChangeSets)
-    .where(and(
-      eq(understandingChangeSets.workspaceId, scope.workspaceId),
-      eq(understandingChangeSets.userId, scope.userId),
-      eq(understandingChangeSets.sourceEventId, canonicalEventId),
-    ))
-    .limit(1);
-  if (rows.length === 0) return false;
-  // watermark 事件的 checkpoint 时间晚于该 event 的物化时间 → 已覆盖。
-  const watermarkRows = await executor
-    .select({ capturedAt: understandingProjectionCheckpoints.capturedAt })
-    .from(understandingProjectionCheckpoints)
-    .where(eq(understandingProjectionCheckpoints.token, token))
-    .limit(1);
-  const watermarkAt = watermarkRows[0]?.capturedAt ?? new Date(0);
-  return watermarkAt.getTime() >= rows[0].createdAt.getTime();
 }

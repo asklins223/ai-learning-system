@@ -19,6 +19,8 @@
   --gate-focus: #8f3518;
   --gate-success: #526a46;
   --gate-danger: #8c3d26;
+  --gate-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --gate-ease-standard: cubic-bezier(0.23, 1, 0.32, 1);
   --gate-lamp-control-left: 69%;
   --gate-lamp-control-top: 57%;
   --gate-lamp-control-width: 104px;
@@ -153,7 +155,7 @@
   backdrop-filter: blur(8px);
   pointer-events: none;
   transform: translate(-50%, -50%);
-  transition: background-color 150ms ease-out, box-shadow 150ms ease-out, transform 100ms ease-out;
+  transition: background-color 150ms var(--gate-ease-out), box-shadow 150ms var(--gate-ease-out), transform 100ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__lamp-control-pulse {
@@ -190,26 +192,35 @@
   background: rgba(35, 27, 22, 0.72);
   opacity: 0;
   pointer-events: none;
-  transform: translateX(-50%);
-  translate: 0 -3px;
-  transition: opacity 140ms ease-out, translate 140ms ease-out;
+  transition: opacity 150ms var(--gate-ease-out), transform 150ms var(--gate-ease-out);
+  transform: translateX(-50%) translateY(-3px);
 }
 
-.desktop-access-gate__lamp-control:hover .desktop-access-gate__lamp-control-pin,
 .desktop-access-gate__lamp-control:focus-visible .desktop-access-gate__lamp-control-pin {
   background: rgba(148, 72, 36, 0.84);
   box-shadow: 0 8px 18px rgba(35, 21, 13, 0.25), 0 0 0 9px rgba(255, 239, 207, 0.13);
 }
 
-.desktop-access-gate__lamp-control:hover .desktop-access-gate__lamp-control-label,
 .desktop-access-gate__lamp-control:focus-visible .desktop-access-gate__lamp-control-label {
   opacity: 1;
-  translate: 0 0;
+  transform: translateX(-50%) translateY(0);
 }
 
 .desktop-access-gate__lamp-control:disabled .desktop-access-gate__lamp-control-label {
   opacity: 0;
-  translate: 0 -3px;
+  transform: translateX(-50%) translateY(-3px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate__lamp-control:hover .desktop-access-gate__lamp-control-pin {
+    background: rgba(148, 72, 36, 0.84);
+    box-shadow: 0 8px 18px rgba(35, 21, 13, 0.25), 0 0 0 9px rgba(255, 239, 207, 0.13);
+  }
+
+  .desktop-access-gate__lamp-control:hover .desktop-access-gate__lamp-control-label {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 .desktop-access-gate__lamp-control:active .desktop-access-gate__lamp-control-pin {
@@ -261,7 +272,7 @@
   border-radius: 2px 9px 2px 2px;
   background: transparent;
   cursor: pointer;
-  transition: color 140ms ease-out, border-color 140ms ease-out, background-color 140ms ease-out, transform 140ms ease-out;
+  transition: color 150ms var(--gate-ease-standard), border-color 150ms var(--gate-ease-standard), background-color 150ms var(--gate-ease-standard), transform 150ms var(--gate-ease-standard);
 }
 
 .desktop-access-gate__time-option > svg {
@@ -314,11 +325,18 @@
   font-size: 10px;
 }
 
-.desktop-access-gate__time-option:hover,
 .desktop-access-gate__time-option:focus-visible {
   color: var(--gate-action-hover);
   border-color: rgba(157, 73, 34, 0.3);
   background: rgba(255, 255, 250, 0.46);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate__time-option:hover {
+    color: var(--gate-action-hover);
+    border-color: rgba(157, 73, 34, 0.3);
+    background: rgba(255, 255, 250, 0.46);
+  }
 }
 
 .desktop-access-gate__time-option:active { transform: translateY(1px); }
@@ -412,7 +430,7 @@
   align-items: center;
   gap: 10px;
   color: var(--gate-ink);
-  transition: color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__brand-seal {
@@ -429,7 +447,7 @@
   font-weight: 760;
   line-height: 1;
   box-shadow: 0 5px 12px rgba(70, 47, 29, 0.13);
-  transition: color 160ms ease-out, border-color 160ms ease-out, background-color 160ms ease-out, box-shadow 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out), border-color 160ms var(--gate-ease-out), background-color 160ms var(--gate-ease-out), box-shadow 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__brand-name {
@@ -446,7 +464,7 @@
   border-radius: 50%;
   background: var(--gate-action);
   box-shadow: 0 0 0 4px rgba(179, 79, 40, 0.1);
-  transition: background-color 160ms ease-out, box-shadow 160ms ease-out;
+  transition: background-color 160ms var(--gate-ease-out), box-shadow 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__heading {
@@ -455,21 +473,23 @@
   gap: 10px;
   padding-bottom: 17px;
   border-bottom: 1px solid var(--gate-line);
-  transition: border-color 160ms ease-out;
+  transition: border-color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__heading h1 {
-  max-width: 12ch;
+  max-width: 100%;
   margin: 0;
   color: var(--gate-ink);
   font-family: "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
   font-size: clamp(31px, 3vw, 39px);
   font-weight: 720;
   line-height: 1.28;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.01em;
   text-wrap: balance;
   overflow-wrap: anywhere;
-  transition: color 160ms ease-out;
+  /* No `ch` cap: `ch` is the width of "0", roughly half an em in this face, so a
+     12ch guard wrapped 8-character CJK titles onto two lines. */
+  transition: color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__heading h1:focus { outline: 0; }
@@ -482,7 +502,7 @@
   font-weight: 520;
   line-height: 1.75;
   overflow-wrap: anywhere;
-  transition: color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__loading,
@@ -592,7 +612,7 @@
   min-width: 0;
   gap: 7px;
   color: var(--gate-ink);
-  transition: color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__field-label {
@@ -621,10 +641,57 @@
   border-radius: 3px 12px 3px 3px;
   background: var(--gate-field);
   box-shadow: inset 0 1px 0 var(--gate-field-shine);
-  transition: color 160ms ease-out, border-color 160ms ease-out, background-color 160ms ease-out, box-shadow 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out), border-color 160ms var(--gate-ease-out), background-color 160ms var(--gate-ease-out), box-shadow 160ms var(--gate-ease-out);
 }
 
-.desktop-access-gate__field-control:hover { border-color: var(--gate-line-strong); }
+.desktop-access-gate__field-control:focus-within > svg {
+  transform: translateY(-1px) scale(1.04);
+}
+
+/* Controls that carry an inline action (the password reveal) need a third
+   column so the action never wraps onto its own row. */
+.desktop-access-gate__field-control--with-action {
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+}
+
+/* Registration puts the required password pair on one row and the optional
+   pair on the next; the email spans both because it identifies the account. */
+.desktop-access-gate__field--wide { grid-column: 1 / -1; }
+
+.desktop-access-gate__reveal {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  margin-inline-end: -6px;
+  padding: 0;
+  color: var(--gate-ink-faint);
+  border: 0;
+  border-radius: 2px 8px 2px 2px;
+  background: transparent;
+  cursor: pointer;
+  transition: color 160ms var(--gate-ease-out), background-color 160ms var(--gate-ease-out);
+}
+
+.desktop-access-gate__reveal:focus-visible {
+  color: var(--gate-action);
+  background: var(--gate-field-focus-halo);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate__reveal:hover {
+    color: var(--gate-ink);
+    background: rgba(120, 84, 56, 0.09);
+  }
+}
+
+.desktop-access-gate__field-control > svg {
+  transition: color 160ms var(--gate-ease-out), transform 160ms var(--gate-ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate__field-control:hover { border-color: var(--gate-line-strong); }
+}
 
 .desktop-access-gate__field-control:focus-within {
   color: var(--gate-action);
@@ -652,13 +719,46 @@
   outline: 0;
   background: transparent;
   caret-color: var(--gate-action);
-  transition: color 160ms ease-out, caret-color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out), caret-color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__form input::placeholder {
   color: var(--gate-ink-faint);
   opacity: 1;
-  transition: color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out);
+}
+
+/* "保持登录" sits directly above the trust note it explains. Scoped through the
+   form so it outranks `.desktop-access-gate__form label { display: grid }`. */
+.desktop-access-gate__form .desktop-access-gate__keep-signed-in {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  color: var(--gate-ink-soft);
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.desktop-access-gate__keep-signed-in input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--gate-action);
+  cursor: pointer;
+}
+
+.desktop-access-gate__keep-signed-in input:focus-visible {
+  outline: 3px solid var(--gate-focus);
+  outline-offset: 2px;
+}
+
+.desktop-access-gate__keep-signed-in:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .desktop-access-gate__trust-note {
@@ -670,14 +770,14 @@
   color: var(--gate-ink-soft);
   font-size: 11px;
   line-height: 1.65;
-  transition: color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__trust-note svg {
   margin-top: 1px;
   flex: 0 0 auto;
   color: var(--gate-success);
-  transition: color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__form-error {
@@ -690,11 +790,18 @@
   border-top: 1px solid rgba(140, 61, 38, 0.38);
   border-bottom: 1px solid rgba(140, 61, 38, 0.22);
   overflow-wrap: anywhere;
+  transition: opacity 180ms var(--gate-ease-out), transform 180ms var(--gate-ease-out);
+}
+
+@starting-style {
+  .desktop-access-gate__form-error {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
 }
 
 .desktop-access-gate__primary,
-.desktop-access-gate__text-action,
-.desktop-access-gate__workspace-list button {
+.desktop-access-gate__text-action {
   font: inherit;
   cursor: pointer;
 }
@@ -715,20 +822,29 @@
   border-radius: 3px 14px 3px 3px;
   background-color: var(--gate-action);
   box-shadow: var(--gate-action-shadow);
-  transition: background-color 160ms ease-out, box-shadow 160ms ease-out, transform 160ms ease;
+  transition: background-color 180ms var(--gate-ease-out), box-shadow 180ms var(--gate-ease-out), transform 180ms var(--gate-ease-out);
 }
 
-.desktop-access-gate__primary:hover:not(:disabled) {
-  background: var(--gate-action-hover);
-  box-shadow: var(--gate-action-shadow-hover);
-  transform: translateY(-1px);
+.desktop-access-gate__primary-arrow {
+  transition: transform 180ms var(--gate-ease-out);
 }
 
 .desktop-access-gate__primary:active:not(:disabled) { transform: translateY(0); }
 
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate__primary:hover:not(:disabled) {
+    background: var(--gate-action-hover);
+    box-shadow: var(--gate-action-shadow-hover);
+    transform: translateY(-1px);
+  }
+
+  .desktop-access-gate__primary:hover:not(:disabled) .desktop-access-gate__primary-arrow {
+    transform: translateX(4px);
+  }
+}
+
 .desktop-access-gate__primary:disabled,
-.desktop-access-gate__text-action:disabled,
-.desktop-access-gate__workspace-list button:disabled {
+.desktop-access-gate__text-action:disabled {
   cursor: not-allowed;
   opacity: 0.56;
 }
@@ -749,83 +865,26 @@
   background: transparent;
   text-decoration-thickness: 1px;
   text-underline-offset: 4px;
-  transition: color 160ms ease-out;
+  transition: color 160ms var(--gate-ease-out);
 }
 
-.desktop-access-gate__text-action:hover:not(:disabled) { text-decoration: underline; }
+.desktop-access-gate__text-action:focus-visible { text-decoration: underline; }
 
-.desktop-access-gate__workspace-list {
-  display: grid;
-  min-width: 0;
-  gap: 0;
-  border-top: 1px solid var(--gate-line);
-}
-
-.desktop-access-gate__workspace-list button {
-  display: grid;
-  min-width: 0;
-  min-height: 68px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 13px 2px;
-  color: var(--gate-ink);
-  text-align: start;
-  border: 0;
-  border-bottom: 1px solid var(--gate-line);
-  border-radius: 0;
-  background: transparent;
-  transition: color 160ms ease, background-color 160ms ease;
-}
-
-.desktop-access-gate__workspace-list button:hover:not(:disabled) {
-  color: var(--gate-action-hover);
-  background: rgba(255, 248, 233, 0.44);
-}
-
-.desktop-access-gate__workspace-list button > * { transition: transform 160ms ease; }
-.desktop-access-gate__workspace-list button:hover:not(:disabled) > * { transform: translateX(6px); }
-
-.desktop-access-gate__workspace-list button > svg:first-child { color: var(--gate-success); }
-
-.desktop-access-gate__workspace-list button span {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-}
-
-.desktop-access-gate__workspace-list strong,
-.desktop-access-gate__workspace-list small { overflow-wrap: anywhere; }
-
-.desktop-access-gate__workspace-list strong {
-  font-family: "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
-  font-size: 15px;
-}
-
-.desktop-access-gate__workspace-list small {
+/* A second, lower-priority text action next to the primary one ("还没有账号？
+   注册" stays the louder of the two). */
+.desktop-access-gate__text-action--quiet {
+  min-height: 34px;
   color: var(--gate-ink-soft);
   font-size: 12px;
-  line-height: 1.5;
+  font-weight: 620;
 }
 
-.desktop-access-gate__empty {
-  display: grid;
-  justify-items: start;
-  gap: 8px;
-  padding: 13px 0;
-  color: var(--gate-ink);
-  border-top: 1px solid var(--gate-line);
-  border-bottom: 1px solid var(--gate-line);
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate__text-action--quiet:hover:not(:disabled) { color: var(--gate-action-text); }
 }
 
-.desktop-access-gate__empty svg { color: var(--gate-success); }
-
-.desktop-access-gate__empty p {
-  max-width: 38ch;
-  margin: 0;
-  color: var(--gate-ink-soft);
-  font-size: 13px;
-  line-height: 1.65;
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate__text-action:hover:not(:disabled) { text-decoration: underline; }
 }
 
 .desktop-access-gate button:focus-visible {
@@ -886,8 +945,10 @@
   text-shadow: 0 1px 0 rgba(255, 239, 220, 0.28);
 }
 
-.desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__field-control:hover {
-  background: #fff8ef;
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__field-control:hover {
+    background: #fff8ef;
+  }
 }
 
 .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-menu {
@@ -902,10 +963,16 @@
 .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-option span { color: #fff4e8; }
 .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-option small { color: #e5b896; }
 
-.desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-option:hover,
 .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-option:focus-visible {
   border-color: rgba(255, 193, 132, 0.36);
   background: rgba(255, 225, 193, 0.1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-option:hover {
+    border-color: rgba(255, 193, 132, 0.36);
+    background: rgba(255, 225, 193, 0.1);
+  }
 }
 
 .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-option[data-selected="true"] {
@@ -964,10 +1031,16 @@
   box-shadow: 0 17px 36px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 244, 220, 0.07);
 }
 
-.desktop-access-gate[data-gate-visual-theme="night"] .desktop-access-gate__time-option:hover,
 .desktop-access-gate[data-gate-visual-theme="night"] .desktop-access-gate__time-option:focus-visible {
   border-color: rgba(255, 195, 111, 0.3);
   background: rgba(255, 220, 156, 0.08);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-access-gate[data-gate-visual-theme="night"] .desktop-access-gate__time-option:hover {
+    border-color: rgba(255, 195, 111, 0.3);
+    background: rgba(255, 220, 156, 0.08);
+  }
 }
 
 .desktop-access-gate[data-gate-visual-theme="night"] .desktop-access-gate__time-option[data-selected="true"] {
@@ -986,43 +1059,15 @@
   box-shadow: 0 0 0 3px var(--gate-field-focus-halo), inset 0 1px 0 var(--gate-field-shine);
 }
 
-.desktop-access-gate[data-gate-visual-theme="night"] .desktop-access-gate__workspace-list button:hover:not(:disabled) {
-  background: rgba(244, 223, 192, 0.055);
-}
-
-.desktop-door-transition {
-  position: absolute;
-  z-index: 90;
-  inset: 0;
-  overflow: hidden;
-  background: transparent;
-  pointer-events: auto;
-  user-select: none;
-}
-
 .desktop-access-gate__room-content {
   position: absolute;
   z-index: 0;
   inset: 0;
 }
 
-.desktop-access-gate__room-content[data-door-entry-phase="open"] {
+.desktop-access-gate__room-content[data-room-revealed="true"] {
   animation: desktop-room-reveal 340ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-
-.desktop-access-gate__room-content[data-door-entry-phase="opening"] {
-  visibility: hidden;
-  pointer-events: none;
-}
-
-.desktop-door-transition canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-.desktop-door-transition[data-transition-theme="night"] { background: transparent; }
 
 @media (max-width: 1080px) {
   .desktop-access-gate {
@@ -1033,7 +1078,8 @@
   .desktop-access-gate__panel { width: min(100%, 420px); }
 }
 
-@media (max-width: 760px), (max-height: 620px) {
+/* Narrow viewport: one column, stacked form. */
+@media (max-width: 760px) {
   .desktop-access-gate {
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
@@ -1049,25 +1095,6 @@
      the lamp interaction deliberately avoids on desktop. */
   .desktop-access-gate__backdrop-scrim--day,
   .desktop-access-gate__backdrop-scrim--night { background: transparent; }
-
-  .desktop-access-gate__lamp-control {
-    top: 48px;
-    right: 18px;
-    left: auto;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    transform: none;
-  }
-
-  .desktop-access-gate__lamp-control-label { display: none; }
-
-  .desktop-access-gate__time-menu {
-    top: 96px;
-    right: 18px;
-    left: auto;
-    width: min(238px, calc(100vw - 36px));
-  }
 
   .desktop-access-gate[data-gate-variant="register"] {
     grid-template-columns: minmax(0, 1fr);
@@ -1103,8 +1130,6 @@
     word-break: break-all;
   }
 
-  .desktop-access-gate__fields--register { grid-template-columns: minmax(0, 1fr); }
-
   .desktop-access-gate__heading {
     gap: 8px;
     padding-bottom: 15px;
@@ -1123,6 +1148,67 @@
   }
 
   .desktop-access-gate__form { gap: 12px; }
+}
+
+/*
+ * Short viewport (any width) — 200% system zoom, or a window near the minimum
+ * height.  Height is the scarce axis here, so the layout keeps its full-width
+ * composition and instead spends less vertical space.  This is deliberately a
+ * separate query from `max-width`: collapsing the register grid into one column
+ * is a *narrow*-viewport decision, and applying it to a merely short viewport
+ * doubled the form height exactly where height was already the problem.
+ */
+@media (max-height: 620px) {
+  .desktop-access-gate {
+    align-items: start;
+    padding-block: 34px 24px;
+  }
+
+  /* One lamp hotspot would drift across a cropped poster at these heights, so
+     the control docks to the corner and keeps its accessible name. */
+  .desktop-access-gate__lamp-control {
+    top: 34px;
+    right: 18px;
+    left: auto;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    transform: none;
+  }
+
+  .desktop-access-gate__lamp-control-label { display: none; }
+
+  .desktop-access-gate__time-menu {
+    top: 82px;
+    right: 18px;
+    left: auto;
+    width: min(238px, calc(100vw - 36px));
+  }
+
+  .desktop-access-gate__panel { gap: 13px; }
+
+  .desktop-access-gate__heading {
+    gap: 6px;
+    padding-bottom: 11px;
+  }
+
+  .desktop-access-gate__heading h1 { font-size: clamp(25px, 4.6vh, 32px); }
+
+  .desktop-access-gate__heading p {
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .desktop-access-gate__fields,
+  .desktop-access-gate__form { gap: 10px; }
+
+  .desktop-access-gate__field-control { min-height: 44px; }
+
+  .desktop-access-gate__form input { min-height: 42px; }
+
+  .desktop-access-gate__primary { min-height: 44px; }
+
+  .desktop-access-gate__text-action { min-height: 36px; }
 }
 
 @media (max-width: 420px) {
@@ -1158,21 +1244,17 @@
     min-height: 48px;
     padding-inline: 12px;
   }
-
-  .desktop-access-gate__workspace-list button { grid-template-columns: auto minmax(0, 1fr); }
-  .desktop-access-gate__workspace-list button > svg:last-child { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .desktop-access-gate__room-content[data-door-entry-phase="open"] { animation: none; }
+  .desktop-access-gate__room-content[data-room-revealed="true"] { animation: none; }
 
   .desktop-access-gate__loading svg,
   .desktop-access-gate__button-spinner { animation: none; }
 
   .desktop-access-gate__primary,
-  .desktop-access-gate__workspace-list button,
-  .desktop-access-gate__workspace-list button > *,
-  .desktop-access-gate__field-control { transition-duration: 1ms; }
+  .desktop-access-gate__field-control,
+  .desktop-access-gate__form-error { transition-duration: 1ms; }
 }
 
 @keyframes desktop-room-reveal {
@@ -1182,4 +1264,15 @@
 
 @keyframes desktop-gate-spin {
   to { transform: rotate(1turn); }
+}
+
+/*
+ * Only stack the register fields once the panel itself is too narrow for two
+ * columns. Keying this off the viewport (as the rest of the narrow layout does)
+ * stacked a form that still had 560px of panel to work with — at the documented
+ * 200% zoom the viewport is narrow *and* short, so the stack doubled the height
+ * of the one axis that was already scarce.
+ */
+@media (max-width: 560px) {
+  .desktop-access-gate__fields--register { grid-template-columns: minmax(0, 1fr); }
 }

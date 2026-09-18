@@ -825,7 +825,6 @@ Web 通过同源 `/api/...` 访问；下表是 Fastify 实际 route，不含 Nex
 
 | Method | Fastify route | 结果 |
 | --- | --- | --- |
-| GET | `/companion/bootstrap` | 当前 session scope/account/feature 投影；`200` |
 | POST | `/companion/conversations` | 创建 dialogue；`201` |
 | POST | `/companion/inbox/ensure` | 幂等获取/创建唯一 inbox；首次 `201`，已有 `200` |
 | GET | `/companion/conversations` | cursor 分页列表；`200` |
@@ -847,29 +846,7 @@ Web 通过同源 `/api/...` 访问；下表是 Fastify 实际 route，不含 Nex
 | POST | `/voice/transcribe` | P3 复用日常 ASR multipart；`200` |
 | POST | `/voice/tts` | P3 复用 allowlisted TTS；`200 audio/mpeg` |
 
-前十八条 `/companion/**` 是本方案新增/扩展的 Companion API；随后一条是 P5 在现有 Learning Session 模块新增的 context-grant route；末两条是既有 voice route，P3 必须按 §11 收紧而不是复制新 endpoint。所有 JSON request/response 使用本合同 shared schema；export 使用 §12 的逐行 strict union，音频 route 的 multipart/binary 例外仍使用严格字段、大小、MIME/magic-byte 和 response header 校验。
-
-### 6.0 Bootstrap
-
-```ts
-const companionBootstrapResponseV1Schema = z.object({
-  version: z.literal(1),
-  userId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  account: companionAccountStateV1Schema,
-  features: z.object({
-    petSurface: z.boolean(),
-    textConversation: z.boolean(),
-    voiceDialogue: z.boolean(),
-    live2d: z.boolean(),
-    learningActions: z.boolean(),
-    streamingVoice: z.boolean(),
-  }).strict(),
-  serverTime: z.string().datetime(),
-}).strict();
-```
-
-route 只从 `requireSession` 的当前 scope 与现有 Companion account service 构造 response，不接受 query/body，不创建 conversation/inbox/message，不读取 provider。features 依次精确投影 `companion_pet_v1 / companion_dialogue_v1 / companion_voice_v1 / companion_live2d_v1 / companion_learning_actions_v1 / companion_streaming_voice_v1` 的服务端有效能力，不读取 `NEXT_PUBLIC_*`。使用 `Cache-Control: no-store`。`globalEnabled=false` 时仍返回 200 及新 epoch，renderer 清空正文并 report `global_off`；401/403 才是 auth failure。workspace switch 后必须重新请求，旧 scope stream/result 由 account epoch + workspace fence 拒绝。
+前十七条 `/companion/**` 是本方案新增/扩展的 Companion API；随后一条是 P5 在现有 Learning Session 模块新增的 context-grant route；末两条是既有 voice route，P3 必须按 §11 收紧而不是复制新 endpoint。所有 JSON request/response 使用本合同 shared schema；export 使用 §12 的逐行 strict union，音频 route 的 multipart/binary 例外仍使用严格字段、大小、MIME/magic-byte 和 response header 校验。
 
 ### 6.1 Create conversation
 
@@ -1163,7 +1140,7 @@ public message 不含 stack、SQL、host、provider body、模型原文、密钥
 - Pet/Web fallback composer 在客户端最多 `4,000` 字符，Main 完整对话最多 `20,000`；server 对所有不可信 `sourceSurface` 统一执行 `20,000` 硬上限，不能靠伪造 surface 绕过权限或其他限额；
 - create turn：每 `(workspace,user)` `12/min`、`120/hour`，且最多 3 个不同 conversation 同时 active；每 conversation 仍最多 1 个 active run；
 - create conversation：每用户 `10/min`，总量上限见 §6.1；
-- bootstrap + conversation list/snapshot/messages/proposal snapshot 合并 `120/min`；PATCH/DELETE conversation 合并 `20/min`；inbox ensure `30/min`；cancel `30/min`；delivery viewed+dismiss 合并 `60/min`；proposal decision `20/min`；全部按 `(workspace,user)`；
+- conversation list/snapshot/messages/proposal snapshot 合并 `120/min`；PATCH/DELETE conversation 合并 `20/min`；inbox ensure `30/min`；cancel `30/min`；delivery viewed+dismiss 合并 `60/min`；proposal decision `20/min`；全部按 `(workspace,user)`；
 - P5 learning-context 每用户 `30/min`；menu-proposal 与 create turn 共用 `12/min` 写预算，且每 conversation 仍最多一个 pending proposal；
 - P3 ASR `10/min`、`60/hour`、每用户最多 1 个并发 upload；Companion TTS `60/min`、每用户最多 2 个并发 synthesis，仍受每 run 20 segment/2,000 字上限；正式学习 voice 使用其既有独立预算；
 - export 每用户最多 `3/hour` 且同一时刻最多一个；当前 scope 任一 dialogue turn 非终态时，在发送 NDJSON headers 前返回 `409 RUN_ALREADY_ACTIVE`，不输出缺失中的 assistant preview；

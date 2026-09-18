@@ -18,7 +18,7 @@
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { learningMetricEvents } from "../../db/schema/learning-metrics.ts";
+import { learningMetricEvents } from "@ailearn/shared/db-schema/learning-metrics";
 
 export interface LearningMetricScope {
   workspaceId: string;
@@ -89,29 +89,6 @@ export async function recordLearningMetric(
     // 埋点失败不产生任何学习副作用；记录一次告警便于运维发现配置问题。
     process.stderr.write(
       `[metrics] drop ${event.eventType} event (best-effort): ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-  }
-}
-
-/**
- * R8（round-3 审计）：批量埋点入口——同一 scope 的多条事件集中在单事务内
- * 多次 insert，替代逐事件独立 withWorkspaceTransaction（run-create 热路径
- * 每事件 1 事务 + 1 RTT）。保持“尽力而为”语义：整批失败静默丢弃，绝不
- * 阻塞/回滚学习主链路。
- */
-export async function recordLearningMetrics(
-  scope: LearningMetricScope,
-  events: LearningMetricEventV1[],
-): Promise<void> {
-  if (events.length === 0) return;
-  try {
-    await withWorkspaceTransaction(scope, (tx) =>
-      Promise.all(events.map((event) => insertLearningMetricEvent(tx, scope, event))),
-    );
-  } catch (error) {
-    // 整批静默丢弃（尽力而为）；无学习副作用。
-    process.stderr.write(
-      `[metrics] drop ${events.length} events (best-effort): ${error instanceof Error ? error.message : String(error)}\n`,
     );
   }
 }

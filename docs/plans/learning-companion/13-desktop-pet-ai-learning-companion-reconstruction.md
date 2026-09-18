@@ -1335,7 +1335,7 @@ packages/db/src/schema/
 | P0/P1 | `petModeEnabled` | Electron device-local 设置；只决定本机是否创建 Pet Window |
 | P2 | `companion_dialogue_v1` | 服务端 capability；授权 conversation/turn/SSE，不由 public env 代替 |
 | P3 | `companion_voice_v1` | 服务端 capability；授权日常点按式录音/ASR/TTS，不授权正式 Voice Artifact 提交 |
-| P4 | `companion_live2d_v1` / `COMPANION_LIVE2D_V1_ENABLED` | 服务端 capability + 合法本地资产 manifest；失败时回退 Sprite |
+| P4 | desktop-client Live2D manifest | 合法本地资产 manifest + renderer 校验；失败时进入同一桌面角色的静态故障态 |
 | P5 | `companion_learning_actions_v1` | 服务端 capability；授权 typed proposal/confirm bridge，不授权直接 canonical write |
 | P6 | `companion_streaming_voice_v1` | 服务端 capability；只授权 streaming transport，P3 文件式点按录音保留回退 |
 

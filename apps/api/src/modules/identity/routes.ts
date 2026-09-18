@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
-import { users, workspaces } from "../../db/schema/identity.ts";
+import { users, workspaces } from "@ailearn/shared/db-schema/identity";
 import { loginWithPassword, registerWithoutInvite, switchWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession, requireOwner, getRequestCredential } from "./middleware.ts";
@@ -42,24 +42,10 @@ export const avatarUrlSchema = z
   .string()
   .trim()
   .max(500)
-  .refine((value) => {
-    // 站内上传路径：仅允许 /api/uploads/avatars/ 前缀（防止 /admin 等内部路径探测）
-    if (value.startsWith("/api/uploads/avatars/")) return true;
-    // 向后兼容：外部 HTTPS URL（已有用户数据）
-    try {
-      return new URL(value).protocol === "https:";
-    } catch {
-      return false;
-    }
-  }, "avatarUrl must be an HTTPS URL or a site-uploaded avatar path");
-
-// ADR-0009: 无邀请码注册 — 只创建个人工作区
-const registerPersonalSchema = z.object({
-  email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
-  password: z.string().min(8).max(200),
-  displayName: displayNameSchema.optional(),
-  avatarUrl: avatarUrlSchema.optional(),
-});
+  .refine(
+    (value) => value.startsWith("/api/uploads/avatars/"),
+    "avatarUrl must be a site-uploaded avatar path",
+  );
 
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_RATE_LIMIT_MAX = 5; // max attempts per window
@@ -152,24 +138,10 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     return { ...result, csrfToken };
   });
 
-  /**
-   * POST /auth/register（已禁用）
-   * 明文 invite code 查找已在 2026-08-11 安全审查后关闭（明文邀请码仍是有效
-   * 凭据且无 hash 校验）；一律 410 Gone，请迁移到 /auth/register-v2。
-   */
-  app.post("/auth/register", async (_req, reply) => {
-    reply.header("Deprecation", "true");
-    reply.header("Sunset", "Sat, 31 Jan 2027 00:00:00 GMT");
-    reply.header("Link", '</auth/register-v2>; rel="successor-version"');
-    return reply.code(410).send({ error: "register endpoint deprecated and disabled; use /auth/register-v2" });
-  });
-
   app.post("/auth/logout", async (req, reply) => {
     // Logout 不要求 CSRF 校验：
     // 1) Logout 是低风险操作——攻击者最多让用户退出登录，不会造成数据泄露或篡改。
     // 2) SameSite=Lax 已阻止跨站表单 POST 退出登录。
-    //（2026-08-11：原注释声称前端 setCsrfCookie 兜底无 Max-Age——已修复，
-    //  前端兜底 cookie 带 7 天 Max-Age 与 session 一致；注释一并更新。）
     const credential = getRequestCredential(req);
     if (credential) await revokeSession(credential.token);
     clearSessionCookies(reply);
@@ -288,7 +260,19 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
 
   app.get("/auth/capabilities/v1", { preHandler: [requireSession] }, async (req) => {
     const role = req.session.membershipRole === "owner" ? "owner" : "member";
-    return buildDesktopCapabilityProjection(role);
+    // 伴星相关能力由工作区 AI 同意与数据策略决定，所以投影必须读真实的
+    // workspaces 行；读不到时按 fail-closed 交给投影处理。
+    const aiSettings = await getAIPrivacySettings(req.session.workspaceId);
+    return buildDesktopCapabilityProjection({
+      role,
+      ai: aiSettings
+        ? {
+            requiresConsent: aiSettings.requiresAIConsent,
+            consentSigned: Boolean(aiSettings.aiConsentVersion && aiSettings.aiConsentAt),
+            sendToExternal: aiSettings.aiDataPolicy.sendToExternal,
+          }
+        : null,
+    });
   });
 
   // PROFILE-01: 更新当前用户档案（昵称/头像）
@@ -330,28 +314,6 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       return result;
     },
   );
-
-  // ─── ADR-0009: 无邀请码注册端点 ────────────────────────────────
-  app.post("/auth/register-personal", async (req, reply) => {
-    const ip = req.ip;
-    const ipKey = `auth:register:ip:${ip}`;
-    const ipDecision = await limiter.consume(ipKey);
-    if (!ipDecision.allowed) {
-      reply.header("Retry-After", retryAfterSeconds(ipDecision.resetAt));
-      return reply.code(429).send({ error: "rate_limited", message: "注册尝试过于频繁，请稍后重试" });
-    }
-    const body = parseBody(app, registerPersonalSchema, req.body);
-    const result = await registerWithoutInvite(body.email, body.password, {
-      displayName: body.displayName,
-      avatarUrl: body.avatarUrl,
-    });
-    if (!result) {
-      throw app.httpErrors.badRequest("email already exists");
-    }
-    await limiter.reset(ipKey);
-    const csrfToken = setSessionCookies(reply, result.token);
-    return { ...result, csrfToken };
-  });
 
   // N-013: 列出用户可访问的所有工作区
   app.get("/auth/workspaces", { preHandler: [requireSession] }, async (req) => {
@@ -422,10 +384,21 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   });
 
   // GET /workspace/ai-settings — 获取当前工作区 AI 隐私配置
+  // 桌面设置页的「AI 数据同意」分区直接消费这份形状：同意状态 + 四个策略开关
+  // + 当前身份能否修改（写入仍由下面两个 PUT 的 requireOwner 收口）。
   app.get("/workspace/ai-settings", { preHandler: [requireSession] }, async (req) => {
     const settings = await getAIPrivacySettings(req.session.workspaceId);
     if (!settings) throw app.httpErrors.notFound("workspace not found");
-    return settings;
+    return {
+      version: 1 as const,
+      workspaceId: req.session.workspaceId,
+      canManage: req.session.membershipRole === "owner",
+      requiresConsent: settings.requiresAIConsent,
+      consentVersion: settings.aiConsentVersion,
+      consentAt: settings.aiConsentAt ? settings.aiConsentAt.toISOString() : null,
+      consentBy: settings.aiConsentBy,
+      dataPolicy: settings.aiDataPolicy,
+    };
   });
 
   // PUT /workspace/ai-consent — Owner 签署 AI 同意
@@ -647,7 +620,8 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         // 请求即可清空注册 IP 计数，配合无邮箱验证可无限批量注册假账户。
         return reply.code(statusMap[result.code] ?? 400).send({ error: result.code });
       }
-      await limiter.reset(ipKey);
+      // SEC 修复（2026-09 后端审查）：成功分支同样不得 reset——见 register-personal
+      // 处的说明；成功即重置会让 IP 上限完全失效。
       const csrfToken = setSessionCookies(reply, result.token);
       return { ...result, csrfToken };
     }
@@ -660,7 +634,6 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     if (!result) {
       throw app.httpErrors.badRequest("email already exists");
     }
-    await limiter.reset(ipKey);
     const csrfToken = setSessionCookies(reply, result.token);
     return { ...result, csrfToken };
   });

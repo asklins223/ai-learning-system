@@ -82,15 +82,23 @@ const desktopApi: AILearnDesktopApiM2 = {
     register: (input) => invoke(DESKTOP_IPC_CHANNELS.authRegister, input),
     logout: (input) => invoke(DESKTOP_IPC_CHANNELS.authLogout, input),
     reauthenticate: (input) => invoke(DESKTOP_IPC_CHANNELS.authReauthenticate, input),
-    changePassword: (input) => invoke(DESKTOP_IPC_CHANNELS.authChangePassword, input)
+    changePassword: (input) => invoke(DESKTOP_IPC_CHANNELS.authChangePassword, input),
+    joinWorkspace: (input) => invoke(DESKTOP_IPC_CHANNELS.authJoinWorkspace, input)
   },
   workspace: {
     list: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceList, input),
     switch: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceSwitch, input),
-    getCurrent: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceGetCurrent, input)
+    getCurrent: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceGetCurrent, input),
+    getAiSettings: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiSettingsGet, input),
+    updateAiConsent: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiConsentUpdate, input),
+    updateAiDataPolicy: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiDataPolicyUpdate, input),
+    export: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceExport, input)
   },
   capabilities: {
     get: (input) => invoke(DESKTOP_IPC_CHANNELS.capabilitiesGet, input)
+  },
+  clipboard: {
+    readLinks: (input) => invoke(DESKTOP_IPC_CHANNELS.clipboardReadLinks, input)
   },
   window: {
     getState: (input) => invoke(DESKTOP_IPC_CHANNELS.windowGetState, input),
@@ -100,19 +108,94 @@ const desktopApi: AILearnDesktopApiM2 = {
   room: {
     getProjection: (input) => invoke(DESKTOP_IPC_CHANNELS.roomGetProjection, input)
   },
+  activity: {
+    getToday: (input) => invoke(DESKTOP_IPC_CHANNELS.activityGetToday, input)
+  },
+  source: {
+    list: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceList, input),
+    create: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceCreate, input),
+    get: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceGet, input),
+    listNotes: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceNotes, input),
+    update: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceUpdate, input),
+    createNote: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceCreateNote, input),
+    archive: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceArchive, input),
+    // 站内图片原始字节：正文引用是 `/api/uploads/…`，渲染层够不到 API 源，
+    // 由 main 带会话令牌取回，这里只把那条通道接出来。
+    getImage: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceImageGet, input)
+  },
+  companion: {
+    home: {
+      getProjection: (input) => invoke(DESKTOP_IPC_CHANNELS.companionHomeGetProjection, input)
+    },
+    room: {
+      getProfile: (input) => invoke(DESKTOP_IPC_CHANNELS.companionRoomGetProfile, input),
+      patchProfile: (input) => invoke(DESKTOP_IPC_CHANNELS.companionRoomPatchProfile, input)
+    },
+    voice: {
+      speak: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceSpeak, input)
+    },
+    account: {
+      getState: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAccountGetState, input),
+      patchState: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAccountPatchState, input)
+    },
+    // 伴星中心（页 20）：共同记录的读取与记忆裁决。这里没有对话发送通道。
+    memory: {
+      list: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryList, input),
+      starMap: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryStarMap, input),
+      confirm: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryConfirm, input),
+      pin: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryPin, input),
+      unpin: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryUnpin, input),
+      archive: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryArchive, input),
+      restore: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryRestore, input),
+      remove: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryDelete, input)
+    },
+    daily: {
+      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionDailyGet, input)
+    },
+    persona: {
+      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionPersonaGet, input),
+      patch: (input) => invoke(DESKTOP_IPC_CHANNELS.companionPersonaPatch, input),
+      reset: (input) => invoke(DESKTOP_IPC_CHANNELS.companionPersonaReset, input)
+    },
+    conversations: {
+      list: (input) => invoke(DESKTOP_IPC_CHANNELS.companionConversationsList, input)
+    }
+  },
   note: {
+    list: (input) => invoke(DESKTOP_IPC_CHANNELS.noteList, input),
+    create: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCreate, input),
+    delete: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDelete, input),
+    restore: (input) => invoke(DESKTOP_IPC_CHANNELS.noteRestore, input),
     get: (input) => invoke(DESKTOP_IPC_CHANNELS.noteGet, input),
     save: (input) => invoke(DESKTOP_IPC_CHANNELS.noteSave, input),
+    versions: (input) => invoke(DESKTOP_IPC_CHANNELS.noteVersions, input),
+    restoreVersion: (input) => invoke(DESKTOP_IPC_CHANNELS.noteVersionRestore, input),
+    // 编辑器里的图写进对象存储。渲染层不持有令牌也够不到 API 源，只交出字节，
+    // 由 main 以 multipart 送出，回传的是可以写进正文的站内地址。
+    uploadImage: (input) => invoke(DESKTOP_IPC_CHANNELS.noteImageUpload, input),
     cardGeneration: {
       start: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationStart, input),
       getRun: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationGetRun, input),
       getCandidates: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationGetCandidates, input),
       review: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationReview, input),
       reveal: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationReveal, input),
+      exposure: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationExposure, input),
+      latestRun: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationLatestRun, input),
       activate: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationActivate, input),
       cancel: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationCancel, input),
+      retry: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationRetry, input),
       close: (input) => invoke(DESKTOP_IPC_CHANNELS.noteCardGenerationClose, input)
     }
+  },
+  objective: {
+    list: (input) => invoke(DESKTOP_IPC_CHANNELS.objectiveList, input),
+    get: (input) => invoke(DESKTOP_IPC_CHANNELS.objectiveGet, input)
+  },
+  understanding: {
+    getTopology: (input) => invoke(DESKTOP_IPC_CHANNELS.understandingGetTopology, input)
+  },
+  search: {
+    global: (input) => invoke(DESKTOP_IPC_CHANNELS.searchGlobal, input)
   },
   subscriptions: {
     subscribe: (input) => invoke(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe, input),
@@ -133,7 +216,8 @@ const desktopApi: AILearnDesktopApiM2 = {
     unsubscribe: (input) => invoke(DESKTOP_IPC_CHANNELS.subscriptionsUnsubscribe, input)
   },
   review: {
-    getQueue: (input) => invoke(DESKTOP_IPC_CHANNELS.reviewGetQueue, input)
+    getQueue: (input) => invoke(DESKTOP_IPC_CHANNELS.reviewGetQueue, input),
+    defer: (input) => invoke(DESKTOP_IPC_CHANNELS.reviewDefer, input)
   },
   learningRun: {
     get: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunGet, input),

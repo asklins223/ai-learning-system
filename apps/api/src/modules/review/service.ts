@@ -1,20 +1,17 @@
-import { and, eq, gte, lte, sql, inArray } from "drizzle-orm";
+import { and, eq, gte, lte, or, isNull, sql, inArray } from "drizzle-orm";
 import { withWorkspaceTransaction, SYSTEM_USER_ID, type ApiTransaction } from "../../db/client.ts";
-import {
-  reviewSchedules,
-  validationEvents,
-} from "../../db/schema/evidence.ts";
-import { validationAssistanceExposures } from "../../db/schema/validation-v2.ts";
+import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
+import { validationAssistanceExposures } from "@ailearn/shared/db-schema/validation-v2";
 import {
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
   learningCardsV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import { ReviewStatus, reviewQueueV2Schema, type ReviewQueueV2 } from "@ailearn/shared";
+import { decodeCursor, encodeCursor } from "../../lib/pagination.ts";
 import { reviewScheduleTargetsConsumableCardPredicate } from "./consumer-eligibility.ts";
 
 export type ReviewReason =
-  | "misunderstanding"
   | "evidence_gap"
   | "due_review"
   | "manual_pin";
@@ -73,19 +70,6 @@ export interface SanitizedReviewItem {
   isV2?: boolean;
 }
 
-export interface SanitizedReviewMeta {
-  scheduleId: string;
-  cardId: string;
-  objectiveId: string | null;
-  status: string;
-  nextReviewAt: string;
-  intervalDays: number;
-  reviewReason: ReviewReason;
-  unassistedEligibleAt: string | null;
-  effectiveStartAt: string;
-  blockedReason: ReviewBlockedReason;
-}
-
 export class ReviewQueueProjectionError extends Error {
   readonly code = "unsupported_contract" as const;
   readonly statusCode = 409 as const;
@@ -98,10 +82,11 @@ export class ReviewQueueProjectionError extends Error {
 
 /**
  * Convert the existing sanitized server query to the Member V2 wire shape.
- * Legacy rows are rejected instead of being silently guessed into an origin.
+ * Rows without a strict V2 identity are rejected instead of being guessed into
+ * an origin.
  */
 export function projectReviewQueueV2(
-  result: { items: SanitizedReviewItem[]; nextCursor: number | null },
+  result: { items: SanitizedReviewItem[]; total: number; nextCursor: string | null },
   now = new Date(),
 ): ReviewQueueV2 {
   const items = result.items.map((item) => {
@@ -118,12 +103,15 @@ export function projectReviewQueueV2(
     if (!Number.isFinite(dueAt.getTime()) || !Number.isFinite(effectiveStartAt.getTime())) {
       throw new ReviewQueueProjectionError("Review item availability 不是有效时间");
     }
+    // 队列只筛选已到期排期（nextReviewAt <= now()），所以唯一能挡住开始的
+    // 就是方案 16 的无辅助冷却期。出现别的 blockedReason 说明队列谓词与投影
+    // 假设脱节了，这里 fail-closed 而不是编一个不存在的状态。
+    if (effectiveStartAt.getTime() > now.getTime() && item.blockedReason !== "assistance_cooldown") {
+      throw new ReviewQueueProjectionError("Review item 在未到期状态下进入了到期队列");
+    }
     const startability = effectiveStartAt.getTime() <= now.getTime()
       ? { kind: "ready" as const }
-      : {
-          kind: "blocked" as const,
-          reason: item.blockedReason === "assistance_cooldown" ? "cooldown" as const : "not_due" as const,
-        };
+      : { kind: "blocked" as const, reason: "cooldown" as const };
     return {
       version: 2 as const,
       reviewId: item.reviewId,
@@ -137,7 +125,8 @@ export function projectReviewQueueV2(
   return reviewQueueV2Schema.parse({
     version: 2,
     items,
-    nextCursor: result.nextCursor === null ? null : String(result.nextCursor),
+    total: result.total,
+    nextCursor: result.nextCursor,
   });
 }
 
@@ -147,14 +136,15 @@ export async function listReviews(
     status?: string;
     includeAll?: boolean;
     limit?: number;
-    offset?: number;
+    /** R-019 风格的 (nextReviewAt, id) 复合 cursor；无效值等价于第一页。 */
+    cursor?: string;
     dueFromMs?: number;
     dueToMs?: number;
     sanitized?: boolean;
   },
   userId?: string,
   tx?: ApiTransaction,
-): Promise<{ items: ReviewWithCard[]; total: number; nextCursor: number | null }> {
+): Promise<{ items: ReviewWithCard[]; total: number; nextCursor: string | null }> {
   if (!tx) {
     return withWorkspaceTransaction(
       { workspaceId, userId: userId ?? SYSTEM_USER_ID },
@@ -181,78 +171,55 @@ export async function listReviews(
       ? and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, filter.status), userFilter, windowFilter)
       : and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, filter.status), windowFilter);
   } else {
+    // 到期队列 = pending 且已到期，且不在展示层延后期内（方案 16 §18.3：
+    // user_deferred_until 只影响这条队列，includeAll / 指定 status 的读取不受限）。
+    const notDeferred = or(
+      isNull(reviewSchedules.userDeferredUntil),
+      lte(reviewSchedules.userDeferredUntil, new Date()),
+    );
     where = userFilter
-      ? and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()), userFilter, windowFilter)
-      : and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()), windowFilter);
+      ? and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()), userFilter, notDeferred, windowFilter)
+      : and(eq(reviewSchedules.workspaceId, workspaceId), eq(reviewSchedules.status, ReviewStatus.PENDING), lte(reviewSchedules.nextReviewAt, new Date()), notDeferred, windowFilter);
   }
 
   where = and(where, reviewScheduleTargetsConsumableCardPredicate());
 
   const limit = Math.min(Math.max(filter.limit ?? 50, 1), 100);
-  const offset = Math.max(filter.offset ?? 0, 0);
+
+  // R-019：到期队列是一个活集合（复习完成、延后都会把它变短）。按 offset 翻页
+  // 会在集合左移时静默漏掉一张卡，所以这里和 note / source 一样改用
+  // (nextReviewAt, id) 复合 cursor —— 键本身不随集合变化而漂移。
+  const cursor = decodeCursor(filter.cursor);
+  if (cursor) {
+    where = and(
+      where,
+      sql`(${reviewSchedules.nextReviewAt}, ${reviewSchedules.id}) > (${cursor.timestamp}::timestamptz, ${cursor.id}::uuid)`,
+    );
+  }
+
   const [totalRow] = await queryDb
     .select({ count: sql<number>`count(*)::int` })
     .from(reviewSchedules)
     .where(where);
   const total = Number(totalRow?.count ?? 0);
 
-  const reviews = await queryDb.query.reviewSchedules.findMany({
+  // 多取一行只为回答「还有没有下一页」，不参与投影。
+  const fetched = await queryDb.query.reviewSchedules.findMany({
     where,
     orderBy: (r, { asc: a }) => [a(r.nextReviewAt), a(r.id)],
-    limit,
-    offset,
+    limit: limit + 1,
   });
+  const hasMore = fetched.length > limit;
+  const reviews = hasMore ? fetched.slice(0, limit) : fetched;
 
   if (reviews.length === 0) return { items: [], total, nextCursor: null };
 
-  const validationIds = reviews
-    .filter((r) => r.subjectType === "validation" && r.subjectId)
-    .map((r) => r.subjectId);
-
-  const cardIdSet = new Set<string>();
-  const objectiveIdSet = new Set<string>();
-  for (const r of reviews) {
-    if (r.subjectType === "card" && r.subjectId) {
-      cardIdSet.add(r.subjectId);
-      // V2 review schedules keep subjectType="card" for compatibility, but
-      // subjectId is the objectiveId (the canonical V2 alias). Resolve both
-      // interpretations before assembling the public review item.
-      objectiveIdSet.add(r.subjectId);
-    }
-    if (r.subjectType === "objective" && r.subjectId) {
-      objectiveIdSet.add(r.subjectId);
-    }
-  }
-
-  const validationToCardId = new Map<string, string>();
-  const validationToOutcome = new Map<string, string>();
+  const objectiveIdSet = new Set(
+    reviews
+      .filter((r) => r.subjectType === "card")
+      .map((r) => r.subjectId),
+  );
   const objectiveToCardId = new Map<string, string>();
-
-  if (validationIds.length > 0) {
-    const veRows = await queryDb.query.validationEvents.findMany({
-      where: and(
-        eq(validationEvents.workspaceId, workspaceId),
-        inArray(validationEvents.id, validationIds),
-      ),
-    });
-    for (const ve of veRows) {
-      validationToOutcome.set(ve.id, ve.outcome);
-    }
-    const linkedSchedules = await queryDb.query.reviewSchedules.findMany({
-      where: and(
-        eq(reviewSchedules.workspaceId, workspaceId),
-        inArray(reviewSchedules.validationEventId, validationIds),
-      ),
-    });
-    for (const sched of linkedSchedules) {
-      if (sched.subjectType === "card" && sched.subjectId) {
-        validationToCardId.set(sched.validationEventId!, sched.subjectId);
-        cardIdSet.add(sched.subjectId);
-      } else if (sched.subjectType === "objective" && sched.subjectId) {
-        objectiveIdSet.add(sched.subjectId);
-      }
-    }
-  }
 
   const objIds = Array.from(objectiveIdSet);
   if (objIds.length > 0) {
@@ -265,39 +232,29 @@ export async function listReviews(
     });
     for (const v2card of v2Cards) {
       objectiveToCardId.set(v2card.objectiveId, v2card.cardId);
-      cardIdSet.add(v2card.cardId);
     }
   }
-
-  const cardIds = Array.from(cardIdSet);
-  if (cardIds.length === 0) return { items: [], total, nextCursor: null };
 
   const v2CardByCardId = new Map<string, { id: string; title: string }>();
   const v2ObjByCardId = new Map<string, string>();
-  if (cardIds.length > 0) {
-    const v2Cards = await queryDb.query.learningCardsV2.findMany({
-      where: and(
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.lifecycle, "active"),
-        inArray(learningCardsV2.cardId, cardIds),
-      ),
+  const v2Cards = objIds.length > 0
+    ? await queryDb.query.learningCardsV2.findMany({
+        where: and(
+          eq(learningCardsV2.workspaceId, workspaceId),
+          eq(learningCardsV2.lifecycle, "active"),
+          inArray(learningCardsV2.objectiveId, objIds),
+        ),
+      })
+    : [];
+  for (const v2card of v2Cards) {
+    v2CardByCardId.set(v2card.cardId, {
+      id: v2card.cardId,
+      title: v2card.publicSummary,
     });
-    for (const v2card of v2Cards) {
-      v2CardByCardId.set(v2card.cardId, {
-        id: v2card.cardId,
-        title: v2card.publicSummary,
-      });
-      v2ObjByCardId.set(v2card.cardId, v2card.objectiveId);
-    }
+    v2ObjByCardId.set(v2card.cardId, v2card.objectiveId);
   }
 
-  const allObjectiveIds = new Set<string>();
-  for (const oid of objectiveIdSet) allObjectiveIds.add(oid);
-  for (const cid of cardIds) {
-    const oid = v2ObjByCardId.get(cid);
-    if (oid) allObjectiveIds.add(oid);
-  }
-  const objectiveIdArray = Array.from(allObjectiveIds);
+  const objectiveIdArray = objIds;
 
   const [v2Display, objectiveHasHardEvidence] = await Promise.all([
     resolveV2Display(queryDb, workspaceId, objectiveIdArray, filter.sanitized ?? false),
@@ -310,27 +267,11 @@ export async function listReviews(
     let objectiveId: string | null = null;
     let isV2Card = false;
 
-    if (r.subjectType === "validation") {
-      cardId = validationToCardId.get(r.subjectId) ?? null;
-      if (!cardId) continue;
-    } else if (r.subjectType === "card") {
-      const aliasedCardId = objectiveToCardId.get(r.subjectId);
-      if (aliasedCardId && !v2CardByCardId.has(r.subjectId)) {
-        objectiveId = r.subjectId;
-        cardId = aliasedCardId;
-        isV2Card = true;
-      } else {
-        cardId = r.subjectId;
-      }
-    } else if (r.subjectType === "objective") {
+    if (r.subjectType === "card") {
       objectiveId = r.subjectId;
-      const resolvedCardId = objectiveToCardId.get(r.subjectId);
-      if (resolvedCardId) {
-        isV2Card = true;
-        cardId = resolvedCardId;
-      } else {
-        continue;
-      }
+      cardId = objectiveToCardId.get(r.subjectId) ?? null;
+      if (!cardId) continue;
+      isV2Card = true;
     }
 
     if (!cardId) continue;
@@ -338,12 +279,6 @@ export async function listReviews(
     if (!v2Card) continue;
 
     let reviewReason: ReviewReason = "due_review";
-    if (r.subjectType === "validation" && r.subjectId) {
-      const outcome = validationToOutcome.get(r.subjectId);
-      if (outcome === "misunderstanding") {
-        reviewReason = "misunderstanding";
-      }
-    }
     if (reviewReason === "due_review") {
       const objId = objectiveId ?? v2ObjByCardId.get(cardId);
       if (!objId || !objectiveHasHardEvidence.has(objId)) {
@@ -370,15 +305,19 @@ export async function listReviews(
         : null,
       blockContent: null,
       reviewReason,
-      isV2: isV2Card || r.subjectType === "objective",
+      isV2: isV2Card,
     });
   }
 
-  const consumed = offset + reviews.length;
+  // 用最后一条「已检查」的原始行做游标：被 V2 identity 过滤掉的行也算走过了，
+  // 否则它们会永远卡在下一页的开头。
+  const lastChecked = reviews[reviews.length - 1];
   return {
     items: out,
     total,
-    nextCursor: consumed < total ? consumed : null,
+    nextCursor: hasMore && lastChecked
+      ? encodeCursor(lastChecked.nextReviewAt, lastChecked.id)
+      : null,
   };
 }
 
@@ -465,10 +404,10 @@ async function resolveObjectiveEvidence(
 
 export async function listSanitizedReviews(
   workspaceId: string,
-  filter: { status?: string; includeAll?: boolean; limit?: number; offset?: number },
+  filter: { status?: string; includeAll?: boolean; limit?: number; cursor?: string },
   userId?: string,
   tx?: ApiTransaction,
-): Promise<{ items: SanitizedReviewItem[]; total: number; nextCursor: number | null }> {
+): Promise<{ items: SanitizedReviewItem[]; total: number; nextCursor: string | null }> {
   if (!tx) {
     return withWorkspaceTransaction(
       { workspaceId, userId: userId ?? SYSTEM_USER_ID },
@@ -498,7 +437,7 @@ export async function listSanitizedReviews(
         where: and(
           eq(reviewSchedules.workspaceId, workspaceId),
           inArray(reviewSchedules.id, inputScheduleIds),
-          eq(reviewSchedules.subjectType, "objective"),
+          eq(reviewSchedules.subjectType, "card"),
           inArray(reviewSchedules.subjectId, objectiveIds),
         ),
       });
@@ -543,193 +482,5 @@ export async function listSanitizedReviews(
     }),
     total: result.total,
     nextCursor: result.nextCursor,
-  };
-}
-
-export async function getSanitizedReviewMeta(
-  workspaceId: string,
-  scheduleId: string,
-  userId?: string,
-  tx?: ApiTransaction,
-): Promise<SanitizedReviewMeta | null> {
-  if (!tx) {
-    return withWorkspaceTransaction(
-      { workspaceId, userId: userId ?? SYSTEM_USER_ID },
-      (newTx) => getSanitizedReviewMeta(workspaceId, scheduleId, userId, newTx),
-    );
-  }
-  const queryDb = tx;
-  const schedule = await queryDb.query.reviewSchedules.findFirst({
-    where: and(
-      eq(reviewSchedules.workspaceId, workspaceId),
-      eq(reviewSchedules.id, scheduleId),
-      ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
-    ),
-  });
-
-  if (!schedule) return null;
-
-  let cardId: string | null = null;
-  let objectiveId: string | null = null;
-  let validationOutcome: string | null = null;
-  let isV2Card = false;
-
-  if (schedule.subjectType === "card") {
-    const directCard = await queryDb.query.learningCardsV2.findFirst({
-      where: and(
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.cardId, schedule.subjectId),
-        eq(learningCardsV2.lifecycle, "active"),
-      ),
-      columns: { cardId: true },
-    });
-    if (directCard) {
-      cardId = directCard.cardId;
-    } else {
-      const aliasedCard = await queryDb.query.learningCardsV2.findFirst({
-        where: and(
-          eq(learningCardsV2.workspaceId, workspaceId),
-          eq(learningCardsV2.objectiveId, schedule.subjectId),
-          eq(learningCardsV2.lifecycle, "active"),
-        ),
-        columns: { cardId: true },
-      });
-      if (aliasedCard) {
-        objectiveId = schedule.subjectId;
-        cardId = aliasedCard.cardId;
-        isV2Card = true;
-      }
-    }
-  } else if (schedule.subjectType === "validation") {
-    const validationEventId = schedule.validationEventId ?? schedule.subjectId;
-    const ve = await queryDb.query.validationEvents.findFirst({
-      where: and(
-        eq(validationEvents.workspaceId, workspaceId),
-        eq(validationEvents.id, validationEventId),
-        ...(userId ? [eq(validationEvents.userId, userId)] : []),
-      ),
-    });
-    if (!ve) return null;
-    validationOutcome = ve.outcome;
-    const linkedSched = await queryDb.query.reviewSchedules.findFirst({
-      where: and(
-        eq(reviewSchedules.workspaceId, workspaceId),
-        eq(reviewSchedules.validationEventId, validationEventId),
-      ),
-    });
-    if (linkedSched?.subjectType === "objective" && linkedSched.subjectId) {
-      objectiveId = linkedSched.subjectId;
-      const v2Card = await queryDb.query.learningCardsV2.findFirst({
-        where: and(
-          eq(learningCardsV2.workspaceId, workspaceId),
-          eq(learningCardsV2.objectiveId, linkedSched.subjectId),
-          eq(learningCardsV2.lifecycle, "active"),
-        ),
-        columns: { cardId: true },
-      });
-      if (v2Card) {
-        isV2Card = true;
-        cardId = v2Card.cardId;
-      }
-    } else if (linkedSched?.subjectType === "card" && linkedSched.subjectId) {
-      cardId = linkedSched.subjectId;
-    }
-  } else if (schedule.subjectType === "objective") {
-    objectiveId = schedule.subjectId;
-    const v2Card = await queryDb.query.learningCardsV2.findFirst({
-      where: and(
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.objectiveId, schedule.subjectId),
-        eq(learningCardsV2.lifecycle, "active"),
-      ),
-      columns: { cardId: true },
-    });
-    if (v2Card) {
-      isV2Card = true;
-      cardId = v2Card.cardId;
-    }
-  }
-
-  if (!cardId) return null;
-
-  if (isV2Card) {
-    const activeCard = await queryDb.query.learningCardsV2.findFirst({
-      where: and(
-        eq(learningCardsV2.cardId, cardId),
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.lifecycle, "active"),
-      ),
-      columns: { cardId: true },
-    });
-    if (!activeCard) return null;
-  }
-
-  let reviewReason: ReviewReason = "due_review";
-  if (validationOutcome === "misunderstanding") {
-    reviewReason = "misunderstanding";
-  }
-  if (reviewReason === "due_review" && !objectiveId) {
-    const v2Card = await queryDb.query.learningCardsV2.findFirst({
-      where: and(
-        eq(learningCardsV2.cardId, cardId),
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.lifecycle, "active"),
-      ),
-      columns: { objectiveId: true },
-    });
-    if (v2Card) {
-      objectiveId = v2Card.objectiveId;
-    }
-  }
-
-  let exposureDate: Date | null = null;
-  if (userId && objectiveId) {
-    const exposures = await queryDb.query.validationAssistanceExposures.findMany({
-      where: and(
-        eq(validationAssistanceExposures.workspaceId, workspaceId),
-        eq(validationAssistanceExposures.userId, userId),
-      ),
-    });
-    // N+1 修复：批量收集所有 inputScheduleId，一次查询所有关联 schedules。
-    const inputScheduleIds = exposures
-      .map((e) => e.inputScheduleId)
-      .filter((id): id is string => Boolean(id));
-    const matchingScheduleIds = new Set<string>();
-    if (inputScheduleIds.length > 0) {
-      const linkedSchedules = await queryDb.query.reviewSchedules.findMany({
-        where: and(
-          eq(reviewSchedules.workspaceId, workspaceId),
-          inArray(reviewSchedules.id, inputScheduleIds),
-          eq(reviewSchedules.subjectType, "objective"),
-          eq(reviewSchedules.subjectId, objectiveId),
-        ),
-      });
-      for (const sched of linkedSchedules) {
-        matchingScheduleIds.add(sched.id);
-      }
-    }
-    for (const exp of exposures) {
-      if (exp.inputScheduleId && matchingScheduleIds.has(exp.inputScheduleId)) {
-        if (!exposureDate || exp.unassistedEligibleAfter > exposureDate) {
-          exposureDate = exp.unassistedEligibleAfter;
-        }
-      }
-    }
-  }
-
-  const availability = deriveReviewAvailability(
-    schedule.nextReviewAt,
-    exposureDate,
-  );
-
-  return {
-    scheduleId: schedule.id,
-    cardId,
-    objectiveId,
-    status: schedule.status,
-    nextReviewAt: schedule.nextReviewAt.toISOString(),
-    intervalDays: schedule.intervalDays,
-    reviewReason,
-    ...availability,
   };
 }

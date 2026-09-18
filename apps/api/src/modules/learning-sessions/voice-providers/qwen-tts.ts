@@ -10,9 +10,9 @@
  *
  * 15b 二期（连接复用）：task-finished 后 60s 内可重新 run-task（每次新
  * task_id）复用同一条连接；cancel 后同样可复用；task-failed/网络错误 →
- * 连接关闭不可复用；空闲 60s 无任务自动断开。实现为单槽位 IDLE 连接池
- * （桌面单用户串行；withQwenConcurrencyLimit 保证同一时刻至多一个任务），
- * 连续多轮对话免建连，首包延迟显著降低。
+ * 连接关闭不可复用；空闲 60s 无任务自动断开。连接池按**连接身份**
+ * （WS URL + apiKey）分槽位，连续多轮对话免建连，首包延迟显著降低。
+ * 并发模型见下方「按用户串行 + 全局有界并发」。
  */
 
 import WebSocket from "ws";
@@ -59,16 +59,154 @@ export class QwenTtsError extends DomainError {
 }
 
 /**
- * 15c：qwen 合成并发限制（全局串行队列）——每段一次 run-task 会并发建立多个
- * WebSocket，连续快速对话时容易触发阿里限流（"Requests rate limit exceeded"）
- * 导致段失败无声。前端播放本身串行（一段播完再播下一段，预取只提前 1 段），
- * 串行合成与播放并行，不增加感知延迟。
+ * ── 按用户串行 + 全局有界并发（稳定 P0，2026-09-15）─────────────────────
+ *
+ * 取代此前的 `withQwenConcurrencyLimit`——那是一条**模块级** promise 链，把
+ * 所有用户的所有段落串成同一条队列，并共用同一个 WS 连接槽位。桌面单用户时
+ * 没问题，但 api 是多用户服务：任一用户一段 30s 的合成会把其他用户的 TTS 全部
+ * 排在后面（P95 直接相加），而且他们还会被塞进"上一个用户的"连接复用槽。
+ *
+ * 现在分两层：
+ *   1. **按队列键（workspaceId:userId）串行**——同一用户的连续段落仍然严格顺序
+ *      执行（保住前端按 ordinal 播放的时序、以及单连接复用的收益），不同用户互不阻塞。
+ *   2. **全局有界并发**（`QWEN_TTS_MAX_CONCURRENCY`，默认 4）——原全局串行是为了
+ *      避免阿里 "Requests rate limit exceeded"；取消全局串行不等于取消总量约束，
+ *      只是把"一律 1"换成"有上界的 N"。
+ *
+ * 名额与**流生命周期**绑定（见 bindTaskSlotToStream）：qwenTtsSynthesizeStream 在
+ * task-started 就 resolve，而音频要到 task-finished 才结束、连接那一刻才归还池子。
+ * 所以名额必须等流结束/出错/被取消才释放——否则同一用户的两段会在音频阶段重叠
+ * （正是要避免的），全局名额也会被提前释放而失去约束力。
+ *
+ * 队列深度不需要额外上限：/voice/tts/stream 在进入这里之前已按用户限流
+ * （COMPANION_RATE_LIMITS.ttsPerMinute），在途请求数天然有界。
  */
-let qwenTaskQueue: Promise<unknown> = Promise.resolve();
-export function withQwenConcurrencyLimit<T>(task: () => Promise<T>): Promise<T> {
-  const run = qwenTaskQueue.then(task, task);
-  qwenTaskQueue = run.catch(() => undefined);
-  return run;
+export const QWEN_TTS_DEFAULT_MAX_CONCURRENCY = 4;
+
+export function resolveQwenTtsMaxConcurrency(
+  raw: string | undefined = process.env.QWEN_TTS_MAX_CONCURRENCY,
+): number {
+  const parsed = Number(raw ?? QWEN_TTS_DEFAULT_MAX_CONCURRENCY);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : QWEN_TTS_DEFAULT_MAX_CONCURRENCY;
+}
+
+let activeQwenTasks = 0;
+const qwenTaskWaiters: Array<() => void> = [];
+
+async function acquireQwenTaskSlot(): Promise<void> {
+  if (activeQwenTasks < resolveQwenTtsMaxConcurrency()) {
+    activeQwenTasks += 1;
+    return;
+  }
+  // 无可用名额：挂起；releaseQwenTaskSlot 会把名额**直接移交**过来（计数不变）。
+  await new Promise<void>((resolveWaiter) => qwenTaskWaiters.push(resolveWaiter));
+}
+
+function releaseQwenTaskSlot(): void {
+  const next = qwenTaskWaiters.shift();
+  if (next) {
+    next(); // 名额移交，占用数不变
+    return;
+  }
+  activeQwenTasks = Math.max(0, activeQwenTasks - 1);
+}
+
+/** 每个队列键一条 promise 链（同键严格串行）；链尾本身永不 reject。 */
+const qwenQueueTails = new Map<string, Promise<void>>();
+
+/** 测试钩子：当前占用中的任务数。 */
+export function qwenTtsActiveTaskCount(): number {
+  return activeQwenTasks;
+}
+
+/** 测试钩子：仍在排队（链尾未清）的队列键数量。 */
+export function qwenTtsQueuedKeyCount(): number {
+  return qwenQueueTails.size;
+}
+
+/** 测试钩子：清空等待队列、占用计数与队列尾（避免用例之间互相影响）。 */
+export function resetQwenTaskQueueForTests(): void {
+  qwenTaskWaiters.length = 0;
+  activeQwenTasks = 0;
+  qwenQueueTails.clear();
+}
+
+/** 把名额释放绑定到流结束 / 出错 / 被取消。 */
+function bindTaskSlotToStream(
+  stream: ReadableStream<Uint8Array>,
+  releaseOnce: () => void,
+): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          releaseOnce();
+          controller.close();
+          return;
+        }
+        if (value) controller.enqueue(value);
+      } catch (err) {
+        releaseOnce();
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      releaseOnce();
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+}
+
+/**
+ * 按用户排队的合成入口：`queueKey` 相同的调用严格串行（含音频阶段），
+ * 不同键并行但受全局名额约束。生产调用点见 voice-routes 的 /voice/tts/stream。
+ *
+ * `queueKey` 为空直接 fail closed：曾经用"缺省键"兜底会让所有调用方悄悄退回
+ * 全局串行，那正是要修掉的语义，不该有静默回退路径。
+ */
+export async function qwenTtsSynthesizeStreamForUser(
+  queueKey: string,
+  text: string,
+  options: QwenTtsOptions,
+): Promise<QwenTtsStreamResult> {
+  if (typeof queueKey !== "string" || queueKey.trim() === "") {
+    throw new QwenTtsError("INVALID_ARGUMENT", "TTS 队列键为空（fail closed）");
+  }
+
+  const previous = qwenQueueTails.get(queueKey) ?? Promise.resolve();
+  let finishTask!: () => void;
+  const taskFinished = new Promise<void>((resolveTask) => { finishTask = resolveTask; });
+  const tail = previous.then(() => taskFinished);
+  qwenQueueTails.set(queueKey, tail);
+  // 链尾清理：只有自己仍是队尾时才删（否则会把后到的任务从链上摘掉）。
+  // 不清理的话 Map 会按用户数无限增长——长期运行的进程里这是泄漏。
+  void tail.then(() => {
+    if (qwenQueueTails.get(queueKey) === tail) qwenQueueTails.delete(queueKey);
+  });
+
+  await previous; // 同键串行：等前一段（含它的音频）彻底结束
+  await acquireQwenTaskSlot(); // 全局名额（排队期间不占名额）
+
+  let released = false;
+  const releaseOnce = (): void => {
+    if (released) return;
+    released = true;
+    releaseQwenTaskSlot();
+    finishTask();
+  };
+
+  let handedOff = false;
+  try {
+    const result = await qwenTtsSynthesizeStream(text, options);
+    handedOff = true;
+    return { ...result, stream: bindTaskSlotToStream(result.stream, releaseOnce) };
+  } finally {
+    // 建流失败（连接错误/超时/空文本）：立刻还名额并放行同键队列，
+    // 否则该用户后续所有段落都会被一个失败任务永久挡住。
+    if (!handedOff) releaseOnce();
+  }
 }
 
 const DEFAULT_MODEL = "qwen-audio-3.0-tts-flash";
@@ -90,15 +228,35 @@ function wsUrl(workspaceId: string): string {
   return `wss://${clean}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference`;
 }
 
-// ─── 15b 二期：单槽位 IDLE 连接池（连接复用） ───────────────────────────
+// ─── 15b 二期：IDLE 连接池（按连接身份分槽位，连接复用） ─────────────────
 
 interface PooledQwenConnection {
   socket: WebSocket;
   alive: boolean;
   idleTimer: ReturnType<typeof setTimeout> | null;
+  /** 连接身份：WS URL + apiKey。见 connectionKey 的说明。 */
+  key: string;
 }
 
-let idleConnection: PooledQwenConnection | null = null;
+/**
+ * 连接身份：同一身份才可复用连接。
+ *
+ * 此前是**单个**全局槽位（`let idleConnection`），取连接时不看身份——一旦
+ * workspaceId/apiKey 不同的两个调用方交替合成，后一个会拿到前一个的 socket：
+ * 轻则任务打到错误的业务空间，重则用别人的 key 计费/越权。当前系统配置是
+ * 单平台所以没暴露，但"多平台"正是配置层已经支持的方向。
+ *
+ * 同时这也是并发放开后的**必要**条件：全局名额 > 1 时，不同任务各自持有连接，
+ * 单槽位会在每次归还时关掉另一个槽里的连接，复用率归零。
+ *
+ * 槽位数上界 = 配置过的 (URL, key) 组合数（现实里 1 个）；空闲 60s 自动断开，
+ * 所以不需要额外的池容量旋钮。
+ */
+function connectionKey(options: QwenTtsOptions): string {
+  return `${wsUrl(options.workspaceId)}|${options.apiKey}`;
+}
+
+const idleConnections = new Map<string, PooledQwenConnection>();
 
 function clearPoolIdleTimer(conn: PooledQwenConnection): void {
   if (conn.idleTimer) {
@@ -110,7 +268,7 @@ function clearPoolIdleTimer(conn: PooledQwenConnection): void {
 function closePooledConnection(conn: PooledQwenConnection, WebSocketImpl: typeof WebSocket): void {
   clearPoolIdleTimer(conn);
   conn.alive = false;
-  if (idleConnection === conn) idleConnection = null;
+  if (idleConnections.get(conn.key) === conn) idleConnections.delete(conn.key);
   if (
     conn.socket.readyState === WebSocketImpl.OPEN ||
     conn.socket.readyState === WebSocketImpl.CONNECTING
@@ -121,22 +279,28 @@ function closePooledConnection(conn: PooledQwenConnection, WebSocketImpl: typeof
 
 /** 测试用：清空池状态（避免测试间串扰）。 */
 export function resetQwenConnectionPool(): void {
-  if (idleConnection) {
-    clearPoolIdleTimer(idleConnection);
-    idleConnection.alive = false;
-    idleConnection = null;
+  for (const conn of [...idleConnections.values()]) {
+    clearPoolIdleTimer(conn);
+    conn.alive = false;
   }
+  idleConnections.clear();
 }
 
-/** 取连接：优先复用 IDLE 槽位；否则新建（串行语义由 withQwenConcurrencyLimit 保证）。 */
+/** 测试钩子：空闲连接槽位数。 */
+export function qwenIdleConnectionCount(): number {
+  return idleConnections.size;
+}
+
+/** 取连接：优先复用同身份的 IDLE 槽位；否则新建（并发由任务名额约束）。 */
 function acquireQwenConnection(
   options: QwenTtsOptions,
 ): Promise<PooledQwenConnection> {
-  if (idleConnection && idleConnection.alive) {
-    const conn = idleConnection;
-    idleConnection = null;
-    clearPoolIdleTimer(conn);
-    return Promise.resolve(conn);
+  const key = connectionKey(options);
+  const idle = idleConnections.get(key);
+  if (idle && idle.alive) {
+    idleConnections.delete(key);
+    clearPoolIdleTimer(idle);
+    return Promise.resolve(idle);
   }
   const WebSocketImpl = options.WebSocketImpl ?? WebSocket;
   const url = wsUrl(options.workspaceId);
@@ -153,7 +317,7 @@ function acquireQwenConnection(
       settled = true;
       fn();
     };
-    socket.on("open", () => settle(() => resolve({ socket, alive: true, idleTimer: null })));
+    socket.on("open", () => settle(() => resolve({ socket, alive: true, idleTimer: null, key })));
     socket.on("error", (err) => settle(() => reject(
       new QwenTtsError("NETWORK_ERROR", `qwen TTS WebSocket 错误：${err instanceof Error ? err.message : String(err)}`),
     )));
@@ -163,7 +327,7 @@ function acquireQwenConnection(
   });
 }
 
-/** 归还连接：reusable=false（task-failed/网络错误）→ 关闭；否则存入 IDLE 槽位（60s 计时）。 */
+/** 归还连接：reusable=false（task-failed/网络错误）→ 关闭；否则存入同身份 IDLE 槽位（60s 计时）。 */
 function releaseQwenConnection(
   conn: PooledQwenConnection,
   reusable: boolean,
@@ -174,10 +338,11 @@ function releaseQwenConnection(
     closePooledConnection(conn, WebSocketImpl);
     return;
   }
-  if (idleConnection && idleConnection !== conn) {
-    closePooledConnection(idleConnection, WebSocketImpl);
+  const existing = idleConnections.get(conn.key);
+  if (existing && existing !== conn) {
+    closePooledConnection(existing, WebSocketImpl);
   }
-  idleConnection = conn;
+  idleConnections.set(conn.key, conn);
   // PERF-BN6 修复：idle timer 加 .unref()，无请求时该 60s 保活计时器
   // 不阻塞进程优雅停机/退出（对齐项目其它 .unref() 惯例）。
   conn.idleTimer = setTimeout(() => {

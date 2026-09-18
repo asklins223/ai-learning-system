@@ -62,7 +62,6 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             apps/api/package-lock.json
-            apps/web/package-lock.json
             workers/ai-worker/package-lock.json
             packages/shared/package-lock.json
             packages/ai-quality/package-lock.json
@@ -80,10 +79,6 @@ jobs:
 
       - name: Install API
         working-directory: apps/api
-        run: npm ci --no-audit --no-fund
-
-      - name: Install Web
-        working-directory: apps/web
         run: npm ci --no-audit --no-fund
 
       - name: Install Worker
@@ -111,20 +106,9 @@ jobs:
         working-directory: apps/api
         run: npm run typecheck
 
-      - name: TypeCheck Web
-        working-directory: apps/web
-        run: npm run typecheck
-
       - name: TypeCheck Worker
         working-directory: workers/ai-worker
         run: npm run typecheck
-
-      - name: Lint Web
-        working-directory: apps/web
-        env:
-          # F-018: 确保非交互模式，不提示 ESLint 配置向导
-          CI: true
-        run: npx eslint . --max-warnings=0
 
       # OPS-01: 验证 Prometheus alerts.yml 语法
       - name: Verify Prometheus alerts syntax
@@ -142,10 +126,6 @@ jobs:
           GITLEAKS_CONFIG: .gitleaks.toml
 
       # F-016: 生产依赖审计门禁 — 0 high/critical 才通过
-      - name: Audit Web production deps
-        working-directory: apps/web
-        run: npm audit --omit=dev --audit-level=high
-
       - name: Audit API production deps
         working-directory: apps/api
         run: npm audit --omit=dev --audit-level=high
@@ -159,7 +139,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   build:
-    name: Build (API / Web / Worker)
+    name: Build (API / Worker)
     runs-on: ubuntu-latest
     needs: typecheck
     timeout-minutes: 20
@@ -173,7 +153,6 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             apps/api/package-lock.json
-            apps/web/package-lock.json
             workers/ai-worker/package-lock.json
             packages/shared/package-lock.json
 
@@ -185,15 +164,11 @@ jobs:
         working-directory: apps/api
         run: npm ci --no-audit --no-fund
 
-      - name: Install Web
-        working-directory: apps/web
-        run: npm ci --no-audit --no-fund
-
       - name: Install Worker
         working-directory: workers/ai-worker
         run: npm ci --no-audit --no-fund
 
-      # F-018: 真实 build 步骤 — 确保 esbuild/next build 产出文件
+      # 真实 build 步骤 — 确保 API/Worker 产出文件
       - name: Build API
         working-directory: apps/api
         run: npm run build
@@ -236,10 +211,6 @@ jobs:
           DATABASE_URL_WORKER: postgres://ailearn_worker:ci-smoke-only@127.0.0.1:1/ailearn
         run: timeout 5 node dist/index.cjs || test $? -eq 124 && echo "Worker started (timeout expected)"
 
-      - name: Build Web
-        working-directory: apps/web
-        run: npm run build
-
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -266,7 +237,6 @@ jobs:
           cache: npm
           cache-dependency-path: |
             apps/api/package-lock.json
-            apps/web/package-lock.json
             workers/ai-worker/package-lock.json
             packages/shared/package-lock.json
 
@@ -294,10 +264,6 @@ jobs:
         working-directory: packages/ai-quality
         run: npm ci --no-audit --no-fund
 
-      - name: Install Web
-        working-directory: apps/web
-        run: npm ci --no-audit --no-fund
-
       - name: Run shared contract unit tests
         working-directory: packages/shared
         run: |
@@ -310,13 +276,6 @@ jobs:
         run: |
           set -o pipefail
           npm test 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/ai-quality.tap"
-
-      # F-018: 基础单元测试 — 覆盖 markdown-blocks 往返、分页参数 clamp 等关键链路
-      - name: Run Web unit tests
-        working-directory: apps/web
-        run: |
-          set -o pipefail
-          npm test 2>&1 | tee "$RUNNER_TEMP/unit-test-logs/web.tap"
 
       - name: Run API unit tests
         working-directory: apps/api
@@ -426,8 +385,6 @@ jobs:
       DATABASE_URL_MIGRATOR: postgres://ailearn_migrator:ci-migrator-only-password@127.0.0.1:5432/ailearn_ci
       DATABASE_URL_API: postgres://ailearn_api:ci-api-only-password@127.0.0.1:5432/ailearn_ci
       DATABASE_URL_WORKER: postgres://ailearn_worker:ci-worker-only-password@127.0.0.1:5432/ailearn_ci
-      UPGRADE_DATABASE_URL: postgres://ailearn:ci-migration-only-password@127.0.0.1:5432/ailearn_upgrade_ci
-      UPGRADE_DATABASE_URL_MIGRATOR: postgres://ailearn_migrator:ci-migrator-only-password@127.0.0.1:5432/ailearn_upgrade_ci
       POSTGRES_HOST: 127.0.0.1
       POSTGRES_USER: ailearn
       POSTGRES_PASSWORD: ci-migration-only-password
@@ -525,17 +482,6 @@ jobs:
           node --import tsx --test src/integration-tests/rate-limit-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/rate-limit.tap"
 
-      - name: Verify G-009 understanding aggregation semantics (real PostgreSQL)
-        working-directory: apps/api
-        env:
-          NODE_ENV: test
-          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
-        run: |
-          set -o pipefail
-          node --import tsx --test --test-concurrency=1 \
-            src/integration-tests/understanding-g009-postgres.integration.ts \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/understanding-g009.tap"
-
       - name: Verify SEC-01 policy catalog and restricted roles
         working-directory: apps/api
         env:
@@ -547,16 +493,6 @@ jobs:
           set -o pipefail
           node --import tsx --test src/integration-tests/rls-policies-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/rls-policies.tap"
-
-      - name: Verify review attempt schema, idempotency, cascade, and RLS
-        working-directory: apps/api
-        env:
-          NODE_ENV: test
-          REVIEW_ATTEMPT_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
-        run: |
-          set -o pipefail
-          node --import tsx --test src/integration-tests/review-attempt-postgres.integration.ts \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/review-attempt.tap"
 
       - name: Verify content hash consistency between PostgreSQL and application layer
         working-directory: apps/api
@@ -587,6 +523,53 @@ jobs:
           set -o pipefail
           node --import tsx --test src/integration-tests/note-version-restore-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-version-restore.tap"
+
+      # Companion 首页房间档案：0185 RLS 隔离 + 真实 SQL revision CAS（含并发
+      # 写入者竞争）+ PATCH /companion/room-profile 的 400/409/200 认证契约。
+      # 该文件此前未接入任何 CI job，只会在缺 URL 时静默 skip。
+      # 必须使用受限角色：超级用户会绕过 RLS，ailearn_api 是 NOBYPASSRLS。
+      - name: Verify companion home profile RLS, revision CAS, and HTTP contract
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          npm run test:companion-home-profile:postgres \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/companion-home-profile.tap"
+
+      # Companion 集成矩阵：对话（turn/幂等/SSE/导出）、记忆（provenance/冲突/
+      # 星图）、交付（inbox/lease/ack/kind 约束）、旅程/沙箱、工具网关提案执行。
+      # 16 个套件此前只存在于仓库里、没有任何 CI job 或 make 目标会运行它们；
+      # 其中 assistant-deliveries-kind-constraint 锁死「代码 kind 集合 == 库约束」，
+      # 防止 0131 漏 memory_candidate 那类「写入即回滚」的漂移再次发生。
+      # 必须使用受限角色：超级用户会绕过 RLS，让隔离断言假通过。
+      - name: Verify companion integration matrix (dialogue, memory, delivery, journey, tool gateway)
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          npm run test:companion-integration:postgres \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/companion-integration.tap"
+
+      # Companion worker 侧：agent bounded loop（工具调用→proposal→waiting_for_
+      # confirmation）与 dialogue 落库/终态；此前同样没有任何 CI job 运行。
+      - name: Verify companion worker agent loop and dialogue persistence
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          npm run test:companion-integration:postgres \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/companion-worker.tap"
 
       - name: Verify double Worker queue, leases, and pool context
         working-directory: workers/ai-worker
@@ -627,323 +610,6 @@ jobs:
           }
           NODE
 
-      - name: Materialize a representative 0012 migration baseline
-        working-directory: apps/api
-        env:
-          BASELINE_DIR: ${{ runner.temp }}/ailearn-migrations-0012
-        run: |
-          node --input-type=module <<'NODE'
-          import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-          import { join } from "node:path";
-
-          const source = "src/db/migrations";
-          const target = process.env.BASELINE_DIR;
-          const journal = JSON.parse(
-            await readFile(join(source, "meta", "_journal.json"), "utf8"),
-          );
-          const entries = journal.entries.filter((entry) => entry.idx <= 12);
-          if (entries.length !== 13 || entries.at(-1)?.tag !== "0012_jobs_lease_token") {
-            throw new Error("0012 migration baseline is not the expected 13 entries");
-          }
-
-          await rm(target, { recursive: true, force: true });
-          await mkdir(join(target, "meta"), { recursive: true });
-          for (const entry of entries) {
-            await copyFile(
-              join(source, `${entry.tag}.sql`),
-              join(target, `${entry.tag}.sql`),
-            );
-          }
-          await writeFile(
-            join(target, "meta", "_journal.json"),
-            `${JSON.stringify({ ...journal, entries }, null, 2)}\n`,
-          );
-          console.log(`prepared ${entries.length}-migration baseline at ${target}`);
-          NODE
-
-      - name: Create representative upgrade database
-        working-directory: apps/api
-        run: |
-          node --input-type=module <<'NODE'
-          import postgres from "postgres";
-
-          const adminUrl = new URL(process.env.DATABASE_URL);
-          adminUrl.pathname = "/postgres";
-          const sql = postgres(adminUrl.toString(), { max: 1 });
-          try {
-            await sql.unsafe("DROP DATABASE IF EXISTS ailearn_upgrade_ci WITH (FORCE)");
-            await sql.unsafe("CREATE DATABASE ailearn_upgrade_ci");
-          } finally {
-            await sql.end();
-          }
-          NODE
-
-      - name: Bootstrap roles in representative upgrade database
-        env:
-          POSTGRES_DB: ailearn_upgrade_ci
-        run: |
-          docker run --rm --network host \
-            -v "$PWD/infra/postgres:/opt/ailearn:ro" \
-            -e POSTGRES_HOST -e POSTGRES_USER -e POSTGRES_PASSWORD -e POSTGRES_DB \
-            -e MIGRATOR_PASSWORD -e API_PASSWORD -e WORKER_PASSWORD \
-            postgres:16-alpine /bin/sh /opt/ailearn/apply-roles.sh
-
-      - name: Migrate representative database to 0012
-        working-directory: apps/api
-        env:
-          DATABASE_URL: ${{ env.UPGRADE_DATABASE_URL }}
-          DATABASE_URL_MIGRATOR: ${{ env.UPGRADE_DATABASE_URL_MIGRATOR }}
-          MIGRATIONS_FOLDER: ${{ runner.temp }}/ailearn-migrations-0012
-        run: npm run db:migrate
-
-      - name: Add legacy enum, RLS, and duplicate-data fixture
-        working-directory: apps/api
-        env:
-          DATABASE_URL: ${{ env.UPGRADE_DATABASE_URL }}
-        run: |
-          node --input-type=module <<'NODE'
-          import postgres from "postgres";
-
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const statements = [
-            `INSERT INTO users (id, email, password_hash)
-             VALUES ('00000000-0000-0000-0000-000000000101', 'migration-upgrade@example.invalid', 'not-used')`,
-            `INSERT INTO workspaces (id, owner_id, name)
-             VALUES ('00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000101', 'migration-upgrade')`,
-            `INSERT INTO workspace_members (workspace_id, user_id, role)
-             VALUES ('00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000101', 'owner')`,
-            `INSERT INTO notes (id, workspace_id, title, created_by)
-             VALUES ('00000000-0000-0000-0000-000000000301', '00000000-0000-0000-0000-000000000201', 'migration-upgrade', '00000000-0000-0000-0000-000000000101')`,
-            `INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, created_by)
-             VALUES ('00000000-0000-0000-0000-000000000401', '00000000-0000-0000-0000-000000000301', '00000000-0000-0000-0000-000000000201', 1, '{}'::jsonb, '00000000-0000-0000-0000-000000000101')`,
-            `UPDATE notes SET current_version_id = '00000000-0000-0000-0000-000000000401'
-             WHERE id = '00000000-0000-0000-0000-000000000301'`,
-            `INSERT INTO ai_artifacts (id, workspace_id, type, input_refs, output, model_id, prompt_version, status)
-             VALUES ('00000000-0000-0000-0000-000000000801', '00000000-0000-0000-0000-000000000201', 'learning_card', '{}'::jsonb, '{}'::jsonb, 'fixture', 'fixture', 'ready')`,
-            `INSERT INTO learning_cards (id, note_version_id, workspace_id, schema_json, artifact_id, created_at, updated_at)
-             VALUES
-               ('00000000-0000-0000-0000-000000000501', '00000000-0000-0000-0000-000000000401', '00000000-0000-0000-0000-000000000201', '{"title":"old","summary":"old"}'::jsonb, '00000000-0000-0000-0000-000000000801', now() - interval '1 minute', now() - interval '1 minute'),
-               ('00000000-0000-0000-0000-000000000502', '00000000-0000-0000-0000-000000000401', '00000000-0000-0000-0000-000000000201', '{"title":"new","summary":"new"}'::jsonb, '00000000-0000-0000-0000-000000000801', now(), now())`,
-            `INSERT INTO jobs (id, type, workspace_id, payload, status, scheduled_at)
-             VALUES
-               ('00000000-0000-0000-0000-000000000601', 'generate_card', '00000000-0000-0000-0000-000000000201', '{"noteVersionId":"00000000-0000-0000-0000-000000000401"}'::jsonb, 'pending', now() - interval '1 minute'),
-               ('00000000-0000-0000-0000-000000000602', 'generate_card', '00000000-0000-0000-0000-000000000201', '{"noteVersionId":"00000000-0000-0000-0000-000000000401"}'::jsonb, 'pending', now()),
-               ('00000000-0000-0000-0000-000000000603', 'evaluate_validation', '00000000-0000-0000-0000-000000000201', '{}'::jsonb, 'succeeded', now())`,
-            `INSERT INTO validation_events (id, workspace_id, user_id, card_id, question, question_type, user_answer, outcome, confidence, job_id, created_at)
-             VALUES
-               ('00000000-0000-0000-0000-000000000701', '00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000101', '00000000-0000-0000-0000-000000000502', 'old?', 'explain', 'old', 'unknown', 0, '00000000-0000-0000-0000-000000000603', now() - interval '1 minute'),
-               ('00000000-0000-0000-0000-000000000702', '00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000101', '00000000-0000-0000-0000-000000000502', 'new?', 'explain', 'new', 'unknown', 0, '00000000-0000-0000-0000-000000000603', now())`,
-            `ALTER TABLE ai_artifacts ALTER COLUMN status DROP DEFAULT`,
-            `ALTER TABLE ai_artifacts ALTER COLUMN status SET DATA TYPE text USING status::text`,
-            `DROP TYPE artifact_status`,
-            `CREATE TYPE artifact_status AS ENUM ('draft', 'accepted', 'rejected', 'superseded')`,
-            `UPDATE ai_artifacts SET status = 'draft' WHERE id = '00000000-0000-0000-0000-000000000801'`,
-            `ALTER TABLE ai_artifacts ALTER COLUMN status SET DATA TYPE artifact_status USING status::artifact_status`,
-            `ALTER TABLE ai_artifacts ALTER COLUMN status SET DEFAULT 'draft'`,
-            `ALTER TABLE validation_events ALTER COLUMN outcome SET DATA TYPE text USING outcome::text`,
-            `DROP TYPE validation_outcome`,
-            `CREATE TYPE validation_outcome AS ENUM ('preliminary', 'validated', 'unclear', 'misunderstanding', 'unknown')`,
-            `UPDATE validation_events SET outcome = CASE id
-               WHEN '00000000-0000-0000-0000-000000000701' THEN 'validated'
-               ELSE 'unclear' END`,
-            `ALTER TABLE validation_events ALTER COLUMN outcome SET DATA TYPE validation_outcome USING outcome::validation_outcome`,
-            `CREATE POLICY notes_workspace_policy ON notes USING (true) WITH CHECK (true)`,
-            `ALTER TABLE notes ENABLE ROW LEVEL SECURITY`,
-            `ALTER TABLE notes FORCE ROW LEVEL SECURITY`,
-          ];
-
-          try {
-            await sql.begin(async (tx) => {
-              for (const statement of statements) await tx.unsafe(statement);
-            });
-          } finally {
-            await sql.end();
-          }
-          NODE
-
-      - name: Reconcile upgrade-fixture ownership before migration
-        env:
-          POSTGRES_DB: ailearn_upgrade_ci
-        run: |
-          docker run --rm --network host \
-            -v "$PWD/infra/postgres:/opt/ailearn:ro" \
-            -e POSTGRES_HOST -e POSTGRES_USER -e POSTGRES_PASSWORD -e POSTGRES_DB \
-            -e MIGRATOR_PASSWORD -e API_PASSWORD -e WORKER_PASSWORD \
-            postgres:16-alpine /bin/sh /opt/ailearn/apply-roles.sh
-
-      - name: Upgrade representative 0012 database to latest
-        working-directory: apps/api
-        env:
-          DATABASE_URL: ${{ env.UPGRADE_DATABASE_URL }}
-          DATABASE_URL_MIGRATOR: ${{ env.UPGRADE_DATABASE_URL_MIGRATOR }}
-        run: npm run db:migrate
-
-      - name: Apply and verify upgraded-database role grants
-        env:
-          POSTGRES_DB: ailearn_upgrade_ci
-          REQUIRE_RLS_DISABLED: "true"
-        run: |
-          docker run --rm --network host \
-            -v "$PWD/infra/postgres:/opt/ailearn:ro" \
-            -e POSTGRES_HOST -e POSTGRES_USER -e POSTGRES_PASSWORD -e POSTGRES_DB \
-            -e MIGRATOR_PASSWORD -e API_PASSWORD -e WORKER_PASSWORD \
-            -e REQUIRE_RLS_DISABLED \
-            postgres:16-alpine /bin/sh /opt/ailearn/apply-roles.sh
-
-      - name: Verify representative upgrade invariants
-        working-directory: apps/api
-        env:
-          DATABASE_URL: ${{ env.UPGRADE_DATABASE_URL }}
-        run: |
-          node --input-type=module <<'NODE'
-          import { readFile } from "node:fs/promises";
-          import postgres from "postgres";
-
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const workspaceId = "00000000-0000-0000-0000-000000000201";
-          const versionId = "00000000-0000-0000-0000-000000000401";
-          const evaluateJobId = "00000000-0000-0000-0000-000000000603";
-          const assert = (condition, message) => {
-            if (!condition) throw new Error(message);
-          };
-
-          try {
-            const journal = JSON.parse(
-              await readFile("src/db/migrations/meta/_journal.json", "utf8"),
-            );
-            const [migrationState] = await sql`
-              SELECT count(*)::integer AS count
-              FROM drizzle.__drizzle_migrations
-            `;
-            assert(migrationState.count === journal.entries.length, "upgrade did not apply every migration");
-
-            const [artifact] = await sql`
-              SELECT status::text AS status FROM ai_artifacts
-              WHERE id = '00000000-0000-0000-0000-000000000801'
-            `;
-            assert(artifact?.status === "pending", "legacy artifact status was not mapped");
-
-            const [cards] = await sql`
-              SELECT
-                count(*) FILTER (WHERE status = 'active')::integer AS active,
-                count(*) FILTER (WHERE status = 'superseded')::integer AS superseded
-              FROM learning_cards
-              WHERE workspace_id = ${workspaceId} AND note_version_id = ${versionId}
-            `;
-            assert(cards.active === 1 && cards.superseded === 1, "active card duplicates were not converged");
-
-            const [jobs] = await sql`
-              SELECT
-                count(*) FILTER (WHERE status = 'pending')::integer AS pending,
-                count(*) FILTER (WHERE status = 'dead')::integer AS dead
-              FROM jobs
-              WHERE workspace_id = ${workspaceId}
-                AND type = 'generate_card'
-                AND payload->>'noteVersionId' = ${versionId}
-            `;
-            assert(jobs.pending === 1 && jobs.dead === 1, "active generate_card duplicates were not converged");
-
-            const [events] = await sql`
-              SELECT
-                count(*) FILTER (WHERE job_id = ${evaluateJobId})::integer AS linked,
-                count(*) FILTER (WHERE job_id IS NULL)::integer AS unlinked,
-                count(*) FILTER (WHERE outcome = 'preliminary_understanding')::integer AS preliminary,
-                count(*) FILTER (WHERE outcome = 'unclear_expression')::integer AS unclear
-              FROM validation_events
-              WHERE workspace_id = ${workspaceId}
-            `;
-            assert(
-              events.linked === 1 && events.unlinked === 1 &&
-                events.preliminary === 1 && events.unclear === 1,
-              "validation event mapping/deduplication failed",
-            );
-
-            const [rls] = await sql`
-              SELECT relrowsecurity, relforcerowsecurity
-              FROM pg_class WHERE oid = 'notes'::regclass
-            `;
-            const [policy] = await sql`
-              SELECT count(*)::integer AS count FROM pg_policy
-              WHERE polrelid = 'notes'::regclass AND polname = 'notes_workspace_policy'
-            `;
-            assert(!rls.relrowsecurity && !rls.relforcerowsecurity && policy.count === 0, "unsafe RLS state survived upgrade");
-
-            const indexes = await sql`
-              SELECT indexrelid::regclass::text AS name
-              FROM pg_index
-              WHERE indisunique AND indexrelid::regclass::text = ANY(${[
-                "learning_cards_workspace_note_version_active_unique_idx",
-                "jobs_generate_card_active_unique_idx",
-                "validation_events_job_unique_idx",
-              ]})
-            `;
-            assert(indexes.length === 3, "one or more idempotency unique indexes are missing");
-            console.log("representative 0012→latest migration invariants verified");
-          } finally {
-            await sql.end();
-          }
-          NODE
-
-      - name: Re-run representative upgrade migrations
-        working-directory: apps/api
-        env:
-          DATABASE_URL: ${{ env.UPGRADE_DATABASE_URL }}
-          DATABASE_URL_MIGRATOR: ${{ env.UPGRADE_DATABASE_URL_MIGRATOR }}
-        run: npm run db:migrate
-
-      # SEC-01: Enforce-mode verification (ADR-0003)
-      # After all migrations are applied (0027 returns to expand mode), this step
-      # manually re-applies 0024_sec01_rls_enforce.sql to enable RLS+FORCE on all
-      # 24 tables and revoke Worker direct UPDATE on jobs. Then it runs the
-      # sec01-enforce-verify.mjs script to verify cross-workspace isolation in
-      # enforce mode. Finally, it re-applies 0027 to return to expand mode.
-      - name: "SEC-01 enforce: apply 0024 enforce SQL"
-        working-directory: apps/api
-        env:
-          PGPASSWORD: ci-migrator-only-password
-        run: |
-          set -o pipefail
-          psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
-            --set=ON_ERROR_STOP=1 \
-            -f src/db/migrations/0024_sec01_rls_enforce.sql \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-apply.log"
-
-      # 0038 drops runtime_access bypass policies and converts RESTRICTIVE
-      # policies to PERMISSIVE so that enforce-mode RLS actually isolates
-      # workspaces.  Must be applied after 0024 (ENABLE+FORCE RLS).
-      - name: "SEC-01 enforce: apply 0038 policy fix SQL"
-        working-directory: apps/api
-        env:
-          PGPASSWORD: ci-migrator-only-password
-        run: |
-          set -o pipefail
-          psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
-            --set=ON_ERROR_STOP=1 \
-            -f src/db/migrations/0038_sec01_rls_enforce_policy_fix.sql \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-policy-fix.log"
-
-      - name: "SEC-01 enforce: run verification script"
-        env:
-          SEC01_VERIFY_MIGRATOR_URL: postgres://ailearn_migrator:ci-migrator-only-password@127.0.0.1:5432/ailearn_ci
-          SEC01_VERIFY_API_URL: postgres://ailearn_api:ci-api-only-password@127.0.0.1:5432/ailearn_ci
-          SEC01_VERIFY_WORKER_URL: postgres://ailearn_worker:ci-worker-only-password@127.0.0.1:5432/ailearn_ci
-        run: |
-          set -o pipefail
-          node .github/scripts/sec01-enforce-verify.mjs \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-verify.log"
-
-      - name: "SEC-01 enforce: restore expand mode (0027 fail-safe)"
-        if: always()
-        working-directory: apps/api
-        env:
-          PGPASSWORD: ci-migrator-only-password
-        run: |
-          set -o pipefail
-          psql -h 127.0.0.1 -U ailearn_migrator -d ailearn_ci \
-            --set=ON_ERROR_STOP=1 \
-            -f src/db/migrations/0027_sec01_rls_expansion_failsafe.sql \
-            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/sec01-enforce-restore.log"
-
       - name: Upload raw PostgreSQL test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -969,8 +635,7 @@ jobs:
       DATABASE_URL_MIGRATOR: postgres://ailearn_migrator:ci-compose-migrator-password@postgres:5432/ailearn
       DATABASE_URL_API: postgres://ailearn_api:ci-compose-api-password@postgres:5432/ailearn
       DATABASE_URL_WORKER: postgres://ailearn_worker:ci-compose-worker-password@postgres:5432/ailearn
-      CORS_ORIGIN: http://localhost:3000
-      AI_PROVIDER_CARD: mock
+      CORS_ORIGIN: ""
       # compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值；CI 必须提供（api 与 edge-tts 一致）
       EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token
       WORKER_METRICS_PORT: "9100"
@@ -987,16 +652,13 @@ jobs:
           docker compose -f docker-compose.yml config --quiet
           docker compose -f docker-compose.dev.yml config --quiet
 
-      # Keep these as three explicit steps so each production image is a
+      # Keep these as explicit steps so each production image is a
       # visible release gate rather than an implicit side effect of `up`.
       - name: Build API production image
         run: docker compose build api
 
       - name: Build Worker production image
         run: docker compose build worker
-
-      - name: Build Web production image
-        run: docker compose build web
 
       - name: Build edge-tts production image
         # 2026-08-11 修复：此前未构建 edge-tts，后续 `up -d --no-build` 会因
@@ -1005,7 +667,7 @@ jobs:
 
       - name: Verify production images run as non-root
         run: |
-          for image in ailearn_ci-api ailearn_ci-worker ailearn_ci-web ailearn_ci-edge-tts; do
+          for image in ailearn_ci-api ailearn_ci-worker ailearn_ci-edge-tts; do
             user="$(docker image inspect "$image" --format '{{.Config.User}}')"
             case "$image" in
               *edge-tts) expected="nobody" ;;
@@ -1018,7 +680,7 @@ jobs:
           done
 
       # REL-01 / RC 硬门禁 §4.1: 镜像漏洞扫描 — 0 high/critical 才通过
-      # 使用 Trivy 扫描三个生产 Docker 镜像的高危和严重漏洞。
+      # 使用 Trivy 扫描生产 Docker 镜像的高危和严重漏洞。
       # --severity HIGH,CRITICAL --exit-code 1 确保有高危漏洞时阻断 CI。
       - name: Scan API image for vulnerabilities (Trivy)
         uses: aquasecurity/trivy-action@master
@@ -1033,15 +695,6 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ailearn_ci-worker
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          format: table
-          ignore-unfixed: true
-
-      - name: Scan Web image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ailearn_ci-web
           severity: HIGH,CRITICAL
           exit-code: '1'
           format: table
@@ -1093,9 +746,6 @@ jobs:
           curl --fail --silent --show-error \
             --retry 30 --retry-delay 2 --retry-all-errors \
             http://127.0.0.1:4000/ready
-          curl --fail --silent --show-error \
-            --retry 30 --retry-delay 2 --retry-all-errors \
-            http://127.0.0.1:3000/ >/dev/null
 
       - name: Verify Worker metrics server is running
         run: |
@@ -1112,7 +762,7 @@ jobs:
             test "$(docker inspect "$container_id" --format '{{.State.ExitCode}}')" = "0"
           done
 
-          for service in postgres api worker web; do
+          for service in postgres api worker; do
             container_id="$(docker compose ps -q "$service")"
             test -n "$container_id" || {
               echo >&2 "$service has no running container"
@@ -1122,25 +772,6 @@ jobs:
           done
 
           docker compose ps -a
-
-      - name: Seed worker smoke owner
-        env:
-          OWNER_EMAIL: worker-smoke@example.invalid
-          OWNER_PASSWORD: ci-worker-smoke-password
-          OWNER_WORKSPACE: CI Worker Smoke
-        run: |
-          docker compose exec -T \
-            -e OWNER_EMAIL="$OWNER_EMAIL" \
-            -e OWNER_PASSWORD="$OWNER_PASSWORD" \
-            -e OWNER_WORKSPACE="$OWNER_WORKSPACE" \
-            api npm run db:seed
-
-      - name: Verify Worker claims and completes a mock job
-        env:
-          API_BASE_URL: http://127.0.0.1:4000
-          WORKER_SMOKE_EMAIL: worker-smoke@example.invalid
-          WORKER_SMOKE_PASSWORD: ci-worker-smoke-password
-        run: node .github/scripts/verify-worker-smoke.mjs
 
       - name: Verify PostgreSQL backup can be restored
         env:
@@ -1175,8 +806,9 @@ jobs:
 
           tables=(
             users workspaces workspace_members notes note_versions
-            learning_cards card_key_points jobs search_documents ai_audit_log
-            user_ai_model_configs
+            note_blocks sources source_segments jobs search_documents ai_audit_log
+            learning_objectives_v2 learning_cards_v2
+            evidence_snapshots_v2
           )
           for table in "${tables[@]}"; do
             source_count="$(docker compose exec -T postgres \
@@ -1187,10 +819,6 @@ jobs:
               "SELECT count(*) FROM \"$table\"")"
             test "$restored_count" = "$source_count" || {
               echo >&2 "$table count mismatch: source=$source_count restored=$restored_count"
-              exit 1
-            }
-            test "$restored_count" -gt 0 || {
-              echo >&2 "$table was not populated by the production smoke fixture"
               exit 1
             }
           done
@@ -1252,236 +880,10 @@ jobs:
         if: always()
         run: docker compose down --volumes --remove-orphans
 
-  e2e:
-    name: E2E (Playwright, ADR-0008)
-    runs-on: ubuntu-latest
-    # E2E tests are now blocking per ADR-0008 §6.7 "PR 失败即阻断".
-    # The PR smoke suite covers: login/session, note creation/card generation,
-    # evidence override, validation submission, review attempt, workspace permissions.
-    # Worker service is started to enable card generation during E2E.
-    env:
-      E2E_BASE_URL: "http://localhost:3000"
-      E2E_API_URL: "http://localhost:4000"
-      # Database URLs for dev compose (must match docker-compose.dev.yml)
-      # Dev compose uses a single superuser role for all connections
-      DATABASE_URL_API: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      DATABASE_URL_WORKER: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      DATABASE_URL: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      # Fixed seed output path (must be consistent between seed and test steps)
-      E2E_SEED_OUTPUT: /tmp/e2e-seed-output.json
-      # 卡组轮播 UI：dev server 编译期读取，否则 card-set-carousel.spec.ts 全部自动跳过
-      NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: "true"
-      # dev compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值
-      EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            apps/api/package-lock.json
-            packages/shared/package-lock.json
-            tests/e2e/package-lock.json
-
-      - name: Install E2E dependencies
-        working-directory: tests/e2e
-        run: npm ci --no-audit --no-fund
-
-      - name: Typecheck E2E harness
-        working-directory: tests/e2e
-        run: npm run typecheck
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json', 'apps/web/package-lock.json') }}
-
-      - name: Install Playwright browsers
-        working-directory: tests/e2e
-        run: npx playwright install --with-deps chromium
-
-      - name: Start dev services
-        run: |
-          docker volume inspect ailearn-dev_dev_postgres_data >/dev/null 2>&1 || \
-            docker volume create --label com.ailearn.purpose=ci-postgres-data ailearn-dev_dev_postgres_data >/dev/null
-          docker compose -f docker-compose.dev.yml up -d postgres minio
-          # Wait for PostgreSQL to be ready
-          for i in $(seq 1 30); do
-            if docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U ailearn >/dev/null 2>&1; then
-              echo "PostgreSQL is ready"
-              break
-            fi
-            echo "Waiting for PostgreSQL... ($i/30)"
-            sleep 2
-          done
-
-      - name: Bootstrap restricted database roles
-        run: docker compose -f docker-compose.dev.yml run --rm role-bootstrap
-
-      - name: Install shared
-        working-directory: packages/shared
-        run: npm ci --no-audit --no-fund
-
-      - name: Install and migrate API
-        working-directory: apps/api
-        run: |
-          npm ci --include=dev --no-audit --no-fund
-          npm run db:migrate
-
-      - name: Install Worker
-        working-directory: workers/ai-worker
-        run: npm ci --include=dev --no-audit --no-fund
-
-      - name: Install and build Web
-        working-directory: apps/web
-        env:
-          NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: "true"
-          NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: "true"
-          NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: "true"
-        run: |
-          npm ci --no-audit --no-fund
-
-      - name: Start API server
-        env:
-          NODE_ENV: development
-          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
-          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
-          AI_PROVIDER_CARD: mock
-          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
-          CORS_ORIGIN: http://localhost:3000
-          AI_QUESTION_V1_ENABLED: "true"
-          RUBRIC_EVALUATION_V1_ENABLED: "true"
-        run: |
-          cd apps/api && npx tsx src/server.ts &
-          # Wait for API to be ready
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:4000/ready >/dev/null 2>&1; then
-              echo "API is ready"
-              break
-            fi
-            echo "Waiting for API... ($i/30)"
-            sleep 2
-          done
-
-      - name: Start Worker
-        env:
-          NODE_ENV: development
-          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
-          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
-          AI_PROVIDER_CARD: mock
-          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
-          API_INTERNAL_URL: http://localhost:4000
-        run: |
-          cd workers/ai-worker && npx tsx src/index.ts &
-          # Give Worker a few seconds to start
-          sleep 3
-          echo "Worker started"
-
-      - name: Start Web dev server
-        run: |
-          cd apps/web && npm run dev &
-          # Wait for Web to be ready
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000 >/dev/null 2>&1; then
-              echo "Web is ready"
-              break
-            fi
-            echo "Waiting for Web... ($i/30)"
-            sleep 2
-          done
-
-      - name: Run seed CLI (QLT-01, PR profile)
-        working-directory: tests/e2e
-        env:
-          SEED_DATABASE_URL: ${{ env.DATABASE_URL_API }}
-          SEED_API_URL: ${{ env.E2E_API_URL }}
-          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
-        run: |
-          npm run seed -- --profile pr --output "$E2E_SEED_OUTPUT"
-
-      - name: Run Playwright E2E tests (v0.5 PR smoke)
-        if: success()
-        working-directory: tests/e2e
-        env:
-          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
-          E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
-        run: |
-          npm run test:pr
-
-      # ── v0.6 E2E (计划 §13.3, M4 Gate) ─────────────────────────────────
-      # Seeds v0.6 test data (fixed card UUID for deterministic navigation)
-      # and runs the v0.6 E2E suite: review flow, card validation, axe-core.
-      # 2026-08-11：continue-on-error 移除——失败必须真实反映在 CI 状态上，
-      # 与 ADR-0008 §6.7 "PR 失败即阻断"一致（此前失败静默 CI 仍绿）。
-      - name: Run v0.6 E2E seed
-        if: success()
-        env:
-          SEED_E2E: "true"
-          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
-          E2E_TEST_USER_EMAIL: e2e-test@ailearn.local
-          E2E_TEST_USER_PASSWORD: e2e_test_password_2026
-        run: node --import tsx apps/api/src/scripts/seed-e2e-v06.ts
-
-      - name: Install v0.6 Playwright browsers
-        working-directory: apps/web
-        run: npx playwright install --with-deps chromium
-
-      - name: Run v0.6 E2E tests
-        if: success()
-        working-directory: apps/web
-        # 2026-08-11：不再 continue-on-error（v0.6 套件视为正式 Gate）
-        env:
-          E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
-        run: npx playwright test
-
-      - name: Upload v0.6 Playwright report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-v06-${{ github.run_id }}
-          path: apps/web/playwright-report
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Upload Playwright report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-${{ github.run_id }}
-          path: tests/e2e/playwright-report
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Upload Playwright test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-results-${{ github.run_id }}
-          path: tests/e2e/test-results
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Stop dev services
-        if: always()
-        run: |
-          docker compose -f docker-compose.dev.yml down --volumes --remove-orphans
-          docker volume rm ailearn-dev_dev_postgres_data >/dev/null 2>&1 || true
-
-  # REL-01: Release evidence aggregation job
-  # Runs after all blocking jobs pass. Generates a contract-compliant RC
-  # manifest skeleton and uploads it as a CI artifact for evidence retention.
-  # The manifest's images/aiQuality/approvals fields are placeholders that
-  # must be filled by the CI build job (image digests), RC gate CLI (AIQ
-  # metrics), and human approval before the contract verifier will accept it.
   release-evidence:
     name: Release Evidence (Manifest Aggregation)
     runs-on: ubuntu-latest
-    needs: [build, unit-tests, fresh-migrations, production-compose, ai-quality-gate, e2e]
+    needs: [build, unit-tests, fresh-migrations, production-compose, ai-quality-gate]
     # Don't run on PRs from forks (secrets may not be available)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 10
@@ -1529,19 +931,6 @@ jobs:
           name: node-${{ env.NODE_VERSION }}-unit-test-logs-${{ github.sha }}
           path: ${{ runner.temp }}/unit-test-logs
 
-      - name: Download Playwright JUnit evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: playwright-results-${{ github.run_id }}
-          path: ${{ runner.temp }}/playwright-results
-
-      - name: Download v0.6 Playwright report
-        uses: actions/download-artifact@v4
-        with:
-          name: playwright-report-v06-${{ github.run_id }}
-          path: ${{ runner.temp }}/playwright-report-v06
-        continue-on-error: true
-
       - name: Prepare collected coverage and scan evidence
         run: |
           test -f "$RUNNER_TEMP/unit-test-logs/coverage-summary.json"
@@ -1550,11 +939,11 @@ jobs:
           cp outputs/coverage/summary.json "$RUNNER_TEMP/release-evidence/coverage-summary.json"
           find "$RUNNER_TEMP/unit-test-logs" -maxdepth 1 -name '*.coverage.json' -exec \
             cp {} outputs/coverage/ \;
-          for name in api worker web; do
+          for name in api worker; do
             echo "passed: production-compose Trivy gate completed with exit-code=0" \
               > "$RUNNER_TEMP/release-evidence/scan-results/trivy-scan-${name}.txt"
           done
-          for name in api worker web shared; do
+          for name in api worker shared; do
             echo "passed: typecheck npm audit gate completed with exit-code=0" \
               > "$RUNNER_TEMP/release-evidence/scan-results/npm-audit-${name}.txt"
           done
@@ -1637,184 +1026,7 @@ jobs:
           path: ${{ runner.temp }}/release-evidence
           if-no-files-found: warn
           retention-days: 90
-
-  # QLT-01/02: Nightly E2E suite (ADR-0008 §6)
-  # Runs the full nightly test matrix: Chromium 390/768/1440 + Firefox 1440.
-  # Uses nightly seed profile (51 notes/cards) for pagination boundary tests.
-  # Only runs on schedule or manual dispatch — does not block PRs.
-  e2e-nightly:
-    name: E2E Nightly (Full Matrix, ADR-0008)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-    timeout-minutes: 45
-    env:
-      E2E_BASE_URL: "http://localhost:3000"
-      E2E_API_URL: "http://localhost:4000"
-      E2E_PROFILE: "nightly"
-      DATABASE_URL_API: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      DATABASE_URL_WORKER: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      DATABASE_URL: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      DATABASE_URL_MIGRATOR: postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn
-      E2E_SEED_OUTPUT: /tmp/e2e-nightly-seed-output.json
-      # dev compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值
-      EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            apps/api/package-lock.json
-            packages/shared/package-lock.json
-            tests/e2e/package-lock.json
-
-      - name: Install E2E dependencies
-        working-directory: tests/e2e
-        run: npm ci --no-audit --no-fund
-
-      - name: Typecheck E2E harness
-        working-directory: tests/e2e
-        run: npm run typecheck
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json') }}
-
-      - name: Install Playwright browsers (Chromium + Firefox)
-        working-directory: tests/e2e
-        run: npx playwright install --with-deps chromium firefox
-
-      - name: Start dev services
-        run: |
-          docker volume inspect ailearn-dev_dev_postgres_data >/dev/null 2>&1 || \
-            docker volume create --label com.ailearn.purpose=ci-postgres-data ailearn-dev_dev_postgres_data >/dev/null
-          docker compose -f docker-compose.dev.yml up -d postgres minio
-          for i in $(seq 1 30); do
-            if docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U ailearn >/dev/null 2>&1; then
-              echo "PostgreSQL is ready"
-              break
-            fi
-            echo "Waiting for PostgreSQL... ($i/30)"
-            sleep 2
-          done
-
-      - name: Bootstrap restricted database roles
-        run: docker compose -f docker-compose.dev.yml run --rm role-bootstrap
-
-      - name: Install shared
-        working-directory: packages/shared
-        run: npm ci --no-audit --no-fund
-
-      - name: Install and migrate API
-        working-directory: apps/api
-        run: |
-          npm ci --include=dev --no-audit --no-fund
-          npm run db:migrate
-
-      - name: Install Worker
-        working-directory: workers/ai-worker
-        run: npm ci --include=dev --no-audit --no-fund
-
-      - name: Install and build Web
-        working-directory: apps/web
-        run: npm ci --no-audit --no-fund
-
-      - name: Start API server
-        env:
-          NODE_ENV: development
-          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
-          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
-          AI_PROVIDER_CARD: mock
-          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
-          CORS_ORIGIN: http://localhost:3000
-        run: |
-          cd apps/api && npx tsx src/server.ts &
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:4000/ready >/dev/null 2>&1; then
-              echo "API is ready"
-              break
-            fi
-            echo "Waiting for API... ($i/30)"
-            sleep 2
-          done
-
-      - name: Start Worker
-        env:
-          NODE_ENV: development
-          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
-          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
-          AI_PROVIDER_CARD: mock
-          AI_PLATFORMS_CONFIG: ${{ github.workspace }}/.github/ci/ai-platforms.mock.json
-          API_INTERNAL_URL: http://localhost:4000
-        run: |
-          cd workers/ai-worker && npx tsx src/index.ts &
-          sleep 3
-          echo "Worker started"
-
-      - name: Start Web dev server
-        run: |
-          cd apps/web && npm run dev &
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000 >/dev/null 2>&1; then
-              echo "Web is ready"
-              break
-            fi
-            echo "Waiting for Web... ($i/30)"
-            sleep 2
-          done
-
-      - name: Run seed CLI (QLT-01, nightly profile)
-        working-directory: tests/e2e
-        env:
-          SEED_DATABASE_URL: ${{ env.DATABASE_URL_API }}
-          SEED_API_URL: ${{ env.E2E_API_URL }}
-          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
-        run: |
-          npm run seed -- --profile nightly --output "$E2E_SEED_OUTPUT"
-
-      - name: Run Playwright nightly E2E tests
-        working-directory: tests/e2e
-        env:
-          E2E_SEED_OUTPUT: ${{ env.E2E_SEED_OUTPUT }}
-          E2E_BASE_URL: ${{ env.E2E_BASE_URL }}
-          E2E_PROFILE: ${{ env.E2E_PROFILE }}
-        run: |
-          npm run test:nightly
-
-      - name: Upload Playwright nightly report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-nightly-report-${{ github.run_id }}
-          path: tests/e2e/playwright-report
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Upload Playwright nightly results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-nightly-results-${{ github.run_id }}
-          path: tests/e2e/test-results
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Stop dev services
-        if: always()
-        run: |
-          docker compose -f docker-compose.dev.yml down --volumes --remove-orphans
-          docker volume rm ailearn-dev_dev_postgres_data >/dev/null 2>&1 || true
-
-  # OPS-01: Alpha infrastructure verification (ADR-0006, ADR-0007)
-  # Uses Docker Compose to deploy Prometheus + Alertmanager + backup-runner
-  # and verifies the full backup/restore/monitoring cycle.
-  # Only runs on schedule or manual dispatch — does not block PRs.
-  alpha-infrastructure:
++  alpha-infrastructure:
     name: Alpha Infrastructure (Monitoring + Backup, OPS-01)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
@@ -1832,13 +1044,12 @@ jobs:
       DATABASE_URL_WORKER: postgres://ailearn_worker:ci-alpha-worker-password@postgres:5432/ailearn
       MINIO_ROOT_USER: ailearn
       MINIO_ROOT_PASSWORD: ci-alpha-minio-secret
-      AI_PROVIDER_CARD: mock
       BACKUP_BUCKET: ailearn-backups
       SOURCE_RELEASE: "0.5.0-alpha"
       SOURCE_COMMIT: ${{ github.sha }}
       # SOURCE_MIGRATION 不再硬编码（此前 "0039" 已过期到 0103+）：
       # alpha-env-setup.sh 从 _journal.json 动态取最新迁移号。
-      CORS_ORIGIN: http://localhost:3000
+      CORS_ORIGIN: ""
       AUTH_COOKIE_SECURE: "false"
       # compose 强制 ${EDGE_TTS_AUTH_TOKEN:?} 插值
       EDGE_TTS_AUTH_TOKEN: ci-edge-tts-token

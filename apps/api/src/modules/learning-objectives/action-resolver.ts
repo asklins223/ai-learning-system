@@ -12,10 +12,6 @@
  *   7. 其余 → create_run 或 none。
  */
 import type { LearningObjectivePrimaryActionV3 } from "@ailearn/shared";
-import {
-  objectiveRunOriginV3Schema,
-  type ObjectiveRunOriginV3,
-} from "@ailearn/shared";
 
 export interface ActionResolverInputV3 {
   objectiveId: string;
@@ -32,9 +28,16 @@ export interface ActionResolverInputV3 {
   /** Reveal/Exposure 后由服务端决定（§7.4）；客户端不得自判。 */
   practiceOnly: boolean;
   practiceReasonCodes: string[];
-  /** 入口 origin（create_run 场景）。 */
-  origin: ObjectiveRunOriginV3;
-  goal: string;
+}
+
+function cardStart(objectiveId: string, cardId: string) {
+  return {
+    version: 2 as const,
+    originV2: { kind: "card" as const, cardId, objectiveId },
+    goal: "stabilize" as const,
+    requestedTimeBudgetSeconds: 180,
+    responsePreference: "adaptive" as const,
+  };
 }
 
 /** 解析唯一主行动；永不返回 label 猜测。 */
@@ -64,20 +67,32 @@ export function resolvePrimaryActionV3(
     return { kind: "resume_run", runId: input.activeRun.runId, objectiveId };
   }
   if (input.reviewDue) {
+    if (input.reviewDue.generation < 1) return { kind: "refresh" };
     return {
       kind: "create_review_run",
       objectiveId,
-      scheduleId: input.reviewDue.scheduleId,
-      generation: input.reviewDue.generation,
+      label: "开始到期复习",
+      start: {
+        version: 2,
+        originV2: {
+          kind: "review",
+          scheduleId: input.reviewDue.scheduleId,
+          objectiveId,
+          scheduleGeneration: input.reviewDue.generation,
+        },
+        goal: "stabilize",
+        requestedTimeBudgetSeconds: 180,
+        responsePreference: "adaptive",
+      },
     };
   }
   if (input.initialReady) {
+    if (!input.cardId) return { kind: "refresh" };
     return {
       kind: "create_run",
-      origin: objectiveRunOriginV3Schema.parse(input.origin),
       objectiveId,
-      cardId: input.cardId,
-      goal: input.goal,
+      label: "开始首次验证",
+      start: cardStart(objectiveId, input.cardId),
     };
   }
   // §7.5：initial validation deferred → wait_for_initial_validation（前端不得用本地时间推断）
@@ -89,20 +104,22 @@ export function resolvePrimaryActionV3(
     };
   }
   if (input.practiceOnly) {
+    if (!input.cardId) return { kind: "refresh" };
     return {
       kind: "practice_only",
       objectiveId,
-      cardId: input.cardId,
       reasonCodes: input.practiceReasonCodes.length > 0 ? input.practiceReasonCodes : ["exposed"],
+      label: "开始练习",
+      start: cardStart(objectiveId, input.cardId),
     };
   }
   if (input.hasActiveCard) {
+    if (!input.cardId) return { kind: "refresh" };
     return {
       kind: "create_run",
-      origin: objectiveRunOriginV3Schema.parse(input.origin),
       objectiveId,
-      cardId: input.cardId,
-      goal: input.goal,
+      label: "开始学习",
+      start: cardStart(objectiveId, input.cardId),
     };
   }
   if (input.lifecycle === "active") {

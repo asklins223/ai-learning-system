@@ -64,8 +64,10 @@ test("P8 delivery 纵切：dedupe → lease 竞争 → ACK 状态机 → inbox �
     const first = await withWorkspaceTransaction(scope, (tx) =>
       deliver(tx, scope, {
         assistantSessionId: null,
-        kind: "proactive_cue",
-        payloadRef: { kind: "proactive_cue", cueId: randomUUID() },
+        // memory_candidate 是 worker 记忆抽取真实写入的 kind：0131 的 CHECK 曾
+        // 漏掉它，导致抽取事务整体回滚（0224 修复）。这里锁死它可被交付。
+        kind: "memory_candidate",
+        payloadRef: { kind: "memory_item", memoryItemId: randomUUID(), contentPreview: "候选记忆" },
         dedupeKey: "cue-1",
         expiresAt: new Date(now.getTime() + 60_000),
       }, now),
@@ -83,8 +85,10 @@ test("P8 delivery 纵切：dedupe → lease 竞争 → ACK 状态机 → inbox �
     const dup = await withWorkspaceTransaction(scope, (tx) =>
       deliver(tx, scope, {
         assistantSessionId: null,
-        kind: "proactive_cue",
-        payloadRef: { kind: "proactive_cue", cueId: randomUUID() },
+        // memory_candidate 是 worker 记忆抽取真实写入的 kind：0131 的 CHECK 曾
+        // 漏掉它，导致抽取事务整体回滚（0224 修复）。这里锁死它可被交付。
+        kind: "memory_candidate",
+        payloadRef: { kind: "memory_item", memoryItemId: randomUUID(), contentPreview: "候选记忆" },
         dedupeKey: "cue-1",
         expiresAt: new Date(now.getTime() + 60_000),
       }, now),

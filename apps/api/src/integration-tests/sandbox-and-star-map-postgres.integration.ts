@@ -11,14 +11,14 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
 process.env.DATABASE_URL_API ??= CONN;
 const sql = postgres(CONN, { max: 2 });
 
 const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.ts");
-const { createRun, submitArtifact } = await import("../modules/learning-runs/run-service.ts");
+const { submitArtifact } = await import("../modules/learning-runs/run-service.ts");
 const { runLearningRunProcessingTick } = await import("../modules/learning-runs/run-processing-tick.ts");
 const { issueCheckpointToken } = await import("../modules/understanding/projection-checkpoint.ts");
 
@@ -60,18 +60,16 @@ test("P6 Gate：sandbox Run 结算 0 canonical/0 schedule；过期 namespace 409
     });
 
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: {
+          originV2: {
             kind: "onboarding",
             sampleMode: "sandbox",
-            keyPointId: seeded.keyPointId,
+            objectiveId: seeded.keyPointId,
             sandboxNamespaceId: namespaceId,
           },
           goal: "stabilize",
-          clientRequestId: "sb-1",
           idempotencyKey: "sb-create-1",
         },
       }),
@@ -117,18 +115,16 @@ test("P6 Gate：sandbox Run 结算 0 canonical/0 schedule；过期 namespace 409
     });
     await assert.rejects(
       () => withWorkspaceTransaction(scope, async (tx) =>
-        createRun(tx, {
+        createLearningRunForTest(tx, {
           ...scope,
           request: {
-            version: 1,
-            origin: {
+            originV2: {
               kind: "onboarding",
               sampleMode: "sandbox",
-              keyPointId: seeded.keyPointId,
+              objectiveId: seeded.keyPointId,
               sandboxNamespaceId: expiredNs,
             },
             goal: "stabilize",
-            clientRequestId: "sb-2",
             idempotencyKey: "sb-create-2",
           },
         })),
@@ -155,13 +151,12 @@ test("P7：star_map origin 有效基线可创建；伪造基线 409 fail closed"
     assert.ok(token, "测试密钥下应能签发 checkpoint token");
 
     const run = await withWorkspaceTransaction(scope, async (tx) =>
-      createRun(tx, {
+      createLearningRunForTest(tx, {
         ...scope,
         request: {
-          version: 1,
-          origin: {
+          originV2: {
             kind: "star_map",
-            keyPointId: seeded.keyPointId,
+            objectiveId: seeded.keyPointId,
             lens: "current_target",
             filter: { showArchived: false, cardId: seeded.cardId },
             baselineCheckpoint: {
@@ -173,7 +168,6 @@ test("P7：star_map origin 有效基线可创建；伪造基线 409 fail closed"
             },
           },
           goal: "stabilize",
-          clientRequestId: "sm-1",
           idempotencyKey: "sm-create-1",
         },
       }),
@@ -184,13 +178,12 @@ test("P7：star_map origin 有效基线可创建；伪造基线 409 fail closed"
     // 伪造基线（篡改 token）→ 409 fail closed。
     await assert.rejects(
       () => withWorkspaceTransaction(scope, async (tx) =>
-        createRun(tx, {
+        createLearningRunForTest(tx, {
           ...scope,
           request: {
-            version: 1,
-            origin: {
+            originV2: {
               kind: "star_map",
-              keyPointId: seeded.keyPointId,
+              objectiveId: seeded.keyPointId,
               lens: "current_target",
               filter: { showArchived: false, cardId: seeded.cardId },
               baselineCheckpoint: {
@@ -202,7 +195,6 @@ test("P7：star_map origin 有效基线可创建；伪造基线 409 fail closed"
               },
             },
             goal: "stabilize",
-            clientRequestId: "sm-2",
             idempotencyKey: "sm-create-2",
           },
         })),

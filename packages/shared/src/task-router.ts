@@ -2,8 +2,7 @@
  * R3: 任务路由层 — 任务 → 能力映射。
  *
  * 不同任务可以路由到不同 provider/模型。
- * 简单任务（验证评估、题目生成、评分）可以用免费小模型，
- * 复杂任务（卡片生成 Agent）用付费大模型。
+ * 当前用户可见任务统一经明确的能力路由选择 provider/model。
  *
  * @see docs/plans/provider-registry-refactor.md §3.3
  */
@@ -19,10 +18,6 @@ export type AITaskType =
   | "deck_composition"     // Deck Composer（中复杂度）
   | "grounding_critic"     // Grounding Critic（中复杂度）
   | "repair"               // Repairer（中复杂度）
-  // ── 验证评估 ──
-  | "evaluate_validation"  // 验证评估（影响深→agent_turn）
-  | "generate_question"    // 题目生成（影响深→agent_turn）
-  | "evaluate_rubric"      // 评分（影响深→agent_turn）
   // ── 其他 ──
   | "analyze_image"        // 图片分析
   | "embed"                // 向量嵌入
@@ -31,9 +26,7 @@ export type AITaskType =
   | "speech_recognition"   // 语音识别
   | "image_generation"     // 文生图
   // ── P2 companion（03 合同 §9.5 参数） ──
-  | "companion_dialogue"    // 日常对话流式回复（低复杂度）
-  // ── P5 learning action bridge（慢动作，worker 执行 Learning 公共入口） ──
-  | "companion_action";
+  | "companion_agent";       // 日常对话与受控工具 loop
 
 /**
  * 模型槽位语义（2026-08-13 按"用户体验"分级，而非任务复杂度）：
@@ -42,7 +35,8 @@ export type AITaskType =
  * （专业模型）**；text_generation（小模型槽）仅保留给**用户不可见的内部
  * 低影响任务**（当前无此类任务，槽位留空待用）。
  *
- * - agent_turn（专业模型，tokenrhythm + deepseek-v4-flash-0731）：
+ * - agent_turn（专业模型，平台由 config/ai-platforms.json 的
+ *   capabilities.agent_turn 决定，当前 tokenrhythm + qwen3.8-flash）：
  *   卡片生成、文本抽取、卡组编排、证据批判、修复、**题目生成、
  *   验证/评估/评分（决定掌握度与复习调度）、日常对话、桌宠动作建议**——
  *   全部用户可见/影响结论，一律专业模型（体验优先）。
@@ -57,14 +51,7 @@ const TASK_CAPABILITY_MAP: Record<AITaskType, Capability> = {
   deck_composition:    "agent_turn",
   grounding_critic:    "agent_turn",
   repair:              "agent_turn",
-  // 2026-08-13（模型分级）：题目生成与评估对用户学习结论影响深——
-  // 一律 agent_turn（专业模型），不用小模型降级体验。
-  evaluate_validation: "agent_turn",
-  generate_question:   "agent_turn",
-  evaluate_rubric:     "agent_turn",
-  companion_dialogue:  "agent_turn",
-  // 桌宠动作建议是用户直接可见的文案——体验优先，专业模型。
-  companion_action:    "agent_turn",
+  companion_agent:     "agent_turn",
   analyze_image:       "vision",
   embed:               "embedding",
   rerank:              "rerank",
@@ -81,16 +68,12 @@ const TASK_COMPLEXITY: Record<AITaskType, TaskComplexity> = {
   deck_composition:    "medium",
   grounding_critic:    "medium",
   repair:              "medium",
-  evaluate_validation: "low",
-  generate_question:   "low",
-  evaluate_rubric:     "low",
   analyze_image:       "medium",
   embed:               "low",
   rerank:              "low",
   speech_recognition:  "low",
   image_generation:    "medium",
-  companion_dialogue:  "low",
-  companion_action:    "low",
+  companion_agent:     "low",
 };
 
 /** 任务 → 所需能力 */
@@ -106,8 +89,7 @@ export function getTaskComplexity(task: AITaskType): TaskComplexity {
 /**
  * Resolve the system-level provider type for a capability.
  *
- * Delegates to resolveSystemPlatform() which reads from config/ai-platforms.json
- * (if present) or falls back to legacy AI_PROVIDER_* env vars.
+ * Delegates to resolveSystemPlatform() which reads from config/ai-platforms.json.
  *
  * This function returns just the provider type string (e.g., "dashscope",
  * "openai_compatible"). For the full config (apiKey, baseUrl, model, options),

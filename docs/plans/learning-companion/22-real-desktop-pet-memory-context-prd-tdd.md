@@ -17,7 +17,7 @@
 >   §2.2.2 来源5 落地），服务端 POST /companion/memory 与客户端方法此前已是死代码。
 > - v1.5（2026-08-23）：第十二轮遗留修复——keyword fallback 排序键去 updated_at
 >   污染（#32）、EXISTS 探测补 scope 过滤（#33）、familiarity 衰减多副本
->   advisory lock 守卫（#34），详见 §31。
+>   数据库日期幂等门（#34），详见 §31。
 > - v1.4（2026-08-19）：独立端到端审查（区别于前几轮的文档一致性比对）发现
 >   并修复 5 处行为级缺陷 + 3 项未实施承诺，详见新增 §29：
 >   1. keyword fallback 整段 ILIKE 永不匹配 → 关键词提取 + ILIKE ANY；
@@ -1298,7 +1298,7 @@ freshness(last_used_at) =
 
 #### 11.2.4 衰减任务位置
 
-- 复用现有 worker tick 或独立 `companion_memory_maintenance` job；
+- 复用现有 worker tick；不保留没有 handler 的独立 `companion_memory_maintenance` job；
 - 每日一次，幂等；
 - 只处理当前 workspace/user 有权限的数据。
 
@@ -2342,7 +2342,7 @@ worker 单测套件（758 个用例）确认零回归。
 |---|---|---|---|
 | 32 | `companion-context-orchestrator.ts` | keyword fallback 排序键依赖被召回行为污染的 `updated_at`：orchestrator 的使用回传 UPDATE 同时刷新 `updated_at=now()`，导致"每被召回一次就在降级检索中永久置顶"，比 §30.3 自认的 last_used_at 回路更强 | 使用回传 UPDATE 改为只更新 `last_used_at`；`updated_at` 保持内容修改时间戳语义（keyword 排序键不再被召回行为污染） |
 | 33 | `companion-memory-vector.ts` | 零召回窗口 EXISTS 探测未带 scope 过滤：用户若只有其他 scope 的 ready embedding 会误判"有 ready"而不降级 | 探测子查询补 `(scope='workspace' OR scope='global' OR currentScope)`，与主检索一致；新增回归用例 |
-| 34 | `companion-memory-maintenance.ts` | familiarity 衰减 tick 用进程内节流，多 worker 副本各持计时器时衰减速率按副本数放大（-0.05×N/日） | 两步骤各自以事务级 `pg_try_advisory_xact_lock(hashtextextended('companion_memory_maintenance',0))` 取锁：非阻塞、随事务自动释放、拿不到锁的副本静默跳过；进程内 24h 节流保留为第一道闸 |
+| 34 | `companion-memory-maintenance.ts` | familiarity 衰减 tick 用进程内节流，多 worker 副本各持计时器时衰减速率按副本数放大（-0.05×N/日） | 迁移 0212 增加数据库日期幂等门 `companion_memory_maintenance_runs`，由 SECURITY DEFINER 函数在同一事务内一次性执行记忆归档与关系衰减；进程内 24h 节流仅作查询降载，不能承担正确性 |
 
 验证：companion-context-orchestrator / companion-memory-vector 单测通过（含新增
 EXISTS scope 用例）；worker tsc 0 错误。

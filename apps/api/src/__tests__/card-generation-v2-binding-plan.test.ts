@@ -16,7 +16,7 @@ import { describe, it, beforeEach } from "node:test";
 import { randomUUID } from "node:crypto";
 import {
   assembleCandidateEvidenceBindingPlanV2,
-} from "../modules/card-generation-v2/binding-plan-assembler.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import { CardGenerationV2ServiceError } from "../modules/card-generation-v2/helpers.ts";
 import type { GroundingCriticReportV2 } from "@ailearn/shared/card-quality-v2-contracts";
 import type { LearningCardCandidateRevisionV2, CanonicalAnswerV2 } from "@ailearn/shared/card-generation-v2-contracts";

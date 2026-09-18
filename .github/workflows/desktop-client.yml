@@ -1,0 +1,202 @@
+name: Desktop client
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, "codex/**"]
+    paths:
+      - "apps/desktop-client/**"
+      - "packages/shared/**"
+      - ".github/workflows/desktop-client.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "apps/desktop-client/**"
+      - "packages/shared/**"
+      - ".github/workflows/desktop-client.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-client-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  shared-contracts:
+    name: Shared contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: packages/shared/package-lock.json
+      - name: Install shared dependencies
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck shared contracts
+        working-directory: packages/shared
+        run: npm run typecheck
+      - name: Test shared contracts
+        working-directory: packages/shared
+        run: npm test
+
+  variant-quality:
+    name: ${{ matrix.variant }} quality and build
+    needs: shared-contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [v1, v2]
+    env:
+      VITE_HOME_SCENE_VARIANT: ${{ matrix.variant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop-client/package-lock.json
+            packages/shared/package-lock.json
+      - name: Install linked shared dependencies
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+      - name: Install desktop-client dependencies
+        working-directory: apps/desktop-client
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck desktop client (${{ matrix.variant }})
+        working-directory: apps/desktop-client
+        run: npm run typecheck
+      - name: Validate source room layers (${{ matrix.variant }})
+        working-directory: apps/desktop-client
+        run: npm run validate:room-layers
+      - name: Build desktop client (${{ matrix.variant }})
+        working-directory: apps/desktop-client
+        run: npm run build
+      - name: Validate emitted room layers (${{ matrix.variant }})
+        working-directory: apps/desktop-client
+        run: npm run validate:room-layers:output
+      - name: Test desktop client (${{ matrix.variant }})
+        working-directory: apps/desktop-client
+        run: npm test
+      - name: Upload desktop-client build (${{ matrix.variant }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-client-${{ matrix.variant }}-out-${{ github.run_id }}
+          path: apps/desktop-client/out
+          if-no-files-found: error
+          retention-days: 14
+
+  package-smoke:
+    name: Package smoke (${{ matrix.label }})
+    needs: variant-quality
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64
+          - os: windows-latest
+            label: windows-x64
+          - os: macos-14
+            label: macos-native
+    runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      VITE_HOME_SCENE_VARIANT: v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop-client/package-lock.json
+            packages/shared/package-lock.json
+      - name: Install linked shared dependencies
+        working-directory: packages/shared
+        run: npm ci --no-audit --no-fund
+      - name: Install desktop-client dependencies
+        working-directory: apps/desktop-client
+        run: npm ci --no-audit --no-fund
+      - name: Install Linux launch dependencies
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop-client
+        run: npx playwright install-deps chromium
+      - name: Build V2 renderer
+        working-directory: apps/desktop-client
+        run: npm run build
+      - name: Create unpacked application
+        working-directory: apps/desktop-client
+        run: npx electron-builder --dir
+      - name: Locate Linux package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          app_bin="$(find apps/desktop-client/release/linux-unpacked -maxdepth 1 -type f -executable -name 'AI Learn*' -print -quit)"
+          test -n "$app_bin"
+          app_bin="$(realpath "$app_bin")"
+          echo "AILEARN_PACKAGED_APP=$app_bin" >> "$GITHUB_ENV"
+      - name: Locate Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem -Path apps/desktop-client/release/win-unpacked -Filter "AI Learn.exe" -Recurse | Select-Object -First 1
+          if ($null -eq $app) { throw "Packaged AI Learn.exe not found" }
+          "AILEARN_PACKAGED_APP=$($app.FullName)" >> $env:GITHUB_ENV
+      - name: Locate macOS package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_bin="$(find apps/desktop-client/release -path '*/Contents/MacOS/AI Learn' -type f -print -quit)"
+          test -n "$app_bin"
+          app_bin="$(realpath "$app_bin")"
+          echo "AILEARN_PACKAGED_APP=$app_bin" >> "$GITHUB_ENV"
+      - name: Verify packaged boundary and asset containment
+        working-directory: apps/desktop-client
+        env:
+          AILEARN_PACKAGED_PREFLIGHT_ONLY: "1"
+        run: npm run package:smoke
+      - name: Smoke packaged Linux app
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: apps/desktop-client
+        env:
+          AILEARN_PACKAGED_OFFLINE_ONLY: "1"
+        run: |
+          xvfb-run --auto-servernum --server-args='-screen 0 1440x900x24' npm run package:smoke
+      - name: Smoke packaged Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: apps/desktop-client
+        env:
+          AILEARN_PACKAGED_OFFLINE_ONLY: "1"
+        run: npm run package:smoke
+      - name: Smoke packaged macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: apps/desktop-client
+        env:
+          AILEARN_PACKAGED_OFFLINE_ONLY: "1"
+        run: npm run package:smoke
+      - name: Upload unpacked desktop-client package
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-client-${{ matrix.label }}-${{ github.run_id }}
+          path: |
+            apps/desktop-client/release
+            .impeccable/evidence/package-smoke-offline.json
+          if-no-files-found: error
+          retention-days: 14

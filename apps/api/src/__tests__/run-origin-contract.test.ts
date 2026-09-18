@@ -32,11 +32,6 @@ describe("normalizeOriginToV1", () => {
     assert.deepEqual(out, { kind: "card", cardId: CARD, keyPointId: OBJECTIVE });
   });
 
-  it("rebase 前 V1 历史形状（keyPointId）原样保留", () => {
-    const out = normalizeOriginToV1({ kind: "card", cardId: CARD, keyPointId: OBJECTIVE });
-    assert.deepEqual(out, { kind: "card", cardId: CARD, keyPointId: OBJECTIVE });
-  });
-
   it("review 透传 scheduleId/scheduleGeneration 并归一 alias", () => {
     const out = normalizeOriginToV1({
       kind: "review", scheduleId: SCHEDULE, objectiveId: OBJECTIVE, scheduleGeneration: 3,
@@ -96,12 +91,8 @@ describe("deriveReturnTargetV1", () => {
     assert.deepEqual(out, { kind: "card", cardId: CARD, keyPointId: OBJECTIVE, objectiveId: OBJECTIVE });
   });
 
-  it("review：补齐 V1 合同的 keyPointId（修复存储缺字段漂移）", () => {
-    const out = deriveReturnTargetV1(
-      { kind: "review", scheduleId: SCHEDULE, objectiveId: OBJECTIVE, scheduleGeneration: 2 },
-      // 存储的残缺 returnTarget（历史漂移形状）
-      { kind: "review", objectiveId: OBJECTIVE },
-    );
+  it("review：由当前 origin 推导完整目标", () => {
+    const out = deriveReturnTargetV1({ kind: "review", scheduleId: SCHEDULE, objectiveId: OBJECTIVE, scheduleGeneration: 2 });
     assert.deepEqual(out, { kind: "review", scheduleId: SCHEDULE, keyPointId: OBJECTIVE });
   });
 
@@ -115,15 +106,6 @@ describe("deriveReturnTargetV1", () => {
     assert.equal(out.keyPointId, OBJECTIVE);
     assert.equal(out.lens, "provenance");
     assert.equal(out.routePlanId, planId);
-  });
-
-  it("star_map：origin 缺 lens/filter 时回退存储值兜底", () => {
-    const out = deriveReturnTargetV1(
-      { kind: "star_map", objectiveId: OBJECTIVE },
-      { kind: "star_map", objectiveId: OBJECTIVE, lens: "issues", filter: { kinds: [], states: [] } },
-    );
-    if (out.kind !== "star_map") throw new Error("kind 应为 star_map");
-    assert.equal(out.lens, "issues");
   });
 
   it("today：V1 合同为裸 {kind:'today'}", () => {
@@ -141,8 +123,7 @@ describe("deriveReturnTargetV1", () => {
     );
   });
 
-  it("origin 形状非法时退回存储值（由 schema 校验兜底拦截）", () => {
-    const stored = { kind: "today" };
-    assert.deepEqual(deriveReturnTargetV1({ kind: "bogus" }, stored), stored);
+  it("origin 形状非法时直接失败", () => {
+    assert.throws(() => deriveReturnTargetV1({ kind: "bogus" }));
   });
 });

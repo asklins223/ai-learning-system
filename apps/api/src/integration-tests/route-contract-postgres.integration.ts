@@ -5,7 +5,7 @@
  * 无自动化保护。本测试用真实 Fastify 实例 + 真实 DB session 认证，
  * 锁死以下契约（2026-08-11 统一后）：
  * - 错误响应统一 { error, message }（invalid_id_format / not_found）；
- * - 非法 UUID 一律 400（含 /reviews/attempts/active）；
+ * - 非法 UUID 一律 400；
  * - 软删除返回 204（DELETE /sources/:id）；
  * - 分页统一 { items, nextCursor, total }（GET /notes）。
  */
@@ -91,29 +91,20 @@ test("契约：错误响应统一 {error, message} + 非法 UUID 400 + 软删除
     const auth = { authorization: `Bearer ${identity.token}` };
 
     // 1) 非法 UUID → 400 { error: "invalid_id_format", message }
-    const badId = await app.inject({ method: "GET", url: "/notes/not-a-uuid", headers: auth });
+    const badId = await app.inject({ method: "GET", url: "/v2/notes/not-a-uuid", headers: auth });
     assert.equal(badId.statusCode, 400);
     assert.deepEqual(badId.json(), { error: "invalid_id_format", message: "无效的 id 格式" });
 
     // 2) 合法但不存在 → 404 { error: "not_found", message }
     const missingId = await app.inject({
       method: "GET",
-      url: `/notes/${randomUUID()}`,
+      url: `/v2/notes/${randomUUID()}`,
       headers: auth,
     });
     assert.equal(missingId.statusCode, 404);
     assert.deepEqual(missingId.json(), { error: "not_found", message: "资源不存在" });
 
-    // 3) 非法 reviewScheduleId → 400（此前静默 200 {activeAttempt:null}）
-    const active = await app.inject({
-      method: "GET",
-      url: "/reviews/attempts/active?reviewScheduleId=bad",
-      headers: auth,
-    });
-    assert.equal(active.statusCode, 400);
-    assert.deepEqual(active.json(), { error: "invalid_id_format", message: "无效的 reviewScheduleId" });
-
-    // 4) 软删除 source → 204（无响应体）
+    // 3) 软删除 source → 204（无响应体）
     const sourceId = randomUUID();
     await sql`INSERT INTO sources (id, workspace_id, created_by, type, title, status)
       VALUES (${sourceId}, ${identity.workspaceId}, ${identity.userId}, 'url', '契约测试', 'ready')`;
@@ -125,7 +116,7 @@ test("契约：错误响应统一 {error, message} + 非法 UUID 400 + 软删除
     assert.equal(del.statusCode, 204);
     assert.equal(del.body, "");
 
-    // 5) 分页统一 { items, nextCursor, total }（GET /notes）
+    // 4) 分页统一 { items, nextCursor, total }（GET /notes）
     for (let index = 0; index < 2; index += 1) {
       await sql`INSERT INTO notes (id, workspace_id, created_by, title)
         VALUES (${randomUUID()}, ${identity.workspaceId}, ${identity.userId}, ${"契约笔记" + index})`;

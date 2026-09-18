@@ -10,14 +10,15 @@
     "build": "esbuild src/server.ts --bundle --platform=node --format=cjs --outfile=dist/server.cjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)",
-    "test:v06:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/v06-migration-fresh-upgrade-repeat.integration.ts src/integration-tests/v06-rls-matrix-postgres.integration.ts src/integration-tests/v06-validation-session-postgres.integration.ts",
     "test:learning-runs:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/learning-runs-postgres.integration.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
-    "test:companion:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-migration-postgres.integration.ts src/integration-tests/companion-conversation-postgres.integration.ts src/integration-tests/commit-outbox-postgres.integration.ts",
+    "test:companion:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-migration-postgres.integration.ts src/integration-tests/companion-conversation-postgres.integration.ts",
+    "test:companion-home-profile:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-home-profile-rls-postgres.integration.ts",
     "test:companion-runtime-fence:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-runtime-fence-postgres.integration.ts",
-    "test:companion-actions:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-action-migration-postgres.integration.ts src/integration-tests/companion-action-rls-postgres.integration.ts src/integration-tests/companion-action-bridge-postgres.integration.ts"
+    "test:companion-actions:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-action-migration-postgres.integration.ts src/integration-tests/companion-action-rls-postgres.integration.ts src/integration-tests/companion-action-bridge-postgres.integration.ts",
+    "test:companion-integration:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-answer-mode-preference-postgres.integration.ts src/integration-tests/companion-account-epoch-postgres.integration.ts src/integration-tests/companion-memory-star-map-postgres.integration.ts src/integration-tests/companion-audit-export-delete-postgres.integration.ts src/integration-tests/companion-pet-profile-postgres.integration.ts src/integration-tests/companion-memory-routes-http-postgres.integration.ts src/integration-tests/companion-migration-postgres.integration.ts src/integration-tests/companion-conversation-postgres.integration.ts src/integration-tests/companion-home-profile-rls-postgres.integration.ts src/integration-tests/companion-runtime-fence-postgres.integration.ts src/integration-tests/companion-action-migration-postgres.integration.ts src/integration-tests/companion-action-rls-postgres.integration.ts src/integration-tests/companion-action-bridge-postgres.integration.ts src/integration-tests/companion-bridge-postgres.integration.ts src/integration-tests/companion-delete-e2e-postgres.integration.ts src/integration-tests/companion-journey-postgres.integration.ts src/integration-tests/companion-proposal-expiry-sweep-postgres.integration.ts src/integration-tests/companion-sandbox-postgres.integration.ts src/integration-tests/assistant-memory-postgres.integration.ts src/integration-tests/assistant-deliveries-postgres.integration.ts src/integration-tests/assistant-deliveries-kind-constraint-postgres.integration.ts src/integration-tests/tool-gateway-postgres.integration.ts"
   },
   "dependencies": {
     "@ailearn/shared": "file:../../packages/shared",
@@ -27,6 +28,7 @@
     "@fastify/multipart": "^9.4.0",
     "@fastify/sensible": "^6.0.4",
     "@fastify/websocket": "^11.3.0",
+    "@smithy/node-http-handler": "^4.9.7",
     "@types/ws": "^8.18.1",
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.7",

@@ -1,0 +1,8 @@
+Use case: background-extraction
+Asset type: transparent near-camera foreground depth layer for a 2.5D desktop learning-room scene
+Input image: the supplied room poster is a style, palette, lighting, and brushwork reference only
+Primary request: create one restrained trailing pothos branch entering from the extreme upper-left corner, seen very close to camera, to frame the room and establish foreground depth
+Style/medium: exactly match the warm hand-painted storybook interior illustration style of the reference, soft painterly edges, natural leaf variation
+Composition/framing: transparent 1672×941 landscape canvas; foliage occupies only the outer upper-left 10–13% width and upper 24% height; a few leaves may trail diagonally toward x=210,y=210 but must not extend farther; the remaining canvas must be fully transparent
+Lighting/mood: soft warm daylight rim light consistent with the room
+Constraints: actual transparent alpha background; isolated foliage only; no pot, room, furniture, people, character, UI, text, border, or watermark; clean antialiased edges; suitable for a subtle 1–3px sway; do not cover the globe/search hotspot around x=280,y=375 or any bottom command area

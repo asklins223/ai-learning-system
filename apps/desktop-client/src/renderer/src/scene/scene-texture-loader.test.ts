@@ -53,7 +53,7 @@ describe("scene Image to Texture loader", () => {
     image.onload?.();
 
     await expect(pending).resolves.toBe(texture);
-    expect(from).toHaveBeenCalledWith(image);
+    expect(from).toHaveBeenCalledWith(image, true);
     expect(image.onload).toBeNull();
     expect(image.onerror).toBeNull();
   });
@@ -73,7 +73,7 @@ describe("scene Image to Texture loader", () => {
     expect(from).toHaveBeenCalledWith({
       resource: image,
       alphaMode: "premultiplied-alpha",
-    });
+    }, true);
   });
 
   it("rejects and clears handlers when the image fails", async () => {

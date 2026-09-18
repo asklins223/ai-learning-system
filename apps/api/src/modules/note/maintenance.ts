@@ -5,8 +5,8 @@
  * 直接使用 db 而非 ApiTransaction，不遵循 API service 契约。
  */
 import { and, isNotNull, sql } from "drizzle-orm";
-import { db } from "../../db/client.ts";
-import { notes } from "../../db/schema/note.ts";
+import { db, withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
+import { notes } from "@ailearn/shared/db-schema/note";
 import { logger } from "../../lib/logger.ts";
 import { deleteObject } from "../../lib/object-storage.ts";
 import { physicalDeleteNote } from "./service.ts";
@@ -16,6 +16,13 @@ import { physicalDeleteNote } from "./service.ts";
  *
  * 由 server 启动时定时调用（每 6 小时一次）。每次最多处理 50 篇，
  * 避免单次事务过长。每篇笔记在独立事务中物理删除，一篇失败不影响其他。
+ *
+ * RLS 修复（2026-09 后端审查）：physicalDeleteNote 会读写 note_image_assets
+ * ——该表 ENABLE+FORCE RLS（0046），策略要求 workspace_id =
+ * current_setting('app.workspace_id')。此前用裸 db.transaction（无事务级 GUC），
+ * 在 ailearn_api（NOBYPASSRLS）下资产查询恒为 0 行：图片资产永不标记 deleted、
+ * MinIO 对象永不回收（与手动 DELETE /notes/:id/permanent 行为分叉）。改为
+ * withWorkspaceTransaction，actor 用 SYSTEM_USER_ID（系统级维护无具体用户）。
  *
  * @param retentionDays 保留天数，默认 30 天
  * @returns 本次实际物理删除的笔记数量
@@ -36,9 +43,10 @@ export async function purgeSoftDeletedNotes(retentionDays = 30): Promise<number>
   let purged = 0;
   for (const note of staleNotes) {
     try {
-      const result = await db.transaction(async (tx) => {
-        return physicalDeleteNote(tx, note.id, note.workspaceId);
-      });
+      const result = await withWorkspaceTransaction(
+        { workspaceId: note.workspaceId, userId: SYSTEM_USER_ID },
+        (tx) => physicalDeleteNote(tx, note.id, note.workspaceId),
+      );
       if (result) {
         purged++;
         // §3.11: 事务已提交，fire-and-forget 清理对象存储中的图片

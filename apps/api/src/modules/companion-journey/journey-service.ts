@@ -6,14 +6,14 @@
  * (journeyId, domainEventId) 幂等）。全部在 withWorkspaceTransaction 内。
  */
 
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { DomainError } from "@ailearn/shared";
 import {
   companionAccountInvitations,
   companionJourneyPendingEvents,
   companionJourneys,
-} from "../../db/schema/companion-journey.ts";
+} from "@ailearn/shared/db-schema/companion-journey";
 import type {
   CompanionInvitationActionV2,
   CompanionInvitationV2,
@@ -97,6 +97,24 @@ function journeyToContract(row: typeof companionJourneys.$inferSelect): Companio
   };
 }
 
+/**
+ * 账号级恢复旅程读取必须跨 workspace，但普通 API 事务受 FORCE RLS 限制。
+ * 通过数据库里的 SECURITY DEFINER 函数读取一个已暂停旅程；函数仍校验
+ * app.user_id 与参数一致，只返回当前账号自己的最小契约，不暴露其他账号数据。
+ */
+async function loadResumableJourney(
+  tx: ApiTransaction,
+  scope: JourneyScope,
+): Promise<CompanionJourneyV2 | null> {
+  const rows = await tx.execute<{ journey: CompanionJourneyV2 | null }>(sql`
+    SELECT public.ailearn_find_resumable_companion_journey(
+      ${scope.userId}::uuid,
+      ${scope.workspaceId}::uuid
+    ) AS journey
+  `);
+  return rows[0]?.journey ?? null;
+}
+
 function stateFromContract(journey: CompanionJourneyV2): JourneyReducerState {
   return {
     status: journey.status,
@@ -146,27 +164,6 @@ export async function bootstrapJourney(
   now: Date = new Date(),
 ): Promise<CompanionJourneyBootstrapV2> {
   const invitation = await ensureInvitation(tx, scope.userId, now);
-  // 存量兼容（2026-08-16）：早期 ensureInvitation 以 not_offered 起步且无
-  // offer 转换路径，导致首邀卡可见但 start_journey 恒 409。此处惰性幂等
-  // 升级：邀请卡在桌宠窗口出现即视同已 offer（与 create 时 offered 同语义）。
-  if (invitation.status === "not_offered") {
-    const upgraded = await tx
-      .update(companionAccountInvitations)
-      .set({
-        status: "offered",
-        offeredAt: invitation.offeredAt ?? now,
-        revision: invitation.revision + 1,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(companionAccountInvitations.userId, scope.userId),
-        eq(companionAccountInvitations.status, "not_offered"),
-      ))
-      .returning();
-    if (upgraded[0]) {
-      return bootstrapJourney(tx, scope, now);
-    }
-  }
   // 惰性 drain：先消费 pending 里程碑事件，再返回最新投影。
   const activeRows = await tx
     .select({ id: companionJourneys.id })
@@ -191,21 +188,14 @@ export async function bootstrapJourney(
     .limit(5);
   const current = journeyRows.find((row) => !TERMINAL.includes(row.status)) ?? null;
   // resumable：账号在其他 workspace 的可恢复旅程（跨 workspace 摘要）。
-  const otherWorkspaceRows = current === null
-    ? await tx
-        .select()
-        .from(companionJourneys)
-        .where(and(
-          eq(companionJourneys.userId, scope.userId),
-          eq(companionJourneys.status, "paused"),
-          ne(companionJourneys.workspaceId, scope.workspaceId),
-        ))
-        .limit(1)
-    : [];
+  // 普通 companionJourneys 查询会被 FORCE RLS 隐藏，必须走受控函数。
+  const resumableJourney = current === null
+    ? await loadResumableJourney(tx, scope)
+    : null;
   return {
     invitation: invitationToContract(invitation),
     journey: current ? journeyToContract(current) : null,
-    resumableJourney: otherWorkspaceRows[0] ? journeyToContract(otherWorkspaceRows[0]) : null,
+    resumableJourney,
   };
 }
 
@@ -272,9 +262,11 @@ export async function applyInvitationAction(
         journeyCreated = await createJourneyRow(tx, scope, action.branch, null, now);
       } catch (err) {
         // 并发双 start：唯一索引兜底 → 409 而非 500。
+        // 修复（2026-09 后端审查）：postgres.js 字段名是 constraint_name。
         if (err && typeof err === "object" && "code" in err
           && (err as { code?: string }).code === "23505"
-          && (err as { constraint?: string }).constraint === "companion_journeys_user_active_unique_idx") {
+          && ((err as { constraint_name?: string }).constraint_name
+            ?? (err as { constraint?: string }).constraint) === "companion_journeys_user_active_unique_idx") {
           throw new JourneyServiceError("journey_conflict", "已有进行中的新手旅程");
         }
         throw err;
@@ -310,7 +302,8 @@ export async function applyInvitationAction(
       } catch (err) {
         if (err && typeof err === "object" && "code" in err
           && (err as { code?: string }).code === "23505"
-          && (err as { constraint?: string }).constraint === "companion_journeys_user_active_unique_idx") {
+          && ((err as { constraint_name?: string }).constraint_name
+            ?? (err as { constraint?: string }).constraint) === "companion_journeys_user_active_unique_idx") {
           throw new JourneyServiceError("journey_conflict", "已有进行中的新手旅程");
         }
         throw err;
@@ -367,7 +360,7 @@ async function createJourneyRow(
   const state = initialJourneyState(branch);
   // §10.1：创建 onboarding AssistantSession（kind='journey'，历史页可区分）。
   const { randomUUID } = await import("node:crypto");
-  const { companionConversations } = await import("../../db/schema/companion-conversations.ts");
+  const { companionConversations } = await import("@ailearn/shared/db-schema/companion-conversations");
   const sessionId = randomUUID();
   await tx.insert(companionConversations).values({
     id: sessionId,
@@ -386,7 +379,7 @@ async function createJourneyRow(
   const sandboxNamespaceId = branch === "sandbox_sample" ? randomUUID() : null;
   const journeyId = randomUUID();
   if (sandboxNamespaceId) {
-    const { companionSandboxNamespaces } = await import("../../db/schema/companion-sandbox.ts");
+    const { companionSandboxNamespaces } = await import("@ailearn/shared/db-schema/companion-sandbox");
     await tx.insert(companionSandboxNamespaces).values({
       id: sandboxNamespaceId,
       workspaceId: scope.workspaceId,
@@ -474,7 +467,7 @@ export async function applyJourneyActionRequest(
   // §16.4 联动：journey 进入终态（skipped/completed）时，其 sandbox namespace
   // 同步退出（拒绝完整性不依赖 24h TTL 兜底）。
   if (["skipped", "completed"].includes(next.status) && journey.branch === "sandbox_sample" && journey.refs.sandboxNamespaceId) {
-    const { companionSandboxNamespaces } = await import("../../db/schema/companion-sandbox.ts");
+    const { companionSandboxNamespaces } = await import("@ailearn/shared/db-schema/companion-sandbox");
     await tx.update(companionSandboxNamespaces)
       .set({ status: "exited", exitedAt: now, updatedAt: now })
       .where(and(
@@ -647,20 +640,11 @@ export async function drainPendingJourneyEvents(
   journeyId: string,
   now: Date = new Date(),
 ): Promise<void> {
-  const rows = await tx
-    .select()
-    .from(companionJourneyPendingEvents)
-    .where(and(
-      eq(companionJourneyPendingEvents.journeyId, journeyId),
-      eq(companionJourneyPendingEvents.workspaceId, scope.workspaceId),
-      eq(companionJourneyPendingEvents.userId, scope.userId),
-      eq(companionJourneyPendingEvents.status, "pending"),
-    ))
-    .orderBy(companionJourneyPendingEvents.createdAt)
-    .limit(50);
-  if (rows.length === 0) return;
-
-  // 锁一次 journey 行（防并发 lost update，原则同 applyJourneyDomainEvent）。
+  // 并发修复（2026-09 后端审查）：先锁 journey 行，再快照 pending 事件。
+  // 原顺序（先 SELECT pending → 再 FOR UPDATE）在 READ COMMITTED 下会让第二个
+  // drain 读到 D1 提交前仍为 pending 的旧快照，阻塞在锁上后带着过期快照继续
+  // 应用事件；reducer 只抑制「倒退」，重复里程碑会再次 stepRevision+1
+  // （叙述/遥测重复触发）。锁先行即与 applyJourneyDomainEvent 的不变量一致。
   const journeyRows = await tx
     .select()
     .from(companionJourneys)
@@ -674,6 +658,19 @@ export async function drainPendingJourneyEvents(
     .execute();
   const row = journeyRows[0];
   if (!row) return;
+
+  const rows = await tx
+    .select()
+    .from(companionJourneyPendingEvents)
+    .where(and(
+      eq(companionJourneyPendingEvents.journeyId, journeyId),
+      eq(companionJourneyPendingEvents.workspaceId, scope.workspaceId),
+      eq(companionJourneyPendingEvents.userId, scope.userId),
+      eq(companionJourneyPendingEvents.status, "pending"),
+    ))
+    .orderBy(companionJourneyPendingEvents.createdAt)
+    .limit(50);
+  if (rows.length === 0) return;
 
   let state = stateFromContract(journeyToContract(row));
   const appliedIds: string[] = [];

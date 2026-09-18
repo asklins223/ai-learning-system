@@ -203,35 +203,65 @@ services:
       AILEARN_DESKTOP_PAIRING_KEY_ID: ${AILEARN_DESKTOP_PAIRING_KEY_ID:-}
       AILEARN_DESKTOP_PAIRING_SECRET: ${AILEARN_DESKTOP_PAIRING_SECRET:-}
       AILEARN_DOMAIN_SCHEMA_REVISION: ${AILEARN_DOMAIN_SCHEMA_REVISION:-}
-      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}
+      # 默认关闭：Next/API 内部转发不能证明客户端 X-Forwarded-For 未被伪造。
+      # 只有外部代理已覆写 X-Forwarded-For 时才显式设置 TRUST_PROXY。
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       # companion grant 签名密钥：未配置时 grant 签发 fail-closed 503（turn-service.ts）。
       # 生产必须设置为强随机值（.env.example 已要求）。
       AUTH_SURFACE_MANIFEST_SECRET: ${AUTH_SURFACE_MANIFEST_SECRET:-}
       AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-postgres}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
-      SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v1}
-      FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-false}
-      # P4 Mao PRO is bundled and Owner-approved. Set false for an explicit
-      # rollback to Sprite without changing the asset manifest.
-      COMPANION_LIVE2D_V1_ENABLED: ${COMPANION_LIVE2D_V1_ENABLED:-true}
-      # P2/P3/P5 capabilities are independently gated and fail-closed.
-      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-false}
+      # Companion / LearningRun / Card Generation V2 capabilities are
+      # independently gated and fail-closed: every switch defaults to false and
+      # the deployment must opt in explicitly. Each service declares exactly the
+      # flags it reads; api/worker parity and dev/prod defaults are enforced by
+      # .github/scripts/verify-companion-capability-config.mjs (make verify).
+      LEARNING_RUN_ENABLED: ${LEARNING_RUN_ENABLED:-false}
+      CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-false}
       COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-false}
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-false}
       COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
-      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-false}
+      COMPANION_JOURNEY_V2: ${COMPANION_JOURNEY_V2:-false}
+      COMPANION_BRIDGE_V2: ${COMPANION_BRIDGE_V2:-false}
+      COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-false}
+      COMPANION_MEMORY_STAR_MAP_V1: ${COMPANION_MEMORY_STAR_MAP_V1:-false}
+      COMPANION_PET_PROFILE_V1: ${COMPANION_PET_PROFILE_V1:-false}
+      COMPANION_PROACTIVE_PERSONALIZED_V1: ${COMPANION_PROACTIVE_PERSONALIZED_V1:-false}
+      COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-false}
+      COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-false}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-false}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
       # AI platform config — all provider/capability config in one JSON file.
       AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
+      # AI P0-1（2026-09-15 审计）：生产栈拒绝 mock 回退——未配置 provider 时
+      # fail-closed（抛 ai_provider_not_configured，不可重试），而不是把 mock 的
+      # 固定假文本当作真实回复/记忆落库。dev 与桌面端不设此项，保留 mock 降级。
+      AI_REQUIRE_CONFIGURED_PROVIDER: ${AI_REQUIRE_CONFIGURED_PROVIDER:-true}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      # 2026-09-18：capabilities.agent_turn（card_generation 经 task-router 映射到它）
+      # 已从 opencode-go 切到 **tokenrhythm**（opencode-go 套餐用量耗尽，实测 HTTP 429）；
+      # 生产必须提供 TOKENRHYTHM_API_KEY，否则平台不可用 → 学习卡生成 fail-closed。
+      #
+      # 2026-09-17：opencode-go 的 key 此前未透传（与上方 Assessment Critic 同一类事故：
+      # compose 只传显式列出的变量）→ 容器内为空 → 平台不可用 → 学习卡生成 fail-closed。
+      # 保留该 key 以便切回时无需再改 compose。
+      OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
+      # 方案 16：LearningRun 独立 Assessment Critic（OpenAI-compatible）。
+      # 2026-09-15 审计 · 设计 P0-2：此前 prod 完全没有注入这三个变量，而 compose
+      # 只把显式列出的变量传进容器 → run-critic 恒抛 CriticUnavailableError →
+      # 所有 text/voice 评估 fail-closed 为 not_assessable，prod 永远拿不到
+      # demonstrated。这里补齐注入；只设 URL 即可（KEY 空则回退 DASHSCOPE_API_KEY，
+      # MODEL 空则默认 qwen-plus，见 apps/api/src/lib/assessment-critic-config.ts）。
+      ASSESSMENT_CRITIC_URL: ${ASSESSMENT_CRITIC_URL:-}
+      ASSESSMENT_CRITIC_KEY: ${ASSESSMENT_CRITIC_KEY:-}
+      ASSESSMENT_CRITIC_MODEL: ${ASSESSMENT_CRITIC_MODEL:-qwen-plus}
       # 语音：SiliconFlow ASR（外部 API）+ edge-tts TTS（Docker 容器）
       EDGE_TTS_BASE_URL: ${EDGE_TTS_BASE_URL:-http://edge-tts:8080}
       EDGE_TTS_AUTH_TOKEN: ${EDGE_TTS_AUTH_TOKEN:?Set EDGE_TTS_AUTH_TOKEN in .env（edge-tts 与 api 必须一致）}
@@ -268,26 +298,43 @@ services:
       NODE_ENV: production
       # AI platform config — all provider/capability config in one JSON file.
       AI_PLATFORMS_CONFIG: /app/config/ai-platforms.json
+      # AI P0-1（2026-09-15 审计）：生产栈拒绝 mock 回退——未配置 provider 时
+      # fail-closed（抛 ai_provider_not_configured，不可重试），而不是把 mock 的
+      # 固定假文本当作真实回复/记忆落库。dev 与桌面端不设此项，保留 mock 降级。
+      AI_REQUIRE_CONFIGURED_PROVIDER: ${AI_REQUIRE_CONFIGURED_PROVIDER:-true}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
       TOKENRHYTHM_API_KEY: ${TOKENRHYTHM_API_KEY:-}
+      # 2026-09-18：capabilities.agent_turn（card_generation 经 task-router 映射到它）
+      # 已从 opencode-go 切到 **tokenrhythm**（opencode-go 套餐用量耗尽，实测 HTTP 429）；
+      # 生产必须提供 TOKENRHYTHM_API_KEY，否则平台不可用 → 学习卡生成 fail-closed。
+      #
+      # 2026-09-17：opencode-go 的 key 此前未透传（与上方 Assessment Critic 同一类事故：
+      # compose 只传显式列出的变量）→ 容器内为空 → 平台不可用 → 学习卡生成 fail-closed。
+      # 保留该 key 以便切回时无需再改 compose。
+      OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-false}
-      API_INTERNAL_URL: http://api:4000
+      # 2026-09-15 审计：API_INTERNAL_URL 已删除——唯一的 TS 读取方（learning_session_assess
+      # handler）在 7be4ffe 退役，worker 现在没有任何 HTTP 客户端回连 API（出站只到
+      # LLM/源站）。留着会让"worker 会回调 API"成为误导性契约。
       # Keep worker-side execution authorization aligned with the API. The
       # production stack remains fail-closed unless deployment env explicitly
-      # enables the approved companion capabilities.
-      COMPANION_PET_V1_ENABLED: ${COMPANION_PET_V1_ENABLED:-false}
+      # enables the approved companion capabilities. Only the flags the worker
+      # actually reads are declared here.
       COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-false}
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-false}
-      COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
-      COMPANION_ACTION_BRIDGE_V1_ENABLED: ${COMPANION_ACTION_BRIDGE_V1_ENABLED:-false}
-      AI_QUESTION_V1_ENABLED: ${AI_QUESTION_V1_ENABLED:-false}
-      RUBRIC_EVALUATION_V1_ENABLED: ${RUBRIC_EVALUATION_V1_ENABLED:-false}
-      CARD_REPAIR_V1_ENABLED: ${CARD_REPAIR_V1_ENABLED:-false}
-      SCHEDULER_POLICY_VERSION: ${SCHEDULER_POLICY_VERSION:-discrete-v1}
-      FSRS_SHADOW_ENABLED: ${FSRS_SHADOW_ENABLED:-false}
+      CARD_GENERATION_V2_LLM: ${CARD_GENERATION_V2_LLM:-false}
+      # 2026-09-17：author/grounding 阶段内并发上限（此前硬串行）。
+      # 默认 12：让实测规模（N≈5）一波跑完；provider 配额紧张时下调。
+      V2_STAGE_CONCURRENCY: ${V2_STAGE_CONCURRENCY:-12}
+      # 2026-09-17：投机 pedagogy 开关（默认开）。
+      V2_SPECULATIVE_PEDAGOGY: ${V2_SPECULATIVE_PEDAGOGY:-1}
+      COMPANION_MEMORY_EXTRACTOR_V1: ${COMPANION_MEMORY_EXTRACTOR_V1:-false}
+      COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-false}
+      COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-false}
+      COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-false}
       # Source image upload: MinIO/S3 storage for embedded images
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
       S3_BUCKET: ${S3_BUCKET:-ailearn-workspaces}
@@ -298,52 +345,19 @@ services:
       # Handler timeouts (ms) — per job type, clamped below lease timeout (120s)
       WORKER_MODEL_TIMEOUT_MS: ${WORKER_MODEL_TIMEOUT_MS:-}
       WORKER_PROVIDER_TIMEOUT_MS: ${WORKER_PROVIDER_TIMEOUT_MS:-75000}
-      WORKER_TIMEOUT_EVALUATE_VALIDATION_MS: ${WORKER_TIMEOUT_EVALUATE_VALIDATION_MS:-}
-      WORKER_TIMEOUT_ALIGN_EVIDENCE_MS: ${WORKER_TIMEOUT_ALIGN_EVIDENCE_MS:-}
       WORKER_TIMEOUT_PARSE_SOURCE_MS: ${WORKER_TIMEOUT_PARSE_SOURCE_MS:-}
     ports:
-      - "${WORKER_METRICS_BIND_ADDRESS:-127.0.0.1}:${WORKER_METRICS_PORT:-9100}:9100"
+      - "${WORKER_METRICS_BIND_ADDRESS:-127.0.0.1}:${WORKER_METRICS_PORT:-9100}:${WORKER_METRICS_PORT:-9100}"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const port=process.env.WORKER_METRICS_PORT || '9100'; fetch('http://127.0.0.1:'+port+'/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
     security_opt:
       - no-new-privileges:true
     volumes:
       - ./config:/app/config:ro
-    networks:
-      - ailearn_net
-
-  web:
-    build:
-      context: .
-      dockerfile: apps/web/Dockerfile
-      target: prod
-      args:
-        INTERNAL_API_URL: http://api:4000
-        NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED: ${NEXT_PUBLIC_QUESTION_FIRST_UI_ENABLED:-false}
-        NEXT_PUBLIC_AI_QUESTION_V1_ENABLED: ${NEXT_PUBLIC_AI_QUESTION_V1_ENABLED:-false}
-        NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED: ${NEXT_PUBLIC_RUBRIC_EVALUATION_V1_ENABLED:-false}
-        NEXT_PUBLIC_COMPANION_PET_ENABLED: ${NEXT_PUBLIC_COMPANION_PET_ENABLED:-false}
-        NEXT_PUBLIC_COMPANION_V2_INTERNAL: ${NEXT_PUBLIC_COMPANION_V2_INTERNAL:-false}
-        NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED: ${NEXT_PUBLIC_CARD_SET_DECK_UI_ENABLED:-false}
-        # Agent 活动流控制台（可选增强，fail-closed：默认关）
-        NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED: ${NEXT_PUBLIC_AGENT_ACTIVITY_STREAM_ENABLED:-false}
-    user: node
-    restart: unless-stopped
-    depends_on:
-      api:
-        condition: service_healthy
-    environment:
-      NODE_ENV: production
-      INTERNAL_API_URL: http://api:4000
-    ports:
-      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
-    security_opt:
-      - no-new-privileges:true
-    # 2026-08-12（构建面审计 P2-3）：web 服务健康检查（此前无 readiness 信号）
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/login"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
     networks:
       - ailearn_net
 
@@ -386,8 +400,7 @@ services:
 # 应用代码需配合读取 /run/secrets/<secret_name> 文件而非环境变量。
 # 当前实现使用环境变量，建议在生产环境迁移到 secrets。
 #
-# 注意：Web 服务不直接访问凭据，无需 secrets 配置。API 和 Worker 需要
-# 通过环境变量访问数据库和对象存储（由环境变量注入）。
+# API 和 Worker 需要通过环境变量访问数据库和对象存储（由环境变量注入）。
 
 volumes:
   postgres_data:

@@ -1,18 +1,22 @@
-import { BrowserWindow, ipcMain, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { BrowserWindow, clipboard, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import { z } from "zod";
 import {
   DESKTOP_API_SERVICE_ID,
   DESKTOP_IPC_CHANNELS,
   DESKTOP_IPC_CONTRACT_VERSION,
   DESKTOP_IPC_SCHEMA_REVISION,
+  type ActionCapability,
   apiHealthSnapshotSchema,
   apiConnectionStateSchema,
   capabilityProjectionSchema,
+  clipboardReadLinksResultSchema,
   desktopContractSnapshotSchema,
   desktopNamespaceM2Values,
   desktopRouteKindM2Values,
   desktopRouteSchema,
+  extractCandidateLinks,
   gatewayEventSchema,
   navigationSnapshotSchema,
   sessionContextSchema,
@@ -47,7 +51,10 @@ import {
   commandIdSchema,
   emailSchema,
   gatewayErrorSchema,
+  inviteTokenSchema,
+  isoTimestampSchema,
   navigationReasonSchema,
+  newPasswordSchema,
   requestIdSchema,
   requestMetaSchema,
   runtimeSnapshotSchema,
@@ -57,7 +64,28 @@ import {
   positiveIntSchema,
   uuidSchema,
   windowStateSnapshotV1Schema,
+  aiDataPolicyV1Schema,
+  workspaceAiSettingsV1Schema,
+  workspaceExportResultV1Schema,
+  type DesktopRouteKindM2,
 } from "@ailearn/shared/desktop-ipc-contracts";
+import {
+  desktopSourceListPageSchema,
+  desktopSourceCreateRequestSchema,
+  desktopSourceDetailSchema,
+  desktopSourceNotesPageSchema,
+  desktopSourceUpdateRequestSchema,
+  desktopSourceNoteResultSchema,
+  desktopSourceArchiveResultSchema,
+  desktopNoteListPageSchema,
+  desktopNoteCreateRequestSchema,
+  desktopNoteMutationResultSchema,
+  desktopNoteVersionListSchema,
+  desktopSearchPageSchema,
+} from "@ailearn/shared/desktop-surface-contracts";
+import { objectiveListPageV3Schema, learningObjectiveSurfaceV3Schema } from "@ailearn/shared/learning-objective-surface-contracts";
+import { understandingTopologySnapshotV3Schema } from "@ailearn/shared/understanding-topology-v3-contracts";
+import { todayActivityV1Schema } from "@ailearn/shared/activity-surface-contracts";
 import {
   getLearningRunResultResponseV2Schema,
   learningRunActionResponseV2Schema,
@@ -67,21 +95,63 @@ import {
   learningTaskDraftWriteReceiptV2Schema,
   submitTaskArtifactReceiptV2Schema,
 } from "@ailearn/shared/learning-run-v2-contracts";
-import { reviewQueueV2Schema } from "@ailearn/shared/review-queue-v2-contracts";
+import { reviewDeferRequestV2Schema, reviewDeferResultV2Schema, reviewQueueV2Schema } from "@ailearn/shared/review-queue-v2-contracts";
 import { roomProjectionV1Schema } from "@ailearn/shared/room-projection-contracts";
+import {
+  companionAccountPatchSchema,
+  companionAccountStateV1Schema,
+  companionOverviewSchema,
+} from "@ailearn/shared/companion-shell-contracts";
+import {
+  companionHomeProjectionV1Schema,
+  companionRoomProfilePatchV1Schema,
+  companionRoomProfileV1Schema,
+} from "@ailearn/shared/companion-home-contracts";
+import {
+  companionVoiceSpeakRequestV1Schema,
+  companionVoiceSpeakResultV1Schema,
+} from "@ailearn/shared/companion-voice-contracts";
+// 站内图片字节通道：来源正文里的 `/api/uploads/…` 由 main 代取，
+// 渲染层只拿 base64 转 blob URL（它的 origin 够不到 API 源）。
+import {
+  sourceImageGetRequestV1Schema,
+  sourceImageGetResultV1Schema,
+} from "@ailearn/shared/source-image-contracts";
+// 笔记图片写入通道：编辑器里的图由 main 送到 `POST /uploads/images`，渲染层拿回
+// 站内地址写进正文；读取那一半仍走上面的字节通道。
+import {
+  noteImageUploadRequestV1Schema,
+  noteImageUploadResultV1Schema,
+} from "@ailearn/shared/note-image-upload-contracts";
+import {
+  companionConversationListV1Schema,
+  companionDailyDateV1Schema,
+  companionDailySummaryV1Schema,
+  companionMemoryItemV1Schema,
+  companionMemoryListQuerySchema,
+  companionMemoryListV1Schema,
+  companionMemoryStarMapV1Schema,
+  companionPersonaMutationV1Schema,
+  companionPersonaPatchV1Schema,
+  companionPersonaResetV1Schema,
+  companionPersonaV1Schema,
+} from "@ailearn/shared/companion-memory-desktop-contracts";
 import { noteDetailV1Schema } from "@ailearn/shared/note-projection-contracts";
 import { noteSaveReceiptV1Schema } from "@ailearn/shared/note-save-contracts";
 import {
   cardActivationReceiptDesktopV1Schema,
   cardGenerationCandidateListV1Schema,
   cardGenerationCancelResultV1Schema,
+  cardGenerationRetryResultV1Schema,
   cardGenerationCloseResultV1Schema,
+  cardGenerationExposureEligibilityV1Schema,
   cardGenerationJobAcceptedV1Schema,
   cardGenerationReviewResultV1Schema,
   cardGenerationRunSnapshotV1Schema,
 } from "@ailearn/shared/card-generation-desktop-contracts";
 import { candidateRevealV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
-import { DesktopGateway, DesktopGatewayFailure } from "./desktop-gateway";
+import { DesktopGateway, DesktopGatewayFailure, type SessionCredentialStore } from "./desktop-gateway";
+import { createSessionCredentialStore } from "./session-credential-store";
 import { FormalAssessmentGuard, type CompanionDeliveryKind } from "./formal-assessment-guard";
 import { recoverPendingReturnMarker, resolveLearningRunReturn, routeForLearningRunReturn } from "./learning-run-return-resolver";
 import { MemoryPendingReturnMarkerStore, type PendingReturnMarkerStore } from "./pending-return-marker-store";
@@ -95,6 +165,7 @@ export type DesktopIpcRegistrationOptions = {
   readonly setTitlebarTheme: (window: BrowserWindow, theme: "day" | "night") => boolean;
   readonly getReducedMotion?: () => boolean;
   readonly gateway?: DesktopGateway;
+  readonly credentials?: SessionCredentialStore;
   readonly env?: NodeJS.ProcessEnv;
   readonly formalAssessmentGuard?: FormalAssessmentGuard;
   readonly pendingReturnMarkerStore?: PendingReturnMarkerStore;
@@ -114,24 +185,73 @@ const authLoginInputSchema = z.strictObject({
   ...m1InputBase,
   email: emailSchema,
   password: secretInputSchema,
-  remember: z.literal(false),
+  remember: z.boolean(),
 });
 const authRegisterInputSchema = z.strictObject({
   ...m1InputBase,
   email: emailSchema,
-  password: secretInputSchema,
-  inviteToken: secretInputSchema.optional(),
+  // 与 API 的 `/auth/register-v2` 保持一致：注册密码至少 8 位。登录不设下限，
+  // 否则历史账号会被客户端挡在门外。
+  password: newPasswordSchema,
+  inviteToken: inviteTokenSchema.optional(),
   displayName: z.string().trim().min(1).max(200).optional(),
-  remember: z.literal(false),
+  remember: z.boolean(),
 });
 const authReauthenticateInputSchema = z.strictObject({ ...m1InputBase, password: secretInputSchema });
 const authChangePasswordInputSchema = z.strictObject({
   ...m1InputBase,
   commandId: commandIdSchema,
   currentPassword: secretInputSchema,
-  newPassword: secretInputSchema,
+  newPassword: newPasswordSchema,
+});
+const authJoinWorkspaceInputSchema = z.strictObject({
+  ...m1InputBase,
+  inviteToken: inviteTokenSchema,
 });
 const workspaceSwitchInputSchema = z.strictObject({ ...m1InputBase, workspaceId: uuidSchema });
+// 设置页的 AI 同意与数据策略：写入由服务端 requireOwner 收口，这里只做形状校验。
+const workspaceAiConsentUpdateInputSchema = z.strictObject({
+  ...m1InputBase,
+  consentVersion: z.string().trim().min(1).max(50),
+});
+const workspaceAiDataPolicyUpdateInputSchema = z.strictObject({
+  ...m1InputBase,
+  policy: aiDataPolicyV1Schema,
+});
+const companionRoomPatchInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionRoomProfilePatchV1Schema,
+});
+const companionVoiceSpeakInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionVoiceSpeakRequestV1Schema,
+});
+const companionAccountPatchInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionAccountPatchSchema,
+});
+// 伴星中心（页 20）：读取按 workspace 路由，裁决端点只带一个记忆 id。
+// 删除走 `DELETE`，服务端回答 204，因此回执在 main 侧自己拼。
+const companionMemoryListInputSchema = z.strictObject({
+  ...m1InputBase,
+  query: companionMemoryListQuerySchema.optional(),
+});
+const companionMemoryIdInputSchema = z.strictObject({ ...m1InputBase, memoryId: uuidSchema });
+const companionDailyGetInputSchema = z.strictObject({
+  ...m1InputBase,
+  date: companionDailyDateV1Schema.optional(),
+});
+const companionConversationsListInputSchema = z.strictObject({
+  ...m1InputBase,
+  limit: z.number().int().min(1).max(50).optional(),
+});
+// 人格写入：请求体是整套档案（服务端不做字段级合并），main 侧照抄同一份 schema，
+// 让渲染层多带一个键也在到达服务端之前被拒。
+const companionPersonaPatchInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionPersonaPatchV1Schema,
+});
+const companionMemoryDeleteOutputSchema = z.strictObject({ memoryItemId: uuidSchema });
 const windowThemeInputSchema = z.strictObject({ ...m1InputBase, theme: z.enum(["day", "night"]) });
 const subscribeInputSchema = z.strictObject({ ...m1InputBase, topic: subscriptionTopicM2Schema });
 const unsubscribeInputSchema = z.strictObject({ ...m1InputBase, subscriptionId: subscriptionIdSchema });
@@ -144,7 +264,58 @@ const focusOutputSchema = z.strictObject({ focused: z.literal(true) });
 const subscriptionOutputSchema = z.strictObject({ subscriptionId: subscriptionIdSchema });
 const closedSubscriptionOutputSchema = z.strictObject({ closed: z.literal(true) });
 const reviewQueueInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional() });
+// 「今日学习」操作日志流：窗口由渲染层本地日历日给出（ISO 带时区），两端各限 62h。
+const activityGetTodayInputSchema = z.strictObject({
+  ...m1InputBase,
+  from: isoTimestampSchema.optional(),
+  to: isoTimestampSchema.optional(),
+});
+const reviewDeferInputSchema = z.strictObject({ ...m1InputBase, request: reviewDeferRequestV2Schema });
+const sourceListInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional(), status: z.string().min(1).max(32).optional() });
+const sourceCreateInputSchema = z.strictObject({ ...m1InputBase, request: desktopSourceCreateRequestSchema });
+const sourceGetInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
+const sourceNotesInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
+const sourceUpdateInputSchema = z.strictObject({
+  ...m1InputBase,
+  sourceId: uuidSchema,
+  request: desktopSourceUpdateRequestSchema
+});
+const sourceCreateNoteInputSchema = z.strictObject({
+  ...m1InputBase,
+  sourceId: uuidSchema,
+  force: z.boolean().optional()
+});
+const sourceArchiveInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
+const sourceImageGetInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: sourceImageGetRequestV1Schema,
+});
+const noteListInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional(), trashed: z.boolean().optional() });
+const noteCreateInputSchema = z.strictObject({ ...m1InputBase, request: desktopNoteCreateRequestSchema });
+const noteIdInputSchema = z.strictObject({ ...m1InputBase, noteId: uuidSchema });
+const objectiveListInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional(), lifecycle: z.enum(["active", "archived", "superseded"]).optional() });
+const objectiveGetInputSchema = z.strictObject({ ...m1InputBase, objectiveId: uuidSchema });
+const searchGlobalInputSchema = z.strictObject({ ...m1InputBase, query: z.string().trim().min(1).max(500), type: z.enum(["note", "source", "objective"]).optional(), limit: z.number().int().min(1).max(50).optional(), cursor: z.string().min(1).max(512).optional() });
 const noteGetInputSchema = z.strictObject({ ...m1InputBase, noteId: uuidSchema });
+// The caller names the version it is reading as current, so the history can mark
+// it without a second note read; the main process never trusts it as authority.
+const noteVersionsInputSchema = z.strictObject({
+  ...m1InputBase,
+  noteId: uuidSchema,
+  currentVersionId: uuidSchema,
+  limit: z.number().int().min(1).max(200).optional(),
+});
+const noteVersionRestoreInputSchema = z.strictObject({
+  ...m1InputBase,
+  noteId: uuidSchema,
+  versionId: uuidSchema,
+  baseVersionId: uuidSchema,
+});
+const noteImageUploadInputSchema = z.strictObject({
+  ...m1InputBase,
+  noteId: uuidSchema,
+  request: noteImageUploadRequestV1Schema,
+});
 const noteSaveInputSchema = z.strictObject({
   ...m1InputBase,
   commandId: commandIdSchema,
@@ -172,6 +343,13 @@ const cardGenerationRevealInputSchema = z.strictObject({
   candidateId: uuidSchema,
   request: desktopRevealCandidateRequestV2Schema,
 });
+// The same preflight the activation path runs, asked for by the review page.
+const cardGenerationExposureInputSchema = z.strictObject({
+  ...m1InputBase,
+  runId: uuidSchema,
+  candidateId: uuidSchema,
+  revision: positiveIntSchema,
+});
 const cardGenerationActivateInputSchema = z.strictObject({
   ...m1InputBase,
   commandId: commandIdSchema,
@@ -179,6 +357,7 @@ const cardGenerationActivateInputSchema = z.strictObject({
   request: desktopCardGenerationActivationSelectionV1Schema,
 });
 const cardGenerationCancelInputSchema = z.strictObject({ ...m1InputBase, commandId: commandIdSchema, runId: uuidSchema });
+const cardGenerationRetryInputSchema = z.strictObject({ ...m1InputBase, commandId: commandIdSchema, runId: uuidSchema });
 const cardGenerationCloseInputSchema = z.strictObject({
   ...m1InputBase,
   commandId: commandIdSchema,
@@ -215,7 +394,6 @@ let registrationComplete = false;
 function generatedOpaqueId(prefix: string): string {
   return `${prefix}-${randomBytes(12).toString("base64url")}`;
 }
-
 function fallbackMeta(): RequestMetaV1 {
   const now = new Date().toISOString();
   return {
@@ -393,7 +571,11 @@ function installHandler<TInput extends ParsedMeta, TOutput>(
 
     try {
       const output = await operation(event, window, parsed.value);
-      const validatedOutput = outputSchema ? outputSchema.parse(output) : output;
+      const outputValidation = outputSchema?.safeParse(output);
+      if (outputValidation && !outputValidation.success) {
+        throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+      }
+      const validatedOutput = outputValidation ? outputValidation.data : output;
       return okResult(parsed.value.meta, validatedOutput, getWorkspaceEpoch?.(validatedOutput));
     } catch (error) {
       return mapFailure<TOutput>(parsed.value.meta, error, getWorkspaceEpoch?.(undefined as TOutput));
@@ -407,15 +589,28 @@ function assertEpoch(meta: RequestMetaV1, activeWorkspaceEpoch: number): void {
   }
 }
 
-function requireM2Route(contract: DesktopContractSnapshotV1, route: "room.home" | "note.detail" | "note.cardGeneration" | "review.queue" | "learningRun.detail"): void {
+function requireM2Route(contract: DesktopContractSnapshotV1, route: DesktopRouteKindM2): void {
   if (!contract.enabledRoutes.includes(route)) throw new DesktopGatewayFailure("route_not_available", "user_action");
+}
+
+/**
+ * 同一份数据会在多个面上出现时的路由门控（如来源图片同时出现在来源详情和
+ * 笔记阅读页）。只要调用方所在的面可达即可——按单一路由收口会把另一个面上
+ * 的合法读取挡在门外。
+ */
+function requireAnyM2Route(contract: DesktopContractSnapshotV1, routes: readonly DesktopRouteKindM2[]): void {
+  if (!routes.some((route) => contract.enabledRoutes.includes(route))) {
+    throw new DesktopGatewayFailure("route_not_available", "user_action");
+  }
 }
 
 export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AILearnDesktopApiM2["contract"] {
   if (registrationComplete) throw new Error("M1 desktop IPC has already been registered");
   registrationComplete = true;
 
-  const gateway = options.gateway ?? new DesktopGateway(options.env);
+  const gateway = options.gateway ?? new DesktopGateway(options.env, {
+    credentials: options.credentials ?? createSessionCredentialStore(),
+  });
   const env = options.env ?? process.env;
   const contract = contractSnapshot(gateway, env);
   const formalAssessmentGuard = options.formalAssessmentGuard ?? new FormalAssessmentGuard();
@@ -634,7 +829,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   };
 
   const requireActionCapability = async (
-    capability: "card_generation.start" | "card_generation.review" | "card_generation.reveal" | "card_generation.activate" | "card_generation.cancel" | "card_generation.close",
+    // 从共享常量派生而不是就地再列一遍：此前这里手写了 6 个字面量，新增能力时
+    // 必须在两处同步（漏改一处就是"共享层有、客户端永远拒绝"的静默 403）。
+    capability: Extract<ActionCapability, `card_generation.${string}`>,
     requestId?: string,
   ): Promise<void> => {
     const projection = await gateway.getCapabilities(requestId);
@@ -809,7 +1006,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
 
   installHandler(DESKTOP_IPC_CHANNELS.authLogin, authLoginInputSchema, options, async (_event, _window, input) => {
     formalAssessmentGuard.failClosed("disconnected");
-    const session = await gateway.login(input.email, input.password, input.meta.requestId);
+    const session = await gateway.login(input.email, input.password, input.meta.requestId, input.remember);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
     await recoverPersistedReturnMarker(input.meta.requestId);
@@ -819,10 +1016,18 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
 
   installHandler(DESKTOP_IPC_CHANNELS.authRegister, authRegisterInputSchema, options, async (_event, _window, input) => {
     formalAssessmentGuard.failClosed("disconnected");
-    const session = await gateway.register(input.email, input.password, input.inviteToken, input.displayName, input.meta.requestId);
+    const session = await gateway.register(input.email, input.password, input.inviteToken, input.displayName, input.meta.requestId, input.remember);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
     await recoverPersistedReturnMarker(input.meta.requestId);
+    return session;
+  }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.authJoinWorkspace, authJoinWorkspaceInputSchema, options, async (_event, _window, input) => {
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const session = await gateway.joinWorkspace(input.inviteToken, input.meta.requestId);
+    activeWorkspaceEpoch = session.workspaceEpoch;
+    rememberSession(session);
     return session;
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
 
@@ -901,11 +1106,249 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return workspace;
   }, (output) => safeWorkspaceEpoch(output), workspaceContextSchema);
 
+  // 设置页的「AI 数据同意」分区。写入是 Owner 专属（服务端 requireOwner 收口），
+  // 读回的是服务端当前状态，因此投影与界面不会各自维护一份同意状态。
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceAiSettingsGet, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getWorkspaceAiSettings(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceAiSettingsV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceAiConsentUpdate, workspaceAiConsentUpdateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.updateAiConsent(input.consentVersion, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceAiSettingsV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceAiDataPolicyUpdate, workspaceAiDataPolicyUpdateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.updateAiDataPolicy(input.policy, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceAiSettingsV1Schema);
+
+  /**
+   * 整库导出。服务端出数据（`requireOwner` 收口），本机负责落盘：读者在系统
+   * 保存对话框里自己选位置，主进程写文件。渲染进程只拿到回执——它既看不到
+   * 文件系统，也没有任何写文件的通道。
+   */
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceExport, runtimeInputSchema, options, async (_event, window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const payload = await gateway.fetchWorkspaceExport(input.meta.requestId);
+    // 网关把解不开的响应体读成 null。导出是数据出口，宁可失败也不能让读者
+    // 在系统对话框里确认之后拿到一个写着 `null` 的文件。
+    if (payload === null || typeof payload !== "object") {
+      throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    }
+    const text = JSON.stringify(payload, null, 2);
+    const selection = await dialog.showSaveDialog(window, {
+      title: "导出工作区",
+      defaultPath: `ailearn-workspace-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (selection.canceled || !selection.filePath) {
+      return { version: 1 as const, saved: false, canceled: true, filePath: null, bytes: 0 };
+    }
+    try {
+      await writeFile(selection.filePath, text, "utf8");
+    } catch {
+      // 数据已经取回来了，失败的是本机写入（权限、磁盘、路径），所以这是一个
+      // 读者可以自己重试的问题，而不是服务端错误。
+      throw new DesktopGatewayFailure("safe_internal_error", "user_action");
+    }
+    return {
+      version: 1 as const,
+      saved: true,
+      canceled: false,
+      filePath: selection.filePath,
+      bytes: Buffer.byteLength(text, "utf8"),
+    };
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceExportResultV1Schema);
+
   installHandler(DESKTOP_IPC_CHANNELS.roomGetProjection, runtimeInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.getRoomProjection(input.meta.requestId);
   }, (output) => safeWorkspaceEpoch(output), roomProjectionV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.sourceList, sourceListInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.library");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listSources({ status: input.status, cursor: input.cursor, limit: input.limit }, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceListPageSchema);
+
+  // Capturing material is an owner-only write on the API, and the capability
+  // projection already says so; checking it here keeps a member from filling in
+  // the capture form only to be rejected at the end.
+  installHandler(DESKTOP_IPC_CHANNELS.sourceCreate, sourceCreateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.library");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["source.create"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.createSource(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceDetailSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.sourceGet, sourceGetInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getSource(input.sourceId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceDetailSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.sourceNotes, sourceNotesInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listSourceNotes(input.sourceId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceNotesPageSchema);
+
+  // Renaming and "write a note from this source" are owner-only writes the
+  // capability projection already advertises, so a member is stopped here
+  // instead of after filling in a title.
+  installHandler(DESKTOP_IPC_CHANNELS.sourceUpdate, sourceUpdateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["source.update"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.updateSourceTitle(input.sourceId, input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceDetailSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.sourceCreateNote, sourceCreateNoteInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["source.createNote"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.createNoteFromSource(input.sourceId, { force: input.force }, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceNoteResultSchema);
+
+  // Archiving is the source's soft delete and the last owner-only source write
+  // the capability projection advertises; checking it here keeps a member from
+  // confirming an action they were never allowed to ask for.
+  installHandler(DESKTOP_IPC_CHANNELS.sourceArchive, sourceArchiveInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["source.archive"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.archiveSource(input.sourceId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceArchiveResultSchema);
+
+  // 站内图片字节：来源详情的正文片段与笔记阅读页都会用到（两者共用同一份
+  // `/api/uploads/…` 引用），所以只要其中一个面可达就放行。这里没有 owner 门控
+  // ——能读到正文的成员就该看到正文里的图，服务端的下载路由仍会按 workspace
+  // 与登记记录自行收口。
+  installHandler(DESKTOP_IPC_CHANNELS.sourceImageGet, sourceImageGetInputSchema, options, async (_event, _window, input) => {
+    requireAnyM2Route(contract, ["source.detail", "note.detail"]);
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getSourceImage(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, sourceImageGetResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionHomeGetProjection, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionHomeProjection(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionHomeProjectionV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionRoomGetProfile, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionRoomProfile(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionRoomProfileV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionRoomPatchProfile, companionRoomPatchInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.patchCompanionRoomProfile(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionRoomProfileV1Schema);
+
+  // 账号级 presence（决策 3）：读当前账号状态 / 写入（revision CAS）。
+  // 与其余伴星通道同一路由门控（设置入口在房间的伴星面板内）。
+  installHandler(DESKTOP_IPC_CHANNELS.companionAccountGetState, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionAccountOverview(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionOverviewSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionAccountPatchState, companionAccountPatchInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.patchCompanionAccountState(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAccountStateV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionVoiceSpeak, companionVoiceSpeakInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.speakCompanionVoice(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceSpeakResultV1Schema);
+
+  // 伴星中心（页 20）的共同记录。与其余伴星通道同一路由门控：这些都是"书房"
+  // 内的呈现，不新增导航目标，也不把记忆正文写进路由或快照。
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryList, companionMemoryListInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listCompanionMemories(input.query ?? {}, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryListV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryStarMap, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionMemoryStarMap(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryStarMapV1Schema);
+
+  for (const [channel, mutate] of [
+    [DESKTOP_IPC_CHANNELS.companionMemoryConfirm, "confirmCompanionMemory"],
+    [DESKTOP_IPC_CHANNELS.companionMemoryPin, "pinCompanionMemory"],
+    [DESKTOP_IPC_CHANNELS.companionMemoryUnpin, "unpinCompanionMemory"],
+    [DESKTOP_IPC_CHANNELS.companionMemoryArchive, "archiveCompanionMemory"],
+    [DESKTOP_IPC_CHANNELS.companionMemoryRestore, "restoreCompanionMemory"],
+  ] as const) {
+    installHandler(channel, companionMemoryIdInputSchema, options, async (_event, _window, input) => {
+      requireM2Route(contract, "room.home");
+      assertEpoch(input.meta, activeWorkspaceEpoch);
+      return gateway[mutate](input.memoryId, input.meta.requestId);
+    }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryItemV1Schema);
+  }
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryDelete, companionMemoryIdInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.deleteCompanionMemory(input.memoryId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryDeleteOutputSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionDailyGet, companionDailyGetInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionDailySummary(input.date, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionDailySummaryV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionPersonaGet, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionPersona(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionPersonaV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionPersonaPatch, companionPersonaPatchInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.patchCompanionPersona(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionPersonaMutationV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionPersonaReset, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.resetCompanionPersona(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionPersonaResetV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionConversationsList, companionConversationsListInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listCompanionConversations(input.limit, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionConversationListV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteGet, noteGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "note.detail");
@@ -916,6 +1359,108 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     }
     return note;
   }, undefined, noteDetailV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteList, noteListInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.library");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listNotes({ cursor: input.cursor, limit: input.limit, trashed: input.trashed }, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopNoteListPageSchema);
+
+  // Writing a note is gated on `note.detail` (the note surfaces) plus the
+  // workspace capability, so a member never fills in a title only to be
+  // rejected at the end of the call.
+  installHandler(DESKTOP_IPC_CHANNELS.noteCreate, noteCreateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["note.create"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.createNote(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDetailV1Schema);
+
+  // Removing and restoring a note are owner-only writes, gated the same way as
+  // creating one: the note surfaces plus the workspace capability.
+  installHandler(DESKTOP_IPC_CHANNELS.noteDelete, noteIdInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["note.delete"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.deleteNote(input.noteId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopNoteMutationResultSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteRestore, noteIdInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["note.restore"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.restoreNote(input.noteId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopNoteMutationResultSchema);
+
+  // Reading a note's immutable version history is a read of the note surface.
+  installHandler(DESKTOP_IPC_CHANNELS.noteVersions, noteVersionsInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listNoteVersions(
+      input.noteId,
+      input.currentVersionId,
+      input.limit ?? 50,
+      input.meta.requestId,
+    );
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopNoteVersionListSchema);
+
+  // Pointing the note back at an older version is a write of its content, so it
+  // carries the same capability as saving one.
+  installHandler(DESKTOP_IPC_CHANNELS.noteVersionRestore, noteVersionRestoreInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["note.save"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.restoreNoteVersion(input.noteId, input.versionId, input.baseVersionId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopNoteMutationResultSchema);
+
+  // 往笔记正文里放一张图，写的是笔记内容，所以和保存一条版本同一道能力门控。
+  // 服务端的上传路由自己另有 owner 校验，这里先挡在前面，免得非 owner 走完整个
+  // 上传流程才被拒。
+  installHandler(DESKTOP_IPC_CHANNELS.noteImageUpload, noteImageUploadInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["note.save"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.uploadNoteImage(input.noteId, input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteImageUploadResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.objectiveList, objectiveListInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "objective.library");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listObjectives({ lifecycle: input.lifecycle, cursor: input.cursor, limit: input.limit }, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, objectiveListPageV3Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.objectiveGet, objectiveGetInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "objective.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getObjective(input.objectiveId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, learningObjectiveSurfaceV3Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.understandingGetTopology, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "understanding.graph");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getUnderstandingTopology(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, understandingTopologySnapshotV3Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.searchGlobal, searchGlobalInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "search.global");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.searchGlobal(input.query, { type: input.type, limit: input.limit, cursor: input.cursor }, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSearchPageSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteSave, noteSaveInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "note.detail");
@@ -983,6 +1528,20 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return gateway.revealCardGenerationCandidate(input.runId, input.candidateId, request, input.commandId, input.meta.requestId);
   }, undefined, candidateRevealV2Schema);
 
+  installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationLatestRun, noteIdInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.cardGeneration");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    await requireActionCapability("card_generation.start", input.meta.requestId);
+    return gateway.getLatestCardGenerationRun(input.noteId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, cardGenerationRunSnapshotV1Schema.nullable());
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationExposure, cardGenerationExposureInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.cardGeneration");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    await requireActionCapability("card_generation.reveal", input.meta.requestId);
+    return gateway.getCardGenerationExposure(input.runId, input.candidateId, input.revision, input.meta.requestId);
+  }, undefined, cardGenerationExposureEligibilityV1Schema);
+
   installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationActivate, cardGenerationActivateInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "note.cardGeneration");
     assertEpoch(input.meta, activeWorkspaceEpoch);
@@ -1000,6 +1559,15 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     ensureCardGenerationStream(input.runId);
     return gateway.cancelCardGeneration(input.runId, input.commandId, input.meta.requestId);
   }, undefined, cardGenerationCancelResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationRetry, cardGenerationRetryInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.cardGeneration");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    await requireActionCapability("card_generation.retry", input.meta.requestId);
+    // 重试会在同一 run 上重新出版本与候选，流必须跟着这条 run 走（与 cancel 同理）。
+    ensureCardGenerationStream(input.runId);
+    return gateway.retryCardGeneration(input.runId, input.commandId, input.meta.requestId);
+  }, undefined, cardGenerationRetryResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationClose, cardGenerationCloseInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "note.cardGeneration");
@@ -1027,6 +1595,13 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     window.focus();
     return { focused: true as const };
   }, undefined, focusOutputSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.clipboardReadLinks, runtimeInputSchema, options, () => {
+    // 外部复制的链接只在这里过一遍：剪贴板原文截断后提取候选地址，
+    // 原文永不过桥，渲染层拿到的只有至多 3 个 http(s) 地址。
+    const text = clipboard.readText().slice(0, 4000);
+    return clipboardReadLinksResultSchema.parse({ urls: extractCandidateLinks(text) });
+  }, undefined, clipboardReadLinksResultSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe, subscribeInputSchema, options, (_event, window, input) => {
     if (input.topic.kind !== "runtime" && activeWorkspaceEpoch < 1) {
@@ -1060,6 +1635,18 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.getReviewQueue(input.cursor, input.limit, input.meta.requestId);
   }, undefined, reviewQueueV2Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.reviewDefer, reviewDeferInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "review.queue");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.deferReview(input.request, input.meta.requestId);
+  }, undefined, reviewDeferResultV2Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.activityGetToday, activityGetTodayInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getTodayActivity(input.from, input.to, input.meta.requestId);
+  }, undefined, todayActivityV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.learningRunGet, learningRunGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "learningRun.detail");
@@ -1180,29 +1767,3 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
 
   return contract;
 }
-
-export const desktopIpcSchemas = {
-  runtimeInputSchema,
-  cancelInputSchema,
-  navigationResolveInputSchema,
-  navigationGoInputSchema,
-  authLoginInputSchema,
-  authRegisterInputSchema,
-  authReauthenticateInputSchema,
-  authChangePasswordInputSchema,
-  workspaceSwitchInputSchema,
-  windowThemeInputSchema,
-  subscribeInputSchema,
-  unsubscribeInputSchema,
-  reviewQueueInputSchema,
-  noteGetInputSchema,
-  noteSaveInputSchema,
-  learningRunGetInputSchema,
-  learningRunStartInputSchema,
-  learningRunDraftGetInputSchema,
-  learningRunDraftSaveInputSchema,
-  learningRunSubmitInputSchema,
-  learningRunActionInputSchema,
-  learningRunLeaseInputSchema,
-  learningRunAbandonInputSchema,
-};

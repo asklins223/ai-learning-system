@@ -69,3 +69,29 @@ reasonix.toml
 /docs/design/
 # 运行时 3D 模型目录（当前已跟踪的历史版本不受影响；新增文件不再入库）
 /apps/web/public/assets/3d/
+
+# —— 2026-09-18 增补：大文件 / 设计源稿 / 模型资产 / 本地状态，一律不入库 ——
+# pnpm 本地缓存
+/.pnpm-store/
+# 本地 agent 与工具状态
+/.workbuddy/
+/.commandcode/
+/.arts/
+# 根目录误生成的临时截图文件
+/--full-page
+# 设计源稿（Live2D 分层 PSD/ORA，单文件 30MB+）
+/artifacts/
+# Blender 建模脚本（3D 设计工具链，本地保留）
+/scripts/blender/
+# 界面验证截图（单张 1–4.6MB）
+apps/desktop-client/scripts/cardgen-verify/
+apps/desktop-client/scripts/graph-verify/
+apps/desktop-client/scripts/rail-graph-entry.png
+# 渲染层大图 / 模型资产（场景大图、Live2D 模型、海报、前景图）
+apps/desktop-client/src/renderer/public/assets/approved-v3/
+apps/desktop-client/src/renderer/public/assets/companion/live2d-v2/
+apps/desktop-client/src/renderer/public/assets/learning-room/v1/layers/home-v2/
+apps/desktop-client/src/renderer/public/assets/learning-room/v1/posters/home-v2/
+apps/desktop-client/src/renderer/public/assets/learning-room/v1/foreground/
+# 本地环境变量文件
+apps/desktop-client/.env.development

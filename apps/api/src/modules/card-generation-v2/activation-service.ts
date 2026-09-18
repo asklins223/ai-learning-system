@@ -3,7 +3,7 @@
  *
  * 原子激活事务：在单个 DB 事务内完成：
  * 1. 幂等检查（receipt idempotencyKey）
- * 2. Run 状态 CAS（review_ready → activating）
+ * 2. Run 状态 CAS（review_ready / needs_attention → activating）
  * 3. 对每个 selectedCandidate：
  *    a. CAS 校验 candidate revision + hash
  *    b. 根据 intent.kind 创建/更新 LearningObjective + LearningCard
@@ -50,7 +50,7 @@ import {
   learningObjectiveRevisionEquivalenceV2,
   learningExposuresV2,
   cardGenerationRunOutboxV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   writeActivationNoteOrigin,
   copyOriginsToRevision,
@@ -61,6 +61,7 @@ import {
   type CardActivationReceiptV2,
   type ActivationIntentV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
+import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
   computeClientReviewHashV2,
@@ -114,18 +115,11 @@ type LifecycleResult = {
 /**
  * §14.3：从 binding plan 行的单条 target_unit_bindings 条目提取被绑定 evidence
  * snapshot id。条目为完整 binding 形状（单数 `evidenceSnapshotId`，与
- * candidateEvidenceBindingPlanV2Schema.bindings 一致；R32 前 assembler 只落
- * targetUnit、C23 手工插入亦为单数键，激活端误读复数 `evidenceSnapshotIds`
- * 导致 §13.1 eligibility 重验恒空转）。为兼容历史行保留复数键回退。
+ * candidateEvidenceBindingPlanV2Schema.bindings 一致）。
  */
 function bindingEntryEvidenceSnapshotIds(entry: Record<string, unknown>): string[] {
   if (typeof entry?.evidenceSnapshotId === "string" && entry.evidenceSnapshotId) {
     return [entry.evidenceSnapshotId];
-  }
-  if (Array.isArray(entry?.evidenceSnapshotIds)) {
-    return (entry.evidenceSnapshotIds as unknown[]).filter(
-      (v): v is string => typeof v === "string" && v.length > 0,
-    );
   }
   return [];
 }
@@ -257,7 +251,9 @@ export async function activateCardCandidatesV2(
     }
     const run = runRows[0];
 
-    if (run.status !== "review_ready" && run.status !== "activating") {
+    // 审核开放态即可激活：needs_attention 的 run 常常仍持有通过门禁、未发布的
+    // 候选，用户保留它们之后必须能真的激活，否则「保留」是一句空话。
+    if (run.status !== "activating" && !isCardGenerationReviewOpen(run.status)) {
       throw new CardGenerationV2ServiceError("invalid_state", 409, "只有 review_ready 状态的运行可以激活");
     }
 

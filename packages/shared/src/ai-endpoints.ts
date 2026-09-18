@@ -6,6 +6,21 @@ export function resolveOpenAIChatCompletionsUrl(baseUrl: string): string {
     : `${normalized}/chat/completions`;
 }
 
+/**
+ * Resolve the OpenAI Responses API endpoint (`/responses`) from a base URL.
+ *
+ * Responses API 与 chat/completions 是两套 body/响应契约：input items +
+ * output items，而不是 messages + choices。OpenCode Go 的 muse-spark-* /
+ * grok-4.6 / gpt-5.6-luna 只在 /responses 提供（/chat/completions 对该模型
+ * 返回 HTTP 500）。
+ */
+export function resolveOpenAIResponsesUrl(baseUrl: string): string {
+  const normalized = baseUrl.replace(/\/+$/, "");
+  return /\/responses$/i.test(normalized)
+    ? normalized
+    : `${normalized}/responses`;
+}
+
 /** Resolve the OpenAI-compatible embeddings endpoint from a base URL. */
 export function resolveOpenAIEmbeddingsUrl(baseUrl: string): string {
   const normalized = baseUrl.replace(/\/+$/, "");
@@ -14,14 +29,7 @@ export function resolveOpenAIEmbeddingsUrl(baseUrl: string): string {
     : `${normalized}/embeddings`;
 }
 
-export function resolveDashScopeGenerationUrl(baseUrl: string): string {
-  const normalized = baseUrl.replace(/\/+$/, "");
-  return /\/services\/aigc\/text-generation\/generation$/i.test(normalized)
-    ? normalized
-    : `${normalized}/services/aigc/text-generation/generation`;
-}
-
-export type DashScopeTextProtocol = "native_text" | "openai_compatible";
+export type DashScopeTextProtocol = "openai_compatible";
 
 export interface DashScopeTextEndpoint {
   protocol: DashScopeTextProtocol;
@@ -37,14 +45,12 @@ export interface DashScopeTextEndpoint {
  *   2. `stream: false` for simpler non-streaming responses
  *   3. A single code path instead of branching on protocol
  *
- * The legacy native text-generation endpoint is no longer used.  A caller can
- * still pass any DashScope base URL (`/api/v1` or `/compatible-mode/v1`) and
- * the function normalises it to the compatible chat-completions URL.
+ * The native text-generation endpoint is not part of the current provider
+ * contract. DashScope callers must use its compatible-mode root explicitly.
  */
-export function resolveDashScopeTextEndpoint(baseUrl: string, _model?: string): DashScopeTextEndpoint {
+export function resolveDashScopeTextEndpoint(baseUrl: string): DashScopeTextEndpoint {
   const normalized = baseUrl.replace(/\/+$/, "");
 
-  // Already pointing at compatible-mode — just append the chat path.
   if (/\/compatible-mode\/v1(?:\/chat\/completions)?$/i.test(normalized)) {
     return {
       protocol: "openai_compatible",
@@ -52,18 +58,5 @@ export function resolveDashScopeTextEndpoint(baseUrl: string, _model?: string): 
     };
   }
 
-  // Rewrite the legacy `/api/v1` root to the compatible-mode root.
-  if (/\/api\/v1$/i.test(normalized)) {
-    const compatibleRoot = normalized.replace(/\/api\/v1$/i, "/compatible-mode/v1");
-    return {
-      protocol: "openai_compatible",
-      url: resolveOpenAIChatCompletionsUrl(compatibleRoot),
-    };
-  }
-
-  // Fallback: assume the caller already supplied a compatible root.
-  return {
-    protocol: "openai_compatible",
-    url: resolveOpenAIChatCompletionsUrl(normalized),
-  };
+  throw new Error("DashScope baseUrl must end with /compatible-mode/v1");
 }

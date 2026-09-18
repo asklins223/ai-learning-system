@@ -15,7 +15,6 @@ export const REPOSITORY_ROOT = resolve(dirname(SCRIPT_PATH), "../..");
 export const VERSION_SOURCE_PATH = "release/version.json";
 export const PACKAGE_ROOTS = [
   "apps/api",
-  "apps/web",
   "workers/ai-worker",
   "packages/shared",
 ];

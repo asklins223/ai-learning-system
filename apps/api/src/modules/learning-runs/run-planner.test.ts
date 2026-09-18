@@ -123,6 +123,7 @@ test("computeRunContractHash：字段参与哈希且确定性", () => {
     schedulingAuthorization: { kind: "create_initial", keyPointId: "k", targetFingerprint: "fp", schedulerPolicyId: "p" },
     taskPlanHash: "plan",
     projectionBaselineCheckpointToken: null,
+    snapshotHash: "snapshot-hash",
   };
   assert.equal(computeRunContractHash(base), computeRunContractHash(base));
   assert.notEqual(
@@ -169,7 +170,7 @@ function makeViewInput(): RunViewInput {
       workspaceId: "44444444-4444-4444-8444-444444444444",
       userId: "55555555-5555-4555-8555-555555555555",
       assistantSessionId: null,
-      origin: { kind: "card", cardId: "66666666-6666-4666-8666-666666666666", keyPointId: target.keyPointId },
+      origin: { kind: "card", cardId: "66666666-6666-4666-8666-666666666666", objectiveId: target.keyPointId },
       returnTarget: { kind: "card", cardId: "66666666-6666-4666-8666-666666666666", keyPointId: target.keyPointId },
       keyPointId: target.keyPointId,
       targetFingerprint: "fp-1",

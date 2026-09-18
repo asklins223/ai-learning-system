@@ -61,19 +61,6 @@ const PACKAGES = [
     sourceIncludes: ["src/**/*.ts", "src/**/*.tsx"],
   },
   {
-    path: "apps/web",
-    testDir: "lib",
-    sourceDirs: ["app", "components", "lib"],
-    sourceIncludes: [
-      "app/**/*.ts",
-      "app/**/*.tsx",
-      "components/**/*.ts",
-      "components/**/*.tsx",
-      "lib/**/*.ts",
-      "lib/**/*.tsx",
-    ],
-  },
-  {
     path: "workers/ai-worker",
     testDir: "src",
     sourceDirs: ["src"],

@@ -32,7 +32,6 @@ import {
   HTTP_STATUS_CLASSES,
   JOB_TYPES,
   JOB_STATUSES,
-  PROVIDER_OPERATIONS,
 } from "../lib/metrics.ts";
 
 const SRC_DIR = join(import.meta.dirname, "..");
@@ -220,9 +219,6 @@ describe("OPS-01 DoD: 指标 allowlist 完整性", () => {
       "onboarding_step",
       "onboarding_completed",
       "card_generation_terminal",
-      "validation_submitted",
-      "validation_terminal",
-      "review_attempt_terminal",
       "job_claimed",
       "job_retried",
       "job_dead",
@@ -270,7 +266,14 @@ describe("OPS-01 DoD: 指标 allowlist 完整性", () => {
   });
 
   it("JOB_TYPES allowlist 对应 handler 注册表", () => {
-    const required = ["execute_card_agent_turn", "align_evidence", "evaluate_validation", "parse_source"];
+    const required = [
+      "parse_source",
+      "companion_agent",
+      "companion_memory_extract",
+      "companion_summarizer",
+      "companion_memory_embedding_rebuild",
+      "companion_daily_summary",
+    ];
     for (const type of required) {
       assert.ok(
         (JOB_TYPES as readonly string[]).includes(type),
@@ -283,9 +286,6 @@ describe("OPS-01 DoD: 指标 allowlist 完整性", () => {
     assert.deepEqual([...JOB_STATUSES], ["pending", "running", "succeeded", "failed", "dead"]);
   });
 
-  it("PROVIDER_OPERATIONS allowlist 只包含已注册操作", () => {
-    assert.deepEqual([...PROVIDER_OPERATIONS], ["align_evidence", "evaluate_validation", "generate_validation_question", "execute_card_agent_turn"]);
-  });
 });
 
 // ─── 3. SLO 必需指标在 registry 中暴露 ──────────────────────────────────────

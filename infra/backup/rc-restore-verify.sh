@@ -400,7 +400,7 @@ else
 fi
 
 # 3b. 核心表行数对比
-CORE_TABLES=("users" "workspaces" "workspace_members" "sources" "notes" "learning_cards" "card_key_points" "evidences" "validation_questions" "validation_events" "review_schedules" "review_attempts" "jobs" "onboarding_states")
+CORE_TABLES=("users" "workspaces" "workspace_members" "sources" "notes" "note_versions" "validation_questions" "validation_events" "review_schedules" "review_attempts" "jobs" "onboarding_states" "learning_objectives_v2" "learning_cards_v2" "evidence_snapshots_v2")
 
 TABLE_COUNT_MISMATCH=0
 TABLE_COUNT_DETAILS=""

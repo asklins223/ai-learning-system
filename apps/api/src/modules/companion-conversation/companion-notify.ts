@@ -6,7 +6,7 @@
  *   `ailearn_companion_account_v1`），再 fan-out 到本进程 subscriber；
  * - NOTIFY payload 只含 conversationId/maxSeq，不含正文；
  * - postgres-js 的 listen 在断线后自动重连并重新 LISTEN；
- * - NOTIFY 只是低延迟 wake hint——SSE 每连接另有 1s durable poll 兜底。
+ * - NOTIFY 只是低延迟 wake hint——SSE 每连接另有 2.5s durable poll 兜底。
  */
 
 import postgres from "postgres";
@@ -156,20 +156,6 @@ export function stopCompanionNotifyListener(): void {
   subscribersByConversation.clear();
   accountSubscribersByUser.clear();
   inboxSubscribersByUser.clear();
-}
-
-/** 测试用：重置单例（仅测试进程调用）。 */
-export function resetCompanionNotifyListenerForTests(): void {
-  void notifyConnection?.end({ timeout: 1 }).catch(() => {});
-  notifyConnection = null;
-  started = false;
-  subscribersByConversation.clear();  accountSubscribersByUser.clear();
-  inboxSubscribersByUser.clear();
-}
-
-/** 测试用：向当前进程 fan-out 一条通知（模拟 NOTIFY 到达）。 */
-export function emitCompanionNotifyForTests(payload: CompanionNotifyPayload): void {
-  fanOut(payload);
 }
 
 export function subscribeCompanionAccountEvents(

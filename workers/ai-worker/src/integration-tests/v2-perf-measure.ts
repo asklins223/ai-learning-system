@@ -62,7 +62,7 @@ async function seedNote(content: string) {
     await tx`INSERT INTO users (id, email, password_hash) VALUES (${userId}, ${`perf-${userId}@example.invalid`}, 'unused') ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by) VALUES (${workspaceId}, ${userId}, 'v2-perf', 'v1', now(), ${userId}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${workspaceId}, ${userId}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch) VALUES (${noteId}, ${workspaceId}, 'perf', ${userId}, 1) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by) VALUES (${noteId}, ${workspaceId}, 'perf', ${userId}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by) VALUES (${versionId}, ${noteId}, ${workspaceId}, 1, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'perf-hash', ${userId}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal) VALUES (${blockId}, ${versionId}, ${workspaceId}, 'paragraph', ${content}, 1) ON CONFLICT (id) DO NOTHING`;
   });

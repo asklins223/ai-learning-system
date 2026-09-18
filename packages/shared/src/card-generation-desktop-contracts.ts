@@ -17,9 +17,13 @@ import {
   createCardGenerationRunRequestV2Schema,
   cardActivationReceiptV2Schema,
   revealCandidateRequestV2Schema,
+  candidateRevealV2Schema,
+  cardRejectReasonV2Schema,
   candidateActionV2Schema,
   activationIntentV2Schema,
   cardStrategyV2Schema,
+  cardLearningGoalV2Schema,
+  cardDetailThresholdV2Schema,
   teachingTransformationV2Schema,
   knowledgeFormV2Schema,
 } from "./card-generation-v2-contracts.ts";
@@ -52,6 +56,25 @@ export const desktopCandidateReviewRequestV2Schema = z.strictObject({
 export type DesktopCandidateReviewRequestV2 = z.infer<typeof desktopCandidateReviewRequestV2Schema>;
 export const desktopRevealCandidateRequestV2Schema = revealCandidateRequestV2Schema;
 export type DesktopRevealCandidateRequestV2 = z.infer<typeof desktopRevealCandidateRequestV2Schema>;
+/**
+ * The reveal payload crosses IPC as the domain schema — main adds no projection
+ * of its own — so the renderer's type comes from here rather than reaching into
+ * the domain contract module directly.
+ */
+export const desktopCandidateRevealV2Schema = candidateRevealV2Schema;
+export type DesktopCandidateRevealV2 = z.infer<typeof desktopCandidateRevealV2Schema>;
+/** The reject vocabulary the review UI offers, taken from the action contract. */
+export const desktopCardRejectReasonV2Schema = cardRejectReasonV2Schema;
+export type DesktopCardRejectReasonV2 = z.infer<typeof desktopCardRejectReasonV2Schema>;
+/**
+ * The generation knobs the note page lets the writer set. They are the domain
+ * enums verbatim: the page sends exactly the values the run contract accepts.
+ */
+export type DesktopCardLearningGoalV2 = z.infer<typeof cardLearningGoalV2Schema>;
+export type DesktopCardDetailThresholdV2 = z.infer<typeof cardDetailThresholdV2Schema>;
+export type DesktopCardStrategyV2 = z.infer<typeof cardStrategyV2Schema>;
+/** Why the writer is asking for a regeneration; the run contract's own vocabulary. */
+export type DesktopCardGenerationFeedbackReasonV2 = z.infer<typeof cardGenerationFeedbackReasonV2Schema>;
 export const desktopActivateCardCandidatesRequestV2Schema = activateCardCandidatesRequestV2Schema.pick({
   version: true,
   runId: true,
@@ -116,6 +139,15 @@ export const cardGenerationRecoveryRetryabilityV1Schema = z.enum([
   "new_run_allowed",
   "not_retryable",
   "resync_required",
+  /**
+   * 可在**同一条 run 内**重试（2026-09-18）。
+   *
+   * 与 `new_run_allowed` 的区别是成本与语义：`new_run_allowed` 表示"回笔记重开一次
+   * 全新生成"，会重新封存来源、重跑 planner 与全部 critic（实测一次 ≈25–55s + 全额
+   * token）；`retry_in_place` 表示服务端可以在**已有 run** 上派发一次重规划
+   * （新 plan revision + supersede 旧候选 + 重新 author），复用已封存的来源与输入快照。
+   */
+  "retry_in_place",
 ]);
 export type CardGenerationRecoveryRetryabilityV1 = z.infer<typeof cardGenerationRecoveryRetryabilityV1Schema>;
 
@@ -124,6 +156,19 @@ export const cardGenerationRecoveryActionV1Schema = z.discriminatedUnion("kind",
   z.strictObject({ kind: z.literal("return_note"), route: z.literal("note.detail"), sourceRef: cardGenerationSourceRefV1Schema }),
   z.strictObject({ kind: z.literal("open_latest_note"), route: z.literal("note.detail"), sourceRef: cardGenerationSourceRefV1Schema }),
   z.strictObject({ kind: z.literal("start_new_generation"), route: z.literal("note.cardGeneration"), sourceRef: cardGenerationSourceRefV1Schema }),
+  /**
+   * 在同一 run 内重跑规划与作者（2026-09-18）。
+   *
+   * 为什么需要它：唯一候选被 critic 否决时，run 会终态化为 `needs_attention`，
+   * 而此前恢复契约只签发 `return_note` / `start_new_generation` —— 用户唯一的出路是
+   * **重开一次全新生成**（重新封存来源、重跑 planner、重付全部 token），而失败很可能
+   * 只是 critic 的一次判断波动。这个动作让"再试一次"变成一次显式、低成本、用户可见的
+   * 选择：服务端复用已封存的来源与输入快照，只重新规划与重新作者。
+   *
+   * 只由服务端在**确有可重试理由**时签发（见 apps/api desktop-projection），
+   * 客户端不得自行构造 —— 与既有恢复动作同一纪律。
+   */
+  z.strictObject({ kind: z.literal("retry_generation"), runId: uuidSchema }),
 ]);
 export type CardGenerationRecoveryActionV1 = z.infer<typeof cardGenerationRecoveryActionV1Schema>;
 
@@ -131,7 +176,7 @@ export const cardGenerationRecoveryProjectionV1Schema = z.strictObject({
   version: z.literal(1),
   publicReasonCode: cardGenerationRecoveryReasonCodeV1Schema,
   retryability: cardGenerationRecoveryRetryabilityV1Schema,
-  allowedActions: z.array(cardGenerationRecoveryActionV1Schema).max(4),
+  allowedActions: z.array(cardGenerationRecoveryActionV1Schema).max(5),
 }).superRefine((value, context) => {
   const actionKinds = new Set(value.allowedActions.map((action) => action.kind));
   if (actionKinds.size !== value.allowedActions.length) {
@@ -140,6 +185,11 @@ export const cardGenerationRecoveryProjectionV1Schema = z.strictObject({
   if (value.retryability === "new_run_allowed" && !actionKinds.has("start_new_generation")) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["allowedActions"], message: "new_run_allowed requires start_new_generation" });
   }
+  // 对称约束：声明"可就地重试"就必须给出可就地重试的动作，否则用户看到
+  // "可以重试"却没有任何按钮，比不给承诺更糟。
+  if (value.retryability === "retry_in_place" && !actionKinds.has("retry_generation")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["allowedActions"], message: "retry_in_place requires retry_generation" });
+  }
 });
 export type CardGenerationRecoveryProjectionV1 = z.infer<typeof cardGenerationRecoveryProjectionV1Schema>;
 
@@ -147,6 +197,25 @@ const cardGenerationRecoveryRunStatuses = new Set(["needs_attention", "failed", 
 
 function recoveryMatchesRunStatus(status: z.infer<typeof cardGenerationRunStatusV2Schema>, recovery: CardGenerationRecoveryProjectionV1 | null): boolean {
   return cardGenerationRecoveryRunStatuses.has(status) ? recovery !== null : recovery === null;
+}
+
+/**
+ * 审核是否仍然开放给用户 —— 桌面审核页、API review / activate / close 三处共用
+ * 同一个定义的唯一理由：此前客户端把审核动作锁死在 `review_ready`，而服务端
+ * 又把 needs_attention 的 run 一并交给审核页（它确实是最活跃的恢复态之一），
+ * 两边一叠加，一个「deck gate 失败但仍有候选通过各自门禁」的 run 会拿着可保留
+ * 的候选停在页面上，却一个决定按钮都不给，任务就此卡死。
+ *
+ * `needs_attention` 不是队列的终点：worker 在 deck gate 失败时会保留通过门禁的
+ * 候选（quality_state=passed / publish_state=unpublished / review_decision 未决），
+ * 并明确要求「用户仍应能保留并启用通过门禁的候选」。真正的门在候选自己身上
+ * （qualityState / reviewDecision / publishState），不在 run 状态上再收一道。
+ *
+ * 参数收 `string` 而非 run status 枚举：两端手里的 run 状态分别来自数据库列与
+ * 服务端视图，本来就是裸字符串，让调用方为了一个比较再 parse 一次只会多一处失败点。
+ */
+export function isCardGenerationReviewOpen(status: string): boolean {
+  return status === "review_ready" || status === "needs_attention";
 }
 
 /** Main-only view of the server serializer; hashes never cross IPC. */
@@ -304,6 +373,19 @@ export const cardGenerationCancelResultV1Schema = z.strictObject({
   status: z.literal("cancelled"),
 });
 export type CardGenerationCancelResultV1 = z.infer<typeof cardGenerationCancelResultV1Schema>;
+
+/**
+ * 就地重试的回执（2026-09-18）。
+ *
+ * 重试把 run 从 `needs_attention` 推回工作态，因此回执报的是**服务端确认的状态**
+ * （当前实现恒为 `checking`），而不是一个乐观推断——客户端据此重新拉取状态即可。
+ */
+export const cardGenerationRetryResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  runId: uuidSchema,
+  status: z.literal("checking"),
+});
+export type CardGenerationRetryResultV1 = z.infer<typeof cardGenerationRetryResultV1Schema>;
 
 export const cardGenerationCloseResultV1Schema = z.strictObject({
   version: z.literal(1),

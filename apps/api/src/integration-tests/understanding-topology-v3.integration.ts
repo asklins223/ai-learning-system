@@ -12,8 +12,8 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { findPrivatePayloadLeaks, assertNoCardOrKeyPointNode } from "@ailearn/shared";
-import { learningObjectivesV2 } from "../db/schema/card-generation-v2.ts";
-import { learningObjectiveOriginsV2 } from "../db/schema/card-generation-v2.ts";
+import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { learningObjectiveOriginsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
@@ -101,4 +101,51 @@ test("TP-10: backfill 后 Note → Objective sourced_from 边出现（TP-03）",
         .delete(learningObjectiveOriginsV2)
         .where(eq(learningObjectiveOriginsV2.workspaceId, FIXTURE_WORKSPACE)),
   );
+});
+
+/**
+ * 稳定 P0-2（2026-09-15 审计）：单集合上限护栏。
+ *
+ * 此前 truncated 硬编码 false 且所有读都没有 LIMIT——workspace 一大就无上界地
+ * 把整张图搬进内存。本用例把上限压到 2、用 5 个 objective 的 workspace 验证：
+ *  1. 真的截断了（节点数 = 上限，integrity.truncated = true）；
+ *  2. 截断是**确定**的（连续两次构建得到同一 topologyRevision），否则 ETag
+ *     协商会在截断点上永远失配；
+ *  3. 上限放开后同一 workspace 不再截断（护栏不是把数据永久丢掉）。
+ */
+test("TP-10: 单集合上限护栏如实回报截断且保持 revision 确定", async () => {
+  const fixture = await seedPureV2Workspace(sql, { objectiveCount: 5 });
+  const ctx = { workspaceId: fixture.workspaceId, userId: fixture.userId };
+  const build = () =>
+    withWorkspaceTransaction(ctx, (tx) => buildTopologySnapshotV3(tx, ctx));
+  const previousLimit = process.env.TOPOLOGY_SNAPSHOT_COLLECTION_LIMIT;
+  try {
+    process.env.TOPOLOGY_SNAPSHOT_COLLECTION_LIMIT = "2";
+    const first = await build();
+    const second = await build();
+    assert.equal(first.integrity.truncated, true, "超过上限必须如实回报 truncated");
+    assert.equal(
+      first.nodes.filter((n) => n.nodeRef.kind === "objective").length,
+      2,
+      "objective 节点数必须恰好等于上限",
+    );
+    assert.equal(
+      first.topologyRevision,
+      second.topologyRevision,
+      "截断点上的行集合必须是确定的，否则 ETag 永远 304 不命中",
+    );
+
+    process.env.TOPOLOGY_SNAPSHOT_COLLECTION_LIMIT = "100";
+    const unbounded = await build();
+    assert.equal(unbounded.integrity.truncated, false, "上限足够大时不得误报截断");
+    assert.equal(
+      unbounded.nodes.filter((n) => n.nodeRef.kind === "objective").length,
+      5,
+      "放开上限后必须看到全部 objective（护栏不丢数据）",
+    );
+  } finally {
+    if (previousLimit === undefined) delete process.env.TOPOLOGY_SNAPSHOT_COLLECTION_LIMIT;
+    else process.env.TOPOLOGY_SNAPSHOT_COLLECTION_LIMIT = previousLimit;
+    await fixture.cleanup();
+  }
 });

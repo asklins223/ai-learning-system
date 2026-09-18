@@ -28,7 +28,7 @@ describe("Room independent raster layer policy", () => {
     expect(resolveRoomSceneLayerUploadAlphaMode("straight-rgba")).toBe("premultiply-alpha-on-upload");
     expect(resolveRoomSceneLayerUploadAlphaMode("blend")).toBe("premultiply-alpha-on-upload");
     expect(resolveRoomSceneLayerUploadAlphaMode("premultiplied-rgba")).toBe("premultiplied-alpha");
-    expect(resolveRoomSceneLayerUploadAlphaMode("opaque-rgb")).toBeNull();
+    expect(resolveRoomSceneLayerUploadAlphaMode("opaque-rgb")).toBe("no-premultiply-alpha");
   });
 
   it("accepts only a reviewed, release-approved transparent source", () => {
@@ -43,6 +43,10 @@ describe("Room independent raster layer policy", () => {
       ...approvedSource,
       alphaMode: "opaque-rgb",
     })).toEqual({ enabled: false, reason: "opaque-layer" });
+    expect(resolveRoomSceneLayerEligibility({
+      ...approvedSource,
+      alphaMode: "opaque-rgb",
+    }, { allowOpaque: true })).toEqual({ enabled: true, reason: "eligible" });
   });
 
   it("rejects review-only and unapproved sources independently", () => {

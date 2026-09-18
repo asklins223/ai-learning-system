@@ -19,7 +19,7 @@
  */
 
 import { and, desc, eq, gt, gte, inArray, sql } from "drizzle-orm";
-import { interactionQualifications } from "../../db/schema/learning-runs.ts";
+import { interactionQualifications } from "@ailearn/shared/db-schema/learning-runs";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
   learningActivityLeases,
@@ -38,18 +38,17 @@ import {
   learningTaskSafetyReports,
   learningTaskVariants,
   learningTasks,
-} from "../../db/schema/learning-runs.ts";
+} from "@ailearn/shared/db-schema/learning-runs";
 import {
   evidenceEligibilityStatesV2,
   learningCardsV2,
   learningObjectivesV2,
-} from "../../db/schema/card-generation-v2.ts";
-import { reviewSchedules } from "../../db/schema/evidence.ts";
-import { validationAssistanceExposures } from "../../db/schema/validation-v2.ts";
-import { companionSandboxNamespaces } from "../../db/schema/companion-sandbox.ts";
-import { understandingProjectionCheckpoints } from "../../db/schema/understanding-projection.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
+import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
+import { validationAssistanceExposures } from "@ailearn/shared/db-schema/validation-v2";
+import { companionSandboxNamespaces } from "@ailearn/shared/db-schema/companion-sandbox";
+import { understandingProjectionCheckpoints } from "@ailearn/shared/db-schema/understanding-projection";
 import type {
-  CreateLearningRunRequestV1,
   GetLearningRunResultResponseV2,
   LearningRunActionV1,
   LearningRunOriginV2,
@@ -119,10 +118,6 @@ import { buildLearningRunAllowedActionsV2 } from "./run-action-availability.ts";
 export interface RunScope {
   workspaceId: string;
   userId: string;
-}
-
-export interface CreateRunInput extends RunScope {
-  request: CreateLearningRunRequestV1;
 }
 
 /** §16.3 V2 PREPARE 请求（wire 上带 originV2；与 V1 的 origin 互斥）。 */
@@ -327,7 +322,7 @@ async function planFollowupTask(
       answerBearingFieldsHidden: true,
       profileHash: textVariant.disclosureProfileHash,
       createdAt: at,
-    });
+    }).onConflictDoNothing();
   }
   return { taskId };
 }
@@ -355,7 +350,7 @@ export async function backfillPresentationHistory(
 }
 
 
-// F16·①（round-4）：createRun/createRunV2 每次热路径都全表物化 interaction
+// F16·①（round-4）：createRunV2 每次热路径都全表物化 interaction
 // qualifications（无 WHERE）。表为全局参考表（无 workspaceId 维度，见 migration
 // 0144），故可安全做进程内短 TTL 缓存（60s）：参考数据低频更新，缓存可消
 // 每请求全扫热点。cache-hit 检查时顺带清过期条目，避免 Map 无界。
@@ -394,9 +389,7 @@ async function recentPresentedPayloadHashes(
   tx: ApiTransaction,
   scope: { workspaceId: string; userId: string; keyPointId: string },
 ): Promise<Set<string>> {
-  // 目标身份经 origin JSONB 的 alias 字段取（方案 20 §29.4）。注意存储的
-  // V2 形状只有 objectiveId（strictObject，无 keyPointId），rebase 前的
-  // 历史行才带 keyPointId——查询必须 coalesce 兼容两种形状。
+  // Run origin is a strict V2 object; objectiveId is the only stored target key.
   const rows = await tx
     .select({ publicPayloadHash: learningTaskPresentationHistory.publicPayloadHash })
     .from(learningTaskPresentationHistory)
@@ -404,7 +397,7 @@ async function recentPresentedPayloadHashes(
     .where(and(
       eq(learningTaskPresentationHistory.workspaceId, scope.workspaceId),
       eq(learningTaskPresentationHistory.userId, scope.userId),
-      sql`coalesce(${learningRuns.origin}->>'keyPointId', ${learningRuns.origin}->>'objectiveId') = ${scope.keyPointId}`,
+      sql`${learningRuns.origin}->>'objectiveId' = ${scope.keyPointId}`,
       gte(learningTaskPresentationHistory.presentedAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)),
     ))
     // 热路径：只取最近一批用于展示去重（presentation-dedup 只需近端历史）。
@@ -414,75 +407,11 @@ async function recentPresentedPayloadHashes(
 }
 
 /**
- * 创建 run（方案 20 §16.3）：origin 的 keyPointId 即 objectiveId alias。
- * 创建统一走 createRunV2（frozen target snapshot）。
- */
-export async function createRun(
-  tx: ApiTransaction,
-  input: CreateRunInput,
-  now: () => Date = () => new Date(),
-): Promise<LearningRunPublicV1> {
-  const { workspaceId, userId } = input;
-  const req = input.request;
-  const result = await createRunV2(tx, {
-    workspaceId,
-    userId,
-    request: {
-      originV2: mapV1OriginToV2(req.origin),
-      goal: req.goal,
-      requestedTimeBudgetSeconds: req.requestedTimeBudgetSeconds,
-      responsePreference: req.responsePreference,
-      idempotencyKey: req.idempotencyKey,
-    },
-  }, now);
-  return getRunPublicView(tx, { workspaceId, userId, runId: result.runId });
-}
-
-/** origin → originV2 映射：keyPointId 即 objectiveId（alias 语义见方案 20 §5.2/§29.4）。 */
-function mapV1OriginToV2(origin: CreateLearningRunRequestV1["origin"]): LearningRunOriginV2 {
-  switch (origin.kind) {
-    case "card":
-      return { kind: "card", cardId: origin.cardId, objectiveId: origin.keyPointId };
-    case "review":
-      return {
-        kind: "review",
-        scheduleId: origin.scheduleId,
-        objectiveId: origin.keyPointId,
-        scheduleGeneration: origin.scheduleGeneration,
-      };
-    case "star_map":
-      return {
-        kind: "star_map",
-        objectiveId: origin.keyPointId,
-        lens: origin.lens,
-        filter: origin.filter,
-        ...(origin.routePlanId ? { routePlanId: origin.routePlanId } : {}),
-        baselineCheckpoint: origin.baselineCheckpoint,
-      };
-    case "today":
-      return {
-        kind: "today",
-        ...(origin.recommendationId ? { recommendationId: origin.recommendationId } : {}),
-        objectiveId: origin.keyPointId,
-      };
-    case "onboarding":
-      return {
-        kind: "onboarding",
-        sampleMode: origin.sampleMode,
-        objectiveId: origin.keyPointId,
-        ...(origin.sandboxNamespaceId ? { sandboxNamespaceId: origin.sandboxNamespaceId } : {}),
-      };
-  }
-}
-
-/**
  * V2 origin 特有 fail-closed 校验（§16.4 sandbox 隔离 + P7 投影基线新鲜度）。
  *
- * 2026-08-23 补回：V1 createRun 在 resolveOriginTarget 内校验 onboarding
- * sandbox namespace 的存在性/归属/过期，以及 star_map baseline checkpoint 的
- * 签名、作用域与 watermark 新鲜度；V2 rebase 时该函数被整体退役，两项校验
- * 一并丢失（过期 namespace / 伪造基线可静默创建 Run）。语义与历史实现一致：
- * 校验失败一律 contextStale（409）。
+ * 校验 onboarding sandbox namespace 的存在性/归属/过期，以及 star_map
+ * baseline checkpoint 的签名、作用域与 watermark 新鲜度；校验失败一律
+ * contextStale（409）。
  */
 async function validateV2OriginExtras(
   tx: ApiTransaction,
@@ -550,18 +479,6 @@ async function validateV2OriginExtras(
 
 // ─── createRunV2（§16.2 PREPARE：V2 Origin → freeze snapshot → V2 planner）────
 
-/**
- * V2 run 的 keyPointId 语义：作为 Objective ID alias（§16.3/§29.4）。
- * objective 的有效性由 freezeTargetSnapshotV2 统一 fail-closed 校验
- * （workspace-scoped active Objective），此处仅保留 alias 语义返回。
- */
-async function resolveV2ObjectiveKeyPoint(
-  _tx: ApiTransaction,
-  _scope: RunScope,
-  objectiveId: string,
-): Promise<{ keyPointId: string }> {
-  return { keyPointId: objectiveId };
-}
 
 /**
  * §16.3 V2 schedulingAuthorization：
@@ -656,7 +573,7 @@ async function resolveV2Scheduling(
       keyPointId: objectiveId,
       targetFingerprint: semanticTargetFingerprint,
       dueAt: new Date().toISOString(),
-      schedulerPolicyId: "review-schedule-v1",
+      schedulerPolicyId: "discrete-v2",
     };
   }
   if (origin.kind === "card" || origin.kind === "star_map") {
@@ -669,18 +586,17 @@ async function resolveV2Scheduling(
         keyPointId: objectiveId,
         targetFingerprint: semanticTargetFingerprint,
         dueAt: new Date().toISOString(),
-        schedulerPolicyId: "review-schedule-v1",
+        schedulerPolicyId: "discrete-v2",
       };
     }
     return {
       kind: "create_initial",
       keyPointId: objectiveId,
       targetFingerprint: semanticTargetFingerprint,
-      schedulerPolicyId: "review-schedule-v1",
+      schedulerPolicyId: "discrete-v2",
     };
   }
-  // today / onboarding：无调度效果（2026-08-23 补回 V1 语义：onboarding
-  // sandbox 模式 reasonCode=sandbox，其余 not_authorized——V2 rebase 时丢失）。
+  // today / onboarding：无调度效果。
   if (origin.kind === "onboarding" && origin.sampleMode === "sandbox") {
     return { kind: "no_effect", reasonCode: "sandbox" };
   }
@@ -740,8 +656,7 @@ export async function createRunV2(
   }
 
   const objectiveId = originV2.objectiveId;
-  // resolveV2ObjectiveKeyPoint 校验迁移期 stable keyPointId alias（§29.4）
-  await resolveV2ObjectiveKeyPoint(tx, { workspaceId, userId }, objectiveId);
+  // freezeTargetSnapshotV2 performs the workspace-scoped active-objective check.
   // origin 特有 fail-closed 校验（2026-08-23 补回：V2 rebase 时随 resolveOriginTarget
   // 一并丢失——sandbox namespace 过期/伪造投影基线此前可静默通过）。
   await validateV2OriginExtras(tx, { workspaceId, userId }, originV2);
@@ -761,7 +676,7 @@ export async function createRunV2(
     // scheduleId/lens/filter/destination），修复此前非 card 分支缺字段的漂移
     // （2026-08-22 审查：review/onboarding/star_map 存储值缺 V1 合同字段）。
     returnTarget: deriveReturnTargetV1(originV2),
-    // 目标身份经 origin JSONB（keyPointId=objectiveId alias）。
+    // 目标身份经严格 V2 origin 的 objectiveId 读取。
     targetFingerprint: "",
     goal: request.goal,
     createdAt: createdAt0,
@@ -993,6 +908,10 @@ export async function createRunV2(
     // disclosure profile：同 (workspace, profileHash) 幂等复用（同一目标的
     // 确定性变体重建不得撞 hash 唯一约束——23505 修复）。
     // PERF-A#13：存在性已由循环前一次 IN 查询预载，无需每 variant SELECT。
+    // M2（2026-08-24 审查）：check-then-insert 在并发 PREPARE 下仍会双双 miss
+    // （text variant 的 hash 由 publicPayloadHash 派生，同目标题面恒等），
+    // loser 撞 (workspace, profileHash) 唯一索引 → 整个创建事务 500。
+    // onConflictDoNothing 把该竞态收敛为幂等复用。
     if (!existingDisclosureHashesV2.has(variant.disclosureProfileHash)) {
       await tx.insert(learningTaskDisclosureProfiles).values({
         variantId: variant.variantId,
@@ -1003,7 +922,7 @@ export async function createRunV2(
         answerBearingFieldsHidden: true,
         profileHash: variant.disclosureProfileHash,
         createdAt,
-      });
+      }).onConflictDoNothing();
     }
   }
   await tx.insert(learningTaskPresentationHistory).values({
@@ -1047,12 +966,11 @@ export async function createRunV2(
 
 // ─── getRunPublicView ────────────────────────────────────────────────────
 
-/** 从 run.origin 取目标 ID（V1 keyPointId / V2 objectiveId 同一 alias，§29.4）。 */
+/** 从严格 V2 run.origin 取目标 ID。 */
 function originObjectiveId(origin: unknown): string {
   if (origin && typeof origin === "object") {
-    const o = origin as { objectiveId?: unknown; keyPointId?: unknown };
-    if (typeof o.objectiveId === "string") return o.objectiveId;
-    if (typeof o.keyPointId === "string") return o.keyPointId;
+    const objectiveId = (origin as { objectiveId?: unknown }).objectiveId;
+    if (typeof objectiveId === "string") return objectiveId;
   }
   return "";
 }
@@ -1069,7 +987,12 @@ export async function getRunPublicView(
       tx.select({ id: learningTasks.id }).from(learningTasks).where(eq(learningTasks.runId, runRow.id)),
     )),
     tx.select().from(learningRunPrivateContracts).where(eq(learningRunPrivateContracts.runId, runRow.id)).limit(1),
-    tx.select().from(learningAssessments).where(eq(learningAssessments.runId, runRow.id)),
+    // H1/H3（2026-08-24 审查）：activeAssessment 必须是「最新」评估且顺序确定。
+    // 此前无 ORDER BY 的 rows[0] 在多 assessment（followup）场景下会把旧评估
+    // 投影成 activeAssessment，误导 recoverable_error 的重试入口。
+    tx.select().from(learningAssessments)
+      .where(eq(learningAssessments.runId, runRow.id))
+      .orderBy(desc(learningAssessments.createdAt)),
   ]);
 
   const view = buildRunPublicView({
@@ -1275,6 +1198,7 @@ function projectLearningRunPublicSnapshotV2(
     runRevision: view.revision,
     runtimeEpoch: view.runtimeEpoch,
     activeSecondsUsed: view.activeSecondsUsed,
+    timeBudgetSeconds: view.timeBudgetSeconds,
     activeTask: view.activeTask,
     allowedActions: buildLearningRunAllowedActionsV2(view),
     publishedTargetEligibility: context.publishedTargetEligibility,
@@ -1403,8 +1327,8 @@ export async function getReturnContractV2(
   input: RunScope & { runId: string },
 ): Promise<LearningRunReturnContractV2> {
   const context = await loadV2RunContext(tx, input);
-  const legacyContract = learningRunReturnContractSchema.safeParse(await getReturnContract(tx, input));
-  if (!legacyContract.success) throw unsupportedV2Contract("V1 return contract 无法安全读取");
+  const currentContract = learningRunReturnContractSchema.safeParse(await getReturnContract(tx, input));
+  if (!currentContract.success) throw unsupportedV2Contract("当前 return contract 无法安全读取");
   const base = {
     version: 2 as const,
     runId: context.run.id,
@@ -1412,7 +1336,7 @@ export async function getReturnContractV2(
     originV2: context.originV2,
     returnTargetV2: context.returnTargetV2,
   };
-  if (legacyContract.data.status !== "run_active" && legacyContract.data.status !== "unavailable") {
+  if (currentContract.data.status !== "run_active" && currentContract.data.status !== "unavailable") {
     const availability = await resolveV2ReturnTargetAvailability(tx, input, context);
     if (availability) {
       return learningRunReturnContractV2Schema.parse({
@@ -1423,12 +1347,12 @@ export async function getReturnContractV2(
       });
     }
   }
-  switch (legacyContract.data.status) {
+  switch (currentContract.data.status) {
     case "run_active":
       return learningRunReturnContractV2Schema.parse({
         ...base,
         status: "run_active",
-        runPhase: legacyContract.data.runPhase,
+        runPhase: currentContract.data.runPhase,
       });
     case "no_projection_change":
       return learningRunReturnContractV2Schema.parse({
@@ -1440,24 +1364,24 @@ export async function getReturnContractV2(
       return learningRunReturnContractV2Schema.parse({
         ...base,
         status: "projection_pending",
-        sourceChange: legacyContract.data.sourceChange,
-        currentCheckpoint: legacyContract.data.currentCheckpoint,
-        retryAfterMs: legacyContract.data.retryAfterMs,
+        sourceChange: currentContract.data.sourceChange,
+        currentCheckpoint: currentContract.data.currentCheckpoint,
+        retryAfterMs: currentContract.data.retryAfterMs,
       });
     case "ready":
       return learningRunReturnContractV2Schema.parse({
         ...base,
         status: "ready",
-        sourceChange: legacyContract.data.sourceChange,
-        targetCheckpoint: legacyContract.data.targetCheckpoint,
-        changeSetId: legacyContract.data.changeSetId,
+        sourceChange: currentContract.data.sourceChange,
+        targetCheckpoint: currentContract.data.targetCheckpoint,
+        changeSetId: currentContract.data.changeSetId,
       });
     case "unavailable":
       return learningRunReturnContractV2Schema.parse({
         ...base,
         status: "unavailable",
-        reason: legacyContract.data.reason,
-        fallbackTargetV2: legacyContract.data.fallbackTarget ? context.returnTargetV2 : null,
+        reason: currentContract.data.reason,
+        fallbackTargetV2: currentContract.data.fallbackTarget ? context.returnTargetV2 : null,
       });
   }
 }
@@ -1468,6 +1392,40 @@ function activeVariantIdFor(
 ): string | null {
   const active = variants.find((v) => v.taskId === taskId && v.status === "active");
   return active?.id ?? null;
+}
+
+/**
+ * M3（2026-08-24 审查）：retry_prepare 重跑规划前，从已在册的 Variant 交互形状
+ * 反推 responsePreference。
+ *
+ * V2 run.origin 只冻结严格 originV2（responsePreference 是请求级字段，从不
+ * 持久化），此前重试恒回落 "adaptive"——用户原本选 structured 的题在重试后
+ * 静默退化为开放回答。当前正在使用的 Variant 形状是最忠实的可用事实源。
+ */
+async function resolveResponsePreferenceForRetry(
+  tx: ApiTransaction,
+  runId: string,
+): Promise<PlannerOptions["responsePreference"]> {
+  const rows = await tx
+    .select({ interaction: learningTaskVariants.interaction })
+    .from(learningTaskVariants)
+    .innerJoin(learningTasks, eq(learningTasks.id, learningTaskVariants.taskId))
+    .where(and(
+      eq(learningTasks.runId, runId),
+      inArray(learningTaskVariants.status, ["active", "standby", "superseded"]),
+    ))
+    .orderBy(
+      sql`CASE WHEN ${learningTaskVariants.status} = 'active' THEN 0 ELSE 1 END`,
+      learningTaskVariants.createdAt,
+    )
+    .limit(1);
+  const kind = (rows[0]?.interaction as { kind?: string } | null)?.kind;
+  if (kind === "voice_teachback") return "voice";
+  if (kind === "text_response") return "text";
+  if (kind === "ordering" || kind === "relation_canvas" || kind === "repair" || kind === "structured_bundle") {
+    return "structured";
+  }
+  return "adaptive";
 }
 
 // ─── applyAction（§13.2 状态机 P2 子集）──────────────────────────────────
@@ -1648,6 +1606,27 @@ export async function applyAction(
             updatedAt: at,
           })
           .where(eq(learningRuns.id, run.id));
+      } else if (run.phase === "recoverable_error") {
+        // H4（2026-08-24 审查）：availability 在 recoverable_error 下已宣告 end
+        // 可用（abandonLockedEvidence:false），状态机必须接受——否则与重试失败的
+        // 情形叠加后 run 无任何出口，永久占用。失败阶段的在途评估一并作废：
+        // epoch 前移（迟到写回无副作用）+ 未终态 assessment 收尾为 failed。
+        await tx.update(learningRuns)
+          .set({
+            phase: "ended",
+            terminalReasonCode: "user_ended",
+            runtimeEpoch: run.runtimeEpoch + 1,
+            revision: run.revision + 1,
+            activeTaskId: null,
+            updatedAt: at,
+          })
+          .where(eq(learningRuns.id, run.id));
+        await tx.update(learningAssessments)
+          .set({ status: "failed", rubricResults: [], trustClass: null, reportHash: null, updatedAt: at })
+          .where(and(
+            eq(learningAssessments.runId, run.id),
+            inArray(learningAssessments.status, ["queued", "running"]),
+          ));
       } else if (["preparing", "active", "paused"].includes(run.phase)) {
         await tx.update(learningRuns)
           .set({
@@ -1775,7 +1754,12 @@ export async function applyAction(
         .where(and(
           eq(learningAssessments.runId, run.id),
           eq(learningAssessments.status, "completed"),
+          // H3（2026-08-24 审查）：绑定「产生该 partial checkpoint 的当前任务」
+          // 的最新 completed assessment，而不是 run 内任意一条（无 ORDER BY 的
+          // 「第一行」在 activate_followup 之后可能是旧任务的评估）。
+          ...(run.activeTaskId ? [eq(learningAssessments.taskId, run.activeTaskId)] : []),
         ))
+        .orderBy(desc(learningAssessments.createdAt))
         .limit(1);
       const assessment = assessmentRows[0];
       if (!assessment) {
@@ -1791,7 +1775,7 @@ export async function applyAction(
         workspaceId: input.workspaceId,
         userId: input.userId,
         commandType: "commit_requested",
-        payload: { assessmentId: assessment.id, disposition: "facet_evidence" },
+        payload: { assessmentId: assessment.id, disposition: "facet_evidence", runtimeEpoch: run.runtimeEpoch },
         idempotencyKey: `commit:facet:${assessment.id}`,
         availableAt: at,
         createdAt: at,
@@ -1843,11 +1827,21 @@ export async function applyAction(
       }
       const st = snap.target;
       const timeBudgetSeconds = clampTimeBudget(run.timeBudgetSeconds);
-      const recentPublicPayloadHashes = await recentPresentedPayloadHashes(tx, {
-        workspaceId: input.workspaceId,
-        userId: input.userId,
-        keyPointId: st.objectiveId,
-      });
+      const [recentPublicPayloadHashes, interactionQualifications, responsePreference] = await Promise.all([
+        recentPresentedPayloadHashes(tx, {
+          workspaceId: input.workspaceId,
+          userId: input.userId,
+          keyPointId: st.objectiveId,
+        }),
+        // M3（2026-08-24 审查）：qualification 数据此前漏传，V1 结构题的 ceiling
+        // 判定会静默退化为 practice。
+        loadInteractionQualifications(tx),
+        // M3：responsePreference 是请求级字段（V2 run.origin 只存严格
+        // originV2，从不持久化它），此前恒回落 "adaptive"——用户原本选
+        // structured 的题在重试后静默变成开放回答。改从已持久化的在册
+        // Variant 交互形状确定性反推（与用户实际看到的题目一致）。
+        resolveResponsePreferenceForRetry(tx, run.id),
+      ]);
       const plan = planRun(
         {
           keyPointId: st.objectiveId,
@@ -1869,9 +1863,10 @@ export async function applyAction(
         {
           runId: run.id,
           goal: run.goal as PlannerOptions["goal"],
-          responsePreference: (run.origin as { responsePreference?: string }).responsePreference as PlannerOptions["responsePreference"] ?? "adaptive",
+          responsePreference,
           timeBudgetSeconds,
           recentPublicPayloadHashes,
+          interactionQualifications,
         },
       );
       // 重写 planning 产物：旧 tasks 级联清除（prepare 失败时无 assessment）。
@@ -1944,7 +1939,8 @@ export async function applyAction(
           reportHash: closure.reportHash,
           createdAt: at,
         });
-        // disclosure profile 按 hash 去重（与 createRun 一致）。
+        // disclosure profile 按 hash 去重（与 createRun 一致；M2：并发下
+        // check-then-insert 仍会撞唯一索引，onConflictDoNothing 收敛为幂等复用）。
         const existingDisclosure = await tx
           .select({ id: learningTaskDisclosureProfiles.id })
           .from(learningTaskDisclosureProfiles)
@@ -1963,7 +1959,7 @@ export async function applyAction(
             answerBearingFieldsHidden: true,
             profileHash: variant.disclosureProfileHash,
             createdAt: at,
-          });
+          }).onConflictDoNothing();
         }
       }
       await tx.update(learningRuns)
@@ -1986,12 +1982,20 @@ export async function applyAction(
         throw invalidPhase(run.phase ?? "none", "recoverable_error(stage=assessment)");
       }
       const at = now();
+      // H1（2026-08-24 审查）：重试必须覆盖 tick 失败路径留下的全部未终态
+      // assessment。prepare 事务整体回滚时 assessment 退回 queued；Critic 写回
+      // 事务回滚时它停在 running（prepare 事务已提交）；worker 主动收尾才写
+      // failed。此前只认 failed → 重试恒 409，叠加 end 拒绝即 run 永久卡死。
+      const requestedAssessmentId = input.action.kind === "retry_assessment"
+        ? input.action.assessmentId
+        : null;
       const assessmentRows = await tx
         .select({ id: learningAssessments.id, taskId: learningAssessments.taskId, artifactId: learningAssessments.artifactId })
         .from(learningAssessments)
         .where(and(
           eq(learningAssessments.runId, run.id),
-          eq(learningAssessments.status, "failed"),
+          inArray(learningAssessments.status, ["queued", "running", "failed"]),
+          ...(requestedAssessmentId ? [eq(learningAssessments.id, requestedAssessmentId)] : []),
         ))
         .orderBy(desc(learningAssessments.createdAt))
         .limit(1);
@@ -2005,6 +2009,9 @@ export async function applyAction(
       await tx.update(learningRuns)
         .set({ phase: "assessing", failure: null, revision: run.revision + 1, updatedAt: at })
         .where(eq(learningRuns.id, run.id));
+      // outbox scope key 唯一约束是 (workspace, run, idempotency_key)：同一
+      // assessment 的第二次重试必须用新的 key（run.revision 每次失败/重试都
+      // 递增），否则第二次重试会撞唯一索引变成裸 23505/500。
       await tx.insert(learningRunProcessingOutbox).values({
         runId: run.id,
         taskId: assessment.taskId,
@@ -2013,7 +2020,7 @@ export async function applyAction(
         userId: input.userId,
         commandType: "assessment_requested",
         payload: { assessmentId: assessment.id },
-        idempotencyKey: `assessment:retry:${assessment.id}`,
+        idempotencyKey: `assessment:retry:${assessment.id}:${run.revision}`,
         availableAt: at,
         createdAt: at,
         updatedAt: at,
@@ -2028,12 +2035,18 @@ export async function applyAction(
         throw invalidPhase(run.phase ?? "none", "recoverable_error(stage=commit)");
       }
       const at = now();
+      // H3（2026-08-24 审查）：重试的必须是「当前任务（正在结算的那个任务）」的
+      // completed assessment。此前取 run 内任意 completed（无序），
+      // activate_followup 产生第二个 assessment 后会引用错误的评估推导
+      // disposition 与 canonical envelope。committing/recoverable_error(commit)
+      // 期间 activeTaskId 恒为被结算任务，故按它收敛。
       const assessmentRows = await tx
         .select({ id: learningAssessments.id, taskId: learningAssessments.taskId, artifactId: learningAssessments.artifactId, trustClass: learningAssessments.trustClass })
         .from(learningAssessments)
         .where(and(
           eq(learningAssessments.runId, run.id),
           eq(learningAssessments.status, "completed"),
+          ...(run.activeTaskId ? [eq(learningAssessments.taskId, run.activeTaskId)] : []),
         ))
         .orderBy(desc(learningAssessments.createdAt))
         .limit(1);
@@ -2054,8 +2067,11 @@ export async function applyAction(
         workspaceId: input.workspaceId,
         userId: input.userId,
         commandType: "commit_requested",
-        payload: { assessmentId: assessment.id, disposition },
-        idempotencyKey: `commit:retry:${assessment.id}`,
+        payload: { assessmentId: assessment.id, disposition, runtimeEpoch: run.runtimeEpoch },
+        // outbox scope key 唯一约束含 idempotency_key：同 assessment 的第二次
+        // 重试必须换 key（run.revision 每次失败/重试都递增），否则撞唯一索引
+        // → 裸 23505/500。
+        idempotencyKey: `commit:retry:${assessment.id}:${run.revision}`,
         availableAt: at,
         createdAt: at,
         updatedAt: at,
@@ -2122,6 +2138,14 @@ export async function putDraft(
     payload: input.payload,
     rendererState: input.rendererState,
   }));
+  // M1（2026-08-24 审查）：draft 幂等边界必须与 action 一致地串行化。此前两个
+  // 同 idempotencyKey 的并发 PUT 会同时 miss ledger 并各自执行写入，loser 撞
+  // ledger 唯一索引 → 裸 23505/500（loadRun 未加 FOR UPDATE，run 行锁不覆盖）。
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`v2-draft:${input.workspaceId}:${input.userId}:${input.runId}:${input.idempotencyKey}`}, 0)
+    )
+  `);
   const existingLedger = await tx
     .select({
       responseStatus: learningRunActionLedger.responseStatus,
@@ -2165,7 +2189,9 @@ export async function putDraft(
     .for("update")
     .execute();
   const current = existing[0];
-  if (input.expectedDraftRevision !== null && current?.draftRevision !== input.expectedDraftRevision) {
+  // 无草稿行视为版本 0：客户端首次保存发 expectedDraftRevision=0（见 V2 合同
+  // min(0)），此前 undefined !== 0 导致首次保存必然 409。
+  if (input.expectedDraftRevision !== null && (current?.draftRevision ?? 0) !== input.expectedDraftRevision) {
     throw new LearningRunServiceError("stale_draft_revision", "草稿已变化，请重新保存", 409, {
       currentDraftRevision: current?.draftRevision ?? null,
     });
@@ -2240,18 +2266,6 @@ export async function putDraft(
   return receipt;
 }
 
-export async function deleteDraft(
-  tx: ApiTransaction,
-  input: RunScope & { runId: string; taskId: string },
-): Promise<void> {
-  await loadRun(tx, input, input.runId);
-  await tx.delete(learningTaskDrafts).where(and(
-    eq(learningTaskDrafts.taskId, input.taskId),
-    eq(learningTaskDrafts.workspaceId, input.workspaceId),
-    eq(learningTaskDrafts.userId, input.userId),
-  ));
-}
-
 /** 读取当前草稿（跨设备恢复；解密失败返回 payload=null，绝不伪造）。 */
 export async function getDraft(
   tx: ApiTransaction,
@@ -2308,9 +2322,8 @@ export async function getDraft(
 // ─── submitArtifact（§12.3 原子提交）─────────────────────────────────────
 
 /**
- * §16.2/§16.7：V2 Artifact lock 的 epoch 复验。
- * - V1 run（private contract 无 snapshotHash）→ 无操作；
- * - V2 run：FOR UPDATE 锁定全部 evidence eligibility 行（稳定 id 顺序），
+ * §16.2/§16.7：Artifact lock 的 epoch 复验。FOR UPDATE 锁定全部
+ * evidence eligibility 行（稳定 id 顺序），
  *   复验 expectedObjectiveLifecycleEpoch 与每个 expectedEvidenceEligibilityEpoch；
  *   任何 restricted/revoked 或 epoch 漂移 → fail closed。
  */
@@ -2321,14 +2334,13 @@ async function revalidateV2ArtifactEpochs(
   const contractRows = await tx
     .select({
       workspaceId: learningRunPrivateContracts.workspaceId,
-      snapshotHash: learningRunPrivateContracts.snapshotHash,
       expectedObjectiveLifecycleEpoch: learningRunPrivateContracts.expectedObjectiveLifecycleEpoch,
     })
     .from(learningRunPrivateContracts)
     .where(eq(learningRunPrivateContracts.runId, runId))
     .limit(1);
   const contract = contractRows[0];
-  if (!contract?.snapshotHash) return; // V1 run：无 V2 闭包复验。
+  if (!contract) throw new LearningRunServiceError("v2_snapshot_missing", "run 缺少 private contract", 409);
 
   const snapshot = await loadFrozenTargetSnapshotV2(tx, contract.workspaceId, runId);
   if (!snapshot) throw new LearningRunServiceError("v2_snapshot_missing", "V2 run 缺少 frozen snapshot", 409);
@@ -2768,7 +2780,7 @@ export async function getReturnContract(
     };
   }
   // P7：终态按 change set 物化状态返回投影语义。
-  const { understandingChangeSets } = await import("../../db/schema/understanding-projection.ts");
+  const { understandingChangeSets } = await import("@ailearn/shared/db-schema/understanding-projection");
   const changeSetRows = await tx
     .select()
     .from(understandingChangeSets)

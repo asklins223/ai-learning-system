@@ -1,5 +1,5 @@
 /**
- * projection-routes 纯函数测试（文档 16 §15.2 shared 平面 + 游标分页）。
+ * projection-read-service 纯函数测试（文档 16 §15.2 shared 平面 + 游标分页）。
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -9,7 +9,7 @@ import {
   encodeProjectionCursor,
   projectionEdgeId,
   projectionKpPageSize,
-} from "./projection-routes.ts";
+} from "./projection-read-service.ts";
 
 test("projectionEdgeId：确定性、不同边不同 id", () => {
   const a = projectionEdgeId("contains", "card:c1", "key_point:k1");

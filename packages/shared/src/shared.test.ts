@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  resolveDashScopeGenerationUrl,
   resolveDashScopeTextEndpoint,
   resolveOpenAIChatCompletionsUrl,
 } from "./ai-endpoints.ts";
@@ -11,8 +10,6 @@ import {
   postJsonToPublicEndpoint,
 } from "./public-json-http.ts";
 import {
-  evaluateValidationOutputSchema,
-  generateValidationQuestionOutputSchema,
   imageInsightOutputSchema,
   learningCardOutputSchema,
 } from "./schemas.ts";
@@ -28,24 +25,11 @@ describe("AI endpoint resolution", () => {
       resolveOpenAIChatCompletionsUrl("https://api.example.com/v1/chat/completions/"),
       "https://api.example.com/v1/chat/completions",
     );
-    assert.equal(
-      resolveDashScopeGenerationUrl("https://dashscope.aliyuncs.com/api/v1/"),
-      "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
-    );
   });
 
   it("routes all models through the compatible endpoint", () => {
-    // qwen-plus (legacy model) — still routes to compatible endpoint
     assert.deepEqual(
-      resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/api/v1", "qwen-plus"),
-      {
-        protocol: "openai_compatible",
-        url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-      },
-    );
-    // qwen3.6-plus (modern model)
-    assert.deepEqual(
-      resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/api/v1", " qwen3.6-plus "),
+      resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/compatible-mode/v1"),
       {
         protocol: "openai_compatible",
         url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
@@ -53,13 +37,10 @@ describe("AI endpoint resolution", () => {
     );
   });
 
-  it("accepts an explicit compatible-mode base URL", () => {
-    assert.deepEqual(
-      resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
-      {
-        protocol: "openai_compatible",
-        url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-      },
+  it("rejects the retired native endpoint root", () => {
+    assert.throws(
+      () => resolveDashScopeTextEndpoint("https://dashscope.aliyuncs.com/api/v1"),
+      /compatible-mode\/v1/,
     );
   });
 });
@@ -131,34 +112,8 @@ describe("public endpoint address policy", () => {
 });
 
 describe("shared AI output contracts", () => {
-  it("rejects empty card data and out-of-range validation confidence", () => {
+  it("rejects empty card data", () => {
     assert.equal(learningCardOutputSchema.safeParse({ title: "", summary: "", key_points: [] }).success, false);
-    assert.equal(evaluateValidationOutputSchema.safeParse({
-      outcome: "unknown",
-      confidence: 2,
-      feedback: "Needs review",
-    }).success, false);
-  });
-
-  it("accepts optional thinking field in evaluateValidationOutputSchema", () => {
-    const withThinking = evaluateValidationOutputSchema.safeParse({
-      outcome: "preliminary_understanding",
-      confidence: 0.85,
-      feedback: "回答准确覆盖了核心原理",
-      thinking: "claim 核心要点：1) 前提条件 2) 策略选择 3) 目的",
-      covered_points: ["策略选择"],
-      missing_points: [],
-      misunderstandings: [],
-      evidence_refs: [],
-    });
-    assert.equal(withThinking.success, true);
-
-    const withoutThinking = evaluateValidationOutputSchema.safeParse({
-      outcome: "preliminary_understanding",
-      confidence: 0.85,
-      feedback: "回答准确覆盖了核心原理",
-    });
-    assert.equal(withoutThinking.success, true);
   });
 
   it("keeps decorative and hard image evidence mutually exclusive", () => {
@@ -183,40 +138,6 @@ describe("shared AI output contracts", () => {
     }).success, false);
   });
 
-  it("enforces unique rubric keys and at least one required item", () => {
-    const valid = {
-      questionType: "explain" as const,
-      question: "请解释这个概念。",
-      rubricItems: [
-        {
-          key: "definition",
-          criterion: "说明定义",
-          expectedConcept: "核心定义",
-          weight: 2 as const,
-          required: true,
-          evidenceRefId: "ev_1",
-        },
-        {
-          key: "reason",
-          criterion: "说明原因",
-          expectedConcept: "核心原因",
-          weight: 1 as const,
-          required: false,
-          evidenceRefId: "ev_1",
-        },
-      ],
-    };
-
-    assert.equal(generateValidationQuestionOutputSchema.safeParse(valid).success, true);
-    assert.equal(generateValidationQuestionOutputSchema.safeParse({
-      ...valid,
-      rubricItems: valid.rubricItems.map((item) => ({ ...item, key: "duplicate" })),
-    }).success, false);
-    assert.equal(generateValidationQuestionOutputSchema.safeParse({
-      ...valid,
-      rubricItems: valid.rubricItems.map((item) => ({ ...item, required: false })),
-    }).success, false);
-  });
 });
 
 describe("shared Markdown parser", () => {

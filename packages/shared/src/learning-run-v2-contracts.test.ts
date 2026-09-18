@@ -70,6 +70,7 @@ const snapshot = {
   runRevision: 1,
   runtimeEpoch: 1,
   activeSecondsUsed: 12,
+  timeBudgetSeconds: 120,
   activeTask,
   allowedActions: [
     { version: 2 as const, kind: "pause" as const },

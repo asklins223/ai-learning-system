@@ -17,7 +17,6 @@ loadDotenv({
 const rendererPublicRoot = resolve('src/renderer/public')
 const packagingExcludedPublicPrefixes = [
   'assets/3d/',
-  'assets/companion/',
 ]
 
 function isPackagingExcludedPublicPath(relativePath: string): boolean {

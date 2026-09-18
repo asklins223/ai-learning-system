@@ -4,22 +4,27 @@
  * - POST /uploads/images   — 笔记图片上传（需 noteId，校验归属）
  * - POST /uploads/avatars  — 用户头像上传
  * - GET  /uploads/*        — 图片下载（租户/用户隔离校验）
+ *
+ * 业务/存储逻辑见 ./upload-service.ts；本文件只保留 HTTP 关注点（路由注册、
+ * preHandler 链、multipart 解析、限流 429 与状态码/响应头映射）。
  */
 import type { FastifyInstance } from "fastify";
-import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNotNull, isNull, or } from "drizzle-orm";
-import { db, withWorkspaceTransaction } from "../../db/client.ts";
-import { noteImageAssets, notes } from "../../db/schema/note.ts";
-import { users } from "../../db/schema/identity.ts";
-import { requireSession, requireOwner } from "../identity/middleware.ts";
+import { requireSession, requireOwner, getRequestCredential } from "../identity/middleware.ts";
 import { hasValidCookieCsrf } from "../identity/session-auth.ts";
+import { isStorageConfigured } from "../../lib/object-storage.ts";
 import {
-  uploadObject,
-  getObject,
-  headObject,
-  deleteObject,
-  isStorageConfigured,
-} from "../../lib/object-storage.ts";
+  RateLimiter,
+  createRateLimitStoreFromEnv,
+  type RateLimitStore,
+} from "../identity/rate-limit.ts";
+import {
+  MAX_IMAGE_SIZE,
+  MAX_AVATAR_SIZE,
+  fileTooLargeError,
+  uploadNoteImage,
+  uploadAvatar,
+  downloadUploadObject,
+} from "./upload-service.ts";
 
 /**
  * PERF-B4 修复：@fastify/multipart 在正常 4xx 早返回时不会自动消费内存态
@@ -37,49 +42,6 @@ function drainMultipartFile(
     }
   }
 }
-
-/**
- * R3（round-3 审计）：@fastify/multipart 在 fileSize 超限时，req.file()/toBuffer()
- * 抛 error.code = "FST_REQ_FILE_TOO_LARGE"。识别并转 413（与 voice-routes 一致），
- * 避免落入 Fastify 默认 500。也可识别错误类名 RequestFileTooLargeError。
- */
-function fileTooLargeError(err: unknown): boolean {
-  if (err instanceof Error) {
-    const code = (err as { code?: string }).code;
-    if (code === "FST_REQ_FILE_TOO_LARGE") return true;
-    if (err.constructor.name === "RequestFileTooLargeError") return true;
-  }
-  return false;
-}
-
-
-/**
- * 2026-08-12（存储面审计）：区分“对象不存在/无权限”（折叠为 404，防
- * 存在性 oracle）与“S3 服务端故障/网络错误”（503 + 日志，此前一律 404，
- * MinIO 故障不可观测）。
- */
-function isObjectMissingError(err: unknown): boolean {
-  const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
-  // 仅 S3 明确返回 403/404（对象不存在或无权限）折叠为 404；
-  // 网络错误/超时等无 $metadata 的错误走 503 分支（可观测）。
-  return status === 403 || status === 404;
-}
-import {
-  validateImageMagicBytes,
-  ALLOWED_IMAGE_TYPES,
-  extFromMimeType,
-  readImageDimensions,
-} from "../../lib/file-validation.ts";
-import { getRequestCredential } from "../identity/middleware.ts";
-import { logger } from "../../lib/logger.ts";
-import {
-  RateLimiter,
-  createRateLimitStoreFromEnv,
-  type RateLimitStore,
-} from "../identity/rate-limit.ts";
-
-const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
-const MAX_AVATAR_SIZE = 2 * 1024 * 1024; // 2MB
 
 // Rate limit defaults (§7.7): images 20/min, avatars 5/min
 const DEFAULT_IMAGE_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -168,132 +130,39 @@ export async function uploadRoutes(
       return reply.code(400).send({ error: "noteId is required" });
     }
 
-    // Validate noteId belongs to current workspace (提前校验，避免无效请求浪费内存读取文件)
-    // CONC-03: 不允许向已软删除的笔记上传图片，避免产生孤儿图片对象
-    const transactionContext = {
-      workspaceId: req.session.workspaceId,
-      userId: req.session.userId,
-    };
-    const note = await withWorkspaceTransaction(
-      transactionContext,
-      (tx) => tx.query.notes.findFirst({
-        where: and(
-          eq(notes.id, noteId),
-          eq(notes.workspaceId, req.session.workspaceId),
-          isNull(notes.deletedAt),
-        ),
-      }),
+    // 业务/存储逻辑：笔记归属校验 → 文件校验 → 对象存储写入 → noteImageAssets 登记
+    const outcome = await uploadNoteImage(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      { noteId, file },
     );
-    if (!note) {
-      drainMultipartFile(file);
-      return reply.code(404).send({ error: "note not found in current workspace" });
+    if (outcome.ok) {
+      return reply.code(201).send(outcome.body);
     }
-
-    // Validate file type
-    if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype as typeof ALLOWED_IMAGE_TYPES[number])) {
-      drainMultipartFile(file);
-      return reply.code(415).send({ error: "unsupported file type" });
-    }
-
-    // QUAL-48 安全注释：file.toBuffer() 将整个文件读入内存。
-    // 防护措施：
-    //   1. req.file({ limits: { fileSize: MAX_IMAGE_SIZE } }) 已在上游设置
-    //      10MB 限制，Fastify 会在流式读取时自动截断并拒绝超大文件
-    //   2. toBuffer() 后的双重校验（buffer.length > MAX_IMAGE_SIZE）作为
-    //      第二道防线，防止 limits 配置被绕过
-    //   3. magic bytes 校验在 toBuffer 后进行，因为需要检查前几字节
-    //   4. 图片尺寸校验防止 decode-bomb（40 megapixel 限制）
-    let buffer;
-    try {
-      buffer = await file.toBuffer();
-    } catch (err) {
-      // R3：读取阶段超限同样抛 FST_REQ_FILE_TOO_LARGE → 413（非 500）。
-      if (fileTooLargeError(err)) {
+    // 排空点与失败点一致：note_not_found / unsupported_type / file_read_too_large
+    // 均发生在 file 流读完之前；其后的失败已消费完请求体，无需 resume()。
+    switch (outcome.reason) {
+      case "note_not_found":
+        drainMultipartFile(file);
+        return reply.code(404).send({ error: "note not found in current workspace" });
+      case "unsupported_type":
+        drainMultipartFile(file);
+        return reply.code(415).send({ error: "unsupported file type" });
+      case "file_read_too_large":
         drainMultipartFile(file);
         return reply.code(413).send({ error: "file too large (max 10MB)", code: "FST_REQ_FILE_TOO_LARGE" });
-      }
-      throw err;
+      case "content_type_mismatch":
+        return reply.code(415).send({ error: "file content does not match declared type" });
+      case "too_large":
+        return reply.code(413).send({ error: "file too large (max 10MB)" });
+      case "dimensions_undecodable":
+        return reply.code(415).send({ error: "image dimensions could not be decoded" });
+      case "pixel_count_exceeded":
+        return reply.code(413).send({ error: "image pixel count exceeds 40 megapixels" });
+      case "storage_upload_failed":
+        return reply.code(503).send({ error: "failed to upload image" });
+      case "asset_persist_failed":
+        return reply.code(503).send({ error: "failed to register uploaded image" });
     }
-
-    // Validate magic bytes
-    if (!validateImageMagicBytes(buffer, file.mimetype)) {
-      return reply.code(415).send({ error: "file content does not match declared type" });
-    }
-
-    // Double-check file size
-    if (buffer.length > MAX_IMAGE_SIZE) {
-      return reply.code(413).send({ error: "file too large (max 10MB)" });
-    }
-
-    const dimensions = readImageDimensions(buffer, file.mimetype);
-    if (!dimensions) {
-      return reply.code(415).send({ error: "image dimensions could not be decoded" });
-    }
-    // Decode-bomb guard: reject before any downstream normalizer opens pixels.
-    if (dimensions.width * dimensions.height > 40_000_000) {
-      return reply.code(413).send({ error: "image pixel count exceeds 40 megapixels" });
-    }
-
-    // Generate objectKey: {workspaceId}/notes/{noteId}/{uuid}.{ext}
-    const ext = extFromMimeType(file.mimetype);
-    const objectKey = `${req.session.workspaceId}/notes/${noteId}/${randomUUID()}.${ext}`;
-
-    try {
-      await uploadObject(objectKey, buffer, file.mimetype);
-    } catch (err) {
-      logger.error({ err, objectKey }, "failed to upload image to storage");
-      return reply.code(503).send({ error: "failed to upload image" });
-    }
-
-    let asset: typeof noteImageAssets.$inferSelect;
-    try {
-      asset = await withWorkspaceTransaction(transactionContext, async (tx) => {
-        const liveNote = await tx.query.notes.findFirst({
-          columns: { id: true },
-          where: and(
-            eq(notes.id, note.id),
-            eq(notes.workspaceId, req.session.workspaceId),
-            isNull(notes.deletedAt),
-          ),
-        });
-        if (!liveNote) throw new Error("note was deleted before image asset registration");
-        const [registered] = await tx
-          .insert(noteImageAssets)
-          .values({
-            workspaceId: req.session.workspaceId,
-            uploadedForNoteId: liveNote.id,
-            objectKey,
-            sha256: createHash("sha256").update(buffer).digest("hex"),
-            mimeType: file.mimetype,
-            byteSize: buffer.length,
-            width: dimensions.width,
-            height: dimensions.height,
-            status: "ready",
-            createdBy: req.session.userId,
-          })
-          .returning();
-        if (!registered) throw new Error("image asset insert returned no row");
-        return registered;
-      });
-    } catch (err) {
-      await deleteObject(objectKey).catch((cleanupError) => {
-        logger.error({ err: cleanupError, objectKey }, "failed to clean up image after asset persistence failure");
-      });
-      logger.error({ err, objectKey }, "failed to persist uploaded image asset");
-      return reply.code(503).send({ error: "failed to register uploaded image" });
-    }
-
-    const url = `/api/uploads/${objectKey}`;
-    return reply.code(201).send({
-      assetId: asset.id,
-      url,
-      objectKey,
-      size: buffer.length,
-      mimeType: file.mimetype,
-      sha256: asset.sha256,
-      width: dimensions.width,
-      height: dimensions.height,
-    });
   });
 
   // ─── POST /uploads/avatars — 用户头像上传 ──────────────────────
@@ -327,104 +196,34 @@ export async function uploadRoutes(
     if (!avFile) return reply.code(400).send({ error: "no file provided" });
     const file = avFile;
 
-    // Validate file type
-    if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype as typeof ALLOWED_IMAGE_TYPES[number])) {
-      drainMultipartFile(file);
-      return reply.code(415).send({ error: "unsupported file type" });
+    // 业务/存储逻辑：文件校验 → 对象存储写入 → avatarUrl 行锁读改写 → 旧头像回收
+    const outcome = await uploadAvatar(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      { file },
+    );
+    if (outcome.ok) {
+      return reply.code(201).send(outcome.body);
     }
-
-    // QUAL-48 安全注释：file.toBuffer() 将整个文件读入内存。
-    // 防护措施：
-    //   1. req.file({ limits: { fileSize: MAX_AVATAR_SIZE } }) 已在上游设置
-    //      2MB 限制，Fastify 会在流式读取时自动截断并拒绝超大文件
-    //   2. toBuffer() 后的双重校验（buffer.length > MAX_AVATAR_SIZE）作为
-    //      第二道防线，防止 limits 配置被绕过
-    //   3. magic bytes 校验在 toBuffer 后进行，因为需要检查前几字节
-    //   4. 图片尺寸校验防止 decode-bomb（40 megapixel 限制）
-    let buffer;
-    try {
-      buffer = await file.toBuffer();
-    } catch (err) {
-      // R3：读取阶段超限同样抛 FST_REQ_FILE_TOO_LARGE → 413（非 500）。
-      if (fileTooLargeError(err)) {
+    switch (outcome.reason) {
+      case "unsupported_type":
+        drainMultipartFile(file);
+        return reply.code(415).send({ error: "unsupported file type" });
+      case "file_read_too_large":
         drainMultipartFile(file);
         return reply.code(413).send({ error: "file too large (max 2MB)", code: "FST_REQ_FILE_TOO_LARGE" });
-      }
-      throw err;
+      case "content_type_mismatch":
+        return reply.code(415).send({ error: "file content does not match declared type" });
+      case "too_large":
+        return reply.code(413).send({ error: "file too large (max 2MB)" });
+      case "dimensions_undecodable":
+        return reply.code(415).send({ error: "image dimensions could not be decoded" });
+      case "pixel_count_exceeded":
+        return reply.code(413).send({ error: "image pixel count exceeds 40 megapixels" });
+      case "storage_upload_failed":
+        return reply.code(503).send({ error: "failed to upload avatar" });
+      case "persist_failed":
+        return reply.code(503).send({ error: "failed to persist avatar" });
     }
-
-    // Validate magic bytes
-    if (!validateImageMagicBytes(buffer, file.mimetype)) {
-      return reply.code(415).send({ error: "file content does not match declared type" });
-    }
-
-    // Double-check file size
-    if (buffer.length > MAX_AVATAR_SIZE) {
-      return reply.code(413).send({ error: "file too large (max 2MB)" });
-    }
-
-    // BUG-26 修复：头像上传也需 decode-bomb 防护，与笔记图片上传保持一致
-    const avatarDimensions = readImageDimensions(buffer, file.mimetype);
-    if (!avatarDimensions) {
-      return reply.code(415).send({ error: "image dimensions could not be decoded" });
-    }
-    if (avatarDimensions.width * avatarDimensions.height > 40_000_000) {
-      return reply.code(413).send({ error: "image pixel count exceeds 40 megapixels" });
-    }
-
-    // Generate objectKey: avatars/{userId}/{uuid}.{ext}
-    const ext = extFromMimeType(file.mimetype);
-    const objectKey = `avatars/${req.session.userId}/${randomUUID()}.${ext}`;
-
-    try {
-      await uploadObject(objectKey, buffer, file.mimetype);
-    } catch (err) {
-      logger.error({ err, objectKey }, "failed to upload avatar to storage");
-      return reply.code(503).send({ error: "failed to upload avatar" });
-    }
-
-    // BUG-21/SEC-31 修复：持久化 avatarUrl 到 users 表，并清理旧头像存储
-    // 查询旧头像 objectKey
-    const [userRow] = await db
-      .select({ avatarUrl: users.avatarUrl })
-      .from(users)
-      .where(eq(users.id, req.session.userId))
-      .limit(1);
-    const oldAvatarUrl = userRow?.avatarUrl;
-
-    // 更新 users.avatarUrl
-    const url = `/api/uploads/${objectKey}`;
-    try {
-      await db
-        .update(users)
-        .set({ avatarUrl: url, updatedAt: new Date() })
-        .where(eq(users.id, req.session.userId));
-    } catch (err) {
-      // 2026-08-12（存储面审计）：DB 更新失败时回收已上传的新头像对象，
-      // 否则成为永久孤儿（头像无 DB 登记表，无其他回收路径）。
-      deleteObject(objectKey).catch((cleanupError) => {
-        logger.warn({ cleanupError, objectKey }, "failed to clean up orphan avatar after DB update failure");
-      });
-      logger.error({ err, objectKey }, "failed to persist avatarUrl");
-      return reply.code(503).send({ error: "failed to persist avatar" });
-    }
-
-    // 异步清理旧头像存储对象（不阻塞响应）
-    if (oldAvatarUrl) {
-      const oldObjectKey = oldAvatarUrl.replace(/^\/api\/uploads\//, "");
-      if (oldObjectKey && oldObjectKey.startsWith("avatars/")) {
-        deleteObject(oldObjectKey).catch((err) => {
-          logger.warn({ err, oldObjectKey }, "failed to delete old avatar from storage");
-        });
-      }
-    }
-
-    return reply.code(201).send({
-      url,
-      objectKey,
-      size: buffer.length,
-      mimeType: file.mimetype,
-    });
   });
 
   // ─── GET /uploads/* — 图片下载（租户/用户隔离） ────────────────
@@ -438,116 +237,33 @@ export async function uploadRoutes(
     const path = (req.params as { "*": string })["*"];
     if (!path) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
 
-    // SEC-21 修复：拒绝包含路径遍历字符的请求，防止跨 workspace 文件访问
-    if (path.includes("..") || path.includes("\\")) {
-      return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-    }
-
-    // Validate path format and enforce tenant isolation
-    // 归属不匹配一律 404（不暴露资源存在性，避免 403 oracle）
-    if (path.startsWith("avatars/")) {
-      // Avatar path: avatars/{userId}/{uuid}.{ext}
-      const parts = path.split("/");
-      if (parts.length < 3) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      const pathUserId = parts[1];
-      if (pathUserId !== req.session.userId) {
+    // 业务/存储逻辑：路径遍历防御 → 租户/用户归属校验 → 登记校验 → ETag/304 → 对象读取
+    const outcome = await downloadUploadObject(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      path,
+      { ifNoneMatch: req.headers["if-none-match"] },
+    );
+    if (!outcome.ok) {
+      if (outcome.reason === "not_found") {
         return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       }
-    } else {
-      // Note/source image path: {workspaceId}/notes/{noteId}/{uuid}.{ext}
-      //   or: {workspaceId}/sources/{sourceId}/{uuid}.{ext}
-      const parts = path.split("/");
-      if (parts.length < 4 || (parts[1] !== "notes" && parts[1] !== "sources")) {
-        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      }
-      const pathWorkspaceId = parts[0];
-      if (pathWorkspaceId !== req.session.workspaceId) {
-        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      }
-      // 登记校验：对象必须在 noteImageAssets 中登记，且所属笔记存在且未软删。
-      // 防止软删/物理删笔记的图片、以及从未登记的孤儿对象仍可被直连下载。
-      const assetRow = await db.query.noteImageAssets.findFirst({
-        where: and(
-          eq(noteImageAssets.workspaceId, parts[0]),
-          or(
-            eq(noteImageAssets.objectKey, path),
-            and(isNotNull(noteImageAssets.normalizedObjectKey), eq(noteImageAssets.normalizedObjectKey, path)),
-            and(isNotNull(noteImageAssets.thumbnailObjectKey), eq(noteImageAssets.thumbnailObjectKey, path)),
-          ),
-        ),
-      });
-      if (!assetRow) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      if (parts[1] === "notes") {
-        // 笔记物理删除后 uploadedForNoteId 已置 NULL；软删除需显式排除
-        if (!assetRow.uploadedForNoteId) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-        const note = await db.query.notes.findFirst({
-          where: and(
-            eq(notes.id, assetRow.uploadedForNoteId),
-            isNull(notes.deletedAt),
-          ),
-        });
-        if (!note) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      }
-    }
-
-    // Check If-None-Match for conditional requests.
-    // Use HEAD request for pre-check: if the ETag matches, return 304
-    // without downloading the full object body.
-    const ifNoneMatch = req.headers["if-none-match"];
-
-    if (ifNoneMatch) {
-      let headResult;
-      try {
-        headResult = await headObject(path);
-      } catch (err) {
-        // 2026-08-12：S3 故障/网络错误 → 503（对象不存在已被 headObject 折叠为 null）
-        logger.error({ err, path }, "headObject failed in upload download route");
-        return reply.code(503).send({ error: "storage unavailable" });
-      }
-      if (!headResult) {
-        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      }
-
-      // RFC 7232: If-None-Match can be "*" (match any existing resource)
-      // or a comma-separated list of ETags.
-      if (ifNoneMatch.trim() === "*") {
-        // Object exists → 304
-        const isAvatarHead = path.startsWith("avatars/");
-        reply.header("Cache-Control", `private, max-age=${isAvatarHead ? 604800 : 86400}`);
-        if (headResult.etag) reply.header("ETag", headResult.etag);
-        return reply.code(304).send();
-      }
-      const requestedETags = ifNoneMatch.split(",").map((e) => e.trim());
-      if (headResult.etag && requestedETags.includes(headResult.etag)) {
-        const isAvatarHead = path.startsWith("avatars/");
-        reply.header("Cache-Control", `private, max-age=${isAvatarHead ? 604800 : 86400}`);
-        reply.header("ETag", headResult.etag);
-        return reply.code(304).send();
-      }
-    }
-
-    let downloadResult;
-    try {
-      downloadResult = await getObject(path);
-    } catch (err) {
-      // 2026-08-12：对象缺失/无权限 → 404（防 oracle）；S3 故障/网络 → 503
-      if (isObjectMissingError(err)) {
-        return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      }
-      logger.error({ err, path }, "getObject failed in upload download route");
       return reply.code(503).send({ error: "storage unavailable" });
     }
 
-    // Set response headers
-    const isAvatar = path.startsWith("avatars/");
-    const maxAge = isAvatar ? 604800 : 86400; // 7 days for avatars, 1 day for note images
-    reply.header("Content-Type", downloadResult.contentType);
-    reply.header("Cache-Control", `private, max-age=${maxAge}`);
-    reply.header("X-Content-Type-Options", "nosniff");
-    if (downloadResult.etag) {
-      reply.header("ETag", downloadResult.etag);
+    if (outcome.notModified) {
+      reply.header("Cache-Control", `private, max-age=${outcome.maxAge}`);
+      if (outcome.etag) reply.header("ETag", outcome.etag);
+      return reply.code(304).send();
     }
 
-    return reply.send(downloadResult.body);
+    // Set response headers
+    reply.header("Content-Type", outcome.contentType);
+    reply.header("Cache-Control", `private, max-age=${outcome.maxAge}`);
+    reply.header("X-Content-Type-Options", "nosniff");
+    if (outcome.etag) {
+      reply.header("ETag", outcome.etag);
+    }
+
+    return reply.send(outcome.body);
   });
 }

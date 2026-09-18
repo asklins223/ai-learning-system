@@ -52,8 +52,8 @@ before(async () => {
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, 'V2 IT note', ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, 'V2 IT note', ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (${VERSION_ID}, ${NOTE_ID}, ${WORKSPACE_ID}, 1, ${tx.json({ blocks: [{ type: "paragraph", content: NOTE_CONTENT }] })}, 'v2-it-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
@@ -77,6 +77,12 @@ after(async () => {
   await admin.end({ timeout: 5 });
   const { closeDatabase } = await import("../../../../apps/api/src/db/client.ts");
   await closeDatabase().catch(() => undefined);
+  // worker 侧的连接池也必须关掉：测试体经 pollV2Outbox 走 worker 的 db.ts，
+  // 只关 api 的池会留下一个打开的句柄 → 进程永不退出（`node --test` 一直等事件循环
+  // 排空，表现为"测试通过了但整条命令挂住"，在 CI 里就是一个假超时）。
+  // 与同目录 card-generation-v2-c-cases.integration.ts 的收尾保持一致。
+  const { closeDatabase: closeWorkerDatabase } = await import("../db.ts");
+  await closeWorkerDatabase().catch(() => undefined);
 });
 
 test("V2 纵切：seal → planner/author/critics → review_ready → activation（0 Schedule）", async () => {

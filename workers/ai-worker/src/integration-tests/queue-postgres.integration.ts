@@ -4,11 +4,10 @@ import { test } from "node:test";
 import { sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres, { type Sql } from "postgres";
-import * as schema from "../schema/index.ts";
+import * as schema from "@ailearn/shared/db-schema";
 import type {
   ClaimedJob,
   QueueSqlExecutor,
-  QueueTransactionRunner,
 } from "../queue.ts";
 
 const REQUIRED_URLS = [
@@ -258,17 +257,33 @@ test("keeps Worker queue claims, leases, reaping, and pool context atomic on Pos
     const executorA = createExecutor(workerDatabaseA);
     const executorB = createExecutor(workerDatabaseB);
 
-    const createTransactionRunner = (
-      database: typeof workerDatabaseA,
-    ): QueueTransactionRunner => async (context, operation) =>
-      database.transaction(async (transaction) => {
+    /**
+     * worker A 的 **max:1** 池上的事务外壳：上下文写入用生产实现
+     * （db.ts 的 setWorkerTransactionContext），测试只补 drizzle 的事务壳。
+     *
+     * 2026-09-15 修复：`runnerA` 此前被遗留为未定义标识符——删除仅服务于单测的
+     * `createDrizzleQueueJobUpdater` 旧链路时，把定义它的 `createTransactionRunner`
+     * 一起删了，但「1000 次提交/回滚不泄漏上下文」子用例仍在引用它，于是该子用例
+     * 恒以 `ReferenceError: runnerA is not defined` 失败。worker 的
+     * tsconfig 排除了 src/integration-tests/**，类型检查也照不到这里。
+     * 刻意用每 worker 一条连接的池（而不是 db.ts 的模块级池）——只有单连接池
+     * 才能真正暴露「上下文在提交/回滚后泄漏到下一个事务」的问题。
+     */
+    const runnerA = async <T>(
+      context: { workspaceId: string; userId: string | null },
+      operation: (transaction: Parameters<Parameters<typeof workerDatabaseA.transaction>[0]>[0]) => Promise<T>,
+    ): Promise<T> =>
+      workerDatabaseA.transaction(async (transaction) => {
         await workerDb.setWorkerTransactionContext(transaction, context);
         return operation(transaction);
       });
-    const runnerA = createTransactionRunner(workerDatabaseA);
-    const runnerB = createTransactionRunner(workerDatabaseB);
-    const updaterA = queue.createDrizzleQueueJobUpdater(runnerA);
-    const updaterB = queue.createDrizzleQueueJobUpdater(runnerB);
+
+    // 生产路径就是 SQL 函数（ailearn_finish_job / ailearn_fail_job，migration 0022）。
+    // 这里用生产实现的两个独立实例做并发/围栏对照——此前用的是仅供单测的
+    // drizzle 版 updater（createDrizzleQueueJobUpdater），已按 AGENTS.md 删除旧链路，
+    // 于是本用例现在验证的是**真实生产围栏**在两个 worker 连接上的行为。
+    const updaterA = queue.createSqlFunctionQueueJobUpdater(executorA);
+    const updaterB = queue.createSqlFunctionQueueJobUpdater(executorB);
 
     const insertPendingJob = async (
       workspaceId: string,

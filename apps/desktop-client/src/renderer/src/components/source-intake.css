@@ -1,0 +1,313 @@
+/* 跨页面收录：剪贴板链接气泡与全局拖放浮层。
+ * 说的是 HUD 那套动森语汇——奶油气泡、粗奶油描边、手绘抖动圆角、
+ * 蜜桃主按钮配深色字、缝线虚线（hud-pages.css 的 speech / button / task-title
+ * 就是母本）。这里只定布局与尺寸，按钮皮囊直接继承 `.hud-surface .button`，
+ * 所有颜色都取 `--hud-*`，不新增 token。 */
+
+.source-intake-dialog {
+  position: relative;
+  box-sizing: border-box;
+  width: min(440px, calc(100vw - 48px));
+  padding: 0;
+  overflow: visible;
+  color: var(--hud-ink);
+  border: 3px solid rgba(255, 252, 235, 0.92);
+  border-radius: 26px 30px 24px 30px / 28px 26px 30px 26px;
+  background:
+    radial-gradient(circle at 12% 0, rgba(255, 255, 255, 0.6), transparent 38%),
+    var(--hud-cream);
+  box-shadow: 0 30px 70px rgba(28, 17, 11, 0.45), 0 5px 16px rgba(28, 17, 11, 0.3);
+}
+
+/* 对话气泡的小尾巴，落在正下方，和 speech 同款只留奶油三角。 */
+.source-intake-dialog::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -14px;
+  border-top: 15px solid var(--hud-cream);
+  border-right: 5px solid transparent;
+  border-left: 10px solid transparent;
+  transform: translateX(-50%) rotate(-4deg);
+}
+
+.source-intake-dialog::backdrop {
+  background: rgba(27, 18, 13, 0.55);
+}
+
+.source-intake-dialog__body {
+  display: grid;
+  gap: 10px;
+  padding: 24px 24px 22px;
+}
+
+.source-intake-dialog__body h2 {
+  margin: 0;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-size: 22px;
+  font-weight: 680;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+/* 动森对话体：物品名直接写在正文里，不套嵌套卡片。 */
+.source-intake-dialog__url {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.source-intake-dialog__url strong {
+  color: var(--hud-clay);
+  font-weight: 800;
+}
+
+.source-intake-dialog__url small {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--hud-soft);
+  font-size: 11.5px;
+}
+
+.source-intake-dialog__hint {
+  margin: 0;
+  color: var(--hud-soft);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.source-intake-dialog__error {
+  margin: 0;
+  color: #82483c;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.7;
+}
+
+.source-intake-dialog__locked {
+  margin: 0;
+  color: var(--hud-soft);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.source-intake-dialog__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+/* 布局与尺寸归我，皮囊（奶油底、蜜桃主按钮、抖动圆角、弹跳 hover）
+ * 归 `.hud-surface .button`，和全站按钮同一套手感。 */
+.source-intake-dialog__actions .button {
+  flex: 1;
+  min-height: 46px;
+  font-size: 14px;
+}
+
+.source-intake-dialog__close {
+  position: absolute;
+  top: -14px;
+  right: -10px;
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  color: var(--hud-ink);
+  border: 2px solid rgba(255, 252, 235, 0.9);
+  border-radius: 50%;
+  background: var(--hud-butter);
+  box-shadow: 0 5px 11px rgba(67, 43, 27, 0.25);
+  cursor: pointer;
+  transition: transform 140ms var(--hud-ease-out), box-shadow 140ms ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .source-intake-dialog__close:not(:disabled):hover {
+    transform: translateY(-2px) scale(1.04);
+    box-shadow: 0 8px 16px rgba(67, 43, 27, 0.28);
+  }
+  .source-intake-dialog__close:not(:disabled):active {
+    transform: scale(0.94);
+  }
+}
+
+/* 全局拖放浮层：平时不存在，拖起来才铺满窗口。 */
+.source-intake-drop {
+  position: fixed;
+  z-index: 75;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(30, 20, 12, 0.45);
+  animation: source-intake-drop-veil 200ms var(--hud-ease-out) both;
+}
+
+@keyframes source-intake-drop-veil {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 薄荷缝线布：task-title 同款薄荷底 + 奶油粗边，虚线当缝线。 */
+.source-intake-drop__card {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: min(430px, calc(100vw - 56px));
+  padding: 28px 26px 24px;
+  text-align: center;
+  color: var(--hud-ink);
+  border: 4px solid rgba(255, 252, 235, 0.85);
+  border-radius: 30px 38px 28px 36px / 34px 30px 38px 30px;
+  outline: 2px dashed rgba(62, 45, 34, 0.35);
+  outline-offset: -11px;
+  background:
+    radial-gradient(circle at 12% 0, rgba(255, 255, 255, 0.5), transparent 40%),
+    var(--hud-mint);
+  box-shadow: 0 30px 70px rgba(28, 17, 11, 0.45), 0 5px 16px rgba(28, 17, 11, 0.3);
+  animation: source-intake-drop-arrive 300ms var(--hud-ease-out) both;
+}
+
+/* 动森式落定：先冒点头再坐回去，只动 transform 与 opacity。 */
+@keyframes source-intake-drop-arrive {
+  0% { opacity: 0; transform: translateY(16px) scale(0.94); }
+  60% { opacity: 1; transform: translateY(-3px) scale(1.015); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.source-intake-drop__icon {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  color: #fff7e8;
+  border: 3px solid rgba(255, 252, 235, 0.9);
+  border-radius: 50%;
+  background: var(--hud-clay);
+  box-shadow: 0 6px 14px rgba(67, 43, 27, 0.3);
+}
+
+.source-intake-drop__card h2 {
+  margin: 4px 0 0;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-size: 21px;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+.source-intake-drop__card > p {
+  margin: 0;
+  color: #4a4438;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.source-intake-drop__progress {
+  width: 100%;
+  height: 10px;
+  margin-top: 6px;
+  overflow: hidden;
+  border: 2px solid rgba(255, 252, 235, 0.7);
+  border-radius: 6px;
+  background: rgba(62, 45, 34, 0.18);
+}
+
+.source-intake-drop__progress > span {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--hud-clay);
+  transform-origin: left center;
+  transition: transform 180ms ease-out;
+}
+
+/* 回执小纸条：evidence-slip 同款奶油纸，成功一条薄荷、失败一条原色。 */
+.source-intake-drop__report {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.source-intake-drop__report li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  border: 2px solid rgba(255, 252, 235, 0.75);
+  border-radius: 14px 17px 13px 16px / 15px 13px 16px 14px;
+  background: var(--hud-cream);
+  box-shadow: 0 5px 12px rgba(67, 43, 27, 0.18);
+}
+
+.source-intake-drop__report li[data-ok="true"] {
+  background: #e4ecd9;
+}
+
+.source-intake-drop__report strong {
+  display: block;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-intake-drop__report small {
+  display: block;
+  color: var(--hud-soft);
+  overflow-wrap: anywhere;
+}
+
+.source-intake-drop__report svg {
+  margin-top: 2px;
+}
+
+.source-intake-drop__report li[data-ok="true"] svg {
+  color: #3f5a40;
+}
+
+.source-intake-drop__report li[data-ok="false"] svg {
+  color: #82483c;
+}
+
+.source-intake-drop__actions {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  margin-top: 10px;
+}
+
+.source-intake-drop__actions .button {
+  flex: 1;
+  min-height: 46px;
+  font-size: 14px;
+}
+
+/* 动效降级：和房间其它界面同一口径，off 与系统减弱都只留淡入。 */
+.desktop-app[data-motion-mode="off"] .source-intake-drop,
+.desktop-app[data-motion-mode="off"] .source-intake-drop__card {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .source-intake-drop,
+  .source-intake-drop__card {
+    animation: source-intake-drop-veil 1ms both;
+  }
+  .source-intake-dialog__close,
+  .source-intake-drop__progress > span {
+    transition-duration: 1ms;
+  }
+}

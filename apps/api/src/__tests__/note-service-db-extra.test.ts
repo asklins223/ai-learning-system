@@ -52,14 +52,8 @@ interface MockConfig {
   notesFindFirstQueue?: any[];
   noteVersionsFindFirst?: any;
   noteVersionsFindFirstQueue?: any[];
-  learningCardsFindFirst?: any;
-  learningCardsFindFirstQueue?: any[];
   noteVersionsFindMany?: any[];
   noteBlocksFindMany?: any[];
-  learningCardsFindMany?: any[];
-  cardKeyPointsFindMany?: any[];
-  evidencesFindMany?: any[];
-  validationEventsFindMany?: any[];
   // count query
   countResult?: number;
   // 是否在 upsertSearchDocument 中抛错
@@ -71,13 +65,11 @@ function createMockExecutor(config: MockConfig = {}): any {
   let selectIdx = 0;
   let notesFindFirstIdx = 0;
   let noteVersionsFindFirstIdx = 0;
-  let learningCardsFindFirstIdx = 0;
 
   const insertReturning = config.insertReturning ?? [];
   const selectResult = config.selectResult ?? [];
   const notesFindFirstQueue = config.notesFindFirstQueue ?? (config.notesFindFirst !== undefined ? [config.notesFindFirst] : [undefined]);
   const noteVersionsFindFirstQueue = config.noteVersionsFindFirstQueue ?? (config.noteVersionsFindFirst !== undefined ? [config.noteVersionsFindFirst] : [undefined]);
-  const learningCardsFindFirstQueue = config.learningCardsFindFirstQueue ?? (config.learningCardsFindFirst !== undefined ? [config.learningCardsFindFirst] : [undefined]);
 
   // Track all insert calls for verifying search index sync etc.
   const insertCalls: Array<{ table: any; data: any }> = [];
@@ -117,19 +109,6 @@ function createMockExecutor(config: MockConfig = {}): any {
       },
       noteBlocks: {
         findMany: async () => config.noteBlocksFindMany ?? [],
-      },
-      learningCards: {
-        findFirst: async () => learningCardsFindFirstQueue[learningCardsFindFirstIdx++],
-        findMany: async () => config.learningCardsFindMany ?? [],
-      },
-      cardKeyPoints: {
-        findMany: async () => config.cardKeyPointsFindMany ?? [],
-      },
-      evidences: {
-        findMany: async () => config.evidencesFindMany ?? [],
-      },
-      validationEvents: {
-        findMany: async () => config.validationEventsFindMany ?? [],
       },
     },
     transaction: async (fn: (tx: any) => Promise<any>) => {
@@ -536,27 +515,6 @@ describe("note/service updateNote", () => {
     assert.equal(result!.version.id, NEW_VERSION_ID);
   });
 
-  it("无 baseVersionId 时不检查版本冲突", async () => {
-    const mock = createMockExecutor({
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: "some-other-version",
-        title: "旧标题",
-        titleSource: "auto",
-        workspaceId: WS_ID,
-      }]],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: "some-other-version", title: "新标题", titleSource: "manual", workspaceId: WS_ID },
-      noteVersionsFindFirst: { id: "some-other-version", versionNo: 1 },
-      noteBlocksFindMany: [],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      title: "新标题",
-      isAutosave: false,
-    });
-
-    assert.ok(result, "无 baseVersionId 不应触发冲突");
-  });
 });
 
 // ─── deleteNote ────────────────────────────────────────────────────────
@@ -835,7 +793,6 @@ describe("note/service updateNote content-hash dedup", () => {
         { id: VERSION_ID, noteId: NOTE_ID, versionNo: 1 }, // final read (after in-place update)
       ],
       noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-      learningCardsFindFirst: null, // no active/superseded cards → allow in-place update
     });
 
     const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
@@ -949,7 +906,6 @@ describe("note/service updateNote content-hash dedup", () => {
         { id: VERSION_ID, noteId: NOTE_ID, versionNo: 1 }, // final read
       ],
       noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-      learningCardsFindFirst: null, // no active cards
     });
 
     const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {

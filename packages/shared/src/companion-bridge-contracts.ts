@@ -22,7 +22,6 @@ import { understandingLensSchema, projectionCheckpointSchema } from "./learning-
 export type EntityRefV2 =
   | { kind: "source"; sourceId: string }
   | { kind: "note"; noteId: string }
-  | { kind: "card_set"; cardSetId: string }
   | { kind: "card"; cardId: string }
   | { kind: "key_point"; keyPointId: string }
   | { kind: "evidence"; evidenceId: string }
@@ -39,7 +38,6 @@ export type AllowedMainRouteV2 =
   | { kind: "today" }
   | { kind: "source"; sourceId?: string }
   | { kind: "note"; noteId: string }
-  | { kind: "card_set"; cardSetId: string }
   | { kind: "card"; cardId: string }
   | { kind: "review"; scheduleId?: string }
   // 方案 16 §18.1：focus_graph_node（lens）与 restore_graph_viewport
@@ -174,11 +172,30 @@ export type CompanionSystemEventV2 = {
 export type AssistantDeliveryPayloadRefV2 =
   | { kind: "message"; messageId: string }
   | { kind: "proposal"; proposalId: string }
-  | { kind: "action_result"; actionRunId: string }
-  | { kind: "proactive_cue"; cueId: string; text?: string }
+  | { kind: "action_result"; proposalId: string }
   | { kind: "system_event"; systemEventId: string; text?: string }
-  /** §16.2：contentPreview 为候选内容摘要 ≤80 字，仅 UI 展示；老 delivery 无该字段。 */
+  /** §16.2：contentPreview 为候选内容摘要 ≤80 字，仅 UI 展示。 */
   | { kind: "memory_item"; memoryItemId: string; contentPreview?: string };
+
+/**
+ * assistant_deliveries.kind 的**唯一事实来源**（2026-09-16 修复）。
+ *
+ * 此前该集合在三处各写一遍（本文件的 TS union / zod enum、timeline 的
+ * DELIVERY_KINDS、delivery-service 的入参类型），而数据库侧的
+ * assistant_deliveries_kind_check 是第四份手写清单——0131 因此漏掉
+ * memory_candidate，worker 记忆抽取写入该 kind 时触发 CHECK 违例并回滚整个
+ * 事务（抽取在找到候选时永久失败）。迁移 0224 修正了约束，下面的集成测试
+ * （assistant-deliveries-kind-constraint）断言库中约束与本清单精确相等。
+ */
+export const ASSISTANT_DELIVERY_KIND_VALUES = [
+  "message",
+  "proposal",
+  "action_result",
+  "system_event",
+  "memory_candidate",
+] as const;
+
+export type AssistantDeliveryKindV2 = (typeof ASSISTANT_DELIVERY_KIND_VALUES)[number];
 
 export type AssistantDeliveryV2 = {
   version: 2;
@@ -197,7 +214,7 @@ export type AssistantDeliveryV2 = {
     | "snoozed"
     | "expired"
     | "suppressed";
-  kind: "message" | "proposal" | "action_result" | "proactive_cue" | "system_event" | "memory_candidate";
+  kind: AssistantDeliveryKindV2;
   payloadRef: AssistantDeliveryPayloadRefV2;
   displayLease: {
     deviceSessionId: string;
@@ -273,7 +290,6 @@ export type MainCommandResultV2 = {
 export const entityRefV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("source"), sourceId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("note"), noteId: z.string().uuid() }),
-  z.strictObject({ kind: z.literal("card_set"), cardSetId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("card"), cardId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("key_point"), keyPointId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("evidence"), evidenceId: z.string().uuid() }),
@@ -291,7 +307,6 @@ export const allowedMainRouteV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("today") }),
   z.strictObject({ kind: z.literal("source"), sourceId: z.string().uuid().optional() }),
   z.strictObject({ kind: z.literal("note"), noteId: z.string().uuid() }),
-  z.strictObject({ kind: z.literal("card_set"), cardSetId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("card"), cardId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("review"), scheduleId: z.string().uuid().optional() }),
   z.strictObject({
@@ -411,12 +426,11 @@ export const assistantDeliveryV2Schema = z.strictObject({
   state: z.enum([
     "queued", "delivered", "displayed", "acted", "dismissed", "snoozed", "expired", "suppressed",
   ]),
-  kind: z.enum(["message", "proposal", "action_result", "proactive_cue", "system_event", "memory_candidate"]),
+  kind: z.enum(ASSISTANT_DELIVERY_KIND_VALUES),
   payloadRef: z.discriminatedUnion("kind", [
     z.strictObject({ kind: z.literal("message"), messageId: z.string().uuid() }),
     z.strictObject({ kind: z.literal("proposal"), proposalId: z.string().uuid() }),
-    z.strictObject({ kind: z.literal("action_result"), actionRunId: z.string().uuid() }),
-    z.strictObject({ kind: z.literal("proactive_cue"), cueId: z.string().uuid(), text: z.string().min(1).max(240).optional() }),
+    z.strictObject({ kind: z.literal("action_result"), proposalId: z.string().uuid() }),
     z.strictObject({ kind: z.literal("system_event"), systemEventId: z.string().min(1), text: z.string().min(1).max(240).optional() }),
     z.strictObject({ kind: z.literal("memory_item"), memoryItemId: z.string().uuid(), contentPreview: z.string().min(1).max(80).optional() }),
   ]),

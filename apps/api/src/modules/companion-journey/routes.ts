@@ -25,7 +25,7 @@ import {
   bootstrapJourney,
   JourneyServiceError,
 } from "./journey-service.ts";
-import { companionJourneys } from "../../db/schema/companion-journey.ts";
+import { companionJourneys } from "@ailearn/shared/db-schema/companion-journey";
 import { and, eq } from "drizzle-orm";
 
 function isCompanionJourneyV2Enabled(): boolean {

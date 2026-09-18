@@ -62,6 +62,7 @@ function surfaceFixture(): Record<string, unknown> {
       lastCanonicalAt: "2026-08-16T10:00:00.000Z",
     },
     lifecycle: { status: "active", successorObjectiveId: null },
+    personalState: { state: "learning", activeRunId: RUN },
     primaryAction: { kind: "resume_run", runId: RUN, objectiveId: OBJ },
     createdAt: "2026-08-16T09:00:00.000Z",
     updatedAt: "2026-08-16T10:00:00.000Z",
@@ -106,11 +107,12 @@ test("W1-17: findPrivatePayloadLeaks reports deep forbidden keys", () => {
 });
 
 test("W1-10: action union is exhaustive over all kinds", () => {
+  const cardStart = { version: 2, originV2: { kind: "card", cardId: CARD, objectiveId: OBJ }, goal: "stabilize", requestedTimeBudgetSeconds: 180, responsePreference: "adaptive" };
   const actions: Array<Record<string, unknown>> = [
-    { kind: "create_run", origin: "card", objectiveId: OBJ, cardId: CARD, goal: "首次验证" },
+    { kind: "create_run", objectiveId: OBJ, label: "首次验证", start: cardStart },
     { kind: "resume_run", runId: RUN, objectiveId: OBJ },
-    { kind: "create_review_run", objectiveId: OBJ, scheduleId: RUN, generation: 2 },
-    { kind: "practice_only", objectiveId: OBJ, cardId: CARD, reasonCodes: ["exposed"] },
+    { kind: "create_review_run", objectiveId: OBJ, label: "开始复习", start: { ...cardStart, originV2: { kind: "review", scheduleId: RUN, objectiveId: OBJ, scheduleGeneration: 2 } } },
+    { kind: "practice_only", objectiveId: OBJ, label: "开始练习", start: cardStart, reasonCodes: ["exposed"] },
     { kind: "wait_for_initial_validation", reminderId: RUN, qualificationNotBefore: "2026-08-18T00:00:00.000Z" },
     { kind: "view_successor", successorObjectiveId: OBJ, successorCardId: CARD },
     { kind: "refresh" },
@@ -149,11 +151,6 @@ test("W1-09: origin discriminated union enforces conditional fields", () => {
   // imported 缺 importBatchRef → 失败
   assert.equal(
     objectiveOriginV3Schema.safeParse({ originId: "99", kind: "imported", evidenceSnapshotIds: [] }).success,
-    false,
-  );
-  // legacy_migrated 缺 legacyKeyPointId → 失败
-  assert.equal(
-    objectiveOriginV3Schema.safeParse({ originId: "99", kind: "legacy_migrated", evidenceSnapshotIds: [] }).success,
     false,
   );
 });

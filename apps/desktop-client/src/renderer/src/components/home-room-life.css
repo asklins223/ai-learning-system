@@ -1,0 +1,135 @@
+.home-room-life {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.home-room-foreground {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.home-room-foreground img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  clip-path: inset(0 74% 48% 0);
+  transform-origin: 0 0;
+  user-select: none;
+  will-change: transform, opacity;
+  transition: filter var(--home-theme-duration) ease-in-out;
+}
+
+[data-theme="night"] .home-room-foreground img {
+  filter: brightness(0.38) saturate(0.68) hue-rotate(8deg) drop-shadow(8px 12px 17px rgba(4, 12, 18, 0.34));
+}
+
+.desktop-app[data-surface-open="true"] .home-room-foreground,
+.desktop-app[data-scene-phase="focusing"] .home-room-foreground,
+.desktop-app[data-scene-phase="returning"] .home-room-foreground {
+  opacity: 0.3;
+}
+
+.home-room-life__window-wash {
+  fill: rgba(255, 240, 194, 0.06);
+  mix-blend-mode: screen;
+  transition: fill var(--home-theme-duration) ease-in-out;
+}
+
+.home-room-life__window-sheen {
+  mix-blend-mode: screen;
+}
+
+.home-room-life__stars {
+  fill: #d9f5ff;
+  filter: drop-shadow(0 0 3px rgba(170, 228, 255, 0.9));
+  opacity: 0;
+  transition: opacity var(--home-theme-duration) ease-in-out;
+}
+
+[data-theme="night"] .home-room-life__window-wash {
+  fill: rgba(109, 174, 219, 0.05);
+}
+
+[data-theme="night"] .home-room-life__window-sheen { opacity: 0.025 !important; }
+[data-theme="night"] .home-room-life__stars { opacity: 0.72; }
+
+.home-room-life__air {
+  fill: #fff2bd;
+  mix-blend-mode: screen;
+  transition: fill var(--home-theme-duration) ease-in-out;
+}
+
+[data-theme="night"] .home-room-life__air { fill: #d9ecff; }
+
+.home-room-life__steam {
+  fill: none;
+  stroke: rgba(255, 249, 226, 0.78);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  mix-blend-mode: screen;
+}
+
+.room-reference-frame:has(.hotspot--lamp:is(:hover, :focus-visible)) .home-room-depth__object--lamp {
+  opacity: 0.76;
+  filter: brightness(1.12) saturate(1.06) drop-shadow(0 7px 8px rgba(47, 27, 14, 0.2));
+  transform:
+    translate(var(--home-object-x, 0), var(--home-object-y, 0px))
+    rotate(var(--home-object-turn, 0deg))
+    scale(1.01);
+}
+
+.home-room-life__cue {
+  fill: rgba(255, 235, 192, 0.22);
+  stroke: rgba(255, 244, 219, 0.32);
+  stroke-width: 1;
+  opacity: 0;
+  filter: blur(1.5px) drop-shadow(0 0 6px rgba(255, 206, 129, 0.28));
+  mix-blend-mode: screen;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity 160ms ease-out, transform 200ms ease-out;
+}
+
+.room-reference-frame:has(.hotspot--shelf:is(:hover, :focus-visible)) .home-room-life__cue--shelf,
+.room-reference-frame:has(.hotspot--lamp:is(:hover, :focus-visible)) .home-room-life__cue--lamp,
+.room-reference-frame:has(.hotspot--graph:is(:hover, :focus-visible)) .home-room-life__cue--graph {
+  opacity: 0.28;
+  transform: scale(1.03);
+}
+
+.home-room-life__lamp-core {
+  fill: rgba(255, 225, 153, 0.12);
+  mix-blend-mode: screen;
+  opacity: 0.42;
+  transition: opacity 180ms ease-out, transform 180ms ease-out;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.room-reference-frame:has(.hotspot--lamp:is(:hover, :focus-visible)) .home-room-life__lamp-core {
+  opacity: 0.82;
+  transform: scale(1.08);
+}
+
+[data-theme="night"] .home-room-life__lamp-core {
+  fill: rgba(255, 211, 119, 0.22);
+  opacity: 0.72;
+}
+
+[data-motion-mode="off"] .home-room-life__steam,
+[data-motion-mode="off"] .home-room-life__mote,
+[data-motion-mode="off"] .home-room-life__window-sheen {
+  opacity: 0 !important;
+}
+
+[data-motion-mode="off"] .home-room-life__cue,
+[data-motion-mode="off"] .home-room-life__lamp-core {
+  transition: none;
+}

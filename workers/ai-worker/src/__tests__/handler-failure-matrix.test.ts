@@ -23,7 +23,6 @@ import {
   JobLeaseLostError,
   throwIfJobAborted,
 } from "../lib/job-lease.ts";
-import { retryBackoffMs } from "../lib/job-retry.ts";
 import {
   claimJobs,
   createClaimedJobUpdate,
@@ -42,7 +41,7 @@ import {
 /** 标准测试用 claimed job fixture */
 const baseJob: ClaimedJob = {
   id: "11111111-1111-1111-1111-111111111111",
-  type: "execute_card_agent_turn",
+  type: "parse_source",
   payload: { noteVersionId: "note-version-1" },
   workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -70,7 +69,17 @@ function createRecordingUpdater(
   const updates: QueueJobUpdate[] = [];
   const updater: QueueJobUpdater = async (update) => {
     updates.push(update);
-    return shouldSucceed;
+    if (update.values.status === "succeeded") {
+      return { updated: shouldSucceed, status: "succeeded", attempts: 0, backoffMs: 0 };
+    }
+    const attempts = updates.length;
+    const dead = attempts >= MAX_ATTEMPTS;
+    return {
+      updated: shouldSucceed,
+      status: dead ? "dead" : "pending",
+      attempts,
+      backoffMs: dead ? 0 : 2_000 * 2 ** (attempts - 1),
+    };
   };
   return { updater, updates };
 }
@@ -199,8 +208,12 @@ test("故障矩阵：重复 markJobSucceeded 调用 — 第二次被 fencing 阻
   let callCount = 0;
   const updater: QueueJobUpdater = async () => {
     callCount++;
-    // 第一次返回 true（匹配 running + lease），第二次返回 false（已不是 running）
-    return callCount === 1;
+    return {
+      updated: callCount === 1,
+      status: "succeeded",
+      attempts: 0,
+      backoffMs: 0,
+    };
   };
 
   const first = await markJobSucceeded(baseJob, updater);
@@ -216,7 +229,12 @@ test("故障矩阵：重复 markJobFailed 调用 — 第二次被 fencing 阻止
   let callCount = 0;
   const updater: QueueJobUpdater = async () => {
     callCount++;
-    return callCount === 1;
+    return {
+      updated: callCount === 1,
+      status: "pending",
+      attempts: callCount,
+      backoffMs: 2_000,
+    };
   };
 
   const first = await markJobFailed(baseJob, "error-1", updater);
@@ -233,11 +251,17 @@ test("故障矩阵：死信重放 — job 经过 MAX_ATTEMPTS 次失败后收敛
   // attempts=1 → 失败 → attempts=2 (pending, backoff=4s)
   // attempts=2 → 失败 → attempts=3=MAX_ATTEMPTS (dead, no backoff)
 
-  const now = Date.parse("2026-07-19T00:00:00.000Z");
   const updates: QueueJobUpdate[] = [];
   const updater: QueueJobUpdater = async (update) => {
     updates.push(update);
-    return true;
+    const attempts = updates.length;
+    const dead = attempts >= MAX_ATTEMPTS;
+    return {
+      updated: true,
+      status: dead ? "dead" : "pending",
+      attempts,
+      backoffMs: dead ? 0 : 2_000 * 2 ** (attempts - 1),
+    };
   };
 
   // 第一次失败（attempts=0 → 1）
@@ -245,12 +269,10 @@ test("故障矩阵：死信重放 — job 经过 MAX_ATTEMPTS 次失败后收敛
     baseJob,
     "attempt 1 failed",
     updater,
-    () => new Date(now),
-    () => now,
   );
   assert.equal(fail1.status, "pending");
   assert.equal(fail1.attempts, 1);
-  assert.equal(fail1.backoffMs, retryBackoffMs(0)); // 2_000
+  assert.equal(fail1.backoffMs, 2_000);
 
   // 第二次失败（attempts=1 → 2）
   const job1 = { ...baseJob, attempts: 1 };
@@ -258,12 +280,10 @@ test("故障矩阵：死信重放 — job 经过 MAX_ATTEMPTS 次失败后收敛
     job1,
     "attempt 2 failed",
     updater,
-    () => new Date(now),
-    () => now,
   );
   assert.equal(fail2.status, "pending");
   assert.equal(fail2.attempts, 2);
-  assert.equal(fail2.backoffMs, retryBackoffMs(1)); // 4_000
+  assert.equal(fail2.backoffMs, 4_000);
 
   // 第三次失败（attempts=2 → 3=MAX_ATTEMPTS → dead）
   const job2 = { ...baseJob, attempts: 2 };
@@ -271,8 +291,6 @@ test("故障矩阵：死信重放 — job 经过 MAX_ATTEMPTS 次失败后收敛
     job2,
     "attempt 3 failed",
     updater,
-    () => new Date(now),
-    () => now,
   );
   assert.equal(fail3.status, "dead");
   assert.equal(fail3.attempts, MAX_ATTEMPTS);
@@ -282,12 +300,13 @@ test("故障矩阵：死信重放 — job 经过 MAX_ATTEMPTS 次失败后收敛
   assert.equal(updates.length, 3);
   assert.equal(updates[0].values.status, "pending");
   assert.equal(updates[1].values.status, "pending");
-  assert.equal(updates[2].values.status, "dead");
+  assert.equal(updates[2].values.status, "pending");
 
-  // dead job 应有 finishedAt，pending job 不应有
+  // SQL function owns the terminal transition; the application sends the
+  // retry intent without duplicating its attempt arithmetic.
   assert.equal(updates[0].values.finishedAt, null);
   assert.equal(updates[1].values.finishedAt, null);
-  assert.ok(updates[2].values.finishedAt, "dead job 应记录完成时间");
+  assert.equal(updates[2].values.finishedAt, null);
 });
 
 test("故障矩阵：死信 job 的 lease token 被清除，不可再被操作", async () => {
@@ -309,7 +328,7 @@ test("故障矩阵：claim 返回未知 job 类型 — 不影响其他 job 的 c
   const executor = executorWithRows([
     {
       id: "job-known",
-      type: "execute_card_agent_turn",
+      type: "parse_source",
       payload: {},
       workspace_id: "ws-1",
       requested_by: "user-1",
@@ -330,7 +349,7 @@ test("故障矩阵：claim 返回未知 job 类型 — 不影响其他 job 的 c
   const jobs = await claimJobs(executor, 2, MAX_ATTEMPTS);
 
   assert.equal(jobs.length, 2);
-  assert.equal(jobs[0].type, "execute_card_agent_turn");
+  assert.equal(jobs[0].type, "parse_source");
   assert.equal(jobs[1].type, "unknown_type_xyz");
   // 两种 job 都应获得独立的 lease token
   assert.equal(new Set(jobs.map((j) => j.leaseToken)).size, 2);

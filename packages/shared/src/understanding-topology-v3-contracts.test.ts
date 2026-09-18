@@ -32,7 +32,7 @@ function snapshotFixture(): Record<string, unknown> {
         nodeRef: { kind: "note", noteId: NOTE },
         label: "光学原理笔记",
         currentVersionId: NOTE,
-        freshness: "current",
+        hasSource: true,
       },
       {
         nodeRef: { kind: "objective", objectiveId: OBJ_A },
@@ -65,7 +65,7 @@ function snapshotFixture(): Record<string, unknown> {
           nextReviewAt: null,
           practiceTrailCount: 0,
           lastCanonicalEventId: null,
-          primaryAction: { kind: "create_run", origin: "graph", objectiveId: OBJ_B, cardId: null, goal: "首次验证" },
+          primaryAction: { kind: "refresh" },
         },
       },
       {
@@ -119,6 +119,23 @@ test("W1-14: guard reports card/key_point violations", () => {
   const { violations } = assertNoCardOrKeyPointNode(nodes);
   assert.equal(violations.length, 2);
   assert.deepEqual(violations.map((v) => v.kind), ["card", "key_point"]);
+});
+
+test("note 节点只声明服务端真正持有的事实，不再有写死的 freshness", () => {
+  const base = {
+    nodeRef: { kind: "note", noteId: NOTE },
+    label: "光学原理笔记",
+    currentVersionId: NOTE,
+  };
+  assert.equal(
+    understandingNodeProjectionV3Schema.safeParse({ ...base, hasSource: false }).success,
+    true,
+  );
+  // 合同是 strictObject：仓库不再产出 freshness，也不许它悄悄回来。
+  assert.equal(
+    understandingNodeProjectionV3Schema.safeParse({ ...base, freshness: "current" }).success,
+    false,
+  );
 });
 
 test("W1-15: edges only use the four shared node kinds", () => {

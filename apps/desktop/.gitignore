@@ -1,6 +1,0 @@
-node_modules/
-dist/
-release/
-.dev-signing/
-*.dmg
-*.app

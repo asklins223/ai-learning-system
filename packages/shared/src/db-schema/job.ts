@@ -7,7 +7,7 @@ export const jobs = pgTable(
   "jobs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    type: text("type").notNull(), // execute_card_agent_turn | align_evidence | evaluate_validation | parse_source | generate_validation_question
+    type: text("type").notNull(), // parse_source | companion_*
     workspaceId: uuid("workspace_id").notNull(),
     // SEC-01: trusted actor attribution. Legacy rows may remain null until a
     // membership-validated backfill or explicit quarantine decision is made.
@@ -21,12 +21,6 @@ export const jobs = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     // G-001: 不可变 lease token — claim 时生成并写入 DB，完成/失败时以此作为原子条件。
     leaseToken: text("lease_token"),
-    // v0.6 CARD-02 (计划 §7.7): card repair state — persisted so crash/lease-lost
-    // prevents a second repair call. CAS: none → claimed → completed.
-    repairState: text("repair_state").notNull().default("none"),
-    // CHECK (0..1) enforced at DB level via migration.
-    repairAttemptCount: integer("repair_attempt_count").notNull().default(0),
-        stage: text("stage"),
     priority: integer("priority").notNull().default(50),
     resourceClass: text("resource_class").notNull().default("maintenance"),
     idempotencyKey: text("idempotency_key"),
@@ -42,11 +36,5 @@ export const jobs = pgTable(
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
 
     idWorkspaceUnique: uniqueIndex("jobs_id_workspace_unique").on(t.id, t.workspaceId),
-    // 2026-08-12（generate 对齐）：表达式+部分唯一索引——同 noteVersion 的
-    // generate_card 不得并发重复(worker 幂等兜底)。drizzle 表达式索引用 sql 模板。
-    generateCardActiveUnique: uniqueIndex("jobs_generate_card_active_unique_idx")
-      .on(t.workspaceId, sql`(${t.payload} ->> 'noteVersionId')`)
-      .where(
-        sql`${t.type} = 'generate_card' AND ${t.status} IN ('pending', 'running') AND (${t.payload} ->> 'noteVersionId') IS NOT NULL`,
-      ),}),
+  }),
 );

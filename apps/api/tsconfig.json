@@ -13,21 +13,40 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "noEmit": true,
-    "rootDir": ".",
+    // 2026-09-15：paths 改为指向 packages/shared 的**实时源码**（与 worker 一致）。
+    // 此前经 node_modules/@ailearn/shared 解析，而 pnpm 对 file: 依赖是**安装期快照**
+    // （pnpm install 不会因源码变化重新拷贝）——后果：对 packages/shared 的任何修改
+    // 对 API 的 typecheck 与 tsx 运行**完全不可见**，新增导出会报"no exported member"，
+    // 删除导出则不会报错。rootDir 相应上移到仓库根（noEmit，无产物影响）。
+    "rootDir": "../..",
     "baseUrl": ".",
     "paths": {
       "@ailearn/shared": [
-        "./node_modules/@ailearn/shared/src/index.ts"
+        "../../packages/shared/src/index.ts"
+      ],
+      "@ailearn/shared/*": [
+        "../../packages/shared/src/*.ts",
+        "../../packages/shared/src/*/index.ts"
+      ],
+      // 与 worker 同款：把 drizzle-orm 钉到本包的**同一份**类型，否则
+      // packages/shared/src 与其各自 node_modules 里的 drizzle-orm 是两份
+      // 不同的类声明（Column/config protected 身份不匹配），一旦把 shared 源码
+      // 纳入本程序就会产生数千条 TS2322/TS2345/TS2769 假错误。
+      "drizzle-orm": [
+        "./node_modules/drizzle-orm/index.d.ts"
+      ],
+      "drizzle-orm/*": [
+        "./node_modules/drizzle-orm/*/index.d.ts",
+        "./node_modules/drizzle-orm/*.d.ts"
       ]
     },
     "outDir": "dist"
   },
   "include": [
-    "src/**/*.ts",
-    "node_modules/@ailearn/shared/src/**/*.ts"
+    "src/**/*.ts"
   ],
   "exclude": [
-    "node_modules/@ailearn/shared/src/**/*.test.ts",
-    "node_modules/@ailearn/shared/src/**/*.test.tsx"
+    "node_modules",
+    "dist"
   ]
 }

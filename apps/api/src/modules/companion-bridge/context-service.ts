@@ -8,7 +8,7 @@
 
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { assistantPageContexts } from "../../db/schema/companion-bridge.ts";
+import { assistantPageContexts } from "@ailearn/shared/db-schema/companion-bridge";
 import type {
   AssistantContextSnapshotV2,
   MainPageContextInputV2,
@@ -30,10 +30,10 @@ export interface BridgeScope {
 const HYDRATABLE_TABLES = new Set([
   "sources",
   "notes",
-  // V1 卡/卡组/要点表已随旧栈退役：V2 用 learning_cards_v2 / learning_objectives_v2。
+  // 当前卡片与学习目标实体使用 learning_cards_v2 / learning_objectives_v2。
   "learning_cards_v2",
   "learning_objectives_v2",
-  "evidences",
+  "evidence_snapshots_v2",
   "review_schedules",
   "learning_runs",
   "learning_tasks",
@@ -52,6 +52,17 @@ export async function publishContext(
     now: Date;
   },
 ): Promise<AssistantContextSnapshotV2> {
+  // contextId 是客户端重试的幂等键，也是表的主键。按 id 先加锁，避免
+  // 同一个 id 在不同 pageInstance 上并发时把唯一键错误暴露成 500。
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(hashtextextended(${`companion-context-id:${input.contextId}`}, 0))
+  `);
+  // UPDATE-then-INSERT is not enough here: two publishes for the same page
+  // can both revoke the old row and race on the partial unique index.  Keep
+  // the whole replace operation serialized for this workspace/user/page.
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(hashtextextended(${`companion-context:${scope.workspaceId}:${scope.userId}:${input.pageInstanceId}`}, 0))
+  `);
   // R6（round-3 审计）：原实现逐 EntityRef 一条 SELECT 校验（一页 ~8 ref → 8 次
   // 串行 RTT，全程占事务连接）。现按 ref.key.table 分组，每表一条
   // `id = ANY($ids) AND workspace_id = ?` 校验归属，消除 N+1。
@@ -60,6 +71,44 @@ export async function publishContext(
   const revision = computeContextRevision(input.page);
   const issuedAt = input.now;
   const expiresAt = new Date(issuedAt.getTime() + CONTEXT_LEASE_SECONDS * 1000);
+
+  const existingRows = await tx
+    .select({
+      workspaceId: assistantPageContexts.workspaceId,
+      userId: assistantPageContexts.userId,
+      pageInstanceId: assistantPageContexts.pageInstanceId,
+      revision: assistantPageContexts.revision,
+      revokedAt: assistantPageContexts.revokedAt,
+      issuedAt: assistantPageContexts.issuedAt,
+      expiresAt: assistantPageContexts.expiresAt,
+    })
+    .from(assistantPageContexts)
+    .where(eq(assistantPageContexts.id, input.contextId as never))
+    .limit(1);
+  const existing = existingRows[0];
+  if (existing) {
+    if (
+      existing.workspaceId === scope.workspaceId
+      && existing.userId === scope.userId
+      && existing.pageInstanceId === input.pageInstanceId
+      && existing.revision === revision
+      && existing.revokedAt === null
+    ) {
+      // 同一个 publish 请求重试时返回原 lease，不能先 revoke 再 insert。
+      return buildContextSnapshot({
+        contextId: input.contextId,
+        accountSessionId: input.accountSessionId,
+        deviceSessionId: input.deviceSessionId,
+        workspaceId: scope.workspaceId,
+        userId: scope.userId,
+        pageInstanceId: input.pageInstanceId,
+        input: input.page,
+        issuedAt: existing.issuedAt,
+        expiresAt: existing.expiresAt,
+      });
+    }
+    throw new ContextHydrationError("context id already used", "context_conflict", 409);
+  }
 
   // 同一 (workspace,user,pageInstance) 未撤销 context 唯一：内容变化重新
   // publish 时先撤销旧 context（§14.2：重新 publish 并立即 revoke 旧 context）。
@@ -195,6 +244,7 @@ async function verifyEntityRefs(
     // 查找列，其余表仍用 id。
     const idColumn = table === "learning_cards_v2" ? "card_id"
       : table === "learning_objectives_v2" ? "objective_id"
+      : table === "evidence_snapshots_v2" ? "evidence_snapshot_id"
       : "id";
     const idList = sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `);
     const rows = await tx.execute(sql`

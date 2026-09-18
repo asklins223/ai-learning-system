@@ -16,8 +16,8 @@ import {
   learningObjectiveOriginsV2,
   learningObjectiveRevisionsV2,
   type ObjectiveOriginKindV3,
-} from "../../db/schema/card-generation-v2.ts";
-import { noteVersions } from "../../db/schema/note.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
+import { noteVersions } from "@ailearn/shared/db-schema/note";
 import {
   objectiveOriginV3Schema,
   type ObjectiveOriginV3,
@@ -38,7 +38,6 @@ export interface OriginWriteInput {
   integrity?: "verified" | "legacy_unreviewed";
   provenance?: Record<string, unknown>;
 }
-
 export class OriginValidationError extends DomainError {
   constructor(message: string) {
     super({ name: "OriginValidationError", code: "origin_validation_error", message, statusCode: 500 });
@@ -78,8 +77,6 @@ function buildRow(
     }
     wireInput.importBatchRef = input.importBatchRef;
   }
-  // legacy_migrated kind 只从读取路径（rowToWire）处理已有 DB 行；
-  // 写入路径不再支持创建新的 legacy_migrated origin。
   const wire = objectiveOriginV3Schema.parse(wireInput);
   return {
     wire,
@@ -182,13 +179,6 @@ export function rowToWire(row: OriginRow): ObjectiveOriginV3 {
       return objectiveOriginV3Schema.parse({ ...base, kind: "manual" });
     case "imported":
       return objectiveOriginV3Schema.parse({ ...base, kind: "imported", importBatchRef: row.importBatchRef });
-    case "legacy_migrated":
-      return objectiveOriginV3Schema.parse({
-        ...base,
-        kind: "legacy_migrated",
-        legacyCardId: row.legacyCardId,
-        legacyKeyPointId: row.legacyKeyPointId,
-      });
     default:
       throw new OriginValidationError("unknown origin_kind: " + String(row.originKind));
   }
@@ -206,23 +196,6 @@ export async function listOriginsByObjective(
     .where(and(
       eq(learningObjectiveOriginsV2.workspaceId, workspaceId),
       eq(learningObjectiveOriginsV2.objectiveId, objectiveId),
-    ))
-    .orderBy(asc(learningObjectiveOriginsV2.boundAt), asc(learningObjectiveOriginsV2.id));
-  return rows.map(rowToWire);
-}
-
-/** 按 note 双向查询（生成/来源侧使用）。 */
-export async function listOriginsByNote(
-  tx: ApiTransaction,
-  workspaceId: string,
-  noteId: string,
-): Promise<ObjectiveOriginV3[]> {
-  const rows = await tx
-    .select()
-    .from(learningObjectiveOriginsV2)
-    .where(and(
-      eq(learningObjectiveOriginsV2.workspaceId, workspaceId),
-      eq(learningObjectiveOriginsV2.noteId, noteId),
     ))
     .orderBy(asc(learningObjectiveOriginsV2.boundAt), asc(learningObjectiveOriginsV2.id));
   return rows.map(rowToWire);
@@ -303,21 +276,4 @@ export async function copyOriginsToRevision(
     if (created) copied += 1;
   }
   return copied;
-}
-
-/** 按 source snapshot 查询。 */
-export async function listOriginsBySourceSnapshot(
-  tx: ApiTransaction,
-  workspaceId: string,
-  sourceSnapshotId: string,
-): Promise<ObjectiveOriginV3[]> {
-  const rows = await tx
-    .select()
-    .from(learningObjectiveOriginsV2)
-    .where(and(
-      eq(learningObjectiveOriginsV2.workspaceId, workspaceId),
-      eq(learningObjectiveOriginsV2.sourceSnapshotId, sourceSnapshotId),
-    ))
-    .orderBy(asc(learningObjectiveOriginsV2.boundAt), asc(learningObjectiveOriginsV2.id));
-  return rows.map(rowToWire);
 }

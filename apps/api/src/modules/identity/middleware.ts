@@ -2,7 +2,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { eq, and } from "drizzle-orm";
 import { decodeToken } from "./service.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
-import { workspaceMembers, workspaces } from "../../db/schema/identity.ts";
+import { workspaceMembers, workspaces } from "@ailearn/shared/db-schema/identity";
 import { extractAuthCredential, hasValidCookieCsrf, type AuthCredential } from "./session-auth.ts";
 
 declare module "fastify" {

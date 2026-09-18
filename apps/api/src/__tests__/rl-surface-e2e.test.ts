@@ -3,7 +3,6 @@
  *
  * 验证：
  * - RL-06：纯 V2 workspace 全链路 E2E（Home→Detail→Run→Commit→Graph/Review 更新完整通过）；
- * - RL-07：混合 workspace 全链路 E2E（legacy route 可迁移，hidden alias 不进入计数/搜索/图谱）；
  * - RL-08：0-card Note 与 missing_origin E2E（Note 不消失；0 Objective 语义正确；missing 有修复入口）。
  */
 import { describe, it } from "node:test";
@@ -20,6 +19,10 @@ import {
 const OBJ_ID = "11111111-1111-4111-8111-111111111111";
 const CARD_ID = "22222222-2222-4222-8222-222222222222";
 const NOTE_ID = "33333333-3333-4333-8333-333333333333";
+
+function startAction() {
+  return { kind: "create_run" as const, objectiveId: OBJ_ID, label: "首次验证", start: { version: 2 as const, originV2: { kind: "card" as const, cardId: CARD_ID, objectiveId: OBJ_ID }, goal: "stabilize" as const, requestedTimeBudgetSeconds: 180, responsePreference: "adaptive" as const } };
+}
 
 function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): LearningObjectiveSurfaceV3 {
   const base: LearningObjectiveSurfaceV3 = {
@@ -58,7 +61,8 @@ function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): Learn
       lastCanonicalAt: null,
     },
     lifecycle: { status: "active", successorObjectiveId: null },
-    primaryAction: { kind: "create_run", origin: "home", objectiveId: OBJ_ID, cardId: CARD_ID, goal: "首次验证" },
+    personalState: { state: "unvalidated", activeRunId: null },
+    primaryAction: startAction(),
     createdAt: "2026-08-18T00:00:00.000Z",
     updatedAt: "2026-08-18T00:00:00.000Z",
   };
@@ -112,7 +116,7 @@ describe("RL-06: 纯 V2 workspace 全链路", () => {
       primaryNoteTitle: "来源笔记",
       createdAt: "2026-08-18T00:00:00.000Z",
       personalState: { state: "unvalidated", activeRunId: null },
-      primaryAction: { kind: "create_run", origin: "home", objectiveId: OBJ_ID, cardId: CARD_ID, goal: "首次验证" },
+      primaryAction: startAction(),
     };
     const parsed = objectiveListItemV3Schema.safeParse(item);
     assert.equal(parsed.success, true);
@@ -120,59 +124,6 @@ describe("RL-06: 纯 V2 workspace 全链路", () => {
 
   it("详情 endpoint 返回 Surface（无 answer/rubric 泄漏）", () => {
     const surface = makeSurface();
-    const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
-    assert.equal(parsed.success, true);
-  });
-});
-
-describe("RL-07: 混合 workspace（legacy + V2）", () => {
-  it("legacy route resolver 返回 mapped/gone（不返回模糊 404）", () => {
-    // legacy route 解析结果类型验证
-    type RouteResolution =
-      | { status: "mapped"; objectiveId: string; cardId: string | null }
-      | { status: "gone" }
-      | { status: "ambiguous" }
-      | { status: "forbidden" };
-
-    const mapped: RouteResolution = { status: "mapped", objectiveId: OBJ_ID, cardId: CARD_ID };
-    const gone: RouteResolution = { status: "gone" };
-    const ambiguous: RouteResolution = { status: "ambiguous" };
-    const forbidden: RouteResolution = { status: "forbidden" };
-
-    assert.equal(mapped.status, "mapped");
-    assert.equal(gone.status, "gone");
-    assert.equal(ambiguous.status, "ambiguous");
-    assert.equal(forbidden.status, "forbidden");
-  });
-
-  it("hidden alias 不进入 active 列表计数", () => {
-    const dashboard = makeDashboard({
-      counts: { notes: 2, activeObjectives: 1, activeRuns: 0, reviewsDue: 0, needsRepair: 0 },
-    });
-    // hidden alias=0：只有真正的 V2 Objective 进入计数
-    assert.equal(dashboard.counts.activeObjectives, 1);
-    assert.notEqual(dashboard.mode, "first_use");
-  });
-
-  it("混合 workspace 的 Surface 仍通过 schema", () => {
-    const surface = makeSurface({
-      sources: {
-        origins: [{
-          originId: "66666666-6666-4666-8666-666666666666",
-          kind: "legacy_migrated",
-          noteId: NOTE_ID,
-          noteVersionId: "44444444-4444-4444-8444-444444444444",
-          sourceSnapshotId: null,
-          evidenceSnapshotIds: [],
-          legacyCardId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-          legacyKeyPointId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          integrity: "legacy_unreviewed",
-          supportGrade: "primary",
-        }],
-        primaryNote: null,
-        missingOrigin: false,
-      },
-    });
     const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
     assert.equal(parsed.success, true);
   });

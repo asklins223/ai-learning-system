@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { markdownToBlocks, type ParsedBlock } from "../lib/markdown-parser.ts";
+import { markdownToBlocks, type ParsedBlock } from "@ailearn/shared/markdown-parser";
 import { computeContentHash } from "../modules/note/service.ts";
 
 // 辅助：ParsedBlock[] → Markdown 文本（简化版，仅用于往返验证）

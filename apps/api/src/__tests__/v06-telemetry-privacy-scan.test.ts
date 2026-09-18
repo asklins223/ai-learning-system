@@ -77,11 +77,6 @@ const WORKER_HANDLER_DIR = join(
   "workers/ai-worker/src/handlers",
 );
 
-const API_MODULE_DIR = join(
-  process.cwd(),
-  "apps/api/src/modules/validation",
-);
-
 function scanFileForSensitiveLoggerContent(filePath: string): string[] {
   if (!existsSync(filePath)) return [];
   const content = readFileSync(filePath, "utf8");
@@ -126,15 +121,6 @@ test("v0.6 遥测隐私：Worker handlers 不在 logger 中泄漏敏感字段", 
   );
 });
 
-test("v0.6 遥测隐私：API validation 模块不在 logger 中泄漏敏感字段", () => {
-  const violations = scanDirectoryForSensitiveLoggerContent(API_MODULE_DIR);
-  assert.equal(
-    violations.length,
-    0,
-    `API validation 模块 logger 调用中发现敏感字段泄漏 (计划 §4.1):\n${violations.join("\n")}`,
-  );
-});
-
 // ─── 验证 metrics 标签不包含敏感内容 ───────────────────────────────────────
 
 test("v0.6 遥测隐私：metrics 标签使用 operation/type/status，不含 question/answer/quote", () => {
@@ -165,7 +151,7 @@ test("v0.6 遥测隐私：metrics 标签使用 operation/type/status，不含 qu
     );
   }
 
-  // 确认 JOB_TYPES 和 PROVIDER_OPERATIONS 是操作类型，不是内容
+  // 确认 JOB_TYPES 是操作类型，不是内容
   assert.ok(content.includes("job"), "metrics should have job metrics");
   assert.ok(content.includes("provider"), "metrics should have provider metrics");
 });

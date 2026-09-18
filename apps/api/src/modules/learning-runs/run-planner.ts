@@ -205,6 +205,34 @@ export function buildTaskPrompt(
     : `请${hint}：${claim}`;
 }
 
+const RUBRIC_FACET_DIRECTIONS: Record<PlannedTaskInput["intent"], string> = {
+  recall: "回忆这个主题的关键信息",
+  paraphrase: "用自己的话重新说明它",
+  explain: "说明它为何成立以及关键机制",
+  example: "给出一个具体例子并说明为什么符合",
+  apply: "说明一个适用场景和相应做法",
+  boundary: "说明它成立的条件或不适用的情况",
+  procedure: "按正确顺序说明处理步骤",
+  relate: "说明它与相关概念之间的关系",
+  repair: "指出容易出错之处并给出更准确的说法",
+};
+
+/**
+ * V2 评分合同决定题目要求：每个 required rubric facet 都要在公开题面中有
+ * 对应的作答动作。这样 Critic 不会拿一题“解释”去判一个未被要求的“应用”。
+ */
+export function buildV2TaskPrompt(
+  primaryIntent: PlannedTaskInput["intent"],
+  objectiveStatement: string,
+  requiredFacets: PlannedTaskInput["intent"][],
+): string {
+  const directions = [...new Set(requiredFacets)].map((facet) => RUBRIC_FACET_DIRECTIONS[facet]);
+  if (directions.length === 0) {
+    throw new Error("V2 task requires at least one rubric facet");
+  }
+  return buildTaskPrompt(primaryIntent, directions.join("；并"), objectiveStatement);
+}
+
 export function clampTimeBudget(seconds: number | undefined): number {
   if (seconds === undefined || Number.isNaN(seconds)) return 180;
   return Math.min(180, Math.max(30, Math.floor(seconds)));
@@ -376,17 +404,30 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   const v2 = target.v2!;
   const runId = options.runId;
   const taskId = randomTaskId();
-  const intent = GOAL_INTENT[options.goal];
-  const hint = selectPromptAngle(options, intent, v2.objectiveStatement);
-  // public 题面：objectiveStatement 是公开卡片前端内容；canonicalAnswer 是答案。
-  const prompt = buildTaskPrompt(intent, hint, v2.objectiveStatement);
+  // 只有 required rubric 是本轮必须证明的掌握条件；可选项只能作为
+  // Critic 的诊断上下文，不能因未覆盖而阻断通过。
+  const requiredRubricTargetIds = v2.scoringRubric.units
+    .filter((unit) => unit.required)
+    .map((unit) => unit.rubricUnitId);
+  if (requiredRubricTargetIds.length === 0) {
+    throw new Error("V2 scoring rubric must contain at least one required unit");
+  }
+  const requiredRubricUnits = v2.scoringRubric.units.filter((unit) => unit.required);
+  const goalIntent = GOAL_INTENT[options.goal];
+  // 用户目标优先；若它不在必需 rubric 中，改用第一个必需能力，避免题目要求
+  // 与评分标准脱节。其余必需能力会在题面中以组合动作明确列出。
+  const intent = requiredRubricUnits.some((unit) => unit.facet === goalIntent)
+    ? goalIntent
+    : requiredRubricUnits[0].facet;
+  // public 题面只消费 objectiveStatement 与 facet 动作；canonicalAnswer/rubric
+  // criterion 仍是 server-private 判分参照。
+  const prompt = buildV2TaskPrompt(
+    intent,
+    v2.objectiveStatement,
+    requiredRubricUnits.map((unit) => unit.facet),
+  );
   const targetSummary = v2.publicSummary.slice(0, 160);
   const estSeconds = 60;
-
-  const practiceOnly = v2.publishedTargetEligibility === "practice_only"
-    || v2.publishedTargetEligibility === "blocked";
-  const purpose = practiceOnly ? "practice" as const : "formal" as const;
-  const ceiling = practiceOnly ? "practice_only" as const : "mastery_eligible" as const;
 
   // 结构化：优先从 CanonicalAnswerV2 显式结构生成；无足够结构则不生成结构题，
   // Planner 换 open text/voice（§16.5）。
@@ -394,6 +435,14 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   const structured = wantsStructured
     ? generateStructuredFromSnapshot(v2.canonicalAnswer, v2.relations)
     : null;
+  const practiceOnly = v2.publishedTargetEligibility === "practice_only"
+    || v2.publishedTargetEligibility === "blocked";
+  // V2 的结构题目前只验证一个可机械比对的答案结构（例如步骤顺序或关系边）。
+  // 它尚不能逐一证明冻结 rubric 的全部 required 能力，故不得以一次结构题
+  // 通过换取 canonical/schedule；保留为可用的练习与反馈入口。
+  const structuredPracticeOnly = structured !== null;
+  const purpose = practiceOnly || structuredPracticeOnly ? "practice" as const : "formal" as const;
+  const ceiling = practiceOnly || structuredPracticeOnly ? "practice_only" as const : "mastery_eligible" as const;
 
   const task: PlannedTaskInput = {
     taskId,
@@ -440,10 +489,10 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
 
   closures[primaryVariant.variantId] = buildClosure(
     runId, taskId, primaryVariant, target, task, runPlanHash, structuredSolution,
-    v2.scoringRubric.units.map((u) => u.rubricUnitId),
+    requiredRubricTargetIds,
   );
   closures[voiceVariant.variantId] = buildClosure(runId, taskId, voiceVariant, target, task, runPlanHash,
-    undefined, v2.scoringRubric.units.map((u) => u.rubricUnitId),
+    undefined, requiredRubricTargetIds,
   );
 
   return {
@@ -532,9 +581,15 @@ function buildStructuredInteraction(
   return { kind: "text_response", maxChars: 2000 };
 }
 
-/** 从 PrivateTaskSolutionV1 提取 rubric 目标 id（choice 用 rationale 目标）。 */
+/**
+ * 从 PrivateTaskSolutionV1 提取 rubric 目标 id。
+ *
+ * 这里曾有一条 `kind === "choice"` 的分支读 rationaleRubricTargetIds，但
+ * PrivateTaskSolutionV1 的五个 kind（open_response / ordering / relation /
+ * repair / structured_bundle）都只带 rubricTargetIds —— "choice" 已经不在合同里，
+ * 那个分支永远不可达，还让 solution 在该分支内被收窄成 never。
+ */
 export function rubricTargetIdsOf(solution: PrivateTaskSolutionV1): string[] {
-  if (solution.kind === "choice") return [...solution.rationaleRubricTargetIds];
   return [...solution.rubricTargetIds];
 }
 
@@ -630,12 +685,8 @@ export function computeRunContractHash(input: {
   schedulingAuthorization: unknown;
   taskPlanHash: string;
   projectionBaselineCheckpointToken: string | null;
-  /**
-   * §16.2 step 8：本方案切流后新建的 V2 Run 必须把 `snapshotHash` 纳入
-   * 版本化 V2 private contract hash closure；历史 V1 Run 不传此值，
-   * hash 保持与既有实现一致（向后兼容，不破坏已落库 contractHash）。
-   */
-  snapshotHash?: string;
+  /** §16.2 step 8：V2 Run 的 target snapshot 必须进入 contract hash closure。 */
+  snapshotHash: string;
 }): string {
   return sha256Hex(
     [
@@ -650,7 +701,7 @@ export function computeRunContractHash(input: {
       `sched:${JSON.stringify(input.schedulingAuthorization)}`,
       `plan:${input.taskPlanHash}`,
       `checkpoint:${input.projectionBaselineCheckpointToken ?? ""}`,
-      ...(input.snapshotHash ? [`snapshot:${input.snapshotHash}`] : []),
+      `snapshot:${input.snapshotHash}`,
     ].join("\n"),
   );
 }

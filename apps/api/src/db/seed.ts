@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { db } from "./client.ts";
-import { users, workspaces, workspaceMembers } from "./schema/identity.ts";
+import { users, workspaces, workspaceMembers } from "@ailearn/shared/db-schema/identity";
 
 const DEMO_OWNER_EMAIL = "owner@ailearn.local";
 const DEMO_OWNER_PASSWORD = "ailearn_owner";

@@ -7,7 +7,7 @@
  *   multipart/form-data: file=<audio> + model=FunAudioLLM/SenseVoiceSmall
  *   响应: { "text": "string" }
  *
- * 实现 AsrProvider 接口（voice-service.ts 的可注入面）：
+ * 实现当前 companion voice 路由使用的 ASR provider：
  * - 逐字 transcript（SenseVoice 返回识别文本，按 utterance 分段）；
  * - 低置信标记：SiliconFlow 响应无逐词置信度，保守起见关键术语不做
  *   自动降级，交由 assessTranscriptionQuality 的规则层判定；

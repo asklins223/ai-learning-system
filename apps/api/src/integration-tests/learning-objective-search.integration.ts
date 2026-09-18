@@ -10,8 +10,8 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { and, eq, sql } from "drizzle-orm";
-import { learningObjectivesV2 } from "../db/schema/card-generation-v2.ts";
-import { searchDocuments } from "../db/schema/search.ts";
+import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { searchDocuments } from "@ailearn/shared/db-schema/search";
 
 const pgSql = (await import("postgres")).default(process.env.DATABASE_URL ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn", { max: 1 });
 const { seedPureV2Workspace } = await import("./helpers/pure-v2-workspace-fixture.ts");

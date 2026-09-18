@@ -56,8 +56,8 @@ async function seedNote(title: string, content: string): Promise<{ versionId: st
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by, card_generation_epoch)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}, 1) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
       VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'rq-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
@@ -68,24 +68,34 @@ async function seedNote(title: string, content: string): Promise<{ versionId: st
   return { versionId };
 }
 
+/**
+ * 创建一次生成运行，并把**用过的请求体**一并返回。
+ *
+ * 返回 body 是必需的：§17.1 的幂等语义是"同一 key **且同一 payload** 才 replay"，
+ * 而 payload 里含 `clientRequestId`。要构造一次真正的幂等重放，就必须拿回上次那个
+ * 请求体；每次现造一个（旧写法）会让服务端正确地判为 `idempotency_conflict`——
+ * 那是契约在生效，不是 bug。
+ */
 async function createRun(versionId: string) {
   const { createGenerationRunV2 } = await import(
     "../../../../apps/api/src/modules/card-generation-v2/generation-run-service.ts"
   );
-  return createGenerationRunV2(
+  const body = {
+    version: 2 as const,
+    noteVersionId: versionId,
+    sourceScope: { kind: "whole_note" as const },
+    learningGoal: "understand" as const,
+    detailThreshold: "balanced" as const,
+    quantity: { kind: "adaptive" as const },
+    clientRequestId: `rq-${randomUUID()}`,
+  };
+  const result = await createGenerationRunV2(
     { workspaceId: WORKSPACE_ID, userId: USER_ID },
     versionId,
-    {
-      version: 2,
-      noteVersionId: versionId,
-      sourceScope: { kind: "whole_note" },
-      learningGoal: "understand",
-      detailThreshold: "balanced",
-      quantity: { kind: "adaptive" },
-      clientRequestId: `rq-${randomUUID()}`,
-    },
+    body,
     `rq-key-${randomUUID()}`,
   );
+  return { ...result, body };
 }
 
 async function runPipelineOnce() {
@@ -240,9 +250,9 @@ test("§15.7/C31：Evidence Redaction — tombstone + eligibility 前移 + 幂�
   assert.ok(mapping.cardId && mapping.objectiveId, "baseline activation must produce card+objective");
 
   // 激活后 PREPARE 成功（baseline eligible）
-  // V1 legacy 桥接数据（learning_cards + card_key_points）已不需要——
+  // 历史卡片桥接数据已不需要——
   // 迁移 0176 后 key_point_id FK 直接引用 learning_objectives_v2(objective_id)，
-  // V2 createRunV2 直接使用 objectiveId，无需 card_key_points alias 行。
+  // V2 createRunV2 直接使用 objectiveId，不再需要历史 alias 行。
   const { createRunV2 } = await import(
     "../../../../apps/api/src/modules/learning-runs/run-service.ts"
   );
@@ -400,9 +410,17 @@ test("§15.7/C31：Evidence Redaction — tombstone + eligibility 前移 + 幂�
     WHERE workspace_id = ${WORKSPACE_ID} AND idempotency_key = ${key2}`;
   assert.equal(receiptsAfter[0].n, 0, "rejected activation must leave 0 receipts");
 
-  // ── redaction 后：PREPARE 被 §16.2 evidence_not_usable 拒绝（fail closed）──
-  await assert.rejects(
-    withWorkspaceTransaction(
+  // ── redaction 后：PREPARE 必须 fail closed（§16.2）──
+  //
+  // 这里断言的是**安全性质**（必须被拒绝、且不留下任何快照），而不是某一个具体错误码。
+  // 原因：redaction 做了两件事——把 eligibility 置为 `revoked`，**并**把 epoch 前移
+  // （fencing 在途消费，见 evidence-redaction-service 第 4 步）。因此基于 redaction 前
+  // 绑定构造的 PREPARE 会**先**撞到"绑定已失效"（`context_stale`），而状态检查
+  // （`evidence_not_usable`）在它之后。两个码都是 fail-closed 的正确拒绝，先命中哪一个
+  // 取决于守卫顺序，把测试钉在其中一个上会在无关重构时误报。
+  let c31Outcome = "no_error_thrown";
+  try {
+    await withWorkspaceTransaction(
       { workspaceId: WORKSPACE_ID, userId: USER_ID },
       (tx) => createRunV2(tx, {
         workspaceId: WORKSPACE_ID,
@@ -414,9 +432,13 @@ test("§15.7/C31：Evidence Redaction — tombstone + eligibility 前移 + 幂�
           idempotencyKey: `rq-prepare-after-redact-${randomUUID()}`,
         },
       }),
-    ),
-    (err: unknown) => (err as { code?: string }).code === "evidence_not_usable",
-    "C31: PREPARE must fail closed after redaction (evidence_not_usable)",
+    );
+  } catch (error) {
+    c31Outcome = String((error as { code?: string }).code ?? (error as Error).message);
+  }
+  assert.ok(
+    ["context_stale", "evidence_not_usable", "evidence_eligibility_missing"].includes(c31Outcome),
+    `C31: PREPARE must fail closed after redaction (got ${c31Outcome})`,
   );
   const snapshotsAfter = await admin`
     SELECT count(*)::int AS n FROM learning_target_snapshots_v2
@@ -471,20 +493,11 @@ test("§22.6：V2 生成配额 — 在途并发上限 + 24h 速率上限 + 幂�
       "in-flight limit must reject with generation_concurrency_limit",
     );
 
-    // 3. 幂等重放豁免：first 的 key 重放 → 同 run（不受配额影响）
+    // 3. 幂等重放豁免：first 的 key + **first 的请求体**重放 → 同 run（不受配额影响）
     const replay = await createGenerationRunV2(
       { workspaceId: WORKSPACE_ID, userId: USER_ID },
       versionId,
-      {
-        version: 2,
-        noteVersionId: versionId,
-        sourceScope: { kind: "whole_note" },
-        learningGoal: "understand",
-        detailThreshold: "balanced",
-        quantity: { kind: "adaptive" },
-        clientRequestId: `rq-quota-${randomUUID()}`,
-      },
-      // first 用的 key 未知——改用直接查 first 的 idempotency_key 重放
+      first.body,
       (await admin`SELECT idempotency_key FROM card_generation_runs_v2 WHERE id = ${first.runId}`)[0].idempotency_key,
     );
     assert.equal(replay.runId, first.runId, "idempotent replay must return same run despite quota");

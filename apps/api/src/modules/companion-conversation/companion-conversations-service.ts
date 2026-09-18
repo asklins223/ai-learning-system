@@ -237,7 +237,7 @@ export async function getCompanionConversationSnapshot(args: {
         user_message_id: string;
         assistant_message_id: string | null;
         generation: number;
-        status: "accepted" | "running" | "cancel_requested";
+        status: "accepted" | "running" | "waiting_for_confirmation" | "cancel_requested";
         created_at: Date;
         updated_at: Date;
       }>(sql`
@@ -245,14 +245,12 @@ export async function getCompanionConversationSnapshot(args: {
                generation, status, created_at, updated_at
         FROM companion_turn_runs
         WHERE conversation_id = ${args.conversationId}
-          AND status IN ('accepted', 'running', 'cancel_requested')
+          AND status IN ('accepted', 'running', 'waiting_for_confirmation', 'cancel_requested')
         ORDER BY generation DESC
         LIMIT 1
       `);
 
-      const learningActionsEnabled =
-        process.env.COMPANION_DIALOGUE_V1_ENABLED === "true" &&
-        process.env.COMPANION_ACTION_BRIDGE_V1_ENABLED === "true";
+      const learningActionsEnabled = process.env.COMPANION_DIALOGUE_V1_ENABLED === "true";
 
       const proposalsPromise = learningActionsEnabled
         ? tx.execute<{
@@ -286,35 +284,11 @@ export async function getCompanionConversationSnapshot(args: {
           `)
         : Promise.resolve([] as never[]);
 
-      const actionRunsPromise = learningActionsEnabled
-        ? tx.execute<{
-            id: string;
-            proposal_id: string;
-            status: "accepted" | "running";
-            result_message_id: string | null;
-            result_ref: string | null;
-            route: unknown;
-            safe_summary: string | null;
-            error_code: string | null;
-            created_at: Date;
-            updated_at: Date;
-          }>(sql`
-            SELECT id, proposal_id, status, result_message_id, result_ref, route,
-                   safe_summary, error_code, created_at, updated_at
-            FROM companion_action_runs
-            WHERE conversation_id = ${args.conversationId}
-              AND status IN ('accepted', 'running')
-            ORDER BY created_at DESC
-            LIMIT 1
-          `)
-        : Promise.resolve([] as never[]);
-
-      // PERF: prop/action-run 读与 active-run 读相互独立，同一事务内并发发出，
+      // PERF: proposal 读与 active-run 读相互独立，同一事务内并发发出，
       // 仅在拿到 active run 后再串行取依赖其 id 的 stream 事件。
-      const [activeRuns, proposals, actionRuns] = await Promise.all([
+      const [activeRuns, proposals] = await Promise.all([
         activeRunsPromise,
         proposalsPromise,
-        actionRunsPromise,
       ]);
 
       let activeRun: Record<string, unknown> | null = null;
@@ -325,7 +299,7 @@ export async function getCompanionConversationSnapshot(args: {
           user_message_id: string;
           assistant_message_id: string | null;
           generation: number;
-          status: "accepted" | "running" | "cancel_requested";
+          status: "accepted" | "running" | "waiting_for_confirmation" | "cancel_requested";
           created_at: Date;
           updated_at: Date;
         };
@@ -386,7 +360,9 @@ export async function getCompanionConversationSnapshot(args: {
         }
         const phase = run.status === "accepted"
           ? "accepted"
-          : sawDelta ? "streaming" : "thinking";
+          : run.status === "waiting_for_confirmation"
+            ? "awaiting_confirmation"
+            : sawDelta ? "streaming" : "thinking";
         activeRun = {
           version: 1,
           id: run.id,
@@ -405,7 +381,6 @@ export async function getCompanionConversationSnapshot(args: {
       }
 
       let pendingProposal: Record<string, unknown> | null = null;
-      let activeActionRun: Record<string, unknown> | null = null;
       if (learningActionsEnabled) {
         const proposal = proposals[0];
         if (proposal) {
@@ -424,7 +399,6 @@ export async function getCompanionConversationSnapshot(args: {
             requiresConfirmation: true,
             status: proposal.status,
             decision: proposal.decision,
-            actionRunId: null,
             expiresAt: new Date(proposal.expires_at).toISOString(),
             decidedAt: null,
             createdAt: new Date(proposal.created_at).toISOString(),
@@ -432,22 +406,6 @@ export async function getCompanionConversationSnapshot(args: {
           };
         }
 
-        const actionRun = actionRuns[0];
-        if (actionRun) {
-          activeActionRun = {
-            version: 1,
-            actionRunId: actionRun.id,
-            proposalId: actionRun.proposal_id,
-            status: actionRun.status,
-            resultMessageId: actionRun.result_message_id,
-            resultRef: actionRun.result_ref,
-            route: actionRun.route == null ? null : parseSnapshotJson(actionRun.route, "action route"),
-            safeSummary: actionRun.safe_summary,
-            errorCode: actionRun.error_code,
-            createdAt: new Date(actionRun.created_at).toISOString(),
-            updatedAt: new Date(actionRun.updated_at).toISOString(),
-          };
-        }
       }
 
       const body = companionConversationSnapshotV1Schema.parse({
@@ -456,7 +414,6 @@ export async function getCompanionConversationSnapshot(args: {
         activeRun,
         latestEventSeq: Number(conversation.next_event_seq) - 1,
         pendingProposal,
-        activeActionRun,
       });
       return { statusCode: 200 as const, body };
     },
@@ -673,7 +630,7 @@ export async function deleteCompanionConversation(args: {
         throw new CompanionConversationError("NOT_FOUND", 404, "conversation not found");
       }
 
-      // 仅 active turn（accepted/running/cancel_requested）：原子 superseded + job cancel fence。
+      // 仅 active turn（accepted/running/waiting_for_confirmation/cancel_requested）：原子 superseded + job cancel fence。
       // 轻微·17（round-4）：不变量保证每会话恰 0/1 条 active turn，仍加 LIMIT 2
       // 防数据异常下深加放大（安全阻尼，不改变语义）。
       const activeRuns = await tx
@@ -681,7 +638,7 @@ export async function deleteCompanionConversation(args: {
         .from(companionTurnRuns)
         .where(and(
           eq(companionTurnRuns.conversationId, args.conversationId),
-          sql`${companionTurnRuns.status} IN ('accepted', 'running', 'cancel_requested')`,
+          sql`${companionTurnRuns.status} IN ('accepted', 'running', 'waiting_for_confirmation', 'cancel_requested')`,
         ))
         .limit(2);
       if (activeRuns.length > 0) {
@@ -699,34 +656,14 @@ export async function deleteCompanionConversation(args: {
         }
       }
 
-      // §12：active action run（accepted/running）存在时不得删除——学习动作
-      // 正在执行，级联删除会让 action 回执与 durable result 一起消失。
-      const activeActionRuns = await tx.execute<{ id: string }>(sql`
-        SELECT id FROM companion_action_runs
-        WHERE conversation_id = ${args.conversationId}
-          AND status IN ('accepted', 'running')
-        LIMIT 1
-      `);
-      if (activeActionRuns.length > 0) {
-        throw new CompanionConversationError(
-          "RUN_ALREADY_ACTIVE",
-          409,
-          "active learning action run",
-        );
-      }
-
       // cascade scoped rows。删除顺序必须同时处理双向 FK：
       //   1. companion_messages.action_ref（0093）反向引用 proposals——
       //      无级联，删 proposals 前必须先置 NULL；
-      //   2. action_runs / proposals 的 source_message_id / result_message_id
-      //      引用 companion_messages 且无 ON DELETE CASCADE（0092），
-      //      必须在删 messages 前删除。
+      //   2. proposals 的 source_message_id 引用 companion_messages 且无
+      //      ON DELETE CASCADE，必须在删 messages 前删除。
       await tx.execute(sql`
         UPDATE companion_messages SET action_ref = NULL
         WHERE conversation_id = ${args.conversationId} AND action_ref IS NOT NULL
-      `);
-      await tx.execute(sql`
-        DELETE FROM companion_action_runs WHERE conversation_id = ${args.conversationId}
       `);
       await tx.execute(sql`
         DELETE FROM companion_action_proposals WHERE conversation_id = ${args.conversationId}

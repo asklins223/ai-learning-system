@@ -2,7 +2,7 @@
 /**
  * REL-01: Docker 镜像 digest 捕获脚本
  *
- * 在 production-compose CI job 构建完三个生产镜像后运行此脚本，
+ * 在 production-compose CI job 构建完两个生产镜像后运行此脚本，
  * 捕获每个镜像的 canonical sha256 digest 并输出为 JSON。
  *
  * 该 JSON 随后作为 CI artifact 上传，由 release-evidence job 下载
@@ -46,12 +46,11 @@ const githubRunId = process.env.GITHUB_RUN_ID || "0";
 // ─── 镜像定义 ───────────────────────────────────────────────────────────
 
 /**
- * 三个生产镜像：api / web / worker
+ * 两个生产镜像：api / worker
  * 镜像名由 docker compose 基于 COMPOSE_PROJECT_NAME 和 service 名生成
  */
 const IMAGES = [
   { key: "api", serviceName: "api", repository: "ghcr.io/asklins223/ailearn/api" },
-  { key: "web", serviceName: "web", repository: "ghcr.io/asklins223/ailearn/web" },
   { key: "worker", serviceName: "worker", repository: "ghcr.io/asklins223/ailearn/worker" },
 ];
 

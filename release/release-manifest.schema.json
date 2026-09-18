@@ -54,10 +54,9 @@
     "images": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["api", "web", "worker"],
+      "required": ["api", "worker"],
       "properties": {
         "api": { "$ref": "#/$defs/image" },
-        "web": { "$ref": "#/$defs/image" },
         "worker": { "$ref": "#/$defs/image" }
       }
     },
@@ -196,7 +195,6 @@
         "summary",
         "unit",
         "integration",
-        "e2e",
         "coverage",
         "dependencyScan",
         "secretScan",
@@ -206,7 +204,6 @@
         "summary": { "$ref": "#/$defs/testSummary" },
         "unit": { "$ref": "#/$defs/gate" },
         "integration": { "$ref": "#/$defs/gate" },
-        "e2e": { "$ref": "#/$defs/gate" },
         "coverage": { "$ref": "#/$defs/gate" },
         "dependencyScan": { "$ref": "#/$defs/gate" },
         "secretScan": { "$ref": "#/$defs/gate" },

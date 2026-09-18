@@ -13,8 +13,6 @@ import {
   type CapabilityId,
 } from "./capability-bundle.ts";
 import {
-  learningRunOriginSchema,
-  learningRunReturnTargetSchema,
 } from "./learning-run-contracts.ts";
 import {
   createLearningRunV2RequestSchema,
@@ -32,8 +30,51 @@ import {
   submitTaskArtifactV2Schema,
   recordLearningRunActivityLeaseRequestV2Schema,
 } from "./learning-run-v2-contracts.ts";
-import { reviewQueueV2Schema } from "./review-queue-v2-contracts.ts";
+import { reviewDeferRequestV2Schema, reviewDeferResultV2Schema, reviewQueueV2Schema } from "./review-queue-v2-contracts.ts";
 import { roomProjectionV1Schema } from "./room-projection-contracts.ts";
+import {
+  companionHomeProjectionV1Schema,
+  companionRoomProfileV1Schema,
+  type CompanionRoomProfilePatchV1,
+} from "./companion-home-contracts.ts";
+import {
+  companionVoiceSpeakResultV1Schema,
+  type CompanionVoiceSpeakRequestV1,
+} from "./companion-voice-contracts.ts";
+// 站内图片字节通道：来源解析把网页图片写进对象存储后，正文引用指向
+// `/api/uploads/…`；渲染层够不到 API 源也不持有令牌，由 main 代取。
+import {
+  sourceImageGetResultV1Schema,
+  type SourceImageGetRequestV1,
+} from "./source-image-contracts.ts";
+// 笔记图片写入通道：编辑器里粘贴/拖进来的一张图由 main 以 multipart 送到
+// `POST /uploads/images`，渲染层拿回服务端确认的 `/api/uploads/…` 地址写进正文，
+// 之后的读取仍走上面那条字节通道。
+import {
+  noteImageUploadResultV1Schema,
+  type NoteImageUploadRequestV1,
+} from "./note-image-upload-contracts.ts";
+// 伴星中心（桌面页 20）：记忆、记忆星图、日记、人格档案与对话记录。
+// 读取之外只开放记忆裁决（确认/忽略/固定/归档），没有对话发送通道。
+import {
+  companionConversationListV1Schema,
+  companionDailySummaryV1Schema,
+  companionMemoryItemV1Schema,
+  companionMemoryListV1Schema,
+  companionMemoryStarMapV1Schema,
+  companionPersonaMutationV1Schema,
+  companionPersonaResetV1Schema,
+  companionPersonaV1Schema,
+  type CompanionMemoryListQuery,
+  type CompanionPersonaPatchV1,
+} from "./companion-memory-desktop-contracts.ts";
+// 账号级 presence（2026-09-16 裁决 3）：在线/勿扰/离线 + 三档强度 + 静默时段。
+// 只读账号状态与 onboarding 状态，不含任何记忆正文。
+import {
+  companionAccountStateV1Schema,
+  companionOverviewSchema,
+  type CompanionAccountPatch,
+} from "./companion-shell-contracts.ts";
 import { noteDetailV1Schema } from "./note-projection-contracts.ts";
 import { noteSaveReceiptV1Schema, noteSaveRequestV1Schema } from "./note-save-contracts.ts";
 import {
@@ -42,14 +83,34 @@ import {
   cardGenerationCloseResultV1Schema,
   cardGenerationJobAcceptedV1Schema,
   cardGenerationReviewResultV1Schema,
+  cardGenerationRetryResultV1Schema,
   cardGenerationRunSnapshotV1Schema,
 } from "./card-generation-desktop-contracts.ts";
 import { candidateRevealV2Schema } from "./card-generation-v2-contracts.ts";
+import {
+  desktopSourceListPageSchema,
+  desktopSourceDetailSchema,
+  desktopSourceNotesPageSchema,
+  type DesktopSourceCreateRequest,
+  type DesktopSourceNoteResult,
+  type DesktopSourceUpdateRequest,
+  type DesktopSourceArchiveResult,
+  desktopNoteListPageSchema,
+  type DesktopNoteCreateRequest,
+  type DesktopNoteMutationResult,
+  desktopNoteVersionListSchema,
+  desktopSearchPageSchema,
+} from "./desktop-surface-contracts.ts";
+import { objectiveListPageV3Schema, learningObjectiveSurfaceV3Schema } from "./learning-objective-surface-contracts.ts";
+import { understandingTopologySnapshotV3Schema } from "./understanding-topology-v3-contracts.ts";
+import { todayActivityV1Schema } from "./activity-surface-contracts.ts";
 import type {
   DesktopCardGenerationActivationSelectionV1,
   DesktopCandidateReviewRequestV2,
   DesktopCreateCardGenerationRunRequestV2,
   DesktopRevealCandidateRequestV2,
+  CardGenerationExposureEligibilityV1,
+  CardGenerationRunSnapshotV1,
 } from "./card-generation-desktop-contracts.ts";
 
 export {
@@ -68,7 +129,7 @@ export type {
 } from "./card-generation-desktop-contracts.ts";
 
 export const DESKTOP_IPC_CONTRACT_VERSION = "desktop-ipc-v1" as const;
-export const DESKTOP_IPC_SCHEMA_REVISION = "desktop-ipc-m2-2026-08-23" as const;
+export const DESKTOP_IPC_SCHEMA_REVISION = "desktop-ipc-m2-2026-09-09" as const;
 export const DESKTOP_API_SERVICE_ID = "ailearn-api" as const;
 export const LEARNING_ROOM_ASSET_BASE_PATH = "/assets/learning-room/v1" as const;
 
@@ -88,6 +149,7 @@ export const DESKTOP_IPC_CHANNELS = {
   authLogout: "ailearn.v1.auth.logout",
   authReauthenticate: "ailearn.v1.auth.reauthenticate",
   authChangePassword: "ailearn.v1.auth.changePassword",
+  authJoinWorkspace: "ailearn.v1.auth.joinWorkspace",
   workspaceList: "ailearn.v1.workspace.list",
   workspaceSwitch: "ailearn.v1.workspace.switch",
   workspaceGetCurrent: "ailearn.v1.workspace.getCurrent",
@@ -99,17 +161,60 @@ export const DESKTOP_IPC_CHANNELS = {
   subscriptionsEvent: "ailearn.v1.subscriptions.event",
   subscriptionsUnsubscribe: "ailearn.v1.subscriptions.unsubscribe",
   roomGetProjection: "ailearn.v1.room.getProjection",
+  companionHomeGetProjection: "ailearn.v1.companion.home.getProjection",
+  companionRoomGetProfile: "ailearn.v1.companion.room.getProfile",
+  companionRoomPatchProfile: "ailearn.v1.companion.room.patchProfile",
+  companionVoiceSpeak: "ailearn.v1.companion.voice.speak",
+  companionAccountGetState: "ailearn.v1.companion.account.getState",
+  companionAccountPatchState: "ailearn.v1.companion.account.patchState",
+  companionMemoryList: "ailearn.v1.companion.memory.list",
+  companionMemoryStarMap: "ailearn.v1.companion.memory.starMap",
+  companionMemoryConfirm: "ailearn.v1.companion.memory.confirm",
+  companionMemoryPin: "ailearn.v1.companion.memory.pin",
+  companionMemoryUnpin: "ailearn.v1.companion.memory.unpin",
+  companionMemoryArchive: "ailearn.v1.companion.memory.archive",
+  companionMemoryRestore: "ailearn.v1.companion.memory.restore",
+  companionMemoryDelete: "ailearn.v1.companion.memory.delete",
+  companionDailyGet: "ailearn.v1.companion.daily.get",
+  companionPersonaGet: "ailearn.v1.companion.persona.get",
+  companionPersonaPatch: "ailearn.v1.companion.persona.patch",
+  companionPersonaReset: "ailearn.v1.companion.persona.reset",
+  companionConversationsList: "ailearn.v1.companion.conversations.list",
   noteGet: "ailearn.v1.note.get",
+  sourceList: "ailearn.v1.source.list",
+  sourceCreate: "ailearn.v1.source.create",
+  sourceGet: "ailearn.v1.source.get",
+  sourceNotes: "ailearn.v1.source.notes",
+  sourceUpdate: "ailearn.v1.source.update",
+  sourceCreateNote: "ailearn.v1.source.createNote",
+  sourceArchive: "ailearn.v1.source.archive",
+  sourceImageGet: "ailearn.v1.source.image.get",
+  noteList: "ailearn.v1.note.list",
+  noteCreate: "ailearn.v1.note.create",
+  noteDelete: "ailearn.v1.note.delete",
+  noteRestore: "ailearn.v1.note.restore",
+  noteVersions: "ailearn.v1.note.versions",
+  noteVersionRestore: "ailearn.v1.note.versionRestore",
+  noteImageUpload: "ailearn.v1.note.image.upload",
+  objectiveList: "ailearn.v1.objective.list",
+  objectiveGet: "ailearn.v1.objective.get",
+  understandingGetTopology: "ailearn.v1.understanding.getTopology",
+  searchGlobal: "ailearn.v1.search.global",
   noteSave: "ailearn.v1.note.save",
   noteCardGenerationStart: "ailearn.v1.note.cardGeneration.start",
   noteCardGenerationGetRun: "ailearn.v1.note.cardGeneration.getRun",
   noteCardGenerationGetCandidates: "ailearn.v1.note.cardGeneration.getCandidates",
   noteCardGenerationReview: "ailearn.v1.note.cardGeneration.review",
+  noteCardGenerationExposure: "ailearn.v1.note.cardGeneration.exposure",
+  noteCardGenerationLatestRun: "ailearn.v1.note.cardGeneration.latestRun",
   noteCardGenerationReveal: "ailearn.v1.note.cardGeneration.reveal",
   noteCardGenerationActivate: "ailearn.v1.note.cardGeneration.activate",
   noteCardGenerationCancel: "ailearn.v1.note.cardGeneration.cancel",
+  noteCardGenerationRetry: "ailearn.v1.note.cardGeneration.retry",
   noteCardGenerationClose: "ailearn.v1.note.cardGeneration.close",
   reviewGetQueue: "ailearn.v1.review.getQueue",
+  activityGetToday: "ailearn.v1.activity.getToday",
+  reviewDefer: "ailearn.v1.review.defer",
   learningRunGet: "ailearn.v1.learningRun.get",
   learningRunStart: "ailearn.v1.learningRun.start",
   learningRunGetDraft: "ailearn.v1.learningRun.getDraft",
@@ -120,6 +225,11 @@ export const DESKTOP_IPC_CHANNELS = {
   learningRunGetReturnContract: "ailearn.v1.learningRun.getReturnContract",
   learningRunRecordActivityLease: "ailearn.v1.learningRun.recordActivityLease",
   learningRunAbandon: "ailearn.v1.learningRun.abandon",
+  workspaceAiSettingsGet: "ailearn.v1.workspace.aiSettings.get",
+  workspaceAiConsentUpdate: "ailearn.v1.workspace.aiConsent.update",
+  workspaceAiDataPolicyUpdate: "ailearn.v1.workspace.aiDataPolicy.update",
+  workspaceExport: "ailearn.v1.workspace.export",
+  clipboardReadLinks: "ailearn.v1.clipboard.readLinks",
 } as const;
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
@@ -161,6 +271,26 @@ export const emailSchema = z
   .max(320);
 export const secretInputSchema = z
   .string()
+  .min(1)
+  .max(200)
+  .refine((value) => !CONTROL_CHARACTERS.test(value), "control characters are not allowed");
+/**
+ * Passwords the user is *choosing* (registration, password change). The API's
+ * `/auth/register-v2` and `/auth/change-password` both require at least 8
+ * characters; mirroring that here lets the desktop reject a short password with
+ * a precise, local message instead of forwarding it and surfacing a generic
+ * server validation failure. Login deliberately keeps `secretInputSchema` so
+ * accounts predating this rule can still sign in.
+ */
+export const newPasswordSchema = z
+  .string()
+  .min(8)
+  .max(200)
+  .refine((value) => !CONTROL_CHARACTERS.test(value), "control characters are not allowed");
+/** Invite codes are pasted bearer tokens, so surrounding whitespace is stripped. */
+export const inviteTokenSchema = z
+  .string()
+  .trim()
   .min(1)
   .max(200)
   .refine((value) => !CONTROL_CHARACTERS.test(value), "control characters are not allowed");
@@ -280,10 +410,26 @@ export const desktopRouteKindM1Values = ["auth.login", "auth.register"] as const
 export const desktopRouteKindM1Schema = z.enum(desktopRouteKindM1Values);
 export type DesktopRouteKindM1 = (typeof desktopRouteKindM1Values)[number];
 
-export const desktopNamespaceM2Values = [...desktopNamespaceM1Values, "room", "note", "review", "learningRun"] as const;
+export const desktopNamespaceM2Values = [...desktopNamespaceM1Values, "room", "source", "note", "objective", "review", "learningRun", "understanding", "search", "companion", "settings"] as const;
 export const desktopNamespaceM2Schema = z.enum(desktopNamespaceM2Values);
 export type DesktopNamespaceM2 = (typeof desktopNamespaceM2Values)[number];
-export const desktopRouteKindM2Values = [...desktopRouteKindM1Values, "room.home", "note.detail", "note.cardGeneration", "review.queue", "learningRun.detail"] as const;
+export const desktopRouteKindM2Values = [
+  ...desktopRouteKindM1Values,
+  "room.home",
+  "objective.library",
+  "objective.detail",
+  "source.library",
+  "source.detail",
+  "note.library",
+  "note.detail",
+  "note.cardGeneration",
+  "review.queue",
+  "learningRun.detail",
+  "understanding.graph",
+  "search.global",
+  "settings.section",
+  "companion.drawer",
+] as const;
 export const desktopRouteKindM2Schema = z.enum(desktopRouteKindM2Values);
 export type DesktopRouteKindM2 = (typeof desktopRouteKindM2Values)[number];
 
@@ -316,11 +462,7 @@ const workspaceRouteSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({ kind: z.literal("review.queue") }),
   z.strictObject({ kind: z.literal("learningRun.detail"), runId: uuidSchema }),
-  z.strictObject({
-    kind: z.literal("understanding.graph"),
-    objectiveId: uuidSchema.optional(),
-    lens: z.enum(["current_target", "evidence", "provenance", "issues"]).optional(),
-  }),
+  z.strictObject({ kind: z.literal("understanding.graph") }),
   z.strictObject({ kind: z.literal("search.global") }),
   z.strictObject({ kind: z.literal("settings.section"), section: nonEmptyStringSchema }),
   z.strictObject({ kind: z.literal("companion.drawer"), focus: nonEmptyStringSchema.optional() }),
@@ -340,23 +482,9 @@ export const safeReturnTargetSchema = z.union([
   z.strictObject({ version: z.literal(1), kind: z.literal("note.detail"), noteId: uuidSchema, workspaceId: uuidSchema.optional() }),
   z.strictObject({ version: z.literal(1), kind: z.literal("note.cardGeneration"), cardGenerationRunId: uuidSchema, workspaceId: uuidSchema.optional() }),
   z.strictObject({ version: z.literal(1), kind: z.literal("learningRun.detail"), runId: uuidSchema, workspaceId: uuidSchema.optional() }),
-  z.strictObject({
-    version: z.literal(1),
-    kind: z.literal("understanding.graph"),
-    objectiveId: uuidSchema.optional(),
-    lens: z.enum(["current_target", "evidence", "provenance", "issues"]).optional(),
-    workspaceId: uuidSchema.optional(),
-  }),
+  z.strictObject({ version: z.literal(1), kind: z.literal("understanding.graph"), workspaceId: uuidSchema.optional() }),
 ]);
 export type SafeReturnTargetV1 = z.infer<typeof safeReturnTargetSchema>;
-
-export const legacyRouteSchema = z.union([
-  z.strictObject({ kind: z.literal("learning-card"), cardId: uuidSchema }),
-  z.strictObject({ kind: z.literal("learning-objective"), objectiveId: uuidSchema }),
-  z.strictObject({ kind: z.literal("learning-run"), runId: uuidSchema }),
-  z.strictObject({ kind: z.literal("note-card-generation"), noteId: uuidSchema }),
-]);
-export type LegacyRouteV1 = z.infer<typeof legacyRouteSchema>;
 
 export const pendingNavigationIntentSchema = z.strictObject({
   version: z.literal(1),
@@ -460,6 +588,16 @@ export const gatewayErrorCodeValues = [
   "stale_workspace",
   "result_unknown",
   "safe_internal_error",
+  // Auth-form outcomes. The API answers these with distinct `error` tokens in
+  // its response body; the desktop gateway maps them through so the sign-in and
+  // sign-up forms can say what actually went wrong instead of collapsing every
+  // 4xx into one generic sentence.
+  "email_exists",
+  "invite_invalid",
+  "invite_expired",
+  "invite_consumed",
+  "workspace_limit",
+  "already_member",
 ] as const;
 export const gatewayErrorCodeSchema = z.enum(gatewayErrorCodeValues);
 export type GatewayErrorCode = (typeof gatewayErrorCodeValues)[number];
@@ -664,11 +802,51 @@ export const nativeCapabilityProjectionSchema = z.strictObject({
 });
 export type NativeCapabilityProjectionV1 = z.infer<typeof nativeCapabilityProjectionSchema>;
 
+/**
+ * 外部复制链接的候选提取。服务端抓取只接受 `http(s)` 地址，所以只有这种
+ * 才算"当前解析支持的链接"；其它协议（ftp/file/私协议、裸域名）一律不过。
+ *
+ * 隐私边界：主进程读剪贴板后只把这里命中的至多 3 个地址交过 IPC，
+ * 剪贴板原文（密码、笔记、私聊）永远不出主进程。
+ */
+const CANDIDATE_LINK_PATTERN = /https?:\/\/[^\s<>"'`，。；：！？）】》]+/gi;
+/** 链接尾巴上常粘的半角标点与成对右括号，归一化时剥掉。 */
+const CANDIDATE_LINK_TRAILING = /[.,;:!?)\]}'"，。；：！？）】》]+$/u;
+export const MAX_CANDIDATE_LINKS = 3;
+export const MAX_CANDIDATE_LINK_LENGTH = 2048;
+
+export function extractCandidateLinks(text: string, max: number = MAX_CANDIDATE_LINKS): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.match(CANDIDATE_LINK_PATTERN) ?? []) {
+    const candidate = match.replace(CANDIDATE_LINK_TRAILING, "");
+    if (candidate.length === 0 || candidate.length > MAX_CANDIDATE_LINK_LENGTH) continue;
+    let url: URL;
+    try {
+      url = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+    if (url.username !== "" || url.password !== "") continue;
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    found.push(candidate);
+    if (found.length >= max) break;
+  }
+  return found;
+}
+
+export const clipboardReadLinksResultSchema = z.strictObject({
+  urls: z.array(z.string().min(1).max(MAX_CANDIDATE_LINK_LENGTH)).max(MAX_CANDIDATE_LINKS),
+});
+export type ClipboardReadLinksResult = z.infer<typeof clipboardReadLinksResultSchema>;
+
 export const actionCapabilityValues = [
   "source.read", "source.create", "source.update", "source.archive", "source.createNote",
   "note.read", "note.create", "note.save", "note.delete", "note.restore", "note.permanentDelete",
   "objective.read", "review.read", "understanding.read", "search.read",
-  "card_generation.start", "card_generation.review", "card_generation.reveal", "card_generation.activate", "card_generation.cancel", "card_generation.close",
+  "card_generation.start", "card_generation.review", "card_generation.reveal", "card_generation.activate", "card_generation.cancel", "card_generation.close", "card_generation.retry",
   "learning_run.read", "learning_run.start", "learning_run.saveDraft", "learning_run.submit", "learning_run.action",
   "companion.read", "companion.sendMessage", "companion.decideProposal", "settings.read", "settings.update",
 ] as const;
@@ -676,11 +854,11 @@ export const actionCapabilitySchema = z.enum(actionCapabilityValues);
 export type ActionCapability = (typeof actionCapabilityValues)[number];
 
 const featureNameExtraValues = [
-  "card_generation_v2", "learning_run_v2", "learning_run_v1", "companion_dialogue_v1",
-  "companion_action_bridge_v1", "companion_journey_v2", "companion_bridge_v2", "companion_memory_vector_v1",
+  "card_generation_v2", "learning_run_v2", "companion_dialogue_v1",
+  "companion_journey_v2", "companion_bridge_v2", "companion_memory_vector_v1",
   "companion_memory_star_map_v1", "companion_summarizer_v1", "companion_daily_summary_v1",
   "companion_proactive_personalized_v1", "companion_pet_v1", "companion_pet_profile_v1",
-  "companion_voice_dialogue_v1", "companion_streaming_voice_v1", "companion_live2d_v1",
+  "companion_voice_dialogue_v1", "companion_streaming_voice_v1",
 ] as const;
 export const featureNameValues = [...CAPABILITY_IDS, ...featureNameExtraValues] as const;
 export const featureNameSchema = z.union([capabilityIdSchema, z.enum(featureNameExtraValues)]);
@@ -708,6 +886,58 @@ export const capabilityProjectionSchema = z.strictObject({
   nativeCapabilities: nativeCapabilityProjectionSchema,
 });
 export type CapabilityProjectionV1 = z.infer<typeof capabilityProjectionSchema>;
+
+/**
+ * 工作区级 AI 同意与数据策略（服务端 `/workspace/ai-*`）。
+ *
+ * 这是设置页「AI 数据同意」分区的**唯一**数据来源：同意是否已签署、由谁签署、
+ * 以及四个真实的外发策略开关。之前这一页只有展示用 chip，没有任何写入口，
+ * 因为客户端从未暴露过这些路由。
+ */
+export const aiDataPolicyV1Schema = z.strictObject({
+  sendToExternal: z.boolean(),
+  sendImageContent: z.boolean(),
+  piiDetection: z.boolean(),
+  auditLogging: z.boolean(),
+});
+export type AiDataPolicyV1 = z.infer<typeof aiDataPolicyV1Schema>;
+
+export const workspaceAiSettingsV1Schema = z.strictObject({
+  version: z.literal(1),
+  workspaceId: uuidSchema,
+  /** 部署里配置了外部模型供应商 → 未签署同意时内容不得外发。 */
+  requiresConsent: z.boolean(),
+  consentVersion: z.string().nullable(),
+  consentAt: isoTimestampSchema.nullable(),
+  consentBy: uuidSchema.nullable(),
+  /** 当前身份是否可以修改（服务端 requireOwner）。 */
+  canManage: z.boolean(),
+  dataPolicy: aiDataPolicyV1Schema,
+});
+export type WorkspaceAiSettingsV1 = z.infer<typeof workspaceAiSettingsV1Schema>;
+
+/**
+ * 客户端签署同意时提交的版本号。服务端只校验它是 1–50 字符的非空串，
+ * 所以这里给一个稳定常量，让「已签署的版本」在两端是同一个字符串。
+ */
+export const AI_CONSENT_VERSION = "ai-consent-v1";
+
+/**
+ * 整库导出的回执。
+ *
+ * 导出是"服务端出数据 + 本机写文件"两段：数据走 `GET /export/workspace`
+ * （服务端 `requireOwner` 收口），落盘由主进程用系统保存对话框完成。取消既不是
+ * 成功也不是失败，所以它是一个独立字段，而不是 `saved: false` 的同义词。
+ */
+export const workspaceExportResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  saved: z.boolean(),
+  canceled: z.boolean(),
+  /** 读者刚刚在系统对话框里自己选定的落盘位置；取消时为 null。 */
+  filePath: z.string().nullable(),
+  bytes: nonNegativeIntSchema,
+});
+export type WorkspaceExportResultV1 = z.infer<typeof workspaceExportResultV1Schema>;
 
 const workspaceSummaryShape = {
   version: z.literal(1),
@@ -801,6 +1031,15 @@ export const runtimeSnapshotSchema = z.strictObject({
   nativeCapabilities: nativeCapabilityProjectionSchema,
   reducedMotion: z.boolean(),
   startupRevision: positiveIntSchema,
+  /**
+   * How this install can carry a sign-in across restarts, so the gate can say
+   * whether it is resuming a stored session and whether offering "keep me
+   * signed in" would be honest.
+   */
+  sessionCredential: z.strictObject({
+    persistence: z.enum(["safe_storage", "memory"]),
+    stored: z.boolean(),
+  }),
 });
 export type RuntimeSnapshotV1 = z.infer<typeof runtimeSnapshotSchema>;
 
@@ -922,28 +1161,9 @@ export const desktopLearningRunAbandonRequestV2Schema = z.strictObject({
 });
 export type DesktopLearningRunAbandonRequestV2 = z.infer<typeof desktopLearningRunAbandonRequestV2Schema>;
 
-// Note save has no renderer-controlled transport/idempotency fields.  The
-// request is still versioned so the main adapter can reject legacy payloads.
+// Note save has no renderer-controlled transport/idempotency fields.
 export const desktopNoteSaveRequestV1Schema = noteSaveRequestV1Schema;
 export type DesktopNoteSaveRequestV1 = z.infer<typeof desktopNoteSaveRequestV1Schema>;
-
-export const legacyStartLearningRunInputSchema = z.strictObject({
-  version: z.literal(1),
-  command: z.literal("learningRun.start"),
-  origin: learningRunOriginSchema,
-  returnTarget: learningRunReturnTargetSchema.optional(),
-});
-export type LegacyStartLearningRunInputV1 = z.infer<typeof legacyStartLearningRunInputSchema>;
-
-export const legacyRouteResolutionSchema = z.strictObject({
-  version: z.literal(1),
-  legacyKind: z.enum(["card", "key_point"]),
-  legacyId: uuidSchema,
-  status: z.enum(["mapped", "gone"]),
-  objectiveId: uuidSchema.nullable(),
-  cardId: uuidSchema.nullable(),
-});
-export type LegacyRouteResolutionV1 = z.infer<typeof legacyRouteResolutionSchema>;
 
 export const learningRoomManifestSchema = z
   .strictObject({
@@ -1000,11 +1220,30 @@ export interface AILearnDesktopApiM1 {
     logout(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<{ loggedOut: true; serverRevoked: boolean }>>;
     reauthenticate(input: { meta: RequestMetaV1; password: string }): Promise<GatewayResultV1<SessionContextV1>>;
     changePassword(input: { meta: RequestMetaV1; commandId: string; currentPassword: string; newPassword: string }): Promise<GatewayResultV1<{ changed: true; sessionsRevoked: true }>>;
+    joinWorkspace(input: { meta: RequestMetaV1; inviteToken: string }): Promise<GatewayResultV1<SessionContextV1>>;
   };
   readonly workspace: {
     list(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<{ workspaces: WorkspaceSummaryV1[] }>>;
     switch(input: { meta: RequestMetaV1; workspaceId: string }): Promise<GatewayResultV1<SessionContextV1>>;
     getCurrent(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceContextV1>>;
+    /**
+     * 工作区级 AI 同意与数据策略。写入由服务端 `requireOwner` 收口，
+     * 因此 Member 读到的是 `canManage: false`，界面据此只读展示。
+     */
+    getAiSettings(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceAiSettingsV1>>;
+    updateAiConsent(input: {
+      meta: RequestMetaV1;
+      consentVersion: string;
+    }): Promise<GatewayResultV1<WorkspaceAiSettingsV1>>;
+    updateAiDataPolicy(input: {
+      meta: RequestMetaV1;
+      policy: AiDataPolicyV1;
+    }): Promise<GatewayResultV1<WorkspaceAiSettingsV1>>;
+    /**
+     * 整库导出：主进程读服务端的导出数据，然后由读者在系统保存对话框里选位置
+     * 并落盘。渲染进程只拿到回执，看不到也不写文件系统。
+     */
+    export(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceExportResultV1>>;
   };
   readonly capabilities: {
     get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<CapabilityProjectionV1>>;
@@ -1019,17 +1258,150 @@ export interface AILearnDesktopApiM1 {
 
 export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
   readonly subscriptions: SubscriptionApiM2;
+  /**
+   * 系统剪贴板里的候选链接。渲染层被权限策略挡在剪贴板外，
+   * 由主进程读出并只交出其中像目标链接的地址（原文永不过桥）。
+   */
+  readonly clipboard: {
+    readLinks(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<ClipboardReadLinksResult>>;
+  };
   readonly room: {
     getProjection(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof roomProjectionV1Schema>>>;
   };
+  /**
+   * 「今日学习」操作日志流：按客户端日历日窗口返回当天真实操作事件与
+   * 状态异常事务。数据全部来自权威表投影，与伴星日记（doc 22）同源。
+   */
+  readonly activity: {
+    getToday(input: {
+      meta: RequestMetaV1;
+      /** 客户端本地日历日窗口（ISO 带时区）。缺省时服务端按自己当天查询。 */
+      from?: string;
+      to?: string;
+    }): Promise<GatewayResultV1<z.infer<typeof todayActivityV1Schema>>>;
+  };
+  readonly source: {
+    list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; status?: string }): Promise<GatewayResultV1<z.infer<typeof desktopSourceListPageSchema>>>;
+    create(input: { meta: RequestMetaV1; request: DesktopSourceCreateRequest }): Promise<GatewayResultV1<z.infer<typeof desktopSourceDetailSchema>>>;
+    get(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<z.infer<typeof desktopSourceDetailSchema>>>;
+    listNotes(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<z.infer<typeof desktopSourceNotesPageSchema>>>;
+    update(input: { meta: RequestMetaV1; sourceId: Uuid; request: DesktopSourceUpdateRequest }): Promise<GatewayResultV1<z.infer<typeof desktopSourceDetailSchema>>>;
+    /**
+     * Starts a note from the source's parsed segments. `force` re-creates a note
+     * the API already reported as identical content.
+     */
+    createNote(input: { meta: RequestMetaV1; sourceId: Uuid; force?: boolean }): Promise<GatewayResultV1<DesktopSourceNoteResult>>;
+    /** Soft-deletes the source into `archived`; the record stays under 全部. */
+    archive(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<DesktopSourceArchiveResult>>;
+    /**
+     * 站内图片的原始字节。渲染层的 origin 是 `ailearn-app://`，相对路径
+     * `/api/uploads/…` 会落到应用包内（404），外链又被渲染层 CSP 拦掉，所以
+     * 这张图只能由 main 带 Bearer 取回，渲染层用 blob URL 显示。
+     */
+    getImage(input: {
+      meta: RequestMetaV1;
+      request: SourceImageGetRequestV1;
+    }): Promise<GatewayResultV1<z.infer<typeof sourceImageGetResultV1Schema>>>;
+  };
+  readonly companion: {
+    readonly home: {
+      getProjection(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionHomeProjectionV1Schema>>>;
+    };
+    readonly room: {
+      getProfile(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionRoomProfileV1Schema>>>;
+      patchProfile(input: {
+        meta: RequestMetaV1;
+        request: CompanionRoomProfilePatchV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionRoomProfileV1Schema>>>;
+    };
+    readonly voice: {
+      speak(input: {
+        meta: RequestMetaV1;
+        request: CompanionVoiceSpeakRequestV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionVoiceSpeakResultV1Schema>>>;
+    };
+    /**
+     * 账号级 presence 设置（GET/PATCH /me/companion）。PATCH 必须携带当前
+     * revision（CAS），冲突时返回 conflict 并重新读取——不做自动重放。
+     */
+    readonly account: {
+      getState(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionOverviewSchema>>>;
+      patchState(input: {
+        meta: RequestMetaV1;
+        request: CompanionAccountPatch;
+      }): Promise<GatewayResultV1<z.infer<typeof companionAccountStateV1Schema>>>;
+    };
+    /**
+     * 伴星中心（桌面页 20）的共同记录。记忆星图与记忆列表是两套视图：
+     * 星图只含已写入的长期记忆，列表可以额外要候选与归档。
+     * 裁决端点都返回被改动的那一条记忆，页面据此就地更新，不重新猜状态。
+     */
+    readonly memory: {
+      list(input: { meta: RequestMetaV1; query?: CompanionMemoryListQuery }): Promise<GatewayResultV1<z.infer<typeof companionMemoryListV1Schema>>>;
+      starMap(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryStarMapV1Schema>>>;
+      confirm(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      pin(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      unpin(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      archive(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      restore(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      /** 候选记忆的「忽略」与已确认记忆的「删除」是同一个服务端动作。 */
+      remove(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<{ readonly memoryItemId: Uuid }>>;
+    };
+    readonly daily: {
+      get(input: { meta: RequestMetaV1; date?: string }): Promise<GatewayResultV1<z.infer<typeof companionDailySummaryV1Schema>>>;
+    };
+    readonly persona: {
+      get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionPersonaV1Schema>>>;
+      /**
+       * 保存人格档案（PATCH /companion/pet-profile，revision CAS）。请求体是
+       * **整套档案**：服务端不做字段级合并，`examples` / `boundaries` 省略即被
+       * 服务端默认值清空，所以要改一项也得把其余项一起提交。
+       */
+      patch(input: {
+        meta: RequestMetaV1;
+        request: CompanionPersonaPatchV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionPersonaMutationV1Schema>>>;
+      /** 恢复系统默认人格（POST /companion/pet-profile/reset）。 */
+      reset(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionPersonaResetV1Schema>>>;
+    };
+    /** 只读对话记录：会话摘要，没有消息正文，也没有发送通道。 */
+    readonly conversations: {
+      list(input: { meta: RequestMetaV1; limit?: number }): Promise<GatewayResultV1<z.infer<typeof companionConversationListV1Schema>>>;
+    };
+  };
   readonly note: {
+    list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; trashed?: boolean }): Promise<GatewayResultV1<z.infer<typeof desktopNoteListPageSchema>>>;
+    create(input: { meta: RequestMetaV1; request: DesktopNoteCreateRequest }): Promise<GatewayResultV1<z.infer<typeof noteDetailV1Schema>>>;
+    delete(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<DesktopNoteMutationResult>>;
+    restore(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<DesktopNoteMutationResult>>;
     get(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<z.infer<typeof noteDetailV1Schema>>>;
+    versions(input: {
+      meta: RequestMetaV1;
+      noteId: Uuid;
+      currentVersionId: Uuid;
+      limit?: number;
+    }): Promise<GatewayResultV1<z.infer<typeof desktopNoteVersionListSchema>>>;
+    restoreVersion(input: {
+      meta: RequestMetaV1;
+      noteId: Uuid;
+      versionId: Uuid;
+      baseVersionId: Uuid;
+    }): Promise<GatewayResultV1<DesktopNoteMutationResult>>;
     save(input: {
       meta: RequestMetaV1;
       commandId: CommandMetaV1["commandId"];
       noteId: Uuid;
       request: DesktopNoteSaveRequestV1;
     }): Promise<GatewayResultV1<z.infer<typeof noteSaveReceiptV1Schema>>>;
+    /**
+     * 把编辑器里的一张图写进对象存储。渲染层没有会话令牌、也够不到 API 源，所以
+     * 只交出文件字节；服务端确认后返回站内地址，正文里写入的就是它。
+     */
+    uploadImage(input: {
+      meta: RequestMetaV1;
+      noteId: Uuid;
+      request: NoteImageUploadRequestV1;
+    }): Promise<GatewayResultV1<z.infer<typeof noteImageUploadResultV1Schema>>>;
     readonly cardGeneration: {
       start(input: {
         meta: RequestMetaV1;
@@ -1052,6 +1424,13 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         candidateId: Uuid;
         request: DesktopRevealCandidateRequestV2;
       }): Promise<GatewayResultV1<z.infer<typeof candidateRevealV2Schema>>>;
+      exposure(input: {
+        meta: RequestMetaV1;
+        runId: Uuid;
+        candidateId: Uuid;
+        revision: number;
+      }): Promise<GatewayResultV1<CardGenerationExposureEligibilityV1>>;
+      latestRun(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<CardGenerationRunSnapshotV1>>;
       activate(input: {
         meta: RequestMetaV1;
         commandId: CommandMetaV1["commandId"];
@@ -1059,8 +1438,20 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         request: DesktopCardGenerationActivationSelectionV1;
       }): Promise<GatewayResultV1<z.infer<typeof cardActivationReceiptDesktopV1Schema>>>;
       cancel(input: { meta: RequestMetaV1; commandId: CommandMetaV1["commandId"]; runId: Uuid }): Promise<GatewayResultV1<{ version: 1; runId: Uuid; status: "cancelled" }>>;
+      /**
+       * 就地重试一次"质量门禁失败"的 run（2026-09-18）。
+       *
+       * 服务端在**同一 run** 上重跑规划与作者，复用已封存的来源——比 `start` 重开一次
+       * 全新生成便宜得多。仅当服务端在恢复契约里签发 `retry_generation` 时客户端才
+       * 显示该入口；服务端仍会独立校验状态与失败原因（投影不是授权）。
+       */
+      retry(input: { meta: RequestMetaV1; commandId: CommandMetaV1["commandId"]; runId: Uuid }): Promise<GatewayResultV1<z.infer<typeof cardGenerationRetryResultV1Schema>>>;
       close(input: { meta: RequestMetaV1; commandId: CommandMetaV1["commandId"]; runId: Uuid; expectedReviewDraftRevision: number }): Promise<GatewayResultV1<z.infer<typeof cardGenerationCloseResultV1Schema>>>;
     };
+  };
+  readonly objective: {
+    list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; lifecycle?: "active" | "archived" | "superseded" }): Promise<GatewayResultV1<z.infer<typeof objectiveListPageV3Schema>>>;
+    get(input: { meta: RequestMetaV1; objectiveId: Uuid }): Promise<GatewayResultV1<z.infer<typeof learningObjectiveSurfaceV3Schema>>>;
   };
   readonly review: {
     getQueue(input: {
@@ -1068,6 +1459,15 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
       cursor?: string;
       limit?: number;
     }): Promise<GatewayResultV1<z.infer<typeof reviewQueueV2Schema>>>;
+    defer(input: { meta: RequestMetaV1; request: z.infer<typeof reviewDeferRequestV2Schema> }): Promise<
+      GatewayResultV1<z.infer<typeof reviewDeferResultV2Schema>>
+    >;
+  };
+  readonly understanding: {
+    getTopology(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof understandingTopologySnapshotV3Schema>>>;
+  };
+  readonly search: {
+    global(input: { meta: RequestMetaV1; query: string; type?: "note" | "source" | "objective"; limit?: number; offset?: number }): Promise<GatewayResultV1<z.infer<typeof desktopSearchPageSchema>>>;
   };
   readonly learningRun: {
     get(input: { meta: RequestMetaV1; runId: Uuid }): Promise<GatewayResultV1<z.infer<typeof learningRunPublicSnapshotV2Schema>>>;

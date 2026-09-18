@@ -21,7 +21,7 @@ export const companionAccountInvitations = pgTable(
   "companion_account_invitations",
   {
     userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
-    status: text("status").notNull().default("not_offered"),
+    status: text("status").notNull().default("offered"),
     offeredAt: timestamp("offered_at", { withTimezone: true }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     deferredUntil: timestamp("deferred_until", { withTimezone: true }),

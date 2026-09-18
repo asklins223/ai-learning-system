@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   applyDeterministicToneToSegments,
-  createStreamToneInjector,
   resolveReplyToneEmotion,
 } from "./companion-tone.ts";
 
@@ -84,59 +83,4 @@ test("applyDeterministicToneToSegments：注入会顶破 160 上限的满段跳�
   assert.equal(out[0].text, full160);
   // 正常长度段照常注入
   assert.equal(out[1].text, "[empathetic]短句。");
-});
-
-test("createStreamToneInjector：单 delta 内完整未知标签剥除，已知标签穿透", () => {
-  const chunks: string[] = [];
-  const injector = createStreamToneInjector((d) => chunks.push(d));
-  injector.push("[happy]恭喜你！");
-  injector.push("[excited]继续加油哦。");
-  injector.flush();
-  const all = chunks.join("");
-  assert.ok(!all.includes("[happy]"), "幻觉标签被剥除");
-  // 已知标签穿透注入器（qwen 引擎需要）——段级应用时再统一处理
-  assert.ok(all.includes("[excited]"), "已知标签不在清洗范围");
-});
-
-test("createStreamToneInjector：跨 delta 拆分的未知标签被扣留拼回后剥除", () => {
-  const chunks: string[] = [];
-  const injector = createStreamToneInjector((d) => chunks.push(d));
-  injector.push("好呀。[ha");    // "[ha" 未闭合 → 扣留
-  injector.push("ppy]你好呀。"); // 拼回完整 [happy] → 剥除
-  injector.flush();
-  assert.equal(chunks.join(""), "好呀。你好呀。");
-});
-
-test("createStreamToneInjector：正文方括号最多短暂延迟，不误删", () => {
-  const chunks: string[] = [];
-  const injector = createStreamToneInjector((d) => chunks.push(d));
-  injector.push("参考 [重要");
-  injector.push("] 标记与 [B2] 等级");
-  injector.flush();
-  // "[重要" 被扣留到下一个 delta，拼出 "] 后确认非 ASCII 标签形态 → 原样放行
-  assert.equal(chunks.join(""), "参考 [重要] 标记与 [B2] 等级");
-});
-
-test("createStreamToneInjector：流结束时扣留片段原样放行（flush 兜底）", () => {
-  const chunks: string[] = [];
-  const injector = createStreamToneInjector((d) => chunks.push(d));
-  injector.push("还没写完的 [半截");
-  injector.flush();
-  assert.equal(chunks.join(""), "还没写完的 [半截");
-});
-
-test("createStreamToneInjector：单 delta 内的未知标签直接剥除", () => {
-  const chunks: string[] = [];
-  const injector = createStreamToneInjector((d) => chunks.push(d));
-  injector.push("[happy]你好呀。");
-  injector.flush();
-  assert.equal(chunks.join(""), "你好呀。");
-});
-
-test("createStreamToneInjector：中文方括号与 CEFR 级别不受影响", () => {
-  const chunks: string[] = [];
-  const injector = createStreamToneInjector((d) => chunks.push(d));
-  injector.push("[重要] 我的英语是 [B2] 水平。");
-  injector.flush();
-  assert.equal(chunks.join(""), "[重要] 我的英语是 [B2] 水平。");
 });

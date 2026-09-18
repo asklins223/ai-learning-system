@@ -9,7 +9,7 @@ import {
 import { SCENE_WORLD } from "./scene-geometry";
 
 describe("scene camera contract", () => {
-  it("keeps one finite named preset for every V1 destination", () => {
+  it("keeps one finite named preset for every desktop destination", () => {
     expect(Object.keys(SCENE_CAMERA_PRESETS)).toEqual([
       "room",
       "study",
@@ -20,6 +20,13 @@ describe("scene camera contract", () => {
       "search",
       "graph",
       "validation",
+      "source-library",
+      "source-detail",
+      "note-library",
+      "objective-library",
+      "objective-detail",
+      "companion-center",
+      "settings",
     ]);
     for (const preset of Object.values(SCENE_CAMERA_PRESETS)) {
       expect(preset.scale).toBeGreaterThanOrEqual(1);

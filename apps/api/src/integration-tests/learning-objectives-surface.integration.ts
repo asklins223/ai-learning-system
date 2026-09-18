@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { findPrivatePayloadLeaks } from "@ailearn/shared";
 import { eq, and } from "drizzle-orm";
-import { learningObjectivesV2, learningObjectiveOriginsV2 } from "../db/schema/card-generation-v2.ts";
+import { learningObjectivesV2, learningObjectiveOriginsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 
 // db client 在 import 时读取 DATABASE_URL；必须先设置再动态 import。
 if (!process.env.DATABASE_URL) {
@@ -66,7 +66,7 @@ test("W2-17: 纯 V2 fixture 的 active Objective 可装配为可行动、无泄�
     (tx) =>
       assembleObjectiveSurfaceV3(
         tx,
-        { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER, origin: "home" },
+        { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
         objectiveId,
       ),
   );

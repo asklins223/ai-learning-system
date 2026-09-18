@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MAX_PENDING_JOBS_PER_WORKSPACE, SourceStatus } from "@ailearn/shared";
-import { jobs } from "../db/schema/job.ts";
-import { noteBlocks, notes, noteVersions, sources } from "../db/schema/note.ts";
+import { jobs } from "@ailearn/shared/db-schema/job";
+import { noteBlocks, notes, noteVersions, sources } from "@ailearn/shared/db-schema/note";
 import {
   createNoteFromSource,
   createSource,
@@ -10,7 +10,6 @@ import {
   getSource,
   listNotesBySource,
   listSources,
-  listSourceStatuses,
   updateSource,
 } from "../modules/source/service.ts";
 import { encodeCursor } from "../lib/pagination.ts";
@@ -74,10 +73,12 @@ describe("source creation and reads", () => {
       typeSource: "manual",
     });
     assert.equal(inserted[1]!.table, jobs);
+    // 稳定 P1（2026-09-15 审计）：payload 收敛到 ParseSourceJobPayload——历史字段
+    // userId 已删除（生产端写、无人读：worker 只读 sourceId/fetchUrlContent，
+    // actor 归属走 jobs.requested_by，jobs 查询接口本就把它脱敏掉）。
     assert.deepEqual(inserted[1]!.value.payload, {
       sourceId: "source-1",
       fetchUrlContent: true,
-      userId: USER_ID,
     });
   });
 
@@ -136,7 +137,8 @@ describe("source creation and reads", () => {
     });
 
     assert.equal(inserted[0]!.metadata.rawContent, "inline body");
-    assert.deepEqual(inserted[1]!.payload, { sourceId: "source-inline", userId: USER_ID });
+    // 内联正文（非 URL）不带 fetchUrlContent；userId 已按契约删除（见上）。
+    assert.deepEqual(inserted[1]!.payload, { sourceId: "source-inline" });
   });
 
   it("gets a source with ordered segments and returns null when absent", async () => {
@@ -216,22 +218,6 @@ describe("source listing", () => {
       listSources(executor, WORKSPACE_ID, { limit: 1 }),
       /source cursor timestamp is missing/,
     );
-  });
-
-  it("short-circuits empty status polling and returns selected statuses otherwise", async () => {
-    let selected = 0;
-    const executor = {
-      select: () => {
-        selected += 1;
-        return { from: () => ({ where: async () => [{ id: "source-1", status: SourceStatus.READY }] }) };
-      },
-    } as any;
-
-    assert.deepEqual(await listSourceStatuses(executor, WORKSPACE_ID, []), []);
-    assert.deepEqual(await listSourceStatuses(executor, WORKSPACE_ID, ["source-1"]), [
-      { id: "source-1", status: SourceStatus.READY },
-    ]);
-    assert.equal(selected, 1);
   });
 });
 
@@ -457,17 +443,23 @@ describe("source to note conversion", () => {
     assert.equal((result as any).note.id, "note-1");
   });
 
-  it("lists non-deleted notes for an existing source", async () => {
+  it("lists non-deleted notes for an existing source with the real total", async () => {
     const expected = [{ id: "note-1", title: "Note" }];
     const executor = {
       query: { sources: { findFirst: async () => ({ id: "source-1" }) } },
-      select: () => ({
+      select: (fields: Record<string, unknown>) => ({
         from: () => ({
-          where: () => ({ orderBy: () => ({ limit: async () => expected }) }),
+          // 详情页的「共 N 篇」要的是真实总数，所以这里必须分别应答页面查询与计数查询。
+          where: () => ("count" in fields
+            ? Promise.resolve([{ count: 60 }])
+            : { orderBy: () => ({ limit: async () => expected }) }),
         }),
       }),
     } as any;
-    assert.deepEqual(await listNotesBySource(executor, "source-1", WORKSPACE_ID), expected);
+    assert.deepEqual(
+      await listNotesBySource(executor, "source-1", WORKSPACE_ID),
+      { items: expected, total: 60 },
+    );
 
     assert.equal(await listNotesBySource({
       query: { sources: { findFirst: async () => undefined } },

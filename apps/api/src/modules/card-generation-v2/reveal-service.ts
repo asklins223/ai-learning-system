@@ -12,8 +12,8 @@ import {
   cardGenerationCandidatesV2,
   cardExposureLedgerV2,
   evidenceSnapshotsV2,
-} from "../../db/schema/card-generation-v2.ts";
-import { noteBlocks } from "../../db/schema/note.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
+import { noteBlocks } from "@ailearn/shared/db-schema/note";
 import {
   parseCandidateRevealV2,
   type CandidateRevealV2,

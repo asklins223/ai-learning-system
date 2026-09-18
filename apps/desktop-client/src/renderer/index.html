@@ -8,11 +8,11 @@
   </head>
   <body>
     <!--
-      THESIS: 首页保留完整书房总览；只有进入具体学习场景后，镜头才来到座位第一视角并继续推进。
-      OWN-WORLD: 首页沿用获批的书房昼夜对图和注册窗景；具体任务使用同构 Seat V2 昼夜近景、局部台灯光与常驻可交互伴星。
-      STORY: 用户先在书房总览选择物件，再进入研究、复习、查找、星图或验证的座位近景；伴星随镜头换位但永不消失。
-      FIRST VIEWPORT: 完整房间、书柜、书桌和窗户都可见，首页不使用 Seat V2；任务近景才让前窗和桌沿占据主体。
-      FORM: 两层场景由 GSAP 在同一坐标系统交叉淡入并推进；任务层保持真实 DOM，不使用全屏蒙版。
+      THESIS: 首页是一张真实学习总控书桌；底部木质指令台推进当前任务，纸质书房目录集中呈现全部产品能力。
+      OWN-WORLD: 首页沿用书房昼夜场景，以胡桃木、旧纸、书布绿和陶土橙组织界面；具体任务继续使用同构座位近景。
+      STORY: 用户先看见后端确认的今日学习状态，再继续、复习、打开当前研究册，或从目录找到已接入与待迁移的能力。
+      FIRST VIEWPORT: 完整房间仍然可见；书房目录默认展开但避开桌面主体，房间物件只保留安静的快捷入口。
+      FORM: 场景、物件热点、指令台和目录共用一套 2.5D 空间语言；GSAP 只负责变换与透明度，任务内容保持真实 DOM。
       FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
     -->
     <div id="root"></div>

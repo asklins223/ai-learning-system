@@ -562,7 +562,7 @@ function setupFlexibleTx(options: {
   objective?: Record<string, unknown>;
   existingCard?: Record<string, unknown>;
   existingReceipt?: Record<string, unknown> | null;
-  /** 表感知覆盖：额外表名 → 行；缺省回退 [candidate]（兼容旧调用） */
+  /** 表感知覆盖：额外表名 → 行。 */
   tableRowsOverride?: Record<string, unknown[]>;
   /** learning_objective_origins_v2 行（W2-07 来源；缺省空） */
   origins?: Record<string, unknown>[];
@@ -614,7 +614,7 @@ function setupFlexibleTx(options: {
       case "learning_objective_origins_v2":
         return options.origins ?? [];
       default:
-        return [candidate]; // 兼容旧调用：未识别表回退候选行
+        return [];
     }
   };
 

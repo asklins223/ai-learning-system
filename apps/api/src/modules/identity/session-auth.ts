@@ -33,7 +33,7 @@ export function parseCookieHeader(header: string | undefined): Record<string, st
   return result;
 }
 
-/** Bearer remains the first-choice credential for backwards compatibility. */
+/** Bearer is the first-choice credential for the desktop gateway. */
 export function extractAuthCredential(headers: RequestHeaders): AuthCredential | null {
   const bearerMatch = headers.authorization?.match(/^Bearer\s+(.+)$/i);
   if (bearerMatch?.[1]) {

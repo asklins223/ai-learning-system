@@ -2,7 +2,7 @@
 
 import { sql } from "drizzle-orm";
 import { db } from "../../db/client.ts";
-import { authRateLimits } from "../../db/schema/identity.ts";
+import { authRateLimits } from "@ailearn/shared/db-schema/identity";
 
 export interface RateLimitEntry {
   count: number;
@@ -161,8 +161,6 @@ export class PostgresRateLimitStore implements RateLimitStore {
     `);
   }
 }
-
-export type RateLimitStoreKind = "memory" | "postgres";
 
 /** Select the local or shared backend without changing route behavior. */
 export function createRateLimitStoreFromEnv(

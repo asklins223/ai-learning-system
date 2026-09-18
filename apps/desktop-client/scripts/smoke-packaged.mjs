@@ -26,8 +26,6 @@ const rejectedRuntimeMedia = [
 ]
 const packageExcludedPrefixes = [
   'out/renderer/assets/3d/',
-  'out/renderer/assets/companion/live2d-v1/',
-  'out/renderer/assets/companion/vendor/',
 ]
 const packagedManifestEntry = 'out/renderer/assets/learning-room/v1/manifest.json'
 const runtimeManifestPath = resolve(appRoot, 'src/renderer/public/assets/learning-room/v1/manifest.json')
@@ -164,10 +162,20 @@ async function inspectPackagedArtifact(executable) {
 
   const excludedArchiveEntries = archiveEntries.filter((entry) => packageExcludedPrefixes.some((prefix) => entry === prefix.slice(0, -1) || entry.startsWith(prefix)))
   if (excludedArchiveEntries.length) {
-    throw new Error(`Reference-only or unlicensed archives entered app.asar: ${excludedArchiveEntries.slice(0, 12).join(', ')}`)
+    throw new Error(`Reference-only archives entered app.asar: ${excludedArchiveEntries.slice(0, 12).join(', ')}`)
   }
-  const requiredOrb = 'out/renderer/assets/learning-room/v1/objects/companion-orb.webp'
-  if (!archiveEntrySet.has(requiredOrb)) throw new Error(`Packaged legal orb fallback is missing: ${requiredOrb}`)
+  // 2026-09-16 裁决移除 orb：打包产物不得再包含它（Live2D 是唯一形态）。
+  const removedOrb = 'out/renderer/assets/learning-room/v1/objects/companion-orb.webp'
+  if (archiveEntrySet.has(removedOrb)) throw new Error(`Removed orb asset still packaged: ${removedOrb}`)
+  const requiredLive2dAssets = [
+    'out/renderer/assets/companion/live2d-v2/seethrough/seethrough_output.model3.json',
+    'out/renderer/assets/companion/live2d-v1/mao-pro/runtime/mao_pro.model3.json',
+    'out/renderer/assets/companion/vendor/pixi.min.js',
+    'out/renderer/assets/companion/vendor/live2dcubismcore.min.js',
+    'out/renderer/assets/companion/vendor/cubism4.min.js',
+  ]
+  const missingLive2dAssets = requiredLive2dAssets.filter((entry) => !archiveEntrySet.has(entry))
+  if (missingLive2dAssets.length) throw new Error(`Bundled Live2D runtime is incomplete: ${missingLive2dAssets.join(', ')}`)
 
   const manifestAssetPaths = [...collectManifestAssetPaths(manifestJson)]
   const missingPackagedAssets = manifestAssetPaths.filter((assetPath) => (
@@ -195,7 +203,8 @@ async function inspectPackagedArtifact(executable) {
     manifestAssetCount: manifestAssetPaths.length,
     rejectedMediaAbsent: rejectedRuntimeMedia,
     excludedArchivesAbsent: packageExcludedPrefixes,
-    orbFallbackPresent: true,
+    orbAssetAbsent: true,
+    live2dRuntimePresent: true,
   }
 }
 
@@ -204,6 +213,7 @@ if (process.env.AILEARN_PACKAGED_PREFLIGHT_ONLY === '1') {
   process.stdout.write(`${JSON.stringify(packageContainment, null, 2)}\n`)
   process.exit(0)
 }
+const portableOfflineOnly = process.env.AILEARN_PACKAGED_OFFLINE_ONLY === '1'
 const userDataDir = await mkdtemp(resolve(tmpdir(), 'ailearn-packaged-smoke-'))
 const errors = []
 const ownerCredentialsAvailable = Boolean(process.env.OWNER_EMAIL?.trim() && process.env.OWNER_PASSWORD)
@@ -214,6 +224,10 @@ const learningRunResponseLossExpected = learningRunResponseLossOperations.length
 const smokeAppEnv = {
   ...process.env,
   AILEARN_PACKAGED_EVIDENCE: '1',
+  // CI runners do not own the local API stack or test credentials. Point the
+  // portable smoke at a closed loopback port so every supported package proves
+  // the real fail-closed DesktopAccessGate instead of merely staying alive.
+  ...(portableOfflineOnly ? { DESKTOP_API_ORIGIN: 'http://127.0.0.1:9' } : {}),
   ...(learningRunResponseLossExpected ? { AILEARN_PACKAGED_LEARNING_RUN_RESPONSE_LOSS: learningRunResponseLossOperations.join(',') } : {}),
 }
 const ownerJourney = {
@@ -245,20 +259,50 @@ let offlineAccessGateBoundary = null
 let formalGuardRuntime = false
 let formalGuardActiveObserved = false
 let formalGuardReleasedObserved = false
+const HOME_READY_SELECTOR = '.action-rail, .home-v2-objects'
+
+async function waitForHomeReady(window, timeout = 30_000) {
+  await window.locator(HOME_READY_SELECTOR).first().waitFor({ state: 'visible', timeout })
+}
+
+async function activateHomeAction(window, action) {
+  await waitForHomeReady(window)
+  const v2Objects = window.locator('.home-v2-objects')
+  if (await v2Objects.count()) {
+    const objectId = action === 'primary' ? 'desk-book' : 'review-cards'
+    const targetZone = 'desk'
+    const object = window.locator(`[data-room-object="${objectId}"]`)
+    await object.waitFor({ state: 'visible', timeout: 15_000 })
+    const activeZone = await v2Objects.getAttribute('data-active-zone')
+    if (activeZone !== targetZone) {
+      await object.click()
+      await window.waitForFunction(
+        ({ zone }) => document.querySelector('.home-v2-objects')?.getAttribute('data-active-zone') === zone
+          && document.querySelector('.desktop-app')?.getAttribute('data-home-v2-camera-state') !== 'moving',
+        { zone: targetZone },
+        { timeout: 15_000 },
+      )
+    }
+    await object.click()
+    return
+  }
+
+  await window.getByTestId(action === 'primary' ? 'action-continue' : 'action-review').click()
+}
 
 async function waitForLearningRunPlayer(window, label, timeout = 60_000) {
-  await window.locator('.run-player').waitFor({ state: 'visible', timeout: 15_000 })
   try {
     await window.waitForFunction(
-      () => Boolean(document.querySelector('.run-player:not(.run-player--loading)')) || Boolean(document.querySelector('.run-player--error')),
+      () => Boolean(document.querySelector('.learning-run-workbench'))
+        || Boolean(document.querySelector('.learning-run-result-board'))
+        || Boolean(document.querySelector('.task-surface .surface-data-state--error')),
       undefined,
       { timeout },
     )
   } catch (error) {
     const diagnostics = await window.evaluate(() => ({
-      playerClass: document.querySelector('.run-player')?.className ?? null,
-      playerText: document.querySelector('.run-player')?.textContent?.slice(0, 500) ?? null,
-      taskSurface: document.querySelector('.task-surface')?.textContent?.slice(0, 500) ?? null,
+      workbenchClass: document.querySelector('.learning-run-workbench')?.className ?? null,
+      surfaceText: document.querySelector('.task-surface')?.textContent?.slice(0, 500) ?? null,
       headings: [...document.querySelectorAll('h1,h2,h3')].map((node) => node.textContent?.trim()).filter(Boolean).slice(0, 8),
     }))
     throw new Error(`${label} did not leave loading state: ${JSON.stringify(diagnostics)} (${error.message})`)
@@ -283,6 +327,7 @@ async function waitForPackagedWindow(window, label) {
     hasAccessGate: document.querySelector('.desktop-access-gate') !== null,
     hasRoomDom: document.querySelector('.scene-stage') !== null,
     hasActionRail: document.querySelector('.action-rail') !== null,
+    hasHomeV2Objects: document.querySelector('.home-v2-objects') !== null,
     hasOnboarding: document.querySelector('.onboarding-card') !== null,
   }))
   if (
@@ -301,10 +346,13 @@ async function readAccessGateBoundary(window) {
     const gate = document.querySelector('.desktop-access-gate')
     return {
       present: gate instanceof HTMLElement,
-      phase: gate?.querySelector('.desktop-access-gate__form')
-        ? 'auth'
-        : gate?.querySelector('.desktop-access-gate__workspace-list')
-          ? 'workspace'
+      // The workspace phase also carries a form (the invite-code join), so the
+      // workspace list has to be tested first or every workspace screen would
+      // be reported as the sign-in screen.
+      phase: gate?.querySelector('.desktop-access-gate__workspace-list')
+        ? 'workspace'
+        : gate?.querySelector('.desktop-access-gate__form')
+          ? 'auth'
           : gate?.querySelector('.desktop-access-gate__notice')
             ? 'blocked'
             : 'loading',
@@ -312,6 +360,7 @@ async function readAccessGateBoundary(window) {
       detail: gate?.querySelector('#desktop-gate-detail')?.textContent?.trim() ?? null,
       hasRoomDom: document.querySelector('.scene-stage') !== null,
       hasActionRail: document.querySelector('.action-rail') !== null,
+      hasHomeV2Objects: document.querySelector('.home-v2-objects') !== null,
       hasOnboarding: document.querySelector('.onboarding-card') !== null,
     }
   })
@@ -325,19 +374,67 @@ async function assertFailClosedAccessGate(window, label) {
     { timeout: 20_000 },
   ).catch(() => undefined)
   const boundary = await readAccessGateBoundary(window)
-  if (!boundary.present || boundary.hasRoomDom || boundary.hasActionRail || boundary.hasOnboarding) {
+  if (!boundary.present || boundary.hasRoomDom || boundary.hasActionRail || boundary.hasHomeV2Objects || boundary.hasOnboarding) {
     throw new Error(`${label} did not stop at the fail-closed DesktopAccessGate: ${JSON.stringify(boundary)}`)
   }
   return boundary
 }
 
+async function runPortableOfflineSmoke() {
+  electronApp = await electron.launch({
+    executablePath,
+    args: [`--user-data-dir=${userDataDir}`, ...(process.platform === 'linux' ? ['--no-sandbox'] : [])],
+    env: smokeAppEnv,
+  })
+  currentWindow = await electronApp.firstWindow()
+  attachWindowDiagnostics(currentWindow)
+  const boundary = await waitForPackagedWindow(currentWindow, 'Portable offline package')
+  const accessGate = await assertFailClosedAccessGate(currentWindow, 'Portable offline package')
+  const [health, room] = await Promise.all([
+    packagedTransportProbe(currentWindow, 'health'),
+    packagedTransportProbe(currentWindow, 'room'),
+  ])
+  const unavailableCodes = ['api_unavailable', 'network_timeout', 'invoke_failed']
+  if (
+    health.ok
+    || !unavailableCodes.includes(health.code)
+    || room.ok
+    || !unavailableCodes.includes(room.code)
+  ) {
+    throw new Error(`Portable package did not fail closed at the API boundary: ${JSON.stringify({ health, room })}`)
+  }
+  if (errors.length > 0) throw new Error(`Packaged renderer emitted errors: ${errors.join('; ')}`)
+
+  const runtime = await electronApp.evaluate(() => ({
+    electronVersion: process.versions.electron ?? 'unknown',
+    chromiumVersion: process.versions.chrome ?? 'unknown',
+    nodeVersion: process.versions.node ?? 'unknown',
+    platform: process.platform,
+    arch: process.arch,
+  }))
+  const smokeEvidence = {
+    schemaVersion: 1,
+    kind: 'packaged-offline-smoke',
+    artifact: process.env.AILEARN_PACKAGED_APP?.trim() ? 'configured-external' : relative(appRoot, executablePath).split('\\').join('/'),
+    packageContainment,
+    runtime,
+    boundary,
+    accessGate,
+    probes: { health, room },
+    errors,
+  }
+  await mkdir(evidenceRoot, { recursive: true })
+  await writeFile(resolve(evidenceRoot, 'package-smoke-offline.json'), `${JSON.stringify(smokeEvidence, null, 2)}\n`, 'utf8')
+  process.stdout.write('packaged offline smoke passed\n')
+}
+
 async function authenticateThroughAccessGate(window, { email, password, expectedRole, label }) {
   await window.waitForFunction(
-    () => Boolean(document.querySelector('.action-rail')) || Boolean(document.querySelector('.desktop-access-gate input[type="email"]')),
+    () => Boolean(document.querySelector('.action-rail, .home-v2-objects')) || Boolean(document.querySelector('.desktop-access-gate input[type="email"]')),
     undefined,
     { timeout: 20_000 },
   )
-  if (await window.locator('.action-rail').count() === 0) {
+  if (await window.locator(HOME_READY_SELECTOR).count() === 0) {
     await window.locator('.desktop-access-gate input[type="email"]').fill(email)
     await window.locator('.desktop-access-gate input[type="password"]').fill(password)
     await window.getByRole('button', { name: '登录', exact: true }).click()
@@ -345,7 +442,7 @@ async function authenticateThroughAccessGate(window, { email, password, expected
 
   const deadline = Date.now() + 30_000
   let workspaceChosen = false
-  while (Date.now() < deadline && await window.locator('.action-rail').count() === 0) {
+  while (Date.now() < deadline && await window.locator(HOME_READY_SELECTOR).count() === 0) {
     const formError = window.locator('.desktop-access-gate__form-error')
     if (await formError.count()) throw new Error(`${label} Gate login failed: ${await formError.innerText()}`)
     const workspaceButtons = window.locator('.desktop-access-gate__workspace-list button')
@@ -361,7 +458,7 @@ async function authenticateThroughAccessGate(window, { email, password, expected
     }
     await window.waitForTimeout(250)
   }
-  await window.locator('.action-rail').waitFor({ state: 'visible', timeout: 1_000 })
+  await waitForHomeReady(window, 1_000)
 
   const session = await window.evaluate(async () => {
     const opaqueId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -388,30 +485,57 @@ async function authenticateThroughAccessGate(window, { email, password, expected
   }
 }
 
-async function waitForStudyObjectSurface(window, label) {
+/**
+ * 今日学习（页 14）是 `.day-route`：三张真实站点票 + 学习记录栏。这里等它或它的
+ * 安全状态出现，而不是等已被删除的 `.study-workbench`（旧学习台的类名）。
+ */
+async function waitForTodayRoute(window, label) {
   await window.waitForFunction(
-    () => Boolean(document.querySelector('.study-workbench.study-workbench--ready'))
-      || Boolean(document.querySelector('.study-boundary:is([role="alert"]), .study-workbench--empty, .study-workbench--error')),
+    () => Boolean(document.querySelector('.task-surface--study .day-route'))
+      || Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
     undefined,
     { timeout: 20_000 },
   )
-  if (await window.locator('.study-workbench.study-workbench--ready').count() !== 1) {
-    const boundary = await window.locator('.study-boundary').first().innerText().catch(() => 'missing Study boundary')
-    throw new Error(`${label} did not reach the real Study object surface: ${boundary}`)
+  if (await window.locator('.day-route').count() !== 1) {
+    const boundary = await window.locator('.task-surface .surface-data-state').first().innerText().catch(() => 'missing Today boundary')
+    throw new Error(`${label} did not reach the real 今日学习 surface: ${boundary}`)
   }
+  if (await window.getByRole('heading', { name: '今日学习' }).count() !== 1) {
+    throw new Error(`${label} did not land on the 今日学习 page`)
+  }
+}
+
+/**
+ * 从页 14 进入研究册：页面自己的「继续写作 · …」票是正门，没有笔记票时退回书房
+ * 目录的「笔记」入口 —— 旧页面的「进入研究册」按钮已经不存在了。
+ */
+async function openNotebookFromToday(window) {
+  const noteTicket = window.getByRole('button', { name: /继续写作/ }).first()
+  if (await noteTicket.count()) {
+    await noteTicket.click()
+  } else {
+    await window.getByRole('navigation', { name: '书房目录' }).getByRole('button', { name: '笔记' }).click()
+    await window.locator('.note-open').first().waitFor({ state: 'visible', timeout: 15_000 })
+    await window.locator('.note-open').first().click()
+  }
+  await window.locator('.notebook[data-mode]').waitFor({ state: 'visible', timeout: 15_000 })
 }
 
 async function readCardGenerationDiagnostics(window) {
   return window.evaluate(() => ({
-    runMeta: document.querySelector('.card-generation-meta')?.textContent?.trim() ?? null,
-    error: document.querySelector('.card-generation-state--error')?.textContent?.trim() ?? null,
-    candidates: [...document.querySelectorAll('.card-generation-candidate')].map((node) => ({
+    heading: document.querySelector('.task-title h1')?.textContent?.trim() ?? null,
+    runMeta: document.querySelector('.card-generation-board__footer')?.textContent?.trim() ?? null,
+    hudState: document.querySelector('.card-generation-hud-state')?.textContent?.trim() ?? null,
+    error: document.querySelector('.card-generation-hud-state[role="alert"]')?.textContent?.trim() ?? null,
+    candidates: [...document.querySelectorAll('.candidate-study-card')].map((node) => ({
       text: node.textContent?.trim() ?? '',
+      decision: node.querySelector('.candidate-card__meta')?.textContent?.trim() ?? null,
       keepButtons: [...node.querySelectorAll('button')]
         .filter((button) => button.textContent?.trim() === '保留')
         .map((button) => ({ disabled: button.disabled })),
-      selectedInputs: node.querySelectorAll('.card-generation-select input[type="checkbox"]').length,
+      selectedInputs: node.querySelectorAll('.candidate-activation-choice input[type="checkbox"]').length,
     })).slice(0, 5),
+    receipt: document.querySelector('.candidate-review-slip__receipt')?.textContent?.trim() ?? null,
     buttons: [...document.querySelectorAll('button')]
       .map((button) => button.textContent?.trim() || button.getAttribute('aria-label'))
       .filter(Boolean)
@@ -420,18 +544,20 @@ async function readCardGenerationDiagnostics(window) {
 }
 
 async function waitForCardGenerationSurface(window) {
-  const heading = window.getByRole('heading', { name: '整理学习卡' })
+  // 页 12「学习卡生成中」渲染 .card-generation-board，页 13「候选卡审核」渲染
+  // .candidate-review-table；两者都在 .task-surface--card-generation 里。
+  const paper = window.locator('.task-surface--card-generation .card-generation-board, .task-surface--card-generation .candidate-review-table').first()
   try {
-    await heading.waitFor({ state: 'visible', timeout: 30_000 })
+    await paper.waitFor({ state: 'visible', timeout: 30_000 })
     return
   } catch (error) {
     // A successful start can race with renderer navigation after a transport
-    // reconnect. If the room already exposes the server recovery route, enter
-    // through that explicit contract before failing the packaged journey.
-    const recoveryButton = window.getByRole('button', { name: /查看恢复状态|恢复候选审核/ })
+    // reconnect. If the page already exposes a server-issued recovery action,
+    // take that explicit route before failing the packaged journey.
+    const recoveryButton = window.getByRole('button', { name: /重新检查|返回笔记|回笔记重新生成/ })
     if (await recoveryButton.count()) {
       await recoveryButton.first().click()
-      await heading.waitFor({ state: 'visible', timeout: 30_000 })
+      await paper.waitFor({ state: 'visible', timeout: 30_000 })
       return
     }
     const diagnostics = await window.evaluate(() => ({
@@ -543,8 +669,9 @@ async function runOfflineStartupRecovery() {
       hasRoomDom: Boolean(document.querySelector('.scene-stage')),
       hasOnboarding: Boolean(document.querySelector('.onboarding-card')),
       hasActionRail: Boolean(document.querySelector('.action-rail')),
+      hasHomeV2Objects: Boolean(document.querySelector('.home-v2-objects')),
     }))
-    if (!boundary.hasAccessGate || !shell.hasAccessGate || shell.hasRoomDom || shell.hasOnboarding || shell.hasActionRail) {
+    if (!boundary.hasAccessGate || !shell.hasAccessGate || shell.hasRoomDom || shell.hasOnboarding || shell.hasActionRail || shell.hasHomeV2Objects) {
       throw new Error(`Packaged offline startup did not isolate Room behind the access Gate: ${JSON.stringify({ boundary, accessGate, shell })}`)
     }
     const health = await packagedTransportProbe(offlineWindow, 'health')
@@ -631,7 +758,7 @@ async function restartApiForPackagedRecovery() {
   if (!recovered?.ok || recovered.kind !== 'ready') throw new Error(`Packaged API did not recover after restart: ${JSON.stringify(recovered)}`)
   const healthy = await packagedTransportProbe(currentWindow, 'health')
   if (!healthy.ok) throw new Error(`Packaged API health did not recover after restart: ${JSON.stringify(healthy)}`)
-  await currentWindow.locator('.action-rail').waitFor({ state: 'visible', timeout: 20_000 })
+  await waitForHomeReady(currentWindow, 20_000)
   apiRestartRecovery = true
 }
 
@@ -743,50 +870,68 @@ async function runOwnerJourney(window) {
   })
   ownerJourney.authenticated = true
 
+  // 房间里的恢复入口由 RunRecoveryNotice 提供，文案是「查看恢复状态 / 恢复候选审核」。
   const generationRecoveryButton = window.getByRole('button', { name: /查看恢复状态|恢复候选审核/ })
   if (await generationRecoveryButton.count()) {
     await generationRecoveryButton.first().click()
-    await window.getByRole('heading', { name: '整理学习卡' }).waitFor()
     await window.waitForFunction(
-      () => Boolean(document.querySelector('.card-generation-meta')) || Boolean(document.querySelector('.card-generation-state--error')),
+      () => Boolean(document.querySelector('.task-surface--card-generation .card-generation-board, .task-surface--card-generation .candidate-review-table')),
       undefined,
       { timeout: 15_000 },
     )
-    if (await window.locator('.card-generation-state--error').count()) {
-      throw new Error(`Packaged Owner Card Generation recovery failed: ${await window.locator('.card-generation-state--error').innerText()}`)
+    if (await window.locator('.card-generation-hud-state[role="alert"]').count()) {
+      throw new Error(`Packaged Owner Card Generation recovery failed: ${await window.locator('.card-generation-hud-state[role="alert"]').innerText()}`)
     }
     const generationContract = await window.evaluate(() => ({
-      runMetaVisible: Boolean(document.querySelector('.card-generation-meta')),
-      candidateListVisible: Boolean(document.querySelector('.card-generation-list')),
-      terminalStateVisible: Boolean(document.querySelector('.card-generation-state--inline, .card-generation-empty')),
+      heading: document.querySelector('.task-title h1')?.textContent?.trim() ?? null,
+      runMetaVisible: Boolean(document.querySelector('.card-generation-board__footer')),
+      candidateVisible: Boolean(document.querySelector('.candidate-study-card')),
+      hudStateVisible: Boolean(document.querySelector('.card-generation-hud-state')),
+      // 本机推断出来的"成功"控件在服务端合同里不存在，必须为 0。
       localSuccessControls: [...document.querySelectorAll('button')].filter((button) => /本机候选|自动激活|生成完成/.test(button.textContent ?? '')).length,
     }))
-    if (!generationContract.runMetaVisible || (!generationContract.candidateListVisible && !generationContract.terminalStateVisible) || generationContract.localSuccessControls !== 0) {
+    if (!generationContract.runMetaVisible && !generationContract.candidateVisible && !generationContract.hudStateVisible) {
       throw new Error(`Packaged Owner Card Generation contract failed: ${JSON.stringify(generationContract)}`)
     }
+    if (generationContract.localSuccessControls !== 0) {
+      throw new Error(`Packaged Owner Card Generation exposed a local-success control: ${JSON.stringify(generationContract)}`)
+    }
     ownerJourney.cardGeneration = true
-    await window.getByRole('button', { name: '关闭学习卡生成并返回房间' }).click()
+    await window.getByLabel(/关闭任务面并返回/).click()
   }
 
-  await window.getByTestId('action-continue').click()
-  await waitForStudyObjectSurface(window, 'Packaged Owner Study')
-  await window.getByRole('button', { name: '进入研究册' }).click()
-  await window.locator('.notebook-editor-workbench').waitFor({ state: 'visible', timeout: 15_000 })
+  await activateHomeAction(window, 'primary')
+  await waitForTodayRoute(window, 'Packaged Owner Study')
+  await openNotebookFromToday(window)
   await window.waitForFunction(
-    () => Boolean(document.querySelector('.notebook-readonly, textarea[aria-label="真实笔记内容"]')) || Boolean(document.querySelector('.notebook-state--error')),
+    () => Boolean(document.querySelector('.notebook[data-mode] .reading-body, .notebook[data-mode] .note-editor .ProseMirror'))
+      || Boolean(document.querySelector('.notebook .surface-data-state--error, .notebook .surface-data-state--empty')),
     undefined,
     { timeout: 15_000 },
   )
-  if (await window.locator('.notebook-state--error').count()) {
-    throw new Error(`Packaged Owner Note projection failed: ${await window.locator('.notebook-state--error').innerText()}`)
+  if (await window.locator('.notebook .surface-data-state--error, .notebook .surface-data-state--empty').count()) {
+    throw new Error(`Packaged Owner Note projection failed: ${await window.locator('.notebook .surface-data-state').first().innerText()}`)
   }
-  if (await window.locator('.notebook-readonly, textarea[aria-label="真实笔记内容"]').count() !== 1) {
-    throw new Error('Packaged Owner Note projection did not expose real note content')
+  const ownerNoteContract = await window.evaluate(() => {
+    const paper = document.querySelector('.notebook[data-mode]')
+    const body = paper?.querySelector('.reading-body')
+    const editor = paper?.querySelector('.note-editor .ProseMirror')
+    return {
+      mode: paper?.getAttribute('data-mode') ?? null,
+      bodyChars: ((body?.textContent ?? editor?.textContent) ?? '').trim().length,
+      rawIdentityVisible: /\b[0-9a-f]{8}(?:-[0-9a-f-]{27})?\b/i.test(paper?.textContent ?? ''),
+    }
+  })
+  if (ownerNoteContract.mode !== 'read' && ownerNoteContract.mode !== 'edit') {
+    throw new Error(`Packaged Owner Note did not enter the real notebook paper: ${JSON.stringify(ownerNoteContract)}`)
   }
+  if (ownerNoteContract.bodyChars === 0) throw new Error('Packaged Owner Note projection did not expose real note content')
+  if (ownerNoteContract.rawIdentityVisible) throw new Error('Packaged Owner Note exposed a raw identity')
   ownerJourney.note = true
 
   const startCardGeneration = async () => {
-    const generateCardsButton = window.getByRole('button', { name: '根据整篇笔记生成学习卡' })
+    // 笔记页的入口在生成在飞时会换成状态入口（cardGenerationEntryLabel）。
+    const generateCardsButton = window.getByRole('button', { name: /生成学习卡|审核学习卡|处理生成任务|查看生成进度|查看激活进度/ }).first()
     await generateCardsButton.waitFor({ state: 'visible', timeout: 15_000 })
     if (await generateCardsButton.isDisabled()) throw new Error('Packaged Owner Card Generation action is unavailable')
     await generateCardsButton.click()
@@ -797,36 +942,36 @@ async function runOwnerJourney(window) {
   let lastKeepAttempt = null
   for (let generationAttempt = 0; generationAttempt < 3 && !selectedCandidate; generationAttempt += 1) {
     if (generationAttempt > 0) {
-      const returnToNote = window.getByRole('button', { name: '回研究册' })
+      const returnToNote = window.getByRole('button', { name: '返回笔记' }).first()
       if (await returnToNote.count() === 0) break
       await returnToNote.click()
-      await window.locator('.notebook-editor-workbench').waitFor({ state: 'visible', timeout: 15_000 })
+      await window.locator('.notebook[data-mode]').waitFor({ state: 'visible', timeout: 15_000 })
       await startCardGeneration()
     }
     lastKeepAttempt = null
     for (let attempt = 0; attempt < 5 && !selectedCandidate; attempt += 1) {
     const cardGenerationDeadline = Date.now() + (attempt === 0 ? 180_000 : 60_000)
     while (Date.now() < cardGenerationDeadline) {
-      if (await window.locator('.card-generation-state--error').count()) break
-      if (await window.getByRole('button', { name: '保留', exact: true }).count()) break
-      const refreshButton = window.getByRole('button', { name: '重新读取生成任务' })
+      if (await window.locator('.card-generation-hud-state[role="alert"]').count()) break
+      if (await window.locator('.candidate-card__meta').filter({ hasText: '待审核' }).count()) break
+      const refreshButton = window.getByRole('button', { name: /刷新状态|重新检查/ }).first()
       if (await refreshButton.count()) await refreshButton.click().catch(() => {})
       await window.waitForTimeout(2_000)
     }
-    if (await window.locator('.card-generation-state--error').count()) {
-      const resyncButton = window.getByRole('button', { name: '重新同步' })
+    if (await window.locator('.card-generation-hud-state[role="alert"]').count()) {
+      const resyncButton = window.getByRole('button', { name: '重新同步' }).first()
       if (await resyncButton.count()) await resyncButton.click().catch(() => {})
       await window.waitForFunction(
-        () => !document.querySelector('.card-generation-state--error'),
+        () => !document.querySelector('.card-generation-hud-state[role="alert"]'),
         undefined,
         { timeout: 10_000 },
       ).catch(() => {})
       await window.waitForTimeout(1_000)
       continue
     }
-    if (await window.getByRole('button', { name: '保留', exact: true }).count() === 0) {
+    if (await window.locator('.candidate-card__meta').filter({ hasText: '待审核' }).count() === 0) {
       lastKeepAttempt = { attempt: attempt + 1, reason: 'review_ready_not_reached_before_deadline', diagnostics: await readCardGenerationDiagnostics(window) }
-      const refreshButton = window.getByRole('button', { name: '重新读取生成任务' })
+      const refreshButton = window.getByRole('button', { name: /刷新状态|重新检查/ }).first()
       if (await refreshButton.count()) await refreshButton.click().catch(() => {})
       await window.waitForTimeout(1_000)
       continue
@@ -835,7 +980,8 @@ async function runOwnerJourney(window) {
     // between two refreshes. Scope the click to one rendered candidate and
     // require the same DOM snapshot to survive a short settling window so the
     // action carries the latest revision/hash pair from React state.
-    const reviewCandidate = window.locator('.card-generation-candidate').filter({
+    // 页 13 一次只渲染一张候选，所以"这张卡"就是 .candidate-study-card 本身。
+    const reviewCandidate = window.locator('.candidate-study-card').filter({
       has: window.locator('button').filter({ hasText: /^保留$/ }),
     }).first()
     await reviewCandidate.waitFor({ state: 'visible', timeout: 5_000 })
@@ -851,11 +997,12 @@ async function runOwnerJourney(window) {
     await keepButton.click()
     const reviewCommitDeadline = Date.now() + 45_000
     while (Date.now() < reviewCommitDeadline) {
-      if (await window.locator('.card-generation-select input[type="checkbox"]').count()) {
+      // 「保留」的真实回执写在这张卡的 meta 行上：已保留 · 待激活。
+      if (await window.locator('.candidate-card__meta').filter({ hasText: '已保留' }).count()) {
         selectedCandidate = true
         break
       }
-      if (await window.locator('.card-generation-state--error').count()) {
+      if (await window.locator('.card-generation-hud-state[role="alert"]').count()) {
         lastKeepAttempt = { attempt: attempt + 1, reason: 'review_request_rejected', diagnostics: await readCardGenerationDiagnostics(window) }
         break
       }
@@ -865,12 +1012,12 @@ async function runOwnerJourney(window) {
       if (!lastKeepAttempt || lastKeepAttempt.attempt !== attempt + 1) {
         lastKeepAttempt = { attempt: attempt + 1, reason: 'review_commit_timeout', diagnostics: await readCardGenerationDiagnostics(window) }
       }
-      const resyncButton = window.getByRole('button', { name: '重新同步' })
+      const resyncButton = window.getByRole('button', { name: '重新同步' }).first()
       if (await resyncButton.count()) await resyncButton.click().catch(() => {})
-      const refreshButton = window.getByRole('button', { name: '重新读取生成任务' })
+      const refreshButton = window.getByRole('button', { name: /刷新状态|重新检查/ }).first()
       if (await refreshButton.count()) await refreshButton.click().catch(() => {})
       await window.waitForFunction(
-        () => !document.querySelector('.card-generation-state--error'),
+        () => !document.querySelector('.card-generation-hud-state[role="alert"]'),
         undefined,
         { timeout: 10_000 },
       ).catch(() => {})
@@ -890,16 +1037,21 @@ async function runOwnerJourney(window) {
     const diagnostics = { lastKeepAttempt, final: await readCardGenerationDiagnostics(window) }
     throw new Error(`Packaged Owner Card Generation could not commit a stable keep decision: ${JSON.stringify(diagnostics)}`)
   }
-  const selectCandidate = window.locator('.card-generation-select input[type="checkbox"]').first()
+  const selectCandidate = window.locator('.candidate-activation-choice input[type="checkbox"]').first()
   await selectCandidate.waitFor({ state: 'visible', timeout: 15_000 })
   await selectCandidate.check()
-  const activateButton = window.getByRole('button', { name: /^激活选中的目标/ })
+  const activateButton = window.getByRole('button', { name: /^激活 \d+ 个目标/ })
   await activateButton.waitFor({ state: 'visible', timeout: 15_000 })
   await activateButton.click()
-  await window.getByText('服务端激活回执已确认', { exact: false }).waitFor({ state: 'visible', timeout: 30_000 })
+  // 真实回执：.candidate-review-slip__receipt 里的「已确认 N 个目标映射」。
+  await window.locator('.candidate-review-slip__receipt').filter({ hasText: '已确认' })
+    .waitFor({ state: 'visible', timeout: 30_000 })
+  if (await window.locator('.candidate-review-slip__receipt').filter({ hasText: '个目标映射' }).count() === 0) {
+    throw new Error(`Packaged Owner Card Activation receipt did not confirm target mappings: ${JSON.stringify(await readCardGenerationDiagnostics(window))}`)
+  }
   ownerJourney.cardGeneration = true
   ownerJourney.cardActivation = true
-  await window.getByLabel('关闭学习卡生成并返回房间').click()
+  await window.getByLabel(/关闭任务面并返回/).click()
 
   // GS-01A ends at the strict CardActivationReceiptV2. The Owner branch must
   // not auto-start a same-session formal LearningRun; that is the Member
@@ -920,42 +1072,44 @@ async function runMemberJourney(window) {
     throw new Error('Packaged Member session exposed the Owner-only Card Generation recovery action')
   }
 
-  await window.getByTestId('action-review').click()
-  await window.getByRole('heading', { name: '今日复习' }).waitFor()
+  await activateHomeAction(window, 'review')
+  // 页 15 的标题是「复习队列」；卡叠是 [aria-label="复习队列卡叠"] 里的 .deck-card.front。
+  await window.getByRole('heading', { name: '复习队列' }).waitFor({ timeout: 20_000 })
   await window.waitForFunction(
-    () => Boolean(document.querySelector('[data-testid="review-queue"]'))
-      || Boolean(document.querySelector('.review-scene-state--empty, .review-scene-state--error')),
+    () => Boolean(document.querySelector('.task-surface--review .deck-card.front'))
+      || Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
     undefined,
     { timeout: 20_000 },
   )
-  if (await window.locator('.review-scene-state--error').count()) {
-    throw new Error(`Packaged Member review queue failed: ${await window.locator('.review-scene-state--error').innerText()}`)
+  if (await window.locator('.task-surface .surface-data-state--error').count()) {
+    throw new Error(`Packaged Member review queue failed: ${await window.locator('.task-surface .surface-data-state--error').innerText()}`)
   }
-  if (await window.locator('.review-scene-state--empty').count()) {
+  if (await window.locator('.task-surface .surface-data-state--empty').count()) {
     throw new Error('Packaged Member review journey requires at least one due ReviewQueueV2 fixture item')
   }
-  const reviewStart = window.getByRole('button', { name: /^开始三分钟巩固/ }).first()
+  const reviewStart = window.getByRole('button', { name: /^开始复习/ }).first()
   await reviewStart.waitFor({ state: 'visible', timeout: 15_000 })
   if (await reviewStart.isDisabled()) throw new Error('Packaged Member review item is not startable')
   memberJourney.reviewQueue = true
   await reviewStart.click()
 
-  await window.getByRole('heading', { name: '三分钟学习旅程' }).waitFor()
+  // LearningRun 用页 16 的 HUD 标题（hud-pages.ts 的 assessment）。
+  await window.getByRole('heading', { name: '理解练习' }).waitFor({ timeout: 20_000 })
   await waitForLearningRunPlayer(window, 'Packaged Member LearningRun')
-  if (await window.locator('.run-player--error').count()) {
-    throw new Error(`Packaged Member LearningRun failed: ${await window.locator('.run-player--error').innerText()}`)
+  if (await window.locator('.task-surface .surface-data-state--error').count()) {
+    throw new Error(`Packaged Member LearningRun failed: ${await window.locator('.task-surface .surface-data-state--error').innerText()}`)
   }
   await assertFormalGuardActive('Packaged Member LearningRun')
   memberJourney.learningRun = true
   await window.locator('.task-surface[data-transition="entered"]').waitFor({ state: 'visible', timeout: 15_000 })
 
   if (learningRunResponseLossOperations.includes('draft')) {
-    const textEditor = window.locator('.run-text-editor textarea').first()
+    const textEditor = window.locator('.learning-run-response .run-text-editor textarea').first()
     await textEditor.waitFor({ state: 'visible', timeout: 15_000 })
     await textEditor.fill('这是一条用于确认草稿回执的临时回答。')
-    const draftResyncAlert = window.locator('.run-resync').filter({ hasText: '草稿版本需要同步' })
-    await draftResyncAlert.waitFor({ state: 'visible', timeout: 15_000 })
-    await draftResyncAlert.getByRole('button', { name: '同步当前状态' }).click()
+    const draftResyncDock = window.locator('.learning-run-dock').filter({ hasText: '草稿版本需要同步' })
+    await draftResyncDock.waitFor({ state: 'visible', timeout: 15_000 })
+    await draftResyncDock.getByRole('button', { name: '同步当前状态' }).click()
     learningRunResponseLossRecoveries.push('draft')
   }
 
@@ -963,70 +1117,66 @@ async function runMemberJourney(window) {
     const hintButton = window.getByRole('button', { name: /给我一点提示|查看第 \d+ 级提示/ }).first()
     await hintButton.waitFor({ state: 'visible', timeout: 15_000 })
     await hintButton.click()
-    const resyncAlert = window.locator('.run-resync').filter({ hasText: '上一动作结果需要确认' })
-    await resyncAlert.waitFor({ state: 'visible', timeout: 15_000 })
-    await resyncAlert.getByRole('button', { name: '同步当前状态' }).click()
+    const resyncDock = window.locator('.learning-run-dock').filter({ hasText: '上一动作结果需要确认' })
+    await resyncDock.waitFor({ state: 'visible', timeout: 15_000 })
+    await resyncDock.getByRole('button', { name: '同步当前状态' }).click()
     learningRunResponseLossRecoveries.push('action')
   }
 
-  const unableButton = window.getByRole('button', { name: '我暂时不会' })
+  await window.locator('.learning-run-more > summary').click()
+  const unableButton = window.getByRole('button', { name: '暂时不会' })
   await unableButton.waitFor({ state: 'visible', timeout: 15_000 })
   await unableButton.click()
   if (learningRunResponseLossOperations.includes('submit')) {
-    const resyncAlert = window.locator('.run-resync').filter({ hasText: '上一动作结果需要确认' })
-    await resyncAlert.waitFor({ state: 'visible', timeout: 15_000 })
-    const syncButton = resyncAlert.getByRole('button', { name: '同步当前状态' })
+    const resyncDock = window.locator('.learning-run-dock').filter({ hasText: '上一动作结果需要确认' })
+    await resyncDock.waitFor({ state: 'visible', timeout: 15_000 })
+    const syncButton = resyncDock.getByRole('button', { name: '同步当前状态' })
     await syncButton.click()
     learningRunResponseLossRecoveries.push('submit')
   }
   await window.waitForFunction(
-    () => Boolean(document.querySelector('.run-result, .run-result--terminal')) || Boolean(document.querySelector('.run-player--error')),
+    () => Boolean(document.querySelector('.learning-run-result-board')),
     undefined,
     { timeout: 35_000 },
   )
-  if (await window.locator('.run-player--error').count()) {
-    throw new Error(`Packaged Member LearningRun result failed: ${await window.locator('.run-player--error').innerText()}`)
-  }
-  if (await window.locator('.run-result, .run-result--terminal').count() !== 1) {
+  if (await window.locator('.learning-run-result-board').count() !== 1) {
     throw new Error('Packaged Member LearningRun did not expose a server result or terminal result')
   }
   memberJourney.result = true
 
-  const resultReturn = window.getByRole('button', { name: /返回(?:并刷新复习|复习队列)/ }).first()
+  const resultReturn = window.getByRole('button', { name: /回到复习队列|返回书房/ }).first()
   await resultReturn.waitFor({ state: 'visible', timeout: 15_000 })
   await resultReturn.click()
-  await window.getByRole('heading', { name: '今日复习' }).waitFor()
+  await window.getByRole('heading', { name: '复习队列' }).waitFor({ timeout: 20_000 })
   await window.waitForFunction(
-    () => Boolean(document.querySelector('[data-testid="review-queue"]'))
-      || Boolean(document.querySelector('.review-scene-state--empty, .review-scene-state--error')),
+    () => Boolean(document.querySelector('.task-surface--review .deck-card.front'))
+      || Boolean(document.querySelector('.task-surface .surface-data-state--empty, .task-surface .surface-data-state--error')),
     undefined,
     { timeout: 20_000 },
   )
-  if (await window.locator('.review-scene-state--error').count()) {
-    throw new Error(`Packaged Member review return failed: ${await window.locator('.review-scene-state--error').innerText()}`)
+  if (await window.locator('.task-surface .surface-data-state--error').count()) {
+    throw new Error(`Packaged Member review return failed: ${await window.locator('.task-surface .surface-data-state--error').innerText()}`)
   }
   await assertFormalGuardReleased('Packaged Member LearningRun')
   memberJourney.returned = true
 
   await window.getByLabel('关闭任务面并返回房间').click()
-  await window.getByTestId('action-continue').click()
-  await waitForStudyObjectSurface(window, 'Packaged Member Study')
-  const notebookButton = window.getByRole('button', { name: '进入研究册' })
-  await notebookButton.waitFor({ state: 'visible', timeout: 15_000 })
-  await notebookButton.click()
-  await window.locator('.notebook-editor-workbench').waitFor({ state: 'visible', timeout: 15_000 })
+  await activateHomeAction(window, 'primary')
+  await waitForTodayRoute(window, 'Packaged Member Study')
+  await openNotebookFromToday(window)
   await window.waitForFunction(
-    () => Boolean(document.querySelector('.notebook-readonly')) || Boolean(document.querySelector('.notebook-state--error')),
+    () => Boolean(document.querySelector('.notebook[data-mode="read"] .reading-body'))
+      || Boolean(document.querySelector('.notebook .surface-data-state--error, .notebook .surface-data-state--empty')),
     undefined,
     { timeout: 20_000 },
   )
-  if (await window.locator('.notebook-state--error').count()) {
-    throw new Error(`Packaged Member Note projection failed: ${await window.locator('.notebook-state--error').innerText()}`)
+  if (await window.locator('.notebook .surface-data-state--error, .notebook .surface-data-state--empty').count()) {
+    throw new Error(`Packaged Member Note projection failed: ${await window.locator('.notebook .surface-data-state').first().innerText()}`)
   }
-  if (await window.locator('.notebook-readonly').count() !== 1 || await window.locator('textarea[aria-label="真实笔记内容"]').count() !== 0) {
+  if (await window.locator('.notebook[data-mode="edit"]').count() !== 0 || await window.locator('.notebook .note-editor .ProseMirror[contenteditable="true"]').count() !== 0) {
     throw new Error('Packaged Member Note projection is not read-only')
   }
-  if (await window.getByRole('button', { name: /根据整篇笔记生成学习卡/ }).count() !== 0) {
+  if (await window.getByRole('button', { name: /生成学习卡|审核学习卡|查看生成进度/ }).count() !== 0) {
     throw new Error('Packaged Member Note still exposes the Owner-only Card Generation action')
   }
   memberJourney.note = true
@@ -1034,6 +1184,9 @@ async function runMemberJourney(window) {
 }
 
 try {
+  if (portableOfflineOnly) {
+    await runPortableOfflineSmoke()
+  } else {
   await runOfflineStartupRecovery()
   electronApp = await electron.launch({
     executablePath,
@@ -1100,6 +1253,7 @@ try {
   await writeFile(resolve(evidenceRoot, 'package-smoke.json'), `${JSON.stringify(smokeEvidence, null, 2)}\n`, 'utf8')
   await writeFile(resolve(evidenceRoot, `package-smoke-${smokeRole}.json`), `${JSON.stringify(smokeEvidence, null, 2)}\n`, 'utf8')
   process.stdout.write('packaged smoke passed\n')
+  }
 } finally {
   await electronApp?.close()
   await rm(userDataDir, { recursive: true, force: true })

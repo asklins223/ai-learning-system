@@ -36,19 +36,9 @@ describe("CI workflow contract", () => {
     assert.doesNotMatch(coverageGate, /packages\/db/);
   });
 
-  it("runs the SEC-01 verification script from the repository root", () => {
+  it("does not invoke the retired V1 SEC-01 enforce script", () => {
     const freshMigrations = jobBlock("fresh-migrations");
-    const step = freshMigrations.match(
-      /- name: "SEC-01 enforce: run verification script"\n([\s\S]*?)(?=\n\s+- name:)/,
-    );
-
-    assert.ok(step, "Fresh Migrations must run SEC-01 enforce verification");
-    assert.doesNotMatch(
-      step[0],
-      /working-directory:/,
-      "the repository-root .github script must not run from apps/api",
-    );
-    assert.match(step[0], /node \.github\/scripts\/sec01-enforce-verify\.mjs/);
+    assert.doesNotMatch(freshMigrations, /sec01-enforce-verify|0024_sec01_rls_enforce|0038_sec01/);
   });
 
   it("keeps coverage discovery self-contained on GitHub runners", () => {

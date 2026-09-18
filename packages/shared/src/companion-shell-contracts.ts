@@ -14,6 +14,10 @@
  */
 
 import { z } from "zod";
+import {
+  companionAgentPermissionLevelSchema,
+  companionAgentSettingsV1Schema,
+} from "./companion-agent-contracts.ts";
 
 // ─── Onboarding 状态机基础枚举 ─────────────────────────────────────────────
 
@@ -228,6 +232,7 @@ export const companionAccountStateV1Schema = z.object({
     })
     .nullable()
     .optional(),
+  agentSettings: companionAgentSettingsV1Schema.optional(),
 }).strict();
 export type CompanionAccountStateV1 = z.infer<typeof companionAccountStateV1Schema>;
 
@@ -262,6 +267,8 @@ export const companionAccountPatchSchema = z.object({
     })
     .nullable()
     .optional(),
+  agentPermissionLevel: companionAgentPermissionLevelSchema.optional(),
+  enabledSkillIds: z.array(z.string()).max(32).optional(),
 }).strict().superRefine((patch, ctx) => {
   const hasChange =
     patch.globalEnabled !== undefined ||
@@ -272,7 +279,9 @@ export const companionAccountPatchSchema = z.object({
     patch.voiceOff !== undefined ||
     patch.notificationBoundary !== undefined ||
     patch.interventionLevel !== undefined ||
-    patch.quietHours !== undefined;
+    patch.quietHours !== undefined ||
+    patch.agentPermissionLevel !== undefined ||
+    patch.enabledSkillIds !== undefined;
   if (!hasChange) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

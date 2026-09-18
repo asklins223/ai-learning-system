@@ -10,8 +10,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   createCapabilityConfig,
-} from "../modules/companion-shell/rollback-drill.ts";
-import {
   learningObjectiveSurfaceV3Schema,
   objectiveListItemV3Schema,
   findPrivatePayloadLeaks,
@@ -20,6 +18,12 @@ import {
 } from "@ailearn/shared";
 
 const OBJ_ID = "11111111-1111-4111-8111-111111111111";
+const CARD_ID = "22222222-2222-4222-8222-222222222222";
+const SCHEDULE_ID = "66666666-6666-4666-8666-666666666666";
+
+function cardStart() {
+  return { version: 2 as const, originV2: { kind: "card" as const, cardId: CARD_ID, objectiveId: OBJ_ID }, goal: "stabilize" as const, requestedTimeBudgetSeconds: 180, responsePreference: "adaptive" as const };
+}
 
 function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): LearningObjectiveSurfaceV3 {
   const base: LearningObjectiveSurfaceV3 = {
@@ -49,6 +53,7 @@ function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): Learn
       lastCanonicalAt: null,
     },
     lifecycle: { status: "active", successorObjectiveId: null },
+    personalState: { state: "unvalidated", activeRunId: null },
     primaryAction: { kind: "none" },
     createdAt: "2026-08-18T00:00:00.000Z",
     updatedAt: "2026-08-18T00:00:00.000Z",
@@ -76,11 +81,13 @@ function makeListItem(overrides: Partial<ObjectiveListItemV3> = {}): ObjectiveLi
 
 describe("RL-15: capability bundle 永久开启", () => {
   it("learning_objective_system_v3 永久 enabled", () => {
-    const config = createCapabilityConfig(
-      { learning_objective_system_v3: "enabled" },
-      { revision: 100 },
-    );
-    assert.equal(config.states.learning_objective_system_v3, "enabled");
+    const config = createCapabilityConfig({
+      revision: 100,
+      overrides: { learning_objective_system_v3: { status: "enabled" } },
+    });
+    const state = config.states.learning_objective_system_v3;
+    assert.ok(state);
+    assert.equal(state.status, "enabled");
     // 切流后 Surface 合同不变
     const surface = makeSurface();
     const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
@@ -129,29 +136,26 @@ describe("RL-16: legacy alias 正式可见性归零", () => {
   });
 });
 
-describe("RL-17: 删除 dead adapters 与旧 UI 分支", () => {
-  it("Surface 合同不含 CardListItem 兼容字段", () => {
+describe("RL-17: Objective surface 合同", () => {
+  it("Surface 合同不含旧列表字段", () => {
     const surface = makeSurface();
-    // V3 Surface 不携带 CardListItem 的 legacy 字段
-    assert.ok(!("cardSetId" in surface), "不应包含 cardSetId");
     assert.ok(!("summary" in surface), "不应包含 summary");
     assert.ok(!("claim" in surface), "不应包含 claim");
     assert.ok(!("keyPointId" in surface), "不应包含 keyPointId");
   });
 
-  it("列表项不含 CardSet 组视图字段", () => {
+  it("列表项不含旧组视图字段", () => {
     const item = makeListItem();
-    assert.ok(!("cardSetId" in item), "不应包含 cardSetId");
     assert.ok(!("cardSetName" in item), "不应包含 cardSetName");
     assert.ok(!("cardCount" in item), "不应包含 cardCount");
   });
 
   it("primaryAction 是 typed union（不靠 label 文本决定）", () => {
     const actions: ObjectiveListItemV3["primaryAction"][] = [
-      { kind: "create_run", origin: "home", objectiveId: OBJ_ID, cardId: null, goal: "测试" },
+      { kind: "create_run", objectiveId: OBJ_ID, label: "测试", start: cardStart() },
       { kind: "resume_run", runId: "55555555-5555-4555-8555-555555555555", objectiveId: OBJ_ID },
-      { kind: "create_review_run", objectiveId: OBJ_ID, scheduleId: "66666666-6666-4666-8666-666666666666", generation: 1 },
-      { kind: "practice_only", objectiveId: OBJ_ID, cardId: null, reasonCodes: ["exposed"] },
+      { kind: "create_review_run", objectiveId: OBJ_ID, label: "开始复习", start: { version: 2, originV2: { kind: "review", scheduleId: SCHEDULE_ID, objectiveId: OBJ_ID, scheduleGeneration: 1 }, goal: "stabilize", requestedTimeBudgetSeconds: 180, responsePreference: "adaptive" } },
+      { kind: "practice_only", objectiveId: OBJ_ID, reasonCodes: ["exposed"], label: "开始练习", start: cardStart() },
       { kind: "wait_for_initial_validation", reminderId: "77777777-7777-4777-8777-777777777777", qualificationNotBefore: "2026-08-18T00:00:00.000Z" },
       { kind: "view_successor", successorObjectiveId: "88888888-8888-4888-8888-888888888888", successorCardId: null },
       { kind: "refresh" },

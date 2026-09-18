@@ -11,7 +11,7 @@
 
 import { and, eq } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { reviewSchedules } from "../../db/schema/evidence.ts";
+import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 
 export interface ReviewDeferScope {
   workspaceId: string;

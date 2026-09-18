@@ -12,7 +12,7 @@
 import { and, desc, eq, ilike, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
-import { assistantMemoryItems } from "../../db/schema/assistant-memory.ts";
+import { assistantMemoryItems } from "@ailearn/shared/db-schema/assistant-memory";
 
 // 轻微·15（round-4）：LIST 无分页时的防御性上限。
 const MEMORY_LIST_LIMIT = 200;
@@ -34,8 +34,7 @@ export type MemorySourceTypeV2 =
   | "user_stated"
   | "model_inferred"
   | "confirmed"
-  | "summary"
-  | "legacy";
+  | "summary";
 export type MemoryEmbeddingStatusV2 = "none" | "pending" | "ready" | "failed";
 
 export interface MemoryItemV2 {

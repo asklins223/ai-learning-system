@@ -6,16 +6,15 @@ import {
   workspaceMembers,
   users,
   workspaces,
-} from "../../db/schema/identity.ts";
-import { sessions } from "../../db/schema/session.ts";
-import { onboardingStates } from "../../db/schema/identity.ts";
-import { notes, sources } from "../../db/schema/note.ts";
-import { validationEvents } from "../../db/schema/evidence.ts";
-import { evidenceSnapshotsV2 } from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/identity";
+import { sessions } from "@ailearn/shared/db-schema/session";
+import { onboardingStates } from "@ailearn/shared/db-schema/identity";
+import { notes, sources } from "@ailearn/shared/db-schema/note";
+import { evidenceSnapshotsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   learningCardsV2,
   learningObjectiveOriginsV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   generateInvitationToken,
   createInvitationTokenStorage,
@@ -568,10 +567,7 @@ export const ONBOARDING_STEPS = [
   "first_note",
   "first_card",
   "evidence_review",
-  "first_validation",
 ] as const;
-
-export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
 export interface OnboardingState {
   id: string;
@@ -605,7 +601,7 @@ async function deriveOnboardingSnapshot(
 ): Promise<DerivedOnboardingSnapshot> {
   // N#7-12：5 个派生查询相互无数据依赖，并行化（原来串行 5 次往返）。
   // 该函数在 markOnboardingStep 的 FOR UPDATE 持有期内调用，并行化缩短写锁持有时间。
-  const [workspace, firstContent, firstNote, firstCard, firstValidation] = await Promise.all([
+  const [workspace, firstContent, firstNote, firstCard] = await Promise.all([
     tx.query.workspaces.findFirst({
       where: eq(workspaces.id, workspaceId),
     }),
@@ -636,16 +632,6 @@ async function deriveOnboardingSnapshot(
         ),
       )
       .limit(1),
-    tx
-      .select({ id: validationEvents.id })
-      .from(validationEvents)
-      .where(
-        and(
-          eq(validationEvents.workspaceId, workspaceId),
-          eq(validationEvents.userId, userId),
-        ),
-      )
-      .limit(1),
   ]);
 
   // v0.6 单一配置源重构：平台解析完全收敛到 config/ai-platforms.json，
@@ -659,7 +645,6 @@ async function deriveOnboardingSnapshot(
     first_note: firstNote.length > 0,
     first_card: firstCard.length > 0,
     evidence_review: storedSteps.evidence_review === true,
-    first_validation: firstValidation.length > 0,
   };
   const completedCount = ONBOARDING_STEPS.filter((step) => steps[step]).length;
   const status = completedCount === ONBOARDING_STEPS.length
@@ -753,7 +738,9 @@ export async function markOnboardingStep(
       // V1 evidences 表已随 0183 退役；evidence_review 步骤改查 V2 证据快照。
       const evidence = await tx.query.evidenceSnapshotsV2.findFirst({
         where: and(
-          eq(evidenceSnapshotsV2.id, evidenceId),
+          // EntityRef/UI payloads carry the stable business identifier, not
+          // the storage surrogate `evidence_snapshots_v2.id`.
+          eq(evidenceSnapshotsV2.evidenceSnapshotId, evidenceId),
           eq(evidenceSnapshotsV2.workspaceId, workspaceId),
         ),
       });

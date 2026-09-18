@@ -43,8 +43,8 @@ const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const roomSceneLayerManifestSchema = z.strictObject({
   assetId: nonEmptyStringSchema,
   path: staticAssetPathSchema,
-  theme: z.enum(["day", "night"]),
-  depth: z.enum(["D1", "D2", "D3", "D4", "D5", "D6"]),
+  theme: z.enum(["day", "dusk", "night"]),
+  depth: z.enum(["D0", "D1", "D2", "D3", "D4", "D5", "D6"]),
   /** Ascending order within the same theme and depth band; larger is nearer. */
   order: z.number().int().min(0).max(SCENE_DEPTH_CHILD_ORDER_MAX),
   /** `null` means the layer is static in its depth band rather than anchor-bound. */
@@ -65,6 +65,11 @@ const roomSceneLayerManifestSchema = z.strictObject({
     ]),
   }),
   alphaMode: z.enum(["straight-rgba", "premultiplied-rgba", "blend", "opaque-rgb"]),
+  sha256: sha256Schema,
+  sourcePath: staticAssetPathSchema,
+  promptPath: staticAssetPathSchema.optional(),
+  matteSourcePath: staticAssetPathSchema.optional(),
+  license: nonEmptyStringSchema,
   reviewStatus: nonEmptyStringSchema,
   releaseApproval: z.boolean(),
 }).superRefine((layer, context) => {
@@ -126,6 +131,7 @@ const sourceManifestSchema = z.strictObject({
   reviewStatus: nonEmptyStringSchema,
   basePath: z.literal(LEARNING_ROOM_ASSET_BASE_PATH),
   posters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
+  homeV2Posters: z.strictObject({ day: sourceMediaSchema, dusk: sourceMediaSchema, night: sourceMediaSchema }),
   seatPosters: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
   entryPosters: z.strictObject({
     closed: z.strictObject({ day: sourceMediaSchema, night: sourceMediaSchema }),
@@ -148,7 +154,6 @@ const sourceManifestSchema = z.strictObject({
     night: sourceMediaSchema,
   }),
   onboarding: sourceMediaSchema.extend({ caption: nonEmptyStringSchema }),
-  companion: sourceMediaSchema,
   graph: z.strictObject({
     poster: staticAssetPathSchema,
     motionImplementation: z.literal("code"),
@@ -215,6 +220,9 @@ export function normalizeLearningRoomManifest(
   const assets: Record<string, string> = {};
   addAsset(assets, "posters.day", source.posters.day.path);
   addAsset(assets, "posters.night", source.posters.night.path);
+  addAsset(assets, "homeV2Posters.day", source.homeV2Posters.day.path);
+  addAsset(assets, "homeV2Posters.dusk", source.homeV2Posters.dusk.path);
+  addAsset(assets, "homeV2Posters.night", source.homeV2Posters.night.path);
   addAsset(assets, "seatPosters.day", source.seatPosters.day.path);
   addAsset(assets, "seatPosters.night", source.seatPosters.night.path);
   addAsset(assets, "entryPosters.closed.day", source.entryPosters.closed.day.path);
@@ -237,7 +245,6 @@ export function normalizeLearningRoomManifest(
   addAsset(assets, "window.day", source.window.day.path);
   addAsset(assets, "window.night", source.window.night.path);
   addAsset(assets, "onboarding", source.onboarding.path);
-  addAsset(assets, "companion", source.companion.path);
   addAsset(assets, "graph.poster", source.graph.poster);
   if (source.sound.ambientDay) addAsset(assets, "sound.ambientDay", source.sound.ambientDay);
   if (source.sound.ambientNight) addAsset(assets, "sound.ambientNight", source.sound.ambientNight);

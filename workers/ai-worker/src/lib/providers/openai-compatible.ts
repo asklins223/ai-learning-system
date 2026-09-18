@@ -29,82 +29,39 @@ import type {
   PlatformOptions,
 } from "@ailearn/shared";
 import { registerFactory } from "../provider-factory.ts";
-import { ProviderRequestError } from "../generation-failure-policy.ts";
+import { ProviderRequestError } from "../provider-request-error.ts";
 import { AgentOutputError } from "../non-retryable-errors.ts";
 import { DEFAULT_CONTEXT_WINDOW_TOKENS } from "../provider-constants.ts";
-
-// ARCH-05: contextWindowTokens 可通过 OPENAI_COMPAT_CONTEXT_WINDOW_TOKENS 环境变量覆盖。
-
-/** R1: Preset options for provider-specific configuration (e.g., DashScope). */
-export interface ProviderPresetOptions {
-  /** URL rewrite function (e.g., DashScope /api/v1 → /compatible-mode/v1). */
-  resolveEndpoint?: (baseUrl: string) => string;
-  /** Extra request params merged into the request body (e.g., enable_thinking: false). */
-  extraRequestParams?: Record<string, unknown>;
-  /** Extra request headers (e.g., X-DashScope-WorkSpace). */
-  extraHeaders?: Record<string, string>;
-  /** max_tokens control: "always" always sets it; "env-gated" respects OPENAI_COMPAT_DISABLE_MAX_TOKENS. */
-  maxTokensStrategy?: "always" | "env-gated";
-  /** Override the provider id (e.g., "dashscope"). */
-  providerId?: string;
-  /** Override the prompt version (e.g., "v6-dashscope"). */
-  promptVersionOverride?: string;
-}
-
-/**
- * R1: Adapt a raw `typeof fetch` function to the `PublicJsonRequester` interface.
- *
- * @deprecated TEST-ONLY. This adapter performs raw `fetch` with NO SSRF
- * validation (no IP pinning, no HTTPS-only check, no DNS resolution guard,
- * no connect timeout). It exists solely so DashScopeProvider test files that
- * inject a `typeof fetch` mock can reuse OpenAICompatibleProvider's logic.
- * It MUST NOT be reachable from production code: createDashScopeProvider and
- * the createProvider fallback never set `options.request`, so production
- * always uses postJsonToPublicEndpoint. If you add a PlatformOptions field
- * that can flow into `options.request`, you will reopen the SSRF bypass that
- * R1 was specifically designed to close — gate it behind an explicit allowlist.
- *
- * @see docs/plans/provider-registry-refactor.md §1.5 (SSRF unification)
- */
-function adaptFetchToPublicJsonRequester(fetchFn: typeof globalThis.fetch): PublicJsonRequester {
-  // Defense-in-depth: this function bypasses postJsonToPublicEndpoint's SSRF
-  // protections (IP pinning, HTTPS-only, connect timeout). Block production use
-  // so a future code change cannot accidentally route real traffic through it.
-  if (process.env.NODE_ENV === "production" && process.env.ALLOW_TEST_FETCH_IN_PRODUCTION !== "true") {
-    throw new Error(
-      "adaptFetchToPublicJsonRequester must not be used in production — it bypasses SSRF protections. "
-      + "Set ALLOW_TEST_FETCH_IN_PRODUCTION=true to override (e.g. for E2E tests).",
-    );
-  }
-  return async (url, headers, body, signal) => {
-    const response = await fetchFn(url, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
-    let parsedBody: unknown = null;
-    try {
-      const text = await response.text();
-      parsedBody = text ? JSON.parse(text) : null;
-    } catch (err) {
-      throw new Error(
-        `returned invalid JSON (${response.status} ${response.statusText})`,
-        { cause: err },
-      );
-    }
-    return {
-      status: response.status,
-      statusText: response.statusText,
-      body: parsedBody,
-    };
-  };
-}
 
 /** R1: Unified abort error helper. */
 function abortError(signal: AbortSignal, phase: string): Error {
   if (signal.reason instanceof Error) return signal.reason;
   return new Error(`AI request aborted ${phase}`);
+}
+
+/**
+ * 采样参数的出口夹取（AI P2 #25，2026-09-15 审计）。
+ *
+ * 上游 zod 合同已经约束了主要调用方（AgentTurnRequest.temperature 0..2、
+ * V2 stage runtime 0..2），但 provider 是被多个入口复用的**最后一层**：
+ * `request.temperature` / `request.maxTokens` 此前原样透传，任何新增的或绕过
+ * 合同的调用方都能把 temperature=99、max_tokens=-1 送到服务端（前者被拒或产出
+ * 无意义结果，后者在部分 OpenAI 兼容实现里会被当作"不限制"）。
+ *
+ * 这里只做保守夹取，不改变合同内的合法值（0..2 / 正整数）。非法值（NaN、负数）
+ * 直接**省略字段**，让 provider 用自身默认值，而不是把垃圾值发出去。
+ */
+const MAX_REQUEST_TEMPERATURE = 2;
+const MAX_REQUEST_MAX_TOKENS = 65_536;
+
+function clampTemperature(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.min(MAX_REQUEST_TEMPERATURE, Math.max(0, value));
+}
+
+function clampMaxTokens(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(MAX_REQUEST_MAX_TOKENS, Math.floor(value));
 }
 
 async function readStreamingBodyText(body: AsyncIterable<Uint8Array>): Promise<string> {
@@ -139,10 +96,8 @@ export class OpenAICompatibleProvider implements AIProvider {
   /**
    * R2: TextGenerationCapability — generic chat completion.
    *
-   * This is the capability-based API that will eventually replace the
-   * business-specific methods (evaluateValidation, generateValidationQuestion,
-   * evaluateRubric) in R5. The provider only does the API call; prompt
-   * selection and schema validation are the caller's responsibility.
+   * The provider only performs transport; prompt selection and output
+   * validation belong to the active caller.
    */
   async chatCompletion(
     messages: ChatMessage[],
@@ -186,8 +141,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     const maxTokens = options.maxTokens ?? 4096;
     const temperature = options.temperature ?? 0.2;
     const model = options.model ?? this.modelId;
-    const disableMaxTokens = this.platformOptions?.disableMaxTokens
-      ?? process.env.OPENAI_COMPAT_DISABLE_MAX_TOKENS === "true";
+    const disableMaxTokens = this.platformOptions?.disableMaxTokens ?? false;
     const shouldSetMaxTokens = this.maxTokensStrategy === "always" || !disableMaxTokens;
     const body: Record<string, unknown> = {
       model,
@@ -195,14 +149,13 @@ export class OpenAICompatibleProvider implements AIProvider {
       temperature,
       stream: true,
       // Companion dialogue explicitly requests natural text. Keep the
-      // historical JSON default for agent/structured callers that omit the
+      // JSON default for structured callers that omit the
       // option, but never force JSON mode onto a text dialogue stream.
       ...(options.responseFormat === "text"
         ? {}
         : { response_format: { type: "json_object" as const } }),
       ...((options.disableThinking
-        || this.platformOptions?.disableThinking
-        || process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+        || this.platformOptions?.disableThinking)
         ? { enable_thinking: false }
         : this.platformOptions?.enableThinking
           ? { enable_thinking: true }
@@ -333,13 +286,11 @@ export class OpenAICompatibleProvider implements AIProvider {
     this.apiKey = options.apiKey;
     this.modelId = options.model;
     this.visionModelId = options.visionModel ?? options.model;
-    this.embeddingModelId = options.embeddingModel
-      ?? process.env.OPENAI_COMPAT_EMBEDDING_MODEL
-      ?? "";
+    this.embeddingModelId = options.embeddingModel ?? options.model;
     // R1: Use resolveEndpoint if provided (e.g., DashScope URL rewriting)
     const resolveFn = options.resolveEndpoint ?? resolveOpenAIChatCompletionsUrl;
     this.endpoint = resolveFn(options.baseUrl);
-    // R1: Use resolveEmbeddingEndpoint if provided (e.g., DashScope /api/v1 → /compatible-mode/v1/embeddings)
+  // Use a provider-specific embedding resolver when the provider needs one.
     const resolveEmbeddingFn = options.resolveEmbeddingEndpoint ?? resolveOpenAIEmbeddingsUrl;
     this.embeddingEndpoint = resolveEmbeddingFn(options.baseUrl);
     this.request = options.request ?? postJsonToPublicEndpoint;
@@ -356,8 +307,8 @@ export class OpenAICompatibleProvider implements AIProvider {
    * Call the OpenAI-compatible embeddings endpoint.
    *
    * Returns null when no embedding model is configured or the request fails,
-   * matching DashScopeProvider's embed() contract. Upstream callers fall back
-   * to lexical/sequential search automatically.
+   * matching the embedding contract expected by upstream callers, which fall
+   * back to lexical/sequential search automatically.
    */
   async embed(text: string, signal?: AbortSignal): Promise<number[] | null> {
     if (!this.embeddingModelId) return null;
@@ -405,16 +356,14 @@ export class OpenAICompatibleProvider implements AIProvider {
   ): Promise<{ content: string; usage: ProviderUsage | null }> {
     if (signal?.aborted) throw abortError(signal, "before request");
     // R1: maxTokensStrategy controls max_tokens ("always" for DashScope, "env-gated" for OpenAI-compatible)
-    // Platform config options can override env vars.
-    const disableMaxTokens = this.platformOptions?.disableMaxTokens
-      ?? process.env.OPENAI_COMPAT_DISABLE_MAX_TOKENS === "true";
+    const disableMaxTokens = this.platformOptions?.disableMaxTokens ?? false;
     const shouldSetMaxTokens = this.maxTokensStrategy === "always" || !disableMaxTokens;
     const body: Record<string, unknown> = {
       model,
       messages,
       temperature,
       stream: false,
-      // Keep structured JSON as the default for legacy callers, while
+      // Keep structured JSON as the default for structured callers, while
       // allowing companion dialogue to request natural text explicitly.
       ...(responseFormat === "text"
         ? {}
@@ -426,8 +375,7 @@ export class OpenAICompatibleProvider implements AIProvider {
       // 2026-08-12+（15a 新反馈）：call 的 disableThinking 参数优先级最高
       //（companion 日常对话用它显式关闭思考模式，换首 token 速度）。
       ...((disableThinking
-        || this.platformOptions?.disableThinking
-        || process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+        || this.platformOptions?.disableThinking)
         ? { enable_thinking: false }
         : this.platformOptions?.enableThinking
           ? { enable_thinking: true }
@@ -525,13 +473,13 @@ export class OpenAICompatibleProvider implements AIProvider {
     const requestBody: Record<string, unknown> = {
       model: request.model ?? this.modelId,
       messages,
-      temperature: request.temperature,
+      temperature: clampTemperature(request.temperature),
       stream: false,
       // Platform config options control thinking mode:
       //   disableThinking: explicitly disable (enable_thinking: false)
       //   enableThinking:  explicitly enable  (enable_thinking: true)
       //   neither:          use model/API default (no field)
-      ...((this.platformOptions?.disableThinking ?? process.env.OPENAI_COMPAT_DISABLE_THINKING === "true")
+      ...((this.platformOptions?.disableThinking ?? false)
         ? { enable_thinking: false }
         : this.platformOptions?.enableThinking
           ? { enable_thinking: true }
@@ -541,11 +489,12 @@ export class OpenAICompatibleProvider implements AIProvider {
     };
 
     // R1: maxTokensStrategy controls max_tokens
-    const disableMaxTokens = this.platformOptions?.disableMaxTokens
-      ?? process.env.OPENAI_COMPAT_DISABLE_MAX_TOKENS === "true";
+    const disableMaxTokens = this.platformOptions?.disableMaxTokens ?? false;
     const shouldSetMaxTokens = this.maxTokensStrategy === "always" || !disableMaxTokens;
     if (shouldSetMaxTokens) {
-      requestBody.max_tokens = request.maxTokens;
+      // AI P2 #25：出口夹取；非法/缺失即省略字段（用 provider 默认），不发垃圾值。
+      const maxTokens = clampMaxTokens(request.maxTokens);
+      if (maxTokens !== undefined) requestBody.max_tokens = maxTokens;
     }
 
     if (hasTools) {
@@ -665,17 +614,11 @@ export class OpenAICompatibleProvider implements AIProvider {
   /**
    * 返回 OpenAI-compatible Provider 能力快照（计划 §8.2）。
    *
-   * ARCH-05: contextWindowTokens is configurable via the config file
-   * options.contextWindowTokens (PlatformOptions), with a fallback to the
-   * legacy OPENAI_COMPAT_CONTEXT_WINDOW_TOKENS / DASHSCOPE_CONTEXT_WINDOW_TOKENS
-   * env vars for models with non-default context limits.
+   * Context window and output limits are configured through PlatformOptions.
    */
   getCapabilities(): ProviderCapability {
-    // 迁移遗漏修复：config/ai-platforms.json 的 options.contextWindowTokens 优先于 env。
     const contextWindowTokens = this.platformOptions?.contextWindowTokens
-      ?? (Number(process.env.OPENAI_COMPAT_CONTEXT_WINDOW_TOKENS)
-        || Number(process.env.DASHSCOPE_CONTEXT_WINDOW_TOKENS)
-        || DEFAULT_CONTEXT_WINDOW_TOKENS);
+      ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
     // 输出预算：允许平台配置覆盖。默认 16384——这是对 openai_compatible 模型实际输出能力的
     // 校准值（实测 deepseek-v4-flash-0731 在 max_tokens=32768 时输出过 15442 token 后自停；
     // 而 provider 在「不传 max_tokens」时的默认上限仅为 8192，会截断大输出）。
@@ -698,12 +641,6 @@ fingerprint: `${this.id}:${this.modelId}:${this.visionModelId}:native_tools`,
   }
 }
 
-export function resolveChatCompletionsUrl(baseUrl: string): string {
-  return resolveOpenAIChatCompletionsUrl(baseUrl);
-}
-
-export { adaptFetchToPublicJsonRequester };
-
 // ─── R2: Factory registrations ──────────────────────────────────────────
 // Register OpenAI-compatible provider for each capability it supports.
 // The factory creates a provider instance from runtime config, returning null
@@ -716,9 +653,9 @@ function resolveOpenAICompatConfig(config: ProviderRuntimeConfig): {
   visionModel?: string;
   platformOptions?: PlatformOptions;
 } | null {
-  const apiKey = config.apiKey ?? process.env.OPENAI_COMPAT_API_KEY;
-  const baseUrl = config.baseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
-  const model = config.model ?? process.env.OPENAI_COMPAT_MODEL;
+  const apiKey = config.apiKey;
+  const baseUrl = config.baseUrl;
+  const model = config.model;
   if (!apiKey || !baseUrl || !model) return null;
   return {
     apiKey,
@@ -748,13 +685,11 @@ registerFactory("openai_compatible", "agent_turn", (config) => {
 });
 
 registerFactory("openai_compatible", "embedding", (config) => {
-  const apiKey = config.apiKey ?? process.env.OPENAI_COMPAT_API_KEY;
-  const baseUrl = config.baseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
-  const model = config.model ?? process.env.OPENAI_COMPAT_MODEL;
+  const apiKey = config.apiKey;
+  const baseUrl = config.baseUrl;
+  const model = config.model;
   if (!apiKey || !baseUrl || !model) return null;
-  // 迁移遗漏修复：配置文件 embedding 能力的 model 即 embedding 模型，
-  // 无 OPENAI_COMPAT_EMBEDDING_MODEL 覆盖时直接复用，避免 embed() 因 env 缺失返回 null。
-  const embeddingModel = process.env.OPENAI_COMPAT_EMBEDDING_MODEL ?? model;
+  const embeddingModel = model;
   return new OpenAICompatibleProvider({
     apiKey,
     baseUrl,

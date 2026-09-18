@@ -38,7 +38,6 @@ const expectedCoveragePackages = [
   "packages/shared",
   "packages/ai-quality",
   "apps/api",
-  "apps/web",
   "workers/ai-worker",
 ];
 

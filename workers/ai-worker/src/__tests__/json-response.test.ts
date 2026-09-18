@@ -60,6 +60,41 @@ test("parseAgentTurnToolCalls: 截断的不完整 arguments 标记 malformed 而
   );
 });
 
+// ─── JSON mode fallback（content 内 toolCalls）────────────────────────────
+
+test("parseAgentTurnToolCalls: JSON fallback 的字符串 arguments 正常解析", () => {
+  const result = parseAgentTurnToolCalls({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          toolCalls: [{ id: "call-9", name: "companion_open_card", arguments: '{"cardId":"c-1"}' }],
+        }),
+      },
+      finish_reason: "stop",
+    }],
+  }, false);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].argumentsMalformed, false);
+  assert.deepEqual(result.toolCalls[0].arguments, { cardId: "c-1" });
+});
+
+test("parseAgentTurnToolCalls: JSON fallback 的损坏 arguments 标记 malformed（不得当作空对象执行）", () => {
+  const result = parseAgentTurnToolCalls({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          toolCalls: [{ id: "call-9", name: "companion_open_card", arguments: '{"cardId":' }],
+        }),
+      },
+      finish_reason: "stop",
+    }],
+  }, false);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].argumentsMalformed, true);
+  assert.deepEqual(result.toolCalls[0].arguments, {});
+  assert.equal(result.toolCalls[0].rawArguments, '{"cardId":');
+});
+
 // ─── asJsonRecord ────────────────────────────────────────────────────────
 
 test("asJsonRecord: 普通对象返回该对象", () => {

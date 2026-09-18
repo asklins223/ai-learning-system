@@ -109,6 +109,29 @@ describe("learningTargetSnapshotV2Schema", () => {
     assert.throws(() => parseLearningTargetSnapshotV2(snap));
   });
 
+  it("rejects a rubric with no required unit", () => {
+    const snap = baseSnapshot();
+    snap.target.scoringRubric.units = snap.target.scoringRubric.units.map((unit) => ({
+      ...unit,
+      required: false,
+    }));
+    assert.throws(() => parseLearningTargetSnapshotV2(snap));
+  });
+
+  it("rejects duplicate rubric unit ids", () => {
+    const snap = baseSnapshot();
+    const original = snap.target.scoringRubric.units[0]!;
+    snap.target.scoringRubric.units.push({
+      ...original,
+      criterion: "A distinct criterion must have its own id",
+    });
+
+    assert.throws(
+      () => parseLearningTargetSnapshotV2(snap),
+      /rubricUnitId must be unique/,
+    );
+  });
+
   it("rejects missing userId", () => {
     const snap = baseSnapshot() as unknown as Record<string, unknown>;
     delete snap.userId;

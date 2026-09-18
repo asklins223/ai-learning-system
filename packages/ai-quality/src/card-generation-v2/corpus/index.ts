@@ -22,6 +22,12 @@ import { MICRO_ZERO_BATCH } from "./micro-zero-batch.ts";
 import { MEDIUM_LONG_BATCH_A } from "./medium-long-batch-a.ts";
 import { MEDIUM_LONG_BATCH_B } from "./medium-long-batch-b.ts";
 import { MEDIUM_LONG_BATCH_C } from "./medium-long-batch-c.ts";
+// 2026-09-18：语料扩充（上一轮验收把未污染的 validation/holdout 样本基本用尽——
+// 零卡只剩 1 条、多卡只剩 0–4 条，继续验收就会变成"在同一批样本上自证"）。
+// 三个批次按类补充：多卡 14 / 零卡 16 / 单卡 10，共 40 条全新未见样本。
+import { EXPANSION_V19_MEDIUM } from "./expansion-batch-v19-medium.ts";
+import { EXPANSION_V19_ZERO } from "./expansion-batch-v19-zero.ts";
+import { EXPANSION_V19_MICRO } from "./expansion-batch-v19-micro.ts";
 
 import { createHash } from "node:crypto";
 
@@ -223,6 +229,9 @@ export const V2_FIXTURE_CORPUS_SEED: CardGenerationFixtureV2[] = [
   ...MEDIUM_LONG_BATCH_C,
   ...ZERO_SAFETY_BATCH,
   ...MICRO_ZERO_BATCH,
+  ...EXPANSION_V19_MEDIUM,
+  ...EXPANSION_V19_ZERO,
+  ...EXPANSION_V19_MICRO,
 ];
 
 /** §23.1：全体样本至少 20% 的 gold 允许或要求 0 卡。 */

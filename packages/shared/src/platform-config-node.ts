@@ -6,9 +6,14 @@
  * platform-config.ts（纯类型/env 逻辑）。
  */
 import { readFileSync, existsSync } from "node:fs";
-import type { AIPlatformConfig, PlatformOptions } from "./platform-config.ts";
-import { resolveLegacyProviderConfig } from "./platform-config.ts";
+import type { AIPlatformConfig, ResolvedPlatform } from "./platform-config.ts";
 import type { Capability } from "./provider-capabilities.ts";
+
+// 设计 P1-6（2026-09-15 审计）：ResolvedPlatform 此前在本文件与
+// platform-config.ts 里逐字重复定义（只差一行注释）——加字段时编译器不会报错，
+// 两边必然漂移。现在只保留 platform-config.ts 的唯一定义，这里 re-export
+// 以保持既有子路径 import 可用。
+export type { ResolvedPlatform };
 
 // ─── Config loading (cached) ─────────────────────────────────────────────
 
@@ -87,13 +92,11 @@ export function loadPlatformConfig(): AIPlatformConfig | null {
 
   try {
     if (!existsSync(configPath)) {
-      // 迁移遗漏修复（C8）：AI_PLATFORMS_CONFIG 被显式设置但文件不存在时，整个配置迁移
-      // 会静默失效并回退 legacy env。加载时告警，避免部署后才发现没在用配置文件。
+      // 显式配置路径不存在时禁用 provider 解析，避免进程误用未声明的配置来源。
       if (process.env.AI_PLATFORMS_CONFIG) {
         console.warn(
           `[ai-platforms] AI_PLATFORMS_CONFIG is set to "${process.env.AI_PLATFORMS_CONFIG}" `
-          + "but the file does not exist; falling back to legacy AI_PROVIDER_* env vars / mock. "
-          + "This usually means the config-file migration is not active in this deployment.",
+          + "but the file does not exist; provider resolution is disabled.",
         );
       }
       return null;
@@ -111,7 +114,7 @@ export function loadPlatformConfig(): AIPlatformConfig | null {
     if (Object.keys(parsed.capabilities).length === 0) {
       console.warn(
         "[ai-platforms] config file exists but has no capability mappings; "
-        + "provider resolution will fall back to legacy AI_PROVIDER_* env vars / mock.",
+        + "unmapped capabilities are unavailable until configured.",
       );
     }
 
@@ -153,33 +156,11 @@ export function setPlatformConfig(config: AIPlatformConfig | null): void {
   configLoadAttempted = true;
 }
 
-export interface ResolvedPlatform {
-  /** Provider type (protocol implementation). */
-  type: string;
-  /** Platform identifier from config. */
-  platformId: string;
-  /** API key (interpolated from config or env). */
-  apiKey?: string;
-  /** Base URL. */
-  baseUrl?: string;
-  /** Model for this capability. */
-  model: string;
-  /** Vision model (if specified). */
-  visionModel?: string;
-  /** Embedding model (if specified). */
-  embeddingModel?: string;
-  /** Provider-specific options. */
-  options?: PlatformOptions;
-}
-
 /**
  * Resolve which platform + model to use for a given capability.
  *
- * Resolution order:
- *   1. Platform config file (config/ai-platforms.json)
- *   2. Fallback to legacy env var resolution (resolveSystemProviderForCapability)
- *
- * Returns null if no platform is configured for the capability.
+ * The config file is the only provider source. Returns null if no platform is
+ * configured for the capability.
  */
 export function resolveSystemPlatform(cap: Capability): ResolvedPlatform | null {
   const config = loadPlatformConfig();
@@ -193,7 +174,7 @@ export function resolveSystemPlatform(cap: Capability): ResolvedPlatform | null 
       }
       // §2.3 缺 key 判定：非 mock 平台但 apiKey 为空或仍含未解析的 ${VAR} 字面文本时，
       // 视为「系统未配置外部模型」→ 返回 null（调用方回退到 mock，豁免 consent）。
-      // 消除 config 文件与 legacy env 两种配置源对同一缺失的语义分歧。
+      // 外部 provider 缺少凭据时不可用，由调用方决定是否使用 mock。
       if (platform.type.toLowerCase() !== "mock") {
         const apiKey = platform.apiKey;
         if (!apiKey || apiKey.includes("${")) {
@@ -212,80 +193,15 @@ export function resolveSystemPlatform(cap: Capability): ResolvedPlatform | null 
         options: platform.options,
       };
     }
-    // C7 安全子集：配置文件存在但该 capability 未映射 —— 每进程只告警一次，
-    // 避免部署以为在用配置文件、实际该能力静默回退到 legacy env / mock。
+    // C7 安全子集：配置文件存在但该 capability 未映射 —— 每进程只告警一次。
     if (!warnedUnmappedCapabilities.has(cap)) {
       warnedUnmappedCapabilities.add(cap);
       console.warn(
         `[ai-platforms] config file does not map capability "${cap}"; `
-        + "falling back to legacy AI_PROVIDER_* env vars / mock.",
+        + "the capability is unavailable until it is mapped.",
       );
     }
   }
 
-  // Fallback: legacy env var resolution
-  return resolveLegacyEnvVar(cap);
-}
-
-/**
- * Legacy env var resolution — used when no config file exists (e.g. CI environments
- * that set `AI_PROVIDER_CARD: mock` without an ai-platforms.json).
- * Maps capabilities to provider names via AI_PROVIDER_* env vars.
- */
-
-export function getDefinedPlatformIds(): string[] {
-  const config = loadPlatformConfig();
-  if (config) return Object.keys(config.platforms);
-  // Legacy fallback: return provider IDs from PROVIDER_METADATA
-  return [];
-}
-
-function resolveLegacyEnvVar(cap: Capability): ResolvedPlatform | null {
-  // Map capability to the env var chain
-  let providerName: string | undefined;
-
-  switch (cap) {
-    case "agent_turn":
-      providerName = (process.env.AI_PROVIDER_AGENT_TURN ?? process.env.AI_PROVIDER_CARD ?? "mock").toLowerCase();
-      break;
-    case "text_generation":
-      providerName = (process.env.AI_PROVIDER_TEXT_GENERATION
-        ?? process.env.AI_PROVIDER_AGENT_TURN
-        ?? process.env.AI_PROVIDER_CARD
-        ?? "mock").toLowerCase();
-      break;
-    case "vision":
-      providerName = (process.env.AI_PROVIDER_VISION
-        ?? process.env.AI_PROVIDER_AGENT_TURN
-        ?? process.env.AI_PROVIDER_CARD
-        ?? "mock").toLowerCase();
-      break;
-    case "embedding":
-      providerName = (process.env.AI_PROVIDER_EMBEDDING ?? "").toLowerCase().trim() || undefined;
-      break;
-    case "rerank":
-      providerName = (process.env.AI_PROVIDER_RERANK
-        ?? process.env.AI_PROVIDER_EMBEDDING
-        ?? "").toLowerCase().trim() || undefined;
-      break;
-    default:
-      return null;
-  }
-
-  if (!providerName) return null;
-
-  // Resolve provider-specific env vars for connection config
-  const platform = resolveLegacyProviderConfig(providerName);
-  if (!platform) return null;
-
-  return {
-    type: providerName,
-    platformId: providerName,
-    apiKey: platform.apiKey,
-    baseUrl: platform.baseUrl,
-    model: platform.model ?? "",
-    visionModel: platform.visionModel,
-    embeddingModel: platform.embeddingModel,
-    options: platform.options,
-  };
+  return null;
 }

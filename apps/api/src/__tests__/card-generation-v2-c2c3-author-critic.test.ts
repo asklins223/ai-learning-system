@@ -16,13 +16,13 @@ import { randomUUID } from "node:crypto";
 import {
   executeAuthor,
   DeterministicAuthoringProvider,
-} from "../modules/card-generation-v2/author-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   deterministicGroundingPrecheck,
   deterministicPedagogyPrecheck,
   runDeterministicFinalGates,
   mergeDuplicateCandidates,
-} from "../modules/card-generation-v2/critic-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 import type {
   CardPlanV2,
   LearningCardCandidateRevisionV2,

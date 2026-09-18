@@ -24,7 +24,8 @@ export type RoomSceneLayerAlphaMode =
 
 export type RoomSceneLayerUploadAlphaMode =
   | "premultiply-alpha-on-upload"
-  | "premultiplied-alpha";
+  | "premultiplied-alpha"
+  | "no-premultiply-alpha";
 
 export type RoomSceneLayerSource = Readonly<{
   readonly assetId: string;
@@ -98,6 +99,7 @@ export function resolveRoomSceneLayerUploadAlphaMode(
   if (alphaMode === "straight-rgba" || alphaMode === "blend") {
     return "premultiply-alpha-on-upload";
   }
+  if (alphaMode === "opaque-rgb") return "no-premultiply-alpha";
   return null;
 }
 
@@ -123,6 +125,7 @@ function matchesRoomSceneLayerSourceSize(
  */
 export function resolveRoomSceneLayerEligibility(
   source: RoomSceneLayerSource | null | undefined,
+  options: Readonly<{ allowOpaque?: boolean }> = {},
 ): RoomSceneLayerEligibility {
   if (
     !source
@@ -136,7 +139,7 @@ export function resolveRoomSceneLayerEligibility(
   ) {
     return { enabled: false, reason: "invalid-source" };
   }
-  if (!hasTransparentAlpha(source.alphaMode)) {
+  if (!hasTransparentAlpha(source.alphaMode) && !options.allowOpaque) {
     return { enabled: false, reason: "opaque-layer" };
   }
   if (source.reviewStatus.trim().toLowerCase() !== "approved") {
@@ -183,7 +186,9 @@ export function resolveRoomSceneLayerRegistrationEligibility(
 export function createRoomSceneLayerNode(
   options: RoomSceneLayerNodeOptions | null | undefined,
 ): RoomSceneLayerNodeResult {
-  const eligibility = resolveRoomSceneLayerEligibility(options?.source);
+  const eligibility = resolveRoomSceneLayerEligibility(options?.source, {
+    allowOpaque: options?.depth === "D0",
+  });
   if (!options || !eligibility.enabled) return { eligibility, node: null };
 
   const registrationEligibility = resolveRoomSceneLayerRegistrationEligibility(options.registration);

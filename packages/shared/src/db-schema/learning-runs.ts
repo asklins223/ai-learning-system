@@ -2,9 +2,9 @@
  * LearningRun V1 数据模型（docs/plans/learning-companion/16 §16.1 目标表演进）。
  *
  * 对象语言与 wire contract 对齐（@ailearn/shared learning-run-contracts.ts）：
- * - learning_runs              ← learning_sessions 演进（phase/budget/activeTask/revision/checkpoint）
- * - learning_run_private_contracts ← learning_episodes 演进（private target/scheduling/epoch/planHash）
- * - learning_tasks / learning_task_variants ← learning_session_probes 演进（intent + Public Variant）
+ * - learning_runs              ← run lifecycle（phase/budget/activeTask/revision/checkpoint）
+ * - learning_run_private_contracts ← private target/scheduling/epoch/planHash
+ * - learning_tasks / learning_task_variants ← task intent + public variant
  * - learning_task_private_solutions / learning_task_safety_reports /
  *   learning_task_disclosure_profiles ← 现有 Critic/Safety 基础（server-private）
  * - learning_artifacts         ← learning_response_artifacts 演进（discriminated payload）
@@ -130,10 +130,6 @@ export const learningRuns = pgTable(
     revision: integer("revision").notNull().default(1),
     runtimeEpoch: integer("runtime_epoch").notNull().default(0),
     result: jsonb("result"), // LearningRunResultV1 | null（只有学习结算存在）
-    // 旧 Session/Episode 迁移追溯（§16.3：按 Episode 拆 Run，可还原旧顺序）。
-    legacySessionId: uuid("legacy_session_id"),
-    legacyEpisodeId: uuid("legacy_episode_id"),
-    legacyOrdinal: integer("legacy_ordinal"),
     // P6 sandbox：隔离教学空间（§16.4）；非 sandbox Run 恒为 null。
     sandboxNamespaceId: uuid("sandbox_namespace_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -147,10 +143,14 @@ export const learningRuns = pgTable(
       t.workspaceId, t.userId, t.phase,
     ),
     activeTaskIdx: index("learning_runs_active_task_idx").on(t.activeTaskId),
-    // 0133：E17 backfill 幂等（legacyEpisodeId 部分唯一）。
-    legacyEpisodeUnique: uniqueIndex("learning_runs_legacy_episode_unique_idx")
-      .on(t.workspaceId, t.legacyEpisodeId)
-      .where(sql`${t.legacyEpisodeId} IS NOT NULL`),
+    // 0222：topology V3 按 origin->>'objectiveId' + created_at DESC 查 runs；
+    // jsonb 的 ->> 是 IMMUTABLE，可作索引表达式（迁移 0222 同步创建）。
+    originObjectiveIdx: index("learning_runs_origin_objective_idx").on(
+      t.workspaceId,
+      t.userId,
+      sql`(${t.origin} ->> 'objectiveId')`,
+      sql`${t.createdAt} DESC`,
+    ),
   }),
 );
 
@@ -171,15 +171,14 @@ export const learningRunPrivateContracts = pgTable(
     taskPlanHash: text("task_plan_hash").notNull(),
     projectionBaselineCheckpointToken: text("projection_baseline_checkpoint_token"),
     contractHash: text("contract_hash").notNull(),
-    // 0139（方案 20 §16.2 step 4/8）：V2 run 的 target contract 闭包。
-    // V1 run 全为 NULL；两路消费以 snapshot_id IS NOT NULL 判别。
-    snapshotId: uuid("snapshot_id"),
-    snapshotHash: text("snapshot_hash"),
-    semanticTargetFingerprint: text("semantic_target_fingerprint"),
-    targetRevisionHash: text("target_revision_hash"),
-    expectedObjectiveLifecycleEpoch: integer("expected_objective_lifecycle_epoch"),
-    evidenceEligibilityVectorHash: text("evidence_eligibility_vector_hash"),
-    publishedTargetEligibility: text("published_target_eligibility"),
+    // §16.2：每个 run 都冻结完整 V2 target contract。
+    snapshotId: uuid("snapshot_id").notNull(),
+    snapshotHash: text("snapshot_hash").notNull(),
+    semanticTargetFingerprint: text("semantic_target_fingerprint").notNull(),
+    targetRevisionHash: text("target_revision_hash").notNull(),
+    expectedObjectiveLifecycleEpoch: integer("expected_objective_lifecycle_epoch").notNull(),
+    evidenceEligibilityVectorHash: text("evidence_eligibility_vector_hash").notNull(),
+    publishedTargetEligibility: text("published_target_eligibility").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
@@ -652,7 +651,7 @@ export const interactionQualifications = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     qualificationId: text("qualification_id").notNull(),
-    family: text("family").$type<"open_text" | "open_voice" | "ordering" | "relation" | "repair" | "scenario" | "choice_with_rationale" | "structured_bundle">().notNull(),
+    family: text("family").$type<"open_text" | "open_voice" | "ordering" | "relation" | "repair" | "structured_bundle">().notNull(),
     locale: text("locale").notNull().default("zh-CN"),
     datasetVersion: text("dataset_version").notNull(),
     rubricSetHash: text("rubric_set_hash").notNull(),
@@ -669,19 +668,5 @@ export const interactionQualifications = pgTable(
   (t) => ({
     qualificationUnique: uniqueIndex("interaction_qualifications_qualification_unique_idx").on(t.qualificationId),
     familyIdx: index("interaction_qualifications_family_idx").on(t.family, t.approvedAt),
-  }),
-);
-
-// ─── key_point_prerequisites（§15.2 weak_prerequisite 数据源，迁移 0145）────
-
-export const keyPointPrerequisites = pgTable(
-  "key_point_prerequisites",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    workspaceIdx: index("key_point_prerequisites_workspace_idx").on(t.workspaceId),
   }),
 );

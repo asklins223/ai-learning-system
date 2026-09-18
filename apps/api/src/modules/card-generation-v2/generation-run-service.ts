@@ -13,11 +13,11 @@ import {
   cardGenerationRunOutboxV2,
   cardGenerationSemanticSpecsV2,
   cardGenerationInputSnapshotsV2,
-} from "../../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   sealEvidenceSnapshotsV2,
 } from "./evidence-seal-service.ts";
-import { notes, noteVersions, noteBlocks } from "../../db/schema/note.ts";
+import { notes, noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
 import {
   createCardGenerationRunRequestV2Schema,
   type CreateCardGenerationRunRequestV2,
@@ -28,9 +28,11 @@ import {
   computeInputSnapshotHashV2,
 } from "@ailearn/shared/card-generation-v2-hashing";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
+import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
 import {
   sanitizeEventPayloadV2,
   CardGenerationV2ServiceError,
+  checkSourceOutdated,
   insertEvent,
   serializeRunPublic,
   serializeCandidatePublic,
@@ -206,6 +208,10 @@ export async function createGenerationRunV2(
         // bump 同步；本数组参与 semanticSpecHash，是审计闭包的一部分。
         // 2026-08-24（§4.5）：v3 —— pedagogy 增补中文语义裁决基准（atomicity/
         // 改写式泄题自确定性 gate 降级 soft 后由 Critic 承担 hard 判定）。
+        // 2026-09-15（管线评审 H3/M3）：v4 —— planner prompt 补不可信数据边界 +
+        // 可用证据 ID 列表（worker prompts.ts CARD_GENERATION_V2_PROMPT_VERSION 同步）。
+        // 2026-09-18：v19 —— 三个类级修复（作者不得补充证据未陈述的内容 /
+        // front 短术语泄漏的逐词自检 + pedagogy 扩判 / 零卡单一判据）。
         stageRuntimes: [
           {
             stage: "planner" as const,
@@ -213,7 +219,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v3",
+            promptVersion: "v19",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -223,7 +229,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v3",
+            promptVersion: "v19",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -233,7 +239,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v3",
+            promptVersion: "v19",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -243,7 +249,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v3",
+            promptVersion: "v19",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -401,6 +407,25 @@ export async function listActiveGenerationRunsV2(ctx: RunContext) {
   });
 }
 
+/**
+ * The note's most recent run, whatever its status. A feedback-carrying
+ * regeneration has to name the run it is answering, and nothing else in the
+ * desktop projection says which run that was once it has finished.
+ */
+export async function getLatestGenerationRunForNoteV2(ctx: RunContext, noteId: string) {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const rows = await tx.select().from(cardGenerationRunsV2)
+      .where(and(
+        eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
+        eq(cardGenerationRunsV2.noteId, noteId),
+      ))
+      .orderBy(desc(cardGenerationRunsV2.updatedAt))
+      .limit(1);
+    if (rows.length === 0) return null;
+    return serializeRunPublic(rows[0], tx);
+  });
+}
+
 export async function getGenerationRunPlanV2(ctx: RunContext, runId: string) {
   return withWorkspaceTransaction(ctx, async (tx) => {
     const runRows = await tx.select().from(cardGenerationRunsV2)
@@ -488,7 +513,9 @@ export async function closeGenerationRunV2(ctx: RunContext, runId: string, expec
     if (runRows.length === 0) return null;
 
     const run = runRows[0];
-    if (run.status !== "review_ready") {
+    // 审核开放态即可结束审核。needs_attention 的 run 也归审核页所有，用户决定
+    // 一张都不要之后必须能把这次审核收尾，否则它只能永远挂在恢复态里。
+    if (!isCardGenerationReviewOpen(run.status)) {
       throw new CardGenerationV2ServiceError("invalid_state", 409, "只有 review_ready 状态的运行可以关闭");
     }
     if (run.reviewDraftRevision !== expectedReviewDraftRevision) {
@@ -559,5 +586,110 @@ export async function cancelGenerationRunV2(ctx: RunContext, runId: string) {
     }
 
     return { runId, status: "cancelled" };
+  });
+}
+
+/**
+ * 就地重试一次质量门禁失败的 run（2026-09-18，补齐产品缺口）。
+ *
+ * ## 为什么需要它
+ * 当**唯一候选**被 critic 否决（例如 pedagogy 判 `multiple_learning_objectives`）时，
+ * 整条 run 会终态化为 `needs_attention`，且没有候选可审核。此前恢复契约只签发
+ * `return_note` / `start_new_generation`——用户唯一的出路是**回笔记重开一次全新生成**：
+ * 重新封存来源、重跑 planner、重付全部 token（实测一次 25–55s），而失败往往只是
+ * critic 的一次判断波动（同一 prompt 的相邻两次运行结论可以不同）。
+ *
+ * 这个入口让"再试一次"变成一次显式、低成本、用户可见的选择：复用已经封存的来源与
+ * 输入快照，只派发一次**重规划**（新 plan revision + supersede 旧候选 + 重新 author），
+ * 走的是 worker 早已实现并状态门闩受限的 `card_generation_replan_set` 任务。
+ *
+ * ## 为什么不是自动重试
+ * 契约与既有纪律一致：恢复动作只由服务端签发、由**用户点击**触发。自动重试会把
+ * "模型判断波动"变成不可见的 token 消耗，也会掩盖真正的确定性缺陷。
+ *
+ * ## 守卫（服务端独立校验，不信任投影）
+ * - run 必须存在；
+ * - status 必须是 `needs_attention`（failed/stale/其它一律拒绝）；
+ * - `error_code` 必须是 `quality_gate_failed`（provider/配置类失败重跑没有意义；
+ *   实测 `generation_failed` + "missing API key" 会在重试后原样再失败一次）；
+ * - 来源不得过期（对着过期来源重跑只会再失败一次）；
+ * - 不得已有在飞行的 outbox 任务（双击/并发重试 → 409，避免重复烧 token）。
+ */
+export async function retryGenerationRunV2(ctx: RunContext, runId: string) {
+  return withWorkspaceTransaction(ctx, async (tx) => {
+    const runRows = await tx.select().from(cardGenerationRunsV2)
+      .where(and(eq(cardGenerationRunsV2.id, runId), eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId)))
+      .limit(1);
+    if (runRows.length === 0) return null;
+    const run = runRows[0];
+
+    if (run.status !== "needs_attention") {
+      throw new CardGenerationV2ServiceError(
+        "invalid_state",
+        409,
+        "只有需要处理（needs_attention）的运行可以就地重试",
+      );
+    }
+    if (run.errorCode !== "quality_gate_failed") {
+      throw new CardGenerationV2ServiceError(
+        "not_retryable",
+        409,
+        "这次失败不是质量门禁造成的，就地重试无法改变结果；请修复配置或重新生成",
+      );
+    }
+    // 来源过期守卫：run 绑定的 note 版本已不是最新 → 重跑只会对着过期内容再产出一批
+    // 注定要被 source_outdated 标记的候选，用户应当先回笔记重开一次生成。
+    if (await checkSourceOutdated(tx, ctx.workspaceId, run.noteId, run.noteVersionId)) {
+      throw new CardGenerationV2ServiceError(
+        "source_outdated",
+        409,
+        "笔记已有新版本，请回到笔记重新生成",
+      );
+    }
+
+    // 在飞行的任务守卫：重试期间已有 worker 在跑 → 拒绝，避免同一 run 并发重跑。
+    const inFlight = await tx
+      .select({ id: cardGenerationRunOutboxV2.id })
+      .from(cardGenerationRunOutboxV2)
+      .where(and(
+        eq(cardGenerationRunOutboxV2.runId, runId),
+        eq(cardGenerationRunOutboxV2.workspaceId, ctx.workspaceId),
+        inArray(cardGenerationRunOutboxV2.status, ["pending", "processing"]),
+      ))
+      .limit(1);
+    if (inFlight.length > 0) {
+      throw new CardGenerationV2ServiceError("retry_in_flight", 409, "这次运行仍在处理中，请稍后再试");
+    }
+
+    // CAS：只有仍是 needs_attention 才允许推进，避免与并发动作竞争。
+    // 状态回到 checking（工作态）并清掉失败码——用户界面应立即体现"又动起来了"，
+    // 而不是继续显示"需要处理"直到 worker 更新。
+    const advanced = await tx.update(cardGenerationRunsV2)
+      .set({ status: "checking", errorCode: null, errorMessage: null, updatedAt: new Date() })
+      .where(and(
+        eq(cardGenerationRunsV2.id, runId),
+        eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
+        eq(cardGenerationRunsV2.status, "needs_attention"),
+      ))
+      .returning({ id: cardGenerationRunsV2.id });
+    if (advanced.length === 0) {
+      throw new CardGenerationV2ServiceError("stale_run_status", 409, "运行状态已被并发修改，请刷新");
+    }
+
+    // 复用既有的 replan 任务：新 plan revision + supersede 旧候选 + 重新 author。
+    // 不传 feedbackReasonCodes —— 用户没有给反馈，他只是要求再试一次。
+    await tx.insert(cardGenerationRunOutboxV2).values({
+      workspaceId: ctx.workspaceId,
+      runId,
+      jobType: "card_generation_replan_set",
+      payload: { runId, workspaceId: ctx.workspaceId },
+      status: "pending",
+    });
+
+    await insertEvent(tx, ctx.workspaceId, runId, "card_generation.retry_requested", {
+      reason: "user_requested_after_quality_gate",
+    });
+
+    return { runId, status: "checking" as const };
   });
 }

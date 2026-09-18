@@ -18,7 +18,6 @@ const DIGEST_PATTERN = /^sha256:([0-9a-f]{64})$/;
 const REQUIRED_GATES = [
   "unit",
   "integration",
-  "e2e",
   "coverage",
   "dependencyScan",
   "secretScan",
@@ -240,7 +239,7 @@ export function validateReleaseManifest(manifest, context) {
     }
   }
 
-  const imageNames = ["api", "web", "worker"];
+  const imageNames = ["api", "worker"];
   if (inspectClosedObject(manifest.images, "manifest.images", imageNames, imageNames, issues)) {
     const digests = [];
     for (const imageName of imageNames) {

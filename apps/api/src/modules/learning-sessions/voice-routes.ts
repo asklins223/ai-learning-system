@@ -8,7 +8,7 @@
  * 本文件打通「朗读」生产路径：cards 页 onReadAloud 调此端点返回 mp3，
  * 不再 console 桩。
  *
- * 安全（与 voice-service 对齐）：
+ * 安全：
  * - 文本经 assertSafeTtsInput 净化校验（SSML/URL/脚本拒绝）；
  * - 文本长度上限 2000（与 edge-tts 容器一致）；
  * - TTS provider 经 EDGE_TTS_BASE_URL 调 Docker 容器（带 X-Edge-TTS-Token）。
@@ -20,10 +20,10 @@ import { parseBody } from "../../lib/validate.ts";
 import { Readable } from "node:stream";
 import { requireSession } from "../identity/middleware.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
-import { assertSafeTtsInput, DEFAULT_VOICE_PROFILE } from "./voice-service.ts";
+import { assertSafeTtsInput, DEFAULT_VOICE_PROFILE } from "./voice-tts-policy.ts";
 import { edgeTtsSynthesize, edgeTtsSynthesizeStream, EdgeTtsError } from "./voice-providers/edge-tts.ts";
 import { stripVoiceExpressionTags } from "@ailearn/shared/voice-expression-tags";
-import { qwenTtsSynthesizeStream, QwenTtsError, withQwenConcurrencyLimit } from "./voice-providers/qwen-tts.ts";
+import { qwenTtsSynthesizeStreamForUser, QwenTtsError } from "./voice-providers/qwen-tts.ts";
 import { loadTtsEngineConfig } from "./voice-providers/tts-config.ts";
 import { companionTtsRequestV1Schema, companionTtsStreamRequestV1Schema } from "@ailearn/shared";
 import { siliconFlowTranscribe, SiliconFlowAsrError } from "./voice-providers/siliconflow-asr.ts";
@@ -48,7 +48,7 @@ import {
 const ttsBodySchema = z.object({
   /** 净化题面纯文本（服务端再校验一次 SSML/URL/脚本） */
   text: z.string().min(1).max(2000),
-  /** P3 legacy 朗读只允许已审核的固定 voice；扩展需新增 profile mapping。 */
+  /** 朗读只允许已审核的固定 voice；扩展需新增 profile mapping。 */
   voice: z.literal("zh-CN-XiaoxiaoNeural").optional(),
 });
 
@@ -177,17 +177,24 @@ export async function voiceRoutes(app: FastifyInstance) {
             message: "qwen TTS 未配置业务空间 ID（config tts.qwen.workspaceId）", recoverable: true,
           });
         }
-        const result = await withQwenConcurrencyLimit(() => qwenTtsSynthesizeStream(parsed.data.text, {
-          workspaceId: cfg.workspaceId,
-          apiKey: process.env.DASHSCOPE_API_KEY ?? "",
-          model: cfg.model,
-          // qwen 音色固定走 config（前端 voice 是 edge 音色，不混用）。
-          voice: cfg.voice,
-          format: cfg.format,
-          sampleRate: cfg.sampleRate,
-          // 15b 二期：指令控制（高质量声音描述，config tts.qwen.instruction）
-          instruction: cfg.instruction,
-        }));
+        // 按用户排队（workspaceId:userId）：同一用户的段落严格串行（含音频阶段，
+        // 保住 ordinal 播放时序与连接复用），不同用户并行、受全局名额约束。
+        // 见 qwen-tts.ts 的「按用户串行 + 全局有界并发」。
+        const result = await qwenTtsSynthesizeStreamForUser(
+          `${req.session.workspaceId}:${req.session.userId}`,
+          parsed.data.text,
+          {
+            workspaceId: cfg.workspaceId,
+            apiKey: process.env.DASHSCOPE_API_KEY ?? "",
+            model: cfg.model,
+            // qwen 音色固定走 config（前端 voice 是 edge 音色，不混用）。
+            voice: cfg.voice,
+            format: cfg.format,
+            sampleRate: cfg.sampleRate,
+            // 15b 二期：指令控制（高质量声音描述，config tts.qwen.instruction）
+            instruction: cfg.instruction,
+          },
+        );
         reply.hijack();
         reply.raw.writeHead(200, {
           "Content-Type": result.contentType,
@@ -236,7 +243,7 @@ export async function voiceRoutes(app: FastifyInstance) {
 
   // POST /voice/tts：朗读（TTS 合成 → mp3），经 edge-tts Docker 容器。
   // Companion branch（§11.3）：请求含 conversationId/runId/...（strict ref）时，重读
-  // voice.segment.ready 事件验证后合成；否则走 legacy 朗读分支。
+  // voice.segment.ready 事件验证后合成；普通朗读请求直接走固定 profile。
   app.post("/voice/tts", { preHandler: [requireSession] }, async (req, reply) => {
     const raw = (req.body ?? {}) as Record<string, unknown>;
     if (typeof raw === "object" && raw !== null && "conversationId" in raw) {
@@ -275,7 +282,11 @@ export async function voiceRoutes(app: FastifyInstance) {
         .send(Buffer.from(result.audio as Uint8Array));
     }
     const body = parseBody(app, ttsBodySchema, req.body);
-    // 净化校验（与 voice-service 的 assertSafeTtsInput 同语义：拒绝 SSML/URL/
+    // 2026-09 后端审查修复：普通朗读此前**完全没有限流**（只有 companion
+    // 分支有），任何已认证用户可无界驱动共享 edge-tts 容器的合成调用，挤占
+    // 所有用户的语音通道。与 companion 分支/transcribe/tts-stream 保持一致。
+    if (!rateLimitVoice(reply, req.id, `${req.session!.workspaceId}:${req.session!.userId}:tts`, COMPANION_RATE_LIMITS.ttsPerMinute.limit, COMPANION_RATE_LIMITS.ttsPerMinute.windowMs)) return;
+    // 净化校验（拒绝 SSML/URL/
     // 隐藏提示/非法 voice profile；DEFAULT_VOICE_PROFILE 通过 allowlist）。
     assertSafeTtsInput(body.text, DEFAULT_VOICE_PROFILE);
     try {
@@ -355,8 +366,8 @@ export async function voiceRoutes(app: FastifyInstance) {
       return reply.code(415).send({ error: "UNSUPPORTED_MEDIA_TYPE", code: "UNSUPPORTED_MEDIA_TYPE", message: "音频格式或 magic bytes 不匹配" });
     }
     // P3：purpose=companion_dialogue → §11.2 Companion 分支（ffprobe duration 实测 +
-    // pending voice artifact + §11.2 响应）；缺省 learning_session 走既有朗读路径。
-    let purpose = "learning_session";
+    // pending voice artifact + §11.2 响应）；缺省 voice_transcription 走既有朗读路径。
+    let purpose = "voice_transcription";
     try {
       const values = multipartFieldValues(fields, "purpose");
       if (values.length > 1 || (values.length === 1 && typeof values[0] !== "string")) {
@@ -364,7 +375,7 @@ export async function voiceRoutes(app: FastifyInstance) {
       }
       if (values.length === 1) purpose = values[0] as string;
     } catch {
-      // purpose 字段解析异常 → learning_session
+      // purpose 字段解析异常 → voice_transcription
     }
     if (purpose === "companion_dialogue") {
       if (rejectDisabledCompanionVoice(reply, "COMPANION_VOICE_DIALOGUE_V1_ENABLED")) return;

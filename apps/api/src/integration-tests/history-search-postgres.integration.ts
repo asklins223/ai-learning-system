@@ -20,6 +20,24 @@ process.env.DATABASE_URL_API ??= CONN;
 const sql = postgres(CONN, { max: 2 });
 const { closeDatabase } = await import("../db/client.ts");
 
+/**
+ * 裸 SQL 夹具/校验必须带 workspace/user 上下文。
+ *
+ * companion_conversations / companion_messages 是 FORCE RLS：受限角色
+ * （ailearn_api）在无上下文事务里 DELETE 会静默匹配 0 行，于是"删除会话后
+ * 不再命中"的断言仍然搜得到旧行（超级用户则绕过 RLS 掩盖同一问题）。
+ */
+function scoped<T>(
+  scope: { workspaceId: string; userId: string },
+  fn: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${scope.userId}, true)`;
+    return fn(tx);
+  }) as Promise<T>;
+}
+
 after(async () => {
   await closeDatabase();
   await sql.end({ timeout: 2 });
@@ -34,9 +52,7 @@ async function seedIdentity() {
   const userId = randomUUID();
   const token = `hs-test-${randomUUID()}`;
   const conversationId = randomUUID();
-  await sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+  await scoped({ workspaceId, userId }, async (tx) => {
     await tx`INSERT INTO users (id, email, password_hash, role) VALUES (${userId}, ${"hs-" + userId.slice(0, 8) + "@x.test"}, 'h', 'owner')`;
     await tx`INSERT INTO workspaces (id, name, owner_id) VALUES (${workspaceId}, ${"w" + workspaceId.slice(0, 8)}, ${userId})`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${workspaceId}, ${userId}, 'owner')`;
@@ -52,9 +68,7 @@ async function seedIdentity() {
               '[{"kind":"text","text":"明白，我会按这个目标安排。"}]'::jsonb, ${"h2"}, now())`;
   });
   const cleanup = async () => {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+    await scoped({ workspaceId, userId }, async (tx) => {
       await tx`DELETE FROM companion_messages WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_conversations WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM sessions WHERE user_id = ${userId}`;
@@ -106,7 +120,7 @@ test("§10.4 历史搜索：命中/无命中/删除后不命中/缺 q 400", asyn
     assert.equal(bad.statusCode, 400);
 
     // 删除会话后不命中（物理清除；redacted 内容不得命中）。
-    await sql`DELETE FROM companion_conversations WHERE id = ${identity.conversationId}`;
+    await scoped(identity, (tx) => tx`DELETE FROM companion_conversations WHERE id = ${identity.conversationId}`);
     const afterDelete = await app.inject({
       method: "GET",
       url: `/companion/history/search?q=${encodeURIComponent("独特关键词xyz")}`,

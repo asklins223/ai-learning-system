@@ -10,7 +10,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { findPrivatePayloadLeaks, learningObjectiveSurfaceV3Schema } from "@ailearn/shared";
-import { learningObjectivesV2 } from "../db/schema/card-generation-v2.ts";
+import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";

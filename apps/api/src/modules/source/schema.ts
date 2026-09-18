@@ -28,10 +28,5 @@ export const sourceListQuerySchema = paginationQuerySchema.extend({
   status: z.enum(["draft", "processing", "ready", "failed", "archived"]).optional(),
 });
 
-export const sourceStatusBatchSchema = z.object({
-  ids: z.array(z.string().uuid()).min(1).max(100),
-});
-
 export type SourceCreateInput = z.output<typeof sourceCreateSchema>;
 export type SourceUpdateInput = z.input<typeof sourceUpdateSchema>;
-export type SourceListQuery = z.output<typeof sourceListQuerySchema>;

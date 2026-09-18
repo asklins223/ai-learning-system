@@ -18,7 +18,7 @@ import {
   SERVER_POLICY_MAX_CARDS,
   type SourceBlockInput,
   type ExistingObjectiveRef,
-} from "../modules/card-generation-v2/planner-service.ts";
+} from "@ailearn/shared/card-generation-v2-pipeline";
 
 // ─── Mock helpers ────────────────────────────────────────────────────────
 

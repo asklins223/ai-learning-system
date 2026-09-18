@@ -46,7 +46,16 @@
       "baseUrl": "https://tokenrhythm.studio/v1",
       "options": {
         "enableThinking": true,
-        "maxOutputTokens": 16384
+        "contextWindowTokens": 1000000,
+        "maxOutputTokens": 131072
+      }
+    },
+    "opencode-go": {
+      "type": "opencode_go",
+      "apiKey": "${OPENCODE_GO_API_KEY}",
+      "baseUrl": "https://opencode.ai/zen/go/v1",
+      "options": {
+        "enableThinking": true
       }
     },
     "mock": {
@@ -56,7 +65,7 @@
   "capabilities": {
     "agent_turn": {
       "platform": "tokenrhythm",
-      "model": "deepseek-v4-flash-0731"
+      "model": "qwen3.8-flash"
     },
     "text_generation": {
       "platform": "siliconflow-chat",

@@ -11,8 +11,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   createCapabilityConfig,
-} from "../modules/companion-shell/rollback-drill.ts";
-import {
   findPrivatePayloadLeaks,
   learningObjectiveSurfaceV3Schema,
   type LearningObjectiveSurfaceV3,
@@ -60,7 +58,8 @@ function makeSurface(overrides: Partial<LearningObjectiveSurfaceV3> = {}): Learn
       lastCanonicalAt: null,
     },
     lifecycle: { status: "active", successorObjectiveId: null },
-    primaryAction: { kind: "create_run", origin: "home", objectiveId: OBJ_ID, cardId: null, goal: "首次验证" },
+    personalState: { state: "unvalidated", activeRunId: null },
+    primaryAction: { kind: "none" },
     createdAt: "2026-08-18T00:00:00.000Z",
     updatedAt: "2026-08-18T00:00:00.000Z",
   };
@@ -87,11 +86,13 @@ function makeListItem(overrides: Partial<ObjectiveListItemV3> = {}): ObjectiveLi
 
 describe("RL-11: capability shadow read 列表计数一致性", () => {
   it("OFF 状态：bundle 默认 disabled，不改变 Surface 内容", () => {
-    const config = createCapabilityConfig(
-      { learning_objective_system_v3: "disabled" },
-      { revision: 1 },
-    );
-    assert.equal(config.states.learning_objective_system_v3, "disabled");
+    const config = createCapabilityConfig({
+      revision: 1,
+      overrides: { learning_objective_system_v3: { status: "disabled" } },
+    });
+    const state = config.states.learning_objective_system_v3;
+    assert.ok(state);
+    assert.equal(state.status, "disabled");
     // Surface 合同不因 capability 状态变化
     const surface = makeSurface();
     const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
@@ -99,11 +100,13 @@ describe("RL-11: capability shadow read 列表计数一致性", () => {
   });
 
   it("ON 状态：bundle enabled，Surface 合同一致", () => {
-    const config = createCapabilityConfig(
-      { learning_objective_system_v3: "enabled" },
-      { revision: 2 },
-    );
-    assert.equal(config.states.learning_objective_system_v3, "enabled");
+    const config = createCapabilityConfig({
+      revision: 2,
+      overrides: { learning_objective_system_v3: { status: "enabled" } },
+    });
+    const state = config.states.learning_objective_system_v3;
+    assert.ok(state);
+    assert.equal(state.status, "enabled");
     const surface = makeSurface();
     const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
     assert.equal(parsed.success, true);

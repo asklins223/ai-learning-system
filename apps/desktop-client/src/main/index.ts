@@ -17,15 +17,31 @@ import { nativeWindowChrome, titleBarOverlayForTheme } from './window-chrome'
 import {
   WINDOW_STATE_CHANNEL,
   WINDOW_STATE_SNAPSHOT_CHANNEL,
+  resolveWindowState,
   type AILearnWindowState,
   type WindowStateSnapshot
 } from '../shared/window-state'
+import {
+  HOME_WINDOW_ASPECT_RATIO,
+  HOME_WINDOW_INITIAL_CONTENT_SIZE,
+  HOME_WINDOW_MINIMUM_SIZE
+} from '../shared/window-geometry'
 import { registerM1DesktopIpc } from './desktop-ipc'
 import { FilePendingReturnMarkerStore } from './pending-return-marker-store'
 
 const APP_SCHEME = 'ailearn-app'
 const APP_HOST = 'bundle'
 const APP_URL = `${APP_SCHEME}://${APP_HOST}/index.html`
+
+// Chromium cannot initialize its own sandbox from inside a restricted
+// environment (CI containers, sandboxed agent shells): every child process then
+// dies with "sandbox initialization failed: Operation not permitted" until the
+// GPU process gives up and the app exits with "GPU process isn't usable". This
+// mirrors the capture scripts' opt-in `AILEARN_CAPTURE_NO_SANDBOX`, so an
+// ordinary local run keeps Electron's sandbox in place.
+if (process.env.AILEARN_ELECTRON_NO_SANDBOX === '1') {
+  app.commandLine.appendSwitch('no-sandbox')
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -313,8 +329,11 @@ const windowStateRevisions = new WeakMap<BrowserWindow, number>()
 const publishedWindowStates = new WeakMap<BrowserWindow, AILearnWindowState>()
 
 function currentWindowState(window: BrowserWindow): AILearnWindowState {
-  if (window.isMinimized()) return 'minimized'
-  return window.isVisible() ? 'visible' : 'hidden'
+  return resolveWindowState({
+    minimized: window.isMinimized(),
+    visible: window.isVisible(),
+    focused: window.isFocused()
+  })
 }
 
 function windowStateSnapshot(window: BrowserWindow): WindowStateSnapshot {
@@ -348,17 +367,21 @@ function registerWindowLifecycle(window: BrowserWindow): void {
 
   window.on('show', () => publishWindowState(window))
   window.on('hide', () => publishWindowState(window))
+  window.on('focus', () => publishWindowState(window))
+  window.on('blur', () => publishWindowState(window))
   window.on('minimize', () => publishWindowState(window))
   window.on('restore', () => publishWindowState(window))
 }
 
 async function createMainWindow(): Promise<BrowserWindow> {
   const window = new BrowserWindow({
-    width: 1440,
-    height: 810,
-    minWidth: 1024,
-    minHeight: 700,
+    width: HOME_WINDOW_INITIAL_CONTENT_SIZE.width,
+    height: HOME_WINDOW_INITIAL_CONTENT_SIZE.height,
+    minWidth: HOME_WINDOW_MINIMUM_SIZE.width,
+    minHeight: HOME_WINDOW_MINIMUM_SIZE.height,
     useContentSize: true,
+    maximizable: false,
+    fullscreenable: false,
     show: false,
     ...nativeWindowChrome(process.platform),
     autoHideMenuBar: true,
@@ -376,6 +399,14 @@ async function createMainWindow(): Promise<BrowserWindow> {
       safeDialogs: true
     }
   })
+
+  // The room and every semantic hit target share one 16:9 logical coordinate
+  // system. Keeping the native content window on that ratio removes the
+  // alternate tall/wide compositions that previously exposed background bars
+  // or forced image deformation. Programmatic capture sizes are validated
+  // separately because Electron intentionally does not apply this constraint
+  // to setSize/setContentSize calls.
+  window.setAspectRatio(HOME_WINDOW_ASPECT_RATIO)
 
   registerWindowLifecycle(window)
 

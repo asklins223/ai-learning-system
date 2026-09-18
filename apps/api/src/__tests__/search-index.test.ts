@@ -217,7 +217,7 @@ test("deleteSearchDocument 失败时不抛异常（F-025）", async () => {
 
 test("deleteSearchDocument 对不同 objectType 都能正常工作", async () => {
   const { db } = createSuccessMockDb();
-  for (const objectType of ["note", "card_set", "card", "source", "evidence"]) {
+  for (const objectType of ["note", "source"] as const) {
     await deleteSearchDocument("ws-1", objectType, `obj-${objectType}`, db);
   }
   assert.ok(true);

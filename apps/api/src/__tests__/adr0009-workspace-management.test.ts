@@ -16,6 +16,7 @@ import {
   type RenameWorkspaceError,
   MAX_COLLABORATIVE_WORKSPACES,
   generateDefaultWorkspaceName,
+  SESSION_ABSOLUTE_MAX_MS,
   SESSION_TTL_MS,
   RECOVERED_PASSWORD_SENTINEL,
   canonicalizeEmail,
@@ -361,9 +362,14 @@ describe("ADR-0009: WorkspaceInfo type", () => {
 // ─── Session and auth constants ─────────────────────────────────────────
 
 describe("Identity service constants", () => {
-  test("SESSION_TTL_MS is 7 days", () => {
-    const sevenDaysInMs = 7 * 24 * 60 * 60 * 1000;
-    assert.equal(SESSION_TTL_MS, sevenDaysInMs);
+  test("SESSION_TTL_MS is the 30-day sliding window", () => {
+    const thirtyDaysInMs = 30 * 24 * 60 * 60 * 1000;
+    assert.equal(SESSION_TTL_MS, thirtyDaysInMs);
+  });
+
+  test("SESSION_ABSOLUTE_MAX_MS bounds how long any session can live", () => {
+    assert.equal(SESSION_ABSOLUTE_MAX_MS, 180 * 24 * 60 * 60 * 1000);
+    assert.ok(SESSION_ABSOLUTE_MAX_MS > SESSION_TTL_MS);
   });
 
   test("RECOVERED_PASSWORD_SENTINEL is not a valid bcrypt hash", () => {

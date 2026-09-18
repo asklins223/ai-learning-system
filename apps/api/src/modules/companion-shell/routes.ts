@@ -105,11 +105,11 @@ export async function companionShellRoutes(app: FastifyInstance) {
         lastEventId,
         writer: {
           write: (chunk) => {
-            safeSseWrite(reply.raw, chunk);
+            return safeSseWrite(reply.raw, chunk);
           },
           onAbort: (cb) => req.raw.on("close", cb),
           close: () => {
-            if (!reply.raw.writableEnded) reply.raw.end();
+            if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
           },
         },
       });
@@ -123,13 +123,27 @@ export async function companionShellRoutes(app: FastifyInstance) {
         });
       }
       reply.hijack();
-      reply.raw.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-store, no-transform",
-        "X-Accel-Buffering": "no",
-        retry: "1500",
-        Connection: "keep-alive",
-      });
+      if (reply.raw.writableEnded || reply.raw.destroyed) {
+        result.stream.close();
+        return reply;
+      }
+      try {
+        reply.raw.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-store, no-transform",
+          "X-Accel-Buffering": "no",
+          retry: "1500",
+          Connection: "keep-alive",
+        });
+      } catch {
+        result.stream.close();
+        if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.destroy();
+        return reply;
+      }
+      if (reply.raw.writableEnded || reply.raw.destroyed) {
+        result.stream.close();
+        return reply;
+      }
       result.stream.start();
       return reply;
     },

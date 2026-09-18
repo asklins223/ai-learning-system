@@ -480,7 +480,7 @@ export const learningTargetSnapshotsV2 = pgTable(
     snapshotHash: text("snapshot_hash").notNull(),
     // 0139：完整 §16.1 server-private target（含 objectiveStatement/
     // publicSummary/knowledgeForm/learningSupport 等未单列为列的子字段）。
-    target: jsonb("target"),
+    target: jsonb("target").notNull(),
     frozenAt: timestamp("frozen_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
@@ -566,6 +566,10 @@ export const cardGenerationRunOutboxV2 = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }),
     leaseToken: uuid("lease_token"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    // 0220（2026-09-15 管线评审 H1）：可重试失败后的下次可认领时间（指数退避）。
+    // 没有它时 retryable 失败立即回 pending，下一个 poll 就重新认领并重放整条
+    // 已付费的 LLM 管道；429/5xx 时会形成重试风暴。
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
   },
   (t) => ({
     wsRunStatusIdx: index("cgro_v2_ws_run_status_idx").on(t.workspaceId, t.runId, t.status, t.createdAt),
@@ -574,7 +578,7 @@ export const cardGenerationRunOutboxV2 = pgTable(
       .on(t.status, t.leaseExpiresAt)
       .where(sql`${t.status} = 'processing'`),
     pendingClaimIdx: index("cgro_v2_pending_claim_idx")
-      .on(t.status, t.createdAt)
+      .on(t.status, t.nextAttemptAt, t.createdAt)
       .where(sql`${t.status} = 'pending'`),
     // 0163（第六轮）：唯一约束收窄为每 run 单例 job 类型——recheck/regenerate
     // 是 per-candidate 语义（同 run 多候选需多 job），全类型唯一会静默吞掉
@@ -784,24 +788,6 @@ export const learningObjectiveRevisionEquivalenceV2 = pgTable(
   }),
 );
 
-/** §18.2 server-private objective contract（ailearn_api 无访问）。 */
-export const learningObjectivePrivateContractsV2 = pgTable(
-  "learning_objective_private_contracts_v2",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull(),
-    objectiveRevisionId: uuid("objective_revision_id").notNull(),
-    canonicalAnswer: jsonb("canonical_answer").notNull(),
-    learningSupport: jsonb("learning_support").notNull(),
-    scoringRubric: jsonb("scoring_rubric").notNull(),
-    privatePayloadHash: text("private_payload_hash").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    revUnique: unique("lopc_v2_rev_unique").on(t.objectiveRevisionId),
-  }),
-);
-
 /** §18.2 merge/split/supersede lineage。 */
 export const learningObjectiveLineageV2 = pgTable(
   "learning_objective_lineage_v2",
@@ -866,24 +852,6 @@ export const cardCandidateQualityReportsV2 = pgTable(
   }),
 );
 
-/** §18.1 candidate lineage（防循环；可审计）。 */
-export const cardCandidateLineageV2 = pgTable(
-  "card_candidate_lineage_v2",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull(),
-    runId: uuid("run_id").notNull(),
-    parentRevisionId: uuid("parent_revision_id").notNull(),
-    childRevisionId: uuid("child_revision_id").notNull(),
-    relation: text("relation").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    parentIdx: index("ccl_v2_parent_idx").on(t.workspaceId, t.parentRevisionId),
-    childIdx: index("ccl_v2_child_idx").on(t.workspaceId, t.childRevisionId),
-  }),
-);
-
 /** §18.1 candidate feedback（敏感文本分级保留）。 */
 export const cardCandidateFeedbackV2 = pgTable(
   "card_candidate_feedback_v2",
@@ -902,12 +870,9 @@ export const cardCandidateFeedbackV2 = pgTable(
   }),
 );
 
-// ─── 0162: V2 post-activation 消费台账 + cutover 事件表 ─────────────────────────
-// R#6-2：按 0162_v2_post_activation_consumptions.sql DDL 逐列声明（含 CHECK/唯一/索引/RLS）。
-// 这两表目前由 worker（api 外）/api 裸 SQL 写入，此处补 schema 声明以避免 generate 反向 DROP
-// 与 RLS 重开时缺事务上下文声明。
-// 注意：两表 RLS policy 用 workspace_id = current_setting('app.workspace_id') 单条件隔离，
-// 未声明 user_id 列（与迁移一致）。
+// ─── 0162: V2 post-activation 消费台账 ──────────────────────────────────────
+// 由 worker（api 外）/api 裸 SQL 写入，此处补 schema 声明以保持迁移与 ORM 一致。
+// RLS policy 仅按 workspace_id 隔离（与迁移一致）。
 
 /** 0162 §17.5 step 17：post-activation 消费台账（共享对账，绝写个人投影）。 */
 export const cardGenerationPostActivationConsumptions = pgTable(
@@ -931,24 +896,6 @@ export const cardGenerationPostActivationConsumptions = pgTable(
   }),
 );
 
-/** 0162 C8: cutover 停写/epoch 前移/rollback drill 审计事件。 */
-export const cardGenerationCutoverEvents = pgTable(
-  "card_generation_cutover_events",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull(),
-    eventType: text("event_type").notNull(),
-    payload: jsonb("payload").notNull().default(sql`'{}'::jsonb`),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    // R35：迁移 0165 已扩展该 CHECK（含 legacy_card_migration）——ORM 同步，
-    // 防 drizzle-kit diff 反向删除约束。
-    typeCheck: check("cgce_v2_type_chk", sql`${t.eventType} IN ('v1_writer_shutdown','v1_writer_epoch_bump','rollback_drill','legacy_card_migration')`),
-    wsTypeIdx: index("cgce_v2_ws_type_idx").on(t.workspaceId, t.eventType, t.createdAt),
-  }),
-);
-
 // ─── Plan 23 W1-01..W1-04: Objective Origin（迁移 0175）────────────────────
 // 知识血缘属于 Objective revision（§3.3），不挂在可替换的 Card Presentation。
 // origin_kind 条件字段由 DB CHECK 约束（W1-02）；正式消费者以 objectiveId 读取。
@@ -957,7 +904,6 @@ export const objectiveOriginKindV3Values = [
   "note",
   "manual",
   "imported",
-  "legacy_migrated",
 ] as const;
 export type ObjectiveOriginKindV3 = (typeof objectiveOriginKindV3Values)[number];
 
@@ -977,9 +923,6 @@ export const learningObjectiveOriginsV2 = pgTable(
     evidenceSnapshotIds: uuid("evidence_snapshot_ids").array().notNull().default(sql`'{}'::uuid[]`),
     // imported kind
     importBatchRef: text("import_batch_ref"),
-    // legacy_migrated kind
-    legacyCardId: uuid("legacy_card_id"),
-    legacyKeyPointId: uuid("legacy_key_point_id"),
     integrity: text("integrity").notNull().default("verified"),
     provenance: jsonb("provenance").notNull().default(sql`'{}'::jsonb`),
     boundAt: timestamp("bound_at", { withTimezone: true }).defaultNow().notNull(),
@@ -993,57 +936,15 @@ export const learningObjectiveOriginsV2 = pgTable(
     objectiveIdx: index("loo_v2_objective_idx").on(t.workspaceId, t.objectiveId, t.objectiveRevisionId),
     noteIdx: index("loo_v2_note_idx").on(t.workspaceId, t.noteId, t.noteVersionId),
     sourceIdx: index("loo_v2_source_idx").on(t.workspaceId, t.sourceSnapshotId),
-    kindCheck: check("loo_v2_kind_chk", sql`${t.originKind} IN ('note','manual','imported','legacy_migrated')`),
+    kindCheck: check("loo_v2_kind_chk", sql`${t.originKind} IN ('note','manual','imported')`),
     integrityCheck: check("loo_v2_integrity_chk", sql`${t.integrity} IN ('verified','legacy_unreviewed')`),
     kindFieldsCheck: check("loo_v2_kind_fields_chk", sql`(
       (${t.originKind} = 'note' AND ${t.noteId} IS NOT NULL AND ${t.noteVersionId} IS NOT NULL
-        AND ${t.importBatchRef} IS NULL AND ${t.legacyKeyPointId} IS NULL)
-      OR (${t.originKind} = 'manual' AND ${t.noteId} IS NULL AND ${t.noteVersionId} IS NULL
-        AND ${t.importBatchRef} IS NULL AND ${t.legacyKeyPointId} IS NULL)
-      OR (${t.originKind} = 'imported' AND ${t.importBatchRef} IS NOT NULL
-        AND ${t.noteId} IS NULL AND ${t.noteVersionId} IS NULL AND ${t.legacyKeyPointId} IS NULL)
-      OR (${t.originKind} = 'legacy_migrated' AND ${t.legacyKeyPointId} IS NOT NULL
         AND ${t.importBatchRef} IS NULL)
-    )`),
-  }),
-);
-
-// ─── Plan 23 W1-07: Legacy Route Mapping（迁移 0175）──────────────────────
-
-export const legacyRouteMappingStatusValues = [
-  "mapped",
-  "gone",
-  "ambiguous",
-  "forbidden",
-] as const;
-export type LegacyRouteMappingStatusV3 = (typeof legacyRouteMappingStatusValues)[number];
-
-export const legacyRouteMappingsV2 = pgTable(
-  "legacy_route_mappings_v2",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull(),
-    mappingId: uuid("mapping_id").notNull(),
-    legacyKind: text("legacy_kind").notNull(),
-    legacyId: uuid("legacy_id").notNull(),
-    status: text("status").$type<LegacyRouteMappingStatusV3>().notNull().default("mapped"),
-    objectiveId: uuid("objective_id"),
-    cardId: uuid("card_id"),
-    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
-    note: text("note"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    mappingIdUnique: uniqueIndex("lrm_v2_mapping_id_unique_idx").on(t.workspaceId, t.mappingId),
-    legacyUnique: uniqueIndex("lrm_v2_legacy_unique_idx").on(t.workspaceId, t.legacyKind, t.legacyId),
-    objectiveIdx: index("lrm_v2_objective_idx").on(t.workspaceId, t.objectiveId),
-    cardIdx: index("lrm_v2_card_idx").on(t.workspaceId, t.cardId),
-    kindCheck: check("lrm_v2_kind_chk", sql`${t.legacyKind} IN ('card','key_point')`),
-    statusCheck: check("lrm_v2_status_chk", sql`${t.status} IN ('mapped','gone','ambiguous','forbidden')`),
-    mappedCheck: check("lrm_v2_mapped_chk", sql`(
-      (${t.status} = 'mapped' AND ${t.objectiveId} IS NOT NULL)
-      OR (${t.status} <> 'mapped' AND ${t.objectiveId} IS NULL)
+      OR (${t.originKind} = 'manual' AND ${t.noteId} IS NULL AND ${t.noteVersionId} IS NULL
+        AND ${t.importBatchRef} IS NULL)
+      OR (${t.originKind} = 'imported' AND ${t.importBatchRef} IS NOT NULL
+        AND ${t.noteId} IS NULL AND ${t.noteVersionId} IS NULL)
     )`),
   }),
 );

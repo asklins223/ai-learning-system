@@ -12,6 +12,17 @@
 
 import { z } from "zod";
 import { postJsonToPublicEndpoint } from "@ailearn/shared/public-json-http";
+import { resolveAssessmentCriticConfig } from "../../lib/assessment-critic-config.ts";
+
+/**
+ * 记忆候选生成的单次调用预算（设计 P1-11，2026-09-15 审计）。
+ *
+ * 这是一次短 JSON 生成（输入是枚举 + 短文本，输出 ≤200 字），不是长文生成：
+ * 8s 已远高于正常耗时。超时按既有 fail-open 语义返回 null，调用方走确定性模板。
+ * 重点是把上界从"共享的 300s"压到与业务重要性相称的量级——该调用此前会最坏
+ * 阻塞 run-processing tick 的串行链 5 分钟/条。
+ */
+const MEMORY_CANDIDATE_TIMEOUT_MS = 8_000;
 
 export const memoryCandidateOutputSchema = z
   .object({
@@ -45,10 +56,12 @@ export async function generateMemoryCandidates(input: {
   keyPointClaim: string;
   scheduleImpact: string;
 }): Promise<GeneratedMemoryCandidates | null> {
-  const url = process.env.ASSESSMENT_CRITIC_URL?.trim();
-  const key = process.env.ASSESSMENT_CRITIC_KEY?.trim() ?? process.env.DASHSCOPE_API_KEY?.trim();
-  if (!url || !key) return null;
-  const model = process.env.ASSESSMENT_CRITIC_MODEL?.trim() ?? "qwen-plus";
+  // 设计 P0-2（2026-09-15 审计）：收敛到单一解析点。此前用
+  // `?? DASHSCOPE_API_KEY`，而 compose 注入的是空串（`${VAR:-}`）——空串不回退，
+  // 于是未显式配置 key 时这里会静默 return null，个性化被无声关闭。
+  const config = resolveAssessmentCriticConfig();
+  if (!config) return null;
+  const { url, key, model } = config;
 
   const prompt = [
     "你是学习伴星的记忆整理器。根据一次三分钟巩固的结果，输出 JSON：",
@@ -62,6 +75,12 @@ export async function generateMemoryCandidates(input: {
   ].join("\n");
 
   try {
+    // 设计 P1-11（2026-09-15 审计）：此前不传 signal，只受共享的
+    // AI_ENDPOINT_RESPONSE_TIMEOUT_MS（默认 300s）约束——一次挂起的 provider 会让
+    // 该调用最多占 5 分钟（而它只是"锦上添花"的个性化，确定性路径本可立即完成）。
+    // 这里给一个远小于共享值的预算：本调用是短 JSON 生成，超时即按既有 fail-open
+    // 语义返回 null（调用方走确定性模板）。兄弟调用（proactive-hook 的个性化文案）
+    // 用的是 2s，此处同样只做轻量生成。
     const response = await postJsonToPublicEndpoint(
       url,
       {
@@ -77,6 +96,7 @@ export async function generateMemoryCandidates(input: {
         response_format: { type: "json_object" },
         stream: false,
       },
+      AbortSignal.timeout(MEMORY_CANDIDATE_TIMEOUT_MS),
     );
     const raw = extractJson(
       (response.body as { choices?: Array<{ message?: { content?: string } }> })

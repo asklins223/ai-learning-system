@@ -63,15 +63,10 @@ describe("SEC-01: 服务层数据访问包含 workspaceId 隔离", () => {
       "noteBlocks",
       "sources",
       "sourceSegments",
-      "learningCards",
-      "cardKeyPoints",
-      "evidences",
-      "validationQuestions",
-      "validationEvents",
+      "learningCardsV2",
+      "learningObjectivesV2",
+      "evidenceSnapshotsV2",
       "reviewSchedules",
-      "reviewAttempts",
-      "understandingEvents",
-      "evidenceOverrides",
       "aiArtifacts",
       "searchDocuments",
       "onboardingStates",
@@ -171,17 +166,6 @@ describe("SEC-01: 跨 workspace ID 猜测防护", () => {
       content.includes("learningObjectiveEvidenceBindingsV2") &&
         (content.includes("eq(") || content.includes("workspaceId")),
       "card-generation-v2 服务证据读取应包含 workspaceId 过滤",
-    );
-  });
-
-  it("listValidations 校验 card 归属并按 workspaceId 过滤", () => {
-    // V1 validation.service.ts 的 listValidations 不再存在；校验当前
-    // validation/session-service.ts 的所有读取均以 workspaceId 过滤。
-    const content = readFileContent(join(MODULES_DIR, "validation", "session-service.ts"));
-    assert.ok(
-      content.includes("eq(validationSubmissions.workspaceId, workspaceId)") ||
-        content.includes("workspaceId"),
-      "validation service 应校验归属 workspace",
     );
   });
 

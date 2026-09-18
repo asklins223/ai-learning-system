@@ -24,7 +24,7 @@ import {
   cardGenerationRunsV2,
   cardGenerationPlansV2,
   cardGenerationCandidatesV2,
-} from "../db/schema/card-generation-v2.ts";
+} from "@ailearn/shared/db-schema/card-generation-v2";
 import type { CandidateActionCommandV2, CandidateActionV2 } from "@ailearn/shared/card-generation-v2-contracts";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
@@ -773,24 +773,4 @@ describe("answer leakage prevention", () => {
     assert.ok(!fnBody.includes("workedExample"), "serializeCandidatePublic must not expose workedExample");
   });
 
-  it("public card demo data does not contain answer fields", () => {
-    // Check that demo data files don't leak answer content into public DTOs
-    const demoSource = readFileSync(
-      resolve(import.meta.dirname, "../../../web/features/card-generation-v2/demo/demo-data.ts"),
-      "utf8",
-    );
-
-    // The demoPublicCards array should not contain answer-related fields
-    const cardsStart = demoSource.indexOf("demoPublicCards");
-    const cardsEnd = demoSource.indexOf("];", cardsStart);
-    assert.ok(cardsStart >= 0 && cardsEnd > cardsStart);
-
-    const cardsBody = demoSource.slice(cardsStart, cardsEnd);
-
-    assert.ok(!cardsBody.includes("canonicalAnswer"), "public cards must not expose canonicalAnswer");
-    assert.ok(!cardsBody.includes("explanation"), "public cards must not expose explanation");
-    assert.ok(!cardsBody.includes("misconception"), "public cards must not expose misconception");
-    assert.ok(!cardsBody.includes("evidenceId"), "public cards must not expose evidenceId");
-    assert.ok(!cardsBody.includes("exposureId"), "public cards must not expose exposureId");
-  });
 });

@@ -13,7 +13,7 @@
  * 2026-08-24（AI 设计审查 §4.4 修复）：本文件自 apps/api/src/modules/card-generation-v2/
  * 下沉至 packages/shared（纯逻辑、无 DB/provider 依赖）。worker 与 api 作为平级
  * 消费者经 @ailearn/shared/card-generation-v2-pipeline 子路径引用，消除 worker
- * 内 ../../../../apps/api 反向路径依赖；apps/api 原路径保留兼容 re-export。
+ * 该模块是 card-generation-v2 pipeline 的 canonical concept-label 实现。
  */
 
 /** 剥离命题开头的学习动词前缀（可带冒号/顿号）。 */

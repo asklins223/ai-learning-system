@@ -86,15 +86,19 @@ export function loadSceneImageTexture(
           return;
         }
         try {
+          // Each scene load creates a fresh Image and transfers lifetime
+          // ownership to its caller. Skip Pixi's global Assets cache so a
+          // route/theme remount cannot retain the decoded image after the
+          // caller destroys the Texture and its TextureSource.
           const texture = options?.alphaMode === undefined
-            ? Texture.from(image)
+            ? Texture.from(image, true)
             : Texture.from({
               // Pixi's DOMAdapter exposes the browser image as its portable
               // ImageLike interface, while TextureSourceOptions still uses
               // the narrower ImageResource union for this overload.
               resource: image as unknown as HTMLImageElement,
               alphaMode: options.alphaMode,
-            });
+            }, true);
           settled = true;
           cleanup();
           resolve(texture);

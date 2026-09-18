@@ -11,9 +11,6 @@ importers:
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2
-      ts-fsrs:
-        specifier: 4.6.0
-        version: 4.6.0
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -291,10 +288,6 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
-  ts-fsrs@4.6.0:
-    resolution: {integrity: sha512-ipZ2GSI4WVDdB95BUBvxo5+YaPJXavf42nRCryPUu0Gyqk4lUEH0o1vsl7xApFEUXYgp9PqIPg8aL6Tr+DbgFQ==}
-    engines: {node: '>=18.0.0'}
-
   tsx@4.23.12:
     resolution: {integrity: sha512-FDf4L4sYzKtzWYhU/Xm0AQFdTjdIxNo9ElTf2mxXM6k8YMHXzYUe4yODVaXP4V9uMFbVg8c0qyBccK2OOxb45Q==}
     engines: {node: '>=18.0.0'}
@@ -428,8 +421,6 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
-
-  ts-fsrs@4.6.0: {}
 
   tsx@4.23.12:
     dependencies:

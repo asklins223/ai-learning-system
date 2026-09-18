@@ -21,9 +21,6 @@ const requiredFiles = [
   "apps/api/Dockerfile",
   "apps/api/package.json",
   "apps/api/package-lock.json",
-  "apps/web/Dockerfile",
-  "apps/web/package.json",
-  "apps/web/package-lock.json",
   "workers/ai-worker/Dockerfile",
   "workers/ai-worker/package.json",
   "workers/ai-worker/package-lock.json",
@@ -36,7 +33,6 @@ const requiredFiles = [
   ".github/scripts/release-manifest-contract.test.mjs",
   ".github/scripts/version-contract.mjs",
   ".github/scripts/version-contract.test.mjs",
-  ".github/scripts/verify-worker-smoke.mjs",
   "apps/api/src/db/migrations/meta/_journal.json",
 ];
 
@@ -119,7 +115,7 @@ try {
   if (schema.properties?.version?.const !== undefined) {
     fail(`${manifestSchemaPath} must not duplicate the manually maintained release version as a const`);
   }
-  for (const image of ["api", "web", "worker"]) {
+  for (const image of ["api", "worker"]) {
     if (!schema.properties?.images?.required?.includes(image)) {
       fail(`${manifestSchemaPath} must require images.${image}`);
     }
@@ -138,7 +134,6 @@ try {
   for (const gate of [
     "unit",
     "integration",
-    "e2e",
     "coverage",
     "dependencyScan",
     "secretScan",

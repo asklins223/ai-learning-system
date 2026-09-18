@@ -6,17 +6,17 @@ import sensible from "@fastify/sensible";
 import multipart from "@fastify/multipart";
 import compress from "@fastify/compress";
 import { logger } from "./lib/logger.ts";
+import { runWithRequestContext } from "./lib/request-context.ts";
 import { authRoutes } from "./modules/identity/routes.ts";
 import { noteRoutes } from "./modules/note/routes.ts";
 import { jobRoutes } from "./modules/job/routes.ts";
-import { validationSessionRoutes } from "./modules/validation/session-routes.ts";
 import { reviewRoutes } from "./modules/review/routes.ts";
 import { sourceRoutes } from "./modules/source/routes.ts";
 import { importRoutes } from "./modules/import/routes.ts";
-import { understandingRoutes } from "./modules/understanding/routes.ts";
 import { searchRoutes } from "./modules/search/routes.ts";
 import { exportRoutes } from "./modules/export/routes.ts";
 import { statsRoutes } from "./modules/stats/routes.ts";
+import { activityRoutes } from "./modules/activity/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
 import { cardGenerationV2Routes } from "./modules/card-generation-v2/routes.ts";
 import { learningObjectiveRoutes } from "./modules/learning-objectives/routes.ts";
@@ -27,7 +27,6 @@ import { companionShellRoutes } from "./modules/companion-shell/index.ts";
 import { learningMetricRoutes } from "./modules/observability/routes.ts";
 import { companionConversationRoutes, companionConversationManagementRoutes, companionExportRoutes, assistantSessionRoutes } from "./modules/companion-conversation/index.ts";
 import { startCompanionNotifyListener, stopCompanionNotifyListener } from "./modules/companion-conversation/companion-notify.ts";
-import { learningSessionRoutes } from "./modules/learning-sessions/session-routes.ts";
 import { learningRunRoutes } from "./modules/learning-runs/run-routes.ts";
 import { companionBridgeRoutes } from "./modules/companion-bridge/routes.ts";
 import { companionJourneyRoutes } from "./modules/companion-journey/routes.ts";
@@ -36,18 +35,14 @@ import { proactiveInboxRoutes } from "./modules/companion-conversation/inbox-rou
 import { deliveryRoutes } from "./modules/companion-conversation/delivery-routes.ts";
 import { memoryRoutes } from "./modules/companion-conversation/memory-routes.ts";
 import { petProfileRoutes } from "./modules/companion-conversation/pet-profile-routes.ts";
+import { companionHomeProjectionRoutes } from "./modules/companion-conversation/home-projection-routes.ts";
 import { dailySummaryRoutes } from "./modules/companion-conversation/daily-summary-routes.ts";
 import { deliveryTimelineRoutes } from "./modules/companion-conversation/timeline-routes.ts";
 import { voiceRoutes } from "./modules/learning-sessions/voice-routes.ts";
-import { assessmentRoutes } from "./modules/learning-sessions/assessment-service.ts";
 import { desktopTrustRoutes, resolveApiBindHost } from "./modules/desktop-trust/routes.ts";
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
 import { purgeSoftDeletedNotes } from "./modules/note/maintenance.ts";
 import { runLearningTtlMaintenance } from "./modules/learning-sessions/ttl-maintenance.ts";
-import {
-  createCommitOutboxWorkerId,
-  runCommitOutboxTick,
-} from "./modules/learning-sessions/commit-outbox.ts";
 import { runLearningRunProcessingTick, closeStructuredSolutionSql } from "./modules/learning-runs/run-processing-tick.ts";
 import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
 import {
@@ -62,6 +57,7 @@ import {
   normalizeRouteTemplate,
   dbPoolActiveConnections,
   dbMigrationVersion,
+  dbRlsDeniedTotal,
 } from "./lib/metrics.ts";
 
 const trustProxyValue = process.env.TRUST_PROXY?.trim();
@@ -81,8 +77,8 @@ const app = Fastify({
   // 2026-08-11（可观测性）：默认 reqId 是进程内递增计数器——多副本部署下
   // 各进程 id 相同，跨进程追踪不可用。改用随机 UUID（Node 20+ crypto.randomUUID）。
   genReqId: () => crypto.randomUUID(),
-  // 不再无条件信任任意 X-Forwarded-For。生产 Compose 只信任
-  // loopback / Docker 私网代理，其他部署必须显式配置 TRUST_PROXY。
+  // 不再无条件信任任意 X-Forwarded-For。默认不信任透传值；只有已覆写
+  // X-Forwarded-For 的前置代理才允许部署方显式配置 TRUST_PROXY。
   trustProxy,
 });
 
@@ -104,8 +100,15 @@ app.get("/metrics", async (_req, reply) => {
   return getMetricsText();
 });
 
+// 设计 P1-15（2026-09-15 审计）：把请求 id 放进 AsyncLocalStorage，供建 job 时
+// 写入 payload.traceId——worker 日志因此能带上"来自哪次请求"，跨进程可关联。
+// 放在最前面（onRequest 先于其它钩子），保证整条处理链都在上下文内。
+app.addHook("onRequest", (request, _reply, done) => {
+  runWithRequestContext(request.id, done);
+});
+
 // NFR-S（方案 16 §19.2）：全局基础安全头——API 独立服务暴露 4000，
-// 与 web（Next.js 已配 CSP/nosniff/DENY）同等的防御基线。SSE 走 hijack
+// 与桌面客户端加载的 API 同等的防御基线。SSE 走 hijack
 // （onSend 不触发），其 writeHead 已带 Content-Type/Cache-Control。
 app.addHook("onSend", async (_request, reply) => {
   reply.header("X-Content-Type-Options", "nosniff");
@@ -160,7 +163,9 @@ app.setErrorHandler((error, request, reply) => {
     // 此前 dbRlsDeniedTotal 定义后从未 set，RLS 误拦完全不可见。
     const errorCode = (error as { code?: unknown }).code;
     if (errorCode === "42501") {
-      import("./lib/metrics.ts").then(({ dbRlsDeniedTotal }) => dbRlsDeniedTotal.inc()).catch(() => {});
+      // 设计 P1-15（2026-09-15 审计）：此前经动态 import 异步自增，关停窗口会丢；
+      // metrics.ts 在本文件已是静态导入，直接同步自增。
+      dbRlsDeniedTotal.inc();
     }
     request.log.error({ err: error, route: typeof routeTemplate === "string" ? routeTemplate : "unmatched" }, "unhandled error");
     return reply.code(500).send({ error: "internal_error", message: "服务器内部错误" });
@@ -180,7 +185,7 @@ app.setErrorHandler((error, request, reply) => {
   });
 });
 
-// 2026-08-11：默认 404 会泄漏路由路径模板（如 "Route /notes/:id not found"）；
+  // 2026-08-11：默认 404 会泄漏路由路径模板（如 "Route /v2/notes/:id not found"）；
 // 统一为不泄漏内部路径的中文占位。
 app.setNotFoundHandler((_request, reply) => {
   return reply.code(404).send({ error: "not_found", message: "资源不存在" });
@@ -211,17 +216,17 @@ app.get("/ready", async (_req, reply) => {
     const presentTables = new Set(
       tableRows.map((row) => (row as { table_name: string }).table_name),
     );
-    // QUAL-08 修复：不再与硬编码列表对比，改为检查核心表是否存在
-    // 救火 2（审计）：learning_sessions 是学习伴侣核心表——缺失时服务必须 not_ready
+    // QUAL-08 修复：不再与硬编码列表对比，改为检查当前 LearningRun 核心表是否存在。
     const coreTables = [
       "users",
       "workspaces",
       "notes",
       "jobs",
       "sessions",
-      "learning_sessions",
-      "learning_episodes",
-      "learning_response_artifacts",
+      "learning_runs",
+      "learning_run_private_contracts",
+      "learning_tasks",
+      "learning_task_variants",
     ];
     const missingTables = coreTables.filter((table) => !presentTables.has(table));
 
@@ -277,16 +282,13 @@ app.get("/ready", async (_req, reply) => {
 
 // G-002: 包装在 async IIFE 中，使 esbuild --format=cjs 能正确构建（CJS 不支持 top-level await）
 async function main() {
-  const allowedOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:3000")
+  const allowedOrigins = (process.env.CORS_ORIGIN ?? "")
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
-  if (allowedOrigins.length === 0) {
-    throw new Error("CORS_ORIGIN must contain at least one origin");
-  }
   await app.register(cors, {
-    origin: allowedOrigins,
-    credentials: true,
+    origin: allowedOrigins.length > 0 ? allowedOrigins : false,
+    credentials: allowedOrigins.length > 0,
   });
 
   // 提供 httpErrors（badRequest / unauthorized / notFound 等）和统一错误序列化。
@@ -323,20 +325,19 @@ async function main() {
   } else {
     app.log.info({ capability: "card_generation_v2" }, "card-generation-v2 disabled (CARD_GENERATION_V2_ENABLED not set)");
   }
-  // Plan 23 W2/W3：Objective Surface + Dashboard 读取端点（只读；页面级切流由
-  // learning_objective_system_v3 capability 统一 gate，见 §22）。
+  // Plan 23 W2/W3：Objective Surface + Dashboard 读取端点（只读；V3 已完成预上线
+  // 切流，能力状态由 shared capability contract 对外投影）。
   await app.register(learningObjectiveRoutes);
   await app.register(learningDashboardRoutes);
   await app.register(understandingTopologyV3Routes);
   await app.register(jobRoutes);
-    await app.register(validationSessionRoutes);
   await app.register(reviewRoutes);
   await app.register(sourceRoutes);
   await app.register(importRoutes);
-  await app.register(understandingRoutes);
   await app.register(searchRoutes);
   await app.register(exportRoutes);
   await app.register(statsRoutes);
+  await app.register(activityRoutes);
   await app.register(uploadRoutes);
   await app.register(companionShellRoutes);
   await app.register(learningMetricRoutes);
@@ -356,7 +357,6 @@ async function main() {
       process.env.DATABASE_URL?.trim() ??
       "postgres://ailearn:ailearn_dev@postgres:5432/ailearn",
   );
-  await app.register(learningSessionRoutes);
   await app.register(learningRunRoutes);
   await app.register(companionBridgeRoutes);
   await app.register(companionJourneyRoutes);
@@ -365,10 +365,10 @@ async function main() {
   await app.register(deliveryRoutes);
   await app.register(memoryRoutes);
   await app.register(petProfileRoutes);
+  await app.register(companionHomeProjectionRoutes);
   await app.register(dailySummaryRoutes);
   await app.register(deliveryTimelineRoutes);
   await app.register(voiceRoutes);
-  await app.register(assessmentRoutes);
 
   const PORT = Number(process.env.PORT ?? 4000);
   const HOST = resolveApiBindHost();
@@ -384,7 +384,6 @@ async function main() {
   let dbGaugeTimer: NodeJS.Timeout | undefined;
   let sessionCleanupTimer: NodeJS.Timeout | undefined;
   let notePurgeTimer: NodeJS.Timeout | undefined;
-  let commitOutboxTimer: NodeJS.Timeout | undefined;
   let learningRunProcessingTimer: NodeJS.Timeout | undefined;
   const shutdown = createGracefulShutdown({
     clearTimer: () => {
@@ -396,8 +395,6 @@ async function main() {
       sessionCleanupTimer = undefined;
       if (notePurgeTimer) clearInterval(notePurgeTimer);
       notePurgeTimer = undefined;
-      if (commitOutboxTimer) clearInterval(commitOutboxTimer);
-      commitOutboxTimer = undefined;
       if (learningRunProcessingTimer) clearInterval(learningRunProcessingTimer);
       learningRunProcessingTimer = undefined;
     },
@@ -486,7 +483,7 @@ async function main() {
   // tombstone 化 + 已处理 outbox 与过期 nonce 删除。启动先跑一次，之后每 6 小时。
   try {
     const ttl = await runLearningTtlMaintenance();
-    const touched = ttl.auditedRows + ttl.ledgerRows + ttl.outboxRows + ttl.nonceRows;
+    const touched = ttl.auditedRows + ttl.ledgerRows;
     if (touched > 0) {
       app.log.info({ ttl }, "learning TTL maintenance ran on startup");
     }
@@ -506,7 +503,7 @@ async function main() {
       }
       try {
         const ttl = await runLearningTtlMaintenance();
-        const touched = ttl.auditedRows + ttl.ledgerRows + ttl.outboxRows + ttl.nonceRows;
+        const touched = ttl.auditedRows + ttl.ledgerRows;
         if (touched > 0) {
           app.log.info({ ttl }, "learning TTL maintenance ran");
         }
@@ -515,40 +512,6 @@ async function main() {
       }
     }, 6 * 60 * 60 * 1000); // 6 hours
     notePurgeTimer.unref();
-  }
-
-  // COMMIT-01: commit_requested outbox 消费（评估完成 → episode-commit 编排，
-  // 幂等 commit key + PgCommitPort；commit 应用后触发 committed_change_display）。
-  // 轮询 10s：commit 是评估→掌握的即时应答关键路径。
-  // 2026-08-15（方案 16 P9）：learning_run_v1 切流后旧 commit 消费者停用——
-  // 新链路（run-processing-tick）是唯一 Commit 执行者；旧 SECURITY DEFINER
-  // claim 函数（ailearn_claim_commit_outbox）在 schema 演进后列引用歧义
-  // （42702），且旧 outbox 已无新写入（P3 原子切流），停用即消除错误循环。
-  if (process.env.LEARNING_RUN_V1 !== "true" && !shutdown.isShuttingDown()) {
-    const commitOutboxWorkerId = createCommitOutboxWorkerId();
-    // 2026-08-11（可观测性）：失败退避——DB 不可达时 10s 轮询会每秒刷 error
-    // 日志；失败后间隔翻倍（10s→20s→40s 封顶 60s），成功后立即回到 10s。
-    let commitOutboxIntervalMs = 10 * 1000;
-    let commitOutboxFailedStreak = 0;
-    const scheduleCommitOutboxTick = () => {
-      commitOutboxTimer = setTimeout(async () => {
-        try {
-          const processed = await runCommitOutboxTick(commitOutboxWorkerId, 60_000);
-          if (processed > 0) {
-            app.log.info({ processed }, "commit outbox processed");
-          }
-          commitOutboxFailedStreak = 0;
-          commitOutboxIntervalMs = 10 * 1000;
-        } catch (err) {
-          commitOutboxFailedStreak += 1;
-          commitOutboxIntervalMs = Math.min(10 * 1000 * (2 ** commitOutboxFailedStreak), 60_000);
-          app.log.error({ err, nextRetryMs: commitOutboxIntervalMs }, "commit outbox tick failed");
-        }
-        scheduleCommitOutboxTick();
-      }, commitOutboxIntervalMs);
-      commitOutboxTimer.unref();
-    };
-    scheduleCommitOutboxTick();
   }
 
   // LR-PROC-01: learning_run_processing_outbox 消费（assessment_requested →

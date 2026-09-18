@@ -366,6 +366,13 @@ export const atomDecisionV2Schema = z.discriminatedUnion("decision", [
       "omit_not_learnable",
       "omit_unreliable",
       "unsupported_for_requested_goal",
+      /**
+       * 2026-09-17：原子本身可学，但计划预算（`activationHardMax`）已满——
+       * §8.5 要求 `recommendedCardCount ≤ activationHardMax`，而预算含
+       * micro-note / 服务端 / 客户端上限，可能小于可学原子数。显式记账，
+       * 使"这个知识点为什么没成卡"在计划里可审计。
+       */
+      "omit_over_budget",
     ]),
   }),
 ]);
@@ -565,7 +572,28 @@ export const objectiveRubricV2Schema = z
     }),
     rubricHash: z.string().regex(/^[0-9a-f]{64}$/),
   })
-  .strict();
+  .strict()
+  .superRefine((rubric, ctx) => {
+    if (!rubric.units.some((unit) => unit.required)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["units"],
+        message: "at least one rubric unit must be required",
+      });
+    }
+
+    const rubricUnitIds = new Set<string>();
+    rubric.units.forEach((unit, index) => {
+      if (rubricUnitIds.has(unit.rubricUnitId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["units", index, "rubricUnitId"],
+          message: "rubricUnitId must be unique",
+        });
+      }
+      rubricUnitIds.add(unit.rubricUnitId);
+    });
+  });
 export type ObjectiveRubricV2 = z.infer<typeof objectiveRubricV2Schema>;
 
 export const objectiveRelationV2Schema = z
@@ -797,6 +825,21 @@ export type CandidateEditablePatchV2 = z.infer<
   typeof candidateEditablePatchV2Schema
 >;
 
+/**
+ * Why a reviewer dropped a candidate. Named here because the desktop review UI
+ * offers the same vocabulary as a choice, and an inline enum would have to be
+ * copied into the renderer to do it.
+ */
+export const cardRejectReasonV2Schema = z.enum([
+  "not_useful",
+  "duplicate",
+  "too_trivial",
+  "wrong",
+  "too_fragmented",
+  "other",
+]);
+export type CardRejectReasonV2 = z.infer<typeof cardRejectReasonV2Schema>;
+
 export const candidateActionV2Schema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("keep"),
@@ -809,14 +852,7 @@ export const candidateActionV2Schema = z.discriminatedUnion("type", [
     candidateId: z.string().uuid(),
     expectedRevision: z.number().int().min(1),
     expectedRevisionHash: z.string().regex(/^[0-9a-f]{64}$/),
-    reasonCode: z.enum([
-      "not_useful",
-      "duplicate",
-      "too_trivial",
-      "wrong",
-      "too_fragmented",
-      "other",
-    ]),
+    reasonCode: cardRejectReasonV2Schema,
     note: z.string().min(1).max(2000).optional(),
   }),
   z.strictObject({
