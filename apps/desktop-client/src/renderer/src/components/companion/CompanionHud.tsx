@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import {
   ArrowDownToLine,
+  CalendarDays,
   ChevronLeft,
   History,
   Keyboard,
@@ -19,6 +20,7 @@ import {
   MoreHorizontal,
   Quote,
   RotateCcw,
+  Search,
   Send,
   Settings2,
   Sparkles,
@@ -74,8 +76,9 @@ import { useCompanionVoiceInput, type CompanionVoiceInput } from "./use-companio
 import { DIRECTORY_RAIL_MODE_EVENT, DIRECTORY_RAIL_STATE_EVENT } from "../DirectoryRail";
 import type { Rect } from "./companion-home-placement";
 import {
-  CompanionChatRecord,
   CompanionChatRecordArticle,
+  MonthCalendar,
+  highlightText,
   messageDayKey,
   messageDayLabel,
   messageTime,
@@ -1202,12 +1205,32 @@ function CompanionHistoryDrawer({
   // 加速追赶，视觉上是连续打字而不是整块砸出来。
   const smoothedDraftText = useSmoothedDraftText(chat.draft);
 
-  // ── 历史浏览（2026-09-19 微信式） ─────────────────────────────────────
-  // 抽屉本体保留：日期分组时间线 + 上滑分页（每页 20）+ 跳转最新；搜索与按
-  // 日期浏览收进「聊天记录」子级页面（`CompanionChatRecord`，独立组件）。
+  // ── 历史浏览（2026-09-19 微信式，二次返工） ───────────────────────────
+  // 「聊天记录」不再是第二个窗口：recordOpen 时**同一个抽屉**切换到记录视图
+  // （搜索 / 月历筛选 / 时间线），返回箭头回到对话视图——微信的聊天记录就是
+  // 与聊天共窗的页内切换。入口只是头部右侧的一个图标按钮。
   const [recordOpen, setRecordOpen] = useState(false);
   const [atLatest, setAtLatest] = useState(true);
+  const [searchInput, setSearchInput] = useState("");
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [dateFilter, setDateFilter] = useState<string | null>(null);
+  const [allMessages, setAllMessages] = useState<readonly CompanionMessageV1[] | null>(null);
+  const [allLoading, setAllLoading] = useState(false);
   const prevScrollHeightRef = useRef<number | null>(null);
+  const messagesRef = useRef(chat.messages);
+  messagesRef.current = chat.messages;
+
+  const ensureAllMessages = useCallback(async () => {
+    if (allMessages || allLoading) return;
+    setAllLoading(true);
+    try {
+      const all = await chat.fetchAllMessages();
+      // null = 会话/分页基线还没就绪：不缓存空结果，下次操作会再取。
+      if (all) setAllMessages(all);
+    } finally {
+      setAllLoading(false);
+    }
+  }, [chat, allMessages, allLoading]);
 
   // 向前翻页时的滚动锚定：prepend 会让浏览器把视口内容整体推下去，这里按高度差拉回来。
   useEffect(() => {
@@ -1233,7 +1256,27 @@ function CompanionHistoryDrawer({
     }
   }, [chat]);
 
-  /** 单条消息：渲染逻辑抽到 `CompanionChatRecordArticle`（聊天记录子页面共用）。 */
+  /** 搜索结果点击 → 补齐上下文分页 → 滚到那条并闪烁。 */
+  const jumpToMessage = useCallback(async (id: string) => {
+    let guard = 0;
+    let present = messagesRef.current.some((message) => message.id === id);
+    while (!present && chat.historyHasMore && guard < 30) {
+      guard += 1;
+      await chat.loadOlderMessages();
+      present = messagesRef.current.some((message) => message.id === id);
+    }
+    if (!present) return;
+    setSearchInput("");
+    setDateFilter(null);
+    window.requestAnimationFrame(() => {
+      const el = listRef.current?.querySelector(`[data-message-id="${id}"]`);
+      el?.scrollIntoView({ block: "center" });
+      el?.setAttribute("data-flash", "true");
+      window.setTimeout(() => el?.removeAttribute("data-flash"), 1600);
+    });
+  }, [chat]);
+
+  /** 单条消息：渲染逻辑抽到 `CompanionChatRecordArticle`（对话/记录两视图共用）。 */
   const renderArticle = useCallback((message: CompanionMessageV1) => (
     <CompanionChatRecordArticle message={message} chat={chat} />
   ), [chat]);
@@ -1250,11 +1293,17 @@ function CompanionHistoryDrawer({
     return () => window.clearTimeout(timer);
   }, [mounted, open]);
 
-  // 消息流只在"用户发送后 / 新一轮到来"滚到底，不抢用户正在回看的位置。
+  // 打开抽屉（含切到聊天记录视图）自动定位到最新一条（要求 ③）。此前直接在
+  // effect 里赋 scrollTop，抽屉挂载同帧布局未完成会滚了个空——改 rAF 等一帧
+  // 布局再滚；消息后到（length 变化）时同样补滚一次。
   useEffect(() => {
-    const list = listRef.current;
-    if (list && open) list.scrollTop = list.scrollHeight;
-  }, [open, chat.messages.length, chat.phase]);
+    if (!open || !mounted) return;
+    const frame = window.requestAnimationFrame(() => {
+      const list = listRef.current;
+      if (list) list.scrollTop = list.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, mounted, recordOpen, chat.messages.length, chat.phase]);
 
   useEffect(() => voice.subscribeLevel((level) => {
     micRef.current?.style.setProperty("--voice-level", level.toFixed(3));
@@ -1299,54 +1348,150 @@ function CompanionHistoryDrawer({
 
   if (!mounted) return null;
   return createPortal(
-    <aside className="companion-history" data-stage={exiting ? "exiting" : "visible"} data-motion={motionMode} aria-label="历史会话抽屉" aria-hidden={exiting || undefined}>
+    <aside
+      className="companion-history"
+      data-stage={exiting ? "exiting" : "visible"}
+      data-motion={motionMode}
+      data-view={recordOpen ? "record" : "chat"}
+      aria-label="历史会话抽屉"
+      aria-hidden={exiting || undefined}
+    >
       <header>
-        <button type="button" onClick={onBack} aria-label="返回更多功能"><ChevronLeft size={17} /></button>
-        <div><strong>历史会话</strong><span>真实会话、语音转写和动作提案</span></div>
-        <button type="button" onClick={onClose} aria-label="关闭历史会话"><X size={17} /></button>
+        <button
+          type="button"
+          onClick={recordOpen ? () => { setRecordOpen(false); setSearchInput(""); setDateFilter(null); } : onBack}
+          aria-label={recordOpen ? "返回对话" : "返回更多功能"}
+        ><ChevronLeft size={17} /></button>
+        <div>
+          <strong>{recordOpen ? "聊天记录" : "历史会话"}</strong>
+          <span>{recordOpen ? "搜索、按日期浏览全部对话" : "真实会话、语音转写和动作提案"}</span>
+        </div>
+        <div className="companion-history__header-actions">
+          {!recordOpen ? (
+            <button type="button" onClick={() => setRecordOpen(true)} aria-label="聊天记录" title="聊天记录">
+              <History size={16} />
+            </button>
+          ) : null}
+          <button type="button" onClick={onClose} aria-label="关闭历史会话"><X size={17} /></button>
+        </div>
       </header>
-      {/* 「聊天记录」子级页面入口（2026-09-19，微信式）：搜索与按日期浏览收进独立组件。 */}
-      <div className="companion-history__toolbar">
-        <button type="button" className="companion-history__tool" onClick={() => setRecordOpen(true)}>
-          <History size={14} aria-hidden="true" />聊天记录 · 搜索与按日期浏览
-        </button>
-      </div>
+      {/* 记录视图专属工具行：搜索 + 自绘月历筛选 */}
+      {recordOpen ? (
+        <div className="companion-history__toolbar">
+          <div className="companion-record__search">
+            <Search size={13} aria-hidden="true" />
+            <input
+              value={searchInput}
+              onChange={(event) => {
+                setSearchInput(event.currentTarget.value);
+                void ensureAllMessages();
+              }}
+              placeholder="搜索聊天记录"
+              aria-label="搜索聊天记录"
+            />
+            {searchInput ? <button type="button" onClick={() => setSearchInput("")} aria-label="清空搜索词"><X size={12} /></button> : null}
+          </div>
+          <div className="companion-record__date-wrap">
+            <button
+              type="button"
+              className="companion-record__date-btn"
+              data-active={dateFilter != null || calendarOpen || undefined}
+              onClick={() => { setCalendarOpen((value) => !value); void ensureAllMessages(); }}
+            >
+              <CalendarDays size={14} aria-hidden="true" />
+              {dateFilter ? messageDayLabel(`${dateFilter}T12:00:00`) : "按日期"}
+            </button>
+            {calendarOpen ? (
+              <MonthCalendar
+                pool={allMessages ?? chat.messages}
+                selected={dateFilter}
+                onPick={(dayKey) => { setDateFilter(dayKey); setCalendarOpen(false); void ensureAllMessages(); }}
+              />
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       <div ref={listRef} className="companion-history__list" onScroll={handleListScroll}>
         {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取会话…</p> : null}
         {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
-        {!chat.historyHasMore && chat.messages.length > 0 ? <p className="companion-history__system">没有更早的消息了</p> : null}
-        {chat.messages.map((message, index) => {
-          const previous = index > 0 ? chat.messages[index - 1] : null;
-          const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
-          return (
-            <Fragment key={message.id}>
-              {showDay ? <div className="companion-history__day">{messageDayLabel(message.createdAt)}</div> : null}
-              {renderArticle(message)}
-            </Fragment>
-          );
-        })}
-        {/*
-          进行中的一轮（2026-09-19 ③）：历史此前只渲染 `listMessages` 的快照，而
-          `companion_messages` 只在 `assistant.final` 的终态事务里才写——于是"她正在说的
-          这段话"在历史里根本不存在，用户必须等整轮结束才能看到。`draft` 早就在气泡里
-          实时显示了，这里把它按同一条消息的样子折进历史（同一份文本，不另起数据源）。
-          过程留痕按 runId 找：进行中那轮的 `assistantMessageId` 还是 null，不能用它匹配。
-        */}
         {(() => {
-          const draft = chat.draft;
-          if (!draft || draft.text.trim().length === 0) return null;
-          const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
-          return (
-            <article data-role="assistant" data-live="true">
-              <header><span>Mao</span><time>正在说…</time></header>
-              <p>{smoothedDraftText}</p>
-              {trace && shouldShowRunTrace(trace)
-                ? <CompanionRunTracePanel trace={trace} />
-                : null}
-            </article>
-          );
+          // 记录视图的两种筛选态：搜索命中 / 某一天的记录。
+          const keyword = searchInput.trim();
+          if (recordOpen && keyword) {
+            const needle = keyword.toLowerCase();
+            const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
+            return (
+              <>
+                {allMessages == null ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
+                {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
+                {hits.map((message) => (
+                  <button key={message.id} type="button" className="companion-record__hit" onClick={() => void jumpToMessage(message.id)}>
+                    <header><span>{message.role === "user" ? "你" : "Mao"}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
+                    <p>{highlightText(companionMessageText(message), keyword)}</p>
+                  </button>
+                ))}
+                {allMessages != null && hits.length > 0 ? <p className="companion-history__system">共 {hits.length} 条 · 点一条回到它的上下文</p> : null}
+              </>
+            );
+          }
+          if (recordOpen && dateFilter) {
+            const dayMessages = (allMessages ?? []).filter((message) => messageDayKey(message.createdAt) === dateFilter);
+            return (
+              <>
+                <div className="companion-record__day companion-record__day--filter">
+                  <span>{messageDayLabel(`${dateFilter}T12:00:00`)} 的记录{allMessages != null ? ` · ${dayMessages.length} 条` : ""}</span>
+                  <button type="button" onClick={() => setDateFilter(null)}>看全部</button>
+                </div>
+                {allMessages == null ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
+                {allMessages != null && dayMessages.length === 0 ? <p className="companion-history__system">这一天没有聊天记录</p> : null}
+                {dayMessages.map((message) => renderArticle(message))}
+              </>
+            );
+          }
+          return null;
         })()}
-        {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
+        {/* 时间线（对话视图的全部内容；记录视图「看全部」/搜索跳转后的上下文也走这里） */}
+        {(!recordOpen || !searchInput.trim()) && !(recordOpen && dateFilter) ? (
+          <>
+            {!recordOpen || allMessages != null ? null : <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p>}
+            {chat.messages.map((message, index) => {
+              const previous = index > 0 ? chat.messages[index - 1] : null;
+              const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
+              return (
+                <Fragment key={message.id}>
+                  {showDay ? <div className="companion-history__day">{messageDayLabel(message.createdAt)}</div> : null}
+                  {renderArticle(message)}
+                </Fragment>
+              );
+            })}
+            {/*
+              进行中的一轮（2026-09-19 ③）：历史此前只渲染 `listMessages` 的快照，而
+              `companion_messages` 只在 `assistant.final` 的终态事务里才写——于是"她正在说的
+              这段话"在历史里根本不存在，用户必须等整轮结束才能看到。`draft` 早就在气泡里
+              实时显示了，这里把它按同一条消息的样子折进历史（同一份文本，不另起数据源）。
+              过程留痕按 runId 找：进行中那轮的 `assistantMessageId` 还是 null，不能用它匹配。
+            */}
+            {!recordOpen ? (
+              <>
+                {(() => {
+                  const draft = chat.draft;
+                  if (!draft || draft.text.trim().length === 0) return null;
+                  const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
+                  return (
+                    <article data-role="assistant" data-live="true">
+                      <header><span>Mao</span><time>正在说…</time></header>
+                      <p>{smoothedDraftText}</p>
+                      {trace && shouldShowRunTrace(trace)
+                        ? <CompanionRunTracePanel trace={trace} />
+                        : null}
+                    </article>
+                  );
+                })()}
+                {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
+              </>
+            ) : null}
+          </>
+        ) : null}
       </div>
       {/* 跳转至最新消息（微信式）：离开底部后出现，一键回底部。 */}
       {!atLatest ? (
@@ -1354,12 +1499,8 @@ function CompanionHistoryDrawer({
           <ArrowDownToLine size={13} aria-hidden="true" />最新
         </button>
       ) : null}
-      <CompanionChatRecord
-        open={recordOpen && chat.mode === "history"}
-        onBack={() => setRecordOpen(false)}
-        onCloseDrawer={() => { setRecordOpen(false); chat.setMode("closed"); }}
-      />
-      {/* 常驻输入行（方案 §2）：与交互台同一套纸面表单，复用同一条会话，不新开滚动容器。 */}
+      {/* 常驻输入行（方案 §2）：与交互台同一套纸面表单，复用同一条会话，不新开滚动容器。记录视图是纯浏览页，不显示输入行。 */}
+      {!recordOpen ? (
       <form className="companion-history__composer" onSubmit={(event) => { event.preventDefault(); void sendText(); }}>
         {voiceEnabled ? (
           <button
@@ -1405,8 +1546,9 @@ function CompanionHistoryDrawer({
           <button type="submit" disabled={!input.trim() || voice.phase === "transcribing"} aria-label="发送"><Send size={15} /></button>
         )}
       </form>
-      {chat.navChips.length > 0 ? <div className="companion-history__nav">{chat.navChips.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null}
-      {navNote || chat.failure ? <p className="companion-history__error" role="status">{navNote ?? chat.failure}</p> : null}
+      ) : null}
+      {chat.navChips.length > 0 && !recordOpen ? <div className="companion-history__nav">{chat.navChips.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null}
+      {!recordOpen && (navNote || chat.failure) ? <p className="companion-history__error" role="status">{navNote ?? chat.failure}</p> : null}
     </aside>,
     document.body,
   );

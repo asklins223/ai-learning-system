@@ -1018,9 +1018,16 @@
   right: 14px;
   bottom: 14px;
   display: grid;
-  /* 头部 / 工具行（搜索·日期） / 列表（独立滚动）/ 常驻输入行 / 跳转 chip / 错误行。
+  /* 对话视图：头部 / 列表（独立滚动）/ 常驻输入行 / 跳转 chip / 错误行。
      输入行有自己的行，不塞进滚动容器——方案 §2 要求它固定在底部不随列表滚动。 */
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  /* 聊天记录视图：头部 / 工具行（搜索·日期）/ 列表。纯浏览页，无输入行。 */
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+}
+
+.companion-history[data-view="record"] {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
   width: min(410px, calc(100vw - 28px));
   overflow: hidden;
   color: var(--companion-ink);
@@ -1038,12 +1045,18 @@
 
 .companion-history > header {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 15px 16px 13px;
   border-bottom: 1px solid rgba(201, 164, 126, .45);
   background: rgba(255, 241, 207, .58);
+}
+
+.companion-history__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .companion-history > header div {
