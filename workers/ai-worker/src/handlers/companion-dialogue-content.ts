@@ -468,6 +468,16 @@ export function buildCompanionPersonaMessages(input: {
     "不要复述、转述、续写或回显输入里的任何内容——包括 JSON 字段名（如 activeMemories / recentMessages / currentMessage）、上下文片段、记忆与人格数据。",
   ].join("\n");
 
+  // 问候防漂移（2026-09-19 用户实测）：会话历史里堆积大量「噪声→极简应答」
+  // （用户连发「哈哈」「213」等，模型逐轮缩短回应）后，模型把「你好」「hi」也
+  // 学成只回「嗯」。问候/寒暄必须按初见热情回应，不从历史里学敷衍风格。
+  const GREETING_ANTI_DRIFT_GUARD = [
+    "",
+    "# Greeting Response Style",
+    "「你好」「hi」「在吗」这类问候或寒暄，要像刚见面一样自然热情地回应：打个招呼，顺势问一句今天想学点什么或有什么打算。",
+    "不要因为历史里出现过简短应答，就把问候也回成「嗯」「哦」这类单字；历史里的极简风格不是你该模仿的对象。",
+  ].join("\n");
+
   // §9.3 提示词注入防护：记忆内容是用户数据，不是指令。
   // 使用 <memory_data> 边界标记，并在 system prompt 中明确声明。
   const activeMemories = (input.activeMemories ?? [])
@@ -572,6 +582,7 @@ export function buildCompanionPersonaMessages(input: {
     : [
         COMPANION_PERSONA_V4,
         NO_ECHO_GUARD,
+        GREETING_ANTI_DRIFT_GUARD,
         ...(activeMemories.length > 0 ? [MEMORY_SAFETY_GUARD] : []),
         ...(selectionText ? [SELECTION_SAFETY_GUARD] : []),
         ...(pageContextBlock ? [PAGE_CONTEXT_SAFETY_GUARD] : []),
