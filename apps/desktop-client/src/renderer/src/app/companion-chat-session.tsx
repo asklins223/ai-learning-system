@@ -15,7 +15,9 @@ import type {
   CompanionChatProposalGetResultV1,
 } from "@ailearn/shared/companion-chat-desktop-contracts";
 import type { DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
+import type { MainPageContextInputV2 } from "@ailearn/shared/companion-bridge-contracts";
 import { useRoomStore } from "./room-store";
+import type { HudPageId } from "../components/hud/hud-pages";
 import { createRequestMeta, gatewayErrorMessage, requireWorkspaceEpoch, unwrapGatewayResult, RendererGatewayError } from "./desktop-client";
 import {
   COMPANION_CONSENT_REQUIRED_LINE,
@@ -214,9 +216,9 @@ export interface CompanionChatSession {
   loadOlderMessages(): Promise<void>;
   /**
    * 全量拉取会话消息（搜索/日期筛选的数据底座，带会话级缓存）。
-   * 上限约 1200 条；失败静默返回已收集部分。
+   * 上限约 1200 条 + 最近窗口；失败或未就绪返回 null，调用方不得缓存 null。
    */
-  fetchAllMessages(): Promise<readonly CompanionMessageV1[]>;
+  fetchAllMessages(): Promise<readonly CompanionMessageV1[] | null>;
   /**
    * 最近一条助手消息的语气情绪（2026-09-18 情绪接表情）。抽屉不再自己算——
    * 消息已经住在这里，情绪也就跟着上来，气泡层与表情共用同一个来源。
@@ -262,6 +264,10 @@ export function desktopRouteFromAgentRoute(route: CompanionAgentRouteEventV1["ro
       return { kind: "note.detail", noteId: route.noteId };
     case "source":
       return route.sourceId ? { kind: "source.detail", sourceId: route.sourceId } : { kind: "source.library" };
+    case "card":
+      return { kind: "objective.detail", objectiveId: route.objectiveId };
+    case "conversation":
+      return { kind: "companion.center", tab: "dialogue" };
     default:
       return null;
   }
@@ -320,6 +326,18 @@ async function applyRouteToRoom(route: DesktopRouteV1): Promise<boolean> {
       // Player 由它驱动挂载。
       room.setActiveRunId(route.runId);
       return true;
+    case "objective.detail":
+      room.setActiveObjectiveId(route.objectiveId);
+      room.invoke("open-objective");
+      return true;
+    case "companion.center":
+      room.setCompanionCenterTarget({
+        tab: route.tab ?? "memory",
+        ...(route.focusMemoryId ? { focusMemoryId: route.focusMemoryId } : {}),
+        ...(route.focusMessageId ? { focusMessageId: route.focusMessageId } : {}),
+      });
+      room.invoke("open-companion-center");
+      return true;
     default:
       return false;
   }
@@ -362,6 +380,65 @@ type CompanionReplyStreamOutcome =
 
 const CompanionChatContext = createContext<CompanionChatSession | null>(null);
 
+function bridgePageContext(input: {
+  hudPage: HudPageId;
+  activeRunId: string | null;
+  activeNoteId: string | null;
+  activeSourceId: string | null;
+  activeReviewScheduleId: string | null;
+  settingsSection: string;
+}): MainPageContextInputV2 {
+  const base = {
+    interactionState: input.hudPage === "note-edit"
+      ? "editing" as const
+      : input.hudPage === "assessment"
+        ? "formal_answer" as const
+        : input.hudPage === "generating"
+          ? "processing" as const
+          : "idle" as const,
+    capabilityHints: ["open_route"] as const,
+    sensitivity: input.hudPage === "assessment"
+      ? "formal_assessment" as const
+      : input.hudPage === "login" || input.hudPage === "register"
+        ? "credential_surface" as const
+        : "normal" as const,
+  };
+  if (input.hudPage === "today") return { ...base, routeRef: { kind: "today" }, pageKind: "today", entityRefs: [] };
+  if (input.hudPage === "sources") return { ...base, routeRef: { kind: "source" }, pageKind: "source", entityRefs: [] };
+  if (input.hudPage === "source-detail" && input.activeSourceId) {
+    return { ...base, routeRef: { kind: "source", sourceId: input.activeSourceId }, pageKind: "source", entityRefs: [{ kind: "source", sourceId: input.activeSourceId }] };
+  }
+  if (["note-read", "note-edit", "generating", "candidate"].includes(input.hudPage) && input.activeNoteId) {
+    return { ...base, routeRef: { kind: "note", noteId: input.activeNoteId }, pageKind: "note", entityRefs: [{ kind: "note", noteId: input.activeNoteId }] };
+  }
+  if (input.hudPage === "queue") {
+    return {
+      ...base,
+      routeRef: { kind: "review", ...(input.activeReviewScheduleId ? { scheduleId: input.activeReviewScheduleId } : {}) },
+      pageKind: "review",
+      entityRefs: input.activeReviewScheduleId ? [{ kind: "review_schedule", scheduleId: input.activeReviewScheduleId }] : [],
+    };
+  }
+  if (input.hudPage === "graph") {
+    return { ...base, routeRef: { kind: "star_map" }, pageKind: "star_map", entityRefs: [], capabilityHints: ["open_route", "graph.focus", "graph.present_route", "graph.restore"] };
+  }
+  if ((input.hudPage === "assessment" || input.hudPage === "result") && input.activeRunId) {
+    return { ...base, routeRef: { kind: "learning_run", runId: input.activeRunId }, pageKind: "learning_run", entityRefs: [{ kind: "learning_run", runId: input.activeRunId }] };
+  }
+  if (input.hudPage === "companion") return { ...base, routeRef: { kind: "conversation" }, pageKind: "conversation", entityRefs: [] };
+  if (input.hudPage === "settings") {
+    const section = input.settingsSection === "companion"
+      ? "companion" as const
+      : input.settingsSection === "data" || input.settingsSection === "management"
+        ? "privacy" as const
+        : input.settingsSection === "appearance"
+          ? "accessibility" as const
+          : undefined;
+    return { ...base, routeRef: { kind: "settings", ...(section ? { section } : {}) }, pageKind: "settings", entityRefs: [] };
+  }
+  return { ...base, routeRef: { kind: "home" }, pageKind: "other", entityRefs: [] };
+}
+
 export function useCompanionChat(): CompanionChatSession {
   const value = useContext(CompanionChatContext);
   if (!value) throw new Error("useCompanionChat must be used inside CompanionChatProvider");
@@ -371,11 +448,44 @@ export function useCompanionChat(): CompanionChatSession {
 export function CompanionChatProvider({ children }: { readonly children: ReactNode }) {
   const hudPage = useRoomStore((state) => state.hudPage);
   const activeRunId = useRoomStore((state) => state.activeRunId);
+  const activeNoteId = useRoomStore((state) => state.activeNoteRef?.noteId ?? null);
+  const activeSourceId = useRoomStore((state) => state.activeSourceId);
+  const activeReviewScheduleId = useRoomStore((state) => state.activeReviewTarget?.scheduleId ?? null);
+  const settingsSection = useRoomStore((state) => state.settingsSection);
   const workspaceScopeRevision = useRoomStore((state) => state.workspaceScopeRevision);
   const pageInstanceIdRef = useRef(crypto.randomUUID());
   useEffect(() => {
     pageInstanceIdRef.current = crypto.randomUUID();
   }, [activeRunId, workspaceScopeRevision]);
+  const brokerPageContext = useMemo(() => bridgePageContext({
+    hudPage,
+    activeRunId,
+    activeNoteId,
+    activeSourceId,
+    activeReviewScheduleId,
+    settingsSection,
+  }), [activeNoteId, activeReviewScheduleId, activeRunId, activeSourceId, hudPage, settingsSection]);
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void requireWorkspaceEpoch().then((epoch) => {
+        if (cancelled) return;
+        return window.ailearn.companion.bridge.setContext({
+          meta: createRequestMeta(epoch),
+          page: brokerPageContext,
+        });
+      }).catch(() => undefined);
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [brokerPageContext, workspaceScopeRevision]);
+  useEffect(() => () => {
+    void requireWorkspaceEpoch().then((epoch) => window.ailearn.companion.bridge.clearContext({
+      meta: createRequestMeta(epoch),
+    })).catch(() => undefined);
+  }, []);
   /**
    * 当前页面上下文：让"她根据页面情况回复"成立。契约没有对应 pageKind 的页面
    * （笔记/设置等）传 null，不发 context。
@@ -440,6 +550,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const [feedSelection, setFeedSelection] = useState<string | null>(null);
   const [proposalStates, setProposalStates] = useState<Record<string, CompanionProposalUiState>>({});
   const [navChips, setNavChips] = useState<CompanionNavChip[]>([]);
+  const [streamCue, setStreamCue] = useState<{ readonly emotion: string; readonly seq: number } | null>(null);
 
   /**
    * 追加导航 chip（SSE 实时流、抽屉轮询与提案确认共用，2026-09-19）。
@@ -511,6 +622,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     setFeedSelection(null);
     setProposalStates({});
     setNavChips([]);
+    setStreamCue(null);
     setMode("closed");
     setFailure(null);
     setPhase("idle");
@@ -599,27 +711,36 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
    * 全量拉取（搜索/日期筛选的数据底座，带会话级缓存）：向前翻到会话开头，
    * **再并上当前最近窗口**——搜索池必须包含最近 50 条，否则刚聊过的内容搜不到。
    * 上限约 1200 条 + 最近窗口；失败静默返回已收集部分。
+   * **未就绪（会话/分页基线还没建立）返回 null**——调用方不得把 null 缓存成
+   * 「没有消息」，否则一次过早的调用会永久污染搜索与月历（实机踩过）。
    */
-  const fetchAllMessages = useCallback(async (): Promise<readonly CompanionMessageV1[]> => {
+  const fetchAllMessages = useCallback(async (): Promise<readonly CompanionMessageV1[] | null> => {
     if (historyAllRef.current) return historyAllRef.current;
     const conversation = conversationRef.current;
-    if (!conversation) return [];
+    const baseline = historyOldestSeqRef.current;
+    // 会话/分页基线未就绪 → null（调用方显示重试，而不是把「未就绪」当「无记录」缓存）。
+    if (!conversation || baseline == null) return null;
     const older: CompanionMessageV1[] = [];
-    let beforeSeq = historyOldestSeqRef.current;
+    let beforeSeq: number | null = baseline;
     let guard = 0;
-    while (beforeSeq != null && guard < 12) {
-      guard += 1;
-      const epoch = await requireWorkspaceEpoch();
-      const result = await window.ailearn.companion.chat.listMessages({
-        meta: createRequestMeta(epoch),
-        request: { version: 1, conversationId: conversation.id, limit: 100, beforeSeq },
-      });
-      if (!result.ok) break;
-      older.push(...result.data.items);
-      historyOldestSeqRef.current = result.data.oldestSeq;
-      setHistoryHasMore(result.data.hasMore);
-      if (!result.data.hasMore || result.data.oldestSeq == null || result.data.oldestSeq === beforeSeq) break;
-      beforeSeq = result.data.oldestSeq;
+    try {
+      while (beforeSeq != null && guard < 12) {
+        guard += 1;
+        const epoch = await requireWorkspaceEpoch();
+        const result = await window.ailearn.companion.chat.listMessages({
+          meta: createRequestMeta(epoch),
+          request: { version: 1, conversationId: conversation.id, limit: 100, beforeSeq },
+        });
+        if (!result.ok) break;
+        older.push(...result.data.items);
+        historyOldestSeqRef.current = result.data.oldestSeq;
+        setHistoryHasMore(result.data.hasMore);
+        if (!result.data.hasMore || result.data.oldestSeq == null || result.data.oldestSeq === beforeSeq) break;
+        beforeSeq = result.data.oldestSeq;
+      }
+    } catch {
+      // 认证/纪元未就绪等瞬时失败：返回已收集部分（可能为 null）。
+      if (older.length === 0) return null;
     }
     older.sort((a, b) => a.seq - b.seq);
     const seen = new Set(older.map((item) => item.id));
@@ -1030,6 +1151,69 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
               }
             }
           }
+          if (streamed.eventType === "turn.accepted") {
+            setPhase("sending");
+          }
+          if (streamed.eventType === "character.cue") {
+            const cue = streamed.payload.cue as { emotion?: unknown } | undefined;
+            if (cue && typeof cue.emotion === "string") {
+              setStreamCue({ emotion: cue.emotion, seq: streamed.seq });
+            }
+          }
+          if (streamed.eventType === "action.proposed") {
+            const proposal = streamed.payload.proposal as { id?: unknown } | undefined;
+            if (proposal && typeof proposal.id === "string") {
+              const proposalId = proposal.id;
+              setProposalStates((current) => ({ ...current, [proposalId]: { phase: "loading" } }));
+              void window.ailearn.companion.chat.getProposal({
+                meta: createRequestMeta(args.epoch),
+                request: { version: 1, proposalId },
+              }).then((response) => {
+                const snapshot = unwrapGatewayResult(response);
+                setProposalStates((current) => ({ ...current, [proposalId]: { phase: "ready", proposal: snapshot.proposal } }));
+              }).catch((error) => {
+                setProposalStates((current) => ({ ...current, [proposalId]: { phase: "error", message: gatewayErrorMessage(error) } }));
+              });
+            }
+          }
+          if (streamed.eventType === "action.decision") {
+            const payload = streamed.payload as { proposalId?: unknown; decision?: unknown; status?: unknown };
+            if (typeof payload.proposalId === "string") {
+              setProposalStates((current) => {
+                const existing = current[payload.proposalId as string];
+                if (!existing || existing.phase !== "ready") return current;
+                return {
+                  ...current,
+                  [payload.proposalId as string]: {
+                    phase: "ready",
+                    proposal: {
+                      ...existing.proposal,
+                      status: payload.status === "rejected" ? "rejected" : "accepted",
+                      decision: payload.decision === "reject" ? "reject" : "confirm",
+                    },
+                  },
+                };
+              });
+            }
+          }
+          if (streamed.eventType === "action.expired") {
+            const proposalId = streamed.payload.proposalId;
+            if (typeof proposalId === "string") {
+              setProposalStates((current) => {
+                const existing = current[proposalId];
+                if (!existing || existing.phase !== "ready") return current;
+                return { ...current, [proposalId]: { phase: "ready", proposal: { ...existing.proposal, status: "expired" } } };
+              });
+            }
+          }
+          if (streamed.eventType === "proactive.delivery" || streamed.eventType === "proactive.delivery.updated") {
+            window.dispatchEvent(new CustomEvent("ailearn:companion-activity-changed"));
+          }
+          if (streamed.eventType === "voice.segment.ready") {
+            window.dispatchEvent(new CustomEvent("ailearn:companion-voice-segment-ready", {
+              detail: { runId: streamed.runId, ...streamed.payload },
+            }));
+          }
           if (streamed.eventType === "assistant.delta") {
             const payload = streamed.payload as { appendFrom?: unknown; textDelta?: unknown };
             if (typeof payload.textDelta !== "string") return;
@@ -1166,6 +1350,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     if (text.length === 0) return false;
     const generation = (sendGenerationRef.current += 1);
     setPhase("sending");
+    setStreamCue(null);
     setFailure(null);
     setLiveReply(null);
     setStopNotice(null);
@@ -1419,6 +1604,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   }, []);
 
   const assistantEmotion = useMemo(() => {
+    if (streamCue?.emotion && streamCue.emotion !== "neutral") return streamCue.emotion;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
       if (message.role !== "assistant") continue;
@@ -1427,7 +1613,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       }
     }
     return null;
-  }, [messages]);
+  }, [messages, streamCue]);
 
   const decideProposal = useCallback(async (proposalId: string, decision: "confirm" | "reject") => {
     const state = proposalStates[proposalId];

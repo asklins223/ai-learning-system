@@ -1216,6 +1216,7 @@ function CompanionHistoryDrawer({
   const [dateFilter, setDateFilter] = useState<string | null>(null);
   const [allMessages, setAllMessages] = useState<readonly CompanionMessageV1[] | null>(null);
   const [allLoading, setAllLoading] = useState(false);
+  const [allError, setAllError] = useState<string | null>(null);
   const prevScrollHeightRef = useRef<number | null>(null);
   const messagesRef = useRef(chat.messages);
   messagesRef.current = chat.messages;
@@ -1223,10 +1224,14 @@ function CompanionHistoryDrawer({
   const ensureAllMessages = useCallback(async () => {
     if (allMessages || allLoading) return;
     setAllLoading(true);
+    setAllError(null);
     try {
       const all = await chat.fetchAllMessages();
-      // null = 会话/分页基线还没就绪：不缓存空结果，下次操作会再取。
+      // null = 会话/分页基线还没就绪：不缓存空结果，落「可重试」态而不是无限转圈。
       if (all) setAllMessages(all);
+      else setAllError("会话还没有就绪，请稍后重试。");
+    } catch (error) {
+      setAllError(gatewayErrorMessage(error));
     } finally {
       setAllLoading(false);
     }
@@ -1280,6 +1285,20 @@ function CompanionHistoryDrawer({
   const renderArticle = useCallback((message: CompanionMessageV1) => (
     <CompanionChatRecordArticle message={message} chat={chat} />
   ), [chat]);
+
+  // 记录视图全量池的三态：加载中 / 失败可重试 / 未就绪。杜绝「null 永远转圈」。
+  const poolStateBlock = allLoading && allMessages == null
+    ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p>
+    : allError
+      ? (
+        <p className="companion-history__system">
+          {allError}
+          <button type="button" className="companion-record__retry" onClick={() => void ensureAllMessages()}>重试</button>
+        </p>
+      )
+      : allMessages == null
+        ? <p className="companion-history__system">会话还没有就绪。</p>
+        : null;
 
   useEffect(() => {
     if (open) {
@@ -1422,7 +1441,7 @@ function CompanionHistoryDrawer({
             const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
             return (
               <>
-                {allMessages == null ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
+                {poolStateBlock}
                 {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
                 {hits.map((message) => (
                   <button key={message.id} type="button" className="companion-record__hit" onClick={() => void jumpToMessage(message.id)}>
@@ -1442,7 +1461,7 @@ function CompanionHistoryDrawer({
                   <span>{messageDayLabel(`${dateFilter}T12:00:00`)} 的记录{allMessages != null ? ` · ${dayMessages.length} 条` : ""}</span>
                   <button type="button" onClick={() => setDateFilter(null)}>看全部</button>
                 </div>
-                {allMessages == null ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
+                {poolStateBlock}
                 {allMessages != null && dayMessages.length === 0 ? <p className="companion-history__system">这一天没有聊天记录</p> : null}
                 {dayMessages.map((message) => renderArticle(message))}
               </>
@@ -1453,7 +1472,15 @@ function CompanionHistoryDrawer({
         {/* 时间线（对话视图的全部内容；记录视图「看全部」/搜索跳转后的上下文也走这里） */}
         {(!recordOpen || !searchInput.trim()) && !(recordOpen && dateFilter) ? (
           <>
-            {!recordOpen || allMessages != null ? null : <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p>}
+            {!recordOpen || allMessages != null || allLoading || allError
+              ? null
+              : (
+                <p className="companion-history__system">
+                  全部记录暂时不可用。
+                  <button type="button" className="companion-record__retry" onClick={() => void ensureAllMessages()}>重试</button>
+                </p>
+              )}
+            {recordOpen && allMessages == null && allLoading ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
             {chat.messages.map((message, index) => {
               const previous = index > 0 ? chat.messages[index - 1] : null;
               const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
