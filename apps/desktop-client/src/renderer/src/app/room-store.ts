@@ -31,9 +31,14 @@ export type ActiveHomeCompletion = PendingHomeCompletion & { readonly started: b
 export type CompanionHomeZone = "desk" | "shelf" | "window" | "rest";
 export const DEFAULT_COMPANION_POSITION: CompanionPosition = { x: 0, y: 0 };
 export const DEFAULT_COMPANION_HOME_ZONE: CompanionHomeZone = "rest";
-export const DEFAULT_COMPANION_SCALE = 1.2;
+export const DEFAULT_COMPANION_SCALE = 1;
 export const MIN_COMPANION_SCALE = 0.6;
 export const MAX_COMPANION_SCALE = 1.4;
+/**
+ * 缩放基准倍率（2026-09-19 用户裁决）：滑条上的 100% 不再是「原始 1:1 尺寸」，
+ * 而是要呈现为原先 120% 的观感。基准在渲染层统一乘这一系数，滑条刻度语义不变。
+ */
+export const COMPANION_SCALE_BASE = 1.2;
 
 export type PersistedCompanionPlacement = Pick<RoomStore,
   "companionHomeZone" | "companionPlacementOwner" | "companionUserAnchor"

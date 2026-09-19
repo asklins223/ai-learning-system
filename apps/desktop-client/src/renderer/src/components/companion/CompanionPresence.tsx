@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import {
+  COMPANION_SCALE_BASE,
   MAX_COMPANION_SCALE,
   MIN_COMPANION_SCALE,
   useRoomStore,
@@ -114,6 +115,9 @@ function CompanionPresenceView() {
   const companionPlacementOwner = useRoomStore((state) => state.companionPlacementOwner);
   const companionUserAnchor = useRoomStore((state) => state.companionUserAnchor);
   const companionScale = useRoomStore((state) => state.companionScale);
+  // 滑条刻度语义不变（100% = 基准），渲染时统一乘基准倍率：100% 的实际观感 =
+  // 改造前的 120%（2026-09-19 用户裁决）。滑条 UI、持久化值仍用原刻度。
+  const companionVisualScale = companionScale * COMPANION_SCALE_BASE;
   const setCompanionPosition = useRoomStore((state) => state.setCompanionPosition);
   const setCompanionHomePlacement = useRoomStore((state) => state.setCompanionHomePlacement);
   const mutedCompanionSceneKeys = useRoomStore((state) => state.mutedCompanionSceneKeys);
@@ -401,7 +405,7 @@ function CompanionPresenceView() {
     const footY = target.y + anchorHeight;
     const maxVisualScale = Math.max(0.3, (footY - companionSafeInset(rootRect)) / anchorHeight);
     gsap.set(visual, {
-      scale: Math.min(companionScale * 0.9 * cameraScale, maxVisualScale),
+      scale: Math.min(companionVisualScale * 0.9 * cameraScale, maxVisualScale),
       transformOrigin: "50% 100%",
       force3D: true,
     });
@@ -942,7 +946,7 @@ function CompanionPresenceView() {
       return;
     }
     gsap.to(visual, {
-      scale: companionScale * (homeMode ? 0.9 : 0.78),
+      scale: companionVisualScale * (homeMode ? 0.9 : 0.78),
       duration: durationFor(motionMode, 0.16),
       ease: motionMode === "off" ? "none" : "power2.out",
       overwrite: "auto",
